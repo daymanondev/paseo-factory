@@ -43,23 +43,28 @@ test("parseSpoolRequest accepts exactly the three request shapes and nothing els
     task: "T1",
     sha: "abc",
   });
-  assert.deepEqual(parseSpoolRequest({ id: "r1", kind: "accept", task: "T1", attempt: 2 }), {
+  assert.deepEqual(parseSpoolRequest({ id: "r1", kind: "accept", task: "T1", attempt: 2, submitter: "owner" }), {
     id: "r1",
     kind: "accept",
     task: "T1",
     attempt: 2,
-  });
-  assert.deepEqual(parseSpoolRequest({ id: "r1", kind: "contract", task: "T1", workspace: "/w", gate: "true", artifact: "a" }), {
-    id: "r1",
-    kind: "contract",
-    task: "T1",
-    workspace: "/w",
-    gate: "true",
-    artifact: "a",
+    submitter: "owner",
   });
   assert.deepEqual(
-    parseSpoolRequest({ id: "r1", kind: "contract", task: "T1", workspace: "/w", gate: "true", artifact: "a", freshEyes: true }),
-    { id: "r1", kind: "contract", task: "T1", workspace: "/w", gate: "true", artifact: "a", freshEyes: true },
+    parseSpoolRequest({ id: "r1", kind: "contract", task: "T1", workspace: "/w", gate: "true", artifact: "a", submitter: "agent-sup-1" }),
+    {
+      id: "r1",
+      kind: "contract",
+      task: "T1",
+      workspace: "/w",
+      gate: "true",
+      artifact: "a",
+      submitter: "agent-sup-1",
+    },
+  );
+  assert.deepEqual(
+    parseSpoolRequest({ id: "r1", kind: "contract", task: "T1", workspace: "/w", gate: "true", artifact: "a", freshEyes: true, submitter: "owner" }),
+    { id: "r1", kind: "contract", task: "T1", workspace: "/w", gate: "true", artifact: "a", freshEyes: true, submitter: "owner" },
     "freshEyes passes only as literal true",
   );
 
@@ -72,12 +77,66 @@ test("parseSpoolRequest accepts exactly the three request shapes and nothing els
     { id: "r1", kind: "claim" },
     { id: "r1", kind: "claim", task: "T1", sha: 7 },
     { id: "r1", kind: "accept", task: "T1", attempt: "2" },
+    // v0.0.9: an Owner act without a submitter is malformed — the spool
+    // never defaults an unstamped contract or accept to anyone.
+    { id: "r1", kind: "accept", task: "T1", attempt: 2 },
+    { id: "r1", kind: "contract", task: "T1", workspace: "/w", gate: "true", artifact: "a" },
+    { id: "r1", kind: "contract", task: "T1", workspace: "/w", gate: "true", artifact: "a", submitter: "  " },
+    { id: "r1", kind: "accept", task: "T1", attempt: 2, submitter: 7 },
     { kind: "claim", task: "T1", sha: "abc" },
-    { id: "r1", kind: "contract", task: "T1", workspace: "/w", gate: "true", artifact: "a", freshEyes: "yes" },
-    { id: "r1", kind: "contract", task: "T1", workspace: "/w", gate: "true", artifact: "a", freshEyes: false },
+    { id: "r1", kind: "contract", task: "T1", workspace: "/w", gate: "true", artifact: "a", submitter: "owner", freshEyes: "yes" },
+    { id: "r1", kind: "contract", task: "T1", workspace: "/w", gate: "true", artifact: "a", submitter: "owner", freshEyes: false },
   ]) {
     assert.equal(parseSpoolRequest(bad), undefined, `${JSON.stringify(bad)} must be rejected`);
   }
+});
+
+test("the v0.0.9 stamps ride both Owner acts onto their ledger lines (ADR 0006)", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const workspace = join(dir, "ws");
+  mkdirSync(join(workspace, "src"), { recursive: true });
+  writeFileSync(join(workspace, "src", "x.ts"), "x\n");
+  const head = gitCommitAll(workspace);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+
+  // The delegated path: the seat's agent id rides the contract line as `by`.
+  const contract = await handleSpoolRequest(factory, {
+    id: "r1",
+    kind: "contract",
+    task: "STAMP1",
+    workspace,
+    gate: "true",
+    artifact: "src/x.ts",
+    submitter: "agent-supervisor-1",
+  });
+  assert.equal(contract.ok, true);
+  if (contract.ok) assert.match(contract.summary, /by agent-supervisor-1/);
+  const set = factory.ledger.eventsFor("STAMP1")[0];
+  assert.equal(set.event === "contract_set" ? set.by : undefined, "agent-supervisor-1");
+
+  // One green attempt, then the delegated accept names itself as `accepted_by`
+  // — "the Ledger always records who accepted".
+  await factory.claim({ task: "STAMP1", sha: head });
+  const accepted = await handleSpoolRequest(factory, { id: "r2", kind: "accept", task: "STAMP1", attempt: 1, submitter: "agent-supervisor-1" });
+  assert.equal(accepted.ok, true);
+  if (accepted.ok) assert.match(accepted.summary, /by agent-supervisor-1/);
+  const line = factory.ledger.eventsFor("STAMP1").find((e) => e.event === "attempt_accepted");
+  assert.equal(line === undefined ? undefined : line.accepted_by, "agent-supervisor-1");
+
+  // The human path is the same mechanism with the other stamp value.
+  const contract2 = await handleSpoolRequest(factory, {
+    id: "r3",
+    kind: "contract",
+    task: "STAMP2",
+    workspace,
+    gate: "true",
+    artifact: "src/x.ts",
+    submitter: "owner",
+  });
+  assert.equal(contract2.ok, true);
+  const set2 = factory.ledger.eventsFor("STAMP2")[0];
+  assert.equal(set2.event === "contract_set" ? set2.by : undefined, "owner");
 });
 
 test("handleSpoolRequest turns factory errors into rejected replies, never throws", async (t) => {
@@ -99,7 +158,7 @@ test("the spool loop answers requests, moves them to processed, and keeps the re
   t.after(() => spool.stop());
 
   const spoolRoot = spoolRootFor(stateDir);
-  dropRequest(spoolRoot, { id: "req-1", kind: "contract", task: "T1", workspace: "/definitely/missing", gate: "true", artifact: "a" });
+  dropRequest(spoolRoot, { id: "req-1", kind: "contract", task: "T1", workspace: "/definitely/missing", gate: "true", artifact: "a", submitter: "owner" });
 
   await until(() => {
     assert.ok(existsSync(join(spoolRoot, "replies", "req-1.json")), "the reply landed");
@@ -141,7 +200,7 @@ test("a replayed request with an existing reply runs nothing a second time (ADR 
   t.after(() => spool.stop());
 
   const spoolRoot = spoolRootFor(stateDir);
-  const body = { id: "req-3", kind: "contract", task: "T1", workspace, gate: "true", artifact: "src/format.ts" };
+  const body = { id: "req-3", kind: "contract", task: "T1", workspace, gate: "true", artifact: "src/format.ts", submitter: "owner" };
   dropRequest(spoolRoot, body);
   await until(() => {
     assert.equal(readReply(spoolRoot, "req-3").ok, true);

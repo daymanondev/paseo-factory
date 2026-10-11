@@ -34,6 +34,11 @@
  * capture `lastUsage` at the task's terminal moment and submit it through
  * the spool (ADR 0004's third amendment) before the agent dies or the
  * daemon restarts — after that, the fact is gone for good.
+ * v0.0.9 (ADR 0006) adds no event kinds: the two Owner acts gain field
+ * stamps instead — `by` on `contract_set`, `accepted_by` on
+ * `attempt_accepted` — each the submitting shell's identity ("the Ledger
+ * always records who accepted"), so a delegated Owner seat's acts are
+ * attributable line by line.
  */
 
 export type Verdict = "red" | "green";
@@ -102,6 +107,13 @@ export interface ContractSet {
    * workspace.
    */
   description?: string;
+  /**
+   * Who set the Contract (v0.0.9, ADR 0006): the submitting shell's stamp,
+   * carried from the spool request — the delegated Owner agent's
+   * `PASEO_AGENT_ID` where the daemon's env carried one, `owner` on the human
+   * CLI path. Pre-0.0.9 Contracts predate the stamp.
+   */
+  by?: string;
 }
 
 export interface ClaimReported {
@@ -218,6 +230,12 @@ export interface AttemptAccepted {
   event: "attempt_accepted";
   task: string;
   attempt: number;
+  /**
+   * Who accepted (v0.0.9, ADR 0006: "the Ledger always records who accepted")
+   * — the submitting shell's stamp, the same law as the Contract's `by`:
+   * the delegated Owner agent's id or `owner`. Pre-0.0.9 lines predate it.
+   */
+  accepted_by?: string;
 }
 
 /**

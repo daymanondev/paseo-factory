@@ -79,6 +79,12 @@ export interface ContractInput {
    * discover its assignment from the workspace.
    */
   description?: string;
+  /**
+   * Who set the Contract (v0.0.9, ADR 0006): the spool stamps the submitting
+   * shell (`PASEO_AGENT_ID` or `owner`) and the factory records it verbatim
+   * on the line — the factory never infers identity.
+   */
+  by?: string;
 }
 
 export interface ClaimInput {
@@ -99,6 +105,11 @@ export interface ClaimOutcome {
 export interface AcceptInput {
   task: string;
   attempt: number;
+  /**
+   * Who accepted (v0.0.9) — the spool's submitting-shell stamp, recorded
+   * verbatim ("the Ledger always records who accepted", ADR 0006).
+   */
+  accepted_by?: string;
 }
 
 export interface SpawnInput {
@@ -158,7 +169,9 @@ export interface Factory {
   /**
    * The Owner accepts one green Attempt (ADR 0002). Green is necessary, not
    * sufficient — this is the only acceptance act in the factory, and it is
-   * never the Agent's.
+   * never the Agent's. Since v0.0.9 the delegated Owner seat (the
+   * Supervisor, ADR 0006) may submit it on the Owner's word; the
+   * `accepted_by` stamp records whose act each line is.
    */
   accept(input: AcceptInput): AttemptAccepted;
   /**
@@ -220,7 +233,7 @@ export function createFactory(options: FactoryOptions): Factory {
     stateDir,
     recoveredAttempts,
 
-    setContract({ task, workspace, gate, artifact, scope, freshEyes, watch, description }) {
+    setContract({ task, workspace, gate, artifact, scope, freshEyes, watch, description, by }) {
       assertTaskId(task);
       if (gate.trim() === "") throw new FactoryError("invalid-contract", "gate command must be a non-empty string");
       if (artifact.trim() === "") throw new FactoryError("invalid-contract", "artifact path must be a non-empty string");
@@ -316,6 +329,7 @@ export function createFactory(options: FactoryOptions): Factory {
         ...(freshEyes === undefined ? {} : { freshEyes }),
         ...(watch === undefined ? {} : { watch }),
         ...(description === undefined ? {} : { description }),
+        ...(by === undefined ? {} : { by }),
       });
     },
 
@@ -485,7 +499,7 @@ export function createFactory(options: FactoryOptions): Factory {
       return finish(task, attempt, ledger, stateDir, contract, result, resolved.full, options.eyeBudgetMs, watchContext());
     },
 
-    accept({ task, attempt }) {
+    accept({ task, attempt, accepted_by }) {
       assertTaskId(task);
       if (!Number.isInteger(attempt) || attempt < 1) {
         throw new FactoryError("invalid-attempt", `attempt must be a positive integer, got ${attempt}`);
@@ -512,7 +526,7 @@ export function createFactory(options: FactoryOptions): Factory {
           `attempt ${attempt} of task ${task} has no green verdict — the Owner accepts evidence, and there is none`,
         );
       }
-      return ledger.append({ event: "attempt_accepted", task, attempt });
+      return ledger.append({ event: "attempt_accepted", task, attempt, ...(accepted_by === undefined ? {} : { accepted_by }) });
     },
 
     requestSpawn({ task, provider, arity }) {

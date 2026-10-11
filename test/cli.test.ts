@@ -102,6 +102,67 @@ test("the whole loop over the spool: contract → red claim → green claim → 
   assert.ok(existsSync(join(stateDir, "report-LOOP1-2.md")));
   const contractEvent = factory.ledger.eventsFor("LOOP1")[0];
   assert.equal(contractEvent.event === "contract_set" ? contractEvent.workspace : undefined, workspace);
+  // v0.0.9: the human path stamps `owner` on both Owner acts (ADR 0006) —
+  // the CLI's env carries no PASEO_AGENT_ID, so that is what rides.
+  assert.equal(contractEvent.event === "contract_set" ? contractEvent.by : undefined, "owner");
+  const acceptedEvent = factory.ledger.eventsFor("LOOP1").find((e) => e.event === "attempt_accepted");
+  assert.equal(acceptedEvent === undefined ? undefined : acceptedEvent.accepted_by, "owner");
+});
+
+test("the delegated Owner seat's env stamps its id on both acts (v0.0.9)", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const workspace = join(dir, "workspace");
+  copyFixture("sample-workspace", workspace);
+  gitCommitAll(workspace); // init the repo; this broken commit is never claimed
+  // Green at HEAD from the first claim — this loop proves the stamp, not the gate.
+  writeFileSync(
+    join(workspace, "src", "format.ts"),
+    [
+      "export function pad(input: string, width: number): string {",
+      "  if (input.length >= width) return input.slice(0, width);",
+      "  return input + \" \".repeat(width - input.length);",
+      "}",
+      "",
+    ].join("\n"),
+  );
+  const sha = gitCommitChanges(workspace, "already green");
+  const home = join(dir, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+
+  const factory = createFactory({ stateDir });
+  const spool = startSpool(stateDir, factory);
+  t.after(() => spool.stop());
+
+  // The Supervisor's mechanical path: the same Owner CLI, its shell carrying
+  // the daemon's PASEO_AGENT_ID — the stamp must be the seat's own id.
+  const seatEnv = { PASEO_HOME: home, PASEO_AGENT_ID: "agent-supervisor-1" };
+  const contract = await run(ownerCli, [
+    "contract", "--task", "SEAT1", "--workspace", workspace, "--gate", "npm test", "--artifact", "src/format.ts",
+  ], seatEnv);
+  assert.equal(contract.status, 0, contract.stderr);
+  assert.match(contract.stdout, /contract set for SEAT1: .* by agent-supervisor-1/);
+
+  const green = await run(claimCli, ["--task", "SEAT1", "--sha", sha], { FACTORY_STATE_DIR: stateDir, PASEO_AGENT_ID: "agent-worker-1" });
+  assert.equal(green.status, 0, `expected green\nstdout: ${green.stdout}\nstderr: ${green.stderr}`);
+
+  const accept = await run(ownerCli, ["accept", "SEAT1", "--attempt", "1"], seatEnv);
+  assert.equal(accept.status, 0, accept.stderr);
+  assert.match(accept.stdout, /SEAT1 accepted at attempt 1 by agent-supervisor-1/);
+
+  const set = factory.ledger.eventsFor("SEAT1")[0];
+  assert.equal(set.event === "contract_set" ? set.by : undefined, "agent-supervisor-1");
+  const accepted = factory.ledger.eventsFor("SEAT1").find((e) => e.event === "attempt_accepted");
+  assert.equal(accepted === undefined ? undefined : accepted.accepted_by, "agent-supervisor-1");
+
+  // A blank PASEO_AGENT_ID counts as absent — the human-path stamp, not an
+  // empty one the spool would refuse.
+  const blank = await run(ownerCli, [
+    "contract", "--task", "SEAT2", "--workspace", workspace, "--gate", "true", "--artifact", "src/format.ts",
+  ], { PASEO_HOME: home, PASEO_AGENT_ID: "  " });
+  assert.equal(blank.status, 0, blank.stderr);
+  const set2 = factory.ledger.eventsFor("SEAT2")[0];
+  assert.equal(set2.event === "contract_set" ? set2.by : undefined, "owner");
 });
 
 test("a claim the factory rejects comes back as an error exit with the reason", async (t) => {

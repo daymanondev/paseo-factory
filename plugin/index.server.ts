@@ -21,7 +21,7 @@ import { createTimelineFetcher } from "./server/timeline.ts";
 import type { TimelineSourceApi } from "./server/timeline.ts";
 import { spoolRootFor, startSpool } from "./server/spool.ts";
 
-const SHELL_VERSION = "0.0.8";
+const SHELL_VERSION = "0.0.9";
 
 const log = (message: string) => console.log(`[${PLUGIN_ID}] ${message}`);
 

@@ -28,8 +28,9 @@ agent it remains the only path.
 
 - One ledger writer: the plugin. The CLIs submit through the spool; nobody
   edits `ledger.jsonl` by hand (ADR 0004).
-- Accept and landing are Owner acts (ADR 0002 / ADR 0005) — step 9 records the
-  delegation convention for when Andrew hands them over.
+- Accept and landing are Owner acts (ADR 0002; delegation per ADR 0006, which
+  supersedes 0005) — accept is delegable to the Supervisor seat, landing never
+  is. Step 9 records the delegation convention.
 
 ## 1. Preflight
 
@@ -248,10 +249,26 @@ because both runs wrote their findings down.
 
       node plugin/bin/factory.mjs --home ~/.paseo-factory accept <task-id> --attempt <n>
 
-- **Delegation convention** (fixed in 09, reused in 06): when Andrew says
-  "bạn làm đi" / "tự làm hết đi" (both mean "you do it"), the Owner seat
-  (accept) and the git flow (push / PR / merge, plus a tag when a version is
-  being cut) are delegated to the operator for that run — revocable, and
-  recorded in the ticket as "0 manual acts, N delegations".
+  Since v0.0.9 the word may arrive in the Owner's conversation with the
+  Supervisor seat (the Paseo app chat): the seat runs this same CLI as the
+  delegated Owner, and the ledger line's `accepted_by` names it — the human
+  path above stamps `owner` the same way.
+
+- **Delegation convention** (fixed in 09, reused in 06; reshaped by the
+  Supervisor seat, v0.0.9 / ADR 0006): when Andrew says "bạn làm đi" /
+  "tự làm hết đi" (both mean "you do it"), the accept act and the git flow
+  (push / PR / merge, plus a tag when a version is being cut) are delegated
+  to the operator for that run — revocable, and recorded in the ticket as
+  "0 manual acts, N delegations". The accept act is separately delegable to
+  the Supervisor seat — Andrew's acceptance word spoken to the seat in
+  conversation, the seat accepting as the delegated Owner. The git flow is
+  NEVER the Supervisor's: landing and push stay on the human-driven path
+  (ADR 0006 — "it is not another project Lead").
+- **Revoking the seat** (ADR 0006 / v0.0.9 design): cancel the turn, archive
+  the agent (`paseo agent archive <id> --home ~/.paseo-factory`), stop typing
+  — no ledger line, no factory-side state exists to clear. Every recorded
+  line stays; a live Contract stays live; the acts fall back to the human
+  CLI path above. A new Supervisor is a new agent under the same
+  convention.
 - **Landing**: PR into main, CI green before merge, branch deleted after
   (ADR 0001).

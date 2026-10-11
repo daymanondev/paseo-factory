@@ -13,8 +13,12 @@ The coding agent doing the work on a Task. It may make Claims; it never sets or 
 _Avoid_: worker, peer (in this context), bot
 
 **Owner**:
-Whoever sets a Task's Contract — the human, or an agent the human has explicitly delegated the Owner seat to (revocably). Never the Agent working that Task. The delegated Owner seat is the Supervisor (ADR 0006); its full term entry lands with the v0.0.9 design ticket.
+Whoever sets a Task's Contract — the human, or an agent the human has explicitly delegated the Owner seat to (revocably). Never the Agent working that Task. The delegated Owner seat is the Supervisor (ADR 0006).
 _Avoid_: reviewer, user
+
+**Supervisor**:
+The Owner seat delegated to exactly one Paseo daemon agent, revocably — the only seat the Owner converses with (the Paseo app chat). Day-one powers, every act an attributed ledger line: take the Owner's stated outcome and draft + set the Contract, run the Driver, relay status and verdicts in words, accept an Attempt on the Owner's word. Never: landing or push, widening scope or budget, accepting without the Owner's word — it is not another project Lead (codex-room §9(a)). Woken by the Owner's message; one turn holds a Driver run, and any fact it acts on is read from the Ledger at act time, never recalled from the conversation transcript — transcript for talk, Ledger for truth. Its shell is ungated (the Choke policy judges contracted Agents only); revocation cancels the turn and archives the agent, returning the acts to the human CLI path. Added in v0.0.9 (ADR 0006).
+_Avoid_: manager, orchestrator, assistant (and Driver — a mechanism, not a seat)
 
 ### Work and criteria
 

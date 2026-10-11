@@ -2,6 +2,10 @@
 /**
  * factory — the Owner's CLI (ADR 0002 / ADR 0004). Never placed on an agent's
  * PATH: setting the Contract and accepting an Attempt are the Owner's acts.
+ * Since v0.0.9 the delegated Owner seat (the Supervisor, ADR 0006) runs this
+ * same CLI from an explicit path — still never symlinked onto agent PATHs —
+ * and every contract/accept stamps who submitted from the shell's env
+ * ($PASEO_AGENT_ID, else `owner`), so the ledger names whose act each line is.
  *
  *   factory [--home <paseoHome>] contract --task <id> --workspace <dir> \
  *       --gate <command> --artifact <path> [--scope <p1,p2,...>] [--wait-secs <n>]
@@ -110,11 +114,27 @@ commands:
 options:
   --home <paseoHome>   daemon home (default: $PASEO_HOME or ~/.paseo)
   --wait-secs <n>      how long to wait for the plugin's reply (default: 60;
-                       retro waits 660 — the pass is minutes-long)`;
+                       retro waits 660 — the pass is minutes-long)
+
+attribution (v0.0.9): contract and accept stamp who submitted — the
+  shell's $PASEO_AGENT_ID when the daemon env carries one (the delegated
+  Owner seat), else "owner" (the human path). The stamp rides the spool
+  request onto the ledger line (by: on contract_set, accepted_by: on
+  attempt_accepted) — there is no flag to set or override it.`;
 
 const DEFAULT_WAIT_SECS = 60;
 /** The retro's own default — one pass runs minutes, and the budget alone is 600s. */
 const RETRO_WAIT_SECS = 660;
+
+/**
+ * The v0.0.9 attribution stamp (ADR 0006): the submitting shell's identity —
+ * the daemon injects PASEO_AGENT_ID into agent shells, so the delegated Owner
+ * seat names itself; every other shell is the human path, `owner`. A blank
+ * env value counts as absent (the spool refuses an empty stamp). Both paths
+ * stamp; there is no flag to override it.
+ */
+const stampedAgent = typeof process.env.PASEO_AGENT_ID === "string" ? process.env.PASEO_AGENT_ID.trim() : "";
+const submitter = stampedAgent === "" ? "owner" : stampedAgent;
 
 // The event vocabulary the status reader understands — mirrored from
 // src/events.ts because the CLIs import no src/ code (ADR 0004). Kept on one
@@ -241,6 +261,7 @@ if (command === "contract") {
     ...(v["fresh-eyes"] ? { freshEyes: true } : {}),
     ...(v.watch ? { watch: true } : {}),
     ...(v.description === undefined ? {} : { description: v.description }),
+    submitter,
   };
   const reply = await roundTrip(request, waitSeconds(parsed));
   console.log(`factory: ${reply.summary}`);
@@ -258,7 +279,7 @@ if (command === "accept") {
   const attempt = Number(parsed.values.attempt);
   if (!Number.isInteger(attempt) || attempt < 1) fail("accept: --attempt must be a positive integer");
 
-  const reply = await roundTrip({ id: randomId(), kind: "accept", task, attempt }, waitSeconds(parsed));
+  const reply = await roundTrip({ id: randomId(), kind: "accept", task, attempt, submitter }, waitSeconds(parsed));
   console.log(`factory: ${reply.summary}`);
   process.exit(0);
 }

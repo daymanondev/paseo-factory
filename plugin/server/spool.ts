@@ -40,6 +40,14 @@ export interface ContractRequest {
   watch?: true;
   /** The task's assignment text (v0.0.6 description-slot rider) — the driver's brief carries it. */
   description?: string;
+  /**
+   * Who submitted (v0.0.9, ADR 0006) — required, stamped by the CLI from the
+   * submitting shell's env: the delegated Owner agent's `PASEO_AGENT_ID`
+   * where the daemon carried one, `owner` on the human path. An unstamped
+   * contract is malformed — attribution is part of the request's shape, so
+   * the spool never guesses or defaults it.
+   */
+  submitter: string;
 }
 
 export interface ClaimRequest {
@@ -56,6 +64,12 @@ export interface AcceptRequest {
   kind: "accept";
   task: string;
   attempt: number;
+  /**
+   * Who submitted (v0.0.9) — required, the submitting shell's stamp, the
+   * same law as the contract's: `PASEO_AGENT_ID` or `owner`. "The Ledger
+   * always records who accepted" (ADR 0006) starts at the request.
+   */
+  submitter: string;
 }
 
 /**
@@ -169,6 +183,9 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     if (typeof req.task !== "string" || typeof req.workspace !== "string" || typeof req.gate !== "string" || typeof req.artifact !== "string") {
       return undefined;
     }
+    // The v0.0.9 stamp: a contract without a submitter is malformed — the
+    // spool never defaults an unstamped Owner act to anyone.
+    if (typeof req.submitter !== "string" || req.submitter.trim() === "") return undefined;
     const scope = req.scope;
     if (scope !== undefined && (!Array.isArray(scope) || scope.some((s) => typeof s !== "string"))) return undefined;
     if (req.freshEyes !== undefined && req.freshEyes !== true) return undefined;
@@ -185,6 +202,7 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       ...(req.freshEyes === undefined ? {} : { freshEyes: true }),
       ...(req.watch === undefined ? {} : { watch: true }),
       ...(req.description === undefined ? {} : { description: req.description }),
+      submitter: req.submitter,
     };
   }
   if (req.kind === "claim") {
@@ -194,7 +212,10 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
   }
   if (req.kind === "accept") {
     if (typeof req.task !== "string" || typeof req.attempt !== "number" || !Number.isInteger(req.attempt)) return undefined;
-    return { id: req.id, kind: "accept", task: req.task, attempt: req.attempt };
+    // Same law as the contract: no submitter, no acceptance — the accepter's
+    // identity is part of the act (ADR 0006).
+    if (typeof req.submitter !== "string" || req.submitter.trim() === "") return undefined;
+    return { id: req.id, kind: "accept", task: req.task, attempt: req.attempt, submitter: req.submitter };
   }
   if (req.kind === "spawn") {
     if (typeof req.task !== "string" || typeof req.provider !== "string" || typeof req.arity !== "number" || !Number.isInteger(req.arity) || req.arity < 1) {
@@ -266,13 +287,14 @@ export async function handleSpoolRequest(
         ...(request.freshEyes === undefined ? {} : { freshEyes: true }),
         ...(request.watch === undefined ? {} : { watch: true }),
         ...(request.description === undefined ? {} : { description: request.description }),
+        by: request.submitter,
       });
       return {
         id: request.id,
         ok: true,
         summary:
           `contract set for ${request.task}: \`${request.gate}\` in ${request.workspace}` +
-          `${request.freshEyes === true ? " · fresh eyes ON" : ""}${request.watch === true ? " · watch ON" : ""}`,
+          `${request.freshEyes === true ? " · fresh eyes ON" : ""}${request.watch === true ? " · watch ON" : ""} · by ${request.submitter}`,
       };
     }
     if (request.kind === "claim") {
@@ -347,8 +369,8 @@ export async function handleSpoolRequest(
         proposalCount: outcome.proposalCount,
       };
     }
-    factory.accept({ task: request.task, attempt: request.attempt });
-    return { id: request.id, ok: true, summary: `task ${request.task} accepted at attempt ${request.attempt}` };
+    factory.accept({ task: request.task, attempt: request.attempt, accepted_by: request.submitter });
+    return { id: request.id, ok: true, summary: `task ${request.task} accepted at attempt ${request.attempt} by ${request.submitter}` };
   } catch (err) {
     if (err instanceof FactoryError) {
       return { id: request.id, ok: false, code: err.code, message: err.message };
@@ -443,10 +465,13 @@ async function handleRequestFile(
     log(`request ${id}: REJECTED — malformed`);
   } else {
     reply = await handleSpoolRequest(factory, request, askHandler);
+    // The v0.0.9 stamps make the two Owner acts attributable in the log too —
+    // the same visibility the claim line always had.
+    const stamp = request.kind === "contract" || request.kind === "accept" ? ` by ${request.submitter}` : "";
     log(
       request.kind === "claim" && reply.ok
         ? `request ${id}: claim ${request.task} by ${request.agent ?? "unknown agent"} → attempt ${reply.attempt} ${reply.verdict}`
-        : `request ${id}: ${request.kind}${"task" in request ? ` ${request.task}` : ""} → ${reply.ok ? (reply.decision ?? "ok") : `rejected (${reply.code})`}`,
+        : `request ${id}: ${request.kind}${"task" in request ? ` ${request.task}` : ""}${stamp} → ${reply.ok ? (reply.decision ?? "ok") : `rejected (${reply.code})`}`,
     );
   }
   writeJsonAtomic(replyPath, reply);
