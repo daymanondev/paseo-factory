@@ -11,16 +11,18 @@ claims the task is finished at a specific commit, and the factory — never the
 agent — runs the gate and records every step in an append-only ledger it
 cannot edit. A green verdict is evidence, not acceptance.
 
-**Status: v0.0.8, pre-release.** The pure verification core is complete and
-tested (245 tests); the plugin loads on a Paseo 0.10 daemon, owns the ledger
+**Status: v0.0.9, pre-release.** The pure verification core is complete and
+tested (247 tests); the plugin loads on a Paseo 0.10 daemon, owns the ledger
 and the gate as the single writer (ADR 0004), and serves the whole loop over a
 file spool: the Owner's `factory` CLI sets Contracts and accepts green
 Attempts, the Agent's `factory-claim` CLI submits Claims (it rides every
 agent's PATH), and each Claim opens a numbered Attempt that ends in a Verdict
 and a per-attempt report — proven end-to-end against a live trial daemon by
 `scripts/smoke-loop.mjs`. Since that first wiring the loop has gained the
-driver (`factory run`), the record-only watch, the on-demand Retro, and the
-Cost read backed by the Meter. Nothing is published yet.
+driver (`factory run`), the record-only watch, the on-demand Retro, the Cost
+read backed by the Meter, and v0.0.9 opens the seat layer (ADR 0006): the
+Supervisor seat — the delegated Owner conversation, every act stamped by who
+submitted it. Nothing is published yet.
 
 ## Layout
 
@@ -85,6 +87,25 @@ to *propose* — new Gate checks for repeated-error patterns, draft Contract
 pieces for knowledge holes, every proposal citing its ledger seq — writing
 one `retro_written` line and a dated proposals file. Nothing becomes law
 until the Owner ratifies it as ordinary repo work.
+
+Since v0.0.9 those Owner acts may arrive through a conversation instead of a
+terminal. The **Supervisor seat** (ADR 0006) is the Owner seat delegated to
+exactly one Paseo daemon agent, revocably — the only seat the Owner
+converses with. Day-one powers, every act a ledger line: take the Owner's
+stated outcome and draft + set the Contract, run the Driver, relay status
+and verdicts in words, accept an Attempt on the Owner's word in the
+conversation. Never: landing or push, widening scope or budget, accepting
+without the Owner's word — it is not another project Lead. Mechanically it
+is the same `factory` CLI above, run from an explicit path (never symlinked
+onto agent PATHs), and revocation archives the agent and returns the acts
+to the human CLI path — every recorded line stays.
+
+Attribution is not left to prose. Every contract and accept carries who
+submitted — the seat's `PASEO_AGENT_ID` where the daemon's env carries one,
+`owner` on the human CLI path, no flag to set or override either way — so
+`contract_set` lines carry `by:` and `attempt_accepted` lines carry
+`accepted_by:`. An unstamped Owner act is refused as malformed; "the Ledger
+always records who accepted" (ADR 0006).
 
 The **Agent** gets one command, `factory-claim --task T1 --sha <commit>`, on its
 PATH automatically. It prints the Verdict, the gate note, and the report path;
