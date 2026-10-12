@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createFactory } from "../src/factory.ts";
+import type { NeedsHumanReason } from "../src/events.ts";
 import { FactoryError } from "../src/errors.ts";
 import { disposeDir, factoryErrorCode, gitCommitAll, gitCommitChanges, makeTempDir } from "./helpers.ts";
 
@@ -666,4 +667,108 @@ test("requestSpawn refuses a workspace overlapping another live contract — the
     assert.equal(alsoRefused.code, "workspace-conflict");
     assert.match(alsoRefused.event.reason, /contains the live contract of task B/);
   }
+});
+
+// ---- the Lead's two acts (v0.0.10, ticket 03 items 2–3) ------------------------------
+
+test("repoke dispatches once per task and refuses the second ask with one repoke_refused line (the structural idempotency)", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact, sha } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  factory.setContract({ task: "LEAD1", workspace, gate: "true", artifact });
+
+  const first = factory.repoke("LEAD1", "ag-lead1");
+  assert.equal(first.outcome, "dispatched");
+  const { ts, ...rest } = first.outcome === "dispatched" ? first.event : { ts: "", event: undefined };
+  assert.deepEqual(rest, { seq: 2, event: "repoke_dispatched", task: "LEAD1", agent: "ag-lead1" }, "the dispatch line IS the spent marker — task and its target, nothing else");
+
+  // The one-per-task law lives plugin-side: a second ask names its own refusal.
+  const second = factory.repoke("LEAD1", "ag-lead1");
+  assert.equal(second.outcome, "refused");
+  if (second.outcome === "refused") {
+    assert.equal(second.code, "already-spent");
+    assert.equal(second.event.rule, "repoke:already-spent");
+    assert.match(second.event.reason, /already spent its one re-poke/);
+    assert.equal(second.event.agent, "ag-lead1", "the refusal names the target the request named");
+  }
+
+  // Unknown task and malformed ids — each still exactly one line.
+  const unknown = factory.repoke("GHOST", "ag-x");
+  assert.equal(unknown.outcome === "refused" && unknown.event.rule, "repoke:unknown-task");
+  const invalid = factory.repoke("no spaces", "ag-x");
+  assert.equal(invalid.outcome === "refused" && invalid.event.rule, "repoke:invalid-task");
+
+  // An accepted task is closed to pokes as to spawns (its own tree — LEAD1's stays live).
+  const wsDone = join(dir, "ws-done");
+  mkdirSync(join(wsDone, "src"), { recursive: true });
+  writeFileSync(join(wsDone, "src", "x.ts"), "x\n");
+  const shaDone = gitCommitAll(wsDone);
+  factory.setContract({ task: "DONE", workspace: wsDone, gate: "true", artifact: "src/x.ts" });
+  await factory.claim({ task: "DONE", sha: shaDone });
+  factory.accept({ task: "DONE", attempt: 1 });
+  const accepted = factory.repoke("DONE", "ag-done");
+  assert.equal(accepted.outcome === "refused" && accepted.event.rule, "repoke:accepted-task");
+
+  assert.deepEqual(
+    factory.ledger.events.filter((e) => e.event === "repoke_refused").map((e) => (e as { rule: string }).rule),
+    ["repoke:already-spent", "repoke:unknown-task", "repoke:invalid-task", "repoke:accepted-task"],
+    "every refusal is one recorded line, the spawn precedent",
+  );
+});
+
+test("needsHuman appends the named end only over a corroborated spend — the meter's own refusal law", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact, sha } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  factory.setContract({ task: "LEAD2", workspace, gate: "true", artifact });
+
+  // No spend yet — nothing to name, no line. needsHuman throws
+  // synchronously (the meter's own shape), so the closures carry it.
+  assert.throws(
+    () => factory.needsHuman({ task: "LEAD2", reason: "denied-again", evidence: { denial: 3, repoke: 4 } }),
+    factoryErrorCode("invalid-needs-human"),
+  );
+  assert.equal(factory.ledger.events.some((e) => e.event === "needs_human"), false);
+
+  // The stall's own denial — the evidence's denial must be a real line.
+  const denial = factory.ledger.append({
+    event: "permit_denied",
+    task: "LEAD2",
+    agent: "ag-lead2",
+    name: "Bash",
+    kind: "tool",
+    command: "git reset --hard",
+    rule: "policy:S1-git-vocabulary",
+    reason: "caught",
+  });
+  const dispatch = factory.repoke("LEAD2", "ag-lead2");
+  assert.equal(dispatch.outcome, "dispatched");
+  const spentSeq = dispatch.outcome === "dispatched" ? dispatch.event.seq : 0;
+
+  // Evidence must name THE spend the slice holds.
+  assert.throws(
+    () => factory.needsHuman({ task: "LEAD2", reason: "silent-after-repoke", evidence: { denial: 1, repoke: spentSeq + 5 } }),
+    factoryErrorCode("invalid-needs-human"),
+  );
+  assert.throws(
+    // The cast is the point: the vocabulary is a compile-time fact, and the
+    // runtime guard still refuses what a cast smuggles through.
+    () => factory.needsHuman({ task: "LEAD2", reason: "nudged" as NeedsHumanReason, evidence: { denial: 1, repoke: spentSeq } }),
+    factoryErrorCode("invalid-needs-human"),
+    "the reason vocabulary is fixed",
+  );
+  assert.throws(
+    () => factory.needsHuman({ task: "GHOST", reason: "denied-again", evidence: { denial: 1, repoke: spentSeq } }),
+    factoryErrorCode("unknown-task"),
+  );
+
+  const line = factory.needsHuman({ task: "LEAD2", reason: "silent-after-repoke", evidence: { denial: denial.seq, repoke: spentSeq } });
+  const { ts, ...rest } = line;
+  assert.deepEqual(rest, { seq: spentSeq + 1, event: "needs_human", task: "LEAD2", reason: "silent-after-repoke", evidence: { denial: denial.seq, repoke: spentSeq } });
+
+  // The task is not closed: a second needs_human line is another recorded
+  // fact (the ledger appends), and the wake path stays the ordinary spawn.
+  assert.equal(factory.ledger.eventsFor("LEAD2").some((e) => e.event === "attempt_accepted"), false);
 });

@@ -23,8 +23,9 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFile
 import { join } from "node:path";
 import { FactoryError } from "./core/errors.ts";
 import { usageIsValid } from "./core/ledger.ts";
+import { needsHumanEvidenceIsValid, NEEDS_HUMAN_REASONS } from "./core/events.ts";
 import type { Factory } from "./core/factory.ts";
-import type { MeterUsage, Verdict } from "./core/events.ts";
+import type { MeterUsage, NeedsHumanEvidence, NeedsHumanReason, Verdict } from "./core/events.ts";
 
 export interface ContractRequest {
   id: string;
@@ -124,6 +125,39 @@ export interface MeterRequest {
 }
 
 /**
+ * The Lead's one spend (v0.0.10, ticket 03 item 3 — the spawn precedent's
+ * strict shape): the driver asks the plugin — the one writer — whether it
+ * may spend the task's one re-poke, and only sends the fixed message after
+ * an ok. The plugin holds the structural laws (task known, not accepted,
+ * not already spent); the stall predicate that triggered the ask stays
+ * driver-side. Deliberately minimal — the trigger is the driver's fact, the
+ * spend is the plugin's authority, and neither interprets the other.
+ */
+export interface RepokeRequest {
+  id: string;
+  kind: "repoke";
+  task: string;
+  /** The stalled agent the fixed re-poke text goes to. */
+  agent: string;
+}
+
+/**
+ * The Lead's named end (v0.0.10): the re-poke is spent and the stall
+ * persisted, so the driver submits the fact for the plugin to ledger — the
+ * meter precedent's law, one task-scoped `needs_human` line with its two
+ * evidence seqs. The reason vocabulary is fixed (`denied-again` /
+ * `silent-after-repoke`); an Owner answer wakes the task through the
+ * ordinary spawn path, so nothing here closes anything.
+ */
+export interface NeedsHumanRequest {
+  id: string;
+  kind: "needs_human";
+  task: string;
+  reason: NeedsHumanReason;
+  evidence: NeedsHumanEvidence;
+}
+
+/**
  * A synthetic permit ask (v0.0.4) — the bypass battery's vehicle into the real
  * choke: the same policy, the same ledger lines, answered in the reply instead
  * of `respondToPermission()` because no daemon ask exists to answer. The task
@@ -140,7 +174,7 @@ export interface AskRequest {
   name?: string;
 }
 
-export type SpoolRequest = ContractRequest | ClaimRequest | AcceptRequest | AskRequest | SpawnRequest | MeterRequest | RetroRequest;
+export type SpoolRequest = ContractRequest | ClaimRequest | AcceptRequest | AskRequest | SpawnRequest | MeterRequest | RepokeRequest | NeedsHumanRequest | RetroRequest;
 
 /** Handles a synthetic ask — `createChoke(...).spoolAskHandler` is the implementation. */
 export type AskHandler = (request: AskRequest) => SpoolReply;
@@ -245,6 +279,16 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       usage,
       ...(req.agent === undefined ? {} : { agent: req.agent }),
     };
+  }
+  if (req.kind === "repoke") {
+    if (typeof req.task !== "string" || typeof req.agent !== "string" || req.agent.trim() === "") return undefined;
+    return { id: req.id, kind: "repoke", task: req.task, agent: req.agent };
+  }
+  if (req.kind === "needs_human") {
+    if (typeof req.task !== "string") return undefined;
+    if (typeof req.reason !== "string" || !(NEEDS_HUMAN_REASONS as readonly string[]).includes(req.reason)) return undefined;
+    if (!needsHumanEvidenceIsValid(req.evidence)) return undefined;
+    return { id: req.id, kind: "needs_human", task: req.task, reason: req.reason as NeedsHumanReason, evidence: req.evidence };
   }
   if (req.kind === "ask") {
     if (typeof req.task !== "string" || typeof req.command !== "string" || req.command.trim() === "") return undefined;
@@ -352,6 +396,31 @@ export async function handleSpoolRequest(
       const dollars = event.usage.totalCostUsd;
       const cost = dollars === undefined ? "no dollars reported (recorded as absent)" : `$${dollars.toFixed(2)}`;
       return { id: request.id, ok: true, summary: `meter for ${request.task} under ${request.provider}: ${cost}` };
+    }
+    if (request.kind === "repoke") {
+      // The Lead's one spend (v0.0.10): one ledger line either way — the
+      // dispatch line is the spent marker, and every refusal is a recorded
+      // fact. Only on ok does the driver send its fixed message.
+      const decision = factory.repoke(request.task, request.agent);
+      if (decision.outcome === "refused") {
+        return { id: request.id, ok: false, code: decision.code, message: decision.event.reason };
+      }
+      return {
+        id: request.id,
+        ok: true,
+        summary: `re-poke dispatched for ${request.task} → agent ${request.agent.slice(0, 12)} — the task's one spend`,
+      };
+    }
+    if (request.kind === "needs_human") {
+      // The stall's named end (v0.0.10): one line, evidence seqs attached.
+      // The meter's law — a refused submission throws, no line, and the
+      // reply carries the code so the driver can report it honestly.
+      const event = factory.needsHuman({ task: request.task, reason: request.reason, evidence: request.evidence });
+      return {
+        id: request.id,
+        ok: true,
+        summary: `needs-human for ${request.task}: ${event.reason} (denial seq ${event.evidence.denial}, repoke seq ${event.evidence.repoke})`,
+      };
     }
     if (request.kind === "retro") {
       // The Owner's on-demand pass (v0.0.7): the plugin runs it whole. A

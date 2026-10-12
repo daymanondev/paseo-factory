@@ -1,7 +1,7 @@
 import { appendFileSync, closeSync, fsyncSync, ftruncateSync, mkdirSync, openSync, readFileSync, writeSync } from "node:fs";
 import { dirname } from "node:path";
 import { FactoryError } from "./errors.ts";
-import { EVENT_NAMES } from "./events.ts";
+import { EVENT_NAMES, needsHumanEvidenceIsValid } from "./events.ts";
 import type { LedgerEvent, PendingEvent } from "./events.ts";
 
 /**
@@ -125,7 +125,12 @@ export class Ledger {
  * `retro_written` carries neither task nor attempt — the factory-level
  * event — and needs its model, outcome and duration. The v0.0.8
  * `meter_written` carries no attempt (usage spans the run) and needs its
- * task, provider, and a usage object of the four daemon fields.
+ * task, provider, and a usage object of the four daemon fields. The v0.0.10
+ * Lead lines carry no attempt either (the stall precedes any Claim): the
+ * repoke pair needs task and agent (a refusal adds rule and reason, the
+ * spawn pair's own law), and `needs_human` needs task, a fixed-vocabulary
+ * reason, and its two evidence seqs (the vocabulary's own shape predicate,
+ * events.ts).
  */
 function shapeIsValid(evt: LedgerEvent): boolean {
   const asRecord = evt as unknown as Record<string, unknown>;
@@ -170,6 +175,16 @@ function shapeIsValid(evt: LedgerEvent): boolean {
       (asRecord.agent === undefined || typeof asRecord.agent === "string") &&
       usageIsValid(asRecord.usage)
     );
+  }
+  if (evt.event === "repoke_dispatched" || evt.event === "repoke_refused") {
+    return (
+      taskIsString &&
+      typeof asRecord.agent === "string" &&
+      (evt.event === "repoke_dispatched" || (typeof asRecord.rule === "string" && typeof asRecord.reason === "string"))
+    );
+  }
+  if (evt.event === "needs_human") {
+    return taskIsString && (asRecord.reason === "denied-again" || asRecord.reason === "silent-after-repoke") && needsHumanEvidenceIsValid(asRecord.evidence);
   }
   const attempt = asRecord.attempt;
   return taskIsString && typeof attempt === "number" && Number.isInteger(attempt) && attempt >= 1;

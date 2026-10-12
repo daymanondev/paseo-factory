@@ -10,7 +10,10 @@
  *   same read-only read `factory status` does). Since v0.0.8 the meter rides
  *   the same law: the driver captures the daemon's usage snapshot at each
  *   task's terminal moment and submits one `meter` request — the plugin
- *   validates and appends `meter_written`.
+ *   validates and appends `meter_written`. Since v0.0.10 the Lead's two acts
+ *   ride it too: one `repoke` request (the task's one spend — the plugin
+ *   holds the one-per-task law) and one `needs_human` request (the stall's
+ *   named end), each a plugin-written ledger line.
  * - **Zero runtime deps:** node's built-in `WebSocket` + `node:fs` +
  *   `node:child_process`, nothing else. The daemon WS protocol is
  *   source-verified against `@getpaseo/client` 0.10.3 (v0.0.5 ticket 01's
@@ -22,7 +25,18 @@
  *   belongs to a later row. A driver crash is safe to re-run: the spool
  *   dedupes replayed request files and the create RPC is idempotency-keyed
  *   by task id, so a re-run meets either the existing agent or a structured
- *   conflict — never a second agent.
+ *   conflict — never a second agent. The re-poke carries the same safety:
+ *   its spend is a ledger line, so a crash re-reads the slice, never the
+ *   socket.
+ * - **The Lead rider (v0.0.10, ADR 0006 §3):** the watch loop carries the
+ *   Lead's denial-stall predicate as a rider — the announced path to a
+ *   standing plugin loop. Zero model calls: the predicate is ledger
+ *   arithmetic, the re-poke is fixed text, `needs_human` is a recorded fact.
+ *   Riding the same branches sits the death fix (the v0.0.10 design's named
+ *   enabling fix, ticket 02 §5): a persisting null fetch graduates to death
+ *   ONLY at zero post-spawn ledger evidence of life — with evidence (an
+ *   ask, a denial, a claim) the watch continues on the ledger predicate,
+ *   and no meter is submitted at a death the ledger contradicts.
  *
  * Plain .mjs like its siblings: the daemon's node may lack TypeScript
  * stripping, and CLIs import no plugin server code (ADR 0004).
@@ -42,9 +56,27 @@ export const STAGGER_MS = 3_000;
 export const STALL_WARN_MS = 10 * 60_000;
 /** A fetch that answers `agent: null` for this long after create is a death — 0.11 answers unready agents with null, not an error. */
 export const AGENT_MISSING_DEAD_MS = 2 * 60_000;
+/**
+ * The Lead's denial-stall grace (v0.0.10 design §1): how long after a denial
+ * the predicate waits before calling the stall — the denial ends the turn
+ * within seconds (measured, v0.0.8), so 30 s sits safely past it with ~70 s
+ * of headroom under the ~106 s false-death window. Fixed in code, never
+ * configuration.
+ */
+export const GRACE_MS = 30_000;
+/**
+ * How long a spent re-poke stays answerable before the Lead writes
+ * `needs_human` (v0.0.10 design §3): no task event and no claim after the
+ * poke for this long is silence — the `STALL_WARN_MS` precedent's own size.
+ */
+export const RE_STALL_MS = 10 * 60_000;
 /** Creating an agent runs the before-hooks and boots a provider session — this is not a fast RPC. */
 const CREATE_TIMEOUT_MS = 120_000;
 const CONNECT_TIMEOUT_MS = 10_000;
+/** How long the Lead's spool replies may take — the plugin answers without running anything (the meter's wait). */
+const LEAD_WAIT_MS = 15_000;
+/** How long the re-poke's daemon send may take to be answered on the session socket. */
+const SEND_WAIT_MS = 15_000;
 
 // Mirrors TASK_ID_PATTERN in src/factory.ts — the CLIs import no src/ code
 // (ADR 0004); the driver checks it before the id becomes a git branch name.
@@ -433,6 +465,200 @@ export async function createTaskAgent(rpc, { task, provider, model, cwd, brief }
   return payload.agent.id;
 }
 
+// ---- the Lead rider (v0.0.10, ADR 0006 §3): the denial-stall predicate, the one re-poke, the named end ----
+
+/**
+ * Events the Lead's predicate ignores when it walks a task's slice for its
+ * last event (the v0.0.10 design §1): the driver's own meter line and the
+ * Lead's own three lines are not agent activity, so none of them can
+ * displace a denial from last position.
+ */
+const PREDICATE_IGNORED = new Set(["meter_written", "repoke_dispatched", "repoke_refused", "needs_human"]);
+
+/**
+ * The re-poke's fixed text (the v0.0.10 design §2) — the needed-text shape
+ * of the canonical report-missing notices, adapted to name the denial. Only
+ * the task and the denial's rule interpolate; no model calls, and nothing
+ * here grants a permission or widens a scope.
+ */
+export function repokeText(task, rule) {
+  return `Your permit ask for task ${task} was denied (rule ${rule}). The turn ended without a Claim. Continue by a route that needs no denied permission and make your Claim — or end your turn stating what you need from the Owner.`;
+}
+
+/**
+ * The Lead's one decision over a task's ledger slice (the v0.0.10 design
+ * §1 + §3), evaluated at every poll in both watch branches. Pure ledger
+ * arithmetic — the measured surface (the daemon stream never reached the
+ * driver in any stall; the ledger is the one carrier of the denial):
+ *
+ * - `poke` — the last task event (predicate-ignored kinds aside) is a
+ *   `permit_denied`, the grace is spent, and no `repoke_dispatched` exists:
+ *   spend the task's one re-poke now. `denial` is the event to answer.
+ * - `needs-human` — the poke is spent and the stall persisted: a NEW denial
+ *   after the poke's seq (`denied-again`), or no task event at all after it
+ *   for `RE_STALL_MS` (`silent-after-repoke`). Terminal for the watch.
+ * - `watch` — a Lead condition is still pending (grace not spent, or the
+ *   re-stall window still open): hold any `finished` commit — a ledger
+ *   stall must not end in the classifier's silent swallow.
+ * - `clear` — no Lead condition: ordinary classification may proceed.
+ *
+ * True negatives by construction: an absorbed denial is displaced from last
+ * position by the agent's later events; spawn-then-silence never shows a
+ * denial in last position (visible-but-unactionable, the later row's lane);
+ * post-claim denials fail the last-position test.
+ */
+export function leadDecision(events, task, now = Date.now(), { graceMs = GRACE_MS, reStallMs = RE_STALL_MS } = {}) {
+  let repoke;
+  const relevant = [];
+  for (const evt of events) {
+    if (evt.task !== task) continue;
+    if (evt.event === "repoke_dispatched") repoke = evt;
+    if (PREDICATE_IGNORED.has(evt.event)) continue;
+    relevant.push(evt);
+  }
+  const last = relevant.at(-1);
+  if (last !== undefined && last.event === "permit_denied") {
+    if (now - Date.parse(last.ts) < graceMs) return { act: "watch", why: "denial grace" };
+    if (repoke === undefined) return { act: "poke", denial: last };
+    if (repoke.seq < last.seq) {
+      // A new denial after the spend — nothing relevant after it (last
+      // position), and the grace above already elapsed on THIS denial.
+      return { act: "needs-human", reason: "denied-again", evidence: { denial: last.seq, repoke: repoke.seq } };
+    }
+    if (now - Date.parse(repoke.ts) > reStallMs) {
+      return { act: "needs-human", reason: "silent-after-repoke", evidence: { denial: last.seq, repoke: repoke.seq } };
+    }
+    return { act: "watch", why: "re-stall window" };
+  }
+  if (repoke !== undefined) {
+    const quietSincePoke = !relevant.some((e) => e.seq > repoke.seq);
+    if (quietSincePoke) {
+      if (now - Date.parse(repoke.ts) > reStallMs) {
+        // The poke's own denial is the evidence's denial — the stall it answered.
+        const denial = relevant.findLast((e) => e.event === "permit_denied" && e.seq < repoke.seq);
+        if (denial !== undefined) {
+          return { act: "needs-human", reason: "silent-after-repoke", evidence: { denial: denial.seq, repoke: repoke.seq } };
+        }
+      }
+      return { act: "watch", why: "re-stall window" };
+    }
+    // Activity after the poke — the Lead's answer arrived (a claim, an ask,
+    // anything): its window is closed, ordinary classification proceeds.
+  }
+  return { act: "clear" };
+}
+
+/** This task's latest `spawn_dispatched` seq — the anchor for both this-run windows (-1 when never spawned). */
+function lastSpawnSeq(events, task) {
+  let seq = -1;
+  for (const evt of events) {
+    if (evt.task === task && evt.event === "spawn_dispatched") seq = evt.seq;
+  }
+  return seq;
+}
+
+/**
+ * Post-spawn evidence of life (the death fix, v0.0.10 design §5): any task
+ * event after THIS run's `spawn_dispatched` that is not the driver's or the
+ * Lead's own writing — an ask, a denial, a claim. Spawn-then-silence (zero
+ * such events) is substrate death and keeps today's 120 s null-death, meter
+ * included; with evidence, the null fetch is contradicted and the watch
+ * continues on the ledger predicate instead. `spawn_refused` is excluded
+ * alongside: a refused re-invocation is the operator's act, not agent life.
+ */
+export function postSpawnLife(events, task) {
+  const spawnSeq = lastSpawnSeq(events, task);
+  if (spawnSeq === -1) return false;
+  for (const evt of events) {
+    if (evt.task !== task || evt.seq <= spawnSeq) continue;
+    if (evt.event === "spawn_dispatched" || evt.event === "spawn_refused" || PREDICATE_IGNORED.has(evt.event)) continue;
+    return true;
+  }
+  return false;
+}
+
+/**
+ * This run's verdict, if the ledger already holds one: a `gate_finished`
+ * after the task's latest `spawn_dispatched`. The null-fetch lane's finish
+ * signal — on this daemon the snapshot lane is dead from tick one, so the
+ * verdict the run exists to print is read from the ledger the plugin wrote
+ * while the agent worked.
+ */
+export function verdictOfThisRun(events, task) {
+  const spawnSeq = lastSpawnSeq(events, task);
+  let verdict;
+  for (const evt of events) {
+    if (evt.task === task && evt.event === "gate_finished" && evt.seq > spawnSeq) verdict = evt;
+  }
+  return verdict;
+}
+
+/**
+ * The Lead's one spend: one `repoke` request through the spool (the plugin
+ * holds the one-per-task law and appends the line — dispatched or refused),
+ * and only on ok the fixed message over the daemon's own session socket.
+ * The send targets an agent the ledger shows stalled — idle, nothing
+ * pending, its denial-ended turn seconds gone — so the send's
+ * interrupt/clear-pending defaults are moot, and delivery truth stays the
+ * timeline's message-id only: ambiguity is uncertainty, and the
+ * claim-or-restall outcome is the observable (no delivery event in v1). The
+ * deterministic `messageId` rides the daemon's own send receipts, so a
+ * replayed send cannot double-deliver. Report-only in every failure shape —
+ * a refusal, a silent plugin or an unaccepted send is logged and the watch
+ * continues on the ledger; the spend stands as the ledger wrote it.
+ */
+async function spendRepoke(rpc, spoolRoot, entry, denial, log) {
+  // One ask per process even when the plugin never answers — the request
+  // stays in the spool and may still be processed; the slice is the truth.
+  entry.repokeSubmitted = true;
+  const request = { id: randomId(), kind: "repoke", task: entry.task, agent: entry.agentId };
+  submit(spoolRoot, request);
+  const reply = await awaitReply(spoolRoot, request.id, LEAD_WAIT_MS);
+  if (reply === null) {
+    log(`factory: ${entry.task} re-poke — no reply within ${LEAD_WAIT_MS / 1000}s (request ${request.id} stays in the spool; the ledger decides the spend)`);
+    return;
+  }
+  if (!reply.ok) {
+    log(`factory: ${entry.task} re-poke refused — ${reply.code}: ${reply.message}`);
+    return;
+  }
+  log(`factory: ${entry.task} re-poke dispatched — the task's one spend, answering the denial at seq ${denial.seq}`);
+  try {
+    const sent = await rpc.request(
+      { type: "send_agent_message_request", agentId: entry.agentId, text: repokeText(entry.task, denial.rule), messageId: `factory-repoke-${entry.task}` },
+      { responseType: "send_agent_message_response", timeoutMs: SEND_WAIT_MS },
+    );
+    if (sent.accepted === true) {
+      log(`factory: ${entry.task} re-poke sent — the claim-or-restall outcome is the observable`);
+    } else {
+      log(`factory: ${entry.task} re-poke send not accepted — ${sent.error ?? "no reason given"} (the spend stands; the outcome stays observable)`);
+    }
+  } catch (err) {
+    log(`factory: ${entry.task} re-poke send failed — ${err.message} (the spend stands; the outcome stays observable)`);
+  }
+}
+
+/**
+ * The stall's named end: one `needs_human` request through the spool (the
+ * plugin validates the spend and appends the line with its evidence seqs),
+ * then the task's terminal fate — `verdict=-`, the reason printed, the
+ * meter captured as at any terminal. A refused or unanswered submission is
+ * logged and the terminal stands: the stall is a fact the driver measured,
+ * and the missing line is visible in this log, never silently dropped.
+ * Returns the fate to commit; the caller owns the commit.
+ */
+async function endNeedsHuman(spoolRoot, task, signal, log) {
+  const request = { id: randomId(), kind: "needs_human", task, reason: signal.reason, evidence: signal.evidence };
+  submit(spoolRoot, request);
+  const reply = await awaitReply(spoolRoot, request.id, LEAD_WAIT_MS);
+  if (reply === null) {
+    log(`factory: ${task} needs-human — no reply within ${LEAD_WAIT_MS / 1000}s (request ${request.id} stays in the spool; no ledger line yet)`);
+  } else if (!reply.ok) {
+    log(`factory: ${task} needs-human refused — ${reply.code}: ${reply.message} (no ledger line)`);
+  }
+  return { fate: "needs-human", reason: `${signal.reason} (denial seq ${signal.evidence.denial}, repoke seq ${signal.evidence.repoke})` };
+}
+
 // ---- observe: poll snapshots to a terminal state, stall report-only (ticket 03 §5–6) -----------------
 
 /**
@@ -470,8 +696,42 @@ export function agentFate(agent) {
  * never race it. At each terminal moment the daemon's usage snapshot is
  * captured onto the entry (`entry.usage`, the v0.0.8 meter's input) — the
  * one re-fetch riding along below.
+ *
+ * Since v0.0.10 the loop carries the Lead rider in both of its branches
+ * (the design §1's two insertions): a null-fetch answer is weighed against
+ * the ledger (the death fix — with post-spawn life the watch continues on
+ * the ledger predicate and the Lead acts there), and a `finished`
+ * classification is intercepted when the ledger shows a stall the Lead
+ * still owes an answer (poke, needs-human, or a pending window). `stateDir`
+ * and `spoolRoot` are the rider's surfaces: the ledger is the predicate's
+ * only input, and both Lead acts are spool submissions.
  */
-export async function observeTasks(rpc, entries, { pollMs = POLL_MS, log = () => {}, onTerminal = () => {} } = {}) {
+export async function observeTasks(rpc, entries, { pollMs = POLL_MS, log = () => {}, onTerminal = () => {}, stateDir, spoolRoot, missingDeadMs = AGENT_MISSING_DEAD_MS, graceMs = GRACE_MS, reStallMs = RE_STALL_MS } = {}) {
+  const commitTerminal = async (entry, fate, snapshot) => {
+    entry.terminal = fate;
+    await captureUsage(rpc, entry, snapshot);
+    await onTerminal(entry);
+  };
+  /**
+   * The Lead's one cascade, shared by both watch branches (design §1's two
+   * insertions — only the finish signal differs, and that is the caller's):
+   * "hold" = a Lead window or the poke's outcome is pending — no finish may
+   * commit; "terminal" = the named end committed here; "clear" = no Lead
+   * condition, the caller's ordinary classification proceeds.
+   */
+  const runLead = async (entry, events, snapshot) => {
+    const lead = leadDecision(events, entry.task, Date.now(), { graceMs, reStallMs });
+    if (lead.act === "poke") {
+      if (entry.repokeSubmitted !== true) await spendRepoke(rpc, spoolRoot, entry, lead.denial, log);
+      return "hold";
+    }
+    if (lead.act === "needs-human") {
+      const fate = await endNeedsHuman(spoolRoot, entry.task, lead, log);
+      await commitTerminal(entry, fate, snapshot);
+      return "terminal";
+    }
+    return lead.act === "watch" ? "hold" : "clear";
+  };
   for (const entry of entries) {
     entry.terminal = undefined;
     entry.printedStatus = undefined;
@@ -479,6 +739,7 @@ export async function observeTasks(rpc, entries, { pollMs = POLL_MS, log = () =>
     entry.timelineStillSince = Date.now();
     entry.warned = false;
     entry.missingSince = undefined;
+    entry.repokeSubmitted = undefined;
   }
   while (entries.some((e) => e.terminal === undefined)) {
     for (const entry of entries) {
@@ -493,14 +754,30 @@ export async function observeTasks(rpc, entries, { pollMs = POLL_MS, log = () =>
           // is mid-run (and right after create — a registration race). The
           // agents-list RPC that would disambiguate is not answered on the
           // session socket (verified live: the request is silently dropped),
-          // so a null is waited out — only one persisting past
-          // AGENT_MISSING_DEAD_MS is called a death. Slow-but-alive agents
-          // outrun the window and their verdicts still land in the ledger,
-          // which is what the run reads.
+          // so the ledger is consulted instead (the death fix, v0.0.10 §5):
+          // with post-spawn evidence of life the null is contradicted — the
+          // watch continues on the Lead's ledger predicate, no death and no
+          // meter at a death the ledger contradicts. Only a null persisting
+          // at ZERO evidence is substrate death: waited out to
+          // missingDeadMs, then called honestly, meter included.
+          const events = readDriverLedger(stateDir);
+          if (postSpawnLife(events, entry.task)) {
+            entry.missingSince = undefined;
+            const outcome = await runLead(entry, events, undefined);
+            if (outcome !== "clear") continue;
+            // clear: the null lane's finish signal — this run's verdict, from
+            // the ledger (the watch that survived to witness the claim).
+            const verdict = verdictOfThisRun(events, entry.task);
+            if (verdict !== undefined) {
+              log(`factory: ${entry.task} verdict on the ledger (the snapshot lane stayed null) — attempt ${verdict.attempt} ${verdict.verdict}`);
+              await commitTerminal(entry, { fate: "finished" }, undefined);
+            }
+            continue;
+          }
           if (entry.missingSince === undefined) {
             entry.missingSince = Date.now();
-          } else if (Date.now() - entry.missingSince > AGENT_MISSING_DEAD_MS) {
-            throw rpcError("agent not found — the daemon no longer has its record");
+          } else if (Date.now() - entry.missingSince > missingDeadMs) {
+            throw rpcError("agent not found — the daemon no longer has its record, and the ledger shows no life since the spawn (substrate death)");
           }
           continue;
         }
@@ -527,9 +804,14 @@ export async function observeTasks(rpc, entries, { pollMs = POLL_MS, log = () =>
         log(`factory: ${entry.task} agent ${snapshot.status}${snapshot.attentionReason === undefined ? "" : ` (${snapshot.attentionReason})`}`);
       }
       if (fate.terminal) {
-        entry.terminal = fate;
-        await captureUsage(rpc, entry, snapshot);
-        await onTerminal(entry);
+        if (fate.fate === "finished") {
+          // The Lead's second insertion (v0.0.10 §1): idle-without-Claim is
+          // only a finish when the ledger agrees — a denial-stall matching
+          // this classifier's own shape must not end in its silent swallow.
+          const outcome = await runLead(entry, readDriverLedger(stateDir), snapshot);
+          if (outcome !== "clear") continue; // the poke's outcome is pending, or the named end already committed
+        }
+        await commitTerminal(entry, fate, snapshot);
         continue;
       }
       await stallWatch(rpc, entry, snapshot, log).catch(() => {}); // a failed timeline read must not sink the poll
@@ -771,10 +1053,14 @@ export async function runDriver({ home, stateDir, spoolRoot, tasks, provider, wa
   // (ticket 03 §5: "at each task's verdict"), from a fresh ledger read —
   // the plugin wrote the verdict while the agent worked. The meter follows
   // the print (v0.0.8): the usage captured at the terminal moment rides one
-  // spool request, and the plugin appends the `meter_written` line.
+  // spool request, and the plugin appends the `meter_written` line. The
+  // Lead rider (v0.0.10) rides the same loop with both surfaces: the ledger
+  // its predicate reads, and the spool its two acts submit through.
   await observeTasks(rpc, entries, {
     pollMs,
     log: say,
+    stateDir,
+    spoolRoot,
     onTerminal: async (entry) => {
       if (entry.terminal.fate !== "finished") {
         say(`factory: ${entry.task} agent ${entry.terminal.fate} — ${entry.terminal.reason ?? "no reason given"}`);

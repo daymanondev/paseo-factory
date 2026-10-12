@@ -1,24 +1,34 @@
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   agentFate,
   contractFromLedger,
+  GRACE_MS,
+  leadDecision,
+  observeTasks,
+  postSpawnLife,
   prepareWorkspace,
   readDriverLedger,
+  RE_STALL_MS,
   renderBrief,
   renderRunBanner,
+  repokeText,
   splitProvider,
   taskOutcome,
+  verdictOfThisRun,
 } from "../plugin/bin/driver.mjs";
 import { copyFixture, disposeDir, gitCommitAll, makeTempDir } from "./helpers.ts";
 
 /**
- * `factory run`'s driver — the pure pieces. The daemon-RPC half (hello,
- * agent.create, snapshot polling) is exercised end to end on the trial home
- * by ticket 04's live runs, not here: a fake daemon would need a WebSocket
- * server, and the zero-dep law keeps one out of the CLIs' world.
+ * `factory run`'s driver — the pure pieces, plus (v0.0.10) the Lead rider's
+ * loop wiring against a fake snapshot lane and the REAL spool+factory: the
+ * re-poke's one-spend law and the needs-human line are proven through the
+ * plugin's own request handling, never a mock of it. The daemon-RPC half
+ * (hello, agent.create, snapshot polling) is exercised end to end on the
+ * trial home by ticket 04's live runs, not here: a fake daemon would need a
+ * WebSocket server, and the zero-dep law keeps one out of the CLIs' world.
  */
 
 test("renderBrief bakes the task and the driver's PATH into the runbook template, verbatim otherwise", () => {
@@ -174,3 +184,388 @@ test("DaemonRpc routes a response to its waiter by requestId AND response type (
   await assert.rejects(hanging, DaemonConnectionError);
   rpc.close();
 });
+
+// ---- the Lead rider (v0.0.10, ticket 03): the predicate table, then the loop wiring ----
+
+test("repokeText is the design's fixed template — only the task and the denial's rule interpolate", () => {
+  assert.equal(
+    repokeText("lead1-a", "policy:S1-git-vocabulary"),
+    "Your permit ask for task lead1-a was denied (rule policy:S1-git-vocabulary). The turn ended without a Claim. " +
+      "Continue by a route that needs no denied permission and make your Claim — or end your turn stating what you need from the Owner.",
+  );
+  assert.equal(GRACE_MS, 30_000, "the denial-stall grace is fixed in code, not configuration (design §1)");
+  assert.equal(RE_STALL_MS, 10 * 60_000, "the re-stall window rides the STALL_WARN precedent's size (design §3)");
+});
+
+/** One task's slice, seqs in order, ts as offsets from a fixed now. */
+function slice(entries: [string, number][], task = "T1", extra: Record<string, unknown> = {}): Record<string, unknown>[] {
+  const NOW = Date.parse("2026-10-12T12:00:00.000Z");
+  return entries.map(([event, tsOffset], i) => ({
+    seq: i + 1,
+    ts: new Date(NOW + tsOffset).toISOString(),
+    event,
+    task,
+    ...extra,
+  }));
+}
+
+test("leadDecision's true/false table — the denial-stall predicate and its two named ends (design §1 + §3)", () => {
+  const NOW = Date.parse("2026-10-12T12:00:00.000Z");
+
+  // TRUE: the last task event is a denial, grace spent, no poke yet.
+  const stall = slice([
+    ["contract_set", -90_000],
+    ["spawn_dispatched", -80_000],
+    ["permit_denied", -60_000],
+  ]);
+  const poke = leadDecision(stall, "T1", NOW);
+  assert.equal(poke.act, "poke", "a denial in last position past the grace spends the poke");
+  if (poke.act === "poke") assert.equal(poke.denial.seq, 3, "the poke answers the denial in last position");
+
+  // FALSE: grace not yet spent.
+  assert.equal(leadDecision(slice([["permit_denied", -10_000]]), "T1", NOW).act, "watch", "the grace window is pending");
+
+  // FALSE: an absorbed denial — the agent continued to an allowed ask.
+  assert.equal(
+    leadDecision(slice([["permit_denied", -60_000], ["permit_allowed", -50_000]]), "T1", NOW).act,
+    "clear",
+    "an absorbed denial is displaced from last position",
+  );
+
+  // FALSE: spawn-then-silence — no denial evidence at all (the later row's lane).
+  assert.equal(leadDecision(slice([["spawn_dispatched", -60_000]]), "T1", NOW).act, "clear");
+
+  // FALSE: post-claim denial — a claim after the denial displaces it.
+  assert.equal(
+    leadDecision(slice([["permit_denied", -60_000], ["claim_reported", -50_000]]), "T1", NOW).act,
+    "clear",
+    "post-claim denials fail the claim test (design §1's own negative)",
+  );
+
+  // The meter line never displaces a denial (design §1's ignore set).
+  assert.equal(leadDecision(slice([["permit_denied", -60_000], ["meter_written", -40_000]]), "T1", NOW).act, "poke");
+
+  // Poke spent, denial still last, within the re-stall window → hold.
+  const within = slice([["permit_denied", -9 * 60_000], ["repoke_dispatched", -8 * 60_000]]);
+  assert.equal(leadDecision(within, "T1", NOW).act, "watch", "the re-stall window is pending");
+
+  // Poke spent, silence since it past RE_STALL_MS → silent-after-repoke.
+  const silent = leadDecision(slice([["permit_denied", -12 * 60_000], ["repoke_dispatched", -11 * 60_000]]), "T1", NOW);
+  assert.equal(silent.act, "needs-human");
+  if (silent.act === "needs-human") {
+    assert.equal(silent.reason, "silent-after-repoke");
+    assert.deepEqual(silent.evidence, { denial: 1, repoke: 2 }, "the evidence names the stall's denial and the spend");
+  }
+
+  // A NEW denial after the spend, grace spent on it → denied-again.
+  const again = leadDecision(
+    slice([["permit_denied", -12 * 60_000], ["repoke_dispatched", -11 * 60_000], ["permit_denied", -60_000]]),
+    "T1",
+    NOW,
+  );
+  assert.equal(again.act, "needs-human");
+  if (again.act === "needs-human") {
+    assert.equal(again.reason, "denied-again");
+    assert.deepEqual(again.evidence, { denial: 3, repoke: 2 }, "the evidence names the NEW denial and the spend");
+  }
+
+  // The same shape inside the new denial's grace → hold.
+  assert.equal(
+    leadDecision(slice([["permit_denied", -12 * 60_000], ["repoke_dispatched", -11 * 60_000], ["permit_denied", -10_000]]), "T1", NOW).act,
+    "watch",
+  );
+
+  // Activity after the poke (a claim, an ask) closes the Lead's window — the
+  // answer arrived, ordinary classification proceeds.
+  assert.equal(
+    leadDecision(slice([["permit_denied", -60_000], ["repoke_dispatched", -50_000], ["claim_reported", -40_000]]), "T1", NOW).act,
+    "clear",
+    "the poke worked — a claim after it is the Lead's all-clear",
+  );
+  assert.equal(
+    leadDecision(slice([["permit_denied", -60_000], ["repoke_dispatched", -50_000], ["permit_allowed", -40_000]]), "T1", NOW).act,
+    "clear",
+    "an ask after the poke is activity too — and activity-then-silence stays the later row's lane in v1",
+  );
+
+  // A refusal does not spend: the refusal line is ignored, the ask stands.
+  assert.equal(leadDecision(slice([["permit_denied", -60_000], ["repoke_refused", -50_000]]), "T1", NOW).act, "poke");
+
+  // Another task's events never enter the slice.
+  const mine = slice([["permit_denied", -60_000]]);
+  const withTheirs = [...mine, { seq: 9, ts: new Date(NOW - 30_000).toISOString(), event: "permit_allowed", task: "OTHER" }];
+  assert.equal(leadDecision(withTheirs, "T1", NOW).act, "poke", "the predicate is task-scoped");
+});
+
+test("postSpawnLife and verdictOfThisRun — the death fix's ledger arithmetic and the null lane's finish signal", () => {
+  const spawnOnly = slice([["contract_set", -90_000], ["spawn_dispatched", -80_000]]);
+  assert.equal(postSpawnLife(spawnOnly, "T1"), false, "spawn-then-silence: zero post-spawn evidence of life");
+  assert.equal(
+    postSpawnLife(slice([["spawn_dispatched", -80_000], ["meter_written", -40_000]]), "T1"),
+    false,
+    "the driver's own meter line is not life",
+  );
+  assert.equal(
+    postSpawnLife(slice([["spawn_dispatched", -80_000], ["repoke_dispatched", -40_000]]), "T1"),
+    false,
+    "the Lead's own lines are not life",
+  );
+  assert.equal(
+    postSpawnLife(slice([["spawn_dispatched", -80_000], ["spawn_refused", -40_000]]), "T1"),
+    false,
+    "a refused re-invocation is the operator's act, not agent life",
+  );
+  assert.equal(postSpawnLife(slice([["spawn_dispatched", -80_000], ["permit_denied", -60_000]]), "T1"), true, "a denial is life");
+  assert.equal(postSpawnLife(slice([["permit_allowed", -60_000], ["spawn_dispatched", -40_000]]), "T1"), false, "pre-spawn asks do not count — the window anchors at THIS run's spawn");
+
+  const thisRun = verdictOfThisRun(slice([["spawn_dispatched", -80_000], ["gate_finished", -60_000]]), "T1");
+  assert.equal((thisRun as { seq?: number } | undefined)?.seq, 2, "a gate_finished after this run's spawn is this run's verdict");
+  assert.equal(verdictOfThisRun(slice([["gate_finished", -90_000], ["spawn_dispatched", -80_000]]), "T1"), undefined, "a previous run's verdict is not this run's");
+  assert.equal(verdictOfThisRun(spawnOnly, "T1"), undefined, "no verdict yet");
+});
+
+/**
+ * The loop-wiring harness (v0.0.10): a fake snapshot lane over the REAL
+ * spool and factory, so the Lead's two acts run through the plugin's own
+ * request handling — the one-spend law and the needs-human line are proven
+ * at the protocol, never mocked. The fake rpc answers fetch/send from a
+ * `respond` callback the test mutates; the ledger evolves by direct appends
+ * at the seams the live system would fill (the choke's denial, the agent's
+ * claim). The window knobs (graceMs, reStallMs, missingDeadMs) are the
+ * loop's test seams — the code defaults are the fixed laws.
+ */
+async function leadHarness(t: TestContext, respond: () => Record<string, unknown> | null) {
+  const dir = makeTempDir("paseo-factory-lead-");
+  disposeDir(t, dir);
+  const workspace = join(dir, "ws");
+  copyFixture("sample-workspace", workspace);
+  gitCommitAll(workspace);
+  const stateDir = join(dir, "state");
+  const { createFactory } = await import("../plugin/server/core/factory.ts");
+  const { startSpool, spoolRootFor } = await import("../plugin/server/spool.ts");
+  const factory = createFactory({ stateDir });
+  factory.setContract({ task: "LEAD1", workspace, gate: "true", artifact: "src/format.ts" });
+  factory.requestSpawn({ task: "LEAD1", provider: "claude", arity: 1 });
+  const spoolRoot = spoolRootFor(stateDir);
+  const spool = startSpool(stateDir, factory, { pollMs: 20 });
+
+  const sent: Record<string, unknown>[] = [];
+  let fetches = 0;
+  const rpc = {
+    connected: true,
+    async request(message: Record<string, unknown>) {
+      sent.push(message);
+      if (message.type === "fetch_agent_request") {
+        fetches += 1;
+        return { requestId: "r", agent: respond() };
+      }
+      if (message.type === "send_agent_message_request") return { requestId: "r", accepted: true, error: null };
+      return { requestId: "r" };
+    },
+    close() {},
+  };
+  const denial = (reason: string) =>
+    factory.ledger.append({
+      event: "permit_denied",
+      task: "LEAD1",
+      agent: "ag-lead1",
+      name: "Bash",
+      kind: "tool",
+      command: "git reset --hard",
+      rule: "policy:S1-git-vocabulary",
+      reason,
+    });
+  const claimGreen = () => {
+    factory.ledger.append({ event: "claim_reported", task: "LEAD1", attempt: 1, sha: "a1b2c3d", agent: "ag-lead1" });
+    factory.ledger.append({ event: "gate_finished", task: "LEAD1", attempt: 1, exit: 0, verdict: "green", note: "", sha: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0" });
+  };
+  const processedKinds = (): string[] =>
+    readdirSync(join(spoolRoot, "processed"))
+      .filter((name) => name.endsWith(".json"))
+      .map((name) => (JSON.parse(readFileSync(join(spoolRoot, "processed", name), "utf8")) as { kind: string }).kind)
+      .sort();
+  return {
+    stateDir,
+    spoolRoot,
+    factory,
+    rpc,
+    sent,
+    denial,
+    claimGreen,
+    processedKinds,
+    get fetches() {
+      return fetches;
+    },
+    stop() {
+      spool.stop();
+    },
+  };
+}
+
+test("the amended finished-pin: idle + prompt-consumed + no-pending with a ledger denial-stall pokes instead of finishing silently", async (t) => {
+  const harness = await leadHarness(t, () => ({ status: "idle", attentionReason: "finished", pendingPermissions: [] }));
+  try {
+    // The stall lands on the ledger while the loop classifies idle: the
+    // denial's grace is a test window (10ms), so the poke fires on the
+    // first or second tick and the finished commit is held from then on.
+    harness.denial("caught");
+    const terminals: { fate?: string }[] = [];
+    const run = observeTasks(harness.rpc, [{ task: "LEAD1", agentId: "ag-lead1" }], {
+      pollMs: 10,
+      stateDir: harness.stateDir,
+      spoolRoot: harness.spoolRoot,
+      graceMs: 10,
+      log: () => {},
+      onTerminal: (entry) => {
+        terminals.push({ ...(entry.terminal as { fate?: string }) });
+      },
+    });
+
+    await until_(() => assert.ok(harness.sent.some((m) => m.type === "send_agent_message_request")), 5000);
+    const send = harness.sent.find((m) => m.type === "send_agent_message_request") as { text?: string; messageId?: string };
+    assert.equal(send.messageId, "factory-repoke-LEAD1", "the deterministic message id rides the daemon's send receipts");
+    assert.equal(send.text, repokeText("LEAD1", "policy:S1-git-vocabulary"), "the fixed text, answering the denial's own rule");
+    assert.equal(terminals.length, 0, "a ledger stall is not a silent finish — the commit is held");
+    assert.equal(harness.factory.ledger.events.filter((e) => e.event === "repoke_dispatched").length, 1, "exactly one spend through the real spool");
+
+    // The agent takes the allowed route and claims: activity after the poke
+    // closes the Lead's window and the ordinary finish proceeds.
+    harness.claimGreen();
+    await run;
+    assert.deepEqual(terminals.map((x) => x.fate), ["finished"]);
+    assert.deepEqual(harness.processedKinds(), ["repoke"], "the poke through the real spool — the meter is runDriver's terminal callback, not the loop's");
+    assert.equal(harness.factory.ledger.events.filter((e) => e.event === "repoke_refused").length, 0, "no second ask, so no refusal line — idempotency measured across the held ticks, not assumed");
+  } finally {
+    harness.stop();
+  }
+});
+
+test("the needs-human terminal (null lane, denied-again): a second denial after the spent poke ends the watch with its evidence on the ledger", async (t) => {
+  const harness = await leadHarness(t, () => null);
+  try {
+    harness.denial("caught");
+    const terminals: { fate?: string; reason?: string }[] = [];
+    const run = observeTasks(harness.rpc, [{ task: "LEAD1", agentId: "ag-lead1" }], {
+      pollMs: 10,
+      stateDir: harness.stateDir,
+      spoolRoot: harness.spoolRoot,
+      graceMs: 10,
+      missingDeadMs: 60, // life is present — the death must stay disarmed
+      log: () => {},
+      onTerminal: (entry) => {
+        terminals.push({ ...(entry.terminal as { fate?: string; reason?: string }) });
+      },
+    });
+
+    await until_(() => assert.ok(harness.factory.ledger.events.some((e) => e.event === "repoke_dispatched")), 5000);
+    assert.equal(terminals.length, 0, "the watch survives the null lane — the death fix disarmed it (missingDeadMs=60 and many ticks in)");
+    // The agent re-attempts the denied act: a second denial after the spend.
+    harness.denial("caught again");
+    await run;
+
+    const line = harness.factory.ledger.events.find((e) => e.event === "needs_human") as { reason: string; evidence: { denial: number; repoke: number } };
+    const spend = harness.factory.ledger.events.find((e) => e.event === "repoke_dispatched") as { seq: number };
+    const denials = harness.factory.ledger.events.filter((e) => e.event === "permit_denied") as { seq: number }[];
+    assert.equal(line.reason, "denied-again");
+    assert.deepEqual(line.evidence, { denial: denials[1].seq, repoke: spend.seq }, "the evidence names the NEW denial and the spend");
+    assert.equal(terminals.length, 1);
+    assert.equal(terminals[0].fate, "needs-human");
+    assert.match(terminals[0].reason ?? "", /denied-again/);
+    assert.ok(harness.fetches > 3, "the null lane kept polling past the old death window — life beat the null (design §5)");
+    assert.deepEqual(harness.processedKinds(), ["needs_human", "repoke"], "poke and named end through the real spool");
+  } finally {
+    harness.stop();
+  }
+});
+
+test("the needs-human terminal (null lane, silent-after-repoke): silence since the spent poke is the named end", async (t) => {
+  const harness = await leadHarness(t, () => null);
+  try {
+    harness.denial("caught");
+    const terminals: { fate?: string; reason?: string }[] = [];
+    const run = observeTasks(harness.rpc, [{ task: "LEAD1", agentId: "ag-lead1" }], {
+      pollMs: 10,
+      stateDir: harness.stateDir,
+      spoolRoot: harness.spoolRoot,
+      graceMs: 10,
+      reStallMs: 150,
+      log: () => {},
+      onTerminal: (entry) => {
+        terminals.push({ ...(entry.terminal as { fate?: string; reason?: string }) });
+      },
+    });
+    await run;
+
+    const line = harness.factory.ledger.events.find((e) => e.event === "needs_human") as { reason: string; evidence: { denial: number; repoke: number } };
+    const spend = harness.factory.ledger.events.find((e) => e.event === "repoke_dispatched") as { seq: number };
+    const denialSeq = (harness.factory.ledger.events.find((e) => e.event === "permit_denied") as { seq: number }).seq;
+    assert.equal(line.reason, "silent-after-repoke");
+    assert.deepEqual(line.evidence, { denial: denialSeq, repoke: spend.seq }, "the evidence names the stall's own denial and the spend");
+    assert.equal(terminals[0].fate, "needs-human");
+    assert.match(terminals[0].reason ?? "", /silent-after-repoke/);
+  } finally {
+    harness.stop();
+  }
+});
+
+test("the null lane's finish signal: after the poke, a claim on the ledger ends the task green (the readme2 arc)", async (t) => {
+  const harness = await leadHarness(t, () => null);
+  try {
+    harness.denial("caught");
+    const terminals: { fate?: string }[] = [];
+    const run = observeTasks(harness.rpc, [{ task: "LEAD1", agentId: "ag-lead1" }], {
+      pollMs: 10,
+      stateDir: harness.stateDir,
+      spoolRoot: harness.spoolRoot,
+      graceMs: 10,
+      log: () => {},
+      onTerminal: (entry) => {
+        terminals.push({ ...(entry.terminal as { fate?: string }) });
+      },
+    });
+    await until_(() => assert.ok(harness.factory.ledger.events.some((e) => e.event === "repoke_dispatched")), 5000);
+    harness.claimGreen();
+    await run;
+    assert.deepEqual(terminals.map((x) => x.fate), ["finished"], "the verdict on the ledger is the null lane's finish — the watch survived to witness it");
+  } finally {
+    harness.stop();
+  }
+});
+
+test("the death rule: a persisting null at ZERO post-spawn life is substrate death, meter included; the Lead never fires", async (t) => {
+  const harness = await leadHarness(t, () => null);
+  try {
+    const terminals: { fate?: string; reason?: string }[] = [];
+    await observeTasks(harness.rpc, [{ task: "LEAD1", agentId: "ag-lead1" }], {
+      pollMs: 10,
+      stateDir: harness.stateDir,
+      spoolRoot: harness.spoolRoot,
+      missingDeadMs: 80,
+      log: () => {},
+      onTerminal: (entry) => {
+        terminals.push({ ...(entry.terminal as { fate?: string; reason?: string }) });
+      },
+    });
+    assert.equal(terminals.length, 1);
+    assert.equal(terminals[0].fate, "died");
+    assert.match(terminals[0].reason ?? "", /substrate death/);
+    assert.deepEqual(harness.processedKinds(), [], "no Lead act ever fires — the meter is runDriver's terminal callback (its own pinned behavior: death meters included)");
+    assert.equal(harness.factory.ledger.events.filter((e) => e.event === "repoke_dispatched").length, 0, "no denial evidence, no poke — visible-but-unactionable");
+  } finally {
+    harness.stop();
+  }
+});
+
+/** Waits (bounded) until the assertion holds — the spool answers asynchronously by design. */
+async function until_(assertion: () => void, ms = 5000): Promise<void> {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    try {
+      assertion();
+      return;
+    } catch (err) {
+      if (Date.now() >= deadline) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  }
+}

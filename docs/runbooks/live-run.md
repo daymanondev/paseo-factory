@@ -264,6 +264,11 @@ because both runs wrote their findings down.
   conversation, the seat accepting as the delegated Owner. The git flow is
   NEVER the Supervisor's: landing and push stay on the human-driven path
   (ADR 0006 — "it is not another project Lead").
+- **Needs-human relay** (v0.0.10, the Lead's named end): the Supervisor's
+  standing law — it reads the Ledger at its next turn (transcript for talk,
+  Ledger for truth) and relays `needs_human` items to the Owner in words,
+  batched at leisure; no push exists. An Owner answer wakes the task through
+  the ordinary spawn path (step 4); only Acceptance closes it.
 - **Revoking the seat** (ADR 0006 / v0.0.9 design): cancel the turn, archive
   the agent (`paseo agent archive <id> --home ~/.paseo-factory`), stop typing
   — no ledger line, no factory-side state exists to clear. Every recorded

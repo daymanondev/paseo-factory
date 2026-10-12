@@ -7,6 +7,11 @@
 export declare const POLL_MS: number;
 export declare const STAGGER_MS: number;
 export declare const STALL_WARN_MS: number;
+export declare const AGENT_MISSING_DEAD_MS: number;
+/** The Lead's denial-stall grace (v0.0.10): fixed in code, never configuration. */
+export declare const GRACE_MS: number;
+/** How long a spent re-poke stays answerable before `needs_human` (v0.0.10). */
+export declare const RE_STALL_MS: number;
 
 export declare function renderBrief(task: string, pathValue: string, description?: string): string;
 export declare function splitProvider(value: string): { provider: string; model: string | undefined };
@@ -58,6 +63,33 @@ export interface AgentFate {
 }
 export declare function agentFate(agent: Record<string, unknown>): AgentFate;
 
+// ---- the Lead rider (v0.0.10) ----
+
+/** The re-poke's fixed text — only the task and the denial's rule interpolate. */
+export declare function repokeText(task: string, rule: string): string;
+
+export interface LeadDenial {
+  seq: number;
+  ts: string;
+  rule: string;
+}
+export type LeadDecision =
+  | { act: "poke"; denial: LeadDenial }
+  | { act: "needs-human"; reason: "denied-again" | "silent-after-repoke"; evidence: { denial: number; repoke: number } }
+  | { act: "watch"; why: string }
+  | { act: "clear" };
+/** The Lead's one decision over a task's ledger slice — pure ledger arithmetic (graceMs/reStallMs: test knobs, the code defaults are the fixed law). */
+export declare function leadDecision(
+  events: readonly Record<string, unknown>[],
+  task: string,
+  now?: number,
+  windows?: { graceMs?: number; reStallMs?: number },
+): LeadDecision;
+/** Post-spawn evidence of life (the death fix): any task event after this run's spawn that is not the driver's or the Lead's own writing. */
+export declare function postSpawnLife(events: readonly Record<string, unknown>[], task: string): boolean;
+/** This run's `gate_finished`, if the ledger already holds one — the null lane's finish signal. */
+export declare function verdictOfThisRun(events: readonly Record<string, unknown>[], task: string): Record<string, unknown> | undefined;
+
 /** The daemon's usage snapshot reduced to the four meter fields, present only when finite (v0.0.8). */
 export interface MeterUsage {
   inputTokens?: number;
@@ -72,11 +104,30 @@ export declare function pickUsage(terminal: MeterUsage, refetched: MeterUsage): 
 export interface ObserveEntry {
   task: string;
   agentId: string;
+  /** Set the moment the task lands its terminal state — the loop's own bookkeeping. */
+  terminal?: { terminal?: boolean; fate: string; reason?: string };
+  /** The terminal usage capture (v0.0.8) — undefined until a terminal moment. */
+  usage?: MeterUsage;
 }
 export declare function observeTasks(
-  rpc: DaemonRpc,
+  rpc: DaemonRpc | {
+    connected: boolean;
+    request(message: Record<string, unknown>, options: { responseType: string; timeoutMs?: number }): Promise<Record<string, unknown>>;
+    close(): void;
+  },
   entries: ObserveEntry[],
-  options?: { pollMs?: number; log?: (message: string) => void; onTerminal?: (entry: ObserveEntry) => void | Promise<void> },
+  options?: {
+    pollMs?: number;
+    log?: (message: string) => void;
+    onTerminal?: (entry: ObserveEntry) => void | Promise<void>;
+    /** The Lead rider's surfaces (v0.0.10): the ledger its predicate reads, the spool its two acts submit through. */
+    stateDir: string;
+    spoolRoot: string;
+    /** Test knobs (defaults are the fixed laws: AGENT_MISSING_DEAD_MS, GRACE_MS, RE_STALL_MS). */
+    missingDeadMs?: number;
+    graceMs?: number;
+    reStallMs?: number;
+  },
 ): Promise<void>;
 
 export interface RunDriverInput {
