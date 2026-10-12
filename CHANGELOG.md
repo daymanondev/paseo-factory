@@ -26,11 +26,11 @@ v0.0.9 readme2 arc witnessed). Suite 260/260 (PR #39).
 The version's judged run answered its row's question **"can a deterministic
 seat preside?"** honestly, in three acts recorded in ticket 04: (1) the
 pre-registered planted-stall run collapsed with its substrate — copilot
-quota died account-wide; pi never asks permissions (the choke's authority is
-ask-dependent — a security-class lane fact, measured live); the daemon's
+quota died account-wide; pi never makes a permit ask (the choke's authority
+is ask-dependent — a security-class lane fact, measured live); the daemon's
 antigravity driver is full-access by design (no asks, ever); (2) the Owner
-ruled the theater off — "no staged stall, the lanes run open" (Amendment 4);
-(3) the run that shipped: two real tasks, zero plants, both on
+ruled the theater off — "no staged stall; the lanes run open" (ticket 04,
+amendment 4); (3) the run that shipped: two real tasks, zero plants, both on
 `pi/zai/glm-5.3`, **green attempt 1 both, $0 out-of-pocket**, zero Lead
 lines (on open lanes the denial-stall trigger has no surface — the positive
 arc stays unwitnessed, transferring to the lane-independent-trigger
@@ -38,15 +38,19 @@ candidate).
 
 The run's finding, grade A, second witness after v0.0.9's readme2 arc: **the
 120 s zero-life death misclassifies healthy long work as substrate death on
-ask-less lanes** — the second task's claim landed ~107 s past the death
-verdict (ledger claim seq 1423 at 15:28:27Z) with the meter already written
-at the false terminal (seq 1422, a meter before a terminal the ledger then
-contradicted), while the daemon's agent timeline carried continuous work
+ask-less lanes** — the second task's work spanned 128.7 s (8.7 s past the
+bound), the driver committed the death and wrote its meter at the false
+terminal (seq 1422, 15:28:25.9Z), and the claim landed ~2 s later (seq 1423,
+15:28:27.6Z; gate green at 1425) — a meter before a terminal the ledger then
+contradicted — while the daemon's agent timeline carried continuous work
 the ledger cannot see. The discriminating signal lives in the daemon
 timeline, not the ledger — the death-classification row's input.
 
 ### Changed
 
+- `CONTEXT.md` gains the version's vocabulary — the Lead (People), and
+  Denial-stall / Re-poke / Needs-human (Running), plus the Driver rider and
+  Supervisor relay amendments (landed with the build, verified at close).
 - `package.json` → 0.0.10.
 
 ## [0.0.9] - 2026-10-12

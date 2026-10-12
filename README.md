@@ -23,8 +23,8 @@ driver (`factory run`), the record-only watch, the on-demand Retro, the Cost
 read backed by the Meter, and the seat layer (ADR 0006) is open: v0.0.9's
 Supervisor seat — the delegated Owner conversation, every act stamped by who
 submitted it — and v0.0.10's Lead seat, the deterministic presider that
-spends one re-poke at a stall and otherwise ends in a needs-human line.
-Nothing is published yet.
+spends one re-poke at a denial-stall and otherwise ends in a needs-human
+line. Nothing is published yet.
 
 ## Layout
 
@@ -112,15 +112,16 @@ always records who accepted" (ADR 0006).
 v0.0.10 adds the presiding half: the **Lead seat** (ADR 0006 §3) — a
 deterministic rider on the Driver's watch, zero model calls of its own, no
 state file (the Ledger is its state). One authority: when a task's last
-ledger event is a denied permission and no Claim follows — a denial-stall —
-it spends the task's one re-poke, a fixed-text message through the daemon's
-own prompt surface, and if the stall persists it writes the `needs_human`
-line the Supervisor relays to the Owner in words at its next turn. Exactly
-one poke per task, enforced plugin-side, never sent into a running turn.
-The live run that closed v0.0.10 also drew the boundary honestly: on lanes
-that never ask (pi has no permission mode; the daemon's antigravity driver
-is full-access by design) the trigger has no surface — the positive arc
-stays unwitnessed until a lane-independent trigger exists (ticket 04).
+ledger event is a denied permit ask, no Claim follows, and a fixed grace has
+elapsed — a denial-stall — it spends the task's one re-poke, a fixed-text
+message through the daemon's own prompt surface, and if the stall persists
+it writes the `needs_human` line the Supervisor relays to the Owner in words
+at its next turn. Exactly one poke per task, enforced plugin-side, never
+sent into a running turn. The live run that closed v0.0.10 also drew the
+boundary honestly: on lanes that never ask (pi has no permission mode; the
+daemon's antigravity driver is full-access by design) the trigger has no
+surface — the positive arc stays unwitnessed until a lane-independent
+trigger exists.
 
 The **Agent** gets one command, `factory-claim --task T1 --sha <commit>`, on its
 PATH automatically. It prints the Verdict, the gate note, and the report path;
