@@ -178,7 +178,7 @@ driver and the choke are not its business (map decision 5). Branch by hand:
     git switch -c live<NN>/<slug>
 
 from main in the real workspace. Landing to main stays a human act
-(ADR 0005).
+(ADR 0006).
 
 Spawn through the trial daemon only — its agents get `factory-claim` on PATH
 via the before-hook (ADR 0004):
