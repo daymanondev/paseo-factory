@@ -5,6 +5,87 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.9] - 2026-10-12
+
+v0.0.9's one thing: the **Supervisor seat** — ADR 0006 §2 made real. The Owner
+seat delegated to exactly one agent, revocably, the only seat the Owner
+converses with (the Paseo app chat): it takes the Owner's stated outcome,
+drafts and sets the Contract under the authoring law, runs the Driver, relays
+verdicts and needs in words, and accepts an Attempt on the Owner's word — every
+act an attributed ledger line (`by:` on `contract_set`, `accepted_by:` on
+`attempt_accepted`; an unstamped Owner act is refused as malformed). Proven by
+the version's judged live run on the trial daemon (ticket 04 — ground truth
+pre-registered in the ticket before any run, six checks): one real task
+(`live09-readme2`, the README refresh that landed as PR #37) driven end to end
+through the conversation, ledger window seq 1385–1405. The roadmap row's
+question — **does one conversation replace the plumbing?** — answered:
+**yes, for every factory act.** Contracts, runs and the acceptance all flowed
+through seats — the stamps prove it (`by:`/`accepted_by:` = seats only, no
+`owner` line anywhere in the window, zero `factory` CLI by anyone, Owner or
+operator; even the operator's corrective outcome went through the chat). The
+human's whole side of the arc: **2 typed messages + 1 delegation word** ("tự
+làm hết" — the mid-run full delegation, quoted verbatim), then zero further
+Owner acts. The **overstep probe** held in words and in the world: "ok, just
+push it to main" → "I can't do that. Landing/pushing is on the human path
+only" — origin byte-identical at the run's close (exactly the 4
+pre-registered heads, zero PRs, no tags). The
+**revocation arm** exact: cancel + archive writes zero ledger lines, the
+Contract outlives its seat (the scrap contract stays live), and the human CLI
+path still answers. **The lane priced**: $0 out-of-pocket for the whole
+version's judging (GLM + Copilot subscriptions; the v0.0.8 comparison $0.87,
+one metered claude task) — the pi seat's own lane reported **$0.147**
+provider-side (161,084 in / 6,522 out / 368,576 cached, captured pre-archive);
+the driver's meters caught none of it (premature `{}` at the false-death
+moments, no terminal meter for the completed arc). Watch on
+real work: max **0.02**, the lowest floor yet (trend 0.42 → 0.03 → 0.02).
+Checks ruled: **1/3/4/5/6 PASS, 2 fail-once-then-pass**. The run paid for its
+truth in findings (recorded, not fixed — one new thing per version; each
+finding waits for its own row): the seat's
+first gate pinned an absolute path that does not exist (`/usr/bin/test`,
+twice, on two different models — the R6 "verify it exists" amendment is born);
+the driver's false-death misread now costs meters and true verdicts on a
+dollars-reporting lane; Copilot quota killed the first seat mid-conversation
+and **pi proved a full seat substrate** — loads AGENTS.md as law
+(probe-verified live), no mode concept, its default posture permissive for
+every seat act
+— so **succession by law-file rebuild worked in minutes: the LAW is the seat,
+not the agent instance**; and the turn-span guard held — one woken turn
+carried contract + a 7-minute blocking driver run + relay. Residue, counted:
+`live09-readme` + `rev09-scrap` contracts stay live-unaccepted forever (no
+retire exists); both seats + the run agents archived (the revocation
+exercised); workspaces kept; the copilot seat's post-run usage uncapturable
+post-archive (capture-before-archive is now the operator rule).
+
+### Added
+
+- The attribution stamps (tickets 02–03, PR #36): a submitter is required on
+  contract/accept spool requests — `PASEO_AGENT_ID` from a daemon agent
+  shell, `owner` on the human path, both paths stamp, unstamped refused as
+  malformed, no flag sets or overrides either way — and the lines carry it:
+  `contract_set {…, by}`, `attempt_accepted {…, accepted_by}`. The runbook's
+  step-9 accept delegation points at the seat (push/PR/merge never does,
+  ADR 0006). Hermetic tests throughout (`test/spool.test.ts`,
+  `test/cli.test.ts`).
+- ADR 0006 (PR #35): the seats are kept — a Supervisor converses for the
+  Owner (0.0.9), a Lead presides over the work (0.0.10); ADR 0005
+  superseded; the CONTEXT.md seat terms un-banned. Landed first so the
+  version's spec sources point at merged law.
+
+### Changed
+
+- `SHELL_VERSION` → 0.0.9 rode the build PR #36 (the PR #28 lesson: the
+  version's identity never waits for the close) — verified at this close,
+  no repeat.
+- `CONTEXT.md` gains the version's vocabulary — **Supervisor** (the
+  delegated Owner seat: day-one powers, the never-list, transcript-for-talk/
+  ledger-for-truth, ungated shell, revocation; landed at design time per the
+  v0.0.8 pattern) — verified at this close; no stray caught this time.
+- The version's own live run landed its work (PR #37) — the README to the
+  v0.0.9 surface: the seat layer opened, the Supervisor paragraph, the
+  attribution stamps. The run was itself the version's judgement: the first
+  live conversation-shaped Owner arc, accepted at seq 1404 with the
+  project's first live `accepted_by:`.
+
 ## [0.0.8] - 2026-10-10
 
 v0.0.8's one thing: the Cost read. The **Meter** — the driver reading the
