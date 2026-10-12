@@ -39,6 +39,16 @@
  * `attempt_accepted` — each the submitting shell's identity ("the Ledger
  * always records who accepted"), so a delegated Owner seat's acts are
  * attributable line by line.
+ * v0.0.10 opens the Lead seat (ADR 0006 §3–§4) with three kinds, all
+ * task-scoped and attempt-less (the stall precedes any Claim — the choke and
+ * spawn lines' own precedent) and all driver-sourced through the spool (the
+ * meter precedent — the one-writer law holds): `repoke_dispatched` /
+ * `repoke_refused` mirror the spawn pair (the plugin judges the Lead's one
+ * spend, one line either way, the dispatch line IS the spent marker), and
+ * `needs_human` is the named end for a stall that survived its re-poke
+ * (ADR 0006 §4's first escalation kind). No `by:` stamp on any of the three:
+ * the v0.0.9 stamps name delegated Owner acts, and the Lead's v1 loop is the
+ * only writer of its kinds — the kind itself is the attribution.
  */
 
 export type Verdict = "red" | "green";
@@ -47,9 +57,9 @@ export type Verdict = "red" | "green";
  * The whole event vocabulary — single source for types and validation. The
  * first eight are the attempt-scoped loop in ledger order; the choke
  * vocabulary (v0.0.4) and the spawn vocabulary (v0.0.5) follow, appended
- * after their host loops; the driver's meter line (v0.0.8) rides beside the
- * spawn events; `retro_written` (v0.0.7) closes as the one factory-level
- * event.
+ * after their host loops; the driver's meter line (v0.0.8) and the Lead's
+ * three lines (v0.0.10) ride beside the spawn events; `retro_written`
+ * (v0.0.7) closes as the one factory-level event.
  */
 export const EVENT_NAMES = [
   "contract_set",
@@ -66,6 +76,9 @@ export const EVENT_NAMES = [
   "spawn_dispatched",
   "spawn_refused",
   "meter_written",
+  "repoke_dispatched",
+  "repoke_refused",
+  "needs_human",
   "retro_written",
 ] as const;
 
@@ -369,6 +382,87 @@ export interface MeterWritten {
 }
 
 /**
+ * The Lead's one act, spent (v0.0.10, ADR 0006 §3): the plugin let the
+ * driver's re-poke request through — the task's Contract exists, is not
+ * accepted, and no earlier `repoke_dispatched` sits in its slice. Exactly
+ * one per task by this validation, structural and not hoped-for: the line
+ * itself is the spent marker, and a driver crash re-reads it, never the
+ * socket. Delivery truth is the timeline's message-id only; no delivery
+ * event exists in v1 — the claim-or-restall outcome is the observable.
+ */
+export interface RepokeDispatched {
+  seq: number;
+  ts: Timestamp;
+  event: "repoke_dispatched";
+  task: string;
+  /** The stalled agent the fixed re-poke text went to — the act names its target. */
+  agent: string;
+}
+
+/**
+ * The plugin refused a driver's re-poke request — one line naming the rule
+ * that fired, mirroring `spawn_refused`: a refused re-poke is a recorded
+ * fact, not a log complaint. The one the design pins is
+ * `repoke:already-spent` (the one-per-task law lives plugin-side — the
+ * driver cannot cheat its own authority), with `repoke:unknown-task`,
+ * `repoke:accepted-task` and `repoke:invalid-request` beside it in the spawn
+ * rules' own order.
+ */
+export interface RepokeRefused {
+  seq: number;
+  ts: Timestamp;
+  event: "repoke_refused";
+  task: string;
+  /** The agent the request named as its target. */
+  agent: string;
+  /** Which re-poke validation fired (e.g. `repoke:already-spent`). */
+  rule: string;
+  /** One line saying what the rule caught. */
+  reason: string;
+}
+
+/** The two ways a stall survives its re-poke — the fixed vocabulary (v0.0.10 §3). */
+export type NeedsHumanReason = "denied-again" | "silent-after-repoke";
+
+/** The vocabulary as a runtime list — the single spelling every validator reads. */
+export const NEEDS_HUMAN_REASONS = ["denied-again", "silent-after-repoke"] as const;
+
+/** The two seqs a `needs_human` line keys its reason on — the denial and the spent `repoke_dispatched`. */
+export interface NeedsHumanEvidence {
+  denial: number;
+  repoke: number;
+}
+
+/** The evidence's shape rule: two ledger seqs, each a positive integer. */
+export function needsHumanEvidenceIsValid(evidence: unknown): evidence is NeedsHumanEvidence {
+  if (typeof evidence !== "object" || evidence === null) return false;
+  const { denial, repoke } = evidence as Record<string, unknown>;
+  return (
+    typeof denial === "number" && Number.isInteger(denial) && denial >= 1 &&
+    typeof repoke === "number" && Number.isInteger(repoke) && repoke >= 1
+  );
+}
+
+/**
+ * The Lead's named end (v0.0.10, ADR 0006 §4 — the first escalation kind):
+ * the task's one re-poke is spent and the stall persisted, either by a new
+ * denial after the poke (`denied-again`) or by silence since it
+ * (`silent-after-repoke`). Terminal for the watch (the task ends `verdict=-`,
+ * exit law unchanged); the Supervisor relays it to the Owner in words at its
+ * next turn, batched at leisure — no push exists in v1. An Owner answer
+ * wakes the task through the ordinary spawn path; only Acceptance closes it.
+ */
+export interface NeedsHuman {
+  seq: number;
+  ts: Timestamp;
+  event: "needs_human";
+  task: string;
+  reason: NeedsHumanReason;
+  /** The seqs the reason keys on: the denial and the spent `repoke_dispatched`. */
+  evidence: NeedsHumanEvidence;
+}
+
+/**
  * The Retro's one line (v0.0.7, ticket 03) — the first factory-level event:
  * no task, no attempt, because the Retro reads the whole ledger, not any
  * task's slice of it. Mirrors `watch_written`'s shape: `model` is the pinned
@@ -411,6 +505,9 @@ export type LedgerEvent =
   | SpawnDispatched
   | SpawnRefused
   | MeterWritten
+  | RepokeDispatched
+  | RepokeRefused
+  | NeedsHuman
   | RetroWritten;
 
 /** What callers hand to Ledger.append — same shape, `seq` and `ts` not yet assigned. */
@@ -429,4 +526,7 @@ export type PendingEvent =
   | Omit<SpawnDispatched, "seq" | "ts">
   | Omit<SpawnRefused, "seq" | "ts">
   | Omit<MeterWritten, "seq" | "ts">
+  | Omit<RepokeDispatched, "seq" | "ts">
+  | Omit<RepokeRefused, "seq" | "ts">
+  | Omit<NeedsHuman, "seq" | "ts">
   | Omit<RetroWritten, "seq" | "ts">;

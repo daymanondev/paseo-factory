@@ -96,8 +96,10 @@ commands:
   status     Print one line per task from the ledger — attempts, last verdict,
              attested sha (short), accepted, last fresh-eyes outcome, and the
              task's choke counts (permit asks allowed / denied, git refusals
-             bound to the task) — plus one trailing retro line when a retro
-             ever ran. A local read; the plugin need not be running.
+             bound to the task) — plus a needs-human key when the Lead ever
+             wrote one (v0.0.10: the glance's needs-human marker), and one
+             trailing retro line when a retro ever ran. A local read; the
+             plugin need not be running.
 
   cost       Print the Cost read over the whole ledger (v0.0.8): one row per
              task — lane, attempts, wall (first spawn → last verdict,
@@ -140,14 +142,15 @@ const submitter = stampedAgent === "" ? "owner" : stampedAgent;
 // src/events.ts because the CLIs import no src/ code (ADR 0004). Kept on one
 // line so test/status.test.ts can guard this copy against drift. Kept in sync
 // with the writer by the same suite, the way test/cli.test.ts guards the spool.
-const EVENT_NAMES = ["contract_set", "claim_reported", "gate_started", "gate_finished", "fresh_eyes_written", "watch_written", "report_written", "attempt_accepted", "permit_allowed", "permit_denied", "git_blocked", "spawn_dispatched", "spawn_refused", "meter_written", "retro_written"];
+const EVENT_NAMES = ["contract_set", "claim_reported", "gate_started", "gate_finished", "fresh_eyes_written", "watch_written", "report_written", "attempt_accepted", "permit_allowed", "permit_denied", "git_blocked", "spawn_dispatched", "spawn_refused", "meter_written", "repoke_dispatched", "repoke_refused", "needs_human", "retro_written"];
 // Events without an Attempt number: contract_set owns the Task, the choke
 // events (v0.0.4) belong to the Task's whole life, git_blocked may carry no
 // task at all (the shim refuses no matter who runs it), the spawn events
 // (v0.0.5) precede any attempt — the plugin records them before an agent
-// exists — meter_written (v0.0.8) spans the task's whole run, and
+// exists — meter_written (v0.0.8) spans the task's whole run, the Lead's
+// three lines (v0.0.10) sit before any Claim like the choke lines do, and
 // retro_written (v0.0.7) is factory-level: no task either.
-const NO_ATTEMPT_EVENTS = new Set(["contract_set", "permit_allowed", "permit_denied", "git_blocked", "spawn_dispatched", "spawn_refused", "meter_written", "retro_written"]);
+const NO_ATTEMPT_EVENTS = new Set(["contract_set", "permit_allowed", "permit_denied", "git_blocked", "spawn_dispatched", "spawn_refused", "meter_written", "repoke_dispatched", "repoke_refused", "needs_human", "retro_written"]);
 
 /**
  * The status reader's shape rule — every event is in the vocabulary above and
@@ -395,12 +398,13 @@ function statusLines(events) {
         if (evt.event === "permit_allowed") counted.allowed += 1;
         else if (evt.event === "permit_denied") counted.denied += 1;
         else if (evt.event === "git_blocked") counted.blocked += 1;
+        else if (evt.event === "needs_human") counted.needsHuman = evt.reason; // the last one on record — the glance's needs-human marker (v0.0.10)
       }
       continue;
     }
     let state = byTask.get(evt.task);
     if (state === undefined) {
-      state = { attempts: 0, verdict: undefined, sha: undefined, eye: undefined, accepted: false, allowed: 0, denied: 0, blocked: 0 };
+      state = { attempts: 0, verdict: undefined, sha: undefined, eye: undefined, accepted: false, allowed: 0, denied: 0, blocked: 0, needsHuman: undefined };
       byTask.set(evt.task, state);
       order.push(evt.task);
     }
@@ -417,7 +421,10 @@ function statusLines(events) {
   }
   const lines = order.map((task) => {
     const s = byTask.get(task);
-    return `${task} attempts=${s.attempts} verdict=${s.verdict ?? "-"} sha=${s.sha ?? "-"} accepted=${s.accepted ? "yes" : "no"} eye=${s.eye ?? "-"} choke=${s.allowed}/${s.denied}/${s.blocked}`;
+    return (
+      `${task} attempts=${s.attempts} verdict=${s.verdict ?? "-"} sha=${s.sha ?? "-"} accepted=${s.accepted ? "yes" : "no"} eye=${s.eye ?? "-"} choke=${s.allowed}/${s.denied}/${s.blocked}` +
+      `${s.needsHuman === undefined ? "" : ` needs-human=${s.needsHuman}`}`
+    );
   });
   if (retro !== undefined) {
     const day = typeof retro.ts === "string" ? retro.ts.slice(0, 10) : "-";

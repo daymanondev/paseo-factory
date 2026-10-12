@@ -430,3 +430,29 @@ test("status reads a ledger with meter lines through — the Cost read's event, 
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, "M1 attempts=0 verdict=- sha=- accepted=no eye=- choke=0/0/0\n", "the meter line counts toward no status field — `factory cost` is its reader");
 });
+
+test("status reads the Lead's lines through — repokes count nothing, needs-human is the glance's own marker (v0.0.10)", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const stateDir = join(dir, "plugin-state", "paseo-factory");
+  writeLedger(stateDir, [
+    contractEvent(1, "LEAD-ST"),
+    { seq: 2, ts, event: "spawn_dispatched", task: "LEAD-ST", provider: "claude", arity: 1 },
+    { seq: 3, ts, event: "permit_denied", task: "LEAD-ST", agent: "ag-1", name: "Bash", kind: "tool", command: "git reset --hard", rule: "policy:S1", reason: "r" },
+    { seq: 4, ts, event: "repoke_dispatched", task: "LEAD-ST", agent: "ag-1" },
+    { seq: 5, ts, event: "needs_human", task: "LEAD-ST", reason: "denied-again", evidence: { denial: 3, repoke: 4 } },
+    contractEvent(6, "LEAD-QUIET"),
+    { seq: 7, ts, event: "spawn_dispatched", task: "LEAD-QUIET", provider: "claude", arity: 1 },
+    { seq: 8, ts, event: "permit_denied", task: "LEAD-QUIET", agent: "ag-2", name: "Bash", kind: "tool", command: "git push --force", rule: "policy:S1", reason: "r" },
+  ]);
+  const result = await run(ownerCli, ["status"], { PASEO_HOME: dir });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(
+    result.stdout,
+    [
+      "LEAD-ST attempts=0 verdict=- sha=- accepted=no eye=- choke=0/1/0 needs-human=denied-again",
+      "LEAD-QUIET attempts=0 verdict=- sha=- accepted=no eye=- choke=0/1/0",
+    ].join("\n") + "\n",
+    "the repoke lines read through; the named end prints once as the task's stuck marker",
+  );
+});

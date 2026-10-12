@@ -322,3 +322,90 @@ test("handleSpoolRequest answers a spawn either way — dispatched rides ok, ref
     "one ledger line per spawn request, either way",
   );
 });
+
+// ---- the Lead's two request kinds (v0.0.10, ticket 03 item 3) ------------------------
+
+test("parseSpoolRequest accepts the repoke and needs_human shapes and nothing around them", () => {
+  assert.deepEqual(parseSpoolRequest({ id: "r1", kind: "repoke", task: "T1", agent: "ag-1" }), { id: "r1", kind: "repoke", task: "T1", agent: "ag-1" });
+  for (const bad of [
+    { id: "r1", kind: "repoke", task: "T1" }, // no agent
+    { id: "r1", kind: "repoke", task: "T1", agent: "  " }, // blank agent
+    { id: "r1", kind: "repoke", agent: "ag-1" }, // no task
+  ]) {
+    assert.equal(parseSpoolRequest(bad), undefined, JSON.stringify(bad));
+  }
+
+  assert.deepEqual(
+    parseSpoolRequest({ id: "r2", kind: "needs_human", task: "T1", reason: "denied-again", evidence: { denial: 3, repoke: 4 } }),
+    { id: "r2", kind: "needs_human", task: "T1", reason: "denied-again", evidence: { denial: 3, repoke: 4 } },
+  );
+  for (const bad of [
+    { id: "r2", kind: "needs_human", task: "T1", reason: "nudged", evidence: { denial: 3, repoke: 4 } }, // off-vocabulary reason
+    { id: "r2", kind: "needs_human", task: "T1", reason: "silent-after-repoke", evidence: { denial: 0, repoke: 4 } }, // seq 0 is not a seq
+    { id: "r2", kind: "needs_human", task: "T1", reason: "silent-after-repoke", evidence: { denial: 3, repoke: 4.5 } }, // fractional seq
+    { id: "r2", kind: "needs_human", task: "T1", reason: "silent-after-repoke" }, // no evidence
+  ]) {
+    assert.equal(parseSpoolRequest(bad), undefined, JSON.stringify(bad));
+  }
+});
+
+test("handleSpoolRequest answers a repoke either way — the spend rides ok, already-spent rides the code, both leave one line", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const ws = join(dir, "ws");
+  mkdirSync(join(ws, "src"), { recursive: true });
+  writeFileSync(join(ws, "src", "x.ts"), "x\n");
+  gitCommitAll(ws);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  factory.setContract({ task: "LEAD-SP", workspace: ws, gate: "true", artifact: "src/x.ts" });
+  const denialSeq = factory.ledger.append({
+    event: "permit_denied",
+    task: "LEAD-SP",
+    agent: "ag-lead",
+    name: "Bash",
+    kind: "tool",
+    command: "git reset --hard",
+    rule: "policy:S1-git-vocabulary",
+    reason: "caught",
+  }).seq;
+
+  const spent = await handleSpoolRequest(factory, { id: "r1", kind: "repoke", task: "LEAD-SP", agent: "ag-lead" });
+  assert.equal(spent.ok, true);
+  if (spent.ok) assert.match(spent.summary, /re-poke dispatched for LEAD-SP/);
+
+  // The structural one-per-task law, answered as a code the driver reports.
+  const again = await handleSpoolRequest(factory, { id: "r2", kind: "repoke", task: "LEAD-SP", agent: "ag-lead" });
+  assert.equal(again.ok, false);
+  if (!again.ok) {
+    assert.equal(again.code, "already-spent");
+    assert.match(again.message, /already spent its one re-poke/);
+  }
+
+  const ghost = await handleSpoolRequest(factory, { id: "r3", kind: "repoke", task: "GHOST", agent: "ag-x" });
+  assert.equal(ghost.ok, false);
+  if (!ghost.ok) assert.equal(ghost.code, "unknown-task");
+
+  assert.deepEqual(
+    factory.ledger.events.filter((e) => e.event === "repoke_dispatched" || e.event === "repoke_refused").map((e) => e.event),
+    ["repoke_dispatched", "repoke_refused", "repoke_refused"],
+    "one ledger line per re-poke request, either way — the spawn pair's law",
+  );
+
+  // The named end over the corroborated spend; a mismatched evidence is a
+  // rejected reply with NO line (the meter's refusal law).
+  const spendLine = factory.ledger.events.find((e) => e.event === "repoke_dispatched");
+  const spendSeq = (spendLine as { seq: number } | undefined)?.seq ?? 0;
+  const named = await handleSpoolRequest(factory, { id: "r4", kind: "needs_human", task: "LEAD-SP", reason: "denied-again", evidence: { denial: denialSeq, repoke: spendSeq } });
+  assert.equal(named.ok, true);
+  if (named.ok) assert.match(named.summary, /needs-human for LEAD-SP: denied-again \(denial seq \d+, repoke seq \d+\)/);
+
+  const mismatch = await handleSpoolRequest(factory, { id: "r5", kind: "needs_human", task: "LEAD-SP", reason: "silent-after-repoke", evidence: { denial: denialSeq, repoke: 999 } });
+  const ghostDenial = await handleSpoolRequest(factory, { id: "r6", kind: "needs_human", task: "LEAD-SP", reason: "silent-after-repoke", evidence: { denial: 999, repoke: spendSeq } });
+  assert.equal(ghostDenial.ok, false);
+  if (!ghostDenial.ok) assert.equal(ghostDenial.code, "invalid-needs-human");
+  assert.equal(mismatch.ok, false);
+  if (!mismatch.ok) {
+    assert.equal(mismatch.code, "invalid-needs-human");
+  }
+  assert.equal(factory.ledger.events.filter((e) => e.event === "needs_human").length, 1, "the refused end wrote no second line");
+});

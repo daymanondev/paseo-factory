@@ -1,6 +1,7 @@
 import { statSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { Ledger, usageIsValid } from "./ledger.ts";
+import { NEEDS_HUMAN_REASONS, needsHumanEvidenceIsValid } from "./events.ts";
 import { runGate } from "./gate.ts";
 import { renderReport } from "./report.ts";
 import { loadEyeConfig, runFreshEyesPass } from "./fresh-eyes.ts";
@@ -10,7 +11,7 @@ import { buildRetroDigest, retroDay, runRetroPass, writtenRetroForDay } from "./
 import type { RetroOutcome } from "./retro.ts";
 import { changesOutsideScope, checkCleanAt, headCommitSync, resolveClaimedCommit } from "./workspace.ts";
 import { FactoryError } from "./errors.ts";
-import type { AttemptAccepted, ContractSet, GateFinished, GitBlocked, LedgerEvent, MeterWritten, MeterUsage, SpawnDispatched, SpawnRefused, Verdict } from "./events.ts";
+import type { AttemptAccepted, ContractSet, GateFinished, GitBlocked, LedgerEvent, MeterWritten, MeterUsage, NeedsHuman, NeedsHumanEvidence, NeedsHumanReason, RepokeDispatched, RepokeRefused, SpawnDispatched, SpawnRefused, Verdict } from "./events.ts";
 import type { GateResult } from "./gate.ts";
 
 /** Task ids become report filenames, so they stay flat and filename-safe. */
@@ -150,6 +151,26 @@ export type SpawnDecision =
   | { outcome: "dispatched"; event: SpawnDispatched }
   | { outcome: "refused"; event: SpawnRefused; code: string };
 
+/**
+ * One re-poke request, judged: dispatched means the Lead's one spend went
+ * through; refused names the rule that fired. Either way exactly one ledger
+ * line exists after this call — the spawn pair's own law, so a refused
+ * re-poke is a recorded fact (v0.0.10, ADR 0006 §3). The one-per-task
+ * authority lives HERE, plugin-side: the dispatch line is the spent marker,
+ * and the driver cannot cheat its own authority by re-asking.
+ */
+export type RepokeDecision =
+  | { outcome: "dispatched"; event: RepokeDispatched }
+  | { outcome: "refused"; event: RepokeRefused; code: string };
+
+/** One needs-human submission (v0.0.10): the stall's named end, evidence seqs attached. */
+export interface NeedsHumanInput {
+  task: string;
+  reason: NeedsHumanReason;
+  /** The seqs the reason keys on: the denial and the spent `repoke_dispatched`. */
+  evidence: NeedsHumanEvidence;
+}
+
 export interface Factory {
   readonly ledger: Ledger;
   readonly stateDir: string;
@@ -196,6 +217,26 @@ export interface Factory {
    * A recorder, never a judge: no budgets, no alerts, verdicts unchanged.
    */
   meter(input: MeterInput): MeterWritten;
+  /**
+   * Judges the Lead's one spend (v0.0.10, ADR 0006 §3): the task must be
+   * known, unaccepted, and carry no earlier `repoke_dispatched` in its slice
+   * — the one-re-poke-per-task law lives here, not in the driver. One ledger
+   * line either way (`repoke_dispatched` or `repoke_refused`, the spawn
+   * pair's law); never throws, the refusal rides the return value. The
+   * stall predicate itself stays driver-side — this is the authority over
+   * the spend, never the trigger.
+   */
+  repoke(task: string, agent: string): RepokeDecision;
+  /**
+   * Records one `needs_human` line (v0.0.10, ADR 0006 §4): the re-poke is
+   * spent and the stall persisted. The meter's own law — a refused
+   * submission (unknown task, malformed shape, evidence that names no spent
+   * re-poke) throws and writes NO line: nothing changed, nothing recorded.
+   * The event is terminal for the watch but not for the task — only
+   * Acceptance closes a task, and an Owner answer wakes it through the
+   * ordinary spawn path.
+   */
+  needsHuman(input: NeedsHumanInput): NeedsHuman;
   /**
    * The live Contract whose workspace contains `cwd`, if any — the choke's
    * mechanical "contracted agent" test (v0.0.4 map decision 5: asks from
@@ -614,6 +655,84 @@ export function createFactory(options: FactoryOptions): Factory {
         usage,
         ...(agent === undefined ? {} : { agent }),
       });
+    },
+
+    repoke(task, agent) {
+      // Two spellings of one refusal on purpose (the requestSpawn precedent):
+      // `code` dash-style for the spool reply, `rule` colon-style for the line.
+      const refuse = (code: string, rule: string, reason: string): RepokeDecision => ({
+        outcome: "refused",
+        code,
+        event: ledger.append({ event: "repoke_refused", task, agent, rule, reason }),
+      });
+      if (typeof agent !== "string" || agent.trim() === "") {
+        return refuse(
+          "invalid-repoke",
+          "repoke:invalid-request",
+          `re-poke for task ${JSON.stringify(task)} is malformed — agent must name the stalled agent the message goes to`,
+        );
+      }
+      if (!TASK_ID_PATTERN.test(task)) {
+        return refuse("invalid-task", "repoke:invalid-task", `task id "${task}" is invalid — use letters, digits, ".", "_", "-"`);
+      }
+      const contract = this.contractFor(task);
+      if (!contract) {
+        return refuse("unknown-task", "repoke:unknown-task", `no contract set for task ${task} — the Lead presides over contracted work only`);
+      }
+      const history = ledger.eventsFor(task);
+      const priorAccept = acceptedAttempt(history);
+      if (priorAccept !== undefined) {
+        return refuse(
+          "already-accepted",
+          "repoke:accepted-task",
+          `task ${task} was already accepted at attempt ${priorAccept.attempt} — the task is closed`,
+        );
+      }
+      // The structural one-per-task law: the dispatch line IS the spent
+      // marker — a second ask names its own refusal, and a driver crash
+      // re-reads this slice rather than trusting any socket.
+      if (history.some((e) => e.event === "repoke_dispatched")) {
+        return refuse(
+          "already-spent",
+          "repoke:already-spent",
+          `task ${task} already spent its one re-poke (its repoke_dispatched line) — the stall's named end is needs_human, not a second poke`,
+        );
+      }
+      return { outcome: "dispatched", event: ledger.append({ event: "repoke_dispatched", task, agent }) };
+    },
+
+    needsHuman({ task, reason, evidence }) {
+      assertTaskId(task);
+      if (!(NEEDS_HUMAN_REASONS as readonly string[]).includes(reason)) {
+        throw new FactoryError("invalid-needs-human", `reason must be one of the fixed vocabulary (${NEEDS_HUMAN_REASONS.join(", ")}), got ${JSON.stringify(reason)}`);
+      }
+      if (!needsHumanEvidenceIsValid(evidence)) {
+        throw new FactoryError(
+          "invalid-needs-human",
+          "evidence must name the denial's seq and the spent repoke_dispatched's seq — two positive integers",
+        );
+      }
+      if (this.contractFor(task) === undefined) {
+        throw new FactoryError("unknown-task", `no contract set for task ${task} — needs_human records a stalled run, and no run was ever contracted`);
+      }
+      // The event attests a SPENT re-poke answering a REAL denial: the
+      // evidence's seqs must be the slice's own lines (the meter precedent —
+      // a recorder refuses what it cannot corroborate, writing no line).
+      const history = ledger.eventsFor(task);
+      const spent = history.findLast((e): e is RepokeDispatched => e.event === "repoke_dispatched");
+      if (spent === undefined || spent.seq !== evidence.repoke) {
+        throw new FactoryError(
+          "invalid-needs-human",
+          `task ${task} has no spent re-poke at seq ${evidence.repoke} — needs_human records a stall that survived its poke, and the ledger does not show one`,
+        );
+      }
+      if (!history.some((e) => e.event === "permit_denied" && e.seq === evidence.denial)) {
+        throw new FactoryError(
+          "invalid-needs-human",
+          `task ${task} has no permit_denied at seq ${evidence.denial} — the evidence names the denial the stall answered`,
+        );
+      }
+      return ledger.append({ event: "needs_human", task, reason, evidence });
     },
 
     liveContractFor(cwd) {

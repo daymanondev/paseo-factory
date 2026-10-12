@@ -17,8 +17,12 @@ Whoever sets a Task's Contract — the human, or an agent the human has explicit
 _Avoid_: reviewer, user
 
 **Supervisor**:
-The Owner seat delegated to exactly one Paseo daemon agent, revocably — the only seat the Owner converses with (the Paseo app chat). Day-one powers, every act an attributed ledger line: take the Owner's stated outcome and draft + set the Contract, run the Driver, relay status and verdicts in words, accept an Attempt on the Owner's word. Never: landing or push, widening scope or budget, accepting without the Owner's word — it is not another project Lead (codex-room §9(a)). Woken by the Owner's message; one turn holds a Driver run, and any fact it acts on is read from the Ledger at act time, never recalled from the conversation transcript — transcript for talk, Ledger for truth. Its shell is ungated (the Choke policy judges contracted Agents only); revocation cancels the turn and archives the agent, returning the acts to the human CLI path. Added in v0.0.9 (ADR 0006).
+The Owner seat delegated to exactly one Paseo daemon agent, revocably — the only seat the Owner converses with (the Paseo app chat). Day-one powers, every act an attributed ledger line: take the Owner's stated outcome and draft + set the Contract, run the Driver, relay status, verdicts and needs-human items in words, accept an Attempt on the Owner's word. Never: landing or push, widening scope or budget, accepting without the Owner's word — it is not another project Lead (codex-room §9(a)). Woken by the Owner's message; one turn holds a Driver run, and any fact it acts on is read from the Ledger at act time, never recalled from the conversation transcript — transcript for talk, Ledger for truth. Its shell is ungated (the Choke policy judges contracted Agents only); revocation cancels the turn and archives the agent, returning the acts to the human CLI path. Added in v0.0.9 (ADR 0006).
 _Avoid_: manager, orchestrator, assistant (and Driver — a mechanism, not a seat)
+
+**Lead**:
+The presiding technical seat over Agents — the seat that acts when an Agent stalls rather than letting the stall end in silence. Day one (v0.0.10, ADR 0006) is a deterministic rider on the Driver's watch: it reads the Ledger, spends the Task's one re-poke at a denial-stall, and writes needs-human when the poke is spent and the stall persists. Zero model calls of its own; it never grants a permission (only the Choke judges asks), never sets Contracts, never Accepts. Judgment (rulings on stuck work) and acceptance-among-agents grow into the seat when the corpus demands it.
+_Avoid_: manager, foreman, orchestrator, "the loop" (that names the mechanism), Driver (a mechanism, not a seat)
 
 ### Work and criteria
 
@@ -143,8 +147,20 @@ Starting a contracted Task's Agent: a `spawn` request through the spool, validat
 _Avoid_: launch, fork, dispatch (that names the happy ledger line)
 
 **Driver**:
-`factory run <task>… --provider <p[/m]>` — the command that takes explicit task ids, creates each task's branch, spawns each Agent (through the spool) and watches to verdict, printing each task's verdict at its own terminal moment and exiting 0 only when every task ran green with zero refusals. It never sets Contracts and never Accepts; it stops at verdicts. Added in v0.0.5.
+`factory run <task>… --provider <p[/m]>` — the command that takes explicit task ids, creates each task's branch, spawns each Agent (through the spool) and watches to verdict, printing each task's verdict at its own terminal moment and exiting 0 only when every task ran green with zero refusals. It never sets Contracts and never Accepts; it stops at verdicts. Since v0.0.10 its watch loop carries the Lead's stall predicate as a rider (the announced path to a standing plugin loop); carrying a seat's act does not make it one. Added in v0.0.5.
 _Avoid_: orchestrator, runner, supervisor, lead (those are seats, ADR 0006 — the Driver is neither)
+
+**Denial-stall**:
+A Task whose Agent's turn ended at a denied permit ask: the last thing the Ledger shows for the Task is a denial, no Claim after it, and a fixed grace has elapsed. The Lead's only trigger. Distinct from spawn-then-silence, where nothing at all follows the spawn — substrate death, not a chokee's stall.
+_Avoid_: stuck (too broad), blocked, hung
+
+**Re-poke**:
+The Lead's one act: a fixed-text message to a stalled Agent — continue by a route that needs no denied permission and make your Claim, or end the turn stating what you need from the Owner. Exactly one per Task, enforced where requests land, not hoped for; never sent into a running turn or over a pending ask.
+_Avoid_: nudge, retry, wake (richer machinery's word), reminder
+
+**Needs-human**:
+The Ledger event the Lead writes when its re-poke is spent and the Task still stalls — the factory's named end for what would otherwise be silence. The Supervisor relays it to the Owner in words at its next turn, at leisure; an Owner answer wakes the Task through the ordinary spawn path (only Acceptance closes a Task).
+_Avoid_: alert, escalation ticket, incident (a different kind, its own later writer)
 
 **Parallel run**:
 The Driver running more than one contracted Task at once: the number of task ids on the invocation is the ceiling, every Task works in its own Workspace, and a scope is mandatory — an unscoped Contract is refused at Spawn when two or more tasks are requested. Added in v0.0.5.
