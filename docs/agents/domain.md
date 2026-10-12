@@ -19,6 +19,10 @@ This repo is **single-context**:
 ├── docs/adr/
 │   ├── 0001-<decision-slug>.md
 │   └── ...
+├── plugin/
+│   ├── bin/     # factory CLIs
+│   └── server/  # daemon-side core
+├── scripts/     # batteries, helpers
 └── src/
 ```
 
