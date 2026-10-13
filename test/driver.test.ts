@@ -346,12 +346,18 @@ const growingTimeline = (): (() => Record<string, unknown>) => {
     return { requestId: "r", entries: [{ seqEnd }] };
   };
 };
+// The live daemon (0.11) resolves the timeline's failure as an `error` field
+// on the response — not an rpc_error envelope. This is the shape the v0.0.11
+// judged run witnessed on arm B's delete (ticket 03's central finding): the
+// ticket-02 tests pinned the thrown envelope below, and the fast door they
+// proved green was unreachable live. The payload seam is the live seam.
+const payloadErrorTimeline = (message: string) => (): Record<string, unknown> => ({ requestId: "r", error: message });
+const notFoundTimeline = () => payloadErrorTimeline("Agent not found: ag-lead1");
 const rpcErrorTimeline = (message: string) => (): Record<string, unknown> => {
   const err = new Error(message) as Error & { rpc: boolean };
   err.rpc = true;
   throw err;
 };
-const notFoundTimeline = () => rpcErrorTimeline("Agent not found");
 
 async function leadHarness(
   t: TestContext,
@@ -383,7 +389,7 @@ async function leadHarness(
         return { requestId: "r", agent: respond() };
       }
       if (message.type === "fetch_agent_timeline_request") {
-        return timeline(); // the oracle's shapes: answers, or throws the not-found rpc error
+        return timeline(); // the oracle's shapes: answers, or the error-named payload the live daemon resolves
       }
       if (message.type === "send_agent_message_request") return { requestId: "r", accepted: true, error: null };
       return { requestId: "r" };
@@ -592,7 +598,7 @@ test("the slow door: null snapshots, a timeline that answers but never grows pas
   }
 });
 
-test("the fast door opens only on the not-found answer: another rpc error never kills, and the ledger finish still runs", async (t) => {
+test("the fast door opens only on the not-found answer: another rpc error never kills, and the ledger finish still runs (the thrown rpc_error envelope)", async (t) => {
   const harness = await leadHarness(t, () => null, rpcErrorTimeline("daemon exploded"));
   try {
     const logs: string[] = [];
@@ -615,7 +621,30 @@ test("the fast door opens only on the not-found answer: another rpc error never 
   }
 });
 
-test("the fast door: the timeline's own not-found answer at zero ledger life is substrate death, the daemon's words verbatim", async (t) => {
+test("the fast door opens only on the not-found answer: an error-named PAYLOAD never kills either — the live daemon's failure shape, logged and retried (the judged run's central finding)", async (t) => {
+  const harness = await leadHarness(t, () => null, payloadErrorTimeline("daemon exploded"));
+  try {
+    const logs: string[] = [];
+    const terminals: { fate?: string; reason?: string }[] = [];
+    const run = observeTasks(harness.rpc, [{ task: "LEAD1", agentId: "ag-lead1" }], {
+      pollMs: 10,
+      stateDir: harness.stateDir,
+      spoolRoot: harness.spoolRoot,
+      log: (message) => logs.push(message),
+      onTerminal: (entry) => {
+        terminals.push({ ...(entry.terminal as { fate?: string; reason?: string }) });
+      },
+    });
+    setTimeout(() => harness.claimGreen(), 120);
+    await run;
+    assert.deepEqual(terminals.map((x) => x.fate), ["finished"], "a resolved error payload defers the death question exactly like the envelope — never a death, never folded as no-growth");
+    assert.ok(logs.some((m) => /timeline read failed \(daemon exploded\) — retrying next poll/.test(m)), "the odd answer is visible in the log, retried every poll");
+  } finally {
+    harness.stop();
+  }
+});
+
+test("the fast door: the timeline's own not-found answer at zero ledger life is substrate death, the daemon's words verbatim — through the RESOLVED payload the live daemon sends", async (t) => {
   const harness = await leadHarness(t, () => null, notFoundTimeline());
   try {
     const terminals: { fate?: string; reason?: string }[] = [];
@@ -630,7 +659,7 @@ test("the fast door: the timeline's own not-found answer at zero ledger life is 
     });
     assert.equal(terminals.length, 1, "the door is immediate — no window is waited out");
     assert.equal(terminals[0].fate, "died");
-    assert.match(terminals[0].reason ?? "", /Agent not found — substrate death \(the fast door: the timeline's own answer\)/);
+    assert.match(terminals[0].reason ?? "", /Agent not found: ag-lead1 — substrate death \(the fast door: the timeline's own answer\)/);
     assert.deepEqual(harness.processedKinds(), [], "no Lead act fires — the probe's bogus-UUID shape, nothing to answer");
   } finally {
     harness.stop();
