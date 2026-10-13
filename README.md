@@ -11,8 +11,8 @@ claims the task is finished at a specific commit, and the factory — never the
 agent — runs the gate and records every step in an append-only ledger it
 cannot edit. A green verdict is evidence, not acceptance.
 
-**Status: v0.0.10, pre-release.** The pure verification core is complete and
-tested (260 tests); the plugin loads on a Paseo 0.10 daemon, owns the ledger
+**Status: v0.0.11, pre-release.** The pure verification core is complete and
+tested (266 tests); the plugin loads on a Paseo 0.10 daemon, owns the ledger
 and the gate as the single writer (ADR 0004), and serves the whole loop over a
 file spool: the Owner's `factory` CLI sets Contracts and accepts green
 Attempts, the Agent's `factory-claim` CLI submits Claims (it rides every
@@ -24,7 +24,8 @@ read backed by the Meter, and the seat layer (ADR 0006) is open: v0.0.9's
 Supervisor seat — the delegated Owner conversation, every act stamped by who
 submitted it — and v0.0.10's Lead seat, the deterministic presider that
 spends one re-poke at a denial-stall and otherwise ends in a needs-human
-line. Nothing is published yet.
+line. v0.0.11 grounds death itself in the daemon's own timeline (ADR 0007,
+the two doors). Nothing is published yet.
 
 ## Layout
 
@@ -122,6 +123,26 @@ boundary honestly: on lanes that never ask (pi has no permission mode; the
 daemon's antigravity driver is full-access by design) the trigger has no
 surface — the positive arc stays unwitnessed until a lane-independent
 trigger exists.
+
+v0.0.11 answers the hardest question a watch can ask — *is the agent still
+alive?* — from the substrate's own record. A null agent-fetch on daemon 0.11
+is an empty signal (it answers null for a closed agent, an idle one, and a
+never-existed UUID alike), so the driver's null lane reads the daemon
+timeline as the death oracle (ADR 0007), and death has two doors: the
+timeline's own **"Agent not found"** answer — the fast door, opened live
+5.5 s after a mid-run `paseo agent delete` — and an answering timeline whose
+`seqEnd` has not grown for a fixed 120 s — the slow door, the bound's meaning
+changed from "zero ledger life" to "no life signal" (healthy ask-less work
+streams timeline items continuously). Post-spawn ledger life survives as
+defense-in-depth only: a not-found the ledger contradicts is a state the
+watch survives, not a death. The version's judged run is the row's witness
+both ways: its healthy arm survived a 399.9 s ask-less span on timeline
+growth (3.3× the bound) with the meter landing after the claim, and its
+planted-delete arm exposed the build's one lie — the fast door could not
+open live (the daemon resolves the not-found as a payload error, not an rpc
+error; every true fast-door death landed 120 s late wearing the slow door's
+words) — the fix rides the version, witnessed live by the door's own words
+at the first poll past the delete.
 
 The **Agent** gets one command, `factory-claim --task T1 --sha <commit>`, on its
 PATH automatically. It prints the Verdict, the gate note, and the report path;
