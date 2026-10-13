@@ -32,11 +32,14 @@
  *   Lead's denial-stall predicate as a rider — the announced path to a
  *   standing plugin loop. Zero model calls: the predicate is ledger
  *   arithmetic, the re-poke is fixed text, `needs_human` is a recorded fact.
- *   Riding the same branches sits the death fix (the v0.0.10 design's named
- *   enabling fix, ticket 02 §5): a persisting null fetch graduates to death
- *   ONLY at zero post-spawn ledger evidence of life — with evidence (an
- *   ask, a denial, a claim) the watch continues on the ledger predicate,
- *   and no meter is submitted at a death the ledger contradicts.
+ *   Riding the same branches sits the death classifier (v0.0.11, ADR 0007):
+ *   the null fetch is an empty signal, so the null lane reads the daemon
+ *   timeline — the death oracle. Two doors: the timeline's own error answer
+ *   ("Agent not found") is the fast door; an answering timeline whose
+ *   `seqEnd` never grows for the bound is the slow door. Post-spawn ledger
+ *   life stays defense-in-depth on the fast door only — contradicted, the
+ *   watch survives on the ledger predicate, and no meter is submitted at a
+ *   death the ledger contradicts.
  *
  * Plain .mjs like its siblings: the daemon's node may lack TypeScript
  * stripping, and CLIs import no plugin server code (ADR 0004).
@@ -54,8 +57,13 @@ export const POLL_MS = 5_000;
 export const STAGGER_MS = 3_000;
 /** Stall is report-only: status `running` with no timeline growth (or an ask parked this long) warns once. */
 export const STALL_WARN_MS = 10 * 60_000;
-/** A fetch that answers `agent: null` for this long after create is a death — 0.11 answers unready agents with null, not an error. */
-export const AGENT_MISSING_DEAD_MS = 2 * 60_000;
+/**
+ * The slow door's bound (ADR 0007): a timeline that answers but shows no
+ * `seqEnd` growth for this long is a death — healthy ask-less work streams
+ * timeline items continuously, so this much stillness is true death. Fixed
+ * in code, never configuration.
+ */
+export const ZERO_GROWTH_DEAD_MS = 2 * 60_000;
 /**
  * The Lead's denial-stall grace (v0.0.10 design §1): how long after a denial
  * the predicate waits before calling the stall — the denial ends the turn
@@ -558,13 +566,14 @@ function lastSpawnSeq(events, task) {
 }
 
 /**
- * Post-spawn evidence of life (the death fix, v0.0.10 design §5): any task
- * event after THIS run's `spawn_dispatched` that is not the driver's or the
- * Lead's own writing — an ask, a denial, a claim. Spawn-then-silence (zero
- * such events) is substrate death and keeps today's 120 s null-death, meter
- * included; with evidence, the null fetch is contradicted and the watch
- * continues on the ledger predicate instead. `spawn_refused` is excluded
- * alongside: a refused re-invocation is the operator's act, not agent life.
+ * Post-spawn evidence of life — demoted to defense-in-depth by ADR 0007 §4:
+ * any task event after THIS run's `spawn_dispatched` that is not the
+ * driver's or the Lead's own writing — an ask, a denial, a claim. Death no
+ * longer reads it (the timeline oracle owns that); it survives at exactly
+ * one place: a timeline not-found contradicted by ledger life is a state
+ * the watch survives on the ledger predicate, not a death. `spawn_refused`
+ * is excluded alongside: a refused re-invocation is the operator's act, not
+ * agent life.
  */
 export function postSpawnLife(events, task) {
   const spawnSeq = lastSpawnSeq(events, task);
@@ -698,15 +707,19 @@ export function agentFate(agent) {
  * one re-fetch riding along below.
  *
  * Since v0.0.10 the loop carries the Lead rider in both of its branches
- * (the design §1's two insertions): a null-fetch answer is weighed against
- * the ledger (the death fix — with post-spawn life the watch continues on
- * the ledger predicate and the Lead acts there), and a `finished`
- * classification is intercepted when the ledger shows a stall the Lead
- * still owes an answer (poke, needs-human, or a pending window). `stateDir`
- * and `spoolRoot` are the rider's surfaces: the ledger is the predicate's
- * only input, and both Lead acts are spool submissions.
+ * (the design §1's two insertions): the null lane routes through the death
+ * oracle before its ledger predicate runs, and a `finished` classification
+ * is intercepted when the ledger shows a stall the Lead still owes an
+ * answer (poke, needs-human, or a pending window). Since v0.0.11 (ADR 0007)
+ * the null lane's first act is the timeline read: the fast door (its error
+ * answer, defended by post-spawn ledger life) and the slow door (no
+ * `seqEnd` growth for the bound) are the only deaths; every surviving tick
+ * continues on the ledger predicate — the Lead rider and the verdict
+ * finish, the v0.0.10 witnessed shape. `stateDir` and `spoolRoot` are the
+ * rider's surfaces: the ledger is the predicate's only input, and both Lead
+ * acts are spool submissions.
  */
-export async function observeTasks(rpc, entries, { pollMs = POLL_MS, log = () => {}, onTerminal = () => {}, stateDir, spoolRoot, missingDeadMs = AGENT_MISSING_DEAD_MS, graceMs = GRACE_MS, reStallMs = RE_STALL_MS } = {}) {
+export async function observeTasks(rpc, entries, { pollMs = POLL_MS, log = () => {}, onTerminal = () => {}, stateDir, spoolRoot, missingDeadMs = ZERO_GROWTH_DEAD_MS, graceMs = GRACE_MS, reStallMs = RE_STALL_MS } = {}) {
   const commitTerminal = async (entry, fate, snapshot) => {
     entry.terminal = fate;
     await captureUsage(rpc, entry, snapshot);
@@ -732,6 +745,24 @@ export async function observeTasks(rpc, entries, { pollMs = POLL_MS, log = () =>
     }
     return lead.act === "watch" ? "hold" : "clear";
   };
+  /**
+   * The null lane's ledger continuation — v0.0.10's witnessed shape, kept
+   * whole (ADR 0007 §4): the Lead rider over the task's slice, and on clear
+   * this run's verdict as the finish signal. Shared by both null-lane
+   * branches that survive the oracle: the answering timeline (where an
+   * empty ledger makes both steps no-ops — spawn-then-silence with growth
+   * is healthy ask-less work) and the not-found contradicted by post-spawn
+   * ledger life.
+   */
+  const continueOnLedger = async (entry, events) => {
+    const outcome = await runLead(entry, events, undefined);
+    if (outcome !== "clear") return;
+    const verdict = verdictOfThisRun(events, entry.task);
+    if (verdict !== undefined) {
+      log(`factory: ${entry.task} verdict on the ledger (the snapshot lane stayed null) — attempt ${verdict.attempt} ${verdict.verdict}`);
+      await commitTerminal(entry, { fate: "finished" }, undefined);
+    }
+  };
   for (const entry of entries) {
     entry.terminal = undefined;
     entry.printedStatus = undefined;
@@ -750,34 +781,63 @@ export async function observeTasks(rpc, entries, { pollMs = POLL_MS, log = () =>
         const payload = await rpc.request({ type: "fetch_agent_request", agentId: entry.agentId }, { responseType: "fetch_agent_response" });
         if (payload.error !== undefined && payload.error !== null) throw rpcError(payload.error);
         if (payload.agent === null || payload.agent === undefined) {
-          // Daemon 0.11 answers a single-agent fetch with null while the agent
-          // is mid-run (and right after create — a registration race). The
+          // Daemon 0.11 answers a single-agent fetch with null for a closed
+          // agent, an idle one, and a never-existed UUID alike — the null is
+          // an empty signal (ADR 0007's probe), so before any death
+          // arithmetic the lane reads the timeline: the death oracle. The
           // agents-list RPC that would disambiguate is not answered on the
-          // session socket (verified live: the request is silently dropped),
-          // so the ledger is consulted instead (the death fix, v0.0.10 §5):
-          // with post-spawn evidence of life the null is contradicted — the
-          // watch continues on the Lead's ledger predicate, no death and no
-          // meter at a death the ledger contradicts. Only a null persisting
-          // at ZERO evidence is substrate death: waited out to
-          // missingDeadMs, then called honestly, meter included.
+          // session socket (verified live: silently dropped).
           const events = readDriverLedger(stateDir);
-          if (postSpawnLife(events, entry.task)) {
-            entry.missingSince = undefined;
-            const outcome = await runLead(entry, events, undefined);
-            if (outcome !== "clear") continue;
-            // clear: the null lane's finish signal — this run's verdict, from
-            // the ledger (the watch that survived to witness the claim).
-            const verdict = verdictOfThisRun(events, entry.task);
-            if (verdict !== undefined) {
-              log(`factory: ${entry.task} verdict on the ledger (the snapshot lane stayed null) — attempt ${verdict.attempt} ${verdict.verdict}`);
-              await commitTerminal(entry, { fate: "finished" }, undefined);
+          let timeline;
+          try {
+            timeline = await rpc.request(
+              { type: "fetch_agent_timeline_request", agentId: entry.agentId, direction: "tail", limit: 5 },
+              { responseType: "fetch_agent_timeline_response" },
+            );
+          } catch (err) {
+            if (err.rpc !== true) {
+              // Transport trouble, not a daemon answer — transient, never a
+              // verdict; the next tick retries.
+              log(`factory: ${entry.task} timeline read failed (${err.message}) — retrying next poll`);
+              continue;
             }
-            continue;
+            // The daemon answered about the timeline and the answer is an
+            // error — the fast door, unless the ledger contradicts it
+            // (defense-in-depth, ADR 0007 §4): post-spawn ledger life
+            // against a not-found timeline is a state the watch survives on
+            // the ledger predicate, not a death.
+            if (postSpawnLife(events, entry.task)) {
+              entry.missingSince = undefined;
+              await continueOnLedger(entry, events);
+              continue;
+            }
+            throw rpcError(`${err.message} — substrate death (the fast door: the timeline's own answer)`);
           }
-          if (entry.missingSince === undefined) {
-            entry.missingSince = Date.now();
-          } else if (Date.now() - entry.missingSince > missingDeadMs) {
-            throw rpcError("agent not found — the daemon no longer has its record, and the ledger shows no life since the spawn (substrate death)");
+          // The timeline answers: the agent exists, and its growth is the
+          // life signal. The same max-seqEnd tracker stallWatch keeps, so a
+          // flapping snapshot lane cannot split the record.
+          let seq = entry.timelineSeq;
+          for (const item of Array.isArray(timeline.entries) ? timeline.entries : []) {
+            if (typeof item.seqEnd === "number" && item.seqEnd > seq) seq = item.seqEnd;
+          }
+          const grew = seq !== entry.timelineSeq;
+          if (grew) {
+            entry.timelineSeq = seq;
+            entry.missingSince = undefined;
+          }
+          await continueOnLedger(entry, events);
+          if (entry.terminal !== undefined) continue;
+          if (!grew) {
+            const now = Date.now();
+            if (entry.missingSince === undefined) {
+              entry.missingSince = now;
+            } else if (now - entry.missingSince > missingDeadMs) {
+              // The slow door: an existing agent whose life signal went
+              // silent for the bound — death, called honestly, meter
+              // included (the rider above may already have ended the task,
+              // which is what the terminal check protects).
+              throw rpcError(`no timeline growth for ${Math.round((now - entry.missingSince) / 1000)}s — substrate death (the slow door)`);
+            }
           }
           continue;
         }
@@ -785,9 +845,11 @@ export async function observeTasks(rpc, entries, { pollMs = POLL_MS, log = () =>
         snapshot = payload.agent;
       } catch (err) {
         if (err.rpc === true) {
-          // The daemon answered: the agent is gone. That is a death, reported.
-          // No snapshot ever arrived, so the meter's capture is the honest
-          // empty one — the lane reported nothing to a dead agent's poll.
+          // The daemon answered and the answer is death: the snapshot lane's
+          // own error answer, or one of the null lane's two doors thrown
+          // above. No snapshot ever arrived, so the meter's capture is the
+          // honest empty one — the lane reported nothing to a dead agent's
+          // poll.
           entry.terminal = { fate: "died", reason: err.message };
           await onTerminal(entry);
           continue;

@@ -7,7 +7,8 @@
 export declare const POLL_MS: number;
 export declare const STAGGER_MS: number;
 export declare const STALL_WARN_MS: number;
-export declare const AGENT_MISSING_DEAD_MS: number;
+/** The slow door's bound (ADR 0007): no timeline `seqEnd` growth for this long is a death — fixed in code, never configuration. */
+export declare const ZERO_GROWTH_DEAD_MS: number;
 /** The Lead's denial-stall grace (v0.0.10): fixed in code, never configuration. */
 export declare const GRACE_MS: number;
 /** How long a spent re-poke stays answerable before `needs_human` (v0.0.10). */
@@ -85,7 +86,7 @@ export declare function leadDecision(
   now?: number,
   windows?: { graceMs?: number; reStallMs?: number },
 ): LeadDecision;
-/** Post-spawn evidence of life (the death fix): any task event after this run's spawn that is not the driver's or the Lead's own writing. */
+/** Post-spawn evidence of life — defense-in-depth on the fast door only (ADR 0007 §4): any task event after this run's spawn that is not the driver's or the Lead's own writing. */
 export declare function postSpawnLife(events: readonly Record<string, unknown>[], task: string): boolean;
 /** This run's `gate_finished`, if the ledger already holds one — the null lane's finish signal. */
 export declare function verdictOfThisRun(events: readonly Record<string, unknown>[], task: string): Record<string, unknown> | undefined;
@@ -123,7 +124,7 @@ export declare function observeTasks(
     /** The Lead rider's surfaces (v0.0.10): the ledger its predicate reads, the spool its two acts submit through. */
     stateDir: string;
     spoolRoot: string;
-    /** Test knobs (defaults are the fixed laws: AGENT_MISSING_DEAD_MS, GRACE_MS, RE_STALL_MS). */
+    /** Test knobs (defaults are the fixed laws: ZERO_GROWTH_DEAD_MS, GRACE_MS, RE_STALL_MS). */
     missingDeadMs?: number;
     graceMs?: number;
     reStallMs?: number;

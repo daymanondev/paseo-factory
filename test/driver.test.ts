@@ -328,13 +328,36 @@ test("postSpawnLife and verdictOfThisRun — the death fix's ledger arithmetic a
  * The loop-wiring harness (v0.0.10): a fake snapshot lane over the REAL
  * spool and factory, so the Lead's two acts run through the plugin's own
  * request handling — the one-spend law and the needs-human line are proven
- * at the protocol, never mocked. The fake rpc answers fetch/send from a
- * `respond` callback the test mutates; the ledger evolves by direct appends
- * at the seams the live system would fill (the choke's denial, the agent's
- * claim). The window knobs (graceMs, reStallMs, missingDeadMs) are the
- * loop's test seams — the code defaults are the fixed laws.
+ * at the protocol, never mocked. The fake rpc answers fetch/send from
+ * `respond`/`timeline` callbacks the test mutates; `timeline` is the death
+ * oracle's seam (v0.0.11): the probe's three shapes — answering-parked,
+ * answering-growing, or the not-found rpc error. The ledger evolves by
+ * direct appends at the seams the live system would fill (the choke's
+ * denial, the agent's claim). The window knobs (graceMs, reStallMs,
+ * missingDeadMs) are the loop's test seams — the code defaults are the
+ * fixed laws.
  */
-async function leadHarness(t: TestContext, respond: () => Record<string, unknown> | null) {
+const stillTimeline = (seqEnd = 45) => (): Record<string, unknown> => ({ requestId: "r", entries: [{ seqEnd }] });
+const growingTimeline = (): (() => Record<string, unknown>) => {
+  let seqEnd = 44;
+  return () => {
+    seqEnd += 1;
+    return { requestId: "r", entries: [{ seqEnd }] };
+  };
+};
+const notFoundTimeline = (): (() => Record<string, unknown>) => {
+  return () => {
+    const err = new Error("Agent not found") as Error & { rpc: boolean };
+    err.rpc = true;
+    throw err;
+  };
+};
+
+async function leadHarness(
+  t: TestContext,
+  respond: () => Record<string, unknown> | null,
+  timeline: () => Record<string, unknown> = stillTimeline(),
+) {
   const dir = makeTempDir("paseo-factory-lead-");
   disposeDir(t, dir);
   const workspace = join(dir, "ws");
@@ -358,6 +381,9 @@ async function leadHarness(t: TestContext, respond: () => Record<string, unknown
       if (message.type === "fetch_agent_request") {
         fetches += 1;
         return { requestId: "r", agent: respond() };
+      }
+      if (message.type === "fetch_agent_timeline_request") {
+        return timeline(); // the oracle's shapes: answers, or throws the not-found rpc error
       }
       if (message.type === "send_agent_message_request") return { requestId: "r", accepted: true, error: null };
       return { requestId: "r" };
@@ -441,7 +467,7 @@ test("the amended finished-pin: idle + prompt-consumed + no-pending with a ledge
 });
 
 test("the needs-human terminal (null lane, denied-again): a second denial after the spent poke ends the watch with its evidence on the ledger", async (t) => {
-  const harness = await leadHarness(t, () => null);
+  const harness = await leadHarness(t, () => null, growingTimeline());
   try {
     harness.denial("caught");
     const terminals: { fate?: string; reason?: string }[] = [];
@@ -450,7 +476,7 @@ test("the needs-human terminal (null lane, denied-again): a second denial after 
       stateDir: harness.stateDir,
       spoolRoot: harness.spoolRoot,
       graceMs: 10,
-      missingDeadMs: 60, // life is present — the death must stay disarmed
+      missingDeadMs: 60, // the timeline grows — the life signal keeps the slow door shut
       log: () => {},
       onTerminal: (entry) => {
         terminals.push({ ...(entry.terminal as { fate?: string; reason?: string }) });
@@ -458,7 +484,7 @@ test("the needs-human terminal (null lane, denied-again): a second denial after 
     });
 
     await until_(() => assert.ok(harness.factory.ledger.events.some((e) => e.event === "repoke_dispatched")), 5000);
-    assert.equal(terminals.length, 0, "the watch survives the null lane — the death fix disarmed it (missingDeadMs=60 and many ticks in)");
+    assert.equal(terminals.length, 0, "the watch survives the null lane — growth is the life signal and the denial is the Lead's to answer (missingDeadMs=60 and many ticks in)");
     // The agent re-attempts the denied act: a second denial after the spend.
     harness.denial("caught again");
     await run;
@@ -509,7 +535,7 @@ test("the needs-human terminal (null lane, silent-after-repoke): silence since t
 });
 
 test("the null lane's finish signal: after the poke, a claim on the ledger ends the task green (the readme2 arc)", async (t) => {
-  const harness = await leadHarness(t, () => null);
+  const harness = await leadHarness(t, () => null, growingTimeline());
   try {
     harness.denial("caught");
     const terminals: { fate?: string }[] = [];
@@ -532,8 +558,8 @@ test("the null lane's finish signal: after the poke, a claim on the ledger ends 
   }
 });
 
-test("the death rule: a persisting null at ZERO post-spawn life is substrate death, meter included; the Lead never fires", async (t) => {
-  const harness = await leadHarness(t, () => null);
+test("the slow door: null snapshots, a timeline that answers but never grows past the bound is substrate death, meter's ride included; the Lead never fires", async (t) => {
+  const harness = await leadHarness(t, () => null, stillTimeline(45));
   try {
     const terminals: { fate?: string; reason?: string }[] = [];
     await observeTasks(harness.rpc, [{ task: "LEAD1", agentId: "ag-lead1" }], {
@@ -546,11 +572,125 @@ test("the death rule: a persisting null at ZERO post-spawn life is substrate dea
         terminals.push({ ...(entry.terminal as { fate?: string; reason?: string }) });
       },
     });
-    assert.equal(terminals.length, 1);
+    assert.equal(terminals.length, 1, "onTerminal fired exactly once — the meter's ride to its terminal");
     assert.equal(terminals[0].fate, "died");
-    assert.match(terminals[0].reason ?? "", /substrate death/);
+    assert.match(terminals[0].reason ?? "", /no timeline growth for \d+s — substrate death \(the slow door\)/);
     assert.deepEqual(harness.processedKinds(), [], "no Lead act ever fires — the meter is runDriver's terminal callback (its own pinned behavior: death meters included)");
     assert.equal(harness.factory.ledger.events.filter((e) => e.event === "repoke_dispatched").length, 0, "no denial evidence, no poke — visible-but-unactionable");
+  } finally {
+    harness.stop();
+  }
+});
+
+test("the fast door: the timeline's own not-found answer at zero ledger life is substrate death, the daemon's words verbatim", async (t) => {
+  const harness = await leadHarness(t, () => null, notFoundTimeline());
+  try {
+    const terminals: { fate?: string; reason?: string }[] = [];
+    await observeTasks(harness.rpc, [{ task: "LEAD1", agentId: "ag-lead1" }], {
+      pollMs: 10,
+      stateDir: harness.stateDir,
+      spoolRoot: harness.spoolRoot,
+      log: () => {},
+      onTerminal: (entry) => {
+        terminals.push({ ...(entry.terminal as { fate?: string; reason?: string }) });
+      },
+    });
+    assert.equal(terminals.length, 1, "the door is immediate — no window is waited out");
+    assert.equal(terminals[0].fate, "died");
+    assert.match(terminals[0].reason ?? "", /Agent not found — substrate death \(the fast door: the timeline's own answer\)/);
+    assert.deepEqual(harness.processedKinds(), [], "no Lead act fires — the probe's bogus-UUID shape, nothing to answer");
+  } finally {
+    harness.stop();
+  }
+});
+
+test("the contradiction (defense-in-depth, ADR 0007 §4): timeline not-found BUT post-spawn ledger life — the watch survives on the ledger predicate, v0.0.10's arc whole", async (t) => {
+  const harness = await leadHarness(t, () => null, notFoundTimeline());
+  try {
+    harness.denial("caught");
+    const terminals: { fate?: string; reason?: string }[] = [];
+    const run = observeTasks(harness.rpc, [{ task: "LEAD1", agentId: "ag-lead1" }], {
+      pollMs: 10,
+      stateDir: harness.stateDir,
+      spoolRoot: harness.spoolRoot,
+      graceMs: 10,
+      missingDeadMs: 60, // the fast door never opens while the ledger contradicts it — the bound is moot
+      log: () => {},
+      onTerminal: (entry) => {
+        terminals.push({ ...(entry.terminal as { fate?: string; reason?: string }) });
+      },
+    });
+    await until_(() => assert.ok(harness.factory.ledger.events.some((e) => e.event === "repoke_dispatched")), 5000);
+    assert.equal(terminals.length, 0, "not-found + ledger life is not a death — the denial is the Lead's to answer");
+    harness.claimGreen();
+    await run;
+    assert.deepEqual(terminals.map((x) => x.fate), ["finished"], "the watch survived to witness the claim — exactly the v0.0.10 continuation");
+  } finally {
+    harness.stop();
+  }
+});
+
+test("growth resets the slow door's clock: death lands a full bound after the LAST growth, not the first stillness", async (t) => {
+  const MISSING = 300;
+  let fetches = 0;
+  let seqEnd = 45;
+  let lastGrowthAt = 0;
+  const harness = await leadHarness(t, () => null, () => {
+    fetches += 1;
+    // fetch 1 is the birth growth (-1 -> 45); fetches 2+ sit still, except
+    // a mid-window spurt (fetches 5-9) that must restart the clock.
+    if (fetches >= 5 && fetches <= 9) {
+      seqEnd += 1;
+      lastGrowthAt = Date.now();
+    }
+    return { requestId: "r", entries: [{ seqEnd }] };
+  });
+  try {
+    const terminals: { fate?: string; reason?: string }[] = [];
+    let deathAt = 0;
+    await observeTasks(harness.rpc, [{ task: "LEAD1", agentId: "ag-lead1" }], {
+      pollMs: 10,
+      stateDir: harness.stateDir,
+      spoolRoot: harness.spoolRoot,
+      missingDeadMs: MISSING,
+      log: () => {},
+      onTerminal: (entry) => {
+        deathAt = Date.now();
+        terminals.push({ ...(entry.terminal as { fate?: string; reason?: string }) });
+      },
+    });
+    assert.equal(terminals[0].fate, "died", "stillness after the spurt still kills — the door only ever opens on true stillness");
+    assert.match(terminals[0].reason ?? "", /the slow door/);
+    assert.ok(lastGrowthAt > 0, "the spurt was observed");
+    assert.ok(deathAt - lastGrowthAt >= MISSING, `death came a full bound after the last growth (${deathAt - lastGrowthAt}ms >= ${MISSING}ms) — a stuck clock would have died inside the first window`);
+  } finally {
+    harness.stop();
+  }
+});
+
+test("healthy ask-less work: null snapshots + a growing timeline, the claim finishes green — zero Lead lines, growth beats the bound", async (t) => {
+  const harness = await leadHarness(t, () => null, growingTimeline());
+  try {
+    const terminals: { fate?: string }[] = [];
+    const run = observeTasks(harness.rpc, [{ task: "LEAD1", agentId: "ag-lead1" }], {
+      pollMs: 10,
+      stateDir: harness.stateDir,
+      spoolRoot: harness.spoolRoot,
+      missingDeadMs: 80, // the claim lands at ~150ms — past the bound the v0.0.10 null-death would have eaten
+      log: () => {},
+      onTerminal: (entry) => {
+        terminals.push({ ...(entry.terminal as { fate?: string }) });
+      },
+    });
+    setTimeout(() => harness.claimGreen(), 150);
+    await run;
+    assert.deepEqual(terminals.map((x) => x.fate), ["finished"], "the verdict on the ledger is the null lane's finish — the growing timeline kept the watch alive past the bound");
+    assert.deepEqual(harness.processedKinds(), [], "zero Lead acts through the real spool — no denial ever landed");
+    assert.equal(
+      harness.factory.ledger.events.filter((e) => e.event === "repoke_dispatched" || e.event === "repoke_refused" || e.event === "needs_human").length,
+      0,
+      "the ledger carries no Lead line — the Arm A discipline",
+    );
   } finally {
     harness.stop();
   }
