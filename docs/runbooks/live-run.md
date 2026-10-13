@@ -129,8 +129,9 @@ One `--provider` per invocation — every task in it runs on it. The task count
 is the parallelism ceiling; there is no `--parallel` knob. Do not pipe this
 command (`| tee` and friends): a pipe owns stdout's exit code, and the
 driver's exit judgement (0 green / 2 not-green) is the run's law — the
-v0.0.11 judged run's attempt 1 lost it to `| tee`; the re-run ran unpiped
-(read the printed `factory: run …` line only when you must pipe).
+v0.0.11 judged run's attempt 1 lost it to `| tee`; the re-run ran unpiped.
+If you must pipe anyway, the printed `factory: run …` line is the only
+trustworthy exit signal left.
 
 Per task, in order:
 

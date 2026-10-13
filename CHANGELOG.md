@@ -5,6 +5,70 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.11] - 2026-10-14
+
+v0.0.11's one thing: **death is read from the daemon timeline** — ADR 0007
+made real. On daemon 0.11 a null agent-fetch is an empty signal (the
+2026-10-13 probe: `fetch_agent` answered null for a closed agent, an idle
+one, and a never-existed UUID alike), so the driver's null lane draws no
+conclusion from nullity and reads `fetch_agent_timeline_request` — the death
+oracle. Death has two doors: the timeline's own **"Agent not found"** answer
+is the fast door (defended by post-spawn ledger life, demoted to
+defense-in-depth), and an answering timeline whose `seqEnd` has not grown
+for the fixed 120 s is the slow door — `AGENT_MISSING_DEAD_MS` renamed
+`ZERO_GROWTH_DEAD_MS`, same number, new meaning: the bound now measures "no
+life signal", not "no ledger life", because healthy ask-less work streams
+timeline items continuously. The row's inputs, all grade A: v0.0.10's two
+false-death witnesses — domaintree, whose 128.7 s of healthy work ran 8.7 s
+past the bound while the meter landed at the false terminal (seq 1422, ~2 s
+before the true claim 1423) — and v0.0.9's readme2, whose claim came +343 s
+past its false death.
+
+The version's judged run (ticket 03 — two arms, the classifier's both
+classes, ground truth pre-registered before any run) ruled **7 of 8 checks
+PASS**, and the one FAIL is the run's central finding: **the fast door could
+not open on the live daemon.** Arm A — healthy long work — survived a 399.9 s
+ask-less span (3.3× the bound) with the watch held on timeline growth,
+claimed green attempt 1, and its meter landed after the claim (seq 1452 >
+1448 — the live10 violation inverted). Arm B — a planted mid-run delete —
+died with the world saying fast (the record gone, the timeline answering
+`Agent not found` from the first post-delete read, the agent verifiably
+absent from every list) and the driver saying slow: the daemon resolves the
+timeline's not-found as a **payload error on the response, not an rpc_error
+envelope**, so the ticket-02 build folded it into `maxSeqEnd` as "no entries
+→ no growth" — every true fast-door death landed 120 s late wearing the slow
+door's words (bounded, exit-2-correct, reason-wrong; 123.8 s on the run's own
+arm B). The run's amendment 1 added the false-terminal shape's third witness
+and its first through the slow door: a 429-stormed lane is honest-still to
+the timeline, both agents died at the bound, recovered ~90 s later and
+greened (+4 m 59 s / +6 m 29 s past their deaths) — the bound measures "no
+life signal", not "no life", and an unattended loop on a rate-limited lane
+will kill recoverable work (feeds the respawn + attempt-ceiling row). The
+fix (PR #43): `fetchTimeline` folds the resolved `payload.error` into the
+thrown shape — the snapshot lane's own pattern — ADR 0007 §2 corrected in
+place, the tests re-pinned on the payload seam (suite 265 → 266), and the
+door's own live witness: a one-task run, growth observed (seqEnd 164→198),
+the agent deleted mid-run, the death line naming the fast door verbatim at
+the first poll past the delete — meter seq 1455, **5.5 s after the delete**.
+
+### Changed
+
+- `package.json` → 0.0.11 (`SHELL_VERSION` rode the build PR #42 — the
+  version's identity never waits for the close).
+- ADR 0007 §2 corrected in place (2026-10-14, the dated-amendment style):
+  the live envelope is a resolved `error` payload, and the row's open fact
+  is closed — the timeline answers a mid-running-turn agent (arm A's 400 s
+  survival, arm B's pre-delete growth ticks).
+- The runbook's step 4 warns against piping `factory run` — a pipe owns
+  stdout's exit code and the driver's exit judgement is the run's law
+  (attempt 1 lost it to `| tee`).
+- The judged run's green work landed (PR #44, byte-identical to the accepted
+  attempts, seq 1456/1457): `docs/agents/judged-runs.md` — the operator's
+  guide to judged runs (pre-registration, ground truth, amendments, ruling
+  at close) — and `docs/runbooks/agent-hygiene.md` — the post-run hygiene
+  runbook (idle agents, delete-or-archive; this close's own agent deletes
+  ran by it).
+
 ## [0.0.10] - 2026-10-12
 
 v0.0.10's one thing: the **Lead seat v1** — ADR 0006 §3 made real: the
