@@ -154,6 +154,14 @@ _Avoid_: orchestrator, runner, supervisor, lead (those are seats, ADR 0006 — t
 A Task whose Agent's turn ended at a denied permit ask: the last thing the Ledger shows for the Task is a denial, no Claim after it, and a fixed grace has elapsed. The Lead's only trigger. Distinct from spawn-then-silence, where nothing at all follows the spawn — substrate death, not a chokee's stall.
 _Avoid_: stuck (too broad), blocked, hung
 
+**Substrate death**:
+The death of a spawned Agent's machinery — the agent no longer exists on the daemon (its timeline answers "not found"), or exists but shows no Life signal for the no-growth bound. What a Denial-stall is not: a stall is a live chokee; a substrate death has no chokee to poke. Classified by the driver's two doors, both read from the daemon timeline (ADR 0007).
+_Avoid_: crash, hang (a live stall's words), zombie, false death (the retired incident class — a history word, not a state)
+
+**Life signal**:
+The observable evidence that a spawned Agent is alive and working: its daemon timeline entries growing. What the watch reads to tell working silence from Substrate death on lanes whose silence is honest — ask-less lanes write nothing to the Ledger between Spawn and Claim. Added in v0.0.11 (ADR 0007).
+_Avoid_: heartbeat (implies the agent transmits it; the daemon is read, not pinged), liveness probe, ping
+
 **Re-poke**:
 The Lead's one act: a fixed-text message to a stalled Agent — continue by a route that needs no denied permission and make your Claim, or end the turn stating what you need from the Owner. Exactly one per Task, enforced where requests land, not hoped for; never sent into a running turn or over a pending ask.
 _Avoid_: nudge, retry, wake (richer machinery's word), reminder
