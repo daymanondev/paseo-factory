@@ -20,6 +20,7 @@ import {
   verdictOfThisRun,
 } from "../plugin/bin/driver.mjs";
 import { copyFixture, disposeDir, gitCommitAll, makeTempDir } from "./helpers.ts";
+import { awaitReply, submit } from "../plugin/bin/spool-client.mjs";
 
 /**
  * `factory run`'s driver — the pure pieces, plus (v0.0.10) the Lead rider's
@@ -345,13 +346,12 @@ const growingTimeline = (): (() => Record<string, unknown>) => {
     return { requestId: "r", entries: [{ seqEnd }] };
   };
 };
-const notFoundTimeline = (): (() => Record<string, unknown>) => {
-  return () => {
-    const err = new Error("Agent not found") as Error & { rpc: boolean };
-    err.rpc = true;
-    throw err;
-  };
+const rpcErrorTimeline = (message: string) => (): Record<string, unknown> => {
+  const err = new Error(message) as Error & { rpc: boolean };
+  err.rpc = true;
+  throw err;
 };
+const notFoundTimeline = () => rpcErrorTimeline("Agent not found");
 
 async function leadHarness(
   t: TestContext,
@@ -485,8 +485,10 @@ test("the needs-human terminal (null lane, denied-again): a second denial after 
 
     await until_(() => assert.ok(harness.factory.ledger.events.some((e) => e.event === "repoke_dispatched")), 5000);
     assert.equal(terminals.length, 0, "the watch survives the null lane — growth is the life signal and the denial is the Lead's to answer (missingDeadMs=60 and many ticks in)");
-    // The agent re-attempts the denied act: a second denial after the spend.
-    harness.denial("caught again");
+    // The agent re-attempts the denied act only once the old death window is
+    // well past — the survival itself is what this stretch proves, so the
+    // second denial must not race it.
+    setTimeout(() => harness.denial("caught again"), 150);
     await run;
 
     const line = harness.factory.ledger.events.find((e) => e.event === "needs_human") as { reason: string; evidence: { denial: number; repoke: number } };
@@ -558,7 +560,7 @@ test("the null lane's finish signal: after the poke, a claim on the ledger ends 
   }
 });
 
-test("the slow door: null snapshots, a timeline that answers but never grows past the bound is substrate death, meter's ride included; the Lead never fires", async (t) => {
+test("the slow door: null snapshots, a timeline that answers but never grows past the bound is substrate death, the meter landing at that terminal; the Lead never fires", async (t) => {
   const harness = await leadHarness(t, () => null, stillTimeline(45));
   try {
     const terminals: { fate?: string; reason?: string }[] = [];
@@ -568,15 +570,46 @@ test("the slow door: null snapshots, a timeline that answers but never grows pas
       spoolRoot: harness.spoolRoot,
       missingDeadMs: 80,
       log: () => {},
+      onTerminal: async (entry) => {
+        terminals.push({ ...(entry.terminal as { fate?: string; reason?: string }) });
+        // runDriver's own terminal callback, verbatim in shape: the captured
+        // usage rides one meter request through the real spool.
+        const request = { id: `meter-${entry.task}`, kind: "meter", task: entry.task, provider: "claude", usage: entry.usage ?? {}, agent: entry.agentId };
+        submit(harness.spoolRoot, request);
+        await awaitReply(harness.spoolRoot, request.id, 5000);
+      },
+    });
+    assert.equal(terminals.length, 1, "onTerminal fired exactly once");
+    assert.equal(terminals[0].fate, "died");
+    assert.match(terminals[0].reason ?? "", /no timeline growth for \d+s — substrate death \(the slow door\)/);
+    const meter = harness.factory.ledger.events.findLast((e) => e.event === "meter_written") as { usage?: Record<string, unknown> } | undefined;
+    assert.ok(meter, "the meter lands at the real death terminal — through the real spool, the plugin appending the line");
+    assert.deepEqual(meter?.usage ?? {}, {}, "the honest empty capture — the null lane reported nothing to a dead agent's poll");
+    assert.deepEqual(harness.processedKinds(), ["meter"], "the meter is the death terminal's one spool act — no Lead line ever fires");
+    assert.equal(harness.factory.ledger.events.filter((e) => e.event === "repoke_dispatched").length, 0, "no denial evidence, no poke — visible-but-unactionable");
+  } finally {
+    harness.stop();
+  }
+});
+
+test("the fast door opens only on the not-found answer: another rpc error never kills, and the ledger finish still runs", async (t) => {
+  const harness = await leadHarness(t, () => null, rpcErrorTimeline("daemon exploded"));
+  try {
+    const logs: string[] = [];
+    const terminals: { fate?: string; reason?: string }[] = [];
+    const run = observeTasks(harness.rpc, [{ task: "LEAD1", agentId: "ag-lead1" }], {
+      pollMs: 10,
+      stateDir: harness.stateDir,
+      spoolRoot: harness.spoolRoot,
+      log: (message) => logs.push(message),
       onTerminal: (entry) => {
         terminals.push({ ...(entry.terminal as { fate?: string; reason?: string }) });
       },
     });
-    assert.equal(terminals.length, 1, "onTerminal fired exactly once — the meter's ride to its terminal");
-    assert.equal(terminals[0].fate, "died");
-    assert.match(terminals[0].reason ?? "", /no timeline growth for \d+s — substrate death \(the slow door\)/);
-    assert.deepEqual(harness.processedKinds(), [], "no Lead act ever fires — the meter is runDriver's terminal callback (its own pinned behavior: death meters included)");
-    assert.equal(harness.factory.ledger.events.filter((e) => e.event === "repoke_dispatched").length, 0, "no denial evidence, no poke — visible-but-unactionable");
+    setTimeout(() => harness.claimGreen(), 120);
+    await run;
+    assert.deepEqual(terminals.map((x) => x.fate), ["finished"], "an un-understood daemon answer defers the death question — it never opens the door, and the verdict still finishes the task");
+    assert.ok(logs.some((m) => /timeline read failed \(daemon exploded\) — retrying next poll/.test(m)), "the odd answer is visible in the log, retried every poll");
   } finally {
     harness.stop();
   }

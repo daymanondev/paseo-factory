@@ -109,6 +109,8 @@ export interface ObserveEntry {
   terminal?: { terminal?: boolean; fate: string; reason?: string };
   /** The terminal usage capture (v0.0.8) — undefined until a terminal moment. */
   usage?: MeterUsage;
+  /** The highest timeline `seqEnd` witnessed — the life-signal tracker both watch lanes fold (v0.0.11, ADR 0007). The loop initializes it. */
+  timelineSeq?: number;
 }
 export declare function observeTasks(
   rpc: DaemonRpc | {

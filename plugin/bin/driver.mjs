@@ -711,9 +711,10 @@ export function agentFate(agent) {
  * oracle before its ledger predicate runs, and a `finished` classification
  * is intercepted when the ledger shows a stall the Lead still owes an
  * answer (poke, needs-human, or a pending window). Since v0.0.11 (ADR 0007)
- * the null lane's first act is the timeline read: the fast door (its error
- * answer, defended by post-spawn ledger life) and the slow door (no
- * `seqEnd` growth for the bound) are the only deaths; every surviving tick
+ * the null lane's first act is the timeline read: the fast door (its
+ * not-found answer, defended by post-spawn ledger life) and the slow door
+ * (no `seqEnd` growth for the bound) are the only deaths; every surviving
+ * tick
  * continues on the ledger predicate — the Lead rider and the verdict
  * finish, the v0.0.10 witnessed shape. `stateDir` and `spoolRoot` are the
  * rider's surfaces: the ledger is the predicate's only input, and both Lead
@@ -790,36 +791,32 @@ export async function observeTasks(rpc, entries, { pollMs = POLL_MS, log = () =>
           const events = readDriverLedger(stateDir);
           let timeline;
           try {
-            timeline = await rpc.request(
-              { type: "fetch_agent_timeline_request", agentId: entry.agentId, direction: "tail", limit: 5 },
-              { responseType: "fetch_agent_timeline_response" },
-            );
+            timeline = await fetchTimeline(rpc, entry);
           } catch (err) {
-            if (err.rpc !== true) {
-              // Transport trouble, not a daemon answer — transient, never a
-              // verdict; the next tick retries.
-              log(`factory: ${entry.task} timeline read failed (${err.message}) — retrying next poll`);
-              continue;
+            if (err.rpc === true && /not found/i.test(err.message)) {
+              // The oracle's one death answer (the probe's exact shape, ADR
+              // 0007 §2) — defended first (§4): a not-found contradicted by
+              // post-spawn ledger life is a state the watch survives on the
+              // ledger predicate, not a death.
+              if (postSpawnLife(events, entry.task)) {
+                entry.missingSince = undefined;
+                await continueOnLedger(entry, events);
+                continue;
+              }
+              throw rpcError(`${err.message} — substrate death (the fast door: the timeline's own answer)`);
             }
-            // The daemon answered about the timeline and the answer is an
-            // error — the fast door, unless the ledger contradicts it
-            // (defense-in-depth, ADR 0007 §4): post-spawn ledger life
-            // against a not-found timeline is a state the watch survives on
-            // the ledger predicate, not a death.
-            if (postSpawnLife(events, entry.task)) {
-              entry.missingSince = undefined;
-              await continueOnLedger(entry, events);
-              continue;
-            }
-            throw rpcError(`${err.message} — substrate death (the fast door: the timeline's own answer)`);
+            // Transport trouble, or a daemon answer that is not the
+            // not-found shape — never a death this tick. The death question
+            // waits for a real answer; the finish signal does not: the
+            // ledger continuation runs whatever the timeline said.
+            log(`factory: ${entry.task} timeline read failed (${err.message}) — retrying next poll`);
+            await continueOnLedger(entry, events);
+            continue;
           }
           // The timeline answers: the agent exists, and its growth is the
-          // life signal. The same max-seqEnd tracker stallWatch keeps, so a
-          // flapping snapshot lane cannot split the record.
-          let seq = entry.timelineSeq;
-          for (const item of Array.isArray(timeline.entries) ? timeline.entries : []) {
-            if (typeof item.seqEnd === "number" && item.seqEnd > seq) seq = item.seqEnd;
-          }
+          // life signal. The shared fold keeps the tracker whole across a
+          // flapping snapshot lane.
+          const seq = maxSeqEnd(timeline, entry.timelineSeq);
           const grew = seq !== entry.timelineSeq;
           if (grew) {
             entry.timelineSeq = seq;
@@ -841,7 +838,6 @@ export async function observeTasks(rpc, entries, { pollMs = POLL_MS, log = () =>
           }
           continue;
         }
-        entry.missingSince = undefined;
         snapshot = payload.agent;
       } catch (err) {
         if (err.rpc === true) {
@@ -889,6 +885,32 @@ function rpcError(message) {
 }
 
 /**
+ * The timeline read both watch lanes share (ADR 0007): the tail of the
+ * agent's daemon record — the death oracle in the null lane, the stall
+ * meter's input in the snapshot lane. The shape `stallWatch` has always
+ * sent: tail, five entries.
+ */
+function fetchTimeline(rpc, entry) {
+  return rpc.request(
+    { type: "fetch_agent_timeline_request", agentId: entry.agentId, direction: "tail", limit: 5 },
+    { responseType: "fetch_agent_timeline_response" },
+  );
+}
+
+/**
+ * The fold over a timeline payload: the highest `seqEnd` it shows above the
+ * floor — the life-signal tracker's one step, shared by both lanes so a
+ * flapping snapshot lane cannot split the record.
+ */
+function maxSeqEnd(payload, floor) {
+  let seq = floor;
+  for (const item of Array.isArray(payload.entries) ? payload.entries : []) {
+    if (typeof item.seqEnd === "number" && item.seqEnd > seq) seq = item.seqEnd;
+  }
+  return seq;
+}
+
+/**
  * Stall is a judgment the daemon does not make (scout §c): status `running`
  * with a timeline that has not grown, or an ask parked past the threshold.
  * Report-only — the driver never kills an agent; the warning prints once.
@@ -907,17 +929,12 @@ async function stallWatch(rpc, entry, snapshot, log) {
     entry.timelineStillSince = now;
     return;
   }
-  const payload = await rpc.request(
-    { type: "fetch_agent_timeline_request", agentId: entry.agentId, direction: "tail", limit: 5 },
-    { responseType: "fetch_agent_timeline_response" },
-  );
-  let seq = entry.timelineSeq;
-  for (const item of Array.isArray(payload.entries) ? payload.entries : []) {
-    if (typeof item.seqEnd === "number" && item.seqEnd > seq) seq = item.seqEnd;
-  }
+  const payload = await fetchTimeline(rpc, entry);
+  const seq = maxSeqEnd(payload, entry.timelineSeq);
   if (seq !== entry.timelineSeq) {
     entry.timelineSeq = seq;
     entry.timelineStillSince = now;
+    entry.missingSince = undefined; // growth is the life signal wherever it is observed — the slow door's clock restarts with it
     return;
   }
   if (!entry.warned && now - entry.timelineStillSince >= STALL_WARN_MS) {
