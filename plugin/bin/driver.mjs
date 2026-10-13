@@ -794,10 +794,11 @@ export async function observeTasks(rpc, entries, { pollMs = POLL_MS, log = () =>
             timeline = await fetchTimeline(rpc, entry);
           } catch (err) {
             if (err.rpc === true && /not found/i.test(err.message)) {
-              // The oracle's one death answer (the probe's exact shape, ADR
-              // 0007 §2) — defended first (§4): a not-found contradicted by
-              // post-spawn ledger life is a state the watch survives on the
-              // ledger predicate, not a death.
+              // The oracle's one death answer — arriving live as the resolved
+              // `error` payload `fetchTimeline` folds into this thrown shape
+              // (ADR 0007 §2's 2026-10-14 correction) — defended first (§4):
+              // a not-found contradicted by post-spawn ledger life is a state
+              // the watch survives on the ledger predicate, not a death.
               if (postSpawnLife(events, entry.task)) {
                 entry.missingSince = undefined;
                 await continueOnLedger(entry, events);
@@ -888,13 +889,21 @@ function rpcError(message) {
  * The timeline read both watch lanes share (ADR 0007): the tail of the
  * agent's daemon record — the death oracle in the null lane, the stall
  * meter's input in the snapshot lane. The shape `stallWatch` has always
- * sent: tail, five entries.
+ * sent: tail, five entries. The daemon (0.11) resolves the timeline's
+ * failure as an `error` field on the response, not an rpc_error envelope —
+ * witnessed live by the v0.0.11 judged run (ticket 03's central finding) —
+ * so the field folds into the thrown shape here, the snapshot lane's own
+ * `payload.error` pattern: the oracle's decision tree above discriminates
+ * one answer either way, and an error payload is never misread as
+ * "no entries → no growth".
  */
-function fetchTimeline(rpc, entry) {
-  return rpc.request(
+async function fetchTimeline(rpc, entry) {
+  const payload = await rpc.request(
     { type: "fetch_agent_timeline_request", agentId: entry.agentId, direction: "tail", limit: 5 },
     { responseType: "fetch_agent_timeline_response" },
   );
+  if (payload.error !== undefined && payload.error !== null) throw rpcError(payload.error);
+  return payload;
 }
 
 /**
