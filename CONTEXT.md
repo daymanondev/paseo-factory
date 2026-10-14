@@ -21,7 +21,7 @@ The Owner seat delegated to exactly one Paseo daemon agent, revocably — the on
 _Avoid_: manager, orchestrator, assistant (and Driver — a mechanism, not a seat)
 
 **Lead**:
-The presiding technical seat over Agents — the seat that acts when an Agent stalls rather than letting the stall end in silence. Day one (v0.0.10, ADR 0006) is a deterministic rider on the Driver's watch: it reads the Ledger, spends the Task's one re-poke at a denial-stall, and writes needs-human when the poke is spent and the stall persists. Zero model calls of its own; it never grants a permission (only the Choke judges asks), never sets Contracts, never Accepts. Judgment (rulings on stuck work) and acceptance-among-agents grow into the seat when the corpus demands it.
+The presiding technical seat over Agents — the seat that acts when an Agent stalls, dies, or exhausts its Attempts rather than letting the run end in silence. Day one (v0.0.10, ADR 0006) is a deterministic rider on the Driver's watch: it reads the Ledger, spends the Task's one re-poke at a denial-stall, and writes needs-human when the poke is spent and the stall persists; since v0.0.12 (ADR 0008) it also writes needs-human when a Task hits the Attempt ceiling (three red Attempts) or dies after its one automatic Respawn. Zero model calls of its own; it never grants a permission (only the Choke judges asks), never sets Contracts, never Accepts. Judgment (rulings on stuck work) and acceptance-among-agents grow into the seat when the corpus demands it.
 _Avoid_: manager, foreman, orchestrator, "the loop" (that names the mechanism), Driver (a mechanism, not a seat)
 
 ### Work and criteria
@@ -57,7 +57,7 @@ The Agent's statement that a Task is finished at a specific commit. A Claim is e
 _Avoid_: "done" (for the Agent's side), report, submission
 
 **Attempt**:
-One Claim and the Gate run it triggers. A Task may have many Attempts; they are numbered and never overlap.
+One Claim and the Gate run it triggers. A Task may have up to three Attempts (the Attempt ceiling, ADR 0008); they are numbered and never overlap.
 _Avoid_: retry, run, iteration
 
 **Verdict**:
@@ -147,8 +147,16 @@ Starting a contracted Task's Agent: a `spawn` request through the spool, validat
 _Avoid_: launch, fork, dispatch (that names the happy ledger line)
 
 **Driver**:
-`factory run <task>… --provider <p[/m]>` — the command that takes explicit task ids, creates each task's branch, spawns each Agent (through the spool) and watches to verdict, printing each task's verdict at its own terminal moment and exiting 0 only when every task ran green with zero refusals. It never sets Contracts and never Accepts; it stops at verdicts. Since v0.0.10 its watch loop carries the Lead's stall predicate as a rider (the announced path to a standing plugin loop); carrying a seat's act does not make it one. Added in v0.0.5.
+`factory run <task>… --provider <p[/m]>` — the command that takes explicit task ids, creates each task's branch, spawns each Agent (through the spool) and watches to verdict, printing each task's verdict at its own terminal moment and exiting 0 only when every task ran green with zero refusals. It never sets Contracts and never Accepts; it stops at verdicts. Since v0.0.10 its watch loop carries the Lead's stall predicate as a rider (the announced path to a standing plugin loop); since v0.0.12 (ADR 0008) it stays watching across red Attempts below the Attempt ceiling and executes at most one automatic Respawn on Substrate death. Carrying a seat's act does not make it one. Added in v0.0.5.
 _Avoid_: orchestrator, runner, supervisor, lead (those are seats, ADR 0006 — the Driver is neither)
+
+**Attempt ceiling**:
+The hard cap of three Attempts per Task (`MAX_ATTEMPTS = 3`, fixed in code, never configuration). Enforced plugin-side at `Claim` (a fourth Claim is refused before any Gate starts) and at `Spawn` / `Respawn` (`spawn:attempt-ceiling` / `respawn:attempt-ceiling`), and observed by the Lead rider: when Attempt 3 finishes red, the Task ends immediately in `needs_human` (`reason: "attempt-ceiling"`). Added in v0.0.12 (ADR 0008).
+_Avoid_: retry limit, max retries, attempt budget
+
+**Respawn**:
+Replacing a contracted Task's Agent after `Substrate death`: a `respawn` request through the spool naming the dead Agent (`died_agent`), validated by the plugin (at most one automatic Respawn per progress marker — the latest `spawn_dispatched` or `gate_finished`) and recorded as `respawn_dispatched` or `respawn_refused` before the replacement Agent is created on the Task's branch with uncommitted working-tree fragments cleaned to `HEAD`. A second `Substrate death` with no new Attempt between them ends in `needs_human` (`reason: "died-after-respawn"`). Added in v0.0.12 (ADR 0008).
+_Avoid_: restart (implies reviving the same daemon session), retry (an Attempt word), re-spawn
 
 **Denial-stall**:
 A Task whose Agent's turn ended at a denied permit ask: the last thing the Ledger shows for the Task is a denial, no Claim after it, and a fixed grace has elapsed. The Lead's only trigger. Distinct from spawn-then-silence, where nothing at all follows the spawn — substrate death, not a chokee's stall.
@@ -167,7 +175,7 @@ The Lead's one act: a fixed-text message to a stalled Agent — continue by a ro
 _Avoid_: nudge, retry, wake (richer machinery's word), reminder
 
 **Needs-human**:
-The Ledger event the Lead writes when its re-poke is spent and the Task still stalls — the factory's named end for what would otherwise be silence. The Supervisor relays it to the Owner in words at its next turn, at leisure; an Owner answer wakes the Task through the ordinary spawn path (only Acceptance closes a Task).
+The Ledger event (`needs_human`) the Lead writes when bounded automation is exhausted — when a Re-poke is spent and the Denial-stall persists (`denied-again`, `silent-after-repoke`), when a Task hits the Attempt ceiling (`attempt-ceiling`), or when a Task suffers Substrate death again after its one automatic Respawn (`died-after-respawn`) — each corroborated by its own Ledger evidence seqs. The Supervisor relays it to the Owner in words at its next turn, at leisure (only Acceptance closes a Task).
 _Avoid_: alert, escalation ticket, incident (a different kind, its own later writer)
 
 **Parallel run**:
