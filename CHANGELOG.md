@@ -5,6 +5,100 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.12] - 2026-10-14
+
+v0.0.12's one thing: **respawn once on substrate death; three attempts cap a
+task** — ADR 0008 (and the re-scoped trio row from ADR 0006 §5 as amended by
+ADR 0007) made real. Two structural ceilings close the unbounded repair gaps
+on daemon 0.11:
+
+1. **The Attempt ceiling (`MAX_ATTEMPTS = 3`, fixed in code, never
+   configuration)** — enforced plugin-side at three points: `Factory.claim`
+   throws `FactoryError("attempt-ceiling")` before opening a fourth Attempt;
+   `Factory.requestSpawn` appends `spawn_refused` (`code: "attempt-ceiling"`,
+   `rule: "spawn:attempt-ceiling"`); and the Lead rider (`leadDecision`)
+   immediately records `needs_human` (`reason: "attempt-ceiling"`,
+   `evidence: { attempt: 3, gate: <seq> }`) when Attempt 3 finishes `red`.
+   Paired with the Q2 enabling fix on the null-fetch lane (`continueOnLedger`):
+   previously any `gate_finished` after spawn committed `fate: "finished"`
+   within 5 s, cutting the watch on a `red` Attempt 1 while the live Agent was
+   still in its turn fixing the code; now `continueOnLedger` commits
+   `fate: "finished"` immediately **only when `verdict.verdict === "green"`**,
+   so `red` Attempts 1 and 2 stay in the watch.
+2. **One automatic `Respawn` per progress marker on `Substrate death`** — when
+   `observeTasks` classifies death (the snapshot lane's `status === "error"` or
+   the null lane's Fast / Slow doors from ADR 0007) and the Task is neither
+   `green` nor at `attempt-ceiling`, the Driver meters the dead Agent first
+   (`meter_written` with the dead `agentId`), submits `kind: "respawn"` through
+   the spool (`Factory.respawn` enforces at most one `respawn_dispatched` since
+   the latest `spawn_dispatched` or `gate_finished`, refusing repeats with
+   `respawn:already-spent`), cleans uncommitted worktree fragments to `HEAD` on
+   branch `<task>` (`git checkout -- . && git clean -fd`), and keys
+   `agent.create.request` by the dispatch `seq`
+   (`${task}-spawn-${seq}` / `${task}-respawn-${seq}`) so a dead agent record
+   still resident in the daemon DB never collides with the replacement Agent's
+   creation. A second `Substrate death` with no new `gate_finished` between
+   them ends in `needs_human` (`reason: "died-after-respawn"`,
+   `evidence: { spawn, respawn }`). Suite 266 → 276 (PR #46).
+
+The version's judged run (ticket 03 — two arms in one `factory run` invocation
+on `pi/zai/glm-5.3`, ground truth pre-registered before any run, zero
+amendments) ruled **7 of 7 checks PASS, $0 out-of-pocket**:
+
+- **Arm A (`live12-respawn`, planted mid-run death → automatic Respawn → green
+  Claim)**: Agent 1 (`90878df6`) streamed timeline growth (`seqEnd=22 GREW`)
+  and was deleted mid-run (`paseo agent delete` → `DELETED` at `10:16:24.039Z`).
+  **2.6 s later** (`10:16:26.641Z`), the Driver caught the Fast door (`Agent
+  not found`), wrote Agent 1's `meter_written` (`seq 1462`), dispatched
+  `respawn_dispatched` (`seq 1463`, `died_agent: "90878df6-..."`), and created
+  replacement Agent 2 (`f0b4b9e5`, `3.16 s` delete-to-create) on branch
+  `live12-respawn`, which authored `docs/runbooks/respawn-and-ceiling.md`,
+  claimed (`seq 1478`, `d0e01b4`), finished `green` on Attempt 1 (`seq 1480`),
+  and wrote Agent 2's `meter_written` (`seq 1482`).
+- **Arm B (`live12-ceiling`, multi-attempt survival across red Claims →
+  `attempt-ceiling`)**: against an unsatisfiable gate token outside scope,
+  `continueOnLedger` held the watch open on the null-fetch lane across red
+  Attempt 1 (`seq 1466`, `10.7 s` window) and red Attempt 2 (`seq 1470`, `9.0 s`
+  window) while the live Agent (`15ae3d7d`) stayed in its turn and submitted
+  Attempts 2 and 3; when Attempt 3 landed `red` (`seq 1474`), the Lead rider
+  recorded `needs_human` (`seq 1476`, `reason: "attempt-ceiling"`,
+  `evidence: { attempt: 3, gate: 1474 }`) before Arm B's `meter_written`
+  (`seq 1477`), and the Driver exited 2 (`factory: run NOT green`). Both
+  post-run negative probes passed: `factory-claim` for Attempt 4 exited 2 with
+  `attempt-ceiling` and wrote zero ledger lines; `factory run live12-ceiling`
+  exited 2 and wrote `spawn_refused` (`seq 1483`, `rule: "spawn:attempt-ceiling"`).
+- **Bonus mechanism finding (resolving v0.0.11 Finding 4)**: each of the three
+  `pi/zai/glm-5.3` agent creations in this clean, 429-free run was followed
+  ~1.5–7 s later by one transient `beforeEachCreate` UUID (`9527e8c9`,
+  `6defe07c`, `6eb23a5c`) with no contracted `cwd` and absent from `agent ls
+  --global --all` — proving they are Paseo's internal `pi` helper sessions on
+  first turn, not 429-storm artifacts.
+
+### Added
+
+- `docs/adr/0008-respawn-and-attempt-ceiling.md` (and `ADR 0006 §5` amendment)
+  ratified before code; `CONTEXT.md` gains **Attempt ceiling** and **Respawn**
+  and updates **Lead**, **Attempt**, **Driver**, and **Needs-human**.
+- `RespawnDispatched` (`respawn_dispatched`) and `RespawnRefused`
+  (`respawn_refused`) ledger events, spool kind `"respawn"`, `Factory.respawn`,
+  and expanded `NEEDS_HUMAN_REASONS` (`"attempt-ceiling"`,
+  `"died-after-respawn"`) with per-reason evidence corroboration in
+  `Factory.needsHuman`.
+- The judged run's accepted green work landed (PR #47, byte-identical to
+  `d0e01b4`, accepted at `seq 1484` `accepted_by: owner`):
+  `docs/runbooks/respawn-and-ceiling.md` — the operator's reference to reading
+  `respawn_dispatched`, `attempt-ceiling`, and `died-after-respawn` in the
+  ledger and `factory status`.
+
+### Changed
+
+- `package.json` + `package-lock.json` → `0.0.12` (`SHELL_VERSION` rode the
+  build PR #46).
+- `docs/runbooks/live-run.md` step 4 law updated from `"No respawn, ever"` to
+  ADR 0008's bounded one-respawn recovery on `Substrate death`, `MAX_ATTEMPTS =
+  3`, and per-dispatch `idempotencyKey` (`${task}-spawn-${seq}` /
+  `${task}-respawn-${seq}`).
+
 ## [0.0.11] - 2026-10-14
 
 v0.0.11's one thing: **death is read from the daemon timeline** — ADR 0007

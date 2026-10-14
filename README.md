@@ -11,8 +11,8 @@ claims the task is finished at a specific commit, and the factory — never the
 agent — runs the gate and records every step in an append-only ledger it
 cannot edit. A green verdict is evidence, not acceptance.
 
-**Status: v0.0.11, pre-release.** The pure verification core is complete and
-tested (266 tests); the plugin loads on a Paseo 0.10 daemon, owns the ledger
+**Status: v0.0.12, pre-release.** The pure verification core is complete and
+tested (276 tests); the plugin loads on a Paseo 0.10 daemon, owns the ledger
 and the gate as the single writer (ADR 0004), and serves the whole loop over a
 file spool: the Owner's `factory` CLI sets Contracts and accepts green
 Attempts, the Agent's `factory-claim` CLI submits Claims (it rides every
@@ -25,7 +25,9 @@ Supervisor seat — the delegated Owner conversation, every act stamped by who
 submitted it — and v0.0.10's Lead seat, the deterministic presider that
 spends one re-poke at a denial-stall and otherwise ends in a needs-human
 line. v0.0.11 grounds death itself in the daemon's own timeline (ADR 0007,
-the two doors). Nothing is published yet.
+the two doors), and v0.0.12 bounds both repair axes (ADR 0008): one automatic
+Respawn per progress marker on Substrate death, and three Attempts per Task.
+Nothing is published yet.
 
 ## Layout
 
@@ -143,6 +145,26 @@ open live (the daemon resolves the not-found as a payload error, not an rpc
 error; every true fast-door death landed 120 s late wearing the slow door's
 words) — the fix rides the version, witnessed live by the door's own words
 at the first poll past the delete.
+
+v0.0.12 closes the re-scoped trio row from ADR 0006 §5 — **Respawn and
+Attempt ceiling** (ADR 0008). Every Task is capped at `MAX_ATTEMPTS = 3`
+plugin-side across `Factory.claim`, `Factory.requestSpawn`, `Factory.respawn`,
+and the Lead rider; on the null-fetch lane `continueOnLedger` finishes
+immediately only on a `green` verdict so a live Agent can read a `red` note,
+commit a fix, and submit Attempts 2 and 3, while a third `red` Attempt ends
+immediately in `needs_human` (`reason: "attempt-ceiling"`). On `Substrate
+death` (either watch lane) the Driver meters the dead Agent first, requests
+at most one automatic `Respawn` per progress marker (`spawn_dispatched` or
+`gate_finished`) through the spool (`respawn_dispatched` / `respawn_refused`),
+cleans uncommitted worktree fragments to `HEAD` on branch `<task>`, and keys
+`agent.create.request` by the dispatch `seq`; a second death with no new
+Attempt between them ends in `needs_human` (`reason: "died-after-respawn"`).
+Witnessed live (7/7 checks PASS, $0 out-of-pocket on `pi/zai/glm-5.3`): a
+planted mid-run delete caught the Fast door in 2.6 s, metered Agent 1,
+dispatched `respawn_dispatched`, and watched Agent 2 to a green Attempt 1
+(3.16 s delete-to-create); the ceiling arm survived red Attempts 1 and 2 in
+one turn, recorded `needs_human ("attempt-ceiling")` at Attempt 3, and
+refused both post-run negative probes (`factory-claim` #4 and `factory run`).
 
 The **Agent** gets one command, `factory-claim --task T1 --sha <commit>`, on its
 PATH automatically. It prints the Verdict, the gate note, and the report path;
