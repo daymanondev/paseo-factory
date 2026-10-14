@@ -167,11 +167,14 @@ Laws the driver runs under:
 - Exit 0 iff every task ended green with zero refusals and no dead agents
   (`factory: run green — every task verified`); anything else exits 2 with a
   reason line per task.
-- No respawn, ever: a dead agent is reported (exit 2); retry policy belongs
-  to a later row. A crashed driver is safe to re-run — the spool dedupes
-  replayed requests and the create is idempotency-keyed by task id, so a
-  re-run meets the existing agent or a structured conflict, never a second
-  agent.
+- Bounded respawn and attempt ceiling (v0.0.12, ADR 0008): at most one
+  automatic Respawn per progress marker (`spawn_dispatched` or `gate_finished`)
+  on Substrate death (`respawn_dispatched` / `respawn_refused`), and at most
+  three Attempts per Task (`MAX_ATTEMPTS = 3`); a second death without a new
+  Attempt ends in `needs_human ("died-after-respawn")`, and a third red Attempt
+  ends in `needs_human ("attempt-ceiling")`. A crashed driver is safe to re-run
+  — the spool dedupes replayed requests and each create is idempotency-keyed by
+  its dispatch `seq` (`<task>-spawn-<seq>` / `<task>-respawn-<seq>`).
 - The daemon is preflighted before any spawn line lands: a dispatched spawn
   with no agent behind it would be a lie the ledger keeps.
 
