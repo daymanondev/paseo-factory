@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createFactory } from "../src/factory.ts";
+import { MAX_ATTEMPTS } from "../src/events.ts";
 import type { NeedsHumanReason } from "../src/events.ts";
 import { FactoryError } from "../src/errors.ts";
 import { disposeDir, factoryErrorCode, gitCommitAll, gitCommitChanges, makeTempDir } from "./helpers.ts";
@@ -772,3 +773,210 @@ test("needsHuman appends the named end only over a corroborated spend — the me
   // fact (the ledger appends), and the wake path stays the ordinary spawn.
   assert.equal(factory.ledger.eventsFor("LEAD2").some((e) => e.event === "attempt_accepted"), false);
 });
+
+// ---- v0.0.12 (ADR 0008): attempt-ceiling + respawn ----------------------------------
+
+test("claim enforces the Attempt ceiling (MAX_ATTEMPTS = 3): Attempts 1–3 open, Attempt 4 throws attempt-ceiling with zero new ledger lines", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact, sha } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  factory.setContract({ task: "CEIL1", workspace, gate: "false", artifact });
+
+  assert.equal(MAX_ATTEMPTS, 3, "the ceiling is fixed in code at 3 (ADR 0008 §1)");
+
+  for (let i = 1; i <= MAX_ATTEMPTS; i++) {
+    const out = await factory.claim({ task: "CEIL1", sha });
+    assert.equal(out.attempt, i);
+    assert.equal(out.verdict, "red");
+  }
+  const countAfterThree = factory.ledger.eventsFor("CEIL1").length;
+
+  await assert.rejects(
+    () => factory.claim({ task: "CEIL1", sha }),
+    factoryErrorCode("attempt-ceiling"),
+    "no fourth Attempt may open",
+  );
+  assert.equal(
+    factory.ledger.eventsFor("CEIL1").length,
+    countAfterThree,
+    "the refused fourth claim writes neither claim_reported nor gate_started",
+  );
+});
+
+test("requestSpawn refuses at the Attempt ceiling (spawn:attempt-ceiling) when three red Attempts are already on record", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact, sha } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  factory.setContract({ task: "CEIL-SP", workspace, gate: "false", artifact });
+
+  for (let i = 1; i <= 2; i++) {
+    await factory.claim({ task: "CEIL-SP", sha });
+  }
+  const beforeCeiling = factory.requestSpawn({ task: "CEIL-SP", provider: "pi/zai/glm-5.3", arity: 1 });
+  assert.equal(beforeCeiling.outcome, "dispatched", "below the ceiling, dispatching a fresh spawn to finish the remaining Attempt is legal");
+
+  await factory.claim({ task: "CEIL-SP", sha });
+  const atCeiling = factory.requestSpawn({ task: "CEIL-SP", provider: "pi/zai/glm-5.3", arity: 1 });
+  assert.equal(atCeiling.outcome, "refused");
+  if (atCeiling.outcome === "refused") {
+    assert.equal(atCeiling.code, "attempt-ceiling");
+    assert.equal(atCeiling.event.rule, "spawn:attempt-ceiling");
+    assert.match(atCeiling.event.reason, /attempt ceiling/);
+  }
+});
+
+test("respawn enforces one automatic Respawn per progress marker (spawn_dispatched or gate_finished), resets after a new Attempt, and records refusals", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact, sha } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  factory.setContract({ task: "RESP1", workspace, gate: "false", artifact });
+
+  // Before any spawn_dispatched, respawn refuses with respawn:not-spawned.
+  const notSpawned = factory.respawn({ task: "RESP1", provider: "pi/zai/glm-5.3", died_agent: "ag-0" });
+  assert.equal(notSpawned.outcome, "refused");
+  if (notSpawned.outcome === "refused") {
+    assert.equal(notSpawned.code, "not-spawned");
+    assert.equal(notSpawned.event.rule, "respawn:not-spawned");
+  }
+
+  // Initial spawn sets the first progress marker.
+  const spawned = factory.requestSpawn({ task: "RESP1", provider: "pi/zai/glm-5.3", arity: 1 });
+  assert.equal(spawned.outcome, "dispatched");
+
+  // First death after spawn → respawn_dispatched.
+  const first = factory.respawn({ task: "RESP1", provider: "pi/zai/glm-5.3", died_agent: "ag-1" });
+  assert.equal(first.outcome, "dispatched");
+  if (first.outcome === "dispatched") {
+    const { ts, ...rest } = first.event;
+    assert.deepEqual(rest, {
+      seq: 4,
+      event: "respawn_dispatched",
+      task: "RESP1",
+      provider: "pi/zai/glm-5.3",
+      died_agent: "ag-1",
+    });
+  }
+
+  // Second death with no new gate_finished in between → refused (respawn:already-spent).
+  const second = factory.respawn({ task: "RESP1", provider: "pi/zai/glm-5.3", died_agent: "ag-2" });
+  assert.equal(second.outcome, "refused");
+  if (second.outcome === "refused") {
+    assert.equal(second.code, "respawn-ceiling");
+    assert.equal(second.event.rule, "respawn:already-spent");
+    assert.equal(second.event.died_agent, "ag-2");
+  }
+
+  // A new Attempt (gate_finished) is a new progress marker — resets the one-respawn allowance.
+  const a1 = await factory.claim({ task: "RESP1", sha });
+  assert.equal(a1.attempt, 1);
+  assert.equal(a1.verdict, "red");
+
+  const afterAttempt1 = factory.respawn({ task: "RESP1", provider: "pi/zai/glm-5.3", died_agent: "ag-2" });
+  assert.equal(afterAttempt1.outcome, "dispatched", "a new gate_finished progress marker allows one fresh respawn");
+
+  const spentAgain = factory.respawn({ task: "RESP1", provider: "pi/zai/glm-5.3", died_agent: "ag-3" });
+  assert.equal(spentAgain.outcome, "refused");
+  if (spentAgain.outcome === "refused") {
+    assert.equal(spentAgain.code, "respawn-ceiling");
+    assert.equal(spentAgain.event.rule, "respawn:already-spent");
+  }
+
+  // Exhaust Attempts 2 and 3 → respawn refuses at attempt-ceiling.
+  await factory.claim({ task: "RESP1", sha });
+  await factory.claim({ task: "RESP1", sha });
+  const atCeiling = factory.respawn({ task: "RESP1", provider: "pi/zai/glm-5.3", died_agent: "ag-4" });
+  assert.equal(atCeiling.outcome, "refused");
+  if (atCeiling.outcome === "refused") {
+    assert.equal(atCeiling.code, "attempt-ceiling");
+    assert.equal(atCeiling.event.rule, "respawn:attempt-ceiling");
+  }
+
+  // Validation refusals: invalid request, invalid task, unknown task.
+  const badReq = factory.respawn({ task: "RESP1", provider: "pi/zai/glm-5.3", died_agent: "  " });
+  assert.equal(badReq.outcome === "refused" && badReq.event.rule, "respawn:invalid-request");
+  const badTask = factory.respawn({ task: "bad task", provider: "pi/zai/glm-5.3", died_agent: "ag-x" });
+  assert.equal(badTask.outcome === "refused" && badTask.event.rule, "respawn:invalid-task");
+  const unknown = factory.respawn({ task: "GHOST", provider: "pi/zai/glm-5.3", died_agent: "ag-x" });
+  assert.equal(unknown.outcome === "refused" && unknown.event.rule, "respawn:unknown-task");
+});
+
+test("needsHuman corroborates attempt-ceiling and died-after-respawn against the ledger slice, refusing forged or mismatched evidence", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact, sha } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  factory.setContract({ task: "NH-V12", workspace, gate: "false", artifact });
+
+  const spawnOut = factory.requestSpawn({ task: "NH-V12", provider: "pi/zai/glm-5.3", arity: 1 });
+  assert.equal(spawnOut.outcome, "dispatched");
+  const spawnSeq = spawnOut.outcome === "dispatched" ? spawnOut.event.seq : 0;
+
+  // Before any respawn, died-after-respawn refuses.
+  assert.throws(
+    () => factory.needsHuman({ task: "NH-V12", reason: "died-after-respawn", evidence: { spawn: spawnSeq, respawn: spawnSeq + 1 } }),
+    factoryErrorCode("invalid-needs-human"),
+  );
+
+  const respawnOut = factory.respawn({ task: "NH-V12", provider: "pi/zai/glm-5.3", died_agent: "ag-1" });
+  assert.equal(respawnOut.outcome, "dispatched");
+  const respawnSeq = respawnOut.outcome === "dispatched" ? respawnOut.event.seq : 0;
+
+  // Mismatched reason + evidence shape refuses.
+  assert.throws(
+    () => factory.needsHuman({ task: "NH-V12", reason: "died-after-respawn", evidence: { attempt: 3, gate: respawnSeq } as never }),
+    factoryErrorCode("invalid-needs-human"),
+  );
+  // Forged spawn seq refuses.
+  assert.throws(
+    () => factory.needsHuman({ task: "NH-V12", reason: "died-after-respawn", evidence: { spawn: 999, respawn: respawnSeq } }),
+    factoryErrorCode("invalid-needs-human"),
+  );
+
+  // Valid died-after-respawn appends needs_human.
+  const diedLine = factory.needsHuman({
+    task: "NH-V12",
+    reason: "died-after-respawn",
+    evidence: { spawn: spawnSeq, respawn: respawnSeq },
+  });
+  assert.equal(diedLine.reason, "died-after-respawn");
+  assert.deepEqual(diedLine.evidence, { spawn: spawnSeq, respawn: respawnSeq });
+
+  // Once a gate_finished lands after respawnSeq, that respawn is no longer an unprogressed death.
+  const a1 = await factory.claim({ task: "NH-V12", sha });
+  assert.throws(
+    () => factory.needsHuman({ task: "NH-V12", reason: "died-after-respawn", evidence: { spawn: spawnSeq, respawn: respawnSeq } }),
+    factoryErrorCode("invalid-needs-human"),
+    "a gate_finished after respawn invalidates died-after-respawn for that earlier respawn",
+  );
+
+  // Attempt-ceiling requires attempt === 3 and a red gate_finished at attempt 3.
+  assert.throws(
+    () => factory.needsHuman({ task: "NH-V12", reason: "attempt-ceiling", evidence: { attempt: 1, gate: a1.gate.seq } }),
+    factoryErrorCode("invalid-needs-human"),
+  );
+  assert.throws(
+    () => factory.needsHuman({ task: "NH-V12", reason: "attempt-ceiling", evidence: { attempt: 3, gate: a1.gate.seq } }),
+    factoryErrorCode("invalid-needs-human"),
+    "a1's gate_finished is attempt 1, not 3",
+  );
+
+  await factory.claim({ task: "NH-V12", sha });
+  const a3 = await factory.claim({ task: "NH-V12", sha });
+  assert.equal(a3.attempt, 3);
+  assert.equal(a3.verdict, "red");
+
+  const ceilLine = factory.needsHuman({
+    task: "NH-V12",
+    reason: "attempt-ceiling",
+    evidence: { attempt: 3, gate: a3.gate.seq },
+  });
+  assert.equal(ceilLine.reason, "attempt-ceiling");
+  assert.deepEqual(ceilLine.evidence, { attempt: 3, gate: a3.gate.seq });
+});
+
+
+
+

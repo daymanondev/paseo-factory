@@ -1,7 +1,7 @@
 import { appendFileSync, closeSync, fsyncSync, ftruncateSync, mkdirSync, openSync, readFileSync, writeSync } from "node:fs";
 import { dirname } from "node:path";
 import { FactoryError } from "./errors.ts";
-import { EVENT_NAMES, needsHumanEvidenceIsValid } from "./events.ts";
+import { EVENT_NAMES, NEEDS_HUMAN_REASONS, needsHumanEvidenceIsValid } from "./events.ts";
 import type { LedgerEvent, PendingEvent } from "./events.ts";
 
 /**
@@ -183,8 +183,21 @@ function shapeIsValid(evt: LedgerEvent): boolean {
       (evt.event === "repoke_dispatched" || (typeof asRecord.rule === "string" && typeof asRecord.reason === "string"))
     );
   }
+  if (evt.event === "respawn_dispatched" || evt.event === "respawn_refused") {
+    return (
+      taskIsString &&
+      typeof asRecord.provider === "string" &&
+      typeof asRecord.died_agent === "string" &&
+      (evt.event === "respawn_dispatched" || (typeof asRecord.rule === "string" && typeof asRecord.reason === "string"))
+    );
+  }
   if (evt.event === "needs_human") {
-    return taskIsString && (asRecord.reason === "denied-again" || asRecord.reason === "silent-after-repoke") && needsHumanEvidenceIsValid(asRecord.evidence);
+    return (
+      taskIsString &&
+      typeof asRecord.reason === "string" &&
+      (NEEDS_HUMAN_REASONS as readonly string[]).includes(asRecord.reason) &&
+      needsHumanEvidenceIsValid(asRecord.evidence, asRecord.reason)
+    );
   }
   const attempt = asRecord.attempt;
   return taskIsString && typeof attempt === "number" && Number.isInteger(attempt) && attempt >= 1;
