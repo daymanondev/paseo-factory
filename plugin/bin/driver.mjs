@@ -21,13 +21,14 @@
  *   `{type:"session", message:{…}}` envelopes, responses matched by
  *   requestId. `paseo.pid` and `local-credential` are re-read on every
  *   connect — both are rewritten on daemon restart.
- * - **No respawn, ever:** a dead agent is reported (exit 2); retry policy
- *   belongs to a later row. A driver crash is safe to re-run: the spool
- *   dedupes replayed request files and the create RPC is idempotency-keyed
- *   by task id, so a re-run meets either the existing agent or a structured
- *   conflict — never a second agent. The re-poke carries the same safety:
- *   its spend is a ledger line, so a crash re-reads the slice, never the
- *   socket.
+ * - **One automatic Respawn per progress marker (v0.0.12, ADR 0008):** on
+ *   `Substrate death` the Lead meters the dead agent and submits one `respawn`
+ *   request through the spool — the plugin enforces the one-per-progress-marker
+ *   (`spawn_dispatched` or `gate_finished`) and `MAX_ATTEMPTS = 3` laws. A
+ *   second death without a new Attempt ends in `needs_human ("died-after-respawn")`.
+ *   Create RPCs are idempotency-keyed by `${task}-spawn-${seq}` /
+ *   `${task}-respawn-${seq}` (falling back to `task`), so a replayed socket
+ *   meets the same operation while each distinct dispatch gets its own key.
  * - **The Lead rider (v0.0.10, ADR 0006 §3):** the watch loop carries the
  *   Lead's denial-stall predicate as a rider — the announced path to a
  *   standing plugin loop. Zero model calls: the predicate is ledger
@@ -78,6 +79,11 @@ export const GRACE_MS = 30_000;
  * poke for this long is silence — the `STALL_WARN_MS` precedent's own size.
  */
 export const RE_STALL_MS = 10 * 60_000;
+/**
+ * The Attempt ceiling (ADR 0008 §1): a Task may open at most 3 Attempts.
+ * Mirrored from `src/events.ts` because CLIs import no `src/` code (ADR 0004).
+ */
+export const MAX_ATTEMPTS = 3;
 /** Creating an agent runs the before-hooks and boots a provider session — this is not a fast RPC. */
 const CREATE_TIMEOUT_MS = 120_000;
 const CONNECT_TIMEOUT_MS = 10_000;
@@ -221,6 +227,17 @@ export function prepareWorkspace(workspace, task) {
     return { ok: false, reason: `could not ${branchExists ? "switch to" : "create"} branch ${task}: ${firstLine(switched.stderr ?? switched.error?.message ?? "")}` };
   }
   return { ok: true, branchExisted: branchExists };
+}
+
+/**
+ * ADR 0008 §2: before creating a replacement agent on Respawn, clean
+ * uncommitted worktree fragments (`git checkout -- . && git clean -fd`) in
+ * the task's workspace while preserving committed branch state (`HEAD`).
+ */
+function cleanWorkspaceForRespawn(workspace) {
+  if (typeof workspace !== "string" || workspace === "") return;
+  gitIn(workspace, ["checkout", "--", "."]);
+  gitIn(workspace, ["clean", "-fd"]);
 }
 
 function firstLine(text) {
@@ -446,11 +463,11 @@ async function reconnect(rpc, log) {
  * baked from this process's environment, and the contract's description
  * (when set) riding ahead of it as the assignment.
  */
-export async function createTaskAgent(rpc, { task, provider, model, cwd, brief }) {
+export async function createTaskAgent(rpc, { task, idempotencyKey, provider, model, cwd, brief }) {
   const config = { provider, cwd, title: task, ...(model === undefined ? {} : { model }) };
   if (rpc.features?.creationLifecycle === true) {
     const payload = await rpc.request(
-      { type: "agent.create.request", idempotencyKey: task, subscribe: true, config, initialPrompt: brief },
+      { type: "agent.create.request", idempotencyKey: idempotencyKey ?? task, subscribe: true, config, initialPrompt: brief },
       { responseType: "agent.create.response", timeoutMs: CREATE_TIMEOUT_MS },
     );
     if (payload.error !== undefined && payload.error !== null) {
@@ -477,11 +494,18 @@ export async function createTaskAgent(rpc, { task, provider, model, cwd, brief }
 
 /**
  * Events the Lead's predicate ignores when it walks a task's slice for its
- * last event (the v0.0.10 design §1): the driver's own meter line and the
- * Lead's own three lines are not agent activity, so none of them can
- * displace a denial from last position.
+ * last event (the v0.0.10 design §1 / ADR 0008): the driver's own meter line
+ * and the Lead's own re-poke, respawn, and needs-human lines are not agent
+ * activity, so none of them can displace a denial from last position.
  */
-const PREDICATE_IGNORED = new Set(["meter_written", "repoke_dispatched", "repoke_refused", "needs_human"]);
+const PREDICATE_IGNORED = new Set([
+  "meter_written",
+  "repoke_dispatched",
+  "repoke_refused",
+  "respawn_dispatched",
+  "respawn_refused",
+  "needs_human",
+]);
 
 /**
  * The re-poke's fixed text (the v0.0.10 design §2) — the needed-text shape
@@ -495,16 +519,19 @@ export function repokeText(task, rule) {
 
 /**
  * The Lead's one decision over a task's ledger slice (the v0.0.10 design
- * §1 + §3), evaluated at every poll in both watch branches. Pure ledger
- * arithmetic — the measured surface (the daemon stream never reached the
- * driver in any stall; the ledger is the one carrier of the denial):
+ * §1 + §3 / ADR 0008 §1), evaluated at every poll in both watch branches. Pure
+ * ledger arithmetic — the measured surface (the daemon stream never reached the
+ * driver in any stall; the ledger is the one carrier of the denial and the
+ * gate verdict):
  *
  * - `poke` — the last task event (predicate-ignored kinds aside) is a
  *   `permit_denied`, the grace is spent, and no `repoke_dispatched` exists:
  *   spend the task's one re-poke now. `denial` is the event to answer.
- * - `needs-human` — the poke is spent and the stall persisted: a NEW denial
- *   after the poke's seq (`denied-again`), or no task event at all after it
- *   for `RE_STALL_MS` (`silent-after-repoke`). Terminal for the watch.
+ * - `needs-human` — the task's latest `gate_finished` is `red` at
+ *   `attempt >= MAX_ATTEMPTS` (`attempt-ceiling`), OR the poke is spent and the
+ *   stall persisted: a NEW denial after the poke's seq (`denied-again`), or no
+ *   task event at all after it for `RE_STALL_MS` (`silent-after-repoke`).
+ *   Terminal for the watch.
  * - `watch` — a Lead condition is still pending (grace not spent, or the
  *   re-stall window still open): hold any `finished` commit — a ledger
  *   stall must not end in the classifier's silent swallow.
@@ -517,12 +544,17 @@ export function repokeText(task, rule) {
  */
 export function leadDecision(events, task, now = Date.now(), { graceMs = GRACE_MS, reStallMs = RE_STALL_MS } = {}) {
   let repoke;
+  let lastGate;
   const relevant = [];
   for (const evt of events) {
     if (evt.task !== task) continue;
     if (evt.event === "repoke_dispatched") repoke = evt;
+    if (evt.event === "gate_finished") lastGate = evt;
     if (PREDICATE_IGNORED.has(evt.event)) continue;
     relevant.push(evt);
+  }
+  if (lastGate !== undefined && lastGate.verdict === "red" && lastGate.attempt >= MAX_ATTEMPTS) {
+    return { act: "needs-human", reason: "attempt-ceiling", evidence: { attempt: lastGate.attempt, gate: lastGate.seq } };
   }
   const last = relevant.at(-1);
   if (last !== undefined && last.event === "permit_denied") {
@@ -556,11 +588,16 @@ export function leadDecision(events, task, now = Date.now(), { graceMs = GRACE_M
   return { act: "clear" };
 }
 
-/** This task's latest `spawn_dispatched` seq — the anchor for both this-run windows (-1 when never spawned). */
+/**
+ * This task's latest `spawn_dispatched` or `respawn_dispatched` seq — the
+ * anchor for both this-run windows (`postSpawnLife` and `verdictOfThisRun`;
+ * -1 when never spawned). After a Respawn, the replacement agent's run
+ * anchors at its own `respawn_dispatched` line (ADR 0008 §2).
+ */
 function lastSpawnSeq(events, task) {
   let seq = -1;
   for (const evt of events) {
-    if (evt.task === task && evt.event === "spawn_dispatched") seq = evt.seq;
+    if (evt.task === task && (evt.event === "spawn_dispatched" || evt.event === "respawn_dispatched")) seq = evt.seq;
   }
   return seq;
 }
@@ -665,7 +702,13 @@ async function endNeedsHuman(spoolRoot, task, signal, log) {
   } else if (!reply.ok) {
     log(`factory: ${task} needs-human refused — ${reply.code}: ${reply.message} (no ledger line)`);
   }
-  return { fate: "needs-human", reason: `${signal.reason} (denial seq ${signal.evidence.denial}, repoke seq ${signal.evidence.repoke})` };
+  const detail =
+    "denial" in signal.evidence
+      ? `denial seq ${signal.evidence.denial}, repoke seq ${signal.evidence.repoke}`
+      : "attempt" in signal.evidence
+        ? `attempt ${signal.evidence.attempt}, gate seq ${signal.evidence.gate}`
+        : `spawn seq ${signal.evidence.spawn}, respawn seq ${signal.evidence.respawn}`;
+  return { fate: "needs-human", reason: `${signal.reason} (${detail})` };
 }
 
 // ---- observe: poll snapshots to a terminal state, stall report-only (ticket 03 §5–6) -----------------
@@ -720,7 +763,11 @@ export function agentFate(agent) {
  * rider's surfaces: the ledger is the predicate's only input, and both Lead
  * acts are spool submissions.
  */
-export async function observeTasks(rpc, entries, { pollMs = POLL_MS, log = () => {}, onTerminal = () => {}, stateDir, spoolRoot, missingDeadMs = ZERO_GROWTH_DEAD_MS, graceMs = GRACE_MS, reStallMs = RE_STALL_MS } = {}) {
+export async function observeTasks(
+  rpc,
+  entries,
+  { pollMs = POLL_MS, log = () => {}, onTerminal = () => {}, stateDir, spoolRoot, provider, missingDeadMs = ZERO_GROWTH_DEAD_MS, graceMs = GRACE_MS, reStallMs = RE_STALL_MS } = {},
+) {
   const commitTerminal = async (entry, fate, snapshot) => {
     entry.terminal = fate;
     await captureUsage(rpc, entry, snapshot);
@@ -748,30 +795,127 @@ export async function observeTasks(rpc, entries, { pollMs = POLL_MS, log = () =>
   };
   /**
    * The null lane's ledger continuation — v0.0.10's witnessed shape, kept
-   * whole (ADR 0007 §4): the Lead rider over the task's slice, and on clear
-   * this run's verdict as the finish signal. Shared by both null-lane
-   * branches that survive the oracle: the answering timeline (where an
-   * empty ledger makes both steps no-ops — spawn-then-silence with growth
-   * is healthy ask-less work) and the not-found contradicted by post-spawn
-   * ledger life.
+   * whole (ADR 0007 §4), with the ADR 0008 §1 multi-attempt survival rule:
+   * `runLead` runs first (catching `attempt-ceiling` at Attempt 3 red), and
+   * on `"clear"` only a `green` `gate_finished` ends the watch as `finished`
+   * — a `red` Attempt < `MAX_ATTEMPTS` stays in the loop so the agent can
+   * make its next Attempt.
    */
   const continueOnLedger = async (entry, events) => {
     const outcome = await runLead(entry, events, undefined);
     if (outcome !== "clear") return;
     const verdict = verdictOfThisRun(events, entry.task);
-    if (verdict !== undefined) {
+    if (verdict !== undefined && verdict.verdict === "green") {
       log(`factory: ${entry.task} verdict on the ledger (the snapshot lane stayed null) — attempt ${verdict.attempt} ${verdict.verdict}`);
       await commitTerminal(entry, { fate: "finished" }, undefined);
     }
   };
-  for (const entry of entries) {
-    entry.terminal = undefined;
+  /**
+   * ADR 0008 §2: on `Substrate death` (either watch lane), when `provider` is
+   * present, check the task's ledger slice for the one-Respawn-per-progress-marker
+   * law. Meter the dead agent first, then either dispatch the replacement
+   * agent (cleaning uncommitted worktree fragments and keying create by
+   * `${task}-respawn-${event.seq}`) or end the task in
+   * `needs_human ("died-after-respawn")` when a Respawn was already spent.
+   */
+  const handleSubstrateDeath = async (entry, reason, snapshot) => {
+    if (typeof provider !== "string" || provider.trim() === "") {
+      if (snapshot === undefined) {
+        entry.terminal = { fate: "died", reason };
+        await onTerminal(entry);
+      } else {
+        await commitTerminal(entry, { terminal: true, fate: "died", reason }, snapshot);
+      }
+      return;
+    }
+    const events = readDriverLedger(stateDir);
+    let lastSpawn;
+    let lastGate;
+    let lastRespawn;
+    let maxAttempt = 0;
+    let hasGreen = false;
+    for (const evt of events) {
+      if (evt.task !== entry.task) continue;
+      if (Number.isInteger(evt.attempt) && evt.attempt > maxAttempt) maxAttempt = evt.attempt;
+      if (evt.event === "spawn_dispatched") lastSpawn = evt;
+      else if (evt.event === "gate_finished") {
+        lastGate = evt;
+        if (evt.verdict === "green") hasGreen = true;
+      } else if (evt.event === "respawn_dispatched") {
+        lastRespawn = evt;
+      }
+    }
+    const progressSeq = Math.max(lastSpawn?.seq ?? -1, lastGate?.seq ?? -1);
+    const spentRespawn = lastRespawn !== undefined && lastRespawn.seq > progressSeq ? lastRespawn : undefined;
+
+    // Always capture and submit the dead agent's meter before replacing or ending.
+    await captureUsage(rpc, entry, snapshot);
+    await submitMeter(spoolRoot, entry, provider, log);
+    entry.metered = true;
+
+    if (spentRespawn !== undefined && lastSpawn !== undefined) {
+      const nhFate = await endNeedsHuman(
+        spoolRoot,
+        entry.task,
+        { reason: "died-after-respawn", evidence: { spawn: lastSpawn.seq, respawn: spentRespawn.seq } },
+        log,
+      );
+      entry.terminal = nhFate;
+      await onTerminal(entry);
+      return;
+    }
+
+    if (spentRespawn === undefined && lastSpawn !== undefined && !hasGreen && maxAttempt < MAX_ATTEMPTS) {
+      const diedAgentId = entry.agentId;
+      const request = { id: randomId(), kind: "respawn", task: entry.task, provider, died_agent: diedAgentId };
+      submit(spoolRoot, request);
+      const reply = await awaitReply(spoolRoot, request.id, LEAD_WAIT_MS);
+      if (reply === null) {
+        log(`factory: ${entry.task} respawn — no reply within ${LEAD_WAIT_MS / 1000}s (request ${request.id} stays in the spool)`);
+      } else if (!reply.ok) {
+        log(`factory: ${entry.task} respawn refused — ${reply.code}: ${reply.message}`);
+      } else {
+        const contract = contractFromLedger(events, entry.task);
+        const workspace = entry.workspace ?? contract?.workspace;
+        cleanWorkspaceForRespawn(workspace);
+        const brief = entry.brief ?? renderBrief(entry.task, process.env.PATH ?? "", contract?.description);
+        const { provider: providerId, model } = splitProvider(provider);
+        const respawnSeq = reply.event?.seq;
+        const idempotencyKey = respawnSeq !== undefined ? `${entry.task}-respawn-${respawnSeq}` : `${entry.task}-respawn`;
+        try {
+          const newAgentId = await createTaskAgent(rpc, {
+            task: entry.task,
+            idempotencyKey,
+            provider: providerId,
+            ...(model === undefined ? {} : { model }),
+            cwd: workspace,
+            brief,
+          });
+          entry.agentId = newAgentId;
+          resetWatchTrackers(entry);
+          log(`factory: ${entry.task} agent ${newAgentId.slice(0, 12)} respawned (replacing ${diedAgentId.slice(0, 12)}) — watching to verdict`);
+          return;
+        } catch (err) {
+          log(`factory: ${entry.task} respawn agent create failed — ${err.code !== undefined ? `${err.code}: ` : ""}${err.message}`);
+        }
+      }
+    }
+
+    entry.terminal = { fate: "died", reason };
+    await onTerminal(entry);
+  };
+  const resetWatchTrackers = (entry) => {
     entry.printedStatus = undefined;
     entry.timelineSeq = -1;
     entry.timelineStillSince = Date.now();
     entry.warned = false;
     entry.missingSince = undefined;
+    entry.metered = false;
+  };
+  for (const entry of entries) {
+    entry.terminal = undefined;
     entry.repokeSubmitted = undefined;
+    resetWatchTrackers(entry);
   }
   while (entries.some((e) => e.terminal === undefined)) {
     for (const entry of entries) {
@@ -844,11 +988,8 @@ export async function observeTasks(rpc, entries, { pollMs = POLL_MS, log = () =>
         if (err.rpc === true) {
           // The daemon answered and the answer is death: the snapshot lane's
           // own error answer, or one of the null lane's two doors thrown
-          // above. No snapshot ever arrived, so the meter's capture is the
-          // honest empty one — the lane reported nothing to a dead agent's
-          // poll.
-          entry.terminal = { fate: "died", reason: err.message };
-          await onTerminal(entry);
+          // above. Route through the ADR 0008 §2 Respawn rider.
+          await handleSubstrateDeath(entry, err.message, undefined);
           continue;
         }
         // Connection trouble or a slow poll — transient, never a verdict.
@@ -863,6 +1004,10 @@ export async function observeTasks(rpc, entries, { pollMs = POLL_MS, log = () =>
         log(`factory: ${entry.task} agent ${snapshot.status}${snapshot.attentionReason === undefined ? "" : ` (${snapshot.attentionReason})`}`);
       }
       if (fate.terminal) {
+        if (fate.fate === "died") {
+          await handleSubstrateDeath(entry, fate.reason, snapshot);
+          continue;
+        }
         if (fate.fate === "finished") {
           // The Lead's second insertion (v0.0.10 §1): idle-without-Claim is
           // only a finish when the ledger agrees — a denial-stall matching
@@ -1122,14 +1267,17 @@ export async function runDriver({ home, stateDir, spoolRoot, tasks, provider, wa
     if (created > 0) await sleep(staggerMs); // CPU etiquette only — gates must not serialize (ticket 03 §7)
     try {
       const brief = renderBrief(task, process.env.PATH ?? "", contract.description);
+      const spawnSeq = reply.event?.seq;
+      const idempotencyKey = spawnSeq !== undefined ? `${task}-spawn-${spawnSeq}` : task;
       const agentId = await createTaskAgent(rpc, {
         task,
+        idempotencyKey,
         provider: providerId,
         ...(model === undefined ? {} : { model }),
         cwd: contract.workspace,
         brief,
       });
-      entries.push({ task, agentId });
+      entries.push({ task, agentId, workspace: contract.workspace, brief });
       created += 1;
       say(`factory: ${task} agent ${agentId.slice(0, 12)} created — watching to verdict`);
     } catch (err) {
@@ -1142,13 +1290,14 @@ export async function runDriver({ home, stateDir, spoolRoot, tasks, provider, wa
   // the plugin wrote the verdict while the agent worked. The meter follows
   // the print (v0.0.8): the usage captured at the terminal moment rides one
   // spool request, and the plugin appends the `meter_written` line. The
-  // Lead rider (v0.0.10) rides the same loop with both surfaces: the ledger
-  // its predicate reads, and the spool its two acts submit through.
+  // Lead rider (v0.0.10 / v0.0.12) rides the same loop with both surfaces:
+  // the ledger its predicate reads, and the spool its acts submit through.
   await observeTasks(rpc, entries, {
     pollMs,
     log: say,
     stateDir,
     spoolRoot,
+    provider,
     onTerminal: async (entry) => {
       if (entry.terminal.fate !== "finished") {
         say(`factory: ${entry.task} agent ${entry.terminal.fate} — ${entry.terminal.reason ?? "no reason given"}`);
@@ -1163,7 +1312,7 @@ export async function runDriver({ home, stateDir, spoolRoot, tasks, provider, wa
           `choke=${outcome.allowed}/${outcome.denied}/${outcome.blocked}`,
         ].join(" "),
       );
-      await submitMeter(spoolRoot, entry, provider, say);
+      if (!entry.metered) await submitMeter(spoolRoot, entry, provider, say);
     },
   });
   rpc.close();

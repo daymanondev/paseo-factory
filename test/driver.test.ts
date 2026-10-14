@@ -5,8 +5,10 @@ import { join } from "node:path";
 import {
   agentFate,
   contractFromLedger,
+  createTaskAgent,
   GRACE_MS,
   leadDecision,
+  MAX_ATTEMPTS,
   observeTasks,
   postSpawnLife,
   prepareWorkspace,
@@ -325,6 +327,85 @@ test("postSpawnLife and verdictOfThisRun — the death fix's ledger arithmetic a
   assert.equal(verdictOfThisRun(spawnOnly, "T1"), undefined, "no verdict yet");
 });
 
+test("ADR 0008 pure functions: MAX_ATTEMPTS, leadDecision attempt-ceiling, respawn anchoring in postSpawnLife/verdictOfThisRun, and createTaskAgent idempotencyKey", async () => {
+  const NOW = Date.parse("2026-10-12T12:00:00.000Z");
+  assert.equal(MAX_ATTEMPTS, 3, "the Attempt ceiling is fixed at 3 in code");
+
+  // leadDecision ignores respawn_dispatched / respawn_refused when checking denial in last position
+  assert.equal(
+    leadDecision(slice([["permit_denied", -60_000], ["respawn_refused", -40_000]]), "T1", NOW).act,
+    "poke",
+  );
+
+  // leadDecision returns clear after red Attempts 1 and 2, and needs-human ("attempt-ceiling") when Attempt 3 finishes red
+  const twoRed = [
+    { seq: 1, ts: new Date(NOW - 90_000).toISOString(), event: "gate_finished", task: "T1", attempt: 1, verdict: "red" },
+    { seq: 2, ts: new Date(NOW - 50_000).toISOString(), event: "gate_finished", task: "T1", attempt: 2, verdict: "red" },
+  ];
+  assert.equal(leadDecision(twoRed, "T1", NOW).act, "clear");
+
+  const threeRed = [
+    ...twoRed,
+    { seq: 7, ts: new Date(NOW - 20_000).toISOString(), event: "gate_finished", task: "T1", attempt: 3, verdict: "red" },
+  ];
+  assert.deepEqual(leadDecision(threeRed, "T1", NOW), {
+    act: "needs-human",
+    reason: "attempt-ceiling",
+    evidence: { attempt: 3, gate: 7 },
+  });
+
+  // Attempt 3 green is NOT attempt-ceiling
+  const thirdGreen = [
+    ...twoRed,
+    { seq: 7, ts: new Date(NOW - 20_000).toISOString(), event: "gate_finished", task: "T1", attempt: 3, verdict: "green" },
+  ];
+  assert.equal(leadDecision(thirdGreen, "T1", NOW).act, "clear");
+
+  // postSpawnLife and verdictOfThisRun anchor on the latest spawn_dispatched OR respawn_dispatched
+  const afterRespawnSilence = slice([
+    ["spawn_dispatched", -90_000],
+    ["permit_allowed", -80_000],
+    ["gate_finished", -70_000],
+    ["respawn_dispatched", -50_000],
+    ["respawn_refused", -40_000],
+  ]);
+  assert.equal(postSpawnLife(afterRespawnSilence, "T1"), false, "Agent 1's life and respawn_refused do not count as life after Agent 2's respawn_dispatched");
+  assert.equal(verdictOfThisRun(afterRespawnSilence, "T1"), undefined, "Agent 1's gate_finished before respawn_dispatched is not Agent 2's verdict");
+
+  const afterRespawnLifeAndVerdict = [
+    ...afterRespawnSilence,
+    { seq: 6, ts: new Date(NOW - 30_000).toISOString(), event: "claim_reported", task: "T1", attempt: 2 },
+    { seq: 7, ts: new Date(NOW - 20_000).toISOString(), event: "gate_finished", task: "T1", attempt: 2, verdict: "green" },
+  ];
+  assert.equal(postSpawnLife(afterRespawnLifeAndVerdict, "T1"), true, "Agent 2's claim after respawn_dispatched is post-spawn life");
+  assert.equal((verdictOfThisRun(afterRespawnLifeAndVerdict, "T1") as { seq?: number } | undefined)?.seq, 7);
+
+  // createTaskAgent uses idempotencyKey when provided, falling back to task
+  const sent: Record<string, unknown>[] = [];
+  const fakeRpc = {
+    features: { creationLifecycle: true },
+    async request(msg: Record<string, unknown>) {
+      sent.push(msg);
+      return { agent: { id: `ag-${sent.length}` } };
+    },
+  };
+  await createTaskAgent(fakeRpc as unknown as Parameters<typeof createTaskAgent>[0], {
+    task: "T1",
+    provider: "claude",
+    cwd: "/ws",
+    brief: "b",
+  });
+  await createTaskAgent(fakeRpc as unknown as Parameters<typeof createTaskAgent>[0], {
+    task: "T1",
+    idempotencyKey: "T1-respawn-12",
+    provider: "claude",
+    cwd: "/ws",
+    brief: "b",
+  });
+  assert.equal(sent[0].idempotencyKey, "T1");
+  assert.equal(sent[1].idempotencyKey, "T1-respawn-12");
+});
+
 /**
  * The loop-wiring harness (v0.0.10): a fake snapshot lane over the REAL
  * spool and factory, so the Lead's two acts run through the plugin's own
@@ -361,8 +442,8 @@ const rpcErrorTimeline = (message: string) => (): Record<string, unknown> => {
 
 async function leadHarness(
   t: TestContext,
-  respond: () => Record<string, unknown> | null,
-  timeline: () => Record<string, unknown> = stillTimeline(),
+  respond: (agentId?: string) => Record<string, unknown> | null,
+  timeline: (agentId?: string) => Record<string, unknown> = stillTimeline(),
 ) {
   const dir = makeTempDir("paseo-factory-lead-");
   disposeDir(t, dir);
@@ -380,16 +461,22 @@ async function leadHarness(
 
   const sent: Record<string, unknown>[] = [];
   let fetches = 0;
+  let createdCount = 1;
   const rpc = {
     connected: true,
+    features: { creationLifecycle: true },
     async request(message: Record<string, unknown>) {
       sent.push(message);
       if (message.type === "fetch_agent_request") {
         fetches += 1;
-        return { requestId: "r", agent: respond() };
+        return { requestId: "r", agent: respond(message.agentId as string | undefined) };
       }
       if (message.type === "fetch_agent_timeline_request") {
-        return timeline(); // the oracle's shapes: answers, or the error-named payload the live daemon resolves
+        return timeline(message.agentId as string | undefined); // the oracle's shapes: answers, or the error-named payload the live daemon resolves
+      }
+      if (message.type === "agent.create.request") {
+        createdCount += 1;
+        return { requestId: "r", agent: { id: `ag-lead${createdCount}` } };
       }
       if (message.type === "send_agent_message_request") return { requestId: "r", accepted: true, error: null };
       return { requestId: "r" };
@@ -407,8 +494,8 @@ async function leadHarness(
       rule: "policy:S1-git-vocabulary",
       reason,
     });
-  const claimGreen = () => {
-    factory.ledger.append({ event: "claim_reported", task: "LEAD1", attempt: 1, sha: "a1b2c3d", agent: "ag-lead1" });
+  const claimGreen = (agent = "ag-lead1") => {
+    factory.ledger.append({ event: "claim_reported", task: "LEAD1", attempt: 1, sha: "a1b2c3d", agent });
     factory.ledger.append({ event: "gate_finished", task: "LEAD1", attempt: 1, exit: 0, verdict: "green", note: "", sha: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0" });
   };
   const processedKinds = (): string[] =>
@@ -417,6 +504,7 @@ async function leadHarness(
       .map((name) => (JSON.parse(readFileSync(join(spoolRoot, "processed", name), "utf8")) as { kind: string }).kind)
       .sort();
   return {
+    workspace,
     stateDir,
     spoolRoot,
     factory,
@@ -752,6 +840,203 @@ test("healthy ask-less work: null snapshots + a growing timeline, the claim fini
       harness.factory.ledger.events.filter((e) => e.event === "repoke_dispatched" || e.event === "repoke_refused" || e.event === "needs_human").length,
       0,
       "the ledger carries no Lead line — the Arm A discipline",
+    );
+  } finally {
+    harness.stop();
+  }
+});
+
+test("multi-attempt survival on the null lane (ADR 0008 §1 / Q2): continueOnLedger keeps watching after Attempt 1 finishes red and commits finished only when Attempt 2 finishes green", async (t) => {
+  const harness = await leadHarness(t, () => null, growingTimeline());
+  try {
+    const terminals: { fate?: string }[] = [];
+    const run = observeTasks(harness.rpc, [{ task: "LEAD1", agentId: "ag-lead1" }], {
+      pollMs: 10,
+      stateDir: harness.stateDir,
+      spoolRoot: harness.spoolRoot,
+      missingDeadMs: 200,
+      log: () => {},
+      onTerminal: (entry) => {
+        terminals.push({ ...(entry.terminal as { fate?: string }) });
+      },
+    });
+
+    // Attempt 1 lands red on the ledger: the null lane must NOT exit early.
+    harness.factory.ledger.append({ event: "claim_reported", task: "LEAD1", attempt: 1, sha: "a1b2c3d", agent: "ag-lead1" });
+    harness.factory.ledger.append({ event: "gate_finished", task: "LEAD1", attempt: 1, exit: 1, verdict: "red", note: "test failed", sha: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0" });
+
+    await until_(() => assert.ok(harness.fetches >= 3), 5000);
+    assert.equal(terminals.length, 0, "a red Attempt 1 (< MAX_ATTEMPTS) must not end the watch — the agent is still fixing its branch");
+
+    // Attempt 2 lands green: now the watch commits fate: "finished".
+    harness.factory.ledger.append({ event: "claim_reported", task: "LEAD1", attempt: 2, sha: "f1e2d3c", agent: "ag-lead1" });
+    harness.factory.ledger.append({ event: "gate_finished", task: "LEAD1", attempt: 2, exit: 0, verdict: "green", note: "", sha: "f1e2d3c4b5a6987654321f0e1d2c3b4a5f6e7d8" });
+
+    await run;
+    assert.deepEqual(terminals.map((x) => x.fate), ["finished"]);
+    assert.equal(harness.factory.ledger.events.filter((e) => e.event === "needs_human").length, 0);
+  } finally {
+    harness.stop();
+  }
+});
+
+test("the attempt-ceiling terminal (ADR 0008 §1): when Attempt 3 finishes red, observeTasks writes needs_human (attempt-ceiling) with { attempt: 3, gate } evidence and ends", async (t) => {
+  const harness = await leadHarness(t, () => null, growingTimeline());
+  try {
+    const terminals: { fate?: string; reason?: string }[] = [];
+    const run = observeTasks(harness.rpc, [{ task: "LEAD1", agentId: "ag-lead1" }], {
+      pollMs: 10,
+      stateDir: harness.stateDir,
+      spoolRoot: harness.spoolRoot,
+      missingDeadMs: 200,
+      log: () => {},
+      onTerminal: (entry) => {
+        terminals.push({ ...(entry.terminal as { fate?: string; reason?: string }) });
+      },
+    });
+
+    // Attempts 1 and 2 finish red; the watch keeps going.
+    for (const attempt of [1, 2]) {
+      harness.factory.ledger.append({ event: "claim_reported", task: "LEAD1", attempt, sha: "a1b2c3d", agent: "ag-lead1" });
+      harness.factory.ledger.append({ event: "gate_finished", task: "LEAD1", attempt, exit: 1, verdict: "red", note: "red", sha: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0" });
+    }
+    await until_(() => assert.ok(harness.fetches >= 3), 5000);
+    assert.equal(terminals.length, 0, "Attempts 1 and 2 red do not trip attempt-ceiling");
+
+    // Attempt 3 finishes red: attempt-ceiling fires through the real spool.
+    harness.factory.ledger.append({ event: "claim_reported", task: "LEAD1", attempt: 3, sha: "a1b2c3d", agent: "ag-lead1" });
+    const gate3 = harness.factory.ledger.append({
+      event: "gate_finished",
+      task: "LEAD1",
+      attempt: 3,
+      exit: 1,
+      verdict: "red",
+      note: "still red",
+      sha: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0",
+    });
+
+    await run;
+    assert.equal(terminals.length, 1);
+    assert.equal(terminals[0].fate, "needs-human");
+    assert.match(terminals[0].reason ?? "", new RegExp(`attempt-ceiling \\(attempt 3, gate seq ${gate3.seq}\\)`));
+    const nh = harness.factory.ledger.events.find((e) => e.event === "needs_human") as { reason: string; evidence: { attempt: number; gate: number } } | undefined;
+    assert.ok(nh, "needs_human landed on the ledger through the real spool");
+    assert.equal(nh?.reason, "attempt-ceiling");
+    assert.deepEqual(nh?.evidence, { attempt: 3, gate: gate3.seq });
+  } finally {
+    harness.stop();
+  }
+});
+
+test("automatic Respawn on Substrate death (ADR 0008 §2): meters dead Agent 1, cleans uncommitted worktree fragments, keys agent.create.request by respawn_dispatched.seq, and watches Agent 2 to green", async (t) => {
+  let seqEnd = 50;
+  const harness = await leadHarness(
+    t,
+    () => null,
+    (agentId) => {
+      if (agentId === "ag-lead1") return { requestId: "r", error: "Agent not found: ag-lead1" };
+      seqEnd += 1;
+      return { requestId: "r", entries: [{ seqEnd }] };
+    },
+  );
+  try {
+    // Dirty the workspace with an uncommitted tracked edit and an untracked file left by dead Agent 1.
+    const trackedPath = join(harness.workspace, "src", "format.ts");
+    const originalTracked = readFileSync(trackedPath, "utf8");
+    writeFileSync(trackedPath, "half-written broken edit\n");
+    const untrackedPath = join(harness.workspace, "src", "leftover.tmp");
+    writeFileSync(untrackedPath, "untracked leftover\n");
+
+    const terminals: { fate?: string; agentId?: string }[] = [];
+    const entry = { task: "LEAD1", agentId: "ag-lead1", workspace: harness.workspace };
+    const run = observeTasks(harness.rpc, [entry], {
+      pollMs: 10,
+      stateDir: harness.stateDir,
+      spoolRoot: harness.spoolRoot,
+      provider: "claude/opus-4-7",
+      log: () => {},
+      onTerminal: (e) => {
+        terminals.push({ ...(e.terminal as { fate?: string }), agentId: e.agentId });
+      },
+    });
+
+    // Wait for the respawn_dispatched line and the replacement agent creation.
+    await until_(() => {
+      assert.ok(harness.factory.ledger.events.some((e) => e.event === "respawn_dispatched"));
+      assert.equal(entry.agentId, "ag-lead2");
+    }, 5000);
+
+    // Dead Agent 1 was metered before the replacement started.
+    const metersAfterRespawn = harness.factory.ledger.events.filter((e) => e.event === "meter_written") as { agent?: string; provider?: string }[];
+    assert.equal(metersAfterRespawn.length, 1, "dead Agent 1 metered before Respawn");
+    assert.equal(metersAfterRespawn[0].agent, "ag-lead1");
+    assert.equal(metersAfterRespawn[0].provider, "claude/opus-4-7");
+
+    // Uncommitted worktree fragments were cleaned before Agent 2 was created.
+    assert.equal(readFileSync(trackedPath, "utf8"), originalTracked, "git checkout -- . restored tracked file");
+    assert.ok(!readdirSync(join(harness.workspace, "src")).includes("leftover.tmp"), "git clean -fd removed untracked file");
+
+    // Replacement agent create was keyed by LEAD1-respawn-<seq>.
+    const respawnEvt = harness.factory.ledger.events.find((e) => e.event === "respawn_dispatched") as { seq: number; died_agent: string } | undefined;
+    assert.equal(respawnEvt?.died_agent, "ag-lead1");
+    const createMsg = harness.sent.find((m) => m.type === "agent.create.request") as { idempotencyKey?: string } | undefined;
+    assert.equal(createMsg?.idempotencyKey, `LEAD1-respawn-${respawnEvt?.seq}`);
+
+    // Now replacement Agent 2 claims green and finishes the task.
+    harness.claimGreen("ag-lead2");
+    await run;
+    assert.deepEqual(terminals, [{ fate: "finished", agentId: "ag-lead2" }]);
+  } finally {
+    harness.stop();
+  }
+});
+
+test("the died-after-respawn terminal (ADR 0008 §2): when replacement Agent 2 also dies, observeTasks meters Agent 2, writes needs_human (died-after-respawn), and ends without a second respawn", async (t) => {
+  const harness = await leadHarness(
+    t,
+    () => null,
+    (agentId) => ({ requestId: "r", error: `Agent not found: ${agentId}` }),
+  );
+  try {
+    const terminals: { fate?: string; reason?: string }[] = [];
+    const entry = { task: "LEAD1", agentId: "ag-lead1", workspace: harness.workspace };
+    await observeTasks(harness.rpc, [entry], {
+      pollMs: 10,
+      stateDir: harness.stateDir,
+      spoolRoot: harness.spoolRoot,
+      provider: "claude/opus-4-7",
+      log: () => {},
+      onTerminal: (e) => {
+        terminals.push({ ...(e.terminal as { fate?: string; reason?: string }) });
+      },
+    });
+
+    const spawnEvt = harness.factory.ledger.events.find((e) => e.event === "spawn_dispatched") as { seq: number };
+    const respawnEvts = harness.factory.ledger.events.filter((e) => e.event === "respawn_dispatched") as { seq: number; died_agent: string }[];
+    assert.equal(respawnEvts.length, 1, "exactly one automatic Respawn dispatched");
+    assert.equal(respawnEvts[0].died_agent, "ag-lead1");
+
+    // Both dead agents (ag-lead1 and ag-lead2) were metered.
+    const meters = harness.factory.ledger.events.filter((e) => e.event === "meter_written") as { agent?: string }[];
+    assert.deepEqual(
+      meters.map((m) => m.agent),
+      ["ag-lead1", "ag-lead2"],
+      "both dead agents metered in order",
+    );
+
+    // needs_human (died-after-respawn) landed with { spawn, respawn } evidence.
+    const nh = harness.factory.ledger.events.find((e) => e.event === "needs_human") as
+      | { reason: string; evidence: { spawn: number; respawn: number } }
+      | undefined;
+    assert.ok(nh, "needs_human written on second death");
+    assert.equal(nh?.reason, "died-after-respawn");
+    assert.deepEqual(nh?.evidence, { spawn: spawnEvt.seq, respawn: respawnEvts[0].seq });
+
+    assert.equal(terminals.length, 1);
+    assert.equal(terminals[0].fate, "needs-human");
+    assert.match(
+      terminals[0].reason ?? "",
+      new RegExp(`died-after-respawn \\(spawn seq ${spawnEvt.seq}, respawn seq ${respawnEvts[0].seq}\\)`),
     );
   } finally {
     harness.stop();

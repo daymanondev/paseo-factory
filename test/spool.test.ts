@@ -339,11 +339,35 @@ test("parseSpoolRequest accepts the repoke and needs_human shapes and nothing ar
     parseSpoolRequest({ id: "r2", kind: "needs_human", task: "T1", reason: "denied-again", evidence: { denial: 3, repoke: 4 } }),
     { id: "r2", kind: "needs_human", task: "T1", reason: "denied-again", evidence: { denial: 3, repoke: 4 } },
   );
+  assert.deepEqual(
+    parseSpoolRequest({ id: "r2b", kind: "needs_human", task: "T1", reason: "attempt-ceiling", evidence: { attempt: 3, gate: 9 } }),
+    { id: "r2b", kind: "needs_human", task: "T1", reason: "attempt-ceiling", evidence: { attempt: 3, gate: 9 } },
+  );
+  assert.deepEqual(
+    parseSpoolRequest({ id: "r2c", kind: "needs_human", task: "T1", reason: "died-after-respawn", evidence: { spawn: 2, respawn: 5 } }),
+    { id: "r2c", kind: "needs_human", task: "T1", reason: "died-after-respawn", evidence: { spawn: 2, respawn: 5 } },
+  );
   for (const bad of [
     { id: "r2", kind: "needs_human", task: "T1", reason: "nudged", evidence: { denial: 3, repoke: 4 } }, // off-vocabulary reason
     { id: "r2", kind: "needs_human", task: "T1", reason: "silent-after-repoke", evidence: { denial: 0, repoke: 4 } }, // seq 0 is not a seq
     { id: "r2", kind: "needs_human", task: "T1", reason: "silent-after-repoke", evidence: { denial: 3, repoke: 4.5 } }, // fractional seq
     { id: "r2", kind: "needs_human", task: "T1", reason: "silent-after-repoke" }, // no evidence
+    { id: "r2", kind: "needs_human", task: "T1", reason: "attempt-ceiling", evidence: { denial: 3, repoke: 4 } }, // mismatched reason/evidence
+    { id: "r2", kind: "needs_human", task: "T1", reason: "died-after-respawn", evidence: { attempt: 3, gate: 9 } }, // mismatched reason/evidence
+    { id: "r2", kind: "needs_human", task: "T1", reason: "denied-again", evidence: { spawn: 2, respawn: 5 } }, // mismatched reason/evidence
+  ]) {
+    assert.equal(parseSpoolRequest(bad), undefined, JSON.stringify(bad));
+  }
+
+  assert.deepEqual(
+    parseSpoolRequest({ id: "r3", kind: "respawn", task: "T1", provider: "claude/opus-4-7", died_agent: "ag-dead-1" }),
+    { id: "r3", kind: "respawn", task: "T1", provider: "claude/opus-4-7", died_agent: "ag-dead-1" },
+  );
+  for (const bad of [
+    { id: "r3", kind: "respawn", task: "T1", provider: "claude" }, // no died_agent
+    { id: "r3", kind: "respawn", task: "T1", provider: "claude", died_agent: "  " }, // blank died_agent
+    { id: "r3", kind: "respawn", task: "T1", provider: "  ", died_agent: "ag-1" }, // blank provider
+    { id: "r3", kind: "respawn", provider: "claude", died_agent: "ag-1" }, // no task
   ]) {
     assert.equal(parseSpoolRequest(bad), undefined, JSON.stringify(bad));
   }
@@ -409,3 +433,79 @@ test("handleSpoolRequest answers a repoke either way — the spend rides ok, alr
   }
   assert.equal(factory.ledger.events.filter((e) => e.event === "needs_human").length, 1, "the refused end wrote no second line");
 });
+
+test("handleSpoolRequest answers respawn (with event on both outcomes) and formats needs_human for attempt-ceiling and died-after-respawn (ADR 0008)", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const ws = join(dir, "ws");
+  mkdirSync(join(ws, "src"), { recursive: true });
+  writeFileSync(join(ws, "src", "x.ts"), "x\n");
+  const head = gitCommitAll(ws);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  factory.setContract({ task: "RSP-SP", workspace: ws, gate: "false", artifact: "src/x.ts" });
+
+  // Initial spawn carries its event on the reply so the driver can key agent creation by seq.
+  const spawned = await handleSpoolRequest(factory, { id: "s1", kind: "spawn", task: "RSP-SP", provider: "claude", arity: 1 });
+  assert.equal(spawned.ok, true);
+  assert.equal(spawned.event?.event, "spawn_dispatched");
+  const spawnSeq = spawned.event?.seq ?? 0;
+
+  // Respawn 1 dispatches and carries its event on the reply.
+  const respawned = await handleSpoolRequest(factory, {
+    id: "rs1",
+    kind: "respawn",
+    task: "RSP-SP",
+    provider: "claude",
+    died_agent: "ag-dead-1",
+  });
+  assert.equal(respawned.ok, true);
+  if (respawned.ok) {
+    assert.match(respawned.summary, /respawn dispatched for RSP-SP/);
+    assert.equal(respawned.event?.event, "respawn_dispatched");
+  }
+  const respawnSeq = respawned.event?.seq ?? 0;
+
+  // Second respawn without a new Attempt is refused and still carries its event.
+  const refused = await handleSpoolRequest(factory, {
+    id: "rs2",
+    kind: "respawn",
+    task: "RSP-SP",
+    provider: "claude",
+    died_agent: "ag-dead-2",
+  });
+  assert.equal(refused.ok, false);
+  if (!refused.ok) {
+    assert.equal(refused.code, "respawn-ceiling");
+    assert.equal(refused.event?.event, "respawn_refused");
+  }
+
+  // died-after-respawn needs_human over the spawn + respawn seqs.
+  const nhDied = await handleSpoolRequest(factory, {
+    id: "nh1",
+    kind: "needs_human",
+    task: "RSP-SP",
+    reason: "died-after-respawn",
+    evidence: { spawn: spawnSeq, respawn: respawnSeq },
+  });
+  assert.equal(nhDied.ok, true);
+  if (nhDied.ok) {
+    assert.match(nhDied.summary, new RegExp(`needs-human for RSP-SP: died-after-respawn \\(spawn seq ${spawnSeq}, respawn seq ${respawnSeq}\\)`));
+  }
+
+  // Now run 3 red Attempts and submit attempt-ceiling needs_human.
+  await factory.claim({ task: "RSP-SP", sha: head });
+  await factory.claim({ task: "RSP-SP", sha: head });
+  const a3 = await factory.claim({ task: "RSP-SP", sha: head });
+  const nhCeiling = await handleSpoolRequest(factory, {
+    id: "nh2",
+    kind: "needs_human",
+    task: "RSP-SP",
+    reason: "attempt-ceiling",
+    evidence: { attempt: 3, gate: a3.gate.seq },
+  });
+  assert.equal(nhCeiling.ok, true);
+  if (nhCeiling.ok) {
+    assert.match(nhCeiling.summary, new RegExp(`needs-human for RSP-SP: attempt-ceiling \\(attempt 3, gate seq ${a3.gate.seq}\\)`));
+  }
+});
+

@@ -13,6 +13,8 @@ export declare const ZERO_GROWTH_DEAD_MS: number;
 export declare const GRACE_MS: number;
 /** How long a spent re-poke stays answerable before `needs_human` (v0.0.10). */
 export declare const RE_STALL_MS: number;
+/** The Attempt ceiling (ADR 0008 §1): a Task may open at most 3 Attempts. */
+export declare const MAX_ATTEMPTS: number;
 
 export declare function renderBrief(task: string, pathValue: string, description?: string): string;
 export declare function splitProvider(value: string): { provider: string; model: string | undefined };
@@ -54,7 +56,7 @@ export declare class DaemonRpc {
 
 export declare function createTaskAgent(
   rpc: DaemonRpc,
-  input: { task: string; provider: string; model?: string; cwd: string; brief: string },
+  input: { task: string; idempotencyKey?: string; provider: string; model?: string; cwd: string; brief: string },
 ): Promise<string>;
 
 export interface AgentFate {
@@ -64,7 +66,7 @@ export interface AgentFate {
 }
 export declare function agentFate(agent: Record<string, unknown>): AgentFate;
 
-// ---- the Lead rider (v0.0.10) ----
+// ---- the Lead rider (v0.0.10 / v0.0.12) ----
 
 /** The re-poke's fixed text — only the task and the denial's rule interpolate. */
 export declare function repokeText(task: string, rule: string): string;
@@ -77,6 +79,7 @@ export interface LeadDenial {
 export type LeadDecision =
   | { act: "poke"; denial: LeadDenial }
   | { act: "needs-human"; reason: "denied-again" | "silent-after-repoke"; evidence: { denial: number; repoke: number } }
+  | { act: "needs-human"; reason: "attempt-ceiling"; evidence: { attempt: number; gate: number } }
   | { act: "watch"; why: string }
   | { act: "clear" };
 /** The Lead's one decision over a task's ledger slice — pure ledger arithmetic (graceMs/reStallMs: test knobs, the code defaults are the fixed law). */
@@ -105,16 +108,21 @@ export declare function pickUsage(terminal: MeterUsage, refetched: MeterUsage): 
 export interface ObserveEntry {
   task: string;
   agentId: string;
+  workspace?: string;
+  brief?: string;
   /** Set the moment the task lands its terminal state — the loop's own bookkeeping. */
   terminal?: { terminal?: boolean; fate: string; reason?: string };
   /** The terminal usage capture (v0.0.8) — undefined until a terminal moment. */
   usage?: MeterUsage;
   /** The highest timeline `seqEnd` witnessed — the life-signal tracker both watch lanes fold (v0.0.11, ADR 0007). The loop initializes it. */
   timelineSeq?: number;
+  /** True when the current agent's terminal meter was already submitted inside `observeTasks` (e.g., on `died-after-respawn`). */
+  metered?: boolean;
 }
 export declare function observeTasks(
   rpc: DaemonRpc | {
     connected: boolean;
+    features?: Record<string, unknown> | null;
     request(message: Record<string, unknown>, options: { responseType: string; timeoutMs?: number }): Promise<Record<string, unknown>>;
     close(): void;
   },
@@ -126,6 +134,8 @@ export declare function observeTasks(
     /** The Lead rider's surfaces (v0.0.10): the ledger its predicate reads, the spool its two acts submit through. */
     stateDir: string;
     spoolRoot: string;
+    /** The `provider[/model]` string for ADR 0008 Respawn + dead-agent metering. */
+    provider?: string;
     /** Test knobs (defaults are the fixed laws: ZERO_GROWTH_DEAD_MS, GRACE_MS, RE_STALL_MS). */
     missingDeadMs?: number;
     graceMs?: number;

@@ -142,15 +142,15 @@ const submitter = stampedAgent === "" ? "owner" : stampedAgent;
 // src/events.ts because the CLIs import no src/ code (ADR 0004). Kept on one
 // line so test/status.test.ts can guard this copy against drift. Kept in sync
 // with the writer by the same suite, the way test/cli.test.ts guards the spool.
-const EVENT_NAMES = ["contract_set", "claim_reported", "gate_started", "gate_finished", "fresh_eyes_written", "watch_written", "report_written", "attempt_accepted", "permit_allowed", "permit_denied", "git_blocked", "spawn_dispatched", "spawn_refused", "meter_written", "repoke_dispatched", "repoke_refused", "needs_human", "retro_written"];
+const EVENT_NAMES = ["contract_set", "claim_reported", "gate_started", "gate_finished", "fresh_eyes_written", "watch_written", "report_written", "attempt_accepted", "permit_allowed", "permit_denied", "git_blocked", "spawn_dispatched", "spawn_refused", "meter_written", "repoke_dispatched", "repoke_refused", "respawn_dispatched", "respawn_refused", "needs_human", "retro_written"];
 // Events without an Attempt number: contract_set owns the Task, the choke
 // events (v0.0.4) belong to the Task's whole life, git_blocked may carry no
 // task at all (the shim refuses no matter who runs it), the spawn events
 // (v0.0.5) precede any attempt — the plugin records them before an agent
 // exists — meter_written (v0.0.8) spans the task's whole run, the Lead's
-// three lines (v0.0.10) sit before any Claim like the choke lines do, and
+// three lines (v0.0.10) and the respawn pair (v0.0.12) are task-scoped, and
 // retro_written (v0.0.7) is factory-level: no task either.
-const NO_ATTEMPT_EVENTS = new Set(["contract_set", "permit_allowed", "permit_denied", "git_blocked", "spawn_dispatched", "spawn_refused", "meter_written", "repoke_dispatched", "repoke_refused", "needs_human", "retro_written"]);
+const NO_ATTEMPT_EVENTS = new Set(["contract_set", "permit_allowed", "permit_denied", "git_blocked", "spawn_dispatched", "spawn_refused", "meter_written", "repoke_dispatched", "repoke_refused", "respawn_dispatched", "respawn_refused", "needs_human", "retro_written"]);
 
 /**
  * The status reader's shape rule — every event is in the vocabulary above and

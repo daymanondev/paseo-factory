@@ -53,6 +53,9 @@
 
 export type Verdict = "red" | "green";
 
+/** The Attempt ceiling (v0.0.12, ADR 0008 §1): a Task may open at most three Attempts — fixed in code, never configuration. */
+export const MAX_ATTEMPTS = 3;
+
 /**
  * The whole event vocabulary — single source for types and validation. The
  * first eight are the attempt-scoped loop in ledger order; the choke
@@ -78,6 +81,8 @@ export const EVENT_NAMES = [
   "meter_written",
   "repoke_dispatched",
   "repoke_refused",
+  "respawn_dispatched",
+  "respawn_refused",
   "needs_human",
   "retro_written",
 ] as const;
@@ -421,26 +426,73 @@ export interface RepokeRefused {
   reason: string;
 }
 
-/** The two ways a stall survives its re-poke — the fixed vocabulary (v0.0.10 §3). */
-export type NeedsHumanReason = "denied-again" | "silent-after-repoke";
-
-/** The vocabulary as a runtime list — the single spelling every validator reads. */
-export const NEEDS_HUMAN_REASONS = ["denied-again", "silent-after-repoke"] as const;
-
-/** The two seqs a `needs_human` line keys its reason on — the denial and the spent `repoke_dispatched`. */
-export interface NeedsHumanEvidence {
-  denial: number;
-  repoke: number;
+/**
+ * Automatic recovery after `Substrate death` (v0.0.12, ADR 0008 §3): the
+ * plugin let the driver's `respawn` request through — the task was spawned,
+ * is not accepted, has not reached the Attempt ceiling, and has not already
+ * spent a respawn since the latest progress marker (`spawn_dispatched` or
+ * `gate_finished`). Recorded before the replacement agent is created.
+ */
+export interface RespawnDispatched {
+  seq: number;
+  ts: Timestamp;
+  event: "respawn_dispatched";
+  task: string;
+  provider: string;
+  /** The dead agent whose substrate death triggered this replacement. */
+  died_agent: string;
 }
 
-/** The evidence's shape rule: two ledger seqs, each a positive integer. */
-export function needsHumanEvidenceIsValid(evidence: unknown): evidence is NeedsHumanEvidence {
-  if (typeof evidence !== "object" || evidence === null) return false;
-  const { denial, repoke } = evidence as Record<string, unknown>;
-  return (
-    typeof denial === "number" && Number.isInteger(denial) && denial >= 1 &&
-    typeof repoke === "number" && Number.isInteger(repoke) && repoke >= 1
-  );
+/**
+ * The plugin refused a driver's `respawn` request — one line naming the rule
+ * that fired (`respawn:already-spent`, `respawn:attempt-ceiling`,
+ * `respawn:not-spawned`, `respawn:accepted-task`, `respawn:unknown-task`,
+ * `respawn:invalid-task`, `respawn:invalid-request`), mirroring `spawn_refused`
+ * and `repoke_refused`.
+ */
+export interface RespawnRefused {
+  seq: number;
+  ts: Timestamp;
+  event: "respawn_refused";
+  task: string;
+  provider: string;
+  died_agent: string;
+  rule: string;
+  reason: string;
+}
+
+/** The four ways bounded automation ends — the fixed vocabulary (v0.0.10 §3, expanded in v0.0.12 ADR 0008 §4). */
+export type NeedsHumanReason = "denied-again" | "silent-after-repoke" | "attempt-ceiling" | "died-after-respawn";
+
+/** The vocabulary as a runtime list — the single spelling every validator reads. */
+export const NEEDS_HUMAN_REASONS = ["denied-again", "silent-after-repoke", "attempt-ceiling", "died-after-respawn"] as const;
+
+/** The evidence fields a `needs_human` line keys its reason on, discriminated by reason (ADR 0008 §4). */
+export type NeedsHumanEvidence =
+  | { denial: number; repoke: number }
+  | { attempt: number; gate: number }
+  | { spawn: number; respawn: number };
+
+function posInt(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1;
+}
+
+/**
+ * The evidence's shape rule: two positive integers matching the reason's own
+ * two keys (or any of the three valid pairs when `reason` is omitted).
+ */
+export function needsHumanEvidenceIsValid(evidence: unknown, reason?: unknown): evidence is NeedsHumanEvidence {
+  if (typeof evidence !== "object" || evidence === null || Array.isArray(evidence)) return false;
+  const rec = evidence as Record<string, unknown>;
+  if (Object.keys(rec).length !== 2) return false;
+  const isDenialRepoke = posInt(rec.denial) && posInt(rec.repoke);
+  const isAttemptGate = posInt(rec.attempt) && posInt(rec.gate);
+  const isSpawnRespawn = posInt(rec.spawn) && posInt(rec.respawn);
+  if (reason === "denied-again" || reason === "silent-after-repoke") return isDenialRepoke;
+  if (reason === "attempt-ceiling") return isAttemptGate;
+  if (reason === "died-after-respawn") return isSpawnRespawn;
+  if (reason !== undefined) return false;
+  return isDenialRepoke || isAttemptGate || isSpawnRespawn;
 }
 
 /**
@@ -507,6 +559,8 @@ export type LedgerEvent =
   | MeterWritten
   | RepokeDispatched
   | RepokeRefused
+  | RespawnDispatched
+  | RespawnRefused
   | NeedsHuman
   | RetroWritten;
 
@@ -528,5 +582,7 @@ export type PendingEvent =
   | Omit<MeterWritten, "seq" | "ts">
   | Omit<RepokeDispatched, "seq" | "ts">
   | Omit<RepokeRefused, "seq" | "ts">
+  | Omit<RespawnDispatched, "seq" | "ts">
+  | Omit<RespawnRefused, "seq" | "ts">
   | Omit<NeedsHuman, "seq" | "ts">
   | Omit<RetroWritten, "seq" | "ts">;

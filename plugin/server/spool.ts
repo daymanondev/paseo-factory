@@ -25,7 +25,7 @@ import { FactoryError } from "./core/errors.ts";
 import { usageIsValid } from "./core/ledger.ts";
 import { needsHumanEvidenceIsValid, NEEDS_HUMAN_REASONS } from "./core/events.ts";
 import type { Factory } from "./core/factory.ts";
-import type { MeterUsage, NeedsHumanEvidence, NeedsHumanReason, Verdict } from "./core/events.ts";
+import type { LedgerEvent, MeterUsage, NeedsHumanEvidence, NeedsHumanReason, Verdict } from "./core/events.ts";
 
 export interface ContractRequest {
   id: string;
@@ -91,6 +91,21 @@ export interface SpawnRequest {
 }
 
 /**
+ * The Lead's one automatic Respawn per progress marker (v0.0.12, ADR 0008):
+ * when an Agent dies (`Substrate death`), the driver asks the plugin — the
+ * one writer — whether it may replace the dead Agent, and only creates the
+ * replacement after an ok. The reply carries `event` (whose `seq` keys the
+ * replacement `agent.create.request` idempotency key).
+ */
+export interface RespawnRequest {
+  id: string;
+  kind: "respawn";
+  task: string;
+  provider: string;
+  died_agent: string;
+}
+
+/**
  * The Owner's Retro request (v0.0.7, ticket 03 item 2): `factory retro`
  * drops this and the plugin does everything — digest, copilot pass,
  * proposals file, the one factory-level `retro_written` line (the one-writer
@@ -142,12 +157,11 @@ export interface RepokeRequest {
 }
 
 /**
- * The Lead's named end (v0.0.10): the re-poke is spent and the stall
- * persisted, so the driver submits the fact for the plugin to ledger — the
- * meter precedent's law, one task-scoped `needs_human` line with its two
- * evidence seqs. The reason vocabulary is fixed (`denied-again` /
- * `silent-after-repoke`); an Owner answer wakes the task through the
- * ordinary spawn path, so nothing here closes anything.
+ * The Lead's named end (v0.0.10 / v0.0.12, ADR 0008): the task reached one
+ * of the four `NeedsHuman` conditions (`denied-again`, `silent-after-repoke`,
+ * `attempt-ceiling`, `died-after-respawn`), so the driver submits the fact
+ * for the plugin to corroborate and ledger as one task-scoped `needs_human`
+ * line with its matching evidence pair.
  */
 export interface NeedsHumanRequest {
   id: string;
@@ -174,7 +188,17 @@ export interface AskRequest {
   name?: string;
 }
 
-export type SpoolRequest = ContractRequest | ClaimRequest | AcceptRequest | AskRequest | SpawnRequest | MeterRequest | RepokeRequest | NeedsHumanRequest | RetroRequest;
+export type SpoolRequest =
+  | ContractRequest
+  | ClaimRequest
+  | AcceptRequest
+  | AskRequest
+  | SpawnRequest
+  | RespawnRequest
+  | MeterRequest
+  | RepokeRequest
+  | NeedsHumanRequest
+  | RetroRequest;
 
 /** Handles a synthetic ask — `createChoke(...).spoolAskHandler` is the implementation. */
 export type AskHandler = (request: AskRequest) => SpoolReply;
@@ -197,8 +221,10 @@ export type SpoolReply =
       /** Retro replies: the proposals file and its count (the success stdout's two facts). */
       proposalsPath?: string;
       proposalCount?: number;
+      /** Spawn / respawn replies: the ledger event appended for the request (carries seq). */
+      event?: LedgerEvent;
     }
-  | { id: string; ok: false; code: string; message: string };
+  | { id: string; ok: false; code: string; message: string; event?: LedgerEvent };
 
 /** Where all three spool directories live. */
 export function spoolRootFor(stateDir: string): string {
@@ -257,6 +283,18 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     }
     return { id: req.id, kind: "spawn", task: req.task, provider: req.provider, arity: req.arity };
   }
+  if (req.kind === "respawn") {
+    if (
+      typeof req.task !== "string" ||
+      typeof req.provider !== "string" ||
+      req.provider.trim() === "" ||
+      typeof req.died_agent !== "string" ||
+      req.died_agent.trim() === ""
+    ) {
+      return undefined;
+    }
+    return { id: req.id, kind: "respawn", task: req.task, provider: req.provider, died_agent: req.died_agent };
+  }
   if (req.kind === "retro") {
     // The Retro carries nothing but its kind — whole-ledger always. The
     // strict shape is the point: any extra field makes it not-a-retro.
@@ -287,8 +325,9 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
   if (req.kind === "needs_human") {
     if (typeof req.task !== "string") return undefined;
     if (typeof req.reason !== "string" || !(NEEDS_HUMAN_REASONS as readonly string[]).includes(req.reason)) return undefined;
-    if (!needsHumanEvidenceIsValid(req.evidence)) return undefined;
-    return { id: req.id, kind: "needs_human", task: req.task, reason: req.reason as NeedsHumanReason, evidence: req.evidence };
+    const reason = req.reason as NeedsHumanReason;
+    if (!needsHumanEvidenceIsValid(req.evidence, reason)) return undefined;
+    return { id: req.id, kind: "needs_human", task: req.task, reason, evidence: req.evidence };
   }
   if (req.kind === "ask") {
     if (typeof req.task !== "string" || typeof req.command !== "string" || req.command.trim() === "") return undefined;
@@ -374,12 +413,32 @@ export async function handleSpoolRequest(
       // the refusal and carry on with the invocation's other tasks.
       const decision = factory.requestSpawn({ task: request.task, provider: request.provider, arity: request.arity });
       if (decision.outcome === "refused") {
-        return { id: request.id, ok: false, code: decision.code, message: decision.event.reason };
+        return { id: request.id, ok: false, code: decision.code, message: decision.event.reason, event: decision.event };
       }
       return {
         id: request.id,
         ok: true,
         summary: `spawn dispatched for ${request.task} under ${request.provider} (n=${request.arity})`,
+        event: decision.event,
+      };
+    }
+    if (request.kind === "respawn") {
+      // The Lead's one automatic Respawn per progress marker (v0.0.12, ADR 0008):
+      // one ledger line either way, with `event` attached so the driver can key
+      // the replacement `agent.create.request` by `${task}-respawn-${event.seq}`.
+      const decision = factory.respawn({
+        task: request.task,
+        provider: request.provider,
+        died_agent: request.died_agent,
+      });
+      if (decision.outcome === "refused") {
+        return { id: request.id, ok: false, code: decision.code, message: decision.event.reason, event: decision.event };
+      }
+      return {
+        id: request.id,
+        ok: true,
+        summary: `respawn dispatched for ${request.task} under ${request.provider} (replacing ${request.died_agent.slice(0, 12)})`,
+        event: decision.event,
       };
     }
     if (request.kind === "meter") {
@@ -412,14 +471,20 @@ export async function handleSpoolRequest(
       };
     }
     if (request.kind === "needs_human") {
-      // The stall's named end (v0.0.10): one line, evidence seqs attached.
-      // The meter's law — a refused submission throws, no line, and the
-      // reply carries the code so the driver can report it honestly.
+      // The stall's or ceiling's named end (v0.0.10 / v0.0.12): one line,
+      // evidence pair attached. The meter's law — a refused submission throws,
+      // no line, and the reply carries the code so the driver can report it.
       const event = factory.needsHuman({ task: request.task, reason: request.reason, evidence: request.evidence });
+      const detail =
+        "denial" in event.evidence
+          ? `denial seq ${event.evidence.denial}, repoke seq ${event.evidence.repoke}`
+          : "attempt" in event.evidence
+            ? `attempt ${event.evidence.attempt}, gate seq ${event.evidence.gate}`
+            : `spawn seq ${event.evidence.spawn}, respawn seq ${event.evidence.respawn}`;
       return {
         id: request.id,
         ok: true,
-        summary: `needs-human for ${request.task}: ${event.reason} (denial seq ${event.evidence.denial}, repoke seq ${event.evidence.repoke})`,
+        summary: `needs-human for ${request.task}: ${event.reason} (${detail})`,
       };
     }
     if (request.kind === "retro") {

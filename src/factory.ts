@@ -1,7 +1,7 @@
 import { statSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { Ledger, usageIsValid } from "./ledger.ts";
-import { NEEDS_HUMAN_REASONS, needsHumanEvidenceIsValid } from "./events.ts";
+import { MAX_ATTEMPTS, NEEDS_HUMAN_REASONS, needsHumanEvidenceIsValid } from "./events.ts";
 import { runGate } from "./gate.ts";
 import { renderReport } from "./report.ts";
 import { loadEyeConfig, runFreshEyesPass } from "./fresh-eyes.ts";
@@ -11,7 +11,7 @@ import { buildRetroDigest, retroDay, runRetroPass, writtenRetroForDay } from "./
 import type { RetroOutcome } from "./retro.ts";
 import { changesOutsideScope, checkCleanAt, headCommitSync, resolveClaimedCommit } from "./workspace.ts";
 import { FactoryError } from "./errors.ts";
-import type { AttemptAccepted, ContractSet, GateFinished, GitBlocked, LedgerEvent, MeterWritten, MeterUsage, NeedsHuman, NeedsHumanEvidence, NeedsHumanReason, RepokeDispatched, RepokeRefused, SpawnDispatched, SpawnRefused, Verdict } from "./events.ts";
+import type { AttemptAccepted, ContractSet, GateFinished, GitBlocked, LedgerEvent, MeterWritten, MeterUsage, NeedsHuman, NeedsHumanEvidence, NeedsHumanReason, RepokeDispatched, RepokeRefused, RespawnDispatched, RespawnRefused, SpawnDispatched, SpawnRefused, Verdict } from "./events.ts";
 import type { GateResult } from "./gate.ts";
 
 /** Task ids become report filenames, so they stay flat and filename-safe. */
@@ -163,6 +163,24 @@ export type RepokeDecision =
   | { outcome: "dispatched"; event: RepokeDispatched }
   | { outcome: "refused"; event: RepokeRefused; code: string };
 
+export interface RespawnInput {
+  task: string;
+  /** The `provider[/model]` string the replacement agent runs under. */
+  provider: string;
+  /** The dead agent whose substrate death triggered this respawn. */
+  died_agent: string;
+}
+
+/**
+ * One respawn request, judged (v0.0.12, ADR 0008 §3): dispatched means the
+ * driver may create the replacement agent on the task's branch; refused names
+ * the rule that fired (`respawn:already-spent`, `respawn:attempt-ceiling`,
+ * `respawn:not-spawned`, etc.). Either way exactly one ledger line exists.
+ */
+export type RespawnDecision =
+  | { outcome: "dispatched"; event: RespawnDispatched }
+  | { outcome: "refused"; event: RespawnRefused; code: string };
+
 /** One needs-human submission (v0.0.10): the stall's named end, evidence seqs attached. */
 export interface NeedsHumanInput {
   task: string;
@@ -227,6 +245,15 @@ export interface Factory {
    * the spend, never the trigger.
    */
   repoke(task: string, agent: string): RepokeDecision;
+  /**
+   * Judges the driver's automatic Respawn request after `Substrate death`
+   * (v0.0.12, ADR 0008 §3): validates `task`, `provider`, and `died_agent`,
+   * refuses unknown, accepted, or attempt-ceiling tasks, and enforces the
+   * one-respawn-per-progress-marker law (`spawn_dispatched` or
+   * `gate_finished`). Appends `respawn_dispatched` or `respawn_refused`;
+   * never throws.
+   */
+  respawn(input: RespawnInput): RespawnDecision;
   /**
    * Records one `needs_human` line (v0.0.10, ADR 0006 §4): the re-poke is
    * spent and the stall persisted. The meter's own law — a refused
@@ -409,6 +436,12 @@ export function createFactory(options: FactoryOptions): Factory {
         throw new FactoryError(
           "gate-running",
           `attempt ${lastAttempt} of task ${task} is still open — wait for its verdict before claiming again`,
+        );
+      }
+      if (lastAttempt >= MAX_ATTEMPTS) {
+        throw new FactoryError(
+          "attempt-ceiling",
+          `task ${task} reached the attempt ceiling (${MAX_ATTEMPTS} attempts) — no further Claim may open an Attempt`,
         );
       }
       const attempt = lastAttempt + 1;
@@ -610,6 +643,13 @@ export function createFactory(options: FactoryOptions): Factory {
           `task ${task} was already accepted at attempt ${priorAccept.attempt} — the task is closed`,
         );
       }
+      if (maxAttempt(history) >= MAX_ATTEMPTS && !history.some((e) => e.event === "gate_finished" && e.verdict === "green")) {
+        return refuse(
+          "attempt-ceiling",
+          "spawn:attempt-ceiling",
+          `task ${task} reached the attempt ceiling (${MAX_ATTEMPTS} red attempts) — no further Attempt may open`,
+        );
+      }
       if (arity >= 2 && (contract.scope === undefined || contract.scope.length === 0)) {
         return refuse(
           "spawn-scope-mandatory",
@@ -701,36 +741,142 @@ export function createFactory(options: FactoryOptions): Factory {
       return { outcome: "dispatched", event: ledger.append({ event: "repoke_dispatched", task, agent }) };
     },
 
+    respawn({ task, provider, died_agent }) {
+      const base = { task, provider, died_agent };
+      const refuse = (code: string, rule: string, reason: string): RespawnDecision => ({
+        outcome: "refused",
+        code,
+        event: ledger.append({ ...base, event: "respawn_refused", rule, reason }),
+      });
+      if (typeof provider !== "string" || provider.trim() === "" || typeof died_agent !== "string" || died_agent.trim() === "") {
+        return refuse(
+          "invalid-respawn",
+          "respawn:invalid-request",
+          `respawn request for task ${JSON.stringify(task)} is malformed — provider and died_agent must be non-empty strings`,
+        );
+      }
+      if (!TASK_ID_PATTERN.test(task)) {
+        return refuse("invalid-task", "respawn:invalid-task", `task id "${task}" is invalid — use letters, digits, ".", "_", "-"`);
+      }
+      const contract = this.contractFor(task);
+      if (!contract) {
+        return refuse("unknown-task", "respawn:unknown-task", `no contract set for task ${task} — register one first`);
+      }
+      const history = ledger.eventsFor(task);
+      const priorAccept = acceptedAttempt(history);
+      if (priorAccept !== undefined) {
+        return refuse(
+          "already-accepted",
+          "respawn:accepted-task",
+          `task ${task} was already accepted at attempt ${priorAccept.attempt} — the task is closed`,
+        );
+      }
+      if (maxAttempt(history) >= MAX_ATTEMPTS) {
+        return refuse(
+          "attempt-ceiling",
+          "respawn:attempt-ceiling",
+          `task ${task} reached the attempt ceiling (${MAX_ATTEMPTS} attempts) — no replacement agent may be spawned`,
+        );
+      }
+      let spawnSeq = -1;
+      let progressSeq = -1;
+      for (const evt of history) {
+        if (evt.event === "spawn_dispatched") {
+          spawnSeq = evt.seq;
+          if (evt.seq > progressSeq) progressSeq = evt.seq;
+        } else if (evt.event === "gate_finished") {
+          if (evt.seq > progressSeq) progressSeq = evt.seq;
+        }
+      }
+      if (spawnSeq === -1) {
+        return refuse(
+          "not-spawned",
+          "respawn:not-spawned",
+          `task ${task} has no spawn_dispatched line — respawn replaces a dead spawned agent, never an unspawned task`,
+        );
+      }
+      if (history.some((e) => e.event === "respawn_dispatched" && e.seq > progressSeq)) {
+        return refuse(
+          "respawn-ceiling",
+          "respawn:already-spent",
+          `task ${task} already spent its one automatic respawn since progress marker seq ${progressSeq} — a second death ends in needs_human`,
+        );
+      }
+      return { outcome: "dispatched", event: ledger.append({ ...base, event: "respawn_dispatched" }) };
+    },
+
     needsHuman({ task, reason, evidence }) {
       assertTaskId(task);
       if (!(NEEDS_HUMAN_REASONS as readonly string[]).includes(reason)) {
         throw new FactoryError("invalid-needs-human", `reason must be one of the fixed vocabulary (${NEEDS_HUMAN_REASONS.join(", ")}), got ${JSON.stringify(reason)}`);
       }
-      if (!needsHumanEvidenceIsValid(evidence)) {
+      if (!needsHumanEvidenceIsValid(evidence, reason)) {
         throw new FactoryError(
           "invalid-needs-human",
-          "evidence must name the denial's seq and the spent repoke_dispatched's seq — two positive integers",
+          `evidence for reason "${reason}" must carry its matching positive-integer evidence fields`,
         );
       }
       if (this.contractFor(task) === undefined) {
         throw new FactoryError("unknown-task", `no contract set for task ${task} — needs_human records a stalled run, and no run was ever contracted`);
       }
-      // The event attests a SPENT re-poke answering a REAL denial: the
-      // evidence's seqs must be the slice's own lines (the meter precedent —
-      // a recorder refuses what it cannot corroborate, writing no line).
       const history = ledger.eventsFor(task);
-      const spent = history.findLast((e): e is RepokeDispatched => e.event === "repoke_dispatched");
-      if (spent === undefined || spent.seq !== evidence.repoke) {
-        throw new FactoryError(
-          "invalid-needs-human",
-          `task ${task} has no spent re-poke at seq ${evidence.repoke} — needs_human records a stall that survived its poke, and the ledger does not show one`,
-        );
-      }
-      if (!history.some((e) => e.event === "permit_denied" && e.seq === evidence.denial)) {
-        throw new FactoryError(
-          "invalid-needs-human",
-          `task ${task} has no permit_denied at seq ${evidence.denial} — the evidence names the denial the stall answered`,
-        );
+      if (reason === "denied-again" || reason === "silent-after-repoke") {
+        const ev = evidence as { denial: number; repoke: number };
+        const spent = history.findLast((e): e is RepokeDispatched => e.event === "repoke_dispatched");
+        if (spent === undefined || spent.seq !== ev.repoke) {
+          throw new FactoryError(
+            "invalid-needs-human",
+            `task ${task} has no spent re-poke at seq ${ev.repoke} — needs_human records a stall that survived its poke, and the ledger does not show one`,
+          );
+        }
+        if (!history.some((e) => e.event === "permit_denied" && e.seq === ev.denial)) {
+          throw new FactoryError(
+            "invalid-needs-human",
+            `task ${task} has no permit_denied at seq ${ev.denial} — the evidence names the denial the stall answered`,
+          );
+        }
+      } else if (reason === "attempt-ceiling") {
+        const ev = evidence as { attempt: number; gate: number };
+        if (ev.attempt !== MAX_ATTEMPTS) {
+          throw new FactoryError(
+            "invalid-needs-human",
+            `attempt-ceiling evidence must name attempt ${MAX_ATTEMPTS}, got ${ev.attempt}`,
+          );
+        }
+        const gate = history.find((e): e is GateFinished => e.event === "gate_finished" && e.seq === ev.gate);
+        if (gate === undefined || gate.attempt !== MAX_ATTEMPTS || gate.verdict !== "red") {
+          throw new FactoryError(
+            "invalid-needs-human",
+            `task ${task} has no red gate_finished for attempt ${MAX_ATTEMPTS} at seq ${ev.gate}`,
+          );
+        }
+      } else {
+        const ev = evidence as { spawn: number; respawn: number };
+        if (ev.respawn <= ev.spawn) {
+          throw new FactoryError(
+            "invalid-needs-human",
+            `died-after-respawn evidence requires respawn seq (${ev.respawn}) > spawn seq (${ev.spawn})`,
+          );
+        }
+        if (!history.some((e) => e.event === "spawn_dispatched" && e.seq === ev.spawn)) {
+          throw new FactoryError(
+            "invalid-needs-human",
+            `task ${task} has no spawn_dispatched at seq ${ev.spawn}`,
+          );
+        }
+        const latestRespawn = history.findLast((e): e is RespawnDispatched => e.event === "respawn_dispatched");
+        if (latestRespawn === undefined || latestRespawn.seq !== ev.respawn) {
+          throw new FactoryError(
+            "invalid-needs-human",
+            `task ${task} has no latest respawn_dispatched at seq ${ev.respawn}`,
+          );
+        }
+        if (history.some((e) => e.event === "gate_finished" && e.seq > ev.respawn)) {
+          throw new FactoryError(
+            "invalid-needs-human",
+            `task ${task} has a gate_finished after respawn seq ${ev.respawn} — the respawn progressed to an Attempt`,
+          );
+        }
       }
       return ledger.append({ event: "needs_human", task, reason, evidence });
     },
