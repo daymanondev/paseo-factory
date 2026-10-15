@@ -142,10 +142,12 @@ test("a single-lane save never names the other lanes — an existing eye.json ke
   const second = saveLanes(stateDir, { watch: "pi/zai/glm-5.3" });
   assert.ok(second.ok);
   assert.deepEqual(JSON.parse(readFileSync(lanesPath(stateDir), "utf8")), { worker: "claude/opus-4-8", watch: "pi/zai/glm-5.3" });
-  assert.ok(resolveEyeLane(stateDir).lane === "eye.json");
+  const stillEye = resolveEyeLane(stateDir);
+  assert.ok(stillEye.ok && stillEye.lane === "eye.json");
   const explicit = saveLanes(stateDir, { freshEyes: "pi/zai/glm-5.3" });
   assert.ok(explicit.ok);
-  assert.equal(resolveEyeLane(stateDir).lane, "pi/zai/glm-5.3", "an explicit freshEyes always wins — that behavior stays");
+  const explicitLane = resolveEyeLane(stateDir);
+  assert.ok(explicitLane.ok && explicitLane.lane === "pi/zai/glm-5.3", "an explicit freshEyes always wins — that behavior stays");
 });
 
 test("saveLanes refuses an invalid lane and writes nothing", (t) => {
