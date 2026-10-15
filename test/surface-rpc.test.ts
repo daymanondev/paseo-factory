@@ -4,10 +4,13 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createFactory } from "../plugin/server/core/factory.ts";
+import { resolveProject } from "../plugin/server/core/project.ts";
 import { createSurfaceHandlers } from "../plugin/server/surface-rpc.ts";
 import type { SurfaceDaemonApi } from "../plugin/server/surface-rpc.ts";
+import { injectRoleOnCreate, injectSessionEnv, renderAgentContract, renderSeatBootstrap, renderSeatContract } from "../plugin/server/roles.ts";
+import { discoverProjects, readProjectRegistration, writeProjectRegistration } from "../plugin/server/projects.ts";
 import { loadLanes, lanesPath } from "../src/lanes.ts";
-import { fakeCopilotRunner, disposeDir, makeTempDir, writeLanes } from "./helpers.ts";
+import { disposeDir, fakeCopilotRunner, gitCommitAll, makeTempDir, writeLanes } from "./helpers.ts";
 
 /**
  * The Factory surface's in-process single-writer RPC handlers (v0.0.13,
@@ -423,5 +426,144 @@ test("retro proposals parse into R1..Rn for the Timeline tab", async (t) => {
     retro.proposals.map((p) => [p.id, p.cls]),
     [[1, "gate-check"], [2, "observation"]],
     "the R-ids and classes parse for rendering",
+  );
+});
+
+// ---- the role-contract layer (v0.0.14, ADR 0010 §1–§2/§6) ----------------------------------
+
+/** A real git repo to seat projects in — resolveProject needs a worktree git answers for. */
+function makeProject(t: TestContext, name: string): { root: string; slug: string } {
+  const root = makeTempDir();
+  disposeDir(t, root);
+  writeFileSync(join(root, "README.md"), `# ${name}\n`);
+  gitCommitAll(root, `seed ${name}`);
+  const project = resolveProject(root);
+  assert.ok(project.ok, project.ok ? "" : project.reason);
+  return { root: project.root, slug: project.slug };
+}
+
+test("roles: the seat contracts carry the role law and the 1-line skill trigger index footer", () => {
+  const supervisor = renderSeatContract("supervisor", { root: "/w/repo", slug: "repo-abc123" });
+  assert.match(supervisor, /Supervisor seat of the paseo-factory/);
+  assert.match(supervisor, /AGENTS\.md or CONTEXT\.md/);
+  assert.match(supervisor, /paseo-factory role skills: grilling, domain-modeling$/);
+
+  const lead = renderSeatContract("lead", { root: "/w/repo", slug: "repo-abc123" });
+  assert.match(lead, /Lead seat of the paseo-factory/);
+  assert.match(lead, /accept --by lead/);
+  assert.match(lead, /paseo-factory role skills: codebase-design, domain-modeling, tdd$/);
+
+  const agent = renderAgentContract("T1", "repo-abc123");
+  assert.match(agent, /task T1, project repo-abc123/);
+  assert.match(agent, /never modify AGENTS\.md, CLAUDE\.md, or CONTEXT\.md/);
+  assert.match(agent, /withheld/);
+  assert.match(agent, /paseo-factory role skills: tdd, diagnosing-bugs, codebase-design$/);
+});
+
+test("roles: the seat bootstrap orients with resolved paths, day-one commands, and the footer", () => {
+  const bootstrap = renderSeatBootstrap({
+    seat: "supervisor",
+    home: "/h/paseo-home",
+    stateDir: "/h/plugin-state/paseo-factory",
+    pluginDir: "/h/plugins/paseo-factory",
+    nodePath: "/usr/local/bin/node",
+    path: "/usr/local/bin",
+    lane: "copilot/gpt-5.4",
+    project: { root: "/w/repo", slug: "repo-abc123" },
+  });
+  assert.match(bootstrap, /Project root \(your cwd\): \/w\/repo/);
+  assert.match(bootstrap, /\/h\/plugins\/paseo-factory\/bin\/factory\.mjs/);
+  assert.match(bootstrap, /contract --task <id>/);
+  assert.match(bootstrap, /lanes\.json → supervisor\): copilot\/gpt-5\.4/);
+  assert.match(bootstrap, /never overwrite them/);
+  assert.match(bootstrap, /paseo-factory role skills: grilling, domain-modeling$/);
+});
+
+test("roles: agent.create injection appends system prompts additively, idempotently, and leaves strangers alone", (t) => {
+  const { stateDir } = makeSurface(t);
+  const project = makeProject(t, "seats");
+
+  // A seat create: the role contract lands in systemPrompt, the env names the seat.
+  const seatRequest = injectRoleOnCreate(
+    { config: { provider: "pi/zai/glm-5.3", cwd: project.root, title: "Supervisor (paseo-factory)" } },
+    stateDir,
+  );
+  assert.ok(seatRequest !== undefined, "a seat-titled create is injected");
+  assert.match(seatRequest.config.systemPrompt!, /paseo-factory role skills: grilling, domain-modeling/);
+  assert.match(seatRequest.config.systemPrompt!, /additive/);
+  assert.equal(seatRequest.env?.PASEO_FACTORY_SEAT, "supervisor");
+  assert.equal(seatRequest.env?.PASEO_FACTORY_PROJECT, project.slug);
+  assert.equal(seatRequest.env?.PASEO_FACTORY_PROJECT_ROOT, project.root);
+  assert.equal(seatRequest.env?.PASEO_FACTORY_STATE_DIR, stateDir);
+
+  // An existing system prompt is APPENDED to, never replaced.
+  const withOwn = injectRoleOnCreate(
+    { config: { provider: "pi/zai/glm-5.3", cwd: project.root, title: "Lead (paseo-factory)", systemPrompt: "repo harness rules" } },
+    stateDir,
+  );
+  assert.ok(withOwn !== undefined);
+  assert.match(withOwn.config.systemPrompt!, /^repo harness rules/);
+  assert.match(withOwn.config.systemPrompt!, /paseo-factory role skills: codebase-design, domain-modeling, tdd/);
+
+  // Idempotent: a second pass over an injected request changes nothing.
+  assert.equal(injectRoleOnCreate(seatRequest, stateDir), undefined);
+
+  // A working agent in its managed task worktree gets the Agent contract.
+  const worktree = join(stateDir, "projects", project.slug, "worktrees", "T1");
+  const agentRequest = injectRoleOnCreate({ config: { provider: "pi/zai/glm-5.3", cwd: worktree, title: "T1" } }, stateDir);
+  assert.ok(agentRequest !== undefined, "a managed-worktree create is injected");
+  assert.match(agentRequest.config.systemPrompt!, /paseo-factory role skills: tdd, diagnosing-bugs, codebase-design/);
+  assert.equal(agentRequest.env?.PASEO_FACTORY_TASK, "T1");
+  assert.equal(agentRequest.env?.PASEO_FACTORY_SEAT, "agent");
+
+  // A stranger in an unrelated directory passes through untouched.
+  assert.equal(injectRoleOnCreate({ config: { provider: "pi/zai/glm-5.3", cwd: "/tmp", title: "Notes" } }, stateDir), undefined);
+});
+
+test("roles: session_open env re-carries the seat identity from the project registry on every launch", (t) => {
+  const { stateDir } = makeSurface(t);
+  const project = makeProject(t, "env");
+  writeProjectRegistration(stateDir, project.slug, { root: project.root, supervisor: "agent-sup-7", lead: "agent-lead-7" });
+
+  const supervisorSession = injectSessionEnv({ agentId: "agent-sup-7", cwd: project.root, env: { PATH: "/bin" } }, stateDir);
+  assert.ok(supervisorSession !== undefined);
+  assert.equal(supervisorSession.env.PASEO_FACTORY_SEAT, "supervisor");
+  assert.equal(supervisorSession.env.PASEO_FACTORY_PROJECT, project.slug);
+  assert.equal(supervisorSession.env.PATH, "/bin", "the overlay is additive over the daemon's env");
+
+  const worktree = join(stateDir, "projects", project.slug, "worktrees", "T2");
+  const agentSession = injectSessionEnv({ agentId: "agent-worker-9", cwd: worktree, env: {} }, stateDir);
+  assert.ok(agentSession !== undefined);
+  assert.equal(agentSession.env.PASEO_FACTORY_TASK, "T2");
+  assert.equal(agentSession.env.PASEO_FACTORY_SEAT, "agent");
+
+  // An unregistered agent at the project root (a stranger) gets nothing.
+  assert.equal(injectSessionEnv({ agentId: "agent-stranger", cwd: project.root, env: {} }, stateDir), undefined);
+});
+
+test("projects: the registration records the slug→root binding and both seat ids, merged field-wise", (t) => {
+  const { stateDir } = makeSurface(t);
+  const project = makeProject(t, "registry");
+  writeProjectRegistration(stateDir, project.slug, { root: project.root, supervisor: "agent-sup-1" });
+  writeProjectRegistration(stateDir, project.slug, { root: project.root, lead: "agent-lead-1" });
+
+  const registration = readProjectRegistration(stateDir, project.slug);
+  assert.deepEqual(registration, { slug: project.slug, root: project.root, supervisor: "agent-sup-1", lead: "agent-lead-1" });
+
+  // A rotate clears the lead id without clobbering the supervisor's.
+  writeProjectRegistration(stateDir, project.slug, { root: project.root, lead: null });
+  const afterRotate = readProjectRegistration(stateDir, project.slug);
+  assert.equal(afterRotate?.lead, undefined);
+  assert.equal(afterRotate?.supervisor, "agent-sup-1");
+
+  // Discovery lists the registered project plus live seat agents it has never seated.
+  const discovered = discoverProjects(stateDir, [{ labels: { seat: "lead", project: "other-xyz789" }, cwd: "/w/other" }]);
+  assert.deepEqual(
+    discovered,
+    [
+      { slug: "other-xyz789", root: "/w/other" },
+      { slug: project.slug, root: project.root },
+    ],
+    "registry files and live seat agents both feed the Project Selector, slug order",
   );
 });
