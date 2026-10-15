@@ -26,6 +26,7 @@ import { usageIsValid } from "./core/ledger.ts";
 import { needsHumanEvidenceIsValid, NEEDS_HUMAN_REASONS } from "./core/events.ts";
 import type { Factory } from "./core/factory.ts";
 import type { LedgerEvent, MeterUsage, NeedsHumanEvidence, NeedsHumanReason, Verdict } from "./core/events.ts";
+import { acceptanceSummary } from "./surface-rpc.ts";
 
 export interface ContractRequest {
   id: string;
@@ -598,13 +599,7 @@ export async function handleSpoolRequest(
     return {
       id: request.id,
       ok: true,
-      summary:
-        `task ${request.task} accepted at attempt ${request.attempt} by ${acceptedBy}` +
-        (accepted.landing === "landed"
-          ? " · landed into <project-root>"
-          : accepted.landing === "pending-conflict"
-            ? ` · landing pending-conflict: ${accepted.landingNote ?? "(no reason recorded)"} — branch factory/${request.task} is preserved`
-            : ""),
+      summary: acceptanceSummary({ task: request.task, attempt: request.attempt, by: acceptedBy, landing: accepted.landing, landingNote: accepted.landingNote }),
     };
   } catch (err) {
     if (err instanceof FactoryError) {

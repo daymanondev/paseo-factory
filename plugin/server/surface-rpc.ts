@@ -23,6 +23,7 @@ import type { Factory } from "./core/factory.ts";
 import { loadLanes, saveLanes } from "./core/lanes.ts";
 import { resolveProject } from "./core/project.ts";
 import type { ProjectResolution } from "./core/project.ts";
+import type { LandingResult } from "./core/workspace.ts";
 import { FACTORY_VIEW_VERSION } from "../shared/view.ts";
 import { foldRetro, foldTasks, foldView, readTailed } from "./view.ts";
 import { setAgentModelViaCli, stopAgentViaCli } from "./daemon-cli.ts";
@@ -111,6 +112,23 @@ function messageOf(err: unknown): string {
 
 function codeOf(err: unknown): string {
   return err instanceof FactoryError ? err.code : "failed";
+}
+
+/**
+ * The one acceptance sentence both reply surfaces print — the spool's accept
+ * reply (the CLI's `factory accept`) and the surface's `factory.accept` RPC
+ * (the UI's Accept). One wording, both doors; `landing` absent is the legacy
+ * shared-checkout path (no landing ran).
+ */
+export function acceptanceSummary(input: { task: string; attempt: number; by: string; landing?: LandingResult["landing"]; landingNote?: string }): string {
+  return (
+    `task ${input.task} accepted at attempt ${input.attempt} by ${input.by}` +
+    (input.landing === "landed"
+      ? " · landed into <project-root>"
+      : input.landing === "pending-conflict"
+        ? ` · landing pending-conflict: ${input.landingNote ?? "(no reason recorded)"} — branch factory/${input.task} is preserved`
+        : "")
+  );
 }
 
 export function createSurfaceHandlers(deps: SurfaceDeps) {
@@ -466,13 +484,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         return {
           ok: true as const,
           seq: event.seq,
-          summary:
-            `${input.task} accepted at attempt ${input.attempt} by owner` +
-            (event.landing === "landed"
-              ? " · landed into <project-root>"
-              : event.landing === "pending-conflict"
-                ? ` · landing pending-conflict: ${event.landingNote ?? "(no reason recorded)"}`
-                : ""),
+          summary: acceptanceSummary({ task: input.task, attempt: input.attempt, by: "owner", landing: event.landing, landingNote: event.landingNote }),
         };
       } catch (err) {
         return failure(codeOf(err), messageOf(err));
