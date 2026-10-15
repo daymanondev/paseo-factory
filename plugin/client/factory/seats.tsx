@@ -1,9 +1,11 @@
 /**
- * Tab 2 — Seats & Models (ADR 0009 §2): four Lane Cards (Supervisor, Default
- * Worker, Watch & Retro, Fresh-eyes) opening the live provider/model picker
- * modal, and below them the orthogonal Seat Graph — Owner ⇄ Supervisor ⇄
- * Lead (Rider) ⇄ Working Agents — with live Timeline Oracle seqEnd, Open
- * Session (navigation.openAgent), and Revoke Supervisor.
+ * Tab 2 — Seats & Models (ADR 0009 §2; the Lead lane and live Lead seat
+ * arrive in v0.0.14, ADR 0010 §2): five Lane Cards (Supervisor, Lead,
+ * Default Worker, Watch & Retro, Fresh-eyes) opening the live
+ * provider/model picker modal, and below them the orthogonal Seat Graph —
+ * Owner ⇄ Supervisor ⇄ Lead ⇄ Working Agents — with live Timeline Oracle
+ * seqEnd, Open Session (navigation.openAgent), Revoke Supervisor, and
+ * Rotate Lead.
  */
 import type { PluginTheme } from "@getpaseo/plugin";
 import { Modal, TextInput } from "@getpaseo/plugin/client/react-native";
@@ -18,6 +20,8 @@ import type { Colour } from "../kit/theme.ts";
 export interface SeatsActions {
   setLane(lane: LaneName, value: string): void;
   revokeSupervisor(): void;
+  /** Retire the Project's Lead (cancel + archive) so the next dispatch starts fresh. */
+  rotateLead(): void;
   openAgent(agentId: string): void;
   busy: boolean;
 }
@@ -40,6 +44,14 @@ const LANE_CARDS: LaneCard[] = [
     hint: "Strong reasoning model to draft Contracts & relay verdicts (e.g. Opus, GPT-5.4, Pro)",
     lanes: ["supervisor"],
     value: (l) => l.supervisor,
+  },
+  {
+    id: "lead",
+    title: "Lead",
+    tier: "Reasoning / Pro",
+    hint: "Strong planning model to split directives into Tasks & Contracts and drive them to verdict (e.g. Opus, GPT-5.4, Pro)",
+    lanes: ["lead"],
+    value: (l) => l.lead,
   },
   {
     id: "worker",
@@ -160,7 +172,7 @@ function AgentCard({ theme, agent, actions }: { theme: PluginTheme; agent: Agent
 
 export function SeatsPane({ theme, view, actions, modelSyncNote }: { theme: PluginTheme; view: FactoryView; actions: SeatsActions; modelSyncNote: string | null }) {
   const [editing, setEditing] = useState<LaneCard | null>(null);
-  const workers = view.agents.filter((agent) => agent.id !== view.supervisor?.id);
+  const workers = view.agents.filter((agent) => agent.id !== view.supervisor?.id && agent.id !== view.lead?.id);
   const save = (card: LaneCard, value: string): void => {
     for (const lane of card.lanes) actions.setLane(lane, value);
     setEditing(null);
@@ -202,7 +214,14 @@ export function SeatsPane({ theme, view, actions, modelSyncNote }: { theme: Plug
           <SeatNode theme={theme} title="Supervisor — vacant" subtitle="Open Supervisor in the header creates the seat" pills={[{ label: "seat=supervisor", tone: "statusWarning", lit: true }]} />
         )}
         <Rail theme={theme} />
-        <SeatNode theme={theme} title="Lead (Rider)" subtitle="the middle seat inside factory run — watches to verdict, one re-poke, one respawn, or needs-human" pills={[{ label: "rider" }, { label: "ledger-only" }]} />
+        {view.lead !== null ? (
+          <View style={{ gap: SPACING[2] }}>
+            <AgentCard theme={theme} agent={view.lead} actions={actions} />
+            <Btn theme={theme} small label="Rotate Lead" tone="statusDanger" disabled={actions.busy} onPress={actions.rotateLead} />
+          </View>
+        ) : (
+          <SeatNode theme={theme} title="Lead — vacant" subtitle="Open Lead in the header seats the model-backed Lead at the project root" pills={[{ label: "seat=lead", tone: "statusWarning", lit: true }, { label: "lanes.lead" }]} />
+        )}
         <Rail theme={theme} />
         {workers.length === 0 ? (
           <SeatNode theme={theme} title="Working Agents — none live" subtitle="spawned agents appear here as the ledger names them" pills={[]} />
