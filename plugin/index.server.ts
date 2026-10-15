@@ -20,6 +20,7 @@ import { createChoke, startGitBlockIngestion } from "./server/choke.ts";
 import { createTimelineFetcher } from "./server/timeline.ts";
 import type { TimelineSourceApi } from "./server/timeline.ts";
 import { spoolRootFor, startSpool } from "./server/spool.ts";
+import { registerSurfaceRpc } from "./server/surface-rpc.ts";
 
 const SHELL_VERSION = "0.0.12";
 
@@ -81,6 +82,19 @@ export default function contribute(server: PluginServerContext) {
 
   const spool = startSpool(stateDir, factory, { onLog: log, ask: choke.spoolAskHandler });
   log(`spool listening on ${spoolRootFor(stateDir)}/{requests,replies,processed}`);
+
+  // The Factory surface's RPC handlers (v0.0.13, ADR 0009 §4): every
+  // `factory.*` call runs in-process against this same single Factory
+  // instance — the UI's Owner acts never round-trip through the spool. Each
+  // handler prefers the PaseoApi the daemon hands it; the captured one is
+  // the fallback for calls whose context carries none.
+  registerSurfaceRpc(server, {
+    factory,
+    stateDir,
+    home,
+    daemon: () => paseoApi as never,
+    onLog: log,
+  });
 
   const gitBlocks = startGitBlockIngestion(factory, { onLog: log });
 
