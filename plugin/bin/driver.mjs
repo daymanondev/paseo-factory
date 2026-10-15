@@ -51,6 +51,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { readLedgerEvents } from "./ledger-read.mjs";
 import { awaitReply, randomId, submit } from "./spool-client.mjs";
+import { prepareTaskWorkspace } from "./task-worktree.mjs";
 
 /** Snapshot polling cadence — the observe loop's only clock (ticket 03 §5). */
 export const POLL_MS = 5_000;
@@ -885,8 +886,8 @@ export async function observeTasks(
       } else {
         const contract = contractFromLedger(events, entry.task);
         const workspace = entry.workspace ?? contract?.workspace;
-        cleanWorkspaceForRespawn(workspace);
-        const brief = entry.brief ?? renderBrief(entry.task, process.env.PATH ?? "", contract?.description);
+        cleanWorkspaceForRespawn(workspace); // the TASK WORKTREE on the worktree path — never <project-root>
+        const brief = entry.brief ?? renderBrief(entry.task, process.env.PATH ?? "", contract?.description, contract?.skills, entry.branch);
         const { provider: providerId, model } = splitProvider(provider);
         const respawnSeq = reply.event?.seq;
         const idempotencyKey = respawnSeq !== undefined ? `${entry.task}-respawn-${respawnSeq}` : `${entry.task}-respawn`;
@@ -1244,18 +1245,32 @@ export async function runDriver({ home, stateDir, spoolRoot, tasks, provider, wa
       continue;
     }
     const contract = contractFromLedger(ledgerAtStart, task);
+    // The Task worktree (v0.0.14, ADR 0010 §4): a contracted task gets its
+    // isolated linked worktree allocated BEFORE the spawn request — the local
+    // refusal law holds (a worktree failure writes no ledger line), and the
+    // spawn request carries the worktree path so the plugin can record it on
+    // `spawn_dispatched` (claim, gate, and choke bind to it after that).
+    let prep;
     if (contract !== undefined) {
-      const prep = prepareWorkspace(contract.workspace, task);
-      if (!prep.ok) {
-        problems.push(bad(task, "refused locally", prep.reason));
+      const prepared = prepareTaskWorkspace(stateDir, contract, task);
+      if (!prepared.ok) {
+        problems.push(bad(task, "refused locally", prepared.reason));
         continue;
       }
-      say(`factory: ${task} on branch ${task}${prep.branchExisted ? " (existing — re-run)" : " (created)"}`);
+      prep = prepared;
+      say(`factory: ${task} in worktree ${prepared.cwd} on branch ${prepared.branch}${prepared.reset ? " (reset — re-run)" : " (created)"}`);
     }
     // The spool owns the record: one spawn request per task, one ledger line
     // either way. Unknown tasks ride this path too — the plugin's refusal is
     // the recorded fact, not a local complaint.
-    const request = { id: randomId(), kind: "spawn", task, provider, arity: tasks.length };
+    const request = {
+      id: randomId(),
+      kind: "spawn",
+      task,
+      provider,
+      arity: tasks.length,
+      ...(prep?.worktree === undefined ? {} : { worktree: prep.worktree }),
+    };
     submit(spoolRoot, request);
     const reply = await awaitReply(spoolRoot, request.id, waitSecs * 1000);
     if (reply === null) {
@@ -1274,7 +1289,11 @@ export async function runDriver({ home, stateDir, spoolRoot, tasks, provider, wa
     }
     if (created > 0) await sleep(staggerMs); // CPU etiquette only — gates must not serialize (ticket 03 §7)
     try {
-      const brief = renderBrief(task, process.env.PATH ?? "", contract.description);
+      // The agent's cwd is the task worktree (v0.0.14), and the brief names
+      // the branch it is already on — `factory/<task>`, never the bare task
+      // id the legacy shared-checkout path used.
+      const branch = prep?.branch ?? task;
+      const brief = renderBrief(task, process.env.PATH ?? "", contract.description, contract.skills, branch);
       const spawnSeq = reply.event?.seq;
       const idempotencyKey = spawnSeq !== undefined ? `${task}-spawn-${spawnSeq}` : task;
       const agentId = await createTaskAgent(rpc, {
@@ -1282,10 +1301,10 @@ export async function runDriver({ home, stateDir, spoolRoot, tasks, provider, wa
         idempotencyKey,
         provider: providerId,
         ...(model === undefined ? {} : { model }),
-        cwd: contract.workspace,
+        cwd: prep?.cwd ?? contract.workspace,
         brief,
       });
-      entries.push({ task, agentId, workspace: contract.workspace, brief });
+      entries.push({ task, agentId, workspace: prep?.cwd ?? contract.workspace, branch, brief });
       created += 1;
       say(`factory: ${task} agent ${agentId.slice(0, 12)} created — watching to verdict`);
     } catch (err) {
