@@ -109,6 +109,8 @@ function attemptView(slice: readonly AnyEvent[], n: number, previousEndSeq: numb
     respawned,
     gateLog: gate?.outputPath === undefined ? null : basename(gate.outputPath),
     report: report === undefined ? null : basename(report.path),
+    claimedAt: firstClaim?.ts ?? null,
+    verdictAt: gate?.ts ?? null,
     watch:
       watch === undefined
         ? null

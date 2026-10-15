@@ -66,6 +66,10 @@ export const AttemptViewSchema = z.object({
   /** The gate log / report file names in the stateDir, when they exist. */
   gateLog: z.string().nullable(),
   report: z.string().nullable(),
+  /** The claim's ts — the swimlane segment's start anchor. */
+  claimedAt: z.string().nullable(),
+  /** The verdict's ts — the swimlane segment's end anchor. */
+  verdictAt: z.string().nullable(),
   watch: WatchAttemptSchema.nullable(),
   eye: EyeAttemptSchema.nullable(),
 });
