@@ -1245,11 +1245,16 @@ export async function runDriver({ home, stateDir, spoolRoot, tasks, provider, wa
       continue;
     }
     const contract = contractFromLedger(ledgerAtStart, task);
-    // The Task worktree (v0.0.14, ADR 0010 §4): a contracted task gets its
-    // isolated linked worktree allocated BEFORE the spawn request — the local
-    // refusal law holds (a worktree failure writes no ledger line), and the
-    // spawn request carries the worktree path so the plugin can record it on
-    // `spawn_dispatched` (claim, gate, and choke bind to it after that).
+    // The Task worktree (v0.0.14, ADR 0010 §4): a contracted task whose
+    // workspace IS the Project root gets its isolated linked worktree
+    // allocated BEFORE the spawn request — the local refusal law holds (a
+    // worktree failure writes no ledger line), and the spawn request carries
+    // the worktree path so the plugin can record it on `spawn_dispatched`
+    // (claim, gate, and choke bind to it after that). A subdirectory
+    // workspace (Implementation Decision 5's condition) keeps the legacy
+    // single-checkout law: the branch switches in place, the agent's cwd
+    // stays the workspace, and no worktree rides the spawn line — no
+    // landing on accept either, exactly as before worktrees existed.
     let prep;
     if (contract !== undefined) {
       const prepared = prepareTaskWorkspace(stateDir, contract, task);
@@ -1257,8 +1262,18 @@ export async function runDriver({ home, stateDir, spoolRoot, tasks, provider, wa
         problems.push(bad(task, "refused locally", prepared.reason));
         continue;
       }
-      prep = prepared;
-      say(`factory: ${task} in worktree ${prepared.cwd} on branch ${prepared.branch}${prepared.reset ? " (reset — re-run)" : " (created)"}`);
+      if (prepared.legacy === true) {
+        const legacy = prepareWorkspace(contract.workspace, task);
+        if (!legacy.ok) {
+          problems.push(bad(task, "refused locally", legacy.reason));
+          continue;
+        }
+        prep = { ok: true, cwd: contract.workspace, branch: task };
+        say(`factory: ${task} on branch ${task}${legacy.branchExisted ? " (existing — re-run)" : " (created)"} — workspace is a repo subdirectory, not the project root: single-checkout path`);
+      } else {
+        prep = prepared;
+        say(`factory: ${task} in worktree ${prepared.cwd} on branch ${prepared.branch}${prepared.reset ? " (reset — re-run)" : " (created)"}`);
+      }
     }
     // The spool owns the record: one spawn request per task, one ledger line
     // either way. Unknown tasks ride this path too — the plugin's refusal is

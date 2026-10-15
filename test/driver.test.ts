@@ -255,6 +255,36 @@ test("prepareTaskWorktree copies .worktreeinclude-matched untracked files withou
   assert.equal(existsSync(join(notListed.path, "unmatched.bin")), false, "no catch-all copy ever happens");
 });
 
+test("a subdirectory workspace keeps the legacy single-checkout path — no worktree, the agent's cwd is the subdir", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const root = join(dir, "ws");
+  copyFixture("sample-workspace", root);
+  gitCommitAll(root);
+  // A monorepo package: the contract's workspace is a repo SUBDIRECTORY, not
+  // the project root (Implementation Decision 5 conditions the worktree on
+  // the workspace BEING <project-root>).
+  const pkg = join(root, "src");
+  const stateDir = join(dir, "state");
+
+  const routed = prepareTaskWorkspace(stateDir, { workspace: pkg, base: undefined }, "WT9");
+  assert.equal(routed.ok, true, routed.ok ? "" : routed.reason);
+  if (!routed.ok) return;
+  assert.equal(routed.cwd, pkg, "the agent's cwd stays the contracted subdirectory");
+  assert.equal(routed.branch, "WT9", "the legacy path's branch is the bare task id, not factory/<task>");
+  assert.equal(routed.legacy, true, "the dispatcher names the routing so the driver can branch in place");
+  assert.equal(routed.worktree, undefined, "no worktree is allocated or carried on the spawn request");
+  assert.equal(gitAt(root, ["worktree", "list"]).includes(join(stateDir, "projects")), false, "nothing was registered under <stateDir>/projects");
+  // And the repo root itself keeps the worktree routing.
+  const rooted = prepareTaskWorkspace(stateDir, { workspace: root, base: undefined }, "WT10");
+  assert.equal(rooted.ok, true, rooted.ok ? "" : rooted.reason);
+  if (rooted.ok) {
+    assert.equal(rooted.cwd, rooted.worktree);
+    assert.equal(rooted.branch, "factory/WT10");
+    assert.notEqual(rooted.legacy, true);
+  }
+});
+
 test("prepareTaskWorktree refuses a non-git workspace by name; the dispatcher never falls back to the shared checkout", (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);

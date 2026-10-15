@@ -33,9 +33,23 @@ export interface PreparedTaskWorkspace {
   /** The worktree path, carried on the spawn request so the plugin can record it. */
   worktree: string;
   reset: boolean;
+  /** Never set on the worktree routing — the discriminator of the legacy branch. */
+  legacy?: undefined;
+}
+/** The legacy routing (Implementation Decision 5): the workspace is a repo subdirectory — single checkout, no worktree. */
+export interface PreparedLegacyWorkspace {
+  ok: true;
+  legacy: true;
+  /** The execution cwd the spawned agent runs in — the contracted subdirectory. */
+  cwd: string;
+  /** The bare task id — the branch the driver switches to in place, as before worktrees existed. */
+  branch: string;
+  /** Never set on the legacy routing — no worktree is allocated or carried. */
+  worktree?: undefined;
+  reset?: undefined;
 }
 export declare function prepareTaskWorkspace(
   stateDir: string,
   contract: { workspace: string; base?: string },
   task: string,
-): PreparedTaskWorkspace | { ok: false; reason: string };
+): PreparedTaskWorkspace | PreparedLegacyWorkspace | { ok: false; reason: string };

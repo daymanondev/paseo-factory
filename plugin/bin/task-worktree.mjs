@@ -23,7 +23,7 @@
  *   on every conflict path.
  */
 import { spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { projectStateDir, resolveProject } from "./project.mjs";
 
@@ -177,18 +177,40 @@ function copyWorktreeIncludes(root, worktreePath) {
 }
 
 /**
- * The dispatcher `runDriver` calls per task: a Contract whose workspace
- * resolves to a Project gets the managed Task worktree (`cwd` = the worktree,
- * `branch` = `factory/<task>`, `worktree` = its path for the spawn request).
+ * The dispatcher `runDriver` calls per task (Implementation Decision 5): the
+ * managed Task worktree is conditioned on the Contract's workspace BEING the
+ * Project root — `cwd` = the worktree, `branch` = `factory/<task>`,
+ * `worktree` = its path for the spawn request. A workspace that resolves to
+ * the SAME repository but sits BELOW the root (a monorepo package) keeps the
+ * legacy single-checkout law instead: `legacy: true`, the agent's cwd stays
+ * the subdirectory, the branch is the bare task id, and no worktree is
+ * allocated (the driver switches the branch in place, exactly as before
+ * worktrees existed — no spawn-line worktree, so no landing on accept).
  * A workspace git cannot resolve, or a worktree git refuses to create, is a
  * local exit-2 refusal with NO ledger line — the allocation never falls back
  * to switching branches inside `<project-root>` (that path would dirty the
  * root the worktree law exists to protect).
  */
 export function prepareTaskWorkspace(stateDir, contract, task) {
+  const project = resolveProject(contract.workspace);
+  if (!project.ok) {
+    return { ok: false, reason: `workspace "${contract.workspace}" does not resolve to a git Project — ${project.reason}` };
+  }
+  if (!samePath(contract.workspace, project.root)) {
+    return { ok: true, legacy: true, cwd: contract.workspace, branch: task };
+  }
   const prepared = prepareTaskWorktree({ stateDir, workspace: contract.workspace, task, base: contract?.base });
   if (prepared.ok) {
     return { ok: true, cwd: prepared.path, branch: prepared.branch, worktree: prepared.path, reset: prepared.reset };
   }
   return { ok: false, reason: prepared.reason };
+}
+
+/** Path equality after canonicalization — git's toplevel is physical, the Contract's workspace may ride a symlink. */
+function samePath(a, b) {
+  try {
+    return realpathSync(a) === realpathSync(b);
+  } catch {
+    return a === b;
+  }
 }
