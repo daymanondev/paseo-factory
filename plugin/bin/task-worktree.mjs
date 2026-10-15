@@ -7,8 +7,9 @@
  * Laws it lives under:
  *
  * - **Plain .mjs, zero runtime deps** (ADR 0004): node:fs / node:child_process
- *   and the `./project.mjs` sibling only — no src/ or plugin-server imports,
- *   the same rule every plugin/bin file follows.
+ *   and the `./project.mjs + ../shared/worktree-shape.mjs` siblings only — no
+ *   src/ or plugin-server imports, the same rule every plugin/bin file
+ *   follows (a relative local import is still zero-dep).
  * - **Pre-spawn, refusal is local** (ticket 03 §2's law): a worktree that
  *   cannot be allocated is a named refusal with NO ledger line — a dispatched
  *   spawn with no worktree behind it would be a lie the ledger keeps.
@@ -26,36 +27,21 @@ import { spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { projectStateDir, resolveProject } from "./project.mjs";
+import { taskWorktreePath } from "../shared/worktree-shape.mjs";
 
 const GIT_TIMEOUT_MS = 15_000;
 
-/** Where one task's worktree lives — the Project's isolated state tree. */
-export function taskWorktreePath(stateDir, projectSlug, task) {
-  return join(projectStateDir(stateDir, projectSlug), "worktrees", task);
-}
+/**
+ * Where one task's worktree lives and its parse — the ONE
+ * `<stateDir>/projects/<slug>/worktrees/<task>` encoding, owned by
+ * ../shared/worktree-shape.mjs (the one place both this allocator and the
+ * server's role injector may import; see that file for the placement law).
+ */
+export { taskWorktreePath, parseTaskWorktreePath } from "../shared/worktree-shape.mjs";
 
 /** The branch every task worktree runs on — `factory/<task>`, never a shared name. */
 export function taskWorktreeBranch(task) {
   return `factory/${task}`;
-}
-
-/**
- * The parse of the shape `taskWorktreePath` builds (this file owns the one
- * `<stateDir>/projects/<slug>/worktrees/<task>` encoding): recognizes a
- * managed Task worktree cwd — or a directory inside one — and names its
- * project and task; anything else is null, not ours to inject. The server's
- * role layer (plugin/server/roles.ts) imports this instead of re-encoding
- * the shape (a relative local import keeps the bin file zero-dep, ADR 0004).
- */
-export function parseTaskWorktreePath(stateDir, cwd) {
-  const prefix = `${projectStateDir(stateDir, "")}/`;
-  if (typeof cwd !== "string" || !cwd.startsWith(prefix)) return null;
-  const segments = cwd.slice(prefix.length).split("/");
-  if (segments.length < 3) return null;
-  const [slug, worktrees, task] = segments;
-  if (slug === undefined || worktrees !== "worktrees" || task === undefined) return null;
-  if (slug === "" || task === "") return null;
-  return { slug, task };
 }
 
 function gitIn(cwd, args) {

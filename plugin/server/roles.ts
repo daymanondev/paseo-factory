@@ -25,7 +25,7 @@ import { join } from "node:path";
 import { projectStateDir, resolveProject } from "./core/project.ts";
 import type { ProjectResolution } from "./core/project.ts";
 import { listProjectRegistrations } from "./projects.ts";
-import { parseTaskWorktreePath } from "../bin/task-worktree.mjs";
+import { parseTaskWorktreePath } from "../shared/worktree-shape.mjs";
 
 /**
  * The Project identity slice every role renderer carries — ProjectResolution's

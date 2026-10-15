@@ -5,16 +5,14 @@
  * wiring is thin on top of them.
  */
 
-export declare function taskWorktreePath(stateDir: string, projectSlug: string, task: string): string;
-export declare function taskWorktreeBranch(task: string): string;
 /**
- * The parse of the shape `taskWorktreePath` builds (this file owns the one
- * `<stateDir>/projects/<slug>/worktrees/<task>` encoding): a managed worktree
- * cwd — or a directory inside one — names its project and task; anything
- * else is null. The server's role layer imports this instead of re-encoding
- * the shape.
+ * The worktree path shape's build/parse pair is owned by
+ * ../shared/worktree-shape.mjs (the one place both this allocator and the
+ * server's role injector may import); re-exported here so the bin module's
+ * public surface is unchanged.
  */
-export declare function parseTaskWorktreePath(stateDir: string, cwd: string): { slug: string; task: string } | null;
+export { taskWorktreePath, parseTaskWorktreePath } from "../shared/worktree-shape.mjs";
+export declare function taskWorktreeBranch(task: string): string;
 
 export interface PreparedTaskWorktree {
   ok: true;
