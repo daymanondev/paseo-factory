@@ -634,8 +634,12 @@ export function createFactory(options: FactoryOptions): Factory {
       // (AGENTS.md, CLAUDE.md, CONTEXT.md) red EVERY contract that does not
       // explicitly scope them — unrestricted ones included (ADR 0010 §6:
       // project memory is the Supervisor's and Lead's act, never a worker's
-      // side effect). A task that overreaches is refused here, never prompted
-      // back to polite behavior.
+      // side effect) — WHEN the Contract carries a base commit, which the
+      // diff below needs (every Contract since v0.0.2 records one; only
+      // pre-0.0.2 ledger lines are base-less). A base-less Contract skips
+      // this claim-time fence; the ask-time Choke fence (MEMORY_FILES in
+      // choke.ts) still covers its writes live. A task that overreaches is
+      // refused here, never prompted back to polite behavior.
       const scopeDeclared = contract.scope !== undefined && contract.scope.length > 0;
       if (scopeDeclared && contract.base === undefined) {
         return finish(
