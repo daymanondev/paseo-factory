@@ -1,8 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createFactory } from "../src/index.ts";
+import { resolveProject } from "../src/project.ts";
 import { copyFixture, disposeDir, gitCommitAll, gitCommitChanges, makeTempDir } from "./helpers.ts";
 
 /** Parses a ledger line and drops the clock-dependent `ts` so asserts stay exact. */
@@ -132,4 +134,59 @@ test("the full loop: red attempt → real fix → green attempt 2 → the Owner 
     "report_written",
     "attempt_accepted",
   ]);
+});
+
+test("the Task worktree loop: driver-style allocation, claim inside the worktree, Lead accept lands into <project-root>", async (t) => {
+  const tmp = makeTempDir();
+  disposeDir(t, tmp);
+  const workspace = join(tmp, "workspace");
+  copyFixture("sample-workspace", workspace);
+  const base = gitCommitAll(workspace);
+  const stateDir = join(tmp, "factory");
+  const { prepareTaskWorktree } = await import("../plugin/bin/task-worktree.mjs");
+  const project = resolveProject(workspace);
+  assert.equal(project.ok, true, "the fixture workspace is a git Project");
+
+  // The driver's own allocation helper — the same .mjs code `factory run` runs.
+  const prepared = prepareTaskWorktree({ stateDir, workspace, task: "WTE2E", base });
+  assert.equal(prepared.ok, true, prepared.ok ? "" : prepared.reason);
+  if (!prepared.ok) return;
+  assert.equal(prepared.path, join(stateDir, "projects", project.ok ? project.slug : "", "worktrees", "WTE2E"));
+
+  const factory = createFactory({ stateDir });
+  factory.setContract({ task: "WTE2E", workspace, gate: "npm test", artifact: "src/format.ts" });
+  const spawn = factory.requestSpawn({ task: "WTE2E", provider: "claude", arity: 1, worktree: prepared.path });
+  assert.equal(spawn.outcome, "dispatched");
+
+  // The agent works INSIDE the worktree; <project-root> never moves.
+  writeFileSync(
+    join(prepared.path, "src", "format.ts"),
+    [
+      "export function pad(input: string, width: number): string {",
+      "  if (input.length >= width) return input.slice(0, width);",
+      "  return input + \" \".repeat(width - input.length);",
+      "}",
+      "",
+    ].join("\n"),
+  );
+  const claimed = gitCommitChanges(prepared.path, "fix pad in the worktree");
+  const outcome = await factory.claim({ task: "WTE2E", sha: claimed });
+  assert.equal(outcome.verdict, "green", "the gate ran against the worktree checkout");
+  assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: workspace, encoding: "utf8" }).trim(), base, "the root sat at base the whole run");
+  assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: workspace, encoding: "utf8" }).trim(), "", "the root stayed clean");
+
+  // The Lead accepts the green attempt; the landing fast-forwards the root.
+  const accepted = await factory.accept({ task: "WTE2E", attempt: 1, accepted_by: "lead" });
+  assert.equal(accepted.landing, "landed");
+  assert.equal(accepted.accepted_by, "lead");
+  assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: workspace, encoding: "utf8" }).trim(), claimed, "the root's branch fast-forwarded to the verified commit");
+  assert.equal(existsSync(prepared.path), false, "the worktree is removed after the landing");
+  assert.equal(
+    execFileSync("git", ["rev-parse", "--verify", "factory/WTE2E"], { cwd: workspace, encoding: "utf8" }).trim(),
+    claimed,
+    "branch factory/Wtask> survives",
+  );
+  const spawnLine = factory.ledger.eventsFor("WTE2E").find((e) => e.event === "spawn_dispatched");
+  assert.equal(spawnLine === undefined ? undefined : "worktree" in spawnLine ? spawnLine.worktree : undefined, prepared.path, "the spawn line carried the worktree");
+  assert.match(readFileSync(join(stateDir, "report-WTE2E-1.md"), "utf8"), /- Verdict: GREEN/);
 });

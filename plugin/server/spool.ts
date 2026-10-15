@@ -71,6 +71,14 @@ export interface AcceptRequest {
   task: string;
   attempt: number;
   /**
+   * The accepting seat, claimed explicitly (v0.0.14, ADR 0010 §3): the CLI's
+   * `--by owner|supervisor|lead` flag. When present it overrides the
+   * submitter stamp as the acceptance's `accepted_by` — the Lead's
+   * conditional authority is judged at the factory, never trusted from the
+   * request's spelling alone.
+   */
+  by?: "owner" | "supervisor" | "lead";
+  /**
    * Who submitted (v0.0.9) — required, the submitting shell's stamp, the
    * same law as the contract's: `PASEO_AGENT_ID` or `owner`. "The Ledger
    * always records who accepted" (ADR 0006) starts at the request.
@@ -290,7 +298,15 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     // Same law as the contract: no submitter, no acceptance — the accepter's
     // identity is part of the act (ADR 0006).
     if (typeof req.submitter !== "string" || req.submitter.trim() === "") return undefined;
-    return { id: req.id, kind: "accept", task: req.task, attempt: req.attempt, submitter: req.submitter };
+    if (req.by !== undefined && req.by !== "owner" && req.by !== "supervisor" && req.by !== "lead") return undefined;
+    return {
+      id: req.id,
+      kind: "accept",
+      task: req.task,
+      attempt: req.attempt,
+      ...(req.by === undefined ? {} : { by: req.by }),
+      submitter: req.submitter,
+    };
   }
   if (req.kind === "spawn") {
     if (typeof req.task !== "string" || typeof req.provider !== "string" || typeof req.arity !== "number" || !Number.isInteger(req.arity) || req.arity < 1) {
@@ -534,13 +550,16 @@ export async function handleSpoolRequest(
       };
     }
     // The acceptance (v0.0.14): awaited — a worktree task's local landing
-    // runs before the line records, and the reply carries the outcome.
-    const accepted = await factory.accept({ task: request.task, attempt: request.attempt, accepted_by: request.submitter });
+    // runs before the line records, and the reply carries the outcome. The
+    // `--by` seat, when the request claims one, overrides the submitter
+    // stamp; the Lead's conditional authority is judged below in the factory.
+    const acceptedBy = request.by ?? request.submitter;
+    const accepted = await factory.accept({ task: request.task, attempt: request.attempt, accepted_by: acceptedBy });
     return {
       id: request.id,
       ok: true,
       summary:
-        `task ${request.task} accepted at attempt ${request.attempt} by ${request.submitter}` +
+        `task ${request.task} accepted at attempt ${request.attempt} by ${acceptedBy}` +
         (accepted.landing === "landed"
           ? " · landed into <project-root>"
           : accepted.landing === "pending-conflict"

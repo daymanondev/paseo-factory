@@ -50,6 +50,16 @@ test("parseSpoolRequest accepts exactly the three request shapes and nothing els
     attempt: 2,
     submitter: "owner",
   });
+  // v0.0.14: --by claims an acceptance seat; anything but the three seats is malformed.
+  assert.deepEqual(parseSpoolRequest({ id: "r1", kind: "accept", task: "T1", attempt: 2, submitter: "owner", by: "lead" }), {
+    id: "r1",
+    kind: "accept",
+    task: "T1",
+    attempt: 2,
+    by: "lead",
+    submitter: "owner",
+  });
+  assert.equal(parseSpoolRequest({ id: "r1", kind: "accept", task: "T1", attempt: 2, submitter: "owner", by: "boss" }), undefined);
   assert.deepEqual(
     parseSpoolRequest({ id: "r1", kind: "contract", task: "T1", workspace: "/w", gate: "true", artifact: "a", submitter: "agent-sup-1" }),
     {
@@ -272,6 +282,12 @@ test("parseSpoolRequest accepts the spawn shape and nothing around it", () => {
     provider: "claude/opus-4-8",
     arity: 2,
   });
+  // v0.0.14: the driver names the managed Task worktree; an empty or non-string value is malformed.
+  assert.deepEqual(
+    parseSpoolRequest({ id: "r1", kind: "spawn", task: "T1", provider: "claude", arity: 1, worktree: "/state/projects/p/worktrees/T1" }),
+    { id: "r1", kind: "spawn", task: "T1", provider: "claude", arity: 1, worktree: "/state/projects/p/worktrees/T1" },
+  );
+  assert.equal(parseSpoolRequest({ id: "r1", kind: "spawn", task: "T1", provider: "claude", arity: 1, worktree: " " }), undefined);
   for (const bad of [
     { id: "r1", kind: "spawn", task: "T1", provider: "claude" },
     { id: "r1", kind: "spawn", task: "T1", provider: "claude", arity: "2" },

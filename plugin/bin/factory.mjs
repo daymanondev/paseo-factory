@@ -9,7 +9,7 @@
  *
  *   factory [--home <paseoHome>] contract --task <id> --workspace <dir> \
  *       --gate <command> --artifact <path> [--scope <p1,p2,...>] [--wait-secs <n>]
- *   factory [--home <paseoHome>] accept <task> --attempt <n> [--wait-secs <n>]
+ *   factory [--home <paseoHome>] accept <task> --attempt <n> [--by owner|supervisor|lead] [--wait-secs <n>]
  *   factory [--home <paseoHome>] run <task> [<task>…] [--provider <provider[/model]>]
  *   factory [--home <paseoHome>] lanes [get [<lane>] | set <lane> <value>]
  *   factory [--home <paseoHome>] status
@@ -80,7 +80,9 @@ commands:
                                      driver's brief renders them at the top
 
   accept     Accept one green attempt of a task (the Owner's act)
-             accept <task> --attempt <n>
+             accept <task> --attempt <n> [--by owner|supervisor|lead]
+             --by names the accepting seat (v0.0.14): owner/supervisor are
+             the unconditional override, lead accepts green + CONCERN-free
 
   run        Run contracted tasks' agents to verdict (the driver, v0.0.5):
              one agent per task on the daemon, watched to its verdict.
@@ -153,11 +155,20 @@ attribution (v0.0.9): contract and accept stamp who submitted — the
   shell's $PASEO_AGENT_ID when the daemon env carries one (the delegated
   Owner seat), else "owner" (the human path). The stamp rides the spool
   request onto the ledger line (by: on contract_set, accepted_by: on
-  attempt_accepted) — there is no flag to set or override it.`;
+  attempt_accepted). Since v0.0.14 "accept --by owner|supervisor|lead" is
+  the one flag that overrides the stamp — the acceptance authority seats
+  (ADR 0010 §3); "lead" is judged at the factory, not trusted from here.`;
 
 const DEFAULT_WAIT_SECS = 60;
 /** The retro's own default — one pass runs minutes, and the budget alone is 600s. */
 const RETRO_WAIT_SECS = 660;
+
+/**
+ * The acceptance authority seats (v0.0.14, ADR 0010 §3): `owner` and
+ * `supervisor` are the unconditional override, `lead` the intermediate
+ * acceptance the factory judges (green + CONCERN-free + not escalated).
+ */
+const ACCEPT_SEATS = ["owner", "supervisor", "lead"];
 
 /**
  * The v0.0.9 attribution stamp (ADR 0006): the submitting shell's identity —
@@ -254,7 +265,9 @@ async function roundTrip(request, waitSecs) {
     process.exit(2);
   }
   if (!reply.ok) {
-    console.error(`factory: ${reply.message}`);
+    // The refusal's code rides the line (the driver's own refusal-log law):
+    // a `lead-accept-refused` reads as itself at the terminal, not as prose.
+    console.error(`factory: ${reply.code}: ${reply.message}`);
     process.exit(2);
   }
   return reply;
@@ -309,15 +322,29 @@ if (command === "contract") {
 if (command === "accept") {
   const parsed = parseCommandOptions({
     attempt: { type: "string" },
+    by: { type: "string" },
     "wait-secs": { type: "string" },
   });
   const task = parsed.positionals[0];
-  if (task === undefined) fail("accept: a task id is required (factory accept <task> --attempt <n>)");
+  if (task === undefined) fail("accept: a task id is required (factory accept <task> --attempt <n> [--by owner|supervisor|lead])");
   if (parsed.positionals.length > 1) fail(`accept: unexpected positional "${parsed.positionals[1]}"`);
   const attempt = Number(parsed.values.attempt);
   if (!Number.isInteger(attempt) || attempt < 1) fail("accept: --attempt must be a positive integer");
+  // The acceptance authority seats (v0.0.14, ADR 0010 §3): the flag claims
+  // one explicitly; without it the shell's own stamp rides (the v0.0.9 law —
+  // the delegated agent's id or "owner").
+  let by;
+  if (parsed.values.by !== undefined) {
+    if (!ACCEPT_SEATS.includes(parsed.values.by)) {
+      fail(`accept: --by must be one of owner|supervisor|lead — got "${parsed.values.by}"`);
+    }
+    by = parsed.values.by;
+  }
 
-  const reply = await roundTrip({ id: randomId(), kind: "accept", task, attempt, submitter }, waitSeconds(parsed));
+  const reply = await roundTrip(
+    { id: randomId(), kind: "accept", task, attempt, submitter, ...(by === undefined ? {} : { by }) },
+    waitSeconds(parsed),
+  );
   console.log(`factory: ${reply.summary}`);
   process.exit(0);
 }
