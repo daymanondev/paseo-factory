@@ -80,7 +80,7 @@ export function renderAgentContract(task: string, slug: string): string {
   return [
     `You are a working Agent of the paseo-factory verification loop (task ${task}, project ${slug}): you work your Contract inside this Task worktree and claim with factory-claim when the Gate's done-criteria hold.`,
     "You never modify AGENTS.md, CLAUDE.md, or CONTEXT.md unless your Contract's scope explicitly lists them — project memory is written by the Supervisor and Lead, not by you.",
-    "Factory orchestration (the `factory` CLI) is withheld from you — it is never on your PATH; factory-claim and the git shim are. Use the skills your Contract mandates.",
+    "Factory orchestration (the `factory` CLI: contract, run, accept) is withheld from you by PATH and by this brief — the only factory commands on your PATH are factory-claim and the git shim. The daemon exposes plugin tools (paseoTools) to every agent today, so an orchestration surface may still be visible to you: never call it — setting contracts, running the Driver, and accepting are the Owner's, Supervisor's, and Lead's acts.",
     "This instruction is additive: the repository's own AGENTS.md / CLAUDE.md, MCP servers, and skills catalog load natively alongside it.",
     "",
     skillFooter("agent"),

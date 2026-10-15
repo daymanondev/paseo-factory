@@ -657,7 +657,14 @@ test("roles: the seat contracts carry the role law and the 1-line skill trigger 
   const agent = renderAgentContract("T1", "repo-abc123");
   assert.match(agent, /task T1, project repo-abc123/);
   assert.match(agent, /never modify AGENTS\.md, CLAUDE\.md, or CONTEXT\.md/);
-  assert.match(agent, /withheld/);
+  // The withholding boundary, stated honestly (US17 partial): the mechanical
+  // guarantee that exists today is PATH + brief — the daemon exposes
+  // paseoTools to every agent, so the contract must both name the mechanism
+  // and forbid the visible surface.
+  assert.match(agent, /withheld from you by PATH and by this brief/);
+  assert.match(agent, /factory-claim and the git shim/);
+  assert.match(agent, /paseoTools.*every agent/);
+  assert.match(agent, /never call it/);
   assert.match(agent, /paseo-factory role skills: tdd, diagnosing-bugs, codebase-design$/);
 });
 
