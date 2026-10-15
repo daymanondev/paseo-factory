@@ -73,8 +73,6 @@ export interface SurfaceCallContext {
   paseo?: unknown;
 }
 
-export type DaemonReplyOf = DaemonReply;
-
 // ---- the handlers -------------------------------------------------------------------------
 
 export interface SurfaceDeps {
