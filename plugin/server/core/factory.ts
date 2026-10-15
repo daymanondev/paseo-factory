@@ -451,11 +451,17 @@ export function createFactory(options: FactoryOptions): Factory {
       // contains. Without this, two gates race in one cwd and permit asks
       // misattribute to the latest covering Contract. It is also the Owner-CLI
       // arm of the driver's spawn-time workspace refusal (ticket 03 §7).
-      const conflict = liveWorkspaceConflict(ledger, workspace, task);
+      // Since v0.0.14 (ADR 0010 §4) the SAME tree is exempt when both Contracts
+      // declare disjoint scopes: each Task executes in its own managed worktree,
+      // so the single-checkout collision cannot happen — the scope globs are
+      // the declared boundary (Implementation Decision 5, bullet 3).
+      const conflict = liveWorkspaceConflict(ledger, workspace, task, scope);
       if (conflict !== undefined) {
         throw new FactoryError(
           "workspace-conflict",
-          `workspace "${workspace}" ${relationText(conflict.relation)} the live contract of task ${conflict.task} (${conflict.workspace}) — accept or retire that task before contracting this tree`,
+          conflict.relation === "equal" && conflict.overlapping !== undefined
+            ? `workspace "${workspace}" is the same tree as the live contract of task ${conflict.task}, and their scopes overlap (${conflict.overlapping}) — two Tasks share one Project only behind disjoint scopes`
+            : `workspace "${workspace}" ${relationText(conflict.relation)} the live contract of task ${conflict.task} (${conflict.workspace}) — accept or retire that task before contracting this tree`,
         );
       }
       return ledger.append({
@@ -797,7 +803,7 @@ export function createFactory(options: FactoryOptions): Factory {
           `task ${task} has no scope — contracts must be scoped to run in parallel (this invocation carries ${arity} tasks)`,
         );
       }
-      const conflict = liveWorkspaceConflict(ledger, contract.workspace, task);
+      const conflict = liveWorkspaceConflict(ledger, contract.workspace, task, contract.scope);
       if (conflict !== undefined) {
         return refuse(
           "workspace-conflict",
@@ -1140,12 +1146,20 @@ function relationText(relation: WorkspaceRelation): string {
  * inside, or contains `workspace`. Comparison is on the paths as contracted
  * (absolute, `resolve`d by the CLI); trailing slashes are tolerated, symlink
  * aliasing is not — the Owner contracts one spelling of a tree per run.
+ * Since v0.0.14 (ADR 0010 §4) the EQUAL relation is exempt when both
+ * Contracts declare disjoint scopes (`myScope` is the asking task's scope —
+ * the contract's own on the spawn path, the input's on the setContract path
+ * where the line has not landed yet): same-Project Tasks each execute in
+ * their own managed worktree, so the single-checkout collision cannot
+ * happen, and the scopes are the declared boundary. On an overlapping equal
+ * pair the returned conflict names the overlapping prefixes.
  */
 function liveWorkspaceConflict(
   ledger: Ledger,
   workspace: string,
   task: string,
-): { task: string; workspace: string; relation: WorkspaceRelation } | undefined {
+  myScope?: string[],
+): { task: string; workspace: string; relation: WorkspaceRelation; overlapping?: string } | undefined {
   const mine = normalized(workspace);
   const accepted = acceptedTasks(ledger);
   for (const evt of ledger.events) {
@@ -1155,7 +1169,29 @@ function liveWorkspaceConflict(
     if (mine === theirs) relation = "equal";
     else if (mine.startsWith(`${theirs}/`)) relation = "inside";
     else if (theirs.startsWith(`${mine}/`)) relation = "contains";
-    if (relation !== undefined) return { task: evt.task, workspace: evt.workspace, relation };
+    if (relation === undefined) continue;
+    if (relation === "equal") {
+      const overlap = scopesOverlap(myScope, evt.scope);
+      if (overlap === undefined) continue; // the worktree exemption — disjoint scopes, one Project
+      return { task: evt.task, workspace: evt.workspace, relation, overlapping: overlap };
+    }
+    return { task: evt.task, workspace: evt.workspace, relation };
+  }
+  return undefined;
+}
+
+/**
+ * The first pair of scope prefixes that overlap (either covers the other's
+ * territory), or undefined when the scopes are disjoint — the exemption's
+ * one question. Unrestricted (empty/undefined) scope means "everywhere", so
+ * it overlaps everything and never rides the exemption.
+ */
+function scopesOverlap(a: readonly string[] | undefined, b: readonly string[] | undefined): string | undefined {
+  if (a === undefined || a.length === 0 || b === undefined || b.length === 0) return "one contract is unscoped";
+  for (const mine of a) {
+    for (const theirs of b) {
+      if (scopeCoversFile([mine], theirs) || scopeCoversFile([theirs], mine)) return `${mine} ↔ ${theirs}`;
+    }
   }
   return undefined;
 }

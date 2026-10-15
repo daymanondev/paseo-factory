@@ -1225,3 +1225,69 @@ test("acceptance retires the worktree binding too — the choke does not outlive
   factory.ledger.append({ event: "attempt_accepted", task: "WTC", attempt: 1 });
   assert.equal(factory.liveContractFor(worktree), undefined, "accepted — the worktree binds no live contract either");
 });
+
+// ---- same-Project parallel Tasks (v0.0.14, ADR 0010 §4): the worktree exemption of the H1/H2 guard ----
+
+test("two Tasks of one Project contract and run concurrently when their scopes are disjoint", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+
+  // Same <project-root>, disjoint scope globs: both contracts land, both
+  // spawns dispatch — each Task executes in its own worktree, so the
+  // single-checkout collision the H1/H2 guard exists for cannot happen.
+  factory.setContract({ task: "PP1", workspace, gate: "true", artifact, scope: ["src/"] });
+  factory.setContract({ task: "PP2", workspace, gate: "true", artifact, scope: ["docs/"] });
+  assert.equal(factory.requestSpawn({ task: "PP1", provider: "claude", arity: 1 }).outcome, "dispatched");
+  assert.equal(factory.requestSpawn({ task: "PP2", provider: "claude", arity: 1 }).outcome, "dispatched");
+});
+
+test("the exemption is the declared boundary: overlapping scopes, an unscoped sibling, and nesting still refuse", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  factory.setContract({ task: "PO1", workspace, gate: "true", artifact, scope: ["src"] });
+
+  // Overlap: src/format.ts sits inside src — one boundary, two owners, refused.
+  assert.throws(
+    () => factory.setContract({ task: "PO2", workspace, gate: "true", artifact, scope: ["src/format.ts"] }),
+    (err: unknown) => err instanceof FactoryError && err.code === "workspace-conflict" && /overlap/.test(err.message),
+    "overlapping scopes refuse, naming the overlap",
+  );
+  // Unrestricted scope means "everywhere" — it overlaps everything, refused.
+  assert.throws(
+    () => factory.setContract({ task: "PO3", workspace, gate: "true", artifact }),
+    factoryErrorCode("workspace-conflict"),
+    "an unscoped sibling cannot declare disjointness",
+  );
+  // A scoped contract against an unscoped incumbent: same refusal, other side.
+  const dir2 = makeTempDir();
+  disposeDir(t, dir2);
+  const { workspace: ws2, artifact: artifact2 } = makeWorkspace(dir2);
+  const factory2 = createFactory({ stateDir: join(dir2, "state") });
+  factory2.setContract({ task: "PO4", workspace: ws2, gate: "true", artifact: artifact2 });
+  assert.throws(
+    () => factory2.setContract({ task: "PO5", workspace: ws2, gate: "true", artifact: artifact2, scope: ["docs/"] }),
+    factoryErrorCode("workspace-conflict"),
+    "a scoped sibling of an unscoped incumbent refuses too",
+  );
+  // Nesting never rides the exemption — only the SAME tree does.
+  const deep = join(workspace, "deep");
+  mkdirSync(deep, { recursive: true });
+  writeFileSync(join(deep, "x.ts"), "x\n");
+  gitCommitChanges(workspace, "add deep dir");
+  assert.throws(
+    () => factory.setContract({ task: "PO6", workspace: deep, gate: "true", artifact, scope: ["deep/"] }),
+    (err: unknown) => err instanceof FactoryError && err.code === "workspace-conflict" && /sits inside/.test(err.message),
+  );
+  // And the spawn-time arm carries the same exemption: two disjoint scoped
+  // siblings of one tree both dispatch (the single-checkout collision the
+  // arm exists for cannot happen when each runs in its own worktree).
+  const factory3 = createFactory({ stateDir: join(dir2, "state3") });
+  factory3.setContract({ task: "PO7", workspace: ws2, gate: "true", artifact: artifact2, scope: ["src"] });
+  factory3.setContract({ task: "PO8", workspace: ws2, gate: "true", artifact: artifact2, scope: ["docs"] });
+  assert.equal(factory3.requestSpawn({ task: "PO7", provider: "claude", arity: 1 }).outcome, "dispatched");
+  assert.equal(factory3.requestSpawn({ task: "PO8", provider: "claude", arity: 1 }).outcome, "dispatched");
+});
