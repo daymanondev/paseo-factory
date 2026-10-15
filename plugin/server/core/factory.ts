@@ -4,10 +4,13 @@ import { Ledger, usageIsValid } from "./ledger.ts";
 import { MAX_ATTEMPTS, NEEDS_HUMAN_REASONS, needsHumanEvidenceIsValid } from "./events.ts";
 import { runGate } from "./gate.ts";
 import { renderReport } from "./report.ts";
-import { loadEyeConfig, runFreshEyesPass } from "./fresh-eyes.ts";
-import { copilotAvailable, runWatchPass } from "./watch.ts";
+import { laneCliAvailable } from "./lanes.ts";
+import { EYE_JSON_LANE } from "./lanes.ts";
+import type { LaneCliRunner } from "./lanes.ts";
+import { loadEyeConfig, resolveEyeLane, runFreshEyesPass } from "./fresh-eyes.ts";
+import { runWatchPass, watchLaneAvailable } from "./watch.ts";
 import type { CopilotRunner, TimelineFetcher } from "./watch.ts";
-import { buildRetroDigest, retroDay, runRetroPass, writtenRetroForDay } from "./retro.ts";
+import { buildRetroDigest, retroDay, retroLaneAvailable, runRetroPass, writtenRetroForDay } from "./retro.ts";
 import type { RetroOutcome } from "./retro.ts";
 import { changesOutsideScope, checkCleanAt, headCommitSync, resolveClaimedCommit } from "./workspace.ts";
 import { FactoryError } from "./errors.ts";
@@ -33,16 +36,24 @@ export interface FactoryOptions {
   fetchTimeline?: TimelineFetcher;
   /** Watch total budget override (ms), all tries together (tests). Defaults to WATCH_TOTAL_BUDGET_MS. */
   watchBudgetMs?: number;
-  /** Copilot CLI availability probe override (tests) — the watch's whole config surface (amendment 2). */
-  watchCopilotProbe?: () => boolean;
-  /** Copilot CLI runner override (tests) — the model and flags stay pinned regardless. */
+  /**
+   * Watch lane availability probe override (tests) — the watch's whole config
+   * surface (amendment 2, generalized to lanes in v0.0.13). Receives the
+   * lane it vouches for.
+   */
+  watchCopilotProbe?: (lane: string) => boolean;
+  /** Watch lane CLI runner override (tests) — the lane and its tool-less flags stay fixed regardless. */
   watchCopilotRunner?: CopilotRunner;
   /** Retro total budget override (ms), both tries together (tests). Defaults to RETRO_TOTAL_BUDGET_MS. */
   retroBudgetMs?: number;
-  /** Retro's copilot availability probe override (tests) — the pass refuses before any ask when false. */
-  retroCopilotProbe?: () => boolean;
-  /** Retro's copilot CLI runner override (tests) — the model and flags stay pinned regardless. */
+  /** Retro lane availability probe override (tests) — the pass refuses before any ask when false. */
+  retroCopilotProbe?: (lane: string) => boolean;
+  /** Retro lane CLI runner override (tests) — the lane and its tool-less flags stay fixed regardless. */
   retroCopilotRunner?: CopilotRunner;
+  /** Fresh-eyes CLI lane availability probe override (tests) — the eye.json path keeps its own config check. */
+  eyeCliProbe?: (lane: string) => boolean;
+  /** Fresh-eyes CLI lane runner override (tests) — the lane's tool-less flags stay fixed regardless. */
+  eyeCliRunner?: LaneCliRunner;
 }
 
 export interface ContractInput {
@@ -351,20 +362,32 @@ export function createFactory(options: FactoryOptions): Factory {
       }
       // Fresh-eyes fails fast here: marking a Contract without a usable eye
       // must error before any Agent work starts, not 60s into a green claim
-      // (ticket 04 §3). The watch follows the same law (v0.0.6).
+      // (ticket 04 §3). Since v0.0.13 the eye runs a lane: "eye.json" keeps
+      // its own config check, a CLI lane probes its command (the watch's law).
       if (freshEyes === true) {
-        const eye = loadEyeConfig(stateDir);
-        if (!eye.ok) {
-          throw new FactoryError("eye-unconfigured", `fresh-eyes is on, but the eye is not usable: ${eye.reason}`);
+        const lane = resolveEyeLane(stateDir);
+        if (!lane.ok) {
+          throw new FactoryError("eye-unconfigured", `fresh-eyes is on, but its lane is not usable: ${lane.reason}`);
+        }
+        if (lane.lane === EYE_JSON_LANE) {
+          const eye = loadEyeConfig(stateDir);
+          if (!eye.ok) {
+            throw new FactoryError("eye-unconfigured", `fresh-eyes is on, but the eye is not usable: ${eye.reason}`);
+          }
+        } else {
+          const usable = options.eyeCliProbe === undefined ? laneCliAvailable(lane.lane) : options.eyeCliProbe(lane.lane);
+          if (!usable) {
+            throw new FactoryError(
+              "eye-unconfigured",
+              `fresh-eyes is on, but the ${lane.lane} CLI is not usable on PATH — install and auth it for the daemon user (the CLI carries the pass's auth; there is no key file)`,
+            );
+          }
         }
       }
       if (watch === true) {
-        const usable = options.watchCopilotProbe === undefined ? copilotAvailable() : options.watchCopilotProbe();
-        if (!usable) {
-          throw new FactoryError(
-            "watch-unconfigured",
-            "the watch is on, but the copilot CLI is not usable on PATH — install and auth it for the daemon user (the CLI carries the watch's auth; there is no key file)",
-          );
+        const usable = watchLaneAvailable(stateDir, options.watchCopilotProbe);
+        if (!usable.ok) {
+          throw new FactoryError("watch-unconfigured", `the watch is on, but its lane is not usable: ${usable.reason}`);
         }
       }
       const existing = ledger.eventsFor(task).some((e) => e.event === "contract_set");
@@ -460,7 +483,7 @@ export function createFactory(options: FactoryOptions): Factory {
       // command never runs on an unverified tree.
       const resolved = await resolveClaimedCommit(contract.workspace, sha);
       if (!resolved.ok) {
-        return finish(task, attempt, ledger, stateDir, contract, { exit: null, verdict: "red", note: resolved.reason, timedOut: false }, undefined, undefined, watchContext());
+        return finish(task, attempt, ledger, stateDir, contract, { exit: null, verdict: "red", note: resolved.reason, timedOut: false }, undefined, undefined, undefined, watchContext());
       }
 
       // Station 2 — clean tree, HEAD at the claimed commit, before the gate.
@@ -479,6 +502,7 @@ export function createFactory(options: FactoryOptions): Factory {
             timedOut: false,
           },
           resolved.full,
+          undefined,
           undefined,
           watchContext(),
         );
@@ -521,6 +545,7 @@ export function createFactory(options: FactoryOptions): Factory {
           },
           resolved.full,
           undefined,
+          undefined,
           watchContext(),
         );
       }
@@ -538,6 +563,7 @@ export function createFactory(options: FactoryOptions): Factory {
             contract,
             { exit: result.exit, verdict: "red", note: "scoped contract has no recorded base commit", timedOut: false },
             resolved.full,
+            undefined,
             undefined,
             watchContext(),
           );
@@ -564,13 +590,14 @@ export function createFactory(options: FactoryOptions): Factory {
             },
             resolved.full,
             undefined,
+            undefined,
             watchContext(),
           );
         }
         scopeViolations = [];
       }
 
-      return finish(task, attempt, ledger, stateDir, contract, result, resolved.full, options.eyeBudgetMs, watchContext());
+      return finish(task, attempt, ledger, stateDir, contract, result, resolved.full, options.eyeBudgetMs, options.eyeCliRunner, watchContext());
     },
 
     accept({ task, attempt, accepted_by }) {
@@ -897,12 +924,13 @@ export function createFactory(options: FactoryOptions): Factory {
     async retro() {
       // Refusal 1 — the pass probes availability itself (ticket 03 item 5:
       // `contract_set`'s pre-flight is untouched; the Retro refuses per
-      // item 3, workspace-conflict style: no ledger line).
-      const usable = options.retroCopilotProbe === undefined ? copilotAvailable() : options.retroCopilotProbe();
-      if (!usable) {
+      // item 3, workspace-conflict style: no ledger line). Since v0.0.13 the
+      // probe is lane-shaped (ADR 0009 §3).
+      const usable = retroLaneAvailable(stateDir, options.retroCopilotProbe);
+      if (!usable.ok) {
         throw new FactoryError(
           "retro-copilot-unusable",
-          "the retro needs the copilot CLI usable on PATH — install and auth it for the daemon user (the CLI carries the pass's auth, there is no key file)",
+          `the retro needs its lane usable — ${usable.reason}`,
         );
       }
       // Refusal 2 — one successful Retro per UTC day (the ledger's ts day,
@@ -1018,6 +1046,7 @@ async function finish(
   result: GateResult,
   sha: string | undefined,
   eyeBudgetMs: number | undefined,
+  eyeRunner: LaneCliRunner | undefined,
   watch: {
     agent: string | undefined;
     scopeViolations: string[] | undefined;
@@ -1042,7 +1071,14 @@ async function finish(
     ...(outputPath === undefined ? {} : { outputPath }),
   });
   if (contract.freshEyes === true && result.verdict === "green" && sha !== undefined) {
-    const eye = await runFreshEyesPass({ stateDir, contract, claimedSha: sha, gateOutputPath: outputPath, budgetMs: eyeBudgetMs });
+    const eye = await runFreshEyesPass({
+      stateDir,
+      contract,
+      claimedSha: sha,
+      gateOutputPath: outputPath,
+      budgetMs: eyeBudgetMs,
+      cliRunner: eyeRunner,
+    });
     ledger.append({
       event: "fresh_eyes_written",
       task,

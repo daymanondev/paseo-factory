@@ -200,7 +200,7 @@ export async function runLaneCli(input: {
   lane: string;
   stdin: string;
   timeoutMs: number;
-  runner: LaneCliRunner | undefined;
+  runner?: LaneCliRunner | undefined;
 }): Promise<{ ok: true; stdout: string } | { ok: false; error: string; budgetExceeded: boolean }> {
   const invocation = laneCliInvocation(input.lane);
   if (invocation === undefined) {

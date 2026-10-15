@@ -12,18 +12,15 @@ export type { CommitResolution, TreeCheck } from "./workspace.ts";
 export { Ledger, usageIsValid } from "./ledger.ts";
 export { runGate } from "./gate.ts";
 export type { GateInput, GateResult } from "./gate.ts";
-export { eyeConfigPath, loadEyeConfig, runFreshEyesPass, tailWithMarker, parseEyeAnswer } from "./fresh-eyes.ts";
-export type { EyeConfig, EyeConfigResult, FreshEyesOutcome, FreshEyesPassInput, ParsedEyeAnswer } from "./fresh-eyes.ts";
+export { eyeConfigPath, loadEyeConfig, resolveEyeLane, runFreshEyesPass, tailWithMarker, parseEyeAnswer } from "./fresh-eyes.ts";
+export type { EyeConfig, EyeConfigResult, EyeLaneResolution, FreshEyesOutcome, FreshEyesPassInput, ParsedEyeAnswer } from "./fresh-eyes.ts";
 export {
-  WATCH_MODEL,
-  WATCH_MODEL_ID,
   WATCH_QUESTIONS,
   buildCodeAnswers,
   buildWatchPrompt,
-  copilotAvailable,
   renderTimelineTranscript,
-  runCopilot,
   runWatchPass,
+  watchLaneAvailable,
 } from "./watch.ts";
 export type {
   CodeAnswersInput,
@@ -37,8 +34,6 @@ export type {
 } from "./watch.ts";
 export { renderReport } from "./report.ts";
 export {
-  RETRO_MODEL,
-  RETRO_MODEL_ID,
   buildRetroDigest,
   buildRetroPrompt,
   orderForRatification,
@@ -46,11 +41,26 @@ export {
   renderRetroFile,
   retroDay,
   retroFilePath,
+  retroLaneAvailable,
   runRetroPass,
   writtenRetroForDay,
 } from "./retro.ts";
 export type { ParsedRetro, RetroCorpus, RetroOutcome, RetroPassInput, RetroProposal } from "./retro.ts";
 export { FactoryError } from "./errors.ts";
+export {
+  DEFAULT_LANE,
+  EYE_JSON_LANE,
+  LANE_NAMES,
+  defaultLanes,
+  laneCliAvailable,
+  laneCliInvocation,
+  laneError,
+  lanesPath,
+  loadLanes,
+  runLaneCli,
+  saveLanes,
+} from "./lanes.ts";
+export type { LaneCliInvocation, LaneCliRunner, LaneName, Lanes, LanesResult } from "./lanes.ts";
 export {
   judgeShellCommand,
   judgeFilePath,

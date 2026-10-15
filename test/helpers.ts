@@ -6,6 +6,7 @@ import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { TestContext } from "node:test";
 import { FactoryError } from "../src/errors.ts";
+import { saveLanes } from "../src/lanes.ts";
 
 export const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -127,8 +128,9 @@ export function eyeAnswer(text: string): unknown {
   return { content: [{ type: "text", text }] };
 }
 
-/** One recorded invocation of the fake Copilot CLI. */
+/** One recorded invocation of the fake lane CLI. */
 export interface FakeCopilotCall {
+  command: string;
   args: string[];
   cwd: string;
   stdin: string;
@@ -146,20 +148,27 @@ export interface FakeCliResult {
 }
 
 /**
- * A stand-in for the watch's Copilot CLI runner (amendment 2): records every
- * invocation and answers from a script — hermetic, no network, no binary. The
- * script is called per invocation so a test can fail the first call and pass
- * the second (the retry rule) or run out the budget.
+ * A stand-in for a lane's CLI runner (the watch's Copilot seam, generalized
+ * to every family in v0.0.13): records every invocation and answers from a
+ * script — hermetic, no network, no binary. The script is called per
+ * invocation so a test can fail the first call and pass the second (the
+ * retry rule) or run out the budget.
  */
 export function fakeCopilotRunner(script: (call: FakeCopilotCall, index: number) => FakeCliResult) {
   const calls: FakeCopilotCall[] = [];
-  const runner = async (call: { args: string[]; cwd: string; stdin: string; timeoutMs: number }) => {
+  const runner = async (call: FakeCopilotCall) => {
     calls.push(call);
     const answer = script(call, calls.length - 1);
     if (answer.delayMs !== undefined) await new Promise((resolve) => setTimeout(resolve, answer.delayMs));
     return { code: answer.code, stdout: answer.stdout, stderr: answer.stderr ?? "", timedOut: answer.timedOut ?? false };
   };
   return { runner, calls };
+}
+
+/** Writes lanes.json lanes over the defaults (v0.0.13) — the config tests pin a lane with. */
+export function writeLanes(stateDir: string, lanes: Record<string, string>): void {
+  const result = saveLanes(stateDir, lanes);
+  if (!result.ok) throw new Error(result.reason);
 }
 
 /** The CLI's happy answer: the five `name: number` lines, the strict output contract satisfied. */

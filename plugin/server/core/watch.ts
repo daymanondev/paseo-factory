@@ -8,15 +8,13 @@
  * no notification or escalation channel exists, and Verdicts and driver
  * exits are unchanged.
  *
- * The answering model is a Copilot chat model (amendment 2, 2026-10-09:
- * Andrew dropped Jev for the Copilot subscription): the pass prompts the
- * daemon's `copilot` CLI headless (`-p`-less stdin form, `-s` silent, model
- * pinned — never `auto`) and strict-parses five `name: probability` lines
- * out of the response, the eye's CONCERN/CLEAR discipline. The CLI carries
- * its own auth — there is no key file; `contract_set` fail-fasts only when
- * the CLI is not usable on PATH. What the swap gave up, recorded in ticket
- * 05: API-typed probabilities, per-call usage, and comparability with the
- * andrew-room priors/AUROC framing — the 0.5-threshold battery stands.
+ * Since v0.0.13 (ADR 0009 §3) the answering model is the `watch` lane from
+ * `<stateDir>/lanes.json` (default `pi/zai/glm-5.3`), dispatched headless
+ * and tool-less through the shared lane runner — any of the three CLI
+ * families works, the flags are the invariant. The pass strict-parses five
+ * `name: probability` lines out of the response, the eye's CONCERN/CLEAR
+ * discipline. The CLI carries its own auth — there is no key file;
+ * `contract_set` fail-fasts only when the lane's CLI is not usable on PATH.
  *
  * The v0.0.7 shrink (Andrew-ratified 2026-10-09, map charting decision 4)
  * kept test-weakened, stuck-loop, scope-creep, secret-leak and dropped
@@ -26,32 +24,25 @@
  * (the v0.0.6 arm stalled on the block and left the Watch nothing to read).
  * The battery's arms follow the table.
  */
-import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
 import {
   WATCH_DIFF_MAX_CHARS,
   WATCH_GATE_OUTPUT_MAX_CHARS,
   WATCH_TIMELINE_MAX_CHARS,
   WATCH_TOTAL_BUDGET_MS,
 } from "./constants.ts";
+import { laneCliAvailable, laneCliInvocation, loadLanes, runLaneCli } from "./lanes.ts";
+import type { LaneCliRunner } from "./lanes.ts";
 import { tailWithMarker } from "./fresh-eyes.ts";
 import { diffBetween } from "./workspace.ts";
 import type { ContractSet, WatchWritten } from "./events.ts";
 import type { GateResult } from "./gate.ts";
 
-/** The pinned Copilot model the watch asks — never `auto`, never swapped by config. */
-export const WATCH_MODEL = "gpt-5.4";
-
-/** What the ledger's `model` field records: provider seat + pinned model. */
-export const WATCH_MODEL_ID = `copilot/${WATCH_MODEL}`;
-
-/** The CLI binary the pass prompts — the daemon's provider surface carries its auth. */
-const WATCH_CLI = "copilot";
-
-/** Judgment dial: the five questions are nuanced reads of a run transcript. */
-const WATCH_REASONING_EFFORT = "medium";
+/**
+ * The lane runner seam the tests fake — the CopilotRunner of v0.0.6–v0.0.12,
+ * generalized to every CLI family (the recorded call names its `command`).
+ */
+export type CopilotRunner = LaneCliRunner;
 
 /** One transient retry — the eye's discipline; the budget covers both tries. */
 const MAX_ATTEMPTS = 2;
@@ -111,13 +102,34 @@ export const WATCH_QUESTIONS: readonly WatchQuestion[] = [
 // historical since amendment 2). Nothing here may grow a prior.
 
 /**
- * The watch's whole availability surface (amendment 2): the Copilot CLI
- * answers `--version`. No key file, nothing to configure — the daemon's
- * provider surface owns auth. `contract_set` fail-fasts on a false here.
+ * The watch's whole availability surface (amendment 2, generalized by ADR
+ * 0009 §3): the watch lane loads and its CLI answers `--version`. No key
+ * file, nothing to configure — the daemon's provider surface owns auth.
+ * `contract_set` fail-fasts on a `ok: false` here. `probe` overrides the
+ * real version probe (tests); it receives the lane it is vouching for.
  */
-export function copilotAvailable(): boolean {
-  const probe = spawnSync(WATCH_CLI, ["--version"], { encoding: "utf8", timeout: 15_000 });
-  return probe.status === 0;
+export function watchLaneAvailable(
+  stateDir: string,
+  probe?: (lane: string) => boolean,
+): { ok: true; lane: string } | { ok: false; reason: string } {
+  const lanes = loadLanes(stateDir);
+  if (!lanes.ok) return { ok: false, reason: lanes.reason };
+  const lane = lanes.lanes.watch;
+  const invocation = laneCliInvocation(lane);
+  if (invocation === undefined) {
+    return {
+      ok: false,
+      reason: `lane ${lane} has no headless tool-less CLI form — use pi/<model>, copilot/<model> or claude/<model>`,
+    };
+  }
+  const usable = probe === undefined ? laneCliAvailable(lane) : probe(lane);
+  if (!usable) {
+    return {
+      ok: false,
+      reason: `the ${invocation.command} CLI is not usable on PATH (lane ${lane}) — install and auth it for the daemon user; the CLI carries the watch's auth, there is no key file`,
+    };
+  }
+  return { ok: true, lane };
 }
 
 // ---- the timeline feed, crossing the shell boundary as plain data --------------
@@ -326,15 +338,6 @@ export function renderTimelineTranscript(entries: readonly WatchTimelineEntry[])
 /** What one pass measured, in the shape of the `watch_written` payload. */
 export type WatchOutcome = Omit<WatchWritten, "seq" | "ts" | "event" | "task" | "attempt">;
 
-/**
- * One headless Copilot CLI invocation — the seam tests fake (the real one
- * spawns `copilot` with the prompt on stdin). `cwd` is the pass's empty
- * scratch dir; `timeoutMs` kills a hanging CLI mid-flight.
- */
-export type CopilotRunner = (input: { args: string[]; cwd: string; stdin: string; timeoutMs: number }) => Promise<
-  { code: number | null; stdout: string; stderr: string; timedOut: boolean }
->;
-
 export interface WatchPassInput {
   stateDir: string;
   contract: ContractSet;
@@ -356,7 +359,7 @@ export interface WatchPassInput {
   gitBlocks: readonly { rule: string; command: string }[];
   /** Total budget override covering both tries (tests); default WATCH_TOTAL_BUDGET_MS. */
   budgetMs?: number;
-  /** Copilot CLI runner override (tests) — the model and flags stay pinned regardless. */
+  /** Lane CLI runner override (tests) — the lane and its tool-less flags stay fixed regardless. */
   copilotRunner?: CopilotRunner;
 }
 
@@ -369,22 +372,26 @@ const WATCH_STATE_NOTE =
   "`code_answers`: facts the factory's own code already established.";
 
 /**
- * One watch pass: read the timeline, build the state, prompt the pinned
- * Copilot model within the budget, record the answers. Never throws — every
- * death is a returned `failed` outcome so the ledger line stays visible. The
- * timeline is the one input whose absence fails the pass without an ask: the
+ * One watch pass: read the timeline, build the state, prompt the watch lane
+ * within the budget, record the answers. Never throws — every death is a
+ * returned `failed` outcome so the ledger line stays visible. The timeline
+ * is the one input whose absence fails the pass without an ask: the
  * questions are about the run, and a run with no readable timeline (no agent
  * bound to the claim, or a daemon restart wiped the in-memory store) gets an
  * honest `failed` line, never a guessed ask.
  */
 export async function runWatchPass(input: WatchPassInput): Promise<WatchOutcome> {
   const started = Date.now();
+  const lanes = loadLanes(input.stateDir);
+  const lane = lanes.ok ? lanes.lanes.watch : undefined;
   const failed = (error: string): WatchOutcome => ({
-    model: WATCH_MODEL_ID,
+    model: lane ?? "unconfigured",
     outcome: "failed",
     durationMs: Date.now() - started,
     error,
   });
+
+  if (!lanes.ok) return failed(`watch lane unusable: ${lanes.reason}`);
 
   if (input.agent === undefined) {
     return failed("timeline unavailable: no agent bound to the claim — a direct CLI claim carries no agent id");
@@ -399,76 +406,21 @@ export async function runWatchPass(input: WatchPassInput): Promise<WatchOutcome>
   const prompt = buildWatchPrompt(state);
   const budgetMs = input.budgetMs ?? WATCH_TOTAL_BUDGET_MS;
 
-  let lastError = "the copilot CLI never ran";
+  let lastError = "the lane CLI never ran";
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
     const remaining = budgetMs - (Date.now() - started);
     if (remaining <= 0) return failed(`watch budget of ${budgetMs}ms exceeded`);
-    const result = await runCopilot({
-      args: ["-s", "--model", WATCH_MODEL, "--reasoning-effort", WATCH_REASONING_EFFORT],
+    const result = await runLaneCli({
+      lane: lane!,
       stdin: prompt,
       timeoutMs: remaining,
       runner: input.copilotRunner,
     });
-    if (result.ok) return parseWatchAnswers(result.stdout, started);
+    if (result.ok) return parseWatchAnswers(result.stdout, started, lane!);
     if (result.budgetExceeded) return failed(`watch budget of ${budgetMs}ms exceeded`); // the clock is spent — no second try
     lastError = result.error;
   }
   return failed(lastError);
-}
-
-/**
- * One headless Copilot CLI invocation — the seam tests fake (the real one
- * spawns `copilot` with the prompt on stdin). `cwd` is the pass's empty
- * scratch dir; `timeoutMs` kills a hanging CLI mid-flight. Shared by the
- * watch and the Retro (v0.0.7 ticket 03 item 5: lifted verbatim).
- */
-export async function runCopilot(input: {
-  args: string[];
-  stdin: string;
-  timeoutMs: number;
-  runner: CopilotRunner | undefined;
-}): Promise<{ ok: true; stdout: string } | { ok: false; error: string; budgetExceeded: boolean }> {
-  const cwd = mkdtempSync(join(tmpdir(), "factory-copilot-"));
-  try {
-    const run = input.runner ?? spawnCopilotCli;
-    const result = await run({ args: input.args, cwd, stdin: input.stdin, timeoutMs: input.timeoutMs });
-    if (result.timedOut) return { ok: false, error: "the CLI outlasted its deadline", budgetExceeded: true };
-    if (result.code !== 0) {
-      const detail = result.stderr.replace(/\s+/g, " ").trim().slice(0, 140);
-      return { ok: false, error: `copilot CLI exited ${result.code ?? "signal"}${detail === "" ? "" : `: ${detail}`}`, budgetExceeded: false };
-    }
-    return { ok: true, stdout: result.stdout };
-  } finally {
-    rmSync(cwd, { recursive: true, force: true });
-  }
-}
-
-/** The real runner: `copilot -s --model … --reasoning-effort …`, prompt on stdin, killed at the deadline. */
-function spawnCopilotCli(input: { args: string[]; cwd: string; stdin: string; timeoutMs: number }): Promise<
-  { code: number | null; stdout: string; stderr: string; timedOut: boolean }
-> {
-  return new Promise((resolve) => {
-    const child = spawn(WATCH_CLI, input.args, { cwd: input.cwd, stdio: ["pipe", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGKILL");
-    }, input.timeoutMs);
-    child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
-    child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
-    child.on("error", (err) => {
-      clearTimeout(timer);
-      resolve({ code: null, stdout, stderr: stderr + String(err), timedOut });
-    });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      resolve({ code, stdout, stderr, timedOut });
-    });
-    child.stdin.on("error", () => {}); // a closed stdin pipe must not sink the pass
-    child.stdin.end(input.stdin);
-  });
 }
 
 /**
@@ -492,8 +444,8 @@ export function buildWatchPrompt(state: Record<string, unknown>): string {
   );
 }
 
-/** Reads the CLI's answer into the `watch_written` payload: five names → probabilities (nulls named), strict on format. */
-function parseWatchAnswers(output: string, started: number): WatchOutcome {
+/** Reads the lane CLI's answer into the `watch_written` payload: five names → probabilities (nulls named), strict on format. */
+function parseWatchAnswers(output: string, started: number, model: string): WatchOutcome {
   const lines = output
     .split(/\r?\n/)
     .map((line) => line.trim().toLowerCase())
@@ -513,14 +465,14 @@ function parseWatchAnswers(output: string, started: number): WatchOutcome {
   }
   if (missing.length > 0) {
     return {
-      model: WATCH_MODEL_ID,
+      model,
       outcome: "failed",
       answers,
       durationMs: Date.now() - started,
       error: `missing question answers: ${missing.join(", ")}`,
     };
   }
-  return { model: WATCH_MODEL_ID, outcome: "written", answers, durationMs: Date.now() - started };
+  return { model, outcome: "written", answers, durationMs: Date.now() - started };
 }
 
 /** Composes the state object (ticket 03 frames 3–4): contract, diff, gate_output, code_answers, timeline bulk last. */

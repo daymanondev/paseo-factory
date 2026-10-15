@@ -8,7 +8,7 @@ import { buildRetroDigest, buildRetroPrompt, parseRetroProposals, retroDay, retr
 import { handleSpoolRequest, parseSpoolRequest, startSpool } from "../plugin/server/spool.ts";
 import type { Factory } from "../plugin/server/core/factory.ts";
 import type { RetroWritten } from "../src/events.ts";
-import { disposeDir, fakeCopilotRunner, gitCommitAll, gitCommitChanges, makeTempDir, repoRoot } from "./helpers.ts";
+import { disposeDir, fakeCopilotRunner, gitCommitAll, gitCommitChanges, makeTempDir, repoRoot, writeLanes } from "./helpers.ts";
 
 /**
  * The Retro station (v0.0.7, ticket 04 building ticket 03's Answer) against a
@@ -25,6 +25,11 @@ import { disposeDir, fakeCopilotRunner, gitCommitAll, gitCommitChanges, makeTemp
  */
 
 const ownerCli = join(repoRoot, "plugin", "bin", "factory.mjs");
+
+/** Pins the retro lane to the copilot family — this suite's argv/model assertions key on it. */
+function pinRetroLane(stateDir: string): void {
+  writeLanes(stateDir, { retro: "copilot/gpt-5.4" });
+}
 
 /** A git workspace at its base commit, ready for a Contract. */
 function makeWorkspaceAtBase(dir: string): { workspace: string; artifact: string } {
@@ -307,6 +312,7 @@ test("a happy retro: file first, one written line, R-ids assigned in ratificatio
   disposeDir(t, dir);
   const { workspace, artifact } = makeWorkspaceAtBase(dir);
   const stateDir = join(dir, "factory");
+  pinRetroLane(stateDir);
   const fake = happyRunner();
   const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: fake.runner });
 
@@ -410,6 +416,7 @@ test("a CLI that keeps failing is a failed line naming the exit and stderr", asy
   const dir = makeTempDir();
   disposeDir(t, dir);
   const { workspace, artifact } = makeWorkspaceAtBase(dir);
+  pinRetroLane(join(dir, "factory"));
   const fake = fakeCopilotRunner(() => ({ code: 2, stdout: "", stderr: "copilot: not authenticated" }));
   const factory = createFactory({ stateDir: join(dir, "factory"), retroCopilotProbe: () => true, retroCopilotRunner: fake.runner });
   factory.setContract({ task: "R4", workspace, gate: "true", artifact });
@@ -496,6 +503,7 @@ test("handleSpoolRequest: retro replies with the count and path, or refuses on t
   disposeDir(t, dir);
   const { workspace, artifact } = makeWorkspaceAtBase(dir);
   const stateDir = join(dir, "factory");
+  pinRetroLane(stateDir);
   const fake = happyRunner();
   const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: fake.runner });
   factory.setContract({ task: "S1", workspace, gate: "true", artifact });
@@ -519,6 +527,7 @@ test("handleSpoolRequest: retro replies with the count and path, or refuses on t
   disposeDir(t, dir2);
   const stateDir2 = join(dir2, "factory");
   const failing = fakeCopilotRunner(() => ({ code: 1, stdout: "", stderr: "copilot: nope" }));
+  pinRetroLane(stateDir2);
   const factory2 = createFactory({ stateDir: stateDir2, retroCopilotProbe: () => true, retroCopilotRunner: failing.runner });
   const failed = await handleSpoolRequest(factory2, { id: "q3", kind: "retro" });
   assert.ok(!failed.ok && failed.code === "retro-failed" && /copilot CLI exited 1/.test(failed.message));
@@ -554,6 +563,7 @@ test("factory retro through the real CLI and spool: exit 0, count + path on stdo
   const { workspace, artifact } = makeWorkspaceAtBase(dir);
   const home = join(dir, "paseo-home");
   const stateDir = join(home, "plugin-state", "paseo-factory");
+  pinRetroLane(stateDir);
   const fake = happyRunner();
   const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: fake.runner });
   const spool = startSpool(stateDir, factory);
@@ -581,4 +591,47 @@ test("factory retro through the real CLI and spool: exit 0, count + path on stdo
   assert.equal(help.status, 0);
   assert.match(help.stdout, /retro\s+Run the Retro over the whole ledger/);
   assert.match(help.stdout, /default 660/);
+});
+
+test("v0.0.13: the retro reads its lane from lanes.json — a claude lane dispatches claude tool-less, model recorded verbatim", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact } = makeWorkspaceAtBase(dir);
+  const stateDir = join(dir, "factory");
+  writeLanes(stateDir, { retro: "claude/opus-4-8" });
+  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: happyRunner().runner });
+  factory.setContract({ task: "R9", workspace, gate: "true", artifact });
+  const claimed = commitWork(workspace, artifact);
+  await factory.claim({ task: "R9", sha: claimed, agent: "agent-r9" });
+
+  const outcome = await factory.retro();
+  assert.equal(outcome.outcome, "written");
+  assert.equal(outcome.model, "claude/opus-4-8", "the lane string is the ledger's model, verbatim");
+  const file = readFileSync(outcome.proposalsPath!, "utf8");
+  assert.ok(file.includes("- Model: claude/opus-4-8"), "the proposals file names the lane");
+  const lane = factory.ledger.events.findLast((e) => e.event === "retro_written")!;
+  assert.equal(lane.model, "claude/opus-4-8");
+});
+
+test("v0.0.13: the retro runner seam records the lane's command — claude -p, tools off", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact } = makeWorkspaceAtBase(dir);
+  const stateDir = join(dir, "factory");
+  writeLanes(stateDir, { retro: "claude/opus-4-8" });
+  const fake = fakeCopilotRunner((_call, index) =>
+    index === 0
+      ? { code: 0, stdout: '{"proposals":[]}' }
+      : { code: 0, stdout: "unused" },
+  );
+  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: fake.runner });
+  factory.setContract({ task: "R10", workspace, gate: "true", artifact });
+  const claimed = commitWork(workspace, artifact);
+  await factory.claim({ task: "R10", sha: claimed, agent: "agent-r10" });
+
+  await factory.retro();
+  assert.equal(fake.calls.length, 1);
+  assert.equal(fake.calls[0]!.command, "claude");
+  assert.deepEqual(fake.calls[0]!.args, ["-p", "--model", "opus-4-8", "--tools", ""], "tools off by construction");
+  assert.match(fake.calls[0]!.stdin, /retro corpus/);
 });
