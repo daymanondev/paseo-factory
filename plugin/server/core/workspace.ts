@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { execFileSync } from "node:child_process";
+import { rmSync } from "node:fs";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -153,6 +154,121 @@ export function diffBetween(
     ({ stdout }) => ({ ok: true as const, diff: stdout }),
     (err: unknown) => ({ ok: false as const, reason: cap(gitDetail(err)) }),
   );
+}
+
+/**
+ * The landing outcome on Accept (v0.0.14, ADR 0010 §4): `landed` means the
+ * verified commit is in `<project-root>`'s local branch history and the
+ * temporary worktree is gone (a cleanup failure rides `note` — the work IS
+ * in); `pending-conflict` means the acceptance recorded while the root was
+ * dirty or the integration conflicted — branch `factory/<task>` and the
+ * worktree both survive, and `note` names the reason for the Lead or
+ * Supervisor to resolve. `git push` never happens — remote landing stays a
+ * human act (ADR 0002 / ADR 0010).
+ */
+export type LandingResult =
+  | { landing: "landed"; note?: string }
+  | { landing: "pending-conflict"; note: string };
+
+/**
+ * A git call that resolves with the exit status instead of throwing on it —
+ * the landing's door reads `merge-base --is-ancestor`, whose exit 1 is an
+ * answer ("not an ancestor"), not an error.
+ */
+function gitExit(
+  cwd: string,
+  args: string[],
+): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  return execFileAsync("git", args, { cwd, timeout: GIT_TIMEOUT_MS }).then(
+    ({ stdout, stderr }) => ({ status: 0, stdout, stderr }),
+    (err: unknown) => {
+      const e = err as { code?: unknown; stdout?: unknown; stderr?: unknown };
+      return {
+        status: typeof e.code === "number" ? e.code : null,
+        stdout: typeof e.stdout === "string" ? e.stdout : "",
+        stderr: typeof e.stderr === "string" ? e.stderr : "",
+      };
+    },
+  );
+}
+
+export async function landTaskWorktree(options: {
+  projectRoot: string;
+  worktree: string;
+  claimedCommit: string;
+  /** The Contract's base — the fast-forward test HEAD compares against. */
+  base?: string;
+  branch: string;
+}): Promise<LandingResult> {
+  const { projectRoot, worktree, claimedCommit, base, branch } = options;
+  // Idempotency door: exit 0 means the claimed commit is ALREADY in the
+  // root's history (a crash between merge and attempt_accepted, or a manual
+  // land) — finish the cleanup and land as done. Exit 1 (not an ancestor) is
+  // the ordinary clean path; any other failure falls through to landCleanly,
+  // whose own first git call reports the honest reason.
+  const already = await gitExit(projectRoot, ["merge-base", "--is-ancestor", claimedCommit, "HEAD"]);
+  if (already.status === 0) return finishLanding(projectRoot, worktree);
+  return landCleanly(projectRoot, worktree, claimedCommit, base, branch);
+}
+
+/**
+ * The landing's clean path, split from the reachability door: the root must
+ * sit clean — uncommitted edits make any integration untrustworthy, and
+ * touching them is never the factory's act — then fast-forward at the base
+ * or `merge --no-ff` of the attempt's whole range above it. A failed merge
+ * is aborted so the root never lives inside a conflict.
+ */
+async function landCleanly(
+  projectRoot: string,
+  worktree: string,
+  claimedCommit: string,
+  base: string | undefined,
+  branch: string,
+): Promise<LandingResult> {
+  const conflict = (note: string): LandingResult => ({ landing: "pending-conflict", note: cap(note) });
+  const status = await gitExit(projectRoot, ["status", "--porcelain"]);
+  if (status.status !== 0) return conflict(`could not read the project root's status: ${gitDetail(status)}`);
+  const changes = status.stdout.split("\n").filter((line) => line.trim() !== "");
+  if (changes.length > 0) {
+    return conflict(
+      `project root not clean (${changes.length} change${changes.length === 1 ? "" : "s"}): ${changes[0]!.trim()} — commit or stash before landing branch ${branch}`,
+    );
+  }
+  const head = await gitExit(projectRoot, ["rev-parse", "HEAD"]);
+  if (head.status !== 0) return conflict(`could not read the project root's HEAD: ${gitDetail(head)}`);
+  const headSha = head.stdout.trim();
+  const mergeArgs =
+    base !== undefined && headSha === base
+      ? ["merge", "--ff-only", claimedCommit]
+      : ["merge", "--no-ff", claimedCommit, "-m", `factory: land ${branch} (${shortSha(claimedCommit)})`];
+  const merged = await gitExit(projectRoot, mergeArgs);
+  if (merged.status !== 0) {
+    await gitExit(projectRoot, ["merge", "--abort"]); // best-effort: the root returns to its own commit, never mid-conflict
+    return conflict(
+      `merge of ${branch} into <project-root> conflicted: ${firstStderrLine(merged) ?? "no reason given"} — resolve manually from branch ${branch}`,
+    );
+  }
+  return finishLanding(projectRoot, worktree);
+}
+
+/** Removes the landed task's worktree; a cleanup failure rides the note, never the outcome. */
+async function finishLanding(projectRoot: string, worktree: string): Promise<LandingResult> {
+  const removed = await gitExit(projectRoot, ["worktree", "remove", "--force", worktree]);
+  if (removed.status === 0) return { landing: "landed" };
+  // A stale or unregistered directory: best-effort remove, then prune.
+  try {
+    rmSync(worktree, { recursive: true, force: true });
+  } catch {
+    // nothing more to try — the landed commit is already in history
+  }
+  await gitExit(projectRoot, ["worktree", "prune"]);
+  return { landing: "landed" };
+}
+
+function firstStderrLine(result: { stderr?: unknown }): string | undefined {
+  const text = result.stderr;
+  if (typeof text !== "string" || text.trim() === "") return undefined;
+  return text.trim().split("\n")[0];
 }
 
 function gitDetail(err: unknown): string {

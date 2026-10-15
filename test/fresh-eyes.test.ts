@@ -289,7 +289,7 @@ test("a 401 is never retried: one call, a visible failed line, verdict and accep
   assert.ok(report.includes("- Fresh eyes (`fake-eye-1`) — FAILED: "), "the failure renders where the Owner reads");
   assert.ok(report.includes("- Evidence, not acceptance"), "ADR 0002's closing language stays the last word");
 
-  const accepted = factory.accept({ task: "FE10", attempt: 1 });
+  const accepted = await factory.accept({ task: "FE10", attempt: 1 });
   assert.equal(accepted.event, "attempt_accepted", "accept still requires only a green verdict");
 });
 

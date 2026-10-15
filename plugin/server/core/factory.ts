@@ -12,7 +12,7 @@ import { runWatchPass, watchLaneAvailable } from "./watch.ts";
 import type { CopilotRunner, TimelineFetcher } from "./watch.ts";
 import { buildRetroDigest, retroDay, retroLaneAvailable, runRetroPass, writtenRetroForDay } from "./retro.ts";
 import type { RetroOutcome } from "./retro.ts";
-import { changedFiles, checkCleanAt, headCommitSync, resolveClaimedCommit, scopeCoversFile } from "./workspace.ts";
+import { changedFiles, checkCleanAt, headCommitSync, landTaskWorktree, resolveClaimedCommit, scopeCoversFile } from "./workspace.ts";
 import { MEMORY_FILES } from "./choke.ts";
 import { projectStateDir } from "./project.ts";
 import { FactoryError } from "./errors.ts";
@@ -252,9 +252,14 @@ export interface Factory {
    * sufficient — this is the only acceptance act in the factory, and it is
    * never the Agent's. Since v0.0.9 the delegated Owner seat (the
    * Supervisor, ADR 0006) may submit it on the Owner's word; the
-   * `accepted_by` stamp records whose act each line is.
+   * `accepted_by` stamp records whose act each line is. Since v0.0.14
+   * (ADR 0010 §3–§4) `accepted_by: "lead"` is the intermediate acceptance
+   * (green + no fresh-eyes CONCERN on the attempt + not in needs_human,
+   * else `lead-accept-refused`), and a task that ran in a managed Task
+   * worktree lands its claimedCommit into `<project-root>`'s local branch
+   * before the line records — async git is why the call awaits.
    */
-  accept(input: AcceptInput): AttemptAccepted;
+  accept(input: AcceptInput): Promise<AttemptAccepted>;
   /**
    * Judges a driver's spawn request (v0.0.5): the task must be known,
    * unaccepted, scoped when the invocation runs parallel (arity ≥ 2), and its
@@ -726,13 +731,14 @@ export function createFactory(options: FactoryOptions): Factory {
       return finish(task, attempt, ledger, stateDir, dataDir, contract, result, resolved.full, options.eyeBudgetMs, options.eyeCliRunner, watchContext());
     },
 
-    accept({ task, attempt, accepted_by }) {
+    async accept({ task, attempt, accepted_by }) {
       assertTaskId(task);
       if (!Number.isInteger(attempt) || attempt < 1) {
         throw new FactoryError("invalid-attempt", `attempt must be a positive integer, got ${attempt}`);
       }
       const history = ledger.eventsFor(task);
-      if (!history.some((e) => e.event === "contract_set")) {
+      const contract = this.contractFor(task);
+      if (contract === undefined) {
         throw new FactoryError("unknown-task", `no contract set for task ${task} — register one first`);
       }
       const events = attemptEvents(history, attempt);
@@ -775,7 +781,34 @@ export function createFactory(options: FactoryOptions): Factory {
           );
         }
       }
-      return ledger.append({ event: "attempt_accepted", task, attempt, ...(accepted_by === undefined ? {} : { accepted_by }) });
+      // Local landing (v0.0.14, ADR 0010 §4): a task that ran in a managed
+      // Task worktree integrates its claimedCommit into <project-root>'s
+      // local branch BEFORE the acceptance line records — the line carries
+      // the outcome (`landed`, or `pending-conflict` with the reason and the
+      // preserved factory/<task> branch). Legacy shared-checkout tasks skip
+      // the step and record exactly as before. Never a git push.
+      const worktree = this.worktreeFor(task);
+      let landing: "landed" | "pending-conflict" | undefined;
+      let landingNote: string | undefined;
+      if (worktree !== undefined && gate.sha !== undefined) {
+        const result = await landTaskWorktree({
+          projectRoot: contract.workspace,
+          worktree,
+          claimedCommit: gate.sha,
+          ...(contract.base === undefined ? {} : { base: contract.base }),
+          branch: `factory/${task}`,
+        });
+        landing = result.landing;
+        landingNote = result.note;
+      }
+      return ledger.append({
+        event: "attempt_accepted",
+        task,
+        attempt,
+        ...(accepted_by === undefined ? {} : { accepted_by }),
+        ...(landing === undefined ? {} : { landing }),
+        ...(landingNote === undefined ? {} : { landingNote }),
+      });
     },
 
     requestSpawn({ task, provider, arity, worktree }) {

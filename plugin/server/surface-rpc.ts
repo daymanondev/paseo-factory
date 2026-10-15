@@ -324,8 +324,20 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
 
     async accept(input: { task: string; attempt: number }, _context?: SurfaceCallContext) {
       try {
-        const event = deps.factory.accept({ task: input.task, attempt: input.attempt, accepted_by: "owner" });
-        return { ok: true as const, seq: event.seq, summary: `${input.task} accepted at attempt ${input.attempt} by owner` };
+        // Awaited since v0.0.14: a worktree task's local landing runs before
+        // the line records, and the summary carries the outcome.
+        const event = await deps.factory.accept({ task: input.task, attempt: input.attempt, accepted_by: "owner" });
+        return {
+          ok: true as const,
+          seq: event.seq,
+          summary:
+            `${input.task} accepted at attempt ${input.attempt} by owner` +
+            (event.landing === "landed"
+              ? " · landed into <project-root>"
+              : event.landing === "pending-conflict"
+                ? ` · landing pending-conflict: ${event.landingNote ?? "(no reason recorded)"}`
+                : ""),
+        };
       } catch (err) {
         return failure(codeOf(err), messageOf(err));
       }

@@ -533,8 +533,20 @@ export async function handleSpoolRequest(
         proposalCount: outcome.proposalCount,
       };
     }
-    factory.accept({ task: request.task, attempt: request.attempt, accepted_by: request.submitter });
-    return { id: request.id, ok: true, summary: `task ${request.task} accepted at attempt ${request.attempt} by ${request.submitter}` };
+    // The acceptance (v0.0.14): awaited — a worktree task's local landing
+    // runs before the line records, and the reply carries the outcome.
+    const accepted = await factory.accept({ task: request.task, attempt: request.attempt, accepted_by: request.submitter });
+    return {
+      id: request.id,
+      ok: true,
+      summary:
+        `task ${request.task} accepted at attempt ${request.attempt} by ${request.submitter}` +
+        (accepted.landing === "landed"
+          ? " · landed into <project-root>"
+          : accepted.landing === "pending-conflict"
+            ? ` · landing pending-conflict: ${accepted.landingNote ?? "(no reason recorded)"} — branch factory/${request.task} is preserved`
+            : ""),
+    };
   } catch (err) {
     if (err instanceof FactoryError) {
       return { id: request.id, ok: false, code: err.code, message: err.message };

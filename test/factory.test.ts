@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -583,7 +583,7 @@ test("accept: the Owner accepts a green attempt, once, and only green attempts (
   factory.setContract({ task: "AC1", workspace, gate: "grep -q padEnd src/format.ts", artifact });
   const red = await factory.claim({ task: "AC1", sha });
   assert.equal(red.verdict, "red");
-  assert.throws(() => factory.accept({ task: "AC1", attempt: 1 }), factoryErrorCode("not-green"));
+  await assert.rejects(factory.accept({ task: "AC1", attempt: 1 }), factoryErrorCode("not-green"));
   assert.deepEqual(
     factory.ledger.eventsFor("AC1").filter((e) => e.event === "attempt_accepted"),
     [],
@@ -596,14 +596,14 @@ test("accept: the Owner accepts a green attempt, once, and only green attempts (
   const green = await factory.claim({ task: "AC1", sha: sha2 });
   assert.equal(green.verdict, "green");
 
-  const accepted = factory.accept({ task: "AC1", attempt: green.attempt });
+  const accepted = await factory.accept({ task: "AC1", attempt: green.attempt });
   assert.equal(accepted.event, "attempt_accepted");
   assert.equal(accepted.attempt, green.attempt);
 
-  assert.throws(() => factory.accept({ task: "AC1", attempt: 1 }), factoryErrorCode("already-accepted"));
-  assert.throws(() => factory.accept({ task: "AC1", attempt: 9 }), factoryErrorCode("unknown-attempt"));
-  assert.throws(() => factory.accept({ task: "AC2", attempt: 1 }), factoryErrorCode("unknown-task"));
-  assert.throws(() => factory.accept({ task: "AC1", attempt: 0 }), factoryErrorCode("invalid-attempt"));
+  await assert.rejects(factory.accept({ task: "AC1", attempt: 1 }), factoryErrorCode("already-accepted"));
+  await assert.rejects(factory.accept({ task: "AC1", attempt: 9 }), factoryErrorCode("unknown-attempt"));
+  await assert.rejects(factory.accept({ task: "AC2", attempt: 1 }), factoryErrorCode("unknown-task"));
+  await assert.rejects(factory.accept({ task: "AC1", attempt: 0 }), factoryErrorCode("invalid-attempt"));
 });
 
 test("opening the ledger closes an attempt interrupted mid-gate: red, reported, logged (ADR 0003)", async (t) => {
@@ -735,7 +735,7 @@ test("claim refuses on an accepted task — the H6 rider closes the loop's far e
   const factory = createFactory({ stateDir: join(dir, "state") });
   factory.setContract({ task: "CLOSED", workspace, gate: "true", artifact });
   await factory.claim({ task: "CLOSED", sha });
-  factory.accept({ task: "CLOSED", attempt: 1 });
+  await factory.accept({ task: "CLOSED", attempt: 1 });
   const eventsBefore = factory.ledger.events.length;
 
   await assert.rejects(factory.claim({ task: "CLOSED", sha }), factoryErrorCode("already-accepted"));
@@ -795,7 +795,7 @@ test("requestSpawn refuses and records one spawn_refused line per rule", async (
 
   // Accepted task — closed to spawns.
   await factory.claim({ task: "KNOWN", sha });
-  factory.accept({ task: "KNOWN", attempt: 1 });
+  await factory.accept({ task: "KNOWN", attempt: 1 });
   const accepted = factory.requestSpawn({ task: "KNOWN", provider: "claude", arity: 1 });
   assert.equal(accepted.outcome, "refused");
   if (accepted.outcome === "refused") assert.equal(accepted.event.rule, "spawn:accepted-task");
@@ -878,7 +878,7 @@ test("repoke dispatches once per task and refuses the second ask with one repoke
   const shaDone = gitCommitAll(wsDone);
   factory.setContract({ task: "DONE", workspace: wsDone, gate: "true", artifact: "src/x.ts" });
   await factory.claim({ task: "DONE", sha: shaDone });
-  factory.accept({ task: "DONE", attempt: 1 });
+  await factory.accept({ task: "DONE", attempt: 1 });
   const accepted = factory.repoke("DONE", "ag-done");
   assert.equal(accepted.outcome === "refused" && accepted.event.rule, "repoke:accepted-task");
 
@@ -1311,7 +1311,7 @@ test("accept authority: the Lead accepts a green attempt with no fresh-eyes CONC
   disposeDir(t, dir);
   const { factory } = await greenAttempt(dir, "LA1");
 
-  const accepted = factory.accept({ task: "LA1", attempt: 1, accepted_by: "lead" });
+  const accepted = await factory.accept({ task: "LA1", attempt: 1, accepted_by: "lead" });
   assert.equal(accepted.event, "attempt_accepted");
   assert.equal(accepted.accepted_by, "lead");
 });
@@ -1322,15 +1322,15 @@ test("a fresh-eyes CONCERN on the attempt refuses the Lead — the Owner's and S
   const { factory } = await greenAttempt(dir, "LA2");
   factory.ledger.append({ event: "fresh_eyes_written", task: "LA2", attempt: 1, model: "fake-eye", outcome: "concern", finding: "the fix does not match the contract", durationMs: 5 });
 
-  assert.throws(
-    () => factory.accept({ task: "LA2", attempt: 1, accepted_by: "lead" }),
+  await assert.rejects(
+    factory.accept({ task: "LA2", attempt: 1, accepted_by: "lead" }),
     (err: unknown) => err instanceof FactoryError && err.code === "lead-accept-refused" && /CONCERN/.test(err.message),
     "the eye's concern is the Lead's hard stop",
   );
   // Nothing landed for the refused act.
   assert.equal(factory.ledger.eventsFor("LA2").some((e) => e.event === "attempt_accepted"), false);
   // The override seats are unconditional on the same evidence.
-  const bySupervisor = factory.accept({ task: "LA2", attempt: 1, accepted_by: "supervisor" });
+  const bySupervisor = await factory.accept({ task: "LA2", attempt: 1, accepted_by: "supervisor" });
   assert.equal(bySupervisor.accepted_by, "supervisor");
 
   // A CLEAR eye on the attempt does NOT refuse the Lead — and a CONCERN on a
@@ -1339,7 +1339,7 @@ test("a fresh-eyes CONCERN on the attempt refuses the Lead — the Owner's and S
   disposeDir(t, dir2);
   const { factory: f2 } = await greenAttempt(dir2, "LA3");
   f2.ledger.append({ event: "fresh_eyes_written", task: "LA3", attempt: 1, model: "fake-eye", outcome: "clear", finding: "nothing to add", durationMs: 5 });
-  assert.equal(f2.accept({ task: "LA3", attempt: 1, accepted_by: "lead" }).accepted_by, "lead");
+  assert.equal((await f2.accept({ task: "LA3", attempt: 1, accepted_by: "lead" })).accepted_by, "lead");
 });
 
 test("a task in needs_human refuses the Lead until activity displaces the marker", async (t) => {
@@ -1353,13 +1353,13 @@ test("a task in needs_human refuses the Lead until activity displaces the marker
   const denial = factory.ledger.append({ event: "permit_denied", task: "LA4", agent: "ag-1", name: "Bash", kind: "tool", command: "rm -rf /", rule: "policy:S2-outside-writable", reason: "r" });
   factory.needsHuman({ task: "LA4", reason: "denied-again", evidence: { denial: denial.seq, repoke: repoke?.seq ?? 0 } });
 
-  assert.throws(
-    () => factory.accept({ task: "LA4", attempt: 1, accepted_by: "lead" }),
+  await assert.rejects(
+    factory.accept({ task: "LA4", attempt: 1, accepted_by: "lead" }),
     (err: unknown) => err instanceof FactoryError && err.code === "lead-accept-refused" && /needs_human/.test(err.message),
   );
   assert.equal(factory.ledger.eventsFor("LA4").some((e) => e.event === "attempt_accepted"), false);
   // The Owner's override stands over the escalation too.
-  assert.equal(factory.accept({ task: "LA4", attempt: 1, accepted_by: "owner" }).accepted_by, "owner");
+  assert.equal((await factory.accept({ task: "LA4", attempt: 1, accepted_by: "owner" })).accepted_by, "owner");
 
   // Displacement: an Owner answer wakes the task, a new green attempt lands,
   // and the Lead may accept THAT attempt (ADR 0010 §3 — corrective work within the ceiling).
@@ -1371,14 +1371,14 @@ test("a task in needs_human refuses the Lead until activity displaces the marker
   assert.equal(poke2.outcome, "dispatched");
   const repoke2 = f2.ledger.eventsFor("LA5").findLast((e) => e.event === "repoke_dispatched");
   f2.needsHuman({ task: "LA5", reason: "denied-again", evidence: { denial: denial2.seq, repoke: repoke2?.seq ?? 0 } });
-  assert.throws(() => f2.accept({ task: "LA5", attempt: 1, accepted_by: "lead" }), factoryErrorCode("lead-accept-refused"));
+  await assert.rejects(f2.accept({ task: "LA5", attempt: 1, accepted_by: "lead" }), factoryErrorCode("lead-accept-refused"));
   // Wake-up: new spawn, new attempt, green again — the marker is displaced.
   f2.requestSpawn({ task: "LA5", provider: "claude", arity: 1 });
   writeFileSync(join(workspace, "src", "format.ts"), "export function pad(input: string, width: number): string {\n  return input.padEnd(width, \"0\").slice(0, width);\n}\n");
   const sha2 = gitCommitChanges(workspace, "corrective work");
   const second = await f2.claim({ task: "LA5", sha: sha2 });
   assert.equal(second.verdict, "green");
-  assert.equal(f2.accept({ task: "LA5", attempt: second.attempt, accepted_by: "lead" }).accepted_by, "lead");
+  assert.equal((await f2.accept({ task: "LA5", attempt: second.attempt, accepted_by: "lead" })).accepted_by, "lead");
 });
 
 test("accepted_by stays the submitting shell's verbatim stamp outside the seat names (the v0.0.9 law)", async (t) => {
@@ -1388,6 +1388,108 @@ test("accepted_by stays the submitting shell's verbatim stamp outside the seat n
 
   // A delegated agent's id is not one of the three seats — it records
   // verbatim, with no Lead privileges attached to an unnamed seat.
-  const stamped = factory.accept({ task: "LA6", attempt: 1, accepted_by: "agent-supervisor-1" });
+  const stamped = await factory.accept({ task: "LA6", attempt: 1, accepted_by: "agent-supervisor-1" });
   assert.equal(stamped.accepted_by, "agent-supervisor-1");
+});
+
+// ---- landing on Accept (v0.0.14, ADR 0010 §4): claimedCommit into <project-root>, worktree removed ----
+
+test("landing: a green worktree attempt fast-forwards into <project-root>, the worktree goes, factory/<task> survives", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact, sha: base } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  const worktree = makeTaskWorktree(dir, workspace, "LW1", base);
+  factory.setContract({ task: "LW1", workspace, gate: "true", artifact });
+  factory.requestSpawn({ task: "LW1", provider: "claude", arity: 1, worktree });
+
+  writeFileSync(join(worktree, artifact), "export function pad(input: string, width: number): string {\n  return input.padEnd(width).slice(0, width);\n}\n");
+  const claimed = gitCommitChanges(worktree, "the verified work");
+  const outcome = await factory.claim({ task: "LW1", sha: claimed });
+  assert.equal(outcome.verdict, "green");
+
+  const accepted = await factory.accept({ task: "LW1", attempt: 1, accepted_by: "lead" });
+  assert.equal(accepted.landing, "landed");
+  assert.equal(accepted.landingNote, undefined);
+  assert.equal(gitFact(workspace, ["rev-parse", "HEAD"]), claimed, "the root's branch fast-forwarded to the verified commit");
+  assert.equal(gitFact(workspace, ["status", "--porcelain"]), "", "landing left the root clean");
+  assert.equal(existsSync(worktree), false, "the temporary worktree is removed");
+  assert.equal(gitFact(workspace, ["rev-parse", "--verify", "factory/LW1"]), claimed, "branch factory/<task> survives the landing");
+});
+
+test("landing on a root that advanced: merge --no-ff brings the attempt's whole range in", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact, sha: base } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  const worktree = makeTaskWorktree(dir, workspace, "LW2", base);
+  factory.setContract({ task: "LW2", workspace, gate: "true", artifact });
+  factory.requestSpawn({ task: "LW2", provider: "claude", arity: 1, worktree });
+
+  writeFileSync(join(worktree, artifact), "export function pad(input: string, width: number): string {\n  return input.padEnd(width).slice(0, width);\n}\n");
+  const claimed = gitCommitChanges(worktree, "the verified work");
+  // Meanwhile the project root advanced on its own.
+  writeFileSync(join(workspace, "other.txt"), "root work\n");
+  const rootMoved = gitCommitChanges(workspace, "the root advanced");
+  assert.equal(await factory.claim({ task: "LW2", sha: claimed }).then((o) => o.verdict), "green");
+
+  const accepted = await factory.accept({ task: "LW2", attempt: 1 });
+  assert.equal(accepted.landing, "landed");
+  assert.notEqual(gitFact(workspace, ["rev-parse", "HEAD"]), claimed, "a merge commit sits on top, not a fast-forward");
+  assert.notEqual(gitFact(workspace, ["rev-parse", "HEAD"]), rootMoved);
+  assert.equal(spawnSync("git", ["merge-base", "--is-ancestor", claimed, "HEAD"], { cwd: workspace }).status, 0, "the verified range is in the root's history");
+  assert.ok(existsSync(join(workspace, "other.txt")), "the root's own work is intact");
+  assert.match(readFileSync(join(workspace, artifact), "utf8"), /padEnd/, "the attempt's work landed too");
+  assert.equal(gitFact(workspace, ["status", "--porcelain"]), "");
+  assert.equal(existsSync(worktree), false);
+});
+
+test("a dirty root lands pending-conflict: the acceptance records, the branch and the worktree survive", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact, sha: base } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  const worktree = makeTaskWorktree(dir, workspace, "LW3", base);
+  factory.setContract({ task: "LW3", workspace, gate: "true", artifact });
+  factory.requestSpawn({ task: "LW3", provider: "claude", arity: 1, worktree });
+
+  writeFileSync(join(worktree, artifact), "export function pad(input: string, width: number): string {\n  return input.padEnd(width).slice(0, width);\n}\n");
+  const claimed = gitCommitChanges(worktree, "the verified work");
+  assert.equal((await factory.claim({ task: "LW3", sha: claimed })).verdict, "green");
+  // The Owner has uncommitted edits at the root — landing must not touch them.
+  writeFileSync(join(workspace, "dirt.txt"), "uncommitted\n");
+
+  const accepted = await factory.accept({ task: "LW3", attempt: 1, accepted_by: "owner" });
+  assert.equal(accepted.landing, "pending-conflict");
+  assert.match(accepted.landingNote ?? "", /not clean/);
+  assert.equal(gitFact(workspace, ["rev-parse", "HEAD"]), base, "the root never moved");
+  assert.ok(readFileSync(join(workspace, "dirt.txt"), "utf8") === "uncommitted\n", "the dirty edit is untouched");
+  assert.equal(existsSync(worktree), true, "the worktree survives a pending-conflict landing");
+  assert.equal(gitFact(workspace, ["rev-parse", "--verify", "factory/LW3"]), claimed, "the verified work is never lost");
+});
+
+test("a merge conflict lands pending-conflict with the root left clean — the conflict is named, never lived in", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact, sha: base } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  const worktree = makeTaskWorktree(dir, workspace, "LW4", base);
+  factory.setContract({ task: "LW4", workspace, gate: "true", artifact });
+  factory.requestSpawn({ task: "LW4", provider: "claude", arity: 1, worktree });
+
+  writeFileSync(join(worktree, artifact), "export const worktreeSide = 1;\n");
+  const claimed = gitCommitChanges(worktree, "the verified work");
+  // The root edits the SAME file differently and commits — a true merge conflict.
+  writeFileSync(join(workspace, artifact), "export const rootSide = 2;\n");
+  const rootMoved = gitCommitChanges(workspace, "the root advanced conflicting");
+  assert.equal((await factory.claim({ task: "LW4", sha: claimed })).verdict, "green");
+
+  const accepted = await factory.accept({ task: "LW4", attempt: 1 });
+  assert.equal(accepted.landing, "pending-conflict");
+  assert.match(accepted.landingNote ?? "", /conflict/i, "the reason names the conflict");
+  assert.equal(gitFact(workspace, ["rev-parse", "HEAD"]), rootMoved, "the root stays at its own commit — the failed merge is aborted");
+  assert.equal(gitFact(workspace, ["status", "--porcelain"]), "", "the root is left clean, not mid-merge");
+  assert.equal(readFileSync(join(workspace, artifact), "utf8"), "export const rootSide = 2;\n", "the root's own edit is untouched");
+  assert.equal(existsSync(worktree), true);
+  assert.equal(gitFact(workspace, ["rev-parse", "--verify", "factory/LW4"]), claimed, "the verified work waits on its branch for the Lead to resolve");
 });

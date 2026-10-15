@@ -310,7 +310,7 @@ test("a claim with no agent is an honest failed line — no call, no timeline to
   assert.equal(watch.model, "copilot/gpt-5.4", "the pinned model stands in when no answer arrived");
   const report = readFileSync(outcome.reportPath, "utf8");
   assert.ok(report.includes("- Watch — FAILED: "), "the failure renders where the Owner reads");
-  const accepted = factory.accept({ task: "W9", attempt: 1 });
+  const accepted = await factory.accept({ task: "W9", attempt: 1 });
   assert.equal(accepted.event, "attempt_accepted", "accept still requires only a green verdict");
 });
 

@@ -118,7 +118,7 @@ test("the full loop: red attempt → real fix → green attempt 2 → the Owner 
   assert.ok(report2.includes("- Evidence, not acceptance"));
 
   // Acceptance is the Owner's act, on a specific green Attempt (ADR 0002).
-  const accepted = factory.accept({ task: "T2", attempt: 2 });
+  const accepted = await factory.accept({ task: "T2", attempt: 2 });
   assert.equal(accepted.event, "attempt_accepted");
   assert.deepEqual(factory.ledger.eventsFor("T2").map((e) => e.event), [
     "contract_set",

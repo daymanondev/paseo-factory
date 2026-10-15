@@ -259,8 +259,25 @@ export interface AttemptAccepted {
    * Who accepted (v0.0.9, ADR 0006: "the Ledger always records who accepted")
    * — the submitting shell's stamp, the same law as the Contract's `by`:
    * the delegated Owner agent's id or `owner`. Pre-0.0.9 lines predate it.
+   * Since v0.0.14 (ADR 0010 §3) the three seat names carry authority
+   * semantics — `owner`/`supervisor` unconditional, `lead` conditional on a
+   * CONCERN-free green attempt outside needs_human (`lead-accept-refused`
+   * otherwise); any other string records verbatim with no seat privileges.
    */
   accepted_by?: string;
+  /**
+   * The local-landing outcome (v0.0.14, ADR 0010 §4), present only when the
+   * task ran in a managed Task worktree: `landed` — claimedCommit is in
+   * `<project-root>`'s local branch history and the temporary worktree is
+   * removed — or `pending-conflict` — the acceptance recorded while the root
+   * was dirty or the integration conflicted, with branch `factory/<task>`
+   * and the worktree preserved for resolution. Never a `git push`: remote
+   * landing stays a human act. Absent on the legacy shared-checkout path
+   * and pre-0.0.14 lines.
+   */
+  landing?: "landed" | "pending-conflict";
+  /** The pending-conflict's reason — the conflict the Lead or Supervisor resolves. */
+  landingNote?: string;
 }
 
 /**
