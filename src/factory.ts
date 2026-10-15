@@ -12,7 +12,8 @@ import { runWatchPass, watchLaneAvailable } from "./watch.ts";
 import type { CopilotRunner, TimelineFetcher } from "./watch.ts";
 import { buildRetroDigest, retroDay, retroLaneAvailable, runRetroPass, writtenRetroForDay } from "./retro.ts";
 import type { RetroOutcome } from "./retro.ts";
-import { changesOutsideScope, checkCleanAt, headCommitSync, resolveClaimedCommit } from "./workspace.ts";
+import { changedFiles, checkCleanAt, headCommitSync, resolveClaimedCommit, scopeCoversFile } from "./workspace.ts";
+import { MEMORY_FILES } from "./choke.ts";
 import { projectStateDir } from "./project.ts";
 import { FactoryError } from "./errors.ts";
 import type { AttemptAccepted, ContractSet, GateFinished, GitBlocked, LedgerEvent, MeterWritten, MeterUsage, NeedsHuman, NeedsHumanEvidence, NeedsHumanReason, RepokeDispatched, RepokeRefused, RespawnDispatched, RespawnRefused, SpawnDispatched, SpawnRefused, Verdict } from "./events.ts";
@@ -583,11 +584,36 @@ export function createFactory(options: FactoryOptions): Factory {
         );
       }
 
-      // Station 4 — the mechanical task boundary (ticket 14): every file the
-      // diff touches must fall inside a declared scope prefix. A task that
-      // overreaches is refused here, never prompted back to polite behavior.
-      if (contract.scope !== undefined && contract.scope.length > 0) {
-        if (contract.base === undefined) {
+      // Station 4 — the mechanical task boundary (ticket 14, fenced in
+      // v0.0.14): every file the diff touches must fall inside a declared
+      // scope prefix, and the three memory files at the workspace root
+      // (AGENTS.md, CLAUDE.md, CONTEXT.md) red EVERY contract that does not
+      // explicitly scope them — unrestricted ones included (ADR 0010 §6:
+      // project memory is the Supervisor's and Lead's act, never a worker's
+      // side effect). A task that overreaches is refused here, never prompted
+      // back to polite behavior.
+      const scopeDeclared = contract.scope !== undefined && contract.scope.length > 0;
+      if (scopeDeclared && contract.base === undefined) {
+        return finish(
+          task,
+          attempt,
+          ledger,
+          stateDir,
+          dataDir,
+          contract,
+          { exit: result.exit, verdict: "red", note: "scoped contract has no recorded base commit", timedOut: false },
+          resolved.full,
+          undefined,
+          undefined,
+          watchContext(),
+        );
+      }
+      if (contract.base !== undefined) {
+        const diff = await changedFiles(contract.workspace, contract.base, resolved.full);
+        if (!diff.ok) {
+          // A failed diff leaves the station with no measurement — undefined,
+          // never an empty list posing as "clean".
+          scopeViolations = undefined;
           return finish(
             task,
             attempt,
@@ -595,18 +621,46 @@ export function createFactory(options: FactoryOptions): Factory {
             stateDir,
             dataDir,
             contract,
-            { exit: result.exit, verdict: "red", note: "scoped contract has no recorded base commit", timedOut: false },
+            {
+              exit: result.exit,
+              verdict: "red",
+              note: `${scopeDeclared ? "scope check" : "memory fence check"} failed: ${diff.reason}`,
+              timedOut: false,
+            },
             resolved.full,
             undefined,
             undefined,
             watchContext(),
           );
         }
-        const scopeCheck = await changesOutsideScope(contract.workspace, contract.base, resolved.full, contract.scope);
-        if (!scopeCheck.ok) {
-          // A failed diff leaves the station with no measurement — undefined,
-          // never an empty list posing as "clean".
-          scopeViolations = scopeCheck.reason !== undefined ? undefined : scopeCheck.files;
+        if (scopeDeclared) {
+          const outside = diff.files.filter((file) => !scopeCoversFile(contract.scope!, file));
+          if (outside.length > 0) {
+            scopeViolations = outside;
+            return finish(
+              task,
+              attempt,
+              ledger,
+              stateDir,
+              dataDir,
+              contract,
+              {
+                exit: result.exit,
+                verdict: "red",
+                note: `changes outside declared scope: ${outside.join(", ")}`,
+                timedOut: false,
+              },
+              resolved.full,
+              undefined,
+              undefined,
+              watchContext(),
+            );
+          }
+          scopeViolations = [];
+        }
+        const fenced = diff.files.filter((file) => (MEMORY_FILES as readonly string[]).includes(file) && !scopeCoversFile(contract.scope ?? [], file));
+        if (fenced.length > 0) {
+          scopeViolations = fenced;
           return finish(
             task,
             attempt,
@@ -618,9 +672,8 @@ export function createFactory(options: FactoryOptions): Factory {
               exit: result.exit,
               verdict: "red",
               note:
-                scopeCheck.reason !== undefined
-                  ? `scope check failed: ${scopeCheck.reason}`
-                  : `changes outside declared scope: ${scopeCheck.files.join(", ")}`,
+                `changes to fenced memory files: ${fenced.join(", ")} — project memory (AGENTS.md/CLAUDE.md/CONTEXT.md) ` +
+                "is the Supervisor's and Lead's act; scope the file explicitly to contract the edit",
               timedOut: false,
             },
             resolved.full,
@@ -629,7 +682,6 @@ export function createFactory(options: FactoryOptions): Factory {
             watchContext(),
           );
         }
-        scopeViolations = [];
       }
 
       return finish(task, attempt, ledger, stateDir, dataDir, contract, result, resolved.full, options.eyeBudgetMs, options.eyeCliRunner, watchContext());

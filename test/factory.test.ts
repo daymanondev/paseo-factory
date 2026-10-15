@@ -403,6 +403,52 @@ test("omitted scope keeps the unrestricted v0.0.1 behavior", async (t) => {
   assert.equal(outcome.verdict, "green");
 });
 
+test("the memory write fence on claims: AGENTS.md/CLAUDE.md/CONTEXT.md edits red every contract that does not scope them", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir: join(dir, "factory") });
+
+  // Unrestricted scope used to mean "anywhere is fine" — the fence (v0.0.14,
+  // ADR 0010 §6) carves the three memory files out of that: project memory is
+  // the Supervisor/Lead's act, never a worker's side effect.
+  factory.setContract({ task: "F1", workspace, gate: "true", artifact });
+  writeFileSync(join(workspace, "AGENTS.md"), "# poisoned rules\n");
+  const poisoned = gitCommitChanges(workspace, "edit AGENTS.md");
+  const unscoped = await factory.claim({ task: "F1", sha: poisoned });
+  assert.equal(unscoped.verdict, "red");
+  assert.equal(unscoped.gate.exit, 0, "the gate passed — the memory edit is what is red");
+  assert.match(unscoped.gate.note, /AGENTS\.md/, "the offending file is named");
+  assert.match(unscoped.gate.note, /memory/i);
+  assert.ok(!unscoped.gate.note.includes("outside declared scope"), "an unscoped contract speaks the fence's words, not the scope check's");
+
+  // A scoped contract that does NOT list the file: the scope check reds it
+  // (the fence and the scope check agree — the file is outside the boundary).
+  const ws2 = join(dir, "ws2");
+  mkdirSync(join(ws2, "src"), { recursive: true });
+  writeFileSync(join(ws2, artifact), "export function pad() {}\n");
+  gitCommitAll(ws2);
+  factory.setContract({ task: "F2", workspace: ws2, gate: "true", artifact, scope: ["src"] });
+  writeFileSync(join(ws2, "CLAUDE.md"), "# poisoned too\n");
+  const fencedScoped = gitCommitChanges(ws2, "edit CLAUDE.md");
+  const scoped = await factory.claim({ task: "F2", sha: fencedScoped });
+  assert.equal(scoped.verdict, "red");
+  assert.match(scoped.gate.note, /outside declared scope/);
+  assert.match(scoped.gate.note, /CLAUDE\.md/);
+
+  // The opt-in: a Contract that explicitly scopes the memory file admits the
+  // edit (documentation maintenance is legal work when contracted for).
+  const ws3 = join(dir, "ws3");
+  mkdirSync(join(ws3, "src"), { recursive: true });
+  writeFileSync(join(ws3, artifact), "export function pad() {}\n");
+  gitCommitAll(ws3);
+  factory.setContract({ task: "F3", workspace: ws3, gate: "true", artifact, scope: ["AGENTS.md"] });
+  writeFileSync(join(ws3, "AGENTS.md"), "# a ratified rule, deliberately contracted\n");
+  const ratified = gitCommitChanges(ws3, "edit AGENTS.md under an explicit scope");
+  const allowed = await factory.claim({ task: "F3", sha: ratified });
+  assert.equal(allowed.verdict, "green", "an explicitly scoped memory edit is contracted work");
+});
+
 test("unusable scope entries are rejected without touching the ledger", (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);

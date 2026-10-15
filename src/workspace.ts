@@ -92,6 +92,35 @@ function git(cwd: string, args: string[]): Promise<{ stdout: string; stderr: str
 }
 
 /**
+ * True when a declared scope prefix owns `file` — the boundary law ticket 14
+ * fixed: a prefix owns itself and everything under it as a directory. One
+ * shared spelling for the scope check, the memory write fence, and any later
+ * boundary judge (v0.0.14).
+ */
+export function scopeCoversFile(scope: readonly string[], file: string): boolean {
+  return scope.some((prefix) => file === prefix || file.startsWith(prefix.endsWith("/") ? prefix : `${prefix}/`));
+}
+
+/**
+ * The files the Attempt changed between two commits — the raw list the scope
+ * check filters (ticket 14) and the memory write fence scans (v0.0.14, ADR
+ * 0010 §6). Facts only; policies live with their callers.
+ */
+export function changedFiles(
+  cwd: string,
+  base: string,
+  claimed: string,
+): Promise<{ ok: true; files: string[] } | { ok: false; reason: string }> {
+  return git(cwd, ["diff", "--name-only", base, claimed]).then(
+    ({ stdout }) => ({
+      ok: true as const,
+      files: stdout.split("\n").map((line) => line.trim()).filter((line) => line !== ""),
+    }),
+    (err: unknown) => ({ ok: false as const, reason: gitDetail(err) }),
+  );
+}
+
+/**
  * Files the Attempt changed between the Contract's base commit and the claimed
  * commit that fall outside every declared scope prefix (ticket 14): the task
  * boundary is mechanical, not polite — an overreaching diff is never stamped
@@ -103,14 +132,11 @@ export function changesOutsideScope(
   claimed: string,
   scope: readonly string[],
 ): Promise<{ ok: true } | { ok: false; files: string[]; reason?: string }> {
-  return git(cwd, ["diff", "--name-only", base, claimed]).then(
-    ({ stdout }) => {
-      const changed = stdout.split("\n").map((line) => line.trim()).filter((line) => line !== "");
-      const outside = changed.filter((file) => !scope.some((prefix) => file === prefix || file.startsWith(prefix.endsWith("/") ? prefix : `${prefix}/`)));
-      return outside.length === 0 ? { ok: true as const } : { ok: false as const, files: outside };
-    },
-    (err: unknown) => ({ ok: false as const, files: [], reason: gitDetail(err) }),
-  );
+  return changedFiles(cwd, base, claimed).then((diff) => {
+    if (!diff.ok) return { ok: false as const, files: [], reason: diff.reason };
+    const outside = diff.files.filter((file) => !scopeCoversFile(scope, file));
+    return outside.length === 0 ? { ok: true as const } : { ok: false as const, files: outside };
+  });
 }
 
 /**

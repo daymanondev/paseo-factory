@@ -75,3 +75,66 @@ test("writableRootsFor carries TMPDIR when the plugin process has one", () => {
   assert.deepEqual(roots.tmp, ["/tmp", "/dev/null", "/var/folders/zz/T"], "trailing slash normalized");
   assert.deepEqual(writableRootsFor("/ws/", "/state", "/home", {}).workspace, "/ws", "workspace trailing slash normalized");
 });
+
+// ---- the memory write fence (v0.0.14, ADR 0010 §6) -------------------------------------------
+
+/** The fence context a contracted ask carries: the live Contract's workspace and scope. */
+function fence(scope?: string[]): { workspace: string; scope?: readonly string[] } {
+  return { workspace: "/ws/proj", ...(scope === undefined ? {} : { scope }) };
+}
+
+test("the memory write fence: write/edit asks to AGENTS.md, CLAUDE.md, CONTEXT.md deny unless the Contract scopes the file", () => {
+  const roots = shellRoots();
+  for (const file of ["AGENTS.md", "CLAUDE.md", "CONTEXT.md"]) {
+    const relative = judgeFilePath(file, roots, fence());
+    assert.equal(relative.behavior, "deny", `${file} — a relative ask from the workspace cwd`);
+    if (relative.behavior === "deny") assert.equal(relative.rule, "policy:memory-write-fenced");
+    assert.equal(judgeFilePath(`./${file}`, roots, fence()).behavior, "deny", "./ prefix is still the root file");
+    assert.equal(judgeFilePath(`/ws/proj/${file}`, roots, fence()).behavior, "deny", "the absolute path inside the workspace");
+    assert.equal(judgeFilePath(file, roots, fence([file])).behavior, "allow", "an explicit Contract.scope entry is the opt-in");
+    assert.equal(judgeFilePath(file, roots, fence(["docs"])).behavior, "deny", "a scope that does not cover the file is no opt-in");
+  }
+  // Not the workspace-root memory: subdirectory files and neighbors stay clear.
+  assert.equal(judgeFilePath("src/AGENTS.md", roots, fence()).behavior, "allow", "a nested AGENTS.md is not the project memory");
+  assert.equal(judgeFilePath("docs/CONTEXT.md", roots, fence()).behavior, "allow");
+  assert.equal(judgeFilePath("AGENTS.md.bak", roots, fence()).behavior, "allow");
+  assert.equal(judgeFilePath("src/x.ts", roots, fence()).behavior, "allow");
+  // Without the memory context (an uncontracted caller) the v0.0.4 behavior stands.
+  assert.equal(judgeFilePath("AGENTS.md", roots).behavior, "allow");
+});
+
+test("the memory write fence catches shell writes to the memory files — redirects, tee, cp/mv, sed -i, rm, dd — and passes reads", () => {
+  const roots = shellRoots();
+  const writes = [
+    "echo new rule > AGENTS.md",
+    "echo more >> CLAUDE.md",
+    "make 2> CONTEXT.md",
+    "tee AGENTS.md < draft.md",
+    "cp draft.md CLAUDE.md",
+    "mv draft.md CONTEXT.md",
+    "sed -i s/old/new/ AGENTS.md",
+    "rm CLAUDE.md",
+    "dd if=backup.img of=CONTEXT.md",
+  ];
+  for (const command of writes) {
+    const decision = judgeShellCommand(command, roots, fence());
+    assert.equal(decision.behavior, "deny", `"${command}" must be denied`);
+    if (decision.behavior === "deny") {
+      assert.equal(decision.rule, "policy:memory-write-fenced");
+      assert.match(decision.reason, /AGENTS|CLAUDE|CONTEXT/, "the deny line names the fenced file");
+    }
+  }
+  const readsAndNeighbors = [
+    "cat AGENTS.md",
+    "grep -i rule CLAUDE.md",
+    "echo x > NOTES.md",
+    "echo x > src/AGENTS.md",
+    "cp a.md src/b.md",
+    "diff AGENTS.md CLAUDE.md > /tmp/d",
+  ];
+  for (const command of readsAndNeighbors) {
+    assert.equal(judgeShellCommand(command, roots, fence()).behavior, "allow", `"${command}" must pass the fence`);
+  }
+  assert.equal(judgeShellCommand("echo x > AGENTS.md", roots, fence(["AGENTS.md"])).behavior, "allow", "the explicit scope opt-in holds on the shell path too");
+  assert.equal(judgeShellCommand("echo x > AGENTS.md", roots).behavior, "allow", "without the memory context the v0.0.4 behavior stands");
+});
