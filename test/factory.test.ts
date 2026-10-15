@@ -1493,3 +1493,35 @@ test("a merge conflict lands pending-conflict with the root left clean — the c
   assert.equal(existsSync(worktree), true);
   assert.equal(gitFact(workspace, ["rev-parse", "--verify", "factory/LW4"]), claimed, "the verified work waits on its branch for the Lead to resolve");
 });
+
+test("two same-Project Tasks run their claims concurrently in sibling worktrees — no collision, root untouched", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, sha: base } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  const wtA = makeTaskWorktree(dir, workspace, "PR1", base);
+  const wtB = makeTaskWorktree(dir, workspace, "PR2", base);
+  factory.setContract({ task: "PR1", workspace, gate: "true", artifact: "src/format.ts", scope: ["src/one"] });
+  factory.setContract({ task: "PR2", workspace, gate: "true", artifact: "src/format.ts", scope: ["src/two"] });
+  for (const [task, wt] of [["PR1", wtA], ["PR2", wtB]] as const) {
+    const spawn = factory.requestSpawn({ task, provider: "claude", arity: 1, worktree: wt });
+    assert.equal(spawn.outcome, "dispatched", `${task} dispatched in its own worktree`);
+  }
+  // Both agents work in their own trees; the claims run interleaved.
+  mkdirSync(join(wtA, "src", "one"), { recursive: true });
+  writeFileSync(join(wtA, "src", "one", "a.ts"), "export const a = 1;\n");
+  mkdirSync(join(wtB, "src", "two"), { recursive: true });
+  writeFileSync(join(wtB, "src", "two", "b.ts"), "export const b = 2;\n");
+  const shaA = gitCommitChanges(wtA, "task one");
+  const shaB = gitCommitChanges(wtB, "task two");
+  const [first, second] = await Promise.all([factory.claim({ task: "PR1", sha: shaA }), factory.claim({ task: "PR2", sha: shaB })]);
+  assert.equal(first.verdict, "green");
+  assert.equal(second.verdict, "green");
+  assert.equal(gitFact(workspace, ["rev-parse", "HEAD"]), base, "the root sat at base through both runs");
+  assert.equal(gitFact(workspace, ["status", "--porcelain"]), "");
+  // And both land independently: accept PR1, its work shows in the root; PR2's branch waits untouched.
+  const accepted = await factory.accept({ task: "PR1", attempt: 1, accepted_by: "lead" });
+  assert.equal(accepted.landing, "landed");
+  assert.ok(existsSync(join(workspace, "src", "one", "a.ts")), "PR1's verified work is in the root");
+  assert.equal(gitFact(workspace, ["rev-parse", "--verify", "factory/PR2"]), shaB, "PR2's verified work waits on its branch");
+});
