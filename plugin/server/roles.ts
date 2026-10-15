@@ -174,9 +174,10 @@ export interface AgentCreateRequest {
  * and its `PASEO_FACTORY_*` env seeded. Strangers pass through untouched
  * (`undefined` — the daemon sees the original request). Seats resolve their
  * project from the create's cwd (git answers); working agents from the
- * worktree shape.
+ * worktree shape. Generic over the request so the SDK's full create shape
+ * (mcpServers, settings, …) rides through unchanged.
  */
-export function injectRoleOnCreate(request: AgentCreateRequest, stateDir: string): AgentCreateRequest | undefined {
+export function injectRoleOnCreate<R extends AgentCreateRequest>(request: R, stateDir: string): R | undefined {
   if ((request.config.systemPrompt ?? "").includes(FOOTER_MARK)) return undefined; // already injected — idempotent
   const title = request.config.title ?? "";
   if (title === SEAT_TITLES.supervisor || title === SEAT_TITLES.lead) {
@@ -208,10 +209,10 @@ function appendContract(existing: string | undefined, contract: string): string 
  * agents match by their managed-worktree cwd; seats by agent id against the
  * project registry the ensure path keeps. Anything else passes through.
  */
-export function injectSessionEnv(
-  request: { agentId: string; cwd: string; env: Record<string, string> },
+export function injectSessionEnv<R extends { agentId: string; cwd: string; env: Record<string, string> }>(
+  request: R,
   stateDir: string,
-): { agentId: string; cwd: string; env: Record<string, string> } | undefined {
+): R | undefined {
   const worktree = parseWorktreeCwd(stateDir, request.cwd);
   if (worktree !== null) {
     return { ...request, env: { ...request.env, ...factoryEnvFor("agent", { stateDir, project: { root: "", slug: worktree.slug }, task: worktree.task }) } };

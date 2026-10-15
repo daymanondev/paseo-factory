@@ -116,6 +116,14 @@ commands:
                                       ever named persist — a refused value
                                       writes nothing, exit 2)
 
+  lead       Rotate a Project's Lead seat (v0.0.14, ADR 0010 §2): cancel and
+             archive the active seat=lead, project=<slug> agent so the next
+             dispatch starts a fresh Lead session grounded in the Project's
+             Ledger and AGENTS.md / CONTEXT.md. Submits through the spool —
+             the plugin is the one daemon actor; no ledger line lands (a
+             rotation is a daemon fact, not a factory fact).
+             lead rotate --project <dir>   any directory inside the Project
+
   retro      Run the Retro over the whole ledger, on demand (v0.0.7): the
              plugin builds the corpus digest, prompts the configured retro
              lane from <stateDir>/lanes.json (default pi/zai/glm-5.3),
@@ -392,6 +400,25 @@ if (command === "lanes") {
   }
 
   fail(`lanes: unknown subcommand "${sub}" — use "lanes [get [<lane>] | set <lane> <value>] [--project <dir>]"`);
+}
+
+if (command === "lead") {
+  const parsed = parseCommandOptions({ project: { type: "string" }, "wait-secs": { type: "string" } });
+  const sub = parsed.positionals[0];
+  if (sub !== "rotate") fail(`lead: unknown subcommand "${sub ?? "(none)"}" — use "lead rotate --project <dir>"`);
+  if (parsed.positionals.length > 1) fail(`lead rotate: unexpected positional "${parsed.positionals[1]}"`);
+  if (typeof parsed.values.project !== "string" || parsed.values.project.trim() === "") {
+    fail("lead rotate: --project <dir> is required — any directory inside the Project's repository");
+  }
+  // v0.0.14 (ADR 0010 §2): the rotation is a spool round trip — the CLI only
+  // submits; the plugin cancels + archives the Project's seat=lead agent and
+  // names it in the reply.
+  const reply = await roundTrip(
+    { id: randomId(), kind: "lead_rotate", projectRoot: resolvePath(parsed.values.project) },
+    waitSeconds(parsed),
+  );
+  console.log(`factory: ${reply.summary}`);
+  process.exit(0);
 }
 
 if (command === "run") {

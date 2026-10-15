@@ -78,6 +78,14 @@ test("parseSpoolRequest accepts exactly the three request shapes and nothing els
     "freshEyes passes only as literal true",
   );
 
+  // v0.0.14: the Lead rotation names its Project root; no stamp — the act
+  // is the plugin's, judged at the daemon, not attributed from a shell.
+  assert.deepEqual(parseSpoolRequest({ id: "r1", kind: "lead_rotate", projectRoot: "/w/repo" }), {
+    id: "r1",
+    kind: "lead_rotate",
+    projectRoot: "/w/repo",
+  });
+
   for (const bad of [
     null,
     "claim",
@@ -99,6 +107,31 @@ test("parseSpoolRequest accepts exactly the three request shapes and nothing els
   ]) {
     assert.equal(parseSpoolRequest(bad), undefined, `${JSON.stringify(bad)} must be rejected`);
   }
+});
+
+test("lead_rotate rides the injected rotation handler and is refused loudly without one (v0.0.14)", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+
+  const without = await handleSpoolRequest(factory, { id: "r0", kind: "lead_rotate", projectRoot: "/w/repo" });
+  assert.ok(!without.ok);
+  assert.equal(without.code, "lead-rotate-unavailable", "no handler wired — a named refusal, never a silent pass");
+
+  const rotated: string[] = [];
+  const withHandler = await handleSpoolRequest(
+    factory,
+    { id: "r1", kind: "lead_rotate", projectRoot: "/w/repo" },
+    undefined,
+    async (request) => {
+      rotated.push(request.projectRoot);
+      return { id: request.id, ok: true, summary: "lead rotated — agent agent-lead-1 cancelled + archived", agentId: "agent-lead-1" };
+    },
+  );
+  assert.ok(withHandler.ok);
+  assert.equal(withHandler.agentId, "agent-lead-1");
+  assert.deepEqual(rotated, ["/w/repo"]);
+  assert.equal(factory.ledger.events.length, 0, "a rotation is a daemon fact — no ledger line lands");
 });
 
 test("the v0.0.9 stamps ride both Owner acts onto their ledger lines (ADR 0006)", async (t) => {

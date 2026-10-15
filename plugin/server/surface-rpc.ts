@@ -592,13 +592,15 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
 
 // ---- the server wiring --------------------------------------------------------------------
 
+/** The handlers' shared type — the shell builds them once and hands them to both the RPC registrations and the spool. */
+export type SurfaceHandlers = ReturnType<typeof createSurfaceHandlers>;
+
 /**
  * Registers every `factory.*` handler on the plugin server. Each daemon
  * call prefers the PaseoApi the daemon hands the handler (`context.paseo`);
  * the constructor's `daemon` is the fallback (and the tests' fake).
  */
-export function registerSurfaceRpc(server: PluginServerContext, deps: SurfaceDeps): void {
-  const handlers = createSurfaceHandlers(deps);
+export function registerSurfaceRpc(server: PluginServerContext, handlers: SurfaceHandlers): void {
   server.handle(snapshot, (input, context) => handlers.snapshot(input, { paseo: context.paseo }));
   server.handle(taskDetail, (input, context) => handlers.taskDetail(input, { paseo: context.paseo }));
   server.handle(accept, (input, context) => handlers.accept(input, { paseo: context.paseo }));

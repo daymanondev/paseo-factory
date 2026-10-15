@@ -20,7 +20,8 @@ import { createChoke, startGitBlockIngestion } from "./server/choke.ts";
 import { createTimelineFetcher } from "./server/timeline.ts";
 import type { TimelineSourceApi } from "./server/timeline.ts";
 import { spoolRootFor, startSpool } from "./server/spool.ts";
-import { registerSurfaceRpc } from "./server/surface-rpc.ts";
+import { createSurfaceHandlers, registerSurfaceRpc } from "./server/surface-rpc.ts";
+import { injectRoleOnCreate, injectSessionEnv } from "./server/roles.ts";
 
 const SHELL_VERSION = "0.0.13";
 
@@ -73,40 +74,67 @@ export default function contribute(server: PluginServerContext) {
   });
   const offAgentCreate = server.before("agent.create", ({ request }, context) => {
     capturePaseo(context);
-    const next = choke.pinCreateMode(request.config);
-    if (next !== undefined) {
-      log(`choke: pinned permission mode to Always Ask for the new agent in ${request.config.cwd}`);
+    let next = request;
+    const pinned = choke.pinCreateMode(next.config);
+    if (pinned !== undefined) {
+      log(`choke: pinned permission mode to Always Ask for the new agent in ${next.config.cwd}`);
+      next = { ...next, config: pinned };
     }
-    return next === undefined ? undefined : { ...request, config: next };
+    // The additive role injection (v0.0.14, ADR 0010 §1–§2/§6): seat-titled
+    // creates and managed-worktree creates carry their role contract in
+    // config.systemPrompt (mapped per provider by the daemon) plus their
+    // PASEO_FACTORY_* env — nothing under any project root is written.
+    const injected = injectRoleOnCreate(next, stateDir);
+    if (injected !== undefined) {
+      log(`roles: injected the ${injected.env?.PASEO_FACTORY_SEAT ?? "agent"} contract into the agent created in ${next.config.cwd}`);
+    }
+    return injected === undefined ? (next === request ? undefined : next) : injected;
   });
-
-  const spool = startSpool(stateDir, factory, { onLog: log, ask: choke.spoolAskHandler });
-  log(`spool listening on ${spoolRootFor(stateDir)}/{requests,replies,processed}`);
 
   // The Factory surface's RPC handlers (v0.0.13, ADR 0009 §4): every
   // `factory.*` call runs in-process against this same single Factory
   // instance — the UI's Owner acts never round-trip through the spool. Each
   // handler prefers the PaseoApi the daemon hands it; the captured one is
-  // the fallback for calls whose context carries none.
-  registerSurfaceRpc(server, {
+  // the fallback for calls whose context carries none. The spool's
+  // lead_rotate kind (v0.0.14) reuses the same handlers — one daemon actor.
+  const surfaceDeps = {
     factory,
     stateDir,
     home,
-    pluginDir,
+    ...(pluginDir === undefined ? {} : { pluginDir }),
     daemon: () => paseoApi as never,
     onLog: log,
+  };
+  const surface = createSurfaceHandlers(surfaceDeps);
+  const spool = startSpool(stateDir, factory, {
+    onLog: log,
+    ask: choke.spoolAskHandler,
+    leadRotate: async (request) => {
+      const reply = await surface.leadRotate({ projectRoot: request.projectRoot }, { paseo: paseoApi as never });
+      return reply.ok
+        ? { id: request.id, ok: true as const, summary: `lead rotated — agent ${reply.agentId} cancelled + archived`, agentId: reply.agentId }
+        : { id: request.id, ok: false as const, code: reply.code, message: reply.error };
+    },
   });
+  log(`spool listening on ${spoolRootFor(stateDir)}/{requests,replies,processed}`);
+  registerSurfaceRpc(server, surface);
 
   const gitBlocks = startGitBlockIngestion(factory, { onLog: log });
 
   const offSessionOpen = server.before("agent.session_open", ({ request }, context) => {
     capturePaseo(context);
-    if (pluginDir === undefined) return undefined;
-    const next = injectClaimCliPath(request, claimCliBinDir(stateDir));
-    if (next !== request) {
-      log(`factory-claim on PATH for agent ${request.agentId} (${request.reason})`);
+    let next = request;
+    if (pluginDir !== undefined) {
+      const withCli = injectClaimCliPath(next, claimCliBinDir(stateDir));
+      if (withCli !== next) {
+        log(`factory-claim on PATH for agent ${request.agentId} (${request.reason})`);
+        next = withCli;
+      }
     }
-    return next;
+    // The role identity re-applies on every provider launch (v0.0.14): a
+    // seat's or worker's shell can always ask which seat it is.
+    const withEnv = injectSessionEnv(next, stateDir);
+    return withEnv === undefined ? (next === request ? undefined : next) : withEnv;
   });
 
   return () => {

@@ -192,6 +192,55 @@ test("the owner CLI refuses bad usage before submitting anything", async () => {
   assert.match(unknown.stderr, /unknown command "teleport"/);
 });
 
+test("factory lead rotate: usage refusals, then the spool round trip names the retired agent (v0.0.14)", async (t) => {
+  // Usage refusals fire before any submission.
+  const noSub = await run(ownerCli, ["lead", "rotate"], {});
+  assert.equal(noSub.status, 2);
+  assert.match(noSub.stderr, /--project <dir> is required/);
+  const badSub = await run(ownerCli, ["lead", "teleport", "--project", "/w"], {});
+  assert.equal(badSub.status, 2);
+  assert.match(badSub.stderr, /unknown subcommand "teleport"/);
+
+  // The round trip: a real git project, a running spool with a rotation
+  // handler wired the way index.server.ts wires it (the surface handlers'
+  // leadRotate over the daemon).
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const projectRoot = join(dir, "repo");
+  mkdirSync(projectRoot);
+  writeFileSync(join(projectRoot, "README.md"), "x\n");
+  gitCommitAll(projectRoot);
+  const home = join(dir, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const factory = createFactory({ stateDir });
+  const rotated: string[] = [];
+  const spool = startSpool(stateDir, factory, {
+    pollMs: 20,
+    leadRotate: async (request) => {
+      rotated.push(request.projectRoot);
+      return { id: request.id, ok: true, summary: "lead rotated — agent agent-lead-7 cancelled + archived", agentId: "agent-lead-7" };
+    },
+  });
+  t.after(() => spool.stop());
+
+  const reply = await run(ownerCli, ["--home", home, "lead", "rotate", "--project", projectRoot, "--wait-secs", "10"], {});
+  assert.equal(reply.status, 0, reply.stderr);
+  assert.match(reply.stdout, /lead rotated — agent agent-lead-7 cancelled \+ archived/);
+  assert.equal(rotated.length, 1);
+  assert.equal(rotated[0], projectRoot, "the resolved project root rode the spool request");
+
+  // A handler refusal (say, no live Lead) reaches the terminal as its code.
+  spool.stop();
+  const refusing = startSpool(stateDir, factory, {
+    pollMs: 20,
+    leadRotate: async (request) => ({ id: request.id, ok: false, code: "no-lead", message: "no live seat=lead agent on this daemon" }),
+  });
+  t.after(() => refusing.stop());
+  const refused = await run(ownerCli, ["--home", home, "lead", "rotate", "--project", projectRoot, "--wait-secs", "10"], {});
+  assert.equal(refused.status, 2);
+  assert.match(refused.stderr, /no-lead: no live seat=lead agent/);
+});
+
 test("factory-claim usage: --help exits 0, a missing --sha exits 2", async () => {
   const help = await run(claimCli, ["--help"], {});
   assert.equal(help.status, 0);

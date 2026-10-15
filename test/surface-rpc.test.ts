@@ -8,6 +8,7 @@ import { resolveProject } from "../plugin/server/core/project.ts";
 import { createSurfaceHandlers } from "../plugin/server/surface-rpc.ts";
 import type { SurfaceDaemonApi } from "../plugin/server/surface-rpc.ts";
 import { injectRoleOnCreate, injectSessionEnv, renderAgentContract, renderSeatBootstrap, renderSeatContract } from "../plugin/server/roles.ts";
+import type { AgentCreateRequest } from "../plugin/server/roles.ts";
 import { discoverProjects, readProjectRegistration, writeProjectRegistration } from "../plugin/server/projects.ts";
 import { lanesPath, loadLanes, saveLanes } from "../src/lanes.ts";
 import { disposeDir, fakeCopilotRunner, gitCommitAll, makeTempDir, writeLanes } from "./helpers.ts";
@@ -658,10 +659,8 @@ test("roles: agent.create injection appends system prompts additively, idempoten
   const project = makeProject(t, "seats");
 
   // A seat create: the role contract lands in systemPrompt, the env names the seat.
-  const seatRequest = injectRoleOnCreate(
-    { config: { provider: "pi/zai/glm-5.3", cwd: project.root, title: "Supervisor (paseo-factory)" } },
-    stateDir,
-  );
+  const seatCreate: AgentCreateRequest = { config: { provider: "pi/zai/glm-5.3", cwd: project.root, title: "Supervisor (paseo-factory)" } };
+  const seatRequest = injectRoleOnCreate(seatCreate, stateDir);
   assert.ok(seatRequest !== undefined, "a seat-titled create is injected");
   assert.match(seatRequest.config.systemPrompt!, /paseo-factory role skills: grilling, domain-modeling/);
   assert.match(seatRequest.config.systemPrompt!, /additive/);
@@ -671,10 +670,8 @@ test("roles: agent.create injection appends system prompts additively, idempoten
   assert.equal(seatRequest.env?.PASEO_FACTORY_STATE_DIR, stateDir);
 
   // An existing system prompt is APPENDED to, never replaced.
-  const withOwn = injectRoleOnCreate(
-    { config: { provider: "pi/zai/glm-5.3", cwd: project.root, title: "Lead (paseo-factory)", systemPrompt: "repo harness rules" } },
-    stateDir,
-  );
+  const ownCreate: AgentCreateRequest = { config: { provider: "pi/zai/glm-5.3", cwd: project.root, title: "Lead (paseo-factory)", systemPrompt: "repo harness rules" } };
+  const withOwn = injectRoleOnCreate(ownCreate, stateDir);
   assert.ok(withOwn !== undefined);
   assert.match(withOwn.config.systemPrompt!, /^repo harness rules/);
   assert.match(withOwn.config.systemPrompt!, /paseo-factory role skills: codebase-design, domain-modeling, tdd/);
@@ -684,14 +681,16 @@ test("roles: agent.create injection appends system prompts additively, idempoten
 
   // A working agent in its managed task worktree gets the Agent contract.
   const worktree = join(stateDir, "projects", project.slug, "worktrees", "T1");
-  const agentRequest = injectRoleOnCreate({ config: { provider: "pi/zai/glm-5.3", cwd: worktree, title: "T1" } }, stateDir);
+  const agentCreate: AgentCreateRequest = { config: { provider: "pi/zai/glm-5.3", cwd: worktree, title: "T1" } };
+  const agentRequest = injectRoleOnCreate(agentCreate, stateDir);
   assert.ok(agentRequest !== undefined, "a managed-worktree create is injected");
   assert.match(agentRequest.config.systemPrompt!, /paseo-factory role skills: tdd, diagnosing-bugs, codebase-design/);
   assert.equal(agentRequest.env?.PASEO_FACTORY_TASK, "T1");
   assert.equal(agentRequest.env?.PASEO_FACTORY_SEAT, "agent");
 
   // A stranger in an unrelated directory passes through untouched.
-  assert.equal(injectRoleOnCreate({ config: { provider: "pi/zai/glm-5.3", cwd: "/tmp", title: "Notes" } }, stateDir), undefined);
+  const strangerCreate: AgentCreateRequest = { config: { provider: "pi/zai/glm-5.3", cwd: "/tmp", title: "Notes" } };
+  assert.equal(injectRoleOnCreate(strangerCreate, stateDir), undefined);
 });
 
 test("roles: session_open env re-carries the seat identity from the project registry on every launch", (t) => {
@@ -699,20 +698,21 @@ test("roles: session_open env re-carries the seat identity from the project regi
   const project = makeProject(t, "env");
   writeProjectRegistration(stateDir, project.slug, { root: project.root, supervisor: "agent-sup-7", lead: "agent-lead-7" });
 
-  const supervisorSession = injectSessionEnv({ agentId: "agent-sup-7", cwd: project.root, env: { PATH: "/bin" } }, stateDir);
+  const supervisorSession = injectSessionEnv({ agentId: "agent-sup-7", cwd: project.root, env: { PATH: "/bin" } } as { agentId: string; cwd: string; env: Record<string, string> }, stateDir);
   assert.ok(supervisorSession !== undefined);
   assert.equal(supervisorSession.env.PASEO_FACTORY_SEAT, "supervisor");
   assert.equal(supervisorSession.env.PASEO_FACTORY_PROJECT, project.slug);
   assert.equal(supervisorSession.env.PATH, "/bin", "the overlay is additive over the daemon's env");
 
   const worktree = join(stateDir, "projects", project.slug, "worktrees", "T2");
-  const agentSession = injectSessionEnv({ agentId: "agent-worker-9", cwd: worktree, env: {} }, stateDir);
+  const agentSession = injectSessionEnv({ agentId: "agent-worker-9", cwd: worktree, env: {} } as { agentId: string; cwd: string; env: Record<string, string> }, stateDir);
   assert.ok(agentSession !== undefined);
   assert.equal(agentSession.env.PASEO_FACTORY_TASK, "T2");
   assert.equal(agentSession.env.PASEO_FACTORY_SEAT, "agent");
 
   // An unregistered agent at the project root (a stranger) gets nothing.
-  assert.equal(injectSessionEnv({ agentId: "agent-stranger", cwd: project.root, env: {} }, stateDir), undefined);
+  const strangerSession: { agentId: string; cwd: string; env: Record<string, string> } = { agentId: "agent-stranger", cwd: project.root, env: {} };
+  assert.equal(injectSessionEnv(strangerSession, stateDir), undefined);
 });
 
 test("projects: the registration records the slug→root binding and both seat ids, merged field-wise", (t) => {

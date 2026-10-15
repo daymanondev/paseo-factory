@@ -111,6 +111,21 @@ export interface SpawnRequest {
 }
 
 /**
+ * The Lead rotation (v0.0.14, ADR 0010 §2): `factory lead rotate --project
+ * <dir>` asks the plugin — the one daemon actor — to cancel + archive the
+ * Project's active `seat=lead` agent, so the next dispatch starts a fresh
+ * Lead session grounded in the Project's Ledger and AGENTS.md / CONTEXT.md.
+ * No ledger line lands: a rotation is a daemon fact, not a factory fact —
+ * the reply names the retired agent.
+ */
+export interface LeadRotateRequest {
+  id: string;
+  kind: "lead_rotate";
+  /** Any directory inside the Project's repository (resolveProject names the slug). */
+  projectRoot: string;
+}
+
+/**
  * The Lead's one automatic Respawn per progress marker (v0.0.12, ADR 0008):
  * when an Agent dies (`Substrate death`), the driver asks the plugin — the
  * one writer — whether it may replace the dead Agent, and only creates the
@@ -213,6 +228,7 @@ export type SpoolRequest =
   | ClaimRequest
   | AcceptRequest
   | AskRequest
+  | LeadRotateRequest
   | SpawnRequest
   | RespawnRequest
   | MeterRequest
@@ -222,6 +238,9 @@ export type SpoolRequest =
 
 /** Handles a synthetic ask — `createChoke(...).spoolAskHandler` is the implementation. */
 export type AskHandler = (request: AskRequest) => SpoolReply;
+
+/** Rotates a Project's Lead — the surface handlers' `leadRotate` is the implementation. */
+export type LeadRotateHandler = (request: LeadRotateRequest) => Promise<SpoolReply>;
 
 export type SpoolReply =
   | {
@@ -243,6 +262,8 @@ export type SpoolReply =
       proposalCount?: number;
       /** Spawn / respawn replies: the ledger event appended for the request (carries seq). */
       event?: LedgerEvent;
+      /** Lead-rotate replies: the agent the rotation cancelled + archived. */
+      agentId?: string;
     }
   | { id: string; ok: false; code: string; message: string; event?: LedgerEvent };
 
@@ -334,6 +355,10 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     }
     return { id: req.id, kind: "respawn", task: req.task, provider: req.provider, died_agent: req.died_agent };
   }
+  if (req.kind === "lead_rotate") {
+    if (typeof req.projectRoot !== "string" || req.projectRoot.trim() === "") return undefined;
+    return { id: req.id, kind: "lead_rotate", projectRoot: req.projectRoot };
+  }
   if (req.kind === "retro") {
     // The Retro carries nothing but its kind — whole-ledger always. The
     // strict shape is the point: any extra field makes it not-a-retro.
@@ -397,6 +422,7 @@ export async function handleSpoolRequest(
   factory: Factory,
   request: SpoolRequest,
   askHandler?: AskHandler,
+  leadRotateHandler?: LeadRotateHandler,
 ): Promise<SpoolReply> {
   try {
     if (request.kind === "contract") {
@@ -446,6 +472,20 @@ export async function handleSpoolRequest(
         };
       }
       return askHandler(request);
+    }
+    if (request.kind === "lead_rotate") {
+      // The Lead rotation (v0.0.14): a daemon act, delegated the same way the
+      // choke's ask is — the shell passes the surface handlers' leadRotate,
+      // which finds, cancels, and archives the Project's seat=lead agent.
+      if (leadRotateHandler === undefined) {
+        return {
+          id: request.id,
+          ok: false,
+          code: "lead-rotate-unavailable",
+          message: "this daemon's factory plugin does not rotate Leads — update the plugin to v0.0.14+",
+        };
+      }
+      return await leadRotateHandler(request);
     }
     if (request.kind === "spawn") {
       // The driver's arrival (v0.0.5): one ledger line either way, then the
@@ -586,6 +626,8 @@ export interface SpoolOptions {
   pollMs?: number;
   /** The choke's synthetic-ask handler (v0.0.4); without it `ask` requests are refused. */
   ask?: AskHandler;
+  /** The Lead-rotation handler (v0.0.14); without it `lead_rotate` requests are refused. */
+  leadRotate?: LeadRotateHandler;
 }
 
 export interface Spool {
@@ -624,7 +666,7 @@ export function startSpool(stateDir: string, factory: Factory, options: SpoolOpt
         continue;
       }
       inFlight.add(id);
-      void handleRequestFile(id, requestPath, replyPath, join(processedDir, name), factory, log, options.ask)
+      void handleRequestFile(id, requestPath, replyPath, join(processedDir, name), factory, log, options.ask, options.leadRotate)
         .catch(() => {})
         .finally(() => inFlight.delete(id));
     }
@@ -647,6 +689,7 @@ async function handleRequestFile(
   factory: Factory,
   log: (message: string) => void,
   askHandler?: AskHandler,
+  leadRotateHandler?: LeadRotateHandler,
 ): Promise<void> {
   let reply: SpoolReply;
   let request: SpoolRequest | undefined;
@@ -659,7 +702,7 @@ async function handleRequestFile(
     reply = { id, ok: false, code: "bad-request", message: `request file ${requestPath} is not a valid spool request` };
     log(`request ${id}: REJECTED — malformed`);
   } else {
-    reply = await handleSpoolRequest(factory, request, askHandler);
+    reply = await handleSpoolRequest(factory, request, askHandler, leadRotateHandler);
     // The v0.0.9 stamps make the two Owner acts attributable in the log too —
     // the same visibility the claim line always had.
     const stamp = request.kind === "contract" || request.kind === "accept" ? ` by ${request.submitter}` : "";
