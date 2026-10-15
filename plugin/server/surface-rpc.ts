@@ -140,8 +140,21 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   const log = deps.onLog ?? (() => {});
   const failure = <C extends string>(code: C, error: string) => ({ ok: false as const, code, error });
 
-  /** Resolves a projectRoot input — a named refusal, never a guess (tests key on the reason). */
-  const projectOf = (projectRoot: string): ProjectResolution => resolveProject(projectRoot);
+  /**
+   * Resolves a projectRoot RPC input — the one door every seats-only act
+   * enters through (F8's five-fold stanza folded). The failure arm IS the
+   * handlers' refusal reply (code + sentence, tests key on the reason), so
+   * call sites return it verbatim; snapshot stays on raw `resolveProject`
+   * because it degrades to the global view instead of refusing.
+   */
+  const projectOrRefusal = (
+    projectRoot: string,
+  ): Extract<ProjectResolution, { ok: true }> | { ok: false; code: "unknown-project"; error: string } => {
+    const project = resolveProject(projectRoot);
+    return project.ok
+      ? project
+      : { ok: false, code: "unknown-project" as const, error: `project root ${projectRoot} does not resolve to a git repository — ${project.reason}` };
+  };
 
   /** The live non-archived seat agent — `seat` plus, when scoped, the Project's slug label. */
   const seatOf = async (daemon: SurfaceDaemonApi, seat: "supervisor" | "lead", projectSlug?: string): Promise<SurfaceAgentSnapshot | undefined> => {
@@ -262,10 +275,8 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     input: { projectRoot: string; message?: string },
     context?: SurfaceCallContext,
   ): Promise<{ ok: true; agentId: string; created: boolean; projectRoot: string; slug: string } | { ok: false; code: string; error: string }> => {
-    const project = projectOf(input.projectRoot);
-    if (!project.ok) {
-      return failure("unknown-project", `project root ${input.projectRoot} does not resolve to a git repository — ${project.reason}`);
-    }
+    const project = projectOrRefusal(input.projectRoot);
+    if (!project.ok) return project;
     const daemon = resolveDaemon(context);
     const lanes = loadLanes(deps.stateDir, project.slug);
     if (!lanes.ok) return failure("lanes-unreadable", lanes.reason);
@@ -298,7 +309,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
             nodePath: process.execPath,
             path: process.env.PATH ?? "",
             lane,
-            project: { root: project.root, slug: project.slug },
+            project,
           }),
         });
         agent = {
@@ -376,7 +387,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     async snapshot(input: { projectRoot?: string }, context?: SurfaceCallContext) {
       // An unresolvable scope degrades to the global view — the panel must
       // render outside git repos; the seats-only acts refuse instead.
-      const resolved = input.projectRoot === undefined ? undefined : projectOf(input.projectRoot);
+      const resolved = input.projectRoot === undefined ? undefined : resolveProject(input.projectRoot);
       const project: ProjectView | null = resolved !== undefined && resolved.ok ? { slug: resolved.slug, root: resolved.root } : null;
       const lanes = loadLanes(deps.stateDir, project?.slug);
       if (!lanes.ok) return failure("lanes-unreadable", lanes.reason);
@@ -509,8 +520,8 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     async lanesSet(input: { lane: LaneName; value: string; projectRoot?: string }, context?: SurfaceCallContext) {
       let projectSlug: string | undefined;
       if (input.projectRoot !== undefined) {
-        const project = projectOf(input.projectRoot);
-        if (!project.ok) return failure("unknown-project", `project root ${input.projectRoot} does not resolve to a git repository — ${project.reason}`);
+        const project = projectOrRefusal(input.projectRoot);
+        if (!project.ok) return project;
         projectSlug = project.slug;
       }
       const saved = saveLanes(deps.stateDir, { [input.lane]: input.value }, projectSlug);
@@ -575,26 +586,20 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         }
         return retireSeat("supervisor", undefined, undefined, context);
       }
-      const project = projectOf(input.projectRoot);
-      if (!project.ok) {
-        return failure("unknown-project", `project root ${input.projectRoot} does not resolve to a git repository — ${project.reason}`);
-      }
+      const project = projectOrRefusal(input.projectRoot);
+      if (!project.ok) return project;
       return retireSeat("supervisor", project.slug, project.root, context);
     },
 
     async leadRotate(input: { projectRoot: string }, context?: SurfaceCallContext) {
-      const project = projectOf(input.projectRoot);
-      if (!project.ok) {
-        return failure("unknown-project", `project root ${input.projectRoot} does not resolve to a git repository — ${project.reason}`);
-      }
+      const project = projectOrRefusal(input.projectRoot);
+      if (!project.ok) return project;
       return retireSeat("lead", project.slug, project.root, context);
     },
 
     async ratifyProposal(input: { projectRoot: string; day: string; proposalId: number }, context?: SurfaceCallContext) {
-      const project = projectOf(input.projectRoot);
-      if (!project.ok) {
-        return failure("unknown-project", `project root ${input.projectRoot} does not resolve to a git repository — ${project.reason}`);
-      }
+      const project = projectOrRefusal(input.projectRoot);
+      if (!project.ok) return project;
       const retro = foldRetro(deps.factory.ledger.events).findLast((entry) => entry.day === input.day);
       if (retro === undefined) {
         return failure("unknown-retro", `no retro was written on ${input.day} — nothing to ratify`);

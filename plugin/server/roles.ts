@@ -23,7 +23,16 @@
  */
 import { join } from "node:path";
 import { projectStateDir, resolveProject } from "./core/project.ts";
+import type { ProjectResolution } from "./core/project.ts";
 import { listProjectRegistrations } from "./projects.ts";
+
+/**
+ * The Project identity slice every role renderer carries — ProjectResolution's
+ * ok branch reduced to its two load-bearing fields, so `{root, slug}` never
+ * travels as an anonymous clump (the working agent's synthetic identity —
+ * root unknown from a worktree cwd — is the same shape with `root: ""`).
+ */
+export type ProjectIdentity = Pick<Extract<ProjectResolution, { ok: true }>, "root" | "slug">;
 
 /** The seat titles the surface's ensure mints — how the create hook tells a seat from a stranger. */
 export const SEAT_TITLES = { supervisor: "Supervisor (paseo-factory)", lead: "Lead (paseo-factory)" } as const;
@@ -50,7 +59,7 @@ function skillFooter(role: RoleName): string {
 // ---- the role contracts (the system-prompt channel) ----------------------------------------
 
 /** The role law each seat runs under — appended to `config.systemPrompt`, never written to disk. */
-export function renderSeatContract(seat: SeatName, project: { root: string; slug: string }): string {
+export function renderSeatContract(seat: SeatName, project: ProjectIdentity): string {
   const lines: string[] = [
     `You are the ${seat === "supervisor" ? "Supervisor" : "Lead"} seat of the paseo-factory verification loop for this project (${project.slug}, rooted at ${project.root}).`,
   ];
@@ -98,7 +107,7 @@ export function renderSeatBootstrap(input: {
   nodePath: string;
   path: string;
   lane: string;
-  project: { root: string; slug: string };
+  project: ProjectIdentity;
 }): string {
   const quote = (s: string) => (/\s/.test(s) ? `"${s}"` : s);
   const runner = /Paseo Helper/i.test(input.nodePath) ? `ELECTRON_RUN_AS_NODE=1 ${quote(input.nodePath)}` : quote(input.nodePath);
@@ -134,7 +143,7 @@ export function renderSeatBootstrap(input: {
 // ---- the PASEO_FACTORY_* env channel -------------------------------------------------------
 
 /** The env vars one role's shells carry (the session_open channel — re-applied on every launch). */
-export function factoryEnvFor(role: RoleName, input: { stateDir: string; project: { root: string; slug: string }; task?: string }): Record<string, string> {
+export function factoryEnvFor(role: RoleName, input: { stateDir: string; project: ProjectIdentity; task?: string }): Record<string, string> {
   const env: Record<string, string> = {
     PASEO_FACTORY_SEAT: role,
     PASEO_FACTORY_PROJECT: input.project.slug,
@@ -186,7 +195,7 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(request: R, sta
     if (!project.ok) return undefined; // a seat title on a non-repo cwd is not ours to guess about
     return {
       ...request,
-      config: { ...request.config, systemPrompt: appendContract(request.config.systemPrompt, renderSeatContract(seat, { root: project.root, slug: project.slug })) },
+      config: { ...request.config, systemPrompt: appendContract(request.config.systemPrompt, renderSeatContract(seat, project)) },
       env: { ...(request.env ?? {}), ...factoryEnvFor(seat, { stateDir, project }) },
     };
   }
@@ -220,7 +229,7 @@ export function injectSessionEnv<R extends { agentId: string; cwd: string; env: 
   for (const registration of listProjectRegistrations(stateDir)) {
     const seat = request.agentId === registration.supervisor ? "supervisor" : request.agentId === registration.lead ? "lead" : undefined;
     if (seat === undefined) continue;
-    return { ...request, env: { ...request.env, ...factoryEnvFor(seat, { stateDir, project: { root: registration.root, slug: registration.slug } }) } };
+    return { ...request, env: { ...request.env, ...factoryEnvFor(seat, { stateDir, project: registration }) } };
   }
   return undefined;
 }
