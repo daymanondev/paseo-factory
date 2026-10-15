@@ -47,7 +47,7 @@ The linked `git worktree` automatically allocated for a Task at Spawn under `<pr
 _Avoid_: clone, sandbox, shadow copy
 
 **Workspace conflict**:
-Two live Contracts whose execution Workspaces are the same working tree, or one nested inside the other. Refused at contract and spawn time when two Tasks target the same checkout; eliminated by construction when each Task runs in its own Task worktree (ADR 0010). Added in v0.0.5; updated in ADR 0010.
+Two live Contracts whose execution Workspaces are the same working tree, or one nested inside the other. Refused at contract and spawn time when two Tasks target the same checkout — except same-tree Contracts behind disjoint scope globs, which run concurrently in their own Task worktrees (ADR 0010); overlap, an unscoped sibling, and nesting still refuse. Eliminated by construction when each Task runs in its own Task worktree. Added in v0.0.5; updated in ADR 0010.
 _Avoid_: scope conflict (the charted name — the real key is workspace overlap, not scope intersection), merge conflict
 
 **Gate**:
