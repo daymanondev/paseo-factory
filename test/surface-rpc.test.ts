@@ -2,14 +2,14 @@ import { test } from "node:test";
 import type { TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { createFactory } from "../plugin/server/core/factory.ts";
 import { resolveProject } from "../plugin/server/core/project.ts";
 import { createSurfaceHandlers } from "../plugin/server/surface-rpc.ts";
 import type { SurfaceDaemonApi } from "../plugin/server/surface-rpc.ts";
 import { injectRoleOnCreate, injectSessionEnv, renderAgentContract, renderSeatBootstrap, renderSeatContract } from "../plugin/server/roles.ts";
 import { discoverProjects, readProjectRegistration, writeProjectRegistration } from "../plugin/server/projects.ts";
-import { loadLanes, lanesPath } from "../src/lanes.ts";
+import { lanesPath, loadLanes, saveLanes } from "../src/lanes.ts";
 import { disposeDir, fakeCopilotRunner, gitCommitAll, makeTempDir, writeLanes } from "./helpers.ts";
 
 /**
@@ -32,10 +32,11 @@ interface FakeAgent {
   labels?: Record<string, string>;
   requiresAttention?: boolean;
   seqEnd?: number;
+  cwd?: string;
 }
 
 function fakeDaemon(agents: FakeAgent[]) {
-  const created: { config: { provider: string }; cwd: string; title: string; labels: Record<string, string> }[] = [];
+  const created: { config: { provider: string }; cwd: string; title: string; labels: Record<string, string>; prompt?: string }[] = [];
   const sent: { agentId: string; text: string }[] = [];
   const archived: string[] = [];
   const timelineReads: string[] = [];
@@ -64,14 +65,14 @@ function fakeDaemon(agents: FakeAgent[]) {
               requiresAttention: agent.requiresAttention ?? false,
               attentionReason: null,
               updatedAt: "2026-10-15T00:00:00.000Z",
-              cwd: "/tmp",
+              cwd: agent.cwd ?? "/tmp",
             },
           })),
           pageInfo: {},
         };
       },
       create: async (options) => {
-        created.push({ config: options.config, cwd: options.cwd, title: options.title ?? "", labels: options.labels ?? {} });
+        created.push({ config: options.config, cwd: options.cwd, title: options.title ?? "", labels: options.labels ?? {}, prompt: options.prompt });
         const id = `agent-created-${created.length}`;
         agents.push({ id, title: options.title ?? undefined, provider: options.config.provider, labels: options.labels });
         return { id };
@@ -168,7 +169,7 @@ test("snapshot: versioned view folding ledger + lanes + daemon agents + provider
   const snap = await handlers.snapshot({});
   assert.ok(snap.ok, snap.ok ? "" : snap.error);
   const view = snap.view;
-  assert.equal(view.version, 1);
+  assert.equal(view.version, 2);
   assert.equal(view.lanes.worker, "pi/zai/glm-5.3", "the lanes table rides the snapshot");
   assert.equal(view.kpis.readyToAccept, 1, "one green unaccepted task");
   assert.equal(view.kpis.accepted, 0);
@@ -311,54 +312,227 @@ test("lanes.set: writes lanes.json, syncs a live supervisor's model, refuses inv
   assert.deepEqual(Object.keys(JSON.parse(readFileSync(lanesPath(stateDir), "utf8"))).sort(), ["supervisor", "worker"]);
 });
 
-// ---- the one-click Supervisor bridge -------------------------------------------------------
+// ---- the per-Project seat bridges (v0.0.14, ADR 0010 §1–§2) ---------------------------------
 
-test("supervisor.ensure: creates the seat when absent — AGENTS.md, labels, lane provider — and dispatches the message", async (t) => {
-  const surface = makeSurface(t, []);
-  const { dir, home, handlers, fake, stateDir } = surface;
+test("supervisor.ensure: seats the agent AT the project root — no AGENTS.md write, labels, lane, bootstrap — and dispatches", async (t) => {
+  const { home, handlers, fake, stateDir } = makeSurface(t, []);
+  const project = makeProject(t, "ensure-sup");
   writeLanes(stateDir, { supervisor: "copilot/gpt-5.4" });
-  const supervisorDir = join(dir, "paseo-home-supervisor"); // <home>-supervisor, the ADR's sibling-of-home law
 
-  const reply = await handlers.supervisorEnsure({ message: "Check the T1 verdict." });
+  const reply = await handlers.supervisorEnsure({ projectRoot: project.root, message: "Check the T1 verdict." });
   assert.ok(reply.ok, reply.ok ? "" : reply.error);
   assert.equal(reply.created, true);
   assert.match(reply.agentId, /agent-created-/);
-  assert.equal(reply.supervisorDir, supervisorDir);
-  assert.ok(existsSync(join(supervisorDir, "AGENTS.md")), "the supervisor dir carries its AGENTS.md");
-  const agents = readFileSync(join(supervisorDir, "AGENTS.md"), "utf8");
-  assert.match(agents, /Supervisor/, "the AGENTS.md orients the seat");
-  assert.match(agents, /contract --task/, "the AGENTS.md lists day-one contract power");
-  assert.match(agents, /run <task>/, "the AGENTS.md lists day-one run power");
-  assert.match(agents, new RegExp(home), "the AGENTS.md names the resolved home");
+  assert.equal(reply.projectRoot, project.root);
+  assert.equal(reply.slug, project.slug);
+
+  // The ADR 0010 §1 law: nothing under <project-root> is ever written — the
+  // role rides the create's system prompt + bootstrap, and the repo's own
+  // AGENTS.md / CLAUDE.md load natively.
+  assert.equal(existsSync(join(project.root, "AGENTS.md")), false, "<project-root>/AGENTS.md is never written");
+  assert.equal(existsSync(join(project.root, "CLAUDE.md")), false, "<project-root>/CLAUDE.md is never written");
+  assert.equal(existsSync(join(dirname(home), `${basename(home)}-supervisor`)), false, "the retired <home>-supervisor folder stays retired");
+
   assert.equal(fake.created.length, 1);
   assert.equal(fake.created[0]!.config.provider, "copilot/gpt-5.4", "spawned under the configured supervisor lane");
-  assert.deepEqual(fake.created[0]!.labels, { seat: "supervisor" }, "the seat label is how every later ensure finds it");
+  assert.deepEqual(fake.created[0]!.labels, { seat: "supervisor", project: project.slug }, "the seat + project labels are how every later ensure finds it");
   assert.equal(fake.created[0]!.title, "Supervisor (paseo-factory)");
-  assert.equal(fake.created[0]!.cwd, supervisorDir);
+  assert.equal(fake.created[0]!.cwd, project.root, "the seat stands at cwd = <project-root>");
+  const bootstrap = fake.created[0]!.prompt ?? "";
+  assert.match(bootstrap, /Project root \(your cwd\)/, "the bootstrap prompt carries the orientation");
+  assert.match(bootstrap, /contract --task/, "the bootstrap lists day-one contract power");
+  assert.match(bootstrap, new RegExp(home.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), "the bootstrap names the resolved home");
+  assert.match(bootstrap, /paseo-factory role skills: grilling, domain-modeling/, "the bootstrap carries the skill trigger index footer");
   assert.deepEqual(fake.sent, [{ agentId: reply.agentId, text: "Check the T1 verdict." }], "the quick dispatch rode the create");
+
+  // The durable registration records the slug→root + seat id.
+  const registration = readProjectRegistration(stateDir, project.slug);
+  assert.equal(registration?.root, project.root);
+  assert.equal(registration?.supervisor, reply.agentId);
 });
 
-test("supervisor.ensure: an existing live supervisor is reused, not duplicated", async (t) => {
-  const { handlers, fake } = makeSurface(t, [{ id: "agent-sup-9", labels: { seat: "supervisor" }, title: "Supervisor (paseo-factory)" }]);
-  const reply = await handlers.supervisorEnsure({ message: "Status?" });
+test("supervisor.ensure: an existing live seat for the Project is reused, not duplicated; other Projects' seats are not", async (t) => {
+  const project = makeProject(t, "reuse-sup");
+  const other = makeProject(t, "other-sup");
+  const { handlers, fake } = makeSurface(t, [
+    { id: "agent-sup-9", labels: { seat: "supervisor", project: project.slug }, title: "Supervisor (paseo-factory)" },
+  ]);
+  const reply = await handlers.supervisorEnsure({ projectRoot: project.root, message: "Status?" });
   assert.ok(reply.ok);
   assert.equal(reply.created, false);
   assert.equal(reply.agentId, "agent-sup-9");
   assert.equal(fake.created.length, 0, "no second supervisor while one lives");
   assert.deepEqual(fake.sent, [{ agentId: "agent-sup-9", text: "Status?" }]);
+
+  // A different Project's supervisor is a different seat: ensure creates its own.
+  const otherReply = await handlers.supervisorEnsure({ projectRoot: other.root });
+  assert.ok(otherReply.ok, otherReply.ok ? "" : otherReply.error);
+  assert.equal(otherReply.created, true, "each Project seats its own supervisor");
+  assert.notEqual(otherReply.agentId, "agent-sup-9");
 });
 
-test("supervisor.revoke: stops and archives the live supervisor; none is a named refusal", async (t) => {
-  const { handlers, stopped, fake } = makeSurface(t, [{ id: "agent-sup-9", labels: { seat: "supervisor" } }]);
-  const reply = await handlers.supervisorRevoke({});
+test("supervisor.ensure: a projectRoot git cannot answer for is a named refusal", async (t) => {
+  const { handlers } = makeSurface(t);
+  const outside = makeTempDir();
+  disposeDir(t, outside);
+  const reply = await handlers.supervisorEnsure({ projectRoot: outside });
+  assert.ok(!reply.ok);
+  assert.equal(reply.code, "unknown-project");
+});
+
+test("supervisor.revoke: stops and archives the Project's supervisor; none is a named refusal", async (t) => {
+  const project = makeProject(t, "revoke-sup");
+  const { handlers, stopped, fake } = makeSurface(t, [{ id: "agent-sup-9", labels: { seat: "supervisor", project: project.slug } }]);
+  const reply = await handlers.supervisorRevoke({ projectRoot: project.root });
   assert.ok(reply.ok);
   assert.equal(reply.agentId, "agent-sup-9");
   assert.deepEqual(stopped, ["agent-sup-9"], "cancel first");
   assert.deepEqual(fake.archived, ["agent-sup-9"], "then archive");
 
-  const none = await handlers.supervisorRevoke({});
+  const none = await handlers.supervisorRevoke({ projectRoot: project.root });
   assert.ok(!none.ok);
   assert.equal(none.code, "no-supervisor");
+});
+
+test("lead.ensure: seats the Lead at the project root under lanes.lead with the Lead skill footer", async (t) => {
+  const { stateDir, handlers, fake } = makeSurface(t, []);
+  const project = makeProject(t, "ensure-lead");
+  writeLanes(stateDir, { lead: "claude/opus-4-8" });
+
+  const reply = await handlers.leadEnsure({ projectRoot: project.root, message: "Split the directive." });
+  assert.ok(reply.ok, reply.ok ? "" : reply.error);
+  assert.equal(reply.created, true);
+  assert.equal(reply.slug, project.slug);
+  assert.equal(fake.created.length, 1);
+  assert.equal(fake.created[0]!.config.provider, "claude/opus-4-8", "spawned under the configured lead lane");
+  assert.equal(fake.created[0]!.cwd, project.root);
+  assert.deepEqual(fake.created[0]!.labels, { seat: "lead", project: project.slug });
+  assert.equal(fake.created[0]!.title, "Lead (paseo-factory)");
+  assert.match(fake.created[0]!.prompt ?? "", /paseo-factory role skills: codebase-design, domain-modeling, tdd/, "the Lead footer names its skills");
+  assert.deepEqual(fake.sent, [{ agentId: reply.agentId, text: "Split the directive." }]);
+
+  // An existing Lead is reused (find-or-create).
+  const reuse = await handlers.leadEnsure({ projectRoot: project.root });
+  assert.ok(reuse.ok);
+  assert.equal(reuse.created, false);
+  assert.equal(fake.created.length, 1);
+});
+
+test("lead.rotate: cancels + archives the active Lead and clears its registration; none is a named refusal", async (t) => {
+  const project = makeProject(t, "rotate-lead");
+  const { stateDir, handlers, stopped, fake } = makeSurface(t, [{ id: "agent-lead-4", labels: { seat: "lead", project: project.slug } }]);
+  writeProjectRegistration(stateDir, project.slug, { root: project.root, lead: "agent-lead-4" });
+
+  const reply = await handlers.leadRotate({ projectRoot: project.root });
+  assert.ok(reply.ok, reply.ok ? "" : reply.error);
+  assert.equal(reply.agentId, "agent-lead-4");
+  assert.deepEqual(stopped, ["agent-lead-4"], "cancel first");
+  assert.deepEqual(fake.archived, ["agent-lead-4"], "then archive — the next dispatch starts a fresh Lead");
+  assert.equal(readProjectRegistration(stateDir, project.slug)?.lead, undefined, "the registration forgets the retired Lead");
+
+  const none = await handlers.leadRotate({ projectRoot: project.root });
+  assert.ok(!none.ok);
+  assert.equal(none.code, "no-lead");
+});
+
+test("lanes.set: a lead save live-syncs the Project's Lead agent and writes the Project override file", async (t) => {
+  const project = makeProject(t, "lanes-lead");
+  const { stateDir, handlers, modelSyncs } = makeSurface(t, [
+    { id: "agent-lead-2", labels: { seat: "lead", project: project.slug }, provider: "pi/zai/glm-5.3" },
+  ]);
+  const reply = await handlers.lanesSet({ lane: "lead", value: "claude/opus-4-8", projectRoot: project.root });
+  assert.ok(reply.ok, reply.ok ? "" : reply.error);
+  assert.equal(reply.lanes.lead, "claude/opus-4-8");
+  assert.match(reply.modelSync, /applied — agent agent-le now runs claude\/opus-4-8/);
+  assert.deepEqual(modelSyncs, [{ agentId: "agent-lead-2", model: "opus-4-8" }], "the live Lead's modelId (provider prefix stripped) was synced");
+  // The save landed in the Project's override file alone — the machine table
+  // was never seeded, so a project-scoped save must not materialize it.
+  assert.equal(existsSync(lanesPath(stateDir)), false, "a project-scoped save never materializes machine lanes");
+  const override = JSON.parse(readFileSync(join(stateDir, "projects", project.slug, "lanes.json"), "utf8")) as Record<string, unknown>;
+  assert.deepEqual(override, { lead: "claude/opus-4-8" });
+
+  // No live Lead → skipped, named.
+  const other = makeProject(t, "lanes-lead-other");
+  const skipped = await handlers.lanesSet({ lane: "lead", value: "copilot/gpt-5.4", projectRoot: other.root });
+  assert.ok(skipped.ok);
+  assert.match(skipped.modelSync, /skipped — no live lead agent for project/);
+  assert.equal(modelSyncs.length, 1);
+});
+
+test("snapshot: a projectRoot scopes lanes, seats, and tasks to the Project and lists discovered projects", async (t) => {
+  const project = makeProject(t, "snap-a");
+  const other = makeProject(t, "snap-b");
+  const { stateDir, factory, handlers } = makeSurface(t, [
+    { id: "agent-sup-1", labels: { seat: "supervisor", project: project.slug }, seqEnd: 41, cwd: project.root },
+    { id: "agent-lead-1", labels: { seat: "lead", project: project.slug }, cwd: project.root },
+    { id: "agent-other-sup", labels: { seat: "supervisor", project: other.slug }, cwd: other.root },
+  ]);
+  // A project override lane so the scoped snapshot proves the merge.
+  writeLanes(stateDir, { worker: "copilot/gpt-5.4" });
+  saveLanes(stateDir, { supervisor: "claude/opus-4-8" }, project.slug);
+  // Two tasks: one contracted inside the project, one outside.
+  seedGreenTask(factory, stateDir, "IN1", join(project.root, "pkg"));
+  seedGreenTask(factory, stateDir, "OUT1", join(other.root, "pkg"));
+
+  const snap = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  const view = snap.view;
+  assert.equal(view.version, 2);
+  assert.deepEqual(view.project, { slug: project.slug, root: project.root });
+  assert.ok(view.projects.some((entry) => entry.slug === project.slug && entry.root === project.root), "the registry feeds the Project Selector");
+  assert.equal(view.lanes.supervisor, "claude/opus-4-8", "the Project override lane wins");
+  assert.equal(view.lanes.worker, "copilot/gpt-5.4", "the machine table fills the rest");
+  assert.ok(view.supervisor !== null && view.supervisor.id === "agent-sup-1", "the Project's supervisor is the snapshot's supervisor");
+  assert.ok(view.lead !== null && view.lead.id === "agent-lead-1", "the Project's Lead rides the snapshot");
+  assert.equal(view.agents.some((agent) => agent.id === "agent-other-sup"), false, "other Projects' seats stay out");
+  assert.deepEqual(view.tasks.map((task) => task.task), ["IN1"], "only in-Project tasks show");
+  assert.equal(view.kpis.readyToAccept, 1);
+
+  // Unscoped: the global view, every task and every seat.
+  const global = await handlers.snapshot({});
+  assert.ok(global.ok);
+  assert.equal(global.view.project, null);
+  assert.ok(global.view.supervisor !== null, "the global view still finds a supervisor");
+  assert.deepEqual(global.view.tasks.map((task) => task.task).sort(), ["IN1", "OUT1"]);
+
+  // An unresolvable scope degrades to the global view, never a failure.
+  const outside = makeTempDir();
+  disposeDir(t, outside);
+  const degraded = await handlers.snapshot({ projectRoot: outside });
+  assert.ok(degraded.ok);
+  assert.equal(degraded.view.project, null, "a non-repo scope renders the global view");
+});
+
+// ---- Ratify via Supervisor (v0.0.14, ADR 0010 §6) -------------------------------------------
+
+test("ratify: dispatches the Retro proposal to the Project's Supervisor; unknown day/proposal are named refusals", async (t) => {
+  const project = makeProject(t, "ratify");
+  const { stateDir, factory, handlers, fake } = makeSurface(t, []);
+  mkdirSync(stateDir, { recursive: true });
+  const proposalsPath = join(stateDir, "retro-2026-10-15.md");
+  writeFileSync(
+    proposalsPath,
+    ["# Retro 2026-10-15 — 1 proposal", "", "## R1 — gate-check", "- Evidence (ledger seq): 1", "- Pattern: repeated X", "- Proposal: add a gate check for X.", ""].join("\n"),
+  );
+  factory.ledger.append({ event: "retro_written", model: "pi/zai/glm-5.3", outcome: "written", durationMs: 10, proposalsPath, proposalCount: 1 });
+
+  const reply = await handlers.ratifyProposal({ projectRoot: project.root, day: "2026-10-15", proposalId: 1 });
+  assert.ok(reply.ok, reply.ok ? "" : reply.error);
+  assert.match(reply.summary, /R1 \(gate-check\) dispatched to the Supervisor of/);
+  assert.equal(fake.created.length, 1, "the ratify ensured the Supervisor seat");
+  assert.deepEqual(fake.created[0]!.labels, { seat: "supervisor", project: project.slug });
+  assert.equal(fake.sent.length, 1);
+  const sent = fake.sent[0]!;
+  assert.match(sent.text, /ratified retro proposal R1 \(gate-check\) from 2026-10-15/);
+  assert.match(sent.text, /add a gate check for X\./, "the proposal text rides the dispatch verbatim");
+  assert.match(sent.text, /AGENTS\.md or CONTEXT\.md/, "the dispatch names the two-tier memory targets");
+
+  const noDay = await handlers.ratifyProposal({ projectRoot: project.root, day: "1999-01-01", proposalId: 1 });
+  assert.ok(!noDay.ok);
+  assert.equal(noDay.code, "unknown-retro");
+  const noProposal = await handlers.ratifyProposal({ projectRoot: project.root, day: "2026-10-15", proposalId: 9 });
+  assert.ok(!noProposal.ok);
+  assert.equal(noProposal.code, "unknown-proposal");
 });
 
 // ---- the detail modal -----------------------------------------------------------------------

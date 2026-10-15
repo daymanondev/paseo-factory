@@ -10,7 +10,7 @@
 import { z } from "zod";
 
 /** Bump when the shape changes in a way an older client cannot render. */
-export const FACTORY_VIEW_VERSION = 1;
+export const FACTORY_VIEW_VERSION = 2 as const;
 
 /** The six model-bearing roles — mirrors src/lanes.ts (kept by test/lanes.test.ts). */
 export const LaneNameSchema = z.enum(["supervisor", "lead", "worker", "watch", "retro", "freshEyes"]);
@@ -117,7 +117,7 @@ export const AgentViewSchema = z.object({
   status: z.string(),
   provider: z.string(),
   model: z.string().nullable(),
-  /** The labels.seat the agent carries — "supervisor" for the Supervisor seat. */
+  /** The labels.seat the agent carries — "supervisor" / "lead" for the standing seats. */
   seat: z.string().nullable(),
   /** The factory task this agent is bound to (a ledger claim/spawn/meter named it), when any. */
   task: z.string().nullable(),
@@ -127,6 +127,13 @@ export const AgentViewSchema = z.object({
   cwd: z.string().nullable(),
 });
 export type AgentView = z.infer<typeof AgentViewSchema>;
+
+/** One discovered Project (v0.0.14, ADR 0010 §1) — the canonical slug and its root. */
+export const ProjectViewSchema = z.object({
+  slug: z.string(),
+  root: z.string(),
+});
+export type ProjectView = z.infer<typeof ProjectViewSchema>;
 
 /** One provider family the lane picker lists. `models` stays null in v1 (fetching models spawns provider discovery). */
 export const ProviderViewSchema = z.object({
@@ -169,11 +176,17 @@ export const FactoryViewSchema = z.object({
   agents: z.array(AgentViewSchema),
   providers: z.array(ProviderViewSchema),
   supervisor: AgentViewSchema.nullable(),
+  /** The Project's standing Lead agent (v0.0.14, ADR 0010 §2) — null when the seat is vacant. */
+  lead: AgentViewSchema.nullable(),
   retro: z.array(RetroViewSchema),
   /** The newest lines first, capped — a stream, not a mirror. */
   ledger: z.array(LedgerLineViewSchema),
   /** The daemon half's health: null when every daemon read answered. */
   daemonError: z.string().nullable(),
+  /** The snapshot's active Project scope — null on the unscoped global view (v0.0.14). */
+  project: ProjectViewSchema.nullable(),
+  /** Every discovered Project for the header's Project Selector, slug order. */
+  projects: z.array(ProjectViewSchema),
 });
 export type FactoryView = z.infer<typeof FactoryViewSchema>;
 
