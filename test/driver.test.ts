@@ -54,8 +54,32 @@ test("renderBrief carries the contract's description ahead of the fixed body (th
   );
   assert.ok(withDescription.includes("Do the assigned work on branch `live06-a`."), "the fixed body is intact below the header");
 
-  // No description: byte-identical to v0.0.5's brief.
+  // No description AND no skills: byte-identical to v0.0.5's brief.
   assert.equal(renderBrief("live06-a", "/custom/bin"), renderBrief("live06-a", "/custom/bin", undefined));
+});
+
+test("renderBrief renders Contract.skills at the very top (v0.0.14, ADR 0010 §6)", () => {
+  const brief = renderBrief("live07-a", "/custom/bin", "Tighten the pad helper.", ["tdd", "diagnosing-bugs"]);
+  assert.ok(
+    brief.startsWith("Required skills to open first: tdd, diagnosing-bugs\n\n"),
+    "the mandate rides above the assignment and the fixed body",
+  );
+  assert.ok(brief.includes("Task: Tighten the pad helper.\n\n"), "the assignment follows the mandate");
+  assert.ok(brief.includes("Do the assigned work on branch `live07-a`."), "the fixed body is intact below both headers");
+
+  // Skills with no description: the mandate rides directly over the fixed body.
+  const noDescription = renderBrief("live07-b", "/custom/bin", undefined, ["codebase-design"]);
+  assert.ok(noDescription.startsWith("Required skills to open first: codebase-design\n\n"));
+  assert.ok(!noDescription.includes("Task:"), "no assignment line is invented");
+
+  // An empty mandate renders nothing — same as an omitted one.
+  assert.equal(renderBrief("live07-c", "/custom/bin", undefined, []), renderBrief("live07-c", "/custom/bin"));
+});
+
+test("renderBrief names the worktree branch when the driver passes it (the task-worktree rider)", () => {
+  const brief = renderBrief("live07-d", "/custom/bin", undefined, undefined, "factory/live07-d");
+  assert.ok(brief.includes("Do the assigned work on branch `factory/live07-d`."), "the agent hears the branch it is already on");
+  assert.ok(!brief.includes("`live07-d`."), "the bare task id is not offered as a branch to switch to");
 });
 
 test("splitProvider takes provider[/model] on the first slash", () => {
