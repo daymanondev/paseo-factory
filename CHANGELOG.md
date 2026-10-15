@@ -76,6 +76,13 @@ Supervisor and Lead per Project, both rooted inside the repository:
 
 ### Changed
 
+- Review fixes: a Contract set on a repository **subdirectory** keeps the
+  legacy single-checkout run (`factory run` switches the branch in place,
+  agent cwd = the subdirectory — no Task worktree, no landing on Accept;
+  Implementation Decision 5 conditions the worktree on the workspace being
+  `<project-root>`), and an unscoped `factory.supervisor.revoke` refuses
+  with `ambiguous-supervisor` when more than one Project has a live seat
+  instead of retiring an arbitrary one.
 - `package.json` + `SHELL_VERSION` → `0.0.14`; FactoryView version → 2.
 - Verified live on `~/.paseo-factory` (Project seats at `cwd`, a
   `--skills tdd` Task through worktree, gate, Lead accept, and local landing)
