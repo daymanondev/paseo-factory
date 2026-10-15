@@ -26,16 +26,45 @@ export interface SeatsActions {
 interface LaneCard {
   id: string;
   title: string;
+  tier: string;
   hint: string;
   lanes: LaneName[];
   value: (lanes: Lanes) => string;
 }
 
 const LANE_CARDS: LaneCard[] = [
-  { id: "supervisor", title: "Supervisor", hint: "the delegated Owner seat the bridge spawns", lanes: ["supervisor"], value: (l) => l.supervisor },
-  { id: "worker", title: "Default Worker", hint: "factory run's lane when --provider is omitted", lanes: ["worker"], value: (l) => l.worker },
-  { id: "watch-retro", title: "Watch & Retro", hint: "the record-only passes' shared lane", lanes: ["watch", "retro"], value: (l) => (l.watch === l.retro ? l.watch : `${l.watch} · ${l.retro}`) },
-  { id: "fresh-eyes", title: "Fresh-eyes", hint: "the advisory pass — or \"eye.json\" for the legacy direct API", lanes: ["freshEyes"], value: (l) => l.freshEyes },
+  {
+    id: "supervisor",
+    title: "Supervisor",
+    tier: "Reasoning / Pro",
+    hint: "Strong reasoning model to draft Contracts & relay verdicts (e.g. Opus, GPT-5.4, Pro)",
+    lanes: ["supervisor"],
+    value: (l) => l.supervisor,
+  },
+  {
+    id: "worker",
+    title: "Default Worker",
+    tier: "Coding Workhorse",
+    hint: "Coding model for multi-attempt implementation & Gate runs (e.g. GLM-5.3, Sonnet, Codex)",
+    lanes: ["worker"],
+    value: (l) => l.worker,
+  },
+  {
+    id: "watch-retro",
+    title: "Watch & Retro",
+    tier: "Flash / Fast",
+    hint: "Fast, wide-context model for 5-question risk scoring & ledger retro (e.g. Flash, GLM-5.3)",
+    lanes: ["watch", "retro"],
+    value: (l) => (l.watch === l.retro ? l.watch : `${l.watch} · ${l.retro}`),
+  },
+  {
+    id: "fresh-eyes",
+    title: "Fresh-eyes",
+    tier: "Reviewer · ≠ Worker",
+    hint: "Second-opinion model (Flash-High / Sonnet) from a different family than Worker, or \"eye.json\"",
+    lanes: ["freshEyes"],
+    value: (l) => l.freshEyes,
+  },
 ];
 
 /** The live picker: provider buttons from the daemon, discovered models + editable input, preview before save. */
@@ -50,6 +79,9 @@ function LaneModalBody({ theme, view, card, onSave, onClose, busy }: { theme: Pl
   const value = provider === "eye.json" ? "eye.json" : provider === "" || model.trim() === "" ? "" : `${provider}/${model.trim()}`;
   return (
     <View style={{ gap: SPACING[3] }}>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1.5], flexWrap: "wrap" }}>
+        <Pill theme={theme} label={`Recommended: ${card.tier}`} tone="accent" lit />
+      </View>
       <Text style={text(theme, "meta")}>{card.hint}</Text>
       <Text style={text(theme, "label")}>PROVIDER</Text>
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: SPACING[1.5] }}>
@@ -140,11 +172,14 @@ export function SeatsPane({ theme, view, actions, modelSyncNote }: { theme: Plug
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: SPACING[2], alignItems: "stretch" }}>
           {LANE_CARDS.map((card) => (
             <Card key={card.id} theme={theme} gap={SPACING[1]}>
-              <Text style={text(theme, "rowTitle")}>{card.title}</Text>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1.5], flexWrap: "wrap" }}>
+                <Text style={text(theme, "rowTitle")}>{card.title}</Text>
+                <Pill theme={theme} label={card.tier} tone="accent" lit />
+              </View>
               <Text style={text(theme, "code")} numberOfLines={1}>
                 {card.value(view.lanes)}
               </Text>
-              <Text style={text(theme, "label")} numberOfLines={2}>
+              <Text style={text(theme, "label")} numberOfLines={3}>
                 {card.hint}
               </Text>
               <Btn theme={theme} small label="Change" disabled={actions.busy} onPress={() => setEditing(card)} />
