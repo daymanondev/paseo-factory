@@ -13,23 +13,28 @@ amendment to ADR 0004) made real. Four pieces close the gap between the
 terminal-only verification engine and day-to-day Paseo Desktop use:
 
 1. **Unified `Lane config` (`<stateDir>/lanes.json`, `src/lanes.ts`)** — one
-   plain JSON file (`version: 1`) persists the `<provider>/<model>` string for
-   all five model-backed roles (`supervisor`, `worker`, `watch`, `retro`,
-   `freshEyes`), each defaulting to `"pi/zai/glm-5.3"` when the file is absent
-   (with `freshEyes` also accepting `"eye.json"` for direct HTTP configuration).
-   `Lead` is intentionally absent from `lanes.json` because it is a
-   deterministic rider with zero model calls (ADR 0006 §3). `factory run <task>`
-   falls back to `lanes.worker` when `--provider` is omitted, and `factory lanes
-   get` / `factory lanes set <lane> <value>` exposes the same file on the CLI.
+   plain JSON file persists the `<provider>/<model>` string for all five
+   model-backed roles (`supervisor`, `worker`, `watch`, `retro`, `freshEyes`),
+   each defaulting to `"pi/zai/glm-5.3"` when the file is absent or partial —
+   only explicitly-set lanes persist (`loadLanes` fills defaults at read time,
+   so a single-lane write never materializes the rest and a pre-existing
+   `eye.json` keeps answering until `freshEyes` is named; `freshEyes` also
+   accepts `"eye.json"` for direct HTTP configuration). `Lead` is
+   intentionally absent from `lanes.json` because it is a deterministic rider
+   with zero model calls (ADR 0006 §3). `factory run <task>` falls back to
+   `lanes.worker` when `--provider` is omitted, and `factory lanes get` /
+   `factory lanes set <lane> <value>` exposes the same file on the CLI.
 2. **Tool-less CLI runner (`runLaneCli`) across `Watch`, `Retro`, and
-   `Fresh-eyes`** — replaces the hardcoded `copilot -p --model gpt-5.4` path
-   with a unified headless subprocess runner supporting `pi/<model>`
-   (`pi --provider <p> --model <m> --no-tools --no-session --mode text -p`),
-   `copilot/<model>` (`copilot -p ... --model <m> --available-tools="" -s`),
-   and `claude/<model>` (`claude -p --model <m> --tools "" --output-format
-   text`), piping the prompt/state over `stdin`. `Fresh-eyes` gains a second
-   configured source (`lanes.freshEyes` CLI lane alongside `<stateDir>/eye.json`
-   HTTP, recording `source: "cli" | "http"` on `fresh_eyes_written`).
+   `Fresh-eyes`** — replaces the hardcoded copilot watch lane (`gpt-5.4`
+   pinned in code) with a unified headless subprocess runner supporting
+   `pi/<model>` (`pi --print --no-session --no-tools --no-extensions
+   --no-skills --no-context-files --model <model>`), `copilot/<model>`
+   (`copilot -s --model <model> --reasoning-effort medium`), and
+   `claude/<model>` (`claude -p --model <model> --tools ""`), piping the
+   prompt/state over `stdin`. `Fresh-eyes` gains a second configured source
+   (`lanes.freshEyes` CLI lane alongside `<stateDir>/eye.json` HTTP — the
+   `fresh_eyes_written` `model` field records the lane string verbatim on the
+   CLI path, the eye.json model id on the HTTP path).
 3. **In-process Plugin RPC & `FactoryView` snapshot (`plugin/shared/rpc.ts`,
    `plugin/shared/view.ts`, `plugin/server/surface-rpc.ts`,
    `plugin/server/view.ts`)** — amends ADR 0004 so UI actions invoke the single
@@ -39,22 +44,22 @@ terminal-only verification engine and day-to-day Paseo Desktop use:
    processes continue to submit through the spool. `factory.accept` stamps
    `accepted_by: "owner"` on the ledger line; `factory.lanes.set` updates a
    live Supervisor agent's model immediately over the daemon WebSocket
-   (`set_agent_model_request`, stripping the `<provider>/` prefix) and persists
-   to `lanes.json`.
+   (`set_agent_model_request`, stripping the `<provider>/` prefix, with a
+   paseo-CLI bridge fallback) and persists to `lanes.json`.
 4. **Paseo Client UI (`plugin/index.client.tsx`, `plugin/client/**`)** —
-   upgrades `@getpaseo/plugin` to `^0.11.2`, registering a Global Screen +
+   upgrades `@getpaseo/plugin` to `0.11.2`, registering a Global Screen +
    Sidebar navigation item (`Factory`), Workspace Panel, and Settings Screen.
    Includes the persistent KPI header, the **Open Supervisor** + **Quick
    Dispatch** bridge (finding or creating the `seat=supervisor` agent in
    `<home>-supervisor` with generated `AGENTS.md` and opening Paseo's native
-   `sdk.ui.openAgentDrawer(agentId)`), **Tab 1 (`Tasks`)** (verification cards
+   `navigation.openAgent({ agentId })`), **Tab 1 (`Tasks`)** (verification cards
    with Attempt `1 · 2 · 3` ladder, Gate/Eye/Watch pills, inline `Accept #n`,
    and full Report / Gate Log / Diff / Timeline modal), **Tab 2 (`Seats &
    Models`)** (interactive lane cards, discovered-model selector modal, and
    orthogonal Seat Graph), and **Tab 3 (`Timeline & Retro`)** (multi-lane
    swimlane across Tasks, Agents, Watch, and Retro, one-click `Run Retro`, and
    searchable Ledger stream), enforced by `scripts/check-bundle.mjs`. Suite
-   276 → 306.
+   276 → 307.
 
 ### Added
 
@@ -62,7 +67,7 @@ terminal-only verification engine and day-to-day Paseo Desktop use:
   RPC single-writer amendment); `CONTEXT.md` gains **Lane config** and **Factory
   surface** and updates **Fresh-eyes**, **Watch**, **Retro**, **Supervisor**,
   and **Driver**.
-- `src/lanes.ts` (`readLanes`, `writeLanes`, `setLane`, `parseLaneSpec`,
+- `src/lanes.ts` (`loadLanes`, `saveLanes`, `laneError`, `laneCliInvocation`,
   `runLaneCli`), `factory lanes [get|set]` CLI subcommand, and optional
   `--provider` fallback to `lanes.worker` in `factory run`.
 - `plugin/shared/rpc.ts`, `plugin/shared/view.ts`, `plugin/server/view.ts`,
@@ -71,7 +76,7 @@ terminal-only verification engine and day-to-day Paseo Desktop use:
 
 ### Changed
 
-- `package.json` + `SHELL_VERSION` → `0.0.13`; `@getpaseo/plugin` → `^0.11.2`.
+- `package.json` + `SHELL_VERSION` → `0.0.13`; `@getpaseo/plugin` → `0.11.2`.
 - Verified live on `~/.paseo-factory` and installed onto `~/.paseo` so Paseo
   Desktop renders the `Factory` surface out of the box.
 
