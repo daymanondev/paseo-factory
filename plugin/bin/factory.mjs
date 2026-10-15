@@ -37,6 +37,7 @@ import { join, resolve as resolvePath } from "node:path";
 import { readLedgerEvents } from "./ledger-read.mjs";
 import { awaitReply, randomId, resolveHome, spoolRootFor, stateDirFor, submit } from "./spool-client.mjs";
 import { LANE_NAMES, loadLanes, resolveRunProvider, saveLanes } from "./lanes-config.mjs";
+import { resolveProject } from "./project.mjs";
 
 // The contract stanza's authoring-law block mirrors docs/runbooks/live-run.md
 // step 3 (the ratified R2–R6 batch, ticket 02 / v0.0.8) — help text and
@@ -90,18 +91,24 @@ commands:
              with zero refusals. Each agent's brief carries its contract's
              --description, when one was set.
 
-  lanes      Inspect or set the Lane config (v0.0.13, ADR 0009 §3) — the one
-             place every model-bearing role's provider/model is named:
-             supervisor, worker, watch, retro, freshEyes (all defaulting to
+  lanes      Inspect or set the Lane config (v0.0.13, ADR 0009 §3; the lead
+             lane and --project arrive in v0.0.14, ADR 0010) — the one place
+             every model-bearing role's provider/model is named: supervisor,
+             lead, worker, watch, retro, freshEyes (all defaulting to
              pi/zai/glm-5.3). A lane is provider/model with both halves
              non-empty, or "eye.json" for freshEyes alone (the legacy direct
              HTTP config in <stateDir>/eye.json). A local read/write of
              <stateDir>/lanes.json — the plugin need not be running.
-             lanes                    print all five lanes
-             lanes get [<lane>]       print one lane, or all five when omitted
-             lanes set <lane> <value> validate and write one lane (only the
-                                      lanes ever named persist — a refused
-                                      value writes nothing, exit 2)
+             lanes [get [<lane>]] [--project <dir>]
+                                     print one lane, or all six when omitted;
+                                     --project overlays the Project's
+                                     <stateDir>/projects/<slug>/lanes.json
+             lanes set <lane> <value> [--project <dir>]
+                                      validate and write one lane into the
+                                      machine file, or the Project's override
+                                      file under --project (only the lanes
+                                      ever named persist — a refused value
+                                      writes nothing, exit 2)
 
   retro      Run the Retro over the whole ledger, on demand (v0.0.7): the
              plugin builds the corpus digest, prompts the configured retro
@@ -308,12 +315,25 @@ if (command === "accept") {
 }
 
 if (command === "lanes") {
-  const parsed = parseCommandOptions({});
+  const parsed = parseCommandOptions({ project: { type: "string" } });
   const sub = parsed.positionals[0] ?? "get";
+
+  // v0.0.14 (ADR 0010 §5): --project <dir> resolves the directory's canonical
+  // Project and targets its override file — get merges it over the machine
+  // table, set writes into it alone.
+  let projectSlug;
+  if (typeof parsed.values.project === "string") {
+    const projectDir = resolvePath(parsed.values.project);
+    const project = resolveProject(projectDir);
+    if (!project.ok) {
+      fail(`lanes: --project ${parsed.values.project} does not resolve to a git repository — ${project.reason}`);
+    }
+    projectSlug = project.slug;
+  }
 
   if (sub === "get") {
     if (parsed.positionals.length > 2) fail(`lanes get: unexpected positional "${parsed.positionals[2]}"`);
-    const lanes = loadLanes(stateDir);
+    const lanes = loadLanes(stateDir, projectSlug);
     if (!lanes.ok) fail(`lanes: ${lanes.reason}`);
     const wanted = parsed.positionals[1];
     if (wanted !== undefined && !LANE_NAMES.includes(wanted)) {
@@ -328,15 +348,15 @@ if (command === "lanes") {
   if (sub === "set") {
     const lane = parsed.positionals[1];
     const value = parsed.positionals[2];
-    if (parsed.positionals.length !== 3) fail("lanes set: exactly two arguments — factory lanes set <lane> <value>");
+    if (parsed.positionals.length !== 3) fail("lanes set: exactly two arguments — factory lanes set <lane> <value> [--project <dir>]");
     if (!LANE_NAMES.includes(lane)) fail(`lanes set: unknown lane "${lane}" — the lanes are ${LANE_NAMES.join(", ")}`);
-    const saved = saveLanes(stateDir, { [lane]: value });
+    const saved = saveLanes(stateDir, { [lane]: value }, projectSlug);
     if (!saved.ok) fail(`lanes set: ${saved.reason}`);
     console.log(`factory: ${lane}=${saved.lanes[lane]} (lanes.json updated)`);
     process.exit(0);
   }
 
-  fail(`lanes: unknown subcommand "${sub}" — use "lanes [get [<lane>] | set <lane> <value>]"`);
+  fail(`lanes: unknown subcommand "${sub}" — use "lanes [get [<lane>] | set <lane> <value>] [--project <dir>]"`);
 }
 
 if (command === "run") {

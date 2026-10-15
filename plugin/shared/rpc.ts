@@ -60,6 +60,7 @@ export const lanesSet = defineRpc({
       ok: z.literal(true),
       lanes: z.object({
         supervisor: z.string(),
+        lead: z.string(),
         worker: z.string(),
         watch: z.string(),
         retro: z.string(),

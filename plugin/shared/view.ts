@@ -12,12 +12,13 @@ import { z } from "zod";
 /** Bump when the shape changes in a way an older client cannot render. */
 export const FACTORY_VIEW_VERSION = 1;
 
-/** The five model-bearing roles — mirrors src/lanes.ts (kept by test/lanes.test.ts). */
-export const LaneNameSchema = z.enum(["supervisor", "worker", "watch", "retro", "freshEyes"]);
+/** The six model-bearing roles — mirrors src/lanes.ts (kept by test/lanes.test.ts). */
+export const LaneNameSchema = z.enum(["supervisor", "lead", "worker", "watch", "retro", "freshEyes"]);
 export type LaneName = z.infer<typeof LaneNameSchema>;
 
 export const LanesSchema = z.object({
   supervisor: z.string(),
+  lead: z.string(),
   worker: z.string(),
   watch: z.string(),
   retro: z.string(),

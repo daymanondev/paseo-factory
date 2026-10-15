@@ -1,11 +1,15 @@
 /**
  * The unified Lane config and the headless tool-less runner (v0.0.13, ADR
- * 0009 §3). `<stateDir>/lanes.json` names the provider/model lane every
- * model-bearing role runs under — `supervisor`, `worker`, `watch`, `retro`,
- * `freshEyes` — with safe defaults (`pi/zai/glm-5.3`, $0 marginal) when the
- * file is absent or partial. The file is the one place the Owner configures
- * or switches models; an explicit `--provider` on `factory run` overrides
- * `worker`, and the plugin surface edits the same file in place.
+ * 0009 §3; the `lead` lane and per-Project overrides arrive in v0.0.14, ADR
+ * 0010 §2/§5). `<stateDir>/lanes.json` names the provider/model lane every
+ * model-bearing role runs under — `supervisor`, `lead`, `worker`, `watch`,
+ * `retro`, `freshEyes` — with safe defaults (`pi/zai/glm-5.3`, $0 marginal)
+ * when the file is absent or partial, and an optional per-Project override
+ * file under `<stateDir>/projects/<slug>/lanes.json` layered on top. The
+ * machine file is the one place the Owner configures or switches models; a
+ * Project file tunes one repository without touching the machine table; an
+ * explicit `--provider` on `factory run` overrides `worker`, and the plugin
+ * surface edits the same files in place.
  *
  * Every CLI lane dispatches headless AND tool-less by construction — the
  * flags below are the invariant, not a promise the model is asked to keep:
@@ -21,10 +25,11 @@
 import { spawn, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { projectStateDir } from "./project.ts";
 
-/** The five model-bearing roles — the file's exact key set. */
-export const LANE_NAMES = ["supervisor", "worker", "watch", "retro", "freshEyes"] as const;
+/** The six model-bearing roles — the file's exact key set (5 UI cards; supervisor and lead pair under Seats). */
+export const LANE_NAMES = ["supervisor", "lead", "worker", "watch", "retro", "freshEyes"] as const;
 
 export type LaneName = (typeof LANE_NAMES)[number];
 
@@ -42,9 +47,17 @@ export function lanesPath(stateDir: string): string {
   return join(stateDir, "lanes.json");
 }
 
+/**
+ * Where one Project's lane overrides live (v0.0.14, ADR 0010 §5) —
+ * `<stateDir>/projects/<slug>/lanes.json`, the Project's own state tree.
+ */
+export function projectLanesPath(stateDir: string, projectSlug: string): string {
+  return join(projectStateDir(stateDir, projectSlug), "lanes.json");
+}
+
 /** The fresh defaults — a fresh copy every call, never a shared mutable. */
 export function defaultLanes(): Lanes {
-  return { supervisor: DEFAULT_LANE, worker: DEFAULT_LANE, watch: DEFAULT_LANE, retro: DEFAULT_LANE, freshEyes: DEFAULT_LANE };
+  return { supervisor: DEFAULT_LANE, lead: DEFAULT_LANE, worker: DEFAULT_LANE, watch: DEFAULT_LANE, retro: DEFAULT_LANE, freshEyes: DEFAULT_LANE };
 }
 
 export type LanesResult = { ok: true; lanes: Lanes } | { ok: false; reason: string };
@@ -69,18 +82,17 @@ export function laneError(name: LaneName, value: string): string | undefined {
 }
 
 /**
- * Loads the lane table: absent file → the five defaults; partial file →
- * defaults fill the missing lanes; unknown keys are ignored (forward
- * compatibility). Unparseable JSON or an invalid lane value is a named error
- * — never a guessed default (the eye.json discipline).
+ * One lanes file's validated entries: absent file → no entries (never an
+ * error); unparseable JSON, a non-object, a non-string lane, or an invalid
+ * lane value is a named error — never a guessed default (the eye.json
+ * discipline). Unknown keys are ignored (forward compatibility).
  */
-export function loadLanes(stateDir: string): LanesResult {
-  const path = lanesPath(stateDir);
+function lanesEntries(path: string): { ok: true; entries: Partial<Record<LaneName, string>> } | { ok: false; reason: string } {
   let raw: string;
   try {
     raw = readFileSync(path, "utf8");
   } catch {
-    return { ok: true, lanes: defaultLanes() };
+    return { ok: true, entries: {} };
   }
   let parsed: unknown;
   try {
@@ -89,33 +101,54 @@ export function loadLanes(stateDir: string): LanesResult {
     return { ok: false, reason: `${path} is not valid JSON` };
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    return { ok: false, reason: `${path} must be a JSON object of the five lanes` };
+    return { ok: false, reason: `${path} must be a JSON object of the six lanes` };
   }
-  const lanes = defaultLanes();
   const record = parsed as Partial<Record<LaneName, unknown>>;
+  const entries: Partial<Record<LaneName, string>> = {};
   for (const name of LANE_NAMES) {
     const value = record[name];
-    if (value === undefined) continue; // partial file: the default stands
+    if (value === undefined) continue; // partial file: the layer below stands
     if (typeof value !== "string") {
       return { ok: false, reason: `${path}: lane ${name} must be a string` };
     }
     const error = laneError(name, value.trim());
     if (error !== undefined) return { ok: false, reason: `${path}: ${error}` };
-    lanes[name] = value.trim();
+    entries[name] = value.trim();
   }
+  return { ok: true, entries };
+}
+
+/**
+ * Loads the lane table (v0.0.14, ADR 0010 §5): the machine file
+ * `<stateDir>/lanes.json` over the six defaults, then — when `projectSlug`
+ * names a Project — that Project's override file layered on top. An absent
+ * file at either layer contributes nothing; a broken file at either layer is
+ * a named error naming the file. Without a slug this is exactly the
+ * v0.0.13 machine table.
+ */
+export function loadLanes(stateDir: string, projectSlug?: string): LanesResult {
+  const machine = lanesEntries(lanesPath(stateDir));
+  if (!machine.ok) return machine;
+  let lanes: Lanes = { ...defaultLanes(), ...machine.entries };
+  if (projectSlug === undefined) return { ok: true, lanes };
+  const project = lanesEntries(projectLanesPath(stateDir, projectSlug));
+  if (!project.ok) return project;
+  lanes = { ...lanes, ...project.entries };
   return { ok: true, lanes };
 }
 
 /**
- * The lanes the file itself names — the seed persistence keeps. `loadLanes`
+ * The lanes one file itself names — the seed persistence keeps. `loadLanes`
  * fills defaults; this drops them again, so a save writes only what was ever
- * explicitly set (the eye.json retention invariant: a lane the file never
- * named — `freshEyes` included — must stay unnamed after an unrelated write).
+ * explicitly set in THAT file (the eye.json retention invariant, per layer:
+ * a lane a file never named — `freshEyes` included — must stay unnamed in it
+ * after an unrelated write, and a project save never materializes machine
+ * lanes into the project file).
  */
-function explicitLanes(stateDir: string): Partial<Record<LaneName, string>> {
+function explicitLanes(path: string): Partial<Record<LaneName, string>> {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(readFileSync(lanesPath(stateDir), "utf8"));
+    parsed = JSON.parse(readFileSync(path, "utf8"));
   } catch {
     return {}; // absent or unreadable — loadLanes already named the broken case
   }
@@ -130,28 +163,36 @@ function explicitLanes(stateDir: string): Partial<Record<LaneName, string>> {
 }
 
 /**
- * Merges a partial lane table over the lanes the file itself names and writes
- * only those — a single-lane set never materializes the defaults (the eye.json
- * retention invariant: `loadLanes` fills defaults at read time, so an unnamed
- * lane stays unnamed on disk and a legacy eye.json keeps answering). A refused
- * value writes nothing. Returns the effective (merged over defaults) table on
- * success.
+ * Merges a partial lane table over the effective table and writes only the
+ * lanes the TARGET file itself names plus the update — a single-lane set
+ * never materializes the defaults (the eye.json retention invariant above).
+ * The target is the machine file, or — with `projectSlug` — the Project's
+ * override file (v0.0.14): a project save reads the machine-merged effective
+ * table but persists into the project file alone. A refused value writes
+ * nothing. Returns the effective (merged over defaults) table on success.
  */
-export function saveLanes(stateDir: string, update: Partial<Record<LaneName, string>>): LanesResult {
-  const current = loadLanes(stateDir);
+export function saveLanes(stateDir: string, update: Partial<Record<LaneName, string>>, projectSlug?: string): LanesResult {
+  const current = loadLanes(stateDir, projectSlug);
   if (!current.ok) return current;
   const next = { ...current.lanes };
-  const persisted = explicitLanes(stateDir);
+  const trimmed: Partial<Record<LaneName, string>> = {};
   for (const name of LANE_NAMES) {
     const value = update[name];
     if (value === undefined) continue;
     const error = laneError(name, value.trim());
     if (error !== undefined) return { ok: false, reason: error };
-    next[name] = value.trim();
-    persisted[name] = value.trim();
+    trimmed[name] = value.trim();
   }
-  mkdirSync(stateDir, { recursive: true });
-  writeFileSync(lanesPath(stateDir), `${JSON.stringify(persisted, null, 2)}\n`);
+  const target = projectSlug === undefined ? lanesPath(stateDir) : projectLanesPath(stateDir, projectSlug);
+  const persisted = explicitLanes(target);
+  for (const name of LANE_NAMES) {
+    const value = trimmed[name];
+    if (value === undefined) continue;
+    next[name] = value;
+    persisted[name] = value;
+  }
+  mkdirSync(dirname(target), { recursive: true });
+  writeFileSync(target, `${JSON.stringify(persisted, null, 2)}\n`);
   return { ok: true, lanes: next };
 }
 

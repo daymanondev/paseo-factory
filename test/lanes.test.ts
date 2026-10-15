@@ -22,7 +22,7 @@ import {
   loadLanes as loadLanesMjs,
   resolveRunProvider as resolveRunProviderMjs,
 } from "../plugin/bin/lanes-config.mjs";
-import { disposeDir, makeTempDir, repoRoot } from "./helpers.ts";
+import { disposeDir, gitCommitAll, makeTempDir, repoRoot } from "./helpers.ts";
 
 /**
  * The unified Lane config and the headless tool-less runner (v0.0.13, ADR
@@ -39,7 +39,7 @@ function writeRawLanes(stateDir: string, body: string): void {
   writeFileSync(lanesPath(stateDir), body);
 }
 
-test("absent lanes.json loads the five defaults", (t) => {
+test("absent lanes.json loads the six defaults", (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);
   const stateDir = join(dir, "factory");
@@ -48,6 +48,7 @@ test("absent lanes.json loads the five defaults", (t) => {
   assert.ok(lanes.ok, "an absent file is the safe default, never an error");
   assert.deepEqual(lanes.lanes, {
     supervisor: DEFAULT_LANE,
+    lead: DEFAULT_LANE,
     worker: DEFAULT_LANE,
     watch: DEFAULT_LANE,
     retro: DEFAULT_LANE,
@@ -159,6 +160,90 @@ test("saveLanes refuses an invalid lane and writes nothing", (t) => {
   assert.ok(!saved.ok);
   assert.match(saved.reason, /supervisor/);
   assert.equal(existsSync(lanesPath(stateDir)), false, "a refused save leaves no file behind");
+});
+
+// ---- the per-Project override layer (v0.0.14, ADR 0010 §2/§5) -------------------------------
+
+/** Writes a raw project-level lanes.json override. */
+function writeRawProjectLanes(stateDir: string, projectSlug: string, body: string): void {
+  const dir = join(stateDir, "projects", projectSlug);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "lanes.json"), body);
+}
+
+test("loadLanes(stateDir, slug) overlays the Project's lanes.json on the machine table — absent file keeps the machine lanes", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const stateDir = join(dir, "factory");
+  writeRawLanes(stateDir, `${JSON.stringify({ worker: "claude/opus-4-8", supervisor: "pi/zai/glm-5.3" }, null, 2)}\n`);
+
+  const noFile = loadLanes(stateDir, "acme-api-abc123");
+  assert.ok(noFile.ok, "a project with no override file reads the machine table");
+  const machineOnly = loadLanes(stateDir);
+  assert.ok(machineOnly.ok);
+  assert.deepEqual(noFile.lanes, machineOnly.lanes);
+
+  writeRawProjectLanes(stateDir, "acme-api-abc123", `${JSON.stringify({ lead: "claude/opus-4-8" })}\n`);
+  const merged = loadLanes(stateDir, "acme-api-abc123");
+  assert.ok(merged.ok);
+  assert.equal(merged.lanes.lead, "claude/opus-4-8", "the project override wins");
+  assert.equal(merged.lanes.worker, "claude/opus-4-8", "unnamed lanes fall through to the machine file");
+  assert.equal(merged.lanes.watch, DEFAULT_LANE, "lanes neither file names keep their defaults");
+
+  const machine = loadLanes(stateDir);
+  assert.ok(machine.ok && machine.lanes.lead === DEFAULT_LANE, "the machine table alone never sees the project override");
+});
+
+test("a broken Project lanes.json is a named error naming the project file, never a guessed default", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const stateDir = join(dir, "factory");
+  writeRawProjectLanes(stateDir, "acme-api-abc123", "{ broken");
+
+  const lanes = loadLanes(stateDir, "acme-api-abc123");
+  assert.ok(!lanes.ok);
+  assert.match(lanes.reason, /projects\/acme-api-abc123\/lanes\.json/);
+  assert.match(lanes.reason, /valid JSON/);
+});
+
+test("saveLanes(stateDir, patch, slug) writes only the Project file — machine lanes and defaults never materialize into it", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const stateDir = join(dir, "factory");
+  writeRawLanes(stateDir, `${JSON.stringify({ worker: "claude/opus-4-8" })}\n`);
+
+  const saved = saveLanes(stateDir, { lead: "claude/opus-4-8" }, "acme-api-abc123");
+  assert.ok(saved.ok);
+  assert.equal(saved.lanes.lead, "claude/opus-4-8");
+  assert.equal(saved.lanes.worker, "claude/opus-4-8", "the effective table still merges the machine file");
+  assert.equal(saved.lanes.watch, DEFAULT_LANE);
+  assert.deepEqual(
+    JSON.parse(readFileSync(join(stateDir, "projects", "acme-api-abc123", "lanes.json"), "utf8")),
+    { lead: "claude/opus-4-8" },
+    "the project file persists exactly the lane it names — the eye.json retention invariant, per file",
+  );
+  assert.deepEqual(
+    JSON.parse(readFileSync(lanesPath(stateDir), "utf8")),
+    { worker: "claude/opus-4-8" },
+    "the machine file is untouched by a project save",
+  );
+
+  // A second project save keeps the first named project lane; a refused
+  // value writes nothing anywhere.
+  const second = saveLanes(stateDir, { supervisor: "pi/zai/glm-5.3" }, "acme-api-abc123");
+  assert.ok(second.ok);
+  assert.deepEqual(
+    JSON.parse(readFileSync(join(stateDir, "projects", "acme-api-abc123", "lanes.json"), "utf8")),
+    { lead: "claude/opus-4-8", supervisor: "pi/zai/glm-5.3" },
+  );
+  const refused = saveLanes(stateDir, { lead: "auto" }, "acme-api-abc123");
+  assert.ok(!refused.ok);
+  assert.match(refused.reason, /lead/);
+  assert.deepEqual(
+    JSON.parse(readFileSync(join(stateDir, "projects", "acme-api-abc123", "lanes.json"), "utf8")),
+    { lead: "claude/opus-4-8", supervisor: "pi/zai/glm-5.3" },
+    "a refused project save leaves the project file untouched",
+  );
 });
 
 // ---- the headless tool-less runner ------------------------------------------------------
@@ -285,6 +370,27 @@ test("the plugin/bin mirror matches src/lanes.ts: names, default, validation, lo
     "both savers persist exactly the named lanes",
   );
   assert.deepEqual(JSON.parse(readFileSync(lanesPath(dirMjs), "utf8")), { worker: "claude/opus-4-8", watch: "copilot/gpt-5.4" });
+
+  // The project-override layer mirrors too: same merge over the same two
+  // files, same persistence law, same refused-value behavior.
+  const projSrc = join(dir, "proj-src");
+  const projMjs = join(dir, "proj-mjs");
+  for (const base of [projSrc, projMjs]) {
+    writeRawLanes(base, `${JSON.stringify({ worker: "claude/opus-4-8" })}\n`);
+    writeRawProjectLanes(base, "acme-api-abc123", `${JSON.stringify({ lead: "claude/opus-4-8" })}\n`);
+  }
+  const projFromSrc = loadLanes(projSrc, "acme-api-abc123");
+  const projFromMjs = await loadLanesMjs(projMjs, "acme-api-abc123");
+  assert.ok(projFromSrc.ok && projFromMjs.ok);
+  assert.deepEqual(projFromMjs.lanes, projFromSrc.lanes, "both loaders merge the project file the same way");
+  const projSavedSrc = saveLanes(projSrc, { supervisor: "pi/zai/glm-5.3" }, "acme-api-abc123");
+  const projSavedMjs = await saveLanesMjs(projMjs, { supervisor: "pi/zai/glm-5.3" }, "acme-api-abc123");
+  assert.ok(projSavedSrc.ok && projSavedMjs.ok);
+  assert.deepEqual(
+    JSON.parse(readFileSync(join(projMjs, "projects", "acme-api-abc123", "lanes.json"), "utf8")),
+    JSON.parse(readFileSync(join(projSrc, "projects", "acme-api-abc123", "lanes.json"), "utf8")),
+    "both project savers persist exactly the named lanes",
+  );
 });
 
 // ---- the Owner CLI (factory lanes / run fallback) ----------------------------------------
@@ -317,6 +423,60 @@ test("factory lanes: get prints the defaults, set writes one lane, invalid set e
 
   const unknownLane = await runCli(["lanes", "set", "captain", "pi/zai/glm-5.3"], { PASEO_HOME: home });
   assert.equal(unknownLane.status, 2);
+});
+
+test("factory lanes --project: get reads and set writes the Project's override file; lead is a settable lane everywhere", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const home = join(dir, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const repo = join(dir, "acme-api");
+  mkdirSync(repo, { recursive: true });
+  writeFileSync(join(repo, "a.txt"), "a\n");
+  gitCommitAll(repo);
+  const { resolveProject } = await import("../src/project.ts");
+  const project = resolveProject(repo);
+  assert.ok(project.ok, project.ok ? "" : project.reason);
+  const projectLanes = join(stateDir, "projects", project.slug, "lanes.json");
+
+  // Machine lane first: `lead` is a first-class lane on the machine table too.
+  const setMachineLead = await runCli(["lanes", "set", "lead", "claude/opus-4-8"], { PASEO_HOME: home });
+  assert.equal(setMachineLead.status, 0, setMachineLead.stderr);
+  assert.deepEqual(JSON.parse(readFileSync(lanesPath(stateDir), "utf8")), { lead: "claude/opus-4-8" });
+
+  // A project-scoped set lands in the project's override file only.
+  const setProject = await runCli(["lanes", "set", "lead", "pi/zai/glm-5.3", "--project", repo], { PASEO_HOME: home });
+  assert.equal(setProject.status, 0, setProject.stderr);
+  assert.deepEqual(
+    JSON.parse(readFileSync(projectLanes, "utf8")),
+    { lead: "pi/zai/glm-5.3" },
+    "the project file persists exactly the lane it names",
+  );
+  assert.deepEqual(
+    JSON.parse(readFileSync(lanesPath(stateDir), "utf8")),
+    { lead: "claude/opus-4-8" },
+    "the machine file is untouched by a project save",
+  );
+
+  // get --project shows the merged table (project override wins).
+  const getProject = await runCli(["lanes", "get", "lead", "--project", repo], { PASEO_HOME: home });
+  assert.equal(getProject.status, 0, getProject.stderr);
+  assert.match(getProject.stdout, /lead=pi\/zai\/glm-5\.3/);
+  const getMachine = await runCli(["lanes", "get", "lead"], { PASEO_HOME: home });
+  assert.equal(getMachine.status, 0, getMachine.stderr);
+  assert.match(getMachine.stdout, /lead=claude\/opus-4-8/);
+
+  // --project on a directory git cannot answer for is a usage failure.
+  const plain = join(dir, "plain");
+  mkdirSync(plain, { recursive: true });
+  const noRepo = await runCli(["lanes", "get", "--project", plain], { PASEO_HOME: home });
+  assert.equal(noRepo.status, 2);
+  assert.match(noRepo.stderr, /plain/);
+
+  // An invalid lane value under --project refuses and writes nothing.
+  const bad = await runCli(["lanes", "set", "lead", "auto", "--project", repo], { PASEO_HOME: home });
+  assert.equal(bad.status, 2);
+  assert.deepEqual(JSON.parse(readFileSync(projectLanes, "utf8")), { lead: "pi/zai/glm-5.3" });
 });
 
 test("run's provider precedence: explicit --provider overrides lanes.worker; omitted falls back to it; a broken lanes.json names itself", async (t) => {
