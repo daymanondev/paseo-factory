@@ -13,9 +13,11 @@ import {
   factoryErrorCode,
   gitCommitAll,
   gitCommitChanges,
+  fakeCopilotRunner,
   makeTempDir,
   startFakeEye,
   writeEyeConfig,
+  writeLanes,
 } from "./helpers.ts";
 
 /**
@@ -58,15 +60,17 @@ function promptOf(fake: { requests: { body: unknown }[] }): string {
   return content as string;
 }
 
-test("fail-fast at contract_set: freshEyes without eye.json is refused, loudly, before any work", (t) => {
+test("fail-fast at contract_set: freshEyes whose lane's CLI is unusable is refused, loudly, before any work", (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);
   const { workspace, artifact } = makeWorkspaceAtBase(dir);
-  const factory = createFactory({ stateDir: join(dir, "factory") });
+  // No lanes.json, no eye.json: the default CLI lane (pi/zai/glm-5.3) — its
+  // CLI probe is refused here, the v0.0.2 eye.json law carried to lanes.
+  const factory = createFactory({ stateDir: join(dir, "factory"), eyeCliProbe: () => false });
 
   assert.throws(
     () => factory.setContract({ task: "FE1", workspace, gate: "true", artifact, freshEyes: true }),
-    (err: unknown) => err instanceof Error && /eye\.json/.test(err.message) && factoryErrorCode("eye-unconfigured")(err),
+    (err: unknown) => err instanceof Error && /pi\/zai\/glm-5\.3 CLI is not usable/.test(err.message) && factoryErrorCode("eye-unconfigured")(err),
   );
   assert.deepEqual([...factory.ledger.events], [], "a refused contract writes nothing");
 });
@@ -443,4 +447,100 @@ test("parseEyeAnswer: findings over 120 words are capped with a marker", () => {
   assert.equal(parsed.outcome, "concern");
   assert.ok(parsed.finding.endsWith(" …"), "the cut is marked");
   assert.equal(parsed.finding.split(" ").filter((w) => w !== "…").length, 120);
+});
+
+// ---- the v0.0.13 lane law (ADR 0009 §3) ----------------------------------------------
+
+test("v0.0.13: a CLI lane runs the eye headless and tool-less — no eye.json, no key, the same output contract", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact } = makeWorkspaceAtBase(dir);
+  const stateDir = join(dir, "factory");
+  writeLanes(stateDir, { freshEyes: "claude/opus-4-8" });
+  const fake = fakeCopilotRunner(() => ({ code: 0, stdout: "CLEAR\nNothing to add." }));
+  const factory = createFactory({ stateDir, eyeCliProbe: () => true, eyeCliRunner: fake.runner });
+
+  factory.setContract({ task: "FE13", workspace, gate: "true", artifact, freshEyes: true });
+  const claimed = commitFix(workspace, artifact);
+  const outcome = await factory.claim({ task: "FE13", sha: claimed, agent: "agent-fe13" });
+  assert.equal(outcome.verdict, "green");
+
+  const eye = eyeEvent(factory, "FE13");
+  assert.equal(eye.outcome, "clear");
+  assert.equal(eye.model, "claude/opus-4-8", "the lane string is the ledger's model, verbatim");
+  assert.equal(fake.calls.length, 1);
+  assert.equal(fake.calls[0]!.command, "claude");
+  assert.deepEqual(fake.calls[0]!.args, ["-p", "--model", "opus-4-8", "--tools", ""], "tools off by construction");
+  assert.match(fake.calls[0]!.stdin, /fresh-eyes reviewer/, "the CLI lane reads the same prompt bundle");
+  assert.equal(existsSync(join(stateDir, "eye.json")), false, "no eye.json exists — the lane needs none");
+});
+
+test("v0.0.13: an existing eye.json keeps answering when lanes.json never named a freshEyes lane (the upgrade never retires a configured eye)", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact } = makeWorkspaceAtBase(dir);
+  const stateDir = join(dir, "factory");
+  const fakeEyeServer = await startFakeEye(t, () => ({ status: 200, payload: eyeAnswer("CLEAR") }));
+  writeEyeConfig(stateDir, fakeEyeServer.url, "legacy-eye-1"); // no lanes.json at all
+  const factory = createFactory({ stateDir });
+
+  factory.setContract({ task: "FE14", workspace, gate: "true", artifact, freshEyes: true });
+  const claimed = commitFix(workspace, artifact);
+  await factory.claim({ task: "FE14", sha: claimed, agent: "agent-fe14" });
+
+  assert.equal(fakeEyeServer.requests.length, 1, "the legacy direct-API path ran, untouched");
+  assert.equal(eyeEvent(factory, "FE14").model, "legacy-eye-1");
+});
+
+test("v0.0.13: an explicit lanes.freshEyes overrides an existing eye.json, and 'eye.json' pins the legacy path on purpose", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact } = makeWorkspaceAtBase(dir);
+  const stateDir = join(dir, "factory");
+  const fakeEyeServer = await startFakeEye(t, () => ({ status: 200, payload: eyeAnswer("CLEAR") }));
+  writeEyeConfig(stateDir, fakeEyeServer.url, "legacy-eye-1");
+
+  // Explicit CLI lane wins over the eye.json that exists.
+  writeLanes(stateDir, { freshEyes: "pi/zai/glm-5.3" });
+  const cli = fakeCopilotRunner(() => ({ code: 0, stdout: "CLEAR" }));
+  const factoryCli = createFactory({ stateDir, eyeCliProbe: () => true, eyeCliRunner: cli.runner });
+  factoryCli.setContract({ task: "FE15", workspace, gate: "true", artifact, freshEyes: true });
+  const claimed = commitFix(workspace, artifact);
+  await factoryCli.claim({ task: "FE15", sha: claimed, agent: "agent-fe15" });
+  assert.equal(fakeEyeServer.requests.length, 0, "the explicit lane bypassed the HTTP eye");
+  assert.equal(cli.calls[0]!.command, "pi");
+  assert.equal(eyeEvent(factoryCli, "FE15").model, "pi/zai/glm-5.3");
+
+  // Explicit "eye.json" pins the legacy path — the deliberate opt-in. (A
+  // second factory on its own stateDir: FE15's contract still owns the tree.)
+  const stateDir2 = join(dir, "factory-eye");
+  writeEyeConfig(stateDir2, fakeEyeServer.url, "legacy-eye-1");
+  writeLanes(stateDir2, { freshEyes: "eye.json" });
+  const factoryEye = createFactory({ stateDir: stateDir2 });
+  factoryEye.setContract({ task: "FE16", workspace, gate: "true", artifact, freshEyes: true });
+  writeFileSync(join(workspace, artifact), "export function pad(input: string): string {\n  return input.trim();\n}\n");
+  const claimed2 = gitCommitChanges(workspace, "implement pad differently — a second real change");
+  await factoryEye.claim({ task: "FE16", sha: claimed2, agent: "agent-fe16" });
+  assert.equal(fakeEyeServer.requests.length, 1, "the named eye.json lane ran the direct-API path");
+  assert.equal(eyeEvent(factoryEye, "FE16").model, "legacy-eye-1");
+});
+
+test("v0.0.13: a CLI-lane eye that breaks the output contract is an honest failed line naming the first line", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact } = makeWorkspaceAtBase(dir);
+  const stateDir = join(dir, "factory");
+  writeLanes(stateDir, { freshEyes: "pi/zai/glm-5.3" });
+  const fake = fakeCopilotRunner(() => ({ code: 0, stdout: "Seems fine to me." }));
+  const factory = createFactory({ stateDir, eyeCliProbe: () => true, eyeCliRunner: fake.runner });
+
+  factory.setContract({ task: "FE17", workspace, gate: "true", artifact, freshEyes: true });
+  const claimed = commitFix(workspace, artifact);
+  const outcome = await factory.claim({ task: "FE17", sha: claimed, agent: "agent-fe17" });
+
+  assert.equal(outcome.verdict, "green", "a failed eye never touches the verdict");
+  const eye = eyeEvent(factory, "FE17");
+  assert.equal(eye.outcome, "failed");
+  assert.match(eye.finding, /output contract/);
+  assert.equal(eye.model, "pi/zai/glm-5.3");
 });

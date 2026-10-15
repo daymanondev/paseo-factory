@@ -69,11 +69,11 @@ The state of a Task after the Owner accepts one of its Attempts. Only an Attempt
 _Avoid_: done, finished, complete, passed
 
 **Fresh-eyes review**:
-A second judgment of a green Attempt by a different model that took no part in writing it — one direct-API read of the Contract, the diff and the gate output, appending one advisory ledger line (`fresh_eyes_written`). Evidence for the Owner, never acceptance; off unless the Contract marks it on. Added in v0.0.2.
+A second judgment of a green Attempt by a model that took no part in writing it — one tool-less read of the Contract, the diff and the gate output (via the station's configured lane in the Lane config, or direct-API `eye.json`), appending one advisory ledger line (`fresh_eyes_written`). Evidence for the Owner, never acceptance; off unless the Contract marks it on. Added in v0.0.2; unlocked onto the Lane config in v0.0.13 (ADR 0009).
 _Avoid_: mắt soi (outside research notes), code review, self-review
 
 **Watch**:
-The record-only post-verdict pass that asks the Watch questions about one Attempt — a Copilot chat model (pinned in code, prompted headless through the daemon's `copilot` CLI) reading the run timeline, the Contract, the diff and the gate output in one strict-answer pass — and appends exactly one ledger line (`watch_written`). A passenger, never a judge: no notification, no escalation, and Verdicts and driver exits are unchanged by its answers. Off unless the Contract marks it on. Added in v0.0.6; the question table shrank to four in v0.0.7 and returned to five in v0.0.8.
+The record-only post-verdict pass that asks the Watch questions about one Attempt — a model prompted headless and tool-less on the Watch's configured lane (Lane config, defaulting to `pi/zai/glm-5.3` or `copilot/gpt-5.4`, ADR 0009) reading the run timeline, the Contract, the diff and the gate output in one strict-answer pass — and appends exactly one ledger line (`watch_written`). A passenger, never a judge: no notification, no escalation, and Verdicts and driver exits are unchanged by its answers. Off unless the Contract marks it on. Added in v0.0.6; the question table shrank to four in v0.0.7, returned to five in v0.0.8, and moved from a hardcoded Copilot pin to the Lane config in v0.0.13.
 _Avoid_: watcher, monitor, alarm, "Jev" (historical: the v0.0.6 design first used a decision model, dropped for the Copilot subscription before the first run)
 
 **Watch question**:
@@ -81,7 +81,7 @@ One of the five fixed yes/no questions the Watch asks (destructive-writes, test-
 _Avoid_: check, heuristic, alert rule
 
 **Retro**:
-The on-demand, Owner-invoked fresh-context pass over the whole recorded history — the Ledger rendered as a per-task digest, every Report, and the red Attempts' gate logs — in which a Copilot chat model (pinned in code, prompted headless, the Watch's lane) proposes new Gate checks for repeated-error patterns and draft Contract pieces for knowledge holes, every Proposal carrying its seq-cited evidence. Appends exactly one advisory ledger line (`retro_written`) and writes one proposals file; never applies, judges, or notifies. Nothing becomes law until Ratification. Added in v0.0.7.
+The on-demand, Owner-invoked fresh-context pass over the whole recorded history — the Ledger rendered as a per-task digest, every Report, and the red Attempts' gate logs — in which a model prompted headless and tool-less on the Retro's configured lane (Lane config, ADR 0009) proposes new Gate checks for repeated-error patterns and draft Contract pieces for knowledge holes, every Proposal carrying its seq-cited evidence. Appends exactly one advisory ledger line (`retro_written`) and writes one proposals file; never applies, judges, or notifies. Nothing becomes law until Ratification. Added in v0.0.7; unlocked onto the Lane config in v0.0.13.
 _Avoid_: retrospective (the agile ceremony), postmortem, session debrief, "Retro pass" (the mechanism is the noun, like Watch)
 
 **Proposal**:
@@ -147,7 +147,7 @@ Starting a contracted Task's Agent: a `spawn` request through the spool, validat
 _Avoid_: launch, fork, dispatch (that names the happy ledger line)
 
 **Driver**:
-`factory run <task>… --provider <p[/m]>` — the command that takes explicit task ids, creates each task's branch, spawns each Agent (through the spool) and watches to verdict, printing each task's verdict at its own terminal moment and exiting 0 only when every task ran green with zero refusals. It never sets Contracts and never Accepts; it stops at verdicts. Since v0.0.10 its watch loop carries the Lead's stall predicate as a rider (the announced path to a standing plugin loop); since v0.0.12 (ADR 0008) it stays watching across red Attempts below the Attempt ceiling and executes at most one automatic Respawn on Substrate death. Carrying a seat's act does not make it one. Added in v0.0.5.
+`factory run <task>… [--provider <p[/m]>]` — the command that takes explicit task ids, creates each task's branch, spawns each Agent (through the spool, falling back to the `worker` lane in the Lane config when `--provider` is omitted, ADR 0009) and watches to verdict, printing each task's verdict at its own terminal moment and exiting 0 only when every task ran green with zero refusals. It never sets Contracts and never Accepts; it stops at verdicts. Since v0.0.10 its watch loop carries the Lead's stall predicate as a rider (the announced path to a standing plugin loop); since v0.0.12 (ADR 0008) it stays watching across red Attempts below the Attempt ceiling and executes at most one automatic Respawn on Substrate death. Carrying a seat's act does not make it one. Added in v0.0.5.
 _Avoid_: orchestrator, runner, supervisor, lead (those are seats, ADR 0006 — the Driver is neither)
 
 **Attempt ceiling**:
@@ -185,3 +185,13 @@ _Avoid_: concurrency (too broad), batch, pool
 **Unattended loop**:
 A driver loop that takes approved Contracts, spawns Agents, runs Gates and records Verdicts without the Owner present. It commits to branches only; landing to main is always a human act. The Driver is its first shipped slice (v0.0.5); schedules and no-Owner operation remain later rows.
 _Avoid_: autopilot, background job, cron
+
+### Surface and configuration
+
+**Factory surface**:
+The plugin's client UI inside Paseo (sidebar global screen, workspace-scoped panel, and settings screen, ADR 0009): it renders a versioned view snapshot derived from the Ledger, the Lane config, and live daemon state across three views (`Tasks` verification line, `Seats & Models` topology and lane switcher, `Timeline & Retro`), bridges to the Supervisor seat via one-click ensure-or-open (and optional quick dispatch), and executes direct Owner acts (`Accept`, `Retro`, `Lane config` updates, Supervisor revoke) through the plugin server's single writer. It never replaces the Paseo chat pane and never bypasses the single-writer law. Added in v0.0.13 (ADR 0009).
+_Avoid_: dashboard, portal, control center, room panel
+
+**Lane config**:
+The plugin-owned configuration (`<stateDir>/lanes.json`) mapping each model-bearing seat and station (`supervisor`, `worker`, `watch`, `retro`, `freshEyes`) to its selected `provider/model` string (or `"eye.json"` for direct-API fresh-eyes). Read by the Factory surface, the Supervisor bridge, the Driver (when `--provider` is omitted), and the post-verdict/retro passes. Added in v0.0.13 (ADR 0009).
+_Avoid_: model settings, profile, preset, fleet manifest

@@ -1,11 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createFactory } from "../plugin/server/core/factory.ts";
 import { startSpool } from "../plugin/server/spool.ts";
-import { copyFixture, disposeDir, eyeAnswer, gitCommitAll, gitCommitChanges, makeTempDir, repoRoot, startFakeEye, writeEyeConfig } from "./helpers.ts";
+import { copyFixture, disposeDir, eyeAnswer, gitCommitAll, gitCommitChanges, makeTempDir, repoRoot, startFakeEye, writeEyeConfig, writeLanes } from "./helpers.ts";
 
 /**
  * The mechanical DoD of ticket 08 without a daemon: the real CLIs
@@ -290,15 +290,25 @@ test("factory run refuses bad usage before touching the spool or the daemon", as
   assert.equal(noTasks.status, 2);
   assert.match(noTasks.stderr, /run: at least one task id is required/);
 
-  const noProvider = await run(ownerCli, ["run", "T1"], { PASEO_HOME: home });
-  assert.equal(noProvider.status, 2);
-  assert.match(noProvider.stderr, /--provider <provider\[\/model\]> is required/);
+  // v0.0.13 (ADR 0009 §3): --provider is optional — omitted resolves through
+  // lanes.worker, and this home has no daemon to reach, so the refusal is the
+  // daemon's, after the lane resolved and before any spool request.
+  const noDaemon = await run(ownerCli, ["run", "T1"], { PASEO_HOME: home });
+  assert.equal(noDaemon.status, 2);
+  assert.match(noDaemon.stdout, /cannot reach the daemon/); // the driver's banner path — stdout, not stderr
+
+  // A broken lanes.json is the one remaining usage refusal on the run path.
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(join(stateDir, "lanes.json"), "{ broken");
+  const brokenLanes = await run(ownerCli, ["run", "T1"], { PASEO_HOME: home });
+  assert.equal(brokenLanes.status, 2);
+  assert.match(brokenLanes.stderr, /lanes\.json is not valid JSON/);
 
   const dup = await run(ownerCli, ["run", "T1", "T1", "--provider", "claude"], { PASEO_HOME: home });
   assert.equal(dup.status, 2);
   assert.match(dup.stderr, /task T1 appears twice/);
 
-  const stateDir = join(home, "plugin-state", "paseo-factory");
   assert.ok(!existsSync(join(stateDir, "spool", "requests")), "no request was submitted for refused usage");
 });
 
@@ -335,6 +345,7 @@ test("the v0.0.6 contract flags round-trip: --watch marks the pass, --descriptio
   // --watch without a usable copilot CLI is refused loudly, before any line.
   const home2 = join(dir, "paseo-home2");
   const stateDir2 = join(home2, "plugin-state", "paseo-factory");
+  writeLanes(stateDir2, { watch: "copilot/gpt-5.4" }); // the lane under test — its CLI is what the message names
   const factory2 = createFactory({ stateDir: stateDir2, watchCopilotProbe: () => false });
   const spool2 = startSpool(stateDir2, factory2);
   t.after(() => spool2.stop());

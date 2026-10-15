@@ -10,7 +10,8 @@
  *   factory [--home <paseoHome>] contract --task <id> --workspace <dir> \
  *       --gate <command> --artifact <path> [--scope <p1,p2,...>] [--wait-secs <n>]
  *   factory [--home <paseoHome>] accept <task> --attempt <n> [--wait-secs <n>]
- *   factory [--home <paseoHome>] run <task> [<task>…] --provider <provider[/model>]
+ *   factory [--home <paseoHome>] run <task> [<task>…] [--provider <provider[/model]>]
+ *   factory [--home <paseoHome>] lanes [get [<lane>] | set <lane> <value>]
  *   factory [--home <paseoHome>] status
  *   factory [--home <paseoHome>] cost
  *
@@ -35,6 +36,7 @@ import { parseArgs } from "node:util";
 import { join, resolve as resolvePath } from "node:path";
 import { readLedgerEvents } from "./ledger-read.mjs";
 import { awaitReply, randomId, resolveHome, spoolRootFor, stateDirFor, submit } from "./spool-client.mjs";
+import { LANE_NAMES, loadLanes, resolveRunProvider, saveLanes } from "./lanes-config.mjs";
 
 // The contract stanza's authoring-law block mirrors docs/runbooks/live-run.md
 // step 3 (the ratified R2–R6 batch, ticket 02 / v0.0.8) — help text and
@@ -60,12 +62,13 @@ commands:
              --task <id> --workspace <dir> --gate <command> --artifact <path>
              [--scope <p1,p2,...>]   workspace-relative prefixes the task may touch
              [--fresh-eyes]          mark the fresh-eyes pass ON for this task
-                                     (needs <stateDir>/eye.json; the pass is
-                                     advisory and runs only on green verdicts)
+                                     (dispatches through lanes.freshEyes in
+                                     <stateDir>/lanes.json, default pi/zai/glm-5.3,
+                                     or <stateDir>/eye.json when set to "eye.json";
+                                     advisory, runs only on green verdicts)
              [--watch]               mark the watch pass ON for this task
-                                     (needs the copilot CLI usable on the
-                                     daemon's PATH — the CLI carries the
-                                     watch's auth, there is no key file;
+                                     (dispatches through lanes.watch in
+                                     <stateDir>/lanes.json, default pi/zai/glm-5.3;
                                      record-only, one watch_written line
                                      after EVERY verdict)
              [--description <text>]  the task's assignment in the Owner's words —
@@ -76,7 +79,10 @@ commands:
 
   run        Run contracted tasks' agents to verdict (the driver, v0.0.5):
              one agent per task on the daemon, watched to its verdict.
-             run <task> [<task>…] --provider <provider[/model]>
+             run <task> [<task>…] [--provider <provider[/model]>]
+             --provider is optional since v0.0.13: omitted reads the worker
+             lane from <stateDir>/lanes.json (default pi/zai/glm-5.3); an
+             explicit --provider overrides the lane (ADR 0009 §3).
              The task count is the parallelism ceiling (no --parallel knob);
              arity ≥ 2 requires scoped contracts. The driver creates the
              branch named after the task, submits one spawn request per task
@@ -84,9 +90,23 @@ commands:
              with zero refusals. Each agent's brief carries its contract's
              --description, when one was set.
 
+  lanes      Inspect or set the Lane config (v0.0.13, ADR 0009 §3) — the one
+             place every model-bearing role's provider/model is named:
+             supervisor, worker, watch, retro, freshEyes (all defaulting to
+             pi/zai/glm-5.3). A lane is provider/model with both halves
+             non-empty, or "eye.json" for freshEyes alone (the legacy direct
+             HTTP config in <stateDir>/eye.json). A local read/write of
+             <stateDir>/lanes.json — the plugin need not be running.
+             lanes                    print all five lanes
+             lanes get [<lane>]       print one lane, or all five when omitted
+             lanes set <lane> <value> validate and write one lane (only the
+                                      lanes ever named persist — a refused
+                                      value writes nothing, exit 2)
+
   retro      Run the Retro over the whole ledger, on demand (v0.0.7): the
-             plugin builds the corpus digest, prompts the pinned copilot
-             model, writes retro-<date>.md in the state dir, and appends one
+             plugin builds the corpus digest, prompts the configured retro
+             lane from <stateDir>/lanes.json (default pi/zai/glm-5.3),
+             writes retro-<date>.md in the state dir, and appends one
              retro_written line. Whole-ledger always — no --since, no task
              filter (v1). One successful retro per UTC day; a same-day second
              run is refused (exit 2, no ledger line). Proposals are advice:
@@ -287,15 +307,51 @@ if (command === "accept") {
   process.exit(0);
 }
 
+if (command === "lanes") {
+  const parsed = parseCommandOptions({});
+  const sub = parsed.positionals[0] ?? "get";
+
+  if (sub === "get") {
+    if (parsed.positionals.length > 2) fail(`lanes get: unexpected positional "${parsed.positionals[2]}"`);
+    const lanes = loadLanes(stateDir);
+    if (!lanes.ok) fail(`lanes: ${lanes.reason}`);
+    const wanted = parsed.positionals[1];
+    if (wanted !== undefined && !LANE_NAMES.includes(wanted)) {
+      fail(`lanes: unknown lane "${wanted}" — the lanes are ${LANE_NAMES.join(", ")}`);
+    }
+    for (const name of wanted === undefined ? LANE_NAMES : [wanted]) {
+      console.log(`${name}=${lanes.lanes[name]}`);
+    }
+    process.exit(0);
+  }
+
+  if (sub === "set") {
+    const lane = parsed.positionals[1];
+    const value = parsed.positionals[2];
+    if (parsed.positionals.length !== 3) fail("lanes set: exactly two arguments — factory lanes set <lane> <value>");
+    if (!LANE_NAMES.includes(lane)) fail(`lanes set: unknown lane "${lane}" — the lanes are ${LANE_NAMES.join(", ")}`);
+    const saved = saveLanes(stateDir, { [lane]: value });
+    if (!saved.ok) fail(`lanes set: ${saved.reason}`);
+    console.log(`factory: ${lane}=${saved.lanes[lane]} (lanes.json updated)`);
+    process.exit(0);
+  }
+
+  fail(`lanes: unknown subcommand "${sub}" — use "lanes [get [<lane>] | set <lane> <value>]"`);
+}
+
 if (command === "run") {
   const parsed = parseCommandOptions({
     provider: { type: "string" },
     "wait-secs": { type: "string" },
   });
   const tasks = parsed.positionals;
-  if (tasks.length === 0) fail("run: at least one task id is required (factory run <task> [<task>…] --provider <provider[/model]>)");
-  const provider = parsed.values.provider;
-  if (typeof provider !== "string" || provider.trim() === "") fail("run: --provider <provider[/model]> is required — one provider for every task in the invocation");
+  if (tasks.length === 0) fail("run: at least one task id is required (factory run <task> [<task>…] [--provider <provider[/model]>])");
+  // v0.0.13 precedence (ADR 0009 §3): explicit --provider wins; omitted
+  // resolves through lanes.worker (default pi/zai/glm-5.3) — the resolver's
+  // own refusal names a broken lanes.json, never a silent default.
+  const provider = typeof parsed.values.provider === "string" && parsed.values.provider.trim() !== "" ? parsed.values.provider.trim() : undefined;
+  const resolved = resolveRunProvider(stateDir, provider);
+  if (!resolved.ok) fail(`run: ${resolved.reason}`);
   const seen = new Set();
   for (const task of tasks) {
     if (seen.has(task)) fail(`run: task ${task} appears twice — one spawn per task per invocation`);
@@ -308,7 +364,7 @@ if (command === "run") {
     stateDir,
     spoolRoot,
     tasks,
-    provider: provider.trim(),
+    provider: resolved.provider,
     waitSecs: waitSeconds(parsed),
   });
   process.exit(code);

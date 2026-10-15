@@ -1,6 +1,6 @@
 {
   "name": "paseo-factory",
-  "version": "0.0.12",
+  "version": "0.0.13",
   "description": "Verification core for Paseo agents: done-criteria contracts, an append-only JSONL ledger, a gate runner, and traceable reports. Pure Node — zero Paseo imports. The Paseo plugin shell loads this core as a plain module.",
   "type": "module",
   "private": true,
@@ -12,15 +12,21 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "test": "node --test \"test/*.test.ts\"",
-    "typecheck": "tsc --noEmit",
+    "test": "node scripts/check-bundle.mjs && node --test \"test/*.test.ts\"",
+    "typecheck": "tsc --noEmit && node scripts/check-bundle.mjs",
     "factory": "node plugin/bin/factory.mjs",
     "sync:plugin-core": "node scripts/sync-plugin-core.mjs",
-    "sync:plugin-core:check": "node scripts/sync-plugin-core.mjs --check"
+    "sync:plugin-core:check": "node scripts/sync-plugin-core.mjs --check",
+    "check:bundle": "node scripts/check-bundle.mjs"
   },
   "devDependencies": {
-    "@getpaseo/plugin": "^0.10.3",
+    "@getpaseo/plugin": "0.11.2",
     "@types/node": "^22.10.0",
-    "typescript": "^5.8.0"
+    "@types/react": "19.2.18",
+    "esbuild": "0.25.12",
+    "react": "19.1.0",
+    "react-native": "0.81.5",
+    "typescript": "^5.8.0",
+    "zod": "4.6.5"
   }
 }

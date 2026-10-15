@@ -31,7 +31,13 @@
   spool; the plugin validates (shape, task known) and appends one
   task-scoped `meter_written` line per task per driver run. A refused meter
   errors back with no ledger line. Still unchanged: the driver never writes
-  the ledger.)*
+  the ledger.)* *(Amended 2026-10-15, v0.0.13 / ADR 0009: the Factory surface
+  client UI communicates with `plugin/index.server.ts` over Paseo plugin RPC;
+  because `server.handle(...)` runs inside the plugin process that owns the
+  single `Factory` instance, Owner acts triggered from the surface (`Accept`
+  with `accepted_by: "owner"` and `Retro`) call `factory.accept` and
+  `factory.retro` directly in-process, preserving the single-writer law
+  without round-tripping through the external CLI file spool.)*
 - **The Agent gets the Claim as a CLI on its `PATH`**, put there by the plugin's
   `agent.session_open` before-hook — not as an MCP tool. It accepts only `--task` and
   `--sha`. *(Amended 2026-10-07, ticket 06: the original wording said `agent.create`;

@@ -3,18 +3,20 @@
  * the whole recorded history. The plugin builds the ledger into a per-task
  * digest (contracts whole, attempt lifecycles, every denial/block/refusal,
  * the permit parade rolled to one count-line per task), attaches all reports
- * whole and the red Attempts' gate logs, prompts the pinned Copilot model
- * headless — the watch's lane, its machinery lifted verbatim — and
- * strict-parses one JSON object of proposals out of the response. Every
- * Proposal cites ledger seq evidence; the factory assigns R1…Rn ids; the
- * pass writes `retro-<date>.md` in the stateDir first, then exactly one
- * `retro_written` ledger line (the first factory-level event) lands — file
- * before line, so a death between leaves an orphan file that never happened
- * and a line without a file cannot occur. Nothing downstream branches on the
- * proposals: the factory proposes, only the Owner ratifies.
+ * whole and the red Attempts' gate logs, prompts the `retro` lane headless
+ * and tool-less — since v0.0.13 (ADR 0009 §3) that lane lives in
+ * `<stateDir>/lanes.json` (default `pi/zai/glm-5.3`), any CLI family, the
+ * shared lane runner — and strict-parses one JSON object of proposals out of
+ * the response. Every Proposal cites ledger seq evidence; the factory
+ * assigns R1…Rn ids; the pass writes `retro-<date>.md` in the stateDir
+ * first, then exactly one `retro_written` ledger line (the first
+ * factory-level event) lands — file before line, so a death between leaves
+ * an orphan file that never happened and a line without a file cannot
+ * occur. Nothing downstream branches on the proposals: the factory proposes,
+ * only the Owner ratifies.
  *
  * Refusals write no ledger line (nothing changed, so nothing is recorded —
- * the workspace-conflict precedent): the copilot CLI unusable, or a
+ * the workspace-conflict precedent): the retro lane's CLI unusable, or a
  * same-day successful Retro already on the ledger. Technical failures
  * (CLI error, timeout, parse fail) are the opposite — a `failed` line with
  * the error named, no file written, and a same-day retry stays legal.
@@ -22,21 +24,42 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { RETRO_TOTAL_BUDGET_MS } from "./constants.ts";
-import { runCopilot } from "./watch.ts";
+import { laneCliAvailable, laneCliInvocation, loadLanes, runLaneCli } from "./lanes.ts";
 import type { CopilotRunner } from "./watch.ts";
 import type { LedgerEvent, RetroWritten } from "./events.ts";
 
-/** The pinned Copilot model the Retro asks — never `auto`, never swapped by config. */
-export const RETRO_MODEL = "gpt-5.4";
-
-/** What the ledger's `model` field records: provider seat + pinned model. */
-export const RETRO_MODEL_ID = `copilot/${RETRO_MODEL}`;
-
-/** Judgment dial: pattern-reading across a whole corpus is nuanced work. */
-const RETRO_REASONING_EFFORT = "medium";
-
 /** One transient retry — the watch's discipline; the budget covers both tries. */
 const MAX_ATTEMPTS = 2;
+
+/**
+ * The retro's whole availability surface: the retro lane loads and its CLI
+ * answers `--version` (the watch's amendment-2 precedent, generalized).
+ * `factory.retro()` refuses before any ask on a `ok: false` here; `probe`
+ * overrides the real version probe (tests) and receives the lane.
+ */
+export function retroLaneAvailable(
+  stateDir: string,
+  probe?: (lane: string) => boolean,
+): { ok: true; lane: string } | { ok: false; reason: string } {
+  const lanes = loadLanes(stateDir);
+  if (!lanes.ok) return { ok: false, reason: lanes.reason };
+  const lane = lanes.lanes.retro;
+  const invocation = laneCliInvocation(lane);
+  if (invocation === undefined) {
+    return {
+      ok: false,
+      reason: `lane ${lane} has no headless tool-less CLI form — use pi/<model>, copilot/<model> or claude/<model>`,
+    };
+  }
+  const usable = probe === undefined ? laneCliAvailable(lane) : probe(lane);
+  if (!usable) {
+    return {
+      ok: false,
+      reason: `the ${invocation.command} CLI is not usable on PATH (lane ${lane}) — install and auth it for the daemon user; the CLI carries the pass's auth, there is no key file`,
+    };
+  }
+  return { ok: true, lane };
+}
 
 // ---- the digest -------------------------------------------------------------------
 
@@ -443,47 +466,52 @@ export function renderRetroFile(input: {
 export type RetroOutcome = Omit<RetroWritten, "seq" | "ts" | "event">;
 
 /**
- * What one pass needs: where the proposals file lands (the stateDir), the
- * corpus to prompt with, and the two test seams the watch also carries —
- * the budget override and the fake CLI runner.
+ * What one pass needs: where the proposals file lands (the stateDir — the
+ * retro lane reads from `<stateDir>/lanes.json`), the corpus to prompt with,
+ * and the two test seams the watch also carries — the budget override and
+ * the fake CLI runner.
  */
 export interface RetroPassInput {
   stateDir: string;
   corpus: RetroCorpus;
   /** Total budget override covering both tries (tests); default RETRO_TOTAL_BUDGET_MS. */
   budgetMs?: number;
-  /** Copilot CLI runner override (tests) — the model and flags stay pinned regardless. */
+  /** Lane CLI runner override (tests) — the lane and its tool-less flags stay fixed regardless. */
   copilotRunner?: CopilotRunner;
 }
 
 /**
- * One Retro pass: prompt the pinned Copilot model with the whole corpus,
- * strict-parse the JSON proposals, write the proposals file. Never throws —
- * every death is a returned `failed` outcome so the ledger line stays
- * visible. The watch's machinery runs unchanged (scratch cwd, prompt on
- * stdin, SIGKILL at the deadline, stderr squash) under two deliberate
- * divergences (ticket 03 item 5+7): the budget is 10 minutes, and parse
- * failures retry once too — a multi-minute generation dying on one malformed
- * brace must not cost the Owner a whole re-run.
+ * One Retro pass: prompt the retro lane with the whole corpus, strict-parse
+ * the JSON proposals, write the proposals file. Never throws — every death
+ * is a returned `failed` outcome so the ledger line stays visible. The lane
+ * runner's machinery runs unchanged (scratch cwd, prompt on stdin, SIGKILL
+ * at the deadline, stderr squash) under two deliberate divergences (ticket
+ * 03 item 5+7): the budget is 10 minutes, and parse failures retry once too
+ * — a multi-minute generation dying on one malformed brace must not cost the
+ * Owner a whole re-run.
  */
 export async function runRetroPass(input: RetroPassInput): Promise<RetroOutcome> {
   const started = Date.now();
+  const lanes = loadLanes(input.stateDir);
+  const lane = lanes.ok ? lanes.lanes.retro : undefined;
   const failed = (error: string): RetroOutcome => ({
-    model: RETRO_MODEL_ID,
+    model: lane ?? "unconfigured",
     outcome: "failed",
     durationMs: Date.now() - started,
     error,
   });
 
+  if (!lanes.ok) return failed(`retro lane unusable: ${lanes.reason}`);
+
   const prompt = buildRetroPrompt(input.corpus.digest);
   const budgetMs = input.budgetMs ?? RETRO_TOTAL_BUDGET_MS;
 
-  let lastError = "the copilot CLI never ran";
+  let lastError = "the lane CLI never ran";
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
     const remaining = budgetMs - (Date.now() - started);
     if (remaining <= 0) return failed(`retro budget of ${budgetMs}ms exceeded`);
-    const result = await runCopilot({
-      args: ["-s", "--model", RETRO_MODEL, "--reasoning-effort", RETRO_REASONING_EFFORT],
+    const result = await runLaneCli({
+      lane: lane!,
       stdin: prompt,
       timeoutMs: remaining,
       runner: input.copilotRunner,
@@ -496,9 +524,9 @@ export async function runRetroPass(input: RetroPassInput): Promise<RetroOutcome>
         // happened; a line without a file cannot occur.
         const day = retroDay(new Date());
         const path = retroFilePath(input.stateDir, day);
-        writeFileSync(path, renderRetroFile({ day, model: RETRO_MODEL_ID, durationMs: Date.now() - started, corpus: input.corpus, proposals: parsed.proposals }));
+        writeFileSync(path, renderRetroFile({ day, model: lane!, durationMs: Date.now() - started, corpus: input.corpus, proposals: parsed.proposals }));
         return {
-          model: RETRO_MODEL_ID,
+          model: lane!,
           outcome: "written",
           durationMs: Date.now() - started,
           proposalsPath: path,

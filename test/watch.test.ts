@@ -8,7 +8,7 @@ import { WATCH_TIMELINE_MAX_CHARS } from "../src/constants.ts";
 import type { Factory } from "../src/factory.ts";
 import type { ContractSet, WatchWritten } from "../src/events.ts";
 import type { WatchTimelineEntry } from "../src/watch.ts";
-import { copilotAnswerLines, disposeDir, factoryErrorCode, fakeCopilotRunner, gitCommitAll, gitCommitChanges, makeTempDir } from "./helpers.ts";
+import { copilotAnswerLines, disposeDir, factoryErrorCode, fakeCopilotRunner, gitCommitAll, gitCommitChanges, makeTempDir, writeLanes } from "./helpers.ts";
 
 /**
  * The watch station (v0.0.6, tickets 01–04 + ticket 05 amendment 2) against a
@@ -86,6 +86,7 @@ test("fail-fast at contract_set: watch without a usable copilot CLI is refused, 
   const dir = makeTempDir();
   disposeDir(t, dir);
   const { workspace, artifact } = makeWorkspaceAtBase(dir);
+  writeLanes(join(dir, "factory"), { watch: "copilot/gpt-5.4" }); // the lane under test — the message names its CLI
   const factory = createFactory({ stateDir: join(dir, "factory"), watchCopilotProbe: () => false });
 
   assert.throws(
@@ -112,6 +113,7 @@ test("a green marked claim runs the watch: ledger order, event fields, CLI argv,
   disposeDir(t, dir);
   const { workspace, artifact } = makeWorkspaceAtBase(dir);
   const stateDir = join(dir, "factory");
+  writeLanes(stateDir, { watch: "copilot/gpt-5.4" }); // the lane this suite's argv/model assertions pin
   const fake = happyCopilot();
   const feed = timelineFetcher(TIMELINE);
 
@@ -199,6 +201,7 @@ test("a red verdict runs the watch too — with honest markers where the station
   disposeDir(t, dir);
   const { workspace, artifact } = makeWorkspaceAtBase(dir);
   const stateDir = join(dir, "factory");
+  writeLanes(stateDir, { watch: "copilot/gpt-5.4" });
   const fake = happyCopilot();
   const feed = timelineFetcher(TIMELINE);
 
@@ -216,6 +219,7 @@ test("a red verdict runs the watch too — with honest markers where the station
 
   // A station-1 red (no resolved sha) never resolved a diff — the state says
   // so instead of leaving a silent gap.
+  writeLanes(join(dir, "factory2"), { watch: "copilot/gpt-5.4" });
   const factory2 = createFactory({ stateDir: join(dir, "factory2"), fetchTimeline: feed.fetch, watchCopilotProbe: () => true, watchCopilotRunner: fake.runner });
   factory2.setContract({ task: "W5b", workspace, gate: "true", artifact, watch: true });
   await factory2.claim({ task: "W5b", sha: "deadbeef", agent: "agent-w5b" });
@@ -290,6 +294,7 @@ test("a claim with no agent is an honest failed line — no call, no timeline to
   disposeDir(t, dir);
   const { workspace, artifact } = makeWorkspaceAtBase(dir);
   const stateDir = join(dir, "factory");
+  writeLanes(stateDir, { watch: "copilot/gpt-5.4" });
   const fake = happyCopilot();
   const factory = createFactory({ stateDir, fetchTimeline: timelineFetcher(TIMELINE).fetch, watchCopilotProbe: () => true, watchCopilotRunner: fake.runner });
 
@@ -403,6 +408,7 @@ test("a CLI that keeps failing is a failed line naming the exit and stderr", asy
   disposeDir(t, dir);
   const { workspace, artifact } = makeWorkspaceAtBase(dir);
   const stateDir = join(dir, "factory");
+  writeLanes(stateDir, { watch: "copilot/gpt-5.4" });
   const fake = fakeCopilotRunner(() => ({ code: 2, stdout: "", stderr: "copilot: not authenticated" }));
   const factory = createFactory({ stateDir, fetchTimeline: timelineFetcher(TIMELINE).fetch, watchCopilotProbe: () => true, watchCopilotRunner: fake.runner });
 
@@ -602,6 +608,7 @@ test("runWatchPass direct: pinned argv per invocation, the budget shared across 
   const dir = makeTempDir();
   disposeDir(t, dir);
   const { workspace, artifact, base } = makeWorkspaceAtBase(dir);
+  writeLanes(join(dir, "factory"), { watch: "copilot/gpt-5.4" });
   const fake = fakeCopilotRunner((_call, index) =>
     index === 0 ? { code: 1, stdout: "", stderr: "boom" } : { code: 0, stdout: copilotAnswerLines(ALL_FIVE) },
   );
@@ -639,4 +646,29 @@ test("runWatchPass direct: pinned argv per invocation, the budget shared across 
   assert.equal(fake.calls.length, 2);
   assert.deepEqual(fake.calls[0]!.args, ["-s", "--model", "gpt-5.4", "--reasoning-effort", "medium"]);
   assert.ok(fake.calls[1]!.timeoutMs <= 5_000, "the retry's timeout is the REMAINING budget, not a fresh one");
+});
+
+test("v0.0.13: the watch reads its lane from lanes.json — a pi lane dispatches pi tool-less, model recorded verbatim", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact } = makeWorkspaceAtBase(dir);
+  const stateDir = join(dir, "factory");
+  writeLanes(stateDir, { watch: "pi/zai/glm-5.3" });
+  const fake = happyCopilot();
+  const factory = createFactory({ stateDir, fetchTimeline: timelineFetcher(TIMELINE).fetch, watchCopilotProbe: () => true, watchCopilotRunner: fake.runner });
+
+  factory.setContract({ task: "W24", workspace, gate: "true", artifact, watch: true });
+  const claimed = commitFix(workspace, artifact);
+  const outcome = await factory.claim({ task: "W24", sha: claimed, agent: "agent-w24" });
+  assert.equal(outcome.verdict, "green");
+
+  const watch = watchEvent(factory, "W24");
+  assert.equal(watch.outcome, "written");
+  assert.equal(watch.model, "pi/zai/glm-5.3", "the lane string is the ledger's model, verbatim");
+  assert.equal(fake.calls[0]!.command, "pi");
+  assert.deepEqual(
+    fake.calls[0]!.args,
+    ["--print", "--no-session", "--no-tools", "--no-extensions", "--no-skills", "--no-context-files", "--model", "zai/glm-5.3"],
+    "the tool-less flags are the invariant — the pass cannot act by construction",
+  );
 });
