@@ -537,6 +537,19 @@ export function createFactory(options: FactoryOptions): Factory {
       }
       const attempt = lastAttempt + 1;
 
+      // Everything the Attempt's closing window fixes up front (F10): the
+      // per-call facts — verdict, sha, the watch context — stay arguments;
+      // the rest rides one context object.
+      const finishCtx = {
+        task,
+        ledger,
+        stateDir,
+        dataDir,
+        contract,
+        eyeBudgetMs: options.eyeBudgetMs,
+        eyeRunner: options.eyeCliRunner,
+      };
+
       // The execution tree (v0.0.14, ADR 0010 §4): a task spawned with a
       // managed Task worktree claims, gates, and diffs THERE — the Contract's
       // workspace stays <project-root>, the recorded home of the work and the
@@ -559,19 +572,15 @@ export function createFactory(options: FactoryOptions): Factory {
       // command never runs on an unverified tree.
       const resolved = await resolveClaimedCommit(executionDir, sha);
       if (!resolved.ok) {
-        return finish(task, attempt, ledger, stateDir, dataDir, contract, { exit: null, verdict: "red", note: resolved.reason, timedOut: false }, undefined, undefined, undefined, watchContext());
+        return finish(finishCtx, attempt, { exit: null, verdict: "red", note: resolved.reason, timedOut: false }, undefined, watchContext());
       }
 
       // Station 2 — clean tree, HEAD at the claimed commit, before the gate.
       const before = await checkCleanAt(executionDir, resolved.full);
       if (!before.ok) {
         return finish(
-          task,
+          finishCtx,
           attempt,
-          ledger,
-          stateDir,
-          dataDir,
-          contract,
           {
             exit: null,
             verdict: "red",
@@ -579,8 +588,6 @@ export function createFactory(options: FactoryOptions): Factory {
             timedOut: false,
           },
           resolved.full,
-          undefined,
-          undefined,
           watchContext(),
         );
       }
@@ -609,12 +616,8 @@ export function createFactory(options: FactoryOptions): Factory {
       const after = await checkCleanAt(executionDir, resolved.full);
       if (!after.ok) {
         return finish(
-          task,
+          finishCtx,
           attempt,
-          ledger,
-          stateDir,
-          dataDir,
-          contract,
           {
             exit: result.exit,
             verdict: "red",
@@ -622,8 +625,6 @@ export function createFactory(options: FactoryOptions): Factory {
             timedOut: false,
           },
           resolved.full,
-          undefined,
-          undefined,
           watchContext(),
         );
       }
@@ -643,16 +644,10 @@ export function createFactory(options: FactoryOptions): Factory {
       const scopeDeclared = contract.scope !== undefined && contract.scope.length > 0;
       if (scopeDeclared && contract.base === undefined) {
         return finish(
-          task,
+          finishCtx,
           attempt,
-          ledger,
-          stateDir,
-          dataDir,
-          contract,
           { exit: result.exit, verdict: "red", note: "scoped contract has no recorded base commit", timedOut: false },
           resolved.full,
-          undefined,
-          undefined,
           watchContext(),
         );
       }
@@ -663,12 +658,8 @@ export function createFactory(options: FactoryOptions): Factory {
           // never an empty list posing as "clean".
           scopeViolations = undefined;
           return finish(
-            task,
+            finishCtx,
             attempt,
-            ledger,
-            stateDir,
-            dataDir,
-            contract,
             {
               exit: result.exit,
               verdict: "red",
@@ -676,8 +667,6 @@ export function createFactory(options: FactoryOptions): Factory {
               timedOut: false,
             },
             resolved.full,
-            undefined,
-            undefined,
             watchContext(),
           );
         }
@@ -686,12 +675,8 @@ export function createFactory(options: FactoryOptions): Factory {
           if (outside.length > 0) {
             scopeViolations = outside;
             return finish(
-              task,
+              finishCtx,
               attempt,
-              ledger,
-              stateDir,
-              dataDir,
-              contract,
               {
                 exit: result.exit,
                 verdict: "red",
@@ -699,8 +684,6 @@ export function createFactory(options: FactoryOptions): Factory {
                 timedOut: false,
               },
               resolved.full,
-              undefined,
-              undefined,
               watchContext(),
             );
           }
@@ -710,12 +693,8 @@ export function createFactory(options: FactoryOptions): Factory {
         if (fenced.length > 0) {
           scopeViolations = fenced;
           return finish(
-            task,
+            finishCtx,
             attempt,
-            ledger,
-            stateDir,
-            dataDir,
-            contract,
             {
               exit: result.exit,
               verdict: "red",
@@ -725,14 +704,12 @@ export function createFactory(options: FactoryOptions): Factory {
               timedOut: false,
             },
             resolved.full,
-            undefined,
-            undefined,
             watchContext(),
           );
         }
       }
 
-      return finish(task, attempt, ledger, stateDir, dataDir, contract, result, resolved.full, options.eyeBudgetMs, options.eyeCliRunner, watchContext());
+      return finish(finishCtx, attempt, result, resolved.full, watchContext());
     },
 
     async accept({ task, attempt, accepted_by }) {
@@ -1295,18 +1272,20 @@ function normalized(path: string): string {
  * it, the Verdict and the accept flow are untouched.
  */
 async function finish(
-  task: string,
+  ctx: {
+    task: string;
+    ledger: Ledger;
+    /** The root state dir — the eye's and watch's machine-level config (lanes.json, eye.json). */
+    stateDir: string;
+    /** Where the data files land: the project dir when project-scoped, the root otherwise. */
+    dataDir: string;
+    contract: ContractSet;
+    eyeBudgetMs: number | undefined;
+    eyeRunner: LaneCliRunner | undefined;
+  },
   attempt: number,
-  ledger: Ledger,
-  /** The root state dir — the eye's and watch's machine-level config (lanes.json, eye.json). */
-  stateDir: string,
-  /** Where the data files land: the project dir when project-scoped, the root otherwise. */
-  dataDir: string,
-  contract: ContractSet,
   result: GateResult,
   sha: string | undefined,
-  eyeBudgetMs: number | undefined,
-  eyeRunner: LaneCliRunner | undefined,
   watch: {
     agent: string | undefined;
     scopeViolations: string[] | undefined;
@@ -1315,6 +1294,7 @@ async function finish(
     copilotRunner: CopilotRunner | undefined;
   },
 ): Promise<ClaimOutcome> {
+  const { task, ledger, stateDir, dataDir, contract, eyeBudgetMs, eyeRunner } = ctx;
   let outputPath: string | undefined;
   if (result.output !== undefined) {
     outputPath = join(dataDir, `gate-${task}-${attempt}.log`);
