@@ -16,7 +16,7 @@ import { changedFiles, checkCleanAt, headCommitSync, resolveClaimedCommit, scope
 import { MEMORY_FILES } from "./choke.ts";
 import { projectStateDir } from "./project.ts";
 import { FactoryError } from "./errors.ts";
-import type { AttemptAccepted, ContractSet, GateFinished, GitBlocked, LedgerEvent, MeterWritten, MeterUsage, NeedsHuman, NeedsHumanEvidence, NeedsHumanReason, RepokeDispatched, RepokeRefused, RespawnDispatched, RespawnRefused, SpawnDispatched, SpawnRefused, Verdict } from "./events.ts";
+import type { AttemptAccepted, ContractSet, FreshEyesWritten, GateFinished, GitBlocked, LedgerEvent, MeterWritten, MeterUsage, NeedsHuman, NeedsHumanEvidence, NeedsHumanReason, RepokeDispatched, RepokeRefused, RespawnDispatched, RespawnRefused, SpawnDispatched, SpawnRefused, Verdict } from "./events.ts";
 import type { GateResult } from "./gate.ts";
 
 /** Task ids become report filenames, so they stay flat and filename-safe. */
@@ -136,7 +136,14 @@ export interface AcceptInput {
   attempt: number;
   /**
    * Who accepted (v0.0.9) — the spool's submitting-shell stamp, recorded
-   * verbatim ("the Ledger always records who accepted", ADR 0006).
+   * verbatim ("the Ledger always records who accepted", ADR 0006). The three
+   * seat names carry authority semantics (v0.0.14, ADR 0010 §3): `owner` and
+   * `supervisor` are the unconditional override (the Supervisor acts on the
+   * Owner's word), `lead` is the intermediate acceptance — permitted only on
+   * a green Verdict with no fresh-eyes CONCERN on the attempt and no
+   * undisplaced `needs_human`, else `lead-accept-refused`. Any other string
+   * (a delegated agent's id, the v0.0.9 spelling) records verbatim with no
+   * seat privileges.
    */
   accepted_by?: string;
 }
@@ -746,6 +753,28 @@ export function createFactory(options: FactoryOptions): Factory {
           `attempt ${attempt} of task ${task} has no green verdict — the Owner accepts evidence, and there is none`,
         );
       }
+      // The Lead's intermediate acceptance (v0.0.14, ADR 0010 §3): green is
+      // necessary (checked above) and sufficient for the override seats, but
+      // the Lead additionally needs a CONCERN-free attempt and a task that is
+      // not escalated — flagged or exhausted work is the Owner's to answer,
+      // never the Lead's self-acceptance.
+      if (accepted_by === "lead") {
+        const concern = events.findLast(
+          (e): e is FreshEyesWritten => e.event === "fresh_eyes_written" && e.attempt === attempt && e.outcome === "concern",
+        );
+        if (concern !== undefined) {
+          throw new FactoryError(
+            "lead-accept-refused",
+            `attempt ${attempt} of task ${task} carries a fresh-eyes CONCERN — a flagged attempt needs the Owner's or Supervisor's override, never the Lead's acceptance`,
+          );
+        }
+        if (taskInNeedsHuman(history)) {
+          throw new FactoryError(
+            "lead-accept-refused",
+            `task ${task} is in needs_human — an escalated task is the Owner's to answer; the Lead may spawn a corrective attempt or escalate, never self-accept`,
+          );
+        }
+      }
       return ledger.append({ event: "attempt_accepted", task, attempt, ...(accepted_by === undefined ? {} : { accepted_by }) });
     },
 
@@ -1119,6 +1148,23 @@ function covers(contract: ContractSet, cwd: string): boolean {
 /** The task's acceptance, when the Owner has accepted — the closed-marker every closer reads. */
 function acceptedAttempt(history: readonly LedgerEvent[]): AttemptAccepted | undefined {
   return history.findLast((e): e is AttemptAccepted => e.event === "attempt_accepted");
+}
+
+/**
+ * Whether the task currently stands in `needs_human` (the lead-acceptance
+ * rule's escalation check, v0.0.14): the latest `needs_human` line wins while
+ * no later `gate_finished` displaces it — the view's own status fold rule. An
+ * Owner answer that wakes the task (a new spawn and a fresh Attempt's green
+ * gate) displaces the marker, and the Lead may accept THAT attempt.
+ */
+function taskInNeedsHuman(history: readonly LedgerEvent[]): boolean {
+  let needs: NeedsHuman | undefined;
+  let lastGateSeq = -1;
+  for (const evt of history) {
+    if (evt.event === "needs_human") needs = evt;
+    else if (evt.event === "gate_finished" && evt.seq > lastGateSeq) lastGateSeq = evt.seq;
+  }
+  return needs !== undefined && needs.seq > lastGateSeq;
 }
 
 /** Every task with an accepted Attempt — acceptance retires a Contract (live = set and unaccepted). */

@@ -1291,3 +1291,103 @@ test("the exemption is the declared boundary: overlapping scopes, an unscoped si
   assert.equal(factory3.requestSpawn({ task: "PO7", provider: "claude", arity: 1 }).outcome, "dispatched");
   assert.equal(factory3.requestSpawn({ task: "PO8", provider: "claude", arity: 1 }).outcome, "dispatched");
 });
+
+// ---- accept authority (v0.0.14, ADR 0010 §3): the Lead accepts green + CLEAR, never CONCERN or Needs-human ----
+
+/** A green attempt on a fresh contract, the lead-rule tests' shared setup. */
+async function greenAttempt(dir: string, task: string): Promise<{ factory: ReturnType<typeof createFactory>; workspace: string; artifact: string }> {
+  const { workspace, artifact } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  factory.setContract({ task, workspace, gate: "true", artifact });
+  writeFileSync(join(workspace, artifact), "export function pad(input: string, width: number): string {\n  return input.padEnd(width).slice(0, width);\n}\n");
+  const sha = gitCommitChanges(workspace, `green ${task}`);
+  const outcome = await factory.claim({ task, sha });
+  assert.equal(outcome.verdict, "green");
+  return { factory, workspace, artifact };
+}
+
+test("accept authority: the Lead accepts a green attempt with no fresh-eyes CONCERN", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { factory } = await greenAttempt(dir, "LA1");
+
+  const accepted = factory.accept({ task: "LA1", attempt: 1, accepted_by: "lead" });
+  assert.equal(accepted.event, "attempt_accepted");
+  assert.equal(accepted.accepted_by, "lead");
+});
+
+test("a fresh-eyes CONCERN on the attempt refuses the Lead — the Owner's and Supervisor's word still land", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { factory } = await greenAttempt(dir, "LA2");
+  factory.ledger.append({ event: "fresh_eyes_written", task: "LA2", attempt: 1, model: "fake-eye", outcome: "concern", finding: "the fix does not match the contract", durationMs: 5 });
+
+  assert.throws(
+    () => factory.accept({ task: "LA2", attempt: 1, accepted_by: "lead" }),
+    (err: unknown) => err instanceof FactoryError && err.code === "lead-accept-refused" && /CONCERN/.test(err.message),
+    "the eye's concern is the Lead's hard stop",
+  );
+  // Nothing landed for the refused act.
+  assert.equal(factory.ledger.eventsFor("LA2").some((e) => e.event === "attempt_accepted"), false);
+  // The override seats are unconditional on the same evidence.
+  const bySupervisor = factory.accept({ task: "LA2", attempt: 1, accepted_by: "supervisor" });
+  assert.equal(bySupervisor.accepted_by, "supervisor");
+
+  // A CLEAR eye on the attempt does NOT refuse the Lead — and a CONCERN on a
+  // DIFFERENT attempt is not this attempt's business.
+  const dir2 = makeTempDir();
+  disposeDir(t, dir2);
+  const { factory: f2 } = await greenAttempt(dir2, "LA3");
+  f2.ledger.append({ event: "fresh_eyes_written", task: "LA3", attempt: 1, model: "fake-eye", outcome: "clear", finding: "nothing to add", durationMs: 5 });
+  assert.equal(f2.accept({ task: "LA3", attempt: 1, accepted_by: "lead" }).accepted_by, "lead");
+});
+
+test("a task in needs_human refuses the Lead until activity displaces the marker", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { factory } = await greenAttempt(dir, "LA4");
+
+  // The stall's named end after the green verdict: a denial that survived its poke.
+  factory.repoke("LA4", "ag-1");
+  const repoke = factory.ledger.eventsFor("LA4").findLast((e) => e.event === "repoke_dispatched");
+  const denial = factory.ledger.append({ event: "permit_denied", task: "LA4", agent: "ag-1", name: "Bash", kind: "tool", command: "rm -rf /", rule: "policy:S2-outside-writable", reason: "r" });
+  factory.needsHuman({ task: "LA4", reason: "denied-again", evidence: { denial: denial.seq, repoke: repoke?.seq ?? 0 } });
+
+  assert.throws(
+    () => factory.accept({ task: "LA4", attempt: 1, accepted_by: "lead" }),
+    (err: unknown) => err instanceof FactoryError && err.code === "lead-accept-refused" && /needs_human/.test(err.message),
+  );
+  assert.equal(factory.ledger.eventsFor("LA4").some((e) => e.event === "attempt_accepted"), false);
+  // The Owner's override stands over the escalation too.
+  assert.equal(factory.accept({ task: "LA4", attempt: 1, accepted_by: "owner" }).accepted_by, "owner");
+
+  // Displacement: an Owner answer wakes the task, a new green attempt lands,
+  // and the Lead may accept THAT attempt (ADR 0010 §3 — corrective work within the ceiling).
+  const dir2 = makeTempDir();
+  disposeDir(t, dir2);
+  const { factory: f2, workspace } = await greenAttempt(dir2, "LA5");
+  const denial2 = f2.ledger.append({ event: "permit_denied", task: "LA5", agent: "ag-1", name: "Bash", kind: "tool", command: "x", rule: "policy:S2-outside-writable", reason: "r" });
+  const poke2 = f2.repoke("LA5", "ag-1");
+  assert.equal(poke2.outcome, "dispatched");
+  const repoke2 = f2.ledger.eventsFor("LA5").findLast((e) => e.event === "repoke_dispatched");
+  f2.needsHuman({ task: "LA5", reason: "denied-again", evidence: { denial: denial2.seq, repoke: repoke2?.seq ?? 0 } });
+  assert.throws(() => f2.accept({ task: "LA5", attempt: 1, accepted_by: "lead" }), factoryErrorCode("lead-accept-refused"));
+  // Wake-up: new spawn, new attempt, green again — the marker is displaced.
+  f2.requestSpawn({ task: "LA5", provider: "claude", arity: 1 });
+  writeFileSync(join(workspace, "src", "format.ts"), "export function pad(input: string, width: number): string {\n  return input.padEnd(width, \"0\").slice(0, width);\n}\n");
+  const sha2 = gitCommitChanges(workspace, "corrective work");
+  const second = await f2.claim({ task: "LA5", sha: sha2 });
+  assert.equal(second.verdict, "green");
+  assert.equal(f2.accept({ task: "LA5", attempt: second.attempt, accepted_by: "lead" }).accepted_by, "lead");
+});
+
+test("accepted_by stays the submitting shell's verbatim stamp outside the seat names (the v0.0.9 law)", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { factory } = await greenAttempt(dir, "LA6");
+
+  // A delegated agent's id is not one of the three seats — it records
+  // verbatim, with no Lead privileges attached to an unnamed seat.
+  const stamped = factory.accept({ task: "LA6", attempt: 1, accepted_by: "agent-supervisor-1" });
+  assert.equal(stamped.accepted_by, "agent-supervisor-1");
+});
