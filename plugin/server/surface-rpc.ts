@@ -542,6 +542,25 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
 
     async supervisorRevoke(input: { projectRoot?: string }, context?: SurfaceCallContext) {
       if (input.projectRoot === undefined) {
+        // The legacy global act (pre-0.0.14): with per-Project seats it must
+        // not retire an arbitrary Project's supervisor — the first live seat
+        // the daemon returns is a choice the caller never made. One live
+        // supervisor stays the legacy act; two or more refuse by name.
+        const daemon = resolveDaemon(context);
+        let live: SurfaceAgentSnapshot[] = [];
+        try {
+          const page = await daemon.agents.list({ filter: { labels: { seat: "supervisor" }, includeArchived: false } });
+          live = page.entries.map((entry) => entry.agent).filter((agent) => agent.archivedAt === null);
+        } catch (err) {
+          return failure("daemon-unavailable", `cannot read the daemon's agents: ${messageOf(err)}`);
+        }
+        if (live.length > 1) {
+          const projects = [...new Set(live.map((agent) => agent.labels.project ?? "(unlabeled)"))].join(", ");
+          return failure(
+            "ambiguous-supervisor",
+            `more than one live supervisor exists (${projects}) — an unscoped revoke must not pick between Projects' seats; pass projectRoot to name the one to retire`,
+          );
+        }
         return retireSeat("supervisor", undefined, undefined, context);
       }
       const project = projectOf(input.projectRoot);

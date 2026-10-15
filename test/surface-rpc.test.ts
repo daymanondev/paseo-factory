@@ -395,6 +395,32 @@ test("supervisor.revoke: stops and archives the Project's supervisor; none is a 
   assert.equal(none.code, "no-supervisor");
 });
 
+test("supervisor.revoke without a projectRoot: one live supervisor is the legacy global act; two or more is a named refusal", async (t) => {
+  const project = makeProject(t, "global-sup-a");
+  const other = makeProject(t, "global-sup-b");
+  const { handlers, stopped, fake } = makeSurface(t, [
+    { id: "agent-sup-a", labels: { seat: "supervisor", project: project.slug } },
+    { id: "agent-sup-b", labels: { seat: "supervisor", project: other.slug } },
+  ]);
+
+  const ambiguous = await handlers.supervisorRevoke({});
+  assert.ok(!ambiguous.ok);
+  assert.equal(ambiguous.code, "ambiguous-supervisor", "the global act refuses to pick between Projects' seats");
+  assert.match(ambiguous.error, /pass projectRoot/);
+  assert.match(ambiguous.error, new RegExp(project.slug));
+  assert.match(ambiguous.error, new RegExp(other.slug));
+  assert.deepEqual(stopped, [], "neither seat was touched");
+  assert.deepEqual(fake.archived, [], "nothing was archived");
+
+  // The single-supervisor case keeps the legacy global act working.
+  const single = makeSurface(t, [{ id: "agent-sup-solo", labels: { seat: "supervisor", project: project.slug } }]);
+  const legacy = await single.handlers.supervisorRevoke({});
+  assert.ok(legacy.ok, legacy.ok ? "" : legacy.error);
+  assert.equal(legacy.agentId, "agent-sup-solo");
+  assert.deepEqual(single.stopped, ["agent-sup-solo"]);
+  assert.deepEqual(single.fake.archived, ["agent-sup-solo"]);
+});
+
 test("lead.ensure: seats the Lead at the project root under lanes.lead with the Lead skill footer", async (t) => {
   const { stateDir, handlers, fake } = makeSurface(t, []);
   const project = makeProject(t, "ensure-lead");
