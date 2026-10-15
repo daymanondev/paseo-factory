@@ -62,12 +62,13 @@ commands:
              --task <id> --workspace <dir> --gate <command> --artifact <path>
              [--scope <p1,p2,...>]   workspace-relative prefixes the task may touch
              [--fresh-eyes]          mark the fresh-eyes pass ON for this task
-                                     (needs <stateDir>/eye.json; the pass is
-                                     advisory and runs only on green verdicts)
+                                     (dispatches through lanes.freshEyes in
+                                     <stateDir>/lanes.json, default pi/zai/glm-5.3,
+                                     or <stateDir>/eye.json when set to "eye.json";
+                                     advisory, runs only on green verdicts)
              [--watch]               mark the watch pass ON for this task
-                                     (needs the copilot CLI usable on the
-                                     daemon's PATH — the CLI carries the
-                                     watch's auth, there is no key file;
+                                     (dispatches through lanes.watch in
+                                     <stateDir>/lanes.json, default pi/zai/glm-5.3;
                                      record-only, one watch_written line
                                      after EVERY verdict)
              [--description <text>]  the task's assignment in the Owner's words —
@@ -103,8 +104,9 @@ commands:
                                       nothing, exit 2)
 
   retro      Run the Retro over the whole ledger, on demand (v0.0.7): the
-             plugin builds the corpus digest, prompts the pinned copilot
-             model, writes retro-<date>.md in the state dir, and appends one
+             plugin builds the corpus digest, prompts the configured retro
+             lane from <stateDir>/lanes.json (default pi/zai/glm-5.3),
+             writes retro-<date>.md in the state dir, and appends one
              retro_written line. Whole-ledger always — no --since, no task
              filter (v1). One successful retro per UTC day; a same-day second
              run is refused (exit 2, no ledger line). Proposals are advice:

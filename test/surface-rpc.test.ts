@@ -225,17 +225,24 @@ test("snapshot: the status fold — running, needs-human, accepted, red", async 
   factory.ledger.append({ event: "claim_reported", task: "T-RED", attempt: 1, sha: "s" });
   factory.ledger.append({ event: "gate_finished", task: "T-RED", attempt: 1, exit: 1, verdict: "red", note: "fail" });
   factory.ledger.append({ event: "report_written", task: "T-RED", attempt: 1, path: "/r" });
+  // T-respawn: attempt 1 red, then respawn_dispatched landed with no verdict since → running.
+  factory.ledger.append({ event: "contract_set", task: "T-RESPAWN", workspace: "/w5", gate: "true", artifact: "a" });
+  factory.ledger.append({ event: "claim_reported", task: "T-RESPAWN", attempt: 1, sha: "s" });
+  factory.ledger.append({ event: "gate_finished", task: "T-RESPAWN", attempt: 1, exit: 1, verdict: "red", note: "fail" });
+  factory.ledger.append({ event: "report_written", task: "T-RESPAWN", attempt: 1, path: "/r" });
+  factory.ledger.append({ event: "respawn_dispatched", task: "T-RESPAWN", provider: "pi/zai/glm-5.3", died_agent: "ag1" });
 
   const snap = await handlers.snapshot({});
   assert.ok(snap.ok);
   const statusOf = (task: string) => snap.view.tasks.find((entry) => entry.task === task)!.status;
   assert.equal(statusOf("T-RUN"), "running");
+  assert.equal(statusOf("T-RESPAWN"), "running");
   assert.equal(statusOf("T-STUCK"), "needs-human");
   assert.equal(statusOf("T-DONE"), "accepted");
   assert.equal(statusOf("T-RED"), "red");
   assert.deepEqual(
     { needsHuman: snap.view.kpis.needsHuman, running: snap.view.kpis.running, accepted: snap.view.kpis.accepted, readyToAccept: snap.view.kpis.readyToAccept },
-    { needsHuman: 1, running: 1, accepted: 1, readyToAccept: 0 },
+    { needsHuman: 1, running: 2, accepted: 1, readyToAccept: 0 },
   );
   const stuck = snap.view.tasks.find((entry) => entry.task === "T-STUCK")!;
   assert.equal(stuck.needsHumanReason, "silent-after-repoke");
@@ -279,7 +286,7 @@ test("lanes.set: writes lanes.json, syncs a live supervisor's model, refuses inv
   assert.equal(reply.lanes.supervisor, "claude/opus-4-8");
   const reread = loadLanes(stateDir);
   assert.ok(reread.ok && reread.lanes.supervisor === "claude/opus-4-8", "lanes.json is the config of record");
-  assert.deepEqual(modelSyncs, [{ agentId: "agent-sup-1", model: "claude/opus-4-8" }], "the live supervisor's model was synced");
+  assert.deepEqual(modelSyncs, [{ agentId: "agent-sup-1", model: "opus-4-8" }], "the live supervisor's modelId (stripped of provider prefix) was synced");
 
   // No live supervisor → the sync is skipped, named, never a failure.
   const skipped = await handlers.lanesSet({ lane: "worker", value: "copilot/gpt-5.4" });
@@ -310,6 +317,8 @@ test("supervisor.ensure: creates the seat when absent — AGENTS.md, labels, lan
   assert.ok(existsSync(join(supervisorDir, "AGENTS.md")), "the supervisor dir carries its AGENTS.md");
   const agents = readFileSync(join(supervisorDir, "AGENTS.md"), "utf8");
   assert.match(agents, /Supervisor/, "the AGENTS.md orients the seat");
+  assert.match(agents, /contract --task/, "the AGENTS.md lists day-one contract power");
+  assert.match(agents, /run <task>/, "the AGENTS.md lists day-one run power");
   assert.match(agents, new RegExp(home), "the AGENTS.md names the resolved home");
   assert.equal(fake.created.length, 1);
   assert.equal(fake.created[0]!.config.provider, "copilot/gpt-5.4", "spawned under the configured supervisor lane");

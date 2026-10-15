@@ -16,9 +16,9 @@ export function FactoryScreen({ theme, layout, navigation, host }: PluginSurface
   return <FactoryShell theme={theme} navigation={navigation} serverId={host.id} />;
 }
 
-/** The settings screen: lane config, supervisor controls, diagnostics — the same shell. */
+/** The settings screen: lane config, supervisor controls, diagnostics — opens on Seats & Models. */
 export function FactorySettings({ theme, layout, navigation, host }: PluginSurfaceProps) {
-  return <FactoryShell theme={theme} navigation={navigation} serverId={host.id} />;
+  return <FactoryShell theme={theme} navigation={navigation} serverId={host.id} initialTab="seats" showDiagnostics />;
 }
 
 /** The workspace panel: the shell scoped to this workspace's directory. */

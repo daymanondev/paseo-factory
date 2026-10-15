@@ -83,6 +83,9 @@ function costLabel(task: TaskView): string {
 /** One task card — the verification line's whole row. */
 function TaskCard({ theme, task, actions }: { theme: PluginTheme; task: TaskView; actions: TasksActions }) {
   const green = task.attempts.findLast((attempt) => attempt.verdict === "green" && !attempt.open);
+  const lastAttempt = task.attempts.at(-1);
+  const lastEye = task.attempts.findLast((a) => a.eye !== null)?.eye ?? null;
+  const lastWatch = task.attempts.findLast((a) => a.watch !== null)?.watch ?? null;
   const pills = statusPill(theme, task.status, task.needsHumanReason);
   return (
     <Card theme={theme}>
@@ -110,15 +113,15 @@ function TaskCard({ theme, task, actions }: { theme: PluginTheme; task: TaskView
 
       {/* Evidence Pills */}
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: SPACING[1] }}>
-        {task.attempts.length > 0 ? (
-          <Pill theme={theme} label={task.attempts.at(-1)!.verdict === "green" ? "Gate green" : task.attempts.at(-1)!.verdict === "red" ? "Gate red" : "Gate —"} tone={task.attempts.at(-1)!.verdict === "green" ? "statusSuccess" : "statusDanger"} lit={task.attempts.at(-1)!.verdict !== null} />
+        {lastAttempt !== undefined ? (
+          <Pill theme={theme} label={lastAttempt.verdict === "green" ? "Gate green" : lastAttempt.verdict === "red" ? "Gate red" : "Gate —"} tone={lastAttempt.verdict === "green" ? "statusSuccess" : "statusDanger"} lit={lastAttempt.verdict !== null} />
         ) : null}
         <Pill theme={theme} label={`Choke ${task.choke.allowed}/${task.choke.denied}/${task.choke.blocked}`} tone="foregroundMuted" />
-        {task.attempts.some((a) => a.eye !== null) ? (
-          <Pill theme={theme} label={`Eye ${task.attempts.findLast((a) => a.eye !== null)!.eye!.outcome.toUpperCase()}`} tone={task.attempts.findLast((a) => a.eye !== null)!.eye!.outcome === "concern" ? "statusWarning" : "statusSuccess"} lit />
+        {lastEye !== null ? (
+          <Pill theme={theme} label={`Eye ${lastEye.outcome.toUpperCase()}`} tone={lastEye.outcome === "concern" ? "statusWarning" : "statusSuccess"} lit />
         ) : null}
-        {task.attempts.some((a) => a.watch !== null) ? (
-          <Pill theme={theme} label={`Watch ${task.attempts.findLast((a) => a.watch !== null)!.watch!.maxProbability === null ? "—" : task.attempts.findLast((a) => a.watch !== null)!.watch!.maxProbability!.toFixed(2)}`} tone={((task.attempts.findLast((a) => a.watch !== null)!.watch!.maxProbability ?? 0) >= 0.5) ? "statusWarning" : "foregroundMuted"} lit={((task.attempts.findLast((a) => a.watch !== null)!.watch!.maxProbability ?? 0) >= 0.5)} />
+        {lastWatch !== null ? (
+          <Pill theme={theme} label={`Watch ${lastWatch.maxProbability === null ? "—" : lastWatch.maxProbability.toFixed(2)}`} tone={(lastWatch.maxProbability ?? 0) >= 0.5 ? "statusWarning" : "foregroundMuted"} lit={(lastWatch.maxProbability ?? 0) >= 0.5} />
         ) : null}
         <Pill theme={theme} label={`Cost ${costLabel(task)}`} tone="foregroundMuted" />
         {task.lane !== null ? <Pill theme={theme} label={task.lane} tone="foregroundMuted" /> : null}

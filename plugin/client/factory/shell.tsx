@@ -13,7 +13,7 @@ import { useState } from "react";
 import { Text, View } from "react-native";
 import { accept, lanesSet, retro, snapshot, supervisorEnsure, supervisorRevoke, taskDetail } from "../../shared/rpc.ts";
 import type { FactoryView, LaneName, TaskDetailView } from "../../shared/view.ts";
-import { Btn, TabBar } from "../kit/pill.tsx";
+import { Btn, Card, TabBar } from "../kit/pill.tsx";
 import type { TabId } from "../kit/pill.tsx";
 import { SPACING, text } from "../kit/theme.ts";
 import { useNow, usePoll, pollEvery } from "../kit/poll.ts";
@@ -34,12 +34,16 @@ export function FactoryShell({
   dir,
   navigation,
   serverId,
+  initialTab = "tasks",
+  showDiagnostics = false,
 }: {
   theme: PluginTheme;
   /** The workspace panel's directory scope; undefined on the global screen. */
   dir?: string;
   navigation?: Navigation;
   serverId?: string;
+  initialTab?: TabId;
+  showDiagnostics?: boolean;
 }) {
   const toast = useToast();
   const snapshotCall = useRpc(snapshot);
@@ -50,7 +54,7 @@ export function FactoryShell({
   const revokeCall = useRpc(supervisorRevoke);
   const detailCall = useRpc(taskDetail);
 
-  const [tab, setTab] = useState<TabId>("tasks");
+  const [tab, setTab] = useState<TabId>(initialTab);
   const [bump, setBump] = useState(0);
   const [busy, setBusy] = useState(false);
   const [laneNote, setLaneNote] = useState<string | null>(null);
@@ -118,6 +122,14 @@ export function FactoryShell({
     <View style={{ flex: 1, backgroundColor: theme.colors.surface0 }}>
       <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: SPACING[4], paddingBottom: SPACING[6], gap: SPACING[4] }}>
         <Header theme={theme} view={view} at={poll.at} now={now} actions={{ openSupervisor, busy }} supervisorLive={view.supervisor !== null} />
+        {showDiagnostics ? (
+          <Card theme={theme} gap={SPACING[1]}>
+            <Text style={text(theme, "section")}>Daemon & State Diagnostics</Text>
+            <Text style={text(theme, "code")}>stateDir: {view.stateDir}</Text>
+            <Text style={text(theme, "code")}>serverId: {serverId ?? "local"}</Text>
+            <Text style={text(theme, "code")}>daemon: {view.daemonError ?? "healthy"}</Text>
+          </Card>
+        ) : null}
         <TabBar theme={theme} active={tab} onPick={setTab} />
         {tab === "tasks" ? (
           <TasksPane

@@ -11,23 +11,27 @@ claims the task is finished at a specific commit, and the factory — never the
 agent — runs the gate and records every step in an append-only ledger it
 cannot edit. A green verdict is evidence, not acceptance.
 
-**Status: v0.0.12, pre-release.** The pure verification core is complete and
-tested (276 tests); the plugin loads on a Paseo 0.10 daemon, owns the ledger
-and the gate as the single writer (ADR 0004), and serves the whole loop over a
-file spool: the Owner's `factory` CLI sets Contracts and accepts green
-Attempts, the Agent's `factory-claim` CLI submits Claims (it rides every
-agent's PATH), and each Claim opens a numbered Attempt that ends in a Verdict
-and a per-attempt report — proven end-to-end against a live trial daemon by
-`scripts/smoke-loop.mjs`. Since that first wiring the loop has gained the
-driver (`factory run`), the record-only watch, the on-demand Retro, the Cost
-read backed by the Meter, and the seat layer (ADR 0006) is open: v0.0.9's
+**Status: v0.0.13, pre-release.** The pure verification core is complete and
+tested (306 tests); the plugin loads on a Paseo 0.10/0.11 daemon, owns the
+ledger and the gate as the single writer (ADR 0004), and serves the whole loop
+over both the file spool (CLI) and in-process Paseo plugin RPCs (`factory.*`,
+ADR 0009): the Owner's `factory` CLI and the Paseo **Factory surface** UI
+(Global Screen + Sidebar item, Workspace Panel, Settings Screen) inspect and
+steer the verification line, the Agent's `factory-claim` CLI submits Claims (it
+rides every agent's PATH), and each Claim opens a numbered Attempt that ends in
+a Verdict and a per-attempt report — proven end-to-end against a live trial
+daemon by `scripts/smoke-loop.mjs`. Since that first wiring the loop has gained
+the driver (`factory run`), the record-only watch, the on-demand Retro, the
+Cost read backed by the Meter, and the seat layer (ADR 0006): v0.0.9's
 Supervisor seat — the delegated Owner conversation, every act stamped by who
-submitted it — and v0.0.10's Lead seat, the deterministic presider that
-spends one re-poke at a denial-stall and otherwise ends in a needs-human
-line. v0.0.11 grounds death itself in the daemon's own timeline (ADR 0007,
-the two doors), and v0.0.12 bounds both repair axes (ADR 0008): one automatic
-Respawn per progress marker on Substrate death, and three Attempts per Task.
-Nothing is published yet.
+submitted it — and v0.0.10's Lead seat, the deterministic presider that spends
+one re-poke at a denial-stall and otherwise ends in a needs-human line. v0.0.11
+grounds death itself in the daemon's own timeline (ADR 0007, the two doors),
+v0.0.12 bounds both repair axes (ADR 0008: one automatic Respawn per progress
+marker on Substrate death, and three Attempts per Task), and v0.0.13 unifies
+all five model-backed seats/passes under `<stateDir>/lanes.json` (defaulting to
+`pi/zai/glm-5.3` over tool-less CLI execution) and ships the Paseo client UI +
+one-click Supervisor bridge (ADR 0009). Nothing is published yet.
 
 ## Layout
 
@@ -166,6 +170,26 @@ dispatched `respawn_dispatched`, and watched Agent 2 to a green Attempt 1
 one turn, recorded `needs_human ("attempt-ceiling")` at Attempt 3, and
 refused both post-run negative probes (`factory-claim` #4 and `factory run`).
 
+v0.0.13 brings the **Factory surface** into Paseo Desktop and unifies every
+model-backed seat and pass under `<stateDir>/lanes.json` (ADR 0009). One JSON
+file (`supervisor`, `worker`, `watch`, `retro`, `freshEyes`, each defaulting to
+`"pi/zai/glm-5.3"`) governs all five lanes, editable from the Paseo UI (**Seats
+& Models** tab) or `factory lanes set <lane> <provider/model>` — with `Lead`
+kept outside `lanes.json` because it is a zero-model deterministic rider.
+`Watch`, `Retro`, and `Fresh-eyes` all route through a shared tool-less CLI
+runner (`runLaneCli` across `pi --no-tools -p`, `copilot -p --available-tools=""`,
+and `claude -p --tools ""`, while `freshEyes: "eye.json"` retains the direct
+HTTP path), eliminating the hardcoded Copilot quota bottleneck. Inside Paseo,
+the `Factory` sidebar screen, workspace panel, and settings view render three
+tabs — **Tasks** (verification line with Attempt 1/2/3 ladder, Gate/Eye/Watch
+badges, inline `Accept #n`, and markdown/diff/gate-log detail modal), **Seats &
+Models** (interactive lane cards, model selector modal, and orthogonal Seat
+Graph), and **Timeline & Retro** (multi-lane swimlane, one-click `Run Retro`,
+and searchable Ledger stream) — plus the **Open Supervisor** / **Quick
+Dispatch** header bar that creates or reuses the tagged `seat=supervisor`
+agent, writes `<home>-supervisor/AGENTS.md` with exact `factory.mjs` recipes,
+and opens the native Paseo chat drawer in one click.
+
 The **Agent** gets one command, `factory-claim --task T1 --sha <commit>`, on its
 PATH automatically. It prints the Verdict, the gate note, and the report path;
 exit 0 on green, 1 on red, 2 when the factory did not process the claim.
@@ -200,16 +224,17 @@ node scripts/watch-battery.mjs --home ~/.paseo-factory   # all arms; --arm <name
 ```
 
 Since v0.0.6 the contract carries `--watch`: a record-only pass after every
-verdict — red included — in which a Copilot chat model, prompted headless
-through the daemon's `copilot` CLI, reads the run timeline, the Contract, the
-diff and the gate output and answers the five fixed questions
+verdict — red included — in which the configured `lanes.watch` model (prompted
+headless and tool-less via `runLaneCli`) reads the run timeline, the Contract,
+the diff and the gate output and answers the five fixed questions
 (destructive-writes, test-weakened, stuck-loop, scope-creep, secret-leak) into
 one `watch_written` ledger line. A passenger, never a judge: verdicts, accepts
 and driver exits never read it.
 
 State lives under `<daemon home>/plugin-state/paseo-factory/` — the ledger,
-per-attempt reports, the spool (`requests/`, `replies/`, `processed/`), and the
-generated `bin/factory-claim` wrapper that rides agent PATHs.
+`lanes.json`, per-attempt reports, the spool (`requests/`, `replies/`,
+`processed/`), and the generated `bin/factory-claim` wrapper + `bin/git` shim
+that ride agent PATHs.
 
 ## License
 

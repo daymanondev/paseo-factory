@@ -6,12 +6,12 @@
  * Session (navigation.openAgent), and Revoke Supervisor.
  */
 import type { PluginTheme } from "@getpaseo/plugin";
-import { TextInput } from "@getpaseo/plugin/client/react-native";
+import { Modal, TextInput } from "@getpaseo/plugin/client/react-native";
 import { useState } from "react";
 import { Text, View } from "react-native";
 import type { AgentView, FactoryView, LaneName, Lanes } from "../../shared/view.ts";
 import { Btn, Card, Pill } from "../kit/pill.tsx";
-import { RADIUS, SPACING, text, tint } from "../kit/theme.ts";
+import { RADIUS, SPACING, text } from "../kit/theme.ts";
 import type { Colour } from "../kit/theme.ts";
 
 /** The Seats tab's whole action surface — the Shell owns the RPC calls. */
@@ -38,31 +38,44 @@ const LANE_CARDS: LaneCard[] = [
   { id: "fresh-eyes", title: "Fresh-eyes", hint: "the advisory pass — or \"eye.json\" for the legacy direct API", lanes: ["freshEyes"], value: (l) => l.freshEyes },
 ];
 
-const LANE_TITLES: Record<LaneName, string> = { supervisor: "Supervisor", worker: "Default Worker", watch: "Watch", retro: "Retro", freshEyes: "Fresh-eyes" };
-
-/** The live picker: provider buttons from the daemon, model editable, preview before save. */
+/** The live picker: provider buttons from the daemon, discovered models + editable input, preview before save. */
 function LaneModalBody({ theme, view, card, onSave, onClose, busy }: { theme: PluginTheme; view: FactoryView; card: LaneCard; onSave: (value: string) => void; onClose: () => void; busy: boolean }) {
   const current = card.value(view.lanes);
   const slash = current.indexOf("/");
-  const [provider, setProvider] = useState(slash === -1 ? "" : current.slice(0, slash));
-  const [model, setModel] = useState(slash === -1 ? (current === "eye.json" ? "" : current) : current.slice(slash + 1));
+  const [provider, setProvider] = useState(current === "eye.json" ? "eye.json" : slash === -1 ? "" : current.slice(0, slash));
+  const [model, setModel] = useState(slash === -1 ? "" : current.slice(slash + 1));
   const available = view.providers.filter((entry) => entry.available);
-  const value = provider === "" || model.trim() === "" ? "" : `${provider}/${model.trim()}`;
+  const activeModels = available.find((entry) => entry.provider === provider)?.models ?? null;
+  const allowEyeJson = card.id === "fresh-eyes";
+  const value = provider === "eye.json" ? "eye.json" : provider === "" || model.trim() === "" ? "" : `${provider}/${model.trim()}`;
   return (
     <View style={{ gap: SPACING[3] }}>
-      <Text style={text(theme, "detailTitle")}>{card.title} lane</Text>
       <Text style={text(theme, "meta")}>{card.hint}</Text>
       <Text style={text(theme, "label")}>PROVIDER</Text>
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: SPACING[1.5] }}>
         {available.map((entry) => (
           <Btn key={entry.provider} theme={theme} small label={entry.provider} tone={provider === entry.provider ? "accent" : "foregroundMuted"} onPress={() => setProvider(entry.provider)} />
         ))}
+        {allowEyeJson ? (
+          <Btn theme={theme} small label="eye.json (HTTP)" tone={provider === "eye.json" ? "accent" : "foregroundMuted"} onPress={() => setProvider("eye.json")} />
+        ) : null}
         {available.length === 0 ? <Text style={text(theme, "label", "statusWarning")}>no available providers — the daemon half is unreadable</Text> : null}
       </View>
-      <Text style={text(theme, "label")}>MODEL</Text>
-      <View style={{ borderWidth: 1, borderColor: theme.colors.border, borderRadius: RADIUS.lg, backgroundColor: theme.colors.surface1 }}>
-        <TextInput value={model} onChangeText={setModel} placeholder="e.g. zai/glm-5.3" placeholderTextColor={theme.colors.foregroundMuted} style={{ paddingHorizontal: SPACING[3], paddingVertical: SPACING[2], color: theme.colors.foreground, fontSize: 13 }} />
-      </View>
+      {provider !== "eye.json" ? (
+        <View style={{ gap: SPACING[2] }}>
+          <Text style={text(theme, "label")}>MODEL</Text>
+          {activeModels !== null && activeModels.length > 0 ? (
+            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: SPACING[1] }}>
+              {activeModels.slice(0, 16).map((m) => (
+                <Btn key={m.id} theme={theme} small label={m.label ?? m.id} tone={model === m.id ? "accent" : "foregroundMuted"} onPress={() => setModel(m.id)} />
+              ))}
+            </View>
+          ) : null}
+          <View style={{ borderWidth: 1, borderColor: theme.colors.border, borderRadius: RADIUS.lg, backgroundColor: theme.colors.surface1 }}>
+            <TextInput value={model} onChangeText={setModel} placeholder="e.g. zai/glm-5.3" placeholderTextColor={theme.colors.foregroundMuted} style={{ paddingHorizontal: SPACING[3], paddingVertical: SPACING[2], color: theme.colors.foreground, fontSize: 13 }} />
+          </View>
+        </View>
+      ) : null}
       <Text style={text(theme, "code")}>{value === "" ? "provider/model — pick both" : value}</Text>
       <View style={{ flexDirection: "row", gap: SPACING[2] }}>
         <Btn theme={theme} label="Save lane" disabled={value === "" || busy} onPress={() => onSave(value)} />
@@ -72,8 +85,7 @@ function LaneModalBody({ theme, view, card, onSave, onClose, busy }: { theme: Pl
   );
 }
 
-function SeatNode({ theme, title, subtitle, pills, actions }: { theme: PluginTheme; title: string; subtitle: string; pills: { label: string; tone?: Colour; lit?: boolean }[]; actions?: () => unknown }) {
-  void actions;
+function SeatNode({ theme, title, subtitle, pills }: { theme: PluginTheme; title: string; subtitle: string; pills: { label: string; tone?: Colour; lit?: boolean }[] }) {
   return (
     <Card theme={theme} gap={SPACING[1]}>
       <Text style={text(theme, "rowTitle")}>{title}</Text>
@@ -144,7 +156,7 @@ export function SeatsPane({ theme, view, actions, modelSyncNote }: { theme: Plug
 
       <View style={{ gap: SPACING[2] }}>
         <Text style={text(theme, "section")}>Seat Graph</Text>
-        <SeatNode theme={theme} title="Owner" subtitle="you — the only seat that accepts and ratifies" pills={[{ label: "Total Cost", lit: false }].length === 0 ? [] : [{ label: `$${view.kpis.totalCostUsd.toFixed(2)} metered` }]} />
+        <SeatNode theme={theme} title="Owner" subtitle="you — the only seat that accepts and ratifies" pills={[{ label: `$${view.kpis.totalCostUsd.toFixed(2)} metered` }]} />
         <Rail theme={theme} />
         {view.supervisor !== null ? (
           <View style={{ gap: SPACING[2] }}>
@@ -155,7 +167,7 @@ export function SeatsPane({ theme, view, actions, modelSyncNote }: { theme: Plug
           <SeatNode theme={theme} title="Supervisor — vacant" subtitle="Open Supervisor in the header creates the seat" pills={[{ label: "seat=supervisor", tone: "statusWarning", lit: true }]} />
         )}
         <Rail theme={theme} />
-        <SeatNode theme={theme} title="Lead (Rider)" subtitle="the driver inside factory run — watches to verdict, one re-poke, the named end" pills={[{ label: "driver" }, { label: "ledger-only" }]} />
+        <SeatNode theme={theme} title="Lead (Rider)" subtitle="the middle seat inside factory run — watches to verdict, one re-poke, one respawn, or needs-human" pills={[{ label: "rider" }, { label: "ledger-only" }]} />
         <Rail theme={theme} />
         {workers.length === 0 ? (
           <SeatNode theme={theme} title="Working Agents — none live" subtitle="spawned agents appear here as the ledger names them" pills={[]} />
@@ -168,13 +180,11 @@ export function SeatsPane({ theme, view, actions, modelSyncNote }: { theme: Plug
         )}
       </View>
 
-      {editing !== null ? (
-        <View style={{ marginTop: SPACING[2], borderWidth: 1, borderColor: tint(theme.colors.accent, "55"), backgroundColor: theme.colors.surface2, borderRadius: RADIUS.lg, padding: SPACING[3] }}>
-          <LaneModalBody theme={theme} view={view} card={editing} busy={actions.busy} onSave={(value) => save(editing, value)} onClose={() => setEditing(null)} />
-        </View>
-      ) : null}
+      <Modal open={editing !== null} onOpenChange={(open) => (open ? undefined : setEditing(null))} title={editing === null ? "" : `${editing.title} lane`} icon={undefined}>
+        <Modal.Content>
+          {editing === null ? null : <LaneModalBody theme={theme} view={view} card={editing} busy={actions.busy} onSave={(value) => save(editing, value)} onClose={() => setEditing(null)} />}
+        </Modal.Content>
+      </Modal>
     </View>
   );
 }
-
-export { LANE_TITLES };

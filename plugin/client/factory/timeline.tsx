@@ -1,14 +1,15 @@
 /**
  * Tab 3 — Timeline & Retro (ADR 0009 §2): the horizontal Swimlane Timeline
- * (30m | 2h | 6h | 24h) of Task Attempts, then the Retro & Ledger section —
- * a Run Retro action, the rendered Proposals (R1..Rn), and the live ledger
- * event stream.
+ * (30m | 2h | 6h | 24h) of Task Attempts and Agents, then the Retro & Ledger
+ * section — a Run Retro action, the rendered Proposals (R1..Rn), and the
+ * searchable/filterable ledger event stream.
  */
 import type { PluginTheme } from "@getpaseo/plugin";
+import { TextInput } from "@getpaseo/plugin/client/react-native";
 import { useState } from "react";
 import { ScrollView, Text, View } from "react-native";
-import type { FactoryView, TaskView } from "../../shared/view.ts";
-import { Btn, Card, Chip } from "../kit/pill.tsx";
+import type { AgentView, FactoryView, TaskView } from "../../shared/view.ts";
+import { Btn, Card, Chip, Pill } from "../kit/pill.tsx";
 import { RADIUS, SPACING, text, tint } from "../kit/theme.ts";
 
 /** The Timeline tab's whole action surface — the Shell owns the RPC calls. */
@@ -24,20 +25,19 @@ const WINDOWS: { id: string; label: string; ms: number }[] = [
   { id: "24h", label: "24h", ms: 24 * 3_600_000 },
 ];
 
-/** One attempt's segment position in [0,1] over the window — clamped, honest at the edges. */
+/** One attempt's segment position in [0,1] over [start, end] — null when outside the window. */
 function positionOf(ts: string | null, start: number, end: number): number | null {
   if (ts === null) return null;
   const at = Date.parse(ts);
   if (!Number.isFinite(at)) return null;
-  if (at <= start) return 0;
-  if (at >= end) return 1;
+  if (at < start || at > end) return null;
   return (at - start) / (end - start);
 }
 
 /** One swimlane: the task's attempts as positioned ticks along the window. */
 function Swimlane({ theme, task, start, end }: { theme: PluginTheme; task: TaskView; start: number; end: number }) {
   const marks = task.attempts.map((attempt) => {
-    const left = positionOf(claimAnchor(attempt.claimedAt, attempt.verdictAt), start, end);
+    const left = attempt.open ? 0.96 : positionOf(claimAnchor(attempt.claimedAt, attempt.verdictAt), start, end);
     return { attempt, left };
   });
   const visible = marks.some((mark) => mark.left !== null);
@@ -57,7 +57,7 @@ function Swimlane({ theme, task, start, end }: { theme: PluginTheme; task: TaskV
               accessibilityLabel={`${task.task} attempt ${attempt.n} ${attempt.verdict ?? "open"}`}
               style={{
                 position: "absolute",
-                left: `${Math.round(left * 100)}%`,
+                left: `${Math.min(96, Math.round(left * 100))}%`,
                 top: 3,
                 bottom: 3,
                 width: 10,
@@ -74,6 +74,26 @@ function Swimlane({ theme, task, start, end }: { theme: PluginTheme; task: TaskV
   );
 }
 
+/** One agent swimlane: live seat/worker bar along the timeline window. */
+function AgentSwimlane({ theme, agent }: { theme: PluginTheme; agent: AgentView }) {
+  const label = `${agent.seat === "supervisor" ? "Supervisor" : (agent.title ?? agent.id.slice(0, 8))}${agent.task !== null ? ` (${agent.task})` : ""}`;
+  const colour = agent.status === "error" ? theme.colors.statusDanger : agent.status === "running" ? theme.colors.accent : theme.colors.statusSuccess;
+  return (
+    <View style={{ gap: SPACING[1] }}>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1.5] }}>
+        <Text style={text(theme, "label")} numberOfLines={1}>
+          {label}
+        </Text>
+        <Pill theme={theme} label={agent.status} tone={agent.status === "running" ? "accent" : "foregroundMuted"} lit={agent.status === "running"} />
+        {agent.seqEnd !== null ? <Text style={text(theme, "code")}>seqEnd {agent.seqEnd}</Text> : null}
+      </View>
+      <View style={{ height: 14, borderWidth: 1, borderColor: theme.colors.border, borderRadius: RADIUS.md, backgroundColor: theme.colors.surface1, justifyContent: "center", paddingHorizontal: SPACING[1] }}>
+        <View style={{ height: 6, borderRadius: 3, backgroundColor: colour, opacity: agent.status === "running" ? 0.9 : 0.45 }} />
+      </View>
+    </View>
+  );
+}
+
 /** The segment's anchor: the verdict when it landed, else the claim. */
 function claimAnchor(claimedAt: string | null, verdictAt: string | null): string | null {
   return verdictAt ?? claimedAt;
@@ -81,9 +101,19 @@ function claimAnchor(claimedAt: string | null, verdictAt: string | null): string
 
 export function TimelinePane({ theme, view, now, actions, retroNote }: { theme: PluginTheme; view: FactoryView; now: number; actions: TimelineActions; retroNote: string | null }) {
   const [windowId, setWindowId] = useState("2h");
+  const [query, setQuery] = useState("");
   const window = WINDOWS.find((entry) => entry.id === windowId) ?? WINDOWS[1]!;
   const end = now;
   const start = now - window.ms;
+  const q = query.trim().toLowerCase();
+  const filteredLedger = q === ""
+    ? view.ledger
+    : view.ledger.filter(
+        (line) =>
+          (line.task !== null && line.task.toLowerCase().includes(q)) ||
+          line.event.toLowerCase().includes(q) ||
+          line.line.toLowerCase().includes(q),
+      );
   return (
     <View style={{ gap: SPACING[4] }}>
       <View style={{ gap: SPACING[2] }}>
@@ -96,7 +126,10 @@ export function TimelinePane({ theme, view, now, actions, retroNote }: { theme: 
         </View>
         <ScrollView horizontal showsHorizontalScrollIndicator={false}>
           <View style={{ gap: SPACING[2], minWidth: 480, paddingRight: SPACING[4] }}>
-            {view.tasks.length === 0 ? <Text style={text(theme, "meta")}>No tasks yet.</Text> : null}
+            {view.tasks.length === 0 && view.agents.length === 0 ? <Text style={text(theme, "meta")}>No tasks or live agents yet.</Text> : null}
+            {view.agents.map((agent) => (
+              <AgentSwimlane key={agent.id} theme={theme} agent={agent} />
+            ))}
             {view.tasks.map((task) => (
               <Swimlane key={task.task} theme={theme} task={task} start={start} end={end} />
             ))}
@@ -137,10 +170,21 @@ export function TimelinePane({ theme, view, now, actions, retroNote }: { theme: 
       </View>
 
       <View style={{ gap: SPACING[2] }}>
-        <Text style={text(theme, "section")}>Ledger stream</Text>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[2], flexWrap: "wrap" }}>
+          <Text style={text(theme, "section")}>Ledger stream</Text>
+          <View style={{ flex: 1, minWidth: 180, borderWidth: 1, borderColor: theme.colors.border, borderRadius: RADIUS.lg, backgroundColor: theme.colors.surface1 }}>
+            <TextInput
+              value={query}
+              onChangeText={setQuery}
+              placeholder="Filter by task, event, or text…"
+              placeholderTextColor={theme.colors.foregroundMuted}
+              style={{ paddingHorizontal: SPACING[2], paddingVertical: SPACING[1], color: theme.colors.foreground, fontSize: 12 }}
+            />
+          </View>
+        </View>
         <Card theme={theme} gap={SPACING[1]}>
-          {view.ledger.length === 0 ? <Text style={text(theme, "meta")}>The ledger is empty.</Text> : null}
-          {view.ledger.slice(0, 40).map((line) => (
+          {filteredLedger.length === 0 ? <Text style={text(theme, "meta")}>{view.ledger.length === 0 ? "The ledger is empty." : "No ledger lines match the filter."}</Text> : null}
+          {filteredLedger.slice(0, 40).map((line) => (
             <View key={line.seq} style={{ flexDirection: "row", gap: SPACING[2] }}>
               <Text style={{ ...text(theme, "code"), opacity: 0.7, fontVariant: ["tabular-nums"] }}>{line.seq}</Text>
               <Text style={text(theme, "code")} numberOfLines={1}>

@@ -40,16 +40,22 @@ agent it remains the only path.
   (09 ran `claude` opus-4-8 at ~$4.07 / 26 min; 06 ran `claude` sonnet-5 at
   ~$1.02 / 6 min on a similar-size task — the Agent's model is a real cost
   dial, and the eye does not care who wrote the diff).
-- When the run measures the eye:
-  `~/.paseo-factory/plugin-state/paseo-factory/eye.json` exists and is mode
-  600. Credentials are placed by the human before the run, never from inside
-  it.
-- When the run measures the watch (v0.0.6, amendment 2): the copilot CLI is
-  usable on the daemon's PATH (`copilot --version` answers) — the watch
-  prompts it headless with the model pinned in code (`gpt-5.4`); there is no
-  key file. The CLI's own auth is the whole credential surface; the wrapper
-  at `/opt/homebrew/bin/copilot` execs the nvm node for the daemon
-  environment.
+- When the run measures the eye (`--fresh-eyes`): since v0.0.13 (ADR 0009),
+  `Fresh-eyes` reads `lanes.freshEyes` in
+  `~/.paseo-factory/plugin-state/paseo-factory/lanes.json` (defaulting to
+  `pi/zai/glm-5.3` over the tool-less CLI runner `runLaneCli`). When
+  `lanes.freshEyes` is set to `"eye.json"` (or when `eye.json` is present and
+  `lanes.json` is not overriding it with a CLI lane),
+  `~/.paseo-factory/plugin-state/paseo-factory/eye.json` (mode 600) is used for
+  the direct HTTP call.
+- When the run measures the watch (`--watch`): since v0.0.13 (ADR 0009), the
+  watch reads `lanes.watch` in `lanes.json` (defaulting to `pi/zai/glm-5.3`
+  via `runLaneCli` across `pi`, `copilot`, or `claude`) and checks that the
+  selected provider's CLI binary is on the daemon's PATH.
+- `factory run <task>` may omit `--provider` when `lanes.worker` in
+  `lanes.json` is set (default `pi/zai/glm-5.3`); inspect or change lanes via
+  `node plugin/bin/factory.mjs --home ~/.paseo-factory lanes` or the **Seats &
+  Models** tab in the Paseo Factory UI.
 
 ## 2. Baseline — mandatory, before the agent exists
 

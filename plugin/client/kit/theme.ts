@@ -15,8 +15,6 @@ export const RADIUS = { md: 6, lg: 8 } as const;
 
 export const DOT = 8;
 
-export const CARD_RADIUS = 12;
-
 export type Colour = keyof PluginTheme["colors"];
 
 const ROLES = {
@@ -35,20 +33,6 @@ type Role = keyof typeof ROLES;
 export function text(theme: PluginTheme, role: Role, colour?: Colour): TextStyle {
   const { colour: base, ...style } = ROLES[role];
   return { ...style, color: theme.colors[colour ?? base] };
-}
-
-function channels(colour: string): [number, number, number] | null {
-  const hex = /^#([0-9a-f]{6})/i.exec(colour)?.[1];
-  if (!hex) return null;
-  return [0, 2, 4].map((at) => Number.parseInt(hex.slice(at, at + 2), 16)) as [number, number, number];
-}
-
-/** Mixes two colours — used for the lit-tile tints and muted borders. */
-export function mix(from: string, to: string, amount: number): string {
-  const a = channels(from);
-  const b = channels(to);
-  if (!a || !b) return from;
-  return `#${a.map((value, index) => Math.round(value + (b[index]! - value) * amount).toString(16).padStart(2, "0")).join("")}`;
 }
 
 /** Appends an alpha channel to a hex colour — `"22"` by default. */

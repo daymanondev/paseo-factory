@@ -64,7 +64,7 @@ export interface SurfaceDaemonApi {
   };
   providers: {
     listAvailable(): Promise<{ providers: { provider: string; available: boolean }[] }>;
-    listModels(provider: string): Promise<{ models: { id: string }[] }>;
+    listModels(provider: string): Promise<{ models: { id: string; label?: string | null }[] }>;
   };
 }
 
@@ -82,12 +82,14 @@ export interface SurfaceDeps {
   stateDir: string;
   /** The paseo home — `<home>-supervisor` (its sibling) is the Supervisor seat's dir. */
   home: string;
+  /** The resolved plugin directory, when installed from a directory — gives AGENTS.md an exact factory.mjs path. */
+  pluginDir?: string;
   /** The daemon to call when the RPC call carries no `context.paseo` (tests). */
   daemon: SurfaceDaemonApi | (() => SurfaceDaemonApi);
   /** Live agent model sync override (tests) — the CLI bridge by default. */
-  setAgentModel?: (agentId: string, model: string) => Promise<DaemonReply>;
+  setAgentModel?: (agentId: string, model: string, home?: string) => Promise<DaemonReply>;
   /** Agent cancel override (tests) — the CLI bridge by default. */
-  stopAgent?: (agentId: string) => Promise<DaemonReply>;
+  stopAgent?: (agentId: string, home?: string) => Promise<DaemonReply>;
   onLog?: (message: string) => void;
 }
 
@@ -103,7 +105,10 @@ function codeOf(err: unknown): string {
 }
 
 /** The AGENTS.md the Supervisor seat boots with — resolved paths, its law, its lanes. */
-function renderSupervisorAgentsMd(input: { home: string; stateDir: string; nodePath: string; path: string; lane: string }): string {
+function renderSupervisorAgentsMd(input: { home: string; stateDir: string; pluginDir?: string; nodePath: string; path: string; lane: string }): string {
+  const quote = (s: string) => (/\s/.test(s) ? `"${s}"` : s);
+  const runner = /Paseo Helper/i.test(input.nodePath) ? `ELECTRON_RUN_AS_NODE=1 ${quote(input.nodePath)}` : quote(input.nodePath);
+  const factoryCmd = input.pluginDir !== undefined ? `${runner} ${quote(join(input.pluginDir, "bin", "factory.mjs"))}` : "factory";
   return [
     "# Supervisor (paseo-factory)",
     "",
@@ -117,11 +122,13 @@ function renderSupervisorAgentsMd(input: { home: string; stateDir: string; nodeP
     "- node: " + input.nodePath,
     "- Your model lane (lanes.json → supervisor): " + input.lane,
     "",
-    "Useful commands (the Owner CLI, never on an agent PATH by accident — it is yours):",
+    "Day-one Supervisor commands (the Owner CLI, never on a Worker agent's PATH — it is yours):",
     "",
-    "  factory --home " + input.home + " status",
-    "  factory --home " + input.home + " lanes get",
-    "  factory --home " + input.home + " accept <task> --attempt <n>",
+    "  " + factoryCmd + " --home " + input.home + " contract --task <id> --workspace <dir> --gate <cmd> --artifact <path> [--scope <p1,p2>] [--watch] [--fresh-eyes] [--description <text>]",
+    "  " + factoryCmd + " --home " + input.home + " run <task> [<task>...]",
+    "  " + factoryCmd + " --home " + input.home + " status",
+    "  " + factoryCmd + " --home " + input.home + " lanes get",
+    "  " + factoryCmd + " --home " + input.home + " accept <task> --attempt <n>",
     "",
     'Your shells may start without node/git on PATH — export PATH="' + input.path + '" first.',
     "",
@@ -180,6 +187,66 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     };
   };
 
+  type ProviderEntry = { provider: string; available: boolean; models: { id: string; label: string | null }[] | null };
+  const PROVIDERS_TTL_MS = 5 * 60_000;
+  const PROVIDERS_WAIT_MS = 2_000;
+  let cachedProviders: ProviderEntry[] | null = null;
+  let cachedProvidersAt = 0;
+  let inFlightProviders: Promise<ProviderEntry[]> | null = null;
+
+  const refreshProviders = (daemon: SurfaceDaemonApi): Promise<ProviderEntry[]> => {
+    if (inFlightProviders !== null) return inFlightProviders;
+    const job = (async () => {
+      const available = (await daemon.providers.listAvailable()).providers;
+      const entries = await Promise.all(
+        available.map(async (entry) => {
+          if (!entry.available) return { provider: entry.provider, available: false, models: null };
+          try {
+            const listed = await daemon.providers.listModels(entry.provider);
+            return {
+              provider: entry.provider,
+              available: true,
+              models: listed.models.map((m) => ({ id: m.id, label: m.label ?? null })),
+            };
+          } catch {
+            return { provider: entry.provider, available: true, models: null };
+          }
+        }),
+      );
+      cachedProviders = entries;
+      cachedProvidersAt = Date.now();
+      return entries;
+    })().finally(() => {
+      if (inFlightProviders === job) inFlightProviders = null;
+    });
+    inFlightProviders = job;
+    return job;
+  };
+
+  const resolveProviders = async (daemon: SurfaceDaemonApi): Promise<ProviderEntry[]> => {
+    const now = Date.now();
+    if (cachedProviders !== null && now - cachedProvidersAt < PROVIDERS_TTL_MS) {
+      return cachedProviders;
+    }
+    const job = refreshProviders(daemon);
+    if (cachedProviders !== null) {
+      job.catch(() => {});
+      return cachedProviders;
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const raced = await Promise.race([
+        job,
+        new Promise<null>((resolve) => {
+          timer = setTimeout(() => resolve(null), PROVIDERS_WAIT_MS);
+        }),
+      ]);
+      return raced ?? cachedProviders ?? [];
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  };
+
   return {
     async snapshot(_input: {}, context?: SurfaceCallContext) {
       const lanes = loadLanes(deps.stateDir);
@@ -189,14 +256,14 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       const bound = agentTaskIndex();
 
       let rawAgents: SurfaceAgentSnapshot[] = [];
-      let providers: { provider: string; available: boolean }[] = [];
+      let providers: ProviderEntry[] = [];
       let daemonError: string | null = null;
       let supervisorRaw: SurfaceAgentSnapshot | undefined;
       try {
         const page = await daemon.agents.list({ filter: { includeArchived: false } });
         rawAgents = page.entries.map((entry) => entry.agent).filter((agent) => agent.archivedAt === null);
         supervisorRaw = rawAgents.find((agent) => agent.labels.seat === "supervisor");
-        providers = (await daemon.providers.listAvailable()).providers;
+        providers = await resolveProviders(daemon);
       } catch (err) {
         daemonError = `daemon unavailable: ${messageOf(err)}`;
       }
@@ -290,7 +357,9 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           const supervisor = await supervisorOf(daemon);
           if (supervisor !== undefined) {
             const sync = deps.setAgentModel ?? setAgentModelViaCli;
-            const reply = await sync(supervisor.id, saved.lanes.supervisor);
+            const slash = saved.lanes.supervisor.indexOf("/");
+            const modelId = slash === -1 ? saved.lanes.supervisor : saved.lanes.supervisor.slice(slash + 1);
+            const reply = await sync(supervisor.id, modelId, deps.home);
             modelSync = reply.ok
               ? `applied — agent ${supervisor.id.slice(0, 8)} now runs ${saved.lanes.supervisor}`
               : `failed — ${reply.reason} (lanes.json is the config of record; the next ensure/create runs it)`;
@@ -327,6 +396,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
             renderSupervisorAgentsMd({
               home: deps.home,
               stateDir: deps.stateDir,
+              pluginDir: deps.pluginDir,
               nodePath: process.execPath,
               path: process.env.PATH ?? "",
               lane: lanes.lanes.supervisor,
@@ -383,7 +453,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       // Cancel first (best-effort: an idle agent has nothing to cancel), then
       // archive — the retirement the seat graph reads.
       const stop = deps.stopAgent ?? stopAgentViaCli;
-      const stopped = await stop(supervisor.id);
+      const stopped = await stop(supervisor.id, deps.home);
       if (!stopped.ok) log(`supervisor: cancel before revoke did not land — ${stopped.reason}`);
       try {
         await daemon.agents.ref(supervisor.id).archive();

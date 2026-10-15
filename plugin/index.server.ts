@@ -22,7 +22,7 @@ import type { TimelineSourceApi } from "./server/timeline.ts";
 import { spoolRootFor, startSpool } from "./server/spool.ts";
 import { registerSurfaceRpc } from "./server/surface-rpc.ts";
 
-const SHELL_VERSION = "0.0.12";
+const SHELL_VERSION = "0.0.13";
 
 const log = (message: string) => console.log(`[${PLUGIN_ID}] ${message}`);
 
@@ -92,6 +92,7 @@ export default function contribute(server: PluginServerContext) {
     factory,
     stateDir,
     home,
+    pluginDir,
     daemon: () => paseoApi as never,
     onLog: log,
   });

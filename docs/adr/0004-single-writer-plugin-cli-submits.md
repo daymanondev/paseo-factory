@@ -35,7 +35,7 @@
   client UI communicates with `plugin/index.server.ts` over Paseo plugin RPC;
   because `server.handle(...)` runs inside the plugin process that owns the
   single `Factory` instance, Owner acts triggered from the surface (`Accept`
-  with `submitter: "owner"` and `Retro`) call `factory.accept` and
+  with `accepted_by: "owner"` and `Retro`) call `factory.accept` and
   `factory.retro` directly in-process, preserving the single-writer law
   without round-tripping through the external CLI file spool.)*
 - **The Agent gets the Claim as a CLI on its `PATH`**, put there by the plugin's

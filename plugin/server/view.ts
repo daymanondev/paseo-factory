@@ -72,7 +72,9 @@ function statusOf(slice: readonly AnyEvent[]): TaskStatus {
     }
   }
   const spawn = lastOf(slice, "spawn_dispatched");
-  if (spawn !== undefined && (gate === undefined || spawn.seq > gate.seq)) return "running"; // dispatched, no verdict yet
+  const respawn = lastOf(slice, "respawn_dispatched");
+  const dispatch = spawn === undefined ? respawn : respawn === undefined ? spawn : spawn.seq >= respawn.seq ? spawn : respawn;
+  if (dispatch !== undefined && (gate === undefined || dispatch.seq > gate.seq)) return "running"; // dispatched or respawned, no verdict yet
   if (numbers.length === 0) return "waiting"; // contracted, never run
   if (gate?.verdict === "green") return "ready-to-accept";
   return "red";
@@ -301,7 +303,7 @@ function ledgerLines(events: readonly AnyEvent[]): LedgerLineView[] {
 export interface DaemonAgentsInput {
   agents: readonly AgentView[];
   supervisor: AgentView | null;
-  providers: readonly { provider: string; available: boolean }[];
+  providers: readonly { provider: string; available: boolean; models?: { id: string; label: string | null }[] | null }[];
   daemonError: string | null;
 }
 
@@ -322,7 +324,11 @@ export function foldView(input: {
     kpis: foldKpis(tasks),
     tasks,
     agents: [...input.daemon.agents],
-    providers: input.daemon.providers.map((provider) => ({ provider: provider.provider, available: provider.available, models: null })),
+    providers: input.daemon.providers.map((provider) => ({
+      provider: provider.provider,
+      available: provider.available,
+      models: provider.models ?? null,
+    })),
     supervisor: input.daemon.supervisor,
     retro: foldRetro(input.events),
     ledger: ledgerLines(input.events),
