@@ -5,6 +5,83 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.14] - 2026-10-16
+
+v0.0.14's one thing: **Project-scoped SLP seats at `cwd`, a model-backed Lead
+agent, and automatic Task worktrees with local landing** — ADR 0010 made real.
+Four pieces move the topology from one synthetic global seat to one standing
+Supervisor and Lead per Project, both rooted inside the repository:
+
+1. **Per-Project identity and state (`src/projects.ts`, `src/factory.ts`)** —
+   any Git repository resolves to `<slug> = <basename(root)>-<sha1(realpath(gitCommonDir)).slice(0,6)>`
+   (`git rev-parse --show-toplevel --git-common-dir`, worktree-aware), and the
+   Project's `ledger.jsonl`, reports, gate logs, retro files, optional
+   `lanes.json` override, and Task worktrees live under
+   `<stateDir>/projects/<slug>/`. The root ledger stays readable as the
+   unscoped fallback; the spool, choke writable set, and generated claim-CLI
+   wrappers remain root-level (one writer per home).
+2. **Automatic Task worktrees and local landing on Accept
+   (`plugin/bin/task-worktree.mjs`, `src/factory.ts`)** — `factory run`
+   allocates `<projectStateDir>/worktrees/<task>` on branch `factory/<task>`
+   at the Contract's base (copying `.worktreeinclude` matches, excluded via a
+   per-worktree excludes file), spawns the working Agent with
+   `cwd = <taskWorktreePath>` (recorded on `spawn_dispatched.worktree`), and
+   `claim` / Gate run against the worktree. `factory accept` is now async:
+   landing runs before the `attempt_accepted` append — fast-forward or
+   cherry-pick `claimedCommit` into `<project-root>`'s local branch, remove
+   the worktree, keep `factory/<task>`, idempotent on retry, and
+   `landing: "landed" | "pending-conflict"` (+ `landingNote`) when the root
+   is dirty or conflicts.
+3. **Project seats at `cwd` with additive injection
+   (`plugin/server/roles.ts`, `plugin/server/surface-rpc.ts`)** —
+   `factory.supervisor.ensure` / `factory.lead.ensure`
+   (`{projectRoot, message?}`) find or create `seat=supervisor|lead,
+   project=<slug>` agents with `cwd = <project-root>` under their lanes; the
+   retired `<home>-supervisor/AGENTS.md` overwrite is gone. Role contracts
+   ride two additive channels at create (`config.systemPrompt` append in the
+   `agent.create` before-hook plus a bootstrap `prompt`) and one at every
+   launch (`PASEO_FACTORY_SEAT/PROJECT/PROJECT_ROOT/STATE_DIR[/TASK]` env on
+   `agent.session_open`), each footer carrying its role's skill index
+   (Supervisor `grilling, domain-modeling`; Lead `codebase-design,
+   domain-modeling, tdd`; Agent `tdd, diagnosing-bugs, codebase-design`).
+   `factory.lead.rotate` (RPC + `factory lead rotate --project <dir>` spool
+   path) cancels and archives the live Lead; the FactoryView version bumps to
+   2 (`project`, `projects`, `lead`), the surface gains a Project Selector,
+   workspace-panel auto-binding, a Lead lane card, and **Ratify via
+   Supervisor** (`factory.retro.ratify`) dispatching the verbatim proposal to
+   the Project's Supervisor with the two-tier memory instruction.
+4. **Lead acceptance, Contract `skills`, and the memory write fence
+   (`src/factory.ts`, `src/events.ts`, `plugin/server/choke.ts`)** — `accept
+   --by owner|supervisor|lead` names the accepting seat; `lead` is judged at
+   the factory (green verdict, no fresh-eyes CONCERN, not needs-human) and
+   refused with `lead-accept-refused` otherwise. `factory contract --skills
+   tdd,diagnosing-bugs` records the list on the Contract and the driver's
+   brief prepends `Required skills to open first: <skills>`. Contracted
+   working Agents are fenced off `AGENTS.md` / `CLAUDE.md` / `CONTEXT.md`
+   unless explicitly scoped — project memory is written by the seats and
+   ratified proposals, never by a mid-task worker.
+
+### Added
+
+- `docs/adr/0010-project-scoped-slp-worktrees-and-lead-agent.md`;
+  `CONTEXT.md` gains **Project**, **Task worktree**, and **Lead (model-backed
+  seat)** and updates **Supervisor**, **Contract**, **Accept**, **Lane
+  config**, and **Choke policy**.
+- `src/projects.ts` (`resolveProject`, `projectStateDir`, registry), the
+  `lead` lane with per-Project override (`loadLanes(stateDir, slug?)`),
+  `plugin/bin/task-worktree.mjs`, `plugin/bin/project.mjs`,
+  `plugin/server/roles.ts`, `factory.lead.ensure` / `factory.lead.rotate` /
+  `factory.retro.ratify` RPCs, the `lead_rotate` spool kind, the `factory
+  lead rotate` CLI, Contract `--skills`, and `accept --by`.
+
+### Changed
+
+- `package.json` + `SHELL_VERSION` → `0.0.14`; FactoryView version → 2.
+- Verified live on `~/.paseo-factory` (Project seats at `cwd`, a
+  `--skills tdd` Task through worktree, gate, Lead accept, and local landing)
+  and installed onto `~/.paseo` so Paseo Desktop renders the Project-scoped
+  Factory surface out of the box. Suite 307 → 357.
+
 ## [0.0.13] - 2026-10-15
 
 v0.0.13's one thing: **the Factory surface in Paseo + unified Lane config and
