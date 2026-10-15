@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { createFactory } from "../plugin/server/core/factory.ts";
 import { createSurfaceHandlers } from "../plugin/server/surface-rpc.ts";
 import type { SurfaceDaemonApi } from "../plugin/server/surface-rpc.ts";
-import { loadLanes } from "../src/lanes.ts";
+import { loadLanes, lanesPath } from "../src/lanes.ts";
 import { fakeCopilotRunner, disposeDir, makeTempDir, writeLanes } from "./helpers.ts";
 
 /**
@@ -286,6 +286,7 @@ test("lanes.set: writes lanes.json, syncs a live supervisor's model, refuses inv
   assert.equal(reply.lanes.supervisor, "claude/opus-4-8");
   const reread = loadLanes(stateDir);
   assert.ok(reread.ok && reread.lanes.supervisor === "claude/opus-4-8", "lanes.json is the config of record");
+  assert.deepEqual(JSON.parse(readFileSync(lanesPath(stateDir), "utf8")), { supervisor: "claude/opus-4-8" }, "a lane-card save persists only the lane it names — defaults never materialize");
   assert.deepEqual(modelSyncs, [{ agentId: "agent-sup-1", model: "opus-4-8" }], "the live supervisor's modelId (stripped of provider prefix) was synced");
 
   // No live supervisor → the sync is skipped, named, never a failure.
@@ -293,12 +294,18 @@ test("lanes.set: writes lanes.json, syncs a live supervisor's model, refuses inv
   assert.ok(skipped.ok);
   assert.match(skipped.modelSync, /skipped/);
   assert.equal(modelSyncs.length, 1);
+  assert.deepEqual(
+    JSON.parse(readFileSync(lanesPath(stateDir), "utf8")),
+    { supervisor: "claude/opus-4-8", worker: "copilot/gpt-5.4" },
+    "the second single-lane save keeps the first named lane and adds nothing else",
+  );
 
   const bad = await handlers.lanesSet({ lane: "watch", value: "auto" });
   assert.ok(!bad.ok);
   assert.equal(bad.code, "invalid-lane");
   const unchanged = loadLanes(stateDir);
   assert.ok(unchanged.ok && unchanged.lanes.watch === "pi/zai/glm-5.3", "a refused set leaves the file untouched");
+  assert.deepEqual(Object.keys(JSON.parse(readFileSync(lanesPath(stateDir), "utf8"))).sort(), ["supervisor", "worker"]);
 });
 
 // ---- the one-click Supervisor bridge -------------------------------------------------------

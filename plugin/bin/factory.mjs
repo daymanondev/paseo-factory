@@ -99,9 +99,9 @@ commands:
              <stateDir>/lanes.json — the plugin need not be running.
              lanes                    print all five lanes
              lanes get [<lane>]       print one lane, or all five when omitted
-             lanes set <lane> <value> validate and write one lane (the file
-                                      is written whole; a refused value writes
-                                      nothing, exit 2)
+             lanes set <lane> <value> validate and write one lane (only the
+                                      lanes ever named persist — a refused
+                                      value writes nothing, exit 2)
 
   retro      Run the Retro over the whole ledger, on demand (v0.0.7): the
              plugin builds the corpus digest, prompts the configured retro

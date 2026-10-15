@@ -60,20 +60,47 @@ export function loadLanes(stateDir) {
   return { ok: true, lanes };
 }
 
-/** Mirrors saveLanes: merge one lane over the current table, validate, write whole. */
+/**
+ * Mirrors explicitLanes in src/lanes.ts: the lanes the file itself names —
+ * the seed persistence keeps, so a save never materializes the defaults.
+ */
+function explicitLanes(stateDir) {
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(lanesPath(stateDir), "utf8"));
+  } catch {
+    return {};
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
+  const explicit = {};
+  for (const name of LANE_NAMES) {
+    const value = parsed[name];
+    if (typeof value === "string") explicit[name] = value.trim();
+  }
+  return explicit;
+}
+
+/**
+ * Mirrors saveLanes: merge one lane over the lanes the file itself names,
+ * validate, persist only the named lanes (loadLanes fills defaults at read
+ * time — the eye.json retention invariant: a lane the file never named stays
+ * unnamed after an unrelated write).
+ */
 export function saveLanes(stateDir, update) {
   const current = loadLanes(stateDir);
   if (!current.ok) return current;
   const next = { ...current.lanes };
+  const persisted = explicitLanes(stateDir);
   for (const name of LANE_NAMES) {
     const value = update?.[name];
     if (value === undefined) continue;
     const error = laneError(name, value.trim());
     if (error !== undefined) return { ok: false, reason: error };
     next[name] = value.trim();
+    persisted[name] = value.trim();
   }
   mkdirSync(stateDir, { recursive: true });
-  writeFileSync(lanesPath(stateDir), `${JSON.stringify(next, null, 2)}\n`);
+  writeFileSync(lanesPath(stateDir), `${JSON.stringify(persisted, null, 2)}\n`);
   return { ok: true, lanes: next };
 }
 

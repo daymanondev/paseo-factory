@@ -107,23 +107,51 @@ export function loadLanes(stateDir: string): LanesResult {
 }
 
 /**
- * Merges a partial lane table over the current one and writes the file whole
- * — exactly the five lanes, pretty-printed with a trailing newline. A refused
- * value writes nothing. Returns the reloaded table on success.
+ * The lanes the file itself names — the seed persistence keeps. `loadLanes`
+ * fills defaults; this drops them again, so a save writes only what was ever
+ * explicitly set (the eye.json retention invariant: a lane the file never
+ * named — `freshEyes` included — must stay unnamed after an unrelated write).
+ */
+function explicitLanes(stateDir: string): Partial<Record<LaneName, string>> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(lanesPath(stateDir), "utf8"));
+  } catch {
+    return {}; // absent or unreadable — loadLanes already named the broken case
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
+  const record = parsed as Partial<Record<LaneName, unknown>>;
+  const explicit: Partial<Record<LaneName, string>> = {};
+  for (const name of LANE_NAMES) {
+    const value = record[name];
+    if (typeof value === "string") explicit[name] = value.trim();
+  }
+  return explicit;
+}
+
+/**
+ * Merges a partial lane table over the lanes the file itself names and writes
+ * only those — a single-lane set never materializes the defaults (the eye.json
+ * retention invariant: `loadLanes` fills defaults at read time, so an unnamed
+ * lane stays unnamed on disk and a legacy eye.json keeps answering). A refused
+ * value writes nothing. Returns the effective (merged over defaults) table on
+ * success.
  */
 export function saveLanes(stateDir: string, update: Partial<Record<LaneName, string>>): LanesResult {
   const current = loadLanes(stateDir);
   if (!current.ok) return current;
   const next = { ...current.lanes };
+  const persisted = explicitLanes(stateDir);
   for (const name of LANE_NAMES) {
     const value = update[name];
     if (value === undefined) continue;
     const error = laneError(name, value.trim());
     if (error !== undefined) return { ok: false, reason: error };
     next[name] = value.trim();
+    persisted[name] = value.trim();
   }
   mkdirSync(stateDir, { recursive: true });
-  writeFileSync(lanesPath(stateDir), `${JSON.stringify(next, null, 2)}\n`);
+  writeFileSync(lanesPath(stateDir), `${JSON.stringify(persisted, null, 2)}\n`);
   return { ok: true, lanes: next };
 }
 

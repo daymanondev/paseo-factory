@@ -14,6 +14,7 @@ import {
   saveLanes,
 } from "../src/lanes.ts";
 import type { LaneCliRunner } from "../src/lanes.ts";
+import { resolveEyeLane } from "../src/fresh-eyes.ts";
 import {
   DEFAULT_LANE as DEFAULT_LANE_MJS,
   LANE_NAMES as LANE_NAMES_MJS,
@@ -102,7 +103,7 @@ test("an invalid lane value is a named error naming the lane", (t) => {
   assert.match(lanes.reason, /retro/);
 });
 
-test("saveLanes validates every lane, writes the five whole, and reloads", (t) => {
+test("saveLanes validates every lane and persists only the lanes it names — defaults are never materialized", (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);
   const stateDir = join(dir, "factory");
@@ -111,12 +112,40 @@ test("saveLanes validates every lane, writes the five whole, and reloads", (t) =
   assert.ok(saved.ok);
   assert.equal(saved.lanes.watch, "copilot/gpt-5.4");
   assert.equal(saved.lanes.freshEyes, "eye.json");
-  assert.equal(saved.lanes.worker, DEFAULT_LANE, "an unspecified lane keeps its default");
+  assert.equal(saved.lanes.worker, DEFAULT_LANE, "an unspecified lane keeps its default — the returned table is the effective one");
   const onDisk = JSON.parse(readFileSync(lanesPath(stateDir), "utf8")) as Record<string, unknown>;
-  assert.deepEqual(Object.keys(onDisk).sort(), [...LANE_NAMES].sort(), "the file is machine-shaped: exactly the five lanes");
+  assert.deepEqual(Object.keys(onDisk).sort(), ["freshEyes", "watch"], "the file persists exactly the lanes that were set — the eye.json retention invariant");
   const reread = loadLanes(stateDir);
   assert.ok(reread.ok);
   assert.deepEqual(reread.lanes, saved.lanes);
+});
+
+test("a single-lane save never names the other lanes — an existing eye.json keeps answering (resolveEyeLane retention)", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const stateDir = join(dir, "factory");
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(join(stateDir, "eye.json"), JSON.stringify({ provider: "fake", model: "legacy-eye", apiKey: "k", baseUrl: "http://127.0.0.1:1" }));
+
+  // The upgrade scenario: an eye.json exists, lanes.json never did, and the
+  // Owner sets one unrelated lane (CLI `factory lanes set worker ...`, or a UI
+  // lane-card save). The write must not materialize freshEyes.
+  const saved = saveLanes(stateDir, { worker: "claude/opus-4-8" });
+  assert.ok(saved.ok);
+  assert.deepEqual(JSON.parse(readFileSync(lanesPath(stateDir), "utf8")), { worker: "claude/opus-4-8" }, "one lane in, one lane on disk");
+  const eyeLane = resolveEyeLane(stateDir);
+  assert.ok(eyeLane.ok);
+  assert.equal(eyeLane.lane, "eye.json", "the legacy eye keeps answering — the single-lane write never retired it");
+
+  // A second single-lane write preserves the first named lane, still without
+  // naming the rest; an explicit freshEyes set still wins (the ADR 0009 §3 law).
+  const second = saveLanes(stateDir, { watch: "pi/zai/glm-5.3" });
+  assert.ok(second.ok);
+  assert.deepEqual(JSON.parse(readFileSync(lanesPath(stateDir), "utf8")), { worker: "claude/opus-4-8", watch: "pi/zai/glm-5.3" });
+  assert.ok(resolveEyeLane(stateDir).lane === "eye.json");
+  const explicit = saveLanes(stateDir, { freshEyes: "pi/zai/glm-5.3" });
+  assert.ok(explicit.ok);
+  assert.equal(resolveEyeLane(stateDir).lane, "pi/zai/glm-5.3", "an explicit freshEyes always wins — that behavior stays");
 });
 
 test("saveLanes refuses an invalid lane and writes nothing", (t) => {
@@ -199,7 +228,7 @@ test("runLaneCli failures name the command: nonzero exit, deadline, unknown lane
 
 // ---- the CLI-side mirror (ADR 0004: CLIs import no src/ code) ----------------------------
 
-test("the plugin/bin mirror matches src/lanes.ts: names, default, validation, load tolerance", async (t) => {
+test("the plugin/bin mirror matches src/lanes.ts: names, default, validation, load tolerance, save persistence", async (t) => {
   assert.deepEqual(LANE_NAMES_MJS, LANE_NAMES);
   assert.equal(DEFAULT_LANE_MJS, DEFAULT_LANE);
 
@@ -236,6 +265,24 @@ test("the plugin/bin mirror matches src/lanes.ts: names, default, validation, lo
 
   writeRawLanes(stateDir, "{ broken");
   assert.ok(!(await loadLanesMjs(stateDir)).ok, "the mirror refuses unparseable JSON too");
+
+  // The persistence law mirrors too: a save over a partial file keeps the
+  // file partial — only the lanes ever named land on disk.
+  const { saveLanes: saveLanesMjs } = await import("../plugin/bin/lanes-config.mjs");
+  const dirSrc = join(dir, "src-half");
+  const dirMjs = join(dir, "mjs-half");
+  writeRawLanes(dirSrc, `${JSON.stringify({ worker: "claude/opus-4-8" })}\n`);
+  writeRawLanes(dirMjs, `${JSON.stringify({ worker: "claude/opus-4-8" })}\n`);
+  const savedSrc = saveLanes(dirSrc, { watch: "copilot/gpt-5.4" });
+  const savedMjs = await saveLanesMjs(dirMjs, { watch: "copilot/gpt-5.4" });
+  assert.ok(savedSrc.ok && savedMjs.ok);
+  assert.deepEqual(savedMjs.lanes, savedSrc.lanes, "both savers return the same effective table");
+  assert.deepEqual(
+    JSON.parse(readFileSync(lanesPath(dirMjs), "utf8")),
+    JSON.parse(readFileSync(lanesPath(dirSrc), "utf8")),
+    "both savers persist exactly the named lanes",
+  );
+  assert.deepEqual(JSON.parse(readFileSync(lanesPath(dirMjs), "utf8")), { worker: "claude/opus-4-8", watch: "copilot/gpt-5.4" });
 });
 
 // ---- the Owner CLI (factory lanes / run fallback) ----------------------------------------
@@ -254,10 +301,11 @@ test("factory lanes: get prints the defaults, set writes one lane, invalid set e
 
   const set = await runCli(["lanes", "set", "watch", "copilot/gpt-5.4"], { PASEO_HOME: home });
   assert.equal(set.status, 0, set.stderr);
+  assert.deepEqual(JSON.parse(readFileSync(lanesPath(stateDir), "utf8")), { watch: "copilot/gpt-5.4" }, "set persists exactly the lane it names — never the file whole");
   const reread = loadLanes(stateDir);
   assert.ok(reread.ok);
   assert.equal(reread.lanes.watch, "copilot/gpt-5.4");
-  assert.equal(reread.lanes.worker, DEFAULT_LANE, "set touches one lane, never the file whole");
+  assert.equal(reread.lanes.worker, DEFAULT_LANE, "an unnamed lane reads back at its default");
 
   const bad = await runCli(["lanes", "set", "watch", "auto"], { PASEO_HOME: home });
   assert.equal(bad.status, 2, "an invalid lane is a usage failure");
