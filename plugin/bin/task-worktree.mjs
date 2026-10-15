@@ -39,6 +39,25 @@ export function taskWorktreeBranch(task) {
   return `factory/${task}`;
 }
 
+/**
+ * The parse of the shape `taskWorktreePath` builds (this file owns the one
+ * `<stateDir>/projects/<slug>/worktrees/<task>` encoding): recognizes a
+ * managed Task worktree cwd — or a directory inside one — and names its
+ * project and task; anything else is null, not ours to inject. The server's
+ * role layer (plugin/server/roles.ts) imports this instead of re-encoding
+ * the shape (a relative local import keeps the bin file zero-dep, ADR 0004).
+ */
+export function parseTaskWorktreePath(stateDir, cwd) {
+  const prefix = `${projectStateDir(stateDir, "")}/`;
+  if (typeof cwd !== "string" || !cwd.startsWith(prefix)) return null;
+  const segments = cwd.slice(prefix.length).split("/");
+  if (segments.length < 3) return null;
+  const [slug, worktrees, task] = segments;
+  if (slug === undefined || worktrees !== "worktrees" || task === undefined) return null;
+  if (slug === "" || task === "") return null;
+  return { slug, task };
+}
+
 function gitIn(cwd, args) {
   return spawnSync("git", args, { cwd, encoding: "utf8", timeout: GIT_TIMEOUT_MS });
 }

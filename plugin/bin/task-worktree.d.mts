@@ -7,6 +7,14 @@
 
 export declare function taskWorktreePath(stateDir: string, projectSlug: string, task: string): string;
 export declare function taskWorktreeBranch(task: string): string;
+/**
+ * The parse of the shape `taskWorktreePath` builds (this file owns the one
+ * `<stateDir>/projects/<slug>/worktrees/<task>` encoding): a managed worktree
+ * cwd — or a directory inside one — names its project and task; anything
+ * else is null. The server's role layer imports this instead of re-encoding
+ * the shape.
+ */
+export declare function parseTaskWorktreePath(stateDir: string, cwd: string): { slug: string; task: string } | null;
 
 export interface PreparedTaskWorktree {
   ok: true;

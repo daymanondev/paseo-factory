@@ -25,6 +25,7 @@ import { join } from "node:path";
 import { projectStateDir, resolveProject } from "./core/project.ts";
 import type { ProjectResolution } from "./core/project.ts";
 import { listProjectRegistrations } from "./projects.ts";
+import { parseTaskWorktreePath } from "../bin/task-worktree.mjs";
 
 /**
  * The Project identity slice every role renderer carries — ProjectResolution's
@@ -154,21 +155,6 @@ export function factoryEnvFor(role: RoleName, input: { stateDir: string; project
   return env;
 }
 
-/**
- * Recognizes a managed Task worktree cwd — `<stateDir>/projects/<slug>/worktrees/<task>`
- * (v0.0.14, ADR 0010 §4). The driver allocates the worktree pre-spawn, so the
- * shape alone names the project and task; anything else is not ours to inject.
- */
-export function parseWorktreeCwd(stateDir: string, cwd: string): { slug: string; task: string } | null {
-  if (!cwd.startsWith(`${stateDir}/projects/`)) return null;
-  const segments = cwd.slice(`${stateDir}/projects/`.length).split("/");
-  if (segments.length < 3) return null;
-  const [slug, worktrees, task] = segments;
-  if (slug === undefined || worktrees !== "worktrees" || task === undefined) return null;
-  if (slug === "" || task === "") return null;
-  return { slug, task };
-}
-
 // The before("agent.create") request slice — the SDK's shape restated locally
 // so the pure function stays testable without a server.
 export interface AgentCreateRequest {
@@ -199,7 +185,7 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(request: R, sta
       env: { ...(request.env ?? {}), ...factoryEnvFor(seat, { stateDir, project }) },
     };
   }
-  const worktree = parseWorktreeCwd(stateDir, request.config.cwd);
+  const worktree = parseTaskWorktreePath(stateDir, request.config.cwd);
   if (worktree === null) return undefined;
   return {
     ...request,
@@ -222,7 +208,7 @@ export function injectSessionEnv<R extends { agentId: string; cwd: string; env: 
   request: R,
   stateDir: string,
 ): R | undefined {
-  const worktree = parseWorktreeCwd(stateDir, request.cwd);
+  const worktree = parseTaskWorktreePath(stateDir, request.cwd);
   if (worktree !== null) {
     return { ...request, env: { ...request.env, ...factoryEnvFor("agent", { stateDir, project: { root: "", slug: worktree.slug }, task: worktree.task }) } };
   }

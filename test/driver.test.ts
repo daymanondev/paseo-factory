@@ -22,7 +22,7 @@ import {
   taskOutcome,
   verdictOfThisRun,
 } from "../plugin/bin/driver.mjs";
-import { prepareTaskWorkspace, prepareTaskWorktree } from "../plugin/bin/task-worktree.mjs";
+import { prepareTaskWorkspace, prepareTaskWorktree, parseTaskWorktreePath } from "../plugin/bin/task-worktree.mjs";
 import { resolveProject } from "../plugin/bin/project.mjs";
 import { copyFixture, disposeDir, gitCommitAll, gitCommitChanges, makeTempDir } from "./helpers.ts";
 import { awaitReply, submit } from "../plugin/bin/spool-client.mjs";
@@ -283,6 +283,15 @@ test("a subdirectory workspace keeps the legacy single-checkout path — no work
     assert.equal(rooted.branch, "factory/WT10");
     assert.notEqual(rooted.legacy, true);
   }
+});
+
+test("parseTaskWorktreePath owns the one <stateDir>/projects/<slug>/worktrees/<task> encoding — build and parse agree", () => {
+  const stateDir = join("/h", "plugin-state", "paseo-factory");
+  assert.deepEqual(parseTaskWorktreePath(stateDir, join(stateDir, "projects", "ws-b4921c", "worktrees", "T1")), { slug: "ws-b4921c", task: "T1" });
+  assert.deepEqual(parseTaskWorktreePath(stateDir, join(stateDir, "projects", "ws-b4921c", "worktrees", "T1", "src")), { slug: "ws-b4921c", task: "T1" }, "a cwd inside the worktree names the worktree");
+  assert.equal(parseTaskWorktreePath(stateDir, join(stateDir, "projects", "ws-b4921c", "ledger.jsonl")), null, "project state that is not a worktree is not ours");
+  assert.equal(parseTaskWorktreePath(stateDir, "/tmp/somewhere-else"), null);
+  assert.equal(parseTaskWorktreePath(stateDir, stateDir), null);
 });
 
 test("prepareTaskWorktree refuses a non-git workspace by name; the dispatcher never falls back to the shared checkout", (t) => {
