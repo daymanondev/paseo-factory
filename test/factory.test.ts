@@ -1,8 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createFactory } from "../src/factory.ts";
+import { projectStateDir, resolveProject } from "../src/project.ts";
 import { MAX_ATTEMPTS } from "../src/events.ts";
 import type { NeedsHumanReason } from "../src/events.ts";
 import { FactoryError } from "../src/errors.ts";
@@ -16,6 +19,97 @@ function makeWorkspace(dir: string): { workspace: string; artifact: string; sha:
   const sha = gitCommitAll(workspace);
   return { workspace, artifact, sha };
 }
+
+// ---- the canonical Project identity (v0.0.14, ADR 0010 §1/§5) --------------------------------
+
+/** The slug the spec's formula demands for a repo whose git dir sits at `<repo>/.git`. */
+function expectedSlugFor(repo: string): { slug: string; gitCommonDir: string } {
+  const gitCommonDir = realpathSync(join(repo, ".git"));
+  const hash = createHash("sha1").update(gitCommonDir).digest("hex").slice(0, 6);
+  return { slug: `${basenameOf(repo)}-${hash}`, gitCommonDir };
+}
+
+function basenameOf(path: string): string {
+  const trimmed = path.endsWith("/") && path.length > 1 ? path.slice(0, -1) : path;
+  const at = trimmed.lastIndexOf("/");
+  return at === -1 ? trimmed : trimmed.slice(at + 1);
+}
+
+test("resolveProject: one canonical Project per repo — the same root and slug from any directory inside it", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const repo = join(dir, "acme-api");
+  mkdirSync(join(repo, "src"), { recursive: true });
+  writeFileSync(join(repo, "src", "x.ts"), "export const x = 1;\n");
+  gitCommitAll(repo);
+  const expected = expectedSlugFor(repo);
+
+  const fromRoot = resolveProject(repo);
+  assert.ok(fromRoot.ok, fromRoot.ok ? "" : fromRoot.reason);
+  const fromInside = resolveProject(join(repo, "src"));
+  assert.ok(fromInside.ok, fromInside.ok ? "" : fromInside.reason);
+  assert.equal(fromRoot.root, fromInside.root, "any cwd inside the repo resolves the same top-level checkout");
+  assert.equal(fromRoot.gitCommonDir, expected.gitCommonDir);
+  assert.equal(fromRoot.slug, expected.slug, "slug = <basename(root)>-<sha1(realpath(gitCommonDir)).slice(0,6)>");
+  assert.equal(projectStateDir(join(dir, "state"), fromRoot.slug), join(dir, "state", "projects", fromRoot.slug));
+});
+
+test("resolveProject: a linked worktree keeps the main repo's git dir in its slug — the hash anchors the repo", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const repo = join(dir, "main-repo");
+  mkdirSync(repo, { recursive: true });
+  writeFileSync(join(repo, "a.txt"), "a\n");
+  gitCommitAll(repo);
+  const worktreeDir = join(dir, "feature-wt");
+  execFileSync("git", ["worktree", "add", "-q", "-b", "feature", worktreeDir], { cwd: repo, stdio: ["ignore", "ignore", "pipe"] });
+  const main = expectedSlugFor(repo);
+
+  const resolved = resolveProject(worktreeDir);
+  assert.ok(resolved.ok, resolved.ok ? "" : resolved.reason);
+  assert.equal(resolved.gitCommonDir, main.gitCommonDir, "--git-common-dir follows the link back to the main repo's git dir");
+  const mainHash = createHash("sha1").update(main.gitCommonDir).digest("hex").slice(0, 6);
+  assert.equal(resolved.slug, `feature-wt-${mainHash}`);
+});
+
+test("resolveProject: a directory outside any git repo is a named refusal, never a guess", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const plain = join(dir, "plain");
+  mkdirSync(plain, { recursive: true });
+
+  const resolved = resolveProject(plain);
+  assert.ok(!resolved.ok);
+  assert.match(resolved.reason, /git/);
+});
+
+test("a project-scoped factory keeps its ledger, reports, and gate logs under projects/<slug>/ — the root ledger stays untouched", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact, sha } = makeWorkspace(dir);
+  const stateDir = join(dir, "factory");
+  const project = resolveProject(workspace);
+  assert.ok(project.ok, project.ok ? "" : project.reason);
+
+  const factory = createFactory({ stateDir, projectSlug: project.slug });
+  factory.setContract({ task: "P1", workspace, gate: "true", artifact });
+  const outcome = await factory.claim({ task: "P1", sha });
+  assert.equal(outcome.verdict, "green");
+
+  const projectDir = join(stateDir, "projects", project.slug);
+  assert.ok(existsSync(join(projectDir, "ledger.jsonl")), "the ledger lands under projects/<slug>/");
+  assert.ok(existsSync(join(projectDir, "report-P1-1.md")), "reports land under projects/<slug>/");
+  assert.ok(existsSync(join(projectDir, "gate-P1-1.log")), "gate logs land under projects/<slug>/");
+  assert.ok(!existsSync(join(stateDir, "ledger.jsonl")), "no project scope, no root ledger — the trees stay isolated");
+  assert.equal(factory.stateDir, stateDir, "the Factory's stateDir stays the root: the spool, the choke writable set, and the git-block log keep their root paths");
+
+  // The legacy path: no projectSlug → exactly today's layout (every pre-0.0.14 test's law).
+  const legacy = createFactory({ stateDir: join(dir, "legacy") });
+  legacy.setContract({ task: "L1", workspace, gate: "true", artifact });
+  await legacy.claim({ task: "L1", sha });
+  assert.ok(existsSync(join(dir, "legacy", "ledger.jsonl")));
+  assert.ok(!existsSync(join(dir, "legacy", "projects")));
+});
 
 test("setContract records the workspace with the criteria and enforces one contract per task", (t) => {
   const dir = makeTempDir();

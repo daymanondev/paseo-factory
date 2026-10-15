@@ -13,6 +13,7 @@ import type { CopilotRunner, TimelineFetcher } from "./watch.ts";
 import { buildRetroDigest, retroDay, retroLaneAvailable, runRetroPass, writtenRetroForDay } from "./retro.ts";
 import type { RetroOutcome } from "./retro.ts";
 import { changesOutsideScope, checkCleanAt, headCommitSync, resolveClaimedCommit } from "./workspace.ts";
+import { projectStateDir } from "./project.ts";
 import { FactoryError } from "./errors.ts";
 import type { AttemptAccepted, ContractSet, GateFinished, GitBlocked, LedgerEvent, MeterWritten, MeterUsage, NeedsHuman, NeedsHumanEvidence, NeedsHumanReason, RepokeDispatched, RepokeRefused, RespawnDispatched, RespawnRefused, SpawnDispatched, SpawnRefused, Verdict } from "./events.ts";
 import type { GateResult } from "./gate.ts";
@@ -23,6 +24,15 @@ const TASK_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 export interface FactoryOptions {
   /** Directory for `ledger.jsonl`, `report-<task>-<n>.md` and `gate-<task>-<n>.log` files. */
   stateDir: string;
+  /**
+   * The Project scope (v0.0.14, ADR 0010 §5): when set, the ledger, reports
+   * and gate logs live under `<stateDir>/projects/<projectSlug>/` instead of
+   * the root — one isolated tree per Git repository (`resolveProject` names
+   * the slug). Omitted, everything sits at the root exactly as before (the
+   * legacy single-ledger layout every pre-0.0.14 caller uses). Machine-level
+   * config (`lanes.json`, `eye.json`) stays at the root either way.
+   */
+  projectSlug?: string;
   /** Gate timeout override (ms). Defaults to DEFAULT_GATE_TIMEOUT_MS. */
   timeoutMs?: number;
   /** Fresh-eyes total budget override (ms), both tries together. Defaults to EYE_TOTAL_BUDGET_MS. */
@@ -304,8 +314,14 @@ export interface Factory {
 
 export function createFactory(options: FactoryOptions): Factory {
   const { stateDir } = options;
-  const ledger = Ledger.open(join(stateDir, "ledger.jsonl"));
-  const recoveredAttempts = recoverInterruptedAttempts(ledger, stateDir);
+  // The data tree: project-scoped factories keep their ledger, reports, gate
+  // logs, and retro files under <stateDir>/projects/<slug>/ (v0.0.14, ADR
+  // 0010 §5); machine-level config (lanes.json, eye.json) stays at the root
+  // for every factory, and the root data tree remains the no-scope default
+  // (the legacy single-ledger layout).
+  const dataDir = options.projectSlug === undefined ? stateDir : projectStateDir(stateDir, options.projectSlug);
+  const ledger = Ledger.open(join(dataDir, "ledger.jsonl"));
+  const recoveredAttempts = recoverInterruptedAttempts(ledger, dataDir);
 
   return {
     ledger,
@@ -483,7 +499,7 @@ export function createFactory(options: FactoryOptions): Factory {
       // command never runs on an unverified tree.
       const resolved = await resolveClaimedCommit(contract.workspace, sha);
       if (!resolved.ok) {
-        return finish(task, attempt, ledger, stateDir, contract, { exit: null, verdict: "red", note: resolved.reason, timedOut: false }, undefined, undefined, undefined, watchContext());
+        return finish(task, attempt, ledger, stateDir, dataDir, contract, { exit: null, verdict: "red", note: resolved.reason, timedOut: false }, undefined, undefined, undefined, watchContext());
       }
 
       // Station 2 — clean tree, HEAD at the claimed commit, before the gate.
@@ -494,6 +510,7 @@ export function createFactory(options: FactoryOptions): Factory {
           attempt,
           ledger,
           stateDir,
+          dataDir,
           contract,
           {
             exit: null,
@@ -536,6 +553,7 @@ export function createFactory(options: FactoryOptions): Factory {
           attempt,
           ledger,
           stateDir,
+          dataDir,
           contract,
           {
             exit: result.exit,
@@ -560,6 +578,7 @@ export function createFactory(options: FactoryOptions): Factory {
             attempt,
             ledger,
             stateDir,
+            dataDir,
             contract,
             { exit: result.exit, verdict: "red", note: "scoped contract has no recorded base commit", timedOut: false },
             resolved.full,
@@ -578,6 +597,7 @@ export function createFactory(options: FactoryOptions): Factory {
             attempt,
             ledger,
             stateDir,
+            dataDir,
             contract,
             {
               exit: result.exit,
@@ -597,7 +617,7 @@ export function createFactory(options: FactoryOptions): Factory {
         scopeViolations = [];
       }
 
-      return finish(task, attempt, ledger, stateDir, contract, result, resolved.full, options.eyeBudgetMs, options.eyeCliRunner, watchContext());
+      return finish(task, attempt, ledger, stateDir, dataDir, contract, result, resolved.full, options.eyeBudgetMs, options.eyeCliRunner, watchContext());
     },
 
     accept({ task, attempt, accepted_by }) {
@@ -944,9 +964,14 @@ export function createFactory(options: FactoryOptions): Factory {
           `a retro already ran today — its ${prior.proposalCount ?? 0} proposals sit in ${prior.proposalsPath}; a failed retro leaves no line, so only a failed one may be re-run today`,
         );
       }
-      const corpus = buildRetroDigest(ledger.events, stateDir);
+      // The digest reads the gate logs by basename against the DATA dir
+      // (v0.0.14: project factories keep them under projects/<slug>/); the
+      // pass writes its proposals file there too, while the lane stays
+      // machine config (root lanes.json).
+      const corpus = buildRetroDigest(ledger.events, dataDir);
       const outcome = await runRetroPass({
         stateDir,
+        ...(options.projectSlug === undefined ? {} : { dataDir }),
         corpus,
         ...(options.retroBudgetMs === undefined ? {} : { budgetMs: options.retroBudgetMs }),
         ...(options.retroCopilotRunner === undefined ? {} : { copilotRunner: options.retroCopilotRunner }),
@@ -1041,7 +1066,10 @@ async function finish(
   task: string,
   attempt: number,
   ledger: Ledger,
+  /** The root state dir — the eye's and watch's machine-level config (lanes.json, eye.json). */
   stateDir: string,
+  /** Where the data files land: the project dir when project-scoped, the root otherwise. */
+  dataDir: string,
   contract: ContractSet,
   result: GateResult,
   sha: string | undefined,
@@ -1057,7 +1085,7 @@ async function finish(
 ): Promise<ClaimOutcome> {
   let outputPath: string | undefined;
   if (result.output !== undefined) {
-    outputPath = join(stateDir, `gate-${task}-${attempt}.log`);
+    outputPath = join(dataDir, `gate-${task}-${attempt}.log`);
     writeFileSync(outputPath, result.output);
   }
   const gate = ledger.append({
@@ -1121,14 +1149,14 @@ async function finish(
       ...(watched.error === undefined ? {} : { error: watched.error }),
     });
   }
-  const reportPath = writeAttemptReport(task, attempt, ledger, stateDir);
+  const reportPath = writeAttemptReport(task, attempt, ledger, dataDir);
   return { attempt, verdict: result.verdict, gate, reportPath };
 }
 
 /** Every Attempt ends the same way: report rendered from the ledger, written, acknowledged. */
-function writeAttemptReport(task: string, attempt: number, ledger: Ledger, stateDir: string): string {
+function writeAttemptReport(task: string, attempt: number, ledger: Ledger, dataDir: string): string {
   const markdown = renderReport(task, attempt, ledger.eventsFor(task));
-  const reportPath = join(stateDir, `report-${task}-${attempt}.md`);
+  const reportPath = join(dataDir, `report-${task}-${attempt}.md`);
   writeFileSync(reportPath, markdown);
   ledger.append({ event: "report_written", task, attempt, path: reportPath });
   return reportPath;
@@ -1169,7 +1197,7 @@ function attemptIsOpen(history: readonly LedgerEvent[], attempt: number): boolea
  * landed (ticket 03 R1). The interrupted pass itself is never re-run: its line
  * simply never exists, recovery's report says so by omission.
  */
-function recoverInterruptedAttempts(ledger: Ledger, stateDir: string): { task: string; attempt: number }[] {
+function recoverInterruptedAttempts(ledger: Ledger, dataDir: string): { task: string; attempt: number }[] {
   const recovered: { task: string; attempt: number }[] = [];
   // `retro_written` carries no task — only tasked events can need recovery.
   const tasks = [...new Set(ledger.events.flatMap((e) => ("task" in e && typeof e.task === "string" ? [e.task] : [])))];
@@ -1192,7 +1220,7 @@ function recoverInterruptedAttempts(ledger: Ledger, stateDir: string): { task: s
             : "interrupted — the factory restarted before the Gate started",
         });
       }
-      writeAttemptReport(task, attempt, ledger, stateDir);
+      writeAttemptReport(task, attempt, ledger, dataDir);
       recovered.push({ task, attempt });
     }
   }
