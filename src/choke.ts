@@ -373,27 +373,34 @@ export type MemoryFileName = (typeof MEMORY_FILES)[number];
 
 /**
  * The ask-time fence's context: the live Contract's workspace (whose root
- * holds the memory files) and its declared scope — the only opt-in.
+ * holds the memory files), its declared scope — the only opt-in — and, since
+ * v0.0.14, the task's managed worktree root: a worktree agent's absolute
+ * writes name the worktree's copy of the memory file, and that copy lands in
+ * `<project-root>` at accept — the fence covers both roots.
  */
 export interface MemoryFence {
   workspace: string;
   scope?: readonly string[];
+  /** The task's managed Task worktree (v0.0.14), when its spawn recorded one. */
+  worktree?: string;
 }
 
 /**
- * The memory file `rawPath` targets, when it is the WORKSPACE-ROOT one:
- * relative paths match the bare name (`./` stripped — a relative ask resolves
- * against the agent's workspace cwd), absolute paths match
- * `<workspace>/<name>`. A nested file (`src/AGENTS.md`) is not the project
- * memory; `~`-relative paths are the home's, not the workspace's. Deliberately
- * not a shell parser: `sub/../AGENTS.md` is not chased (S2's quote-blindness
+ * The memory file `rawPath` targets, when it is a ROOT one (the workspace's
+ * or the worktree's): relative paths match the bare name (`./` stripped — a
+ * relative ask resolves against the agent's cwd, which holds a copy of the
+ * memory file on both paths), absolute paths match `<root>/<name>` for
+ * either root. A nested file (`src/AGENTS.md`) is not the project memory;
+ * `~`-relative paths are the home's, not the workspace's. Deliberately not a
+ * shell parser: `sub/../AGENTS.md` is not chased (S2's quote-blindness
  * doctrine — the corpus, not the grammar, is the boundary).
  */
-function memoryFileOf(rawPath: string, workspace: string): MemoryFileName | undefined {
-  const root = stripTrailingSlash(workspace);
+function memoryFileOf(rawPath: string, fence: MemoryFence): MemoryFileName | undefined {
+  const roots = [stripTrailingSlash(fence.workspace)];
+  if (fence.worktree !== undefined) roots.push(stripTrailingSlash(fence.worktree));
   for (const name of MEMORY_FILES) {
     if (isAbsolute(rawPath)) {
-      if (rawPath === join(root, name)) return name;
+      if (roots.some((root) => rawPath === join(root, name))) return name;
     } else {
       let relative = rawPath;
       while (relative.startsWith("./")) relative = relative.slice(2);
@@ -410,7 +417,7 @@ function memoryFileOf(rawPath: string, workspace: string): MemoryFileName | unde
  * when the destination is not a fenced file.
  */
 function judgeMemoryDestination(rawPath: string, fence: MemoryFence): ChokeDecision | undefined {
-  const name = memoryFileOf(rawPath, fence.workspace);
+  const name = memoryFileOf(rawPath, fence);
   if (name === undefined) return undefined;
   if (fence.scope !== undefined && fence.scope.length > 0 && scopeCoversFile(fence.scope, name)) return undefined;
   return {

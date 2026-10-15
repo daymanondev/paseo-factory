@@ -334,6 +334,16 @@ export interface SpawnDispatched {
   provider: string;
   /** How many tasks the spawning invocation carried — the run's parallel width. */
   arity: number;
+  /**
+   * The managed Task worktree this run executes in (v0.0.14, ADR 0010 §4) —
+   * `<projectStateDir>/worktrees/<task>` on branch `factory/<task>`, allocated
+   * by the driver before this line exists. The `provider`/`arity` precedent
+   * was recorded-never-interpreted; this field is the one deliberate
+   * exception — `claim` executes against it, `liveContractFor` binds the
+   * worktree agent's asks through it, and accept's landing reads it back.
+   * Absent on the legacy shared-checkout path and pre-0.0.14 lines.
+   */
+  worktree?: string;
 }
 
 /**

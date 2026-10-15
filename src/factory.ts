@@ -150,6 +150,13 @@ export interface SpawnInput {
    * parallel width, and scope is mandatory from two up (map decision 3).
    */
   arity: number;
+  /**
+   * The managed Task worktree this run executes in (v0.0.14, ADR 0010 §4) —
+   * the driver allocates it before submitting the spawn request and names it
+   * here; the line records it, and `claim` / `liveContractFor` / accept's
+   * landing read it back. Omitted on the legacy shared-checkout path.
+   */
+  worktree?: string;
 }
 
 /**
@@ -297,7 +304,10 @@ export interface Factory {
    * mechanical "contracted agent" test (v0.0.4 map decision 5: asks from
    * agents without a live Contract are not the factory's business). Live =
    * contract set and no accepted Attempt yet. When several live Contracts
-   * cover the same tree, the latest in ledger order wins.
+   * cover the same tree, the latest in ledger order wins. Since v0.0.14 a
+   * cwd inside the task's recorded Task worktree binds too — the worktree
+   * sits outside the workspace (under `<stateDir>/projects/`), so the spawn
+   * line's `worktree` field is what ties the tree to its Contract.
    */
   liveContractFor(cwd: string): ContractSet | undefined;
   /**
@@ -306,6 +316,14 @@ export interface Factory {
    * Undefined when no Contract was ever set for the task.
    */
   contractFor(task: string): ContractSet | undefined;
+  /**
+   * The managed Task worktree the task's latest dispatch runs in (v0.0.14,
+   * ADR 0010 §4) — the one lookup that binds a task to its execution tree:
+   * the claim's gate cwd and the choke's worktree agent both resolve through
+   * it. Undefined when no spawn recorded one (the legacy shared-checkout
+   * path, pre-0.0.14 lines).
+   */
+  worktreeFor(task: string): string | undefined;
   /**
    * Runs the Retro (v0.0.7): builds the whole-ledger digest, prompts the
    * pinned Copilot model, writes `retro-<date>.md`, appends one
@@ -501,6 +519,14 @@ export function createFactory(options: FactoryOptions): Factory {
       }
       const attempt = lastAttempt + 1;
 
+      // The execution tree (v0.0.14, ADR 0010 §4): a task spawned with a
+      // managed Task worktree claims, gates, and diffs THERE — the Contract's
+      // workspace stays <project-root>, the recorded home of the work and the
+      // landing target; the worktree is the driver-level execution detail the
+      // spawn line carries. Legacy spawns (no worktree on the line) execute
+      // at the contract workspace, v0.0.5's law.
+      const executionDir = this.worktreeFor(task) ?? contract.workspace;
+
       ledger.append({
         event: "claim_reported",
         task,
@@ -513,13 +539,13 @@ export function createFactory(options: FactoryOptions): Factory {
       // Station 1 — the claimed commit must exist as one full object. An empty,
       // unknown or ambiguous sha is a red Verdict (ADR 0002), and the gate
       // command never runs on an unverified tree.
-      const resolved = await resolveClaimedCommit(contract.workspace, sha);
+      const resolved = await resolveClaimedCommit(executionDir, sha);
       if (!resolved.ok) {
         return finish(task, attempt, ledger, stateDir, dataDir, contract, { exit: null, verdict: "red", note: resolved.reason, timedOut: false }, undefined, undefined, undefined, watchContext());
       }
 
       // Station 2 — clean tree, HEAD at the claimed commit, before the gate.
-      const before = await checkCleanAt(contract.workspace, resolved.full);
+      const before = await checkCleanAt(executionDir, resolved.full);
       if (!before.ok) {
         return finish(
           task,
@@ -545,7 +571,7 @@ export function createFactory(options: FactoryOptions): Factory {
       try {
         result = await runGate({
           cmd: contract.gate,
-          cwd: contract.workspace,
+          cwd: executionDir,
           artifact: contract.artifact,
           timeoutMs: options.timeoutMs,
         });
@@ -562,7 +588,7 @@ export function createFactory(options: FactoryOptions): Factory {
 
       // Station 3 — same check after the gate: a green exit on a tree that moved
       // during the run attests nothing.
-      const after = await checkCleanAt(contract.workspace, resolved.full);
+      const after = await checkCleanAt(executionDir, resolved.full);
       if (!after.ok) {
         return finish(
           task,
@@ -609,7 +635,7 @@ export function createFactory(options: FactoryOptions): Factory {
         );
       }
       if (contract.base !== undefined) {
-        const diff = await changedFiles(contract.workspace, contract.base, resolved.full);
+        const diff = await changedFiles(executionDir, contract.base, resolved.full);
         if (!diff.ok) {
           // A failed diff leaves the station with no measurement — undefined,
           // never an empty list posing as "clean".
@@ -717,8 +743,8 @@ export function createFactory(options: FactoryOptions): Factory {
       return ledger.append({ event: "attempt_accepted", task, attempt, ...(accepted_by === undefined ? {} : { accepted_by }) });
     },
 
-    requestSpawn({ task, provider, arity }) {
-      const base = { task, provider, arity };
+    requestSpawn({ task, provider, arity, worktree }) {
+      const base = { task, provider, arity, ...(worktree === undefined || worktree.trim() === "" ? {} : { worktree }) };
       // Two spellings of one refusal on purpose: `code` is dash-style for the
       // spool reply (the FactoryError convention), `rule` is colon-style for
       // the ledger line (the choke's `policy:S1-…` / `git:…` convention).
@@ -997,15 +1023,35 @@ export function createFactory(options: FactoryOptions): Factory {
 
     liveContractFor(cwd) {
       const accepted = acceptedTasks(ledger);
+      // The worktree map (v0.0.14, ADR 0010 §4): a task spawned into a managed
+      // Task worktree binds asks from that tree — the worktree sits under
+      // <stateDir>/projects/, OUTSIDE <project-root>, so the covers() test
+      // alone would miss every worktree agent. Latest dispatch per task wins.
+      const worktrees = new Map<string, string>();
+      for (const evt of ledger.events) {
+        if (evt.event === "spawn_dispatched" && typeof evt.worktree === "string" && evt.worktree !== "") {
+          worktrees.set(evt.task, evt.worktree);
+        }
+      }
       let match: ContractSet | undefined;
       for (const evt of ledger.events) {
-        if (evt.event === "contract_set" && !accepted.has(evt.task) && covers(evt, cwd)) match = evt;
+        if (evt.event !== "contract_set" || accepted.has(evt.task)) continue;
+        if (covers(evt, cwd)) match = evt;
+        const worktree = worktrees.get(evt.task);
+        if (worktree !== undefined && (cwd === worktree || cwd.startsWith(`${worktree}/`))) match = evt;
       }
       return match;
     },
 
     contractFor(task) {
       return ledger.eventsFor(task).findLast((e): e is ContractSet => e.event === "contract_set");
+    },
+
+    worktreeFor(task) {
+      for (const evt of ledger.eventsFor(task).reverse()) {
+        if (evt.event === "spawn_dispatched" && typeof evt.worktree === "string" && evt.worktree !== "") return evt.worktree;
+      }
+      return undefined;
     },
 
     async retro() {

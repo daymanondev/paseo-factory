@@ -78,8 +78,21 @@ export function createChoke(options: ChokeOptions): Choke {
 
   // The memory write fence's context (v0.0.14, ADR 0010 §6): every judged ask
   // comes from a contracted agent, so the live Contract's workspace and scope
-  // ride into the core judges — write/edit asks and shell destinations both.
-  const fenceOf = (contract: ContractSet): MemoryFence => ({ workspace: contract.workspace, scope: contract.scope });
+  // ride into the core judges — write/edit asks and shell destinations both —
+  // plus the task's worktree root when its spawn recorded one (a worktree
+  // agent's absolute writes name the worktree's copy of the memory file).
+  const fenceOf = (contract: ContractSet): MemoryFence => {
+    const worktree = factory.worktreeFor(contract.task);
+    return { workspace: contract.workspace, scope: contract.scope, ...(worktree === undefined ? {} : { worktree }) };
+  };
+  /**
+   * The writable root for an ask: the task's worktree when its spawn recorded
+   * one (the execution tree, v0.0.14 — the worktree sits under the state dir,
+   * so the root set already admits it, and the PROJECT ROOT drops out of the
+   * agent's writable set, which is the isolation working), the Contract's
+   * workspace otherwise.
+   */
+  const executionRootOf = (task: string, workspace: string): string => factory.worktreeFor(task) ?? workspace;
 
   const decide = (request: AgentPermissionRequest, workspace: string, memory?: MemoryFence): { decision: ChokeDecision; command?: string } => {
     const roots = writableRootsFor(workspace, factory.stateDir, homeDir);
@@ -112,7 +125,7 @@ export function createChoke(options: ChokeOptions): Choke {
         return;
       }
       if (contract === undefined) return; // not a contracted agent — not our ask to answer
-      const { decision, command } = decide(request, contract.workspace, fenceOf(contract));
+      const { decision, command } = decide(request, executionRootOf(contract.task, contract.workspace), fenceOf(contract));
       const response = recordAsk(factory, log, {
         task: contract.task,
         agent: agent.id,
@@ -138,7 +151,9 @@ export function createChoke(options: ChokeOptions): Choke {
       if (contract === undefined) {
         throw new FactoryError("unknown-task", `no contract set for task ${request.task} — register one first`);
       }
-      const cwd = request.cwd ?? contract.workspace;
+      // The default cwd is the task's execution tree (the worktree on the
+      // v0.0.14 path) — where the asking agent actually sits.
+      const cwd = request.cwd ?? factory.worktreeFor(request.task) ?? contract.workspace;
       const live = factory.liveContractFor(cwd);
       if (live === undefined || live.task !== request.task) {
         throw new FactoryError(
@@ -146,7 +161,11 @@ export function createChoke(options: ChokeOptions): Choke {
           `task ${request.task} has no live contract covering ${cwd} — the choke judges contracted work only`,
         );
       }
-      const decision = judgeShellCommand(request.command, writableRootsFor(live.workspace, factory.stateDir, homeDir), fenceOf(live));
+      const decision = judgeShellCommand(
+        request.command,
+        writableRootsFor(executionRootOf(live.task, live.workspace), factory.stateDir, homeDir),
+        fenceOf(live),
+      );
       const base = {
         task: request.task,
         agent: request.agent ?? "spool-ask",

@@ -93,6 +93,13 @@ export interface SpawnRequest {
   task: string;
   provider: string;
   arity: number;
+  /**
+   * The managed Task worktree this run executes in (v0.0.14, ADR 0010 §4) —
+   * the driver allocates it pre-spawn and names it here; the plugin records
+   * it on `spawn_dispatched`, and claim / gate / choke binding resolve
+   * through it. Optional: the legacy shared-checkout path sends none.
+   */
+  worktree?: string;
 }
 
 /**
@@ -289,7 +296,15 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     if (typeof req.task !== "string" || typeof req.provider !== "string" || typeof req.arity !== "number" || !Number.isInteger(req.arity) || req.arity < 1) {
       return undefined;
     }
-    return { id: req.id, kind: "spawn", task: req.task, provider: req.provider, arity: req.arity };
+    if (req.worktree !== undefined && (typeof req.worktree !== "string" || req.worktree.trim() === "")) return undefined;
+    return {
+      id: req.id,
+      kind: "spawn",
+      task: req.task,
+      provider: req.provider,
+      arity: req.arity,
+      ...(req.worktree === undefined ? {} : { worktree: req.worktree }),
+    };
   }
   if (req.kind === "respawn") {
     if (
@@ -419,8 +434,14 @@ export async function handleSpoolRequest(
     if (request.kind === "spawn") {
       // The driver's arrival (v0.0.5): one ledger line either way, then the
       // reply the driver keys its next move on — create the agent, or report
-      // the refusal and carry on with the invocation's other tasks.
-      const decision = factory.requestSpawn({ task: request.task, provider: request.provider, arity: request.arity });
+      // the refusal and carry on with the invocation's other tasks. The
+      // worktree (v0.0.14) rides the line so claim/gate/choke bind to it.
+      const decision = factory.requestSpawn({
+        task: request.task,
+        provider: request.provider,
+        arity: request.arity,
+        ...(request.worktree === undefined ? {} : { worktree: request.worktree }),
+      });
       if (decision.outcome === "refused") {
         return { id: request.id, ok: false, code: decision.code, message: decision.event.reason, event: decision.event };
       }

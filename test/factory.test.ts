@@ -1151,3 +1151,77 @@ test("needsHuman corroborates attempt-ceiling and died-after-respawn against the
 
 
 
+
+// ---- the Task worktree (v0.0.14, ADR 0010 §4/§5): spawn records it, claim and the choke bind to it ----
+
+/** One git fact about a checkout, as a string — the worktree tests' `git rev-parse` shorthand. */
+function gitFact(cwd: string, args: string[]): string {
+  return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+}
+
+/** A real linked worktree the way the driver's task-worktree.mjs allocates it — outside the project root, like `<stateDir>/projects/<slug>/worktrees/<task>`. */
+function makeTaskWorktree(dir: string, workspace: string, task: string, base: string): string {
+  const path = join(dir, "state", "worktrees", task);
+  execFileSync("git", ["worktree", "add", "-b", `factory/${task}`, path, base], { cwd: workspace });
+  return path;
+}
+
+test("spawn records the driver's worktree; worktreeFor reads it back, claim and the choke bind to it", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact, sha: base } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir: join(dir, "factory") });
+
+  const worktree = makeTaskWorktree(dir, workspace, "WTA", base);
+  factory.setContract({ task: "WTA", workspace, gate: "true", artifact });
+  const spawn = factory.requestSpawn({ task: "WTA", provider: "claude", arity: 1, worktree });
+  assert.equal(spawn.outcome, "dispatched");
+  if (spawn.outcome === "dispatched") {
+    assert.equal(spawn.event.worktree, worktree, "the driver-level execution detail rides the spawn line");
+  }
+  assert.equal(factory.worktreeFor("WTA"), worktree);
+
+  // The choke's binding (liveContractFor): the worktree and its subdirs bind
+  // to the task's contract — the worktree sits OUTSIDE <project-root>, so
+  // this is the binding that keeps a worktree agent contracted.
+  assert.equal(factory.liveContractFor(worktree)?.task, "WTA");
+  assert.equal(factory.liveContractFor(join(worktree, "src"))?.task, "WTA");
+  assert.equal(factory.liveContractFor(workspace)?.task, "WTA", "the project root still binds its own contract too");
+  assert.equal(factory.worktreeFor("NOPE"), undefined);
+
+  // The claim executes in the worktree: the gate's cwd, the clean checks, and
+  // the diff all read the worktree, and <project-root> never moves.
+  writeFileSync(join(worktree, artifact), "export function pad(input: string, width: number): string {\n  return input.padEnd(width).slice(0, width);\n}\n");
+  const claimed = gitCommitChanges(worktree, "work in the worktree");
+  const outcome = await factory.claim({ task: "WTA", sha: claimed });
+  assert.equal(outcome.verdict, "green", "the gate ran against the worktree tree");
+  assert.equal(gitFact(workspace, ["rev-parse", "HEAD"]), base, "the project root never moved");
+  assert.equal(gitFact(workspace, ["status", "--porcelain"]), "", "the project root stayed clean");
+  assert.equal(gitFact(worktree, ["rev-parse", "HEAD"]), claimed);
+
+  // A spawn without a worktree (the legacy spelling) records no field, and
+  // worktreeFor stays undefined — the claim falls back to the contract workspace.
+  const dir2 = makeTempDir();
+  disposeDir(t, dir2);
+  const { workspace: ws2, artifact: artifact2, sha: base2 } = makeWorkspace(dir2);
+  factory.setContract({ task: "WTB", workspace: ws2, gate: "true", artifact: artifact2 });
+  const legacy = factory.requestSpawn({ task: "WTB", provider: "claude", arity: 1 });
+  assert.equal(legacy.outcome, "dispatched");
+  if (legacy.outcome === "dispatched") assert.equal("worktree" in legacy.event, false);
+  assert.equal(factory.worktreeFor("WTB"), undefined);
+  const legacyOutcome = await factory.claim({ task: "WTB", sha: base2 });
+  assert.equal(legacyOutcome.verdict, "green", "no worktree — the claim runs at the contract workspace, v0.0.5's law");
+});
+
+test("acceptance retires the worktree binding too — the choke does not outlive the task", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact, sha: base } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir: join(dir, "factory") });
+  const worktree = makeTaskWorktree(dir, workspace, "WTC", base);
+  factory.setContract({ task: "WTC", workspace, gate: "true", artifact });
+  factory.requestSpawn({ task: "WTC", provider: "claude", arity: 1, worktree });
+  assert.equal(factory.liveContractFor(worktree)?.task, "WTC");
+  factory.ledger.append({ event: "attempt_accepted", task: "WTC", attempt: 1 });
+  assert.equal(factory.liveContractFor(worktree), undefined, "accepted — the worktree binds no live contract either");
+});
