@@ -12,7 +12,7 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "test": "node --test \"test/*.test.ts\"",
+    "test": "node scripts/check-bundle.mjs && node --test \"test/*.test.ts\"",
     "typecheck": "tsc --noEmit && node scripts/check-bundle.mjs",
     "factory": "node plugin/bin/factory.mjs",
     "sync:plugin-core": "node scripts/sync-plugin-core.mjs",
