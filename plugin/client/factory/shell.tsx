@@ -214,6 +214,7 @@ function DetailBody({ theme, detail }: { theme: PluginTheme; detail: TaskDetailV
         <Text style={text(theme, "code")}>gate: {contract.gate}</Text>
         <Text style={text(theme, "code")}>artifact: {contract.artifact}</Text>
         <Text style={text(theme, "code")}>scope: {contract.scope === null ? "unrestricted" : contract.scope.join(", ")}</Text>
+        <Text style={text(theme, "code")}>skills: {contract.skills === null ? "none mandated" : contract.skills.join(", ")}</Text>
         <Text style={text(theme, "code")}>workspace: {contract.workspace}</Text>
         {contract.description !== null ? <Text style={text(theme, "meta")}>{contract.description}</Text> : null}
         <Text style={text(theme, "label")}>

@@ -367,3 +367,64 @@ test("the v0.0.6 contract flags round-trip: --watch marks the pass, --descriptio
   assert.equal(blank.status, 2);
   assert.match(blank.stderr, /--description must be a non-empty text/);
 });
+
+test("the v0.0.14 contract flag round-trip: --skills rides the spool onto the contract_set line", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const workspace = join(dir, "workspace");
+  copyFixture("sample-workspace", workspace);
+  gitCommitAll(workspace);
+
+  // One home per sub-case: one contract per tree, and the workspace-conflict
+  // guard fires on the second contract of the same tree (its own law).
+  const spawnHome = () => {
+    const home = join(dir, `paseo-home-${Math.random().toString(36).slice(2, 8)}`);
+    const stateDir = join(home, "plugin-state", "paseo-factory");
+    const factory = createFactory({ stateDir });
+    const spool = startSpool(stateDir, factory);
+    t.after(() => spool.stop());
+    return { home, stateDir, factory };
+  };
+
+  const first = spawnHome();
+  const contract = await run(
+    ownerCli,
+    [
+      "contract", "--task", "SKILL1", "--workspace", workspace, "--gate", "true", "--artifact", "src/format.ts",
+      "--skills", "tdd, diagnosing-bugs ,",
+    ],
+    { PASEO_HOME: first.home },
+  );
+  assert.equal(contract.status, 0, contract.stderr);
+  assert.match(contract.stdout, /contract set for SKILL1/);
+
+  const set = first.factory.ledger.eventsFor("SKILL1")[0];
+  assert.deepEqual(
+    set.event === "contract_set" ? set.skills : undefined,
+    ["tdd", "diagnosing-bugs"],
+    "comma-split, trimmed, blanks dropped — scope's own parsing law",
+  );
+
+  // Omitted flag omits the field, never an empty array.
+  const second = spawnHome();
+  const plain = await run(
+    ownerCli,
+    ["contract", "--task", "SKILL2", "--workspace", workspace, "--gate", "true", "--artifact", "src/format.ts"],
+    { PASEO_HOME: second.home },
+  );
+  assert.equal(plain.status, 0, plain.stderr);
+  const set2 = second.factory.ledger.eventsFor("SKILL2")[0];
+  assert.equal("skills" in set2, false);
+
+  // A skills value with only blanks parses to no skills at all — the field
+  // stays omitted, same as an omitted flag.
+  const third = spawnHome();
+  const blankOnly = await run(
+    ownerCli,
+    ["contract", "--task", "SKILL3", "--workspace", workspace, "--gate", "true", "--artifact", "src/format.ts", "--skills", " ,"],
+    { PASEO_HOME: third.home },
+  );
+  assert.equal(blankOnly.status, 0, blankOnly.stderr);
+  const set3 = third.factory.ledger.eventsFor("SKILL3")[0];
+  assert.equal("skills" in set3, false);
+});

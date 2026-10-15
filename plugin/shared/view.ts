@@ -187,6 +187,8 @@ export const TaskDetailViewSchema = z.object({
     gate: z.string(),
     artifact: z.string(),
     scope: z.array(z.string()).nullable(),
+    /** The mandated SKILL.md workflows (v0.0.14) — null when the contract names none. */
+    skills: z.array(z.string()).nullable(),
     base: z.string().nullable(),
     description: z.string().nullable(),
     watch: z.boolean(),

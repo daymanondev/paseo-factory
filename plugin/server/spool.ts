@@ -42,6 +42,11 @@ export interface ContractRequest {
   /** The task's assignment text (v0.0.6 description-slot rider) — the driver's brief carries it. */
   description?: string;
   /**
+   * The SKILL.md workflows the working Agent must open first (v0.0.14, ADR
+   * 0010 §6) — skill names; the driver's brief renders them at the top.
+   */
+  skills?: string[];
+  /**
    * Who submitted (v0.0.9, ADR 0006) — required, stamped by the CLI from the
    * submitting shell's env: the delegated Owner agent's `PASEO_AGENT_ID`
    * where the daemon carried one, `owner` on the human path. An unstamped
@@ -248,6 +253,8 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     if (typeof req.submitter !== "string" || req.submitter.trim() === "") return undefined;
     const scope = req.scope;
     if (scope !== undefined && (!Array.isArray(scope) || scope.some((s) => typeof s !== "string"))) return undefined;
+    const skills = req.skills;
+    if (skills !== undefined && (!Array.isArray(skills) || skills.some((s) => typeof s !== "string"))) return undefined;
     if (req.freshEyes !== undefined && req.freshEyes !== true) return undefined;
     if (req.watch !== undefined && req.watch !== true) return undefined;
     if (req.description !== undefined && (typeof req.description !== "string" || req.description.trim() === "")) return undefined;
@@ -259,6 +266,7 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       gate: req.gate,
       artifact: req.artifact,
       ...(scope === undefined ? {} : { scope: scope as string[] }),
+      ...(skills === undefined ? {} : { skills: skills as string[] }),
       ...(req.freshEyes === undefined ? {} : { freshEyes: true }),
       ...(req.watch === undefined ? {} : { watch: true }),
       ...(req.description === undefined ? {} : { description: req.description }),
@@ -367,6 +375,7 @@ export async function handleSpoolRequest(
         gate: request.gate,
         artifact: request.artifact,
         ...(request.scope === undefined ? {} : { scope: request.scope }),
+        ...(request.skills === undefined || request.skills.length === 0 ? {} : { skills: request.skills }),
         ...(request.freshEyes === undefined ? {} : { freshEyes: true }),
         ...(request.watch === undefined ? {} : { watch: true }),
         ...(request.description === undefined ? {} : { description: request.description }),

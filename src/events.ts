@@ -126,6 +126,13 @@ export interface ContractSet {
    */
   description?: string;
   /**
+   * The SKILL.md workflows the working Agent must open first (v0.0.14, ADR
+   * 0010 §6) — the Lead's way to mandate a method, not just an outcome. Skill
+   * names, recorded verbatim; the driver's brief renders them at the top.
+   * Pre-0.0.14 Contracts predate the field.
+   */
+  skills?: string[];
+  /**
    * Who set the Contract (v0.0.9, ADR 0006): the submitting shell's stamp,
    * carried from the spool request — the delegated Owner agent's
    * `PASEO_AGENT_ID` where the daemon's env carried one, `owner` on the human

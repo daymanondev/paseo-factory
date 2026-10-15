@@ -246,7 +246,7 @@ export function foldRetro(events: readonly AnyEvent[]): RetroView[] {
 export function renderLedgerLine(evt: AnyEvent): string {
   switch (evt.event) {
     case "contract_set":
-      return `contract gate="${evt.gate}" artifact=${evt.artifact}${evt.scope === undefined ? "" : ` scope=[${evt.scope.join(",")}]`}`;
+      return `contract gate="${evt.gate}" artifact=${evt.artifact}${evt.scope === undefined ? "" : ` scope=[${evt.scope.join(",")}]`}${evt.skills === undefined ? "" : ` skills=[${evt.skills.join(",")}]`}`;
     case "claim_reported":
       return `claim #${evt.attempt} ${evt.sha.slice(0, 7)}`;
     case "gate_started":

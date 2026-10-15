@@ -368,6 +368,7 @@ test("taskDetail: contract + per-attempt report and gate log contents, tailed", 
   assert.ok(reply.ok, reply.ok ? "" : reply.error);
   assert.equal(reply.detail.contract.gate, "npm test");
   assert.deepEqual(reply.detail.contract.scope, ["src"]);
+  assert.equal(reply.detail.contract.skills, null, "a contract without mandated skills renders null, never an empty list");
   assert.equal(reply.detail.contract.watch, false);
   assert.equal(reply.detail.contract.freshEyes, false);
   assert.equal(reply.detail.attempts.length, 1);
@@ -377,6 +378,17 @@ test("taskDetail: contract + per-attempt report and gate log contents, tailed", 
   const unknown = await handlers.taskDetail({ task: "NOPE" });
   assert.ok(!unknown.ok);
   assert.equal(unknown.code, "unknown-task");
+});
+
+test("taskDetail: the contract's mandated skills ride the detail (v0.0.14)", async (t) => {
+  const { stateDir, factory, handlers } = makeSurface(t);
+  factory.ledger.append({
+    event: "contract_set", task: "DET2", workspace: "/w/skills", gate: "npm test", artifact: "src/x.ts",
+    base: "base0001", skills: ["tdd", "diagnosing-bugs"],
+  });
+  const reply = await handlers.taskDetail({ task: "DET2" });
+  assert.ok(reply.ok, reply.ok ? "" : reply.error);
+  assert.deepEqual(reply.detail.contract.skills, ["tdd", "diagnosing-bugs"]);
 });
 
 test("retro proposals parse into R1..Rn for the Timeline tab", async (t) => {

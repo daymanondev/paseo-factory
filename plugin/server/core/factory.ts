@@ -102,6 +102,12 @@ export interface ContractInput {
    */
   description?: string;
   /**
+   * The SKILL.md workflows the working Agent must open first (v0.0.14, ADR
+   * 0010 §6) — skill names, recorded verbatim on the Contract line; the
+   * driver's brief renders them at the top. Omitted or empty = no mandate.
+   */
+  skills?: string[];
+  /**
    * Who set the Contract (v0.0.9, ADR 0006): the spool stamps the submitting
    * shell (`PASEO_AGENT_ID` or `owner`) and the factory records it verbatim
    * on the line — the factory never infers identity.
@@ -328,7 +334,7 @@ export function createFactory(options: FactoryOptions): Factory {
     stateDir,
     recoveredAttempts,
 
-    setContract({ task, workspace, gate, artifact, scope, freshEyes, watch, description, by }) {
+    setContract({ task, workspace, gate, artifact, scope, freshEyes, watch, description, skills, by }) {
       assertTaskId(task);
       if (gate.trim() === "") throw new FactoryError("invalid-contract", "gate command must be a non-empty string");
       if (artifact.trim() === "") throw new FactoryError("invalid-contract", "artifact path must be a non-empty string");
@@ -340,6 +346,14 @@ export function createFactory(options: FactoryOptions): Factory {
       }
       if (description !== undefined && (typeof description !== "string" || description.trim() === "")) {
         throw new FactoryError("invalid-contract", "description must be a non-empty string — omit it when the task has no assignment text");
+      }
+      if (skills !== undefined && skills.length > 0) {
+        const unusable =
+          !Array.isArray(skills) ||
+          skills.some((name) => typeof name !== "string" || name.trim() === "");
+        if (unusable) {
+          throw new FactoryError("invalid-contract", "skills must be an array of non-empty skill names — omit it when the task mandates none");
+        }
       }
       if (!isAbsolute(workspace)) {
         throw new FactoryError("invalid-contract", `workspace "${workspace}" must be an absolute path`);
@@ -436,6 +450,7 @@ export function createFactory(options: FactoryOptions): Factory {
         ...(freshEyes === undefined ? {} : { freshEyes }),
         ...(watch === undefined ? {} : { watch }),
         ...(description === undefined ? {} : { description }),
+        ...(skills === undefined || skills.length === 0 ? {} : { skills }),
         ...(by === undefined ? {} : { by }),
       });
     },

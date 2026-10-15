@@ -74,6 +74,10 @@ commands:
                                      after EVERY verdict)
              [--description <text>]  the task's assignment in the Owner's words —
                                      the driver's brief carries it (v0.0.6)
+             [--skills <s1,s2,...>]  SKILL.md workflows the working agent must
+                                     open first (v0.0.14) — the Lead mandates
+                                     a method, not just an outcome; the
+                                     driver's brief renders them at the top
 
   accept     Accept one green attempt of a task (the Owner's act)
              accept <task> --attempt <n>
@@ -263,6 +267,7 @@ if (command === "contract") {
     gate: { type: "string" },
     artifact: { type: "string" },
     scope: { type: "string" },
+    skills: { type: "string" },
     "fresh-eyes": { type: "boolean", default: false },
     watch: { type: "boolean", default: false },
     description: { type: "string" },
@@ -288,6 +293,9 @@ if (command === "contract") {
     ...(v.scope === undefined
       ? {}
       : { scope: v.scope.split(",").map((s) => s.trim()).filter((s) => s !== "") }),
+    ...(v.skills === undefined
+      ? {}
+      : { skills: v.skills.split(",").map((s) => s.trim()).filter((s) => s !== "") }),
     ...(v["fresh-eyes"] ? { freshEyes: true } : {}),
     ...(v.watch ? { watch: true } : {}),
     ...(v.description === undefined ? {} : { description: v.description }),

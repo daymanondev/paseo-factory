@@ -433,6 +433,37 @@ test("a scoped contract refuses a workspace git cannot read", (t) => {
   );
 });
 
+test("setContract carries an optional skills list — validated when present, omitted when empty", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact } = makeWorkspace(dir);
+  // A second, distinct tree — one contract per workspace (the conflict guard's own law).
+  const secondWorkspace = join(dir, "ws2");
+  mkdirSync(join(secondWorkspace, "src"), { recursive: true });
+  writeFileSync(join(secondWorkspace, artifact), "export function pad() {}\n");
+  gitCommitAll(secondWorkspace);
+  const factory = createFactory({ stateDir: join(dir, "factory") });
+
+  const withSkills = factory.setContract({ task: "SK1", workspace, gate: "true", artifact, skills: ["tdd", "diagnosing-bugs"] });
+  assert.deepEqual(withSkills.skills, ["tdd", "diagnosing-bugs"], "the mandated skills ride the Contract line");
+
+  const empty = factory.setContract({ task: "SK2", workspace: secondWorkspace, gate: "true", artifact, skills: [] });
+  assert.equal("skills" in empty, false, "an empty list omits the field — scope's own law");
+
+  for (const bad of [[""], ["ok", 1], ["  "]]) {
+    assert.throws(
+      () => factory.setContract({ task: "SKX", workspace: secondWorkspace, gate: "true", artifact, skills: bad as unknown as string[] }),
+      factoryErrorCode("invalid-contract"),
+      `skills ${JSON.stringify(bad)} must be rejected`,
+    );
+  }
+  assert.equal(
+    factory.ledger.events.filter((e) => e.event === "contract_set").length,
+    2,
+    "only the two valid contracts landed — rejected skills touch nothing",
+  );
+});
+
 test("two tasks share one ledger with independent seq and reports", async (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);

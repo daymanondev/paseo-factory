@@ -305,6 +305,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
             gate: contract.gate,
             artifact: contract.artifact,
             scope: contract.scope === undefined || contract.scope.length === 0 ? null : contract.scope,
+            skills: contract.skills === undefined || contract.skills.length === 0 ? null : contract.skills,
             base: contract.base ?? null,
             description: contract.description ?? null,
             watch: contract.watch === true,
