@@ -2,26 +2,38 @@
  * The Factory surface's in-process single-writer handlers (v0.0.13, ADR
  * 0009 §2/§4, the amendment to ADR 0004): every `factory.*` RPC runs inside
  * the plugin server process that owns the one Factory instance, so Owner
- * acts from the UI — Accept, Retro, Lane config, the Supervisor bridge —
- * invoke `factory.accept({...,accepted_by:"owner"})`, `factory.retro()` and
- * `saveLanes` directly, never through the spool. The daemon half rides the
- * PaseoApi each `handle` call receives (`context.paseo`), reduced to the
- * structural slice below — SDK types stay out by the timeline.ts precedent.
+ * acts from the UI — Accept, Retro, Lane config, the seat bridges — invoke
+ * `factory.accept({...})`, `factory.retro()` and `saveLanes` directly, never
+ * through the spool. The daemon half rides the PaseoApi each `handle` call
+ * receives (`context.paseo`), reduced to the structural slice below — SDK
+ * types stay out by the timeline.ts precedent.
  *
- * The two daemon acts the in-process API lacks (a live agent's model sync,
+ * v0.0.14 (ADR 0010 §1–§3/§6): the Supervisor and Lead seats are
+ * per-Project agents standing at `cwd = <project-root>` with labels
+ * `{seat, project: <slug>}` — `supervisorEnsure`/`leadEnsure` find or create
+ * them under their lane (additive role injection lives in roles.ts; nothing
+ * under the project root is ever written), `leadRotate` retires a Lead so
+ * the next dispatch starts fresh, and `ratifyProposal` dispatches a Retro
+ * proposal to the Project's Supervisor (the two-tier memory loop). The two
+ * daemon acts the in-process API lacks (a live agent's model sync,
  * cancelling a running agent) ride the CLI bridge in daemon-cli.ts.
  */
-import { mkdirSync, writeFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
 import { FactoryError } from "./core/errors.ts";
 import type { Factory } from "./core/factory.ts";
 import { loadLanes, saveLanes } from "./core/lanes.ts";
-import { foldTasks, foldView, readTailed } from "./view.ts";
+import { resolveProject } from "./core/project.ts";
+import type { ProjectResolution } from "./core/project.ts";
+import type { LandingResult } from "./core/workspace.ts";
+import { FACTORY_VIEW_VERSION } from "../shared/view.ts";
+import { foldRetro, foldTasks, foldView, readTailed } from "./view.ts";
 import { setAgentModelViaCli, stopAgentViaCli } from "./daemon-cli.ts";
 import type { DaemonReply } from "./daemon-cli.ts";
+import { SEAT_TITLES, renderSeatBootstrap } from "./roles.ts";
+import type { SeatName } from "./roles.ts";
+import { discoverProjects, writeProjectRegistration } from "./projects.ts";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { accept, lanesSet, retro, snapshot, supervisorEnsure, supervisorRevoke, taskDetail } from "../shared/rpc.ts";
-import type { AgentView, LaneName, Lanes } from "../shared/view.ts";
+import { accept, lanesSet, leadEnsure, leadRotate, ratifyProposal, retro, snapshot, supervisorEnsure, supervisorRevoke, taskDetail } from "../shared/rpc.ts";
+import type { AgentView, LaneName, Lanes, ProjectView } from "../shared/view.ts";
 
 // ---- the daemon slice ---------------------------------------------------------------------
 
@@ -78,9 +90,9 @@ export interface SurfaceCallContext {
 export interface SurfaceDeps {
   factory: Factory;
   stateDir: string;
-  /** The paseo home — `<home>-supervisor` (its sibling) is the Supervisor seat's dir. */
+  /** The paseo home — the daemon the seat bridges and CLI fallbacks target. */
   home: string;
-  /** The resolved plugin directory, when installed from a directory — gives AGENTS.md an exact factory.mjs path. */
+  /** The resolved plugin directory, when installed from a directory — gives the seat bootstrap an exact factory.mjs path. */
   pluginDir?: string;
   /** The daemon to call when the RPC call carries no `context.paseo` (tests). */
   daemon: SurfaceDaemonApi | (() => SurfaceDaemonApi);
@@ -91,7 +103,7 @@ export interface SurfaceDeps {
   onLog?: (message: string) => void;
 }
 
-/** How many agents one snapshot resolves a Timeline Oracle seqEnd for (supervisor + bound workers). */
+/** How many agents one snapshot resolves a Timeline Oracle seqEnd for (seats + bound workers). */
 const SEQ_END_CAP = 12;
 
 function messageOf(err: unknown): string {
@@ -102,35 +114,21 @@ function codeOf(err: unknown): string {
   return err instanceof FactoryError ? err.code : "failed";
 }
 
-/** The AGENTS.md the Supervisor seat boots with — resolved paths, its law, its lanes. */
-function renderSupervisorAgentsMd(input: { home: string; stateDir: string; pluginDir?: string; nodePath: string; path: string; lane: string }): string {
-  const quote = (s: string) => (/\s/.test(s) ? `"${s}"` : s);
-  const runner = /Paseo Helper/i.test(input.nodePath) ? `ELECTRON_RUN_AS_NODE=1 ${quote(input.nodePath)}` : quote(input.nodePath);
-  const factoryCmd = input.pluginDir !== undefined ? `${runner} ${quote(join(input.pluginDir, "bin", "factory.mjs"))}` : "factory";
-  return [
-    "# Supervisor (paseo-factory)",
-    "",
-    "You are the delegated Owner seat of the paseo-factory verification loop: the one agent the Owner",
-    "converses with. You relay what the factory measured — Verdicts, Watch lines, needs-human stalls —",
-    "in words, and the Owner's answers ride you back down. You never grade work yourself: the Gate, the",
-    "Choke, the Watch and the Ledger are the law, and `factory` (the Owner CLI) performs the Owner's acts.",
-    "",
-    "- Paseo home (the daemon this seat serves): " + input.home,
-    "- Factory state (ledger, reports, lanes.json): " + input.stateDir,
-    "- node: " + input.nodePath,
-    "- Your model lane (lanes.json → supervisor): " + input.lane,
-    "",
-    "Day-one Supervisor commands (the Owner CLI, never on a Worker agent's PATH — it is yours):",
-    "",
-    "  " + factoryCmd + " --home " + input.home + " contract --task <id> --workspace <dir> --gate <cmd> --artifact <path> [--scope <p1,p2>] [--watch] [--fresh-eyes] [--description <text>]",
-    "  " + factoryCmd + " --home " + input.home + " run <task> [<task>...]",
-    "  " + factoryCmd + " --home " + input.home + " status",
-    "  " + factoryCmd + " --home " + input.home + " lanes get",
-    "  " + factoryCmd + " --home " + input.home + " accept <task> --attempt <n>",
-    "",
-    'Your shells may start without node/git on PATH — export PATH="' + input.path + '" first.',
-    "",
-  ].join("\n");
+/**
+ * The one acceptance sentence both reply surfaces print — the spool's accept
+ * reply (the CLI's `factory accept`) and the surface's `factory.accept` RPC
+ * (the UI's Accept). One wording, both doors; `landing` absent is the legacy
+ * shared-checkout path (no landing ran).
+ */
+export function acceptanceSummary(input: { task: string; attempt: number; by: string; landing?: LandingResult["landing"]; landingNote?: string }): string {
+  return (
+    `task ${input.task} accepted at attempt ${input.attempt} by ${input.by}` +
+    (input.landing === "landed"
+      ? " · landed into <project-root>"
+      : input.landing === "pending-conflict"
+        ? ` · landing pending-conflict: ${input.landingNote ?? "(no reason recorded)"} — branch factory/${input.task} is preserved`
+        : "")
+  );
 }
 
 export function createSurfaceHandlers(deps: SurfaceDeps) {
@@ -142,9 +140,26 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   const log = deps.onLog ?? (() => {});
   const failure = <C extends string>(code: C, error: string) => ({ ok: false as const, code, error });
 
-  /** The live non-archived seat=supervisor agent, when one exists. */
-  const supervisorOf = async (daemon: SurfaceDaemonApi): Promise<SurfaceAgentSnapshot | undefined> => {
-    const page = await daemon.agents.list({ filter: { labels: { seat: "supervisor" }, includeArchived: false } });
+  /**
+   * Resolves a projectRoot RPC input — the one door every seats-only act
+   * enters through (F8's five-fold stanza folded). The failure arm IS the
+   * handlers' refusal reply (code + sentence, tests key on the reason), so
+   * call sites return it verbatim; snapshot stays on raw `resolveProject`
+   * because it degrades to the global view instead of refusing.
+   */
+  const projectOrRefusal = (
+    projectRoot: string,
+  ): Extract<ProjectResolution, { ok: true }> | { ok: false; code: "unknown-project"; error: string } => {
+    const project = resolveProject(projectRoot);
+    return project.ok
+      ? project
+      : { ok: false, code: "unknown-project" as const, error: `project root ${projectRoot} does not resolve to a git repository — ${project.reason}` };
+  };
+
+  /** The live non-archived seat agent — `seat` plus, when scoped, the Project's slug label. */
+  const seatOf = async (daemon: SurfaceDaemonApi, seat: "supervisor" | "lead", projectSlug?: string): Promise<SurfaceAgentSnapshot | undefined> => {
+    const labels: Record<string, string> = projectSlug === undefined ? { seat } : { seat, project: projectSlug };
+    const page = await daemon.agents.list({ filter: { labels, includeArchived: false } });
     for (const entry of page.entries) {
       if (entry.agent.archivedAt === null) return entry.agent;
     }
@@ -159,6 +174,13 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       if ("task" in evt && typeof evt.task === "string" && typeof agent === "string" && agent !== "") index.set(agent, evt.task);
     }
     return index;
+  };
+
+  /** One task's contract workspace sits inside the Project root (equal or nested). */
+  const taskInProject = (task: string, root: string): boolean => {
+    const contract = deps.factory.contractFor(task);
+    if (contract === undefined) return false;
+    return contract.workspace === root || contract.workspace.startsWith(`${root}/`);
   };
 
   /** One agent → AgentView, with the Timeline Oracle seqEnd when the daemon answers. */
@@ -245,42 +267,186 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     }
   };
 
+  // ---- the seat bridges (v0.0.14, ADR 0010 §1–§2) ----------------------------------------
+
+  /** Find-or-create one Project's standing seat agent at `cwd = <project-root>` under its lane. */
+  const ensureSeat = async (
+    seat: SeatName,
+    input: { projectRoot: string; message?: string },
+    context?: SurfaceCallContext,
+  ): Promise<{ ok: true; agentId: string; created: boolean; projectRoot: string; slug: string } | { ok: false; code: string; error: string }> => {
+    const project = projectOrRefusal(input.projectRoot);
+    if (!project.ok) return project;
+    const daemon = resolveDaemon(context);
+    const lanes = loadLanes(deps.stateDir, project.slug);
+    if (!lanes.ok) return failure("lanes-unreadable", lanes.reason);
+    const lane = lanes.lanes[seat];
+    let agent: SurfaceAgentSnapshot | undefined;
+    try {
+      agent = await seatOf(daemon, seat, project.slug);
+    } catch (err) {
+      return failure("daemon-unavailable", `cannot read the daemon's agents: ${messageOf(err)}`);
+    }
+    let created = false;
+    if (agent === undefined) {
+      // The bridge's create half (v0.0.14): the agent stands INSIDE the
+      // project root — cwd carries the repository, the labels carry the
+      // seat, the bootstrap prompt carries the orientation, and NOTHING
+      // under <project-root> is written (the <home>-supervisor folder and
+      // its AGENTS.md overwrite are retired; roles.ts owns the injection).
+      const title = SEAT_TITLES[seat];
+      try {
+        const handle = await daemon.agents.create({
+          config: { provider: lane },
+          cwd: project.root,
+          title,
+          labels: { seat, project: project.slug },
+          prompt: renderSeatBootstrap({
+            seat,
+            home: deps.home,
+            stateDir: deps.stateDir,
+            ...(deps.pluginDir === undefined ? {} : { pluginDir: deps.pluginDir }),
+            nodePath: process.execPath,
+            path: process.env.PATH ?? "",
+            lane,
+            project,
+          }),
+        });
+        agent = {
+          id: handle.id,
+          provider: lane,
+          title,
+          status: "initializing",
+          model: null,
+          labels: { seat, project: project.slug },
+          archivedAt: null,
+          requiresAttention: false,
+          attentionReason: null,
+          updatedAt: new Date().toISOString(),
+          cwd: project.root,
+        };
+        created = true;
+        log(`${seat}: created agent ${handle.id} under ${lane} at ${project.root} (project ${project.slug})`);
+      } catch (err) {
+        return failure("create-failed", `creating the ${seat} agent failed: ${messageOf(err)}`);
+      }
+    }
+    // The durable slug→root + seat-id binding: the Project Selector's
+    // discovery and the session-open env injection both read it.
+    writeProjectRegistration(deps.stateDir, project.slug, {
+      root: project.root,
+      ...(seat === "supervisor" ? { supervisor: agent.id } : { lead: agent.id }),
+    });
+    const message = input.message?.trim();
+    if (message !== undefined && message !== "") {
+      try {
+        await daemon.agents.ref(agent.id).send(message);
+        log(`${seat}: dispatched a message to ${agent.id}`);
+      } catch (err) {
+        return failure("send-failed", `the ${seat} agent exists (${agent.id}) but the dispatch failed: ${messageOf(err)}`);
+      }
+    }
+    return { ok: true as const, agentId: agent.id, created, projectRoot: project.root, slug: project.slug };
+  };
+
+  /** Cancel + archive one Project's live seat agent — the rotate/revoke retirement. */
+  const retireSeat = async (
+    seat: "supervisor" | "lead",
+    projectSlug: string | undefined,
+    projectRoot: string | undefined,
+    context?: SurfaceCallContext,
+  ): Promise<{ ok: true; agentId: string } | { ok: false; code: string; error: string }> => {
+    const daemon = resolveDaemon(context);
+    let agent: SurfaceAgentSnapshot | undefined;
+    try {
+      agent = await seatOf(daemon, seat, projectSlug);
+    } catch (err) {
+      return failure("daemon-unavailable", `cannot read the daemon's agents: ${messageOf(err)}`);
+    }
+    if (agent === undefined) {
+      return failure(seat === "lead" ? "no-lead" : "no-supervisor", `no live seat=${seat}${projectSlug === undefined ? "" : `, project=${projectSlug}`} agent on this daemon — nothing to retire`);
+    }
+    // Cancel first (best-effort: an idle agent has nothing to cancel), then
+    // archive — the retirement the seat graph reads.
+    const stop = deps.stopAgent ?? stopAgentViaCli;
+    const stopped = await stop(agent.id, deps.home);
+    if (!stopped.ok) log(`${seat}: cancel before retire did not land — ${stopped.reason}`);
+    try {
+      await daemon.agents.ref(agent.id).archive();
+    } catch (err) {
+      return failure("archive-failed", `archiving ${seat} ${agent.id} failed: ${messageOf(err)}`);
+    }
+    if (projectSlug !== undefined && projectRoot !== undefined) {
+      writeProjectRegistration(deps.stateDir, projectSlug, { root: projectRoot, ...(seat === "lead" ? { lead: null } : { supervisor: null }) });
+    }
+    log(`${seat}: retired ${agent.id} (cancelled + archived)`);
+    return { ok: true as const, agentId: agent.id };
+  };
+
   return {
-    async snapshot(_input: {}, context?: SurfaceCallContext) {
-      const lanes = loadLanes(deps.stateDir);
+    async snapshot(input: { projectRoot?: string }, context?: SurfaceCallContext) {
+      // An unresolvable scope degrades to the global view — the panel must
+      // render outside git repos; the seats-only acts refuse instead.
+      const resolved = input.projectRoot === undefined ? undefined : resolveProject(input.projectRoot);
+      const project: ProjectView | null = resolved !== undefined && resolved.ok ? { slug: resolved.slug, root: resolved.root } : null;
+      const lanes = loadLanes(deps.stateDir, project?.slug);
       if (!lanes.ok) return failure("lanes-unreadable", lanes.reason);
       const daemon = resolveDaemon(context);
-      const events = deps.factory.ledger.events;
       const bound = agentTaskIndex();
+      const allEvents = deps.factory.ledger.events;
 
       let rawAgents: SurfaceAgentSnapshot[] = [];
       let providers: ProviderEntry[] = [];
       let daemonError: string | null = null;
       let supervisorRaw: SurfaceAgentSnapshot | undefined;
+      let leadRaw: SurfaceAgentSnapshot | undefined;
       try {
         const page = await daemon.agents.list({ filter: { includeArchived: false } });
         rawAgents = page.entries.map((entry) => entry.agent).filter((agent) => agent.archivedAt === null);
-        supervisorRaw = rawAgents.find((agent) => agent.labels.seat === "supervisor");
+        const seatOfProject = (seat: string): SurfaceAgentSnapshot | undefined =>
+          rawAgents.find((agent) => agent.labels.seat === seat && (project === null || agent.labels.project === project.slug));
+        supervisorRaw = seatOfProject("supervisor");
+        leadRaw = seatOfProject("lead");
         providers = await resolveProviders(daemon);
       } catch (err) {
         daemonError = `daemon unavailable: ${messageOf(err)}`;
       }
 
-      // Every supervisor and every ledger-bound working agent gets a seqEnd;
-      // strangers stay strangers (the surface shows seats, not a census).
-      const relevant = rawAgents.filter((agent) => agent.labels.seat !== undefined || bound.has(agent.id)).slice(0, SEQ_END_CAP);
+      // The scoped snapshot narrows to this Project's world: its seat agents
+      // and the ledger-bound workers whose task's contract workspace sits
+      // inside the project root. Unscoped, every seat and bound worker shows
+      // (the global surface shows seats, not a census — strangers stay out).
+      const inScope = (agent: SurfaceAgentSnapshot): boolean => {
+        if (project === null) return agent.labels.seat !== undefined || bound.has(agent.id);
+        if (agent.labels.seat !== undefined) return agent.labels.project === project.slug;
+        const task = bound.get(agent.id);
+        return task !== undefined && taskInProject(task, project.root);
+      };
+      const relevant = rawAgents.filter(inScope).slice(0, SEQ_END_CAP);
       const agents: AgentView[] = [];
       for (const agent of relevant) {
         agents.push(await agentViewOf(daemon, agent, bound.get(agent.id) ?? null));
       }
       const supervisor = supervisorRaw === undefined ? null : (agents.find((agent) => agent.id === supervisorRaw!.id) ?? null);
+      const lead = leadRaw === undefined ? null : (agents.find((agent) => agent.id === leadRaw!.id) ?? null);
+
+      const events =
+        project === null
+          ? allEvents
+          : allEvents.filter((evt) => !("task" in evt) || (typeof evt.task === "string" && taskInProject(evt.task, project.root)));
+      const projects = discoverProjects(
+        deps.stateDir,
+        rawAgents.filter((agent) => agent.labels.seat !== undefined),
+      ).filter((entry): entry is { slug: string; root: string } => entry.root !== null);
 
       const view = foldView({
         stateDir: deps.stateDir,
         generatedAt: new Date().toISOString(),
         lanes: lanes.lanes,
         events,
-        daemon: { agents, supervisor, providers, daemonError },
+        daemon: { agents, supervisor, lead, providers, daemonError },
+        project,
+        projects,
       });
       return { ok: true as const, view };
     },
@@ -290,14 +456,13 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       if (contract === undefined) {
         return failure("unknown-task", `no contract set for task ${input.task}`);
       }
-      const lanes = loadLanes(deps.stateDir);
-      if (!lanes.ok) return failure("lanes-unreadable", lanes.reason);
+      if (!loadLanes(deps.stateDir).ok) return failure("lanes-unreadable", `the lane table under ${deps.stateDir} is unreadable`);
       const task = foldTasks(deps.factory.ledger.events).find((entry) => entry.task === input.task);
       if (task === undefined) return failure("unknown-task", `no foldable history for task ${input.task}`);
       return {
         ok: true as const,
         detail: {
-          version: 1 as const,
+          version: FACTORY_VIEW_VERSION,
           task,
           contract: {
             task: contract.task,
@@ -305,6 +470,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
             gate: contract.gate,
             artifact: contract.artifact,
             scope: contract.scope === undefined || contract.scope.length === 0 ? null : contract.scope,
+            skills: contract.skills === undefined || contract.skills.length === 0 ? null : contract.skills,
             base: contract.base ?? null,
             description: contract.description ?? null,
             watch: contract.watch === true,
@@ -323,8 +489,14 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
 
     async accept(input: { task: string; attempt: number }, _context?: SurfaceCallContext) {
       try {
-        const event = deps.factory.accept({ task: input.task, attempt: input.attempt, accepted_by: "owner" });
-        return { ok: true as const, seq: event.seq, summary: `${input.task} accepted at attempt ${input.attempt} by owner` };
+        // Awaited since v0.0.14: a worktree task's local landing runs before
+        // the line records, and the summary carries the outcome.
+        const event = await deps.factory.accept({ task: input.task, attempt: input.attempt, accepted_by: "owner" });
+        return {
+          ok: true as const,
+          seq: event.seq,
+          summary: acceptanceSummary({ task: input.task, attempt: input.attempt, by: "owner", landing: event.landing, landingNote: event.landingNote }),
+        };
       } catch (err) {
         return failure(codeOf(err), messageOf(err));
       }
@@ -345,134 +517,126 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       }
     },
 
-    async lanesSet(input: { lane: LaneName; value: string }, context?: SurfaceCallContext) {
-      const saved = saveLanes(deps.stateDir, { [input.lane]: input.value });
+    async lanesSet(input: { lane: LaneName; value: string; projectRoot?: string }, context?: SurfaceCallContext) {
+      let projectSlug: string | undefined;
+      if (input.projectRoot !== undefined) {
+        const project = projectOrRefusal(input.projectRoot);
+        if (!project.ok) return project;
+        projectSlug = project.slug;
+      }
+      const saved = saveLanes(deps.stateDir, { [input.lane]: input.value }, projectSlug);
       if (!saved.ok) return failure("invalid-lane", saved.reason);
-      let modelSync = "skipped — no live supervisor agent on this daemon";
-      if (input.lane === "supervisor") {
+      // The live seat sync (v0.0.14): a supervisor or lead save pushes the
+      // model to that seat's live agent — project-scoped when the save was,
+      // else the first live seat of the lane. The message names what happened.
+      let modelSync = "skipped — not a seat lane (applies to the next create)";
+      if (input.lane === "supervisor" || input.lane === "lead") {
+        const seat = input.lane;
         const daemon = resolveDaemon(context);
         try {
-          const supervisor = await supervisorOf(daemon);
-          if (supervisor !== undefined) {
+          const agent = await seatOf(daemon, seat, projectSlug);
+          if (agent !== undefined) {
             const sync = deps.setAgentModel ?? setAgentModelViaCli;
-            const slash = saved.lanes.supervisor.indexOf("/");
-            const modelId = slash === -1 ? saved.lanes.supervisor : saved.lanes.supervisor.slice(slash + 1);
-            const reply = await sync(supervisor.id, modelId, deps.home);
+            const laneValue = saved.lanes[seat];
+            const slash = laneValue.indexOf("/");
+            const modelId = slash === -1 ? laneValue : laneValue.slice(slash + 1);
+            const reply = await sync(agent.id, modelId, deps.home);
             modelSync = reply.ok
-              ? `applied — agent ${supervisor.id.slice(0, 8)} now runs ${saved.lanes.supervisor}`
+              ? `applied — agent ${agent.id.slice(0, 8)} now runs ${laneValue}`
               : `failed — ${reply.reason} (lanes.json is the config of record; the next ensure/create runs it)`;
+          } else {
+            modelSync = `skipped — no live ${seat} agent${projectSlug === undefined ? "" : ` for project ${projectSlug}`} on this daemon`;
           }
         } catch (err) {
           modelSync = `failed — ${messageOf(err)} (lanes.json is the config of record)`;
         }
       }
-      log(`lanes: ${input.lane}=${saved.lanes[input.lane]} (${modelSync})`);
+      log(`lanes: ${input.lane}=${saved.lanes[input.lane]}${projectSlug === undefined ? "" : ` (project ${projectSlug})`} (${modelSync})`);
       return { ok: true as const, lanes: saved.lanes, modelSync };
     },
 
-    async supervisorEnsure(input: { message?: string }, context?: SurfaceCallContext) {
-      const daemon = resolveDaemon(context);
-      const lanes = loadLanes(deps.stateDir);
-      if (!lanes.ok) return failure("lanes-unreadable", lanes.reason);
-      let supervisor: SurfaceAgentSnapshot | undefined;
-      try {
-        supervisor = await supervisorOf(daemon);
-      } catch (err) {
-        return failure("daemon-unavailable", `cannot read the daemon's agents: ${messageOf(err)}`);
-      }
-      let created = false;
-      let supervisorDir: string | null = null;
-      if (supervisor === undefined) {
-        // The bridge's create half: `<home>-supervisor/AGENTS.md` with the
-        // resolved paths, then the agent under the configured supervisor
-        // lane, seat-labeled so every later ensure finds it.
-        supervisorDir = join(dirname(deps.home), `${basename(deps.home)}-supervisor`);
-        try {
-          mkdirSync(supervisorDir, { recursive: true });
-          writeFileSync(
-            join(supervisorDir, "AGENTS.md"),
-            renderSupervisorAgentsMd({
-              home: deps.home,
-              stateDir: deps.stateDir,
-              pluginDir: deps.pluginDir,
-              nodePath: process.execPath,
-              path: process.env.PATH ?? "",
-              lane: lanes.lanes.supervisor,
-            }),
-          );
-          const handle = await daemon.agents.create({
-            config: { provider: lanes.lanes.supervisor },
-            cwd: supervisorDir,
-            title: "Supervisor (paseo-factory)",
-            labels: { seat: "supervisor" },
-          });
-          supervisor = {
-            id: handle.id,
-            provider: lanes.lanes.supervisor,
-            title: "Supervisor (paseo-factory)",
-            status: "initializing",
-            model: null,
-            labels: { seat: "supervisor" },
-            archivedAt: null,
-            requiresAttention: false,
-            attentionReason: null,
-            updatedAt: new Date().toISOString(),
-            cwd: supervisorDir,
-          };
-          created = true;
-          log(`supervisor: created agent ${handle.id} under ${lanes.lanes.supervisor} at ${supervisorDir}`);
-        } catch (err) {
-          return failure("create-failed", `creating the Supervisor agent failed: ${messageOf(err)}`);
-        }
-      }
-      const message = input.message?.trim();
-      if (message !== undefined && message !== "") {
-        try {
-          await daemon.agents.ref(supervisor.id).send(message);
-          log(`supervisor: dispatched a message to ${supervisor.id}`);
-        } catch (err) {
-          return failure("send-failed", `the supervisor exists (${supervisor.id}) but the dispatch failed: ${messageOf(err)}`);
-        }
-      }
-      return { ok: true as const, agentId: supervisor.id, created, supervisorDir };
+    async supervisorEnsure(input: { projectRoot: string; message?: string }, context?: SurfaceCallContext) {
+      return ensureSeat("supervisor", input, context);
     },
 
-    async supervisorRevoke(_input: {}, context?: SurfaceCallContext) {
-      const daemon = resolveDaemon(context);
-      let supervisor: SurfaceAgentSnapshot | undefined;
-      try {
-        supervisor = await supervisorOf(daemon);
-      } catch (err) {
-        return failure("daemon-unavailable", `cannot read the daemon's agents: ${messageOf(err)}`);
+    async leadEnsure(input: { projectRoot: string; message?: string }, context?: SurfaceCallContext) {
+      return ensureSeat("lead", input, context);
+    },
+
+    async supervisorRevoke(input: { projectRoot?: string }, context?: SurfaceCallContext) {
+      if (input.projectRoot === undefined) {
+        // The legacy global act (pre-0.0.14): with per-Project seats it must
+        // not retire an arbitrary Project's supervisor — the first live seat
+        // the daemon returns is a choice the caller never made. One live
+        // supervisor stays the legacy act; two or more refuse by name.
+        const daemon = resolveDaemon(context);
+        let live: SurfaceAgentSnapshot[] = [];
+        try {
+          const page = await daemon.agents.list({ filter: { labels: { seat: "supervisor" }, includeArchived: false } });
+          live = page.entries.map((entry) => entry.agent).filter((agent) => agent.archivedAt === null);
+        } catch (err) {
+          return failure("daemon-unavailable", `cannot read the daemon's agents: ${messageOf(err)}`);
+        }
+        if (live.length > 1) {
+          const projects = [...new Set(live.map((agent) => agent.labels.project ?? "(unlabeled)"))].join(", ");
+          return failure(
+            "ambiguous-supervisor",
+            `more than one live supervisor exists (${projects}) — an unscoped revoke must not pick between Projects' seats; pass projectRoot to name the one to retire`,
+          );
+        }
+        return retireSeat("supervisor", undefined, undefined, context);
       }
-      if (supervisor === undefined) {
-        return failure("no-supervisor", "no live seat=supervisor agent on this daemon — nothing to revoke");
+      const project = projectOrRefusal(input.projectRoot);
+      if (!project.ok) return project;
+      return retireSeat("supervisor", project.slug, project.root, context);
+    },
+
+    async leadRotate(input: { projectRoot: string }, context?: SurfaceCallContext) {
+      const project = projectOrRefusal(input.projectRoot);
+      if (!project.ok) return project;
+      return retireSeat("lead", project.slug, project.root, context);
+    },
+
+    async ratifyProposal(input: { projectRoot: string; day: string; proposalId: number }, context?: SurfaceCallContext) {
+      const project = projectOrRefusal(input.projectRoot);
+      if (!project.ok) return project;
+      const retro = foldRetro(deps.factory.ledger.events).findLast((entry) => entry.day === input.day);
+      if (retro === undefined) {
+        return failure("unknown-retro", `no retro was written on ${input.day} — nothing to ratify`);
       }
-      // Cancel first (best-effort: an idle agent has nothing to cancel), then
-      // archive — the retirement the seat graph reads.
-      const stop = deps.stopAgent ?? stopAgentViaCli;
-      const stopped = await stop(supervisor.id, deps.home);
-      if (!stopped.ok) log(`supervisor: cancel before revoke did not land — ${stopped.reason}`);
-      try {
-        await daemon.agents.ref(supervisor.id).archive();
-      } catch (err) {
-        return failure("archive-failed", `archiving supervisor ${supervisor.id} failed: ${messageOf(err)}`);
+      const proposal = retro.proposals.find((entry) => entry.id === input.proposalId);
+      if (proposal === undefined) {
+        return failure("unknown-proposal", `retro ${input.day} has no proposal R${input.proposalId} — its proposals are ${retro.proposals.map((entry) => `R${entry.id}`).join(", ") || "none"}`);
       }
-      log(`supervisor: revoked ${supervisor.id} (cancelled + archived)`);
-      return { ok: true as const, agentId: supervisor.id };
+      // The dispatch (the supervisorEnsure({message}) precedent): the
+      // Project's Supervisor applies the ratified proposal to project memory
+      // — <project-root>/AGENTS.md, CONTEXT.md, or Gate config — and reports.
+      const message = [
+        `The Owner ratified retro proposal R${proposal.id} (${proposal.cls}) from ${input.day} — apply it now.`,
+        "",
+        `Proposal: ${proposal.text}`,
+        "",
+        `Apply it to this repository's project memory: <project-root>/AGENTS.md or CONTEXT.md for rules and context, or propose the Gate/command change in your reply if it belongs there. Then confirm what changed and where.`,
+      ].join("\n");
+      const ensured = await ensureSeat("supervisor", { projectRoot: input.projectRoot, message }, context);
+      if (!ensured.ok) return ensured;
+      log(`retro: R${proposal.id} of ${input.day} ratified via the supervisor of ${project.slug} (${ensured.agentId})`);
+      return { ok: true as const, agentId: ensured.agentId, summary: `R${proposal.id} (${proposal.cls}) dispatched to the Supervisor of ${project.slug}` };
     },
   };
 }
 
 // ---- the server wiring --------------------------------------------------------------------
 
+/** The handlers' shared type — the shell builds them once and hands them to both the RPC registrations and the spool. */
+export type SurfaceHandlers = ReturnType<typeof createSurfaceHandlers>;
+
 /**
  * Registers every `factory.*` handler on the plugin server. Each daemon
  * call prefers the PaseoApi the daemon hands the handler (`context.paseo`);
  * the constructor's `daemon` is the fallback (and the tests' fake).
  */
-export function registerSurfaceRpc(server: PluginServerContext, deps: SurfaceDeps): void {
-  const handlers = createSurfaceHandlers(deps);
+export function registerSurfaceRpc(server: PluginServerContext, handlers: SurfaceHandlers): void {
   server.handle(snapshot, (input, context) => handlers.snapshot(input, { paseo: context.paseo }));
   server.handle(taskDetail, (input, context) => handlers.taskDetail(input, { paseo: context.paseo }));
   server.handle(accept, (input, context) => handlers.accept(input, { paseo: context.paseo }));
@@ -480,4 +644,7 @@ export function registerSurfaceRpc(server: PluginServerContext, deps: SurfaceDep
   server.handle(lanesSet, (input, context) => handlers.lanesSet(input, { paseo: context.paseo }));
   server.handle(supervisorEnsure, (input, context) => handlers.supervisorEnsure(input, { paseo: context.paseo }));
   server.handle(supervisorRevoke, (input, context) => handlers.supervisorRevoke(input, { paseo: context.paseo }));
+  server.handle(leadEnsure, (input, context) => handlers.leadEnsure(input, { paseo: context.paseo }));
+  server.handle(leadRotate, (input, context) => handlers.leadRotate(input, { paseo: context.paseo }));
+  server.handle(ratifyProposal, (input, context) => handlers.ratifyProposal(input, { paseo: context.paseo }));
 }

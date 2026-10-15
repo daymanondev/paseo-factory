@@ -13,33 +13,41 @@ The coding agent doing the work on a Task. It may make Claims; it never sets or 
 _Avoid_: worker, peer (in this context), bot
 
 **Owner**:
-Whoever sets a Task's Contract — the human, or an agent the human has explicitly delegated the Owner seat to (revocably). Never the Agent working that Task. The delegated Owner seat is the Supervisor (ADR 0006).
+Whoever sets or ratifies the work's outcome and final acceptance — the human, or a seat the human has delegated authority to (the Supervisor as conversational delegate; the Lead for intermediate Task contracts and clean green-task acceptance under ADR 0010, with Human override always retained). Never the Agent working that Task.
 _Avoid_: reviewer, user
 
 **Supervisor**:
-The Owner seat delegated to exactly one Paseo daemon agent, revocably — the only seat the Owner converses with (the Paseo app chat). Day-one powers, every act an attributed ledger line: take the Owner's stated outcome and draft + set the Contract, run the Driver, relay status, verdicts and needs-human items in words, accept an Attempt on the Owner's word. Never: landing or push, widening scope or budget, accepting without the Owner's word — it is not another project Lead (codex-room §9(a)). Woken by the Owner's message; one turn holds a Driver run, and any fact it acts on is read from the Ledger at act time, never recalled from the conversation transcript — transcript for talk, Ledger for truth. Its shell is ungated (the Choke policy judges contracted Agents only); revocation cancels the turn and archives the agent, returning the acts to the human CLI path. Added in v0.0.9 (ADR 0006).
+The Owner's conversational delegate seat for a Project (`labels: { seat: "supervisor", project: <slug> }`), rooted at the Project's directory (`cwd = <project-root>`, ADR 0010) rather than an external `<home>-supervisor` folder, with role instructions injected additively so `<project-root>/AGENTS.md` is never overwritten. It clarifies intent (`grilling`), dispatches outcomes to the Project's Lead, relays status, verdicts and needs-human items to the Owner, accepts on the Owner's word (`accepted_by: "supervisor"`), and curates project-level rules in `AGENTS.md` / `CONTEXT.md`. Never: external `git push`, widening scope or budget, or accepting without the Owner's word. Added in v0.0.9 (ADR 0006); scoped per Project at `cwd` in ADR 0010.
 _Avoid_: manager, orchestrator, assistant (and Driver — a mechanism, not a seat)
 
 **Lead**:
-The presiding technical seat over Agents — the seat that acts when an Agent stalls, dies, or exhausts its Attempts rather than letting the run end in silence. Day one (v0.0.10, ADR 0006) is a deterministic rider on the Driver's watch: it reads the Ledger, spends the Task's one re-poke at a denial-stall, and writes needs-human when the poke is spent and the stall persists; since v0.0.12 (ADR 0008) it also writes needs-human when a Task hits the Attempt ceiling (three red Attempts) or dies after its one automatic Respawn. Zero model calls of its own; it never grants a permission (only the Choke judges asks), never sets Contracts, never Accepts. Judgment (rulings on stuck work) and acceptance-among-agents grow into the seat when the corpus demands it.
+The presiding technical seat over Agents for a Project (`labels: { seat: "lead", project: <slug> }`, `cwd = <project-root>`, ADR 0010): a standing model-backed Paseo agent on the `lead` lane (`lanes.json`, rotatable via `Rotate / Revoke Lead`) paired with the Driver's deterministic watch/respawn/ceiling rider underneath. The Lead reads the repository, splits a Supervisor directive into one or more Tasks, sets each Task's Contract (including optional `skills`), runs the Driver, judges hand-backs against Gate / Fresh-eyes / Watch evidence, accepts clean green intermediate Tasks (`accepted_by: "lead"`, when Verdict is green and Fresh-eyes has no `CONCERN`), re-briefs or escalates stuck work (`needs_human`), and reports completion to the Supervisor. Added as a mechanical rider in v0.0.10 (ADR 0006); graduated to a model-backed project seat in ADR 0010.
 _Avoid_: manager, foreman, orchestrator, "the loop" (that names the mechanism), Driver (a mechanism, not a seat)
 
 ### Work and criteria
 
+**Project**:
+One Git repository supervised by the factory, identified canonically via `git rev-parse --show-toplevel --git-common-dir` as `<project-slug> = <basename>-<sha1(gitRoot).slice(0,6)>` (ADR 0010). Owns its isolated state directory (`<stateDir>/projects/<project-slug>/`) containing its Ledger, Reports, Retro proposals, and Task worktrees, plus its standing Supervisor and Lead seats.
+_Avoid_: workspace (that is the working copy a Task runs in), folder, team
+
 **Task**:
-One unit of work, identified by a filename-safe id, judged against exactly one Contract.
+One unit of work within a Project, identified by a filename-safe id, judged against exactly one Contract.
 _Avoid_: job, ticket, lane
 
 **Contract**:
-The Owner's done-criteria for a Task, fixed before the Agent starts: one Gate command and one Artifact, run in one Workspace.
+The done-criteria for a Task, fixed before the Agent starts: one Gate command, one Artifact, optional file `scope` and required `skills`, rooted at a Project workspace.
 _Avoid_: spec, acceptance criteria, hợp đồng (outside research notes)
 
 **Workspace**:
-The git working copy a Task's work lives in; the Gate runs there and the Artifact is resolved inside it.
+The git working copy a Task's work lives in; the Gate runs there and the Artifact is resolved inside it. Under ADR 0010, each spawned Task runs inside its own isolated Task worktree so the Project's root checkout stays clean.
 _Avoid_: repo, project dir, cwd
 
+**Task worktree**:
+The linked `git worktree` automatically allocated for a Task at Spawn under `<projectStateDir>/worktrees/<task>` on branch `factory/<task>` (rooted at the Contract's `base` commit, copying `.worktreeinclude` entries when present, ADR 0010). Isolates the working Agent and Gate execution from `<project-root>`, and lands its `claimedCommit` back into `<project-root>`'s local branch upon Acceptance before being removed.
+_Avoid_: clone, sandbox, shadow copy
+
 **Workspace conflict**:
-Two live Contracts whose Workspaces are the same tree, or one nested inside the other. Refused at contract time (the second `factory contract` exits 2, no ledger line — nothing changed, so nothing is recorded) and again at spawn time for already-contracted tasks; a conflict retires only when the live Contract is accepted. Prevention, not resolution — there is no merge machinery. Added in v0.0.5.
+Two live Contracts whose execution Workspaces are the same working tree, or one nested inside the other. Refused at contract and spawn time when two Tasks target the same checkout — except same-tree Contracts behind disjoint scope globs, which run concurrently in their own Task worktrees (ADR 0010); overlap, an unscoped sibling, and nesting still refuse. Eliminated by construction when each Task runs in its own Task worktree. Added in v0.0.5; updated in ADR 0010.
 _Avoid_: scope conflict (the charted name — the real key is workspace overlap, not scope intersection), merge conflict
 
 **Gate**:
@@ -65,7 +73,7 @@ The factory's red/green judgment of one Attempt. Green means the Workspace sat c
 _Avoid_: result, status, pass/fail
 
 **Accepted**:
-The state of a Task after the Owner accepts one of its Attempts. Only an Attempt with a green Verdict can be accepted.
+The state of a Task after one of its green Attempts is accepted (`attempt_accepted`, recording `accepted_by: "owner" | "supervisor" | "lead"`, ADR 0010) and its claimed commit is landed into the Project's local checkout from the Task worktree (preserving `factory/<task>` if a local merge conflict requires resolution; never pushing to remote). The Lead may accept intermediate green Attempts with no Fresh-eyes `CONCERN`; the Owner retains override and final sign-off.
 _Avoid_: done, finished, complete, passed
 
 **Fresh-eyes review**:
@@ -189,9 +197,9 @@ _Avoid_: autopilot, background job, cron
 ### Surface and configuration
 
 **Factory surface**:
-The plugin's client UI inside Paseo (sidebar global screen, workspace-scoped panel, and settings screen, ADR 0009): it renders a versioned view snapshot derived from the Ledger, the Lane config, and live daemon state across three views (`Tasks` verification line, `Seats & Models` topology and lane switcher, `Timeline & Retro`), bridges to the Supervisor seat via one-click ensure-or-open (and optional quick dispatch), and executes direct Owner acts (`Accept`, `Retro`, `Lane config` updates, Supervisor revoke) through the plugin server's single writer. It never replaces the Paseo chat pane and never bypasses the single-writer law. Added in v0.0.13 (ADR 0009).
+The plugin's client UI inside Paseo (sidebar global screen with Project selector, workspace-scoped panel bound to the active Project, and settings screen, ADR 0009, ADR 0010): it renders a versioned view snapshot derived from the Project's Ledger, the Lane config, and live daemon state across three views (`Tasks` verification line, `Seats & Models` topology and 5-lane switcher, `Timeline & Retro`), bridges to the Project's Supervisor seat via one-click ensure-or-open (and optional quick dispatch), and executes direct Owner acts (`Accept`, `Retro`, `Lane config` updates, `Supervisor` revoke, `Lead` rotate/revoke) through the plugin server's single writer. It never replaces the Paseo chat pane and never bypasses the single-writer law. Added in v0.0.13 (ADR 0009); updated in ADR 0010.
 _Avoid_: dashboard, portal, control center, room panel
 
 **Lane config**:
-The plugin-owned configuration (`<stateDir>/lanes.json`) mapping each model-bearing seat and station (`supervisor`, `worker`, `watch`, `retro`, `freshEyes`) to its selected `provider/model` string (or `"eye.json"` for direct-API fresh-eyes). Read by the Factory surface, the Supervisor bridge, the Driver (when `--provider` is omitted), and the post-verdict/retro passes. Added in v0.0.13 (ADR 0009).
+The plugin-owned configuration (`<stateDir>/lanes.json` machine defaults, plus optional `<projectStateDir>/lanes.json` overrides, ADR 0009, ADR 0010) mapping each model-bearing seat and station (`supervisor`, `lead`, `worker`, `watch`, `retro`, `freshEyes`) to its selected `provider/model` string (or `"eye.json"` for direct-API fresh-eyes). Read by the Factory surface, the Supervisor and Lead bridges, the Driver (when `--provider` is omitted), and the post-verdict/retro passes. Added in v0.0.13 (ADR 0009); expanded with `lead` and per-project overrides in ADR 0010.
 _Avoid_: model settings, profile, preset, fleet manifest

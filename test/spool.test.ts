@@ -50,6 +50,16 @@ test("parseSpoolRequest accepts exactly the three request shapes and nothing els
     attempt: 2,
     submitter: "owner",
   });
+  // v0.0.14: --by claims an acceptance seat; anything but the three seats is malformed.
+  assert.deepEqual(parseSpoolRequest({ id: "r1", kind: "accept", task: "T1", attempt: 2, submitter: "owner", by: "lead" }), {
+    id: "r1",
+    kind: "accept",
+    task: "T1",
+    attempt: 2,
+    by: "lead",
+    submitter: "owner",
+  });
+  assert.equal(parseSpoolRequest({ id: "r1", kind: "accept", task: "T1", attempt: 2, submitter: "owner", by: "boss" }), undefined);
   assert.deepEqual(
     parseSpoolRequest({ id: "r1", kind: "contract", task: "T1", workspace: "/w", gate: "true", artifact: "a", submitter: "agent-sup-1" }),
     {
@@ -67,6 +77,14 @@ test("parseSpoolRequest accepts exactly the three request shapes and nothing els
     { id: "r1", kind: "contract", task: "T1", workspace: "/w", gate: "true", artifact: "a", freshEyes: true, submitter: "owner" },
     "freshEyes passes only as literal true",
   );
+
+  // v0.0.14: the Lead rotation names its Project root; no stamp — the act
+  // is the plugin's, judged at the daemon, not attributed from a shell.
+  assert.deepEqual(parseSpoolRequest({ id: "r1", kind: "lead_rotate", projectRoot: "/w/repo" }), {
+    id: "r1",
+    kind: "lead_rotate",
+    projectRoot: "/w/repo",
+  });
 
   for (const bad of [
     null,
@@ -89,6 +107,31 @@ test("parseSpoolRequest accepts exactly the three request shapes and nothing els
   ]) {
     assert.equal(parseSpoolRequest(bad), undefined, `${JSON.stringify(bad)} must be rejected`);
   }
+});
+
+test("lead_rotate rides the injected rotation handler and is refused loudly without one (v0.0.14)", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+
+  const without = await handleSpoolRequest(factory, { id: "r0", kind: "lead_rotate", projectRoot: "/w/repo" });
+  assert.ok(!without.ok);
+  assert.equal(without.code, "lead-rotate-unavailable", "no handler wired — a named refusal, never a silent pass");
+
+  const rotated: string[] = [];
+  const withHandler = await handleSpoolRequest(
+    factory,
+    { id: "r1", kind: "lead_rotate", projectRoot: "/w/repo" },
+    undefined,
+    async (request) => {
+      rotated.push(request.projectRoot);
+      return { id: request.id, ok: true, summary: "lead rotated — agent agent-lead-1 cancelled + archived", agentId: "agent-lead-1" };
+    },
+  );
+  assert.ok(withHandler.ok);
+  assert.equal(withHandler.agentId, "agent-lead-1");
+  assert.deepEqual(rotated, ["/w/repo"]);
+  assert.equal(factory.ledger.events.length, 0, "a rotation is a daemon fact — no ledger line lands");
 });
 
 test("the v0.0.9 stamps ride both Owner acts onto their ledger lines (ADR 0006)", async (t) => {
@@ -272,6 +315,12 @@ test("parseSpoolRequest accepts the spawn shape and nothing around it", () => {
     provider: "claude/opus-4-8",
     arity: 2,
   });
+  // v0.0.14: the driver names the managed Task worktree; an empty or non-string value is malformed.
+  assert.deepEqual(
+    parseSpoolRequest({ id: "r1", kind: "spawn", task: "T1", provider: "claude", arity: 1, worktree: "/state/projects/p/worktrees/T1" }),
+    { id: "r1", kind: "spawn", task: "T1", provider: "claude", arity: 1, worktree: "/state/projects/p/worktrees/T1" },
+  );
+  assert.equal(parseSpoolRequest({ id: "r1", kind: "spawn", task: "T1", provider: "claude", arity: 1, worktree: " " }), undefined);
   for (const bad of [
     { id: "r1", kind: "spawn", task: "T1", provider: "claude" },
     { id: "r1", kind: "spawn", task: "T1", provider: "claude", arity: "2" },

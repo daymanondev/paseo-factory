@@ -26,6 +26,7 @@ import { usageIsValid } from "./core/ledger.ts";
 import { needsHumanEvidenceIsValid, NEEDS_HUMAN_REASONS } from "./core/events.ts";
 import type { Factory } from "./core/factory.ts";
 import type { LedgerEvent, MeterUsage, NeedsHumanEvidence, NeedsHumanReason, Verdict } from "./core/events.ts";
+import { acceptanceSummary } from "./surface-rpc.ts";
 
 export interface ContractRequest {
   id: string;
@@ -41,6 +42,11 @@ export interface ContractRequest {
   watch?: true;
   /** The task's assignment text (v0.0.6 description-slot rider) — the driver's brief carries it. */
   description?: string;
+  /**
+   * The SKILL.md workflows the working Agent must open first (v0.0.14, ADR
+   * 0010 §6) — skill names; the driver's brief renders them at the top.
+   */
+  skills?: string[];
   /**
    * Who submitted (v0.0.9, ADR 0006) — required, stamped by the CLI from the
    * submitting shell's env: the delegated Owner agent's `PASEO_AGENT_ID`
@@ -66,6 +72,14 @@ export interface AcceptRequest {
   task: string;
   attempt: number;
   /**
+   * The accepting seat, claimed explicitly (v0.0.14, ADR 0010 §3): the CLI's
+   * `--by owner|supervisor|lead` flag. When present it overrides the
+   * submitter stamp as the acceptance's `accepted_by` — the Lead's
+   * conditional authority is judged at the factory, never trusted from the
+   * request's spelling alone.
+   */
+  by?: "owner" | "supervisor" | "lead";
+  /**
    * Who submitted (v0.0.9) — required, the submitting shell's stamp, the
    * same law as the contract's: `PASEO_AGENT_ID` or `owner`. "The Ledger
    * always records who accepted" (ADR 0006) starts at the request.
@@ -88,6 +102,28 @@ export interface SpawnRequest {
   task: string;
   provider: string;
   arity: number;
+  /**
+   * The managed Task worktree this run executes in (v0.0.14, ADR 0010 §4) —
+   * the driver allocates it pre-spawn and names it here; the plugin records
+   * it on `spawn_dispatched`, and claim / gate / choke binding resolve
+   * through it. Optional: the legacy shared-checkout path sends none.
+   */
+  worktree?: string;
+}
+
+/**
+ * The Lead rotation (v0.0.14, ADR 0010 §2): `factory lead rotate --project
+ * <dir>` asks the plugin — the one daemon actor — to cancel + archive the
+ * Project's active `seat=lead` agent, so the next dispatch starts a fresh
+ * Lead session grounded in the Project's Ledger and AGENTS.md / CONTEXT.md.
+ * No ledger line lands: a rotation is a daemon fact, not a factory fact —
+ * the reply names the retired agent.
+ */
+export interface LeadRotateRequest {
+  id: string;
+  kind: "lead_rotate";
+  /** Any directory inside the Project's repository (resolveProject names the slug). */
+  projectRoot: string;
 }
 
 /**
@@ -193,6 +229,7 @@ export type SpoolRequest =
   | ClaimRequest
   | AcceptRequest
   | AskRequest
+  | LeadRotateRequest
   | SpawnRequest
   | RespawnRequest
   | MeterRequest
@@ -202,6 +239,9 @@ export type SpoolRequest =
 
 /** Handles a synthetic ask — `createChoke(...).spoolAskHandler` is the implementation. */
 export type AskHandler = (request: AskRequest) => SpoolReply;
+
+/** Rotates a Project's Lead — the surface handlers' `leadRotate` is the implementation. */
+export type LeadRotateHandler = (request: LeadRotateRequest) => Promise<SpoolReply>;
 
 export type SpoolReply =
   | {
@@ -223,6 +263,8 @@ export type SpoolReply =
       proposalCount?: number;
       /** Spawn / respawn replies: the ledger event appended for the request (carries seq). */
       event?: LedgerEvent;
+      /** Lead-rotate replies: the agent the rotation cancelled + archived. */
+      agentId?: string;
     }
   | { id: string; ok: false; code: string; message: string; event?: LedgerEvent };
 
@@ -248,6 +290,8 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     if (typeof req.submitter !== "string" || req.submitter.trim() === "") return undefined;
     const scope = req.scope;
     if (scope !== undefined && (!Array.isArray(scope) || scope.some((s) => typeof s !== "string"))) return undefined;
+    const skills = req.skills;
+    if (skills !== undefined && (!Array.isArray(skills) || skills.some((s) => typeof s !== "string"))) return undefined;
     if (req.freshEyes !== undefined && req.freshEyes !== true) return undefined;
     if (req.watch !== undefined && req.watch !== true) return undefined;
     if (req.description !== undefined && (typeof req.description !== "string" || req.description.trim() === "")) return undefined;
@@ -259,6 +303,7 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       gate: req.gate,
       artifact: req.artifact,
       ...(scope === undefined ? {} : { scope: scope as string[] }),
+      ...(skills === undefined ? {} : { skills: skills as string[] }),
       ...(req.freshEyes === undefined ? {} : { freshEyes: true }),
       ...(req.watch === undefined ? {} : { watch: true }),
       ...(req.description === undefined ? {} : { description: req.description }),
@@ -275,13 +320,29 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     // Same law as the contract: no submitter, no acceptance — the accepter's
     // identity is part of the act (ADR 0006).
     if (typeof req.submitter !== "string" || req.submitter.trim() === "") return undefined;
-    return { id: req.id, kind: "accept", task: req.task, attempt: req.attempt, submitter: req.submitter };
+    if (req.by !== undefined && req.by !== "owner" && req.by !== "supervisor" && req.by !== "lead") return undefined;
+    return {
+      id: req.id,
+      kind: "accept",
+      task: req.task,
+      attempt: req.attempt,
+      ...(req.by === undefined ? {} : { by: req.by }),
+      submitter: req.submitter,
+    };
   }
   if (req.kind === "spawn") {
     if (typeof req.task !== "string" || typeof req.provider !== "string" || typeof req.arity !== "number" || !Number.isInteger(req.arity) || req.arity < 1) {
       return undefined;
     }
-    return { id: req.id, kind: "spawn", task: req.task, provider: req.provider, arity: req.arity };
+    if (req.worktree !== undefined && (typeof req.worktree !== "string" || req.worktree.trim() === "")) return undefined;
+    return {
+      id: req.id,
+      kind: "spawn",
+      task: req.task,
+      provider: req.provider,
+      arity: req.arity,
+      ...(req.worktree === undefined ? {} : { worktree: req.worktree }),
+    };
   }
   if (req.kind === "respawn") {
     if (
@@ -294,6 +355,10 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       return undefined;
     }
     return { id: req.id, kind: "respawn", task: req.task, provider: req.provider, died_agent: req.died_agent };
+  }
+  if (req.kind === "lead_rotate") {
+    if (typeof req.projectRoot !== "string" || req.projectRoot.trim() === "") return undefined;
+    return { id: req.id, kind: "lead_rotate", projectRoot: req.projectRoot };
   }
   if (req.kind === "retro") {
     // The Retro carries nothing but its kind — whole-ledger always. The
@@ -358,6 +423,7 @@ export async function handleSpoolRequest(
   factory: Factory,
   request: SpoolRequest,
   askHandler?: AskHandler,
+  leadRotateHandler?: LeadRotateHandler,
 ): Promise<SpoolReply> {
   try {
     if (request.kind === "contract") {
@@ -367,6 +433,7 @@ export async function handleSpoolRequest(
         gate: request.gate,
         artifact: request.artifact,
         ...(request.scope === undefined ? {} : { scope: request.scope }),
+        ...(request.skills === undefined || request.skills.length === 0 ? {} : { skills: request.skills }),
         ...(request.freshEyes === undefined ? {} : { freshEyes: true }),
         ...(request.watch === undefined ? {} : { watch: true }),
         ...(request.description === undefined ? {} : { description: request.description }),
@@ -407,11 +474,31 @@ export async function handleSpoolRequest(
       }
       return askHandler(request);
     }
+    if (request.kind === "lead_rotate") {
+      // The Lead rotation (v0.0.14): a daemon act, delegated the same way the
+      // choke's ask is — the shell passes the surface handlers' leadRotate,
+      // which finds, cancels, and archives the Project's seat=lead agent.
+      if (leadRotateHandler === undefined) {
+        return {
+          id: request.id,
+          ok: false,
+          code: "lead-rotate-unavailable",
+          message: "this daemon's factory plugin does not rotate Leads — update the plugin to v0.0.14+",
+        };
+      }
+      return await leadRotateHandler(request);
+    }
     if (request.kind === "spawn") {
       // The driver's arrival (v0.0.5): one ledger line either way, then the
       // reply the driver keys its next move on — create the agent, or report
-      // the refusal and carry on with the invocation's other tasks.
-      const decision = factory.requestSpawn({ task: request.task, provider: request.provider, arity: request.arity });
+      // the refusal and carry on with the invocation's other tasks. The
+      // worktree (v0.0.14) rides the line so claim/gate/choke bind to it.
+      const decision = factory.requestSpawn({
+        task: request.task,
+        provider: request.provider,
+        arity: request.arity,
+        ...(request.worktree === undefined ? {} : { worktree: request.worktree }),
+      });
       if (decision.outcome === "refused") {
         return { id: request.id, ok: false, code: decision.code, message: decision.event.reason, event: decision.event };
       }
@@ -503,8 +590,17 @@ export async function handleSpoolRequest(
         proposalCount: outcome.proposalCount,
       };
     }
-    factory.accept({ task: request.task, attempt: request.attempt, accepted_by: request.submitter });
-    return { id: request.id, ok: true, summary: `task ${request.task} accepted at attempt ${request.attempt} by ${request.submitter}` };
+    // The acceptance (v0.0.14): awaited — a worktree task's local landing
+    // runs before the line records, and the reply carries the outcome. The
+    // `--by` seat, when the request claims one, overrides the submitter
+    // stamp; the Lead's conditional authority is judged below in the factory.
+    const acceptedBy = request.by ?? request.submitter;
+    const accepted = await factory.accept({ task: request.task, attempt: request.attempt, accepted_by: acceptedBy });
+    return {
+      id: request.id,
+      ok: true,
+      summary: acceptanceSummary({ task: request.task, attempt: request.attempt, by: acceptedBy, landing: accepted.landing, landingNote: accepted.landingNote }),
+    };
   } catch (err) {
     if (err instanceof FactoryError) {
       return { id: request.id, ok: false, code: err.code, message: err.message };
@@ -525,6 +621,8 @@ export interface SpoolOptions {
   pollMs?: number;
   /** The choke's synthetic-ask handler (v0.0.4); without it `ask` requests are refused. */
   ask?: AskHandler;
+  /** The Lead-rotation handler (v0.0.14); without it `lead_rotate` requests are refused. */
+  leadRotate?: LeadRotateHandler;
 }
 
 export interface Spool {
@@ -563,7 +661,7 @@ export function startSpool(stateDir: string, factory: Factory, options: SpoolOpt
         continue;
       }
       inFlight.add(id);
-      void handleRequestFile(id, requestPath, replyPath, join(processedDir, name), factory, log, options.ask)
+      void handleRequestFile(id, requestPath, replyPath, join(processedDir, name), factory, log, options.ask, options.leadRotate)
         .catch(() => {})
         .finally(() => inFlight.delete(id));
     }
@@ -586,6 +684,7 @@ async function handleRequestFile(
   factory: Factory,
   log: (message: string) => void,
   askHandler?: AskHandler,
+  leadRotateHandler?: LeadRotateHandler,
 ): Promise<void> {
   let reply: SpoolReply;
   let request: SpoolRequest | undefined;
@@ -598,7 +697,7 @@ async function handleRequestFile(
     reply = { id, ok: false, code: "bad-request", message: `request file ${requestPath} is not a valid spool request` };
     log(`request ${id}: REJECTED — malformed`);
   } else {
-    reply = await handleSpoolRequest(factory, request, askHandler);
+    reply = await handleSpoolRequest(factory, request, askHandler, leadRotateHandler);
     // The v0.0.9 stamps make the two Owner acts attributable in the log too —
     // the same visibility the claim line always had.
     const stamp = request.kind === "contract" || request.kind === "accept" ? ` by ${request.submitter}` : "";

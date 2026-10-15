@@ -473,6 +473,13 @@ export type RetroOutcome = Omit<RetroWritten, "seq" | "ts" | "event">;
  */
 export interface RetroPassInput {
   stateDir: string;
+  /**
+   * Where the proposals file lands when the factory is project-scoped
+   * (v0.0.14, ADR 0010 §5) — `<stateDir>/projects/<slug>/`. The lane still
+   * reads machine config from `stateDir`; omitted, the file lands beside the
+   * root ledger (the legacy layout).
+   */
+  dataDir?: string;
   corpus: RetroCorpus;
   /** Total budget override covering both tries (tests); default RETRO_TOTAL_BUDGET_MS. */
   budgetMs?: number;
@@ -523,7 +530,7 @@ export async function runRetroPass(input: RetroPassInput): Promise<RetroOutcome>
         // 03 item 3): a death between leaves an orphan file that never
         // happened; a line without a file cannot occur.
         const day = retroDay(new Date());
-        const path = retroFilePath(input.stateDir, day);
+        const path = retroFilePath(input.dataDir ?? input.stateDir, day);
         writeFileSync(path, renderRetroFile({ day, model: lane!, durationMs: Date.now() - started, corpus: input.corpus, proposals: parsed.proposals }));
         return {
           model: lane!,

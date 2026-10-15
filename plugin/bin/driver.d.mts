@@ -16,7 +16,8 @@ export declare const RE_STALL_MS: number;
 /** The Attempt ceiling (ADR 0008 §1): a Task may open at most 3 Attempts. */
 export declare const MAX_ATTEMPTS: number;
 
-export declare function renderBrief(task: string, pathValue: string, description?: string): string;
+/** Since v0.0.14: `skills` renders the `Required skills to open first` mandate at the top, and `branch` (default the task id) names the branch the agent is already on — `factory/<task>` on the worktree path. */
+export declare function renderBrief(task: string, pathValue: string, description?: string, skills?: readonly string[], branch?: string): string;
 export declare function splitProvider(value: string): { provider: string; model: string | undefined };
 export declare function renderRunBanner(tasks: readonly string[], provider: string): string;
 

@@ -162,7 +162,7 @@ test("the digest: per-task blocks, parade roll-up, denials verbatim, red gate lo
   const green = gitCommitChanges(workspace, "pad, implemented and tested");
   const greenOutcome = await factory.claim({ task: "DIG", sha: green, agent: "agent-dig" });
   assert.equal(greenOutcome.verdict, "green");
-  const accepted = factory.accept({ task: "DIG", attempt: 2 });
+  const accepted = await factory.accept({ task: "DIG", attempt: 2 });
 
   // A prior Retro (a written one and a failed one) — the NEXT digest renders them as one-liners.
   factory.ledger.append({

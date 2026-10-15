@@ -192,6 +192,55 @@ test("the owner CLI refuses bad usage before submitting anything", async () => {
   assert.match(unknown.stderr, /unknown command "teleport"/);
 });
 
+test("factory lead rotate: usage refusals, then the spool round trip names the retired agent (v0.0.14)", async (t) => {
+  // Usage refusals fire before any submission.
+  const noSub = await run(ownerCli, ["lead", "rotate"], {});
+  assert.equal(noSub.status, 2);
+  assert.match(noSub.stderr, /--project <dir> is required/);
+  const badSub = await run(ownerCli, ["lead", "teleport", "--project", "/w"], {});
+  assert.equal(badSub.status, 2);
+  assert.match(badSub.stderr, /unknown subcommand "teleport"/);
+
+  // The round trip: a real git project, a running spool with a rotation
+  // handler wired the way index.server.ts wires it (the surface handlers'
+  // leadRotate over the daemon).
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const projectRoot = join(dir, "repo");
+  mkdirSync(projectRoot);
+  writeFileSync(join(projectRoot, "README.md"), "x\n");
+  gitCommitAll(projectRoot);
+  const home = join(dir, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const factory = createFactory({ stateDir });
+  const rotated: string[] = [];
+  const spool = startSpool(stateDir, factory, {
+    pollMs: 20,
+    leadRotate: async (request) => {
+      rotated.push(request.projectRoot);
+      return { id: request.id, ok: true, summary: "lead rotated — agent agent-lead-7 cancelled + archived", agentId: "agent-lead-7" };
+    },
+  });
+  t.after(() => spool.stop());
+
+  const reply = await run(ownerCli, ["--home", home, "lead", "rotate", "--project", projectRoot, "--wait-secs", "10"], {});
+  assert.equal(reply.status, 0, reply.stderr);
+  assert.match(reply.stdout, /lead rotated — agent agent-lead-7 cancelled \+ archived/);
+  assert.equal(rotated.length, 1);
+  assert.equal(rotated[0], projectRoot, "the resolved project root rode the spool request");
+
+  // A handler refusal (say, no live Lead) reaches the terminal as its code.
+  spool.stop();
+  const refusing = startSpool(stateDir, factory, {
+    pollMs: 20,
+    leadRotate: async (request) => ({ id: request.id, ok: false, code: "no-lead", message: "no live seat=lead agent on this daemon" }),
+  });
+  t.after(() => refusing.stop());
+  const refused = await run(ownerCli, ["--home", home, "lead", "rotate", "--project", projectRoot, "--wait-secs", "10"], {});
+  assert.equal(refused.status, 2);
+  assert.match(refused.stderr, /no-lead: no live seat=lead agent/);
+});
+
 test("factory-claim usage: --help exits 0, a missing --sha exits 2", async () => {
   const help = await run(claimCli, ["--help"], {});
   assert.equal(help.status, 0);
@@ -366,4 +415,142 @@ test("the v0.0.6 contract flags round-trip: --watch marks the pass, --descriptio
   );
   assert.equal(blank.status, 2);
   assert.match(blank.stderr, /--description must be a non-empty text/);
+});
+
+test("the v0.0.14 contract flag round-trip: --skills rides the spool onto the contract_set line", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const workspace = join(dir, "workspace");
+  copyFixture("sample-workspace", workspace);
+  gitCommitAll(workspace);
+
+  // One home per sub-case: one contract per tree, and the workspace-conflict
+  // guard fires on the second contract of the same tree (its own law).
+  const spawnHome = () => {
+    const home = join(dir, `paseo-home-${Math.random().toString(36).slice(2, 8)}`);
+    const stateDir = join(home, "plugin-state", "paseo-factory");
+    const factory = createFactory({ stateDir });
+    const spool = startSpool(stateDir, factory);
+    t.after(() => spool.stop());
+    return { home, stateDir, factory };
+  };
+
+  const first = spawnHome();
+  const contract = await run(
+    ownerCli,
+    [
+      "contract", "--task", "SKILL1", "--workspace", workspace, "--gate", "true", "--artifact", "src/format.ts",
+      "--skills", "tdd, diagnosing-bugs ,",
+    ],
+    { PASEO_HOME: first.home },
+  );
+  assert.equal(contract.status, 0, contract.stderr);
+  assert.match(contract.stdout, /contract set for SKILL1/);
+
+  const set = first.factory.ledger.eventsFor("SKILL1")[0];
+  assert.deepEqual(
+    set.event === "contract_set" ? set.skills : undefined,
+    ["tdd", "diagnosing-bugs"],
+    "comma-split, trimmed, blanks dropped — scope's own parsing law",
+  );
+
+  // Omitted flag omits the field, never an empty array.
+  const second = spawnHome();
+  const plain = await run(
+    ownerCli,
+    ["contract", "--task", "SKILL2", "--workspace", workspace, "--gate", "true", "--artifact", "src/format.ts"],
+    { PASEO_HOME: second.home },
+  );
+  assert.equal(plain.status, 0, plain.stderr);
+  const set2 = second.factory.ledger.eventsFor("SKILL2")[0];
+  assert.equal("skills" in set2, false);
+
+  // A skills value with only blanks parses to no skills at all — the field
+  // stays omitted, same as an omitted flag.
+  const third = spawnHome();
+  const blankOnly = await run(
+    ownerCli,
+    ["contract", "--task", "SKILL3", "--workspace", workspace, "--gate", "true", "--artifact", "src/format.ts", "--skills", " ,"],
+    { PASEO_HOME: third.home },
+  );
+  assert.equal(blankOnly.status, 0, blankOnly.stderr);
+  const set3 = third.factory.ledger.eventsFor("SKILL3")[0];
+  assert.equal("skills" in set3, false);
+});
+
+test("factory accept --by <seat>: the flag rides the spool; the Lead's rules answer at the CLI (v0.0.14)", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const workspace = join(dir, "workspace");
+  copyFixture("sample-workspace", workspace);
+  gitCommitAll(workspace);
+  writeFileSync(
+    join(workspace, "src", "format.ts"),
+    [
+      "export function pad(input: string, width: number): string {",
+      "  if (input.length >= width) return input.slice(0, width);",
+      "  return input + \" \".repeat(width - input.length);",
+      "}",
+      "",
+    ].join("\n"),
+  );
+  const sha = gitCommitChanges(workspace, "already green");
+  const home = join(dir, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const fake = await startFakeEye(t, () => ({
+    status: 200,
+    payload: eyeAnswer("CONCERN\nthe diff touches nothing the contract gated."),
+  }));
+  writeEyeConfig(stateDir, fake.url);
+
+  const factory = createFactory({ stateDir });
+  const spool = startSpool(stateDir, factory);
+  t.after(() => spool.stop());
+  const ownerEnv = { PASEO_HOME: home };
+  const agentEnv = { FACTORY_STATE_DIR: stateDir, PASEO_AGENT_ID: "agent-worker-1" };
+
+  const contract = await run(ownerCli, [
+    "contract", "--task", "SEAT2", "--workspace", workspace, "--gate", "true", "--artifact", "src/format.ts", "--fresh-eyes",
+  ], ownerEnv);
+  assert.equal(contract.status, 0, contract.stderr);
+  const green = await run(claimCli, ["--task", "SEAT2", "--sha", sha], agentEnv);
+  assert.equal(green.status, 0, `expected green\nstdout: ${green.stdout}\nstderr: ${green.stderr}`);
+  assert.equal(fake.requests.length, 1, "the eye ran on the green attempt");
+
+  // The Lead may not accept its own CONCERN-flagged attempt.
+  const leadRefused = await run(ownerCli, ["accept", "SEAT2", "--attempt", "1", "--by", "lead"], ownerEnv);
+  assert.equal(leadRefused.status, 2);
+  assert.match(leadRefused.stderr, /lead-accept-refused/);
+  assert.match(leadRefused.stderr, /CONCERN/);
+  assert.equal(factory.ledger.eventsFor("SEAT2").some((e) => e.event === "attempt_accepted"), false, "no line for the refused act");
+
+  // The usage guard: --by takes exactly the three seats.
+  const badSeat = await run(ownerCli, ["accept", "SEAT2", "--attempt", "1", "--by", "boss"], ownerEnv);
+  assert.equal(badSeat.status, 2);
+  assert.match(badSeat.stderr, /--by must be one of owner\|supervisor\|lead/);
+
+  // The Supervisor's word lands over the same evidence, stamped by the flag.
+  const supervisor = await run(ownerCli, ["accept", "SEAT2", "--attempt", "1", "--by", "supervisor"], ownerEnv);
+  assert.equal(supervisor.status, 0, supervisor.stderr);
+  assert.match(supervisor.stdout, /SEAT2 accepted at attempt 1 by supervisor/);
+  const accepted = factory.ledger.eventsFor("SEAT2").find((e) => e.event === "attempt_accepted");
+  assert.equal(accepted === undefined ? undefined : accepted.accepted_by, "supervisor");
+
+  // And the Lead's clean acceptance on a CONCERN-free attempt.
+  const home2 = join(dir, "paseo-home2");
+  const stateDir2 = join(home2, "plugin-state", "paseo-factory");
+  const factory2 = createFactory({ stateDir: stateDir2 });
+  const spool2 = startSpool(stateDir2, factory2);
+  t.after(() => spool2.stop());
+  const contract2 = await run(ownerCli, [
+    "contract", "--task", "SEAT3", "--workspace", workspace, "--gate", "true", "--artifact", "src/format.ts",
+  ], { PASEO_HOME: home2 });
+  assert.equal(contract2.status, 0, contract2.stderr);
+  const green2 = await run(claimCli, ["--task", "SEAT3", "--sha", sha], { FACTORY_STATE_DIR: stateDir2, PASEO_AGENT_ID: "agent-worker-2" });
+  assert.equal(green2.status, 0, green2.stderr);
+  const lead = await run(ownerCli, ["accept", "SEAT3", "--attempt", "1", "--by", "lead"], { PASEO_HOME: home2 });
+  assert.equal(lead.status, 0, lead.stderr);
+  assert.match(lead.stdout, /SEAT3 accepted at attempt 1 by lead/);
+  const accepted2 = factory2.ledger.eventsFor("SEAT3").find((e) => e.event === "attempt_accepted");
+  assert.equal(accepted2 === undefined ? undefined : accepted2.accepted_by, "lead");
 });

@@ -3,6 +3,7 @@
 - **Status:** Accepted — 2026-10-15 (ratified by Andrew over a two-round `/grill-with-docs`, all-recommended; words "toàn bộ theo khuyến nghị của bạn")
 - **Grounded in:** `Patruxs/PigMonitor` (`v0.2.1`, `@getpaseo/plugin@0.11.2`, `index.client.tsx`, `client/monitor/{surface,header,overview,graph,dialog}.tsx`, `client/chat/step-in.tsx`, `scripts/check-bundle.mjs`) · `sting8k/piggery` (`v0.10.2`, `ps --view`) · `research/piggery-vs-factory-v0.0.11-argon-review.md` · `research/piggery-pigmonitor-second-opinion.md` · `src/{watch,retro,fresh-eyes,factory}.ts`
 - **Amends:** ADR 0004 (client RPC handlers inside `plugin/index.server.ts` invoke the plugin's own `factory` instance directly as the single writer) · ADR 0006 §2 & §5 (v0.0.13 adds the Factory surface and one-click Supervisor bridge; roadmap law #4 "no UI yet" retires after twelve core versions)
+- **Amended by:** ADR 0010 (per-Project `Supervisor` and `Lead` seats rooted at `<project-root>`, 5-lane switcher adding `lead`, per-Project state isolation, and automatic `Task worktree` landing)
 
 ## Decision
 

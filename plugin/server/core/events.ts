@@ -51,6 +51,8 @@
  * only writer of its kinds — the kind itself is the attribution.
  */
 
+import type { LandingResult } from "./workspace.ts";
+
 export type Verdict = "red" | "green";
 
 /** The Attempt ceiling (v0.0.12, ADR 0008 §1): a Task may open at most three Attempts — fixed in code, never configuration. */
@@ -125,6 +127,13 @@ export interface ContractSet {
    * workspace.
    */
   description?: string;
+  /**
+   * The SKILL.md workflows the working Agent must open first (v0.0.14, ADR
+   * 0010 §6) — the Lead's way to mandate a method, not just an outcome. Skill
+   * names, recorded verbatim; the driver's brief renders them at the top.
+   * Pre-0.0.14 Contracts predate the field.
+   */
+  skills?: string[];
   /**
    * Who set the Contract (v0.0.9, ADR 0006): the submitting shell's stamp,
    * carried from the spool request — the delegated Owner agent's
@@ -252,8 +261,26 @@ export interface AttemptAccepted {
    * Who accepted (v0.0.9, ADR 0006: "the Ledger always records who accepted")
    * — the submitting shell's stamp, the same law as the Contract's `by`:
    * the delegated Owner agent's id or `owner`. Pre-0.0.9 lines predate it.
+   * Since v0.0.14 (ADR 0010 §3) the three seat names carry authority
+   * semantics — `owner`/`supervisor` unconditional, `lead` conditional on a
+   * CONCERN-free green attempt outside needs_human (`lead-accept-refused`
+   * otherwise); any other string records verbatim with no seat privileges.
    */
   accepted_by?: string;
+  /**
+   * The local-landing outcome (v0.0.14, ADR 0010 §4), present only when the
+   * task ran in a managed Task worktree: `landed` — claimedCommit is in
+   * `<project-root>`'s local branch history and the temporary worktree is
+   * removed — or `pending-conflict` — the acceptance recorded while the root
+   * was dirty or the integration conflicted, with branch `factory/<task>`
+   * and the worktree preserved for resolution. Never a `git push`: remote
+   * landing stays a human act. Absent on the legacy shared-checkout path
+   * and pre-0.0.14 lines. The vocabulary is LandingResult's (workspace.ts)
+   * — one declaration, both halves of the landing.
+   */
+  landing?: LandingResult["landing"];
+  /** The pending-conflict's reason — the conflict the Lead or Supervisor resolves. */
+  landingNote?: string;
 }
 
 /**
@@ -327,6 +354,16 @@ export interface SpawnDispatched {
   provider: string;
   /** How many tasks the spawning invocation carried — the run's parallel width. */
   arity: number;
+  /**
+   * The managed Task worktree this run executes in (v0.0.14, ADR 0010 §4) —
+   * `<projectStateDir>/worktrees/<task>` on branch `factory/<task>`, allocated
+   * by the driver before this line exists. The `provider`/`arity` precedent
+   * was recorded-never-interpreted; this field is the one deliberate
+   * exception — `claim` executes against it, `liveContractFor` binds the
+   * worktree agent's asks through it, and accept's landing reads it back.
+   * Absent on the legacy shared-checkout path and pre-0.0.14 lines.
+   */
+  worktree?: string;
 }
 
 /**

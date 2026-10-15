@@ -1,7 +1,9 @@
 import { test } from "node:test";
 import type { TestContext } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { join } from "node:path";
 import type { AgentPermissionRequest, AgentPermissionResponse } from "@getpaseo/protocol/agent-types";
 import { createFactory } from "../plugin/server/core/factory.ts";
@@ -229,6 +231,55 @@ test("the spool's synthetic ask judges through the same policy and ledger", (t) 
   );
 });
 
+test("the memory write fence answers contracted asks: AGENTS.md writes deny unless the Contract scopes the file (v0.0.14)", async (t) => {
+  const s = stage(t); // T1's contract: no scope — unrestricted code edits, fenced memory files
+
+  // A write/edit tool ask at the workspace root memory file.
+  await s.ask({
+    request: {
+      id: "m1",
+      provider: "claude",
+      name: "Write",
+      kind: "tool",
+      detail: { type: "write", filePath: "AGENTS.md", content: "# poisoned rule\n" },
+    },
+  });
+  const denied = s.factory.ledger.eventsFor("T1").find((e) => e.event === "permit_denied")!;
+  assert.equal(denied.rule, "policy:memory-write-fenced");
+  assert.equal(denied.command, "AGENTS.md", "the line names what was aimed at");
+  assert.equal(s.paseo.sent[0]?.response.behavior, "deny");
+
+  // A shell ask through the same fence — the synthetic spool path too.
+  const spoolDenied = s.choke.spoolAskHandler({ id: "m2", kind: "ask", task: "T1", command: "echo rule >> CLAUDE.md", cwd: s.workspace, agent: "bypass-battery" });
+  assert.equal(spoolDenied.ok && spoolDenied.decision, "denied");
+  assert.equal(spoolDenied.ok ? spoolDenied.rule : undefined, "policy:memory-write-fenced");
+
+  // Ordinary code edits in the same workspace stay allowed — the fence is the
+  // only thing that changed.
+  await s.ask({ request: shellRequest("m3", "echo done > src_out.txt") });
+  assert.equal(s.paseo.sent.at(-1)?.response.behavior, "allow");
+
+  // The opt-in: a scoped contract admits the edit. A second task cannot share
+  // T1's workspace (the conflict guard), so the opt-in rides its own tree.
+  const ws2 = join(s.dir, "ws2");
+  mkdirSync(ws2, { recursive: true });
+  writeFileSync(join(ws2, "probe.txt"), "x\n");
+  gitCommitAll(ws2, "base");
+  s.factory.setContract({ task: "T2", workspace: ws2, gate: "true", artifact: "probe.txt", scope: ["AGENTS.md"] });
+  await s.ask({
+    cwd: ws2,
+    request: {
+      id: "m4",
+      provider: "claude",
+      name: "Write",
+      kind: "tool",
+      detail: { type: "write", filePath: "AGENTS.md", content: "# a contracted rule edit\n" },
+    },
+  });
+  const t2Allowed = s.factory.ledger.eventsFor("T2").filter((e) => e.event === "permit_allowed");
+  assert.equal(t2Allowed.length, 1, "an explicitly scoped memory edit is contracted work");
+});
+
 /**
  * Like helpers' factoryErrorCode, but by the stable `code` string: the shell
  * throws the SYNCED core's FactoryError class, a different identity from
@@ -334,3 +385,94 @@ test("the ledger validates the choke shapes on reopen — and rejects the malfor
     }
   });
 });
+
+// ---- the Task worktree binding (v0.0.14, ADR 0010 §4): the choke follows the agent into the worktree ----
+
+test("a worktree agent is contracted, fenced, and isolated — the choke binds through the spawn line's worktree", async (t) => {
+  const dir = makeTempDir("choke-loop-worktree-");
+  disposeDir(t, dir);
+  const workspace = join(dir, "ws");
+  mkdirSync(workspace, { recursive: true });
+  writeFileSync(join(workspace, "probe.txt"), "x\n");
+  gitCommitAll(workspace, "base");
+  const stateDir = join(dir, "state");
+  const worktree = join(dir, "state", "worktrees", "WT");
+  mkdirSync(dirname(worktree), { recursive: true });
+  execFileSync("git", ["worktree", "add", "-b", "factory/WT", worktree, headSha(workspace)], { cwd: workspace });
+
+  const factory = createFactory({ stateDir });
+  factory.setContract({ task: "WT", workspace, gate: "true", artifact: "probe.txt" });
+  factory.requestSpawn({ task: "WT", provider: "claude", arity: 1, worktree });
+  const choke = createChoke({ factory, homeDir: "/fake-home", onLog: () => {} });
+  const paseo = fakePaseo();
+
+  // A worktree-cwd'd agent is a contracted agent — the ask is judged and answered.
+  await choke.onPermissionAsked(
+    { agent: { id: "agent-wt", cwd: worktree }, request: shellRequest("r1", "bash -c 'git push --force origin main'") },
+    paseo.api,
+  );
+  assert.equal(paseo.sent.length, 1, "the worktree bound the ask to the live contract");
+  assert.equal(paseo.sent[0]?.response.behavior, "deny");
+  assert.equal(factory.ledger.eventsFor("WT").filter((e) => e.event === "permit_denied").length, 1);
+
+  // The memory fence covers the worktree's copy of AGENTS.md — an absolute
+  // write at the worktree root denies exactly like one at the project root.
+  await choke.onPermissionAsked(
+    {
+      agent: { id: "agent-wt", cwd: join(worktree, "src") },
+      request: { id: "m-wt", provider: "claude", name: "Write", kind: "tool", detail: { type: "write", filePath: join(worktree, "AGENTS.md"), content: "# poisoned\n" } },
+    },
+    paseo.api,
+  );
+  assert.equal(paseo.sent.length, 2);
+  assert.equal(paseo.sent[1]?.response.behavior, "deny", "the worktree's memory file is fenced");
+  const fenced = factory.ledger.eventsFor("WT").findLast((e) => e.event === "permit_denied");
+  assert.equal(fenced === undefined ? undefined : fenced.rule, "policy:memory-write-fenced");
+
+  // A write INSIDE the worktree is ordinary contracted work — the execution
+  // tree is the agent's writable root now. (A <project-root> write denies on
+  // every real checkout — the root drops out of the writable set — but this
+  // suite's temp dirs sit under $TMPDIR, whose /tmp entry already admits
+  // them; that admission is S2's own law, not a worktree behavior, so it is
+  // not asserted here.)
+  await choke.onPermissionAsked(
+    {
+      agent: { id: "agent-wt", cwd: worktree },
+      request: { id: "w-wt", provider: "claude", name: "Write", kind: "tool", detail: { type: "write", filePath: join(worktree, "src", "new.ts"), content: "export const n = 1;\n" } },
+    },
+    paseo.api,
+  );
+  assert.equal(paseo.sent[2]?.response.behavior, "allow");
+
+  // The synthetic ask's default cwd is the task's execution tree: an ask
+  // with no cwd of its own judges from the worktree root.
+  const allowed = choke.spoolAskHandler({ id: "q1", kind: "ask", task: "WT", command: `echo hi > ${join(worktree, "ok.txt")}`, agent: "bypass-battery" });
+  assert.equal(allowed.ok, true);
+  if (allowed.ok) assert.equal(allowed.decision, "allowed", "the spool ask judged from the worktree root");
+
+  // Acceptance retires the binding at the worktree like at the root.
+  factory.ledger.append({ event: "attempt_accepted", task: "WT", attempt: 1 });
+  const after = await countAnswered(choke, worktree);
+  assert.equal(after, 0, "an accepted task's worktree binds no live contract");
+});
+
+/** Fires one benign ask from `cwd` and returns how many responses the daemon side received. */
+async function countAnswered(choke: ReturnType<typeof createChoke>, cwd: string): Promise<number> {
+  const sent: unknown[] = [];
+  await choke.onPermissionAsked(
+    { agent: { id: "agent-x", cwd }, request: shellRequest("rz", "true") },
+    {
+      agents: {
+        ref() {
+          return { async respondToPermission(options: { response: unknown }) { sent.push(options.response); } };
+        },
+      },
+    },
+  );
+  return sent.length;
+}
+
+/** HEAD sha of a checkout — the worktree fixture's base. */
+function headSha(cwd: string): string {
+  return execFileSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" }).trim();
+}

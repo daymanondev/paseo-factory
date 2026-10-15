@@ -207,7 +207,10 @@ asks.
 
 **The brief — fixed template, edit only the placeholders** (the driver
 renders these same words for its own agents — template and code move
-together):
+together; since v0.0.14 the driver may also prepend a
+`Required skills to open first: <skills>` line above the template when the
+Contract carries `skills`, and `<branch>` is the agent's `factory/<task>`
+worktree branch on the driver path):
 
 > Do the assigned work on branch `<branch>`. When done: commit, run
 > `git rev-parse HEAD`, then `factory-claim --task <task-id> --sha <sha>`.

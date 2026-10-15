@@ -51,6 +51,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { readLedgerEvents } from "./ledger-read.mjs";
 import { awaitReply, randomId, submit } from "./spool-client.mjs";
+import { prepareTaskWorkspace } from "./task-worktree.mjs";
 
 /** Snapshot polling cadence — the observe loop's only clock (ticket 03 §5). */
 export const POLL_MS = 5_000;
@@ -100,8 +101,11 @@ const TASK_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 // placeholders and the baked PATH vary, never the words. Since v0.0.6 a
 // contract's description rides ahead of the fixed body (the description-slot
 // rider): the assignment reaches the agent in the brief itself, retiring the
-// v0.0.5 TASK.md seed workaround. No description, no header — the brief is
-// byte-identical to v0.0.5's.
+// v0.0.5 TASK.md seed workaround. Since v0.0.14 a contract's skills ride
+// above everything (ADR 0010 §6): `Required skills to open first: <skills>`
+// mandates the SKILL.md workflows the working Agent opens before it starts.
+// No description and no skills, no headers — the brief is byte-identical to
+// v0.0.5's.
 const BRIEF_TEMPLATE = `Do the assigned work on branch \`<branch>\`. When done: commit, run
 \`git rev-parse HEAD\`, then \`factory-claim --task <task-id> --sha <sha>\`.
 If the result is RED: read the note line, fix, make a NEW commit, claim
@@ -111,16 +115,21 @@ Your shells under the daemon start without git/node/npm on PATH — export
 PATH="<path>" first.`;
 
 /**
- * The brief, rendered per task — `<branch>` and `<task-id>` are the task id; the
- * PATH is baked from the driver's own environment at spawn time; the
- * contract's description (when set) rides ahead as the assignment header.
+ * The brief, rendered per task — `<task-id>` is the task id and `<branch>` the
+ * branch argument (the task id on the legacy shared-checkout path, its
+ * `factory/<task>` worktree branch since v0.0.14); the PATH is baked from the
+ * driver's own environment at spawn time; the contract's description (when
+ * set) rides ahead as the assignment header, and its skills (when set) ride
+ * at the very top as the method mandate.
  */
-export function renderBrief(task, pathValue, description) {
-  const body = BRIEF_TEMPLATE.replaceAll("<branch>", task)
+export function renderBrief(task, pathValue, description, skills, branch = task) {
+  const body = BRIEF_TEMPLATE.replaceAll("<branch>", branch)
     .replaceAll("<task-id>", task)
     .replace('PATH="<path>" first.', `PATH="${pathValue}" first.`);
-  if (description === undefined || description === null) return body;
-  return `Task: ${description}\n\n${body}`;
+  let brief = body;
+  if (description !== undefined && description !== null) brief = `Task: ${description}\n\n${brief}`;
+  if (Array.isArray(skills) && skills.length > 0) brief = `Required skills to open first: ${skills.join(", ")}\n\n${brief}`;
+  return brief;
 }
 
 /** `--provider claude/opus-4-8` → provider `claude`, model `opus-4-8`; a bare id carries no model. */
@@ -877,8 +886,8 @@ export async function observeTasks(
       } else {
         const contract = contractFromLedger(events, entry.task);
         const workspace = entry.workspace ?? contract?.workspace;
-        cleanWorkspaceForRespawn(workspace);
-        const brief = entry.brief ?? renderBrief(entry.task, process.env.PATH ?? "", contract?.description);
+        cleanWorkspaceForRespawn(workspace); // the TASK WORKTREE on the worktree path — never <project-root>
+        const brief = entry.brief ?? renderBrief(entry.task, process.env.PATH ?? "", contract?.description, contract?.skills, entry.branch);
         const { provider: providerId, model } = splitProvider(provider);
         const respawnSeq = reply.event?.seq;
         const idempotencyKey = respawnSeq !== undefined ? `${entry.task}-respawn-${respawnSeq}` : `${entry.task}-respawn`;
@@ -1236,18 +1245,47 @@ export async function runDriver({ home, stateDir, spoolRoot, tasks, provider, wa
       continue;
     }
     const contract = contractFromLedger(ledgerAtStart, task);
+    // The Task worktree (v0.0.14, ADR 0010 §4): a contracted task whose
+    // workspace IS the Project root gets its isolated linked worktree
+    // allocated BEFORE the spawn request — the local refusal law holds (a
+    // worktree failure writes no ledger line), and the spawn request carries
+    // the worktree path so the plugin can record it on `spawn_dispatched`
+    // (claim, gate, and choke bind to it after that). A subdirectory
+    // workspace (Implementation Decision 5's condition) keeps the legacy
+    // single-checkout law: the branch switches in place, the agent's cwd
+    // stays the workspace, and no worktree rides the spawn line — no
+    // landing on accept either, exactly as before worktrees existed.
+    let prep;
     if (contract !== undefined) {
-      const prep = prepareWorkspace(contract.workspace, task);
-      if (!prep.ok) {
-        problems.push(bad(task, "refused locally", prep.reason));
+      const prepared = prepareTaskWorkspace(stateDir, contract, task);
+      if (!prepared.ok) {
+        problems.push(bad(task, "refused locally", prepared.reason));
         continue;
       }
-      say(`factory: ${task} on branch ${task}${prep.branchExisted ? " (existing — re-run)" : " (created)"}`);
+      if (prepared.legacy === true) {
+        const legacy = prepareWorkspace(contract.workspace, task);
+        if (!legacy.ok) {
+          problems.push(bad(task, "refused locally", legacy.reason));
+          continue;
+        }
+        prep = { ok: true, cwd: contract.workspace, branch: task };
+        say(`factory: ${task} on branch ${task}${legacy.branchExisted ? " (existing — re-run)" : " (created)"} — workspace is a repo subdirectory, not the project root: single-checkout path`);
+      } else {
+        prep = prepared;
+        say(`factory: ${task} in worktree ${prepared.cwd} on branch ${prepared.branch}${prepared.reset ? " (reset — re-run)" : " (created)"}`);
+      }
     }
     // The spool owns the record: one spawn request per task, one ledger line
     // either way. Unknown tasks ride this path too — the plugin's refusal is
     // the recorded fact, not a local complaint.
-    const request = { id: randomId(), kind: "spawn", task, provider, arity: tasks.length };
+    const request = {
+      id: randomId(),
+      kind: "spawn",
+      task,
+      provider,
+      arity: tasks.length,
+      ...(prep?.worktree === undefined ? {} : { worktree: prep.worktree }),
+    };
     submit(spoolRoot, request);
     const reply = await awaitReply(spoolRoot, request.id, waitSecs * 1000);
     if (reply === null) {
@@ -1266,7 +1304,11 @@ export async function runDriver({ home, stateDir, spoolRoot, tasks, provider, wa
     }
     if (created > 0) await sleep(staggerMs); // CPU etiquette only — gates must not serialize (ticket 03 §7)
     try {
-      const brief = renderBrief(task, process.env.PATH ?? "", contract.description);
+      // The agent's cwd is the task worktree (v0.0.14), and the brief names
+      // the branch it is already on — `factory/<task>`, never the bare task
+      // id the legacy shared-checkout path used.
+      const branch = prep?.branch ?? task;
+      const brief = renderBrief(task, process.env.PATH ?? "", contract.description, contract.skills, branch);
       const spawnSeq = reply.event?.seq;
       const idempotencyKey = spawnSeq !== undefined ? `${task}-spawn-${spawnSeq}` : task;
       const agentId = await createTaskAgent(rpc, {
@@ -1274,10 +1316,10 @@ export async function runDriver({ home, stateDir, spoolRoot, tasks, provider, wa
         idempotencyKey,
         provider: providerId,
         ...(model === undefined ? {} : { model }),
-        cwd: contract.workspace,
+        cwd: prep?.cwd ?? contract.workspace,
         brief,
       });
-      entries.push({ task, agentId, workspace: contract.workspace, brief });
+      entries.push({ task, agentId, workspace: prep?.cwd ?? contract.workspace, branch, brief });
       created += 1;
       say(`factory: ${task} agent ${agentId.slice(0, 12)} created — watching to verdict`);
     } catch (err) {

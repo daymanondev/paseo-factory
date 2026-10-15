@@ -1,6 +1,7 @@
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   agentFate,
@@ -21,7 +22,9 @@ import {
   taskOutcome,
   verdictOfThisRun,
 } from "../plugin/bin/driver.mjs";
-import { copyFixture, disposeDir, gitCommitAll, makeTempDir } from "./helpers.ts";
+import { prepareTaskWorkspace, prepareTaskWorktree, parseTaskWorktreePath } from "../plugin/bin/task-worktree.mjs";
+import { resolveProject } from "../plugin/bin/project.mjs";
+import { copyFixture, disposeDir, gitCommitAll, gitCommitChanges, makeTempDir } from "./helpers.ts";
 import { awaitReply, submit } from "../plugin/bin/spool-client.mjs";
 
 /**
@@ -54,8 +57,32 @@ test("renderBrief carries the contract's description ahead of the fixed body (th
   );
   assert.ok(withDescription.includes("Do the assigned work on branch `live06-a`."), "the fixed body is intact below the header");
 
-  // No description: byte-identical to v0.0.5's brief.
+  // No description AND no skills: byte-identical to v0.0.5's brief.
   assert.equal(renderBrief("live06-a", "/custom/bin"), renderBrief("live06-a", "/custom/bin", undefined));
+});
+
+test("renderBrief renders Contract.skills at the very top (v0.0.14, ADR 0010 §6)", () => {
+  const brief = renderBrief("live07-a", "/custom/bin", "Tighten the pad helper.", ["tdd", "diagnosing-bugs"]);
+  assert.ok(
+    brief.startsWith("Required skills to open first: tdd, diagnosing-bugs\n\n"),
+    "the mandate rides above the assignment and the fixed body",
+  );
+  assert.ok(brief.includes("Task: Tighten the pad helper.\n\n"), "the assignment follows the mandate");
+  assert.ok(brief.includes("Do the assigned work on branch `live07-a`."), "the fixed body is intact below both headers");
+
+  // Skills with no description: the mandate rides directly over the fixed body.
+  const noDescription = renderBrief("live07-b", "/custom/bin", undefined, ["codebase-design"]);
+  assert.ok(noDescription.startsWith("Required skills to open first: codebase-design\n\n"));
+  assert.ok(!noDescription.includes("Task:"), "no assignment line is invented");
+
+  // An empty mandate renders nothing — same as an omitted one.
+  assert.equal(renderBrief("live07-c", "/custom/bin", undefined, []), renderBrief("live07-c", "/custom/bin"));
+});
+
+test("renderBrief names the worktree branch when the driver passes it (the task-worktree rider)", () => {
+  const brief = renderBrief("live07-d", "/custom/bin", undefined, undefined, "factory/live07-d");
+  assert.ok(brief.includes("Do the assigned work on branch `factory/live07-d`."), "the agent hears the branch it is already on");
+  assert.ok(!brief.includes("`live07-d`."), "the bare task id is not offered as a branch to switch to");
 });
 
 test("splitProvider takes provider[/model] on the first slash", () => {
@@ -137,6 +164,164 @@ test("prepareWorkspace: clean tree gets the task's branch, re-run switches to it
   const missing = prepareWorkspace(join(dir, "not-there"), "live05-c");
   assert.equal(missing.ok, false);
   if (!missing.ok) assert.match(missing.reason, /does not exist/);
+});
+
+// ---- the Task worktree (v0.0.14, ADR 0010 §4): allocation, reset, .worktreeinclude ----------------
+
+/** One git fact about a checkout, asserted as a string — the worktree tests' own `git rev-parse` shorthand. */
+function gitAt(cwd: string, args: string[]): string {
+  return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+}
+
+test("prepareTaskWorktree: linked worktree at <projectStateDir>/worktrees/<task> on branch factory/<task> at the contract base", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const workspace = join(dir, "ws");
+  copyFixture("sample-workspace", workspace);
+  const base = gitCommitAll(workspace);
+  const stateDir = join(dir, "state");
+  const project = resolveProject(workspace);
+  assert.equal(project.ok, true);
+
+  const prepared = prepareTaskWorktree({ stateDir, workspace, task: "WT1", base });
+  assert.equal(prepared.ok, true, prepared.ok ? "" : prepared.reason);
+  if (!prepared.ok) return;
+  const path = join(stateDir, "projects", project.ok ? project.slug : "", "worktrees", "WT1");
+  assert.equal(prepared.path, path, "the worktree sits in the Project's isolated state tree");
+  assert.equal(prepared.branch, "factory/WT1");
+  assert.equal(prepared.reset, false, "first allocation is a create, not a reset");
+  assert.equal(gitAt(path, ["rev-parse", "HEAD"]), base, "checked out at the Contract's base commit");
+  assert.equal(gitAt(path, ["rev-parse", "--abbrev-ref", "HEAD"]), "factory/WT1");
+  assert.ok(gitAt(workspace, ["worktree", "list"]).includes(path), "a linked worktree of the project checkout");
+  // The project root is untouched — its branch, its HEAD, its clean tree.
+  assert.equal(gitAt(workspace, ["rev-parse", "HEAD"]), base);
+  assert.equal(gitAt(workspace, ["status", "--porcelain"]), "");
+});
+
+test("prepareTaskWorktree: a re-run resets the worktree back to base — committed or dirty fragments are gone", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const workspace = join(dir, "ws");
+  copyFixture("sample-workspace", workspace);
+  const base = gitCommitAll(workspace);
+  const stateDir = join(dir, "state");
+
+  const first = prepareTaskWorktree({ stateDir, workspace, task: "WT2", base });
+  if (!first.ok) return void assert.fail(first.reason);
+  // The agent "worked": a commit on factory/WT2 plus an uncommitted fragment.
+  writeFileSync(join(first.path, "src", "format.ts"), "export const dirty = 1;\n");
+  const moved = gitCommitChanges(first.path, "agent work");
+
+  const again = prepareTaskWorktree({ stateDir, workspace, task: "WT2", base });
+  assert.equal(again.ok, true, again.ok ? "" : again.reason);
+  if (!again.ok) return;
+  assert.equal(again.reset, true, "the second allocation is a reset");
+  assert.equal(gitAt(again.path, ["rev-parse", "HEAD"]), base, "back at base — the re-run starts clean");
+  assert.equal(gitAt(again.path, ["status", "--porcelain"]), "");
+  assert.equal(readFileSync(join(again.path, "src", "format.ts"), "utf8"), readFileSync(join(workspace, "src", "format.ts"), "utf8"), "base content restored");
+  assert.notEqual(moved, base);
+});
+
+test("prepareTaskWorktree copies .worktreeinclude-matched untracked files without dirtying the worktree", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const workspace = join(dir, "ws");
+  copyFixture("sample-workspace", workspace);
+  // The include file is tracked config; the matched files are untracked — one
+  // gitignored (.env.local), one merely untracked (secret.txt).
+  writeFileSync(join(workspace, ".gitignore"), "node_modules/\n.env*\n");
+  writeFileSync(join(workspace, ".worktreeinclude"), "# local env only\n.env*\nsecret.txt\n");
+  const base = gitCommitAll(workspace);
+  writeFileSync(join(workspace, ".env.local"), "TOKEN=abc\n");
+  writeFileSync(join(workspace, "secret.txt"), "do not commit me\n");
+  const stateDir = join(dir, "state");
+
+  const prepared = prepareTaskWorktree({ stateDir, workspace, task: "WT3", base });
+  if (!prepared.ok) return void assert.fail(prepared.reason);
+  assert.equal(readFileSync(join(prepared.path, ".env.local"), "utf8"), "TOKEN=abc\n", "the ignored untracked file rides over");
+  assert.equal(readFileSync(join(prepared.path, "secret.txt"), "utf8"), "do not commit me\n", "the non-ignored untracked file rides over too");
+  assert.equal(
+    gitAt(prepared.path, ["status", "--porcelain"]),
+    "",
+    "the copies are per-worktree excluded — a Claim's clean-tree station stays honest",
+  );
+  // A file the include does not match stays behind.
+  writeFileSync(join(workspace, ".env.prod"), "TOKEN=prod\n");
+  const other = prepareTaskWorktree({ stateDir, workspace, task: "WT4", base });
+  if (!other.ok) return void assert.fail(other.reason);
+  assert.equal(existsSync(join(other.path, ".env.prod")), true, ".env* matches .env.prod as well");
+  const notListed = prepareTaskWorktree({ stateDir, workspace, task: "WT5", base });
+  if (!notListed.ok) return void assert.fail(notListed.reason);
+  assert.equal(existsSync(join(notListed.path, "unmatched.bin")), false, "no catch-all copy ever happens");
+});
+
+test("a subdirectory workspace keeps the legacy single-checkout path — no worktree, the agent's cwd is the subdir", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const root = join(dir, "ws");
+  copyFixture("sample-workspace", root);
+  gitCommitAll(root);
+  // A monorepo package: the contract's workspace is a repo SUBDIRECTORY, not
+  // the project root (Implementation Decision 5 conditions the worktree on
+  // the workspace BEING <project-root>).
+  const pkg = join(root, "src");
+  const stateDir = join(dir, "state");
+
+  const routed = prepareTaskWorkspace(stateDir, { workspace: pkg, base: undefined }, "WT9");
+  assert.equal(routed.ok, true, routed.ok ? "" : routed.reason);
+  if (!routed.ok) return;
+  assert.equal(routed.cwd, pkg, "the agent's cwd stays the contracted subdirectory");
+  assert.equal(routed.branch, "WT9", "the legacy path's branch is the bare task id, not factory/<task>");
+  assert.equal(routed.legacy, true, "the dispatcher names the routing so the driver can branch in place");
+  assert.equal(routed.worktree, undefined, "no worktree is allocated or carried on the spawn request");
+  assert.equal(gitAt(root, ["worktree", "list"]).includes(join(stateDir, "projects")), false, "nothing was registered under <stateDir>/projects");
+  // And the repo root itself keeps the worktree routing.
+  const rooted = prepareTaskWorkspace(stateDir, { workspace: root, base: undefined }, "WT10");
+  assert.equal(rooted.ok, true, rooted.ok ? "" : rooted.reason);
+  if (rooted.ok) {
+    assert.equal(rooted.cwd, rooted.worktree);
+    assert.equal(rooted.branch, "factory/WT10");
+    assert.notEqual(rooted.legacy, true);
+  }
+});
+
+test("parseTaskWorktreePath owns the one <stateDir>/projects/<slug>/worktrees/<task> encoding — build and parse agree", () => {
+  const stateDir = join("/h", "plugin-state", "paseo-factory");
+  assert.deepEqual(parseTaskWorktreePath(stateDir, join(stateDir, "projects", "ws-b4921c", "worktrees", "T1")), { slug: "ws-b4921c", task: "T1" });
+  assert.deepEqual(parseTaskWorktreePath(stateDir, join(stateDir, "projects", "ws-b4921c", "worktrees", "T1", "src")), { slug: "ws-b4921c", task: "T1" }, "a cwd inside the worktree names the worktree");
+  assert.equal(parseTaskWorktreePath(stateDir, join(stateDir, "projects", "ws-b4921c", "ledger.jsonl")), null, "project state that is not a worktree is not ours");
+  assert.equal(parseTaskWorktreePath(stateDir, "/tmp/somewhere-else"), null);
+  assert.equal(parseTaskWorktreePath(stateDir, stateDir), null);
+});
+
+test("prepareTaskWorktree refuses a non-git workspace by name; the dispatcher never falls back to the shared checkout", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const plain = join(dir, "plain");
+  mkdirSync(plain, { recursive: true });
+  writeFileSync(join(plain, "x.txt"), "not a repo\n");
+  const stateDir = join(dir, "state");
+
+  const refused = prepareTaskWorktree({ stateDir, workspace: plain, task: "WT6", base: "0".repeat(40) });
+  assert.equal(refused.ok, false);
+  if (!refused.ok) assert.match(refused.reason, /does not resolve to a git Project/);
+
+  // The dispatcher: a git workspace routes to the worktree path; a non-git
+  // one is refused (never switched to a branch-in-checkout fallback — that
+  // would dirty the root the worktree law protects).
+  const ws = join(dir, "ws");
+  copyFixture("sample-workspace", ws);
+  const base = gitCommitAll(ws);
+  const routed = prepareTaskWorkspace(stateDir, { workspace: ws, base }, "WT7");
+  assert.equal(routed.ok, true, routed.ok ? "" : routed.reason);
+  if (routed.ok) {
+    assert.equal(routed.worktree !== undefined, true, "the git workspace got a managed worktree");
+    assert.equal(routed.cwd, routed.worktree);
+    assert.equal(routed.branch, "factory/WT7");
+  }
+  const nonGit = prepareTaskWorkspace(stateDir, { workspace: plain, base: undefined }, "WT8");
+  assert.equal(nonGit.ok, false, "the non-git workspace cannot be prepared either way");
+  if (!nonGit.ok) assert.match(nonGit.reason, /does not resolve to a git Project/);
 });
 
 test("agentFate reads a snapshot the way ticket 03 §5 settled it", () => {

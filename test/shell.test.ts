@@ -157,3 +157,21 @@ test("ensureGitShim generates the git wrapper beside factory-claim, rewriting on
   ensureGitShim(stateDir, pluginDir, "/daemon/node-v2");
   assert.match(readFileSync(target, "utf8"), /daemon\/node-v2/, "a moved node binary moves the wrapper");
 });
+
+test("the agent PATH surface is exactly factory-claim and the git shim — the factory CLI never rides it (US17's mechanical half)", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const pluginDir = join(repoRoot, "plugin");
+
+  // Both wrappers the plugin's session_open hook ever generates.
+  ensureClaimCli(stateDir, pluginDir, "/daemon/node");
+  ensureGitShim(stateDir, pluginDir, "/daemon/node");
+  assert.deepEqual(
+    readdirSync(claimCliBinDir(stateDir)).sort(),
+    ["factory-claim", "git"],
+    "the one dir injectClaimCliPath puts on every agent's PATH holds exactly the claim CLI and the git shim — never the Owner CLI (factory.mjs), whose every wrapper would be an orchestration door",
+  );
+  // And the wrapper that IS there points at factory-claim.mjs, not factory.mjs.
+  assert.match(readFileSync(join(claimCliBinDir(stateDir), "factory-claim"), "utf8"), /factory-claim\.mjs/);
+});

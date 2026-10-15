@@ -9,12 +9,17 @@ export declare const DEFAULT_LANE: string;
 export declare const EYE_JSON_LANE: string;
 
 export declare function lanesPath(stateDir: string): string;
+export declare function projectLanesPath(stateDir: string, projectSlug: string): string;
 export declare function defaultLanes(): Record<string, string>;
 export declare function laneError(name: string, value: string): string | undefined;
-export declare function loadLanes(stateDir: string): { ok: true; lanes: Record<string, string> } | { ok: false; reason: string };
+export declare function loadLanes(
+  stateDir: string,
+  projectSlug?: string,
+): { ok: true; lanes: Record<string, string> } | { ok: false; reason: string };
 export declare function saveLanes(
   stateDir: string,
   update: Record<string, string>,
+  projectSlug?: string,
 ): { ok: true; lanes: Record<string, string> } | { ok: false; reason: string };
 export declare function resolveRunProvider(
   stateDir: string,

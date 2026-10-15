@@ -15,6 +15,8 @@ import { RADIUS, SPACING, text, tint } from "../kit/theme.ts";
 /** The Timeline tab's whole action surface — the Shell owns the RPC calls. */
 export interface TimelineActions {
   runRetro(): void;
+  /** Ratify via Supervisor (v0.0.14, ADR 0010 §6): dispatch one Retro proposal to the Project's Supervisor. */
+  ratify(day: string, proposalId: number): void;
   busy: boolean;
 }
 
@@ -163,6 +165,13 @@ export function TimelinePane({ theme, view, now, actions, retroNote }: { theme: 
                     R{proposal.id} — {proposal.cls}
                   </Text>
                   <Text style={text(theme, "meta")}>{proposal.text}</Text>
+                  <Btn
+                    theme={theme}
+                    small
+                    label="Ratify via Supervisor"
+                    disabled={actions.busy || view.project === null}
+                    onPress={() => actions.ratify(retro.day, proposal.id)}
+                  />
                 </View>
               ))}
             </Card>

@@ -8,7 +8,8 @@
  */
 import { readFileSync } from "node:fs";
 import { basename, join } from "node:path";
-import type { AgentView, AttemptView, FactoryView, LedgerLineView, Lanes, RetroView, TaskStatus, TaskView } from "../shared/view.ts";
+import { FACTORY_VIEW_VERSION } from "../shared/view.ts";
+import type { AgentView, AttemptView, FactoryView, LedgerLineView, Lanes, ProjectView, RetroView, TaskStatus, TaskView } from "../shared/view.ts";
 import type { LedgerEvent } from "./core/events.ts";
 
 /** How many ledger lines ride one snapshot — a stream, not a mirror. */
@@ -246,7 +247,7 @@ export function foldRetro(events: readonly AnyEvent[]): RetroView[] {
 export function renderLedgerLine(evt: AnyEvent): string {
   switch (evt.event) {
     case "contract_set":
-      return `contract gate="${evt.gate}" artifact=${evt.artifact}${evt.scope === undefined ? "" : ` scope=[${evt.scope.join(",")}]`}`;
+      return `contract gate="${evt.gate}" artifact=${evt.artifact}${evt.scope === undefined ? "" : ` scope=[${evt.scope.join(",")}]`}${evt.skills === undefined ? "" : ` skills=[${evt.skills.join(",")}]`}`;
     case "claim_reported":
       return `claim #${evt.attempt} ${evt.sha.slice(0, 7)}`;
     case "gate_started":
@@ -303,6 +304,7 @@ function ledgerLines(events: readonly AnyEvent[]): LedgerLineView[] {
 export interface DaemonAgentsInput {
   agents: readonly AgentView[];
   supervisor: AgentView | null;
+  lead: AgentView | null;
   providers: readonly { provider: string; available: boolean; models?: { id: string; label: string | null }[] | null }[];
   daemonError: string | null;
 }
@@ -314,10 +316,14 @@ export function foldView(input: {
   lanes: Lanes;
   events: readonly AnyEvent[];
   daemon: DaemonAgentsInput;
+  /** The active Project scope (v0.0.14) — null on the unscoped global view. */
+  project: ProjectView | null;
+  /** Every discovered Project for the header's Project Selector. */
+  projects: readonly ProjectView[];
 }): FactoryView {
   const tasks = foldTasks(input.events);
   return {
-    version: 1,
+    version: FACTORY_VIEW_VERSION,
     stateDir: input.stateDir,
     generatedAt: input.generatedAt,
     lanes: input.lanes,
@@ -330,9 +336,12 @@ export function foldView(input: {
       models: provider.models ?? null,
     })),
     supervisor: input.daemon.supervisor,
+    lead: input.daemon.lead,
     retro: foldRetro(input.events),
     ledger: ledgerLines(input.events),
     daemonError: input.daemon.daemonError,
+    project: input.project,
+    projects: [...input.projects],
   };
 }
 

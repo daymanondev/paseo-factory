@@ -7,7 +7,9 @@
  */
 export { createFactory } from "./factory.ts";
 export type { Factory, FactoryOptions, ContractInput, ClaimInput, ClaimOutcome, AcceptInput, SpawnInput, SpawnDecision, RespawnInput, RespawnDecision, MeterInput } from "./factory.ts";
-export { resolveClaimedCommit, checkCleanAt, diffBetween } from "./workspace.ts";
+export { resolveProject, projectStateDir } from "./project.ts";
+export type { ProjectResolution } from "./project.ts";
+export { resolveClaimedCommit, checkCleanAt, diffBetween, changedFiles, scopeCoversFile } from "./workspace.ts";
 export type { CommitResolution, TreeCheck } from "./workspace.ts";
 export { Ledger, usageIsValid } from "./ledger.ts";
 export { runGate } from "./gate.ts";
@@ -67,8 +69,9 @@ export {
   refuseGitArgv,
   shellTokens,
   writableRootsFor,
+  MEMORY_FILES,
 } from "./choke.ts";
-export type { ChokeDecision, GitRefusal, WritableRoots } from "./choke.ts";
+export type { ChokeDecision, GitRefusal, WritableRoots, MemoryFence, MemoryFileName } from "./choke.ts";
 export {
   DEFAULT_GATE_TIMEOUT_MS,
   GATE_OUTPUT_CAP_BYTES,

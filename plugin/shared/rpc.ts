@@ -18,7 +18,16 @@ export const Failure = z.object({ ok: z.literal(false), code: z.string(), error:
 
 export const snapshot = defineRpc({
   name: "factory.snapshot",
-  input: z.object({}),
+  input: z.object({
+    /**
+     * The Project scope (v0.0.14, ADR 0010 §1): any directory inside the
+     * Project's repository — the workspace panel's dir, or a root picked in
+     * the global Project Selector. Omitted, the snapshot is the unscoped
+     * global view. An unresolvable path degrades to the global view (the
+     * panel must render outside git repos too), never a guess.
+     */
+    projectRoot: z.string().optional(),
+  }),
   output: z.union([z.object({ ok: z.literal(true), view: FactoryViewSchema }), Failure]),
 });
 
@@ -54,18 +63,24 @@ export const retro = defineRpc({
 
 export const lanesSet = defineRpc({
   name: "factory.lanes.set",
-  input: z.object({ lane: LaneNameSchema, value: z.string().min(1) }),
+  input: z.object({
+    lane: LaneNameSchema,
+    value: z.string().min(1),
+    /** The Project scope — the save targets its override file and the model sync finds its seat agent. */
+    projectRoot: z.string().optional(),
+  }),
   output: z.union([
     z.object({
       ok: z.literal(true),
       lanes: z.object({
         supervisor: z.string(),
+        lead: z.string(),
         worker: z.string(),
         watch: z.string(),
         retro: z.string(),
         freshEyes: z.string(),
       }),
-      /** What the live Supervisor model sync did: applied / skipped (no live supervisor) / failed (reason). */
+      /** What the live seat model sync did: applied / skipped (no live seat agent) / failed (reason). */
       modelSync: z.string(),
     }),
     Failure,
@@ -74,15 +89,49 @@ export const lanesSet = defineRpc({
 
 export const supervisorEnsure = defineRpc({
   name: "factory.supervisor.ensure",
-  input: z.object({ message: z.string().optional() }),
+  input: z.object({
+    /** The Project to seat — any directory inside its repository (v0.0.14, ADR 0010 §1). */
+    projectRoot: z.string(),
+    message: z.string().optional(),
+  }),
   output: z.union([
-    z.object({ ok: z.literal(true), agentId: z.string(), created: z.boolean(), supervisorDir: z.string().nullable() }),
+    z.object({ ok: z.literal(true), agentId: z.string(), created: z.boolean(), projectRoot: z.string(), slug: z.string() }),
     Failure,
   ]),
 });
 
 export const supervisorRevoke = defineRpc({
   name: "factory.supervisor.revoke",
-  input: z.object({}),
+  input: z.object({
+    /** The Project scope; omitted revokes the first live supervisor (the legacy global act). */
+    projectRoot: z.string().optional(),
+  }),
   output: z.union([z.object({ ok: z.literal(true), agentId: z.string() }), Failure]),
+});
+
+// The Lead seat's lifecycle (v0.0.14, ADR 0010 §2): ensure finds-or-creates
+// the standing seat=lead agent at <project-root>; rotate cancels + archives
+// it so the next dispatch starts a fresh Lead grounded in the Ledger.
+export const leadEnsure = defineRpc({
+  name: "factory.lead.ensure",
+  input: z.object({ projectRoot: z.string(), message: z.string().optional() }),
+  output: z.union([
+    z.object({ ok: z.literal(true), agentId: z.string(), created: z.boolean(), projectRoot: z.string(), slug: z.string() }),
+    Failure,
+  ]),
+});
+
+export const leadRotate = defineRpc({
+  name: "factory.lead.rotate",
+  input: z.object({ projectRoot: z.string() }),
+  output: z.union([z.object({ ok: z.literal(true), agentId: z.string() }), Failure]),
+});
+
+// Ratify via Supervisor (v0.0.14, ADR 0010 §6): dispatch one Retro proposal
+// to the Project's Supervisor to apply to <project-root>/AGENTS.md,
+// CONTEXT.md, or Gate config — the two-tier memory loop's Owner act.
+export const ratifyProposal = defineRpc({
+  name: "factory.retro.ratify",
+  input: z.object({ projectRoot: z.string(), day: z.string(), proposalId: z.number().int() }),
+  output: z.union([z.object({ ok: z.literal(true), agentId: z.string(), summary: z.string() }), Failure]),
 });

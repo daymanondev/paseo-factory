@@ -12,9 +12,11 @@ import { runWatchPass, watchLaneAvailable } from "./watch.ts";
 import type { CopilotRunner, TimelineFetcher } from "./watch.ts";
 import { buildRetroDigest, retroDay, retroLaneAvailable, runRetroPass, writtenRetroForDay } from "./retro.ts";
 import type { RetroOutcome } from "./retro.ts";
-import { changesOutsideScope, checkCleanAt, headCommitSync, resolveClaimedCommit } from "./workspace.ts";
+import { changedFiles, checkCleanAt, headCommitSync, landTaskWorktree, resolveClaimedCommit, scopeCoversFile } from "./workspace.ts";
+import { MEMORY_FILES } from "./choke.ts";
+import { projectStateDir } from "./project.ts";
 import { FactoryError } from "./errors.ts";
-import type { AttemptAccepted, ContractSet, GateFinished, GitBlocked, LedgerEvent, MeterWritten, MeterUsage, NeedsHuman, NeedsHumanEvidence, NeedsHumanReason, RepokeDispatched, RepokeRefused, RespawnDispatched, RespawnRefused, SpawnDispatched, SpawnRefused, Verdict } from "./events.ts";
+import type { AttemptAccepted, ContractSet, FreshEyesWritten, GateFinished, GitBlocked, LedgerEvent, MeterWritten, MeterUsage, NeedsHuman, NeedsHumanEvidence, NeedsHumanReason, RepokeDispatched, RepokeRefused, RespawnDispatched, RespawnRefused, SpawnDispatched, SpawnRefused, Verdict } from "./events.ts";
 import type { GateResult } from "./gate.ts";
 
 /** Task ids become report filenames, so they stay flat and filename-safe. */
@@ -23,6 +25,15 @@ const TASK_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 export interface FactoryOptions {
   /** Directory for `ledger.jsonl`, `report-<task>-<n>.md` and `gate-<task>-<n>.log` files. */
   stateDir: string;
+  /**
+   * The Project scope (v0.0.14, ADR 0010 §5): when set, the ledger, reports
+   * and gate logs live under `<stateDir>/projects/<projectSlug>/` instead of
+   * the root — one isolated tree per Git repository (`resolveProject` names
+   * the slug). Omitted, everything sits at the root exactly as before (the
+   * legacy single-ledger layout every pre-0.0.14 caller uses). Machine-level
+   * config (`lanes.json`, `eye.json`) stays at the root either way.
+   */
+  projectSlug?: string;
   /** Gate timeout override (ms). Defaults to DEFAULT_GATE_TIMEOUT_MS. */
   timeoutMs?: number;
   /** Fresh-eyes total budget override (ms), both tries together. Defaults to EYE_TOTAL_BUDGET_MS. */
@@ -92,6 +103,12 @@ export interface ContractInput {
    */
   description?: string;
   /**
+   * The SKILL.md workflows the working Agent must open first (v0.0.14, ADR
+   * 0010 §6) — skill names, recorded verbatim on the Contract line; the
+   * driver's brief renders them at the top. Omitted or empty = no mandate.
+   */
+  skills?: string[];
+  /**
    * Who set the Contract (v0.0.9, ADR 0006): the spool stamps the submitting
    * shell (`PASEO_AGENT_ID` or `owner`) and the factory records it verbatim
    * on the line — the factory never infers identity.
@@ -119,7 +136,14 @@ export interface AcceptInput {
   attempt: number;
   /**
    * Who accepted (v0.0.9) — the spool's submitting-shell stamp, recorded
-   * verbatim ("the Ledger always records who accepted", ADR 0006).
+   * verbatim ("the Ledger always records who accepted", ADR 0006). The three
+   * seat names carry authority semantics (v0.0.14, ADR 0010 §3): `owner` and
+   * `supervisor` are the unconditional override (the Supervisor acts on the
+   * Owner's word), `lead` is the intermediate acceptance — permitted only on
+   * a green Verdict with no fresh-eyes CONCERN on the attempt and no
+   * undisplaced `needs_human`, else `lead-accept-refused`. Any other string
+   * (a delegated agent's id, the v0.0.9 spelling) records verbatim with no
+   * seat privileges.
    */
   accepted_by?: string;
 }
@@ -133,6 +157,13 @@ export interface SpawnInput {
    * parallel width, and scope is mandatory from two up (map decision 3).
    */
   arity: number;
+  /**
+   * The managed Task worktree this run executes in (v0.0.14, ADR 0010 §4) —
+   * the driver allocates it before submitting the spawn request and names it
+   * here; the line records it, and `claim` / `liveContractFor` / accept's
+   * landing read it back. Omitted on the legacy shared-checkout path.
+   */
+  worktree?: string;
 }
 
 /**
@@ -221,9 +252,14 @@ export interface Factory {
    * sufficient — this is the only acceptance act in the factory, and it is
    * never the Agent's. Since v0.0.9 the delegated Owner seat (the
    * Supervisor, ADR 0006) may submit it on the Owner's word; the
-   * `accepted_by` stamp records whose act each line is.
+   * `accepted_by` stamp records whose act each line is. Since v0.0.14
+   * (ADR 0010 §3–§4) `accepted_by: "lead"` is the intermediate acceptance
+   * (green + no fresh-eyes CONCERN on the attempt + not in needs_human,
+   * else `lead-accept-refused`), and a task that ran in a managed Task
+   * worktree lands its claimedCommit into `<project-root>`'s local branch
+   * before the line records — async git is why the call awaits.
    */
-  accept(input: AcceptInput): AttemptAccepted;
+  accept(input: AcceptInput): Promise<AttemptAccepted>;
   /**
    * Judges a driver's spawn request (v0.0.5): the task must be known,
    * unaccepted, scoped when the invocation runs parallel (arity ≥ 2), and its
@@ -280,7 +316,10 @@ export interface Factory {
    * mechanical "contracted agent" test (v0.0.4 map decision 5: asks from
    * agents without a live Contract are not the factory's business). Live =
    * contract set and no accepted Attempt yet. When several live Contracts
-   * cover the same tree, the latest in ledger order wins.
+   * cover the same tree, the latest in ledger order wins. Since v0.0.14 a
+   * cwd inside the task's recorded Task worktree binds too — the worktree
+   * sits outside the workspace (under `<stateDir>/projects/`), so the spawn
+   * line's `worktree` field is what ties the tree to its Contract.
    */
   liveContractFor(cwd: string): ContractSet | undefined;
   /**
@@ -289,6 +328,14 @@ export interface Factory {
    * Undefined when no Contract was ever set for the task.
    */
   contractFor(task: string): ContractSet | undefined;
+  /**
+   * The managed Task worktree the task's latest dispatch runs in (v0.0.14,
+   * ADR 0010 §4) — the one lookup that binds a task to its execution tree:
+   * the claim's gate cwd and the choke's worktree agent both resolve through
+   * it. Undefined when no spawn recorded one (the legacy shared-checkout
+   * path, pre-0.0.14 lines).
+   */
+  worktreeFor(task: string): string | undefined;
   /**
    * Runs the Retro (v0.0.7): builds the whole-ledger digest, prompts the
    * pinned Copilot model, writes `retro-<date>.md`, appends one
@@ -304,15 +351,21 @@ export interface Factory {
 
 export function createFactory(options: FactoryOptions): Factory {
   const { stateDir } = options;
-  const ledger = Ledger.open(join(stateDir, "ledger.jsonl"));
-  const recoveredAttempts = recoverInterruptedAttempts(ledger, stateDir);
+  // The data tree: project-scoped factories keep their ledger, reports, gate
+  // logs, and retro files under <stateDir>/projects/<slug>/ (v0.0.14, ADR
+  // 0010 §5); machine-level config (lanes.json, eye.json) stays at the root
+  // for every factory, and the root data tree remains the no-scope default
+  // (the legacy single-ledger layout).
+  const dataDir = options.projectSlug === undefined ? stateDir : projectStateDir(stateDir, options.projectSlug);
+  const ledger = Ledger.open(join(dataDir, "ledger.jsonl"));
+  const recoveredAttempts = recoverInterruptedAttempts(ledger, dataDir);
 
   return {
     ledger,
     stateDir,
     recoveredAttempts,
 
-    setContract({ task, workspace, gate, artifact, scope, freshEyes, watch, description, by }) {
+    setContract({ task, workspace, gate, artifact, scope, freshEyes, watch, description, skills, by }) {
       assertTaskId(task);
       if (gate.trim() === "") throw new FactoryError("invalid-contract", "gate command must be a non-empty string");
       if (artifact.trim() === "") throw new FactoryError("invalid-contract", "artifact path must be a non-empty string");
@@ -324,6 +377,14 @@ export function createFactory(options: FactoryOptions): Factory {
       }
       if (description !== undefined && (typeof description !== "string" || description.trim() === "")) {
         throw new FactoryError("invalid-contract", "description must be a non-empty string — omit it when the task has no assignment text");
+      }
+      if (skills !== undefined && skills.length > 0) {
+        const unusable =
+          !Array.isArray(skills) ||
+          skills.some((name) => typeof name !== "string" || name.trim() === "");
+        if (unusable) {
+          throw new FactoryError("invalid-contract", "skills must be an array of non-empty skill names — omit it when the task mandates none");
+        }
       }
       if (!isAbsolute(workspace)) {
         throw new FactoryError("invalid-contract", `workspace "${workspace}" must be an absolute path`);
@@ -402,11 +463,17 @@ export function createFactory(options: FactoryOptions): Factory {
       // contains. Without this, two gates race in one cwd and permit asks
       // misattribute to the latest covering Contract. It is also the Owner-CLI
       // arm of the driver's spawn-time workspace refusal (ticket 03 §7).
-      const conflict = liveWorkspaceConflict(ledger, workspace, task);
+      // Since v0.0.14 (ADR 0010 §4) the SAME tree is exempt when both Contracts
+      // declare disjoint scopes: each Task executes in its own managed worktree,
+      // so the single-checkout collision cannot happen — the scope globs are
+      // the declared boundary (Implementation Decision 5, bullet 3).
+      const conflict = liveWorkspaceConflict(ledger, workspace, task, scope);
       if (conflict !== undefined) {
         throw new FactoryError(
           "workspace-conflict",
-          `workspace "${workspace}" ${relationText(conflict.relation)} the live contract of task ${conflict.task} (${conflict.workspace}) — accept or retire that task before contracting this tree`,
+          conflict.relation === "equal" && conflict.overlapping !== undefined
+            ? `workspace "${workspace}" is the same tree as the live contract of task ${conflict.task}, and their scopes overlap (${conflict.overlapping}) — two Tasks share one Project only behind disjoint scopes`
+            : `workspace "${workspace}" ${relationText(conflict.relation)} the live contract of task ${conflict.task} (${conflict.workspace}) — accept or retire that task before contracting this tree`,
         );
       }
       return ledger.append({
@@ -420,6 +487,7 @@ export function createFactory(options: FactoryOptions): Factory {
         ...(freshEyes === undefined ? {} : { freshEyes }),
         ...(watch === undefined ? {} : { watch }),
         ...(description === undefined ? {} : { description }),
+        ...(skills === undefined || skills.length === 0 ? {} : { skills }),
         ...(by === undefined ? {} : { by }),
       });
     },
@@ -469,6 +537,27 @@ export function createFactory(options: FactoryOptions): Factory {
       }
       const attempt = lastAttempt + 1;
 
+      // Everything the Attempt's closing window fixes up front (F10): the
+      // per-call facts — verdict, sha, the watch context — stay arguments;
+      // the rest rides one context object.
+      const finishCtx = {
+        task,
+        ledger,
+        stateDir,
+        dataDir,
+        contract,
+        eyeBudgetMs: options.eyeBudgetMs,
+        eyeRunner: options.eyeCliRunner,
+      };
+
+      // The execution tree (v0.0.14, ADR 0010 §4): a task spawned with a
+      // managed Task worktree claims, gates, and diffs THERE — the Contract's
+      // workspace stays <project-root>, the recorded home of the work and the
+      // landing target; the worktree is the driver-level execution detail the
+      // spawn line carries. Legacy spawns (no worktree on the line) execute
+      // at the contract workspace, v0.0.5's law.
+      const executionDir = this.worktreeFor(task) ?? contract.workspace;
+
       ledger.append({
         event: "claim_reported",
         task,
@@ -481,20 +570,17 @@ export function createFactory(options: FactoryOptions): Factory {
       // Station 1 — the claimed commit must exist as one full object. An empty,
       // unknown or ambiguous sha is a red Verdict (ADR 0002), and the gate
       // command never runs on an unverified tree.
-      const resolved = await resolveClaimedCommit(contract.workspace, sha);
+      const resolved = await resolveClaimedCommit(executionDir, sha);
       if (!resolved.ok) {
-        return finish(task, attempt, ledger, stateDir, contract, { exit: null, verdict: "red", note: resolved.reason, timedOut: false }, undefined, undefined, undefined, watchContext());
+        return finish(finishCtx, attempt, { exit: null, verdict: "red", note: resolved.reason, timedOut: false }, undefined, watchContext());
       }
 
       // Station 2 — clean tree, HEAD at the claimed commit, before the gate.
-      const before = await checkCleanAt(contract.workspace, resolved.full);
+      const before = await checkCleanAt(executionDir, resolved.full);
       if (!before.ok) {
         return finish(
-          task,
+          finishCtx,
           attempt,
-          ledger,
-          stateDir,
-          contract,
           {
             exit: null,
             verdict: "red",
@@ -502,8 +588,6 @@ export function createFactory(options: FactoryOptions): Factory {
             timedOut: false,
           },
           resolved.full,
-          undefined,
-          undefined,
           watchContext(),
         );
       }
@@ -512,7 +596,7 @@ export function createFactory(options: FactoryOptions): Factory {
       try {
         result = await runGate({
           cmd: contract.gate,
-          cwd: contract.workspace,
+          cwd: executionDir,
           artifact: contract.artifact,
           timeoutMs: options.timeoutMs,
         });
@@ -529,14 +613,11 @@ export function createFactory(options: FactoryOptions): Factory {
 
       // Station 3 — same check after the gate: a green exit on a tree that moved
       // during the run attests nothing.
-      const after = await checkCleanAt(contract.workspace, resolved.full);
+      const after = await checkCleanAt(executionDir, resolved.full);
       if (!after.ok) {
         return finish(
-          task,
+          finishCtx,
           attempt,
-          ledger,
-          stateDir,
-          contract,
           {
             exit: result.exit,
             verdict: "red",
@@ -544,69 +625,101 @@ export function createFactory(options: FactoryOptions): Factory {
             timedOut: false,
           },
           resolved.full,
-          undefined,
-          undefined,
           watchContext(),
         );
       }
 
-      // Station 4 — the mechanical task boundary (ticket 14): every file the
-      // diff touches must fall inside a declared scope prefix. A task that
-      // overreaches is refused here, never prompted back to polite behavior.
-      if (contract.scope !== undefined && contract.scope.length > 0) {
-        if (contract.base === undefined) {
+      // Station 4 — the mechanical task boundary (ticket 14, fenced in
+      // v0.0.14): every file the diff touches must fall inside a declared
+      // scope prefix, and the three memory files at the workspace root
+      // (AGENTS.md, CLAUDE.md, CONTEXT.md) red EVERY contract that does not
+      // explicitly scope them — unrestricted ones included (ADR 0010 §6:
+      // project memory is the Supervisor's and Lead's act, never a worker's
+      // side effect) — WHEN the Contract carries a base commit, which the
+      // diff below needs (every Contract since v0.0.2 records one; only
+      // pre-0.0.2 ledger lines are base-less). A base-less Contract skips
+      // this claim-time fence; the ask-time Choke fence (MEMORY_FILES in
+      // choke.ts) still covers its writes live. A task that overreaches is
+      // refused here, never prompted back to polite behavior.
+      const scopeDeclared = contract.scope !== undefined && contract.scope.length > 0;
+      if (scopeDeclared && contract.base === undefined) {
+        return finish(
+          finishCtx,
+          attempt,
+          { exit: result.exit, verdict: "red", note: "scoped contract has no recorded base commit", timedOut: false },
+          resolved.full,
+          watchContext(),
+        );
+      }
+      if (contract.base !== undefined) {
+        const diff = await changedFiles(executionDir, contract.base, resolved.full);
+        if (!diff.ok) {
+          // A failed diff leaves the station with no measurement — undefined,
+          // never an empty list posing as "clean".
+          scopeViolations = undefined;
           return finish(
-            task,
+            finishCtx,
             attempt,
-            ledger,
-            stateDir,
-            contract,
-            { exit: result.exit, verdict: "red", note: "scoped contract has no recorded base commit", timedOut: false },
+            {
+              exit: result.exit,
+              verdict: "red",
+              note: `${scopeDeclared ? "scope check" : "memory fence check"} failed: ${diff.reason}`,
+              timedOut: false,
+            },
             resolved.full,
-            undefined,
-            undefined,
             watchContext(),
           );
         }
-        const scopeCheck = await changesOutsideScope(contract.workspace, contract.base, resolved.full, contract.scope);
-        if (!scopeCheck.ok) {
-          // A failed diff leaves the station with no measurement — undefined,
-          // never an empty list posing as "clean".
-          scopeViolations = scopeCheck.reason !== undefined ? undefined : scopeCheck.files;
+        if (scopeDeclared) {
+          const outside = diff.files.filter((file) => !scopeCoversFile(contract.scope!, file));
+          if (outside.length > 0) {
+            scopeViolations = outside;
+            return finish(
+              finishCtx,
+              attempt,
+              {
+                exit: result.exit,
+                verdict: "red",
+                note: `changes outside declared scope: ${outside.join(", ")}`,
+                timedOut: false,
+              },
+              resolved.full,
+              watchContext(),
+            );
+          }
+          scopeViolations = [];
+        }
+        const fenced = diff.files.filter((file) => (MEMORY_FILES as readonly string[]).includes(file) && !scopeCoversFile(contract.scope ?? [], file));
+        if (fenced.length > 0) {
+          scopeViolations = fenced;
           return finish(
-            task,
+            finishCtx,
             attempt,
-            ledger,
-            stateDir,
-            contract,
             {
               exit: result.exit,
               verdict: "red",
               note:
-                scopeCheck.reason !== undefined
-                  ? `scope check failed: ${scopeCheck.reason}`
-                  : `changes outside declared scope: ${scopeCheck.files.join(", ")}`,
+                `changes to fenced memory files: ${fenced.join(", ")} — project memory (AGENTS.md/CLAUDE.md/CONTEXT.md) ` +
+                "is the Supervisor's and Lead's act; scope the file explicitly to contract the edit",
               timedOut: false,
             },
             resolved.full,
-            undefined,
-            undefined,
             watchContext(),
           );
         }
-        scopeViolations = [];
       }
 
-      return finish(task, attempt, ledger, stateDir, contract, result, resolved.full, options.eyeBudgetMs, options.eyeCliRunner, watchContext());
+      return finish(finishCtx, attempt, result, resolved.full, watchContext());
     },
 
-    accept({ task, attempt, accepted_by }) {
+    async accept({ task, attempt, accepted_by }) {
       assertTaskId(task);
       if (!Number.isInteger(attempt) || attempt < 1) {
         throw new FactoryError("invalid-attempt", `attempt must be a positive integer, got ${attempt}`);
       }
       const history = ledger.eventsFor(task);
-      if (!history.some((e) => e.event === "contract_set")) {
+      const contract = this.contractFor(task);
+      if (contract === undefined) {
         throw new FactoryError("unknown-task", `no contract set for task ${task} — register one first`);
       }
       const events = attemptEvents(history, attempt);
@@ -627,11 +740,60 @@ export function createFactory(options: FactoryOptions): Factory {
           `attempt ${attempt} of task ${task} has no green verdict — the Owner accepts evidence, and there is none`,
         );
       }
-      return ledger.append({ event: "attempt_accepted", task, attempt, ...(accepted_by === undefined ? {} : { accepted_by }) });
+      // The Lead's intermediate acceptance (v0.0.14, ADR 0010 §3): green is
+      // necessary (checked above) and sufficient for the override seats, but
+      // the Lead additionally needs a CONCERN-free attempt and a task that is
+      // not escalated — flagged or exhausted work is the Owner's to answer,
+      // never the Lead's self-acceptance.
+      if (accepted_by === "lead") {
+        const concern = events.findLast(
+          (e): e is FreshEyesWritten => e.event === "fresh_eyes_written" && e.attempt === attempt && e.outcome === "concern",
+        );
+        if (concern !== undefined) {
+          throw new FactoryError(
+            "lead-accept-refused",
+            `attempt ${attempt} of task ${task} carries a fresh-eyes CONCERN — a flagged attempt needs the Owner's or Supervisor's override, never the Lead's acceptance`,
+          );
+        }
+        if (taskInNeedsHuman(history)) {
+          throw new FactoryError(
+            "lead-accept-refused",
+            `task ${task} is in needs_human — an escalated task is the Owner's to answer; the Lead may spawn a corrective attempt or escalate, never self-accept`,
+          );
+        }
+      }
+      // Local landing (v0.0.14, ADR 0010 §4): a task that ran in a managed
+      // Task worktree integrates its claimedCommit into <project-root>'s
+      // local branch BEFORE the acceptance line records — the line carries
+      // the outcome (`landed`, or `pending-conflict` with the reason and the
+      // preserved factory/<task> branch). Legacy shared-checkout tasks skip
+      // the step and record exactly as before. Never a git push.
+      const worktree = this.worktreeFor(task);
+      let landing: "landed" | "pending-conflict" | undefined;
+      let landingNote: string | undefined;
+      if (worktree !== undefined && gate.sha !== undefined) {
+        const result = await landTaskWorktree({
+          projectRoot: contract.workspace,
+          worktree,
+          claimedCommit: gate.sha,
+          ...(contract.base === undefined ? {} : { base: contract.base }),
+          branch: `factory/${task}`,
+        });
+        landing = result.landing;
+        landingNote = result.note;
+      }
+      return ledger.append({
+        event: "attempt_accepted",
+        task,
+        attempt,
+        ...(accepted_by === undefined ? {} : { accepted_by }),
+        ...(landing === undefined ? {} : { landing }),
+        ...(landingNote === undefined ? {} : { landingNote }),
+      });
     },
 
-    requestSpawn({ task, provider, arity }) {
-      const base = { task, provider, arity };
+    requestSpawn({ task, provider, arity, worktree }) {
+      const base = { task, provider, arity, ...(worktree === undefined || worktree.trim() === "" ? {} : { worktree }) };
       // Two spellings of one refusal on purpose: `code` is dash-style for the
       // spool reply (the FactoryError convention), `rule` is colon-style for
       // the ledger line (the choke's `policy:S1-…` / `git:…` convention).
@@ -684,7 +846,7 @@ export function createFactory(options: FactoryOptions): Factory {
           `task ${task} has no scope — contracts must be scoped to run in parallel (this invocation carries ${arity} tasks)`,
         );
       }
-      const conflict = liveWorkspaceConflict(ledger, contract.workspace, task);
+      const conflict = liveWorkspaceConflict(ledger, contract.workspace, task, contract.scope);
       if (conflict !== undefined) {
         return refuse(
           "workspace-conflict",
@@ -910,15 +1072,35 @@ export function createFactory(options: FactoryOptions): Factory {
 
     liveContractFor(cwd) {
       const accepted = acceptedTasks(ledger);
+      // The worktree map (v0.0.14, ADR 0010 §4): a task spawned into a managed
+      // Task worktree binds asks from that tree — the worktree sits under
+      // <stateDir>/projects/, OUTSIDE <project-root>, so the covers() test
+      // alone would miss every worktree agent. Latest dispatch per task wins.
+      const worktrees = new Map<string, string>();
+      for (const evt of ledger.events) {
+        if (evt.event === "spawn_dispatched" && typeof evt.worktree === "string" && evt.worktree !== "") {
+          worktrees.set(evt.task, evt.worktree);
+        }
+      }
       let match: ContractSet | undefined;
       for (const evt of ledger.events) {
-        if (evt.event === "contract_set" && !accepted.has(evt.task) && covers(evt, cwd)) match = evt;
+        if (evt.event !== "contract_set" || accepted.has(evt.task)) continue;
+        if (covers(evt, cwd)) match = evt;
+        const worktree = worktrees.get(evt.task);
+        if (worktree !== undefined && (cwd === worktree || cwd.startsWith(`${worktree}/`))) match = evt;
       }
       return match;
     },
 
     contractFor(task) {
       return ledger.eventsFor(task).findLast((e): e is ContractSet => e.event === "contract_set");
+    },
+
+    worktreeFor(task) {
+      for (const evt of ledger.eventsFor(task).reverse()) {
+        if (evt.event === "spawn_dispatched" && typeof evt.worktree === "string" && evt.worktree !== "") return evt.worktree;
+      }
+      return undefined;
     },
 
     async retro() {
@@ -944,9 +1126,14 @@ export function createFactory(options: FactoryOptions): Factory {
           `a retro already ran today — its ${prior.proposalCount ?? 0} proposals sit in ${prior.proposalsPath}; a failed retro leaves no line, so only a failed one may be re-run today`,
         );
       }
-      const corpus = buildRetroDigest(ledger.events, stateDir);
+      // The digest reads the gate logs by basename against the DATA dir
+      // (v0.0.14: project factories keep them under projects/<slug>/); the
+      // pass writes its proposals file there too, while the lane stays
+      // machine config (root lanes.json).
+      const corpus = buildRetroDigest(ledger.events, dataDir);
       const outcome = await runRetroPass({
         stateDir,
+        ...(options.projectSlug === undefined ? {} : { dataDir }),
         corpus,
         ...(options.retroBudgetMs === undefined ? {} : { budgetMs: options.retroBudgetMs }),
         ...(options.retroCopilotRunner === undefined ? {} : { copilotRunner: options.retroCopilotRunner }),
@@ -977,6 +1164,23 @@ function acceptedAttempt(history: readonly LedgerEvent[]): AttemptAccepted | und
   return history.findLast((e): e is AttemptAccepted => e.event === "attempt_accepted");
 }
 
+/**
+ * Whether the task currently stands in `needs_human` (the lead-acceptance
+ * rule's escalation check, v0.0.14): the latest `needs_human` line wins while
+ * no later `gate_finished` displaces it — the view's own status fold rule. An
+ * Owner answer that wakes the task (a new spawn and a fresh Attempt's green
+ * gate) displaces the marker, and the Lead may accept THAT attempt.
+ */
+function taskInNeedsHuman(history: readonly LedgerEvent[]): boolean {
+  let needs: NeedsHuman | undefined;
+  let lastGateSeq = -1;
+  for (const evt of history) {
+    if (evt.event === "needs_human") needs = evt;
+    else if (evt.event === "gate_finished" && evt.seq > lastGateSeq) lastGateSeq = evt.seq;
+  }
+  return needs !== undefined && needs.seq > lastGateSeq;
+}
+
 /** Every task with an accepted Attempt — acceptance retires a Contract (live = set and unaccepted). */
 function acceptedTasks(ledger: Ledger): Set<string> {
   const accepted = new Set<string>();
@@ -1002,12 +1206,20 @@ function relationText(relation: WorkspaceRelation): string {
  * inside, or contains `workspace`. Comparison is on the paths as contracted
  * (absolute, `resolve`d by the CLI); trailing slashes are tolerated, symlink
  * aliasing is not — the Owner contracts one spelling of a tree per run.
+ * Since v0.0.14 (ADR 0010 §4) the EQUAL relation is exempt when both
+ * Contracts declare disjoint scopes (`myScope` is the asking task's scope —
+ * the contract's own on the spawn path, the input's on the setContract path
+ * where the line has not landed yet): same-Project Tasks each execute in
+ * their own managed worktree, so the single-checkout collision cannot
+ * happen, and the scopes are the declared boundary. On an overlapping equal
+ * pair the returned conflict names the overlapping prefixes.
  */
 function liveWorkspaceConflict(
   ledger: Ledger,
   workspace: string,
   task: string,
-): { task: string; workspace: string; relation: WorkspaceRelation } | undefined {
+  myScope?: string[],
+): { task: string; workspace: string; relation: WorkspaceRelation; overlapping?: string } | undefined {
   const mine = normalized(workspace);
   const accepted = acceptedTasks(ledger);
   for (const evt of ledger.events) {
@@ -1017,7 +1229,29 @@ function liveWorkspaceConflict(
     if (mine === theirs) relation = "equal";
     else if (mine.startsWith(`${theirs}/`)) relation = "inside";
     else if (theirs.startsWith(`${mine}/`)) relation = "contains";
-    if (relation !== undefined) return { task: evt.task, workspace: evt.workspace, relation };
+    if (relation === undefined) continue;
+    if (relation === "equal") {
+      const overlap = scopesOverlap(myScope, evt.scope);
+      if (overlap === undefined) continue; // the worktree exemption — disjoint scopes, one Project
+      return { task: evt.task, workspace: evt.workspace, relation, overlapping: overlap };
+    }
+    return { task: evt.task, workspace: evt.workspace, relation };
+  }
+  return undefined;
+}
+
+/**
+ * The first pair of scope prefixes that overlap (either covers the other's
+ * territory), or undefined when the scopes are disjoint — the exemption's
+ * one question. Unrestricted (empty/undefined) scope means "everywhere", so
+ * it overlaps everything and never rides the exemption.
+ */
+function scopesOverlap(a: readonly string[] | undefined, b: readonly string[] | undefined): string | undefined {
+  if (a === undefined || a.length === 0 || b === undefined || b.length === 0) return "one contract is unscoped";
+  for (const mine of a) {
+    for (const theirs of b) {
+      if (scopeCoversFile([mine], theirs) || scopeCoversFile([theirs], mine)) return `${mine} ↔ ${theirs}`;
+    }
   }
   return undefined;
 }
@@ -1038,15 +1272,20 @@ function normalized(path: string): string {
  * it, the Verdict and the accept flow are untouched.
  */
 async function finish(
-  task: string,
+  ctx: {
+    task: string;
+    ledger: Ledger;
+    /** The root state dir — the eye's and watch's machine-level config (lanes.json, eye.json). */
+    stateDir: string;
+    /** Where the data files land: the project dir when project-scoped, the root otherwise. */
+    dataDir: string;
+    contract: ContractSet;
+    eyeBudgetMs: number | undefined;
+    eyeRunner: LaneCliRunner | undefined;
+  },
   attempt: number,
-  ledger: Ledger,
-  stateDir: string,
-  contract: ContractSet,
   result: GateResult,
   sha: string | undefined,
-  eyeBudgetMs: number | undefined,
-  eyeRunner: LaneCliRunner | undefined,
   watch: {
     agent: string | undefined;
     scopeViolations: string[] | undefined;
@@ -1055,9 +1294,10 @@ async function finish(
     copilotRunner: CopilotRunner | undefined;
   },
 ): Promise<ClaimOutcome> {
+  const { task, ledger, stateDir, dataDir, contract, eyeBudgetMs, eyeRunner } = ctx;
   let outputPath: string | undefined;
   if (result.output !== undefined) {
-    outputPath = join(stateDir, `gate-${task}-${attempt}.log`);
+    outputPath = join(dataDir, `gate-${task}-${attempt}.log`);
     writeFileSync(outputPath, result.output);
   }
   const gate = ledger.append({
@@ -1121,14 +1361,14 @@ async function finish(
       ...(watched.error === undefined ? {} : { error: watched.error }),
     });
   }
-  const reportPath = writeAttemptReport(task, attempt, ledger, stateDir);
+  const reportPath = writeAttemptReport(task, attempt, ledger, dataDir);
   return { attempt, verdict: result.verdict, gate, reportPath };
 }
 
 /** Every Attempt ends the same way: report rendered from the ledger, written, acknowledged. */
-function writeAttemptReport(task: string, attempt: number, ledger: Ledger, stateDir: string): string {
+function writeAttemptReport(task: string, attempt: number, ledger: Ledger, dataDir: string): string {
   const markdown = renderReport(task, attempt, ledger.eventsFor(task));
-  const reportPath = join(stateDir, `report-${task}-${attempt}.md`);
+  const reportPath = join(dataDir, `report-${task}-${attempt}.md`);
   writeFileSync(reportPath, markdown);
   ledger.append({ event: "report_written", task, attempt, path: reportPath });
   return reportPath;
@@ -1169,7 +1409,7 @@ function attemptIsOpen(history: readonly LedgerEvent[], attempt: number): boolea
  * landed (ticket 03 R1). The interrupted pass itself is never re-run: its line
  * simply never exists, recovery's report says so by omission.
  */
-function recoverInterruptedAttempts(ledger: Ledger, stateDir: string): { task: string; attempt: number }[] {
+function recoverInterruptedAttempts(ledger: Ledger, dataDir: string): { task: string; attempt: number }[] {
   const recovered: { task: string; attempt: number }[] = [];
   // `retro_written` carries no task — only tasked events can need recovery.
   const tasks = [...new Set(ledger.events.flatMap((e) => ("task" in e && typeof e.task === "string" ? [e.task] : [])))];
@@ -1192,7 +1432,7 @@ function recoverInterruptedAttempts(ledger: Ledger, stateDir: string): { task: s
             : "interrupted — the factory restarted before the Gate started",
         });
       }
-      writeAttemptReport(task, attempt, ledger, stateDir);
+      writeAttemptReport(task, attempt, ledger, dataDir);
       recovered.push({ task, attempt });
     }
   }

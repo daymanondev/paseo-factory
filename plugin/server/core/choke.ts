@@ -17,6 +17,7 @@
  * `--force-with-lease`, `fetch -f`, `checkout -b` and `clean -n` stay clear.
  */
 import { isAbsolute, join } from "node:path";
+import { scopeCoversFile } from "./workspace.ts";
 
 /** One refusal-list hit: which class fired and one line saying what it destroys. */
 export interface GitRefusal {
@@ -304,71 +305,171 @@ function judgeS2(tokens: readonly string[], roots: WritableRoots): ChokeDecision
     reason: `write to ${dest} is outside the writable set (workspace, /tmp, factory state dir)`,
   });
 
+  for (const dest of shellWriteDestinations(tokens)) {
+    if (!withinWritable(dest, roots)) return deny(dest);
+  }
+  return { behavior: "allow" };
+}
+
+/**
+ * Every write destination a shell line names, in scan order — S2's own list,
+ * extracted so the memory write fence (v0.0.14) scans the same destinations
+ * under the same rules: redirections (`>x` `>>x` `2>x` `2>>x` `&>x` `&>>x`,
+ * or the bare operator with a following token), `tee`'s first non-flag
+ * operand, the DEST_IS_LAST commands' last operand, every `rm` operand,
+ * `sed -i`'s last operand, and `dd`'s `of=` values.
+ */
+function shellWriteDestinations(tokens: readonly string[]): string[] {
+  const destinations: string[] = [];
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
-    // Redirections: `>x` `>>x` `2>x` `2>>x` `&>x` `&>>x`, or the bare operator with a following token.
     const redirect = token.match(/^(?:\d*|&)>>?(.*)$/);
     if (redirect) {
       const dest = redirect[1] !== "" ? redirect[1] : tokens[i + 1];
-      if (dest !== undefined && !withinWritable(dest, roots)) return deny(dest);
+      if (dest !== undefined) destinations.push(dest);
       continue;
     }
     if (token === "tee") {
       const dest = tokens.slice(i + 1).find((t) => !t.startsWith("-"));
-      if (dest !== undefined && !withinWritable(dest, roots)) return deny(dest);
+      if (dest !== undefined) destinations.push(dest);
       continue;
     }
     if (DEST_IS_LAST.has(token)) {
       const operands = tokens.slice(i + 1).filter((t) => !t.startsWith("-"));
       const dest = operands.at(-1);
-      if (dest !== undefined && !withinWritable(dest, roots)) return deny(dest);
+      if (dest !== undefined) destinations.push(dest);
       continue;
     }
     if (OPERAND_ALL.has(token)) {
-      for (const dest of tokens.slice(i + 1).filter((t) => !t.startsWith("-"))) {
-        if (!withinWritable(dest, roots)) return deny(dest);
-      }
+      for (const dest of tokens.slice(i + 1).filter((t) => !t.startsWith("-"))) destinations.push(dest);
       continue;
     }
     if (token === "sed") {
       const interactive = tokens.slice(i + 1).some((t) => t === "-i" || t.startsWith("-i"));
       if (!interactive) continue;
       const dest = tokens.slice(i + 1).filter((t) => !t.startsWith("-")).at(-1);
-      if (dest !== undefined && !withinWritable(dest, roots)) return deny(dest);
+      if (dest !== undefined) destinations.push(dest);
       continue;
     }
     if (token === "dd") {
       for (const t of tokens.slice(i + 1)) {
-        if (t.startsWith("of=") && !withinWritable(t.slice(3), roots)) return deny(t.slice(3));
+        if (t.startsWith("of=")) destinations.push(t.slice(3));
       }
+    }
+  }
+  return destinations;
+}
+
+// ---- the memory write fence (v0.0.14, ADR 0010 §6) --------------------------------------------
+
+/**
+ * The workspace-root files a contracted working Agent never writes unless the
+ * Contract explicitly scopes them — project memory is the Supervisor's and
+ * Lead's act (or a ratified Retro proposal's), never a worker's side effect.
+ */
+export const MEMORY_FILES = ["AGENTS.md", "CLAUDE.md", "CONTEXT.md"] as const;
+
+export type MemoryFileName = (typeof MEMORY_FILES)[number];
+
+/**
+ * The ask-time fence's context: the live Contract's workspace (whose root
+ * holds the memory files), its declared scope — the only opt-in — and, since
+ * v0.0.14, the task's managed worktree root: a worktree agent's absolute
+ * writes name the worktree's copy of the memory file, and that copy lands in
+ * `<project-root>` at accept — the fence covers both roots.
+ */
+export interface MemoryFence {
+  workspace: string;
+  scope?: readonly string[];
+  /** The task's managed Task worktree (v0.0.14), when its spawn recorded one. */
+  worktree?: string;
+}
+
+/**
+ * The memory file `rawPath` targets, when it is a ROOT one (the workspace's
+ * or the worktree's): relative paths match the bare name (`./` stripped — a
+ * relative ask resolves against the agent's cwd, which holds a copy of the
+ * memory file on both paths), absolute paths match `<root>/<name>` for
+ * either root. A nested file (`src/AGENTS.md`) is not the project memory;
+ * `~`-relative paths are the home's, not the workspace's. Deliberately not a
+ * shell parser: `sub/../AGENTS.md` is not chased (S2's quote-blindness
+ * doctrine — the corpus, not the grammar, is the boundary).
+ */
+function memoryFileOf(rawPath: string, fence: MemoryFence): MemoryFileName | undefined {
+  const roots = [stripTrailingSlash(fence.workspace)];
+  if (fence.worktree !== undefined) roots.push(stripTrailingSlash(fence.worktree));
+  for (const name of MEMORY_FILES) {
+    if (isAbsolute(rawPath)) {
+      if (roots.some((root) => rawPath === join(root, name))) return name;
+    } else {
+      let relative = rawPath;
+      while (relative.startsWith("./")) relative = relative.slice(2);
+      if (relative === name) return name;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The fence's verdict on one write destination: deny naming the file, unless
+ * a declared scope prefix covers it (the Contract's explicit opt-in —
+ * documentation maintenance is legal work when contracted for). Undefined
+ * when the destination is not a fenced file.
+ */
+function judgeMemoryDestination(rawPath: string, fence: MemoryFence): ChokeDecision | undefined {
+  const name = memoryFileOf(rawPath, fence);
+  if (name === undefined) return undefined;
+  if (fence.scope !== undefined && fence.scope.length > 0 && scopeCoversFile(fence.scope, name)) return undefined;
+  return {
+    behavior: "deny",
+    rule: "policy:memory-write-fenced",
+    reason: `write to ${name} is fenced — project memory (AGENTS.md/CLAUDE.md/CONTEXT.md) is the Supervisor's and Lead's act; list the file in the Contract's scope to contract the edit`,
+  };
+}
+
+// ---- the ask-time entry points ------------------------------------------------------------------
+
+/**
+ * Judges a shell ask's exact command line: S1 first (the git vocabulary), then
+ * S2 (the writable set), then — when the ask comes from a contracted agent —
+ * the memory write fence over the same write destinations (v0.0.14).
+ */
+export function judgeShellCommand(command: string, roots: WritableRoots, memory?: MemoryFence): ChokeDecision {
+  const tokens = shellTokens(command);
+  const s1 = judgeS1(tokens);
+  if (s1.behavior === "deny") return s1;
+  const s2 = judgeS2(tokens, roots);
+  if (s2.behavior === "deny") return s2;
+  if (memory !== undefined) {
+    for (const dest of shellWriteDestinations(tokens)) {
+      const fenced = judgeMemoryDestination(dest, memory);
+      if (fenced !== undefined) return fenced;
     }
   }
   return { behavior: "allow" };
 }
 
-// ---- the ask-time entry points ------------------------------------------------------------------
-
-/** Judges a shell ask's exact command line: S1 first (the git vocabulary), then S2. */
-export function judgeShellCommand(command: string, roots: WritableRoots): ChokeDecision {
-  const tokens = shellTokens(command);
-  const s1 = judgeS1(tokens);
-  if (s1.behavior === "deny") return s1;
-  return judgeS2(tokens, roots);
-}
-
 /**
  * The write/edit tool rider (ticket 01's non-shell twin of S2): a write or
- * edit ask whose destination sits outside the writable set denies. Reads
+ * edit ask whose destination sits outside the writable set denies, and — for
+ * a contracted agent — a destination that is a workspace-root memory file
+ * denies unless the Contract scopes it (v0.0.14, ADR 0010 §6). Reads
  * anywhere are legitimate agent behavior and never judge.
  */
-export function judgeFilePath(rawPath: string, roots: WritableRoots): ChokeDecision {
+export function judgeFilePath(rawPath: string, roots: WritableRoots, memory?: MemoryFence): ChokeDecision {
   const expanded = expandUser(rawPath, roots);
-  if (withinWritable(expanded, roots)) return { behavior: "allow" };
-  return {
-    behavior: "deny",
-    rule: "policy:file-write-outside-writable",
-    reason: `write to ${expanded} is outside the writable set (workspace, /tmp, factory state dir)`,
-  };
+  if (!withinWritable(expanded, roots)) {
+    return {
+      behavior: "deny",
+      rule: "policy:file-write-outside-writable",
+      reason: `write to ${expanded} is outside the writable set (workspace, /tmp, factory state dir)`,
+    };
+  }
+  if (memory !== undefined) {
+    const fenced = judgeMemoryDestination(rawPath, memory);
+    if (fenced !== undefined) return fenced;
+  }
+  return { behavior: "allow" };
 }
 
 function stripTrailingSlash(path: string): string {

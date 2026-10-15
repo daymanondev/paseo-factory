@@ -1,8 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createFactory } from "../src/factory.ts";
+import { projectStateDir, resolveProject } from "../src/project.ts";
 import { MAX_ATTEMPTS } from "../src/events.ts";
 import type { NeedsHumanReason } from "../src/events.ts";
 import { FactoryError } from "../src/errors.ts";
@@ -16,6 +19,97 @@ function makeWorkspace(dir: string): { workspace: string; artifact: string; sha:
   const sha = gitCommitAll(workspace);
   return { workspace, artifact, sha };
 }
+
+// ---- the canonical Project identity (v0.0.14, ADR 0010 §1/§5) --------------------------------
+
+/** The slug the spec's formula demands for a repo whose git dir sits at `<repo>/.git`. */
+function expectedSlugFor(repo: string): { slug: string; gitCommonDir: string } {
+  const gitCommonDir = realpathSync(join(repo, ".git"));
+  const hash = createHash("sha1").update(gitCommonDir).digest("hex").slice(0, 6);
+  return { slug: `${basenameOf(repo)}-${hash}`, gitCommonDir };
+}
+
+function basenameOf(path: string): string {
+  const trimmed = path.endsWith("/") && path.length > 1 ? path.slice(0, -1) : path;
+  const at = trimmed.lastIndexOf("/");
+  return at === -1 ? trimmed : trimmed.slice(at + 1);
+}
+
+test("resolveProject: one canonical Project per repo — the same root and slug from any directory inside it", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const repo = join(dir, "acme-api");
+  mkdirSync(join(repo, "src"), { recursive: true });
+  writeFileSync(join(repo, "src", "x.ts"), "export const x = 1;\n");
+  gitCommitAll(repo);
+  const expected = expectedSlugFor(repo);
+
+  const fromRoot = resolveProject(repo);
+  assert.ok(fromRoot.ok, fromRoot.ok ? "" : fromRoot.reason);
+  const fromInside = resolveProject(join(repo, "src"));
+  assert.ok(fromInside.ok, fromInside.ok ? "" : fromInside.reason);
+  assert.equal(fromRoot.root, fromInside.root, "any cwd inside the repo resolves the same top-level checkout");
+  assert.equal(fromRoot.gitCommonDir, expected.gitCommonDir);
+  assert.equal(fromRoot.slug, expected.slug, "slug = <basename(root)>-<sha1(realpath(gitCommonDir)).slice(0,6)>");
+  assert.equal(projectStateDir(join(dir, "state"), fromRoot.slug), join(dir, "state", "projects", fromRoot.slug));
+});
+
+test("resolveProject: a linked worktree keeps the main repo's git dir in its slug — the hash anchors the repo", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const repo = join(dir, "main-repo");
+  mkdirSync(repo, { recursive: true });
+  writeFileSync(join(repo, "a.txt"), "a\n");
+  gitCommitAll(repo);
+  const worktreeDir = join(dir, "feature-wt");
+  execFileSync("git", ["worktree", "add", "-q", "-b", "feature", worktreeDir], { cwd: repo, stdio: ["ignore", "ignore", "pipe"] });
+  const main = expectedSlugFor(repo);
+
+  const resolved = resolveProject(worktreeDir);
+  assert.ok(resolved.ok, resolved.ok ? "" : resolved.reason);
+  assert.equal(resolved.gitCommonDir, main.gitCommonDir, "--git-common-dir follows the link back to the main repo's git dir");
+  const mainHash = createHash("sha1").update(main.gitCommonDir).digest("hex").slice(0, 6);
+  assert.equal(resolved.slug, `feature-wt-${mainHash}`);
+});
+
+test("resolveProject: a directory outside any git repo is a named refusal, never a guess", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const plain = join(dir, "plain");
+  mkdirSync(plain, { recursive: true });
+
+  const resolved = resolveProject(plain);
+  assert.ok(!resolved.ok);
+  assert.match(resolved.reason, /git/);
+});
+
+test("a project-scoped factory keeps its ledger, reports, and gate logs under projects/<slug>/ — the root ledger stays untouched", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact, sha } = makeWorkspace(dir);
+  const stateDir = join(dir, "factory");
+  const project = resolveProject(workspace);
+  assert.ok(project.ok, project.ok ? "" : project.reason);
+
+  const factory = createFactory({ stateDir, projectSlug: project.slug });
+  factory.setContract({ task: "P1", workspace, gate: "true", artifact });
+  const outcome = await factory.claim({ task: "P1", sha });
+  assert.equal(outcome.verdict, "green");
+
+  const projectDir = join(stateDir, "projects", project.slug);
+  assert.ok(existsSync(join(projectDir, "ledger.jsonl")), "the ledger lands under projects/<slug>/");
+  assert.ok(existsSync(join(projectDir, "report-P1-1.md")), "reports land under projects/<slug>/");
+  assert.ok(existsSync(join(projectDir, "gate-P1-1.log")), "gate logs land under projects/<slug>/");
+  assert.ok(!existsSync(join(stateDir, "ledger.jsonl")), "no project scope, no root ledger — the trees stay isolated");
+  assert.equal(factory.stateDir, stateDir, "the Factory's stateDir stays the root: the spool, the choke writable set, and the git-block log keep their root paths");
+
+  // The legacy path: no projectSlug → exactly today's layout (every pre-0.0.14 test's law).
+  const legacy = createFactory({ stateDir: join(dir, "legacy") });
+  legacy.setContract({ task: "L1", workspace, gate: "true", artifact });
+  await legacy.claim({ task: "L1", sha });
+  assert.ok(existsSync(join(dir, "legacy", "ledger.jsonl")));
+  assert.ok(!existsSync(join(dir, "legacy", "projects")));
+});
 
 test("setContract records the workspace with the criteria and enforces one contract per task", (t) => {
   const dir = makeTempDir();
@@ -309,6 +403,52 @@ test("omitted scope keeps the unrestricted v0.0.1 behavior", async (t) => {
   assert.equal(outcome.verdict, "green");
 });
 
+test("the memory write fence on claims: AGENTS.md/CLAUDE.md/CONTEXT.md edits red every contract that does not scope them", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir: join(dir, "factory") });
+
+  // Unrestricted scope used to mean "anywhere is fine" — the fence (v0.0.14,
+  // ADR 0010 §6) carves the three memory files out of that: project memory is
+  // the Supervisor/Lead's act, never a worker's side effect.
+  factory.setContract({ task: "F1", workspace, gate: "true", artifact });
+  writeFileSync(join(workspace, "AGENTS.md"), "# poisoned rules\n");
+  const poisoned = gitCommitChanges(workspace, "edit AGENTS.md");
+  const unscoped = await factory.claim({ task: "F1", sha: poisoned });
+  assert.equal(unscoped.verdict, "red");
+  assert.equal(unscoped.gate.exit, 0, "the gate passed — the memory edit is what is red");
+  assert.match(unscoped.gate.note, /AGENTS\.md/, "the offending file is named");
+  assert.match(unscoped.gate.note, /memory/i);
+  assert.ok(!unscoped.gate.note.includes("outside declared scope"), "an unscoped contract speaks the fence's words, not the scope check's");
+
+  // A scoped contract that does NOT list the file: the scope check reds it
+  // (the fence and the scope check agree — the file is outside the boundary).
+  const ws2 = join(dir, "ws2");
+  mkdirSync(join(ws2, "src"), { recursive: true });
+  writeFileSync(join(ws2, artifact), "export function pad() {}\n");
+  gitCommitAll(ws2);
+  factory.setContract({ task: "F2", workspace: ws2, gate: "true", artifact, scope: ["src"] });
+  writeFileSync(join(ws2, "CLAUDE.md"), "# poisoned too\n");
+  const fencedScoped = gitCommitChanges(ws2, "edit CLAUDE.md");
+  const scoped = await factory.claim({ task: "F2", sha: fencedScoped });
+  assert.equal(scoped.verdict, "red");
+  assert.match(scoped.gate.note, /outside declared scope/);
+  assert.match(scoped.gate.note, /CLAUDE\.md/);
+
+  // The opt-in: a Contract that explicitly scopes the memory file admits the
+  // edit (documentation maintenance is legal work when contracted for).
+  const ws3 = join(dir, "ws3");
+  mkdirSync(join(ws3, "src"), { recursive: true });
+  writeFileSync(join(ws3, artifact), "export function pad() {}\n");
+  gitCommitAll(ws3);
+  factory.setContract({ task: "F3", workspace: ws3, gate: "true", artifact, scope: ["AGENTS.md"] });
+  writeFileSync(join(ws3, "AGENTS.md"), "# a ratified rule, deliberately contracted\n");
+  const ratified = gitCommitChanges(ws3, "edit AGENTS.md under an explicit scope");
+  const allowed = await factory.claim({ task: "F3", sha: ratified });
+  assert.equal(allowed.verdict, "green", "an explicitly scoped memory edit is contracted work");
+});
+
 test("unusable scope entries are rejected without touching the ledger", (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);
@@ -336,6 +476,37 @@ test("a scoped contract refuses a workspace git cannot read", (t) => {
   assert.throws(
     () => factory.setContract({ task: "SC5", workspace, gate: "true", artifact: "src/format.ts", scope: ["src"] }),
     factoryErrorCode("invalid-contract"),
+  );
+});
+
+test("setContract carries an optional skills list — validated when present, omitted when empty", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact } = makeWorkspace(dir);
+  // A second, distinct tree — one contract per workspace (the conflict guard's own law).
+  const secondWorkspace = join(dir, "ws2");
+  mkdirSync(join(secondWorkspace, "src"), { recursive: true });
+  writeFileSync(join(secondWorkspace, artifact), "export function pad() {}\n");
+  gitCommitAll(secondWorkspace);
+  const factory = createFactory({ stateDir: join(dir, "factory") });
+
+  const withSkills = factory.setContract({ task: "SK1", workspace, gate: "true", artifact, skills: ["tdd", "diagnosing-bugs"] });
+  assert.deepEqual(withSkills.skills, ["tdd", "diagnosing-bugs"], "the mandated skills ride the Contract line");
+
+  const empty = factory.setContract({ task: "SK2", workspace: secondWorkspace, gate: "true", artifact, skills: [] });
+  assert.equal("skills" in empty, false, "an empty list omits the field — scope's own law");
+
+  for (const bad of [[""], ["ok", 1], ["  "]]) {
+    assert.throws(
+      () => factory.setContract({ task: "SKX", workspace: secondWorkspace, gate: "true", artifact, skills: bad as unknown as string[] }),
+      factoryErrorCode("invalid-contract"),
+      `skills ${JSON.stringify(bad)} must be rejected`,
+    );
+  }
+  assert.equal(
+    factory.ledger.events.filter((e) => e.event === "contract_set").length,
+    2,
+    "only the two valid contracts landed — rejected skills touch nothing",
   );
 });
 
@@ -412,7 +583,7 @@ test("accept: the Owner accepts a green attempt, once, and only green attempts (
   factory.setContract({ task: "AC1", workspace, gate: "grep -q padEnd src/format.ts", artifact });
   const red = await factory.claim({ task: "AC1", sha });
   assert.equal(red.verdict, "red");
-  assert.throws(() => factory.accept({ task: "AC1", attempt: 1 }), factoryErrorCode("not-green"));
+  await assert.rejects(factory.accept({ task: "AC1", attempt: 1 }), factoryErrorCode("not-green"));
   assert.deepEqual(
     factory.ledger.eventsFor("AC1").filter((e) => e.event === "attempt_accepted"),
     [],
@@ -425,14 +596,14 @@ test("accept: the Owner accepts a green attempt, once, and only green attempts (
   const green = await factory.claim({ task: "AC1", sha: sha2 });
   assert.equal(green.verdict, "green");
 
-  const accepted = factory.accept({ task: "AC1", attempt: green.attempt });
+  const accepted = await factory.accept({ task: "AC1", attempt: green.attempt });
   assert.equal(accepted.event, "attempt_accepted");
   assert.equal(accepted.attempt, green.attempt);
 
-  assert.throws(() => factory.accept({ task: "AC1", attempt: 1 }), factoryErrorCode("already-accepted"));
-  assert.throws(() => factory.accept({ task: "AC1", attempt: 9 }), factoryErrorCode("unknown-attempt"));
-  assert.throws(() => factory.accept({ task: "AC2", attempt: 1 }), factoryErrorCode("unknown-task"));
-  assert.throws(() => factory.accept({ task: "AC1", attempt: 0 }), factoryErrorCode("invalid-attempt"));
+  await assert.rejects(factory.accept({ task: "AC1", attempt: 1 }), factoryErrorCode("already-accepted"));
+  await assert.rejects(factory.accept({ task: "AC1", attempt: 9 }), factoryErrorCode("unknown-attempt"));
+  await assert.rejects(factory.accept({ task: "AC2", attempt: 1 }), factoryErrorCode("unknown-task"));
+  await assert.rejects(factory.accept({ task: "AC1", attempt: 0 }), factoryErrorCode("invalid-attempt"));
 });
 
 test("opening the ledger closes an attempt interrupted mid-gate: red, reported, logged (ADR 0003)", async (t) => {
@@ -564,7 +735,7 @@ test("claim refuses on an accepted task — the H6 rider closes the loop's far e
   const factory = createFactory({ stateDir: join(dir, "state") });
   factory.setContract({ task: "CLOSED", workspace, gate: "true", artifact });
   await factory.claim({ task: "CLOSED", sha });
-  factory.accept({ task: "CLOSED", attempt: 1 });
+  await factory.accept({ task: "CLOSED", attempt: 1 });
   const eventsBefore = factory.ledger.events.length;
 
   await assert.rejects(factory.claim({ task: "CLOSED", sha }), factoryErrorCode("already-accepted"));
@@ -624,7 +795,7 @@ test("requestSpawn refuses and records one spawn_refused line per rule", async (
 
   // Accepted task — closed to spawns.
   await factory.claim({ task: "KNOWN", sha });
-  factory.accept({ task: "KNOWN", attempt: 1 });
+  await factory.accept({ task: "KNOWN", attempt: 1 });
   const accepted = factory.requestSpawn({ task: "KNOWN", provider: "claude", arity: 1 });
   assert.equal(accepted.outcome, "refused");
   if (accepted.outcome === "refused") assert.equal(accepted.event.rule, "spawn:accepted-task");
@@ -707,7 +878,7 @@ test("repoke dispatches once per task and refuses the second ask with one repoke
   const shaDone = gitCommitAll(wsDone);
   factory.setContract({ task: "DONE", workspace: wsDone, gate: "true", artifact: "src/x.ts" });
   await factory.claim({ task: "DONE", sha: shaDone });
-  factory.accept({ task: "DONE", attempt: 1 });
+  await factory.accept({ task: "DONE", attempt: 1 });
   const accepted = factory.repoke("DONE", "ag-done");
   assert.equal(accepted.outcome === "refused" && accepted.event.rule, "repoke:accepted-task");
 
@@ -980,3 +1151,377 @@ test("needsHuman corroborates attempt-ceiling and died-after-respawn against the
 
 
 
+
+// ---- the Task worktree (v0.0.14, ADR 0010 §4/§5): spawn records it, claim and the choke bind to it ----
+
+/** One git fact about a checkout, as a string — the worktree tests' `git rev-parse` shorthand. */
+function gitFact(cwd: string, args: string[]): string {
+  return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+}
+
+/** A real linked worktree the way the driver's task-worktree.mjs allocates it — outside the project root, like `<stateDir>/projects/<slug>/worktrees/<task>`. */
+function makeTaskWorktree(dir: string, workspace: string, task: string, base: string): string {
+  const path = join(dir, "state", "worktrees", task);
+  execFileSync("git", ["worktree", "add", "-b", `factory/${task}`, path, base], { cwd: workspace });
+  return path;
+}
+
+test("spawn records the driver's worktree; worktreeFor reads it back, claim and the choke bind to it", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact, sha: base } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir: join(dir, "factory") });
+
+  const worktree = makeTaskWorktree(dir, workspace, "WTA", base);
+  factory.setContract({ task: "WTA", workspace, gate: "true", artifact });
+  const spawn = factory.requestSpawn({ task: "WTA", provider: "claude", arity: 1, worktree });
+  assert.equal(spawn.outcome, "dispatched");
+  if (spawn.outcome === "dispatched") {
+    assert.equal(spawn.event.worktree, worktree, "the driver-level execution detail rides the spawn line");
+  }
+  assert.equal(factory.worktreeFor("WTA"), worktree);
+
+  // The choke's binding (liveContractFor): the worktree and its subdirs bind
+  // to the task's contract — the worktree sits OUTSIDE <project-root>, so
+  // this is the binding that keeps a worktree agent contracted.
+  assert.equal(factory.liveContractFor(worktree)?.task, "WTA");
+  assert.equal(factory.liveContractFor(join(worktree, "src"))?.task, "WTA");
+  assert.equal(factory.liveContractFor(workspace)?.task, "WTA", "the project root still binds its own contract too");
+  assert.equal(factory.worktreeFor("NOPE"), undefined);
+
+  // The claim executes in the worktree: the gate's cwd, the clean checks, and
+  // the diff all read the worktree, and <project-root> never moves.
+  writeFileSync(join(worktree, artifact), "export function pad(input: string, width: number): string {\n  return input.padEnd(width).slice(0, width);\n}\n");
+  const claimed = gitCommitChanges(worktree, "work in the worktree");
+  const outcome = await factory.claim({ task: "WTA", sha: claimed });
+  assert.equal(outcome.verdict, "green", "the gate ran against the worktree tree");
+  assert.equal(gitFact(workspace, ["rev-parse", "HEAD"]), base, "the project root never moved");
+  assert.equal(gitFact(workspace, ["status", "--porcelain"]), "", "the project root stayed clean");
+  assert.equal(gitFact(worktree, ["rev-parse", "HEAD"]), claimed);
+
+  // A spawn without a worktree (the legacy spelling) records no field, and
+  // worktreeFor stays undefined — the claim falls back to the contract workspace.
+  const dir2 = makeTempDir();
+  disposeDir(t, dir2);
+  const { workspace: ws2, artifact: artifact2, sha: base2 } = makeWorkspace(dir2);
+  factory.setContract({ task: "WTB", workspace: ws2, gate: "true", artifact: artifact2 });
+  const legacy = factory.requestSpawn({ task: "WTB", provider: "claude", arity: 1 });
+  assert.equal(legacy.outcome, "dispatched");
+  if (legacy.outcome === "dispatched") assert.equal("worktree" in legacy.event, false);
+  assert.equal(factory.worktreeFor("WTB"), undefined);
+  const legacyOutcome = await factory.claim({ task: "WTB", sha: base2 });
+  assert.equal(legacyOutcome.verdict, "green", "no worktree — the claim runs at the contract workspace, v0.0.5's law");
+});
+
+test("acceptance retires the worktree binding too — the choke does not outlive the task", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact, sha: base } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir: join(dir, "factory") });
+  const worktree = makeTaskWorktree(dir, workspace, "WTC", base);
+  factory.setContract({ task: "WTC", workspace, gate: "true", artifact });
+  factory.requestSpawn({ task: "WTC", provider: "claude", arity: 1, worktree });
+  assert.equal(factory.liveContractFor(worktree)?.task, "WTC");
+  factory.ledger.append({ event: "attempt_accepted", task: "WTC", attempt: 1 });
+  assert.equal(factory.liveContractFor(worktree), undefined, "accepted — the worktree binds no live contract either");
+});
+
+// ---- same-Project parallel Tasks (v0.0.14, ADR 0010 §4): the worktree exemption of the H1/H2 guard ----
+
+test("two Tasks of one Project contract and run concurrently when their scopes are disjoint", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+
+  // Same <project-root>, disjoint scope globs: both contracts land, both
+  // spawns dispatch — each Task executes in its own worktree, so the
+  // single-checkout collision the H1/H2 guard exists for cannot happen.
+  factory.setContract({ task: "PP1", workspace, gate: "true", artifact, scope: ["src/"] });
+  factory.setContract({ task: "PP2", workspace, gate: "true", artifact, scope: ["docs/"] });
+  assert.equal(factory.requestSpawn({ task: "PP1", provider: "claude", arity: 1 }).outcome, "dispatched");
+  assert.equal(factory.requestSpawn({ task: "PP2", provider: "claude", arity: 1 }).outcome, "dispatched");
+});
+
+test("the exemption is the declared boundary: overlapping scopes, an unscoped sibling, and nesting still refuse", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  factory.setContract({ task: "PO1", workspace, gate: "true", artifact, scope: ["src"] });
+
+  // Overlap: src/format.ts sits inside src — one boundary, two owners, refused.
+  assert.throws(
+    () => factory.setContract({ task: "PO2", workspace, gate: "true", artifact, scope: ["src/format.ts"] }),
+    (err: unknown) => err instanceof FactoryError && err.code === "workspace-conflict" && /overlap/.test(err.message),
+    "overlapping scopes refuse, naming the overlap",
+  );
+  // Unrestricted scope means "everywhere" — it overlaps everything, refused.
+  assert.throws(
+    () => factory.setContract({ task: "PO3", workspace, gate: "true", artifact }),
+    factoryErrorCode("workspace-conflict"),
+    "an unscoped sibling cannot declare disjointness",
+  );
+  // A scoped contract against an unscoped incumbent: same refusal, other side.
+  const dir2 = makeTempDir();
+  disposeDir(t, dir2);
+  const { workspace: ws2, artifact: artifact2 } = makeWorkspace(dir2);
+  const factory2 = createFactory({ stateDir: join(dir2, "state") });
+  factory2.setContract({ task: "PO4", workspace: ws2, gate: "true", artifact: artifact2 });
+  assert.throws(
+    () => factory2.setContract({ task: "PO5", workspace: ws2, gate: "true", artifact: artifact2, scope: ["docs/"] }),
+    factoryErrorCode("workspace-conflict"),
+    "a scoped sibling of an unscoped incumbent refuses too",
+  );
+  // Nesting never rides the exemption — only the SAME tree does.
+  const deep = join(workspace, "deep");
+  mkdirSync(deep, { recursive: true });
+  writeFileSync(join(deep, "x.ts"), "x\n");
+  gitCommitChanges(workspace, "add deep dir");
+  assert.throws(
+    () => factory.setContract({ task: "PO6", workspace: deep, gate: "true", artifact, scope: ["deep/"] }),
+    (err: unknown) => err instanceof FactoryError && err.code === "workspace-conflict" && /sits inside/.test(err.message),
+  );
+  // And the spawn-time arm carries the same exemption: two disjoint scoped
+  // siblings of one tree both dispatch (the single-checkout collision the
+  // arm exists for cannot happen when each runs in its own worktree).
+  const factory3 = createFactory({ stateDir: join(dir2, "state3") });
+  factory3.setContract({ task: "PO7", workspace: ws2, gate: "true", artifact: artifact2, scope: ["src"] });
+  factory3.setContract({ task: "PO8", workspace: ws2, gate: "true", artifact: artifact2, scope: ["docs"] });
+  assert.equal(factory3.requestSpawn({ task: "PO7", provider: "claude", arity: 1 }).outcome, "dispatched");
+  assert.equal(factory3.requestSpawn({ task: "PO8", provider: "claude", arity: 1 }).outcome, "dispatched");
+});
+
+// ---- accept authority (v0.0.14, ADR 0010 §3): the Lead accepts green + CLEAR, never CONCERN or Needs-human ----
+
+/** A green attempt on a fresh contract, the lead-rule tests' shared setup. */
+async function greenAttempt(dir: string, task: string): Promise<{ factory: ReturnType<typeof createFactory>; workspace: string; artifact: string }> {
+  const { workspace, artifact } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  factory.setContract({ task, workspace, gate: "true", artifact });
+  writeFileSync(join(workspace, artifact), "export function pad(input: string, width: number): string {\n  return input.padEnd(width).slice(0, width);\n}\n");
+  const sha = gitCommitChanges(workspace, `green ${task}`);
+  const outcome = await factory.claim({ task, sha });
+  assert.equal(outcome.verdict, "green");
+  return { factory, workspace, artifact };
+}
+
+test("accept authority: the Lead accepts a green attempt with no fresh-eyes CONCERN", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { factory } = await greenAttempt(dir, "LA1");
+
+  const accepted = await factory.accept({ task: "LA1", attempt: 1, accepted_by: "lead" });
+  assert.equal(accepted.event, "attempt_accepted");
+  assert.equal(accepted.accepted_by, "lead");
+});
+
+test("a fresh-eyes CONCERN on the attempt refuses the Lead — the Owner's and Supervisor's word still land", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { factory } = await greenAttempt(dir, "LA2");
+  factory.ledger.append({ event: "fresh_eyes_written", task: "LA2", attempt: 1, model: "fake-eye", outcome: "concern", finding: "the fix does not match the contract", durationMs: 5 });
+
+  await assert.rejects(
+    factory.accept({ task: "LA2", attempt: 1, accepted_by: "lead" }),
+    (err: unknown) => err instanceof FactoryError && err.code === "lead-accept-refused" && /CONCERN/.test(err.message),
+    "the eye's concern is the Lead's hard stop",
+  );
+  // Nothing landed for the refused act.
+  assert.equal(factory.ledger.eventsFor("LA2").some((e) => e.event === "attempt_accepted"), false);
+  // The override seats are unconditional on the same evidence.
+  const bySupervisor = await factory.accept({ task: "LA2", attempt: 1, accepted_by: "supervisor" });
+  assert.equal(bySupervisor.accepted_by, "supervisor");
+
+  // A CLEAR eye on the attempt does NOT refuse the Lead — and a CONCERN on a
+  // DIFFERENT attempt is not this attempt's business.
+  const dir2 = makeTempDir();
+  disposeDir(t, dir2);
+  const { factory: f2 } = await greenAttempt(dir2, "LA3");
+  f2.ledger.append({ event: "fresh_eyes_written", task: "LA3", attempt: 1, model: "fake-eye", outcome: "clear", finding: "nothing to add", durationMs: 5 });
+  assert.equal((await f2.accept({ task: "LA3", attempt: 1, accepted_by: "lead" })).accepted_by, "lead");
+});
+
+test("a task in needs_human refuses the Lead until activity displaces the marker", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { factory } = await greenAttempt(dir, "LA4");
+
+  // The stall's named end after the green verdict: a denial that survived its poke.
+  factory.repoke("LA4", "ag-1");
+  const repoke = factory.ledger.eventsFor("LA4").findLast((e) => e.event === "repoke_dispatched");
+  const denial = factory.ledger.append({ event: "permit_denied", task: "LA4", agent: "ag-1", name: "Bash", kind: "tool", command: "rm -rf /", rule: "policy:S2-outside-writable", reason: "r" });
+  factory.needsHuman({ task: "LA4", reason: "denied-again", evidence: { denial: denial.seq, repoke: repoke?.seq ?? 0 } });
+
+  await assert.rejects(
+    factory.accept({ task: "LA4", attempt: 1, accepted_by: "lead" }),
+    (err: unknown) => err instanceof FactoryError && err.code === "lead-accept-refused" && /needs_human/.test(err.message),
+  );
+  assert.equal(factory.ledger.eventsFor("LA4").some((e) => e.event === "attempt_accepted"), false);
+  // The Owner's override stands over the escalation too.
+  assert.equal((await factory.accept({ task: "LA4", attempt: 1, accepted_by: "owner" })).accepted_by, "owner");
+
+  // Displacement: an Owner answer wakes the task, a new green attempt lands,
+  // and the Lead may accept THAT attempt (ADR 0010 §3 — corrective work within the ceiling).
+  const dir2 = makeTempDir();
+  disposeDir(t, dir2);
+  const { factory: f2, workspace } = await greenAttempt(dir2, "LA5");
+  const denial2 = f2.ledger.append({ event: "permit_denied", task: "LA5", agent: "ag-1", name: "Bash", kind: "tool", command: "x", rule: "policy:S2-outside-writable", reason: "r" });
+  const poke2 = f2.repoke("LA5", "ag-1");
+  assert.equal(poke2.outcome, "dispatched");
+  const repoke2 = f2.ledger.eventsFor("LA5").findLast((e) => e.event === "repoke_dispatched");
+  f2.needsHuman({ task: "LA5", reason: "denied-again", evidence: { denial: denial2.seq, repoke: repoke2?.seq ?? 0 } });
+  await assert.rejects(f2.accept({ task: "LA5", attempt: 1, accepted_by: "lead" }), factoryErrorCode("lead-accept-refused"));
+  // Wake-up: new spawn, new attempt, green again — the marker is displaced.
+  f2.requestSpawn({ task: "LA5", provider: "claude", arity: 1 });
+  writeFileSync(join(workspace, "src", "format.ts"), "export function pad(input: string, width: number): string {\n  return input.padEnd(width, \"0\").slice(0, width);\n}\n");
+  const sha2 = gitCommitChanges(workspace, "corrective work");
+  const second = await f2.claim({ task: "LA5", sha: sha2 });
+  assert.equal(second.verdict, "green");
+  assert.equal((await f2.accept({ task: "LA5", attempt: second.attempt, accepted_by: "lead" })).accepted_by, "lead");
+});
+
+test("accepted_by stays the submitting shell's verbatim stamp outside the seat names (the v0.0.9 law)", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { factory } = await greenAttempt(dir, "LA6");
+
+  // A delegated agent's id is not one of the three seats — it records
+  // verbatim, with no Lead privileges attached to an unnamed seat.
+  const stamped = await factory.accept({ task: "LA6", attempt: 1, accepted_by: "agent-supervisor-1" });
+  assert.equal(stamped.accepted_by, "agent-supervisor-1");
+});
+
+// ---- landing on Accept (v0.0.14, ADR 0010 §4): claimedCommit into <project-root>, worktree removed ----
+
+test("landing: a green worktree attempt fast-forwards into <project-root>, the worktree goes, factory/<task> survives", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact, sha: base } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  const worktree = makeTaskWorktree(dir, workspace, "LW1", base);
+  factory.setContract({ task: "LW1", workspace, gate: "true", artifact });
+  factory.requestSpawn({ task: "LW1", provider: "claude", arity: 1, worktree });
+
+  writeFileSync(join(worktree, artifact), "export function pad(input: string, width: number): string {\n  return input.padEnd(width).slice(0, width);\n}\n");
+  const claimed = gitCommitChanges(worktree, "the verified work");
+  const outcome = await factory.claim({ task: "LW1", sha: claimed });
+  assert.equal(outcome.verdict, "green");
+
+  const accepted = await factory.accept({ task: "LW1", attempt: 1, accepted_by: "lead" });
+  assert.equal(accepted.landing, "landed");
+  assert.equal(accepted.landingNote, undefined);
+  assert.equal(gitFact(workspace, ["rev-parse", "HEAD"]), claimed, "the root's branch fast-forwarded to the verified commit");
+  assert.equal(gitFact(workspace, ["status", "--porcelain"]), "", "landing left the root clean");
+  assert.equal(existsSync(worktree), false, "the temporary worktree is removed");
+  assert.equal(gitFact(workspace, ["rev-parse", "--verify", "factory/LW1"]), claimed, "branch factory/<task> survives the landing");
+});
+
+test("landing on a root that advanced: merge --no-ff brings the attempt's whole range in", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact, sha: base } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  const worktree = makeTaskWorktree(dir, workspace, "LW2", base);
+  factory.setContract({ task: "LW2", workspace, gate: "true", artifact });
+  factory.requestSpawn({ task: "LW2", provider: "claude", arity: 1, worktree });
+
+  writeFileSync(join(worktree, artifact), "export function pad(input: string, width: number): string {\n  return input.padEnd(width).slice(0, width);\n}\n");
+  const claimed = gitCommitChanges(worktree, "the verified work");
+  // Meanwhile the project root advanced on its own.
+  writeFileSync(join(workspace, "other.txt"), "root work\n");
+  const rootMoved = gitCommitChanges(workspace, "the root advanced");
+  assert.equal(await factory.claim({ task: "LW2", sha: claimed }).then((o) => o.verdict), "green");
+
+  const accepted = await factory.accept({ task: "LW2", attempt: 1 });
+  assert.equal(accepted.landing, "landed");
+  assert.notEqual(gitFact(workspace, ["rev-parse", "HEAD"]), claimed, "a merge commit sits on top, not a fast-forward");
+  assert.notEqual(gitFact(workspace, ["rev-parse", "HEAD"]), rootMoved);
+  assert.equal(spawnSync("git", ["merge-base", "--is-ancestor", claimed, "HEAD"], { cwd: workspace }).status, 0, "the verified range is in the root's history");
+  assert.ok(existsSync(join(workspace, "other.txt")), "the root's own work is intact");
+  assert.match(readFileSync(join(workspace, artifact), "utf8"), /padEnd/, "the attempt's work landed too");
+  assert.equal(gitFact(workspace, ["status", "--porcelain"]), "");
+  assert.equal(existsSync(worktree), false);
+});
+
+test("a dirty root lands pending-conflict: the acceptance records, the branch and the worktree survive", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact, sha: base } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  const worktree = makeTaskWorktree(dir, workspace, "LW3", base);
+  factory.setContract({ task: "LW3", workspace, gate: "true", artifact });
+  factory.requestSpawn({ task: "LW3", provider: "claude", arity: 1, worktree });
+
+  writeFileSync(join(worktree, artifact), "export function pad(input: string, width: number): string {\n  return input.padEnd(width).slice(0, width);\n}\n");
+  const claimed = gitCommitChanges(worktree, "the verified work");
+  assert.equal((await factory.claim({ task: "LW3", sha: claimed })).verdict, "green");
+  // The Owner has uncommitted edits at the root — landing must not touch them.
+  writeFileSync(join(workspace, "dirt.txt"), "uncommitted\n");
+
+  const accepted = await factory.accept({ task: "LW3", attempt: 1, accepted_by: "owner" });
+  assert.equal(accepted.landing, "pending-conflict");
+  assert.match(accepted.landingNote ?? "", /not clean/);
+  assert.equal(gitFact(workspace, ["rev-parse", "HEAD"]), base, "the root never moved");
+  assert.ok(readFileSync(join(workspace, "dirt.txt"), "utf8") === "uncommitted\n", "the dirty edit is untouched");
+  assert.equal(existsSync(worktree), true, "the worktree survives a pending-conflict landing");
+  assert.equal(gitFact(workspace, ["rev-parse", "--verify", "factory/LW3"]), claimed, "the verified work is never lost");
+});
+
+test("a merge conflict lands pending-conflict with the root left clean — the conflict is named, never lived in", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact, sha: base } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  const worktree = makeTaskWorktree(dir, workspace, "LW4", base);
+  factory.setContract({ task: "LW4", workspace, gate: "true", artifact });
+  factory.requestSpawn({ task: "LW4", provider: "claude", arity: 1, worktree });
+
+  writeFileSync(join(worktree, artifact), "export const worktreeSide = 1;\n");
+  const claimed = gitCommitChanges(worktree, "the verified work");
+  // The root edits the SAME file differently and commits — a true merge conflict.
+  writeFileSync(join(workspace, artifact), "export const rootSide = 2;\n");
+  const rootMoved = gitCommitChanges(workspace, "the root advanced conflicting");
+  assert.equal((await factory.claim({ task: "LW4", sha: claimed })).verdict, "green");
+
+  const accepted = await factory.accept({ task: "LW4", attempt: 1 });
+  assert.equal(accepted.landing, "pending-conflict");
+  assert.match(accepted.landingNote ?? "", /conflict/i, "the reason names the conflict");
+  assert.equal(gitFact(workspace, ["rev-parse", "HEAD"]), rootMoved, "the root stays at its own commit — the failed merge is aborted");
+  assert.equal(gitFact(workspace, ["status", "--porcelain"]), "", "the root is left clean, not mid-merge");
+  assert.equal(readFileSync(join(workspace, artifact), "utf8"), "export const rootSide = 2;\n", "the root's own edit is untouched");
+  assert.equal(existsSync(worktree), true);
+  assert.equal(gitFact(workspace, ["rev-parse", "--verify", "factory/LW4"]), claimed, "the verified work waits on its branch for the Lead to resolve");
+});
+
+test("two same-Project Tasks run their claims concurrently in sibling worktrees — no collision, root untouched", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, sha: base } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  const wtA = makeTaskWorktree(dir, workspace, "PR1", base);
+  const wtB = makeTaskWorktree(dir, workspace, "PR2", base);
+  factory.setContract({ task: "PR1", workspace, gate: "true", artifact: "src/format.ts", scope: ["src/one"] });
+  factory.setContract({ task: "PR2", workspace, gate: "true", artifact: "src/format.ts", scope: ["src/two"] });
+  for (const [task, wt] of [["PR1", wtA], ["PR2", wtB]] as const) {
+    const spawn = factory.requestSpawn({ task, provider: "claude", arity: 1, worktree: wt });
+    assert.equal(spawn.outcome, "dispatched", `${task} dispatched in its own worktree`);
+  }
+  // Both agents work in their own trees; the claims run interleaved.
+  mkdirSync(join(wtA, "src", "one"), { recursive: true });
+  writeFileSync(join(wtA, "src", "one", "a.ts"), "export const a = 1;\n");
+  mkdirSync(join(wtB, "src", "two"), { recursive: true });
+  writeFileSync(join(wtB, "src", "two", "b.ts"), "export const b = 2;\n");
+  const shaA = gitCommitChanges(wtA, "task one");
+  const shaB = gitCommitChanges(wtB, "task two");
+  const [first, second] = await Promise.all([factory.claim({ task: "PR1", sha: shaA }), factory.claim({ task: "PR2", sha: shaB })]);
+  assert.equal(first.verdict, "green");
+  assert.equal(second.verdict, "green");
+  assert.equal(gitFact(workspace, ["rev-parse", "HEAD"]), base, "the root sat at base through both runs");
+  assert.equal(gitFact(workspace, ["status", "--porcelain"]), "");
+  // And both land independently: accept PR1, its work shows in the root; PR2's branch waits untouched.
+  const accepted = await factory.accept({ task: "PR1", attempt: 1, accepted_by: "lead" });
+  assert.equal(accepted.landing, "landed");
+  assert.ok(existsSync(join(workspace, "src", "one", "a.ts")), "PR1's verified work is in the root");
+  assert.equal(gitFact(workspace, ["rev-parse", "--verify", "factory/PR2"]), shaB, "PR2's verified work waits on its branch");
+});

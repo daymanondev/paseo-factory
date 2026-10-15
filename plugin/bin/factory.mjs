@@ -9,7 +9,7 @@
  *
  *   factory [--home <paseoHome>] contract --task <id> --workspace <dir> \
  *       --gate <command> --artifact <path> [--scope <p1,p2,...>] [--wait-secs <n>]
- *   factory [--home <paseoHome>] accept <task> --attempt <n> [--wait-secs <n>]
+ *   factory [--home <paseoHome>] accept <task> --attempt <n> [--by owner|supervisor|lead] [--wait-secs <n>]
  *   factory [--home <paseoHome>] run <task> [<task>…] [--provider <provider[/model]>]
  *   factory [--home <paseoHome>] lanes [get [<lane>] | set <lane> <value>]
  *   factory [--home <paseoHome>] status
@@ -37,6 +37,7 @@ import { join, resolve as resolvePath } from "node:path";
 import { readLedgerEvents } from "./ledger-read.mjs";
 import { awaitReply, randomId, resolveHome, spoolRootFor, stateDirFor, submit } from "./spool-client.mjs";
 import { LANE_NAMES, loadLanes, resolveRunProvider, saveLanes } from "./lanes-config.mjs";
+import { resolveProject } from "./project.mjs";
 
 // The contract stanza's authoring-law block mirrors docs/runbooks/live-run.md
 // step 3 (the ratified R2–R6 batch, ticket 02 / v0.0.8) — help text and
@@ -73,9 +74,15 @@ commands:
                                      after EVERY verdict)
              [--description <text>]  the task's assignment in the Owner's words —
                                      the driver's brief carries it (v0.0.6)
+             [--skills <s1,s2,...>]  SKILL.md workflows the working agent must
+                                     open first (v0.0.14) — the Lead mandates
+                                     a method, not just an outcome; the
+                                     driver's brief renders them at the top
 
   accept     Accept one green attempt of a task (the Owner's act)
-             accept <task> --attempt <n>
+             accept <task> --attempt <n> [--by owner|supervisor|lead]
+             --by names the accepting seat (v0.0.14): owner/supervisor are
+             the unconditional override, lead accepts green + CONCERN-free
 
   run        Run contracted tasks' agents to verdict (the driver, v0.0.5):
              one agent per task on the daemon, watched to its verdict.
@@ -90,18 +97,32 @@ commands:
              with zero refusals. Each agent's brief carries its contract's
              --description, when one was set.
 
-  lanes      Inspect or set the Lane config (v0.0.13, ADR 0009 §3) — the one
-             place every model-bearing role's provider/model is named:
-             supervisor, worker, watch, retro, freshEyes (all defaulting to
+  lanes      Inspect or set the Lane config (v0.0.13, ADR 0009 §3; the lead
+             lane and --project arrive in v0.0.14, ADR 0010) — the one place
+             every model-bearing role's provider/model is named: supervisor,
+             lead, worker, watch, retro, freshEyes (all defaulting to
              pi/zai/glm-5.3). A lane is provider/model with both halves
              non-empty, or "eye.json" for freshEyes alone (the legacy direct
              HTTP config in <stateDir>/eye.json). A local read/write of
              <stateDir>/lanes.json — the plugin need not be running.
-             lanes                    print all five lanes
-             lanes get [<lane>]       print one lane, or all five when omitted
-             lanes set <lane> <value> validate and write one lane (only the
-                                      lanes ever named persist — a refused
-                                      value writes nothing, exit 2)
+             lanes [get [<lane>]] [--project <dir>]
+                                     print one lane, or all six when omitted;
+                                     --project overlays the Project's
+                                     <stateDir>/projects/<slug>/lanes.json
+             lanes set <lane> <value> [--project <dir>]
+                                      validate and write one lane into the
+                                      machine file, or the Project's override
+                                      file under --project (only the lanes
+                                      ever named persist — a refused value
+                                      writes nothing, exit 2)
+
+  lead       Rotate a Project's Lead seat (v0.0.14, ADR 0010 §2): cancel and
+             archive the active seat=lead, project=<slug> agent so the next
+             dispatch starts a fresh Lead session grounded in the Project's
+             Ledger and AGENTS.md / CONTEXT.md. Submits through the spool —
+             the plugin is the one daemon actor; no ledger line lands (a
+             rotation is a daemon fact, not a factory fact).
+             lead rotate --project <dir>   any directory inside the Project
 
   retro      Run the Retro over the whole ledger, on demand (v0.0.7): the
              plugin builds the corpus digest, prompts the configured retro
@@ -142,11 +163,20 @@ attribution (v0.0.9): contract and accept stamp who submitted — the
   shell's $PASEO_AGENT_ID when the daemon env carries one (the delegated
   Owner seat), else "owner" (the human path). The stamp rides the spool
   request onto the ledger line (by: on contract_set, accepted_by: on
-  attempt_accepted) — there is no flag to set or override it.`;
+  attempt_accepted). Since v0.0.14 "accept --by owner|supervisor|lead" is
+  the one flag that overrides the stamp — the acceptance authority seats
+  (ADR 0010 §3); "lead" is judged at the factory, not trusted from here.`;
 
 const DEFAULT_WAIT_SECS = 60;
 /** The retro's own default — one pass runs minutes, and the budget alone is 600s. */
 const RETRO_WAIT_SECS = 660;
+
+/**
+ * The acceptance authority seats (v0.0.14, ADR 0010 §3): `owner` and
+ * `supervisor` are the unconditional override, `lead` the intermediate
+ * acceptance the factory judges (green + CONCERN-free + not escalated).
+ */
+const ACCEPT_SEATS = ["owner", "supervisor", "lead"];
 
 /**
  * The v0.0.9 attribution stamp (ADR 0006): the submitting shell's identity —
@@ -243,7 +273,9 @@ async function roundTrip(request, waitSecs) {
     process.exit(2);
   }
   if (!reply.ok) {
-    console.error(`factory: ${reply.message}`);
+    // The refusal's code rides the line (the driver's own refusal-log law):
+    // a `lead-accept-refused` reads as itself at the terminal, not as prose.
+    console.error(`factory: ${reply.code}: ${reply.message}`);
     process.exit(2);
   }
   return reply;
@@ -256,6 +288,7 @@ if (command === "contract") {
     gate: { type: "string" },
     artifact: { type: "string" },
     scope: { type: "string" },
+    skills: { type: "string" },
     "fresh-eyes": { type: "boolean", default: false },
     watch: { type: "boolean", default: false },
     description: { type: "string" },
@@ -281,6 +314,9 @@ if (command === "contract") {
     ...(v.scope === undefined
       ? {}
       : { scope: v.scope.split(",").map((s) => s.trim()).filter((s) => s !== "") }),
+    ...(v.skills === undefined
+      ? {}
+      : { skills: v.skills.split(",").map((s) => s.trim()).filter((s) => s !== "") }),
     ...(v["fresh-eyes"] ? { freshEyes: true } : {}),
     ...(v.watch ? { watch: true } : {}),
     ...(v.description === undefined ? {} : { description: v.description }),
@@ -294,26 +330,53 @@ if (command === "contract") {
 if (command === "accept") {
   const parsed = parseCommandOptions({
     attempt: { type: "string" },
+    by: { type: "string" },
     "wait-secs": { type: "string" },
   });
   const task = parsed.positionals[0];
-  if (task === undefined) fail("accept: a task id is required (factory accept <task> --attempt <n>)");
+  if (task === undefined) fail("accept: a task id is required (factory accept <task> --attempt <n> [--by owner|supervisor|lead])");
   if (parsed.positionals.length > 1) fail(`accept: unexpected positional "${parsed.positionals[1]}"`);
   const attempt = Number(parsed.values.attempt);
   if (!Number.isInteger(attempt) || attempt < 1) fail("accept: --attempt must be a positive integer");
+  // The acceptance authority seats (v0.0.14, ADR 0010 §3): the flag claims
+  // one explicitly; without it the shell's own stamp rides (the v0.0.9 law —
+  // the delegated agent's id or "owner").
+  let by;
+  if (parsed.values.by !== undefined) {
+    if (!ACCEPT_SEATS.includes(parsed.values.by)) {
+      fail(`accept: --by must be one of owner|supervisor|lead — got "${parsed.values.by}"`);
+    }
+    by = parsed.values.by;
+  }
 
-  const reply = await roundTrip({ id: randomId(), kind: "accept", task, attempt, submitter }, waitSeconds(parsed));
+  const reply = await roundTrip(
+    { id: randomId(), kind: "accept", task, attempt, submitter, ...(by === undefined ? {} : { by }) },
+    waitSeconds(parsed),
+  );
   console.log(`factory: ${reply.summary}`);
   process.exit(0);
 }
 
 if (command === "lanes") {
-  const parsed = parseCommandOptions({});
+  const parsed = parseCommandOptions({ project: { type: "string" } });
   const sub = parsed.positionals[0] ?? "get";
+
+  // v0.0.14 (ADR 0010 §5): --project <dir> resolves the directory's canonical
+  // Project and targets its override file — get merges it over the machine
+  // table, set writes into it alone.
+  let projectSlug;
+  if (typeof parsed.values.project === "string") {
+    const projectDir = resolvePath(parsed.values.project);
+    const project = resolveProject(projectDir);
+    if (!project.ok) {
+      fail(`lanes: --project ${parsed.values.project} does not resolve to a git repository — ${project.reason}`);
+    }
+    projectSlug = project.slug;
+  }
 
   if (sub === "get") {
     if (parsed.positionals.length > 2) fail(`lanes get: unexpected positional "${parsed.positionals[2]}"`);
-    const lanes = loadLanes(stateDir);
+    const lanes = loadLanes(stateDir, projectSlug);
     if (!lanes.ok) fail(`lanes: ${lanes.reason}`);
     const wanted = parsed.positionals[1];
     if (wanted !== undefined && !LANE_NAMES.includes(wanted)) {
@@ -328,15 +391,34 @@ if (command === "lanes") {
   if (sub === "set") {
     const lane = parsed.positionals[1];
     const value = parsed.positionals[2];
-    if (parsed.positionals.length !== 3) fail("lanes set: exactly two arguments — factory lanes set <lane> <value>");
+    if (parsed.positionals.length !== 3) fail("lanes set: exactly two arguments — factory lanes set <lane> <value> [--project <dir>]");
     if (!LANE_NAMES.includes(lane)) fail(`lanes set: unknown lane "${lane}" — the lanes are ${LANE_NAMES.join(", ")}`);
-    const saved = saveLanes(stateDir, { [lane]: value });
+    const saved = saveLanes(stateDir, { [lane]: value }, projectSlug);
     if (!saved.ok) fail(`lanes set: ${saved.reason}`);
     console.log(`factory: ${lane}=${saved.lanes[lane]} (lanes.json updated)`);
     process.exit(0);
   }
 
-  fail(`lanes: unknown subcommand "${sub}" — use "lanes [get [<lane>] | set <lane> <value>]"`);
+  fail(`lanes: unknown subcommand "${sub}" — use "lanes [get [<lane>] | set <lane> <value>] [--project <dir>]"`);
+}
+
+if (command === "lead") {
+  const parsed = parseCommandOptions({ project: { type: "string" }, "wait-secs": { type: "string" } });
+  const sub = parsed.positionals[0];
+  if (sub !== "rotate") fail(`lead: unknown subcommand "${sub ?? "(none)"}" — use "lead rotate --project <dir>"`);
+  if (parsed.positionals.length > 1) fail(`lead rotate: unexpected positional "${parsed.positionals[1]}"`);
+  if (typeof parsed.values.project !== "string" || parsed.values.project.trim() === "") {
+    fail("lead rotate: --project <dir> is required — any directory inside the Project's repository");
+  }
+  // v0.0.14 (ADR 0010 §2): the rotation is a spool round trip — the CLI only
+  // submits; the plugin cancels + archives the Project's seat=lead agent and
+  // names it in the reply.
+  const reply = await roundTrip(
+    { id: randomId(), kind: "lead_rotate", projectRoot: resolvePath(parsed.values.project) },
+    waitSeconds(parsed),
+  );
+  console.log(`factory: ${reply.summary}`);
+  process.exit(0);
 }
 
 if (command === "run") {
