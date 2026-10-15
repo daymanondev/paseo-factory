@@ -51,6 +51,8 @@
  * only writer of its kinds — the kind itself is the attribution.
  */
 
+import type { LandingResult } from "./workspace.ts";
+
 export type Verdict = "red" | "green";
 
 /** The Attempt ceiling (v0.0.12, ADR 0008 §1): a Task may open at most three Attempts — fixed in code, never configuration. */
@@ -273,9 +275,10 @@ export interface AttemptAccepted {
    * was dirty or the integration conflicted, with branch `factory/<task>`
    * and the worktree preserved for resolution. Never a `git push`: remote
    * landing stays a human act. Absent on the legacy shared-checkout path
-   * and pre-0.0.14 lines.
+   * and pre-0.0.14 lines. The vocabulary is LandingResult's (workspace.ts)
+   * — one declaration, both halves of the landing.
    */
-  landing?: "landed" | "pending-conflict";
+  landing?: LandingResult["landing"];
   /** The pending-conflict's reason — the conflict the Lead or Supervisor resolves. */
   landingNote?: string;
 }
