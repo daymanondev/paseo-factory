@@ -30,7 +30,7 @@
        - `pi/<model>` → `pi --print --no-session --no-tools --no-extensions --no-skills --no-context-files --model <model>`
        - `copilot/<model>` → `copilot -s --model <model> --reasoning-effort medium`
        - `claude/<model>` → `claude -p --model <model> --tools ""`
-     - `Fresh-eyes` (`src/fresh-eyes.ts`) supports both `"eye.json"` (direct HTTP API when `<stateDir>/eye.json` is selected or present as override) and any headless tool-less CLI lane (`pi/...`, `copilot/...`, `claude/...`) configured in `lanes.freshEyes`, preserving the "cannot act by construction (zero tools)" invariant on subscription/$0 lanes.
+     - `Fresh-eyes` (`src/fresh-eyes.ts`) supports both `"eye.json"` (direct HTTP API when `<stateDir>/eye.json` is selected or present as override) and any headless tool-less CLI lane (`pi/...`, `copilot/...`, `claude/...`) configured in `lanes.freshEyes`, preserving the "cannot act by construction (zero tools)" invariant on subscription/$0 lanes. When `lanes.json` has never named `freshEyes`, a pre-existing `eye.json` keeps answering (legacy retention); any explicit `freshEyes` value — `eye.json` included — wins, and single-lane writes persist only the lane they name.
 
 4. **Single-Writer Law preserved over Plugin RPC (ADR 0004).**
    - Because `server.handle(...)` RPC handlers run inside the `plugin/index.server.ts` process that owns the single `Factory` instance, Owner acts triggered from the UI (`Accept`, `Retro`, `Lane config` save) invoke `factory.accept({ task, attempt, accepted_by: "owner" })` and `factory.retro()` directly in-process rather than round-tripping through the external CLI file spool.
