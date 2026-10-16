@@ -415,6 +415,7 @@ export async function runWatchPass(input: WatchPassInput): Promise<WatchOutcome>
       stdin: prompt,
       timeoutMs: remaining,
       runner: input.copilotRunner,
+      stateDir: input.stateDir,
     });
     if (result.ok) return parseWatchAnswers(result.stdout, started, lane!);
     if (result.budgetExceeded) return failed(`watch budget of ${budgetMs}ms exceeded`); // the clock is spent — no second try

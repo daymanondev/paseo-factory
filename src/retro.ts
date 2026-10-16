@@ -522,6 +522,7 @@ export async function runRetroPass(input: RetroPassInput): Promise<RetroOutcome>
       stdin: prompt,
       timeoutMs: remaining,
       runner: input.copilotRunner,
+      stateDir: input.stateDir,
     });
     if (result.ok) {
       const parsed = parseRetroProposals(result.stdout, input.corpus.knownSeqs);

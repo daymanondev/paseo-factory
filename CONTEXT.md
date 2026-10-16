@@ -203,3 +203,8 @@ _Avoid_: dashboard, portal, control center, room panel
 **Lane config**:
 The plugin-owned configuration (`<stateDir>/lanes.json` machine defaults, plus optional `<projectStateDir>/lanes.json` overrides, ADR 0009, ADR 0010) mapping each model-bearing seat and station (`supervisor`, `lead`, `worker`, `watch`, `retro`, `freshEyes`) to its selected `provider/model` string (or `"eye.json"` for direct-API fresh-eyes). Read by the Factory surface, the Supervisor and Lead bridges, the Driver (when `--provider` is omitted), and the post-verdict/retro passes. Added in v0.0.13 (ADR 0009); expanded with `lead` and per-project overrides in ADR 0010.
 _Avoid_: model settings, profile, preset, fleet manifest
+
+**Pi harness home**:
+The clean-room per-role `PI_CODING_AGENT_DIR` directory (`<stateDir>/pi-agent/<role>`, ADR 0011) provisioned by the factory for `Supervisor`, `Lead`, working `Agent`, and headless tool-less passes (`Watch`, `Retro`, `Fresh-eyes review`). Strips user TUI npm packages, extensions, personal `~/.pi/agent/skills`, and `APPEND_SYSTEM.md` while symlinking auth, models, and `sessions/` from `~/.pi/agent`, sanitizing `mcp.json` for Pi's native `builtin:mcp`, and scoping working `Agent` `<available_skills>` to its three core skills (`tdd`, `diagnosing-bugs`, `codebase-design`) plus on-demand `Contract` skills.
+_Avoid_: sandbox, profile dir, shadow home
+

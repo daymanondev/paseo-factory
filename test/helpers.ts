@@ -135,6 +135,8 @@ export interface FakeCopilotCall {
   cwd: string;
   stdin: string;
   timeoutMs: number;
+  /** The extra child environment a `pi` lane carries (its clean `PI_CODING_AGENT_DIR`) — undefined for every other family. */
+  env?: Record<string, string>;
 }
 
 /** What one fake CLI invocation answers — the result shape the runner contract returns. */

@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.16] - 2026-10-17
+
+v0.0.16's one thing: **Clean-room `Pi harness home` isolation
+(`PI_CODING_AGENT_DIR`) across roles and headless passes** — ADR 0011
+made real.
+
+### Added
+
+- **The Pi harness home provisioner (`src/pi-home.ts`, vendored verbatim at `plugin/server/core/pi-home.ts`)** — `provisionPiAgentHome` materializes `<stateDir>/pi-agent/<role>` idempotently for `supervisor` / `lead` / `agent` / `headless`: a generated clean-room `settings.json` that keeps only the operator's `defaultProvider` / `defaultModel` / `defaultThinkingLevel` and enforces `packages: []`, `extensions: ["-builtin:llama.cpp"]` (native `builtin:mcp`, `builtin:codemode`, `builtin:tool-search` stay enabled), `quietStartup: true`, and `defaultProjectTrust: "always"` (so `<project-root>/.pi/mcp.json` overrides work); symlinks `auth.json`, `models.json`, `models-store.json`, every OAuth credential store, and `sessions/` back to `~/.pi/agent` so auth, custom models, and session resume are shared; and never links `APPEND_SYSTEM.md`, `SYSTEM.md`, `extensions/`, `prompts/`, or `skills/` — the operator's global TUI auto-delegation rules and 20+-package resolution never reach a Factory seat.
+- **`PI_CODING_AGENT_DIR` on every seat and working Agent (`plugin/server/roles.ts`)** — `factoryEnvFor` provisions the role's harness home on demand and returns it as `PI_CODING_AGENT_DIR` alongside the `PASEO_FACTORY_*` vars; the `agent.create` (`injectRoleOnCreate`) and `agent.session_open` (`injectSessionEnv`) before-hooks both merge it, so every pi-lane `Supervisor`, `Lead`, and contracted working `Agent` runs in the clean room at creation and on every launch (both hooks grow a hermetic `userHome` override for tests).
+- **A clean headless home for tool-less passes (`src/lanes.ts`, threaded through `src/watch.ts`, `src/retro.ts`, `src/fresh-eyes.ts`)** — `runLaneCli` provisions `<stateDir>/pi-agent/headless` (skills denied, every interactive builtin extension off on top of the argv's `--no-extensions --no-skills --no-context-files`) and passes `PI_CODING_AGENT_DIR` in the spawned child env for `pi/<model>` lanes, so `Watch`, `Retro`, and `Fresh-eyes review` never pay the operator's package-resolution cost or inherit `APPEND_SYSTEM.md`; `LaneCliRunner` grows the recorded `env` field.
+- **Sanitized `mcp.json` synchronization and per-role skills scoping (`src/pi-home.ts`)** — every provision re-syncs the session-bearing role homes' `mcp.json` from `~/.pi/agent/mcp.json`, stripping legacy `pi-mcp-adapter` `"auth": "oauth"` strings (Pi v1.3.0's `builtin:mcp` validator rejects them) while preserving valid `auth: { provider }` objects and all other fields, so operator edits propagate on the next session open; `agent` filters `<available_skills>` to the three core skills (`tdd`, `diagnosing-bugs`, `codebase-design`) while `supervisor` and `lead` auto-discover the clean `~/.agents/skills` catalog for Contract authoring.
+- `docs/adr/0011-clean-room-pi-harness-isolation.md`; `CONTEXT.md` gains
+  the **Pi harness home** entry (naming `Supervisor`, `Lead`, working
+  `Agent`, and the headless `Watch` / `Retro` / `Fresh-eyes review` passes;
+  the six term entries themselves are untouched).
+
+### Changed
+
+- **The Driver brief names where each mandated `SKILL.md` lives (`plugin/bin/driver.mjs`)** — a Contract with `skills` now renders `Required skills to open first: <skills> (read ~/.agents/skills/<skill>/SKILL.md or .agents/skills/<skill>/SKILL.md before starting)`, so a working Agent whose `<available_skills>` is filtered to the core three can still open any `Contract.skills` entry on demand.
+- Owner-side migration (no repo change, ADR 0011's Consequences): obsolete
+  Yara-specific MCP servers (`code-graph-mp`, `yara-db`,
+  `atlassian-mcp-server`, `sentry`) come out of the operator's
+  `~/.pi/agent/mcp.json`; the provisioner's per-provision re-synchronization
+  carries the edit into every role home on the next session open or headless
+  pass, so no unused background MCP processes spawn for retired projects.
+- `package.json` + `SHELL_VERSION` → `0.0.16`. Suite 361 → 372.
+
 ## [0.0.15] - 2026-10-16
 
 v0.0.15's one thing: **Per-lane Thinking Level (`provider/model[:thinking]`), Paseo project discovery, and Factory surface redesign**.

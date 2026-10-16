@@ -178,7 +178,7 @@ export async function runFreshEyesPass(input: FreshEyesPassInput): Promise<Fresh
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
     const remaining = budgetMs - (Date.now() - started);
     if (remaining <= 0) return failed(`eye budget of ${budgetMs}ms exceeded`, lane);
-    const result = await runLaneCli({ lane, stdin: prompt.prompt, timeoutMs: remaining, runner: input.cliRunner });
+    const result = await runLaneCli({ lane, stdin: prompt.prompt, timeoutMs: remaining, runner: input.cliRunner, stateDir: input.stateDir });
     if (result.ok) {
       const parsed = parseEyeAnswer(result.stdout);
       return {

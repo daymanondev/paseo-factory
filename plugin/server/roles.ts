@@ -13,7 +13,9 @@
  *      surface's ensure passes it; the driver's brief is the Agent's);
  *   3. `PASEO_FACTORY_*` env vars on `agent.session_open` — re-applied on
  *      every provider launch (the daemon's own law), so a seat's shell can
- *      always ask which seat it is.
+ *      always ask which seat it is. Since v0.0.16 the same channel carries
+ *      `PI_CODING_AGENT_DIR` — every pi-lane role runs inside its
+ *      provisioned clean-room Pi harness home (ADR 0011).
  *
  * Every rendered contract ends with the 1-line role skill trigger index
  * (ADR 0010 §6): Supervisor `grilling, domain-modeling`; Lead
@@ -21,9 +23,11 @@
  * codebase-design`. Injection is idempotent — the footer's marker line is
  * the sentinel; a request that already carries it passes through untouched.
  */
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { projectStateDir, resolveProject } from "./core/project.ts";
 import type { ProjectResolution } from "./core/project.ts";
+import { provisionPiAgentHome } from "./core/pi-home.ts";
 import { listProjectRegistrations } from "./projects.ts";
 import { parseTaskWorktreePath } from "../shared/worktree-shape.mjs";
 
@@ -143,12 +147,27 @@ export function renderSeatBootstrap(input: {
 
 // ---- the PASEO_FACTORY_* env channel -------------------------------------------------------
 
-/** The env vars one role's shells carry (the session_open channel — re-applied on every launch). */
-export function factoryEnvFor(role: RoleName, input: { stateDir: string; project: ProjectIdentity; task?: string }): Record<string, string> {
+/**
+ * The env vars one role's shells carry (the session_open channel — re-applied
+ * on every launch). Since v0.0.16 (ADR 0011) this is also the provisioning
+ * seam for the role's isolated Pi harness home: the call materializes
+ * `<stateDir>/pi-agent/<role>` on demand (idempotently — the provisioner's
+ * law) and returns it as `PI_CODING_AGENT_DIR`, so every pi-lane seat and
+ * working agent runs inside the clean room instead of the operator's global
+ * `~/.pi/agent`. `userHome` overrides the operator home the shared-state
+ * symlinks point back at (default `<homedir()>`; hermetic tests pass a fake).
+ */
+export function factoryEnvFor(role: RoleName, input: { stateDir: string; project: ProjectIdentity; task?: string; userHome?: string }): Record<string, string> {
+  const roleHome = provisionPiAgentHome({
+    stateDir: input.stateDir,
+    role,
+    sourceAgentDir: join(input.userHome ?? homedir(), ".pi", "agent"),
+  });
   const env: Record<string, string> = {
     PASEO_FACTORY_SEAT: role,
     PASEO_FACTORY_PROJECT: input.project.slug,
     PASEO_FACTORY_STATE_DIR: input.stateDir,
+    PI_CODING_AGENT_DIR: roleHome,
   };
   if (input.project.root !== "") env.PASEO_FACTORY_PROJECT_ROOT = input.project.root;
   if (input.task !== undefined) env.PASEO_FACTORY_TASK = input.task;
@@ -166,13 +185,16 @@ export interface AgentCreateRequest {
  * The additive `agent.create` injection (channel 1 + the first-launch env): a
  * seat-titled create or a managed-worktree create gets its role contract
  * APPENDED to `config.systemPrompt` (idempotent — the footer is the sentinel)
- * and its `PASEO_FACTORY_*` env seeded. Strangers pass through untouched
- * (`undefined` — the daemon sees the original request). Seats resolve their
- * project from the create's cwd (git answers); working agents from the
- * worktree shape. Generic over the request so the SDK's full create shape
- * (mcpServers, settings, …) rides through unchanged.
+ * and its `PASEO_FACTORY_*` env seeded — since v0.0.16 including the
+ * provisioned role's `PI_CODING_AGENT_DIR` (the clean-room Pi harness home).
+ * Strangers pass through untouched (`undefined` — the daemon sees the original
+ * request). Seats resolve their project from the create's cwd (git answers);
+ * working agents from the worktree shape. Generic over the request so the
+ * SDK's full create shape (mcpServers, settings, …) rides through unchanged.
+ * `userHome` (default `<homedir()>`) overrides the operator home the harness
+ * home's shared-state symlinks point back at — hermetic tests pass a fake.
  */
-export function injectRoleOnCreate<R extends AgentCreateRequest>(request: R, stateDir: string): R | undefined {
+export function injectRoleOnCreate<R extends AgentCreateRequest>(request: R, stateDir: string, userHome?: string): R | undefined {
   if ((request.config.systemPrompt ?? "").includes(FOOTER_MARK)) return undefined; // already injected — idempotent
   const title = request.config.title ?? "";
   if (title === SEAT_TITLES.supervisor || title === SEAT_TITLES.lead) {
@@ -182,7 +204,7 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(request: R, sta
     return {
       ...request,
       config: { ...request.config, systemPrompt: appendContract(request.config.systemPrompt, renderSeatContract(seat, project)) },
-      env: { ...(request.env ?? {}), ...factoryEnvFor(seat, { stateDir, project }) },
+      env: { ...(request.env ?? {}), ...factoryEnvFor(seat, { stateDir, project, userHome }) },
     };
   }
   const worktree = parseTaskWorktreePath(stateDir, request.config.cwd);
@@ -190,7 +212,7 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(request: R, sta
   return {
     ...request,
     config: { ...request.config, systemPrompt: appendContract(request.config.systemPrompt, renderAgentContract(worktree.task, worktree.slug)) },
-    env: { ...(request.env ?? {}), ...factoryEnvFor("agent", { stateDir, project: { root: "", slug: worktree.slug }, task: worktree.task }) },
+    env: { ...(request.env ?? {}), ...factoryEnvFor("agent", { stateDir, project: { root: "", slug: worktree.slug }, task: worktree.task, userHome }) },
   };
 }
 
@@ -200,22 +222,28 @@ function appendContract(existing: string | undefined, contract: string): string 
 
 /**
  * The `agent.session_open` injection (channel 3): every launch of a seat or
- * working-agent shell re-carries its `PASEO_FACTORY_*` identity. Working
- * agents match by their managed-worktree cwd; seats by agent id against the
- * project registry the ensure path keeps. Anything else passes through.
+ * working-agent shell re-carries its `PASEO_FACTORY_*` identity — since
+ * v0.0.16 including its provisioned `PI_CODING_AGENT_DIR`, so every provider
+ * launch (not just the create) runs inside the clean-room Pi harness home.
+ * Working agents match by their managed-worktree cwd; seats by agent id
+ * against the project registry the ensure path keeps. Anything else passes
+ * through. `userHome` (default `<homedir()>`) overrides the operator home the
+ * harness home's shared-state symlinks point back at — hermetic tests pass a
+ * fake.
  */
 export function injectSessionEnv<R extends { agentId: string; cwd: string; env: Record<string, string> }>(
   request: R,
   stateDir: string,
+  userHome?: string,
 ): R | undefined {
   const worktree = parseTaskWorktreePath(stateDir, request.cwd);
   if (worktree !== null) {
-    return { ...request, env: { ...request.env, ...factoryEnvFor("agent", { stateDir, project: { root: "", slug: worktree.slug }, task: worktree.task }) } };
+    return { ...request, env: { ...request.env, ...factoryEnvFor("agent", { stateDir, project: { root: "", slug: worktree.slug }, task: worktree.task, userHome }) } };
   }
   for (const registration of listProjectRegistrations(stateDir)) {
     const seat = request.agentId === registration.supervisor ? "supervisor" : request.agentId === registration.lead ? "lead" : undefined;
     if (seat === undefined) continue;
-    return { ...request, env: { ...request.env, ...factoryEnvFor(seat, { stateDir, project: registration }) } };
+    return { ...request, env: { ...request.env, ...factoryEnvFor(seat, { stateDir, project: registration, userHome }) } };
   }
   return undefined;
 }

@@ -61,22 +61,32 @@ test("renderBrief carries the contract's description ahead of the fixed body (th
   assert.equal(renderBrief("live06-a", "/custom/bin"), renderBrief("live06-a", "/custom/bin", undefined));
 });
 
-test("renderBrief renders Contract.skills at the very top (v0.0.14, ADR 0010 §6)", () => {
-  const brief = renderBrief("live07-a", "/custom/bin", "Tighten the pad helper.", ["tdd", "diagnosing-bugs"]);
+test("renderBrief renders Contract.skills at the very top with the SKILL.md path (v0.0.16, ADR 0011)", () => {
+  const brief = renderBrief("live16-a", "/custom/bin", "Tighten the pad helper.", ["frontend-design"]);
   assert.ok(
-    brief.startsWith("Required skills to open first: tdd, diagnosing-bugs\n\n"),
-    "the mandate rides above the assignment and the fixed body",
+    brief.startsWith(
+      "Required skills to open first: frontend-design (read ~/.agents/skills/<skill>/SKILL.md or .agents/skills/<skill>/SKILL.md before starting)\n\n",
+    ),
+    "the mandate names the skill and where its SKILL.md lives — the agent's <available_skills> no longer preloads it (v0.0.16)",
   );
   assert.ok(brief.includes("Task: Tighten the pad helper.\n\n"), "the assignment follows the mandate");
-  assert.ok(brief.includes("Do the assigned work on branch `live07-a`."), "the fixed body is intact below both headers");
+  assert.ok(brief.includes("Do the assigned work on branch `live16-a`."), "the fixed body is intact below both headers");
+
+  // Multiple skills stay comma-joined in one line, the parenthetical a generic path hint.
+  const two = renderBrief("live16-b", "/custom/bin", "Tighten the pad helper.", ["tdd", "diagnosing-bugs"]);
+  assert.ok(
+    two.startsWith("Required skills to open first: tdd, diagnosing-bugs (read "),
+    "the joined mandate keeps the path instruction on the same line",
+  );
+  assert.ok(two.includes("(read ~/.agents/skills/<skill>/SKILL.md or .agents/skills/<skill>/SKILL.md before starting)"));
 
   // Skills with no description: the mandate rides directly over the fixed body.
-  const noDescription = renderBrief("live07-b", "/custom/bin", undefined, ["codebase-design"]);
-  assert.ok(noDescription.startsWith("Required skills to open first: codebase-design\n\n"));
+  const noDescription = renderBrief("live16-c", "/custom/bin", undefined, ["codebase-design"]);
+  assert.ok(noDescription.startsWith("Required skills to open first: codebase-design (read ~/.agents/skills/"));
   assert.ok(!noDescription.includes("Task:"), "no assignment line is invented");
 
   // An empty mandate renders nothing — same as an omitted one.
-  assert.equal(renderBrief("live07-c", "/custom/bin", undefined, []), renderBrief("live07-c", "/custom/bin"));
+  assert.equal(renderBrief("live16-d", "/custom/bin", undefined, []), renderBrief("live16-d", "/custom/bin"));
 });
 
 test("renderBrief names the worktree branch when the driver passes it (the task-worktree rider)", () => {
