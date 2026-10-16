@@ -51,6 +51,6 @@ Both `seatworks` (v3) and `paseo-room` solve this by provisioning a clean-room `
 
 ## Consequences
 
-- `CONTEXT.md` adds **Pi harness home** and updates **Supervisor**, **Lead**, **Agent**, **Watch**, **Retro**, and **Fresh-eyes review**.
+- `CONTEXT.md` adds the **Pi harness home** entry (naming `Supervisor`, `Lead`, working `Agent`, and the headless `Watch` / `Retro` / `Fresh-eyes review` passes; the six term entries themselves are untouched).
 - `plugin/server/roles.ts` (`factoryEnvFor`) and `src/lanes.ts` (`runLaneCli`) provision and bind `PI_CODING_AGENT_DIR`.
-- Obsolete Yara-specific entries (`code-graph-mp`, `yara-db`, `atlassian-mcp-server`, `sentry`) and legacy `"auth": "oauth"` fields are cleaned from the operator's `~/.pi/agent/mcp.json`.
+- Obsolete Yara-specific entries (`code-graph-mp`, `yara-db`, `atlassian-mcp-server`, `sentry`) and legacy `"auth": "oauth"` fields come out of the operator's `~/.pi/agent/mcp.json` as an owner-side migration (the repo diff cannot edit the operator home); the per-provision re-synchronization then carries the edit into every role home on the next session open or headless pass.

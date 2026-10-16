@@ -18,8 +18,9 @@ made real.
 - **A clean headless home for tool-less passes (`src/lanes.ts`, threaded through `src/watch.ts`, `src/retro.ts`, `src/fresh-eyes.ts`)** — `runLaneCli` provisions `<stateDir>/pi-agent/headless` (skills denied, every interactive builtin extension off on top of the argv's `--no-extensions --no-skills --no-context-files`) and passes `PI_CODING_AGENT_DIR` in the spawned child env for `pi/<model>` lanes, so `Watch`, `Retro`, and `Fresh-eyes review` never pay the operator's package-resolution cost or inherit `APPEND_SYSTEM.md`; `LaneCliRunner` grows the recorded `env` field.
 - **Sanitized `mcp.json` synchronization and per-role skills scoping (`src/pi-home.ts`)** — every provision re-syncs the session-bearing role homes' `mcp.json` from `~/.pi/agent/mcp.json`, stripping legacy `pi-mcp-adapter` `"auth": "oauth"` strings (Pi v1.3.0's `builtin:mcp` validator rejects them) while preserving valid `auth: { provider }` objects and all other fields, so operator edits propagate on the next session open; `agent` filters `<available_skills>` to the three core skills (`tdd`, `diagnosing-bugs`, `codebase-design`) while `supervisor` and `lead` auto-discover the clean `~/.agents/skills` catalog for Contract authoring.
 - `docs/adr/0011-clean-room-pi-harness-isolation.md`; `CONTEXT.md` gains
-  **Pi harness home** and updates **Supervisor**, **Lead**, **Agent**,
-  **Watch**, **Retro**, and **Fresh-eyes review**.
+  the **Pi harness home** entry (naming `Supervisor`, `Lead`, working
+  `Agent`, and the headless `Watch` / `Retro` / `Fresh-eyes review` passes;
+  the six term entries themselves are untouched).
 
 ### Changed
 
