@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   DEFAULT_LANE,
@@ -286,13 +286,31 @@ test("each provider family maps to its exact tool-less argv — the invariant is
 
 /** A fake lane runner recording every invocation — the watch/retro test seam, generalized. */
 function fakeLaneRunner(script: (call: { command: string; args: string[] }) => { code: number; stdout: string; stderr?: string; timedOut?: boolean }) {
-  const calls: { command: string; args: string[]; cwd: string; stdin: string; timeoutMs: number }[] = [];
+  const calls: { command: string; args: string[]; cwd: string; stdin: string; timeoutMs: number; env?: Record<string, string> }[] = [];
   const runner: LaneCliRunner = async (call) => {
     calls.push(call);
     const answer = script(call);
     return { code: answer.code, stdout: answer.stdout, stderr: answer.stderr ?? "", timedOut: answer.timedOut ?? false };
   };
   return { runner, calls };
+}
+
+/** Seeds a minimal fake operator Pi home — the headless runner seam's hermetic source (never the real `~/.pi/agent`). */
+function seedFakePiAgent(piAgent: string): string {
+  mkdirSync(join(piAgent, "extensions"), { recursive: true });
+  writeFileSync(join(piAgent, "extensions", "cmux.ts"), "// tui extension\n");
+  writeFileSync(join(piAgent, "APPEND_SYSTEM.md"), "# Auto-Delegation Rules\n");
+  writeFileSync(join(piAgent, "auth.json"), '{"keys":{}}');
+  mkdirSync(join(piAgent, "sessions"), { recursive: true });
+  writeFileSync(
+    join(piAgent, "settings.json"),
+    JSON.stringify(
+      { defaultProvider: "zai", defaultModel: "glm-5.3", defaultThinkingLevel: "medium", packages: ["npm:context-mode", "npm:pi-subagents"] },
+      null,
+      2,
+    ),
+  );
+  return piAgent;
 }
 
 test("runLaneCli records the lane's command and argv, prompt on stdin", async () => {
@@ -330,6 +348,50 @@ test("runLaneCli failures name the command: nonzero exit, deadline, unknown lane
   const unknown = await runLaneCli({ lane: "codex/gpt-6", stdin: "p", timeoutMs: 5_000 });
   assert.ok(!unknown.ok && !unknown.budgetExceeded);
   assert.match(unknown.error, /codex\/gpt-6/);
+});
+
+test("runLaneCli on a pi lane passes a clean headless PI_CODING_AGENT_DIR to the child (v0.0.16, ADR 0011)", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const source = seedFakePiAgent(join(dir, "pi-home", ".pi", "agent"));
+  const stateDir = join(dir, "factory");
+  const fake = fakeLaneRunner(() => ({ code: 0, stdout: "answer" }));
+
+  const result = await runLaneCli({ lane: "pi/zai/glm-5.3", stdin: "p", timeoutMs: 5_000, runner: fake.runner, stateDir, sourceAgentDir: source });
+  assert.ok(result.ok);
+  const headless = join(stateDir, "pi-agent", "headless");
+  assert.equal(fake.calls[0]!.env?.PI_CODING_AGENT_DIR, headless, "the child env carries the headless Pi harness home");
+  const settings = JSON.parse(readFileSync(join(headless, "settings.json"), "utf8"));
+  assert.deepEqual(settings.skills, ["!*"], "a headless pass denies every skill on top of --no-skills");
+  assert.deepEqual(settings.extensions, ["-builtin:llama.cpp", "-builtin:mcp", "-builtin:codemode", "-builtin:tool-search"]);
+  assert.deepEqual(settings.packages, [], "the operator's 20+ user packages never load");
+  assert.ok(!existsSync(join(headless, "APPEND_SYSTEM.md")), "the operator's APPEND_SYSTEM.md never reaches a headless pass");
+  assert.equal(realpathSync(join(headless, "auth.json")), realpathSync(join(source, "auth.json")), "shared auth still symlinks back to the source home");
+
+  // Idempotent reuse: a second pass finds the same home in the same state.
+  const again = await runLaneCli({ lane: "pi/zai/glm-5.3", stdin: "p", timeoutMs: 5_000, runner: fake.runner, stateDir, sourceAgentDir: source });
+  assert.ok(again.ok);
+  assert.equal(fake.calls[1]!.env?.PI_CODING_AGENT_DIR, headless);
+  assert.equal(realpathSync(join(headless, "auth.json")), realpathSync(join(source, "auth.json")), "re-provision never breaks a symlink it already made");
+
+  // The userHome override resolves the same fake source through <userHome>/.pi/agent.
+  const viaUserHome = await runLaneCli({
+    lane: "pi/zai/glm-5.3",
+    stdin: "p",
+    timeoutMs: 5_000,
+    runner: fake.runner,
+    stateDir: join(dir, "factory-2"),
+    userHome: join(dir, "pi-home"),
+  });
+  assert.ok(viaUserHome.ok);
+  assert.equal(fake.calls[2]!.env?.PI_CODING_AGENT_DIR, join(dir, "factory-2", "pi-agent", "headless"));
+  assert.equal(realpathSync(join(dir, "factory-2", "pi-agent", "headless", "auth.json")), realpathSync(join(source, "auth.json")));
+
+  // A non-pi lane never carries PI_CODING_AGENT_DIR — only pi is isolated (spec Out of Scope).
+  const other = fakeLaneRunner(() => ({ code: 0, stdout: "a" }));
+  const copilot = await runLaneCli({ lane: "copilot/gpt-5.4", stdin: "p", timeoutMs: 5_000, runner: other.runner, stateDir, sourceAgentDir: source });
+  assert.ok(copilot.ok);
+  assert.equal(other.calls[0]!.env?.PI_CODING_AGENT_DIR, undefined, "copilot lanes inherit the environment unchanged");
 });
 
 // ---- the CLI-side mirror (ADR 0004: CLIs import no src/ code) ----------------------------

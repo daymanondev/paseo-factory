@@ -26,6 +26,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { provisionPiAgentHome } from "./pi-home.ts";
 import { projectStateDir } from "./project.ts";
 
 /** The six model-bearing roles — the file's exact key set (5 UI cards; supervisor and lead pair under Seats). */
@@ -270,7 +271,9 @@ export function laneCliInvocation(lane: string): LaneCliInvocation | undefined {
  * One lane CLI invocation — the seam tests fake (the real one spawns the
  * lane's command with the prompt on stdin). `command` records which family
  * ran; `cwd` is the pass's empty scratch dir; `timeoutMs` kills a hanging CLI
- * mid-flight.
+ * mid-flight; `env` carries the extra environment a `pi` lane needs — its
+ * clean `PI_CODING_AGENT_DIR` (v0.0.16, ADR 0011) — and is undefined for
+ * every other family, which inherit the parent environment unchanged.
  */
 export type LaneCliRunner = (input: {
   command: string;
@@ -278,6 +281,7 @@ export type LaneCliRunner = (input: {
   cwd: string;
   stdin: string;
   timeoutMs: number;
+  env?: Record<string, string> | undefined;
 }) => Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }>;
 
 /**
@@ -299,12 +303,26 @@ export function laneCliAvailable(lane: string): boolean {
  * cwd, prompt on stdin, SIGKILL at the deadline, stderr squashed into the
  * error. A nonzero exit names the command; a blown deadline flags
  * `budgetExceeded` so the caller spends no second try.
+ *
+ * A `pi/<model>` lane additionally runs inside the clean headless Pi harness
+ * home (v0.0.16, ADR 0011): `PI_CODING_AGENT_DIR` is provisioned —
+ * idempotently, before the scratch cwd exists — at `<stateDir>/pi-agent/headless`
+ * so `pi --print` never resolves the operator's user packages or reads
+ * `~/.pi/agent/APPEND_SYSTEM.md` (on top of the argv's own `--no-extensions
+ * --no-skills --no-context-files` flags). Non-pi lanes and callers without a
+ * `stateDir` inherit the parent environment, exactly as before.
  */
 export async function runLaneCli(input: {
   lane: string;
   stdin: string;
   timeoutMs: number;
   runner?: LaneCliRunner | undefined;
+  /** The factory state directory naming the headless Pi harness home a `pi` lane runs under. */
+  stateDir?: string | undefined;
+  /** Hermetic override (tests): the operator Pi agent home shared state symlinks back to — default `<homedir>/.pi/agent`. */
+  sourceAgentDir?: string | undefined;
+  /** Hermetic override (tests): the home `sourceAgentDir` lives under — `<userHome>/.pi/agent`; ignored when `sourceAgentDir` is set. */
+  userHome?: string | undefined;
 }): Promise<{ ok: true; stdout: string } | { ok: false; error: string; budgetExceeded: boolean }> {
   const invocation = laneCliInvocation(input.lane);
   if (invocation === undefined) {
@@ -314,10 +332,16 @@ export async function runLaneCli(input: {
       budgetExceeded: false,
     };
   }
+  const sourceAgentDir =
+    input.sourceAgentDir ?? (input.userHome !== undefined ? join(input.userHome, ".pi", "agent") : undefined);
+  const env =
+    parseLane(input.lane)?.provider === "pi" && input.stateDir !== undefined
+      ? { PI_CODING_AGENT_DIR: provisionPiAgentHome({ stateDir: input.stateDir, role: "headless", sourceAgentDir }) }
+      : undefined;
   const cwd = mkdtempSync(join(tmpdir(), "factory-lane-"));
   try {
     const run = input.runner ?? spawnLaneCli;
-    const result = await run({ command: invocation.command, args: invocation.args, cwd, stdin: input.stdin, timeoutMs: input.timeoutMs });
+    const result = await run({ command: invocation.command, args: invocation.args, cwd, stdin: input.stdin, timeoutMs: input.timeoutMs, env });
     if (result.timedOut) {
       return { ok: false, error: `the ${invocation.command} CLI outlasted its deadline`, budgetExceeded: true };
     }
@@ -342,9 +366,14 @@ function spawnLaneCli(input: {
   cwd: string;
   stdin: string;
   timeoutMs: number;
+  env?: Record<string, string> | undefined;
 }): Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }> {
   return new Promise((resolve) => {
-    const child = spawn(input.command, input.args, { cwd: input.cwd, stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(input.command, input.args, {
+      cwd: input.cwd,
+      stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env, ...(input.env ?? {}) },
+    });
     let stdout = "";
     let stderr = "";
     let timedOut = false;
