@@ -302,3 +302,20 @@ test("an unwritable source home skips the sessions link instead of failing the s
     chmodSync(source, 0o755);
   }
 });
+
+test("provisioning retires pre-isolation contamination left in the harness home (v0.0.16, ADR 0011)", (t) => {
+  const dir = makeTempDir("pi-home-test-");
+  disposeDir(t, dir);
+  const source = makeFakePiAgent(dir);
+  const stateDir = join(dir, "factory-state");
+  const roleHome = join(stateDir, "pi-agent", "agent");
+  mkdirSync(join(roleHome, "skills"), { recursive: true });
+  writeFileSync(join(roleHome, "skills", "personal.md"), "# personal\n");
+  writeFileSync(join(roleHome, "APPEND_SYSTEM.md"), "# Auto-Delegation Rules\n");
+
+  const home = provisionPiAgentHome({ stateDir, role: "agent", sourceAgentDir: source });
+
+  assert.equal(home, roleHome);
+  assert.ok(!existsSync(join(roleHome, "skills")), "a leftover skills/ dir is retired");
+  assert.ok(!existsSync(join(roleHome, "APPEND_SYSTEM.md")), "a leftover APPEND_SYSTEM.md is retired");
+});
