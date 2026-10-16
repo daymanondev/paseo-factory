@@ -104,3 +104,52 @@ test("provisionPiAgentHome materializes a clean supervisor Pi harness home (v0.0
     },
   });
 });
+
+test("each role gets its skills policy: agent filtered, supervisor/lead unfiltered, headless fully denied (v0.0.16, ADR 0011)", (t) => {
+  const dir = makeTempDir("pi-home-test-");
+  disposeDir(t, dir);
+  const source = makeFakePiAgent(dir);
+  const stateDir = join(dir, "factory-state");
+
+  // The working agent sees only its three core skills, in Pi's `~` form (which
+  // resolves to agentsSkillsDir at session time) — even when a catalog root is
+  // passed explicitly.
+  const agentHome = provisionPiAgentHome({
+    stateDir,
+    role: "agent",
+    sourceAgentDir: source,
+    agentsSkillsDir: join(dir, "catalog", "skills"),
+  });
+  const agentSettings = JSON.parse(readFileSync(join(agentHome, "settings.json"), "utf8"));
+  assert.deepEqual(agentSettings.skills, [
+    "!*",
+    "+~/.agents/skills/tdd",
+    "+~/.agents/skills/diagnosing-bugs",
+    "+~/.agents/skills/codebase-design",
+  ]);
+  assert.deepEqual(agentSettings.extensions, ["-builtin:llama.cpp"]);
+  assert.ok(existsSync(join(agentHome, "mcp.json")), "the agent still gets the sanitized mcp.json");
+  assert.ok(lstatSync(join(agentHome, "auth.json")).isSymbolicLink(), "the agent still shares auth");
+
+  // The seats leave "skills" out entirely so pi auto-discovers all of ~/.agents/skills.
+  for (const seat of ["supervisor", "lead"] as const) {
+    const seatHome = provisionPiAgentHome({ stateDir, role: seat, sourceAgentDir: source });
+    const seatSettings = JSON.parse(readFileSync(join(seatHome, "settings.json"), "utf8"));
+    assert.ok(!("skills" in seatSettings), `${seat} keeps skills unfiltered for ~/.agents/skills auto-discovery`);
+    assert.deepEqual(seatSettings.extensions, ["-builtin:llama.cpp"]);
+  }
+
+  // The tool-less headless pass denies every skill and every interactive
+  // builtin extension, and never sees an mcp.json — but still shares sessions.
+  const headlessHome = provisionPiAgentHome({ stateDir, role: "headless", sourceAgentDir: source });
+  const headlessSettings = JSON.parse(readFileSync(join(headlessHome, "settings.json"), "utf8"));
+  assert.deepEqual(headlessSettings.skills, ["!*"]);
+  assert.deepEqual(headlessSettings.extensions, [
+    "-builtin:llama.cpp",
+    "-builtin:mcp",
+    "-builtin:codemode",
+    "-builtin:tool-search",
+  ]);
+  assert.ok(!existsSync(join(headlessHome, "mcp.json")), "the tool-less headless pass never sees an mcp.json");
+  assert.ok(lstatSync(join(headlessHome, "sessions")).isSymbolicLink(), "headless still shares sessions");
+});
