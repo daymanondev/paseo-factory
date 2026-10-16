@@ -43,11 +43,10 @@ export interface PiAgentHomeInput {
    */
   sourceAgentDir?: string;
   /**
-   * The shared engineering skills catalog — default `<homedir>/.agents/skills`.
-   * The generated `"agent"` `"skills"` filters always use Pi's `~` form
-   * (`+~/.agents/skills/<skill>`, expanded by pi at session time against the
-   * runtime home), which is exactly this directory in a default deployment;
-   * the parameter is accepted so callers and tests pin one catalog root.
+   * The shared engineering skills catalog the generated `"agent"` skills
+   * filters pin — default Pi's `~` form (`~/.agents/skills`, expanded by pi
+   * at session time against the runtime home); hermetic tests pass an
+   * explicit directory and the filters derive from it verbatim.
    */
   agentsSkillsDir?: string;
 }
@@ -80,7 +79,7 @@ export function provisionPiAgentHome(input: PiAgentHomeInput): string {
   for (const forbidden of FORBIDDEN_NAMES) {
     rmSync(join(roleHome, forbidden), { recursive: true, force: true });
   }
-  writeSettingsJson(sourceAgentDir, roleHome, input.role);
+  writeSettingsJson(sourceAgentDir, roleHome, input.role, input.agentsSkillsDir ?? "~/.agents/skills");
   syncMcpJson(sourceAgentDir, roleHome, input.role);
   for (const name of SHARED_STATE_NAMES) {
     const source = join(sourceAgentDir, name);
@@ -105,11 +104,12 @@ export function provisionPiAgentHome(input: PiAgentHomeInput): string {
  * `builtin:codemode`, and `builtin:tool-search` enabled), `quietStartup`,
  * and `defaultProjectTrust: "always"` so `<project-root>/.pi/mcp.json`
  * overrides work. Per role: `agent` filters skills down to the three core
- * skills; `supervisor` and `lead` leave `"skills"` out so pi auto-discovers
- * all of `~/.agents/skills`; `headless` denies every skill and every
- * interactive builtin extension on top of the CLI's own `--no-*` flags.
+ * skills under `agentsSkillsDir` (Pi's `~` form by default); `supervisor`
+ * and `lead` leave `"skills"` out so pi auto-discovers all of
+ * `~/.agents/skills`; `headless` denies every skill and every interactive
+ * builtin extension on top of the CLI's own `--no-*` flags.
  */
-function writeSettingsJson(sourceAgentDir: string, roleHome: string, role: PiAgentRole): void {
+function writeSettingsJson(sourceAgentDir: string, roleHome: string, role: PiAgentRole, agentsSkillsDir: string): void {
   const settings: Record<string, unknown> = {};
   const source = readJsonObject(join(sourceAgentDir, "settings.json"));
   if (source !== undefined) {
@@ -126,7 +126,7 @@ function writeSettingsJson(sourceAgentDir: string, roleHome: string, role: PiAge
   settings.quietStartup = true;
   settings.defaultProjectTrust = "always";
   if (role === "agent") {
-    settings.skills = ["!*", ...CORE_AGENT_SKILLS.map((skill) => `+~/.agents/skills/${skill}`)];
+    settings.skills = ["!*", ...CORE_AGENT_SKILLS.map((skill) => `+${join(agentsSkillsDir, skill)}`)];
   } else if (role === "headless") {
     settings.skills = ["!*"];
   }

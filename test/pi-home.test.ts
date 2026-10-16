@@ -115,21 +115,22 @@ test("each role gets its skills policy: agent filtered, supervisor/lead unfilter
   const source = makeFakePiAgent(dir);
   const stateDir = join(dir, "factory-state");
 
-  // The working agent sees only its three core skills, in Pi's `~` form (which
-  // resolves to agentsSkillsDir at session time) — even when a catalog root is
-  // passed explicitly.
+  // The working agent sees only its three core skills, pinned under the
+  // passed catalog root — the default deployment's `~` form resolves to the
+  // same place at session time.
+  const catalogRoot = join(dir, "catalog", "skills");
   const agentHome = provisionPiAgentHome({
     stateDir,
     role: "agent",
     sourceAgentDir: source,
-    agentsSkillsDir: join(dir, "catalog", "skills"),
+    agentsSkillsDir: catalogRoot,
   });
   const agentSettings = JSON.parse(readFileSync(join(agentHome, "settings.json"), "utf8"));
   assert.deepEqual(agentSettings.skills, [
     "!*",
-    "+~/.agents/skills/tdd",
-    "+~/.agents/skills/diagnosing-bugs",
-    "+~/.agents/skills/codebase-design",
+    `+${join(catalogRoot, "tdd")}`,
+    `+${join(catalogRoot, "diagnosing-bugs")}`,
+    `+${join(catalogRoot, "codebase-design")}`,
   ]);
   assert.deepEqual(agentSettings.extensions, ["-builtin:llama.cpp"]);
   assert.ok(existsSync(join(agentHome, "mcp.json")), "the agent still gets the sanitized mcp.json");
