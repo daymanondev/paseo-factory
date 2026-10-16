@@ -21,9 +21,11 @@
  * codebase-design`. Injection is idempotent — the footer's marker line is
  * the sentinel; a request that already carries it passes through untouched.
  */
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { projectStateDir, resolveProject } from "./core/project.ts";
 import type { ProjectResolution } from "./core/project.ts";
+import { provisionPiAgentHome } from "./core/pi-home.ts";
 import { listProjectRegistrations } from "./projects.ts";
 import { parseTaskWorktreePath } from "../shared/worktree-shape.mjs";
 
@@ -143,12 +145,27 @@ export function renderSeatBootstrap(input: {
 
 // ---- the PASEO_FACTORY_* env channel -------------------------------------------------------
 
-/** The env vars one role's shells carry (the session_open channel — re-applied on every launch). */
-export function factoryEnvFor(role: RoleName, input: { stateDir: string; project: ProjectIdentity; task?: string }): Record<string, string> {
+/**
+ * The env vars one role's shells carry (the session_open channel — re-applied
+ * on every launch). Since v0.0.16 (ADR 0011) this is also the provisioning
+ * seam for the role's isolated Pi harness home: the call materializes
+ * `<stateDir>/pi-agent/<role>` on demand (idempotently — the provisioner's
+ * law) and returns it as `PI_CODING_AGENT_DIR`, so every pi-lane seat and
+ * working agent runs inside the clean room instead of the operator's global
+ * `~/.pi/agent`. `userHome` overrides the operator home the shared-state
+ * symlinks point back at (default `<homedir()>`; hermetic tests pass a fake).
+ */
+export function factoryEnvFor(role: RoleName, input: { stateDir: string; project: ProjectIdentity; task?: string; userHome?: string }): Record<string, string> {
+  const roleHome = provisionPiAgentHome({
+    stateDir: input.stateDir,
+    role,
+    sourceAgentDir: join(input.userHome ?? homedir(), ".pi", "agent"),
+  });
   const env: Record<string, string> = {
     PASEO_FACTORY_SEAT: role,
     PASEO_FACTORY_PROJECT: input.project.slug,
     PASEO_FACTORY_STATE_DIR: input.stateDir,
+    PI_CODING_AGENT_DIR: roleHome,
   };
   if (input.project.root !== "") env.PASEO_FACTORY_PROJECT_ROOT = input.project.root;
   if (input.task !== undefined) env.PASEO_FACTORY_TASK = input.task;
