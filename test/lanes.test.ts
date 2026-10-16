@@ -10,6 +10,7 @@ import {
   laneError,
   lanesPath,
   loadLanes,
+  parseLane,
   runLaneCli,
   saveLanes,
 } from "../src/lanes.ts";
@@ -20,6 +21,7 @@ import {
   LANE_NAMES as LANE_NAMES_MJS,
   laneError as laneErrorMjs,
   loadLanes as loadLanesMjs,
+  parseLane as parseLaneMjs,
   resolveRunProvider as resolveRunProviderMjs,
 } from "../plugin/bin/lanes-config.mjs";
 import { disposeDir, gitCommitAll, makeTempDir, repoRoot } from "./helpers.ts";
@@ -81,13 +83,18 @@ test("unparseable JSON is a named error, never a guessed default", (t) => {
   assert.match(lanes.reason, /valid JSON/);
 });
 
-test("lane strings validate: provider/model with both halves non-empty; eye.json only for freshEyes", () => {
+test("lane strings validate: provider/model[:thinking] with all parts non-empty; eye.json only for freshEyes", () => {
   assert.equal(laneError("worker", "pi/zai/glm-5.3"), undefined, "provider/model is the shape");
-  assert.equal(laneError("worker", "claude/claude-sonnet-4-6"), undefined);
+  assert.equal(laneError("worker", "pi/zai/glm-5.3:max"), undefined, "provider/model:thinking is valid");
+  assert.equal(laneError("worker", "claude/claude-sonnet-4-6:high"), undefined);
+  assert.deepEqual(parseLane("pi/zai/glm-5.3:max"), { provider: "pi", model: "zai/glm-5.3", thinking: "max" });
+  assert.deepEqual(parseLane("pi/zai/glm-5.3"), { provider: "pi", model: "zai/glm-5.3" });
   assert.equal(laneError("freshEyes", "eye.json"), undefined, "the eye's legacy direct-API lane");
   assert.notEqual(laneError("worker", "eye.json"), undefined, "eye.json is the fresh-eyes lane alone");
   assert.notEqual(laneError("watch", "copilot"), undefined, "a bare provider never picks a model by itself — never auto");
   assert.notEqual(laneError("watch", "copilot/"), undefined);
+  assert.notEqual(laneError("watch", "pi/zai/glm-5.3:"), undefined, "empty thinking suffix is refused");
+  assert.notEqual(laneError("watch", "pi/:high"), undefined, "empty model before :thinking is refused");
   assert.notEqual(laneError("watch", "/gpt-5.4"), undefined);
   assert.notEqual(laneError("watch", "copilot/gpt 5.4"), undefined, "no whitespace inside a lane");
   assert.notEqual(laneError("watch", ""), undefined);
@@ -253,13 +260,25 @@ test("each provider family maps to its exact tool-less argv — the invariant is
     command: "pi",
     args: ["--print", "--no-session", "--no-tools", "--no-extensions", "--no-skills", "--no-context-files", "--model", "zai/glm-5.3"],
   });
+  assert.deepEqual(laneCliInvocation("pi/zai/glm-5.3:max"), {
+    command: "pi",
+    args: ["--print", "--no-session", "--no-tools", "--no-extensions", "--no-skills", "--no-context-files", "--model", "zai/glm-5.3", "--thinking", "max"],
+  });
   assert.deepEqual(laneCliInvocation("copilot/gpt-5.4"), {
     command: "copilot",
     args: ["-s", "--model", "gpt-5.4", "--reasoning-effort", "medium"],
   });
+  assert.deepEqual(laneCliInvocation("copilot/gpt-5.4:high"), {
+    command: "copilot",
+    args: ["-s", "--model", "gpt-5.4", "--reasoning-effort", "high"],
+  });
   assert.deepEqual(laneCliInvocation("claude/opus-4-8"), {
     command: "claude",
     args: ["-p", "--model", "opus-4-8", "--tools", ""],
+  });
+  assert.deepEqual(laneCliInvocation("claude/opus-4-8:high"), {
+    command: "claude",
+    args: ["-p", "--model", "opus-4-8", "--tools", "", "--effort", "high"],
   });
   assert.equal(laneCliInvocation("codex/gpt-6"), undefined, "no known tool-less form — refused, never improvised");
   assert.equal(laneCliInvocation("eye.json"), undefined);
@@ -321,11 +340,14 @@ test("the plugin/bin mirror matches src/lanes.ts: names, default, validation, lo
 
   const matrix = [
     "pi/zai/glm-5.3",
+    "pi/zai/glm-5.3:max",
     "copilot/gpt-5.4",
+    "copilot/gpt-5.4:high",
     "claude/opus-4-8",
     "eye.json",
     "copilot",
     "copilot/",
+    "pi/zai/glm-5.3:",
     "/model",
     "pi / glm",
     "",
@@ -337,6 +359,11 @@ test("the plugin/bin mirror matches src/lanes.ts: names, default, validation, lo
         laneErrorMjs(lane, value),
         laneError(lane, value),
         `mirror drift at ${lane} = ${JSON.stringify(value)}`,
+      );
+      assert.deepEqual(
+        parseLaneMjs(value),
+        parseLane(value),
+        `parseLane mirror drift at ${JSON.stringify(value)}`,
       );
     }
   }

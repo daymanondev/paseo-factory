@@ -23,7 +23,7 @@ import { spoolRootFor, startSpool } from "./server/spool.ts";
 import { createSurfaceHandlers, registerSurfaceRpc } from "./server/surface-rpc.ts";
 import { injectRoleOnCreate, injectSessionEnv } from "./server/roles.ts";
 
-const SHELL_VERSION = "0.0.14";
+const SHELL_VERSION = "0.0.15";
 
 const log = (message: string) => console.log(`[${PLUGIN_ID}] ${message}`);
 

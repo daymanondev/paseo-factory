@@ -170,6 +170,16 @@ export function setAgentModelViaCli(agentId: string, model: string, home?: strin
   return bridgeCall("setAgentModel", [agentId, model], home);
 }
 
+/** Updates a live agent's thinking option over the daemon's WebSocket RPC (or CLI fallback). */
+export function setAgentThinkingViaCli(agentId: string, thinkingOptionId: string, home?: string): Promise<DaemonReply> {
+  const targetHome = home ?? process.env.PASEO_HOME;
+  if (targetHome !== undefined) {
+    const wsCall = daemonWsRequest(targetHome, { type: "set_agent_thinking_request", agentId, thinkingOptionId }, "set_agent_thinking_response");
+    if (wsCall !== null) return wsCall;
+  }
+  return bridgeCall("setAgentThinkingOption", [agentId, thinkingOptionId], home);
+}
+
 /** Cancels a running agent over the daemon's WebSocket RPC (or `paseo agent stop` fallback). */
 export function stopAgentViaCli(agentId: string, home?: string): Promise<DaemonReply> {
   const targetHome = home ?? process.env.PASEO_HOME;

@@ -11,6 +11,7 @@ export declare const EYE_JSON_LANE: string;
 export declare function lanesPath(stateDir: string): string;
 export declare function projectLanesPath(stateDir: string, projectSlug: string): string;
 export declare function defaultLanes(): Record<string, string>;
+export declare function parseLane(value: string): { provider: string; model: string; thinking?: string } | null;
 export declare function laneError(name: string, value: string): string | undefined;
 export declare function loadLanes(
   stateDir: string,

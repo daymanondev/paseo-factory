@@ -121,6 +121,7 @@ function makeSurface(t: TestContext, agents: FakeAgent[] = []) {
   const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner });
   const fake = fakeDaemon(agents);
   const modelSyncs: { agentId: string; model: string }[] = [];
+  const thinkingSyncs: { agentId: string; thinkingOptionId: string }[] = [];
   const stopped: string[] = [];
   const handlers = createSurfaceHandlers({
     factory,
@@ -131,12 +132,16 @@ function makeSurface(t: TestContext, agents: FakeAgent[] = []) {
       modelSyncs.push({ agentId, model });
       return { ok: true };
     },
+    setAgentThinking: async (agentId, thinkingOptionId) => {
+      thinkingSyncs.push({ agentId, thinkingOptionId });
+      return { ok: true };
+    },
     stopAgent: async (agentId) => {
       stopped.push(agentId);
       return { ok: true };
     },
   });
-  return { dir, home, stateDir, factory, handlers, fake, modelSyncs, stopped };
+  return { dir, home, stateDir, factory, handlers, fake, modelSyncs, thinkingSyncs, stopped };
 }
 
 /** Appends a green task's whole ledger slice + files, the fold's richest input. */
@@ -282,8 +287,8 @@ test("retro: the plugin's own factory.retro(), refusals as Failure codes", async
   void stateDir;
 });
 
-test("lanes.set: writes lanes.json, syncs a live supervisor's model, refuses invalid values", async (t) => {
-  const { stateDir, handlers, modelSyncs } = makeSurface(t, [
+test("lanes.set: writes lanes.json, syncs a live supervisor's model and thinking level, refuses invalid values", async (t) => {
+  const { stateDir, handlers, modelSyncs, thinkingSyncs } = makeSurface(t, [
     { id: "agent-sup-1", labels: { seat: "supervisor" }, provider: "pi/zai/glm-5.3" },
   ]);
   const reply = await handlers.lanesSet({ lane: "supervisor", value: "claude/opus-4-8" });
@@ -293,15 +298,22 @@ test("lanes.set: writes lanes.json, syncs a live supervisor's model, refuses inv
   assert.ok(reread.ok && reread.lanes.supervisor === "claude/opus-4-8", "lanes.json is the config of record");
   assert.deepEqual(JSON.parse(readFileSync(lanesPath(stateDir), "utf8")), { supervisor: "claude/opus-4-8" }, "a lane-card save persists only the lane it names — defaults never materialize");
   assert.deepEqual(modelSyncs, [{ agentId: "agent-sup-1", model: "opus-4-8" }], "the live supervisor's modelId (stripped of provider prefix) was synced");
+  assert.deepEqual(thinkingSyncs, [], "no thinking suffix means no thinking sync call");
+
+  const withThinking = await handlers.lanesSet({ lane: "supervisor", value: "pi/zai/glm-5.3:max" });
+  assert.ok(withThinking.ok, withThinking.ok ? "" : withThinking.error);
+  assert.equal(withThinking.lanes.supervisor, "pi/zai/glm-5.3:max");
+  assert.deepEqual(modelSyncs[1], { agentId: "agent-sup-1", model: "zai/glm-5.3" });
+  assert.deepEqual(thinkingSyncs, [{ agentId: "agent-sup-1", thinkingOptionId: "max" }], "a :thinking suffix live-syncs the thinking option too");
 
   // No live supervisor → the sync is skipped, named, never a failure.
   const skipped = await handlers.lanesSet({ lane: "worker", value: "copilot/gpt-5.4" });
   assert.ok(skipped.ok);
   assert.match(skipped.modelSync, /skipped/);
-  assert.equal(modelSyncs.length, 1);
+  assert.equal(modelSyncs.length, 2);
   assert.deepEqual(
     JSON.parse(readFileSync(lanesPath(stateDir), "utf8")),
-    { supervisor: "claude/opus-4-8", worker: "copilot/gpt-5.4" },
+    { supervisor: "pi/zai/glm-5.3:max", worker: "copilot/gpt-5.4" },
     "the second single-lane save keeps the first named lane and adds nothing else",
   );
 
@@ -536,28 +548,29 @@ test("ratify: dispatches the Retro proposal to the Project's Supervisor; unknown
   const project = makeProject(t, "ratify");
   const { stateDir, factory, handlers, fake } = makeSurface(t, []);
   mkdirSync(stateDir, { recursive: true });
-  const proposalsPath = join(stateDir, "retro-2026-10-15.md");
+  const day = new Date().toISOString().slice(0, 10);
+  const proposalsPath = join(stateDir, `retro-${day}.md`);
   writeFileSync(
     proposalsPath,
-    ["# Retro 2026-10-15 — 1 proposal", "", "## R1 — gate-check", "- Evidence (ledger seq): 1", "- Pattern: repeated X", "- Proposal: add a gate check for X.", ""].join("\n"),
+    [`# Retro ${day} — 1 proposal`, "", "## R1 — gate-check", "- Evidence (ledger seq): 1", "- Pattern: repeated X", "- Proposal: add a gate check for X.", ""].join("\n"),
   );
   factory.ledger.append({ event: "retro_written", model: "pi/zai/glm-5.3", outcome: "written", durationMs: 10, proposalsPath, proposalCount: 1 });
 
-  const reply = await handlers.ratifyProposal({ projectRoot: project.root, day: "2026-10-15", proposalId: 1 });
+  const reply = await handlers.ratifyProposal({ projectRoot: project.root, day, proposalId: 1 });
   assert.ok(reply.ok, reply.ok ? "" : reply.error);
   assert.match(reply.summary, /R1 \(gate-check\) dispatched to the Supervisor of/);
   assert.equal(fake.created.length, 1, "the ratify ensured the Supervisor seat");
   assert.deepEqual(fake.created[0]!.labels, { seat: "supervisor", project: project.slug });
   assert.equal(fake.sent.length, 1);
   const sent = fake.sent[0]!;
-  assert.match(sent.text, /ratified retro proposal R1 \(gate-check\) from 2026-10-15/);
+  assert.match(sent.text, new RegExp(`ratified retro proposal R1 \\(gate-check\\) from ${day}`));
   assert.match(sent.text, /add a gate check for X\./, "the proposal text rides the dispatch verbatim");
   assert.match(sent.text, /AGENTS\.md or CONTEXT\.md/, "the dispatch names the two-tier memory targets");
 
   const noDay = await handlers.ratifyProposal({ projectRoot: project.root, day: "1999-01-01", proposalId: 1 });
   assert.ok(!noDay.ok);
   assert.equal(noDay.code, "unknown-retro");
-  const noProposal = await handlers.ratifyProposal({ projectRoot: project.root, day: "2026-10-15", proposalId: 9 });
+  const noProposal = await handlers.ratifyProposal({ projectRoot: project.root, day, proposalId: 9 });
   assert.ok(!noProposal.ok);
   assert.equal(noProposal.code, "unknown-proposal");
 });
@@ -598,11 +611,12 @@ test("taskDetail: the contract's mandated skills ride the detail (v0.0.14)", asy
 test("retro proposals parse into R1..Rn for the Timeline tab", async (t) => {
   const { stateDir, factory, handlers } = makeSurface(t);
   mkdirSync(stateDir, { recursive: true });
-  const proposalsPath = join(stateDir, "retro-2026-10-15.md");
+  const day = new Date().toISOString().slice(0, 10);
+  const proposalsPath = join(stateDir, `retro-${day}.md`);
   writeFileSync(
     proposalsPath,
     [
-      "# Retro 2026-10-15 — 2 proposals",
+      `# Retro ${day} — 2 proposals`,
       "",
       "- Model: pi/zai/glm-5.3",
       "",
@@ -622,7 +636,7 @@ test("retro proposals parse into R1..Rn for the Timeline tab", async (t) => {
   const snap = await handlers.snapshot({});
   assert.ok(snap.ok);
   const retro = snap.view.retro[0]!;
-  assert.equal(retro.day, "2026-10-15");
+  assert.equal(retro.day, day);
   assert.deepEqual(
     retro.proposals.map((p) => [p.id, p.cls]),
     [[1, "gate-check"], [2, "observation"]],
@@ -763,14 +777,27 @@ test("projects: the registration records the slug→root binding and both seat i
   assert.equal(afterRotate?.lead, undefined);
   assert.equal(afterRotate?.supervisor, "agent-sup-1");
 
-  // Discovery lists the registered project plus live seat agents it has never seated.
-  const discovered = discoverProjects(stateDir, [{ labels: { seat: "lead", project: "other-xyz789" }, cwd: "/w/other" }]);
+  // Discovery lists the registered project plus live seat agents it has never seated,
+  // plus non-archived git projects from Paseo's <home>/projects/projects.json.
+  const paseoProject = makeProject(t, "paseo-ui");
+  const homeDir = makeTempDir();
+  disposeDir(t, homeDir);
+  mkdirSync(join(homeDir, "projects"), { recursive: true });
+  writeFileSync(
+    join(homeDir, "projects", "projects.json"),
+    JSON.stringify([
+      { projectId: "p1", rootPath: paseoProject.root, kind: "git", archivedAt: null },
+      { projectId: "p2", rootPath: "/nonexistent/archived", kind: "git", archivedAt: "2026-01-01T00:00:00Z" },
+    ]),
+  );
+  const discovered = discoverProjects(stateDir, [{ labels: { seat: "lead", project: "other-xyz789" }, cwd: "/w/other" }], homeDir);
   assert.deepEqual(
     discovered,
     [
       { slug: "other-xyz789", root: "/w/other" },
+      { slug: paseoProject.slug, root: paseoProject.root },
       { slug: project.slug, root: project.root },
-    ],
-    "registry files and live seat agents both feed the Project Selector, slug order",
+    ].sort((a, b) => a.slug.localeCompare(b.slug)),
+    "registry files, live seat agents, and Paseo's projects.json all feed the Project Selector, slug order",
   );
 });

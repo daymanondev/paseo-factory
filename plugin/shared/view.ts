@@ -117,6 +117,7 @@ export const AgentViewSchema = z.object({
   status: z.string(),
   provider: z.string(),
   model: z.string().nullable(),
+  thinking: z.string().nullable().optional(),
   /** The labels.seat the agent carries — "supervisor" / "lead" for the standing seats. */
   seat: z.string().nullable(),
   /** The factory task this agent is bound to (a ledger claim/spawn/meter named it), when any. */
@@ -135,11 +136,27 @@ export const ProjectViewSchema = z.object({
 });
 export type ProjectView = z.infer<typeof ProjectViewSchema>;
 
-/** One provider family the lane picker lists. `models` stays null in v1 (fetching models spawns provider discovery). */
+/** One thinking option a provider model advertises. */
+export const ThinkingOptionViewSchema = z.object({
+  id: z.string(),
+  label: z.string().nullable().optional(),
+});
+export type ThinkingOptionView = z.infer<typeof ThinkingOptionViewSchema>;
+
+/** One model entry advertised by a provider. */
+export const ProviderModelViewSchema = z.object({
+  id: z.string(),
+  label: z.string().nullable(),
+  thinkingOptions: z.array(ThinkingOptionViewSchema).nullable().optional(),
+  defaultThinkingOptionId: z.string().nullable().optional(),
+});
+export type ProviderModelView = z.infer<typeof ProviderModelViewSchema>;
+
+/** One provider family the lane picker lists. */
 export const ProviderViewSchema = z.object({
   provider: z.string(),
   available: z.boolean(),
-  models: z.array(z.object({ id: z.string(), label: z.string().nullable() })).nullable(),
+  models: z.array(ProviderModelViewSchema).nullable(),
 });
 export type ProviderView = z.infer<typeof ProviderViewSchema>;
 

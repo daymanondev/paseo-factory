@@ -20,13 +20,13 @@
  */
 import { FactoryError } from "./core/errors.ts";
 import type { Factory } from "./core/factory.ts";
-import { loadLanes, saveLanes } from "./core/lanes.ts";
+import { loadLanes, parseLane, saveLanes } from "./core/lanes.ts";
 import { resolveProject } from "./core/project.ts";
 import type { ProjectResolution } from "./core/project.ts";
 import type { LandingResult } from "./core/workspace.ts";
 import { FACTORY_VIEW_VERSION } from "../shared/view.ts";
 import { foldRetro, foldTasks, foldView, readTailed } from "./view.ts";
-import { setAgentModelViaCli, stopAgentViaCli } from "./daemon-cli.ts";
+import { setAgentModelViaCli, setAgentThinkingViaCli, stopAgentViaCli } from "./daemon-cli.ts";
 import type { DaemonReply } from "./daemon-cli.ts";
 import { SEAT_TITLES, renderSeatBootstrap } from "./roles.ts";
 import type { SeatName } from "./roles.ts";
@@ -44,6 +44,7 @@ export interface SurfaceAgentSnapshot {
   title: string | null;
   status: string;
   model: string | null;
+  thinkingOptionId?: string | null;
   labels: Record<string, string>;
   archivedAt: string | null;
   requiresAttention: boolean;
@@ -62,7 +63,7 @@ export interface SurfaceDaemonApi {
   agents: {
     list(options?: { filter?: { labels?: Record<string, string>; includeArchived?: boolean } }): Promise<{ entries: { agent: SurfaceAgentSnapshot }[] }>;
     create(options: {
-      config: { provider: string };
+      config: { provider: string; thinkingOptionId?: string };
       cwd: string;
       title: string;
       labels: Record<string, string>;
@@ -76,7 +77,14 @@ export interface SurfaceDaemonApi {
   };
   providers: {
     listAvailable(): Promise<{ providers: { provider: string; available: boolean }[] }>;
-    listModels(provider: string): Promise<{ models: { id: string; label?: string | null }[] }>;
+    listModels(provider: string): Promise<{
+      models: {
+        id: string;
+        label?: string | null;
+        thinkingOptions?: { id: string; label?: string | null }[] | null;
+        defaultThinkingOptionId?: string | null;
+      }[];
+    }>;
   };
 }
 
@@ -98,6 +106,8 @@ export interface SurfaceDeps {
   daemon: SurfaceDaemonApi | (() => SurfaceDaemonApi);
   /** Live agent model sync override (tests) — the CLI bridge by default. */
   setAgentModel?: (agentId: string, model: string, home?: string) => Promise<DaemonReply>;
+  /** Live agent thinking sync override (tests) — the CLI bridge by default. */
+  setAgentThinking?: (agentId: string, thinkingOptionId: string, home?: string) => Promise<DaemonReply>;
   /** Agent cancel override (tests) — the CLI bridge by default. */
   stopAgent?: (agentId: string, home?: string) => Promise<DaemonReply>;
   onLog?: (message: string) => void;
@@ -199,6 +209,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       status: agent.status,
       provider: agent.provider,
       model: agent.model,
+      ...(agent.thinkingOptionId === undefined ? {} : { thinking: agent.thinkingOptionId }),
       seat: agent.labels.seat ?? null,
       task,
       seqEnd,
@@ -207,7 +218,16 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     };
   };
 
-  type ProviderEntry = { provider: string; available: boolean; models: { id: string; label: string | null }[] | null };
+  type ProviderEntry = {
+    provider: string;
+    available: boolean;
+    models: {
+      id: string;
+      label: string | null;
+      thinkingOptions?: { id: string; label: string | null }[] | null;
+      defaultThinkingOptionId?: string | null;
+    }[] | null;
+  };
   const PROVIDERS_TTL_MS = 5 * 60_000;
   const PROVIDERS_WAIT_MS = 2_000;
   let cachedProviders: ProviderEntry[] | null = null;
@@ -226,7 +246,14 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
             return {
               provider: entry.provider,
               available: true,
-              models: listed.models.map((m) => ({ id: m.id, label: m.label ?? null })),
+              models: listed.models.map((m) => ({
+                id: m.id,
+                label: m.label ?? null,
+                ...(m.thinkingOptions !== undefined && m.thinkingOptions !== null
+                  ? { thinkingOptions: m.thinkingOptions.map((o) => ({ id: o.id, label: o.label ?? null })) }
+                  : {}),
+                ...(m.defaultThinkingOptionId !== undefined ? { defaultThinkingOptionId: m.defaultThinkingOptionId } : {}),
+              })),
             };
           } catch {
             return { provider: entry.provider, available: true, models: null };
@@ -295,9 +322,14 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       // under <project-root> is written (the <home>-supervisor folder and
       // its AGENTS.md overwrite are retired; roles.ts owns the injection).
       const title = SEAT_TITLES[seat];
+      const parsed = parseLane(lane);
+      const config =
+        parsed?.thinking !== undefined
+          ? { provider: `${parsed.provider}/${parsed.model}`, thinkingOptionId: parsed.thinking }
+          : { provider: lane };
       try {
         const handle = await daemon.agents.create({
-          config: { provider: lane },
+          config,
           cwd: project.root,
           title,
           labels: { seat, project: project.slug },
@@ -314,10 +346,11 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         });
         agent = {
           id: handle.id,
-          provider: lane,
+          provider: config.provider,
           title,
           status: "initializing",
-          model: null,
+          model: parsed?.model ?? null,
+          ...(parsed?.thinking !== undefined ? { thinkingOptionId: parsed.thinking } : {}),
           labels: { seat, project: project.slug },
           archivedAt: null,
           requiresAttention: false,
@@ -437,6 +470,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       const projects = discoverProjects(
         deps.stateDir,
         rawAgents.filter((agent) => agent.labels.seat !== undefined),
+        deps.home,
       ).filter((entry): entry is { slug: string; root: string } => entry.root !== null);
 
       const view = foldView({
@@ -537,13 +571,22 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           const agent = await seatOf(daemon, seat, projectSlug);
           if (agent !== undefined) {
             const sync = deps.setAgentModel ?? setAgentModelViaCli;
+            const syncThinking = deps.setAgentThinking ?? setAgentThinkingViaCli;
             const laneValue = saved.lanes[seat];
+            const parsed = parseLane(laneValue);
             const slash = laneValue.indexOf("/");
-            const modelId = slash === -1 ? laneValue : laneValue.slice(slash + 1);
+            const modelId = parsed?.model ?? (slash === -1 ? laneValue : laneValue.slice(slash + 1));
             const reply = await sync(agent.id, modelId, deps.home);
-            modelSync = reply.ok
-              ? `applied — agent ${agent.id.slice(0, 8)} now runs ${laneValue}`
-              : `failed — ${reply.reason} (lanes.json is the config of record; the next ensure/create runs it)`;
+            if (reply.ok && parsed?.thinking !== undefined) {
+              const thinkingReply = await syncThinking(agent.id, parsed.thinking, deps.home);
+              modelSync = thinkingReply.ok
+                ? `applied — agent ${agent.id.slice(0, 8)} now runs ${laneValue}`
+                : `applied model (${modelId}); thinking sync failed — ${thinkingReply.reason}`;
+            } else {
+              modelSync = reply.ok
+                ? `applied — agent ${agent.id.slice(0, 8)} now runs ${laneValue}`
+                : `failed — ${reply.reason} (lanes.json is the config of record; the next ensure/create runs it)`;
+            }
           } else {
             modelSync = `skipped — no live ${seat} agent${projectSlug === undefined ? "" : ` for project ${projectSlug}`} on this daemon`;
           }

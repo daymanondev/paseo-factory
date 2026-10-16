@@ -305,7 +305,16 @@ export interface DaemonAgentsInput {
   agents: readonly AgentView[];
   supervisor: AgentView | null;
   lead: AgentView | null;
-  providers: readonly { provider: string; available: boolean; models?: { id: string; label: string | null }[] | null }[];
+  providers: readonly {
+    provider: string;
+    available: boolean;
+    models?: {
+      id: string;
+      label: string | null;
+      thinkingOptions?: { id: string; label?: string | null }[] | null;
+      defaultThinkingOptionId?: string | null;
+    }[] | null;
+  }[];
   daemonError: string | null;
 }
 
