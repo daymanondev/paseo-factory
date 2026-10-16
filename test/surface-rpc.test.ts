@@ -867,6 +867,48 @@ test("roles: factoryEnvFor provisions the role's Pi harness home on demand and c
   assert.ok(!("PASEO_FACTORY_PROJECT_ROOT" in agentEnv), "no known root, no PASEO_FACTORY_PROJECT_ROOT");
 });
 
+test("roles: agent.create injection launches every seat and working agent in its isolated Pi harness home (v0.0.16, ADR 0011)", (t) => {
+  const { stateDir } = makeSurface(t);
+  const userHome = makeFakeUserHome(t);
+  const project = makeProject(t, "pi-seats");
+  const source = join(userHome, ".pi", "agent");
+  // The seed pins the operator-contamination scenario the spec names: 21 packages.
+  assert.equal(JSON.parse(readFileSync(join(source, "settings.json"), "utf8")).packages.length, 21);
+
+  // Every seat-titled create and every managed-worktree create carries its
+  // role's isolated home as PI_CODING_AGENT_DIR.
+  const supervisorCreate: AgentCreateRequest = { config: { provider: "pi/zai/glm-5.3", cwd: project.root, title: "Supervisor (paseo-factory)" } };
+  const supervisorRequest = injectRoleOnCreate(supervisorCreate, stateDir, userHome);
+  assert.ok(supervisorRequest !== undefined);
+  assert.equal(supervisorRequest.env?.PI_CODING_AGENT_DIR, join(stateDir, "pi-agent", "supervisor"));
+
+  const leadCreate: AgentCreateRequest = { config: { provider: "pi/zai/glm-5.3", cwd: project.root, title: "Lead (paseo-factory)" } };
+  const leadRequest = injectRoleOnCreate(leadCreate, stateDir, userHome);
+  assert.ok(leadRequest !== undefined);
+  assert.equal(leadRequest.env?.PI_CODING_AGENT_DIR, join(stateDir, "pi-agent", "lead"));
+
+  const worktree = join(stateDir, "projects", project.slug, "worktrees", "T5");
+  const agentCreate: AgentCreateRequest = { config: { provider: "pi/zai/glm-5.3", cwd: worktree, title: "T5" } };
+  const agentRequest = injectRoleOnCreate(agentCreate, stateDir, userHome);
+  assert.ok(agentRequest !== undefined);
+  assert.equal(agentRequest.env?.PI_CODING_AGENT_DIR, join(stateDir, "pi-agent", "agent"));
+
+  // The materialized homes are clean rooms built from the FAKE operator home:
+  // zero packages, the llama.cpp-only extension denylist, quiet startup,
+  // always-trusted projects, and only the operator's model/thinking defaults.
+  assert.deepEqual(JSON.parse(readFileSync(join(stateDir, "pi-agent", "supervisor", "settings.json"), "utf8")), cleanRoomSettings());
+  assert.deepEqual(JSON.parse(readFileSync(join(stateDir, "pi-agent", "lead", "settings.json"), "utf8")), cleanRoomSettings());
+  // Skills policy per role: supervisor and lead stay unfiltered (all of
+  // ~/.agents/skills auto-discovers); only the working agent is filtered down
+  // to its three core skills in Pi's `~` form.
+  assert.ok(!("skills" in JSON.parse(readFileSync(join(stateDir, "pi-agent", "supervisor", "settings.json"), "utf8"))), "supervisor skills unfiltered");
+  assert.ok(!("skills" in JSON.parse(readFileSync(join(stateDir, "pi-agent", "lead", "settings.json"), "utf8"))), "lead skills unfiltered");
+  assert.deepEqual(
+    JSON.parse(readFileSync(join(stateDir, "pi-agent", "agent", "settings.json"), "utf8")),
+    cleanRoomSettings({ skills: ["!*", "+~/.agents/skills/tdd", "+~/.agents/skills/diagnosing-bugs", "+~/.agents/skills/codebase-design"] }),
+  );
+});
+
 test("projects: the registration records the slug→root binding and both seat ids, merged field-wise", (t) => {
   const { stateDir } = makeSurface(t);
   const project = makeProject(t, "registry");

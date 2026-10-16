@@ -183,13 +183,16 @@ export interface AgentCreateRequest {
  * The additive `agent.create` injection (channel 1 + the first-launch env): a
  * seat-titled create or a managed-worktree create gets its role contract
  * APPENDED to `config.systemPrompt` (idempotent — the footer is the sentinel)
- * and its `PASEO_FACTORY_*` env seeded. Strangers pass through untouched
- * (`undefined` — the daemon sees the original request). Seats resolve their
- * project from the create's cwd (git answers); working agents from the
- * worktree shape. Generic over the request so the SDK's full create shape
- * (mcpServers, settings, …) rides through unchanged.
+ * and its `PASEO_FACTORY_*` env seeded — since v0.0.16 including the
+ * provisioned role's `PI_CODING_AGENT_DIR` (the clean-room Pi harness home).
+ * Strangers pass through untouched (`undefined` — the daemon sees the original
+ * request). Seats resolve their project from the create's cwd (git answers);
+ * working agents from the worktree shape. Generic over the request so the
+ * SDK's full create shape (mcpServers, settings, …) rides through unchanged.
+ * `userHome` (default `<homedir()>`) overrides the operator home the harness
+ * home's shared-state symlinks point back at — hermetic tests pass a fake.
  */
-export function injectRoleOnCreate<R extends AgentCreateRequest>(request: R, stateDir: string): R | undefined {
+export function injectRoleOnCreate<R extends AgentCreateRequest>(request: R, stateDir: string, userHome?: string): R | undefined {
   if ((request.config.systemPrompt ?? "").includes(FOOTER_MARK)) return undefined; // already injected — idempotent
   const title = request.config.title ?? "";
   if (title === SEAT_TITLES.supervisor || title === SEAT_TITLES.lead) {
@@ -199,7 +202,7 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(request: R, sta
     return {
       ...request,
       config: { ...request.config, systemPrompt: appendContract(request.config.systemPrompt, renderSeatContract(seat, project)) },
-      env: { ...(request.env ?? {}), ...factoryEnvFor(seat, { stateDir, project }) },
+      env: { ...(request.env ?? {}), ...factoryEnvFor(seat, { stateDir, project, userHome }) },
     };
   }
   const worktree = parseTaskWorktreePath(stateDir, request.config.cwd);
@@ -207,7 +210,7 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(request: R, sta
   return {
     ...request,
     config: { ...request.config, systemPrompt: appendContract(request.config.systemPrompt, renderAgentContract(worktree.task, worktree.slug)) },
-    env: { ...(request.env ?? {}), ...factoryEnvFor("agent", { stateDir, project: { root: "", slug: worktree.slug }, task: worktree.task }) },
+    env: { ...(request.env ?? {}), ...factoryEnvFor("agent", { stateDir, project: { root: "", slug: worktree.slug }, task: worktree.task, userHome }) },
   };
 }
 
