@@ -13,7 +13,9 @@
  *      surface's ensure passes it; the driver's brief is the Agent's);
  *   3. `PASEO_FACTORY_*` env vars on `agent.session_open` — re-applied on
  *      every provider launch (the daemon's own law), so a seat's shell can
- *      always ask which seat it is.
+ *      always ask which seat it is. Since v0.0.16 the same channel carries
+ *      `PI_CODING_AGENT_DIR` — every pi-lane role runs inside its
+ *      provisioned clean-room Pi harness home (ADR 0011).
  *
  * Every rendered contract ends with the 1-line role skill trigger index
  * (ADR 0010 §6): Supervisor `grilling, domain-modeling`; Lead
@@ -220,22 +222,28 @@ function appendContract(existing: string | undefined, contract: string): string 
 
 /**
  * The `agent.session_open` injection (channel 3): every launch of a seat or
- * working-agent shell re-carries its `PASEO_FACTORY_*` identity. Working
- * agents match by their managed-worktree cwd; seats by agent id against the
- * project registry the ensure path keeps. Anything else passes through.
+ * working-agent shell re-carries its `PASEO_FACTORY_*` identity — since
+ * v0.0.16 including its provisioned `PI_CODING_AGENT_DIR`, so every provider
+ * launch (not just the create) runs inside the clean-room Pi harness home.
+ * Working agents match by their managed-worktree cwd; seats by agent id
+ * against the project registry the ensure path keeps. Anything else passes
+ * through. `userHome` (default `<homedir()>`) overrides the operator home the
+ * harness home's shared-state symlinks point back at — hermetic tests pass a
+ * fake.
  */
 export function injectSessionEnv<R extends { agentId: string; cwd: string; env: Record<string, string> }>(
   request: R,
   stateDir: string,
+  userHome?: string,
 ): R | undefined {
   const worktree = parseTaskWorktreePath(stateDir, request.cwd);
   if (worktree !== null) {
-    return { ...request, env: { ...request.env, ...factoryEnvFor("agent", { stateDir, project: { root: "", slug: worktree.slug }, task: worktree.task }) } };
+    return { ...request, env: { ...request.env, ...factoryEnvFor("agent", { stateDir, project: { root: "", slug: worktree.slug }, task: worktree.task, userHome }) } };
   }
   for (const registration of listProjectRegistrations(stateDir)) {
     const seat = request.agentId === registration.supervisor ? "supervisor" : request.agentId === registration.lead ? "lead" : undefined;
     if (seat === undefined) continue;
-    return { ...request, env: { ...request.env, ...factoryEnvFor(seat, { stateDir, project: registration }) } };
+    return { ...request, env: { ...request.env, ...factoryEnvFor(seat, { stateDir, project: registration, userHome }) } };
   }
   return undefined;
 }

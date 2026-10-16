@@ -909,6 +909,55 @@ test("roles: agent.create injection launches every seat and working agent in its
   );
 });
 
+test("roles: session_open re-carries PI_CODING_AGENT_DIR and keeps the harness home a hermetic clean room (v0.0.16, ADR 0011)", (t) => {
+  const { stateDir } = makeSurface(t);
+  const userHome = makeFakeUserHome(t);
+  const source = join(userHome, ".pi", "agent");
+  const project = makeProject(t, "pi-sessions");
+  writeProjectRegistration(stateDir, project.slug, { root: project.root, supervisor: "agent-sup-11", lead: "agent-lead-11" });
+
+  // Every launch of a seat or working-agent shell re-carries its isolated home.
+  const supervisorSession = injectSessionEnv({ agentId: "agent-sup-11", cwd: project.root, env: {} } as { agentId: string; cwd: string; env: Record<string, string> }, stateDir, userHome);
+  assert.ok(supervisorSession !== undefined);
+  assert.equal(supervisorSession.env.PI_CODING_AGENT_DIR, join(stateDir, "pi-agent", "supervisor"));
+
+  const leadSession = injectSessionEnv({ agentId: "agent-lead-11", cwd: project.root, env: {} } as { agentId: string; cwd: string; env: Record<string, string> }, stateDir, userHome);
+  assert.ok(leadSession !== undefined);
+  assert.equal(leadSession.env.PI_CODING_AGENT_DIR, join(stateDir, "pi-agent", "lead"));
+
+  const worktree = join(stateDir, "projects", project.slug, "worktrees", "T3");
+  const agentSession = injectSessionEnv({ agentId: "agent-worker-3", cwd: worktree, env: {} } as { agentId: string; cwd: string; env: Record<string, string> }, stateDir, userHome);
+  assert.ok(agentSession !== undefined);
+  assert.equal(agentSession.env.PI_CODING_AGENT_DIR, join(stateDir, "pi-agent", "agent"));
+
+  // The operator's prompt contamination never lands in a harness home.
+  const roleHome = join(stateDir, "pi-agent", "supervisor");
+  for (const forbidden of ["APPEND_SYSTEM.md", "SYSTEM.md", "extensions", "prompts", "skills"]) {
+    assert.ok(!existsSync(join(roleHome, forbidden)), `${forbidden} never lands in the harness home`);
+  }
+  // Shared state — auth, custom models, sessions — symlinks back to the FAKE
+  // source home; the provisioner's sessions ensure landed inside that fake
+  // only, never the real ~/.pi/agent (the seed deliberately omits sessions/).
+  assert.ok(existsSync(join(source, "sessions")), "the sessions ensure landed inside the fake source home");
+  for (const name of ["auth.json", "models.json", "sessions"]) {
+    const link = join(roleHome, name);
+    assert.ok(lstatSync(link).isSymbolicLink(), `${name} is a symlink`);
+    assert.equal(realpathSync(link), realpathSync(join(source, name)), `${name} points at the fake source home`);
+  }
+  // The synchronized mcp.json strips legacy "auth": "oauth" strings while
+  // preserving server definitions and valid object auth.
+  const mcp = JSON.parse(readFileSync(join(roleHome, "mcp.json"), "utf8"));
+  assert.deepEqual(mcp, {
+    mcpServers: {
+      "legacy-http": { url: "https://x" },
+      "stdio-ok": { command: "npx", args: ["-y", "mcp"] },
+      "modern-oauth": { url: "https://y", auth: { provider: "anthropic" } },
+    },
+  });
+  // The source home itself keeps its legacy string — sanitization copies, never rewrites the operator.
+  assert.equal(JSON.parse(readFileSync(join(source, "mcp.json"), "utf8")).mcpServers["legacy-http"].auth, "oauth");
+});
+
 test("projects: the registration records the slug→root binding and both seat ids, merged field-wise", (t) => {
   const { stateDir } = makeSurface(t);
   const project = makeProject(t, "registry");
