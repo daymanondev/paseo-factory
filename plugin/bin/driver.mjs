@@ -132,10 +132,17 @@ export function renderBrief(task, pathValue, description, skills, branch = task)
   return brief;
 }
 
-/** `--provider claude/opus-4-8` → provider `claude`, model `opus-4-8`; a bare id carries no model. */
+/** `--provider claude/opus-4-8[:high]` → provider `claude`, model `opus-4-8`, optional `thinking`; a bare id carries no model. */
 export function splitProvider(value) {
   const slash = value.indexOf("/");
-  return slash === -1 ? { provider: value, model: undefined } : { provider: value.slice(0, slash), model: value.slice(slash + 1) };
+  if (slash === -1) return { provider: value, model: undefined };
+  const provider = value.slice(0, slash);
+  const rest = value.slice(slash + 1);
+  const colon = rest.lastIndexOf(":");
+  if (colon === -1) return { provider, model: rest };
+  const model = rest.slice(0, colon);
+  const thinking = rest.slice(colon + 1);
+  return thinking === "" ? { provider, model: rest } : { provider, model, thinking };
 }
 
 /** The startup banner echoes the CLI's provider argument verbatim, once. */
@@ -472,8 +479,14 @@ async function reconnect(rpc, log) {
  * baked from this process's environment, and the contract's description
  * (when set) riding ahead of it as the assignment.
  */
-export async function createTaskAgent(rpc, { task, idempotencyKey, provider, model, cwd, brief }) {
-  const config = { provider, cwd, title: task, ...(model === undefined ? {} : { model }) };
+export async function createTaskAgent(rpc, { task, idempotencyKey, provider, model, thinking, cwd, brief }) {
+  const config = {
+    provider,
+    cwd,
+    title: task,
+    ...(model === undefined ? {} : { model }),
+    ...(thinking === undefined ? {} : { thinkingOptionId: thinking }),
+  };
   if (rpc.features?.creationLifecycle === true) {
     const payload = await rpc.request(
       { type: "agent.create.request", idempotencyKey: idempotencyKey ?? task, subscribe: true, config, initialPrompt: brief },
@@ -888,7 +901,7 @@ export async function observeTasks(
         const workspace = entry.workspace ?? contract?.workspace;
         cleanWorkspaceForRespawn(workspace); // the TASK WORKTREE on the worktree path — never <project-root>
         const brief = entry.brief ?? renderBrief(entry.task, process.env.PATH ?? "", contract?.description, contract?.skills, entry.branch);
-        const { provider: providerId, model } = splitProvider(provider);
+        const { provider: providerId, model, thinking } = splitProvider(provider);
         const respawnSeq = reply.event?.seq;
         const idempotencyKey = respawnSeq !== undefined ? `${entry.task}-respawn-${respawnSeq}` : `${entry.task}-respawn`;
         try {
@@ -897,6 +910,7 @@ export async function observeTasks(
             idempotencyKey,
             provider: providerId,
             ...(model === undefined ? {} : { model }),
+            ...(thinking === undefined ? {} : { thinking }),
             cwd: workspace,
             brief,
           });
@@ -1223,7 +1237,7 @@ export async function runDriver({ home, stateDir, spoolRoot, tasks, provider, wa
     say(`factory: ${task} ${status} — ${reason}`);
     problems.push(task);
   };
-  const { provider: providerId, model } = splitProvider(provider);
+  const { provider: providerId, model, thinking } = splitProvider(provider);
   say(renderRunBanner(tasks, provider));
 
   // The daemon is preflighted before any spawn line lands in the ledger: a
@@ -1316,6 +1330,7 @@ export async function runDriver({ home, stateDir, spoolRoot, tasks, provider, wa
         idempotencyKey,
         provider: providerId,
         ...(model === undefined ? {} : { model }),
+        ...(thinking === undefined ? {} : { thinking }),
         cwd: prep?.cwd ?? contract.workspace,
         brief,
       });

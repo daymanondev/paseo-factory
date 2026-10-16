@@ -27,6 +27,22 @@ export function defaultLanes() {
   return { supervisor: DEFAULT_LANE, lead: DEFAULT_LANE, worker: DEFAULT_LANE, watch: DEFAULT_LANE, retro: DEFAULT_LANE, freshEyes: DEFAULT_LANE };
 }
 
+/** Mirrors parseLane in src/lanes.ts — splits provider/model[:thinking]. */
+export function parseLane(value) {
+  if (value === EYE_JSON_LANE || /\s/.test(value)) return undefined;
+  const slash = value.indexOf("/");
+  if (slash === -1) return undefined;
+  const provider = value.slice(0, slash);
+  const rest = value.slice(slash + 1);
+  if (provider.trim() === "" || rest.trim() === "") return undefined;
+  const colon = rest.lastIndexOf(":");
+  if (colon === -1) return { provider, model: rest };
+  const model = rest.slice(0, colon);
+  const thinking = rest.slice(colon + 1);
+  if (model.trim() === "" || thinking.trim() === "") return undefined;
+  return { provider, model, thinking };
+}
+
 /** Mirrors laneError in src/lanes.ts — the drift test walks the same matrix. */
 export function laneError(name, value) {
   if (name === "freshEyes" && value === EYE_JSON_LANE) return undefined;
@@ -34,9 +50,7 @@ export function laneError(name, value) {
   if (slash === -1) {
     return `lane ${name}="${value}" is not provider/model — name the model explicitly (never auto), or "eye.json" for freshEyes`;
   }
-  const provider = value.slice(0, slash);
-  const model = value.slice(slash + 1);
-  if (provider.trim() === "" || model.trim() === "" || /\s/.test(value)) {
+  if (parseLane(value) === undefined) {
     return `lane ${name}="${value}" must be provider/model with both halves non-empty and no whitespace`;
   }
   return undefined;

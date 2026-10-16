@@ -62,10 +62,36 @@ export function defaultLanes(): Lanes {
 
 export type LanesResult = { ok: true; lanes: Lanes } | { ok: false; reason: string };
 
+export interface ParsedLane {
+  provider: string;
+  model: string;
+  thinking?: string;
+}
+
 /**
- * Validates one lane string: `provider/model` with both halves non-empty and
- * no whitespace, or `eye.json` for `freshEyes` alone. Returns the error text,
- * or undefined when the value is usable.
+ * Splits a `provider/model[:thinking]` lane string into its provider, model,
+ * and optional thinking level. Returns undefined for `eye.json` or any
+ * malformed value (missing slash, empty parts, or whitespace).
+ */
+export function parseLane(value: string): ParsedLane | undefined {
+  if (value === EYE_JSON_LANE || /\s/.test(value)) return undefined;
+  const slash = value.indexOf("/");
+  if (slash === -1) return undefined;
+  const provider = value.slice(0, slash);
+  const rest = value.slice(slash + 1);
+  if (provider.trim() === "" || rest.trim() === "") return undefined;
+  const colon = rest.lastIndexOf(":");
+  if (colon === -1) return { provider, model: rest };
+  const model = rest.slice(0, colon);
+  const thinking = rest.slice(colon + 1);
+  if (model.trim() === "" || thinking.trim() === "") return undefined;
+  return { provider, model, thinking };
+}
+
+/**
+ * Validates one lane string: `provider/model` (or `provider/model:thinking`)
+ * with non-empty parts and no whitespace, or `eye.json` for `freshEyes` alone.
+ * Returns the error text, or undefined when the value is usable.
  */
 export function laneError(name: LaneName, value: string): string | undefined {
   if (name === "freshEyes" && value === EYE_JSON_LANE) return undefined;
@@ -73,9 +99,7 @@ export function laneError(name: LaneName, value: string): string | undefined {
   if (slash === -1) {
     return `lane ${name}="${value}" is not provider/model — name the model explicitly (never auto), or "eye.json" for freshEyes`;
   }
-  const provider = value.slice(0, slash);
-  const model = value.slice(slash + 1);
-  if (provider.trim() === "" || model.trim() === "" || /\s/.test(value)) {
+  if (parseLane(value) === undefined) {
     return `lane ${name}="${value}" must be provider/model with both halves non-empty and no whitespace`;
   }
   return undefined;
@@ -211,21 +235,32 @@ export interface LaneCliInvocation {
  * an improvised command with tools on.
  */
 export function laneCliInvocation(lane: string): LaneCliInvocation | undefined {
-  const slash = lane.indexOf("/");
-  if (slash === -1) return undefined;
-  const provider = lane.slice(0, slash);
-  const model = lane.slice(slash + 1);
-  if (provider === "" || model === "") return undefined;
+  const parsed = parseLane(lane);
+  if (parsed === undefined) return undefined;
+  const { provider, model, thinking } = parsed;
   switch (provider) {
     case "pi":
       return {
         command: "pi",
-        args: ["--print", "--no-session", "--no-tools", "--no-extensions", "--no-skills", "--no-context-files", "--model", model],
+        args: [
+          "--print",
+          "--no-session",
+          "--no-tools",
+          "--no-extensions",
+          "--no-skills",
+          "--no-context-files",
+          "--model",
+          model,
+          ...(thinking === undefined ? [] : ["--thinking", thinking]),
+        ],
       };
     case "copilot":
-      return { command: "copilot", args: ["-s", "--model", model, "--reasoning-effort", "medium"] };
+      return { command: "copilot", args: ["-s", "--model", model, "--reasoning-effort", thinking ?? "medium"] };
     case "claude":
-      return { command: "claude", args: ["-p", "--model", model, "--tools", ""] };
+      return {
+        command: "claude",
+        args: ["-p", "--model", model, "--tools", "", ...(thinking === undefined ? [] : ["--effort", thinking])],
+      };
     default:
       return undefined;
   }

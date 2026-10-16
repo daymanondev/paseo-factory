@@ -9,7 +9,7 @@
  */
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { projectStateDir } from "./core/project.ts";
+import { projectStateDir, resolveProject } from "./core/project.ts";
 
 /** One project's registry entry — the root binding plus the seat agent ids, when seats live. */
 export interface ProjectRegistration {
@@ -84,6 +84,7 @@ export function listProjectRegistrations(stateDir: string): ProjectRegistration[
 export function discoverProjects(
   stateDir: string,
   liveSeatAgents: readonly { labels: Record<string, string>; cwd: string }[],
+  home?: string,
 ): { slug: string; root: string | null }[] {
   const roots = new Map<string, string | null>();
   for (const registration of listProjectRegistrations(stateDir)) {
@@ -93,6 +94,24 @@ export function discoverProjects(
     const slug = agent.labels.project;
     if (slug === undefined || agent.labels.seat === undefined) continue;
     if (!roots.has(slug)) roots.set(slug, agent.cwd);
+  }
+  if (home !== undefined) {
+    try {
+      const parsed = JSON.parse(readFileSync(join(home, "projects", "projects.json"), "utf8")) as unknown;
+      if (Array.isArray(parsed)) {
+        for (const entry of parsed) {
+          if (entry === null || typeof entry !== "object") continue;
+          const record = entry as { archivedAt?: unknown; rootPath?: unknown };
+          if (record.archivedAt !== null || typeof record.rootPath !== "string" || record.rootPath === "") continue;
+          const resolved = resolveProject(record.rootPath);
+          if (resolved.ok && !roots.has(resolved.slug)) {
+            roots.set(resolved.slug, resolved.root);
+          }
+        }
+      }
+    } catch {
+      // missing or unreadable Paseo projects.json is ignored
+    }
   }
   return [...roots.entries()].map(([slug, root]) => ({ slug, root })).sort((a, b) => a.slug.localeCompare(b.slug));
 }

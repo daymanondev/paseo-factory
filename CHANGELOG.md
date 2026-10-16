@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.15] - 2026-10-16
+
+v0.0.15's one thing: **Per-lane Thinking Level (`provider/model[:thinking]`), Paseo project discovery, and Factory surface redesign**.
+
+### Added
+
+- **Per-lane Thinking Level (`src/lanes.ts`, `plugin/bin/lanes-config.mjs`, `plugin/bin/driver.mjs`, `plugin/server/surface-rpc.ts`, `plugin/server/daemon-cli.ts`)** — lane values now accept an optional `:thinking` suffix (e.g. `pi/zai/glm-5.3:high`, `pi/zai/glm-5.3:max`, `copilot/gpt-5.4:high`, `claude/opus-4-8:high`). `parseLane` splits `{ provider, model, thinking }`; `laneCliInvocation` forwards `--thinking <level>` for `pi`, `--reasoning-effort <level>` for `copilot`, and `--effort <level>` for `claude`; `driver.mjs` and `ensureSeat` pass `thinkingOptionId` on `agent.create`; and `lanes.set` live-syncs both `set_agent_model_request` and `set_agent_thinking_request` to active seats.
+- **Full Model & Thinking Picker on `Seats & Models` (`plugin/client/factory/seats.tsx`, `plugin/shared/view.ts`)** — `ProviderView.models` carries structured `{ id, label, thinkingOptions, defaultThinkingOptionId }` from `daemon.providers.listModels`. The Lane configurator modal adds sub-family filter chips (`All`, `zai`, `github-copilot`, `google-antigravity`, …), search filtering across the full model catalog (removing the 16-item cap), and a 3rd step to pick the Thinking Level (`Provider default` or model-supported options).
+- **Paseo `<home>/projects/projects.json` discovery (`plugin/server/projects.ts`)** — `discoverProjects` merges non-archived git repositories from Paseo's own project list so the Project Scope Bar populates before any seat has been created.
+
+### Changed
+
+- **Factory surface UI & SLP alignment (`plugin/client/*`)** — equal-width KPI Stat Tiles, responsive multi-column Lane Cards grid with provider/model/thinking pills, height-locked controls (`CONTROL_H = 32`, `CONTROL_SM = 26`, `PILL_H = 22`), non-stretching buttons (`alignSelf: "flex-start"`), and removal of the header's `Ensure Lead` button and inline dispatch input so the Human Owner interacts exclusively through Paseo's native Conversation UI per canonical SLP.
+- `package.json` + `SHELL_VERSION` → `0.0.15`. Suite 357 → 361.
+
 ## [0.0.14] - 2026-10-16
 
 v0.0.14's one thing: **Project-scoped SLP seats at `cwd`, a model-backed Lead

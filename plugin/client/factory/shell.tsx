@@ -163,7 +163,16 @@ export function FactoryShell({
             <Text style={text(theme, "code")}>project: {view.project === null ? "(unscoped)" : `${view.project.slug} · ${view.project.root}`}</Text>
           </Card>
         ) : null}
-        <TabBar theme={theme} active={tab} onPick={setTab} />
+        <TabBar
+          theme={theme}
+          active={tab}
+          onPick={setTab}
+          counts={{
+            tasks: view.tasks.length,
+            seats: view.agents.length,
+            timeline: view.retro.length,
+          }}
+        />
         {tab === "tasks" ? (
           <TasksPane
             theme={theme}
