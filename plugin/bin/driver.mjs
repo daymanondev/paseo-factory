@@ -104,6 +104,11 @@ const TASK_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 // v0.0.5 TASK.md seed workaround. Since v0.0.14 a contract's skills ride
 // above everything (ADR 0010 §6): `Required skills to open first: <skills>`
 // mandates the SKILL.md workflows the working Agent opens before it starts.
+// Since v0.0.16 the mandate also names WHERE each SKILL.md lives (ADR 0011):
+// the working Agent's Pi harness home filters <available_skills> down to
+// tdd, diagnosing-bugs, codebase-design, so a Contract-mandated skill beyond
+// those three must be opened by path — `~/.agents/skills/<skill>/SKILL.md`
+// (or `.agents/skills/<skill>/SKILL.md` in the Workspace) — on demand.
 // No description and no skills, no headers — the brief is byte-identical to
 // v0.0.5's.
 const BRIEF_TEMPLATE = `Do the assigned work on branch \`<branch>\`. When done: commit, run
@@ -120,7 +125,9 @@ PATH="<path>" first.`;
  * `factory/<task>` worktree branch since v0.0.14); the PATH is baked from the
  * driver's own environment at spawn time; the contract's description (when
  * set) rides ahead as the assignment header, and its skills (when set) ride
- * at the very top as the method mandate.
+ * at the very top as the method mandate — since v0.0.16 with the read-first
+ * path instruction, so the Agent can open any SKILL.md its filtered
+ * <available_skills> no longer preloads.
  */
 export function renderBrief(task, pathValue, description, skills, branch = task) {
   const body = BRIEF_TEMPLATE.replaceAll("<branch>", branch)
@@ -128,7 +135,8 @@ export function renderBrief(task, pathValue, description, skills, branch = task)
     .replace('PATH="<path>" first.', `PATH="${pathValue}" first.`);
   let brief = body;
   if (description !== undefined && description !== null) brief = `Task: ${description}\n\n${brief}`;
-  if (Array.isArray(skills) && skills.length > 0) brief = `Required skills to open first: ${skills.join(", ")}\n\n${brief}`;
+  if (Array.isArray(skills) && skills.length > 0)
+    brief = `Required skills to open first: ${skills.join(", ")} (read ~/.agents/skills/<skill>/SKILL.md or .agents/skills/<skill>/SKILL.md before starting)\n\n${brief}`;
   return brief;
 }
 
