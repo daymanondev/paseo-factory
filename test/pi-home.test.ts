@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { provisionPiAgentHome } from "../src/pi-home.ts";
 import { disposeDir, makeTempDir } from "./helpers.ts";
@@ -152,4 +152,60 @@ test("each role gets its skills policy: agent filtered, supervisor/lead unfilter
   ]);
   assert.ok(!existsSync(join(headlessHome, "mcp.json")), "the tool-less headless pass never sees an mcp.json");
   assert.ok(lstatSync(join(headlessHome, "sessions")).isSymbolicLink(), "headless still shares sessions");
+});
+
+test("provisioning is idempotent and re-synchronizes mcp.json on every call (v0.0.16, ADR 0011)", (t) => {
+  const dir = makeTempDir("pi-home-test-");
+  disposeDir(t, dir);
+  const source = makeFakePiAgent(dir);
+  const stateDir = join(dir, "factory-state");
+
+  const first = provisionPiAgentHome({ stateDir, role: "supervisor", sourceAgentDir: source });
+  assert.deepEqual(readdirSync(first).sort(), [
+    "auth.json",
+    "mcp-oauth",
+    "mcp.json",
+    "models-store.json",
+    "models.json",
+    "sessions",
+    "settings.json",
+  ], "the harness home holds exactly the generated files and shared-state links — no strays");
+  const authLink = join(first, "auth.json");
+  const linkInoBefore = lstatSync(authLink).ino;
+  const settingsBefore = readFileSync(join(first, "settings.json"), "utf8");
+
+  const second = provisionPiAgentHome({ stateDir, role: "supervisor", sourceAgentDir: source });
+
+  assert.equal(second, first, "a second call finds the same home");
+  assert.ok(lstatSync(authLink).isSymbolicLink(), "the symlink survives a re-provision");
+  assert.equal(realpathSync(authLink), realpathSync(join(source, "auth.json")));
+  assert.equal(lstatSync(authLink).ino, linkInoBefore, "an already-correct symlink is left untouched, never re-made or duplicated");
+  assert.equal(readFileSync(join(second, "settings.json"), "utf8"), settingsBefore, "settings.json is byte-stable across calls");
+
+  // Operator edits the global mcp.json — the next provision call propagates them.
+  writeFileSync(
+    join(source, "mcp.json"),
+    JSON.stringify(
+      {
+        mcpServers: {
+          "legacy-http": { url: "https://x", auth: "oauth" }, // still stripped
+          added: { command: "node", args: ["server.js"] }, // newly added
+        },
+      },
+      null,
+      2,
+    ),
+  );
+  provisionPiAgentHome({ stateDir, role: "supervisor", sourceAgentDir: source });
+  assert.deepEqual(JSON.parse(readFileSync(join(second, "mcp.json"), "utf8")), {
+    mcpServers: {
+      "legacy-http": { url: "https://x" },
+      added: { command: "node", args: ["server.js"] },
+    },
+  });
+
+  // Operator deletes the global mcp.json — the stale sanitized copy retires with it.
+  rmSync(join(source, "mcp.json"));
+  provisionPiAgentHome({ stateDir, role: "supervisor", sourceAgentDir: source });
+  assert.ok(!existsSync(join(second, "mcp.json")), "a removed source mcp.json retires the harness copy");
 });
