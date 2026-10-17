@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.18] - 2026-10-18
+
+v0.0.18's one thing: **`paseo-factory` becomes remotely installable** — the
+remote-first story v0.0.17 shipped for its companions now holds for the core
+plugin itself.
+
+### Fixed
+
+- `package.json` declares `@getpaseo/protocol` (`0.11.2`, pinned to the
+  version `@getpaseo/plugin@0.11.2` requires as its peer) under
+  devDependencies. `plugin/server/choke.ts` imports
+  `@getpaseo/protocol/agent-types`, but the package was never declared — it only
+  reached `node_modules` transitively on machines with a full dev checkout, so a
+  fresh `git:` install (daemon clones the repo and builds from a clean
+  `npm install`) failed with `Could not resolve type dependency
+  "@getpaseo/protocol/agent-types"`. First witnessed on a real remote install
+  (Mac mini trial home); both homes on the dev machine are directory installs
+  and had the package locally, which masked the gap. Every other external
+  import under `plugin/` was audited against the manifest — this was the only
+  undeclared one.
+- `package.json` + `SHELL_VERSION` → `0.0.18`.
+
 ## [0.0.17] - 2026-10-17
 
 v0.0.17's one thing: **Remote-first `Companion plugin` catalog and lifecycle
