@@ -1,4 +1,4 @@
-# paseo-slp-factory
+# paseo-factory
 
 Research and build repo for `paseo-factory` — a thin verification core delivered as a Paseo plugin.
 

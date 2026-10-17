@@ -9,7 +9,8 @@
 import { readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { FACTORY_VIEW_VERSION } from "../shared/view.ts";
-import type { AgentView, AttemptView, FactoryView, LedgerLineView, Lanes, ProjectView, RetroView, TaskStatus, TaskView } from "../shared/view.ts";
+import type { AgentView, AttemptView, CompanionPluginView, FactoryView, LedgerLineView, Lanes, ProjectView, RetroView, TaskStatus, TaskView } from "../shared/view.ts";
+import { COMPANION_CATALOG } from "../shared/companions.ts";
 import type { LedgerEvent } from "./core/events.ts";
 
 /** How many ledger lines ride one snapshot — a stream, not a mirror. */
@@ -318,6 +319,78 @@ export interface DaemonAgentsInput {
   daemonError: string | null;
 }
 
+// ---- the companion fold (v0.0.17, ADR 0012 §2) ----------------------------------------------
+
+/**
+ * The daemon's install identity — which source a plugin was installed from,
+ * discriminated on `kind` (@getpaseo/protocol's `PluginSourceIdentity` subset).
+ * `pluginPath` is optional so the daemon bridge's own `DaemonPluginItem`
+ * (whose identity may omit it, plus a registry pointer) assigns directly —
+ * the fold only reads `kind` and the kind's source string.
+ */
+export type DaemonPluginIdentity =
+  | { kind: "git"; remote: string; pluginPath?: string }
+  | { kind: "directory"; path: string }
+  | { kind: "npm"; packageName: string; pluginPath?: string };
+
+/**
+ * One daemon plugin-list entry, structural — the subset of `@getpaseo/protocol`'s
+ * `PluginListItem` the fold reads. surface-rpc.ts gathers it, this module never
+ * calls the daemon. The install identity (not the legacy `source` field, whose
+ * enum has no npm arm) is the installKind truth.
+ */
+export interface DaemonPluginEntry {
+  id: string;
+  enabled: boolean;
+  status: "running" | "failed" | "disabled";
+  error?: string;
+  /** Legacy revision pointer — fills when `installation.currentRevision` is absent. */
+  commit?: string;
+  installation?: {
+    identity?: DaemonPluginIdentity;
+    currentRevision?: string;
+  };
+}
+
+/** The daemon plugin half's raw input — null plugins means the list call was unavailable. */
+export interface DaemonPluginsInput {
+  plugins: readonly DaemonPluginEntry[] | null;
+}
+
+/** The install identity's source string per kind — git remote, directory path, or npm package. */
+function installedSourceOf(identity: DaemonPluginIdentity): string | null {
+  if (identity.kind === "git") return identity.remote;
+  if (identity.kind === "directory") return identity.path;
+  return identity.packageName;
+}
+
+/**
+ * Joins the companion catalog against the daemon's plugin list: every catalog
+ * entry becomes exactly one card — listed companions carry their live daemon
+ * state and install identity; unlisted entries (or an unavailable list, the
+ * degrade law) fold to the `not_installed` default. Strangers on the daemon
+ * never gain a card, and no host-disk path is ever probed.
+ */
+export function foldCompanions(plugins: readonly DaemonPluginEntry[] | null): CompanionPluginView[] {
+  return COMPANION_CATALOG.map((entry): CompanionPluginView => {
+    const listed = plugins === null ? undefined : plugins.find((plugin) => plugin.id === entry.id);
+    if (listed === undefined) {
+      return { ...entry, capabilities: [...entry.capabilities], status: "not_installed", enabled: false, installKind: null, installedSource: null, currentRevision: null, error: null };
+    }
+    const identity = listed.installation?.identity;
+    return {
+      ...entry,
+      capabilities: [...entry.capabilities],
+      status: listed.status,
+      enabled: listed.enabled,
+      installKind: identity?.kind ?? null,
+      installedSource: identity === undefined ? null : installedSourceOf(identity),
+      currentRevision: listed.installation?.currentRevision ?? listed.commit ?? null,
+      error: listed.error ?? null,
+    };
+  });
+}
+
 /** Builds the one snapshot from its halves: ledger fold + lanes + daemon reads. */
 export function foldView(input: {
   stateDir: string;
@@ -325,6 +398,8 @@ export function foldView(input: {
   lanes: Lanes;
   events: readonly AnyEvent[];
   daemon: DaemonAgentsInput;
+  /** The daemon plugin half (v0.0.17, ADR 0012 §2) — null plugins folds every catalog entry to not_installed. */
+  companions: DaemonPluginsInput;
   /** The active Project scope (v0.0.14) — null on the unscoped global view. */
   project: ProjectView | null;
   /** Every discovered Project for the header's Project Selector. */
@@ -351,6 +426,7 @@ export function foldView(input: {
     daemonError: input.daemon.daemonError,
     project: input.project,
     projects: [...input.projects],
+    companions: foldCompanions(input.companions.plugins),
   };
 }
 
