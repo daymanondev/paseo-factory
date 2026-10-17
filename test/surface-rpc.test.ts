@@ -11,6 +11,8 @@ import { factoryEnvFor, injectRoleOnCreate, injectSessionEnv, renderAgentContrac
 import type { AgentCreateRequest } from "../plugin/server/roles.ts";
 import { discoverProjects, readProjectRegistration, writeProjectRegistration } from "../plugin/server/projects.ts";
 import { lanesPath, loadLanes, saveLanes } from "../src/lanes.ts";
+import { cliUtils } from "../plugin/server/daemon-cli.ts";
+import { delimiter } from "node:path";
 import { disposeDir, fakeCopilotRunner, gitCommitAll, makeTempDir, writeLanes } from "./helpers.ts";
 
 /**
@@ -996,4 +998,27 @@ test("projects: the registration records the slug→root binding and both seat i
     ].sort((a, b) => a.slug.localeCompare(b.slug)),
     "registry files, live seat agents, and Paseo's projects.json all feed the Project Selector, slug order",
   );
+});
+
+// ---- the daemon plugin bridge (v0.0.17, ADR 0012 §2–§4) -----------------------------------
+
+test("cliUtils: splits the search path on node:path's delimiter — a ';' Windows PATH resolves the CLI, ':' splitting does not", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  // The layout cliUtils expects: <entry>/paseo beside <entry>/../dist/utils/{client.js,daemon-target.js}.
+  mkdirSync(join(dir, "win-entry"), { recursive: true });
+  writeFileSync(join(dir, "win-entry", "paseo"), "#!/bin/sh\nexit 0\n");
+  const utils = join(dir, "dist", "utils");
+  mkdirSync(utils, { recursive: true });
+  writeFileSync(join(utils, "client.js"), "");
+  writeFileSync(join(utils, "daemon-target.js"), "");
+
+  const windowsPath = [join(dir, "miss"), join(dir, "win-entry")].join(";");
+  const found = cliUtils(windowsPath, ";");
+  assert.ok(found !== null, "a ';'-separated PATH resolves the paseo CLI when split on ';'");
+  assert.ok(existsSync(join(found, "client.js")), "the resolved utils carry the CLI's client.js");
+  assert.equal(cliUtils(windowsPath, ":"), null, "splitting a ';' PATH on ':' sees one garbage entry — the pre-fix Windows bug");
+
+  const posixPath = [join(dir, "miss"), join(dir, "win-entry")].join(delimiter);
+  assert.ok(cliUtils(posixPath) !== null, "the platform delimiter stays the default");
 });

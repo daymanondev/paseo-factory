@@ -12,7 +12,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { delimiter as pathDelimiter, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 export type DaemonReply = { ok: true } | { ok: false; reason: string };
@@ -115,9 +115,13 @@ try {
 }
 `;
 
-/** Resolves the paseo CLI's `dist/utils` directory from PATH — null when the CLI or its utils are absent. */
-export function cliUtils(searchPath: string = process.env.PATH ?? ""): string | null {
-  for (const dir of searchPath.split(":")) {
+/**
+ * Resolves the paseo CLI's `dist/utils` directory from PATH — null when the CLI or its utils are absent.
+ * The search path splits on `node:path`'s `delimiter` (`:` on POSIX, `;` on Windows, v0.0.17) —
+ * the separator is a parameter only so tests can exercise the Windows arm on any host.
+ */
+export function cliUtils(searchPath: string = process.env.PATH ?? "", separator: string = pathDelimiter): string | null {
+  for (const dir of searchPath.split(separator)) {
     if (dir === "") continue;
     const bin = join(dir, "paseo");
     if (!existsSync(bin)) continue;
