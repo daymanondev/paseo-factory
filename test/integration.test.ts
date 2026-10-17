@@ -268,6 +268,63 @@ test("the core barrel's prepareTaskWorktree: symlinked node_modules and .worktre
   assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: workspace, encoding: "utf8" }).trim(), base, "the root sat at base the whole run");
 });
 
+test("the core barrel's prepareTaskWorktree lands companion overrides: custom worktreePath and branchName replace the defaults", (t) => {
+  const tmp = makeTempDir();
+  disposeDir(t, tmp);
+  const workspace = join(tmp, "workspace");
+  copyFixture("sample-workspace", workspace);
+  // A Best-of-N arena repo: deps installed at the root, NO .worktreeinclude —
+  // the excludes file must still land for the node_modules link alone.
+  mkdirSync(join(workspace, "node_modules", ".bin"), { recursive: true });
+  writeFileSync(join(workspace, ".gitignore"), "node_modules/\n");
+  const base = gitCommitAll(workspace);
+  const stateDir = join(tmp, "factory");
+  const arena = join(tmp, "arena", "attempt-1");
+
+  const prepared = prepareTaskWorktree({
+    stateDir,
+    workspace,
+    task: "BO1",
+    base,
+    worktreePath: arena,
+    branchName: "burn-lab/BO1-a1",
+    symlinkNodeModules: true,
+  });
+  assert.ok(prepared.ok, prepared.ok ? "" : prepared.reason);
+  if (!prepared.ok) return;
+  assert.equal(prepared.path, arena, "the override replaces taskWorktreePath(stateDir, slug, task)");
+  assert.equal(prepared.branch, "burn-lab/BO1-a1", "the override replaces factory/<task>");
+  assert.equal(prepared.reset, false, "first allocation is a create, not a reset");
+  assert.equal(execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: arena, encoding: "utf8" }).trim(), "burn-lab/BO1-a1", "the worktree runs on the custom branch");
+  assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: arena, encoding: "utf8" }).trim(), base, "checked out at the Contract's base commit");
+  assert.ok(execFileSync("git", ["worktree", "list"], { cwd: workspace, encoding: "utf8" }).includes(arena), "a linked worktree of the project checkout");
+  assert.ok(lstatSync(join(arena, "node_modules")).isSymbolicLink(), "node_modules is a link, not a copy");
+  const gitDir = resolve(execFileSync("git", ["rev-parse", "--git-dir"], { cwd: arena, encoding: "utf8" }).trim());
+  assert.equal(readFileSync(join(gitDir, "factory-excludes"), "utf8"), "node_modules\n", "no include file matched, yet the link is excluded");
+  assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: arena, encoding: "utf8" }).trim(), "", "the arena sits clean");
+  assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: workspace, encoding: "utf8" }).trim(), "", "the root stays clean");
+
+  // A Best-of-N re-attempt: the previous attempt committed and moved on; a
+  // re-run at the same override path resets to base — with `base` omitted, the
+  // root's HEAD is the fallback base.
+  writeFileSync(join(arena, "src", "format.ts"), "export const dirty = 1;\n");
+  gitCommitChanges(arena, "attempt 1 went sideways");
+  const again = prepareTaskWorktree({ stateDir, workspace, task: "BO1", worktreePath: arena, branchName: "burn-lab/BO1-a1" });
+  assert.ok(again.ok, again.ok ? "" : again.reason);
+  if (!again.ok) return;
+  assert.equal(again.reset, true, "the second allocation at the custom path is a reset");
+  assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: arena, encoding: "utf8" }).trim(), base, "back at base — the omitted base fell back to the root's HEAD");
+  assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: arena, encoding: "utf8" }).trim(), "", "the reset arena sits clean");
+
+  // Refusal parity with the driver's allocator, at the barrel seam.
+  const plain = join(tmp, "plain");
+  mkdirSync(plain, { recursive: true });
+  writeFileSync(join(plain, "x.txt"), "not a repo\n");
+  const refused = prepareTaskWorktree({ stateDir, workspace: plain, task: "BO2" });
+  assert.equal(refused.ok, false);
+  if (!refused.ok) assert.match(refused.reason, /does not resolve to a git Project/);
+});
+
 // ---- the shared Project registry served from the core barrel (v0.0.18, ADR 0010 / ADR 0012) ----
 
 /** Makes a real temp git repo (one file, one commit) — the registry binds roots git can answer for. */
