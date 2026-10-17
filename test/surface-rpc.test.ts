@@ -1411,6 +1411,20 @@ test("daemon plugin bridge: manageDaemonPlugin dispatches enable, disable, reloa
   }
 });
 
+test("daemon plugin bridge: with no paseo.pid the list falls back to the paseo CLI", async (t) => {
+  const home = makeTempDir("paseo-factory-no-daemon-");
+  disposeDir(t, home);
+  const cli = fakePaseoCli(t, `${JSON.stringify([{ id: "paseo-factory", path: "/plugins/paseo-factory", enabled: true, status: "running" }])}\n`);
+
+  const reply = await listDaemonPlugins(home);
+  assert.ok(reply.ok, reply.ok ? "" : reply.reason);
+  assert.deepEqual(
+    reply.plugins.map((plugin) => [plugin.id, plugin.status]),
+    [["paseo-factory", "running"]],
+  );
+  assert.deepEqual(cli.argvs(), [["--home", home, "plugin", "ls", "--json"]], "the fallback spells 'paseo --home <home> plugin ls --json'");
+});
+
 test("daemon plugin bridge: with no paseo.pid the manage actions fall back to the paseo CLI", async (t) => {
   const home = makeTempDir("paseo-factory-no-daemon-");
   disposeDir(t, home);
