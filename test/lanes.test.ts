@@ -24,7 +24,7 @@ import {
   parseLane as parseLaneMjs,
   resolveRunProvider as resolveRunProviderMjs,
 } from "../plugin/bin/lanes-config.mjs";
-import { disposeDir, gitCommitAll, makeTempDir, repoRoot } from "./helpers.ts";
+import { copilotAnswerLines, disposeDir, gitCommitAll, gitCommitChanges, makeTempDir, repoRoot, writeLanes } from "./helpers.ts";
 import * as core from "../src/index.ts";
 
 /**
@@ -461,6 +461,107 @@ test("runLaneCli strips ANSI escape sequences from an opencode lane's stdout —
   const untouched = await core.runLaneCli({ lane: "copilot/gpt-5.4", stdin: "p", timeoutMs: 5_000, runner: copilot.runner });
   assert.ok(untouched.ok);
   assert.equal(untouched.stdout, noisy);
+});
+
+test("an opencode lane completes the Watch, the Retro, and the Fresh-eyes CLI pass through the injected runner", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const stateDir = join(dir, "factory");
+  const lane = "opencode/deepseek-v4.1-flash-free";
+  const expectedArgs = ["run", "--standalone", "--auto", "-m", "opencode/deepseek-v4.1-flash-free"];
+
+  // A real git workspace at base, then the Agent's committed work — the diff every pass reads.
+  const workspace = join(dir, "ws");
+  mkdirSync(join(workspace, "src"), { recursive: true });
+  const artifact = "src/format.ts";
+  writeFileSync(join(workspace, artifact), "export function pad() {}\n");
+  const base = gitCommitAll(workspace);
+  writeFileSync(join(workspace, artifact), "export function pad(input: string): string {\n  return input;\n}\n");
+  const claimed = gitCommitChanges(workspace, "implement pad");
+  const contract: core.ContractSet = {
+    seq: 1,
+    ts: "2026-10-18T09:00:00.000Z",
+    event: "contract_set",
+    task: "W23",
+    workspace,
+    gate: "npm test",
+    artifact,
+    scope: ["src"],
+    base,
+    watch: true,
+  };
+
+  // The Watch: five `name: number` lines, the strict output contract.
+  writeLanes(stateDir, { watch: lane });
+  const watchAnswers = {
+    "destructive-writes": 0.02,
+    "test-weakened": 0.03,
+    "stuck-loop": 0.1,
+    "scope-creep": 0.2,
+    "secret-leak": 0.01,
+  };
+  const watchFake = fakeLaneRunner(() => ({ code: 0, stdout: copilotAnswerLines(watchAnswers) }));
+  const watch = await core.runWatchPass({
+    stateDir,
+    contract,
+    task: "W23",
+    attempt: 1,
+    sha: claimed,
+    gateResult: { exit: 0, verdict: "green", note: "", timedOut: false, output: "ok 3 tests", artifactPresent: true },
+    gateOutputPath: undefined,
+    scopeViolations: [],
+    agent: "agent-w23",
+    fetchTimeline: async () => ({
+      ok: true,
+      entries: [
+        { seq: 2, item: { type: "user_message", text: "Do the assigned work." } },
+        { seq: 5, item: { type: "assistant_message", text: "Done — tests pass." } },
+      ],
+    }),
+    gitBlocks: [],
+    copilotRunner: watchFake.runner,
+    budgetMs: 5_000,
+  });
+  assert.equal(watch.outcome, "written", watch.outcome === "written" ? "" : watch.error ?? "watch failed");
+  assert.equal(watch.model, lane, "the lane string is recorded verbatim");
+  assert.equal(watchFake.calls.length, 1);
+  assert.equal(watchFake.calls[0]!.command, "opencode");
+  assert.deepEqual(watchFake.calls[0]!.args, expectedArgs);
+  assert.equal(watchFake.calls[0]!.env?.OPENCODE_CONFIG_CONTENT, core.TOOLLESS_OPENCODE_CONFIG, "the pass inherits the tool-less config");
+  assert.equal(watchFake.calls[0]!.env?.CI, "1");
+  assert.ok(watchFake.calls[0]!.stdin.includes("STATE"), "the prompt rides stdin with the state as its tail");
+
+  // The Retro: strict JSON proposals citing known seqs.
+  writeLanes(stateDir, { retro: lane });
+  const retroJson = JSON.stringify({
+    proposals: [{ class: "observation", evidence: [1], pattern: "reports bury the gate note", text: "Surface the note." }],
+  });
+  const retroFake = fakeLaneRunner(() => ({ code: 0, stdout: retroJson }));
+  const retro = await core.runRetroPass({
+    stateDir,
+    corpus: { digest: "the corpus", eventsRead: 2, taskBlocks: 1, reports: 0, redGateLogs: 0, knownSeqs: new Set([1, 2]) },
+    copilotRunner: retroFake.runner,
+    budgetMs: 5_000,
+  });
+  assert.equal(retro.outcome, "written", retro.outcome === "written" ? "" : retro.error ?? "retro failed");
+  assert.equal(retro.model, lane);
+  assert.equal(retroFake.calls.length, 1);
+  assert.equal(retroFake.calls[0]!.command, "opencode");
+  assert.deepEqual(retroFake.calls[0]!.args, expectedArgs);
+  assert.equal(retroFake.calls[0]!.env?.OPENCODE_CONFIG_CONTENT, core.TOOLLESS_OPENCODE_CONFIG);
+  assert.equal(retroFake.calls[0]!.env?.CI, "1");
+
+  // The Fresh-eyes CLI path: first line CONCERN or CLEAR.
+  writeLanes(stateDir, { freshEyes: lane });
+  const eyeFake = fakeLaneRunner(() => ({ code: 0, stdout: "CLEAR\nNothing to add." }));
+  const eye = await core.runFreshEyesPass({ stateDir, contract, claimedSha: claimed, gateOutputPath: undefined, cliRunner: eyeFake.runner, budgetMs: 5_000 });
+  assert.equal(eye.outcome, "clear", eye.outcome === "clear" ? "" : eye.finding);
+  assert.equal(eye.model, lane);
+  assert.equal(eyeFake.calls.length, 1);
+  assert.equal(eyeFake.calls[0]!.command, "opencode");
+  assert.deepEqual(eyeFake.calls[0]!.args, expectedArgs);
+  assert.equal(eyeFake.calls[0]!.env?.OPENCODE_CONFIG_CONTENT, core.TOOLLESS_OPENCODE_CONFIG);
+  assert.equal(eyeFake.calls[0]!.env?.CI, "1");
 });
 
 // ---- the CLI-side mirror (ADR 0004: CLIs import no src/ code) ----------------------------

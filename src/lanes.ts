@@ -367,7 +367,7 @@ export async function runLaneCli(input: {
   const sourceAgentDir =
     input.sourceAgentDir ?? (input.userHome !== undefined ? join(input.userHome, ".pi", "agent") : undefined);
   const provider = parseLane(input.lane)?.provider;
-  const env =
+  const env: Record<string, string> | undefined =
     provider === "pi" && input.stateDir !== undefined
       ? { PI_CODING_AGENT_DIR: provisionPiAgentHome({ stateDir: input.stateDir, role: "headless", sourceAgentDir }) }
       : provider === "opencode"
