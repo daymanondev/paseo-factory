@@ -53,16 +53,19 @@ export {
   DEFAULT_LANE,
   EYE_JSON_LANE,
   LANE_NAMES,
+  TOOLLESS_OPENCODE_CONFIG,
   defaultLanes,
   laneCliAvailable,
   laneCliInvocation,
   laneError,
   lanesPath,
   loadLanes,
+  parseLane,
+  projectLanesPath,
   runLaneCli,
   saveLanes,
 } from "./lanes.ts";
-export type { LaneCliInvocation, LaneCliRunner, LaneName, Lanes, LanesResult } from "./lanes.ts";
+export type { LaneCliInvocation, LaneCliRunner, LaneName, Lanes, LanesResult, ParsedLane } from "./lanes.ts";
 export {
   judgeShellCommand,
   judgeFilePath,
