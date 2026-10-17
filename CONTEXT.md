@@ -197,7 +197,7 @@ _Avoid_: autopilot, background job, cron
 ### Surface and configuration
 
 **Factory surface**:
-The plugin's client UI inside Paseo (sidebar global screen with Project selector, workspace-scoped panel bound to the active Project, and settings screen, ADR 0009, ADR 0010): it renders a versioned view snapshot derived from the Project's Ledger, the Lane config, and live daemon state across three views (`Tasks` verification line, `Seats & Models` topology and 5-lane switcher, `Timeline & Retro`), bridges to the Project's Supervisor seat via one-click ensure-or-open (and optional quick dispatch), and executes direct Owner acts (`Accept`, `Retro`, `Lane config` updates, `Supervisor` revoke, `Lead` rotate/revoke) through the plugin server's single writer. It never replaces the Paseo chat pane and never bypasses the single-writer law. Added in v0.0.13 (ADR 0009); updated in ADR 0010.
+The plugin's client UI inside Paseo (sidebar global screen with Project selector, workspace-scoped panel bound to the active Project, and settings screen, ADR 0009, ADR 0010, ADR 0012): it renders a versioned view snapshot derived from the Project's Ledger, the Lane config, and live daemon state across four views (`Tasks` verification line, `Seats & Models` topology and 5-lane switcher, `Timeline & Retro`, and `Plugins` companion catalog), bridges to the Project's Supervisor seat via one-click ensure-or-open (and optional quick dispatch), and executes direct Owner acts (`Accept`, `Retro`, `Lane config` updates, `Supervisor` revoke, `Lead` rotate/revoke, `Companion plugin` lifecycle) through the plugin server's single writer. It never replaces the Paseo chat pane and never bypasses the single-writer law. Added in v0.0.13 (ADR 0009); updated in ADR 0010 and ADR 0012.
 _Avoid_: dashboard, portal, control center, room panel
 
 **Lane config**:
@@ -207,4 +207,8 @@ _Avoid_: model settings, profile, preset, fleet manifest
 **Pi harness home**:
 The clean-room per-role `PI_CODING_AGENT_DIR` directory (`<stateDir>/pi-agent/<role>`, ADR 0011) provisioned by the factory for `Supervisor`, `Lead`, working `Agent`, and headless tool-less passes (`Watch`, `Retro`, `Fresh-eyes review`). Strips user TUI npm packages, extensions, personal `~/.pi/agent/skills`, and `APPEND_SYSTEM.md` while symlinking auth, models, and `sessions/` from `~/.pi/agent`, sanitizing `mcp.json` for Pi's native `builtin:mcp`, and scoping working `Agent` `<available_skills>` to its three core skills (`tdd`, `diagnosing-bugs`, `codebase-design`) plus on-demand `Contract` skills.
 _Avoid_: sandbox, profile dir, shadow home
+
+**Companion plugin**:
+A first-party Paseo plugin in the factory family (`factory-burn-lab`, `factory-connector`) listed in the `Factory surface`'s `Plugins` view and installed, updated, enabled, disabled, reloaded, or removed on the active daemon from its canonical remote GitHub source (ADR 0012).
+_Avoid_: addon, widget, module, local sibling
 
