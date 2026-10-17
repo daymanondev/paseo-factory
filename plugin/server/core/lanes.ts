@@ -388,10 +388,21 @@ export async function runLaneCli(input: {
         budgetExceeded: false,
       };
     }
-    return { ok: true, stdout: result.stdout };
+    return { ok: true, stdout: provider === "opencode" ? stripAnsiEscapes(result.stdout) : result.stdout };
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
+}
+
+/**
+ * Strips ANSI escape sequences (CSI `\x1b[…m` controls and OSC `\x1b]… BEL
+ * title strings) from the opencode CLI's stdout — its pretty-printing must
+ * never reach a downstream strict parser (the eye's CONCERN/CLEAR line, the
+ * watch's five `name: number` lines). The opencode path alone: the other
+ * families' output rides byte-identical.
+ */
+function stripAnsiEscapes(text: string): string {
+  return text.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "");
 }
 
 /** The real runner: the lane's command with its argv, prompt on stdin, killed at the deadline. */

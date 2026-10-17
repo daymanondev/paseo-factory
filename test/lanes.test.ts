@@ -449,6 +449,20 @@ test("runLaneCli on an opencode lane denies every tool by construction — confi
   assert.match(unknown.error, /opencode\/<model>/);
 });
 
+test("runLaneCli strips ANSI escape sequences from an opencode lane's stdout — and only that path", async () => {
+  const noisy = "\u001b[1;32mCLEAR\u001b[0m\n\u001b[2KAll good.";
+  const opencode = fakeLaneRunner(() => ({ code: 0, stdout: noisy }));
+  const stripped = await core.runLaneCli({ lane: "opencode/glm-5.3-flash-free", stdin: "p", timeoutMs: 5_000, runner: opencode.runner });
+  assert.ok(stripped.ok);
+  assert.equal(stripped.stdout, "CLEAR\nAll good.", "the opencode CLI's pretty-printing never reaches a downstream parser");
+
+  // The other families keep their stdout byte-identical — the strip is the opencode path's alone.
+  const copilot = fakeLaneRunner(() => ({ code: 0, stdout: noisy }));
+  const untouched = await core.runLaneCli({ lane: "copilot/gpt-5.4", stdin: "p", timeoutMs: 5_000, runner: copilot.runner });
+  assert.ok(untouched.ok);
+  assert.equal(untouched.stdout, noisy);
+});
+
 // ---- the CLI-side mirror (ADR 0004: CLIs import no src/ code) ----------------------------
 
 test("the plugin/bin mirror matches src/lanes.ts: names, default, validation, load tolerance, save persistence", async (t) => {
