@@ -8,6 +8,12 @@
  * plain CLI invocation. Both are best-effort callers: a failure is a named
  * reason in the reply, never a thrown error — the config of record stays
  * lanes.json either way.
+ *
+ * v0.0.17 (ADR 0012 §2–§4): the session WebSocket grew a payload-returning
+ * core (`daemonWsRequestPayload`) and the plugin lifecycle trio
+ * (`listDaemonPlugins` / `installDaemonPlugin` / `manageDaemonPlugin`) speaks
+ * Paseo's native plugin.* messages over it, CLI fallbacks behind — every
+ * function takes the daemon `home` first.
  */
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
