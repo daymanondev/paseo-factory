@@ -313,3 +313,37 @@ export async function listDaemonPlugins(home: string): Promise<{ ok: true; plugi
   if (!cli.ok) return { ok: false, reason: cli.reason };
   return { ok: true, plugins: pluginsFromCliJson(cli.value) };
 }
+
+/**
+ * An explicit local path source — routes the install to the directory request.
+ * `/`, `.`, `~`, or a Windows drive path (`C:\…` / `C:/…`); `~` stays literal,
+ * the daemon resolves it (spec §Implementation Decisions 4).
+ */
+function isLocalPathSource(source: string): boolean {
+  return source.startsWith("/") || source.startsWith(".") || source.startsWith("~") || /^[A-Za-z]:[\\/]/.test(source);
+}
+
+/** Installs a plugin (`plugin.source.install.request` / `plugin.directory.install.request`), falling back to the paseo CLI. */
+export async function installDaemonPlugin(
+  home: string,
+  input: { id: string; source: string; ref?: string },
+): Promise<{ ok: true; plugin: DaemonPluginItem } | { ok: false; reason: string }> {
+  const request = isLocalPathSource(input.source)
+    ? { type: "plugin.directory.install.request", path: input.source, id: input.id }
+    : { type: "plugin.source.install.request", source: input.source, id: input.id, ...(input.ref ? { ref: input.ref } : {}) };
+  const responseType = request.type.replace(".request", ".response");
+  const wsCall = daemonWsRequestPayload<{ plugin?: unknown }>(home, request, responseType, PLUGIN_IO_TIMEOUT_MS);
+  if (wsCall !== null) {
+    const reply = await wsCall;
+    if (!reply.ok) return { ok: false, reason: reply.reason };
+    const plugin = (reply.payload as { plugin?: unknown } | undefined)?.plugin;
+    if (!isDaemonPluginItem(plugin)) return { ok: false, reason: `the daemon's ${responseType} carried no plugin` };
+    return { ok: true, plugin };
+  }
+  const argv = ["--home", home, "plugin", "install", input.source, "--id", input.id, ...(input.ref ? ["--ref", input.ref] : []), "--json"];
+  const cli = pluginCliJson(home, argv, PLUGIN_IO_TIMEOUT_MS);
+  if (!cli.ok) return { ok: false, reason: cli.reason };
+  const plugin = pluginsFromCliJson(cli.value)[0];
+  if (plugin === undefined) return { ok: false, reason: `paseo plugin install printed no plugin JSON` };
+  return { ok: true, plugin };
+}

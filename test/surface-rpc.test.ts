@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import type { Socket } from "node:net";
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, chmodSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { basename, delimiter, dirname, join } from "node:path";
 import { createFactory } from "../plugin/server/core/factory.ts";
 import { resolveProject } from "../plugin/server/core/project.ts";
@@ -14,7 +14,7 @@ import { factoryEnvFor, injectRoleOnCreate, injectSessionEnv, renderAgentContrac
 import type { AgentCreateRequest } from "../plugin/server/roles.ts";
 import { discoverProjects, readProjectRegistration, writeProjectRegistration } from "../plugin/server/projects.ts";
 import { lanesPath, loadLanes, saveLanes } from "../src/lanes.ts";
-import { BRIDGE_TIMEOUT_MS, cliUtils, listDaemonPlugins, PLUGIN_IO_TIMEOUT_MS } from "../plugin/server/daemon-cli.ts";
+import { BRIDGE_TIMEOUT_MS, cliUtils, installDaemonPlugin, listDaemonPlugins, PLUGIN_IO_TIMEOUT_MS } from "../plugin/server/daemon-cli.ts";
 import { disposeDir, fakeCopilotRunner, gitCommitAll, makeTempDir, writeLanes } from "./helpers.ts";
 
 /**
@@ -1182,4 +1182,164 @@ test("daemon plugin bridge: listDaemonPlugins speaks plugin.list.request over th
 test("daemon plugin bridge: the payload timeouts stay pinned — 30s default, 300s for plugin install/update", () => {
   assert.equal(BRIDGE_TIMEOUT_MS, 30_000, "every non-install request keeps the 30s bridge default");
   assert.equal(PLUGIN_IO_TIMEOUT_MS, 300_000, "a remote Git clone/fetch never times out prematurely (spec §Implementation Decisions 4)");
+});
+
+/** A fake `paseo` CLI first on PATH — records every argv, answers fixed stdout (the CLI fallback seam). */
+function fakePaseoCli(t: TestContext, stdout: string, opts: { code?: number; stderr?: string } = {}) {
+  const binDir = makeTempDir("paseo-factory-fake-cli-");
+  disposeDir(t, binDir);
+  const argvLog = join(binDir, "argv.log");
+  const script = [
+    "#!/usr/bin/env node",
+    `require("node:fs").appendFileSync(process.env.FAKE_PASEO_LOG, JSON.stringify(process.argv.slice(2)) + "\\n");`,
+    `process.stdout.write(${JSON.stringify(stdout)});`,
+    opts.stderr === undefined ? "" : `process.stderr.write(${JSON.stringify(opts.stderr)});`,
+    `process.exitCode = ${opts.code ?? 0};`,
+  ]
+    .filter((line) => line !== "")
+    .join("\n");
+  writeFileSync(join(binDir, "paseo"), `${script}\n`);
+  chmodSync(join(binDir, "paseo"), 0o755);
+  const savedPath = process.env.PATH;
+  const savedLog = process.env.FAKE_PASEO_LOG;
+  process.env.PATH = `${binDir}${delimiter}${savedPath ?? ""}`;
+  process.env.FAKE_PASEO_LOG = argvLog;
+  t.after(() => {
+    process.env.PATH = savedPath;
+    if (savedLog === undefined) delete process.env.FAKE_PASEO_LOG;
+    else process.env.FAKE_PASEO_LOG = savedLog;
+  });
+  const argvs = (): string[][] =>
+    existsSync(argvLog)
+      ? readFileSync(argvLog, "utf8")
+          .split("\n")
+          .filter((line) => line !== "")
+          .map((line) => JSON.parse(line) as string[])
+      : [];
+  return { argvs };
+}
+
+test("daemon plugin bridge: installDaemonPlugin routes a git source to plugin.source.install.request and returns the plugin", async (t) => {
+  const daemon = await startFakeDaemon(t, (message) => {
+    if (message.type === "plugin.source.install.request") {
+      return {
+        type: "plugin.source.install.response",
+        payload: {
+          requestId: message.requestId,
+          plugin: {
+            id: message.id,
+            path: "/plugins/factory-burn-lab",
+            enabled: true,
+            status: "running",
+            installation: { identity: { kind: "git", remote: "https://github.com/daymanondev/factory-burn-lab", pluginPath: "plugin" }, currentRevision: "abc1234def5678" },
+          },
+        },
+      };
+    }
+    return null;
+  });
+
+  const reply = await installDaemonPlugin(daemon.home, { id: "factory-burn-lab", source: "git:daymanondev/factory-burn-lab:plugin" });
+  assert.ok(reply.ok, reply.ok ? "" : reply.reason);
+  assert.equal(reply.plugin.id, "factory-burn-lab");
+  assert.equal(reply.plugin.status, "running");
+  assert.equal(reply.plugin.installation?.identity.kind, "git");
+  assert.equal(daemon.frames.length, 1);
+  const frame = daemon.frames[0]!;
+  assert.equal(frame.type, "plugin.source.install.request");
+  assert.deepEqual(
+    Object.keys(frame.message).sort(),
+    ["id", "requestId", "source", "type"],
+    "the canonical source ride as { source, id } — ref only when given, never a probed local sibling",
+  );
+  assert.equal(frame.message.source, "git:daymanondev/factory-burn-lab:plugin");
+  assert.equal(frame.message.id, "factory-burn-lab");
+});
+
+test("daemon plugin bridge: installDaemonPlugin forwards a custom ref and classifies local paths as directory installs", async (t) => {
+  const daemon = await startFakeDaemon(t, (message) => {
+    if (String(message.type).endsWith(".request")) {
+      const type = String(message.type).replace(".request", ".response");
+      return {
+        type,
+        payload: {
+          requestId: message.requestId,
+          plugin: { id: message.id ?? message.pluginId, path: "/plugins/x", enabled: true, status: "running" },
+        },
+      };
+    }
+    return null;
+  });
+
+  const fork = await installDaemonPlugin(daemon.home, { id: "factory-connector", source: "git:myfork/factory-connector:plugin", ref: "feat/x" });
+  assert.ok(fork.ok, fork.ok ? "" : fork.reason);
+  assert.equal(daemon.frames[0]!.type, "plugin.source.install.request");
+  assert.equal(daemon.frames[0]!.message.ref, "feat/x", "a custom branch/tag/commit ref forwards verbatim");
+
+  // The spec's exact local-path arms: "/", ".", "~", and a Windows drive path.
+  const localSources = ["/tmp/custom-plugin", "./checkouts/factory-connector", "~/plugins/factory-connector", "C:\\dev\\factory-connector"];
+  for (const source of localSources) {
+    const reply = await installDaemonPlugin(daemon.home, { id: "factory-connector", source });
+    assert.ok(reply.ok, reply.ok ? "" : reply.reason);
+  }
+  const directoryFrames = daemon.frames.slice(1);
+  assert.deepEqual(
+    directoryFrames.map((frame) => frame.type),
+    localSources.map(() => "plugin.directory.install.request"),
+    "every explicit local path routes to the directory install request",
+  );
+  for (let i = 0; i < localSources.length; i++) {
+    assert.deepEqual(
+      Object.keys(directoryFrames[i]!.message).sort(),
+      ["id", "path", "requestId", "type"],
+      "the directory install carries { path, id } — the path stays literal (the daemon resolves ~)",
+    );
+    assert.equal(directoryFrames[i]!.message.path, localSources[i]);
+    assert.equal(directoryFrames[i]!.message.id, "factory-connector");
+  }
+});
+
+test("daemon plugin bridge: a daemon rpc_error surfaces as the named reason", async (t) => {
+  const daemon = await startFakeDaemon(t, (message) => ({
+    type: "rpc_error",
+    payload: { requestId: message.requestId, error: "plugin source installs need a newer host" },
+  }));
+
+  const reply = await installDaemonPlugin(daemon.home, { id: "factory-burn-lab", source: "git:daymanondev/factory-burn-lab:plugin" });
+  assert.ok(!reply.ok);
+  assert.equal(reply.reason, "plugin source installs need a newer host");
+});
+
+test("daemon plugin bridge: with no paseo.pid the install falls back to the paseo CLI", async (t) => {
+  const home = makeTempDir("paseo-factory-no-daemon-"); // no paseo.pid — the WebSocket bridge declines
+  disposeDir(t, home);
+  const cli = fakePaseoCli(t, `${JSON.stringify({ id: "factory-burn-lab", path: "/plugins/factory-burn-lab", enabled: true, status: "running" })}\n`);
+
+  const reply = await installDaemonPlugin(home, { id: "factory-burn-lab", source: "git:daymanondev/factory-burn-lab:plugin", ref: "feat/x" });
+  assert.ok(reply.ok, reply.ok ? "" : reply.reason);
+  assert.equal(reply.plugin.id, "factory-burn-lab");
+  assert.deepEqual(
+    cli.argvs(),
+    [["--home", home, "plugin", "install", "git:daymanondev/factory-burn-lab:plugin", "--id", "factory-burn-lab", "--ref", "feat/x", "--json"]],
+    "the fallback spells 'paseo --home <home> plugin install <source> --id <id> [--ref <ref>] --json'",
+  );
+
+  const bare = await installDaemonPlugin(home, { id: "factory-connector", source: "git:daymanondev/factory-connector:plugin" });
+  assert.ok(bare.ok, bare.ok ? "" : bare.reason);
+  assert.deepEqual(
+    cli.argvs()[1],
+    ["--home", home, "plugin", "install", "git:daymanondev/factory-connector:plugin", "--id", "factory-connector", "--json"],
+    "no --ref flag when no ref was given",
+  );
+});
+
+test("daemon plugin bridge: a failing CLI fallback reports the CLI's first error line", async (t) => {
+  const home = makeTempDir("paseo-factory-no-daemon-");
+  disposeDir(t, home);
+  const cli = fakePaseoCli(t, "", { code: 1, stderr: "Error: no such source: git:nope/x:plugin\nsecond line\n" });
+
+  const reply = await installDaemonPlugin(home, { id: "factory-burn-lab", source: "git:nope/x:plugin" });
+  assert.ok(!reply.ok);
+  assert.equal(reply.reason, "Error: no such source: git:nope/x:plugin");
+  assert.equal(cli.argvs().length, 1);
 });
