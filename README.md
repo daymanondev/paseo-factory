@@ -2,8 +2,7 @@
 
 A verification line for coding agents, delivered as a [Paseo](https://paseo.sh) plugin.
 
-The repo is `paseo-slp-factory`; the plugin/package name is `paseo-factory` (the
-divergence is accepted — see ADR 0001).
+Both the GitHub repository and the plugin/package name are `paseo-factory` (see ADR 0001).
 
 Work is judged against criteria fixed before it starts: the **Owner** sets a
 Contract (one gate command, one artifact), the **Agent** does the work and

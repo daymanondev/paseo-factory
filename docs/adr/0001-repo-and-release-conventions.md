@@ -9,9 +9,9 @@
 
 ## Decision
 
-- **Repo name stays `paseo-slp-factory`.** No rename, no fresh repo. The repo
-  name diverging from the package/plugin name (`paseo-factory`) is accepted;
-  the README must link them clearly.
+- **Repo name unified as `paseo-factory` (amended 2026-10-17).** Originally
+  kept as `paseo-slp-factory`, renamed on GitHub to `paseo-factory` so the
+  repository, npm package, and plugin id share one canonical name.
 - **Branch model: trunk-based.** Short-lived feature branches → PR into a
   protected `main`; CI must pass to merge; branches deleted after merge.
 - **Versioning: semver 0.0.x while private.** `0.1.0` is the first public cut;
@@ -26,5 +26,4 @@
 ## Consequences
 
 - All public artifacts (commits, README, CHANGELOG, ADRs) are in English.
-- npm package and GitHub repo names differ — every README states both once,
-  up top, to keep discoverability simple.
+- The GitHub repo, npm package, and Paseo plugin id all share the single name `paseo-factory`.
