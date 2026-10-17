@@ -66,6 +66,8 @@ export {
   saveLanes,
 } from "./lanes.ts";
 export type { LaneCliInvocation, LaneCliRunner, LaneName, Lanes, LanesResult, ParsedLane } from "./lanes.ts";
+export { provisionPiAgentHome } from "./pi-home.ts";
+export type { PiAgentRole, ProvisionPiHomeOptions } from "./pi-home.ts";
 export {
   judgeShellCommand,
   judgeFilePath,

@@ -32,7 +32,7 @@ import { join } from "node:path";
 /** The factory roles that get an isolated Pi harness home (spec §Implementation Decisions 1). */
 export type PiAgentRole = "supervisor" | "lead" | "agent" | "headless";
 
-export interface PiAgentHomeInput {
+export interface ProvisionPiHomeOptions {
   /** The factory state directory — the harness home is materialized at `<stateDir>/pi-agent/<role>`. */
   stateDir: string;
   role: PiAgentRole;
@@ -72,7 +72,7 @@ const CORE_AGENT_SKILLS = ["tdd", "diagnosing-bugs", "codebase-design"] as const
  * Materializes (idempotently) the isolated Pi harness home for `role` and
  * returns its path — the value callers inject as `PI_CODING_AGENT_DIR`.
  */
-export function provisionPiAgentHome(input: PiAgentHomeInput): string {
+export function provisionPiAgentHome(input: ProvisionPiHomeOptions): string {
   const sourceAgentDir = input.sourceAgentDir ?? join(homedir(), ".pi", "agent");
   const roleHome = join(input.stateDir, "pi-agent", input.role);
   mkdirSync(roleHome, { recursive: true });
