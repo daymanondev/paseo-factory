@@ -18,14 +18,24 @@ import { pathToFileURL } from "node:url";
 export type DaemonReply = { ok: true } | { ok: false; reason: string };
 
 /** How long a bridge call may take before the socket/child is closed. */
-const BRIDGE_TIMEOUT_MS = 30_000;
+export const BRIDGE_TIMEOUT_MS = 30_000;
 
-/** Direct daemon WebSocket call using `<home>/paseo.pid` and `<home>/local-credential` (same protocol as driver.mjs). */
-function daemonWsRequest(
+/** How long a plugin install/update may take — a Git clone/fetch over the network never times out prematurely (v0.0.17, ADR 0012 §4). */
+export const PLUGIN_IO_TIMEOUT_MS = 300_000;
+
+/** A daemon reply that also carries the response message's payload (v0.0.17). */
+export type DaemonPayloadReply<T> = { ok: true; payload: T } | { ok: false; reason: string };
+
+/**
+ * Direct daemon WebSocket call using `<home>/paseo.pid` and `<home>/local-credential`
+ * (same protocol as driver.mjs), returning the response payload.
+ */
+function daemonWsRequestPayload<T>(
   home: string,
   message: Record<string, unknown>,
   responseType: string,
-): Promise<DaemonReply> | null {
+  timeoutMs: number = BRIDGE_TIMEOUT_MS,
+): Promise<DaemonPayloadReply<T>> | null {
   const pidPath = join(home, "paseo.pid");
   const credPath = join(home, "local-credential");
   if (!existsSync(pidPath) || !existsSync(credPath)) return null;
@@ -43,7 +53,7 @@ function daemonWsRequest(
   return new Promise((resolve) => {
     const ws = new WebSocket(`ws://${listen}/ws`);
     let settled = false;
-    const finish = (reply: DaemonReply): void => {
+    const finish = (reply: DaemonPayloadReply<T>): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -52,7 +62,7 @@ function daemonWsRequest(
       } catch {}
       resolve(reply);
     };
-    const timer = setTimeout(() => finish({ ok: false, reason: `no ${responseType} within ${BRIDGE_TIMEOUT_MS}ms` }), BRIDGE_TIMEOUT_MS);
+    const timer = setTimeout(() => finish({ ok: false, reason: `no ${responseType} within ${timeoutMs}ms` }), timeoutMs);
     ws.addEventListener("open", () => {
       ws.send(
         JSON.stringify({
@@ -89,13 +99,24 @@ function daemonWsRequest(
         if (typeof msg.payload.error === "string" && msg.payload.error !== "") {
           finish({ ok: false, reason: msg.payload.error });
         } else {
-          finish({ ok: true });
+          finish({ ok: true, payload: msg.payload as T });
         }
       }
     });
     ws.addEventListener("error", () => finish({ ok: false, reason: `daemon socket error (ws://${listen}/ws)` }));
     ws.addEventListener("close", () => finish({ ok: false, reason: "daemon socket closed before response" }));
   });
+}
+
+/** The ok-only view of a WebSocket call — the payload-discarding wrapper the seat bridges keep. */
+function daemonWsRequest(
+  home: string,
+  message: Record<string, unknown>,
+  responseType: string,
+): Promise<DaemonReply> | null {
+  const call = daemonWsRequestPayload<unknown>(home, message, responseType);
+  if (call === null) return null;
+  return call.then((reply): DaemonReply => (reply.ok ? { ok: true } : { ok: false, reason: reply.reason }));
 }
 
 /** The bridge body: import the CLI's own daemon client, call one method, print JSON. */
@@ -199,4 +220,96 @@ export function stopAgentViaCli(agentId: string, home?: string): Promise<DaemonR
     const detail = (probe.stderr || probe.stdout || "").trim().split("\n")[0] ?? "";
     resolve({ ok: false, reason: detail !== "" ? detail : `paseo agent stop exited with ${probe.status ?? "a signal"}` });
   });
+}
+
+// ---- the plugin lifecycle bridge (v0.0.17, ADR 0012 §2–§4) ---------------------------------
+//
+// Paseo's native plugin lifecycle, spoken over the same session WebSocket
+// (`<home>/paseo.pid` + `<home>/local-credential`) with the paseo CLI as the
+// fallback when no daemon answers. Every function takes the daemon `home`
+// first — trial (`~/.paseo-factory`) and production (`~/.paseo`) plugin
+// state never cross-contaminate.
+
+/** How a plugin was installed — the protocol's `PluginSourceIdentity` kinds. */
+export type DaemonPluginIdentity =
+  | { kind: "directory"; path: string }
+  | { kind: "git"; remote: string; pluginPath?: string; registry?: { url: string; id: string } }
+  | { kind: "npm"; packageName: string; pluginPath?: string; registry?: { url: string; id: string } };
+
+/** A daemon plugin list item — the structural slice of the protocol's `PluginListItem` the surface reads. */
+export interface DaemonPluginItem {
+  id: string;
+  name?: string;
+  path: string;
+  enabled: boolean;
+  status: "running" | "failed" | "disabled";
+  source?: "git" | "directory";
+  npm?: { packageName: string; requestedSpec?: string; version?: string; integrity?: string };
+  installation?: { identity: DaemonPluginIdentity; currentRevision?: string };
+  remote?: string;
+  ref?: string;
+  commit?: string;
+  error?: string;
+}
+
+/** One row of a `plugin.source.update.response` — what changed for one plugin id. */
+export interface DaemonPluginUpdateRow {
+  id: string;
+  previousCommit?: string;
+  currentCommit?: string;
+  commits?: number;
+  updated: boolean;
+}
+
+/** The manage actions the bridge speaks (spec §Implementation Decisions 4). */
+export type DaemonPluginAction = "enable" | "disable" | "reload" | "update" | "remove";
+
+function isDaemonPluginItem(value: unknown): value is DaemonPluginItem {
+  if (typeof value !== "object" || value === null) return false;
+  const item = value as { id?: unknown; path?: unknown };
+  return typeof item.id === "string" && typeof item.path === "string";
+}
+
+/** One `paseo` CLI invocation answering parsed `--json` stdout — a named reason on any death. */
+function pluginCliJson(home: string, argv: string[], timeoutMs: number): { ok: true; value: unknown } | { ok: false; reason: string } {
+  const env = { ...process.env, PASEO_HOME: home, NO_COLOR: "1" };
+  const probe = spawnSync("paseo", argv, { encoding: "utf8", timeout: timeoutMs, env });
+  if (probe.error !== undefined) return { ok: false, reason: probe.error.message };
+  if (probe.status !== 0) {
+    const detail = (probe.stderr || probe.stdout || "").trim().split("\n")[0] ?? "";
+    return { ok: false, reason: detail !== "" ? detail : `paseo ${argv.join(" ")} exited with ${probe.status ?? "a signal"}` };
+  }
+  try {
+    return { ok: true, value: JSON.parse(probe.stdout) };
+  } catch {
+    const detail = probe.stdout.trim().split("\n")[0] ?? "";
+    return { ok: false, reason: detail !== "" ? `paseo ${argv.join(" ")} printed non-JSON output: ${detail}` : `paseo ${argv.join(" ")} printed no output` };
+  }
+}
+
+/** Unwraps a CLI `--json` answer that may be the item itself or wrapped as `{ plugin }` / listed under `plugins`. */
+function pluginsFromCliJson(value: unknown): DaemonPluginItem[] {
+  const candidates = Array.isArray(value)
+    ? value
+    : typeof value === "object" && value !== null && Array.isArray((value as { plugins?: unknown }).plugins)
+      ? ((value as { plugins: unknown[] }).plugins)
+      : typeof value === "object" && value !== null && isDaemonPluginItem((value as { plugin?: unknown }).plugin)
+        ? [(value as { plugin: unknown }).plugin]
+        : [value];
+  return candidates.filter(isDaemonPluginItem);
+}
+
+/** Lists the daemon's plugins (`plugin.list.request` → `payload.plugins`), falling back to `paseo --home <home> plugin ls --json`. */
+export async function listDaemonPlugins(home: string): Promise<{ ok: true; plugins: DaemonPluginItem[] } | { ok: false; reason: string }> {
+  const wsCall = daemonWsRequestPayload<{ plugins?: unknown }>(home, { type: "plugin.list.request" }, "plugin.list.response");
+  if (wsCall !== null) {
+    const reply = await wsCall;
+    if (!reply.ok) return { ok: false, reason: reply.reason };
+    const plugins = Array.isArray(reply.payload?.plugins) ? reply.payload.plugins.filter(isDaemonPluginItem) : null;
+    if (plugins === null) return { ok: false, reason: "the daemon's plugin.list.response carried no plugins array" };
+    return { ok: true, plugins };
+  }
+  const cli = pluginCliJson(home, ["--home", home, "plugin", "ls", "--json"], BRIDGE_TIMEOUT_MS);
+  if (!cli.ok) return { ok: false, reason: cli.reason };
+  return { ok: true, plugins: pluginsFromCliJson(cli.value) };
 }

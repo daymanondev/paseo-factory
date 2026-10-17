@@ -1,8 +1,11 @@
 import { test } from "node:test";
 import type { TestContext } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { createServer } from "node:http";
+import type { Socket } from "node:net";
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, delimiter, dirname, join } from "node:path";
 import { createFactory } from "../plugin/server/core/factory.ts";
 import { resolveProject } from "../plugin/server/core/project.ts";
 import { createSurfaceHandlers } from "../plugin/server/surface-rpc.ts";
@@ -11,8 +14,7 @@ import { factoryEnvFor, injectRoleOnCreate, injectSessionEnv, renderAgentContrac
 import type { AgentCreateRequest } from "../plugin/server/roles.ts";
 import { discoverProjects, readProjectRegistration, writeProjectRegistration } from "../plugin/server/projects.ts";
 import { lanesPath, loadLanes, saveLanes } from "../src/lanes.ts";
-import { cliUtils } from "../plugin/server/daemon-cli.ts";
-import { delimiter } from "node:path";
+import { BRIDGE_TIMEOUT_MS, cliUtils, listDaemonPlugins, PLUGIN_IO_TIMEOUT_MS } from "../plugin/server/daemon-cli.ts";
 import { disposeDir, fakeCopilotRunner, gitCommitAll, makeTempDir, writeLanes } from "./helpers.ts";
 
 /**
@@ -1021,4 +1023,163 @@ test("cliUtils: splits the search path on node:path's delimiter — a ';' Window
 
   const posixPath = [join(dir, "miss"), join(dir, "win-entry")].join(delimiter);
   assert.ok(cliUtils(posixPath) !== null, "the platform delimiter stays the default");
+});
+
+// ---- the mock daemon — a hand-rolled RFC6455 server over the bridge's session protocol -------
+
+const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+/** Decodes complete client frames from a buffer — text payloads plus the unconsumed rest. */
+function decodeWsFrames(buffer: Buffer): { texts: string[]; closed: boolean; rest: Buffer } {
+  const texts: string[] = [];
+  let closed = false;
+  let offset = 0;
+  while (offset + 2 <= buffer.length) {
+    const opcode = buffer[offset]! & 0x0f;
+    const masked = (buffer[offset + 1]! & 0x80) !== 0;
+    let length = buffer[offset + 1]! & 0x7f;
+    let cursor = offset + 2;
+    if (length === 126) {
+      if (cursor + 2 > buffer.length) break;
+      length = buffer.readUInt16BE(cursor);
+      cursor += 2;
+    } else if (length === 127) {
+      if (cursor + 8 > buffer.length) break;
+      length = Number(buffer.readBigUInt64BE(cursor));
+      cursor += 8;
+    }
+    const maskLength = masked ? 4 : 0;
+    if (cursor + maskLength + length > buffer.length) break;
+    const mask = masked ? buffer.subarray(cursor, cursor + 4) : null;
+    cursor += maskLength;
+    const payload = buffer.subarray(cursor, cursor + length);
+    if (mask !== null) for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i & 3]!;
+    if (opcode === 0x1) texts.push(payload.toString("utf8"));
+    if (opcode === 0x8) closed = true;
+    offset = cursor + length;
+  }
+  return { texts, closed, rest: buffer.subarray(offset) };
+}
+
+/** Encodes one unmasked server text frame. */
+function encodeWsText(text: string): Buffer {
+  const payload = Buffer.from(text, "utf8");
+  const frame = payload.length < 126 ? Buffer.allocUnsafe(2 + payload.length) : Buffer.allocUnsafe(4 + payload.length);
+  frame[0] = 0x81;
+  if (payload.length < 126) {
+    frame[1] = payload.length;
+    payload.copy(frame, 2);
+  } else {
+    frame[1] = 126;
+    frame.writeUInt16BE(payload.length, 2);
+    payload.copy(frame, 4);
+  }
+  return frame;
+}
+
+/** One session message the fake daemon received. */
+interface FakeDaemonFrame {
+  type: string;
+  message: Record<string, unknown>;
+}
+
+/**
+ * A fake Paseo daemon speaking the bridge's exact session protocol (hello →
+ * server_info → session envelopes) over a hermetic temp home seeded with
+ * `<home>/paseo.pid` + `<home>/local-credential`. No `ws` dependency is
+ * installed, so this is a hand-rolled upgrade server — loopback only, never
+ * the network. `reply` scripts each session message's answer; null stays
+ * silent. Every received session message is recorded for wire assertions.
+ */
+async function startFakeDaemon(t: TestContext, reply: (message: Record<string, unknown>) => Record<string, unknown> | null) {
+  const frames: FakeDaemonFrame[] = [];
+  const sockets = new Set<Socket>();
+  const server = createServer();
+  server.on("upgrade", (req, socket) => {
+    const key = String(req.headers["sec-websocket-key"] ?? "");
+    const accept = createHash("sha1").update(key + WS_GUID).digest("base64");
+    socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+    sockets.add(socket);
+    let pending = Buffer.alloc(0);
+    socket.on("data", (chunk: Buffer) => {
+      const decoded = decodeWsFrames(Buffer.concat([pending, chunk]));
+      pending = decoded.rest;
+      for (const text of decoded.texts) {
+        const envelope = JSON.parse(text) as Record<string, unknown>;
+        if (envelope.type === "hello") {
+          socket.write(
+            encodeWsText(
+              JSON.stringify({
+                type: "session",
+                message: { type: "status", payload: { status: "server_info", features: { pluginSourceInstallation: true, pluginSourceUpdates: true } } },
+              }),
+            ),
+          );
+          continue;
+        }
+        if (envelope.type !== "session" || typeof envelope.message !== "object" || envelope.message === null) continue;
+        const message = envelope.message as Record<string, unknown>;
+        frames.push({ type: String(message.type), message });
+        const answer = reply(message);
+        if (answer !== null) socket.write(encodeWsText(JSON.stringify({ type: "session", message: answer })));
+      }
+      if (decoded.closed) socket.end(Buffer.from([0x88, 0x00]));
+    });
+    socket.on("close", () => sockets.delete(socket));
+    socket.on("error", () => {});
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (address === null || typeof address === "string") throw new Error("the fake daemon did not get a port");
+  const home = makeTempDir("paseo-factory-fake-daemon-");
+  disposeDir(t, home);
+  writeFileSync(join(home, "paseo.pid"), `${JSON.stringify({ listen: `127.0.0.1:${address.port}` })}\n`);
+  writeFileSync(join(home, "local-credential"), "test-local-credential\n");
+  t.after(() => {
+    for (const socket of sockets) socket.destroy();
+    server.close();
+  });
+  return { home, frames };
+}
+
+test("daemon plugin bridge: listDaemonPlugins speaks plugin.list.request over the session WebSocket and returns the payload", async (t) => {
+  const daemon = await startFakeDaemon(t, (message) => {
+    if (message.type === "plugin.list.request") {
+      return {
+        type: "plugin.list.response",
+        payload: {
+          requestId: message.requestId,
+          plugins: [
+            { id: "paseo-factory", path: "/plugins/paseo-factory", enabled: true, status: "running" },
+            {
+              id: "factory-burn-lab",
+              path: "/plugins/factory-burn-lab",
+              enabled: true,
+              status: "running",
+              installation: { identity: { kind: "git", remote: "https://github.com/daymanondev/factory-burn-lab", pluginPath: "plugin" }, currentRevision: "abc1234def5678" },
+            },
+          ],
+        },
+      };
+    }
+    return null;
+  });
+
+  const reply = await listDaemonPlugins(daemon.home);
+  assert.ok(reply.ok, reply.ok ? "" : reply.reason);
+  assert.deepEqual(
+    reply.plugins.map((plugin) => [plugin.id, plugin.status]),
+    [["paseo-factory", "running"], ["factory-burn-lab", "running"]],
+    "the response payload's plugins array rides the reply — the payload-returning bridge",
+  );
+  assert.equal(reply.plugins[1]!.installation?.currentRevision, "abc1234def5678");
+  assert.equal(daemon.frames.length, 1, "one session message — the bridge's own hello/status frames stay out");
+  assert.equal(daemon.frames[0]!.type, "plugin.list.request");
+  assert.equal(daemon.frames[0]!.message.requestId !== undefined, true, "the bridge stamps a requestId on the request");
+  assert.deepEqual(Object.keys(daemon.frames[0]!.message).sort(), ["requestId", "type"], "the list request carries only type + requestId");
+});
+
+test("daemon plugin bridge: the payload timeouts stay pinned — 30s default, 300s for plugin install/update", () => {
+  assert.equal(BRIDGE_TIMEOUT_MS, 30_000, "every non-install request keeps the 30s bridge default");
+  assert.equal(PLUGIN_IO_TIMEOUT_MS, 300_000, "a remote Git clone/fetch never times out prematurely (spec §Implementation Decisions 4)");
 });
