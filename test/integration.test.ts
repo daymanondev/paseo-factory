@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { createFactory } from "../src/index.ts";
+import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { checkCleanAt, createFactory, prepareTaskWorktree } from "../src/index.ts";
 import {
   discoverProjects,
   listProjectRegistrations,
@@ -196,6 +196,133 @@ test("the Task worktree loop: driver-style allocation, claim inside the worktree
   const spawnLine = factory.ledger.eventsFor("WTE2E").find((e) => e.event === "spawn_dispatched");
   assert.equal(spawnLine === undefined ? undefined : "worktree" in spawnLine ? spawnLine.worktree : undefined, prepared.path, "the spawn line carried the worktree");
   assert.match(readFileSync(join(stateDir, "report-WTE2E-1.md"), "utf8"), /- Verdict: GREEN/);
+});
+
+// ---- the Task worktree allocation served from the core barrel (v0.0.18, ADR 0010 / ADR 0012) ----
+
+test("the core barrel's prepareTaskWorktree: symlinked node_modules and .worktreeinclude copies stay clean through checkCleanAt and a full factory.claim", async (t) => {
+  const tmp = makeTempDir();
+  disposeDir(t, tmp);
+  const workspace = join(tmp, "workspace");
+  copyFixture("sample-workspace", workspace);
+  // node_modules rides as a link, never a copy; .env* is gitignored untracked config.
+  mkdirSync(join(workspace, "node_modules", ".bin"), { recursive: true });
+  writeFileSync(join(workspace, ".gitignore"), "node_modules/\n.env*\n");
+  writeFileSync(join(workspace, ".worktreeinclude"), "# local env only\n.env*\n");
+  const base = gitCommitAll(workspace);
+  writeFileSync(join(workspace, ".env.local"), "TOKEN=abc\n");
+  const stateDir = join(tmp, "factory");
+  const project = resolveProject(workspace);
+  assert.equal(project.ok, true, "the fixture workspace is a git Project");
+
+  // The core allocation (v0.0.18): companion-facing options on the proven driver behavior.
+  const prepared = prepareTaskWorktree({ stateDir, workspace, task: "COREWT1", base, symlinkNodeModules: true });
+  assert.ok(prepared.ok, prepared.ok ? "" : prepared.reason);
+  if (!prepared.ok) return;
+  assert.equal(prepared.path, join(stateDir, "projects", project.ok ? project.slug : "", "worktrees", "COREWT1"));
+  assert.equal(prepared.branch, "factory/COREWT1");
+  assert.equal(prepared.reset, false, "first allocation is a create, not a reset");
+  assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: prepared.path, encoding: "utf8" }).trim(), base, "checked out at the Contract's base commit");
+
+  // node_modules is a directory symlink to the root's, not a copy.
+  assert.ok(lstatSync(join(prepared.path, "node_modules")).isSymbolicLink(), "node_modules is a link, not a copy");
+  assert.ok(existsSync(join(prepared.path, "node_modules", ".bin")), "the link resolves into the root's node_modules");
+  // The .worktreeinclude-matched untracked file rides over.
+  assert.equal(readFileSync(join(prepared.path, ".env.local"), "utf8"), "TOKEN=abc\n", "the ignored untracked file rides over");
+
+  // Both the copies and the link are recorded in the worktree's own factory-excludes.
+  const gitDir = resolve(execFileSync("git", ["rev-parse", "--git-dir"], { cwd: prepared.path, encoding: "utf8" }).trim());
+  assert.equal(
+    readFileSync(join(gitDir, "factory-excludes"), "utf8"),
+    ".env.local\nnode_modules\n",
+    "the per-worktree excludes record the copied file AND the node_modules link",
+  );
+
+  // The station the Claim reads: clean tree at the claimed commit — with a symlink that
+  // `node_modules/` in .gitignore does NOT cover (git sees a file, not a directory).
+  const clean = await checkCleanAt(prepared.path, base);
+  assert.equal(clean.ok, true, clean.ok ? "" : clean.reason);
+  assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: prepared.path, encoding: "utf8" }).trim(), "", "porcelain is empty — the exclude carries the symlink");
+  // <project-root> is untouched — its HEAD and its clean tree.
+  assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: workspace, encoding: "utf8" }).trim(), base);
+  assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: workspace, encoding: "utf8" }).trim(), "");
+
+  // The full loop against the core allocation: the agent fixes the work inside the worktree.
+  const factory = createFactory({ stateDir });
+  factory.setContract({ task: "COREWT1", workspace, gate: "npm test", artifact: "src/format.ts" });
+  const spawn = factory.requestSpawn({ task: "COREWT1", provider: "claude", arity: 1, worktree: prepared.path });
+  assert.equal(spawn.outcome, "dispatched");
+  writeFileSync(
+    join(prepared.path, "src", "format.ts"),
+    [
+      "export function pad(input: string, width: number): string {",
+      "  if (input.length >= width) return input.slice(0, width);",
+      "  return input + \" \".repeat(width - input.length);",
+      "}",
+      "",
+    ].join("\n"),
+  );
+  const claimed = gitCommitChanges(prepared.path, "fix pad inside the core-allocated worktree");
+  const outcome = await factory.claim({ task: "COREWT1", sha: claimed });
+  assert.equal(outcome.verdict, "green", "the gate ran against the worktree checkout with node_modules linked");
+  assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: workspace, encoding: "utf8" }).trim(), base, "the root sat at base the whole run");
+});
+
+test("the core barrel's prepareTaskWorktree lands companion overrides: custom worktreePath and branchName replace the defaults", (t) => {
+  const tmp = makeTempDir();
+  disposeDir(t, tmp);
+  const workspace = join(tmp, "workspace");
+  copyFixture("sample-workspace", workspace);
+  // A Best-of-N arena repo: deps installed at the root, NO .worktreeinclude —
+  // the excludes file must still land for the node_modules link alone.
+  mkdirSync(join(workspace, "node_modules", ".bin"), { recursive: true });
+  writeFileSync(join(workspace, ".gitignore"), "node_modules/\n");
+  const base = gitCommitAll(workspace);
+  const stateDir = join(tmp, "factory");
+  const arena = join(tmp, "arena", "attempt-1");
+
+  const prepared = prepareTaskWorktree({
+    stateDir,
+    workspace,
+    task: "BO1",
+    base,
+    worktreePath: arena,
+    branchName: "burn-lab/BO1-a1",
+    symlinkNodeModules: true,
+  });
+  assert.ok(prepared.ok, prepared.ok ? "" : prepared.reason);
+  if (!prepared.ok) return;
+  assert.equal(prepared.path, arena, "the override replaces taskWorktreePath(stateDir, slug, task)");
+  assert.equal(prepared.branch, "burn-lab/BO1-a1", "the override replaces factory/<task>");
+  assert.equal(prepared.reset, false, "first allocation is a create, not a reset");
+  assert.equal(execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: arena, encoding: "utf8" }).trim(), "burn-lab/BO1-a1", "the worktree runs on the custom branch");
+  assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: arena, encoding: "utf8" }).trim(), base, "checked out at the Contract's base commit");
+  assert.ok(execFileSync("git", ["worktree", "list"], { cwd: workspace, encoding: "utf8" }).includes(arena), "a linked worktree of the project checkout");
+  assert.ok(lstatSync(join(arena, "node_modules")).isSymbolicLink(), "node_modules is a link, not a copy");
+  const gitDir = resolve(execFileSync("git", ["rev-parse", "--git-dir"], { cwd: arena, encoding: "utf8" }).trim());
+  assert.equal(readFileSync(join(gitDir, "factory-excludes"), "utf8"), "node_modules\n", "no include file matched, yet the link is excluded");
+  assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: arena, encoding: "utf8" }).trim(), "", "the arena sits clean");
+  assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: workspace, encoding: "utf8" }).trim(), "", "the root stays clean");
+
+  // A Best-of-N re-attempt: the previous attempt committed and moved on; a
+  // re-run at the same override path resets to base — with `base` omitted, the
+  // root's HEAD is the fallback base.
+  writeFileSync(join(arena, "src", "format.ts"), "export const dirty = 1;\n");
+  gitCommitChanges(arena, "attempt 1 went sideways");
+  const again = prepareTaskWorktree({ stateDir, workspace, task: "BO1", worktreePath: arena, branchName: "burn-lab/BO1-a1" });
+  assert.ok(again.ok, again.ok ? "" : again.reason);
+  if (!again.ok) return;
+  assert.equal(again.reset, true, "the second allocation at the custom path is a reset");
+  assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: arena, encoding: "utf8" }).trim(), base, "back at base — the omitted base fell back to the root's HEAD");
+  assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: arena, encoding: "utf8" }).trim(), "", "the reset arena sits clean");
+
+  // Refusal parity with the driver's allocator, at the barrel seam.
+  const plain = join(tmp, "plain");
+  mkdirSync(plain, { recursive: true });
+  writeFileSync(join(plain, "x.txt"), "not a repo\n");
+  const refused = prepareTaskWorktree({ stateDir, workspace: plain, task: "BO2" });
+  assert.equal(refused.ok, false);
+  if (!refused.ok) assert.match(refused.reason, /does not resolve to a git Project/);
 });
 
 // ---- the shared Project registry served from the core barrel (v0.0.18, ADR 0010 / ADR 0012) ----
