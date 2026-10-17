@@ -14,7 +14,7 @@ import { factoryEnvFor, injectRoleOnCreate, injectSessionEnv, renderAgentContrac
 import type { AgentCreateRequest } from "../plugin/server/roles.ts";
 import { discoverProjects, readProjectRegistration, writeProjectRegistration } from "../plugin/server/projects.ts";
 import { lanesPath, loadLanes, saveLanes } from "../src/lanes.ts";
-import { BRIDGE_TIMEOUT_MS, cliUtils, installDaemonPlugin, listDaemonPlugins, PLUGIN_IO_TIMEOUT_MS } from "../plugin/server/daemon-cli.ts";
+import { BRIDGE_TIMEOUT_MS, cliUtils, installDaemonPlugin, listDaemonPlugins, manageDaemonPlugin, PLUGIN_IO_TIMEOUT_MS } from "../plugin/server/daemon-cli.ts";
 import { disposeDir, fakeCopilotRunner, gitCommitAll, makeTempDir, writeLanes } from "./helpers.ts";
 
 /**
@@ -1342,4 +1342,75 @@ test("daemon plugin bridge: a failing CLI fallback reports the CLI's first error
   assert.ok(!reply.ok);
   assert.equal(reply.reason, "Error: no such source: git:nope/x:plugin");
   assert.equal(cli.argvs().length, 1);
+});
+
+test("daemon plugin bridge: manageDaemonPlugin dispatches enable, disable, reload, remove, and update", async (t) => {
+  const daemon = await startFakeDaemon(t, (message) => {
+    const type = String(message.type);
+    if (type === "plugin.source.update.request") {
+      return {
+        type: "plugin.source.update.response",
+        payload: {
+          requestId: message.requestId,
+          plugins: [
+            { id: "factory-burn-lab", previousCommit: "abc1234", currentCommit: "def5678", commits: 3, updated: true },
+            { id: "some-other-plugin", updated: false },
+          ],
+        },
+      };
+    }
+    if (type.endsWith(".request")) {
+      const responseType = type.replace(".request", ".response");
+      return {
+        type: responseType,
+        // remove responses carry requestId only (no plugin payload); the rest carry the plugin item
+        payload: {
+          requestId: message.requestId,
+          ...(responseType === "plugin.remove.response"
+            ? {}
+            : { plugin: { id: message.pluginId, path: "/plugins/x", enabled: responseType === "plugin.enable.response", status: "running" } }),
+        },
+      };
+    }
+    return null;
+  });
+
+  const enable = await manageDaemonPlugin(daemon.home, "factory-burn-lab", "enable");
+  assert.ok(enable.ok, enable.ok ? "" : enable.reason);
+  assert.equal(enable.plugin?.id, "factory-burn-lab");
+  assert.equal(enable.plugin?.enabled, true);
+  const disable = await manageDaemonPlugin(daemon.home, "factory-burn-lab", "disable");
+  assert.ok(disable.ok, disable.ok ? "" : disable.reason);
+  const reload = await manageDaemonPlugin(daemon.home, "factory-burn-lab", "reload");
+  assert.ok(reload.ok, reload.ok ? "" : reload.reason);
+  const remove = await manageDaemonPlugin(daemon.home, "factory-burn-lab", "remove");
+  assert.ok(remove.ok, remove.ok ? "" : remove.reason, "a remove's success is the frame arriving — the response carries no plugin");
+  const update = await manageDaemonPlugin(daemon.home, "factory-burn-lab", "update");
+  assert.ok(update.ok, update.ok ? "" : update.reason);
+  assert.equal(update.update?.currentCommit, "def5678", "the update answer is the row matching the pluginId — the payload is an array");
+  assert.equal(update.update?.updated, true);
+
+  assert.deepEqual(
+    daemon.frames.map((frame) => frame.type),
+    ["plugin.enable.request", "plugin.disable.request", "plugin.reload.request", "plugin.remove.request", "plugin.source.update.request"],
+  );
+  for (const frame of daemon.frames) {
+    assert.deepEqual(Object.keys(frame.message).sort(), ["pluginId", "requestId", "type"]);
+    assert.equal(frame.message.pluginId, "factory-burn-lab", "every manage request names its plugin — an update without pluginId would update every plugin");
+  }
+});
+
+test("daemon plugin bridge: with no paseo.pid the manage actions fall back to the paseo CLI", async (t) => {
+  const home = makeTempDir("paseo-factory-no-daemon-");
+  disposeDir(t, home);
+  const cli = fakePaseoCli(t, `${JSON.stringify({ plugins: [] })}\n`);
+
+  const enable = await manageDaemonPlugin(home, "factory-burn-lab", "enable");
+  assert.ok(enable.ok, enable.ok ? "" : enable.reason);
+  const update = await manageDaemonPlugin(home, "factory-burn-lab", "update");
+  assert.ok(update.ok, update.ok ? "" : update.reason);
+  assert.deepEqual(cli.argvs(), [
+    ["--home", home, "plugin", "enable", "factory-burn-lab", "--json"],
+    ["--home", home, "plugin", "update", "factory-burn-lab", "--yes", "--json"],
+  ]);
 });

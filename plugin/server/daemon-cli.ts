@@ -347,3 +347,42 @@ export async function installDaemonPlugin(
   if (plugin === undefined) return { ok: false, reason: `paseo plugin install printed no plugin JSON` };
   return { ok: true, plugin };
 }
+
+/**
+ * Manages an installed plugin: enable/disable/reload speak `plugin.<action>.request`,
+ * remove speaks `plugin.remove.request` (its response carries no plugin — the frame
+ * arriving is the success), update speaks `plugin.source.update.request` on the 300s
+ * plugin-IO timeout and answers with the payload row matching the pluginId.
+ */
+export async function manageDaemonPlugin(
+  home: string,
+  pluginId: string,
+  action: DaemonPluginAction,
+): Promise<{ ok: true; plugin?: DaemonPluginItem; update?: DaemonPluginUpdateRow } | { ok: false; reason: string }> {
+  const requestType = action === "update" ? "plugin.source.update.request" : `plugin.${action}.request`;
+  const responseType = requestType.replace(".request", ".response");
+  const timeoutMs = action === "update" ? PLUGIN_IO_TIMEOUT_MS : BRIDGE_TIMEOUT_MS;
+  const wsCall = daemonWsRequestPayload<Record<string, unknown>>(home, { type: requestType, pluginId }, responseType, timeoutMs);
+  if (wsCall !== null) {
+    const reply = await wsCall;
+    if (!reply.ok) return { ok: false, reason: reply.reason };
+    if (action === "update") {
+      const rows = Array.isArray((reply.payload as { plugins?: unknown }).plugins) ? (reply.payload as { plugins: unknown[] }).plugins : [];
+      const row = rows.find((entry): entry is DaemonPluginUpdateRow => {
+        if (typeof entry !== "object" || entry === null) return false;
+        const typed = entry as { id?: unknown; updated?: unknown };
+        return typed.id === pluginId && typeof typed.updated === "boolean";
+      });
+      return row === undefined ? { ok: true } : { ok: true, update: row };
+    }
+    if (action === "remove") return { ok: true };
+    const plugin = (reply.payload as { plugin?: unknown }).plugin;
+    if (!isDaemonPluginItem(plugin)) return { ok: false, reason: `the daemon's ${responseType} carried no plugin` };
+    return { ok: true, plugin };
+  }
+  // `--yes` on update: the bridge is non-interactive, and the flag is the CLI's own skip-confirmation switch.
+  const argv = ["--home", home, "plugin", action, pluginId, ...(action === "update" ? ["--yes"] : []), "--json"];
+  const cli = pluginCliJson(home, argv, timeoutMs);
+  if (!cli.ok) return { ok: false, reason: cli.reason };
+  return { ok: true };
+}
