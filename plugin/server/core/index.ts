@@ -7,8 +7,8 @@
  */
 export { createFactory } from "./factory.ts";
 export type { Factory, FactoryOptions, ContractInput, ClaimInput, ClaimOutcome, AcceptInput, SpawnInput, SpawnDecision, RespawnInput, RespawnDecision, MeterInput } from "./factory.ts";
-export { resolveProject, projectStateDir } from "./project.ts";
-export type { ProjectResolution } from "./project.ts";
+export { resolveProject, projectStateDir, readProjectRegistration, writeProjectRegistration, listProjectRegistrations, discoverProjects } from "./project.ts";
+export type { ProjectResolution, ProjectRegistration } from "./project.ts";
 export { resolveClaimedCommit, checkCleanAt, diffBetween, changedFiles, scopeCoversFile } from "./workspace.ts";
 export type { CommitResolution, TreeCheck } from "./workspace.ts";
 export { Ledger, usageIsValid } from "./ledger.ts";
