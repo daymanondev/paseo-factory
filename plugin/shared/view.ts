@@ -10,7 +10,7 @@
 import { z } from "zod";
 
 /** Bump when the shape changes in a way an older client cannot render. */
-export const FACTORY_VIEW_VERSION = 2 as const;
+export const FACTORY_VIEW_VERSION = 3 as const;
 
 /** The six model-bearing roles — mirrors src/lanes.ts (kept by test/lanes.test.ts). */
 export const LaneNameSchema = z.enum(["supervisor", "lead", "worker", "watch", "retro", "freshEyes"]);
@@ -172,6 +172,37 @@ export const RetroViewSchema = z.object({
 });
 export type RetroView = z.infer<typeof RetroViewSchema>;
 
+/**
+ * One companion plugin's lifecycle state as the daemon reports it (v0.0.17,
+ * ADR 0012 §2) — `not_installed` is the fold's own default for a catalog
+ * entry the daemon's plugin list does not carry (or cannot be asked for).
+ */
+export const CompanionStatusSchema = z.enum(["not_installed", "running", "disabled", "failed"]);
+export type CompanionStatus = z.infer<typeof CompanionStatusSchema>;
+
+/** How a companion was installed — the daemon's install identity kind. */
+export const CompanionInstallKindSchema = z.enum(["git", "directory", "npm"]);
+export type CompanionInstallKind = z.infer<typeof CompanionInstallKindSchema>;
+
+/** One Companion plugin card — the catalog entry joined with live daemon state. */
+export const CompanionPluginViewSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  tagline: z.string(),
+  description: z.string(),
+  canonicalSource: z.string(),
+  sidebarLabel: z.string(),
+  sidebarIcon: z.string(),
+  capabilities: z.array(z.string()),
+  status: CompanionStatusSchema,
+  enabled: z.boolean(),
+  installKind: CompanionInstallKindSchema.nullable(),
+  installedSource: z.string().nullable(),
+  currentRevision: z.string().nullable(),
+  error: z.string().nullable(),
+});
+export type CompanionPluginView = z.infer<typeof CompanionPluginViewSchema>;
+
 /** One ledger line for the stream — seq, ts, kind, and a one-line rendering. */
 export const LedgerLineViewSchema = z.object({
   seq: z.number().int(),
@@ -204,6 +235,8 @@ export const FactoryViewSchema = z.object({
   project: ProjectViewSchema.nullable(),
   /** Every discovered Project for the header's Project Selector, slug order. */
   projects: z.array(ProjectViewSchema),
+  /** The companion catalog joined with the daemon's plugin list (v0.0.17, ADR 0012 §2). */
+  companions: z.array(CompanionPluginViewSchema),
 });
 export type FactoryView = z.infer<typeof FactoryViewSchema>;
 
