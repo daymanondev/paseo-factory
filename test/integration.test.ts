@@ -3,15 +3,32 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { checkCleanAt, createFactory, prepareTaskWorktree } from "../src/index.ts";
+// The companion SDK surface (v0.0.18, ADR 0012): one import from the top-level
+// core barrel pulling every symbol spec §Testing Decisions 2, bullet 1 names —
+// the registry four, prepareTaskWorktree, headCommitSync, changesOutsideScope,
+// landTaskWorktree, parseLane, projectLanesPath, provisionPiAgentHome — used
+// below so `npm run typecheck` proves the full TypeScript types (spec.md:127:
+// tests exercise only exported entry points from `src/index.ts`).
 import {
+  changesOutsideScope,
+  checkCleanAt,
+  createFactory,
   discoverProjects,
+  headCommitSync,
+  landTaskWorktree,
   listProjectRegistrations,
+  parseLane,
+  prepareTaskWorktree,
+  projectLanesPath,
+  provisionPiAgentHome,
   readProjectRegistration,
+  resolveProject,
   writeProjectRegistration,
+  type LandingResult,
+  type ParsedLane,
   type ProjectRegistration,
+  type ProvisionPiHomeOptions,
 } from "../src/index.ts";
-import { resolveProject } from "../src/project.ts";
 import { copyFixture, disposeDir, gitCommitAll, gitCommitChanges, makeTempDir } from "./helpers.ts";
 
 /** Parses a ledger line and drops the clock-dependent `ts` so asserts stay exact. */
@@ -424,4 +441,69 @@ test("the core barrel's discoverProjects merges registry, live seat agents, and 
     { slug: "other-xyz789", root: "/w/other" },
     { slug: acme.slug, root: acme.root },
   ].sort((a, b) => a.slug.localeCompare(b.slug)));
+});
+
+// ---- the complete core barrel (v0.0.18, ADR 0012): the companion SDK in one import ----
+
+test("the complete core barrel: every spec §Testing Decisions 2 symbol from src/index.ts, exercised end to end", async (t) => {
+  const tmp = makeTempDir();
+  disposeDir(t, tmp);
+  const workspace = join(tmp, "workspace");
+  copyFixture("sample-workspace", workspace);
+  const base = gitCommitAll(workspace);
+  const stateDir = join(tmp, "factory");
+  const project = resolveProject(workspace);
+  assert.equal(project.ok, true, "the fixture workspace is a git Project");
+  if (!project.ok) return;
+
+  // Lane config: the lane parser and the per-project lanes.json path.
+  const parsed: ParsedLane | undefined = parseLane("opencode/glm-5.3-flash-free:high");
+  assert.deepEqual(parsed, { provider: "opencode", model: "glm-5.3-flash-free", thinking: "high" });
+  assert.equal(projectLanesPath(stateDir, project.slug), join(stateDir, "projects", project.slug, "lanes.json"));
+
+  // Pi harness home: an isolated headless home from a fake operator source —
+  // the real `~/.pi/agent` is never read (ADR 0011).
+  const sourceAgent = join(tmp, "pi-home", ".pi", "agent");
+  mkdirSync(join(sourceAgent, "sessions"), { recursive: true });
+  writeFileSync(join(sourceAgent, "settings.json"), JSON.stringify({ defaultModel: "glm-5.3" }));
+  const options: ProvisionPiHomeOptions = { stateDir, role: "headless", sourceAgentDir: sourceAgent };
+  assert.equal(provisionPiAgentHome(options), join(stateDir, "pi-agent", "headless"));
+
+  // Workspace verification around a core worktree allocation: HEAD sync, scope check, landing.
+  assert.equal(headCommitSync(workspace), base);
+  const prepared = prepareTaskWorktree({ stateDir, workspace, task: "SDK1", base });
+  assert.ok(prepared.ok, prepared.ok ? "" : prepared.reason);
+  if (!prepared.ok) return;
+  writeFileSync(
+    join(prepared.path, "src", "format.ts"),
+    [
+      "export function pad(input: string, width: number): string {",
+      "  if (input.length >= width) return input.slice(0, width);",
+      "  return input + \" \".repeat(width - input.length);",
+      "}",
+      "",
+    ].join("\n"),
+  );
+  const claimed = gitCommitChanges(prepared.path, "the companion attempt inside the core-allocated worktree");
+  assert.deepEqual(await changesOutsideScope(prepared.path, base, claimed, ["src/"]), { ok: true }, "an in-scope change is inside the scope");
+  const outside = await changesOutsideScope(prepared.path, base, claimed, ["docs/"]);
+  assert.equal(outside.ok, false);
+  if (!outside.ok) assert.deepEqual(outside.files, ["src/format.ts"]);
+  const landed: LandingResult = await landTaskWorktree({
+    projectRoot: workspace,
+    worktree: prepared.path,
+    claimedCommit: claimed,
+    base,
+    branch: "factory/SDK1",
+  });
+  assert.deepEqual(landed, { landing: "landed" });
+  assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: workspace, encoding: "utf8" }).trim(), claimed, "the landing fast-forwarded the root");
+  assert.equal(existsSync(prepared.path), false, "the worktree is removed after the landing");
+
+  // The shared Project registry, through the same single barrel import.
+  writeProjectRegistration(stateDir, project.slug, { root: project.root, supervisor: "agent-sup-1" });
+  const registration: ProjectRegistration | undefined = readProjectRegistration(stateDir, project.slug);
+  assert.deepEqual(registration, { slug: project.slug, root: project.root, supervisor: "agent-sup-1" });
+  assert.deepEqual(listProjectRegistrations(stateDir).map((r) => r.slug), [project.slug]);
+  assert.deepEqual(discoverProjects(stateDir, []), [{ slug: project.slug, root: project.root }], "registry-only discovery needs no home");
 });
