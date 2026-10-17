@@ -7,6 +7,7 @@ import { createFactory } from "../plugin/server/core/factory.ts";
 import { resolveProject } from "../plugin/server/core/project.ts";
 import { createSurfaceHandlers } from "../plugin/server/surface-rpc.ts";
 import type { SurfaceDaemonApi } from "../plugin/server/surface-rpc.ts";
+import { foldCompanions } from "../plugin/server/view.ts";
 import { factoryEnvFor, injectRoleOnCreate, injectSessionEnv, renderAgentContract, renderSeatBootstrap, renderSeatContract } from "../plugin/server/roles.ts";
 import type { AgentCreateRequest } from "../plugin/server/roles.ts";
 import { discoverProjects, readProjectRegistration, writeProjectRegistration } from "../plugin/server/projects.ts";
@@ -175,7 +176,7 @@ test("snapshot: versioned view folding ledger + lanes + daemon agents + provider
   const snap = await handlers.snapshot({});
   assert.ok(snap.ok, snap.ok ? "" : snap.error);
   const view = snap.view;
-  assert.equal(view.version, 2);
+  assert.equal(view.version, 3);
   assert.equal(view.lanes.worker, "pi/zai/glm-5.3", "the lanes table rides the snapshot");
   assert.equal(view.kpis.readyToAccept, 1, "one green unaccepted task");
   assert.equal(view.kpis.accepted, 0);
@@ -213,6 +214,116 @@ test("snapshot: versioned view folding ledger + lanes + daemon agents + provider
   );
   assert.ok(view.ledger.length > 0, "the ledger stream rides the snapshot");
   assert.equal(view.daemonError, null);
+});
+
+test("snapshot: the companion catalog rides the view — two cards, degraded not_installed while no daemon plugin list is wired", async (t) => {
+  const { handlers } = makeSurface(t);
+  const snap = await handlers.snapshot({});
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  const view = snap.view;
+  // Exactly the two official companions, catalog order — the spec's own literals.
+  assert.deepEqual(view.companions.map((companion) => companion.id), ["factory-burn-lab", "factory-connector"]);
+
+  const burn = view.companions[0]!;
+  assert.equal(burn.title, "Burn Lab");
+  assert.equal(burn.canonicalSource, "git:daymanondev/factory-burn-lab:plugin");
+  assert.equal(burn.sidebarLabel, "Burn Lab");
+  assert.equal(burn.sidebarIcon, "Flame");
+  assert.deepEqual(burn.capabilities, ["Scout Pool", "OSS Lab", "Proto Arena", "Night Shift", "Self-Evolve"]);
+  assert.ok(burn.tagline.length > 0, "the card's tagline is prose, not a blank");
+  assert.ok(burn.description.length > 0, "the card's description is prose, not a blank");
+
+  const fleet = view.companions[1]!;
+  assert.equal(fleet.title, "Fleet Connector");
+  assert.equal(fleet.canonicalSource, "git:daymanondev/factory-connector:plugin");
+  assert.equal(fleet.sidebarLabel, "Fleet Connector");
+  assert.equal(fleet.sidebarIcon, "Network");
+  assert.deepEqual(fleet.capabilities, ["Tailscale Fleet Surface", "1-Click Handoff", "Cooperative Burst", "Git Mirror & Ref Sync"]);
+  assert.ok(fleet.tagline.length > 0);
+  assert.ok(fleet.description.length > 0);
+
+  // The degraded arm: no daemon plugin list → every card is not_installed with
+  // null install identity (spec §Implementation Decisions 2's unavailable default).
+  for (const companion of view.companions) {
+    assert.equal(companion.status, "not_installed");
+    assert.equal(companion.enabled, false);
+    assert.equal(companion.installKind, null);
+    assert.equal(companion.installedSource, null);
+    assert.equal(companion.currentRevision, null);
+    assert.equal(companion.error, null);
+  }
+});
+
+// ---- the companion fold (v0.0.17, ADR 0012 §2) ----------------------------------------------
+
+// The fold is pure over the daemon's plugin.list entries (the DaemonAgentsInput
+// precedent — surface-rpc.ts gathers, view.ts never calls the daemon), so its
+// listed-state mapping is exercised directly; the snapshot seam carries the
+// same join once the live lister lands (ticket 03).
+
+test("companion fold: listed daemon plugins map onto the cards with install identity; strangers gain no card and absent entries degrade", () => {
+  const folded = foldCompanions([
+    // A non-companion plugin on the same daemon — never a card.
+    { id: "paseo-factory", enabled: true, status: "running" },
+    {
+      id: "factory-burn-lab",
+      enabled: true,
+      status: "running",
+      installation: { identity: { kind: "git", remote: "https://github.com/daymanondev/factory-burn-lab", pluginPath: "plugin" }, currentRevision: "abc1234def5678" },
+    },
+    {
+      id: "factory-connector",
+      enabled: false,
+      status: "disabled",
+      installation: { identity: { kind: "directory", path: "/Users/dev/code/factory-connector" } },
+    },
+  ]);
+  assert.equal(folded.length, 2, "the catalog fixes the card count");
+
+  const burn = folded[0]!;
+  assert.equal(burn.title, "Burn Lab");
+  assert.equal(burn.status, "running");
+  assert.equal(burn.enabled, true);
+  assert.equal(burn.installKind, "git");
+  assert.equal(burn.installedSource, "https://github.com/daymanondev/factory-burn-lab");
+  assert.equal(burn.currentRevision, "abc1234def5678");
+  assert.equal(burn.error, null);
+
+  const fleet = folded[1]!;
+  assert.equal(fleet.status, "disabled");
+  assert.equal(fleet.enabled, false);
+  assert.equal(fleet.installKind, "directory");
+  assert.equal(fleet.installedSource, "/Users/dev/code/factory-connector");
+  assert.equal(fleet.currentRevision, null, "no revision anywhere on the entry → null, never a fabricated sha");
+  assert.equal(fleet.error, null);
+});
+
+test("companion fold: failed carries the daemon error, npm names its package, revision falls back to the legacy commit", () => {
+  const folded = foldCompanions([
+    {
+      id: "factory-burn-lab",
+      enabled: true,
+      status: "failed",
+      error: "entry point factory.mjs missing",
+      commit: "deadbee",
+      installation: { identity: { kind: "npm", packageName: "@daymanondev/factory-burn-lab", pluginPath: "." } },
+    },
+  ]);
+  const burn = folded[0]!;
+  assert.equal(burn.status, "failed");
+  assert.equal(burn.installKind, "npm", "the install identity's kind is the truth — the legacy source enum has no npm arm");
+  assert.equal(burn.installedSource, "@daymanondev/factory-burn-lab");
+  assert.equal(burn.currentRevision, "deadbee", "installation.currentRevision wins; the legacy commit fills when absent");
+  assert.equal(burn.error, "entry point factory.mjs missing");
+
+  // An absent catalog entry degrades to not_installed even when the list itself answered.
+  const fleet = folded[1]!;
+  assert.equal(fleet.status, "not_installed");
+  assert.equal(fleet.enabled, false);
+  assert.equal(fleet.installKind, null);
+  assert.equal(fleet.installedSource, null);
+  assert.equal(fleet.currentRevision, null);
+  assert.equal(fleet.error, null);
 });
 
 test("snapshot: the status fold — running, needs-human, accepted, red", async (t) => {
@@ -516,7 +627,7 @@ test("snapshot: a projectRoot scopes lanes, seats, and tasks to the Project and 
   const snap = await handlers.snapshot({ projectRoot: project.root });
   assert.ok(snap.ok, snap.ok ? "" : snap.error);
   const view = snap.view;
-  assert.equal(view.version, 2);
+  assert.equal(view.version, 3);
   assert.deepEqual(view.project, { slug: project.slug, root: project.root });
   assert.ok(view.projects.some((entry) => entry.slug === project.slug && entry.root === project.root), "the registry feeds the Project Selector");
   assert.equal(view.lanes.supervisor, "claude/opus-4-8", "the Project override lane wins");

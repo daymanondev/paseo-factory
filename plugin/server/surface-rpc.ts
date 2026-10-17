@@ -479,6 +479,10 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         lanes: lanes.lanes,
         events,
         daemon: { agents, supervisor, lead, providers, daemonError },
+        // v0.0.17 (ADR 0012 §2): the daemon plugin list rides the snapshot once
+        // the live lister lands; until then every catalog entry folds to the
+        // spec's not_installed default — the degrade law, never a refusal.
+        companions: { plugins: null },
         project,
         projects,
       });
