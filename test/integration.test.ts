@@ -207,7 +207,6 @@ function makeRegistryRepo(dir: string, name: string): { root: string; slug: stri
   gitCommitAll(join(dir, name));
   const project = resolveProject(join(dir, name));
   assert.ok(project.ok, `${name} is a git Project`);
-  if (!project.ok) throw new Error(project.reason);
   // git's --show-toplevel answers with the physical path (macOS `/private/var` vs `/var`), so pin the root to it.
   return { root: project.root, slug: project.slug };
 }
@@ -262,7 +261,7 @@ test("the core barrel's discoverProjects merges registry, live seat agents, and 
 
   // Live seat agents: a same-slug conflict (registry wins), a fresh slug the registry has never seated,
   // and an agent missing labels.seat (skipped — a seat label is required).
-  const liveSeatAgents = [
+  const liveSeatAgents: { labels: Record<string, string>; cwd: string }[] = [
     { labels: { seat: "supervisor", project: acme.slug }, cwd: "/w/elsewhere" },
     { labels: { seat: "lead", project: "other-xyz789" }, cwd: "/w/other" },
     { labels: { project: "no-seat-label" }, cwd: "/w/noseat" },
