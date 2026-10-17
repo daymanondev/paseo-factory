@@ -28,12 +28,27 @@ import { FACTORY_VIEW_VERSION } from "../shared/view.ts";
 import { foldRetro, foldTasks, foldView, readTailed } from "./view.ts";
 import { setAgentModelViaCli, setAgentThinkingViaCli, stopAgentViaCli } from "./daemon-cli.ts";
 import { installDaemonPlugin, listDaemonPlugins, manageDaemonPlugin } from "./daemon-cli.ts";
-import type { DaemonPluginItem, DaemonReply } from "./daemon-cli.ts";
+import type { DaemonPluginAction, DaemonPluginItem, DaemonReply } from "./daemon-cli.ts";
 import { SEAT_TITLES, renderSeatBootstrap } from "./roles.ts";
 import type { SeatName } from "./roles.ts";
 import { discoverProjects, writeProjectRegistration } from "./projects.ts";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { accept, lanesSet, leadEnsure, leadRotate, ratifyProposal, retro, snapshot, supervisorEnsure, supervisorRevoke, taskDetail } from "../shared/rpc.ts";
+import { COMPANION_CATALOG } from "../shared/companions.ts";
+import type { CompanionCatalogEntry } from "../shared/companions.ts";
+import {
+  accept,
+  lanesSet,
+  leadEnsure,
+  leadRotate,
+  pluginsInstall,
+  pluginsManage,
+  ratifyProposal,
+  retro,
+  snapshot,
+  supervisorEnsure,
+  supervisorRevoke,
+  taskDetail,
+} from "../shared/rpc.ts";
 import type { AgentView, LaneName, Lanes, ProjectView } from "../shared/view.ts";
 
 // ---- the daemon slice ---------------------------------------------------------------------
@@ -148,6 +163,30 @@ export function acceptanceSummary(input: { task: string; attempt: number; by: st
         ? ` · landing pending-conflict: ${input.landingNote ?? "(no reason recorded)"} — branch factory/${input.task} is preserved`
         : "")
   );
+}
+
+/** One companion install's sentence — the source actually used, the ref when one was given. */
+function pluginsInstallSummary(input: { ids: readonly string[]; source: string; ref?: string; batch: boolean }): string {
+  if (input.ids.length === 0) return "every companion is already installed — nothing to do";
+  const ids = input.ids.join(", ");
+  const from = input.batch ? "their canonical sources" : input.source;
+  return `installed ${ids} from ${from}${input.ref === undefined ? "" : ` at ref ${input.ref}`}`;
+}
+
+/** One companion manage act's sentence — the per-action verb, house style. */
+function pluginsManageSummary(pluginId: string, action: DaemonPluginAction): string {
+  switch (action) {
+    case "enable":
+      return `enabled ${pluginId} on the daemon`;
+    case "disable":
+      return `disabled ${pluginId} on the daemon`;
+    case "reload":
+      return `reloaded ${pluginId} on the daemon`;
+    case "update":
+      return `updated ${pluginId} to the latest revision`;
+    case "remove":
+      return `removed ${pluginId} from the daemon`;
+  }
 }
 
 export function createSurfaceHandlers(deps: SurfaceDeps) {
@@ -692,6 +731,72 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       log(`retro: R${proposal.id} of ${input.day} ratified via the supervisor of ${project.slug} (${ensured.agentId})`);
       return { ok: true as const, agentId: ensured.agentId, summary: `R${proposal.id} (${proposal.cls}) dispatched to the Supervisor of ${project.slug}` };
     },
+
+    // ---- the companion plugin lifecycle (v0.0.17, ADR 0012 §3) -----------------------------
+
+    async pluginsInstall(
+      input: { target: CompanionCatalogEntry["id"] | "all"; source?: string; ref?: string },
+      _context?: SurfaceCallContext,
+    ): Promise<{ ok: true; installed: string[]; summary: string } | { ok: false; code: string; error: string }> {
+      // A custom source or ref names ONE companion — it cannot ride a batch.
+      if (input.target === "all" && (input.source !== undefined || input.ref !== undefined)) {
+        return failure("invalid-target", 'a custom source or ref targets one companion — pass a named target, not "all"');
+      }
+      let targets: readonly CompanionCatalogEntry[];
+      if (input.target === "all") {
+        // Batch installs only the currently uninstalled companions — the list
+        // decides, and an unavailable list refuses rather than reinstall blind.
+        const lister = deps.listPlugins ?? listDaemonPlugins;
+        let listedIds: Set<string> | undefined;
+        let listReason = "";
+        try {
+          const listed = await lister(deps.home);
+          if (listed.ok) listedIds = new Set(listed.plugins.map((plugin) => plugin.id));
+          else listReason = listed.reason;
+        } catch (err) {
+          listReason = messageOf(err);
+        }
+        if (listedIds === undefined) {
+          return failure("daemon_failed", `cannot tell which companions are already installed — the daemon plugin list is unavailable: ${listReason}`);
+        }
+        targets = COMPANION_CATALOG.filter((entry) => !listedIds!.has(entry.id));
+      } else {
+        const entry = COMPANION_CATALOG.find((candidate) => candidate.id === input.target);
+        if (entry === undefined) return failure("unknown-companion", `${input.target} is not a Factory companion — the surface manages only the catalog's own family`);
+        targets = [entry];
+      }
+      const installer = deps.installPlugin ?? installDaemonPlugin;
+      const installed: string[] = [];
+      for (const entry of targets) {
+        // The catalog's canonicalSource is the default — no code path probes
+        // or prefers `../` sibling directories on the host disk.
+        const source = input.source ?? entry.canonicalSource;
+        const reply = await installer(deps.home, { id: entry.id, source, ...(input.ref !== undefined ? { ref: input.ref } : {}) });
+        if (!reply.ok) return failure("daemon_failed", reply.reason);
+        installed.push(entry.id);
+        log(`plugins: installed ${entry.id} from ${source}${input.ref === undefined ? "" : ` at ref ${input.ref}`}`);
+      }
+      return {
+        ok: true as const,
+        installed,
+        summary: pluginsInstallSummary({ ids: installed, source: input.source ?? targets[0]?.canonicalSource ?? "", ref: input.ref, batch: input.target === "all" }),
+      };
+    },
+
+    async pluginsManage(
+      input: { pluginId: CompanionCatalogEntry["id"]; action: DaemonPluginAction },
+      _context?: SurfaceCallContext,
+    ): Promise<{ ok: true; pluginId: string; action: string; summary: string } | { ok: false; code: string; error: string }> {
+      if (!COMPANION_CATALOG.some((entry) => entry.id === input.pluginId)) {
+        return failure("unknown-companion", `${input.pluginId} is not a Factory companion — the surface manages only the catalog's own family`);
+      }
+      const manager = deps.managePlugin ?? manageDaemonPlugin;
+      const reply = await manager(deps.home, input.pluginId, input.action);
+      if (!reply.ok) return failure("daemon_failed", reply.reason);
+      const summary = pluginsManageSummary(input.pluginId, input.action);
+      log(`plugins: ${summary}`);
+      return { ok: true as const, pluginId: input.pluginId, action: input.action, summary };
+    },
   };
 }
 
@@ -716,4 +821,6 @@ export function registerSurfaceRpc(server: PluginServerContext, handlers: Surfac
   server.handle(leadEnsure, (input, context) => handlers.leadEnsure(input, { paseo: context.paseo }));
   server.handle(leadRotate, (input, context) => handlers.leadRotate(input, { paseo: context.paseo }));
   server.handle(ratifyProposal, (input, context) => handlers.ratifyProposal(input, { paseo: context.paseo }));
+  server.handle(pluginsInstall, (input, context) => handlers.pluginsInstall(input, { paseo: context.paseo }));
+  server.handle(pluginsManage, (input, context) => handlers.pluginsManage(input, { paseo: context.paseo }));
 }

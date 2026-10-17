@@ -135,3 +135,31 @@ export const ratifyProposal = defineRpc({
   input: z.object({ projectRoot: z.string(), day: z.string(), proposalId: z.number().int() }),
   output: z.union([z.object({ ok: z.literal(true), agentId: z.string(), summary: z.string() }), Failure]),
 });
+
+// The companion plugin lifecycle (v0.0.17, ADR 0012 §3): install from the
+// catalog's canonical GitHub sources (or a developer's custom source/ref —
+// never a probed `../` sibling), then manage the five lifecycle acts. Every
+// call targets the daemon home serving this surface, and a daemon-side
+// failure refuses as data — `{ ok: false, code: "daemon_failed", error }` —
+// never an exception.
+export const pluginsInstall = defineRpc({
+  name: "factory.plugins.install",
+  input: z.object({
+    /** Target companion id ("factory-burn-lab" | "factory-connector") or "all" for batch install of uninstalled companions. */
+    target: z.enum(["factory-burn-lab", "factory-connector", "all"]),
+    /** Optional custom source override (Git source, npm spec, or explicit local directory path). Omitted uses canonicalSource. */
+    source: z.string().optional(),
+    /** Optional Git branch, tag, or commit ref when installing from a Git source. */
+    ref: z.string().optional(),
+  }),
+  output: z.union([z.object({ ok: z.literal(true), installed: z.array(z.string()), summary: z.string() }), Failure]),
+});
+
+export const pluginsManage = defineRpc({
+  name: "factory.plugins.manage",
+  input: z.object({
+    pluginId: z.enum(["factory-burn-lab", "factory-connector"]),
+    action: z.enum(["enable", "disable", "reload", "update", "remove"]),
+  }),
+  output: z.union([z.object({ ok: z.literal(true), pluginId: z.string(), action: z.string(), summary: z.string() }), Failure]),
+});
