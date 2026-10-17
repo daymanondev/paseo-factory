@@ -324,8 +324,14 @@ export interface DaemonAgentsInput {
 /**
  * The daemon's install identity — which source a plugin was installed from,
  * discriminated on `kind` (@getpaseo/protocol's `PluginSourceIdentity` subset).
+ * `pluginPath` is optional so the daemon bridge's own `DaemonPluginItem`
+ * (whose identity may omit it, plus a registry pointer) assigns directly —
+ * the fold only reads `kind` and the kind's source string.
  */
-export type DaemonPluginIdentity = { kind: "git"; remote: string; pluginPath: string } | { kind: "directory"; path: string } | { kind: "npm"; packageName: string; pluginPath: string };
+export type DaemonPluginIdentity =
+  | { kind: "git"; remote: string; pluginPath?: string }
+  | { kind: "directory"; path: string }
+  | { kind: "npm"; packageName: string; pluginPath?: string };
 
 /**
  * One daemon plugin-list entry, structural — the subset of `@getpaseo/protocol`'s

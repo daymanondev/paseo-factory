@@ -28,7 +28,7 @@ import { FACTORY_VIEW_VERSION } from "../shared/view.ts";
 import { foldRetro, foldTasks, foldView, readTailed } from "./view.ts";
 import { setAgentModelViaCli, setAgentThinkingViaCli, stopAgentViaCli } from "./daemon-cli.ts";
 import { installDaemonPlugin, listDaemonPlugins, manageDaemonPlugin } from "./daemon-cli.ts";
-import type { DaemonReply } from "./daemon-cli.ts";
+import type { DaemonPluginItem, DaemonReply } from "./daemon-cli.ts";
 import { SEAT_TITLES, renderSeatBootstrap } from "./roles.ts";
 import type { SeatName } from "./roles.ts";
 import { discoverProjects, writeProjectRegistration } from "./projects.ts";
@@ -454,6 +454,19 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         daemonError = `daemon unavailable: ${messageOf(err)}`;
       }
 
+      // The live companion half (v0.0.17, ADR 0012 §2–§3): every snapshot reads
+      // the daemon's plugin list fresh — no TTL cache (a 5s poll cadence is the
+      // design) — strictly against `deps.home`, and an unavailable list degrades
+      // to the all-`not_installed` default rather than refusing.
+      const listPlugins = deps.listPlugins ?? listDaemonPlugins;
+      let daemonPlugins: DaemonPluginItem[] | null = null;
+      try {
+        const listed = await listPlugins(deps.home);
+        if (listed.ok) daemonPlugins = listed.plugins;
+      } catch {
+        // the degrade law — the cards render as not_installed
+      }
+
       // The scoped snapshot narrows to this Project's world: its seat agents
       // and the ledger-bound workers whose task's contract workspace sits
       // inside the project root. Unscoped, every seat and bound worker shows
@@ -488,10 +501,10 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         lanes: lanes.lanes,
         events,
         daemon: { agents, supervisor, lead, providers, daemonError },
-        // v0.0.17 (ADR 0012 §2): the daemon plugin list rides the snapshot once
-        // the live lister lands; until then every catalog entry folds to the
-        // spec's not_installed default — the degrade law, never a refusal.
-        companions: { plugins: null },
+        // v0.0.17 (ADR 0012 §2): the daemon plugin list joined against the
+        // companion catalog — null when the list call was unavailable (the
+        // degrade law: every entry folds to not_installed, never a refusal).
+        companions: { plugins: daemonPlugins },
         project,
         projects,
       });

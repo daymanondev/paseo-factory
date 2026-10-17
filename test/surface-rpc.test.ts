@@ -18,6 +18,7 @@ import {
   manageDaemonPlugin,
   PLUGIN_IO_TIMEOUT_MS,
 } from "../plugin/server/daemon-cli.ts";
+import type { DaemonPluginItem } from "../plugin/server/daemon-cli.ts";
 import { foldCompanions } from "../plugin/server/view.ts";
 import { factoryEnvFor, injectRoleOnCreate, injectSessionEnv, renderAgentContract, renderSeatBootstrap, renderSeatContract } from "../plugin/server/roles.ts";
 import type { AgentCreateRequest } from "../plugin/server/roles.ts";
@@ -124,7 +125,7 @@ function fakeDaemon(agents: FakeAgent[]) {
 }
 
 /** A factory plus handlers over a temp state dir and home. */
-function makeSurface(t: TestContext, agents: FakeAgent[] = []) {
+function makeSurface(t: TestContext, agents: FakeAgent[] = [], plugins: DaemonPluginItem[] = []) {
   const dir = makeTempDir();
   disposeDir(t, dir);
   const home = join(dir, "paseo-home");
@@ -135,6 +136,13 @@ function makeSurface(t: TestContext, agents: FakeAgent[] = []) {
   const modelSyncs: { agentId: string; model: string }[] = [];
   const thinkingSyncs: { agentId: string; thinkingOptionId: string }[] = [];
   const stopped: string[] = [];
+  // The plugin lifecycle overrides (v0.0.17): the daemon's plugin list is
+  // mutable so a test can seed installed companions, and every capture array
+  // records the `home` the handler targeted — the ADR 0012 §4 isolation proof.
+  const listedPlugins: DaemonPluginItem[] = [...plugins];
+  const pluginListHomes: string[] = [];
+  const pluginInstalls: { home: string; input: { id: string; source: string; ref?: string } }[] = [];
+  const pluginManages: { home: string; pluginId: string; action: string }[] = [];
   const handlers = createSurfaceHandlers({
     factory,
     stateDir,
@@ -152,8 +160,20 @@ function makeSurface(t: TestContext, agents: FakeAgent[] = []) {
       stopped.push(agentId);
       return { ok: true };
     },
+    listPlugins: async (listHome) => {
+      pluginListHomes.push(listHome);
+      return { ok: true, plugins: listedPlugins };
+    },
+    installPlugin: async (installHome, input) => {
+      pluginInstalls.push({ home: installHome, input });
+      return { ok: true, plugin: { id: input.id, path: `/plugins/${input.id}`, enabled: true, status: "running" } };
+    },
+    managePlugin: async (manageHome, pluginId, action) => {
+      pluginManages.push({ home: manageHome, pluginId, action });
+      return { ok: true };
+    },
   });
-  return { dir, home, stateDir, factory, handlers, fake, modelSyncs, thinkingSyncs, stopped };
+  return { dir, home, stateDir, factory, handlers, fake, modelSyncs, thinkingSyncs, stopped, listedPlugins, pluginListHomes, pluginInstalls, pluginManages };
 }
 
 /** Appends a green task's whole ledger slice + files, the fold's richest input. */
@@ -227,7 +247,7 @@ test("snapshot: versioned view folding ledger + lanes + daemon agents + provider
   assert.equal(view.daemonError, null);
 });
 
-test("snapshot: the companion catalog rides the view — two cards, degraded not_installed while no daemon plugin list is wired", async (t) => {
+test("snapshot: the companion catalog rides the view — two cards, not_installed while the daemon lists no companions", async (t) => {
   const { handlers } = makeSurface(t);
   const snap = await handlers.snapshot({});
   assert.ok(snap.ok, snap.ok ? "" : snap.error);
@@ -335,6 +355,107 @@ test("companion fold: failed carries the daemon error, npm names its package, re
   assert.equal(fleet.installedSource, null);
   assert.equal(fleet.currentRevision, null);
   assert.equal(fleet.error, null);
+});
+
+test("snapshot: the companions fold joins the live daemon plugin list — running and disabled carry their install identity", async (t) => {
+  const { handlers, home, pluginListHomes } = makeSurface(
+    t,
+    [],
+    [
+      // A non-companion plugin on the same daemon — never a card.
+      { id: "paseo-factory", path: "/plugins/paseo-factory", enabled: true, status: "running" },
+      {
+        id: "factory-burn-lab",
+        path: "/plugins/factory-burn-lab",
+        enabled: true,
+        status: "running",
+        installation: { identity: { kind: "git", remote: "https://github.com/daymanondev/factory-burn-lab", pluginPath: "plugin" }, currentRevision: "abc1234def5678" },
+      },
+      {
+        id: "factory-connector",
+        path: "/plugins/factory-connector",
+        enabled: false,
+        status: "disabled",
+        installation: { identity: { kind: "directory", path: "/Users/dev/code/factory-connector" } },
+      },
+    ],
+  );
+  const snap = await handlers.snapshot({});
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  assert.deepEqual(pluginListHomes, [home], "the list call targets strictly the surface's home — trial and production never cross-contaminate");
+
+  const burn = snap.view.companions.find((companion) => companion.id === "factory-burn-lab")!;
+  assert.equal(burn.status, "running");
+  assert.equal(burn.enabled, true);
+  assert.equal(burn.installKind, "git");
+  assert.equal(burn.installedSource, "https://github.com/daymanondev/factory-burn-lab");
+  assert.equal(burn.currentRevision, "abc1234def5678");
+  assert.equal(burn.error, null);
+
+  const fleet = snap.view.companions.find((companion) => companion.id === "factory-connector")!;
+  assert.equal(fleet.status, "disabled");
+  assert.equal(fleet.enabled, false);
+  assert.equal(fleet.installKind, "directory");
+  assert.equal(fleet.installedSource, "/Users/dev/code/factory-connector");
+  assert.equal(fleet.currentRevision, null);
+  assert.equal(fleet.error, null);
+});
+
+test("snapshot: a failed companion carries the daemon's error and npm identity; an unlisted companion degrades to not_installed", async (t) => {
+  const { handlers } = makeSurface(t, [], [
+    {
+      id: "factory-connector",
+      path: "/plugins/factory-connector",
+      enabled: true,
+      status: "failed",
+      error: "missing requirement: tailscale binary",
+      commit: "legacy0001",
+      installation: { identity: { kind: "npm", packageName: "@daymanondev/factory-connector", pluginPath: "." } },
+    },
+  ]);
+  const snap = await handlers.snapshot({});
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+
+  const fleet = snap.view.companions.find((companion) => companion.id === "factory-connector")!;
+  assert.equal(fleet.status, "failed");
+  assert.equal(fleet.error, "missing requirement: tailscale binary", "the daemon's error string rides the card (spec §User Story 10)");
+  assert.equal(fleet.installKind, "npm", "the install identity's kind is the truth — the legacy source enum has no npm arm");
+  assert.equal(fleet.installedSource, "@daymanondev/factory-connector");
+  assert.equal(fleet.currentRevision, "legacy0001", "installation.currentRevision wins; the legacy commit fills when absent");
+
+  const burn = snap.view.companions.find((companion) => companion.id === "factory-burn-lab")!;
+  assert.equal(burn.status, "not_installed");
+  assert.equal(burn.enabled, false);
+  assert.equal(burn.installKind, null);
+  assert.equal(burn.installedSource, null);
+  assert.equal(burn.currentRevision, null);
+  assert.equal(burn.error, null);
+});
+
+test("snapshot: an unavailable daemon plugin list degrades to the all-not_installed default — never a refusal", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const home = join(dir, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const retroRunner = fakeCopilotRunner(() => ({ code: 0, stdout: '{"proposals":[]}' }));
+  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner });
+  const handlers = createSurfaceHandlers({
+    factory,
+    stateDir,
+    home,
+    daemon: fakeDaemon([]).daemon,
+    listPlugins: async () => ({ ok: false, reason: "no daemon is running at this home" }),
+  });
+  const snap = await handlers.snapshot({});
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  assert.deepEqual(
+    snap.view.companions.map((companion) => [companion.id, companion.status]),
+    [
+      ["factory-burn-lab", "not_installed"],
+      ["factory-connector", "not_installed"],
+    ],
+    "the degrade law — an unavailable list folds every catalog entry to not_installed (spec §Implementation Decisions 2)",
+  );
 });
 
 test("snapshot: the status fold — running, needs-human, accepted, red", async (t) => {
@@ -1580,7 +1701,7 @@ test("surface deps: the plugin bridge overrides ride createSurfaceHandlers like 
 
   const snap = await handlers.snapshot({});
   assert.ok(snap.ok, snap.ok ? "" : snap.error);
-  assert.deepEqual(pluginCalls, [], "nothing fires the overrides yet — their consumers arrive with the handlers ticket");
+  assert.deepEqual(pluginCalls, ["list"], "the snapshot's live companions fold fires the list override");
 
   // The real bridge functions satisfy the override slots — the defaults the handlers ticket will bind.
   const defaults: Partial<SurfaceDeps> = { listPlugins: listDaemonPlugins, installPlugin: installDaemonPlugin, managePlugin: manageDaemonPlugin };
