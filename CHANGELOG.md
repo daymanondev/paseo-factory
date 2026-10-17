@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.17] - 2026-10-17
+
+v0.0.17's one thing: **Remote-first `Companion plugin` catalog and lifecycle
+on the `Factory surface`** — ADR 0012 made real.
+
+### Added
+
+- **The shared `Companion plugin` catalog (`plugin/shared/companions.ts`)** — `COMPANION_CATALOG` declares the official first-party companions (`factory-burn-lab` "Burn Lab" and `factory-connector` "Fleet Connector") with taglines, descriptions, capability lists, sidebar labels/icons, and their canonical GitHub sources (`git:daymanondev/factory-burn-lab:plugin`, `git:daymanondev/factory-connector:plugin`). Pure declarative data shared by server and client; the server never probes `../` sibling directories, so installation is remote-first and identical on macOS and Windows.
+- **The `FactoryView.companions` fold (`plugin/shared/view.ts`, `plugin/server/view.ts`)** — `CompanionPluginViewSchema` (live `status` `not_installed | running | disabled | failed`, `installKind` `git | npm | directory`, `installedSource`, `currentRevision`, `error`) and `foldCompanions` join the catalog against the daemon's `plugin.list.request` answer, defaulting every entry to `not_installed` when the daemon lists only `paseo-factory` or the list call is unavailable.
+- **The cross-platform daemon plugin bridge (`plugin/server/daemon-cli.ts`)** — a payload-returning session-WebSocket helper over `<home>/paseo.pid` + `<home>/local-credential` plus `listDaemonPlugins` / `installDaemonPlugin` / `manageDaemonPlugin`: `plugin.list.request`; `plugin.source.install.request` (a 300 s `PLUGIN_IO_TIMEOUT_MS` so a Git clone or fetch never times out prematurely) with `plugin.directory.install.request` routing for explicit local paths (absolute, `./`, `~/`, and Windows drive paths); `plugin.{enable,disable,reload,remove}.request` and `plugin.source.update.request`; each with a `paseo --home <home> plugin … --json` CLI fallback when the pid file is absent. `SurfaceDeps` grows injectable `listPlugins` / `installPlugin` / `managePlugin` overrides (`plugin/server/surface-rpc.ts`), matching the `setAgentModel` pattern.
+- **`factory.plugins.install` / `factory.plugins.manage` surface RPC (`plugin/shared/rpc.ts`, `plugin/server/surface-rpc.ts`)** — install one companion or `target: "all"` (only the currently uninstalled, each from its canonical source) with optional custom `source` / `ref`; `enable` / `disable` / `reload` / `update` / `remove` on an installed companion; daemon failures refuse with `code: "daemon_failed"` and the daemon's error verbatim.
+- **The fourth `Plugins` tab and `<PluginsPane />` (`plugin/client/kit/pill.tsx`, `plugin/client/factory/plugins.tsx`, `plugin/client/factory/shell.tsx`)** — `TabId` grows `"plugins"` (Blocks icon) with the badge counting running companions; the pane renders the ecosystem summary header (`{running} of {n} active on this daemon`), an `Install All` button whenever any companion is uninstalled, and one card per companion: status pill, `Active in Sidebar · <label>` badge when running, capability pills, install identity (remote + short `currentRevision`, npm package + version, or directory path), the daemon error banner, `Install` + `Custom source…` when absent, and `Enable`/`Disable` · `Update` (git/npm) · `Reload` · `Remove` when installed.
+- **The plugin wire seam pinned end to end (`test/surface-rpc.test.ts`, `test/client-surface.test.ts`)** — handler-level tests run against the injectable overrides, and one hand-rolled RFC6455 mock daemon (`node:http` + `node:crypto`, loopback only, temp homes seeded with `<home>/paseo.pid` + `<home>/local-credential`, zero new dependencies) verifies the exact `plugin.*` session frames the bridge puts on the wire; the client tests pin the fourth tab, the shell wiring, and the pane. `test/release.test.ts` pins the release invariants (`package.json`, both `package-lock.json` version spots, and `SHELL_VERSION` carry one version; `CHANGELOG.md` opens its entry).
+- `docs/adr/0012-companion-plugin-catalog.md`; `CONTEXT.md` gains the
+  **Companion plugin** entry and the **Factory surface** entry's fourth view;
+  ADR 0009's `Amended by:` line names the ADR 0012 rider.
+
+### Changed
+
+- `cliUtils` in `plugin/server/daemon-cli.ts` splits `PATH` on `node:path`'s
+  `delimiter` (`:` on POSIX, `;` on Windows) instead of a hardcoded `":"`, so
+  daemon CLI fallback resolution stops being POSIX-only.
+- `package.json` + `SHELL_VERSION` → `0.0.17`. Suite 372 → 412.
+
 ## [0.0.16] - 2026-10-17
 
 v0.0.16's one thing: **Clean-room `Pi harness home` isolation
