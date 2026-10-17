@@ -1,9 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createFactory } from "../src/index.ts";
+import {
+  discoverProjects,
+  listProjectRegistrations,
+  readProjectRegistration,
+  writeProjectRegistration,
+  type ProjectRegistration,
+} from "../src/index.ts";
 import { resolveProject } from "../src/project.ts";
 import { copyFixture, disposeDir, gitCommitAll, gitCommitChanges, makeTempDir } from "./helpers.ts";
 
@@ -189,4 +196,105 @@ test("the Task worktree loop: driver-style allocation, claim inside the worktree
   const spawnLine = factory.ledger.eventsFor("WTE2E").find((e) => e.event === "spawn_dispatched");
   assert.equal(spawnLine === undefined ? undefined : "worktree" in spawnLine ? spawnLine.worktree : undefined, prepared.path, "the spawn line carried the worktree");
   assert.match(readFileSync(join(stateDir, "report-WTE2E-1.md"), "utf8"), /- Verdict: GREEN/);
+});
+
+// ---- the shared Project registry served from the core barrel (v0.0.18, ADR 0010 / ADR 0012) ----
+
+/** Makes a real temp git repo (one file, one commit) — the registry binds roots git can answer for. */
+function makeRegistryRepo(dir: string, name: string): { root: string; slug: string } {
+  mkdirSync(join(dir, name), { recursive: true });
+  writeFileSync(join(dir, name, "README.md"), `# ${name}\n`);
+  gitCommitAll(join(dir, name));
+  const project = resolveProject(join(dir, name));
+  assert.ok(project.ok, `${name} is a git Project`);
+  // git's --show-toplevel answers with the physical path (macOS `/private/var` vs `/var`), so pin the root to it.
+  return { root: project.root, slug: project.slug };
+}
+
+test("the core barrel serves the shared Project registry: write/read/list round-trip with field-wise seat merges", (t) => {
+  const tmp = makeTempDir();
+  disposeDir(t, tmp);
+  const acme = makeRegistryRepo(tmp, "acme-api");
+  const beta = makeRegistryRepo(tmp, "beta-web");
+  const stateDir = join(tmp, "factory");
+
+  // Before any write there is no registry — undefined, never a guess.
+  assert.equal(readProjectRegistration(stateDir, acme.slug), undefined);
+
+  // Seat bindings land field-wise across separate writes.
+  writeProjectRegistration(stateDir, acme.slug, { root: acme.root, supervisor: "agent-sup-1" });
+  writeProjectRegistration(stateDir, acme.slug, { root: acme.root, lead: "agent-lead-1" });
+  const merged: ProjectRegistration | undefined = readProjectRegistration(stateDir, acme.slug);
+  assert.deepEqual(merged, { slug: acme.slug, root: acme.root, supervisor: "agent-sup-1", lead: "agent-lead-1" });
+
+  // The on-disk shape is the format factory-burn-lab shares — pretty JSON plus the trailing newline.
+  assert.equal(
+    readFileSync(join(stateDir, "projects", acme.slug, "project.json"), "utf8"),
+    `${JSON.stringify({ root: acme.root, supervisor: "agent-sup-1", lead: "agent-lead-1" }, null, 2)}\n`,
+  );
+
+  // `null` clears one seat; the untouched seat survives.
+  writeProjectRegistration(stateDir, acme.slug, { root: acme.root, lead: null });
+  assert.equal(readProjectRegistration(stateDir, acme.slug)?.lead, undefined);
+  assert.equal(readProjectRegistration(stateDir, acme.slug)?.supervisor, "agent-sup-1");
+
+  // `undefined` leaves the seats alone — a root-only rewrite preserves both ids.
+  writeProjectRegistration(stateDir, acme.slug, { root: acme.root, supervisor: undefined, lead: undefined });
+  assert.deepEqual(readProjectRegistration(stateDir, acme.slug), { slug: acme.slug, root: acme.root, supervisor: "agent-sup-1" });
+
+  // The listing is every registration on disk, slug order.
+  writeProjectRegistration(stateDir, beta.slug, { root: beta.root, supervisor: "agent-sup-2" });
+  assert.deepEqual(listProjectRegistrations(stateDir).map((r) => r.slug), [acme.slug, beta.slug].sort((a, b) => a.localeCompare(b)));
+
+  // An empty state dir lists nothing.
+  assert.deepEqual(listProjectRegistrations(join(tmp, "empty-state")), []);
+});
+
+test("the core barrel's discoverProjects merges registry, live seat agents, and Paseo's projects.json — registry wins on conflicts", (t) => {
+  const tmp = makeTempDir();
+  disposeDir(t, tmp);
+  const acme = makeRegistryRepo(tmp, "acme-api");
+  const paseoUi = makeRegistryRepo(tmp, "paseo-ui");
+  const stateDir = join(tmp, "factory");
+
+  writeProjectRegistration(stateDir, acme.slug, { root: acme.root, supervisor: "agent-sup-1" });
+
+  // Live seat agents: a same-slug conflict (registry wins), a fresh slug the registry has never seated,
+  // and an agent missing labels.seat (skipped — a seat label is required).
+  const liveSeatAgents: { labels: Record<string, string>; cwd: string }[] = [
+    { labels: { seat: "supervisor", project: acme.slug }, cwd: "/w/elsewhere" },
+    { labels: { seat: "lead", project: "other-xyz789" }, cwd: "/w/other" },
+    { labels: { project: "no-seat-label" }, cwd: "/w/noseat" },
+  ];
+
+  // Paseo's <home>/projects/projects.json: one non-archived real repo (resolved through git),
+  // one archived entry (skipped), one pointing nowhere (resolveProject refuses).
+  const home = makeTempDir();
+  disposeDir(t, home);
+  mkdirSync(join(home, "projects"), { recursive: true });
+  writeFileSync(
+    join(home, "projects", "projects.json"),
+    JSON.stringify([
+      { projectId: "p1", rootPath: paseoUi.root, kind: "git", archivedAt: null },
+      { projectId: "p2", rootPath: "/nonexistent/archived", kind: "git", archivedAt: "2026-01-01T00:00:00Z" },
+      { projectId: "p3", rootPath: "/nonexistent/active", kind: "git", archivedAt: null },
+    ]),
+  );
+
+  const discovered = discoverProjects(stateDir, liveSeatAgents, home);
+  assert.deepEqual(
+    discovered,
+    [
+      { slug: "other-xyz789", root: "/w/other" },
+      { slug: paseoUi.slug, root: paseoUi.root },
+      { slug: acme.slug, root: acme.root },
+    ].sort((a, b) => a.slug.localeCompare(b.slug)),
+    "registry files, live seat agents, and non-archived Paseo projects all feed the discovery, slug order",
+  );
+
+  // Without a home there is no projects.json leg — registry plus live agents only.
+  assert.deepEqual(discoverProjects(stateDir, liveSeatAgents), [
+    { slug: "other-xyz789", root: "/w/other" },
+    { slug: acme.slug, root: acme.root },
+  ].sort((a, b) => a.slug.localeCompare(b.slug)));
 });
