@@ -1,12 +1,23 @@
 import { test } from "node:test";
 import type { TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { createHash } from "node:crypto";
+import { createServer } from "node:http";
+import type { Duplex } from "node:stream";
+import { existsSync, chmodSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { basename, delimiter, dirname, join } from "node:path";
 import { createFactory } from "../plugin/server/core/factory.ts";
 import { resolveProject } from "../plugin/server/core/project.ts";
 import { createSurfaceHandlers } from "../plugin/server/surface-rpc.ts";
-import type { SurfaceDaemonApi } from "../plugin/server/surface-rpc.ts";
+import type { SurfaceDaemonApi, SurfaceDeps } from "../plugin/server/surface-rpc.ts";
+import {
+  BRIDGE_TIMEOUT_MS,
+  cliUtils,
+  installDaemonPlugin,
+  listDaemonPlugins,
+  manageDaemonPlugin,
+  PLUGIN_IO_TIMEOUT_MS,
+} from "../plugin/server/daemon-cli.ts";
 import { foldCompanions } from "../plugin/server/view.ts";
 import { factoryEnvFor, injectRoleOnCreate, injectSessionEnv, renderAgentContract, renderSeatBootstrap, renderSeatContract } from "../plugin/server/roles.ts";
 import type { AgentCreateRequest } from "../plugin/server/roles.ts";
@@ -1107,4 +1118,473 @@ test("projects: the registration records the slug→root binding and both seat i
     ].sort((a, b) => a.slug.localeCompare(b.slug)),
     "registry files, live seat agents, and Paseo's projects.json all feed the Project Selector, slug order",
   );
+});
+
+// ---- the daemon plugin bridge (v0.0.17, ADR 0012 §2–§4) -----------------------------------
+
+test("cliUtils: splits the search path on node:path's delimiter — a ';' Windows PATH resolves the CLI, ':' splitting does not", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  // The layout cliUtils expects: <entry>/paseo beside <entry>/../dist/utils/{client.js,daemon-target.js}.
+  mkdirSync(join(dir, "win-entry"), { recursive: true });
+  writeFileSync(join(dir, "win-entry", "paseo"), "#!/bin/sh\nexit 0\n");
+  const utils = join(dir, "dist", "utils");
+  mkdirSync(utils, { recursive: true });
+  writeFileSync(join(utils, "client.js"), "");
+  writeFileSync(join(utils, "daemon-target.js"), "");
+
+  const windowsPath = [join(dir, "miss"), join(dir, "win-entry")].join(";");
+  const found = cliUtils(windowsPath, ";");
+  assert.ok(found !== null, "a ';'-separated PATH resolves the paseo CLI when split on ';'");
+  assert.ok(existsSync(join(found, "client.js")), "the resolved utils carry the CLI's client.js");
+  assert.equal(cliUtils(windowsPath, ":"), null, "splitting a ';' PATH on ':' sees one garbage entry — the pre-fix Windows bug");
+
+  const posixPath = [join(dir, "miss"), join(dir, "win-entry")].join(delimiter);
+  assert.ok(cliUtils(posixPath) !== null, "the platform delimiter stays the default");
+});
+
+// ---- the mock daemon — a hand-rolled RFC6455 server over the bridge's session protocol -------
+
+const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+/** Decodes complete client frames from a buffer — text payloads plus the unconsumed rest. */
+function decodeWsFrames(buffer: Buffer): { texts: string[]; closed: boolean; rest: Buffer } {
+  const texts: string[] = [];
+  let closed = false;
+  let offset = 0;
+  while (offset + 2 <= buffer.length) {
+    const opcode = buffer[offset]! & 0x0f;
+    const masked = (buffer[offset + 1]! & 0x80) !== 0;
+    let length = buffer[offset + 1]! & 0x7f;
+    let cursor = offset + 2;
+    if (length === 126) {
+      if (cursor + 2 > buffer.length) break;
+      length = buffer.readUInt16BE(cursor);
+      cursor += 2;
+    } else if (length === 127) {
+      if (cursor + 8 > buffer.length) break;
+      length = Number(buffer.readBigUInt64BE(cursor));
+      cursor += 8;
+    }
+    const maskLength = masked ? 4 : 0;
+    if (cursor + maskLength + length > buffer.length) break;
+    const mask = masked ? buffer.subarray(cursor, cursor + 4) : null;
+    cursor += maskLength;
+    const payload = buffer.subarray(cursor, cursor + length);
+    if (mask !== null) for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i & 3]!;
+    if (opcode === 0x1) texts.push(payload.toString("utf8"));
+    if (opcode === 0x8) closed = true;
+    offset = cursor + length;
+  }
+  return { texts, closed, rest: buffer.subarray(offset) };
+}
+
+/** Encodes one unmasked server text frame. */
+function encodeWsText(text: string): Buffer {
+  const payload = Buffer.from(text, "utf8");
+  const frame = payload.length < 126 ? Buffer.allocUnsafe(2 + payload.length) : Buffer.allocUnsafe(4 + payload.length);
+  frame[0] = 0x81;
+  if (payload.length < 126) {
+    frame[1] = payload.length;
+    payload.copy(frame, 2);
+  } else {
+    frame[1] = 126;
+    frame.writeUInt16BE(payload.length, 2);
+    payload.copy(frame, 4);
+  }
+  return frame;
+}
+
+/** One session message the fake daemon received. */
+interface FakeDaemonFrame {
+  type: string;
+  message: Record<string, unknown>;
+}
+
+/**
+ * A fake Paseo daemon speaking the bridge's exact session protocol (hello →
+ * server_info → session envelopes) over a hermetic temp home seeded with
+ * `<home>/paseo.pid` + `<home>/local-credential`. No `ws` dependency is
+ * installed, so this is a hand-rolled upgrade server — loopback only, never
+ * the network. `reply` scripts each session message's answer; null stays
+ * silent. Every received session message is recorded for wire assertions.
+ */
+async function startFakeDaemon(t: TestContext, reply: (message: Record<string, unknown>) => Record<string, unknown> | null) {
+  const frames: FakeDaemonFrame[] = [];
+  const sockets = new Set<Duplex>();
+  const server = createServer();
+  server.on("upgrade", (req, socket) => {
+    const key = String(req.headers["sec-websocket-key"] ?? "");
+    const accept = createHash("sha1").update(key + WS_GUID).digest("base64");
+    socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+    sockets.add(socket);
+    let pending: Buffer<ArrayBufferLike> = Buffer.alloc(0);
+    socket.on("data", (chunk: Buffer) => {
+      const decoded = decodeWsFrames(Buffer.concat([pending, chunk]));
+      pending = decoded.rest;
+      for (const text of decoded.texts) {
+        const envelope = JSON.parse(text) as Record<string, unknown>;
+        if (envelope.type === "hello") {
+          socket.write(
+            encodeWsText(
+              JSON.stringify({
+                type: "session",
+                message: { type: "status", payload: { status: "server_info", features: { pluginSourceInstallation: true, pluginSourceUpdates: true } } },
+              }),
+            ),
+          );
+          continue;
+        }
+        if (envelope.type !== "session" || typeof envelope.message !== "object" || envelope.message === null) continue;
+        const message = envelope.message as Record<string, unknown>;
+        frames.push({ type: String(message.type), message });
+        const answer = reply(message);
+        if (answer !== null) socket.write(encodeWsText(JSON.stringify({ type: "session", message: answer })));
+      }
+      if (decoded.closed) {
+        socket.write(Buffer.from([0x88, 0x00]));
+        socket.end();
+      }
+    });
+    socket.on("close", () => sockets.delete(socket));
+    socket.on("error", () => {});
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (address === null || typeof address === "string") throw new Error("the fake daemon did not get a port");
+  const home = makeTempDir("paseo-factory-fake-daemon-");
+  disposeDir(t, home);
+  writeFileSync(join(home, "paseo.pid"), `${JSON.stringify({ listen: `127.0.0.1:${address.port}` })}\n`);
+  writeFileSync(join(home, "local-credential"), "test-local-credential\n");
+  t.after(() => {
+    for (const socket of sockets) socket.destroy();
+    server.close();
+  });
+  return { home, frames };
+}
+
+test("daemon plugin bridge: listDaemonPlugins speaks plugin.list.request over the session WebSocket and returns the payload", async (t) => {
+  const daemon = await startFakeDaemon(t, (message) => {
+    if (message.type === "plugin.list.request") {
+      return {
+        type: "plugin.list.response",
+        payload: {
+          requestId: message.requestId,
+          plugins: [
+            { id: "paseo-factory", path: "/plugins/paseo-factory", enabled: true, status: "running" },
+            {
+              id: "factory-burn-lab",
+              path: "/plugins/factory-burn-lab",
+              enabled: true,
+              status: "running",
+              installation: { identity: { kind: "git", remote: "https://github.com/daymanondev/factory-burn-lab", pluginPath: "plugin" }, currentRevision: "abc1234def5678" },
+            },
+          ],
+        },
+      };
+    }
+    return null;
+  });
+
+  const reply = await listDaemonPlugins(daemon.home);
+  assert.ok(reply.ok, reply.ok ? "" : reply.reason);
+  assert.deepEqual(
+    reply.plugins.map((plugin) => [plugin.id, plugin.status]),
+    [["paseo-factory", "running"], ["factory-burn-lab", "running"]],
+    "the response payload's plugins array rides the reply — the payload-returning bridge",
+  );
+  assert.equal(reply.plugins[1]!.installation?.currentRevision, "abc1234def5678");
+  assert.equal(daemon.frames.length, 1, "one session message — the bridge's own hello/status frames stay out");
+  assert.equal(daemon.frames[0]!.type, "plugin.list.request");
+  assert.equal(daemon.frames[0]!.message.requestId !== undefined, true, "the bridge stamps a requestId on the request");
+  assert.deepEqual(Object.keys(daemon.frames[0]!.message).sort(), ["requestId", "type"], "the list request carries only type + requestId");
+});
+
+test("daemon plugin bridge: the payload timeouts stay pinned — 30s default, 300s for plugin install/update", () => {
+  assert.equal(BRIDGE_TIMEOUT_MS, 30_000, "every non-install request keeps the 30s bridge default");
+  assert.equal(PLUGIN_IO_TIMEOUT_MS, 300_000, "a remote Git clone/fetch never times out prematurely (spec §Implementation Decisions 4)");
+});
+
+/** A fake `paseo` CLI first on PATH — records every argv, answers fixed stdout (the CLI fallback seam). */
+function fakePaseoCli(t: TestContext, stdout: string, opts: { code?: number; stderr?: string } = {}) {
+  const binDir = makeTempDir("paseo-factory-fake-cli-");
+  disposeDir(t, binDir);
+  const argvLog = join(binDir, "argv.log");
+  const script = [
+    "#!/usr/bin/env node",
+    `require("node:fs").appendFileSync(process.env.FAKE_PASEO_LOG, JSON.stringify(process.argv.slice(2)) + "\\n");`,
+    `process.stdout.write(${JSON.stringify(stdout)});`,
+    opts.stderr === undefined ? "" : `process.stderr.write(${JSON.stringify(opts.stderr)});`,
+    `process.exitCode = ${opts.code ?? 0};`,
+  ]
+    .filter((line) => line !== "")
+    .join("\n");
+  writeFileSync(join(binDir, "paseo"), `${script}\n`);
+  chmodSync(join(binDir, "paseo"), 0o755);
+  const savedPath = process.env.PATH;
+  const savedLog = process.env.FAKE_PASEO_LOG;
+  process.env.PATH = `${binDir}${delimiter}${savedPath ?? ""}`;
+  process.env.FAKE_PASEO_LOG = argvLog;
+  t.after(() => {
+    process.env.PATH = savedPath;
+    if (savedLog === undefined) delete process.env.FAKE_PASEO_LOG;
+    else process.env.FAKE_PASEO_LOG = savedLog;
+  });
+  const argvs = (): string[][] =>
+    existsSync(argvLog)
+      ? readFileSync(argvLog, "utf8")
+          .split("\n")
+          .filter((line) => line !== "")
+          .map((line) => JSON.parse(line) as string[])
+      : [];
+  return { argvs };
+}
+
+test("daemon plugin bridge: installDaemonPlugin routes a git source to plugin.source.install.request and returns the plugin", async (t) => {
+  const daemon = await startFakeDaemon(t, (message) => {
+    if (message.type === "plugin.source.install.request") {
+      return {
+        type: "plugin.source.install.response",
+        payload: {
+          requestId: message.requestId,
+          plugin: {
+            id: message.id,
+            path: "/plugins/factory-burn-lab",
+            enabled: true,
+            status: "running",
+            installation: { identity: { kind: "git", remote: "https://github.com/daymanondev/factory-burn-lab", pluginPath: "plugin" }, currentRevision: "abc1234def5678" },
+          },
+        },
+      };
+    }
+    return null;
+  });
+
+  const reply = await installDaemonPlugin(daemon.home, { id: "factory-burn-lab", source: "git:daymanondev/factory-burn-lab:plugin" });
+  assert.ok(reply.ok, reply.ok ? "" : reply.reason);
+  assert.equal(reply.plugin.id, "factory-burn-lab");
+  assert.equal(reply.plugin.status, "running");
+  assert.equal(reply.plugin.installation?.identity.kind, "git");
+  assert.equal(daemon.frames.length, 1);
+  const frame = daemon.frames[0]!;
+  assert.equal(frame.type, "plugin.source.install.request");
+  assert.deepEqual(
+    Object.keys(frame.message).sort(),
+    ["id", "requestId", "source", "type"],
+    "the canonical source ride as { source, id } — ref only when given, never a probed local sibling",
+  );
+  assert.equal(frame.message.source, "git:daymanondev/factory-burn-lab:plugin");
+  assert.equal(frame.message.id, "factory-burn-lab");
+});
+
+test("daemon plugin bridge: installDaemonPlugin forwards a custom ref and classifies local paths as directory installs", async (t) => {
+  const daemon = await startFakeDaemon(t, (message) => {
+    if (String(message.type).endsWith(".request")) {
+      const type = String(message.type).replace(".request", ".response");
+      return {
+        type,
+        payload: {
+          requestId: message.requestId,
+          plugin: { id: message.id ?? message.pluginId, path: "/plugins/x", enabled: true, status: "running" },
+        },
+      };
+    }
+    return null;
+  });
+
+  const fork = await installDaemonPlugin(daemon.home, { id: "factory-connector", source: "git:myfork/factory-connector:plugin", ref: "feat/x" });
+  assert.ok(fork.ok, fork.ok ? "" : fork.reason);
+  assert.equal(daemon.frames[0]!.type, "plugin.source.install.request");
+  assert.equal(daemon.frames[0]!.message.ref, "feat/x", "a custom branch/tag/commit ref forwards verbatim");
+
+  // The spec's exact local-path arms: "/", ".", "~", and a Windows drive path.
+  const localSources = ["/tmp/custom-plugin", "./checkouts/factory-connector", "~/plugins/factory-connector", "C:\\dev\\factory-connector"];
+  for (const source of localSources) {
+    const reply = await installDaemonPlugin(daemon.home, { id: "factory-connector", source });
+    assert.ok(reply.ok, reply.ok ? "" : reply.reason);
+  }
+  const directoryFrames = daemon.frames.slice(1);
+  assert.deepEqual(
+    directoryFrames.map((frame) => frame.type),
+    localSources.map(() => "plugin.directory.install.request"),
+    "every explicit local path routes to the directory install request",
+  );
+  for (let i = 0; i < localSources.length; i++) {
+    assert.deepEqual(
+      Object.keys(directoryFrames[i]!.message).sort(),
+      ["id", "path", "requestId", "type"],
+      "the directory install carries { path, id } — the path stays literal (the daemon resolves ~)",
+    );
+    assert.equal(directoryFrames[i]!.message.path, localSources[i]);
+    assert.equal(directoryFrames[i]!.message.id, "factory-connector");
+  }
+});
+
+test("daemon plugin bridge: a daemon rpc_error surfaces as the named reason", async (t) => {
+  const daemon = await startFakeDaemon(t, (message) => ({
+    type: "rpc_error",
+    payload: { requestId: message.requestId, error: "plugin source installs need a newer host" },
+  }));
+
+  const reply = await installDaemonPlugin(daemon.home, { id: "factory-burn-lab", source: "git:daymanondev/factory-burn-lab:plugin" });
+  assert.ok(!reply.ok);
+  assert.equal(reply.reason, "plugin source installs need a newer host");
+});
+
+test("daemon plugin bridge: with no paseo.pid the install falls back to the paseo CLI", async (t) => {
+  const home = makeTempDir("paseo-factory-no-daemon-"); // no paseo.pid — the WebSocket bridge declines
+  disposeDir(t, home);
+  const cli = fakePaseoCli(t, `${JSON.stringify({ id: "factory-burn-lab", path: "/plugins/factory-burn-lab", enabled: true, status: "running" })}\n`);
+
+  const reply = await installDaemonPlugin(home, { id: "factory-burn-lab", source: "git:daymanondev/factory-burn-lab:plugin", ref: "feat/x" });
+  assert.ok(reply.ok, reply.ok ? "" : reply.reason);
+  assert.equal(reply.plugin.id, "factory-burn-lab");
+  assert.deepEqual(
+    cli.argvs(),
+    [["--home", home, "plugin", "install", "git:daymanondev/factory-burn-lab:plugin", "--id", "factory-burn-lab", "--ref", "feat/x", "--json"]],
+    "the fallback spells 'paseo --home <home> plugin install <source> --id <id> [--ref <ref>] --json'",
+  );
+
+  const bare = await installDaemonPlugin(home, { id: "factory-connector", source: "git:daymanondev/factory-connector:plugin" });
+  assert.ok(bare.ok, bare.ok ? "" : bare.reason);
+  assert.deepEqual(
+    cli.argvs()[1],
+    ["--home", home, "plugin", "install", "git:daymanondev/factory-connector:plugin", "--id", "factory-connector", "--json"],
+    "no --ref flag when no ref was given",
+  );
+});
+
+test("daemon plugin bridge: a failing CLI fallback reports the CLI's first error line", async (t) => {
+  const home = makeTempDir("paseo-factory-no-daemon-");
+  disposeDir(t, home);
+  const cli = fakePaseoCli(t, "", { code: 1, stderr: "Error: no such source: git:nope/x:plugin\nsecond line\n" });
+
+  const reply = await installDaemonPlugin(home, { id: "factory-burn-lab", source: "git:nope/x:plugin" });
+  assert.ok(!reply.ok);
+  assert.equal(reply.reason, "Error: no such source: git:nope/x:plugin");
+  assert.equal(cli.argvs().length, 1);
+});
+
+test("daemon plugin bridge: manageDaemonPlugin dispatches enable, disable, reload, remove, and update", async (t) => {
+  const daemon = await startFakeDaemon(t, (message) => {
+    const type = String(message.type);
+    if (type === "plugin.source.update.request") {
+      return {
+        type: "plugin.source.update.response",
+        payload: {
+          requestId: message.requestId,
+          plugins: [
+            { id: "factory-burn-lab", previousCommit: "abc1234", currentCommit: "def5678", commits: 3, updated: true },
+            { id: "some-other-plugin", updated: false },
+          ],
+        },
+      };
+    }
+    if (type.endsWith(".request")) {
+      const responseType = type.replace(".request", ".response");
+      return {
+        type: responseType,
+        // remove responses carry requestId only (no plugin payload); the rest carry the plugin item
+        payload: {
+          requestId: message.requestId,
+          ...(responseType === "plugin.remove.response"
+            ? {}
+            : { plugin: { id: message.pluginId, path: "/plugins/x", enabled: responseType === "plugin.enable.response", status: "running" } }),
+        },
+      };
+    }
+    return null;
+  });
+
+  const enable = await manageDaemonPlugin(daemon.home, "factory-burn-lab", "enable");
+  assert.ok(enable.ok, enable.ok ? "" : enable.reason);
+  assert.equal(enable.plugin?.id, "factory-burn-lab");
+  assert.equal(enable.plugin?.enabled, true);
+  const disable = await manageDaemonPlugin(daemon.home, "factory-burn-lab", "disable");
+  assert.ok(disable.ok, disable.ok ? "" : disable.reason);
+  const reload = await manageDaemonPlugin(daemon.home, "factory-burn-lab", "reload");
+  assert.ok(reload.ok, reload.ok ? "" : reload.reason);
+  const remove = await manageDaemonPlugin(daemon.home, "factory-burn-lab", "remove");
+  // A remove's success is the frame arriving — the response carries no plugin payload.
+  assert.ok(remove.ok, remove.ok ? "" : remove.reason);
+  const update = await manageDaemonPlugin(daemon.home, "factory-burn-lab", "update");
+  assert.ok(update.ok, update.ok ? "" : update.reason);
+  assert.equal(update.update?.currentCommit, "def5678", "the update answer is the row matching the pluginId — the payload is an array");
+  assert.equal(update.update?.updated, true);
+
+  assert.deepEqual(
+    daemon.frames.map((frame) => frame.type),
+    ["plugin.enable.request", "plugin.disable.request", "plugin.reload.request", "plugin.remove.request", "plugin.source.update.request"],
+  );
+  for (const frame of daemon.frames) {
+    assert.deepEqual(Object.keys(frame.message).sort(), ["pluginId", "requestId", "type"]);
+    assert.equal(frame.message.pluginId, "factory-burn-lab", "every manage request names its plugin — an update without pluginId would update every plugin");
+  }
+});
+
+test("daemon plugin bridge: with no paseo.pid the list falls back to the paseo CLI", async (t) => {
+  const home = makeTempDir("paseo-factory-no-daemon-");
+  disposeDir(t, home);
+  const cli = fakePaseoCli(t, `${JSON.stringify([{ id: "paseo-factory", path: "/plugins/paseo-factory", enabled: true, status: "running" }])}\n`);
+
+  const reply = await listDaemonPlugins(home);
+  assert.ok(reply.ok, reply.ok ? "" : reply.reason);
+  assert.deepEqual(
+    reply.plugins.map((plugin) => [plugin.id, plugin.status]),
+    [["paseo-factory", "running"]],
+  );
+  assert.deepEqual(cli.argvs(), [["--home", home, "plugin", "ls", "--json"]], "the fallback spells 'paseo --home <home> plugin ls --json'");
+});
+
+test("daemon plugin bridge: with no paseo.pid the manage actions fall back to the paseo CLI", async (t) => {
+  const home = makeTempDir("paseo-factory-no-daemon-");
+  disposeDir(t, home);
+  const cli = fakePaseoCli(t, `${JSON.stringify({ plugins: [] })}\n`);
+
+  const enable = await manageDaemonPlugin(home, "factory-burn-lab", "enable");
+  assert.ok(enable.ok, enable.ok ? "" : enable.reason);
+  const update = await manageDaemonPlugin(home, "factory-burn-lab", "update");
+  assert.ok(update.ok, update.ok ? "" : update.reason);
+  assert.deepEqual(cli.argvs(), [
+    ["--home", home, "plugin", "enable", "factory-burn-lab", "--json"],
+    ["--home", home, "plugin", "update", "factory-burn-lab", "--yes", "--json"],
+  ]);
+});
+
+test("surface deps: the plugin bridge overrides ride createSurfaceHandlers like the seat bridges", async (t) => {
+  const pluginCalls: string[] = [];
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const home = join(dir, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const retroRunner = fakeCopilotRunner(() => ({ code: 0, stdout: '{"proposals":[]}' }));
+  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner });
+  const handlers = createSurfaceHandlers({
+    factory,
+    stateDir,
+    home,
+    daemon: fakeDaemon([]).daemon,
+    listPlugins: async () => {
+      pluginCalls.push("list");
+      return { ok: true, plugins: [] };
+    },
+    installPlugin: async () => {
+      pluginCalls.push("install");
+      return { ok: true, plugin: { id: "factory-burn-lab", path: "/plugins/factory-burn-lab", enabled: true, status: "running" } };
+    },
+    managePlugin: async () => {
+      pluginCalls.push("manage");
+      return { ok: true };
+    },
+  });
+
+  const snap = await handlers.snapshot({});
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  assert.deepEqual(pluginCalls, [], "nothing fires the overrides yet — their consumers arrive with the handlers ticket");
+
+  // The real bridge functions satisfy the override slots — the defaults the handlers ticket will bind.
+  const defaults: Partial<SurfaceDeps> = { listPlugins: listDaemonPlugins, installPlugin: installDaemonPlugin, managePlugin: manageDaemonPlugin };
+  assert.equal(typeof defaults.listPlugins, "function");
+  assert.equal(typeof defaults.installPlugin, "function");
+  assert.equal(typeof defaults.managePlugin, "function");
 });
