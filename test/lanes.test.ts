@@ -280,8 +280,17 @@ test("each provider family maps to its exact tool-less argv — the invariant is
     command: "claude",
     args: ["-p", "--model", "opus-4-8", "--tools", "", "--effort", "high"],
   });
+  assert.deepEqual(laneCliInvocation("opencode/deepseek-v4.1-flash-free"), {
+    command: "opencode",
+    args: ["run", "--standalone", "--auto", "-m", "opencode/deepseek-v4.1-flash-free"],
+  });
+  assert.deepEqual(laneCliInvocation("opencode/glm-5.3-flash-free:high"), {
+    command: "opencode",
+    args: ["run", "--standalone", "--auto", "-m", "opencode/glm-5.3-flash-free", "--variant", "high"],
+  }, "the :thinking suffix rides --variant — the last-colon split the other three families use");
   assert.equal(laneCliInvocation("codex/gpt-6"), undefined, "no known tool-less form — refused, never improvised");
   assert.equal(laneCliInvocation("eye.json"), undefined);
+  assert.equal(laneCliInvocation("opencode/"), undefined, "a malformed lane never reaches the switch");
 });
 
 /** A fake lane runner recording every invocation — the watch/retro test seam, generalized. */

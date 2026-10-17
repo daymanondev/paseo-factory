@@ -17,6 +17,9 @@
  *                     --no-skills --no-context-files --model <model>`
  *   copilot/<model>→ `copilot -s --model <model> --reasoning-effort medium`
  *   claude/<model> → `claude -p --model <model> --tools ""`
+ *   opencode/<model> → `opencode run --standalone --auto -m opencode/<model>`
+ *                     (tools denied a second way: the runner injects
+ *                     TOOLLESS_OPENCODE_CONFIG, v0.0.18)
  * The prompt rides stdin (the watch's discipline since amendment 2); the
  * runner owns a scratch cwd and a SIGKILL deadline. `eye.json` is not a CLI
  * lane — it is the fresh-eyes pass's legacy direct-HTTP configuration, legal
@@ -230,10 +233,10 @@ export interface LaneCliInvocation {
 }
 
 /**
- * Maps a lane string to its headless tool-less CLI invocation. `pi`, `copilot`
- * and `claude` are the three families with a verified tool-less form; anything
- * else (including `eye.json` and bare providers) has none — undefined, never
- * an improvised command with tools on.
+ * Maps a lane string to its headless tool-less CLI invocation. `pi`,
+ * `copilot`, `claude` and `opencode` are the four families with a verified
+ * tool-less form; anything else (including `eye.json` and bare providers)
+ * has none — undefined, never an improvised command with tools on.
  */
 export function laneCliInvocation(lane: string): LaneCliInvocation | undefined {
   const parsed = parseLane(lane);
@@ -261,6 +264,11 @@ export function laneCliInvocation(lane: string): LaneCliInvocation | undefined {
       return {
         command: "claude",
         args: ["-p", "--model", model, "--tools", "", ...(thinking === undefined ? [] : ["--effort", thinking])],
+      };
+    case "opencode":
+      return {
+        command: "opencode",
+        args: ["run", "--standalone", "--auto", "-m", `opencode/${model}`, ...(thinking === undefined ? [] : ["--variant", thinking])],
       };
     default:
       return undefined;
