@@ -249,12 +249,13 @@ test("snapshot: versioned view folding ledger + lanes + daemon agents + provider
   assert.equal(view.daemonError, null);
 });
 
-test("snapshot: the companion catalog rides the view — two cards, not_installed while the daemon lists no companions", async (t) => {
-  const { handlers } = makeSurface(t);
+test("snapshot: the companion catalog rides the view — two cards, not_installed when the daemon lists only paseo-factory", async (t) => {
+  const { handlers } = makeSurface(t, [], [{ id: "paseo-factory", path: "/plugins/paseo-factory", enabled: true, status: "running" }]);
   const snap = await handlers.snapshot({});
   assert.ok(snap.ok, snap.ok ? "" : snap.error);
   const view = snap.view;
-  // Exactly the two official companions, catalog order — the spec's own literals.
+  // Exactly the two official companions, catalog order — the spec's own literals;
+  // the daemon's own paseo-factory entry is a stranger to the catalog, never a card.
   assert.deepEqual(view.companions.map((companion) => companion.id), ["factory-burn-lab", "factory-connector"]);
 
   const burn = view.companions[0]!;
