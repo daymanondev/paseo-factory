@@ -27,6 +27,7 @@ import type { LandingResult } from "./core/workspace.ts";
 import { FACTORY_VIEW_VERSION } from "../shared/view.ts";
 import { foldRetro, foldTasks, foldView, readTailed } from "./view.ts";
 import { setAgentModelViaCli, setAgentThinkingViaCli, stopAgentViaCli } from "./daemon-cli.ts";
+import { installDaemonPlugin, listDaemonPlugins, manageDaemonPlugin } from "./daemon-cli.ts";
 import type { DaemonReply } from "./daemon-cli.ts";
 import { SEAT_TITLES, renderSeatBootstrap } from "./roles.ts";
 import type { SeatName } from "./roles.ts";
@@ -110,6 +111,14 @@ export interface SurfaceDeps {
   setAgentThinking?: (agentId: string, thinkingOptionId: string, home?: string) => Promise<DaemonReply>;
   /** Agent cancel override (tests) — the CLI bridge by default. */
   stopAgent?: (agentId: string, home?: string) => Promise<DaemonReply>;
+  /**
+   * Daemon plugin lifecycle overrides (v0.0.17, ADR 0012 §4; tests) — the
+   * daemon WebSocket bridge by default. Every call targets `home` first, so
+   * trial and production plugin state never cross-contaminate.
+   */
+  listPlugins?: typeof listDaemonPlugins;
+  installPlugin?: typeof installDaemonPlugin;
+  managePlugin?: typeof manageDaemonPlugin;
   onLog?: (message: string) => void;
 }
 

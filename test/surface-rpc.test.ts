@@ -3,18 +3,25 @@ import type { TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
-import type { Socket } from "node:net";
+import type { Duplex } from "node:stream";
 import { existsSync, chmodSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { basename, delimiter, dirname, join } from "node:path";
 import { createFactory } from "../plugin/server/core/factory.ts";
 import { resolveProject } from "../plugin/server/core/project.ts";
 import { createSurfaceHandlers } from "../plugin/server/surface-rpc.ts";
-import type { SurfaceDaemonApi } from "../plugin/server/surface-rpc.ts";
+import type { SurfaceDaemonApi, SurfaceDeps } from "../plugin/server/surface-rpc.ts";
+import {
+  BRIDGE_TIMEOUT_MS,
+  cliUtils,
+  installDaemonPlugin,
+  listDaemonPlugins,
+  manageDaemonPlugin,
+  PLUGIN_IO_TIMEOUT_MS,
+} from "../plugin/server/daemon-cli.ts";
 import { factoryEnvFor, injectRoleOnCreate, injectSessionEnv, renderAgentContract, renderSeatBootstrap, renderSeatContract } from "../plugin/server/roles.ts";
 import type { AgentCreateRequest } from "../plugin/server/roles.ts";
 import { discoverProjects, readProjectRegistration, writeProjectRegistration } from "../plugin/server/projects.ts";
 import { lanesPath, loadLanes, saveLanes } from "../src/lanes.ts";
-import { BRIDGE_TIMEOUT_MS, cliUtils, installDaemonPlugin, listDaemonPlugins, manageDaemonPlugin, PLUGIN_IO_TIMEOUT_MS } from "../plugin/server/daemon-cli.ts";
 import { disposeDir, fakeCopilotRunner, gitCommitAll, makeTempDir, writeLanes } from "./helpers.ts";
 
 /**
@@ -1093,14 +1100,14 @@ interface FakeDaemonFrame {
  */
 async function startFakeDaemon(t: TestContext, reply: (message: Record<string, unknown>) => Record<string, unknown> | null) {
   const frames: FakeDaemonFrame[] = [];
-  const sockets = new Set<Socket>();
+  const sockets = new Set<Duplex>();
   const server = createServer();
   server.on("upgrade", (req, socket) => {
     const key = String(req.headers["sec-websocket-key"] ?? "");
     const accept = createHash("sha1").update(key + WS_GUID).digest("base64");
     socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
     sockets.add(socket);
-    let pending = Buffer.alloc(0);
+    let pending: Buffer<ArrayBufferLike> = Buffer.alloc(0);
     socket.on("data", (chunk: Buffer) => {
       const decoded = decodeWsFrames(Buffer.concat([pending, chunk]));
       pending = decoded.rest;
@@ -1123,7 +1130,10 @@ async function startFakeDaemon(t: TestContext, reply: (message: Record<string, u
         const answer = reply(message);
         if (answer !== null) socket.write(encodeWsText(JSON.stringify({ type: "session", message: answer })));
       }
-      if (decoded.closed) socket.end(Buffer.from([0x88, 0x00]));
+      if (decoded.closed) {
+        socket.write(Buffer.from([0x88, 0x00]));
+        socket.end();
+      }
     });
     socket.on("close", () => sockets.delete(socket));
     socket.on("error", () => {});
@@ -1384,7 +1394,8 @@ test("daemon plugin bridge: manageDaemonPlugin dispatches enable, disable, reloa
   const reload = await manageDaemonPlugin(daemon.home, "factory-burn-lab", "reload");
   assert.ok(reload.ok, reload.ok ? "" : reload.reason);
   const remove = await manageDaemonPlugin(daemon.home, "factory-burn-lab", "remove");
-  assert.ok(remove.ok, remove.ok ? "" : remove.reason, "a remove's success is the frame arriving — the response carries no plugin");
+  // A remove's success is the frame arriving — the response carries no plugin payload.
+  assert.ok(remove.ok, remove.ok ? "" : remove.reason);
   const update = await manageDaemonPlugin(daemon.home, "factory-burn-lab", "update");
   assert.ok(update.ok, update.ok ? "" : update.reason);
   assert.equal(update.update?.currentCommit, "def5678", "the update answer is the row matching the pluginId — the payload is an array");
@@ -1413,4 +1424,42 @@ test("daemon plugin bridge: with no paseo.pid the manage actions fall back to th
     ["--home", home, "plugin", "enable", "factory-burn-lab", "--json"],
     ["--home", home, "plugin", "update", "factory-burn-lab", "--yes", "--json"],
   ]);
+});
+
+test("surface deps: the plugin bridge overrides ride createSurfaceHandlers like the seat bridges", async (t) => {
+  const pluginCalls: string[] = [];
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const home = join(dir, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const retroRunner = fakeCopilotRunner(() => ({ code: 0, stdout: '{"proposals":[]}' }));
+  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner });
+  const handlers = createSurfaceHandlers({
+    factory,
+    stateDir,
+    home,
+    daemon: fakeDaemon([]).daemon,
+    listPlugins: async () => {
+      pluginCalls.push("list");
+      return { ok: true, plugins: [] };
+    },
+    installPlugin: async () => {
+      pluginCalls.push("install");
+      return { ok: true, plugin: { id: "factory-burn-lab", path: "/plugins/factory-burn-lab", enabled: true, status: "running" } };
+    },
+    managePlugin: async () => {
+      pluginCalls.push("manage");
+      return { ok: true };
+    },
+  });
+
+  const snap = await handlers.snapshot({});
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  assert.deepEqual(pluginCalls, [], "nothing fires the overrides yet — their consumers arrive with the handlers ticket");
+
+  // The real bridge functions satisfy the override slots — the defaults the handlers ticket will bind.
+  const defaults: Partial<SurfaceDeps> = { listPlugins: listDaemonPlugins, installPlugin: installDaemonPlugin, managePlugin: manageDaemonPlugin };
+  assert.equal(typeof defaults.listPlugins, "function");
+  assert.equal(typeof defaults.installPlugin, "function");
+  assert.equal(typeof defaults.managePlugin, "function");
 });
