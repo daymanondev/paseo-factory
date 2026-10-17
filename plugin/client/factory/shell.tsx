@@ -13,7 +13,7 @@ import { useRpc } from "@getpaseo/plugin/client";
 import { Modal, ScrollView, useToast } from "@getpaseo/plugin/client/react-native";
 import { useState } from "react";
 import { Text, View } from "react-native";
-import { accept, lanesSet, leadEnsure, leadRotate, ratifyProposal, retro, snapshot, supervisorEnsure, supervisorRevoke, taskDetail } from "../../shared/rpc.ts";
+import { accept, lanesSet, leadEnsure, leadRotate, pluginsInstall, pluginsManage, ratifyProposal, retro, snapshot, supervisorEnsure, supervisorRevoke, taskDetail } from "../../shared/rpc.ts";
 import type { FactoryView, LaneName, TaskDetailView } from "../../shared/view.ts";
 import { Btn, Card, TabBar } from "../kit/pill.tsx";
 import type { TabId } from "../kit/pill.tsx";
@@ -23,6 +23,7 @@ import { Header } from "./header.tsx";
 import { TasksPane } from "./tasks.tsx";
 import { SeatsPane } from "./seats.tsx";
 import { TimelinePane } from "./timeline.tsx";
+import { PluginsPane } from "./plugins.tsx";
 
 /** The navigation slice the shell uses — `openAgent` jumps to a session. */
 export interface Navigation {
@@ -58,6 +59,8 @@ export function FactoryShell({
   const leadRotateCall = useRpc(leadRotate);
   const ratifyCall = useRpc(ratifyProposal);
   const detailCall = useRpc(taskDetail);
+  const pluginsInstallCall = useRpc(pluginsInstall);
+  const pluginsManageCall = useRpc(pluginsManage);
 
   const [tab, setTab] = useState<TabId>(initialTab);
   const [bump, setBump] = useState(0);
@@ -171,6 +174,7 @@ export function FactoryShell({
             tasks: view.tasks.length,
             seats: view.agents.length,
             timeline: view.retro.length,
+            plugins: view.companions.filter((c) => c.status === "running").length,
           }}
         />
         {tab === "tasks" ? (
@@ -234,6 +238,22 @@ export function FactoryShell({
                   if (reply.ok) setRetroNote(reply.summary);
                   return reply;
                 });
+              },
+            }}
+          />
+        ) : null}
+        {tab === "plugins" ? (
+          <PluginsPane
+            theme={theme}
+            view={view}
+            actions={{
+              busy,
+              install: (target, source, ref) => {
+                void act("Install", () => pluginsInstallCall({ target, source, ref }));
+              },
+              manage: (pluginId, action) => {
+                // The toast names the act — "Update: …", "Remove: …" (the act() law).
+                void act(`${action[0]!.toUpperCase()}${action.slice(1)}`, () => pluginsManageCall({ pluginId, action }));
               },
             }}
           />
