@@ -233,6 +233,26 @@ export interface LaneCliInvocation {
 }
 
 /**
+ * The opencode lane's tool-less permission set (v0.0.18, spec
+ * §Implementation Decisions 3), injected as `OPENCODE_CONFIG_CONTENT` so
+ * every tool is denied by construction — the second line of defense beside
+ * the argv's own `--standalone --auto`. `read` denies even file reads: the
+ * prompt on stdin is the whole material, exactly like the other families.
+ */
+export const TOOLLESS_OPENCODE_CONFIG = JSON.stringify({
+  permission: {
+    "*": "deny",
+    external_directory: "deny",
+    doom_loop: "deny",
+    question: "deny",
+    edit: "deny",
+    write: "deny",
+    bash: "deny",
+    read: { "*": "deny" },
+  },
+});
+
+/**
  * Maps a lane string to its headless tool-less CLI invocation. `pi`,
  * `copilot`, `claude` and `opencode` are the four families with a verified
  * tool-less form; anything else (including `eye.json` and bare providers)
@@ -279,9 +299,10 @@ export function laneCliInvocation(lane: string): LaneCliInvocation | undefined {
  * One lane CLI invocation — the seam tests fake (the real one spawns the
  * lane's command with the prompt on stdin). `command` records which family
  * ran; `cwd` is the pass's empty scratch dir; `timeoutMs` kills a hanging CLI
- * mid-flight; `env` carries the extra environment a `pi` lane needs — its
- * clean `PI_CODING_AGENT_DIR` (v0.0.16, ADR 0011) — and is undefined for
- * every other family, which inherit the parent environment unchanged.
+ * mid-flight; `env` carries the extra environment a family needs — a `pi`
+ * lane's clean `PI_CODING_AGENT_DIR` (v0.0.16, ADR 0011), an `opencode`
+ * lane's `TOOLLESS_OPENCODE_CONFIG` plus `CI=1` (v0.0.18) — and is undefined
+ * for every other family, which inherit the parent environment unchanged.
  */
 export type LaneCliRunner = (input: {
   command: string;
@@ -317,8 +338,11 @@ export function laneCliAvailable(lane: string): boolean {
  * idempotently, before the scratch cwd exists — at `<stateDir>/pi-agent/headless`
  * so `pi --print` never resolves the operator's user packages or reads
  * `~/.pi/agent/APPEND_SYSTEM.md` (on top of the argv's own `--no-extensions
- * --no-skills --no-context-files` flags). Non-pi lanes and callers without a
- * `stateDir` inherit the parent environment, exactly as before.
+ * --no-skills --no-context-files` flags). An `opencode/<model>` lane runs
+ * with every tool denied a second way (v0.0.18): `OPENCODE_CONFIG_CONTENT`
+ * carries TOOLLESS_OPENCODE_CONFIG and `CI=1` keeps the CLI non-interactive,
+ * independent of any `stateDir`. Every other lane, and a pi caller without a
+ * `stateDir`, inherits the parent environment, exactly as before.
  */
 export async function runLaneCli(input: {
   lane: string;
@@ -336,16 +360,19 @@ export async function runLaneCli(input: {
   if (invocation === undefined) {
     return {
       ok: false,
-      error: `lane "${input.lane}" has no headless tool-less CLI form — use pi/<model>, copilot/<model>, claude/<model>, or "eye.json" for freshEyes`,
+      error: `lane "${input.lane}" has no headless tool-less CLI form — use pi/<model>, copilot/<model>, claude/<model>, opencode/<model>, or "eye.json" for freshEyes`,
       budgetExceeded: false,
     };
   }
   const sourceAgentDir =
     input.sourceAgentDir ?? (input.userHome !== undefined ? join(input.userHome, ".pi", "agent") : undefined);
+  const provider = parseLane(input.lane)?.provider;
   const env =
-    parseLane(input.lane)?.provider === "pi" && input.stateDir !== undefined
+    provider === "pi" && input.stateDir !== undefined
       ? { PI_CODING_AGENT_DIR: provisionPiAgentHome({ stateDir: input.stateDir, role: "headless", sourceAgentDir }) }
-      : undefined;
+      : provider === "opencode"
+        ? { OPENCODE_CONFIG_CONTENT: TOOLLESS_OPENCODE_CONFIG, CI: "1" }
+        : undefined;
   const cwd = mkdtempSync(join(tmpdir(), "factory-lane-"));
   try {
     const run = input.runner ?? spawnLaneCli;

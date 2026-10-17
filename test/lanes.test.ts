@@ -25,6 +25,7 @@ import {
   resolveRunProvider as resolveRunProviderMjs,
 } from "../plugin/bin/lanes-config.mjs";
 import { disposeDir, gitCommitAll, makeTempDir, repoRoot } from "./helpers.ts";
+import * as core from "../src/index.ts";
 
 /**
  * The unified Lane config and the headless tool-less runner (v0.0.13, ADR
@@ -280,17 +281,8 @@ test("each provider family maps to its exact tool-less argv — the invariant is
     command: "claude",
     args: ["-p", "--model", "opus-4-8", "--tools", "", "--effort", "high"],
   });
-  assert.deepEqual(laneCliInvocation("opencode/deepseek-v4.1-flash-free"), {
-    command: "opencode",
-    args: ["run", "--standalone", "--auto", "-m", "opencode/deepseek-v4.1-flash-free"],
-  });
-  assert.deepEqual(laneCliInvocation("opencode/glm-5.3-flash-free:high"), {
-    command: "opencode",
-    args: ["run", "--standalone", "--auto", "-m", "opencode/glm-5.3-flash-free", "--variant", "high"],
-  }, "the :thinking suffix rides --variant — the last-colon split the other three families use");
   assert.equal(laneCliInvocation("codex/gpt-6"), undefined, "no known tool-less form — refused, never improvised");
   assert.equal(laneCliInvocation("eye.json"), undefined);
-  assert.equal(laneCliInvocation("opencode/"), undefined, "a malformed lane never reaches the switch");
 });
 
 /** A fake lane runner recording every invocation — the watch/retro test seam, generalized. */
@@ -401,6 +393,60 @@ test("runLaneCli on a pi lane passes a clean headless PI_CODING_AGENT_DIR to the
   const copilot = await runLaneCli({ lane: "copilot/gpt-5.4", stdin: "p", timeoutMs: 5_000, runner: other.runner, stateDir, sourceAgentDir: source });
   assert.ok(copilot.ok);
   assert.equal(other.calls[0]!.env?.PI_CODING_AGENT_DIR, undefined, "copilot lanes inherit the environment unchanged");
+});
+
+// ---- the opencode family (v0.0.18) — barrel-only imports ----------------------------------
+//
+// The fourth headless tool-less CLI family exercises the top-level core
+// barrel alone (spec Testing Decisions): everything this section touches —
+// laneCliInvocation, runLaneCli, TOOLLESS_OPENCODE_CONFIG, the three passes —
+// is imported through `core`, never from ../src/lanes.ts directly.
+
+test("opencode/<model> maps to its exact headless tool-less argv — the fourth family", () => {
+  assert.deepEqual(core.laneCliInvocation("opencode/deepseek-v4.1-flash-free"), {
+    command: "opencode",
+    args: ["run", "--standalone", "--auto", "-m", "opencode/deepseek-v4.1-flash-free"],
+  });
+  assert.deepEqual(
+    core.laneCliInvocation("opencode/glm-5.3-flash-free:high"),
+    { command: "opencode", args: ["run", "--standalone", "--auto", "-m", "opencode/glm-5.3-flash-free", "--variant", "high"] },
+    "the :thinking suffix rides --variant — the last-colon split the other three families use",
+  );
+  assert.equal(core.laneCliInvocation("opencode/"), undefined, "a malformed lane never reaches the switch");
+});
+
+test("runLaneCli on an opencode lane denies every tool by construction — config and CI reach the child env", async () => {
+  assert.equal(typeof core.TOOLLESS_OPENCODE_CONFIG, "string", "the barrel exports the tool-less opencode config");
+  const fake = fakeLaneRunner(() => ({ code: 0, stdout: "answer" }));
+
+  const result = await core.runLaneCli({ lane: "opencode/deepseek-v4.1-flash-free", stdin: "the prompt", timeoutMs: 5_000, runner: fake.runner });
+  assert.ok(result.ok);
+  assert.equal(fake.calls.length, 1);
+  assert.equal(fake.calls[0]!.command, "opencode");
+  assert.deepEqual(fake.calls[0]!.args, ["run", "--standalone", "--auto", "-m", "opencode/deepseek-v4.1-flash-free"]);
+  assert.equal(fake.calls[0]!.stdin, "the prompt", "the prompt stays on stdin — the shared discipline since amendment 2");
+  assert.equal(fake.calls[0]!.env?.OPENCODE_CONFIG_CONTENT, core.TOOLLESS_OPENCODE_CONFIG, "the tool-less permission set reaches the child verbatim");
+  assert.equal(fake.calls[0]!.env?.CI, "1", "CI=1 — no interactive prompt can hang the pass");
+  assert.equal(fake.calls[0]!.env?.PI_CODING_AGENT_DIR, undefined, "only pi lanes carry the Pi home — opencode needs no stateDir");
+
+  // The permission set itself is the spec's literal block: everything denied,
+  // read included — the prompt on stdin is the whole material.
+  const parsed = JSON.parse(core.TOOLLESS_OPENCODE_CONFIG) as { permission: Record<string, unknown> };
+  assert.deepEqual(parsed.permission, {
+    "*": "deny",
+    external_directory: "deny",
+    doom_loop: "deny",
+    question: "deny",
+    edit: "deny",
+    write: "deny",
+    bash: "deny",
+    read: { "*": "deny" },
+  });
+
+  // The no-headless-form refusal names the fourth family among the usable forms.
+  const unknown = await core.runLaneCli({ lane: "codex/gpt-6", stdin: "p", timeoutMs: 5_000 });
+  assert.ok(!unknown.ok && !unknown.budgetExceeded);
+  assert.match(unknown.error, /opencode\/<model>/);
 });
 
 // ---- the CLI-side mirror (ADR 0004: CLIs import no src/ code) ----------------------------
