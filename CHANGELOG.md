@@ -11,6 +11,58 @@ v0.0.18's one thing: **`paseo-factory` becomes remotely installable** — the
 remote-first story v0.0.17 shipped for its companions now holds for the core
 plugin itself.
 
+The version also completes the core as a self-contained SDK for its
+`Companion plugin`s (ADR 0012): the four slices below resolve burn-lab
+upstream issues `#01` and `#02`.
+
+### Added
+
+- **Headless tool-less `opencode/<model>` lanes in `Lane config`
+  (`src/lanes.ts`, pinned in `test/lanes.test.ts`)** — `parseLane` accepts
+  `opencode/<model>` and its `:thinking` suffix, and `laneCliInvocation`
+  maps it to `opencode run --standalone --auto -m opencode/<model>`
+  (`--variant <thinking>` when set), so the $0 `opencode/*-free` models
+  become selectable for `watch`, `retro`, and `freshEyes`. The pass is
+  tool-less by construction: `runLaneCli` injects
+  `OPENCODE_CONFIG_CONTENT = TOOLLESS_OPENCODE_CONFIG` — every tool denied,
+  `read` included (the prompt on stdin is the whole material) — plus
+  `CI=1` into the spawned env and strips ANSI escapes from the opencode
+  path's stdout, so a pass can never mutate disk or hang on an interactive
+  prompt; the same seam carries `Watch`, `Retro`, and `Fresh-eyes review`
+  end to end.
+- **The `Project` registry in the pure-Node core (`src/project.ts`, vendored
+  at `plugin/server/core/project.ts`)** — `ProjectRegistration`,
+  `readProjectRegistration`, `writeProjectRegistration`,
+  `listProjectRegistrations`, and `discoverProjects` move out of the plugin
+  server layer into the core `Project` module, so `paseo-factory` and its
+  companions share one source of truth for
+  `<stateDir>/projects/<slug>/project.json` and its `Supervisor` / `Lead`
+  seat bindings.
+- **`Task worktree` allocation in the pure-Node core (`src/workspace.ts`,
+  pinned in `test/integration.test.ts`)** — `taskWorktreePath`,
+  `parseTaskWorktreePath`, `taskWorktreeBranch`, and `prepareTaskWorktree`
+  (the port of the driver's proven `plugin/bin/task-worktree.mjs` allocator
+  — the CLI itself is untouched) join the core `Workspace` module with the
+  `.worktreeinclude` copying and per-worktree `core.excludesFile`
+  (`factory-excludes`) behavior, gaining the companion-facing
+  `worktreePath` / `branchName` overrides (Best-of-N arenas) and
+  `symlinkNodeModules: true` (`junction` on win32, `dir` symlink on POSIX,
+  with `node_modules` appended to `factory-excludes` so `checkCleanAt`
+  stays clean).
+- **The complete top-level core barrel (`src/index.ts`, vendored at
+  `plugin/server/core/index.ts`)** — everything a companion needs from one
+  import: the registry five, `headCommitSync` / `changesOutsideScope` /
+  `landTaskWorktree`, the worktree four, `parseLane` / `projectLanesPath` /
+  `TOOLLESS_OPENCODE_CONFIG`, and `provisionPiAgentHome` with its options
+  interface renamed to `ProvisionPiHomeOptions` (`src/pi-home.ts`).
+
+### Changed
+
+- `plugin/server/projects.ts` becomes a thin re-export of
+  `./core/project.ts` — same signatures, same registry bytes, zero behavior
+  change for existing callers and tests.
+- Suite 412 → 421.
+
 ### Fixed
 
 - `package.json` declares `@getpaseo/protocol` (`0.11.2`, pinned to the

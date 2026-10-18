@@ -24,7 +24,8 @@ import {
   parseLane as parseLaneMjs,
   resolveRunProvider as resolveRunProviderMjs,
 } from "../plugin/bin/lanes-config.mjs";
-import { disposeDir, gitCommitAll, makeTempDir, repoRoot } from "./helpers.ts";
+import { copilotAnswerLines, disposeDir, gitCommitAll, gitCommitChanges, makeTempDir, repoRoot, writeLanes } from "./helpers.ts";
+import * as core from "../src/index.ts";
 
 /**
  * The unified Lane config and the headless tool-less runner (v0.0.13, ADR
@@ -392,6 +393,175 @@ test("runLaneCli on a pi lane passes a clean headless PI_CODING_AGENT_DIR to the
   const copilot = await runLaneCli({ lane: "copilot/gpt-5.4", stdin: "p", timeoutMs: 5_000, runner: other.runner, stateDir, sourceAgentDir: source });
   assert.ok(copilot.ok);
   assert.equal(other.calls[0]!.env?.PI_CODING_AGENT_DIR, undefined, "copilot lanes inherit the environment unchanged");
+});
+
+// ---- the opencode family (v0.0.18) — barrel-only imports ----------------------------------
+//
+// The fourth headless tool-less CLI family exercises the top-level core
+// barrel alone (spec Testing Decisions): everything this section touches —
+// laneCliInvocation, runLaneCli, TOOLLESS_OPENCODE_CONFIG, the three passes —
+// is imported through `core`, never from ../src/lanes.ts directly.
+
+test("opencode/<model> maps to its exact headless tool-less argv — the fourth family", () => {
+  assert.deepEqual(core.laneCliInvocation("opencode/deepseek-v4.1-flash-free"), {
+    command: "opencode",
+    args: ["run", "--standalone", "--auto", "-m", "opencode/deepseek-v4.1-flash-free"],
+  });
+  assert.deepEqual(
+    core.laneCliInvocation("opencode/glm-5.3-flash-free:high"),
+    { command: "opencode", args: ["run", "--standalone", "--auto", "-m", "opencode/glm-5.3-flash-free", "--variant", "high"] },
+    "the :thinking suffix rides --variant — the last-colon split the other three families use",
+  );
+  assert.equal(core.laneCliInvocation("opencode/"), undefined, "a malformed lane never reaches the switch");
+});
+
+test("runLaneCli on an opencode lane denies every tool by construction — config and CI reach the child env", async () => {
+  assert.equal(typeof core.TOOLLESS_OPENCODE_CONFIG, "string", "the barrel exports the tool-less opencode config");
+  const fake = fakeLaneRunner(() => ({ code: 0, stdout: "answer" }));
+
+  const result = await core.runLaneCli({ lane: "opencode/deepseek-v4.1-flash-free", stdin: "the prompt", timeoutMs: 5_000, runner: fake.runner });
+  assert.ok(result.ok);
+  assert.equal(fake.calls.length, 1);
+  assert.equal(fake.calls[0]!.command, "opencode");
+  assert.deepEqual(fake.calls[0]!.args, ["run", "--standalone", "--auto", "-m", "opencode/deepseek-v4.1-flash-free"]);
+  assert.equal(fake.calls[0]!.stdin, "the prompt", "the prompt stays on stdin — the shared discipline since amendment 2");
+  assert.equal(fake.calls[0]!.env?.OPENCODE_CONFIG_CONTENT, core.TOOLLESS_OPENCODE_CONFIG, "the tool-less permission set reaches the child verbatim");
+  assert.equal(fake.calls[0]!.env?.CI, "1", "CI=1 — no interactive prompt can hang the pass");
+  assert.equal(fake.calls[0]!.env?.PI_CODING_AGENT_DIR, undefined, "only pi lanes carry the Pi home — opencode needs no stateDir");
+
+  // The permission set itself is the spec's literal block: everything denied,
+  // read included — the prompt on stdin is the whole material.
+  const parsed = JSON.parse(core.TOOLLESS_OPENCODE_CONFIG) as { permission: Record<string, unknown> };
+  assert.deepEqual(parsed.permission, {
+    "*": "deny",
+    external_directory: "deny",
+    doom_loop: "deny",
+    question: "deny",
+    edit: "deny",
+    write: "deny",
+    bash: "deny",
+    read: { "*": "deny" },
+  });
+
+  // The no-headless-form refusal names the fourth family among the usable forms.
+  const unknown = await core.runLaneCli({ lane: "codex/gpt-6", stdin: "p", timeoutMs: 5_000 });
+  assert.ok(!unknown.ok && !unknown.budgetExceeded);
+  assert.match(unknown.error, /opencode\/<model>/);
+});
+
+test("runLaneCli strips ANSI escape sequences from an opencode lane's stdout — and only that path", async () => {
+  const noisy = "\u001b[1;32mCLEAR\u001b[0m\n\u001b[2KAll good.";
+  const opencode = fakeLaneRunner(() => ({ code: 0, stdout: noisy }));
+  const stripped = await core.runLaneCli({ lane: "opencode/glm-5.3-flash-free", stdin: "p", timeoutMs: 5_000, runner: opencode.runner });
+  assert.ok(stripped.ok);
+  assert.equal(stripped.stdout, "CLEAR\nAll good.", "the opencode CLI's pretty-printing never reaches a downstream parser");
+
+  // The other families keep their stdout byte-identical — the strip is the opencode path's alone.
+  const copilot = fakeLaneRunner(() => ({ code: 0, stdout: noisy }));
+  const untouched = await core.runLaneCli({ lane: "copilot/gpt-5.4", stdin: "p", timeoutMs: 5_000, runner: copilot.runner });
+  assert.ok(untouched.ok);
+  assert.equal(untouched.stdout, noisy);
+});
+
+test("an opencode lane completes the Watch, the Retro, and the Fresh-eyes CLI pass through the injected runner", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const stateDir = join(dir, "factory");
+  const lane = "opencode/deepseek-v4.1-flash-free";
+  const expectedArgs = ["run", "--standalone", "--auto", "-m", "opencode/deepseek-v4.1-flash-free"];
+
+  // A real git workspace at base, then the Agent's committed work — the diff every pass reads.
+  const workspace = join(dir, "ws");
+  mkdirSync(join(workspace, "src"), { recursive: true });
+  const artifact = "src/format.ts";
+  writeFileSync(join(workspace, artifact), "export function pad() {}\n");
+  const base = gitCommitAll(workspace);
+  writeFileSync(join(workspace, artifact), "export function pad(input: string): string {\n  return input;\n}\n");
+  const claimed = gitCommitChanges(workspace, "implement pad");
+  const contract: core.ContractSet = {
+    seq: 1,
+    ts: "2026-10-18T09:00:00.000Z",
+    event: "contract_set",
+    task: "W23",
+    workspace,
+    gate: "npm test",
+    artifact,
+    scope: ["src"],
+    base,
+    watch: true,
+  };
+
+  // The Watch: five `name: number` lines, the strict output contract.
+  writeLanes(stateDir, { watch: lane });
+  const watchAnswers = {
+    "destructive-writes": 0.02,
+    "test-weakened": 0.03,
+    "stuck-loop": 0.1,
+    "scope-creep": 0.2,
+    "secret-leak": 0.01,
+  };
+  const watchFake = fakeLaneRunner(() => ({ code: 0, stdout: copilotAnswerLines(watchAnswers) }));
+  const watch = await core.runWatchPass({
+    stateDir,
+    contract,
+    task: "W23",
+    attempt: 1,
+    sha: claimed,
+    gateResult: { exit: 0, verdict: "green", note: "", timedOut: false, output: "ok 3 tests", artifactPresent: true },
+    gateOutputPath: undefined,
+    scopeViolations: [],
+    agent: "agent-w23",
+    fetchTimeline: async () => ({
+      ok: true,
+      entries: [
+        { seq: 2, item: { type: "user_message", text: "Do the assigned work." } },
+        { seq: 5, item: { type: "assistant_message", text: "Done — tests pass." } },
+      ],
+    }),
+    gitBlocks: [],
+    copilotRunner: watchFake.runner,
+    budgetMs: 5_000,
+  });
+  assert.equal(watch.outcome, "written", watch.outcome === "written" ? "" : watch.error ?? "watch failed");
+  assert.equal(watch.model, lane, "the lane string is recorded verbatim");
+  assert.equal(watchFake.calls.length, 1);
+  assert.equal(watchFake.calls[0]!.command, "opencode");
+  assert.deepEqual(watchFake.calls[0]!.args, expectedArgs);
+  assert.equal(watchFake.calls[0]!.env?.OPENCODE_CONFIG_CONTENT, core.TOOLLESS_OPENCODE_CONFIG, "the pass inherits the tool-less config");
+  assert.equal(watchFake.calls[0]!.env?.CI, "1");
+  assert.ok(watchFake.calls[0]!.stdin.includes("STATE"), "the prompt rides stdin with the state as its tail");
+
+  // The Retro: strict JSON proposals citing known seqs.
+  writeLanes(stateDir, { retro: lane });
+  const retroJson = JSON.stringify({
+    proposals: [{ class: "observation", evidence: [1], pattern: "reports bury the gate note", text: "Surface the note." }],
+  });
+  const retroFake = fakeLaneRunner(() => ({ code: 0, stdout: retroJson }));
+  const retro = await core.runRetroPass({
+    stateDir,
+    corpus: { digest: "the corpus", eventsRead: 2, taskBlocks: 1, reports: 0, redGateLogs: 0, knownSeqs: new Set([1, 2]) },
+    copilotRunner: retroFake.runner,
+    budgetMs: 5_000,
+  });
+  assert.equal(retro.outcome, "written", retro.outcome === "written" ? "" : retro.error ?? "retro failed");
+  assert.equal(retro.model, lane);
+  assert.equal(retroFake.calls.length, 1);
+  assert.equal(retroFake.calls[0]!.command, "opencode");
+  assert.deepEqual(retroFake.calls[0]!.args, expectedArgs);
+  assert.equal(retroFake.calls[0]!.env?.OPENCODE_CONFIG_CONTENT, core.TOOLLESS_OPENCODE_CONFIG);
+  assert.equal(retroFake.calls[0]!.env?.CI, "1");
+
+  // The Fresh-eyes CLI path: first line CONCERN or CLEAR.
+  writeLanes(stateDir, { freshEyes: lane });
+  const eyeFake = fakeLaneRunner(() => ({ code: 0, stdout: "CLEAR\nNothing to add." }));
+  const eye = await core.runFreshEyesPass({ stateDir, contract, claimedSha: claimed, gateOutputPath: undefined, cliRunner: eyeFake.runner, budgetMs: 5_000 });
+  assert.equal(eye.outcome, "clear", eye.outcome === "clear" ? "" : eye.finding);
+  assert.equal(eye.model, lane);
+  assert.equal(eyeFake.calls.length, 1);
+  assert.equal(eyeFake.calls[0]!.command, "opencode");
+  assert.deepEqual(eyeFake.calls[0]!.args, expectedArgs);
+  assert.equal(eyeFake.calls[0]!.env?.OPENCODE_CONFIG_CONTENT, core.TOOLLESS_OPENCODE_CONFIG);
+  assert.equal(eyeFake.calls[0]!.env?.CI, "1");
 });
 
 // ---- the CLI-side mirror (ADR 0004: CLIs import no src/ code) ----------------------------
