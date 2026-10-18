@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.19] - 2026-10-18
+
+### Fixed
+
+- **Preserve the daemon's `process.env.PATH` in `injectClaimCliPath`
+  (`plugin/server/shell.ts`, pinned in `test/shell.test.ts`)** — Paseo's
+  `agent.session_open` before-hook passes `request.env` as a per-launch
+  overlay (normally `{}`) and later `Object.assign`s it onto `process.env`.
+  Setting `PATH` to `<stateDir>/bin` alone when `request.env.PATH` was unset
+  clobbered the daemon's `process.env.PATH`, causing PATH-resolved provider
+  CLIs (`copilot`, `pi`, `opencode`) to fail on launch with `spawn … ENOENT`
+  and leaving Paseo Desktop draft workspace tabs stuck on
+  `workspace_request_key_conflict` when retrying with another provider.
+  `injectClaimCliPath` now seeds from `basePath` (`process.env.PATH ?? ""`)
+  whenever `request.env.PATH` is unset or empty.
+- `package.json` + `SHELL_VERSION` → `0.0.19`.
+
 ## [0.0.18] - 2026-10-18
 
 v0.0.18's one thing: **`paseo-factory` becomes remotely installable** — the

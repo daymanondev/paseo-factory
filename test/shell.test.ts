@@ -60,16 +60,25 @@ test("injectClaimCliPath prepends the bin dir without touching the rest of the r
   assert.equal(again, next, "idempotent — no duplicate entry on repeated launches");
 });
 
-test("injectClaimCliPath leaves no empty PATH entry when the agent had none", () => {
-  const next = injectClaimCliPath(sessionOpenRequest("resume", {}), "/state/bin");
+test("injectClaimCliPath seeds from basePath (process.env.PATH) when request.env is an overlay without PATH", () => {
+  const next = injectClaimCliPath(sessionOpenRequest("create", {}), "/state/bin", "/opt/homebrew/bin:/usr/bin:/bin");
+  assert.equal(
+    next.env.PATH,
+    "/state/bin:/opt/homebrew/bin:/usr/bin:/bin",
+    "daemon overlays request.env onto process.env with Object.assign — missing request.env.PATH must preserve basePath so PATH-resolved provider CLIs (copilot, pi, opencode) do not fail with ENOENT",
+  );
+});
+
+test("injectClaimCliPath leaves no empty PATH entry when neither request.env nor basePath has PATH", () => {
+  const next = injectClaimCliPath(sessionOpenRequest("resume", {}), "/state/bin", "");
   assert.equal(next.env.PATH, "/state/bin");
   assert.ok(!next.env.PATH.endsWith(":") && !next.env.PATH.includes("::"), "no empty entry (CWD) on PATH");
 });
 
-test("injectClaimCliPath keeps an explicit missing-PATH env shape intact", () => {
-  const next = injectClaimCliPath(sessionOpenRequest("refresh", { CUSTOM: "1" }), "/state/bin");
+test("injectClaimCliPath keeps other overlay env keys intact when seeding PATH from basePath", () => {
+  const next = injectClaimCliPath(sessionOpenRequest("refresh", { CUSTOM: "1" }), "/state/bin", "/usr/bin");
   assert.equal(next.env.CUSTOM, "1");
-  assert.equal(next.env.PATH, "/state/bin");
+  assert.equal(next.env.PATH, "/state/bin:/usr/bin");
 });
 
 test("ensureClaimCli writes an executable wrapper around the daemon's node", (t) => {

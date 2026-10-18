@@ -25,14 +25,23 @@ export function claimCliBinDir(stateDir: string): string {
 }
 
 /**
- * Prepend the factory bin dir to the request's PATH, idempotently. An empty
- * incoming PATH stays empty-tail-free — a trailing delimiter would put the
- * agent's CWD on PATH.
+ * Prepend the factory bin dir to the request's PATH, idempotently. Because the
+ * daemon passes `request.env` to `agent.session_open` as an overlay (often `{}`)
+ * and later `Object.assign`s it onto `process.env`, a missing `request.env.PATH`
+ * must seed from the daemon's `process.env.PATH` (`basePath`) — setting `PATH`
+ * to `binDir` alone would clobber `process.env.PATH` and break every provider
+ * CLI resolved via PATH (`copilot`, `pi`, `opencode`, etc.). An empty base PATH
+ * stays empty-tail-free so a trailing delimiter never puts CWD on PATH.
  */
-export function injectClaimCliPath<T extends PluginSessionOpenRequest>(request: T, binDir: string): T {
-  const existing = typeof request.env?.PATH === "string" ? request.env.PATH : "";
-  if (existing.split(delimiter).includes(binDir)) return request;
-  const path = existing === "" ? binDir : `${binDir}${delimiter}${existing}`;
+export function injectClaimCliPath<T extends PluginSessionOpenRequest>(
+  request: T,
+  binDir: string,
+  basePath: string = process.env.PATH ?? "",
+): T {
+  const raw = typeof request.env?.PATH === "string" && request.env.PATH !== "" ? request.env.PATH : basePath;
+  const entries = raw.split(delimiter).filter((entry) => entry !== "");
+  if (entries.includes(binDir)) return request;
+  const path = [binDir, ...entries].join(delimiter);
   return { ...request, env: { ...request.env, PATH: path } };
 }
 
