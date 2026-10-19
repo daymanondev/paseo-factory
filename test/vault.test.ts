@@ -1,16 +1,23 @@
 import { test } from "node:test";
+import type { TestContext } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { gzipSync } from "node:zlib";
 import {
+  createDefaultVaultRunner,
+  hydrateVaultDirect,
   loadVaultConfig,
+  pullVault,
+  pushVault,
   readVaultStatus,
   saveVaultConfig,
   sealVaultBuffer,
   unsealVaultBuffer,
 } from "../src/index.ts";
-import type { VaultStatusView } from "../src/index.ts";
+import type { VaultRunner, VaultRunnerCall, VaultStatusView } from "../src/index.ts";
 import { disposeDir, factoryErrorCode, makeTempDir } from "./helpers.ts";
 
 /**
@@ -279,4 +286,375 @@ test("readVaultStatus degrades visibly over a corrupted config, never crashes", 
   assert.deepEqual(status.sharedSecrets, { ascKey: false, ascCredentials: false, gplayServiceAccount: false, eyeConfig: false });
   assert.deepEqual(status.hydratedApps, []);
   assert.ok(typeof status.error === "string" && status.error.length > 0, "the damage is visible in error, not silent");
+});
+
+/**
+ * ===== The transport group (ticket 02): the `VaultRunner` seam + both transports =====
+ *
+ * Direct hydrate runs against an in-memory tarball fixture through an injected
+ * fake runner (zero network); Vault sync runs real `git` against local bare
+ * repositories seeded over `file://`-style local paths — the repo's first
+ * `git init --bare` fixtures. No endpoint, no `~/.paseo`, no prompts.
+ */
+
+/** Two plausible ledger lines — stage B copies them verbatim; parsing belongs to stage C. */
+const LEDGER_LINES = [
+  JSON.stringify({ seq: 1, ts: "2026-10-20T09:00:00.000Z", event: "contract_set", task: "t01", base: "e5b52cc", done: ["gate"] }),
+  JSON.stringify({ seq: 2, ts: "2026-10-20T09:05:00.000Z", event: "claim_reported", task: "t01", attempt: 1, agent: "pi", sha: "8fd67b4" }),
+].join("\n") + "\n";
+
+/** One git invocation against the fixture — output captured, never inherited. */
+function runGit(args: string[], cwd?: string): string {
+  return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+}
+
+/** A local bare remote (the repo's first `git init --bare` fixture), HEAD pinned to `branch`. */
+function makeBareRemote(t: TestContext, branch = "main"): string {
+  const dir = makeTempDir("paseo-factory-vault-remote-");
+  disposeDir(t, dir);
+  const bare = join(dir, "remote.git");
+  runGit(["init", "--bare", bare]);
+  runGit(["--git-dir", bare, "symbolic-ref", "HEAD", `refs/heads/${branch}`]);
+  return bare;
+}
+
+/** Seeds the bare remote's branch from a throwaway clone with its own hermetic identity. */
+function seedBareRemote(t: TestContext, bare: string, files: Record<string, string | Buffer>, branch = "main"): void {
+  const seed = makeTempDir("paseo-factory-vault-seed-");
+  disposeDir(t, seed);
+  runGit(["clone", bare, seed]);
+  runGit(["config", "user.email", "vault@test.local"], seed);
+  runGit(["config", "user.name", "Vault Test"], seed);
+  for (const [rel, data] of Object.entries(files)) {
+    const target = join(seed, rel);
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, data);
+  }
+  runGit(["add", "-A"], seed);
+  runGit(["commit", "-q", "-m", "seed vault"], seed);
+  runGit(["push", "-q", "origin", branch], seed);
+}
+
+/** The bare remote's branch tip — the sha a push (or its absence) moves. */
+function bareHead(bare: string, branch = "main"): string {
+  return runGit(["--git-dir", bare, "rev-parse", `refs/heads/${branch}`]);
+}
+
+/** One ustar header with a real checksum — enough archive for the vault's in-memory parser. */
+function tarHeader(name: string, size: number, typeflag: "0" | "5"): Buffer {
+  const header = Buffer.alloc(512);
+  header.write(name, 0, 100, "utf8");
+  header.write("0000644\0", 100, 8, "utf8");
+  header.write("0000000\0", 108, 8, "utf8");
+  header.write("0000000\0", 116, 8, "utf8");
+  header.write(`${size.toString(8).padStart(11, "0")}\0`, 124, 12, "utf8");
+  header.write("00000000000\0", 136, 12, "utf8");
+  header.write("        ", 148, 8, "latin1");
+  header.write(typeflag, 156, 1, "latin1");
+  header.write("ustar", 257, 5, "latin1");
+  header.write("00", 263, 2, "latin1");
+  let checksum = 0;
+  for (const byte of header) checksum += byte;
+  header.write(`${checksum.toString(8).padStart(6, "0")}\0 `, 148, 8, "latin1");
+  return header;
+}
+
+function tarFileEntry(name: string, data: Buffer): Buffer {
+  const padding = Buffer.alloc((512 - (data.length % 512)) % 512);
+  return Buffer.concat([tarHeader(name, data.length, "0"), data, padding]);
+}
+
+function tarDirEntry(name: string): Buffer {
+  return tarHeader(`${name}/`, 0, "5");
+}
+
+/** A GitHub-shaped tarball: one top-level `<owner>-<repo>-<sha>/` prefix, gzipped in memory. */
+function buildTarball(entries: Array<{ path: string; data: Buffer | string }>, topDir = "daymanondev-factory-vault-abc1234"): Buffer {
+  const parts: Buffer[] = [tarDirEntry(topDir)];
+  for (const entry of entries) {
+    const data = typeof entry.data === "string" ? Buffer.from(entry.data, "utf8") : entry.data;
+    const dir = dirname(entry.path);
+    if (dir !== "." && dir !== topDir) parts.push(tarDirEntry(dir));
+    parts.push(tarFileEntry(entry.path, data));
+  }
+  parts.push(Buffer.alloc(1024));
+  return gzipSync(Buffer.concat(parts));
+}
+
+/** An in-memory `VaultRunner` answering every `gh` call with the fixture tarball — zero network, calls recorded. */
+function fakeTarballRunner(tarball: Buffer): { runner: VaultRunner; calls: VaultRunnerCall[] } {
+  const calls: VaultRunnerCall[] = [];
+  return {
+    calls,
+    runner: async (call) => {
+      calls.push(call);
+      if (call.command === "gh") return tarball;
+      throw new Error(`unexpected vault runner call: ${call.command} ${call.args.join(" ")}`);
+    },
+  };
+}
+
+function modeOf(path: string): number {
+  return statSync(path).mode & 0o777;
+}
+
+test("the default VaultRunner stamps GIT_TERMINAL_PROMPT=0 into every child env and wraps failures", async () => {
+  const runner = createDefaultVaultRunner();
+  const stdout = await runner({
+    command: process.execPath,
+    args: ["-e", 'process.stdout.write(process.env.GIT_TERMINAL_PROMPT ?? "unset")'],
+  });
+  assert.equal(stdout.toString("utf8"), "0", "children never prompt for git credentials — they fail instead");
+
+  await assert.rejects(
+    () => runner({ command: process.execPath, args: ["-e", 'process.stderr.write("boom"); process.exit(3)'] }),
+    factoryErrorCode("vault-runner-failed"),
+    "a failing child refuses with the stable runner error code",
+  );
+});
+
+test("hydrateVaultDirect provisions a fresh home from the tarball stream — no vault/.git, 0o600 secrets, unsealed bytes", async (t) => {
+  const home = makeTempDir();
+  disposeDir(t, home);
+  saveVaultConfig(home, { repo: "daymanondev/factory-vault", passphrase: "correct-horse-battery" });
+
+  const p8 = "-----BEGIN PRIVATE KEY-----\nasc api key\n-----END PRIVATE KEY-----\n";
+  const eyePlain = '{\n  "provider": "eye"\n}\n';
+  const keystore = randomBytes(2048);
+  const tarball = buildTarball([
+    { path: "daymanondev-factory-vault-abc1234/secrets/shared/asc-api-key.p8", data: p8 },
+    { path: "daymanondev-factory-vault-abc1234/secrets/shared/gplay-service-account.json", data: JSON.stringify(sealVaultBuffer(Buffer.from(GCP_SERVICE_ACCOUNT, "utf8"))) },
+    { path: "daymanondev-factory-vault-abc1234/secrets/shared/eye.json", data: JSON.stringify(sealVaultBuffer(Buffer.from(eyePlain, "utf8"), "correct-horse-battery")) },
+    { path: "daymanondev-factory-vault-abc1234/secrets/apps/patigame/release.keystore", data: keystore },
+    { path: "daymanondev-factory-vault-abc1234/config/lanes.json", data: JSON.stringify({ lanes: { default: "pi" } }) },
+    { path: "daymanondev-factory-vault-abc1234/state/nodes/mac-studio/global-ledger.jsonl", data: LEDGER_LINES },
+  ]);
+  const { runner, calls } = fakeTarballRunner(tarball);
+
+  const result = await withVaultEnv(undefined, () => hydrateVaultDirect(home, { token: "ghp_fixture_token", runner }));
+
+  assert.deepEqual(result.hydratedFiles, [
+    "config/lanes.json",
+    "secrets/apps/patigame/release.keystore",
+    "secrets/shared/asc-api-key.p8",
+    "secrets/shared/eye.json",
+    "secrets/shared/gplay-service-account.json",
+    "state/nodes/mac-studio/global-ledger.jsonl",
+  ]);
+  assert.equal(calls.length, 1, "exactly one gh api call");
+  assert.equal(calls[0]!.command, "gh");
+  assert.deepEqual(calls[0]!.args, ["api", "repos/daymanondev/factory-vault/tarball/main"], "streams GET /repos/{owner}/{repo}/tarball/{ref} through gh");
+  assert.deepEqual(calls[0]!.env, { GH_TOKEN: "ghp_fixture_token" }, "an explicit token rides the child env");
+
+  const runtime = join(home, "vault-runtime");
+  assert.equal(readFileSync(join(runtime, "secrets/shared/asc-api-key.p8"), "utf8"), p8, "plaintext lands verbatim");
+  assert.equal(readFileSync(join(runtime, "secrets/shared/gplay-service-account.json"), "utf8"), GCP_SERVICE_ACCOUNT, "the obfuscated envelope unseals zero-passphrase");
+  assert.equal(readFileSync(join(runtime, "secrets/shared/eye.json"), "utf8"), eyePlain, "the locked envelope unseals with the persisted passphrase");
+  assert.deepEqual(readFileSync(join(runtime, "secrets/apps/patigame/release.keystore")), keystore, "binary keystore bytes round-trip");
+  assert.equal(readFileSync(join(runtime, "config/lanes.json"), "utf8"), JSON.stringify({ lanes: { default: "pi" } }));
+  assert.equal(readFileSync(join(runtime, "state/nodes/mac-studio/global-ledger.jsonl"), "utf8"), LEDGER_LINES);
+
+  assert.equal(modeOf(join(runtime, "secrets")), 0o700, "secret directories are 0o700");
+  assert.equal(modeOf(join(runtime, "secrets/shared")), 0o700);
+  assert.equal(modeOf(join(runtime, "secrets/shared/asc-api-key.p8")), 0o600, "secret files are 0o600");
+  assert.equal(modeOf(join(runtime, "secrets/shared/eye.json")), 0o600);
+  assert.equal(modeOf(join(runtime, "secrets/apps/patigame/release.keystore")), 0o600);
+  assert.equal(modeOf(join(runtime, "config/lanes.json")), 0o644, "non-secret tiers keep normal permissions");
+  assert.equal(modeOf(join(runtime, "state/nodes/mac-studio/global-ledger.jsonl")), 0o644);
+
+  assert.ok(!existsSync(join(home, "vault")), "zero-clone: the vault checkout (and its .git) is never created");
+
+  const config = loadVaultConfig(home);
+  assert.equal(config?.lastHydrateMode, "direct");
+  assert.ok(!Number.isNaN(Date.parse(config?.lastHydratedAt ?? "")), "lastHydratedAt is a real ISO stamp");
+  assert.equal(config?.repo, "daymanondev/factory-vault");
+  assert.equal(config?.passphrase, "correct-horse-battery", "the stamp preserves the rest of the config");
+  const status = readVaultStatus(home);
+  assert.equal(status.lastHydrateMode, "direct");
+  assert.equal(status.cloneExists, false);
+  assert.deepEqual(status.sharedSecrets, { ascKey: true, ascCredentials: false, gplayServiceAccount: true, eyeConfig: true });
+});
+
+test("hydrateVaultDirect pins the gh api call to the requested ref and refuses unconfigured repos and unsafe archive paths", async (t) => {
+  const home = makeTempDir();
+  disposeDir(t, home);
+  saveVaultConfig(home, { repo: "daymanondev/factory-vault", branch: "release" });
+  const emptyTarball = gzipSync(Buffer.alloc(1024));
+
+  const explicit = fakeTarballRunner(emptyTarball);
+  await hydrateVaultDirect(home, { ref: "v1.2.3", token: "ghp_x", runner: explicit.runner });
+  assert.deepEqual(explicit.calls[0]!.args, ["api", "repos/daymanondev/factory-vault/tarball/v1.2.3"], "an explicit ref wins");
+
+  const branchDefault = fakeTarballRunner(emptyTarball);
+  await hydrateVaultDirect(home, { runner: branchDefault.runner });
+  assert.deepEqual(branchDefault.calls[0]!.args, ["api", "repos/daymanondev/factory-vault/tarball/release"], "no ref falls back to the configured branch");
+  assert.equal(branchDefault.calls[0]!.env, undefined, "no token means no token env");
+
+  const unconfigured = makeTempDir();
+  disposeDir(t, unconfigured);
+  await assert.rejects(
+    () => hydrateVaultDirect(unconfigured, { runner: fakeTarballRunner(emptyTarball).runner }),
+    factoryErrorCode("vault-not-configured"),
+  );
+
+  const evil = buildTarball([{ path: "top/../../.ssh/authorized_keys", data: Buffer.from("nope\n") }]);
+  await assert.rejects(
+    () => hydrateVaultDirect(home, { runner: fakeTarballRunner(evil).runner }),
+    factoryErrorCode("vault-invalid-path"),
+    "an archive entry trying to escape the vault layout is refused, never written",
+  );
+});
+
+test("pushVault commits the full secret/config/state set and pushes it to the configured bare remote", async (t) => {
+  const bare = makeBareRemote(t);
+  seedBareRemote(t, bare, { "README.md": "private vault\n" });
+  const home = makeTempDir();
+  disposeDir(t, home);
+  saveVaultConfig(home, { repo: bare, nodeId: "mac-studio" });
+
+  const p8 = "-----BEGIN PRIVATE KEY-----\nasc api key\n-----END PRIVATE KEY-----\n";
+  const keystore = randomBytes(1024);
+  const gplayEnvelope = JSON.stringify(sealVaultBuffer(Buffer.from(GCP_SERVICE_ACCOUNT, "utf8")));
+  const files: Array<[string, string | Buffer]> = [
+    ["secrets/shared/asc-api-key.p8", p8],
+    ["secrets/shared/gplay-service-account.json", gplayEnvelope],
+    ["secrets/shared/eye.json", '{\n  "provider": "eye"\n}\n'],
+    ["secrets/apps/patigame/release.keystore", keystore],
+    ["secrets/apps/patigame/google-services.json", JSON.stringify({ project_id: "patigame" })],
+    ["secrets/apps/patigame/GoogleService-Info.plist", '<?xml version="1.0"?>\n<plist/>\n'],
+    ["config/lanes.json", JSON.stringify({ lanes: { default: "pi" } })],
+    ["config/fleet.json", JSON.stringify({ peers: [] })],
+    ["config/apps/patigame/store-manifest.json", JSON.stringify({ bundleId: "com.patigame.app" })],
+  ];
+  const runtime = join(home, "vault-runtime");
+  for (const [rel, data] of files) {
+    const target = join(runtime, rel);
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, data);
+  }
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(join(stateDir, "ledger.jsonl"), LEDGER_LINES);
+
+  const result = await pushVault(home, { includeLedger: true });
+
+  assert.equal(result.pushed, true, "a commit landed and was pushed");
+  assert.deepEqual(
+    result.pushedFiles,
+    [...files.map(([rel]) => rel), "state/nodes/mac-studio/global-ledger.jsonl"].sort(),
+    "the full shared-secret, per-app signing, config, and node-scoped state set is reported",
+  );
+
+  const probe = makeTempDir();
+  disposeDir(t, probe);
+  runGit(["clone", bare, probe]);
+  assert.equal(readFileSync(join(probe, "secrets/shared/asc-api-key.p8"), "utf8"), p8);
+  assert.equal(readFileSync(join(probe, "secrets/shared/gplay-service-account.json"), "utf8"), gplayEnvelope, "envelopes ride the vault byte-exact — sealing policy stays with the writer");
+  assert.deepEqual(readFileSync(join(probe, "secrets/apps/patigame/release.keystore")), keystore);
+  assert.equal(readFileSync(join(probe, "secrets/apps/patigame/google-services.json"), "utf8"), JSON.stringify({ project_id: "patigame" }));
+  assert.equal(readFileSync(join(probe, "secrets/apps/patigame/GoogleService-Info.plist"), "utf8"), '<?xml version="1.0"?>\n<plist/>\n');
+  assert.equal(readFileSync(join(probe, "config/lanes.json"), "utf8"), JSON.stringify({ lanes: { default: "pi" } }));
+  assert.equal(readFileSync(join(probe, "config/fleet.json"), "utf8"), JSON.stringify({ peers: [] }));
+  assert.equal(readFileSync(join(probe, "config/apps/patigame/store-manifest.json"), "utf8"), JSON.stringify({ bundleId: "com.patigame.app" }));
+  assert.equal(readFileSync(join(probe, "state/nodes/mac-studio/global-ledger.jsonl"), "utf8"), LEDGER_LINES, "includeLedger snapshots the global ledger under this node's namespace");
+
+  assert.ok(existsSync(join(home, "vault", ".git")), "push clones the vault checkout first when absent");
+  const config = loadVaultConfig(home);
+  assert.ok(!Number.isNaN(Date.parse(config?.lastPushedAt ?? "")), "lastPushedAt is stamped");
+});
+
+test("pushVault with nothing new pushes no commit and leaves the remote tip where it was", async (t) => {
+  const bare = makeBareRemote(t);
+  const p8 = "-----BEGIN PRIVATE KEY-----\nasc api key\n-----END PRIVATE KEY-----\n";
+  seedBareRemote(t, bare, {
+    "secrets/shared/asc-api-key.p8": p8,
+    "config/lanes.json": JSON.stringify({ lanes: { default: "pi" } }),
+    "README.md": "vault\n",
+  });
+  const home = makeTempDir();
+  disposeDir(t, home);
+  saveVaultConfig(home, { repo: bare, nodeId: "mac-studio" });
+  await pullVault(home); // runtime now mirrors the remote (plaintext fixtures — nothing to unseal)
+  const headBefore = bareHead(bare);
+
+  const result = await pushVault(home);
+
+  assert.equal(result.pushed, false, "a clean tree produces no commit and no push");
+  assert.deepEqual(result.pushedFiles, ["README.md", "config/lanes.json", "secrets/shared/asc-api-key.p8"], "the staged set is still reported");
+  assert.equal(bareHead(bare), headBefore, "the remote tip did not move");
+  assert.ok(!Number.isNaN(Date.parse(loadVaultConfig(home)?.lastPushedAt ?? "")), "lastPushedAt is stamped regardless");
+});
+
+test("pullVault clones the configured remote into <paseoHome>/vault and hydrates vault-runtime (sync mode)", async (t) => {
+  const bare = makeBareRemote(t);
+  const p8 = "-----BEGIN PRIVATE KEY-----\nasc api key\n-----END PRIVATE KEY-----\n";
+  const keystore = randomBytes(512);
+  seedBareRemote(t, bare, {
+    "secrets/shared/asc-api-key.p8": p8,
+    "secrets/shared/gplay-service-account.json": JSON.stringify(sealVaultBuffer(Buffer.from(GCP_SERVICE_ACCOUNT, "utf8"))),
+    "secrets/apps/patigame/release.keystore": keystore,
+    "config/lanes.json": JSON.stringify({ lanes: { default: "pi" } }),
+    "README.md": "vault\n",
+  });
+  const home = makeTempDir();
+  disposeDir(t, home);
+  saveVaultConfig(home, { repo: bare, nodeId: "mac-studio" });
+
+  const result = await pullVault(home);
+
+  assert.ok(existsSync(join(home, "vault", ".git")), "the clone landed at <paseoHome>/vault");
+  assert.deepEqual(result.hydratedFiles, [
+    "README.md",
+    "config/lanes.json",
+    "secrets/apps/patigame/release.keystore",
+    "secrets/shared/asc-api-key.p8",
+    "secrets/shared/gplay-service-account.json",
+  ]);
+  const runtime = join(home, "vault-runtime");
+  assert.equal(readFileSync(join(runtime, "secrets/shared/asc-api-key.p8"), "utf8"), p8);
+  assert.equal(readFileSync(join(runtime, "secrets/shared/gplay-service-account.json"), "utf8"), GCP_SERVICE_ACCOUNT, "hydration unseals envelopes from the checkout");
+  assert.deepEqual(readFileSync(join(runtime, "secrets/apps/patigame/release.keystore")), keystore);
+  assert.equal(modeOf(join(runtime, "secrets/shared/asc-api-key.p8")), 0o600, "secrets hydrate 0o600 in sync mode too");
+  assert.equal(modeOf(join(runtime, "config/lanes.json")), 0o644);
+
+  const config = loadVaultConfig(home);
+  assert.equal(config?.lastHydrateMode, "sync");
+  assert.ok(!Number.isNaN(Date.parse(config?.lastHydratedAt ?? "")));
+  assert.ok(readVaultStatus(home).cloneExists, "the status read sees the clone");
+});
+
+test("pullVault pulls (--rebase --autostash) after a second node pushes — the two-way cycle", async (t) => {
+  const bare = makeBareRemote(t);
+  seedBareRemote(t, bare, { "README.md": "vault\n" });
+
+  const home1 = makeTempDir();
+  disposeDir(t, home1);
+  saveVaultConfig(home1, { repo: bare, nodeId: "mac-studio" });
+  const first = await pullVault(home1);
+  assert.deepEqual(first.hydratedFiles, ["README.md"]);
+  const headAfterClone = bareHead(bare);
+  const pullMarker = join(home1, "vault", ".git", "t02-pull-marker");
+  writeFileSync(pullMarker, "vanishes if the vault is ever re-cloned\n");
+
+  // a second node stages Day-0 signing artifacts and pushes
+  const home2 = makeTempDir();
+  disposeDir(t, home2);
+  saveVaultConfig(home2, { repo: bare, nodeId: "mini-m2" });
+  const runtime2 = join(home2, "vault-runtime");
+  const keystore = randomBytes(768);
+  mkdirSync(join(runtime2, "secrets/apps/patigame"), { recursive: true });
+  writeFileSync(join(runtime2, "secrets/apps/patigame/release.keystore"), keystore);
+  mkdirSync(join(runtime2, "config"), { recursive: true });
+  writeFileSync(join(runtime2, "config/lanes.json"), JSON.stringify({ lanes: { default: "pi" } }));
+  const push2 = await pushVault(home2);
+  assert.equal(push2.pushed, true);
+  assert.notEqual(bareHead(bare), headAfterClone, "the second node's push moved the remote tip");
+
+  // node one pulls the second node's push and hydrates it
+  const second = await pullVault(home1);
+  assert.deepEqual(second.hydratedFiles, ["README.md", "config/lanes.json", "secrets/apps/patigame/release.keystore"]);
+  assert.deepEqual(readFileSync(join(home1, "vault-runtime/secrets/apps/patigame/release.keystore")), keystore, "the second node's keystore arrives");
+  assert.equal(readFileSync(join(home1, "vault-runtime/config/lanes.json"), "utf8"), JSON.stringify({ lanes: { default: "pi" } }));
+  assert.ok(existsSync(pullMarker), "the existing checkout was pulled in place, not re-cloned");
+  assert.equal(runGit(["rev-parse", "HEAD"], join(home1, "vault")), runGit(["rev-parse", "HEAD"], join(home2, "vault")), "both nodes converge on the same tip");
 });
