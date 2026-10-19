@@ -494,9 +494,11 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       }
 
       // The live companion half (v0.0.17, ADR 0012 §2–§3): every snapshot reads
-      // the daemon's plugin list fresh — no TTL cache (a 5s poll cadence is the
-      // design) — strictly against `deps.home`, and an unavailable list degrades
-      // to the all-`not_installed` default rather than refusing.
+      // the daemon's plugin list through the bridge's 15s TTL + single-flight
+      // per-`home` cache (v0.0.20, ADR 0013 §1 — the 5s poll cadence shares one
+      // `plugin.list.request`, and install/manage invalidate the entry) strictly
+      // against `deps.home`, and an unavailable list degrades to the
+      // all-`not_installed` default rather than refusing.
       const listPlugins = deps.listPlugins ?? listDaemonPlugins;
       let daemonPlugins: DaemonPluginItem[] | null = null;
       try {
