@@ -72,6 +72,8 @@ export { ensureFactorySkill, ensureFactorySkillSafe, factorySkillPath, renderFac
 export type { FactorySkillInput } from "./skill.ts";
 export { ackLeadMail, deliverLeadMail, enqueueLeadMail, foldLeadMailboxEvents, readLeadMailbox, recoverLeadMailbox, requeueLeadMail } from "./mailbox.ts";
 export type { LeadMailFrom, LeadMailKind, LeadMailboxEvent, LeadMailItem, LeadMailboxState } from "./mailbox.ts";
+export { loadVaultConfig, readVaultStatus, saveVaultConfig, sealVaultBuffer, unsealVaultBuffer } from "./vault.ts";
+export type { VaultConfig, VaultEnvelope, VaultRuntimeEnv, VaultStatusView } from "./vault.ts";
 export {
   judgeShellCommand,
   judgeFilePath,
