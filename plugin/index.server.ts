@@ -21,6 +21,7 @@ import { createTimelineFetcher } from "./server/timeline.ts";
 import type { TimelineSourceApi } from "./server/timeline.ts";
 import { spoolRootFor, startSpool } from "./server/spool.ts";
 import { createSurfaceHandlers, registerSurfaceRpc } from "./server/surface-rpc.ts";
+import { createLeadMailRuntime } from "./server/lead-mailbox.ts";
 import { injectRoleOnCreate, injectSessionEnv } from "./server/roles.ts";
 
 const SHELL_VERSION = "0.0.19";
@@ -106,6 +107,19 @@ export default function contribute(server: PluginServerContext) {
     onLog: log,
   };
   const surface = createSurfaceHandlers(surfaceDeps);
+  // The Lead mailbox runtime (v0.0.20, ADR 0013 §4): the single writer around
+  // each Project's mailbox.jsonl. Its seat door is the surface's leadEnsure
+  // (the spec's ensureProjectSeat("lead")); its daemon is the same captured
+  // PaseoApi the handlers fall back to. Startup recovery first — any delivery
+  // a crashed lifetime left un-acked returns to queued before new mail moves.
+  const leadMail = createLeadMailRuntime({
+    factory,
+    stateDir,
+    daemon: () => paseoApi as never,
+    ensureLead: (input) => surface.leadEnsure(input),
+    onLog: log,
+  });
+  leadMail.startupRecovery();
   const spool = startSpool(stateDir, factory, {
     onLog: log,
     ask: choke.spoolAskHandler,
@@ -115,6 +129,8 @@ export default function contribute(server: PluginServerContext) {
         ? { id: request.id, ok: true as const, summary: `lead rotated — agent ${reply.agentId} cancelled + archived`, agentId: reply.agentId }
         : { id: request.id, ok: false as const, code: reply.code, message: reply.error };
     },
+    leadDispatch: (request) => leadMail.dispatchLead(request),
+    peerMail: leadMail.notifyPeer,
   });
   log(`spool listening on ${spoolRootFor(stateDir)}/{requests,replies,processed}`);
   registerSurfaceRpc(server, surface);

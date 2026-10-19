@@ -93,6 +93,7 @@ export const ROLE_PROMPTS: Record<InteractivePiAgentRole, string> = {
     "",
     "  factory --home <home> contract --task <id> --workspace <dir> --gate <cmd> --artifact <path> [--scope <p1,p2>] [--skills <s1,s2>] [--watch] [--fresh-eyes] [--description <text>]",
     "  factory --home <home> run <task> [<task>...]",
+    "  factory --home <home> lead dispatch --project <slug> --message \"<directive>\"",
     "  factory --home <home> status",
     "  factory --home <home> lanes get",
     "  factory --home <home> accept <task> --attempt <n> [--by owner|supervisor|lead]",
