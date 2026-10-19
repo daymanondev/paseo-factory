@@ -17,6 +17,7 @@ import {
   listDaemonPlugins,
   manageDaemonPlugin,
   PLUGIN_IO_TIMEOUT_MS,
+  PLUGIN_LIST_TTL_MS,
 } from "../plugin/server/daemon-cli.ts";
 import type { DaemonPluginItem } from "../plugin/server/daemon-cli.ts";
 import { foldCompanions } from "../plugin/server/view.ts";
@@ -1427,6 +1428,123 @@ test("daemon plugin bridge: listDaemonPlugins speaks plugin.list.request over th
 test("daemon plugin bridge: the payload timeouts stay pinned — 30s default, 300s for plugin install/update", () => {
   assert.equal(BRIDGE_TIMEOUT_MS, 30_000, "every non-install request keeps the 30s bridge default");
   assert.equal(PLUGIN_IO_TIMEOUT_MS, 300_000, "a remote Git clone/fetch never times out prematurely (spec §Implementation Decisions 4)");
+});
+
+// ---- the list cache (v0.0.20, ADR 0013 §1) — single-flight + 15s TTL over the fake daemon ----
+
+/** The one-item list the cache proofs' fake daemon answers every `plugin.list.request` with. */
+function fakeListReply(message: Record<string, unknown>): Record<string, unknown> {
+  return {
+    type: "plugin.list.response",
+    payload: {
+      requestId: message.requestId,
+      plugins: [{ id: "paseo-factory", path: "/plugins/paseo-factory", enabled: true, status: "running" }],
+    },
+  };
+}
+
+test("daemon plugin bridge: listDaemonPlugins single-flights concurrent calls and serves the 15s TTL from the cache", async (t) => {
+  assert.equal(PLUGIN_LIST_TTL_MS, 15_000, "the list TTL stays pinned at 15s (spec §Implementation Decisions 1, paseo-factory bullet 1)");
+  const daemon = await startFakeDaemon(t, (message) => (message.type === "plugin.list.request" ? fakeListReply(message) : null));
+
+  const concurrent = await Promise.all([listDaemonPlugins(daemon.home), listDaemonPlugins(daemon.home), listDaemonPlugins(daemon.home)]);
+  for (const reply of concurrent) {
+    assert.ok(reply.ok, reply.ok ? "" : reply.reason);
+    assert.deepEqual(reply.plugins.map((plugin) => plugin.id), ["paseo-factory"], "every concurrent caller rides the same payload");
+  }
+  const requests = (): number => daemon.frames.filter((frame) => frame.type === "plugin.list.request").length;
+  assert.equal(requests(), 1, "concurrent callers share one WebSocket plugin.list.request — the inFlight map");
+
+  const again = await listDaemonPlugins(daemon.home);
+  assert.ok(again.ok, again.ok ? "" : again.reason);
+  assert.deepEqual(again.plugins.map((plugin) => plugin.id), ["paseo-factory"]);
+  assert.equal(requests(), 1, "a second call well inside the 15s TTL flies no new request");
+});
+
+test("daemon plugin bridge: only ok replies are cached — a failed list retries on the next call", async (t) => {
+  const daemon = await startFakeDaemon(t, (message) => ({
+    type: "rpc_error",
+    payload: { requestId: message.requestId, error: "the daemon plugin list is busy" },
+  }));
+
+  for (let i = 0; i < 2; i++) {
+    const reply = await listDaemonPlugins(daemon.home);
+    assert.ok(!reply.ok, "the rpc_error answers ok:false both times");
+    assert.equal(reply.reason, "the daemon plugin list is busy");
+  }
+  assert.equal(
+    daemon.frames.filter((frame) => frame.type === "plugin.list.request").length,
+    2,
+    "a { ok: false } answer is never cached — the degrade law keeps retrying on the next snapshot",
+  );
+});
+
+test("daemon plugin bridge: installDaemonPlugin and manageDaemonPlugin invalidate the home's list cache at entry", async (t) => {
+  const daemon = await startFakeDaemon(t, (message) => {
+    const type = String(message.type);
+    if (type === "plugin.list.request") return fakeListReply(message);
+    if (type === "plugin.directory.install.request") {
+      return {
+        type: "plugin.directory.install.response",
+        payload: { requestId: message.requestId, plugin: { id: "factory-connector", path: "/plugins/factory-connector", enabled: true, status: "running" } },
+      };
+    }
+    if (type === "plugin.disable.request") {
+      return {
+        type: "plugin.disable.response",
+        payload: { requestId: message.requestId, plugin: { id: "paseo-factory", path: "/plugins/paseo-factory", enabled: false, status: "disabled" } },
+      };
+    }
+    return null;
+  });
+
+  const first = await listDaemonPlugins(daemon.home);
+  assert.ok(first.ok, first.ok ? "" : first.reason);
+  const second = await listDaemonPlugins(daemon.home);
+  assert.ok(second.ok, second.ok ? "" : second.reason);
+  assert.equal(daemon.frames.filter((frame) => frame.type === "plugin.list.request").length, 1, "the second read rides the 15s TTL entry");
+
+  const install = await installDaemonPlugin(daemon.home, { id: "factory-connector", source: "/tmp/custom-plugin" });
+  assert.ok(install.ok, install.ok ? "" : install.reason);
+  const afterInstall = await listDaemonPlugins(daemon.home);
+  assert.ok(afterInstall.ok, afterInstall.ok ? "" : afterInstall.reason);
+  assert.equal(
+    daemon.frames.filter((frame) => frame.type === "plugin.list.request").length,
+    2,
+    "installDaemonPlugin drops the home's cache entry — the next list flies a fresh plugin.list.request",
+  );
+
+  const disable = await manageDaemonPlugin(daemon.home, "paseo-factory", "disable");
+  assert.ok(disable.ok, disable.ok ? "" : disable.reason);
+  const afterManage = await listDaemonPlugins(daemon.home);
+  assert.ok(afterManage.ok, afterManage.ok ? "" : afterManage.reason);
+  assert.equal(
+    daemon.frames.filter((frame) => frame.type === "plugin.list.request").length,
+    3,
+    "manageDaemonPlugin drops the home's cache entry too — no reader ever sees a pre-mutation list",
+  );
+});
+
+test("daemon plugin bridge: the list cache keys per home — a second daemon's home keeps its own entry", async (t) => {
+  const daemonA = await startFakeDaemon(t, (message) => (message.type === "plugin.list.request" ? fakeListReply(message) : null));
+  const daemonB = await startFakeDaemon(t, (message) => (message.type === "plugin.list.request" ? fakeListReply(message) : null));
+
+  for (const daemon of [daemonA, daemonB]) {
+    const first = await listDaemonPlugins(daemon.home);
+    assert.ok(first.ok, first.ok ? "" : first.reason);
+    const second = await listDaemonPlugins(daemon.home);
+    assert.ok(second.ok, second.ok ? "" : second.reason);
+  }
+  assert.equal(
+    daemonA.frames.filter((frame) => frame.type === "plugin.list.request").length,
+    1,
+    "home A's cache entry answers its second read without a new request",
+  );
+  assert.equal(
+    daemonB.frames.filter((frame) => frame.type === "plugin.list.request").length,
+    1,
+    "home B never rides home A's entry — trial and production plugin state never cross-contaminate",
+  );
 });
 
 /** A fake `paseo` CLI first on PATH — records every argv, answers fixed stdout (the CLI fallback seam). */

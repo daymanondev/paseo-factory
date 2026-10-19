@@ -29,6 +29,9 @@ export const BRIDGE_TIMEOUT_MS = 30_000;
 /** How long a plugin install/update may take — a Git clone/fetch over the network never times out prematurely (v0.0.17, ADR 0012 §4). */
 export const PLUGIN_IO_TIMEOUT_MS = 300_000;
 
+/** How long a daemon plugin list stays fresh (v0.0.20, ADR 0013 §1) — the 5s UI poll cadence shares one list. */
+export const PLUGIN_LIST_TTL_MS = 15_000;
+
 /** A daemon reply that also carries the response message's payload (v0.0.17). */
 export type DaemonPayloadReply<T> = { ok: true; payload: T } | { ok: false; reason: string };
 
@@ -305,8 +308,38 @@ function pluginsFromCliJson(value: unknown): DaemonPluginItem[] {
   return candidates.filter(isDaemonPluginItem);
 }
 
-/** Lists the daemon's plugins (`plugin.list.request` → `payload.plugins`), falling back to `paseo --home <home> plugin ls --json`. */
-export async function listDaemonPlugins(home: string): Promise<{ ok: true; plugins: DaemonPluginItem[] } | { ok: false; reason: string }> {
+/**
+ * The per-`home` plugin-list cache (v0.0.20, ADR 0013 §1): a 15s TTL plus an
+ * in-flight Promise map, so concurrent `factory.surface.snapshot` calls share
+ * one WebSocket `plugin.list.request` — the providers precedent
+ * (`PROVIDERS_TTL_MS`/`cachedProviders`/`inFlightProviders` in
+ * surface-rpc.ts) restated for the bridge. Keyed per `home` (the bridge's own
+ * trial/prod isolation law above); only ok replies are cached — a
+ * `{ ok: false }` answer returns uncached so the surface's degrade law keeps
+ * retrying on the next snapshot. `installDaemonPlugin` and
+ * `manageDaemonPlugin` drop their `home` entry at entry, so a failed mutation
+ * still costs at most one re-list.
+ */
+interface PluginListCacheEntry {
+  plugins: DaemonPluginItem[];
+  cachedAt: number;
+}
+const pluginListCache = new Map<string, PluginListCacheEntry>();
+const pluginListInFlight = new Map<string, Promise<{ ok: true; plugins: DaemonPluginItem[] } | { ok: false; reason: string }>>();
+const pluginListGeneration = new Map<string, number>();
+
+/**
+ * Drops the cached plugin list for `home` — and bumps its generation, so a
+ * pre-mutation list still in flight when the mutation began cannot land in
+ * the cache behind the mutation's back.
+ */
+function invalidatePluginListCache(home: string): void {
+  pluginListCache.delete(home);
+  pluginListGeneration.set(home, (pluginListGeneration.get(home) ?? 0) + 1);
+}
+
+/** The uncached bridge body: `plugin.list.request` → `payload.plugins`, falling back to `paseo --home <home> plugin ls --json`. */
+async function listDaemonPluginsUncached(home: string): Promise<{ ok: true; plugins: DaemonPluginItem[] } | { ok: false; reason: string }> {
   const wsCall = daemonWsRequestPayload<{ plugins?: unknown }>(home, { type: "plugin.list.request" }, "plugin.list.response");
   if (wsCall !== null) {
     const reply = await wsCall;
@@ -318,6 +351,33 @@ export async function listDaemonPlugins(home: string): Promise<{ ok: true; plugi
   const cli = pluginCliJson(home, ["--home", home, "plugin", "ls", "--json"], BRIDGE_TIMEOUT_MS);
   if (!cli.ok) return { ok: false, reason: cli.reason };
   return { ok: true, plugins: pluginsFromCliJson(cli.value) };
+}
+
+/**
+ * Lists the daemon's plugins through the per-`home` cache: a fresh-enough
+ * entry answers from memory, callers racing the same refresh share one
+ * in-flight request, and only an ok reply lands in the cache (v0.0.20,
+ * ADR 0013 §1).
+ */
+export async function listDaemonPlugins(home: string): Promise<{ ok: true; plugins: DaemonPluginItem[] } | { ok: false; reason: string }> {
+  const cached = pluginListCache.get(home);
+  if (cached !== undefined && Date.now() - cached.cachedAt < PLUGIN_LIST_TTL_MS) {
+    return { ok: true, plugins: cached.plugins };
+  }
+  const inFlight = pluginListInFlight.get(home);
+  if (inFlight !== undefined) return inFlight;
+  const generation = pluginListGeneration.get(home) ?? 0;
+  const job = (async () => {
+    const reply = await listDaemonPluginsUncached(home);
+    if (reply.ok && (pluginListGeneration.get(home) ?? 0) === generation) {
+      pluginListCache.set(home, { plugins: reply.plugins, cachedAt: Date.now() });
+    }
+    return reply;
+  })().finally(() => {
+    if (pluginListInFlight.get(home) === job) pluginListInFlight.delete(home);
+  });
+  pluginListInFlight.set(home, job);
+  return job;
 }
 
 /**
@@ -334,6 +394,7 @@ export async function installDaemonPlugin(
   home: string,
   input: { id: string; source: string; ref?: string },
 ): Promise<{ ok: true; plugin: DaemonPluginItem } | { ok: false; reason: string }> {
+  invalidatePluginListCache(home);
   const request = isLocalPathSource(input.source)
     ? { type: "plugin.directory.install.request", path: input.source, id: input.id }
     : { type: "plugin.source.install.request", source: input.source, id: input.id, ...(input.ref ? { ref: input.ref } : {}) };
@@ -365,6 +426,7 @@ export async function manageDaemonPlugin(
   pluginId: string,
   action: DaemonPluginAction,
 ): Promise<{ ok: true; plugin?: DaemonPluginItem; update?: DaemonPluginUpdateRow } | { ok: false; reason: string }> {
+  invalidatePluginListCache(home);
   const requestType = action === "update" ? "plugin.source.update.request" : `plugin.${action}.request`;
   const responseType = requestType.replace(".request", ".response");
   const timeoutMs = action === "update" ? PLUGIN_IO_TIMEOUT_MS : BRIDGE_TIMEOUT_MS;
