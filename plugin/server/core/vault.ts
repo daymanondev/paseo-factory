@@ -1,17 +1,22 @@
+import { execFile } from "node:child_process";
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
+import { gunzipSync } from "node:zlib";
 import { FactoryError } from "./errors.ts";
 
 /**
  * The Private vault engine, stage A (ADR 0014 Decisions 1 & 3): dual-mode
- * secret envelopes, `VaultConfig` persistence, and the status read.
+ * secret envelopes, `VaultConfig` persistence, and the status read. Stage B
+ * (ADR 0014 Decision 2): the injectable `VaultRunner` seam, the zero-clone
+ * `hydrateVaultDirect` tarball stream, and the `pullVault`/`pushVault` sync
+ * transport against a cached git checkout at `<paseoHome>/vault`.
  *
  * Pure Node built-ins only — `node:crypto`, `node:fs`, `node:path`,
- * `node:os`; zero npm or binary dependencies. The transports (`gh api`
- * streams, cached git checkouts) and the multi-node `Ledger` reconciler
- * arrive with stage B and build on this interface.
+ * `node:os`, `node:child_process`, `node:zlib`; zero npm or binary
+ * dependencies. The multi-node `Ledger` reconciler and canonical-key routing
+ * into local `Project` checkouts arrive with stage C.
  *
  * Dual-mode law: a vault file is either raw plaintext/binary (returned
  * unchanged — Plaintext Direct mode), a zero-passphrase `obfuscated`
@@ -26,6 +31,12 @@ import { FactoryError } from "./errors.ts";
  * owns the paseo home; `unsealVaultBuffer` (no home in its signature)
  * resolves the first two legs, and its callers thread the persisted
  * passphrase in as the explicit argument.
+ *
+ * Stage B moves files by their vault paths verbatim: hydration unseals every
+ * entry into `<paseoHome>/vault-runtime/` (`0o600` under `secrets/`), push
+ * packages the `vault-runtime` tree plus this node's global ledger snapshot
+ * back into `<paseoHome>/vault` and pushes. Envelopes ride the vault
+ * byte-exact — sealing policy stays with whoever wrote the file.
  */
 
 export interface VaultEnvelope {
@@ -319,7 +330,413 @@ function withConfigDefaults(config: Partial<VaultConfig> & Pick<VaultConfig, "re
   };
 }
 
-/** Probes one shared-secret file under `<paseoHome>/vault-runtime/secrets/`. */
+/** Probes one shared-secret file under `<paseoHome>/vault-runtime/secrets/` — both the flat and the three-tier `secrets/shared/` spot (ADR 0014 Decision 4). */
 function sharedSecretExists(paseoHome: string, name: string): boolean {
-  return existsSync(join(paseoHome, "vault-runtime", "secrets", name));
+  const secrets = join(paseoHome, "vault-runtime", "secrets");
+  return existsSync(join(secrets, name)) || existsSync(join(secrets, "shared", name));
+}
+
+// ===== Stage B (ADR 0014 Decision 2): the runner seam + both transports =====
+
+/** One external CLI call routed through the `VaultRunner` seam — `gh api`, `git clone/pull/push`, never a shell string. */
+export interface VaultRunnerCall {
+  /** The binary to run — `gh` or `git` in practice, anything a test wants to observe. */
+  command: string;
+  args: readonly string[];
+  /** Working directory for the child (git operations inside the vault checkout). */
+  cwd?: string;
+  /** Extra child environment (an explicit token rides as `GH_TOKEN`). */
+  env?: Record<string, string>;
+}
+
+/**
+ * The injectable seam every external vault CLI call goes through (spec
+ * §Implementation Decisions 1). The default runs real children with
+ * `GIT_TERMINAL_PROMPT: "0"`; tests inject fakes that answer with in-memory
+ * tarball fixtures — zero network, zero prompts. Resolves with the child's
+ * stdout as raw bytes (tarball streams are binary).
+ */
+export type VaultRunner = (call: VaultRunnerCall) => Promise<Buffer>;
+
+export function createDefaultVaultRunner(): VaultRunner {
+  return (call) =>
+    new Promise<Buffer>((resolve, reject) => {
+      execFile(
+        call.command,
+        [...call.args],
+        {
+          cwd: call.cwd,
+          encoding: "buffer",
+          maxBuffer: VAULT_RUNNER_MAX_BUFFER_BYTES,
+          env: { ...process.env, ...call.env, GIT_TERMINAL_PROMPT: "0" },
+        },
+        (err, stdout, stderr) => {
+          if (err) {
+            const detail = stderr.length > 0 ? stderr.toString("utf8").trim() : err.message;
+            reject(new FactoryError("vault-runner-failed", `${call.command} ${call.args.join(" ")}: ${detail}`));
+            return;
+          }
+          resolve(stdout);
+        },
+      );
+    });
+}
+
+/** The runner every transport uses unless the caller injects one. */
+const builtinVaultRunner = createDefaultVaultRunner();
+
+export interface HydrateVaultDirectOptions {
+  /** Defaults to the persisted config's repo. */
+  repo?: string;
+  /** The tarball ref — defaults to the configured branch (`main` on a fresh config). */
+  ref?: string;
+  /** An explicit GitHub token; absent means the machine's `gh auth login` session. */
+  token?: string;
+  runner?: VaultRunner;
+}
+
+export interface PullVaultOptions {
+  /**
+   * Ask the hydration to reconcile multi-node ledger snapshots. The flag is
+   * part of this stage's contract; the `reconcileVaultLedgers` behavior it
+   * gates arrives with stage C.
+   */
+  mergeLedgers?: boolean;
+  runner?: VaultRunner;
+}
+
+export interface PushVaultOptions {
+  /** Snapshot the global `<stateDir>/ledger.jsonl` under `state/nodes/<nodeId>/global-ledger.jsonl` before pushing. */
+  includeLedger?: boolean;
+  runner?: VaultRunner;
+}
+
+export interface VaultHydrationResult {
+  /** The vault-relative paths written under `<paseoHome>/vault-runtime/`, sorted. */
+  hydratedFiles: string[];
+}
+
+export interface VaultPushResult {
+  /** The vault-relative paths packaged into `<paseoHome>/vault`, sorted. */
+  pushedFiles: string[];
+  /** Whether a new commit was pushed to the remote (false when the tree was already clean). */
+  pushed: boolean;
+}
+
+/**
+ * Mode A — `Direct hydrate` (ADR 0014 Decision 2): streams
+ * `GET /repos/{owner}/{repo}/tarball/{ref}` through `gh api` (the machine's
+ * `gh auth login` session, or an explicit token), gunzips and walks the tar
+ * entries in memory (`node:zlib`, no external tar library), unseals each
+ * entry through `unsealVaultBuffer`, and writes the three-tier layout into
+ * `<paseoHome>/vault-runtime/` (`0o600` under `secrets/`). `<paseoHome>/vault`
+ * is never touched — no `.git` checkout exists on disk after this call.
+ */
+export async function hydrateVaultDirect(paseoHome: string, options: HydrateVaultDirectOptions = {}): Promise<VaultHydrationResult> {
+  const config = loadVaultConfig(paseoHome);
+  const repo = options.repo ?? config?.repo;
+  if (repo === undefined || repo.trim() === "") {
+    throw new FactoryError("vault-not-configured", "hydrateVaultDirect needs a vault repo — pass one or save a VaultConfig first");
+  }
+  const slug = githubRepoSlug(repo);
+  const ref = options.ref ?? config?.branch ?? "main";
+  const runner = options.runner ?? builtinVaultRunner;
+  const env = options.token !== undefined && options.token !== "" ? { GH_TOKEN: options.token } : undefined;
+
+  const tarball = await runner({ command: "gh", args: ["api", `repos/${slug}/tarball/${ref}`], env });
+  const archive = tarball.length > 2 && tarball[0] === 0x1f && tarball[1] === 0x8b ? gunzipSync(tarball) : tarball;
+
+  const passphrase = resolveVaultPassphrase(config?.passphrase);
+  const hydratedFiles: string[] = [];
+  for (const entry of parseTarEntries(archive)) {
+    const vaultPath = vaultPathFromArchivePath(entry.path);
+    if (vaultPath === null) continue;
+    writeRuntimeFile(paseoHome, vaultPath, unsealVaultBuffer(entry.data, passphrase));
+    hydratedFiles.push(vaultPath);
+  }
+
+  stampVaultConfig(paseoHome, config, repo, { lastHydratedAt: nowIso(), lastHydrateMode: "direct" });
+  return { hydratedFiles: hydratedFiles.sort() };
+}
+
+/**
+ * Mode B, hydrating leg — `Vault sync`: `git clone` when `<paseoHome>/vault`
+ * is absent, else `git pull --rebase --autostash`, then hydrate
+ * `<paseoHome>/vault-runtime/` from the checkout (every file unsealed,
+ * `0o600` under `secrets/`, `.git` never walked). Stamps
+ * `lastHydrateMode: "sync"`.
+ */
+export async function pullVault(paseoHome: string, options: PullVaultOptions = {}): Promise<VaultHydrationResult> {
+  const config = requiredVaultConfig(paseoHome);
+  const runner = options.runner ?? builtinVaultRunner;
+  const vaultDir = join(paseoHome, "vault");
+
+  if (existsSync(join(vaultDir, ".git"))) {
+    await runner({ command: "git", args: ["pull", "--rebase", "--autostash"], cwd: vaultDir });
+  } else {
+    if (existsSync(vaultDir)) rmSync(vaultDir, { recursive: true, force: true });
+    await runner({ command: "git", args: ["clone", "--branch", config.branch, vaultRemoteUrl(config.repo), vaultDir] });
+  }
+
+  const hydratedFiles = hydrateRuntimeFromTree(paseoHome, vaultDir, resolveVaultPassphrase(config.passphrase));
+  stampVaultConfig(paseoHome, config, config.repo, { lastHydratedAt: nowIso(), lastHydrateMode: "sync" });
+  return { hydratedFiles };
+}
+
+/**
+ * Mode B, publishing leg — `Vault push`: ensures the cached checkout at
+ * `<paseoHome>/vault` (cloning when absent), packages the `vault-runtime`
+ * tree into it by vault path verbatim (envelopes stay envelopes), snapshots
+ * the global ledger under this node's namespace when `includeLedger` is set,
+ * commits (nothing when the tree is clean — no empty commits) and pushes to
+ * the configured remote. Stamps `lastPushedAt`.
+ */
+export async function pushVault(paseoHome: string, options: PushVaultOptions = {}): Promise<VaultPushResult> {
+  const config = requiredVaultConfig(paseoHome);
+  const runner = options.runner ?? builtinVaultRunner;
+  const vaultDir = join(paseoHome, "vault");
+
+  if (!existsSync(join(vaultDir, ".git"))) {
+    if (existsSync(vaultDir)) rmSync(vaultDir, { recursive: true, force: true });
+    await runner({ command: "git", args: ["clone", "--branch", config.branch, vaultRemoteUrl(config.repo), vaultDir] });
+  }
+
+  const runtimeRoot = join(paseoHome, "vault-runtime");
+  const staged = existsSync(runtimeRoot) ? walkFiles(runtimeRoot, (rel) => rel === "env.json") : [];
+  for (const rel of staged) {
+    const target = join(vaultDir, rel);
+    mkdirSync(dirname(target), { recursive: true });
+    copyFileSync(join(runtimeRoot, rel), target);
+  }
+  const pushedFiles = new Set(staged);
+  if (options.includeLedger) {
+    const globalLedger = join(paseoHome, "plugin-state", STATE_PLUGIN_DIR, "ledger.jsonl");
+    if (existsSync(globalLedger)) {
+      const target = join(vaultDir, "state", "nodes", config.nodeId, "global-ledger.jsonl");
+      mkdirSync(dirname(target), { recursive: true });
+      copyFileSync(globalLedger, target);
+      pushedFiles.add(`state/nodes/${config.nodeId}/global-ledger.jsonl`);
+    }
+  }
+
+  const status = (await runner({ command: "git", args: ["status", "--porcelain"], cwd: vaultDir })).toString("utf8").trim();
+  const pushed = status !== "";
+  if (pushed) {
+    await runner({ command: "git", args: ["add", "-A"], cwd: vaultDir });
+    await runner({
+      command: "git",
+      args: ["-c", "user.name=paseo-factory", "-c", "user.email=vault@paseo-factory.invalid", "commit", "-m", `vault push from ${config.nodeId}`],
+      cwd: vaultDir,
+    });
+    await runner({ command: "git", args: ["push", "origin", config.branch], cwd: vaultDir });
+  }
+
+  stampVaultConfig(paseoHome, config, config.repo, { lastPushedAt: nowIso() });
+  return { pushedFiles: [...pushedFiles].sort(), pushed };
+}
+
+/** The default runner's stdout ceiling — vault tarballs are binary and can be large. */
+const VAULT_RUNNER_MAX_BUFFER_BYTES = 256 * 1024 * 1024;
+
+/** The config every sync-transport call needs, or the honest refusal. */
+function requiredVaultConfig(paseoHome: string): VaultConfig {
+  const config = loadVaultConfig(paseoHome);
+  if (config === null || config.repo.trim() === "") {
+    throw new FactoryError("vault-not-configured", "the vault transport needs a configured repo — saveVaultConfig first");
+  }
+  return config;
+}
+
+/** `owner/repo` for `gh api`; a leading `git:` and trailing `.git` are tolerated, anything else is not a GitHub slug. */
+function githubRepoSlug(repo: string): string {
+  const stripped = repo.startsWith("git:") ? repo.slice("git:".length) : repo;
+  const slug = stripped.endsWith(".git") ? stripped.slice(0, -".git".length) : stripped;
+  if (/^[^\s/]+\/[^\s/]+$/.test(slug)) return slug;
+  throw new FactoryError("vault-repo-not-github", `direct hydrate needs a GitHub owner/repo slug, got "${repo}"`);
+}
+
+/** The clone/push URL: GitHub slugs expand to https remotes; local paths, `file://`, and URL/SCP forms pass through. */
+function vaultRemoteUrl(repo: string): string {
+  const stripped = repo.startsWith("git:") ? repo.slice("git:".length) : repo;
+  if (stripped.includes("://") || /^[^/]+:/.test(stripped) || stripped.startsWith("/") || stripped.startsWith("./") || stripped.startsWith("../")) {
+    return stripped;
+  }
+  if (/^[^\s/]+\/[^\s/]+$/.test(stripped)) return `https://github.com/${stripped}.git`;
+  return stripped;
+}
+
+/** Merges hydration/push stamps into the persisted config, preserving every other field. */
+function stampVaultConfig(
+  paseoHome: string,
+  prior: VaultConfig | null,
+  fallbackRepo: string,
+  stamps: { lastHydratedAt?: string; lastHydrateMode?: "direct" | "sync"; lastPushedAt?: string },
+): void {
+  const merged = {
+    lastHydratedAt: stamps.lastHydratedAt ?? prior?.lastHydratedAt,
+    lastHydrateMode: stamps.lastHydrateMode ?? prior?.lastHydrateMode,
+    lastPushedAt: stamps.lastPushedAt ?? prior?.lastPushedAt,
+  };
+  saveVaultConfig(paseoHome, {
+    repo: prior?.repo ?? fallbackRepo,
+    ...(prior?.branch === undefined ? {} : { branch: prior.branch }),
+    ...(prior?.nodeId === undefined ? {} : { nodeId: prior.nodeId }),
+    ...(prior?.passphrase === undefined ? {} : { passphrase: prior.passphrase }),
+    ...(merged.lastHydratedAt === undefined ? {} : { lastHydratedAt: merged.lastHydratedAt }),
+    ...(merged.lastHydrateMode === undefined ? {} : { lastHydrateMode: merged.lastHydrateMode }),
+    ...(merged.lastPushedAt === undefined ? {} : { lastPushedAt: merged.lastPushedAt }),
+  });
+}
+
+/** Hydrates `<paseoHome>/vault-runtime/` from a vault tree on disk (the sync-mode checkout). */
+function hydrateRuntimeFromTree(paseoHome: string, treeRoot: string, passphrase: string | undefined): string[] {
+  const written: string[] = [];
+  for (const rel of walkFiles(treeRoot, () => false)) {
+    writeRuntimeFile(paseoHome, rel, unsealVaultBuffer(readFileSync(join(treeRoot, rel)), passphrase));
+    written.push(rel);
+  }
+  return written.sort();
+}
+
+/** Writes one unsealed vault file under `<paseoHome>/vault-runtime/` — `0o600` (+ `0o700` dirs) under `secrets/`. */
+function writeRuntimeFile(paseoHome: string, vaultPath: string, data: Buffer): void {
+  assertSafeVaultPath(vaultPath);
+  const runtimeRoot = join(paseoHome, "vault-runtime");
+  mkdirSync(runtimeRoot, { recursive: true });
+  const segments = vaultPath.split("/");
+  let acc = runtimeRoot;
+  let insideSecrets = false;
+  for (const segment of segments.slice(0, -1)) {
+    acc = join(acc, segment);
+    insideSecrets = insideSecrets || segment === "secrets";
+    mkdirSync(acc, { recursive: true });
+    if (insideSecrets) chmodSync(acc, 0o700);
+  }
+  const target = join(runtimeRoot, vaultPath);
+  writeFileSync(target, data);
+  chmodSync(target, segments[0] === "secrets" ? 0o600 : 0o644);
+}
+
+/** A vault path is `/`-separated relative segments, none of them `.`/`..`/empty — archive traversal is refused, not written. */
+function assertSafeVaultPath(vaultPath: string): void {
+  const segments = vaultPath.split("/");
+  if (segments.some((segment) => segment === "" || segment === "." || segment === "..")) {
+    throw new FactoryError("vault-invalid-path", `refusing unsafe vault path "${vaultPath}"`);
+  }
+}
+
+/** Every file under `root` as `/`-separated relative paths (sorted), skipping any `.git` directory and `skip` matches. */
+function walkFiles(root: string, skip: (rel: string) => boolean): string[] {
+  const found: string[] = [];
+  const visit = (dir: string, rel: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const childRel = rel === "" ? entry.name : `${rel}/${entry.name}`;
+      if (entry.isDirectory()) {
+        if (entry.name === ".git") continue;
+        visit(join(dir, entry.name), childRel);
+      } else if (entry.isFile()) {
+        if (skip(childRel)) continue;
+        found.push(childRel);
+      }
+    }
+  };
+  visit(root, "");
+  return found.sort();
+}
+
+/** Strips the GitHub tarball's single top-level `<owner>-<repo>-<sha>/` prefix; root-level entries and dirs yield `null`. */
+function vaultPathFromArchivePath(path: string): string | null {
+  const slash = path.indexOf("/");
+  if (slash <= 0) return null;
+  const rest = path.slice(slash + 1);
+  return rest === "" ? null : rest;
+}
+
+interface TarEntry {
+  path: string;
+  data: Buffer;
+}
+
+/**
+ * A minimal in-memory tar walker (`node:fs`-free, no external tar library):
+ * 512-byte ustar headers, octal sizes, ustar prefix fields, GNU long-name
+ * (`L`) and pax `path=` overrides, directories and links skipped, the
+ * zero-block end marker honored, a truncated archive refused.
+ */
+function parseTarEntries(archive: Buffer): TarEntry[] {
+  const entries: TarEntry[] = [];
+  let pendingPath: string | null = null;
+  let offset = 0;
+  while (offset + 512 <= archive.length) {
+    const header = archive.subarray(offset, offset + 512);
+    if (isAllZeroes(header)) break;
+    const size = parseTarOctal(header, 124, 12);
+    const dataStart = offset + 512;
+    const dataEnd = dataStart + size;
+    if (dataEnd > archive.length) {
+      throw new FactoryError("corrupted-vault-tarball", `the vault tarball is truncated inside an entry (needs ${dataEnd} bytes, has ${archive.length})`);
+    }
+    const data = archive.subarray(dataStart, dataEnd);
+    const typeflag = String.fromCharCode(header[156]!);
+
+    if (typeflag === "L" || typeflag === "x" || typeflag === "g") {
+      const override = typeflag === "L" ? stripTrailingNul(data.toString("utf8")) : paxPath(data);
+      if (override !== null) pendingPath = override;
+    } else if (typeflag === "0" || typeflag === "\0") {
+      let path = tarString(header, 0, 100);
+      const prefix = tarString(header, 345, 155);
+      if (prefix !== "") path = `${prefix}/${path}`;
+      if (pendingPath !== null) {
+        path = pendingPath;
+        pendingPath = null;
+      }
+      entries.push({ path, data });
+    }
+    // directories (`5`) and link entries are not vault content
+
+    offset = dataStart + Math.ceil(size / 512) * 512;
+  }
+  return entries;
+}
+
+function isAllZeroes(block: Buffer): boolean {
+  return block.every((byte) => byte === 0);
+}
+
+/** Reads one NUL-terminated string field out of a tar header. */
+function tarString(header: Buffer, offset: number, length: number): string {
+  const field = header.subarray(offset, offset + length);
+  const end = field.indexOf(0);
+  return field.subarray(0, end === -1 ? field.length : end).toString("utf8");
+}
+
+/** Reads one octal tar header field; a blank field is 0, garbage is a corrupted archive. */
+function parseTarOctal(header: Buffer, offset: number, length: number): number {
+  const raw = tarString(header, offset, length).trim();
+  if (raw === "") return 0;
+  const value = parseInt(raw, 8);
+  if (Number.isNaN(value)) {
+    throw new FactoryError("corrupted-vault-tarball", `the vault tarball header field at ${offset} is not octal ("${raw}")`);
+  }
+  return value;
+}
+
+/** Extracts `path=` from a pax extended header's `<len> key=value\n` records, if present. */
+function paxPath(data: Buffer): string | null {
+  for (const line of data.toString("utf8").split("\n")) {
+    const space = line.indexOf(" ");
+    if (space <= 0) continue;
+    const record = line.slice(space + 1);
+    const eq = record.indexOf("=");
+    if (eq > 0 && record.slice(0, eq) === "path") return record.slice(eq + 1);
+  }
+  return null;
+}
+
+function stripTrailingNul(text: string): string {
+  return text.replace(/\0+$/, "");
+}
+
+function nowIso(): string {
+  return new Date().toISOString();
 }
