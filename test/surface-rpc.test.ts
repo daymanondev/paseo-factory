@@ -17,6 +17,7 @@ import {
   listDaemonPlugins,
   manageDaemonPlugin,
   PLUGIN_IO_TIMEOUT_MS,
+  PLUGIN_LIST_TTL_MS,
 } from "../plugin/server/daemon-cli.ts";
 import type { DaemonPluginItem } from "../plugin/server/daemon-cli.ts";
 import { foldCompanions } from "../plugin/server/view.ts";
@@ -24,6 +25,7 @@ import { factoryEnvFor, injectRoleOnCreate, injectSessionEnv, renderAgentContrac
 import type { AgentCreateRequest } from "../plugin/server/roles.ts";
 import { discoverProjects, readProjectRegistration, writeProjectRegistration } from "../plugin/server/projects.ts";
 import { lanesPath, loadLanes, saveLanes } from "../src/lanes.ts";
+import { deliverLeadMail, enqueueLeadMail } from "../src/mailbox.ts";
 import { disposeDir, fakeCopilotRunner, gitCommitAll, makeTempDir, writeLanes } from "./helpers.ts";
 
 /**
@@ -47,6 +49,8 @@ interface FakeAgent {
   requiresAttention?: boolean;
   seqEnd?: number;
   cwd?: string;
+  /** The live usage slice the 128k Lead sensor reads (ticket 07's SurfaceAgentSnapshot extension). */
+  lastUsage?: { contextWindowUsedTokens?: number; contextWindowMaxTokens?: number } | null;
 }
 
 function fakeDaemon(agents: FakeAgent[]) {
@@ -80,6 +84,7 @@ function fakeDaemon(agents: FakeAgent[]) {
               attentionReason: null,
               updatedAt: "2026-10-15T00:00:00.000Z",
               cwd: agent.cwd ?? "/tmp",
+              ...(agent.lastUsage === undefined ? {} : { lastUsage: agent.lastUsage }),
             },
           })),
           pageInfo: {},
@@ -788,6 +793,68 @@ test("snapshot: a projectRoot scopes lanes, seats, and tasks to the Project and 
   assert.equal(degraded.view.project, null, "a non-repo scope renders the global view");
 });
 
+// ---- the Lead telemetry join (v0.0.20, ADR 0013 §6, ticket 08) ------------------------------
+
+test("snapshot: the Lead view carries the 128k telemetry — lastUsage tokens, project.json rotationState, and the mailbox fold's queued count; other seats leave all four unset", async (t) => {
+  const project = makeProject(t, "lead-telemetry");
+  const { stateDir, handlers } = makeSurface(t, [
+    { id: "agent-sup-t", labels: { seat: "supervisor", project: project.slug }, cwd: project.root },
+    {
+      id: "agent-lead-t",
+      labels: { seat: "lead", project: project.slug },
+      cwd: project.root,
+      lastUsage: { contextWindowUsedTokens: 94_400, contextWindowMaxTokens: 200_000 },
+    },
+  ]);
+  writeProjectRegistration(stateDir, project.slug, { root: project.root, lead: "agent-lead-t", rotationState: "rotation_pending" });
+  // The mailbox seed: three queued, one of them delivered — the count folds
+  // the present (2 queued), never the history (3 events).
+  const mailbox = join(stateDir, "projects", project.slug, "mailbox.jsonl");
+  const first = enqueueLeadMail(mailbox, { from: "supervisor", kind: "directive", text: "Ship the roadmap." });
+  enqueueLeadMail(mailbox, { from: "peer", kind: "verdict", task: "T1", text: "T1 is green." });
+  enqueueLeadMail(mailbox, { from: "owner", kind: "directive", text: "One more." });
+  deliverLeadMail(mailbox, { mailIds: [first.mailId], toAgentId: "agent-lead-t" });
+
+  const snap = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  assert.ok(snap.view.lead !== null && snap.view.lead.id === "agent-lead-t", "the Project's Lead rides the snapshot");
+  const lead = snap.view.lead!;
+  assert.equal(lead.contextUsedTokens, 94_400, "the live lastUsage used-tokens ride the Lead view");
+  assert.equal(lead.contextMaxTokens, 200_000, "the live lastUsage max-tokens ride the Lead view");
+  assert.equal(lead.rotationState, "rotation_pending", "project.json's rotationState rides the Lead view");
+  assert.equal(lead.queuedMailCount, 2, "the mailbox fold's queued count rides the Lead view — a delivered item no longer counts");
+
+  // Non-Lead agents leave all four unset — the telemetry is the Lead's alone.
+  assert.ok(snap.view.supervisor !== null && snap.view.supervisor.id === "agent-sup-t");
+  const supervisor = snap.view.supervisor!;
+  assert.equal(supervisor.contextUsedTokens, undefined, "a non-Lead seat leaves the token pair unset");
+  assert.equal(supervisor.contextMaxTokens, undefined);
+  assert.equal(supervisor.rotationState, undefined);
+  assert.equal(supervisor.queuedMailCount, undefined);
+  for (const agent of snap.view.agents) {
+    if (agent.id === "agent-lead-t") continue;
+    assert.equal(agent.contextUsedTokens, undefined, `agent ${agent.id} carries no Lead telemetry`);
+    assert.equal(agent.contextMaxTokens, undefined);
+    assert.equal(agent.rotationState, undefined);
+    assert.equal(agent.queuedMailCount, undefined);
+  }
+});
+
+test("snapshot: a Lead with no usage, no rotation on record, and no mailbox degrades honestly — null tokens, no rotationState, zero queued", async (t) => {
+  const project = makeProject(t, "lead-telemetry-bare");
+  const { handlers } = makeSurface(t, [
+    // No lastUsage from the daemon, no project.json, no mailbox.jsonl on disk.
+    { id: "agent-lead-bare", labels: { seat: "lead", project: project.slug }, cwd: project.root },
+  ]);
+  const snap = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  const lead = snap.view.lead!;
+  assert.equal(lead.contextUsedTokens, null, "no lastUsage → null, never a fabricated number");
+  assert.equal(lead.contextMaxTokens, null);
+  assert.equal(lead.rotationState, undefined, "no rotationState on record → the key stays unset (absent reads as normal)");
+  assert.equal(lead.queuedMailCount, 0, "no mailbox yet → zero queued, still a number the card can trust");
+});
+
 // ---- Ratify via Supervisor (v0.0.14, ADR 0010 §6) -------------------------------------------
 
 test("ratify: dispatches the Retro proposal to the Project's Supervisor; unknown day/proposal are named refusals", async (t) => {
@@ -1176,11 +1243,18 @@ test("roles: session_open re-carries PI_CODING_AGENT_DIR and keeps the harness h
   assert.ok(agentSession !== undefined);
   assert.equal(agentSession.env.PI_CODING_AGENT_DIR, join(stateDir, "pi-agent", "agent"));
 
-  // The operator's prompt contamination never lands in a harness home.
+  // The operator's prompt contamination never lands in a harness home; the
+  // supervisor home's APPEND_SYSTEM.md is the MANAGED role contract
+  // (v0.0.20, ADR 0013), never the operator's — and this fake home seeds no
+  // prompts/ or skills/, so supervisor keeps both stripped here.
   const roleHome = join(stateDir, "pi-agent", "supervisor");
-  for (const forbidden of ["APPEND_SYSTEM.md", "SYSTEM.md", "extensions", "prompts", "skills"]) {
+  for (const forbidden of ["SYSTEM.md", "extensions", "prompts", "skills"]) {
     assert.ok(!existsSync(join(roleHome, forbidden)), `${forbidden} never lands in the harness home`);
   }
+  assert.ok(
+    !readFileSync(join(roleHome, "APPEND_SYSTEM.md"), "utf8").includes("Auto-Delegation"),
+    "the operator's APPEND_SYSTEM.md content never lands in the harness home",
+  );
   // Shared state — auth, custom models, sessions — symlinks back to the FAKE
   // source home; the provisioner's sessions ensure landed inside that fake
   // only, never the real ~/.pi/agent (the seed deliberately omits sessions/).
@@ -1427,6 +1501,123 @@ test("daemon plugin bridge: listDaemonPlugins speaks plugin.list.request over th
 test("daemon plugin bridge: the payload timeouts stay pinned — 30s default, 300s for plugin install/update", () => {
   assert.equal(BRIDGE_TIMEOUT_MS, 30_000, "every non-install request keeps the 30s bridge default");
   assert.equal(PLUGIN_IO_TIMEOUT_MS, 300_000, "a remote Git clone/fetch never times out prematurely (spec §Implementation Decisions 4)");
+});
+
+// ---- the list cache (v0.0.20, ADR 0013 §1) — single-flight + 15s TTL over the fake daemon ----
+
+/** The one-item list the cache proofs' fake daemon answers every `plugin.list.request` with. */
+function fakeListReply(message: Record<string, unknown>): Record<string, unknown> {
+  return {
+    type: "plugin.list.response",
+    payload: {
+      requestId: message.requestId,
+      plugins: [{ id: "paseo-factory", path: "/plugins/paseo-factory", enabled: true, status: "running" }],
+    },
+  };
+}
+
+test("daemon plugin bridge: listDaemonPlugins single-flights concurrent calls and serves the 15s TTL from the cache", async (t) => {
+  assert.equal(PLUGIN_LIST_TTL_MS, 15_000, "the list TTL stays pinned at 15s (spec §Implementation Decisions 1, paseo-factory bullet 1)");
+  const daemon = await startFakeDaemon(t, (message) => (message.type === "plugin.list.request" ? fakeListReply(message) : null));
+
+  const concurrent = await Promise.all([listDaemonPlugins(daemon.home), listDaemonPlugins(daemon.home), listDaemonPlugins(daemon.home)]);
+  for (const reply of concurrent) {
+    assert.ok(reply.ok, reply.ok ? "" : reply.reason);
+    assert.deepEqual(reply.plugins.map((plugin) => plugin.id), ["paseo-factory"], "every concurrent caller rides the same payload");
+  }
+  const requests = (): number => daemon.frames.filter((frame) => frame.type === "plugin.list.request").length;
+  assert.equal(requests(), 1, "concurrent callers share one WebSocket plugin.list.request — the inFlight map");
+
+  const again = await listDaemonPlugins(daemon.home);
+  assert.ok(again.ok, again.ok ? "" : again.reason);
+  assert.deepEqual(again.plugins.map((plugin) => plugin.id), ["paseo-factory"]);
+  assert.equal(requests(), 1, "a second call well inside the 15s TTL flies no new request");
+});
+
+test("daemon plugin bridge: only ok replies are cached — a failed list retries on the next call", async (t) => {
+  const daemon = await startFakeDaemon(t, (message) => ({
+    type: "rpc_error",
+    payload: { requestId: message.requestId, error: "the daemon plugin list is busy" },
+  }));
+
+  for (let i = 0; i < 2; i++) {
+    const reply = await listDaemonPlugins(daemon.home);
+    assert.ok(!reply.ok, "the rpc_error answers ok:false both times");
+    assert.equal(reply.reason, "the daemon plugin list is busy");
+  }
+  assert.equal(
+    daemon.frames.filter((frame) => frame.type === "plugin.list.request").length,
+    2,
+    "a { ok: false } answer is never cached — the degrade law keeps retrying on the next snapshot",
+  );
+});
+
+test("daemon plugin bridge: installDaemonPlugin and manageDaemonPlugin invalidate the home's list cache at entry", async (t) => {
+  const daemon = await startFakeDaemon(t, (message) => {
+    const type = String(message.type);
+    if (type === "plugin.list.request") return fakeListReply(message);
+    if (type === "plugin.directory.install.request") {
+      return {
+        type: "plugin.directory.install.response",
+        payload: { requestId: message.requestId, plugin: { id: "factory-connector", path: "/plugins/factory-connector", enabled: true, status: "running" } },
+      };
+    }
+    if (type === "plugin.disable.request") {
+      return {
+        type: "plugin.disable.response",
+        payload: { requestId: message.requestId, plugin: { id: "paseo-factory", path: "/plugins/paseo-factory", enabled: false, status: "disabled" } },
+      };
+    }
+    return null;
+  });
+
+  const first = await listDaemonPlugins(daemon.home);
+  assert.ok(first.ok, first.ok ? "" : first.reason);
+  const second = await listDaemonPlugins(daemon.home);
+  assert.ok(second.ok, second.ok ? "" : second.reason);
+  assert.equal(daemon.frames.filter((frame) => frame.type === "plugin.list.request").length, 1, "the second read rides the 15s TTL entry");
+
+  const install = await installDaemonPlugin(daemon.home, { id: "factory-connector", source: "/tmp/custom-plugin" });
+  assert.ok(install.ok, install.ok ? "" : install.reason);
+  const afterInstall = await listDaemonPlugins(daemon.home);
+  assert.ok(afterInstall.ok, afterInstall.ok ? "" : afterInstall.reason);
+  assert.equal(
+    daemon.frames.filter((frame) => frame.type === "plugin.list.request").length,
+    2,
+    "installDaemonPlugin drops the home's cache entry — the next list flies a fresh plugin.list.request",
+  );
+
+  const disable = await manageDaemonPlugin(daemon.home, "paseo-factory", "disable");
+  assert.ok(disable.ok, disable.ok ? "" : disable.reason);
+  const afterManage = await listDaemonPlugins(daemon.home);
+  assert.ok(afterManage.ok, afterManage.ok ? "" : afterManage.reason);
+  assert.equal(
+    daemon.frames.filter((frame) => frame.type === "plugin.list.request").length,
+    3,
+    "manageDaemonPlugin drops the home's cache entry too — no reader ever sees a pre-mutation list",
+  );
+});
+
+test("daemon plugin bridge: the list cache keys per home — a second daemon's home keeps its own entry", async (t) => {
+  const daemonA = await startFakeDaemon(t, (message) => (message.type === "plugin.list.request" ? fakeListReply(message) : null));
+  const daemonB = await startFakeDaemon(t, (message) => (message.type === "plugin.list.request" ? fakeListReply(message) : null));
+
+  for (const daemon of [daemonA, daemonB]) {
+    const first = await listDaemonPlugins(daemon.home);
+    assert.ok(first.ok, first.ok ? "" : first.reason);
+    const second = await listDaemonPlugins(daemon.home);
+    assert.ok(second.ok, second.ok ? "" : second.reason);
+  }
+  assert.equal(
+    daemonA.frames.filter((frame) => frame.type === "plugin.list.request").length,
+    1,
+    "home A's cache entry answers its second read without a new request",
+  );
+  assert.equal(
+    daemonB.frames.filter((frame) => frame.type === "plugin.list.request").length,
+    1,
+    "home B never rides home A's entry — trial and production plugin state never cross-contaminate",
+  );
 });
 
 /** A fake `paseo` CLI first on PATH — records every argv, answers fixed stdout (the CLI fallback seam). */

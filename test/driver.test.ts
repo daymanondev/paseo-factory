@@ -776,8 +776,13 @@ test("the needs-human terminal (null lane, denied-again): a second denial after 
     assert.equal(terminals.length, 0, "the watch survives the null lane — growth is the life signal and the denial is the Lead's to answer (missingDeadMs=60 and many ticks in)");
     // The agent re-attempts the denied act only once the old death window is
     // well past — the survival itself is what this stretch proves, so the
-    // second denial must not race it.
-    setTimeout(() => harness.denial("caught again"), 150);
+    // second denial must not race it. 500ms, not a tighter "well past the
+    // 60ms window" margin: under the full parallel suite a 10ms poll loop can
+    // be starved past 150ms whole (measured while landing v0.0.20 ticket 06 —
+    // the base suite sat just under the cliff), and the stretch only needs
+    // the denial later than the death window for `fetches > 3` to stay an
+    // honest survival claim on a loaded box.
+    setTimeout(() => harness.denial("caught again"), 500);
     await run;
 
     const line = harness.factory.ledger.events.find((e) => e.event === "needs_human") as { reason: string; evidence: { denial: number; repoke: number } };

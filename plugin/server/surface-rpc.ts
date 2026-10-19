@@ -18,11 +18,14 @@
  * daemon acts the in-process API lacks (a live agent's model sync,
  * cancelling a running agent) ride the CLI bridge in daemon-cli.ts.
  */
+import { randomUUID } from "node:crypto";
 import { FactoryError } from "./core/errors.ts";
 import type { Factory } from "./core/factory.ts";
+import { readLeadMailbox } from "./core/mailbox.ts";
 import { loadLanes, parseLane, saveLanes } from "./core/lanes.ts";
-import { resolveProject } from "./core/project.ts";
+import { projectStateDir, readProjectRegistration, resolveProject } from "./core/project.ts";
 import type { ProjectResolution } from "./core/project.ts";
+import { join } from "node:path";
 import type { LandingResult } from "./core/workspace.ts";
 import { FACTORY_VIEW_VERSION } from "../shared/view.ts";
 import { foldRetro, foldTasks, foldView, readTailed } from "./view.ts";
@@ -35,9 +38,11 @@ import { discoverProjects, writeProjectRegistration } from "./projects.ts";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { COMPANION_CATALOG } from "../shared/companions.ts";
 import type { CompanionCatalogEntry } from "../shared/companions.ts";
+import type { SpoolLeadDispatchRequest, SpoolReply } from "./spool.ts";
 import {
   accept,
   lanesSet,
+  leadDispatch,
   leadEnsure,
   leadRotate,
   pluginsInstall,
@@ -67,6 +72,16 @@ export interface SurfaceAgentSnapshot {
   attentionReason: string | null;
   updatedAt: string;
   cwd: string;
+  /**
+   * The live usage slice the 128k Lead sensor reads (v0.0.20, ADR 0013 §5) —
+   * the SDK's `AgentUsage` subset, present when the daemon reports usage.
+   */
+  lastUsage?: { contextWindowUsedTokens?: number; contextWindowMaxTokens?: number } | null;
+  /**
+   * The persistence slice naming the provider-native session handle — the Pi
+   * `.jsonl` fallback's path across daemon restarts (v0.0.20, ADR 0013 §5).
+   */
+  persistence?: { nativeHandle?: string } | null;
 }
 
 /**
@@ -134,6 +149,24 @@ export interface SurfaceDeps {
   listPlugins?: typeof listDaemonPlugins;
   installPlugin?: typeof installDaemonPlugin;
   managePlugin?: typeof manageDaemonPlugin;
+  /**
+   * The Lead-mailbox rotation settle (v0.0.20, ADR 0013 §4's last arm):
+   * `retireSeat` fires it right after a Project's Lead is archived, so any
+   * un-acked in-flight delivery of that Project's `mailbox.jsonl` returns to
+   * `queued` as `mail_requeued` (`reason: "lead-rotated"`) — the
+   * Lead-mailbox runtime's `settleLeadRotation` is the implementation. A
+   * thrown settle is logged, never a failed rotation (startup recovery
+   * remains the net).
+   */
+  onLeadRetired?: (input: { slug: string; agentId: string }) => void;
+  /**
+   * The UI's quick-dispatch door (v0.0.20, ADR 0013 §4): the `leadDispatch`
+   * handler routes through the Lead-mailbox runtime's `dispatchLead` — the
+   * same `enqueueLeadMail` + `pumpProjectLead` pipeline the spool's
+   * `lead_dispatch` rides. Without it the RPC refuses by name (the spool's
+   * `lead-dispatch-unavailable` precedent).
+   */
+  leadDispatch?: (request: SpoolLeadDispatchRequest) => Promise<SpoolReply>;
   onLog?: (message: string) => void;
 }
 
@@ -241,6 +274,34 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     return contract.workspace === root || contract.workspace.startsWith(`${root}/`);
   };
 
+  /**
+   * The Lead telemetry join (v0.0.20, ADR 0013 §6): the Lead's own labels
+   * name its Project, so its card's facts fold in here — the live
+   * context-window pair from the daemon's `lastUsage` (null when it reports
+   * none), the durable `rotationState` from `project.json` (unset when
+   * unrecorded — absent reads as "normal"), and the queued count from the
+   * Project's `mailbox.jsonl` fold (0 when no mailbox exists yet; a damaged
+   * one renders no count, never a failed snapshot). Non-Lead agents — and a
+   * Lead the daemon lists without its project label — leave all four unset.
+   */
+  const leadTelemetryOf = (
+    agent: SurfaceAgentSnapshot,
+  ): Pick<AgentView, "contextUsedTokens" | "contextMaxTokens" | "rotationState" | "queuedMailCount"> => {
+    if (agent.labels.seat !== "lead" || agent.labels.project === undefined) return {};
+    const tokens = {
+      contextUsedTokens: agent.lastUsage?.contextWindowUsedTokens ?? null,
+      contextMaxTokens: agent.lastUsage?.contextWindowMaxTokens ?? null,
+    };
+    let queued: number;
+    try {
+      queued = readLeadMailbox(join(projectStateDir(deps.stateDir, agent.labels.project), "mailbox.jsonl")).queued.length;
+    } catch {
+      return tokens; // an unreadable mailbox is not a snapshot failure — the count stays unset
+    }
+    const rotationState = readProjectRegistration(deps.stateDir, agent.labels.project)?.rotationState;
+    return { ...tokens, queuedMailCount: queued, ...(rotationState === undefined ? {} : { rotationState }) };
+  };
+
   /** One agent → AgentView, with the Timeline Oracle seqEnd when the daemon answers. */
   const agentViewOf = async (daemon: SurfaceDaemonApi, agent: SurfaceAgentSnapshot, task: string | null): Promise<AgentView> => {
     let seqEnd: number | null = null;
@@ -261,6 +322,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       seat: agent.labels.seat ?? null,
       task,
       seqEnd,
+      ...leadTelemetryOf(agent),
       requiresAttention: agent.requiresAttention,
       cwd: agent.cwd,
     };
@@ -460,6 +522,19 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     if (projectSlug !== undefined && projectRoot !== undefined) {
       writeProjectRegistration(deps.stateDir, projectSlug, { root: projectRoot, ...(seat === "lead" ? { lead: null } : { supervisor: null }) });
     }
+    // The Lead's mailbox settle (v0.0.20, ADR 0013 §4's last arm): a retired
+    // Lead can never ack its live delivery, so the un-acked batch returns to
+    // `queued` (`mail_requeued`, reason "lead-rotated") the moment the seat
+    // archives — a manual rotate racing a live delivery delays the mail to
+    // the next Lead, never strands it. The automatic handoff arm rides this
+    // same door as a no-op (its turn boundary settles first).
+    if (seat === "lead" && projectSlug !== undefined) {
+      try {
+        deps.onLeadRetired?.({ slug: projectSlug, agentId: agent.id });
+      } catch (err) {
+        log(`lead: the rotation's mailbox settle of ${projectSlug} failed — startup recovery remains the net (${messageOf(err)})`);
+      }
+    }
     log(`${seat}: retired ${agent.id} (cancelled + archived)`);
     return { ok: true as const, agentId: agent.id };
   };
@@ -494,9 +569,11 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       }
 
       // The live companion half (v0.0.17, ADR 0012 §2–§3): every snapshot reads
-      // the daemon's plugin list fresh — no TTL cache (a 5s poll cadence is the
-      // design) — strictly against `deps.home`, and an unavailable list degrades
-      // to the all-`not_installed` default rather than refusing.
+      // the daemon's plugin list through the bridge's 15s TTL + single-flight
+      // per-`home` cache (v0.0.20, ADR 0013 §1 — the 5s poll cadence shares one
+      // `plugin.list.request`, and install/manage invalidate the entry) strictly
+      // against `deps.home`, and an unavailable list degrades to the
+      // all-`not_installed` default rather than refusing.
       const listPlugins = deps.listPlugins ?? listDaemonPlugins;
       let daemonPlugins: DaemonPluginItem[] | null = null;
       try {
@@ -705,6 +782,44 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       return retireSeat("lead", project.slug, project.root, context);
     },
 
+    /**
+     * The UI's quick dispatch (v0.0.20, ADR 0013 §4): routes through the
+     * Lead-mailbox runtime's `dispatchLead` — auto-ensure the Lead seat,
+     * `enqueueLeadMail`, `pumpProjectLead` — the same pipeline the spool's
+     * `lead_dispatch` rides, never a bare `agents.ref().send`.
+     */
+    async leadDispatch(
+      input: { projectRoot?: string; project?: string; from?: "supervisor" | "owner"; message: string },
+      _context?: SurfaceCallContext,
+    ): Promise<
+      | { ok: true; project: string; leadAgentId: string; mailId: string; rotationState: string; summary: string }
+      | { ok: false; code: string; error: string }
+    > {
+      if (deps.leadDispatch === undefined) {
+        return failure("lead-dispatch-unavailable", "the Lead-mailbox runtime is not wired into this surface — dispatch through `factory lead dispatch` instead");
+      }
+      // The request mirrors the spool's shape: a root resolves as `workspace`
+      // (resolveProject), a slug rides `project` (the registry).
+      const request: SpoolLeadDispatchRequest = {
+        id: `surface-${randomUUID()}`,
+        kind: "lead_dispatch",
+        ...(input.projectRoot === undefined ? {} : { workspace: input.projectRoot }),
+        ...(input.project === undefined ? {} : { project: input.project }),
+        ...(input.from === undefined ? {} : { from: input.from }),
+        message: input.message,
+      };
+      const reply = await deps.leadDispatch(request);
+      if (!reply.ok) return { ok: false as const, code: reply.code ?? "lead-dispatch-failed", error: reply.message ?? "the dispatch failed" };
+      return {
+        ok: true as const,
+        project: reply.project ?? "",
+        leadAgentId: reply.leadAgentId ?? "",
+        mailId: reply.mailId ?? "",
+        rotationState: reply.rotationState ?? "normal",
+        summary: reply.summary,
+      };
+    },
+
     async ratifyProposal(input: { projectRoot: string; day: string; proposalId: number }, context?: SurfaceCallContext) {
       const project = projectOrRefusal(input.projectRoot);
       if (!project.ok) return project;
@@ -820,6 +935,7 @@ export function registerSurfaceRpc(server: PluginServerContext, handlers: Surfac
   server.handle(supervisorRevoke, (input, context) => handlers.supervisorRevoke(input, { paseo: context.paseo }));
   server.handle(leadEnsure, (input, context) => handlers.leadEnsure(input, { paseo: context.paseo }));
   server.handle(leadRotate, (input, context) => handlers.leadRotate(input, { paseo: context.paseo }));
+  server.handle(leadDispatch, (input, context) => handlers.leadDispatch(input, { paseo: context.paseo }));
   server.handle(ratifyProposal, (input, context) => handlers.ratifyProposal(input, { paseo: context.paseo }));
   server.handle(pluginsInstall, (input, context) => handlers.pluginsInstall(input, { paseo: context.paseo }));
   server.handle(pluginsManage, (input, context) => handlers.pluginsManage(input, { paseo: context.paseo }));

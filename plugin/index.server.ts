@@ -12,18 +12,21 @@
  * `accept`), which is never on an agent PATH.
  */
 import { homedir } from "node:os";
+import { join } from "node:path";
 import type { PluginHookContext, PluginServerContext } from "@getpaseo/plugin/server";
 import { createFactory } from "./server/core/factory.ts";
 import { PLUGIN_ID, pluginDirFor, resolvePaseoHome, stateDirFor } from "./server/paths.ts";
+import { ensureFactorySkillSafe } from "./server/core/skill.ts";
 import { claimCliBinDir, ensureClaimCli, ensureGitShim, injectClaimCliPath } from "./server/shell.ts";
 import { createChoke, startGitBlockIngestion } from "./server/choke.ts";
 import { createTimelineFetcher } from "./server/timeline.ts";
 import type { TimelineSourceApi } from "./server/timeline.ts";
 import { spoolRootFor, startSpool } from "./server/spool.ts";
 import { createSurfaceHandlers, registerSurfaceRpc } from "./server/surface-rpc.ts";
+import { createLeadMailRuntime } from "./server/lead-mailbox.ts";
 import { injectRoleOnCreate, injectSessionEnv } from "./server/roles.ts";
 
-const SHELL_VERSION = "0.0.19";
+const SHELL_VERSION = "0.0.20";
 
 const log = (message: string) => console.log(`[${PLUGIN_ID}] ${message}`);
 
@@ -62,6 +65,22 @@ export default function contribute(server: PluginServerContext) {
     ensureGitShim(stateDir, pluginDir, process.execPath);
     log(`up v${SHELL_VERSION} — state ${stateDir}, plugin ${pluginDir}, claim CLI + git shim ${claimCliBinDir(stateDir)}`);
   }
+
+  // The global `/factory` skill (v0.0.20, ADR 0013 §3): reconcile
+  // `~/.agents/skills/factory/SKILL.md` at boot so the Owner can type
+  // `/factory <directive>` in any session and bootstrap or dispatch into the
+  // Project's SLP loop. The skill carries this install's exact factory CLI
+  // invocation (the seats' `factoryCmd` precedent) but never a `--home` —
+  // the file is global across daemons, so the body names the default-home
+  // law and the override instead. The SAFE door: unlike the stateDir writes
+  // above, `~/.agents` is operator-global and not a precondition the plugin
+  // depends on, so an unwritable skills root warns and the boot continues
+  // (choke, spool, mailbox runtime) — a skill never kills a boot.
+  const quoted = (value: string) => (/\s/.test(value) ? `"${value}"` : value);
+  const runner = /Paseo Helper/i.test(process.execPath) ? `ELECTRON_RUN_AS_NODE=1 ${quoted(process.execPath)}` : quoted(process.execPath);
+  const factoryCmd = pluginDir === undefined ? "factory" : `${runner} ${quoted(join(pluginDir, "bin", "factory.mjs"))}`;
+  const skillPath = ensureFactorySkillSafe(join(homedir(), ".agents", "skills"), { factoryCmd }, log);
+  if (skillPath !== null) log(`skill: /factory reconciled at ${skillPath}`);
 
   // The choke (v0.0.4): judge every permit ask from a contracted agent,
   // answer it, and leave one ledger line per judged ask. The permission mode
@@ -105,7 +124,44 @@ export default function contribute(server: PluginServerContext) {
     daemon: () => paseoApi as never,
     onLog: log,
   };
-  const surface = createSurfaceHandlers(surfaceDeps);
+  // The Lead-mailbox doors the surface defers to (the runtime is created
+  // right below — its own seat doors are the surface's leadEnsure and
+  // leadRotate, so the two objects are mutually late-bound; these arrows
+  // only ever fire once RPCs are registered, after both exist):
+  // `onLeadRetired` settles a rotated Lead's mailbox (`mail_requeued`,
+  // reason "lead-rotated" — ADR 0013 §4's last arm), `leadDispatch` is the
+  // UI quick-dispatch door onto the same enqueueLeadMail + pumpProjectLead
+  // pipeline the spool's lead_dispatch rides.
+  const surface = createSurfaceHandlers({
+    ...surfaceDeps,
+    onLeadRetired: (input) => leadMail.settleLeadRotation(input.slug),
+    leadDispatch: (request) => leadMail.dispatchLead(request),
+  });
+  // The Lead mailbox runtime (v0.0.20, ADR 0013 §4–§5): the single writer
+  // around each Project's mailbox.jsonl. Its seat doors are the surface's
+  // leadEnsure (the spec's ensureProjectSeat("lead")) and leadRotate (the
+  // handoff's retire sequence); its daemon is the same captured PaseoApi the
+  // handlers fall back to. Startup recovery first — any delivery a crashed
+  // lifetime left un-acked returns to queued before new mail moves.
+  const leadMail = createLeadMailRuntime({
+    factory,
+    stateDir,
+    daemon: () => paseoApi as never,
+    ensureLead: (input) => surface.leadEnsure(input),
+    retireLead: (input) => surface.leadRotate(input),
+    onLog: log,
+  });
+  leadMail.startupRecovery();
+  // The turn boundary (v0.0.20, ADR 0013 §5): every `agent.turn_ended` hands
+  // the Lead-mailbox runtime the event — it settles the in-flight batch
+  // (`mail_acked` on completed, `mail_requeued` otherwise) and drives the 128k
+  // rotation state machine (lock → extraction → archive → successor → drain)
+  // for the Project whose registered Lead ended the turn. Non-Lead turns are
+  // ignored inside the runtime.
+  const offTurnEnded = server.on("agent.turn_ended", (event, context) => {
+    capturePaseo(context);
+    void leadMail.onLeadTurnEnded({ agentId: event.agent.id, outcome: event.outcome, timeline: event.timeline });
+  });
   const spool = startSpool(stateDir, factory, {
     onLog: log,
     ask: choke.spoolAskHandler,
@@ -115,6 +171,8 @@ export default function contribute(server: PluginServerContext) {
         ? { id: request.id, ok: true as const, summary: `lead rotated — agent ${reply.agentId} cancelled + archived`, agentId: reply.agentId }
         : { id: request.id, ok: false as const, code: reply.code, message: reply.error };
     },
+    leadDispatch: (request) => leadMail.dispatchLead(request),
+    peerMail: leadMail.notifyPeer,
   });
   log(`spool listening on ${spoolRootFor(stateDir)}/{requests,replies,processed}`);
   registerSurfaceRpc(server, surface);
@@ -141,6 +199,7 @@ export default function contribute(server: PluginServerContext) {
     offPermissionAsked();
     offAgentCreate();
     offSessionOpen();
+    offTurnEnded();
     gitBlocks.stop();
     spool.stop();
     log(`down v${SHELL_VERSION}`);

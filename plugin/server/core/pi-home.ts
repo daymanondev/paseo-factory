@@ -8,10 +8,19 @@
  * `mcp.json` (legacy `pi-mcp-adapter` `"auth": "oauth"` strings stripped for
  * Pi v1.3.0's native `builtin:mcp`), while authentication, custom models,
  * OAuth credentials, and the `sessions/` tree stay SHARED through symlinks
- * back to the operator's Pi home. The prompt contamination —
- * `APPEND_SYSTEM.md`, `SYSTEM.md`, `extensions/`, `prompts/`, `skills/` — is
- * never linked or copied, so no role or headless pass ever inherits the
- * operator's global TUI rules or pays its package-resolution cost.
+ * back to the operator's Pi home. The operator's prompt contamination —
+ * `SYSTEM.md`, `extensions/` — is never linked or copied, so no role or
+ * headless pass ever inherits the operator's global TUI rules or pays its
+ * package-resolution cost. Since v0.0.20 (ADR 0013) the three interactive
+ * roles each carry a MANAGED `APPEND_SYSTEM.md` — their immutable SLP
+ * contract + exact `factory` CLI vocabulary (`ROLE_PROMPTS[role]`), the file
+ * Pi's `DefaultResourceLoader` reloads into `_baseSystemPrompt` on every
+ * turn, every `/compact`, and every `agent.session_open` resume (the
+ * compaction-proof channel `config.systemPrompt` alone is not) — and
+ * `supervisor` alone additionally symlinks the operator's `prompts/` and
+ * `skills/` back in, keeping 100% of the Owner's personal slash commands
+ * and skills on Supervisor while `lead`, `agent`, and `headless` stay
+ * strictly stripped.
  *
  * Provisioning is idempotent and synchronous (the role-env seam that calls it
  * returns a plain env record, never a Promise): a second call finds the same
@@ -32,6 +41,9 @@ import { join } from "node:path";
 /** The factory roles that get an isolated Pi harness home (spec §Implementation Decisions 1). */
 export type PiAgentRole = "supervisor" | "lead" | "agent" | "headless";
 
+/** The interactive roles — every factory role except the tool-less `headless` pass. */
+export type InteractivePiAgentRole = Exclude<PiAgentRole, "headless">;
+
 export interface ProvisionPiHomeOptions {
   /** The factory state directory — the harness home is materialized at `<stateDir>/pi-agent/<role>`. */
   stateDir: string;
@@ -49,7 +61,72 @@ export interface ProvisionPiHomeOptions {
    * explicit directory and the filters derive from it verbatim.
    */
   agentsSkillsDir?: string;
+  /**
+   * Overrides the role's canonical `ROLE_PROMPTS[role]` as the managed
+   * `APPEND_SYSTEM.md` content (v0.0.20, ADR 0013). Interactive roles only —
+   * `headless` never gets one; an empty string writes nothing.
+   */
+  appendSystemPrompt?: string;
 }
+
+/**
+ * The canonical per-role SLP contracts (v0.0.20, ADR 0013 Decision 2): each
+ * interactive role's immutable law plus its exact `factory` CLI command
+ * vocabulary — the content `provisionPiAgentHome` writes to the role's
+ * managed `APPEND_SYSTEM.md`, the file Pi's `DefaultResourceLoader` reloads
+ * into `_baseSystemPrompt` on every turn, every `/compact`, and every
+ * `agent.session_open` resume. The contract lines mirror
+ * `renderSeatContract` / `renderAgentContract` and the seats' command list
+ * mirrors the bootstrap's "Day-one seat commands" (plugin/server/roles.ts);
+ * the working agent's whole vocabulary is `factory-claim` — orchestration is
+ * withheld from it by PATH and by brief. Exported at module level only,
+ * never through the `src/index.ts` barrel.
+ */
+export const ROLE_PROMPTS: Record<InteractivePiAgentRole, string> = {
+  supervisor: [
+    "# Supervisor (paseo-factory) — immutable SLP role contract",
+    "",
+    "You are the Supervisor seat of the paseo-factory verification loop: the sole conversational door to the Owner. Clarify intent, agree the outcome and boundaries, and relay what the factory measured — Verdicts, Watch lines, needs-human stalls — in words; the Owner's answers ride you back down.",
+    "You never grade work yourself: the Gate, the Choke, the Watch and the Ledger are the law, and `factory` (the Owner CLI) performs the Owner's acts — contract, run, accept --by supervisor. When the Owner states a project rule in chat or ratifies a Retro proposal, record it in this repository's AGENTS.md or CONTEXT.md — you (and the Lead) are the only seats that may edit project memory.",
+    "",
+    "Day-one seat commands (the Owner CLI — never on a Worker agent's PATH):",
+    "",
+    "  factory --home <home> contract --task <id> --workspace <dir> --gate <cmd> --artifact <path> [--scope <p1,p2>] [--skills <s1,s2>] [--watch] [--fresh-eyes] [--description <text>]",
+    "  factory --home <home> run <task> [<task>...]",
+    "  factory --home <home> lead dispatch --project <slug> --message \"<directive>\"",
+    "  factory --home <home> status",
+    "  factory --home <home> lanes get",
+    "  factory --home <home> accept <task> --attempt <n> [--by owner|supervisor|lead]",
+    "",
+    "This instruction is additive: the repository's own AGENTS.md / CLAUDE.md, MCP servers, and skills catalog load natively alongside it — never overwrite them.",
+  ].join("\n") + "\n",
+  lead: [
+    "# Lead (paseo-factory) — immutable SLP role contract",
+    "",
+    "You are the Lead seat of the paseo-factory verification loop: read the repository, split the Supervisor's directive into Tasks, set each Contract (gate, artifact, scope, skills) with `factory contract`, invoke the Driver (`factory run`), inspect the Verdict / Fresh-eyes / Watch / Report evidence, and report back to the Supervisor.",
+    "You may accept an intermediate Task's green, CONCERN-free Attempt (`factory accept --by lead`); a CONCERN or a needs-human task is never yours to accept — correct it or escalate. You may update this repository's AGENTS.md or CONTEXT.md when the Owner ratifies a rule; working Agents never may.",
+    "",
+    "Day-one seat commands (the Owner CLI — never on a Worker agent's PATH):",
+    "",
+    "  factory --home <home> contract --task <id> --workspace <dir> --gate <cmd> --artifact <path> [--scope <p1,p2>] [--skills <s1,s2>] [--watch] [--fresh-eyes] [--description <text>]",
+    "  factory --home <home> run <task> [<task>...]",
+    "  factory --home <home> status",
+    "  factory --home <home> lanes get",
+    "  factory --home <home> accept <task> --attempt <n> [--by owner|supervisor|lead]",
+    "",
+    "This instruction is additive: the repository's own AGENTS.md / CLAUDE.md, MCP servers, and skills catalog load natively alongside it — never overwrite them.",
+  ].join("\n") + "\n",
+  agent: [
+    "# Working Agent (paseo-factory) — immutable SLP role contract",
+    "",
+    "You are a working Agent of the paseo-factory verification loop: you work your Contract inside this Task worktree and claim with factory-claim when the Gate's done-criteria hold.",
+    "You never modify AGENTS.md, CLAUDE.md, or CONTEXT.md unless your Contract's scope explicitly lists them — project memory is written by the Supervisor and Lead, not by you. Factory orchestration (the `factory` CLI: contract, run, accept) is withheld from you by PATH and by this brief — your only factory command is factory-claim (plus the git shim), and any orchestration surface that is nevertheless visible to you is never yours to call: setting contracts, running the Driver, and accepting are the Owner's, Supervisor's, and Lead's acts.",
+    "",
+    "Your factory CLI vocabulary (complete): factory-claim — claim your Task when the Gate's done-criteria hold.",
+    "",
+    "This instruction is additive: the repository's own AGENTS.md / CLAUDE.md, MCP servers, and skills catalog load natively alongside it.",
+  ].join("\n") + "\n",
+};
 
 /**
  * The shared state that rides along as symlinks when present in the source
@@ -61,6 +138,13 @@ const SHARED_STATE_NAMES = ["auth.json", "models.json", "models-store.json", "mc
 
 /** The operator's prompt contamination — never linked, never copied, kept absent. */
 const FORBIDDEN_NAMES = ["APPEND_SYSTEM.md", "SYSTEM.md", "extensions", "prompts", "skills"] as const;
+
+/**
+ * The operator's personal command surface `supervisor` alone links back
+ * (v0.0.20, ADR 0013): 100% Owner slash-command and skill parity on
+ * Supervisor, while `lead`, `agent`, and `headless` stay strictly stripped.
+ */
+const OPERATOR_COMMAND_NAMES = ["prompts", "skills"] as const;
 
 /** The only source-settings keys the clean room preserves, and only when strings. */
 const OPERATOR_DEFAULT_KEYS = ["defaultProvider", "defaultModel", "defaultThinkingLevel"] as const;
@@ -79,11 +163,23 @@ export function provisionPiAgentHome(input: ProvisionPiHomeOptions): string {
   for (const forbidden of FORBIDDEN_NAMES) {
     rmSync(join(roleHome, forbidden), { recursive: true, force: true });
   }
+  // Strictly after the sweep — anything written or linked before it would
+  // be deleted as contamination (the sweep's ordering is load-bearing).
+  writeAppendSystemMd(roleHome, input.role, input.appendSystemPrompt);
   writeSettingsJson(sourceAgentDir, roleHome, input.role, input.agentsSkillsDir ?? "~/.agents/skills");
   syncMcpJson(sourceAgentDir, roleHome, input.role);
   for (const name of SHARED_STATE_NAMES) {
     const source = join(sourceAgentDir, name);
     if (existsSync(source)) ensureSymlink(source, join(roleHome, name));
+  }
+  // Supervisor alone keeps the Owner's personal slash commands and skills:
+  // prompts/ and skills/ symlink back to the source home when present
+  // (v0.0.20, ADR 0013); lead, agent, and headless stay strictly stripped.
+  if (input.role === "supervisor") {
+    for (const name of OPERATOR_COMMAND_NAMES) {
+      const source = join(sourceAgentDir, name);
+      if (existsSync(source)) ensureSymlink(source, join(roleHome, name));
+    }
   }
   const sessions = join(sourceAgentDir, "sessions");
   try {
@@ -95,6 +191,22 @@ export function provisionPiAgentHome(input: ProvisionPiHomeOptions): string {
   }
   if (existsSync(sessions)) ensureSymlink(sessions, join(roleHome, "sessions"));
   return roleHome;
+}
+
+/**
+ * The managed `APPEND_SYSTEM.md` (v0.0.20, ADR 0013 Decision 2): the three
+ * interactive roles carry their immutable SLP contract — an explicit
+ * `appendSystemPrompt` overrides the role default verbatim — while the
+ * tool-less `headless` pass never gets one (the forbidden-name sweep keeps
+ * it absent) and an empty override writes nothing. The file Pi reloads into
+ * `_baseSystemPrompt` on every turn, every `/compact`, and every
+ * `agent.session_open` resume — this call is the compaction-proof channel.
+ */
+function writeAppendSystemMd(roleHome: string, role: PiAgentRole, appendSystemPrompt: string | undefined): void {
+  if (role === "headless") return;
+  const content = appendSystemPrompt ?? ROLE_PROMPTS[role];
+  if (content === "") return;
+  writeFileSync(join(roleHome, "APPEND_SYSTEM.md"), content.endsWith("\n") ? content : `${content}\n`);
 }
 
 /**

@@ -116,13 +116,31 @@ commands:
                                       ever named persist — a refused value
                                       writes nothing, exit 2)
 
-  lead       Rotate a Project's Lead seat (v0.0.14, ADR 0010 §2): cancel and
-             archive the active seat=lead, project=<slug> agent so the next
-             dispatch starts a fresh Lead session grounded in the Project's
-             Ledger and AGENTS.md / CONTEXT.md. Submits through the spool —
-             the plugin is the one daemon actor; no ledger line lands (a
-             rotation is a daemon fact, not a factory fact).
-             lead rotate --project <dir>   any directory inside the Project
+  lead       Rotate a Project's Lead seat or dispatch into its Lead mailbox.
+             lead rotate --project <dir>   (v0.0.14, ADR 0010 §2) cancel and
+                                          archive the active seat=lead,
+                                          project=<slug> agent so the next
+                                          dispatch starts a fresh Lead
+                                          session. Submits through the spool —
+                                          the plugin is the one daemon actor;
+                                          no ledger line lands (a rotation is
+                                          a daemon fact, not a factory fact).
+                                          --project is any directory inside
+                                          the Project's repository.
+             lead dispatch [--project <slug>] [--workspace <dir>] --message "<text>"
+                                          (v0.0.20, ADR 0013 §4) queue one
+                                          directive in the Project's Lead
+                                          mailbox (<projectStateDir>/
+                                          mailbox.jsonl): the plugin
+                                          auto-ensures the Project's Lead
+                                          seat, appends mail_queued, and
+                                          delivers the batch when the Lead is
+                                          idle — the mail holds (never lost)
+                                          while the Lead runs. Exactly one
+                                          target: the registry slug or a
+                                          directory inside the Project's
+                                          repository; the message may ride as
+                                          one positional instead of --message.
 
   retro      Run the Retro over the whole ledger, on demand (v0.0.7): the
              plugin builds the corpus digest, prompts the configured retro
@@ -403,22 +421,63 @@ if (command === "lanes") {
 }
 
 if (command === "lead") {
-  const parsed = parseCommandOptions({ project: { type: "string" }, "wait-secs": { type: "string" } });
+  const parsed = parseCommandOptions({ project: { type: "string" }, workspace: { type: "string" }, message: { type: "string" }, "wait-secs": { type: "string" } });
   const sub = parsed.positionals[0];
-  if (sub !== "rotate") fail(`lead: unknown subcommand "${sub ?? "(none)"}" — use "lead rotate --project <dir>"`);
-  if (parsed.positionals.length > 1) fail(`lead rotate: unexpected positional "${parsed.positionals[1]}"`);
-  if (typeof parsed.values.project !== "string" || parsed.values.project.trim() === "") {
-    fail("lead rotate: --project <dir> is required — any directory inside the Project's repository");
+
+  if (sub === "rotate") {
+    if (parsed.positionals.length > 1) fail(`lead rotate: unexpected positional "${parsed.positionals[1]}"`);
+    if (typeof parsed.values.project !== "string" || parsed.values.project.trim() === "") {
+      fail("lead rotate: --project <dir> is required — any directory inside the Project's repository");
+    }
+    // v0.0.14 (ADR 0010 §2): the rotation is a spool round trip — the CLI only
+    // submits; the plugin cancels + archives the Project's seat=lead agent and
+    // names it in the reply.
+    const reply = await roundTrip(
+      { id: randomId(), kind: "lead_rotate", projectRoot: resolvePath(parsed.values.project) },
+      waitSeconds(parsed),
+    );
+    console.log(`factory: ${reply.summary}`);
+    process.exit(0);
   }
-  // v0.0.14 (ADR 0010 §2): the rotation is a spool round trip — the CLI only
-  // submits; the plugin cancels + archives the Project's seat=lead agent and
-  // names it in the reply.
-  const reply = await roundTrip(
-    { id: randomId(), kind: "lead_rotate", projectRoot: resolvePath(parsed.values.project) },
-    waitSeconds(parsed),
-  );
-  console.log(`factory: ${reply.summary}`);
-  process.exit(0);
+
+  if (sub === "dispatch") {
+    // v0.0.20 (ADR 0013 §4): the directive rides the same spool — the plugin
+    // resolves the Project, auto-ensures its Lead seat, appends one
+    // mail_queued to <projectStateDir>/mailbox.jsonl, and pumps the lane. The
+    // reply names the project, the Lead agent, the mail id, and the rotation
+    // state, so no raw Paseo agentId is ever needed here. The CLI leaves
+    // `from` unset — the plugin's default records the owner side.
+    const message = typeof parsed.values.message === "string" ? parsed.values.message : parsed.positionals[1];
+    if (message === undefined || message.trim() === "") {
+      fail('lead dispatch: --message "<text>" is required (or one positional message)');
+    }
+    if (parsed.positionals.length > 2) fail(`lead dispatch: unexpected positional "${parsed.positionals[2]}"`);
+    if (parsed.values.message !== undefined && parsed.positionals.length > 1) {
+      fail("lead dispatch: pass the message either as --message or as one positional, not both");
+    }
+    const hasProject = typeof parsed.values.project === "string" && parsed.values.project.trim() !== "";
+    const hasWorkspace = typeof parsed.values.workspace === "string" && parsed.values.workspace.trim() !== "";
+    if (!hasProject && !hasWorkspace) {
+      fail("lead dispatch: --project <slug> or --workspace <dir> is required — the Project whose Lead receives the directive");
+    }
+    if (hasProject && hasWorkspace) {
+      fail("lead dispatch: name exactly one target — --project <slug> or --workspace <dir>");
+    }
+    const reply = await roundTrip(
+      {
+        id: randomId(),
+        kind: "lead_dispatch",
+        ...(hasProject ? { project: parsed.values.project.trim() } : {}),
+        ...(hasWorkspace ? { workspace: resolvePath(parsed.values.workspace) } : {}),
+        message,
+      },
+      waitSeconds(parsed),
+    );
+    console.log(`factory: ${reply.summary}`);
+    process.exit(0);
+  }
+
+  fail(`lead: unknown subcommand "${sub ?? "(none)"}" — use "lead rotate --project <dir>" or "lead dispatch --project <slug> --message \\"<text>\\""`);
 }
 
 if (command === "run") {

@@ -5,6 +5,90 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.20] - 2026-10-19
+
+v0.0.20's one thing: **the SLP loop survives context** — compaction-proof
+role retention, a single-writer `Lead mailbox`, and automatic `128k` `Lead
+handoff`, with the daemon RPC storm gone across the family (ADR 0013 made
+real).
+
+### Added
+
+- **The single-writer `Lead mailbox` (`src/mailbox.ts`, pinned in
+  `test/mailbox.test.ts`)** — one append-only `mailbox.jsonl` per `Project`
+  is the sole mail channel into the standing `Lead` seat: every state
+  transition is one immutable JSONL line (`mail_queued`, `mail_delivered`,
+  `mail_acked`, `mail_requeued`) appended by the single-writer plugin, the
+  pure deterministic fold rebuilds the present from the file alone, a
+  delivered batch is `mail_acked` only when the receiving `Lead` turn ends
+  with `outcome === "completed"` (failed, cancelled, rotated, or
+  daemon-restarted turns append `mail_requeued`), and `recoverLeadMailbox`
+  settles any un-acked in-flight batch on boot — zero mail is ever lost
+  across a restart. Never a mutable JSON array, never SQLite (ADR 0004).
+- **`factory lead dispatch` + the `lead_dispatch` spool request
+  (`plugin/server/spool.ts`, `plugin/bin/factory.mjs`, pinned in
+  `test/plugin-spool.test.ts`)** — `factory lead dispatch --project <slug>
+  --message "<directive>"` submits one atomic one-file-per-request intent
+  into `<stateDir>/spool/requests/<id>.json` (ADR 0004 — no CLI
+  Read-Modify-Write on shared state, no raw Paseo `agentId`s); the spool
+  processor resolves the `Project`, ensures its `Lead` seat exists, appends
+  `mail_queued` to `mailbox.jsonl`, and pumps the mailbox on the serialized
+  per-`Project` async lane.
+- **The automatic `128k` `Lead handoff` (`plugin/server/lead-mailbox.ts`,
+  `src/project.ts`)** — the fixed `LEAD_ROTATE_TOKENS = 128_000` mark with
+  the deterministic context sensor `readLeadContextTokens` (Paseo's live
+  `agent.lastUsage.contextWindowUsedTokens`, with the Pi `.jsonl` session
+  fallback across daemon restarts — 0 LLM tokens, no 4th agent role).
+  `ProjectRegistration` gains `rotationState` (`normal` |
+  `rotation_pending` | `handing_over`): crossing `128k` mid-turn only marks
+  `rotation_pending` (the running turn is never interrupted); at the turn
+  boundary the mailbox locks (`handing_over`), one bounded Handoff
+  Extraction turn writes `<projectStateDir>/lead-handoff.md`, and the
+  successor `Lead` is spawned at `0%` context with the deterministic
+  **Machine-Verified Active Peer Roster** (`Task` ↔ live `Agent` ↔ `Task`
+  worktree), the Ledger State Digest, and the handoff file — then every
+  held `mail_queued` item drains into it (pinned in
+  `test/plugin-spool.test.ts` and `test/surface-rpc.test.ts`).
+- **Compaction-proof role `APPEND_SYSTEM.md` + `Supervisor` command
+  symlinks (`src/pi-home.ts`, pinned in `test/pi-home.test.ts`)** —
+  `provisionPiAgentHome` writes a managed, role-specific
+  `<stateDir>/pi-agent/<role>/APPEND_SYSTEM.md` for `supervisor`, `lead`,
+  and `agent` (`ROLE_PROMPTS` carrying each seat's immutable SLP contract
+  and exact `factory` CLI paths; none for `headless`) — the file Pi's
+  `DefaultResourceLoader` reloads into `_baseSystemPrompt` on every turn,
+  every `/compact`, and every `agent.session_open` resume, so no seat ever
+  forgets its duties — and for `supervisor` alone symlinks
+  `~/.pi/agent/prompts` and `~/.pi/agent/skills` back in, keeping 100% of
+  the `Owner`'s personal slash commands on `Supervisor` while `lead`,
+  `agent`, and `headless` stay strictly isolated.
+- **Always-visible `Start / Open` seat buttons + `Lead` telemetry
+  (`plugin/client/factory/header.tsx`, `plugin/client/factory/seats.tsx`,
+  `plugin/shared/view.ts`, pinned in `test/client-surface.test.ts`)** — the
+  `Seats & Models` header renders Start/Open Supervisor and Start/Open Lead
+  even when `view.supervisor === null` on a brand-new `Project`, and the
+  `Lead` card shows live context usage (`94k / 128k handoff`), the
+  `rotationState` badge, and the queued mailbox count.
+
+### Fixed
+
+- **The daemon RPC storm: `listDaemonPlugins` single-flight + `15s` TTL
+  (`plugin/server/daemon-cli.ts`, pinned in `test/surface-rpc.test.ts`)** —
+  concurrent `factory.surface.snapshot` polls share one WebSocket
+  `plugin.list.request` through an in-memory per-`home` cache
+  (`PLUGIN_LIST_TTL_MS = 15_000` plus an in-flight Promise map); only ok
+  replies are cached (a failed list keeps retrying), a generation counter
+  stops a pre-mutation list still in flight from repopulating the entry
+  behind a mutation's back, and `installDaemonPlugin` /
+  `manageDaemonPlugin` invalidate as their first statement.
+- **The companion fixes, by name:** `factory-burn-lab` v0.0.5 —
+  `resolvePaseoHome` defaults to `~/.paseo` when `PASEO_HOME` is unset, and
+  `discoverDaemonFreeModels` speaks the zero-side-effect
+  `provider.models.list.request` behind a `5 min` single-flight cache, so
+  `burnlab.status` polls never open agent sessions (ticket 01);
+  `factory-connector` v0.0.3 — `pollFleetPulse` behind a single-flight +
+  `5s` TTL cache with the active client poll at `10s` (ticket 02).
+- `package.json` + `SHELL_VERSION` → `0.0.20`. Suite 422 → 457.
+
 ## [0.0.19] - 2026-10-18
 
 ### Fixed

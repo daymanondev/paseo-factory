@@ -124,6 +124,24 @@ export const AgentViewSchema = z.object({
   task: z.string().nullable(),
   /** The Timeline Oracle's last seqEnd, when the daemon answered. */
   seqEnd: z.number().nullable(),
+  /**
+   * The Lead telemetry pair (v0.0.20, ADR 0013 §6): the daemon's live
+   * `agent.lastUsage` context-window reading — present on the Project's Lead
+   * (null when the daemon reports no usage), unset on every other agent.
+   * The spec names the pair `z.number().nullable()`; the `.optional()` half
+   * is what lets non-Lead agents leave it unset (the `thinking` tri-state
+   * precedent) — an older client ignores either shape, so the version stays.
+   */
+  contextUsedTokens: z.number().nullable().optional(),
+  contextMaxTokens: z.number().nullable().optional(),
+  /**
+   * The Lead rotation state machine's durable state as `project.json` records
+   * it (v0.0.20, ADR 0013 §5) — Lead-only; unset when unrecorded (absent
+   * reads as "normal").
+   */
+  rotationState: z.enum(["normal", "rotation_pending", "handing_over"]).optional(),
+  /** How many mail items wait queued in the Project's `mailbox.jsonl` fold — Lead-only. */
+  queuedMailCount: z.number().optional(),
   requiresAttention: z.boolean().nullable(),
   cwd: z.string().nullable(),
 });

@@ -13,7 +13,7 @@ import { useRpc } from "@getpaseo/plugin/client";
 import { Modal, ScrollView, useToast } from "@getpaseo/plugin/client/react-native";
 import { useState } from "react";
 import { Text, View } from "react-native";
-import { accept, lanesSet, leadEnsure, leadRotate, pluginsInstall, pluginsManage, ratifyProposal, retro, snapshot, supervisorEnsure, supervisorRevoke, taskDetail } from "../../shared/rpc.ts";
+import { accept, lanesSet, leadDispatch, leadEnsure, leadRotate, pluginsInstall, pluginsManage, ratifyProposal, retro, snapshot, supervisorEnsure, supervisorRevoke, taskDetail } from "../../shared/rpc.ts";
 import type { FactoryView, LaneName, TaskDetailView } from "../../shared/view.ts";
 import { Btn, Card, TabBar } from "../kit/pill.tsx";
 import type { TabId } from "../kit/pill.tsx";
@@ -57,6 +57,7 @@ export function FactoryShell({
   const revokeCall = useRpc(supervisorRevoke);
   const leadEnsureCall = useRpc(leadEnsure);
   const leadRotateCall = useRpc(leadRotate);
+  const leadDispatchCall = useRpc(leadDispatch);
   const ratifyCall = useRpc(ratifyProposal);
   const detailCall = useRpc(taskDetail);
   const pluginsInstallCall = useRpc(pluginsInstall);
@@ -137,10 +138,21 @@ export function FactoryShell({
   };
   const openLead = (message?: string): void => {
     if (projectRoot === undefined) return;
+    const text = message?.trim();
     void act("Lead", async () => {
-      const reply = await leadEnsureCall({ projectRoot, message: message?.trim() === "" || message === undefined ? undefined : message.trim() });
+      // A dispatch (v0.0.20, ADR 0013 §4) rides the Lead mailbox pipeline —
+      // factory.lead.dispatch → enqueueLeadMail + pumpProjectLead — so the
+      // directive is durable and held through turns and rotations; a bare
+      // open rides leadEnsure and only opens the seat.
+      if (text === undefined || text === "") {
+        const reply = await leadEnsureCall({ projectRoot });
+        if (!reply.ok) return reply;
+        navigation?.openAgent({ agentId: reply.agentId, serverId });
+        return reply;
+      }
+      const reply = await leadDispatchCall({ projectRoot, message: text });
       if (!reply.ok) return reply;
-      navigation?.openAgent({ agentId: reply.agentId, serverId });
+      navigation?.openAgent({ agentId: reply.leadAgentId, serverId });
       return reply;
     });
   };

@@ -4,8 +4,9 @@
  * dot, the five tabular-num KPI Stat Tiles (Needs Human, Running, Ready to
  * Accept, Accepted, Total Cost), the Project Selector (the panel auto-binds
  * its workspace's Project; the global screen picks across discovered
- * Projects), and the seat bridges — Open Supervisor + Quick Dispatch, and
- * Open Lead — scoped to the selected Project.
+ * Projects), and the seat bridges — Start/Open Supervisor and Start/Open Lead,
+ * always rendered once a Project is selected (v0.0.20, ADR 0013 §3) so a
+ * brand-new Project offers its header action on day one.
  */
 import type { PluginTheme } from "@getpaseo/plugin";
 import { Icon, TextInput } from "@getpaseo/plugin/client/react-native";
@@ -129,7 +130,6 @@ export function Header({
   supervisorLive: boolean;
   leadLive: boolean;
 }) {
-  void leadLive;
   const [pickingPath, setPickingPath] = useState(false);
   const [customPath, setCustomPath] = useState("");
   const busy = view.kpis.running + view.kpis.needsHuman > 0;
@@ -243,16 +243,32 @@ export function Header({
           />
           <View style={{ marginLeft: "auto", flexDirection: "row", alignItems: "center", gap: SPACING[1.5], flexWrap: "wrap" }}>
             {project !== null ? <Pill theme={theme} label={project.slug} mono /> : null}
-            {supervisorLive && view.supervisor !== null ? (
-              <Btn
-                theme={theme}
-                small
-                icon="Shield"
-                label="Open Supervisor"
-                tone="accent"
-                disabled={actions.busy}
-                onPress={() => actions.openSupervisor("")}
-              />
+            {/* The seat bridges (v0.0.20, ADR 0013 §3): ALWAYS rendered once a
+                Project is selected — Start when the seat is vacant, Open when
+                it lives — so a brand-new Project offers its header action on
+                day one. Both ride the shell's ensure-then-open wiring, which
+                creates the seat when none exists. */}
+            {project !== null ? (
+              <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1.5], flexWrap: "wrap" }}>
+                <Btn
+                  theme={theme}
+                  small
+                  icon="Shield"
+                  label={supervisorLive ? "Open Supervisor" : "Start Supervisor"}
+                  tone="accent"
+                  disabled={actions.busy}
+                  onPress={() => actions.openSupervisor("")}
+                />
+                <Btn
+                  theme={theme}
+                  small
+                  icon="Compass"
+                  label={leadLive ? "Open Lead" : "Start Lead"}
+                  tone="accent"
+                  disabled={actions.busy}
+                  onPress={() => actions.openLead()}
+                />
+              </View>
             ) : null}
           </View>
         </View>

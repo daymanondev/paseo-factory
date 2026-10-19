@@ -2,19 +2,22 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { provisionPiAgentHome } from "../src/pi-home.ts";
+import { provisionPiAgentHome, ROLE_PROMPTS } from "../src/pi-home.ts";
 import { disposeDir, makeTempDir } from "./helpers.ts";
 
 /**
- * The Pi harness home provisioner (v0.0.16, ADR 0011): every factory role —
- * `supervisor`, `lead`, working `agent`, and the tool-less `headless` pass —
- * gets an isolated `PI_CODING_AGENT_DIR` under `<stateDir>/pi-agent/<role>`:
- * a generated clean-room `settings.json`, a sanitized `mcp.json`, and
- * symlinks back to the operator's Pi home for shared state. Never linked or
- * copied: `APPEND_SYSTEM.md`, `SYSTEM.md`, `extensions/`, `prompts/`,
- * `skills/`. Tests drive the public entry point only, against a fake source
- * Pi home in a temp directory — the real `~/.pi/agent` is never read
- * (spec §Testing Decisions).
+ * The Pi harness home provisioner (v0.0.16, ADR 0011; v0.0.20, ADR 0013):
+ * every factory role — `supervisor`, `lead`, working `agent`, and the
+ * tool-less `headless` pass — gets an isolated `PI_CODING_AGENT_DIR` under
+ * `<stateDir>/pi-agent/<role>`: a generated clean-room `settings.json`, a
+ * sanitized `mcp.json`, and symlinks back to the operator's Pi home for
+ * shared state. Never linked or copied for any role: `SYSTEM.md`,
+ * `extensions/`. Since v0.0.20 the three interactive roles carry a MANAGED
+ * `APPEND_SYSTEM.md` (their immutable SLP contract + `factory` CLI
+ * vocabulary, `ROLE_PROMPTS[role]`), and `supervisor` alone symlinks the
+ * operator's `prompts/` and `skills/` back in. Tests drive the public entry
+ * point only, against a fake source Pi home in a temp directory — the real
+ * `~/.pi/agent` is never read (spec §Testing Decisions).
  */
 
 /** Seeds a fake operator Pi home at `piAgent` — the messy global one isolation protects roles from. */
@@ -88,9 +91,21 @@ test("provisionPiAgentHome materializes a clean supervisor Pi harness home (v0.0
     quietStartup: true,
     defaultProjectTrust: "always",
   });
-  // The operator's prompt contamination never lands in the harness home.
-  for (const forbidden of ["APPEND_SYSTEM.md", "SYSTEM.md", "extensions", "prompts", "skills"]) {
+  // The operator's prompt contamination never lands in the harness home:
+  // SYSTEM.md and extensions stay swept; APPEND_SYSTEM.md is the MANAGED
+  // role contract (v0.0.20, ADR 0013), never the operator's; prompts/ and
+  // skills/ symlink back so the Owner keeps 100% of personal slash commands
+  // and skills on Supervisor.
+  for (const forbidden of ["SYSTEM.md", "extensions"]) {
     assert.ok(!existsSync(join(roleHome, forbidden)), `${forbidden} never lands in the harness home`);
+  }
+  const appendSystem = readFileSync(join(roleHome, "APPEND_SYSTEM.md"), "utf8");
+  assert.equal(appendSystem, ROLE_PROMPTS.supervisor, "supervisor carries its managed SLP role contract");
+  assert.ok(!appendSystem.includes("Auto-Delegation"), "the operator's APPEND_SYSTEM.md content never leaks in");
+  for (const name of ["prompts", "skills"]) {
+    const link = join(roleHome, name);
+    assert.ok(lstatSync(link).isSymbolicLink(), `${name} is a symlink back to the source home`);
+    assert.equal(realpathSync(link), realpathSync(join(source, name)));
   }
   // Shared state — auth, models, OAuth credentials, sessions — symlinks back to the source.
   for (const name of ["auth.json", "models.json", "models-store.json", "mcp-oauth", "sessions"]) {
@@ -107,6 +122,82 @@ test("provisionPiAgentHome materializes a clean supervisor Pi harness home (v0.0
       "modern-oauth": { url: "https://y", auth: { provider: "anthropic" } },
     },
   });
+});
+
+test("interactive roles carry managed APPEND_SYSTEM.md; headless never does; only supervisor links operator prompts/skills (v0.0.20, ADR 0013)", (t) => {
+  const dir = makeTempDir("pi-home-test-");
+  disposeDir(t, dir);
+  const source = makeFakePiAgent(dir);
+  const stateDir = join(dir, "factory-state");
+
+  // Every interactive role gets its own managed role contract — the file Pi
+  // reloads into _baseSystemPrompt on every turn, every /compact, and every
+  // session resume — never the operator's auto-delegation rules.
+  const seen = new Set<string>();
+  for (const role of ["supervisor", "lead", "agent"] as const) {
+    const home = provisionPiAgentHome({ stateDir, role, sourceAgentDir: source });
+    const content = readFileSync(join(home, "APPEND_SYSTEM.md"), "utf8");
+    assert.equal(content, ROLE_PROMPTS[role], `${role} carries its canonical ROLE_PROMPTS entry`);
+    assert.ok(!content.includes("Auto-Delegation"), `the operator's APPEND_SYSTEM.md never reaches ${role}`);
+    assert.ok(!seen.has(content), "each role's contract is distinct");
+    seen.add(content);
+  }
+
+  // The canonical table itself: each entry carries the role's immutable SLP
+  // contract plus its exact factory CLI command vocabulary — the seats the
+  // day-one command family (contract/run/status/lanes get/accept), the
+  // working agent its single claim command.
+  assert.ok(ROLE_PROMPTS.supervisor.includes("You are"), "the supervisor contract opens with its SLP law");
+  for (const cmd of ["factory --home", "contract --task", "run <task>", "status", "lanes get", "accept <task>"]) {
+    assert.ok(ROLE_PROMPTS.supervisor.includes(cmd), `ROLE_PROMPTS.supervisor names \`${cmd}\``);
+    assert.ok(ROLE_PROMPTS.lead.includes(cmd), `ROLE_PROMPTS.lead names \`${cmd}\``);
+  }
+  assert.ok(ROLE_PROMPTS.agent.includes("factory-claim"), "the working agent's vocabulary is factory-claim");
+  assert.ok(!ROLE_PROMPTS.agent.includes("factory --home"), "orchestration commands are withheld from the working agent");
+
+  // lead, agent, and headless stay strictly stripped of the operator's
+  // prompts and skills — only Supervisor keeps 100% command parity.
+  for (const role of ["lead", "agent", "headless"] as const) {
+    const home = provisionPiAgentHome({ stateDir, role, sourceAgentDir: source });
+    for (const name of ["prompts", "skills"]) {
+      assert.ok(!existsSync(join(home, name)), `${name} stays stripped from ${role}`);
+    }
+  }
+
+  // The tool-less headless pass never carries an APPEND_SYSTEM.md — not the
+  // role default, not even an explicitly provided one.
+  const headlessHome = provisionPiAgentHome({ stateDir, role: "headless", sourceAgentDir: source });
+  assert.ok(!existsSync(join(headlessHome, "APPEND_SYSTEM.md")), "headless never carries APPEND_SYSTEM.md");
+  const explicitHeadless = provisionPiAgentHome({
+    stateDir: join(dir, "state-explicit"),
+    role: "headless",
+    sourceAgentDir: source,
+    appendSystemPrompt: "# should not land\n",
+  });
+  assert.ok(!existsSync(join(explicitHeadless, "APPEND_SYSTEM.md")), "an explicit appendSystemPrompt never lands for headless either");
+});
+
+test("appendSystemPrompt overrides the role default; an empty override writes nothing (v0.0.20, ADR 0013)", (t) => {
+  const dir = makeTempDir("pi-home-test-");
+  disposeDir(t, dir);
+  const source = makeFakePiAgent(dir);
+  const stateDir = join(dir, "factory-state");
+
+  const home = provisionPiAgentHome({
+    stateDir,
+    role: "lead",
+    sourceAgentDir: source,
+    appendSystemPrompt: "# Custom lead brief\n",
+  });
+  assert.equal(readFileSync(join(home, "APPEND_SYSTEM.md"), "utf8"), "# Custom lead brief\n", "the override lands verbatim");
+
+  const empty = provisionPiAgentHome({
+    stateDir: join(dir, "state-empty"),
+    role: "agent",
+    sourceAgentDir: source,
+    appendSystemPrompt: "",
+  });
+  assert.ok(!existsSync(join(empty, "APPEND_SYSTEM.md")), "an empty appendSystemPrompt writes no file");
 });
 
 test("each role gets its skills policy: agent filtered, supervisor/lead unfiltered, headless fully denied (v0.0.16, ADR 0011)", (t) => {
@@ -167,17 +258,21 @@ test("provisioning is idempotent and re-synchronizes mcp.json on every call (v0.
 
   const first = provisionPiAgentHome({ stateDir, role: "supervisor", sourceAgentDir: source });
   assert.deepEqual(readdirSync(first).sort(), [
+    "APPEND_SYSTEM.md",
     "auth.json",
     "mcp-oauth",
     "mcp.json",
     "models-store.json",
     "models.json",
+    "prompts",
     "sessions",
     "settings.json",
+    "skills",
   ], "the harness home holds exactly the generated files and shared-state links — no strays");
   const authLink = join(first, "auth.json");
   const linkInoBefore = lstatSync(authLink).ino;
   const settingsBefore = readFileSync(join(first, "settings.json"), "utf8");
+  const appendBefore = readFileSync(join(first, "APPEND_SYSTEM.md"), "utf8");
 
   const second = provisionPiAgentHome({ stateDir, role: "supervisor", sourceAgentDir: source });
 
@@ -186,6 +281,15 @@ test("provisioning is idempotent and re-synchronizes mcp.json on every call (v0.
   assert.equal(realpathSync(authLink), realpathSync(join(source, "auth.json")));
   assert.equal(lstatSync(authLink).ino, linkInoBefore, "an already-correct symlink is left untouched, never re-made or duplicated");
   assert.equal(readFileSync(join(second, "settings.json"), "utf8"), settingsBefore, "settings.json is byte-stable across calls");
+  assert.equal(readFileSync(join(second, "APPEND_SYSTEM.md"), "utf8"), appendBefore, "APPEND_SYSTEM.md is rewritten to the same bytes");
+  // The sweep retires the command links and they re-link to the same
+  // targets — one prompts, one skills, never duplicated (the readdir
+  // deepEqual above proves the exact entry set on every call).
+  for (const name of ["prompts", "skills"]) {
+    const link = join(second, name);
+    assert.ok(lstatSync(link).isSymbolicLink(), `${name} is re-linked as a symlink`);
+    assert.equal(realpathSync(link), realpathSync(join(source, name)), `${name} re-links to the same source target`);
+  }
 
   // Operator edits the global mcp.json — the next provision call propagates them.
   writeFileSync(
@@ -318,5 +422,9 @@ test("provisioning retires pre-isolation contamination left in the harness home 
 
   assert.equal(home, roleHome);
   assert.ok(!existsSync(join(roleHome, "skills")), "a leftover skills/ dir is retired");
-  assert.ok(!existsSync(join(roleHome, "APPEND_SYSTEM.md")), "a leftover APPEND_SYSTEM.md is retired");
+  assert.equal(
+    readFileSync(join(roleHome, "APPEND_SYSTEM.md"), "utf8"),
+    ROLE_PROMPTS.agent,
+    "a leftover operator APPEND_SYSTEM.md is replaced by the managed role contract (v0.0.20, ADR 0013)",
+  );
 });

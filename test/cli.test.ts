@@ -241,6 +241,60 @@ test("factory lead rotate: usage refusals, then the spool round trip names the r
   assert.match(refused.stderr, /no-lead: no live seat=lead agent/);
 });
 
+test("factory lead dispatch: usage refusals, then the spool round trip prints the queued mail's facts (v0.0.20)", async (t) => {
+  // Usage refusals fire before any submission.
+  const noTarget = await run(ownerCli, ["lead", "dispatch", "--message", "x"], {});
+  assert.equal(noTarget.status, 2);
+  assert.match(noTarget.stderr, /--project <slug> or --workspace <dir> is required/);
+  const noMessage = await run(ownerCli, ["lead", "dispatch", "--project", "demo-slug"], {});
+  assert.equal(noMessage.status, 2);
+  assert.match(noMessage.stderr, /--message/);
+
+  // The round trip: a real home, a spool with a dispatch handler wired the way
+  // index.server.ts wires it (the Lead-mailbox runtime's dispatchLead).
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const home = join(dir, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const factory = createFactory({ stateDir });
+  const dispatched: Record<string, unknown>[] = [];
+  const spool = startSpool(stateDir, factory, {
+    pollMs: 20,
+    leadDispatch: async (request) => {
+      dispatched.push({ ...request });
+      return {
+        id: request.id,
+        ok: true,
+        summary: "dispatched to the lead of demo-slug — agent=agent-lead-9 mail=mail-1 rotation=normal",
+        project: "demo-slug",
+        leadAgentId: "agent-lead-9",
+        mailId: "mail-1",
+        rotationState: "normal",
+      };
+    },
+  });
+  t.after(() => spool.stop());
+
+  const reply = await run(ownerCli, ["--home", home, "lead", "dispatch", "--project", "demo-slug", "--message", "Ship the roadmap", "--wait-secs", "10"], {});
+  assert.equal(reply.status, 0, reply.stderr);
+  assert.match(reply.stdout, /dispatched to the lead of demo-slug/);
+  assert.match(reply.stdout, /agent=agent-lead-9/);
+  assert.match(reply.stdout, /mail=mail-1/);
+  assert.match(reply.stdout, /rotation=normal/);
+  assert.equal(dispatched.length, 1);
+  assert.equal(dispatched[0]?.kind, "lead_dispatch");
+  assert.equal(dispatched[0]?.project, "demo-slug");
+  assert.equal(dispatched[0]?.message, "Ship the roadmap");
+  assert.equal("workspace" in (dispatched[0] ?? {}), false, "no workspace rode the slug form");
+  assert.equal("from" in (dispatched[0] ?? {}), false, "the CLI leaves `from` to the plugin's owner default");
+
+  // The one positional message rides in place of --message (the spec's "or one
+  // positional message" form).
+  const positional = await run(ownerCli, ["--home", home, "lead", "dispatch", "--project", "demo-slug", "Do the thing", "--wait-secs", "10"], {});
+  assert.equal(positional.status, 0, positional.stderr);
+  assert.equal(dispatched[1]?.message, "Do the thing");
+});
+
 test("factory-claim usage: --help exits 0, a missing --sha exits 2", async () => {
   const help = await run(claimCli, ["--help"], {});
   assert.equal(help.status, 0);
