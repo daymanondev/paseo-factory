@@ -115,3 +115,50 @@ test("the one FactoryShell still hosts all three entries — the fourth tab need
   const entries = read("plugin/client/factory/entries.tsx");
   assert.equal((entries.match(/<FactoryShell/g) ?? []).length, 3, "global screen, settings screen, and workspace panel all render the one shell");
 });
+
+// ---- the always-visible seat buttons + Lead telemetry (v0.0.20, ADR 0013 §6) ----------------
+
+test("the Header renders the Supervisor seat button whenever a Project is selected — Start when vacant, Open when live", () => {
+  const header = read("plugin/client/factory/header.tsx");
+  assert.match(header, /supervisorLive \? "Open Supervisor" : "Start Supervisor"/, "the label flips on the live seat (supervisorLive is view.supervisor !== null by shell construction)");
+  assert.match(header, /onPress=\{\(\) => actions\.openSupervisor\(""\)\}/, "both labels ride the existing ensure-then-open action");
+  assert.ok(
+    !header.includes("supervisorLive && view.supervisor !== null"),
+    "the old guard is gone — a brand-new Project (view.supervisor === null) still shows the header's seat action",
+  );
+});
+
+test("the Header renders the symmetric Lead seat button beside it, wiring the once-voided leadLive prop", () => {
+  const header = read("plugin/client/factory/header.tsx");
+  assert.match(header, /leadLive \? "Open Lead" : "Start Lead"/, "the label flips on the live seat (leadLive is view.lead !== null by shell construction)");
+  assert.match(header, /onPress=\{\(\) => actions\.openLead\(\)\}/, "the button rides the existing openLead action");
+  assert.ok(!header.includes("void leadLive;"), "the prop is wired, no longer voided");
+});
+
+test("the seat buttons live unconditionally inside the Project Scope Bar's action row — no live-seat condition wraps them", () => {
+  const header = read("plugin/client/factory/header.tsx");
+  assert.match(header, /\{project !== null \? \(\n\s*<View style=\{\{ flexDirection: "row", alignItems: "center", gap: SPACING\[1\.5\]/, "the pair renders as one row gated only on a selected Project");
+  assert.ok(!header.includes("? (\n            <Btn"), "no conditional hides a seat button behind a live seat");
+});
+
+test("the Lead card renders the 128k telemetry trio — usage pill, rotationState badge, queued mail count", () => {
+  const seats = read("plugin/client/factory/seats.tsx");
+  assert.match(
+    seats,
+    /label=\{`\$\{Math\.round\(agent\.contextUsedTokens \/ 1000\)\}k \/ 128k handoff`\}/,
+    "the usage pill renders <used>k against the fixed 128k handoff mark (e.g. 94k / 128k handoff)",
+  );
+  assert.match(seats, /agent\.contextUsedTokens !== undefined && agent\.contextUsedTokens !== null/, "the pill appears only when the daemon answered usage");
+  assert.match(seats, /label=\{agent\.rotationState\}/, "the rotationState badge renders the state itself");
+  assert.match(
+    seats,
+    /agent\.rotationState === "handing_over" \? "accent" : agent\.rotationState === "rotation_pending" \? "statusWarning" : "foregroundMuted"/,
+    "the badge's tone vocabulary — handing_over accent, rotation_pending warning, normal muted",
+  );
+  assert.match(
+    seats,
+    /label=\{`\$\{agent\.queuedMailCount\} queued`\}/,
+    "the queued-mail pill renders N queued",
+  );
+  assert.match(seats, /agent\.queuedMailCount !== undefined && agent\.queuedMailCount > 0/, "the queued pill appears only when mail actually waits");
+});

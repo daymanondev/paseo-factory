@@ -20,9 +20,11 @@
  */
 import { FactoryError } from "./core/errors.ts";
 import type { Factory } from "./core/factory.ts";
+import { readLeadMailbox } from "./core/mailbox.ts";
 import { loadLanes, parseLane, saveLanes } from "./core/lanes.ts";
-import { resolveProject } from "./core/project.ts";
+import { projectStateDir, readProjectRegistration, resolveProject } from "./core/project.ts";
 import type { ProjectResolution } from "./core/project.ts";
+import { join } from "node:path";
 import type { LandingResult } from "./core/workspace.ts";
 import { FACTORY_VIEW_VERSION } from "../shared/view.ts";
 import { foldRetro, foldTasks, foldView, readTailed } from "./view.ts";
@@ -251,6 +253,34 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     return contract.workspace === root || contract.workspace.startsWith(`${root}/`);
   };
 
+  /**
+   * The Lead telemetry join (v0.0.20, ADR 0013 §6): the Lead's own labels
+   * name its Project, so its card's facts fold in here — the live
+   * context-window pair from the daemon's `lastUsage` (null when it reports
+   * none), the durable `rotationState` from `project.json` (unset when
+   * unrecorded — absent reads as "normal"), and the queued count from the
+   * Project's `mailbox.jsonl` fold (0 when no mailbox exists yet; a damaged
+   * one renders no count, never a failed snapshot). Non-Lead agents — and a
+   * Lead the daemon lists without its project label — leave all four unset.
+   */
+  const leadTelemetryOf = (
+    agent: SurfaceAgentSnapshot,
+  ): Pick<AgentView, "contextUsedTokens" | "contextMaxTokens" | "rotationState" | "queuedMailCount"> => {
+    if (agent.labels.seat !== "lead" || agent.labels.project === undefined) return {};
+    const tokens = {
+      contextUsedTokens: agent.lastUsage?.contextWindowUsedTokens ?? null,
+      contextMaxTokens: agent.lastUsage?.contextWindowMaxTokens ?? null,
+    };
+    let queued: number;
+    try {
+      queued = readLeadMailbox(join(projectStateDir(deps.stateDir, agent.labels.project), "mailbox.jsonl")).queued.length;
+    } catch {
+      return tokens; // an unreadable mailbox is not a snapshot failure — the count stays unset
+    }
+    const rotationState = readProjectRegistration(deps.stateDir, agent.labels.project)?.rotationState;
+    return { ...tokens, queuedMailCount: queued, ...(rotationState === undefined ? {} : { rotationState }) };
+  };
+
   /** One agent → AgentView, with the Timeline Oracle seqEnd when the daemon answers. */
   const agentViewOf = async (daemon: SurfaceDaemonApi, agent: SurfaceAgentSnapshot, task: string | null): Promise<AgentView> => {
     let seqEnd: number | null = null;
@@ -271,6 +301,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       seat: agent.labels.seat ?? null,
       task,
       seqEnd,
+      ...leadTelemetryOf(agent),
       requiresAttention: agent.requiresAttention,
       cwd: agent.cwd,
     };

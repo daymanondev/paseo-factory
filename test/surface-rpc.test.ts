@@ -25,6 +25,7 @@ import { factoryEnvFor, injectRoleOnCreate, injectSessionEnv, renderAgentContrac
 import type { AgentCreateRequest } from "../plugin/server/roles.ts";
 import { discoverProjects, readProjectRegistration, writeProjectRegistration } from "../plugin/server/projects.ts";
 import { lanesPath, loadLanes, saveLanes } from "../src/lanes.ts";
+import { deliverLeadMail, enqueueLeadMail } from "../src/mailbox.ts";
 import { disposeDir, fakeCopilotRunner, gitCommitAll, makeTempDir, writeLanes } from "./helpers.ts";
 
 /**
@@ -48,6 +49,8 @@ interface FakeAgent {
   requiresAttention?: boolean;
   seqEnd?: number;
   cwd?: string;
+  /** The live usage slice the 128k Lead sensor reads (ticket 07's SurfaceAgentSnapshot extension). */
+  lastUsage?: { contextWindowUsedTokens?: number; contextWindowMaxTokens?: number } | null;
 }
 
 function fakeDaemon(agents: FakeAgent[]) {
@@ -81,6 +84,7 @@ function fakeDaemon(agents: FakeAgent[]) {
               attentionReason: null,
               updatedAt: "2026-10-15T00:00:00.000Z",
               cwd: agent.cwd ?? "/tmp",
+              ...(agent.lastUsage === undefined ? {} : { lastUsage: agent.lastUsage }),
             },
           })),
           pageInfo: {},
@@ -787,6 +791,68 @@ test("snapshot: a projectRoot scopes lanes, seats, and tasks to the Project and 
   const degraded = await handlers.snapshot({ projectRoot: outside });
   assert.ok(degraded.ok);
   assert.equal(degraded.view.project, null, "a non-repo scope renders the global view");
+});
+
+// ---- the Lead telemetry join (v0.0.20, ADR 0013 §6, ticket 08) ------------------------------
+
+test("snapshot: the Lead view carries the 128k telemetry — lastUsage tokens, project.json rotationState, and the mailbox fold's queued count; other seats leave all four unset", async (t) => {
+  const project = makeProject(t, "lead-telemetry");
+  const { stateDir, handlers } = makeSurface(t, [
+    { id: "agent-sup-t", labels: { seat: "supervisor", project: project.slug }, cwd: project.root },
+    {
+      id: "agent-lead-t",
+      labels: { seat: "lead", project: project.slug },
+      cwd: project.root,
+      lastUsage: { contextWindowUsedTokens: 94_400, contextWindowMaxTokens: 200_000 },
+    },
+  ]);
+  writeProjectRegistration(stateDir, project.slug, { root: project.root, lead: "agent-lead-t", rotationState: "rotation_pending" });
+  // The mailbox seed: three queued, one of them delivered — the count folds
+  // the present (2 queued), never the history (3 events).
+  const mailbox = join(stateDir, "projects", project.slug, "mailbox.jsonl");
+  const first = enqueueLeadMail(mailbox, { from: "supervisor", kind: "directive", text: "Ship the roadmap." });
+  enqueueLeadMail(mailbox, { from: "peer", kind: "verdict", task: "T1", text: "T1 is green." });
+  enqueueLeadMail(mailbox, { from: "owner", kind: "directive", text: "One more." });
+  deliverLeadMail(mailbox, { mailIds: [first.mailId], toAgentId: "agent-lead-t" });
+
+  const snap = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  assert.ok(snap.view.lead !== null && snap.view.lead.id === "agent-lead-t", "the Project's Lead rides the snapshot");
+  const lead = snap.view.lead!;
+  assert.equal(lead.contextUsedTokens, 94_400, "the live lastUsage used-tokens ride the Lead view");
+  assert.equal(lead.contextMaxTokens, 200_000, "the live lastUsage max-tokens ride the Lead view");
+  assert.equal(lead.rotationState, "rotation_pending", "project.json's rotationState rides the Lead view");
+  assert.equal(lead.queuedMailCount, 2, "the mailbox fold's queued count rides the Lead view — a delivered item no longer counts");
+
+  // Non-Lead agents leave all four unset — the telemetry is the Lead's alone.
+  assert.ok(snap.view.supervisor !== null && snap.view.supervisor.id === "agent-sup-t");
+  const supervisor = snap.view.supervisor!;
+  assert.equal(supervisor.contextUsedTokens, undefined, "a non-Lead seat leaves the token pair unset");
+  assert.equal(supervisor.contextMaxTokens, undefined);
+  assert.equal(supervisor.rotationState, undefined);
+  assert.equal(supervisor.queuedMailCount, undefined);
+  for (const agent of snap.view.agents) {
+    if (agent.id === "agent-lead-t") continue;
+    assert.equal(agent.contextUsedTokens, undefined, `agent ${agent.id} carries no Lead telemetry`);
+    assert.equal(agent.contextMaxTokens, undefined);
+    assert.equal(agent.rotationState, undefined);
+    assert.equal(agent.queuedMailCount, undefined);
+  }
+});
+
+test("snapshot: a Lead with no usage, no rotation on record, and no mailbox degrades honestly — null tokens, no rotationState, zero queued", async (t) => {
+  const project = makeProject(t, "lead-telemetry-bare");
+  const { handlers } = makeSurface(t, [
+    // No lastUsage from the daemon, no project.json, no mailbox.jsonl on disk.
+    { id: "agent-lead-bare", labels: { seat: "lead", project: project.slug }, cwd: project.root },
+  ]);
+  const snap = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  const lead = snap.view.lead!;
+  assert.equal(lead.contextUsedTokens, null, "no lastUsage → null, never a fabricated number");
+  assert.equal(lead.contextMaxTokens, null);
+  assert.equal(lead.rotationState, undefined, "no rotationState on record → the key stays unset (absent reads as normal)");
+  assert.equal(lead.queuedMailCount, 0, "no mailbox yet → zero queued, still a number the card can trust");
 });
 
 // ---- Ratify via Supervisor (v0.0.14, ADR 0010 §6) -------------------------------------------
