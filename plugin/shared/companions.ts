@@ -11,7 +11,7 @@
  * identically on user and developer machines, macOS and Windows alike.
  */
 export interface CompanionCatalogEntry {
-  id: "factory-burn-lab" | "factory-connector";
+  id: "factory-burn-lab" | "factory-connector" | "factory-release-lab";
   title: string;
   tagline: string;
   description: string;
@@ -44,5 +44,21 @@ export const COMPANION_CATALOG: readonly CompanionCatalogEntry[] = [
     sidebarLabel: "Fleet Connector",
     sidebarIcon: "Network",
     capabilities: ["Tailscale Fleet Surface", "1-Click Handoff", "Cooperative Burst", "Git Mirror & Ref Sync"],
+  },
+  {
+    id: "factory-release-lab",
+    title: "Release Lab",
+    tagline: "The sequential iOS & Android store-ops and release workflow lab.",
+    description:
+      "An agent-managed 7-phase iOS (App Store Connect) and Android (Google Play) release workflow engine with Day-0 bootstrap, signing & Firebase SHA hygiene, Screenshot Studio, and idempotent IAP reconciliation.",
+    canonicalSource: "git:daymanondev/factory-release-lab:plugin",
+    sidebarLabel: "Release Lab",
+    sidebarIcon: "Rocket",
+    capabilities: [
+      "7-Phase Release Pipeline",
+      "ASC & Google Play IAP Sync",
+      "Signing & Firebase SHA Bridge",
+      "Screenshot Studio",
+    ],
   },
 ];
