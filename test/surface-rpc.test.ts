@@ -1176,11 +1176,18 @@ test("roles: session_open re-carries PI_CODING_AGENT_DIR and keeps the harness h
   assert.ok(agentSession !== undefined);
   assert.equal(agentSession.env.PI_CODING_AGENT_DIR, join(stateDir, "pi-agent", "agent"));
 
-  // The operator's prompt contamination never lands in a harness home.
+  // The operator's prompt contamination never lands in a harness home; the
+  // supervisor home's APPEND_SYSTEM.md is the MANAGED role contract
+  // (v0.0.20, ADR 0013), never the operator's — and this fake home seeds no
+  // prompts/ or skills/, so supervisor keeps both stripped here.
   const roleHome = join(stateDir, "pi-agent", "supervisor");
-  for (const forbidden of ["APPEND_SYSTEM.md", "SYSTEM.md", "extensions", "prompts", "skills"]) {
+  for (const forbidden of ["SYSTEM.md", "extensions", "prompts", "skills"]) {
     assert.ok(!existsSync(join(roleHome, forbidden)), `${forbidden} never lands in the harness home`);
   }
+  assert.ok(
+    !readFileSync(join(roleHome, "APPEND_SYSTEM.md"), "utf8").includes("Auto-Delegation"),
+    "the operator's APPEND_SYSTEM.md content never lands in the harness home",
+  );
   // Shared state — auth, custom models, sessions — symlinks back to the FAKE
   // source home; the provisioner's sessions ensure landed inside that fake
   // only, never the real ~/.pi/agent (the seed deliberately omits sessions/).
