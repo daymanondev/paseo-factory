@@ -130,6 +130,9 @@ function makeSpooledSurface(t: TestContext, agents: FakeAgent[] = []) {
   // The retire path's cancel half rides the CLI in production — recorded and
   // ok here, so the 128k handoff tests never spawn a real paseo process.
   const stopped: string[] = [];
+  // The two Lead-mailbox doors the surface defers to (index.server.ts's
+  // mutual late binding, mirrored): the rotation settle fires on every Lead
+  // retire, the dispatch door is the UI's quick-dispatch RPC.
   const surface = createSurfaceHandlers({
     factory,
     stateDir,
@@ -139,6 +142,8 @@ function makeSpooledSurface(t: TestContext, agents: FakeAgent[] = []) {
       stopped.push(agentId);
       return { ok: true };
     },
+    onLeadRetired: (input) => leadMail.settleLeadRotation(input.slug),
+    leadDispatch: (request) => leadMail.dispatchLead(request),
   });
   const leadMail = createLeadMailRuntime({
     factory,
@@ -693,6 +698,113 @@ test("a failed Lead turn requeues its in-flight batch with the outcome kind as t
   assert.equal(events[2]?.reason, "failed");
   assert.equal(events.filter((evt) => evt.type === "mail_acked").length, 0, "a failed turn never acks");
   assert.equal(fake.sent.length, 2, "the batch was pitched again after the requeue");
+});
+
+// ---- the rotation settle (ADR 0013 Decision 3's last arm — lead-rotated) ------------------
+
+test("a manual lead rotate requeues the un-acked in-flight delivery with reason lead-rotated — delayed to the next Lead, never stranded", async (t) => {
+  const lead: FakeAgent = { id: "agent-lead-1", title: "Lead (paseo-factory)", status: "idle", labels: {} };
+  const { stateDir, slug, projectRoot, surface, fake, stopped } = makeSpooledSurface(t, [lead]);
+  lead.labels = { seat: "lead", project: slug };
+
+  // The delivery goes live to the idle Lead (an un-acked inFlight batch), then
+  // the Owner rotates the seat mid-flight — the manual door, off the lane.
+  dropRequest(spoolRootFor(stateDir), { id: "man-1", kind: "lead_dispatch", project: slug, message: "Mid-flight directive" });
+  await until(() => {
+    assert.deepEqual(readMailbox(stateDir, slug).map((evt) => evt.type), ["mail_queued", "mail_delivered"], "the directive delivered to the idle Lead");
+  });
+
+  const rotated = await surface.leadRotate({ projectRoot });
+  assert.ok(rotated.ok, "the manual rotate retired the seat");
+  assert.ok(stopped.includes("agent-lead-1"), "the retire sequence cancelled the outgoing Lead first");
+
+  // The rotation settle: a retired Lead can never ack, so the un-acked batch
+  // returned to queued as exactly one mail_requeued (reason lead-rotated).
+  let events = readMailbox(stateDir, slug);
+  assert.deepEqual(
+    events.map((evt) => evt.type),
+    ["mail_queued", "mail_delivered", "mail_requeued"],
+  );
+  assert.equal(events[2]?.reason, "lead-rotated");
+  assert.equal(events[2]?.deliveryId, events[1]?.deliveryId, "the requeue settles the live delivery");
+  assert.deepEqual(events[2]?.mailIds, events[1]?.mailIds, "the requeue returns the whole batch");
+
+  // Delayed, not lost: the next dispatch auto-ensures a fresh Lead and the
+  // held directive rides the same delivery as the new one.
+  dropRequest(spoolRootFor(stateDir), { id: "man-2", kind: "lead_dispatch", project: slug, message: "After the rotation" });
+  await until(() => {
+    assert.equal(readReply(spoolRootFor(stateDir), "man-2").ok, true);
+  });
+  assert.equal(readReply(spoolRootFor(stateDir), "man-2").leadAgentId, "agent-created-1", "the dispatch ensured the fresh Lead");
+  events = readMailbox(stateDir, slug);
+  const second = events.findLast((evt) => evt.type === "mail_delivered");
+  assert.equal(second?.toAgentId, "agent-created-1", "the fresh Lead received the batch");
+  assert.equal(fake.created.length, 1, "the rotation's successor is the one created Lead");
+  const requeuedIds = events[2]?.mailIds as string[] | undefined;
+  const carried = second?.mailIds as string[] | undefined;
+  assert.ok(
+    requeuedIds !== undefined && carried !== undefined && requeuedIds.every((id) => carried.includes(id)),
+    "the requeued directive rode the new delivery — zero mail lost",
+  );
+  assert.equal(fake.sent.filter((entry) => entry.agentId === "agent-created-1").length, 1, "one prompt carried the batch");
+});
+
+// ---- the single-writer lane around the dispatch's ensure (the module's own claim) ----------
+
+test("two concurrent lead_dispatch requests serialize on the Project lane — one Lead seat, one consolidated delivery", async (t) => {
+  const { stateDir, slug, leadMail, fake } = makeSpooledSurface(t);
+
+  const [first, second] = await Promise.all([
+    leadMail.dispatchLead({ id: "conc-1", kind: "lead_dispatch", project: slug, message: "first directive" }),
+    leadMail.dispatchLead({ id: "conc-2", kind: "lead_dispatch", project: slug, message: "second directive" }),
+  ]);
+
+  assert.ok(first.ok && second.ok, "both dispatches replied ok");
+  assert.equal(fake.created.length, 1, "the lane serialized the ensures — exactly one Lead seat was created");
+  assert.equal(first.leadAgentId, second.leadAgentId, "both dispatches name the same Lead");
+
+  const events = readMailbox(stateDir, slug);
+  assert.equal(events.filter((evt) => evt.type === "mail_queued").length, 2, "both directives queued");
+  const deliveries = events.filter((evt) => evt.type === "mail_delivered");
+  assert.equal(deliveries.length, 1, "one consolidated delivery carried the batch");
+  assert.equal((deliveries[0]?.mailIds as string[] | undefined)?.length, 2);
+  assert.equal(fake.sent.length, 1, "one prompt pitched the whole batch");
+});
+
+// ---- the UI quick-dispatch door (ADR 0013 Decision 4's third internal caller) --------------
+
+test("the surface's leadDispatch RPC rides the same mailbox pipeline as the spool — and refuses by name without the runtime", async (t) => {
+  const { stateDir, slug, projectRoot, surface, fake, dir } = makeSpooledSurface(t);
+
+  const reply = await surface.leadDispatch({ projectRoot, message: "From the UI" });
+  assert.ok(reply.ok, "the UI dispatch replied ok");
+  if (reply.ok) {
+    assert.equal(reply.project, slug);
+    assert.equal(reply.leadAgentId, "agent-created-1", "the pipeline auto-ensured the Lead");
+    assert.equal(reply.rotationState, "normal");
+    assert.equal(typeof reply.mailId, "string");
+    assert.ok(reply.summary.includes(slug), "the summary names the Project");
+  }
+
+  // The same enqueueLeadMail + pumpProjectLead facts the spool's door shows.
+  assert.deepEqual(
+    readMailbox(stateDir, slug).map((evt) => evt.type),
+    ["mail_queued", "mail_delivered"],
+  );
+  assert.equal(fake.sent.length, 1);
+  assert.ok(fake.sent[0]?.text.includes("From the UI"));
+
+  // A surface built without the runtime door refuses by name (the spool's
+  // lead-dispatch-unavailable precedent), never a silent pass.
+  const bare = createSurfaceHandlers({
+    factory: createFactory({ stateDir: join(dir, "bare-state") }),
+    stateDir: join(dir, "bare-state"),
+    home: dir,
+    daemon: fake.daemon,
+  });
+  const refused = await bare.leadDispatch({ projectRoot, message: "x" });
+  assert.ok(!refused.ok);
+  assert.equal(refused.code, "lead-dispatch-unavailable");
 });
 
 /** The last send's text — a tiny accessor so a missing steer fails with a message, not a TypeError. */

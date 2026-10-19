@@ -39,7 +39,12 @@
  *     delivery when the wave's last outcome closes it;
  *   - `startupRecovery` — run the core's recovery helper with
  *     `reason: "daemon-restart"` for every registered Project, so an un-acked
- *     delivery from a crashed lifetime returns to `queued` (zero mail lost).
+ *     delivery from a crashed lifetime returns to `queued` (zero mail lost);
+ *   - `settleLeadRotation` — the same recovery with `reason: "lead-rotated"`
+ *     for one Project, fired by the surface's `retireSeat` through its
+ *     `onLeadRetired` door the moment a Lead is archived, so a manual rotate
+ *     racing a live delivery returns the batch to `queued` instead of
+ *     stranding it `inFlight` until the next plugin restart.
  */
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -199,6 +204,14 @@ export interface LeadMailRuntime {
    */
   onLeadTurnEnded(input: LeadTurnEndedInput): Promise<void>;
   startupRecovery(): void;
+  /**
+   * The rotation settle (ADR 0013 Decision 3's last arm): requeue any
+   * un-acked in-flight delivery of one Project's mailbox as `mail_requeued`
+   * (`reason: "lead-rotated"`) — the surface's `retireSeat` fires it through
+   * its `onLeadRetired` door after a Lead is archived, so a manual rotate
+   * racing a live delivery never strands the batch `inFlight`. Idempotent.
+   */
+  settleLeadRotation(slug: string): void;
 }
 
 /** What the `agent.turn_ended` wiring hands the machine — the SDK event reduced to plain data. */
@@ -496,19 +509,31 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     } else {
       return { id: request.id, ok: false, code: "unknown-project", message: "lead dispatch needs a target — pass --project <slug> or --workspace <dir>" };
     }
-    // The auto-ensure: the Project's Lead seat exists before any mail lands.
-    const ensured = await deps.ensureLead({ projectRoot: root });
-    if (!ensured.ok) return { id: request.id, ok: false, code: ensured.code, message: ensured.error };
-    // The directive lands as one queued mail, then the lane pumps it.
-    const { mailId } = await enqueueLeadMail(slug, { from: request.from ?? "owner", kind: "directive", text: request.message });
+    // The auto-ensure and the queue land as ONE lane job — the single-writer
+    // law this module's header claims: two concurrent dispatches serialize,
+    // so the second sees the first's Lead and never double-creates the seat,
+    // and a dispatch racing a handoff completion queues behind it (the
+    // machine's own ensure calls already run inside their lane).
+    const laneOutcome = await projectLane(
+      slug,
+      async (): Promise<{ ok: true; agentId: string; mailId: string } | { ok: false; code: string; error: string }> => {
+        const ensured = await deps.ensureLead({ projectRoot: root });
+        if (!ensured.ok) return ensured;
+        const queued = appendMailQueued(mailboxPath(slug), { from: request.from ?? "owner", kind: "directive", text: request.message });
+        return { ok: true, agentId: ensured.agentId, mailId: queued.mailId };
+      },
+    );
+    if (!laneOutcome.ok) return { id: request.id, ok: false, code: laneOutcome.code, message: laneOutcome.error };
+    const { agentId, mailId } = laneOutcome;
+    // The directive is queued — the lane pumps it.
     await pumpProjectLead(slug);
     const rotationState = readRotationState(slug);
     return {
       id: request.id,
       ok: true,
-      summary: `dispatched to the lead of ${slug} — agent=${ensured.agentId} mail=${mailId} rotation=${rotationState}`,
+      summary: `dispatched to the lead of ${slug} — agent=${agentId} mail=${mailId} rotation=${rotationState}`,
       project: slug,
-      leadAgentId: ensured.agentId,
+      leadAgentId: agentId,
       mailId,
       rotationState,
     };
@@ -555,7 +580,26 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     }
   };
 
-  return { dispatchLead, notifyPeer, enqueueLeadMail, pumpProjectLead, onLeadTurnEnded, startupRecovery };
+  /**
+   * The rotation settle (ADR 0013 Decision 3's last arm, wired through the
+   * surface's `onLeadRetired` door): a Lead retired while a delivery is live
+   * can never receive its turn-end ack, so any un-acked `inFlight` batch
+   * returns to `queued` as one `mail_requeued` (`reason: "lead-rotated"`).
+   * Synchronous by the core's own read-then-append law — every append is one
+   * atomic read-then-write on the single JS thread, so the settle is safe
+   * from any caller (the surface's off-lane rotate doors and the handoff's
+   * in-lane retireLead alike; the handoff arm is a no-op by construction —
+   * `settleTurnAndRotate` settles before `completeHandoff` retires).
+   * Idempotent: a settled mailbox appends nothing.
+   */
+  const settleLeadRotation = (slug: string): void => {
+    const settled = recoverLeadMailbox(mailboxPath(slug), "lead-rotated");
+    for (const event of settled) {
+      log(`lead-mailbox: rotation of ${slug} requeued ${event.mailIds.length} item(s) — the un-acked delivery returns to queued (lead-rotated)`);
+    }
+  };
+
+  return { dispatchLead, notifyPeer, enqueueLeadMail, pumpProjectLead, onLeadTurnEnded, startupRecovery, settleLeadRotation };
 }
 
 // ---- the handoff renderers (ADR 0013 §5 — fixed prose, machine-verified payload) ------------

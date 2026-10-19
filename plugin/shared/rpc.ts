@@ -127,6 +127,35 @@ export const leadRotate = defineRpc({
   output: z.union([z.object({ ok: z.literal(true), agentId: z.string() }), Failure]),
 });
 
+// The UI's quick dispatch (v0.0.20, ADR 0013 §4): the third internal caller
+// of the in-process `enqueueLeadMail()` pipeline — the same door the spool's
+// `lead_dispatch` rides (auto-ensure the Lead seat, queue the directive in
+// `<projectStateDir>/mailbox.jsonl`, pump the per-Project lane), reached
+// from the Factory surface instead of the CLI.
+export const leadDispatch = defineRpc({
+  name: "factory.lead.dispatch",
+  input: z.object({
+    /** The Project scope — any directory inside its repository (the seat bridges' law). */
+    projectRoot: z.string().optional(),
+    /** The registered Project slug — the registry door when no root is at hand. */
+    project: z.string().optional(),
+    /** Whose act the mail records — the UI's two seats (peers ride the hook, never dispatch). */
+    from: z.enum(["supervisor", "owner"]).optional(),
+    message: z.string().min(1),
+  }),
+  output: z.union([
+    z.object({
+      ok: z.literal(true),
+      project: z.string(),
+      leadAgentId: z.string(),
+      mailId: z.string(),
+      rotationState: z.string(),
+      summary: z.string(),
+    }),
+    Failure,
+  ]),
+});
+
 // Ratify via Supervisor (v0.0.14, ADR 0010 §6): dispatch one Retro proposal
 // to the Project's Supervisor to apply to <project-root>/AGENTS.md,
 // CONTEXT.md, or Gate config — the two-tier memory loop's Owner act.

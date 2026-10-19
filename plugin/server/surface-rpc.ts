@@ -18,6 +18,7 @@
  * daemon acts the in-process API lacks (a live agent's model sync,
  * cancelling a running agent) ride the CLI bridge in daemon-cli.ts.
  */
+import { randomUUID } from "node:crypto";
 import { FactoryError } from "./core/errors.ts";
 import type { Factory } from "./core/factory.ts";
 import { readLeadMailbox } from "./core/mailbox.ts";
@@ -37,9 +38,11 @@ import { discoverProjects, writeProjectRegistration } from "./projects.ts";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { COMPANION_CATALOG } from "../shared/companions.ts";
 import type { CompanionCatalogEntry } from "../shared/companions.ts";
+import type { SpoolLeadDispatchRequest, SpoolReply } from "./spool.ts";
 import {
   accept,
   lanesSet,
+  leadDispatch,
   leadEnsure,
   leadRotate,
   pluginsInstall,
@@ -146,6 +149,24 @@ export interface SurfaceDeps {
   listPlugins?: typeof listDaemonPlugins;
   installPlugin?: typeof installDaemonPlugin;
   managePlugin?: typeof manageDaemonPlugin;
+  /**
+   * The Lead-mailbox rotation settle (v0.0.20, ADR 0013 §4's last arm):
+   * `retireSeat` fires it right after a Project's Lead is archived, so any
+   * un-acked in-flight delivery of that Project's `mailbox.jsonl` returns to
+   * `queued` as `mail_requeued` (`reason: "lead-rotated"`) — the
+   * Lead-mailbox runtime's `settleLeadRotation` is the implementation. A
+   * thrown settle is logged, never a failed rotation (startup recovery
+   * remains the net).
+   */
+  onLeadRetired?: (input: { slug: string; agentId: string }) => void;
+  /**
+   * The UI's quick-dispatch door (v0.0.20, ADR 0013 §4): the `leadDispatch`
+   * handler routes through the Lead-mailbox runtime's `dispatchLead` — the
+   * same `enqueueLeadMail` + `pumpProjectLead` pipeline the spool's
+   * `lead_dispatch` rides. Without it the RPC refuses by name (the spool's
+   * `lead-dispatch-unavailable` precedent).
+   */
+  leadDispatch?: (request: SpoolLeadDispatchRequest) => Promise<SpoolReply>;
   onLog?: (message: string) => void;
 }
 
@@ -501,6 +522,19 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     if (projectSlug !== undefined && projectRoot !== undefined) {
       writeProjectRegistration(deps.stateDir, projectSlug, { root: projectRoot, ...(seat === "lead" ? { lead: null } : { supervisor: null }) });
     }
+    // The Lead's mailbox settle (v0.0.20, ADR 0013 §4's last arm): a retired
+    // Lead can never ack its live delivery, so the un-acked batch returns to
+    // `queued` (`mail_requeued`, reason "lead-rotated") the moment the seat
+    // archives — a manual rotate racing a live delivery delays the mail to
+    // the next Lead, never strands it. The automatic handoff arm rides this
+    // same door as a no-op (its turn boundary settles first).
+    if (seat === "lead" && projectSlug !== undefined) {
+      try {
+        deps.onLeadRetired?.({ slug: projectSlug, agentId: agent.id });
+      } catch (err) {
+        log(`lead: the rotation's mailbox settle of ${projectSlug} failed — startup recovery remains the net (${messageOf(err)})`);
+      }
+    }
     log(`${seat}: retired ${agent.id} (cancelled + archived)`);
     return { ok: true as const, agentId: agent.id };
   };
@@ -748,6 +782,44 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       return retireSeat("lead", project.slug, project.root, context);
     },
 
+    /**
+     * The UI's quick dispatch (v0.0.20, ADR 0013 §4): routes through the
+     * Lead-mailbox runtime's `dispatchLead` — auto-ensure the Lead seat,
+     * `enqueueLeadMail`, `pumpProjectLead` — the same pipeline the spool's
+     * `lead_dispatch` rides, never a bare `agents.ref().send`.
+     */
+    async leadDispatch(
+      input: { projectRoot?: string; project?: string; from?: "supervisor" | "owner"; message: string },
+      _context?: SurfaceCallContext,
+    ): Promise<
+      | { ok: true; project: string; leadAgentId: string; mailId: string; rotationState: string; summary: string }
+      | { ok: false; code: string; error: string }
+    > {
+      if (deps.leadDispatch === undefined) {
+        return failure("lead-dispatch-unavailable", "the Lead-mailbox runtime is not wired into this surface — dispatch through `factory lead dispatch` instead");
+      }
+      // The request mirrors the spool's shape: a root resolves as `workspace`
+      // (resolveProject), a slug rides `project` (the registry).
+      const request: SpoolLeadDispatchRequest = {
+        id: `surface-${randomUUID()}`,
+        kind: "lead_dispatch",
+        ...(input.projectRoot === undefined ? {} : { workspace: input.projectRoot }),
+        ...(input.project === undefined ? {} : { project: input.project }),
+        ...(input.from === undefined ? {} : { from: input.from }),
+        message: input.message,
+      };
+      const reply = await deps.leadDispatch(request);
+      if (!reply.ok) return { ok: false as const, code: reply.code ?? "lead-dispatch-failed", error: reply.message ?? "the dispatch failed" };
+      return {
+        ok: true as const,
+        project: reply.project ?? "",
+        leadAgentId: reply.leadAgentId ?? "",
+        mailId: reply.mailId ?? "",
+        rotationState: reply.rotationState ?? "normal",
+        summary: reply.summary,
+      };
+    },
+
     async ratifyProposal(input: { projectRoot: string; day: string; proposalId: number }, context?: SurfaceCallContext) {
       const project = projectOrRefusal(input.projectRoot);
       if (!project.ok) return project;
@@ -863,6 +935,7 @@ export function registerSurfaceRpc(server: PluginServerContext, handlers: Surfac
   server.handle(supervisorRevoke, (input, context) => handlers.supervisorRevoke(input, { paseo: context.paseo }));
   server.handle(leadEnsure, (input, context) => handlers.leadEnsure(input, { paseo: context.paseo }));
   server.handle(leadRotate, (input, context) => handlers.leadRotate(input, { paseo: context.paseo }));
+  server.handle(leadDispatch, (input, context) => handlers.leadDispatch(input, { paseo: context.paseo }));
   server.handle(ratifyProposal, (input, context) => handlers.ratifyProposal(input, { paseo: context.paseo }));
   server.handle(pluginsInstall, (input, context) => handlers.pluginsInstall(input, { paseo: context.paseo }));
   server.handle(pluginsManage, (input, context) => handlers.pluginsManage(input, { paseo: context.paseo }));
