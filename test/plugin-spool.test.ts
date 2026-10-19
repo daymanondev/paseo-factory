@@ -6,12 +6,13 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { join } from "node:path";
 import { createFactory } from "../plugin/server/core/factory.ts";
 import { resolveProject } from "../plugin/server/core/project.ts";
+import { taskWorktreePath } from "../plugin/server/core/workspace.ts";
 import { projectStateDir } from "../src/index.ts";
-import { writeProjectRegistration } from "../plugin/server/projects.ts";
+import { readProjectRegistration, writeProjectRegistration } from "../plugin/server/projects.ts";
 import { createSurfaceHandlers } from "../plugin/server/surface-rpc.ts";
-import type { SurfaceDaemonApi } from "../plugin/server/surface-rpc.ts";
+import type { SurfaceAgentSnapshot, SurfaceDaemonApi } from "../plugin/server/surface-rpc.ts";
 import { handleSpoolRequest, parseSpoolRequest, spoolRootFor, startSpool } from "../plugin/server/spool.ts";
-import { createLeadMailRuntime } from "../plugin/server/lead-mailbox.ts";
+import { createLeadMailRuntime, LEAD_ROTATE_TOKENS, readLeadContextTokens } from "../plugin/server/lead-mailbox.ts";
 import { deliverLeadMail as coreDeliver, enqueueLeadMail as coreEnqueue } from "../src/index.ts";
 import { disposeDir, gitCommitAll, makeTempDir } from "./helpers.ts";
 
@@ -40,6 +41,10 @@ interface FakeAgent {
   labels?: Record<string, string>;
   requiresAttention?: boolean;
   cwd?: string;
+  /** The live usage slice the 128k sensor reads (ticket 07) — absent on agents the daemon reports no usage for. */
+  lastUsage?: { contextWindowUsedTokens?: number; contextWindowMaxTokens?: number } | null;
+  /** The persistence slice naming the Pi session `.jsonl` (ticket 07's fallback sensor). */
+  persistence?: { nativeHandle?: string } | null;
 }
 
 function fakeDaemon(agents: FakeAgent[]) {
@@ -71,6 +76,8 @@ function fakeDaemon(agents: FakeAgent[]) {
               attentionReason: null,
               updatedAt: "2026-10-15T00:00:00.000Z",
               cwd: agent.cwd ?? "/tmp",
+              ...(agent.lastUsage === undefined ? {} : { lastUsage: agent.lastUsage }),
+              ...(agent.persistence === undefined ? {} : { persistence: agent.persistence }),
             },
           })),
         };
@@ -120,12 +127,25 @@ function makeSpooledSurface(t: TestContext, agents: FakeAgent[] = []) {
   // writes this in production) — the slug form of dispatch resolves through it.
   writeProjectRegistration(stateDir, resolved.slug, { root: projectRoot });
   const fake = fakeDaemon(agents);
-  const surface = createSurfaceHandlers({ factory, stateDir, home, daemon: fake.daemon });
+  // The retire path's cancel half rides the CLI in production — recorded and
+  // ok here, so the 128k handoff tests never spawn a real paseo process.
+  const stopped: string[] = [];
+  const surface = createSurfaceHandlers({
+    factory,
+    stateDir,
+    home,
+    daemon: fake.daemon,
+    stopAgent: async (agentId) => {
+      stopped.push(agentId);
+      return { ok: true };
+    },
+  });
   const leadMail = createLeadMailRuntime({
     factory,
     stateDir,
     daemon: fake.daemon,
     ensureLead: (input) => surface.leadEnsure(input),
+    retireLead: (input) => surface.leadRotate(input),
   });
   const spool = startSpool(stateDir, factory, {
     pollMs: POLL_MS,
@@ -133,7 +153,7 @@ function makeSpooledSurface(t: TestContext, agents: FakeAgent[] = []) {
     peerMail: leadMail.notifyPeer,
   });
   t.after(() => spool.stop());
-  return { dir, home, stateDir, slug, projectRoot, factory, surface, leadMail, spool, fake };
+  return { dir, home, stateDir, slug, projectRoot, factory, surface, leadMail, spool, fake, stopped };
 }
 
 /** The CLI half's write pattern: tmp file + rename, so the plugin never reads a half-written request. */
@@ -411,3 +431,272 @@ test("startup recovery requeues an un-acked delivery for every registered Projec
   assert.equal(events[2]?.reason, "daemon-restart");
   assert.deepEqual(events[2]?.mailIds, [queued.mailId]);
 });
+
+// ---- the 128k rotation state machine (v0.0.20, ADR 0013 §5 — ticket 07) --------------------
+
+test("LEAD_ROTATE_TOKENS is the fixed 128,000 and the rotation fields ride the registry's merge-by-field law", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+
+  // The threshold is a constant, never a per-model formula (spec §Out of Scope).
+  assert.equal(LEAD_ROTATE_TOKENS, 128_000);
+
+  // A bare registration carries no rotation state — absent reads as "normal".
+  writeProjectRegistration(stateDir, "demo-a1b2c3", { root: "/w/demo" });
+  assert.equal(readProjectRegistration(stateDir, "demo-a1b2c3")?.rotationState, undefined);
+  assert.equal(readProjectRegistration(stateDir, "demo-a1b2c3")?.handoffRequestedAt, undefined);
+
+  // A value sets; `undefined` preserves (the seats' precedent); null clears.
+  writeProjectRegistration(stateDir, "demo-a1b2c3", { root: "/w/demo", rotationState: "rotation_pending" });
+  assert.equal(readProjectRegistration(stateDir, "demo-a1b2c3")?.rotationState, "rotation_pending");
+  writeProjectRegistration(stateDir, "demo-a1b2c3", { root: "/w/demo" });
+  assert.equal(readProjectRegistration(stateDir, "demo-a1b2c3")?.rotationState, "rotation_pending", "undefined preserves the field");
+  writeProjectRegistration(stateDir, "demo-a1b2c3", { root: "/w/demo", rotationState: "handing_over", handoffRequestedAt: "2026-10-19T00:00:00.000Z" });
+  const locked = readProjectRegistration(stateDir, "demo-a1b2c3");
+  assert.equal(locked?.rotationState, "handing_over");
+  assert.equal(locked?.handoffRequestedAt, "2026-10-19T00:00:00.000Z");
+  writeProjectRegistration(stateDir, "demo-a1b2c3", { root: "/w/demo", rotationState: "normal", handoffRequestedAt: null });
+  const reset = readProjectRegistration(stateDir, "demo-a1b2c3");
+  assert.equal(reset?.rotationState, "normal");
+  assert.equal(reset?.handoffRequestedAt, undefined, "null cleared the timestamp");
+
+  // A value that is not one of the three states is ignored, never trusted.
+  writeFileSync(join(stateDir, "projects", "demo-a1b2c3", "project.json"), `${JSON.stringify({ root: "/w/demo", rotationState: "bogus" })}\n`);
+  assert.equal(readProjectRegistration(stateDir, "demo-a1b2c3")?.rotationState, undefined);
+});
+
+test("readLeadContextTokens prefers the daemon's lastUsage and falls back to the Pi session .jsonl", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const snapshotOf = (overrides: Partial<Pick<SurfaceAgentSnapshot, "lastUsage" | "persistence">>): SurfaceAgentSnapshot => ({
+    id: "agent-lead-1",
+    provider: "pi/zai/glm-5.3",
+    title: null,
+    status: "idle",
+    model: null,
+    labels: {},
+    archivedAt: null,
+    requiresAttention: false,
+    attentionReason: null,
+    updatedAt: "2026-10-19T00:00:00.000Z",
+    cwd: "/tmp",
+    ...overrides,
+  });
+
+  // Primary: the live daemon snapshot's lastUsage (0 LLM tokens, no 4th role).
+  assert.deepEqual(
+    readLeadContextTokens(snapshotOf({ lastUsage: { contextWindowUsedTokens: 135_000, contextWindowMaxTokens: 200_000 } })),
+    { usedTokens: 135_000, maxTokens: 200_000, source: "daemon" },
+  );
+
+  // Fallback: after a daemon restart lastUsage is gone — the LAST assistant
+  // message carrying usage answers, skipping later lines without one, summed
+  // as input + output + cacheRead + cacheWrite.
+  const session = join(dir, "session.jsonl");
+  writeFileSync(
+    session,
+    [
+      JSON.stringify({ type: "message", message: { role: "user", text: "go" } }),
+      JSON.stringify({ type: "message", message: { role: "assistant", text: "wip", usage: { input: 10, output: 5, cacheRead: 2, cacheWrite: 1 } } }),
+      JSON.stringify({ type: "message", message: { role: "assistant", text: "the last word", usage: { input: 1000, output: 2000, cacheRead: 3000, cacheWrite: 4000 } } }),
+      JSON.stringify({ type: "message", message: { role: "assistant", text: "no usage on me" } }),
+    ].join("\n") + "\n",
+  );
+  assert.deepEqual(readLeadContextTokens(snapshotOf({ persistence: { nativeHandle: session } })), {
+    usedTokens: 10_000,
+    maxTokens: null,
+    source: "session-file",
+  });
+
+  // totalTokens, when the session records it, wins over the component sum.
+  const sessionTotal = join(dir, "session-total.jsonl");
+  writeFileSync(sessionTotal, `${JSON.stringify({ message: { role: "assistant", usage: { totalTokens: 42, input: 1, output: 1 } } })}\n`);
+  assert.deepEqual(readLeadContextTokens(snapshotOf({ persistence: { nativeHandle: sessionTotal } })), {
+    usedTokens: 42,
+    maxTokens: null,
+    source: "session-file",
+  });
+
+  // Nothing to read anywhere is a null, never a guess.
+  assert.deepEqual(readLeadContextTokens(snapshotOf({})), { usedTokens: null, maxTokens: null, source: "daemon" });
+});
+
+test("crossing 128k mid-turn marks rotation_pending without interrupting the running Lead", async (t) => {
+  const lead: FakeAgent = {
+    id: "agent-lead-1",
+    title: "Lead (paseo-factory)",
+    status: "running",
+    labels: {},
+    lastUsage: { contextWindowUsedTokens: 135_000, contextWindowMaxTokens: 200_000 },
+  };
+  const { stateDir, slug, fake } = makeSpooledSurface(t, [lead]);
+  lead.labels = { seat: "lead", project: slug };
+
+  dropRequest(spoolRootFor(stateDir), { id: "rot-1", kind: "lead_dispatch", project: slug, message: "While I am running" });
+  await until(() => {
+    assert.equal(readReply(spoolRootFor(stateDir), "rot-1").ok, true);
+  });
+  const reply = readReply(spoolRootFor(stateDir), "rot-1");
+
+  // The pump observed the running Lead at 135k → rotation_pending, persisted
+  // to project.json (the durable record), and the turn kept running.
+  assert.equal(reply.rotationState, "rotation_pending", "the dispatch reply reports the pending rotation");
+  assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "rotation_pending");
+  assert.equal(lead.status, "running", "the active turn was never interrupted (§User Story 16)");
+  assert.equal(fake.sent.length, 0, "nothing was pitched at the running Lead");
+  assert.deepEqual(readMailbox(stateDir, slug).map((evt) => evt.type), ["mail_queued"], "the mail stays queued");
+});
+
+test("a turn ending at >= 128k acks its batch, locks handing_over, holds arriving mail, and steers the extraction prompt — then handoff completion rotates the Lead end to end", async (t) => {
+  const lead: FakeAgent = {
+    id: "agent-lead-1",
+    title: "Lead (paseo-factory)",
+    status: "idle",
+    labels: {},
+    lastUsage: { contextWindowUsedTokens: 50_000, contextWindowMaxTokens: 200_000 },
+  };
+  const worker: FakeAgent = { id: "agent-worker-1", status: "running" };
+  const { stateDir, slug, projectRoot, factory, surface, leadMail, fake, stopped } = makeSpooledSurface(t, [lead, worker]);
+  lead.labels = { seat: "lead", project: slug };
+  const spoolRoot = spoolRootFor(stateDir);
+
+  // The registry binding the turn boundary resolves the Lead by: the ensure
+  // path writes it (bare — no message, so no delivery of its own).
+  const seated = await surface.leadEnsure({ projectRoot });
+  assert.ok(seated.ok && seated.agentId === "agent-lead-1", "the seeded Lead is the registered one");
+
+  // The Project's world the successor's roster must preserve: one contracted,
+  // dispatched (worktree), claimed task bound to a live worker. The claim's
+  // verdict lands as peer mail and — Lead idle, rotation normal — delivers.
+  // (The contract's workspace rides git's resolved toplevel, the form the
+  // registration's root binding and the roster's scoping compare against.)
+  const resolvedRoot = resolveProject(projectRoot);
+  assert.ok(resolvedRoot.ok);
+  factory.setContract({ task: "T1", workspace: resolvedRoot.ok ? resolvedRoot.root : projectRoot, gate: "true", artifact: "README.md" });
+  const sha = execSync("git rev-parse HEAD", { cwd: projectRoot, encoding: "utf8" }).trim();
+  dropRequest(spoolRoot, { id: "rot-spawn", kind: "spawn", task: "T1", provider: "pi/zai/glm-5.3", arity: 1, worktree: taskWorktreePath(stateDir, slug, "T1") });
+  await until(() => {
+    assert.equal(readReply(spoolRoot, "rot-spawn").ok, true);
+  });
+  dropRequest(spoolRoot, { id: "rot-claim", kind: "claim", task: "T1", sha, agent: "agent-worker-1" });
+  await until(() => {
+    assert.equal(readReply(spoolRoot, "rot-claim").ok, true);
+  });
+  await until(() => {
+    assert.deepEqual(
+      readMailbox(stateDir, slug).map((evt) => evt.type),
+      ["mail_queued", "mail_delivered"],
+      "the verdict mail delivered to the idle Lead",
+    );
+  });
+
+  // (1)+(3): the work turn ends — the Lead crossed 128k during it (the
+  // snapshot now reads 135k). The batch acks, the mailbox locks handing_over,
+  // and the one bounded extraction prompt goes out.
+  lead.lastUsage = { contextWindowUsedTokens: 135_000, contextWindowMaxTokens: 200_000 };
+  await leadMail.onLeadTurnEnded({ agentId: "agent-lead-1", outcome: { kind: "completed" }, timeline: [] });
+  let events = readMailbox(stateDir, slug);
+  assert.deepEqual(
+    events.map((evt) => evt.type),
+    ["mail_queued", "mail_delivered", "mail_acked"],
+  );
+  assert.equal(events[2]?.byAgentId, "agent-lead-1");
+  const locked = readProjectRegistration(stateDir, slug);
+  assert.equal(locked?.rotationState, "handing_over");
+  assert.ok(typeof locked?.handoffRequestedAt === "string" && locked.handoffRequestedAt !== "", "the lock stamps handoffRequestedAt");
+  const steer = fake.sent.at(-1);
+  assert.ok(steerText(steer).includes(join(projectStateDir(stateDir, slug), "lead-handoff.md")), "the extraction prompt names lead-handoff.md");
+  for (const section of ["Goal & Remaining Roadmap", "Uncontracted Next Tasks", "Key Technical Findings", "Open Questions", "Read-First Files"]) {
+    assert.ok(steerText(steer).includes(section), `the extraction prompt names the section "${section}"`);
+  }
+  assert.ok(steerText(steer).includes("Start no new tasks"), "the extraction prompt bounds the turn");
+
+  // Mail arriving under handing_over is held as mail_queued — never delivered.
+  dropRequest(spoolRoot, { id: "rot-3", kind: "lead_dispatch", project: slug, message: "Held through the handoff" });
+  await until(() => {
+    assert.equal(readReply(spoolRoot, "rot-3").ok, true);
+  });
+  events = readMailbox(stateDir, slug);
+  assert.equal(events.at(-1)?.type, "mail_queued", "arriving mail is held under handing_over (§User Story 18)");
+  assert.equal(fake.sent.length, 2, "the held mail was not delivered — only the verdict delivery and the extraction steer went out");
+
+  // (2): the extraction turn completes, its assistant text becoming the
+  // handoff file — the full archive → successor → reset → drain sequence.
+  await leadMail.onLeadTurnEnded({
+    agentId: "agent-lead-1",
+    outcome: { kind: "completed" },
+    timeline: [
+      { type: "user_message", text: "extract your handoff" },
+      { type: "assistant_message", text: "# Handoff\nGoal: ship the roadmap." },
+    ],
+  });
+
+  // The fallback write: the turn's assistant text became lead-handoff.md.
+  const handoffPath = join(projectStateDir(stateDir, slug), "lead-handoff.md");
+  assert.equal(readFileSync(handoffPath, "utf8"), "# Handoff\nGoal: ship the roadmap.");
+
+  // The outgoing Lead was cancelled (best-effort) and archived; the successor
+  // is the one live seat=lead agent, and the registry names it.
+  assert.ok(stopped.includes("agent-lead-1"), "the retire sequence cancelled the outgoing Lead first");
+  const liveLeads = await fake.daemon.agents.list({ filter: { labels: { seat: "lead", project: slug }, includeArchived: false } });
+  assert.equal(fake.created.length, 1, "the successor Lead was created");
+  const successorId = "agent-created-1";
+  assert.equal(liveLeads.entries.length, 1, "the archived Lead is gone");
+  assert.equal(liveLeads.entries[0]?.agent.id, successorId);
+  assert.equal(readProjectRegistration(stateDir, slug)?.lead, successorId);
+
+  // The successor's kickoff carries the three layers: roster (task ↔ agentId ↔
+  // worktree), the ledger digest, and the handoff text.
+  const kickoff = fake.sent.find((entry) => entry.agentId === successorId && entry.text.includes("Lead handoff"));
+  assert.ok(kickoff, "the successor received the kickoff");
+  assert.ok(kickoff.text.includes("T1"), "the roster names the task");
+  assert.ok(kickoff.text.includes("agent-worker-1"), "the roster names the bound agent");
+  assert.ok(kickoff.text.includes(taskWorktreePath(stateDir, slug, "T1")), "the roster names the Task worktree");
+  assert.ok(kickoff.text.includes("factory/T1"), "the roster names the branch");
+  assert.ok(kickoff.text.includes("Ledger State Digest"), "the kickoff carries the ledger digest");
+  assert.ok(kickoff.text.includes("# Handoff\nGoal: ship the roadmap."), "the kickoff carries the handoff text");
+
+  // Reset + drain: rotation is normal again and the held batch reached the successor.
+  assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "normal");
+  events = readMailbox(stateDir, slug);
+  const lastDelivery = events.findLast((evt) => evt.type === "mail_delivered");
+  assert.equal(lastDelivery?.toAgentId, successorId, "the held batch drained into the successor (§User Story 20)");
+  assert.deepEqual(lastDelivery?.mailIds, [events.find((evt) => evt.type === "mail_queued" && evt.text === "Held through the handoff")?.mailId]);
+});
+
+test("a failed Lead turn requeues its in-flight batch with the outcome kind as the reason", async (t) => {
+  const lead: FakeAgent = {
+    id: "agent-lead-1",
+    title: "Lead (paseo-factory)",
+    status: "idle",
+    labels: {},
+    lastUsage: { contextWindowUsedTokens: 50_000, contextWindowMaxTokens: 200_000 },
+  };
+  const { stateDir, slug, leadMail, fake } = makeSpooledSurface(t, [lead]);
+  lead.labels = { seat: "lead", project: slug };
+
+  dropRequest(spoolRootFor(stateDir), { id: "rot-4", kind: "lead_dispatch", project: slug, message: "This turn will fail" });
+  await until(() => {
+    assert.equal(readReply(spoolRootFor(stateDir), "rot-4").ok, true);
+  });
+
+  await leadMail.onLeadTurnEnded({ agentId: "agent-lead-1", outcome: { kind: "failed", error: { message: "boom" } }, timeline: [] });
+
+  // The failed turn requeued its batch; under threshold and normal again, the
+  // same turn boundary drained it straight back — zero mail lost.
+  const events = readMailbox(stateDir, slug);
+  assert.deepEqual(
+    events.map((evt) => evt.type),
+    ["mail_queued", "mail_delivered", "mail_requeued", "mail_delivered"],
+  );
+  assert.equal(events[2]?.reason, "failed");
+  assert.equal(events.filter((evt) => evt.type === "mail_acked").length, 0, "a failed turn never acks");
+  assert.equal(fake.sent.length, 2, "the batch was pitched again after the requeue");
+});
+
+/** The last send's text — a tiny accessor so a missing steer fails with a message, not a TypeError. */
+function steerText(sent: { agentId: string; text: string } | undefined): string {
+  assert.ok(sent !== undefined, "a prompt was sent");
+  return sent.text;
+}
