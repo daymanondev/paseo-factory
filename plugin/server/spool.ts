@@ -127,6 +127,25 @@ export interface LeadRotateRequest {
 }
 
 /**
+ * The Lead dispatch (v0.0.20, ADR 0013 §4): `factory lead dispatch` drops one
+ * of these and the plugin — the single writer of `<projectStateDir>/
+ * mailbox.jsonl` — resolves the target Project (`workspace` through
+ * resolveProject, `project` slug through the registry), auto-ensures the
+ * Project's Lead seat, appends one `mail_queued`, and pumps the serialized
+ * per-Project lane. The ok reply carries the dispatch facts (`project`,
+ * `leadAgentId`, `mailId`, `rotationState`) so the caller never needs a raw
+ * Paseo agentId.
+ */
+export interface SpoolLeadDispatchRequest {
+  id: string;
+  kind: "lead_dispatch";
+  project?: string;
+  workspace?: string;
+  from?: "supervisor" | "owner";
+  message: string;
+}
+
+/**
  * The Lead's one automatic Respawn per progress marker (v0.0.12, ADR 0008):
  * when an Agent dies (`Substrate death`), the driver asks the plugin — the
  * one writer — whether it may replace the dead Agent, and only creates the
@@ -230,6 +249,7 @@ export type SpoolRequest =
   | AcceptRequest
   | AskRequest
   | LeadRotateRequest
+  | SpoolLeadDispatchRequest
   | SpawnRequest
   | RespawnRequest
   | MeterRequest
@@ -242,6 +262,19 @@ export type AskHandler = (request: AskRequest) => SpoolReply;
 
 /** Rotates a Project's Lead — the surface handlers' `leadRotate` is the implementation. */
 export type LeadRotateHandler = (request: LeadRotateRequest) => Promise<SpoolReply>;
+
+/** Dispatches a directive into a Project's Lead mailbox — the Lead-mailbox runtime's `dispatchLead` is the implementation (v0.0.20). */
+export type LeadDispatchHandler = (request: SpoolLeadDispatchRequest) => Promise<SpoolReply>;
+
+/**
+ * Notifies a Project's Lead mailbox that a Peer's task reached a terminal
+ * outcome (v0.0.20, ADR 0013 §4, last bullet) — the Lead-mailbox runtime's
+ * `notifyPeer` is the implementation. Appends `mail_queued`
+ * (`from: "peer"`) on the owning Project's lane, held while a Driver wave is
+ * in flight and flushed when the wave finishes; never rejects (a notification
+ * failure must not break the verdict's own reply).
+ */
+export type PeerMailHook = (input: { task: string; kind: "verdict" | "needs_human"; text: string }) => Promise<void>;
 
 export type SpoolReply =
   | {
@@ -265,6 +298,15 @@ export type SpoolReply =
       event?: LedgerEvent;
       /** Lead-rotate replies: the agent the rotation cancelled + archived. */
       agentId?: string;
+      /**
+       * Lead-dispatch replies (v0.0.20): the Project the mail landed in, the
+       * ensured Lead's agent id, the queued mail's id, and the Project's
+       * rotation state at dispatch time (absent on disk reads as "normal").
+       */
+      project?: string;
+      leadAgentId?: string;
+      mailId?: string;
+      rotationState?: string;
     }
   | { id: string; ok: false; code: string; message: string; event?: LedgerEvent };
 
@@ -360,6 +402,24 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     if (typeof req.projectRoot !== "string" || req.projectRoot.trim() === "") return undefined;
     return { id: req.id, kind: "lead_rotate", projectRoot: req.projectRoot };
   }
+  if (req.kind === "lead_dispatch") {
+    // The v0.0.20 dispatch: the message is the payload (never blank); the
+    // target Project rides either form — a registry slug or a workspace
+    // directory — and only the Owner-side seats may name themselves `from`
+    // (peer mail rides the spool's own hook, never this field).
+    if (typeof req.message !== "string" || req.message.trim() === "") return undefined;
+    if (req.project !== undefined && (typeof req.project !== "string" || req.project.trim() === "")) return undefined;
+    if (req.workspace !== undefined && (typeof req.workspace !== "string" || req.workspace.trim() === "")) return undefined;
+    if (req.from !== undefined && req.from !== "supervisor" && req.from !== "owner") return undefined;
+    return {
+      id: req.id,
+      kind: "lead_dispatch",
+      ...(req.project === undefined ? {} : { project: req.project }),
+      ...(req.workspace === undefined ? {} : { workspace: req.workspace }),
+      ...(req.from === undefined ? {} : { from: req.from }),
+      message: req.message,
+    };
+  }
   if (req.kind === "retro") {
     // The Retro carries nothing but its kind — whole-ledger always. The
     // strict shape is the point: any extra field makes it not-a-retro.
@@ -424,6 +484,8 @@ export async function handleSpoolRequest(
   request: SpoolRequest,
   askHandler?: AskHandler,
   leadRotateHandler?: LeadRotateHandler,
+  leadDispatchHandler?: LeadDispatchHandler,
+  peerMailHook?: PeerMailHook,
 ): Promise<SpoolReply> {
   try {
     if (request.kind === "contract") {
@@ -452,6 +514,16 @@ export async function handleSpoolRequest(
         task: request.task,
         sha: request.sha,
         ...(request.agent === undefined ? {} : { agent: request.agent }),
+      });
+      // The peer hook (v0.0.20, ADR 0013 §4): a verdict is a terminal Task
+      // outcome the Project's Lead must hear — the hook appends `mail_queued`
+      // (`from: "peer"`) on the owning Project's lane, held while a Driver
+      // wave is in flight. It never rejects; a notification failure must not
+      // break the verdict's own reply.
+      await peerMailHook?.({
+        task: request.task,
+        kind: "verdict",
+        text: `Task ${request.task} attempt ${outcome.attempt} ended ${outcome.verdict.toUpperCase()}${outcome.gate.note === "" ? "" : ` — note: ${outcome.gate.note}`}`,
       });
       return {
         id: request.id,
@@ -487,6 +559,21 @@ export async function handleSpoolRequest(
         };
       }
       return await leadRotateHandler(request);
+    }
+    if (request.kind === "lead_dispatch") {
+      // The Lead dispatch (v0.0.20): delegated to the Lead-mailbox runtime —
+      // the single writer of mailbox.jsonl — the same way the rotation is
+      // delegated to the surface handlers. Without the runtime the request is
+      // refused loudly, never silently queued nowhere.
+      if (leadDispatchHandler === undefined) {
+        return {
+          id: request.id,
+          ok: false,
+          code: "lead-dispatch-unavailable",
+          message: "this daemon's factory plugin does not dispatch Lead mail — update the plugin to v0.0.20+",
+        };
+      }
+      return await leadDispatchHandler(request);
     }
     if (request.kind === "spawn") {
       // The driver's arrival (v0.0.5): one ledger line either way, then the
@@ -568,6 +655,14 @@ export async function handleSpoolRequest(
           : "attempt" in event.evidence
             ? `attempt ${event.evidence.attempt}, gate seq ${event.evidence.gate}`
             : `spawn seq ${event.evidence.spawn}, respawn seq ${event.evidence.respawn}`;
+      // The peer hook (v0.0.20): a needs-human recording is a terminal Task
+      // state the Project's Lead must hear — same lane, same hold law as the
+      // verdict hook above.
+      await peerMailHook?.({
+        task: request.task,
+        kind: "needs_human",
+        text: `Task ${request.task} needs a human: ${event.reason} (${detail})`,
+      });
       return {
         id: request.id,
         ok: true,
@@ -623,6 +718,10 @@ export interface SpoolOptions {
   ask?: AskHandler;
   /** The Lead-rotation handler (v0.0.14); without it `lead_rotate` requests are refused. */
   leadRotate?: LeadRotateHandler;
+  /** The Lead-dispatch handler (v0.0.20); without it `lead_dispatch` requests are refused. */
+  leadDispatch?: LeadDispatchHandler;
+  /** The peer-outcome notifier (v0.0.20) — verdicts and needs_human recordings land as Lead mail. */
+  peerMail?: PeerMailHook;
 }
 
 export interface Spool {
@@ -661,7 +760,7 @@ export function startSpool(stateDir: string, factory: Factory, options: SpoolOpt
         continue;
       }
       inFlight.add(id);
-      void handleRequestFile(id, requestPath, replyPath, join(processedDir, name), factory, log, options.ask, options.leadRotate)
+      void handleRequestFile(id, requestPath, replyPath, join(processedDir, name), factory, log, options.ask, options.leadRotate, options.leadDispatch, options.peerMail)
         .catch(() => {})
         .finally(() => inFlight.delete(id));
     }
@@ -685,6 +784,8 @@ async function handleRequestFile(
   log: (message: string) => void,
   askHandler?: AskHandler,
   leadRotateHandler?: LeadRotateHandler,
+  leadDispatchHandler?: LeadDispatchHandler,
+  peerMailHook?: PeerMailHook,
 ): Promise<void> {
   let reply: SpoolReply;
   let request: SpoolRequest | undefined;
@@ -697,7 +798,7 @@ async function handleRequestFile(
     reply = { id, ok: false, code: "bad-request", message: `request file ${requestPath} is not a valid spool request` };
     log(`request ${id}: REJECTED — malformed`);
   } else {
-    reply = await handleSpoolRequest(factory, request, askHandler, leadRotateHandler);
+    reply = await handleSpoolRequest(factory, request, askHandler, leadRotateHandler, leadDispatchHandler, peerMailHook);
     // The v0.0.9 stamps make the two Owner acts attributable in the log too —
     // the same visibility the claim line always had.
     const stamp = request.kind === "contract" || request.kind === "accept" ? ` by ${request.submitter}` : "";
