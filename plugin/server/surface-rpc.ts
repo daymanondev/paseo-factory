@@ -67,6 +67,16 @@ export interface SurfaceAgentSnapshot {
   attentionReason: string | null;
   updatedAt: string;
   cwd: string;
+  /**
+   * The live usage slice the 128k Lead sensor reads (v0.0.20, ADR 0013 §5) —
+   * the SDK's `AgentUsage` subset, present when the daemon reports usage.
+   */
+  lastUsage?: { contextWindowUsedTokens?: number; contextWindowMaxTokens?: number } | null;
+  /**
+   * The persistence slice naming the provider-native session handle — the Pi
+   * `.jsonl` fallback's path across daemon restarts (v0.0.20, ADR 0013 §5).
+   */
+  persistence?: { nativeHandle?: string } | null;
 }
 
 /**

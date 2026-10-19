@@ -107,19 +107,31 @@ export default function contribute(server: PluginServerContext) {
     onLog: log,
   };
   const surface = createSurfaceHandlers(surfaceDeps);
-  // The Lead mailbox runtime (v0.0.20, ADR 0013 §4): the single writer around
-  // each Project's mailbox.jsonl. Its seat door is the surface's leadEnsure
-  // (the spec's ensureProjectSeat("lead")); its daemon is the same captured
-  // PaseoApi the handlers fall back to. Startup recovery first — any delivery
-  // a crashed lifetime left un-acked returns to queued before new mail moves.
+  // The Lead mailbox runtime (v0.0.20, ADR 0013 §4–§5): the single writer
+  // around each Project's mailbox.jsonl. Its seat doors are the surface's
+  // leadEnsure (the spec's ensureProjectSeat("lead")) and leadRotate (the
+  // handoff's retire sequence); its daemon is the same captured PaseoApi the
+  // handlers fall back to. Startup recovery first — any delivery a crashed
+  // lifetime left un-acked returns to queued before new mail moves.
   const leadMail = createLeadMailRuntime({
     factory,
     stateDir,
     daemon: () => paseoApi as never,
     ensureLead: (input) => surface.leadEnsure(input),
+    retireLead: (input) => surface.leadRotate(input),
     onLog: log,
   });
   leadMail.startupRecovery();
+  // The turn boundary (v0.0.20, ADR 0013 §5): every `agent.turn_ended` hands
+  // the Lead-mailbox runtime the event — it settles the in-flight batch
+  // (`mail_acked` on completed, `mail_requeued` otherwise) and drives the 128k
+  // rotation state machine (lock → extraction → archive → successor → drain)
+  // for the Project whose registered Lead ended the turn. Non-Lead turns are
+  // ignored inside the runtime.
+  const offTurnEnded = server.on("agent.turn_ended", (event, context) => {
+    capturePaseo(context);
+    void leadMail.onLeadTurnEnded({ agentId: event.agent.id, outcome: event.outcome, timeline: event.timeline });
+  });
   const spool = startSpool(stateDir, factory, {
     onLog: log,
     ask: choke.spoolAskHandler,
@@ -157,6 +169,7 @@ export default function contribute(server: PluginServerContext) {
     offPermissionAsked();
     offAgentCreate();
     offSessionOpen();
+    offTurnEnded();
     gitBlocks.stop();
     spool.stop();
     log(`down v${SHELL_VERSION}`);

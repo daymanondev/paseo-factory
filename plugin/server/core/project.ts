@@ -82,13 +82,29 @@ export function projectStateDir(stateDir: string, projectSlug: string): string {
  * guess.
  */
 
+/**
+ * The Lead rotation state machine's three states (v0.0.20, ADR 0013 §5):
+ * `normal` — the mailbox drains per ticket 06; `rotation_pending` — the Lead
+ * crossed `LEAD_ROTATE_TOKENS` mid-turn and the boundary waits; `handing_over`
+ * — the mailbox is locked (arriving mail holds as `mail_queued`) while the
+ * outgoing Lead runs its one Handoff Extraction turn and the successor spawns.
+ * The state lives in `project.json` — absent reads as `normal`.
+ */
+export type LeadRotationState = "normal" | "rotation_pending" | "handing_over";
+
 /** One project's registry entry — the root binding plus the seat agent ids, when seats live. */
 export interface ProjectRegistration {
   slug: string;
   root: string;
   supervisor?: string;
   lead?: string;
+  /** The Lead rotation state's durable record (v0.0.20, ADR 0013 §5) — absent reads as "normal". */
+  rotationState?: LeadRotationState;
+  /** When the current handoff was requested (ISO 8601) — stamped entering "handing_over", cleared on reset. */
+  handoffRequestedAt?: string;
 }
+
+const LEAD_ROTATION_STATES: readonly string[] = ["normal", "rotation_pending", "handing_over"];
 
 /** Reads `<stateDir>/projects/<slug>/project.json` — undefined when the project has no registry yet. */
 export function readProjectRegistration(stateDir: string, slug: string): ProjectRegistration | undefined {
@@ -102,6 +118,10 @@ export function readProjectRegistration(stateDir: string, slug: string): Project
       root: parsed.root,
       ...(typeof parsed.supervisor === "string" && parsed.supervisor !== "" ? { supervisor: parsed.supervisor } : {}),
       ...(typeof parsed.lead === "string" && parsed.lead !== "" ? { lead: parsed.lead } : {}),
+      ...(typeof parsed.rotationState === "string" && LEAD_ROTATION_STATES.includes(parsed.rotationState)
+        ? { rotationState: parsed.rotationState as LeadRotationState }
+        : {}),
+      ...(typeof parsed.handoffRequestedAt === "string" && parsed.handoffRequestedAt !== "" ? { handoffRequestedAt: parsed.handoffRequestedAt } : {}),
     };
   } catch {
     return undefined; // a corrupt file is ignored, not trusted
@@ -115,15 +135,32 @@ function registrationPath(stateDir: string, slug: string): string {
 /**
  * Writes/updates one project's registration — merge by field: a string sets
  * the seat id, `null` clears it (the rotate/revoke paths), `undefined`
- * leaves it alone. The root binding is always rewritten.
+ * leaves it alone. The root binding is always rewritten. The rotation fields
+ * (v0.0.20, ADR 0013 §5) follow the same law: a value sets the state (or
+ * stamps `handoffRequestedAt`), `null` clears, `undefined` preserves — so
+ * `project.json` is the durable rotation-state record.
  */
-export function writeProjectRegistration(stateDir: string, slug: string, patch: { root: string; supervisor?: string | null; lead?: string | null }): void {
+export function writeProjectRegistration(
+  stateDir: string,
+  slug: string,
+  patch: {
+    root: string;
+    supervisor?: string | null;
+    lead?: string | null;
+    rotationState?: LeadRotationState | null;
+    handoffRequestedAt?: string | null;
+  },
+): void {
   const prior = readProjectRegistration(stateDir, slug);
   const supervisor = patch.supervisor === null ? undefined : patch.supervisor ?? prior?.supervisor;
   const lead = patch.lead === null ? undefined : patch.lead ?? prior?.lead;
+  const rotationState = patch.rotationState === null ? undefined : patch.rotationState ?? prior?.rotationState;
+  const handoffRequestedAt = patch.handoffRequestedAt === null ? undefined : patch.handoffRequestedAt ?? prior?.handoffRequestedAt;
   const record: Record<string, string> = { root: patch.root };
   if (supervisor !== undefined) record.supervisor = supervisor;
   if (lead !== undefined) record.lead = lead;
+  if (rotationState !== undefined) record.rotationState = rotationState;
+  if (handoffRequestedAt !== undefined) record.handoffRequestedAt = handoffRequestedAt;
   mkdirSync(projectStateDir(stateDir, slug), { recursive: true });
   writeFileSync(registrationPath(stateDir, slug), `${JSON.stringify(record, null, 2)}\n`);
 }
