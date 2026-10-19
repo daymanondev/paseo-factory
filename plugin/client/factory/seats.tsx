@@ -599,6 +599,24 @@ function AgentCard({
         ) : null}
         {agent.task !== null ? <Pill theme={theme} label={`task ${agent.task}`} tone="accent" lit /> : null}
         {agent.seqEnd !== null ? <Pill theme={theme} label={`seqEnd ${agent.seqEnd}`} mono /> : null}
+        {/* The Lead telemetry trio (v0.0.20, ADR 0013 §6): live context usage
+            against the fixed 128k handoff mark, the rotation state, and the
+            queued mailbox count — present only on the Lead's view, so every
+            other seat's card simply skips them. */}
+        {agent.contextUsedTokens !== undefined && agent.contextUsedTokens !== null ? (
+          <Pill theme={theme} label={`${Math.round(agent.contextUsedTokens / 1000)}k / 128k handoff`} mono />
+        ) : null}
+        {agent.rotationState !== undefined ? (
+          <Pill
+            theme={theme}
+            label={agent.rotationState}
+            tone={agent.rotationState === "handing_over" ? "accent" : agent.rotationState === "rotation_pending" ? "statusWarning" : "foregroundMuted"}
+            lit={agent.rotationState !== "normal"}
+          />
+        ) : null}
+        {agent.queuedMailCount !== undefined && agent.queuedMailCount > 0 ? (
+          <Pill theme={theme} label={`${agent.queuedMailCount} queued`} tone="accent" lit />
+        ) : null}
       </View>
     </Card>
   );
