@@ -68,6 +68,8 @@ export {
 export type { LaneCliInvocation, LaneCliRunner, LaneName, Lanes, LanesResult, ParsedLane } from "./lanes.ts";
 export { provisionPiAgentHome } from "./pi-home.ts";
 export type { PiAgentRole, ProvisionPiHomeOptions } from "./pi-home.ts";
+export { ensureFactorySkill, factorySkillPath, renderFactorySkill } from "./skill.ts";
+export type { FactorySkillInput } from "./skill.ts";
 export { ackLeadMail, deliverLeadMail, enqueueLeadMail, foldLeadMailboxEvents, readLeadMailbox, recoverLeadMailbox, requeueLeadMail } from "./mailbox.ts";
 export type { LeadMailFrom, LeadMailKind, LeadMailboxEvent, LeadMailItem, LeadMailboxState } from "./mailbox.ts";
 export {
