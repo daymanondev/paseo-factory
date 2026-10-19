@@ -9,10 +9,15 @@
  *
  * Pure Node like every `src/` module: the plugin shell vendors the verbatim
  * copy into `plugin/server/core/` (the `./core/project.ts` precedent) and
- * reconciles the file at boot — idempotent, rewritten only when the rendered
- * content changes (the `ensureClaimCli` wrapper law), so a plugin update
- * refreshes the skill and an Operator edit is deliberately reconciled back
- * (the file is plugin-managed, the `APPEND_SYSTEM.md` precedent).
+ * reconciles the file at boot through `ensureFactorySkillSafe` — idempotent,
+ * rewritten only when the rendered content changes (the `ensureClaimCli`
+ * wrapper law), so a plugin update refreshes the skill and an Operator edit
+ * is deliberately reconciled back (the file is plugin-managed, the
+ * `APPEND_SYSTEM.md` precedent). One failure law above all: unlike the
+ * stateDir writes, `~/.agents` is not a precondition the plugin depends on,
+ * so a skill that cannot be written is a WARNING, never a boot failure —
+ * the raw `ensureFactorySkill` keeps the throwing contract for callers that
+ * want errors; only the safe door ever runs at boot.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -73,8 +78,10 @@ export function renderFactorySkill(input: FactorySkillInput): string {
 
 /**
  * Materializes (idempotently) the skill at `factorySkillPath(agentsSkillsDir)`
- * and returns that path — the boot-time reconcile: written when absent or
- * when the rendered content changed, untouched otherwise.
+ * and returns that path — the raw reconcile: written when absent or when the
+ * rendered content changed, untouched otherwise. THROWS on an unusable skills
+ * root (unwritable, unreadable, a non-directory in the way) — the caller owns
+ * the failure policy; the plugin's boot uses `ensureFactorySkillSafe`.
  */
 export function ensureFactorySkill(agentsSkillsDir: string, input: FactorySkillInput): string {
   const path = factorySkillPath(agentsSkillsDir);
@@ -83,4 +90,27 @@ export function ensureFactorySkill(agentsSkillsDir: string, input: FactorySkillI
   if (existsSync(path) && readFileSync(path, "utf8") === content) return path;
   writeFileSync(path, content);
   return path;
+}
+
+/**
+ * The boot door (the plugin server's one call): the same reconcile, but a
+ * skill is a convenience artifact — an unwritable or unreadable
+ * operator-global skills root (ownership, a read-only home, a denied file)
+ * downgrades to ONE warning and a null, NEVER a thrown error, because the
+ * raw verb's throw would otherwise kill the whole plugin boot (choke, spool,
+ * Lead-mailbox runtime, rotation machine) for an artifact nobody depends on
+ * to boot. Contrast the stateDir writes (`ensureClaimCli`, `createFactory`):
+ * those target the daemon home the plugin already depends on, so their
+ * fail-closed is doctrine; `~/.agents` is not a precondition.
+ */
+export function ensureFactorySkillSafe(agentsSkillsDir: string, input: FactorySkillInput, onWarn: (message: string) => void): string | null {
+  try {
+    return ensureFactorySkill(agentsSkillsDir, input);
+  } catch (err) {
+    onWarn(
+      `skill: could not reconcile ${factorySkillPath(agentsSkillsDir)} — /factory stays unavailable this lifetime ` +
+        `(the plugin boots regardless) — ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return null;
+  }
 }

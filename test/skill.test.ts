@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import type { TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { ensureFactorySkill, factorySkillPath, renderFactorySkill } from "../src/index.ts";
+import { ensureFactorySkill, ensureFactorySkillSafe, factorySkillPath, renderFactorySkill } from "../src/index.ts";
 import { disposeDir, makeTempDir } from "./helpers.ts";
 
 /**
@@ -64,4 +64,38 @@ test("a drifted skill copy reconciles back — the file is plugin-managed", (t) 
   writeFileSync(factorySkillPath(skills), "an operator's local edit\n");
   ensureFactorySkill(skills, { factoryCmd: "factory" });
   assert.equal(readFileSync(factorySkillPath(skills), "utf8"), renderFactorySkill({ factoryCmd: "factory" }), "the managed content returned");
+});
+
+test("the boot door never throws — an unusable skills root warns once and the boot continues (the plugin's other halves live)", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+
+  // A deterministic unusable root, no permissions involved: a regular FILE
+  // where a directory component must be, so the reconcile's mkdirSync fails
+  // (ENOTDIR) exactly as an unwritable or unreadable ~/.agents would.
+  const blocker = join(dir, "blocker");
+  writeFileSync(blocker, "occupied by a file\n");
+  const unusable = join(blocker, "skills");
+
+  // The raw verb's contract: it throws — the caller owns the failure policy.
+  assert.throws(() => ensureFactorySkill(unusable, { factoryCmd: "factory" }), "the raw reconcile surfaces the error");
+
+  // The boot door's contract: the same failure downgrades to ONE warning and
+  // a null — never a throw, so contribute()'s choke/spool/mailbox wiring
+  // after it stays reachable for this convenience artifact.
+  const warnings: string[] = [];
+  const failed = ensureFactorySkillSafe(unusable, { factoryCmd: "factory" }, (message) => warnings.push(message));
+  assert.equal(failed, null, "no path on failure");
+  assert.equal(warnings.length, 1, "exactly one warning");
+  assert.ok(warnings[0]!.includes(factorySkillPath(unusable)), "the warning names the artifact it could not write");
+  assert.ok(warnings[0]!.includes("/factory stays unavailable"), "the warning names the consequence, not just the error");
+  assert.ok(!existsSync(factorySkillPath(unusable)), "nothing was written");
+
+  // The happy path stays silent: a writable root returns the path, zero warnings.
+  const good = join(dir, "skills");
+  const quiet: string[] = [];
+  const path = ensureFactorySkillSafe(good, { factoryCmd: "factory" }, (message) => quiet.push(message));
+  assert.equal(path, factorySkillPath(good));
+  assert.equal(quiet.length, 0, "a successful reconcile warns nothing");
+  assert.ok(existsSync(path), "the skill landed");
 });

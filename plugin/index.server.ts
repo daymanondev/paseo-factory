@@ -16,7 +16,7 @@ import { join } from "node:path";
 import type { PluginHookContext, PluginServerContext } from "@getpaseo/plugin/server";
 import { createFactory } from "./server/core/factory.ts";
 import { PLUGIN_ID, pluginDirFor, resolvePaseoHome, stateDirFor } from "./server/paths.ts";
-import { ensureFactorySkill } from "./server/core/skill.ts";
+import { ensureFactorySkillSafe } from "./server/core/skill.ts";
 import { claimCliBinDir, ensureClaimCli, ensureGitShim, injectClaimCliPath } from "./server/shell.ts";
 import { createChoke, startGitBlockIngestion } from "./server/choke.ts";
 import { createTimelineFetcher } from "./server/timeline.ts";
@@ -72,12 +72,15 @@ export default function contribute(server: PluginServerContext) {
   // Project's SLP loop. The skill carries this install's exact factory CLI
   // invocation (the seats' `factoryCmd` precedent) but never a `--home` —
   // the file is global across daemons, so the body names the default-home
-  // law and the override instead.
+  // law and the override instead. The SAFE door: unlike the stateDir writes
+  // above, `~/.agents` is operator-global and not a precondition the plugin
+  // depends on, so an unwritable skills root warns and the boot continues
+  // (choke, spool, mailbox runtime) — a skill never kills a boot.
   const quoted = (value: string) => (/\s/.test(value) ? `"${value}"` : value);
   const runner = /Paseo Helper/i.test(process.execPath) ? `ELECTRON_RUN_AS_NODE=1 ${quoted(process.execPath)}` : quoted(process.execPath);
   const factoryCmd = pluginDir === undefined ? "factory" : `${runner} ${quoted(join(pluginDir, "bin", "factory.mjs"))}`;
-  const skillPath = ensureFactorySkill(join(homedir(), ".agents", "skills"), { factoryCmd });
-  log(`skill: /factory reconciled at ${skillPath}`);
+  const skillPath = ensureFactorySkillSafe(join(homedir(), ".agents", "skills"), { factoryCmd }, log);
+  if (skillPath !== null) log(`skill: /factory reconciled at ${skillPath}`);
 
   // The choke (v0.0.4): judge every permit ask from a contracted agent,
   // answer it, and leave one ledger line per judged ask. The permission mode
