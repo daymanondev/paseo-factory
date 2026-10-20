@@ -26,7 +26,7 @@ import { createSurfaceHandlers, registerSurfaceRpc } from "./server/surface-rpc.
 import { createLeadMailRuntime } from "./server/lead-mailbox.ts";
 import { injectRoleOnCreate, injectSessionEnv } from "./server/roles.ts";
 
-const SHELL_VERSION = "0.0.22";
+const SHELL_VERSION = "0.0.23";
 
 const log = (message: string) => console.log(`[${PLUGIN_ID}] ${message}`);
 
@@ -66,21 +66,25 @@ export default function contribute(server: PluginServerContext) {
     log(`up v${SHELL_VERSION} — state ${stateDir}, plugin ${pluginDir}, claim CLI + git shim ${claimCliBinDir(stateDir)}`);
   }
 
-  // The global `/factory` skill (v0.0.20, ADR 0013 §3): reconcile
-  // `~/.agents/skills/factory/SKILL.md` at boot so the Owner can type
+  // The global `/factory` skill (v0.0.20, ADR 0013 §3; v0.0.23, ADR 0015 §5):
+  // reconcile both `~/.agents/skills/factory/SKILL.md` (pi / opencode) and
+  // `~/.claude/skills/factory/SKILL.md` (claude) at boot so the Owner can type
   // `/factory <directive>` in any session and bootstrap or dispatch into the
-  // Project's SLP loop. The skill carries this install's exact factory CLI
-  // invocation (the seats' `factoryCmd` precedent) but never a `--home` —
-  // the file is global across daemons, so the body names the default-home
-  // law and the override instead. The SAFE door: unlike the stateDir writes
-  // above, `~/.agents` is operator-global and not a precondition the plugin
-  // depends on, so an unwritable skills root warns and the boot continues
-  // (choke, spool, mailbox runtime) — a skill never kills a boot.
+  // Project's SLP loop via `factory supervisor dispatch`. The skill carries
+  // this install's exact factory CLI invocation (the seats' `factoryCmd`
+  // precedent) but never a `--home` — the file is global across daemons, so
+  // the body names the default-home law and the override instead. The SAFE
+  // door: unlike the stateDir writes above, `~/.agents` and `~/.claude` are
+  // operator-global and not preconditions the plugin depends on, so an
+  // unwritable skills root warns and the boot continues (choke, spool,
+  // mailbox runtime) — a skill never kills a boot.
   const quoted = (value: string) => (/\s/.test(value) ? `"${value}"` : value);
   const runner = /Paseo Helper/i.test(process.execPath) ? `ELECTRON_RUN_AS_NODE=1 ${quoted(process.execPath)}` : quoted(process.execPath);
   const factoryCmd = pluginDir === undefined ? "factory" : `${runner} ${quoted(join(pluginDir, "bin", "factory.mjs"))}`;
-  const skillPath = ensureFactorySkillSafe(join(homedir(), ".agents", "skills"), { factoryCmd }, log);
-  if (skillPath !== null) log(`skill: /factory reconciled at ${skillPath}`);
+  for (const skillsRoot of [join(homedir(), ".agents", "skills"), join(homedir(), ".claude", "skills")]) {
+    const skillPath = ensureFactorySkillSafe(skillsRoot, { factoryCmd }, log);
+    if (skillPath !== null) log(`skill: /factory reconciled at ${skillPath}`);
+  }
 
   // The choke (v0.0.4): judge every permit ask from a contracted agent,
   // answer it, and leave one ledger line per judged ask. The permission mode
@@ -94,7 +98,7 @@ export default function contribute(server: PluginServerContext) {
   const offAgentCreate = server.before("agent.create", ({ request }, context) => {
     capturePaseo(context);
     let next = request;
-    const pinned = choke.pinCreateMode(next.config);
+    const pinned = choke.pinCreateMode(next.config, (next as { labels?: Record<string, string> }).labels);
     if (pinned !== undefined) {
       log(`choke: pinned permission mode to Always Ask for the new agent in ${next.config.cwd}`);
       next = { ...next, config: pinned };
@@ -148,16 +152,17 @@ export default function contribute(server: PluginServerContext) {
     stateDir,
     daemon: () => paseoApi as never,
     ensureLead: (input) => surface.leadEnsure(input),
+    ensureSupervisor: (input) => surface.supervisorEnsure(input),
     retireLead: (input) => surface.leadRotate(input),
     onLog: log,
   });
   leadMail.startupRecovery();
-  // The turn boundary (v0.0.20, ADR 0013 §5): every `agent.turn_ended` hands
-  // the Lead-mailbox runtime the event — it settles the in-flight batch
-  // (`mail_acked` on completed, `mail_requeued` otherwise) and drives the 128k
-  // rotation state machine (lock → extraction → archive → successor → drain)
-  // for the Project whose registered Lead ended the turn. Non-Lead turns are
-  // ignored inside the runtime.
+  // The turn boundary (v0.0.20, ADR 0013 §5; v0.0.23, ADR 0015 §3): every
+  // `agent.turn_ended` hands the Lead-mailbox runtime the event — it settles
+  // the in-flight batch (`mail_acked` on completed, `mail_requeued` otherwise)
+  // for both registered Lead and registered Supervisor seats and drives the
+  // 128k rotation state machine for the Project whose registered Lead ended
+  // the turn.
   const offTurnEnded = server.on("agent.turn_ended", (event, context) => {
     capturePaseo(context);
     void leadMail.onLeadTurnEnded({ agentId: event.agent.id, outcome: event.outcome, timeline: event.timeline });
@@ -172,7 +177,10 @@ export default function contribute(server: PluginServerContext) {
         : { id: request.id, ok: false as const, code: reply.code, message: reply.error };
     },
     leadDispatch: (request) => leadMail.dispatchLead(request),
+    supervisorDispatch: (request) => leadMail.dispatchSupervisor(request),
+    supervisorReport: (request) => leadMail.reportSupervisor(request),
     peerMail: leadMail.notifyPeer,
+    daemon: () => paseoApi as never,
   });
   log(`spool listening on ${spoolRootFor(stateDir)}/{requests,replies,processed}`);
   registerSurfaceRpc(server, surface);

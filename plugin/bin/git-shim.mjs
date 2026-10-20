@@ -24,9 +24,14 @@
  * set FACTORY_STATE_DIR themselves.
  */
 import { appendFileSync, constants as fsConstants, existsSync, mkdirSync, accessSync } from "node:fs";
-import { delimiter, dirname, join } from "node:path";
-import { spawn } from "node:child_process";
-import { refuseGitArgv } from "./git-refusals.mjs";
+import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
+import { spawn, spawnSync } from "node:child_process";
+import {
+  isSeatMemoryRelativePathAllowed,
+  parseGitSubcommand,
+  refuseGitArgv,
+  refuseSupervisorGitArgv,
+} from "./git-refusals.mjs";
 
 const argv = process.argv.slice(2);
 const stateDir = process.env.FACTORY_STATE_DIR;
@@ -40,37 +45,6 @@ const die = (message) => {
 if (stateDir === undefined || stateDir === "") {
   die("git shim: FACTORY_STATE_DIR is not set — the generated wrapper bakes it in; direct runs must export it");
 }
-
-// ---- the refusal -------------------------------------------------------------------------------
-
-const refusal = refuseGitArgv(argv);
-if (refusal !== undefined) {
-  const command = ["git", ...argv].join(" ");
-  const block = {
-    id: `${Date.now().toString(36)}-${process.pid.toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
-    ts: new Date().toISOString(),
-    command,
-    rule: refusal.rule,
-    reason: refusal.reason,
-    cwd: process.cwd(),
-    ...(process.env.PASEO_AGENT_ID === undefined || process.env.PASEO_AGENT_ID === ""
-      ? {}
-      : { agent: process.env.PASEO_AGENT_ID }),
-  };
-  try {
-    mkdirSync(stateDir, { recursive: true });
-    // O_APPEND single write: concurrent shim processes never interleave lines.
-    appendFileSync(join(stateDir, "git-blocked.log"), `${JSON.stringify(block)}\n`);
-  } catch (err) {
-    // The refusal itself must never depend on logging succeeding.
-    console.error(`git shim: WARNING could not append the block line: ${err instanceof Error ? err.message : String(err)}`);
-  }
-  console.error(`git: paseo-factory refused to run: ${refusal.reason} [${refusal.rule}]`);
-  console.error(`git: nothing was executed; adapt the command (e.g. --force-with-lease) and retry.`);
-  process.exit(REFUSAL_EXIT);
-}
-
-// ---- the pass-through --------------------------------------------------------------------------
 
 /** The absolute fallbacks for agent shells whose PATH holds nothing but this dir. */
 const GIT_FALLBACKS = ["/opt/homebrew/bin/git", "/usr/local/bin/git", "/usr/bin/git"];
@@ -98,6 +72,195 @@ function resolveRealGit() {
   }
   return GIT_FALLBACKS.find(isExecutable);
 }
+
+function resolveEffectiveCwd(globalFlags) {
+  let cwd = process.cwd();
+  for (let i = 0; i < globalFlags.length; i++) {
+    if (globalFlags[i] === "-C" && typeof globalFlags[i + 1] === "string") {
+      cwd = isAbsolute(globalFlags[i + 1]) ? globalFlags[i + 1] : resolve(cwd, globalFlags[i + 1]);
+      i += 1;
+    }
+  }
+  return cwd;
+}
+
+function hasMergeOrCherryPickHead(realGit, globalFlags) {
+  const effectiveCwd = resolveEffectiveCwd(globalFlags);
+  if (
+    existsSync(join(effectiveCwd, ".git", "MERGE_HEAD")) ||
+    existsSync(join(effectiveCwd, ".git", "CHERRY_PICK_HEAD"))
+  ) {
+    return true;
+  }
+  if (realGit === undefined) return false;
+  const rev = spawnSync(realGit, [...globalFlags, "rev-parse", "--git-dir"], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+  });
+  if (rev.status !== 0 || typeof rev.stdout !== "string") return false;
+  const rawGitDir = rev.stdout.trim();
+  if (rawGitDir === "") return false;
+  const gitDir = isAbsolute(rawGitDir) ? rawGitDir : resolve(effectiveCwd, rawGitDir);
+  return existsSync(join(gitDir, "MERGE_HEAD")) || existsSync(join(gitDir, "CHERRY_PICK_HEAD"));
+}
+
+const COMMIT_LONG_VALUE_FLAGS = new Set([
+  "--message",
+  "--file",
+  "--reedit-message",
+  "--reuse-message",
+  "--fixup",
+  "--squash",
+  "--author",
+  "--date",
+  "--cleanup",
+  "--template",
+  "--trailer",
+  "--pathspec-from-file",
+]);
+
+const COMMIT_SHORT_VALUE_LETTERS = new Set(["m", "F", "c", "C", "t"]);
+
+function extractCommitPathspecs(args) {
+  const pathspecs = [];
+  let afterDoubleDash = false;
+  for (let i = 0; i < args.length; i++) {
+    const token = args[i];
+    if (afterDoubleDash) {
+      pathspecs.push(token);
+      continue;
+    }
+    if (token === "--") {
+      afterDoubleDash = true;
+      continue;
+    }
+    if (token === "--pathspec-from-file" || token.startsWith("--pathspec-from-file=")) {
+      pathspecs.push(token);
+      if (token === "--pathspec-from-file") i += 1;
+      continue;
+    }
+    if (COMMIT_LONG_VALUE_FLAGS.has(token)) {
+      i += 1;
+      continue;
+    }
+    if (token.startsWith("--")) {
+      continue;
+    }
+    if (token.startsWith("-") && token.length >= 2) {
+      const letters = token.slice(1);
+      let attachedValue = false;
+      for (let j = 0; j < letters.length - 1; j++) {
+        if (COMMIT_SHORT_VALUE_LETTERS.has(letters[j])) {
+          attachedValue = true;
+          break;
+        }
+      }
+      if (!attachedValue && COMMIT_SHORT_VALUE_LETTERS.has(letters[letters.length - 1])) {
+        i += 1;
+      }
+      continue;
+    }
+    pathspecs.push(token);
+  }
+  return pathspecs;
+}
+
+function checkLeadGitCommit(realGit, argvTokens) {
+  const { globalFlags, sub, args } = parseGitSubcommand(argvTokens);
+  if (sub !== "commit") return undefined;
+  if (hasMergeOrCherryPickHead(realGit, globalFlags)) return undefined;
+  if (realGit === undefined) return undefined;
+
+  const staged = spawnSync(realGit, [...globalFlags, "diff", "--cached", "--name-only"], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+  });
+  const paths = new Set(
+    (staged.stdout ?? "")
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line !== ""),
+  );
+
+  // Also check unstaged tracked files when -a / --all is passed (e.g. `git commit -am ...`).
+  const hasAllFlag = args.some(
+    (t) => t === "-a" || t === "--all" || (t.length >= 2 && t[0] === "-" && t[1] !== "-" && t.slice(1).includes("a")),
+  );
+  if (hasAllFlag) {
+    const unstaged = spawnSync(realGit, [...globalFlags, "diff", "--name-only"], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+    });
+    for (const line of (unstaged.stdout ?? "").split("\n").map((s) => s.trim()).filter(Boolean)) {
+      paths.add(line);
+    }
+  }
+
+  // Also check explicit positional pathspecs (e.g. `git commit src/index.ts -m ...` or `git commit -m ... -- src/index.ts`).
+  const pathspecs = extractCommitPathspecs(args);
+  for (const spec of pathspecs) {
+    paths.add(spec);
+  }
+  if (pathspecs.length > 0) {
+    const bySpec = spawnSync(realGit, [...globalFlags, "diff", "HEAD", "--name-only", "--", ...pathspecs], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+    });
+    for (const line of (bySpec.stdout ?? "").split("\n").map((s) => s.trim()).filter(Boolean)) {
+      paths.add(line);
+    }
+  }
+
+  const disallowed = [...paths].filter((file) => !isSeatMemoryRelativePathAllowed(file));
+  if (disallowed.length > 0) {
+    return {
+      rule: "lead-git-fence",
+      reason:
+        `factory git-shim: blocked (lead-git-fence) — Lead may only commit project memory/docs ` +
+        `(AGENTS.md, CLAUDE.md, CONTEXT.md, GLOSSARY.md, .gitignore, .worktreeinclude, docs/**, .scratch/**) on <project-root>; ` +
+        `staged outside whitelist: ${disallowed.join(", ")}`,
+    };
+  }
+  return undefined;
+}
+
+// ---- the refusal -------------------------------------------------------------------------------
+
+const seat = (process.env.PASEO_FACTORY_SEAT ?? "").trim();
+let refusal = refuseGitArgv(argv);
+if (refusal === undefined && seat === "supervisor") {
+  refusal = refuseSupervisorGitArgv(argv);
+}
+if (refusal === undefined && seat === "lead") {
+  refusal = checkLeadGitCommit(resolveRealGit(), argv);
+}
+if (refusal !== undefined) {
+  const command = ["git", ...argv].join(" ");
+  const block = {
+    id: `${Date.now().toString(36)}-${process.pid.toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
+    ts: new Date().toISOString(),
+    command,
+    rule: refusal.rule,
+    reason: refusal.reason,
+    cwd: process.cwd(),
+    ...(process.env.PASEO_AGENT_ID === undefined || process.env.PASEO_AGENT_ID === ""
+      ? {}
+      : { agent: process.env.PASEO_AGENT_ID }),
+  };
+  try {
+    mkdirSync(stateDir, { recursive: true });
+    // O_APPEND single write: concurrent shim processes never interleave lines.
+    appendFileSync(join(stateDir, "git-blocked.log"), `${JSON.stringify(block)}\n`);
+  } catch (err) {
+    // The refusal itself must never depend on logging succeeding.
+    console.error(`git shim: WARNING could not append the block line: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  console.error(`git: paseo-factory refused to run: ${refusal.reason} [${refusal.rule}]`);
+  console.error(`git: nothing was executed; adapt the command (e.g. --force-with-lease) and retry.`);
+  process.exit(REFUSAL_EXIT);
+}
+
+// ---- the pass-through --------------------------------------------------------------------------
 
 const realGit = resolveRealGit();
 if (realGit === undefined) {

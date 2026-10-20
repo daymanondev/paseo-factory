@@ -50,7 +50,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Factory } from "./core/factory.ts";
 import type { LedgerEvent } from "./core/events.ts";
-import { listProjectRegistrations, projectStateDir, readProjectRegistration, resolveProject, writeProjectRegistration } from "./core/project.ts";
+import { ensureProjectRegistered, listProjectRegistrations, projectStateDir, readProjectRegistration, resolveProject, writeProjectRegistration } from "./core/project.ts";
 import type { LeadRotationState, ProjectRegistration } from "./core/project.ts";
 import { taskWorktreeBranch, taskWorktreePath } from "./core/workspace.ts";
 import {
@@ -61,10 +61,15 @@ import {
   recoverLeadMailbox,
   requeueLeadMail as appendMailRequeued,
 } from "./core/mailbox.ts";
-import type { LeadMailFrom, LeadMailItem, LeadMailKind } from "./core/mailbox.ts";
+import type { LeadMailFrom, LeadMailItem, LeadMailKind, MailRecipient } from "./core/mailbox.ts";
 import { foldTasks, renderLedgerLine } from "./view.ts";
 import type { TaskView } from "../shared/view.ts";
-import type { SpoolLeadDispatchRequest, SpoolReply } from "./spool.ts";
+import type {
+  SpoolLeadDispatchRequest,
+  SpoolReply,
+  SpoolSupervisorDispatchRequest,
+  SpoolSupervisorReportRequest,
+} from "./spool.ts";
 import type { SurfaceAgentSnapshot, SurfaceDaemonApi } from "./surface-rpc.ts";
 
 /**
@@ -164,10 +169,12 @@ function finiteNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-/** The ensure result the surface handlers' `leadEnsure` answers — the runtime's seat door. */
+/** The ensure result the surface handlers' `leadEnsure` / `supervisorEnsure` answers — the runtime's seat door. */
 export type EnsureLeadResult =
   | { ok: true; agentId: string; created: boolean; projectRoot: string; slug: string }
   | { ok: false; code: string; error: string };
+
+export type LeadSeatEnsureResult = EnsureLeadResult;
 
 export interface LeadMailRuntimeDeps {
   factory: Factory;
@@ -182,6 +189,12 @@ export interface LeadMailRuntimeDeps {
    */
   ensureLead: (input: { projectRoot: string; message?: string }) => Promise<EnsureLeadResult>;
   /**
+   * Auto-ensure a Project's Supervisor seat (v0.0.23, ADR 0015 §3/§5): the
+   * surface handlers' `supervisorEnsure` is the implementation — find-or-create
+   * the standing `seat=supervisor` agent at the Project's root under its lane.
+   */
+  ensureSupervisor?: (input: { projectRoot: string; message?: string }) => Promise<LeadSeatEnsureResult>;
+  /**
    * Retire a Project's Lead (v0.0.20, ADR 0013 §5): the surface handlers'
    * `leadRotate` is the implementation — the `retireSeat` sequence of
    * best-effort cancel, `archive()`, and registration `lead: null`. The
@@ -194,13 +207,20 @@ export interface LeadMailRuntimeDeps {
 /** One runtime's public face — see the module doc for each member's law. */
 export interface LeadMailRuntime {
   dispatchLead(request: SpoolLeadDispatchRequest): Promise<SpoolReply>;
+  dispatchSupervisor(request: SpoolSupervisorDispatchRequest): Promise<SpoolReply>;
+  reportSupervisor(request: SpoolSupervisorReportRequest): Promise<SpoolReply>;
   notifyPeer(input: { task: string; kind: "verdict" | "needs_human"; text: string }): Promise<void>;
-  enqueueLeadMail(slug: string, mail: { from: LeadMailFrom; kind: LeadMailKind; task?: string; text: string }): Promise<{ mailId: string }>;
+  enqueueLeadMail(
+    slug: string,
+    mail: { to?: MailRecipient; from: LeadMailFrom; kind: LeadMailKind; task?: string; text: string },
+  ): Promise<{ mailId: string }>;
   pumpProjectLead(slug: string): Promise<void>;
+  pumpProjectSupervisor(slug: string): Promise<void>;
   /**
-   * The turn-boundary state machine (ticket 07): `agent.turn_ended` for a
-   * registered Lead, with the event's outcome kind and timeline (structural —
-   * no SDK types here). Never rejects; every failure logs and holds.
+   * The turn-boundary state machine (ticket 07 / v0.0.23): `agent.turn_ended`
+   * for a registered Lead or Supervisor, with the event's outcome kind and
+   * timeline (structural — no SDK types here). Never rejects; every failure
+   * logs and holds.
    */
   onLeadTurnEnded(input: LeadTurnEndedInput): Promise<void>;
   startupRecovery(): void;
@@ -260,7 +280,10 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     });
   };
 
-  const enqueueLeadMail = (slug: string, mail: { from: LeadMailFrom; kind: LeadMailKind; task?: string; text: string }): Promise<{ mailId: string }> =>
+  const enqueueLeadMail = (
+    slug: string,
+    mail: { to?: MailRecipient; from: LeadMailFrom; kind: LeadMailKind; task?: string; text: string },
+  ): Promise<{ mailId: string }> =>
     projectLane(slug, async () => {
       const queued = appendMailQueued(mailboxPath(slug), mail);
       return { mailId: queued.mailId };
@@ -269,6 +292,15 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   /** The live non-archived Lead agent of one Project — the seatOf law, on the runtime's daemon slice. */
   const liveLeadAgent = async (daemon: SurfaceDaemonApi, slug: string): Promise<SurfaceAgentSnapshot | undefined> => {
     const page = await daemon.agents.list({ filter: { labels: { seat: "lead", project: slug }, includeArchived: false } });
+    for (const entry of page.entries) {
+      if (entry.agent.archivedAt === null) return entry.agent;
+    }
+    return undefined;
+  };
+
+  /** The live non-archived Supervisor agent of one Project — the seatOf law, on the runtime's daemon slice. */
+  const liveSupervisorAgent = async (daemon: SurfaceDaemonApi, slug: string): Promise<SurfaceAgentSnapshot | undefined> => {
+    const page = await daemon.agents.list({ filter: { labels: { seat: "supervisor", project: slug }, includeArchived: false } });
     for (const entry of page.entries) {
       if (entry.agent.archivedAt === null) return entry.agent;
     }
@@ -302,6 +334,45 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     await daemon.agents.ref(lead.id).send(renderMailPrompt(state.queued));
     appendMailDelivered(path, { mailIds: state.queued.map((item) => item.mailId), toAgentId: lead.id });
     log(`lead-mailbox: delivered ${state.queued.length} item(s) to the lead of ${slug} (${lead.id})`);
+  };
+
+  /**
+   * The Supervisor drain (v0.0.23, ADR 0015 §3): when `supervisorQueued` has
+   * waiting items and `supervisorInFlight === null`, ensures `Supervisor` (if
+   * `ensureSupervisor` is wired), waits if `Supervisor` is `running` or
+   * `initializing` (or requires attention), and otherwise formats the batch
+   * (`renderSupervisorMailBatch`), sends it to `Supervisor`, and appends
+   * `mail_delivered` (`to: "supervisor"`).
+   */
+  const drainSupervisorMailbox = async (slug: string): Promise<void> => {
+    const path = mailboxPath(slug);
+    const state = readLeadMailbox(path);
+    if (state.supervisorInFlight !== null || state.supervisorQueued.length === 0) return;
+    const daemon = resolveDaemon();
+    const registration = readProjectRegistration(deps.stateDir, slug);
+    if (deps.ensureSupervisor !== undefined && registration?.root !== undefined) {
+      const ensured = await deps.ensureSupervisor({ projectRoot: registration.root });
+      if (!ensured.ok) {
+        log(`lead-mailbox: cannot ensure supervisor for ${slug} (${ensured.code}: ${ensured.error}) — holding ${state.supervisorQueued.length} item(s)`);
+        return;
+      }
+    }
+    let supervisor: SurfaceAgentSnapshot | undefined;
+    try {
+      supervisor = await liveSupervisorAgent(daemon, slug);
+    } catch (err) {
+      log(`lead-mailbox: cannot read the daemon's supervisor for ${slug} — holding ${state.supervisorQueued.length} item(s) queued (${messageOf(err)})`);
+      return;
+    }
+    if (supervisor === undefined) return;
+    if (supervisor.status !== "idle" || supervisor.requiresAttention) return;
+    await daemon.agents.ref(supervisor.id).send(renderSupervisorMailBatch(state.supervisorQueued));
+    appendMailDelivered(path, {
+      to: "supervisor",
+      mailIds: state.supervisorQueued.map((item) => item.mailId),
+      toAgentId: supervisor.id,
+    });
+    log(`lead-mailbox: delivered ${state.supervisorQueued.length} item(s) to the supervisor of ${slug} (${supervisor.id})`);
   };
 
   /**
@@ -343,19 +414,78 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     });
   };
 
+  /** Runs the lane for the Project's Supervisor mailbox (`to: "supervisor"`). */
+  const pumpProjectSupervisor = async (slug: string): Promise<void> => {
+    await projectLane(slug, async () => {
+      try {
+        await drainSupervisorMailbox(slug);
+      } catch (err) {
+        log(`lead-mailbox: supervisor pump of ${slug} failed — the mail stays queued (${messageOf(err)})`);
+      }
+    });
+  };
+
   /**
-   * The turn-boundary state machine (ticket 07, ADR 0013 §5) — serialized on
-   * the Project's lane like every other mailbox act. Never rejects: a failed
-   * step logs and holds (holding is the safe state, losing is the bug).
+   * The turn-boundary state machine (ticket 07, ADR 0013 §5; v0.0.23, ADR 0015
+   * §3) — serialized on the Project's lane like every other mailbox act.
+   * Handles both registered `Lead` and registered `Supervisor` turn-end events.
+   * Never rejects: a failed step logs and holds (holding is the safe state,
+   * losing is the bug).
    */
   const onLeadTurnEnded = async (input: LeadTurnEndedInput): Promise<void> => {
-    // Which Project's Lead ended a turn: the registry's durable binding names it.
-    let owned: { slug: string; root: string } | undefined;
+    // Which Project's Lead or Supervisor ended a turn: the registry's durable binding names it.
+    let ownedLead: { slug: string; root: string } | undefined;
+    let ownedSupervisor: { slug: string; root: string } | undefined;
     for (const registration of listProjectRegistrations(deps.stateDir)) {
-      if (registration.lead === input.agentId) owned = { slug: registration.slug, root: registration.root };
+      if (registration.lead === input.agentId) {
+        ownedLead = { slug: registration.slug, root: registration.root };
+      }
+      if (registration.supervisor === input.agentId) {
+        ownedSupervisor = { slug: registration.slug, root: registration.root };
+      } else {
+        try {
+          const state = readLeadMailbox(mailboxPath(registration.slug));
+          if (state.supervisorInFlight?.toAgentId === input.agentId) {
+            ownedSupervisor = { slug: registration.slug, root: registration.root };
+          }
+        } catch {
+          // ignore unreadable mailbox during lookup
+        }
+      }
     }
-    if (owned === undefined) return; // not a registered Lead's turn — none of this machine's business
-    const { slug, root } = owned;
+    if (ownedSupervisor !== undefined) {
+      const { slug } = ownedSupervisor;
+      await projectLane(slug, async () => {
+        try {
+          const path = mailboxPath(slug);
+          const state = readLeadMailbox(path);
+          if (state.supervisorInFlight !== null && state.supervisorInFlight.toAgentId === input.agentId) {
+            const mailIds = state.supervisorInFlight.items.map((item) => item.mailId);
+            if (input.outcome.kind === "completed") {
+              appendMailAcked(path, {
+                to: "supervisor",
+                deliveryId: state.supervisorInFlight.deliveryId,
+                mailIds,
+                byAgentId: input.agentId,
+              });
+            } else {
+              appendMailRequeued(path, {
+                to: "supervisor",
+                deliveryId: state.supervisorInFlight.deliveryId,
+                mailIds,
+                reason: input.outcome.kind,
+              });
+              log(`lead-mailbox: ${slug}'s supervisor turn ${input.outcome.kind} — ${mailIds.length} item(s) requeued`);
+            }
+          }
+          await drainSupervisorMailbox(slug);
+        } catch (err) {
+          log(`lead-mailbox: turn boundary of ${slug}'s supervisor failed — the state stands, mail is held (${messageOf(err)})`);
+        }
+      });
+    }
+    if (ownedLead === undefined) return; // not a registered Lead's turn — none of this machine's business
+    const { slug, root } = ownedLead;
     await projectLane(slug, async () => {
       try {
         await settleTurnAndRotate(slug, root, input);
@@ -486,29 +616,63 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     return live;
   };
 
-  /** The spool's `lead_dispatch` handler (ADR 0013 Decision 4, bullet 3). */
-  const dispatchLead = async (request: SpoolLeadDispatchRequest): Promise<SpoolReply> => {
-    // The target Project: a workspace directory resolves through git; a slug
-    // resolves through the registry. Neither is a guess — each refusal names itself.
-    let root: string;
-    let slug: string;
+  /** Resolves `--workspace` or `--project` to `{ root, slug }` or a structured `unknown-project` refusal. */
+  const resolveTargetProject = (
+    request: { id: string; workspace?: string; project?: string },
+    verb: string,
+  ): { ok: true; root: string; slug: string } | Extract<SpoolReply, { ok: false }> => {
     if (request.workspace !== undefined) {
       const resolved = resolveProject(request.workspace);
       if (!resolved.ok) {
-        return { id: request.id, ok: false, code: "unknown-project", message: `workspace ${request.workspace} does not resolve to a git repository — ${resolved.reason}` };
+        return {
+          id: request.id,
+          ok: false,
+          code: "unknown-project",
+          message: `workspace ${request.workspace} does not resolve to a git repository — ${resolved.reason}`,
+        };
       }
-      root = resolved.root;
-      slug = resolved.slug;
-    } else if (request.project !== undefined) {
+      return { ok: true, root: resolved.root, slug: resolved.slug };
+    }
+    if (request.project !== undefined) {
       const registration: ProjectRegistration | undefined = readProjectRegistration(deps.stateDir, request.project);
       if (registration === undefined) {
-        return { id: request.id, ok: false, code: "unknown-project", message: `no project registered under slug ${request.project} — pass --workspace <dir>, or seat the project first` };
+        return {
+          id: request.id,
+          ok: false,
+          code: "unknown-project",
+          message: `no project registered under slug ${request.project} — pass --workspace <dir>, or seat the project first`,
+        };
       }
-      root = registration.root;
-      slug = registration.slug;
-    } else {
-      return { id: request.id, ok: false, code: "unknown-project", message: "lead dispatch needs a target — pass --project <slug> or --workspace <dir>" };
+      return { ok: true, root: registration.root, slug: registration.slug };
     }
+    return {
+      id: request.id,
+      ok: false,
+      code: "unknown-project",
+      message: `${verb} needs a target — pass --project <slug> or --workspace <dir>`,
+    };
+  };
+
+  /** Ensure or look up the Project's Supervisor inside a lane job. */
+  const ensureSupervisorInLane = async (
+    slug: string,
+    root: string,
+  ): Promise<{ ok: true; agentId: string } | { ok: false; code: string; error: string }> => {
+    if (deps.ensureSupervisor !== undefined) {
+      const ensured = await deps.ensureSupervisor({ projectRoot: root });
+      if (!ensured.ok) return ensured;
+      return { ok: true, agentId: ensured.agentId };
+    }
+    const existing = await liveSupervisorAgent(resolveDaemon(), slug);
+    if (existing !== undefined) return { ok: true, agentId: existing.id };
+    return { ok: false, code: "no-supervisor", error: `no supervisor seat available for project ${slug}` };
+  };
+
+  /** The spool's `lead_dispatch` handler (ADR 0013 Decision 4, bullet 3). */
+  const dispatchLead = async (request: SpoolLeadDispatchRequest): Promise<SpoolReply> => {
+    const target = resolveTargetProject(request, "lead dispatch");
+    if (!target.ok) return target;
+    const { root, slug } = target;
     // The auto-ensure and the queue land as ONE lane job — the single-writer
     // law this module's header claims: two concurrent dispatches serialize,
     // so the second sees the first's Lead and never double-creates the seat,
@@ -540,20 +704,125 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   };
 
   /**
+   * The spool's `supervisor_dispatch` handler (v0.0.23, ADR 0015 §5):
+   * - If `request.seat === "supervisor"`, routes transparently to `dispatchLead`
+   *   (`to: "lead"`, `from: "supervisor"`) and tells `Supervisor` to end its
+   *   turn immediately and wait for `Lead`'s report.
+   * - Otherwise ensures `Supervisor`, enqueues `to: "supervisor"`
+   *   (`from: "owner"`, `kind: "directive"`), pumps `Supervisor`, and tells the
+   *   normal chat caller to stop its turn immediately without editing files.
+   */
+  const dispatchSupervisor = async (request: SpoolSupervisorDispatchRequest): Promise<SpoolReply> => {
+    if (request.seat === "supervisor") {
+      const leadReply = await dispatchLead({
+        id: request.id,
+        kind: "lead_dispatch",
+        ...(request.project === undefined ? {} : { project: request.project }),
+        ...(request.workspace === undefined ? {} : { workspace: request.workspace }),
+        from: "supervisor",
+        message: request.message,
+        seat: "supervisor",
+      });
+      if (!leadReply.ok) return leadReply;
+      return {
+        ...leadReply,
+        summary: `directive dispatched to Lead (${leadReply.leadAgentId ?? "lead"}) — end your turn now and wait for Lead's report`,
+      };
+    }
+    const target = resolveTargetProject(request, "supervisor dispatch");
+    if (!target.ok) return target;
+    const { root, slug } = target;
+    const laneOutcome = await projectLane(
+      slug,
+      async (): Promise<{ ok: true; agentId: string; mailId: string } | { ok: false; code: string; error: string }> => {
+        const ensured = await ensureSupervisorInLane(slug, root);
+        if (!ensured.ok) return ensured;
+        const queued = appendMailQueued(mailboxPath(slug), {
+          to: "supervisor",
+          from: "owner",
+          kind: "directive",
+          text: request.message,
+        });
+        return { ok: true, agentId: ensured.agentId, mailId: queued.mailId };
+      },
+    );
+    if (!laneOutcome.ok) return { id: request.id, ok: false, code: laneOutcome.code, message: laneOutcome.error };
+    const { agentId, mailId } = laneOutcome;
+    await pumpProjectSupervisor(slug);
+    return {
+      id: request.id,
+      ok: true,
+      summary: `directive routed to Supervisor (${agentId}) — stop this turn immediately without editing files and open the Supervisor session`,
+      project: slug,
+      supervisorAgentId: agentId,
+      mailId,
+    };
+  };
+
+  /**
+   * The spool's `supervisor_report` handler (v0.0.23, ADR 0015 §3):
+   * Ensures `Supervisor`, enqueues `to: "supervisor"` (`from: "lead"`,
+   * `kind: "report"`), pumps `Supervisor`, and returns `supervisorAgentId` +
+   * `mailId`.
+   */
+  const reportSupervisor = async (request: SpoolSupervisorReportRequest): Promise<SpoolReply> => {
+    const target = resolveTargetProject(request, "supervisor report");
+    if (!target.ok) return target;
+    const { root, slug } = target;
+    const laneOutcome = await projectLane(
+      slug,
+      async (): Promise<{ ok: true; agentId: string; mailId: string } | { ok: false; code: string; error: string }> => {
+        const ensured = await ensureSupervisorInLane(slug, root);
+        if (!ensured.ok) return ensured;
+        const queued = appendMailQueued(mailboxPath(slug), {
+          to: "supervisor",
+          from: "lead",
+          kind: "report",
+          text: request.message,
+        });
+        return { ok: true, agentId: ensured.agentId, mailId: queued.mailId };
+      },
+    );
+    if (!laneOutcome.ok) return { id: request.id, ok: false, code: laneOutcome.code, message: laneOutcome.error };
+    const { agentId, mailId } = laneOutcome;
+    await pumpProjectSupervisor(slug);
+    return {
+      id: request.id,
+      ok: true,
+      summary: `report queued for Supervisor (${agentId}) — end your turn`,
+      project: slug,
+      supervisorAgentId: agentId,
+      mailId,
+    };
+  };
+
+  /**
    * The spool's peer hook: a Task's terminal outcome lands as `from: "peer"`
    * mail on the owning Project's lane — appended durably BEFORE any delivery
-   * decision, so no regime (driver-held or not) can lose it. The pump is
-   * suppressed while a synchronous CLI Driver wave is in flight; the wave's
-   * last terminal outcome clears the predicate and its own hook pumps the
-   * whole held batch as one consolidated delivery. Never rejects.
+   * decision, so no regime (driver-held or not) can lose it. When
+   * `input.kind === "needs_human"`, also enqueues to `to: "supervisor"` and
+   * pumps `Supervisor` (ADR 0015 §3). The Lead pump is suppressed while a
+   * synchronous CLI Driver wave is in flight; the wave's last terminal outcome
+   * clears the predicate and its own hook pumps the whole held batch as one
+   * consolidated delivery. Never rejects.
    */
   const notifyPeer = async (input: { task: string; kind: "verdict" | "needs_human"; text: string }): Promise<void> => {
     try {
       const workspace = contractWorkspaceOf(deps.factory.ledger.events, input.task);
       if (workspace === undefined) return; // no contract on record — no owning Project to notify
-      const resolved = resolveProject(workspace);
+      const resolved = ensureProjectRegistered(deps.stateDir, workspace);
       if (!resolved.ok) return;
       await enqueueLeadMail(resolved.slug, { from: "peer", kind: input.kind, task: input.task, text: input.text });
+      if (input.kind === "needs_human") {
+        await enqueueLeadMail(resolved.slug, {
+          to: "supervisor",
+          from: "peer",
+          kind: "needs_human",
+          task: input.task,
+          text: input.text,
+        });
+        await pumpProjectSupervisor(resolved.slug);
+      }
       if (driverWaveInFlight(deps.factory.ledger.events)) return; // held in mailbox.jsonl — the wave's last outcome pumps it
       await pumpProjectLead(resolved.slug);
     } catch (err) {
@@ -593,13 +862,24 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
    * Idempotent: a settled mailbox appends nothing.
    */
   const settleLeadRotation = (slug: string): void => {
-    const settled = recoverLeadMailbox(mailboxPath(slug), "lead-rotated");
+    const settled = recoverLeadMailbox(mailboxPath(slug), "lead-rotated", "lead");
     for (const event of settled) {
       log(`lead-mailbox: rotation of ${slug} requeued ${event.mailIds.length} item(s) — the un-acked delivery returns to queued (lead-rotated)`);
     }
   };
 
-  return { dispatchLead, notifyPeer, enqueueLeadMail, pumpProjectLead, onLeadTurnEnded, startupRecovery, settleLeadRotation };
+  return {
+    dispatchLead,
+    dispatchSupervisor,
+    reportSupervisor,
+    notifyPeer,
+    enqueueLeadMail,
+    pumpProjectLead,
+    pumpProjectSupervisor,
+    onLeadTurnEnded,
+    startupRecovery,
+    settleLeadRotation,
+  };
 }
 
 // ---- the handoff renderers (ADR 0013 §5 — fixed prose, machine-verified payload) ------------
@@ -745,6 +1025,16 @@ function driverWaveInFlight(events: readonly LedgerEvent[]): boolean {
 /** One queued batch as the single prompt the Lead receives — every waiting item, in enqueue order. */
 function renderMailPrompt(items: readonly LeadMailItem[]): string {
   const lines: string[] = [`# Lead mailbox — ${items.length} item${items.length === 1 ? "" : "s"}`, ""];
+  for (const [index, item] of items.entries()) {
+    lines.push(`${index + 1}. ${item.kind} from ${item.from}${item.task === undefined ? "" : ` (task ${item.task})`}`);
+    lines.push(item.text);
+  }
+  return lines.join("\n");
+}
+
+/** One queued batch as the single prompt the Supervisor receives — every waiting item, in enqueue order. */
+export function renderSupervisorMailBatch(items: readonly LeadMailItem[]): string {
+  const lines: string[] = [`# Supervisor mailbox — ${items.length} item${items.length === 1 ? "" : "s"}`, ""];
   for (const [index, item] of items.entries()) {
     lines.push(`${index + 1}. ${item.kind} from ${item.from}${item.task === undefined ? "" : ` (task ${item.task})`}`);
     lines.push(item.text);

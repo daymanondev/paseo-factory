@@ -1,7 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { judgeFilePath, judgeShellCommand, refuseGitArgv, shellTokens, writableRootsFor } from "../src/choke.ts";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { AgentPermissionRequest, AgentPermissionResponse } from "@getpaseo/protocol/agent-types";
+import { createFactory } from "../plugin/server/core/factory.ts";
+import { writeProjectRegistration } from "../plugin/server/core/project.ts";
+import { createChoke, isContractedAgentCwd } from "../plugin/server/choke.ts";
+import type { PaseoResponderApi } from "../plugin/server/choke.ts";
+import { isSeatMemoryPathAllowed, judgeFilePath, judgeShellCommand, refuseGitArgv, shellTokens, writableRootsFor } from "../src/choke.ts";
 import { GIT_ARGV_CASES, SHELL_CASES, shellRoots } from "./choke-cases.ts";
+import { disposeDir, gitCommitAll, makeTempDir } from "./helpers.ts";
 
 /**
  * The choke policy against ticket 01's exact-token contract: the shared case
@@ -138,3 +147,291 @@ test("the memory write fence catches shell writes to the memory files — redire
   assert.equal(judgeShellCommand("echo x > AGENTS.md", roots, fence(["AGENTS.md"])).behavior, "allow", "the explicit scope opt-in holds on the shell path too");
   assert.equal(judgeShellCommand("echo x > AGENTS.md", roots).behavior, "allow", "without the memory context the v0.0.4 behavior stands");
 });
+
+// ---- Seat write fence: isSeatMemoryPathAllowed (v0.0.23, ADR 0015 §2) -------------------------
+
+test("isSeatMemoryPathAllowed admits stateDir, tmpDirs, and SEAT_MEMORY_WHITELIST under projectRoot, rejecting all other paths", () => {
+  const projectRoot = "/ws/proj";
+  const stateDir = "/state/factory";
+  const tmpDirs = ["/tmp", tmpdir()];
+
+  // Whitelisted root files (relative and absolute)
+  for (const allowedFile of ["AGENTS.md", "CLAUDE.md", "CONTEXT.md", "GLOSSARY.md", ".gitignore", ".worktreeinclude"]) {
+    assert.equal(isSeatMemoryPathAllowed(projectRoot, allowedFile, stateDir, tmpDirs), true, `relative ${allowedFile}`);
+    assert.equal(isSeatMemoryPathAllowed(projectRoot, `./${allowedFile}`, stateDir, tmpDirs), true, `./${allowedFile}`);
+    assert.equal(isSeatMemoryPathAllowed(projectRoot, `${projectRoot}/${allowedFile}`, stateDir, tmpDirs), true, `absolute ${allowedFile}`);
+  }
+
+  // Whitelisted docs/** and .scratch/** subtrees
+  for (const allowedSubpath of ["docs/adr/0015.md", "docs/README.md", ".scratch/spec.md", ".scratch/factory-v0.0.23/issues/01.md"]) {
+    assert.equal(isSeatMemoryPathAllowed(projectRoot, allowedSubpath, stateDir, tmpDirs), true, `relative ${allowedSubpath}`);
+    assert.equal(isSeatMemoryPathAllowed(projectRoot, `${projectRoot}/${allowedSubpath}`, stateDir, tmpDirs), true, `absolute ${allowedSubpath}`);
+  }
+
+  // Allowed stateDir and tmpDirs
+  assert.equal(isSeatMemoryPathAllowed(projectRoot, "/state/factory/mailbox.jsonl", stateDir, tmpDirs), true);
+  assert.equal(isSeatMemoryPathAllowed(projectRoot, "/tmp/out.log", stateDir, tmpDirs), true);
+  assert.equal(isSeatMemoryPathAllowed(projectRoot, `${tmpdir()}/scratch.txt`, stateDir, tmpDirs), true);
+  assert.equal(isSeatMemoryPathAllowed(projectRoot, "/dev/null", stateDir, tmpDirs), true);
+
+  // Rejected paths inside and outside projectRoot
+  for (const rejected of [
+    "src/GameStore.ts",
+    `${projectRoot}/src/GameStore.ts`,
+    "package.json",
+    `${projectRoot}/package.json`,
+    "ai-game/index.ts",
+    "DESIGN.md",
+    "src/AGENTS.md",
+    "docs/../src/index.ts",
+    "/etc/hosts",
+    "/ws/other/AGENTS.md",
+    "~/.ssh/authorized_keys",
+  ]) {
+    assert.equal(isSeatMemoryPathAllowed(projectRoot, rejected, stateDir, tmpDirs), false, `${rejected} must be rejected`);
+  }
+});
+
+test("pinCreateMode pins modeId: 'default' only for claude workers, leaves opencode/codex/pi untouched, and never pins Supervisor or Lead seats", (t) => {
+  const dir = makeTempDir("choke-pin-test-");
+  disposeDir(t, dir);
+  const workspace = join(dir, "ws");
+  const stateDir = join(dir, "state");
+  const worktree = join(stateDir, "projects", "ws-123456", "worktrees", "T-01");
+  mkdirSync(workspace, { recursive: true });
+  mkdirSync(worktree, { recursive: true });
+  writeFileSync(join(workspace, "probe.txt"), "x\n");
+  gitCommitAll(workspace, "base");
+
+  const factory = createFactory({ stateDir });
+  factory.setContract({ task: "T-01", workspace, gate: "true", artifact: "probe.txt" });
+  factory.requestSpawn({ task: "T-01", provider: "opencode/minimax-m2.5-free", arity: 1, worktree });
+  const choke = createChoke({ factory, homeDir: "/fake-home" });
+
+  // Claude worker in a contracted worktree is pinned to "default"
+  const claudeWorker = choke.pinCreateMode({ provider: "claude/claude-sonnet-4-6", cwd: worktree, modeId: "bypassPermissions" }, { seat: "agent" });
+  assert.equal(claudeWorker?.modeId, "default");
+
+  // Non-Claude workers (opencode, codex, pi) keep their native modeId (returns undefined)
+  for (const provider of ["opencode", "opencode/minimax-m2.5-free", "codex", "codex/gpt-5.4", "pi", "pi/zai/glm-5.1"]) {
+    assert.equal(
+      choke.pinCreateMode({ provider, cwd: worktree, modeId: "build" }, { seat: "agent" }),
+      undefined,
+      `${provider} worker must not be pinned to 'default'`,
+    );
+  }
+
+  // Supervisor and Lead at <project-root> are NEVER pinned, even for claude and even when a Contract's workspace is <project-root>
+  assert.equal(
+    choke.pinCreateMode({ provider: "claude/claude-opus-4-7", cwd: workspace, modeId: "bypassPermissions" }, { seat: "supervisor" }),
+    undefined,
+    "Supervisor with labels.seat=supervisor is never pinned",
+  );
+  assert.equal(
+    choke.pinCreateMode({ provider: "claude/claude-sonnet-4-6", cwd: workspace, modeId: "bypassPermissions" }, { seat: "lead" }),
+    undefined,
+    "Lead with labels.seat=lead is never pinned",
+  );
+  assert.equal(
+    choke.pinCreateMode({ provider: "opencode/minimax-m2.5-free", cwd: workspace, modeId: "build", title: "Lead (paseo-factory)" }),
+    undefined,
+    "rotated Lead at <project-root> keeps its native modeId",
+  );
+});
+
+test("choke.onPermissionAsked enforces seat-write-fence on Supervisor and Lead at <project-root> even when a Contract's workspace is <project-root>", async (t) => {
+  const dir = makeTempDir("choke-seat-fence-test-");
+  disposeDir(t, dir);
+  const workspace = join(dir, "ws");
+  const stateDir = join(dir, "state");
+  mkdirSync(workspace, { recursive: true });
+  writeFileSync(join(workspace, "probe.txt"), "x\n");
+  gitCommitAll(workspace, "base");
+
+  const factory = createFactory({ stateDir });
+  // Active contract whose workspace is <project-root> (does NOT scope AGENTS.md — would deny a worker on memory-write-fenced, but must allow a Seat!)
+  factory.setContract({ task: "T-01", workspace, gate: "true", artifact: "probe.txt" });
+  const choke = createChoke({ factory, homeDir: "/fake-home" });
+
+  const sent: { agentId: string; requestId: string; response: AgentPermissionResponse }[] = [];
+  const paseo: PaseoResponderApi = {
+    agents: {
+      ref(agentId: string) {
+        return {
+          async respondToPermission({ requestId, response }) {
+            sent.push({ agentId, requestId, response });
+          },
+        };
+      },
+    },
+  };
+
+  const askSeat = async (
+    seat: "supervisor" | "lead",
+    id: string,
+    request: Omit<AgentPermissionRequest, "id" | "provider">,
+  ) => {
+    await choke.onPermissionAsked(
+      {
+        agent: { id: `${seat}-1`, cwd: workspace, labels: { seat, project: "ws" } },
+        request: { id, provider: "opencode", ...request },
+      },
+      paseo,
+    );
+    return sent.at(-1)!;
+  };
+
+  // 1. Allowed file writes for Supervisor and Lead within SEAT_MEMORY_WHITELIST
+  for (const [idx, filePath] of ["AGENTS.md", "CONTEXT.md", "docs/adr/0015.md", ".scratch/spec.md"].entries()) {
+    const sup = await askSeat("supervisor", `allow-sup-${idx}`, {
+      name: "Write",
+      kind: "tool",
+      detail: { type: "write", filePath, content: "# updated\n" },
+    });
+    assert.equal(sup.response.behavior, "allow", `Supervisor allowed to write ${filePath}`);
+
+    const lead = await askSeat("lead", `allow-lead-${idx}`, {
+      name: "Edit",
+      kind: "tool",
+      detail: { type: "edit", filePath, oldString: "a", newString: "b" },
+    });
+    assert.equal(lead.response.behavior, "allow", `Lead allowed to edit ${filePath}`);
+  }
+
+  // 2. Allowed shell commands: read-only, factory CLI (even when --message mentions src/** or npm install), and whitelisted shell writes
+  for (const [idx, command] of [
+    "git status --short",
+    "ls -la src/",
+    'factory lead dispatch --workspace /ws --message "Edit src/GameStore.ts and run npm install"',
+    'node "/plugins/paseo-factory/bin/factory.mjs" contract --task T-02 --workspace /ws --gate "npm test" --artifact src/GameStore.ts',
+    "echo '# Decision' > docs/adr/0016.md",
+    "cat > .scratch/plan.md",
+  ].entries()) {
+    const res = await askSeat("supervisor", `allow-cmd-${idx}`, {
+      name: "Bash",
+      kind: "tool",
+      detail: { type: "shell", command, cwd: workspace },
+    });
+    assert.equal(res.response.behavior, "allow", `Seat allowed to run: ${command}`);
+  }
+
+  // 3. Denied file writes to product source files (src/GameStore.ts, package.json)
+  for (const [idx, filePath] of ["src/GameStore.ts", "package.json", `${workspace}/src/index.ts`].entries()) {
+    const sup = await askSeat("supervisor", `deny-file-sup-${idx}`, {
+      name: "Write",
+      kind: "tool",
+      detail: { type: "write", filePath, content: "export const x = 1;\n" },
+    });
+    assert.equal(sup.response.behavior, "deny", `Supervisor denied writing ${filePath}`);
+    if (sup.response.behavior === "deny") {
+      assert.equal(
+        sup.response.message,
+        "Seat write fence: Supervisor and Lead may only write project memory/docs (AGENTS.md, CONTEXT.md, docs/**, .scratch/**); dispatch implementation work to Lead / Task Agents",
+      );
+    }
+
+    const lead = await askSeat("lead", `deny-file-lead-${idx}`, {
+      name: "Write",
+      kind: "tool",
+      detail: { type: "write", filePath, content: "export const x = 1;\n" },
+    });
+    assert.equal(lead.response.behavior, "deny", `Lead denied writing ${filePath}`);
+  }
+
+  // 4. Denied shell commands: package installs and shell writes outside SEAT_MEMORY_WHITELIST
+  for (const [idx, command] of [
+    "npm install",
+    "npm i zustand",
+    "pnpm add react",
+    "pnpm install",
+    "yarn add lodash",
+    "bun install",
+    "echo 'export const x = 1' > src/GameStore.ts",
+    "cp /tmp/draft.ts src/GameStore.ts",
+    "rm package.json",
+  ].entries()) {
+    const res = await askSeat("supervisor", `deny-cmd-${idx}`, {
+      name: "Bash",
+      kind: "tool",
+      detail: { type: "shell", command, cwd: workspace },
+    });
+    assert.equal(res.response.behavior, "deny", `Seat denied running: ${command}`);
+    if (res.response.behavior === "deny") {
+      assert.match(res.response.message ?? "", /Seat write fence/);
+    }
+  }
+
+  const seatDenials = factory.ledger.events.filter((e) => e.event === "permit_denied" && e.rule === "seat-write-fence");
+  assert.ok(seatDenials.length >= 15, "every seat-write-fence denial is recorded in the ledger with rule 'seat-write-fence'");
+
+  // 5. Dangerous git commands from a Seat are denied with rule 'dangerous-git'
+  const gitDenied = await askSeat("supervisor", "deny-git-1", {
+    name: "Bash",
+    kind: "tool",
+    detail: { type: "shell", command: "git push --force origin main", cwd: workspace },
+  });
+  assert.equal(gitDenied.response.behavior, "deny");
+  const lastDenied = factory.ledger.events.findLast((e) => e.event === "permit_denied");
+  assert.equal(lastDenied?.rule, "dangerous-git");
+});
+
+test("isContractedAgentCwd recognizes a single-checkout subdirectory Contract under a registered project while keeping <project-root> as a Seat cwd (v0.0.23, T-03)", async (t) => {
+  const dir = makeTempDir("choke-subdir-contract-");
+  disposeDir(t, dir);
+  const workspace = join(dir, "ws");
+  const subdir = join(workspace, "packages", "sub");
+  const stateDir = join(dir, "state");
+  mkdirSync(subdir, { recursive: true });
+  writeFileSync(join(subdir, "index.ts"), "export const x = 1;\n");
+  gitCommitAll(workspace, "base");
+
+  writeProjectRegistration(stateDir, "ws-123456", {
+    root: workspace,
+    supervisor: "sup-1",
+    lead: "lead-1",
+  });
+
+  const factory = createFactory({ stateDir });
+  factory.setContract({ task: "T-SUB", workspace: subdir, gate: "true", artifact: "index.ts" });
+  const choke = createChoke({ factory, homeDir: "/fake-home" });
+
+  assert.equal(isContractedAgentCwd(factory, workspace), false, "<project-root> itself is not a contracted Agent cwd");
+  assert.equal(isContractedAgentCwd(factory, subdir), true, "contracted subdirectory is a contracted Agent cwd");
+
+  // Claude agent in the contracted subdirectory is pinned to modeId: 'default'
+  const pinned = choke.pinCreateMode({ provider: "claude/claude-sonnet-4-6", cwd: subdir, modeId: "bypassPermissions" });
+  assert.equal(pinned?.modeId, "default");
+
+  // Permission asks from the contracted subdirectory are mediated by the choke
+  const sent: { agentId: string; requestId: string; response: AgentPermissionResponse }[] = [];
+  const paseo: PaseoResponderApi = {
+    agents: {
+      ref(agentId: string) {
+        return {
+          async respondToPermission({ requestId, response }) {
+            sent.push({ agentId, requestId, response });
+          },
+        };
+      },
+    },
+  };
+  await choke.onPermissionAsked(
+    {
+      agent: { id: "agent-sub-1", cwd: subdir, labels: { seat: "agent", task: "T-SUB" } },
+      request: {
+        id: "ask-sub-1",
+        provider: "claude",
+        name: "Write",
+        kind: "tool",
+        detail: { type: "write", filePath: join(subdir, "index.ts"), content: "export const x = 2;\n" },
+      },
+    },
+    paseo,
+  );
+  assert.equal(sent.length, 1, "subdirectory Agent ask was answered by choke");
+  assert.equal(sent[0].response.behavior, "allow");
+});
+
+
+
+

@@ -26,7 +26,12 @@ import { usageIsValid } from "./core/ledger.ts";
 import { needsHumanEvidenceIsValid, NEEDS_HUMAN_REASONS } from "./core/events.ts";
 import type { Factory } from "./core/factory.ts";
 import type { LedgerEvent, MeterUsage, NeedsHumanEvidence, NeedsHumanReason, Verdict } from "./core/events.ts";
-import { acceptanceSummary } from "./surface-rpc.ts";
+import { listProjectRegistrations, readProjectRegistration, resolveProject, writeProjectRegistration } from "./core/project.ts";
+import { acceptanceSummary, archiveAcceptedTaskWorkspace } from "./surface-rpc.ts";
+import type { SurfaceDaemonApi } from "./surface-rpc.ts";
+
+/** Seat identity stamped from `PASEO_FACTORY_SEAT` (v0.0.23, ADR 0015 §1). */
+export type SpoolSeat = "supervisor" | "lead" | "agent";
 
 export interface ContractRequest {
   id: string;
@@ -55,6 +60,8 @@ export interface ContractRequest {
    * the spool never guesses or defaults it.
    */
   submitter: string;
+  /** Caller seat stamped from `PASEO_FACTORY_SEAT` when present (v0.0.23, ADR 0015 §1). */
+  seat?: SpoolSeat;
 }
 
 export interface ClaimRequest {
@@ -64,6 +71,7 @@ export interface ClaimRequest {
   sha: string;
   /** Who submitted, when the daemon stamps it on the agent's env — for the spool log, not the ledger. */
   agent?: string;
+  seat?: SpoolSeat;
 }
 
 export interface AcceptRequest {
@@ -85,6 +93,8 @@ export interface AcceptRequest {
    * always records who accepted" (ADR 0006) starts at the request.
    */
   submitter: string;
+  /** Caller seat stamped from `PASEO_FACTORY_SEAT` when present (v0.0.23, ADR 0015 §1). */
+  seat?: SpoolSeat;
 }
 
 /**
@@ -109,6 +119,9 @@ export interface SpawnRequest {
    * through it. Optional: the legacy shared-checkout path sends none.
    */
   worktree?: string;
+  submitter?: string;
+  /** Caller seat stamped from `PASEO_FACTORY_SEAT` when present (v0.0.23, ADR 0015 §1). */
+  seat?: SpoolSeat;
 }
 
 /**
@@ -124,6 +137,9 @@ export interface LeadRotateRequest {
   kind: "lead_rotate";
   /** Any directory inside the Project's repository (resolveProject names the slug). */
   projectRoot: string;
+  submitter?: string;
+  /** Caller seat stamped from `PASEO_FACTORY_SEAT` when present (v0.0.23, ADR 0015 §1). */
+  seat?: SpoolSeat;
 }
 
 /**
@@ -143,6 +159,41 @@ export interface SpoolLeadDispatchRequest {
   workspace?: string;
   from?: "supervisor" | "owner";
   message: string;
+  submitter?: string;
+  /** Caller seat stamped from `PASEO_FACTORY_SEAT` when present (v0.0.23, ADR 0015 §1). */
+  seat?: SpoolSeat;
+}
+
+/**
+ * Seat-aware `/factory` entrypoint (v0.0.23, ADR 0015 §5): `factory supervisor
+ * dispatch` routes normal-chat / CLI directives into the Project's `Supervisor`
+ * mailbox (`to: "supervisor"`), and when called from inside `Supervisor`
+ * (`seat === "supervisor"`) transparently routes to `lead_dispatch` (`to: "lead"`).
+ */
+export interface SpoolSupervisorDispatchRequest {
+  id: string;
+  kind: "supervisor_dispatch";
+  project?: string;
+  workspace?: string;
+  message: string;
+  submitter?: string;
+  seat?: SpoolSeat;
+}
+
+/**
+ * Lead -> Supervisor reporting channel (v0.0.23, ADR 0015 §3): `factory
+ * supervisor report` queues a report (`to: "supervisor"`, `from: "lead"`,
+ * `kind: "report"`) in `<projectStateDir>/mailbox.jsonl` and pumps the
+ * Supervisor lane.
+ */
+export interface SpoolSupervisorReportRequest {
+  id: string;
+  kind: "supervisor_report";
+  project?: string;
+  workspace?: string;
+  message: string;
+  submitter?: string;
+  seat?: SpoolSeat;
 }
 
 /**
@@ -158,6 +209,9 @@ export interface RespawnRequest {
   task: string;
   provider: string;
   died_agent: string;
+  submitter?: string;
+  /** Caller seat stamped from `PASEO_FACTORY_SEAT` when present (v0.0.23, ADR 0015 §1). */
+  seat?: SpoolSeat;
 }
 
 /**
@@ -171,6 +225,9 @@ export interface RespawnRequest {
 export interface RetroRequest {
   id: string;
   kind: "retro";
+  submitter?: string;
+  /** Caller seat stamped from `PASEO_FACTORY_SEAT` when present (v0.0.23, ADR 0015 §1). */
+  seat?: SpoolSeat;
 }
 
 /**
@@ -192,6 +249,8 @@ export interface MeterRequest {
   usage: MeterUsage;
   /** The metered agent's id, when the driver knows it. */
   agent?: string;
+  submitter?: string;
+  seat?: SpoolSeat;
 }
 
 /**
@@ -209,6 +268,8 @@ export interface RepokeRequest {
   task: string;
   /** The stalled agent the fixed re-poke text goes to. */
   agent: string;
+  submitter?: string;
+  seat?: SpoolSeat;
 }
 
 /**
@@ -224,6 +285,8 @@ export interface NeedsHumanRequest {
   task: string;
   reason: NeedsHumanReason;
   evidence: NeedsHumanEvidence;
+  submitter?: string;
+  seat?: SpoolSeat;
 }
 
 /**
@@ -241,6 +304,8 @@ export interface AskRequest {
   cwd?: string;
   agent?: string;
   name?: string;
+  submitter?: string;
+  seat?: SpoolSeat;
 }
 
 export type SpoolRequest =
@@ -250,6 +315,8 @@ export type SpoolRequest =
   | AskRequest
   | LeadRotateRequest
   | SpoolLeadDispatchRequest
+  | SpoolSupervisorDispatchRequest
+  | SpoolSupervisorReportRequest
   | SpawnRequest
   | RespawnRequest
   | MeterRequest
@@ -265,6 +332,12 @@ export type LeadRotateHandler = (request: LeadRotateRequest) => Promise<SpoolRep
 
 /** Dispatches a directive into a Project's Lead mailbox — the Lead-mailbox runtime's `dispatchLead` is the implementation (v0.0.20). */
 export type LeadDispatchHandler = (request: SpoolLeadDispatchRequest) => Promise<SpoolReply>;
+
+/** Dispatches a directive into a Project's Supervisor mailbox (or Lead when called by Supervisor) (v0.0.23, ADR 0015 §5). */
+export type SupervisorDispatchHandler = (request: SpoolSupervisorDispatchRequest) => Promise<SpoolReply>;
+
+/** Queues a Lead report into a Project's Supervisor mailbox (v0.0.23, ADR 0015 §3). */
+export type SupervisorReportHandler = (request: SpoolSupervisorReportRequest) => Promise<SpoolReply>;
 
 /**
  * Notifies a Project's Lead mailbox that a Peer's task reached a terminal
@@ -305,14 +378,30 @@ export type SpoolReply =
        */
       project?: string;
       leadAgentId?: string;
+      supervisorAgentId?: string;
       mailId?: string;
       rotationState?: string;
+      /** Spawn / respawn replies (v0.0.23, ADR 0015 §6): the Task worktree's Paseo workspace id and owning Project slug. */
+      workspaceId?: string;
+      projectSlug?: string;
     }
   | { id: string; ok: false; code: string; message: string; event?: LedgerEvent };
 
 /** Where all three spool directories live. */
 export function spoolRootFor(stateDir: string): string {
   return join(stateDir, "spool");
+}
+
+function parseOptionalSeat(value: unknown): { ok: true; seat?: SpoolSeat } | { ok: false } {
+  if (value === undefined) return { ok: true };
+  if (value === "supervisor" || value === "lead" || value === "agent") return { ok: true, seat: value };
+  return { ok: false };
+}
+
+function parseOptionalSubmitter(value: unknown): { ok: true; submitter?: string } | { ok: false } {
+  if (value === undefined) return { ok: true };
+  if (typeof value === "string" && value.trim() !== "") return { ok: true, submitter: value };
+  return { ok: false };
 }
 
 /**
@@ -323,6 +412,12 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
   if (typeof body !== "object" || body === null) return undefined;
   const req = body as Record<string, unknown>;
   if (typeof req.id !== "string" || req.id === "") return undefined;
+  const seatParsed = parseOptionalSeat(req.seat);
+  if (!seatParsed.ok) return undefined;
+  const seatField = seatParsed.seat === undefined ? {} : { seat: seatParsed.seat };
+  const submitterParsed = parseOptionalSubmitter(req.submitter);
+  if (!submitterParsed.ok) return undefined;
+  const submitterField = submitterParsed.submitter === undefined ? {} : { submitter: submitterParsed.submitter };
   if (req.kind === "contract") {
     if (typeof req.task !== "string" || typeof req.workspace !== "string" || typeof req.gate !== "string" || typeof req.artifact !== "string") {
       return undefined;
@@ -350,6 +445,7 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       ...(req.watch === undefined ? {} : { watch: true }),
       ...(req.description === undefined ? {} : { description: req.description }),
       submitter: req.submitter,
+      ...seatField,
     };
   }
   if (req.kind === "claim") {
@@ -370,6 +466,7 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       attempt: req.attempt,
       ...(req.by === undefined ? {} : { by: req.by }),
       submitter: req.submitter,
+      ...seatField,
     };
   }
   if (req.kind === "spawn") {
@@ -384,6 +481,8 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       provider: req.provider,
       arity: req.arity,
       ...(req.worktree === undefined ? {} : { worktree: req.worktree }),
+      ...submitterField,
+      ...seatField,
     };
   }
   if (req.kind === "respawn") {
@@ -396,11 +495,11 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     ) {
       return undefined;
     }
-    return { id: req.id, kind: "respawn", task: req.task, provider: req.provider, died_agent: req.died_agent };
+    return { id: req.id, kind: "respawn", task: req.task, provider: req.provider, died_agent: req.died_agent, ...submitterField, ...seatField };
   }
   if (req.kind === "lead_rotate") {
     if (typeof req.projectRoot !== "string" || req.projectRoot.trim() === "") return undefined;
-    return { id: req.id, kind: "lead_rotate", projectRoot: req.projectRoot };
+    return { id: req.id, kind: "lead_rotate", projectRoot: req.projectRoot, ...submitterField, ...seatField };
   }
   if (req.kind === "lead_dispatch") {
     // The v0.0.20 dispatch: the message is the payload (never blank); the
@@ -418,14 +517,30 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       ...(req.workspace === undefined ? {} : { workspace: req.workspace }),
       ...(req.from === undefined ? {} : { from: req.from }),
       message: req.message,
+      ...submitterField,
+      ...seatField,
+    };
+  }
+  if (req.kind === "supervisor_dispatch" || req.kind === "supervisor_report") {
+    if (typeof req.message !== "string" || req.message.trim() === "") return undefined;
+    if (req.project !== undefined && (typeof req.project !== "string" || req.project.trim() === "")) return undefined;
+    if (req.workspace !== undefined && (typeof req.workspace !== "string" || req.workspace.trim() === "")) return undefined;
+    return {
+      id: req.id,
+      kind: req.kind,
+      ...(req.project === undefined ? {} : { project: req.project }),
+      ...(req.workspace === undefined ? {} : { workspace: req.workspace }),
+      message: req.message,
+      ...submitterField,
+      ...seatField,
     };
   }
   if (req.kind === "retro") {
-    // The Retro carries nothing but its kind — whole-ledger always. The
-    // strict shape is the point: any extra field makes it not-a-retro.
-    const keys = Object.keys(req).filter((key) => key !== "id" && key !== "kind");
+    // The Retro carries nothing but its kind (plus optional submitter and seat stamps) —
+    // whole-ledger always. Any extra field makes it not-a-retro.
+    const keys = Object.keys(req).filter((key) => key !== "id" && key !== "kind" && key !== "seat" && key !== "submitter");
     if (keys.length > 0) return undefined;
-    return { id: req.id, kind: "retro" };
+    return { id: req.id, kind: "retro", ...submitterField, ...seatField };
   }
   if (req.kind === "meter") {
     if (typeof req.task !== "string" || typeof req.provider !== "string" || req.provider.trim() === "") return undefined;
@@ -441,18 +556,20 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       provider: req.provider,
       usage,
       ...(req.agent === undefined ? {} : { agent: req.agent }),
+      ...submitterField,
+      ...seatField,
     };
   }
   if (req.kind === "repoke") {
     if (typeof req.task !== "string" || typeof req.agent !== "string" || req.agent.trim() === "") return undefined;
-    return { id: req.id, kind: "repoke", task: req.task, agent: req.agent };
+    return { id: req.id, kind: "repoke", task: req.task, agent: req.agent, ...submitterField, ...seatField };
   }
   if (req.kind === "needs_human") {
     if (typeof req.task !== "string") return undefined;
     if (typeof req.reason !== "string" || !(NEEDS_HUMAN_REASONS as readonly string[]).includes(req.reason)) return undefined;
     const reason = req.reason as NeedsHumanReason;
     if (!needsHumanEvidenceIsValid(req.evidence, reason)) return undefined;
-    return { id: req.id, kind: "needs_human", task: req.task, reason, evidence: req.evidence };
+    return { id: req.id, kind: "needs_human", task: req.task, reason, evidence: req.evidence, ...submitterField, ...seatField };
   }
   if (req.kind === "ask") {
     if (typeof req.task !== "string" || typeof req.command !== "string" || req.command.trim() === "") return undefined;
@@ -467,9 +584,137 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       ...(req.cwd === undefined ? {} : { cwd: req.cwd as string }),
       ...(req.agent === undefined ? {} : { agent: req.agent as string }),
       ...(req.name === undefined ? {} : { name: req.name as string }),
+      ...submitterField,
+      ...seatField,
     };
   }
   return undefined;
+}
+
+function resolveDaemonArg(daemon?: SurfaceDaemonApi | (() => SurfaceDaemonApi | undefined)): SurfaceDaemonApi | undefined {
+  return typeof daemon === "function" ? daemon() : daemon;
+}
+
+async function resolveEffectiveSeat(
+  factory: Factory,
+  daemon: SurfaceDaemonApi | undefined,
+  request: SpoolRequest,
+): Promise<SpoolSeat | undefined> {
+  const submitter =
+    "submitter" in request && typeof request.submitter === "string" ? request.submitter.trim() : "";
+  if (submitter !== "" && submitter !== "owner") {
+    if (daemon?.agents?.list !== undefined) {
+      try {
+        const page = await daemon.agents.list({ filter: { includeArchived: false } });
+        const matched = page.entries.find((e) => e.agent.id === submitter && e.agent.archivedAt === null)?.agent;
+        const liveSeat = matched?.labels?.seat;
+        if (liveSeat === "supervisor" || liveSeat === "lead" || liveSeat === "agent") {
+          return liveSeat;
+        }
+      } catch {
+        // best-effort live daemon seat corroboration
+      }
+    }
+    for (const reg of listProjectRegistrations(factory.stateDir)) {
+      if (reg.supervisor === submitter) return "supervisor";
+      if (reg.lead === submitter) return "lead";
+    }
+  }
+  return request.seat;
+}
+
+function lastTaskAgentForTask(factory: Factory, task: string): string | undefined {
+  let agentId: string | undefined;
+  for (const evt of factory.ledger.events) {
+    if ("task" in evt && evt.task === task) {
+      if (evt.event === "claim_reported" && typeof evt.agent === "string" && evt.agent !== "") agentId = evt.agent;
+      else if (evt.event === "repoke_dispatched" && typeof evt.agent === "string" && evt.agent !== "") agentId = evt.agent;
+      else if (evt.event === "meter_written" && typeof evt.agent === "string" && evt.agent !== "") agentId = evt.agent;
+    }
+  }
+  return agentId;
+}
+
+async function archiveTaskAgentBestEffort(daemon: SurfaceDaemonApi | undefined, agentId: string | undefined): Promise<void> {
+  if (daemon === undefined || typeof agentId !== "string" || agentId === "") return;
+  try {
+    await daemon.agents.ref(agentId).archive();
+  } catch {
+    // best-effort archive
+  }
+}
+
+async function resolveSpawnWorkspaceAndParent(
+  factory: Factory,
+  daemon: SurfaceDaemonApi | undefined,
+  task: string,
+  explicitWorktree?: string,
+): Promise<{ leadAgentId?: string; workspaceId?: string; projectSlug?: string }> {
+  const contract = factory.contractFor(task);
+  if (contract === undefined) return {};
+  const project = resolveProject(contract.workspace);
+  if (!project.ok) return {};
+  const reg = readProjectRegistration(factory.stateDir, project.slug);
+  let projectWorkspaceId = reg?.workspaceId;
+  let paseoProjectId = reg?.paseoProjectId;
+  if (paseoProjectId === undefined && daemon?.workspaces?.open !== undefined) {
+    try {
+      const opened = await daemon.workspaces.open({ cwd: project.root });
+      if (typeof opened?.id === "string" && opened.id !== "") projectWorkspaceId = opened.id;
+      if (typeof opened?.projectId === "string" && opened.projectId !== "") paseoProjectId = opened.projectId;
+    } catch {
+      // best-effort workspace open
+    }
+  }
+  let leadAgentId: string | undefined;
+  if (daemon !== undefined) {
+    try {
+      const page = await daemon.agents.list({ filter: { labels: { seat: "lead", project: project.slug }, includeArchived: false } });
+      const liveLead = page.entries.find((e) => e.agent.archivedAt === null)?.agent;
+      if (liveLead !== undefined) leadAgentId = liveLead.id;
+    } catch {
+      // best-effort lead lookup
+    }
+  }
+  if (leadAgentId === undefined) leadAgentId = reg?.lead;
+
+  let worktree = explicitWorktree;
+  if (worktree === undefined) {
+    for (const evt of factory.ledger.events) {
+      if (evt.event === "spawn_dispatched" && evt.task === task && typeof evt.worktree === "string" && evt.worktree !== "") {
+        worktree = evt.worktree;
+      }
+    }
+  }
+  let workspaceId = reg?.taskWorkspaces?.[task];
+  if (workspaceId === undefined && worktree !== undefined && daemon?.workspaces?.create !== undefined) {
+    try {
+      const created = await daemon.workspaces.create({
+        title: `${project.slug} ${task}`,
+        source: { kind: "directory", path: worktree, ...(paseoProjectId !== undefined ? { projectId: paseoProjectId } : {}) },
+      });
+      if (typeof created?.id === "string" && created.id !== "") workspaceId = created.id;
+    } catch {
+      // best-effort workspace registration
+    }
+  }
+  if (
+    projectWorkspaceId !== reg?.workspaceId ||
+    paseoProjectId !== reg?.paseoProjectId ||
+    (workspaceId !== undefined && workspaceId !== reg?.taskWorkspaces?.[task])
+  ) {
+    writeProjectRegistration(factory.stateDir, project.slug, {
+      root: project.root,
+      ...(projectWorkspaceId !== undefined ? { workspaceId: projectWorkspaceId } : {}),
+      ...(paseoProjectId !== undefined ? { paseoProjectId } : {}),
+      ...(workspaceId !== undefined ? { taskWorkspaces: { [task]: workspaceId } } : {}),
+    });
+  }
+  return {
+    projectSlug: project.slug,
+    ...(leadAgentId !== undefined ? { leadAgentId } : {}),
+    ...(workspaceId !== undefined ? { workspaceId } : {}),
+  };
 }
 
 /**
@@ -486,8 +731,47 @@ export async function handleSpoolRequest(
   leadRotateHandler?: LeadRotateHandler,
   leadDispatchHandler?: LeadDispatchHandler,
   peerMailHook?: PeerMailHook,
+  supervisorDispatchHandler?: SupervisorDispatchHandler,
+  supervisorReportHandler?: SupervisorReportHandler,
+  daemon?: SurfaceDaemonApi | (() => SurfaceDaemonApi | undefined),
 ): Promise<SpoolReply> {
+  const resolvedDaemon = resolveDaemonArg(daemon);
   try {
+    const effectiveSeat = await resolveEffectiveSeat(factory, resolvedDaemon, request);
+    // Hard Spool Command Authority by Seat (v0.0.23, ADR 0015 §1).
+    if (
+      (request.kind === "contract" || request.kind === "spawn" || request.kind === "respawn") &&
+      effectiveSeat === "supervisor"
+    ) {
+      return {
+        id: request.id,
+        ok: false,
+        code: "supervisor-cannot-contract-or-run",
+        message: `Supervisor cannot call factory ${request.kind}; dispatch the directive to Lead via 'factory lead dispatch --workspace <dir> --message <directive>' and end your turn.`,
+      };
+    }
+    if (
+      (request.kind === "contract" ||
+        request.kind === "spawn" ||
+        request.kind === "respawn" ||
+        request.kind === "repoke" ||
+        request.kind === "needs_human" ||
+        request.kind === "meter" ||
+        request.kind === "accept" ||
+        request.kind === "lead_dispatch" ||
+        request.kind === "supervisor_dispatch" ||
+        request.kind === "supervisor_report" ||
+        request.kind === "lead_rotate" ||
+        request.kind === "retro") &&
+      effectiveSeat === "agent"
+    ) {
+      return {
+        id: request.id,
+        ok: false,
+        code: "agent-cannot-orchestrate",
+        message: `Working Agent cannot call factory ${request.kind}; working Agents may only submit claims via 'factory-claim --task <task> --sha <sha>'.`,
+      };
+    }
     if (request.kind === "contract") {
       factory.setContract({
         task: request.task,
@@ -575,6 +859,46 @@ export async function handleSpoolRequest(
       }
       return await leadDispatchHandler(request);
     }
+    if (request.kind === "supervisor_dispatch") {
+      const normalizedRequest = effectiveSeat === undefined ? request : { ...request, seat: effectiveSeat };
+      if (supervisorDispatchHandler !== undefined) {
+        return await supervisorDispatchHandler(normalizedRequest);
+      }
+      if (effectiveSeat === "supervisor" && leadDispatchHandler !== undefined) {
+        const leadReply = await leadDispatchHandler({
+          id: request.id,
+          kind: "lead_dispatch",
+          ...(request.project === undefined ? {} : { project: request.project }),
+          ...(request.workspace === undefined ? {} : { workspace: request.workspace }),
+          from: "supervisor",
+          message: request.message,
+          ...(request.submitter === undefined ? {} : { submitter: request.submitter }),
+          seat: "supervisor",
+        });
+        if (!leadReply.ok) return leadReply;
+        return {
+          ...leadReply,
+          summary: `directive dispatched to Lead (${leadReply.leadAgentId ?? "lead"}) — end your turn now and wait for Lead's report`,
+        };
+      }
+      return {
+        id: request.id,
+        ok: false,
+        code: "supervisor-dispatch-unavailable",
+        message: "this daemon's factory plugin does not dispatch Supervisor mail — update the plugin to v0.0.23+",
+      };
+    }
+    if (request.kind === "supervisor_report") {
+      if (supervisorReportHandler === undefined) {
+        return {
+          id: request.id,
+          ok: false,
+          code: "supervisor-report-unavailable",
+          message: "this daemon's factory plugin does not handle Supervisor reports — update the plugin to v0.0.23+",
+        };
+      }
+      return await supervisorReportHandler(effectiveSeat === undefined ? request : { ...request, seat: effectiveSeat });
+    }
     if (request.kind === "spawn") {
       // The driver's arrival (v0.0.5): one ledger line either way, then the
       // reply the driver keys its next move on — create the agent, or report
@@ -589,11 +913,13 @@ export async function handleSpoolRequest(
       if (decision.outcome === "refused") {
         return { id: request.id, ok: false, code: decision.code, message: decision.event.reason, event: decision.event };
       }
+      const spawnMeta = await resolveSpawnWorkspaceAndParent(factory, resolvedDaemon, request.task, request.worktree);
       return {
         id: request.id,
         ok: true,
         summary: `spawn dispatched for ${request.task} under ${request.provider} (n=${request.arity})`,
         event: decision.event,
+        ...spawnMeta,
       };
     }
     if (request.kind === "respawn") {
@@ -608,11 +934,14 @@ export async function handleSpoolRequest(
       if (decision.outcome === "refused") {
         return { id: request.id, ok: false, code: decision.code, message: decision.event.reason, event: decision.event };
       }
+      await archiveTaskAgentBestEffort(resolvedDaemon, request.died_agent);
+      const spawnMeta = await resolveSpawnWorkspaceAndParent(factory, resolvedDaemon, request.task);
       return {
         id: request.id,
         ok: true,
         summary: `respawn dispatched for ${request.task} under ${request.provider} (replacing ${request.died_agent.slice(0, 12)})`,
         event: decision.event,
+        ...spawnMeta,
       };
     }
     if (request.kind === "meter") {
@@ -626,6 +955,7 @@ export async function handleSpoolRequest(
         usage: request.usage,
         ...(request.agent === undefined ? {} : { agent: request.agent }),
       });
+      await archiveTaskAgentBestEffort(resolvedDaemon, request.agent ?? lastTaskAgentForTask(factory, request.task));
       const dollars = event.usage.totalCostUsd;
       const cost = dollars === undefined ? "no dollars reported (recorded as absent)" : `$${dollars.toFixed(2)}`;
       return { id: request.id, ok: true, summary: `meter for ${request.task} under ${request.provider}: ${cost}` };
@@ -649,6 +979,7 @@ export async function handleSpoolRequest(
       // evidence pair attached. The meter's law — a refused submission throws,
       // no line, and the reply carries the code so the driver can report it.
       const event = factory.needsHuman({ task: request.task, reason: request.reason, evidence: request.evidence });
+      await archiveTaskAgentBestEffort(resolvedDaemon, lastTaskAgentForTask(factory, request.task));
       const detail =
         "denial" in event.evidence
           ? `denial seq ${event.evidence.denial}, repoke seq ${event.evidence.repoke}`
@@ -691,6 +1022,7 @@ export async function handleSpoolRequest(
     // stamp; the Lead's conditional authority is judged below in the factory.
     const acceptedBy = request.by ?? request.submitter;
     const accepted = await factory.accept({ task: request.task, attempt: request.attempt, accepted_by: acceptedBy });
+    await archiveAcceptedTaskWorkspace(factory, resolvedDaemon, request.task);
     return {
       id: request.id,
       ok: true,
@@ -720,8 +1052,14 @@ export interface SpoolOptions {
   leadRotate?: LeadRotateHandler;
   /** The Lead-dispatch handler (v0.0.20); without it `lead_dispatch` requests are refused. */
   leadDispatch?: LeadDispatchHandler;
+  /** The Supervisor-dispatch handler (v0.0.23); without it `supervisor_dispatch` requests are refused. */
+  supervisorDispatch?: SupervisorDispatchHandler;
+  /** The Supervisor-report handler (v0.0.23); without it `supervisor_report` requests are refused. */
+  supervisorReport?: SupervisorReportHandler;
   /** The peer-outcome notifier (v0.0.20) — verdicts and needs_human recordings land as Lead mail. */
   peerMail?: PeerMailHook;
+  /** The daemon API for workspace registration and worker/workspace archiving (v0.0.23, ADR 0015 §6). */
+  daemon?: SurfaceDaemonApi | (() => SurfaceDaemonApi | undefined);
 }
 
 export interface Spool {
@@ -760,7 +1098,21 @@ export function startSpool(stateDir: string, factory: Factory, options: SpoolOpt
         continue;
       }
       inFlight.add(id);
-      void handleRequestFile(id, requestPath, replyPath, join(processedDir, name), factory, log, options.ask, options.leadRotate, options.leadDispatch, options.peerMail)
+      void handleRequestFile(
+        id,
+        requestPath,
+        replyPath,
+        join(processedDir, name),
+        factory,
+        log,
+        options.ask,
+        options.leadRotate,
+        options.leadDispatch,
+        options.peerMail,
+        options.supervisorDispatch,
+        options.supervisorReport,
+        options.daemon,
+      )
         .catch(() => {})
         .finally(() => inFlight.delete(id));
     }
@@ -786,6 +1138,9 @@ async function handleRequestFile(
   leadRotateHandler?: LeadRotateHandler,
   leadDispatchHandler?: LeadDispatchHandler,
   peerMailHook?: PeerMailHook,
+  supervisorDispatchHandler?: SupervisorDispatchHandler,
+  supervisorReportHandler?: SupervisorReportHandler,
+  daemon?: SurfaceDaemonApi | (() => SurfaceDaemonApi | undefined),
 ): Promise<void> {
   let reply: SpoolReply;
   let request: SpoolRequest | undefined;
@@ -798,7 +1153,17 @@ async function handleRequestFile(
     reply = { id, ok: false, code: "bad-request", message: `request file ${requestPath} is not a valid spool request` };
     log(`request ${id}: REJECTED — malformed`);
   } else {
-    reply = await handleSpoolRequest(factory, request, askHandler, leadRotateHandler, leadDispatchHandler, peerMailHook);
+    reply = await handleSpoolRequest(
+      factory,
+      request,
+      askHandler,
+      leadRotateHandler,
+      leadDispatchHandler,
+      peerMailHook,
+      supervisorDispatchHandler,
+      supervisorReportHandler,
+      daemon,
+    );
     // The v0.0.9 stamps make the two Owner acts attributable in the log too —
     // the same visibility the claim line always had.
     const stamp = request.kind === "contract" || request.kind === "accept" ? ` by ${request.submitter}` : "";

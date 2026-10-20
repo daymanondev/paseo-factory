@@ -25,9 +25,34 @@ import type { AgentPermissionRequest, AgentPermissionResponse, AgentSessionConfi
 import type { Factory } from "./core/factory.ts";
 import type { ContractSet } from "./core/events.ts";
 import { FactoryError } from "./core/errors.ts";
-import { judgeFilePath, judgeShellCommand, writableRootsFor } from "./core/choke.ts";
+import {
+  SEAT_MEMORY_WHITELIST,
+  SEAT_WRITE_FENCE_MESSAGE,
+  extractWriteTargets,
+  isSeatMemoryPathAllowed,
+  isSeatMemoryRelativePathAllowed,
+  judgeFilePath,
+  judgeSeatFilePath,
+  judgeSeatShellCommand,
+  judgeShellCommand,
+  writableRootsFor,
+} from "./core/choke.ts";
 import type { ChokeDecision, MemoryFence } from "./core/choke.ts";
+import { listProjectRegistrations } from "./projects.ts";
+import { SEAT_TITLES } from "./roles.ts";
+import type { SeatName } from "./roles.ts";
+import { parseTaskWorktreePath } from "../shared/worktree-shape.mjs";
 import type { AskRequest, SpoolReply } from "./spool.ts";
+
+export {
+  SEAT_MEMORY_WHITELIST,
+  SEAT_WRITE_FENCE_MESSAGE,
+  extractWriteTargets,
+  isSeatMemoryPathAllowed,
+  isSeatMemoryRelativePathAllowed,
+  judgeSeatFilePath,
+  judgeSeatShellCommand,
+};
 
 /**
  * The structural slice of PaseoApi the choke needs — tests pass a fake shaped
@@ -43,12 +68,53 @@ export interface PaseoResponderApi {
 
 /** The lifecycle event payload, structural so hermetic tests can build one. */
 export interface PermissionAskedEvent {
-  agent: { id: string; cwd: string };
+  agent: {
+    id: string;
+    cwd: string;
+    title?: string | null;
+    labels?: Record<string, string>;
+  };
   request: AgentPermissionRequest;
 }
 
 /** The claude catalog's "default" mode, labeled "Always Ask" (scout §2, grade A). */
 export const PINNED_MODE_ID = "default";
+
+const WORKTREE_PATH_PATTERN = /\/projects\/[^/]+\/worktrees\/[^/]+(?:\/|$)/;
+
+/**
+ * Whether `cwd` belongs to a contracted task Agent (as opposed to `<project-root>`
+ * when a task executes inside a managed Task worktree or when a Seat is seated there).
+ */
+export function isContractedAgentCwd(factory: Factory, cwd: string | undefined): boolean {
+  if (typeof cwd !== "string" || cwd === "") return false;
+  let contract: ContractSet | undefined;
+  try {
+    contract = factory.liveContractFor(cwd);
+  } catch {
+    return false;
+  }
+  if (contract === undefined) return false;
+  const worktree = factory.worktreeFor(contract.task);
+  if (worktree !== undefined && (cwd === worktree || cwd.startsWith(`${worktree}/`))) {
+    return true;
+  }
+  if (parseTaskWorktreePath(factory.stateDir, cwd) !== null || WORKTREE_PATH_PATTERN.test(cwd)) {
+    return true;
+  }
+  if (worktree !== undefined) {
+    // The contract executes inside its Task worktree, not at <project-root>.
+    return false;
+  }
+  for (const reg of listProjectRegistrations(factory.stateDir)) {
+    if ((reg.supervisor !== undefined || reg.lead !== undefined) && cwd === reg.root) {
+      return false;
+    }
+  }
+  return true;
+}
+
+export const isContractedWorkerCwd = isContractedAgentCwd;
 
 export interface ChokeOptions {
   factory: Factory;
@@ -64,12 +130,15 @@ export interface Choke {
   /** The spool's synthetic-ask handler — the battery's vehicle into the same judge and ledger. */
   spoolAskHandler(request: AskRequest): SpoolReply;
   /**
-   * The `agent.create` before-hook body (map decision 7): a contracted agent's
-   * permission mode is pinned to "Always Ask" so asks always surface — no
-   * asks would mean a blinded choke, the shim alone. Returns the rewritten
-   * config, or undefined when nothing changes.
+   * The `agent.create` before-hook body (map decision 7, provider-aware in
+   * v0.0.23 ADR 0015 §4): pins `modeId: "default"` ("Always Ask") ONLY for
+   * `claude` contracted task workers, never for `Supervisor`/`Lead` seats or
+   * non-Claude providers (`opencode`, `codex`, `pi`).
    */
-  pinCreateMode(config: AgentSessionConfig): AgentSessionConfig | undefined;
+  pinCreateMode<T extends { provider: string; cwd?: string; modeId?: string; title?: string | null }>(
+    config: T,
+    labels?: Record<string, string>,
+  ): T | undefined;
 }
 
 export function createChoke(options: ChokeOptions): Choke {
@@ -115,8 +184,82 @@ export function createChoke(options: ChokeOptions): Choke {
     return { decision: { behavior: "allow" } };
   };
 
+  const resolveSeatAskContext = (agent: PermissionAskedEvent["agent"]): { seat: SeatName; projectRoot: string } | undefined => {
+    const labelSeat = agent.labels?.seat;
+    if (labelSeat === "supervisor" || labelSeat === "lead") {
+      return { seat: labelSeat, projectRoot: agent.cwd };
+    }
+    if (agent.title === SEAT_TITLES.supervisor) {
+      return { seat: "supervisor", projectRoot: agent.cwd };
+    }
+    if (agent.title === SEAT_TITLES.lead) {
+      return { seat: "lead", projectRoot: agent.cwd };
+    }
+    for (const reg of listProjectRegistrations(factory.stateDir)) {
+      if (reg.supervisor === agent.id) {
+        return { seat: "supervisor", projectRoot: reg.root !== "" ? reg.root : agent.cwd };
+      }
+      if (reg.lead === agent.id) {
+        return { seat: "lead", projectRoot: reg.root !== "" ? reg.root : agent.cwd };
+      }
+    }
+    return undefined;
+  };
+
+  const decideSeat = (request: AgentPermissionRequest, projectRoot: string): { decision: ChokeDecision; command?: string } => {
+    const detail = request.detail;
+    if (detail !== undefined && detail.type === "shell" && typeof detail.command === "string") {
+      return {
+        decision: judgeSeatShellCommand(detail.command, projectRoot, factory.stateDir),
+        command: detail.command,
+      };
+    }
+    if (
+      detail !== undefined &&
+      (detail.type === "write" || detail.type === "edit") &&
+      typeof detail.filePath === "string"
+    ) {
+      return {
+        decision: judgeSeatFilePath(detail.filePath, projectRoot, factory.stateDir),
+        command: detail.filePath,
+      };
+    }
+    return { decision: { behavior: "allow" } };
+  };
+
   return {
     async onPermissionAsked({ agent, request }, paseo) {
+      const seatCtx = resolveSeatAskContext(agent);
+      if (seatCtx !== undefined) {
+        const { decision, command } = decideSeat(request, seatCtx.projectRoot);
+        const exactMessage =
+          decision.behavior === "deny" && decision.rule === "seat-write-fence" ? decision.reason : undefined;
+        const response = recordAsk(
+          factory,
+          log,
+          {
+            task: seatCtx.seat,
+            agent: agent.id,
+            name: request.name,
+            kind: request.kind,
+            ...(command === undefined ? {} : { command }),
+          },
+          decision,
+          exactMessage,
+        );
+        if (response === undefined) return;
+        try {
+          await paseo.agents.ref(agent.id).respondToPermission({ requestId: request.id, response });
+        } catch (err) {
+          log(
+            `choke: recorded the seat ask from agent ${agent.id} but could not answer it ` +
+              `(${err instanceof Error ? err.message : String(err)}) — the ask stays pending`,
+          );
+        }
+        return;
+      }
+
+      if (!isContractedAgentCwd(factory, agent.cwd)) return;
       let contract;
       try {
         contract = factory.liveContractFor(agent.cwd);
@@ -195,14 +338,12 @@ export function createChoke(options: ChokeOptions): Choke {
       };
     },
 
-    pinCreateMode(config) {
-      let covered;
-      try {
-        covered = factory.liveContractFor(config.cwd) !== undefined;
-      } catch {
-        return undefined; // never block agent creation on a lookup failure
-      }
-      if (!covered || config.modeId === PINNED_MODE_ID) return undefined;
+    pinCreateMode(config, labels) {
+      if (labels?.seat === "supervisor" || labels?.seat === "lead") return undefined;
+      if (config.title === SEAT_TITLES.supervisor || config.title === SEAT_TITLES.lead) return undefined;
+      const providerId = config.provider.split("/")[0]?.trim().toLowerCase() ?? "";
+      if (providerId !== "claude") return undefined;
+      if (!isContractedAgentCwd(factory, config.cwd) || config.modeId === PINNED_MODE_ID) return undefined;
       return { ...config, modeId: PINNED_MODE_ID };
     },
   };
@@ -218,6 +359,7 @@ function recordAsk(
   log: (message: string) => void,
   base: { task: string; agent: string; name: string; kind: string; command?: string },
   decision: ChokeDecision,
+  exactMessage?: string,
 ): AgentPermissionResponse | undefined {
   try {
     if (decision.behavior === "deny") {
@@ -232,7 +374,7 @@ function recordAsk(
     return undefined;
   }
   return decision.behavior === "deny"
-    ? { behavior: "deny", message: `paseo-factory choke: ${decision.reason} (${decision.rule})`, interrupt: false }
+    ? { behavior: "deny", message: exactMessage ?? `paseo-factory choke: ${decision.reason} (${decision.rule})`, interrupt: false }
     : { behavior: "allow" };
 }
 

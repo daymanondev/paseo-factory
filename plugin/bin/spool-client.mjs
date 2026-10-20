@@ -31,16 +31,23 @@ export function spoolRootFor(stateDir) {
   return join(stateDir, "spool");
 }
 
+function stampedSeatFromEnv(env = process.env) {
+  const raw = typeof env.PASEO_FACTORY_SEAT === "string" ? env.PASEO_FACTORY_SEAT.trim() : "";
+  return raw === "supervisor" || raw === "lead" || raw === "agent" ? raw : undefined;
+}
+
 /**
  * Drops a request file and returns it. The id travels in the filename and the
  * body — a reply to this exact id is the only thing this client will accept.
  */
 export function submit(spoolRoot, request) {
+  const seat = request.seat ?? stampedSeatFromEnv();
+  const payload = seat === undefined || request.seat !== undefined || request.kind === "claim" ? request : { ...request, seat };
   const requestsDir = join(spoolRoot, "requests");
   mkdirSync(requestsDir, { recursive: true });
-  const path = join(requestsDir, `${request.id}.json`);
+  const path = join(requestsDir, `${payload.id}.json`);
   const tmp = `${path}.${process.pid}.tmp`;
-  writeFileSync(tmp, `${JSON.stringify(request)}\n`);
+  writeFileSync(tmp, `${JSON.stringify(payload)}\n`);
   renameSync(tmp, path);
   return path;
 }

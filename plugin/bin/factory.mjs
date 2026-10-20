@@ -146,6 +146,20 @@ commands:
                                           repository; the message may ride as
                                           one positional instead of --message.
 
+  supervisor Seat-aware directive dispatch or Lead -> Supervisor reporting
+             (v0.0.23, ADR 0015 §3/§5).
+             supervisor dispatch [--project <slug>] [--workspace <dir>] --message "<text>"
+                                           route a directive into the Project's
+                                           Supervisor mailbox (to="supervisor")
+                                           when called from a normal chat, or
+                                           transparently into Lead (to="lead")
+                                           when called from Supervisor.
+             supervisor report [--project <slug>] [--workspace <dir>] --message "<text>"
+                                           queue a Lead wave-completion or
+                                           escalation report in the Project's
+                                           Supervisor mailbox (to="supervisor",
+                                           from="lead", kind="report").
+
   retro      Run the Retro over the whole ledger, on demand (v0.0.7): the
              plugin builds the corpus digest, prompts the configured retro
              lane from <stateDir>/lanes.json (default pi/zai/glm-5.3),
@@ -297,6 +311,8 @@ const ACCEPT_SEATS = ["owner", "supervisor", "lead"];
  */
 const stampedAgent = typeof process.env.PASEO_AGENT_ID === "string" ? process.env.PASEO_AGENT_ID.trim() : "";
 const submitter = stampedAgent === "" ? "owner" : stampedAgent;
+const rawSeat = typeof process.env.PASEO_FACTORY_SEAT === "string" ? process.env.PASEO_FACTORY_SEAT.trim() : "";
+const stampedSeat = rawSeat === "supervisor" || rawSeat === "lead" || rawSeat === "agent" ? rawSeat : undefined;
 
 // The event vocabulary the status reader understands — mirrored from
 // src/events.ts because the CLIs import no src/ code (ADR 0004). Kept on one
@@ -373,8 +389,13 @@ function waitSeconds(parsed, defaultSecs = DEFAULT_WAIT_SECS) {
 }
 
 async function roundTrip(request, waitSecs) {
-  submit(spoolRoot, request);
-  const reply = await awaitReply(spoolRoot, request.id, waitSecs * 1000);
+  const payload = {
+    ...request,
+    ...(request.submitter === undefined ? { submitter } : {}),
+    ...(stampedSeat === undefined || request.seat !== undefined ? {} : { seat: stampedSeat }),
+  };
+  submit(spoolRoot, payload);
+  const reply = await awaitReply(spoolRoot, payload.id, waitSecs * 1000);
   if (reply === null) {
     console.error(
       `factory: no reply from the factory plugin after ${waitSecs}s — is the plugin running on this home? ` +
@@ -572,6 +593,49 @@ if (command === "lead") {
   fail(`lead: unknown subcommand "${sub ?? "(none)"}" — use "lead rotate --project <dir>" or "lead dispatch --project <slug> --message \\"<text>\\""`);
 }
 
+if (command === "supervisor") {
+  const parsed = parseCommandOptions({
+    project: { type: "string" },
+    workspace: { type: "string" },
+    message: { type: "string" },
+    "wait-secs": { type: "string" },
+  });
+  const sub = parsed.positionals[0];
+
+  if (sub === "dispatch" || sub === "report") {
+    const message = typeof parsed.values.message === "string" ? parsed.values.message : parsed.positionals[1];
+    if (message === undefined || message.trim() === "") {
+      fail(`supervisor ${sub}: --message "<text>" is required (or one positional message)`);
+    }
+    if (parsed.positionals.length > 2) fail(`supervisor ${sub}: unexpected positional "${parsed.positionals[2]}"`);
+    if (parsed.values.message !== undefined && parsed.positionals.length > 1) {
+      fail(`supervisor ${sub}: pass the message either as --message or as one positional, not both`);
+    }
+    const hasProject = typeof parsed.values.project === "string" && parsed.values.project.trim() !== "";
+    const hasWorkspace = typeof parsed.values.workspace === "string" && parsed.values.workspace.trim() !== "";
+    if (!hasProject && !hasWorkspace) {
+      fail(`supervisor ${sub}: --project <slug> or --workspace <dir> is required — the target Project`);
+    }
+    if (hasProject && hasWorkspace) {
+      fail(`supervisor ${sub}: name exactly one target — --project <slug> or --workspace <dir>`);
+    }
+    const reply = await roundTrip(
+      {
+        id: randomId(),
+        kind: sub === "dispatch" ? "supervisor_dispatch" : "supervisor_report",
+        ...(hasProject ? { project: parsed.values.project.trim() } : {}),
+        ...(hasWorkspace ? { workspace: resolvePath(parsed.values.workspace) } : {}),
+        message,
+      },
+      waitSeconds(parsed),
+    );
+    console.log(`factory: ${reply.summary}`);
+    process.exit(0);
+  }
+
+  fail(`supervisor: unknown subcommand "${sub ?? "(none)"}" — use "supervisor dispatch --workspace <dir> --message \\"<text>\\"" or "supervisor report --workspace <dir> --message \\"<text>\\""`);
+}
+
 if (command === "run") {
   const parsed = parseCommandOptions({
     provider: { type: "string" },
@@ -579,6 +643,18 @@ if (command === "run") {
   });
   const tasks = parsed.positionals;
   if (tasks.length === 0) fail("run: at least one task id is required (factory run <task> [<task>…] [--provider <provider[/model]>])");
+  if (stampedSeat === "supervisor") {
+    console.error(
+      "factory: supervisor-cannot-contract-or-run: Supervisor cannot call factory run; dispatch the directive to Lead via 'factory lead dispatch --workspace <dir> --message <directive>' and end your turn.",
+    );
+    process.exit(2);
+  }
+  if (stampedSeat === "agent") {
+    console.error(
+      "factory: agent-cannot-orchestrate: Working Agent cannot call factory run; working Agents may only submit claims via 'factory-claim --task <task> --sha <sha>'.",
+    );
+    process.exit(2);
+  }
   // v0.0.13 precedence (ADR 0009 §3): explicit --provider wins; omitted
   // resolves through lanes.worker (default pi/zai/glm-5.3) — the resolver's
   // own refusal names a broken lanes.json, never a silent default.

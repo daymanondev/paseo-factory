@@ -7,7 +7,7 @@
  */
 export { createFactory } from "./factory.ts";
 export type { Factory, FactoryOptions, ContractInput, ClaimInput, ClaimOutcome, AcceptInput, SpawnInput, SpawnDecision, RespawnInput, RespawnDecision, MeterInput } from "./factory.ts";
-export { resolveProject, projectStateDir, readProjectRegistration, writeProjectRegistration, listProjectRegistrations, discoverProjects } from "./project.ts";
+export { resolveProject, projectStateDir, readProjectRegistration, writeProjectRegistration, ensureProjectRegistered, listProjectRegistrations, discoverProjects } from "./project.ts";
 export type { ProjectResolution, ProjectRegistration } from "./project.ts";
 export { resolveClaimedCommit, checkCleanAt, diffBetween, changedFiles, scopeCoversFile, headCommitSync, changesOutsideScope, landTaskWorktree, taskWorktreePath, parseTaskWorktreePath, taskWorktreeBranch, prepareTaskWorktree } from "./workspace.ts";
 export type { CommitResolution, TreeCheck, LandingResult, PrepareTaskWorktreeOptions, PrepareTaskWorktreeResult } from "./workspace.ts";
@@ -66,21 +66,65 @@ export {
   saveLanes,
 } from "./lanes.ts";
 export type { LaneCliInvocation, LaneCliRunner, LaneName, Lanes, LanesResult, ParsedLane } from "./lanes.ts";
-export { provisionPiAgentHome } from "./pi-home.ts";
+export { provisionPiAgentHome, renderRoleAppendSystem } from "./pi-home.ts";
 export type { PiAgentRole, ProvisionPiHomeOptions } from "./pi-home.ts";
+export {
+  FOOTER_MARK,
+  ROLE_SKILL_INDEX,
+  SEAT_TITLES,
+  renderRoleContract,
+  renderSeatBootstrapPrompt,
+  skillFooter,
+} from "./roles-contract.ts";
+export type { ProjectIdentity, RoleContractOptions, RoleName, SeatBootstrapInput, SeatName } from "./roles-contract.ts";
 export { ensureFactorySkill, ensureFactorySkillSafe, factorySkillPath, renderFactorySkill } from "./skill.ts";
 export type { FactorySkillInput } from "./skill.ts";
-export { ackLeadMail, deliverLeadMail, enqueueLeadMail, foldLeadMailboxEvents, readLeadMailbox, recoverLeadMailbox, requeueLeadMail } from "./mailbox.ts";
-export type { LeadMailFrom, LeadMailKind, LeadMailboxEvent, LeadMailItem, LeadMailboxState } from "./mailbox.ts";
+export {
+  ackLeadMail,
+  ackMailDelivery,
+  deliverLeadMail,
+  enqueueLeadMail,
+  foldLeadMailboxEvents,
+  foldMailboxEvents,
+  markMailDelivered,
+  readLeadMailbox,
+  recoverLeadMailbox,
+  requeueLeadMail,
+  requeueMailDelivery,
+} from "./mailbox.ts";
+export type {
+  InFlightDelivery,
+  LeadMailFrom,
+  LeadMailItem,
+  LeadMailKind,
+  LeadMailMessage,
+  LeadMailboxEvent,
+  LeadMailboxState,
+  MailAckedEvent,
+  MailDeliveredEvent,
+  MailKind,
+  MailQueuedEvent,
+  MailRecipient,
+  MailRequeuedEvent,
+  MailSource,
+} from "./mailbox.ts";
 export { buildVaultPath, clearGhAuthCache, createDefaultVaultRunner, ensureLocalGitExcludeAndWorktreeInclude, ensureRemoteVaultRepo, hydrateVaultDirect, importVaultSecrets, loadVaultConfig, parseVaultManifest, probeGhAuth, pullVault, pushVault, readVaultStatus, reconcileVaultLedgers, resolveVaultApps, saveVaultConfig, sealVaultBuffer, syncVault, unsealVaultBuffer } from "./vault.ts";
 export type { HydrateVaultDirectOptions, ImportVaultSecretsInput, ImportVaultSecretsResult, PullVaultOptions, PushVaultOptions, ResolvedVaultApp, SyncVaultOptions, SyncVaultResult, VaultConfig, VaultEnvelope, VaultGhAuthStatus, VaultHydrationResult, VaultLedgerSource, VaultManifest, VaultManifestEntry, VaultPushResult, VaultRunner, VaultRunnerCall, VaultRuntimeEnv, VaultStatusView, VaultTransportOptions } from "./vault.ts";
 export {
   judgeShellCommand,
   judgeFilePath,
+  judgeSeatShellCommand,
+  judgeSeatFilePath,
+  extractWriteTargets,
   refuseGitArgv,
+  refuseSupervisorGitArgv,
   shellTokens,
   writableRootsFor,
   MEMORY_FILES,
+  SEAT_MEMORY_WHITELIST,
+  SEAT_WRITE_FENCE_MESSAGE,
+  isSeatMemoryPathAllowed,
+  isSeatMemoryRelativePathAllowed,
 } from "./choke.ts";
 export type { ChokeDecision, GitRefusal, WritableRoots, MemoryFence, MemoryFileName } from "./choke.ts";
 export {

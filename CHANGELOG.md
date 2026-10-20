@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.23] - 2026-10-20
+
+v0.0.23's one thing: **enforced SLP command & write boundaries (`Seat write fence`), bidirectional `Supervisor ⇄ Lead` mailbox (`supervisor dispatch` / `supervisor report`), provider-aware mode pinning, and workspace-bound `Agent` spawning with parentage & auto-archive** — closing five live end-to-end orchestration failures discovered on Paseo Desktop (`opencode` / `claude`) so `Supervisor`, `Lead`, and working `Agent`s stay strictly inside their seats and workspaces from `/factory <directive>` through green `Accept` (ADR 0015).
+
+### Added
+
+- **Bidirectional `Supervisor ⇄ Lead` mailbox (`to: "lead" | "supervisor"`), `factory supervisor dispatch`, and `factory supervisor report` (`src/mailbox.ts`, `plugin/server/lead-mailbox.ts`, `plugin/server/spool.ts`, `plugin/bin/factory.mjs`, pinned in `test/mailbox.test.ts`, `test/lead-mailbox.test.ts`, and `test/cli.test.ts`)** —
+  `<projectStateDir>/mailbox.jsonl` partitions queues and in-flight deliveries independently for `to: "lead"` and `to: "supervisor"` (defaulting historical lines to `"lead"`). `factory supervisor dispatch` routes from a normal chat or CLI into `to: "supervisor"` (auto-ensuring `Supervisor` and instructing the caller to end its turn immediately) and transparently delegates to `lead_dispatch` (`to: "lead"`) when called inside `Supervisor` (`PASEO_FACTORY_SEAT=supervisor`). `factory supervisor report` lets `Lead` report wave completion or escalate questions back to `Supervisor` (`to: "supervisor"`), delivered when `Supervisor` is idle and acked on `agent.turn_ended` (`outcome === "completed"`), alongside automatic `to: "supervisor"` notifications on `needs_human`.
+- **Unified role contracts (`src/roles-contract.ts`) and Spool command authority (`plugin/server/roles.ts`, `src/pi-home.ts`, `plugin/server/spool.ts`, pinned in `test/roles.test.ts`, `test/pi-home.test.ts`, and `test/cli.test.ts`)** —
+  `src/roles-contract.ts` is the single source of truth for `Supervisor`, `Lead`, and `Agent` system prompts and bootstraps across all providers (`config.systemPrompt` and `APPEND_SYSTEM.md`), teaching `Supervisor`'s Fire-and-End-Turn law (`factory lead dispatch` then end turn; no `sleep` polling, task decomposition, or coding) and `Lead`'s wave-report return step (`factory supervisor report`). The Spool enforces seat authority on `contract`, `spawn`, `respawn`, and `supervisor_report` (`supervisor-cannot-contract-or-run`, `agent-cannot-orchestrate`).
+- **Multi-provider `/factory` skill reconciliation (`src/skill.ts`, `plugin/index.server.ts`, pinned in `test/skill.test.ts`)** —
+  `renderFactorySkill` teaches the deterministic `factory supervisor dispatch --workspace "$PWD" --message "<directive>"` command + immediate turn stop, and `ensureFactorySkillSafe` reconciles `SKILL.md` into both `~/.agents/skills/factory/SKILL.md` and `~/.claude/skills/factory/SKILL.md` at plugin boot.
+
+### Fixed
+
+- **Provider-aware `pinCreateMode`, strict worker vs. seat recognition, and mechanical `Seat write fence` (`src/choke.ts`, `plugin/server/choke.ts`, `plugin/server/shell.ts`, pinned in `test/choke.test.ts` and `test/shell.test.ts`)** —
+  `pinCreateMode` only sets `modeId: "default"` when the provider prefix is `"claude"` and the `cwd` is a contracted `Task worktree` (`/projects/<slug>/worktrees/<task>`), leaving `opencode`, `codex`, and `pi` `modeId` untouched and never pinning `Supervisor` or `Lead` at `<project-root>`. `choke.onPermissionAsked` enforces `seat-write-fence` on `Supervisor` and `Lead` (allowing only `SEAT_MEMORY_WHITELIST`: `AGENTS.md`, `CLAUDE.md`, `CONTEXT.md`, `GLOSSARY.md`, `.gitignore`, `.worktreeinclude`, `docs/**`, `.scratch/**`, `<stateDir>/**`, and temp dirs, while denying source edits and package-install commands on `<project-root>`), and the `Git shim` enforces `supervisor-git-fence` and `lead-git-fence`.
+- **Workspace-bound seat & `Agent` spawning (`workspaces.open` / `projectId`), `parent` hierarchy, and automatic archive (`plugin/server/surface-rpc.ts`, `plugin/server/spool.ts`, `plugin/bin/driver.mjs`, `src/project.ts`, pinned in `test/surface-rpc.test.ts` and `test/driver.test.ts`)** —
+  `ensureSeat` opens/reuses the `Project`'s Paseo workspace (`workspaces.open({ cwd: project.root })`) and sets `parent: supervisorId` on `Lead`; `spawn` / `respawn` registers the `Task worktree` workspace bound to the `Project`'s Paseo `projectId` and passes `parent: leadAgentId`, `workspaceId`, and `{ seat: "agent", project: <slug>, task }` labels to `createTaskAgent` so Paseo Desktop never creates rogue top-level `T-01` / `T-02` Projects or duplicate Workspaces; and finished/superseded working `Agent`s and accepted `Task worktree` workspaces are archived automatically (`agents.ref(id).archive()`, `workspaces.archive(workspaceId)`).
+- `package.json` + `SHELL_VERSION` → `0.0.23`. Suite 522 → 542.
+
 ## [0.0.22] - 2026-10-20
 
 v0.0.22's one thing: **the built-in Header `Private vault` Sync Bar** — the

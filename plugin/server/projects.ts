@@ -15,6 +15,7 @@
 export {
   readProjectRegistration,
   writeProjectRegistration,
+  ensureProjectRegistered,
   listProjectRegistrations,
   discoverProjects,
 } from "./core/project.ts";

@@ -608,3 +608,263 @@ test("factory accept --by <seat>: the flag rides the spool; the Lead's rules ans
   const accepted2 = factory2.ledger.eventsFor("SEAT3").find((e) => e.event === "attempt_accepted");
   assert.equal(accepted2 === undefined ? undefined : accepted2.accepted_by, "lead");
 });
+
+test("factory CLI stamps PASEO_FACTORY_SEAT onto spool requests and enforces seat command authority (v0.0.23, ADR 0015 §1)", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const workspace = join(dir, "workspace");
+  copyFixture("sample-workspace", workspace);
+  gitCommitAll(workspace);
+  writeFileSync(
+    join(workspace, "src", "format.ts"),
+    [
+      "export function pad(input: string, width: number): string {",
+      "  if (input.length >= width) return input.slice(0, width);",
+      "  return input + \" \".repeat(width - input.length);",
+      "}",
+      "",
+    ].join("\n"),
+  );
+  const sha = gitCommitChanges(workspace, "green implementation");
+  const home = join(dir, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+
+  const factory = createFactory({ stateDir });
+  const dispatched: Record<string, unknown>[] = [];
+  const spool = startSpool(stateDir, factory, {
+    pollMs: 20,
+    leadDispatch: async (request) => {
+      dispatched.push({ ...request });
+      return {
+        id: request.id,
+        ok: true,
+        summary: "dispatched to lead",
+        project: "workspace",
+        leadAgentId: "agent-lead-1",
+        mailId: "mail-1",
+        rotationState: "normal",
+      };
+    },
+  });
+  t.after(() => spool.stop());
+
+  const supEnv = { PASEO_HOME: home, PASEO_AGENT_ID: "agent-sup-1", PASEO_FACTORY_SEAT: "supervisor" };
+  const leadEnv = { PASEO_HOME: home, PASEO_AGENT_ID: "agent-lead-1", PASEO_FACTORY_SEAT: "lead" };
+  const workerEnv = { PASEO_HOME: home, PASEO_AGENT_ID: "agent-worker-1", PASEO_FACTORY_SEAT: "agent" };
+
+  // Supervisor calling `factory contract` is refused with supervisor-cannot-contract-or-run.
+  const supContract = await run(
+    ownerCli,
+    ["contract", "--task", "T-AUTH", "--workspace", workspace, "--gate", "true", "--artifact", "src/format.ts"],
+    supEnv,
+  );
+  assert.equal(supContract.status, 2);
+  assert.match(supContract.stderr, /supervisor-cannot-contract-or-run/);
+  assert.match(supContract.stderr, /factory lead dispatch/);
+  assert.equal(factory.ledger.eventsFor("T-AUTH").length, 0, "no contract_set written when Supervisor is refused");
+
+  // Supervisor calling `factory run` is refused with supervisor-cannot-contract-or-run.
+  const supRun = await run(ownerCli, ["run", "T-AUTH"], supEnv);
+  assert.equal(supRun.status, 2);
+  assert.match(supRun.stderr, /supervisor-cannot-contract-or-run/);
+
+  // Supervisor CAN call `factory lead dispatch`, and its seat stamp rides the request.
+  const supDispatch = await run(ownerCli, ["lead", "dispatch", "--workspace", workspace, "--message", "Build T-AUTH"], supEnv);
+  assert.equal(supDispatch.status, 0, supDispatch.stderr);
+  assert.equal(dispatched.length, 1);
+  assert.equal(dispatched[0]?.seat, "supervisor");
+
+  // Lead CAN call `factory contract`.
+  const leadContract = await run(
+    ownerCli,
+    ["contract", "--task", "T-AUTH", "--workspace", workspace, "--gate", "true", "--artifact", "src/format.ts"],
+    leadEnv,
+  );
+  assert.equal(leadContract.status, 0, leadContract.stderr);
+
+  // Working Agent (PASEO_FACTORY_SEAT=agent) is refused on contract, run, accept, lead dispatch, lead rotate.
+  const agContract = await run(
+    ownerCli,
+    ["contract", "--task", "T-AG", "--workspace", workspace, "--gate", "true", "--artifact", "src/format.ts"],
+    workerEnv,
+  );
+  assert.equal(agContract.status, 2);
+  assert.match(agContract.stderr, /agent-cannot-orchestrate/);
+
+  const agRun = await run(ownerCli, ["run", "T-AUTH"], workerEnv);
+  assert.equal(agRun.status, 2);
+  assert.match(agRun.stderr, /agent-cannot-orchestrate/);
+
+  const agDispatch = await run(ownerCli, ["lead", "dispatch", "--workspace", workspace, "--message", "no"], workerEnv);
+  assert.equal(agDispatch.status, 2);
+  assert.match(agDispatch.stderr, /agent-cannot-orchestrate/);
+
+  const agRotate = await run(ownerCli, ["lead", "rotate", "--project", workspace], workerEnv);
+  assert.equal(agRotate.status, 2);
+  assert.match(agRotate.stderr, /agent-cannot-orchestrate/);
+
+  // Working Agent CAN claim via factory-claim.
+  const claimed = await run(claimCli, ["--task", "T-AUTH", "--sha", sha], {
+    FACTORY_STATE_DIR: stateDir,
+    PASEO_AGENT_ID: "agent-worker-1",
+    PASEO_FACTORY_SEAT: "agent",
+  });
+  assert.equal(claimed.status, 0, claimed.stderr);
+
+  // Working Agent still cannot accept its own green attempt.
+  const agAccept = await run(ownerCli, ["accept", "T-AUTH", "--attempt", "1"], workerEnv);
+  assert.equal(agAccept.status, 2);
+  assert.match(agAccept.stderr, /agent-cannot-orchestrate/);
+
+  // Supervisor CAN accept --by supervisor on the Owner's word.
+  const supAccept = await run(ownerCli, ["accept", "T-AUTH", "--attempt", "1", "--by", "supervisor"], supEnv);
+  assert.equal(supAccept.status, 0, supAccept.stderr);
+});
+
+test("factory supervisor dispatch and factory supervisor report: usage refusals, seat routing, and spool round trip (v0.0.23, ADR 0015 §3/§5)", async (t) => {
+  // Usage refusals before any submission.
+  const noTargetDispatch = await run(ownerCli, ["supervisor", "dispatch", "--message", "x"], {});
+  assert.equal(noTargetDispatch.status, 2);
+  assert.match(noTargetDispatch.stderr, /--project <slug> or --workspace <dir> is required/);
+
+  const noMsgDispatch = await run(ownerCli, ["supervisor", "dispatch", "--project", "demo-slug"], {});
+  assert.equal(noMsgDispatch.status, 2);
+  assert.match(noMsgDispatch.stderr, /--message/);
+
+  const noTargetReport = await run(ownerCli, ["supervisor", "report", "--message", "wave green"], {});
+  assert.equal(noTargetReport.status, 2);
+  assert.match(noTargetReport.stderr, /--project <slug> or --workspace <dir> is required/);
+
+  const noMsgReport = await run(ownerCli, ["supervisor", "report", "--project", "demo-slug"], {});
+  assert.equal(noMsgReport.status, 2);
+  assert.match(noMsgReport.stderr, /--message/);
+
+  const badSub = await run(ownerCli, ["supervisor", "teleport", "--project", "demo-slug"], {});
+  assert.equal(badSub.status, 2);
+  assert.match(badSub.stderr, /unknown subcommand "teleport"/);
+
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const workspace = join(dir, "repo");
+  mkdirSync(workspace, { recursive: true });
+  writeFileSync(join(workspace, "README.md"), "x\n");
+  gitCommitAll(workspace);
+  const home = join(dir, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const factory = createFactory({ stateDir });
+
+  const supDispatched: Record<string, unknown>[] = [];
+  const leadDispatched: Record<string, unknown>[] = [];
+  const supReported: Record<string, unknown>[] = [];
+
+  const spool = startSpool(stateDir, factory, {
+    pollMs: 20,
+    leadDispatch: async (request) => {
+      leadDispatched.push({ ...request });
+      return {
+        id: request.id,
+        ok: true,
+        summary: "dispatched to the lead of repo",
+        project: "repo",
+        leadAgentId: "agent-lead-1",
+        mailId: "mail-lead-1",
+        rotationState: "normal",
+      };
+    },
+    supervisorDispatch: async (request) => {
+      if (request.seat === "supervisor") {
+        leadDispatched.push({ ...request, kind: "lead_dispatch", from: "supervisor" });
+        return {
+          id: request.id,
+          ok: true,
+          summary: "directive dispatched to Lead (agent-lead-1) — end your turn now and wait for Lead's report",
+          project: "repo",
+          leadAgentId: "agent-lead-1",
+          mailId: "mail-lead-1",
+          rotationState: "normal",
+        };
+      }
+      supDispatched.push({ ...request });
+      return {
+        id: request.id,
+        ok: true,
+        summary: "directive routed to Supervisor (agent-sup-1) — stop this turn immediately without editing files and open the Supervisor session",
+        project: "repo",
+        supervisorAgentId: "agent-sup-1",
+        mailId: "mail-sup-1",
+      };
+    },
+    supervisorReport: async (request) => {
+      supReported.push({ ...request });
+      return {
+        id: request.id,
+        ok: true,
+        summary: "report queued for Supervisor (agent-sup-1) — end your turn",
+        project: "repo",
+        supervisorAgentId: "agent-sup-1",
+        mailId: "mail-rep-1",
+      };
+    },
+  });
+  t.after(() => spool.stop());
+
+  // 1. Normal chat (PASEO_FACTORY_SEAT unset): routes to Supervisor.
+  const chatDispatch = await run(
+    ownerCli,
+    ["--home", home, "supervisor", "dispatch", "--workspace", workspace, "--message", "Build 2048", "--wait-secs", "10"],
+    {},
+  );
+  assert.equal(chatDispatch.status, 0, chatDispatch.stderr);
+  assert.match(chatDispatch.stdout, /directive routed to Supervisor \(agent-sup-1\)/);
+  assert.match(chatDispatch.stdout, /stop this turn immediately without editing files/);
+  assert.equal(supDispatched.length, 1);
+  assert.equal(supDispatched[0]?.kind, "supervisor_dispatch");
+  assert.equal(supDispatched[0]?.workspace, workspace);
+  assert.equal(supDispatched[0]?.message, "Build 2048");
+  assert.equal(supDispatched[0]?.submitter, "owner");
+
+  // 2. Inside Supervisor (PASEO_FACTORY_SEAT=supervisor): routes to Lead.
+  const fromSupDispatch = await run(
+    ownerCli,
+    ["--home", home, "supervisor", "dispatch", "--workspace", workspace, "--message", "Ship wave 1", "--wait-secs", "10"],
+    { PASEO_FACTORY_SEAT: "supervisor", PASEO_AGENT_ID: "agent-sup-1" },
+  );
+  assert.equal(fromSupDispatch.status, 0, fromSupDispatch.stderr);
+  assert.match(fromSupDispatch.stdout, /directive dispatched to Lead \(agent-lead-1\)/);
+  assert.match(fromSupDispatch.stdout, /end your turn now and wait for Lead's report/);
+  assert.equal(leadDispatched.length, 1);
+  assert.equal(leadDispatched[0]?.seat, "supervisor");
+  assert.equal(leadDispatched[0]?.submitter, "agent-sup-1");
+
+  // 3. Lead calling `factory supervisor report`: queues report for Supervisor.
+  const leadReport = await run(
+    ownerCli,
+    ["--home", home, "supervisor", "report", "--workspace", workspace, "--message", "Wave 1 accepted and landed", "--wait-secs", "10"],
+    { PASEO_FACTORY_SEAT: "lead", PASEO_AGENT_ID: "agent-lead-1" },
+  );
+  assert.equal(leadReport.status, 0, leadReport.stderr);
+  assert.match(leadReport.stdout, /report queued for Supervisor \(agent-sup-1\) — end your turn/);
+  assert.equal(supReported.length, 1);
+  assert.equal(supReported[0]?.kind, "supervisor_report");
+  assert.equal(supReported[0]?.seat, "lead");
+  assert.equal(supReported[0]?.submitter, "agent-lead-1");
+  assert.equal(supReported[0]?.message, "Wave 1 accepted and landed");
+
+  // 4. Working Agent calling `factory supervisor dispatch` or `factory supervisor report` is refused.
+  const agSupDispatch = await run(
+    ownerCli,
+    ["--home", home, "supervisor", "dispatch", "--workspace", workspace, "--message", "nope", "--wait-secs", "10"],
+    { PASEO_FACTORY_SEAT: "agent", PASEO_AGENT_ID: "agent-worker-1" },
+  );
+  assert.equal(agSupDispatch.status, 2);
+  assert.match(agSupDispatch.stderr, /agent-cannot-orchestrate/);
+
+  const agSupReport = await run(
+    ownerCli,
+    ["--home", home, "supervisor", "report", "--workspace", workspace, "--message", "nope", "--wait-secs", "10"],
+    { PASEO_FACTORY_SEAT: "agent", PASEO_AGENT_ID: "agent-worker-1" },
+  );
+  assert.equal(agSupReport.status, 2);
+  assert.match(agSupReport.stderr, /agent-cannot-orchestrate/);
+});
+
