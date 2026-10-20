@@ -40,7 +40,7 @@ import { SEAT_TITLES, renderSeatBootstrap } from "./roles.ts";
 import type { SeatName } from "./roles.ts";
 import { discoverProjects, writeProjectRegistration } from "./projects.ts";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { COMPANION_CATALOG, CORE_PLUGIN_ENTRY } from "../shared/companions.ts";
+import { COMPANION_CATALOG, CORE_PLUGIN_ENTRY, MANAGEABLE_PLUGIN_IDS } from "../shared/companions.ts";
 import type { CompanionCatalogEntry, ManageablePluginId } from "../shared/companions.ts";
 import type { SpoolLeadDispatchRequest, SpoolReply } from "./spool.ts";
 import {
@@ -1423,9 +1423,8 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         const lister = deps.listPlugins ?? listDaemonPlugins;
         const listed = await lister(deps.home);
         if (!listed.ok) return failure("daemon_failed", listed.reason);
-        const familyIds = new Set<string>([CORE_PLUGIN_ENTRY.id, ...COMPANION_CATALOG.map((c) => c.id)]);
         const remoteInstalled = listed.plugins.filter((p) => {
-          if (!familyIds.has(p.id)) return false;
+          if (!MANAGEABLE_PLUGIN_IDS.has(p.id)) return false;
           const kind = p.installation?.identity?.kind ?? p.source;
           return kind === "git" || kind === "npm";
         });
@@ -1481,9 +1480,8 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       const map = new Map<string, DaemonPluginSourceStatus>();
       for (const row of reply.statuses) map.set(row.id, row);
       localUpdateSnapshot = { statuses: map, checkedAt: reply.checkedAt };
-      const familyIds = new Set<string>([CORE_PLUGIN_ENTRY.id, ...COMPANION_CATALOG.map((c) => c.id)]);
       const updatesAvailable = reply.statuses
-        .filter((row) => familyIds.has(row.id) && row.updateAvailable === true)
+        .filter((row) => MANAGEABLE_PLUGIN_IDS.has(row.id) && row.updateAvailable === true)
         .map((row) => row.id);
       const summary =
         updatesAvailable.length > 0

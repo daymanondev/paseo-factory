@@ -51,6 +51,14 @@ export const CORE_PLUGIN_ENTRY: CorePluginCatalogEntry = {
 /** Every plugin id the Plugins tab can manage (Core + Companions). */
 export type ManageablePluginId = CorePluginCatalogEntry["id"] | CompanionCatalogEntry["id"];
 
+/** Set of every plugin id managed by the Factory surface (Core + Companions). */
+export const MANAGEABLE_PLUGIN_IDS: ReadonlySet<string> = new Set<string>([
+  "paseo-factory",
+  "factory-burn-lab",
+  "factory-connector",
+  "factory-release-lab",
+]);
+
 /** The official Factory companion family — catalog order is the card order. */
 export const COMPANION_CATALOG: readonly CompanionCatalogEntry[] = [
   {
