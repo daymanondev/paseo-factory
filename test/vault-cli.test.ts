@@ -307,6 +307,10 @@ test("factory vault status prints exactly readVaultStatus's view — a pure loca
     lastPushedAt: "2026-10-20T11:30:00.000Z",
     sharedSecrets: { ascKey: true, ascCredentials: false, gplayServiceAccount: false, eyeConfig: false },
     hydratedApps: [],
+    ghInstalled: false,
+    ghAuthenticated: false,
+    ghUser: null,
+    suggestedRepo: null,
     error: null,
   });
 });

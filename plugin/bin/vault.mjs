@@ -122,7 +122,7 @@ export function saveVaultConfig(paseoHome, config) {
   return full;
 }
 
-export function readVaultStatus(paseoHome, passphrase) {
+export function readVaultStatus(paseoHome, passphrase, ghAuth) {
   let config = null;
   let error = null;
   try {
@@ -149,6 +149,10 @@ export function readVaultStatus(paseoHome, passphrase) {
       eyeConfig: sharedSecretExists(paseoHome, SHARED_SECRET_FILES.eyeConfig),
     },
     hydratedApps: hydratedAppKeys(paseoHome),
+    ghInstalled: ghAuth?.ghInstalled ?? false,
+    ghAuthenticated: ghAuth?.ghAuthenticated ?? false,
+    ghUser: ghAuth?.ghUser ?? null,
+    suggestedRepo: ghAuth?.suggestedRepo ?? null,
     error,
   };
 }

@@ -257,6 +257,10 @@ export const VaultStatusViewSchema = z.object({
     eyeConfig: z.boolean(),
   }),
   hydratedApps: z.array(z.string()),
+  ghInstalled: z.boolean(),
+  ghAuthenticated: z.boolean(),
+  ghUser: z.string().nullable(),
+  suggestedRepo: z.string().nullable(),
   error: z.string().nullable(),
 });
 export type VaultStatusView = z.infer<typeof VaultStatusViewSchema>;

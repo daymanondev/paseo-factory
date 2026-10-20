@@ -42,6 +42,10 @@ export interface VaultStatusView {
     eyeConfig: boolean;
   };
   hydratedApps: string[];
+  ghInstalled: boolean;
+  ghAuthenticated: boolean;
+  ghUser: string | null;
+  suggestedRepo: string | null;
   error: string | null;
 }
 
