@@ -33,7 +33,7 @@ export interface CorePluginCatalogEntry {
 }
 
 /** Default semantic version for the Core plugin when the daemon list does not carry a disk path (e.g. unit test fixtures). */
-export const CORE_PLUGIN_DEFAULT_VERSION = "0.0.25";
+export const CORE_PLUGIN_DEFAULT_VERSION = "0.0.26";
 
 /** The Core Factory plugin entry — rendered at the top of the Plugins tab above the companion catalog (v0.0.25, ADR 0012 §2). */
 export const CORE_PLUGIN_ENTRY: CorePluginCatalogEntry = {

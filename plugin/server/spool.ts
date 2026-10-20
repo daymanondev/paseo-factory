@@ -120,6 +120,8 @@ export interface SpawnRequest {
    * through it. Optional: the legacy shared-checkout path sends none.
    */
   worktree?: string;
+  /** Optional prompt when `lead_spawn_agent` MCP tool requests the plugin to create the daemon agent directly (v0.0.26). */
+  prompt?: string;
   submitter?: string;
   /** Caller seat stamped from `PASEO_FACTORY_SEAT` when present (v0.0.23, ADR 0015 §1). */
   seat?: SpoolSeat;
@@ -508,6 +510,7 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       return undefined;
     }
     if (req.worktree !== undefined && (typeof req.worktree !== "string" || req.worktree.trim() === "")) return undefined;
+    if (req.prompt !== undefined && typeof req.prompt !== "string") return undefined;
     return {
       id: req.id,
       kind: "spawn",
@@ -515,6 +518,7 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       provider: req.provider,
       arity: req.arity,
       ...(req.worktree === undefined ? {} : { worktree: req.worktree }),
+      ...(req.prompt === undefined ? {} : { prompt: req.prompt }),
       ...submitterField,
       ...seatField,
     };
@@ -543,7 +547,7 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     if (typeof req.message !== "string" || req.message.trim() === "") return undefined;
     if (req.project !== undefined && (typeof req.project !== "string" || req.project.trim() === "")) return undefined;
     if (req.workspace !== undefined && (typeof req.workspace !== "string" || req.workspace.trim() === "")) return undefined;
-    if (req.from !== undefined && req.from !== "supervisor" && req.from !== "owner" && req.from !== "peer") return undefined;
+    if (req.from !== undefined && req.from !== "supervisor" && req.from !== "owner" && !(req.from === "peer" && req.seat === "agent")) return undefined;
     return {
       id: req.id,
       kind: "lead_dispatch",
@@ -652,7 +656,7 @@ async function resolveEffectiveSeat(
   const submitter =
     "submitter" in request && typeof request.submitter === "string"
       ? request.submitter.trim()
-      : "agent" in request && typeof request.agent === "string"
+      : request.kind === "claim" && typeof request.agent === "string"
         ? request.agent.trim()
         : "";
   if (submitter !== "" && submitter !== "owner") {
@@ -998,12 +1002,44 @@ export async function handleSpoolRequest(
         return { id: request.id, ok: false, code: decision.code, message: decision.event.reason, event: decision.event };
       }
       const spawnMeta = await resolveSpawnWorkspaceAndParent(factory, resolvedDaemon, request.task, request.worktree);
+      let spawnedAgentId: string | undefined;
+      if (request.prompt !== undefined && request.prompt !== "" && resolvedDaemon !== undefined) {
+        const contract = factory.contractFor(request.task);
+        const targetCwd = request.worktree ?? contract?.workspace ?? "";
+        const proj = contract !== undefined ? resolveProject(contract.workspace) : undefined;
+        const labels: Record<string, string> = {
+          seat: "agent",
+          task: request.task,
+          ...(proj?.ok ? { project: proj.slug } : {}),
+        };
+        if (spawnMeta.workspaceId !== undefined && resolvedDaemon.workspaces !== undefined) {
+          const created = await resolvedDaemon.workspaces.ref(spawnMeta.workspaceId).agents.create({
+            config: { provider: sanitizedProvider },
+            title: request.task,
+            labels,
+            prompt: request.prompt,
+            ...(spawnMeta.leadAgentId !== undefined ? { parent: spawnMeta.leadAgentId } : {}),
+          });
+          spawnedAgentId = created.id;
+        } else if (typeof resolvedDaemon.agents?.create === "function") {
+          const created = await resolvedDaemon.agents.create({
+            config: { provider: sanitizedProvider },
+            cwd: targetCwd,
+            title: request.task,
+            labels,
+            prompt: request.prompt,
+            ...(spawnMeta.leadAgentId !== undefined ? { parent: spawnMeta.leadAgentId } : {}),
+          });
+          spawnedAgentId = created.id;
+        }
+      }
       return {
         id: request.id,
         ok: true,
-        summary: `spawn dispatched for ${request.task} under ${sanitizedProvider} (n=${request.arity})`,
+        summary: `spawn dispatched for ${request.task} under ${sanitizedProvider} (n=${request.arity})${spawnedAgentId ? ` → agent ${spawnedAgentId}` : ""}`,
         event: decision.event,
         ...spawnMeta,
+        ...(spawnedAgentId !== undefined ? { agentId: spawnedAgentId } : {}),
       };
     }
     if (request.kind === "respawn") {

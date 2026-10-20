@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.26] - 2026-10-21
+
+v0.0.26's one thing: **role-scoped MCP bridge (`paseo_factory`), unforgeable `Correlation token` seat identity (`cor_<uuid>`), 2-step seat launch with Turn-1 `Seat kickoff packet`, process-group `Gate` reaping, and 3-layer execution fence across all 7 Paseo providers (`claude-code`, `codex`, `opencode`, `copilot`, `cursor`, `pi`, `antigravity`)** (ADR 0016).
+
+### Added
+
+- **Role-scoped `paseo_factory` stdio MCP server (`plugin/bin/bridge.mjs`) and `CorrelationRegistry` (`src/correlations.ts`, `plugin/server/correlations.ts`, `plugin/server/spool.ts`, `plugin/server/lead-mailbox.ts`, pinned in `test/bridge-mcp.test.ts`)** —
+  `CorrelationRegistry` issues a cryptographic `cor_<uuid>` token in `agent.create`, associates it with the live `agentId` in `agent.session_open`, and persists `<stateDir>/correlations.json`. `plugin/bin/bridge.mjs` exposes strictly role-scoped MCP tools in `tools/list` and enforces role boundaries in `tools/call` across newline-delimited and `Content-Length` framed JSON-RPC (`supervisor_dispatch_lead`, `supervisor_accept_task`, `factory_status` for `Supervisor`; `lead_set_contract`, `lead_spawn_agent`, `lead_accept_task`, `lead_repoke_agent`, `lead_needs_human`, `lead_report_to_supervisor`, `factory_status` for `Lead`; `agent_claim`, `agent_escalate_blocker` for `Agent`; `factory_dispatch_supervisor`, `factory_status` for unbound callers).
+- **Turn-1 `Seat kickoff packet` (`src/preflight.ts`, `plugin/server/lead-mailbox.ts`, `plugin/server/surface-rpc.ts`, pinned in `test/lead-mailbox.test.ts` and `test/slp-lifecycle.test.ts`)** —
+  `buildSeatKickoffPacket` computes a `<50ms` deterministic repository preflight (git branch/HEAD/status, `package.json` scripts and build markers, top-level files, memory/docs presence, active lanes, folded `Ledger` task digest, and role MCP tool reference) and prepends it to Turn 1 of every newly created or rotated `Supervisor` and `Lead` seat. `ensureSeat` verifies seat `cwd` health alongside `status !== "error"` before reusing an existing seat.
+- **3-layer execution fence across all 7 providers (`src/agy-home.ts`, `src/pi-home.ts`, `src/choke.ts`, `plugin/server/roles.ts`, `plugin/server/choke.ts`, `plugin/server/shell.ts`, `plugin/bin/agy-pre-tool-hook.mjs`, `plugin/bin/exec-shim.mjs`, pinned in `test/roles.test.ts`, `test/pi-home.test.ts`, `test/choke.test.ts`, `test/shell.test.ts`, and `test/slp-lifecycle.test.ts`)** —
+  Layer 1 wires `paseo_factory` MCP and provider-native tool/permission restrictions in `agent.create` (and provisions `<agyPluginsDir>/paseo-factory` for `antigravity` without passing `config.mcpServers` or `labels`). Layer 2 enforces `seat-paseo-tool-fence`, `<stateDir>` state-file protection, and `pkill plugin-process.js` denial in `choke.onPermissionAsked` and `agy-pre-tool-hook.mjs`. Layer 3 installs OS `PATH` shims in `<stateDir>/bin` for `git`, `pkill`, `kill`, `killall`, `paseo`, and `gh`.
+
+### Fixed
+
+- **Process-group reaping in `runGate` (`src/gate.ts`, pinned in `test/gate.test.ts` and `test/slp-lifecycle.test.ts`)** —
+  `runGate` spawns the gate command in a detached process group and reaps `-child.pid` (`SIGTERM` → `SIGKILL`) immediately when the gate shell exits or times out so background child processes holding `stdout`/`stderr` open never hang gate completion.
+- `package.json` + `SHELL_VERSION` → `0.0.26`.
+
 ## [0.0.25] - 2026-10-20
 
 v0.0.25's one thing: **compact 2-row `Plugins` tab redesign, Core (`paseo-factory`) + 3 `Companion plugin`s semantic version visibility (`vX.Y.Z · <sha>`), on-demand update checking (`factory.plugins.check.updates`), conditional `Update` / `Update All (N)` CTAs, and honest update toast summaries** (ADR 0012 amended).

@@ -886,6 +886,10 @@ async function handleToolCall(name, rawArgs) {
         }
         worktree = prep.worktree;
       }
+      const taskPrompt =
+        typeof args.prompt === "string" && args.prompt.trim() !== ""
+          ? args.prompt.trim()
+          : `Execute task ${task}: produce artifact ${contract?.artifact ?? "(see contract)"} and pass gate \`${contract?.gate ?? ""}\`, commit on branch factory/${task}, and call agent_claim.`;
       const reply = await roundTripSpool(ctx, {
         id: randomId(),
         kind: "spawn",
@@ -893,6 +897,7 @@ async function handleToolCall(name, rawArgs) {
         provider,
         arity: tasks.length,
         ...(worktree ? { worktree } : {}),
+        prompt: taskPrompt,
         seat: "lead",
       });
       if (!reply.ok) {

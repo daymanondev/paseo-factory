@@ -154,6 +154,10 @@ export class CorrelationRegistry {
     return matched;
   }
 
+  findByAgentId(agentId: string): SeatCorrelationRecord | undefined {
+    return this.resolve(agentId);
+  }
+
   list(): SeatCorrelationRecord[] {
     this.reloadFromDisk();
     return [...this.byCorrelationId.values()];
