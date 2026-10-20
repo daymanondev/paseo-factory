@@ -868,7 +868,7 @@ test("factory supervisor dispatch and factory supervisor report: usage refusals,
   assert.match(agSupReport.stderr, /agent-cannot-orchestrate/);
 });
 
-test("factory reset CLI: refuses supervisor/lead/agent with seat-cannot-reset and executes owner reset via spool (v0.0.24, ADR 0016 §4)", async (t) => {
+test("factory reset CLI: refuses supervisor/lead/agent with seat-cannot-reset and executes owner reset via spool (v0.0.24, ADR 0015 §6)", async (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);
   const workspace = join(dir, "repo");

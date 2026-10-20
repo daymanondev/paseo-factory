@@ -604,9 +604,13 @@ test("onLeadTurnEnded performs a bounded 1-shot self-healing retry per mailId fo
   });
   assert.equal(supDisp.ok, true);
   const supId1 = supDisp.ok ? supDisp.supervisorAgentId ?? "" : "";
+  assert.equal(supId1, "agent-created-3");
   assert.equal(fake.sent.length, 3);
 
-  // First Supervisor turn fails -> requeues and retries once
+  // First Supervisor turn fails and leaves the Supervisor seat in status="error" -> ensureSupervisor self-heals before drainSupervisorMailbox
+  const supAgentObj = fake.agents.find((a) => a.id === supId1);
+  assert.ok(supAgentObj);
+  supAgentObj.status = "error";
   await leadMail.onLeadTurnEnded({
     agentId: supId1,
     outcome: { kind: "failed", error: { message: "Supervisor crash 1" } },
@@ -615,6 +619,7 @@ test("onLeadTurnEnded performs a bounded 1-shot self-healing retry per mailId fo
   state = readLeadMailbox(mailboxPath);
   assert.equal(state.supervisorQueued.length, 0);
   assert.ok(state.supervisorInFlight !== null, "first Supervisor failure retried once");
+  assert.equal(state.supervisorInFlight?.toAgentId, "agent-created-4", "ensureSupervisor replaced the errored Supervisor seat on retry");
   assert.equal(fake.sent.length, 4);
 
   // Second Supervisor turn fails on the same mailId -> requeues and holds WITHOUT re-pumping
@@ -629,6 +634,39 @@ test("onLeadTurnEnded performs a bounded 1-shot self-healing retry per mailId fo
   assert.equal(state.supervisorQueued.length, 1, "Supervisor mail stays queued after exhausting 1-shot retry");
   assert.equal(fake.sent.length, 4, "no fifth send occurred");
   assert.equal(warnings.length, 2, "logged a warning when Supervisor retry limit was reached");
+
+  // Direct order check: on a failed Supervisor turn, ensureSupervisor is invoked BEFORE drainSupervisorMailbox lists/sends
+  const callOrder: string[] = [];
+  const orderRuntime = createLeadMailRuntime({
+    factory: createFactory({ stateDir: join(makeTempDir(), "order-state") }),
+    stateDir,
+    daemon: {
+      ...fake.daemon,
+      agents: {
+        ...fake.daemon.agents,
+        list: async (opts) => {
+          if (opts?.filter?.labels?.seat === "supervisor") callOrder.push("drainSupervisorMailbox:list");
+          return fake.daemon.agents.list(opts);
+        },
+      },
+    },
+    ensureLead: async () => ({ ok: true, agentId: "lead-x", created: false, projectRoot, slug }),
+    ensureSupervisor: async () => {
+      callOrder.push("ensureSupervisor");
+      return { ok: true, agentId: supIdAfterFirstRetry, created: false, projectRoot, slug };
+    },
+    retireLead: async () => ({ ok: true, agentId: "lead-x" }),
+  });
+  await orderRuntime.enqueueLeadMail(slug, { to: "supervisor", from: "owner", kind: "directive", text: "Order check directive" });
+  await orderRuntime.pumpProjectSupervisor(slug);
+  callOrder.length = 0;
+  await orderRuntime.onLeadTurnEnded({
+    agentId: supIdAfterFirstRetry,
+    outcome: { kind: "failed", error: { message: "Order check failure" } },
+    timeline: [],
+  });
+  assert.equal(callOrder[0], "ensureSupervisor", "onLeadTurnEnded invokes ensureSupervisor before drainSupervisorMailbox on 1-shot retry");
+  assert.ok(callOrder.includes("drainSupervisorMailbox:list"), "drainSupervisorMailbox ran after ensureSupervisor");
 });
 
 test("resetProjectMailbox clears in-memory retry and handoff state for the target project slug (v0.0.24, T-02)", async (t) => {

@@ -371,20 +371,28 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     const state = readLeadMailbox(path);
     if (state.supervisorInFlight !== null || state.supervisorQueued.length === 0) return;
     const daemon = resolveDaemon();
-    const registration = readProjectRegistration(deps.stateDir, slug);
-    if (deps.ensureSupervisor !== undefined && registration?.root !== undefined) {
-      const ensured = await deps.ensureSupervisor({ projectRoot: registration.root });
-      if (!ensured.ok) {
-        log(`lead-mailbox: cannot ensure supervisor for ${slug} (${ensured.code}: ${ensured.error}) — holding ${state.supervisorQueued.length} item(s)`);
-        return;
-      }
-    }
     let supervisor: SurfaceAgentSnapshot | undefined;
     try {
       supervisor = await liveSupervisorAgent(daemon, slug);
     } catch (err) {
       log(`lead-mailbox: cannot read the daemon's supervisor for ${slug} — holding ${state.supervisorQueued.length} item(s) queued (${messageOf(err)})`);
       return;
+    }
+    if (supervisor === undefined) {
+      const registration = readProjectRegistration(deps.stateDir, slug);
+      if (deps.ensureSupervisor !== undefined && registration?.root !== undefined) {
+        const ensured = await deps.ensureSupervisor({ projectRoot: registration.root });
+        if (!ensured.ok) {
+          log(`lead-mailbox: cannot ensure supervisor for ${slug} (${ensured.code}: ${ensured.error}) — holding ${state.supervisorQueued.length} item(s)`);
+          return;
+        }
+        try {
+          supervisor = await liveSupervisorAgent(daemon, slug);
+        } catch (err) {
+          log(`lead-mailbox: cannot read the daemon's supervisor for ${slug} — holding ${state.supervisorQueued.length} item(s) queued (${messageOf(err)})`);
+          return;
+        }
+      }
     }
     if (supervisor === undefined) return;
     if (supervisor.status !== "idle" || isBlockedByAttention(supervisor)) return;
@@ -447,6 +455,28 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     });
   };
 
+  const clearRetriedFailedBatch = (slug: string, seat: MailRecipient, mailIds: readonly string[]): void => {
+    for (const id of mailIds) retriedFailedMailIds.delete(`${slug}:${seat}:${id}`);
+  };
+
+  const claimFailedBatchRetry = (
+    slug: string,
+    seat: MailRecipient,
+    mailIds: readonly string[],
+    outcomeKind: string,
+  ): boolean => {
+    log(`lead-mailbox: ${slug}'s ${seat} turn ${outcomeKind} — ${mailIds.length} item(s) requeued`);
+    const shouldRetry = mailIds.some((id) => !retriedFailedMailIds.has(`${slug}:${seat}:${id}`));
+    if (!shouldRetry) {
+      warn(
+        `lead-mailbox: ${slug}'s ${seat} turn ${outcomeKind} after retry — holding ${mailIds.length} item(s) queued without re-pumping`,
+      );
+      return false;
+    }
+    for (const id of mailIds) retriedFailedMailIds.add(`${slug}:${seat}:${id}`);
+    return true;
+  };
+
   /**
    * The turn-boundary state machine (ticket 07, ADR 0013 §5; v0.0.23, ADR 0015
    * §3) — serialized on the Project's lane like every other mailbox act.
@@ -485,11 +515,12 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       }
     }
     if (ownedSupervisor !== undefined) {
-      const { slug } = ownedSupervisor;
+      const { slug, root } = ownedSupervisor;
       await projectLane(slug, async () => {
         try {
           const path = mailboxPath(slug);
           const state = readLeadMailbox(path);
+          let retryingFailedSupervisorBatch = false;
           if (state.supervisorInFlight !== null && state.supervisorInFlight.toAgentId === input.agentId) {
             const mailIds = state.supervisorInFlight.items.map((item) => item.mailId);
             if (input.outcome.kind === "completed") {
@@ -499,7 +530,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
                 mailIds,
                 byAgentId: input.agentId,
               });
-              for (const id of mailIds) retriedFailedMailIds.delete(`${slug}:supervisor:${id}`);
+              clearRetriedFailedBatch(slug, "supervisor", mailIds);
             } else {
               appendMailRequeued(path, {
                 to: "supervisor",
@@ -507,18 +538,14 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
                 mailIds,
                 reason: input.outcome.kind,
               });
-              log(`lead-mailbox: ${slug}'s supervisor turn ${input.outcome.kind} — ${mailIds.length} item(s) requeued`);
-              const shouldRetry = mailIds.some((id) => !retriedFailedMailIds.has(`${slug}:supervisor:${id}`));
-              if (!shouldRetry) {
-                warn(
-                  `lead-mailbox: ${slug}'s supervisor turn ${input.outcome.kind} after retry — holding ${mailIds.length} item(s) queued without re-pumping`,
-                );
+              if (!claimFailedBatchRetry(slug, "supervisor", mailIds, input.outcome.kind)) {
                 return;
               }
-              for (const id of mailIds) retriedFailedMailIds.add(`${slug}:supervisor:${id}`);
-              await drainSupervisorMailbox(slug);
-              return;
+              retryingFailedSupervisorBatch = true;
             }
+          }
+          if (retryingFailedSupervisorBatch && root) {
+            await ensureSupervisorInLane(slug, root);
           }
           await drainSupervisorMailbox(slug);
         } catch (err) {
@@ -548,16 +575,12 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       const mailIds = state.inFlight.items.map((item) => item.mailId);
       if (input.outcome.kind === "completed") {
         appendMailAcked(path, { deliveryId: state.inFlight.deliveryId, mailIds, byAgentId: input.agentId });
-        for (const id of mailIds) retriedFailedMailIds.delete(`${slug}:lead:${id}`);
+        clearRetriedFailedBatch(slug, "lead", mailIds);
       } else {
         appendMailRequeued(path, { deliveryId: state.inFlight.deliveryId, mailIds, reason: input.outcome.kind });
-        log(`lead-mailbox: ${slug}'s lead turn ${input.outcome.kind} — ${mailIds.length} item(s) requeued`);
-        const shouldRetry = mailIds.some((id) => !retriedFailedMailIds.has(`${slug}:lead:${id}`));
-        if (!shouldRetry) {
-          warn(`lead-mailbox: ${slug}'s lead turn ${input.outcome.kind} after retry — holding ${mailIds.length} item(s) queued without re-pumping`);
+        if (!claimFailedBatchRetry(slug, "lead", mailIds, input.outcome.kind)) {
           return;
         }
-        for (const id of mailIds) retriedFailedMailIds.add(`${slug}:lead:${id}`);
         retryingFailedLeadBatch = true;
       }
     }

@@ -39,6 +39,7 @@ import {
 } from "./core/choke.ts";
 import type { ChokeDecision, MemoryFence } from "./core/choke.ts";
 import { listProjectRegistrations } from "./projects.ts";
+import { parseLane } from "./core/lanes.ts";
 import { SEAT_TITLES } from "./roles.ts";
 import type { SeatName } from "./roles.ts";
 import { parseTaskWorktreePath } from "../shared/worktree-shape.mjs";
@@ -133,16 +134,38 @@ const KNOWN_PROVIDER_IDS = new Set([
 
 export interface ProviderCatalogModel {
   id: string;
+  thinkingOptions?: readonly { id: string; label?: string | null }[] | null;
 }
 
 export interface ProviderCatalogEntry {
-  id: string;
-  models?: readonly ProviderCatalogModel[];
+  id?: string;
+  provider?: string;
+  models?: readonly ProviderCatalogModel[] | null;
 }
 
 export interface NormalizeCreateOptions {
   stateDir?: string;
   providers?: readonly ProviderCatalogEntry[];
+}
+
+function findCatalogModelMeta(
+  provider: string,
+  model: string,
+  providers?: readonly ProviderCatalogEntry[],
+): ProviderCatalogModel | undefined {
+  if (providers === undefined || providers.length === 0) return undefined;
+  const entry = providers.find((p) => (p.provider ?? p.id) === provider);
+  const models = entry?.models;
+  if (models === undefined || models === null) return undefined;
+  const strippedModel = model.replace(/^[^/]+\//, "");
+  return models.find(
+    (m) =>
+      m.id === model ||
+      `${provider}/${m.id}` === model ||
+      m.id === `${provider}/${model}` ||
+      m.id === strippedModel ||
+      m.id.replace(/^[^/]+\//, "") === strippedModel,
+  );
 }
 
 function inferReservedSeatFromTitle(title: string | null | undefined): SeatName | undefined {
@@ -172,42 +195,69 @@ function inferReservedSeatFromTitle(title: string | null | undefined): SeatName 
 function normalizeBareProviderModel(rawProvider: string, providers?: readonly ProviderCatalogEntry[]): string {
   const trimmed = rawProvider.trim();
   if (trimmed === "" || trimmed.includes("/")) return rawProvider;
-  const lower = trimmed.toLowerCase();
+  const colon = trimmed.lastIndexOf(":");
+  const baseModel = colon > 0 ? trimmed.slice(0, colon) : trimmed;
+  const suffix = colon > 0 ? trimmed.slice(colon) : "";
+  const lower = baseModel.toLowerCase();
   if (KNOWN_PROVIDER_IDS.has(lower)) return rawProvider;
 
-  if (Array.isArray(providers)) {
+  if (providers !== undefined && providers.length > 0) {
+    const matches: { providerId: string; modelId: string }[] = [];
     for (const entry of providers) {
+      const providerId = entry.provider ?? entry.id ?? "";
+      if (providerId === "") continue;
       for (const m of entry.models ?? []) {
-        if (m.id === trimmed || m.id.endsWith(`/${trimmed}`)) {
-          if (entry.id === "opencode" && !m.id.includes("/")) {
-            return `opencode/opencode/${m.id}`;
-          }
-          return `${entry.id}/${m.id}`;
+        if (m.id === baseModel || m.id.endsWith(`/${baseModel}`)) {
+          matches.push({ providerId, modelId: m.id });
+          break;
         }
       }
+    }
+    if (matches.length === 1) {
+      const { providerId, modelId } = matches[0]!;
+      if (providerId === "opencode" && !modelId.includes("/")) {
+        return `opencode/opencode/${modelId}${suffix}`;
+      }
+      return `${providerId}/${modelId}${suffix}`;
+    }
+    if (matches.length > 1) {
+      return rawProvider;
     }
   }
 
   if (lower.startsWith("claude-") || lower === "sonnet" || lower === "opus" || lower === "haiku") {
-    return `claude-code/${trimmed}`;
+    return `claude-code/${baseModel}${suffix}`;
   }
   if (lower.startsWith("gpt-") || lower.startsWith("o1") || lower.startsWith("o3") || lower.startsWith("o4")) {
-    return `codex/${trimmed}`;
+    return `codex/${baseModel}${suffix}`;
   }
-  return `opencode/opencode/${trimmed}`;
+  if (
+    lower.startsWith("nemotron-") ||
+    lower.startsWith("qwen") ||
+    lower.startsWith("deepseek") ||
+    lower.startsWith("glm") ||
+    lower.startsWith("minimax") ||
+    lower.startsWith("kimi") ||
+    lower.startsWith("llama")
+  ) {
+    return `opencode/opencode/${baseModel}${suffix}`;
+  }
+  return rawProvider;
 }
 
 /**
  * Normalizes `agent.create` requests before the daemon sees them (v0.0.24, ADR 0015 §4/§5):
  * 1. If `config.provider` is a bare model ID with no `"/"` (e.g. `"nemotron-3.5-super-vl-free"`),
  *    prefixes the canonical `<provider>/` so MCP `create_agent` calls do not crash.
- * 2. If `labels.seat` is absent and `config.title` uses a reserved seat title
+ * 2. Strips unsupported `:thinking` suffixes and `thinkingOptionId` when `providers`
+ *    advertises `thinkingOptions: []` or options excluding the requested variant.
+ * 3. If `labels.seat` is absent and `config.title` uses a reserved seat title
  *    (`"Supervisor — ..."`, `"Lead — ..."`, `"Supervisor"`, `"Lead"`) at a registered
  *    `<project-root>`, attaches `{ seat: "supervisor" | "lead", project: reg.slug }`.
  */
 export function normalizeAgentCreateRequest<
   T extends {
-    config: { provider?: string; cwd?: string; title?: string | null; labels?: Record<string, string> };
+    config: { provider?: string; thinkingOptionId?: string; cwd?: string; title?: string | null; labels?: Record<string, string> };
     labels?: Record<string, string>;
   },
 >(
@@ -216,7 +266,7 @@ export function normalizeAgentCreateRequest<
   providers?: readonly ProviderCatalogEntry[],
 ): T & { labels?: Record<string, string>; config: T["config"] & { labels?: Record<string, string> } };
 export function normalizeAgentCreateRequest<
-  T extends { provider?: string; cwd?: string; title?: string | null; labels?: Record<string, string> },
+  T extends { provider?: string; thinkingOptionId?: string; cwd?: string; title?: string | null; labels?: Record<string, string> },
 >(
   config: T,
   stateDirOrOptions?: string | NormalizeCreateOptions,
@@ -235,6 +285,7 @@ export function normalizeAgentCreateRequest(
     "config" in requestOrConfig && typeof requestOrConfig.config === "object" && requestOrConfig.config !== null;
   const config = (hasNestedConfig ? requestOrConfig.config : requestOrConfig) as {
     provider?: string;
+    thinkingOptionId?: string;
     cwd?: string;
     title?: string | null;
     labels?: Record<string, string>;
@@ -244,7 +295,30 @@ export function normalizeAgentCreateRequest(
     : undefined;
 
   const rawProvider = typeof config.provider === "string" ? config.provider : "";
-  const normalizedProvider = normalizeBareProviderModel(rawProvider, providers);
+  let normalizedProvider = normalizeBareProviderModel(rawProvider, providers);
+
+  let stripThinkingOptionId = false;
+  const parsedLane = parseLane(normalizedProvider);
+  if (parsedLane !== undefined) {
+    const meta = findCatalogModelMeta(parsedLane.provider, parsedLane.model, providers);
+    const thinkingOptions = meta?.thinkingOptions;
+    if (thinkingOptions !== undefined && thinkingOptions !== null) {
+      if (
+        parsedLane.thinking !== undefined &&
+        (thinkingOptions.length === 0 || !thinkingOptions.some((o) => o.id === parsedLane.thinking))
+      ) {
+        normalizedProvider = `${parsedLane.provider}/${parsedLane.model}`;
+      }
+      const rawThinkingOptionId =
+        typeof config.thinkingOptionId === "string" && config.thinkingOptionId !== "" ? config.thinkingOptionId : undefined;
+      if (
+        rawThinkingOptionId !== undefined &&
+        (thinkingOptions.length === 0 || !thinkingOptions.some((o) => o.id === rawThinkingOptionId))
+      ) {
+        stripThinkingOptionId = true;
+      }
+    }
+  }
   const providerChanged = normalizedProvider !== rawProvider;
 
   const existingSeat = config.labels?.seat ?? topLabels?.seat;
@@ -269,7 +343,7 @@ export function normalizeAgentCreateRequest(
     }
   }
 
-  if (!providerChanged && nextLabels === undefined) {
+  if (!providerChanged && !stripThinkingOptionId && nextLabels === undefined) {
     return requestOrConfig;
   }
 
@@ -278,6 +352,9 @@ export function normalizeAgentCreateRequest(
     ...(providerChanged ? { provider: normalizedProvider } : {}),
     ...(nextLabels !== undefined ? { labels: nextLabels } : {}),
   };
+  if (stripThinkingOptionId) {
+    delete updatedConfig.thinkingOptionId;
+  }
 
   if (!hasNestedConfig) {
     return updatedConfig;

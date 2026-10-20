@@ -220,9 +220,9 @@ test("v0.0.24 (ADR 0015 §1): Seats & Models lane modal distinguishes thinkingOp
   );
 });
 
-// ---- Owner-Only Project Reset Header Button & RPC Wiring (v0.0.24, ADR 0016 §4) --------------
+// ---- Owner-Only Project Reset Header Button & RPC Wiring (v0.0.24, ADR 0015 §6) --------------
 
-test("v0.0.24 (ADR 0016 §4): Header renders two-step Reset Project -> Confirm Reset + Cancel with 5s auto-cancel, wired to projectReset RPC in FactoryShell", () => {
+test("v0.0.24 (ADR 0015 §6): Header renders two-step Reset Project -> Confirm Reset + Cancel with 5s auto-cancel, wired to projectReset RPC in FactoryShell", () => {
   const header = read("plugin/client/factory/header.tsx");
   assert.match(header, /resetProject\?:\s*\(\)\s*=>\s*void|resetProject\(\):\s*void/, "HeaderActions declares resetProject()");
   assert.match(header, /label="Reset Project"/, "Header renders Reset Project button when a project is selected");

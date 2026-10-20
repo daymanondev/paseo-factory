@@ -62,7 +62,7 @@ export interface HeaderActions {
   openLead(message?: string): void;
   /** The Project Selector's pick — null returns to the unscoped global view. */
   pickProject(root: string | null): void;
-  /** Owner-only clean-slate reset of the selected Project (v0.0.24, ADR 0016 §4). */
+  /** Owner-only clean-slate reset of the selected Project (v0.0.24, ADR 0015 §6). */
   resetProject(): void;
   busy: boolean;
 }
