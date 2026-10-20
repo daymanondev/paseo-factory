@@ -219,3 +219,21 @@ test("v0.0.24 (ADR 0015 §1): Seats & Models lane modal distinguishes thinkingOp
     "selectModel clears thinking whenever nextModel.thinkingOptions is empty or omits the current thinking variant",
   );
 });
+
+// ---- Owner-Only Project Reset Header Button & RPC Wiring (v0.0.24, ADR 0016 §4) --------------
+
+test("v0.0.24 (ADR 0016 §4): Header renders two-step Reset Project -> Confirm Reset + Cancel with 5s auto-cancel, wired to projectReset RPC in FactoryShell", () => {
+  const header = read("plugin/client/factory/header.tsx");
+  assert.match(header, /resetProject\?:\s*\(\)\s*=>\s*void|resetProject\(\):\s*void/, "HeaderActions declares resetProject()");
+  assert.match(header, /label="Reset Project"/, "Header renders Reset Project button when a project is selected");
+  assert.match(header, /label="Confirm Reset"/, "first click flips to Confirm Reset");
+  assert.match(header, /tone="statusDanger"/, "Confirm Reset is danger-styled");
+  assert.match(header, /5000/, "auto-cancels confirmation state after 5 seconds");
+  assert.match(header, /actions\.resetProject/, "Confirm Reset invokes actions.resetProject()");
+
+  const shell = read("plugin/client/factory/shell.tsx");
+  assert.match(shell, /projectReset/, "FactoryShell imports projectReset RPC");
+  assert.match(shell, /useRpc\(projectReset\)/, "FactoryShell binds useRpc(projectReset)");
+  assert.match(shell, /resetProject/, "FactoryShell passes resetProject action to Header");
+});
+

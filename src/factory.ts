@@ -1,4 +1,4 @@
-import { statSync, writeFileSync } from "node:fs";
+import { readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { Ledger, usageIsValid } from "./ledger.ts";
 import { MAX_ATTEMPTS, NEEDS_HUMAN_REASONS, needsHumanEvidenceIsValid } from "./events.ts";
@@ -344,6 +344,12 @@ export interface Factory {
   lastProgressSeq(task: string): number;
   /** Whether `task` currently stands in `needs_human` in its current Contract epoch (v0.0.24). */
   isNeedsHuman(task: string): boolean;
+  /**
+   * Owner-only Project reset (v0.0.24): purges all ledger events, contracts,
+   * reports, and gate logs belonging to `projectRoot` (and `projectSlug` when
+   * given) in-memory and on disk without disturbing other projects' events.
+   */
+  resetProject(projectRoot: string, projectSlug?: string): { purgedEvents: number; tasks: string[]; removedFiles: number };
   /**
    * Runs the Retro (v0.0.7): builds the whole-ledger digest, prompts the
    * pinned Copilot model, writes `retro-<date>.md`, appends one
@@ -1157,6 +1163,102 @@ export function createFactory(options: FactoryOptions): Factory {
       return taskInNeedsHuman(epochEventsFor(ledger, task));
     },
 
+    resetProject(projectRoot, projectSlug) {
+      const rawRoot = normalized(projectRoot);
+      const realRoot = realpathSafe(projectRoot);
+      const matchesProjectRoot = (candidate: string): boolean => {
+        const norm = normalized(candidate);
+        const real = realpathSafe(candidate);
+        return (
+          norm === rawRoot ||
+          norm.startsWith(`${rawRoot}/`) ||
+          real === realRoot ||
+          real.startsWith(`${realRoot}/`)
+        );
+      };
+      const slug = projectSlug !== undefined && projectSlug.trim() !== "" ? projectSlug.trim() : options.projectSlug;
+      const projectDir = slug !== undefined ? projectStateDir(stateDir, slug) : undefined;
+      const rawProjectDir = projectDir !== undefined ? normalized(projectDir) : undefined;
+      const realProjectDir = projectDir !== undefined ? realpathSafe(projectDir) : undefined;
+      const matchesProjectState = (candidate: string): boolean => {
+        if (rawProjectDir === undefined || realProjectDir === undefined) return false;
+        const norm = normalized(candidate);
+        const real = realpathSafe(candidate);
+        return (
+          norm === rawProjectDir ||
+          norm.startsWith(`${rawProjectDir}/`) ||
+          real === realProjectDir ||
+          real.startsWith(`${realProjectDir}/`)
+        );
+      };
+
+      const projectTaskSet = new Set<string>();
+      const otherProjectTasks = new Set<string>();
+      for (const evt of ledger.events) {
+        if (evt.event === "contract_set") {
+          if (matchesProjectRoot(evt.workspace) || matchesProjectState(evt.workspace)) {
+            projectTaskSet.add(evt.task);
+          } else {
+            otherProjectTasks.add(evt.task);
+          }
+        } else if (evt.event === "spawn_dispatched" && typeof evt.worktree === "string" && evt.worktree !== "") {
+          if (matchesProjectRoot(evt.worktree) || matchesProjectState(evt.worktree)) {
+            projectTaskSet.add(evt.task);
+          }
+        }
+      }
+      for (const task of projectTaskSet) {
+        otherProjectTasks.delete(task);
+      }
+
+      const purgedEvents = ledger.purgeWhere((evt) => {
+        if ("task" in evt && typeof evt.task === "string" && projectTaskSet.has(evt.task)) {
+          return true;
+        }
+        if ("cwd" in evt && typeof (evt as { cwd?: unknown }).cwd === "string") {
+          const cwd = (evt as { cwd: string }).cwd;
+          if (matchesProjectRoot(cwd) || matchesProjectState(cwd)) return true;
+        }
+        if (evt.event === "retro_written" && otherProjectTasks.size === 0) {
+          return true;
+        }
+        return false;
+      });
+
+      const tasks = [...projectTaskSet];
+      const dirsToClean = [...new Set([stateDir, dataDir, ...(projectDir !== undefined ? [projectDir] : [])])];
+      let removedFiles = 0;
+      for (const dir of dirsToClean) {
+        let entries: string[];
+        try {
+          entries = readdirSync(dir);
+        } catch {
+          continue;
+        }
+        for (const entry of entries) {
+          const matchesTaskFile = tasks.some(
+            (task) =>
+              (entry.startsWith(`report-${task}-`) && entry.endsWith(".md")) ||
+              (entry.startsWith(`gate-${task}-`) && entry.endsWith(".log")),
+          );
+          const matchesRetroFile =
+            (otherProjectTasks.size === 0 || dir === projectDir) &&
+            entry.startsWith("retro-") &&
+            (entry.endsWith(".md") || entry.endsWith(".json"));
+          if (matchesTaskFile || matchesRetroFile) {
+            try {
+              rmSync(join(dir, entry), { force: true });
+              removedFiles += 1;
+            } catch {
+              // ignore best-effort file removal failure
+            }
+          }
+        }
+      }
+
+      return { purgedEvents, tasks, removedFiles };
+    },
+
     async retro() {
       // Refusal 1 — the pass probes availability itself (ticket 03 item 5:
       // `contract_set`'s pre-flight is untouched; the Retro refuses per
@@ -1349,6 +1451,14 @@ function scopesOverlap(a: readonly string[] | undefined, b: readonly string[] | 
 /** Workspace paths as contracted, with a tolerated trailing slash gone. */
 function normalized(path: string): string {
   return path.length > 1 && path.endsWith("/") ? path.slice(0, -1) : path;
+}
+
+function realpathSafe(path: string): string {
+  try {
+    return normalized(realpathSync(path));
+  } catch {
+    return normalized(path);
+  }
 }
 
 /**

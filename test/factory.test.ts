@@ -1613,3 +1613,68 @@ test("re-contracting an unaccepted task after MAX_ATTEMPTS and needs_human opens
   const allForTask = factory.ledger.eventsFor("T-01");
   assert.deepEqual(allForTask.slice(0, epoch1EventCount).map((e) => e.seq), epoch1Seqs);
 });
+
+test("resetProject purges target project tasks, events, reports, and gate logs while preserving other projects (v0.0.24)", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace: wsA, artifact, sha: shaA } = makeWorkspace(dir);
+  const wsB = join(dir, "wsB");
+  mkdirSync(join(wsB, "src"), { recursive: true });
+  writeFileSync(join(wsB, artifact), "export function pad() { return 'b'; }\n");
+  const shaB = gitCommitAll(wsB);
+
+  const stateDir = join(dir, "state");
+  const slugA = "projA-111111";
+  const slugB = "projB-222222";
+  mkdirSync(join(stateDir, "projects", slugA), { recursive: true });
+  mkdirSync(join(stateDir, "projects", slugB), { recursive: true });
+
+  const factory = createFactory({ stateDir });
+  factory.setContract({ task: "A-1", workspace: wsA, gate: "echo gateA", artifact });
+  factory.setContract({ task: "B-1", workspace: wsB, gate: "echo gateB", artifact });
+
+  const claimA = await factory.claim({ task: "A-1", sha: shaA });
+  const claimB = await factory.claim({ task: "B-1", sha: shaB });
+  assert.equal(claimA.verdict, "green");
+  assert.equal(claimB.verdict, "green");
+  await factory.accept({ task: "A-1", attempt: 1 });
+
+  // Also record a git_blocked line inside wsA and a project-scoped report file under projects/<slugA>.
+  factory.ledger.append({
+    event: "git_blocked",
+    command: "git push",
+    rule: "git:push",
+    reason: "push is forbidden",
+    cwd: wsA,
+    blockId: "blk-1",
+  });
+
+  const scopedReportA = join(stateDir, "projects", slugA, "report-A-1-1.md");
+  writeFileSync(scopedReportA, "# Scoped report\n");
+
+  assert.equal(existsSync(claimA.reportPath), true);
+  assert.equal(existsSync(claimB.reportPath), true);
+  assert.equal(existsSync(scopedReportA), true);
+
+  const res = factory.resetProject(wsA, slugA);
+  assert.deepEqual(res.tasks, ["A-1"]);
+  assert.ok(res.purgedEvents >= 6, `expected at least 6 purged events, got ${res.purgedEvents}`);
+  assert.ok(res.removedFiles >= 2, `expected at least 2 removed files, got ${res.removedFiles}`);
+
+  // Project A's contract, events, and report/gate files are gone.
+  assert.equal(factory.contractFor("A-1"), undefined);
+  assert.equal(factory.liveContractFor(wsA), undefined);
+  assert.deepEqual(factory.ledger.eventsFor("A-1"), []);
+  assert.equal(existsSync(claimA.reportPath), false);
+  assert.equal(existsSync(scopedReportA), false);
+
+  // Project B's contract, events, and report/gate files remain intact.
+  assert.equal(factory.contractFor("B-1")?.workspace, wsB);
+  assert.equal(factory.ledger.eventsFor("B-1").length, 5);
+  assert.equal(existsSync(claimB.reportPath), true);
+
+  // Task A-1 can now be contracted fresh at Attempt 1 (not blocked by prior acceptance).
+  const recontracted = factory.setContract({ task: "A-1", workspace: wsA, gate: "true", artifact });
+  assert.equal(recontracted.task, "A-1");
+});
+

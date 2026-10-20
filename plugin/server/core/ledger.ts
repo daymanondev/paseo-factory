@@ -1,4 +1,4 @@
-import { appendFileSync, closeSync, fsyncSync, ftruncateSync, mkdirSync, openSync, readFileSync, writeSync } from "node:fs";
+import { appendFileSync, closeSync, fsyncSync, ftruncateSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from "node:fs";
 import { dirname } from "node:path";
 import { FactoryError } from "./errors.ts";
 import { EVENT_NAMES, NEEDS_HUMAN_REASONS, needsHumanEvidenceIsValid } from "./events.ts";
@@ -111,6 +111,39 @@ export class Ledger {
 
   eventsFor(task: string): LedgerEvent[] {
     return this.#events.filter((e): boolean => "task" in e && e.task === task);
+  }
+
+  /**
+   * Removes all events matching `predicate` from the in-memory event array and
+   * atomically rewrites the ledger file with the remaining events (Owner-only
+   * reset path, v0.0.24). Preserves each remaining event's `seq`, updates
+   * `#nextSeq` to `(lastRemaining?.seq ?? 0) + 1`, and returns the number of
+   * purged events.
+   */
+  purgeWhere(predicate: (event: LedgerEvent) => boolean): number {
+    const remaining: LedgerEvent[] = [];
+    let purged = 0;
+    for (const evt of this.#events) {
+      if (predicate(evt)) {
+        purged += 1;
+      } else {
+        remaining.push(evt);
+      }
+    }
+    this.#events.splice(0, this.#events.length, ...remaining);
+    this.#nextSeq = (this.#events.at(-1)?.seq ?? 0) + 1;
+    mkdirSync(dirname(this.#path), { recursive: true });
+    const content = remaining.map((evt) => `${JSON.stringify(evt)}\n`).join("");
+    const tmpPath = `${this.#path}.${process.pid}.${Date.now()}.tmp`;
+    const fd = openSync(tmpPath, "w");
+    try {
+      if (content !== "") writeSync(fd, content);
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    renameSync(tmpPath, this.#path);
+    return purged;
   }
 }
 

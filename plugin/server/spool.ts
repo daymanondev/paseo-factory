@@ -197,6 +197,23 @@ export interface SpoolSupervisorReportRequest {
 }
 
 /**
+ * Owner-only Project Reset (v0.0.24, ADR 0016 §4): `factory reset` purges all
+ * Project state (ledger events, reports/worktrees, `<projectStateDir>/`, and
+ * optionally seat/worker sessions unless `keepSeats` is set). Refused with
+ * `code: "seat-cannot-reset"` when called from any non-Owner seat.
+ */
+export interface SpoolResetRequest {
+  id: string;
+  kind: "reset";
+  workspace?: string;
+  project?: string;
+  keepSeats?: boolean;
+  submitter?: string;
+  seat?: SpoolSeat;
+}
+
+
+/**
  * The Lead's one automatic Respawn per progress marker (v0.0.12, ADR 0008):
  * when an Agent dies (`Substrate death`), the driver asks the plugin — the
  * one writer — whether it may replace the dead Agent, and only creates the
@@ -317,6 +334,7 @@ export type SpoolRequest =
   | SpoolLeadDispatchRequest
   | SpoolSupervisorDispatchRequest
   | SpoolSupervisorReportRequest
+  | SpoolResetRequest
   | SpawnRequest
   | RespawnRequest
   | MeterRequest
@@ -338,6 +356,10 @@ export type SupervisorDispatchHandler = (request: SpoolSupervisorDispatchRequest
 
 /** Queues a Lead report into a Project's Supervisor mailbox (v0.0.23, ADR 0015 §3). */
 export type SupervisorReportHandler = (request: SpoolSupervisorReportRequest) => Promise<SpoolReply>;
+
+/** Resets a Project — the surface handlers' `projectReset` is the implementation (v0.0.24, ADR 0016 §4). */
+export type ProjectResetHandler = (request: SpoolResetRequest) => Promise<SpoolReply>;
+
 
 /**
  * Notifies a Project's Lead mailbox that a Peer's task reached a terminal
@@ -384,8 +406,16 @@ export type SpoolReply =
       /** Spawn / respawn replies (v0.0.23, ADR 0015 §6): the Task worktree's Paseo workspace id and owning Project slug. */
       workspaceId?: string;
       projectSlug?: string;
+      /** Project-reset replies (v0.0.24, ADR 0016 §4). */
+      purgedEvents?: number;
+      tasks?: string[];
+      removedFiles?: number;
+      archivedSeats?: string[];
+      archivedAgents?: string[];
     }
   | { id: string; ok: false; code: string; message: string; event?: LedgerEvent };
+
+
 
 /** Where all three spool directories live. */
 export function spoolRootFor(stateDir: string): string {
@@ -535,6 +565,21 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       ...seatField,
     };
   }
+  if (req.kind === "reset") {
+    if (req.project !== undefined && (typeof req.project !== "string" || req.project.trim() === "")) return undefined;
+    if (req.workspace !== undefined && (typeof req.workspace !== "string" || req.workspace.trim() === "")) return undefined;
+    if (req.keepSeats !== undefined && typeof req.keepSeats !== "boolean") return undefined;
+    return {
+      id: req.id,
+      kind: "reset",
+      ...(req.project === undefined ? {} : { project: req.project }),
+      ...(req.workspace === undefined ? {} : { workspace: req.workspace }),
+      ...(req.keepSeats === undefined ? {} : { keepSeats: req.keepSeats }),
+      ...submitterField,
+      ...seatField,
+    };
+  }
+
   if (req.kind === "retro") {
     // The Retro carries nothing but its kind (plus optional submitter and seat stamps) —
     // whole-ledger always. Any extra field makes it not-a-retro.
@@ -728,11 +773,23 @@ export async function handleSpoolRequest(
   supervisorDispatchHandler?: SupervisorDispatchHandler,
   supervisorReportHandler?: SupervisorReportHandler,
   daemon?: SurfaceDaemonApi | (() => SurfaceDaemonApi | undefined),
+  projectResetHandler?: ProjectResetHandler,
 ): Promise<SpoolReply> {
   const resolvedDaemon = resolveDaemonArg(daemon);
   try {
     const effectiveSeat = await resolveEffectiveSeat(factory, resolvedDaemon, request);
-    // Hard Spool Command Authority by Seat (v0.0.23, ADR 0015 §1).
+    // Hard Spool Command Authority by Seat (v0.0.23, ADR 0015 §1; v0.0.24, ADR 0016 §4).
+    if (
+      request.kind === "reset" &&
+      (effectiveSeat === "supervisor" || effectiveSeat === "lead" || effectiveSeat === "agent")
+    ) {
+      return {
+        id: request.id,
+        ok: false,
+        code: "seat-cannot-reset",
+        message: `Seat ${effectiveSeat} cannot call factory reset; project reset is an Owner-only action.`,
+      };
+    }
     if (
       (request.kind === "contract" || request.kind === "spawn" || request.kind === "respawn") &&
       effectiveSeat === "supervisor"
@@ -744,6 +801,7 @@ export async function handleSpoolRequest(
         message: `Supervisor cannot call factory ${request.kind}; dispatch the directive to Lead via 'factory lead dispatch --workspace <dir> --message <directive>' and end your turn.`,
       };
     }
+
     if (
       (request.kind === "contract" ||
         request.kind === "spawn" ||
@@ -893,6 +951,18 @@ export async function handleSpoolRequest(
       }
       return await supervisorReportHandler(effectiveSeat === undefined ? request : { ...request, seat: effectiveSeat });
     }
+    if (request.kind === "reset") {
+      if (projectResetHandler === undefined) {
+        return {
+          id: request.id,
+          ok: false,
+          code: "project-reset-unavailable",
+          message: "this daemon's factory plugin does not handle Project resets — update the plugin to v0.0.24+",
+        };
+      }
+      return await projectResetHandler(request);
+    }
+
     if (request.kind === "spawn") {
       // The driver's arrival (v0.0.5): one ledger line either way, then the
       // reply the driver keys its next move on — create the agent, or report
@@ -1050,6 +1120,8 @@ export interface SpoolOptions {
   supervisorDispatch?: SupervisorDispatchHandler;
   /** The Supervisor-report handler (v0.0.23); without it `supervisor_report` requests are refused. */
   supervisorReport?: SupervisorReportHandler;
+  /** The Project-reset handler (v0.0.24); without it `reset` requests are refused. */
+  projectReset?: ProjectResetHandler;
   /** The peer-outcome notifier (v0.0.20) — verdicts and needs_human recordings land as Lead mail. */
   peerMail?: PeerMailHook;
   /** The daemon API for workspace registration and worker/workspace archiving (v0.0.23, ADR 0015 §6). */
@@ -1106,6 +1178,7 @@ export function startSpool(stateDir: string, factory: Factory, options: SpoolOpt
         options.supervisorDispatch,
         options.supervisorReport,
         options.daemon,
+        options.projectReset,
       )
         .catch(() => {})
         .finally(() => inFlight.delete(id));
@@ -1135,6 +1208,7 @@ async function handleRequestFile(
   supervisorDispatchHandler?: SupervisorDispatchHandler,
   supervisorReportHandler?: SupervisorReportHandler,
   daemon?: SurfaceDaemonApi | (() => SurfaceDaemonApi | undefined),
+  projectResetHandler?: ProjectResetHandler,
 ): Promise<void> {
   let reply: SpoolReply;
   let request: SpoolRequest | undefined;
@@ -1157,7 +1231,9 @@ async function handleRequestFile(
       supervisorDispatchHandler,
       supervisorReportHandler,
       daemon,
+      projectResetHandler,
     );
+
     // The v0.0.9 stamps make the two Owner acts attributable in the log too —
     // the same visibility the claim line always had.
     const stamp = request.kind === "contract" || request.kind === "accept" ? ` by ${request.submitter}` : "";

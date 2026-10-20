@@ -752,4 +752,81 @@ test("spool command authority (v0.0.23, ADR 0015 §1): refuses contract/spawn/re
   assert.equal(supAccept.ok, true);
 });
 
+test("handleSpoolRequest refuses reset from supervisor, lead, and agent with seat-cannot-reset and executes for owner (v0.0.24, ADR 0016 §4)", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const ws = join(dir, "ws");
+  mkdirSync(ws, { recursive: true });
+  writeFileSync(join(ws, "README.md"), "# ws\n");
+  gitCommitAll(ws);
+
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  await handleSpoolRequest(factory, {
+    id: "c-reset-1",
+    kind: "contract",
+    task: "R-1",
+    workspace: ws,
+    gate: "true",
+    artifact: "README.md",
+    submitter: "owner",
+  });
+  assert.equal(factory.ledger.eventsFor("R-1").length, 1);
+
+  for (const seat of ["supervisor", "lead", "agent"] as const) {
+    const refused = await handleSpoolRequest(factory, {
+      id: `refuse-${seat}`,
+      kind: "reset",
+      workspace: ws,
+      submitter: `agent-${seat}-1`,
+      seat,
+    });
+    assert.equal(refused.ok, false, `expected ${seat} reset to be refused`);
+    if (!refused.ok) {
+      assert.equal(refused.code, "seat-cannot-reset");
+    }
+  }
+  assert.equal(factory.ledger.eventsFor("R-1").length, 1, "events untouched after refused resets");
+
+  let handlerCalledWith: Record<string, unknown> | undefined;
+  const okRes = await handleSpoolRequest(
+    factory,
+    {
+      id: "owner-reset-1",
+      kind: "reset",
+      workspace: ws,
+      keepSeats: true,
+      submitter: "owner",
+    },
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    async (req) => {
+      handlerCalledWith = { ...req };
+      const res = factory.resetProject(ws, "ws");
+      return {
+        id: req.id,
+        ok: true,
+        summary: `project ws reset (${res.purgedEvents} events purged)`,
+        project: "ws",
+        purgedEvents: res.purgedEvents,
+        tasks: res.tasks,
+        removedFiles: res.removedFiles,
+        archivedSeats: [],
+        archivedAgents: [],
+      };
+    },
+  );
+  assert.equal(okRes.ok, true);
+  if (okRes.ok) {
+    assert.match(okRes.summary, /project ws reset/);
+  }
+  assert.equal(handlerCalledWith?.keepSeats, true);
+  assert.equal(factory.ledger.eventsFor("R-1").length, 0);
+});
+
+
 

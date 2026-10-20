@@ -147,6 +147,7 @@ export default function contribute(server: PluginServerContext) {
   const surface = createSurfaceHandlers({
     ...surfaceDeps,
     onLeadRetired: (input) => leadMail.settleLeadRotation(input.slug),
+    resetProjectMailbox: (slug) => leadMail.resetProjectMailbox(slug),
     leadDispatch: (request) => leadMail.dispatchLead(request),
   });
   // The Lead mailbox runtime (v0.0.20, ADR 0013 §4–§5): the single writer
@@ -187,9 +188,38 @@ export default function contribute(server: PluginServerContext) {
     leadDispatch: (request) => leadMail.dispatchLead(request),
     supervisorDispatch: (request) => leadMail.dispatchSupervisor(request),
     supervisorReport: (request) => leadMail.reportSupervisor(request),
+    projectReset: async (request) => {
+      const reply = await surface.projectReset(
+        {
+          ...(request.workspace !== undefined ? { projectRoot: request.workspace } : {}),
+          ...(request.project !== undefined ? { project: request.project } : {}),
+          ...(request.keepSeats !== undefined ? { keepSeats: request.keepSeats } : {}),
+        },
+        { paseo: paseoApi as never },
+      );
+      return reply.ok
+        ? {
+            id: request.id,
+            ok: true as const,
+            summary: reply.summary,
+            project: reply.project,
+            purgedEvents: reply.purgedEvents,
+            tasks: reply.tasks,
+            removedFiles: reply.removedFiles,
+            archivedSeats: reply.archivedSeats,
+            archivedAgents: reply.archivedAgents,
+          }
+        : {
+            id: request.id,
+            ok: false as const,
+            code: reply.code,
+            message: reply.error,
+          };
+    },
     peerMail: leadMail.notifyPeer,
     daemon: () => paseoApi as never,
   });
+
   log(`spool listening on ${spoolRootFor(stateDir)}/{requests,replies,processed}`);
   registerSurfaceRpc(server, surface);
 
