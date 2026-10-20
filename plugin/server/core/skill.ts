@@ -1,23 +1,25 @@
 /**
- * The global `/factory` skill (v0.0.20, ADR 0013 Decision 3): the managed
- * `SKILL.md` at `<agentsSkillsDir>/factory/SKILL.md` (Pi's default skills
- * root is `~/.agents/skills`, the same root the role homes' filters pin)
- * that lets the Owner type `/factory <directive>` in any session and have
- * that session bootstrap or dispatch directly into the Project's SLP loop —
- * `factory lead dispatch` for the directive arm, the Factory surface's
- * always-visible `Start Supervisor` for the bootstrap arm (§User Story 7).
+ * The global `/factory` skill (v0.0.20, ADR 0013 Decision 3; v0.0.23, ADR 0015
+ * Decision 5): the managed `SKILL.md` reconciled across both
+ * `~/.agents/skills/factory/SKILL.md` (`pi` / `opencode`) and
+ * `~/.claude/skills/factory/SKILL.md` (`claude`) that lets the Owner type
+ * `/factory <directive>` in any session and have that session bootstrap or
+ * dispatch deterministically into the Project's SLP loop —
+ * `factory supervisor dispatch` for the directive arm (seat-aware routing into
+ * `Supervisor` from a normal chat or into `Lead` from inside `Supervisor`),
+ * and the Factory surface's `Start / Open Supervisor` for the bootstrap arm.
  *
  * Pure Node like every `src/` module: the plugin shell vendors the verbatim
  * copy into `plugin/server/core/` (the `./core/project.ts` precedent) and
- * reconciles the file at boot through `ensureFactorySkillSafe` — idempotent,
+ * reconciles the files at boot through `ensureFactorySkillSafe` — idempotent,
  * rewritten only when the rendered content changes (the `ensureClaimCli`
  * wrapper law), so a plugin update refreshes the skill and an Operator edit
  * is deliberately reconciled back (the file is plugin-managed, the
  * `APPEND_SYSTEM.md` precedent). One failure law above all: unlike the
- * stateDir writes, `~/.agents` is not a precondition the plugin depends on,
- * so a skill that cannot be written is a WARNING, never a boot failure —
- * the raw `ensureFactorySkill` keeps the throwing contract for callers that
- * want errors; only the safe door ever runs at boot.
+ * stateDir writes, `~/.agents` and `~/.claude` are not preconditions the
+ * plugin depends on, so a skill that cannot be written is a WARNING, never a
+ * boot failure — the raw `ensureFactorySkill` keeps the throwing contract for
+ * callers that want errors; only the safe door ever runs at boot.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -56,17 +58,20 @@ export function renderFactorySkill(input: FactorySkillInput): string {
     "",
     "## Step 2 — `/factory <directive>`: dispatch the directive into the Project's SLP loop",
     "",
-    "Run:",
+    "Run a single command:",
     "",
-    `  ${input.factoryCmd} lead dispatch --workspace <project-root> --message "<directive>"`,
+    `  ${input.factoryCmd} supervisor dispatch --workspace "$PWD" --message "<directive>"`,
     "",
-    "The plugin auto-ensures the Project's Lead seat, queues the directive in the Project's Lead mailbox (`<projectStateDir>/mailbox.jsonl`), and pumps it into the Lead's next idle turn. Relay the command's printed facts (project, leadAgentId, mailId, rotationState) and stop — the standing Lead owns the work from here. Further directives ride the same command at any time; mail arriving while the Lead is mid-turn or rotating is held in the mailbox, never lost.",
+    "Deterministic seat-aware routing:",
+    "- In a normal chat session, `supervisor dispatch` ensures the `Project`'s `Supervisor` seat is open, delivers `<directive>` to `Supervisor`, and prints the `Supervisor` `agentId`.",
+    "- Inside `Supervisor` (`PASEO_FACTORY_SEAT=supervisor`), `supervisor dispatch` routes `<directive>` straight into `Lead` (`lead_dispatch`).",
+    "",
+    `**Mandatory stop rule:** Immediately after running \`${input.factoryCmd} supervisor dispatch\`, end your turn and relay the command's output to the Owner. Never install packages, create files, edit code, or decompose tasks in this turn.`,
     "",
     "## Step 3 — bare `/factory`: bootstrap the Project's loop",
     "",
-    `1. Read the loop's state: \`${input.factoryCmd} status\` (a local ledger read — one line per task; needs-human rows want the Owner's eye first).`,
-    "2. If the Project has no Supervisor yet, tell the Owner to press `Start Supervisor` in the Factory surface's Seats & Models header on Paseo Desktop — the always-visible button creates and opens the Supervisor, the Owner's conversational door.",
-    "3. Offer the one-command alternative: dispatch a kickoff directive to the Lead (Step 2) — `lead dispatch` auto-creates the Lead seat when absent.",
+    `1. When \`/factory\` is invoked with no \`<directive>\`, run \`${input.factoryCmd} status\` (a local ledger read — one line per task; needs-human rows want the Owner's eye first).`,
+    "2. Tell the `Owner` to click **`Start / Open Supervisor`** in the Factory surface's Seats & Models header on Paseo Desktop, or pass `/factory <directive>`.",
     "",
     "## Notes",
     "",

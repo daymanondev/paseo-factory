@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ensureFactorySkill, ensureFactorySkillSafe, factorySkillPath, renderFactorySkill } from "../src/index.ts";
+import contribute from "../plugin/index.server.ts";
 import { disposeDir, makeTempDir } from "./helpers.ts";
 
 /**
@@ -34,16 +35,35 @@ test("the /factory skill reconciles at boot with both arms, the exact CLI door, 
   // The frontmatter names the skill so `/factory` resolves.
   assert.ok(written.startsWith("---\nname: factory\n"), "the frontmatter names the skill factory");
 
-  // The dispatch arm: the exact CLI door (§User Story 7's dispatch half).
+  // The dispatch arm: the exact CLI door via supervisor dispatch (v0.0.23, ADR 0015 §5).
   assert.ok(
-    written.includes(`${FACTORY_CMD} lead dispatch --workspace <project-root> --message "<directive>"`),
-    "the dispatch arm carries the install's exact factory lead dispatch invocation",
+    written.includes(`${FACTORY_CMD} supervisor dispatch --workspace "$PWD" --message "<directive>"`),
+    "the dispatch arm carries the install's exact factory supervisor dispatch invocation",
+  );
+  assert.ok(
+    !written.includes(`${FACTORY_CMD} lead dispatch`),
+    "the skill never instructs a normal chat to call factory lead dispatch directly",
   );
 
-  // The bootstrap arm: the loop's state plus the always-visible seat button
-  // (§User Story 7's ensure-and-open half).
+  // Seat-aware routing explanation (normal chat -> Supervisor, Supervisor -> Lead).
+  assert.ok(
+    written.includes("PASEO_FACTORY_SEAT=supervisor") && written.includes("lead_dispatch"),
+    "the skill explains the deterministic seat-aware routing for both normal chat and Supervisor",
+  );
+
+  // Mandatory immediate turn-end rule.
+  assert.ok(
+    written.includes(
+      `Immediately after running \`${FACTORY_CMD} supervisor dispatch\`, end your turn and relay the command's output to the Owner. Never install packages, create files, edit code, or decompose tasks in this turn.`,
+    ),
+    "the skill states the mandatory immediate turn-end stop rule",
+  );
+
+  // The bootstrap arm: when invoked with no <directive>, run status and point
+  // at Start / Open Supervisor or passing /factory <directive>.
   assert.ok(written.includes(`${FACTORY_CMD} status`), "the bootstrap arm reads the loop's state");
-  assert.ok(written.includes("Start Supervisor"), "the bootstrap arm points at the always-visible Start Supervisor button");
+  assert.ok(written.includes("Start / Open Supervisor"), "the bootstrap arm points at the Start / Open Supervisor button");
+  assert.ok(written.includes("/factory <directive>"), "the bootstrap arm offers passing /factory <directive>");
 
   // The home law: a global file never pins one daemon's home — no rendered
   // command bakes a --home, the override stays a named option.
@@ -98,4 +118,37 @@ test("the boot door never throws — an unusable skills root warns once and the 
   assert.equal(path, factorySkillPath(good));
   assert.equal(quiet.length, 0, "a successful reconcile warns nothing");
   assert.ok(existsSync(path), "the skill landed");
+});
+
+test("plugin boot reconciles factory/SKILL.md into both ~/.agents/skills and ~/.claude/skills (v0.0.23, ADR 0015 §5)", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const prevHome = process.env.HOME;
+  const prevPaseoHome = process.env.PASEO_HOME;
+  process.env.HOME = dir;
+  process.env.PASEO_HOME = join(dir, ".paseo");
+  t.after(() => {
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+    if (prevPaseoHome === undefined) delete process.env.PASEO_HOME;
+    else process.env.PASEO_HOME = prevPaseoHome;
+  });
+
+  const fakeServer = {
+    on: () => () => {},
+    before: () => () => {},
+    handle: () => () => {},
+  };
+  const stop = contribute(fakeServer as unknown as Parameters<typeof contribute>[0]);
+  try {
+    const agentsSkill = factorySkillPath(join(dir, ".agents", "skills"));
+    const claudeSkill = factorySkillPath(join(dir, ".claude", "skills"));
+    assert.ok(existsSync(agentsSkill), "~/.agents/skills/factory/SKILL.md reconciled at boot");
+    assert.ok(existsSync(claudeSkill), "~/.claude/skills/factory/SKILL.md reconciled at boot");
+    const expected = renderFactorySkill({ factoryCmd: "factory" });
+    assert.equal(readFileSync(agentsSkill, "utf8"), expected, "~/.agents/skills copy matches renderFactorySkill");
+    assert.equal(readFileSync(claudeSkill, "utf8"), expected, "~/.claude/skills copy matches renderFactorySkill");
+  } finally {
+    stop();
+  }
 });
