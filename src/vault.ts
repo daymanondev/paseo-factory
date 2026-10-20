@@ -1,7 +1,7 @@
 import { execFile, execFileSync } from "node:child_process";
 import { createCipheriv, createDecipheriv, randomBytes, randomUUID, scryptSync } from "node:crypto";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { hostname, tmpdir } from "node:os";
+import { homedir, hostname, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { FactoryError } from "./errors.ts";
@@ -612,7 +612,11 @@ export async function ensureRemoteVaultRepo(repo: string, runner?: VaultRunner):
   return { created: true, repo: stripped };
 }
 
-export interface HydrateVaultDirectOptions {
+export interface VaultTransportOptions {
+  runner?: VaultRunner;
+}
+
+export interface HydrateVaultDirectOptions extends VaultTransportOptions {
   /**
    * Defaults to the persisted config's repo. On a home with no saved config
    * the override is persisted as the vault config of record — the hydrate
@@ -625,20 +629,22 @@ export interface HydrateVaultDirectOptions {
   token?: string;
   /** Reconcile the vault's `state/nodes/*` ledger snapshots into this machine's ledgers after hydrating (stage C). */
   mergeLedgers?: boolean;
-  runner?: VaultRunner;
+  /** Overwrite existing local `lanes.json`, `fleet.json`, and `free-pool.json` files with the vault's copies (default false). */
+  overwriteConfigs?: boolean;
 }
 
-export interface PullVaultOptions {
+export interface PullVaultOptions extends VaultTransportOptions {
   /**
    * Reconcile the vault's `state/nodes/*` ledger snapshots into this
    * machine's global and per-project ledgers through `reconcileVaultLedgers`
    * after hydrating (spec §Implementation Decisions 2).
    */
   mergeLedgers?: boolean;
-  runner?: VaultRunner;
+  /** Overwrite existing local `lanes.json`, `fleet.json`, and `free-pool.json` files with the vault's copies (default false). */
+  overwriteConfigs?: boolean;
 }
 
-export interface PushVaultOptions {
+export interface PushVaultOptions extends VaultTransportOptions {
   /**
    * Snapshot this machine's ledgers under its node namespace before pushing:
    * the global `<stateDir>/ledger.jsonl` as `state/nodes/<nodeId>/global-ledger.jsonl`
@@ -647,7 +653,47 @@ export interface PushVaultOptions {
    * stands in for the key when `vault.manifest.json` does not route it).
    */
   includeLedger?: boolean;
-  runner?: VaultRunner;
+}
+
+export interface SyncVaultOptions extends VaultTransportOptions {
+  repo?: string;
+  branch?: string;
+  passphrase?: string;
+  mergeLedgers?: boolean;
+  includeLedger?: boolean;
+  overwriteConfigs?: boolean;
+}
+
+export interface SyncVaultResult {
+  createdRepo: boolean;
+  repo: string;
+  branch: string;
+  hydratedFiles: string[];
+  pushedFiles: string[];
+  pushed: boolean;
+  summary: string;
+}
+
+export interface ImportVaultSecretsInput extends VaultTransportOptions {
+  ascKeyPath?: string;
+  ascKeyId?: string;
+  ascIssuer?: string;
+  gplayKeyPath?: string;
+  eyeConfigPath?: string;
+  appKey?: string;
+  keystorePath?: string;
+  storePass?: string;
+  keyAlias?: string;
+  firebaseProjectId?: string;
+  googleServicesJsonPath?: string;
+  googleServiceInfoPlistPath?: string;
+  syncAfterImport?: boolean;
+}
+
+export interface ImportVaultSecretsResult {
+  importedFiles: string[];
+  synced: SyncVaultResult | null;
+  summary: string;
 }
 
 export interface VaultHydrationResult {
@@ -697,7 +743,7 @@ export async function hydrateVaultDirect(paseoHome: string, options: HydrateVaul
     hydratedFiles.push(vaultPath);
   }
 
-  applyVaultHydration(paseoHome);
+  applyVaultHydration(paseoHome, options.overwriteConfigs ?? false);
   if (options.mergeLedgers === true) reconcileVaultLedgerState(paseoHome);
   stampVaultConfig(paseoHome, config, repo, { lastHydratedAt: nowIso(), lastHydrateMode: "direct" });
   return { hydratedFiles: hydratedFiles.sort() };
@@ -731,7 +777,7 @@ export async function pullVault(paseoHome: string, options: PullVaultOptions = {
   }
 
   const hydratedFiles = hydrateRuntimeFromTree(paseoHome, vaultDir, resolveVaultPassphrase(config.passphrase));
-  applyVaultHydration(paseoHome);
+  applyVaultHydration(paseoHome, options.overwriteConfigs ?? false);
   if (options.mergeLedgers === true) reconcileVaultLedgerState(paseoHome);
   stampVaultConfig(paseoHome, config, config.repo, { lastHydratedAt: nowIso(), lastHydrateMode: "sync" });
   return { hydratedFiles };
@@ -752,12 +798,13 @@ export async function pushVault(paseoHome: string, options: PushVaultOptions = {
   const vaultDir = join(paseoHome, "vault");
 
   await ensureVaultCheckout(runner, config, vaultDir);
+  collectLocalStateIntoRuntime(paseoHome);
 
   const runtimeRoot = join(paseoHome, "vault-runtime");
   const staged = existsSync(runtimeRoot) ? walkFiles(runtimeRoot, (rel) => rel === "env.json") : [];
   const passphrase = resolveVaultPassphrase(config.passphrase);
   for (const rel of staged) {
-    stageRuntimeFileIntoCheckout(join(runtimeRoot, rel), join(vaultDir, rel), passphrase);
+    stageRuntimeFileIntoCheckout(join(runtimeRoot, rel), join(vaultDir, rel), passphrase, rel);
   }
   const pushedFiles = new Set(staged);
   if (options.includeLedger) {
@@ -800,6 +847,279 @@ export async function pushVault(paseoHome: string, options: PushVaultOptions = {
 
   stampVaultConfig(paseoHome, config, config.repo, { lastPushedAt: nowIso() });
   return { pushedFiles: [...pushedFiles].sort(), pushed };
+}
+
+/**
+ * Unified smart bidirectional sync (spec §Implementation Decisions 3):
+ * 1. Auto-selects `<ghUser>/factory-vault` via `probeGhAuth` when unconfigured.
+ * 2. Persists `vault-config.json` and ensures the remote repository exists via `ensureRemoteVaultRepo`.
+ * 3. Runs `pullVault` (hydrating secrets, materializing configs, and reconciling multi-node ledgers).
+ * 4. Runs `pushVault` (collecting local configs/state/store-manifests and node ledgers, then pushing).
+ */
+export async function syncVault(paseoHome: string, options: SyncVaultOptions = {}): Promise<SyncVaultResult> {
+  const existing = loadVaultConfig(paseoHome);
+  let repo = options.repo !== undefined && options.repo.trim() !== "" ? options.repo.trim() : existing?.repo?.trim() ?? "";
+  if (repo === "") {
+    const gh = await probeGhAuth(options.runner);
+    if (gh.ghAuthenticated && gh.suggestedRepo !== null && gh.suggestedRepo.trim() !== "") {
+      repo = gh.suggestedRepo.trim();
+    } else {
+      throw new FactoryError(
+        "vault-not-configured",
+        "Private vault is not configured yet — run `gh auth login --web -p https` then click Enable & Sync Vault or save a repository in Vault settings",
+      );
+    }
+  }
+
+  const branch = options.branch !== undefined && options.branch.trim() !== "" ? options.branch.trim() : existing?.branch ?? "main";
+  const passphrase =
+    options.passphrase === undefined ? existing?.passphrase : options.passphrase === "" ? undefined : options.passphrase;
+
+  const ensured = await ensureRemoteVaultRepo(repo, options.runner);
+  repo = ensured.repo;
+
+  saveVaultConfig(paseoHome, {
+    repo,
+    branch,
+    ...(existing?.nodeId === undefined ? {} : { nodeId: existing.nodeId }),
+    ...(passphrase === undefined ? {} : { passphrase }),
+    ...(existing?.lastHydratedAt === undefined ? {} : { lastHydratedAt: existing.lastHydratedAt }),
+    ...(existing?.lastHydrateMode === undefined ? {} : { lastHydrateMode: existing.lastHydrateMode }),
+    ...(existing?.lastPushedAt === undefined ? {} : { lastPushedAt: existing.lastPushedAt }),
+  });
+
+  const pullResult = await pullVault(paseoHome, {
+    mergeLedgers: options.mergeLedgers ?? true,
+    overwriteConfigs: options.overwriteConfigs ?? false,
+    runner: options.runner,
+  });
+
+  const pushResult = await pushVault(paseoHome, {
+    includeLedger: options.includeLedger ?? true,
+    runner: options.runner,
+  });
+
+  const createdNote = ensured.created ? `created private repo ${repo}; ` : "";
+  const pushNote = pushResult.pushed
+    ? `pushed ${pushResult.pushedFiles.length} file(s)`
+    : `up to date (${pushResult.pushedFiles.length} file(s) tracked)`;
+  const summary = `Vault synced with ${repo} (${branch}): ${createdNote}hydrated ${pullResult.hydratedFiles.length} file(s), ${pushNote}.`;
+
+  return {
+    createdRepo: ensured.created,
+    repo,
+    branch,
+    hydratedFiles: pullResult.hydratedFiles,
+    pushedFiles: pushResult.pushedFiles,
+    pushed: pushResult.pushed,
+    summary,
+  };
+}
+
+function expandImportPath(rawPath: string): string {
+  const trimmed = rawPath.trim();
+  if (trimmed === "~") return homedir();
+  if (trimmed.startsWith("~/")) return join(homedir(), trimmed.slice(2));
+  return trimmed;
+}
+
+function readImportFile(rawPath: string, label: string): Buffer {
+  const path = expandImportPath(rawPath);
+  if (!existsSync(path)) {
+    throw new FactoryError("vault-import-file-not-found", `${label} file not found at "${path}"`);
+  }
+  return readFileSync(path);
+}
+
+/**
+ * 1-Click Key Import (spec §Implementation Decisions 3):
+ * Imports `.p8`, ASC credentials, Google Play service account `.json`, `eye.json`,
+ * and per-app Android/Firebase signing files from disk (or `process.env` when no
+ * explicit inputs are given) into `<paseoHome>/vault-runtime/secrets/`, updates
+ * `env.json` and local project checkouts via `applyVaultHydration`, and optionally
+ * runs `syncVault` so imported keys are sealed and pushed to the remote vault.
+ */
+export async function importVaultSecrets(
+  paseoHome: string,
+  input: ImportVaultSecretsInput = {},
+): Promise<ImportVaultSecretsResult> {
+  const explicitFields = [
+    input.ascKeyPath,
+    input.ascKeyId,
+    input.ascIssuer,
+    input.gplayKeyPath,
+    input.eyeConfigPath,
+    input.keystorePath,
+    input.storePass,
+    input.keyAlias,
+    input.firebaseProjectId,
+    input.googleServicesJsonPath,
+    input.googleServiceInfoPlistPath,
+  ];
+  const hasExplicit = explicitFields.some((val) => val !== undefined && val.trim() !== "");
+
+  const ascKeyPath = hasExplicit
+    ? input.ascKeyPath?.trim() || undefined
+    : process.env.ASC_KEY_PATH?.trim() && existsSync(expandImportPath(process.env.ASC_KEY_PATH))
+      ? process.env.ASC_KEY_PATH.trim()
+      : undefined;
+  const ascKeyId = hasExplicit ? input.ascKeyId?.trim() || undefined : process.env.ASC_KEY_ID?.trim() || undefined;
+  const ascIssuer = hasExplicit ? input.ascIssuer?.trim() || undefined : process.env.ASC_ISSUER?.trim() || undefined;
+  const gplayKeyPath = hasExplicit
+    ? input.gplayKeyPath?.trim() || undefined
+    : process.env.GPLAY_KEY_PATH?.trim() && existsSync(expandImportPath(process.env.GPLAY_KEY_PATH))
+      ? process.env.GPLAY_KEY_PATH.trim()
+      : undefined;
+  const eyeConfigPath = input.eyeConfigPath?.trim() || undefined;
+
+  const config = loadVaultConfig(paseoHome);
+  const passphrase = resolveVaultPassphrase(config?.passphrase);
+  const importedFiles = new Set<string>();
+  const runtimeRoot = join(paseoHome, "vault-runtime");
+
+  if (ascKeyPath !== undefined) {
+    const bytes = unsealVaultBuffer(readImportFile(ascKeyPath, "ASC .p8 key"), passphrase);
+    const rel = `secrets/shared/${SHARED_SECRET_FILES.ascKey}`;
+    writeRuntimeFile(paseoHome, rel, bytes);
+    importedFiles.add(rel);
+  }
+
+  if (ascKeyId !== undefined || ascIssuer !== undefined) {
+    const rel = `secrets/shared/${SHARED_SECRET_FILES.ascCredentials}`;
+    const prior = readJsonFile(join(runtimeRoot, rel)) ?? {};
+    const merged = {
+      ...prior,
+      ...(ascKeyId !== undefined ? { keyId: ascKeyId } : {}),
+      ...(ascIssuer !== undefined ? { issuerId: ascIssuer } : {}),
+    };
+    writeRuntimeFile(paseoHome, rel, Buffer.from(`${JSON.stringify(merged, null, 2)}\n`, "utf8"));
+    importedFiles.add(rel);
+  }
+
+  if (gplayKeyPath !== undefined) {
+    const bytes = unsealVaultBuffer(readImportFile(gplayKeyPath, "Google Play service account JSON"), passphrase);
+    const rel = `secrets/shared/${SHARED_SECRET_FILES.gplayServiceAccount}`;
+    writeRuntimeFile(paseoHome, rel, bytes);
+    importedFiles.add(rel);
+  }
+
+  if (eyeConfigPath !== undefined) {
+    const bytes = unsealVaultBuffer(readImportFile(eyeConfigPath, "Eye config JSON"), passphrase);
+    const rel = `secrets/shared/${SHARED_SECRET_FILES.eyeConfig}`;
+    writeRuntimeFile(paseoHome, rel, bytes);
+    importedFiles.add(rel);
+  }
+
+  const keystorePath = input.keystorePath?.trim() || undefined;
+  const storePass = input.storePass?.trim() || undefined;
+  const keyAlias = input.keyAlias?.trim() || undefined;
+  const firebaseProjectId = input.firebaseProjectId?.trim() || undefined;
+  const googleServicesJsonPath = input.googleServicesJsonPath?.trim() || undefined;
+  const googleServiceInfoPlistPath = input.googleServiceInfoPlistPath?.trim() || undefined;
+
+  const hasAppInputs =
+    keystorePath !== undefined ||
+    storePass !== undefined ||
+    keyAlias !== undefined ||
+    firebaseProjectId !== undefined ||
+    googleServicesJsonPath !== undefined ||
+    googleServiceInfoPlistPath !== undefined;
+
+  if (hasAppInputs) {
+    let appKey = input.appKey?.trim() ?? "";
+    if (appKey === "") {
+      const roots = collectCandidateProjectRoots(paseoHome);
+      const firstFacts = roots.map(inspectProjectRootFacts).find((f) => f !== null) ?? null;
+      appKey = firstFacts?.basename ?? "default";
+    }
+    assertSafeVaultPath(`secrets/apps/${appKey}`);
+
+    if (keystorePath !== undefined) {
+      const bytes = unsealVaultBuffer(readImportFile(keystorePath, "Android release keystore"), passphrase);
+      const rel = `secrets/apps/${appKey}/release.keystore`;
+      writeRuntimeFile(paseoHome, rel, bytes);
+      importedFiles.add(rel);
+    }
+
+    if (storePass !== undefined || keyAlias !== undefined) {
+      const rel = `secrets/apps/${appKey}/signing.json`;
+      const prior = readJsonFile(join(runtimeRoot, rel)) ?? {};
+      const merged: Record<string, unknown> = {
+        ...prior,
+        ...(storePass !== undefined
+          ? {
+              storePassword: storePass,
+              ...(typeof prior.keyPassword === "string" && prior.keyPassword !== "" ? {} : { keyPassword: storePass }),
+            }
+          : {}),
+        ...(keyAlias !== undefined ? { keyAlias } : {}),
+      };
+      writeRuntimeFile(paseoHome, rel, Buffer.from(`${JSON.stringify(merged, null, 2)}\n`, "utf8"));
+      importedFiles.add(rel);
+    }
+
+    if (googleServicesJsonPath !== undefined) {
+      const bytes = unsealVaultBuffer(readImportFile(googleServicesJsonPath, "google-services.json"), passphrase);
+      const rel = `secrets/apps/${appKey}/google-services.json`;
+      writeRuntimeFile(paseoHome, rel, bytes);
+      importedFiles.add(rel);
+    } else if (firebaseProjectId !== undefined) {
+      const rel = `secrets/apps/${appKey}/google-services.json`;
+      const prior = readJsonFile(join(runtimeRoot, rel)) ?? {};
+      const priorInfo =
+        typeof prior.project_info === "object" && prior.project_info !== null && !Array.isArray(prior.project_info)
+          ? (prior.project_info as Record<string, unknown>)
+          : {};
+      const merged = {
+        ...prior,
+        project_info: { ...priorInfo, project_id: firebaseProjectId },
+      };
+      writeRuntimeFile(paseoHome, rel, Buffer.from(`${JSON.stringify(merged, null, 2)}\n`, "utf8"));
+      importedFiles.add(rel);
+    }
+
+    if (googleServiceInfoPlistPath !== undefined) {
+      const bytes = unsealVaultBuffer(readImportFile(googleServiceInfoPlistPath, "GoogleService-Info.plist"), passphrase);
+      const rel = `secrets/apps/${appKey}/GoogleService-Info.plist`;
+      writeRuntimeFile(paseoHome, rel, bytes);
+      importedFiles.add(rel);
+    }
+
+    const manifest = existsSync(join(runtimeRoot, "vault.manifest.json"))
+      ? readVaultManifestAt(runtimeRoot)
+      : readVaultManifestAt(join(paseoHome, "vault"));
+    if (manifest[appKey] === undefined) {
+      manifest[appKey] = { repoBasename: appKey };
+      writeRuntimeFile(paseoHome, "vault.manifest.json", Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, "utf8"));
+    }
+  }
+
+  applyVaultHydration(paseoHome);
+
+  const sortedImported = [...importedFiles].sort();
+  let synced: SyncVaultResult | null = null;
+  if (input.syncAfterImport !== false) {
+    const configured = (loadVaultConfig(paseoHome)?.repo?.trim() ?? "") !== "";
+    const canSync = configured || (await probeGhAuth(input.runner)).ghAuthenticated;
+    if (canSync) {
+      synced = await syncVault(paseoHome, { runner: input.runner });
+    }
+  }
+
+  const syncSuffix =
+    synced !== null
+      ? ` and synced with ${synced.repo} (${synced.pushed ? `pushed ${synced.pushedFiles.length} file(s)` : "up to date"})`
+      : " into local vault-runtime";
+  const summary =
+    sortedImported.length > 0
+      ? `Imported ${sortedImported.length} secret file(s) (${sortedImported.join(", ")})${syncSuffix}.`
+      : `No new secret files imported${synced !== null ? `; synced with ${synced.repo}` : ""}.`;
+
+  return {
+    importedFiles: sortedImported,
+    synced,
+    summary,
+  };
 }
 
 /** The default runner's stdout ceiling — vault tarballs are binary and can be large. */
@@ -864,7 +1184,7 @@ function isEmptyOrUnbornPullError(err: unknown): boolean {
  *   `vault-push-passphrase-required`: unverifiable is never traded for a
  *   plaintext guess.
  */
-function stageRuntimeFileIntoCheckout(runtimePath: string, target: string, passphrase: string | undefined): void {
+function stageRuntimeFileIntoCheckout(runtimePath: string, target: string, passphrase: string | undefined, relPath?: string): void {
   let existing: Buffer | null = null;
   try {
     existing = readFileSync(target);
@@ -897,6 +1217,15 @@ function stageRuntimeFileIntoCheckout(runtimePath: string, target: string, passp
       writeFileSync(target, resealed);
       return;
     }
+  }
+  if (
+    (relPath === "secrets/shared/gplay-service-account.json" || relPath === "secrets/shared/eye.json") &&
+    parseEnvelope(runtimeBytes) === null
+  ) {
+    const sealed = Buffer.from(`${JSON.stringify(sealVaultBuffer(runtimeBytes, passphrase))}\n`, "utf8");
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, sealed);
+    return;
   }
   mkdirSync(dirname(target), { recursive: true });
   copyFileSync(runtimePath, target);
@@ -1216,35 +1545,40 @@ interface RootFacts {
  * Keys with no local match resolve `null`/`null`; output is canonical-key
  * order, first matching root (sorted) per key — deterministic everywhere.
  */
-export function resolveVaultApps(paseoHome: string, manifest: VaultManifest): ResolvedVaultApp[] {
+function collectCandidateProjectRoots(paseoHome: string): string[] {
   const stateDir = vaultStateDir(paseoHome);
-
   const candidateRoots = new Set<string>();
   for (const registration of listProjectRegistrations(stateDir)) candidateRoots.add(registration.root);
   for (const discovered of discoverProjects(stateDir, [], paseoHome)) {
     if (discovered.root !== null) candidateRoots.add(discovered.root);
   }
   for (const root of readReleaseLabProjectRoots(paseoHome)) candidateRoots.add(root);
+  return [...candidateRoots].sort();
+}
+
+function inspectProjectRootFacts(root: string): RootFacts | null {
+  const resolved = resolveProject(root);
+  if (!resolved.ok) return null;
+  const storeManifest = readJsonFile(join(resolved.root, ".store-release", "manifest.json"));
+  return {
+    root: resolved.root,
+    slug: resolved.slug,
+    basename: basename(resolved.root),
+    originUrl: gitProbe(resolved.root, ["config", "--get", "remote.origin.url"]),
+    bundleId: jsonStringField(storeManifest, "bundleId") ?? nestedJsonStringField(storeManifest, ["ios", "bundleId"]),
+    packageName: jsonStringField(storeManifest, "packageName") ?? nestedJsonStringField(storeManifest, ["android", "packageName"]),
+  };
+}
+
+export function resolveVaultApps(paseoHome: string, manifest: VaultManifest): ResolvedVaultApp[] {
+  const candidateRoots = collectCandidateProjectRoots(paseoHome);
 
   // resolveProject per distinct root, once — it is the slug's single source
   const factsByRoot = new Map<string, RootFacts | null>();
   const factsOf = (root: string): RootFacts | null => {
     const cached = factsByRoot.get(root);
     if (cached !== undefined) return cached;
-    const resolved = resolveProject(root);
-    if (!resolved.ok) {
-      factsByRoot.set(root, null);
-      return null;
-    }
-    const storeManifest = readJsonFile(join(resolved.root, ".store-release", "manifest.json"));
-    const facts: RootFacts = {
-      root: resolved.root,
-      slug: resolved.slug,
-      basename: basename(resolved.root),
-      originUrl: gitProbe(resolved.root, ["config", "--get", "remote.origin.url"]),
-      bundleId: jsonStringField(storeManifest, "bundleId"),
-      packageName: jsonStringField(storeManifest, "packageName"),
-    };
+    const facts = inspectProjectRootFacts(root);
     factsByRoot.set(root, facts);
     return facts;
   };
@@ -1253,7 +1587,7 @@ export function resolveVaultApps(paseoHome: string, manifest: VaultManifest): Re
   for (const canonicalAppKey of Object.keys(manifest).sort()) {
     const entry = manifest[canonicalAppKey]!;
     let matched: RootFacts | null = null;
-    for (const root of [...candidateRoots].sort()) {
+    for (const root of candidateRoots) {
       const facts = factsOf(root);
       if (facts !== null && entryMatches(entry, facts)) {
         matched = facts;
@@ -1452,19 +1786,111 @@ function renderKeystoreProperties(signing: Record<string, unknown> | null): stri
 }
 
 /**
+ * Collects local state and config files from `<paseoHome>` into `<paseoHome>/vault-runtime/`
+ * before staging into `<paseoHome>/vault`:
+ * - `<stateDir>/lanes.json` -> `config/lanes.json`
+ * - `<paseoHome>/connector/fleet.json` -> `config/fleet.json`
+ * - `<paseoHome>/burn-lab/free-pool.json` -> `config/free-pool.json`
+ * - `<stateDir>/eye.json` -> `secrets/shared/eye.json` (when not already present in `vault-runtime`)
+ * - For every registered local `Project` with `.store-release/manifest.json`, copies it into
+ *   `config/apps/<canonicalAppKey>/store-manifest.json` and updates `vault.manifest.json`.
+ */
+function collectLocalStateIntoRuntime(paseoHome: string): void {
+  const stateDir = vaultStateDir(paseoHome);
+  const configSources: ReadonlyArray<{ src: string; vaultRel: string }> = [
+    { src: join(stateDir, "lanes.json"), vaultRel: "config/lanes.json" },
+    { src: join(paseoHome, "connector", "fleet.json"), vaultRel: "config/fleet.json" },
+    { src: join(paseoHome, "burn-lab", "free-pool.json"), vaultRel: "config/free-pool.json" },
+  ];
+  for (const { src, vaultRel } of configSources) {
+    if (existsSync(src)) {
+      writeRuntimeFile(paseoHome, vaultRel, readFileSync(src));
+    }
+  }
+
+  const localEye = join(stateDir, "eye.json");
+  if (existsSync(localEye) && !sharedSecretExists(paseoHome, SHARED_SECRET_FILES.eyeConfig)) {
+    writeRuntimeFile(paseoHome, `secrets/shared/${SHARED_SECRET_FILES.eyeConfig}`, readFileSync(localEye));
+  }
+
+  const runtimeRoot = join(paseoHome, "vault-runtime");
+  const vaultDir = join(paseoHome, "vault");
+  const manifest = existsSync(join(runtimeRoot, "vault.manifest.json"))
+    ? readVaultManifestAt(runtimeRoot)
+    : readVaultManifestAt(vaultDir);
+  let manifestUpdated = false;
+  const seenRoots = new Set<string>();
+
+  for (const candidateRoot of collectCandidateProjectRoots(paseoHome)) {
+    const facts = inspectProjectRootFacts(candidateRoot);
+    if (facts === null || seenRoots.has(facts.root)) continue;
+    seenRoots.add(facts.root);
+    const storeManifestPath = join(facts.root, ".store-release", "manifest.json");
+    if (!existsSync(storeManifestPath)) continue;
+
+    let canonicalAppKey: string | null = null;
+    for (const key of Object.keys(manifest).sort()) {
+      if (entryMatches(manifest[key]!, facts)) {
+        canonicalAppKey = key;
+        break;
+      }
+    }
+    if (canonicalAppKey === null) {
+      const storeManifestObj = readJsonFile(storeManifestPath);
+      canonicalAppKey = jsonStringField(storeManifestObj, "appKey") ?? facts.basename;
+    }
+
+    writeRuntimeFile(paseoHome, `config/apps/${canonicalAppKey}/store-manifest.json`, readFileSync(storeManifestPath));
+    const priorEntry = manifest[canonicalAppKey] ?? {};
+    manifest[canonicalAppKey] = {
+      ...priorEntry,
+      repoBasename: facts.basename,
+      ...(facts.originUrl !== null && facts.originUrl !== "" ? { gitRemote: facts.originUrl } : {}),
+      ...(facts.bundleId !== null ? { bundleId: facts.bundleId } : {}),
+      ...(facts.packageName !== null ? { packageName: facts.packageName } : {}),
+    };
+    manifestUpdated = true;
+  }
+
+  if (manifestUpdated) {
+    writeRuntimeFile(paseoHome, "vault.manifest.json", Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, "utf8"));
+  }
+}
+
+/**
+ * Materializes `config/{lanes,fleet,free-pool}.json` from `<paseoHome>/vault-runtime/`
+ * into their local `<paseoHome>` destinations when absent locally (or when `overwriteConfigs === true`).
+ */
+function materializeConfigsFromRuntime(paseoHome: string, overwriteConfigs = false): void {
+  const runtimeConfigDir = join(paseoHome, "vault-runtime", "config");
+  const targets: ReadonlyArray<{ src: string; dest: string }> = [
+    { src: join(runtimeConfigDir, "lanes.json"), dest: join(vaultStateDir(paseoHome), "lanes.json") },
+    { src: join(runtimeConfigDir, "fleet.json"), dest: join(paseoHome, "connector", "fleet.json") },
+    { src: join(runtimeConfigDir, "free-pool.json"), dest: join(paseoHome, "burn-lab", "free-pool.json") },
+  ];
+  for (const { src, dest } of targets) {
+    if (!existsSync(src)) continue;
+    if (!overwriteConfigs && existsSync(dest)) continue;
+    mkdirSync(dirname(dest), { recursive: true });
+    copyFileSync(src, dest);
+  }
+}
+
+/**
  * The stage-C hydration tail both transports share: route `vault.manifest.json`
  * canonical keys to local `Project`s, materialize per-app files into every
- * resolved checkout with hygiene registered, and write the
- * `<paseoHome>/vault-runtime/env.json` pointer index (`0o600`) — the
- * zero-shell-config hand-off `factory-release-lab` reads (ADR 0014 Decision 5).
+ * resolved checkout with hygiene registered, materialize global config files,
+ * and write the `<paseoHome>/vault-runtime/env.json` pointer index (`0o600`) —
+ * the zero-shell-config hand-off `factory-release-lab` reads (ADR 0014 Decision 5).
  */
-function applyVaultHydration(paseoHome: string): void {
+function applyVaultHydration(paseoHome: string, overwriteConfigs = false): void {
   const manifest = readVaultManifestAt(join(paseoHome, "vault-runtime"));
   for (const app of resolveVaultApps(paseoHome, manifest)) {
     if (app.projectRoot === null) continue; // no local checkout behind this canonical key on this machine
     const written = materializeVaultAppFiles(paseoHome, app.canonicalAppKey, app.projectRoot);
     if (written.length > 0) ensureLocalGitExcludeAndWorktreeInclude(app.projectRoot, written);
   }
+  materializeConfigsFromRuntime(paseoHome, overwriteConfigs);
   writeVaultRuntimeEnv(paseoHome);
 }
 
