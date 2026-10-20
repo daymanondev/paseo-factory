@@ -11,7 +11,7 @@
  */
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
-import { FactoryViewSchema, LaneNameSchema, TaskDetailViewSchema } from "./view.ts";
+import { FactoryViewSchema, LaneNameSchema, TaskDetailViewSchema, VaultStatusViewSchema } from "./view.ts";
 
 /** Every handler's refusal shape: a stable machine code plus the human sentence. */
 export const Failure = z.object({ ok: z.literal(false), code: z.string(), error: z.string() });
@@ -191,4 +191,52 @@ export const pluginsManage = defineRpc({
     action: z.enum(["enable", "disable", "reload", "update", "remove"]),
   }),
   output: z.union([z.object({ ok: z.literal(true), pluginId: z.string(), action: z.string(), summary: z.string() }), Failure]),
+});
+
+// The Private vault surface (v0.0.21, ADR 0014 §4): configure persists the
+// Owner's repo/branch/passphrase to the `0o600` `<stateDir>/vault-config.json`
+// and returns the refreshed status; hydrate streams the zero-clone Direct
+// hydrate tarball, pull runs the two-way Vault sync checkout, push packages
+// this machine's runtime tree back to the remote. Every refusal is data —
+// the vendored core's own `vault-*` FactoryError codes ride the Failure
+// union — never an exception.
+export const vaultConfigure = defineRpc({
+  name: "factory.vault.configure",
+  input: z.object({
+    /** The private GitHub `owner/repo` slug (or a local git path for tests). */
+    repo: z.string().min(1),
+    branch: z.string().min(1),
+    /** Absent preserves the persisted passphrase; an empty string clears it. */
+    passphrase: z.string().optional(),
+  }),
+  output: z.union([z.object({ ok: z.literal(true), vault: VaultStatusViewSchema }), Failure]),
+});
+
+export const vaultHydrate = defineRpc({
+  name: "factory.vault.hydrate",
+  input: z.object({
+    /** One-off repo override — omitted uses the persisted config's repo. */
+    repo: z.string().optional(),
+    /** The tarball ref — omitted uses the configured branch. */
+    ref: z.string().optional(),
+  }),
+  output: z.union([z.object({ ok: z.literal(true), vault: VaultStatusViewSchema, hydratedFiles: z.array(z.string()) }), Failure]),
+});
+
+export const vaultPull = defineRpc({
+  name: "factory.vault.pull",
+  input: z.object({
+    /** Reconcile the vault's `state/nodes/*` ledger snapshots into this machine's ledgers after hydrating. */
+    mergeLedgers: z.boolean().optional(),
+  }),
+  output: z.union([z.object({ ok: z.literal(true), vault: VaultStatusViewSchema, hydratedFiles: z.array(z.string()) }), Failure]),
+});
+
+export const vaultPush = defineRpc({
+  name: "factory.vault.push",
+  input: z.object({
+    /** Snapshot this machine's ledgers under its node namespace before pushing. */
+    includeLedgers: z.boolean().optional(),
+  }),
+  output: z.union([z.object({ ok: z.literal(true), vault: VaultStatusViewSchema, pushedFiles: z.array(z.string()) }), Failure]),
 });

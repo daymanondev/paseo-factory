@@ -6,6 +6,9 @@ import { createServer } from "node:http";
 import type { Duplex } from "node:stream";
 import { existsSync, chmodSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { basename, delimiter, dirname, join } from "node:path";
+import { gzipSync } from "node:zlib";
+import { sealVaultBuffer } from "../src/index.ts";
+import type { VaultRunner, VaultRunnerCall } from "../src/index.ts";
 import { createFactory } from "../plugin/server/core/factory.ts";
 import { resolveProject } from "../plugin/server/core/project.ts";
 import { createSurfaceHandlers } from "../plugin/server/surface-rpc.ts";
@@ -130,7 +133,7 @@ function fakeDaemon(agents: FakeAgent[]) {
 }
 
 /** A factory plus handlers over a temp state dir and home. */
-function makeSurface(t: TestContext, agents: FakeAgent[] = [], plugins: DaemonPluginItem[] = []) {
+function makeSurface(t: TestContext, agents: FakeAgent[] = [], plugins: DaemonPluginItem[] = [], vaultRunner?: VaultRunner) {
   const dir = makeTempDir();
   disposeDir(t, dir);
   const home = join(dir, "paseo-home");
@@ -179,6 +182,10 @@ function makeSurface(t: TestContext, agents: FakeAgent[] = [], plugins: DaemonPl
       pluginManages.push({ home: manageHome, pluginId, action });
       return { ok: true };
     },
+    // The vault transport seam (v0.0.21, ADR 0014 §2): tests inject a fake
+    // `VaultRunner` so the four factory.vault.* handlers run end-to-end with
+    // zero network — the same law listPlugins/installPlugin carry.
+    ...(vaultRunner === undefined ? {} : { vaultRunner }),
   });
   return { dir, home, stateDir, factory, handlers, fake, modelSyncs, thinkingSyncs, stopped, listedPlugins, pluginListHomes, pluginInstalls, pluginManages };
 }
@@ -2159,4 +2166,304 @@ test("surface deps: the plugin bridge overrides ride createSurfaceHandlers like 
   assert.equal(typeof defaults.listPlugins, "function");
   assert.equal(typeof defaults.installPlugin, "function");
   assert.equal(typeof defaults.managePlugin, "function");
+});
+
+// ---- the Private vault surface (v0.0.21, ADR 0014 §4) ----------------------------------------
+//
+// The four factory.vault.* handlers run end-to-end through createSurfaceHandlers
+// against the real vendored core (plugin/server/core/vault.ts) on the seam's own
+// temp home, with an injected fake `VaultRunner` answering every external CLI
+// call from in-memory fixtures — zero network, zero prompts, `~/.paseo` never
+// touched (spec §Testing Decisions 2).
+
+/** Runs `run` with FACTORY_VAULT_PASSPHRASE pinned (deleted when undefined), restoring after — the hasPassphrase chain's third leg must not leak from the dev shell. */
+function withVaultPassphrase<T>(value: string | undefined, run: () => T): T {
+  const prior = process.env.FACTORY_VAULT_PASSPHRASE;
+  if (value === undefined) delete process.env.FACTORY_VAULT_PASSPHRASE;
+  else process.env.FACTORY_VAULT_PASSPHRASE = value;
+  try {
+    return run();
+  } finally {
+    if (prior === undefined) delete process.env.FACTORY_VAULT_PASSPHRASE;
+    else process.env.FACTORY_VAULT_PASSPHRASE = prior;
+  }
+}
+
+/** One ustar header with a real checksum — the minimal archive the core's in-memory tar parser walks. */
+function vaultTarHeader(name: string, size: number, typeflag: "0" | "5"): Buffer {
+  const header = Buffer.alloc(512);
+  header.write(name, 0, 100, "utf8");
+  header.write("0000644\0", 100, 8, "utf8");
+  header.write("0000000\0", 108, 8, "utf8");
+  header.write("0000000\0", 116, 8, "utf8");
+  header.write(`${size.toString(8).padStart(11, "0")}\0`, 124, 12, "utf8");
+  header.write("00000000000\0", 136, 12, "utf8");
+  header.write("        ", 148, 8, "latin1");
+  header.write(typeflag, 156, 1, "latin1");
+  header.write("ustar", 257, 5, "latin1");
+  header.write("00", 263, 2, "latin1");
+  let checksum = 0;
+  for (const byte of header) checksum += byte;
+  header.write(`${checksum.toString(8).padStart(6, "0")}\0 `, 148, 8, "latin1");
+  return header;
+}
+
+/** A GitHub-shaped gzipped tarball: one top-level `<owner>-<repo>-<sha>/` prefix over the vault files. */
+function buildVaultTarball(entries: Array<{ path: string; data: Buffer | string }>, topDir = "acme-factory-vault-abc1234"): Buffer {
+  const file = (name: string, data: Buffer): Buffer => {
+    const padding = Buffer.alloc((512 - (data.length % 512)) % 512);
+    return Buffer.concat([vaultTarHeader(name, data.length, "0"), data, padding]);
+  };
+  const parts: Buffer[] = [vaultTarHeader(`${topDir}/`, 0, "5")];
+  for (const entry of entries) {
+    const data = typeof entry.data === "string" ? Buffer.from(entry.data, "utf8") : entry.data;
+    const dir = dirname(entry.path);
+    if (dir !== "." && dir !== topDir) parts.push(vaultTarHeader(`${dir}/`, 0, "5"));
+    parts.push(file(entry.path, data));
+  }
+  parts.push(Buffer.alloc(1024));
+  return gzipSync(Buffer.concat(parts));
+}
+
+/** An in-memory `VaultRunner` answering every call through `answer` — zero network, calls recorded. */
+function fakeVaultRunner(answer: (call: VaultRunnerCall) => Buffer): { runner: VaultRunner; calls: VaultRunnerCall[] } {
+  const calls: VaultRunnerCall[] = [];
+  return {
+    calls,
+    runner: async (call) => {
+      calls.push(call);
+      return answer(call);
+    },
+  };
+}
+
+test("vault snapshot: view.vault rides the factory view — a fresh home's honest defaults, alongside all 3 companions", async (t) => {
+  const { handlers } = makeSurface(t);
+  const snap = await withVaultPassphrase(undefined, () => handlers.snapshot({}));
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  // The snapshot carries the vault half beside the companion half — one view, both surfaces (spec §Testing Decisions 2).
+  assert.deepEqual(
+    snap.view.companions.map((companion) => companion.id),
+    ["factory-burn-lab", "factory-connector", "factory-release-lab"],
+  );
+  const vault = snap.view.vault;
+  assert.equal(vault.configured, false, "no vault-config.json yet — the card says so, never guesses");
+  assert.equal(vault.repo, null);
+  assert.equal(vault.branch, "main", "the default branch renders before any save");
+  assert.ok(typeof vault.nodeId === "string" && vault.nodeId.length > 0, "the hostname-derived nodeId renders");
+  assert.ok(/^[a-z0-9-]+$/.test(vault.nodeId), "the nodeId is a legal [a-z0-9-] segment");
+  assert.equal(vault.hasPassphrase, false);
+  assert.equal(vault.cloneExists, false, "no <home>/vault/.git on a fresh home");
+  assert.equal(vault.lastHydratedAt, null);
+  assert.equal(vault.lastHydrateMode, null);
+  assert.equal(vault.lastPushedAt, null);
+  assert.deepEqual(vault.sharedSecrets, { ascKey: false, ascCredentials: false, gplayServiceAccount: false, eyeConfig: false });
+  assert.deepEqual(vault.hydratedApps, []);
+  assert.equal(vault.error, null);
+});
+
+test("vault.configure: persists repo/branch/passphrase to vault-config.json 0o600 and returns the updated view", async (t) => {
+  const { handlers, stateDir } = makeSurface(t);
+  const reply = await withVaultPassphrase(undefined, () => handlers.vaultConfigure({ repo: "acme/factory-vault", branch: "release", passphrase: "correct-horse" }));
+  assert.ok(reply.ok, reply.ok ? "" : reply.error);
+  assert.equal(reply.vault.configured, true);
+  assert.equal(reply.vault.repo, "acme/factory-vault");
+  assert.equal(reply.vault.branch, "release");
+  assert.equal(reply.vault.hasPassphrase, true, "the persisted passphrase satisfies the status read's chain");
+
+  // The spec's exact persistence law (§Implementation Decisions 4): repo/branch/passphrase
+  // land in <stateDir>/vault-config.json with 0o600 permissions.
+  const configPath = join(stateDir, "vault-config.json");
+  const saved = JSON.parse(readFileSync(configPath, "utf8")) as Record<string, unknown>;
+  assert.equal(saved.repo, "acme/factory-vault");
+  assert.equal(saved.branch, "release");
+  assert.equal(saved.passphrase, "correct-horse");
+  assert.equal(lstatSync(configPath).mode & 0o777, 0o600, "the persisted config is owner-only");
+
+  // The next snapshot gathers the same configured vault — one view, both halves.
+  const snap = await handlers.snapshot({});
+  assert.ok(snap.ok);
+  assert.equal(snap.view.vault.configured, true);
+  assert.equal(snap.view.vault.repo, "acme/factory-vault");
+
+  // The passphrase tri-state: absent preserves the prior value, empty clears it.
+  const preserved = await handlers.vaultConfigure({ repo: "acme/factory-vault", branch: "main" });
+  assert.ok(preserved.ok, preserved.ok ? "" : preserved.error);
+  assert.equal(preserved.vault.hasPassphrase, true, "a save with no passphrase field keeps the persisted one");
+  assert.equal(preserved.vault.branch, "main");
+  const cleared = await handlers.vaultConfigure({ repo: "acme/factory-vault", branch: "main", passphrase: "" });
+  assert.ok(cleared.ok, cleared.ok ? "" : cleared.error);
+  assert.equal(cleared.vault.hasPassphrase, false, "an explicit empty passphrase clears the persisted one");
+
+  // A blank repo refuses as data, never an exception.
+  const blank = await handlers.vaultConfigure({ repo: "   ", branch: "main" });
+  assert.ok(!blank.ok);
+  assert.equal(blank.code, "vault-invalid-repo");
+});
+
+test("vault.configure: a damaged vault-config.json refuses as data with the core's own code", async (t) => {
+  const { handlers, stateDir } = makeSurface(t);
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(join(stateDir, "vault-config.json"), "{not json");
+  const reply = await handlers.vaultConfigure({ repo: "acme/factory-vault", branch: "main" });
+  assert.ok(!reply.ok);
+  assert.equal(reply.code, "corrupted-vault-config", "the core's refusal rides the Failure union, never a throw");
+});
+
+test("vault.hydrate: zero-clone Direct hydrate end-to-end through the handlers — unsealed runtime, direct stamp, no vault/.git", async (t) => {
+  const p8 = "-----BEGIN PRIVATE KEY-----\nfixture asc api key\n-----END PRIVATE KEY-----\n";
+  const gplayPlain = '{"client_email":"svc@fixture.iam.gserviceaccount.com"}';
+  const eyePlain = '{\n  "provider": "eye"\n}\n';
+  const tarball = buildVaultTarball([
+    { path: "acme-factory-vault-abc1234/secrets/shared/asc-api-key.p8", data: p8 },
+    { path: "acme-factory-vault-abc1234/secrets/shared/gplay-service-account.json", data: JSON.stringify(sealVaultBuffer(Buffer.from(gplayPlain, "utf8"))) },
+    { path: "acme-factory-vault-abc1234/secrets/shared/eye.json", data: JSON.stringify(sealVaultBuffer(Buffer.from(eyePlain, "utf8"), "correct-horse")) },
+  ]);
+  const { runner, calls } = fakeVaultRunner(() => tarball);
+  const { handlers, home } = makeSurface(t, [], [], runner);
+
+  // User Story 1's path: configure once, then one click — the persisted repo and passphrase drive the stream.
+  const configured = await handlers.vaultConfigure({ repo: "acme/factory-vault", branch: "main", passphrase: "correct-horse" });
+  assert.ok(configured.ok, configured.ok ? "" : configured.error);
+  const reply = await withVaultPassphrase(undefined, () => handlers.vaultHydrate({}));
+  assert.ok(reply.ok, reply.ok ? "" : reply.error);
+  assert.deepEqual(reply.hydratedFiles, [
+    "secrets/shared/asc-api-key.p8",
+    "secrets/shared/eye.json",
+    "secrets/shared/gplay-service-account.json",
+  ]);
+  assert.equal(calls.length, 1, "exactly one gh api call — the zero-clone stream");
+  assert.equal(calls[0]!.command, "gh");
+  assert.deepEqual(calls[0]!.args, ["api", "repos/acme/factory-vault/tarball/main"]);
+
+  // The runtime tree is unsealed on disk: plaintext verbatim, the obfuscated
+  // envelope zero-passphrase, the locked envelope with the persisted passphrase.
+  const runtime = join(home, "vault-runtime");
+  assert.equal(readFileSync(join(runtime, "secrets/shared/asc-api-key.p8"), "utf8"), p8);
+  assert.equal(readFileSync(join(runtime, "secrets/shared/gplay-service-account.json"), "utf8"), gplayPlain);
+  assert.equal(readFileSync(join(runtime, "secrets/shared/eye.json"), "utf8"), eyePlain);
+  assert.equal(lstatSync(join(runtime, "secrets/shared/asc-api-key.p8")).mode & 0o777, 0o600, "hydrated secrets are owner-only");
+
+  // The refreshed view reports the hydrated half: pills lit, direct mode stamped.
+  assert.equal(reply.vault.configured, true);
+  assert.equal(reply.vault.lastHydrateMode, "direct");
+  assert.ok(reply.vault.lastHydratedAt !== null);
+  assert.deepEqual(reply.vault.sharedSecrets, { ascKey: true, ascCredentials: false, gplayServiceAccount: true, eyeConfig: true });
+  assert.equal(reply.vault.cloneExists, false, "Direct hydrate leaves no cached checkout — no <home>/vault/.git");
+  assert.equal(existsSync(join(home, "vault")), false);
+});
+
+test("vault.hydrate: refusals are data — unconfigured, a non-GitHub repo, and a failing runner never throw", async (t) => {
+  const unconfigured = makeSurface(t);
+  const none = await unconfigured.handlers.vaultHydrate({});
+  assert.ok(!none.ok);
+  assert.equal(none.code, "vault-not-configured");
+
+  const notGithub = makeSurface(t, [], [], fakeVaultRunner(() => Buffer.alloc(0)).runner);
+  const bad = await notGithub.handlers.vaultHydrate({ repo: "not a slug" });
+  assert.ok(!bad.ok);
+  assert.equal(bad.code, "vault-repo-not-github");
+
+  const failing = makeSurface(t, [], [], async () => {
+    throw new Error("gh: rate limit exceeded");
+  });
+  const settled = await failing.handlers.vaultHydrate({ repo: "acme/factory-vault" });
+  assert.ok(!settled.ok);
+  assert.match(settled.error, /gh: rate limit exceeded/);
+});
+
+test("vault.pull: Vault sync through the handlers — cached checkout hydrated, sync stamp, node ledgers reconciled", async (t) => {
+  // A prior pull's cached checkout at <home>/vault: an obfuscated envelope, a
+  // config file, and another machine's node-scoped ledger snapshot.
+  const { runner, calls } = fakeVaultRunner(() => Buffer.alloc(0));
+  const { handlers, home, stateDir, factory } = makeSurface(t, [], [], runner);
+  mkdirSync(join(home, "vault", ".git"), { recursive: true });
+  mkdirSync(join(home, "vault", "secrets", "shared"), { recursive: true });
+  writeFileSync(join(home, "vault", "secrets", "shared", "eye.json"), JSON.stringify(sealVaultBuffer(Buffer.from('{"provider":"eye"}', "utf8"))));
+  mkdirSync(join(home, "vault", "config"), { recursive: true });
+  writeFileSync(join(home, "vault", "config", "lanes.json"), '{"lanes":{"default":"pi"}}');
+  mkdirSync(join(home, "vault", "state", "nodes", "other-mac"), { recursive: true });
+  const remoteLedger = `${JSON.stringify({ seq: 1, ts: "2026-10-20T09:00:00.000Z", event: "contract_set", task: "T-REMOTE", workspace: "/w", gate: "true", artifact: "a" })}\n`;
+  writeFileSync(join(home, "vault", "state", "nodes", "other-mac", "global-ledger.jsonl"), remoteLedger);
+
+  const configured = await handlers.vaultConfigure({ repo: "acme/factory-vault", branch: "main" });
+  assert.ok(configured.ok, configured.ok ? "" : configured.error);
+  // This machine's own ledger has one event the remote does not.
+  factory.ledger.append({ event: "contract_set", task: "T-LOCAL", workspace: "/w", gate: "true", artifact: "a" });
+
+  const reply = await handlers.vaultPull({ mergeLedgers: true });
+  assert.ok(reply.ok, reply.ok ? "" : reply.error);
+  assert.deepEqual(reply.hydratedFiles, ["config/lanes.json", "secrets/shared/eye.json", "state/nodes/other-mac/global-ledger.jsonl"]);
+  // The cached-checkout leg: git pull --rebase --autostash inside <home>/vault, never a fresh clone.
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0]!.args, ["pull", "--rebase", "--autostash"], "an existing checkout pulls, it does not re-clone");
+  assert.equal(calls[0]!.cwd, join(home, "vault"));
+
+  assert.equal(readFileSync(join(home, "vault-runtime", "secrets", "shared", "eye.json"), "utf8"), '{"provider":"eye"}', "the envelope unsealed into the runtime tree");
+  assert.equal(reply.vault.lastHydrateMode, "sync");
+  assert.equal(reply.vault.cloneExists, true, "the cached checkout is exactly what cloneExists reports");
+
+  // The mergeLedgers leg: both machines' events land in the global ledger, re-indexed monotonic.
+  const merged = readFileSync(join(stateDir, "ledger.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line) as { seq: number; task: string });
+  assert.deepEqual(
+    merged.map((entry) => entry.task).sort(),
+    ["T-LOCAL", "T-REMOTE"],
+    "the node snapshot folded into this machine's global ledger",
+  );
+  assert.deepEqual(merged.map((entry) => entry.seq), merged.map((_, index) => index + 1), "seq re-indexed strictly monotonic 1..N");
+});
+
+test("vault.push: packages the runtime tree plus this node's ledger snapshot, commits and pushes through the handlers", async (t) => {
+  const { runner, calls } = fakeVaultRunner((call) => (call.args[0] === "status" ? Buffer.from(" M secrets/shared/asc-api-key.p8\n") : Buffer.alloc(0)));
+  const { handlers, home, factory } = makeSurface(t, [], [], runner);
+  const configured = await handlers.vaultConfigure({ repo: "acme/factory-vault", branch: "main" });
+  assert.ok(configured.ok, configured.ok ? "" : configured.error);
+
+  const p8 = "-----BEGIN PRIVATE KEY-----\npush me back\n-----END PRIVATE KEY-----\n";
+  mkdirSync(join(home, "vault-runtime", "secrets", "shared"), { recursive: true });
+  writeFileSync(join(home, "vault-runtime", "secrets", "shared", "asc-api-key.p8"), p8);
+  factory.ledger.append({ event: "contract_set", task: "T-PUSH", workspace: "/w", gate: "true", artifact: "a" });
+
+  const reply = await handlers.vaultPush({ includeLedgers: true });
+  assert.ok(reply.ok, reply.ok ? "" : reply.error);
+  assert.deepEqual(reply.pushedFiles, ["secrets/shared/asc-api-key.p8", `state/nodes/${reply.vault.nodeId}/global-ledger.jsonl`]);
+  assert.equal(readFileSync(join(home, "vault", "secrets", "shared", "asc-api-key.p8"), "utf8"), p8, "the runtime tree landed in the checkout");
+  assert.ok(existsSync(join(home, "vault", "state", "nodes", reply.vault.nodeId, "global-ledger.jsonl")), "this node's ledger snapshot rode the push");
+  assert.ok(reply.vault.lastPushedAt !== null, "the push stamps lastPushedAt");
+
+  // The full git choreography through the seam: clone (no cached checkout
+  // yet), status sees the staged tree, add + commit + push origin main.
+  const nodeId = reply.vault.nodeId;
+  assert.deepEqual(
+    calls.map((call) => [call.command, ...call.args]),
+    [
+      ["git", "clone", "--branch", "main", "https://github.com/acme/factory-vault.git", join(home, "vault")],
+      ["git", "status", "--porcelain"],
+      ["git", "add", "-A"],
+      ["git", "-c", "user.name=paseo-factory", "-c", "user.email=vault@paseo-factory.invalid", "commit", "-m", `vault push from ${nodeId}`],
+      ["git", "push", "origin", "main"],
+    ],
+  );
+});
+
+test("vault.pull / vault.push: unconfigured and failing-runner refusals are data, never exceptions", async (t) => {
+  const unconfigured = makeSurface(t);
+  const noPull = await unconfigured.handlers.vaultPull({});
+  assert.ok(!noPull.ok);
+  assert.equal(noPull.code, "vault-not-configured");
+  const noPush = await unconfigured.handlers.vaultPush({});
+  assert.ok(!noPush.ok);
+  assert.equal(noPush.code, "vault-not-configured");
+
+  const failing = makeSurface(t, [], [], async () => {
+    throw new Error("fatal: could not read from remote repository");
+  });
+  const configured = await failing.handlers.vaultConfigure({ repo: "acme/factory-vault", branch: "main" });
+  assert.ok(configured.ok, configured.ok ? "" : configured.error);
+  const pullFail = await failing.handlers.vaultPull({});
+  assert.ok(!pullFail.ok);
+  assert.match(pullFail.error, /could not read from remote repository/);
+  const pushFail = await failing.handlers.vaultPush({});
+  assert.ok(!pushFail.ok);
+  assert.match(pushFail.error, /could not read from remote repository/);
 });
