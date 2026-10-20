@@ -152,3 +152,91 @@ export function refuseGitArgv(argv) {
       return undefined;
   }
 }
+
+const SUPERVISOR_BLOCKED_GIT_SUBCOMMANDS = new Set(["commit", "merge", "cherry-pick", "rebase", "am", "apply", "stash"]);
+const SUPERVISOR_GIT_FENCE_REASON =
+  "factory git-shim: blocked (supervisor-git-fence) — Supervisor never commits or branches on <project-root>; dispatch to Lead via factory lead dispatch";
+
+export const SEAT_MEMORY_WHITELIST = [
+  "AGENTS.md",
+  "CLAUDE.md",
+  "CONTEXT.md",
+  "GLOSSARY.md",
+  ".gitignore",
+  ".worktreeinclude",
+];
+
+/**
+ * Parses leading global flags (`-C <dir>`, `-c <k=v>`, etc.), the git subcommand,
+ * and the subcommand's remaining arguments.
+ */
+export function parseGitSubcommand(argv) {
+  let i = 0;
+  const globalFlags = [];
+  while (i < argv.length && argv[i] !== undefined && argv[i].startsWith("-")) {
+    if (GIT_GLOBAL_VALUE_FLAGS.has(argv[i])) {
+      globalFlags.push(argv[i]);
+      if (argv[i + 1] !== undefined) globalFlags.push(argv[i + 1]);
+      i += 2;
+    } else {
+      globalFlags.push(argv[i]);
+      i += 1;
+    }
+  }
+  const sub = argv[i];
+  const args = sub === undefined ? [] : argv.slice(i + 1);
+  return { globalFlags, sub, args };
+}
+
+/**
+ * Refuses git subcommands and branch-creation flags forbidden to the Supervisor
+ * seat on `<project-root>` (v0.0.23, ADR 0015 §2).
+ */
+export function refuseSupervisorGitArgv(argv) {
+  const { sub, args } = parseGitSubcommand(argv);
+  if (sub === undefined) return undefined;
+  if (SUPERVISOR_BLOCKED_GIT_SUBCOMMANDS.has(sub)) {
+    return { rule: "supervisor-git-fence", reason: SUPERVISOR_GIT_FENCE_REASON };
+  }
+  const dd = args.indexOf("--");
+  const flagSlice = dd === -1 ? args : args.slice(0, dd);
+  if (sub === "checkout") {
+    for (const token of flagSlice) {
+      if (token === "-b" || token === "-B" || clusterHas(token, "b") || clusterHas(token, "B")) {
+        return { rule: "supervisor-git-fence", reason: SUPERVISOR_GIT_FENCE_REASON };
+      }
+    }
+  }
+  if (sub === "switch") {
+    for (const token of flagSlice) {
+      if (
+        token === "-c" ||
+        token === "-C" ||
+        token === "--create" ||
+        token === "--force-create" ||
+        clusterHas(token, "c") ||
+        clusterHas(token, "C")
+      ) {
+        return { rule: "supervisor-git-fence", reason: SUPERVISOR_GIT_FENCE_REASON };
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Whether a repo-relative path is within `SEAT_MEMORY_WHITELIST` (`AGENTS.md`,
+ * `CLAUDE.md`, `CONTEXT.md`, `GLOSSARY.md`, `.gitignore`, `.worktreeinclude`,
+ * `docs/**`, `.scratch/**`).
+ */
+export function isSeatMemoryRelativePathAllowed(relativePath) {
+  if (typeof relativePath !== "string") return false;
+  let normalized = relativePath.trim();
+  while (normalized.startsWith("./")) normalized = normalized.slice(2);
+  while (normalized.length > 1 && normalized.endsWith("/")) normalized = normalized.slice(0, -1);
+  if (normalized === "" || normalized.startsWith("/") || normalized.split("/").includes("..")) return false;
+  if (SEAT_MEMORY_WHITELIST.includes(normalized)) return true;
+  if (normalized === "docs" || normalized.startsWith("docs/")) return true;
+  if (normalized === ".scratch" || normalized.startsWith(".scratch/")) return true;
+  return false;
+}

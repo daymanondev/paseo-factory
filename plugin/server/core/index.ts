@@ -86,10 +86,18 @@ export type { HydrateVaultDirectOptions, ImportVaultSecretsInput, ImportVaultSec
 export {
   judgeShellCommand,
   judgeFilePath,
+  judgeSeatShellCommand,
+  judgeSeatFilePath,
+  extractWriteTargets,
   refuseGitArgv,
+  refuseSupervisorGitArgv,
   shellTokens,
   writableRootsFor,
   MEMORY_FILES,
+  SEAT_MEMORY_WHITELIST,
+  SEAT_WRITE_FENCE_MESSAGE,
+  isSeatMemoryPathAllowed,
+  isSeatMemoryRelativePathAllowed,
 } from "./choke.ts";
 export type { ChokeDecision, GitRefusal, WritableRoots, MemoryFence, MemoryFileName } from "./choke.ts";
 export {
