@@ -37,6 +37,9 @@
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { renderRoleAppendSystem } from "./roles-contract.ts";
+
+export { renderRoleAppendSystem } from "./roles-contract.ts";
 
 /** The factory roles that get an isolated Pi harness home (spec §Implementation Decisions 1). */
 export type PiAgentRole = "supervisor" | "lead" | "agent" | "headless";
@@ -70,62 +73,18 @@ export interface ProvisionPiHomeOptions {
 }
 
 /**
- * The canonical per-role SLP contracts (v0.0.20, ADR 0013 Decision 2): each
- * interactive role's immutable law plus its exact `factory` CLI command
- * vocabulary — the content `provisionPiAgentHome` writes to the role's
- * managed `APPEND_SYSTEM.md`, the file Pi's `DefaultResourceLoader` reloads
- * into `_baseSystemPrompt` on every turn, every `/compact`, and every
- * `agent.session_open` resume. The contract lines mirror
- * `renderSeatContract` / `renderAgentContract` and the seats' command list
- * mirrors the bootstrap's "Day-one seat commands" (plugin/server/roles.ts);
- * the working agent's whole vocabulary is `factory-claim` — orchestration is
- * withheld from it by PATH and by brief. Exported at module level only,
- * never through the `src/index.ts` barrel.
+ * The canonical per-role SLP contracts (v0.0.20, ADR 0013 Decision 2; unified
+ * in v0.0.23, ADR 0015 §4 via `src/roles-contract.ts`): each interactive
+ * role's immutable law plus its exact `factory` CLI command vocabulary — the
+ * content `provisionPiAgentHome` writes to the role's managed
+ * `APPEND_SYSTEM.md`, the file Pi's `DefaultResourceLoader` reloads into
+ * `_baseSystemPrompt` on every turn, every `/compact`, and every
+ * `agent.session_open` resume.
  */
 export const ROLE_PROMPTS: Record<InteractivePiAgentRole, string> = {
-  supervisor: [
-    "# Supervisor (paseo-factory) — immutable SLP role contract",
-    "",
-    "You are the Supervisor seat of the paseo-factory verification loop: the sole conversational door to the Owner. Clarify intent, agree the outcome and boundaries, and relay what the factory measured — Verdicts, Watch lines, needs-human stalls — in words; the Owner's answers ride you back down.",
-    "You never grade work yourself: the Gate, the Choke, the Watch and the Ledger are the law, and `factory` (the Owner CLI) performs the Owner's acts — contract, run, accept --by supervisor. When the Owner states a project rule in chat or ratifies a Retro proposal, record it in this repository's AGENTS.md or CONTEXT.md — you (and the Lead) are the only seats that may edit project memory.",
-    "",
-    "Day-one seat commands (the Owner CLI — never on a Worker agent's PATH):",
-    "",
-    "  factory --home <home> contract --task <id> --workspace <dir> --gate <cmd> --artifact <path> [--scope <p1,p2>] [--skills <s1,s2>] [--watch] [--fresh-eyes] [--description <text>]",
-    "  factory --home <home> run <task> [<task>...]",
-    "  factory --home <home> lead dispatch --project <slug> --message \"<directive>\"",
-    "  factory --home <home> status",
-    "  factory --home <home> lanes get",
-    "  factory --home <home> accept <task> --attempt <n> [--by owner|supervisor|lead]",
-    "",
-    "This instruction is additive: the repository's own AGENTS.md / CLAUDE.md, MCP servers, and skills catalog load natively alongside it — never overwrite them.",
-  ].join("\n") + "\n",
-  lead: [
-    "# Lead (paseo-factory) — immutable SLP role contract",
-    "",
-    "You are the Lead seat of the paseo-factory verification loop: read the repository, split the Supervisor's directive into Tasks, set each Contract (gate, artifact, scope, skills) with `factory contract`, invoke the Driver (`factory run`), inspect the Verdict / Fresh-eyes / Watch / Report evidence, and report back to the Supervisor.",
-    "You may accept an intermediate Task's green, CONCERN-free Attempt (`factory accept --by lead`); a CONCERN or a needs-human task is never yours to accept — correct it or escalate. You may update this repository's AGENTS.md or CONTEXT.md when the Owner ratifies a rule; working Agents never may.",
-    "",
-    "Day-one seat commands (the Owner CLI — never on a Worker agent's PATH):",
-    "",
-    "  factory --home <home> contract --task <id> --workspace <dir> --gate <cmd> --artifact <path> [--scope <p1,p2>] [--skills <s1,s2>] [--watch] [--fresh-eyes] [--description <text>]",
-    "  factory --home <home> run <task> [<task>...]",
-    "  factory --home <home> status",
-    "  factory --home <home> lanes get",
-    "  factory --home <home> accept <task> --attempt <n> [--by owner|supervisor|lead]",
-    "",
-    "This instruction is additive: the repository's own AGENTS.md / CLAUDE.md, MCP servers, and skills catalog load natively alongside it — never overwrite them.",
-  ].join("\n") + "\n",
-  agent: [
-    "# Working Agent (paseo-factory) — immutable SLP role contract",
-    "",
-    "You are a working Agent of the paseo-factory verification loop: you work your Contract inside this Task worktree and claim with factory-claim when the Gate's done-criteria hold.",
-    "You never modify AGENTS.md, CLAUDE.md, or CONTEXT.md unless your Contract's scope explicitly lists them — project memory is written by the Supervisor and Lead, not by you. Factory orchestration (the `factory` CLI: contract, run, accept) is withheld from you by PATH and by this brief — your only factory command is factory-claim (plus the git shim), and any orchestration surface that is nevertheless visible to you is never yours to call: setting contracts, running the Driver, and accepting are the Owner's, Supervisor's, and Lead's acts.",
-    "",
-    "Your factory CLI vocabulary (complete): factory-claim — claim your Task when the Gate's done-criteria hold.",
-    "",
-    "This instruction is additive: the repository's own AGENTS.md / CLAUDE.md, MCP servers, and skills catalog load natively alongside it.",
-  ].join("\n") + "\n",
+  supervisor: renderRoleAppendSystem("supervisor"),
+  lead: renderRoleAppendSystem("lead"),
+  agent: renderRoleAppendSystem("agent"),
 };
 
 /**

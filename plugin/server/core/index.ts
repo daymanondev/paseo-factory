@@ -66,8 +66,17 @@ export {
   saveLanes,
 } from "./lanes.ts";
 export type { LaneCliInvocation, LaneCliRunner, LaneName, Lanes, LanesResult, ParsedLane } from "./lanes.ts";
-export { provisionPiAgentHome } from "./pi-home.ts";
+export { provisionPiAgentHome, renderRoleAppendSystem } from "./pi-home.ts";
 export type { PiAgentRole, ProvisionPiHomeOptions } from "./pi-home.ts";
+export {
+  FOOTER_MARK,
+  ROLE_SKILL_INDEX,
+  SEAT_TITLES,
+  renderRoleContract,
+  renderSeatBootstrapPrompt,
+  skillFooter,
+} from "./roles-contract.ts";
+export type { ProjectIdentity, RoleContractOptions, RoleName, SeatBootstrapInput, SeatName } from "./roles-contract.ts";
 export { ensureFactorySkill, ensureFactorySkillSafe, factorySkillPath, renderFactorySkill } from "./skill.ts";
 export type { FactorySkillInput } from "./skill.ts";
 export { ackLeadMail, deliverLeadMail, enqueueLeadMail, foldLeadMailboxEvents, readLeadMailbox, recoverLeadMailbox, requeueLeadMail } from "./mailbox.ts";

@@ -297,6 +297,8 @@ const ACCEPT_SEATS = ["owner", "supervisor", "lead"];
  */
 const stampedAgent = typeof process.env.PASEO_AGENT_ID === "string" ? process.env.PASEO_AGENT_ID.trim() : "";
 const submitter = stampedAgent === "" ? "owner" : stampedAgent;
+const rawSeat = typeof process.env.PASEO_FACTORY_SEAT === "string" ? process.env.PASEO_FACTORY_SEAT.trim() : "";
+const stampedSeat = rawSeat === "supervisor" || rawSeat === "lead" || rawSeat === "agent" ? rawSeat : undefined;
 
 // The event vocabulary the status reader understands — mirrored from
 // src/events.ts because the CLIs import no src/ code (ADR 0004). Kept on one
@@ -373,8 +375,9 @@ function waitSeconds(parsed, defaultSecs = DEFAULT_WAIT_SECS) {
 }
 
 async function roundTrip(request, waitSecs) {
-  submit(spoolRoot, request);
-  const reply = await awaitReply(spoolRoot, request.id, waitSecs * 1000);
+  const payload = stampedSeat === undefined || request.seat !== undefined ? request : { ...request, seat: stampedSeat };
+  submit(spoolRoot, payload);
+  const reply = await awaitReply(spoolRoot, payload.id, waitSecs * 1000);
   if (reply === null) {
     console.error(
       `factory: no reply from the factory plugin after ${waitSecs}s — is the plugin running on this home? ` +
@@ -579,6 +582,18 @@ if (command === "run") {
   });
   const tasks = parsed.positionals;
   if (tasks.length === 0) fail("run: at least one task id is required (factory run <task> [<task>…] [--provider <provider[/model]>])");
+  if (stampedSeat === "supervisor") {
+    console.error(
+      "factory: supervisor-cannot-contract-or-run: Supervisor cannot call factory run; dispatch the directive to Lead via 'factory lead dispatch --workspace <dir> --message <directive>' and end your turn.",
+    );
+    process.exit(2);
+  }
+  if (stampedSeat === "agent") {
+    console.error(
+      "factory: agent-cannot-orchestrate: Working Agent cannot call factory run; working Agents may only submit claims via 'factory-claim --task <task> --sha <sha>'.",
+    );
+    process.exit(2);
+  }
   // v0.0.13 precedence (ADR 0009 §3): explicit --provider wins; omitted
   // resolves through lanes.worker (default pi/zai/glm-5.3) — the resolver's
   // own refusal names a broken lanes.json, never a silent default.

@@ -144,12 +144,34 @@ test("interactive roles carry managed APPEND_SYSTEM.md; headless never does; onl
   }
 
   // The canonical table itself: each entry carries the role's immutable SLP
-  // contract plus its exact factory CLI command vocabulary — the seats the
-  // day-one command family (contract/run/status/lanes get/accept), the
-  // working agent its single claim command.
+  // contract plus its exact factory CLI command vocabulary — Supervisor gets
+  // lead dispatch / status / accept --by supervisor (never contract or run)
+  // plus the Fire-and-End-Turn law; Lead gets contract / run / status / lanes
+  // get / accept --by lead / supervisor report plus the Seat write fence;
+  // the working agent gets its single factory-claim command.
   assert.ok(ROLE_PROMPTS.supervisor.includes("You are"), "the supervisor contract opens with its SLP law");
-  for (const cmd of ["factory --home", "contract --task", "run <task>", "status", "lanes get", "accept <task>"]) {
+  for (const cmd of ["factory --home", "lead dispatch", "status", "lanes get", "accept <task> --attempt <n> --by supervisor"]) {
     assert.ok(ROLE_PROMPTS.supervisor.includes(cmd), `ROLE_PROMPTS.supervisor names \`${cmd}\``);
+  }
+  assert.ok(
+    ROLE_PROMPTS.supervisor.includes(
+      "Immediately after running `lead dispatch`, end your turn and wait for Lead to wake you via `factory supervisor report` or `needs_human`.",
+    ),
+    "ROLE_PROMPTS.supervisor states the Fire-and-End-Turn law",
+  );
+  for (const forbidden of ["contract --task", "factory contract", "factory run", "run <task>"]) {
+    assert.ok(!ROLE_PROMPTS.supervisor.includes(forbidden), `ROLE_PROMPTS.supervisor never lists \`${forbidden}\``);
+  }
+  for (const cmd of [
+    "factory --home",
+    "contract --task",
+    "run <task>",
+    "status",
+    "lanes get",
+    "accept <task> --attempt <n> --by lead",
+    "supervisor report --workspace",
+    "Seat write fence",
+  ]) {
     assert.ok(ROLE_PROMPTS.lead.includes(cmd), `ROLE_PROMPTS.lead names \`${cmd}\``);
   }
   assert.ok(ROLE_PROMPTS.agent.includes("factory-claim"), "the working agent's vocabulary is factory-claim");

@@ -558,3 +558,121 @@ test("handleSpoolRequest answers respawn (with event on both outcomes) and forma
   }
 });
 
+test("spool command authority (v0.0.23, ADR 0015 §1): refuses contract/spawn/respawn from seat=supervisor and refuses orchestration commands from seat=agent", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const ws = join(dir, "ws");
+  mkdirSync(join(ws, "src"), { recursive: true });
+  writeFileSync(join(ws, "src", "x.ts"), "x\n");
+  const head = gitCommitAll(ws);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+
+  // parseSpoolRequest preserves optional valid seat ("supervisor" | "lead" | "agent") and rejects invalid seat values.
+  assert.equal(
+    parseSpoolRequest({ id: "p1", kind: "contract", task: "T1", workspace: ws, gate: "true", artifact: "src/x.ts", submitter: "sup-1", seat: "supervisor" })?.seat,
+    "supervisor",
+  );
+  assert.equal(
+    parseSpoolRequest({ id: "p2", kind: "spawn", task: "T1", provider: "claude", arity: 1, seat: "lead" })?.seat,
+    "lead",
+  );
+  assert.equal(
+    parseSpoolRequest({ id: "p3", kind: "respawn", task: "T1", provider: "claude", died_agent: "ag-1", seat: "agent" })?.seat,
+    "agent",
+  );
+  assert.equal(
+    parseSpoolRequest({ id: "p4", kind: "contract", task: "T1", workspace: ws, gate: "true", artifact: "src/x.ts", submitter: "sup-1", seat: "invalid" }),
+    undefined,
+  );
+
+  // Supervisor is refused on contract, spawn, and respawn with supervisor-cannot-contract-or-run.
+  const supContract = await handleSpoolRequest(factory, {
+    id: "sc-1",
+    kind: "contract",
+    task: "SUP-NO",
+    workspace: ws,
+    gate: "true",
+    artifact: "src/x.ts",
+    submitter: "agent-sup-1",
+    seat: "supervisor",
+  });
+  assert.equal(supContract.ok, false);
+  if (!supContract.ok) {
+    assert.equal(supContract.code, "supervisor-cannot-contract-or-run");
+    assert.match(supContract.message, /factory lead dispatch/);
+  }
+
+  // Lead can set contract, spawn, and respawn.
+  const leadContract = await handleSpoolRequest(factory, {
+    id: "lc-1",
+    kind: "contract",
+    task: "AUTH-1",
+    workspace: ws,
+    gate: "true",
+    artifact: "src/x.ts",
+    submitter: "agent-lead-1",
+    seat: "lead",
+  });
+  assert.equal(leadContract.ok, true);
+
+  const supSpawn = await handleSpoolRequest(factory, {
+    id: "ss-1",
+    kind: "spawn",
+    task: "AUTH-1",
+    provider: "opencode/glm-5.1",
+    arity: 1,
+    seat: "supervisor",
+  });
+  assert.equal(supSpawn.ok, false);
+  if (!supSpawn.ok) {
+    assert.equal(supSpawn.code, "supervisor-cannot-contract-or-run");
+    assert.match(supSpawn.message, /factory lead dispatch/);
+  }
+
+  const supRespawn = await handleSpoolRequest(factory, {
+    id: "sr-1",
+    kind: "respawn",
+    task: "AUTH-1",
+    provider: "opencode/glm-5.1",
+    died_agent: "ag-dead-1",
+    seat: "supervisor",
+  });
+  assert.equal(supRespawn.ok, false);
+  if (!supRespawn.ok) {
+    assert.equal(supRespawn.code, "supervisor-cannot-contract-or-run");
+    assert.match(supRespawn.message, /factory lead dispatch/);
+  }
+
+  // Working Agent (seat === "agent") is refused on all orchestration commands with agent-cannot-orchestrate.
+  const agentRequests: Parameters<typeof handleSpoolRequest>[1][] = [
+    { id: "ag-1", kind: "contract", task: "AG-1", workspace: ws, gate: "true", artifact: "src/x.ts", submitter: "ag-1", seat: "agent" },
+    { id: "ag-2", kind: "spawn", task: "AUTH-1", provider: "opencode/glm-5.1", arity: 1, seat: "agent" },
+    { id: "ag-3", kind: "respawn", task: "AUTH-1", provider: "opencode/glm-5.1", died_agent: "ag-dead-1", seat: "agent" },
+    { id: "ag-4", kind: "accept", task: "AUTH-1", attempt: 1, submitter: "ag-1", seat: "agent" },
+    { id: "ag-5", kind: "lead_dispatch", workspace: ws, message: "hi", seat: "agent" },
+    { id: "ag-6", kind: "lead_rotate", projectRoot: ws, seat: "agent" },
+  ];
+  for (const req of agentRequests) {
+    const res = await handleSpoolRequest(factory, req);
+    assert.equal(res.ok, false, `expected ${req.kind} from seat=agent to be refused`);
+    if (!res.ok) {
+      assert.equal(res.code, "agent-cannot-orchestrate");
+    }
+  }
+
+  // Working Agent can still claim, and Supervisor can still accept --by supervisor.
+  const claimRes = await handleSpoolRequest(factory, { id: "cl-1", kind: "claim", task: "AUTH-1", sha: head, agent: "ag-worker-1" });
+  assert.equal(claimRes.ok, true);
+  const supAccept = await handleSpoolRequest(factory, {
+    id: "sa-1",
+    kind: "accept",
+    task: "AUTH-1",
+    attempt: 1,
+    by: "supervisor",
+    submitter: "agent-sup-1",
+    seat: "supervisor",
+  });
+  assert.equal(supAccept.ok, true);
+});
+
+
