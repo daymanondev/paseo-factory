@@ -162,3 +162,46 @@ test("the Lead card renders the 128k telemetry trio — usage pill, rotationStat
   );
   assert.match(seats, /agent\.queuedMailCount !== undefined && agent\.queuedMailCount > 0/, "the queued pill appears only when mail actually waits");
 });
+
+// ---- Built-In Header VaultSyncBar & 3-Layer Feedback (v0.0.22, ADR 0014) --------------------
+
+test("Header exports and renders VaultSyncBar across all tabs with the 3-state gh onboarding, Sync Vault, + Import Key drawer, and ⚙ drawer", () => {
+  const header = read("plugin/client/factory/header.tsx");
+  assert.match(header, /export function VaultSyncBar\(/, "VaultSyncBar is exported from header.tsx");
+  assert.match(header, /<VaultSyncBar/, "Header renders VaultSyncBar inside the persistent header");
+  // State 1: !vault.configured && !vault.ghAuthenticated
+  assert.match(header, /gh auth login --web -p https/, "State 1 shows the exact gh auth login command");
+  assert.match(header, /Copy Command/, "State 1 offers a 1-click Copy Command button");
+  assert.match(header, /Check GitHub Login/, "State 1 offers a Check GitHub Login button");
+  // State 2: !vault.configured && vault.ghAuthenticated
+  assert.match(header, /Enable & Sync Vault/, "State 2 offers the single primary Enable & Sync Vault CTA");
+  assert.match(header, /Setting up & Syncing…/, "State 2 shows in-flight Setting up & Syncing… label");
+  // State 3: vault.configured
+  assert.match(header, /Sync Vault/, "State 3 offers the single primary Sync Vault CTA");
+  assert.match(header, /Syncing Vault…/, "State 3 shows in-flight Syncing Vault… label");
+  assert.match(header, /ASC \.p8/, "readiness pill for ASC .p8");
+  assert.match(header, /GPlay JSON/, "readiness pill for GPlay JSON");
+  assert.match(header, /Apps: \$\{vault\.hydratedApps\.length\}/, "readiness pill for hydrated Apps count");
+  // + Import Key drawer & ⚙ drawer
+  assert.match(header, /\+ Import Key/, "renders + Import Key drawer toggle");
+  assert.match(header, /Import & Sync/, "Import Key drawer submits via Import & Sync");
+  assert.match(header, /ascKeyPath/, "Import Key drawer collects ascKeyPath");
+  assert.match(header, /ascKeyId/, "Import Key drawer collects ascKeyId");
+  assert.match(header, /ascIssuer/, "Import Key drawer collects ascIssuer");
+  assert.match(header, /gplayKeyPath/, "Import Key drawer collects gplayKeyPath");
+  assert.match(header, /Save Config/, "⚙ drawer keeps Save Config for custom repo/branch/passphrase");
+  assert.match(header, /Direct Hydrate \(gh api\)/, "⚙ drawer keeps Direct Hydrate (gh api)");
+  assert.match(header, /vaultNote/, "VaultSyncBar renders the inline vaultNote banner");
+});
+
+test("FactoryShell removes PrivateVaultCard from the Plugins tab, wires vaultSync & vaultImport, and provides 3-layer feedback in act()", () => {
+  const shell = read("plugin/client/factory/shell.tsx");
+  assert.ok(!shell.includes("<PrivateVaultCard"), "PrivateVaultCard is no longer rendered inside FactoryShell");
+  assert.match(shell, /vaultSync/, "FactoryShell imports and wires vaultSync");
+  assert.match(shell, /vaultImport/, "FactoryShell imports and wires vaultImport");
+  assert.match(shell, /useRpc\(vaultSync\)/);
+  assert.match(shell, /useRpc\(vaultImport\)/);
+  assert.match(shell, /busyAct/, "FactoryShell tracks busyAct for in-flight button labels");
+  assert.match(shell, /vaultNote/, "FactoryShell tracks vaultNote for inline status feedback");
+  assert.match(shell, /toast\.show\(summary, \{ variant: "success" \}\)/, "act() fires a green success toast whenever summary is returned");
+});
