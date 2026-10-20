@@ -9,8 +9,9 @@
 import { readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { FACTORY_VIEW_VERSION } from "../shared/view.ts";
-import type { AgentView, AttemptView, CompanionPluginView, FactoryView, LedgerLineView, Lanes, ProjectView, RetroView, TaskStatus, TaskView, VaultStatusView } from "../shared/view.ts";
+import type { AgentView, AttemptView, CompanionPluginView, CompanionStatus, FactoryView, LedgerLineView, Lanes, ProjectView, RetroView, TaskStatus, TaskView, VaultStatusView } from "../shared/view.ts";
 import { COMPANION_CATALOG, CORE_PLUGIN_DEFAULT_VERSION, CORE_PLUGIN_ENTRY } from "../shared/companions.ts";
+import type { CompanionCatalogEntry, CorePluginCatalogEntry } from "../shared/companions.ts";
 import { readPluginVersionFromDisk } from "./daemon-cli.ts";
 import type { DaemonPluginSourceStatus } from "./daemon-cli.ts";
 import type { LedgerEvent } from "./core/events.ts";
@@ -386,6 +387,51 @@ function resolvePluginVersion(entry: DaemonPluginEntry, fallbackVersion: string 
   return direct ?? fallbackVersion;
 }
 
+/** Shared pure join of a catalog entry (Core or Companion) against its listed daemon row and cached update status. */
+function foldPluginCard(
+  entry: CompanionCatalogEntry | CorePluginCatalogEntry,
+  listed: DaemonPluginEntry | undefined,
+  update: DaemonPluginSourceStatus | null,
+  fallbackStatus: CompanionStatus,
+  fallbackEnabled: boolean,
+  fallbackVersion: string | null,
+): CompanionPluginView {
+  if (listed === undefined) {
+    return {
+      ...entry,
+      capabilities: [...entry.capabilities],
+      status: fallbackStatus,
+      enabled: fallbackEnabled,
+      installKind: null,
+      installedSource: null,
+      currentRevision: null,
+      version: fallbackVersion,
+      latestRevision: null,
+      commitsBehind: null,
+      updateAvailable: null,
+      error: null,
+    };
+  }
+  const identity = listed.installation?.identity;
+  const installKind = identity?.kind ?? null;
+  const currentRevision = listed.installation?.currentRevision ?? listed.commit ?? update?.currentRevision ?? null;
+  const isRemote = installKind === "git" || installKind === "npm";
+  return {
+    ...entry,
+    capabilities: [...entry.capabilities],
+    status: listed.status,
+    enabled: listed.enabled,
+    installKind,
+    installedSource: identity === undefined ? null : installedSourceOf(identity),
+    currentRevision,
+    version: resolvePluginVersion(listed, fallbackVersion),
+    latestRevision: isRemote ? (update?.latestRevision ?? null) : null,
+    commitsBehind: isRemote ? (update?.commitsBehind ?? null) : null,
+    updateAvailable: isRemote ? (update?.updateAvailable ?? null) : null,
+    error: listed.error ?? null,
+  };
+}
+
 /**
  * Folds the Core plugin (`paseo-factory`) entry against the daemon's plugin
  * list and cached update check snapshot (v0.0.25, ADR 0012 §2–§4). When the
@@ -399,41 +445,8 @@ export function foldCorePlugin(
   updates?: ReadonlyMap<string, DaemonPluginSourceStatus> | null,
 ): CompanionPluginView {
   const listed = plugins === null ? undefined : plugins.find((plugin) => plugin.id === CORE_PLUGIN_ENTRY.id);
-  if (listed === undefined) {
-    return {
-      ...CORE_PLUGIN_ENTRY,
-      capabilities: [...CORE_PLUGIN_ENTRY.capabilities],
-      status: "running",
-      enabled: true,
-      installKind: null,
-      installedSource: null,
-      currentRevision: null,
-      version: CORE_PLUGIN_DEFAULT_VERSION,
-      latestRevision: null,
-      commitsBehind: null,
-      updateAvailable: null,
-      error: null,
-    };
-  }
-  const identity = listed.installation?.identity;
-  const installKind = identity?.kind ?? null;
   const update = updates?.get(CORE_PLUGIN_ENTRY.id) ?? null;
-  const currentRevision = listed.installation?.currentRevision ?? listed.commit ?? update?.currentRevision ?? null;
-  const isRemote = installKind === "git" || installKind === "npm";
-  return {
-    ...CORE_PLUGIN_ENTRY,
-    capabilities: [...CORE_PLUGIN_ENTRY.capabilities],
-    status: listed.status,
-    enabled: listed.enabled,
-    installKind,
-    installedSource: identity === undefined ? null : installedSourceOf(identity),
-    currentRevision,
-    version: resolvePluginVersion(listed, CORE_PLUGIN_DEFAULT_VERSION),
-    latestRevision: isRemote ? (update?.latestRevision ?? null) : null,
-    commitsBehind: isRemote ? (update?.commitsBehind ?? null) : null,
-    updateAvailable: isRemote ? (update?.updateAvailable ?? null) : null,
-    error: listed.error ?? null,
-  };
+  return foldPluginCard(CORE_PLUGIN_ENTRY, listed, update, "running", true, CORE_PLUGIN_DEFAULT_VERSION);
 }
 
 /**
@@ -450,41 +463,8 @@ export function foldCompanions(
 ): CompanionPluginView[] {
   return COMPANION_CATALOG.map((entry): CompanionPluginView => {
     const listed = plugins === null ? undefined : plugins.find((plugin) => plugin.id === entry.id);
-    if (listed === undefined) {
-      return {
-        ...entry,
-        capabilities: [...entry.capabilities],
-        status: "not_installed",
-        enabled: false,
-        installKind: null,
-        installedSource: null,
-        currentRevision: null,
-        version: null,
-        latestRevision: null,
-        commitsBehind: null,
-        updateAvailable: null,
-        error: null,
-      };
-    }
-    const identity = listed.installation?.identity;
-    const installKind = identity?.kind ?? null;
     const update = updates?.get(entry.id) ?? null;
-    const currentRevision = listed.installation?.currentRevision ?? listed.commit ?? update?.currentRevision ?? null;
-    const isRemote = installKind === "git" || installKind === "npm";
-    return {
-      ...entry,
-      capabilities: [...entry.capabilities],
-      status: listed.status,
-      enabled: listed.enabled,
-      installKind,
-      installedSource: identity === undefined ? null : installedSourceOf(identity),
-      currentRevision,
-      version: resolvePluginVersion(listed, null),
-      latestRevision: isRemote ? (update?.latestRevision ?? null) : null,
-      commitsBehind: isRemote ? (update?.commitsBehind ?? null) : null,
-      updateAvailable: isRemote ? (update?.updateAvailable ?? null) : null,
-      error: listed.error ?? null,
-    };
+    return foldPluginCard(entry, listed, update, "not_installed", false, null);
   });
 }
 

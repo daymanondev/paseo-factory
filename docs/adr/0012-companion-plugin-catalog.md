@@ -45,10 +45,10 @@ Auditing the `Plugins` tab on Paseo Desktop exposed four concrete UX problems:
      - **Row 2 (Subtitle):** Concise 1-line `tagline` (plus daemon error banner if `error !== null`).
    - **Conditional Primary CTA Law:**
      - When `status === "not_installed"`: primary solid CTA is **`Install`**.
-     - When installed and `updateAvailable === true`: primary solid CTA is **`Update`** (`Update → <shortLatestSha>`).
+     - When installed and `updateAvailable === true`: primary solid CTA is **`Update`**.
      - When installed and `updateAvailable !== true`: **no primary `Update` button** is shown on the main card header — eliminating the always-lit `Update` anti-pattern.
    - **Collapsible `⋯` (`Manage` / `Custom source…`) Drawer:**
-     - For installed plugins: reveals the 1-line install source metadata (`installKind · installedSource · shortRevision`), `capabilities` pills, and secondary lifecycle buttons (`Disable` / `Enable`, `Reload`, muted `Force Update` for remote installs, and `Remove` in `statusDanger` for companions).
+     - For installed plugins: reveals the 1-line install source metadata (`installKind · installedSource · shortRevision`), `capabilities` pills, and secondary lifecycle buttons (`Disable` / `Enable`, `Reload`, muted manual `Update` for remote installs, and `Remove` in `statusDanger` for companions).
      - For uninstalled companions (`not_installed`): reveals `canonicalSource`, `capabilities` pills, and the custom `Source` / `Ref (branch/tag/commit)` inputs + `Install Custom` button.
 
 4. **On-Demand Update Check (`factory.plugins.check.updates`) & Honest Update Summaries.**
