@@ -243,6 +243,56 @@ test("supervisor_dispatch from normal chat ensures Supervisor, delivers to=super
   assert.ok(fake.sent[0]?.text.includes("Design and build the 2D platformer"));
 });
 
+test("supervisor_dispatch from a normal chat agent records submitter in project.json dispatchers (deduplicated) and ignores reserved/seat submitters (v0.0.24, T-03)", async (t) => {
+  const { stateDir, slug, projectRoot } = makeSpooledRuntime(t);
+  const spoolRoot = spoolRootFor(stateDir);
+
+  // 1. Normal chat session agent dispatches -> recorded in reg.dispatchers
+  dropRequest(spoolRoot, {
+    id: "sup-disp-chat-1",
+    kind: "supervisor_dispatch",
+    workspace: projectRoot,
+    message: "Build the platformer",
+    submitter: "chat-session-7c5ac02",
+  });
+  await until(() => {
+    assert.equal(readReply(spoolRoot, "sup-disp-chat-1").ok, true);
+  });
+  let reg = readProjectRegistration(stateDir, slug);
+  assert.deepEqual(reg?.dispatchers, ["chat-session-7c5ac02"]);
+
+  // 2. Duplicate dispatch from the same chat session + dispatch from "owner" + dispatch from Supervisor agentId -> deduplicated, reserved ignored
+  dropRequest(spoolRoot, {
+    id: "sup-disp-chat-2",
+    kind: "supervisor_dispatch",
+    workspace: projectRoot,
+    message: "Add sound effects",
+    submitter: "chat-session-7c5ac02",
+  });
+  dropRequest(spoolRoot, {
+    id: "sup-disp-owner",
+    kind: "supervisor_dispatch",
+    workspace: projectRoot,
+    message: "Owner CLI dispatch",
+    submitter: "owner",
+  });
+  dropRequest(spoolRoot, {
+    id: "sup-disp-sup-id",
+    kind: "supervisor_dispatch",
+    workspace: projectRoot,
+    message: "Supervisor self-id",
+    submitter: reg?.supervisor ?? "agent-created-1",
+  });
+  await until(() => {
+    assert.equal(readReply(spoolRoot, "sup-disp-chat-2").ok, true);
+    assert.equal(readReply(spoolRoot, "sup-disp-owner").ok, true);
+    assert.equal(readReply(spoolRoot, "sup-disp-sup-id").ok, true);
+  });
+
+  reg = readProjectRegistration(stateDir, slug);
+  assert.deepEqual(reg?.dispatchers, ["chat-session-7c5ac02"], "dispatchers stays deduplicated and excludes owner and seat agentIds");
+});
+
 test("supervisor_dispatch from seat=supervisor transparently routes to Lead (to=lead, from=supervisor)", async (t) => {
   const { stateDir, slug, projectRoot, fake } = makeSpooledRuntime(t);
   const spoolRoot = spoolRootFor(stateDir);

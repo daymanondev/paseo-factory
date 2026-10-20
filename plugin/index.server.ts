@@ -18,7 +18,7 @@ import { createFactory } from "./server/core/factory.ts";
 import { PLUGIN_ID, pluginDirFor, resolvePaseoHome, stateDirFor } from "./server/paths.ts";
 import { ensureFactorySkillSafe } from "./server/core/skill.ts";
 import { claimCliBinDir, ensureClaimCli, ensureGitShim, injectClaimCliPath } from "./server/shell.ts";
-import { createChoke, startGitBlockIngestion } from "./server/choke.ts";
+import { createChoke, normalizeAgentCreateRequest, startGitBlockIngestion } from "./server/choke.ts";
 import { createTimelineFetcher } from "./server/timeline.ts";
 import type { TimelineSourceApi } from "./server/timeline.ts";
 import { spoolRootFor, startSpool } from "./server/spool.ts";
@@ -98,7 +98,15 @@ export default function contribute(server: PluginServerContext) {
   const offAgentCreate = server.before("agent.create", ({ request }, context) => {
     capturePaseo(context);
     let next = request;
-    const pinned = choke.pinCreateMode(next.config, (next as { labels?: Record<string, string> }).labels);
+    const normalized = normalizeAgentCreateRequest(next, stateDir);
+    if (normalized !== next) {
+      log(`choke: normalized agent.create in ${next.config.cwd} (provider=${normalized.config.provider})`);
+      next = normalized;
+    }
+    const nextLabels =
+      (next as { labels?: Record<string, string> }).labels ??
+      (next.config as { labels?: Record<string, string> }).labels;
+    const pinned = choke.pinCreateMode(next.config, nextLabels);
     if (pinned !== undefined) {
       log(`choke: pinned permission mode to Always Ask for the new agent in ${next.config.cwd}`);
       next = { ...next, config: pinned };

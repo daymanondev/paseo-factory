@@ -108,6 +108,8 @@ export interface ProjectRegistration {
   paseoProjectId?: string;
   /** Active Task worktree Paseo workspace ids keyed by task id (v0.0.23, ADR 0015 §6). */
   taskWorkspaces?: Record<string, string>;
+  /** Normal-chat agent ids that invoked `supervisor_dispatch` for this Project (v0.0.24, ADR 0015 §5). */
+  dispatchers?: string[];
 }
 
 const LEAD_ROTATION_STATES: readonly string[] = ["normal", "rotation_pending", "handing_over"];
@@ -125,6 +127,14 @@ export function readProjectRegistration(stateDir: string, slug: string): Project
         if (typeof wsId === "string" && wsId !== "") taskWorkspaces[task] = wsId;
       }
     }
+    const dispatchers: string[] = [];
+    if (Array.isArray(parsed.dispatchers)) {
+      for (const id of parsed.dispatchers) {
+        if (typeof id === "string" && id.trim() !== "" && !dispatchers.includes(id.trim())) {
+          dispatchers.push(id.trim());
+        }
+      }
+    }
     return {
       slug,
       root: parsed.root,
@@ -137,6 +147,7 @@ export function readProjectRegistration(stateDir: string, slug: string): Project
       ...(typeof parsed.workspaceId === "string" && parsed.workspaceId !== "" ? { workspaceId: parsed.workspaceId } : {}),
       ...(typeof parsed.paseoProjectId === "string" && parsed.paseoProjectId !== "" ? { paseoProjectId: parsed.paseoProjectId } : {}),
       ...(Object.keys(taskWorkspaces).length > 0 ? { taskWorkspaces } : {}),
+      ...(dispatchers.length > 0 ? { dispatchers } : {}),
     };
   } catch {
     return undefined; // a corrupt file is ignored, not trusted
@@ -167,6 +178,7 @@ export function writeProjectRegistration(
     workspaceId?: string | null;
     paseoProjectId?: string | null;
     taskWorkspaces?: Record<string, string | null> | null;
+    dispatchers?: readonly string[] | null;
   },
 ): void {
   const prior = readProjectRegistration(stateDir, slug);
@@ -192,6 +204,20 @@ export function writeProjectRegistration(
   } else {
     taskWorkspaces = prior?.taskWorkspaces;
   }
+  let dispatchers: string[] | undefined;
+  if (patch.dispatchers === null) {
+    dispatchers = undefined;
+  } else if (patch.dispatchers !== undefined) {
+    const merged: string[] = [];
+    for (const id of [...(prior?.dispatchers ?? []), ...patch.dispatchers]) {
+      if (typeof id === "string" && id.trim() !== "" && !merged.includes(id.trim())) {
+        merged.push(id.trim());
+      }
+    }
+    dispatchers = merged.length > 0 ? merged : undefined;
+  } else {
+    dispatchers = prior?.dispatchers;
+  }
   const record: Record<string, unknown> = { root: patch.root };
   if (supervisor !== undefined) record.supervisor = supervisor;
   if (lead !== undefined) record.lead = lead;
@@ -200,6 +226,7 @@ export function writeProjectRegistration(
   if (workspaceId !== undefined) record.workspaceId = workspaceId;
   if (paseoProjectId !== undefined) record.paseoProjectId = paseoProjectId;
   if (taskWorkspaces !== undefined && Object.keys(taskWorkspaces).length > 0) record.taskWorkspaces = taskWorkspaces;
+  if (dispatchers !== undefined && dispatchers.length > 0) record.dispatchers = dispatchers;
   mkdirSync(projectStateDir(stateDir, slug), { recursive: true });
   writeFileSync(registrationPath(stateDir, slug), `${JSON.stringify(record, null, 2)}\n`);
 }
