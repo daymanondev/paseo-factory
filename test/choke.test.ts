@@ -551,15 +551,72 @@ test("normalizeAgentCreateRequest prefixes bare model IDs without '/' and labels
     "codex/o3-mini",
   );
 
-  // 3. Optional provider catalog resolution wins when matched
+  // 3. Optional provider catalog resolution wins when unambiguous, and leaves ambiguous bare models untouched
   const catalog = [
-    { id: "pi", models: [{ id: "zai/glm-5.3" }] },
-    { id: "opencode", models: [{ id: "opencode/nemotron-3-ultra-free" }] },
+    { id: "pi", models: [{ id: "zai/glm-5.3" }, { id: "shared-model" }] },
+    {
+      provider: "opencode",
+      models: [
+        { id: "opencode/nemotron-3-ultra-free", thinkingOptions: [] },
+        { id: "shared-model" },
+      ],
+    },
+    {
+      provider: "claude",
+      models: [{ id: "opus-4-8", thinkingOptions: [{ id: "max", label: "Max" }] }],
+    },
   ];
   assert.equal(
     normalizeAgentCreateRequest({ config: { provider: "glm-5.3", cwd: workspace } }, stateDir, catalog).config.provider,
     "pi/zai/glm-5.3",
   );
+  assert.equal(
+    normalizeAgentCreateRequest({ config: { provider: "shared-model", cwd: workspace } }, stateDir, catalog).config.provider,
+    "shared-model",
+    "ambiguous bare model matching multiple providers is left untouched rather than guessing",
+  );
+  assert.equal(
+    normalizeAgentCreateRequest({ config: { provider: "unknown-custom-model", cwd: workspace } }, stateDir).config.provider,
+    "unknown-custom-model",
+    "unknown bare strings outside known families are left untouched when providers is absent",
+  );
+  assert.equal(
+    normalizeAgentCreateRequest({ config: { provider: "llama-3.3-70b", cwd: workspace } }, stateDir).config.provider,
+    "opencode/opencode/llama-3.3-70b",
+    "llama* family bare model is prefixed with opencode/opencode/",
+  );
+
+  // 3b. Unsupported thinkingOptionId and :thinking suffixes are stripped against providers catalog
+  const strippedThinking = normalizeAgentCreateRequest(
+    {
+      config: {
+        provider: "opencode/opencode/nemotron-3-ultra-free:max",
+        thinkingOptionId: "max",
+        cwd: workspace,
+        title: "Worker",
+      },
+    },
+    { stateDir, providers: catalog },
+  );
+  assert.equal(strippedThinking.config.provider, "opencode/opencode/nemotron-3-ultra-free", "unsupported :max suffix stripped from provider");
+  assert.equal(
+    "thinkingOptionId" in strippedThinking.config ? strippedThinking.config.thinkingOptionId : undefined,
+    undefined,
+    "unsupported thinkingOptionId stripped when thinkingOptions is []",
+  );
+
+  const keptThinking = normalizeAgentCreateRequest(
+    {
+      config: {
+        provider: "claude/opus-4-8",
+        thinkingOptionId: "max",
+        cwd: workspace,
+        title: "Worker",
+      },
+    },
+    { stateDir, providers: catalog },
+  );
+  assert.equal(keptThinking.config.thinkingOptionId, "max", "supported thinkingOptionId is preserved");
 
   // 4. Already-prefixed providers and valid top-level provider IDs pass through unchanged
   for (const valid of ["opencode/opencode/nemotron-3-ultra-free", "claude/claude-sonnet-4-6", "opencode", "claude", "codex", "pi"]) {

@@ -2971,6 +2971,11 @@ test("v0.0.24 (ADR 0015 §1): lanesSet sanitizes unsupported :thinking before sa
     lead: "opencode/opencode/nemotron-3-ultra-free",
     worker: "opencode/opencode/nemotron-3-ultra-free",
   });
+
+  // 4. cachedProviders() returns the cached provider catalog and sanitizeLane() strips unsupported :thinking suffixes.
+  assert.equal(handlers.cachedProviders().length, 1);
+  assert.equal(handlers.cachedProviders()[0]?.provider, "opencode");
+  assert.equal(await handlers.sanitizeLane("opencode/opencode/nemotron-3-ultra-free:max"), "opencode/opencode/nemotron-3-ultra-free");
 });
 
 test("v0.0.24 (ADR 0015 §1–§2): ensureSeat sanitizes :thinking on create, retires and recreates errored or provider-mismatched seats, and syncs drifted model/thinking in-place", async (t) => {
@@ -3162,15 +3167,11 @@ test("v0.0.24 (ADR 0015 §5): projectReset wipes a project's ledger events, task
   assert.ok(preservedLanes.ok);
   assert.equal(preservedLanes.lanes.supervisor, "pi/zai/glm-5.3");
 
-  // project.json is cleaned of seats, rotationState, taskWorkspaces, and dispatchers while preserving root.
-  const cleanedReg = readProjectRegistration(stateDir, projectA.slug);
-  assert.ok(cleanedReg !== undefined);
-  assert.equal(cleanedReg.root, projectA.root);
-  assert.equal(cleanedReg.supervisor, undefined);
-  assert.equal(cleanedReg.lead, undefined);
-  assert.equal(cleanedReg.rotationState, undefined);
-  assert.equal(cleanedReg.taskWorkspaces, undefined);
-  assert.equal(cleanedReg.dispatchers, undefined);
+  // When keepSeats !== true, project.json is deleted on disk while lanes.json remains intact.
+  assert.equal(existsSync(join(projectADir, "project.json")), false, "project.json is deleted when keepSeats !== true");
+  assert.equal(readProjectRegistration(stateDir, projectA.slug), undefined);
+  assert.match(resetRes.summary, /1 agent\(s\)/, "summary uses agent(s) vocabulary");
+  assert.doesNotMatch(resetRes.summary, /worker\(s\)/);
 
   // Returned view has 0 tasks for projectA, while projectB's task remains intact.
   assert.deepEqual(resetRes.view?.tasks, []);
@@ -3187,9 +3188,14 @@ test("v0.0.24 (ADR 0015 §5): projectReset wipes a project's ledger events, task
   assert.ok(keepRes.ok, keepRes.ok ? "" : keepRes.error);
   assert.deepEqual(keepRes.tasks, ["T-RESET-2"]);
   assert.deepEqual(keepRes.archivedSeats, [], "keepSeats: true preserves live Supervisor and Lead seats");
+  assert.equal(existsSync(join(projectADir, "project.json")), true, "keepSeats: true retains project.json");
   const keptReg = readProjectRegistration(stateDir, projectA.slug);
+  assert.equal(keptReg?.root, projectA.root);
   assert.equal(keptReg?.supervisor, supA2.agentId);
   assert.equal(keptReg?.lead, leadA2.agentId);
+  assert.equal(keptReg?.rotationState, undefined);
+  assert.equal(keptReg?.taskWorkspaces, undefined);
+  assert.equal(keptReg?.dispatchers, undefined);
   assert.equal(factory.contractFor("T-RESET-2"), undefined);
 });
 

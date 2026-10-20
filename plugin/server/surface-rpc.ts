@@ -487,7 +487,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
 
   const PROVIDERS_TTL_MS = 5 * 60_000;
   const PROVIDERS_WAIT_MS = 2_000;
-  let cachedProviders: ProviderEntry[] | null = null;
+  let cachedProviderList: ProviderEntry[] | null = null;
   let cachedProvidersAt = 0;
   let cachedProvidersRefs: { listAvailable: unknown; listModels: unknown } | null = null;
   let inFlightProviders: Promise<ProviderEntry[]> | null = null;
@@ -518,7 +518,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           }
         }),
       );
-      cachedProviders = entries;
+      cachedProviderList = entries;
       cachedProvidersAt = Date.now();
       cachedProvidersRefs = { listAvailable: daemon.providers.listAvailable, listModels: daemon.providers.listModels };
       return entries;
@@ -534,17 +534,17 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       cachedProvidersRefs !== null &&
       (cachedProvidersRefs.listAvailable !== daemon.providers.listAvailable || cachedProvidersRefs.listModels !== daemon.providers.listModels)
     ) {
-      cachedProviders = null;
+      cachedProviderList = null;
       cachedProvidersAt = 0;
     }
     const now = Date.now();
-    if (cachedProviders !== null && now - cachedProvidersAt < PROVIDERS_TTL_MS) {
-      return cachedProviders;
+    if (cachedProviderList !== null && now - cachedProvidersAt < PROVIDERS_TTL_MS) {
+      return cachedProviderList;
     }
     const job = refreshProviders(daemon);
-    if (cachedProviders !== null) {
+    if (cachedProviderList !== null) {
       job.catch(() => {});
-      return cachedProviders;
+      return cachedProviderList;
     }
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -554,10 +554,21 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           timer = setTimeout(() => resolve(null), PROVIDERS_WAIT_MS);
         }),
       ]);
-      return raced ?? cachedProviders ?? [];
+      return raced ?? cachedProviderList ?? [];
     } finally {
       if (timer !== undefined) clearTimeout(timer);
     }
+  };
+
+  const sanitizeLane = async (laneValue: string, context?: SurfaceCallContext): Promise<string> => {
+    const daemon = resolveDaemon(context);
+    let providers: ProviderEntry[] = [];
+    try {
+      providers = await resolveProviders(daemon);
+    } catch {
+      // best-effort provider catalog lookup
+    }
+    return sanitizeLaneWithProviders(laneValue, providers);
   };
 
   // ---- the seat bridges (v0.0.14, ADR 0010 §1–§2) ----------------------------------------
@@ -763,6 +774,14 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   };
 
   return {
+    cachedProviders(): readonly ProviderEntry[] {
+      return cachedProviderList ?? [];
+    },
+
+    sanitizeLane(laneValue: string, context?: SurfaceCallContext): Promise<string> {
+      return sanitizeLane(laneValue, context);
+    },
+
     async snapshot(input: { projectRoot?: string }, context?: SurfaceCallContext) {
       // An unresolvable scope degrades to the global view — the panel must
       // render outside git repos; the seats-only acts refuse instead.
@@ -1232,7 +1251,14 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       const { purgedEvents, tasks: purgedTasks, removedFiles } = deps.factory.resetProject(project.root, project.slug);
       const tasks = [...new Set([...purgedTasks, ...projectTaskSet])];
       const snap = await this.snapshot({ projectRoot: project.root }, context);
-      const summary = `Reset project ${project.slug}: purged ${purgedEvents} ledger event(s), ${tasks.length} task(s), archived ${archivedSeats.length} seat(s) & ${archivedAgents.length} worker(s).`;
+      if (input.keepSeats !== true) {
+        try {
+          rmSync(join(projectDir, "project.json"), { force: true });
+        } catch {
+          // best-effort
+        }
+      }
+      const summary = `Reset project ${project.slug}: purged ${purgedEvents} ledger event(s), ${tasks.length} task(s), archived ${archivedSeats.length} seat(s) & ${archivedAgents.length} agent(s).`;
       log(`reset: ${summary}`);
       return {
         ok: true as const,

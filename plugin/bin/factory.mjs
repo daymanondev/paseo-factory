@@ -160,7 +160,7 @@ commands:
                                            Supervisor mailbox (to="supervisor",
                                            from="lead", kind="report").
 
-  reset      Owner-only clean-slate Project reset (v0.0.24, ADR 0016 §4):
+  reset      Owner-only clean-slate Project reset (v0.0.24, ADR 0015 §6):
              purges the Project's ledger events, task reports/worktrees, and
              per-Project state directory (<stateDir>/projects/<slug>/), and
              archives live worker/seat sessions unless --keep-seats is set.

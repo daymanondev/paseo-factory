@@ -752,7 +752,7 @@ test("spool command authority (v0.0.23, ADR 0015 §1): refuses contract/spawn/re
   assert.equal(supAccept.ok, true);
 });
 
-test("handleSpoolRequest refuses reset from supervisor, lead, and agent with seat-cannot-reset and executes for owner (v0.0.24, ADR 0016 §4)", async (t) => {
+test("handleSpoolRequest refuses reset from supervisor, lead, and agent with seat-cannot-reset and executes for owner (v0.0.24, ADR 0015 §6)", async (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);
   const ws = join(dir, "ws");
@@ -826,6 +826,59 @@ test("handleSpoolRequest refuses reset from supervisor, lead, and agent with sea
   }
   assert.equal(handlerCalledWith?.keepSeats, true);
   assert.equal(factory.ledger.eventsFor("R-1").length, 0);
+});
+
+test("handleSpoolRequest sanitizes spawn and respawn provider via sanitizeLane before recording to ledger (v0.0.24, ADR 0015 §1)", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const ws = join(dir, "ws");
+  mkdirSync(ws, { recursive: true });
+  writeFileSync(join(ws, "README.md"), "# ws\n");
+  gitCommitAll(ws);
+
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  factory.setContract({ task: "SAN-SP-1", workspace: ws, gate: "true", artifact: "README.md" });
+
+  const sanitizeLane = async (lane: string) =>
+    lane === "opencode/opencode/nemotron-3-ultra-free:max" ? "opencode/opencode/nemotron-3-ultra-free" : lane;
+
+  const spawned = await handleSpoolRequest(
+    factory,
+    { id: "sp-san-1", kind: "spawn", task: "SAN-SP-1", provider: "opencode/opencode/nemotron-3-ultra-free:max", arity: 1 },
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    sanitizeLane,
+  );
+  assert.equal(spawned.ok, true);
+  if (spawned.ok) {
+    assert.equal(spawned.event?.event === "spawn_dispatched" ? spawned.event.provider : undefined, "opencode/opencode/nemotron-3-ultra-free");
+    assert.match(spawned.summary, /under opencode\/opencode\/nemotron-3-ultra-free \(n=1\)/);
+  }
+
+  const respawned = await handleSpoolRequest(
+    factory,
+    { id: "rsp-san-1", kind: "respawn", task: "SAN-SP-1", provider: "opencode/opencode/nemotron-3-ultra-free:max", died_agent: "ag-dead-1" },
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    sanitizeLane,
+  );
+  assert.equal(respawned.ok, true);
+  if (respawned.ok) {
+    assert.equal(respawned.event?.event === "respawn_dispatched" ? respawned.event.provider : undefined, "opencode/opencode/nemotron-3-ultra-free");
+    assert.match(respawned.summary, /under opencode\/opencode\/nemotron-3-ultra-free /);
+  }
 });
 
 

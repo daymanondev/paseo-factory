@@ -98,7 +98,7 @@ export default function contribute(server: PluginServerContext) {
   const offAgentCreate = server.before("agent.create", ({ request }, context) => {
     capturePaseo(context);
     let next = request;
-    const normalized = normalizeAgentCreateRequest(next, stateDir);
+    const normalized = normalizeAgentCreateRequest(next, { stateDir, providers: surface.cachedProviders() });
     if (normalized !== next) {
       log(`choke: normalized agent.create in ${next.config.cwd} (provider=${normalized.config.provider})`);
       next = normalized;
@@ -218,6 +218,7 @@ export default function contribute(server: PluginServerContext) {
     },
     peerMail: leadMail.notifyPeer,
     daemon: () => paseoApi as never,
+    sanitizeLane: (lane) => surface.sanitizeLane(lane),
   });
 
   log(`spool listening on ${spoolRootFor(stateDir)}/{requests,replies,processed}`);
