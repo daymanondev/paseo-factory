@@ -193,13 +193,16 @@ export const pluginsManage = defineRpc({
   output: z.union([z.object({ ok: z.literal(true), pluginId: z.string(), action: z.string(), summary: z.string() }), Failure]),
 });
 
-// The Private vault surface (v0.0.21, ADR 0014 §4): configure persists the
-// Owner's repo/branch/passphrase to the `0o600` `<stateDir>/vault-config.json`
-// and returns the refreshed status; hydrate streams the zero-clone Direct
-// hydrate tarball, pull runs the two-way Vault sync checkout, push packages
-// this machine's runtime tree back to the remote. Every refusal is data —
-// the vendored core's own `vault-*` FactoryError codes ride the Failure
-// union — never an exception.
+// The Private vault surface (v0.0.21, ADR 0014 §4; v0.0.22 unified sync &
+// 1-click key import): configure persists the Owner's repo/branch/passphrase
+// to the `0o600` `<stateDir>/vault-config.json` and returns the refreshed
+// status; hydrate streams the zero-clone Direct hydrate tarball, pull runs
+// the two-way Vault sync checkout, push packages this machine's runtime tree
+// back to the remote, sync runs the unified smart bidirectional sync (with
+// automatic `<ghUser>/factory-vault` creation on unconfigured homes), and
+// import seals keys from disk into `vault-runtime/secrets/` and optionally
+// syncs. Every refusal is data — the vendored core's own `vault-*`
+// FactoryError codes ride the Failure union — never an exception.
 export const vaultConfigure = defineRpc({
   name: "factory.vault.configure",
   input: z.object({
@@ -209,7 +212,7 @@ export const vaultConfigure = defineRpc({
     /** Absent preserves the persisted passphrase; an empty string clears it. */
     passphrase: z.string().optional(),
   }),
-  output: z.union([z.object({ ok: z.literal(true), vault: VaultStatusViewSchema }), Failure]),
+  output: z.union([z.object({ ok: z.literal(true), vault: VaultStatusViewSchema, summary: z.string() }), Failure]),
 });
 
 export const vaultHydrate = defineRpc({
@@ -225,7 +228,7 @@ export const vaultHydrate = defineRpc({
     /** The tarball ref — omitted uses the configured branch. */
     ref: z.string().optional(),
   }),
-  output: z.union([z.object({ ok: z.literal(true), vault: VaultStatusViewSchema, hydratedFiles: z.array(z.string()) }), Failure]),
+  output: z.union([z.object({ ok: z.literal(true), vault: VaultStatusViewSchema, hydratedFiles: z.array(z.string()), summary: z.string() }), Failure]),
 });
 
 export const vaultPull = defineRpc({
@@ -234,7 +237,7 @@ export const vaultPull = defineRpc({
     /** Reconcile the vault's `state/nodes/*` ledger snapshots into this machine's ledgers after hydrating. */
     mergeLedgers: z.boolean().optional(),
   }),
-  output: z.union([z.object({ ok: z.literal(true), vault: VaultStatusViewSchema, hydratedFiles: z.array(z.string()) }), Failure]),
+  output: z.union([z.object({ ok: z.literal(true), vault: VaultStatusViewSchema, hydratedFiles: z.array(z.string()), summary: z.string() }), Failure]),
 });
 
 export const vaultPush = defineRpc({
@@ -243,5 +246,58 @@ export const vaultPush = defineRpc({
     /** Snapshot this machine's ledgers under its node namespace before pushing. */
     includeLedgers: z.boolean().optional(),
   }),
-  output: z.union([z.object({ ok: z.literal(true), vault: VaultStatusViewSchema, pushedFiles: z.array(z.string()) }), Failure]),
+  output: z.union([z.object({ ok: z.literal(true), vault: VaultStatusViewSchema, pushedFiles: z.array(z.string()), summary: z.string() }), Failure]),
+});
+
+export const vaultSync = defineRpc({
+  name: "factory.vault.sync",
+  input: z.object({
+    repo: z.string().optional(),
+    branch: z.string().optional(),
+    passphrase: z.string().optional(),
+    mergeLedgers: z.boolean().optional(),
+    includeLedger: z.boolean().optional(),
+    overwriteConfigs: z.boolean().optional(),
+  }),
+  output: z.union([
+    z.object({
+      ok: z.literal(true),
+      vault: VaultStatusViewSchema,
+      createdRepo: z.boolean(),
+      hydratedFiles: z.array(z.string()),
+      pushedFiles: z.array(z.string()),
+      pushed: z.boolean(),
+      summary: z.string(),
+    }),
+    Failure,
+  ]),
+});
+
+export const vaultImport = defineRpc({
+  name: "factory.vault.import",
+  input: z.object({
+    ascKeyPath: z.string().optional(),
+    ascKeyId: z.string().optional(),
+    ascIssuer: z.string().optional(),
+    gplayKeyPath: z.string().optional(),
+    eyeConfigPath: z.string().optional(),
+    appKey: z.string().optional(),
+    keystorePath: z.string().optional(),
+    storePass: z.string().optional(),
+    keyAlias: z.string().optional(),
+    firebaseProjectId: z.string().optional(),
+    googleServicesJsonPath: z.string().optional(),
+    googleServiceInfoPlistPath: z.string().optional(),
+    syncAfterImport: z.boolean().optional(),
+  }),
+  output: z.union([
+    z.object({
+      ok: z.literal(true),
+      vault: VaultStatusViewSchema,
+      importedFiles: z.array(z.string()),
+      pushed: z.boolean(),
+      summary: z.string(),
+    }),
+    Failure,
+  ]),
 });
