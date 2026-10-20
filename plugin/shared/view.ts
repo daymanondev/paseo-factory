@@ -231,6 +231,36 @@ export const LedgerLineViewSchema = z.object({
 });
 export type LedgerLineView = z.infer<typeof LedgerLineViewSchema>;
 
+/**
+ * The `Private vault` status half (v0.0.21, ADR 0014 §4) — the zod mirror of
+ * the core's `VaultStatusView` (`plugin/server/core/vault.ts`): the
+ * `configured`/`repo`/`branch`/`nodeId`/`hasPassphrase`/`cloneExists`/
+ * `lastHydratedAt`/`lastHydrateMode`/`lastPushedAt`/`sharedSecrets`/
+ * `hydratedApps`/`error` shape the Private Vault (GitHub) card renders. The
+ * gather is a pure filesystem probe the snapshot handler owns; this file is
+ * the wire shape alone.
+ */
+export const VaultStatusViewSchema = z.object({
+  configured: z.boolean(),
+  repo: z.string().nullable(),
+  branch: z.string(),
+  nodeId: z.string(),
+  hasPassphrase: z.boolean(),
+  cloneExists: z.boolean(),
+  lastHydratedAt: z.string().nullable(),
+  lastHydrateMode: z.enum(["direct", "sync"]).nullable(),
+  lastPushedAt: z.string().nullable(),
+  sharedSecrets: z.object({
+    ascKey: z.boolean(),
+    ascCredentials: z.boolean(),
+    gplayServiceAccount: z.boolean(),
+    eyeConfig: z.boolean(),
+  }),
+  hydratedApps: z.array(z.string()),
+  error: z.string().nullable(),
+});
+export type VaultStatusView = z.infer<typeof VaultStatusViewSchema>;
+
 /** The whole Factory surface snapshot — one RPC answer, one render. */
 export const FactoryViewSchema = z.object({
   version: z.literal(FACTORY_VIEW_VERSION),
@@ -255,6 +285,13 @@ export const FactoryViewSchema = z.object({
   projects: z.array(ProjectViewSchema),
   /** The companion catalog joined with the daemon's plugin list (v0.0.17, ADR 0012 §2). */
   companions: z.array(CompanionPluginViewSchema),
+  /**
+   * The `Private vault` status half (v0.0.21, ADR 0014 §4) — the card's whole
+   * world, gathered per snapshot. An additive field on a v3 view: an older
+   * client ignores the extra JSON key, so the version stays (the companions
+   * field's own precedent).
+   */
+  vault: VaultStatusViewSchema,
 });
 export type FactoryView = z.infer<typeof FactoryViewSchema>;
 
