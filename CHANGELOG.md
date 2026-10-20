@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.25] - 2026-10-20
+
+v0.0.25's one thing: **compact 2-row `Plugins` tab redesign, Core (`paseo-factory`) + 3 `Companion plugin`s semantic version visibility (`vX.Y.Z · <sha>`), on-demand update checking (`factory.plugins.check.updates`), conditional `Update` / `Update All (N)` CTAs, and honest update toast summaries** (ADR 0012 amended).
+
+### Added
+
+- **Core plugin (`paseo-factory`) card (`view.corePlugin`) with self-kill guard (`plugin/shared/companions.ts`, `plugin/shared/view.ts`, `plugin/server/view.ts`, `plugin/server/surface-rpc.ts`, `plugin/client/factory/plugins.tsx`, pinned in `test/surface-rpc.test.ts` and `test/client-surface.test.ts`)** —
+  `CORE_PLUGIN_ENTRY` (`paseo-factory`) folds into `FactoryView.corePlugin` and renders at the top of `PluginsPane` with a `CORE` badge alongside the 3 `Companion plugin`s (`factory-burn-lab`, `factory-connector`, `factory-release-lab`). `factory.plugins.manage` allows `reload`, `update`, and `enable` on `paseo-factory` while refusing `disable` and `remove` with `core-plugin-protected` (and locking those actions in the UI) so the `Owner` cannot accidentally disable or remove the active `Factory surface`.
+- **Installed semantic version resolution (`package.json`) and on-demand update checking (`factory.plugins.check.updates`) (`plugin/server/daemon-cli.ts`, `plugin/shared/rpc.ts`, `plugin/server/view.ts`, `plugin/server/surface-rpc.ts`, `plugin/client/factory/shell.tsx`, pinned in `test/surface-rpc.test.ts` and `test/client-surface.test.ts`)** —
+  `readPluginVersionFromDisk` resolves each installed plugin's semantic `"version"` from `<plugin.path>/package.json`, `<plugin.path>/../package.json`, or `<plugin.path>/paseo-plugin.json`. `checkDaemonPluginUpdates` queries Paseo's native `plugin.source.status.request` over the daemon WebSocket (falling back to `paseo --home <home> plugin update --all --check --json`), caches per-`home` update rows (`updateAvailable`, `latestRevision`, `commitsBehind`, `checkedAt`), and invalidates on install/manage. `FactoryShell` triggers `pluginsCheckUpdates` automatically once when opening `tab === "plugins"` (when unchecked or > 5 minutes old) and whenever the `Owner` clicks `Check for updates`.
+
+### Changed
+
+- **Compact 2-row plugin card layout, conditional primary `Update` / `Update All (N)` CTAs, collapsible `⋯ Manage` drawer, and honest update summaries (`plugin/client/factory/plugins.tsx`, `plugin/server/surface-rpc.ts`, pinned in `test/surface-rpc.test.ts` and `test/client-surface.test.ts`)** —
+  Every card in `PluginsPane` renders a 2-row face (`Header row` with icon, title, `CORE`/id pill, semantic version + short SHA pill `vX.Y.Z · <sha>`, status pill, `Active in Sidebar`, update status pill `Up to date` / `Update available · <curr> → <latest>`, conditional primary CTA, and `⋯ Manage` / `Custom source…` toggle; plus 1-line `tagline`). The primary `Update` button on a card and `Update All (N)` in the toolbar appear **only** when `updateAvailable === true`, while source metadata, capabilities, and secondary actions (`Disable`/`Enable`, `Reload`, manual `Update`, `Remove`, `Custom source…`) live inside the collapsible `⋯ Manage` drawer. `pluginsManageSummary` inspects `reply.update` to report `"updated <id> (<prev> → <curr>)"` when updated and `"<id> is already up to date (<curr>)"` when `updated === false`.
+- `package.json` + `SHELL_VERSION` → `0.0.25`. Suite 564 → 568.
+
 ## [0.0.24] - 2026-10-20
 
 v0.0.24's one thing: **end-to-end `:thinking` variant sanitization, self-healing `Supervisor` & `Lead` seats with permission-only mailbox attention blocking and bounded 1-shot retry, dispatcher write fence on `<project-root>`, re-Contract epoch for unaccepted `Task`s, and Owner-only `Project reset` (`factory reset`)** — closing four live operational failure chains and adding clean `Project` reset across CLI and UI (ADR 0015).
