@@ -26,6 +26,7 @@ import { usageIsValid } from "./core/ledger.ts";
 import { needsHumanEvidenceIsValid, NEEDS_HUMAN_REASONS } from "./core/events.ts";
 import type { Factory } from "./core/factory.ts";
 import type { LedgerEvent, MeterUsage, NeedsHumanEvidence, NeedsHumanReason, Verdict } from "./core/events.ts";
+import { readCorrelations } from "./core/correlations.ts";
 import { listProjectRegistrations, readProjectRegistration, resolveProject, writeProjectRegistration } from "./core/project.ts";
 import { acceptanceSummary, archiveAcceptedTaskWorkspace } from "./surface-rpc.ts";
 import type { SurfaceDaemonApi } from "./surface-rpc.ts";
@@ -157,7 +158,7 @@ export interface SpoolLeadDispatchRequest {
   kind: "lead_dispatch";
   project?: string;
   workspace?: string;
-  from?: "supervisor" | "owner";
+  from?: "supervisor" | "owner" | "peer";
   message: string;
   submitter?: string;
   /** Caller seat stamped from `PASEO_FACTORY_SEAT` when present (v0.0.23, ADR 0015 §1). */
@@ -542,7 +543,7 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     if (typeof req.message !== "string" || req.message.trim() === "") return undefined;
     if (req.project !== undefined && (typeof req.project !== "string" || req.project.trim() === "")) return undefined;
     if (req.workspace !== undefined && (typeof req.workspace !== "string" || req.workspace.trim() === "")) return undefined;
-    if (req.from !== undefined && req.from !== "supervisor" && req.from !== "owner") return undefined;
+    if (req.from !== undefined && req.from !== "supervisor" && req.from !== "owner" && req.from !== "peer") return undefined;
     return {
       id: req.id,
       kind: "lead_dispatch",
@@ -649,8 +650,19 @@ async function resolveEffectiveSeat(
   request: SpoolRequest,
 ): Promise<SpoolSeat | undefined> {
   const submitter =
-    "submitter" in request && typeof request.submitter === "string" ? request.submitter.trim() : "";
+    "submitter" in request && typeof request.submitter === "string"
+      ? request.submitter.trim()
+      : "agent" in request && typeof request.agent === "string"
+        ? request.agent.trim()
+        : "";
   if (submitter !== "" && submitter !== "owner") {
+    const correlations = readCorrelations(factory.stateDir);
+    for (let i = correlations.length - 1; i >= 0; i -= 1) {
+      const rec = correlations[i];
+      if (rec !== undefined && (rec.correlationId === submitter || rec.agentId === submitter)) {
+        return rec.role;
+      }
+    }
     if (daemon?.agents?.list !== undefined) {
       try {
         const page = await daemon.agents.list({ filter: { includeArchived: false } });
@@ -814,7 +826,7 @@ export async function handleSpoolRequest(
         request.kind === "needs_human" ||
         request.kind === "meter" ||
         request.kind === "accept" ||
-        request.kind === "lead_dispatch" ||
+        (request.kind === "lead_dispatch" && request.from !== "peer") ||
         request.kind === "supervisor_dispatch" ||
         request.kind === "supervisor_report" ||
         request.kind === "lead_rotate" ||

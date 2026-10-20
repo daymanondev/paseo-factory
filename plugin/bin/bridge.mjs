@@ -1,0 +1,1257 @@
+#!/usr/bin/env node
+/**
+ * bridge.mjs — Role-scoped MCP bridge (`paseo_factory`, v0.0.26, ADR 0016 §1).
+ *
+ * Zero-dependency Node ESM stdio JSON-RPC 2.0 MCP server supporting both
+ * newline-delimited JSON-RPC 2.0 frames and Content-Length framed JSON-RPC 2.0
+ * messages. Authenticates the calling seat (`supervisor`, `lead`, `agent`, or
+ * unbound) via CLI flags, process environment, parent process environment, and
+ * `<stateDir>/correlations.json`, and exposes strictly role-scoped tools over
+ * the single-writer Spool.
+ */
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
+import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+
+const DEFAULT_WAIT_MS = 60_000;
+const GIT_TIMEOUT_MS = 15_000;
+
+function parseCliArgs(argv) {
+  const out = {};
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === "--correlation" && i + 1 < argv.length) out.correlationId = argv[++i];
+    else if (arg === "--role" && i + 1 < argv.length) out.role = argv[++i];
+    else if (arg === "--state-dir" && i + 1 < argv.length) out.stateDir = argv[++i];
+    else if (arg === "--project" && i + 1 < argv.length) out.projectSlug = argv[++i];
+    else if (arg === "--workspace" && i + 1 < argv.length) out.workspace = argv[++i];
+    else if (arg === "--task" && i + 1 < argv.length) out.task = argv[++i];
+    else if (arg === "--home" && i + 1 < argv.length) out.home = argv[++i];
+  }
+  return out;
+}
+
+function expandHome(raw) {
+  if (raw === "~") return homedir();
+  if (typeof raw === "string" && raw.startsWith("~/")) return join(homedir(), raw.slice(2));
+  return raw;
+}
+
+function readParentProcessEnv() {
+  if (process.platform === "win32" || typeof process.ppid !== "number" || process.ppid <= 1) return {};
+  try {
+    const out = execFileSync("ps", ["eww", "-o", "command=", "-p", String(process.ppid)], {
+      encoding: "utf8",
+      timeout: 1500,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const env = {};
+    const keys = [
+      "PASEO_FACTORY_CORRELATION",
+      "PASEO_FACTORY_SEAT",
+      "PASEO_FACTORY_STATE_DIR",
+      "PASEO_FACTORY_PROJECT",
+      "PASEO_AGENT_ID",
+      "PASEO_AGENT_CWD",
+      "PASEO_HOME",
+    ];
+    for (const key of keys) {
+      const re = new RegExp(`(?:^|\\s)${key}=([^\\s]+)`);
+      const m = re.exec(out);
+      if (m && m[1]) env[key] = m[1];
+    }
+    return env;
+  } catch {
+    return {};
+  }
+}
+
+function readCorrelationsFile(stateDir) {
+  const path = join(stateDir, "correlations.json");
+  if (!existsSync(path)) return [];
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8"));
+    const list = Array.isArray(parsed)
+      ? parsed
+      : typeof parsed === "object" && parsed !== null && Array.isArray(parsed.records)
+        ? parsed.records
+        : [];
+    return list.filter((r) => typeof r === "object" && r !== null && typeof r.correlationId === "string");
+  } catch {
+    return [];
+  }
+}
+
+function resolveProjectFromDir(cwd) {
+  try {
+    const stdout = execFileSync("git", ["rev-parse", "--show-toplevel", "--git-common-dir"], {
+      cwd,
+      encoding: "utf8",
+      timeout: GIT_TIMEOUT_MS,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const lines = stdout.trim().split("\n");
+    const root = (lines[0] ?? "").trim();
+    const commonDirRaw = (lines[1] ?? "").trim();
+    if (root === "" || commonDirRaw === "") return null;
+    const commonDirAbs = isAbsolute(commonDirRaw) ? commonDirRaw : resolve(cwd, commonDirRaw);
+    const gitCommonDir = realpathSync(commonDirAbs);
+    const hash = createHash("sha1").update(gitCommonDir).digest("hex").slice(0, 6);
+    return { root, gitCommonDir, slug: `${basename(root)}-${hash}` };
+  } catch {
+    return null;
+  }
+}
+
+const cliFlags = parseCliArgs(process.argv.slice(2));
+let cachedParentEnv = null;
+
+function resolveBridgeContext() {
+  const env = process.env;
+  const needParentFallback =
+    !cliFlags.correlationId &&
+    !env.PASEO_FACTORY_CORRELATION &&
+    !cliFlags.role &&
+    !env.PASEO_FACTORY_SEAT;
+  if (needParentFallback && cachedParentEnv === null) {
+    cachedParentEnv = readParentProcessEnv();
+  }
+  const pEnv = cachedParentEnv ?? {};
+
+  const homeRaw =
+    cliFlags.home ??
+    env.PASEO_HOME ??
+    pEnv.PASEO_HOME ??
+    join(homedir(), ".paseo");
+  const home = expandHome(homeRaw);
+  const stateDir = expandHome(
+    cliFlags.stateDir ??
+      env.PASEO_FACTORY_STATE_DIR ??
+      pEnv.PASEO_FACTORY_STATE_DIR ??
+      join(home, "plugin-state", "paseo-factory"),
+  );
+
+  const correlationId =
+    (cliFlags.correlationId ?? env.PASEO_FACTORY_CORRELATION ?? pEnv.PASEO_FACTORY_CORRELATION ?? "").trim() || undefined;
+  const agentId = (env.PASEO_AGENT_ID ?? pEnv.PASEO_AGENT_ID ?? "").trim() || undefined;
+
+  let record;
+  if (correlationId || agentId) {
+    const records = readCorrelationsFile(stateDir);
+    if (correlationId) {
+      record = records.find((r) => r.correlationId === correlationId);
+    }
+    if (!record && agentId) {
+      for (let i = records.length - 1; i >= 0; i -= 1) {
+        if (records[i].agentId === agentId) {
+          record = records[i];
+          break;
+        }
+      }
+    }
+  }
+
+  const rawRole = (
+    record?.role ??
+    cliFlags.role ??
+    env.PASEO_FACTORY_SEAT ??
+    pEnv.PASEO_FACTORY_SEAT ??
+    ""
+  ).trim();
+  const role = rawRole === "supervisor" || rawRole === "lead" || rawRole === "agent" ? rawRole : undefined;
+
+  const workspace =
+    (cliFlags.workspace ?? record?.projectRoot ?? env.PASEO_AGENT_CWD ?? pEnv.PASEO_AGENT_CWD ?? process.cwd()).trim();
+  let projectSlug =
+    (record?.projectSlug ?? cliFlags.projectSlug ?? env.PASEO_FACTORY_PROJECT ?? pEnv.PASEO_FACTORY_PROJECT ?? "").trim() ||
+    undefined;
+  let projectRoot = record?.projectRoot;
+
+  if ((!projectSlug || !projectRoot) && workspace) {
+    const resolved = resolveProjectFromDir(workspace);
+    if (resolved) {
+      if (!projectSlug) projectSlug = resolved.slug;
+      if (!projectRoot) projectRoot = resolved.root;
+    }
+  }
+
+  const task = (record?.task ?? cliFlags.task ?? "").trim() || undefined;
+  const effectiveAgentId = record?.agentId ?? agentId;
+
+  return {
+    home,
+    stateDir,
+    spoolRoot: join(stateDir, "spool"),
+    correlationId: record?.correlationId ?? correlationId,
+    agentId: effectiveAgentId,
+    role,
+    projectSlug,
+    projectRoot,
+    workspace,
+    task,
+  };
+}
+
+function randomId() {
+  return `${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
+}
+
+function submitSpoolRequest(spoolRoot, request) {
+  const requestsDir = join(spoolRoot, "requests");
+  mkdirSync(requestsDir, { recursive: true });
+  const path = join(requestsDir, `${request.id}.json`);
+  const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(tmp, `${JSON.stringify(request)}\n`);
+  renameSync(tmp, path);
+  return path;
+}
+
+function awaitSpoolReply(spoolRoot, id, timeoutMs = DEFAULT_WAIT_MS, pollMs = 50) {
+  const replyPath = join(spoolRoot, "replies", `${id}.json`);
+  const deadline = Date.now() + timeoutMs;
+  return new Promise((resolvePromise) => {
+    const tick = () => {
+      if (existsSync(replyPath)) {
+        try {
+          resolvePromise(JSON.parse(readFileSync(replyPath, "utf8")));
+          return;
+        } catch {
+          // retry if mid-rename
+        }
+      }
+      if (Date.now() >= deadline) {
+        resolvePromise(null);
+        return;
+      }
+      setTimeout(tick, pollMs);
+    };
+    tick();
+  });
+}
+
+async function roundTripSpool(ctx, request, timeoutMs = DEFAULT_WAIT_MS) {
+  const submitter = ctx.agentId ?? ctx.correlationId ?? ctx.role ?? "owner";
+  const payload = {
+    ...request,
+    ...(request.submitter === undefined && request.kind !== "claim" ? { submitter } : {}),
+    ...(ctx.role !== undefined && request.seat === undefined && request.kind !== "claim" ? { seat: ctx.role } : {}),
+  };
+  submitSpoolRequest(ctx.spoolRoot, payload);
+  const reply = await awaitSpoolReply(ctx.spoolRoot, payload.id, timeoutMs);
+  if (reply === null) {
+    return {
+      ok: false,
+      code: "spool-timeout",
+      message: `No reply from the factory plugin after ${Math.round(timeoutMs / 1000)}s (request ${payload.id}).`,
+    };
+  }
+  return reply;
+}
+
+function readLedgerEventsList(stateDir) {
+  const ledgerPath = join(stateDir, "ledger.jsonl");
+  if (!existsSync(ledgerPath)) return [];
+  try {
+    const raw = readFileSync(ledgerPath, "utf8");
+    const out = [];
+    for (const line of raw.split("\n")) {
+      const trimmed = line.trim();
+      if (trimmed === "") continue;
+      try {
+        out.push(JSON.parse(trimmed));
+      } catch {
+        // skip malformed line
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+function formatFactoryStatus(stateDir, workspaceFilter) {
+  const events = readLedgerEventsList(stateDir);
+  if (events.length === 0) {
+    return `factory: no tasks yet (ledger: ${join(stateDir, "ledger.jsonl")})`;
+  }
+  const NO_ATTEMPT_EVENTS = new Set([
+    "contract_set",
+    "permit_allowed",
+    "permit_denied",
+    "git_blocked",
+    "spawn_dispatched",
+    "spawn_refused",
+    "meter_written",
+    "repoke_dispatched",
+    "repoke_refused",
+    "respawn_dispatched",
+    "respawn_refused",
+    "needs_human",
+    "retro_written",
+  ]);
+  const order = [];
+  const byTask = new Map();
+  let retro;
+  for (const evt of events) {
+    if (evt.event === "retro_written") {
+      retro = evt;
+      continue;
+    }
+    if (evt.event !== "contract_set" && NO_ATTEMPT_EVENTS.has(evt.event)) {
+      const counted = byTask.get(evt.task);
+      if (counted !== undefined) {
+        if (evt.event === "permit_allowed") counted.allowed += 1;
+        else if (evt.event === "permit_denied") counted.denied += 1;
+        else if (evt.event === "git_blocked") counted.blocked += 1;
+        else if (evt.event === "needs_human") counted.needsHuman = evt.reason;
+      }
+      continue;
+    }
+    let state = byTask.get(evt.task);
+    if (state === undefined) {
+      state = {
+        attempts: 0,
+        verdict: undefined,
+        sha: undefined,
+        eye: undefined,
+        accepted: false,
+        allowed: 0,
+        denied: 0,
+        blocked: 0,
+        needsHuman: undefined,
+        workspace: undefined,
+      };
+      byTask.set(evt.task, state);
+      order.push(evt.task);
+    }
+    if (evt.event === "contract_set") {
+      state.workspace = evt.workspace;
+      if (!state.accepted) {
+        state.attempts = 0;
+        state.verdict = undefined;
+        state.sha = undefined;
+        state.eye = undefined;
+        state.needsHuman = undefined;
+        state.allowed = 0;
+        state.denied = 0;
+        state.blocked = 0;
+      }
+      continue;
+    }
+    if (evt.attempt > state.attempts) state.attempts = evt.attempt;
+    if (evt.event === "gate_finished") {
+      state.verdict = evt.verdict;
+      state.sha = typeof evt.sha === "string" ? evt.sha.slice(0, 7) : undefined;
+    }
+    if (evt.event === "fresh_eyes_written") {
+      state.eye = typeof evt.outcome === "string" ? evt.outcome : undefined;
+    }
+    if (evt.event === "attempt_accepted") state.accepted = true;
+  }
+
+  const lines = [];
+  for (const task of order) {
+    const s = byTask.get(task);
+    if (workspaceFilter && s.workspace && s.workspace !== workspaceFilter) continue;
+    lines.push(
+      `${task} attempts=${s.attempts} verdict=${s.verdict ?? "-"} sha=${s.sha ?? "-"} accepted=${s.accepted ? "yes" : "no"} eye=${s.eye ?? "-"} choke=${s.allowed}/${s.denied}/${s.blocked}` +
+        `${s.needsHuman === undefined ? "" : ` needs-human=${s.needsHuman}`}`,
+    );
+  }
+  if (retro !== undefined) {
+    const day = typeof retro.ts === "string" ? retro.ts.slice(0, 10) : "-";
+    const count = retro.outcome === "written" && Number.isInteger(retro.proposalCount) ? ` proposals=${retro.proposalCount}` : "";
+    lines.push(`retro last=${day} outcome=${retro.outcome ?? "-"}${count}`);
+  }
+  return lines.length > 0 ? lines.join("\n") : "factory: no matching tasks";
+}
+
+function allocateTaskWorktree(stateDir, contract, task) {
+  const resolved = resolveProjectFromDir(contract.workspace);
+  if (!resolved) {
+    return { ok: false, reason: `workspace "${contract.workspace}" does not resolve to a git repository` };
+  }
+  let isRoot = false;
+  try {
+    isRoot = realpathSync(contract.workspace) === realpathSync(resolved.root);
+  } catch {
+    isRoot = contract.workspace === resolved.root;
+  }
+  if (!isRoot) {
+    return { ok: true, legacy: true, cwd: contract.workspace, branch: task };
+  }
+  let baseCommit = contract.base;
+  if (typeof baseCommit !== "string" || !/^[0-9a-f]{40}$/i.test(baseCommit)) {
+    const headOut = spawnSync("git", ["rev-parse", "HEAD"], { cwd: resolved.root, encoding: "utf8", timeout: GIT_TIMEOUT_MS });
+    if (headOut.status !== 0) {
+      return { ok: false, reason: `cannot resolve HEAD in ${resolved.root}` };
+    }
+    baseCommit = headOut.stdout.trim();
+  }
+  const worktreePath = join(stateDir, "projects", resolved.slug, "worktrees", task);
+  if (existsSync(worktreePath)) {
+    const rmOut = spawnSync("git", ["worktree", "remove", "--force", worktreePath], {
+      cwd: resolved.root,
+      encoding: "utf8",
+      timeout: GIT_TIMEOUT_MS,
+    });
+    if (rmOut.status !== 0) {
+      rmSync(worktreePath, { recursive: true, force: true });
+      spawnSync("git", ["worktree", "prune"], { cwd: resolved.root, encoding: "utf8", timeout: GIT_TIMEOUT_MS });
+    }
+  } else {
+    spawnSync("git", ["worktree", "prune"], { cwd: resolved.root, encoding: "utf8", timeout: GIT_TIMEOUT_MS });
+  }
+  const branch = `factory/${task}`;
+  const addOut = spawnSync("git", ["worktree", "add", "-B", branch, worktreePath, baseCommit], {
+    cwd: resolved.root,
+    encoding: "utf8",
+    timeout: GIT_TIMEOUT_MS,
+  });
+  if (addOut.status !== 0) {
+    return { ok: false, reason: `could not create worktree at ${worktreePath}: ${(addOut.stderr || "").trim()}` };
+  }
+  // Copy .worktreeinclude files if present
+  try {
+    const includePath = join(resolved.root, ".worktreeinclude");
+    if (existsSync(includePath)) {
+      const patterns = readFileSync(includePath, "utf8")
+        .split("\n")
+        .map((l) => l.trim())
+        .filter((l) => l !== "" && !l.startsWith("#"));
+      if (patterns.length > 0) {
+        const untracked = new Set();
+        for (const extra of [[], ["--ignored"]]) {
+          const listed = spawnSync("git", ["ls-files", "--others", "--exclude-standard", ...extra], {
+            cwd: resolved.root,
+            encoding: "utf8",
+            timeout: GIT_TIMEOUT_MS,
+          });
+          if (listed.status === 0) {
+            for (const f of listed.stdout.split("\n").map((s) => s.trim()).filter(Boolean)) untracked.add(f);
+          }
+        }
+        for (const file of untracked) {
+          const from = join(resolved.root, file);
+          const to = join(worktreePath, file);
+          if (existsSync(from) && statSync(from).isFile()) {
+            mkdirSync(dirname(to), { recursive: true });
+            cpSync(from, to);
+          }
+        }
+      }
+    }
+  } catch {
+    // best-effort include copy
+  }
+  return { ok: true, cwd: worktreePath, branch, worktree: worktreePath };
+}
+
+function resolveDefaultWorkerLane(stateDir, projectSlug) {
+  const DEFAULT_LANE = "pi/zai/glm-5.3";
+  try {
+    if (projectSlug) {
+      const projLanesPath = join(stateDir, "projects", projectSlug, "lanes.json");
+      if (existsSync(projLanesPath)) {
+        const parsed = JSON.parse(readFileSync(projLanesPath, "utf8"));
+        if (typeof parsed?.worker === "string" && parsed.worker.trim() !== "") return parsed.worker.trim();
+      }
+    }
+    const globalLanesPath = join(stateDir, "lanes.json");
+    if (existsSync(globalLanesPath)) {
+      const parsed = JSON.parse(readFileSync(globalLanesPath, "utf8"));
+      if (typeof parsed?.worker === "string" && parsed.worker.trim() !== "") return parsed.worker.trim();
+    }
+  } catch {
+    // fallback to default
+  }
+  return DEFAULT_LANE;
+}
+
+const TOOL_DEFINITIONS = {
+  supervisor_dispatch_lead: {
+    name: "supervisor_dispatch_lead",
+    description:
+      "Dispatch an implementation directive to the Project's Lead seat via the serialized Lead mailbox. After calling this tool, end your turn immediately and wait for Lead's wave report.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        message: { type: "string", description: "The directive text for Lead." },
+        workspace: { type: "string", description: "Optional Project root path (defaults to current project root)." },
+      },
+      required: ["message"],
+    },
+  },
+  supervisor_accept_task: {
+    name: "supervisor_accept_task",
+    description: "Accept a green Attempt of a Task on the Owner's behalf (`by: supervisor`).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        task: { type: "string", description: "Task ID to accept." },
+        attempt: { type: "number", description: "1-indexed Attempt number to accept." },
+        workspace: { type: "string", description: "Optional Project root path." },
+      },
+      required: ["task", "attempt"],
+    },
+  },
+  lead_set_contract: {
+    name: "lead_set_contract",
+    description:
+      "Register a Task's immutable Contract (`gate`, `artifact`, optional `scope`, `skills`, `freshEyes`, `watch`, `description`) before spawning its working Agent.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        task: { type: "string", description: "Unique Task ID (letters, digits, '.', '_', '-')." },
+        gate: { type: "string", description: "Gate command to verify the Task." },
+        artifact: { type: "string", description: "Workspace-relative artifact path that must exist and be non-empty." },
+        base: { type: "string", description: "Optional base commit SHA." },
+        scope: {
+          oneOf: [{ type: "string" }, { type: "array", items: { type: "string" } }],
+          description: "Optional comma-separated path prefixes or array of path prefixes the task may touch.",
+        },
+        skills: {
+          type: "array",
+          items: { type: "string" },
+          description: "Optional list of SKILL.md names the working Agent must open first.",
+        },
+        freshEyes: { type: "boolean", description: "Enable the advisory fresh-eyes review pass on green verdicts." },
+        watch: { type: "boolean", description: "Enable the post-verdict watch pass." },
+        description: { type: "string", description: "Optional task assignment description." },
+        workspace: { type: "string", description: "Optional Project root path (defaults to current project root)." },
+      },
+      required: ["task", "gate", "artifact"],
+    },
+  },
+  lead_spawn_agent: {
+    name: "lead_spawn_agent",
+    description:
+      "Allocate isolated Task worktrees (`<projectStateDir>/worktrees/<task>` on branch `factory/<task>`) and dispatch working Agent(s) for the contracted Task(s). After calling this tool, end your turn immediately and wait for the completion report.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tasks: {
+          type: "array",
+          items: { type: "string" },
+          description: "Task IDs to spawn working Agents for.",
+        },
+        provider: {
+          type: "string",
+          description: "Optional `<provider>/<model>[:<thinking>]` override (defaults to `lanes.worker`).",
+        },
+        workspace: { type: "string", description: "Optional Project root path." },
+      },
+      required: ["tasks"],
+    },
+  },
+  lead_accept_task: {
+    name: "lead_accept_task",
+    description:
+      "Accept a green, CONCERN-free Attempt of a Task (`by: lead`) and land its Task worktree commit into `<project-root>`.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        task: { type: "string", description: "Task ID to accept." },
+        attempt: { type: "number", description: "1-indexed Attempt number to accept." },
+        workspace: { type: "string", description: "Optional Project root path." },
+      },
+      required: ["task", "attempt"],
+    },
+  },
+  lead_repoke_agent: {
+    name: "lead_repoke_agent",
+    description: "Spend the Task's single automatic re-poke on a stalled working Agent.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        task: { type: "string", description: "Task ID to re-poke." },
+        agent: { type: "string", description: "Optional target Agent ID (resolved automatically from task when omitted)." },
+        workspace: { type: "string", description: "Optional Project root path." },
+      },
+      required: ["task"],
+    },
+  },
+  lead_needs_human: {
+    name: "lead_needs_human",
+    description:
+      "Record a terminal `needs_human` escalation for a Task with its corroborating ledger sequence pair.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        task: { type: "string", description: "Task ID." },
+        reason: {
+          type: "string",
+          enum: ["denied-again", "silent-after-repoke", "attempt-ceiling", "died-after-respawn"],
+          description: "Escalation reason.",
+        },
+        evidenceSeqs: {
+          type: "array",
+          items: { type: "number" },
+          description: "Two ledger event sequence numbers corroborating `reason`.",
+        },
+        summary: { type: "string", description: "Human-readable escalation summary." },
+        workspace: { type: "string", description: "Optional Project root path." },
+      },
+      required: ["task", "reason", "evidenceSeqs", "summary"],
+    },
+  },
+  lead_report_to_supervisor: {
+    name: "lead_report_to_supervisor",
+    description:
+      "Send a wave completion or escalation report to the Project's Supervisor mailbox (`to: supervisor`, `from: lead`, `kind: report`). After calling this tool, end your turn immediately.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        message: { type: "string", description: "Report message for Supervisor." },
+        workspace: { type: "string", description: "Optional Project root path." },
+      },
+      required: ["message"],
+    },
+  },
+  agent_claim: {
+    name: "agent_claim",
+    description:
+      "Submit a Claim for your bound Task in the Task worktree. Runs the Contract's Gate and returns the Verdict (`GREEN` or `RED`) and report.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        task: { type: "string", description: "Optional Task ID (defaults to your bound correlation Task)." },
+        commit: { type: "string", description: "Optional git commit SHA (defaults to `git rev-parse HEAD` in the Task worktree)." },
+      },
+    },
+  },
+  agent_escalate_blocker: {
+    name: "agent_escalate_blocker",
+    description:
+      "Escalate an unresolvable blocker (e.g., an edit required outside `--scope` or contradictory Contract criteria) to the Project's Lead mailbox.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        message: { type: "string", description: "Detailed blocker explanation for Lead." },
+      },
+      required: ["message"],
+    },
+  },
+  factory_dispatch_supervisor: {
+    name: "factory_dispatch_supervisor",
+    description: "Route an Owner directive into a Project's Supervisor mailbox (`to: supervisor`).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workspace: { type: "string", description: "Project repository root path." },
+        message: { type: "string", description: "Directive message for Supervisor." },
+      },
+      required: ["workspace", "message"],
+    },
+  },
+  factory_status: {
+    name: "factory_status",
+    description: "Return the Project's folded Ledger task digest (`attempts`, `verdict`, `sha`, `accepted`, `eye`, `choke`).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workspace: { type: "string", description: "Optional Project root path filter." },
+      },
+    },
+  },
+};
+
+const ROLE_TOOL_NAMES = {
+  supervisor: ["supervisor_dispatch_lead", "supervisor_accept_task", "factory_status"],
+  lead: [
+    "lead_set_contract",
+    "lead_spawn_agent",
+    "lead_accept_task",
+    "lead_repoke_agent",
+    "lead_needs_human",
+    "lead_report_to_supervisor",
+    "factory_status",
+  ],
+  agent: ["agent_claim", "agent_escalate_blocker"],
+  unbound: ["factory_dispatch_supervisor", "factory_status"],
+};
+
+function getAllowedToolNames(role) {
+  if (role === "supervisor" || role === "lead" || role === "agent") {
+    return ROLE_TOOL_NAMES[role];
+  }
+  return ROLE_TOOL_NAMES.unbound;
+}
+
+function toolResult(text, isError = false) {
+  return {
+    content: [{ type: "text", text }],
+    ...(isError ? { isError: true } : {}),
+  };
+}
+
+async function handleToolCall(name, rawArgs) {
+  const ctx = resolveBridgeContext();
+  const allowed = getAllowedToolNames(ctx.role);
+  if (!allowed.includes(name)) {
+    return toolResult(
+      `Tool "${name}" is not permitted for role "${ctx.role ?? "unbound"}". Allowed tools for this seat: ${allowed.join(", ")}.`,
+      true,
+    );
+  }
+  const args = typeof rawArgs === "object" && rawArgs !== null ? rawArgs : {};
+
+  if (name === "factory_status") {
+    const ws = typeof args.workspace === "string" && args.workspace.trim() !== "" ? resolve(args.workspace.trim()) : undefined;
+    return toolResult(formatFactoryStatus(ctx.stateDir, ws));
+  }
+
+  if (name === "factory_dispatch_supervisor") {
+    const message = typeof args.message === "string" ? args.message.trim() : "";
+    const workspace = typeof args.workspace === "string" && args.workspace.trim() !== "" ? resolve(args.workspace.trim()) : ctx.projectRoot ?? ctx.workspace;
+    if (message === "" || !workspace) {
+      return toolResult("factory_dispatch_supervisor requires non-empty `workspace` and `message`.", true);
+    }
+    const reply = await roundTripSpool(ctx, {
+      id: randomId(),
+      kind: "supervisor_dispatch",
+      workspace,
+      message,
+    });
+    if (!reply.ok) return toolResult(`${reply.code}: ${reply.message}`, true);
+    return toolResult(`${reply.summary}\nEnd your turn now and open the Supervisor session.`);
+  }
+
+  if (name === "supervisor_dispatch_lead") {
+    const message = typeof args.message === "string" ? args.message.trim() : "";
+    if (message === "") return toolResult("supervisor_dispatch_lead requires a non-empty `message`.", true);
+    const workspace =
+      typeof args.workspace === "string" && args.workspace.trim() !== ""
+        ? resolve(args.workspace.trim())
+        : ctx.projectRoot ?? ctx.workspace;
+    const reply = await roundTripSpool(ctx, {
+      id: randomId(),
+      kind: "lead_dispatch",
+      ...(workspace ? { workspace } : ctx.projectSlug ? { project: ctx.projectSlug } : {}),
+      from: "supervisor",
+      message,
+      seat: "supervisor",
+    });
+    if (!reply.ok) return toolResult(`${reply.code}: ${reply.message}`, true);
+    return toolResult(
+      `${reply.summary}\nDirective dispatched to Lead (${reply.leadAgentId ?? "lead"}). End your turn immediately and wait for Lead's report.`,
+    );
+  }
+
+  if (name === "supervisor_accept_task") {
+    const task = typeof args.task === "string" ? args.task.trim() : "";
+    const attempt = Number(args.attempt);
+    if (task === "" || !Number.isInteger(attempt) || attempt < 1) {
+      return toolResult("supervisor_accept_task requires `task` (string) and `attempt` (positive integer).", true);
+    }
+    const reply = await roundTripSpool(ctx, {
+      id: randomId(),
+      kind: "accept",
+      task,
+      attempt,
+      by: "supervisor",
+      seat: "supervisor",
+    });
+    if (!reply.ok) return toolResult(`${reply.code}: ${reply.message}`, true);
+    return toolResult(reply.summary);
+  }
+
+  if (name === "lead_set_contract") {
+    const task = typeof args.task === "string" ? args.task.trim() : "";
+    const gate = typeof args.gate === "string" ? args.gate.trim() : "";
+    const artifact = typeof args.artifact === "string" ? args.artifact.trim() : "";
+    if (task === "" || gate === "" || artifact === "") {
+      return toolResult("lead_set_contract requires non-empty `task`, `gate`, and `artifact`.", true);
+    }
+    const workspace =
+      typeof args.workspace === "string" && args.workspace.trim() !== ""
+        ? resolve(args.workspace.trim())
+        : ctx.projectRoot ?? ctx.workspace;
+    let scope;
+    if (typeof args.scope === "string" && args.scope.trim() !== "") {
+      scope = args.scope
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+    } else if (Array.isArray(args.scope)) {
+      scope = args.scope.map((s) => String(s).trim()).filter(Boolean);
+    }
+    const skills = Array.isArray(args.skills)
+      ? args.skills.map((s) => String(s).trim()).filter(Boolean)
+      : undefined;
+    const description =
+      typeof args.description === "string" && args.description.trim() !== "" ? args.description.trim() : undefined;
+
+    const reply = await roundTripSpool(ctx, {
+      id: randomId(),
+      kind: "contract",
+      task,
+      workspace,
+      gate,
+      artifact,
+      ...(scope && scope.length > 0 ? { scope } : {}),
+      ...(skills && skills.length > 0 ? { skills } : {}),
+      ...(args.freshEyes === true ? { freshEyes: true } : {}),
+      ...(args.watch === true ? { watch: true } : {}),
+      ...(description ? { description } : {}),
+      seat: "lead",
+    });
+    if (!reply.ok) return toolResult(`${reply.code}: ${reply.message}`, true);
+    return toolResult(reply.summary);
+  }
+
+  if (name === "lead_spawn_agent") {
+    const tasks = Array.isArray(args.tasks)
+      ? args.tasks.map((t) => String(t).trim()).filter(Boolean)
+      : typeof args.task === "string" && args.task.trim() !== ""
+        ? [args.task.trim()]
+        : [];
+    if (tasks.length === 0) {
+      return toolResult("lead_spawn_agent requires `tasks` (non-empty array of task IDs).", true);
+    }
+    const provider =
+      typeof args.provider === "string" && args.provider.trim() !== ""
+        ? args.provider.trim()
+        : resolveDefaultWorkerLane(ctx.stateDir, ctx.projectSlug);
+
+    // If a live Paseo daemon socket exists alongside factory.mjs, launch the
+    // detached background Driver after verifying/allocating worktree or wait
+    // for spawn_dispatched. When no daemon socket is present (or when running
+    // in spool-only mode), allocate the Task worktree and submit the spawn
+    // request directly through the Spool.
+    const daemonSockExists = existsSync(join(ctx.home, "endpoint.sock"));
+    const factoryBinCandidate = join(dirname(new URL(import.meta.url).pathname), "factory.mjs");
+    if (daemonSockExists && existsSync(factoryBinCandidate)) {
+      const eventsBefore = readLedgerEventsList(ctx.stateDir).length;
+      const child = spawn(
+        process.execPath,
+        [
+          factoryBinCandidate,
+          "--home",
+          ctx.home,
+          "run",
+          ...tasks,
+          ...(provider ? ["--provider", provider] : []),
+        ],
+        {
+          cwd: ctx.projectRoot ?? ctx.workspace,
+          env: {
+            ...process.env,
+            PASEO_HOME: ctx.home,
+            PASEO_FACTORY_SEAT: "lead",
+            ...(ctx.correlationId ? { PASEO_FACTORY_CORRELATION: ctx.correlationId } : {}),
+          },
+          detached: true,
+          stdio: "ignore",
+        },
+      );
+      child.unref();
+
+      // Wait briefly (up to 4s) for spawn_dispatched / spawn_refused to record
+      const deadline = Date.now() + 4_000;
+      while (Date.now() < deadline) {
+        const eventsNow = readLedgerEventsList(ctx.stateDir).slice(eventsBefore);
+        const spawnEvents = eventsNow.filter(
+          (e) => (e.event === "spawn_dispatched" || e.event === "spawn_refused") && tasks.includes(e.task),
+        );
+        if (spawnEvents.length >= tasks.length) {
+          const refused = spawnEvents.find((e) => e.event === "spawn_refused");
+          if (refused) {
+            return toolResult(`spawn refused for ${refused.task}: ${refused.rule} — ${refused.reason}`, true);
+          }
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 75));
+      }
+      return toolResult(
+        `Driver launched in background for task(s): ${tasks.join(", ")} under ${provider}. End your turn now and wait for the completion report in your mailbox.`,
+      );
+    }
+
+    // Direct Spool + Task worktree path
+    const events = readLedgerEventsList(ctx.stateDir);
+    const summaries = [];
+    for (const task of tasks) {
+      let contract;
+      for (const evt of events) {
+        if (evt.event === "contract_set" && evt.task === task) contract = evt;
+      }
+      let worktree;
+      if (contract) {
+        const prep = allocateTaskWorktree(ctx.stateDir, contract, task);
+        if (!prep.ok) {
+          return toolResult(`Failed to prepare Task worktree for ${task}: ${prep.reason}`, true);
+        }
+        worktree = prep.worktree;
+      }
+      const reply = await roundTripSpool(ctx, {
+        id: randomId(),
+        kind: "spawn",
+        task,
+        provider,
+        arity: tasks.length,
+        ...(worktree ? { worktree } : {}),
+        seat: "lead",
+      });
+      if (!reply.ok) {
+        return toolResult(`${reply.code}: ${reply.message}`, true);
+      }
+      summaries.push(
+        `${reply.summary}${worktree ? ` (worktree: ${worktree})` : ""}`,
+      );
+    }
+    return toolResult(
+      `${summaries.join("\n")}\nWorking Agent spawn dispatched. End your turn now and wait for the Verdict notification.`,
+    );
+  }
+
+  if (name === "lead_accept_task") {
+    const task = typeof args.task === "string" ? args.task.trim() : "";
+    const attempt = Number(args.attempt);
+    if (task === "" || !Number.isInteger(attempt) || attempt < 1) {
+      return toolResult("lead_accept_task requires `task` (string) and `attempt` (positive integer).", true);
+    }
+    const reply = await roundTripSpool(ctx, {
+      id: randomId(),
+      kind: "accept",
+      task,
+      attempt,
+      by: "lead",
+      seat: "lead",
+    });
+    if (!reply.ok) return toolResult(`${reply.code}: ${reply.message}`, true);
+    return toolResult(reply.summary);
+  }
+
+  if (name === "lead_repoke_agent") {
+    const task = typeof args.task === "string" ? args.task.trim() : "";
+    if (task === "") return toolResult("lead_repoke_agent requires `task`.", true);
+    let targetAgent = typeof args.agent === "string" && args.agent.trim() !== "" ? args.agent.trim() : undefined;
+    if (!targetAgent) {
+      const records = readCorrelationsFile(ctx.stateDir);
+      for (let i = records.length - 1; i >= 0; i -= 1) {
+        if (records[i].role === "agent" && records[i].task === task && records[i].agentId) {
+          targetAgent = records[i].agentId;
+          break;
+        }
+      }
+    }
+    if (!targetAgent) {
+      const events = readLedgerEventsList(ctx.stateDir);
+      for (let i = events.length - 1; i >= 0; i -= 1) {
+        const evt = events[i];
+        if (evt.task === task && typeof evt.agent === "string" && evt.agent.trim() !== "") {
+          targetAgent = evt.agent.trim();
+          break;
+        }
+      }
+    }
+    if (!targetAgent) targetAgent = `agent-${task}`;
+    const reply = await roundTripSpool(ctx, {
+      id: randomId(),
+      kind: "repoke",
+      task,
+      agent: targetAgent,
+      seat: "lead",
+    });
+    if (!reply.ok) return toolResult(`${reply.code}: ${reply.message}`, true);
+    return toolResult(reply.summary);
+  }
+
+  if (name === "lead_needs_human") {
+    const task = typeof args.task === "string" ? args.task.trim() : "";
+    const reason = typeof args.reason === "string" ? args.reason.trim() : "";
+    const seqs = Array.isArray(args.evidenceSeqs) ? args.evidenceSeqs.map(Number) : [];
+    if (task === "" || reason === "" || seqs.length < 2 || !Number.isInteger(seqs[0]) || !Number.isInteger(seqs[1])) {
+      return toolResult(
+        "lead_needs_human requires `task`, `reason`, `evidenceSeqs` ([seq1, seq2]), and `summary`.",
+        true,
+      );
+    }
+    let evidence;
+    if (reason === "denied-again" || reason === "silent-after-repoke") {
+      evidence = { denial: seqs[0], repoke: seqs[1] };
+    } else if (reason === "attempt-ceiling") {
+      evidence = { attempt: seqs[0], gate: seqs[1] };
+    } else if (reason === "died-after-respawn") {
+      evidence = { spawn: seqs[0], respawn: seqs[1] };
+    } else {
+      return toolResult(`Invalid needs_human reason "${reason}".`, true);
+    }
+    const reply = await roundTripSpool(ctx, {
+      id: randomId(),
+      kind: "needs_human",
+      task,
+      reason,
+      evidence,
+      seat: "lead",
+    });
+    if (!reply.ok) return toolResult(`${reply.code}: ${reply.message}`, true);
+    return toolResult(`${reply.summary}${args.summary ? ` — ${args.summary}` : ""}`);
+  }
+
+  if (name === "lead_report_to_supervisor") {
+    const message = typeof args.message === "string" ? args.message.trim() : "";
+    if (message === "") return toolResult("lead_report_to_supervisor requires a non-empty `message`.", true);
+    const workspace =
+      typeof args.workspace === "string" && args.workspace.trim() !== ""
+        ? resolve(args.workspace.trim())
+        : ctx.projectRoot ?? ctx.workspace;
+    const reply = await roundTripSpool(ctx, {
+      id: randomId(),
+      kind: "supervisor_report",
+      ...(workspace ? { workspace } : ctx.projectSlug ? { project: ctx.projectSlug } : {}),
+      message,
+      seat: "lead",
+    });
+    if (!reply.ok) return toolResult(`${reply.code}: ${reply.message}`, true);
+    return toolResult(`${reply.summary}\nReport queued for Supervisor. End your turn immediately.`);
+  }
+
+  if (name === "agent_claim") {
+    const task = (typeof args.task === "string" && args.task.trim() !== "" ? args.task.trim() : ctx.task) ?? "";
+    if (task === "") {
+      return toolResult("agent_claim requires `task` (or a task-bound correlation token).", true);
+    }
+    let sha = typeof args.commit === "string" && args.commit.trim() !== "" ? args.commit.trim() : "";
+    if (sha === "") {
+      let worktreeCwd = process.cwd();
+      if (ctx.projectSlug) {
+        const candidate = join(ctx.stateDir, "projects", ctx.projectSlug, "worktrees", task);
+        if (existsSync(candidate)) worktreeCwd = candidate;
+      }
+      const headOut = spawnSync("git", ["rev-parse", "HEAD"], {
+        cwd: worktreeCwd,
+        encoding: "utf8",
+        timeout: GIT_TIMEOUT_MS,
+      });
+      if (headOut.status !== 0) {
+        return toolResult(`Could not resolve HEAD in ${worktreeCwd}: ${(headOut.stderr || "").trim()}`, true);
+      }
+      sha = headOut.stdout.trim();
+    }
+    const reply = await roundTripSpool(ctx, {
+      id: randomId(),
+      kind: "claim",
+      task,
+      sha,
+      ...(ctx.agentId ? { agent: ctx.agentId } : ctx.correlationId ? { agent: ctx.correlationId } : {}),
+    });
+    if (!reply.ok) return toolResult(`${reply.code}: ${reply.message}`, true);
+    const lines = [
+      `Claim outcome: ${reply.summary}`,
+      `Verdict: ${String(reply.verdict ?? "").toUpperCase()}`,
+      ...(reply.attempt !== undefined ? [`Attempt: ${reply.attempt}`] : []),
+      ...(reply.reportPath ? [`Report: ${reply.reportPath}`] : []),
+      ...(reply.note ? [`Note: ${reply.note}`] : []),
+    ];
+    return toolResult(lines.join("\n"), reply.verdict === "red");
+  }
+
+  if (name === "agent_escalate_blocker") {
+    const message = typeof args.message === "string" ? args.message.trim() : "";
+    if (message === "") return toolResult("agent_escalate_blocker requires a non-empty `message`.", true);
+    const workspace = ctx.projectRoot ?? ctx.workspace;
+    const prefix = ctx.task ? `[Blocker on task ${ctx.task}] ` : "[Agent Blocker] ";
+    const reply = await roundTripSpool(ctx, {
+      id: randomId(),
+      kind: "lead_dispatch",
+      ...(workspace ? { workspace } : ctx.projectSlug ? { project: ctx.projectSlug } : {}),
+      from: "peer",
+      message: `${prefix}${message}`,
+      seat: "agent",
+    });
+    if (!reply.ok) return toolResult(`${reply.code}: ${reply.message}`, true);
+    return toolResult(`Blocker escalated to Lead (${reply.mailId ?? "queued"}). End your turn and wait for Lead guidance.`);
+  }
+
+  return toolResult(`Unknown tool "${name}".`, true);
+}
+
+// ---- Stdio JSON-RPC 2.0 Framing (Newline-delimited & Content-Length) ----
+
+let responseFraming = "newline";
+let stdinBuffer = Buffer.alloc(0);
+let pendingOps = 0;
+let stdinEnded = false;
+
+function writeJsonRpcMessage(msg) {
+  const json = JSON.stringify(msg);
+  if (responseFraming === "content-length") {
+    const bytes = Buffer.from(json, "utf8");
+    process.stdout.write(`Content-Length: ${bytes.length}\r\n\r\n`);
+    process.stdout.write(bytes);
+  } else {
+    process.stdout.write(`${json}\n`);
+  }
+}
+
+async function handleRpcMessage(msg) {
+  if (typeof msg !== "object" || msg === null) return;
+  const { id, method, params } = msg;
+
+  // Notifications have no id
+  if (id === undefined || id === null) {
+    return;
+  }
+
+  try {
+    if (method === "initialize") {
+      const clientProtocol =
+        typeof params?.protocolVersion === "string" && params.protocolVersion.trim() !== ""
+          ? params.protocolVersion
+          : "2024-11-05";
+      writeJsonRpcMessage({
+        jsonrpc: "2.0",
+        id,
+        result: {
+          protocolVersion: clientProtocol,
+          capabilities: {
+            tools: {},
+          },
+          serverInfo: {
+            name: "paseo_factory",
+            version: "0.0.26",
+          },
+        },
+      });
+      return;
+    }
+
+    if (method === "ping") {
+      writeJsonRpcMessage({ jsonrpc: "2.0", id, result: {} });
+      return;
+    }
+
+    if (method === "tools/list") {
+      const ctx = resolveBridgeContext();
+      const names = getAllowedToolNames(ctx.role);
+      const tools = names.map((n) => TOOL_DEFINITIONS[n]).filter(Boolean);
+      writeJsonRpcMessage({
+        jsonrpc: "2.0",
+        id,
+        result: { tools },
+      });
+      return;
+    }
+
+    if (method === "tools/call") {
+      const toolName = typeof params?.name === "string" ? params.name : "";
+      const toolArgs = params?.arguments ?? {};
+      const result = await handleToolCall(toolName, toolArgs);
+      writeJsonRpcMessage({
+        jsonrpc: "2.0",
+        id,
+        result,
+      });
+      return;
+    }
+
+    writeJsonRpcMessage({
+      jsonrpc: "2.0",
+      id,
+      error: {
+        code: -32601,
+        message: `Method not found: ${String(method)}`,
+      },
+    });
+  } catch (err) {
+    writeJsonRpcMessage({
+      jsonrpc: "2.0",
+      id,
+      error: {
+        code: -32603,
+        message: err instanceof Error ? err.message : String(err),
+      },
+    });
+  }
+}
+
+function drainStdinBuffer() {
+  while (stdinBuffer.length > 0) {
+    const preview = stdinBuffer.subarray(0, Math.min(stdinBuffer.length, 64)).toString("utf8");
+    const trimmedPreview = preview.replace(/^[\r\n]+/, "");
+    if (trimmedPreview.length < preview.length) {
+      const trimBytes = Buffer.byteLength(preview.slice(0, preview.length - trimmedPreview.length), "utf8");
+      stdinBuffer = stdinBuffer.subarray(trimBytes);
+      if (stdinBuffer.length === 0) break;
+    }
+    const headStr = stdinBuffer.subarray(0, Math.min(stdinBuffer.length, 32)).toString("utf8");
+    if (/^Content-Length:/i.test(headStr)) {
+      responseFraming = "content-length";
+      const sepIndex = stdinBuffer.indexOf("\r\n\r\n");
+      const lfSepIndex = stdinBuffer.indexOf("\n\n");
+      let headerEnd = -1;
+      let sepLen = 4;
+      if (sepIndex !== -1 && (lfSepIndex === -1 || sepIndex < lfSepIndex)) {
+        headerEnd = sepIndex;
+        sepLen = 4;
+      } else if (lfSepIndex !== -1) {
+        headerEnd = lfSepIndex;
+        sepLen = 2;
+      }
+      if (headerEnd === -1) return;
+      const headerText = stdinBuffer.subarray(0, headerEnd).toString("utf8");
+      const m = /Content-Length:\s*(\d+)/i.exec(headerText);
+      if (!m) {
+        stdinBuffer = stdinBuffer.subarray(headerEnd + sepLen);
+        continue;
+      }
+      const contentLen = Number(m[1]);
+      const totalLen = headerEnd + sepLen + contentLen;
+      if (stdinBuffer.length < totalLen) return;
+      const bodyStr = stdinBuffer.subarray(headerEnd + sepLen, totalLen).toString("utf8");
+      stdinBuffer = stdinBuffer.subarray(totalLen);
+      let parsed;
+      try {
+        parsed = JSON.parse(bodyStr);
+      } catch {
+        continue;
+      }
+      dispatchMessage(parsed);
+    } else {
+      const nlIndex = stdinBuffer.indexOf("\n");
+      if (nlIndex === -1) return;
+      const line = stdinBuffer.subarray(0, nlIndex).toString("utf8").trim();
+      stdinBuffer = stdinBuffer.subarray(nlIndex + 1);
+      if (line === "") continue;
+      let parsed;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      dispatchMessage(parsed);
+    }
+  }
+}
+
+let rpcQueue = Promise.resolve();
+
+function dispatchMessage(parsed) {
+  pendingOps += 1;
+  rpcQueue = rpcQueue
+    .then(() => handleRpcMessage(parsed))
+    .catch(() => {})
+    .finally(() => {
+      pendingOps -= 1;
+      if (stdinEnded && pendingOps === 0) {
+        process.exit(0);
+      }
+    });
+}
+
+process.stdin.on("data", (chunk) => {
+  stdinBuffer = Buffer.concat([stdinBuffer, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)]);
+  drainStdinBuffer();
+});
+
+process.stdin.on("end", () => {
+  stdinEnded = true;
+  drainStdinBuffer();
+  if (pendingOps === 0) {
+    process.exit(0);
+  }
+});

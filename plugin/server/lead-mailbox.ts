@@ -762,7 +762,9 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       async (): Promise<{ ok: true; agentId: string; mailId: string } | { ok: false; code: string; error: string }> => {
         const ensured = await deps.ensureLead({ projectRoot: root });
         if (!ensured.ok) return ensured;
-        const queued = appendMailQueued(mailboxPath(slug), { from: request.from ?? "owner", kind: "directive", text: request.message });
+        const from = request.from ?? "owner";
+        const kind = from === "peer" ? "needs_human" : "directive";
+        const queued = appendMailQueued(mailboxPath(slug), { from, kind, text: request.message });
         return { ok: true, agentId: ensured.agentId, mailId: queued.mailId };
       },
     );
