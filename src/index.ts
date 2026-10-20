@@ -79,8 +79,35 @@ export {
 export type { ProjectIdentity, RoleContractOptions, RoleName, SeatBootstrapInput, SeatName } from "./roles-contract.ts";
 export { ensureFactorySkill, ensureFactorySkillSafe, factorySkillPath, renderFactorySkill } from "./skill.ts";
 export type { FactorySkillInput } from "./skill.ts";
-export { ackLeadMail, deliverLeadMail, enqueueLeadMail, foldLeadMailboxEvents, readLeadMailbox, recoverLeadMailbox, requeueLeadMail } from "./mailbox.ts";
-export type { LeadMailFrom, LeadMailKind, LeadMailboxEvent, LeadMailItem, LeadMailboxState } from "./mailbox.ts";
+export {
+  ackLeadMail,
+  ackMailDelivery,
+  deliverLeadMail,
+  enqueueLeadMail,
+  foldLeadMailboxEvents,
+  foldMailboxEvents,
+  markMailDelivered,
+  readLeadMailbox,
+  recoverLeadMailbox,
+  requeueLeadMail,
+  requeueMailDelivery,
+} from "./mailbox.ts";
+export type {
+  InFlightDelivery,
+  LeadMailFrom,
+  LeadMailItem,
+  LeadMailKind,
+  LeadMailMessage,
+  LeadMailboxEvent,
+  LeadMailboxState,
+  MailAckedEvent,
+  MailDeliveredEvent,
+  MailKind,
+  MailQueuedEvent,
+  MailRecipient,
+  MailRequeuedEvent,
+  MailSource,
+} from "./mailbox.ts";
 export { buildVaultPath, clearGhAuthCache, createDefaultVaultRunner, ensureLocalGitExcludeAndWorktreeInclude, ensureRemoteVaultRepo, hydrateVaultDirect, importVaultSecrets, loadVaultConfig, parseVaultManifest, probeGhAuth, pullVault, pushVault, readVaultStatus, reconcileVaultLedgers, resolveVaultApps, saveVaultConfig, sealVaultBuffer, syncVault, unsealVaultBuffer } from "./vault.ts";
 export type { HydrateVaultDirectOptions, ImportVaultSecretsInput, ImportVaultSecretsResult, PullVaultOptions, PushVaultOptions, ResolvedVaultApp, SyncVaultOptions, SyncVaultResult, VaultConfig, VaultEnvelope, VaultGhAuthStatus, VaultHydrationResult, VaultLedgerSource, VaultManifest, VaultManifestEntry, VaultPushResult, VaultRunner, VaultRunnerCall, VaultRuntimeEnv, VaultStatusView, VaultTransportOptions } from "./vault.ts";
 export {

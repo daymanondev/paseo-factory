@@ -160,6 +160,36 @@ export interface SpoolLeadDispatchRequest {
 }
 
 /**
+ * Seat-aware `/factory` entrypoint (v0.0.23, ADR 0015 §5): `factory supervisor
+ * dispatch` routes normal-chat / CLI directives into the Project's `Supervisor`
+ * mailbox (`to: "supervisor"`), and when called from inside `Supervisor`
+ * (`seat === "supervisor"`) transparently routes to `lead_dispatch` (`to: "lead"`).
+ */
+export interface SpoolSupervisorDispatchRequest {
+  id: string;
+  kind: "supervisor_dispatch";
+  project?: string;
+  workspace?: string;
+  message: string;
+  seat?: SpoolSeat;
+}
+
+/**
+ * Lead -> Supervisor reporting channel (v0.0.23, ADR 0015 §3): `factory
+ * supervisor report` queues a report (`to: "supervisor"`, `from: "lead"`,
+ * `kind: "report"`) in `<projectStateDir>/mailbox.jsonl` and pumps the
+ * Supervisor lane.
+ */
+export interface SpoolSupervisorReportRequest {
+  id: string;
+  kind: "supervisor_report";
+  project?: string;
+  workspace?: string;
+  message: string;
+  seat?: SpoolSeat;
+}
+
+/**
  * The Lead's one automatic Respawn per progress marker (v0.0.12, ADR 0008):
  * when an Agent dies (`Substrate death`), the driver asks the plugin — the
  * one writer — whether it may replace the dead Agent, and only creates the
@@ -272,6 +302,8 @@ export type SpoolRequest =
   | AskRequest
   | LeadRotateRequest
   | SpoolLeadDispatchRequest
+  | SpoolSupervisorDispatchRequest
+  | SpoolSupervisorReportRequest
   | SpawnRequest
   | RespawnRequest
   | MeterRequest
@@ -287,6 +319,12 @@ export type LeadRotateHandler = (request: LeadRotateRequest) => Promise<SpoolRep
 
 /** Dispatches a directive into a Project's Lead mailbox — the Lead-mailbox runtime's `dispatchLead` is the implementation (v0.0.20). */
 export type LeadDispatchHandler = (request: SpoolLeadDispatchRequest) => Promise<SpoolReply>;
+
+/** Dispatches a directive into a Project's Supervisor mailbox (or Lead when called by Supervisor) (v0.0.23, ADR 0015 §5). */
+export type SupervisorDispatchHandler = (request: SpoolSupervisorDispatchRequest) => Promise<SpoolReply>;
+
+/** Queues a Lead report into a Project's Supervisor mailbox (v0.0.23, ADR 0015 §3). */
+export type SupervisorReportHandler = (request: SpoolSupervisorReportRequest) => Promise<SpoolReply>;
 
 /**
  * Notifies a Project's Lead mailbox that a Peer's task reached a terminal
@@ -327,6 +365,7 @@ export type SpoolReply =
        */
       project?: string;
       leadAgentId?: string;
+      supervisorAgentId?: string;
       mailId?: string;
       rotationState?: string;
     }
@@ -455,6 +494,19 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       ...seatField,
     };
   }
+  if (req.kind === "supervisor_dispatch" || req.kind === "supervisor_report") {
+    if (typeof req.message !== "string" || req.message.trim() === "") return undefined;
+    if (req.project !== undefined && (typeof req.project !== "string" || req.project.trim() === "")) return undefined;
+    if (req.workspace !== undefined && (typeof req.workspace !== "string" || req.workspace.trim() === "")) return undefined;
+    return {
+      id: req.id,
+      kind: req.kind,
+      ...(req.project === undefined ? {} : { project: req.project }),
+      ...(req.workspace === undefined ? {} : { workspace: req.workspace }),
+      message: req.message,
+      ...seatField,
+    };
+  }
   if (req.kind === "retro") {
     // The Retro carries nothing but its kind (plus optional seat stamp) —
     // whole-ledger always. Any extra field makes it not-a-retro.
@@ -521,6 +573,8 @@ export async function handleSpoolRequest(
   leadRotateHandler?: LeadRotateHandler,
   leadDispatchHandler?: LeadDispatchHandler,
   peerMailHook?: PeerMailHook,
+  supervisorDispatchHandler?: SupervisorDispatchHandler,
+  supervisorReportHandler?: SupervisorReportHandler,
 ): Promise<SpoolReply> {
   try {
     // Hard Spool Command Authority by Seat (v0.0.23, ADR 0015 §1).
@@ -541,6 +595,8 @@ export async function handleSpoolRequest(
         request.kind === "respawn" ||
         request.kind === "accept" ||
         request.kind === "lead_dispatch" ||
+        request.kind === "supervisor_dispatch" ||
+        request.kind === "supervisor_report" ||
         request.kind === "lead_rotate" ||
         request.kind === "retro") &&
       request.seat === "agent"
@@ -638,6 +694,44 @@ export async function handleSpoolRequest(
         };
       }
       return await leadDispatchHandler(request);
+    }
+    if (request.kind === "supervisor_dispatch") {
+      if (supervisorDispatchHandler !== undefined) {
+        return await supervisorDispatchHandler(request);
+      }
+      if (request.seat === "supervisor" && leadDispatchHandler !== undefined) {
+        const leadReply = await leadDispatchHandler({
+          id: request.id,
+          kind: "lead_dispatch",
+          ...(request.project === undefined ? {} : { project: request.project }),
+          ...(request.workspace === undefined ? {} : { workspace: request.workspace }),
+          from: "supervisor",
+          message: request.message,
+          seat: "supervisor",
+        });
+        if (!leadReply.ok) return leadReply;
+        return {
+          ...leadReply,
+          summary: `directive dispatched to Lead (${leadReply.leadAgentId ?? "lead"}) — end your turn now and wait for Lead's report`,
+        };
+      }
+      return {
+        id: request.id,
+        ok: false,
+        code: "supervisor-dispatch-unavailable",
+        message: "this daemon's factory plugin does not dispatch Supervisor mail — update the plugin to v0.0.23+",
+      };
+    }
+    if (request.kind === "supervisor_report") {
+      if (supervisorReportHandler === undefined) {
+        return {
+          id: request.id,
+          ok: false,
+          code: "supervisor-report-unavailable",
+          message: "this daemon's factory plugin does not handle Supervisor reports — update the plugin to v0.0.23+",
+        };
+      }
+      return await supervisorReportHandler(request);
     }
     if (request.kind === "spawn") {
       // The driver's arrival (v0.0.5): one ledger line either way, then the
@@ -784,6 +878,10 @@ export interface SpoolOptions {
   leadRotate?: LeadRotateHandler;
   /** The Lead-dispatch handler (v0.0.20); without it `lead_dispatch` requests are refused. */
   leadDispatch?: LeadDispatchHandler;
+  /** The Supervisor-dispatch handler (v0.0.23); without it `supervisor_dispatch` requests are refused. */
+  supervisorDispatch?: SupervisorDispatchHandler;
+  /** The Supervisor-report handler (v0.0.23); without it `supervisor_report` requests are refused. */
+  supervisorReport?: SupervisorReportHandler;
   /** The peer-outcome notifier (v0.0.20) — verdicts and needs_human recordings land as Lead mail. */
   peerMail?: PeerMailHook;
 }
@@ -824,7 +922,20 @@ export function startSpool(stateDir: string, factory: Factory, options: SpoolOpt
         continue;
       }
       inFlight.add(id);
-      void handleRequestFile(id, requestPath, replyPath, join(processedDir, name), factory, log, options.ask, options.leadRotate, options.leadDispatch, options.peerMail)
+      void handleRequestFile(
+        id,
+        requestPath,
+        replyPath,
+        join(processedDir, name),
+        factory,
+        log,
+        options.ask,
+        options.leadRotate,
+        options.leadDispatch,
+        options.peerMail,
+        options.supervisorDispatch,
+        options.supervisorReport,
+      )
         .catch(() => {})
         .finally(() => inFlight.delete(id));
     }
@@ -850,6 +961,8 @@ async function handleRequestFile(
   leadRotateHandler?: LeadRotateHandler,
   leadDispatchHandler?: LeadDispatchHandler,
   peerMailHook?: PeerMailHook,
+  supervisorDispatchHandler?: SupervisorDispatchHandler,
+  supervisorReportHandler?: SupervisorReportHandler,
 ): Promise<void> {
   let reply: SpoolReply;
   let request: SpoolRequest | undefined;
@@ -862,7 +975,16 @@ async function handleRequestFile(
     reply = { id, ok: false, code: "bad-request", message: `request file ${requestPath} is not a valid spool request` };
     log(`request ${id}: REJECTED — malformed`);
   } else {
-    reply = await handleSpoolRequest(factory, request, askHandler, leadRotateHandler, leadDispatchHandler, peerMailHook);
+    reply = await handleSpoolRequest(
+      factory,
+      request,
+      askHandler,
+      leadRotateHandler,
+      leadDispatchHandler,
+      peerMailHook,
+      supervisorDispatchHandler,
+      supervisorReportHandler,
+    );
     // The v0.0.9 stamps make the two Owner acts attributable in the log too —
     // the same visibility the claim line always had.
     const stamp = request.kind === "contract" || request.kind === "accept" ? ` by ${request.submitter}` : "";

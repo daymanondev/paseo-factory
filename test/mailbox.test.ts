@@ -71,6 +71,8 @@ test("three enqueues batch into one delivery; one ack closes the batch", (t) => 
       toAgentId: "lead-7",
       items: state.inFlight?.items ?? [],
     },
+    supervisorQueued: [],
+    supervisorInFlight: null,
     ackedCount: 0,
   } satisfies LeadMailboxState);
   assert.deepEqual(state.inFlight?.items.map((m) => m.mailId), [a.mailId, b.mailId, c.mailId], "the batch carries all three");
@@ -78,7 +80,7 @@ test("three enqueues batch into one delivery; one ack closes the batch", (t) => 
 
   const ack = ackLeadMail(path, { deliveryId: delivery.deliveryId, mailIds: delivery.mailIds, byAgentId: "lead-7" });
   assert.equal(ack.type, "mail_acked");
-  assert.deepEqual(readLeadMailbox(path), { queued: [], inFlight: null, ackedCount: 3 });
+  assert.deepEqual(readLeadMailbox(path), { queued: [], inFlight: null, supervisorQueued: [], supervisorInFlight: null, ackedCount: 3 });
 
   const lines = readFileSync(path, "utf8").trimEnd().split("\n");
   assert.equal(lines.length, 5, "one line per event");
@@ -115,7 +117,7 @@ test("requeue on failure returns the batch to queued; a later delivery re-batche
   // A later delivery re-batches all three and the ack closes them.
   const redelivery = deliverLeadMail(path, { mailIds: state.queued.map((m) => m.mailId), toAgentId: "lead-7" });
   ackLeadMail(path, { deliveryId: redelivery.deliveryId, mailIds: redelivery.mailIds, byAgentId: "lead-7" });
-  assert.deepEqual(readLeadMailbox(path), { queued: [], inFlight: null, ackedCount: 3 });
+  assert.deepEqual(readLeadMailbox(path), { queued: [], inFlight: null, supervisorQueued: [], supervisorInFlight: null, ackedCount: 3 });
 });
 
 test("requeue on rotation: recoverLeadMailbox returns an un-acked in-flight batch with the caller's reason", (t) => {
@@ -268,10 +270,69 @@ test("a missing mailbox is an empty state; a nested path is created on first app
   const nested = join(dir, "deep", "project-state");
   const path = join(nested, "mailbox.jsonl");
 
-  assert.deepEqual(readLeadMailbox(path), { queued: [], inFlight: null, ackedCount: 0 });
+  assert.deepEqual(readLeadMailbox(path), { queued: [], inFlight: null, supervisorQueued: [], supervisorInFlight: null, ackedCount: 0 });
   assert.deepEqual(recoverLeadMailbox(path, "daemon-restart"), [], "nothing to recover on a fresh Project");
 
   const evt = enqueueLeadMail(path, { from: "system", kind: "directive", text: "kickoff" });
   assert.equal(evt.seq, 1);
   assert.equal(readFileSync(path, "utf8").trimEnd().split("\n").length, 1);
+});
+
+test("bidirectional mailbox: to=lead and to=supervisor queues, in-flight deliveries, acks, requeues, and startup recovery are independent (v0.0.23, ADR 0015 §3)", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const path = join(dir, "mailbox.jsonl");
+
+  const leadMsg = enqueueLeadMail(path, { to: "lead", from: "supervisor", kind: "directive", text: "build wave 1" });
+  const supDir = enqueueLeadMail(path, { to: "supervisor", from: "owner", kind: "directive", text: "ship game" });
+  const supRep = enqueueLeadMail(path, { to: "supervisor", from: "lead", kind: "report", text: "wave 1 green and landed" });
+
+  let state = readLeadMailbox(path);
+  assert.deepEqual(state.queued.map((m) => m.mailId), [leadMsg.mailId]);
+  assert.deepEqual(state.supervisorQueued.map((m) => m.mailId), [supDir.mailId, supRep.mailId]);
+  assert.equal(state.supervisorQueued[1]?.from, "lead");
+  assert.equal(state.supervisorQueued[1]?.kind, "report");
+  assert.equal(state.supervisorQueued[1]?.to, "supervisor");
+  assert.equal(state.inFlight, null);
+  assert.equal(state.supervisorInFlight, null);
+
+  // Delivering to Lead does not disturb Supervisor's queue, and both can be inFlight simultaneously.
+  const leadDel = deliverLeadMail(path, { to: "lead", mailIds: [leadMsg.mailId], toAgentId: "lead-1" });
+  const supDel = deliverLeadMail(path, { to: "supervisor", mailIds: [supDir.mailId, supRep.mailId], toAgentId: "sup-1" });
+
+  state = readLeadMailbox(path);
+  assert.deepEqual(state.queued, []);
+  assert.deepEqual(state.supervisorQueued, []);
+  assert.equal(state.inFlight?.deliveryId, leadDel.deliveryId);
+  assert.equal(state.inFlight?.toAgentId, "lead-1");
+  assert.equal(state.supervisorInFlight?.deliveryId, supDel.deliveryId);
+  assert.equal(state.supervisorInFlight?.toAgentId, "sup-1");
+  assert.equal(state.supervisorInFlight?.to, "supervisor");
+  assert.deepEqual(state.supervisorInFlight?.items.map((m) => m.mailId), [supDir.mailId, supRep.mailId]);
+
+  // Refuses a second concurrent delivery to Supervisor while supervisorInFlight is live.
+  const supExtra = enqueueLeadMail(path, { to: "supervisor", from: "peer", kind: "needs_human", task: "T-9", text: "blocked" });
+  assert.throws(
+    () => deliverLeadMail(path, { to: "supervisor", mailIds: [supExtra.mailId], toAgentId: "sup-1" }),
+    factoryErrorCode("mailbox-in-flight"),
+  );
+
+  // Startup recovery recovers BOTH inFlight (lead) and supervisorInFlight (supervisor).
+  const recovered = recoverLeadMailbox(path, "daemon-restart");
+  assert.equal(recovered.length, 2, "both lead and supervisor in-flight deliveries are requeued on restart");
+  state = readLeadMailbox(path);
+  assert.equal(state.inFlight, null);
+  assert.equal(state.supervisorInFlight, null);
+  assert.deepEqual(state.queued.map((m) => m.mailId), [leadMsg.mailId]);
+  assert.deepEqual(state.supervisorQueued.map((m) => m.mailId), [supDir.mailId, supRep.mailId, supExtra.mailId]);
+
+  // Re-deliver and ack Supervisor independently from Lead.
+  const supDel2 = deliverLeadMail(path, { to: "supervisor", mailIds: state.supervisorQueued.map((m) => m.mailId), toAgentId: "sup-1" });
+  ackLeadMail(path, { to: "supervisor", deliveryId: supDel2.deliveryId, mailIds: supDel2.mailIds, byAgentId: "sup-1" });
+
+  state = readLeadMailbox(path);
+  assert.deepEqual(state.supervisorQueued, []);
+  assert.equal(state.supervisorInFlight, null);
+  assert.equal(state.ackedCount, 3);
+  assert.deepEqual(state.queued.map((m) => m.mailId), [leadMsg.mailId], "Lead queue remains untouched");
 });

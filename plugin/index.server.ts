@@ -148,16 +148,17 @@ export default function contribute(server: PluginServerContext) {
     stateDir,
     daemon: () => paseoApi as never,
     ensureLead: (input) => surface.leadEnsure(input),
+    ensureSupervisor: (input) => surface.supervisorEnsure(input),
     retireLead: (input) => surface.leadRotate(input),
     onLog: log,
   });
   leadMail.startupRecovery();
-  // The turn boundary (v0.0.20, ADR 0013 §5): every `agent.turn_ended` hands
-  // the Lead-mailbox runtime the event — it settles the in-flight batch
-  // (`mail_acked` on completed, `mail_requeued` otherwise) and drives the 128k
-  // rotation state machine (lock → extraction → archive → successor → drain)
-  // for the Project whose registered Lead ended the turn. Non-Lead turns are
-  // ignored inside the runtime.
+  // The turn boundary (v0.0.20, ADR 0013 §5; v0.0.23, ADR 0015 §3): every
+  // `agent.turn_ended` hands the Lead-mailbox runtime the event — it settles
+  // the in-flight batch (`mail_acked` on completed, `mail_requeued` otherwise)
+  // for both registered Lead and registered Supervisor seats and drives the
+  // 128k rotation state machine for the Project whose registered Lead ended
+  // the turn.
   const offTurnEnded = server.on("agent.turn_ended", (event, context) => {
     capturePaseo(context);
     void leadMail.onLeadTurnEnded({ agentId: event.agent.id, outcome: event.outcome, timeline: event.timeline });
@@ -172,6 +173,8 @@ export default function contribute(server: PluginServerContext) {
         : { id: request.id, ok: false as const, code: reply.code, message: reply.error };
     },
     leadDispatch: (request) => leadMail.dispatchLead(request),
+    supervisorDispatch: (request) => leadMail.dispatchSupervisor(request),
+    supervisorReport: (request) => leadMail.reportSupervisor(request),
     peerMail: leadMail.notifyPeer,
   });
   log(`spool listening on ${spoolRootFor(stateDir)}/{requests,replies,processed}`);
