@@ -821,6 +821,7 @@ test("factory supervisor dispatch and factory supervisor report: usage refusals,
   assert.equal(supDispatched[0]?.kind, "supervisor_dispatch");
   assert.equal(supDispatched[0]?.workspace, workspace);
   assert.equal(supDispatched[0]?.message, "Build 2048");
+  assert.equal(supDispatched[0]?.submitter, "owner");
 
   // 2. Inside Supervisor (PASEO_FACTORY_SEAT=supervisor): routes to Lead.
   const fromSupDispatch = await run(
@@ -833,6 +834,7 @@ test("factory supervisor dispatch and factory supervisor report: usage refusals,
   assert.match(fromSupDispatch.stdout, /end your turn now and wait for Lead's report/);
   assert.equal(leadDispatched.length, 1);
   assert.equal(leadDispatched[0]?.seat, "supervisor");
+  assert.equal(leadDispatched[0]?.submitter, "agent-sup-1");
 
   // 3. Lead calling `factory supervisor report`: queues report for Supervisor.
   const leadReport = await run(
@@ -845,6 +847,7 @@ test("factory supervisor dispatch and factory supervisor report: usage refusals,
   assert.equal(supReported.length, 1);
   assert.equal(supReported[0]?.kind, "supervisor_report");
   assert.equal(supReported[0]?.seat, "lead");
+  assert.equal(supReported[0]?.submitter, "agent-lead-1");
   assert.equal(supReported[0]?.message, "Wave 1 accepted and landed");
 
   // 4. Working Agent calling `factory supervisor dispatch` or `factory supervisor report` is refused.

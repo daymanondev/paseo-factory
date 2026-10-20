@@ -104,6 +104,67 @@ function hasMergeOrCherryPickHead(realGit, globalFlags) {
   return existsSync(join(gitDir, "MERGE_HEAD")) || existsSync(join(gitDir, "CHERRY_PICK_HEAD"));
 }
 
+const COMMIT_LONG_VALUE_FLAGS = new Set([
+  "--message",
+  "--file",
+  "--reedit-message",
+  "--reuse-message",
+  "--fixup",
+  "--squash",
+  "--author",
+  "--date",
+  "--cleanup",
+  "--template",
+  "--trailer",
+  "--pathspec-from-file",
+]);
+
+const COMMIT_SHORT_VALUE_LETTERS = new Set(["m", "F", "c", "C", "t"]);
+
+function extractCommitPathspecs(args) {
+  const pathspecs = [];
+  let afterDoubleDash = false;
+  for (let i = 0; i < args.length; i++) {
+    const token = args[i];
+    if (afterDoubleDash) {
+      pathspecs.push(token);
+      continue;
+    }
+    if (token === "--") {
+      afterDoubleDash = true;
+      continue;
+    }
+    if (token === "--pathspec-from-file" || token.startsWith("--pathspec-from-file=")) {
+      pathspecs.push(token);
+      if (token === "--pathspec-from-file") i += 1;
+      continue;
+    }
+    if (COMMIT_LONG_VALUE_FLAGS.has(token)) {
+      i += 1;
+      continue;
+    }
+    if (token.startsWith("--")) {
+      continue;
+    }
+    if (token.startsWith("-") && token.length >= 2) {
+      const letters = token.slice(1);
+      let attachedValue = false;
+      for (let j = 0; j < letters.length - 1; j++) {
+        if (COMMIT_SHORT_VALUE_LETTERS.has(letters[j])) {
+          attachedValue = true;
+          break;
+        }
+      }
+      if (!attachedValue && COMMIT_SHORT_VALUE_LETTERS.has(letters[letters.length - 1])) {
+        i += 1;
+      }
+      continue;
+    }
+    pathspecs.push(token);
+  }
+  return pathspecs;
+}
+
 function checkLeadGitCommit(realGit, argvTokens) {
   const { globalFlags, sub, args } = parseGitSubcommand(argvTokens);
   if (sub !== "commit") return undefined;
@@ -131,6 +192,21 @@ function checkLeadGitCommit(realGit, argvTokens) {
       encoding: "utf8",
     });
     for (const line of (unstaged.stdout ?? "").split("\n").map((s) => s.trim()).filter(Boolean)) {
+      paths.add(line);
+    }
+  }
+
+  // Also check explicit positional pathspecs (e.g. `git commit src/index.ts -m ...` or `git commit -m ... -- src/index.ts`).
+  const pathspecs = extractCommitPathspecs(args);
+  for (const spec of pathspecs) {
+    paths.add(spec);
+  }
+  if (pathspecs.length > 0) {
+    const bySpec = spawnSync(realGit, [...globalFlags, "diff", "HEAD", "--name-only", "--", ...pathspecs], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+    });
+    for (const line of (bySpec.stdout ?? "").split("\n").map((s) => s.trim()).filter(Boolean)) {
       paths.add(line);
     }
   }

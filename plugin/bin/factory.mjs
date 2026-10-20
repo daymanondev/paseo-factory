@@ -389,7 +389,11 @@ function waitSeconds(parsed, defaultSecs = DEFAULT_WAIT_SECS) {
 }
 
 async function roundTrip(request, waitSecs) {
-  const payload = stampedSeat === undefined || request.seat !== undefined ? request : { ...request, seat: stampedSeat };
+  const payload = {
+    ...request,
+    ...(request.submitter === undefined ? { submitter } : {}),
+    ...(stampedSeat === undefined || request.seat !== undefined ? {} : { seat: stampedSeat }),
+  };
   submit(spoolRoot, payload);
   const reply = await awaitReply(spoolRoot, payload.id, waitSecs * 1000);
   if (reply === null) {

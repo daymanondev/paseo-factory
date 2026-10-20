@@ -1,12 +1,12 @@
 import { test } from "node:test";
 import type { TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createFactory } from "../plugin/server/core/factory.ts";
 import { resolveProject } from "../plugin/server/core/project.ts";
 import { projectStateDir, readLeadMailbox } from "../src/index.ts";
-import { writeProjectRegistration } from "../plugin/server/projects.ts";
+import { ensureProjectRegistered, readProjectRegistration, writeProjectRegistration } from "../plugin/server/projects.ts";
 import { createSurfaceHandlers } from "../plugin/server/surface-rpc.ts";
 import type { SurfaceDaemonApi } from "../plugin/server/surface-rpc.ts";
 import { handleSpoolRequest, parseSpoolRequest, spoolRootFor, startSpool } from "../plugin/server/spool.ts";
@@ -378,3 +378,56 @@ test("needs_human automatically notifies both Lead (to=lead) and Supervisor (to=
   assert.equal(fake.sent.some((s) => s.agentId === leadEnsured.agentId && s.text.includes("T-NH")), true);
   assert.equal(fake.sent.some((s) => s.agentId === supEnsured.agentId && s.text.includes("T-NH")), true);
 });
+
+test("needs_human before project.json exists registers project.json via ensureProjectRegistered, ensures Supervisor, and delivers to=supervisor (v0.0.23, T-07)", async (t) => {
+  const { stateDir, slug, projectRoot, factory, fake } = makeSpooledRuntime(t);
+  const spoolRoot = spoolRootFor(stateDir);
+  rmSync(join(projectStateDir(stateDir, slug), "project.json"), { force: true });
+
+  assert.equal(readProjectRegistration(stateDir, slug), undefined, "project.json does not exist yet");
+
+  factory.setContract({ task: "T-NH-FRESH", workspace: projectRoot, gate: "true", artifact: "README.md" });
+  const denialSeq = factory.ledger.append({
+    event: "permit_denied",
+    task: "T-NH-FRESH",
+    agent: "ag-worker",
+    name: "Bash",
+    kind: "tool",
+    command: "git reset --hard",
+    rule: "policy:S1-git-vocabulary",
+    reason: "caught",
+  }).seq;
+  dropRequest(spoolRoot, { id: "rp-nh-fresh", kind: "repoke", task: "T-NH-FRESH", agent: "ag-worker" });
+  await until(() => {
+    assert.equal(readReply(spoolRoot, "rp-nh-fresh").ok, true);
+  });
+  const repokeSeq = factory.ledger.events.find((e) => e.event === "repoke_dispatched")?.seq ?? 0;
+
+  dropRequest(spoolRoot, {
+    id: "nh-fresh",
+    kind: "needs_human",
+    task: "T-NH-FRESH",
+    reason: "denied-again",
+    evidence: { denial: denialSeq, repoke: repokeSeq },
+  });
+  await until(() => {
+    assert.equal(readReply(spoolRoot, "nh-fresh").ok, true);
+  });
+
+  const resolved = resolveProject(projectRoot);
+  assert.ok(resolved.ok);
+  const reg = readProjectRegistration(stateDir, slug);
+  assert.equal(reg?.root, resolved.root, "project.json was registered with root");
+  assert.ok(reg?.supervisor !== undefined, "Supervisor was ensured on demand");
+  assert.equal(
+    fake.sent.some((s) => s.agentId === reg?.supervisor && s.text.includes("T-NH-FRESH")),
+    true,
+    "Supervisor received the needs_human delivery even when project.json was not previously written",
+  );
+
+  // Direct unit check of ensureProjectRegistered idempotence
+  const ensuredAgain = ensureProjectRegistered(stateDir, projectRoot);
+  assert.equal(ensuredAgain.ok, true);
+  assert.equal(readProjectRegistration(stateDir, slug)?.supervisor, reg?.supervisor, "ensureProjectRegistered preserves existing seat fields");
+});
+

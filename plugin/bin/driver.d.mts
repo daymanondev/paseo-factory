@@ -66,6 +66,7 @@ export declare function createTaskAgent(
     cwd: string;
     brief: string;
     parent?: string;
+    parentAgentId?: string;
     leadAgentId?: string;
     workspaceId?: string;
     projectSlug?: string;

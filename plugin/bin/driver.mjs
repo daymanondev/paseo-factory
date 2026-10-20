@@ -487,7 +487,7 @@ async function reconnect(rpc, log) {
  * baked from this process's environment, and the contract's description
  * (when set) riding ahead of it as the assignment.
  */
-export async function createTaskAgent(rpc, { task, idempotencyKey, provider, model, thinking, cwd, brief, parent, leadAgentId, workspaceId, projectSlug, project }) {
+export async function createTaskAgent(rpc, { task, idempotencyKey, provider, model, thinking, cwd, brief, parent, parentAgentId, leadAgentId, workspaceId, projectSlug, project }) {
   const config = {
     provider,
     cwd,
@@ -495,7 +495,7 @@ export async function createTaskAgent(rpc, { task, idempotencyKey, provider, mod
     ...(model === undefined ? {} : { model }),
     ...(thinking === undefined ? {} : { thinkingOptionId: thinking }),
   };
-  const resolvedParent = parent ?? leadAgentId;
+  const resolvedParent = parent ?? parentAgentId ?? leadAgentId;
   const resolvedProject = projectSlug ?? project;
   const labels = {
     seat: "agent",
@@ -704,11 +704,21 @@ export function verdictOfThisRun(events, task) {
  * a refusal, a silent plugin or an unaccepted send is logged and the watch
  * continues on the ledger; the spend stands as the ledger wrote it.
  */
+function currentDriverSeat() {
+  const raw = typeof process.env.PASEO_FACTORY_SEAT === "string" ? process.env.PASEO_FACTORY_SEAT.trim() : "";
+  return raw === "supervisor" || raw === "lead" || raw === "agent" ? raw : undefined;
+}
+
+function stampDriverRequest(request) {
+  const seat = request.seat ?? currentDriverSeat();
+  return seat === undefined || request.seat !== undefined ? request : { ...request, seat };
+}
+
 async function spendRepoke(rpc, spoolRoot, entry, denial, log) {
   // One ask per process even when the plugin never answers — the request
   // stays in the spool and may still be processed; the slice is the truth.
   entry.repokeSubmitted = true;
-  const request = { id: randomId(), kind: "repoke", task: entry.task, agent: entry.agentId };
+  const request = stampDriverRequest({ id: randomId(), kind: "repoke", task: entry.task, agent: entry.agentId });
   submit(spoolRoot, request);
   const reply = await awaitReply(spoolRoot, request.id, LEAD_WAIT_MS);
   if (reply === null) {
@@ -745,7 +755,7 @@ async function spendRepoke(rpc, spoolRoot, entry, denial, log) {
  * Returns the fate to commit; the caller owns the commit.
  */
 async function endNeedsHuman(spoolRoot, task, signal, log) {
-  const request = { id: randomId(), kind: "needs_human", task, reason: signal.reason, evidence: signal.evidence };
+  const request = stampDriverRequest({ id: randomId(), kind: "needs_human", task, reason: signal.reason, evidence: signal.evidence });
   submit(spoolRoot, request);
   const reply = await awaitReply(spoolRoot, request.id, LEAD_WAIT_MS);
   if (reply === null) {
@@ -920,7 +930,7 @@ export async function observeTasks(
 
     if (spentRespawn === undefined && lastSpawn !== undefined && !hasGreen && maxAttempt < MAX_ATTEMPTS) {
       const diedAgentId = entry.agentId;
-      const request = { id: randomId(), kind: "respawn", task: entry.task, provider, died_agent: diedAgentId };
+      const request = stampDriverRequest({ id: randomId(), kind: "respawn", task: entry.task, provider, died_agent: diedAgentId });
       submit(spoolRoot, request);
       const reply = await awaitReply(spoolRoot, request.id, LEAD_WAIT_MS);
       if (reply === null) {
@@ -1229,14 +1239,14 @@ const METER_WAIT_MS = 15_000;
  * neither turns a green run red — the meter records, it never judges.
  */
 async function submitMeter(spoolRoot, entry, provider, log) {
-  const request = {
+  const request = stampDriverRequest({
     id: randomId(),
     kind: "meter",
     task: entry.task,
     provider,
     usage: entry.usage ?? {},
     agent: entry.agentId,
-  };
+  });
   submit(spoolRoot, request);
   const reply = await awaitReply(spoolRoot, request.id, METER_WAIT_MS);
   if (reply === null) {
@@ -1334,14 +1344,14 @@ export async function runDriver({ home, stateDir, spoolRoot, tasks, provider, wa
     // The spool owns the record: one spawn request per task, one ledger line
     // either way. Unknown tasks ride this path too — the plugin's refusal is
     // the recorded fact, not a local complaint.
-    const request = {
+    const request = stampDriverRequest({
       id: randomId(),
       kind: "spawn",
       task,
       provider,
       arity: tasks.length,
       ...(prep?.worktree === undefined ? {} : { worktree: prep.worktree }),
-    };
+    });
     submit(spoolRoot, request);
     const reply = await awaitReply(spoolRoot, request.id, waitSecs * 1000);
     if (reply === null) {

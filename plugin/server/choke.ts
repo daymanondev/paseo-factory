@@ -83,10 +83,10 @@ export const PINNED_MODE_ID = "default";
 const WORKTREE_PATH_PATTERN = /\/projects\/[^/]+\/worktrees\/[^/]+(?:\/|$)/;
 
 /**
- * Whether `cwd` belongs to a contracted task worker (as opposed to `<project-root>`
+ * Whether `cwd` belongs to a contracted task Agent (as opposed to `<project-root>`
  * when a task executes inside a managed Task worktree or when a Seat is seated there).
  */
-export function isContractedWorkerCwd(factory: Factory, cwd: string | undefined): boolean {
+export function isContractedAgentCwd(factory: Factory, cwd: string | undefined): boolean {
   if (typeof cwd !== "string" || cwd === "") return false;
   let contract: ContractSet | undefined;
   try {
@@ -107,12 +107,14 @@ export function isContractedWorkerCwd(factory: Factory, cwd: string | undefined)
     return false;
   }
   for (const reg of listProjectRegistrations(factory.stateDir)) {
-    if ((reg.supervisor !== undefined || reg.lead !== undefined) && (cwd === reg.root || cwd.startsWith(`${reg.root}/`))) {
+    if ((reg.supervisor !== undefined || reg.lead !== undefined) && cwd === reg.root) {
       return false;
     }
   }
   return true;
 }
+
+export const isContractedWorkerCwd = isContractedAgentCwd;
 
 export interface ChokeOptions {
   factory: Factory;
@@ -257,7 +259,7 @@ export function createChoke(options: ChokeOptions): Choke {
         return;
       }
 
-      if (!isContractedWorkerCwd(factory, agent.cwd)) return;
+      if (!isContractedAgentCwd(factory, agent.cwd)) return;
       let contract;
       try {
         contract = factory.liveContractFor(agent.cwd);
@@ -341,7 +343,7 @@ export function createChoke(options: ChokeOptions): Choke {
       if (config.title === SEAT_TITLES.supervisor || config.title === SEAT_TITLES.lead) return undefined;
       const providerId = config.provider.split("/")[0]?.trim().toLowerCase() ?? "";
       if (providerId !== "claude") return undefined;
-      if (!isContractedWorkerCwd(factory, config.cwd) || config.modeId === PINNED_MODE_ID) return undefined;
+      if (!isContractedAgentCwd(factory, config.cwd) || config.modeId === PINNED_MODE_ID) return undefined;
       return { ...config, modeId: PINNED_MODE_ID };
     },
   };

@@ -26,7 +26,7 @@ import { usageIsValid } from "./core/ledger.ts";
 import { needsHumanEvidenceIsValid, NEEDS_HUMAN_REASONS } from "./core/events.ts";
 import type { Factory } from "./core/factory.ts";
 import type { LedgerEvent, MeterUsage, NeedsHumanEvidence, NeedsHumanReason, Verdict } from "./core/events.ts";
-import { readProjectRegistration, resolveProject, writeProjectRegistration } from "./core/project.ts";
+import { listProjectRegistrations, readProjectRegistration, resolveProject, writeProjectRegistration } from "./core/project.ts";
 import { acceptanceSummary, archiveAcceptedTaskWorkspace } from "./surface-rpc.ts";
 import type { SurfaceDaemonApi } from "./surface-rpc.ts";
 
@@ -119,6 +119,7 @@ export interface SpawnRequest {
    * through it. Optional: the legacy shared-checkout path sends none.
    */
   worktree?: string;
+  submitter?: string;
   /** Caller seat stamped from `PASEO_FACTORY_SEAT` when present (v0.0.23, ADR 0015 §1). */
   seat?: SpoolSeat;
 }
@@ -136,6 +137,7 @@ export interface LeadRotateRequest {
   kind: "lead_rotate";
   /** Any directory inside the Project's repository (resolveProject names the slug). */
   projectRoot: string;
+  submitter?: string;
   /** Caller seat stamped from `PASEO_FACTORY_SEAT` when present (v0.0.23, ADR 0015 §1). */
   seat?: SpoolSeat;
 }
@@ -157,6 +159,7 @@ export interface SpoolLeadDispatchRequest {
   workspace?: string;
   from?: "supervisor" | "owner";
   message: string;
+  submitter?: string;
   /** Caller seat stamped from `PASEO_FACTORY_SEAT` when present (v0.0.23, ADR 0015 §1). */
   seat?: SpoolSeat;
 }
@@ -173,6 +176,7 @@ export interface SpoolSupervisorDispatchRequest {
   project?: string;
   workspace?: string;
   message: string;
+  submitter?: string;
   seat?: SpoolSeat;
 }
 
@@ -188,6 +192,7 @@ export interface SpoolSupervisorReportRequest {
   project?: string;
   workspace?: string;
   message: string;
+  submitter?: string;
   seat?: SpoolSeat;
 }
 
@@ -204,6 +209,7 @@ export interface RespawnRequest {
   task: string;
   provider: string;
   died_agent: string;
+  submitter?: string;
   /** Caller seat stamped from `PASEO_FACTORY_SEAT` when present (v0.0.23, ADR 0015 §1). */
   seat?: SpoolSeat;
 }
@@ -219,6 +225,7 @@ export interface RespawnRequest {
 export interface RetroRequest {
   id: string;
   kind: "retro";
+  submitter?: string;
   /** Caller seat stamped from `PASEO_FACTORY_SEAT` when present (v0.0.23, ADR 0015 §1). */
   seat?: SpoolSeat;
 }
@@ -242,6 +249,7 @@ export interface MeterRequest {
   usage: MeterUsage;
   /** The metered agent's id, when the driver knows it. */
   agent?: string;
+  submitter?: string;
   seat?: SpoolSeat;
 }
 
@@ -260,6 +268,7 @@ export interface RepokeRequest {
   task: string;
   /** The stalled agent the fixed re-poke text goes to. */
   agent: string;
+  submitter?: string;
   seat?: SpoolSeat;
 }
 
@@ -276,6 +285,7 @@ export interface NeedsHumanRequest {
   task: string;
   reason: NeedsHumanReason;
   evidence: NeedsHumanEvidence;
+  submitter?: string;
   seat?: SpoolSeat;
 }
 
@@ -294,6 +304,7 @@ export interface AskRequest {
   cwd?: string;
   agent?: string;
   name?: string;
+  submitter?: string;
   seat?: SpoolSeat;
 }
 
@@ -387,6 +398,12 @@ function parseOptionalSeat(value: unknown): { ok: true; seat?: SpoolSeat } | { o
   return { ok: false };
 }
 
+function parseOptionalSubmitter(value: unknown): { ok: true; submitter?: string } | { ok: false } {
+  if (value === undefined) return { ok: true };
+  if (typeof value === "string" && value.trim() !== "") return { ok: true, submitter: value };
+  return { ok: false };
+}
+
 /**
  * Validates one decoded request body. Anything that does not match a kind's
  * exact shape is rejected — the spool never guesses what a CLI meant.
@@ -398,6 +415,9 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
   const seatParsed = parseOptionalSeat(req.seat);
   if (!seatParsed.ok) return undefined;
   const seatField = seatParsed.seat === undefined ? {} : { seat: seatParsed.seat };
+  const submitterParsed = parseOptionalSubmitter(req.submitter);
+  if (!submitterParsed.ok) return undefined;
+  const submitterField = submitterParsed.submitter === undefined ? {} : { submitter: submitterParsed.submitter };
   if (req.kind === "contract") {
     if (typeof req.task !== "string" || typeof req.workspace !== "string" || typeof req.gate !== "string" || typeof req.artifact !== "string") {
       return undefined;
@@ -461,6 +481,7 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       provider: req.provider,
       arity: req.arity,
       ...(req.worktree === undefined ? {} : { worktree: req.worktree }),
+      ...submitterField,
       ...seatField,
     };
   }
@@ -474,11 +495,11 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     ) {
       return undefined;
     }
-    return { id: req.id, kind: "respawn", task: req.task, provider: req.provider, died_agent: req.died_agent, ...seatField };
+    return { id: req.id, kind: "respawn", task: req.task, provider: req.provider, died_agent: req.died_agent, ...submitterField, ...seatField };
   }
   if (req.kind === "lead_rotate") {
     if (typeof req.projectRoot !== "string" || req.projectRoot.trim() === "") return undefined;
-    return { id: req.id, kind: "lead_rotate", projectRoot: req.projectRoot, ...seatField };
+    return { id: req.id, kind: "lead_rotate", projectRoot: req.projectRoot, ...submitterField, ...seatField };
   }
   if (req.kind === "lead_dispatch") {
     // The v0.0.20 dispatch: the message is the payload (never blank); the
@@ -496,6 +517,7 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       ...(req.workspace === undefined ? {} : { workspace: req.workspace }),
       ...(req.from === undefined ? {} : { from: req.from }),
       message: req.message,
+      ...submitterField,
       ...seatField,
     };
   }
@@ -509,15 +531,16 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       ...(req.project === undefined ? {} : { project: req.project }),
       ...(req.workspace === undefined ? {} : { workspace: req.workspace }),
       message: req.message,
+      ...submitterField,
       ...seatField,
     };
   }
   if (req.kind === "retro") {
-    // The Retro carries nothing but its kind (plus optional seat stamp) —
+    // The Retro carries nothing but its kind (plus optional submitter and seat stamps) —
     // whole-ledger always. Any extra field makes it not-a-retro.
-    const keys = Object.keys(req).filter((key) => key !== "id" && key !== "kind" && key !== "seat");
+    const keys = Object.keys(req).filter((key) => key !== "id" && key !== "kind" && key !== "seat" && key !== "submitter");
     if (keys.length > 0) return undefined;
-    return { id: req.id, kind: "retro", ...seatField };
+    return { id: req.id, kind: "retro", ...submitterField, ...seatField };
   }
   if (req.kind === "meter") {
     if (typeof req.task !== "string" || typeof req.provider !== "string" || req.provider.trim() === "") return undefined;
@@ -533,18 +556,20 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       provider: req.provider,
       usage,
       ...(req.agent === undefined ? {} : { agent: req.agent }),
+      ...submitterField,
+      ...seatField,
     };
   }
   if (req.kind === "repoke") {
     if (typeof req.task !== "string" || typeof req.agent !== "string" || req.agent.trim() === "") return undefined;
-    return { id: req.id, kind: "repoke", task: req.task, agent: req.agent };
+    return { id: req.id, kind: "repoke", task: req.task, agent: req.agent, ...submitterField, ...seatField };
   }
   if (req.kind === "needs_human") {
     if (typeof req.task !== "string") return undefined;
     if (typeof req.reason !== "string" || !(NEEDS_HUMAN_REASONS as readonly string[]).includes(req.reason)) return undefined;
     const reason = req.reason as NeedsHumanReason;
     if (!needsHumanEvidenceIsValid(req.evidence, reason)) return undefined;
-    return { id: req.id, kind: "needs_human", task: req.task, reason, evidence: req.evidence };
+    return { id: req.id, kind: "needs_human", task: req.task, reason, evidence: req.evidence, ...submitterField, ...seatField };
   }
   if (req.kind === "ask") {
     if (typeof req.task !== "string" || typeof req.command !== "string" || req.command.trim() === "") return undefined;
@@ -559,6 +584,8 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       ...(req.cwd === undefined ? {} : { cwd: req.cwd as string }),
       ...(req.agent === undefined ? {} : { agent: req.agent as string }),
       ...(req.name === undefined ? {} : { name: req.name as string }),
+      ...submitterField,
+      ...seatField,
     };
   }
   return undefined;
@@ -568,7 +595,35 @@ function resolveDaemonArg(daemon?: SurfaceDaemonApi | (() => SurfaceDaemonApi | 
   return typeof daemon === "function" ? daemon() : daemon;
 }
 
-function lastWorkerAgentForTask(factory: Factory, task: string): string | undefined {
+async function resolveEffectiveSeat(
+  factory: Factory,
+  daemon: SurfaceDaemonApi | undefined,
+  request: SpoolRequest,
+): Promise<SpoolSeat | undefined> {
+  const submitter =
+    "submitter" in request && typeof request.submitter === "string" ? request.submitter.trim() : "";
+  if (submitter !== "" && submitter !== "owner") {
+    if (daemon?.agents?.list !== undefined) {
+      try {
+        const page = await daemon.agents.list({ filter: { includeArchived: false } });
+        const matched = page.entries.find((e) => e.agent.id === submitter && e.agent.archivedAt === null)?.agent;
+        const liveSeat = matched?.labels?.seat;
+        if (liveSeat === "supervisor" || liveSeat === "lead" || liveSeat === "agent") {
+          return liveSeat;
+        }
+      } catch {
+        // best-effort live daemon seat corroboration
+      }
+    }
+    for (const reg of listProjectRegistrations(factory.stateDir)) {
+      if (reg.supervisor === submitter) return "supervisor";
+      if (reg.lead === submitter) return "lead";
+    }
+  }
+  return request.seat;
+}
+
+function lastTaskAgentForTask(factory: Factory, task: string): string | undefined {
   let agentId: string | undefined;
   for (const evt of factory.ledger.events) {
     if ("task" in evt && evt.task === task) {
@@ -580,7 +635,7 @@ function lastWorkerAgentForTask(factory: Factory, task: string): string | undefi
   return agentId;
 }
 
-async function archiveWorkerAgentBestEffort(daemon: SurfaceDaemonApi | undefined, agentId: string | undefined): Promise<void> {
+async function archiveTaskAgentBestEffort(daemon: SurfaceDaemonApi | undefined, agentId: string | undefined): Promise<void> {
   if (daemon === undefined || typeof agentId !== "string" || agentId === "") return;
   try {
     await daemon.agents.ref(agentId).archive();
@@ -682,10 +737,11 @@ export async function handleSpoolRequest(
 ): Promise<SpoolReply> {
   const resolvedDaemon = resolveDaemonArg(daemon);
   try {
+    const effectiveSeat = await resolveEffectiveSeat(factory, resolvedDaemon, request);
     // Hard Spool Command Authority by Seat (v0.0.23, ADR 0015 §1).
     if (
       (request.kind === "contract" || request.kind === "spawn" || request.kind === "respawn") &&
-      request.seat === "supervisor"
+      effectiveSeat === "supervisor"
     ) {
       return {
         id: request.id,
@@ -698,13 +754,16 @@ export async function handleSpoolRequest(
       (request.kind === "contract" ||
         request.kind === "spawn" ||
         request.kind === "respawn" ||
+        request.kind === "repoke" ||
+        request.kind === "needs_human" ||
+        request.kind === "meter" ||
         request.kind === "accept" ||
         request.kind === "lead_dispatch" ||
         request.kind === "supervisor_dispatch" ||
         request.kind === "supervisor_report" ||
         request.kind === "lead_rotate" ||
         request.kind === "retro") &&
-      request.seat === "agent"
+      effectiveSeat === "agent"
     ) {
       return {
         id: request.id,
@@ -801,10 +860,11 @@ export async function handleSpoolRequest(
       return await leadDispatchHandler(request);
     }
     if (request.kind === "supervisor_dispatch") {
+      const normalizedRequest = effectiveSeat === undefined ? request : { ...request, seat: effectiveSeat };
       if (supervisorDispatchHandler !== undefined) {
-        return await supervisorDispatchHandler(request);
+        return await supervisorDispatchHandler(normalizedRequest);
       }
-      if (request.seat === "supervisor" && leadDispatchHandler !== undefined) {
+      if (effectiveSeat === "supervisor" && leadDispatchHandler !== undefined) {
         const leadReply = await leadDispatchHandler({
           id: request.id,
           kind: "lead_dispatch",
@@ -812,6 +872,7 @@ export async function handleSpoolRequest(
           ...(request.workspace === undefined ? {} : { workspace: request.workspace }),
           from: "supervisor",
           message: request.message,
+          ...(request.submitter === undefined ? {} : { submitter: request.submitter }),
           seat: "supervisor",
         });
         if (!leadReply.ok) return leadReply;
@@ -836,7 +897,7 @@ export async function handleSpoolRequest(
           message: "this daemon's factory plugin does not handle Supervisor reports — update the plugin to v0.0.23+",
         };
       }
-      return await supervisorReportHandler(request);
+      return await supervisorReportHandler(effectiveSeat === undefined ? request : { ...request, seat: effectiveSeat });
     }
     if (request.kind === "spawn") {
       // The driver's arrival (v0.0.5): one ledger line either way, then the
@@ -873,7 +934,7 @@ export async function handleSpoolRequest(
       if (decision.outcome === "refused") {
         return { id: request.id, ok: false, code: decision.code, message: decision.event.reason, event: decision.event };
       }
-      await archiveWorkerAgentBestEffort(resolvedDaemon, request.died_agent);
+      await archiveTaskAgentBestEffort(resolvedDaemon, request.died_agent);
       const spawnMeta = await resolveSpawnWorkspaceAndParent(factory, resolvedDaemon, request.task);
       return {
         id: request.id,
@@ -894,7 +955,7 @@ export async function handleSpoolRequest(
         usage: request.usage,
         ...(request.agent === undefined ? {} : { agent: request.agent }),
       });
-      await archiveWorkerAgentBestEffort(resolvedDaemon, request.agent ?? lastWorkerAgentForTask(factory, request.task));
+      await archiveTaskAgentBestEffort(resolvedDaemon, request.agent ?? lastTaskAgentForTask(factory, request.task));
       const dollars = event.usage.totalCostUsd;
       const cost = dollars === undefined ? "no dollars reported (recorded as absent)" : `$${dollars.toFixed(2)}`;
       return { id: request.id, ok: true, summary: `meter for ${request.task} under ${request.provider}: ${cost}` };
@@ -918,7 +979,7 @@ export async function handleSpoolRequest(
       // evidence pair attached. The meter's law — a refused submission throws,
       // no line, and the reply carries the code so the driver can report it.
       const event = factory.needsHuman({ task: request.task, reason: request.reason, evidence: request.evidence });
-      await archiveWorkerAgentBestEffort(resolvedDaemon, lastWorkerAgentForTask(factory, request.task));
+      await archiveTaskAgentBestEffort(resolvedDaemon, lastTaskAgentForTask(factory, request.task));
       const detail =
         "denial" in event.evidence
           ? `denial seq ${event.evidence.denial}, repoke seq ${event.evidence.repoke}`

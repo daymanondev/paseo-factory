@@ -50,7 +50,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Factory } from "./core/factory.ts";
 import type { LedgerEvent } from "./core/events.ts";
-import { listProjectRegistrations, projectStateDir, readProjectRegistration, resolveProject, writeProjectRegistration } from "./core/project.ts";
+import { ensureProjectRegistered, listProjectRegistrations, projectStateDir, readProjectRegistration, resolveProject, writeProjectRegistration } from "./core/project.ts";
 import type { LeadRotationState, ProjectRegistration } from "./core/project.ts";
 import { taskWorktreeBranch, taskWorktreePath } from "./core/workspace.ts";
 import {
@@ -810,7 +810,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     try {
       const workspace = contractWorkspaceOf(deps.factory.ledger.events, input.task);
       if (workspace === undefined) return; // no contract on record — no owning Project to notify
-      const resolved = resolveProject(workspace);
+      const resolved = ensureProjectRegistered(deps.stateDir, workspace);
       if (!resolved.ok) return;
       await enqueueLeadMail(resolved.slug, { from: "peer", kind: input.kind, task: input.task, text: input.text });
       if (input.kind === "needs_human") {

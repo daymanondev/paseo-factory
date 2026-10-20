@@ -204,6 +204,20 @@ export function writeProjectRegistration(
   writeFileSync(registrationPath(stateDir, slug), `${JSON.stringify(record, null, 2)}\n`);
 }
 
+/**
+ * Resolves `cwd` to its canonical Project and ensures `<stateDir>/projects/<slug>/project.json`
+ * records `root` (preserving any existing fields via `writeProjectRegistration`'s merge law).
+ */
+export function ensureProjectRegistered(stateDir: string, cwd: string): ProjectResolution {
+  const resolved = resolveProject(cwd);
+  if (!resolved.ok) return resolved;
+  const existing = readProjectRegistration(stateDir, resolved.slug);
+  if (existing === undefined || existing.root !== resolved.root) {
+    writeProjectRegistration(stateDir, resolved.slug, { root: resolved.root });
+  }
+  return resolved;
+}
+
 /** Every registration on disk, slug order — the discovery source of record. */
 export function listProjectRegistrations(stateDir: string): ProjectRegistration[] {
   const projectsDir = join(stateDir, "projects");

@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentPermissionRequest, AgentPermissionResponse } from "@getpaseo/protocol/agent-types";
 import { createFactory } from "../plugin/server/core/factory.ts";
-import { createChoke } from "../plugin/server/choke.ts";
+import { writeProjectRegistration } from "../plugin/server/core/project.ts";
+import { createChoke, isContractedAgentCwd } from "../plugin/server/choke.ts";
 import type { PaseoResponderApi } from "../plugin/server/choke.ts";
 import { isSeatMemoryPathAllowed, judgeFilePath, judgeShellCommand, refuseGitArgv, shellTokens, writableRootsFor } from "../src/choke.ts";
 import { GIT_ARGV_CASES, SHELL_CASES, shellRoots } from "./choke-cases.ts";
@@ -373,6 +374,64 @@ test("choke.onPermissionAsked enforces seat-write-fence on Supervisor and Lead a
   const lastDenied = factory.ledger.events.findLast((e) => e.event === "permit_denied");
   assert.equal(lastDenied?.rule, "dangerous-git");
 });
+
+test("isContractedAgentCwd recognizes a single-checkout subdirectory Contract under a registered project while keeping <project-root> as a Seat cwd (v0.0.23, T-03)", async (t) => {
+  const dir = makeTempDir("choke-subdir-contract-");
+  disposeDir(t, dir);
+  const workspace = join(dir, "ws");
+  const subdir = join(workspace, "packages", "sub");
+  const stateDir = join(dir, "state");
+  mkdirSync(subdir, { recursive: true });
+  writeFileSync(join(subdir, "index.ts"), "export const x = 1;\n");
+  gitCommitAll(workspace, "base");
+
+  writeProjectRegistration(stateDir, "ws-123456", {
+    root: workspace,
+    supervisor: "sup-1",
+    lead: "lead-1",
+  });
+
+  const factory = createFactory({ stateDir });
+  factory.setContract({ task: "T-SUB", workspace: subdir, gate: "true", artifact: "index.ts" });
+  const choke = createChoke({ factory, homeDir: "/fake-home" });
+
+  assert.equal(isContractedAgentCwd(factory, workspace), false, "<project-root> itself is not a contracted Agent cwd");
+  assert.equal(isContractedAgentCwd(factory, subdir), true, "contracted subdirectory is a contracted Agent cwd");
+
+  // Claude agent in the contracted subdirectory is pinned to modeId: 'default'
+  const pinned = choke.pinCreateMode({ provider: "claude/claude-sonnet-4-6", cwd: subdir, modeId: "bypassPermissions" });
+  assert.equal(pinned?.modeId, "default");
+
+  // Permission asks from the contracted subdirectory are mediated by the choke
+  const sent: { agentId: string; requestId: string; response: AgentPermissionResponse }[] = [];
+  const paseo: PaseoResponderApi = {
+    agents: {
+      ref(agentId: string) {
+        return {
+          async respondToPermission({ requestId, response }) {
+            sent.push({ agentId, requestId, response });
+          },
+        };
+      },
+    },
+  };
+  await choke.onPermissionAsked(
+    {
+      agent: { id: "agent-sub-1", cwd: subdir, labels: { seat: "agent", task: "T-SUB" } },
+      request: {
+        id: "ask-sub-1",
+        provider: "claude",
+        name: "Write",
+        kind: "tool",
+        detail: { type: "write", filePath: join(subdir, "index.ts"), content: "export const x = 2;\n" },
+      },
+    },
+    paseo,
+  );
+  assert.equal(sent.length, 1, "subdirectory Agent ask was answered by choke");
+  assert.equal(sent[0].response.behavior, "allow");
+});
+
 
 
 

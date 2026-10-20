@@ -239,8 +239,14 @@ test("ensureGitShim enforces supervisor-git-fence and lead-git-fence by PASEO_FA
   assert.equal(leadDenied.status, 126, "lead committing src/index.ts must be blocked");
   assert.match(leadDenied.stderr, /lead-git-fence/);
 
-  // Unstage src/index.ts and restore it
+  // Unstage src/index.ts; verify direct pathspec commits (with a clean index) are also blocked by lead-git-fence
   assert.equal(runGit("lead", ["reset", "HEAD", "src/index.ts"]).status, 0);
+  const pathspecDenied1 = runGit("lead", ["commit", "src/index.ts", "-m", "bypass via pathspec"]);
+  assert.equal(pathspecDenied1.status, 126, "lead committing unstaged src/index.ts via positional pathspec must be blocked");
+  assert.match(pathspecDenied1.stderr, /lead-git-fence/);
+  const pathspecDenied2 = runGit("lead", ["commit", "-m", "bypass via double-dash pathspec", "--", "src/index.ts"]);
+  assert.equal(pathspecDenied2.status, 126, "lead committing unstaged src/index.ts after -- must be blocked");
+  assert.match(pathspecDenied2.stderr, /lead-git-fence/);
   writeFileSync(join(workspace, "src", "index.ts"), "export const v = 1;\n");
 
   // 3. Lead git fence: allows committing CONTEXT.md, docs/**, and .scratch/**

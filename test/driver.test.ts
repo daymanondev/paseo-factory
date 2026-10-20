@@ -1293,12 +1293,12 @@ test("v0.0.23 (ADR 0015 §6): createTaskAgent and observeTasks pass parent: lead
     provider: "opencode",
     cwd: "/ws/t04",
     brief: "do T-04",
-    parent: "lead-agent-1",
+    parentAgentId: "lead-agent-1",
     workspaceId: "ws-wt-t04",
     projectSlug: "repo-123456",
   });
   assert.equal(sent[1].type, "create_agent_request");
-  assert.equal(sent[1].parent, "lead-agent-1");
+  assert.equal(sent[1].parent, "lead-agent-1", "parentAgentId parameter maps to parent on the create request");
   assert.equal(sent[1].workspaceId, "ws-wt-t04");
   assert.deepEqual(sent[1].labels, { seat: "agent", project: "repo-123456", task: "T-04" });
 

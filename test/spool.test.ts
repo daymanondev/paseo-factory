@@ -651,13 +651,90 @@ test("spool command authority (v0.0.23, ADR 0015 §1): refuses contract/spawn/re
     { id: "ag-4", kind: "accept", task: "AUTH-1", attempt: 1, submitter: "ag-1", seat: "agent" },
     { id: "ag-5", kind: "lead_dispatch", workspace: ws, message: "hi", seat: "agent" },
     { id: "ag-6", kind: "lead_rotate", projectRoot: ws, seat: "agent" },
+    { id: "ag-7", kind: "supervisor_dispatch", workspace: ws, message: "hi", seat: "agent" },
+    { id: "ag-8", kind: "supervisor_report", workspace: ws, message: "hi", seat: "agent" },
+    { id: "ag-9", kind: "repoke", task: "AUTH-1", agent: "ag-1", seat: "agent" },
+    { id: "ag-10", kind: "needs_human", task: "AUTH-1", reason: "attempt-ceiling", evidence: { attempt: 3, gate: 2 }, seat: "agent" },
+    { id: "ag-11", kind: "meter", task: "AUTH-1", provider: "opencode/glm-5.1", usage: {}, seat: "agent" },
+    { id: "ag-12", kind: "retro", seat: "agent" },
   ];
   for (const req of agentRequests) {
-    const res = await handleSpoolRequest(factory, req);
+    const parsed = parseSpoolRequest({ ...req, submitter: "ag-1" });
+    assert.equal(parsed?.seat, "agent", `parseSpoolRequest preserves seat on ${req.kind}`);
+    assert.equal((parsed as { submitter?: string } | undefined)?.submitter, "ag-1", `parseSpoolRequest preserves submitter on ${req.kind}`);
+    const res = await handleSpoolRequest(factory, parsed!);
     assert.equal(res.ok, false, `expected ${req.kind} from seat=agent to be refused`);
     if (!res.ok) {
       assert.equal(res.code, "agent-cannot-orchestrate");
     }
+  }
+  assert.equal(
+    parseSpoolRequest({ id: "ask-s", kind: "ask", task: "AUTH-1", command: "ls", seat: "agent", submitter: "ag-1" })?.seat,
+    "agent",
+  );
+
+  // Live daemon & project registration seat corroboration: omitting or spoofing `seat` cannot bypass authority when `submitter` identifies a live agent or registered seat.
+  const fakeDaemon = {
+    agents: {
+      async list() {
+        return {
+          entries: [
+            { agent: { id: "live-sup-1", cwd: ws, status: "running", archivedAt: null, labels: { seat: "supervisor", project: "ws" } } },
+            { agent: { id: "live-worker-1", cwd: ws, status: "running", archivedAt: null, labels: { seat: "agent", project: "ws", task: "AUTH-1" } } },
+          ],
+        };
+      },
+      ref() {
+        return { async archive() {} };
+      },
+    },
+  };
+  const spoofedSupContract = await handleSpoolRequest(
+    factory,
+    {
+      id: "spoof-sup-1",
+      kind: "contract",
+      task: "SPOOF-1",
+      workspace: ws,
+      gate: "true",
+      artifact: "src/x.ts",
+      submitter: "live-sup-1",
+      seat: "lead", // spoofed seat!
+    },
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    fakeDaemon as unknown as Parameters<typeof handleSpoolRequest>[8],
+  );
+  assert.equal(spoofedSupContract.ok, false);
+  if (!spoofedSupContract.ok) {
+    assert.equal(spoofedSupContract.code, "supervisor-cannot-contract-or-run");
+  }
+
+  const omittedWorkerAccept = await handleSpoolRequest(
+    factory,
+    {
+      id: "omit-ag-1",
+      kind: "accept",
+      task: "AUTH-1",
+      attempt: 1,
+      submitter: "live-worker-1",
+      // seat omitted!
+    },
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    fakeDaemon as unknown as Parameters<typeof handleSpoolRequest>[8],
+  );
+  assert.equal(omittedWorkerAccept.ok, false);
+  if (!omittedWorkerAccept.ok) {
+    assert.equal(omittedWorkerAccept.code, "agent-cannot-orchestrate");
   }
 
   // Working Agent can still claim, and Supervisor can still accept --by supervisor.
