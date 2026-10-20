@@ -94,7 +94,7 @@ export default function contribute(server: PluginServerContext) {
   const offAgentCreate = server.before("agent.create", ({ request }, context) => {
     capturePaseo(context);
     let next = request;
-    const pinned = choke.pinCreateMode(next.config);
+    const pinned = choke.pinCreateMode(next.config, (next as { labels?: Record<string, string> }).labels);
     if (pinned !== undefined) {
       log(`choke: pinned permission mode to Always Ask for the new agent in ${next.config.cwd}`);
       next = { ...next, config: pinned };

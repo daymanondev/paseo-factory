@@ -1,11 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { pluginDirFor, resolvePaseoHome, stateDirFor } from "../plugin/server/paths.ts";
 import { claimCliBinDir, ensureClaimCli, ensureGitShim, injectClaimCliPath } from "../plugin/server/shell.ts";
 import { Ledger } from "../plugin/server/core/ledger.ts";
-import { disposeDir, makeTempDir, repoRoot } from "./helpers.ts";
+import { disposeDir, gitCommitAll, makeTempDir, repoRoot } from "./helpers.ts";
 import type { PluginSessionOpenRequest } from "@getpaseo/plugin/server";
 
 const sessionOpenRequest = (reason: PluginSessionOpenRequest["reason"], env: Record<string, string>): PluginSessionOpenRequest => ({
@@ -184,3 +185,78 @@ test("the agent PATH surface is exactly factory-claim and the git shim — the f
   // And the wrapper that IS there points at factory-claim.mjs, not factory.mjs.
   assert.match(readFileSync(join(claimCliBinDir(stateDir), "factory-claim"), "utf8"), /factory-claim\.mjs/);
 });
+
+test("ensureGitShim enforces supervisor-git-fence and lead-git-fence by PASEO_FACTORY_SEAT", (t) => {
+  const dir = makeTempDir("git-shim-seat-fence-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const workspace = join(dir, "ws");
+  mkdirSync(join(workspace, "src"), { recursive: true });
+  mkdirSync(join(workspace, "docs", "adr"), { recursive: true });
+  mkdirSync(join(workspace, ".scratch"), { recursive: true });
+  writeFileSync(join(workspace, "src", "index.ts"), "export const v = 1;\n");
+  writeFileSync(join(workspace, "CONTEXT.md"), "# Context\n");
+  gitCommitAll(workspace, "initial");
+
+  const pluginDir = join(repoRoot, "plugin");
+  ensureGitShim(stateDir, pluginDir, process.execPath);
+  const gitWrapper = join(claimCliBinDir(stateDir), "git");
+  const pathWithShim = `${claimCliBinDir(stateDir)}${delimiter}${process.env.PATH ?? "/usr/bin:/bin"}`;
+
+  const runGit = (seat: string, argv: string[]) =>
+    spawnSync(gitWrapper, argv, {
+      cwd: workspace,
+      encoding: "utf8",
+      env: { ...process.env, FACTORY_STATE_DIR: stateDir, PATH: pathWithShim, PASEO_FACTORY_SEAT: seat },
+      timeout: 15_000,
+    });
+
+  // 1. Supervisor git fence: blocks commit, merge, cherry-pick, rebase, am, apply, stash, checkout -b/-B, switch -c/-C
+  for (const argv of [
+    ["commit", "-m", "supervisor coding on main"],
+    ["merge", "factory/T-01"],
+    ["cherry-pick", "HEAD"],
+    ["rebase", "main"],
+    ["am", "patch.mbox"],
+    ["apply", "diff.patch"],
+    ["stash"],
+    ["checkout", "-b", "feat/rogue"],
+    ["checkout", "-B", "feat/rogue"],
+    ["switch", "-c", "feat/rogue"],
+    ["switch", "-C", "feat/rogue"],
+  ]) {
+    const res = runGit("supervisor", argv);
+    assert.equal(res.status, 126, `supervisor 'git ${argv.join(" ")}' must be blocked`);
+    assert.match(res.stderr, /supervisor-git-fence/);
+  }
+  // Supervisor read-only git commands stay allowed
+  assert.equal(runGit("supervisor", ["status", "--short"]).status, 0);
+
+  // 2. Lead git fence: blocks committing staged product files (src/index.ts)
+  writeFileSync(join(workspace, "src", "index.ts"), "export const v = 2;\n");
+  assert.equal(runGit("lead", ["add", "src/index.ts"]).status, 0);
+  const leadDenied = runGit("lead", ["commit", "-m", "lead editing product source"]);
+  assert.equal(leadDenied.status, 126, "lead committing src/index.ts must be blocked");
+  assert.match(leadDenied.stderr, /lead-git-fence/);
+
+  // Unstage src/index.ts and restore it
+  assert.equal(runGit("lead", ["reset", "HEAD", "src/index.ts"]).status, 0);
+  writeFileSync(join(workspace, "src", "index.ts"), "export const v = 1;\n");
+
+  // 3. Lead git fence: allows committing CONTEXT.md, docs/**, and .scratch/**
+  writeFileSync(join(workspace, "CONTEXT.md"), "# Updated Context\n");
+  writeFileSync(join(workspace, "docs", "adr", "0015.md"), "# ADR 0015\n");
+  writeFileSync(join(workspace, ".scratch", "spec.md"), "# Spec\n");
+  assert.equal(runGit("lead", ["add", "CONTEXT.md", "docs/adr/0015.md", ".scratch/spec.md"]).status, 0);
+  const leadAllowed = runGit("lead", ["commit", "-m", "docs: update context and scratch"]);
+  assert.equal(leadAllowed.status, 0, `lead committing whitelisted docs must pass: ${leadAllowed.stderr}`);
+
+  // 4. Lead git fence: allows committing src/index.ts when MERGE_HEAD is present (settling a Landing on Accept conflict)
+  const headSha = runGit("lead", ["rev-parse", "HEAD"]).stdout.trim();
+  writeFileSync(join(workspace, "src", "index.ts"), "export const v = 3;\n");
+  assert.equal(runGit("lead", ["add", "src/index.ts"]).status, 0);
+  writeFileSync(join(workspace, ".git", "MERGE_HEAD"), `${headSha}\n`);
+  const mergeAllowed = runGit("lead", ["commit", "-m", "merge: settle landing conflict"]);
+  assert.equal(mergeAllowed.status, 0, `lead settling a MERGE_HEAD conflict must pass: ${mergeAllowed.stderr}`);
+});
+

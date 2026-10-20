@@ -16,7 +16,8 @@
  * Judging is mechanical: exact tokens, never substrings, so
  * `--force-with-lease`, `fetch -f`, `checkout -b` and `clean -n` stay clear.
  */
-import { isAbsolute, join } from "node:path";
+import { tmpdir } from "node:os";
+import { isAbsolute, join, resolve } from "node:path";
 import { scopeCoversFile } from "./workspace.ts";
 
 /** One refusal-list hit: which class fired and one line saying what it destroys. */
@@ -179,6 +180,51 @@ export function refuseGitArgv(argv: readonly string[]): GitRefusal | undefined {
     default:
       return undefined;
   }
+}
+
+const SUPERVISOR_BLOCKED_GIT_SUBCOMMANDS = new Set(["commit", "merge", "cherry-pick", "rebase", "am", "apply", "stash"]);
+const SUPERVISOR_GIT_FENCE_REASON =
+  "factory git-shim: blocked (supervisor-git-fence) — Supervisor never commits or branches on <project-root>; dispatch to Lead via factory lead dispatch";
+
+/**
+ * Refuses git subcommands and branch-creation flags forbidden to the Supervisor
+ * seat on `<project-root>` (v0.0.23, ADR 0015 §2).
+ */
+export function refuseSupervisorGitArgv(argv: readonly string[]): GitRefusal | undefined {
+  let i = 0;
+  while (i < argv.length && argv[i] !== undefined && argv[i]!.startsWith("-")) {
+    i += GIT_GLOBAL_VALUE_FLAGS.has(argv[i]!) ? 2 : 1;
+  }
+  const sub = argv[i];
+  if (sub === undefined) return undefined;
+  const args = argv.slice(i + 1);
+  if (SUPERVISOR_BLOCKED_GIT_SUBCOMMANDS.has(sub)) {
+    return { rule: "supervisor-git-fence", reason: SUPERVISOR_GIT_FENCE_REASON };
+  }
+  const dd = args.indexOf("--");
+  const flagSlice = dd === -1 ? args : args.slice(0, dd);
+  if (sub === "checkout") {
+    for (const token of flagSlice) {
+      if (token === "-b" || token === "-B" || clusterHas(token, "b") || clusterHas(token, "B")) {
+        return { rule: "supervisor-git-fence", reason: SUPERVISOR_GIT_FENCE_REASON };
+      }
+    }
+  }
+  if (sub === "switch") {
+    for (const token of flagSlice) {
+      if (
+        token === "-c" ||
+        token === "-C" ||
+        token === "--create" ||
+        token === "--force-create" ||
+        clusterHas(token, "c") ||
+        clusterHas(token, "C")
+      ) {
+        return { rule: "supervisor-git-fence", reason: SUPERVISOR_GIT_FENCE_REASON };
+      }
+    }
+  }
+  return undefined;
 }
 
 function pushRefusal(what: string): GitRefusal {
@@ -370,6 +416,316 @@ function shellWriteDestinations(tokens: readonly string[]): string[] {
 export const MEMORY_FILES = ["AGENTS.md", "CLAUDE.md", "CONTEXT.md"] as const;
 
 export type MemoryFileName = (typeof MEMORY_FILES)[number];
+
+/**
+ * The root-level files a Supervisor or Lead seat may edit on `<project-root>`
+ * (v0.0.23, ADR 0015 §2), alongside `docs/**` and `.scratch/**`.
+ */
+export const SEAT_MEMORY_WHITELIST = [
+  "AGENTS.md",
+  "CLAUDE.md",
+  "CONTEXT.md",
+  "GLOSSARY.md",
+  ".gitignore",
+  ".worktreeinclude",
+] as const;
+
+export const SEAT_WRITE_FENCE_MESSAGE =
+  "Seat write fence: Supervisor and Lead may only write project memory/docs (AGENTS.md, CONTEXT.md, docs/**, .scratch/**); dispatch implementation work to Lead / Task Agents";
+
+/**
+ * Whether a project-root-relative path (POSIX slashes, no `..`) sits inside
+ * `SEAT_MEMORY_WHITELIST` (`AGENTS.md`, `CLAUDE.md`, `CONTEXT.md`,
+ * `GLOSSARY.md`, `.gitignore`, `.worktreeinclude`, `docs/**`, `.scratch/**`).
+ */
+export function isSeatMemoryRelativePathAllowed(relativePath: string): boolean {
+  let normalized = relativePath.trim();
+  while (normalized.startsWith("./")) normalized = normalized.slice(2);
+  normalized = stripTrailingSlash(normalized);
+  if (normalized === "" || normalized.startsWith("/") || normalized.split("/").includes("..")) return false;
+  if ((SEAT_MEMORY_WHITELIST as readonly string[]).includes(normalized)) return true;
+  if (normalized === "docs" || normalized.startsWith("docs/")) return true;
+  if (normalized === ".scratch" || normalized.startsWith(".scratch/")) return true;
+  return false;
+}
+
+function defaultSeatTmpDirs(): string[] {
+  const dirs = ["/tmp", "/dev/null", tmpdir()];
+  if (typeof process.env.TMPDIR === "string" && process.env.TMPDIR.trim() !== "") {
+    dirs.push(process.env.TMPDIR);
+  }
+  return dirs.map(stripTrailingSlash);
+}
+
+/**
+ * Whether `candidatePath` is an allowed write target for a Supervisor or Lead
+ * seat rooted at `projectRoot` (v0.0.23, ADR 0015 §2):
+ * - Allows `/dev/null`, `stateDir`, and `tmpDirs` (`/tmp`, `os.tmpdir()`, `$TMPDIR`).
+ * - Inside `projectRoot`, allows ONLY `AGENTS.md`, `CLAUDE.md`, `CONTEXT.md`,
+ *   `GLOSSARY.md`, `.gitignore`, `.worktreeinclude`, `docs/**`, and `.scratch/**`.
+ * - Rejects all other paths inside or outside `projectRoot`.
+ */
+export function isSeatMemoryPathAllowed(
+  projectRoot: string,
+  candidatePath: string,
+  stateDir: string,
+  tmpDirs: readonly string[] = defaultSeatTmpDirs(),
+): boolean {
+  const raw = candidatePath.trim();
+  if (raw === "") return false;
+  if (raw === "/dev/null") return true;
+  if (raw === "~" || raw.startsWith("~/")) return false;
+
+  const resolvedRoot = stripTrailingSlash(resolve(projectRoot));
+  const resolvedState = stateDir.trim() === "" ? "" : stripTrailingSlash(resolve(stateDir));
+  const resolvedCandidate = stripTrailingSlash(isAbsolute(raw) ? resolve(raw) : resolve(resolvedRoot, raw));
+
+  if (resolvedState !== "" && (resolvedCandidate === resolvedState || resolvedCandidate.startsWith(`${resolvedState}/`))) {
+    return true;
+  }
+
+  if (resolvedCandidate === resolvedRoot) return false;
+  if (resolvedCandidate.startsWith(`${resolvedRoot}/`)) {
+    const rel = resolvedCandidate.slice(resolvedRoot.length + 1);
+    return isSeatMemoryRelativePathAllowed(rel);
+  }
+
+  for (const tmp of tmpDirs) {
+    if (typeof tmp !== "string" || tmp.trim() === "") continue;
+    const resolvedTmp = stripTrailingSlash(resolve(tmp));
+    if (resolvedCandidate === resolvedTmp || resolvedCandidate.startsWith(`${resolvedTmp}/`)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+const TOUCH_OR_MKDIR = new Set(["touch", "mkdir"]);
+
+/**
+ * Extracts all candidate write target paths from a shell command (redirections,
+ * `tee`, `cp`, `mv`, `install`, `rsync`, `ln`, `truncate`, `rm`, `sed -i`,
+ * `dd of=`, `touch`, and `mkdir`).
+ */
+export function extractWriteTargets(command: string): string[] {
+  const tokens = shellTokens(command);
+  const targets = [...shellWriteDestinations(tokens)];
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (token !== undefined && TOUCH_OR_MKDIR.has(token)) {
+      for (const operand of tokens.slice(i + 1).filter((t) => !t.startsWith("-"))) {
+        targets.push(operand);
+      }
+    }
+  }
+  return targets;
+}
+
+/**
+ * Splits a shell command line on unquoted `;`, `|`, `||`, `&&`, and `\n` so
+ * chained segments can be inspected independently.
+ */
+function splitShellSegments(command: string): string[] {
+  const segments: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | null = null;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!;
+    if (quote !== null) {
+      if (ch === "\\" && quote === '"' && i + 1 < command.length) {
+        current += ch + command[i + 1]!;
+        i += 1;
+        continue;
+      }
+      if (ch === quote) quote = null;
+      current += ch;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      current += ch;
+      continue;
+    }
+    if (ch === "\\" && i + 1 < command.length) {
+      current += ch + command[i + 1]!;
+      i += 1;
+      continue;
+    }
+    if (ch === ";" || ch === "\n") {
+      if (current.trim() !== "") segments.push(current.trim());
+      current = "";
+      continue;
+    }
+    if ((ch === "&" && command[i + 1] === "&") || (ch === "|" && command[i + 1] === "|")) {
+      if (current.trim() !== "") segments.push(current.trim());
+      current = "";
+      i += 1;
+      continue;
+    }
+    if (ch === "|") {
+      if (current.trim() !== "") segments.push(current.trim());
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+  if (current.trim() !== "") segments.push(current.trim());
+  return segments;
+}
+
+/**
+ * Tokenizes a single shell segment preserving quoted strings as single tokens
+ * so `--message "npm install src/foo.ts"` is not mistaken for a subcommand.
+ */
+function quoteAwareWords(segment: string): string[] {
+  const words: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | null = null;
+  for (let i = 0; i < segment.length; i++) {
+    const ch = segment[i]!;
+    if (quote !== null) {
+      if (ch === "\\" && quote === '"' && i + 1 < segment.length) {
+        current += segment[i + 1]!;
+        i += 1;
+        continue;
+      }
+      if (ch === quote) {
+        quote = null;
+        continue;
+      }
+      current += ch;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      if (current !== "") {
+        words.push(current);
+        current = "";
+      }
+      continue;
+    }
+    current += ch;
+  }
+  if (current !== "") words.push(current);
+  return words;
+}
+
+function isFactoryCliSegment(
+  segment: string,
+  projectRoot: string,
+  stateDir: string,
+  tmpDirs: readonly string[],
+): boolean {
+  const words = quoteAwareWords(segment);
+  let idx = 0;
+  while (idx < words.length) {
+    const w = words[idx]!;
+    if (w === "export" || WRAPPER_WORDS.has(w) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(w)) {
+      idx += 1;
+      continue;
+    }
+    break;
+  }
+  if (idx >= words.length) return true; // pure env export segment (e.g. `export PATH="..."`)
+
+  // Check if any top-level redirection targets a disallowed path
+  for (let i = idx; i < words.length; i++) {
+    const w = words[i]!;
+    const redirect = w.match(/^(?:\d*|&)>>?(.*)$/);
+    if (redirect) {
+      const dest = redirect[1] !== "" ? redirect[1]! : words[i + 1];
+      if (dest !== undefined && !isSeatMemoryPathAllowed(projectRoot, dest, stateDir, tmpDirs)) {
+        return false;
+      }
+    }
+  }
+
+  const cmd = words[idx]!;
+  if (cmd === "factory" || cmd.endsWith("/factory") || cmd.endsWith("/factory.mjs")) {
+    return true;
+  }
+  const nextWord = words[idx + 1];
+  if (
+    nextWord !== undefined &&
+    (nextWord === "factory.mjs" || nextWord.endsWith("/factory.mjs")) &&
+    (cmd === "node" || cmd.endsWith("/node") || /Paseo Helper/i.test(cmd))
+  ) {
+    return true;
+  }
+  return false;
+}
+
+const NPM_MUTATION_SUBCOMMANDS = new Set(["install", "i", "add", "ci", "uninstall", "remove", "rm", "init", "create"]);
+const PNPM_MUTATION_SUBCOMMANDS = new Set(["add", "install", "i", "remove", "rm", "init", "create", "dlx"]);
+const YARN_MUTATION_SUBCOMMANDS = new Set(["add", "install", "remove", "init", "create", "dlx"]);
+const BUN_MUTATION_SUBCOMMANDS = new Set(["install", "i", "add", "remove", "rm", "init", "create", "x"]);
+
+function isPackageMutationSegment(tokens: readonly string[]): boolean {
+  const words = tokens.filter((t) => t !== "export" && !WRAPPER_WORDS.has(t) && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(t));
+  const cmd = words[0];
+  if (cmd === undefined) return false;
+  const bin = cmd.split("/").at(-1) ?? cmd;
+  const sub = words.slice(1).find((t) => !t.startsWith("-"));
+  if (bin === "npx") return true;
+  if (bin === "npm") return sub !== undefined && NPM_MUTATION_SUBCOMMANDS.has(sub);
+  if (bin === "pnpm") return sub !== undefined && PNPM_MUTATION_SUBCOMMANDS.has(sub);
+  if (bin === "yarn") return sub === undefined || YARN_MUTATION_SUBCOMMANDS.has(sub);
+  if (bin === "bun") return sub !== undefined && BUN_MUTATION_SUBCOMMANDS.has(sub);
+  return false;
+}
+
+/**
+ * Judges a shell ask from a Supervisor or Lead seat on `<project-root>`
+ * (v0.0.23, ADR 0015 §2):
+ * - Dangerous git commands on any spelling are denied (`rule: "dangerous-git"`).
+ * - Package-mutation commands (`npm install`, `pnpm add`, `yarn add`, `bun install`, `npx`)
+ *   are denied (`rule: "seat-write-fence"`).
+ * - Write targets outside `isSeatMemoryPathAllowed` are denied (`rule: "seat-write-fence"`).
+ * - Read-only commands, `factory` CLI invocations, and whitelisted memory/docs writes are allowed.
+ */
+export function judgeSeatShellCommand(
+  command: string,
+  projectRoot: string,
+  stateDir: string,
+  tmpDirs: readonly string[] = defaultSeatTmpDirs(),
+): ChokeDecision {
+  for (const segment of splitShellSegments(command)) {
+    if (isFactoryCliSegment(segment, projectRoot, stateDir, tmpDirs)) continue;
+    const segTokens = shellTokens(segment);
+    const s1 = judgeS1(segTokens);
+    if (s1.behavior === "deny") {
+      return { behavior: "deny", rule: "dangerous-git", reason: s1.reason };
+    }
+    if (isPackageMutationSegment(segTokens)) {
+      return { behavior: "deny", rule: "seat-write-fence", reason: SEAT_WRITE_FENCE_MESSAGE };
+    }
+    for (const target of extractWriteTargets(segment)) {
+      if (!isSeatMemoryPathAllowed(projectRoot, target, stateDir, tmpDirs)) {
+        return { behavior: "deny", rule: "seat-write-fence", reason: SEAT_WRITE_FENCE_MESSAGE };
+      }
+    }
+  }
+  return { behavior: "allow" };
+}
+
+/**
+ * Judges a Write/Edit file ask from a Supervisor or Lead seat on `<project-root>`
+ * (v0.0.23, ADR 0015 §2).
+ */
+export function judgeSeatFilePath(
+  filePath: string,
+  projectRoot: string,
+  stateDir: string,
+  tmpDirs: readonly string[] = defaultSeatTmpDirs(),
+): ChokeDecision {
+  if (!isSeatMemoryPathAllowed(projectRoot, filePath, stateDir, tmpDirs)) {
+    return { behavior: "deny", rule: "seat-write-fence", reason: SEAT_WRITE_FENCE_MESSAGE };
+  }
+  return { behavior: "allow" };
+}
 
 /**
  * The ask-time fence's context: the live Contract's workspace (whose root
