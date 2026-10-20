@@ -737,6 +737,23 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       async (): Promise<{ ok: true; agentId: string; mailId: string } | { ok: false; code: string; error: string }> => {
         const ensured = await ensureSupervisorInLane(slug, root);
         if (!ensured.ok) return ensured;
+        const submitter = typeof request.submitter === "string" ? request.submitter.trim() : "";
+        if (
+          submitter !== "" &&
+          submitter !== "owner" &&
+          submitter !== "supervisor" &&
+          submitter !== "lead" &&
+          submitter !== "agent" &&
+          submitter !== "ui"
+        ) {
+          const reg = readProjectRegistration(deps.stateDir, slug);
+          if (submitter !== ensured.agentId && submitter !== reg?.supervisor && submitter !== reg?.lead) {
+            writeProjectRegistration(deps.stateDir, slug, {
+              root: reg?.root ?? root,
+              dispatchers: [submitter],
+            });
+          }
+        }
         const queued = appendMailQueued(mailboxPath(slug), {
           to: "supervisor",
           from: "owner",

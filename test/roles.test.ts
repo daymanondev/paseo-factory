@@ -1,8 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { join } from "node:path";
 import { renderRoleAppendSystem, renderRoleContract, renderSeatBootstrapPrompt } from "../src/roles-contract.ts";
 import { ROLE_PROMPTS } from "../src/pi-home.ts";
-import { renderAgentContract, renderSeatBootstrap, renderSeatContract } from "../plugin/server/roles.ts";
+import { writeProjectRegistration } from "../plugin/server/projects.ts";
+import { injectSessionEnv, renderAgentContract, renderSeatBootstrap, renderSeatContract } from "../plugin/server/roles.ts";
+import { disposeDir, makeTempDir } from "./helpers.ts";
 
 test("src/roles-contract.ts is the single source of truth for Supervisor, Lead, and Agent contracts and bootstraps (v0.0.23, ADR 0015)", () => {
   const supervisorContract = renderRoleContract("supervisor", { factoryCmd: "factory", home: "/h/paseo" });
@@ -84,4 +87,31 @@ test("src/roles-contract.ts is the single source of truth for Supervisor, Lead, 
     assert.match(surface, /end your turn/i);
     assert.match(surface, /paseo-factory role skills: tdd, diagnosing-bugs, codebase-design/);
   }
+});
+
+test("injectSessionEnv injects PASEO_FACTORY_SEAT=supervisor for normal-chat agentIds recorded in reg.dispatchers at <project-root> (v0.0.24, T-03)", (t) => {
+  const dir = makeTempDir("roles-dispatcher-env-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const userHome = join(dir, "home");
+  const projectRoot = "/w/ai-test";
+
+  writeProjectRegistration(stateDir, "ai-test-043c7e", {
+    root: projectRoot,
+    supervisor: "sup-1",
+    lead: "lead-1",
+    dispatchers: ["chat-session-7c5ac02"],
+  });
+
+  // Dispatcher at <project-root> gets PASEO_FACTORY_SEAT=supervisor so git-shim enforces supervisor-git-fence
+  const env: Record<string, string> = {};
+  const injected = injectSessionEnv({ agentId: "chat-session-7c5ac02", cwd: projectRoot, env }, stateDir, userHome);
+  assert.ok(injected !== undefined, "dispatcher agentId receives factory session env");
+  assert.equal(injected.env.PASEO_FACTORY_SEAT, "supervisor");
+  assert.equal(injected.env.PASEO_FACTORY_PROJECT, "ai-test-043c7e");
+  assert.equal(injected.env.PASEO_FACTORY_PROJECT_ROOT, projectRoot);
+
+  // Unrelated normal chat session is untouched
+  const stranger = injectSessionEnv({ agentId: "stranger-chat", cwd: projectRoot, env }, stateDir, userHome);
+  assert.equal(stranger, undefined, "unregistered normal chat session passes through untouched");
 });

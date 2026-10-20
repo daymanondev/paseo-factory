@@ -6,7 +6,7 @@ import { join } from "node:path";
 import type { AgentPermissionRequest, AgentPermissionResponse } from "@getpaseo/protocol/agent-types";
 import { createFactory } from "../plugin/server/core/factory.ts";
 import { writeProjectRegistration } from "../plugin/server/core/project.ts";
-import { createChoke, isContractedAgentCwd } from "../plugin/server/choke.ts";
+import { createChoke, isContractedAgentCwd, normalizeAgentCreateRequest } from "../plugin/server/choke.ts";
 import type { PaseoResponderApi } from "../plugin/server/choke.ts";
 import { isSeatMemoryPathAllowed, judgeFilePath, judgeShellCommand, refuseGitArgv, shellTokens, writableRootsFor } from "../src/choke.ts";
 import { GIT_ARGV_CASES, SHELL_CASES, shellRoots } from "./choke-cases.ts";
@@ -430,6 +430,172 @@ test("isContractedAgentCwd recognizes a single-checkout subdirectory Contract un
   );
   assert.equal(sent.length, 1, "subdirectory Agent ask was answered by choke");
   assert.equal(sent[0].response.behavior, "allow");
+});
+
+test("choke.onPermissionAsked and resolveSeatAtProjectRoot enforce seat-write-fence on normal-chat agents recorded in reg.dispatchers (v0.0.24, T-03)", async (t) => {
+  const dir = makeTempDir("choke-dispatcher-fence-");
+  disposeDir(t, dir);
+  const workspace = join(dir, "ws");
+  const stateDir = join(dir, "state");
+  mkdirSync(workspace, { recursive: true });
+  writeFileSync(join(workspace, "probe.txt"), "x\n");
+  gitCommitAll(workspace, "base");
+
+  writeProjectRegistration(stateDir, "ws-123456", {
+    root: workspace,
+    supervisor: "sup-1",
+    lead: "lead-1",
+    dispatchers: ["chat-session-7c5ac02"],
+  });
+
+  const factory = createFactory({ stateDir });
+  const choke = createChoke({ factory, homeDir: "/fake-home" });
+
+  const sent: { agentId: string; requestId: string; response: AgentPermissionResponse }[] = [];
+  const paseo: PaseoResponderApi = {
+    agents: {
+      ref(agentId: string) {
+        return {
+          async respondToPermission({ requestId, response }) {
+            sent.push({ agentId, requestId, response });
+          },
+        };
+      },
+    },
+  };
+
+  // Dispatcher session (no seat label, normal title) attempting to write product code or rm -rf ai-game is denied by seat-write-fence
+  await choke.onPermissionAsked(
+    {
+      agent: { id: "chat-session-7c5ac02", cwd: workspace, title: "New Chat", labels: {} },
+      request: {
+        id: "disp-write-1",
+        provider: "opencode",
+        name: "Write",
+        kind: "tool",
+        detail: { type: "write", filePath: "src/GameStore.ts", content: "export const x = 1;\n" },
+      },
+    },
+    paseo,
+  );
+  assert.equal(sent.at(-1)?.response.behavior, "deny", "dispatcher session denied writing product source file");
+
+  await choke.onPermissionAsked(
+    {
+      agent: { id: "chat-session-7c5ac02", cwd: workspace, title: "New Chat", labels: {} },
+      request: {
+        id: "disp-rm-1",
+        provider: "opencode",
+        name: "Bash",
+        kind: "tool",
+        detail: { type: "shell", command: "rm -rf ai-game", cwd: workspace },
+      },
+    },
+    paseo,
+  );
+  assert.equal(sent.at(-1)?.response.behavior, "deny", "dispatcher session denied running rm -rf ai-game");
+
+  const deniedEvents = factory.ledger.events
+    .filter((e) => e.event === "permit_denied")
+    .filter((e) => e.agent === "chat-session-7c5ac02");
+  assert.equal(deniedEvents.length, 2);
+  assert.equal(deniedEvents[0]?.rule, "seat-write-fence");
+  assert.equal(deniedEvents[1]?.rule, "seat-write-fence");
+});
+
+test("normalizeAgentCreateRequest prefixes bare model IDs without '/' and labels untagged 'Supervisor — ...' / 'Lead — ...' creations at registered <project-root> (v0.0.24, T-03)", (t) => {
+  const dir = makeTempDir("choke-normalize-create-");
+  disposeDir(t, dir);
+  const workspace = join(dir, "ai-test");
+  const stateDir = join(dir, "state");
+  mkdirSync(workspace, { recursive: true });
+
+  writeProjectRegistration(stateDir, "ai-test-043c7e", {
+    root: workspace,
+    supervisor: "sup-1",
+    lead: "lead-1",
+  });
+
+  // 1. Bare OpenCode / free-pool model IDs get prefixed with opencode/opencode/
+  for (const bareModel of [
+    "nemotron-3.5-super-vl-free",
+    "nemotron-3-ultra-free",
+    "qwen3-coder-free",
+    "glm-5.1",
+    "deepseek-r1",
+    "minimax-m2.5-free",
+    "kimi-k2",
+  ]) {
+    const req = normalizeAgentCreateRequest(
+      { config: { provider: bareModel, cwd: workspace, title: "Worker" } },
+      stateDir,
+    );
+    assert.equal(req.config.provider, `opencode/opencode/${bareModel}`, `bare model ${bareModel} normalized`);
+  }
+
+  // 2. Bare Claude and Codex model IDs get their respective provider prefixes
+  assert.equal(
+    normalizeAgentCreateRequest({ config: { provider: "claude-sonnet-4-6", cwd: workspace } }, stateDir).config.provider,
+    "claude-code/claude-sonnet-4-6",
+  );
+  assert.equal(
+    normalizeAgentCreateRequest({ config: { provider: "sonnet", cwd: workspace } }, stateDir).config.provider,
+    "claude-code/sonnet",
+  );
+  assert.equal(
+    normalizeAgentCreateRequest({ config: { provider: "gpt-5.4", cwd: workspace } }, stateDir).config.provider,
+    "codex/gpt-5.4",
+  );
+  assert.equal(
+    normalizeAgentCreateRequest({ config: { provider: "o3-mini", cwd: workspace } }, stateDir).config.provider,
+    "codex/o3-mini",
+  );
+
+  // 3. Optional provider catalog resolution wins when matched
+  const catalog = [
+    { id: "pi", models: [{ id: "zai/glm-5.3" }] },
+    { id: "opencode", models: [{ id: "opencode/nemotron-3-ultra-free" }] },
+  ];
+  assert.equal(
+    normalizeAgentCreateRequest({ config: { provider: "glm-5.3", cwd: workspace } }, stateDir, catalog).config.provider,
+    "pi/zai/glm-5.3",
+  );
+
+  // 4. Already-prefixed providers and valid top-level provider IDs pass through unchanged
+  for (const valid of ["opencode/opencode/nemotron-3-ultra-free", "claude/claude-sonnet-4-6", "opencode", "claude", "codex", "pi"]) {
+    const original = { config: { provider: valid, cwd: workspace, title: "Regular Chat" } };
+    const res = normalizeAgentCreateRequest(original, stateDir);
+    assert.equal(res, original, `${valid} should remain untouched`);
+  }
+
+  // 5. Untagged "Supervisor — ..." and "Lead — ..." creations at registered <project-root> receive canonical seat & project labels
+  const rogueSup = normalizeAgentCreateRequest(
+    {
+      config: {
+        provider: "nemotron-3.5-super-vl-free",
+        cwd: workspace,
+        title: "Supervisor — ai-test",
+      },
+    },
+    stateDir,
+  );
+  assert.equal(rogueSup.config.provider, "opencode/opencode/nemotron-3.5-super-vl-free");
+  assert.deepEqual(rogueSup.config.labels, { seat: "supervisor", project: "ai-test-043c7e" });
+  assert.deepEqual(rogueSup.labels, { seat: "supervisor", project: "ai-test-043c7e" });
+
+  const rogueLead = normalizeAgentCreateRequest(
+    {
+      config: {
+        provider: "nemotron-3-ultra-free",
+        cwd: workspace,
+        title: "Lead — ai-test",
+        labels: { custom: "1" },
+      },
+    },
+    stateDir,
+  );
+  assert.equal(rogueLead.config.provider, "opencode/opencode/nemotron-3-ultra-free");
+  assert.deepEqual(rogueLead.config.labels, { custom: "1", seat: "lead", project: "ai-test-043c7e" });
 });
 
 

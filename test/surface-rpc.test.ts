@@ -11,8 +11,8 @@ import { sealVaultBuffer } from "../src/index.ts";
 import type { VaultRunner, VaultRunnerCall } from "../src/index.ts";
 import { createFactory } from "../plugin/server/core/factory.ts";
 import { resolveProject } from "../plugin/server/core/project.ts";
-import { createSurfaceHandlers } from "../plugin/server/surface-rpc.ts";
-import type { SurfaceDaemonApi, SurfaceDeps } from "../plugin/server/surface-rpc.ts";
+import { createSurfaceHandlers, sanitizeLaneWithProviders } from "../plugin/server/surface-rpc.ts";
+import type { ProviderEntry, SurfaceDaemonApi, SurfaceDeps } from "../plugin/server/surface-rpc.ts";
 import { handleSpoolRequest } from "../plugin/server/spool.ts";
 import {
   BRIDGE_TIMEOUT_MS,
@@ -50,6 +50,8 @@ interface FakeAgent {
   status?: string;
   provider?: string;
   model?: string | null;
+  thinkingOptionId?: string | null;
+  lastError?: string | null;
   labels?: Record<string, string>;
   requiresAttention?: boolean;
   seqEnd?: number;
@@ -59,7 +61,7 @@ interface FakeAgent {
 }
 
 function fakeDaemon(agents: FakeAgent[]) {
-  const created: { config: { provider: string }; cwd: string; title: string; labels: Record<string, string>; prompt?: string }[] = [];
+  const created: { config: { provider: string; thinkingOptionId?: string }; cwd: string; title: string; labels: Record<string, string>; prompt?: string }[] = [];
   const sent: { agentId: string; text: string }[] = [];
   const archived: string[] = [];
   const timelineReads: string[] = [];
@@ -83,6 +85,8 @@ function fakeDaemon(agents: FakeAgent[]) {
               title: agent.title ?? null,
               status: agent.status ?? "idle",
               model: agent.model ?? null,
+              ...(agent.thinkingOptionId === undefined ? {} : { thinkingOptionId: agent.thinkingOptionId }),
+              ...(agent.lastError === undefined ? {} : { lastError: agent.lastError }),
               labels: agent.labels ?? {},
               archivedAt: null,
               requiresAttention: agent.requiresAttention ?? false,
@@ -98,7 +102,13 @@ function fakeDaemon(agents: FakeAgent[]) {
       create: async (options) => {
         created.push({ config: options.config, cwd: options.cwd, title: options.title ?? "", labels: options.labels ?? {}, prompt: options.prompt });
         const id = `agent-created-${created.length}`;
-        agents.push({ id, title: options.title ?? undefined, provider: options.config.provider, labels: options.labels });
+        agents.push({
+          id,
+          title: options.title ?? undefined,
+          provider: options.config.provider,
+          ...(options.config.thinkingOptionId === undefined ? {} : { thinkingOptionId: options.config.thinkingOptionId }),
+          labels: options.labels,
+        });
         return { id };
       },
       ref: (id: string) => ({
@@ -2827,6 +2837,226 @@ test("foldTasks scopes attempts, status, needsHumanReason, lane, cost, and choke
   assert.equal(afterEpoch2Attempt[0]?.needsHumanReason, null);
   assert.equal(afterEpoch2Attempt[0]?.lane, "opencode/new-model");
   assert.equal(afterEpoch2Attempt[0]?.lastSeq, r2.seq);
+});
+
+// ---- v0.0.24 (ADR 0015): Thinking Variant Sanitization & Seat Self-Healing -------------------
+
+test("v0.0.24 (ADR 0015 §1): sanitizeLaneWithProviders strips unsupported :thinking variants when model advertises thinkingOptions: [] or omits the requested variant", () => {
+  const providers: ProviderEntry[] = [
+    {
+      provider: "opencode",
+      available: true,
+      models: [
+        { id: "opencode/nemotron-3-ultra-free", label: "Nemotron 3 Ultra Free", thinkingOptions: [] },
+        {
+          id: "opencode/nemotron-3.5-super-vl-free",
+          label: "Nemotron 3.5 Super VL Free",
+          thinkingOptions: [
+            { id: "low", label: "Low" },
+            { id: "high", label: "High" },
+          ],
+        },
+        { id: "opencode/glm-5.1", label: "GLM 5.1", thinkingOptions: null },
+      ],
+    },
+  ];
+
+  // 1. Model with thinkingOptions: [] strips :max (whether model has inner opencode/ prefix or not)
+  assert.equal(
+    sanitizeLaneWithProviders("opencode/opencode/nemotron-3-ultra-free:max", providers),
+    "opencode/opencode/nemotron-3-ultra-free",
+  );
+  assert.equal(
+    sanitizeLaneWithProviders("opencode/nemotron-3-ultra-free:max", providers),
+    "opencode/nemotron-3-ultra-free",
+  );
+  assert.equal(
+    sanitizeLaneWithProviders("opencode/opencode/nemotron-3-ultra-free", providers),
+    "opencode/opencode/nemotron-3-ultra-free",
+  );
+
+  // 2. Model with non-empty thinkingOptions strips unsupported :max, keeps supported :high
+  assert.equal(
+    sanitizeLaneWithProviders("opencode/opencode/nemotron-3.5-super-vl-free:max", providers),
+    "opencode/opencode/nemotron-3.5-super-vl-free",
+  );
+  assert.equal(
+    sanitizeLaneWithProviders("opencode/opencode/nemotron-3.5-super-vl-free:high", providers),
+    "opencode/opencode/nemotron-3.5-super-vl-free:high",
+  );
+
+  // 3. Model with thinkingOptions: null or unknown provider/model preserves :max
+  assert.equal(sanitizeLaneWithProviders("opencode/opencode/glm-5.1:max", providers), "opencode/opencode/glm-5.1:max");
+  assert.equal(sanitizeLaneWithProviders("pi/zai/glm-5.3:max", providers), "pi/zai/glm-5.3:max");
+  assert.equal(sanitizeLaneWithProviders("eye.json", providers), "eye.json");
+});
+
+test("v0.0.24 (ADR 0015 §1): lanesSet sanitizes unsupported :thinking before saving lanes.json and calls setAgentThinking(id, '') to clear stale thinkingOptionId on live seats", async (t) => {
+  const project = makeProject(t, "lanes-sanitize");
+  const { stateDir, handlers, fake, modelSyncs, thinkingSyncs } = makeSurface(t, [
+    {
+      id: "agent-sup-san",
+      labels: { seat: "supervisor", project: project.slug },
+      provider: "opencode/opencode/nemotron-3.5-super-vl-free",
+      model: "opencode/nemotron-3.5-super-vl-free",
+      thinkingOptionId: "max",
+    },
+    {
+      id: "agent-lead-san",
+      labels: { seat: "lead", project: project.slug },
+      provider: "opencode/opencode/nemotron-3.5-super-vl-free",
+      model: "opencode/nemotron-3.5-super-vl-free",
+      thinkingOptionId: "max",
+    },
+  ]);
+
+  fake.daemon.providers = {
+    listAvailable: async () => ({
+      providers: [{ provider: "opencode", available: true }],
+    }),
+    listModels: async () => ({
+      models: [
+        { id: "opencode/nemotron-3-ultra-free", label: "Nemotron 3 Ultra Free", thinkingOptions: [] },
+        {
+          id: "opencode/nemotron-3.5-super-vl-free",
+          label: "Nemotron 3.5 Super VL Free",
+          thinkingOptions: [{ id: "max", label: "Max" }],
+        },
+      ],
+    }),
+  };
+
+  // 1. Setting supervisor to opencode/opencode/nemotron-3-ultra-free:max strips :max before saving and clears thinkingOptionId ("") on live seat.
+  const supReply = await handlers.lanesSet({
+    lane: "supervisor",
+    value: "opencode/opencode/nemotron-3-ultra-free:max",
+    projectRoot: project.root,
+  });
+  assert.ok(supReply.ok, supReply.ok ? "" : supReply.error);
+  assert.equal(supReply.lanes.supervisor, "opencode/opencode/nemotron-3-ultra-free", ":max was stripped before persisting");
+  assert.deepEqual(modelSyncs, [{ agentId: "agent-sup-san", model: "opencode/nemotron-3-ultra-free" }]);
+  assert.deepEqual(
+    thinkingSyncs,
+    [{ agentId: "agent-sup-san", thinkingOptionId: "" }],
+    "setAgentThinking(id, '') was called to clear the stale :max on the live Supervisor",
+  );
+
+  // 2. Setting lead to opencode/opencode/nemotron-3-ultra-free (no :thinking in input, but live Lead has thinkingOptionId: "max") also clears thinkingOptionId ("").
+  const leadReply = await handlers.lanesSet({
+    lane: "lead",
+    value: "opencode/opencode/nemotron-3-ultra-free",
+    projectRoot: project.root,
+  });
+  assert.ok(leadReply.ok, leadReply.ok ? "" : leadReply.error);
+  assert.equal(leadReply.lanes.lead, "opencode/opencode/nemotron-3-ultra-free");
+  assert.deepEqual(modelSyncs[1], { agentId: "agent-lead-san", model: "opencode/nemotron-3-ultra-free" });
+  assert.deepEqual(
+    thinkingSyncs[1],
+    { agentId: "agent-lead-san", thinkingOptionId: "" },
+    "setAgentThinking(id, '') was called to clear thinkingOptionId when switching from :max to a model with no thinking suffix",
+  );
+
+  // 3. Setting worker to opencode/opencode/nemotron-3-ultra-free:max also sanitizes before saving to lanes.json.
+  const workerReply = await handlers.lanesSet({
+    lane: "worker",
+    value: "opencode/opencode/nemotron-3-ultra-free:max",
+    projectRoot: project.root,
+  });
+  assert.ok(workerReply.ok, workerReply.ok ? "" : workerReply.error);
+  assert.equal(workerReply.lanes.worker, "opencode/opencode/nemotron-3-ultra-free");
+
+  const persisted = JSON.parse(readFileSync(join(stateDir, "projects", project.slug, "lanes.json"), "utf8")) as Record<string, string>;
+  assert.deepEqual(persisted, {
+    supervisor: "opencode/opencode/nemotron-3-ultra-free",
+    lead: "opencode/opencode/nemotron-3-ultra-free",
+    worker: "opencode/opencode/nemotron-3-ultra-free",
+  });
+});
+
+test("v0.0.24 (ADR 0015 §1–§2): ensureSeat sanitizes :thinking on create, retires and recreates errored or provider-mismatched seats, and syncs drifted model/thinking in-place", async (t) => {
+  const project = makeProject(t, "ensure-self-heal");
+  const agents: FakeAgent[] = [
+    {
+      id: "agent-lead-errored",
+      labels: { seat: "lead", project: project.slug },
+      status: "error",
+      lastError: 'Agent not found: "default"',
+      provider: "opencode/opencode/nemotron-3-ultra-free",
+      model: "opencode/nemotron-3-ultra-free",
+    },
+    {
+      id: "agent-sup-drifted",
+      labels: { seat: "supervisor", project: project.slug },
+      status: "idle",
+      provider: "opencode",
+      model: "opencode/nemotron-3.5-super-vl-free",
+      thinkingOptionId: "max",
+    },
+  ];
+  const { stateDir, handlers, fake, modelSyncs, thinkingSyncs, stopped } = makeSurface(t, agents);
+
+  fake.daemon.providers = {
+    listAvailable: async () => ({
+      providers: [
+        { provider: "opencode", available: true },
+        { provider: "claude", available: true },
+      ],
+    }),
+    listModels: async (provider: string) => ({
+      models:
+        provider === "opencode"
+          ? [{ id: "opencode/nemotron-3-ultra-free", label: "Nemotron 3 Ultra Free", thinkingOptions: [] }]
+          : [{ id: "opus-4-8", label: "Opus 4.8", thinkingOptions: [{ id: "max", label: "Max" }] }],
+    }),
+  };
+
+  // Write lanes with an unsupported :max suffix on nemotron-3-ultra-free (thinkingOptions: []).
+  writeLanes(stateDir, {
+    supervisor: "opencode/opencode/nemotron-3-ultra-free:max",
+    lead: "opencode/opencode/nemotron-3-ultra-free:max",
+  });
+
+  // 1. Lead is in status === "error": ensureSeat retires it (stop + archive) and creates a clean replacement with :max stripped.
+  const leadHeal = await handlers.leadEnsure({ projectRoot: project.root });
+  assert.ok(leadHeal.ok, leadHeal.ok ? "" : leadHeal.error);
+  assert.equal(leadHeal.created, true, "errored Lead seat was retired and recreated");
+  assert.notEqual(leadHeal.agentId, "agent-lead-errored");
+  assert.ok(stopped.includes("agent-lead-errored"), "errored Lead was stopped before archive");
+  assert.ok(fake.archived.includes("agent-lead-errored"), "errored Lead was archived");
+  assert.equal(fake.created.length, 1);
+  assert.deepEqual(
+    fake.created[0]!.config,
+    { provider: "opencode/opencode/nemotron-3-ultra-free" },
+    "replacement Lead seat omitted unsupported :max thinkingOptionId",
+  );
+
+  // 2. Supervisor is healthy (idle) on same provider ("opencode") but drifted on model & thinkingOptionId: synced in-place!
+  const supHeal = await handlers.supervisorEnsure({ projectRoot: project.root });
+  assert.ok(supHeal.ok, supHeal.ok ? "" : supHeal.error);
+  assert.equal(supHeal.created, false, "healthy Supervisor on same provider was reused");
+  assert.equal(supHeal.agentId, "agent-sup-drifted");
+  assert.deepEqual(
+    modelSyncs,
+    [{ agentId: "agent-sup-drifted", model: "opencode/nemotron-3-ultra-free" }],
+    "drifted model was synced in-place",
+  );
+  assert.deepEqual(
+    thinkingSyncs,
+    [{ agentId: "agent-sup-drifted", thinkingOptionId: "" }],
+    "stale thinkingOptionId ('max') was cleared in-place",
+  );
+
+  // 3. Switch supervisor lane to a different provider family (claude/opus-4-8:max): ensureSeat retires opencode seat and creates claude seat.
+  writeLanes(stateDir, {
+    supervisor: "claude/opus-4-8:max",
+    lead: "opencode/opencode/nemotron-3-ultra-free",
+  });
+  const supSwitch = await handlers.supervisorEnsure({ projectRoot: project.root });
+  assert.ok(supSwitch.ok, supSwitch.ok ? "" : supSwitch.error);
+  assert.equal(supSwitch.created, true, "provider-mismatched Supervisor was retired and recreated on claude");
+  assert.notEqual(supSwitch.agentId, "agent-sup-drifted");
+  assert.ok(fake.archived.includes("agent-sup-drifted"), "old opencode Supervisor was archived");
+  assert.deepEqual(fake.created[1]!.config, { provider: "claude/opus-4-8", thinkingOptionId: "max" });
 });
 
 

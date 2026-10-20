@@ -74,6 +74,7 @@ export interface SurfaceAgentSnapshot {
   status: string;
   model: string | null;
   thinkingOptionId?: string | null;
+  lastError?: string | null;
   labels: Record<string, string>;
   archivedAt: string | null;
   requiresAttention: boolean;
@@ -90,6 +91,50 @@ export interface SurfaceAgentSnapshot {
    * `.jsonl` fallback's path across daemon restarts (v0.0.20, ADR 0013 §5).
    */
   persistence?: { nativeHandle?: string } | null;
+}
+
+/** One provider entry resolved from the daemon's provider & model catalog. */
+export interface ProviderEntry {
+  provider: string;
+  id?: string;
+  available: boolean;
+  models: {
+    id: string;
+    label: string | null;
+    thinkingOptions?: { id: string; label: string | null }[] | null;
+    defaultThinkingOptionId?: string | null;
+  }[] | null;
+}
+
+/**
+ * Strips any unsupported `:thinking` variant from a `<provider>/<model>[:<thinking>]`
+ * lane string when the provider catalog explicitly advertises `thinkingOptions: []`
+ * or does not include the requested thinking option (v0.0.24, ADR 0015 §1).
+ */
+export function sanitizeLaneWithProviders(laneValue: string, providers: readonly ProviderEntry[]): string {
+  const parsed = parseLane(laneValue);
+  if (parsed === undefined) return laneValue;
+  const { provider, model, thinking } = parsed;
+  const entry = providers.find((p) => (p.provider ?? p.id) === provider);
+  if (entry === undefined || !Array.isArray(entry.models)) return laneValue;
+  const strippedModel = model.replace(/^[^/]+\//, "");
+  const meta = entry.models.find(
+    (m) =>
+      m.id === model ||
+      `${provider}/${m.id}` === model ||
+      m.id === `${provider}/${model}` ||
+      m.id === strippedModel ||
+      m.id.replace(/^[^/]+\//, "") === strippedModel,
+  );
+  if (meta !== undefined && Array.isArray(meta.thinkingOptions)) {
+    if (
+      meta.thinkingOptions.length === 0 ||
+      (thinking !== undefined && !meta.thinkingOptions.some((o) => o.id === thinking))
+    ) {
+      return `${provider}/${model}`;
+    }
+  }
+  return laneValue;
 }
 
 /**
@@ -435,20 +480,11 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     };
   };
 
-  type ProviderEntry = {
-    provider: string;
-    available: boolean;
-    models: {
-      id: string;
-      label: string | null;
-      thinkingOptions?: { id: string; label: string | null }[] | null;
-      defaultThinkingOptionId?: string | null;
-    }[] | null;
-  };
   const PROVIDERS_TTL_MS = 5 * 60_000;
   const PROVIDERS_WAIT_MS = 2_000;
   let cachedProviders: ProviderEntry[] | null = null;
   let cachedProvidersAt = 0;
+  let cachedProvidersRefs: { listAvailable: unknown; listModels: unknown } | null = null;
   let inFlightProviders: Promise<ProviderEntry[]> | null = null;
 
   const refreshProviders = (daemon: SurfaceDaemonApi): Promise<ProviderEntry[]> => {
@@ -479,6 +515,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       );
       cachedProviders = entries;
       cachedProvidersAt = Date.now();
+      cachedProvidersRefs = { listAvailable: daemon.providers.listAvailable, listModels: daemon.providers.listModels };
       return entries;
     })().finally(() => {
       if (inFlightProviders === job) inFlightProviders = null;
@@ -488,6 +525,13 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   };
 
   const resolveProviders = async (daemon: SurfaceDaemonApi): Promise<ProviderEntry[]> => {
+    if (
+      cachedProvidersRefs !== null &&
+      (cachedProvidersRefs.listAvailable !== daemon.providers.listAvailable || cachedProvidersRefs.listModels !== daemon.providers.listModels)
+    ) {
+      cachedProviders = null;
+      cachedProvidersAt = 0;
+    }
     const now = Date.now();
     if (cachedProviders !== null && now - cachedProvidersAt < PROVIDERS_TTL_MS) {
       return cachedProviders;
@@ -524,12 +568,47 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     const daemon = resolveDaemon(context);
     const lanes = loadLanes(deps.stateDir, project.slug);
     if (!lanes.ok) return failure("lanes-unreadable", lanes.reason);
-    const lane = lanes.lanes[seat];
+    let providers: ProviderEntry[] = [];
+    try {
+      providers = await resolveProviders(daemon);
+    } catch {
+      // best-effort provider catalog lookup
+    }
+    const lane = sanitizeLaneWithProviders(lanes.lanes[seat], providers);
+    const parsed = parseLane(lane);
     let agent: SurfaceAgentSnapshot | undefined;
     try {
       agent = await seatOf(daemon, seat, project.slug);
     } catch (err) {
       return failure("daemon-unavailable", `cannot read the daemon's agents: ${messageOf(err)}`);
+    }
+    if (agent !== undefined) {
+      const targetProvider = parsed !== undefined ? `${parsed.provider}/${parsed.model}` : lane;
+      const sameProviderFamily =
+        parsed === undefined ||
+        agent.provider === parsed.provider ||
+        agent.provider === targetProvider ||
+        agent.provider.startsWith(`${parsed.provider}/`);
+      if (agent.status === "error" || !sameProviderFamily) {
+        const retired = await retireSeat(seat, project.slug, project.root, context);
+        if (!retired.ok) {
+          log(`${seat}: retiring unhealthy seat ${agent.id} before recreate did not cleanly settle — ${retired.error}`);
+        }
+        agent = undefined;
+      } else if (parsed !== undefined) {
+        const sync = deps.setAgentModel ?? setAgentModelViaCli;
+        const syncThinking = deps.setAgentThinking ?? setAgentThinkingViaCli;
+        const currentModel =
+          agent.model ?? (agent.provider.startsWith(`${parsed.provider}/`) ? agent.provider.slice(parsed.provider.length + 1) : null);
+        if (currentModel !== null && currentModel !== parsed.model && currentModel !== `${parsed.provider}/${parsed.model}`) {
+          await sync(agent.id, parsed.model, deps.home);
+        }
+        const currentThinking = agent.thinkingOptionId ?? "";
+        const targetThinking = parsed.thinking ?? "";
+        if (currentThinking !== targetThinking) {
+          await syncThinking(agent.id, targetThinking, deps.home);
+        }
+      }
     }
     let workspaceId: string | undefined;
     let paseoProjectId: string | undefined;
@@ -550,7 +629,6 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       // under <project-root> is written (the <home>-supervisor folder and
       // its AGENTS.md overwrite are retired; roles.ts owns the injection).
       const title = SEAT_TITLES[seat];
-      const parsed = parseLane(lane);
       const config =
         parsed?.thinking !== undefined
           ? { provider: `${parsed.provider}/${parsed.model}`, thinkingOptionId: parsed.thinking }
@@ -845,7 +923,15 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         if (!project.ok) return project;
         projectSlug = project.slug;
       }
-      const saved = saveLanes(deps.stateDir, { [input.lane]: input.value }, projectSlug);
+      const daemon = resolveDaemon(context);
+      let providers: ProviderEntry[] = [];
+      try {
+        providers = await resolveProviders(daemon);
+      } catch {
+        // best-effort provider catalog lookup
+      }
+      const sanitizedValue = sanitizeLaneWithProviders(input.value.trim(), providers);
+      const saved = saveLanes(deps.stateDir, { [input.lane]: sanitizedValue }, projectSlug);
       if (!saved.ok) return failure("invalid-lane", saved.reason);
       // The live seat sync (v0.0.14): a supervisor or lead save pushes the
       // model to that seat's live agent — project-scoped when the save was,
@@ -853,7 +939,6 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       let modelSync = "skipped — not a seat lane (applies to the next create)";
       if (input.lane === "supervisor" || input.lane === "lead") {
         const seat = input.lane;
-        const daemon = resolveDaemon(context);
         try {
           const agent = await seatOf(daemon, seat, projectSlug);
           if (agent !== undefined) {
@@ -864,8 +949,10 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
             const slash = laneValue.indexOf("/");
             const modelId = parsed?.model ?? (slash === -1 ? laneValue : laneValue.slice(slash + 1));
             const reply = await sync(agent.id, modelId, deps.home);
-            if (reply.ok && parsed?.thinking !== undefined) {
-              const thinkingReply = await syncThinking(agent.id, parsed.thinking, deps.home);
+            const hadThinkingInInput = parseLane(input.value.trim())?.thinking !== undefined;
+            const shouldClearThinking = parsed?.thinking === undefined && ((agent.thinkingOptionId ?? "") !== "" || hadThinkingInInput);
+            if (reply.ok && (parsed?.thinking !== undefined || shouldClearThinking)) {
+              const thinkingReply = await syncThinking(agent.id, parsed?.thinking ?? "", deps.home);
               modelSync = thinkingReply.ok
                 ? `applied — agent ${agent.id.slice(0, 8)} now runs ${laneValue}`
                 : `applied model (${modelId}); thinking sync failed — ${thinkingReply.reason}`;
