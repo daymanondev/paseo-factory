@@ -174,13 +174,16 @@ function LaneModalBody({
   const selectedModelMeta = activeModels?.find((m) => m.id === model.trim());
   const advertisedThinking = selectedModelMeta?.thinkingOptions ?? null;
   const defaultThinking = selectedModelMeta?.defaultThinkingOptionId ?? null;
+  const noThinkingSupported = Array.isArray(advertisedThinking) && advertisedThinking.length === 0;
   const thinkingChoices: { id: string; label: string }[] =
-    advertisedThinking !== null && advertisedThinking.length > 0
-      ? advertisedThinking.map((o) => ({ id: o.id, label: o.label ?? o.id }))
-      : FALLBACK_THINKING_OPTIONS;
+    advertisedThinking === null
+      ? FALLBACK_THINKING_OPTIONS
+      : advertisedThinking.length === 0
+        ? []
+        : advertisedThinking.map((o) => ({ id: o.id, label: o.label ?? o.id }));
 
   const trimmedModel = model.trim();
-  const trimmedThinking = thinking.trim();
+  const trimmedThinking = noThinkingSupported ? "" : thinking.trim();
   const value =
     provider === "eye.json"
       ? "eye.json"
@@ -201,21 +204,24 @@ function LaneModalBody({
     }
     const nextModels = available.find((entry) => entry.provider === nextProvider)?.models ?? null;
     if (nextModels !== null && nextModels.length > 0) {
-      const exists = nextModels.some((m) => m.id === model);
-      if (!exists) {
-        const preferred = nextModels.find((m) => m.id === "zai/glm-5.3") ?? nextModels[0]!;
-        setModel(preferred.id);
+      const existing = nextModels.find((m) => m.id === model);
+      const targetModel = existing ?? nextModels.find((m) => m.id === "zai/glm-5.3") ?? nextModels[0]!;
+      if (!existing) {
+        setModel(targetModel.id);
+      }
+      if (!targetModel.thinkingOptions || targetModel.thinkingOptions.length === 0 || !targetModel.thinkingOptions.some((o) => o.id === thinking)) {
         setThinking("");
       }
+    } else {
+      setThinking("");
     }
   };
 
   const selectModel = (nextModel: ProviderModelView): void => {
     setModel(nextModel.id);
-    // Keep current thinking if the new model also supports it; otherwise reset to default ("")
-    if (thinking !== "" && nextModel.thinkingOptions && nextModel.thinkingOptions.length > 0) {
-      const supported = nextModel.thinkingOptions.some((o) => o.id === thinking);
-      if (!supported) setThinking("");
+    // Keep current thinking only if the new model explicitly advertises support for it; otherwise reset to default ("")
+    if (!nextModel.thinkingOptions || nextModel.thinkingOptions.length === 0 || !nextModel.thinkingOptions.some((o) => o.id === thinking)) {
+      setThinking("");
     }
   };
 
@@ -459,13 +465,23 @@ function LaneModalBody({
           <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: SPACING[1] }}>
             <Text style={text(theme, "badge")}>3. THINKING LEVEL (REASONING EFFORT)</Text>
             <Text style={text(theme, "label")}>
-              {defaultThinking !== null ? `Model default: ${defaultThinking}` : "Optional — appended as :thinking"}
+              {noThinkingSupported
+                ? "No thinking variants supported by this model"
+                : defaultThinking !== null
+                  ? `Model default: ${defaultThinking}`
+                  : "Optional — appended as :thinking"}
             </Text>
           </View>
           <View style={{ flexDirection: "row", flexWrap: "wrap", gap: SPACING[1.5] }}>
             <Chip
               theme={theme}
-              label={defaultThinking !== null ? `Provider default (${defaultThinking})` : "Provider default"}
+              label={
+                noThinkingSupported
+                  ? "Default (none)"
+                  : defaultThinking !== null
+                    ? `Provider default (${defaultThinking})`
+                    : "Provider default"
+              }
               active={trimmedThinking === ""}
               count={0}
               onPress={() => setThinking("")}
