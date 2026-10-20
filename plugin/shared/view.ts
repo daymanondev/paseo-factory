@@ -202,7 +202,7 @@ export type CompanionStatus = z.infer<typeof CompanionStatusSchema>;
 export const CompanionInstallKindSchema = z.enum(["git", "directory", "npm"]);
 export type CompanionInstallKind = z.infer<typeof CompanionInstallKindSchema>;
 
-/** One Companion plugin card — the catalog entry joined with live daemon state. */
+/** One Companion (or Core) plugin card — the catalog entry joined with live daemon state and on-demand update status (v0.0.25, ADR 0012 §3–§4). */
 export const CompanionPluginViewSchema = z.object({
   id: z.string(),
   title: z.string(),
@@ -217,6 +217,14 @@ export const CompanionPluginViewSchema = z.object({
   installKind: CompanionInstallKindSchema.nullable(),
   installedSource: z.string().nullable(),
   currentRevision: z.string().nullable(),
+  /** Installed semantic version from package.json / npm metadata (v0.0.25, ADR 0012 §3) — null when uninstalled or unknown. */
+  version: z.string().nullable(),
+  /** Latest remote revision from the last on-demand update check (v0.0.25, ADR 0012 §4) — null when unchecked or local. */
+  latestRevision: z.string().nullable(),
+  /** How many commits behind the remote head the installed checkout is (v0.0.25) — null when unchecked or local. */
+  commitsBehind: z.number().int().nullable(),
+  /** Whether a remote update is available (`true`), up to date (`false`), or unchecked/local (`null`) (v0.0.25, ADR 0012 §4). */
+  updateAvailable: z.boolean().nullable(),
   error: z.string().nullable(),
 });
 export type CompanionPluginView = z.infer<typeof CompanionPluginViewSchema>;
@@ -287,8 +295,12 @@ export const FactoryViewSchema = z.object({
   project: ProjectViewSchema.nullable(),
   /** Every discovered Project for the header's Project Selector, slug order. */
   projects: z.array(ProjectViewSchema),
+  /** The Core plugin (`paseo-factory`) joined with the daemon's plugin list and update check cache (v0.0.25, ADR 0012 §2). */
+  corePlugin: CompanionPluginViewSchema,
   /** The companion catalog joined with the daemon's plugin list (v0.0.17, ADR 0012 §2). */
   companions: z.array(CompanionPluginViewSchema),
+  /** ISO timestamp of the last on-demand plugin update check for this daemon home — null when not yet checked (v0.0.25, ADR 0012 §4). */
+  pluginsCheckedAt: z.string().nullable(),
   /**
    * The `Private vault` status half (v0.0.21, ADR 0014 §4) — the card's whole
    * world, gathered per snapshot. An additive field on a v3 view: an older

@@ -21,6 +21,36 @@ export interface CompanionCatalogEntry {
   capabilities: readonly string[];
 }
 
+export interface CorePluginCatalogEntry {
+  id: "paseo-factory";
+  title: string;
+  tagline: string;
+  description: string;
+  canonicalSource: string;
+  sidebarLabel: string;
+  sidebarIcon: string;
+  capabilities: readonly string[];
+}
+
+/** Default semantic version for the Core plugin when the daemon list does not carry a disk path (e.g. unit test fixtures). */
+export const CORE_PLUGIN_DEFAULT_VERSION = "0.0.25";
+
+/** The Core Factory plugin entry — rendered at the top of the Plugins tab above the companion catalog (v0.0.25, ADR 0012 §2). */
+export const CORE_PLUGIN_ENTRY: CorePluginCatalogEntry = {
+  id: "paseo-factory",
+  title: "Factory Core",
+  tagline: "The verification core — Contracts, Gates, Fresh-eyes, Watch, Retro, and Project seats.",
+  description:
+    "Verification core for Paseo agents: owner-set contracts, a gate the agent cannot grade itself with, an append-only ledger, and standing Supervisor/Lead project seats.",
+  canonicalSource: "git:daymanondev/paseo-factory:plugin",
+  sidebarLabel: "Factory",
+  sidebarIcon: "Blocks",
+  capabilities: ["Contracts & Gates", "Append-Only Ledger", "Supervisor & Lead Seats", "Fresh-Eyes & Watch", "Private Vault Sync"],
+};
+
+/** Every plugin id the Plugins tab can manage (Core + Companions). */
+export type ManageablePluginId = CorePluginCatalogEntry["id"] | CompanionCatalogEntry["id"];
+
 /** The official Factory companion family — catalog order is the card order. */
 export const COMPANION_CATALOG: readonly CompanionCatalogEntry[] = [
   {
