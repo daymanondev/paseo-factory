@@ -66,21 +66,25 @@ export default function contribute(server: PluginServerContext) {
     log(`up v${SHELL_VERSION} — state ${stateDir}, plugin ${pluginDir}, claim CLI + git shim ${claimCliBinDir(stateDir)}`);
   }
 
-  // The global `/factory` skill (v0.0.20, ADR 0013 §3): reconcile
-  // `~/.agents/skills/factory/SKILL.md` at boot so the Owner can type
+  // The global `/factory` skill (v0.0.20, ADR 0013 §3; v0.0.23, ADR 0015 §5):
+  // reconcile both `~/.agents/skills/factory/SKILL.md` (pi / opencode) and
+  // `~/.claude/skills/factory/SKILL.md` (claude) at boot so the Owner can type
   // `/factory <directive>` in any session and bootstrap or dispatch into the
-  // Project's SLP loop. The skill carries this install's exact factory CLI
-  // invocation (the seats' `factoryCmd` precedent) but never a `--home` —
-  // the file is global across daemons, so the body names the default-home
-  // law and the override instead. The SAFE door: unlike the stateDir writes
-  // above, `~/.agents` is operator-global and not a precondition the plugin
-  // depends on, so an unwritable skills root warns and the boot continues
-  // (choke, spool, mailbox runtime) — a skill never kills a boot.
+  // Project's SLP loop via `factory supervisor dispatch`. The skill carries
+  // this install's exact factory CLI invocation (the seats' `factoryCmd`
+  // precedent) but never a `--home` — the file is global across daemons, so
+  // the body names the default-home law and the override instead. The SAFE
+  // door: unlike the stateDir writes above, `~/.agents` and `~/.claude` are
+  // operator-global and not preconditions the plugin depends on, so an
+  // unwritable skills root warns and the boot continues (choke, spool,
+  // mailbox runtime) — a skill never kills a boot.
   const quoted = (value: string) => (/\s/.test(value) ? `"${value}"` : value);
   const runner = /Paseo Helper/i.test(process.execPath) ? `ELECTRON_RUN_AS_NODE=1 ${quoted(process.execPath)}` : quoted(process.execPath);
   const factoryCmd = pluginDir === undefined ? "factory" : `${runner} ${quoted(join(pluginDir, "bin", "factory.mjs"))}`;
-  const skillPath = ensureFactorySkillSafe(join(homedir(), ".agents", "skills"), { factoryCmd }, log);
-  if (skillPath !== null) log(`skill: /factory reconciled at ${skillPath}`);
+  for (const skillsRoot of [join(homedir(), ".agents", "skills"), join(homedir(), ".claude", "skills")]) {
+    const skillPath = ensureFactorySkillSafe(skillsRoot, { factoryCmd }, log);
+    if (skillPath !== null) log(`skill: /factory reconciled at ${skillPath}`);
+  }
 
   // The choke (v0.0.4): judge every permit ask from a contracted agent,
   // answer it, and leave one ledger line per judged ask. The permission mode
