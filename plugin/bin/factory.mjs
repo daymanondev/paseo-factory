@@ -14,7 +14,7 @@
  *   factory [--home <paseoHome>] lanes [get [<lane>] | set <lane> <value>]
  *   factory [--home <paseoHome>] status
  *   factory [--home <paseoHome>] cost
- *   factory [--home <paseoHome>] vault status | hydrate | pull | push | seal
+ *   factory [--home <paseoHome>] vault status | hydrate | pull | push | seal | sync | import
  *
  * contract and accept submit through the spool and wait for the plugin's
  * reply — the CLI never writes the ledger. run (v0.0.5) is the driver: per
@@ -174,62 +174,83 @@ commands:
              fabricated zero. Whole ledger always, no filters in v1. A local
              read; the plugin need not be running.
 
-  vault      The Private vault's five verbs (v0.0.21, ADR 0014): status |
-             hydrate | pull | push | seal against the Owner's private GitHub
-             repository. Every verb prints one JSON object on stdout — vault
-             operations script and verify mechanically (spec §User Story 11;
-             exit 0 on success, 2 on any failure). The work rides the CLI's
-             own engine mirror (plugin/bin/vault.mjs — the CLIs import no
-             src/ code, ADR 0004), pinned to the core engine by
-             test/vault-cli.test.ts. The plugin-side stage-C tail — canonical-
-             key routing into Project checkouts, worktree hygiene, multi-node
-             ledger reconciliation — stays with the Factory surface's vault
-             RPCs; the CLI moves the vault itself.
+  vault      The Private vault's seven verbs (v0.0.21–v0.0.22, ADR 0014):
+             status | hydrate | pull | push | seal | sync | import against the
+             Owner's private GitHub repository. Every verb prints one JSON
+             object on stdout — vault operations script and verify mechanically
+             (spec §User Story 11; exit 0 on success, 2 on any failure). The
+             work rides the CLI's own engine mirror (plugin/bin/vault.mjs —
+             the CLIs import no src/ code, ADR 0004), pinned to the core
+             engine by test/vault-cli.test.ts.
 
              vault status        the VaultStatusView as JSON: configured,
                                  repo, branch, nodeId, hasPassphrase,
                                  cloneExists, hydration/push stamps, the four
-                                 shared-secret pills, hydratedApps. A pure
-                                 local read of <stateDir>/vault-config.json
-                                 and the <paseoHome>/vault-runtime probes —
-                                 the plugin need not be running
-             vault hydrate [--repo <owner/repo>] [--ref <ref>]
+                                 shared-secret pills, hydratedApps, gh CLI
+                                 readiness, error. A pure local read of
+                                 <stateDir>/vault-config.json and the
+                                 <paseoHome>/vault-runtime probes — the plugin
+                                 need not be running
+             vault sync [--repo <owner/repo>] [--branch <branch>] [--passphrase <pass>] [--overwrite-configs]
+                                 one-command unified sync: pull remote into
+                                 <paseoHome>/vault (provisioning via gh repo
+                                 create --private when missing, or
+                                 bootstrapping an empty remote), hydrate
+                                 <paseoHome>/vault-runtime, materialize per-
+                                 Project secrets and machine configs, reconcile
+                                 multi-node ledgers, then collect local state
+                                 and push any changes + ledger snapshots back
+             vault import [--asc-key <path>] [--asc-key-id <id>] [--asc-issuer <id>] [--gplay-key <path>] [--eye-config <path>] [--app <key>] [--keystore <path>] [--store-pass <pass>] [--key-alias <alias>] [--no-sync]
+                                 stage shared credentials (ASC .p8 + Key ID /
+                                 Issuer ID, Google Play service account JSON,
+                                 eye.json) and/or per-app signing (Android
+                                 release.keystore + signing.json) into
+                                 <paseoHome>/vault-runtime, rebuild env.json,
+                                 materialize into registered Projects, and run
+                                 a full vault sync unless --no-sync is set
+             vault hydrate [--repo <owner/repo>] [--ref <ref>] [--merge-ledgers] [--overwrite-configs]
                                  Direct hydrate (zero-clone): stream the repo
                                  tarball through the machine's gh api
                                  session, unseal envelopes in memory, write
                                  <paseoHome>/vault-runtime/ (0o600 under
-                                 secrets/) plus the env.json pointer index —
-                                 no .git checkout is left behind. --repo
+                                 secrets/) plus the env.json pointer index,
+                                 and materialize per-Project secrets and
+                                 machine configs (--overwrite-configs replaces
+                                 existing lanes/fleet/free-pool files;
+                                 --merge-ledgers reconciles multi-node ledgers)
+                                 — no .git checkout is left behind. --repo
                                  defaults to the saved config's repo (and on
                                  a home with no saved config it is persisted
                                  as the config of record), --ref to the
                                  configured branch (main); a locked
                                  (aes-256-gcm) envelope unseals through
                                  FACTORY_VAULT_PASSPHRASE or the saved config
-             vault pull          Vault sync: clone (or git pull --rebase
-                                 --autostash) <paseoHome>/vault from the
-                                 configured repo, then hydrate the runtime
-                                 tree from the checkout — every file
-                                 unsealed, envelopes and all. The CLI moves
-                                 the vault itself: materializing per-app
-                                 secrets into registered Projects and
-                                 reconciling multi-node ledgers ride the
-                                 Factory surface's factory.vault.pull RPC
-                                 (mergeLedgers), not this verb
+             vault pull [--merge-ledgers] [--overwrite-configs]
+                                 Vault pull: clone (or git pull --rebase
+                                 --autostash, or empty-remote bootstrap)
+                                 <paseoHome>/vault from the configured repo,
+                                 hydrate the runtime tree from the checkout,
+                                 materialize per-app secrets into registered
+                                 Projects and machine configs into <stateDir>
+                                 (--overwrite-configs replaces existing files),
+                                 and reconcile multi-node ledgers when
+                                 --merge-ledgers is passed
              vault push [--include-ledger]
-                                 package <paseoHome>/vault-runtime back into
-                                 the vault checkout under the re-seal law (a
-                                 checkout path holding an envelope never
-                                 receives raw plaintext back — unchanged
-                                 content keeps the sealed bytes, changed
-                                 content re-seals; env.json, the machine-
-                                 local pointer, never rides), commit and
-                                 push — a commit only when something
-                                 changed, never an empty one. --include-ledger
-                                 also snapshots the global ledger under
-                                 state/nodes/<nodeId>/ (per-project ledger
-                                 snapshots ride the plugin's canonical-key
-                                 routing)
+                                 collect local machine configs (lanes.json,
+                                 fleet.json, free-pool.json), registered
+                                 Project .store-release/manifest.json files,
+                                 and sealed eye.json, package
+                                 <paseoHome>/vault-runtime back into the vault
+                                 checkout under the re-seal law (a checkout
+                                 path holding an envelope never receives raw
+                                 plaintext back — unchanged content keeps the
+                                 sealed bytes, changed content re-seals;
+                                 env.json, the machine-local pointer, never
+                                 rides), commit and push — a commit only when
+                                 something changed, never an empty one.
+                                 --include-ledger also snapshots the global
+                                 ledger and every registered Project ledger
+                                 under state/nodes/<nodeId>/
              vault seal <file> --to <vaultPath> [--passphrase <pass>]
                                  seal one local file into the runtime tree at
                                  <paseoHome>/vault-runtime/<vaultPath> —
@@ -639,18 +660,31 @@ if (command === "cost") {
 }
 
 if (command === "vault") {
-  // v0.0.21 (ADR 0014): the Private vault's five verbs, one JSON object on
-  // stdout each (spec §User Story 11). The engine is the CLI's behavioral
-  // mirror (plugin/bin/vault.mjs) — the CLIs import no src/ code (ADR 0004);
-  // test/vault-cli.test.ts pins the mirror to the core engine. Usage
-  // failures go through fail() (usage + exit 2); engine refusals carry the
-  // stable vault-* codes on stderr, exit 2, never a partial JSON on stdout.
+  // v0.0.21–v0.0.22 (ADR 0014): the Private vault's seven verbs, one JSON
+  // object on stdout each (spec §User Story 11). The engine is the CLI's
+  // behavioral mirror (plugin/bin/vault.mjs) — the CLIs import no src/ code
+  // (ADR 0004); test/vault-cli.test.ts pins the mirror to the core engine.
+  // Usage failures go through fail() (usage + exit 2); engine refusals carry
+  // the stable vault-* codes on stderr, exit 2, never a partial JSON on stdout.
   const parsed = parseCommandOptions({
     repo: { type: "string" },
     ref: { type: "string" },
+    branch: { type: "string" },
     to: { type: "string" },
     passphrase: { type: "string" },
     "include-ledger": { type: "boolean" },
+    "merge-ledgers": { type: "boolean" },
+    "overwrite-configs": { type: "boolean" },
+    "asc-key": { type: "string" },
+    "asc-key-id": { type: "string" },
+    "asc-issuer": { type: "string" },
+    "gplay-key": { type: "string" },
+    "eye-config": { type: "string" },
+    app: { type: "string" },
+    keystore: { type: "string" },
+    "store-pass": { type: "string" },
+    "key-alias": { type: "string" },
+    "no-sync": { type: "boolean" },
   });
   const sub = parsed.positionals[0];
   const values = parsed.values;
@@ -660,7 +694,7 @@ if (command === "vault") {
     }
   };
 
-  if (sub === undefined) fail("vault: a subcommand is required — status | hydrate | pull | push | seal");
+  if (sub === undefined) fail("vault: a subcommand is required — status | hydrate | pull | push | seal | sync | import");
   const vault = await import("./vault.mjs");
 
   try {
@@ -675,10 +709,12 @@ if (command === "vault") {
 
     if (sub === "hydrate") {
       if (parsed.positionals.length > 1) fail(`vault hydrate: unexpected positional "${parsed.positionals[1]}"`);
-      refuseOptions("hydrate", ["repo", "ref"]);
+      refuseOptions("hydrate", ["repo", "ref", "merge-ledgers", "overwrite-configs"]);
       const result = await vault.hydrateVaultDirect(home, {
         ...(typeof values.repo === "string" && values.repo.trim() !== "" ? { repo: values.repo.trim() } : {}),
         ...(typeof values.ref === "string" && values.ref.trim() !== "" ? { ref: values.ref.trim() } : {}),
+        ...(values["merge-ledgers"] ? { mergeLedgers: true } : {}),
+        ...(values["overwrite-configs"] ? { overwriteConfigs: true } : {}),
       });
       console.log(JSON.stringify({ ok: true, mode: "direct", repo: result.repo, ref: result.ref, hydratedFiles: result.hydratedFiles, vault: vault.readVaultStatus(home) }, null, 2));
       process.exit(0);
@@ -686,8 +722,11 @@ if (command === "vault") {
 
     if (sub === "pull") {
       if (parsed.positionals.length > 1) fail(`vault pull: unexpected positional "${parsed.positionals[1]}"`);
-      refuseOptions("pull", []);
-      const result = await vault.pullVault(home);
+      refuseOptions("pull", ["merge-ledgers", "overwrite-configs"]);
+      const result = await vault.pullVault(home, {
+        ...(values["merge-ledgers"] ? { mergeLedgers: true } : {}),
+        ...(values["overwrite-configs"] ? { overwriteConfigs: true } : {}),
+      });
       console.log(JSON.stringify({ ok: true, mode: "sync", hydratedFiles: result.hydratedFiles, vault: vault.readVaultStatus(home) }, null, 2));
       process.exit(0);
     }
@@ -697,6 +736,49 @@ if (command === "vault") {
       refuseOptions("push", ["include-ledger"]);
       const result = await vault.pushVault(home, ...(values["include-ledger"] ? [{ includeLedger: true }] : []));
       console.log(JSON.stringify({ ok: true, pushed: result.pushed, pushedFiles: result.pushedFiles, vault: vault.readVaultStatus(home) }, null, 2));
+      process.exit(0);
+    }
+
+    if (sub === "sync") {
+      if (parsed.positionals.length > 1) fail(`vault sync: unexpected positional "${parsed.positionals[1]}"`);
+      refuseOptions("sync", ["repo", "branch", "passphrase", "overwrite-configs"]);
+      const result = await vault.syncVault(home, {
+        ...(typeof values.repo === "string" && values.repo.trim() !== "" ? { repo: values.repo.trim() } : {}),
+        ...(typeof values.branch === "string" && values.branch.trim() !== "" ? { branch: values.branch.trim() } : {}),
+        ...(typeof values.passphrase === "string" && values.passphrase !== "" ? { passphrase: values.passphrase } : {}),
+        ...(values["overwrite-configs"] ? { overwriteConfigs: true } : {}),
+      });
+      console.log(JSON.stringify({ ok: true, ...result, vault: vault.readVaultStatus(home) }, null, 2));
+      process.exit(0);
+    }
+
+    if (sub === "import") {
+      if (parsed.positionals.length > 1) fail(`vault import: unexpected positional "${parsed.positionals[1]}"`);
+      refuseOptions("import", [
+        "asc-key",
+        "asc-key-id",
+        "asc-issuer",
+        "gplay-key",
+        "eye-config",
+        "app",
+        "keystore",
+        "store-pass",
+        "key-alias",
+        "no-sync",
+      ]);
+      const result = await vault.importVaultSecrets(home, {
+        ...(typeof values["asc-key"] === "string" && values["asc-key"].trim() !== "" ? { ascKeyPath: resolvePath(values["asc-key"].trim()) } : {}),
+        ...(typeof values["asc-key-id"] === "string" && values["asc-key-id"].trim() !== "" ? { ascKeyId: values["asc-key-id"].trim() } : {}),
+        ...(typeof values["asc-issuer"] === "string" && values["asc-issuer"].trim() !== "" ? { ascIssuer: values["asc-issuer"].trim() } : {}),
+        ...(typeof values["gplay-key"] === "string" && values["gplay-key"].trim() !== "" ? { gplayKeyPath: resolvePath(values["gplay-key"].trim()) } : {}),
+        ...(typeof values["eye-config"] === "string" && values["eye-config"].trim() !== "" ? { eyeConfigPath: resolvePath(values["eye-config"].trim()) } : {}),
+        ...(typeof values.app === "string" && values.app.trim() !== "" ? { appKey: values.app.trim() } : {}),
+        ...(typeof values.keystore === "string" && values.keystore.trim() !== "" ? { keystorePath: resolvePath(values.keystore.trim()) } : {}),
+        ...(typeof values["store-pass"] === "string" && values["store-pass"] !== "" ? { storePass: values["store-pass"] } : {}),
+        ...(typeof values["key-alias"] === "string" && values["key-alias"].trim() !== "" ? { keyAlias: values["key-alias"].trim() } : {}),
+        ...(values["no-sync"] ? { syncAfterImport: false } : {}),
+      });
+      console.log(JSON.stringify({ ok: true, ...result, pushed: result.synced?.pushed ?? false, vault: vault.readVaultStatus(home) }, null, 2));
       process.exit(0);
     }
 
@@ -723,7 +805,7 @@ if (command === "vault") {
       process.exit(0);
     }
 
-    fail(`vault: unknown subcommand "${sub}" — use "vault status | hydrate | pull | push | seal"`);
+    fail(`vault: unknown subcommand "${sub}" — use "vault status | hydrate | pull | push | seal | sync | import"`);
   } catch (err) {
     const code = err !== null && typeof err === "object" && typeof err.code === "string" ? err.code : "vault-cli-failed";
     die(`vault: ${code}: ${err instanceof Error ? err.message : String(err)}`);

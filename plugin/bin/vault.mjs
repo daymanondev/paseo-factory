@@ -1,34 +1,21 @@
 /**
- * The CLIs' Private-vault engine mirror (v0.0.21, ADR 0014 / ADR 0004: plain
- * .mjs, importing no src/ or plugin-server code), kept behaviorally identical
- * to src/vault.ts on the surfaces `factory vault` touches by
- * test/vault-cli.test.ts: the dual-mode envelopes round-trip byte-for-byte
- * against sealVaultBuffer/unsealVaultBuffer, `vault status` prints exactly
- * readVaultStatus's view, hydrate/pull land the same vault-runtime tree the
- * core's transports land (envelopes, permissions, env.json included), and
- * push stages through the same re-seal law (a checkout path holding an
- * envelope never receives raw plaintext back — stageRuntimeFileIntoCheckout).
- *
- * What the mirror deliberately does NOT carry — the plugin-side stage-C tail
- * (canonical-key routing into Project checkouts, worktree hygiene, multi-node
- * ledger reconciliation) — stays with the Factory surface's vault RPCs; the
- * CLI moves the vault itself. `vault push --include-ledger` snapshots the
- * global ledger only, for the same reason: per-project snapshots ride the
- * canonical-key routing the plugin owns.
- *
- * The `<paseoHome>/vault` checkout this mirror writes has two legitimate
- * writers — the plugin process (the Factory surface's vault RPCs, through the
- * vendored core) and this CLI process. They are not serialized by a lock: the
- * Owner drives one surface at a time in normal operation, and a genuine race
- * collides on git's own `index.lock` and fails honestly
- * (`vault-runner-failed`) rather than corrupting the tree.
+ * The CLIs' Private-vault engine mirror (v0.0.21–v0.0.22, ADR 0014 / ADR 0004:
+ * plain .mjs, importing no src/ or plugin-server code), kept behaviorally
+ * identical to src/vault.ts by test/vault-cli.test.ts: dual-mode envelopes,
+ * VaultConfig persistence, readVaultStatus, probeGhAuth, ensureRemoteVaultRepo,
+ * empty-remote bootstrap, hydrateVaultDirect, pullVault, pushVault, syncVault,
+ * importVaultSecrets, sealVaultFile, canonical-key routing (parseVaultManifest,
+ * resolveVaultApps), per-Project secret materialization + worktree hygiene
+ * (ensureLocalGitExcludeAndWorktreeInclude), config collection/materialization,
+ * and multi-node Ledger reconciliation (reconcileVaultLedgers).
  */
-import { execFile } from "node:child_process";
-import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
+import { execFile, execFileSync } from "node:child_process";
+import { createCipheriv, createDecipheriv, randomBytes, randomUUID, scryptSync } from "node:crypto";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { hostname } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { homedir, hostname } from "node:os";
+import { basename, dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { gunzipSync } from "node:zlib";
+import { projectStateDir, resolveProject } from "./project.mjs";
 
 /** The core's FactoryError, mirrored as a plain Error carrying the stable code. */
 function vaultError(code, message) {
@@ -36,6 +23,8 @@ function vaultError(code, message) {
   err.code = code;
   return err;
 }
+
+const STATE_PLUGIN_DIR = "paseo-factory";
 
 // ===== Stage A (ADR 0014 Decision 3): dual-mode envelopes + config + status =====
 
@@ -89,7 +78,7 @@ export function unsealVaultBuffer(rawOrEnvelope, passphrase) {
 
 /** `<paseoHome>/plugin-state/paseo-factory/vault-config.json` — parity with the shell's stateDirFor. */
 function vaultConfigPath(paseoHome) {
-  return join(paseoHome, "plugin-state", "paseo-factory", "vault-config.json");
+  return join(paseoHome, "plugin-state", STATE_PLUGIN_DIR, "vault-config.json");
 }
 
 export function loadVaultConfig(paseoHome) {
@@ -272,57 +261,247 @@ function stampVaultConfig(paseoHome, prior, fallbackRepo, stamps) {
   });
 }
 
-// ===== Stage B (ADR 0014 Decision 2): both transports =====
+// ===== Stage B (ADR 0014 Decision 2): runner seam + gh probe + both transports =====
 
 /** The default runner's stdout ceiling — vault tarballs are binary and can be large. */
 const VAULT_RUNNER_MAX_BUFFER_BYTES = 256 * 1024 * 1024;
+const VAULT_FALLBACK_PATH_DIRS = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
 
 /**
- * One external vault CLI call (`gh api`, `git clone/pull/push`) — never a
- * shell string, always GIT_TERMINAL_PROMPT=0 (children fail instead of
- * prompting), mirroring the core's default VaultRunner.
+ * Appends macOS/POSIX fallback binary directories to `basePath` when absent,
+ * preserving any caller/test prepended entries first so `PATH` shims always win.
  */
-function runVaultChild(call) {
-  return new Promise((resolve, reject) => {
-    execFile(
-      call.command,
-      [...call.args],
-      {
-        cwd: call.cwd,
-        encoding: "buffer",
-        maxBuffer: VAULT_RUNNER_MAX_BUFFER_BYTES,
-        env: { ...process.env, ...call.env, GIT_TERMINAL_PROMPT: "0" },
-      },
-      (err, stdout, stderr) => {
-        if (err) {
-          const detail = stderr.length > 0 ? stderr.toString("utf8").trim() : err.message;
-          reject(vaultError("vault-runner-failed", `${call.command} ${call.args.join(" ")}: ${detail}`));
-          return;
+export function buildVaultPath(basePath = process.env.PATH ?? "") {
+  const segments = basePath.split(":").filter((segment) => segment !== "");
+  for (const fallback of VAULT_FALLBACK_PATH_DIRS) {
+    if (!segments.includes(fallback)) segments.push(fallback);
+  }
+  return segments.join(":");
+}
+
+export function createDefaultVaultRunner() {
+  return (call) =>
+    new Promise((resolve, reject) => {
+      const childEnv = { ...process.env, ...call.env, GIT_TERMINAL_PROMPT: "0" };
+      childEnv.PATH = buildVaultPath(childEnv.PATH);
+      execFile(
+        call.command,
+        [...call.args],
+        {
+          cwd: call.cwd,
+          encoding: "buffer",
+          maxBuffer: VAULT_RUNNER_MAX_BUFFER_BYTES,
+          env: childEnv,
+        },
+        (err, stdout, stderr) => {
+          if (err) {
+            const detail = stderr.length > 0 ? stderr.toString("utf8").trim() : err.message;
+            reject(vaultError("vault-runner-failed", `${call.command} ${call.args.join(" ")}: ${detail}`));
+            return;
+          }
+          resolve(stdout);
+        },
+      );
+    });
+}
+
+const builtinVaultRunner = createDefaultVaultRunner();
+
+const GH_AUTH_CACHE_TTL_MS = 15_000;
+const ghAuthCache = new Map();
+
+/** Clears the 15-second `probeGhAuth` cache (used by tests and explicit login re-checks). */
+export function clearGhAuthCache() {
+  ghAuthCache.clear();
+}
+
+/**
+ * Probes GitHub CLI (`gh`) installation and active `github.com` login via
+ * `gh auth status --json hosts` (falling back to `gh api user --jq .login`
+ * when `--json` is unsupported on older `gh`), cached for 15 seconds per
+ * runner so snapshot polls never spam subprocesses.
+ */
+export async function probeGhAuth(runner) {
+  const effectiveRunner = runner ?? builtinVaultRunner;
+  const now = Date.now();
+  const cached = ghAuthCache.get(effectiveRunner);
+  if (cached !== undefined && now < cached.expiresAt) {
+    return { ...cached.value };
+  }
+
+  const store = (value) => {
+    ghAuthCache.set(effectiveRunner, { expiresAt: Date.now() + GH_AUTH_CACHE_TTL_MS, value });
+    return { ...value };
+  };
+
+  try {
+    const out = await effectiveRunner({ command: "gh", args: ["auth", "status", "--json", "hosts"] });
+    const parsed = parseGhHostsStatus(out.toString("utf8"));
+    if (parsed.kind === "authenticated") {
+      return store({
+        ghInstalled: true,
+        ghAuthenticated: true,
+        ghUser: parsed.login,
+        suggestedRepo: `${parsed.login}/factory-vault`,
+      });
+    }
+    if (parsed.kind === "unauthenticated") {
+      return store({ ghInstalled: true, ghAuthenticated: false, ghUser: null, suggestedRepo: null });
+    }
+  } catch (err) {
+    if (isGhMissingError(err)) {
+      return store({ ghInstalled: false, ghAuthenticated: false, ghUser: null, suggestedRepo: null });
+    }
+    if (isGhUnauthenticatedError(err)) {
+      return store({ ghInstalled: true, ghAuthenticated: false, ghUser: null, suggestedRepo: null });
+    }
+  }
+
+  try {
+    const out = await effectiveRunner({ command: "gh", args: ["api", "user", "--jq", ".login"] });
+    const login = out.toString("utf8").trim().split(/\r?\n/)[0]?.trim() ?? "";
+    if (login !== "" && !login.includes(" ") && !login.startsWith("{")) {
+      return store({
+        ghInstalled: true,
+        ghAuthenticated: true,
+        ghUser: login,
+        suggestedRepo: `${login}/factory-vault`,
+      });
+    }
+  } catch (err) {
+    if (isGhMissingError(err)) {
+      return store({ ghInstalled: false, ghAuthenticated: false, ghUser: null, suggestedRepo: null });
+    }
+  }
+
+  return store({ ghInstalled: true, ghAuthenticated: false, ghUser: null, suggestedRepo: null });
+}
+
+function parseGhHostsStatus(raw) {
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { kind: "unknown" };
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return { kind: "unknown" };
+  const hosts = parsed.hosts;
+  if (typeof hosts !== "object" || hosts === null) return { kind: "unknown" };
+
+  const candidates = [];
+  if (Array.isArray(hosts)) {
+    for (const item of hosts) {
+      if (typeof item === "object" && item !== null && !Array.isArray(item)) {
+        if (item.host === undefined || item.host === "github.com") candidates.push(item);
+      }
+    }
+  } else {
+    const ghCom = hosts["github.com"];
+    if (Array.isArray(ghCom)) {
+      for (const item of ghCom) {
+        if (typeof item === "object" && item !== null && !Array.isArray(item)) {
+          candidates.push(item);
         }
-        resolve(stdout);
-      },
-    );
+      }
+    } else if (typeof ghCom === "object" && ghCom !== null) {
+      candidates.push(ghCom);
+    }
+  }
+
+  const valid = candidates.filter((entry) => {
+    const login = typeof entry.login === "string" ? entry.login.trim() : typeof entry.user === "string" ? entry.user.trim() : "";
+    if (login === "") return false;
+    if (typeof entry.state === "string" && entry.state !== "success") return false;
+    if (entry.authenticated === false) return false;
+    return true;
   });
+
+  if (valid.length === 0) return { kind: "unauthenticated" };
+  const chosen = valid.find((entry) => entry.active === true) ?? valid[0];
+  const login = (typeof chosen.login === "string" ? chosen.login : chosen.user).trim();
+  return { kind: "authenticated", login };
+}
+
+function isGhMissingError(err) {
+  if (err?.code === "ENOENT") return true;
+  const msg = err instanceof Error ? err.message : String(err);
+  return /\bENOENT\b|command not found|spawn gh\b.*not found|\bgh:\s*not found|\bgh not found\b|^not found$/i.test(msg);
+}
+
+function isGhUnauthenticatedError(err) {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /not logged in|You are not logged into|authentication failed|To log in, run|no oauth token/i.test(msg);
+}
+
+/**
+ * Ensures the remote GitHub repository `<owner>/<repo>` exists: returns
+ * `{ created: false, repo }` immediately for local filesystem paths or URLs,
+ * otherwise runs `gh auth setup-git --hostname github.com` (best-effort),
+ * probes `gh repo view <slug> --json nameWithOwner`, and creates the private
+ * repository via `gh repo create <slug> --private --add-readme --description "Private vault for paseo-factory"`
+ * when absent.
+ */
+export async function ensureRemoteVaultRepo(repo, runner) {
+  const trimmed = repo.trim();
+  if (
+    isAbsolute(trimmed) ||
+    trimmed.startsWith("./") ||
+    trimmed.startsWith("../") ||
+    trimmed.startsWith("file://") ||
+    trimmed.includes("://") ||
+    /^[^/]+@[^:]+:/.test(trimmed)
+  ) {
+    return { created: false, repo };
+  }
+  const stripped = trimmed.replace(/^git:/, "").replace(/\.git$/, "");
+  if (!/^[^\s/]+\/[^\s/]+$/.test(stripped)) {
+    return { created: false, repo };
+  }
+
+  const effectiveRunner = runner ?? builtinVaultRunner;
+  try {
+    await effectiveRunner({ command: "gh", args: ["auth", "setup-git", "--hostname", "github.com"] });
+  } catch {
+    // best-effort: setup-git is non-fatal when git credentials are already configured
+  }
+
+  try {
+    await effectiveRunner({ command: "gh", args: ["repo", "view", stripped, "--json", "nameWithOwner"] });
+    return { created: false, repo: stripped };
+  } catch {
+    // repository does not exist yet — create it below
+  }
+
+  await effectiveRunner({
+    command: "gh",
+    args: ["repo", "create", stripped, "--private", "--add-readme", "--description", "Private vault for paseo-factory"],
+  });
+  return { created: true, repo: stripped };
 }
 
 /**
  * Mode A — Direct hydrate: streams GET /repos/{owner}/{repo}/tarball/{ref}
  * through the machine's `gh api` session, gunzips and walks the tar in
- * memory, unseals each entry, and writes the three-tier layout into
+ * memory, unseals each entry, writes the three-tier layout into
  * `<paseoHome>/vault-runtime/` (0o600 under secrets/) — no `.git` checkout
- * on disk. Returns the repo/ref used and the hydrated vault-relative paths.
+ * on disk — then runs stage-C hydration (per-Project materialization, config
+ * materialization, env.json) and optional ledger reconciliation.
  */
 export async function hydrateVaultDirect(paseoHome, options = {}) {
   const config = loadVaultConfig(paseoHome);
   const repo = options.repo ?? config?.repo;
   if (repo === undefined || repo.trim() === "") {
-    throw vaultError("vault-not-configured", "hydrate needs a vault repo — pass --repo <owner/repo> or save a VaultConfig first");
+    throw vaultError(
+      "vault-not-configured",
+      "Private vault is not configured yet — click Enable & Sync Vault or save a repository in Vault settings",
+    );
   }
   const slug = githubRepoSlug(repo);
   const ref = options.ref ?? config?.branch ?? "main";
+  const runner = options.runner ?? builtinVaultRunner;
   const env = options.token !== undefined && options.token !== "" ? { GH_TOKEN: options.token } : undefined;
 
-  const tarball = await runVaultChild({ command: "gh", args: ["api", `repos/${slug}/tarball/${ref}`], env });
+  const tarball = await runner({ command: "gh", args: ["api", `repos/${slug}/tarball/${ref}`], env });
   const archive = tarball.length > 2 && tarball[0] === 0x1f && tarball[1] === 0x8b ? gunzipSync(tarball) : tarball;
 
   const passphrase = resolveVaultPassphrase(config?.passphrase);
@@ -334,81 +513,102 @@ export async function hydrateVaultDirect(paseoHome, options = {}) {
     hydratedFiles.push(vaultPath);
   }
 
-  writeVaultRuntimeEnv(paseoHome);
+  applyVaultHydration(paseoHome, options.overwriteConfigs ?? false);
+  if (options.mergeLedgers === true) reconcileVaultLedgerState(paseoHome);
   stampVaultConfig(paseoHome, config, repo, { lastHydratedAt: nowIso(), lastHydrateMode: "direct" });
   return { repo, ref, hydratedFiles: hydratedFiles.sort() };
 }
 
 /**
  * Mode B, hydrating leg — Vault sync: `git clone` when `<paseoHome>/vault` is
- * absent, else `git pull --rebase --autostash`, then hydrate
- * `<paseoHome>/vault-runtime/` from the checkout (every file unsealed, 0o600
- * under secrets/, `.git` never walked). Stamps lastHydrateMode: "sync".
+ * absent (with empty-remote fallback), else `git pull --rebase --autostash`,
+ * then hydrate `<paseoHome>/vault-runtime/` from the checkout, materialize
+ * per-Project secrets and configs, and optionally reconcile multi-node ledgers.
  */
-export async function pullVault(paseoHome) {
+export async function pullVault(paseoHome, options = {}) {
   const config = requiredVaultConfig(paseoHome);
+  const runner = options.runner ?? builtinVaultRunner;
   const vaultDir = join(paseoHome, "vault");
 
   if (existsSync(join(vaultDir, ".git"))) {
-    await runVaultChild({ command: "git", args: ["pull", "--rebase", "--autostash"], cwd: vaultDir });
+    try {
+      await runner({ command: "git", args: ["pull", "--rebase", "--autostash"], cwd: vaultDir });
+    } catch (err) {
+      if (!isEmptyOrUnbornPullError(err)) throw err;
+      try {
+        await runner({ command: "git", args: ["pull", "--rebase", "--autostash", "origin", config.branch], cwd: vaultDir });
+      } catch (retryErr) {
+        if (!isEmptyOrUnbornPullError(retryErr)) throw retryErr;
+      }
+    }
   } else {
-    if (existsSync(vaultDir)) rmSync(vaultDir, { recursive: true, force: true });
-    await runVaultChild({ command: "git", args: ["clone", "--branch", config.branch, vaultRemoteUrl(config.repo), vaultDir] });
+    await ensureVaultCheckout(runner, config, vaultDir);
   }
 
   const hydratedFiles = hydrateRuntimeFromTree(paseoHome, vaultDir, resolveVaultPassphrase(config.passphrase));
-  writeVaultRuntimeEnv(paseoHome);
+  applyVaultHydration(paseoHome, options.overwriteConfigs ?? false);
+  if (options.mergeLedgers === true) reconcileVaultLedgerState(paseoHome);
   stampVaultConfig(paseoHome, config, config.repo, { lastHydratedAt: nowIso(), lastHydrateMode: "sync" });
   return { hydratedFiles };
 }
 
 /**
  * Mode B, publishing leg: ensures the cached checkout at `<paseoHome>/vault`
- * (cloning when absent), packages the `vault-runtime` tree into it under the
- * push-side re-seal law (stageRuntimeFileIntoCheckout — envelopes are never
- * overwritten with their own unsealed plaintext; env.json, the machine-local
- * pointer index, never rides), optionally snapshots the global ledger under
- * this node's namespace, commits (nothing when the tree is clean — no empty
- * commits) and pushes. Stamps lastPushedAt.
+ * (cloning when absent, with empty-remote fallback), collects local state into
+ * `vault-runtime`, packages `vault-runtime` into the checkout under the
+ * push-side re-seal law, snapshots both global and per-Project ledgers under
+ * this node's namespace when `includeLedger` is set, commits (when dirty) and
+ * pushes. Stamps lastPushedAt.
  */
 export async function pushVault(paseoHome, options = {}) {
   const config = requiredVaultConfig(paseoHome);
+  const runner = options.runner ?? builtinVaultRunner;
   const vaultDir = join(paseoHome, "vault");
 
-  if (!existsSync(join(vaultDir, ".git"))) {
-    if (existsSync(vaultDir)) rmSync(vaultDir, { recursive: true, force: true });
-    await runVaultChild({ command: "git", args: ["clone", "--branch", config.branch, vaultRemoteUrl(config.repo), vaultDir] });
-  }
+  await ensureVaultCheckout(runner, config, vaultDir);
+  collectLocalStateIntoRuntime(paseoHome);
 
   const runtimeRoot = join(paseoHome, "vault-runtime");
   const staged = existsSync(runtimeRoot) ? walkFiles(runtimeRoot, (rel) => rel === "env.json") : [];
   const passphrase = resolveVaultPassphrase(config.passphrase);
   for (const rel of staged) {
-    stageRuntimeFileIntoCheckout(join(runtimeRoot, rel), join(vaultDir, rel), passphrase);
+    stageRuntimeFileIntoCheckout(join(runtimeRoot, rel), join(vaultDir, rel), passphrase, rel);
   }
   const pushedFiles = new Set(staged);
   if (options.includeLedger) {
-    // the global ledger only — per-project snapshots ride the canonical-key
-    // routing the plugin surface owns (the mirror deliberately skips stage C)
-    const globalLedger = join(paseoHome, "plugin-state", "paseo-factory", "ledger.jsonl");
+    const stateDir = vaultStateDir(paseoHome);
+    const globalLedger = join(stateDir, "ledger.jsonl");
     if (existsSync(globalLedger)) {
       const target = join(vaultDir, "state", "nodes", config.nodeId, "global-ledger.jsonl");
       mkdirSync(dirname(target), { recursive: true });
       copyFileSync(globalLedger, target);
       pushedFiles.add(`state/nodes/${config.nodeId}/global-ledger.jsonl`);
     }
+    const slugToKey = new Map();
+    for (const app of resolveVaultApps(paseoHome, readVaultManifestAt(vaultDir))) {
+      if (app.projectSlug !== null) slugToKey.set(app.projectSlug, app.canonicalAppKey);
+    }
+    for (const slug of listDirNames(join(stateDir, "projects"))) {
+      const projectLedger = join(stateDir, "projects", slug, "ledger.jsonl");
+      if (!existsSync(projectLedger)) continue;
+      const key = slugToKey.get(slug) ?? slug;
+      const target = join(vaultDir, "state", "nodes", config.nodeId, "projects", key, "ledger.jsonl");
+      mkdirSync(dirname(target), { recursive: true });
+      copyFileSync(projectLedger, target);
+      pushedFiles.add(`state/nodes/${config.nodeId}/projects/${key}/ledger.jsonl`);
+    }
   }
 
-  const status = (await runVaultChild({ command: "git", args: ["status", "--porcelain"], cwd: vaultDir })).toString("utf8").trim();
+  const status = (await runner({ command: "git", args: ["status", "--porcelain"], cwd: vaultDir })).toString("utf8").trim();
   const pushed = status !== "";
   if (pushed) {
-    await runVaultChild({ command: "git", args: ["add", "-A"], cwd: vaultDir });
-    await runVaultChild({
+    await runner({ command: "git", args: ["add", "-A"], cwd: vaultDir });
+    await runner({
       command: "git",
       args: ["-c", "user.name=paseo-factory", "-c", "user.email=vault@paseo-factory.invalid", "commit", "-m", `vault push from ${config.nodeId}`],
       cwd: vaultDir,
     });
-    await runVaultChild({ command: "git", args: ["push", "origin", config.branch], cwd: vaultDir });
+    await runner({ command: "git", args: ["push", "origin", config.branch], cwd: vaultDir });
   }
 
   stampVaultConfig(paseoHome, config, config.repo, { lastPushedAt: nowIso() });
@@ -416,29 +616,321 @@ export async function pushVault(paseoHome, options = {}) {
 }
 
 /**
- * Stages one vault-runtime file into the vault checkout under the push-side
- * re-seal law (src/vault.ts's stageRuntimeFileIntoCheckout, mirrored): a
- * checkout path holding an envelope never receives raw plaintext back —
- * byte-identical content keeps the sealed bytes (a no-op pull → push commits
- * nothing), genuinely changed plaintext is re-sealed with the envelope's own
- * mode, another envelope rides verbatim, and an envelope this machine cannot
- * unseal to verify against refuses with vault-push-passphrase-required.
- * Paths with no envelope at the far end ride verbatim — sealing policy stays
- * with whoever wrote the file.
+ * Unified smart bidirectional sync (spec §Implementation Decisions 3):
+ * 1. Auto-selects `<ghUser>/factory-vault` via `probeGhAuth` when unconfigured.
+ * 2. Persists `vault-config.json` and ensures the remote repository exists via `ensureRemoteVaultRepo`.
+ * 3. Runs `pullVault` (hydrating secrets, materializing configs, and reconciling multi-node ledgers).
+ * 4. Runs `pushVault` (collecting local configs/state/store-manifests and node ledgers, then pushing).
  */
-function stageRuntimeFileIntoCheckout(runtimePath, target, passphrase) {
+export async function syncVault(paseoHome, options = {}) {
+  const existing = loadVaultConfig(paseoHome);
+  let repo = options.repo !== undefined && options.repo.trim() !== "" ? options.repo.trim() : existing?.repo?.trim() ?? "";
+  if (repo === "") {
+    const gh = await probeGhAuth(options.runner);
+    if (gh.ghAuthenticated && gh.suggestedRepo !== null && gh.suggestedRepo.trim() !== "") {
+      repo = gh.suggestedRepo.trim();
+    } else {
+      throw vaultError(
+        "vault-not-configured",
+        "Private vault is not configured yet — run `gh auth login --web -p https` then click Enable & Sync Vault or save a repository in Vault settings",
+      );
+    }
+  }
+
+  const branch = options.branch !== undefined && options.branch.trim() !== "" ? options.branch.trim() : existing?.branch ?? "main";
+  const passphrase =
+    options.passphrase === undefined ? existing?.passphrase : options.passphrase === "" ? undefined : options.passphrase;
+
+  const ensured = await ensureRemoteVaultRepo(repo, options.runner);
+  repo = ensured.repo;
+
+  saveVaultConfig(paseoHome, {
+    repo,
+    branch,
+    ...(existing?.nodeId === undefined ? {} : { nodeId: existing.nodeId }),
+    ...(passphrase === undefined ? {} : { passphrase }),
+    ...(existing?.lastHydratedAt === undefined ? {} : { lastHydratedAt: existing.lastHydratedAt }),
+    ...(existing?.lastHydrateMode === undefined ? {} : { lastHydrateMode: existing.lastHydrateMode }),
+    ...(existing?.lastPushedAt === undefined ? {} : { lastPushedAt: existing.lastPushedAt }),
+  });
+
+  const pullResult = await pullVault(paseoHome, {
+    mergeLedgers: options.mergeLedgers ?? true,
+    overwriteConfigs: options.overwriteConfigs ?? false,
+    runner: options.runner,
+  });
+
+  const pushResult = await pushVault(paseoHome, {
+    includeLedger: options.includeLedger ?? true,
+    runner: options.runner,
+  });
+
+  const createdNote = ensured.created ? `created private repo ${repo}; ` : "";
+  const pushNote = pushResult.pushed
+    ? `pushed ${pushResult.pushedFiles.length} file(s)`
+    : `up to date (${pushResult.pushedFiles.length} file(s) tracked)`;
+  const summary = `Vault synced with ${repo} (${branch}): ${createdNote}hydrated ${pullResult.hydratedFiles.length} file(s), ${pushNote}.`;
+
+  return {
+    createdRepo: ensured.created,
+    repo,
+    branch,
+    hydratedFiles: pullResult.hydratedFiles,
+    pushedFiles: pushResult.pushedFiles,
+    pushed: pushResult.pushed,
+    summary,
+  };
+}
+
+function expandImportPath(rawPath) {
+  const trimmed = rawPath.trim();
+  if (trimmed === "~") return homedir();
+  if (trimmed.startsWith("~/")) return join(homedir(), trimmed.slice(2));
+  return trimmed;
+}
+
+function readImportFile(rawPath, label) {
+  const path = expandImportPath(rawPath);
+  if (!existsSync(path)) {
+    throw vaultError("vault-import-file-not-found", `${label} file not found at "${path}"`);
+  }
+  return readFileSync(path);
+}
+
+/**
+ * 1-Click Key Import (spec §Implementation Decisions 3):
+ * Imports `.p8`, ASC credentials, Google Play service account `.json`, `eye.json`,
+ * and per-app Android/Firebase signing files from disk (or `process.env` when no
+ * explicit inputs are given) into `<paseoHome>/vault-runtime/secrets/`, updates
+ * `env.json` and local project checkouts via `applyVaultHydration`, and optionally
+ * runs `syncVault` so imported keys are sealed and pushed to the remote vault.
+ */
+export async function importVaultSecrets(paseoHome, input = {}) {
+  const explicitFields = [
+    input.ascKeyPath,
+    input.ascKeyId,
+    input.ascIssuer,
+    input.gplayKeyPath,
+    input.eyeConfigPath,
+    input.keystorePath,
+    input.storePass,
+    input.keyAlias,
+    input.firebaseProjectId,
+    input.googleServicesJsonPath,
+    input.googleServiceInfoPlistPath,
+  ];
+  const hasExplicit = explicitFields.some((val) => val !== undefined && val.trim() !== "");
+
+  const ascKeyPath = hasExplicit
+    ? input.ascKeyPath?.trim() || undefined
+    : process.env.ASC_KEY_PATH?.trim() && existsSync(expandImportPath(process.env.ASC_KEY_PATH))
+      ? process.env.ASC_KEY_PATH.trim()
+      : undefined;
+  const ascKeyId = hasExplicit ? input.ascKeyId?.trim() || undefined : process.env.ASC_KEY_ID?.trim() || undefined;
+  const ascIssuer = hasExplicit ? input.ascIssuer?.trim() || undefined : process.env.ASC_ISSUER?.trim() || undefined;
+  const gplayKeyPath = hasExplicit
+    ? input.gplayKeyPath?.trim() || undefined
+    : process.env.GPLAY_KEY_PATH?.trim() && existsSync(expandImportPath(process.env.GPLAY_KEY_PATH))
+      ? process.env.GPLAY_KEY_PATH.trim()
+      : undefined;
+  const eyeConfigPath = input.eyeConfigPath?.trim() || undefined;
+
+  const config = loadVaultConfig(paseoHome);
+  const passphrase = resolveVaultPassphrase(config?.passphrase);
+  const importedFiles = new Set();
+  const runtimeRoot = join(paseoHome, "vault-runtime");
+
+  if (ascKeyPath !== undefined) {
+    const bytes = unsealVaultBuffer(readImportFile(ascKeyPath, "ASC .p8 key"), passphrase);
+    const rel = `secrets/shared/${SHARED_SECRET_FILES.ascKey}`;
+    writeRuntimeFile(paseoHome, rel, bytes);
+    importedFiles.add(rel);
+  }
+
+  if (ascKeyId !== undefined || ascIssuer !== undefined) {
+    const rel = `secrets/shared/${SHARED_SECRET_FILES.ascCredentials}`;
+    const prior = readJsonFile(join(runtimeRoot, rel)) ?? {};
+    const merged = {
+      ...prior,
+      ...(ascKeyId !== undefined ? { keyId: ascKeyId } : {}),
+      ...(ascIssuer !== undefined ? { issuerId: ascIssuer } : {}),
+    };
+    writeRuntimeFile(paseoHome, rel, Buffer.from(`${JSON.stringify(merged, null, 2)}\n`, "utf8"));
+    importedFiles.add(rel);
+  }
+
+  if (gplayKeyPath !== undefined) {
+    const bytes = unsealVaultBuffer(readImportFile(gplayKeyPath, "Google Play service account JSON"), passphrase);
+    const rel = `secrets/shared/${SHARED_SECRET_FILES.gplayServiceAccount}`;
+    writeRuntimeFile(paseoHome, rel, bytes);
+    importedFiles.add(rel);
+  }
+
+  if (eyeConfigPath !== undefined) {
+    const bytes = unsealVaultBuffer(readImportFile(eyeConfigPath, "Eye config JSON"), passphrase);
+    const rel = `secrets/shared/${SHARED_SECRET_FILES.eyeConfig}`;
+    writeRuntimeFile(paseoHome, rel, bytes);
+    importedFiles.add(rel);
+  }
+
+  const keystorePath = input.keystorePath?.trim() || undefined;
+  const storePass = input.storePass?.trim() || undefined;
+  const keyAlias = input.keyAlias?.trim() || undefined;
+  const firebaseProjectId = input.firebaseProjectId?.trim() || undefined;
+  const googleServicesJsonPath = input.googleServicesJsonPath?.trim() || undefined;
+  const googleServiceInfoPlistPath = input.googleServiceInfoPlistPath?.trim() || undefined;
+
+  const hasAppInputs =
+    keystorePath !== undefined ||
+    storePass !== undefined ||
+    keyAlias !== undefined ||
+    firebaseProjectId !== undefined ||
+    googleServicesJsonPath !== undefined ||
+    googleServiceInfoPlistPath !== undefined;
+
+  if (hasAppInputs) {
+    let appKey = input.appKey?.trim() ?? "";
+    if (appKey === "") {
+      const roots = collectCandidateProjectRoots(paseoHome);
+      const firstFacts = roots.map(inspectProjectRootFacts).find((f) => f !== null) ?? null;
+      appKey = firstFacts?.basename ?? "default";
+    }
+    assertSafeVaultPath(`secrets/apps/${appKey}`);
+
+    if (keystorePath !== undefined) {
+      const bytes = unsealVaultBuffer(readImportFile(keystorePath, "Android release keystore"), passphrase);
+      const rel = `secrets/apps/${appKey}/release.keystore`;
+      writeRuntimeFile(paseoHome, rel, bytes);
+      importedFiles.add(rel);
+    }
+
+    if (storePass !== undefined || keyAlias !== undefined) {
+      const rel = `secrets/apps/${appKey}/signing.json`;
+      const prior = readJsonFile(join(runtimeRoot, rel)) ?? {};
+      const merged = {
+        ...prior,
+        ...(storePass !== undefined
+          ? {
+              storePassword: storePass,
+              ...(typeof prior.keyPassword === "string" && prior.keyPassword !== "" ? {} : { keyPassword: storePass }),
+            }
+          : {}),
+        ...(keyAlias !== undefined ? { keyAlias } : {}),
+      };
+      writeRuntimeFile(paseoHome, rel, Buffer.from(`${JSON.stringify(merged, null, 2)}\n`, "utf8"));
+      importedFiles.add(rel);
+    }
+
+    if (googleServicesJsonPath !== undefined) {
+      const bytes = unsealVaultBuffer(readImportFile(googleServicesJsonPath, "google-services.json"), passphrase);
+      const rel = `secrets/apps/${appKey}/google-services.json`;
+      writeRuntimeFile(paseoHome, rel, bytes);
+      importedFiles.add(rel);
+    } else if (firebaseProjectId !== undefined) {
+      const rel = `secrets/apps/${appKey}/google-services.json`;
+      const prior = readJsonFile(join(runtimeRoot, rel)) ?? {};
+      const priorInfo =
+        typeof prior.project_info === "object" && prior.project_info !== null && !Array.isArray(prior.project_info)
+          ? prior.project_info
+          : {};
+      const merged = {
+        ...prior,
+        project_info: { ...priorInfo, project_id: firebaseProjectId },
+      };
+      writeRuntimeFile(paseoHome, rel, Buffer.from(`${JSON.stringify(merged, null, 2)}\n`, "utf8"));
+      importedFiles.add(rel);
+    }
+
+    if (googleServiceInfoPlistPath !== undefined) {
+      const bytes = unsealVaultBuffer(readImportFile(googleServiceInfoPlistPath, "GoogleService-Info.plist"), passphrase);
+      const rel = `secrets/apps/${appKey}/GoogleService-Info.plist`;
+      writeRuntimeFile(paseoHome, rel, bytes);
+      importedFiles.add(rel);
+    }
+
+    const manifest = existsSync(join(runtimeRoot, "vault.manifest.json"))
+      ? readVaultManifestAt(runtimeRoot)
+      : readVaultManifestAt(join(paseoHome, "vault"));
+    if (manifest[appKey] === undefined) {
+      manifest[appKey] = { repoBasename: appKey };
+      writeRuntimeFile(paseoHome, "vault.manifest.json", Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, "utf8"));
+    }
+  }
+
+  applyVaultHydration(paseoHome);
+
+  const sortedImported = [...importedFiles].sort();
+  let synced = null;
+  if (input.syncAfterImport !== false) {
+    const configured = (loadVaultConfig(paseoHome)?.repo?.trim() ?? "") !== "";
+    const canSync = configured || (await probeGhAuth(input.runner)).ghAuthenticated;
+    if (canSync) {
+      synced = await syncVault(paseoHome, { runner: input.runner });
+    }
+  }
+
+  const syncSuffix =
+    synced !== null
+      ? ` and synced with ${synced.repo} (${synced.pushed ? `pushed ${synced.pushedFiles.length} file(s)` : "up to date"})`
+      : " into local vault-runtime";
+  const summary =
+    sortedImported.length > 0
+      ? `Imported ${sortedImported.length} secret file(s) (${sortedImported.join(", ")})${syncSuffix}.`
+      : `No new secret files imported${synced !== null ? `; synced with ${synced.repo}` : ""}.`;
+
+  return {
+    importedFiles: sortedImported,
+    synced,
+    summary,
+  };
+}
+
+/**
+ * Ensures `<vaultDir>/.git` exists: tries `git clone --branch <branch> <url> <vaultDir>`
+ * first, and when `<branch>` does not exist on an empty/branchless remote, cleans
+ * `<vaultDir>`, clones without `--branch`, and initializes `<branch>` locally via
+ * `git checkout -B <branch>`.
+ */
+async function ensureVaultCheckout(runner, config, vaultDir) {
+  if (existsSync(join(vaultDir, ".git"))) return;
+  if (existsSync(vaultDir)) rmSync(vaultDir, { recursive: true, force: true });
+  const remoteUrl = vaultRemoteUrl(config.repo);
+  try {
+    await runner({ command: "git", args: ["clone", "--branch", config.branch, remoteUrl, vaultDir] });
+  } catch (err) {
+    if (!isMissingRemoteBranchCloneError(err)) throw err;
+    if (existsSync(vaultDir)) rmSync(vaultDir, { recursive: true, force: true });
+    await runner({ command: "git", args: ["clone", remoteUrl, vaultDir] });
+    await runner({ command: "git", args: ["checkout", "-B", config.branch], cwd: vaultDir });
+  }
+}
+
+function isMissingRemoteBranchCloneError(err) {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /Remote branch .* not found|Could not find remote branch|cloned an empty repository|unborn/i.test(msg);
+}
+
+function isEmptyOrUnbornPullError(err) {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /There is no tracking information|Couldn't find remote ref|no such ref was fetched|Remote branch .* not found|does not have any commits yet|unborn/i.test(msg);
+}
+
+/**
+ * Stages one vault-runtime file into the vault checkout under the push-side
+ * re-seal law (src/vault.ts's stageRuntimeFileIntoCheckout, mirrored).
+ */
+function stageRuntimeFileIntoCheckout(runtimePath, target, passphrase, relPath) {
   let existing = null;
   try {
     existing = readFileSync(target);
   } catch {
-    existing = null; // no far-end file yet — a new vault path, rides verbatim below
+    existing = null;
   }
   const runtimeBytes = readFileSync(runtimePath);
   const envelope = existing === null ? null : parseEnvelope(existing);
   if (envelope !== null && existing !== null) {
-    if (runtimeBytes.equals(existing)) return; // byte-identical — nothing to stage
+    if (runtimeBytes.equals(existing)) return;
     if (parseEnvelope(runtimeBytes) !== null) {
-      // sealed stays sealed: keep the checkout's envelope only when both unseal to the same content
       if (tryUnseal(existing, passphrase, (a) => tryUnseal(runtimeBytes, passphrase, (b) => a.equals(b)))) return;
     } else {
       let unsealed;
@@ -450,7 +942,7 @@ function stageRuntimeFileIntoCheckout(runtimePath, target, passphrase) {
           `vault push cannot stage ${basename(target)}: the checkout holds a sealed envelope and no passphrase resolves to verify the runtime copy against it — restore the passphrase or stage an envelope (vault seal)`,
         );
       }
-      if (unsealed.equals(runtimeBytes)) return; // unchanged content — the sealed bytes stay, byte-exact
+      if (unsealed.equals(runtimeBytes)) return;
       const resealed = Buffer.from(
         `${JSON.stringify(sealVaultBuffer(runtimeBytes, envelope.mode === "aes-256-gcm" ? passphrase : undefined))}\n`,
         "utf8",
@@ -459,6 +951,15 @@ function stageRuntimeFileIntoCheckout(runtimePath, target, passphrase) {
       writeFileSync(target, resealed);
       return;
     }
+  }
+  if (
+    (relPath === "secrets/shared/gplay-service-account.json" || relPath === "secrets/shared/eye.json") &&
+    parseEnvelope(runtimeBytes) === null
+  ) {
+    const sealed = Buffer.from(`${JSON.stringify(sealVaultBuffer(runtimeBytes, passphrase))}\n`, "utf8");
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, sealed);
+    return;
   }
   mkdirSync(dirname(target), { recursive: true });
   copyFileSync(runtimePath, target);
@@ -499,7 +1000,10 @@ export function sealVaultFile(paseoHome, sourcePath, vaultPath, passphrase) {
 function requiredVaultConfig(paseoHome) {
   const config = loadVaultConfig(paseoHome);
   if (config === null || config.repo.trim() === "") {
-    throw vaultError("vault-not-configured", "the vault transport needs a configured repo — save a VaultConfig first");
+    throw vaultError(
+      "vault-not-configured",
+      "Private vault is not configured yet — click Enable & Sync Vault or save a repository in Vault settings",
+    );
   }
   return config;
 }
@@ -671,7 +1175,418 @@ function nowIso() {
   return new Date().toISOString();
 }
 
-// ===== the runtime pointer index (ADR 0014 Decision 5's zero-shell-config hand-off) =====
+// ===== Stage C (ADR 0014 Decisions 4 & 5): canonical-key routing, per-Project materialization, hygiene, configs, multi-node Ledger reconciler =====
+
+/**
+ * Parses and validates `vault.manifest.json` text. The manifest is a plain
+ * object of `<canonicalAppKey>` → `{ repoBasename?, gitRemote?, bundleId?,
+ * packageName? }` (string legs only); anything else is refused with
+ * `corrupted-vault-manifest`.
+ */
+export function parseVaultManifest(raw) {
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw vaultError("corrupted-vault-manifest", "vault.manifest.json is not valid JSON");
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw vaultError("corrupted-vault-manifest", "vault.manifest.json must be an object of canonicalAppKey → matching legs");
+  }
+  const manifest = {};
+  for (const [key, value] of Object.entries(parsed)) {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      throw vaultError("corrupted-vault-manifest", `vault.manifest.json entry "${key}" must be an object`);
+    }
+    const entry = {};
+    for (const leg of ["repoBasename", "gitRemote", "bundleId", "packageName"]) {
+      const field = value[leg];
+      if (field === undefined) continue;
+      if (typeof field !== "string") {
+        throw vaultError("corrupted-vault-manifest", `vault.manifest.json entry "${key}" field "${leg}" must be a string`);
+      }
+      entry[leg] = field;
+    }
+    manifest[key] = entry;
+  }
+  return manifest;
+}
+
+/** Reads `<root>/vault.manifest.json`; a missing file is an empty mapping. */
+function readVaultManifestAt(root) {
+  try {
+    return parseVaultManifest(readFileSync(join(root, "vault.manifest.json"), "utf8"));
+  } catch (err) {
+    if (err !== null && typeof err === "object" && err.code === "corrupted-vault-manifest") throw err;
+    return {};
+  }
+}
+
+/** Reads `<stateDir>/projects/<slug>/project.json` — undefined when the project has no registry yet. */
+function readProjectRegistration(stateDir, slug) {
+  const path = join(projectStateDir(stateDir, slug), "project.json");
+  if (!existsSync(path)) return undefined;
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8"));
+    if (typeof parsed?.root !== "string" || parsed.root === "") return undefined;
+    return { slug, root: parsed.root };
+  } catch {
+    return undefined;
+  }
+}
+
+/** Every registration on disk, slug order — mirrors src/project.ts. */
+function listProjectRegistrations(stateDir) {
+  const projectsDir = join(stateDir, "projects");
+  let slugs;
+  try {
+    slugs = readdirSync(projectsDir);
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const slug of slugs) {
+    const registration = readProjectRegistration(stateDir, slug);
+    if (registration !== undefined) out.push(registration);
+  }
+  return out.sort((a, b) => a.slug.localeCompare(b.slug));
+}
+
+/** Discovers projects across factory registrations and `<paseoHome>/projects/projects.json` — mirrors src/project.ts. */
+function discoverProjects(stateDir, liveSeatAgents, home) {
+  const roots = new Map();
+  for (const registration of listProjectRegistrations(stateDir)) {
+    roots.set(registration.slug, registration.root);
+  }
+  for (const agent of liveSeatAgents) {
+    const slug = agent.labels?.project;
+    if (slug === undefined || agent.labels?.seat === undefined) continue;
+    if (!roots.has(slug)) roots.set(slug, agent.cwd);
+  }
+  if (home !== undefined) {
+    try {
+      const parsed = JSON.parse(readFileSync(join(home, "projects", "projects.json"), "utf8"));
+      if (Array.isArray(parsed)) {
+        for (const entry of parsed) {
+          if (entry === null || typeof entry !== "object") continue;
+          if (entry.archivedAt !== null || typeof entry.rootPath !== "string" || entry.rootPath === "") continue;
+          const resolved = resolveProject(entry.rootPath);
+          if (resolved.ok && !roots.has(resolved.slug)) {
+            roots.set(resolved.slug, resolved.root);
+          }
+        }
+      }
+    } catch {
+      // missing or unreadable Paseo projects.json is ignored
+    }
+  }
+  return [...roots.entries()].map(([slug, root]) => ({ slug, root })).sort((a, b) => a.slug.localeCompare(b.slug));
+}
+
+function collectCandidateProjectRoots(paseoHome) {
+  const stateDir = vaultStateDir(paseoHome);
+  const candidateRoots = new Set();
+  for (const registration of listProjectRegistrations(stateDir)) candidateRoots.add(registration.root);
+  for (const discovered of discoverProjects(stateDir, [], paseoHome)) {
+    if (discovered.root !== null) candidateRoots.add(discovered.root);
+  }
+  for (const root of readReleaseLabProjectRoots(paseoHome)) candidateRoots.add(root);
+  return [...candidateRoots].sort();
+}
+
+function inspectProjectRootFacts(root) {
+  const resolved = resolveProject(root);
+  if (!resolved.ok) return null;
+  const storeManifest = readJsonFile(join(resolved.root, ".store-release", "manifest.json"));
+  return {
+    root: resolved.root,
+    slug: resolved.slug,
+    basename: basename(resolved.root),
+    originUrl: gitProbe(resolved.root, ["config", "--get", "remote.origin.url"]),
+    bundleId: jsonStringField(storeManifest, "bundleId") ?? nestedJsonStringField(storeManifest, ["ios", "bundleId"]),
+    packageName: jsonStringField(storeManifest, "packageName") ?? nestedJsonStringField(storeManifest, ["android", "packageName"]),
+  };
+}
+
+export function resolveVaultApps(paseoHome, manifest) {
+  const candidateRoots = collectCandidateProjectRoots(paseoHome);
+  const factsByRoot = new Map();
+  const factsOf = (root) => {
+    const cached = factsByRoot.get(root);
+    if (cached !== undefined) return cached;
+    const facts = inspectProjectRootFacts(root);
+    factsByRoot.set(root, facts);
+    return facts;
+  };
+
+  const out = [];
+  for (const canonicalAppKey of Object.keys(manifest).sort()) {
+    const entry = manifest[canonicalAppKey];
+    let matched = null;
+    for (const root of candidateRoots) {
+      const facts = factsOf(root);
+      if (facts !== null && entryMatches(entry, facts)) {
+        matched = facts;
+        break;
+      }
+    }
+    out.push(
+      matched === null
+        ? { canonicalAppKey, projectRoot: null, projectSlug: null }
+        : { canonicalAppKey, projectRoot: matched.root, projectSlug: matched.slug },
+    );
+  }
+  return out;
+}
+
+function entryMatches(entry, facts) {
+  if (entry.repoBasename !== undefined && entry.repoBasename === facts.basename) return true;
+  if (entry.gitRemote !== undefined && facts.originUrl !== null && gitRemotesMatch(entry.gitRemote, facts.originUrl)) return true;
+  if (entry.bundleId !== undefined && entry.bundleId === facts.bundleId) return true;
+  if (entry.packageName !== undefined && entry.packageName === facts.packageName) return true;
+  return false;
+}
+
+function gitRemotesMatch(a, b) {
+  const left = normalizeGitRemote(a);
+  const right = normalizeGitRemote(b);
+  return left === right || left.endsWith(`/${right}`) || right.endsWith(`/${left}`);
+}
+
+function normalizeGitRemote(url) {
+  let u = url.trim();
+  if (u.endsWith(".git")) u = u.slice(0, -".git".length);
+  const scp = u.match(/^[^@/]+@([^:/]+):(.+)$/);
+  if (scp !== null) u = `${scp[1]}/${scp[2]}`;
+  const scheme = u.match(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/(.+)$/);
+  if (scheme !== null) u = scheme[1];
+  u = u.replace(/^[^@/]+@/, "");
+  return u.toLowerCase();
+}
+
+function readReleaseLabProjectRoots(paseoHome) {
+  const parsed = readJsonFile(join(paseoHome, "release-lab", "projects.json"));
+  const roots = [];
+  for (const entry of arrayField(parsed, "projects")) {
+    const root = jsonStringField(entry, "root");
+    if (root !== null && root.trim() !== "") roots.push(root);
+  }
+  return roots;
+}
+
+function vaultStateDir(paseoHome) {
+  return join(paseoHome, "plugin-state", STATE_PLUGIN_DIR);
+}
+
+function gitProbe(cwd, args) {
+  try {
+    return execFileSync("git", args, {
+      cwd,
+      encoding: "utf8",
+      timeout: 10_000,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, PATH: buildVaultPath(process.env.PATH), GIT_TERMINAL_PROMPT: "0" },
+    }).trim();
+  } catch {
+    return null;
+  }
+}
+
+/** Reads a JSON file as an object, or null when absent/damaged — a pointer/routing input, not an authority. */
+function readJsonFile(path) {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8"));
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/** A string field of a JSON object, or null. */
+function jsonStringField(record, field) {
+  const value = record?.[field];
+  return typeof value === "string" && value !== "" ? value : null;
+}
+
+/** An array field of a JSON object as objects, or empty — malformed entries are skipped, never fatal. */
+function arrayField(record, field) {
+  const value = record?.[field];
+  if (!Array.isArray(value)) return [];
+  return value.filter((entry) => typeof entry === "object" && entry !== null && !Array.isArray(entry));
+}
+
+/** A nested two-key string field (project_info.project_id), or null. */
+function nestedJsonStringField(record, path) {
+  if (record === null) return null;
+  const inner = record[path[0]];
+  if (typeof inner !== "object" || inner === null || Array.isArray(inner)) return null;
+  return jsonStringField(inner, path[1]);
+}
+
+/**
+ * Registers materialized per-app paths in `<gitCommonDir>/info/exclude` AND
+ * `<projectRoot>/.worktreeinclude` (spec §Implementation Decisions 3).
+ */
+export function ensureLocalGitExcludeAndWorktreeInclude(projectRoot, relPaths) {
+  if (relPaths.length === 0) return;
+  const commonDirRaw = gitProbe(projectRoot, ["rev-parse", "--git-common-dir"]);
+  if (commonDirRaw === null || commonDirRaw === "") {
+    throw vaultError("vault-project-not-git", `${projectRoot} does not resolve to a git checkout — vault hygiene has nothing to register against`);
+  }
+  const gitCommonDir = isAbsolute(commonDirRaw) ? commonDirRaw : resolvePath(projectRoot, commonDirRaw);
+  appendUniqueLines(join(gitCommonDir, "info", "exclude"), [...relPaths, ".worktreeinclude"]);
+  appendUniqueLines(join(projectRoot, ".worktreeinclude"), relPaths);
+}
+
+function appendUniqueLines(path, lines) {
+  let existing;
+  try {
+    existing = readFileSync(path, "utf8");
+  } catch {
+    existing = "";
+  }
+  const present = new Set(existing.split("\n").map((line) => line.trim()).filter((line) => line !== ""));
+  const missing = lines.filter((line) => !present.has(line.trim()));
+  if (missing.length === 0) return;
+  const base = existing === "" ? "" : existing.endsWith("\n") ? existing : `${existing}\n`;
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, `${base}${missing.join("\n")}\n`);
+}
+
+const APP_FILE_TARGETS = [
+  { vaultFile: "release.keystore", projectRel: "android/app/release.keystore" },
+  { vaultFile: "signing.json", projectRel: "android/keystore.properties" },
+  { vaultFile: "google-services.json", projectRel: "android/app/google-services.json" },
+  { vaultFile: "GoogleService-Info.plist", projectRel: "ios/GoogleService-Info.plist" },
+];
+
+function materializeVaultAppFiles(paseoHome, canonicalAppKey, projectRoot) {
+  const appSecrets = join(paseoHome, "vault-runtime", "secrets", "apps", canonicalAppKey);
+  const written = [];
+  for (const target of APP_FILE_TARGETS) {
+    const source = join(appSecrets, target.vaultFile);
+    if (!existsSync(source)) continue;
+    let data;
+    if (target.vaultFile === "signing.json") {
+      const rendered = renderKeystoreProperties(readJsonFile(source));
+      if (rendered === null) continue;
+      data = Buffer.from(rendered, "utf8");
+    } else {
+      data = readFileSync(source);
+    }
+    const dest = join(projectRoot, target.projectRel);
+    mkdirSync(dirname(dest), { recursive: true });
+    writeFileSync(dest, data, { mode: 0o600 });
+    chmodSync(dest, 0o600);
+    written.push(target.projectRel);
+  }
+  return written;
+}
+
+function renderKeystoreProperties(signing) {
+  if (signing === null) return null;
+  const lines = Object.keys(signing)
+    .filter((key) => typeof signing[key] === "string")
+    .sort()
+    .map((key) => `${key}=${signing[key]}`);
+  return lines.length > 0 ? `${lines.join("\n")}\n` : null;
+}
+
+/**
+ * Collects local state and config files under `<paseoHome>` into `<paseoHome>/vault-runtime/`
+ * before staging into `<paseoHome>/vault`.
+ */
+function collectLocalStateIntoRuntime(paseoHome) {
+  const stateDir = vaultStateDir(paseoHome);
+  const configSources = [
+    { src: join(stateDir, "lanes.json"), vaultRel: "config/lanes.json" },
+    { src: join(paseoHome, "connector", "fleet.json"), vaultRel: "config/fleet.json" },
+    { src: join(paseoHome, "burn-lab", "free-pool.json"), vaultRel: "config/free-pool.json" },
+  ];
+  for (const { src, vaultRel } of configSources) {
+    if (existsSync(src)) {
+      writeRuntimeFile(paseoHome, vaultRel, readFileSync(src));
+    }
+  }
+
+  const localEye = join(stateDir, "eye.json");
+  if (existsSync(localEye) && !sharedSecretExists(paseoHome, SHARED_SECRET_FILES.eyeConfig)) {
+    writeRuntimeFile(paseoHome, `secrets/shared/${SHARED_SECRET_FILES.eyeConfig}`, readFileSync(localEye));
+  }
+
+  const runtimeRoot = join(paseoHome, "vault-runtime");
+  const vaultDir = join(paseoHome, "vault");
+  const manifest = existsSync(join(runtimeRoot, "vault.manifest.json"))
+    ? readVaultManifestAt(runtimeRoot)
+    : readVaultManifestAt(vaultDir);
+  let manifestUpdated = false;
+  const seenRoots = new Set();
+
+  for (const candidateRoot of collectCandidateProjectRoots(paseoHome)) {
+    const facts = inspectProjectRootFacts(candidateRoot);
+    if (facts === null || seenRoots.has(facts.root)) continue;
+    seenRoots.add(facts.root);
+    const storeManifestPath = join(facts.root, ".store-release", "manifest.json");
+    if (!existsSync(storeManifestPath)) continue;
+
+    let canonicalAppKey = null;
+    for (const key of Object.keys(manifest).sort()) {
+      if (entryMatches(manifest[key], facts)) {
+        canonicalAppKey = key;
+        break;
+      }
+    }
+    if (canonicalAppKey === null) {
+      const storeManifestObj = readJsonFile(storeManifestPath);
+      canonicalAppKey = jsonStringField(storeManifestObj, "appKey") ?? facts.basename;
+    }
+
+    writeRuntimeFile(paseoHome, `config/apps/${canonicalAppKey}/store-manifest.json`, readFileSync(storeManifestPath));
+    const priorEntry = manifest[canonicalAppKey] ?? {};
+    manifest[canonicalAppKey] = {
+      ...priorEntry,
+      repoBasename: facts.basename,
+      ...(facts.originUrl !== null && facts.originUrl !== "" ? { gitRemote: facts.originUrl } : {}),
+      ...(facts.bundleId !== null ? { bundleId: facts.bundleId } : {}),
+      ...(facts.packageName !== null ? { packageName: facts.packageName } : {}),
+    };
+    manifestUpdated = true;
+  }
+
+  if (manifestUpdated) {
+    writeRuntimeFile(paseoHome, "vault.manifest.json", Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, "utf8"));
+  }
+}
+
+/**
+ * Materializes `config/{lanes,fleet,free-pool}.json` inside `<paseoHome>/vault-runtime/`
+ * into their local `<paseoHome>` destinations when absent locally (or when `overwriteConfigs === true`).
+ */
+function materializeConfigsFromRuntime(paseoHome, overwriteConfigs = false) {
+  const runtimeConfigDir = join(paseoHome, "vault-runtime", "config");
+  const targets = [
+    { src: join(runtimeConfigDir, "lanes.json"), dest: join(vaultStateDir(paseoHome), "lanes.json") },
+    { src: join(runtimeConfigDir, "fleet.json"), dest: join(paseoHome, "connector", "fleet.json") },
+    { src: join(runtimeConfigDir, "free-pool.json"), dest: join(paseoHome, "burn-lab", "free-pool.json") },
+  ];
+  for (const { src, dest } of targets) {
+    if (!existsSync(src)) continue;
+    if (!overwriteConfigs && existsSync(dest)) continue;
+    mkdirSync(dirname(dest), { recursive: true });
+    copyFileSync(src, dest);
+  }
+}
+
+function applyVaultHydration(paseoHome, overwriteConfigs = false) {
+  const manifest = readVaultManifestAt(join(paseoHome, "vault-runtime"));
+  for (const app of resolveVaultApps(paseoHome, manifest)) {
+    if (app.projectRoot === null) continue;
+    const written = materializeVaultAppFiles(paseoHome, app.canonicalAppKey, app.projectRoot);
+    if (written.length > 0) ensureLocalGitExcludeAndWorktreeInclude(app.projectRoot, written);
+  }
+  materializeConfigsFromRuntime(paseoHome, overwriteConfigs);
+  writeVaultRuntimeEnv(paseoHome);
+}
 
 /** Writes the VaultRuntimeEnv pointer index at `<paseoHome>/vault-runtime/env.json`, 0o600. */
 function writeVaultRuntimeEnv(paseoHome) {
@@ -685,8 +1600,8 @@ function writeVaultRuntimeEnv(paseoHome) {
 /**
  * The six runtime keys, each present only when its source hydrated: the
  * shared ASC .p8/credentials and Google Play JSON by path, the keystore
- * storepass from the first (canonical-key order) app's signing.json, and the
- * Firebase project id from its google-services.json.
+ * storepass of the first (canonical-key order) app's signing.json, and the
+ * Firebase project id of its google-services.json.
  */
 function buildVaultRuntimeEnv(paseoHome) {
   const shared = join(paseoHome, "vault-runtime", "secrets", "shared");
@@ -716,26 +1631,232 @@ function buildVaultRuntimeEnv(paseoHome) {
   return env;
 }
 
-/** Reads a JSON file as an object, or null when absent/damaged — a pointer input, not an authority. */
-function readJsonFile(path) {
-  try {
-    const parsed = JSON.parse(readFileSync(path, "utf8"));
-    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? parsed : null;
-  } catch {
-    return null;
+// ===== Multi-node Ledger reconciler (mirrors src/vault.ts & src/ledger.ts) =====
+
+const EVENT_NAMES = [
+  "contract_set",
+  "claim_reported",
+  "gate_started",
+  "gate_finished",
+  "fresh_eyes_written",
+  "watch_written",
+  "report_written",
+  "attempt_accepted",
+  "permit_allowed",
+  "permit_denied",
+  "git_blocked",
+  "spawn_dispatched",
+  "spawn_refused",
+  "meter_written",
+  "repoke_dispatched",
+  "repoke_refused",
+  "respawn_dispatched",
+  "respawn_refused",
+  "needs_human",
+  "retro_written",
+];
+
+const NEEDS_HUMAN_REASONS = ["denied-again", "silent-after-repoke", "attempt-ceiling", "died-after-respawn"];
+
+function posInt(value) {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1;
+}
+
+function needsHumanEvidenceIsValid(evidence, reason) {
+  if (typeof evidence !== "object" || evidence === null || Array.isArray(evidence)) return false;
+  if (Object.keys(evidence).length !== 2) return false;
+  const isDenialRepoke = posInt(evidence.denial) && posInt(evidence.repoke);
+  const isAttemptGate = posInt(evidence.attempt) && posInt(evidence.gate);
+  const isSpawnRespawn = posInt(evidence.spawn) && posInt(evidence.respawn);
+  if (reason === "denied-again" || reason === "silent-after-repoke") return isDenialRepoke;
+  if (reason === "attempt-ceiling") return isAttemptGate;
+  if (reason === "died-after-respawn") return isSpawnRespawn;
+  if (reason !== undefined) return false;
+  return isDenialRepoke || isAttemptGate || isSpawnRespawn;
+}
+
+function usageIsValid(usage) {
+  if (typeof usage !== "object" || usage === null || Array.isArray(usage)) return false;
+  for (const [key, value] of Object.entries(usage)) {
+    if (!["inputTokens", "cachedInputTokens", "outputTokens", "totalCostUsd"].includes(key)) return false;
+    if (typeof value !== "number" || !Number.isFinite(value)) return false;
+  }
+  return true;
+}
+
+function shapeIsValid(evt) {
+  const taskIsString = typeof evt.task === "string";
+  if (evt.event === "contract_set") return taskIsString;
+  if (evt.event === "retro_written") {
+    return (
+      typeof evt.model === "string" &&
+      (evt.outcome === "written" || evt.outcome === "failed") &&
+      typeof evt.durationMs === "number" &&
+      Number.isFinite(evt.durationMs) &&
+      evt.durationMs >= 0
+    );
+  }
+  if (evt.event === "permit_allowed" || evt.event === "permit_denied") {
+    return taskIsString && typeof evt.agent === "string" && (evt.event === "permit_allowed" || typeof evt.rule === "string");
+  }
+  if (evt.event === "git_blocked") {
+    return (
+      (evt.task === undefined || taskIsString) &&
+      (evt.agent === undefined || typeof evt.agent === "string") &&
+      typeof evt.command === "string" &&
+      typeof evt.rule === "string" &&
+      typeof evt.cwd === "string" &&
+      typeof evt.blockId === "string"
+    );
+  }
+  if (evt.event === "spawn_dispatched" || evt.event === "spawn_refused") {
+    return (
+      taskIsString &&
+      typeof evt.provider === "string" &&
+      typeof evt.arity === "number" &&
+      Number.isInteger(evt.arity) &&
+      evt.arity >= 1 &&
+      (evt.event === "spawn_dispatched" || (typeof evt.rule === "string" && typeof evt.reason === "string"))
+    );
+  }
+  if (evt.event === "meter_written") {
+    return (
+      taskIsString &&
+      typeof evt.provider === "string" &&
+      (evt.agent === undefined || typeof evt.agent === "string") &&
+      usageIsValid(evt.usage)
+    );
+  }
+  if (evt.event === "repoke_dispatched" || evt.event === "repoke_refused") {
+    return (
+      taskIsString &&
+      typeof evt.agent === "string" &&
+      (evt.event === "repoke_dispatched" || (typeof evt.rule === "string" && typeof evt.reason === "string"))
+    );
+  }
+  if (evt.event === "respawn_dispatched" || evt.event === "respawn_refused") {
+    return (
+      taskIsString &&
+      typeof evt.provider === "string" &&
+      typeof evt.died_agent === "string" &&
+      (evt.event === "respawn_dispatched" || (typeof evt.rule === "string" && typeof evt.reason === "string"))
+    );
+  }
+  if (evt.event === "needs_human") {
+    return (
+      taskIsString &&
+      typeof evt.reason === "string" &&
+      NEEDS_HUMAN_REASONS.includes(evt.reason) &&
+      needsHumanEvidenceIsValid(evt.evidence, evt.reason)
+    );
+  }
+  const attempt = evt.attempt;
+  return taskIsString && typeof attempt === "number" && Number.isInteger(attempt) && attempt >= 1;
+}
+
+function isValidVaultLedgerRecord(evt) {
+  if (typeof evt !== "object" || evt === null || Array.isArray(evt)) return false;
+  if (typeof evt.seq !== "number" || !Number.isInteger(evt.seq) || evt.seq < 1) return false;
+  if (typeof evt.ts !== "string" || evt.ts === "") return false;
+  if (typeof evt.event !== "string" || !EVENT_NAMES.includes(evt.event)) return false;
+  return shapeIsValid(evt);
+}
+
+export function reconcileVaultLedgers(existingLines, nodeLedgerLines) {
+  const seen = new Map();
+  const carry = (lines, sourceNodeId) => {
+    for (const raw of lines.split("\n")) {
+      const line = raw.trim();
+      if (line === "") continue;
+      let parsed;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (!isValidVaultLedgerRecord(parsed)) continue;
+      const fingerprint = stableStringify(omitSeq(parsed));
+      if (!seen.has(fingerprint)) {
+        const ts = Date.parse(String(parsed.ts));
+        seen.set(fingerprint, {
+          evt: parsed,
+          sourceNodeId,
+          originalSeq: parsed.seq,
+          sortTs: Number.isNaN(ts) ? 0 : ts,
+        });
+      }
+    }
+  };
+
+  carry(existingLines, "");
+  for (const source of nodeLedgerLines) carry(source.lines, source.nodeId);
+
+  const ordered = [...seen.values()].sort(
+    (a, b) => a.sortTs - b.sortTs || (a.sourceNodeId < b.sourceNodeId ? -1 : a.sourceNodeId > b.sourceNodeId ? 1 : 0) || a.originalSeq - b.originalSeq,
+  );
+  return ordered.map((carried, index) => `${JSON.stringify({ ...carried.evt, seq: index + 1 })}\n`).join("");
+}
+
+function omitSeq(evt) {
+  const rest = {};
+  for (const [key, value] of Object.entries(evt)) {
+    if (key !== "seq") rest[key] = value;
+  }
+  return rest;
+}
+
+function stableStringify(value) {
+  if (typeof value !== "object" || value === null) return JSON.stringify(value) ?? "null";
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  const entries = Object.entries(value)
+    .filter(([, v]) => v !== undefined)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableStringify(v)}`).join(",")}}`;
+}
+
+function reconcileVaultLedgerState(paseoHome) {
+  const stateDir = vaultStateDir(paseoHome);
+  const runtimeRoot = join(paseoHome, "vault-runtime");
+  mergeLedgerFile(join(stateDir, "ledger.jsonl"), nodeLedgerSourcesAt(runtimeRoot, ["global-ledger.jsonl"]));
+  for (const app of resolveVaultApps(paseoHome, readVaultManifestAt(runtimeRoot))) {
+    if (app.projectSlug === null) continue;
+    mergeLedgerFile(
+      join(stateDir, "projects", app.projectSlug, "ledger.jsonl"),
+      nodeLedgerSourcesAt(runtimeRoot, ["projects", app.canonicalAppKey, "ledger.jsonl"]),
+    );
   }
 }
 
-/** A string field of a JSON object, or null. */
-function jsonStringField(record, field) {
-  const value = record?.[field];
-  return typeof value === "string" && value !== "" ? value : null;
+function nodeLedgerSourcesAt(vaultTreeRoot, rel) {
+  const nodesDir = join(vaultTreeRoot, "state", "nodes");
+  const out = [];
+  for (const nodeId of listDirNames(nodesDir)) {
+    const path = join(nodesDir, nodeId, ...rel);
+    if (existsSync(path)) out.push({ nodeId, lines: readFileSync(path, "utf8") });
+  }
+  return out;
 }
 
-/** A nested two-key string field (project_info.project_id), or null. */
-function nestedJsonStringField(record, path) {
-  if (record === null) return null;
-  const inner = record[path[0]];
-  if (typeof inner !== "object" || inner === null || Array.isArray(inner)) return null;
-  return jsonStringField(inner, path[1]);
+function mergeLedgerFile(localPath, sources) {
+  if (sources.length === 0) return;
+  let existing = "";
+  try {
+    existing = readFileSync(localPath, "utf8");
+  } catch {
+    // no local ledger yet
+  }
+  const reconciled = reconcileVaultLedgers(existing, sources);
+  if (reconciled === "") return;
+  mkdirSync(dirname(localPath), { recursive: true });
+  const tmp = `${localPath}.reconcile-${process.pid}-${randomUUID()}`;
+  writeFileSync(tmp, reconciled);
+  renameSync(tmp, localPath);
+}
+
+function listDirNames(dir) {
+  try {
+    return readdirSync(dir).sort();
+  } catch {
+    return [];
+  }
 }
