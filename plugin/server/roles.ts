@@ -25,124 +25,39 @@
  */
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { projectStateDir, resolveProject } from "./core/project.ts";
-import type { ProjectResolution } from "./core/project.ts";
+import { resolveProject } from "./core/project.ts";
 import { provisionPiAgentHome } from "./core/pi-home.ts";
+import {
+  FOOTER_MARK,
+  ROLE_SKILL_INDEX,
+  SEAT_TITLES,
+  renderRoleContract,
+  renderSeatBootstrapPrompt,
+} from "./core/roles-contract.ts";
+import type { ProjectIdentity, RoleName, SeatBootstrapInput, SeatName } from "./core/roles-contract.ts";
 import { listProjectRegistrations } from "./projects.ts";
 import { parseTaskWorktreePath } from "../shared/worktree-shape.mjs";
 
-/**
- * The Project identity slice every role renderer carries — ProjectResolution's
- * ok branch reduced to its two load-bearing fields, so `{root, slug}` never
- * travels as an anonymous clump (the working agent's synthetic identity —
- * root unknown from a worktree cwd — is the same shape with `root: ""`).
- */
-export type ProjectIdentity = Pick<Extract<ProjectResolution, { ok: true }>, "root" | "slug">;
-
-/** The seat titles the surface's ensure mints — how the create hook tells a seat from a stranger. */
-export const SEAT_TITLES = { supervisor: "Supervisor (paseo-factory)", lead: "Lead (paseo-factory)" } as const;
-
-export type SeatName = keyof typeof SEAT_TITLES;
-
-/** The working-agent role — task-bound, worktree-rooted, never a seat. */
-export type RoleName = SeatName | "agent";
-
-/** The 1-line role skill trigger index footers (ADR 0010 §6). */
-export const ROLE_SKILL_INDEX: Record<RoleName, string> = {
-  supervisor: "grilling, domain-modeling",
-  lead: "codebase-design, domain-modeling, tdd",
-  agent: "tdd, diagnosing-bugs, codebase-design",
-};
-
-/** The footer's marker — the idempotency sentinel for every injection below. */
-const FOOTER_MARK = "paseo-factory role skills:";
-
-function skillFooter(role: RoleName): string {
-  return `${FOOTER_MARK} ${ROLE_SKILL_INDEX[role]}`;
-}
+export { ROLE_SKILL_INDEX, SEAT_TITLES } from "./core/roles-contract.ts";
+export type { ProjectIdentity, RoleName, SeatBootstrapInput, SeatName } from "./core/roles-contract.ts";
 
 // ---- the role contracts (the system-prompt channel) ----------------------------------------
 
 /** The role law each seat runs under — appended to `config.systemPrompt`, never written to disk. */
 export function renderSeatContract(seat: SeatName, project: ProjectIdentity): string {
-  const lines: string[] = [
-    `You are the ${seat === "supervisor" ? "Supervisor" : "Lead"} seat of the paseo-factory verification loop for this project (${project.slug}, rooted at ${project.root}).`,
-  ];
-  if (seat === "supervisor") {
-    lines.push(
-      "You are the sole conversational door to the Owner: clarify intent, agree the outcome and boundaries, and relay what the factory measured — Verdicts, Watch lines, needs-human stalls — in words; the Owner's answers ride you back down.",
-      "You never grade work yourself: the Gate, the Choke, the Watch and the Ledger are the law, and `factory` (the Owner CLI, run from its explicit path) performs the Owner's acts — contract, run, accept --by supervisor.",
-      "When the Owner states a project rule in chat or ratifies a Retro proposal, record it in this repository's AGENTS.md or CONTEXT.md — you (and the Lead) are the only seats that may edit project memory.",
-    );
-  } else {
-    lines.push(
-      "You read the repository, split the Supervisor's directive into Tasks, and set each Contract (gate, artifact, scope, skills) with `factory contract`; invoke the Driver (`factory run`) and inspect the Verdict / Fresh-eyes / Watch / Report evidence before reporting back to the Supervisor.",
-      "You may accept an intermediate Task's green, CONCERN-free Attempt (`factory accept --by lead`); a CONCERN or a needs-human task is never yours to accept — correct it or escalate.",
-      "You may update this repository's AGENTS.md or CONTEXT.md when the Owner ratifies a rule; working Agents never may.",
-    );
-  }
-  lines.push(
-    "This instruction is additive: the repository's own AGENTS.md / CLAUDE.md, MCP servers, and skills catalog load natively alongside it — never overwrite them.",
-    "",
-    skillFooter(seat),
-  );
-  return lines.join("\n");
+  return renderRoleContract(seat, { factoryCmd: "factory", project });
 }
 
 /** The working Agent's law — appended to its task-worktree agent's system prompt. */
 export function renderAgentContract(task: string, slug: string): string {
-  return [
-    `You are a working Agent of the paseo-factory verification loop (task ${task}, project ${slug}): you work your Contract inside this Task worktree and claim with factory-claim when the Gate's done-criteria hold.`,
-    "You never modify AGENTS.md, CLAUDE.md, or CONTEXT.md unless your Contract's scope explicitly lists them — project memory is written by the Supervisor and Lead, not by you.",
-    "Factory orchestration (the `factory` CLI: contract, run, accept) is withheld from you by PATH and by this brief — the only factory commands on your PATH are factory-claim and the git shim. The daemon exposes plugin tools (paseoTools) to every agent today, so an orchestration surface may still be visible to you: never call it — setting contracts, running the Driver, and accepting are the Owner's, Supervisor's, and Lead's acts.",
-    "This instruction is additive: the repository's own AGENTS.md / CLAUDE.md, MCP servers, and skills catalog load natively alongside it.",
-    "",
-    skillFooter("agent"),
-  ].join("\n");
+  return renderRoleContract("agent", { factoryCmd: "factory", project: { root: "", slug }, task });
 }
 
 // ---- the bootstrap orientation (the initial-prompt channel) --------------------------------
 
 /** The seat's bootstrap message — resolved paths, day-one commands, the skill footer. */
-export function renderSeatBootstrap(input: {
-  seat: SeatName;
-  home: string;
-  stateDir: string;
-  pluginDir?: string;
-  nodePath: string;
-  path: string;
-  lane: string;
-  project: ProjectIdentity;
-}): string {
-  const quote = (s: string) => (/\s/.test(s) ? `"${s}"` : s);
-  const runner = /Paseo Helper/i.test(input.nodePath) ? `ELECTRON_RUN_AS_NODE=1 ${quote(input.nodePath)}` : quote(input.nodePath);
-  const factoryCmd = input.pluginDir !== undefined ? `${runner} ${quote(join(input.pluginDir, "bin", "factory.mjs"))}` : "factory";
-  return [
-    `# ${input.seat === "supervisor" ? "Supervisor" : "Lead"} (paseo-factory) — project ${input.project.slug}`,
-    "",
-    input.seat === "supervisor"
-      ? "You are this project's delegated Owner seat: the one agent the Owner converses with. Relay what the factory measured in words; the Owner's answers ride you back down. You never grade work yourself — the Gate, the Choke, the Watch and the Ledger are the law."
-      : "You are this project's standing Lead: read the repository, split the Supervisor's directive into Tasks, set each Contract, invoke the Driver, inspect the evidence, accept green CONCERN-free intermediate work, and report back to the Supervisor.",
-    "",
-    "- Project root (your cwd): " + input.project.root,
-    "- Paseo home (the daemon this seat serves): " + input.home,
-    "- Factory state (this project's ledger, reports, worktrees): " + projectStateDir(input.stateDir, input.project.slug),
-    "- node: " + input.nodePath,
-    `- Your model lane (lanes.json → ${input.seat}): ${input.lane}`,
-    "",
-    "Day-one seat commands (the Owner CLI — never on a Worker agent's PATH):",
-    "",
-    "  " + factoryCmd + " --home " + input.home + " contract --task <id> --workspace <dir> --gate <cmd> --artifact <path> [--scope <p1,p2>] [--skills <s1,s2>] [--watch] [--fresh-eyes] [--description <text>]",
-    "  " + factoryCmd + " --home " + input.home + " run <task> [<task>...]",
-    "  " + factoryCmd + " --home " + input.home + " status",
-    "  " + factoryCmd + " --home " + input.home + " lanes get",
-    "  " + factoryCmd + " --home " + input.home + " accept <task> --attempt <n> [--by owner|supervisor|lead]",
-    "",
-    'Your shells may start without node/git on PATH — export PATH="' + input.path + '" first.',
-    "This seat's instructions are additive — the repository's own AGENTS.md / CLAUDE.md load natively; never overwrite them.",
-    "",
-    skillFooter(input.seat),
-  ].join("\n");
+export function renderSeatBootstrap(input: SeatBootstrapInput): string {
+  return renderSeatBootstrapPrompt(input);
 }
 
 // ---- the PASEO_FACTORY_* env channel -------------------------------------------------------

@@ -651,7 +651,7 @@ test("supervisor.ensure: seats the agent AT the project root — no AGENTS.md wr
   assert.equal(fake.created[0]!.cwd, project.root, "the seat stands at cwd = <project-root>");
   const bootstrap = fake.created[0]!.prompt ?? "";
   assert.match(bootstrap, /Project root \(your cwd\)/, "the bootstrap prompt carries the orientation");
-  assert.match(bootstrap, /contract --task/, "the bootstrap lists day-one contract power");
+  assert.match(bootstrap, /lead dispatch --workspace/, "the bootstrap lists day-one lead dispatch power");
   assert.match(bootstrap, new RegExp(home.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), "the bootstrap names the resolved home");
   assert.match(bootstrap, /paseo-factory role skills: grilling, domain-modeling/, "the bootstrap carries the skill trigger index footer");
   assert.deepEqual(fake.sent, [{ agentId: reply.agentId, text: "Check the T1 verdict." }], "the quick dispatch rode the create");
@@ -1132,7 +1132,7 @@ test("roles: the seat bootstrap orients with resolved paths, day-one commands, a
   });
   assert.match(bootstrap, /Project root \(your cwd\): \/w\/repo/);
   assert.match(bootstrap, /\/h\/plugins\/paseo-factory\/bin\/factory\.mjs/);
-  assert.match(bootstrap, /contract --task <id>/);
+  assert.match(bootstrap, /lead dispatch --workspace "<project-root>" --message "<directive>"/);
   assert.match(bootstrap, /lanes\.json → supervisor\): copilot\/gpt-5\.4/);
   assert.match(bootstrap, /never overwrite them/);
   assert.match(bootstrap, /paseo-factory role skills: grilling, domain-modeling$/);

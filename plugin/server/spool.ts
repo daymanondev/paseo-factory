@@ -28,6 +28,9 @@ import type { Factory } from "./core/factory.ts";
 import type { LedgerEvent, MeterUsage, NeedsHumanEvidence, NeedsHumanReason, Verdict } from "./core/events.ts";
 import { acceptanceSummary } from "./surface-rpc.ts";
 
+/** Seat identity stamped from `PASEO_FACTORY_SEAT` (v0.0.23, ADR 0015 §1). */
+export type SpoolSeat = "supervisor" | "lead" | "agent";
+
 export interface ContractRequest {
   id: string;
   kind: "contract";
@@ -55,6 +58,8 @@ export interface ContractRequest {
    * the spool never guesses or defaults it.
    */
   submitter: string;
+  /** Caller seat stamped from `PASEO_FACTORY_SEAT` when present (v0.0.23, ADR 0015 §1). */
+  seat?: SpoolSeat;
 }
 
 export interface ClaimRequest {
@@ -64,6 +69,7 @@ export interface ClaimRequest {
   sha: string;
   /** Who submitted, when the daemon stamps it on the agent's env — for the spool log, not the ledger. */
   agent?: string;
+  seat?: SpoolSeat;
 }
 
 export interface AcceptRequest {
@@ -85,6 +91,8 @@ export interface AcceptRequest {
    * always records who accepted" (ADR 0006) starts at the request.
    */
   submitter: string;
+  /** Caller seat stamped from `PASEO_FACTORY_SEAT` when present (v0.0.23, ADR 0015 §1). */
+  seat?: SpoolSeat;
 }
 
 /**
@@ -109,6 +117,8 @@ export interface SpawnRequest {
    * through it. Optional: the legacy shared-checkout path sends none.
    */
   worktree?: string;
+  /** Caller seat stamped from `PASEO_FACTORY_SEAT` when present (v0.0.23, ADR 0015 §1). */
+  seat?: SpoolSeat;
 }
 
 /**
@@ -124,6 +134,8 @@ export interface LeadRotateRequest {
   kind: "lead_rotate";
   /** Any directory inside the Project's repository (resolveProject names the slug). */
   projectRoot: string;
+  /** Caller seat stamped from `PASEO_FACTORY_SEAT` when present (v0.0.23, ADR 0015 §1). */
+  seat?: SpoolSeat;
 }
 
 /**
@@ -143,6 +155,8 @@ export interface SpoolLeadDispatchRequest {
   workspace?: string;
   from?: "supervisor" | "owner";
   message: string;
+  /** Caller seat stamped from `PASEO_FACTORY_SEAT` when present (v0.0.23, ADR 0015 §1). */
+  seat?: SpoolSeat;
 }
 
 /**
@@ -158,6 +172,8 @@ export interface RespawnRequest {
   task: string;
   provider: string;
   died_agent: string;
+  /** Caller seat stamped from `PASEO_FACTORY_SEAT` when present (v0.0.23, ADR 0015 §1). */
+  seat?: SpoolSeat;
 }
 
 /**
@@ -171,6 +187,8 @@ export interface RespawnRequest {
 export interface RetroRequest {
   id: string;
   kind: "retro";
+  /** Caller seat stamped from `PASEO_FACTORY_SEAT` when present (v0.0.23, ADR 0015 §1). */
+  seat?: SpoolSeat;
 }
 
 /**
@@ -192,6 +210,7 @@ export interface MeterRequest {
   usage: MeterUsage;
   /** The metered agent's id, when the driver knows it. */
   agent?: string;
+  seat?: SpoolSeat;
 }
 
 /**
@@ -209,6 +228,7 @@ export interface RepokeRequest {
   task: string;
   /** The stalled agent the fixed re-poke text goes to. */
   agent: string;
+  seat?: SpoolSeat;
 }
 
 /**
@@ -224,6 +244,7 @@ export interface NeedsHumanRequest {
   task: string;
   reason: NeedsHumanReason;
   evidence: NeedsHumanEvidence;
+  seat?: SpoolSeat;
 }
 
 /**
@@ -241,6 +262,7 @@ export interface AskRequest {
   cwd?: string;
   agent?: string;
   name?: string;
+  seat?: SpoolSeat;
 }
 
 export type SpoolRequest =
@@ -315,6 +337,12 @@ export function spoolRootFor(stateDir: string): string {
   return join(stateDir, "spool");
 }
 
+function parseOptionalSeat(value: unknown): { ok: true; seat?: SpoolSeat } | { ok: false } {
+  if (value === undefined) return { ok: true };
+  if (value === "supervisor" || value === "lead" || value === "agent") return { ok: true, seat: value };
+  return { ok: false };
+}
+
 /**
  * Validates one decoded request body. Anything that does not match a kind's
  * exact shape is rejected — the spool never guesses what a CLI meant.
@@ -323,6 +351,9 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
   if (typeof body !== "object" || body === null) return undefined;
   const req = body as Record<string, unknown>;
   if (typeof req.id !== "string" || req.id === "") return undefined;
+  const seatParsed = parseOptionalSeat(req.seat);
+  if (!seatParsed.ok) return undefined;
+  const seatField = seatParsed.seat === undefined ? {} : { seat: seatParsed.seat };
   if (req.kind === "contract") {
     if (typeof req.task !== "string" || typeof req.workspace !== "string" || typeof req.gate !== "string" || typeof req.artifact !== "string") {
       return undefined;
@@ -350,6 +381,7 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       ...(req.watch === undefined ? {} : { watch: true }),
       ...(req.description === undefined ? {} : { description: req.description }),
       submitter: req.submitter,
+      ...seatField,
     };
   }
   if (req.kind === "claim") {
@@ -370,6 +402,7 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       attempt: req.attempt,
       ...(req.by === undefined ? {} : { by: req.by }),
       submitter: req.submitter,
+      ...seatField,
     };
   }
   if (req.kind === "spawn") {
@@ -384,6 +417,7 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       provider: req.provider,
       arity: req.arity,
       ...(req.worktree === undefined ? {} : { worktree: req.worktree }),
+      ...seatField,
     };
   }
   if (req.kind === "respawn") {
@@ -396,11 +430,11 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     ) {
       return undefined;
     }
-    return { id: req.id, kind: "respawn", task: req.task, provider: req.provider, died_agent: req.died_agent };
+    return { id: req.id, kind: "respawn", task: req.task, provider: req.provider, died_agent: req.died_agent, ...seatField };
   }
   if (req.kind === "lead_rotate") {
     if (typeof req.projectRoot !== "string" || req.projectRoot.trim() === "") return undefined;
-    return { id: req.id, kind: "lead_rotate", projectRoot: req.projectRoot };
+    return { id: req.id, kind: "lead_rotate", projectRoot: req.projectRoot, ...seatField };
   }
   if (req.kind === "lead_dispatch") {
     // The v0.0.20 dispatch: the message is the payload (never blank); the
@@ -418,14 +452,15 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       ...(req.workspace === undefined ? {} : { workspace: req.workspace }),
       ...(req.from === undefined ? {} : { from: req.from }),
       message: req.message,
+      ...seatField,
     };
   }
   if (req.kind === "retro") {
-    // The Retro carries nothing but its kind — whole-ledger always. The
-    // strict shape is the point: any extra field makes it not-a-retro.
-    const keys = Object.keys(req).filter((key) => key !== "id" && key !== "kind");
+    // The Retro carries nothing but its kind (plus optional seat stamp) —
+    // whole-ledger always. Any extra field makes it not-a-retro.
+    const keys = Object.keys(req).filter((key) => key !== "id" && key !== "kind" && key !== "seat");
     if (keys.length > 0) return undefined;
-    return { id: req.id, kind: "retro" };
+    return { id: req.id, kind: "retro", ...seatField };
   }
   if (req.kind === "meter") {
     if (typeof req.task !== "string" || typeof req.provider !== "string" || req.provider.trim() === "") return undefined;
@@ -488,6 +523,35 @@ export async function handleSpoolRequest(
   peerMailHook?: PeerMailHook,
 ): Promise<SpoolReply> {
   try {
+    // Hard Spool Command Authority by Seat (v0.0.23, ADR 0015 §1).
+    if (
+      (request.kind === "contract" || request.kind === "spawn" || request.kind === "respawn") &&
+      request.seat === "supervisor"
+    ) {
+      return {
+        id: request.id,
+        ok: false,
+        code: "supervisor-cannot-contract-or-run",
+        message: `Supervisor cannot call factory ${request.kind}; dispatch the directive to Lead via 'factory lead dispatch --workspace <dir> --message <directive>' and end your turn.`,
+      };
+    }
+    if (
+      (request.kind === "contract" ||
+        request.kind === "spawn" ||
+        request.kind === "respawn" ||
+        request.kind === "accept" ||
+        request.kind === "lead_dispatch" ||
+        request.kind === "lead_rotate" ||
+        request.kind === "retro") &&
+      request.seat === "agent"
+    ) {
+      return {
+        id: request.id,
+        ok: false,
+        code: "agent-cannot-orchestrate",
+        message: `Working Agent cannot call factory ${request.kind}; working Agents may only submit claims via 'factory-claim --task <task> --sha <sha>'.`,
+      };
+    }
     if (request.kind === "contract") {
       factory.setContract({
         task: request.task,
