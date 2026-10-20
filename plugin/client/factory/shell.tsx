@@ -11,9 +11,9 @@
 import type { PluginTheme } from "@getpaseo/plugin";
 import { useRpc } from "@getpaseo/plugin/client";
 import { Modal, ScrollView, useToast } from "@getpaseo/plugin/client/react-native";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Text, View } from "react-native";
-import { accept, lanesSet, leadDispatch, leadEnsure, leadRotate, pluginsInstall, pluginsManage, projectReset, ratifyProposal, retro, snapshot, supervisorEnsure, supervisorRevoke, taskDetail, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
+import { accept, lanesSet, leadDispatch, leadEnsure, leadRotate, pluginsInstall, pluginsManage, pluginsCheckUpdates, projectReset, ratifyProposal, retro, snapshot, supervisorEnsure, supervisorRevoke, taskDetail, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
 
 import type { FactoryView, LaneName, TaskDetailView } from "../../shared/view.ts";
 import { Btn, Card, TabBar } from "../kit/pill.tsx";
@@ -66,6 +66,7 @@ export function FactoryShell({
   const detailCall = useRpc(taskDetail);
   const pluginsInstallCall = useRpc(pluginsInstall);
   const pluginsManageCall = useRpc(pluginsManage);
+  const pluginsCheckUpdatesCall = useRpc(pluginsCheckUpdates);
   // The Private vault RPCs (v0.0.21–v0.0.22, ADR 0014 §4): one useRpc per
   // contract, every act through act() — the plugins pair's law.
   const vaultConfigureCall = useRpc(vaultConfigure);
@@ -77,6 +78,8 @@ export function FactoryShell({
   const [bump, setBump] = useState(0);
   const [busy, setBusy] = useState(false);
   const [busyAct, setBusyAct] = useState<string | null>(null);
+  const [checkingUpdates, setCheckingUpdates] = useState(false);
+  const [autoCheckedPlugins, setAutoCheckedPlugins] = useState(false);
   const [vaultNote, setVaultNote] = useState<VaultNote | null>(null);
   const [laneNote, setLaneNote] = useState<string | null>(null);
   const [retroNote, setRetroNote] = useState<string | null>(null);
@@ -100,6 +103,24 @@ export function FactoryShell({
   );
   const view = poll.value;
   const now = useNow(1000);
+
+  // Automatically check for plugin updates once when the Owner opens the Plugins tab
+  // if update status has never been checked or is older than 5 minutes (v0.0.25, ADR 0012 §4).
+  useEffect(() => {
+    if (tab !== "plugins") {
+      setAutoCheckedPlugins(false);
+      return;
+    }
+    if (view === null || checkingUpdates || autoCheckedPlugins) return;
+    const stale = view.pluginsCheckedAt === null || Date.now() - Date.parse(view.pluginsCheckedAt) > 300_000;
+    if (!stale) return;
+    setAutoCheckedPlugins(true);
+    setCheckingUpdates(true);
+    void pluginsCheckUpdatesCall({}).finally(() => {
+      setCheckingUpdates(false);
+      refresh();
+    });
+  }, [tab, view?.pluginsCheckedAt, checkingUpdates, autoCheckedPlugins]);
 
   const act = async (name: string, run: () => Promise<{ ok: boolean; error?: string | null; summary?: string }>): Promise<boolean> => {
     setBusy(true);
@@ -306,6 +327,17 @@ export function FactoryShell({
             view={view}
             actions={{
               busy,
+              checkingUpdates,
+              checkUpdates: () => {
+                void act("Check Updates", async () => {
+                  setCheckingUpdates(true);
+                  try {
+                    return await pluginsCheckUpdatesCall({});
+                  } finally {
+                    setCheckingUpdates(false);
+                  }
+                });
+              },
               install: (target, source, ref) => {
                 void act("Install", () => pluginsInstallCall({ target, source, ref }));
               },
