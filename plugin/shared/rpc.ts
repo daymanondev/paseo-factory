@@ -215,7 +215,12 @@ export const vaultConfigure = defineRpc({
 export const vaultHydrate = defineRpc({
   name: "factory.vault.hydrate",
   input: z.object({
-    /** One-off repo override — omitted uses the persisted config's repo. */
+    /**
+     * Repo override for this hydrate — omitted uses the persisted config's
+     * repo. On a home with no saved config the override is persisted as the
+     * vault config of record (the hydrate that named the repo is the hydrate
+     * that configured the home).
+     */
     repo: z.string().optional(),
     /** The tarball ref — omitted uses the configured branch. */
     ref: z.string().optional(),

@@ -200,25 +200,36 @@ commands:
                                  <paseoHome>/vault-runtime/ (0o600 under
                                  secrets/) plus the env.json pointer index —
                                  no .git checkout is left behind. --repo
-                                 defaults to the saved config's repo, --ref to
-                                 the configured branch (main); a locked
+                                 defaults to the saved config's repo (and on
+                                 a home with no saved config it is persisted
+                                 as the config of record), --ref to the
+                                 configured branch (main); a locked
                                  (aes-256-gcm) envelope unseals through
                                  FACTORY_VAULT_PASSPHRASE or the saved config
              vault pull          Vault sync: clone (or git pull --rebase
                                  --autostash) <paseoHome>/vault from the
                                  configured repo, then hydrate the runtime
                                  tree from the checkout — every file
-                                 unsealed, envelopes and all
+                                 unsealed, envelopes and all. The CLI moves
+                                 the vault itself: materializing per-app
+                                 secrets into registered Projects and
+                                 reconciling multi-node ledgers ride the
+                                 Factory surface's factory.vault.pull RPC
+                                 (mergeLedgers), not this verb
              vault push [--include-ledger]
                                  package <paseoHome>/vault-runtime back into
-                                 the vault checkout (envelopes ride verbatim;
-                                 env.json, the machine-local pointer, never
-                                 rides), commit and push — a commit only when
-                                 something changed, never an empty one.
-                                 --include-ledger also snapshots the global
-                                 ledger under state/nodes/<nodeId>/ (per-
-                                 project ledger snapshots ride the plugin's
-                                 canonical-key routing)
+                                 the vault checkout under the re-seal law (a
+                                 checkout path holding an envelope never
+                                 receives raw plaintext back — unchanged
+                                 content keeps the sealed bytes, changed
+                                 content re-seals; env.json, the machine-
+                                 local pointer, never rides), commit and
+                                 push — a commit only when something
+                                 changed, never an empty one. --include-ledger
+                                 also snapshots the global ledger under
+                                 state/nodes/<nodeId>/ (per-project ledger
+                                 snapshots ride the plugin's canonical-key
+                                 routing)
              vault seal <file> --to <vaultPath> [--passphrase <pass>]
                                  seal one local file into the runtime tree at
                                  <paseoHome>/vault-runtime/<vaultPath> —
