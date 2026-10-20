@@ -10,7 +10,9 @@ import { readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { FACTORY_VIEW_VERSION } from "../shared/view.ts";
 import type { AgentView, AttemptView, CompanionPluginView, FactoryView, LedgerLineView, Lanes, ProjectView, RetroView, TaskStatus, TaskView, VaultStatusView } from "../shared/view.ts";
-import { COMPANION_CATALOG } from "../shared/companions.ts";
+import { COMPANION_CATALOG, CORE_PLUGIN_DEFAULT_VERSION, CORE_PLUGIN_ENTRY } from "../shared/companions.ts";
+import { readPluginVersionFromDisk } from "./daemon-cli.ts";
+import type { DaemonPluginSourceStatus } from "./daemon-cli.ts";
 import type { LedgerEvent } from "./core/events.ts";
 
 /** How many ledger lines ride one snapshot — a stream, not a mirror. */
@@ -345,11 +347,15 @@ export type DaemonPluginIdentity =
  */
 export interface DaemonPluginEntry {
   id: string;
+  path?: string;
   enabled: boolean;
   status: "running" | "failed" | "disabled";
   error?: string;
   /** Legacy revision pointer — fills when `installation.currentRevision` is absent. */
   commit?: string;
+  /** Resolved semantic version from npm metadata or package.json (v0.0.25, ADR 0012 §3). */
+  version?: string;
+  npm?: { version?: string };
   installation?: {
     identity?: DaemonPluginIdentity;
     currentRevision?: string;
@@ -359,6 +365,10 @@ export interface DaemonPluginEntry {
 /** The daemon plugin half's raw input — null plugins means the list call was unavailable. */
 export interface DaemonPluginsInput {
   plugins: readonly DaemonPluginEntry[] | null;
+  /** Optional cached on-demand update status rows keyed by plugin id (v0.0.25, ADR 0012 §4). */
+  updates?: ReadonlyMap<string, DaemonPluginSourceStatus> | null;
+  /** ISO timestamp when update statuses were last checked for this home (v0.0.25). */
+  checkedAt?: string | null;
 }
 
 /** The install identity's source string per kind — git remote, directory path, or npm package. */
@@ -368,28 +378,111 @@ function installedSourceOf(identity: DaemonPluginIdentity): string | null {
   return identity.packageName;
 }
 
+function resolvePluginVersion(entry: DaemonPluginEntry, fallbackVersion: string | null = null): string | null {
+  const direct =
+    entry.version ??
+    entry.npm?.version ??
+    (entry.path !== undefined ? readPluginVersionFromDisk(entry.path) : undefined);
+  return direct ?? fallbackVersion;
+}
+
+/**
+ * Folds the Core plugin (`paseo-factory`) entry against the daemon's plugin
+ * list and cached update check snapshot (v0.0.25, ADR 0012 §2–§4). When the
+ * daemon plugin list does not include `paseo-factory` (e.g. unit test fixtures
+ * that pass only companion entries), defaults to `running` at
+ * `CORE_PLUGIN_DEFAULT_VERSION` since the core plugin is actively serving the
+ * snapshot itself.
+ */
+export function foldCorePlugin(
+  plugins: readonly DaemonPluginEntry[] | null,
+  updates?: ReadonlyMap<string, DaemonPluginSourceStatus> | null,
+): CompanionPluginView {
+  const listed = plugins === null ? undefined : plugins.find((plugin) => plugin.id === CORE_PLUGIN_ENTRY.id);
+  if (listed === undefined) {
+    return {
+      ...CORE_PLUGIN_ENTRY,
+      capabilities: [...CORE_PLUGIN_ENTRY.capabilities],
+      status: "running",
+      enabled: true,
+      installKind: null,
+      installedSource: null,
+      currentRevision: null,
+      version: CORE_PLUGIN_DEFAULT_VERSION,
+      latestRevision: null,
+      commitsBehind: null,
+      updateAvailable: null,
+      error: null,
+    };
+  }
+  const identity = listed.installation?.identity;
+  const installKind = identity?.kind ?? null;
+  const update = updates?.get(CORE_PLUGIN_ENTRY.id) ?? null;
+  const currentRevision = listed.installation?.currentRevision ?? listed.commit ?? update?.currentRevision ?? null;
+  const isRemote = installKind === "git" || installKind === "npm";
+  return {
+    ...CORE_PLUGIN_ENTRY,
+    capabilities: [...CORE_PLUGIN_ENTRY.capabilities],
+    status: listed.status,
+    enabled: listed.enabled,
+    installKind,
+    installedSource: identity === undefined ? null : installedSourceOf(identity),
+    currentRevision,
+    version: resolvePluginVersion(listed, CORE_PLUGIN_DEFAULT_VERSION),
+    latestRevision: isRemote ? (update?.latestRevision ?? null) : null,
+    commitsBehind: isRemote ? (update?.commitsBehind ?? null) : null,
+    updateAvailable: isRemote ? (update?.updateAvailable ?? null) : null,
+    error: listed.error ?? null,
+  };
+}
+
 /**
  * Joins the companion catalog against the daemon's plugin list: every catalog
  * entry becomes exactly one card — listed companions carry their live daemon
- * state and install identity; unlisted entries (or an unavailable list, the
- * degrade law) fold to the `not_installed` default. Strangers on the daemon
- * never gain a card, and no host-disk path is ever probed.
+ * state, semantic version, and on-demand update status; unlisted entries (or
+ * an unavailable list, the degrade law) fold to the `not_installed` default.
+ * Strangers on the daemon never gain a card, and no host-disk path is ever
+ * probed for uninstalled companions.
  */
-export function foldCompanions(plugins: readonly DaemonPluginEntry[] | null): CompanionPluginView[] {
+export function foldCompanions(
+  plugins: readonly DaemonPluginEntry[] | null,
+  updates?: ReadonlyMap<string, DaemonPluginSourceStatus> | null,
+): CompanionPluginView[] {
   return COMPANION_CATALOG.map((entry): CompanionPluginView => {
     const listed = plugins === null ? undefined : plugins.find((plugin) => plugin.id === entry.id);
     if (listed === undefined) {
-      return { ...entry, capabilities: [...entry.capabilities], status: "not_installed", enabled: false, installKind: null, installedSource: null, currentRevision: null, error: null };
+      return {
+        ...entry,
+        capabilities: [...entry.capabilities],
+        status: "not_installed",
+        enabled: false,
+        installKind: null,
+        installedSource: null,
+        currentRevision: null,
+        version: null,
+        latestRevision: null,
+        commitsBehind: null,
+        updateAvailable: null,
+        error: null,
+      };
     }
     const identity = listed.installation?.identity;
+    const installKind = identity?.kind ?? null;
+    const update = updates?.get(entry.id) ?? null;
+    const currentRevision = listed.installation?.currentRevision ?? listed.commit ?? update?.currentRevision ?? null;
+    const isRemote = installKind === "git" || installKind === "npm";
     return {
       ...entry,
       capabilities: [...entry.capabilities],
       status: listed.status,
       enabled: listed.enabled,
-      installKind: identity?.kind ?? null,
+      installKind,
       installedSource: identity === undefined ? null : installedSourceOf(identity),
-      currentRevision: listed.installation?.currentRevision ?? listed.commit ?? null,
+      currentRevision,
+      version: resolvePluginVersion(listed, null),
+      latestRevision: isRemote ? (update?.latestRevision ?? null) : null,
+      commitsBehind: isRemote ? (update?.commitsBehind ?? null) : null,
+      updateAvailable: isRemote ? (update?.updateAvailable ?? null) : null,
       error: listed.error ?? null,
     };
   });
@@ -437,7 +530,9 @@ export function foldView(input: {
     daemonError: input.daemon.daemonError,
     project: input.project,
     projects: [...input.projects],
-    companions: foldCompanions(input.companions.plugins),
+    corePlugin: foldCorePlugin(input.companions.plugins, input.companions.updates),
+    companions: foldCompanions(input.companions.plugins, input.companions.updates),
+    pluginsCheckedAt: input.companions.checkedAt ?? null,
     vault: input.vault,
   };
 }
