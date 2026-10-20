@@ -16,15 +16,18 @@ import type { ProviderEntry, SurfaceDaemonApi, SurfaceDeps } from "../plugin/ser
 import { handleSpoolRequest } from "../plugin/server/spool.ts";
 import {
   BRIDGE_TIMEOUT_MS,
+  checkDaemonPluginUpdates,
   cliUtils,
+  getCachedPluginUpdateStatus,
   installDaemonPlugin,
   listDaemonPlugins,
   manageDaemonPlugin,
   PLUGIN_IO_TIMEOUT_MS,
   PLUGIN_LIST_TTL_MS,
+  readPluginVersionFromDisk,
 } from "../plugin/server/daemon-cli.ts";
 import type { DaemonPluginItem } from "../plugin/server/daemon-cli.ts";
-import { foldCompanions, foldTasks } from "../plugin/server/view.ts";
+import { foldCompanions, foldCorePlugin, foldTasks } from "../plugin/server/view.ts";
 import { factoryEnvFor, injectRoleOnCreate, injectSessionEnv, renderAgentContract, renderSeatBootstrap, renderSeatContract } from "../plugin/server/roles.ts";
 import type { AgentCreateRequest } from "../plugin/server/roles.ts";
 import { discoverProjects, readProjectRegistration, writeProjectRegistration } from "../plugin/server/projects.ts";
@@ -3198,6 +3201,332 @@ test("v0.0.24 (ADR 0015 §5): projectReset wipes a project's ledger events, task
   assert.equal(keptReg?.dispatchers, undefined);
   assert.equal(factory.contractFor("T-RESET-2"), undefined);
 });
+
+// ---- v0.0.25 (ADR 0012 §2–§4): Core + Companion Version Visibility & On-Demand Update Check ----
+
+test("v0.0.25 (ADR 0012 §2–§3): readPluginVersionFromDisk, foldCorePlugin, and foldCompanions resolve package.json version and join on-demand update status", (t) => {
+  const dir = makeTempDir("plugin-version-fold-");
+  disposeDir(t, dir);
+
+  const burnCheckout = join(dir, "factory-burn-lab", "checkout");
+  const burnPluginDir = join(burnCheckout, "plugin");
+  mkdirSync(burnPluginDir, { recursive: true });
+  writeFileSync(join(burnCheckout, "package.json"), JSON.stringify({ name: "factory-burn-lab", version: "0.0.5" }));
+
+  const coreCheckout = join(dir, "paseo-factory");
+  const corePluginDir = join(coreCheckout, "plugin");
+  mkdirSync(corePluginDir, { recursive: true });
+  writeFileSync(join(coreCheckout, "package.json"), JSON.stringify({ name: "paseo-factory", version: "0.0.25" }));
+
+  assert.equal(readPluginVersionFromDisk(burnPluginDir), "0.0.5", "resolves version from <pluginPath>/../package.json");
+  assert.equal(readPluginVersionFromDisk(corePluginDir), "0.0.25");
+  assert.equal(readPluginVersionFromDisk(join(dir, "nonexistent")), undefined);
+
+  const updates = new Map([
+    [
+      "paseo-factory",
+      { id: "paseo-factory", currentRevision: null, latestRevision: null, commitsBehind: null, updateAvailable: null },
+    ],
+    [
+      "factory-burn-lab",
+      {
+        id: "factory-burn-lab",
+        currentRevision: "7f8a5cc000",
+        latestRevision: "a91c3f2999",
+        commitsBehind: 2,
+        updateAvailable: true,
+      },
+    ],
+    [
+      "factory-connector",
+      {
+        id: "factory-connector",
+        currentRevision: "1122334455",
+        latestRevision: "1122334455",
+        commitsBehind: 0,
+        updateAvailable: false,
+      },
+    ],
+  ]);
+
+  const plugins = [
+    {
+      id: "paseo-factory",
+      path: corePluginDir,
+      enabled: true,
+      status: "running" as const,
+      installation: { identity: { kind: "directory" as const, path: corePluginDir } },
+    },
+    {
+      id: "factory-burn-lab",
+      path: burnPluginDir,
+      enabled: true,
+      status: "running" as const,
+      installation: {
+        identity: { kind: "git" as const, remote: "https://github.com/daymanondev/factory-burn-lab", pluginPath: "plugin" },
+        currentRevision: "7f8a5cc000",
+      },
+    },
+    {
+      id: "factory-connector",
+      enabled: true,
+      status: "running" as const,
+      version: "0.0.3",
+      installation: {
+        identity: { kind: "git" as const, remote: "https://github.com/daymanondev/factory-connector", pluginPath: "plugin" },
+        currentRevision: "1122334455",
+      },
+    },
+  ];
+
+  const core = foldCorePlugin(plugins, updates);
+  assert.equal(core.id, "paseo-factory");
+  assert.equal(core.title, "Factory Core");
+  assert.equal(core.version, "0.0.25");
+  assert.equal(core.installKind, "directory");
+  assert.equal(core.updateAvailable, null, "directory installs never report remote updateAvailable");
+
+  const folded = foldCompanions(plugins, updates);
+  const burn = folded.find((c) => c.id === "factory-burn-lab")!;
+  assert.equal(burn.version, "0.0.5");
+  assert.equal(burn.currentRevision, "7f8a5cc000");
+  assert.equal(burn.latestRevision, "a91c3f2999");
+  assert.equal(burn.commitsBehind, 2);
+  assert.equal(burn.updateAvailable, true);
+
+  const fleet = folded.find((c) => c.id === "factory-connector")!;
+  assert.equal(fleet.version, "0.0.3");
+  assert.equal(fleet.updateAvailable, false);
+  assert.equal(fleet.commitsBehind, 0);
+
+  const lab = folded.find((c) => c.id === "factory-release-lab")!;
+  assert.equal(lab.status, "not_installed");
+  assert.equal(lab.version, null);
+  assert.equal(lab.updateAvailable, null);
+});
+
+test("v0.0.25 (ADR 0012 §4): checkDaemonPluginUpdates speaks plugin.source.status.request over WebSocket, caches per home, falls back to CLI, and invalidates on install/manage", async (t) => {
+  const daemon = await startFakeDaemon(t, (message) => {
+    if (message.type === "plugin.source.status.request") {
+      return {
+        type: "plugin.source.status.response",
+        payload: {
+          requestId: message.requestId,
+          plugins: [
+            { id: "paseo-factory", source: "directory", path: "/w/plugin", updateAvailable: false },
+            {
+              id: "factory-burn-lab",
+              source: "git",
+              path: "/p/burn",
+              currentCommit: "7f8a5cc",
+              latestCommit: "a91c3f2",
+              commitsBehind: 3,
+              updateAvailable: true,
+            },
+            {
+              id: "factory-connector",
+              source: "git",
+              path: "/p/fleet",
+              currentCommit: "1122334",
+              latestCommit: "1122334",
+              commitsBehind: 0,
+              updateAvailable: false,
+            },
+          ],
+        },
+      };
+    }
+    if (message.type === "plugin.reload.request") {
+      return {
+        type: "plugin.reload.response",
+        payload: {
+          requestId: message.requestId,
+          plugin: { id: message.pluginId, path: "/w/plugin", enabled: true, status: "running" },
+        },
+      };
+    }
+    return null;
+  });
+
+  assert.equal(getCachedPluginUpdateStatus(daemon.home), null);
+  const res = await checkDaemonPluginUpdates(daemon.home);
+  assert.ok(res.ok, res.ok ? "" : res.reason);
+  assert.equal(res.statuses.length, 3);
+  const cached = getCachedPluginUpdateStatus(daemon.home);
+  assert.ok(cached !== null);
+  assert.equal(cached.statuses.get("paseo-factory")?.updateAvailable, null, "directory source maps to updateAvailable: null");
+  assert.equal(cached.statuses.get("factory-burn-lab")?.updateAvailable, true);
+  assert.equal(cached.statuses.get("factory-burn-lab")?.latestRevision, "a91c3f2");
+  assert.equal(cached.statuses.get("factory-connector")?.updateAvailable, false);
+
+  // Managing a plugin invalidates the cached update status for that home.
+  const reload = await manageDaemonPlugin(daemon.home, "paseo-factory", "reload");
+  assert.ok(reload.ok);
+  assert.equal(getCachedPluginUpdateStatus(daemon.home), null, "manageDaemonPlugin invalidates cached update status");
+
+  // CLI fallback when no paseo.pid exists on home:
+  const noDaemonHome = makeTempDir("paseo-factory-no-daemon-update-");
+  disposeDir(t, noDaemonHome);
+  const cli = fakePaseoCli(
+    t,
+    `${JSON.stringify({
+      plugins: [{ id: "factory-burn-lab", outcome: "update", target: { kind: "git", commit: "9988776" } }],
+    })}\n`,
+  );
+  const cliRes = await checkDaemonPluginUpdates(noDaemonHome);
+  assert.ok(cliRes.ok, cliRes.ok ? "" : cliRes.reason);
+  assert.equal(cliRes.statuses[0]?.id, "factory-burn-lab");
+  assert.equal(cliRes.statuses[0]?.updateAvailable, true);
+  assert.equal(cliRes.statuses[0]?.latestRevision, "9988776");
+  assert.deepEqual(cli.argvs(), [["--home", noDaemonHome, "plugin", "update", "--all", "--check", "--json"]]);
+});
+
+test("v0.0.25 (ADR 0012 §2/§4): pluginsCheckUpdates populates snapshot update flags, pluginsManage protects paseo-factory from disable/remove, reports honest update summaries, and supports batch update ('all')", async (t) => {
+  const dir = makeTempDir("surface-plugins-v25-");
+  disposeDir(t, dir);
+  const home = join(dir, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const retroRunner = fakeCopilotRunner(() => ({ code: 0, stdout: '{"proposals":[]}' }));
+  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner });
+
+  const manageCalls: { pluginId: string; action: string }[] = [];
+  const handlers = createSurfaceHandlers({
+    factory,
+    stateDir,
+    home,
+    daemon: fakeDaemon([]).daemon,
+    listPlugins: async () => ({
+      ok: true,
+      plugins: [
+        {
+          id: "paseo-factory",
+          path: "/plugins/paseo-factory",
+          enabled: true,
+          status: "running",
+          version: "0.0.25",
+          installation: { identity: { kind: "directory", path: "/plugins/paseo-factory" } },
+        },
+        {
+          id: "factory-burn-lab",
+          path: "/plugins/factory-burn-lab",
+          enabled: true,
+          status: "running",
+          version: "0.0.5",
+          installation: {
+            identity: { kind: "git", remote: "https://github.com/daymanondev/factory-burn-lab", pluginPath: "plugin" },
+            currentRevision: "7f8a5cc111",
+          },
+        },
+        {
+          id: "factory-connector",
+          path: "/plugins/factory-connector",
+          enabled: true,
+          status: "running",
+          version: "0.0.3",
+          installation: {
+            identity: { kind: "git", remote: "https://github.com/daymanondev/factory-connector", pluginPath: "plugin" },
+            currentRevision: "1122334455",
+          },
+        },
+      ],
+    }),
+    checkPluginUpdates: async () => ({
+      ok: true,
+      checkedAt: "2026-10-20T15:30:00.000Z",
+      statuses: [
+        {
+          id: "factory-burn-lab",
+          currentRevision: "7f8a5cc111",
+          latestRevision: "a91c3f2222",
+          commitsBehind: 2,
+          updateAvailable: true,
+        },
+        {
+          id: "factory-connector",
+          currentRevision: "1122334455",
+          latestRevision: "1122334455",
+          commitsBehind: 0,
+          updateAvailable: false,
+        },
+      ],
+    }),
+    managePlugin: async (_home, pluginId, action) => {
+      manageCalls.push({ pluginId, action });
+      if (action === "update" && pluginId === "factory-burn-lab") {
+        return {
+          ok: true,
+          update: { id: "factory-burn-lab", previousCommit: "7f8a5cc111", currentCommit: "a91c3f2222", commits: 2, updated: true },
+        };
+      }
+      if (action === "update" && pluginId === "factory-connector") {
+        return {
+          ok: true,
+          update: { id: "factory-connector", previousCommit: "1122334455", currentCommit: "1122334455", commits: 0, updated: false },
+        };
+      }
+      return { ok: true };
+    },
+  });
+
+  // 1. Before pluginsCheckUpdates runs, pluginsCheckedAt is null and updateAvailable is null.
+  const snapBefore = await handlers.snapshot({});
+  assert.ok(snapBefore.ok);
+  assert.equal(snapBefore.view.pluginsCheckedAt, null);
+  assert.equal(snapBefore.view.corePlugin.id, "paseo-factory");
+  assert.equal(snapBefore.view.corePlugin.version, "0.0.25");
+  assert.equal(snapBefore.view.companions.find((c) => c.id === "factory-burn-lab")?.updateAvailable, null);
+
+  // 2. Run pluginsCheckUpdates -> populates checkedAt, updatesAvailable, and feeds the next snapshot.
+  const checkRes = await handlers.pluginsCheckUpdates({});
+  assert.ok(checkRes.ok, checkRes.ok ? "" : checkRes.error);
+  assert.equal(checkRes.checkedAt, "2026-10-20T15:30:00.000Z");
+  assert.deepEqual(checkRes.updatesAvailable, ["factory-burn-lab"]);
+  assert.equal(checkRes.summary, "1 plugin update(s) available: factory-burn-lab");
+
+  const snapAfter = await handlers.snapshot({});
+  assert.ok(snapAfter.ok);
+  assert.equal(snapAfter.view.pluginsCheckedAt, "2026-10-20T15:30:00.000Z");
+  const burnAfter = snapAfter.view.companions.find((c) => c.id === "factory-burn-lab")!;
+  assert.equal(burnAfter.updateAvailable, true);
+  assert.equal(burnAfter.latestRevision, "a91c3f2222");
+  const fleetAfter = snapAfter.view.companions.find((c) => c.id === "factory-connector")!;
+  assert.equal(fleetAfter.updateAvailable, false);
+
+  // 3. Core plugin protection: disable and remove on paseo-factory refuse with core-plugin-protected, while reload succeeds.
+  const disableCore = await handlers.pluginsManage({ pluginId: "paseo-factory", action: "disable" });
+  assert.ok(!disableCore.ok);
+  assert.equal(disableCore.code, "core-plugin-protected");
+
+  const removeCore = await handlers.pluginsManage({ pluginId: "paseo-factory", action: "remove" });
+  assert.ok(!removeCore.ok);
+  assert.equal(removeCore.code, "core-plugin-protected");
+
+  const reloadCore = await handlers.pluginsManage({ pluginId: "paseo-factory", action: "reload" });
+  assert.ok(reloadCore.ok);
+  assert.equal(reloadCore.summary, "reloaded paseo-factory on the daemon");
+
+  // 4. Honest update summaries: updated: true vs updated: false.
+  const updateBurn = await handlers.pluginsManage({ pluginId: "factory-burn-lab", action: "update" });
+  assert.ok(updateBurn.ok);
+  assert.equal(updateBurn.summary, "updated factory-burn-lab (7f8a5cc → a91c3f2)");
+
+  const updateFleet = await handlers.pluginsManage({ pluginId: "factory-connector", action: "update" });
+  assert.ok(updateFleet.ok);
+  assert.equal(updateFleet.summary, "factory-connector is already up to date (1122334)");
+
+  // 5. Batch update ("all"): refuses non-update actions with invalid-target, and after re-checking updates, updates only the plugin with updateAvailable === true.
+  const invalidBatch = await handlers.pluginsManage({ pluginId: "all", action: "disable" });
+  assert.ok(!invalidBatch.ok);
+  assert.equal(invalidBatch.code, "invalid-target");
+
+  await handlers.pluginsCheckUpdates({});
+  manageCalls.length = 0;
+  const updateAll = await handlers.pluginsManage({ pluginId: "all", action: "update" });
+  assert.ok(updateAll.ok);
+  assert.deepEqual(manageCalls, [{ pluginId: "factory-burn-lab", action: "update" }]);
+  assert.equal(updateAll.summary, "updated factory-burn-lab (7f8a5cc → a91c3f2)");
+});
+
 
 
 

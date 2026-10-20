@@ -34,14 +34,14 @@ import type { LandingResult } from "./core/workspace.ts";
 import { FACTORY_VIEW_VERSION } from "../shared/view.ts";
 import { foldRetro, foldTasks, foldView, readTailed } from "./view.ts";
 import { setAgentModelViaCli, setAgentThinkingViaCli, stopAgentViaCli } from "./daemon-cli.ts";
-import { installDaemonPlugin, listDaemonPlugins, manageDaemonPlugin } from "./daemon-cli.ts";
-import type { DaemonPluginAction, DaemonPluginItem, DaemonReply } from "./daemon-cli.ts";
+import { checkDaemonPluginUpdates, getCachedPluginUpdateStatus, installDaemonPlugin, listDaemonPlugins, manageDaemonPlugin } from "./daemon-cli.ts";
+import type { DaemonPluginAction, DaemonPluginItem, DaemonPluginSourceStatus, DaemonPluginUpdateRow, DaemonReply } from "./daemon-cli.ts";
 import { SEAT_TITLES, renderSeatBootstrap } from "./roles.ts";
 import type { SeatName } from "./roles.ts";
 import { discoverProjects, writeProjectRegistration } from "./projects.ts";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { COMPANION_CATALOG } from "../shared/companions.ts";
-import type { CompanionCatalogEntry } from "../shared/companions.ts";
+import { COMPANION_CATALOG, CORE_PLUGIN_ENTRY } from "../shared/companions.ts";
+import type { CompanionCatalogEntry, ManageablePluginId } from "../shared/companions.ts";
 import type { SpoolLeadDispatchRequest, SpoolReply } from "./spool.ts";
 import {
   accept,
@@ -49,6 +49,7 @@ import {
   leadDispatch,
   leadEnsure,
   leadRotate,
+  pluginsCheckUpdates,
   pluginsInstall,
   pluginsManage,
   projectReset,
@@ -225,6 +226,7 @@ export interface SurfaceDeps {
   listPlugins?: typeof listDaemonPlugins;
   installPlugin?: typeof installDaemonPlugin;
   managePlugin?: typeof manageDaemonPlugin;
+  checkPluginUpdates?: typeof checkDaemonPluginUpdates;
   /**
    * The Lead-mailbox rotation settle (v0.0.20, ADR 0013 §4's last arm):
    * `retireSeat` fires it right after a Project's Lead is archived, so any
@@ -321,8 +323,8 @@ function pluginsInstallSummary(input: { ids: readonly string[]; source: string; 
   return `installed ${ids} from ${from}${input.ref === undefined ? "" : ` at ref ${input.ref}`}`;
 }
 
-/** One companion manage act's sentence — the per-action verb, house style. */
-function pluginsManageSummary(pluginId: string, action: DaemonPluginAction): string {
+/** One companion manage act's sentence — the per-action verb, house style (with honest update outcome in v0.0.25, ADR 0012 §4). */
+function pluginsManageSummary(pluginId: string, action: DaemonPluginAction, update?: DaemonPluginUpdateRow): string {
   switch (action) {
     case "enable":
       return `enabled ${pluginId} on the daemon`;
@@ -330,8 +332,21 @@ function pluginsManageSummary(pluginId: string, action: DaemonPluginAction): str
       return `disabled ${pluginId} on the daemon`;
     case "reload":
       return `reloaded ${pluginId} on the daemon`;
-    case "update":
+    case "update": {
+      if (update?.updated === false) {
+        const curr = update.currentCommit ? ` (${update.currentCommit.slice(0, 7)})` : "";
+        return `${pluginId} is already up to date${curr}`;
+      }
+      if (update?.updated === true) {
+        if (update.previousCommit && update.currentCommit) {
+          return `updated ${pluginId} (${update.previousCommit.slice(0, 7)} → ${update.currentCommit.slice(0, 7)})`;
+        }
+        if (update.currentCommit) {
+          return `updated ${pluginId} to ${update.currentCommit.slice(0, 7)}`;
+        }
+      }
       return `updated ${pluginId} to the latest revision`;
+    }
     case "remove":
       return `removed ${pluginId} from the daemon`;
   }
@@ -345,6 +360,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   };
   const log = deps.onLog ?? (() => {});
   const failure = <C extends string>(code: C, error: string) => ({ ok: false as const, code, error });
+  let localUpdateSnapshot: { statuses: ReadonlyMap<string, DaemonPluginSourceStatus>; checkedAt: string } | null = null;
 
   /**
    * The vault half's gather (v0.0.21, ADR 0014 §4; v0.0.22 guided `gh` probe):
@@ -853,16 +869,20 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         deps.home,
       ).filter((entry): entry is { slug: string; root: string } => entry.root !== null);
 
+      const updateSnap = localUpdateSnapshot ?? getCachedPluginUpdateStatus(deps.home);
       const view = foldView({
         stateDir: deps.stateDir,
         generatedAt: new Date().toISOString(),
         lanes: lanes.lanes,
         events,
         daemon: { agents, supervisor, lead, providers, daemonError },
-        // v0.0.17 (ADR 0012 §2): the daemon plugin list joined against the
-        // companion catalog — null when the list call was unavailable (the
-        // degrade law: every entry folds to not_installed, never a refusal).
-        companions: { plugins: daemonPlugins },
+        // v0.0.17 (ADR 0012 §2) & v0.0.25 (ADR 0012 §3–§4): the daemon plugin
+        // list joined against Core + companion catalog and cached update check.
+        companions: {
+          plugins: daemonPlugins,
+          updates: updateSnap?.statuses ?? null,
+          checkedAt: updateSnap?.checkedAt ?? null,
+        },
         // v0.0.21 (ADR 0014 §4): the Private vault status half, gathered per
         // snapshot the way the companion list is — a probe that cannot answer
         // degrades inside the view's own `error` field, never a refusal.
@@ -1373,6 +1393,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         targets = [entry];
       }
       const installer = deps.installPlugin ?? installDaemonPlugin;
+      localUpdateSnapshot = null;
       const installed: string[] = [];
       for (const entry of targets) {
         // The catalog's canonicalSource is the default — no code path probes
@@ -1391,18 +1412,90 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     },
 
     async pluginsManage(
-      input: { pluginId: CompanionCatalogEntry["id"]; action: DaemonPluginAction },
+      input: { pluginId: ManageablePluginId | "all"; action: DaemonPluginAction },
       _context?: SurfaceCallContext,
     ): Promise<{ ok: true; pluginId: string; action: string; summary: string } | { ok: false; code: string; error: string }> {
-      if (!COMPANION_CATALOG.some((entry) => entry.id === input.pluginId)) {
-        return failure("unknown-companion", `${input.pluginId} is not a Factory companion — the surface manages only the catalog's own family`);
-      }
       const manager = deps.managePlugin ?? manageDaemonPlugin;
+      if (input.pluginId === "all") {
+        if (input.action !== "update") {
+          return failure("invalid-target", 'target "all" is only supported for action "update"');
+        }
+        const lister = deps.listPlugins ?? listDaemonPlugins;
+        const listed = await lister(deps.home);
+        if (!listed.ok) return failure("daemon_failed", listed.reason);
+        const familyIds = new Set<string>([CORE_PLUGIN_ENTRY.id, ...COMPANION_CATALOG.map((c) => c.id)]);
+        const remoteInstalled = listed.plugins.filter((p) => {
+          if (!familyIds.has(p.id)) return false;
+          const kind = p.installation?.identity?.kind ?? p.source;
+          return kind === "git" || kind === "npm";
+        });
+        const updateSnap = localUpdateSnapshot ?? getCachedPluginUpdateStatus(deps.home);
+        const targets =
+          updateSnap === null
+            ? remoteInstalled
+            : remoteInstalled.filter((p) => updateSnap.statuses.get(p.id)?.updateAvailable === true);
+        localUpdateSnapshot = null;
+        if (targets.length === 0) {
+          return { ok: true as const, pluginId: "all", action: "update", summary: "All installed Factory plugins are already up to date." };
+        }
+        const summaries: string[] = [];
+        for (const target of targets) {
+          const reply = await manager(deps.home, target.id, "update");
+          if (!reply.ok) return failure("daemon_failed", reply.reason);
+          summaries.push(pluginsManageSummary(target.id, "update", reply.update));
+        }
+        const summary = summaries.join(" · ");
+        log(`plugins: ${summary}`);
+        return { ok: true as const, pluginId: "all", action: "update", summary };
+      }
+
+      const isCore = input.pluginId === CORE_PLUGIN_ENTRY.id;
+      const isCompanion = COMPANION_CATALOG.some((entry) => entry.id === input.pluginId);
+      if (!isCore && !isCompanion) {
+        return failure("unknown-companion", `${input.pluginId} is not a Factory plugin — the surface manages only the catalog's own family`);
+      }
+      if (isCore && (input.action === "disable" || input.action === "remove")) {
+        return failure(
+          "core-plugin-protected",
+          "paseo-factory is the active Factory core plugin and cannot be disabled or removed from the Factory surface",
+        );
+      }
+      localUpdateSnapshot = null;
       const reply = await manager(deps.home, input.pluginId, input.action);
       if (!reply.ok) return failure("daemon_failed", reply.reason);
-      const summary = pluginsManageSummary(input.pluginId, input.action);
+      const summary = pluginsManageSummary(input.pluginId, input.action, reply.update);
       log(`plugins: ${summary}`);
       return { ok: true as const, pluginId: input.pluginId, action: input.action, summary };
+    },
+
+    async pluginsCheckUpdates(
+      _input: Record<string, never>,
+      _context?: SurfaceCallContext,
+    ): Promise<
+      | { ok: true; checkedAt: string; updatesAvailable: string[]; summary: string }
+      | { ok: false; code: string; error: string }
+    > {
+      const checker = deps.checkPluginUpdates ?? checkDaemonPluginUpdates;
+      const reply = await checker(deps.home);
+      if (!reply.ok) return failure("daemon_failed", reply.reason);
+      const map = new Map<string, DaemonPluginSourceStatus>();
+      for (const row of reply.statuses) map.set(row.id, row);
+      localUpdateSnapshot = { statuses: map, checkedAt: reply.checkedAt };
+      const familyIds = new Set<string>([CORE_PLUGIN_ENTRY.id, ...COMPANION_CATALOG.map((c) => c.id)]);
+      const updatesAvailable = reply.statuses
+        .filter((row) => familyIds.has(row.id) && row.updateAvailable === true)
+        .map((row) => row.id);
+      const summary =
+        updatesAvailable.length > 0
+          ? `${updatesAvailable.length} plugin update(s) available: ${updatesAvailable.join(", ")}`
+          : "All installed Factory plugins are up to date.";
+      log(`plugins: checked updates — ${summary}`);
+      return {
+        ok: true as const,
+        checkedAt: reply.checkedAt,
+        updatesAvailable,
+        summary,
+      };
     },
 
     // ---- the Private vault surface (v0.0.21–v0.0.22, ADR 0014 §2/§4) ------------------------
@@ -1579,6 +1672,7 @@ export function registerSurfaceRpc(server: PluginServerContext, handlers: Surfac
   server.handle(ratifyProposal, (input, context) => handlers.ratifyProposal(input, { paseo: context.paseo }));
   server.handle(pluginsInstall, (input, context) => handlers.pluginsInstall(input, { paseo: context.paseo }));
   server.handle(pluginsManage, (input, context) => handlers.pluginsManage(input, { paseo: context.paseo }));
+  server.handle(pluginsCheckUpdates, (input, context) => handlers.pluginsCheckUpdates(input, { paseo: context.paseo }));
   server.handle(vaultConfigure, (input, context) => handlers.vaultConfigure(input, { paseo: context.paseo }));
   server.handle(vaultHydrate, (input, context) => handlers.vaultHydrate(input, { paseo: context.paseo }));
   server.handle(vaultPull, (input, context) => handlers.vaultPull(input, { paseo: context.paseo }));
