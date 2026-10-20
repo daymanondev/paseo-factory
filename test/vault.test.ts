@@ -14,6 +14,7 @@ import {
   ensureLocalGitExcludeAndWorktreeInclude,
   ensureRemoteVaultRepo,
   hydrateVaultDirect,
+  importVaultSecrets,
   loadVaultConfig,
   parseVaultManifest,
   prepareTaskWorktree,
@@ -26,10 +27,21 @@ import {
   resolveVaultApps,
   saveVaultConfig,
   sealVaultBuffer,
+  syncVault,
   unsealVaultBuffer,
   writeProjectRegistration,
 } from "../src/index.ts";
-import type { VaultGhAuthStatus, VaultManifest, VaultRunner, VaultRunnerCall, VaultStatusView } from "../src/index.ts";
+import type {
+  ImportVaultSecretsInput,
+  ImportVaultSecretsResult,
+  SyncVaultOptions,
+  SyncVaultResult,
+  VaultGhAuthStatus,
+  VaultManifest,
+  VaultRunner,
+  VaultRunnerCall,
+  VaultStatusView,
+} from "../src/index.ts";
 import { disposeDir, factoryErrorCode, gitCommitAll, makeTempDir } from "./helpers.ts";
 
 /**
@@ -1452,3 +1464,334 @@ test("empty-remote bootstrap: pullVault on an empty bare remote returns hydrated
   const pullAfterInit = await pullVault(home1);
   assert.deepEqual(pullAfterInit.hydratedFiles, ["config/lanes.json"]);
 });
+
+test("pushVault automatically collects lanes.json, fleet.json, free-pool.json, eye.json (sealed on remote), and project .store-release/manifest.json; pullVault and hydrateVaultDirect materialize configs when absent or overwriteConfigs: true", async (t) => {
+  const bare = makeBareRemote(t);
+  const parent = makeProjectParent(t);
+  const patigame = join(parent, "patigame");
+  mkdirSync(patigame, { recursive: true });
+  writeFileSync(join(patigame, "README.md"), "patigame fixture\n");
+  gitCommitAll(patigame);
+  runGit(["remote", "add", "origin", "git@github.com:daymanondev/patigame.git"], patigame);
+  const storeManifest = JSON.stringify({ bundleId: "com.patigame.app", packageName: "com.patigame" }, null, 2);
+  mkdirSync(join(patigame, ".store-release"), { recursive: true });
+  writeFileSync(join(patigame, ".store-release", "manifest.json"), storeManifest);
+  const resolved = resolveProject(patigame);
+  assert.ok(resolved.ok);
+
+  const home1 = makeTempDir();
+  disposeDir(t, home1);
+  saveVaultConfig(home1, { repo: bare, nodeId: "mac-studio" });
+  const stateDir1 = join(home1, "plugin-state", "paseo-factory");
+  writeProjectRegistration(stateDir1, resolved.slug, { root: patigame });
+
+  const lanesJson = JSON.stringify({ worker: "pi/zai/glm-5.3", supervisor: "copilot/gpt-5.4" });
+  const fleetJson = JSON.stringify({ peers: [{ id: "mini-m2", host: "100.64.0.2" }] });
+  const freePoolJson = JSON.stringify({ providers: ["openrouter/free"] });
+  const eyeJson = JSON.stringify({ provider: "openrouter", apiKey: "sk-or-secret-12345" });
+
+  writeFileSync(join(stateDir1, "lanes.json"), lanesJson);
+  writeFileSync(join(stateDir1, "eye.json"), eyeJson);
+  mkdirSync(join(home1, "connector"), { recursive: true });
+  writeFileSync(join(home1, "connector", "fleet.json"), fleetJson);
+  mkdirSync(join(home1, "burn-lab"), { recursive: true });
+  writeFileSync(join(home1, "burn-lab", "free-pool.json"), freePoolJson);
+
+  const pushed = await pushVault(home1);
+  assert.equal(pushed.pushed, true);
+  assert.deepEqual(pushed.pushedFiles, [
+    "config/apps/patigame/store-manifest.json",
+    "config/fleet.json",
+    "config/free-pool.json",
+    "config/lanes.json",
+    "secrets/shared/eye.json",
+    "vault.manifest.json",
+  ]);
+  assert.equal(modeOf(join(home1, "vault-runtime", "secrets", "shared", "eye.json")), 0o600);
+
+  // Verify the remote checkout sealed eye.json and wrote vault.manifest.json + store-manifest.json
+  const probe = makeTempDir();
+  disposeDir(t, probe);
+  runGit(["clone", bare, probe]);
+  const remoteEyeRaw = readFileSync(join(probe, "secrets/shared/eye.json"), "utf8");
+  assert.ok(!remoteEyeRaw.includes("sk-or-secret-12345"), "eye.json on remote must be sealed, never raw plaintext");
+  assert.equal(unsealVaultBuffer(Buffer.from(remoteEyeRaw, "utf8")).toString("utf8"), eyeJson);
+  assert.equal(readFileSync(join(probe, "config/apps/patigame/store-manifest.json"), "utf8"), storeManifest);
+  assert.deepEqual(parseVaultManifest(readFileSync(join(probe, "vault.manifest.json"), "utf8")), {
+    patigame: {
+      repoBasename: "patigame",
+      gitRemote: "git@github.com:daymanondev/patigame.git",
+      bundleId: "com.patigame.app",
+      packageName: "com.patigame",
+    },
+  });
+
+  // Machine 2 pulls: configs materialize into local state dirs when absent
+  const home2 = makeTempDir();
+  disposeDir(t, home2);
+  saveVaultConfig(home2, { repo: bare, nodeId: "mini-m2" });
+  await pullVault(home2);
+
+  const stateDir2 = join(home2, "plugin-state", "paseo-factory");
+  assert.equal(readFileSync(join(stateDir2, "lanes.json"), "utf8"), lanesJson);
+  assert.equal(readFileSync(join(home2, "connector", "fleet.json"), "utf8"), fleetJson);
+  assert.equal(readFileSync(join(home2, "burn-lab", "free-pool.json"), "utf8"), freePoolJson);
+
+  // Local edits are preserved on pull when overwriteConfigs is false (default), and overwritten when overwriteConfigs: true
+  const localCustomLanes = JSON.stringify({ worker: "claude/opus-4-8" });
+  writeFileSync(join(stateDir2, "lanes.json"), localCustomLanes);
+  await pullVault(home2);
+  assert.equal(readFileSync(join(stateDir2, "lanes.json"), "utf8"), localCustomLanes, "existing local config is not overwritten by default");
+
+  await pullVault(home2, { overwriteConfigs: true });
+  assert.equal(readFileSync(join(stateDir2, "lanes.json"), "utf8"), lanesJson, "overwriteConfigs: true restores vault config");
+
+  // Direct hydrate also respects overwriteConfigs
+  const home3 = makeTempDir();
+  disposeDir(t, home3);
+  saveVaultConfig(home3, { repo: "daymanondev/factory-vault" });
+  const top = "daymanondev-factory-vault-abc1234";
+  const tarball = buildTarball([
+    { path: `${top}/config/lanes.json`, data: lanesJson },
+    { path: `${top}/config/fleet.json`, data: fleetJson },
+    { path: `${top}/config/free-pool.json`, data: freePoolJson },
+  ]);
+  await hydrateVaultDirect(home3, { runner: fakeTarballRunner(tarball).runner });
+  const stateDir3 = join(home3, "plugin-state", "paseo-factory");
+  assert.equal(readFileSync(join(stateDir3, "lanes.json"), "utf8"), lanesJson);
+  assert.equal(readFileSync(join(home3, "connector", "fleet.json"), "utf8"), fleetJson);
+  assert.equal(readFileSync(join(home3, "burn-lab", "free-pool.json"), "utf8"), freePoolJson);
+  writeFileSync(join(stateDir3, "lanes.json"), localCustomLanes);
+  await hydrateVaultDirect(home3, { runner: fakeTarballRunner(tarball).runner, overwriteConfigs: false });
+  assert.equal(readFileSync(join(stateDir3, "lanes.json"), "utf8"), localCustomLanes);
+  await hydrateVaultDirect(home3, { runner: fakeTarballRunner(tarball).runner, overwriteConfigs: true });
+  assert.equal(readFileSync(join(stateDir3, "lanes.json"), "utf8"), lanesJson);
+});
+
+test("syncVault auto-detects @daymanondev via probeGhAuth, auto-creates daymanondev/factory-vault, collects local state & ledgers, pushes, and hydrates a second machine in one call", async (t) => {
+  clearGhAuthCache();
+  const bare = makeBareRemote(t);
+  const defaultRunner = createDefaultVaultRunner();
+
+  // Route GitHub URL https://github.com/daymanondev/factory-vault.git to our local bare remote
+  const ghCalls: VaultRunnerCall[] = [];
+  let repoCreated = false;
+  const hybridRunner: VaultRunner = async (call) => {
+    if (call.command === "gh") {
+      ghCalls.push(call);
+      if (call.args[0] === "auth" && call.args[1] === "status") {
+        return Buffer.from(
+          JSON.stringify({
+            hosts: {
+              "github.com": [{ login: "daymanondev", active: true, state: "success" }],
+            },
+          }),
+          "utf8",
+        );
+      }
+      if (call.args[0] === "auth" && call.args[1] === "setup-git") {
+        return Buffer.alloc(0);
+      }
+      if (call.args[0] === "repo" && call.args[1] === "view") {
+        if (!repoCreated) {
+          throw new Error("Could not resolve to a Repository with the name 'daymanondev/factory-vault'.");
+        }
+        return Buffer.from(JSON.stringify({ nameWithOwner: "daymanondev/factory-vault" }), "utf8");
+      }
+      if (call.args[0] === "repo" && call.args[1] === "create") {
+        repoCreated = true;
+        return Buffer.from("https://github.com/daymanondev/factory-vault\n", "utf8");
+      }
+      throw new Error(`unexpected gh call: ${call.args.join(" ")}`);
+    }
+    const rewrittenArgs = call.args.map((arg) => (arg === "https://github.com/daymanondev/factory-vault.git" ? bare : arg));
+    return defaultRunner({ ...call, args: rewrittenArgs });
+  };
+
+  // Machine 1: unconfigured home, gh authenticated as @daymanondev, has local lanes, fleet, free-pool, project store manifest, and ledger
+  const parent = makeProjectParent(t);
+  const patigame1 = join(parent, "m1", "patigame");
+  mkdirSync(patigame1, { recursive: true });
+  writeFileSync(join(patigame1, "README.md"), "patigame fixture\n");
+  gitCommitAll(patigame1);
+  mkdirSync(join(patigame1, ".store-release"), { recursive: true });
+  writeFileSync(join(patigame1, ".store-release", "manifest.json"), JSON.stringify({ bundleId: "com.patigame.app" }));
+  const resolved1 = resolveProject(patigame1);
+  assert.ok(resolved1.ok);
+
+  const home1 = makeTempDir();
+  disposeDir(t, home1);
+  const stateDir1 = join(home1, "plugin-state", "paseo-factory");
+  writeProjectRegistration(stateDir1, resolved1.slug, { root: patigame1 });
+  writeFileSync(join(stateDir1, "lanes.json"), JSON.stringify({ worker: "pi/zai/glm-5.3" }));
+  mkdirSync(join(home1, "connector"), { recursive: true });
+  writeFileSync(join(home1, "connector", "fleet.json"), JSON.stringify({ peers: [] }));
+  mkdirSync(join(home1, "burn-lab"), { recursive: true });
+  writeFileSync(join(home1, "burn-lab", "free-pool.json"), JSON.stringify({ pool: ["free"] }));
+  writeFileSync(join(stateDir1, "ledger.jsonl"), LEDGER_LINES);
+
+  const sync1: SyncVaultResult = await syncVault(home1, { runner: hybridRunner } satisfies SyncVaultOptions);
+  assert.equal(sync1.createdRepo, true, "first sync auto-creates daymanondev/factory-vault");
+  assert.equal(sync1.repo, "daymanondev/factory-vault");
+  assert.equal(sync1.branch, "main");
+  assert.equal(sync1.pushed, true);
+  assert.ok(sync1.pushedFiles.includes("config/lanes.json"));
+  assert.ok(sync1.pushedFiles.includes("config/fleet.json"));
+  assert.ok(sync1.pushedFiles.includes("config/free-pool.json"));
+  assert.ok(sync1.pushedFiles.includes("config/apps/patigame/store-manifest.json"));
+  assert.ok(sync1.pushedFiles.includes("vault.manifest.json"));
+  assert.ok(sync1.pushedFiles.some((f) => f.endsWith("/global-ledger.jsonl")));
+  assert.ok(sync1.summary.length > 0);
+  assert.equal(loadVaultConfig(home1)?.repo, "daymanondev/factory-vault");
+
+  // Machine 2: single syncVault call hydrates configs and reconciles ledger
+  const home2 = makeTempDir();
+  disposeDir(t, home2);
+  const sync2 = await syncVault(home2, { runner: hybridRunner });
+  assert.equal(sync2.createdRepo, false, "repo already exists on second sync");
+  assert.equal(sync2.repo, "daymanondev/factory-vault");
+  assert.ok(sync2.hydratedFiles.includes("config/lanes.json"));
+  assert.equal(readFileSync(join(home2, "plugin-state", "paseo-factory", "lanes.json"), "utf8"), JSON.stringify({ worker: "pi/zai/glm-5.3" }));
+  assert.equal(readFileSync(join(home2, "connector", "fleet.json"), "utf8"), JSON.stringify({ peers: [] }));
+  assert.equal(readFileSync(join(home2, "burn-lab", "free-pool.json"), "utf8"), JSON.stringify({ pool: ["free"] }));
+  const openedLedger2 = Ledger.open(join(home2, "plugin-state", "paseo-factory", "ledger.jsonl"));
+  assert.equal(openedLedger2.events.length, 2, "global ledger reconciled onto machine 2");
+
+  // Unconfigured home with unauthenticated gh refuses with vault-not-configured
+  const homeUnauth = makeTempDir();
+  disposeDir(t, homeUnauth);
+  const unauthRunner: VaultRunner = async () => {
+    throw new Error("You are not logged into any GitHub hosts.");
+  };
+  await assert.rejects(() => syncVault(homeUnauth, { runner: unauthRunner }), factoryErrorCode("vault-not-configured"));
+});
+
+test("importVaultSecrets imports .p8, ASC credentials, Google Play JSON (sealed against Secret Scanning on remote), eye.json, and app keystore/Firebase files, updates env.json, and syncs", async (t) => {
+  const bare = makeBareRemote(t);
+  const srcDir = makeTempDir();
+  disposeDir(t, srcDir);
+
+  const p8 = "-----BEGIN PRIVATE KEY-----\nasc api key imported\n-----END PRIVATE KEY-----\n";
+  const eyePlain = JSON.stringify({ provider: "openrouter", apiKey: "sk-or-eye" });
+  const keystore = randomBytes(1024);
+  const googleServices = JSON.stringify({ project_info: { project_id: "patigame-firebase" } });
+  const plist = '<?xml version="1.0"?>\n<plist/>\n';
+
+  const ascKeyPath = join(srcDir, "AuthKey_XYZ.p8");
+  const gplayKeyPath = join(srcDir, "gplay-sa.json");
+  const eyeConfigPath = join(srcDir, "eye.json");
+  const keystorePath = join(srcDir, "release.keystore");
+  const googleServicesJsonPath = join(srcDir, "google-services.json");
+  const googleServiceInfoPlistPath = join(srcDir, "GoogleService-Info.plist");
+
+  writeFileSync(ascKeyPath, p8);
+  writeFileSync(gplayKeyPath, GCP_SERVICE_ACCOUNT);
+  writeFileSync(eyeConfigPath, eyePlain);
+  writeFileSync(keystorePath, keystore);
+  writeFileSync(googleServicesJsonPath, googleServices);
+  writeFileSync(googleServiceInfoPlistPath, plist);
+
+  const parent = makeProjectParent(t);
+  const patigame = join(parent, "patigame");
+  mkdirSync(patigame, { recursive: true });
+  writeFileSync(join(patigame, "README.md"), "patigame fixture\n");
+  gitCommitAll(patigame);
+  const resolved = resolveProject(patigame);
+  assert.ok(resolved.ok);
+
+  const home = makeTempDir();
+  disposeDir(t, home);
+  saveVaultConfig(home, { repo: bare, nodeId: "mac-studio" });
+  writeProjectRegistration(join(home, "plugin-state", "paseo-factory"), resolved.slug, { root: patigame });
+
+  const input: ImportVaultSecretsInput = {
+    ascKeyPath,
+    ascKeyId: "KEY123456",
+    ascIssuer: "ISSUER-999",
+    gplayKeyPath,
+    eyeConfigPath,
+    appKey: "patigame",
+    keystorePath,
+    storePass: "keystore-secret-pass",
+    keyAlias: "upload",
+    googleServicesJsonPath,
+    googleServiceInfoPlistPath,
+  };
+  const imported: ImportVaultSecretsResult = await importVaultSecrets(home, input);
+
+  assert.deepEqual(imported.importedFiles, [
+    "secrets/apps/patigame/GoogleService-Info.plist",
+    "secrets/apps/patigame/google-services.json",
+    "secrets/apps/patigame/release.keystore",
+    "secrets/apps/patigame/signing.json",
+    "secrets/shared/asc-api-key.p8",
+    "secrets/shared/asc-credentials.json",
+    "secrets/shared/eye.json",
+    "secrets/shared/gplay-service-account.json",
+  ]);
+  assert.ok(imported.synced !== null && imported.synced.pushed === true, "syncAfterImport defaults to true and pushes to configured vault");
+  assert.ok(imported.summary.length > 0);
+
+  // Verify env.json is immediately populated
+  const envJson = JSON.parse(readFileSync(join(home, "vault-runtime", "env.json"), "utf8"));
+  assert.deepEqual(envJson, {
+    ASC_KEY_PATH: join(home, "vault-runtime", "secrets", "shared", "asc-api-key.p8"),
+    ASC_KEY_ID: "KEY123456",
+    ASC_ISSUER: "ISSUER-999",
+    GPLAY_KEY_PATH: join(home, "vault-runtime", "secrets", "shared", "gplay-service-account.json"),
+    RELEASE_LAB_KEYSTORE_STOREPASS: "keystore-secret-pass",
+    FIREBASE_PROJECT_ID: "patigame-firebase",
+  });
+
+  // Verify local project checkout received materialized per-app files
+  assert.deepEqual(readFileSync(join(patigame, "android/app/release.keystore")), keystore);
+  assert.equal(readFileSync(join(patigame, "android/app/google-services.json"), "utf8"), googleServices);
+  assert.equal(readFileSync(join(patigame, "ios/GoogleService-Info.plist"), "utf8"), plist);
+
+  // Verify remote bare repository has gplay-service-account.json and eye.json sealed (never raw PRIVATE KEY)
+  const probe = makeTempDir();
+  disposeDir(t, probe);
+  runGit(["clone", bare, probe]);
+  const remoteGplay = readFileSync(join(probe, "secrets/shared/gplay-service-account.json"), "utf8");
+  assert.ok(!remoteGplay.includes("PRIVATE KEY"), "Google Play SA key on remote must be sealed against GitHub Secret Scanning");
+  assert.equal(unsealVaultBuffer(Buffer.from(remoteGplay, "utf8")).toString("utf8"), GCP_SERVICE_ACCOUNT);
+  const remoteEye = readFileSync(join(probe, "secrets/shared/eye.json"), "utf8");
+  assert.ok(!remoteEye.includes("sk-or-eye"), "eye.json on remote must be sealed");
+  assert.equal(unsealVaultBuffer(Buffer.from(remoteEye, "utf8")).toString("utf8"), eyePlain);
+
+  // Verify process.env fallback when no explicit inputs are passed and syncAfterImport: false
+  const homeEnv = makeTempDir();
+  disposeDir(t, homeEnv);
+  const priorAscPath = process.env.ASC_KEY_PATH;
+  const priorAscId = process.env.ASC_KEY_ID;
+  const priorAscIssuer = process.env.ASC_ISSUER;
+  const priorGplayPath = process.env.GPLAY_KEY_PATH;
+  process.env.ASC_KEY_PATH = ascKeyPath;
+  process.env.ASC_KEY_ID = "ENV_KEY_ID";
+  process.env.ASC_ISSUER = "ENV_ISSUER_ID";
+  process.env.GPLAY_KEY_PATH = gplayKeyPath;
+  try {
+    const envImported = await importVaultSecrets(homeEnv, { syncAfterImport: false });
+    assert.equal(envImported.synced, null);
+    assert.deepEqual(envImported.importedFiles, [
+      "secrets/shared/asc-api-key.p8",
+      "secrets/shared/asc-credentials.json",
+      "secrets/shared/gplay-service-account.json",
+    ]);
+    const envJson2 = JSON.parse(readFileSync(join(homeEnv, "vault-runtime", "env.json"), "utf8"));
+    assert.equal(envJson2.ASC_KEY_ID, "ENV_KEY_ID");
+    assert.equal(envJson2.ASC_ISSUER, "ENV_ISSUER_ID");
+  } finally {
+    if (priorAscPath === undefined) delete process.env.ASC_KEY_PATH;
+    else process.env.ASC_KEY_PATH = priorAscPath;
+    if (priorAscId === undefined) delete process.env.ASC_KEY_ID;
+    else process.env.ASC_KEY_ID = priorAscId;
+    if (priorAscIssuer === undefined) delete process.env.ASC_ISSUER;
+    else process.env.ASC_ISSUER = priorAscIssuer;
+    if (priorGplayPath === undefined) delete process.env.GPLAY_KEY_PATH;
+    else process.env.GPLAY_KEY_PATH = priorGplayPath;
+  }
+});
+
+
+
