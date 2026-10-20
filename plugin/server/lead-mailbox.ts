@@ -992,6 +992,10 @@ function renderLedgerDigest(events: readonly LedgerEvent[]): string {
 function agentOfTask(events: readonly LedgerEvent[]): Map<string, string> {
   const index = new Map<string, string>();
   for (const evt of events) {
+    if (evt.event === "contract_set") {
+      index.delete(evt.task);
+      continue;
+    }
     if (evt.event !== "claim_reported" && evt.event !== "meter_written" && evt.event !== "repoke_dispatched") continue;
     if (typeof evt.agent === "string" && evt.agent !== "") index.set(evt.task, evt.agent);
   }
@@ -1027,14 +1031,11 @@ function contractWorkspaceOf(events: readonly LedgerEvent[], task: string): stri
 function driverWaveInFlight(events: readonly LedgerEvent[]): boolean {
   const openRounds = new Map<string, number>();
   for (const evt of events) {
-    if (evt.event === "spawn_dispatched") openRounds.set(evt.task, evt.seq);
-  }
-  if (openRounds.size === 0) return false;
-  for (const evt of events) {
     if (!("task" in evt) || typeof evt.task !== "string") continue;
-    const spawnSeq = openRounds.get(evt.task);
-    if (spawnSeq === undefined || evt.seq <= spawnSeq) continue;
-    if (evt.event === "gate_finished" || evt.event === "needs_human") openRounds.delete(evt.task);
+    if (evt.event === "spawn_dispatched") openRounds.set(evt.task, evt.seq);
+    else if (evt.event === "contract_set" || evt.event === "gate_finished" || evt.event === "needs_human") {
+      openRounds.delete(evt.task);
+    }
   }
   return openRounds.size > 0;
 }

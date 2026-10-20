@@ -627,7 +627,8 @@ function lastTaskAgentForTask(factory: Factory, task: string): string | undefine
   let agentId: string | undefined;
   for (const evt of factory.ledger.events) {
     if ("task" in evt && evt.task === task) {
-      if (evt.event === "claim_reported" && typeof evt.agent === "string" && evt.agent !== "") agentId = evt.agent;
+      if (evt.event === "contract_set") agentId = undefined;
+      else if (evt.event === "claim_reported" && typeof evt.agent === "string" && evt.agent !== "") agentId = evt.agent;
       else if (evt.event === "repoke_dispatched" && typeof evt.agent === "string" && evt.agent !== "") agentId = evt.agent;
       else if (evt.event === "meter_written" && typeof evt.agent === "string" && evt.agent !== "") agentId = evt.agent;
     }
@@ -678,14 +679,7 @@ async function resolveSpawnWorkspaceAndParent(
   }
   if (leadAgentId === undefined) leadAgentId = reg?.lead;
 
-  let worktree = explicitWorktree;
-  if (worktree === undefined) {
-    for (const evt of factory.ledger.events) {
-      if (evt.event === "spawn_dispatched" && evt.task === task && typeof evt.worktree === "string" && evt.worktree !== "") {
-        worktree = evt.worktree;
-      }
-    }
-  }
+  const worktree = explicitWorktree ?? factory.worktreeFor(task);
   let workspaceId = reg?.taskWorkspaces?.[task];
   if (workspaceId === undefined && worktree !== undefined && daemon?.workspaces?.create !== undefined) {
     try {

@@ -456,3 +456,30 @@ test("status reads the Lead's lines through — repokes count nothing, needs-hum
     "the repoke lines read through; the named end prints once as the task's stuck marker",
   );
 });
+
+test("status scopes attempts, verdict, sha, eye, and needs-human to the task's current Contract epoch (v0.0.24)", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const stateDir = join(dir, "plugin-state", "paseo-factory");
+  const full = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0";
+  writeLedger(stateDir, [
+    contractEvent(1, "T-EPOCH"),
+    { seq: 2, ts, event: "claim_reported", task: "T-EPOCH", attempt: 1, sha: full, agent: "ag-1" },
+    { seq: 3, ts, event: "gate_finished", task: "T-EPOCH", attempt: 1, exit: 1, verdict: "red", note: "fail", sha: full },
+    { seq: 4, ts, event: "claim_reported", task: "T-EPOCH", attempt: 2, sha: full, agent: "ag-1" },
+    { seq: 5, ts, event: "gate_finished", task: "T-EPOCH", attempt: 2, exit: 1, verdict: "red", note: "fail", sha: full },
+    { seq: 6, ts, event: "claim_reported", task: "T-EPOCH", attempt: 3, sha: full, agent: "ag-1" },
+    { seq: 7, ts, event: "gate_finished", task: "T-EPOCH", attempt: 3, exit: 1, verdict: "red", note: "fail", sha: full },
+    { seq: 8, ts, event: "needs_human", task: "T-EPOCH", reason: "attempt-ceiling", evidence: { attempt: 3, gate: 7 } },
+    contractEvent(9, "T-EPOCH"),
+  ]);
+
+  const result = await run(ownerCli, ["status"], { PASEO_HOME: dir });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(
+    result.stdout,
+    "T-EPOCH attempts=0 verdict=- sha=- accepted=no eye=- choke=0/0/0\n",
+    "re-contracting an unaccepted task resets its status glance for the new Contract epoch",
+  );
+});
+

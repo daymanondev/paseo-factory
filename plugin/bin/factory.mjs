@@ -941,7 +941,19 @@ function statusLines(events) {
       byTask.set(evt.task, state);
       order.push(evt.task);
     }
-    if (evt.event === "contract_set") continue; // the Contract registers its Task's line, but never counts as an Attempt
+    if (evt.event === "contract_set") {
+      if (!state.accepted) {
+        state.attempts = 0;
+        state.verdict = undefined;
+        state.sha = undefined;
+        state.eye = undefined;
+        state.needsHuman = undefined;
+        state.allowed = 0;
+        state.denied = 0;
+        state.blocked = 0;
+      }
+      continue;
+    }
     if (evt.attempt > state.attempts) state.attempts = evt.attempt;
     if (evt.event === "gate_finished") {
       state.verdict = evt.verdict; // the last verdict on record, even while a newer attempt runs
