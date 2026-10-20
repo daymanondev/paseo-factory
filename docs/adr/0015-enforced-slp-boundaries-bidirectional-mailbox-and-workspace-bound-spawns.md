@@ -57,26 +57,34 @@ Live end-to-end testing of `paseo-factory` (`v0.0.21`) on Paseo Desktop (`~/.pas
      - Whenever a `Task` transitions to `needs_human`, the plugin enqueues notifications to both `Lead` (`to: "lead"`) and `Supervisor` (`to: "supervisor"`, `kind: "needs_human"`) so neither seat can miss a stalled or ceiling-exhausted task.
    - **Fire-and-End-Turn Law:**
      - Both `Supervisor` (after running `factory lead dispatch`) and `Lead` (after running `factory supervisor report` or when waiting on background mail) are instructed in their immutable role contracts to **end their turn immediately** and never run `sleep` or filesystem polling loops.
+   - **Permission-Only Attention Blocking & Seat Self-Healing (`ensureSeat` / `onLeadTurnEnded`):**
+     - `drainLeadMailbox` and `drainSupervisorMailbox` hold queued mail only when the seat is not `"idle"` or when `attentionReason === "permission"` (never blocking on `attentionReason === "error"`).
+     - `ensureSeat` inspects any existing non-archived seat: if `status === "error"` or `provider` differs from the sanitized `Lane config`, it automatically retires and recreates the seat; if `model` or `thinkingOptionId` differs, it syncs the seat in-place before delivery.
+     - When `onLeadTurnEnded` settles a turn with `outcome.kind === "failed"`, it requeues the in-flight batch (`mail_requeued`) and triggers at most **one** automatic re-pump per `mailId` (running `ensureSeat` self-healing first) so transient or config-mismatch failures recover automatically without infinite retry loops.
 
-4. **Provider-Aware Mode Pinning (`pinCreateMode`), Strict Worker Recognition, and Unified Role Prompts (`src/roles-contract.ts`).**
+4. **Provider-Aware Mode Pinning (`pinCreateMode`), Thinking Variant Sanitization, Strict Worker Recognition, and Unified Role Prompts (`src/roles-contract.ts`).**
+   - **Thinking Variant Sanitization (`seats.tsx`, `lanesSet`, `ensureSeat`, `driver.mjs`):**
+     - In `seats.tsx`, when `selectedModelMeta` exists and `thinkingOptions` is `[]` (the model supports zero thinking variants, e.g. `opencode/nemotron-3-ultra-free`), the UI disables/hides thinking choices (`Default (none)`) and resets `thinking` to `""` on `selectModel` and `switchProvider` (falling back to `FALLBACK_THINKING_OPTIONS` only when `selectedModelMeta` or `thinkingOptions` is `null`/`undefined`).
+     - On the server (`lanesSet`, `ensureSeat`, `driver.mjs`), any `:thinking` suffix is validated against the daemon's `providers.listModels` metadata when available: unsupported `:thinking` suffixes are stripped before saving `lanes.json`, creating seats/workers, or calling `setAgentThinking`, and clearing `:thinking` explicitly resets `thinkingOptionId` on live seats.
    - **Strict working `Agent` recognition (`isContractedWorkerCreate`):**
      - `choke.pinCreateMode(config, labels)` and `choke.onPermissionAsked` never classify an agent with `labels.seat === "supervisor"` or `labels.seat === "lead"` as a contracted Task worker, even when a Contract's `workspace` equals `<project-root>`.
      - A created agent is recognized as a contracted Task worker only when its `cwd` is inside a managed `Task worktree` (`<projectStateDir>/worktrees/<task>`) or when it has no `seat=supervisor|lead` label and matches a live non-worktree Contract.
-   - **Provider-aware `pinCreateMode`:**
+   - **Provider-aware `pinCreateMode` & `agent.create` prefix guard:**
      - `PINNED_MODE_ID = "default"` is applied **only** when the provider id (the prefix before `/`) is `"claude"` (Claude Code).
      - For `"opencode"`, `"codex"`, `"pi"`, and all other providers, `pinCreateMode` does **not** overwrite `config.modeId` with `"default"`, preserving each provider's native execution mode (e.g. OpenCode's `"build"` mode) while Paseo still routes `agent.permission_requested` events to `choke.onPermissionAsked`.
+     - If an `agent.create` request passes a bare model id in `config.provider` without a `<provider>/` prefix, `server.before("agent.create")` resolves the matching `<provider>/<model>` against cached provider catalogs when unambiguous.
    - **Single Source of Truth for Role Contracts (`src/roles-contract.ts`):**
      - Extract all role contract prompts (`Supervisor`, `Lead`, `Agent`) and bootstrap builders into a single pure module `src/roles-contract.ts` (synced into `plugin/server/core/roles-contract.ts`) consumed by both `plugin/server/roles.ts` (`config.systemPrompt` injection for all providers: `opencode`, `claude`, `codex`, `pi`) and `src/pi-home.ts` (`<stateDir>/pi-agent/<role>/APPEND_SYSTEM.md`).
 
-5. **Seat-Aware `/factory` Entrypoint (`factory supervisor dispatch`) and Multi-Provider Skill Installation.**
+5. **Seat-Aware `/factory` Entrypoint (`factory supervisor dispatch`), Dispatcher Write Fence, and Multi-Provider Skill Installation.**
    - **New CLI & Spool command `factory supervisor dispatch [--workspace <dir>] [--project <slug>] --message "<directive>"` (`kind: "supervisor_dispatch"`):**
      - Inspects the caller's `PASEO_FACTORY_SEAT` (corroborated by the plugin):
-       - **Called from a normal chat session (`PASEO_FACTORY_SEAT` unset):** Automatically ensures the `Project`'s `Supervisor` seat (`ensureSeat("supervisor")`), enqueues the directive into the `Supervisor` mailbox (`to: "supervisor"`, `from: "owner"`, `kind: "directive"`), wakes `Supervisor`, and returns a structured reply instructing the normal chat agent to **stop immediately without editing any files** and directing the `Owner` to the `Supervisor` session (`agentId`).
+       - **Called from a normal chat session (`PASEO_FACTORY_SEAT` unset):** Automatically ensures the `Project`'s `Supervisor` seat (`ensureSeat("supervisor")`), records the calling `submitter` `agentId` in the `Project`'s `dispatchers` fence list (`project.json`) so the calling chat session is bound by the same `Seat write fence` on `<project-root>`, enqueues the directive into the `Supervisor` mailbox (`to: "supervisor"`, `from: "owner"`, `kind: "directive"`), wakes `Supervisor`, and returns a structured reply instructing the normal chat agent to **stop immediately without calling `factory status`, Paseo MCP tools, or editing any files**.
        - **Called from inside `Supervisor` (`PASEO_FACTORY_SEAT === "supervisor"`):** Transparently routes the directive straight into `lead_dispatch` (`to: "lead"`, `from: "supervisor"`, `kind: "directive"`), ensures/wakes `Lead`, and instructs `Supervisor` to end its turn and wait for `Lead`'s report.
-   - **Multi-provider skill reconciliation:**
-     - At plugin boot, `ensureFactorySkillSafe` reconciles the `/factory` `SKILL.md` into both `~/.agents/skills/factory/SKILL.md` (read by `pi` and `opencode`) and `~/.claude/skills/factory/SKILL.md` (read by `claude`), teaching a single deterministic rule: run `factory supervisor dispatch --workspace "$PWD" --message "<directive>"` and immediately end your turn.
+   - **Multi-provider skill reconciliation (`if/else` structure):**
+     - At plugin boot, `ensureFactorySkillSafe` reconciles the `/factory` `SKILL.md` into both `~/.agents/skills/factory/SKILL.md` (read by `pi` and `opencode`) and `~/.claude/skills/factory/SKILL.md` (read by `claude`), structured as two mutually exclusive `IF directive provided` / `ELSE bare /factory` branches (never sequential `Step 1 → Step 2 → Step 3` that weak models execute together) and forbidding Paseo MCP agent-management tool calls after dispatch.
 
-6. **Paseo Workspace-Bound Seat & `Agent` Creation, Parentage (`parent`), and Automatic Worktree/Workspace Archive.**
+6. **Paseo Workspace-Bound Seat & `Agent` Creation, Parentage (`parent`), Automatic Worktree/Workspace Archive, Re-Contract Epoch, and `Project reset`.**
    - **Never call `agents.create` with an unbound bare worktree `cwd`:**
      - In accordance with `seatworks` (`slots.ts:282`, `adapters/paseo/agents.ts:130-154`) and `paseo-room` (`paseo-port.ts:201-215, 471-513`), the plugin resolves the `Project`'s canonical Paseo workspace and `projectId` via `paseo.workspaces.open({ cwd: project.root })` (falling back gracefully when the daemon fake in unit tests does not expose `workspaces`).
      - **`Supervisor` and `Lead` creation (`ensureSeat`):** Placed inside the `Project`'s existing Paseo workspace (`workspaces.ref(projectWorkspaceId).agents.create(...)`), with `Lead` carrying `parent: supervisorAgentId` when a live `Supervisor` exists for the `Project`.
@@ -86,10 +94,14 @@ Live end-to-end testing of `paseo-factory` (`v0.0.21`) on Paseo Desktop (`~/.pas
    - **Automatic Archive on Terminal Settle (`Attempt` finish / `Accept`):**
      - When a working `Agent`'s Attempt finishes (`gate_finished`) or is superseded on `Respawn`, the finished/dead working `Agent` is archived (`agents.ref(agentId).archive()`).
      - When a `Task` is `Accepted` (`attempt_accepted`) and its `Task worktree` is removed, its temporary Paseo worktree workspace (`workspaceId`) is also archived (`workspaces.archive(workspaceId)`), leaving zero orphan workspaces in Paseo Desktop.
+   - **Re-Contract Epoch for Unaccepted / `Needs-human` Tasks:**
+     - Setting a new `Contract` (`contract_set`) on an unaccepted `Task` (including one currently in `needs_human` or at the `Attempt ceiling` from an earlier contract) starts a new Contract epoch for that `Task`: attempt counting (`attemptsOf`), active `needs_human` folding, and spawn/respawn ceiling checks evaluate events from the latest `contract_set` of that `Task` onward while keeping the `Ledger` strictly append-only during normal runs.
+   - **Owner-Only `Project reset` (`factory reset` CLI + `Factory surface` `Reset Project` button):**
+     - Provides a single-writer Owner action (`factory.project.reset` RPC and `factory reset [--workspace <dir>] [--project <slug>] [--keep-seats]` CLI/Spool command, refused with `seat-cannot-reset` if called by `Supervisor`, `Lead`, or `Agent`) that cancels and archives bound working `Agent`s and temporary Paseo worktree workspaces, removes `<projectStateDir>/worktrees/*` and `factory/<task>` branches, archives `Supervisor` and `Lead` (unless `--keep-seats`), clears `<projectStateDir>/{mailbox.jsonl,lead-handoff.md,project.json}`, and purges the Project's events from `Ledger` (both in-memory and on disk in `ledger.jsonl`) along with its `report-<task>-*.md`, `gate-<task>-*.log`, and `retro-*` files, while preserving `<projectStateDir>/lanes.json`.
 
 ## Consequences
 
-- `CONTEXT.md` updates **Supervisor**, **Lead**, **Choke policy**, **Git shim**, **Spawn**, **Task worktree**, and **Lead mailbox**, and adds **Seat write fence** and **Supervisor mailbox**.
+- `CONTEXT.md` updates **Supervisor**, **Lead**, **Contract**, **Choke policy**, **Seat write fence**, **Git shim**, **Spawn**, **Task worktree**, **Lead mailbox**, **Supervisor mailbox**, **Factory surface**, and **Lane config**, and adds **Project reset**.
 - `OpenCode`, `Claude`, `Codex`, and `Pi` lanes all spawn working `Agent`s and rotate `Lead`s cleanly without `Agent not found: "default"` crashes.
 - `Supervisor` and `Lead` are mechanically prevented from coding on `<project-root>` or usurping each other's commands, and communicate bidirectionally via `<projectStateDir>/mailbox.jsonl`.
 - Spawning `Task` `Agent`s in `Task worktree`s never pollutes Paseo Desktop with rogue top-level Projects or unarchived Workspaces.
