@@ -25,8 +25,8 @@ import { readLeadMailbox } from "./core/mailbox.ts";
 import { loadLanes, parseLane, saveLanes } from "./core/lanes.ts";
 import { projectStateDir, readProjectRegistration, resolveProject } from "./core/project.ts";
 import type { ProjectResolution } from "./core/project.ts";
-import { hydrateVaultDirect, loadVaultConfig, pullVault, pushVault, readVaultStatus, saveVaultConfig } from "./core/vault.ts";
-import type { VaultConfig, VaultRunner } from "./core/vault.ts";
+import { hydrateVaultDirect, importVaultSecrets, loadVaultConfig, probeGhAuth, pullVault, pushVault, readVaultStatus, saveVaultConfig, syncVault } from "./core/vault.ts";
+import type { ImportVaultSecretsInput, SyncVaultOptions, VaultConfig, VaultRunner } from "./core/vault.ts";
 import { join } from "node:path";
 import type { LandingResult } from "./core/workspace.ts";
 import { FACTORY_VIEW_VERSION } from "../shared/view.ts";
@@ -57,8 +57,10 @@ import {
   taskDetail,
   vaultConfigure,
   vaultHydrate,
+  vaultImport,
   vaultPull,
   vaultPush,
+  vaultSync,
 } from "../shared/rpc.ts";
 import type { AgentView, LaneName, Lanes, ProjectView, VaultStatusView } from "../shared/view.ts";
 
@@ -248,15 +250,22 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   const failure = <C extends string>(code: C, error: string) => ({ ok: false as const, code, error });
 
   /**
-   * The vault half's gather (v0.0.21, ADR 0014 §4): the vendored core's pure
-   * filesystem probe over `deps.home` — config fields, the `<home>/vault/.git`
-   * clone probe, and the shared-secret readiness pills. The core folds a
+   * The vault half's gather (v0.0.21, ADR 0014 §4; v0.0.22 guided `gh` probe):
+   * the vendored core's filesystem probe over `deps.home` — config fields, the
+   * `<home>/vault/.git` clone probe, and the shared-secret readiness pills,
+   * plus a cached `probeGhAuth` check when unconfigured so the Header Vault
+   * Bar can greet `@<ghUser>` with `<ghUser>/factory-vault`. The core folds a
    * damaged config into `error`; a probe that still throws degrades the same
    * way (the daemon-half law: never a failed snapshot).
    */
-  const vaultStatusOf = (): VaultStatusView => {
+  const vaultStatusOf = async (): Promise<VaultStatusView> => {
     try {
-      return readVaultStatus(deps.home);
+      const base = readVaultStatus(deps.home);
+      if (!base.configured) {
+        const ghAuth = await probeGhAuth(deps.vaultRunner);
+        return readVaultStatus(deps.home, undefined, ghAuth);
+      }
+      return base;
     } catch (err) {
       return {
         configured: false,
@@ -270,6 +279,10 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         lastPushedAt: null,
         sharedSecrets: { ascKey: false, ascCredentials: false, gplayServiceAccount: false, eyeConfig: false },
         hydratedApps: [],
+        ghInstalled: false,
+        ghAuthenticated: false,
+        ghUser: null,
+        suggestedRepo: null,
         error: messageOf(err),
       };
     }
@@ -671,7 +684,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         // v0.0.21 (ADR 0014 §4): the Private vault status half, gathered per
         // snapshot the way the companion list is — a probe that cannot answer
         // degrades inside the view's own `error` field, never a refusal.
-        vault: vaultStatusOf(),
+        vault: await vaultStatusOf(),
         project,
         projects,
       });
@@ -964,12 +977,12 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       return { ok: true as const, pluginId: input.pluginId, action: input.action, summary };
     },
 
-    // ---- the Private vault surface (v0.0.21, ADR 0014 §2/§4) --------------------------------
+    // ---- the Private vault surface (v0.0.21–v0.0.22, ADR 0014 §2/§4) ------------------------
 
     async vaultConfigure(
       input: { repo: string; branch: string; passphrase?: string },
       _context?: SurfaceCallContext,
-    ): Promise<{ ok: true; vault: VaultStatusView } | { ok: false; code: string; error: string }> {
+    ): Promise<{ ok: true; vault: VaultStatusView; summary: string } | { ok: false; code: string; error: string }> {
       const repo = input.repo.trim();
       if (repo === "") {
         return failure("vault-invalid-repo", "the vault repo cannot be blank — pass the GitHub owner/repo slug (or a local git path for tests)");
@@ -994,22 +1007,26 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         ...(prior?.lastHydrateMode === undefined ? {} : { lastHydrateMode: prior.lastHydrateMode }),
         ...(prior?.lastPushedAt === undefined ? {} : { lastPushedAt: prior.lastPushedAt }),
       });
-      log(`vault: configured ${repo} (branch ${branch})`);
-      return { ok: true as const, vault: vaultStatusOf() };
+      const vault = await vaultStatusOf();
+      const summary = `Saved vault config for ${repo} (branch ${vault.branch}).`;
+      log(`vault: configured ${repo} (branch ${vault.branch})`);
+      return { ok: true as const, vault, summary };
     },
 
     async vaultHydrate(
       input: { repo?: string; ref?: string },
       _context?: SurfaceCallContext,
-    ): Promise<{ ok: true; vault: VaultStatusView; hydratedFiles: string[] } | { ok: false; code: string; error: string }> {
+    ): Promise<{ ok: true; vault: VaultStatusView; hydratedFiles: string[]; summary: string } | { ok: false; code: string; error: string }> {
       try {
         const result = await hydrateVaultDirect(deps.home, {
           ...(input.repo === undefined ? {} : { repo: input.repo }),
           ...(input.ref === undefined ? {} : { ref: input.ref }),
           ...vaultRunnerOptions(),
         });
+        const vault = await vaultStatusOf();
+        const summary = `Direct hydrate unpacked ${result.hydratedFiles.length} file(s) from ${vault.repo ?? input.repo ?? "vault"}.`;
         log(`vault: direct hydrate wrote ${result.hydratedFiles.length} files from the gh api tarball stream (no clone left behind)`);
-        return { ok: true as const, vault: vaultStatusOf(), hydratedFiles: result.hydratedFiles };
+        return { ok: true as const, vault, hydratedFiles: result.hydratedFiles, summary };
       } catch (err) {
         return failure(codeOf(err), messageOf(err));
       }
@@ -1018,14 +1035,16 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     async vaultPull(
       input: { mergeLedgers?: boolean },
       _context?: SurfaceCallContext,
-    ): Promise<{ ok: true; vault: VaultStatusView; hydratedFiles: string[] } | { ok: false; code: string; error: string }> {
+    ): Promise<{ ok: true; vault: VaultStatusView; hydratedFiles: string[]; summary: string } | { ok: false; code: string; error: string }> {
       try {
         const result = await pullVault(deps.home, {
           ...(input.mergeLedgers === undefined ? {} : { mergeLedgers: input.mergeLedgers }),
           ...vaultRunnerOptions(),
         });
+        const vault = await vaultStatusOf();
+        const summary = `Pulled and hydrated ${result.hydratedFiles.length} file(s) from ${vault.repo ?? "vault"}${input.mergeLedgers === true ? " (ledgers reconciled)" : ""}.`;
         log(`vault: sync pull hydrated ${result.hydratedFiles.length} files from the cached checkout${input.mergeLedgers === true ? " and reconciled node ledgers" : ""}`);
-        return { ok: true as const, vault: vaultStatusOf(), hydratedFiles: result.hydratedFiles };
+        return { ok: true as const, vault, hydratedFiles: result.hydratedFiles, summary };
       } catch (err) {
         return failure(codeOf(err), messageOf(err));
       }
@@ -1034,14 +1053,72 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     async vaultPush(
       input: { includeLedgers?: boolean },
       _context?: SurfaceCallContext,
-    ): Promise<{ ok: true; vault: VaultStatusView; pushedFiles: string[] } | { ok: false; code: string; error: string }> {
+    ): Promise<{ ok: true; vault: VaultStatusView; pushedFiles: string[]; summary: string } | { ok: false; code: string; error: string }> {
       try {
         const result = await pushVault(deps.home, {
           ...(input.includeLedgers === undefined ? {} : { includeLedger: input.includeLedgers }),
           ...vaultRunnerOptions(),
         });
+        const vault = await vaultStatusOf();
+        const summary = result.pushed
+          ? `Pushed ${result.pushedFiles.length} file(s) to ${vault.repo ?? "vault"}.`
+          : `Vault ${vault.repo ?? "checkout"} is already up to date (${result.pushedFiles.length} file(s) tracked).`;
         log(`vault: push packaged ${result.pushedFiles.length} files${result.pushed ? " and pushed a commit to the remote" : " — the checkout was already clean"}`);
-        return { ok: true as const, vault: vaultStatusOf(), pushedFiles: result.pushedFiles };
+        return { ok: true as const, vault, pushedFiles: result.pushedFiles, summary };
+      } catch (err) {
+        return failure(codeOf(err), messageOf(err));
+      }
+    },
+
+    async vaultSync(
+      input: Omit<SyncVaultOptions, "runner">,
+      _context?: SurfaceCallContext,
+    ): Promise<
+      | { ok: true; vault: VaultStatusView; createdRepo: boolean; hydratedFiles: string[]; pushedFiles: string[]; pushed: boolean; summary: string }
+      | { ok: false; code: string; error: string }
+    > {
+      try {
+        const result = await syncVault(deps.home, {
+          ...input,
+          ...vaultRunnerOptions(),
+        });
+        const vault = await vaultStatusOf();
+        log(`vault: ${result.summary}`);
+        return {
+          ok: true as const,
+          vault,
+          createdRepo: result.createdRepo,
+          hydratedFiles: result.hydratedFiles,
+          pushedFiles: result.pushedFiles,
+          pushed: result.pushed,
+          summary: result.summary,
+        };
+      } catch (err) {
+        return failure(codeOf(err), messageOf(err));
+      }
+    },
+
+    async vaultImport(
+      input: Omit<ImportVaultSecretsInput, "runner">,
+      _context?: SurfaceCallContext,
+    ): Promise<
+      | { ok: true; vault: VaultStatusView; importedFiles: string[]; pushed: boolean; summary: string }
+      | { ok: false; code: string; error: string }
+    > {
+      try {
+        const result = await importVaultSecrets(deps.home, {
+          ...input,
+          ...vaultRunnerOptions(),
+        });
+        const vault = await vaultStatusOf();
+        log(`vault: ${result.summary}`);
+        return {
+          ok: true as const,
+          vault,
+          importedFiles: result.importedFiles,
+          pushed: result.synced?.pushed ?? false,
+          summary: result.summary,
+        };
       } catch (err) {
         return failure(codeOf(err), messageOf(err));
       }
@@ -1077,4 +1154,6 @@ export function registerSurfaceRpc(server: PluginServerContext, handlers: Surfac
   server.handle(vaultHydrate, (input, context) => handlers.vaultHydrate(input, { paseo: context.paseo }));
   server.handle(vaultPull, (input, context) => handlers.vaultPull(input, { paseo: context.paseo }));
   server.handle(vaultPush, (input, context) => handlers.vaultPush(input, { paseo: context.paseo }));
+  server.handle(vaultSync, (input, context) => handlers.vaultSync(input, { paseo: context.paseo }));
+  server.handle(vaultImport, (input, context) => handlers.vaultImport(input, { paseo: context.paseo }));
 }

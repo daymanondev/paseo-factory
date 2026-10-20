@@ -13,17 +13,18 @@ import { useRpc } from "@getpaseo/plugin/client";
 import { Modal, ScrollView, useToast } from "@getpaseo/plugin/client/react-native";
 import { useState } from "react";
 import { Text, View } from "react-native";
-import { accept, lanesSet, leadDispatch, leadEnsure, leadRotate, pluginsInstall, pluginsManage, ratifyProposal, retro, snapshot, supervisorEnsure, supervisorRevoke, taskDetail, vaultConfigure, vaultHydrate, vaultPull, vaultPush } from "../../shared/rpc.ts";
+import { accept, lanesSet, leadDispatch, leadEnsure, leadRotate, pluginsInstall, pluginsManage, ratifyProposal, retro, snapshot, supervisorEnsure, supervisorRevoke, taskDetail, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
 import type { FactoryView, LaneName, TaskDetailView } from "../../shared/view.ts";
 import { Btn, Card, TabBar } from "../kit/pill.tsx";
 import type { TabId } from "../kit/pill.tsx";
 import { SPACING, text } from "../kit/theme.ts";
 import { useNow, usePoll, pollEvery } from "../kit/poll.ts";
-import { Header } from "./header.tsx";
+import { Header, isVaultActName } from "./header.tsx";
+import type { VaultNote } from "./header.tsx";
 import { TasksPane } from "./tasks.tsx";
 import { SeatsPane } from "./seats.tsx";
 import { TimelinePane } from "./timeline.tsx";
-import { PluginsPane, PrivateVaultCard } from "./plugins.tsx";
+import { PluginsPane } from "./plugins.tsx";
 
 /** The navigation slice the shell uses — `openAgent` jumps to a session. */
 export interface Navigation {
@@ -62,16 +63,18 @@ export function FactoryShell({
   const detailCall = useRpc(taskDetail);
   const pluginsInstallCall = useRpc(pluginsInstall);
   const pluginsManageCall = useRpc(pluginsManage);
-  // The Private vault quartet (v0.0.21, ADR 0014 §4): one useRpc per contract,
-  // every act through act() — the plugins pair's law.
+  // The Private vault RPCs (v0.0.21–v0.0.22, ADR 0014 §4): one useRpc per
+  // contract, every act through act() — the plugins pair's law.
   const vaultConfigureCall = useRpc(vaultConfigure);
   const vaultHydrateCall = useRpc(vaultHydrate);
-  const vaultPullCall = useRpc(vaultPull);
-  const vaultPushCall = useRpc(vaultPush);
+  const vaultSyncCall = useRpc(vaultSync);
+  const vaultImportCall = useRpc(vaultImport);
 
   const [tab, setTab] = useState<TabId>(initialTab);
   const [bump, setBump] = useState(0);
   const [busy, setBusy] = useState(false);
+  const [busyAct, setBusyAct] = useState<string | null>(null);
+  const [vaultNote, setVaultNote] = useState<VaultNote | null>(null);
   const [laneNote, setLaneNote] = useState<string | null>(null);
   const [retroNote, setRetroNote] = useState<string | null>(null);
   const [detail, setDetail] = useState<DetailState | null>(null);
@@ -95,20 +98,32 @@ export function FactoryShell({
   const view = poll.value;
   const now = useNow(1000);
 
-  const act = async (name: string, run: () => Promise<{ ok: boolean; error?: string | null }>): Promise<boolean> => {
+  const act = async (name: string, run: () => Promise<{ ok: boolean; error?: string | null; summary?: string }>): Promise<boolean> => {
     setBusy(true);
+    setBusyAct(name);
+    const isVaultAct = isVaultActName(name);
     try {
       const reply = await run();
       if (!reply.ok) {
-        toast.error(`${name}: ${reply.error ?? "failed"}`);
+        const message = reply.error ?? "failed";
+        toast.error(`${name}: ${message}`);
+        if (isVaultAct) setVaultNote({ text: `${name}: ${message}`, tone: "statusDanger" });
         return false;
+      }
+      const summary = (reply as { summary?: string }).summary;
+      if (typeof summary === "string" && summary.trim() !== "") {
+        toast.show(summary, { variant: "success" });
+        if (isVaultAct) setVaultNote({ text: summary, tone: "statusSuccess" });
       }
       return true;
     } catch (error) {
-      toast.error(`${name}: ${String(error)}`);
+      const message = String(error);
+      toast.error(`${name}: ${message}`);
+      if (isVaultAct) setVaultNote({ text: `${name}: ${message}`, tone: "statusDanger" });
       return false;
     } finally {
       setBusy(false);
+      setBusyAct(null);
       refresh();
     }
   };
@@ -174,6 +189,23 @@ export function FactoryShell({
           supervisorLive={view.supervisor !== null}
           leadLive={view.lead !== null}
           actions={{ openSupervisor, openLead, pickProject: (root) => setPickedRoot(root), busy }}
+          busyAct={busyAct}
+          vaultNote={vaultNote}
+          onVaultSync={(input) => {
+            void act("Vault Sync", () => vaultSyncCall(input ?? {}));
+          }}
+          onVaultImport={(input) => {
+            void act("Vault Import", () => vaultImportCall(input));
+          }}
+          onVaultConfigure={(input) => {
+            void act("Vault Save", () => vaultConfigureCall(input));
+          }}
+          onVaultHydrate={(repo, ref) => {
+            void act("Vault Hydrate", () =>
+              vaultHydrateCall({ ...(repo === undefined ? {} : { repo }), ...(ref === undefined ? {} : { ref }) }),
+            );
+          }}
+          onRefresh={refresh}
         />
         {showDiagnostics ? (
           <Card theme={theme} gap={SPACING[1]}>
@@ -183,40 +215,6 @@ export function FactoryShell({
             <Text style={text(theme, "code")}>daemon: {view.daemonError ?? "healthy"}</Text>
             <Text style={text(theme, "code")}>project: {view.project === null ? "(unscoped)" : `${view.project.slug} · ${view.project.root}`}</Text>
           </Card>
-        ) : null}
-        {/*
-          The Private Vault (GitHub) card (v0.0.21, ADR 0014 §4): one gate puts
-          it at the top of BOTH the Plugins tab and the Settings screen — the
-          settings host (FactorySettings, entries.tsx) renders this same shell
-          with initialTab="seats" + showDiagnostics, and there is no separate
-          settings-screen component, so `tab === "plugins" || showDiagnostics`
-          is the one condition that covers both surfaces (the diagnostics-card
-          precedent directly above).
-        */}
-        {tab === "plugins" || showDiagnostics ? (
-          <PrivateVaultCard
-            theme={theme}
-            vault={view.vault}
-            actions={{
-              busy,
-              configure: (input) => {
-                void act("Vault Save", () => vaultConfigureCall(input));
-              },
-              hydrate: (repo, ref) => {
-                // User Story 1's one-click path: the typed repo rides the call
-                // so a fresh machine can hydrate before it ever saves a config.
-                void act("Hydrate Vault", () =>
-                  vaultHydrateCall({ ...(repo === undefined ? {} : { repo }), ...(ref === undefined ? {} : { ref }) }),
-                );
-              },
-              pull: (mergeLedgers) => {
-                void act("Pull & Sync Vault", () => vaultPullCall({ ...(mergeLedgers === undefined ? {} : { mergeLedgers }) }));
-              },
-              push: (includeLedgers) => {
-                void act("Push to Vault", () => vaultPushCall({ ...(includeLedgers === undefined ? {} : { includeLedgers }) }));
-              },
-            }}
-          />
         ) : null}
         <TabBar
           theme={theme}

@@ -2270,6 +2270,7 @@ test("vault.configure: persists repo/branch/passphrase to vault-config.json 0o60
   assert.equal(reply.vault.repo, "acme/factory-vault");
   assert.equal(reply.vault.branch, "release");
   assert.equal(reply.vault.hasPassphrase, true, "the persisted passphrase satisfies the status read's chain");
+  assert.match(reply.summary, /acme\/factory-vault/, "vaultConfigure returns a human-readable summary");
 
   // The spec's exact persistence law (§Implementation Decisions 4): repo/branch/passphrase
   // land in <stateDir>/vault-config.json with 0o600 permissions.
@@ -2327,6 +2328,7 @@ test("vault.hydrate: zero-clone Direct hydrate end-to-end through the handlers �
   assert.ok(configured.ok, configured.ok ? "" : configured.error);
   const reply = await withVaultPassphrase(undefined, () => handlers.vaultHydrate({}));
   assert.ok(reply.ok, reply.ok ? "" : reply.error);
+  assert.match(reply.summary, /3/, "vaultHydrate returns a human-readable summary naming the hydrated count");
   assert.deepEqual(reply.hydratedFiles, [
     "secrets/shared/asc-api-key.p8",
     "secrets/shared/eye.json",
@@ -2393,6 +2395,7 @@ test("vault.pull: Vault sync through the handlers — cached checkout hydrated, 
 
   const reply = await handlers.vaultPull({ mergeLedgers: true });
   assert.ok(reply.ok, reply.ok ? "" : reply.error);
+  assert.match(reply.summary, /3/, "vaultPull returns a human-readable summary");
   assert.deepEqual(reply.hydratedFiles, ["config/lanes.json", "secrets/shared/eye.json", "state/nodes/other-mac/global-ledger.jsonl"]);
   // The cached-checkout leg: git pull --rebase --autostash inside <home>/vault, never a fresh clone.
   assert.equal(calls.length, 1);
@@ -2426,6 +2429,7 @@ test("vault.push: packages the runtime tree plus this node's ledger snapshot, co
 
   const reply = await handlers.vaultPush({ includeLedgers: true });
   assert.ok(reply.ok, reply.ok ? "" : reply.error);
+  assert.match(reply.summary, /2/, "vaultPush returns a human-readable summary");
   assert.deepEqual(reply.pushedFiles, ["secrets/shared/asc-api-key.p8", `state/nodes/${reply.vault.nodeId}/global-ledger.jsonl`]);
   assert.equal(readFileSync(join(home, "vault", "secrets", "shared", "asc-api-key.p8"), "utf8"), p8, "the runtime tree landed in the checkout");
   assert.ok(existsSync(join(home, "vault", "state", "nodes", reply.vault.nodeId, "global-ledger.jsonl")), "this node's ledger snapshot rode the push");
@@ -2451,9 +2455,13 @@ test("vault.pull / vault.push: unconfigured and failing-runner refusals are data
   const noPull = await unconfigured.handlers.vaultPull({});
   assert.ok(!noPull.ok);
   assert.equal(noPull.code, "vault-not-configured");
+  assert.match(noPull.error, /Enable & Sync Vault/, "unconfigured error guides the Owner to the UI action");
+  assert.doesNotMatch(noPull.error, /saveVaultConfig/, "internal function names never leak in user-facing error copy");
   const noPush = await unconfigured.handlers.vaultPush({});
   assert.ok(!noPush.ok);
   assert.equal(noPush.code, "vault-not-configured");
+  assert.match(noPush.error, /Enable & Sync Vault/);
+  assert.doesNotMatch(noPush.error, /saveVaultConfig/);
 
   const failing = makeSurface(t, [], [], async () => {
     throw new Error("fatal: could not read from remote repository");
@@ -2466,4 +2474,89 @@ test("vault.pull / vault.push: unconfigured and failing-runner refusals are data
   const pushFail = await failing.handlers.vaultPush({});
   assert.ok(!pushFail.ok);
   assert.match(pushFail.error, /could not read from remote repository/);
+});
+
+test("vault snapshot & vault.sync / vault.import: unconfigured snapshot probes gh auth, vaultSync auto-provisions & syncs, vaultImport seals keys and returns summary", async (t) => {
+  const { runner, calls } = fakeVaultRunner((call) => {
+    if (call.command === "gh" && call.args[0] === "auth" && call.args[1] === "status") {
+      return Buffer.from(
+        JSON.stringify({
+          hosts: {
+            "github.com": [{ login: "daymanondev", active: true, state: "success" }],
+          },
+        }),
+      );
+    }
+    if (call.command === "gh" && call.args[0] === "repo" && call.args[1] === "view") {
+      throw new Error("GraphQL: Could not resolve to a Repository");
+    }
+    if (call.command === "git" && call.args[0] === "clone") {
+      const targetDir = call.args[call.args.length - 1]!;
+      mkdirSync(join(targetDir, ".git"), { recursive: true });
+      return Buffer.alloc(0);
+    }
+    if (call.command === "git" && call.args[0] === "status") {
+      return Buffer.from(" M config/lanes.json\n");
+    }
+    return Buffer.alloc(0);
+  });
+
+  const { handlers, home, stateDir } = makeSurface(t, [], [], runner);
+  writeLanes(stateDir, { supervisor: "claude/opus-4-8" });
+
+  // 1. Unconfigured snapshot probes gh auth via the injected vaultRunner and populates suggestedRepo.
+  const snap = await handlers.snapshot({});
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  assert.equal(snap.view.vault.configured, false);
+  assert.equal(snap.view.vault.ghInstalled, true);
+  assert.equal(snap.view.vault.ghAuthenticated, true);
+  assert.equal(snap.view.vault.ghUser, "daymanondev");
+  assert.equal(snap.view.vault.suggestedRepo, "daymanondev/factory-vault");
+
+  // 2. vaultSync auto-configures daymanondev/factory-vault, creates the missing private repo, and syncs.
+  const syncReply = await handlers.vaultSync({});
+  assert.ok(syncReply.ok, syncReply.ok ? "" : syncReply.error);
+  assert.equal(syncReply.createdRepo, true);
+  assert.equal(syncReply.vault.configured, true);
+  assert.equal(syncReply.vault.repo, "daymanondev/factory-vault");
+  assert.equal(syncReply.pushed, true);
+  assert.ok(syncReply.pushedFiles.includes("config/lanes.json"), "local lanes.json was collected and pushed");
+  assert.match(syncReply.summary, /Vault synced with daymanondev\/factory-vault/);
+  assert.ok(
+    calls.some((c) => c.command === "gh" && c.args[0] === "repo" && c.args[1] === "create" && c.args[2] === "daymanondev/factory-vault"),
+    "gh repo create was invoked for the missing default vault repo",
+  );
+
+  // 3. vaultImport imports .p8 and GPlay JSON from disk into vault-runtime/secrets/shared/ and syncs.
+  const keysDir = makeTempDir();
+  disposeDir(t, keysDir);
+  const p8Path = join(keysDir, "AuthKey_ABC123.p8");
+  const gplayPath = join(keysDir, "service-account.json");
+  writeFileSync(p8Path, "-----BEGIN PRIVATE KEY-----\nimported-p8\n-----END PRIVATE KEY-----\n");
+  writeFileSync(gplayPath, '{"type":"service_account","project_id":"demo"}');
+
+  const importReply = await handlers.vaultImport({
+    ascKeyPath: p8Path,
+    ascKeyId: "ABC123",
+    ascIssuer: "ISSUER-999",
+    gplayKeyPath: gplayPath,
+    syncAfterImport: true,
+  });
+  assert.ok(importReply.ok, importReply.ok ? "" : importReply.error);
+  assert.deepEqual(importReply.importedFiles, [
+    "secrets/shared/asc-api-key.p8",
+    "secrets/shared/asc-credentials.json",
+    "secrets/shared/gplay-service-account.json",
+  ]);
+  assert.equal(importReply.vault.sharedSecrets.ascKey, true);
+  assert.equal(importReply.vault.sharedSecrets.ascCredentials, true);
+  assert.equal(importReply.vault.sharedSecrets.gplayServiceAccount, true);
+  assert.equal(importReply.pushed, true);
+  assert.match(importReply.summary, /Imported 3 secret file\(s\)/);
+  assert.ok(existsSync(join(home, "vault-runtime", "env.json")), "env.json written after import");
+
+  // Missing import file refuses as data.
+  const badImport = await handlers.vaultImport({ ascKeyPath: join(keysDir, "missing.p8"), syncAfterImport: false });
+  assert.ok(!badImport.ok);
+  assert.equal(badImport.code, "vault-import-file-not-found");
 });
