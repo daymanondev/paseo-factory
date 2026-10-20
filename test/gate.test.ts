@@ -103,3 +103,23 @@ test("timeout kills the gate and records red with exit null", async (t) => {
 test("spawn failure in a bad cwd rejects instead of inventing a verdict", async () => {
   await assert.rejects(() => runGate({ cmd: "true", cwd: "/nonexistent-cwd-xyz" }));
 });
+
+test("runGate reaps background subprocesses holding stdout open and finishes in <2s (v0.0.26, ADR 0016)", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  writeFileSync(join(dir, "out.txt"), "artifact\n");
+
+  const start = Date.now();
+  const result = await runGate({
+    cmd: "sleep 60 & echo gate-done; exit 0",
+    cwd: dir,
+    artifact: "out.txt",
+    timeoutMs: 10_000,
+  });
+  const elapsed = Date.now() - start;
+
+  assert.equal(result.verdict, "green");
+  assert.equal(result.exit, 0);
+  assert.match(result.output ?? "", /gate-done/);
+  assert.ok(elapsed < 2_000, `runGate must reap background children and finish in <2s (took ${elapsed}ms)`);
+});

@@ -153,7 +153,7 @@ export function refuseGitArgv(argv) {
   }
 }
 
-const SUPERVISOR_BLOCKED_GIT_SUBCOMMANDS = new Set(["commit", "merge", "cherry-pick", "rebase", "am", "apply", "stash"]);
+const SUPERVISOR_BLOCKED_GIT_SUBCOMMANDS = new Set(["commit", "merge", "cherry-pick", "rebase", "am", "apply", "stash", "reset", "clean"]);
 const SUPERVISOR_GIT_FENCE_REASON =
   "factory git-shim: blocked (supervisor-git-fence) — Supervisor never commits or branches on <project-root>; dispatch to Lead via factory lead dispatch";
 
@@ -190,7 +190,7 @@ export function parseGitSubcommand(argv) {
 
 /**
  * Refuses git subcommands and branch-creation flags forbidden to the Supervisor
- * seat on `<project-root>` (v0.0.23, ADR 0015 §2).
+ * seat on `<project-root>` (v0.0.23, ADR 0015 §2; v0.0.26, ADR 0016 §3).
  */
 export function refuseSupervisorGitArgv(argv) {
   const { sub, args } = parseGitSubcommand(argv);
@@ -201,6 +201,9 @@ export function refuseSupervisorGitArgv(argv) {
   const dd = args.indexOf("--");
   const flagSlice = dd === -1 ? args : args.slice(0, dd);
   if (sub === "checkout") {
+    if (dd !== -1) {
+      return { rule: "supervisor-git-fence", reason: SUPERVISOR_GIT_FENCE_REASON };
+    }
     for (const token of flagSlice) {
       if (token === "-b" || token === "-B" || clusterHas(token, "b") || clusterHas(token, "B")) {
         return { rule: "supervisor-git-fence", reason: SUPERVISOR_GIT_FENCE_REASON };

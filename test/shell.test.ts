@@ -179,8 +179,8 @@ test("the agent PATH surface is exactly factory-claim and the git shim — the f
   ensureGitShim(stateDir, pluginDir, "/daemon/node");
   assert.deepEqual(
     readdirSync(claimCliBinDir(stateDir)).sort(),
-    ["factory-claim", "git"],
-    "the one dir injectClaimCliPath puts on every agent's PATH holds exactly the claim CLI and the git shim — never the Owner CLI (factory.mjs), whose every wrapper would be an orchestration door",
+    ["factory-claim", "gh", "git", "kill", "killall", "paseo", "pkill"],
+    "the one dir injectClaimCliPath puts on every agent's PATH holds the claim CLI and the OS PATH shims — never the Owner CLI (factory.mjs), whose every wrapper would be an orchestration door",
   );
   // And the wrapper that IS there points at factory-claim.mjs, not factory.mjs.
   assert.match(readFileSync(join(claimCliBinDir(stateDir), "factory-claim"), "utf8"), /factory-claim\.mjs/);
@@ -220,6 +220,9 @@ test("ensureGitShim enforces supervisor-git-fence and lead-git-fence by PASEO_FA
     ["am", "patch.mbox"],
     ["apply", "diff.patch"],
     ["stash"],
+    ["reset", "--soft", "HEAD~1"],
+    ["clean", "-n"],
+    ["checkout", "main", "--", "src/index.ts"],
     ["checkout", "-b", "feat/rogue"],
     ["checkout", "-B", "feat/rogue"],
     ["switch", "-c", "feat/rogue"],
@@ -264,5 +267,54 @@ test("ensureGitShim enforces supervisor-git-fence and lead-git-fence by PASEO_FA
   writeFileSync(join(workspace, ".git", "MERGE_HEAD"), `${headSha}\n`);
   const mergeAllowed = runGit("lead", ["commit", "-m", "merge: settle landing conflict"]);
   assert.equal(mergeAllowed.status, 0, `lead settling a MERGE_HEAD conflict must pass: ${mergeAllowed.stderr}`);
+});
+
+test("ensureGitShim OS PATH shims (pkill, kill, killall, paseo, gh) block forbidden seat invocations and pass benign commands through (v0.0.26, ADR 0016)", (t) => {
+  const dir = makeTempDir("exec-shims-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const stubBin = join(dir, "stub-bin");
+  mkdirSync(stubBin, { recursive: true });
+
+  // Create stub binaries in stubBin for pkill, kill, killall, paseo, gh
+  for (const name of ["pkill", "kill", "killall", "paseo", "gh"]) {
+    const p = join(stubBin, name);
+    writeFileSync(p, `#!/bin/sh\necho "STUB-${name}: $*"\nexit 0\n`, { mode: 0o755 });
+  }
+
+  ensureGitShim(stateDir, join(repoRoot, "plugin"), process.execPath);
+  const binDir = claimCliBinDir(stateDir);
+  const pathEnv = `${binDir}${delimiter}${stubBin}${delimiter}/usr/bin:/bin`;
+
+  const runTool = (tool: string, argv: string[], seat = "supervisor") =>
+    spawnSync(join(binDir, tool), argv, {
+      cwd: dir,
+      encoding: "utf8",
+      env: { ...process.env, FACTORY_STATE_DIR: stateDir, PATH: pathEnv, PASEO_FACTORY_SEAT: seat },
+      timeout: 10_000,
+    });
+
+  // Forbidden commands exit 126
+  assert.equal(runTool("pkill", ["-9", "-f", "plugin-process.js"]).status, 126);
+  assert.equal(runTool("killall", ["-9", "paseo"]).status, 126);
+  assert.equal(runTool("paseo", ["agent", "create", "--provider", "claude"]).status, 126);
+  assert.equal(runTool("paseo", ["plugin", "reload", "paseo-factory"]).status, 126);
+  assert.equal(runTool("gh", ["pr", "merge", "12"]).status, 126);
+  assert.equal(runTool("gh", ["repo", "delete", "org/repo"]).status, 126);
+  assert.equal(runTool("gh", ["release", "create", "v1.0.0"]).status, 126);
+
+  // Benign commands pass through to stub (exit 0)
+  const okPkill = runTool("pkill", ["-f", "my-app-dev-server"]);
+  assert.equal(okPkill.status, 0);
+  assert.match(okPkill.stdout, /STUB-pkill: -f my-app-dev-server/);
+
+  const okGh = runTool("gh", ["pr", "view", "12"]);
+  assert.equal(okGh.status, 0);
+  assert.match(okGh.stdout, /STUB-gh: pr view 12/);
+
+  // Outside a factory seat (PASEO_FACTORY_SEAT=""), even paseo agent list passes through
+  const unboundPaseo = runTool("paseo", ["agent", "list"], "");
+  assert.equal(unboundPaseo.status, 0);
+  assert.match(unboundPaseo.stdout, /STUB-paseo: agent list/);
 });
 

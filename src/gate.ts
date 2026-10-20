@@ -60,7 +60,13 @@ export function runGate(input: GateInput): Promise<GateResult> {
     // gate into silent child mode (0 tests, exit 0 — a false green).
     const env = { ...process.env };
     delete env.NODE_TEST_CONTEXT;
-    const child = spawn(cmd, { shell: true, cwd, detached: true, env, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(cmd, {
+      shell: true,
+      cwd,
+      detached: process.platform !== "win32",
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
 
     // One interleaved stream, kept from the end: the note's summary and the
     // persisted log both want the output as it happened, not stdout-then-stderr.
@@ -72,15 +78,35 @@ export function runGate(input: GateInput): Promise<GateResult> {
       raw = keepRaw(raw, chunk);
     });
 
+    let graceKillTimer: ReturnType<typeof setTimeout> | undefined;
+    const reapGroup = (immediateSigKill = false): void => {
+      if (immediateSigKill) {
+        killGroup(child, "SIGKILL");
+        return;
+      }
+      killGroup(child, "SIGTERM");
+      if (graceKillTimer === undefined) {
+        graceKillTimer = setTimeout(() => {
+          killGroup(child, "SIGKILL");
+        }, 50);
+        graceKillTimer.unref?.();
+      }
+    };
+
     const timer = setTimeout(() => {
       timedOut = true;
-      killGroup(child);
+      reapGroup(true);
     }, timeoutMs);
+
+    child.on("exit", () => {
+      reapGroup(false);
+    });
 
     child.on("error", (err) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (graceKillTimer !== undefined) clearTimeout(graceKillTimer);
       reject(err);
     });
 
@@ -88,6 +114,7 @@ export function runGate(input: GateInput): Promise<GateResult> {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (graceKillTimer !== undefined) clearTimeout(graceKillTimer);
 
       if (timedOut) {
         resolve({ exit: null, verdict: "red", note: `gate killed after ${timeoutMs}ms (timeout)`, timedOut: true, output: raw, ...(artifact === undefined ? {} : { artifactPresent: existsSync(resolvePath(cwd, artifact)) }) });
@@ -115,15 +142,15 @@ export function runGate(input: GateInput): Promise<GateResult> {
   });
 }
 
-function killGroup(child: import("node:child_process").ChildProcess): void {
+function killGroup(child: import("node:child_process").ChildProcess, signal: NodeJS.Signals = "SIGKILL"): void {
   if (child.pid === undefined || process.platform === "win32") {
-    child.kill("SIGKILL");
+    child.kill(signal);
     return;
   }
   try {
-    process.kill(-child.pid, "SIGKILL");
+    process.kill(-child.pid, signal);
   } catch {
-    child.kill("SIGKILL");
+    child.kill(signal);
   }
 }
 
