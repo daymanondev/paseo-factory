@@ -7,18 +7,27 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync
 import { dirname, join } from "node:path";
 import { gzipSync } from "node:zlib";
 import {
+  Ledger,
+  checkCleanAt,
   createDefaultVaultRunner,
+  ensureLocalGitExcludeAndWorktreeInclude,
   hydrateVaultDirect,
   loadVaultConfig,
+  parseVaultManifest,
+  prepareTaskWorktree,
   pullVault,
   pushVault,
   readVaultStatus,
+  reconcileVaultLedgers,
+  resolveProject,
+  resolveVaultApps,
   saveVaultConfig,
   sealVaultBuffer,
   unsealVaultBuffer,
+  writeProjectRegistration,
 } from "../src/index.ts";
-import type { VaultRunner, VaultRunnerCall, VaultStatusView } from "../src/index.ts";
-import { disposeDir, factoryErrorCode, makeTempDir } from "./helpers.ts";
+import type { VaultManifest, VaultRunner, VaultRunnerCall, VaultStatusView } from "../src/index.ts";
+import { disposeDir, factoryErrorCode, gitCommitAll, makeTempDir } from "./helpers.ts";
 
 /**
  * The Private vault engine, stage A (ticket 01): dual-mode secret envelopes,
@@ -657,4 +666,473 @@ test("pullVault pulls (--rebase --autostash) after a second node pushes — the 
   assert.equal(readFileSync(join(home1, "vault-runtime/config/lanes.json"), "utf8"), JSON.stringify({ lanes: { default: "pi" } }));
   assert.ok(existsSync(pullMarker), "the existing checkout was pulled in place, not re-cloned");
   assert.equal(runGit(["rev-parse", "HEAD"], join(home1, "vault")), runGit(["rev-parse", "HEAD"], join(home2, "vault")), "both nodes converge on the same tip");
+});
+
+/**
+ * ===== The stage C group (ticket 03): canonical-key routing, the multi-node
+ * `Ledger` reconciler, worktree hygiene, and `vault-runtime/env.json` =====
+ *
+ * Canonical keys route through real local git checkouts (different filesystem
+ * paths mint different `<project-slug>` hashes — the ADR 0014 Context
+ * invariant), ledgers reconcile from real divergent JSONL snapshots, and the
+ * hygiene asserts ride the real `git status` / `checkCleanAt` reads. Still
+ * every assertion through the top-level barrel, still no network.
+ */
+
+/** A fresh parent temp dir — the only way to control a checkout's basename. */
+function makeProjectParent(t: TestContext): string {
+  const parent = makeTempDir("paseo-factory-vault-apps-");
+  disposeDir(t, parent);
+  return parent;
+}
+
+test("parseVaultManifest reads the canonical mapping and refuses damage, never guesses", () => {
+  const manifest = parseVaultManifest(
+    JSON.stringify({
+      patigame: { repoBasename: "patigame", gitRemote: "git@github.com:daymanondev/patigame.git", bundleId: "com.patigame.app", packageName: "com.patigame" },
+    }),
+  );
+  assert.deepEqual(manifest, {
+    patigame: { repoBasename: "patigame", gitRemote: "git@github.com:daymanondev/patigame.git", bundleId: "com.patigame.app", packageName: "com.patigame" },
+  } satisfies VaultManifest);
+
+  assert.deepEqual(parseVaultManifest("{}"), {}, "an empty mapping is a legal vault with no routing");
+  assert.throws(() => parseVaultManifest("{not json"), factoryErrorCode("corrupted-vault-manifest"));
+  assert.throws(() => parseVaultManifest("[]"), factoryErrorCode("corrupted-vault-manifest"), "the manifest is a map, never a list");
+  assert.throws(() => parseVaultManifest('{"patigame": "patigame"}'), factoryErrorCode("corrupted-vault-manifest"), "an entry must be an object");
+  assert.throws(() => parseVaultManifest('{"patigame": {"repoBasename": 3}}'), factoryErrorCode("corrupted-vault-manifest"), "entry fields are strings");
+});
+
+test("resolveVaultApps routes canonical keys to local roots and host-local slugs across all three sources", (t) => {
+  const parent = makeProjectParent(t);
+  const home = makeTempDir();
+  disposeDir(t, home);
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+
+  // the basename leg — a factory-registered checkout
+  const patigame = join(parent, "patigame");
+  mkdirSync(patigame, { recursive: true });
+  writeFileSync(join(patigame, "README.md"), "patigame fixture\n");
+  gitCommitAll(patigame);
+  const patigameResolved = resolveProject(patigame);
+  assert.ok(patigameResolved.ok, "fixture checkout resolves");
+  writeProjectRegistration(stateDir, patigameResolved.slug, { root: patigame });
+
+  // the git-remote leg — a release-lab-registered checkout with a GitHub origin
+  const foxrun = join(parent, "foxrun");
+  mkdirSync(foxrun, { recursive: true });
+  writeFileSync(join(foxrun, "README.md"), "foxrun fixture\n");
+  gitCommitAll(foxrun);
+  runGit(["remote", "add", "origin", "git@github.com:daymanondev/foxrun.git"], foxrun);
+  mkdirSync(join(home, "release-lab"), { recursive: true });
+  const foxrunResolved = resolveProject(foxrun);
+  assert.ok(foxrunResolved.ok);
+  writeFileSync(
+    join(home, "release-lab", "projects.json"),
+    JSON.stringify({ projects: [{ slug: foxrunResolved.slug, name: "foxrun", root: foxrun }] }),
+  );
+
+  // the .store-release manifest leg (bundleId + packageName) — discovered through Paseo's projects.json
+  const wingame = join(parent, "wingame");
+  mkdirSync(wingame, { recursive: true });
+  writeFileSync(join(wingame, "README.md"), "wingame fixture\n");
+  gitCommitAll(wingame);
+  mkdirSync(join(wingame, ".store-release"), { recursive: true });
+  writeFileSync(join(wingame, ".store-release", "manifest.json"), JSON.stringify({ bundleId: "com.wingame.app", packageName: "com.wingame" }));
+  mkdirSync(join(home, "projects"), { recursive: true });
+  writeFileSync(join(home, "projects", "projects.json"), JSON.stringify([{ rootPath: wingame, archivedAt: null }]));
+  const wingameResolved = resolveProject(wingame);
+  assert.ok(wingameResolved.ok);
+
+  const apps = resolveVaultApps(home, {
+    patigame: { repoBasename: "patigame" },
+    foxrun: { gitRemote: "https://github.com/daymanondev/foxrun.git" }, // https vs the checkout's scp-style origin
+    wingame: { bundleId: "com.wingame.app" },
+    "wingame-pkg": { packageName: "com.wingame" },
+    nomatch: { repoBasename: "no-such-checkout" },
+  });
+
+  assert.deepEqual(apps, [
+    { canonicalAppKey: "foxrun", projectRoot: foxrunResolved.root, projectSlug: foxrunResolved.slug },
+    { canonicalAppKey: "nomatch", projectRoot: null, projectSlug: null },
+    { canonicalAppKey: "patigame", projectRoot: patigameResolved.root, projectSlug: patigameResolved.slug },
+    { canonicalAppKey: "wingame", projectRoot: wingameResolved.root, projectSlug: wingameResolved.slug },
+    { canonicalAppKey: "wingame-pkg", projectRoot: wingameResolved.root, projectSlug: wingameResolved.slug },
+  ]);
+});
+
+test("two checkouts of one repo at different paths mint different slugs — the invariant canonical routing exists for", (t) => {
+  const parent = makeProjectParent(t);
+  const machineA = join(parent, "machine-a", "patigame");
+  mkdirSync(machineA, { recursive: true });
+  writeFileSync(join(machineA, "README.md"), "patigame fixture\n");
+  gitCommitAll(machineA);
+  const machineB = join(parent, "machine-b", "patigame");
+  mkdirSync(dirname(machineB), { recursive: true });
+  runGit(["clone", "-q", machineA, machineB]);
+
+  const a = resolveProject(machineA);
+  const b = resolveProject(machineB);
+  assert.ok(a.ok && b.ok);
+  assert.match(a.slug, /^patigame-[0-9a-f]{6}$/, "the slug is <basename>-<sha1(realpath(gitCommonDir)).slice(0,6)>");
+  assert.match(b.slug, /^patigame-[0-9a-f]{6}$/, "the clone keeps the basename half");
+  assert.notEqual(a.slug, b.slug, "different filesystem paths hash to different <project-slug>s");
+});
+
+test("ensureLocalGitExcludeAndWorktreeInclude registers paths idempotently and refuses non-git roots", (t) => {
+  const parent = makeProjectParent(t);
+  const repo = join(parent, "hygiene");
+  mkdirSync(repo, { recursive: true });
+  writeFileSync(join(repo, "README.md"), "hygiene fixture\n");
+  gitCommitAll(repo);
+  const resolved = resolveProject(repo);
+  assert.ok(resolved.ok);
+
+  ensureLocalGitExcludeAndWorktreeInclude(repo, ["android/app/release.keystore", "ios/GoogleService-Info.plist"]);
+  ensureLocalGitExcludeAndWorktreeInclude(repo, ["android/app/release.keystore", "android/keystore.properties"]); // partial overlap re-run
+
+  const rels = ["android/app/release.keystore", "android/keystore.properties", "ios/GoogleService-Info.plist"];
+  const excludeLines = readFileSync(join(resolved.gitCommonDir, "info", "exclude"), "utf8").split("\n");
+  const includeLines = readFileSync(join(repo, ".worktreeinclude"), "utf8").split("\n");
+  for (const rel of rels) {
+    assert.ok(excludeLines.includes(rel), `${rel} rides <gitCommonDir>/info/exclude`);
+    assert.ok(includeLines.includes(rel), `${rel} rides <projectRoot>/.worktreeinclude`);
+  }
+  assert.equal(excludeLines.filter((line) => line === "android/app/release.keystore").length, 1, "idempotent — one exclude line per path");
+  assert.equal(includeLines.filter((line) => line === "android/app/release.keystore").length, 1, "idempotent — one include line per path");
+
+  const plain = makeTempDir();
+  disposeDir(t, plain);
+  assert.throws(
+    () => ensureLocalGitExcludeAndWorktreeInclude(plain, ["android/app/release.keystore"]),
+    factoryErrorCode("vault-project-not-git"),
+    "hygiene on a directory git cannot answer for is refused, never guessed at",
+  );
+});
+
+test("hydrateVaultDirect routes per-app secrets into a resolved checkout — hygiene keeps the tree clean, env.json lands 0o600", async (t) => {
+  const parent = makeProjectParent(t);
+  const machineA = join(parent, "machine-a", "patigame");
+  mkdirSync(machineA, { recursive: true });
+  writeFileSync(join(machineA, "README.md"), "patigame fixture\n");
+  gitCommitAll(machineA);
+  const machineB = join(parent, "machine-b", "patigame");
+  mkdirSync(dirname(machineB), { recursive: true });
+  runGit(["clone", "-q", machineA, machineB]);
+  const resolvedA = resolveProject(machineA);
+  const resolvedB = resolveProject(machineB);
+  assert.ok(resolvedA.ok && resolvedB.ok);
+  assert.notEqual(resolvedA.slug, resolvedB.slug);
+
+  const p8 = "-----BEGIN PRIVATE KEY-----\nasc api key\n-----END PRIVATE KEY-----\n";
+  const keystore = randomBytes(1024);
+  const googleServices = JSON.stringify({ project_info: { project_id: "patigame-prod" } });
+  const signing = JSON.stringify({ storePassword: "correct-horse-battery", keyAlias: "upload", keyPassword: "correct-horse-battery" });
+  const plist = '<?xml version="1.0"?>\n<plist/>\n';
+  const top = "daymanondev-factory-vault-abc1234";
+  const tarball = buildTarball([
+    { path: `${top}/vault.manifest.json`, data: JSON.stringify({ patigame: { repoBasename: "patigame" } }) },
+    { path: `${top}/secrets/shared/asc-api-key.p8`, data: p8 },
+    { path: `${top}/secrets/shared/asc-credentials.json`, data: JSON.stringify({ keyId: "K2XYZ123456", issuerId: "issuer-uuid-1" }) },
+    { path: `${top}/secrets/shared/gplay-service-account.json`, data: JSON.stringify(sealVaultBuffer(Buffer.from(GCP_SERVICE_ACCOUNT, "utf8"))) },
+    { path: `${top}/secrets/apps/patigame/release.keystore`, data: keystore },
+    { path: `${top}/secrets/apps/patigame/signing.json`, data: signing },
+    { path: `${top}/secrets/apps/patigame/google-services.json`, data: googleServices },
+    { path: `${top}/secrets/apps/patigame/GoogleService-Info.plist`, data: plist },
+  ]);
+
+  // machine two's home — the clone is registered through Release Lab's own registry
+  const homeB = makeTempDir();
+  disposeDir(t, homeB);
+  mkdirSync(join(homeB, "release-lab"), { recursive: true });
+  writeFileSync(
+    join(homeB, "release-lab", "projects.json"),
+    JSON.stringify({ projects: [{ slug: resolvedB.slug, name: "patigame", root: machineB }] }),
+  );
+  saveVaultConfig(homeB, { repo: "daymanondev/factory-vault" });
+
+  await hydrateVaultDirect(homeB, { runner: fakeTarballRunner(tarball).runner });
+
+  // the per-app files materialize into machine two's checkout, keyed by the canonical key — not machine one's path
+  assert.deepEqual(readFileSync(join(resolvedB.root, "android/app/release.keystore")), keystore);
+  assert.equal(
+    readFileSync(join(resolvedB.root, "android/keystore.properties"), "utf8"),
+    "keyAlias=upload\nkeyPassword=correct-horse-battery\nstorePassword=correct-horse-battery\n",
+    "signing.json renders to android/keystore.properties, keys sorted",
+  );
+  assert.equal(readFileSync(join(resolvedB.root, "android/app/google-services.json"), "utf8"), googleServices);
+  assert.equal(readFileSync(join(resolvedB.root, "ios/GoogleService-Info.plist"), "utf8"), plist);
+  assert.ok(!existsSync(join(resolvedA.root, "android")), "machine one's checkout is untouched");
+
+  // hygiene: the four materialized paths ride info/exclude + .worktreeinclude, and the tree stays clean
+  const rels = ["android/app/release.keystore", "android/keystore.properties", "android/app/google-services.json", "ios/GoogleService-Info.plist"];
+  const excludeLines = readFileSync(join(resolvedB.gitCommonDir, "info", "exclude"), "utf8").split("\n");
+  const includeLines = readFileSync(join(resolvedB.root, ".worktreeinclude"), "utf8").split("\n");
+  for (const rel of rels) {
+    assert.ok(excludeLines.includes(rel));
+    assert.ok(includeLines.includes(rel));
+  }
+  assert.equal(runGit(["status", "--porcelain"], resolvedB.root), "", "git status --porcelain stays empty over the hydrated checkout");
+  const headB = runGit(["rev-parse", "HEAD"], resolvedB.root);
+  assert.deepEqual(await checkCleanAt(resolvedB.root, headB), { ok: true }, "checkCleanAt stays green — Claims are not refused");
+
+  // the materialized secrets still ride Task worktrees (the .worktreeinclude consumer)
+  const stateDirB = join(homeB, "plugin-state", "paseo-factory");
+  const worktree = prepareTaskWorktree({ stateDir: stateDirB, workspace: resolvedB.root, task: "vault-ride" });
+  assert.ok(worktree.ok, `worktree allocation succeeded: ${worktree.ok ? "" : worktree.reason}`);
+  assert.deepEqual(readFileSync(join(worktree.path, "android/app/release.keystore")), keystore, "the keystore rides the Task worktree");
+
+  // the runtime pointer index — six keys at the materialized paths, 0o600
+  const envPath = join(homeB, "vault-runtime", "env.json");
+  assert.deepEqual(JSON.parse(readFileSync(envPath, "utf8")), {
+    ASC_KEY_PATH: join(homeB, "vault-runtime", "secrets", "shared", "asc-api-key.p8"),
+    ASC_KEY_ID: "K2XYZ123456",
+    ASC_ISSUER: "issuer-uuid-1",
+    GPLAY_KEY_PATH: join(homeB, "vault-runtime", "secrets", "shared", "gplay-service-account.json"),
+    RELEASE_LAB_KEYSTORE_STOREPASS: "correct-horse-battery",
+    FIREBASE_PROJECT_ID: "patigame-prod",
+  });
+  assert.equal(modeOf(envPath), 0o600, "env.json is 0o600");
+
+  // idempotent re-hydration: no duplicate hygiene lines, files rewritten byte-exact
+  await hydrateVaultDirect(homeB, { runner: fakeTarballRunner(tarball).runner });
+  assert.equal(
+    readFileSync(join(resolvedB.gitCommonDir, "info", "exclude"), "utf8").split("\n").filter((line) => line === "android/app/release.keystore").length,
+    1,
+    "a second hydration adds no second exclude line",
+  );
+
+  assert.deepEqual(readVaultStatus(homeB).hydratedApps, ["patigame"], "readVaultStatus fills hydratedApps from the canonical keys");
+});
+
+/** One valid `LedgerEvent` JSONL line with a controlled clock — reconciler fixtures need ordered, real-vocabulary events. */
+function ledgerLine(seq: number, ts: string, event: string, extra: Record<string, unknown> = {}): string {
+  return JSON.stringify({ seq, ts, event, ...extra });
+}
+
+/** Writes JSONL text to a real file — the `Ledger.open` proof needs a path. */
+function writeJsonl(t: TestContext, content: string, name = "ledger.jsonl"): string {
+  const dir = makeTempDir("paseo-factory-vault-ledger-");
+  disposeDir(t, dir);
+  const path = join(dir, name);
+  writeFileSync(path, content);
+  return path;
+}
+
+test("reconcileVaultLedgers dedupes by the real-vocabulary fingerprint, sorts by (ts, node, seq), and re-indexes 1..N", (t) => {
+  // the shared history every node carries (mini-m2's copy sits at different seqs — fingerprints ignore seq)
+  const retro = ledgerLine(1, "2026-10-20T08:00:00.000Z", "retro_written", { model: "copilot/gpt-5.4", outcome: "written", durationMs: 1200 });
+  const contract = ledgerLine(2, "2026-10-20T09:00:00.000Z", "contract_set", { task: "t01", workspace: "/w", gate: "npm test", artifact: "report.md", base: "e5b52cc" });
+  const claim = ledgerLine(3, "2026-10-20T09:05:00.000Z", "claim_reported", { task: "t01", attempt: 1, sha: "8fd67b4", agent: "pi" });
+
+  const local = [
+    retro,
+    contract,
+    claim,
+    ledgerLine(4, "2026-10-20T09:20:00.000Z", "gate_finished", { task: "t01", attempt: 1, exit: 0, verdict: "green", note: "all gates green", sha: "8fd67b4" }),
+    ledgerLine(5, "2026-10-20T09:25:00.000Z", "report_written", { task: "t01", attempt: 1, path: "reports/t01.md" }),
+  ].join("\n") + "\n";
+
+  const mini = [
+    ledgerLine(5, "2026-10-20T09:00:00.000Z", "contract_set", { task: "t01", workspace: "/w", gate: "npm test", artifact: "report.md", base: "e5b52cc" }),
+    ledgerLine(6, "2026-10-20T09:05:00.000Z", "claim_reported", { task: "t01", attempt: 1, sha: "8fd67b4", agent: "pi" }),
+    ledgerLine(7, "2026-10-20T10:40:00.000Z", "gate_finished", { task: "t01", attempt: 2, exit: 1, verdict: "red", note: "flaky wall clock", sha: "b6f93a1" }),
+    ledgerLine(8, "2026-10-20T10:45:00.000Z", "attempt_accepted", { task: "t01", attempt: 2, accepted_by: "owner" }),
+  ].join("\n") + "\n";
+
+  // this machine's own earlier push still sitting in the vault — a full duplicate of local
+  const selfPush = local;
+
+  const reconciled = reconcileVaultLedgers(local, [
+    { nodeId: "mini-m2", lines: mini },
+    { nodeId: "mac-studio", lines: selfPush },
+  ]);
+
+  const events = reconciled.split("\n").filter((line) => line !== "").map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.equal(events.length, 7, "the shared base dedupes to one copy each; only genuinely divergent events survive");
+  for (let i = 0; i < events.length; i++) {
+    assert.equal(events[i]!.seq, i + 1, `event ${i} re-indexed to ${i + 1}`);
+  }
+  assert.deepEqual(
+    events.map((evt) => evt.event),
+    ["retro_written", "contract_set", "claim_reported", "gate_finished", "report_written", "gate_finished", "attempt_accepted"],
+    "chronological by ts, both nodes' divergent gate_finished lines preserved",
+  );
+  assert.deepEqual(
+    events.map((evt) => evt.ts),
+    [...events.map((evt) => evt.ts)].sort(),
+    "ts ordering is monotonic across the reconciled file",
+  );
+  assert.equal(events.filter((evt) => evt.event === "contract_set").length, 1, "three copies of the contract (local, mini at other seqs, self-push) collapse to one");
+  assert.equal((events[3] as { verdict?: string }).verdict, "green", "payload fields ride the reconcile verbatim");
+  assert.equal((events[5] as { verdict?: string }).verdict, "red");
+
+  // the reconciled file loads through the ledger's own reader — the monotonic gate never fires
+  const path = writeJsonl(t, reconciled);
+  const opened = Ledger.open(path);
+  assert.equal(opened.events.length, 7);
+  for (let i = 0; i < opened.events.length; i++) assert.equal(opened.events[i]!.seq, i + 1);
+
+  // the union-merge control: `.gitattributes merge=union` of the same two files refuses to open
+  const unionPath = writeJsonl(t, `${local}${mini}`);
+  assert.throws(() => Ledger.open(unionPath), factoryErrorCode("corrupted-ledger"), "a union merge hits the non-monotonic seq and throws — the reconciler exists for exactly this");
+});
+
+test("reconcileVaultLedgers skips damaged and foreign lines instead of failing the merge", () => {
+  const good = ledgerLine(1, "2026-10-20T09:00:00.000Z", "contract_set", { task: "t01", workspace: "/w", gate: "npm test", artifact: "report.md" });
+  const damaged = [
+    good,
+    "this line is not json",
+    ledgerLine(2, "2026-10-20T09:01:00.000Z", "not_a_real_event", { task: "t01" }),
+    ledgerLine(3, "2026-10-20T09:02:00.000Z", "claim_reported", { task: "t02", attempt: 0, sha: "x" }), // attempt must be >= 1
+    "",
+    ledgerLine(4, "2026-10-20T09:03:00.000Z", "claim_reported", { task: "t03", attempt: 1, sha: "y" }),
+  ].join("\n") + "\n";
+
+  const reconciled = reconcileVaultLedgers("", [{ nodeId: "mini-m2", lines: damaged }]);
+  const events = reconciled.split("\n").filter((line) => line !== "").map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.equal(events.length, 2, "only the records the ledger's own validity law accepts survive");
+  assert.equal(events[0]!.event, "contract_set");
+  assert.equal(events[1]!.event, "claim_reported");
+  assert.equal(events[1]!.seq, 2, "survivors re-index 1..N over the gaps");
+});
+
+test("pullVault with mergeLedgers reconciles two nodes' snapshots into the local ledgers — then pushes them back node-scoped", async (t) => {
+  const parent = makeProjectParent(t);
+  const patigame = join(parent, "patigame");
+  mkdirSync(patigame, { recursive: true });
+  writeFileSync(join(patigame, "README.md"), "patigame fixture\n");
+  gitCommitAll(patigame);
+  const resolved = resolveProject(patigame);
+  assert.ok(resolved.ok);
+
+  // the shared history both nodes once agreed on, then each node's own appends
+  const contract = ledgerLine(1, "2026-10-20T09:00:00.000Z", "contract_set", { task: "t01", workspace: "/w", gate: "npm test", artifact: "report.md", base: "e5b52cc" });
+  const claim = ledgerLine(2, "2026-10-20T09:05:00.000Z", "claim_reported", { task: "t01", attempt: 1, sha: "8fd67b4", agent: "pi" });
+  const macStudioSnapshot = [
+    contract,
+    claim,
+    ledgerLine(3, "2026-10-20T09:20:00.000Z", "gate_finished", { task: "t01", attempt: 1, exit: 0, verdict: "green", note: "all gates green", sha: "8fd67b4" }),
+  ].join("\n") + "\n";
+  const miniSnapshot = [
+    ledgerLine(2, "2026-10-20T09:00:00.000Z", "contract_set", { task: "t01", workspace: "/w", gate: "npm test", artifact: "report.md", base: "e5b52cc" }),
+    ledgerLine(3, "2026-10-20T09:05:00.000Z", "claim_reported", { task: "t01", attempt: 1, sha: "8fd67b4", agent: "pi" }),
+    ledgerLine(4, "2026-10-20T09:40:00.000Z", "gate_finished", { task: "t01", attempt: 2, exit: 1, verdict: "red", note: "flaky wall clock", sha: "b6f93a1" }),
+    ledgerLine(5, "2026-10-20T09:45:00.000Z", "attempt_accepted", { task: "t01", attempt: 2, accepted_by: "owner" }),
+  ].join("\n") + "\n";
+  const globalNodeSnapshot = [
+    ledgerLine(1, "2026-10-20T08:00:00.000Z", "contract_set", { task: "g01", workspace: "/w", gate: "npm test", artifact: "report.md" }),
+    ledgerLine(2, "2026-10-20T08:30:00.000Z", "meter_written", { task: "g01", provider: "pi", usage: {} }),
+  ].join("\n") + "\n";
+
+  const bare = makeBareRemote(t);
+  seedBareRemote(t, bare, {
+    "README.md": "vault\n",
+    "vault.manifest.json": JSON.stringify({ patigame: { repoBasename: "patigame" } }),
+    "state/nodes/mac-studio/projects/patigame/ledger.jsonl": macStudioSnapshot,
+    "state/nodes/mini-m2/projects/patigame/ledger.jsonl": miniSnapshot,
+    "state/nodes/mac-studio/global-ledger.jsonl": globalNodeSnapshot,
+  });
+
+  // this machine (mini-m2): the checkout registered, a local per-project ledger with its own latest append, a local global ledger
+  const home = makeTempDir();
+  disposeDir(t, home);
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  writeProjectRegistration(stateDir, resolved.slug, { root: patigame });
+  const localProjectLedger = join(stateDir, "projects", resolved.slug, "ledger.jsonl");
+  mkdirSync(dirname(localProjectLedger), { recursive: true });
+  writeFileSync(localProjectLedger, [
+    contract,
+    claim,
+    ledgerLine(4, "2026-10-20T09:40:00.000Z", "gate_finished", { task: "t01", attempt: 2, exit: 1, verdict: "red", note: "flaky wall clock", sha: "b6f93a1" }),
+    ledgerLine(5, "2026-10-20T09:45:00.000Z", "attempt_accepted", { task: "t01", attempt: 2, accepted_by: "owner" }),
+    ledgerLine(6, "2026-10-20T09:50:00.000Z", "report_written", { task: "t01", attempt: 2, path: "reports/t01.md" }),
+  ].join("\n") + "\n");
+  const localGlobalLedger = join(stateDir, "ledger.jsonl");
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(localGlobalLedger, [
+    ledgerLine(1, "2026-10-20T08:00:00.000Z", "contract_set", { task: "g01", workspace: "/w", gate: "npm test", artifact: "report.md" }),
+    ledgerLine(2, "2026-10-20T08:30:00.000Z", "meter_written", { task: "g01", provider: "pi", usage: {} }),
+    ledgerLine(3, "2026-10-20T09:00:00.000Z", "retro_written", { model: "copilot/gpt-5.4", outcome: "written", durationMs: 900 }),
+  ].join("\n") + "\n");
+
+  saveVaultConfig(home, { repo: bare, nodeId: "mini-m2" });
+  await pullVault(home, { mergeLedgers: true });
+
+  // the per-project ledger: union of both nodes' + local events, deduped, strictly 1..N, openable
+  const opened = Ledger.open(localProjectLedger);
+  assert.deepEqual(
+    opened.events.map((evt) => `${evt.event}:${(evt as { verdict?: string }).verdict ?? ""}`),
+    [
+      "contract_set:",
+      "claim_reported:",
+      "gate_finished:green", // mac-studio's append, missing locally before the pull
+      "gate_finished:red",
+      "attempt_accepted:",
+      "report_written:", // the local append the snapshots lacked
+    ],
+    "ts order, one contract, both verdicts, the local tail",
+  );
+  for (let i = 0; i < opened.events.length; i++) assert.equal(opened.events[i]!.seq, i + 1);
+
+  // the global ledger reconciles through the same law
+  const openedGlobal = Ledger.open(localGlobalLedger);
+  assert.deepEqual(
+    openedGlobal.events.map((evt) => evt.event),
+    ["contract_set", "meter_written", "retro_written"],
+    "the node's global snapshot folds into the local global ledger, deduped",
+  );
+
+  // the push side: this node's reconciled ledgers ride the vault under its own namespace
+  const push = await pushVault(home, { includeLedger: true });
+  assert.equal(push.pushed, true, "the reconciled per-project snapshot is new content in the vault");
+  assert.ok(push.pushedFiles.includes(`state/nodes/mini-m2/projects/patigame/ledger.jsonl`), "the per-project ledger lands under the canonical app key");
+  assert.ok(push.pushedFiles.includes("state/nodes/mini-m2/global-ledger.jsonl"));
+
+  const probe = makeTempDir();
+  disposeDir(t, probe);
+  runGit(["clone", bare, probe]);
+  assert.equal(
+    readFileSync(join(probe, "state/nodes/mini-m2/projects/patigame/ledger.jsonl"), "utf8"),
+    readFileSync(localProjectLedger, "utf8"),
+    "what was pushed is byte-exact the reconciled local ledger — the next node's pull starts from here",
+  );
+});
+
+test("hydrateVaultDirect with mergeLedgers reconciles on the zero-clone path too — no vault/.git ever appears", async (t) => {
+  const parent = makeProjectParent(t);
+  const patigame = join(parent, "patigame");
+  mkdirSync(patigame, { recursive: true });
+  writeFileSync(join(patigame, "README.md"), "patigame fixture\n");
+  gitCommitAll(patigame);
+  const resolved = resolveProject(patigame);
+  assert.ok(resolved.ok);
+
+  const contract = ledgerLine(1, "2026-10-20T09:00:00.000Z", "contract_set", { task: "t01", workspace: "/w", gate: "npm test", artifact: "report.md" });
+  const nodeSnapshot = [
+    contract,
+    ledgerLine(2, "2026-10-20T09:10:00.000Z", "claim_reported", { task: "t01", attempt: 1, sha: "8fd67b4", agent: "pi" }),
+  ].join("\n") + "\n";
+
+  const top = "daymanondev-factory-vault-abc1234";
+  const tarball = buildTarball([
+    { path: `${top}/vault.manifest.json`, data: JSON.stringify({ patigame: { repoBasename: "patigame" } }) },
+    { path: `${top}/state/nodes/mac-studio/projects/patigame/ledger.jsonl`, data: nodeSnapshot },
+  ]);
+
+  const home = makeTempDir();
+  disposeDir(t, home);
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  writeProjectRegistration(stateDir, resolved.slug, { root: patigame });
+  const localProjectLedger = join(stateDir, "projects", resolved.slug, "ledger.jsonl");
+  mkdirSync(dirname(localProjectLedger), { recursive: true });
+  writeFileSync(localProjectLedger, `${contract}\n`); // a fresh machine that only ever saw the contract
+  saveVaultConfig(home, { repo: "daymanondev/factory-vault" });
+
+  await hydrateVaultDirect(home, { runner: fakeTarballRunner(tarball).runner, mergeLedgers: true });
+
+  const opened = Ledger.open(localProjectLedger);
+  assert.deepEqual(opened.events.map((evt) => evt.event), ["contract_set", "claim_reported"], "the node snapshot's append folds in");
+  assert.equal(opened.events[1]!.seq, 2);
+  assert.ok(!existsSync(join(home, "vault")), "still zero-clone — no checkout, no .git");
 });
