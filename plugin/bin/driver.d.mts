@@ -57,7 +57,20 @@ export declare class DaemonRpc {
 
 export declare function createTaskAgent(
   rpc: DaemonRpc,
-  input: { task: string; idempotencyKey?: string; provider: string; model?: string; cwd: string; brief: string },
+  input: {
+    task: string;
+    idempotencyKey?: string;
+    provider: string;
+    model?: string;
+    thinking?: string;
+    cwd: string;
+    brief: string;
+    parent?: string;
+    leadAgentId?: string;
+    workspaceId?: string;
+    projectSlug?: string;
+    project?: string;
+  },
 ): Promise<string>;
 
 export interface AgentFate {
@@ -111,6 +124,9 @@ export interface ObserveEntry {
   agentId: string;
   workspace?: string;
   brief?: string;
+  leadAgentId?: string;
+  workspaceId?: string;
+  projectSlug?: string;
   /** Set the moment the task lands its terminal state — the loop's own bookkeeping. */
   terminal?: { terminal?: boolean; fate: string; reason?: string };
   /** The terminal usage capture (v0.0.8) — undefined until a terminal moment. */

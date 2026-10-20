@@ -107,11 +107,31 @@ export interface SurfaceDaemonApi {
       title: string;
       labels: Record<string, string>;
       prompt?: string;
+      parent?: string;
     }): Promise<{ id: string }>;
     ref(id: string): {
       send(text: string): Promise<void>;
       archive(): Promise<{ archivedAt: string }>;
       timeline: { refetch(options?: { direction?: "tail"; limit?: number }): Promise<{ entries?: { seqEnd?: number }[]; error?: string | null }> };
+    };
+  };
+  workspaces?: {
+    open(options: { cwd: string }): Promise<{ id: string; projectId?: string | null }>;
+    create(options: {
+      title: string;
+      source: { kind: "directory"; path: string; projectId?: string };
+    }): Promise<{ id: string; projectId?: string | null }>;
+    archive(workspaceId: string): Promise<unknown>;
+    ref(workspaceId: string): {
+      agents: {
+        create(options: {
+          config: { provider: string; thinkingOptionId?: string };
+          title: string;
+          labels: Record<string, string>;
+          prompt?: string;
+          parent?: string;
+        }): Promise<{ id: string }>;
+      };
     };
   };
   providers: {
@@ -214,6 +234,33 @@ export function acceptanceSummary(input: { task: string; attempt: number; by: st
         ? ` · landing pending-conflict: ${input.landingNote ?? "(no reason recorded)"} — branch factory/${input.task} is preserved`
         : "")
   );
+}
+
+/**
+ * Automatic archive of an Accepted Task's Paseo workspace (v0.0.23, ADR 0015 §6):
+ * looks up `taskWorkspaces[task]` in `<projectStateDir>/project.json`, calls
+ * `daemon.workspaces?.archive(workspaceId)` best-effort, and removes the entry
+ * from `taskWorkspaces`.
+ */
+export async function archiveAcceptedTaskWorkspace(factory: Factory, daemon: SurfaceDaemonApi | undefined, task: string): Promise<void> {
+  const contract = factory.contractFor(task);
+  if (contract === undefined) return;
+  const project = resolveProject(contract.workspace);
+  if (!project.ok) return;
+  const reg = readProjectRegistration(factory.stateDir, project.slug);
+  const workspaceId = reg?.taskWorkspaces?.[task];
+  if (workspaceId === undefined) return;
+  if (daemon?.workspaces?.archive !== undefined) {
+    try {
+      await daemon.workspaces.archive(workspaceId);
+    } catch {
+      // best-effort archive
+    }
+  }
+  writeProjectRegistration(factory.stateDir, project.slug, {
+    root: project.root,
+    taskWorkspaces: { [task]: null },
+  });
 }
 
 /** One companion install's sentence — the source actually used, the ref when one was given. */
@@ -484,6 +531,17 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     } catch (err) {
       return failure("daemon-unavailable", `cannot read the daemon's agents: ${messageOf(err)}`);
     }
+    let workspaceId: string | undefined;
+    let paseoProjectId: string | undefined;
+    if (daemon.workspaces !== undefined) {
+      try {
+        const opened = await daemon.workspaces.open({ cwd: project.root });
+        if (typeof opened?.id === "string" && opened.id !== "") workspaceId = opened.id;
+        if (typeof opened?.projectId === "string" && opened.projectId !== "") paseoProjectId = opened.projectId;
+      } catch (err) {
+        log(`${seat}: workspaces.open(${project.root}) did not resolve (${messageOf(err)}) — falling back to daemon.agents.create`);
+      }
+    }
     let created = false;
     if (agent === undefined) {
       // The bridge's create half (v0.0.14): the agent stands INSIDE the
@@ -497,23 +555,43 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         parsed?.thinking !== undefined
           ? { provider: `${parsed.provider}/${parsed.model}`, thinkingOptionId: parsed.thinking }
           : { provider: lane };
+      let parent: string | undefined;
+      if (seat === "lead") {
+        try {
+          const sup = await seatOf(daemon, "supervisor", project.slug);
+          if (sup !== undefined) parent = sup.id;
+        } catch {
+          // best-effort parent lookup
+        }
+      }
+      const prompt = renderSeatBootstrap({
+        seat,
+        home: deps.home,
+        stateDir: deps.stateDir,
+        ...(deps.pluginDir === undefined ? {} : { pluginDir: deps.pluginDir }),
+        nodePath: process.execPath,
+        path: process.env.PATH ?? "",
+        lane,
+        project,
+      });
       try {
-        const handle = await daemon.agents.create({
-          config,
-          cwd: project.root,
-          title,
-          labels: { seat, project: project.slug },
-          prompt: renderSeatBootstrap({
-            seat,
-            home: deps.home,
-            stateDir: deps.stateDir,
-            ...(deps.pluginDir === undefined ? {} : { pluginDir: deps.pluginDir }),
-            nodePath: process.execPath,
-            path: process.env.PATH ?? "",
-            lane,
-            project,
-          }),
-        });
+        const handle =
+          workspaceId !== undefined && daemon.workspaces !== undefined
+            ? await daemon.workspaces.ref(workspaceId).agents.create({
+                config,
+                title,
+                labels: { seat, project: project.slug },
+                prompt,
+                ...(parent !== undefined ? { parent } : {}),
+              })
+            : await daemon.agents.create({
+                config,
+                cwd: project.root,
+                title,
+                labels: { seat, project: project.slug },
+                prompt,
+                ...(parent !== undefined ? { parent } : {}),
+              });
         agent = {
           id: handle.id,
           provider: config.provider,
@@ -539,6 +617,8 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     writeProjectRegistration(deps.stateDir, project.slug, {
       root: project.root,
       ...(seat === "supervisor" ? { supervisor: agent.id } : { lead: agent.id }),
+      ...(workspaceId !== undefined ? { workspaceId } : {}),
+      ...(paseoProjectId !== undefined ? { paseoProjectId } : {}),
     });
     const message = input.message?.trim();
     if (message !== undefined && message !== "") {
@@ -727,11 +807,12 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       };
     },
 
-    async accept(input: { task: string; attempt: number }, _context?: SurfaceCallContext) {
+    async accept(input: { task: string; attempt: number }, context?: SurfaceCallContext) {
       try {
         // Awaited since v0.0.14: a worktree task's local landing runs before
         // the line records, and the summary carries the outcome.
         const event = await deps.factory.accept({ task: input.task, attempt: input.attempt, accepted_by: "owner" });
+        await archiveAcceptedTaskWorkspace(deps.factory, resolveDaemon(context), input.task);
         return {
           ok: true as const,
           seq: event.seq,

@@ -176,6 +176,7 @@ export default function contribute(server: PluginServerContext) {
     supervisorDispatch: (request) => leadMail.dispatchSupervisor(request),
     supervisorReport: (request) => leadMail.reportSupervisor(request),
     peerMail: leadMail.notifyPeer,
+    daemon: () => paseoApi as never,
   });
   log(`spool listening on ${spoolRootFor(stateDir)}/{requests,replies,processed}`);
   registerSurfaceRpc(server, surface);

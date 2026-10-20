@@ -13,6 +13,7 @@ import { createFactory } from "../plugin/server/core/factory.ts";
 import { resolveProject } from "../plugin/server/core/project.ts";
 import { createSurfaceHandlers } from "../plugin/server/surface-rpc.ts";
 import type { SurfaceDaemonApi, SurfaceDeps } from "../plugin/server/surface-rpc.ts";
+import { handleSpoolRequest } from "../plugin/server/spool.ts";
 import {
   BRIDGE_TIMEOUT_MS,
   cliUtils,
@@ -28,6 +29,7 @@ import { factoryEnvFor, injectRoleOnCreate, injectSessionEnv, renderAgentContrac
 import type { AgentCreateRequest } from "../plugin/server/roles.ts";
 import { discoverProjects, readProjectRegistration, writeProjectRegistration } from "../plugin/server/projects.ts";
 import { lanesPath, loadLanes, saveLanes } from "../src/lanes.ts";
+import { prepareTaskWorktree } from "../src/workspace.ts";
 import { deliverLeadMail, enqueueLeadMail } from "../src/mailbox.ts";
 import { disposeDir, fakeCopilotRunner, gitCommitAll, makeTempDir, writeLanes } from "./helpers.ts";
 
@@ -2560,3 +2562,201 @@ test("vault snapshot & vault.sync / vault.import: unconfigured snapshot probes g
   assert.ok(!badImport.ok);
   assert.equal(badImport.code, "vault-import-file-not-found");
 });
+
+test("v0.0.23 (ADR 0015 §6): ensureSeat opens/reuses the Project's Paseo workspaceId, persists workspaceId + paseoProjectId, and sets parent: supervisorId on Lead", async (t) => {
+  const { handlers, fake, stateDir } = makeSurface(t, []);
+  const project = makeProject(t, "ws-bound-seats");
+  writeLanes(stateDir, { supervisor: "claude/opus-4-8", lead: "opencode/glm-5.1" });
+
+  const openedWorkspaces: string[] = [];
+  const wsCreatedAgents: {
+    workspaceId: string;
+    config: { provider: string; thinkingOptionId?: string };
+    parent?: string;
+    title: string;
+    labels: Record<string, string>;
+    prompt?: string;
+  }[] = [];
+
+  fake.daemon.workspaces = {
+    open: async ({ cwd }) => {
+      openedWorkspaces.push(cwd);
+      return { id: "ws-project-main", projectId: "prj-project-main" };
+    },
+    create: async () => ({ id: "ws-unused", projectId: "prj-project-main" }),
+    archive: async () => ({ archivedAt: new Date().toISOString(), error: null }),
+    ref: (workspaceId: string) => ({
+      agents: {
+        create: async (options) => {
+          wsCreatedAgents.push({
+            workspaceId,
+            config: options.config,
+            ...(options.parent === undefined ? {} : { parent: options.parent }),
+            title: options.title,
+            labels: options.labels,
+            prompt: options.prompt,
+          });
+          return fake.daemon.agents.create({
+            ...options,
+            cwd: project.root,
+          });
+        },
+      },
+    }),
+  };
+
+  const supReply = await handlers.supervisorEnsure({ projectRoot: project.root });
+  assert.ok(supReply.ok, supReply.ok ? "" : supReply.error);
+  assert.equal(supReply.created, true);
+  assert.deepEqual(openedWorkspaces, [project.root], "ensureSeat opened the Project's Paseo workspace at <project-root>");
+  assert.equal(wsCreatedAgents.length, 1, "Supervisor was created through workspaces.ref(workspaceId).agents.create");
+  assert.equal(wsCreatedAgents[0]!.workspaceId, "ws-project-main");
+  assert.equal(wsCreatedAgents[0]!.parent, undefined, "Supervisor has no parent agent");
+
+  const leadReply = await handlers.leadEnsure({ projectRoot: project.root });
+  assert.ok(leadReply.ok, leadReply.ok ? "" : leadReply.error);
+  assert.equal(leadReply.created, true);
+  assert.equal(wsCreatedAgents.length, 2, "Lead was also created through workspaces.ref(workspaceId).agents.create");
+  assert.equal(wsCreatedAgents[1]!.workspaceId, "ws-project-main");
+  assert.equal(wsCreatedAgents[1]!.parent, supReply.agentId, "Lead carries parent: supervisor.id when a live Supervisor exists");
+
+  const reg = readProjectRegistration(stateDir, project.slug);
+  assert.equal(reg?.workspaceId, "ws-project-main", "workspaceId persisted in project.json");
+  assert.equal(reg?.paseoProjectId, "prj-project-main", "paseoProjectId persisted in project.json");
+  assert.equal(reg?.supervisor, supReply.agentId);
+  assert.equal(reg?.lead, leadReply.agentId);
+});
+
+test("v0.0.23 (ADR 0015 §6): spool spawn/respawn registers Task worktree workspace under paseoProjectId, returns leadAgentId + workspaceId + projectSlug, and meter/respawn/accept auto-archive", async (t) => {
+  const { handlers, factory, fake, stateDir } = makeSurface(t, []);
+  const project = makeProject(t, "ws-task-archive");
+  writeLanes(stateDir, { supervisor: "claude/opus-4-8", lead: "opencode/glm-5.1", agent: "opencode/glm-5.1" });
+
+  const createdWorkspaces: { title: string; source: { kind: "directory"; path: string; projectId?: string } }[] = [];
+  const archivedWorkspaces: string[] = [];
+
+  fake.daemon.workspaces = {
+    open: async () => ({ id: "ws-proj-root", projectId: "prj-proj-root" }),
+    create: async ({ title, source }) => {
+      createdWorkspaces.push({ title, source });
+      return { id: `ws-wt-${createdWorkspaces.length}`, projectId: source.projectId ?? null };
+    },
+    archive: async (wsId: string) => {
+      archivedWorkspaces.push(wsId);
+      return { archivedAt: new Date().toISOString(), error: null };
+    },
+    ref: () => ({
+      agents: {
+        create: async (options) => fake.daemon.agents.create({ ...options, cwd: project.root }),
+      },
+    }),
+  };
+
+  // Ensure Supervisor and Lead seats first so project.json has workspaceId + paseoProjectId + lead.
+  const supEnsure = await handlers.supervisorEnsure({ projectRoot: project.root });
+  assert.ok(supEnsure.ok);
+  const leadEnsure = await handlers.leadEnsure({ projectRoot: project.root });
+  assert.ok(leadEnsure.ok);
+
+  // Set contract for T-WS-1 inside project.root.
+  factory.setContract({
+    task: "T-WS-1",
+    workspace: project.root,
+    gate: "test -f out.txt",
+    artifact: "out.txt",
+    by: "lead",
+  });
+
+  const wtPrep = prepareTaskWorktree({ stateDir, workspace: project.root, task: "T-WS-1" });
+  assert.ok(wtPrep.ok, wtPrep.ok ? "" : wtPrep.reason);
+  const wtPath = wtPrep.path;
+  writeFileSync(join(wtPath, "out.txt"), "ok\n");
+  const headSha = gitCommitAll(wtPath, "out");
+  const spawnReply = await handleSpoolRequest(
+    factory,
+    { id: "sp-ws-1", kind: "spawn", task: "T-WS-1", provider: "opencode/glm-5.1", arity: 1, worktree: wtPath },
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    fake.daemon,
+  );
+  assert.equal(spawnReply.ok, true);
+  if (spawnReply.ok) {
+    assert.equal(spawnReply.leadAgentId, leadEnsure.agentId);
+    assert.equal(spawnReply.workspaceId, "ws-wt-1");
+    assert.equal(spawnReply.projectSlug, project.slug);
+  }
+  assert.deepEqual(createdWorkspaces, [
+    {
+      title: `${project.slug} T-WS-1`,
+      source: { kind: "directory", path: wtPath, projectId: "prj-proj-root" },
+    },
+  ]);
+  assert.equal(readProjectRegistration(stateDir, project.slug)?.taskWorkspaces?.["T-WS-1"], "ws-wt-1");
+
+  // Seed a dead worker agent and test respawn: archives died_agent and reuses taskWorkspaces["T-WS-1"].
+  const deadWorker = await fake.daemon.agents.create({
+    config: { provider: "opencode/glm-5.1" },
+    cwd: wtPath,
+    title: "factory T-WS-1 (dead)",
+    labels: { seat: "agent", project: project.slug, task: "T-WS-1" },
+  });
+  const respawnReply = await handleSpoolRequest(
+    factory,
+    { id: "rsp-ws-1", kind: "respawn", task: "T-WS-1", provider: "opencode/glm-5.1", died_agent: deadWorker.id },
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    fake.daemon,
+  );
+  assert.equal(respawnReply.ok, true);
+  if (respawnReply.ok) {
+    assert.equal(respawnReply.leadAgentId, leadEnsure.agentId);
+    assert.equal(respawnReply.workspaceId, "ws-wt-1");
+    assert.equal(respawnReply.projectSlug, project.slug);
+  }
+  assert.ok(fake.archived.includes(deadWorker.id), "respawn archived superseded died_agent");
+  assert.equal(createdWorkspaces.length, 1, "respawn reused the existing taskWorkspaces[T-WS-1] entry");
+
+  // Seed replacement live worker, run claim + meter, verify meter archives finished worker.
+  const liveWorker = await fake.daemon.agents.create({
+    config: { provider: "opencode/glm-5.1" },
+    cwd: wtPath,
+    title: "factory T-WS-1 (live)",
+    labels: { seat: "agent", project: project.slug, task: "T-WS-1" },
+  });
+  const claim1 = await factory.claim({ task: "T-WS-1", sha: headSha, agent: liveWorker.id });
+  assert.equal(claim1.verdict, "green");
+
+  const meterReply = await handleSpoolRequest(
+    factory,
+    { id: "m-ws-1", kind: "meter", task: "T-WS-1", provider: "opencode/glm-5.1", agent: liveWorker.id, usage: { inputTokens: 100, outputTokens: 50 } },
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    fake.daemon,
+  );
+  assert.equal(meterReply.ok, true);
+  assert.ok(fake.archived.includes(liveWorker.id), "meter archived finished working Agent");
+
+  // Accept T-WS-1: archives taskWorkspaces[T-WS-1] and removes it from project.json.
+  const accept1 = await handlers.accept({ task: "T-WS-1", attempt: 1 });
+  assert.ok(accept1.ok, accept1.ok ? "" : accept1.error);
+  assert.ok(archivedWorkspaces.includes("ws-wt-1"), "accept archived the Task worktree Paseo workspace");
+  assert.equal(
+    readProjectRegistration(stateDir, project.slug)?.taskWorkspaces?.["T-WS-1"],
+    undefined,
+    "accept removed taskWorkspaces[T-WS-1] from project.json",
+  );
+});
+
+
