@@ -197,6 +197,23 @@ export interface SpoolSupervisorReportRequest {
 }
 
 /**
+ * Owner-only Project Reset (v0.0.24, ADR 0015 §6): `factory reset` purges all
+ * Project state (ledger events, reports/worktrees, `<projectStateDir>/`, and
+ * optionally seat/worker sessions unless `keepSeats` is set). Refused with
+ * `code: "seat-cannot-reset"` when called from any non-Owner seat.
+ */
+export interface SpoolResetRequest {
+  id: string;
+  kind: "reset";
+  workspace?: string;
+  project?: string;
+  keepSeats?: boolean;
+  submitter?: string;
+  seat?: SpoolSeat;
+}
+
+
+/**
  * The Lead's one automatic Respawn per progress marker (v0.0.12, ADR 0008):
  * when an Agent dies (`Substrate death`), the driver asks the plugin — the
  * one writer — whether it may replace the dead Agent, and only creates the
@@ -317,6 +334,7 @@ export type SpoolRequest =
   | SpoolLeadDispatchRequest
   | SpoolSupervisorDispatchRequest
   | SpoolSupervisorReportRequest
+  | SpoolResetRequest
   | SpawnRequest
   | RespawnRequest
   | MeterRequest
@@ -338,6 +356,13 @@ export type SupervisorDispatchHandler = (request: SpoolSupervisorDispatchRequest
 
 /** Queues a Lead report into a Project's Supervisor mailbox (v0.0.23, ADR 0015 §3). */
 export type SupervisorReportHandler = (request: SpoolSupervisorReportRequest) => Promise<SpoolReply>;
+
+/** Resets a Project — the surface handlers' `projectReset` is the implementation (v0.0.24, ADR 0015 §6). */
+export type ProjectResetHandler = (request: SpoolResetRequest) => Promise<SpoolReply>;
+
+/** Sanitizes a `<provider>/<model>[:<thinking>]` lane string against the daemon's provider catalog (v0.0.24, ADR 0015 §1). */
+export type SanitizeLaneHandler = (laneValue: string) => Promise<string> | string;
+
 
 /**
  * Notifies a Project's Lead mailbox that a Peer's task reached a terminal
@@ -384,8 +409,16 @@ export type SpoolReply =
       /** Spawn / respawn replies (v0.0.23, ADR 0015 §6): the Task worktree's Paseo workspace id and owning Project slug. */
       workspaceId?: string;
       projectSlug?: string;
+      /** Project-reset replies (v0.0.24, ADR 0015 §6). */
+      purgedEvents?: number;
+      tasks?: string[];
+      removedFiles?: number;
+      archivedSeats?: string[];
+      archivedAgents?: string[];
     }
   | { id: string; ok: false; code: string; message: string; event?: LedgerEvent };
+
+
 
 /** Where all three spool directories live. */
 export function spoolRootFor(stateDir: string): string {
@@ -535,6 +568,21 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       ...seatField,
     };
   }
+  if (req.kind === "reset") {
+    if (req.project !== undefined && (typeof req.project !== "string" || req.project.trim() === "")) return undefined;
+    if (req.workspace !== undefined && (typeof req.workspace !== "string" || req.workspace.trim() === "")) return undefined;
+    if (req.keepSeats !== undefined && typeof req.keepSeats !== "boolean") return undefined;
+    return {
+      id: req.id,
+      kind: "reset",
+      ...(req.project === undefined ? {} : { project: req.project }),
+      ...(req.workspace === undefined ? {} : { workspace: req.workspace }),
+      ...(req.keepSeats === undefined ? {} : { keepSeats: req.keepSeats }),
+      ...submitterField,
+      ...seatField,
+    };
+  }
+
   if (req.kind === "retro") {
     // The Retro carries nothing but its kind (plus optional submitter and seat stamps) —
     // whole-ledger always. Any extra field makes it not-a-retro.
@@ -627,7 +675,8 @@ function lastTaskAgentForTask(factory: Factory, task: string): string | undefine
   let agentId: string | undefined;
   for (const evt of factory.ledger.events) {
     if ("task" in evt && evt.task === task) {
-      if (evt.event === "claim_reported" && typeof evt.agent === "string" && evt.agent !== "") agentId = evt.agent;
+      if (evt.event === "contract_set") agentId = undefined;
+      else if (evt.event === "claim_reported" && typeof evt.agent === "string" && evt.agent !== "") agentId = evt.agent;
       else if (evt.event === "repoke_dispatched" && typeof evt.agent === "string" && evt.agent !== "") agentId = evt.agent;
       else if (evt.event === "meter_written" && typeof evt.agent === "string" && evt.agent !== "") agentId = evt.agent;
     }
@@ -678,14 +727,7 @@ async function resolveSpawnWorkspaceAndParent(
   }
   if (leadAgentId === undefined) leadAgentId = reg?.lead;
 
-  let worktree = explicitWorktree;
-  if (worktree === undefined) {
-    for (const evt of factory.ledger.events) {
-      if (evt.event === "spawn_dispatched" && evt.task === task && typeof evt.worktree === "string" && evt.worktree !== "") {
-        worktree = evt.worktree;
-      }
-    }
-  }
+  const worktree = explicitWorktree ?? factory.worktreeFor(task);
   let workspaceId = reg?.taskWorkspaces?.[task];
   if (workspaceId === undefined && worktree !== undefined && daemon?.workspaces?.create !== undefined) {
     try {
@@ -734,11 +776,24 @@ export async function handleSpoolRequest(
   supervisorDispatchHandler?: SupervisorDispatchHandler,
   supervisorReportHandler?: SupervisorReportHandler,
   daemon?: SurfaceDaemonApi | (() => SurfaceDaemonApi | undefined),
+  projectResetHandler?: ProjectResetHandler,
+  sanitizeLane?: SanitizeLaneHandler,
 ): Promise<SpoolReply> {
   const resolvedDaemon = resolveDaemonArg(daemon);
   try {
     const effectiveSeat = await resolveEffectiveSeat(factory, resolvedDaemon, request);
-    // Hard Spool Command Authority by Seat (v0.0.23, ADR 0015 §1).
+    // Hard Spool Command Authority by Seat (v0.0.23, ADR 0015 §1; v0.0.24, ADR 0015 §6).
+    if (
+      request.kind === "reset" &&
+      (effectiveSeat === "supervisor" || effectiveSeat === "lead" || effectiveSeat === "agent")
+    ) {
+      return {
+        id: request.id,
+        ok: false,
+        code: "seat-cannot-reset",
+        message: `Seat ${effectiveSeat} cannot call factory reset; project reset is an Owner-only action.`,
+      };
+    }
     if (
       (request.kind === "contract" || request.kind === "spawn" || request.kind === "respawn") &&
       effectiveSeat === "supervisor"
@@ -750,6 +805,7 @@ export async function handleSpoolRequest(
         message: `Supervisor cannot call factory ${request.kind}; dispatch the directive to Lead via 'factory lead dispatch --workspace <dir> --message <directive>' and end your turn.`,
       };
     }
+
     if (
       (request.kind === "contract" ||
         request.kind === "spawn" ||
@@ -899,14 +955,30 @@ export async function handleSpoolRequest(
       }
       return await supervisorReportHandler(effectiveSeat === undefined ? request : { ...request, seat: effectiveSeat });
     }
+    if (request.kind === "reset") {
+      if (projectResetHandler === undefined) {
+        return {
+          id: request.id,
+          ok: false,
+          code: "project-reset-unavailable",
+          message: "this daemon's factory plugin does not handle Project resets — update the plugin to v0.0.24+",
+        };
+      }
+      return await projectResetHandler(request);
+    }
+
     if (request.kind === "spawn") {
       // The driver's arrival (v0.0.5): one ledger line either way, then the
       // reply the driver keys its next move on — create the agent, or report
       // the refusal and carry on with the invocation's other tasks. The
       // worktree (v0.0.14) rides the line so claim/gate/choke bind to it.
+      const sanitizedProvider =
+        sanitizeLane !== undefined && request.provider !== ""
+          ? await sanitizeLane(request.provider)
+          : request.provider;
       const decision = factory.requestSpawn({
         task: request.task,
-        provider: request.provider,
+        provider: sanitizedProvider,
         arity: request.arity,
         ...(request.worktree === undefined ? {} : { worktree: request.worktree }),
       });
@@ -917,7 +989,7 @@ export async function handleSpoolRequest(
       return {
         id: request.id,
         ok: true,
-        summary: `spawn dispatched for ${request.task} under ${request.provider} (n=${request.arity})`,
+        summary: `spawn dispatched for ${request.task} under ${sanitizedProvider} (n=${request.arity})`,
         event: decision.event,
         ...spawnMeta,
       };
@@ -926,9 +998,13 @@ export async function handleSpoolRequest(
       // The Lead's one automatic Respawn per progress marker (v0.0.12, ADR 0008):
       // one ledger line either way, with `event` attached so the driver can key
       // the replacement `agent.create.request` by `${task}-respawn-${event.seq}`.
+      const sanitizedProvider =
+        sanitizeLane !== undefined && request.provider !== ""
+          ? await sanitizeLane(request.provider)
+          : request.provider;
       const decision = factory.respawn({
         task: request.task,
-        provider: request.provider,
+        provider: sanitizedProvider,
         died_agent: request.died_agent,
       });
       if (decision.outcome === "refused") {
@@ -939,7 +1015,7 @@ export async function handleSpoolRequest(
       return {
         id: request.id,
         ok: true,
-        summary: `respawn dispatched for ${request.task} under ${request.provider} (replacing ${request.died_agent.slice(0, 12)})`,
+        summary: `respawn dispatched for ${request.task} under ${sanitizedProvider} (replacing ${request.died_agent.slice(0, 12)})`,
         event: decision.event,
         ...spawnMeta,
       };
@@ -1056,11 +1132,17 @@ export interface SpoolOptions {
   supervisorDispatch?: SupervisorDispatchHandler;
   /** The Supervisor-report handler (v0.0.23); without it `supervisor_report` requests are refused. */
   supervisorReport?: SupervisorReportHandler;
+  /** The Project-reset handler (v0.0.24); without it `reset` requests are refused. */
+  projectReset?: ProjectResetHandler;
   /** The peer-outcome notifier (v0.0.20) — verdicts and needs_human recordings land as Lead mail. */
   peerMail?: PeerMailHook;
   /** The daemon API for workspace registration and worker/workspace archiving (v0.0.23, ADR 0015 §6). */
   daemon?: SurfaceDaemonApi | (() => SurfaceDaemonApi | undefined);
+  /** Sanitizes `<provider>/<model>[:<thinking>]` lane strings before spawn/respawn (v0.0.24, ADR 0015 §1). */
+  sanitizeLane?: SanitizeLaneHandler;
 }
+
+export type SpoolDeps = SpoolOptions;
 
 export interface Spool {
   stop(): void;
@@ -1112,6 +1194,8 @@ export function startSpool(stateDir: string, factory: Factory, options: SpoolOpt
         options.supervisorDispatch,
         options.supervisorReport,
         options.daemon,
+        options.projectReset,
+        options.sanitizeLane,
       )
         .catch(() => {})
         .finally(() => inFlight.delete(id));
@@ -1127,6 +1211,8 @@ export function startSpool(stateDir: string, factory: Factory, options: SpoolOpt
   };
 }
 
+export const startSpoolWatcher = startSpool;
+
 async function handleRequestFile(
   id: string,
   requestPath: string,
@@ -1141,6 +1227,8 @@ async function handleRequestFile(
   supervisorDispatchHandler?: SupervisorDispatchHandler,
   supervisorReportHandler?: SupervisorReportHandler,
   daemon?: SurfaceDaemonApi | (() => SurfaceDaemonApi | undefined),
+  projectResetHandler?: ProjectResetHandler,
+  sanitizeLane?: SanitizeLaneHandler,
 ): Promise<void> {
   let reply: SpoolReply;
   let request: SpoolRequest | undefined;
@@ -1163,7 +1251,10 @@ async function handleRequestFile(
       supervisorDispatchHandler,
       supervisorReportHandler,
       daemon,
+      projectResetHandler,
+      sanitizeLane,
     );
+
     // The v0.0.9 stamps make the two Owner acts attributable in the log too —
     // the same visibility the claim line always had.
     const stamp = request.kind === "contract" || request.kind === "accept" ? ` by ${request.submitter}` : "";

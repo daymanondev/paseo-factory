@@ -205,3 +205,35 @@ test("FactoryShell removes PrivateVaultCard from the Plugins tab, wires vaultSyn
   assert.match(shell, /vaultNote/, "FactoryShell tracks vaultNote for inline status feedback");
   assert.match(shell, /toast\.show\(summary, \{ variant: "success" \}\)/, "act() fires a green success toast whenever summary is returned");
 });
+
+// ---- Thinking Variant Sanitization in Seats & Models UI (v0.0.24, ADR 0015 §1) --------------
+
+test("v0.0.24 (ADR 0015 §1): Seats & Models lane modal distinguishes thinkingOptions === [] from null, renders Default (none), and clears thinking on model/provider selection", () => {
+  const seats = read("plugin/client/factory/seats.tsx");
+  assert.match(seats, /advertisedThinking === null\s*\?\s*FALLBACK_THINKING_OPTIONS/, "only null metadata falls back to FALLBACK_THINKING_OPTIONS");
+  assert.match(seats, /advertisedThinking\.length === 0/, "explicitly empty thinkingOptions [] produces [] choices and forces trimmedThinking = ''");
+  assert.match(seats, /Default \(none\)/, "Step 3 renders active 'Default (none)' chip when model supports zero thinking variants");
+  assert.match(
+    seats,
+    /!nextModel\.thinkingOptions \|\| nextModel\.thinkingOptions\.length === 0 \|\| !nextModel\.thinkingOptions\.some\(/,
+    "selectModel clears thinking whenever nextModel.thinkingOptions is empty or omits the current thinking variant",
+  );
+});
+
+// ---- Owner-Only Project Reset Header Button & RPC Wiring (v0.0.24, ADR 0015 §6) --------------
+
+test("v0.0.24 (ADR 0015 §6): Header renders two-step Reset Project -> Confirm Reset + Cancel with 5s auto-cancel, wired to projectReset RPC in FactoryShell", () => {
+  const header = read("plugin/client/factory/header.tsx");
+  assert.match(header, /resetProject\?:\s*\(\)\s*=>\s*void|resetProject\(\):\s*void/, "HeaderActions declares resetProject()");
+  assert.match(header, /label="Reset Project"/, "Header renders Reset Project button when a project is selected");
+  assert.match(header, /label="Confirm Reset"/, "first click flips to Confirm Reset");
+  assert.match(header, /tone="statusDanger"/, "Confirm Reset is danger-styled");
+  assert.match(header, /5000/, "auto-cancels confirmation state after 5 seconds");
+  assert.match(header, /actions\.resetProject/, "Confirm Reset invokes actions.resetProject()");
+
+  const shell = read("plugin/client/factory/shell.tsx");
+  assert.match(shell, /projectReset/, "FactoryShell imports projectReset RPC");
+  assert.match(shell, /useRpc\(projectReset\)/, "FactoryShell binds useRpc(projectReset)");
+  assert.match(shell, /resetProject/, "FactoryShell passes resetProject action to Header");
+});
+

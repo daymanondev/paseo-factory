@@ -156,7 +156,16 @@ export function injectSessionEnv<R extends { agentId: string; cwd: string; env: 
     return { ...request, env: { ...request.env, ...factoryEnvFor("agent", { stateDir, project: { root: "", slug: worktree.slug }, task: worktree.task, userHome }) } };
   }
   for (const registration of listProjectRegistrations(stateDir)) {
-    const seat = request.agentId === registration.supervisor ? "supervisor" : request.agentId === registration.lead ? "lead" : undefined;
+    const isDispatcher =
+      Array.isArray(registration.dispatchers) &&
+      registration.dispatchers.includes(request.agentId) &&
+      (request.cwd === "" || request.cwd === registration.root || request.cwd.startsWith(`${registration.root}/`));
+    const seat =
+      request.agentId === registration.supervisor || isDispatcher
+        ? "supervisor"
+        : request.agentId === registration.lead
+          ? "lead"
+          : undefined;
     if (seat === undefined) continue;
     return { ...request, env: { ...request.env, ...factoryEnvFor(seat, { stateDir, project: registration, userHome }) } };
   }

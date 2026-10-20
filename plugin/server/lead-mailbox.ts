@@ -80,6 +80,16 @@ import type { SurfaceAgentSnapshot, SurfaceDaemonApi } from "./surface-rpc.ts";
  */
 export const LEAD_ROTATE_TOKENS = 128_000;
 
+/**
+ * Whether an agent's attention state blocks mailbox delivery (v0.0.24, ADR 0015 §2):
+ * only a mid-turn permission prompt (`attentionReason === "permission"`) holds
+ * mail; a stale `attentionReason === "error"` from an earlier failed turn never
+ * freezes the mailbox.
+ */
+export function isBlockedByAttention(agent: SurfaceAgentSnapshot): boolean {
+  return agent.requiresAttention === true && agent.attentionReason === "permission";
+}
+
 // ---- the deterministic context sensor (ADR 0013 §5, "Reading Lead Context Tokens") ----------
 
 /** What the sensor read, and where it read it from — nulls mean "unknown", never a guess. */
@@ -202,6 +212,7 @@ export interface LeadMailRuntimeDeps {
    */
   retireLead: (input: { projectRoot: string }) => Promise<{ ok: true; agentId: string } | { ok: false; code: string; error: string }>;
   onLog?: (message: string) => void;
+  logger?: { warn?: (message: string) => void; info?: (message: string) => void; error?: (message: string) => void };
 }
 
 /** One runtime's public face — see the module doc for each member's law. */
@@ -232,6 +243,11 @@ export interface LeadMailRuntime {
    * racing a live delivery never strands the batch `inFlight`. Idempotent.
    */
   settleLeadRotation(slug: string): void;
+  /**
+   * Clears in-memory retry and handoff state for one Project (`slug`), used
+   * by `Project reset` (`v0.0.24`, ADR 0015 §5).
+   */
+  resetProjectMailbox(slug: string): void;
 }
 
 /** What the `agent.turn_ended` wiring hands the machine — the SDK event reduced to plain data. */
@@ -251,7 +267,13 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   // job for the SAME Project settles (either way — a failed job never poisons
   // the chain), so read-then-append against one mailbox is atomic in practice.
   const lanes = new Map<string, Promise<unknown>>();
+  const handingOverBySlug = new Set<string>();
+  const retriedFailedMailIds = new Set<string>();
   const log = deps.onLog ?? (() => {});
+  const warn = (message: string): void => {
+    log(message);
+    deps.logger?.warn?.(message);
+  };
   const resolveDaemon = (): SurfaceDaemonApi => (typeof deps.daemon === "function" ? deps.daemon() : deps.daemon);
   const mailboxPath = (slug: string): string => join(projectStateDir(deps.stateDir, slug), "mailbox.jsonl");
 
@@ -330,7 +352,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       return;
     }
     if (lead === undefined) return; // no live Lead — the next dispatch ensures one and pumps again
-    if (lead.status !== "idle" || lead.requiresAttention) return; // a running or asking Lead is never interrupted (§User Story 12)
+    if (lead.status !== "idle" || isBlockedByAttention(lead)) return; // a running or permission-waiting Lead is never interrupted (§User Story 12)
     await daemon.agents.ref(lead.id).send(renderMailPrompt(state.queued));
     appendMailDelivered(path, { mailIds: state.queued.map((item) => item.mailId), toAgentId: lead.id });
     log(`lead-mailbox: delivered ${state.queued.length} item(s) to the lead of ${slug} (${lead.id})`);
@@ -349,14 +371,6 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     const state = readLeadMailbox(path);
     if (state.supervisorInFlight !== null || state.supervisorQueued.length === 0) return;
     const daemon = resolveDaemon();
-    const registration = readProjectRegistration(deps.stateDir, slug);
-    if (deps.ensureSupervisor !== undefined && registration?.root !== undefined) {
-      const ensured = await deps.ensureSupervisor({ projectRoot: registration.root });
-      if (!ensured.ok) {
-        log(`lead-mailbox: cannot ensure supervisor for ${slug} (${ensured.code}: ${ensured.error}) — holding ${state.supervisorQueued.length} item(s)`);
-        return;
-      }
-    }
     let supervisor: SurfaceAgentSnapshot | undefined;
     try {
       supervisor = await liveSupervisorAgent(daemon, slug);
@@ -364,8 +378,24 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       log(`lead-mailbox: cannot read the daemon's supervisor for ${slug} — holding ${state.supervisorQueued.length} item(s) queued (${messageOf(err)})`);
       return;
     }
+    if (supervisor === undefined) {
+      const registration = readProjectRegistration(deps.stateDir, slug);
+      if (deps.ensureSupervisor !== undefined && registration?.root !== undefined) {
+        const ensured = await deps.ensureSupervisor({ projectRoot: registration.root });
+        if (!ensured.ok) {
+          log(`lead-mailbox: cannot ensure supervisor for ${slug} (${ensured.code}: ${ensured.error}) — holding ${state.supervisorQueued.length} item(s)`);
+          return;
+        }
+        try {
+          supervisor = await liveSupervisorAgent(daemon, slug);
+        } catch (err) {
+          log(`lead-mailbox: cannot read the daemon's supervisor for ${slug} — holding ${state.supervisorQueued.length} item(s) queued (${messageOf(err)})`);
+          return;
+        }
+      }
+    }
     if (supervisor === undefined) return;
-    if (supervisor.status !== "idle" || supervisor.requiresAttention) return;
+    if (supervisor.status !== "idle" || isBlockedByAttention(supervisor)) return;
     await daemon.agents.ref(supervisor.id).send(renderSupervisorMailBatch(state.supervisorQueued));
     appendMailDelivered(path, {
       to: "supervisor",
@@ -425,6 +455,28 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     });
   };
 
+  const clearRetriedFailedBatch = (slug: string, seat: MailRecipient, mailIds: readonly string[]): void => {
+    for (const id of mailIds) retriedFailedMailIds.delete(`${slug}:${seat}:${id}`);
+  };
+
+  const claimFailedBatchRetry = (
+    slug: string,
+    seat: MailRecipient,
+    mailIds: readonly string[],
+    outcomeKind: string,
+  ): boolean => {
+    log(`lead-mailbox: ${slug}'s ${seat} turn ${outcomeKind} — ${mailIds.length} item(s) requeued`);
+    const shouldRetry = mailIds.some((id) => !retriedFailedMailIds.has(`${slug}:${seat}:${id}`));
+    if (!shouldRetry) {
+      warn(
+        `lead-mailbox: ${slug}'s ${seat} turn ${outcomeKind} after retry — holding ${mailIds.length} item(s) queued without re-pumping`,
+      );
+      return false;
+    }
+    for (const id of mailIds) retriedFailedMailIds.add(`${slug}:${seat}:${id}`);
+    return true;
+  };
+
   /**
    * The turn-boundary state machine (ticket 07, ADR 0013 §5; v0.0.23, ADR 0015
    * §3) — serialized on the Project's lane like every other mailbox act.
@@ -439,6 +491,15 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     for (const registration of listProjectRegistrations(deps.stateDir)) {
       if (registration.lead === input.agentId) {
         ownedLead = { slug: registration.slug, root: registration.root };
+      } else {
+        try {
+          const state = readLeadMailbox(mailboxPath(registration.slug));
+          if (state.inFlight?.toAgentId === input.agentId) {
+            ownedLead = { slug: registration.slug, root: registration.root };
+          }
+        } catch {
+          // ignore unreadable mailbox during lookup
+        }
       }
       if (registration.supervisor === input.agentId) {
         ownedSupervisor = { slug: registration.slug, root: registration.root };
@@ -454,11 +515,12 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       }
     }
     if (ownedSupervisor !== undefined) {
-      const { slug } = ownedSupervisor;
+      const { slug, root } = ownedSupervisor;
       await projectLane(slug, async () => {
         try {
           const path = mailboxPath(slug);
           const state = readLeadMailbox(path);
+          let retryingFailedSupervisorBatch = false;
           if (state.supervisorInFlight !== null && state.supervisorInFlight.toAgentId === input.agentId) {
             const mailIds = state.supervisorInFlight.items.map((item) => item.mailId);
             if (input.outcome.kind === "completed") {
@@ -468,6 +530,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
                 mailIds,
                 byAgentId: input.agentId,
               });
+              clearRetriedFailedBatch(slug, "supervisor", mailIds);
             } else {
               appendMailRequeued(path, {
                 to: "supervisor",
@@ -475,8 +538,14 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
                 mailIds,
                 reason: input.outcome.kind,
               });
-              log(`lead-mailbox: ${slug}'s supervisor turn ${input.outcome.kind} — ${mailIds.length} item(s) requeued`);
+              if (!claimFailedBatchRetry(slug, "supervisor", mailIds, input.outcome.kind)) {
+                return;
+              }
+              retryingFailedSupervisorBatch = true;
             }
+          }
+          if (retryingFailedSupervisorBatch && root) {
+            await ensureSupervisorInLane(slug, root);
           }
           await drainSupervisorMailbox(slug);
         } catch (err) {
@@ -501,13 +570,18 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     // (1) Settle the in-flight batch first: `mail_acked` on completed,
     // `mail_requeued` (reason = the outcome kind) otherwise — zero mail lost.
     const state = readLeadMailbox(path);
+    let retryingFailedLeadBatch = false;
     if (state.inFlight !== null && state.inFlight.toAgentId === input.agentId) {
       const mailIds = state.inFlight.items.map((item) => item.mailId);
       if (input.outcome.kind === "completed") {
         appendMailAcked(path, { deliveryId: state.inFlight.deliveryId, mailIds, byAgentId: input.agentId });
+        clearRetriedFailedBatch(slug, "lead", mailIds);
       } else {
         appendMailRequeued(path, { deliveryId: state.inFlight.deliveryId, mailIds, reason: input.outcome.kind });
-        log(`lead-mailbox: ${slug}'s lead turn ${input.outcome.kind} — ${mailIds.length} item(s) requeued`);
+        if (!claimFailedBatchRetry(slug, "lead", mailIds, input.outcome.kind)) {
+          return;
+        }
+        retryingFailedLeadBatch = true;
       }
     }
     const rotation = readRotationState(slug);
@@ -530,12 +604,16 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       await beginHandoff(slug, root);
       return;
     }
-    // (4) Normal and under threshold: the ticket-06 drain.
+    // (4) Normal and under threshold: self-heal on 1-shot retry, then drain.
+    if (retryingFailedLeadBatch && root) {
+      await deps.ensureLead({ projectRoot: root });
+    }
     await drainLeadMailbox(slug);
   };
 
   /** Arm 3 — lock the mailbox (holding all mail), then steer the one bounded Handoff Extraction prompt. */
   const beginHandoff = async (slug: string, root: string): Promise<void> => {
+    handingOverBySlug.add(slug);
     writeRotationState(slug, root, { rotationState: "handing_over", handoffRequestedAt: new Date().toISOString() });
     const lead = await liveLeadAgent(resolveDaemon(), slug);
     if (lead === undefined) {
@@ -589,6 +667,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       log(`lead-mailbox: handoff of ${slug} could not spawn the successor (${ensured.code}: ${ensured.error}) — the mailbox stays locked, mail holds queued`);
       return;
     }
+    handingOverBySlug.delete(slug);
     writeRotationState(slug, root, { rotationState: "normal", handoffRequestedAt: null });
     log(`lead-mailbox: handoff of ${slug} complete — ${retired.agentId} archived, successor ${ensured.agentId} kicked off, rotation reset to normal`);
     // The successor just spawned; when it is not yet idle the drain holds one
@@ -737,6 +816,23 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       async (): Promise<{ ok: true; agentId: string; mailId: string } | { ok: false; code: string; error: string }> => {
         const ensured = await ensureSupervisorInLane(slug, root);
         if (!ensured.ok) return ensured;
+        const submitter = typeof request.submitter === "string" ? request.submitter.trim() : "";
+        if (
+          submitter !== "" &&
+          submitter !== "owner" &&
+          submitter !== "supervisor" &&
+          submitter !== "lead" &&
+          submitter !== "agent" &&
+          submitter !== "ui"
+        ) {
+          const reg = readProjectRegistration(deps.stateDir, slug);
+          if (submitter !== ensured.agentId && submitter !== reg?.supervisor && submitter !== reg?.lead) {
+            writeProjectRegistration(deps.stateDir, slug, {
+              root: reg?.root ?? root,
+              dispatchers: [submitter],
+            });
+          }
+        }
         const queued = appendMailQueued(mailboxPath(slug), {
           to: "supervisor",
           from: "owner",
@@ -868,6 +964,18 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     }
   };
 
+  const resetProjectMailbox = (slug: string): void => {
+    handingOverBySlug.delete(slug);
+    const prefix = `${slug}:`;
+    for (const key of [...retriedFailedMailIds]) {
+      if (key.startsWith(prefix)) retriedFailedMailIds.delete(key);
+    }
+    const reg = readProjectRegistration(deps.stateDir, slug);
+    if (reg !== undefined && (reg.rotationState !== undefined || reg.handoffRequestedAt !== undefined)) {
+      writeRotationState(slug, reg.root, { rotationState: null, handoffRequestedAt: null });
+    }
+  };
+
   return {
     dispatchLead,
     dispatchSupervisor,
@@ -879,6 +987,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     onLeadTurnEnded,
     startupRecovery,
     settleLeadRotation,
+    resetProjectMailbox,
   };
 }
 
@@ -975,6 +1084,10 @@ function renderLedgerDigest(events: readonly LedgerEvent[]): string {
 function agentOfTask(events: readonly LedgerEvent[]): Map<string, string> {
   const index = new Map<string, string>();
   for (const evt of events) {
+    if (evt.event === "contract_set") {
+      index.delete(evt.task);
+      continue;
+    }
     if (evt.event !== "claim_reported" && evt.event !== "meter_written" && evt.event !== "repoke_dispatched") continue;
     if (typeof evt.agent === "string" && evt.agent !== "") index.set(evt.task, evt.agent);
   }
@@ -1010,14 +1123,11 @@ function contractWorkspaceOf(events: readonly LedgerEvent[], task: string): stri
 function driverWaveInFlight(events: readonly LedgerEvent[]): boolean {
   const openRounds = new Map<string, number>();
   for (const evt of events) {
-    if (evt.event === "spawn_dispatched") openRounds.set(evt.task, evt.seq);
-  }
-  if (openRounds.size === 0) return false;
-  for (const evt of events) {
     if (!("task" in evt) || typeof evt.task !== "string") continue;
-    const spawnSeq = openRounds.get(evt.task);
-    if (spawnSeq === undefined || evt.seq <= spawnSeq) continue;
-    if (evt.event === "gate_finished" || evt.event === "needs_human") openRounds.delete(evt.task);
+    if (evt.event === "spawn_dispatched") openRounds.set(evt.task, evt.seq);
+    else if (evt.event === "contract_set" || evt.event === "gate_finished" || evt.event === "needs_human") {
+      openRounds.delete(evt.task);
+    }
   }
   return openRounds.size > 0;
 }

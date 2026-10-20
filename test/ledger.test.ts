@@ -195,3 +195,36 @@ test("spawn events need their shape at open — provider, arity, and the refusal
   );
   assert.equal(Ledger.open(ok).events.length, 2);
 });
+
+test("purgeWhere removes matching events in-memory, rewrites ledger.jsonl atomically, and updates nextSeq (v0.0.24)", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const path = join(dir, "ledger.jsonl");
+  const ledger = Ledger.open(path);
+
+  ledger.append({ ...contract, task: "T1", workspace: "/tmp/p1" });
+  ledger.append({ event: "claim_reported", task: "T1", attempt: 1, sha: "a1b2c3d" });
+  ledger.append({ ...contract, task: "T2", workspace: "/tmp/p2" });
+  ledger.append({ event: "claim_reported", task: "T2", attempt: 1, sha: "d4e5f6a" });
+
+  const purged = ledger.purgeWhere((e) => "task" in e && e.task === "T1");
+  assert.equal(purged, 2);
+  assert.deepEqual(ledger.events.map((e) => `${e.seq}:${"task" in e ? e.task : ""}`), ["3:T2", "4:T2"]);
+
+  // Re-opening from disk reads back the surviving events cleanly.
+  const reopened = Ledger.open(path);
+  assert.deepEqual(reopened.events.map((e) => `${e.seq}:${"task" in e ? e.task : ""}`), ["3:T2", "4:T2"]);
+
+  // Next append continues from (last remaining seq) + 1.
+  const next = ledger.append({ ...contract, task: "T3", workspace: "/tmp/p2" });
+  assert.equal(next.seq, 5);
+
+  // Purging everything leaves an empty file and resets nextSeq to 1.
+  const purgedAll = ledger.purgeWhere(() => true);
+  assert.equal(purgedAll, 3);
+  assert.deepEqual([...ledger.events], []);
+  assert.equal(readFileSync(path, "utf8"), "");
+  const fresh = ledger.append({ ...contract, task: "T1", workspace: "/tmp/p1" });
+  assert.equal(fresh.seq, 1);
+});
+

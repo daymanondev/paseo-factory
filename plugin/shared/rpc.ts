@@ -127,6 +127,30 @@ export const leadRotate = defineRpc({
   output: z.union([z.object({ ok: z.literal(true), agentId: z.string() }), Failure]),
 });
 
+export const projectReset = defineRpc({
+  name: "factory.project.reset",
+  input: z.object({
+    projectRoot: z.string().optional(),
+    project: z.string().optional(),
+    keepSeats: z.boolean().optional(),
+  }),
+  output: z.union([
+    z.object({
+      ok: z.literal(true),
+      project: z.string(),
+      projectRoot: z.string(),
+      purgedEvents: z.number().int(),
+      tasks: z.array(z.string()),
+      removedFiles: z.number().int(),
+      archivedSeats: z.array(z.string()),
+      archivedAgents: z.array(z.string()),
+      summary: z.string(),
+      view: FactoryViewSchema.optional(),
+    }),
+    Failure,
+  ]),
+});
+
 // The UI's quick dispatch (v0.0.20, ADR 0013 §4): the third internal caller
 // of the in-process `enqueueLeadMail()` pipeline — the same door the spool's
 // `lead_dispatch` rides (auto-ensure the Lead seat, queue the directive in

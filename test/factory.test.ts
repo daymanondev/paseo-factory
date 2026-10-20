@@ -111,13 +111,13 @@ test("a project-scoped factory keeps its ledger, reports, and gate logs under pr
   assert.ok(!existsSync(join(dir, "legacy", "projects")));
 });
 
-test("setContract records the workspace with the criteria and enforces one contract per task", (t) => {
+test("setContract records the workspace with the criteria, allows re-contracting an unaccepted task into a new epoch, and refuses once accepted or while an attempt is open", async (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);
-  const { workspace, sha } = makeWorkspace(dir);
+  const { workspace, artifact, sha } = makeWorkspace(dir);
   const factory = createFactory({ stateDir: join(dir, "factory") });
 
-  const evt = factory.setContract({ task: "T1", workspace, gate: "npm test", artifact: "src/format.ts" });
+  const evt = factory.setContract({ task: "T1", workspace, gate: "npm test", artifact });
 
   const { ts, ...rest } = evt;
   assert.match(ts, /^\d{4}-\d{2}-\d{2}T/);
@@ -127,12 +127,37 @@ test("setContract records the workspace with the criteria and enforces one contr
     task: "T1",
     workspace,
     gate: "npm test",
-    artifact: "src/format.ts",
+    artifact,
     base: sha, // recorded on every Contract since v0.0.2 (ticket 03 R2)
   });
+
+  // Re-contracting an unaccepted task with no open attempt starts a fresh Contract epoch.
+  const evt2 = factory.setContract({ task: "T1", workspace, gate: "true", artifact });
+  assert.equal(evt2.event, "contract_set");
+  assert.equal(evt2.seq, 2);
+  assert.equal(factory.contractFor("T1")?.gate, "true");
+
+  // While an attempt is open in the current epoch, setContract refuses with gate-running.
+  factory.ledger.append({ event: "claim_reported", task: "T1", attempt: 1, sha });
   assert.throws(
-    () => factory.setContract({ task: "T1", workspace, gate: "echo easier", artifact: "x.ts" }),
-    factoryErrorCode("contract-exists"),
+    () => factory.setContract({ task: "T1", workspace, gate: "true", artifact }),
+    factoryErrorCode("gate-running"),
+  );
+  factory.ledger.append({ event: "gate_finished", task: "T1", attempt: 1, exit: 1, verdict: "red", note: "failed" });
+  factory.ledger.append({ event: "report_written", task: "T1", attempt: 1, path: "report-T1-1.md" });
+
+  // Once the attempt closes, re-contracting T1 starts epoch 3, where the next claim is attempt 1.
+  const evt3 = factory.setContract({ task: "T1", workspace, gate: "true", artifact });
+  assert.equal(evt3.event, "contract_set");
+
+  // Once a task is accepted, setContract refuses with already-accepted.
+  const claimed = await factory.claim({ task: "T1", sha });
+  assert.equal(claimed.attempt, 1);
+  assert.equal(claimed.verdict, "green");
+  await factory.accept({ task: "T1", attempt: 1 });
+  assert.throws(
+    () => factory.setContract({ task: "T1", workspace, gate: "echo easier", artifact }),
+    factoryErrorCode("already-accepted"),
   );
 });
 
@@ -1525,3 +1550,131 @@ test("two same-Project Tasks run their claims concurrently in sibling worktrees 
   assert.ok(existsSync(join(workspace, "src", "one", "a.ts")), "PR1's verified work is in the root");
   assert.equal(gitFact(workspace, ["rev-parse", "--verify", "factory/PR2"]), shaB, "PR2's verified work waits on its branch");
 });
+
+test("re-contracting an unaccepted task after MAX_ATTEMPTS and needs_human opens a fresh Contract epoch, resetting attempts and needs_human while preserving prior ledger events (v0.0.24)", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact, sha } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+
+  // Epoch 1: contract T-01 with a failing gate, spawn, exhaust 3 attempts, and record needs_human.
+  const c1 = factory.setContract({ task: "T-01", workspace, gate: "false", artifact });
+  const sp1 = factory.requestSpawn({ task: "T-01", provider: "opencode/nemotron", arity: 1 });
+  assert.equal(sp1.outcome, "dispatched");
+  const a1 = await factory.claim({ task: "T-01", sha });
+  const a2 = await factory.claim({ task: "T-01", sha });
+  const a3 = await factory.claim({ task: "T-01", sha });
+  assert.equal(a1.attempt, 1);
+  assert.equal(a2.attempt, 2);
+  assert.equal(a3.attempt, 3);
+  assert.equal(a3.verdict, "red");
+  factory.needsHuman({ task: "T-01", reason: "attempt-ceiling", evidence: { attempt: 3, gate: a3.gate.seq } });
+
+  assert.equal(factory.attemptsOf("T-01").length, 3);
+  assert.equal(factory.isNeedsHuman("T-01"), true);
+  assert.equal(factory.activeSpawnOf("T-01")?.seq, sp1.event.seq);
+  assert.equal(factory.lastProgressSeq("T-01"), a3.gate.seq);
+
+  const epoch1EventCount = factory.ledger.eventsFor("T-01").length;
+  const epoch1Seqs = factory.ledger.eventsFor("T-01").map((e) => e.seq);
+
+  // Epoch 2: re-contract T-01 with a passing gate.
+  const c2 = factory.setContract({ task: "T-01", workspace, gate: "true", artifact, description: "Fresh wave" });
+  assert.ok(c2.seq > c1.seq);
+  assert.equal(factory.contractFor("T-01")?.seq, c2.seq);
+  assert.equal(factory.contractFor("T-01")?.gate, "true");
+  assert.deepEqual(factory.attemptsOf("T-01"), []);
+  assert.equal(factory.isNeedsHuman("T-01"), false);
+  assert.equal(factory.activeSpawnOf("T-01"), undefined);
+  assert.equal(factory.lastProgressSeq("T-01"), 0);
+
+  // Spawn and claim in the new epoch start fresh at attempt 1, and Lead can accept.
+  const sp2 = factory.requestSpawn({ task: "T-01", provider: "opencode/nemotron", arity: 1 });
+  assert.equal(sp2.outcome, "dispatched");
+  assert.equal(factory.activeSpawnOf("T-01")?.seq, sp2.event.seq);
+  assert.equal(factory.lastProgressSeq("T-01"), sp2.event.seq);
+
+  const epoch2Attempt1 = await factory.claim({ task: "T-01", sha });
+  assert.equal(epoch2Attempt1.attempt, 1);
+  assert.equal(epoch2Attempt1.verdict, "green");
+  assert.equal(factory.attemptsOf("T-01").length, 1);
+  assert.equal(factory.attemptsOf("T-01")[0]?.attempt, 1);
+  assert.equal(factory.attemptsOf("T-01")[0]?.verdict, "green");
+
+  const report = readFileSync(epoch2Attempt1.reportPath, "utf8");
+  assert.ok(report.includes("- Attempt: 1 of 1"), "report in epoch 2 counts only epoch 2's attempts");
+  assert.ok(report.includes("- Contract: `true` green"), "report in epoch 2 uses epoch 2's contract");
+
+  const accepted = await factory.accept({ task: "T-01", attempt: 1, accepted_by: "lead" });
+  assert.equal(accepted.event, "attempt_accepted");
+  assert.equal(accepted.attempt, 1);
+
+  // All historical events from epoch 1 remain untouched in the append-only ledger.
+  const allForTask = factory.ledger.eventsFor("T-01");
+  assert.deepEqual(allForTask.slice(0, epoch1EventCount).map((e) => e.seq), epoch1Seqs);
+});
+
+test("resetProject purges target project tasks, events, reports, and gate logs while preserving other projects (v0.0.24)", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace: wsA, artifact, sha: shaA } = makeWorkspace(dir);
+  const wsB = join(dir, "wsB");
+  mkdirSync(join(wsB, "src"), { recursive: true });
+  writeFileSync(join(wsB, artifact), "export function pad() { return 'b'; }\n");
+  const shaB = gitCommitAll(wsB);
+
+  const stateDir = join(dir, "state");
+  const slugA = "projA-111111";
+  const slugB = "projB-222222";
+  mkdirSync(join(stateDir, "projects", slugA), { recursive: true });
+  mkdirSync(join(stateDir, "projects", slugB), { recursive: true });
+
+  const factory = createFactory({ stateDir });
+  factory.setContract({ task: "A-1", workspace: wsA, gate: "echo gateA", artifact });
+  factory.setContract({ task: "B-1", workspace: wsB, gate: "echo gateB", artifact });
+
+  const claimA = await factory.claim({ task: "A-1", sha: shaA });
+  const claimB = await factory.claim({ task: "B-1", sha: shaB });
+  assert.equal(claimA.verdict, "green");
+  assert.equal(claimB.verdict, "green");
+  await factory.accept({ task: "A-1", attempt: 1 });
+
+  // Also record a git_blocked line inside wsA and a project-scoped report file under projects/<slugA>.
+  factory.ledger.append({
+    event: "git_blocked",
+    command: "git push",
+    rule: "git:push",
+    reason: "push is forbidden",
+    cwd: wsA,
+    blockId: "blk-1",
+  });
+
+  const scopedReportA = join(stateDir, "projects", slugA, "report-A-1-1.md");
+  writeFileSync(scopedReportA, "# Scoped report\n");
+
+  assert.equal(existsSync(claimA.reportPath), true);
+  assert.equal(existsSync(claimB.reportPath), true);
+  assert.equal(existsSync(scopedReportA), true);
+
+  const res = factory.resetProject(wsA, slugA);
+  assert.deepEqual(res.tasks, ["A-1"]);
+  assert.ok(res.purgedEvents >= 6, `expected at least 6 purged events, got ${res.purgedEvents}`);
+  assert.ok(res.removedFiles >= 2, `expected at least 2 removed files, got ${res.removedFiles}`);
+
+  // Project A's contract, events, and report/gate files are gone.
+  assert.equal(factory.contractFor("A-1"), undefined);
+  assert.equal(factory.liveContractFor(wsA), undefined);
+  assert.deepEqual(factory.ledger.eventsFor("A-1"), []);
+  assert.equal(existsSync(claimA.reportPath), false);
+  assert.equal(existsSync(scopedReportA), false);
+
+  // Project B's contract, events, and report/gate files remain intact.
+  assert.equal(factory.contractFor("B-1")?.workspace, wsB);
+  assert.equal(factory.ledger.eventsFor("B-1").length, 5);
+  assert.equal(existsSync(claimB.reportPath), true);
+
+  // Task A-1 can now be contracted fresh at Attempt 1 (not blocked by prior acceptance).
+  const recontracted = factory.setContract({ task: "A-1", workspace: wsA, gate: "true", artifact });
+  assert.equal(recontracted.task, "A-1");
+});
+

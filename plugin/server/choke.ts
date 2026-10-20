@@ -39,6 +39,7 @@ import {
 } from "./core/choke.ts";
 import type { ChokeDecision, MemoryFence } from "./core/choke.ts";
 import { listProjectRegistrations } from "./projects.ts";
+import { parseLane } from "./core/lanes.ts";
 import { SEAT_TITLES } from "./roles.ts";
 import type { SeatName } from "./roles.ts";
 import { parseTaskWorktreePath } from "../shared/worktree-shape.mjs";
@@ -107,7 +108,7 @@ export function isContractedAgentCwd(factory: Factory, cwd: string | undefined):
     return false;
   }
   for (const reg of listProjectRegistrations(factory.stateDir)) {
-    if ((reg.supervisor !== undefined || reg.lead !== undefined) && cwd === reg.root) {
+    if ((reg.supervisor !== undefined || reg.lead !== undefined || (reg.dispatchers?.length ?? 0) > 0) && cwd === reg.root) {
       return false;
     }
   }
@@ -115,6 +116,293 @@ export function isContractedAgentCwd(factory: Factory, cwd: string | undefined):
 }
 
 export const isContractedWorkerCwd = isContractedAgentCwd;
+
+const KNOWN_PROVIDER_IDS = new Set([
+  "claude",
+  "claude-code",
+  "codex",
+  "copilot",
+  "opencode",
+  "pi",
+  "omp",
+  "mock",
+  "mock-slow",
+  "gemini",
+  "cursor",
+  "acp",
+]);
+
+export interface ProviderCatalogModel {
+  id: string;
+  thinkingOptions?: readonly { id: string; label?: string | null }[] | null;
+}
+
+export interface ProviderCatalogEntry {
+  id?: string;
+  provider?: string;
+  models?: readonly ProviderCatalogModel[] | null;
+}
+
+export interface NormalizeCreateOptions {
+  stateDir?: string;
+  providers?: readonly ProviderCatalogEntry[];
+}
+
+function findCatalogModelMeta(
+  provider: string,
+  model: string,
+  providers?: readonly ProviderCatalogEntry[],
+): ProviderCatalogModel | undefined {
+  if (providers === undefined || providers.length === 0) return undefined;
+  const entry = providers.find((p) => (p.provider ?? p.id) === provider);
+  const models = entry?.models;
+  if (models === undefined || models === null) return undefined;
+  const strippedModel = model.replace(/^[^/]+\//, "");
+  return models.find(
+    (m) =>
+      m.id === model ||
+      `${provider}/${m.id}` === model ||
+      m.id === `${provider}/${model}` ||
+      m.id === strippedModel ||
+      m.id.replace(/^[^/]+\//, "") === strippedModel,
+  );
+}
+
+function inferReservedSeatFromTitle(title: string | null | undefined): SeatName | undefined {
+  if (typeof title !== "string") return undefined;
+  const trimmed = title.trim();
+  if (
+    trimmed === "Supervisor" ||
+    trimmed === SEAT_TITLES.supervisor ||
+    trimmed.startsWith("Supervisor — ") ||
+    trimmed.startsWith("Supervisor - ") ||
+    trimmed.startsWith("Supervisor (")
+  ) {
+    return "supervisor";
+  }
+  if (
+    trimmed === "Lead" ||
+    trimmed === SEAT_TITLES.lead ||
+    trimmed.startsWith("Lead — ") ||
+    trimmed.startsWith("Lead - ") ||
+    trimmed.startsWith("Lead (")
+  ) {
+    return "lead";
+  }
+  return undefined;
+}
+
+function normalizeBareProviderModel(rawProvider: string, providers?: readonly ProviderCatalogEntry[]): string {
+  const trimmed = rawProvider.trim();
+  if (trimmed === "" || trimmed.includes("/")) return rawProvider;
+  const colon = trimmed.lastIndexOf(":");
+  const baseModel = colon > 0 ? trimmed.slice(0, colon) : trimmed;
+  const suffix = colon > 0 ? trimmed.slice(colon) : "";
+  const lower = baseModel.toLowerCase();
+  if (KNOWN_PROVIDER_IDS.has(lower)) return rawProvider;
+
+  if (providers !== undefined && providers.length > 0) {
+    const matches: { providerId: string; modelId: string }[] = [];
+    for (const entry of providers) {
+      const providerId = entry.provider ?? entry.id ?? "";
+      if (providerId === "") continue;
+      for (const m of entry.models ?? []) {
+        if (m.id === baseModel || m.id.endsWith(`/${baseModel}`)) {
+          matches.push({ providerId, modelId: m.id });
+          break;
+        }
+      }
+    }
+    if (matches.length === 1) {
+      const { providerId, modelId } = matches[0]!;
+      if (providerId === "opencode" && !modelId.includes("/")) {
+        return `opencode/opencode/${modelId}${suffix}`;
+      }
+      return `${providerId}/${modelId}${suffix}`;
+    }
+    if (matches.length > 1) {
+      return rawProvider;
+    }
+  }
+
+  if (lower.startsWith("claude-") || lower === "sonnet" || lower === "opus" || lower === "haiku") {
+    return `claude-code/${baseModel}${suffix}`;
+  }
+  if (lower.startsWith("gpt-") || lower.startsWith("o1") || lower.startsWith("o3") || lower.startsWith("o4")) {
+    return `codex/${baseModel}${suffix}`;
+  }
+  if (
+    lower.startsWith("nemotron-") ||
+    lower.startsWith("qwen") ||
+    lower.startsWith("deepseek") ||
+    lower.startsWith("glm") ||
+    lower.startsWith("minimax") ||
+    lower.startsWith("kimi") ||
+    lower.startsWith("llama")
+  ) {
+    return `opencode/opencode/${baseModel}${suffix}`;
+  }
+  return rawProvider;
+}
+
+/**
+ * Normalizes `agent.create` requests before the daemon sees them (v0.0.24, ADR 0015 §4/§5):
+ * 1. If `config.provider` is a bare model ID with no `"/"` (e.g. `"nemotron-3.5-super-vl-free"`),
+ *    prefixes the canonical `<provider>/` so MCP `create_agent` calls do not crash.
+ * 2. Strips unsupported `:thinking` suffixes and `thinkingOptionId` when `providers`
+ *    advertises `thinkingOptions: []` or options excluding the requested variant.
+ * 3. If `labels.seat` is absent and `config.title` uses a reserved seat title
+ *    (`"Supervisor — ..."`, `"Lead — ..."`, `"Supervisor"`, `"Lead"`) at a registered
+ *    `<project-root>`, attaches `{ seat: "supervisor" | "lead", project: reg.slug }`.
+ */
+export function normalizeAgentCreateRequest<
+  T extends {
+    config: { provider?: string; thinkingOptionId?: string; cwd?: string; title?: string | null; labels?: Record<string, string> };
+    labels?: Record<string, string>;
+  },
+>(
+  request: T,
+  stateDirOrOptions?: string | NormalizeCreateOptions,
+  providers?: readonly ProviderCatalogEntry[],
+): T & { labels?: Record<string, string>; config: T["config"] & { labels?: Record<string, string> } };
+export function normalizeAgentCreateRequest<
+  T extends { provider?: string; thinkingOptionId?: string; cwd?: string; title?: string | null; labels?: Record<string, string> },
+>(
+  config: T,
+  stateDirOrOptions?: string | NormalizeCreateOptions,
+  providers?: readonly ProviderCatalogEntry[],
+): T & { labels?: Record<string, string> };
+export function normalizeAgentCreateRequest(
+  requestOrConfig: Record<string, unknown>,
+  stateDirOrOptions?: string | NormalizeCreateOptions,
+  providersArg?: readonly ProviderCatalogEntry[],
+): Record<string, unknown> {
+  const stateDir = typeof stateDirOrOptions === "string" ? stateDirOrOptions : stateDirOrOptions?.stateDir;
+  const providers =
+    providersArg ?? (typeof stateDirOrOptions === "object" && stateDirOrOptions !== null ? stateDirOrOptions.providers : undefined);
+
+  const hasNestedConfig =
+    "config" in requestOrConfig && typeof requestOrConfig.config === "object" && requestOrConfig.config !== null;
+  const config = (hasNestedConfig ? requestOrConfig.config : requestOrConfig) as {
+    provider?: string;
+    thinkingOptionId?: string;
+    cwd?: string;
+    title?: string | null;
+    labels?: Record<string, string>;
+  };
+  const topLabels = hasNestedConfig
+    ? (requestOrConfig.labels as Record<string, string> | undefined)
+    : undefined;
+
+  const rawProvider = typeof config.provider === "string" ? config.provider : "";
+  let normalizedProvider = normalizeBareProviderModel(rawProvider, providers);
+
+  let stripThinkingOptionId = false;
+  const parsedLane = parseLane(normalizedProvider);
+  if (parsedLane !== undefined) {
+    const meta = findCatalogModelMeta(parsedLane.provider, parsedLane.model, providers);
+    const thinkingOptions = meta?.thinkingOptions;
+    if (thinkingOptions !== undefined && thinkingOptions !== null) {
+      if (
+        parsedLane.thinking !== undefined &&
+        (thinkingOptions.length === 0 || !thinkingOptions.some((o) => o.id === parsedLane.thinking))
+      ) {
+        normalizedProvider = `${parsedLane.provider}/${parsedLane.model}`;
+      }
+      const rawThinkingOptionId =
+        typeof config.thinkingOptionId === "string" && config.thinkingOptionId !== "" ? config.thinkingOptionId : undefined;
+      if (
+        rawThinkingOptionId !== undefined &&
+        (thinkingOptions.length === 0 || !thinkingOptions.some((o) => o.id === rawThinkingOptionId))
+      ) {
+        stripThinkingOptionId = true;
+      }
+    }
+  }
+  const providerChanged = normalizedProvider !== rawProvider;
+
+  const existingSeat = config.labels?.seat ?? topLabels?.seat;
+  const inferredSeat = inferReservedSeatFromTitle(config.title);
+  let nextLabels: Record<string, string> | undefined;
+  if (
+    existingSeat === undefined &&
+    inferredSeat !== undefined &&
+    typeof config.cwd === "string" &&
+    config.cwd !== "" &&
+    typeof stateDir === "string" &&
+    stateDir !== ""
+  ) {
+    const matchedReg = listProjectRegistrations(stateDir).find((reg) => reg.root === config.cwd);
+    if (matchedReg !== undefined) {
+      nextLabels = {
+        ...(topLabels ?? {}),
+        ...(config.labels ?? {}),
+        seat: inferredSeat,
+        project: matchedReg.slug,
+      };
+    }
+  }
+
+  if (!providerChanged && !stripThinkingOptionId && nextLabels === undefined) {
+    return requestOrConfig;
+  }
+
+  const updatedConfig: Record<string, unknown> = {
+    ...config,
+    ...(providerChanged ? { provider: normalizedProvider } : {}),
+    ...(nextLabels !== undefined ? { labels: nextLabels } : {}),
+  };
+  if (stripThinkingOptionId) {
+    delete updatedConfig.thinkingOptionId;
+  }
+
+  if (!hasNestedConfig) {
+    return updatedConfig;
+  }
+
+  return {
+    ...requestOrConfig,
+    config: updatedConfig,
+    ...(nextLabels !== undefined ? { labels: nextLabels } : {}),
+  };
+}
+
+export const normalizeCreateAgentConfig = normalizeAgentCreateRequest;
+
+/**
+ * Resolves whether `agent` is a `Supervisor`, `Lead`, or normal-chat
+ * `/factory` dispatcher (`reg.dispatchers`) standing at `<project-root>` so
+ * `choke.onPermissionAsked` enforces the `Seat write fence` (`seat-write-fence`).
+ */
+export function resolveSeatAtProjectRoot(
+  stateDir: string,
+  agent: PermissionAskedEvent["agent"],
+): { seat: SeatName; projectRoot: string } | undefined {
+  const labelSeat = agent.labels?.seat;
+  if (labelSeat === "supervisor" || labelSeat === "lead") {
+    return { seat: labelSeat, projectRoot: agent.cwd };
+  }
+  const titleSeat = inferReservedSeatFromTitle(agent.title);
+  if (titleSeat !== undefined) {
+    return { seat: titleSeat, projectRoot: agent.cwd };
+  }
+  for (const reg of listProjectRegistrations(stateDir)) {
+    if (reg.supervisor === agent.id) {
+      return { seat: "supervisor", projectRoot: reg.root !== "" ? reg.root : agent.cwd };
+    }
+    if (reg.lead === agent.id) {
+      return { seat: "lead", projectRoot: reg.root !== "" ? reg.root : agent.cwd };
+    }
+    if (
+      Array.isArray(reg.dispatchers) &&
+      reg.dispatchers.includes(agent.id) &&
+      (reg.root === "" || agent.cwd === reg.root || agent.cwd.startsWith(`${reg.root}/`))
+    ) {
+      return { seat: "supervisor", projectRoot: reg.root !== "" ? reg.root : agent.cwd };
+    }
+  }
+  return undefined;
+}
 
 export interface ChokeOptions {
   factory: Factory;
@@ -184,27 +472,8 @@ export function createChoke(options: ChokeOptions): Choke {
     return { decision: { behavior: "allow" } };
   };
 
-  const resolveSeatAskContext = (agent: PermissionAskedEvent["agent"]): { seat: SeatName; projectRoot: string } | undefined => {
-    const labelSeat = agent.labels?.seat;
-    if (labelSeat === "supervisor" || labelSeat === "lead") {
-      return { seat: labelSeat, projectRoot: agent.cwd };
-    }
-    if (agent.title === SEAT_TITLES.supervisor) {
-      return { seat: "supervisor", projectRoot: agent.cwd };
-    }
-    if (agent.title === SEAT_TITLES.lead) {
-      return { seat: "lead", projectRoot: agent.cwd };
-    }
-    for (const reg of listProjectRegistrations(factory.stateDir)) {
-      if (reg.supervisor === agent.id) {
-        return { seat: "supervisor", projectRoot: reg.root !== "" ? reg.root : agent.cwd };
-      }
-      if (reg.lead === agent.id) {
-        return { seat: "lead", projectRoot: reg.root !== "" ? reg.root : agent.cwd };
-      }
-    }
-    return undefined;
-  };
+  const resolveSeatAskContext = (agent: PermissionAskedEvent["agent"]): { seat: SeatName; projectRoot: string } | undefined =>
+    resolveSeatAtProjectRoot(factory.stateDir, agent);
 
   const decideSeat = (request: AgentPermissionRequest, projectRoot: string): { decision: ChokeDecision; command?: string } => {
     const detail = request.detail;
@@ -340,9 +609,9 @@ export function createChoke(options: ChokeOptions): Choke {
 
     pinCreateMode(config, labels) {
       if (labels?.seat === "supervisor" || labels?.seat === "lead") return undefined;
-      if (config.title === SEAT_TITLES.supervisor || config.title === SEAT_TITLES.lead) return undefined;
+      if (inferReservedSeatFromTitle(config.title) !== undefined) return undefined;
       const providerId = config.provider.split("/")[0]?.trim().toLowerCase() ?? "";
-      if (providerId !== "claude") return undefined;
+      if (providerId !== "claude" && providerId !== "claude-code") return undefined;
       if (!isContractedAgentCwd(factory, config.cwd) || config.modeId === PINNED_MODE_ID) return undefined;
       return { ...config, modeId: PINNED_MODE_ID };
     },

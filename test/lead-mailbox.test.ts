@@ -10,7 +10,7 @@ import { ensureProjectRegistered, readProjectRegistration, writeProjectRegistrat
 import { createSurfaceHandlers } from "../plugin/server/surface-rpc.ts";
 import type { SurfaceDaemonApi } from "../plugin/server/surface-rpc.ts";
 import { handleSpoolRequest, parseSpoolRequest, spoolRootFor, startSpool } from "../plugin/server/spool.ts";
-import { createLeadMailRuntime } from "../plugin/server/lead-mailbox.ts";
+import { createLeadMailRuntime, isBlockedByAttention } from "../plugin/server/lead-mailbox.ts";
 import { disposeDir, gitCommitAll, makeTempDir } from "./helpers.ts";
 
 const POLL_MS = 20;
@@ -22,6 +22,7 @@ interface FakeAgent {
   provider?: string;
   labels?: Record<string, string>;
   requiresAttention?: boolean;
+  attentionReason?: string | null;
   cwd?: string;
 }
 
@@ -51,7 +52,7 @@ function fakeDaemon(agents: FakeAgent[]) {
               labels: agent.labels ?? {},
               archivedAt: null,
               requiresAttention: agent.requiresAttention ?? false,
-              attentionReason: null,
+              attentionReason: agent.attentionReason ?? null,
               updatedAt: "2026-10-20T00:00:00.000Z",
               cwd: agent.cwd ?? "/tmp",
             },
@@ -81,7 +82,7 @@ function fakeDaemon(agents: FakeAgent[]) {
       listModels: async () => ({ models: [] }),
     },
   };
-  return { daemon, created, sent };
+  return { daemon, created, sent, agents };
 }
 
 function makeSpooledRuntime(t: TestContext, agents: FakeAgent[] = []) {
@@ -100,6 +101,8 @@ function makeSpooledRuntime(t: TestContext, agents: FakeAgent[] = []) {
   const factory = createFactory({ stateDir });
   writeProjectRegistration(stateDir, slug, { root: projectRoot });
   const fake = fakeDaemon(agents);
+  const logs: string[] = [];
+  const warnings: string[] = [];
   const surface = createSurfaceHandlers({
     factory,
     stateDir,
@@ -116,6 +119,8 @@ function makeSpooledRuntime(t: TestContext, agents: FakeAgent[] = []) {
     ensureLead: (input) => surface.leadEnsure(input),
     ensureSupervisor: (input) => surface.supervisorEnsure(input),
     retireLead: (input) => surface.leadRotate(input),
+    onLog: (msg) => logs.push(msg),
+    logger: { warn: (msg) => warnings.push(msg) },
   });
   const spool = startSpool(stateDir, factory, {
     pollMs: POLL_MS,
@@ -125,7 +130,7 @@ function makeSpooledRuntime(t: TestContext, agents: FakeAgent[] = []) {
     peerMail: leadMail.notifyPeer,
   });
   t.after(() => spool.stop());
-  return { dir, home, stateDir, slug, projectRoot, factory, surface, leadMail, spool, fake };
+  return { dir, home, stateDir, slug, projectRoot, factory, surface, leadMail, spool, fake, logs, warnings };
 }
 
 function dropRequest(spoolRoot: string, body: Record<string, unknown> & { id: string }): void {
@@ -241,6 +246,56 @@ test("supervisor_dispatch from normal chat ensures Supervisor, delivers to=super
   assert.equal(fake.sent[0]?.agentId, "agent-created-1");
   assert.ok(fake.sent[0]?.text.includes("# Supervisor mailbox — 1 item"));
   assert.ok(fake.sent[0]?.text.includes("Design and build the 2D platformer"));
+});
+
+test("supervisor_dispatch from a normal chat agent records submitter in project.json dispatchers (deduplicated) and ignores reserved/seat submitters (v0.0.24, T-03)", async (t) => {
+  const { stateDir, slug, projectRoot } = makeSpooledRuntime(t);
+  const spoolRoot = spoolRootFor(stateDir);
+
+  // 1. Normal chat session agent dispatches -> recorded in reg.dispatchers
+  dropRequest(spoolRoot, {
+    id: "sup-disp-chat-1",
+    kind: "supervisor_dispatch",
+    workspace: projectRoot,
+    message: "Build the platformer",
+    submitter: "chat-session-7c5ac02",
+  });
+  await until(() => {
+    assert.equal(readReply(spoolRoot, "sup-disp-chat-1").ok, true);
+  });
+  let reg = readProjectRegistration(stateDir, slug);
+  assert.deepEqual(reg?.dispatchers, ["chat-session-7c5ac02"]);
+
+  // 2. Duplicate dispatch from the same chat session + dispatch from "owner" + dispatch from Supervisor agentId -> deduplicated, reserved ignored
+  dropRequest(spoolRoot, {
+    id: "sup-disp-chat-2",
+    kind: "supervisor_dispatch",
+    workspace: projectRoot,
+    message: "Add sound effects",
+    submitter: "chat-session-7c5ac02",
+  });
+  dropRequest(spoolRoot, {
+    id: "sup-disp-owner",
+    kind: "supervisor_dispatch",
+    workspace: projectRoot,
+    message: "Owner CLI dispatch",
+    submitter: "owner",
+  });
+  dropRequest(spoolRoot, {
+    id: "sup-disp-sup-id",
+    kind: "supervisor_dispatch",
+    workspace: projectRoot,
+    message: "Supervisor self-id",
+    submitter: reg?.supervisor ?? "agent-created-1",
+  });
+  await until(() => {
+    assert.equal(readReply(spoolRoot, "sup-disp-chat-2").ok, true);
+    assert.equal(readReply(spoolRoot, "sup-disp-owner").ok, true);
+    assert.equal(readReply(spoolRoot, "sup-disp-sup-id").ok, true);
+  });
+
+  reg = readProjectRegistration(stateDir, slug);
+  assert.deepEqual(reg?.dispatchers, ["chat-session-7c5ac02"], "dispatchers stays deduplicated and excludes owner and seat agentIds");
 });
 
 test("supervisor_dispatch from seat=supervisor transparently routes to Lead (to=lead, from=supervisor)", async (t) => {
@@ -430,4 +485,233 @@ test("needs_human before project.json exists registers project.json via ensurePr
   assert.equal(ensuredAgain.ok, true);
   assert.equal(readProjectRegistration(stateDir, slug)?.supervisor, reg?.supervisor, "ensureProjectRegistered preserves existing seat fields");
 });
+
+test("isBlockedByAttention and mailbox drains only block on attentionReason='permission', never on attentionReason='error' (v0.0.24, T-02)", async (t) => {
+  const baseAgent = {
+    id: "ag-1",
+    provider: "pi/zai/glm-5.3",
+    title: "Lead",
+    status: "idle",
+    model: null,
+    labels: {},
+    archivedAt: null,
+    updatedAt: "2026-10-20T00:00:00.000Z",
+    cwd: "/tmp",
+  };
+  assert.equal(isBlockedByAttention({ ...baseAgent, requiresAttention: false, attentionReason: null }), false);
+  assert.equal(isBlockedByAttention({ ...baseAgent, requiresAttention: true, attentionReason: "error" }), false);
+  assert.equal(isBlockedByAttention({ ...baseAgent, requiresAttention: true, attentionReason: null }), false);
+  assert.equal(isBlockedByAttention({ ...baseAgent, requiresAttention: false, attentionReason: "permission" }), false);
+  assert.equal(isBlockedByAttention({ ...baseAgent, requiresAttention: true, attentionReason: "permission" }), true);
+
+  const lead: FakeAgent = {
+    id: "agent-lead-attn",
+    title: "Lead (paseo-factory)",
+    status: "idle",
+    requiresAttention: true,
+    attentionReason: "permission",
+  };
+  const supervisor: FakeAgent = {
+    id: "agent-sup-attn",
+    title: "Supervisor (paseo-factory)",
+    status: "idle",
+    requiresAttention: true,
+    attentionReason: "permission",
+  };
+  const { stateDir, slug, leadMail, fake } = makeSpooledRuntime(t, [lead, supervisor]);
+  lead.labels = { seat: "lead", project: slug };
+  supervisor.labels = { seat: "supervisor", project: slug };
+  const mailboxPath = join(projectStateDir(stateDir, slug), "mailbox.jsonl");
+
+  await leadMail.enqueueLeadMail(slug, { to: "lead", from: "supervisor", kind: "directive", text: "Lead work" });
+  await leadMail.enqueueLeadMail(slug, { to: "supervisor", from: "owner", kind: "directive", text: "Supervisor work" });
+
+  // 1. Both have requiresAttention: true, attentionReason: "permission" -> held queued
+  await leadMail.pumpProjectLead(slug);
+  await leadMail.pumpProjectSupervisor(slug);
+  assert.equal(fake.sent.length, 0, "permission attention blocks delivery to both Lead and Supervisor");
+  let state = readLeadMailbox(mailboxPath);
+  assert.equal(state.queued.length, 1);
+  assert.equal(state.supervisorQueued.length, 1);
+
+  // 2. Both switch to requiresAttention: true, attentionReason: "error" -> delivered!
+  lead.attentionReason = "error";
+  supervisor.attentionReason = "error";
+  await leadMail.pumpProjectLead(slug);
+  await leadMail.pumpProjectSupervisor(slug);
+
+  assert.equal(fake.sent.length, 2, "error attention does NOT block mailbox delivery");
+  state = readLeadMailbox(mailboxPath);
+  assert.equal(state.queued.length, 0);
+  assert.equal(state.inFlight?.toAgentId, "agent-lead-attn");
+  assert.equal(state.supervisorQueued.length, 0);
+  assert.equal(state.supervisorInFlight?.toAgentId, "agent-sup-attn");
+});
+
+test("onLeadTurnEnded performs a bounded 1-shot self-healing retry per mailId for both Lead and Supervisor and stops on a second failure (v0.0.24, T-02)", async (t) => {
+  const { stateDir, slug, projectRoot, leadMail, fake, warnings } = makeSpooledRuntime(t);
+  const mailboxPath = join(projectStateDir(stateDir, slug), "mailbox.jsonl");
+
+  // --- Lead 1-shot self-healing retry ---
+  const leadDisp = await leadMail.dispatchLead({
+    id: "ld-retry-1",
+    kind: "lead_dispatch",
+    workspace: projectRoot,
+    message: "Execute Wave 1",
+  });
+  assert.equal(leadDisp.ok, true);
+  const leadId1 = leadDisp.ok ? leadDisp.leadAgentId ?? "" : "";
+  assert.equal(leadId1, "agent-created-1");
+  assert.equal(fake.sent.length, 1);
+
+  // First Lead turn fails and leaves the Lead seat in status="error"
+  const leadAgentObj = fake.agents.find((a) => a.id === leadId1);
+  assert.ok(leadAgentObj);
+  leadAgentObj.status = "error";
+  await leadMail.onLeadTurnEnded({
+    agentId: leadId1,
+    outcome: { kind: "failed", error: { message: "Variant unavailable" } },
+    timeline: [],
+  });
+
+  // First failure triggered 1-shot retry -> ensureLead self-healed the errored seat and re-delivered once
+  let state = readLeadMailbox(mailboxPath);
+  assert.equal(state.queued.length, 0);
+  assert.ok(state.inFlight !== null, "first failure retried and re-delivered the batch");
+  assert.equal(state.inFlight?.toAgentId, "agent-created-2", "ensureLead replaced the errored Lead seat on retry");
+  assert.equal(fake.sent.length, 2);
+
+  // Second failure on the SAME mailId -> requeued and held queued WITHOUT re-pumping
+  const leadIdAfterFirstRetry = state.inFlight!.toAgentId;
+  await leadMail.onLeadTurnEnded({
+    agentId: leadIdAfterFirstRetry,
+    outcome: { kind: "failed", error: { message: "Persistent crash" } },
+    timeline: [],
+  });
+
+  state = readLeadMailbox(mailboxPath);
+  assert.equal(state.inFlight, null, "second failure did NOT re-deliver");
+  assert.equal(state.queued.length, 1, "mail stays queued after exhausting 1-shot retry");
+  assert.equal(fake.sent.length, 2, "no third send occurred");
+  assert.equal(warnings.length, 1, "logged a warning when retry limit was reached");
+
+  // --- Supervisor 1-shot self-healing retry ---
+  const supDisp = await leadMail.dispatchSupervisor({
+    id: "sd-retry-1",
+    kind: "supervisor_dispatch",
+    workspace: projectRoot,
+    message: "Plan the architecture",
+  });
+  assert.equal(supDisp.ok, true);
+  const supId1 = supDisp.ok ? supDisp.supervisorAgentId ?? "" : "";
+  assert.equal(supId1, "agent-created-3");
+  assert.equal(fake.sent.length, 3);
+
+  // First Supervisor turn fails and leaves the Supervisor seat in status="error" -> ensureSupervisor self-heals before drainSupervisorMailbox
+  const supAgentObj = fake.agents.find((a) => a.id === supId1);
+  assert.ok(supAgentObj);
+  supAgentObj.status = "error";
+  await leadMail.onLeadTurnEnded({
+    agentId: supId1,
+    outcome: { kind: "failed", error: { message: "Supervisor crash 1" } },
+    timeline: [],
+  });
+  state = readLeadMailbox(mailboxPath);
+  assert.equal(state.supervisorQueued.length, 0);
+  assert.ok(state.supervisorInFlight !== null, "first Supervisor failure retried once");
+  assert.equal(state.supervisorInFlight?.toAgentId, "agent-created-4", "ensureSupervisor replaced the errored Supervisor seat on retry");
+  assert.equal(fake.sent.length, 4);
+
+  // Second Supervisor turn fails on the same mailId -> requeues and holds WITHOUT re-pumping
+  const supIdAfterFirstRetry = state.supervisorInFlight!.toAgentId;
+  await leadMail.onLeadTurnEnded({
+    agentId: supIdAfterFirstRetry,
+    outcome: { kind: "failed", error: { message: "Supervisor crash 2" } },
+    timeline: [],
+  });
+  state = readLeadMailbox(mailboxPath);
+  assert.equal(state.supervisorInFlight, null, "second Supervisor failure did NOT re-deliver");
+  assert.equal(state.supervisorQueued.length, 1, "Supervisor mail stays queued after exhausting 1-shot retry");
+  assert.equal(fake.sent.length, 4, "no fifth send occurred");
+  assert.equal(warnings.length, 2, "logged a warning when Supervisor retry limit was reached");
+
+  // Direct order check: on a failed Supervisor turn, ensureSupervisor is invoked BEFORE drainSupervisorMailbox lists/sends
+  const callOrder: string[] = [];
+  const orderRuntime = createLeadMailRuntime({
+    factory: createFactory({ stateDir: join(makeTempDir(), "order-state") }),
+    stateDir,
+    daemon: {
+      ...fake.daemon,
+      agents: {
+        ...fake.daemon.agents,
+        list: async (opts) => {
+          if (opts?.filter?.labels?.seat === "supervisor") callOrder.push("drainSupervisorMailbox:list");
+          return fake.daemon.agents.list(opts);
+        },
+      },
+    },
+    ensureLead: async () => ({ ok: true, agentId: "lead-x", created: false, projectRoot, slug }),
+    ensureSupervisor: async () => {
+      callOrder.push("ensureSupervisor");
+      return { ok: true, agentId: supIdAfterFirstRetry, created: false, projectRoot, slug };
+    },
+    retireLead: async () => ({ ok: true, agentId: "lead-x" }),
+  });
+  await orderRuntime.enqueueLeadMail(slug, { to: "supervisor", from: "owner", kind: "directive", text: "Order check directive" });
+  await orderRuntime.pumpProjectSupervisor(slug);
+  callOrder.length = 0;
+  await orderRuntime.onLeadTurnEnded({
+    agentId: supIdAfterFirstRetry,
+    outcome: { kind: "failed", error: { message: "Order check failure" } },
+    timeline: [],
+  });
+  assert.equal(callOrder[0], "ensureSupervisor", "onLeadTurnEnded invokes ensureSupervisor before drainSupervisorMailbox on 1-shot retry");
+  assert.ok(callOrder.includes("drainSupervisorMailbox:list"), "drainSupervisorMailbox ran after ensureSupervisor");
+});
+
+test("resetProjectMailbox clears in-memory retry and handoff state for the target project slug (v0.0.24, T-02)", async (t) => {
+  const { stateDir, slug, projectRoot, leadMail, fake } = makeSpooledRuntime(t);
+  const mailboxPath = join(projectStateDir(stateDir, slug), "mailbox.jsonl");
+
+  const leadDisp = await leadMail.dispatchLead({
+    id: "ld-reset-1",
+    kind: "lead_dispatch",
+    workspace: projectRoot,
+    message: "Initial directive",
+  });
+  assert.equal(leadDisp.ok, true);
+  const leadId = leadDisp.ok ? leadDisp.leadAgentId ?? "" : "";
+
+  // Exhaust 1-shot retry: fail twice so the mailId is recorded in retriedFailedMailIds and held queued
+  await leadMail.onLeadTurnEnded({ agentId: leadId, outcome: { kind: "failed" }, timeline: [] });
+  await leadMail.onLeadTurnEnded({ agentId: leadId, outcome: { kind: "failed" }, timeline: [] });
+  let state = readLeadMailbox(mailboxPath);
+  assert.equal(state.inFlight, null);
+  assert.equal(state.queued.length, 1);
+  assert.equal(fake.sent.length, 2);
+
+  // Also set handing_over on project.json
+  writeProjectRegistration(stateDir, slug, { root: projectRoot, rotationState: "handing_over", handoffRequestedAt: "2026-10-20T00:00:00.000Z" });
+
+  // Reset the project mailbox state
+  leadMail.resetProjectMailbox(slug);
+
+  assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, undefined, "resetProjectMailbox clears rotationState");
+  assert.equal(readProjectRegistration(stateDir, slug)?.handoffRequestedAt, undefined, "resetProjectMailbox clears handoffRequestedAt");
+
+  // Re-deliver the queued item and fail once: because resetProjectMailbox cleared retriedFailedMailIds for slug,
+  // onLeadTurnEnded grants a fresh 1-shot retry instead of holding immediately!
+  await leadMail.pumpProjectLead(slug);
+  state = readLeadMailbox(mailboxPath);
+  assert.equal(state.inFlight?.toAgentId, leadId);
+  assert.equal(fake.sent.length, 3);
+
+  await leadMail.onLeadTurnEnded({ agentId: leadId, outcome: { kind: "failed" }, timeline: [] });
+  state = readLeadMailbox(mailboxPath);
+  assert.equal(state.inFlight?.toAgentId, leadId, "fresh 1-shot retry was granted after resetProjectMailbox");
+  assert.equal(fake.sent.length, 4);
+});
+
+
+
 

@@ -18,12 +18,14 @@
  * daemon acts the in-process API lacks (a live agent's model sync,
  * cancelling a running agent) ride the CLI bridge in daemon-cli.ts.
  */
+import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { readdirSync, rmSync } from "node:fs";
 import { FactoryError } from "./core/errors.ts";
 import type { Factory } from "./core/factory.ts";
 import { readLeadMailbox } from "./core/mailbox.ts";
 import { loadLanes, parseLane, saveLanes } from "./core/lanes.ts";
-import { projectStateDir, readProjectRegistration, resolveProject } from "./core/project.ts";
+import { listProjectRegistrations, projectStateDir, readProjectRegistration, resolveProject } from "./core/project.ts";
 import type { ProjectResolution } from "./core/project.ts";
 import { hydrateVaultDirect, importVaultSecrets, loadVaultConfig, probeGhAuth, pullVault, pushVault, readVaultStatus, saveVaultConfig, syncVault } from "./core/vault.ts";
 import type { ImportVaultSecretsInput, SyncVaultOptions, VaultConfig, VaultRunner } from "./core/vault.ts";
@@ -49,6 +51,7 @@ import {
   leadRotate,
   pluginsInstall,
   pluginsManage,
+  projectReset,
   ratifyProposal,
   retro,
   snapshot,
@@ -74,6 +77,7 @@ export interface SurfaceAgentSnapshot {
   status: string;
   model: string | null;
   thinkingOptionId?: string | null;
+  lastError?: string | null;
   labels: Record<string, string>;
   archivedAt: string | null;
   requiresAttention: boolean;
@@ -90,6 +94,50 @@ export interface SurfaceAgentSnapshot {
    * `.jsonl` fallback's path across daemon restarts (v0.0.20, ADR 0013 §5).
    */
   persistence?: { nativeHandle?: string } | null;
+}
+
+/** One provider entry resolved from the daemon's provider & model catalog. */
+export interface ProviderEntry {
+  provider: string;
+  id?: string;
+  available: boolean;
+  models: {
+    id: string;
+    label: string | null;
+    thinkingOptions?: { id: string; label: string | null }[] | null;
+    defaultThinkingOptionId?: string | null;
+  }[] | null;
+}
+
+/**
+ * Strips any unsupported `:thinking` variant from a `<provider>/<model>[:<thinking>]`
+ * lane string when the provider catalog explicitly advertises `thinkingOptions: []`
+ * or does not include the requested thinking option (v0.0.24, ADR 0015 §1).
+ */
+export function sanitizeLaneWithProviders(laneValue: string, providers: readonly ProviderEntry[]): string {
+  const parsed = parseLane(laneValue);
+  if (parsed === undefined) return laneValue;
+  const { provider, model, thinking } = parsed;
+  const entry = providers.find((p) => (p.provider ?? p.id) === provider);
+  if (entry === undefined || !Array.isArray(entry.models)) return laneValue;
+  const strippedModel = model.replace(/^[^/]+\//, "");
+  const meta = entry.models.find(
+    (m) =>
+      m.id === model ||
+      `${provider}/${m.id}` === model ||
+      m.id === `${provider}/${model}` ||
+      m.id === strippedModel ||
+      m.id.replace(/^[^/]+\//, "") === strippedModel,
+  );
+  if (meta !== undefined && Array.isArray(meta.thinkingOptions)) {
+    if (
+      meta.thinkingOptions.length === 0 ||
+      (thinking !== undefined && !meta.thinkingOptions.some((o) => o.id === thinking))
+    ) {
+      return `${provider}/${model}`;
+    }
+  }
+  return laneValue;
 }
 
 /**
@@ -187,6 +235,8 @@ export interface SurfaceDeps {
    * remains the net).
    */
   onLeadRetired?: (input: { slug: string; agentId: string }) => void;
+  /** Reset in-memory mailbox state for a project on Owner-only Project reset (v0.0.24). */
+  resetProjectMailbox?: (slug: string) => void;
   /**
    * The UI's quick-dispatch door (v0.0.20, ADR 0013 §4): the `leadDispatch`
    * handler routes through the Lead-mailbox runtime's `dispatchLead` — the
@@ -435,20 +485,11 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     };
   };
 
-  type ProviderEntry = {
-    provider: string;
-    available: boolean;
-    models: {
-      id: string;
-      label: string | null;
-      thinkingOptions?: { id: string; label: string | null }[] | null;
-      defaultThinkingOptionId?: string | null;
-    }[] | null;
-  };
   const PROVIDERS_TTL_MS = 5 * 60_000;
   const PROVIDERS_WAIT_MS = 2_000;
-  let cachedProviders: ProviderEntry[] | null = null;
+  let cachedProviderList: ProviderEntry[] | null = null;
   let cachedProvidersAt = 0;
+  let cachedProvidersRefs: { listAvailable: unknown; listModels: unknown } | null = null;
   let inFlightProviders: Promise<ProviderEntry[]> | null = null;
 
   const refreshProviders = (daemon: SurfaceDaemonApi): Promise<ProviderEntry[]> => {
@@ -477,8 +518,9 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           }
         }),
       );
-      cachedProviders = entries;
+      cachedProviderList = entries;
       cachedProvidersAt = Date.now();
+      cachedProvidersRefs = { listAvailable: daemon.providers.listAvailable, listModels: daemon.providers.listModels };
       return entries;
     })().finally(() => {
       if (inFlightProviders === job) inFlightProviders = null;
@@ -488,14 +530,21 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   };
 
   const resolveProviders = async (daemon: SurfaceDaemonApi): Promise<ProviderEntry[]> => {
+    if (
+      cachedProvidersRefs !== null &&
+      (cachedProvidersRefs.listAvailable !== daemon.providers.listAvailable || cachedProvidersRefs.listModels !== daemon.providers.listModels)
+    ) {
+      cachedProviderList = null;
+      cachedProvidersAt = 0;
+    }
     const now = Date.now();
-    if (cachedProviders !== null && now - cachedProvidersAt < PROVIDERS_TTL_MS) {
-      return cachedProviders;
+    if (cachedProviderList !== null && now - cachedProvidersAt < PROVIDERS_TTL_MS) {
+      return cachedProviderList;
     }
     const job = refreshProviders(daemon);
-    if (cachedProviders !== null) {
+    if (cachedProviderList !== null) {
       job.catch(() => {});
-      return cachedProviders;
+      return cachedProviderList;
     }
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -505,10 +554,21 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           timer = setTimeout(() => resolve(null), PROVIDERS_WAIT_MS);
         }),
       ]);
-      return raced ?? cachedProviders ?? [];
+      return raced ?? cachedProviderList ?? [];
     } finally {
       if (timer !== undefined) clearTimeout(timer);
     }
+  };
+
+  const sanitizeLane = async (laneValue: string, context?: SurfaceCallContext): Promise<string> => {
+    const daemon = resolveDaemon(context);
+    let providers: ProviderEntry[] = [];
+    try {
+      providers = await resolveProviders(daemon);
+    } catch {
+      // best-effort provider catalog lookup
+    }
+    return sanitizeLaneWithProviders(laneValue, providers);
   };
 
   // ---- the seat bridges (v0.0.14, ADR 0010 §1–§2) ----------------------------------------
@@ -524,12 +584,47 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     const daemon = resolveDaemon(context);
     const lanes = loadLanes(deps.stateDir, project.slug);
     if (!lanes.ok) return failure("lanes-unreadable", lanes.reason);
-    const lane = lanes.lanes[seat];
+    let providers: ProviderEntry[] = [];
+    try {
+      providers = await resolveProviders(daemon);
+    } catch {
+      // best-effort provider catalog lookup
+    }
+    const lane = sanitizeLaneWithProviders(lanes.lanes[seat], providers);
+    const parsed = parseLane(lane);
     let agent: SurfaceAgentSnapshot | undefined;
     try {
       agent = await seatOf(daemon, seat, project.slug);
     } catch (err) {
       return failure("daemon-unavailable", `cannot read the daemon's agents: ${messageOf(err)}`);
+    }
+    if (agent !== undefined) {
+      const targetProvider = parsed !== undefined ? `${parsed.provider}/${parsed.model}` : lane;
+      const sameProviderFamily =
+        parsed === undefined ||
+        agent.provider === parsed.provider ||
+        agent.provider === targetProvider ||
+        agent.provider.startsWith(`${parsed.provider}/`);
+      if (agent.status === "error" || !sameProviderFamily) {
+        const retired = await retireSeat(seat, project.slug, project.root, context);
+        if (!retired.ok) {
+          log(`${seat}: retiring unhealthy seat ${agent.id} before recreate did not cleanly settle — ${retired.error}`);
+        }
+        agent = undefined;
+      } else if (parsed !== undefined) {
+        const sync = deps.setAgentModel ?? setAgentModelViaCli;
+        const syncThinking = deps.setAgentThinking ?? setAgentThinkingViaCli;
+        const currentModel =
+          agent.model ?? (agent.provider.startsWith(`${parsed.provider}/`) ? agent.provider.slice(parsed.provider.length + 1) : null);
+        if (currentModel !== null && currentModel !== parsed.model && currentModel !== `${parsed.provider}/${parsed.model}`) {
+          await sync(agent.id, parsed.model, deps.home);
+        }
+        const currentThinking = agent.thinkingOptionId ?? "";
+        const targetThinking = parsed.thinking ?? "";
+        if (currentThinking !== targetThinking) {
+          await syncThinking(agent.id, targetThinking, deps.home);
+        }
+      }
     }
     let workspaceId: string | undefined;
     let paseoProjectId: string | undefined;
@@ -550,7 +645,6 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       // under <project-root> is written (the <home>-supervisor folder and
       // its AGENTS.md overwrite are retired; roles.ts owns the injection).
       const title = SEAT_TITLES[seat];
-      const parsed = parseLane(lane);
       const config =
         parsed?.thinking !== undefined
           ? { provider: `${parsed.provider}/${parsed.model}`, thinkingOptionId: parsed.thinking }
@@ -680,6 +774,14 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   };
 
   return {
+    cachedProviders(): readonly ProviderEntry[] {
+      return cachedProviderList ?? [];
+    },
+
+    sanitizeLane(laneValue: string, context?: SurfaceCallContext): Promise<string> {
+      return sanitizeLane(laneValue, context);
+    },
+
     async snapshot(input: { projectRoot?: string }, context?: SurfaceCallContext) {
       // An unresolvable scope degrades to the global view — the panel must
       // render outside git repos; the seats-only acts refuse instead.
@@ -845,7 +947,15 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         if (!project.ok) return project;
         projectSlug = project.slug;
       }
-      const saved = saveLanes(deps.stateDir, { [input.lane]: input.value }, projectSlug);
+      const daemon = resolveDaemon(context);
+      let providers: ProviderEntry[] = [];
+      try {
+        providers = await resolveProviders(daemon);
+      } catch {
+        // best-effort provider catalog lookup
+      }
+      const sanitizedValue = sanitizeLaneWithProviders(input.value.trim(), providers);
+      const saved = saveLanes(deps.stateDir, { [input.lane]: sanitizedValue }, projectSlug);
       if (!saved.ok) return failure("invalid-lane", saved.reason);
       // The live seat sync (v0.0.14): a supervisor or lead save pushes the
       // model to that seat's live agent — project-scoped when the save was,
@@ -853,7 +963,6 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       let modelSync = "skipped — not a seat lane (applies to the next create)";
       if (input.lane === "supervisor" || input.lane === "lead") {
         const seat = input.lane;
-        const daemon = resolveDaemon(context);
         try {
           const agent = await seatOf(daemon, seat, projectSlug);
           if (agent !== undefined) {
@@ -864,8 +973,10 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
             const slash = laneValue.indexOf("/");
             const modelId = parsed?.model ?? (slash === -1 ? laneValue : laneValue.slice(slash + 1));
             const reply = await sync(agent.id, modelId, deps.home);
-            if (reply.ok && parsed?.thinking !== undefined) {
-              const thinkingReply = await syncThinking(agent.id, parsed.thinking, deps.home);
+            const hadThinkingInInput = parseLane(input.value.trim())?.thinking !== undefined;
+            const shouldClearThinking = parsed?.thinking === undefined && ((agent.thinkingOptionId ?? "") !== "" || hadThinkingInInput);
+            if (reply.ok && (parsed?.thinking !== undefined || shouldClearThinking)) {
+              const thinkingReply = await syncThinking(agent.id, parsed?.thinking ?? "", deps.home);
               modelSync = thinkingReply.ok
                 ? `applied — agent ${agent.id.slice(0, 8)} now runs ${laneValue}`
                 : `applied model (${modelId}); thinking sync failed — ${thinkingReply.reason}`;
@@ -925,6 +1036,242 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       const project = projectOrRefusal(input.projectRoot);
       if (!project.ok) return project;
       return retireSeat("lead", project.slug, project.root, context);
+    },
+
+    /**
+     * Owner-only Project reset (v0.0.24, ADR 0015 §5): stops and archives bound
+     * working Agents, archives temporary Paseo worktree workspaces, deletes
+     * task worktrees and `factory/<task>` branches, retires Supervisor/Lead
+     * seats (unless `keepSeats: true`), clears mailbox and handoff state while
+     * preserving `lanes.json`, and purges the Project's Ledger events, tasks,
+     * reports, and gate logs.
+     */
+    async projectReset(
+      input: { projectRoot?: string; project?: string; keepSeats?: boolean } = {},
+      context?: SurfaceCallContext,
+    ) {
+      let project: { slug: string; root: string } | undefined;
+      if (input.projectRoot !== undefined && input.projectRoot.trim() !== "") {
+        const rawRoot = input.projectRoot.trim();
+        const resolved = resolveProject(rawRoot);
+        if (resolved.ok) {
+          project = { slug: resolved.slug, root: resolved.root };
+        } else {
+          const byRoot = listProjectRegistrations(deps.stateDir).find((reg) => reg.root === rawRoot);
+          if (byRoot !== undefined) {
+            project = { slug: byRoot.slug, root: byRoot.root };
+          } else {
+            return failure("unknown-project", `project root ${rawRoot} does not resolve to a git repository — ${resolved.reason}`);
+          }
+        }
+      } else if (input.project !== undefined && input.project.trim() !== "") {
+        const slug = input.project.trim();
+        const reg = readProjectRegistration(deps.stateDir, slug);
+        if (reg !== undefined) {
+          project = { slug: reg.slug, root: reg.root };
+        } else {
+          return failure("unknown-project", `project "${slug}" is not registered — pass projectRoot or a known project slug`);
+        }
+      } else {
+        const registrations = listProjectRegistrations(deps.stateDir);
+        if (registrations.length === 1) {
+          project = { slug: registrations[0]!.slug, root: registrations[0]!.root };
+        } else if (registrations.length === 0) {
+          return failure("unknown-project", "no project specified and no project is registered");
+        } else {
+          return failure(
+            "ambiguous-project",
+            `more than one project is registered (${registrations.map((r) => r.slug).join(", ")}) — pass projectRoot or project to name the one to reset`,
+          );
+        }
+      }
+
+      const daemon = resolveDaemon(context);
+      const stop = deps.stopAgent ?? stopAgentViaCli;
+      const projectDir = projectStateDir(deps.stateDir, project.slug);
+      const worktreesDir = join(projectDir, "worktrees");
+      const reg = readProjectRegistration(deps.stateDir, project.slug);
+
+      // 1. Collect all tasks belonging to this Project (from ledger contracts/spawns, taskWorkspaces, and worktrees/*).
+      const projectTaskSet = new Set<string>();
+      for (const evt of deps.factory.ledger.events) {
+        if (evt.event === "contract_set" && (evt.workspace === project.root || evt.workspace.startsWith(`${project.root}/`))) {
+          projectTaskSet.add(evt.task);
+        } else if (
+          evt.event === "spawn_dispatched" &&
+          typeof evt.worktree === "string" &&
+          (evt.worktree === worktreesDir || evt.worktree.startsWith(`${worktreesDir}/`))
+        ) {
+          projectTaskSet.add(evt.task);
+        }
+      }
+      for (const task of Object.keys(reg?.taskWorkspaces ?? {})) {
+        if (task !== "") projectTaskSet.add(task);
+      }
+      try {
+        for (const entry of readdirSync(worktreesDir)) {
+          if (entry !== "") projectTaskSet.add(entry);
+        }
+      } catch {
+        // worktrees dir may not exist
+      }
+
+      // 2. Find and stop + archive all non-archived working Agents bound to this Project.
+      const archivedAgents: string[] = [];
+      const bound = agentTaskIndex();
+      let rawAgents: SurfaceAgentSnapshot[] = [];
+      try {
+        const page = await daemon.agents.list({ filter: { includeArchived: false } });
+        rawAgents = page.entries.map((entry) => entry.agent).filter((agent) => agent.archivedAt === null);
+      } catch {
+        // best-effort agent listing
+      }
+      for (const agent of rawAgents) {
+        const seat = agent.labels.seat;
+        if (seat === "supervisor" || seat === "lead") continue;
+        const boundTask = bound.get(agent.id) ?? agent.labels.task;
+        const inWorktree = agent.cwd === worktreesDir || agent.cwd.startsWith(`${worktreesDir}/`);
+        const matchesProject =
+          (seat === "agent" && agent.labels.project === project.slug) ||
+          (typeof boundTask === "string" && (projectTaskSet.has(boundTask) || taskInProject(boundTask, project.root))) ||
+          inWorktree;
+        if (!matchesProject) continue;
+        try {
+          await stop(agent.id, deps.home);
+        } catch {
+          // best-effort cancel
+        }
+        try {
+          await daemon.agents.ref(agent.id).archive();
+          archivedAgents.push(agent.id);
+        } catch {
+          // best-effort archive
+        }
+      }
+
+      // 3. Archive any temporary Paseo worktree workspaces recorded in reg.taskWorkspaces.
+      if (daemon.workspaces?.archive !== undefined && reg?.taskWorkspaces !== undefined) {
+        for (const wsId of Object.values(reg.taskWorkspaces)) {
+          if (typeof wsId !== "string" || wsId === "") continue;
+          try {
+            await daemon.workspaces.archive(wsId);
+          } catch {
+            // best-effort workspace archive
+          }
+        }
+      }
+
+      // 4. Remove all <projectStateDir>/worktrees/<task> directories and delete local factory/<task> git branches.
+      for (const task of projectTaskSet) {
+        const wtPath = join(worktreesDir, task);
+        try {
+          spawnSync("git", ["worktree", "remove", "--force", wtPath], {
+            cwd: project.root,
+            encoding: "utf8",
+            timeout: 10_000,
+          });
+        } catch {
+          // best-effort git worktree remove
+        }
+        try {
+          rmSync(wtPath, { recursive: true, force: true });
+        } catch {
+          // best-effort rm
+        }
+      }
+      try {
+        rmSync(worktreesDir, { recursive: true, force: true });
+      } catch {
+        // best-effort rm worktrees root
+      }
+      try {
+        spawnSync("git", ["worktree", "prune"], { cwd: project.root, encoding: "utf8", timeout: 10_000 });
+      } catch {
+        // best-effort prune
+      }
+      const branchesToDelete = new Set<string>([...projectTaskSet].map((task) => `factory/${task}`));
+      try {
+        const refs = spawnSync("git", ["for-each-ref", "--format=%(refname:short)", "refs/heads/factory/"], {
+          cwd: project.root,
+          encoding: "utf8",
+          timeout: 10_000,
+        });
+        if (refs.status === 0 && typeof refs.stdout === "string") {
+          for (const line of refs.stdout.split("\n")) {
+            const branch = line.trim();
+            if (branch.startsWith("factory/")) branchesToDelete.add(branch);
+          }
+        }
+      } catch {
+        // best-effort branch discovery
+      }
+      for (const branch of branchesToDelete) {
+        try {
+          spawnSync("git", ["branch", "-D", branch], { cwd: project.root, encoding: "utf8", timeout: 10_000 });
+        } catch {
+          // best-effort branch delete
+        }
+      }
+
+      // 5. Unless keepSeats === true, retire Supervisor and Lead seats for this Project.
+      const archivedSeats: string[] = [];
+      if (input.keepSeats !== true) {
+        for (const seat of ["supervisor", "lead"] as const) {
+          const retired = await retireSeat(seat, project.slug, project.root, context);
+          if (retired.ok) archivedSeats.push(retired.agentId);
+        }
+      }
+
+      // 6. Reset in-memory mailbox state and delete mailbox.jsonl, lead-handoff.md, and stale registration fields while preserving lanes.json.
+      try {
+        deps.resetProjectMailbox?.(project.slug);
+      } catch {
+        // best-effort mailbox reset
+      }
+      try {
+        rmSync(join(projectDir, "mailbox.jsonl"), { force: true });
+      } catch {
+        // best-effort
+      }
+      try {
+        rmSync(join(projectDir, "lead-handoff.md"), { force: true });
+      } catch {
+        // best-effort
+      }
+      writeProjectRegistration(deps.stateDir, project.slug, {
+        root: project.root,
+        ...(input.keepSeats === true ? {} : { supervisor: null, lead: null }),
+        rotationState: null,
+        handoffRequestedAt: null,
+        taskWorkspaces: null,
+        dispatchers: null,
+      });
+
+      // 7. Purge ledger events, contracts, reports, and gate logs in-memory and on disk.
+      const { purgedEvents, tasks: purgedTasks, removedFiles } = deps.factory.resetProject(project.root, project.slug);
+      const tasks = [...new Set([...purgedTasks, ...projectTaskSet])];
+      const snap = await this.snapshot({ projectRoot: project.root }, context);
+      if (input.keepSeats !== true) {
+        try {
+          rmSync(join(projectDir, "project.json"), { force: true });
+        } catch {
+          // best-effort
+        }
+      }
+      const summary = `Reset project ${project.slug}: purged ${purgedEvents} ledger event(s), ${tasks.length} task(s), archived ${archivedSeats.length} seat(s) & ${archivedAgents.length} agent(s).`;
+      log(`reset: ${summary}`);
+      return {
+        ok: true as const,
+        project: project.slug,
+        projectRoot: project.root,
+        purgedEvents,
+        tasks,
+        removedFiles,
+        archivedSeats,
+        archivedAgents,
+        summary,
+        ...(snap.ok ? { view: snap.view } : {}),
+      };
     },
 
     /**
@@ -1227,6 +1574,7 @@ export function registerSurfaceRpc(server: PluginServerContext, handlers: Surfac
   server.handle(supervisorRevoke, (input, context) => handlers.supervisorRevoke(input, { paseo: context.paseo }));
   server.handle(leadEnsure, (input, context) => handlers.leadEnsure(input, { paseo: context.paseo }));
   server.handle(leadRotate, (input, context) => handlers.leadRotate(input, { paseo: context.paseo }));
+  server.handle(projectReset, (input, context) => handlers.projectReset(input, { paseo: context.paseo }));
   server.handle(leadDispatch, (input, context) => handlers.leadDispatch(input, { paseo: context.paseo }));
   server.handle(ratifyProposal, (input, context) => handlers.ratifyProposal(input, { paseo: context.paseo }));
   server.handle(pluginsInstall, (input, context) => handlers.pluginsInstall(input, { paseo: context.paseo }));

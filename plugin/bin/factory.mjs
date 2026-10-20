@@ -160,6 +160,13 @@ commands:
                                            Supervisor mailbox (to="supervisor",
                                            from="lead", kind="report").
 
+  reset      Owner-only clean-slate Project reset (v0.0.24, ADR 0015 §6):
+             purges the Project's ledger events, task reports/worktrees, and
+             per-Project state directory (<stateDir>/projects/<slug>/), and
+             archives live worker/seat sessions unless --keep-seats is set.
+             reset [--workspace <dir>] [--project <slug>] [--keep-seats]
+
+
   retro      Run the Retro over the whole ledger, on demand (v0.0.7): the
              plugin builds the corpus digest, prompts the configured retro
              lane from <stateDir>/lanes.json (default pi/zai/glm-5.3),
@@ -636,6 +643,39 @@ if (command === "supervisor") {
   fail(`supervisor: unknown subcommand "${sub ?? "(none)"}" — use "supervisor dispatch --workspace <dir> --message \\"<text>\\"" or "supervisor report --workspace <dir> --message \\"<text>\\""`);
 }
 
+if (command === "reset") {
+  const parsed = parseCommandOptions({
+    workspace: { type: "string" },
+    project: { type: "string" },
+    "keep-seats": { type: "boolean", default: false },
+    "wait-secs": { type: "string" },
+  });
+  if (parsed.positionals.length > 0) {
+    fail(`reset: unexpected positional "${parsed.positionals[0]}"`);
+  }
+  if (stampedSeat === "supervisor" || stampedSeat === "lead" || stampedSeat === "agent") {
+    console.error(
+      `factory: seat-cannot-reset: Seat ${stampedSeat} cannot call factory reset; project reset is an Owner-only action.`,
+    );
+    process.exit(2);
+  }
+  const hasWorkspace = typeof parsed.values.workspace === "string" && parsed.values.workspace.trim() !== "";
+  const hasProject = typeof parsed.values.project === "string" && parsed.values.project.trim() !== "";
+  const reply = await roundTrip(
+    {
+      id: randomId(),
+      kind: "reset",
+      ...(hasWorkspace ? { workspace: resolvePath(parsed.values.workspace) } : {}),
+      ...(hasProject ? { project: parsed.values.project.trim() } : {}),
+      ...(parsed.values["keep-seats"] === true ? { keepSeats: true } : {}),
+    },
+    waitSeconds(parsed),
+  );
+  console.log(`factory: ${reply.summary}`);
+  process.exit(0);
+}
+
+
 if (command === "run") {
   const parsed = parseCommandOptions({
     provider: { type: "string" },
@@ -941,7 +981,19 @@ function statusLines(events) {
       byTask.set(evt.task, state);
       order.push(evt.task);
     }
-    if (evt.event === "contract_set") continue; // the Contract registers its Task's line, but never counts as an Attempt
+    if (evt.event === "contract_set") {
+      if (!state.accepted) {
+        state.attempts = 0;
+        state.verdict = undefined;
+        state.sha = undefined;
+        state.eye = undefined;
+        state.needsHuman = undefined;
+        state.allowed = 0;
+        state.denied = 0;
+        state.blocked = 0;
+      }
+      continue;
+    }
     if (evt.attempt > state.attempts) state.attempts = evt.attempt;
     if (evt.event === "gate_finished") {
       state.verdict = evt.verdict; // the last verdict on record, even while a newer attempt runs

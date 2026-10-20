@@ -51,12 +51,38 @@ test("the /factory skill reconciles at boot with both arms, the exact CLI door, 
     "the skill explains the deterministic seat-aware routing for both normal chat and Supervisor",
   );
 
-  // Mandatory immediate turn-end rule.
+  // Mutually exclusive Mode A / Mode B structure (v0.0.24, T-03): never sequential Step 1 / Step 2 / Step 3.
+  assert.ok(
+    written.includes("## Mode A — When invoked with a directive: /factory <directive>"),
+    "the skill defines Mode A for /factory <directive>",
+  );
+  assert.ok(
+    written.includes("## Mode B — When invoked with NO arguments: bare /factory"),
+    "the skill defines Mode B for bare /factory",
+  );
+  assert.ok(
+    !written.includes("## Step 1") && !written.includes("## Step 2") && !written.includes("## Step 3"),
+    "the skill removes sequential Step 1 / Step 2 / Step 3 numbering",
+  );
+
+  // Mandatory immediate turn-end rule and explicit prohibition of factory status, Paseo MCP agent tools, and file operations in Mode A.
+  assert.ok(
+    written.includes("**STOP IMMEDIATELY:**"),
+    "Mode A carries the STOP IMMEDIATELY directive",
+  );
   assert.ok(
     written.includes(
       `Immediately after running \`${FACTORY_CMD} supervisor dispatch\`, end your turn and relay the command's output to the Owner. Never install packages, create files, edit code, or decompose tasks in this turn.`,
     ),
     "the skill states the mandatory immediate turn-end stop rule",
+  );
+  for (const forbiddenTool of ["create_agent", "kill_agent", "update_agent", "get_agent_status", "send_message"]) {
+    assert.ok(written.includes(forbiddenTool), `Mode A explicitly forbids Paseo MCP tool ${forbiddenTool}`);
+  }
+  assert.ok(
+    written.includes("Do **not** run `factory status`") &&
+      written.includes("do **not** read, create, edit, or delete any files in the repository"),
+    "Mode A explicitly forbids running factory status or touching repository files after supervisor dispatch",
   );
 
   // The bootstrap arm: when invoked with no <directive>, run status and point

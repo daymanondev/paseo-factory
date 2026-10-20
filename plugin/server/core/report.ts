@@ -25,7 +25,10 @@ import type {
  */
 export function renderReport(task: string, attempt: number, events: readonly LedgerEvent[]): string {
   // `retro_written` carries no task — the guard keeps the union honest.
-  const mine = events.filter((e): boolean => "task" in e && e.task === task && (e.event === "contract_set" || ("attempt" in e && e.attempt === attempt)));
+  const taskEvents = events.filter((e): boolean => "task" in e && e.task === task);
+  const latestContract = taskEvents.findLast((e): e is ContractSet => e.event === "contract_set");
+  const epochEvents = latestContract === undefined ? taskEvents : taskEvents.filter((e) => e.seq >= latestContract.seq);
+  const mine = epochEvents.filter((e): boolean => e.event === "contract_set" || ("attempt" in e && e.attempt === attempt));
   const contract = mine.findLast((e): e is ContractSet => e.event === "contract_set");
   const claim = mine.findLast((e): e is ClaimReported => e.event === "claim_reported");
   const gate = mine.findLast((e): e is GateFinished => e.event === "gate_finished");
@@ -44,8 +47,8 @@ export function renderReport(task: string, attempt: number, events: readonly Led
   }
 
   const totalAttempts = new Set(
-    events
-      .filter((e): e is LedgerEvent & { task: string; attempt: number } => "task" in e && e.task === task && "attempt" in e)
+    epochEvents
+      .filter((e): e is LedgerEvent & { task: string; attempt: number } => "attempt" in e)
       .map((e) => e.attempt),
   ).size;
 
@@ -56,7 +59,7 @@ export function renderReport(task: string, attempt: number, events: readonly Led
       contract.scope === undefined ? "" : ` · scope: ${contract.scope.map((s) => `\`${s}\``).join(", ")}`
     }`,
     `- Workspace: ${contract.workspace}`,
-    ...(chokeLines(events.filter(isChokeEventFor(task)))),
+    ...(chokeLines(epochEvents.filter(isChokeEventFor(task)))),
     `- Claimed @ ${formatTimestamp(claim.ts)}: ${claim.sha}`,
     ...(claim.agent === undefined ? [] : [`- Claimed by agent \`${claim.agent}\``]),
     ...(gate.sha === undefined ? [] : [`- Attested commit: \`${gate.sha}\``]),

@@ -868,3 +868,61 @@ test("factory supervisor dispatch and factory supervisor report: usage refusals,
   assert.match(agSupReport.stderr, /agent-cannot-orchestrate/);
 });
 
+test("factory reset CLI: refuses supervisor/lead/agent with seat-cannot-reset and executes owner reset via spool (v0.0.24, ADR 0015 §6)", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const workspace = join(dir, "repo");
+  mkdirSync(workspace, { recursive: true });
+  writeFileSync(join(workspace, "README.md"), "x\n");
+  gitCommitAll(workspace);
+  const home = join(dir, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const factory = createFactory({ stateDir });
+
+  const resets: Record<string, unknown>[] = [];
+  const spool = startSpool(stateDir, factory, {
+    pollMs: 20,
+    projectReset: async (request) => {
+      resets.push({ ...request });
+      return {
+        id: request.id,
+        ok: true,
+        summary: `project repo reset (2 events across 1 task purged, 2 files removed, 1 seat archived)`,
+        project: "repo",
+        purgedEvents: 2,
+        tasks: ["T1"],
+        removedFiles: 2,
+        archivedSeats: ["lead:lead-1"],
+        archivedAgents: [],
+      };
+
+    },
+  });
+  t.after(() => spool.stop());
+
+  for (const seat of ["supervisor", "lead", "agent"] as const) {
+    const refused = await run(
+      ownerCli,
+      ["--home", home, "reset", "--workspace", workspace, "--wait-secs", "5"],
+      { PASEO_FACTORY_SEAT: seat, PASEO_AGENT_ID: `agent-${seat}-1` },
+    );
+    assert.equal(refused.status, 2, `expected ${seat} to exit 2`);
+    assert.match(refused.stderr, /seat-cannot-reset/);
+  }
+  assert.equal(resets.length, 0);
+
+  const ownerReset = await run(
+    ownerCli,
+    ["--home", home, "reset", "--workspace", workspace, "--keep-seats", "--wait-secs", "10"],
+    {},
+  );
+  assert.equal(ownerReset.status, 0, ownerReset.stderr);
+  assert.match(ownerReset.stdout, /project repo reset/);
+  assert.equal(resets.length, 1);
+  assert.equal(resets[0]?.kind, "reset");
+  assert.equal(resets[0]?.workspace, workspace);
+  assert.equal(resets[0]?.keepSeats, true);
+  assert.equal(resets[0]?.submitter, "owner");
+});
+
+

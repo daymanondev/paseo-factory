@@ -11,8 +11,8 @@ import { sealVaultBuffer } from "../src/index.ts";
 import type { VaultRunner, VaultRunnerCall } from "../src/index.ts";
 import { createFactory } from "../plugin/server/core/factory.ts";
 import { resolveProject } from "../plugin/server/core/project.ts";
-import { createSurfaceHandlers } from "../plugin/server/surface-rpc.ts";
-import type { SurfaceDaemonApi, SurfaceDeps } from "../plugin/server/surface-rpc.ts";
+import { createSurfaceHandlers, sanitizeLaneWithProviders } from "../plugin/server/surface-rpc.ts";
+import type { ProviderEntry, SurfaceDaemonApi, SurfaceDeps } from "../plugin/server/surface-rpc.ts";
 import { handleSpoolRequest } from "../plugin/server/spool.ts";
 import {
   BRIDGE_TIMEOUT_MS,
@@ -24,7 +24,7 @@ import {
   PLUGIN_LIST_TTL_MS,
 } from "../plugin/server/daemon-cli.ts";
 import type { DaemonPluginItem } from "../plugin/server/daemon-cli.ts";
-import { foldCompanions } from "../plugin/server/view.ts";
+import { foldCompanions, foldTasks } from "../plugin/server/view.ts";
 import { factoryEnvFor, injectRoleOnCreate, injectSessionEnv, renderAgentContract, renderSeatBootstrap, renderSeatContract } from "../plugin/server/roles.ts";
 import type { AgentCreateRequest } from "../plugin/server/roles.ts";
 import { discoverProjects, readProjectRegistration, writeProjectRegistration } from "../plugin/server/projects.ts";
@@ -50,6 +50,8 @@ interface FakeAgent {
   status?: string;
   provider?: string;
   model?: string | null;
+  thinkingOptionId?: string | null;
+  lastError?: string | null;
   labels?: Record<string, string>;
   requiresAttention?: boolean;
   seqEnd?: number;
@@ -59,7 +61,7 @@ interface FakeAgent {
 }
 
 function fakeDaemon(agents: FakeAgent[]) {
-  const created: { config: { provider: string }; cwd: string; title: string; labels: Record<string, string>; prompt?: string }[] = [];
+  const created: { config: { provider: string; thinkingOptionId?: string }; cwd: string; title: string; labels: Record<string, string>; prompt?: string }[] = [];
   const sent: { agentId: string; text: string }[] = [];
   const archived: string[] = [];
   const timelineReads: string[] = [];
@@ -83,6 +85,8 @@ function fakeDaemon(agents: FakeAgent[]) {
               title: agent.title ?? null,
               status: agent.status ?? "idle",
               model: agent.model ?? null,
+              ...(agent.thinkingOptionId === undefined ? {} : { thinkingOptionId: agent.thinkingOptionId }),
+              ...(agent.lastError === undefined ? {} : { lastError: agent.lastError }),
               labels: agent.labels ?? {},
               archivedAt: null,
               requiresAttention: agent.requiresAttention ?? false,
@@ -98,7 +102,13 @@ function fakeDaemon(agents: FakeAgent[]) {
       create: async (options) => {
         created.push({ config: options.config, cwd: options.cwd, title: options.title ?? "", labels: options.labels ?? {}, prompt: options.prompt });
         const id = `agent-created-${created.length}`;
-        agents.push({ id, title: options.title ?? undefined, provider: options.config.provider, labels: options.labels });
+        agents.push({
+          id,
+          title: options.title ?? undefined,
+          provider: options.config.provider,
+          ...(options.config.thinkingOptionId === undefined ? {} : { thinkingOptionId: options.config.thinkingOptionId }),
+          labels: options.labels,
+        });
         return { id };
       },
       ref: (id: string) => ({
@@ -2758,5 +2768,437 @@ test("v0.0.23 (ADR 0015 §6): spool spawn/respawn registers Task worktree worksp
     "accept removed taskWorkspaces[T-WS-1] from project.json",
   );
 });
+
+test("foldTasks scopes attempts, status, needsHumanReason, lane, cost, and choke to the task's current Contract epoch (v0.0.24)", (t) => {
+  const { factory } = makeSurface(t);
+  // Epoch 1: contract T-01, 3 red attempts, choke events, meter, and needs_human.
+  factory.ledger.append({
+    event: "contract_set",
+    task: "T-01",
+    workspace: "/tmp/ws-old",
+    gate: "false",
+    artifact: "src/old.ts",
+    description: "Old epoch",
+  });
+  factory.ledger.append({ event: "spawn_dispatched", task: "T-01", provider: "opencode/old-model", arity: 1 });
+  for (const attempt of [1, 2, 3]) {
+    factory.ledger.append({ event: "claim_reported", task: "T-01", attempt, sha: "deadbeef" });
+    factory.ledger.append({ event: "gate_started", task: "T-01", attempt, cmd: "false" });
+    factory.ledger.append({ event: "gate_finished", task: "T-01", attempt, exit: 1, verdict: "red", note: "failed" });
+    factory.ledger.append({ event: "report_written", task: "T-01", attempt, path: `report-T-01-${attempt}.md` });
+  }
+  const lastGate = factory.ledger.eventsFor("T-01").findLast((e) => e.event === "gate_finished")!;
+  factory.ledger.append({ event: "permit_denied", task: "T-01", agent: "ag-1", name: "Write", kind: "tool", rule: "scope:outside", reason: "outside" });
+  factory.ledger.append({ event: "meter_written", task: "T-01", provider: "opencode/old-model", usage: { totalCostUsd: 0.42 } });
+  factory.ledger.append({ event: "needs_human", task: "T-01", reason: "attempt-ceiling", evidence: { attempt: 3, gate: lastGate.seq } });
+
+  const beforeRecontract = foldTasks(factory.ledger.events);
+  assert.equal(beforeRecontract.length, 1);
+  assert.equal(beforeRecontract[0]?.status, "needs-human");
+  assert.equal(beforeRecontract[0]?.attempts.length, 3);
+  assert.equal(beforeRecontract[0]?.needsHumanReason, "attempt-ceiling");
+
+  // Epoch 2: re-contract T-01 with updated contract metadata.
+  const c2 = factory.ledger.append({
+    event: "contract_set",
+    task: "T-01",
+    workspace: "/tmp/ws-new",
+    gate: "npm test",
+    artifact: "src/new.ts",
+    description: "New epoch",
+  });
+
+  const afterRecontract = foldTasks(factory.ledger.events);
+  assert.equal(afterRecontract.length, 1);
+  assert.equal(afterRecontract[0]?.task, "T-01");
+  assert.equal(afterRecontract[0]?.status, "waiting");
+  assert.deepEqual(afterRecontract[0]?.attempts, []);
+  assert.equal(afterRecontract[0]?.needsHumanReason, null);
+  assert.equal(afterRecontract[0]?.description, "New epoch");
+  assert.equal(afterRecontract[0]?.workspace, "/tmp/ws-new");
+  assert.equal(afterRecontract[0]?.lane, null);
+  assert.equal(afterRecontract[0]?.costState, "none");
+  assert.equal(afterRecontract[0]?.costUsd, null);
+  assert.deepEqual(afterRecontract[0]?.choke, { allowed: 0, denied: 0, blocked: 0 });
+  assert.equal(afterRecontract[0]?.lastSeq, c2.seq);
+
+  // Subsequent attempt in epoch 2 folds as attempt #1 and ready-to-accept.
+  factory.ledger.append({ event: "spawn_dispatched", task: "T-01", provider: "opencode/new-model", arity: 1 });
+  factory.ledger.append({ event: "claim_reported", task: "T-01", attempt: 1, sha: "cafebabe" });
+  factory.ledger.append({ event: "gate_started", task: "T-01", attempt: 1, cmd: "npm test" });
+  factory.ledger.append({ event: "gate_finished", task: "T-01", attempt: 1, exit: 0, verdict: "green", note: "ok", sha: "cafebabe" });
+  const r2 = factory.ledger.append({ event: "report_written", task: "T-01", attempt: 1, path: "report-T-01-1.md" });
+
+  const afterEpoch2Attempt = foldTasks(factory.ledger.events);
+  assert.equal(afterEpoch2Attempt[0]?.status, "ready-to-accept");
+  assert.equal(afterEpoch2Attempt[0]?.attempts.length, 1);
+  assert.equal(afterEpoch2Attempt[0]?.attempts[0]?.n, 1);
+  assert.equal(afterEpoch2Attempt[0]?.attempts[0]?.verdict, "green");
+  assert.equal(afterEpoch2Attempt[0]?.needsHumanReason, null);
+  assert.equal(afterEpoch2Attempt[0]?.lane, "opencode/new-model");
+  assert.equal(afterEpoch2Attempt[0]?.lastSeq, r2.seq);
+});
+
+// ---- v0.0.24 (ADR 0015): Thinking Variant Sanitization & Seat Self-Healing -------------------
+
+test("v0.0.24 (ADR 0015 §1): sanitizeLaneWithProviders strips unsupported :thinking variants when model advertises thinkingOptions: [] or omits the requested variant", () => {
+  const providers: ProviderEntry[] = [
+    {
+      provider: "opencode",
+      available: true,
+      models: [
+        { id: "opencode/nemotron-3-ultra-free", label: "Nemotron 3 Ultra Free", thinkingOptions: [] },
+        {
+          id: "opencode/nemotron-3.5-super-vl-free",
+          label: "Nemotron 3.5 Super VL Free",
+          thinkingOptions: [
+            { id: "low", label: "Low" },
+            { id: "high", label: "High" },
+          ],
+        },
+        { id: "opencode/glm-5.1", label: "GLM 5.1", thinkingOptions: null },
+      ],
+    },
+  ];
+
+  // 1. Model with thinkingOptions: [] strips :max (whether model has inner opencode/ prefix or not)
+  assert.equal(
+    sanitizeLaneWithProviders("opencode/opencode/nemotron-3-ultra-free:max", providers),
+    "opencode/opencode/nemotron-3-ultra-free",
+  );
+  assert.equal(
+    sanitizeLaneWithProviders("opencode/nemotron-3-ultra-free:max", providers),
+    "opencode/nemotron-3-ultra-free",
+  );
+  assert.equal(
+    sanitizeLaneWithProviders("opencode/opencode/nemotron-3-ultra-free", providers),
+    "opencode/opencode/nemotron-3-ultra-free",
+  );
+
+  // 2. Model with non-empty thinkingOptions strips unsupported :max, keeps supported :high
+  assert.equal(
+    sanitizeLaneWithProviders("opencode/opencode/nemotron-3.5-super-vl-free:max", providers),
+    "opencode/opencode/nemotron-3.5-super-vl-free",
+  );
+  assert.equal(
+    sanitizeLaneWithProviders("opencode/opencode/nemotron-3.5-super-vl-free:high", providers),
+    "opencode/opencode/nemotron-3.5-super-vl-free:high",
+  );
+
+  // 3. Model with thinkingOptions: null or unknown provider/model preserves :max
+  assert.equal(sanitizeLaneWithProviders("opencode/opencode/glm-5.1:max", providers), "opencode/opencode/glm-5.1:max");
+  assert.equal(sanitizeLaneWithProviders("pi/zai/glm-5.3:max", providers), "pi/zai/glm-5.3:max");
+  assert.equal(sanitizeLaneWithProviders("eye.json", providers), "eye.json");
+});
+
+test("v0.0.24 (ADR 0015 §1): lanesSet sanitizes unsupported :thinking before saving lanes.json and calls setAgentThinking(id, '') to clear stale thinkingOptionId on live seats", async (t) => {
+  const project = makeProject(t, "lanes-sanitize");
+  const { stateDir, handlers, fake, modelSyncs, thinkingSyncs } = makeSurface(t, [
+    {
+      id: "agent-sup-san",
+      labels: { seat: "supervisor", project: project.slug },
+      provider: "opencode/opencode/nemotron-3.5-super-vl-free",
+      model: "opencode/nemotron-3.5-super-vl-free",
+      thinkingOptionId: "max",
+    },
+    {
+      id: "agent-lead-san",
+      labels: { seat: "lead", project: project.slug },
+      provider: "opencode/opencode/nemotron-3.5-super-vl-free",
+      model: "opencode/nemotron-3.5-super-vl-free",
+      thinkingOptionId: "max",
+    },
+  ]);
+
+  fake.daemon.providers = {
+    listAvailable: async () => ({
+      providers: [{ provider: "opencode", available: true }],
+    }),
+    listModels: async () => ({
+      models: [
+        { id: "opencode/nemotron-3-ultra-free", label: "Nemotron 3 Ultra Free", thinkingOptions: [] },
+        {
+          id: "opencode/nemotron-3.5-super-vl-free",
+          label: "Nemotron 3.5 Super VL Free",
+          thinkingOptions: [{ id: "max", label: "Max" }],
+        },
+      ],
+    }),
+  };
+
+  // 1. Setting supervisor to opencode/opencode/nemotron-3-ultra-free:max strips :max before saving and clears thinkingOptionId ("") on live seat.
+  const supReply = await handlers.lanesSet({
+    lane: "supervisor",
+    value: "opencode/opencode/nemotron-3-ultra-free:max",
+    projectRoot: project.root,
+  });
+  assert.ok(supReply.ok, supReply.ok ? "" : supReply.error);
+  assert.equal(supReply.lanes.supervisor, "opencode/opencode/nemotron-3-ultra-free", ":max was stripped before persisting");
+  assert.deepEqual(modelSyncs, [{ agentId: "agent-sup-san", model: "opencode/nemotron-3-ultra-free" }]);
+  assert.deepEqual(
+    thinkingSyncs,
+    [{ agentId: "agent-sup-san", thinkingOptionId: "" }],
+    "setAgentThinking(id, '') was called to clear the stale :max on the live Supervisor",
+  );
+
+  // 2. Setting lead to opencode/opencode/nemotron-3-ultra-free (no :thinking in input, but live Lead has thinkingOptionId: "max") also clears thinkingOptionId ("").
+  const leadReply = await handlers.lanesSet({
+    lane: "lead",
+    value: "opencode/opencode/nemotron-3-ultra-free",
+    projectRoot: project.root,
+  });
+  assert.ok(leadReply.ok, leadReply.ok ? "" : leadReply.error);
+  assert.equal(leadReply.lanes.lead, "opencode/opencode/nemotron-3-ultra-free");
+  assert.deepEqual(modelSyncs[1], { agentId: "agent-lead-san", model: "opencode/nemotron-3-ultra-free" });
+  assert.deepEqual(
+    thinkingSyncs[1],
+    { agentId: "agent-lead-san", thinkingOptionId: "" },
+    "setAgentThinking(id, '') was called to clear thinkingOptionId when switching from :max to a model with no thinking suffix",
+  );
+
+  // 3. Setting worker to opencode/opencode/nemotron-3-ultra-free:max also sanitizes before saving to lanes.json.
+  const workerReply = await handlers.lanesSet({
+    lane: "worker",
+    value: "opencode/opencode/nemotron-3-ultra-free:max",
+    projectRoot: project.root,
+  });
+  assert.ok(workerReply.ok, workerReply.ok ? "" : workerReply.error);
+  assert.equal(workerReply.lanes.worker, "opencode/opencode/nemotron-3-ultra-free");
+
+  const persisted = JSON.parse(readFileSync(join(stateDir, "projects", project.slug, "lanes.json"), "utf8")) as Record<string, string>;
+  assert.deepEqual(persisted, {
+    supervisor: "opencode/opencode/nemotron-3-ultra-free",
+    lead: "opencode/opencode/nemotron-3-ultra-free",
+    worker: "opencode/opencode/nemotron-3-ultra-free",
+  });
+
+  // 4. cachedProviders() returns the cached provider catalog and sanitizeLane() strips unsupported :thinking suffixes.
+  assert.equal(handlers.cachedProviders().length, 1);
+  assert.equal(handlers.cachedProviders()[0]?.provider, "opencode");
+  assert.equal(await handlers.sanitizeLane("opencode/opencode/nemotron-3-ultra-free:max"), "opencode/opencode/nemotron-3-ultra-free");
+});
+
+test("v0.0.24 (ADR 0015 §1–§2): ensureSeat sanitizes :thinking on create, retires and recreates errored or provider-mismatched seats, and syncs drifted model/thinking in-place", async (t) => {
+  const project = makeProject(t, "ensure-self-heal");
+  const agents: FakeAgent[] = [
+    {
+      id: "agent-lead-errored",
+      labels: { seat: "lead", project: project.slug },
+      status: "error",
+      lastError: 'Agent not found: "default"',
+      provider: "opencode/opencode/nemotron-3-ultra-free",
+      model: "opencode/nemotron-3-ultra-free",
+    },
+    {
+      id: "agent-sup-drifted",
+      labels: { seat: "supervisor", project: project.slug },
+      status: "idle",
+      provider: "opencode",
+      model: "opencode/nemotron-3.5-super-vl-free",
+      thinkingOptionId: "max",
+    },
+  ];
+  const { stateDir, handlers, fake, modelSyncs, thinkingSyncs, stopped } = makeSurface(t, agents);
+
+  fake.daemon.providers = {
+    listAvailable: async () => ({
+      providers: [
+        { provider: "opencode", available: true },
+        { provider: "claude", available: true },
+      ],
+    }),
+    listModels: async (provider: string) => ({
+      models:
+        provider === "opencode"
+          ? [{ id: "opencode/nemotron-3-ultra-free", label: "Nemotron 3 Ultra Free", thinkingOptions: [] }]
+          : [{ id: "opus-4-8", label: "Opus 4.8", thinkingOptions: [{ id: "max", label: "Max" }] }],
+    }),
+  };
+
+  // Write lanes with an unsupported :max suffix on nemotron-3-ultra-free (thinkingOptions: []).
+  writeLanes(stateDir, {
+    supervisor: "opencode/opencode/nemotron-3-ultra-free:max",
+    lead: "opencode/opencode/nemotron-3-ultra-free:max",
+  });
+
+  // 1. Lead is in status === "error": ensureSeat retires it (stop + archive) and creates a clean replacement with :max stripped.
+  const leadHeal = await handlers.leadEnsure({ projectRoot: project.root });
+  assert.ok(leadHeal.ok, leadHeal.ok ? "" : leadHeal.error);
+  assert.equal(leadHeal.created, true, "errored Lead seat was retired and recreated");
+  assert.notEqual(leadHeal.agentId, "agent-lead-errored");
+  assert.ok(stopped.includes("agent-lead-errored"), "errored Lead was stopped before archive");
+  assert.ok(fake.archived.includes("agent-lead-errored"), "errored Lead was archived");
+  assert.equal(fake.created.length, 1);
+  assert.deepEqual(
+    fake.created[0]!.config,
+    { provider: "opencode/opencode/nemotron-3-ultra-free" },
+    "replacement Lead seat omitted unsupported :max thinkingOptionId",
+  );
+
+  // 2. Supervisor is healthy (idle) on same provider ("opencode") but drifted on model & thinkingOptionId: synced in-place!
+  const supHeal = await handlers.supervisorEnsure({ projectRoot: project.root });
+  assert.ok(supHeal.ok, supHeal.ok ? "" : supHeal.error);
+  assert.equal(supHeal.created, false, "healthy Supervisor on same provider was reused");
+  assert.equal(supHeal.agentId, "agent-sup-drifted");
+  assert.deepEqual(
+    modelSyncs,
+    [{ agentId: "agent-sup-drifted", model: "opencode/nemotron-3-ultra-free" }],
+    "drifted model was synced in-place",
+  );
+  assert.deepEqual(
+    thinkingSyncs,
+    [{ agentId: "agent-sup-drifted", thinkingOptionId: "" }],
+    "stale thinkingOptionId ('max') was cleared in-place",
+  );
+
+  // 3. Switch supervisor lane to a different provider family (claude/opus-4-8:max): ensureSeat retires opencode seat and creates claude seat.
+  writeLanes(stateDir, {
+    supervisor: "claude/opus-4-8:max",
+    lead: "opencode/opencode/nemotron-3-ultra-free",
+  });
+  const supSwitch = await handlers.supervisorEnsure({ projectRoot: project.root });
+  assert.ok(supSwitch.ok, supSwitch.ok ? "" : supSwitch.error);
+  assert.equal(supSwitch.created, true, "provider-mismatched Supervisor was retired and recreated on claude");
+  assert.notEqual(supSwitch.agentId, "agent-sup-drifted");
+  assert.ok(fake.archived.includes("agent-sup-drifted"), "old opencode Supervisor was archived");
+  assert.deepEqual(fake.created[1]!.config, { provider: "claude/opus-4-8", thinkingOptionId: "max" });
+});
+
+test("v0.0.24 (ADR 0015 §5): projectReset wipes a project's ledger events, tasks, reports, worktrees, branches, mailbox, bound workers, and seats (unless keepSeats: true) while preserving lanes.json and other projects", async (t) => {
+  const projectA = makeProject(t, "reset-target");
+  const projectB = makeProject(t, "reset-bystander");
+  const agents: FakeAgent[] = [];
+  const { stateDir, home, factory, fake, stopped } = makeSurface(t, agents);
+
+  const archivedWorkspaces: string[] = [];
+  fake.daemon.workspaces = {
+    open: async () => ({ id: "ws-main", projectId: "paseo-proj-a" }),
+    create: async () => ({ id: "ws-wt-1", projectId: "paseo-proj-a" }),
+    archive: async (wsId: string) => {
+      archivedWorkspaces.push(wsId);
+    },
+    ref: () => ({
+      agents: {
+        create: async (opts) => fake.daemon.agents.create({ ...opts, cwd: projectA.root }),
+      },
+    }),
+  };
+
+  const mailboxResets: string[] = [];
+  const handlers = createSurfaceHandlers({
+    factory,
+    stateDir,
+    home,
+    daemon: fake.daemon,
+    stopAgent: async (agentId) => {
+      stopped.push(agentId);
+      return { ok: true };
+    },
+    resetProjectMailbox: (slug) => {
+      mailboxResets.push(slug);
+    },
+  });
+
+  // Save project-scoped lanes.json for projectA.
+  saveLanes(stateDir, { supervisor: "pi/zai/glm-5.3", lead: "pi/zai/glm-5.3", worker: "pi/zai/glm-5.3" }, projectA.slug);
+  const projectALanesFile = join(stateDir, "projects", projectA.slug, "lanes.json");
+  assert.equal(existsSync(projectALanesFile), true);
+
+  // Ensure Supervisor and Lead seats for projectA.
+  const supA = await handlers.supervisorEnsure({ projectRoot: projectA.root });
+  const leadA = await handlers.leadEnsure({ projectRoot: projectA.root });
+  assert.ok(supA.ok && leadA.ok);
+
+  // Contract T-RESET-1 in projectA with a real git worktree & branch factory/T-RESET-1, plus a claim.
+  const contractA = factory.setContract({ task: "T-RESET-1", workspace: projectA.root, gate: "true", artifact: "README.md" });
+  const wt = prepareTaskWorktree({ stateDir, workspace: projectA.root, task: "T-RESET-1" });
+  assert.ok(wt.ok, wt.ok ? "" : wt.reason);
+  assert.equal(existsSync(wt.path), true);
+  factory.requestSpawn({ task: "T-RESET-1", provider: "pi/zai/glm-5.3", arity: 1, worktree: wt.path });
+  const claimOut = await factory.claim({ task: "T-RESET-1", sha: contractA.base!, agent: "agent-worker-reset-1" });
+  assert.equal(existsSync(claimOut.reportPath), true);
+
+  // Seed a live working agent bound to T-RESET-1 in the daemon.
+  agents.push({
+    id: "agent-worker-reset-1",
+    labels: { seat: "agent", project: projectA.slug, task: "T-RESET-1" },
+    cwd: wt.path,
+    status: "running",
+  });
+
+  // Seed mailbox.jsonl, lead-handoff.md, and extra fields in project.json for projectA.
+  const projectADir = join(stateDir, "projects", projectA.slug);
+  enqueueLeadMail(join(projectADir, "mailbox.jsonl"), { from: "owner", kind: "directive", text: "build it" });
+  writeFileSync(join(projectADir, "lead-handoff.md"), "# handoff\n");
+  writeProjectRegistration(stateDir, projectA.slug, {
+    root: projectA.root,
+    rotationState: "handing_over",
+    handoffRequestedAt: "2026-10-20T00:00:00.000Z",
+    taskWorkspaces: { "T-RESET-1": "ws-wt-1" },
+    dispatchers: ["chat-dispatcher-1"],
+  });
+
+  // Contract T-KEEP-1 in projectB to verify other projects are undisturbed.
+  factory.setContract({ task: "T-KEEP-1", workspace: projectB.root, gate: "true", artifact: "README.md" });
+
+  // Execute full projectReset on projectA.
+  const resetRes = await handlers.projectReset({ projectRoot: projectA.root });
+  assert.ok(resetRes.ok, resetRes.ok ? "" : resetRes.error);
+  assert.equal(resetRes.project, projectA.slug);
+  assert.equal(resetRes.projectRoot, projectA.root);
+  assert.deepEqual(resetRes.tasks, ["T-RESET-1"]);
+  assert.ok(resetRes.purgedEvents >= 5);
+  assert.ok(resetRes.removedFiles >= 1);
+  assert.deepEqual(resetRes.archivedAgents, ["agent-worker-reset-1"]);
+  assert.deepEqual(resetRes.archivedSeats.sort(), [supA.agentId, leadA.agentId].sort());
+  assert.deepEqual(archivedWorkspaces, ["ws-wt-1"]);
+  assert.deepEqual(mailboxResets, [projectA.slug]);
+
+  // Worktree directory, factory/T-RESET-1 branch, report file, mailbox.jsonl, and lead-handoff.md are gone.
+  assert.equal(existsSync(wt.path), false, "task worktree directory was removed");
+  assert.equal(existsSync(join(projectADir, "worktrees")), false, "worktrees directory was removed");
+  assert.equal(existsSync(claimOut.reportPath), false, "report file was removed");
+  assert.equal(existsSync(join(projectADir, "mailbox.jsonl")), false, "mailbox.jsonl was removed");
+  assert.equal(existsSync(join(projectADir, "lead-handoff.md")), false, "lead-handoff.md was removed");
+
+  // lanes.json is preserved!
+  assert.equal(existsSync(projectALanesFile), true, "project lanes.json must be preserved across reset");
+  const preservedLanes = loadLanes(stateDir, projectA.slug);
+  assert.ok(preservedLanes.ok);
+  assert.equal(preservedLanes.lanes.supervisor, "pi/zai/glm-5.3");
+
+  // When keepSeats !== true, project.json is deleted on disk while lanes.json remains intact.
+  assert.equal(existsSync(join(projectADir, "project.json")), false, "project.json is deleted when keepSeats !== true");
+  assert.equal(readProjectRegistration(stateDir, projectA.slug), undefined);
+  assert.match(resetRes.summary, /1 agent\(s\)/, "summary uses agent(s) vocabulary");
+  assert.doesNotMatch(resetRes.summary, /worker\(s\)/);
+
+  // Returned view has 0 tasks for projectA, while projectB's task remains intact.
+  assert.deepEqual(resetRes.view?.tasks, []);
+  assert.equal(factory.contractFor("T-RESET-1"), undefined);
+  assert.equal(factory.contractFor("T-KEEP-1")?.workspace, projectB.root);
+
+  // Test keepSeats: true by project slug.
+  const supA2 = await handlers.supervisorEnsure({ projectRoot: projectA.root });
+  const leadA2 = await handlers.leadEnsure({ projectRoot: projectA.root });
+  assert.ok(supA2.ok && leadA2.ok);
+  factory.setContract({ task: "T-RESET-2", workspace: projectA.root, gate: "true", artifact: "README.md" });
+
+  const keepRes = await handlers.projectReset({ project: projectA.slug, keepSeats: true });
+  assert.ok(keepRes.ok, keepRes.ok ? "" : keepRes.error);
+  assert.deepEqual(keepRes.tasks, ["T-RESET-2"]);
+  assert.deepEqual(keepRes.archivedSeats, [], "keepSeats: true preserves live Supervisor and Lead seats");
+  assert.equal(existsSync(join(projectADir, "project.json")), true, "keepSeats: true retains project.json");
+  const keptReg = readProjectRegistration(stateDir, projectA.slug);
+  assert.equal(keptReg?.root, projectA.root);
+  assert.equal(keptReg?.supervisor, supA2.agentId);
+  assert.equal(keptReg?.lead, leadA2.agentId);
+  assert.equal(keptReg?.rotationState, undefined);
+  assert.equal(keptReg?.taskWorkspaces, undefined);
+  assert.equal(keptReg?.dispatchers, undefined);
+  assert.equal(factory.contractFor("T-RESET-2"), undefined);
+});
+
+
 
 

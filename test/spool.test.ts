@@ -752,4 +752,134 @@ test("spool command authority (v0.0.23, ADR 0015 §1): refuses contract/spawn/re
   assert.equal(supAccept.ok, true);
 });
 
+test("handleSpoolRequest refuses reset from supervisor, lead, and agent with seat-cannot-reset and executes for owner (v0.0.24, ADR 0015 §6)", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const ws = join(dir, "ws");
+  mkdirSync(ws, { recursive: true });
+  writeFileSync(join(ws, "README.md"), "# ws\n");
+  gitCommitAll(ws);
+
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  await handleSpoolRequest(factory, {
+    id: "c-reset-1",
+    kind: "contract",
+    task: "R-1",
+    workspace: ws,
+    gate: "true",
+    artifact: "README.md",
+    submitter: "owner",
+  });
+  assert.equal(factory.ledger.eventsFor("R-1").length, 1);
+
+  for (const seat of ["supervisor", "lead", "agent"] as const) {
+    const refused = await handleSpoolRequest(factory, {
+      id: `refuse-${seat}`,
+      kind: "reset",
+      workspace: ws,
+      submitter: `agent-${seat}-1`,
+      seat,
+    });
+    assert.equal(refused.ok, false, `expected ${seat} reset to be refused`);
+    if (!refused.ok) {
+      assert.equal(refused.code, "seat-cannot-reset");
+    }
+  }
+  assert.equal(factory.ledger.eventsFor("R-1").length, 1, "events untouched after refused resets");
+
+  let handlerCalledWith: Record<string, unknown> | undefined;
+  const okRes = await handleSpoolRequest(
+    factory,
+    {
+      id: "owner-reset-1",
+      kind: "reset",
+      workspace: ws,
+      keepSeats: true,
+      submitter: "owner",
+    },
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    async (req) => {
+      handlerCalledWith = { ...req };
+      const res = factory.resetProject(ws, "ws");
+      return {
+        id: req.id,
+        ok: true,
+        summary: `project ws reset (${res.purgedEvents} events purged)`,
+        project: "ws",
+        purgedEvents: res.purgedEvents,
+        tasks: res.tasks,
+        removedFiles: res.removedFiles,
+        archivedSeats: [],
+        archivedAgents: [],
+      };
+    },
+  );
+  assert.equal(okRes.ok, true);
+  if (okRes.ok) {
+    assert.match(okRes.summary, /project ws reset/);
+  }
+  assert.equal(handlerCalledWith?.keepSeats, true);
+  assert.equal(factory.ledger.eventsFor("R-1").length, 0);
+});
+
+test("handleSpoolRequest sanitizes spawn and respawn provider via sanitizeLane before recording to ledger (v0.0.24, ADR 0015 §1)", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const ws = join(dir, "ws");
+  mkdirSync(ws, { recursive: true });
+  writeFileSync(join(ws, "README.md"), "# ws\n");
+  gitCommitAll(ws);
+
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  factory.setContract({ task: "SAN-SP-1", workspace: ws, gate: "true", artifact: "README.md" });
+
+  const sanitizeLane = async (lane: string) =>
+    lane === "opencode/opencode/nemotron-3-ultra-free:max" ? "opencode/opencode/nemotron-3-ultra-free" : lane;
+
+  const spawned = await handleSpoolRequest(
+    factory,
+    { id: "sp-san-1", kind: "spawn", task: "SAN-SP-1", provider: "opencode/opencode/nemotron-3-ultra-free:max", arity: 1 },
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    sanitizeLane,
+  );
+  assert.equal(spawned.ok, true);
+  if (spawned.ok) {
+    assert.equal(spawned.event?.event === "spawn_dispatched" ? spawned.event.provider : undefined, "opencode/opencode/nemotron-3-ultra-free");
+    assert.match(spawned.summary, /under opencode\/opencode\/nemotron-3-ultra-free \(n=1\)/);
+  }
+
+  const respawned = await handleSpoolRequest(
+    factory,
+    { id: "rsp-san-1", kind: "respawn", task: "SAN-SP-1", provider: "opencode/opencode/nemotron-3-ultra-free:max", died_agent: "ag-dead-1" },
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    sanitizeLane,
+  );
+  assert.equal(respawned.ok, true);
+  if (respawned.ok) {
+    assert.equal(respawned.event?.event === "respawn_dispatched" ? respawned.event.provider : undefined, "opencode/opencode/nemotron-3-ultra-free");
+    assert.match(respawned.summary, /under opencode\/opencode\/nemotron-3-ultra-free /);
+  }
+});
+
+
 

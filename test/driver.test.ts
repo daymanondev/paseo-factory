@@ -1357,3 +1357,29 @@ test("v0.0.23 (ADR 0015 §6): createTaskAgent and observeTasks pass parent: lead
     harness.stop();
   }
 });
+
+test("leadDecision and taskOutcome scope to the task's current Contract epoch (v0.0.24)", () => {
+  const ts = "2026-06-01T00:00:00.000Z";
+  const events = [
+    { seq: 1, ts, event: "contract_set", task: "T-01", workspace: "/w", gate: "false", artifact: "a" },
+    { seq: 2, ts, event: "spawn_dispatched", task: "T-01", provider: "opencode/m", arity: 1 },
+    { seq: 3, ts, event: "gate_finished", task: "T-01", attempt: 3, exit: 1, verdict: "red", note: "fail", sha: "deadbeef" },
+    { seq: 4, ts, event: "report_written", task: "T-01", attempt: 3, path: "/r/report-T-01-3.md" },
+    { seq: 5, ts, event: "permit_denied", task: "T-01", agent: "ag-1", name: "Bash", kind: "tool", rule: "policy:S1", reason: "r" },
+    { seq: 6, ts, event: "repoke_dispatched", task: "T-01", agent: "ag-1" },
+    { seq: 7, ts, event: "needs_human", task: "T-01", reason: "attempt-ceiling", evidence: { attempt: 3, gate: 3 } },
+    { seq: 8, ts, event: "contract_set", task: "T-01", workspace: "/w", gate: "true", artifact: "a" },
+  ];
+  assert.deepEqual(leadDecision(events, "T-01", Date.parse(ts) + 60_000), { act: "clear" });
+  assert.deepEqual(taskOutcome(events, "T-01"), {
+    attempt: 0,
+    verdict: undefined,
+    sha: undefined,
+    reportPath: undefined,
+    allowed: 0,
+    denied: 0,
+    blocked: 0,
+    accepted: false,
+  });
+});
+

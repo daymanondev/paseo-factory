@@ -18,7 +18,7 @@ import { createFactory } from "./server/core/factory.ts";
 import { PLUGIN_ID, pluginDirFor, resolvePaseoHome, stateDirFor } from "./server/paths.ts";
 import { ensureFactorySkillSafe } from "./server/core/skill.ts";
 import { claimCliBinDir, ensureClaimCli, ensureGitShim, injectClaimCliPath } from "./server/shell.ts";
-import { createChoke, startGitBlockIngestion } from "./server/choke.ts";
+import { createChoke, normalizeAgentCreateRequest, startGitBlockIngestion } from "./server/choke.ts";
 import { createTimelineFetcher } from "./server/timeline.ts";
 import type { TimelineSourceApi } from "./server/timeline.ts";
 import { spoolRootFor, startSpool } from "./server/spool.ts";
@@ -26,7 +26,7 @@ import { createSurfaceHandlers, registerSurfaceRpc } from "./server/surface-rpc.
 import { createLeadMailRuntime } from "./server/lead-mailbox.ts";
 import { injectRoleOnCreate, injectSessionEnv } from "./server/roles.ts";
 
-const SHELL_VERSION = "0.0.23";
+const SHELL_VERSION = "0.0.24";
 
 const log = (message: string) => console.log(`[${PLUGIN_ID}] ${message}`);
 
@@ -98,7 +98,15 @@ export default function contribute(server: PluginServerContext) {
   const offAgentCreate = server.before("agent.create", ({ request }, context) => {
     capturePaseo(context);
     let next = request;
-    const pinned = choke.pinCreateMode(next.config, (next as { labels?: Record<string, string> }).labels);
+    const normalized = normalizeAgentCreateRequest(next, { stateDir, providers: surface.cachedProviders() });
+    if (normalized !== next) {
+      log(`choke: normalized agent.create in ${next.config.cwd} (provider=${normalized.config.provider})`);
+      next = normalized;
+    }
+    const nextLabels =
+      (next as { labels?: Record<string, string> }).labels ??
+      (next.config as { labels?: Record<string, string> }).labels;
+    const pinned = choke.pinCreateMode(next.config, nextLabels);
     if (pinned !== undefined) {
       log(`choke: pinned permission mode to Always Ask for the new agent in ${next.config.cwd}`);
       next = { ...next, config: pinned };
@@ -139,6 +147,7 @@ export default function contribute(server: PluginServerContext) {
   const surface = createSurfaceHandlers({
     ...surfaceDeps,
     onLeadRetired: (input) => leadMail.settleLeadRotation(input.slug),
+    resetProjectMailbox: (slug) => leadMail.resetProjectMailbox(slug),
     leadDispatch: (request) => leadMail.dispatchLead(request),
   });
   // The Lead mailbox runtime (v0.0.20, ADR 0013 §4–§5): the single writer
@@ -179,9 +188,39 @@ export default function contribute(server: PluginServerContext) {
     leadDispatch: (request) => leadMail.dispatchLead(request),
     supervisorDispatch: (request) => leadMail.dispatchSupervisor(request),
     supervisorReport: (request) => leadMail.reportSupervisor(request),
+    projectReset: async (request) => {
+      const reply = await surface.projectReset(
+        {
+          ...(request.workspace !== undefined ? { projectRoot: request.workspace } : {}),
+          ...(request.project !== undefined ? { project: request.project } : {}),
+          ...(request.keepSeats !== undefined ? { keepSeats: request.keepSeats } : {}),
+        },
+        { paseo: paseoApi as never },
+      );
+      return reply.ok
+        ? {
+            id: request.id,
+            ok: true as const,
+            summary: reply.summary,
+            project: reply.project,
+            purgedEvents: reply.purgedEvents,
+            tasks: reply.tasks,
+            removedFiles: reply.removedFiles,
+            archivedSeats: reply.archivedSeats,
+            archivedAgents: reply.archivedAgents,
+          }
+        : {
+            id: request.id,
+            ok: false as const,
+            code: reply.code,
+            message: reply.error,
+          };
+    },
     peerMail: leadMail.notifyPeer,
     daemon: () => paseoApi as never,
+    sanitizeLane: (lane) => surface.sanitizeLane(lane),
   });
+
   log(`spool listening on ${spoolRootFor(stateDir)}/{requests,replies,processed}`);
   registerSurfaceRpc(server, surface);
 
