@@ -237,3 +237,25 @@ test("v0.0.24 (ADR 0015 §6): Header renders two-step Reset Project -> Confirm R
   assert.match(shell, /resetProject/, "FactoryShell passes resetProject action to Header");
 });
 
+// ---- Compact Plugins Tab, Core Card, Version Pills & On-Demand Update Check (v0.0.25, ADR 0012 §1–§4) ----
+
+test("v0.0.25 (ADR 0012 §1–§4): PluginsPane renders compact 2-row cards, Core plugin card with CORE badge, version/update pills, Check for updates, conditional Update All, and collapsible Manage drawer", () => {
+  const plugins = read("plugin/client/factory/plugins.tsx");
+  assert.match(plugins, /view\.corePlugin/, "PluginsPane renders the Core plugin card at the top");
+  assert.match(plugins, /label="CORE"/, "Core plugin card carries the CORE badge");
+  assert.match(plugins, /Core plugin protected/, "Core plugin drawer explains that Disable/Remove are locked");
+  assert.match(plugins, /formatVersionBadge/, "cards format semantic version + short revision badge");
+  assert.match(plugins, /Update available/, "cards surface Update available pill when updateAvailable === true");
+  assert.match(plugins, /Up to date/, "cards surface Up to date pill when updateAvailable === false");
+  assert.match(plugins, /Check for updates/, "toolbar exposes Check for updates button");
+  assert.match(plugins, /Update All \(\$\{updatableCount\}\)/, "toolbar exposes Update All (N) when updates exist");
+  assert.match(plugins, /⋯ Manage/, "installed cards tuck secondary lifecycle controls behind ⋯ Manage drawer");
+  assert.match(plugins, /remote && companion\.updateAvailable === true/, "primary Update CTA on the card header appears only when updateAvailable === true");
+
+  const shell = read("plugin/client/factory/shell.tsx");
+  assert.match(shell, /pluginsCheckUpdates/, "FactoryShell imports pluginsCheckUpdates RPC");
+  assert.match(shell, /useRpc\(pluginsCheckUpdates\)/, "FactoryShell binds useRpc(pluginsCheckUpdates)");
+  assert.match(shell, /pluginsCheckUpdatesCall\(\{\}\)/, "FactoryShell invokes pluginsCheckUpdatesCall");
+});
+
+
