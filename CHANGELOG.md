@@ -5,6 +5,72 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.22] - 2026-10-20
+
+v0.0.22's one thing: **the built-in Header `Private vault` Sync Bar** — the
+`Private vault` moves out of the `Plugins` tab into a compact, always-visible
+Header status & sync bar with guided 3-state `gh` onboarding, automatic
+private repository provisioning (`<ghUser>/factory-vault`), a single smart
+bidirectional `Sync Vault` action (`syncVault`), 1-click key import
+(`importVaultSecrets`), and 3-layer visual feedback (busy button state +
+inline status banner + toast notification), alongside empty-remote bootstrap,
+automatic config collection/materialization, and full CLI parity (ADR 0014
+amended).
+
+### Added
+
+- **Guided `gh` onboarding, auto-repo provisioning, unified `syncVault`, and
+  1-click `importVaultSecrets` (`src/vault.ts`, `plugin/bin/vault.mjs`,
+  `plugin/shared/view.ts`, `plugin/shared/rpc.ts`,
+  `plugin/server/surface-rpc.ts`, pinned in `test/vault.test.ts`,
+  `test/vault-cli.test.ts`, and `test/surface-rpc.test.ts`)** —
+  `probeGhAuth` detects `ghInstalled`, `ghAuthenticated`, `ghUser`, and
+  `suggestedRepo` (`<ghUser>/factory-vault`) with a 15-second per-runner TTL
+  cache; `ensureRemoteVaultRepo` verifies or auto-creates the private GitHub
+  repository via `gh repo create <owner/repo> --private`; `syncVault`
+  (`factory.vault.sync` / `factory vault sync`) runs pull + multi-node
+  `Ledger` reconciliation + local config/state collection + push in one
+  bidirectional operation; and `importVaultSecrets` (`factory.vault.import` /
+  `factory vault import`) imports `.p8` keys, App Store Connect credentials,
+  Google Play Service Account `.json` keys (sealed against GitHub Secret
+  Scanning on remote push), `eye.json`, and per-app signing/Firebase files
+  into `<paseoHome>/vault-runtime/`, updates `env.json`, and syncs.
+- **Built-in Header `VaultSyncBar` and 3-layer action feedback
+  (`plugin/client/factory/header.tsx`, `plugin/client/factory/shell.tsx`,
+  pinned in `test/client-surface.test.ts` and `test/surface-rpc.test.ts`)** —
+  `<VaultSyncBar />` renders inside `<Header />` across all tabs in three
+  clear states (`!configured && !ghAuthenticated` step-by-step `gh auth login`
+  guide with `Copy Command` + `Check GitHub Login`; `!configured &&
+  ghAuthenticated` `@<ghUser>` badge + `Enable & Sync Vault`; `configured`
+  readiness pills + `Sync Vault` + `+ Import Key` and `⚙` drawers), while
+  `<PrivateVaultCard />` leaves the `Plugins` tab so `Plugins` is dedicated
+  exclusively to `Companion plugin`s. Every `factory.vault.*` RPC returns a
+  human-readable `summary: string`, and `FactoryShell.act()` surfaces
+  in-flight `busyAct` labels, an inline `vaultNote` banner, and
+  `toast.show(summary, { variant: "success" })`.
+
+### Fixed
+
+- **Empty-remote bootstrap, Finder `PATH` augmentation, automatic state/config
+  collection & materialization, and `factory vault` CLI parity
+  (`src/vault.ts`, `plugin/bin/vault.mjs`, `plugin/bin/factory.mjs`, pinned
+  in `test/vault.test.ts` and `test/vault-cli.test.ts`)** —
+  `createDefaultVaultRunner` appends `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`
+  to child `PATH` so GUI-launched Paseo daemons resolve `gh`, `git`, and `tar`;
+  `ensureVaultCheckout`, `pullVault`, `pushVault`, and `hydrateVaultDirect`
+  handle brand-new 0-commit remotes cleanly (`hydratedFiles: []` on pull/hydrate
+  and initial branch creation on push); `pushVault` and `syncVault`
+  automatically collect `lanes.json`, `fleet.json`, `free-pool.json`,
+  `eye.json` (sealed on remote), and registered `Project`
+  `.store-release/manifest.json` files into `vault-runtime/` before staging,
+  while `hydrateVaultDirect`, `pullVault`, and `syncVault` materialize
+  `config/{lanes,fleet,free-pool}.json` into local state directories; and
+  `plugin/bin/vault.mjs` reaches 100% behavioral parity with `src/vault.ts`
+  (`pull --merge-ledgers --overwrite-configs`, `push --include-ledger`
+  per-project ledger snapshots, `sync`, and `import`) while preserving ADR
+  0004's zero-`src/`-imports boundary.
+- `package.json` + `SHELL_VERSION` → `0.0.22`. Suite 509 → 522.
+
 ## [0.0.21] - 2026-10-20
 
 v0.0.21's one thing: **the `Private vault`** — the `Owner`'s private GitHub
