@@ -102,6 +102,12 @@ export interface ProjectRegistration {
   rotationState?: LeadRotationState;
   /** When the current handoff was requested (ISO 8601) — stamped entering "handing_over", cleared on reset. */
   handoffRequestedAt?: string;
+  /** The Project's Paseo workspace id (v0.0.23, ADR 0015 §6). */
+  workspaceId?: string;
+  /** The Project's Paseo project id (v0.0.23, ADR 0015 §6). */
+  paseoProjectId?: string;
+  /** Active Task worktree Paseo workspace ids keyed by task id (v0.0.23, ADR 0015 §6). */
+  taskWorkspaces?: Record<string, string>;
 }
 
 const LEAD_ROTATION_STATES: readonly string[] = ["normal", "rotation_pending", "handing_over"];
@@ -113,6 +119,12 @@ export function readProjectRegistration(stateDir: string, slug: string): Project
   try {
     const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<ProjectRegistration>;
     if (typeof parsed.root !== "string" || parsed.root === "") return undefined;
+    const taskWorkspaces: Record<string, string> = {};
+    if (parsed.taskWorkspaces !== undefined && parsed.taskWorkspaces !== null && typeof parsed.taskWorkspaces === "object" && !Array.isArray(parsed.taskWorkspaces)) {
+      for (const [task, wsId] of Object.entries(parsed.taskWorkspaces)) {
+        if (typeof wsId === "string" && wsId !== "") taskWorkspaces[task] = wsId;
+      }
+    }
     return {
       slug,
       root: parsed.root,
@@ -122,6 +134,9 @@ export function readProjectRegistration(stateDir: string, slug: string): Project
         ? { rotationState: parsed.rotationState as LeadRotationState }
         : {}),
       ...(typeof parsed.handoffRequestedAt === "string" && parsed.handoffRequestedAt !== "" ? { handoffRequestedAt: parsed.handoffRequestedAt } : {}),
+      ...(typeof parsed.workspaceId === "string" && parsed.workspaceId !== "" ? { workspaceId: parsed.workspaceId } : {}),
+      ...(typeof parsed.paseoProjectId === "string" && parsed.paseoProjectId !== "" ? { paseoProjectId: parsed.paseoProjectId } : {}),
+      ...(Object.keys(taskWorkspaces).length > 0 ? { taskWorkspaces } : {}),
     };
   } catch {
     return undefined; // a corrupt file is ignored, not trusted
@@ -149,6 +164,9 @@ export function writeProjectRegistration(
     lead?: string | null;
     rotationState?: LeadRotationState | null;
     handoffRequestedAt?: string | null;
+    workspaceId?: string | null;
+    paseoProjectId?: string | null;
+    taskWorkspaces?: Record<string, string | null> | null;
   },
 ): void {
   const prior = readProjectRegistration(stateDir, slug);
@@ -156,11 +174,32 @@ export function writeProjectRegistration(
   const lead = patch.lead === null ? undefined : patch.lead ?? prior?.lead;
   const rotationState = patch.rotationState === null ? undefined : patch.rotationState ?? prior?.rotationState;
   const handoffRequestedAt = patch.handoffRequestedAt === null ? undefined : patch.handoffRequestedAt ?? prior?.handoffRequestedAt;
-  const record: Record<string, string> = { root: patch.root };
+  const workspaceId = patch.workspaceId === null ? undefined : patch.workspaceId ?? prior?.workspaceId;
+  const paseoProjectId = patch.paseoProjectId === null ? undefined : patch.paseoProjectId ?? prior?.paseoProjectId;
+  let taskWorkspaces: Record<string, string> | undefined;
+  if (patch.taskWorkspaces === null) {
+    taskWorkspaces = undefined;
+  } else if (patch.taskWorkspaces !== undefined) {
+    const merged: Record<string, string> = { ...(prior?.taskWorkspaces ?? {}) };
+    for (const [task, wsId] of Object.entries(patch.taskWorkspaces)) {
+      if (wsId === null) {
+        delete merged[task];
+      } else if (typeof wsId === "string" && wsId !== "") {
+        merged[task] = wsId;
+      }
+    }
+    taskWorkspaces = Object.keys(merged).length > 0 ? merged : undefined;
+  } else {
+    taskWorkspaces = prior?.taskWorkspaces;
+  }
+  const record: Record<string, unknown> = { root: patch.root };
   if (supervisor !== undefined) record.supervisor = supervisor;
   if (lead !== undefined) record.lead = lead;
   if (rotationState !== undefined) record.rotationState = rotationState;
   if (handoffRequestedAt !== undefined) record.handoffRequestedAt = handoffRequestedAt;
+  if (workspaceId !== undefined) record.workspaceId = workspaceId;
+  if (paseoProjectId !== undefined) record.paseoProjectId = paseoProjectId;
+  if (taskWorkspaces !== undefined && Object.keys(taskWorkspaces).length > 0) record.taskWorkspaces = taskWorkspaces;
   mkdirSync(projectStateDir(stateDir, slug), { recursive: true });
   writeFileSync(registrationPath(stateDir, slug), `${JSON.stringify(record, null, 2)}\n`);
 }

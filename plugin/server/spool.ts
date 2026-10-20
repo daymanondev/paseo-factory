@@ -26,7 +26,9 @@ import { usageIsValid } from "./core/ledger.ts";
 import { needsHumanEvidenceIsValid, NEEDS_HUMAN_REASONS } from "./core/events.ts";
 import type { Factory } from "./core/factory.ts";
 import type { LedgerEvent, MeterUsage, NeedsHumanEvidence, NeedsHumanReason, Verdict } from "./core/events.ts";
-import { acceptanceSummary } from "./surface-rpc.ts";
+import { readProjectRegistration, resolveProject, writeProjectRegistration } from "./core/project.ts";
+import { acceptanceSummary, archiveAcceptedTaskWorkspace } from "./surface-rpc.ts";
+import type { SurfaceDaemonApi } from "./surface-rpc.ts";
 
 /** Seat identity stamped from `PASEO_FACTORY_SEAT` (v0.0.23, ADR 0015 §1). */
 export type SpoolSeat = "supervisor" | "lead" | "agent";
@@ -368,6 +370,9 @@ export type SpoolReply =
       supervisorAgentId?: string;
       mailId?: string;
       rotationState?: string;
+      /** Spawn / respawn replies (v0.0.23, ADR 0015 §6): the Task worktree's Paseo workspace id and owning Project slug. */
+      workspaceId?: string;
+      projectSlug?: string;
     }
   | { id: string; ok: false; code: string; message: string; event?: LedgerEvent };
 
@@ -559,6 +564,104 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
   return undefined;
 }
 
+function resolveDaemonArg(daemon?: SurfaceDaemonApi | (() => SurfaceDaemonApi | undefined)): SurfaceDaemonApi | undefined {
+  return typeof daemon === "function" ? daemon() : daemon;
+}
+
+function lastWorkerAgentForTask(factory: Factory, task: string): string | undefined {
+  let agentId: string | undefined;
+  for (const evt of factory.ledger.events) {
+    if ("task" in evt && evt.task === task) {
+      if (evt.event === "claim_reported" && typeof evt.agent === "string" && evt.agent !== "") agentId = evt.agent;
+      else if (evt.event === "repoke_dispatched" && typeof evt.agent === "string" && evt.agent !== "") agentId = evt.agent;
+      else if (evt.event === "meter_written" && typeof evt.agent === "string" && evt.agent !== "") agentId = evt.agent;
+    }
+  }
+  return agentId;
+}
+
+async function archiveWorkerAgentBestEffort(daemon: SurfaceDaemonApi | undefined, agentId: string | undefined): Promise<void> {
+  if (daemon === undefined || typeof agentId !== "string" || agentId === "") return;
+  try {
+    await daemon.agents.ref(agentId).archive();
+  } catch {
+    // best-effort archive
+  }
+}
+
+async function resolveSpawnWorkspaceAndParent(
+  factory: Factory,
+  daemon: SurfaceDaemonApi | undefined,
+  task: string,
+  explicitWorktree?: string,
+): Promise<{ leadAgentId?: string; workspaceId?: string; projectSlug?: string }> {
+  const contract = factory.contractFor(task);
+  if (contract === undefined) return {};
+  const project = resolveProject(contract.workspace);
+  if (!project.ok) return {};
+  const reg = readProjectRegistration(factory.stateDir, project.slug);
+  let projectWorkspaceId = reg?.workspaceId;
+  let paseoProjectId = reg?.paseoProjectId;
+  if (paseoProjectId === undefined && daemon?.workspaces?.open !== undefined) {
+    try {
+      const opened = await daemon.workspaces.open({ cwd: project.root });
+      if (typeof opened?.id === "string" && opened.id !== "") projectWorkspaceId = opened.id;
+      if (typeof opened?.projectId === "string" && opened.projectId !== "") paseoProjectId = opened.projectId;
+    } catch {
+      // best-effort workspace open
+    }
+  }
+  let leadAgentId: string | undefined;
+  if (daemon !== undefined) {
+    try {
+      const page = await daemon.agents.list({ filter: { labels: { seat: "lead", project: project.slug }, includeArchived: false } });
+      const liveLead = page.entries.find((e) => e.agent.archivedAt === null)?.agent;
+      if (liveLead !== undefined) leadAgentId = liveLead.id;
+    } catch {
+      // best-effort lead lookup
+    }
+  }
+  if (leadAgentId === undefined) leadAgentId = reg?.lead;
+
+  let worktree = explicitWorktree;
+  if (worktree === undefined) {
+    for (const evt of factory.ledger.events) {
+      if (evt.event === "spawn_dispatched" && evt.task === task && typeof evt.worktree === "string" && evt.worktree !== "") {
+        worktree = evt.worktree;
+      }
+    }
+  }
+  let workspaceId = reg?.taskWorkspaces?.[task];
+  if (workspaceId === undefined && worktree !== undefined && daemon?.workspaces?.create !== undefined) {
+    try {
+      const created = await daemon.workspaces.create({
+        title: `${project.slug} ${task}`,
+        source: { kind: "directory", path: worktree, ...(paseoProjectId !== undefined ? { projectId: paseoProjectId } : {}) },
+      });
+      if (typeof created?.id === "string" && created.id !== "") workspaceId = created.id;
+    } catch {
+      // best-effort workspace registration
+    }
+  }
+  if (
+    projectWorkspaceId !== reg?.workspaceId ||
+    paseoProjectId !== reg?.paseoProjectId ||
+    (workspaceId !== undefined && workspaceId !== reg?.taskWorkspaces?.[task])
+  ) {
+    writeProjectRegistration(factory.stateDir, project.slug, {
+      root: project.root,
+      ...(projectWorkspaceId !== undefined ? { workspaceId: projectWorkspaceId } : {}),
+      ...(paseoProjectId !== undefined ? { paseoProjectId } : {}),
+      ...(workspaceId !== undefined ? { taskWorkspaces: { [task]: workspaceId } } : {}),
+    });
+  }
+  return {
+    projectSlug: project.slug,
+    ...(leadAgentId !== undefined ? { leadAgentId } : {}),
+    ...(workspaceId !== undefined ? { workspaceId } : {}),
+  };
+}
+
 /**
  * Runs one request through the factory — the single place a spool request
  * becomes Ledger events or a Gate run. Never throws: every failure becomes a
@@ -575,7 +678,9 @@ export async function handleSpoolRequest(
   peerMailHook?: PeerMailHook,
   supervisorDispatchHandler?: SupervisorDispatchHandler,
   supervisorReportHandler?: SupervisorReportHandler,
+  daemon?: SurfaceDaemonApi | (() => SurfaceDaemonApi | undefined),
 ): Promise<SpoolReply> {
+  const resolvedDaemon = resolveDaemonArg(daemon);
   try {
     // Hard Spool Command Authority by Seat (v0.0.23, ADR 0015 §1).
     if (
@@ -747,11 +852,13 @@ export async function handleSpoolRequest(
       if (decision.outcome === "refused") {
         return { id: request.id, ok: false, code: decision.code, message: decision.event.reason, event: decision.event };
       }
+      const spawnMeta = await resolveSpawnWorkspaceAndParent(factory, resolvedDaemon, request.task, request.worktree);
       return {
         id: request.id,
         ok: true,
         summary: `spawn dispatched for ${request.task} under ${request.provider} (n=${request.arity})`,
         event: decision.event,
+        ...spawnMeta,
       };
     }
     if (request.kind === "respawn") {
@@ -766,11 +873,14 @@ export async function handleSpoolRequest(
       if (decision.outcome === "refused") {
         return { id: request.id, ok: false, code: decision.code, message: decision.event.reason, event: decision.event };
       }
+      await archiveWorkerAgentBestEffort(resolvedDaemon, request.died_agent);
+      const spawnMeta = await resolveSpawnWorkspaceAndParent(factory, resolvedDaemon, request.task);
       return {
         id: request.id,
         ok: true,
         summary: `respawn dispatched for ${request.task} under ${request.provider} (replacing ${request.died_agent.slice(0, 12)})`,
         event: decision.event,
+        ...spawnMeta,
       };
     }
     if (request.kind === "meter") {
@@ -784,6 +894,7 @@ export async function handleSpoolRequest(
         usage: request.usage,
         ...(request.agent === undefined ? {} : { agent: request.agent }),
       });
+      await archiveWorkerAgentBestEffort(resolvedDaemon, request.agent ?? lastWorkerAgentForTask(factory, request.task));
       const dollars = event.usage.totalCostUsd;
       const cost = dollars === undefined ? "no dollars reported (recorded as absent)" : `$${dollars.toFixed(2)}`;
       return { id: request.id, ok: true, summary: `meter for ${request.task} under ${request.provider}: ${cost}` };
@@ -807,6 +918,7 @@ export async function handleSpoolRequest(
       // evidence pair attached. The meter's law — a refused submission throws,
       // no line, and the reply carries the code so the driver can report it.
       const event = factory.needsHuman({ task: request.task, reason: request.reason, evidence: request.evidence });
+      await archiveWorkerAgentBestEffort(resolvedDaemon, lastWorkerAgentForTask(factory, request.task));
       const detail =
         "denial" in event.evidence
           ? `denial seq ${event.evidence.denial}, repoke seq ${event.evidence.repoke}`
@@ -849,6 +961,7 @@ export async function handleSpoolRequest(
     // stamp; the Lead's conditional authority is judged below in the factory.
     const acceptedBy = request.by ?? request.submitter;
     const accepted = await factory.accept({ task: request.task, attempt: request.attempt, accepted_by: acceptedBy });
+    await archiveAcceptedTaskWorkspace(factory, resolvedDaemon, request.task);
     return {
       id: request.id,
       ok: true,
@@ -884,6 +997,8 @@ export interface SpoolOptions {
   supervisorReport?: SupervisorReportHandler;
   /** The peer-outcome notifier (v0.0.20) — verdicts and needs_human recordings land as Lead mail. */
   peerMail?: PeerMailHook;
+  /** The daemon API for workspace registration and worker/workspace archiving (v0.0.23, ADR 0015 §6). */
+  daemon?: SurfaceDaemonApi | (() => SurfaceDaemonApi | undefined);
 }
 
 export interface Spool {
@@ -935,6 +1050,7 @@ export function startSpool(stateDir: string, factory: Factory, options: SpoolOpt
         options.peerMail,
         options.supervisorDispatch,
         options.supervisorReport,
+        options.daemon,
       )
         .catch(() => {})
         .finally(() => inFlight.delete(id));
@@ -963,6 +1079,7 @@ async function handleRequestFile(
   peerMailHook?: PeerMailHook,
   supervisorDispatchHandler?: SupervisorDispatchHandler,
   supervisorReportHandler?: SupervisorReportHandler,
+  daemon?: SurfaceDaemonApi | (() => SurfaceDaemonApi | undefined),
 ): Promise<void> {
   let reply: SpoolReply;
   let request: SpoolRequest | undefined;
@@ -984,6 +1101,7 @@ async function handleRequestFile(
       peerMailHook,
       supervisorDispatchHandler,
       supervisorReportHandler,
+      daemon,
     );
     // The v0.0.9 stamps make the two Owner acts attributable in the log too —
     // the same visibility the claim line always had.

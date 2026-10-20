@@ -1256,3 +1256,104 @@ async function until_(assertion: () => void, ms = 5000): Promise<void> {
     }
   }
 }
+
+test("v0.0.23 (ADR 0015 §6): createTaskAgent and observeTasks pass parent: leadAgentId, workspaceId, labels: { seat: 'agent', project, task }, and auto-archive superseded/finished workers", async (t) => {
+  const sent: Record<string, unknown>[] = [];
+  const fakeRpcModern = {
+    features: { creationLifecycle: true },
+    async request(msg: Record<string, unknown>) {
+      sent.push(msg);
+      return { agent: { id: `ag-${sent.length}` } };
+    },
+  };
+  await createTaskAgent(fakeRpcModern as unknown as Parameters<typeof createTaskAgent>[0], {
+    task: "T-04",
+    provider: "opencode",
+    model: "glm-5.1",
+    cwd: "/ws/t04",
+    brief: "do T-04",
+    parent: "lead-agent-1",
+    workspaceId: "ws-wt-t04",
+    projectSlug: "repo-123456",
+  });
+  assert.equal(sent[0].type, "agent.create.request");
+  assert.equal(sent[0].parent, "lead-agent-1");
+  assert.equal(sent[0].workspaceId, "ws-wt-t04");
+  assert.deepEqual(sent[0].labels, { seat: "agent", project: "repo-123456", task: "T-04" });
+
+  const fakeRpcLegacy = {
+    features: { creationLifecycle: false },
+    async request(msg: Record<string, unknown>) {
+      sent.push(msg);
+      return { agent: { id: `ag-${sent.length}` } };
+    },
+  };
+  await createTaskAgent(fakeRpcLegacy as unknown as Parameters<typeof createTaskAgent>[0], {
+    task: "T-04",
+    provider: "opencode",
+    cwd: "/ws/t04",
+    brief: "do T-04",
+    parent: "lead-agent-1",
+    workspaceId: "ws-wt-t04",
+    projectSlug: "repo-123456",
+  });
+  assert.equal(sent[1].type, "create_agent_request");
+  assert.equal(sent[1].parent, "lead-agent-1");
+  assert.equal(sent[1].workspaceId, "ws-wt-t04");
+  assert.deepEqual(sent[1].labels, { seat: "agent", project: "repo-123456", task: "T-04" });
+
+  // End-to-end through observeTasks: respawn forwards leadAgentId, workspaceId, projectSlug from spool reply and archives died/finished agents.
+  let seqEnd = 50;
+  const harness = await leadHarness(
+    t,
+    () => null,
+    (agentId) => {
+      if (agentId === "ag-lead1") return { requestId: "r", error: "Agent not found: ag-lead1" };
+      seqEnd += 1;
+      return { requestId: "r", entries: [{ seqEnd }] };
+    },
+  );
+  try {
+    const { resolveProject, writeProjectRegistration } = await import("../plugin/server/core/project.ts");
+    const resolved = resolveProject(harness.workspace);
+    assert.ok(resolved.ok);
+    writeProjectRegistration(harness.stateDir, resolved.slug, {
+      root: resolved.root,
+      lead: "lead-seat-99",
+      workspaceId: "ws-proj-99",
+      paseoProjectId: "prj-99",
+      taskWorkspaces: { LEAD1: "ws-wt-lead1" },
+    });
+
+    const entry = { task: "LEAD1", agentId: "ag-lead1", workspace: harness.workspace };
+    const run = observeTasks(harness.rpc, [entry], {
+      pollMs: 10,
+      stateDir: harness.stateDir,
+      spoolRoot: harness.spoolRoot,
+      provider: "claude/opus-4-7",
+      log: () => {},
+      onTerminal: () => {},
+    });
+
+    await until_(() => {
+      assert.equal(entry.agentId, "ag-lead2");
+    }, 5000);
+
+    const createMsg = harness.sent.find((m) => m.type === "agent.create.request");
+    assert.ok(createMsg, "respawn sent agent.create.request");
+    assert.equal(createMsg.parent, "lead-seat-99");
+    assert.equal(createMsg.workspaceId, "ws-wt-lead1");
+    assert.deepEqual(createMsg.labels, { seat: "agent", project: resolved.slug, task: "LEAD1" });
+
+    harness.claimGreen("ag-lead2");
+    await run;
+
+    const archivedIds = harness.sent
+      .filter((m) => m.type === "archive_agent_request")
+      .map((m) => m.agentId);
+    assert.ok(archivedIds.includes("ag-lead1"), "superseded dead worker ag-lead1 archived");
+    assert.ok(archivedIds.includes("ag-lead2"), "settled replacement worker ag-lead2 archived");
+  } finally {
+    harness.stop();
+  }
+});

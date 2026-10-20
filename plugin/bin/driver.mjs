@@ -487,7 +487,7 @@ async function reconnect(rpc, log) {
  * baked from this process's environment, and the contract's description
  * (when set) riding ahead of it as the assignment.
  */
-export async function createTaskAgent(rpc, { task, idempotencyKey, provider, model, thinking, cwd, brief }) {
+export async function createTaskAgent(rpc, { task, idempotencyKey, provider, model, thinking, cwd, brief, parent, leadAgentId, workspaceId, projectSlug, project }) {
   const config = {
     provider,
     cwd,
@@ -495,9 +495,21 @@ export async function createTaskAgent(rpc, { task, idempotencyKey, provider, mod
     ...(model === undefined ? {} : { model }),
     ...(thinking === undefined ? {} : { thinkingOptionId: thinking }),
   };
+  const resolvedParent = parent ?? leadAgentId;
+  const resolvedProject = projectSlug ?? project;
+  const labels = {
+    seat: "agent",
+    ...(typeof resolvedProject === "string" && resolvedProject !== "" ? { project: resolvedProject } : {}),
+    task,
+  };
+  const extra = {
+    labels,
+    ...(typeof resolvedParent === "string" && resolvedParent !== "" ? { parent: resolvedParent, callerAgentId: resolvedParent } : {}),
+    ...(typeof workspaceId === "string" && workspaceId !== "" ? { workspaceId } : {}),
+  };
   if (rpc.features?.creationLifecycle === true) {
     const payload = await rpc.request(
-      { type: "agent.create.request", idempotencyKey: idempotencyKey ?? task, subscribe: true, config, initialPrompt: brief },
+      { type: "agent.create.request", idempotencyKey: idempotencyKey ?? task, subscribe: true, config, initialPrompt: brief, ...extra },
       { responseType: "agent.create.response", timeoutMs: CREATE_TIMEOUT_MS },
     );
     if (payload.error !== undefined && payload.error !== null) {
@@ -512,12 +524,21 @@ export async function createTaskAgent(rpc, { task, idempotencyKey, provider, mod
   // creationLifecycle), so this path is unkeyed — re-run protection rests on
   // the operator's eyes. The trial daemon (0.10.3) advertises the feature.
   const payload = await rpc.request(
-    { type: "create_agent_request", config, initialPrompt: brief },
+    { type: "create_agent_request", config, initialPrompt: brief, ...extra },
     { responseType: "status", timeoutMs: CREATE_TIMEOUT_MS },
   );
   if (payload.status === "agent_create_failed") throw new Error(payload.error ?? "agent creation failed");
   if (payload.agent?.id === undefined) throw new Error("agent creation returned no agent");
   return payload.agent.id;
+}
+
+async function archiveTaskAgentBestEffort(rpc, agentId) {
+  if (typeof agentId !== "string" || agentId === "") return;
+  try {
+    await rpc.request({ type: "archive_agent_request", agentId }, { responseType: "agent_archived", timeoutMs: 5_000 });
+  } catch {
+    // best-effort archive
+  }
 }
 
 // ---- the Lead rider (v0.0.10, ADR 0006 §3): the denial-stall predicate, the one re-poke, the named end ----
@@ -802,6 +823,7 @@ export async function observeTasks(
     entry.terminal = fate;
     await captureUsage(rpc, entry, snapshot);
     await onTerminal(entry);
+    await archiveTaskAgentBestEffort(rpc, entry.agentId);
   };
   /**
    * The Lead's one cascade, shared by both watch branches (design §1's two
@@ -892,6 +914,7 @@ export async function observeTasks(
       );
       entry.terminal = nhFate;
       await onTerminal(entry);
+      await archiveTaskAgentBestEffort(rpc, entry.agentId);
       return;
     }
 
@@ -905,6 +928,7 @@ export async function observeTasks(
       } else if (!reply.ok) {
         log(`factory: ${entry.task} respawn refused — ${reply.code}: ${reply.message}`);
       } else {
+        await archiveTaskAgentBestEffort(rpc, diedAgentId);
         const contract = contractFromLedger(events, entry.task);
         const workspace = entry.workspace ?? contract?.workspace;
         cleanWorkspaceForRespawn(workspace); // the TASK WORKTREE on the worktree path — never <project-root>
@@ -912,6 +936,9 @@ export async function observeTasks(
         const { provider: providerId, model, thinking } = splitProvider(provider);
         const respawnSeq = reply.event?.seq;
         const idempotencyKey = respawnSeq !== undefined ? `${entry.task}-respawn-${respawnSeq}` : `${entry.task}-respawn`;
+        const leadAgentId = reply.leadAgentId ?? entry.leadAgentId;
+        const workspaceId = reply.workspaceId ?? entry.workspaceId;
+        const projectSlug = reply.projectSlug ?? entry.projectSlug;
         try {
           const newAgentId = await createTaskAgent(rpc, {
             task: entry.task,
@@ -921,8 +948,14 @@ export async function observeTasks(
             ...(thinking === undefined ? {} : { thinking }),
             cwd: workspace,
             brief,
+            ...(leadAgentId === undefined ? {} : { parent: leadAgentId }),
+            ...(workspaceId === undefined ? {} : { workspaceId }),
+            ...(projectSlug === undefined ? {} : { projectSlug }),
           });
           entry.agentId = newAgentId;
+          if (leadAgentId !== undefined) entry.leadAgentId = leadAgentId;
+          if (workspaceId !== undefined) entry.workspaceId = workspaceId;
+          if (projectSlug !== undefined) entry.projectSlug = projectSlug;
           resetWatchTrackers(entry);
           log(`factory: ${entry.task} agent ${newAgentId.slice(0, 12)} respawned (replacing ${diedAgentId.slice(0, 12)}) — watching to verdict`);
           return;
@@ -934,6 +967,7 @@ export async function observeTasks(
 
     entry.terminal = { fate: "died", reason };
     await onTerminal(entry);
+    await archiveTaskAgentBestEffort(rpc, entry.agentId);
   };
   const resetWatchTrackers = (entry) => {
     entry.printedStatus = undefined;
@@ -1341,8 +1375,20 @@ export async function runDriver({ home, stateDir, spoolRoot, tasks, provider, wa
         ...(thinking === undefined ? {} : { thinking }),
         cwd: prep?.cwd ?? contract.workspace,
         brief,
+        ...(reply.leadAgentId === undefined ? {} : { parent: reply.leadAgentId }),
+        ...(reply.workspaceId === undefined ? {} : { workspaceId: reply.workspaceId }),
+        ...(reply.projectSlug === undefined ? {} : { projectSlug: reply.projectSlug }),
       });
-      entries.push({ task, agentId, workspace: prep?.cwd ?? contract.workspace, branch, brief });
+      entries.push({
+        task,
+        agentId,
+        workspace: prep?.cwd ?? contract.workspace,
+        branch,
+        brief,
+        ...(reply.leadAgentId === undefined ? {} : { leadAgentId: reply.leadAgentId }),
+        ...(reply.workspaceId === undefined ? {} : { workspaceId: reply.workspaceId }),
+        ...(reply.projectSlug === undefined ? {} : { projectSlug: reply.projectSlug }),
+      });
       created += 1;
       say(`factory: ${task} agent ${agentId.slice(0, 12)} created — watching to verdict`);
     } catch (err) {
