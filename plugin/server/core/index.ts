@@ -72,8 +72,8 @@ export { ensureFactorySkill, ensureFactorySkillSafe, factorySkillPath, renderFac
 export type { FactorySkillInput } from "./skill.ts";
 export { ackLeadMail, deliverLeadMail, enqueueLeadMail, foldLeadMailboxEvents, readLeadMailbox, recoverLeadMailbox, requeueLeadMail } from "./mailbox.ts";
 export type { LeadMailFrom, LeadMailKind, LeadMailboxEvent, LeadMailItem, LeadMailboxState } from "./mailbox.ts";
-export { createDefaultVaultRunner, hydrateVaultDirect, loadVaultConfig, pullVault, pushVault, readVaultStatus, saveVaultConfig, sealVaultBuffer, unsealVaultBuffer } from "./vault.ts";
-export type { HydrateVaultDirectOptions, PullVaultOptions, PushVaultOptions, VaultConfig, VaultEnvelope, VaultHydrationResult, VaultPushResult, VaultRunner, VaultRunnerCall, VaultRuntimeEnv, VaultStatusView } from "./vault.ts";
+export { createDefaultVaultRunner, ensureLocalGitExcludeAndWorktreeInclude, hydrateVaultDirect, loadVaultConfig, parseVaultManifest, pullVault, pushVault, readVaultStatus, reconcileVaultLedgers, resolveVaultApps, saveVaultConfig, sealVaultBuffer, unsealVaultBuffer } from "./vault.ts";
+export type { HydrateVaultDirectOptions, PullVaultOptions, PushVaultOptions, ResolvedVaultApp, VaultConfig, VaultEnvelope, VaultHydrationResult, VaultLedgerSource, VaultManifest, VaultManifestEntry, VaultPushResult, VaultRunner, VaultRunnerCall, VaultRuntimeEnv, VaultStatusView } from "./vault.ts";
 export {
   judgeShellCommand,
   judgeFilePath,
