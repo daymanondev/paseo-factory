@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { CorrelationRegistry } from "../src/correlations.ts";
-import { createFactory } from "../src/factory.ts";
+import { createFactory } from "../plugin/server/core/factory.ts";
 import { ensureProjectRegistered } from "../src/project.ts";
 import { readLeadMailbox } from "../src/mailbox.ts";
 import { createLeadMailRuntime } from "../plugin/server/lead-mailbox.ts";
@@ -281,8 +281,9 @@ test("bridge.mjs executes Supervisor, Lead, and Agent tools end-to-end over the 
     stateDir,
     factory,
     daemon: fakeDaemon as never,
-    ensureLead: async () => ({ ok: true, agentId: "lead-1", created: false }),
-    ensureSupervisor: async () => ({ ok: true, agentId: "sup-1", created: false }),
+    ensureLead: async () => ({ ok: true, agentId: "lead-1", created: false, projectRoot: repoDir, slug: reg.slug }),
+    ensureSupervisor: async () => ({ ok: true, agentId: "sup-1", created: false, projectRoot: repoDir, slug: reg.slug }),
+    retireLead: async () => ({ ok: true, agentId: "lead-1" }),
   });
 
   const spool = startSpool(stateDir, factory, {
@@ -404,7 +405,7 @@ test("bridge.mjs executes Supervisor, Lead, and Agent tools end-to-end over the 
 
     const blockerRes = (agentCall[1].result as { isError?: boolean; content: Array<{ text: string }> });
     assert.notEqual(blockerRes.isError, true, blockerRes.content[0].text);
-    const mailboxState = readLeadMailbox(join(stateDir, "projects", reg.slug, "mailbox.jsonl"), "lead");
+    const mailboxState = readLeadMailbox(join(stateDir, "projects", reg.slug, "mailbox.jsonl"));
     const allLeadMail = [...mailboxState.queued, ...(mailboxState.inFlight ? [mailboxState.inFlight] : [])];
     assert.ok(
       sentPrompts.some((p) => p.id === "lead-1" && p.text.includes("check edge case Y")) ||

@@ -29,6 +29,10 @@ import {
   SEAT_MEMORY_WHITELIST,
   SEAT_WRITE_FENCE_MESSAGE,
   extractWriteTargets,
+  isForbiddenPaseoToolName,
+  isPaseoFactoryToolName,
+  isProcessKillAgainstFactory,
+  isProtectedFactoryStatePath,
   isSeatMemoryPathAllowed,
   isSeatMemoryRelativePathAllowed,
   judgeFilePath,
@@ -39,6 +43,7 @@ import {
 } from "./core/choke.ts";
 import type { ChokeDecision, MemoryFence } from "./core/choke.ts";
 import { listProjectRegistrations } from "./projects.ts";
+import { readCorrelations } from "./correlations.ts";
 import { parseLane } from "./core/lanes.ts";
 import { SEAT_TITLES } from "./roles.ts";
 import type { SeatName } from "./roles.ts";
@@ -49,6 +54,10 @@ export {
   SEAT_MEMORY_WHITELIST,
   SEAT_WRITE_FENCE_MESSAGE,
   extractWriteTargets,
+  isForbiddenPaseoToolName,
+  isPaseoFactoryToolName,
+  isProcessKillAgainstFactory,
+  isProtectedFactoryStatePath,
   isSeatMemoryPathAllowed,
   isSeatMemoryRelativePathAllowed,
   judgeSeatFilePath,
@@ -401,6 +410,12 @@ export function resolveSeatAtProjectRoot(
       return { seat: "supervisor", projectRoot: reg.root !== "" ? reg.root : agent.cwd };
     }
   }
+  const correlations = readCorrelations(stateDir);
+  for (const rec of correlations) {
+    if (rec.agentId === agent.id && (rec.role === "supervisor" || rec.role === "lead")) {
+      return { seat: rec.role, projectRoot: rec.projectRoot !== "" ? rec.projectRoot : agent.cwd };
+    }
+  }
   return undefined;
 }
 
@@ -452,6 +467,19 @@ export function createChoke(options: ChokeOptions): Choke {
   const executionRootOf = (task: string, workspace: string): string => factory.worktreeFor(task) ?? workspace;
 
   const decide = (request: AgentPermissionRequest, workspace: string, memory?: MemoryFence): { decision: ChokeDecision; command?: string } => {
+    if (isForbiddenPaseoToolName(request.name)) {
+      return {
+        decision: {
+          behavior: "deny",
+          rule: "seat-paseo-tool-fence",
+          reason: "raw Paseo agent/messaging tool is forbidden inside a factory seat — use paseo_factory MCP tools instead",
+        },
+        command: request.name,
+      };
+    }
+    if (isPaseoFactoryToolName(request.name)) {
+      return { decision: { behavior: "allow" }, command: request.name };
+    }
     const roots = writableRootsFor(workspace, factory.stateDir, homeDir);
     const detail = request.detail;
     if (detail !== undefined && detail.type === "shell" && typeof detail.command === "string") {
@@ -476,6 +504,19 @@ export function createChoke(options: ChokeOptions): Choke {
     resolveSeatAtProjectRoot(factory.stateDir, agent);
 
   const decideSeat = (request: AgentPermissionRequest, projectRoot: string): { decision: ChokeDecision; command?: string } => {
+    if (isForbiddenPaseoToolName(request.name)) {
+      return {
+        decision: {
+          behavior: "deny",
+          rule: "seat-paseo-tool-fence",
+          reason: "raw Paseo agent/messaging tool is forbidden inside a factory seat — use paseo_factory MCP tools instead",
+        },
+        command: request.name,
+      };
+    }
+    if (isPaseoFactoryToolName(request.name)) {
+      return { decision: { behavior: "allow" }, command: request.name };
+    }
     const detail = request.detail;
     if (detail !== undefined && detail.type === "shell" && typeof detail.command === "string") {
       return {

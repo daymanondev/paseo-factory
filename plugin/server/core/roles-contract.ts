@@ -74,6 +74,12 @@ function formatCmdPrefix(factoryCmd?: string, home?: string): string {
 function renderSeatCommandBlock(seat: SeatName, cmdPrefix: string): string[] {
   if (seat === "supervisor") {
     return [
+      "Primary `paseo_factory` MCP tools (prefer calling these directly):",
+      "",
+      '  supervisor_dispatch_lead({ message: "<directive>", workspace: "<project-root>" })',
+      '  supervisor_accept_task({ task: "<id>", attempt: <n> })',
+      '  factory_status({ workspace: "<project-root>" })',
+      "",
       "Day-one Supervisor commands (the Owner CLI — never on a Worker agent's PATH):",
       "",
       `  ${cmdPrefix} lead dispatch --workspace "<project-root>" --message "<directive>"`,
@@ -83,6 +89,16 @@ function renderSeatCommandBlock(seat: SeatName, cmdPrefix: string): string[] {
     ];
   }
   return [
+    "Primary `paseo_factory` MCP tools (prefer calling these directly):",
+    "",
+    '  lead_set_contract({ task: "<id>", gate: "<cmd>", artifact: "<path>", scope: "<p1,p2>", skills: ["tdd"], description: "<text>" })',
+    '  lead_spawn_agent({ tasks: ["<id>"] })',
+    '  lead_accept_task({ task: "<id>", attempt: <n> })',
+    '  lead_repoke_agent({ task: "<id>" })',
+    '  lead_needs_human({ task: "<id>", reason: "attempt-ceiling", evidenceSeqs: [<attempt>, <gate>], summary: "<summary>" })',
+    '  lead_report_to_supervisor({ message: "<summary>", workspace: "<project-root>" })',
+    '  factory_status({ workspace: "<project-root>" })',
+    "",
     "Day-one Lead commands (the Owner CLI — never on a Worker agent's PATH):",
     "",
     `  ${cmdPrefix} contract --task <id> --workspace <dir> --gate <cmd> --artifact <path> [--scope <p1,p2>] [--skills <s1,s2>] [--watch] [--fresh-eyes] [--description <text>]`,
@@ -144,10 +160,10 @@ export function renderRoleContract(role: RoleName, options: RoleContractOptions 
       ? ` (task ${options.task}, project ${options.project.slug})`
       : "";
   return [
-    `You are a working Agent of the paseo-factory verification loop${agentIdentity}: you work your Contract strictly inside this assigned Task worktree on branch \`factory/${taskLabel}\`, run the Gate check, commit, call \`factory-claim --task ${taskLabel} --sha <sha>\`, and end your turn.`,
+    `You are a working Agent of the paseo-factory verification loop${agentIdentity}: you work your Contract strictly inside this assigned Task worktree on branch \`factory/${taskLabel}\`, run the Gate check, commit, call \`agent_claim\` (or \`factory-claim --task ${taskLabel} --sha <sha>\`), and end your turn.`,
     "You never modify AGENTS.md, CLAUDE.md, or CONTEXT.md unless your Contract's scope explicitly lists them — project memory is written by the Supervisor and Lead, not by you.",
     "Factory orchestration (the `factory` CLI: contract, run, accept) is withheld from you by PATH and by this brief — the only factory commands on your PATH are factory-claim and the git shim. The daemon exposes plugin tools (paseoTools) to every agent today, so an orchestration surface may still be visible to you: never call it — setting contracts, running the Driver, and accepting are the Owner's, Supervisor's, and Lead's acts.",
-    `Your factory CLI vocabulary (complete): \`factory-claim --task ${taskLabel} --sha <sha>\` — claim your Task when the Gate's done-criteria hold, then end your turn.`,
+    `Your \`paseo_factory\` MCP tools: \`agent_claim\` (submits your Claim, defaulting commit to HEAD) and \`agent_escalate_blocker\` (escalates an unresolvable blocker to Lead). Your factory CLI vocabulary (complete): \`factory-claim --task ${taskLabel} --sha <sha>\` — claim your Task when the Gate's done-criteria hold, then end your turn.`,
     "This instruction is additive: the repository's own AGENTS.md / CLAUDE.md, MCP servers, and skills catalog load natively alongside it.",
     "",
     skillFooter("agent"),
