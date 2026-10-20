@@ -9,7 +9,7 @@
 import { readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { FACTORY_VIEW_VERSION } from "../shared/view.ts";
-import type { AgentView, AttemptView, CompanionPluginView, FactoryView, LedgerLineView, Lanes, ProjectView, RetroView, TaskStatus, TaskView } from "../shared/view.ts";
+import type { AgentView, AttemptView, CompanionPluginView, FactoryView, LedgerLineView, Lanes, ProjectView, RetroView, TaskStatus, TaskView, VaultStatusView } from "../shared/view.ts";
 import { COMPANION_CATALOG } from "../shared/companions.ts";
 import type { LedgerEvent } from "./core/events.ts";
 
@@ -404,6 +404,13 @@ export function foldView(input: {
   project: ProjectView | null;
   /** Every discovered Project for the header's Project Selector. */
   projects: readonly ProjectView[];
+  /**
+   * The `Private vault` status half (v0.0.21, ADR 0014 §4) — the gathered
+   * `VaultStatusView` passes through the way `foldCompanions` folds the plugin
+   * list: the filesystem probe belongs to the gatherer (surface-rpc.ts), the
+   * fold stays pure over its inputs.
+   */
+  vault: VaultStatusView;
 }): FactoryView {
   const tasks = foldTasks(input.events);
   return {
@@ -427,6 +434,7 @@ export function foldView(input: {
     project: input.project,
     projects: [...input.projects],
     companions: foldCompanions(input.companions.plugins),
+    vault: input.vault,
   };
 }
 

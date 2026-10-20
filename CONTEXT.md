@@ -205,7 +205,7 @@ _Avoid_: fourth monitor agent role, mid-turn kill, context compaction on Lead
 ### Surface and configuration
 
 **Factory surface**:
-The plugin's client UI inside Paseo (sidebar global screen with Project selector, workspace-scoped panel bound to the active Project, and settings screen, ADR 0009, ADR 0010, ADR 0012): it renders a versioned view snapshot derived from the Project's Ledger, the Lane config, and live daemon state across four views (`Tasks` verification line, `Seats & Models` topology and 5-lane switcher, `Timeline & Retro`, and `Plugins` companion catalog), bridges to the Project's Supervisor seat via one-click ensure-or-open (and optional quick dispatch), and executes direct Owner acts (`Accept`, `Retro`, `Lane config` updates, `Supervisor` revoke, `Lead` rotate/revoke, `Companion plugin` lifecycle) through the plugin server's single writer. It never replaces the Paseo chat pane and never bypasses the single-writer law. Added in v0.0.13 (ADR 0009); updated in ADR 0010 and ADR 0012.
+The plugin's client UI inside Paseo (sidebar global screen with Project selector, workspace-scoped panel bound to the active Project, and settings screen, ADR 0009, ADR 0010, ADR 0012, ADR 0014): it renders a versioned view snapshot derived from the Project's Ledger, the Lane config, and live daemon state across four views (`Tasks` verification line, `Seats & Models` topology and 5-lane switcher, `Timeline & Retro`, and `Plugins` companion catalog + `Private vault` control), bridges to the Project's Supervisor seat via one-click ensure-or-open (and optional quick dispatch), and executes direct Owner acts (`Accept`, `Retro`, `Lane config` updates, `Supervisor` revoke, `Lead` rotate/revoke, `Companion plugin` lifecycle, `Private vault` direct hydrate / pull / push) through the plugin server's single writer. It never replaces the Paseo chat pane and never bypasses the single-writer law. Added in v0.0.13 (ADR 0009); updated in ADR 0010, ADR 0012, and ADR 0014.
 _Avoid_: dashboard, portal, control center, room panel
 
 **Lane config**:
@@ -217,6 +217,11 @@ The clean-room per-role `PI_CODING_AGENT_DIR` directory (`<stateDir>/pi-agent/<r
 _Avoid_: sandbox, profile dir, shadow home
 
 **Companion plugin**:
-A first-party Paseo plugin in the factory family (`factory-burn-lab`, `factory-connector`) listed in the `Factory surface`'s `Plugins` view and installed, updated, enabled, disabled, reloaded, or removed on the active daemon from its canonical remote GitHub source (ADR 0012).
+A first-party Paseo plugin in the factory family (`factory-burn-lab`, `factory-connector`, `factory-release-lab`) listed in the `Factory surface`'s `Plugins` view and installed, updated, enabled, disabled, reloaded, or removed on the active daemon from its canonical remote GitHub source (ADR 0012, ADR 0014).
 _Avoid_: addon, widget, module, local sibling
+
+**Private vault**:
+The Owner's private GitHub repository (`git:<owner>/<vault-repo>`, e.g. `daymanondev/factory-vault`, ADR 0014) storing private store and signing credentials (`.p8` App Store Connect keys, Google Play Service Account JSONs, Android `release.keystore` files, Firebase SDK configs, `eye.json`), operational configurations (`Lane config`, Fleet peer registry, store manifests), and node-partitioned `Ledger` / run snapshots outside the open-source factory plugin repositories. Consumed on any authenticated machine via either zero-clone **Direct hydrate** (`gh api` tarball/raw stream) or two-way **Vault sync** (`git clone` / `pull` / `push` at `<paseoHome>/vault`), materializing runtime secrets into `<paseoHome>/vault-runtime/` (`0o600`), mapping canonical app keys to local `<project-slug>` directories, and reconciling multi-node `Ledger` snapshots with monotonic `seq` re-indexing.
+_Avoid_: secret manager service, hardcoded local paths, git-crypt smudge repo
+
 

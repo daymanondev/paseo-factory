@@ -5,6 +5,89 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.21] - 2026-10-20
+
+v0.0.21's one thing: **the `Private vault`** — the `Owner`'s private GitHub
+repository becomes the single home for store and signing secrets,
+operational configs, and node-partitioned `Ledger` snapshots, hydrated on
+any authenticated machine with zero shell config, plus `Release Lab` as the
+third `Companion plugin` in the catalog (ADR 0014 made real).
+
+### Added
+
+- **Dual-mode secret envelopes, `VaultConfig` persistence, and the status
+  read (`src/vault.ts`, pinned in `test/vault.test.ts`)** —
+  `sealVaultBuffer` / `unsealVaultBuffer` round-trip three shapes
+  identically: raw plaintext or binary passes through untouched, the
+  zero-passphrase `obfuscated` envelope (the default, so GitHub Secret
+  Scanning never flags or auto-revokes a Google Cloud Service Account JSON),
+  and the passphrase-locked `aes-256-gcm` `.enc` envelope built on
+  `node:crypto` `scryptSync` alone — no `git-crypt`, `sops`, `age`, or `gpg`
+  — failing loudly with `vault-passphrase-required` /
+  `vault-decrypt-failed`. `loadVaultConfig` / `saveVaultConfig` keep
+  `vault-config.json` at `0o600` under the plugin state dir, and
+  `readVaultStatus` folds it into the `VaultStatusView` the surface renders.
+- **Zero-clone `Direct hydrate` and two-way `Vault sync` behind the
+  injectable `VaultRunner` seam (`src/vault.ts`, pinned in
+  `test/vault.test.ts`)** — `hydrateVaultDirect` streams the private repo
+  tarball through the machine's `gh` session, unseals in memory, and writes
+  straight into `<paseoHome>/vault-runtime/` (`0o600`) without ever leaving
+  a `.git` checkout on disk; `pullVault` / `pushVault` clone or
+  `pull --rebase --autostash` the cached checkout at `<paseoHome>/vault` and
+  push shared secrets, per-app signing files, `lanes.json`, store manifests,
+  and this node's `Ledger` snapshot back. The push side holds the shield:
+  a checkout path carrying an envelope never receives raw plaintext back —
+  unchanged content keeps the sealed bytes byte-exact (a no-op pull → push
+  commits nothing) and changed plaintext is re-sealed in the envelope's own
+  mode, refusing with `vault-push-passphrase-required` rather than guessing.
+  Every `gh` / `git` / `tar` call
+  runs through `createDefaultVaultRunner` (`GIT_TERMINAL_PROMPT=0`), so the
+  suite drives both modes against local bare repositories and in-memory
+  tarball fixtures with zero network calls.
+- **`Canonical project key` routing, the multi-node `Ledger` reconciler,
+  worktree hygiene, and `vault-runtime/env.json` (`src/vault.ts`, pinned in
+  `test/vault.test.ts`)** — `parseVaultManifest` / `resolveVaultApps` map a
+  `vault.manifest.json` canonical key (`patigame`) onto each host's own
+  `<projectRoot>` and `<project-slug>`, so the same app checked out at two
+  paths on two machines shares one vault entry; `reconcileVaultLedgers`
+  dedupes events by fingerprint, sorts them by `(ts, nodeId, seq)`, and
+  re-indexes `seq: 1..N` with an atomic write, so `Ledger.open` never throws
+  `corrupted-ledger` after a multi-node merge;
+  `ensureLocalGitExcludeAndWorktreeInclude` registers hydrated
+  `release.keystore` / `google-services.json` / `GoogleService-Info.plist`
+  in `<gitCommonDir>/info/exclude` and `.worktreeinclude`, keeping
+  `checkCleanAt` green and carrying the files into every `Task` worktree;
+  hydration writes `env.json` (`0o600`) with the six `VaultRuntimeEnv` keys.
+- **The `factory vault` CLI (`plugin/bin/vault.mjs`, pinned in
+  `test/vault-cli.test.ts`)** — `status | hydrate [--repo <owner/repo>]
+  [--ref <ref>] | pull | push | seal <file> --to <vaultPath>`, every verb
+  printing one JSON object on stdout so vault operations script and verify
+  mechanically.
+- **`view.vault`, the four `factory.vault.*` RPCs, and the `Private Vault
+  (GitHub)` card (`plugin/shared/view.ts`, `plugin/shared/rpc.ts`,
+  `plugin/server/surface-rpc.ts`, `plugin/client/factory/shell.tsx`, pinned
+  in `test/surface-rpc.test.ts`)** — `factory.vault.configure | hydrate |
+  pull | push` through the single-writer plugin server, and the card at the
+  top of the `Plugins` view and `Settings` screen with readiness pills (ASC
+  `.p8`, Google Play JSON, Eye Config, Hydrated Apps) and the one-click
+  `Hydrate Vault`, `Pull & Sync Vault`, and `Push to Vault` acts.
+- **`Release Lab` is the third `Companion plugin`
+  (`plugin/shared/companions.ts`, pinned in `test/surface-rpc.test.ts`)** —
+  `factory-release-lab` (`Rocket`,
+  `git:daymanondev/factory-release-lab:plugin`) joins `Burn Lab` and `Fleet
+  Connector` in `COMPANION_CATALOG` with the full one-click Install / Update
+  / Reload / Enable / Disable / Remove lifecycle (ADR 0012); closes upstream
+  issue `01-register-release-lab-in-companion-catalog.md`.
+- **Zero-shell-config consumption in the sibling `factory-release-lab`
+  v0.0.2** — `Release Lab` reads `<paseoHome>/vault-runtime/env.json`
+  whenever `ASC_KEY_PATH`, `ASC_KEY_ID`, `ASC_ISSUER`, `GPLAY_KEY_PATH`,
+  `RELEASE_LAB_KEYSTORE_STOREPASS`, or `FIREBASE_PROJECT_ID` is unset (Paseo
+  Desktop launched from Finder inherits no `~/.zshrc`), and
+  `wireSigningConfig` points `android/app/build.gradle` at
+  `System.getenv("RELEASE_LAB_KEYSTORE_STOREPASS")` / an excluded
+  `keystore.properties` instead of writing plaintext passwords.
+- `package.json` + `SHELL_VERSION` → `0.0.21`. Suite 463 → 509.
+
 ## [0.0.20] - 2026-10-19
 
 v0.0.20's one thing: **the SLP loop survives context** — compaction-proof

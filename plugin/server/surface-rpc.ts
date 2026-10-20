@@ -25,6 +25,8 @@ import { readLeadMailbox } from "./core/mailbox.ts";
 import { loadLanes, parseLane, saveLanes } from "./core/lanes.ts";
 import { projectStateDir, readProjectRegistration, resolveProject } from "./core/project.ts";
 import type { ProjectResolution } from "./core/project.ts";
+import { hydrateVaultDirect, loadVaultConfig, pullVault, pushVault, readVaultStatus, saveVaultConfig } from "./core/vault.ts";
+import type { VaultConfig, VaultRunner } from "./core/vault.ts";
 import { join } from "node:path";
 import type { LandingResult } from "./core/workspace.ts";
 import { FACTORY_VIEW_VERSION } from "../shared/view.ts";
@@ -53,8 +55,12 @@ import {
   supervisorEnsure,
   supervisorRevoke,
   taskDetail,
+  vaultConfigure,
+  vaultHydrate,
+  vaultPull,
+  vaultPush,
 } from "../shared/rpc.ts";
-import type { AgentView, LaneName, Lanes, ProjectView } from "../shared/view.ts";
+import type { AgentView, LaneName, Lanes, ProjectView, VaultStatusView } from "../shared/view.ts";
 
 // ---- the daemon slice ---------------------------------------------------------------------
 
@@ -167,6 +173,16 @@ export interface SurfaceDeps {
    * `lead-dispatch-unavailable` precedent).
    */
   leadDispatch?: (request: SpoolLeadDispatchRequest) => Promise<SpoolReply>;
+  /**
+   * The vault transport seam (v0.0.21, ADR 0014 §2; tests): every external
+   * CLI call the four `factory.vault.*` handlers make — `gh api`,
+   * `git clone/pull/add/commit/push` — rides this injectable `VaultRunner`
+   * instead of the vendored core's default (real children with
+   * `GIT_TERMINAL_PROMPT: "0"`), the same law `listPlugins`/`installPlugin`/
+   * `managePlugin` carry: tests drive both transports from in-memory
+   * fixtures, zero network.
+   */
+  vaultRunner?: VaultRunner;
   onLog?: (message: string) => void;
 }
 
@@ -230,6 +246,37 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   };
   const log = deps.onLog ?? (() => {});
   const failure = <C extends string>(code: C, error: string) => ({ ok: false as const, code, error });
+
+  /**
+   * The vault half's gather (v0.0.21, ADR 0014 §4): the vendored core's pure
+   * filesystem probe over `deps.home` — config fields, the `<home>/vault/.git`
+   * clone probe, and the shared-secret readiness pills. The core folds a
+   * damaged config into `error`; a probe that still throws degrades the same
+   * way (the daemon-half law: never a failed snapshot).
+   */
+  const vaultStatusOf = (): VaultStatusView => {
+    try {
+      return readVaultStatus(deps.home);
+    } catch (err) {
+      return {
+        configured: false,
+        repo: null,
+        branch: "main",
+        nodeId: "node",
+        hasPassphrase: false,
+        cloneExists: false,
+        lastHydratedAt: null,
+        lastHydrateMode: null,
+        lastPushedAt: null,
+        sharedSecrets: { ascKey: false, ascCredentials: false, gplayServiceAccount: false, eyeConfig: false },
+        hydratedApps: [],
+        error: messageOf(err),
+      };
+    }
+  };
+
+  /** The transport handlers' shared runner leg — the injected seam, else the core's default children. */
+  const vaultRunnerOptions = (): { runner?: VaultRunner } => (deps.vaultRunner === undefined ? {} : { runner: deps.vaultRunner });
 
   /**
    * Resolves a projectRoot RPC input — the one door every seats-only act
@@ -621,6 +668,10 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         // companion catalog — null when the list call was unavailable (the
         // degrade law: every entry folds to not_installed, never a refusal).
         companions: { plugins: daemonPlugins },
+        // v0.0.21 (ADR 0014 §4): the Private vault status half, gathered per
+        // snapshot the way the companion list is — a probe that cannot answer
+        // degrades inside the view's own `error` field, never a refusal.
+        vault: vaultStatusOf(),
         project,
         projects,
       });
@@ -912,6 +963,89 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       log(`plugins: ${summary}`);
       return { ok: true as const, pluginId: input.pluginId, action: input.action, summary };
     },
+
+    // ---- the Private vault surface (v0.0.21, ADR 0014 §2/§4) --------------------------------
+
+    async vaultConfigure(
+      input: { repo: string; branch: string; passphrase?: string },
+      _context?: SurfaceCallContext,
+    ): Promise<{ ok: true; vault: VaultStatusView } | { ok: false; code: string; error: string }> {
+      const repo = input.repo.trim();
+      if (repo === "") {
+        return failure("vault-invalid-repo", "the vault repo cannot be blank — pass the GitHub owner/repo slug (or a local git path for tests)");
+      }
+      let prior: VaultConfig | null;
+      try {
+        prior = loadVaultConfig(deps.home);
+      } catch (err) {
+        return failure(codeOf(err), messageOf(err));
+      }
+      // The passphrase tri-state: absent preserves the persisted value, an
+      // empty string clears it, text sets it (ADR 0014 Decision 3's optional leg).
+      const passphrase = input.passphrase === undefined ? prior?.passphrase : input.passphrase === "" ? undefined : input.passphrase;
+      const branch = input.branch.trim();
+      saveVaultConfig(deps.home, {
+        repo,
+        branch,
+        // The prior config's durable stamps survive a re-configure untouched.
+        ...(prior?.nodeId === undefined ? {} : { nodeId: prior.nodeId }),
+        ...(passphrase === undefined ? {} : { passphrase }),
+        ...(prior?.lastHydratedAt === undefined ? {} : { lastHydratedAt: prior.lastHydratedAt }),
+        ...(prior?.lastHydrateMode === undefined ? {} : { lastHydrateMode: prior.lastHydrateMode }),
+        ...(prior?.lastPushedAt === undefined ? {} : { lastPushedAt: prior.lastPushedAt }),
+      });
+      log(`vault: configured ${repo} (branch ${branch})`);
+      return { ok: true as const, vault: vaultStatusOf() };
+    },
+
+    async vaultHydrate(
+      input: { repo?: string; ref?: string },
+      _context?: SurfaceCallContext,
+    ): Promise<{ ok: true; vault: VaultStatusView; hydratedFiles: string[] } | { ok: false; code: string; error: string }> {
+      try {
+        const result = await hydrateVaultDirect(deps.home, {
+          ...(input.repo === undefined ? {} : { repo: input.repo }),
+          ...(input.ref === undefined ? {} : { ref: input.ref }),
+          ...vaultRunnerOptions(),
+        });
+        log(`vault: direct hydrate wrote ${result.hydratedFiles.length} files from the gh api tarball stream (no clone left behind)`);
+        return { ok: true as const, vault: vaultStatusOf(), hydratedFiles: result.hydratedFiles };
+      } catch (err) {
+        return failure(codeOf(err), messageOf(err));
+      }
+    },
+
+    async vaultPull(
+      input: { mergeLedgers?: boolean },
+      _context?: SurfaceCallContext,
+    ): Promise<{ ok: true; vault: VaultStatusView; hydratedFiles: string[] } | { ok: false; code: string; error: string }> {
+      try {
+        const result = await pullVault(deps.home, {
+          ...(input.mergeLedgers === undefined ? {} : { mergeLedgers: input.mergeLedgers }),
+          ...vaultRunnerOptions(),
+        });
+        log(`vault: sync pull hydrated ${result.hydratedFiles.length} files from the cached checkout${input.mergeLedgers === true ? " and reconciled node ledgers" : ""}`);
+        return { ok: true as const, vault: vaultStatusOf(), hydratedFiles: result.hydratedFiles };
+      } catch (err) {
+        return failure(codeOf(err), messageOf(err));
+      }
+    },
+
+    async vaultPush(
+      input: { includeLedgers?: boolean },
+      _context?: SurfaceCallContext,
+    ): Promise<{ ok: true; vault: VaultStatusView; pushedFiles: string[] } | { ok: false; code: string; error: string }> {
+      try {
+        const result = await pushVault(deps.home, {
+          ...(input.includeLedgers === undefined ? {} : { includeLedger: input.includeLedgers }),
+          ...vaultRunnerOptions(),
+        });
+        log(`vault: push packaged ${result.pushedFiles.length} files${result.pushed ? " and pushed a commit to the remote" : " — the checkout was already clean"}`);
+        return { ok: true as const, vault: vaultStatusOf(), pushedFiles: result.pushedFiles };
+      } catch (err) {
+        return failure(codeOf(err), messageOf(err));
+      }
+    },
   };
 }
 
@@ -939,4 +1073,8 @@ export function registerSurfaceRpc(server: PluginServerContext, handlers: Surfac
   server.handle(ratifyProposal, (input, context) => handlers.ratifyProposal(input, { paseo: context.paseo }));
   server.handle(pluginsInstall, (input, context) => handlers.pluginsInstall(input, { paseo: context.paseo }));
   server.handle(pluginsManage, (input, context) => handlers.pluginsManage(input, { paseo: context.paseo }));
+  server.handle(vaultConfigure, (input, context) => handlers.vaultConfigure(input, { paseo: context.paseo }));
+  server.handle(vaultHydrate, (input, context) => handlers.vaultHydrate(input, { paseo: context.paseo }));
+  server.handle(vaultPull, (input, context) => handlers.vaultPull(input, { paseo: context.paseo }));
+  server.handle(vaultPush, (input, context) => handlers.vaultPush(input, { paseo: context.paseo }));
 }
