@@ -13,13 +13,13 @@ import { useRpc } from "@getpaseo/plugin/client";
 import { Modal, ScrollView, useToast } from "@getpaseo/plugin/client/react-native";
 import { useState } from "react";
 import { Text, View } from "react-native";
-import { accept, lanesSet, leadDispatch, leadEnsure, leadRotate, pluginsInstall, pluginsManage, ratifyProposal, retro, snapshot, supervisorEnsure, supervisorRevoke, taskDetail, vaultConfigure, vaultHydrate, vaultImport, vaultPull, vaultPush, vaultSync } from "../../shared/rpc.ts";
+import { accept, lanesSet, leadDispatch, leadEnsure, leadRotate, pluginsInstall, pluginsManage, ratifyProposal, retro, snapshot, supervisorEnsure, supervisorRevoke, taskDetail, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
 import type { FactoryView, LaneName, TaskDetailView } from "../../shared/view.ts";
 import { Btn, Card, TabBar } from "../kit/pill.tsx";
 import type { TabId } from "../kit/pill.tsx";
 import { SPACING, text } from "../kit/theme.ts";
 import { useNow, usePoll, pollEvery } from "../kit/poll.ts";
-import { Header } from "./header.tsx";
+import { Header, isVaultActName } from "./header.tsx";
 import type { VaultNote } from "./header.tsx";
 import { TasksPane } from "./tasks.tsx";
 import { SeatsPane } from "./seats.tsx";
@@ -67,12 +67,8 @@ export function FactoryShell({
   // contract, every act through act() — the plugins pair's law.
   const vaultConfigureCall = useRpc(vaultConfigure);
   const vaultHydrateCall = useRpc(vaultHydrate);
-  const vaultPullCall = useRpc(vaultPull);
-  const vaultPushCall = useRpc(vaultPush);
   const vaultSyncCall = useRpc(vaultSync);
   const vaultImportCall = useRpc(vaultImport);
-  void vaultPullCall;
-  void vaultPushCall;
 
   const [tab, setTab] = useState<TabId>(initialTab);
   const [bump, setBump] = useState(0);
@@ -105,7 +101,7 @@ export function FactoryShell({
   const act = async (name: string, run: () => Promise<{ ok: boolean; error?: string | null; summary?: string }>): Promise<boolean> => {
     setBusy(true);
     setBusyAct(name);
-    const isVaultAct = name.startsWith("Vault");
+    const isVaultAct = isVaultActName(name);
     try {
       const reply = await run();
       if (!reply.ok) {

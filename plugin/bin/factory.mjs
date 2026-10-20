@@ -17,7 +17,9 @@
  *   factory [--home <paseoHome>] vault status | hydrate | pull | push | seal | sync | import
  *
  * contract and accept submit through the spool and wait for the plugin's
- * reply — the CLI never writes the ledger. run (v0.0.5) is the driver: per
+ * reply — the CLI never writes the ledger directly for loop acts (the sole
+ * offline exception is ADR 0014 §3.4's `vault pull --merge-ledgers` / `vault sync`
+ * multi-node ledger snapshot reconciliation). run (v0.0.5) is the driver: per
  * task it submits a `spawn` request through the same spool (the plugin
  * ledgered `spawn_dispatched`/`spawn_refused` either way), creates the agent
  * over the daemon's own WebSocket RPC, and watches to verdict — the heavy
@@ -684,6 +686,9 @@ if (command === "vault") {
     keystore: { type: "string" },
     "store-pass": { type: "string" },
     "key-alias": { type: "string" },
+    "firebase-project-id": { type: "string" },
+    "google-services-json": { type: "string" },
+    "google-service-info-plist": { type: "string" },
     "no-sync": { type: "boolean" },
   });
   const sub = parsed.positionals[0];
@@ -764,6 +769,9 @@ if (command === "vault") {
         "keystore",
         "store-pass",
         "key-alias",
+        "firebase-project-id",
+        "google-services-json",
+        "google-service-info-plist",
         "no-sync",
       ]);
       const result = await vault.importVaultSecrets(home, {
@@ -776,6 +784,15 @@ if (command === "vault") {
         ...(typeof values.keystore === "string" && values.keystore.trim() !== "" ? { keystorePath: resolvePath(values.keystore.trim()) } : {}),
         ...(typeof values["store-pass"] === "string" && values["store-pass"] !== "" ? { storePass: values["store-pass"] } : {}),
         ...(typeof values["key-alias"] === "string" && values["key-alias"].trim() !== "" ? { keyAlias: values["key-alias"].trim() } : {}),
+        ...(typeof values["firebase-project-id"] === "string" && values["firebase-project-id"].trim() !== ""
+          ? { firebaseProjectId: values["firebase-project-id"].trim() }
+          : {}),
+        ...(typeof values["google-services-json"] === "string" && values["google-services-json"].trim() !== ""
+          ? { googleServicesJsonPath: resolvePath(values["google-services-json"].trim()) }
+          : {}),
+        ...(typeof values["google-service-info-plist"] === "string" && values["google-service-info-plist"].trim() !== ""
+          ? { googleServiceInfoPlistPath: resolvePath(values["google-service-info-plist"].trim()) }
+          : {}),
         ...(values["no-sync"] ? { syncAfterImport: false } : {}),
       });
       console.log(JSON.stringify({ ok: true, ...result, pushed: result.synced?.pushed ?? false, vault: vault.readVaultStatus(home) }, null, 2));

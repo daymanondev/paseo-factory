@@ -18,6 +18,19 @@ import { CONTROL_H, CONTROL_SM, DOT, RADIUS, SPACING, text, tint } from "../kit/
 import type { Colour } from "../kit/theme.ts";
 import { GRACE_MS, pollEvery } from "../kit/poll.ts";
 
+export type VaultActName = "Vault Sync" | "Vault Import" | "Vault Configure" | "Vault Hydrate";
+
+const VAULT_ACT_NAMES: ReadonlySet<string> = new Set<VaultActName>([
+  "Vault Sync",
+  "Vault Import",
+  "Vault Configure",
+  "Vault Hydrate",
+]);
+
+export function isVaultActName(name: string): name is VaultActName {
+  return VAULT_ACT_NAMES.has(name);
+}
+
 export interface VaultNote {
   text: string;
   tone: "statusSuccess" | "statusDanger";
@@ -34,6 +47,10 @@ export interface VaultImportInput {
   ascKeyId?: string;
   ascIssuer?: string;
   gplayKeyPath?: string;
+  eyeConfigPath?: string;
+  appKey?: string;
+  keystorePath?: string;
+  storePass?: string;
   syncAfterImport?: boolean;
 }
 
@@ -126,6 +143,10 @@ export function VaultSyncBar({
   const [ascKeyId, setAscKeyId] = useState("");
   const [ascIssuer, setAscIssuer] = useState("");
   const [gplayKeyPath, setGplayKeyPath] = useState("");
+  const [eyeConfigPath, setEyeConfigPath] = useState("");
+  const [appKey, setAppKey] = useState("");
+  const [keystorePath, setKeystorePath] = useState("");
+  const [storePass, setStorePass] = useState("");
 
   const [repo, setRepo] = useState(vault.repo ?? vault.suggestedRepo ?? "");
   const [branch, setBranch] = useState(vault.branch || "main");
@@ -144,6 +165,10 @@ export function VaultSyncBar({
   const importing = busyAct === "Vault Import";
   const suggestedRepo = vault.suggestedRepo ?? (vault.ghUser !== null ? `${vault.ghUser}/factory-vault` : "owner/factory-vault");
   const lastSyncStamp = vault.lastPushedAt ?? vault.lastHydratedAt;
+  const syncAgeSeconds =
+    lastSyncStamp !== null && !Number.isNaN(Date.parse(lastSyncStamp))
+      ? Math.max(0, Math.round((Date.now() - Date.parse(lastSyncStamp)) / 1000))
+      : null;
   const trimmedRepo = repo.trim();
   const trimmedBranch = branch.trim();
   const trimmedPassphrase = passphrase.trim();
@@ -152,6 +177,7 @@ export function VaultSyncBar({
     { label: "ASC .p8", lit: vault.sharedSecrets.ascKey },
     { label: "GPlay JSON", lit: vault.sharedSecrets.gplayServiceAccount },
     { label: "Eye", lit: vault.sharedSecrets.eyeConfig },
+    { label: "Lanes", lit: vault.configured },
     { label: `Apps: ${vault.hydratedApps.length}`, lit: vault.hydratedApps.length > 0 },
   ];
 
@@ -238,7 +264,11 @@ export function VaultSyncBar({
             ))}
             {vault.hasPassphrase ? <Pill theme={theme} label="Passphrase" tone="accent" lit /> : null}
             <Text style={text(theme, "meta")}>
-              {lastSyncStamp !== null ? `synced ${lastSyncStamp.slice(0, 19).replace("T", " ")}` : "not synced yet"}
+              {syncAgeSeconds !== null
+                ? `synced ${readAgo(syncAgeSeconds)}`
+                : lastSyncStamp !== null
+                  ? `synced ${lastSyncStamp.slice(0, 19).replace("T", " ")}`
+                  : "not synced yet"}
             </Text>
           </View>
           <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5] }}>
@@ -322,6 +352,10 @@ export function VaultSyncBar({
             <VaultField theme={theme} label="ASC Key ID (ascKeyId)" value={ascKeyId} onChange={setAscKeyId} placeholder="ABC123DEFG" />
             <VaultField theme={theme} label="ASC Issuer ID (ascIssuer)" value={ascIssuer} onChange={setAscIssuer} placeholder="00000000-0000-0000-0000-000000000000" />
             <VaultField theme={theme} label="Google Play JSON Path (gplayKeyPath)" value={gplayKeyPath} onChange={setGplayKeyPath} placeholder="~/Downloads/service-account.json" />
+            <VaultField theme={theme} label="Eye Config Path (eyeConfigPath)" value={eyeConfigPath} onChange={setEyeConfigPath} placeholder="~/.paseo-factory/plugin-state/paseo-factory/eye.json" />
+            <VaultField theme={theme} label="App Key (appKey)" value={appKey} onChange={setAppKey} placeholder="patigame" />
+            <VaultField theme={theme} label="Android Keystore Path (keystorePath)" value={keystorePath} onChange={setKeystorePath} placeholder="~/keys/release.keystore" />
+            <VaultField theme={theme} label="Keystore Password (storePass)" value={storePass} onChange={setStorePass} placeholder="optional keystore password" secure />
           </View>
           <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1.5] }}>
             <Btn
@@ -337,6 +371,10 @@ export function VaultSyncBar({
                   ...(ascKeyId.trim() === "" ? {} : { ascKeyId: ascKeyId.trim() }),
                   ...(ascIssuer.trim() === "" ? {} : { ascIssuer: ascIssuer.trim() }),
                   ...(gplayKeyPath.trim() === "" ? {} : { gplayKeyPath: gplayKeyPath.trim() }),
+                  ...(eyeConfigPath.trim() === "" ? {} : { eyeConfigPath: eyeConfigPath.trim() }),
+                  ...(appKey.trim() === "" ? {} : { appKey: appKey.trim() }),
+                  ...(keystorePath.trim() === "" ? {} : { keystorePath: keystorePath.trim() }),
+                  ...(storePass.trim() === "" ? {} : { storePass: storePass.trim() }),
                   syncAfterImport: true,
                 })
               }

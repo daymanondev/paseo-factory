@@ -330,7 +330,9 @@ export async function probeGhAuth(runner) {
   }
 
   const store = (value) => {
-    ghAuthCache.set(effectiveRunner, { expiresAt: Date.now() + GH_AUTH_CACHE_TTL_MS, value });
+    if (value.ghAuthenticated) {
+      ghAuthCache.set(effectiveRunner, { expiresAt: Date.now() + GH_AUTH_CACHE_TTL_MS, value });
+    }
     return { ...value };
   };
 
@@ -739,13 +741,14 @@ export async function importVaultSecrets(paseoHome, input = {}) {
   const passphrase = resolveVaultPassphrase(config?.passphrase);
   const importedFiles = new Set();
   const runtimeRoot = join(paseoHome, "vault-runtime");
-
-  if (ascKeyPath !== undefined) {
-    const bytes = unsealVaultBuffer(readImportFile(ascKeyPath, "ASC .p8 key"), passphrase);
-    const rel = `secrets/shared/${SHARED_SECRET_FILES.ascKey}`;
+  const importFile = (rawPath, label, rel) => {
+    if (rawPath === undefined) return;
+    const bytes = unsealVaultBuffer(readImportFile(rawPath, label), passphrase);
     writeRuntimeFile(paseoHome, rel, bytes);
     importedFiles.add(rel);
-  }
+  };
+
+  importFile(ascKeyPath, "ASC .p8 key", `secrets/shared/${SHARED_SECRET_FILES.ascKey}`);
 
   if (ascKeyId !== undefined || ascIssuer !== undefined) {
     const rel = `secrets/shared/${SHARED_SECRET_FILES.ascCredentials}`;
@@ -759,19 +762,8 @@ export async function importVaultSecrets(paseoHome, input = {}) {
     importedFiles.add(rel);
   }
 
-  if (gplayKeyPath !== undefined) {
-    const bytes = unsealVaultBuffer(readImportFile(gplayKeyPath, "Google Play service account JSON"), passphrase);
-    const rel = `secrets/shared/${SHARED_SECRET_FILES.gplayServiceAccount}`;
-    writeRuntimeFile(paseoHome, rel, bytes);
-    importedFiles.add(rel);
-  }
-
-  if (eyeConfigPath !== undefined) {
-    const bytes = unsealVaultBuffer(readImportFile(eyeConfigPath, "Eye config JSON"), passphrase);
-    const rel = `secrets/shared/${SHARED_SECRET_FILES.eyeConfig}`;
-    writeRuntimeFile(paseoHome, rel, bytes);
-    importedFiles.add(rel);
-  }
+  importFile(gplayKeyPath, "Google Play service account JSON", `secrets/shared/${SHARED_SECRET_FILES.gplayServiceAccount}`);
+  importFile(eyeConfigPath, "Eye config JSON", `secrets/shared/${SHARED_SECRET_FILES.eyeConfig}`);
 
   const keystorePath = input.keystorePath?.trim() || undefined;
   const storePass = input.storePass?.trim() || undefined;
@@ -797,12 +789,7 @@ export async function importVaultSecrets(paseoHome, input = {}) {
     }
     assertSafeVaultPath(`secrets/apps/${appKey}`);
 
-    if (keystorePath !== undefined) {
-      const bytes = unsealVaultBuffer(readImportFile(keystorePath, "Android release keystore"), passphrase);
-      const rel = `secrets/apps/${appKey}/release.keystore`;
-      writeRuntimeFile(paseoHome, rel, bytes);
-      importedFiles.add(rel);
-    }
+    importFile(keystorePath, "Android release keystore", `secrets/apps/${appKey}/release.keystore`);
 
     if (storePass !== undefined || keyAlias !== undefined) {
       const rel = `secrets/apps/${appKey}/signing.json`;
@@ -822,10 +809,7 @@ export async function importVaultSecrets(paseoHome, input = {}) {
     }
 
     if (googleServicesJsonPath !== undefined) {
-      const bytes = unsealVaultBuffer(readImportFile(googleServicesJsonPath, "google-services.json"), passphrase);
-      const rel = `secrets/apps/${appKey}/google-services.json`;
-      writeRuntimeFile(paseoHome, rel, bytes);
-      importedFiles.add(rel);
+      importFile(googleServicesJsonPath, "google-services.json", `secrets/apps/${appKey}/google-services.json`);
     } else if (firebaseProjectId !== undefined) {
       const rel = `secrets/apps/${appKey}/google-services.json`;
       const prior = readJsonFile(join(runtimeRoot, rel)) ?? {};
@@ -841,12 +825,7 @@ export async function importVaultSecrets(paseoHome, input = {}) {
       importedFiles.add(rel);
     }
 
-    if (googleServiceInfoPlistPath !== undefined) {
-      const bytes = unsealVaultBuffer(readImportFile(googleServiceInfoPlistPath, "GoogleService-Info.plist"), passphrase);
-      const rel = `secrets/apps/${appKey}/GoogleService-Info.plist`;
-      writeRuntimeFile(paseoHome, rel, bytes);
-      importedFiles.add(rel);
-    }
+    importFile(googleServiceInfoPlistPath, "GoogleService-Info.plist", `secrets/apps/${appKey}/GoogleService-Info.plist`);
 
     const manifest = existsSync(join(runtimeRoot, "vault.manifest.json"))
       ? readVaultManifestAt(runtimeRoot)
@@ -902,6 +881,16 @@ async function ensureVaultCheckout(runner, config, vaultDir) {
     if (existsSync(vaultDir)) rmSync(vaultDir, { recursive: true, force: true });
     await runner({ command: "git", args: ["clone", remoteUrl, vaultDir] });
     await runner({ command: "git", args: ["checkout", "-B", config.branch], cwd: vaultDir });
+    const gitConfigPath = join(vaultDir, ".git", "config");
+    if (existsSync(gitConfigPath)) {
+      const gitConfig = readFileSync(gitConfigPath, "utf8");
+      if (!gitConfig.includes(`[branch "${config.branch}"]`)) {
+        writeFileSync(
+          gitConfigPath,
+          `${gitConfig.endsWith("\n") ? gitConfig : `${gitConfig}\n`}[branch "${config.branch}"]\n\tremote = origin\n\tmerge = refs/heads/${config.branch}\n`,
+        );
+      }
+    }
   }
 }
 
@@ -1512,6 +1501,23 @@ function collectLocalStateIntoRuntime(paseoHome) {
   const localEye = join(stateDir, "eye.json");
   if (existsSync(localEye) && !sharedSecretExists(paseoHome, SHARED_SECRET_FILES.eyeConfig)) {
     writeRuntimeFile(paseoHome, `secrets/shared/${SHARED_SECRET_FILES.eyeConfig}`, readFileSync(localEye));
+  }
+
+  const config = loadVaultConfig(paseoHome);
+  const passphrase = resolveVaultPassphrase(config?.passphrase);
+  const envAscPath = process.env.ASC_KEY_PATH?.trim();
+  if (envAscPath && !sharedSecretExists(paseoHome, SHARED_SECRET_FILES.ascKey)) {
+    const expanded = expandImportPath(envAscPath);
+    if (existsSync(expanded)) {
+      writeRuntimeFile(paseoHome, `secrets/shared/${SHARED_SECRET_FILES.ascKey}`, unsealVaultBuffer(readFileSync(expanded), passphrase));
+    }
+  }
+  const envGplayPath = process.env.GPLAY_KEY_PATH?.trim();
+  if (envGplayPath && !sharedSecretExists(paseoHome, SHARED_SECRET_FILES.gplayServiceAccount)) {
+    const expanded = expandImportPath(envGplayPath);
+    if (existsSync(expanded)) {
+      writeRuntimeFile(paseoHome, `secrets/shared/${SHARED_SECRET_FILES.gplayServiceAccount}`, unsealVaultBuffer(readFileSync(expanded), passphrase));
+    }
   }
 
   const runtimeRoot = join(paseoHome, "vault-runtime");
