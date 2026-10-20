@@ -35,7 +35,12 @@ third `Companion plugin` in the catalog (ADR 0014 made real).
   a `.git` checkout on disk; `pullVault` / `pushVault` clone or
   `pull --rebase --autostash` the cached checkout at `<paseoHome>/vault` and
   push shared secrets, per-app signing files, `lanes.json`, store manifests,
-  and this node's `Ledger` snapshot back. Every `gh` / `git` / `tar` call
+  and this node's `Ledger` snapshot back. The push side holds the shield:
+  a checkout path carrying an envelope never receives raw plaintext back —
+  unchanged content keeps the sealed bytes byte-exact (a no-op pull → push
+  commits nothing) and changed plaintext is re-sealed in the envelope's own
+  mode, refusing with `vault-push-passphrase-required` rather than guessing.
+  Every `gh` / `git` / `tar` call
   runs through `createDefaultVaultRunner` (`GIT_TERMINAL_PROMPT=0`), so the
   suite drives both modes against local bare repositories and in-memory
   tarball fixtures with zero network calls.
@@ -81,7 +86,7 @@ third `Companion plugin` in the catalog (ADR 0014 made real).
   `wireSigningConfig` points `android/app/build.gradle` at
   `System.getenv("RELEASE_LAB_KEYSTORE_STOREPASS")` / an excluded
   `keystore.properties` instead of writing plaintext passwords.
-- `package.json` + `SHELL_VERSION` → `0.0.21`. Suite 463 → 507.
+- `package.json` + `SHELL_VERSION` → `0.0.21`. Suite 463 → 509.
 
 ## [0.0.20] - 2026-10-19
 
