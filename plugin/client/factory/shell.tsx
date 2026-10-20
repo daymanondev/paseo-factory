@@ -13,7 +13,8 @@ import { useRpc } from "@getpaseo/plugin/client";
 import { Modal, ScrollView, useToast } from "@getpaseo/plugin/client/react-native";
 import { useState } from "react";
 import { Text, View } from "react-native";
-import { accept, lanesSet, leadDispatch, leadEnsure, leadRotate, pluginsInstall, pluginsManage, ratifyProposal, retro, snapshot, supervisorEnsure, supervisorRevoke, taskDetail, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
+import { accept, lanesSet, leadDispatch, leadEnsure, leadRotate, pluginsInstall, pluginsManage, projectReset, ratifyProposal, retro, snapshot, supervisorEnsure, supervisorRevoke, taskDetail, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
+
 import type { FactoryView, LaneName, TaskDetailView } from "../../shared/view.ts";
 import { Btn, Card, TabBar } from "../kit/pill.tsx";
 import type { TabId } from "../kit/pill.tsx";
@@ -59,7 +60,9 @@ export function FactoryShell({
   const leadEnsureCall = useRpc(leadEnsure);
   const leadRotateCall = useRpc(leadRotate);
   const leadDispatchCall = useRpc(leadDispatch);
+  const projectResetCall = useRpc(projectReset);
   const ratifyCall = useRpc(ratifyProposal);
+
   const detailCall = useRpc(taskDetail);
   const pluginsInstallCall = useRpc(pluginsInstall);
   const pluginsManageCall = useRpc(pluginsManage);
@@ -177,6 +180,10 @@ export function FactoryShell({
       return reply;
     });
   };
+  const resetProject = (): void => {
+    if (projectRoot === undefined) return;
+    void act("Reset Project", () => projectResetCall({ projectRoot }));
+  };
 
   return (
     <View style={{ flex: 1, backgroundColor: theme.colors.surface0 }}>
@@ -188,7 +195,8 @@ export function FactoryShell({
           now={now}
           supervisorLive={view.supervisor !== null}
           leadLive={view.lead !== null}
-          actions={{ openSupervisor, openLead, pickProject: (root) => setPickedRoot(root), busy }}
+          actions={{ openSupervisor, openLead, resetProject, pickProject: (root) => setPickedRoot(root), busy }}
+
           busyAct={busyAct}
           vaultNote={vaultNote}
           onVaultSync={(input) => {

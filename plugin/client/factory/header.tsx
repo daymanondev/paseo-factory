@@ -10,8 +10,9 @@
  */
 import type { PluginTheme } from "@getpaseo/plugin";
 import { Icon, TextInput } from "@getpaseo/plugin/client/react-native";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Text, View } from "react-native";
+
 import type { FactoryView, VaultStatusView } from "../../shared/view.ts";
 import { Btn, Card, Chip, Pill } from "../kit/pill.tsx";
 import { CONTROL_H, CONTROL_SM, DOT, RADIUS, SPACING, text, tint } from "../kit/theme.ts";
@@ -61,8 +62,11 @@ export interface HeaderActions {
   openLead(message?: string): void;
   /** The Project Selector's pick — null returns to the unscoped global view. */
   pickProject(root: string | null): void;
+  /** Owner-only clean-slate reset of the selected Project (v0.0.24, ADR 0016 §4). */
+  resetProject(): void;
   busy: boolean;
 }
+
 
 function VaultField({
   theme,
@@ -556,7 +560,14 @@ export function Header({
 }) {
   const [pickingPath, setPickingPath] = useState(false);
   const [customPath, setCustomPath] = useState("");
+  const [confirmingReset, setConfirmingReset] = useState(false);
+  useEffect(() => {
+    if (!confirmingReset) return;
+    const timer = setTimeout(() => setConfirmingReset(false), 5000);
+    return () => clearTimeout(timer);
+  }, [confirmingReset]);
   const busy = view.kpis.running + view.kpis.needsHuman > 0;
+
   const fresh = at !== null && now - at <= pollEvery(busy) + GRACE_MS;
   const dollars = view.kpis.totalCostUsd > 0 ? `$${view.kpis.totalCostUsd.toFixed(2)}` : "$0";
   const project = view.project;
@@ -692,8 +703,47 @@ export function Header({
                   disabled={actions.busy}
                   onPress={() => actions.openLead()}
                 />
+                {confirmingReset ? (
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1] }}>
+                    <Btn
+                      theme={theme}
+                      small
+                      solid
+                      icon="RotateCcw"
+                      label="Confirm Reset"
+                      tone="statusDanger"
+                      disabled={actions.busy}
+                      onPress={() => {
+                        setConfirmingReset(false);
+                        actions.resetProject();
+                      }}
+                    />
+                    <Btn
+                      theme={theme}
+                      small
+                      icon="X"
+                      label="Cancel"
+                      tone="foregroundMuted"
+                      disabled={actions.busy}
+                      onPress={() => setConfirmingReset(false)}
+                    />
+                  </View>
+                ) : (
+                  <View style={{ flexDirection: "row", alignItems: "center" }}>
+                    <Btn
+                      theme={theme}
+                      small
+                      icon="RotateCcw"
+                      label="Reset Project"
+                      tone="foregroundMuted"
+                      disabled={actions.busy}
+                      onPress={() => setConfirmingReset(true)}
+                    />
+                  </View>
+                )}
               </View>
             ) : null}
+
           </View>
         </View>
 

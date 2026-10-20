@@ -3059,5 +3059,140 @@ test("v0.0.24 (ADR 0015 §1–§2): ensureSeat sanitizes :thinking on create, re
   assert.deepEqual(fake.created[1]!.config, { provider: "claude/opus-4-8", thinkingOptionId: "max" });
 });
 
+test("v0.0.24 (ADR 0015 §5): projectReset wipes a project's ledger events, tasks, reports, worktrees, branches, mailbox, bound workers, and seats (unless keepSeats: true) while preserving lanes.json and other projects", async (t) => {
+  const projectA = makeProject(t, "reset-target");
+  const projectB = makeProject(t, "reset-bystander");
+  const agents: FakeAgent[] = [];
+  const { stateDir, home, factory, fake, stopped } = makeSurface(t, agents);
+
+  const archivedWorkspaces: string[] = [];
+  fake.daemon.workspaces = {
+    open: async () => ({ id: "ws-main", projectId: "paseo-proj-a" }),
+    create: async () => ({ id: "ws-wt-1", projectId: "paseo-proj-a" }),
+    archive: async (wsId: string) => {
+      archivedWorkspaces.push(wsId);
+    },
+    ref: () => ({
+      agents: {
+        create: async (opts) => fake.daemon.agents.create({ ...opts, cwd: projectA.root }),
+      },
+    }),
+  };
+
+  const mailboxResets: string[] = [];
+  const handlers = createSurfaceHandlers({
+    factory,
+    stateDir,
+    home,
+    daemon: fake.daemon,
+    stopAgent: async (agentId) => {
+      stopped.push(agentId);
+      return { ok: true };
+    },
+    resetProjectMailbox: (slug) => {
+      mailboxResets.push(slug);
+    },
+  });
+
+  // Save project-scoped lanes.json for projectA.
+  saveLanes(stateDir, { supervisor: "pi/zai/glm-5.3", lead: "pi/zai/glm-5.3", worker: "pi/zai/glm-5.3" }, projectA.slug);
+  const projectALanesFile = join(stateDir, "projects", projectA.slug, "lanes.json");
+  assert.equal(existsSync(projectALanesFile), true);
+
+  // Ensure Supervisor and Lead seats for projectA.
+  const supA = await handlers.supervisorEnsure({ projectRoot: projectA.root });
+  const leadA = await handlers.leadEnsure({ projectRoot: projectA.root });
+  assert.ok(supA.ok && leadA.ok);
+
+  // Contract T-RESET-1 in projectA with a real git worktree & branch factory/T-RESET-1, plus a claim.
+  const contractA = factory.setContract({ task: "T-RESET-1", workspace: projectA.root, gate: "true", artifact: "README.md" });
+  const wt = prepareTaskWorktree({ stateDir, workspace: projectA.root, task: "T-RESET-1" });
+  assert.ok(wt.ok, wt.ok ? "" : wt.reason);
+  assert.equal(existsSync(wt.path), true);
+  factory.requestSpawn({ task: "T-RESET-1", provider: "pi/zai/glm-5.3", arity: 1, worktree: wt.path });
+  const claimOut = await factory.claim({ task: "T-RESET-1", sha: contractA.base!, agent: "agent-worker-reset-1" });
+  assert.equal(existsSync(claimOut.reportPath), true);
+
+  // Seed a live working agent bound to T-RESET-1 in the daemon.
+  agents.push({
+    id: "agent-worker-reset-1",
+    labels: { seat: "agent", project: projectA.slug, task: "T-RESET-1" },
+    cwd: wt.path,
+    status: "running",
+  });
+
+  // Seed mailbox.jsonl, lead-handoff.md, and extra fields in project.json for projectA.
+  const projectADir = join(stateDir, "projects", projectA.slug);
+  enqueueLeadMail(join(projectADir, "mailbox.jsonl"), { from: "owner", kind: "directive", text: "build it" });
+  writeFileSync(join(projectADir, "lead-handoff.md"), "# handoff\n");
+  writeProjectRegistration(stateDir, projectA.slug, {
+    root: projectA.root,
+    rotationState: "handing_over",
+    handoffRequestedAt: "2026-10-20T00:00:00.000Z",
+    taskWorkspaces: { "T-RESET-1": "ws-wt-1" },
+    dispatchers: ["chat-dispatcher-1"],
+  });
+
+  // Contract T-KEEP-1 in projectB to verify other projects are undisturbed.
+  factory.setContract({ task: "T-KEEP-1", workspace: projectB.root, gate: "true", artifact: "README.md" });
+
+  // Execute full projectReset on projectA.
+  const resetRes = await handlers.projectReset({ projectRoot: projectA.root });
+  assert.ok(resetRes.ok, resetRes.ok ? "" : resetRes.error);
+  assert.equal(resetRes.project, projectA.slug);
+  assert.equal(resetRes.projectRoot, projectA.root);
+  assert.deepEqual(resetRes.tasks, ["T-RESET-1"]);
+  assert.ok(resetRes.purgedEvents >= 5);
+  assert.ok(resetRes.removedFiles >= 1);
+  assert.deepEqual(resetRes.archivedAgents, ["agent-worker-reset-1"]);
+  assert.deepEqual(resetRes.archivedSeats.sort(), [supA.agentId, leadA.agentId].sort());
+  assert.deepEqual(archivedWorkspaces, ["ws-wt-1"]);
+  assert.deepEqual(mailboxResets, [projectA.slug]);
+
+  // Worktree directory, factory/T-RESET-1 branch, report file, mailbox.jsonl, and lead-handoff.md are gone.
+  assert.equal(existsSync(wt.path), false, "task worktree directory was removed");
+  assert.equal(existsSync(join(projectADir, "worktrees")), false, "worktrees directory was removed");
+  assert.equal(existsSync(claimOut.reportPath), false, "report file was removed");
+  assert.equal(existsSync(join(projectADir, "mailbox.jsonl")), false, "mailbox.jsonl was removed");
+  assert.equal(existsSync(join(projectADir, "lead-handoff.md")), false, "lead-handoff.md was removed");
+
+  // lanes.json is preserved!
+  assert.equal(existsSync(projectALanesFile), true, "project lanes.json must be preserved across reset");
+  const preservedLanes = loadLanes(stateDir, projectA.slug);
+  assert.ok(preservedLanes.ok);
+  assert.equal(preservedLanes.lanes.supervisor, "pi/zai/glm-5.3");
+
+  // project.json is cleaned of seats, rotationState, taskWorkspaces, and dispatchers while preserving root.
+  const cleanedReg = readProjectRegistration(stateDir, projectA.slug);
+  assert.ok(cleanedReg !== undefined);
+  assert.equal(cleanedReg.root, projectA.root);
+  assert.equal(cleanedReg.supervisor, undefined);
+  assert.equal(cleanedReg.lead, undefined);
+  assert.equal(cleanedReg.rotationState, undefined);
+  assert.equal(cleanedReg.taskWorkspaces, undefined);
+  assert.equal(cleanedReg.dispatchers, undefined);
+
+  // Returned view has 0 tasks for projectA, while projectB's task remains intact.
+  assert.deepEqual(resetRes.view?.tasks, []);
+  assert.equal(factory.contractFor("T-RESET-1"), undefined);
+  assert.equal(factory.contractFor("T-KEEP-1")?.workspace, projectB.root);
+
+  // Test keepSeats: true by project slug.
+  const supA2 = await handlers.supervisorEnsure({ projectRoot: projectA.root });
+  const leadA2 = await handlers.leadEnsure({ projectRoot: projectA.root });
+  assert.ok(supA2.ok && leadA2.ok);
+  factory.setContract({ task: "T-RESET-2", workspace: projectA.root, gate: "true", artifact: "README.md" });
+
+  const keepRes = await handlers.projectReset({ project: projectA.slug, keepSeats: true });
+  assert.ok(keepRes.ok, keepRes.ok ? "" : keepRes.error);
+  assert.deepEqual(keepRes.tasks, ["T-RESET-2"]);
+  assert.deepEqual(keepRes.archivedSeats, [], "keepSeats: true preserves live Supervisor and Lead seats");
+  const keptReg = readProjectRegistration(stateDir, projectA.slug);
+  assert.equal(keptReg?.supervisor, supA2.agentId);
+  assert.equal(keptReg?.lead, leadA2.agentId);
+  assert.equal(factory.contractFor("T-RESET-2"), undefined);
+});
+
+
 
 
