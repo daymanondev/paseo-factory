@@ -146,6 +146,20 @@ commands:
                                           repository; the message may ride as
                                           one positional instead of --message.
 
+  supervisor Seat-aware directive dispatch or Lead -> Supervisor reporting
+             (v0.0.23, ADR 0015 §3/§5).
+             supervisor dispatch [--project <slug>] [--workspace <dir>] --message "<text>"
+                                           route a directive into the Project's
+                                           Supervisor mailbox (to="supervisor")
+                                           when called from a normal chat, or
+                                           transparently into Lead (to="lead")
+                                           when called from Supervisor.
+             supervisor report [--project <slug>] [--workspace <dir>] --message "<text>"
+                                           queue a Lead wave-completion or
+                                           escalation report in the Project's
+                                           Supervisor mailbox (to="supervisor",
+                                           from="lead", kind="report").
+
   retro      Run the Retro over the whole ledger, on demand (v0.0.7): the
              plugin builds the corpus digest, prompts the configured retro
              lane from <stateDir>/lanes.json (default pi/zai/glm-5.3),
@@ -573,6 +587,49 @@ if (command === "lead") {
   }
 
   fail(`lead: unknown subcommand "${sub ?? "(none)"}" — use "lead rotate --project <dir>" or "lead dispatch --project <slug> --message \\"<text>\\""`);
+}
+
+if (command === "supervisor") {
+  const parsed = parseCommandOptions({
+    project: { type: "string" },
+    workspace: { type: "string" },
+    message: { type: "string" },
+    "wait-secs": { type: "string" },
+  });
+  const sub = parsed.positionals[0];
+
+  if (sub === "dispatch" || sub === "report") {
+    const message = typeof parsed.values.message === "string" ? parsed.values.message : parsed.positionals[1];
+    if (message === undefined || message.trim() === "") {
+      fail(`supervisor ${sub}: --message "<text>" is required (or one positional message)`);
+    }
+    if (parsed.positionals.length > 2) fail(`supervisor ${sub}: unexpected positional "${parsed.positionals[2]}"`);
+    if (parsed.values.message !== undefined && parsed.positionals.length > 1) {
+      fail(`supervisor ${sub}: pass the message either as --message or as one positional, not both`);
+    }
+    const hasProject = typeof parsed.values.project === "string" && parsed.values.project.trim() !== "";
+    const hasWorkspace = typeof parsed.values.workspace === "string" && parsed.values.workspace.trim() !== "";
+    if (!hasProject && !hasWorkspace) {
+      fail(`supervisor ${sub}: --project <slug> or --workspace <dir> is required — the target Project`);
+    }
+    if (hasProject && hasWorkspace) {
+      fail(`supervisor ${sub}: name exactly one target — --project <slug> or --workspace <dir>`);
+    }
+    const reply = await roundTrip(
+      {
+        id: randomId(),
+        kind: sub === "dispatch" ? "supervisor_dispatch" : "supervisor_report",
+        ...(hasProject ? { project: parsed.values.project.trim() } : {}),
+        ...(hasWorkspace ? { workspace: resolvePath(parsed.values.workspace) } : {}),
+        message,
+      },
+      waitSeconds(parsed),
+    );
+    console.log(`factory: ${reply.summary}`);
+    process.exit(0);
+  }
+
+  fail(`supervisor: unknown subcommand "${sub ?? "(none)"}" — use "supervisor dispatch --workspace <dir> --message \\"<text>\\"" or "supervisor report --workspace <dir> --message \\"<text>\\""`);
 }
 
 if (command === "run") {
