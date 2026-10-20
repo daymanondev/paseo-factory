@@ -7,20 +7,23 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, 
 import { dirname, join } from "node:path";
 import { gzipSync } from "node:zlib";
 import {
+  Ledger,
   hydrateVaultDirect,
   loadVaultConfig,
   pullVault,
   readVaultStatus,
+  resolveProject,
   saveVaultConfig,
   sealVaultBuffer,
   unsealVaultBuffer,
+  writeProjectRegistration,
 } from "../src/index.ts";
 import type { VaultRunner } from "../src/index.ts";
 import {
   sealVaultBuffer as sealVaultBufferMjs,
   unsealVaultBuffer as unsealVaultBufferMjs,
 } from "../plugin/bin/vault.mjs";
-import { disposeDir, makeTempDir, repoRoot } from "./helpers.ts";
+import { disposeDir, gitCommitAll, makeTempDir, repoRoot } from "./helpers.ts";
 
 /**
  * `factory vault status | hydrate | pull | push | seal` — the Private vault's
@@ -343,17 +346,22 @@ test("vault refuses bad usage through fail(): exit 2, usage on stderr, nothing o
     assert.match(result.stderr, expected, args.join(" "));
   }
 
-  // the failure prints the usage — the vault stanza documents all five verbs
+  // the failure prints the usage — the vault stanza documents all seven verbs
   const first = await runFactory(["--home", dir, "vault"]);
   assert.match(first.stderr, /vault status/);
+  assert.match(first.stderr, /vault sync \[--repo <owner\/repo>\] \[--branch <branch>\] \[--passphrase <pass>\] \[--overwrite-configs\]/);
+  assert.match(first.stderr, /vault import \[--asc-key <path>\]/);
   assert.match(first.stderr, /vault hydrate \[--repo <owner\/repo>\] \[--ref <ref>\]/);
   assert.match(first.stderr, /vault pull/);
   assert.match(first.stderr, /vault push \[--include-ledger\]/);
   assert.match(first.stderr, /vault seal <file> --to <vaultPath> \[--passphrase <pass>\]/);
+  assert.ok(!first.stderr.includes("not this verb"), "usage no longer claims per-project materialization or mergeLedgers skip the CLI");
 
   // and `factory --help` carries the same stanza, exit 0
   const help = await runFactory(["--help"]);
   assert.equal(help.status, 0, help.stderr);
+  assert.match(help.stdout, /vault sync \[--repo <owner\/repo>\]/);
+  assert.match(help.stdout, /vault import \[--asc-key <path>\]/);
   assert.match(help.stdout, /vault seal <file> --to <vaultPath> \[--passphrase <pass>\]/);
 });
 
@@ -679,6 +687,312 @@ test("factory vault seal stages the zero-passphrase obfuscated envelope (and the
     Buffer.from(GCP_SERVICE_ACCOUNT, "utf8"),
     "the core unseals the CLI's locked envelope with the passphrase",
   );
+});
+
+// ---- v0.0.22 CLI parity: empty-remote bootstrap, pull --merge-ledgers, push --include-ledger per-project, sync, import ----
+
+test("factory vault pull and push handle an empty bare remote cleanly (empty-remote bootstrap)", async (t) => {
+  const emptyBare = makeBareRemote(t, "main");
+  const home = makeTempDir();
+  disposeDir(t, home);
+  saveVaultConfig(home, { repo: emptyBare, branch: "main", nodeId: "mac-studio" });
+
+  // 1. Pull against an empty bare remote (0 commits, no refs/heads/main)
+  const pullRes = await runFactory(["--home", home, "vault", "pull"]);
+  assert.equal(pullRes.status, 0, pullRes.stderr);
+  const pullPayload = JSON.parse(pullRes.stdout);
+  assert.equal(pullPayload.ok, true);
+  assert.deepEqual(pullPayload.hydratedFiles, []);
+  assert.ok(existsSync(join(home, "vault", ".git")), "checkout created on empty remote");
+  assert.equal(runGit(["symbolic-ref", "--short", "HEAD"], join(home, "vault")), "main");
+
+  // Re-pulling while remote is still empty also succeeds cleanly
+  const pullAgain = await runFactory(["--home", home, "vault", "pull"]);
+  assert.equal(pullAgain.status, 0, pullAgain.stderr);
+  assert.deepEqual(JSON.parse(pullAgain.stdout).hydratedFiles, []);
+
+  // 2. Push from a fresh home into another empty bare remote creates refs/heads/main
+  const emptyBare2 = makeBareRemote(t, "main");
+  const homePush = makeTempDir();
+  disposeDir(t, homePush);
+  saveVaultConfig(homePush, { repo: emptyBare2, branch: "main", nodeId: "mac-studio" });
+  const p8 = "-----BEGIN PRIVATE KEY-----\nasc api key\n-----END PRIVATE KEY-----\n";
+  mkdirSync(join(homePush, "vault-runtime", "secrets", "shared"), { recursive: true });
+  writeFileSync(join(homePush, "vault-runtime", "secrets", "shared", "asc-api-key.p8"), p8);
+
+  const pushRes = await runFactory(["--home", homePush, "vault", "push"]);
+  assert.equal(pushRes.status, 0, pushRes.stderr);
+  const pushPayload = JSON.parse(pushRes.stdout);
+  assert.equal(pushPayload.ok, true);
+  assert.equal(pushPayload.pushed, true);
+  assert.deepEqual(pushPayload.pushedFiles, ["secrets/shared/asc-api-key.p8"]);
+  assert.ok(bareHead(emptyBare2, "main").length > 0, "refs/heads/main created on empty bare remote");
+});
+
+test("factory vault pull --merge-ledgers materializes per-Project secrets, configs (--overwrite-configs), and reconciles ledgers in parity with pullVault", async (t) => {
+  const bare = makeBareRemote(t);
+  const keystore = randomBytes(512);
+  const signing = JSON.stringify({ storePassword: "correct-horse-battery", keyAlias: "upload", keyPassword: "correct-horse-battery" });
+  const googleServices = JSON.stringify({ project_info: { project_id: "patigame-prod" } });
+  const plist = '<?xml version="1.0"?>\n<plist/>\n';
+  const vaultLanes = JSON.stringify({ worker: "pi/zai/glm-5.3", supervisor: "copilot/gpt-5.4" });
+
+  const contract = JSON.stringify({ seq: 1, ts: "2026-10-20T09:00:00.000Z", event: "contract_set", task: "t01", workspace: "/w", gate: "npm test", artifact: "report.md", base: "e5b52cc" });
+  const claim = JSON.stringify({ seq: 2, ts: "2026-10-20T09:05:00.000Z", event: "claim_reported", task: "t01", attempt: 1, sha: "8fd67b4", agent: "pi" });
+  const macStudioProjSnapshot = [
+    contract,
+    claim,
+    JSON.stringify({ seq: 3, ts: "2026-10-20T09:20:00.000Z", event: "gate_finished", task: "t01", attempt: 1, exit: 0, verdict: "green", note: "all gates green", sha: "8fd67b4" }),
+  ].join("\n") + "\n";
+  const miniProjSnapshot = [
+    JSON.stringify({ seq: 2, ts: "2026-10-20T09:00:00.000Z", event: "contract_set", task: "t01", workspace: "/w", gate: "npm test", artifact: "report.md", base: "e5b52cc" }),
+    JSON.stringify({ seq: 3, ts: "2026-10-20T09:05:00.000Z", event: "claim_reported", task: "t01", attempt: 1, sha: "8fd67b4", agent: "pi" }),
+    JSON.stringify({ seq: 4, ts: "2026-10-20T09:40:00.000Z", event: "gate_finished", task: "t01", attempt: 2, exit: 1, verdict: "red", note: "flaky", sha: "b6f93a1" }),
+  ].join("\n") + "\n";
+  const globalNodeSnapshot = [
+    JSON.stringify({ seq: 1, ts: "2026-10-20T08:00:00.000Z", event: "contract_set", task: "g01", workspace: "/w", gate: "npm test", artifact: "report.md" }),
+    JSON.stringify({ seq: 2, ts: "2026-10-20T08:30:00.000Z", event: "meter_written", task: "g01", provider: "pi", usage: {} }),
+  ].join("\n") + "\n";
+
+  seedBareRemote(t, bare, {
+    "vault.manifest.json": JSON.stringify({ patigame: { repoBasename: "patigame" } }),
+    "config/lanes.json": vaultLanes,
+    "secrets/apps/patigame/release.keystore": keystore,
+    "secrets/apps/patigame/signing.json": signing,
+    "secrets/apps/patigame/google-services.json": googleServices,
+    "secrets/apps/patigame/GoogleService-Info.plist": plist,
+    "state/nodes/mac-studio/projects/patigame/ledger.jsonl": macStudioProjSnapshot,
+    "state/nodes/mini-m2/projects/patigame/ledger.jsonl": miniProjSnapshot,
+    "state/nodes/mac-studio/global-ledger.jsonl": globalNodeSnapshot,
+  });
+
+  const setupTwinHome = () => {
+    const parent = makeTempDir("paseo-factory-cli-parity-");
+    disposeDir(t, parent);
+    const repo = join(parent, "patigame");
+    mkdirSync(repo, { recursive: true });
+    writeFileSync(join(repo, "README.md"), "patigame\n");
+    gitCommitAll(repo);
+    const resolved = resolveProject(repo);
+    assert.ok(resolved.ok);
+
+    const home = makeTempDir();
+    disposeDir(t, home);
+    saveVaultConfig(home, { repo: bare, nodeId: "mini-m2" });
+    const stateDir = join(home, "plugin-state", "paseo-factory");
+    writeProjectRegistration(stateDir, resolved.slug, { root: repo });
+
+    const projLedger = join(stateDir, "projects", resolved.slug, "ledger.jsonl");
+    mkdirSync(dirname(projLedger), { recursive: true });
+    writeFileSync(
+      projLedger,
+      [
+        contract,
+        claim,
+        JSON.stringify({ seq: 3, ts: "2026-10-20T09:50:00.000Z", event: "attempt_accepted", task: "t01", attempt: 1, accepted_by: "owner" }),
+      ].join("\n") + "\n",
+    );
+    const globalLedger = join(stateDir, "ledger.jsonl");
+    writeFileSync(
+      globalLedger,
+      [
+        JSON.stringify({ seq: 1, ts: "2026-10-20T08:00:00.000Z", event: "contract_set", task: "g01", workspace: "/w", gate: "npm test", artifact: "report.md" }),
+        JSON.stringify({ seq: 2, ts: "2026-10-20T09:00:00.000Z", event: "retro_written", model: "copilot/gpt-5.4", outcome: "written", durationMs: 900 }),
+      ].join("\n") + "\n",
+    );
+    return { home, stateDir, repo, resolved, projLedger, globalLedger };
+  };
+
+  const cliTwin = setupTwinHome();
+  const coreTwin = setupTwinHome();
+
+  const cliPull = await runFactory(["--home", cliTwin.home, "vault", "pull", "--merge-ledgers"]);
+  assert.equal(cliPull.status, 0, cliPull.stderr);
+  await pullVault(coreTwin.home, { mergeLedgers: true });
+
+  // Per-Project secret materialization + git exclude & worktreeinclude hygiene
+  assert.deepEqual(readFileSync(join(cliTwin.repo, "android/app/release.keystore")), keystore);
+  assert.equal(
+    readFileSync(join(cliTwin.repo, "android/keystore.properties"), "utf8"),
+    "keyAlias=upload\nkeyPassword=correct-horse-battery\nstorePassword=correct-horse-battery\n",
+  );
+  assert.equal(readFileSync(join(cliTwin.repo, "android/app/google-services.json"), "utf8"), googleServices);
+  assert.equal(readFileSync(join(cliTwin.repo, "ios/GoogleService-Info.plist"), "utf8"), plist);
+  assert.equal(runGit(["status", "--porcelain"], cliTwin.repo), "", "hygiene keeps the checkout clean");
+
+  // Config materialization + --overwrite-configs
+  assert.equal(readFileSync(join(cliTwin.stateDir, "lanes.json"), "utf8"), vaultLanes);
+  const customLanes = JSON.stringify({ worker: "claude/opus-4-8" });
+  writeFileSync(join(cliTwin.stateDir, "lanes.json"), customLanes);
+  await runFactory(["--home", cliTwin.home, "vault", "pull"]);
+  assert.equal(readFileSync(join(cliTwin.stateDir, "lanes.json"), "utf8"), customLanes, "existing local config preserved without --overwrite-configs");
+  await runFactory(["--home", cliTwin.home, "vault", "pull", "--overwrite-configs"]);
+  assert.equal(readFileSync(join(cliTwin.stateDir, "lanes.json"), "utf8"), vaultLanes, "--overwrite-configs restores vault config");
+
+  // Reconciled ledgers match src/vault.ts byte-for-byte and open cleanly through Ledger.open
+  assert.equal(readFileSync(cliTwin.projLedger, "utf8"), readFileSync(coreTwin.projLedger, "utf8"), "CLI and core reconcile per-project ledger identically");
+  assert.equal(readFileSync(cliTwin.globalLedger, "utf8"), readFileSync(coreTwin.globalLedger, "utf8"), "CLI and core reconcile global ledger identically");
+  assert.equal(Ledger.open(cliTwin.projLedger).events.length, 5);
+  assert.equal(Ledger.open(cliTwin.globalLedger).events.length, 3);
+});
+
+test("factory vault push --include-ledger collects local configs, store-manifest.json, seals eye.json, and snapshots both global and per-Project ledgers", async (t) => {
+  const bare = makeBareRemote(t);
+  const parent = makeTempDir("paseo-factory-cli-push-proj-");
+  disposeDir(t, parent);
+  const patigame = join(parent, "patigame");
+  mkdirSync(patigame, { recursive: true });
+  writeFileSync(join(patigame, "README.md"), "patigame\n");
+  gitCommitAll(patigame);
+  runGit(["remote", "add", "origin", "git@github.com:daymanondev/patigame.git"], patigame);
+  const storeManifest = JSON.stringify({ bundleId: "com.patigame.app", packageName: "com.patigame" }, null, 2);
+  mkdirSync(join(patigame, ".store-release"), { recursive: true });
+  writeFileSync(join(patigame, ".store-release", "manifest.json"), storeManifest);
+  const resolved = resolveProject(patigame);
+  assert.ok(resolved.ok);
+
+  const home = makeTempDir();
+  disposeDir(t, home);
+  saveVaultConfig(home, { repo: bare, nodeId: "mac-studio" });
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  writeProjectRegistration(stateDir, resolved.slug, { root: patigame });
+
+  const lanesJson = JSON.stringify({ worker: "pi/zai/glm-5.3" });
+  const fleetJson = JSON.stringify({ peers: [{ id: "mini-m2" }] });
+  const freePoolJson = JSON.stringify({ pool: ["free"] });
+  const eyeJson = JSON.stringify({ provider: "openrouter", apiKey: "sk-or-secret-999" });
+  writeFileSync(join(stateDir, "lanes.json"), lanesJson);
+  writeFileSync(join(stateDir, "eye.json"), eyeJson);
+  mkdirSync(join(home, "connector"), { recursive: true });
+  writeFileSync(join(home, "connector", "fleet.json"), fleetJson);
+  mkdirSync(join(home, "burn-lab"), { recursive: true });
+  writeFileSync(join(home, "burn-lab", "free-pool.json"), freePoolJson);
+
+  writeFileSync(join(stateDir, "ledger.jsonl"), LEDGER_LINES);
+  const projLedgerPath = join(stateDir, "projects", resolved.slug, "ledger.jsonl");
+  mkdirSync(dirname(projLedgerPath), { recursive: true });
+  writeFileSync(projLedgerPath, LEDGER_LINES);
+
+  const res = await runFactory(["--home", home, "vault", "push", "--include-ledger"]);
+  assert.equal(res.status, 0, res.stderr);
+  const payload = JSON.parse(res.stdout);
+  assert.equal(payload.ok, true);
+  assert.equal(payload.pushed, true);
+  assert.deepEqual(payload.pushedFiles, [
+    "config/apps/patigame/store-manifest.json",
+    "config/fleet.json",
+    "config/free-pool.json",
+    "config/lanes.json",
+    "secrets/shared/eye.json",
+    "state/nodes/mac-studio/global-ledger.jsonl",
+    "state/nodes/mac-studio/projects/patigame/ledger.jsonl",
+    "vault.manifest.json",
+  ]);
+
+  const probe = makeTempDir();
+  disposeDir(t, probe);
+  runGit(["clone", bare, probe]);
+  assert.equal(readFileSync(join(probe, "state/nodes/mac-studio/global-ledger.jsonl"), "utf8"), LEDGER_LINES);
+  assert.equal(readFileSync(join(probe, "state/nodes/mac-studio/projects/patigame/ledger.jsonl"), "utf8"), LEDGER_LINES);
+  assert.equal(readFileSync(join(probe, "config/lanes.json"), "utf8"), lanesJson);
+  assert.equal(readFileSync(join(probe, "config/fleet.json"), "utf8"), fleetJson);
+  assert.equal(readFileSync(join(probe, "config/free-pool.json"), "utf8"), freePoolJson);
+  assert.equal(readFileSync(join(probe, "config/apps/patigame/store-manifest.json"), "utf8"), storeManifest);
+  const remoteEye = readFileSync(join(probe, "secrets/shared/eye.json"), "utf8");
+  assert.ok(!remoteEye.includes("sk-or-secret-999"), "eye.json is sealed on remote");
+  assert.equal(unsealVaultBuffer(Buffer.from(remoteEye, "utf8")).toString("utf8"), eyeJson);
+});
+
+test("factory vault sync and factory vault import work end-to-end across machines", async (t) => {
+  const bare = makeBareRemote(t);
+  const srcDir = makeTempDir();
+  disposeDir(t, srcDir);
+
+  const p8 = "-----BEGIN PRIVATE KEY-----\nasc api key imported via cli\n-----END PRIVATE KEY-----\n";
+  const eyePlain = JSON.stringify({ provider: "openrouter", apiKey: "sk-or-cli-eye" });
+  const keystore = randomBytes(512);
+  const ascKeyPath = join(srcDir, "AuthKey_CLI.p8");
+  const gplayKeyPath = join(srcDir, "gplay-cli.json");
+  const eyeConfigPath = join(srcDir, "eye-cli.json");
+  const keystorePath = join(srcDir, "release.keystore");
+  writeFileSync(ascKeyPath, p8);
+  writeFileSync(gplayKeyPath, GCP_SERVICE_ACCOUNT);
+  writeFileSync(eyeConfigPath, eyePlain);
+  writeFileSync(keystorePath, keystore);
+
+  const parent = makeTempDir("paseo-factory-cli-sync-import-");
+  disposeDir(t, parent);
+  const patigame = join(parent, "patigame");
+  mkdirSync(patigame, { recursive: true });
+  writeFileSync(join(patigame, "README.md"), "patigame\n");
+  gitCommitAll(patigame);
+  const resolved = resolveProject(patigame);
+  assert.ok(resolved.ok);
+
+  const home1 = makeTempDir();
+  disposeDir(t, home1);
+  saveVaultConfig(home1, { repo: bare, nodeId: "mac-studio" });
+  const stateDir1 = join(home1, "plugin-state", "paseo-factory");
+  writeProjectRegistration(stateDir1, resolved.slug, { root: patigame });
+  writeFileSync(join(stateDir1, "lanes.json"), JSON.stringify({ worker: "pi/zai/glm-5.3" }));
+  writeFileSync(join(stateDir1, "ledger.jsonl"), LEDGER_LINES);
+
+  // 1. `factory vault import --no-sync` imports locally without pushing to bare remote
+  const importNoSync = await runFactory([
+    "--home", home1, "vault", "import",
+    "--asc-key", ascKeyPath,
+    "--asc-key-id", "CLI_KEY_ID",
+    "--asc-issuer", "CLI_ISSUER_ID",
+    "--gplay-key", gplayKeyPath,
+    "--eye-config", eyeConfigPath,
+    "--app", "patigame",
+    "--keystore", keystorePath,
+    "--store-pass", "cli-store-pass",
+    "--key-alias", "upload",
+    "--no-sync",
+  ]);
+  assert.equal(importNoSync.status, 0, importNoSync.stderr);
+  const importNoSyncPayload = JSON.parse(importNoSync.stdout);
+  assert.equal(importNoSyncPayload.ok, true);
+  assert.equal(importNoSyncPayload.synced, null);
+  assert.equal(importNoSyncPayload.pushed, false);
+  assert.deepEqual(importNoSyncPayload.importedFiles, [
+    "secrets/apps/patigame/release.keystore",
+    "secrets/apps/patigame/signing.json",
+    "secrets/shared/asc-api-key.p8",
+    "secrets/shared/asc-credentials.json",
+    "secrets/shared/eye.json",
+    "secrets/shared/gplay-service-account.json",
+  ]);
+  assert.deepEqual(readFileSync(join(patigame, "android/app/release.keystore")), keystore, "import materializes keystore into project checkout");
+  const envJson1 = JSON.parse(readFileSync(join(home1, "vault-runtime", "env.json"), "utf8"));
+  assert.equal(envJson1.ASC_KEY_ID, "CLI_KEY_ID");
+  assert.equal(envJson1.ASC_ISSUER, "CLI_ISSUER_ID");
+  assert.equal(envJson1.RELEASE_LAB_KEYSTORE_STOREPASS, "cli-store-pass");
+
+  // 2. `factory vault sync` on home1 pushes everything (including ledgers & local state) to the empty bare remote
+  const sync1 = await runFactory(["--home", home1, "vault", "sync"]);
+  assert.equal(sync1.status, 0, sync1.stderr);
+  const sync1Payload = JSON.parse(sync1.stdout);
+  assert.equal(sync1Payload.ok, true);
+  assert.equal(sync1Payload.pushed, true);
+  assert.ok(sync1Payload.pushedFiles.includes("config/lanes.json"));
+  assert.ok(sync1Payload.pushedFiles.includes("secrets/shared/gplay-service-account.json"));
+  assert.ok(sync1Payload.pushedFiles.includes("state/nodes/mac-studio/global-ledger.jsonl"));
+  assert.ok(typeof sync1Payload.summary === "string" && sync1Payload.summary.length > 0);
+
+  // 3. `factory vault sync --repo <bare>` on a brand-new unconfigured home2 configures, pulls, hydrates, and reconciles ledgers in one command
+  const home2 = makeTempDir();
+  disposeDir(t, home2);
+  const sync2 = await runFactory(["--home", home2, "vault", "sync", "--repo", bare]);
+  assert.equal(sync2.status, 0, sync2.stderr);
+  const sync2Payload = JSON.parse(sync2.stdout);
+  assert.equal(sync2Payload.ok, true);
+  assert.equal(sync2Payload.repo, bare);
+  assert.ok(sync2Payload.hydratedFiles.includes("secrets/shared/asc-api-key.p8"));
+  assert.equal(readFileSync(join(home2, "vault-runtime", "secrets/shared/gplay-service-account.json"), "utf8"), GCP_SERVICE_ACCOUNT);
+  assert.equal(readFileSync(join(home2, "plugin-state", "paseo-factory", "lanes.json"), "utf8"), JSON.stringify({ worker: "pi/zai/glm-5.3" }));
+  assert.equal(Ledger.open(join(home2, "plugin-state", "paseo-factory", "ledger.jsonl")).events.length, 2);
 });
 
 // ---- the mirror law (ADR 0004) ---------------------------------------------------------------
