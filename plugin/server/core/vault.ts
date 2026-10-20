@@ -49,7 +49,17 @@ import { Ledger } from "./ledger.ts";
  * machine's ledgers. Push packages the runtime tree plus this node's
  * node-scoped ledger snapshots back into `<paseoHome>/vault` and pushes.
  * Envelopes ride the vault byte-exact — sealing policy stays with whoever
- * wrote the file.
+ * wrote the file — and the push side holds the shield itself
+ * (`stageRuntimeFileIntoCheckout`): a path whose checkout copy is an
+ * envelope never receives raw plaintext back, so a hydrate/pull → push
+ * cycle cannot strip the secret-scanning shield off the remote.
+ *
+ * The `<paseoHome>/vault` checkout has two legitimate writers — this core's
+ * RPCs (one plugin process) and the Owner CLI's engine mirror
+ * (`plugin/bin/vault.mjs`, a separate process). They never write
+ * concurrently in normal operation (the Owner drives one surface at a
+ * time); a genuine race collides on git's own `index.lock` and fails
+ * honestly with `vault-runner-failed` rather than corrupting the tree.
  */
 
 export interface VaultEnvelope {
@@ -399,7 +409,11 @@ export function createDefaultVaultRunner(): VaultRunner {
 const builtinVaultRunner = createDefaultVaultRunner();
 
 export interface HydrateVaultDirectOptions {
-  /** Defaults to the persisted config's repo. */
+  /**
+   * Defaults to the persisted config's repo. On a home with no saved config
+   * the override is persisted as the vault config of record — the hydrate
+   * that named the repo is the hydrate that configured the home.
+   */
   repo?: string;
   /** The tarball ref — defaults to the configured branch (`main` on a fresh config). */
   ref?: string;
@@ -511,10 +525,11 @@ export async function pullVault(paseoHome: string, options: PullVaultOptions = {
 /**
  * Mode B, publishing leg — `Vault push`: ensures the cached checkout at
  * `<paseoHome>/vault` (cloning when absent), packages the `vault-runtime`
- * tree into it by vault path verbatim (envelopes stay envelopes), snapshots
- * the global ledger under this node's namespace when `includeLedger` is set,
- * commits (nothing when the tree is clean — no empty commits) and pushes to
- * the configured remote. Stamps `lastPushedAt`.
+ * tree into it under the push-side re-seal law (`stageRuntimeFileIntoCheckout`
+ * — envelopes are never overwritten with their own unsealed plaintext),
+ * snapshots the global ledger under this node's namespace when `includeLedger`
+ * is set, commits (nothing when the tree is clean — no empty commits) and
+ * pushes to the configured remote. Stamps `lastPushedAt`.
  */
 export async function pushVault(paseoHome: string, options: PushVaultOptions = {}): Promise<VaultPushResult> {
   const config = requiredVaultConfig(paseoHome);
@@ -528,10 +543,9 @@ export async function pushVault(paseoHome: string, options: PushVaultOptions = {
 
   const runtimeRoot = join(paseoHome, "vault-runtime");
   const staged = existsSync(runtimeRoot) ? walkFiles(runtimeRoot, (rel) => rel === "env.json") : [];
+  const passphrase = resolveVaultPassphrase(config.passphrase);
   for (const rel of staged) {
-    const target = join(vaultDir, rel);
-    mkdirSync(dirname(target), { recursive: true });
-    copyFileSync(join(runtimeRoot, rel), target);
+    stageRuntimeFileIntoCheckout(join(runtimeRoot, rel), join(vaultDir, rel), passphrase);
   }
   const pushedFiles = new Set(staged);
   if (options.includeLedger) {
@@ -578,6 +592,85 @@ export async function pushVault(paseoHome: string, options: PushVaultOptions = {
 
 /** The default runner's stdout ceiling — vault tarballs are binary and can be large. */
 const VAULT_RUNNER_MAX_BUFFER_BYTES = 256 * 1024 * 1024;
+
+/**
+ * Stages one vault-runtime file into the vault checkout under the push-side
+ * re-seal law — the leg that keeps ADR 0014 Decision 3's secret-scanning
+ * shield true after a hydrate/pull has unsealed everything into
+ * `vault-runtime`:
+ *
+ * - The checkout holds no envelope at this path (absent, or plaintext) →
+ *   the runtime bytes ride verbatim: Plaintext Direct files and `vault
+ *   seal`-staged envelopes alike — sealing policy stays with whoever wrote
+ *   the file.
+ * - The checkout holds an envelope and the runtime bytes are byte-identical
+ *   → nothing is written (the no-op pull → push cycle commits nothing).
+ * - The checkout holds an envelope and the runtime bytes are themselves an
+ *   envelope unsealing to the same content → the checkout's sealed bytes
+ *   stay (no churn over equivalent envelopes).
+ * - The checkout holds an envelope and the runtime bytes are another
+ *   envelope (different content, or one this machine cannot open) → the
+ *   runtime envelope rides verbatim — it is sealed, never plaintext.
+ * - The checkout holds an envelope and the runtime bytes are plaintext that
+ *   unseals byte-identical → the checkout's sealed bytes stay.
+ * - The checkout holds an envelope and the runtime bytes are plaintext that
+ *   genuinely changed → the content is re-sealed with the envelope's own
+ *   mode (`obfuscated` zero-passphrase, `aes-256-gcm` with the resolved
+ *   passphrase — the same one that just unsealed the old copy).
+ * - The checkout holds an envelope this machine cannot unseal and the
+ *   runtime bytes differ from it as bytes → refused with
+ *   `vault-push-passphrase-required`: unverifiable is never traded for a
+ *   plaintext guess.
+ */
+function stageRuntimeFileIntoCheckout(runtimePath: string, target: string, passphrase: string | undefined): void {
+  let existing: Buffer | null = null;
+  try {
+    existing = readFileSync(target);
+  } catch {
+    existing = null; // no far-end file yet — a new vault path, rides verbatim below
+  }
+  const runtimeBytes = readFileSync(runtimePath);
+  const envelope = existing === null ? null : parseEnvelope(existing);
+  if (envelope !== null && existing !== null) {
+    if (runtimeBytes.equals(existing)) return; // byte-identical — nothing to stage
+    if (parseEnvelope(runtimeBytes) !== null) {
+      // sealed stays sealed: keep the checkout's envelope only when both unseal to the same content
+      if (tryUnseal(existing, passphrase, (a) => tryUnseal(runtimeBytes, passphrase, (b) => a.equals(b)))) return;
+    } else {
+      let unsealed: Buffer;
+      try {
+        unsealed = unsealVaultBuffer(existing, passphrase);
+      } catch {
+        throw new FactoryError(
+          "vault-push-passphrase-required",
+          `vault push cannot stage ${basename(target)}: the checkout holds a sealed envelope and no passphrase resolves to verify the runtime copy against it — restore the passphrase or stage an envelope (vault seal)`,
+        );
+      }
+      if (unsealed.equals(runtimeBytes)) return; // unchanged content — the sealed bytes stay, byte-exact
+      const resealed = Buffer.from(
+        `${JSON.stringify(sealVaultBuffer(runtimeBytes, envelope.mode === "aes-256-gcm" ? passphrase : undefined))}\n`,
+        "utf8",
+      );
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, resealed);
+      return;
+    }
+  }
+  mkdirSync(dirname(target), { recursive: true });
+  copyFileSync(runtimePath, target);
+}
+
+/** Runs `unseal` and maps both refusal codes to `false` — a verification probe, never a hard failure. */
+function tryUnseal(raw: Buffer, passphrase: string | undefined, then: (unsealed: Buffer) => boolean): boolean {
+  try {
+    return then(unsealVaultBuffer(raw, passphrase));
+  } catch (err) {
+    if (err instanceof FactoryError && (err.code === "vault-passphrase-required" || err.code === "vault-decrypt-failed")) {
+      return false;
+    }
+    throw err;
+  }
+}
 
 /** The config every sync-transport call needs, or the honest refusal. */
 function requiredVaultConfig(paseoHome: string): VaultConfig {

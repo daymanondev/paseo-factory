@@ -4,8 +4,10 @@
  * to src/vault.ts on the surfaces `factory vault` touches by
  * test/vault-cli.test.ts: the dual-mode envelopes round-trip byte-for-byte
  * against sealVaultBuffer/unsealVaultBuffer, `vault status` prints exactly
- * readVaultStatus's view, and hydrate/pull land the same vault-runtime tree
- * the core's transports land (envelopes, permissions, env.json included).
+ * readVaultStatus's view, hydrate/pull land the same vault-runtime tree the
+ * core's transports land (envelopes, permissions, env.json included), and
+ * push stages through the same re-seal law (a checkout path holding an
+ * envelope never receives raw plaintext back — stageRuntimeFileIntoCheckout).
  *
  * What the mirror deliberately does NOT carry — the plugin-side stage-C tail
  * (canonical-key routing into Project checkouts, worktree hygiene, multi-node
@@ -13,6 +15,13 @@
  * CLI moves the vault itself. `vault push --include-ledger` snapshots the
  * global ledger only, for the same reason: per-project snapshots ride the
  * canonical-key routing the plugin owns.
+ *
+ * The `<paseoHome>/vault` checkout this mirror writes has two legitimate
+ * writers — the plugin process (the Factory surface's vault RPCs, through the
+ * vendored core) and this CLI process. They are not serialized by a lock: the
+ * Owner drives one surface at a time in normal operation, and a genuine race
+ * collides on git's own `index.lock` and fails honestly
+ * (`vault-runner-failed`) rather than corrupting the tree.
  */
 import { execFile } from "node:child_process";
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
@@ -351,9 +360,10 @@ export async function pullVault(paseoHome) {
 
 /**
  * Mode B, publishing leg: ensures the cached checkout at `<paseoHome>/vault`
- * (cloning when absent), packages the `vault-runtime` tree into it by vault
- * path verbatim (envelopes stay envelopes; env.json — the machine-local
- * pointer index — never rides), optionally snapshots the global ledger under
+ * (cloning when absent), packages the `vault-runtime` tree into it under the
+ * push-side re-seal law (stageRuntimeFileIntoCheckout — envelopes are never
+ * overwritten with their own unsealed plaintext; env.json, the machine-local
+ * pointer index, never rides), optionally snapshots the global ledger under
  * this node's namespace, commits (nothing when the tree is clean — no empty
  * commits) and pushes. Stamps lastPushedAt.
  */
@@ -368,10 +378,9 @@ export async function pushVault(paseoHome, options = {}) {
 
   const runtimeRoot = join(paseoHome, "vault-runtime");
   const staged = existsSync(runtimeRoot) ? walkFiles(runtimeRoot, (rel) => rel === "env.json") : [];
+  const passphrase = resolveVaultPassphrase(config.passphrase);
   for (const rel of staged) {
-    const target = join(vaultDir, rel);
-    mkdirSync(dirname(target), { recursive: true });
-    copyFileSync(join(runtimeRoot, rel), target);
+    stageRuntimeFileIntoCheckout(join(runtimeRoot, rel), join(vaultDir, rel), passphrase);
   }
   const pushedFiles = new Set(staged);
   if (options.includeLedger) {
@@ -400,6 +409,67 @@ export async function pushVault(paseoHome, options = {}) {
 
   stampVaultConfig(paseoHome, config, config.repo, { lastPushedAt: nowIso() });
   return { pushedFiles: [...pushedFiles].sort(), pushed };
+}
+
+/**
+ * Stages one vault-runtime file into the vault checkout under the push-side
+ * re-seal law (src/vault.ts's stageRuntimeFileIntoCheckout, mirrored): a
+ * checkout path holding an envelope never receives raw plaintext back —
+ * byte-identical content keeps the sealed bytes (a no-op pull → push commits
+ * nothing), genuinely changed plaintext is re-sealed with the envelope's own
+ * mode, another envelope rides verbatim, and an envelope this machine cannot
+ * unseal to verify against refuses with vault-push-passphrase-required.
+ * Paths with no envelope at the far end ride verbatim — sealing policy stays
+ * with whoever wrote the file.
+ */
+function stageRuntimeFileIntoCheckout(runtimePath, target, passphrase) {
+  let existing = null;
+  try {
+    existing = readFileSync(target);
+  } catch {
+    existing = null; // no far-end file yet — a new vault path, rides verbatim below
+  }
+  const runtimeBytes = readFileSync(runtimePath);
+  const envelope = existing === null ? null : parseEnvelope(existing);
+  if (envelope !== null && existing !== null) {
+    if (runtimeBytes.equals(existing)) return; // byte-identical — nothing to stage
+    if (parseEnvelope(runtimeBytes) !== null) {
+      // sealed stays sealed: keep the checkout's envelope only when both unseal to the same content
+      if (tryUnseal(existing, passphrase, (a) => tryUnseal(runtimeBytes, passphrase, (b) => a.equals(b)))) return;
+    } else {
+      let unsealed;
+      try {
+        unsealed = unsealVaultBuffer(existing, passphrase);
+      } catch {
+        throw vaultError(
+          "vault-push-passphrase-required",
+          `vault push cannot stage ${basename(target)}: the checkout holds a sealed envelope and no passphrase resolves to verify the runtime copy against it — restore the passphrase or stage an envelope (vault seal)`,
+        );
+      }
+      if (unsealed.equals(runtimeBytes)) return; // unchanged content — the sealed bytes stay, byte-exact
+      const resealed = Buffer.from(
+        `${JSON.stringify(sealVaultBuffer(runtimeBytes, envelope.mode === "aes-256-gcm" ? passphrase : undefined))}\n`,
+        "utf8",
+      );
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, resealed);
+      return;
+    }
+  }
+  mkdirSync(dirname(target), { recursive: true });
+  copyFileSync(runtimePath, target);
+}
+
+/** Runs `unseal` and maps both refusal codes to false — a verification probe, never a hard failure. */
+function tryUnseal(raw, passphrase, then) {
+  try {
+    return then(unsealVaultBuffer(raw, passphrase));
+  } catch (err) {
+    if (err !== null && typeof err === "object" && (err.code === "vault-passphrase-required" || err.code === "vault-decrypt-failed")) {
+      return false;
+    }
+    throw err;
+  }
 }
 
 /**

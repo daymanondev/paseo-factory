@@ -576,6 +576,60 @@ test("factory vault push packages the runtime tree, pushes, and rides envelopes 
   assert.equal(bareHead(bare), headBefore, "the remote tip did not move");
 });
 
+test("factory vault pull → push roundtrip: the remote keeps its envelopes, a no-op cycle commits nothing, changed content re-seals", async (t) => {
+  const bare = makeBareRemote(t);
+  const p8 = "-----BEGIN PRIVATE KEY-----\nasc api key\n-----END PRIVATE KEY-----\n";
+  const gplayEnvelope = JSON.stringify(sealVaultBuffer(Buffer.from(GCP_SERVICE_ACCOUNT, "utf8")));
+  seedBareRemote(t, bare, {
+    "README.md": "vault\n",
+    "secrets/shared/asc-api-key.p8": p8,
+    "secrets/shared/gplay-service-account.json": gplayEnvelope,
+  });
+
+  const home = makeTempDir();
+  disposeDir(t, home);
+  saveVaultConfig(home, { repo: bare, nodeId: "mac-studio" });
+
+  const pull = await runFactory(["--home", home, "vault", "pull"]);
+  assert.equal(pull.status, 0, pull.stderr);
+  const runtimeGplay = join(home, "vault-runtime", "secrets", "shared", "gplay-service-account.json");
+  assert.equal(readFileSync(runtimeGplay, "utf8"), GCP_SERVICE_ACCOUNT, "the CLI's pull unsealed the envelope into vault-runtime");
+
+  // the no-op cycle through the CLI's mirror: the remote must keep its envelope and its tip
+  const headBefore = bareHead(bare);
+  const push = await runFactory(["--home", home, "vault", "push"]);
+  assert.equal(push.status, 0, push.stderr);
+  const payload = JSON.parse(push.stdout);
+  assert.equal(payload.pushed, false, "a no-op pull → push cycle over the unsealed runtime produces no commit");
+  assert.equal(bareHead(bare), headBefore, "the remote tip did not move");
+
+  const probe = makeTempDir();
+  disposeDir(t, probe);
+  runGit(["clone", bare, probe]);
+  const remoteGplay = readFileSync(join(probe, "secrets", "shared", "gplay-service-account.json"), "utf8");
+  assert.equal(remoteGplay, gplayEnvelope, "the remote still holds the sealed envelope, never the plaintext GSA JSON");
+  assert.ok(!remoteGplay.includes("PRIVATE KEY"), "no PEM marker ever reaches the remote through the CLI");
+
+  // genuinely changed content through the CLI: re-sealed with the envelope's own mode, still never plaintext
+  const rotated = GCP_SERVICE_ACCOUNT.replace("d1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1", "e2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2");
+  writeFileSync(runtimeGplay, rotated);
+  const changed = await runFactory(["--home", home, "vault", "push"]);
+  assert.equal(changed.status, 0, changed.stderr);
+  assert.equal(JSON.parse(changed.stdout).pushed, true, "genuinely changed content does commit");
+
+  const probe2 = makeTempDir();
+  disposeDir(t, probe2);
+  runGit(["clone", bare, probe2]);
+  const resealed = readFileSync(join(probe2, "secrets", "shared", "gplay-service-account.json"), "utf8");
+  assert.equal(
+    resealed,
+    `${JSON.stringify(sealVaultBuffer(Buffer.from(rotated, "utf8")))}\n`,
+    "the mirror re-seals changed plaintext with the envelope's own (deterministic obfuscated) mode",
+  );
+  assert.ok(!resealed.includes("PRIVATE KEY"), "the re-sealed copy still carries no PEM marker");
+  assert.deepEqual(unsealVaultBuffer(readFileSync(join(probe2, "secrets", "shared", "gplay-service-account.json"))), Buffer.from(rotated, "utf8"));
+});
+
 // ---- vault seal: staging envelopes into the runtime tree ------------------------------------
 
 test("factory vault seal stages the zero-passphrase obfuscated envelope (and the locked mode) into vault-runtime", async (t) => {

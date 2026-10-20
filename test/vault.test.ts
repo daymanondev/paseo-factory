@@ -594,6 +594,83 @@ test("pushVault with nothing new pushes no commit and leaves the remote tip wher
   assert.ok(!Number.isNaN(Date.parse(loadVaultConfig(home)?.lastPushedAt ?? "")), "lastPushedAt is stamped regardless");
 });
 
+test("pushVault after a pull keeps the remote's envelopes sealed — a no-op cycle commits nothing, changed content re-seals", async (t) => {
+  const bare = makeBareRemote(t);
+  const p8 = "-----BEGIN PRIVATE KEY-----\nasc api key\n-----END PRIVATE KEY-----\n";
+  const eyePlain = '{\n  "provider": "eye"\n}\n';
+  const gplayEnvelope = JSON.stringify(sealVaultBuffer(Buffer.from(GCP_SERVICE_ACCOUNT, "utf8")));
+  const eyeEnvelope = JSON.stringify(sealVaultBuffer(Buffer.from(eyePlain, "utf8"), "correct-horse-battery"));
+  seedBareRemote(t, bare, {
+    "README.md": "vault\n",
+    "secrets/shared/asc-api-key.p8": p8,
+    "secrets/shared/gplay-service-account.json": gplayEnvelope,
+    "secrets/shared/eye.json": eyeEnvelope,
+  });
+  const home = makeTempDir();
+  disposeDir(t, home);
+  saveVaultConfig(home, { repo: bare, nodeId: "mac-studio", passphrase: "correct-horse-battery" });
+
+  // the leak setup exactly: pull unseals every envelope into vault-runtime
+  await withVaultEnv(undefined, () => pullVault(home));
+  const runtimeGplay = join(home, "vault-runtime", "secrets", "shared", "gplay-service-account.json");
+  assert.equal(readFileSync(runtimeGplay, "utf8"), GCP_SERVICE_ACCOUNT, "pull unsealed the obfuscated GSA envelope into vault-runtime");
+  assert.equal(
+    readFileSync(join(home, "vault-runtime", "secrets", "shared", "eye.json"), "utf8"),
+    eyePlain,
+    "pull unsealed the locked envelope with the persisted passphrase",
+  );
+
+  // the no-op cycle: pushing the unsealed tree back must NOT overwrite the remote's envelopes with plaintext
+  const headBefore = bareHead(bare);
+  const noOp = await withVaultEnv(undefined, () => pushVault(home));
+  assert.equal(noOp.pushed, false, "a hydrate/pull → push cycle over unchanged content produces no commit");
+  assert.deepEqual(noOp.pushedFiles, [
+    "README.md",
+    "secrets/shared/asc-api-key.p8",
+    "secrets/shared/eye.json",
+    "secrets/shared/gplay-service-account.json",
+  ], "the staged set is still reported");
+  assert.equal(bareHead(bare), headBefore, "the remote tip did not move");
+
+  const probe = makeTempDir();
+  disposeDir(t, probe);
+  runGit(["clone", bare, probe]);
+  const remoteGplay = readFileSync(join(probe, "secrets/shared/gplay-service-account.json"), "utf8");
+  assert.equal(remoteGplay, gplayEnvelope, "the obfuscated GSA envelope rides byte-exact — never its plaintext");
+  assert.ok(!remoteGplay.includes("PRIVATE KEY"), "no PEM marker ever reaches the remote");
+  assert.equal(readFileSync(join(probe, "secrets/shared/eye.json"), "utf8"), eyeEnvelope, "the aes-256-gcm envelope rides byte-exact too");
+
+  // genuinely changed content: the runtime plaintext differs → re-sealed with the envelope's own mode, still never plaintext
+  const rotated = GCP_SERVICE_ACCOUNT.replace("d1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1", "e2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2");
+  writeFileSync(runtimeGplay, rotated);
+  const changed = await withVaultEnv(undefined, () => pushVault(home));
+  assert.equal(changed.pushed, true, "genuinely changed content does commit");
+
+  const probe2 = makeTempDir();
+  disposeDir(t, probe2);
+  runGit(["clone", bare, probe2]);
+  const resealed = readFileSync(join(probe2, "secrets/shared/gplay-service-account.json"), "utf8");
+  assert.equal(
+    resealed,
+    `${JSON.stringify(sealVaultBuffer(Buffer.from(rotated, "utf8")))}\n`,
+    "changed plaintext re-seals with the envelope's own (deterministic obfuscated) mode",
+  );
+  assert.ok(!resealed.includes("PRIVATE KEY"), "the re-sealed copy still carries no PEM marker");
+  assert.deepEqual(unsealVaultBuffer(readFileSync(join(probe2, "secrets/shared/gplay-service-account.json"))), Buffer.from(rotated, "utf8"), "and still unseals to the new content");
+
+  // an envelope this machine cannot verify against refuses honestly instead of guessing plaintext
+  saveVaultConfig(home, { repo: bare, nodeId: "mac-studio" }); // passphrase gone
+  const runtimeEye = join(home, "vault-runtime", "secrets", "shared", "eye.json");
+  writeFileSync(runtimeEye, '{\n  "provider": "rotated-eye"\n}\n');
+  const headAfterChanged = bareHead(bare);
+  await assert.rejects(
+    () => withVaultEnv(undefined, () => pushVault(home)),
+    factoryErrorCode("vault-push-passphrase-required"),
+    "changed plaintext over an unopenable envelope refuses — it is never traded for a plaintext guess",
+  );
+  assert.equal(bareHead(bare), headAfterChanged, "the refusal left the remote tip untouched");
+});
+
 test("pullVault clones the configured remote into <paseoHome>/vault and hydrates vault-runtime (sync mode)", async (t) => {
   const bare = makeBareRemote(t);
   const p8 = "-----BEGIN PRIVATE KEY-----\nasc api key\n-----END PRIVATE KEY-----\n";
