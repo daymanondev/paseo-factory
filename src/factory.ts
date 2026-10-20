@@ -336,6 +336,14 @@ export interface Factory {
    * path, pre-0.0.14 lines).
    */
   worktreeFor(task: string): string | undefined;
+  /** Completed gate verdicts for `task` in its current Contract epoch (v0.0.24). */
+  attemptsOf(task: string): GateFinished[];
+  /** Latest spawn or respawn dispatch for `task` in its current Contract epoch (v0.0.24). */
+  activeSpawnOf(task: string): SpawnDispatched | RespawnDispatched | undefined;
+  /** Latest progress-marker seq (`spawn_dispatched` or `gate_finished`) for `task` in its current Contract epoch, or `-1` if none (v0.0.24). */
+  lastProgressSeq(task: string): number;
+  /** Whether `task` currently stands in `needs_human` in its current Contract epoch (v0.0.24). */
+  isNeedsHuman(task: string): boolean;
   /**
    * Runs the Retro (v0.0.7): builds the whole-ledger digest, prompts the
    * pinned Copilot model, writes `retro-<date>.md`, appends one
@@ -451,11 +459,20 @@ export function createFactory(options: FactoryOptions): Factory {
           throw new FactoryError("watch-unconfigured", `the watch is on, but its lane is not usable: ${usable.reason}`);
         }
       }
-      const existing = ledger.eventsFor(task).some((e) => e.event === "contract_set");
-      if (existing) {
+      const fullHistory = ledger.eventsFor(task);
+      const priorAccept = acceptedAttempt(fullHistory);
+      if (priorAccept !== undefined) {
         throw new FactoryError(
-          "contract-exists",
-          `contract already set for task ${task}; the ledger is append-only — use a new task id`,
+          "already-accepted",
+          `task ${task} was already accepted at attempt ${priorAccept.attempt}; the ledger is append-only`,
+        );
+      }
+      const epochHistory = epochEventsFor(ledger, task);
+      const inFlight = inFlightAttempt(epochHistory);
+      if (inFlight !== undefined) {
+        throw new FactoryError(
+          "gate-running",
+          `attempt ${inFlight} of task ${task} is still open — wait for its verdict before re-contracting`,
         );
       }
       // The one concurrency guard the audit demanded (H1/H2, v0.0.5 ticket 02):
@@ -496,7 +513,8 @@ export function createFactory(options: FactoryOptions): Factory {
       assertTaskId(task);
       const contract = this.contractFor(task);
       if (!contract) throw new FactoryError("unknown-task", `no contract set for task ${task} — register one first`);
-      const history = ledger.eventsFor(task);
+      const fullHistory = ledger.eventsFor(task);
+      const history = epochEventsFor(ledger, task);
 
       // The watch's read of the scope station: undefined until it runs, then
       // the outside-scope files it found (empty = clean). Set where station 4
@@ -512,7 +530,7 @@ export function createFactory(options: FactoryOptions): Factory {
 
       // H6 rider (v0.0.5 ticket 02): an accepted task is closed — a Claim on it
       // used to fall through to a fresh Attempt; it refuses like accept does.
-      const priorAccept = acceptedAttempt(history);
+      const priorAccept = acceptedAttempt(fullHistory);
       if (priorAccept !== undefined) {
         throw new FactoryError(
           "already-accepted",
@@ -717,7 +735,8 @@ export function createFactory(options: FactoryOptions): Factory {
       if (!Number.isInteger(attempt) || attempt < 1) {
         throw new FactoryError("invalid-attempt", `attempt must be a positive integer, got ${attempt}`);
       }
-      const history = ledger.eventsFor(task);
+      const fullHistory = ledger.eventsFor(task);
+      const history = epochEventsFor(ledger, task);
       const contract = this.contractFor(task);
       if (contract === undefined) {
         throw new FactoryError("unknown-task", `no contract set for task ${task} — register one first`);
@@ -726,7 +745,7 @@ export function createFactory(options: FactoryOptions): Factory {
       if (events.length === 0) {
         throw new FactoryError("unknown-attempt", `task ${task} has no attempt ${attempt}`);
       }
-      const priorAccept = acceptedAttempt(history);
+      const priorAccept = acceptedAttempt(fullHistory);
       if (priorAccept !== undefined) {
         throw new FactoryError(
           "already-accepted",
@@ -823,8 +842,8 @@ export function createFactory(options: FactoryOptions): Factory {
       if (!contract) {
         return refuse("unknown-task", "spawn:unknown-task", `no contract set for task ${task} — register one first`);
       }
-      const history = ledger.eventsFor(task);
-      const priorAccept = acceptedAttempt(history);
+      const fullHistory = ledger.eventsFor(task);
+      const priorAccept = acceptedAttempt(fullHistory);
       if (priorAccept !== undefined) {
         return refuse(
           "already-accepted",
@@ -832,6 +851,7 @@ export function createFactory(options: FactoryOptions): Factory {
           `task ${task} was already accepted at attempt ${priorAccept.attempt} — the task is closed`,
         );
       }
+      const history = epochEventsFor(ledger, task);
       if (maxAttempt(history) >= MAX_ATTEMPTS && !history.some((e) => e.event === "gate_finished" && e.verdict === "green")) {
         return refuse(
           "attempt-ceiling",
@@ -908,8 +928,8 @@ export function createFactory(options: FactoryOptions): Factory {
       if (!contract) {
         return refuse("unknown-task", "repoke:unknown-task", `no contract set for task ${task} — the Lead presides over contracted work only`);
       }
-      const history = ledger.eventsFor(task);
-      const priorAccept = acceptedAttempt(history);
+      const fullHistory = ledger.eventsFor(task);
+      const priorAccept = acceptedAttempt(fullHistory);
       if (priorAccept !== undefined) {
         return refuse(
           "already-accepted",
@@ -917,6 +937,7 @@ export function createFactory(options: FactoryOptions): Factory {
           `task ${task} was already accepted at attempt ${priorAccept.attempt} — the task is closed`,
         );
       }
+      const history = epochEventsFor(ledger, task);
       // The structural one-per-task law: the dispatch line IS the spent
       // marker — a second ask names its own refusal, and a driver crash
       // re-reads this slice rather than trusting any socket.
@@ -951,8 +972,8 @@ export function createFactory(options: FactoryOptions): Factory {
       if (!contract) {
         return refuse("unknown-task", "respawn:unknown-task", `no contract set for task ${task} — register one first`);
       }
-      const history = ledger.eventsFor(task);
-      const priorAccept = acceptedAttempt(history);
+      const fullHistory = ledger.eventsFor(task);
+      const priorAccept = acceptedAttempt(fullHistory);
       if (priorAccept !== undefined) {
         return refuse(
           "already-accepted",
@@ -960,6 +981,7 @@ export function createFactory(options: FactoryOptions): Factory {
           `task ${task} was already accepted at attempt ${priorAccept.attempt} — the task is closed`,
         );
       }
+      const history = epochEventsFor(ledger, task);
       if (maxAttempt(history) >= MAX_ATTEMPTS) {
         return refuse(
           "attempt-ceiling",
@@ -1008,7 +1030,7 @@ export function createFactory(options: FactoryOptions): Factory {
       if (this.contractFor(task) === undefined) {
         throw new FactoryError("unknown-task", `no contract set for task ${task} — needs_human records a stalled run, and no run was ever contracted`);
       }
-      const history = ledger.eventsFor(task);
+      const history = epochEventsFor(ledger, task);
       if (reason === "denied-again" || reason === "silent-after-repoke") {
         const ev = evidence as { denial: number; repoke: number };
         const spent = history.findLast((e): e is RepokeDispatched => e.event === "repoke_dispatched");
@@ -1072,19 +1094,25 @@ export function createFactory(options: FactoryOptions): Factory {
 
     liveContractFor(cwd) {
       const accepted = acceptedTasks(ledger);
-      // The worktree map (v0.0.14, ADR 0010 §4): a task spawned into a managed
-      // Task worktree binds asks from that tree — the worktree sits under
-      // <stateDir>/projects/, OUTSIDE <project-root>, so the covers() test
-      // alone would miss every worktree agent. Latest dispatch per task wins.
+      // Only each unaccepted task's latest contract_set (and any spawn_dispatched
+      // in that current epoch) is live.
+      const latestContracts = new Map<string, ContractSet>();
+      for (const evt of ledger.events) {
+        if (evt.event === "contract_set" && !accepted.has(evt.task)) {
+          latestContracts.set(evt.task, evt);
+        }
+      }
       const worktrees = new Map<string, string>();
       for (const evt of ledger.events) {
         if (evt.event === "spawn_dispatched" && typeof evt.worktree === "string" && evt.worktree !== "") {
-          worktrees.set(evt.task, evt.worktree);
+          const contract = latestContracts.get(evt.task);
+          if (contract !== undefined && evt.seq >= contract.seq) {
+            worktrees.set(evt.task, evt.worktree);
+          }
         }
       }
       let match: ContractSet | undefined;
-      for (const evt of ledger.events) {
-        if (evt.event !== "contract_set" || accepted.has(evt.task)) continue;
+      for (const evt of latestContracts.values()) {
         if (covers(evt, cwd)) match = evt;
         const worktree = worktrees.get(evt.task);
         if (worktree !== undefined && (cwd === worktree || cwd.startsWith(`${worktree}/`))) match = evt;
@@ -1097,10 +1125,36 @@ export function createFactory(options: FactoryOptions): Factory {
     },
 
     worktreeFor(task) {
-      for (const evt of ledger.eventsFor(task).reverse()) {
+      for (const evt of epochEventsFor(ledger, task).reverse()) {
         if (evt.event === "spawn_dispatched" && typeof evt.worktree === "string" && evt.worktree !== "") return evt.worktree;
       }
       return undefined;
+    },
+
+    attemptsOf(task) {
+      assertTaskId(task);
+      return epochEventsFor(ledger, task).filter((e): e is GateFinished => e.event === "gate_finished");
+    },
+
+    activeSpawnOf(task) {
+      assertTaskId(task);
+      return epochEventsFor(ledger, task).findLast((e): e is SpawnDispatched => e.event === "spawn_dispatched");
+    },
+
+    lastProgressSeq(task) {
+      assertTaskId(task);
+      let progressSeq = 0;
+      for (const evt of epochEventsFor(ledger, task)) {
+        if (evt.event === "spawn_dispatched" || evt.event === "gate_finished") {
+          if (evt.seq > progressSeq) progressSeq = evt.seq;
+        }
+      }
+      return progressSeq;
+    },
+
+    isNeedsHuman(task) {
+      assertTaskId(task);
+      return taskInNeedsHuman(epochEventsFor(ledger, task));
     },
 
     async retro() {
@@ -1152,6 +1206,37 @@ export function createFactory(options: FactoryOptions): Factory {
       return outcome;
     },
   };
+}
+
+/**
+ * The seq of the latest `contract_set` event for `task`, or 0 when none exists.
+ * Every per-task fold and ceiling check scopes to the current Contract epoch
+ * (`seq >= latestContractSeq(ledger, task)`).
+ */
+export function latestContractSeq(ledger: Ledger, task: string): number {
+  const latest = ledger.eventsFor(task).findLast((e): e is ContractSet => e.event === "contract_set");
+  return latest?.seq ?? 0;
+}
+
+/** All ledger events for `task` in its current Contract epoch (`seq >= latestContractSeq`). */
+function epochEventsFor(ledger: Ledger, task: string): LedgerEvent[] {
+  const minSeq = latestContractSeq(ledger, task);
+  return ledger.eventsFor(task).filter((e) => e.seq >= minSeq);
+}
+
+/**
+ * Returns the attempt number of an in-flight Attempt in the given epoch history
+ * (a `claim_reported` or `gate_started` with no matching `gate_finished`), or
+ * `undefined` if no Attempt is currently running.
+ */
+function inFlightAttempt(history: readonly LedgerEvent[]): number | undefined {
+  for (const evt of history) {
+    if (evt.event === "claim_reported" || evt.event === "gate_started") {
+      const finished = history.some((e) => e.event === "gate_finished" && e.attempt === evt.attempt);
+      if (!finished) return evt.attempt;
+    }
+  }
+  return undefined;
 }
 
 /** A Contract covers a cwd when the cwd is the workspace or sits inside it. */
@@ -1222,8 +1307,13 @@ function liveWorkspaceConflict(
 ): { task: string; workspace: string; relation: WorkspaceRelation; overlapping?: string } | undefined {
   const mine = normalized(workspace);
   const accepted = acceptedTasks(ledger);
+  const latestContracts = new Map<string, ContractSet>();
   for (const evt of ledger.events) {
-    if (evt.event !== "contract_set" || evt.task === task || accepted.has(evt.task)) continue;
+    if (evt.event === "contract_set" && evt.task !== task && !accepted.has(evt.task)) {
+      latestContracts.set(evt.task, evt);
+    }
+  }
+  for (const evt of latestContracts.values()) {
     const theirs = normalized(evt.workspace);
     let relation: WorkspaceRelation | undefined;
     if (mine === theirs) relation = "equal";
@@ -1330,8 +1420,7 @@ async function finish(
     });
   }
   if (contract.watch === true) {
-    const gitBlocks = ledger
-      .eventsFor(task)
+    const gitBlocks = epochEventsFor(ledger, task)
       .filter((e): e is GitBlocked => e.event === "git_blocked")
       .map((e) => ({ rule: e.rule, command: e.command }));
     const watched = await runWatchPass({
@@ -1367,7 +1456,7 @@ async function finish(
 
 /** Every Attempt ends the same way: report rendered from the ledger, written, acknowledged. */
 function writeAttemptReport(task: string, attempt: number, ledger: Ledger, dataDir: string): string {
-  const markdown = renderReport(task, attempt, ledger.eventsFor(task));
+  const markdown = renderReport(task, attempt, epochEventsFor(ledger, task));
   const reportPath = join(dataDir, `report-${task}-${attempt}.md`);
   writeFileSync(reportPath, markdown);
   ledger.append({ event: "report_written", task, attempt, path: reportPath });
@@ -1414,7 +1503,7 @@ function recoverInterruptedAttempts(ledger: Ledger, dataDir: string): { task: st
   // `retro_written` carries no task — only tasked events can need recovery.
   const tasks = [...new Set(ledger.events.flatMap((e) => ("task" in e && typeof e.task === "string" ? [e.task] : [])))];
   for (const task of tasks) {
-    const history = ledger.eventsFor(task);
+    const history = epochEventsFor(ledger, task);
     for (let attempt = 1; attempt <= maxAttempt(history); attempt++) {
       if (!attemptIsOpen(history, attempt)) continue;
       const events = attemptEvents(history, attempt);

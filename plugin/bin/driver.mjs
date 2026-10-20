@@ -195,7 +195,17 @@ export function taskOutcome(events, task) {
   const outcome = { attempt: 0, verdict: undefined, sha: undefined, reportPath: undefined, allowed: 0, denied: 0, blocked: 0, accepted: false };
   for (const evt of events) {
     if (evt.task !== task) continue;
-    if (evt.event === "gate_finished") {
+    if (evt.event === "contract_set") {
+      if (!outcome.accepted) {
+        outcome.attempt = 0;
+        outcome.verdict = undefined;
+        outcome.sha = undefined;
+        outcome.reportPath = undefined;
+        outcome.allowed = 0;
+        outcome.denied = 0;
+        outcome.blocked = 0;
+      }
+    } else if (evt.event === "gate_finished") {
       outcome.attempt = evt.attempt;
       outcome.verdict = evt.verdict;
       outcome.sha = typeof evt.sha === "string" ? evt.sha : undefined;
@@ -599,6 +609,12 @@ export function leadDecision(events, task, now = Date.now(), { graceMs = GRACE_M
   const relevant = [];
   for (const evt of events) {
     if (evt.task !== task) continue;
+    if (evt.event === "contract_set") {
+      repoke = undefined;
+      lastGate = undefined;
+      relevant.length = 0;
+      continue;
+    }
     if (evt.event === "repoke_dispatched") repoke = evt;
     if (evt.event === "gate_finished") lastGate = evt;
     if (PREDICATE_IGNORED.has(evt.event)) continue;
@@ -648,7 +664,9 @@ export function leadDecision(events, task, now = Date.now(), { graceMs = GRACE_M
 function lastSpawnSeq(events, task) {
   let seq = -1;
   for (const evt of events) {
-    if (evt.task === task && (evt.event === "spawn_dispatched" || evt.event === "respawn_dispatched")) seq = evt.seq;
+    if (evt.task !== task) continue;
+    if (evt.event === "contract_set") seq = -1;
+    else if (evt.event === "spawn_dispatched" || evt.event === "respawn_dispatched") seq = evt.seq;
   }
   return seq;
 }
@@ -898,6 +916,14 @@ export async function observeTasks(
     let hasGreen = false;
     for (const evt of events) {
       if (evt.task !== entry.task) continue;
+      if (evt.event === "contract_set") {
+        lastSpawn = undefined;
+        lastGate = undefined;
+        lastRespawn = undefined;
+        maxAttempt = 0;
+        hasGreen = false;
+        continue;
+      }
       if (Number.isInteger(evt.attempt) && evt.attempt > maxAttempt) maxAttempt = evt.attempt;
       if (evt.event === "spawn_dispatched") lastSpawn = evt;
       else if (evt.event === "gate_finished") {

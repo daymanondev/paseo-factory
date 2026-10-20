@@ -24,7 +24,7 @@ import {
   PLUGIN_LIST_TTL_MS,
 } from "../plugin/server/daemon-cli.ts";
 import type { DaemonPluginItem } from "../plugin/server/daemon-cli.ts";
-import { foldCompanions } from "../plugin/server/view.ts";
+import { foldCompanions, foldTasks } from "../plugin/server/view.ts";
 import { factoryEnvFor, injectRoleOnCreate, injectSessionEnv, renderAgentContract, renderSeatBootstrap, renderSeatContract } from "../plugin/server/roles.ts";
 import type { AgentCreateRequest } from "../plugin/server/roles.ts";
 import { discoverProjects, readProjectRegistration, writeProjectRegistration } from "../plugin/server/projects.ts";
@@ -2758,5 +2758,76 @@ test("v0.0.23 (ADR 0015 §6): spool spawn/respawn registers Task worktree worksp
     "accept removed taskWorkspaces[T-WS-1] from project.json",
   );
 });
+
+test("foldTasks scopes attempts, status, needsHumanReason, lane, cost, and choke to the task's current Contract epoch (v0.0.24)", (t) => {
+  const { factory } = makeSurface(t);
+  // Epoch 1: contract T-01, 3 red attempts, choke events, meter, and needs_human.
+  factory.ledger.append({
+    event: "contract_set",
+    task: "T-01",
+    workspace: "/tmp/ws-old",
+    gate: "false",
+    artifact: "src/old.ts",
+    description: "Old epoch",
+  });
+  factory.ledger.append({ event: "spawn_dispatched", task: "T-01", provider: "opencode/old-model", arity: 1 });
+  for (const attempt of [1, 2, 3]) {
+    factory.ledger.append({ event: "claim_reported", task: "T-01", attempt, sha: "deadbeef" });
+    factory.ledger.append({ event: "gate_started", task: "T-01", attempt, cmd: "false" });
+    factory.ledger.append({ event: "gate_finished", task: "T-01", attempt, exit: 1, verdict: "red", note: "failed" });
+    factory.ledger.append({ event: "report_written", task: "T-01", attempt, path: `report-T-01-${attempt}.md` });
+  }
+  const lastGate = factory.ledger.eventsFor("T-01").findLast((e) => e.event === "gate_finished")!;
+  factory.ledger.append({ event: "permit_denied", task: "T-01", agent: "ag-1", name: "Write", kind: "tool", rule: "scope:outside", reason: "outside" });
+  factory.ledger.append({ event: "meter_written", task: "T-01", provider: "opencode/old-model", usage: { totalCostUsd: 0.42 } });
+  factory.ledger.append({ event: "needs_human", task: "T-01", reason: "attempt-ceiling", evidence: { attempt: 3, gate: lastGate.seq } });
+
+  const beforeRecontract = foldTasks(factory.ledger.events);
+  assert.equal(beforeRecontract.length, 1);
+  assert.equal(beforeRecontract[0]?.status, "needs-human");
+  assert.equal(beforeRecontract[0]?.attempts.length, 3);
+  assert.equal(beforeRecontract[0]?.needsHumanReason, "attempt-ceiling");
+
+  // Epoch 2: re-contract T-01 with updated contract metadata.
+  const c2 = factory.ledger.append({
+    event: "contract_set",
+    task: "T-01",
+    workspace: "/tmp/ws-new",
+    gate: "npm test",
+    artifact: "src/new.ts",
+    description: "New epoch",
+  });
+
+  const afterRecontract = foldTasks(factory.ledger.events);
+  assert.equal(afterRecontract.length, 1);
+  assert.equal(afterRecontract[0]?.task, "T-01");
+  assert.equal(afterRecontract[0]?.status, "waiting");
+  assert.deepEqual(afterRecontract[0]?.attempts, []);
+  assert.equal(afterRecontract[0]?.needsHumanReason, null);
+  assert.equal(afterRecontract[0]?.description, "New epoch");
+  assert.equal(afterRecontract[0]?.workspace, "/tmp/ws-new");
+  assert.equal(afterRecontract[0]?.lane, null);
+  assert.equal(afterRecontract[0]?.costState, "none");
+  assert.equal(afterRecontract[0]?.costUsd, null);
+  assert.deepEqual(afterRecontract[0]?.choke, { allowed: 0, denied: 0, blocked: 0 });
+  assert.equal(afterRecontract[0]?.lastSeq, c2.seq);
+
+  // Subsequent attempt in epoch 2 folds as attempt #1 and ready-to-accept.
+  factory.ledger.append({ event: "spawn_dispatched", task: "T-01", provider: "opencode/new-model", arity: 1 });
+  factory.ledger.append({ event: "claim_reported", task: "T-01", attempt: 1, sha: "cafebabe" });
+  factory.ledger.append({ event: "gate_started", task: "T-01", attempt: 1, cmd: "npm test" });
+  factory.ledger.append({ event: "gate_finished", task: "T-01", attempt: 1, exit: 0, verdict: "green", note: "ok", sha: "cafebabe" });
+  const r2 = factory.ledger.append({ event: "report_written", task: "T-01", attempt: 1, path: "report-T-01-1.md" });
+
+  const afterEpoch2Attempt = foldTasks(factory.ledger.events);
+  assert.equal(afterEpoch2Attempt[0]?.status, "ready-to-accept");
+  assert.equal(afterEpoch2Attempt[0]?.attempts.length, 1);
+  assert.equal(afterEpoch2Attempt[0]?.attempts[0]?.n, 1);
+  assert.equal(afterEpoch2Attempt[0]?.attempts[0]?.verdict, "green");
+  assert.equal(afterEpoch2Attempt[0]?.needsHumanReason, null);
+  assert.equal(afterEpoch2Attempt[0]?.lane, "opencode/new-model");
+  assert.equal(afterEpoch2Attempt[0]?.lastSeq, r2.seq);
+});
+
 
 

@@ -135,28 +135,29 @@ export function foldTasks(events: readonly AnyEvent[]): TaskView[] {
   const views: TaskView[] = [];
   for (const [task, slice] of byTask) {
     const contract = lastOf(slice, "contract_set");
-    const numbers = attemptNumbers(slice);
+    const epochSlice = contract === undefined ? slice : slice.filter((e) => e.seq >= contract.seq);
+    const numbers = attemptNumbers(epochSlice);
     if (contract === undefined && numbers.length === 0 && (task === "supervisor" || task === "lead")) {
       continue;
     }
     const accepted = lastOf(slice, "attempt_accepted");
-    const meter = lastOf(slice, "meter_written");
-    const spawn = lastOf(slice, "spawn_dispatched");
+    const meter = lastOf(epochSlice, "meter_written");
+    const spawn = lastOf(epochSlice, "spawn_dispatched");
     const lane = meter?.provider ?? spawn?.provider ?? null;
     const dollars = meter !== undefined && typeof meter.usage.totalCostUsd === "number" && Number.isFinite(meter.usage.totalCostUsd) ? meter.usage.totalCostUsd : undefined;
     const costState = meter === undefined ? "none" : dollars !== undefined ? "metered" : lane !== null && laneFamily(lane) === "copilot" ? "subscription" : "absent";
-    const needs = lastOf(slice, "needs_human");
+    const needs = lastOf(epochSlice, "needs_human");
     const attempts: AttemptView[] = [];
     let previousEndSeq = contract?.seq ?? 0;
     for (const n of numbers) {
-      attempts.push(attemptView(slice, n, previousEndSeq));
-      const attemptEvents = slice.filter((e) => "attempt" in e && e.attempt === n);
+      attempts.push(attemptView(epochSlice, n, previousEndSeq));
+      const attemptEvents = epochSlice.filter((e) => "attempt" in e && e.attempt === n);
       previousEndSeq = Math.max(previousEndSeq, ...attemptEvents.map((e) => e.seq));
     }
     let allowed = 0;
     let denied = 0;
     let blocked = 0;
-    for (const evt of slice) {
+    for (const evt of epochSlice) {
       if (evt.event === "permit_allowed") allowed += 1;
       else if (evt.event === "permit_denied") denied += 1;
       else if (evt.event === "git_blocked") blocked += 1;
@@ -165,7 +166,7 @@ export function foldTasks(events: readonly AnyEvent[]): TaskView[] {
       task,
       workspace: contract?.workspace ?? "",
       description: contract?.description ?? null,
-      status: statusOf(slice),
+      status: statusOf(epochSlice),
       accepted: accepted !== undefined,
       acceptedBy: accepted?.accepted_by ?? null,
       lane,
