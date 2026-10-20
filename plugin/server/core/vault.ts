@@ -92,6 +92,13 @@ export interface VaultRuntimeEnv {
   FIREBASE_PROJECT_ID?: string;
 }
 
+export interface VaultGhAuthStatus {
+  ghInstalled: boolean;
+  ghAuthenticated: boolean;
+  ghUser: string | null;
+  suggestedRepo: string | null;
+}
+
 export interface VaultStatusView {
   configured: boolean;
   repo: string | null;
@@ -109,6 +116,10 @@ export interface VaultStatusView {
     eyeConfig: boolean;
   };
   hydratedApps: string[];
+  ghInstalled: boolean;
+  ghAuthenticated: boolean;
+  ghUser: string | null;
+  suggestedRepo: string | null;
   error: string | null;
 }
 
@@ -240,7 +251,7 @@ export function saveVaultConfig(paseoHome: string, config: Partial<VaultConfig> 
  * in `error` instead of crashing the read. `hydratedApps` lists the canonical
  * app keys with secrets hydrated under `vault-runtime/secrets/apps/`.
  */
-export function readVaultStatus(paseoHome: string, passphrase?: string): VaultStatusView {
+export function readVaultStatus(paseoHome: string, passphrase?: string, ghAuth?: VaultGhAuthStatus): VaultStatusView {
   let config: VaultConfig | null = null;
   let error: string | null = null;
   try {
@@ -267,6 +278,10 @@ export function readVaultStatus(paseoHome: string, passphrase?: string): VaultSt
       eyeConfig: sharedSecretExists(paseoHome, SHARED_SECRET_FILES.eyeConfig),
     },
     hydratedApps: hydratedAppKeys(paseoHome),
+    ghInstalled: ghAuth?.ghInstalled ?? false,
+    ghAuthenticated: ghAuth?.ghAuthenticated ?? false,
+    ghUser: ghAuth?.ghUser ?? null,
+    suggestedRepo: ghAuth?.suggestedRepo ?? null,
     error,
   };
 }
@@ -381,9 +396,25 @@ export interface VaultRunnerCall {
  */
 export type VaultRunner = (call: VaultRunnerCall) => Promise<Buffer>;
 
+const VAULT_FALLBACK_PATH_DIRS = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"] as const;
+
+/**
+ * Appends macOS/POSIX fallback binary directories to `basePath` when absent,
+ * preserving any caller/test prepended entries first so `PATH` shims always win.
+ */
+export function buildVaultPath(basePath = process.env.PATH ?? ""): string {
+  const segments = basePath.split(":").filter((segment) => segment !== "");
+  for (const fallback of VAULT_FALLBACK_PATH_DIRS) {
+    if (!segments.includes(fallback)) segments.push(fallback);
+  }
+  return segments.join(":");
+}
+
 export function createDefaultVaultRunner(): VaultRunner {
   return (call) =>
     new Promise<Buffer>((resolve, reject) => {
+      const childEnv: NodeJS.ProcessEnv = { ...process.env, ...call.env, GIT_TERMINAL_PROMPT: "0" };
+      childEnv.PATH = buildVaultPath(childEnv.PATH);
       execFile(
         call.command,
         [...call.args],
@@ -391,7 +422,7 @@ export function createDefaultVaultRunner(): VaultRunner {
           cwd: call.cwd,
           encoding: "buffer",
           maxBuffer: VAULT_RUNNER_MAX_BUFFER_BYTES,
-          env: { ...process.env, ...call.env, GIT_TERMINAL_PROMPT: "0" },
+          env: childEnv,
         },
         (err, stdout, stderr) => {
           if (err) {
@@ -407,6 +438,179 @@ export function createDefaultVaultRunner(): VaultRunner {
 
 /** The runner every transport uses unless the caller injects one. */
 const builtinVaultRunner = createDefaultVaultRunner();
+
+const GH_AUTH_CACHE_TTL_MS = 15_000;
+const ghAuthCache = new Map<VaultRunner, { expiresAt: number; value: VaultGhAuthStatus }>();
+
+/** Clears the 15-second `probeGhAuth` cache (used by tests and explicit login re-checks). */
+export function clearGhAuthCache(): void {
+  ghAuthCache.clear();
+}
+
+/**
+ * Probes GitHub CLI (`gh`) installation and active `github.com` login via
+ * `gh auth status --json hosts` (falling back to `gh api user --jq .login`
+ * when `--json` is unsupported on older `gh`), cached for 15 seconds per
+ * runner so snapshot polls never spam subprocesses.
+ */
+export async function probeGhAuth(runner?: VaultRunner): Promise<VaultGhAuthStatus> {
+  const effectiveRunner = runner ?? builtinVaultRunner;
+  const now = Date.now();
+  const cached = ghAuthCache.get(effectiveRunner);
+  if (cached !== undefined && now < cached.expiresAt) {
+    return { ...cached.value };
+  }
+
+  const store = (value: VaultGhAuthStatus): VaultGhAuthStatus => {
+    ghAuthCache.set(effectiveRunner, { expiresAt: Date.now() + GH_AUTH_CACHE_TTL_MS, value });
+    return { ...value };
+  };
+
+  try {
+    const out = await effectiveRunner({ command: "gh", args: ["auth", "status", "--json", "hosts"] });
+    const parsed = parseGhHostsStatus(out.toString("utf8"));
+    if (parsed.kind === "authenticated") {
+      return store({
+        ghInstalled: true,
+        ghAuthenticated: true,
+        ghUser: parsed.login,
+        suggestedRepo: `${parsed.login}/factory-vault`,
+      });
+    }
+    if (parsed.kind === "unauthenticated") {
+      return store({ ghInstalled: true, ghAuthenticated: false, ghUser: null, suggestedRepo: null });
+    }
+  } catch (err) {
+    if (isGhMissingError(err)) {
+      return store({ ghInstalled: false, ghAuthenticated: false, ghUser: null, suggestedRepo: null });
+    }
+    if (isGhUnauthenticatedError(err)) {
+      return store({ ghInstalled: true, ghAuthenticated: false, ghUser: null, suggestedRepo: null });
+    }
+  }
+
+  try {
+    const out = await effectiveRunner({ command: "gh", args: ["api", "user", "--jq", ".login"] });
+    const login = out.toString("utf8").trim().split(/\r?\n/)[0]?.trim() ?? "";
+    if (login !== "" && !login.includes(" ") && !login.startsWith("{")) {
+      return store({
+        ghInstalled: true,
+        ghAuthenticated: true,
+        ghUser: login,
+        suggestedRepo: `${login}/factory-vault`,
+      });
+    }
+  } catch (err) {
+    if (isGhMissingError(err)) {
+      return store({ ghInstalled: false, ghAuthenticated: false, ghUser: null, suggestedRepo: null });
+    }
+  }
+
+  return store({ ghInstalled: true, ghAuthenticated: false, ghUser: null, suggestedRepo: null });
+}
+
+function parseGhHostsStatus(raw: string): { kind: "authenticated"; login: string } | { kind: "unauthenticated" } | { kind: "unknown" } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { kind: "unknown" };
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return { kind: "unknown" };
+  const hosts = (parsed as { hosts?: unknown }).hosts;
+  if (typeof hosts !== "object" || hosts === null) return { kind: "unknown" };
+
+  const candidates: Array<Record<string, unknown>> = [];
+  if (Array.isArray(hosts)) {
+    for (const item of hosts) {
+      if (typeof item === "object" && item !== null && !Array.isArray(item)) {
+        const rec = item as Record<string, unknown>;
+        if (rec.host === undefined || rec.host === "github.com") candidates.push(rec);
+      }
+    }
+  } else {
+    const ghCom = (hosts as Record<string, unknown>)["github.com"];
+    if (Array.isArray(ghCom)) {
+      for (const item of ghCom) {
+        if (typeof item === "object" && item !== null && !Array.isArray(item)) {
+          candidates.push(item as Record<string, unknown>);
+        }
+      }
+    } else if (typeof ghCom === "object" && ghCom !== null) {
+      candidates.push(ghCom as Record<string, unknown>);
+    }
+  }
+
+  const valid = candidates.filter((entry) => {
+    const login = typeof entry.login === "string" ? entry.login.trim() : typeof entry.user === "string" ? entry.user.trim() : "";
+    if (login === "") return false;
+    if (typeof entry.state === "string" && entry.state !== "success") return false;
+    if (entry.authenticated === false) return false;
+    return true;
+  });
+
+  if (valid.length === 0) return { kind: "unauthenticated" };
+  const chosen = valid.find((entry) => entry.active === true) ?? valid[0]!;
+  const login = (typeof chosen.login === "string" ? chosen.login : (chosen.user as string)).trim();
+  return { kind: "authenticated", login };
+}
+
+function isGhMissingError(err: unknown): boolean {
+  if ((err as NodeJS.ErrnoException | null)?.code === "ENOENT") return true;
+  const msg = err instanceof Error ? err.message : String(err);
+  return /\bENOENT\b|command not found|spawn gh\b.*not found|\bgh:\s*not found|\bgh not found\b|^not found$/i.test(msg);
+}
+
+function isGhUnauthenticatedError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /not logged in|You are not logged into|authentication failed|To log in, run|no oauth token/i.test(msg);
+}
+
+/**
+ * Ensures the remote GitHub repository `<owner>/<repo>` exists: returns
+ * `{ created: false, repo }` immediately for local filesystem paths or URLs,
+ * otherwise runs `gh auth setup-git --hostname github.com` (best-effort),
+ * probes `gh repo view <slug> --json nameWithOwner`, and creates the private
+ * repository via `gh repo create <slug> --private --add-readme --description "Private vault for paseo-factory"`
+ * when absent.
+ */
+export async function ensureRemoteVaultRepo(repo: string, runner?: VaultRunner): Promise<{ created: boolean; repo: string }> {
+  const trimmed = repo.trim();
+  if (
+    isAbsolute(trimmed) ||
+    trimmed.startsWith("./") ||
+    trimmed.startsWith("../") ||
+    trimmed.startsWith("file://") ||
+    trimmed.includes("://") ||
+    /^[^/]+@[^:]+:/.test(trimmed)
+  ) {
+    return { created: false, repo };
+  }
+  const stripped = trimmed.replace(/^git:/, "").replace(/\.git$/, "");
+  if (!/^[^\s/]+\/[^\s/]+$/.test(stripped)) {
+    return { created: false, repo };
+  }
+
+  const effectiveRunner = runner ?? builtinVaultRunner;
+  try {
+    await effectiveRunner({ command: "gh", args: ["auth", "setup-git", "--hostname", "github.com"] });
+  } catch {
+    // best-effort: setup-git is non-fatal when git credentials are already configured
+  }
+
+  try {
+    await effectiveRunner({ command: "gh", args: ["repo", "view", stripped, "--json", "nameWithOwner"] });
+    return { created: false, repo: stripped };
+  } catch {
+    // repository does not exist yet — create it below
+  }
+
+  await effectiveRunner({
+    command: "gh",
+    args: ["repo", "create", stripped, "--private", "--add-readme", "--description", "Private vault for paseo-factory"],
+  });
+  return { created: true, repo: stripped };
+}
 
 export interface HydrateVaultDirectOptions {
   /**
@@ -471,7 +675,10 @@ export async function hydrateVaultDirect(paseoHome: string, options: HydrateVaul
   const config = loadVaultConfig(paseoHome);
   const repo = options.repo ?? config?.repo;
   if (repo === undefined || repo.trim() === "") {
-    throw new FactoryError("vault-not-configured", "hydrateVaultDirect needs a vault repo — pass one or save a VaultConfig first");
+    throw new FactoryError(
+      "vault-not-configured",
+      "Private vault is not configured yet — click Enable & Sync Vault or save a repository in Vault settings",
+    );
   }
   const slug = githubRepoSlug(repo);
   const ref = options.ref ?? config?.branch ?? "main";
@@ -509,10 +716,18 @@ export async function pullVault(paseoHome: string, options: PullVaultOptions = {
   const vaultDir = join(paseoHome, "vault");
 
   if (existsSync(join(vaultDir, ".git"))) {
-    await runner({ command: "git", args: ["pull", "--rebase", "--autostash"], cwd: vaultDir });
+    try {
+      await runner({ command: "git", args: ["pull", "--rebase", "--autostash"], cwd: vaultDir });
+    } catch (err) {
+      if (!isEmptyOrUnbornPullError(err)) throw err;
+      try {
+        await runner({ command: "git", args: ["pull", "--rebase", "--autostash", "origin", config.branch], cwd: vaultDir });
+      } catch (retryErr) {
+        if (!isEmptyOrUnbornPullError(retryErr)) throw retryErr;
+      }
+    }
   } else {
-    if (existsSync(vaultDir)) rmSync(vaultDir, { recursive: true, force: true });
-    await runner({ command: "git", args: ["clone", "--branch", config.branch, vaultRemoteUrl(config.repo), vaultDir] });
+    await ensureVaultCheckout(runner, config, vaultDir);
   }
 
   const hydratedFiles = hydrateRuntimeFromTree(paseoHome, vaultDir, resolveVaultPassphrase(config.passphrase));
@@ -536,10 +751,7 @@ export async function pushVault(paseoHome: string, options: PushVaultOptions = {
   const runner = options.runner ?? builtinVaultRunner;
   const vaultDir = join(paseoHome, "vault");
 
-  if (!existsSync(join(vaultDir, ".git"))) {
-    if (existsSync(vaultDir)) rmSync(vaultDir, { recursive: true, force: true });
-    await runner({ command: "git", args: ["clone", "--branch", config.branch, vaultRemoteUrl(config.repo), vaultDir] });
-  }
+  await ensureVaultCheckout(runner, config, vaultDir);
 
   const runtimeRoot = join(paseoHome, "vault-runtime");
   const staged = existsSync(runtimeRoot) ? walkFiles(runtimeRoot, (rel) => rel === "env.json") : [];
@@ -592,6 +804,36 @@ export async function pushVault(paseoHome: string, options: PushVaultOptions = {
 
 /** The default runner's stdout ceiling — vault tarballs are binary and can be large. */
 const VAULT_RUNNER_MAX_BUFFER_BYTES = 256 * 1024 * 1024;
+
+/**
+ * Ensures `<vaultDir>/.git` exists: tries `git clone --branch <branch> <url> <vaultDir>`
+ * first, and when `<branch>` does not exist on an empty/branchless remote, cleans
+ * `<vaultDir>`, clones without `--branch`, and initializes `<branch>` locally via
+ * `git checkout -B <branch>`.
+ */
+async function ensureVaultCheckout(runner: VaultRunner, config: VaultConfig, vaultDir: string): Promise<void> {
+  if (existsSync(join(vaultDir, ".git"))) return;
+  if (existsSync(vaultDir)) rmSync(vaultDir, { recursive: true, force: true });
+  const remoteUrl = vaultRemoteUrl(config.repo);
+  try {
+    await runner({ command: "git", args: ["clone", "--branch", config.branch, remoteUrl, vaultDir] });
+  } catch (err) {
+    if (!isMissingRemoteBranchCloneError(err)) throw err;
+    if (existsSync(vaultDir)) rmSync(vaultDir, { recursive: true, force: true });
+    await runner({ command: "git", args: ["clone", remoteUrl, vaultDir] });
+    await runner({ command: "git", args: ["checkout", "-B", config.branch], cwd: vaultDir });
+  }
+}
+
+function isMissingRemoteBranchCloneError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /Remote branch .* not found|Could not find remote branch|cloned an empty repository|unborn/i.test(msg);
+}
+
+function isEmptyOrUnbornPullError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /There is no tracking information|Couldn't find remote ref|no such ref was fetched|Remote branch .* not found|does not have any commits yet|unborn/i.test(msg);
+}
 
 /**
  * Stages one vault-runtime file into the vault checkout under the push-side
@@ -676,7 +918,10 @@ function tryUnseal(raw: Buffer, passphrase: string | undefined, then: (unsealed:
 function requiredVaultConfig(paseoHome: string): VaultConfig {
   const config = loadVaultConfig(paseoHome);
   if (config === null || config.repo.trim() === "") {
-    throw new FactoryError("vault-not-configured", "the vault transport needs a configured repo — saveVaultConfig first");
+    throw new FactoryError(
+      "vault-not-configured",
+      "Private vault is not configured yet — click Enable & Sync Vault or save a repository in Vault settings",
+    );
   }
   return config;
 }
@@ -1076,7 +1321,13 @@ function vaultStateDir(paseoHome: string): string {
 /** One git fact about a checkout, or null — a missing answer is never a guess. */
 function gitProbe(cwd: string, args: string[]): string | null {
   try {
-    return execFileSync("git", args, { cwd, encoding: "utf8", timeout: 10_000, stdio: ["ignore", "pipe", "pipe"] }).trim();
+    return execFileSync("git", args, {
+      cwd,
+      encoding: "utf8",
+      timeout: 10_000,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, PATH: buildVaultPath(process.env.PATH), GIT_TERMINAL_PROMPT: "0" },
+    }).trim();
   } catch {
     return null;
   }

@@ -270,6 +270,10 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         lastPushedAt: null,
         sharedSecrets: { ascKey: false, ascCredentials: false, gplayServiceAccount: false, eyeConfig: false },
         hydratedApps: [],
+        ghInstalled: false,
+        ghAuthenticated: false,
+        ghUser: null,
+        suggestedRepo: null,
         error: messageOf(err),
       };
     }

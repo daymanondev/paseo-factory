@@ -9,12 +9,15 @@ import { gzipSync } from "node:zlib";
 import {
   Ledger,
   checkCleanAt,
+  clearGhAuthCache,
   createDefaultVaultRunner,
   ensureLocalGitExcludeAndWorktreeInclude,
+  ensureRemoteVaultRepo,
   hydrateVaultDirect,
   loadVaultConfig,
   parseVaultManifest,
   prepareTaskWorktree,
+  probeGhAuth,
   pullVault,
   pushVault,
   readVaultStatus,
@@ -26,7 +29,7 @@ import {
   unsealVaultBuffer,
   writeProjectRegistration,
 } from "../src/index.ts";
-import type { VaultManifest, VaultRunner, VaultRunnerCall, VaultStatusView } from "../src/index.ts";
+import type { VaultGhAuthStatus, VaultManifest, VaultRunner, VaultRunnerCall, VaultStatusView } from "../src/index.ts";
 import { disposeDir, factoryErrorCode, gitCommitAll, makeTempDir } from "./helpers.ts";
 
 /**
@@ -207,11 +210,26 @@ test("readVaultStatus on a fresh home reports the unconfigured defaults", (t) =>
       lastPushedAt: null,
       sharedSecrets: { ascKey: false, ascCredentials: false, gplayServiceAccount: false, eyeConfig: false },
       hydratedApps: [],
+      ghInstalled: false,
+      ghAuthenticated: false,
+      ghUser: null,
+      suggestedRepo: null,
       error: null,
     } satisfies VaultStatusView);
     assert.match(status.nodeId, /^[a-z0-9-]+$/);
     assert.ok(status.nodeId.length > 0);
     assert.equal(readVaultStatus(home).nodeId, status.nodeId, "the default nodeId is deterministic");
+
+    const withGh = readVaultStatus(home, undefined, {
+      ghInstalled: true,
+      ghAuthenticated: true,
+      ghUser: "daymanondev",
+      suggestedRepo: "daymanondev/factory-vault",
+    });
+    assert.equal(withGh.ghInstalled, true);
+    assert.equal(withGh.ghAuthenticated, true);
+    assert.equal(withGh.ghUser, "daymanondev");
+    assert.equal(withGh.suggestedRepo, "daymanondev/factory-vault");
   });
 });
 
@@ -249,6 +267,10 @@ test("readVaultStatus reflects a configured home: pills, clone, hydration stamps
       lastPushedAt: "2026-10-20T11:30:00.000Z",
       sharedSecrets: { ascKey: true, ascCredentials: true, gplayServiceAccount: true, eyeConfig: true },
       hydratedApps: [],
+      ghInstalled: false,
+      ghAuthenticated: false,
+      ghUser: null,
+      suggestedRepo: null,
       error: null,
     } satisfies VaultStatusView);
   });
@@ -407,13 +429,26 @@ function modeOf(path: string): number {
   return statSync(path).mode & 0o777;
 }
 
-test("the default VaultRunner stamps GIT_TERMINAL_PROMPT=0 into every child env and wraps failures", async () => {
+test("the default VaultRunner stamps GIT_TERMINAL_PROMPT=0, appends macOS fallback PATH dirs after caller PATH, and wraps failures", async () => {
   const runner = createDefaultVaultRunner();
   const stdout = await runner({
     command: process.execPath,
     args: ["-e", 'process.stdout.write(process.env.GIT_TERMINAL_PROMPT ?? "unset")'],
   });
   assert.equal(stdout.toString("utf8"), "0", "children never prompt for git credentials — they fail instead");
+
+  const pathOut = (
+    await runner({
+      command: process.execPath,
+      args: ["-e", 'process.stdout.write(process.env.PATH ?? "")'],
+      env: { PATH: "/tmp/custom-shim:/usr/bin" },
+    })
+  ).toString("utf8");
+  const pathParts = pathOut.split(":");
+  assert.equal(pathParts[0], "/tmp/custom-shim", "caller/test prepended PATH entries stay first so shims win");
+  for (const fallback of ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]) {
+    assert.ok(pathParts.includes(fallback), `missing fallback dir ${fallback} is appended to PATH`);
+  }
 
   await assert.rejects(
     () => runner({ command: process.execPath, args: ["-e", 'process.stderr.write("boom"); process.exit(3)'] }),
@@ -503,7 +538,21 @@ test("hydrateVaultDirect pins the gh api call to the requested ref and refuses u
   disposeDir(t, unconfigured);
   await assert.rejects(
     () => hydrateVaultDirect(unconfigured, { runner: fakeTarballRunner(emptyTarball).runner }),
-    factoryErrorCode("vault-not-configured"),
+    (err: unknown) => {
+      assert.ok(factoryErrorCode("vault-not-configured")(err));
+      assert.ok(!(err as Error).message.includes("saveVaultConfig"), "error copy must not leak internal saveVaultConfig name");
+      assert.match((err as Error).message, /Enable & Sync Vault/);
+      return true;
+    },
+  );
+  await assert.rejects(
+    () => pullVault(unconfigured, { runner: fakeTarballRunner(emptyTarball).runner }),
+    (err: unknown) => {
+      assert.ok(factoryErrorCode("vault-not-configured")(err));
+      assert.ok(!(err as Error).message.includes("saveVaultConfig"), "error copy must not leak internal saveVaultConfig name");
+      assert.match((err as Error).message, /Enable & Sync Vault/);
+      return true;
+    },
   );
 
   const evil = buildTarball([{ path: "top/../../.ssh/authorized_keys", data: Buffer.from("nope\n") }]);
@@ -1212,4 +1261,194 @@ test("hydrateVaultDirect with mergeLedgers reconciles on the zero-clone path too
   assert.deepEqual(opened.events.map((evt) => evt.event), ["contract_set", "claim_reported"], "the node snapshot's append folds in");
   assert.equal(opened.events[1]!.seq, 2);
   assert.ok(!existsSync(join(home, "vault")), "still zero-clone — no checkout, no .git");
+});
+
+test("probeGhAuth parses gh auth status --json hosts, falls back to gh api user, caches per runner for 15s, and distinguishes missing vs unauthenticated gh", async () => {
+  clearGhAuthCache();
+
+  // 1. Active account on github.com + 15s cache per runner
+  const calls1: VaultRunnerCall[] = [];
+  const runner1: VaultRunner = async (call) => {
+    calls1.push(call);
+    assert.equal(call.command, "gh");
+    assert.deepEqual(call.args, ["auth", "status", "--json", "hosts"]);
+    return Buffer.from(
+      JSON.stringify({
+        hosts: {
+          "github.com": [
+            { login: "secondary-user", active: false, state: "success" },
+            { login: "daymanondev", active: true, state: "success" },
+          ],
+        },
+      }),
+      "utf8",
+    );
+  };
+  const auth1 = await probeGhAuth(runner1);
+  assert.deepEqual(auth1, {
+    ghInstalled: true,
+    ghAuthenticated: true,
+    ghUser: "daymanondev",
+    suggestedRepo: "daymanondev/factory-vault",
+  } satisfies VaultGhAuthStatus);
+  const auth1Cached = await probeGhAuth(runner1);
+  assert.deepEqual(auth1Cached, auth1);
+  assert.equal(calls1.length, 1, "second call within 15s hits the per-runner cache");
+
+  clearGhAuthCache();
+  await probeGhAuth(runner1);
+  assert.equal(calls1.length, 2, "clearGhAuthCache invalidates the cache");
+
+  // 2. Fallback to gh api user --jq .login when --json is unsupported
+  const callsFallback: VaultRunnerCall[] = [];
+  const runnerFallback: VaultRunner = async (call) => {
+    callsFallback.push(call);
+    if (call.args[0] === "auth") {
+      throw new Error("gh auth status --json hosts: unknown flag: --json");
+    }
+    if (call.args[0] === "api") {
+      assert.deepEqual(call.args, ["api", "user", "--jq", ".login"]);
+      return Buffer.from("daymanondev\n", "utf8");
+    }
+    throw new Error(`unexpected call: ${call.command} ${call.args.join(" ")}`);
+  };
+  const fallbackAuth = await probeGhAuth(runnerFallback);
+  assert.deepEqual(fallbackAuth, {
+    ghInstalled: true,
+    ghAuthenticated: true,
+    ghUser: "daymanondev",
+    suggestedRepo: "daymanondev/factory-vault",
+  });
+  assert.equal(callsFallback.length, 2);
+
+  // 3. Missing gh binary (ENOENT / not found) -> ghInstalled: false
+  const runnerMissing: VaultRunner = async () => {
+    throw new Error("gh auth status --json hosts: spawn gh ENOENT");
+  };
+  assert.deepEqual(await probeGhAuth(runnerMissing), {
+    ghInstalled: false,
+    ghAuthenticated: false,
+    ghUser: null,
+    suggestedRepo: null,
+  });
+
+  // 4. Installed but unauthenticated gh -> ghInstalled: true, ghAuthenticated: false
+  const runnerUnauth: VaultRunner = async () => {
+    throw new Error("gh auth status --json hosts: You are not logged into any GitHub hosts. To log in, run: gh auth login");
+  };
+  assert.deepEqual(await probeGhAuth(runnerUnauth), {
+    ghInstalled: true,
+    ghAuthenticated: false,
+    ghUser: null,
+    suggestedRepo: null,
+  });
+});
+
+test("ensureRemoteVaultRepo skips local paths and auto-provisions missing private GitHub repos via gh repo create", async (t) => {
+  const bare = makeBareRemote(t);
+  const localCalls: VaultRunnerCall[] = [];
+  const neverCalledRunner: VaultRunner = async (call) => {
+    localCalls.push(call);
+    return Buffer.alloc(0);
+  };
+
+  assert.deepEqual(await ensureRemoteVaultRepo(bare, neverCalledRunner), { created: false, repo: bare });
+  assert.deepEqual(await ensureRemoteVaultRepo("./local-vault.git", neverCalledRunner), { created: false, repo: "./local-vault.git" });
+  assert.deepEqual(await ensureRemoteVaultRepo("file:///tmp/vault.git", neverCalledRunner), { created: false, repo: "file:///tmp/vault.git" });
+  assert.equal(localCalls.length, 0, "local paths and URLs never invoke gh");
+
+  // Existing GitHub repo -> setup-git + repo view, created: false
+  const existingCalls: VaultRunnerCall[] = [];
+  const existingRunner: VaultRunner = async (call) => {
+    existingCalls.push(call);
+    if (call.args[0] === "auth") return Buffer.alloc(0);
+    if (call.args[0] === "repo" && call.args[1] === "view") {
+      return Buffer.from(JSON.stringify({ nameWithOwner: "daymanondev/factory-vault" }), "utf8");
+    }
+    throw new Error(`unexpected call: ${call.command} ${call.args.join(" ")}`);
+  };
+  assert.deepEqual(await ensureRemoteVaultRepo("daymanondev/factory-vault", existingRunner), {
+    created: false,
+    repo: "daymanondev/factory-vault",
+  });
+  assert.deepEqual(
+    existingCalls.map((c) => [c.command, ...c.args]),
+    [
+      ["gh", "auth", "setup-git", "--hostname", "github.com"],
+      ["gh", "repo", "view", "daymanondev/factory-vault", "--json", "nameWithOwner"],
+    ],
+  );
+
+  // Missing GitHub repo -> setup-git + repo view (fails) + repo create --private --add-readme, created: true
+  const createCalls: VaultRunnerCall[] = [];
+  const createRunner: VaultRunner = async (call) => {
+    createCalls.push(call);
+    if (call.args[0] === "auth") return Buffer.alloc(0);
+    if (call.args[0] === "repo" && call.args[1] === "view") {
+      throw new Error("GraphQL: Could not resolve to a Repository with the name 'daymanondev/factory-vault'.");
+    }
+    if (call.args[0] === "repo" && call.args[1] === "create") {
+      return Buffer.from("https://github.com/daymanondev/factory-vault\n", "utf8");
+    }
+    throw new Error(`unexpected call: ${call.command} ${call.args.join(" ")}`);
+  };
+  assert.deepEqual(await ensureRemoteVaultRepo("daymanondev/factory-vault", createRunner), {
+    created: true,
+    repo: "daymanondev/factory-vault",
+  });
+  assert.deepEqual(
+    createCalls.map((c) => [c.command, ...c.args]),
+    [
+      ["gh", "auth", "setup-git", "--hostname", "github.com"],
+      ["gh", "repo", "view", "daymanondev/factory-vault", "--json", "nameWithOwner"],
+      ["gh", "repo", "create", "daymanondev/factory-vault", "--private", "--add-readme", "--description", "Private vault for paseo-factory"],
+    ],
+  );
+});
+
+test("empty-remote bootstrap: pullVault on an empty bare remote returns hydratedFiles: [] and pushVault creates the branch with the initial commit", async (t) => {
+  // 1. Pull on a brand-new empty bare remote (0 commits, no refs/heads/main)
+  const emptyBare = makeBareRemote(t, "main");
+  const home1 = makeTempDir();
+  disposeDir(t, home1);
+  saveVaultConfig(home1, { repo: emptyBare, branch: "main", nodeId: "mac-studio" });
+
+  const pullEmpty = await pullVault(home1);
+  assert.deepEqual(pullEmpty.hydratedFiles, [], "empty remote pulls cleanly with zero hydrated files");
+  assert.ok(existsSync(join(home1, "vault", ".git")), "checkout exists at <paseoHome>/vault");
+  assert.equal(runGit(["symbolic-ref", "--short", "HEAD"], join(home1, "vault")), "main", "checkout is on configured branch");
+
+  // Re-pulling an existing unborn checkout while remote is still empty also succeeds cleanly
+  const pullEmptyAgain = await pullVault(home1);
+  assert.deepEqual(pullEmptyAgain.hydratedFiles, []);
+
+  // 2. Push from a fresh home into another empty bare remote creates the remote branch
+  const emptyBare2 = makeBareRemote(t, "main");
+  const homePush = makeTempDir();
+  disposeDir(t, homePush);
+  saveVaultConfig(homePush, { repo: emptyBare2, branch: "main", nodeId: "mac-studio" });
+  const p8 = "-----BEGIN PRIVATE KEY-----\nasc api key\n-----END PRIVATE KEY-----\n";
+  mkdirSync(join(homePush, "vault-runtime", "secrets", "shared"), { recursive: true });
+  writeFileSync(join(homePush, "vault-runtime", "secrets", "shared", "asc-api-key.p8"), p8);
+
+  const pushRes = await pushVault(homePush);
+  assert.equal(pushRes.pushed, true, "initial commit pushed to empty remote");
+  assert.deepEqual(pushRes.pushedFiles, ["secrets/shared/asc-api-key.p8"]);
+  assert.ok(bareHead(emptyBare2, "main").length > 0, "refs/heads/main now exists on the bare remote");
+
+  // 3. A second home can now pullVault what was pushed to the previously empty remote
+  const homePull = makeTempDir();
+  disposeDir(t, homePull);
+  saveVaultConfig(homePull, { repo: emptyBare2, branch: "main", nodeId: "mini-m2" });
+  const pulled = await pullVault(homePull);
+  assert.deepEqual(pulled.hydratedFiles, ["secrets/shared/asc-api-key.p8"]);
+  assert.equal(readFileSync(join(homePull, "vault-runtime", "secrets", "shared", "asc-api-key.p8"), "utf8"), p8);
+
+  // And home1 (which pulled when emptyBare was empty) can push its own initial commit and pull thereafter
+  mkdirSync(join(home1, "vault-runtime", "config"), { recursive: true });
+  writeFileSync(join(home1, "vault-runtime", "config", "lanes.json"), JSON.stringify({ lanes: { default: "pi" } }));
+  const pushFromUnborn = await pushVault(home1);
+  assert.equal(pushFromUnborn.pushed, true);
+  const pullAfterInit = await pullVault(home1);
+  assert.deepEqual(pullAfterInit.hydratedFiles, ["config/lanes.json"]);
 });
