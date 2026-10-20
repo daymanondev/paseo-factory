@@ -211,10 +211,24 @@ export const pluginsInstall = defineRpc({
 export const pluginsManage = defineRpc({
   name: "factory.plugins.manage",
   input: z.object({
-    pluginId: z.enum(["factory-burn-lab", "factory-connector", "factory-release-lab"]),
+    pluginId: z.enum(["paseo-factory", "factory-burn-lab", "factory-connector", "factory-release-lab", "all"]),
     action: z.enum(["enable", "disable", "reload", "update", "remove"]),
   }),
   output: z.union([z.object({ ok: z.literal(true), pluginId: z.string(), action: z.string(), summary: z.string() }), Failure]),
+});
+
+export const pluginsCheckUpdates = defineRpc({
+  name: "factory.plugins.check.updates",
+  input: z.object({}),
+  output: z.union([
+    z.object({
+      ok: z.literal(true),
+      checkedAt: z.string(),
+      updatesAvailable: z.array(z.string()),
+      summary: z.string(),
+    }),
+    Failure,
+  ]),
 });
 
 // The Private vault surface (v0.0.21, ADR 0014 §4; v0.0.22 unified sync &

@@ -258,7 +258,55 @@ export interface DaemonPluginItem {
   remote?: string;
   ref?: string;
   commit?: string;
+  /** Semantic version resolved from npm metadata or <path>/package.json / <path>/../package.json (v0.0.25, ADR 0012 §3). */
+  version?: string;
   error?: string;
+}
+
+/** One plugin's remote update status from `plugin.source.status.response` (v0.0.25, ADR 0012 §4). */
+export interface DaemonPluginSourceStatus {
+  id: string;
+  currentRevision: string | null;
+  latestRevision: string | null;
+  commitsBehind: number | null;
+  updateAvailable: boolean | null;
+}
+
+/** Cached on-demand update check result for a daemon home (v0.0.25, ADR 0012 §4). */
+export interface DaemonPluginUpdateCheckSnapshot {
+  statuses: ReadonlyMap<string, DaemonPluginSourceStatus>;
+  checkedAt: string;
+}
+
+/**
+ * Reads the semantic `"version"` field from `<pluginPath>/package.json`,
+ * `<pluginPath>/../package.json`, or `<pluginPath>/paseo-plugin.json` when
+ * present on disk (v0.0.25, ADR 0012 §3). Never throws.
+ */
+export function readPluginVersionFromDisk(pluginPath: string): string | undefined {
+  if (typeof pluginPath !== "string" || pluginPath.trim() === "") return undefined;
+  const candidates = [
+    join(pluginPath, "package.json"),
+    join(pluginPath, "..", "package.json"),
+    join(pluginPath, "paseo-plugin.json"),
+  ];
+  for (const candidate of candidates) {
+    try {
+      if (!existsSync(candidate)) continue;
+      const parsed = JSON.parse(readFileSync(candidate, "utf8")) as { version?: unknown };
+      if (typeof parsed?.version === "string" && parsed.version.trim() !== "") {
+        return parsed.version.trim();
+      }
+    } catch {
+      // ignore unreadable or malformed manifest
+    }
+  }
+  return undefined;
+}
+
+function enrichDaemonPluginItem(item: DaemonPluginItem): DaemonPluginItem {
+  const version = item.version ?? item.npm?.version ?? readPluginVersionFromDisk(item.path);
+  return version === undefined ? item : { ...item, version };
 }
 
 /** One row of a `plugin.source.update.response` — what changed for one plugin id. */
@@ -327,15 +375,22 @@ interface PluginListCacheEntry {
 const pluginListCache = new Map<string, PluginListCacheEntry>();
 const pluginListInFlight = new Map<string, Promise<{ ok: true; plugins: DaemonPluginItem[] } | { ok: false; reason: string }>>();
 const pluginListGeneration = new Map<string, number>();
+const pluginUpdateCache = new Map<string, DaemonPluginUpdateCheckSnapshot>();
 
 /**
- * Drops the cached plugin list for `home` — and bumps its generation, so a
- * pre-mutation list still in flight when the mutation began cannot land in
- * the cache behind the mutation's back.
+ * Drops the cached plugin list (and cached update statuses) for `home` — and
+ * bumps its generation, so a pre-mutation list still in flight when the
+ * mutation began cannot land in the cache behind the mutation's back.
  */
 function invalidatePluginListCache(home: string): void {
   pluginListCache.delete(home);
+  pluginUpdateCache.delete(home);
   pluginListGeneration.set(home, (pluginListGeneration.get(home) ?? 0) + 1);
+}
+
+/** Returns the cached on-demand update check snapshot for `home`, or `null` if not yet checked (v0.0.25, ADR 0012 §4). */
+export function getCachedPluginUpdateStatus(home: string): DaemonPluginUpdateCheckSnapshot | null {
+  return pluginUpdateCache.get(home) ?? null;
 }
 
 /** The uncached bridge body: `plugin.list.request` → `payload.plugins`, falling back to `paseo --home <home> plugin ls --json`. */
@@ -344,13 +399,13 @@ async function listDaemonPluginsUncached(home: string): Promise<{ ok: true; plug
   if (wsCall !== null) {
     const reply = await wsCall;
     if (!reply.ok) return { ok: false, reason: reply.reason };
-    const plugins = Array.isArray(reply.payload?.plugins) ? reply.payload.plugins.filter(isDaemonPluginItem) : null;
+    const plugins = Array.isArray(reply.payload?.plugins) ? reply.payload.plugins.filter(isDaemonPluginItem).map(enrichDaemonPluginItem) : null;
     if (plugins === null) return { ok: false, reason: "the daemon's plugin.list.response carried no plugins array" };
     return { ok: true, plugins };
   }
   const cli = pluginCliJson(home, ["--home", home, "plugin", "ls", "--json"], BRIDGE_TIMEOUT_MS);
   if (!cli.ok) return { ok: false, reason: cli.reason };
-  return { ok: true, plugins: pluginsFromCliJson(cli.value) };
+  return { ok: true, plugins: pluginsFromCliJson(cli.value).map(enrichDaemonPluginItem) };
 }
 
 /**
@@ -415,6 +470,19 @@ export async function installDaemonPlugin(
   return { ok: true, plugin };
 }
 
+function extractUpdateRow(raw: unknown, pluginId: string): DaemonPluginUpdateRow | undefined {
+  const rows = Array.isArray(raw)
+    ? raw
+    : typeof raw === "object" && raw !== null && Array.isArray((raw as { plugins?: unknown }).plugins)
+      ? (raw as { plugins: unknown[] }).plugins
+      : [];
+  return rows.find((entry): entry is DaemonPluginUpdateRow => {
+    if (typeof entry !== "object" || entry === null) return false;
+    const typed = entry as { id?: unknown; updated?: unknown };
+    return typed.id === pluginId && typeof typed.updated === "boolean";
+  });
+}
+
 /**
  * Manages an installed plugin: enable/disable/reload speak `plugin.<action>.request`,
  * remove speaks `plugin.remove.request` (its response carries no plugin — the frame
@@ -435,12 +503,7 @@ export async function manageDaemonPlugin(
     const reply = await wsCall;
     if (!reply.ok) return { ok: false, reason: reply.reason };
     if (action === "update") {
-      const rows = Array.isArray((reply.payload as { plugins?: unknown }).plugins) ? (reply.payload as { plugins: unknown[] }).plugins : [];
-      const row = rows.find((entry): entry is DaemonPluginUpdateRow => {
-        if (typeof entry !== "object" || entry === null) return false;
-        const typed = entry as { id?: unknown; updated?: unknown };
-        return typed.id === pluginId && typeof typed.updated === "boolean";
-      });
+      const row = extractUpdateRow(reply.payload, pluginId);
       return row === undefined ? { ok: true } : { ok: true, update: row };
     }
     if (action === "remove") return { ok: true };
@@ -452,5 +515,94 @@ export async function manageDaemonPlugin(
   const argv = ["--home", home, "plugin", action, pluginId, ...(action === "update" ? ["--yes"] : []), "--json"];
   const cli = pluginCliJson(home, argv, timeoutMs);
   if (!cli.ok) return { ok: false, reason: cli.reason };
+  if (action === "update") {
+    const row = extractUpdateRow(cli.value, pluginId);
+    return row === undefined ? { ok: true } : { ok: true, update: row };
+  }
   return { ok: true };
+}
+
+function parseSourceStatusRows(raw: unknown): DaemonPluginSourceStatus[] | null {
+  const list = Array.isArray(raw)
+    ? raw
+    : typeof raw === "object" && raw !== null && Array.isArray((raw as { plugins?: unknown }).plugins)
+      ? (raw as { plugins: unknown[] }).plugins
+      : null;
+  if (list === null) return null;
+  const rows: DaemonPluginSourceStatus[] = [];
+  for (const item of list) {
+    if (typeof item !== "object" || item === null) continue;
+    const entry = item as {
+      id?: unknown;
+      source?: unknown;
+      outcome?: unknown;
+      currentCommit?: unknown;
+      latestCommit?: unknown;
+      commitsBehind?: unknown;
+      updateAvailable?: unknown;
+      target?: { commit?: unknown; version?: unknown } | null;
+    };
+    if (typeof entry.id !== "string" || entry.id === "") continue;
+    const isDirectoryOnly = entry.source === "directory" && entry.latestCommit === undefined && entry.target === undefined;
+    const currentRevision = typeof entry.currentCommit === "string" && entry.currentCommit !== "" ? entry.currentCommit : null;
+    const latestRevision =
+      typeof entry.latestCommit === "string" && entry.latestCommit !== ""
+        ? entry.latestCommit
+        : typeof entry.target?.commit === "string" && entry.target.commit !== ""
+          ? entry.target.commit
+          : typeof entry.target?.version === "string" && entry.target.version !== ""
+            ? entry.target.version
+            : null;
+    const commitsBehind = typeof entry.commitsBehind === "number" ? entry.commitsBehind : null;
+    const updateAvailable = isDirectoryOnly
+      ? null
+      : typeof entry.updateAvailable === "boolean"
+        ? entry.updateAvailable
+        : entry.outcome === "update"
+          ? true
+          : entry.outcome === "current" || entry.outcome === "installed-newer"
+            ? false
+            : null;
+    rows.push({
+      id: entry.id,
+      currentRevision,
+      latestRevision,
+      commitsBehind,
+      updateAvailable,
+    });
+  }
+  return rows;
+}
+
+/**
+ * Checks remote update availability for all installed plugins on `home` via
+ * `plugin.source.status.request` over the daemon WebSocket (falling back to
+ * `paseo --home <home> plugin update --all --check --json`), caching the
+ * result per `home` for subsequent snapshot reads (v0.0.25, ADR 0012 §4).
+ */
+export async function checkDaemonPluginUpdates(
+  home: string,
+): Promise<{ ok: true; statuses: DaemonPluginSourceStatus[]; checkedAt: string } | { ok: false; reason: string }> {
+  const wsCall = daemonWsRequestPayload<{ plugins?: unknown }>(
+    home,
+    { type: "plugin.source.status.request" },
+    "plugin.source.status.response",
+    PLUGIN_IO_TIMEOUT_MS,
+  );
+  let rows: DaemonPluginSourceStatus[] | null = null;
+  if (wsCall !== null) {
+    const reply = await wsCall;
+    if (!reply.ok) return { ok: false, reason: reply.reason };
+    rows = parseSourceStatusRows(reply.payload);
+    if (rows === null) return { ok: false, reason: "the daemon's plugin.source.status.response carried no plugins array" };
+  } else {
+    const cli = pluginCliJson(home, ["--home", home, "plugin", "update", "--all", "--check", "--json"], PLUGIN_IO_TIMEOUT_MS);
+    if (!cli.ok) return { ok: false, reason: cli.reason };
+    rows = parseSourceStatusRows(cli.value) ?? [];
+  }
+  const checkedAt = new Date().toISOString();
+  const map = new Map<string, DaemonPluginSourceStatus>();
+  for (const row of rows) map.set(row.id, row);
+  pluginUpdateCache.set(home, { statuses: map, checkedAt });
+  return { ok: true, statuses: rows, checkedAt };
 }
