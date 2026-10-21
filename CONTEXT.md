@@ -77,7 +77,7 @@ The state of a Task after one of its green Attempts is accepted (`attempt_accept
 _Avoid_: done, finished, complete, passed
 
 **Fresh-eyes review**:
-A second judgment of a green Attempt by a model that took no part in writing it — one tool-less read of the Contract, the diff and the gate output (via the station's configured lane in the Lane config, or direct-API `eye.json`), appending one advisory ledger line (`fresh_eyes_written`). Evidence for the Owner, never acceptance; off unless the Contract marks it on. Added in v0.0.2; unlocked onto the Lane config in v0.0.13 (ADR 0009).
+A second judgment of a green Attempt by a model that took no part in writing it — one tool-less read of the Contract, the diff and the gate output (via the station's configured lane in the Lane config, or direct-API `eye.json`), appending one advisory ledger line (`fresh_eyes_written`). Evidence for the Owner and the Lead, never acceptance by itself: when `Lead` registers a Contract (`lead_set_contract` without explicitly passing `freshEyes: false`), Fresh-eyes is automatically enabled whenever the configured `freshEyes` lane is available on the host (gracefully staying off on minimal hosts where the lane CLI is absent, while explicit `freshEyes: true` / `--fresh-eyes` still fails fast if unconfigured). Added in v0.0.2; unlocked onto the Lane config in v0.0.13 (ADR 0009); smart-defaulted for Lead contracts in ADR 0018.
 _Avoid_: mắt soi (outside research notes), code review, self-review
 
 **Watch**:
@@ -210,8 +210,8 @@ The `to: "supervisor"` recipient slice of a Project's `mailbox.jsonl` (ADR 0015)
 _Avoid_: separate `supervisor-mailbox.jsonl` file, direct `agents.send` bypass
 
 **Lead handoff**:
-The deterministic runtime succession of a Project's Lead when its context window usage reaches the fixed `128,000` token mark (`128k`, read from Paseo's `lastUsage.contextWindowUsedTokens` with Pi `.jsonl` session fallback, ADR 0013). Crossing `128k` mid-turn marks `rotation_pending` without interrupting the active turn; at the turn boundary (`agent.turn_ended`), the plugin locks the Lead mailbox (`handing_over`), steers one bounded handoff-extraction turn (`<projectStateDir>/lead-handoff.md`), archives the outgoing Lead, spawns a fresh successor Lead injected with the machine-verified Active Agent roster (`task ↔ agentId ↔ Task worktree`), the Ledger state digest, and `lead-handoff.md`, and drains all held Lead mailbox items into the successor Lead.
-_Avoid_: fourth monitor agent role, mid-turn kill, context compaction on Lead
+The deterministic runtime succession of a Project's Lead when its context window usage reaches the fixed `128,000` token mark (`128k`, read from Paseo's `lastUsage.contextWindowUsedTokens` with Pi `.jsonl` session fallback, ADR 0013, ADR 0018). Crossing `128k` mid-turn marks `rotation_pending` without interrupting the active turn; at the turn boundary (`agent.turn_ended`), the plugin locks the Lead mailbox (`handing_over`) and steers one bounded handoff-extraction turn (`<projectStateDir>/lead-handoff.md`) guarded by a dual-fuse safeguard (if the outgoing Lead is absent/errored, if sending the extraction prompt fails, or if `handing_over` exceeds `90s`, the runtime bypasses extraction immediately and completes handoff from machine-verified state without paging Supervisor). Upon extraction completion or fuse trip, the plugin archives the outgoing Lead, silently creates a fresh successor Lead (`0%` context), and delivers a single unified Turn-1 kickoff combining the `Seat kickoff packet`, the machine-verified Active Peer Roster (resolved across the `Ledger`, `CorrelationRegistry`, and live daemon worktrees so even Attempt-1 workers that have not yet claimed are bound), the `Ledger` state digest, `lead-handoff.md`, and any held `Lead mailbox` items.
+_Avoid_: fourth monitor agent role, mid-turn kill, context compaction on Lead, multi-turn handoff prompt storm
 
 ### Surface and configuration
 
