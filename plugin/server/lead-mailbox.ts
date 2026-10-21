@@ -445,7 +445,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   const prependKickoffPacketIfFirstTurn = (
     role: "supervisor" | "lead",
     slug: string,
-    agent: SurfaceAgentSnapshot,
+    agent: { id: string; cwd?: string | null },
     prompt: string,
   ): string => {
     if (kickoffSentAgentIds.has(agent.id)) return prompt;
@@ -878,19 +878,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       const kickoffPrompt = prependKickoffPacketIfFirstTurn(
         "lead",
         slug,
-        {
-          id: ensured.agentId,
-          provider: "",
-          title: null,
-          status: "idle",
-          model: null,
-          labels: { seat: "lead", project: slug },
-          archivedAt: null,
-          requiresAttention: false,
-          attentionReason: null,
-          updatedAt: new Date().toISOString(),
-          cwd: root,
-        },
+        { id: ensured.agentId, cwd: root },
         handoffBundle,
       );
       await resolveDaemon().agents.ref(ensured.agentId).send(kickoffPrompt);
@@ -1367,7 +1355,7 @@ function agentOfTask(
 
   const { stateDir, slug, tasks, live } = context;
   const correlations = readCorrelations(stateDir);
-  const liveWorkers = [...live.values()].filter((agent) => {
+  const livePeers = [...live.values()].filter((agent) => {
     if (agent.archivedAt !== null) return false;
     const seatLabel = agent.labels?.seat;
     if (seatLabel === "supervisor" || seatLabel === "lead") return false;
@@ -1381,7 +1369,7 @@ function agentOfTask(
     if (task.accepted || task.status === "accepted") continue;
     const wt = taskWorktreePath(stateDir, slug, task.task);
     let matchedLive: string | undefined;
-    for (const agent of liveWorkers) {
+    for (const agent of livePeers) {
       const cwdMatch = typeof agent.cwd === "string" && (agent.cwd === wt || agent.cwd.startsWith(`${wt}/`));
       const labelMatch =
         agent.labels?.task === task.task &&

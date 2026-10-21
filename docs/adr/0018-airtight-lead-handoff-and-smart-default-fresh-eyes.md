@@ -8,7 +8,7 @@
 
 In `paseo-factory` through `v0.0.27`, auditing the `Lead handoff` runtime state machine and the `Fresh-eyes review` contract flow for large multi-wave projects exposed four reliability and verification gaps:
 
-1. **Attempt-1 Workers Missing from the `Machine-Verified Active Peer Roster`:**
+1. **Attempt-1 Agents Missing from the `Machine-Verified Active Peer Roster`:**
    - During `Lead handoff`, `agentOfTask` resolved a `Task`'s bound working `Agent` only from post-claim `Ledger` events (`claim_reported`, `meter_written`, `repoke_dispatched`).
    - If a working `Agent` was actively coding its first `Attempt` inside its `Task worktree` and had not yet submitted its first `Claim` when `Lead` crossed `128,000` tokens, the roster handed to the successor `Lead` reported `agent (none bound)` — risking duplicate spawns on an already active `Task`.
 
