@@ -6,7 +6,7 @@
  * provisions `<agyPluginsDir>/paseo-factory/{plugin.json,mcp_config.json,hooks.json}`
  * alongside `<stateDir>/bin/agy-pre-tool-hook.mjs` and `<stateDir>/bin/bridge.mjs`.
  */
-import { chmodSync, copyFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { isElectronNodeBinary } from "./pi-home.ts";
@@ -44,18 +44,41 @@ function defaultRepoBinDir(): string {
     const candidate2 = resolve(here, "../../bin");
     if (existsSync(candidate2)) return candidate2;
   } catch {
-    // ignore URL resolution errors
+    // ignore URL resolution errors (e.g. CJS bundle where import.meta is {})
   }
   return "";
+}
+
+function resolvePluginBinDir(stateDir: string, pluginDir?: string): string {
+  if (pluginDir !== undefined && existsSync(join(pluginDir, "bin"))) {
+    return join(pluginDir, "bin");
+  }
+  const configCandidates = [
+    resolve(stateDir, "../..", "config.json"),
+    join(homedir(), ".paseo-factory", "config.json"),
+    join(homedir(), ".paseo", "config.json"),
+  ];
+  for (const configPath of configCandidates) {
+    try {
+      if (!existsSync(configPath)) continue;
+      const cfg = JSON.parse(readFileSync(configPath, "utf8")) as {
+        plugins?: Record<string, { path?: unknown }>;
+      };
+      const recordedPath = cfg.plugins?.["paseo-factory"]?.path;
+      if (typeof recordedPath === "string" && existsSync(join(recordedPath, "bin"))) {
+        return join(recordedPath, "bin");
+      }
+    } catch {
+      // ignore unreadable config.json
+    }
+  }
+  return defaultRepoBinDir();
 }
 
 export function ensureFactoryBinScripts(stateDir: string, pluginDir?: string): { bridgeBinPath: string; agyHookBinPath: string } {
   const binDir = join(stateDir, "bin");
   mkdirSync(binDir, { recursive: true });
-  const sourceBinDir =
-    pluginDir !== undefined && existsSync(join(pluginDir, "bin"))
-      ? join(pluginDir, "bin")
-      : defaultRepoBinDir();
+  const sourceBinDir = resolvePluginBinDir(stateDir, pluginDir);
 
   const bridgeBinPath = join(binDir, "bridge.mjs");
   const agyHookBinPath = join(binDir, "agy-pre-tool-hook.mjs");

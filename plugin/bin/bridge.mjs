@@ -829,7 +829,21 @@ async function handleToolCall(name, rawArgs) {
     // in spool-only mode), allocate the Task worktree and submit the spawn
     // request directly through the Spool.
     const daemonSockExists = existsSync(join(ctx.home, "endpoint.sock"));
-    const factoryBinCandidate = join(dirname(new URL(import.meta.url).pathname), "factory.mjs");
+    let factoryBinCandidate = join(dirname(new URL(import.meta.url).pathname), "factory.mjs");
+    if (!existsSync(factoryBinCandidate)) {
+      try {
+        const cfgPath = join(ctx.home, "config.json");
+        if (existsSync(cfgPath)) {
+          const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
+          const pluginPath = cfg?.plugins?.["paseo-factory"]?.path;
+          if (typeof pluginPath === "string" && existsSync(join(pluginPath, "bin", "factory.mjs"))) {
+            factoryBinCandidate = join(pluginPath, "bin", "factory.mjs");
+          }
+        }
+      } catch {
+        // ignore unreadable config.json
+      }
+    }
     if (daemonSockExists && existsSync(factoryBinCandidate)) {
       const eventsBefore = readLedgerEventsList(ctx.stateDir).length;
       const child = spawn(
@@ -846,6 +860,7 @@ async function handleToolCall(name, rawArgs) {
           cwd: ctx.projectRoot ?? ctx.workspace,
           env: {
             ...process.env,
+            ELECTRON_RUN_AS_NODE: "1",
             PASEO_HOME: ctx.home,
             PASEO_FACTORY_SEAT: "lead",
             ...(ctx.correlationId ? { PASEO_FACTORY_CORRELATION: ctx.correlationId } : {}),
