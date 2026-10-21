@@ -26,7 +26,7 @@ import { usageIsValid } from "./core/ledger.ts";
 import { needsHumanEvidenceIsValid, NEEDS_HUMAN_REASONS } from "./core/events.ts";
 import type { Factory } from "./core/factory.ts";
 import type { LedgerEvent, MeterUsage, NeedsHumanEvidence, NeedsHumanReason, Verdict } from "./core/events.ts";
-import { readCorrelations } from "./core/correlations.ts";
+import { CorrelationRegistry, readCorrelations } from "./core/correlations.ts";
 import { loadLanes, parseLane } from "./core/lanes.ts";
 import { listProjectRegistrations, readProjectRegistration, resolveProject, writeProjectRegistration } from "./core/project.ts";
 import { FACTORY_SEAT_PROVIDER_IDS } from "./roles.ts";
@@ -45,8 +45,8 @@ export interface ContractRequest {
   artifact: string;
   base?: string;
   scope?: string[];
-  /** Marks the fresh-eyes pass ON (ADR 0005 default: off). Exactly `true` passes; anything else is rejected. */
-  freshEyes?: true;
+  /** Marks the fresh-eyes pass ON or OFF (`true` | `false`, or omitted for caller default; anything else is rejected). */
+  freshEyes?: boolean;
   /** Marks the watch pass ON (v0.0.6, record-only, both verdicts). Exactly `true` passes; anything else is rejected. */
   watch?: true;
   /** The task's assignment text (v0.0.6 description-slot rider) — the driver's brief carries it. */
@@ -468,7 +468,7 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     if (scope !== undefined && (!Array.isArray(scope) || scope.some((s) => typeof s !== "string"))) return undefined;
     const skills = req.skills;
     if (skills !== undefined && (!Array.isArray(skills) || skills.some((s) => typeof s !== "string"))) return undefined;
-    if (req.freshEyes !== undefined && req.freshEyes !== true) return undefined;
+    if (req.freshEyes !== undefined && typeof req.freshEyes !== "boolean") return undefined;
     if (req.watch !== undefined && req.watch !== true) return undefined;
     if (req.base !== undefined && (typeof req.base !== "string" || req.base.trim() === "")) return undefined;
     if (req.description !== undefined && (typeof req.description !== "string" || req.description.trim() === "")) return undefined;
@@ -482,7 +482,7 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       ...(req.base === undefined ? {} : { base: req.base }),
       ...(scope === undefined ? {} : { scope: scope as string[] }),
       ...(skills === undefined ? {} : { skills: skills as string[] }),
-      ...(req.freshEyes === undefined ? {} : { freshEyes: true }),
+      ...(req.freshEyes === undefined ? {} : { freshEyes: req.freshEyes }),
       ...(req.watch === undefined ? {} : { watch: true }),
       ...(req.description === undefined ? {} : { description: req.description }),
       submitter: req.submitter,
@@ -889,7 +889,7 @@ export async function handleSpoolRequest(
       };
     }
     if (request.kind === "contract") {
-      factory.setContract({
+      const contractEvt = factory.setContract({
         task: request.task,
         workspace: request.workspace,
         gate: request.gate,
@@ -897,17 +897,18 @@ export async function handleSpoolRequest(
         ...(request.base === undefined ? {} : { base: request.base }),
         ...(request.scope === undefined ? {} : { scope: request.scope }),
         ...(request.skills === undefined || request.skills.length === 0 ? {} : { skills: request.skills }),
-        ...(request.freshEyes === undefined ? {} : { freshEyes: true }),
+        ...(request.freshEyes === undefined ? {} : { freshEyes: request.freshEyes }),
         ...(request.watch === undefined ? {} : { watch: true }),
         ...(request.description === undefined ? {} : { description: request.description }),
         by: request.submitter,
+        ...(effectiveSeat === undefined ? {} : { seat: effectiveSeat }),
       });
       return {
         id: request.id,
         ok: true,
         summary:
           `contract set for ${request.task}: \`${request.gate}\` in ${request.workspace}` +
-          `${request.freshEyes === true ? " · fresh eyes ON" : ""}${request.watch === true ? " · watch ON" : ""} · by ${request.submitter}`,
+          `${contractEvt.freshEyes === true ? " · fresh eyes ON" : ""}${request.watch === true ? " · watch ON" : ""} · by ${request.submitter}`,
       };
     }
     if (request.kind === "claim") {
@@ -1080,6 +1081,25 @@ export async function handleSpoolRequest(
             ...(spawnMeta.leadAgentId !== undefined ? { parent: spawnMeta.leadAgentId } : {}),
           });
           spawnedAgentId = created.id;
+        }
+        if (spawnedAgentId !== undefined && proj?.ok) {
+          const correlations = new CorrelationRegistry(factory.stateDir);
+          if (correlations.findByAgentId(spawnedAgentId) === undefined) {
+            const unassociated = correlations
+              .list()
+              .findLast((r) => r.role === "agent" && r.projectSlug === proj.slug && r.task === request.task && r.agentId === undefined);
+            if (unassociated !== undefined) {
+              correlations.associate(unassociated.correlationId, spawnedAgentId);
+            } else {
+              correlations.issue({
+                role: "agent",
+                projectSlug: proj.slug,
+                projectRoot: proj.root,
+                task: request.task,
+                agentId: spawnedAgentId,
+              });
+            }
+          }
         }
       }
       return {

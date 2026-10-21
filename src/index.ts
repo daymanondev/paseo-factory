@@ -14,7 +14,7 @@ export type { CommitResolution, TreeCheck, LandingResult, PrepareTaskWorktreeOpt
 export { Ledger, usageIsValid } from "./ledger.ts";
 export { runGate } from "./gate.ts";
 export type { GateInput, GateResult } from "./gate.ts";
-export { eyeConfigPath, loadEyeConfig, resolveEyeLane, runFreshEyesPass, tailWithMarker, parseEyeAnswer } from "./fresh-eyes.ts";
+export { eyeConfigPath, isEyeLaneUsable, loadEyeConfig, resolveEyeLane, runFreshEyesPass, tailWithMarker, parseEyeAnswer } from "./fresh-eyes.ts";
 export type { EyeConfig, EyeConfigResult, EyeLaneResolution, FreshEyesOutcome, FreshEyesPassInput, ParsedEyeAnswer } from "./fresh-eyes.ts";
 export {
   WATCH_QUESTIONS,

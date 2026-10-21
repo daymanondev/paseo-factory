@@ -247,7 +247,7 @@ test("bridge.mjs executes Supervisor, Lead, and Agent tools end-to-end over the 
   const homeDir = mkdtempSync(join(tmpdir(), "factory-bridge-e2e-home-"));
   const stateDir = join(homeDir, "plugin-state", "paseo-factory");
   const repoDir = makeGitRepo();
-  const factory = createFactory({ stateDir });
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
   const reg = ensureProjectRegistered(stateDir, repoDir);
   assert.equal(reg.ok, true);
 
@@ -465,3 +465,134 @@ test("bridge.mjs executes Supervisor, Lead, and Agent tools end-to-end over the 
     rmSync(repoDir, { recursive: true, force: true });
   }
 });
+
+test("v0.0.28 (ADR 0018 §4): lead_set_contract smart-defaults freshEyes to true when usable, omits when unavailable, respects freshEyes: false, and fails fast on freshEyes: true when unconfigured", async () => {
+  const repoDir = makeGitRepo();
+
+  // 1. Usable freshEyes lane (eyeCliProbe: () => true)
+  const homeUsable = mkdtempSync(join(tmpdir(), "factory-bridge-fe-on-"));
+  const stateUsable = join(homeUsable, "plugin-state", "paseo-factory");
+  const factoryUsable = createFactory({ stateDir: stateUsable, eyeCliProbe: () => true });
+  const spoolUsable = startSpool(stateUsable, factoryUsable, { pollMs: 25 });
+
+  // 2. Unusable freshEyes lane (eyeCliProbe: () => false)
+  const homeUnusable = mkdtempSync(join(tmpdir(), "factory-bridge-fe-off-"));
+  const stateUnusable = join(homeUnusable, "plugin-state", "paseo-factory");
+  const factoryUnusable = createFactory({ stateDir: stateUnusable, eyeCliProbe: () => false });
+  const spoolUnusable = startSpool(stateUnusable, factoryUnusable, { pollMs: 25 });
+
+  try {
+    const corrUsable = new CorrelationRegistry(stateUsable).issue({
+      role: "lead",
+      projectSlug: "demo-usable",
+      projectRoot: repoDir,
+      agentId: "lead-usable-1",
+    });
+
+    const usableResponses = await runMcpSession({
+      args: ["--correlation", corrUsable.correlationId, "--state-dir", stateUsable],
+      cwd: repoDir,
+      requests: [
+        {
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: {
+            name: "lead_set_contract",
+            arguments: {
+              task: "t-default-on",
+              gate: "/usr/bin/true",
+              artifact: "README.md",
+              scope: "src/a",
+            },
+          },
+        },
+        {
+          jsonrpc: "2.0",
+          id: 2,
+          method: "tools/call",
+          params: {
+            name: "lead_set_contract",
+            arguments: {
+              task: "t-explicit-off",
+              gate: "/usr/bin/true",
+              artifact: "README.md",
+              scope: "src/b",
+              freshEyes: false,
+            },
+          },
+        },
+      ],
+    });
+
+    const resDefaultOn = usableResponses[0].result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.notEqual(resDefaultOn.isError, true, resDefaultOn.content[0].text);
+    assert.match(resDefaultOn.content[0].text, /fresh eyes ON/);
+    assert.equal(factoryUsable.contractFor("t-default-on")?.freshEyes, true);
+
+    const resExplicitOff = usableResponses[1].result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.notEqual(resExplicitOff.isError, true, resExplicitOff.content[0].text);
+    assert.doesNotMatch(resExplicitOff.content[0].text, /fresh eyes ON/);
+    assert.equal(factoryUsable.contractFor("t-explicit-off")?.freshEyes, undefined);
+
+    const corrUnusable = new CorrelationRegistry(stateUnusable).issue({
+      role: "lead",
+      projectSlug: "demo-unusable",
+      projectRoot: repoDir,
+      agentId: "lead-unusable-1",
+    });
+
+    const unusableResponses = await runMcpSession({
+      args: ["--correlation", corrUnusable.correlationId, "--state-dir", stateUnusable],
+      cwd: repoDir,
+      requests: [
+        {
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: {
+            name: "lead_set_contract",
+            arguments: {
+              task: "t-degraded-off",
+              gate: "/usr/bin/true",
+              artifact: "README.md",
+              scope: "src/c",
+            },
+          },
+        },
+        {
+          jsonrpc: "2.0",
+          id: 2,
+          method: "tools/call",
+          params: {
+            name: "lead_set_contract",
+            arguments: {
+              task: "t-explicit-on-fail",
+              gate: "/usr/bin/true",
+              artifact: "README.md",
+              scope: "src/d",
+              freshEyes: true,
+            },
+          },
+        },
+      ],
+    });
+
+    const resDegraded = unusableResponses[0].result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.notEqual(resDegraded.isError, true, resDegraded.content[0].text);
+    assert.doesNotMatch(resDegraded.content[0].text, /fresh eyes ON/);
+    assert.equal(factoryUnusable.contractFor("t-degraded-off")?.freshEyes, undefined);
+
+    const resFailFast = unusableResponses[1].result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.equal(resFailFast.isError, true);
+    assert.match(resFailFast.content[0].text, /eye-unconfigured/);
+    assert.equal(factoryUnusable.contractFor("t-explicit-on-fail"), undefined);
+  } finally {
+    spoolUsable.stop();
+    spoolUnusable.stop();
+    rmSync(homeUsable, { recursive: true, force: true });
+    rmSync(homeUnusable, { recursive: true, force: true });
+    rmSync(repoDir, { recursive: true, force: true });
+  }
+});
+

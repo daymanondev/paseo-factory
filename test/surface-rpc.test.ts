@@ -154,7 +154,7 @@ function makeSurface(t: TestContext, agents: FakeAgent[] = [], plugins: DaemonPl
   const home = join(dir, "paseo-home");
   const stateDir = join(home, "plugin-state", "paseo-factory");
   const retroRunner = fakeCopilotRunner(() => ({ code: 0, stdout: '{"proposals":[]}' }));
-  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner });
+  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner, eyeCliProbe: () => false });
   const fake = fakeDaemon(agents);
   const modelSyncs: { agentId: string; model: string }[] = [];
   const thinkingSyncs: { agentId: string; thinkingOptionId: string }[] = [];
@@ -507,7 +507,7 @@ test("snapshot: an unavailable daemon plugin list degrades to the all-not_instal
   const home = join(dir, "paseo-home");
   const stateDir = join(home, "plugin-state", "paseo-factory");
   const retroRunner = fakeCopilotRunner(() => ({ code: 0, stdout: '{"proposals":[]}' }));
-  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner });
+  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner, eyeCliProbe: () => false });
   const handlers = createSurfaceHandlers({
     factory,
     stateDir,
@@ -664,11 +664,7 @@ test("supervisor.ensure: seats the agent AT the project root — no AGENTS.md wr
   assert.deepEqual(fake.created[0]!.labels, { seat: "supervisor", project: project.slug }, "the seat + project labels are how every later ensure finds it");
   assert.equal(fake.created[0]!.title, "Supervisor (paseo-factory)");
   assert.equal(fake.created[0]!.cwd, project.root, "the seat stands at cwd = <project-root>");
-  const bootstrap = fake.created[0]!.prompt ?? "";
-  assert.match(bootstrap, /Project root \(your cwd\)/, "the bootstrap prompt carries the orientation");
-  assert.match(bootstrap, /lead dispatch --workspace/, "the bootstrap lists day-one lead dispatch power");
-  assert.match(bootstrap, new RegExp(home.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), "the bootstrap names the resolved home");
-  assert.match(bootstrap, /paseo-factory role skills: grilling, domain-modeling/, "the bootstrap carries the skill trigger index footer");
+  assert.equal(fake.created[0]!.prompt, undefined, "seat creation is silent — no bootstrap prompt inside agents.create (v0.0.28, ADR 0018 §2)");
   assert.deepEqual(fake.sent, [{ agentId: reply.agentId, text: "Check the T1 verdict." }], "the quick dispatch rode the create");
 
   // The durable registration records the slug→root + seat id.
@@ -804,7 +800,7 @@ test("lead.ensure: seats the Lead at the project root under lanes.lead with the 
   assert.equal(fake.created[0]!.cwd, project.root);
   assert.deepEqual(fake.created[0]!.labels, { seat: "lead", project: project.slug });
   assert.equal(fake.created[0]!.title, "Lead (paseo-factory)");
-  assert.match(fake.created[0]!.prompt ?? "", /paseo-factory role skills: codebase-design, domain-modeling, tdd/, "the Lead footer names its skills");
+  assert.equal(fake.created[0]!.prompt, undefined, "seat creation is silent — no bootstrap prompt inside agents.create (v0.0.28, ADR 0018 §2)");
   assert.deepEqual(fake.sent, [{ agentId: reply.agentId, text: "Split the directive." }]);
 
   // An existing Lead is reused (find-or-create).
@@ -2079,7 +2075,7 @@ test("pluginsInstall: a daemon failure refuses as data — { ok: false, code: 'd
   const home = join(dir, "paseo-home");
   const stateDir = join(home, "plugin-state", "paseo-factory");
   const retroRunner = fakeCopilotRunner(() => ({ code: 0, stdout: '{"proposals":[]}' }));
-  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner });
+  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner, eyeCliProbe: () => false });
   const handlers = createSurfaceHandlers({
     factory,
     stateDir,
@@ -2122,7 +2118,7 @@ test("pluginsManage: a daemon error refuses as data — { ok: false, code: 'daem
   const home = join(dir, "paseo-home");
   const stateDir = join(home, "plugin-state", "paseo-factory");
   const retroRunner = fakeCopilotRunner(() => ({ code: 0, stdout: '{"proposals":[]}' }));
-  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner });
+  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner, eyeCliProbe: () => false });
   const handlers = createSurfaceHandlers({
     factory,
     stateDir,
@@ -2175,7 +2171,7 @@ test("companion lifecycle over the wire: the handlers bind the daemon bridge by 
   // bridge (paseo.pid + local-credential in the temp home) is the default.
   const stateDir = join(daemon.home, "plugin-state", "paseo-factory");
   const retroRunner = fakeCopilotRunner(() => ({ code: 0, stdout: '{"proposals":[]}' }));
-  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner });
+  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner, eyeCliProbe: () => false });
   const handlers = createSurfaceHandlers({ factory, stateDir, home: daemon.home, daemon: fakeDaemon([]).daemon });
 
   const snap = await handlers.snapshot({});
@@ -2207,7 +2203,7 @@ test("surface deps: the plugin bridge overrides ride createSurfaceHandlers like 
   const home = join(dir, "paseo-home");
   const stateDir = join(home, "plugin-state", "paseo-factory");
   const retroRunner = fakeCopilotRunner(() => ({ code: 0, stdout: '{"proposals":[]}' }));
-  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner });
+  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner, eyeCliProbe: () => false });
   const handlers = createSurfaceHandlers({
     factory,
     stateDir,
@@ -3442,7 +3438,7 @@ test("v0.0.25 (ADR 0012 §2/§4): pluginsCheckUpdates populates snapshot update 
   const home = join(dir, "paseo-home");
   const stateDir = join(home, "plugin-state", "paseo-factory");
   const retroRunner = fakeCopilotRunner(() => ({ code: 0, stdout: '{"proposals":[]}' }));
-  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner });
+  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner, eyeCliProbe: () => false });
 
   const manageCalls: { pluginId: string; action: string }[] = [];
   const handlers = createSurfaceHandlers({

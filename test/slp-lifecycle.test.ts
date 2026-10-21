@@ -82,7 +82,7 @@ test("Full SLP lifecycle: Owner -> Supervisor -> Lead -> Agent -> Lead -> Superv
   writeFileSync(join(projectRoot, "src", "index.ts"), "export const base = 1;\n");
   gitCommitAll(projectRoot, "initial commit");
 
-  const factory = createFactory({ stateDir });
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
   const correlations = new CorrelationRegistry(stateDir);
 
   interface LiveAgent {

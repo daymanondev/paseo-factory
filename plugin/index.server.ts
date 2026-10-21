@@ -28,7 +28,7 @@ import { createSurfaceHandlers, registerSurfaceRpc } from "./server/surface-rpc.
 import { createLeadMailRuntime } from "./server/lead-mailbox.ts";
 import { injectRoleOnCreate, injectSessionEnv, sanitizeAgentCreateHookResult } from "./server/roles.ts";
 
-const SHELL_VERSION = "0.0.27";
+const SHELL_VERSION = "0.0.28";
 
 const log = (message: string) => console.log(`[${PLUGIN_ID}] ${message}`);
 
@@ -172,6 +172,7 @@ export default function contribute(server: PluginServerContext) {
   const surface = createSurfaceHandlers({
     ...surfaceDeps,
     onLeadRetired: (input) => leadMail.settleLeadRotation(input.slug),
+    onSeatKickoffSent: (input) => leadMail.markKickoffSent(input.agentId),
     resetProjectMailbox: (slug) => leadMail.resetProjectMailbox(slug),
     leadDispatch: (request) => leadMail.dispatchLead(request),
   });
@@ -283,6 +284,7 @@ export default function contribute(server: PluginServerContext) {
     offTurnEnded();
     gitBlocks.stop();
     spool.stop();
+    leadMail.stop();
     log(`down v${SHELL_VERSION}`);
   };
 }
