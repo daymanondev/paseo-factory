@@ -46,7 +46,7 @@
  *     racing a live delivery returns the batch to `queued` instead of
  *     stranding it `inFlight` until the next plugin restart.
  */
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Factory } from "./core/factory.ts";
 import { readCorrelations } from "./core/correlations.ts";
@@ -83,6 +83,17 @@ import type { SurfaceAgentSnapshot, SurfaceDaemonApi } from "./surface-rpc.ts";
  * `200k`–`1M` model lane.
  */
 export const LEAD_ROTATE_TOKENS = 128_000;
+
+/**
+ * The Dual-Fuse `Lead handoff` extraction timeout (v0.0.28, ADR 0018 §3):
+ * 90,000 ms (90 seconds) — if `rotationState === "handing_over"` remains
+ * unresolved past this ceiling, the runtime trips Fuse 2 and completes
+ * succession using the machine-verified roster and ledger digest.
+ */
+export const HANDOFF_EXTRACTION_TIMEOUT_MS = 90_000;
+
+const INTERRUPTED_HANDOFF_EXTRACTION_NOTE =
+  "(the outgoing Lead was interrupted during handoff extraction — rely on the Machine-Verified Active Peer Roster and Ledger State Digest above)";
 
 /**
  * Whether an agent's attention state blocks mailbox delivery (v0.0.24, ADR 0015 §2):
@@ -215,6 +226,11 @@ export interface LeadMailRuntimeDeps {
    * handoff's archive step rides it.
    */
   retireLead: (input: { projectRoot: string }) => Promise<{ ok: true; agentId: string } | { ok: false; code: string; error: string }>;
+  /**
+   * Optional override for the `handing_over` extraction fuse timeout in ms
+   * (v0.0.28, ADR 0018 §3; defaults to `HANDOFF_EXTRACTION_TIMEOUT_MS = 90_000`).
+   */
+  handoffTimeoutMs?: number;
   onLog?: (message: string) => void;
   logger?: { warn?: (message: string) => void; info?: (message: string) => void; error?: (message: string) => void };
 }
@@ -257,6 +273,10 @@ export interface LeadMailRuntime {
    * turn (v0.0.28, ADR 0018 §2).
    */
   markKickoffSent(agentId: string): void;
+  /**
+   * Clears all active handoff extraction timers on shutdown (v0.0.28, ADR 0018 §3).
+   */
+  stop(): void;
 }
 
 /** What the `agent.turn_ended` wiring hands the machine — the SDK event reduced to plain data. */
@@ -277,9 +297,22 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   // the chain), so read-then-append against one mailbox is atomic in practice.
   const lanes = new Map<string, Promise<unknown>>();
   const handingOverBySlug = new Set<string>();
+  const handoffTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const handoffTimeoutMs = deps.handoffTimeoutMs ?? HANDOFF_EXTRACTION_TIMEOUT_MS;
   const retriedFailedMailIds = new Set<string>();
   const kickoffSentAgentIds = new Set<string>();
   const pendingHandoffByAgentId = new Map<string, string>();
+  const clearHandoffTimer = (slug: string): void => {
+    const timer = handoffTimers.get(slug);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      handoffTimers.delete(slug);
+    }
+  };
+  const stop = (): void => {
+    for (const timer of handoffTimers.values()) clearTimeout(timer);
+    handoffTimers.clear();
+  };
   const log = deps.onLog ?? (() => {});
   const warn = (message: string): void => {
     log(message);
@@ -506,6 +539,25 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       } catch (err) {
         log(`lead-mailbox: rotation observation of ${slug} failed — the state stands (${messageOf(err)})`);
       }
+      if (readRotationState(slug) === "handing_over") {
+        const reg = readProjectRegistration(deps.stateDir, slug);
+        const requestedAt = reg?.handoffRequestedAt;
+        const requestedMs = requestedAt !== undefined ? Date.parse(requestedAt) : Number.NaN;
+        if (reg?.root !== undefined && Number.isFinite(requestedMs) && Date.now() - requestedMs >= handoffTimeoutMs) {
+          try {
+            log(`lead-mailbox: ${slug} handoff extraction timed out (${Date.now() - requestedMs}ms >= ${handoffTimeoutMs}ms) during pump — tripping fuse`);
+            await completeHandoff(slug, reg.root, {
+              agentId: reg.lead ?? "",
+              outcome: { kind: "failed" },
+              timeline: [],
+              fuseReason: "extraction-timeout",
+              handoffRequestedAt: requestedAt,
+            });
+          } catch (err) {
+            log(`lead-mailbox: handoff timeout fuse of ${slug} failed — the state stands (${messageOf(err)})`);
+          }
+        }
+      }
       try {
         await drainLeadMailbox(slug);
       } catch (err) {
@@ -683,42 +735,114 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     await drainLeadMailbox(slug);
   };
 
-  /** Arm 3 — lock the mailbox (holding all mail), then steer the one bounded Handoff Extraction prompt. */
+  /** Arm 3 — lock the mailbox (holding all mail), then steer the one bounded Handoff Extraction prompt (with Fuse 1 immediate bypass). */
   const beginHandoff = async (slug: string, root: string): Promise<void> => {
+    const handoffRequestedAt = new Date().toISOString();
     handingOverBySlug.add(slug);
-    writeRotationState(slug, root, { rotationState: "handing_over", handoffRequestedAt: new Date().toISOString() });
-    const lead = await liveLeadAgent(resolveDaemon(), slug);
-    if (lead === undefined) {
-      log(`lead-mailbox: ${slug} locked for handoff but no live lead answered — mail holds queued`);
-      return; // locked stands; the next turn boundary or ensure re-enters the machine
+    writeRotationState(slug, root, { rotationState: "handing_over", handoffRequestedAt });
+    let lead: SurfaceAgentSnapshot | undefined;
+    try {
+      lead = await liveLeadAgent(resolveDaemon(), slug);
+    } catch {
+      lead = undefined;
     }
-    await resolveDaemon().agents.ref(lead.id).send(renderHandoffExtractionPrompt(deps.stateDir, slug));
+    if (lead === undefined || lead.status === "error") {
+      log(
+        `lead-mailbox: ${slug} handoff extraction bypassed (${lead === undefined ? "no live lead" : "lead in error state"}) — completing handoff immediately`,
+      );
+      await completeHandoff(slug, root, {
+        agentId: lead?.id ?? "",
+        outcome: { kind: "failed" },
+        timeline: [],
+        fuseReason: "extraction-send-failed",
+        handoffRequestedAt,
+      });
+      return;
+    }
+    try {
+      await resolveDaemon().agents.ref(lead.id).send(renderHandoffExtractionPrompt(deps.stateDir, slug));
+    } catch (err) {
+      log(`lead-mailbox: ${slug} handoff extraction send failed (${messageOf(err)}) — completing handoff immediately`);
+      await completeHandoff(slug, root, {
+        agentId: lead.id,
+        outcome: { kind: "failed" },
+        timeline: [],
+        fuseReason: "extraction-send-failed",
+        handoffRequestedAt,
+      });
+      return;
+    }
     log(`lead-mailbox: ${slug} locked for handoff — extraction prompt sent to ${lead.id}`);
+    clearHandoffTimer(slug);
+    const timer = setTimeout(() => {
+      handoffTimers.delete(slug);
+      void projectLane(slug, async () => {
+        try {
+          if (readRotationState(slug) !== "handing_over") return;
+          const reg = readProjectRegistration(deps.stateDir, slug);
+          const effectiveRoot = reg?.root ?? root;
+          const effectiveLeadId = reg?.lead ?? lead.id;
+          const effectiveRequestedAt = reg?.handoffRequestedAt ?? handoffRequestedAt;
+          log(`lead-mailbox: ${slug} handoff extraction timed out after ${handoffTimeoutMs}ms — tripping fuse`);
+          await completeHandoff(slug, effectiveRoot, {
+            agentId: effectiveLeadId,
+            outcome: { kind: "failed" },
+            timeline: [],
+            fuseReason: "extraction-timeout",
+            handoffRequestedAt: effectiveRequestedAt,
+          });
+        } catch (err) {
+          log(`lead-mailbox: handoff timeout fuse of ${slug} failed — the state stands (${messageOf(err)})`);
+        }
+      });
+    }, handoffTimeoutMs);
+    timer.unref?.();
+    handoffTimers.set(slug, timer);
   };
 
   /**
-   * Arm 2 — the outgoing Lead finished its extraction turn: read (or write,
-   * from the turn's assistant text) `lead-handoff.md`, build the
-   * machine-verified roster + digest, archive the outgoing Lead, spawn the
-   * successor with the three-layer kickoff, reset `normal`, and drain every
-   * held mail into it. Any failure holds the lock — mail waits, never drops.
+   * Arm 2 — the outgoing Lead finished its extraction turn (or a Dual-Fuse
+   * safeguard tripped): read (or write, from the turn's assistant text)
+   * `lead-handoff.md`, build the machine-verified roster + digest, archive the
+   * outgoing Lead, spawn the successor with the three-layer kickoff, reset
+   * `normal`, and drain every held mail into it. Any failure holds the lock —
+   * mail waits, never drops.
    */
-  const completeHandoff = async (slug: string, root: string, input: LeadTurnEndedInput): Promise<void> => {
+  const completeHandoff = async (
+    slug: string,
+    root: string,
+    input: LeadTurnEndedInput & { fuseReason?: "extraction-send-failed" | "extraction-timeout"; handoffRequestedAt?: string },
+  ): Promise<void> => {
+    clearHandoffTimer(slug);
     const statePath = projectStateDir(deps.stateDir, slug);
     const handoffPath = join(statePath, "lead-handoff.md");
+    const requestedAt = input.handoffRequestedAt ?? readProjectRegistration(deps.stateDir, slug)?.handoffRequestedAt;
+    const requestedMs = requestedAt !== undefined ? Date.parse(requestedAt) : Number.NaN;
     let handoffText: string | null = null;
-    try {
-      handoffText = readFileSync(handoffPath, "utf8");
-    } catch {
-      handoffText = null;
+    if (input.fuseReason !== "extraction-send-failed") {
+      try {
+        const stat = statSync(handoffPath);
+        const isFresh =
+          input.fuseReason === "extraction-timeout"
+            ? Number.isFinite(requestedMs) && stat.mtimeMs >= requestedMs
+            : !Number.isFinite(requestedMs) || stat.mtimeMs + 1 >= requestedMs;
+        if (isFresh) {
+          handoffText = readFileSync(handoffPath, "utf8");
+        }
+      } catch {
+        handoffText = null;
+      }
     }
-    if ((handoffText === null || handoffText.trim() === "") && input.outcome.kind === "completed") {
+    if ((handoffText === null || handoffText.trim() === "") && input.outcome.kind === "completed" && input.fuseReason === undefined) {
       const fromTurn = lastAssistantText(input.timeline);
       if (fromTurn !== null) {
         mkdirSync(statePath, { recursive: true });
         writeFileSync(handoffPath, fromTurn);
         handoffText = fromTurn;
       }
+    }
+    if ((handoffText === null || handoffText.trim() === "") && (input.fuseReason !== undefined || input.outcome.kind !== "completed")) {
+      handoffText = INTERRUPTED_HANDOFF_EXTRACTION_NOTE;
     }
     const events = projectEventsOf(root);
     const tasks = foldTasks(events);
@@ -732,9 +856,12 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     });
     const digest = renderLedgerDigest(events);
     const retired = await deps.retireLead({ projectRoot: root });
-    if (!retired.ok) {
+    if (!retired.ok && retired.code !== "no-lead") {
       log(`lead-mailbox: handoff of ${slug} could not archive the outgoing lead (${retired.code}: ${retired.error}) — the mailbox stays locked, mail holds queued`);
       return;
+    }
+    if (!retired.ok && retired.code === "no-lead") {
+      settleLeadRotation(slug);
     }
     const ensured = await deps.ensureLead({ projectRoot: root });
     if (!ensured.ok) {
@@ -768,7 +895,8 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       );
       await resolveDaemon().agents.ref(ensured.agentId).send(kickoffPrompt);
     }
-    log(`lead-mailbox: handoff of ${slug} complete — ${retired.agentId} archived, successor ${ensured.agentId} kicked off, rotation reset to normal`);
+    const retiredLabel = retired.ok ? retired.agentId : (input.agentId || "absent-lead");
+    log(`lead-mailbox: handoff of ${slug} complete — ${retiredLabel} archived, successor ${ensured.agentId} kicked off, rotation reset to normal`);
   };
 
   /** The Project's ledger slice — every event whose task's contract workspace sits inside the root (the snapshot's own scoping law). */
@@ -869,12 +997,13 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     // The directive is queued — the lane pumps it.
     await pumpProjectLead(slug);
     const rotationState = readRotationState(slug);
+    const finalAgentId = readProjectRegistration(deps.stateDir, slug)?.lead ?? agentId;
     return {
       id: request.id,
       ok: true,
-      summary: `dispatched to the lead of ${slug} — agent=${agentId} mail=${mailId} rotation=${rotationState}`,
+      summary: `dispatched to the lead of ${slug} — agent=${finalAgentId} mail=${mailId} rotation=${rotationState}`,
       project: slug,
-      leadAgentId: agentId,
+      leadAgentId: finalAgentId,
       mailId,
       rotationState,
     };
@@ -1068,6 +1197,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   };
 
   const resetProjectMailbox = (slug: string): void => {
+    clearHandoffTimer(slug);
     handingOverBySlug.delete(slug);
     const prefix = `${slug}:`;
     for (const key of [...retriedFailedMailIds]) {
@@ -1103,6 +1233,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     settleLeadRotation,
     resetProjectMailbox,
     markKickoffSent,
+    stop,
   };
 }
 

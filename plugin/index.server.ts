@@ -284,6 +284,7 @@ export default function contribute(server: PluginServerContext) {
     offTurnEnded();
     gitBlocks.stop();
     spool.stop();
+    leadMail.stop();
     log(`down v${SHELL_VERSION}`);
   };
 }
