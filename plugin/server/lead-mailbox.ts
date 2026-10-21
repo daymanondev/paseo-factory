@@ -52,6 +52,8 @@ import type { Factory } from "./core/factory.ts";
 import type { LedgerEvent } from "./core/events.ts";
 import { ensureProjectRegistered, listProjectRegistrations, projectStateDir, readProjectRegistration, resolveProject, writeProjectRegistration } from "./core/project.ts";
 import type { LeadRotationState, ProjectRegistration } from "./core/project.ts";
+import { loadLanes } from "./core/lanes.ts";
+import { buildSeatKickoffPacket } from "./core/preflight.ts";
 import { taskWorktreeBranch, taskWorktreePath } from "./core/workspace.ts";
 import {
   ackLeadMail as appendMailAcked,
@@ -269,6 +271,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   const lanes = new Map<string, Promise<unknown>>();
   const handingOverBySlug = new Set<string>();
   const retriedFailedMailIds = new Set<string>();
+  const kickoffSentAgentIds = new Set<string>();
   const log = deps.onLog ?? (() => {});
   const warn = (message: string): void => {
     log(message);
@@ -353,9 +356,30 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     }
     if (lead === undefined) return; // no live Lead — the next dispatch ensures one and pumps again
     if (lead.status !== "idle" || isBlockedByAttention(lead)) return; // a running or permission-waiting Lead is never interrupted (§User Story 12)
-    await daemon.agents.ref(lead.id).send(renderMailPrompt(state.queued));
+    const prompt = prependKickoffPacketIfFirstTurn("lead", slug, lead, renderMailPrompt(state.queued));
+    await daemon.agents.ref(lead.id).send(prompt);
     appendMailDelivered(path, { mailIds: state.queued.map((item) => item.mailId), toAgentId: lead.id });
     log(`lead-mailbox: delivered ${state.queued.length} item(s) to the lead of ${slug} (${lead.id})`);
+  };
+
+  const prependKickoffPacketIfFirstTurn = (
+    role: "supervisor" | "lead",
+    slug: string,
+    agent: SurfaceAgentSnapshot,
+    prompt: string,
+  ): string => {
+    if (kickoffSentAgentIds.has(agent.id)) return prompt;
+    const reg = readProjectRegistration(deps.stateDir, slug);
+    const loadedLanes = loadLanes(deps.stateDir, slug);
+    const kickoff = buildSeatKickoffPacket({
+      role,
+      projectSlug: slug,
+      projectRoot: reg?.root ?? agent.cwd ?? "",
+      ledgerEvents: deps.factory.ledger.events,
+      ...(loadedLanes.ok ? { lanes: loadedLanes.lanes } : {}),
+    });
+    kickoffSentAgentIds.add(agent.id);
+    return `${kickoff}\n${prompt}`;
   };
 
   /**
@@ -396,7 +420,8 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     }
     if (supervisor === undefined) return;
     if (supervisor.status !== "idle" || isBlockedByAttention(supervisor)) return;
-    await daemon.agents.ref(supervisor.id).send(renderSupervisorMailBatch(state.supervisorQueued));
+    const prompt = prependKickoffPacketIfFirstTurn("supervisor", slug, supervisor, renderSupervisorMailBatch(state.supervisorQueued));
+    await daemon.agents.ref(supervisor.id).send(prompt);
     appendMailDelivered(path, {
       to: "supervisor",
       mailIds: state.supervisorQueued.map((item) => item.mailId),
@@ -762,7 +787,9 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       async (): Promise<{ ok: true; agentId: string; mailId: string } | { ok: false; code: string; error: string }> => {
         const ensured = await deps.ensureLead({ projectRoot: root });
         if (!ensured.ok) return ensured;
-        const queued = appendMailQueued(mailboxPath(slug), { from: request.from ?? "owner", kind: "directive", text: request.message });
+        const from = request.from ?? "owner";
+        const kind = from === "peer" ? "needs_human" : "directive";
+        const queued = appendMailQueued(mailboxPath(slug), { from, kind, text: request.message });
         return { ok: true, agentId: ensured.agentId, mailId: queued.mailId };
       },
     );
@@ -958,6 +985,8 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
    * Idempotent: a settled mailbox appends nothing.
    */
   const settleLeadRotation = (slug: string): void => {
+    const reg = readProjectRegistration(deps.stateDir, slug);
+    if (reg?.lead !== undefined) kickoffSentAgentIds.delete(reg.lead);
     const settled = recoverLeadMailbox(mailboxPath(slug), "lead-rotated", "lead");
     for (const event of settled) {
       log(`lead-mailbox: rotation of ${slug} requeued ${event.mailIds.length} item(s) — the un-acked delivery returns to queued (lead-rotated)`);
@@ -971,6 +1000,8 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       if (key.startsWith(prefix)) retriedFailedMailIds.delete(key);
     }
     const reg = readProjectRegistration(deps.stateDir, slug);
+    if (reg?.lead !== undefined) kickoffSentAgentIds.delete(reg.lead);
+    if (reg?.supervisor !== undefined) kickoffSentAgentIds.delete(reg.supervisor);
     if (reg !== undefined && (reg.rotationState !== undefined || reg.handoffRequestedAt !== undefined)) {
       writeRotationState(slug, reg.root, { rotationState: null, handoffRequestedAt: null });
     }

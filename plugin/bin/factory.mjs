@@ -317,7 +317,9 @@ const ACCEPT_SEATS = ["owner", "supervisor", "lead"];
  * stamp; there is no flag to override it.
  */
 const stampedAgent = typeof process.env.PASEO_AGENT_ID === "string" ? process.env.PASEO_AGENT_ID.trim() : "";
-const submitter = stampedAgent === "" ? "owner" : stampedAgent;
+const stampedCorrelation =
+  typeof process.env.PASEO_FACTORY_CORRELATION === "string" ? process.env.PASEO_FACTORY_CORRELATION.trim() : "";
+const submitter = stampedAgent !== "" ? stampedAgent : stampedCorrelation !== "" ? stampedCorrelation : "owner";
 const rawSeat = typeof process.env.PASEO_FACTORY_SEAT === "string" ? process.env.PASEO_FACTORY_SEAT.trim() : "";
 const stampedSeat = rawSeat === "supervisor" || rawSeat === "lead" || rawSeat === "agent" ? rawSeat : undefined;
 

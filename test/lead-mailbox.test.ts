@@ -712,6 +712,68 @@ test("resetProjectMailbox clears in-memory retry and handoff state for the targe
   assert.equal(fake.sent.length, 4);
 });
 
+test("drainSupervisorMailbox and drainLeadMailbox prepend the Seat kickoff packet on Turn 1 of each seat agentId and omit it on subsequent turns (v0.0.26, ADR 0016)", async (t) => {
+  const { slug, projectRoot, leadMail, surface, fake } = makeSpooledRuntime(t);
+
+  // 1. First Supervisor delivery includes the Seat kickoff packet
+  await leadMail.dispatchSupervisor({
+    id: "sd-kickoff-1",
+    kind: "supervisor_dispatch",
+    workspace: projectRoot,
+    message: "First Supervisor directive",
+  });
+  assert.equal(fake.sent.length, 1);
+  const supId = fake.sent[0]!.agentId;
+  assert.match(fake.sent[0]!.text, /\[paseo-factory seat kickoff packet · role=supervisor/);
+  assert.match(fake.sent[0]!.text, /First Supervisor directive/);
+
+  // Complete Turn 1 and send Turn 2 to the SAME Supervisor agentId -> kickoff packet is omitted
+  await leadMail.onLeadTurnEnded({ agentId: supId, outcome: { kind: "completed" }, timeline: [] });
+  await leadMail.dispatchSupervisor({
+    id: "sd-kickoff-2",
+    kind: "supervisor_dispatch",
+    workspace: projectRoot,
+    message: "Second Supervisor directive",
+  });
+  assert.equal(fake.sent.length, 2);
+  assert.doesNotMatch(fake.sent[1]!.text, /\[paseo-factory seat kickoff packet/);
+  assert.match(fake.sent[1]!.text, /Second Supervisor directive/);
+
+  // 2. First Lead delivery includes the Seat kickoff packet
+  await leadMail.dispatchLead({
+    id: "ld-kickoff-1",
+    kind: "lead_dispatch",
+    workspace: projectRoot,
+    message: "First Lead directive",
+  });
+  assert.equal(fake.sent.length, 3);
+  const leadId = fake.sent[2]!.agentId;
+  assert.match(fake.sent[2]!.text, /\[paseo-factory seat kickoff packet · role=lead/);
+  assert.match(fake.sent[2]!.text, /First Lead directive/);
+
+  // Complete Turn 1 and send Turn 2 to the SAME Lead agentId -> kickoff packet is omitted
+  await leadMail.onLeadTurnEnded({ agentId: leadId, outcome: { kind: "completed" }, timeline: [] });
+  await leadMail.dispatchLead({
+    id: "ld-kickoff-2",
+    kind: "lead_dispatch",
+    workspace: projectRoot,
+    message: "Second Lead directive",
+  });
+  assert.equal(fake.sent.length, 4);
+  assert.doesNotMatch(fake.sent[3]!.text, /\[paseo-factory seat kickoff packet/);
+  assert.match(fake.sent[3]!.text, /Second Lead directive/);
+
+  // 3. If a seat's cwd drifts away from projectRoot, ensureSeat retires and recreates it, and the new seat gets a fresh kickoff packet
+  await leadMail.onLeadTurnEnded({ agentId: leadId, outcome: { kind: "completed" }, timeline: [] });
+  const liveLead = fake.agents.find((a) => a.id === leadId);
+  assert.ok(liveLead);
+  liveLead.cwd = "/wrong/project/root";
+  const reEnsured = await surface.leadEnsure({ projectRoot });
+  assert.ok(reEnsured.ok);
+  assert.equal(reEnsured.created, true, "mismatched cwd seat is retired and recreated");
+  assert.notEqual(reEnsured.agentId, leadId);
+});
+
 
 
 

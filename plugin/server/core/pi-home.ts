@@ -126,7 +126,7 @@ export function provisionPiAgentHome(input: ProvisionPiHomeOptions): string {
   // be deleted as contamination (the sweep's ordering is load-bearing).
   writeAppendSystemMd(roleHome, input.role, input.appendSystemPrompt);
   writeSettingsJson(sourceAgentDir, roleHome, input.role, input.agentsSkillsDir ?? "~/.agents/skills");
-  syncMcpJson(sourceAgentDir, roleHome, input.role);
+  syncMcpJson(sourceAgentDir, roleHome, input.role, input.stateDir);
   for (const name of SHARED_STATE_NAMES) {
     const source = join(sourceAgentDir, name);
     if (existsSync(source)) ensureSymlink(source, join(roleHome, name));
@@ -196,6 +196,9 @@ function writeSettingsJson(sourceAgentDir: string, roleHome: string, role: PiAge
       : ["-builtin:llama.cpp"];
   settings.quietStartup = true;
   settings.defaultProjectTrust = "always";
+  if (role === "supervisor" || role === "lead") {
+    settings.defaultTools = ["read", "bash", "grep", "find", "ls"];
+  }
   if (role === "agent") {
     settings.skills = ["!*", ...CORE_AGENT_SKILLS.map((skill) => `+${join(agentsSkillsDir, skill)}`)];
   } else if (role === "headless") {
@@ -209,25 +212,30 @@ function writeSettingsJson(sourceAgentDir: string, roleHome: string, role: PiAge
  * v1.3.0's native `builtin:mcp`: every server entry whose `auth` is the
  * legacy `pi-mcp-adapter` string `"oauth"` loses `auth`, while valid object
  * shapes (`auth: { provider: "..." }`) and every other field pass through
- * untouched. Only the three session-bearing roles get an `mcp.json` — the
- * tool-less `headless` pass runs `--no-tools` and never sees an MCP server.
- * Re-runs on every provision call, so operator edits propagate immediately;
- * a source that is absent or no longer valid retires any stale copy.
+ * untouched, and `paseo_factory` is always injected with `"exposure": "direct"`
+ * so Pi declares `mcp__paseo_factory__*` tools directly to the model instead
+ * of hiding them in `codemode` (v0.0.26, ADR 0016 §3). Only the three
+ * session-bearing roles get an `mcp.json` — the tool-less `headless` pass runs
+ * `--no-tools` and never sees an MCP server.
  */
-function syncMcpJson(sourceAgentDir: string, roleHome: string, role: PiAgentRole): void {
+function syncMcpJson(sourceAgentDir: string, roleHome: string, role: PiAgentRole, stateDir: string): void {
   const target = join(roleHome, "mcp.json");
   if (role === "headless") return;
   const source = readJsonObject(join(sourceAgentDir, "mcp.json"));
   const servers = source !== undefined && isJsonObject(source.mcpServers) ? source.mcpServers : undefined;
-  if (servers === undefined) {
-    rmSync(target, { force: true });
-    return;
-  }
   const mcpServers: Record<string, unknown> = {};
-  for (const [name, entry] of Object.entries(servers)) {
-    mcpServers[name] = isJsonObject(entry) && entry.auth === "oauth" ? withoutAuth(entry) : entry;
+  if (servers !== undefined) {
+    for (const [name, entry] of Object.entries(servers)) {
+      mcpServers[name] = isJsonObject(entry) && entry.auth === "oauth" ? withoutAuth(entry) : entry;
+    }
   }
-  writeFileSync(target, `${JSON.stringify({ ...source, mcpServers }, null, 2)}\n`);
+  mcpServers.paseo_factory = {
+    command: process.execPath,
+    args: [join(stateDir, "bin", "bridge.mjs"), "--role", role, "--state-dir", stateDir],
+    exposure: "direct",
+  };
+  const restSource = source !== undefined && servers !== undefined ? source : {};
+  writeFileSync(target, `${JSON.stringify({ ...restSource, mcpServers }, null, 2)}\n`);
 }
 
 /** A copy of `entry` without its `auth` field, key order otherwise preserved. */

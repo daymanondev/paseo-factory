@@ -74,21 +74,39 @@ export function ensureClaimCli(stateDir: string, pluginDir: string, nodeBinary: 
  * nets compose). Everything benign passes through to the real git untouched.
  */
 export function ensureGitShim(stateDir: string, pluginDir: string, nodeBinary: string): void {
+  const binDir = claimCliBinDir(stateDir);
   ensureGeneratedWrapper({
-    target: join(claimCliBinDir(stateDir), "git"),
+    target: join(binDir, "git"),
     script: join(pluginDir, "bin", "git-shim.mjs"),
     stateDir,
     nodeBinary,
   });
+  const execShimScript = join(pluginDir, "bin", "exec-shim.mjs");
+  for (const tool of ["pkill", "kill", "killall", "paseo", "gh"] as const) {
+    ensureGeneratedWrapper({
+      target: join(binDir, tool),
+      script: execShimScript,
+      extraArg: tool,
+      stateDir,
+      nodeBinary,
+    });
+  }
 }
 
-function ensureGeneratedWrapper(input: { target: string; script: string; stateDir: string; nodeBinary: string }): void {
+function ensureGeneratedWrapper(input: {
+  target: string;
+  script: string;
+  extraArg?: string;
+  stateDir: string;
+  nodeBinary: string;
+}): void {
   const binDir = dirname(input.target);
   mkdirSync(binDir, { recursive: true });
+  const extra = input.extraArg !== undefined ? ` ${shellQuote(input.extraArg)}` : "";
   const body =
     `#!/bin/sh\n` +
     `ELECTRON_RUN_AS_NODE=1 FACTORY_STATE_DIR=${shellQuote(input.stateDir)} ` +
-    `exec ${shellQuote(input.nodeBinary)} ${shellQuote(input.script)} "$@"\n`;
+    `exec ${shellQuote(input.nodeBinary)} ${shellQuote(input.script)}${extra} "$@"\n`;
   if (existsSync(input.target) && readFileSync(input.target, "utf8") === body) return;
   writeFileSync(input.target, body);
   chmodSync(input.target, 0o755);

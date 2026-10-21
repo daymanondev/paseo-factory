@@ -77,9 +77,9 @@ export function checkCleanAt(cwd: string, expectedFull: string): Promise<TreeChe
  * base at the moment the Contract is set. Returns undefined when git cannot
  * answer; setContract turns that into a refusal, never a silent null base.
  */
-export function headCommitSync(cwd: string): string | undefined {
+export function headCommitSync(cwd: string, ref = "HEAD"): string | undefined {
   try {
-    const out = execFileSync("git", ["rev-parse", "HEAD"], {
+    const out = execFileSync("git", ["rev-parse", "--verify", `${ref.trim() || "HEAD"}^{commit}`], {
       cwd,
       encoding: "utf8",
       timeout: GIT_TIMEOUT_MS,

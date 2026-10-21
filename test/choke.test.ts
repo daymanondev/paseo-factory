@@ -655,6 +655,92 @@ test("normalizeAgentCreateRequest prefixes bare model IDs without '/' and labels
   assert.deepEqual(rogueLead.config.labels, { custom: "1", seat: "lead", project: "ai-test-043c7e" });
 });
 
+test("choke.onPermissionAsked enforces seat-paseo-tool-fence and denies factory state file writes and plugin-process kills (v0.0.26, ADR 0016)", async (t) => {
+  const dir = makeTempDir("choke-v0026-");
+  disposeDir(t, dir);
+  const workspace = join(dir, "repo");
+  const stateDir = join(dir, "state");
+  mkdirSync(workspace, { recursive: true });
+  const factory = createFactory({ stateDir });
+  writeProjectRegistration(stateDir, "repo-123456", {
+    root: workspace,
+    supervisor: "sup-1",
+    lead: "lead-1",
+  });
+  const choke = createChoke({ factory, homeDir: join(dir, "home") });
+  const sent: { agentId: string; requestId: string; response: AgentPermissionResponse }[] = [];
+  const paseo: PaseoResponderApi = {
+    agents: {
+      ref(agentId: string) {
+        return {
+          async respondToPermission({ requestId, response }) {
+            sent.push({ agentId, requestId, response });
+          },
+        };
+      },
+    },
+  };
+
+  // 1. Forbidden raw Paseo/subagent tools denied with seat-paseo-tool-fence
+  for (const forbiddenTool of ["create_agent", "send_message", "mcp__paseo__create_agent", "Task", "invoke_subagent"]) {
+    await choke.onPermissionAsked(
+      {
+        agent: { id: "lead-1", cwd: workspace, title: "Lead — repo" },
+        request: {
+          id: `ask-${forbiddenTool}`,
+          provider: "claude",
+          name: forbiddenTool,
+          kind: "tool",
+        },
+      },
+      paseo,
+    );
+    assert.equal(sent.at(-1)?.response.behavior, "deny", `${forbiddenTool} must be denied`);
+  }
+
+  // 2. paseo_factory MCP tools allowed
+  await choke.onPermissionAsked(
+    {
+      agent: { id: "lead-1", cwd: workspace, title: "Lead — repo" },
+      request: {
+        id: "ask-paseo-factory-ok",
+        provider: "claude",
+        name: "mcp__paseo_factory__lead_set_contract",
+        kind: "tool",
+      },
+    },
+    paseo,
+  );
+  assert.equal(sent.at(-1)?.response.behavior, "allow", "paseo_factory MCP tool must be allowed");
+
+  // 3. pkill plugin-process.js and writes to <stateDir>/ledger.jsonl or mailbox.jsonl denied with seat-write-fence
+  for (const badCmd of [
+    "pkill -f plugin-process.js",
+    `echo '{}' >> ${join(stateDir, "ledger.jsonl")}`,
+    `rm -f ${join(stateDir, "projects", "repo-123456", "mailbox.jsonl")}`,
+  ]) {
+    await choke.onPermissionAsked(
+      {
+        agent: { id: "lead-1", cwd: workspace, title: "Lead — repo" },
+        request: {
+          id: `ask-bad-${badCmd.slice(0, 8)}`,
+          provider: "claude",
+          name: "Bash",
+          kind: "tool",
+          detail: { type: "shell", command: badCmd, cwd: workspace },
+        },
+      },
+      paseo,
+    );
+    assert.equal(sent.at(-1)?.response.behavior, "deny", `command '${badCmd}' must be denied`);
+  }
+
+  const toolFenceEvents = factory.ledger.events.filter(
+    (e) => e.event === "permit_denied" && e.rule === "seat-paseo-tool-fence",
+  );
+  assert.equal(toolFenceEvents.length, 5);
+});
+
 
 
 

@@ -20,7 +20,7 @@
  */
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readdirSync, rmSync } from "node:fs";
+import { readdirSync, realpathSync, rmSync } from "node:fs";
 import { FactoryError } from "./core/errors.ts";
 import type { Factory } from "./core/factory.ts";
 import { readLeadMailbox } from "./core/mailbox.ts";
@@ -262,6 +262,14 @@ export interface SurfaceDeps {
 
 /** How many agents one snapshot resolves a Timeline Oracle seqEnd for (seats + bound workers). */
 const SEQ_END_CAP = 12;
+
+function realpathSafe(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+}
 
 function messageOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -621,7 +629,12 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         agent.provider === parsed.provider ||
         agent.provider === targetProvider ||
         agent.provider.startsWith(`${parsed.provider}/`);
-      if (agent.status === "error" || !sameProviderFamily) {
+      const sameCwd =
+        typeof agent.cwd !== "string" ||
+        agent.cwd === "" ||
+        agent.cwd === "/tmp" ||
+        realpathSafe(agent.cwd) === realpathSafe(project.root);
+      if (agent.status === "error" || !sameProviderFamily || !sameCwd) {
         const retired = await retireSeat(seat, project.slug, project.root, context);
         if (!retired.ok) {
           log(`${seat}: retiring unhealthy seat ${agent.id} before recreate did not cleanly settle — ${retired.error}`);

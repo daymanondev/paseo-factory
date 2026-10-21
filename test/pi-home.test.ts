@@ -90,6 +90,7 @@ test("provisionPiAgentHome materializes a clean supervisor Pi harness home (v0.0
     extensions: ["-builtin:llama.cpp"],
     quietStartup: true,
     defaultProjectTrust: "always",
+    defaultTools: ["read", "bash", "grep", "find", "ls"],
   });
   // The operator's prompt contamination never lands in the harness home:
   // SYSTEM.md and extensions stay swept; APPEND_SYSTEM.md is the MANAGED
@@ -113,13 +114,18 @@ test("provisionPiAgentHome materializes a clean supervisor Pi harness home (v0.0
     assert.ok(lstatSync(link).isSymbolicLink(), `${name} is a symlink`);
     assert.equal(realpathSync(link), realpathSync(join(source, name)));
   }
-  // The sanitized mcp.json strips legacy "auth": "oauth" strings and keeps everything else.
+  // The sanitized mcp.json strips legacy "auth": "oauth" strings, keeps everything else, and injects paseo_factory.
   const mcp = JSON.parse(readFileSync(join(roleHome, "mcp.json"), "utf8"));
   assert.deepEqual(mcp, {
     mcpServers: {
       "legacy-http": { url: "https://x" },
       "stdio-ok": { command: "npx", args: ["-y", "mcp"] },
       "modern-oauth": { url: "https://y", auth: { provider: "anthropic" } },
+      paseo_factory: {
+        command: process.execPath,
+        args: [join(stateDir, "bin", "bridge.mjs"), "--role", "supervisor", "--state-dir", stateDir],
+        exposure: "direct",
+      },
     },
   });
 });
@@ -332,13 +338,26 @@ test("provisioning is idempotent and re-synchronizes mcp.json on every call (v0.
     mcpServers: {
       "legacy-http": { url: "https://x" },
       added: { command: "node", args: ["server.js"] },
+      paseo_factory: {
+        command: process.execPath,
+        args: [join(stateDir, "bin", "bridge.mjs"), "--role", "supervisor", "--state-dir", stateDir],
+        exposure: "direct",
+      },
     },
   });
 
-  // Operator deletes the global mcp.json — the stale sanitized copy retires with it.
+  // Operator deletes the global mcp.json — the stale operator entries retire while paseo_factory stays wired.
   rmSync(join(source, "mcp.json"));
   provisionPiAgentHome({ stateDir, role: "supervisor", sourceAgentDir: source });
-  assert.ok(!existsSync(join(second, "mcp.json")), "a removed source mcp.json retires the harness copy");
+  assert.deepEqual(JSON.parse(readFileSync(join(second, "mcp.json"), "utf8")), {
+    mcpServers: {
+      paseo_factory: {
+        command: process.execPath,
+        args: [join(stateDir, "bin", "bridge.mjs"), "--role", "supervisor", "--state-dir", stateDir],
+        exposure: "direct",
+      },
+    },
+  });
 });
 
 test("optional sources stay optional: absent stores are not linked, sessions are ensured, junk defaults dropped (v0.0.16, ADR 0011)", (t) => {
@@ -367,22 +386,48 @@ test("optional sources stay optional: absent stores are not linked, sessions are
     extensions: ["-builtin:llama.cpp"],
     quietStartup: true,
     defaultProjectTrust: "always",
+    defaultTools: ["read", "bash", "grep", "find", "ls"],
   });
-  for (const absent of ["auth.json", "models.json", "models-store.json", "mcp-oauth", "mcp-oauth.json", "oauth", "credentials", "mcp.json"]) {
+  for (const absent of ["auth.json", "models.json", "models-store.json", "mcp-oauth", "mcp-oauth.json", "oauth", "credentials"]) {
     assert.ok(!existsSync(join(home, absent)), `${absent} is not invented when the source has none`);
   }
+  assert.deepEqual(JSON.parse(readFileSync(join(home, "mcp.json"), "utf8")), {
+    mcpServers: {
+      paseo_factory: {
+        command: process.execPath,
+        args: [join(stateDir, "bin", "bridge.mjs"), "--role", "lead", "--state-dir", stateDir],
+        exposure: "direct",
+      },
+    },
+  });
   // sessions/ was absent in a writable source — it is ensured there and linked here.
   assert.ok(existsSync(join(source, "sessions")), "the source sessions dir is ensured");
   assert.ok(lstatSync(join(home, "sessions")).isSymbolicLink(), "and the role home links to it");
   assert.equal(realpathSync(join(home, "sessions")), realpathSync(join(source, "sessions")));
 
-  // An invalid (or mcpServers-less) source mcp.json still yields no harness copy.
+  // An invalid (or mcpServers-less) source mcp.json still yields only the managed paseo_factory server.
   writeFileSync(join(source, "mcp.json"), "{ not json");
   provisionPiAgentHome({ stateDir, role: "lead", sourceAgentDir: source });
-  assert.ok(!existsSync(join(home, "mcp.json")), "invalid JSON yields no harness mcp.json");
+  assert.deepEqual(JSON.parse(readFileSync(join(home, "mcp.json"), "utf8")), {
+    mcpServers: {
+      paseo_factory: {
+        command: process.execPath,
+        args: [join(stateDir, "bin", "bridge.mjs"), "--role", "lead", "--state-dir", stateDir],
+        exposure: "direct",
+      },
+    },
+  });
   writeFileSync(join(source, "mcp.json"), JSON.stringify({ somethingElse: true }));
   provisionPiAgentHome({ stateDir, role: "lead", sourceAgentDir: source });
-  assert.ok(!existsSync(join(home, "mcp.json")), "valid JSON without an mcpServers object yields no harness mcp.json");
+  assert.deepEqual(JSON.parse(readFileSync(join(home, "mcp.json"), "utf8")), {
+    mcpServers: {
+      paseo_factory: {
+        command: process.execPath,
+        args: [join(stateDir, "bin", "bridge.mjs"), "--role", "lead", "--state-dir", stateDir],
+        exposure: "direct",
+      },
+    },
+  });
 });
 
 test("defaults resolve against the runtime home: <home>/.pi/agent and <home>/.agents/skills (v0.0.16, ADR 0011)", (t) => {

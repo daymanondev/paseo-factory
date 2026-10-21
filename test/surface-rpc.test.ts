@@ -1231,7 +1231,7 @@ test("roles: factoryEnvFor provisions the role's Pi harness home on demand and c
   assert.ok(existsSync(join(stateDir, "pi-agent", "supervisor", "settings.json")), "the harness home is materialized on demand");
   assert.deepEqual(
     JSON.parse(readFileSync(join(stateDir, "pi-agent", "supervisor", "settings.json"), "utf8")),
-    cleanRoomSettings(),
+    cleanRoomSettings({ defaultTools: ["read", "bash", "grep", "find", "ls"] }),
     "the generated settings come from the fake operator home — never the real one",
   );
 
@@ -1271,8 +1271,14 @@ test("roles: agent.create injection launches every seat and working agent in its
   // The materialized homes are clean rooms built from the FAKE operator home:
   // zero packages, the llama.cpp-only extension denylist, quiet startup,
   // always-trusted projects, and only the operator's model/thinking defaults.
-  assert.deepEqual(JSON.parse(readFileSync(join(stateDir, "pi-agent", "supervisor", "settings.json"), "utf8")), cleanRoomSettings());
-  assert.deepEqual(JSON.parse(readFileSync(join(stateDir, "pi-agent", "lead", "settings.json"), "utf8")), cleanRoomSettings());
+  assert.deepEqual(
+    JSON.parse(readFileSync(join(stateDir, "pi-agent", "supervisor", "settings.json"), "utf8")),
+    cleanRoomSettings({ defaultTools: ["read", "bash", "grep", "find", "ls"] }),
+  );
+  assert.deepEqual(
+    JSON.parse(readFileSync(join(stateDir, "pi-agent", "lead", "settings.json"), "utf8")),
+    cleanRoomSettings({ defaultTools: ["read", "bash", "grep", "find", "ls"] }),
+  );
   // Skills policy per role: supervisor and lead stay unfiltered (all of
   // ~/.agents/skills auto-discovers); only the working agent is filtered down
   // to its three core skills in Pi's `~` form.
@@ -1327,13 +1333,18 @@ test("roles: session_open re-carries PI_CODING_AGENT_DIR and keeps the harness h
     assert.equal(realpathSync(link), realpathSync(join(source, name)), `${name} points at the fake source home`);
   }
   // The synchronized mcp.json strips legacy "auth": "oauth" strings while
-  // preserving server definitions and valid object auth.
+  // preserving server definitions and valid object auth, plus paseo_factory (v0.0.26).
   const mcp = JSON.parse(readFileSync(join(roleHome, "mcp.json"), "utf8"));
   assert.deepEqual(mcp, {
     mcpServers: {
       "legacy-http": { url: "https://x" },
       "stdio-ok": { command: "npx", args: ["-y", "mcp"] },
       "modern-oauth": { url: "https://y", auth: { provider: "anthropic" } },
+      paseo_factory: {
+        command: process.execPath,
+        args: [join(stateDir, "bin", "bridge.mjs"), "--role", "supervisor", "--state-dir", stateDir],
+        exposure: "direct",
+      },
     },
   });
   // The source home itself keeps its legacy string — sanitization copies, never rewrites the operator.

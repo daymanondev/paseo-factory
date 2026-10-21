@@ -24,9 +24,9 @@ import type { TimelineSourceApi } from "./server/timeline.ts";
 import { spoolRootFor, startSpool } from "./server/spool.ts";
 import { createSurfaceHandlers, registerSurfaceRpc } from "./server/surface-rpc.ts";
 import { createLeadMailRuntime } from "./server/lead-mailbox.ts";
-import { injectRoleOnCreate, injectSessionEnv } from "./server/roles.ts";
+import { injectRoleOnCreate, injectSessionEnv, sanitizeAgentCreateHookResult } from "./server/roles.ts";
 
-const SHELL_VERSION = "0.0.25";
+const SHELL_VERSION = "0.0.26";
 
 const log = (message: string) => console.log(`[${PLUGIN_ID}] ${message}`);
 
@@ -119,7 +119,8 @@ export default function contribute(server: PluginServerContext) {
     if (injected !== undefined) {
       log(`roles: injected the ${injected.env?.PASEO_FACTORY_SEAT ?? "agent"} contract into the agent created in ${next.config.cwd}`);
     }
-    return injected === undefined ? (next === request ? undefined : next) : injected;
+    const candidate = injected === undefined ? (next === request ? undefined : next) : injected;
+    return candidate === undefined ? undefined : sanitizeAgentCreateHookResult(candidate);
   });
 
   // The Factory surface's RPC handlers (v0.0.13, ADR 0009 §4): every

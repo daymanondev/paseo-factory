@@ -26,6 +26,7 @@ import { usageIsValid } from "./core/ledger.ts";
 import { needsHumanEvidenceIsValid, NEEDS_HUMAN_REASONS } from "./core/events.ts";
 import type { Factory } from "./core/factory.ts";
 import type { LedgerEvent, MeterUsage, NeedsHumanEvidence, NeedsHumanReason, Verdict } from "./core/events.ts";
+import { readCorrelations } from "./core/correlations.ts";
 import { listProjectRegistrations, readProjectRegistration, resolveProject, writeProjectRegistration } from "./core/project.ts";
 import { acceptanceSummary, archiveAcceptedTaskWorkspace } from "./surface-rpc.ts";
 import type { SurfaceDaemonApi } from "./surface-rpc.ts";
@@ -40,6 +41,7 @@ export interface ContractRequest {
   workspace: string;
   gate: string;
   artifact: string;
+  base?: string;
   scope?: string[];
   /** Marks the fresh-eyes pass ON (ADR 0005 default: off). Exactly `true` passes; anything else is rejected. */
   freshEyes?: true;
@@ -119,6 +121,8 @@ export interface SpawnRequest {
    * through it. Optional: the legacy shared-checkout path sends none.
    */
   worktree?: string;
+  /** Optional prompt when `lead_spawn_agent` MCP tool requests the plugin to create the daemon agent directly (v0.0.26). */
+  prompt?: string;
   submitter?: string;
   /** Caller seat stamped from `PASEO_FACTORY_SEAT` when present (v0.0.23, ADR 0015 §1). */
   seat?: SpoolSeat;
@@ -157,7 +161,7 @@ export interface SpoolLeadDispatchRequest {
   kind: "lead_dispatch";
   project?: string;
   workspace?: string;
-  from?: "supervisor" | "owner";
+  from?: "supervisor" | "owner" | "peer";
   message: string;
   submitter?: string;
   /** Caller seat stamped from `PASEO_FACTORY_SEAT` when present (v0.0.23, ADR 0015 §1). */
@@ -464,6 +468,7 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     if (skills !== undefined && (!Array.isArray(skills) || skills.some((s) => typeof s !== "string"))) return undefined;
     if (req.freshEyes !== undefined && req.freshEyes !== true) return undefined;
     if (req.watch !== undefined && req.watch !== true) return undefined;
+    if (req.base !== undefined && (typeof req.base !== "string" || req.base.trim() === "")) return undefined;
     if (req.description !== undefined && (typeof req.description !== "string" || req.description.trim() === "")) return undefined;
     return {
       id: req.id,
@@ -472,6 +477,7 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       workspace: req.workspace,
       gate: req.gate,
       artifact: req.artifact,
+      ...(req.base === undefined ? {} : { base: req.base }),
       ...(scope === undefined ? {} : { scope: scope as string[] }),
       ...(skills === undefined ? {} : { skills: skills as string[] }),
       ...(req.freshEyes === undefined ? {} : { freshEyes: true }),
@@ -507,6 +513,7 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       return undefined;
     }
     if (req.worktree !== undefined && (typeof req.worktree !== "string" || req.worktree.trim() === "")) return undefined;
+    if (req.prompt !== undefined && typeof req.prompt !== "string") return undefined;
     return {
       id: req.id,
       kind: "spawn",
@@ -514,6 +521,7 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       provider: req.provider,
       arity: req.arity,
       ...(req.worktree === undefined ? {} : { worktree: req.worktree }),
+      ...(req.prompt === undefined ? {} : { prompt: req.prompt }),
       ...submitterField,
       ...seatField,
     };
@@ -542,7 +550,7 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     if (typeof req.message !== "string" || req.message.trim() === "") return undefined;
     if (req.project !== undefined && (typeof req.project !== "string" || req.project.trim() === "")) return undefined;
     if (req.workspace !== undefined && (typeof req.workspace !== "string" || req.workspace.trim() === "")) return undefined;
-    if (req.from !== undefined && req.from !== "supervisor" && req.from !== "owner") return undefined;
+    if (req.from !== undefined && req.from !== "supervisor" && req.from !== "owner" && !(req.from === "peer" && req.seat === "agent")) return undefined;
     return {
       id: req.id,
       kind: "lead_dispatch",
@@ -649,8 +657,19 @@ async function resolveEffectiveSeat(
   request: SpoolRequest,
 ): Promise<SpoolSeat | undefined> {
   const submitter =
-    "submitter" in request && typeof request.submitter === "string" ? request.submitter.trim() : "";
+    "submitter" in request && typeof request.submitter === "string"
+      ? request.submitter.trim()
+      : request.kind === "claim" && typeof request.agent === "string"
+        ? request.agent.trim()
+        : "";
   if (submitter !== "" && submitter !== "owner") {
+    const correlations = readCorrelations(factory.stateDir);
+    for (let i = correlations.length - 1; i >= 0; i -= 1) {
+      const rec = correlations[i];
+      if (rec !== undefined && (rec.correlationId === submitter || rec.agentId === submitter)) {
+        return rec.role;
+      }
+    }
     if (daemon?.agents?.list !== undefined) {
       try {
         const page = await daemon.agents.list({ filter: { includeArchived: false } });
@@ -814,7 +833,7 @@ export async function handleSpoolRequest(
         request.kind === "needs_human" ||
         request.kind === "meter" ||
         request.kind === "accept" ||
-        request.kind === "lead_dispatch" ||
+        (request.kind === "lead_dispatch" && request.from !== "peer") ||
         request.kind === "supervisor_dispatch" ||
         request.kind === "supervisor_report" ||
         request.kind === "lead_rotate" ||
@@ -834,6 +853,7 @@ export async function handleSpoolRequest(
         workspace: request.workspace,
         gate: request.gate,
         artifact: request.artifact,
+        ...(request.base === undefined ? {} : { base: request.base }),
         ...(request.scope === undefined ? {} : { scope: request.scope }),
         ...(request.skills === undefined || request.skills.length === 0 ? {} : { skills: request.skills }),
         ...(request.freshEyes === undefined ? {} : { freshEyes: true }),
@@ -986,12 +1006,44 @@ export async function handleSpoolRequest(
         return { id: request.id, ok: false, code: decision.code, message: decision.event.reason, event: decision.event };
       }
       const spawnMeta = await resolveSpawnWorkspaceAndParent(factory, resolvedDaemon, request.task, request.worktree);
+      let spawnedAgentId: string | undefined;
+      if (request.prompt !== undefined && request.prompt !== "" && resolvedDaemon !== undefined) {
+        const contract = factory.contractFor(request.task);
+        const targetCwd = request.worktree ?? contract?.workspace ?? "";
+        const proj = contract !== undefined ? resolveProject(contract.workspace) : undefined;
+        const labels: Record<string, string> = {
+          seat: "agent",
+          task: request.task,
+          ...(proj?.ok ? { project: proj.slug } : {}),
+        };
+        if (spawnMeta.workspaceId !== undefined && resolvedDaemon.workspaces !== undefined) {
+          const created = await resolvedDaemon.workspaces.ref(spawnMeta.workspaceId).agents.create({
+            config: { provider: sanitizedProvider },
+            title: request.task,
+            labels,
+            prompt: request.prompt,
+            ...(spawnMeta.leadAgentId !== undefined ? { parent: spawnMeta.leadAgentId } : {}),
+          });
+          spawnedAgentId = created.id;
+        } else if (typeof resolvedDaemon.agents?.create === "function") {
+          const created = await resolvedDaemon.agents.create({
+            config: { provider: sanitizedProvider },
+            cwd: targetCwd,
+            title: request.task,
+            labels,
+            prompt: request.prompt,
+            ...(spawnMeta.leadAgentId !== undefined ? { parent: spawnMeta.leadAgentId } : {}),
+          });
+          spawnedAgentId = created.id;
+        }
+      }
       return {
         id: request.id,
         ok: true,
-        summary: `spawn dispatched for ${request.task} under ${sanitizedProvider} (n=${request.arity})`,
+        summary: `spawn dispatched for ${request.task} under ${sanitizedProvider} (n=${request.arity})${spawnedAgentId ? ` → agent ${spawnedAgentId}` : ""}`,
         event: decision.event,
         ...spawnMeta,
+        ...(spawnedAgentId !== undefined ? { agentId: spawnedAgentId } : {}),
       };
     }
     if (request.kind === "respawn") {

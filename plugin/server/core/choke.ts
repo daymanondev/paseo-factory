@@ -182,13 +182,13 @@ export function refuseGitArgv(argv: readonly string[]): GitRefusal | undefined {
   }
 }
 
-const SUPERVISOR_BLOCKED_GIT_SUBCOMMANDS = new Set(["commit", "merge", "cherry-pick", "rebase", "am", "apply", "stash"]);
+const SUPERVISOR_BLOCKED_GIT_SUBCOMMANDS = new Set(["commit", "merge", "cherry-pick", "rebase", "am", "apply", "stash", "reset", "clean"]);
 const SUPERVISOR_GIT_FENCE_REASON =
   "factory git-shim: blocked (supervisor-git-fence) — Supervisor never commits or branches on <project-root>; dispatch to Lead via factory lead dispatch";
 
 /**
  * Refuses git subcommands and branch-creation flags forbidden to the Supervisor
- * seat on `<project-root>` (v0.0.23, ADR 0015 §2).
+ * seat on `<project-root>` (v0.0.23, ADR 0015 §2; v0.0.26, ADR 0016 §3).
  */
 export function refuseSupervisorGitArgv(argv: readonly string[]): GitRefusal | undefined {
   let i = 0;
@@ -204,6 +204,9 @@ export function refuseSupervisorGitArgv(argv: readonly string[]): GitRefusal | u
   const dd = args.indexOf("--");
   const flagSlice = dd === -1 ? args : args.slice(0, dd);
   if (sub === "checkout") {
+    if (dd !== -1) {
+      return { rule: "supervisor-git-fence", reason: SUPERVISOR_GIT_FENCE_REASON };
+    }
     for (const token of flagSlice) {
       if (token === "-b" || token === "-B" || clusterHas(token, "b") || clusterHas(token, "B")) {
         return { rule: "supervisor-git-fence", reason: SUPERVISOR_GIT_FENCE_REASON };
@@ -457,10 +460,92 @@ function defaultSeatTmpDirs(): string[] {
   return dirs.map(stripTrailingSlash);
 }
 
+export function isProtectedFactoryStatePath(
+  resolvedCandidate: string,
+  resolvedState: string,
+  allowedWorktree?: string,
+): boolean {
+  if (resolvedState === "") return false;
+  if (
+    resolvedCandidate === `${resolvedState}/ledger.jsonl` ||
+    resolvedCandidate === `${resolvedState}/correlations.json`
+  ) {
+    return true;
+  }
+  const projectsPrefix = `${resolvedState}/projects`;
+  if (resolvedCandidate === projectsPrefix || resolvedCandidate.startsWith(`${resolvedState}/projects/`)) {
+    if (resolvedCandidate.endsWith("/lead-handoff.md")) return false;
+    if (allowedWorktree !== undefined && allowedWorktree.trim() !== "") {
+      const resolvedWt = stripTrailingSlash(resolve(allowedWorktree));
+      if (resolvedCandidate === resolvedWt || resolvedCandidate.startsWith(`${resolvedWt}/`)) {
+        return false;
+      }
+    } else if (/\/projects\/[^/]+\/worktrees\/[^/]+(\/|$)/.test(resolvedCandidate)) {
+      return false;
+    }
+    return true;
+  }
+  return false;
+}
+
+const FORBIDDEN_PASEO_TOOL_SET = new Set([
+  "Task",
+  "Agent",
+  "send_message",
+  "invoke_subagent",
+  "define_subagent",
+  "manage_subagents",
+  "create_agent",
+  "kill_agent",
+  "archive_agent",
+  "send_agent_prompt",
+  "update_agent",
+  "paseo_create_agent",
+  "paseo_kill_agent",
+  "paseo_archive_agent",
+  "paseo_send_agent_prompt",
+  "paseo_update_agent",
+  "mcp__paseo__create_agent",
+  "mcp__paseo__kill_agent",
+  "mcp__paseo__archive_agent",
+  "mcp__paseo__send_agent_prompt",
+  "mcp__paseo__update_agent",
+]);
+
+export function isForbiddenPaseoToolName(toolName: string | undefined): boolean {
+  if (typeof toolName !== "string") return false;
+  const trimmed = toolName.trim();
+  if (FORBIDDEN_PASEO_TOOL_SET.has(trimmed)) return true;
+  if (trimmed.startsWith("mcp__paseo__") || trimmed.startsWith("paseo:")) return true;
+  return false;
+}
+
+export function isPaseoFactoryToolName(toolName: string | undefined): boolean {
+  if (typeof toolName !== "string") return false;
+  const trimmed = toolName.trim();
+  return (
+    trimmed.startsWith("mcp__paseo_factory__") ||
+    trimmed.startsWith("paseo_factory_") ||
+    trimmed.startsWith("paseo_factory/") ||
+    trimmed.startsWith("supervisor_") ||
+    trimmed.startsWith("lead_") ||
+    trimmed.startsWith("agent_") ||
+    trimmed === "factory_status" ||
+    trimmed === "factory_dispatch_supervisor"
+  );
+}
+
+export function isProcessKillAgainstFactory(command: string): boolean {
+  if (!/\b(?:pkill|killall|kill)\b/.test(command)) return false;
+  return /\b(?:plugin-process|paseo)\b/i.test(command);
+}
+
 /**
  * Whether `candidatePath` is an allowed write target for a Supervisor or Lead
- * seat rooted at `projectRoot` (v0.0.23, ADR 0015 §2):
- * - Allows `/dev/null`, `stateDir`, and `tmpDirs` (`/tmp`, `os.tmpdir()`, `$TMPDIR`).
+ * seat rooted at `projectRoot` (v0.0.23, ADR 0015 §2; v0.0.26, ADR 0016 §3):
+ * - Allows `/dev/null`, non-protected `stateDir` paths, and `tmpDirs` (`/tmp`, `os.tmpdir()`, `$TMPDIR`).
+ * - Denies protected factory state files (`<stateDir>/ledger.jsonl`, `<stateDir>/correlations.json`,
+ *   `<stateDir>/projects/**` outside `<projectStateDir>/worktrees/<task>` and `<projectStateDir>/lead-handoff.md`).
  * - Inside `projectRoot`, allows ONLY `AGENTS.md`, `CLAUDE.md`, `CONTEXT.md`,
  *   `GLOSSARY.md`, `.gitignore`, `.worktreeinclude`, `docs/**`, and `.scratch/**`.
  * - Rejects all other paths inside or outside `projectRoot`.
@@ -479,6 +564,10 @@ export function isSeatMemoryPathAllowed(
   const resolvedRoot = stripTrailingSlash(resolve(projectRoot));
   const resolvedState = stateDir.trim() === "" ? "" : stripTrailingSlash(resolve(stateDir));
   const resolvedCandidate = stripTrailingSlash(isAbsolute(raw) ? resolve(raw) : resolve(resolvedRoot, raw));
+
+  if (isProtectedFactoryStatePath(resolvedCandidate, resolvedState)) {
+    return false;
+  }
 
   if (resolvedState !== "" && (resolvedCandidate === resolvedState || resolvedCandidate.startsWith(`${resolvedState}/`))) {
     return true;
@@ -693,6 +782,9 @@ export function judgeSeatShellCommand(
   tmpDirs: readonly string[] = defaultSeatTmpDirs(),
 ): ChokeDecision {
   for (const segment of splitShellSegments(command)) {
+    if (isProcessKillAgainstFactory(segment)) {
+      return { behavior: "deny", rule: "seat-write-fence", reason: SEAT_WRITE_FENCE_MESSAGE };
+    }
     if (isFactoryCliSegment(segment, projectRoot, stateDir, tmpDirs)) continue;
     const segTokens = shellTokens(segment);
     const s1 = judgeS1(segTokens);
@@ -791,11 +883,31 @@ function judgeMemoryDestination(rawPath: string, fence: MemoryFence): ChokeDecis
  * the memory write fence over the same write destinations (v0.0.14).
  */
 export function judgeShellCommand(command: string, roots: WritableRoots, memory?: MemoryFence): ChokeDecision {
+  if (isProcessKillAgainstFactory(command)) {
+    return {
+      behavior: "deny",
+      rule: "seat-write-fence",
+      reason: SEAT_WRITE_FENCE_MESSAGE,
+    };
+  }
   const tokens = shellTokens(command);
   const s1 = judgeS1(tokens);
   if (s1.behavior === "deny") return s1;
   const s2 = judgeS2(tokens, roots);
   if (s2.behavior === "deny") return s2;
+  if (roots.stateDir !== "") {
+    for (const dest of extractWriteTargets(command)) {
+      const expanded = expandUser(dest, roots);
+      const resolvedDest = isAbsolute(expanded) ? resolve(expanded) : resolve(roots.workspace, expanded);
+      if (isProtectedFactoryStatePath(resolvedDest, roots.stateDir)) {
+        return {
+          behavior: "deny",
+          rule: "seat-write-fence",
+          reason: SEAT_WRITE_FENCE_MESSAGE,
+        };
+      }
+    }
+  }
   if (memory !== undefined) {
     for (const dest of shellWriteDestinations(tokens)) {
       const fenced = judgeMemoryDestination(dest, memory);
@@ -814,6 +926,14 @@ export function judgeShellCommand(command: string, roots: WritableRoots, memory?
  */
 export function judgeFilePath(rawPath: string, roots: WritableRoots, memory?: MemoryFence): ChokeDecision {
   const expanded = expandUser(rawPath, roots);
+  const resolvedDest = isAbsolute(expanded) ? resolve(expanded) : resolve(roots.workspace, expanded);
+  if (roots.stateDir !== "" && isProtectedFactoryStatePath(resolvedDest, roots.stateDir)) {
+    return {
+      behavior: "deny",
+      rule: "seat-write-fence",
+      reason: SEAT_WRITE_FENCE_MESSAGE,
+    };
+  }
   if (!withinWritable(expanded, roots)) {
     return {
       behavior: "deny",
