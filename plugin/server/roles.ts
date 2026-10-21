@@ -78,6 +78,7 @@ export function factoryEnvFor(
   role: RoleName,
   input: { stateDir: string; project: ProjectIdentity; task?: string; correlationId?: string; userHome?: string },
 ): Record<string, string> {
+  ensureFactoryBinScripts(input.stateDir);
   const roleHome = provisionPiAgentHome({
     stateDir: input.stateDir,
     role,

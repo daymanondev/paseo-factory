@@ -20,7 +20,7 @@ import {
   inferRoleFromProviderId,
 } from "../plugin/server/roles.ts";
 import type { AgentCreateRequest } from "../plugin/server/roles.ts";
-import { disposeDir, makeTempDir } from "./helpers.ts";
+import { disposeDir, makeTempDir, repoRoot } from "./helpers.ts";
 
 /** A committed git repository — the Project resolution every seat path needs. */
 function makeGitRepo(dir: string): string {
@@ -517,4 +517,84 @@ test("injectSessionEnv binds provider-recognized supervisor and lead sessions in
   // An unrelated session at the same repository is untouched.
   const stranger = injectSessionEnv({ agentId: "stranger-chat", cwd: repoDir, env: {} }, stateDir, userHome);
   assert.equal(stranger, undefined, "an unrecognized session passes through untouched");
+});
+
+test("CJS bundle regression: ensureFactoryBinScripts, injectRoleOnCreate, and injectSessionEnv materialize <stateDir>/bin/bridge.mjs even when esbuild strips import.meta.url in CJS mode", async (t) => {
+  const { build } = await import("esbuild");
+  const { createRequire } = await import("node:module");
+  const dir = makeTempDir("roles-cjs-bridge-");
+  disposeDir(t, dir);
+
+  const paseoHome = join(dir, "paseo-home");
+  const stateDir = join(paseoHome, "plugin-state", "paseo-factory");
+  const repoDir = makeGitRepo(dir);
+  mkdirSync(paseoHome, { recursive: true });
+  writeFileSync(
+    join(paseoHome, "config.json"),
+    JSON.stringify({
+      plugins: {
+        "paseo-factory": {
+          source: "directory",
+          path: join(repoRoot, "plugin"),
+          enabled: true,
+        },
+      },
+    }),
+  );
+
+  // Compile roles.ts (which bundles agy-home.ts) as CommonJS (just like Paseo's plugin loader does, where import.meta is {})
+  const bundled = await build({
+    entryPoints: [join(repoRoot, "plugin", "server", "roles.ts")],
+    bundle: true,
+    format: "cjs",
+    platform: "node",
+    write: false,
+  });
+  const cjsMod = { exports: {} as Record<string, unknown> };
+  const req = createRequire(import.meta.url);
+  const runCjs = new Function("exports", "require", "module", bundled.outputFiles[0]!.text);
+  runCjs(cjsMod.exports, req, cjsMod);
+
+  const injectRoleOnCreateCjs = cjsMod.exports.injectRoleOnCreate as typeof injectRoleOnCreate;
+  const injected = injectRoleOnCreateCjs(
+    {
+      config: {
+        provider: "factory-supervisor",
+        cwd: repoDir,
+        title: "New Chat",
+      },
+    },
+    stateDir,
+    join(dir, "user-home"),
+  );
+  assert.ok(injected);
+  assert.equal(existsSync(join(stateDir, "bin", "bridge.mjs")), true, "injectRoleOnCreate in CJS mode materializes bridge.mjs on disk");
+  assert.equal(existsSync(join(stateDir, "bin", "agy-pre-tool-hook.mjs")), true, "injectRoleOnCreate in CJS mode materializes agy-pre-tool-hook.mjs on disk");
+
+  // Also verify injectSessionEnv in CJS mode materializes bridge.mjs when opening a session on a fresh stateDir
+  const dir2 = makeTempDir("roles-cjs-bridge2-");
+  disposeDir(t, dir2);
+  const paseoHome2 = join(dir2, "paseo-home");
+  const stateDir2 = join(paseoHome2, "plugin-state", "paseo-factory");
+  mkdirSync(paseoHome2, { recursive: true });
+  writeFileSync(
+    join(paseoHome2, "config.json"),
+    JSON.stringify({
+      plugins: {
+        "paseo-factory": {
+          source: "directory",
+          path: join(repoRoot, "plugin"),
+          enabled: true,
+        },
+      },
+    }),
+  );
+  const injectSessionEnvCjs = cjsMod.exports.injectSessionEnv as typeof injectSessionEnv;
+  const opened = injectSessionEnvCjs(
+    { agentId: "sup-cjs-1", cwd: repoDir, provider: "factory-supervisor", env: {} },
+    stateDir2,
+    join(dir2, "user-home"),
+  );
+  assert.ok(opened);
+  assert.equal(existsSync(join(stateDir2, "bin", "bridge.mjs")), true, "injectSessionEnv in CJS mode materializes bridge.mjs on disk");
 });

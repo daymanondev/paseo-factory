@@ -15,6 +15,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { createFactory } from "./server/core/factory.ts";
+import { ensureFactoryBinScripts } from "./server/core/agy-home.ts";
 import { PLUGIN_ID, pluginDirFor, resolvePaseoHome, stateDirFor } from "./server/paths.ts";
 import { ensureFactorySkillSafe } from "./server/core/skill.ts";
 import { effectiveLanesForReconcile, reconcilePaseoRoleProviders } from "./server/core/role-providers.ts";
@@ -61,11 +62,13 @@ export default function contribute(server: PluginServerContext) {
   }
 
   if (pluginDir === undefined) {
+    ensureFactoryBinScripts(stateDir);
     log(`up v${SHELL_VERSION} — WARNING: plugin directory not recorded in ${home}/config.json; ` +
       `factory-claim and the git shim cannot be put on agent PATHs until the plugin is installed from a directory`);
   } else {
     ensureClaimCli(stateDir, pluginDir, process.execPath);
     ensureGitShim(stateDir, pluginDir, process.execPath);
+    ensureFactoryBinScripts(stateDir, pluginDir);
     log(`up v${SHELL_VERSION} — state ${stateDir}, plugin ${pluginDir}, claim CLI + git shim ${claimCliBinDir(stateDir)}`);
   }
 
