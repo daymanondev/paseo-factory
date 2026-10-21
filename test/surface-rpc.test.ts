@@ -664,11 +664,7 @@ test("supervisor.ensure: seats the agent AT the project root — no AGENTS.md wr
   assert.deepEqual(fake.created[0]!.labels, { seat: "supervisor", project: project.slug }, "the seat + project labels are how every later ensure finds it");
   assert.equal(fake.created[0]!.title, "Supervisor (paseo-factory)");
   assert.equal(fake.created[0]!.cwd, project.root, "the seat stands at cwd = <project-root>");
-  const bootstrap = fake.created[0]!.prompt ?? "";
-  assert.match(bootstrap, /Project root \(your cwd\)/, "the bootstrap prompt carries the orientation");
-  assert.match(bootstrap, /lead dispatch --workspace/, "the bootstrap lists day-one lead dispatch power");
-  assert.match(bootstrap, new RegExp(home.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), "the bootstrap names the resolved home");
-  assert.match(bootstrap, /paseo-factory role skills: grilling, domain-modeling/, "the bootstrap carries the skill trigger index footer");
+  assert.equal(fake.created[0]!.prompt, undefined, "seat creation is silent — no bootstrap prompt inside agents.create (v0.0.28, ADR 0018 §2)");
   assert.deepEqual(fake.sent, [{ agentId: reply.agentId, text: "Check the T1 verdict." }], "the quick dispatch rode the create");
 
   // The durable registration records the slug→root + seat id.
@@ -804,7 +800,7 @@ test("lead.ensure: seats the Lead at the project root under lanes.lead with the 
   assert.equal(fake.created[0]!.cwd, project.root);
   assert.deepEqual(fake.created[0]!.labels, { seat: "lead", project: project.slug });
   assert.equal(fake.created[0]!.title, "Lead (paseo-factory)");
-  assert.match(fake.created[0]!.prompt ?? "", /paseo-factory role skills: codebase-design, domain-modeling, tdd/, "the Lead footer names its skills");
+  assert.equal(fake.created[0]!.prompt, undefined, "seat creation is silent — no bootstrap prompt inside agents.create (v0.0.28, ADR 0018 §2)");
   assert.deepEqual(fake.sent, [{ agentId: reply.agentId, text: "Split the directive." }]);
 
   // An existing Lead is reused (find-or-create).

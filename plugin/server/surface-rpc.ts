@@ -37,7 +37,7 @@ import { setAgentModelViaCli, setAgentThinkingViaCli, stopAgentViaCli } from "./
 import { checkDaemonPluginUpdates, cleanupDaemonWorkspacesAndProjectsViaWs, getCachedPluginUpdateStatus, installDaemonPlugin, listDaemonPlugins, manageDaemonPlugin, reloadDaemonConfigViaWs } from "./daemon-cli.ts";
 import type { DaemonPluginAction, DaemonPluginItem, DaemonPluginSourceStatus, DaemonPluginUpdateRow, DaemonReply } from "./daemon-cli.ts";
 import { reconcilePaseoRoleProviders } from "./core/role-providers.ts";
-import { SEAT_TITLES, inferRoleFromProviderId, renderSeatBootstrap, resolveEffectiveProviderFamily } from "./roles.ts";
+import { SEAT_TITLES, inferRoleFromProviderId, resolveEffectiveProviderFamily } from "./roles.ts";
 import type { SeatName } from "./roles.ts";
 import { discoverProjects, writeProjectRegistration } from "./projects.ts";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
@@ -245,6 +245,8 @@ export interface SurfaceDeps {
    * remains the net).
    */
   onLeadRetired?: (input: { slug: string; agentId: string }) => void;
+  /** Notify LeadMailRuntime when ensureSeat dispatches an explicit initial message to a seat (v0.0.28, ADR 0018 §2). */
+  onSeatKickoffSent?: (input: { slug: string; seat: "supervisor" | "lead"; agentId: string }) => void;
   /** Reset in-memory mailbox state for a project on Owner-only Project reset (v0.0.24). */
   resetProjectMailbox?: (slug: string) => void;
   /**
@@ -762,16 +764,6 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           // best-effort parent lookup
         }
       }
-      const prompt = renderSeatBootstrap({
-        seat,
-        home: deps.home,
-        stateDir: deps.stateDir,
-        ...(deps.pluginDir === undefined ? {} : { pluginDir: deps.pluginDir }),
-        nodePath: process.execPath,
-        path: process.env.PATH ?? "",
-        lane,
-        project,
-      });
       try {
         const handle =
           workspaceId !== undefined && daemon.workspaces !== undefined
@@ -779,7 +771,6 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
                 config,
                 title,
                 labels: { seat, project: project.slug },
-                prompt,
                 ...(parent !== undefined ? { parent } : {}),
               })
             : await daemon.agents.create({
@@ -787,7 +778,6 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
                 cwd: project.root,
                 title,
                 labels: { seat, project: project.slug },
-                prompt,
                 ...(parent !== undefined ? { parent } : {}),
               });
         agent = {
@@ -822,6 +812,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     if (message !== undefined && message !== "") {
       try {
         await daemon.agents.ref(agent.id).send(message);
+        deps.onSeatKickoffSent?.({ slug: project.slug, seat, agentId: agent.id });
         log(`${seat}: dispatched a message to ${agent.id}`);
       } catch (err) {
         return failure("send-failed", `the ${seat} agent exists (${agent.id}) but the dispatch failed: ${messageOf(err)}`);

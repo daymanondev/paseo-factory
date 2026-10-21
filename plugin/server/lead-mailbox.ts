@@ -49,6 +49,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Factory } from "./core/factory.ts";
+import { readCorrelations } from "./core/correlations.ts";
 import type { LedgerEvent } from "./core/events.ts";
 import { ensureProjectRegistered, listProjectRegistrations, projectStateDir, readProjectRegistration, resolveProject, writeProjectRegistration } from "./core/project.ts";
 import type { LeadRotationState, ProjectRegistration } from "./core/project.ts";
@@ -251,6 +252,11 @@ export interface LeadMailRuntime {
    * by `Project reset` (`v0.0.24`, ADR 0015 §5).
    */
   resetProjectMailbox(slug: string): void;
+  /**
+   * Marks one seat `agentId` as having already received its initial kickoff
+   * turn (v0.0.28, ADR 0018 §2).
+   */
+  markKickoffSent(agentId: string): void;
 }
 
 /** What the `agent.turn_ended` wiring hands the machine — the SDK event reduced to plain data. */
@@ -273,6 +279,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   const handingOverBySlug = new Set<string>();
   const retriedFailedMailIds = new Set<string>();
   const kickoffSentAgentIds = new Set<string>();
+  const pendingHandoffByAgentId = new Map<string, string>();
   const log = deps.onLog ?? (() => {});
   const warn = (message: string): void => {
     log(message);
@@ -392,8 +399,12 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     }
     if (lead === undefined) return; // no live Lead — the next dispatch ensures one and pumps again
     if (lead.status !== "idle" || isBlockedByAttention(lead)) return; // a running or permission-waiting Lead is never interrupted (§User Story 12)
-    const prompt = prependKickoffPacketIfFirstTurn("lead", slug, lead, renderMailPrompt(state.queued));
+    const pendingHandoff = pendingHandoffByAgentId.get(lead.id);
+    const mailPrompt = renderMailPrompt(state.queued);
+    const body = pendingHandoff !== undefined ? `${pendingHandoff}\n\n${mailPrompt}` : mailPrompt;
+    const prompt = prependKickoffPacketIfFirstTurn("lead", slug, lead, body);
     await daemon.agents.ref(lead.id).send(prompt);
+    if (pendingHandoff !== undefined) pendingHandoffByAgentId.delete(lead.id);
     appendMailDelivered(path, { mailIds: state.queued.map((item) => item.mailId), toAgentId: lead.id });
     log(`lead-mailbox: delivered ${state.queued.length} item(s) to the lead of ${slug} (${lead.id})`);
   };
@@ -710,12 +721,14 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       }
     }
     const events = projectEventsOf(root);
+    const tasks = foldTasks(events);
+    const live = await liveAgentsById();
     const roster = renderPeerRoster({
       stateDir: deps.stateDir,
       slug,
-      tasks: foldTasks(events),
-      agents: agentOfTask(events),
-      live: await liveAgentsById(),
+      tasks,
+      agents: agentOfTask(events, { stateDir: deps.stateDir, slug, tasks, live }),
+      live,
     });
     const digest = renderLedgerDigest(events);
     const retired = await deps.retireLead({ projectRoot: root });
@@ -723,17 +736,39 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       log(`lead-mailbox: handoff of ${slug} could not archive the outgoing lead (${retired.code}: ${retired.error}) — the mailbox stays locked, mail holds queued`);
       return;
     }
-    const ensured = await deps.ensureLead({ projectRoot: root, message: renderSuccessorKickoff({ slug, roster, digest, handoffText }) });
+    const ensured = await deps.ensureLead({ projectRoot: root });
     if (!ensured.ok) {
       log(`lead-mailbox: handoff of ${slug} could not spawn the successor (${ensured.code}: ${ensured.error}) — the mailbox stays locked, mail holds queued`);
       return;
     }
+    const handoffBundle = renderSuccessorKickoff({ slug, roster, digest, handoffText });
+    pendingHandoffByAgentId.set(ensured.agentId, handoffBundle);
     handingOverBySlug.delete(slug);
     writeRotationState(slug, root, { rotationState: "normal", handoffRequestedAt: null });
-    log(`lead-mailbox: handoff of ${slug} complete — ${retired.agentId} archived, successor ${ensured.agentId} kicked off, rotation reset to normal`);
-    // The successor just spawned; when it is not yet idle the drain holds one
-    // boundary and the successor's own first turn end drains instead.
     await drainLeadMailbox(slug);
+    if (pendingHandoffByAgentId.has(ensured.agentId)) {
+      pendingHandoffByAgentId.delete(ensured.agentId);
+      const kickoffPrompt = prependKickoffPacketIfFirstTurn(
+        "lead",
+        slug,
+        {
+          id: ensured.agentId,
+          provider: "",
+          title: null,
+          status: "idle",
+          model: null,
+          labels: { seat: "lead", project: slug },
+          archivedAt: null,
+          requiresAttention: false,
+          attentionReason: null,
+          updatedAt: new Date().toISOString(),
+          cwd: root,
+        },
+        handoffBundle,
+      );
+      await resolveDaemon().agents.ref(ensured.agentId).send(kickoffPrompt);
+    }
+    log(`lead-mailbox: handoff of ${slug} complete — ${retired.agentId} archived, successor ${ensured.agentId} kicked off, rotation reset to normal`);
   };
 
   /** The Project's ledger slice — every event whose task's contract workspace sits inside the root (the snapshot's own scoping law). */
@@ -1022,7 +1057,10 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
    */
   const settleLeadRotation = (slug: string): void => {
     const reg = readProjectRegistration(deps.stateDir, slug);
-    if (reg?.lead !== undefined) kickoffSentAgentIds.delete(reg.lead);
+    if (reg?.lead !== undefined) {
+      kickoffSentAgentIds.delete(reg.lead);
+      pendingHandoffByAgentId.delete(reg.lead);
+    }
     const settled = recoverLeadMailbox(mailboxPath(slug), "lead-rotated", "lead");
     for (const event of settled) {
       log(`lead-mailbox: rotation of ${slug} requeued ${event.mailIds.length} item(s) — the un-acked delivery returns to queued (lead-rotated)`);
@@ -1036,10 +1074,19 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       if (key.startsWith(prefix)) retriedFailedMailIds.delete(key);
     }
     const reg = readProjectRegistration(deps.stateDir, slug);
-    if (reg?.lead !== undefined) kickoffSentAgentIds.delete(reg.lead);
+    if (reg?.lead !== undefined) {
+      kickoffSentAgentIds.delete(reg.lead);
+      pendingHandoffByAgentId.delete(reg.lead);
+    }
     if (reg?.supervisor !== undefined) kickoffSentAgentIds.delete(reg.supervisor);
     if (reg !== undefined && (reg.rotationState !== undefined || reg.handoffRequestedAt !== undefined)) {
       writeRotationState(slug, reg.root, { rotationState: null, handoffRequestedAt: null });
+    }
+  };
+
+  const markKickoffSent = (agentId: string): void => {
+    if (typeof agentId === "string" && agentId.trim() !== "") {
+      kickoffSentAgentIds.add(agentId.trim());
     }
   };
 
@@ -1055,6 +1102,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     startupRecovery,
     settleLeadRotation,
     resetProjectMailbox,
+    markKickoffSent,
   };
 }
 
@@ -1147,16 +1195,94 @@ function renderLedgerDigest(events: readonly LedgerEvent[]): string {
   return [`${events.length} ledger line(s) under <projectStateDir>/ledger.jsonl: ${census}`, ...tail].join("\n");
 }
 
-/** The task → agent binding, from the ledger's own names (the `agentTaskIndex` precedent, inverted). */
-function agentOfTask(events: readonly LedgerEvent[]): Map<string, string> {
-  const index = new Map<string, string>();
+/**
+ * The task → agent binding for the Machine-Verified Active Peer Roster
+ * (v0.0.28, ADR 0018 §1): for each unaccepted Task in the Project's current
+ * Contract epoch, resolves the bound working Agent in priority order:
+ *   1. Live Daemon Worktree / Label Match: any live non-archived daemon agent
+ *      (excluding supervisor / lead seats) whose cwd sits at or inside
+ *      taskWorktreePath(stateDir, slug, task.task) or whose labels bind
+ *      { task: task.task } (and labels.project === undefined || labels.project === slug).
+ *   2. Correlation token Registry Match: the latest correlation record in
+ *      readCorrelations(stateDir) for { role: "agent", projectSlug: slug, task: task.task }
+ *      carrying a non-empty agentId within the current Contract epoch.
+ *   3. Ledger Event Match: the latest claim_reported, meter_written, or
+ *      repoke_dispatched event in the Task's current Contract epoch carrying a
+ *      non-empty agent identifier.
+ */
+function agentOfTask(
+  events: readonly LedgerEvent[],
+  context?: {
+    stateDir: string;
+    slug: string;
+    tasks: readonly TaskView[];
+    live: ReadonlyMap<string, SurfaceAgentSnapshot>;
+  },
+): Map<string, string> {
+  const ledgerAgents = new Map<string, string>();
+  const latestContractSetByTask = new Map<string, Extract<LedgerEvent, { event: "contract_set" }>>();
+  const contractSetCountByTask = new Map<string, number>();
   for (const evt of events) {
     if (evt.event === "contract_set") {
-      index.delete(evt.task);
+      ledgerAgents.delete(evt.task);
+      latestContractSetByTask.set(evt.task, evt);
+      contractSetCountByTask.set(evt.task, (contractSetCountByTask.get(evt.task) ?? 0) + 1);
       continue;
     }
     if (evt.event !== "claim_reported" && evt.event !== "meter_written" && evt.event !== "repoke_dispatched") continue;
-    if (typeof evt.agent === "string" && evt.agent !== "") index.set(evt.task, evt.agent);
+    if (typeof evt.agent === "string" && evt.agent !== "") ledgerAgents.set(evt.task, evt.agent);
+  }
+  if (context === undefined) return ledgerAgents;
+
+  const { stateDir, slug, tasks, live } = context;
+  const correlations = readCorrelations(stateDir);
+  const liveWorkers = [...live.values()].filter((agent) => {
+    if (agent.archivedAt !== null) return false;
+    const seatLabel = agent.labels?.seat;
+    if (seatLabel === "supervisor" || seatLabel === "lead") return false;
+    const inferredRole = inferRoleFromProviderId(agent.provider);
+    if (inferredRole === "supervisor" || inferredRole === "lead") return false;
+    return true;
+  });
+
+  const index = new Map<string, string>(ledgerAgents);
+  for (const task of tasks) {
+    if (task.accepted || task.status === "accepted") continue;
+    const wt = taskWorktreePath(stateDir, slug, task.task);
+    let matchedLive: string | undefined;
+    for (const agent of liveWorkers) {
+      const cwdMatch = typeof agent.cwd === "string" && (agent.cwd === wt || agent.cwd.startsWith(`${wt}/`));
+      const labelMatch =
+        agent.labels?.task === task.task &&
+        (agent.labels?.project === undefined || agent.labels?.project === slug);
+      if (cwdMatch || labelMatch) {
+        matchedLive = agent.id;
+      }
+    }
+    if (matchedLive !== undefined) {
+      index.set(task.task, matchedLive);
+      continue;
+    }
+
+    const latestContractSet = latestContractSetByTask.get(task.task);
+    const contractSetCount = contractSetCountByTask.get(task.task) ?? 0;
+    const contractEpochMs = latestContractSet !== undefined ? Date.parse(latestContractSet.ts) : Number.NaN;
+    let matchedCorr: string | undefined;
+    for (const rec of correlations) {
+      if (rec.role !== "agent" || rec.projectSlug !== slug || rec.task !== task.task) continue;
+      if (typeof rec.agentId !== "string" || rec.agentId.trim() === "") continue;
+      if (latestContractSet !== undefined) {
+        const recMs = Date.parse(rec.issuedAt);
+        if ((contractSetCount > 1 || rec.issuedAt < latestContractSet.ts) && Number.isFinite(contractEpochMs) && Number.isFinite(recMs)) {
+          if (recMs < contractEpochMs) continue;
+        }
+      }
+      matchedCorr = rec.agentId.trim();
+    }
+    if (matchedCorr !== undefined) {
+      index.set(task.task, matchedCorr);
+      continue;
+    }
   }
   return index;
 }
