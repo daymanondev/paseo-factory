@@ -7,7 +7,8 @@ import { renderReport } from "./report.ts";
 import { laneCliAvailable } from "./lanes.ts";
 import { EYE_JSON_LANE } from "./lanes.ts";
 import type { LaneCliRunner } from "./lanes.ts";
-import { loadEyeConfig, resolveEyeLane, runFreshEyesPass } from "./fresh-eyes.ts";
+import { isEyeLaneUsable, loadEyeConfig, resolveEyeLane, runFreshEyesPass } from "./fresh-eyes.ts";
+import { readCorrelations } from "./correlations.ts";
 import { runWatchPass, watchLaneAvailable } from "./watch.ts";
 import type { CopilotRunner, TimelineFetcher } from "./watch.ts";
 import { buildRetroDigest, retroDay, retroLaneAvailable, runRetroPass, writtenRetroForDay } from "./retro.ts";
@@ -88,11 +89,12 @@ export interface ContractInput {
    */
   scope?: string[];
   /**
-   * Marks the fresh-eyes pass ON for this task (ADR 0005: off unless marked).
-   * The eye's model and key are plugin-level config (`<stateDir>/eye.json`),
-   * never Contract fields.
+   * Marks the fresh-eyes pass ON or OFF for this task (ADR 0005 / ADR 0018 §4):
+   * - `true`: explicitly turns fresh-eyes ON (fails fast with `eye-unconfigured` when unusable).
+   * - `false`: explicitly opts out (leaves fresh-eyes OFF even when the caller is `Lead`).
+   * - `undefined`: uses the caller default (`Lead` turns it ON when the `freshEyes` lane is usable; `Owner` leaves it OFF).
    */
-  freshEyes?: true;
+  freshEyes?: boolean;
   /**
    * Marks the watch pass ON for this task (v0.0.6; ADR 0005 symmetry — off
    * unless marked). Runs post-verdict on BOTH verdicts, record-only. The
@@ -118,6 +120,12 @@ export interface ContractInput {
    * on the line — the factory never infers identity.
    */
   by?: string;
+  /**
+   * Optional caller seat (v0.0.28, ADR 0018 §4): when `"lead"` (or when `by`
+   * resolves to `Lead`) and `freshEyes` is omitted, `setContract` smart-defaults
+   * `freshEyes: true` whenever the `freshEyes` lane is usable.
+   */
+  seat?: "supervisor" | "lead" | "agent";
 }
 
 export interface ClaimInput {
@@ -383,12 +391,12 @@ export function createFactory(options: FactoryOptions): Factory {
     stateDir,
     recoveredAttempts,
 
-    setContract({ task, workspace, gate, artifact, base: inputBase, scope, freshEyes, watch, description, skills, by }) {
+    setContract({ task, workspace, gate, artifact, base: inputBase, scope, freshEyes, watch, description, skills, by, seat }) {
       assertTaskId(task);
       if (gate.trim() === "") throw new FactoryError("invalid-contract", "gate command must be a non-empty string");
       if (artifact.trim() === "") throw new FactoryError("invalid-contract", "artifact path must be a non-empty string");
-      if (freshEyes !== undefined && freshEyes !== true) {
-        throw new FactoryError("invalid-contract", "freshEyes marks the pass ON — omit it, or set it to exactly true");
+      if (freshEyes !== undefined && typeof freshEyes !== "boolean") {
+        throw new FactoryError("invalid-contract", "freshEyes must be a boolean (true or false) — omit it to use the caller default");
       }
       if (watch !== undefined && watch !== true) {
         throw new FactoryError("invalid-contract", "watch marks the pass ON — omit it, or set it to exactly true");
@@ -439,10 +447,13 @@ export function createFactory(options: FactoryOptions): Factory {
           "the workspace must be a git workspace with a resolvable HEAD — the Contract's base commit is the diff base for the scope check and the fresh-eyes pass",
         );
       }
-      // Fresh-eyes fails fast here: marking a Contract without a usable eye
-      // must error before any Agent work starts, not 60s into a green claim
-      // (ticket 04 §3). Since v0.0.13 the eye runs a lane: "eye.json" keeps
-      // its own config check, a CLI lane probes its command (the watch's law).
+      // Fresh-eyes fails fast here when explicitly requested (`freshEyes === true`):
+      // marking a Contract without a usable eye must error before any Agent work
+      // starts, not 60s into a green claim (ticket 04 §3). Since v0.0.28 (ADR 0018 §4),
+      // when `Lead` omits `freshEyes`, it smart-defaults to `true` if `isEyeLaneUsable`
+      // is true and degrades gracefully to `undefined` otherwise; `freshEyes === false`
+      // explicitly opts out.
+      let effectiveFreshEyes: true | undefined;
       if (freshEyes === true) {
         const lane = resolveEyeLane(stateDir);
         if (!lane.ok) {
@@ -452,7 +463,7 @@ export function createFactory(options: FactoryOptions): Factory {
           const eye = loadEyeConfig(stateDir);
           if (!eye.ok) {
             throw new FactoryError("eye-unconfigured", `fresh-eyes is on, but the eye is not usable: ${eye.reason}`);
-          }
+           }
         } else {
           const usable = options.eyeCliProbe === undefined ? laneCliAvailable(lane.lane) : options.eyeCliProbe(lane.lane);
           if (!usable) {
@@ -461,6 +472,22 @@ export function createFactory(options: FactoryOptions): Factory {
               `fresh-eyes is on, but the ${lane.lane} CLI is not usable on PATH — install and auth it for the daemon user (the CLI carries the pass's auth; there is no key file)`,
             );
           }
+        }
+        effectiveFreshEyes = true;
+      } else if (freshEyes === false) {
+        effectiveFreshEyes = undefined;
+      } else {
+        const trimmedBy = typeof by === "string" ? by.trim() : "";
+        const isLeadCaller =
+          seat === "lead" ||
+          trimmedBy === "lead" ||
+          (trimmedBy !== "" &&
+            trimmedBy !== "owner" &&
+            readCorrelations(stateDir).some(
+              (rec) => rec.role === "lead" && (rec.correlationId === trimmedBy || rec.agentId === trimmedBy),
+            ));
+        if (isLeadCaller && isEyeLaneUsable(stateDir, options.eyeCliProbe)) {
+          effectiveFreshEyes = true;
         }
       }
       if (watch === true) {
@@ -511,7 +538,7 @@ export function createFactory(options: FactoryOptions): Factory {
         artifact,
         ...(scope === undefined || scope.length === 0 ? {} : { scope }),
         base,
-        ...(freshEyes === undefined ? {} : { freshEyes }),
+        ...(effectiveFreshEyes === true ? { freshEyes: true } : {}),
         ...(watch === undefined ? {} : { watch }),
         ...(description === undefined ? {} : { description }),
         ...(skills === undefined || skills.length === 0 ? {} : { skills }),

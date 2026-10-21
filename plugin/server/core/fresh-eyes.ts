@@ -114,6 +114,21 @@ export function resolveEyeLane(stateDir: string): EyeLaneResolution {
   return { ok: true, lane: existsSync(eyeConfigPath(stateDir)) ? EYE_JSON_LANE : lanes.lanes.freshEyes };
 }
 
+/**
+ * Whether the configured fresh-eyes lane is available and ready to run on
+ * this host (v0.0.28, ADR 0018 §4): used by Lead contract smart-defaulting
+ * so `freshEyes` turns on automatically whenever the lane is usable without
+ * breaking minimal/test environments where the CLI is not installed.
+ */
+export function isEyeLaneUsable(stateDir: string, eyeCliProbe?: (lane: string) => boolean): boolean {
+  const lane = resolveEyeLane(stateDir);
+  if (!lane.ok) return false;
+  if (lane.lane === EYE_JSON_LANE) {
+    return loadEyeConfig(stateDir).ok;
+  }
+  return eyeCliProbe === undefined ? laneCliAvailable(lane.lane) : eyeCliProbe(lane.lane);
+}
+
 export interface FreshEyesPassInput {
   stateDir: string;
   contract: ContractSet;

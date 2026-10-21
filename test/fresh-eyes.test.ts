@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createFactory } from "../src/factory.ts";
-import { parseEyeAnswer } from "../src/fresh-eyes.ts";
+import { isEyeLaneUsable, parseEyeAnswer } from "../src/fresh-eyes.ts";
 import { EYE_DIFF_MAX_CHARS, EYE_GATE_OUTPUT_MAX_CHARS } from "../src/constants.ts";
 import type { Factory } from "../src/factory.ts";
 import type { GateFinished, FreshEyesWritten } from "../src/events.ts";
@@ -90,16 +90,24 @@ test("fail-fast at contract_set: eye.json with a missing field is refused", (t) 
   );
 });
 
-test("freshEyes: false is refused — the mark is ON or absent, never off-by-accident", (t) => {
+test("freshEyes: non-boolean is refused with invalid-contract, while freshEyes: false explicitly opts out and isEyeLaneUsable probes lane readiness", (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);
   const { workspace, artifact } = makeWorkspaceAtBase(dir);
-  const factory = createFactory({ stateDir: join(dir, "factory") });
+  const stateDir = join(dir, "factory");
+  const factory = createFactory({ stateDir, eyeCliProbe: () => true });
+
+  assert.equal(isEyeLaneUsable(stateDir, () => true), true);
+  assert.equal(isEyeLaneUsable(stateDir, () => false), false);
 
   assert.throws(
-    () => factory.setContract({ task: "FE3", workspace, gate: "true", artifact, freshEyes: false as unknown as true }),
+    () => factory.setContract({ task: "FE3-BAD", workspace, gate: "true", artifact, freshEyes: "yes" as unknown as boolean }),
     factoryErrorCode("invalid-contract"),
   );
+
+  const optedOut = factory.setContract({ task: "FE3", workspace, gate: "true", artifact, freshEyes: false, by: "lead", seat: "lead" });
+  assert.equal(optedOut.freshEyes, undefined, "explicit freshEyes: false leaves fresh-eyes off on contract_set");
+  assert.equal("freshEyes" in optedOut, false);
 });
 
 test("a green marked claim runs the eye: ledger order, event fields, gate log, report line", async (t) => {

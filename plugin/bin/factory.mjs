@@ -70,7 +70,11 @@ commands:
                                      (dispatches through lanes.freshEyes in
                                      <stateDir>/lanes.json, default pi/zai/glm-5.3,
                                      or <stateDir>/eye.json when set to "eye.json";
-                                     advisory, runs only on green verdicts)
+                                     advisory, runs only on green verdicts;
+                                     defaults to ON when Lead sets a contract
+                                     and the freshEyes lane is usable)
+             [--no-fresh-eyes]       explicitly opt out of the fresh-eyes pass
+                                     (leaves fresh-eyes OFF even when called by Lead)
              [--watch]               mark the watch pass ON for this task
                                      (dispatches through lanes.watch in
                                      <stateDir>/lanes.json, default pi/zai/glm-5.3;
@@ -430,6 +434,7 @@ if (command === "contract") {
     scope: { type: "string" },
     skills: { type: "string" },
     "fresh-eyes": { type: "boolean", default: false },
+    "no-fresh-eyes": { type: "boolean", default: false },
     watch: { type: "boolean", default: false },
     description: { type: "string" },
     "wait-secs": { type: "string" },
@@ -439,6 +444,7 @@ if (command === "contract") {
   if (typeof v.workspace !== "string") fail("contract: --workspace is required");
   if (typeof v.gate !== "string") fail("contract: --gate is required");
   if (typeof v.artifact !== "string") fail("contract: --artifact is required");
+  if (v["fresh-eyes"] && v["no-fresh-eyes"]) fail("contract: pass either --fresh-eyes or --no-fresh-eyes, not both");
   if (typeof v.description === "string" && v.description.trim() === "") {
     fail("contract: --description must be a non-empty text — omit it when the task has no assignment text");
   }
@@ -457,7 +463,7 @@ if (command === "contract") {
     ...(v.skills === undefined
       ? {}
       : { skills: v.skills.split(",").map((s) => s.trim()).filter((s) => s !== "") }),
-    ...(v["fresh-eyes"] ? { freshEyes: true } : {}),
+    ...(v["fresh-eyes"] ? { freshEyes: true } : v["no-fresh-eyes"] ? { freshEyes: false } : {}),
     ...(v.watch ? { watch: true } : {}),
     ...(v.description === undefined ? {} : { description: v.description }),
     submitter,

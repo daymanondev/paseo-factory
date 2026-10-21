@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createFactory } from "../src/factory.ts";
+import { CorrelationRegistry } from "../src/correlations.ts";
 import { projectStateDir, resolveProject } from "../src/project.ts";
 import { MAX_ATTEMPTS } from "../src/events.ts";
 import type { NeedsHumanReason } from "../src/events.ts";
@@ -1677,4 +1678,105 @@ test("resetProject purges target project tasks, events, reports, and gate logs w
   const recontracted = factory.setContract({ task: "A-1", workspace: wsA, gate: "true", artifact });
   assert.equal(recontracted.task, "A-1");
 });
+
+test("v0.0.28 (ADR 0018 §4): Lead contracts smart-default freshEyes to true when the freshEyes lane is usable, omit when unavailable, respect explicit freshEyes: false, and fail fast on explicit freshEyes: true when unconfigured", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace } = makeWorkspace(dir);
+
+  // 1. Usable freshEyes lane: Lead omitting freshEyes gets freshEyes: true (by seat="lead", by="lead", or Lead correlation).
+  const stateDirUsable = join(dir, "state-usable");
+  const correlations = new CorrelationRegistry(stateDirUsable);
+  const leadCorr = correlations.issue({ role: "lead", projectSlug: "proj-1", projectRoot: workspace, agentId: "agent-lead-99" });
+  const factoryUsable = createFactory({ stateDir: stateDirUsable, eyeCliProbe: () => true });
+
+  const cSeat = factoryUsable.setContract({
+    task: "SD-1",
+    workspace,
+    gate: "true",
+    artifact: "src/format.ts",
+    scope: ["src/one"],
+    seat: "lead",
+    by: "some-agent",
+  });
+  assert.equal(cSeat.freshEyes, true, "seat='lead' omitting freshEyes defaults to true when lane is usable");
+
+  const cByLead = factoryUsable.setContract({
+    task: "SD-2",
+    workspace,
+    gate: "true",
+    artifact: "src/format.ts",
+    scope: ["src/two"],
+    by: "lead",
+  });
+  assert.equal(cByLead.freshEyes, true, "by='lead' omitting freshEyes defaults to true when lane is usable");
+
+  const cCorr = factoryUsable.setContract({
+    task: "SD-3",
+    workspace,
+    gate: "true",
+    artifact: "src/format.ts",
+    scope: ["src/three"],
+    by: leadCorr.agentId,
+  });
+  assert.equal(cCorr.freshEyes, true, "Lead-correlated submitter omitting freshEyes defaults to true when lane is usable");
+
+  // Explicit freshEyes: false from Lead opts out even when the lane is usable.
+  const cOptOut = factoryUsable.setContract({
+    task: "SD-4",
+    workspace,
+    gate: "true",
+    artifact: "src/format.ts",
+    scope: ["src/four"],
+    seat: "lead",
+    by: "lead",
+    freshEyes: false,
+  });
+  assert.equal(cOptOut.freshEyes, undefined, "Lead passing freshEyes: false omits freshEyes");
+  assert.equal("freshEyes" in cOptOut, false);
+
+  // Owner (non-Lead) omitting freshEyes leaves freshEyes off even when lane is usable.
+  const cOwner = factoryUsable.setContract({
+    task: "SD-5",
+    workspace,
+    gate: "true",
+    artifact: "src/format.ts",
+    scope: ["src/five"],
+    by: "owner",
+  });
+  assert.equal(cOwner.freshEyes, undefined, "Owner omitting freshEyes leaves freshEyes off");
+
+  // 2. Unusable freshEyes lane: Lead omitting freshEyes degrades gracefully to off, while explicit freshEyes: true fails fast.
+  const stateDirUnusable = join(dir, "state-unusable");
+  const factoryUnusable = createFactory({ stateDir: stateDirUnusable, eyeCliProbe: () => false });
+
+  const cDegraded = factoryUnusable.setContract({
+    task: "SD-6",
+    workspace,
+    gate: "true",
+    artifact: "src/format.ts",
+    scope: ["src/six"],
+    seat: "lead",
+    by: "lead",
+  });
+  assert.equal(cDegraded.freshEyes, undefined, "Lead omitting freshEyes on an unusable lane succeeds with freshEyes omitted");
+  assert.equal("freshEyes" in cDegraded, false);
+
+  assert.throws(
+    () =>
+      factoryUnusable.setContract({
+        task: "SD-7",
+        workspace,
+        gate: "true",
+        artifact: "src/format.ts",
+        scope: ["src/seven"],
+        seat: "lead",
+        by: "lead",
+        freshEyes: true,
+      }),
+    factoryErrorCode("eye-unconfigured"),
+    "Lead explicitly passing freshEyes: true on an unusable lane still fails fast with eye-unconfigured",
+  );
+});
+
 

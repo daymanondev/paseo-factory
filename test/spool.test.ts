@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createFactory } from "../plugin/server/core/factory.ts";
+import { CorrelationRegistry } from "../plugin/server/core/correlations.ts";
 import { handleSpoolRequest, parseSpoolRequest, spoolRootFor, startSpool } from "../plugin/server/spool.ts";
 import { disposeDir, gitCommitAll, makeTempDir } from "./helpers.ts";
 
@@ -75,7 +76,12 @@ test("parseSpoolRequest accepts exactly the three request shapes and nothing els
   assert.deepEqual(
     parseSpoolRequest({ id: "r1", kind: "contract", task: "T1", workspace: "/w", gate: "true", artifact: "a", freshEyes: true, submitter: "owner" }),
     { id: "r1", kind: "contract", task: "T1", workspace: "/w", gate: "true", artifact: "a", freshEyes: true, submitter: "owner" },
-    "freshEyes passes only as literal true",
+    "freshEyes: true passes as literal true",
+  );
+  assert.deepEqual(
+    parseSpoolRequest({ id: "r1", kind: "contract", task: "T1", workspace: "/w", gate: "true", artifact: "a", freshEyes: false, submitter: "lead" }),
+    { id: "r1", kind: "contract", task: "T1", workspace: "/w", gate: "true", artifact: "a", freshEyes: false, submitter: "lead" },
+    "freshEyes: false passes as literal false (explicit opt-out)",
   );
 
   // v0.0.14: the Lead rotation names its Project root; no stamp — the act
@@ -103,7 +109,7 @@ test("parseSpoolRequest accepts exactly the three request shapes and nothing els
     { id: "r1", kind: "accept", task: "T1", attempt: 2, submitter: 7 },
     { kind: "claim", task: "T1", sha: "abc" },
     { id: "r1", kind: "contract", task: "T1", workspace: "/w", gate: "true", artifact: "a", submitter: "owner", freshEyes: "yes" },
-    { id: "r1", kind: "contract", task: "T1", workspace: "/w", gate: "true", artifact: "a", submitter: "owner", freshEyes: false },
+    { id: "r1", kind: "contract", task: "T1", workspace: "/w", gate: "true", artifact: "a", submitter: "owner", freshEyes: 1 },
   ]) {
     assert.equal(parseSpoolRequest(bad), undefined, `${JSON.stringify(bad)} must be rejected`);
   }
@@ -565,7 +571,7 @@ test("spool command authority (v0.0.23, ADR 0015 §1): refuses contract/spawn/re
   mkdirSync(join(ws, "src"), { recursive: true });
   writeFileSync(join(ws, "src", "x.ts"), "x\n");
   const head = gitCommitAll(ws);
-  const factory = createFactory({ stateDir: join(dir, "state") });
+  const factory = createFactory({ stateDir: join(dir, "state"), eyeCliProbe: () => false });
 
   // parseSpoolRequest preserves optional valid seat ("supervisor" | "lead" | "agent") and rejects invalid seat values.
   assert.equal(
@@ -880,6 +886,100 @@ test("handleSpoolRequest sanitizes spawn and respawn provider via sanitizeLane b
     assert.match(respawned.summary, /under opencode\/opencode\/nemotron-3-ultra-free /);
   }
 });
+
+test("handleSpoolRequest smart-defaults freshEyes on Lead contracts, reports 'fresh eyes ON' in summary, and records worker correlation on spawn (v0.0.28, ADR 0018)", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const ws = join(dir, "ws");
+  mkdirSync(join(ws, "src"), { recursive: true });
+  writeFileSync(join(ws, "src", "x.ts"), "x\n");
+  gitCommitAll(ws);
+
+  const stateDir = join(dir, "state");
+  const factory = createFactory({ stateDir, eyeCliProbe: () => true });
+
+  // 1. Lead omits freshEyes -> smart-defaults to true and summary includes 'fresh eyes ON'.
+  const r1 = await handleSpoolRequest(factory, {
+    id: "sp-fe-1",
+    kind: "contract",
+    task: "T-FE-1",
+    workspace: ws,
+    gate: "true",
+    artifact: "src/x.ts",
+    scope: ["src/one"],
+    submitter: "agent-lead-1",
+    seat: "lead",
+  });
+  assert.equal(r1.ok, true);
+  if (r1.ok) {
+    assert.match(r1.summary, /fresh eyes ON/);
+  }
+  assert.equal(factory.contractFor("T-FE-1")?.freshEyes, true);
+
+  // 2. Lead explicitly passes freshEyes: false -> omits freshEyes and summary does not report 'fresh eyes ON'.
+  const r2 = await handleSpoolRequest(factory, {
+    id: "sp-fe-2",
+    kind: "contract",
+    task: "T-FE-2",
+    workspace: ws,
+    gate: "true",
+    artifact: "src/x.ts",
+    scope: ["src/two"],
+    freshEyes: false,
+    submitter: "agent-lead-1",
+    seat: "lead",
+  });
+  assert.equal(r2.ok, true);
+  if (r2.ok) {
+    assert.doesNotMatch(r2.summary, /fresh eyes ON/);
+  }
+  assert.equal(factory.contractFor("T-FE-2")?.freshEyes, undefined);
+
+  // 3. Spawn with prompt and daemon records worker correlation in CorrelationRegistry.
+  const fakeDaemon = {
+    agents: {
+      async list() {
+        return { entries: [] };
+      },
+      async create() {
+        return { id: "agent-spawned-worker-1" };
+      },
+      ref() {
+        return { async archive() {} };
+      },
+    },
+  };
+  const sp = await handleSpoolRequest(
+    factory,
+    {
+      id: "sp-w-1",
+      kind: "spawn",
+      task: "T-FE-1",
+      provider: "pi/zai/glm-5.3",
+      arity: 1,
+      prompt: "Execute T-FE-1",
+      submitter: "agent-lead-1",
+      seat: "lead",
+    },
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    fakeDaemon as unknown as Parameters<typeof handleSpoolRequest>[8],
+  );
+  assert.equal(sp.ok, true);
+  if (sp.ok) {
+    assert.equal(sp.agentId, "agent-spawned-worker-1");
+  }
+  const correlations = new CorrelationRegistry(stateDir);
+  const workerCorr = correlations.findByAgentId("agent-spawned-worker-1");
+  assert.ok(workerCorr, "spawned worker has a CorrelationRegistry record bound to its agentId");
+  assert.equal(workerCorr?.role, "agent");
+  assert.equal(workerCorr?.task, "T-FE-1");
+});
+
 
 
 

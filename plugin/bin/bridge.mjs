@@ -517,7 +517,11 @@ const TOOL_DEFINITIONS = {
           items: { type: "string" },
           description: "Optional list of SKILL.md names the working Agent must open first.",
         },
-        freshEyes: { type: "boolean", description: "Enable the advisory fresh-eyes review pass on green verdicts." },
+        freshEyes: {
+          type: "boolean",
+          description:
+            "Enable or disable the advisory fresh-eyes review pass on green verdicts (defaults to true for Lead when the freshEyes lane is usable; pass false to opt out).",
+        },
         watch: { type: "boolean", description: "Enable the post-verdict watch pass." },
         description: { type: "string", description: "Optional task assignment description." },
         workspace: { type: "string", description: "Optional Project root path (defaults to current project root)." },
@@ -796,7 +800,7 @@ async function handleToolCall(name, rawArgs) {
       ...(base ? { base } : {}),
       ...(scope && scope.length > 0 ? { scope } : {}),
       ...(skills && skills.length > 0 ? { skills } : {}),
-      ...(args.freshEyes === true ? { freshEyes: true } : {}),
+      ...(typeof args.freshEyes === "boolean" ? { freshEyes: args.freshEyes } : {}),
       ...(args.watch === true ? { watch: true } : {}),
       ...(description ? { description } : {}),
       seat: "lead",

@@ -49,7 +49,7 @@ test("the whole loop over the spool: contract → red claim → green claim → 
   const home = join(dir, "paseo-home");
   const stateDir = join(home, "plugin-state", "paseo-factory");
 
-  const factory = createFactory({ stateDir });
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
   const spool = startSpool(stateDir, factory);
   t.after(() => spool.stop());
 
@@ -130,7 +130,7 @@ test("the delegated Owner seat's env stamps its id on both acts (v0.0.9)", async
   const home = join(dir, "paseo-home");
   const stateDir = join(home, "plugin-state", "paseo-factory");
 
-  const factory = createFactory({ stateDir });
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
   const spool = startSpool(stateDir, factory);
   t.after(() => spool.stop());
 
@@ -629,7 +629,7 @@ test("factory CLI stamps PASEO_FACTORY_SEAT onto spool requests and enforces sea
   const home = join(dir, "paseo-home");
   const stateDir = join(home, "plugin-state", "paseo-factory");
 
-  const factory = createFactory({ stateDir });
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
   const dispatched: Record<string, unknown>[] = [];
   const spool = startSpool(stateDir, factory, {
     pollMs: 20,
@@ -677,10 +677,19 @@ test("factory CLI stamps PASEO_FACTORY_SEAT onto spool requests and enforces sea
   // Lead CAN call `factory contract`.
   const leadContract = await run(
     ownerCli,
-    ["contract", "--task", "T-AUTH", "--workspace", workspace, "--gate", "true", "--artifact", "src/format.ts"],
+    ["contract", "--task", "T-AUTH", "--workspace", workspace, "--gate", "true", "--artifact", "src/format.ts", "--scope", "src/format.ts"],
     leadEnv,
   );
   assert.equal(leadContract.status, 0, leadContract.stderr);
+
+  // Lead CAN pass `--no-fresh-eyes` to explicitly opt out of fresh-eyes.
+  const leadNoEye = await run(
+    ownerCli,
+    ["contract", "--task", "T-NO-EYE", "--workspace", workspace, "--gate", "true", "--artifact", "src/format.ts", "--scope", "src/other.ts", "--no-fresh-eyes"],
+    leadEnv,
+  );
+  assert.equal(leadNoEye.status, 0, leadNoEye.stderr);
+  assert.equal(factory.contractFor("T-NO-EYE")?.freshEyes, undefined);
 
   // Working Agent (PASEO_FACTORY_SEAT=agent) is refused on contract, run, accept, lead dispatch, lead rotate.
   const agContract = await run(
