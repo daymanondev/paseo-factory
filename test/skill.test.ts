@@ -86,9 +86,9 @@ test("the /factory skill reconciles at boot with both arms, the exact CLI door, 
   );
 
   // The bootstrap arm: when invoked with no <directive>, run status and point
-  // at Start / Open Supervisor or passing /factory <directive>.
+  // at the native Supervisor (Factory) picker or passing /factory <directive>.
   assert.ok(written.includes(`${FACTORY_CMD} status`), "the bootstrap arm reads the loop's state");
-  assert.ok(written.includes("Start / Open Supervisor"), "the bootstrap arm points at the Start / Open Supervisor button");
+  assert.ok(written.includes("Supervisor (Factory)"), "the bootstrap arm points at the native Supervisor (Factory) picker");
   assert.ok(written.includes("/factory <directive>"), "the bootstrap arm offers passing /factory <directive>");
 
   // The home law: a global file never pins one daemon's home — no rendered

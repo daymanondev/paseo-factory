@@ -112,6 +112,17 @@ const OPERATOR_DEFAULT_KEYS = ["defaultProvider", "defaultModel", "defaultThinki
 const CORE_AGENT_SKILLS = ["tdd", "diagnosing-bugs", "codebase-design"] as const;
 
 /**
+ * Whether `execPath` is an Electron / `Paseo Helper` binary (v0.0.27, ADR
+ * 0017 §2): under Paseo Desktop on macOS `process.execPath` points at the
+ * Electron helper, and spawning it for `bridge.mjs` without
+ * `ELECTRON_RUN_AS_NODE=1` aborts at Electron startup (`Unable to find helper
+ * app`) — so those spawns carry the Node-mode flag in their env.
+ */
+export function isElectronNodeBinary(execPath: string): boolean {
+  return /Paseo Helper/i.test(execPath) || /electron/i.test(execPath) || process.versions.electron !== undefined;
+}
+
+/**
  * Materializes (idempotently) the isolated Pi harness home for `role` and
  * returns its path — the value callers inject as `PI_CODING_AGENT_DIR`.
  */
@@ -233,6 +244,9 @@ function syncMcpJson(sourceAgentDir: string, roleHome: string, role: PiAgentRole
     command: process.execPath,
     args: [join(stateDir, "bin", "bridge.mjs"), "--role", role, "--state-dir", stateDir],
     exposure: "direct",
+    // Paseo Desktop's execPath is an Electron helper — bridge.mjs must run in
+    // Node mode (v0.0.27, ADR 0017 §2).
+    ...(isElectronNodeBinary(process.execPath) ? { env: { ELECTRON_RUN_AS_NODE: "1" } } : {}),
   };
   const restSource = source !== undefined && servers !== undefined ? source : {};
   writeFileSync(target, `${JSON.stringify({ ...restSource, mcpServers }, null, 2)}\n`);

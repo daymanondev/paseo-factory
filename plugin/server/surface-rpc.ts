@@ -34,9 +34,10 @@ import type { LandingResult } from "./core/workspace.ts";
 import { FACTORY_VIEW_VERSION } from "../shared/view.ts";
 import { foldRetro, foldTasks, foldView, readTailed } from "./view.ts";
 import { setAgentModelViaCli, setAgentThinkingViaCli, stopAgentViaCli } from "./daemon-cli.ts";
-import { checkDaemonPluginUpdates, getCachedPluginUpdateStatus, installDaemonPlugin, listDaemonPlugins, manageDaemonPlugin } from "./daemon-cli.ts";
+import { checkDaemonPluginUpdates, cleanupDaemonWorkspacesAndProjectsViaWs, getCachedPluginUpdateStatus, installDaemonPlugin, listDaemonPlugins, manageDaemonPlugin, reloadDaemonConfigViaWs } from "./daemon-cli.ts";
 import type { DaemonPluginAction, DaemonPluginItem, DaemonPluginSourceStatus, DaemonPluginUpdateRow, DaemonReply } from "./daemon-cli.ts";
-import { SEAT_TITLES, renderSeatBootstrap } from "./roles.ts";
+import { reconcilePaseoRoleProviders } from "./core/role-providers.ts";
+import { SEAT_TITLES, inferRoleFromProviderId, renderSeatBootstrap, resolveEffectiveProviderFamily } from "./roles.ts";
 import type { SeatName } from "./roles.ts";
 import { discoverProjects, writeProjectRegistration } from "./projects.ts";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
@@ -228,6 +229,13 @@ export interface SurfaceDeps {
   managePlugin?: typeof manageDaemonPlugin;
   checkPluginUpdates?: typeof checkDaemonPluginUpdates;
   /**
+   * The daemon worktree-record sweep override (v0.0.27, ADR 0017 §4; tests) —
+   * the WebSocket bridge by default, the same law the plugin lifecycle
+   * overrides carry: tests drive the delete requests from in-memory
+   * fixtures, zero daemon.
+   */
+  cleanupDaemonWorkspaces?: typeof cleanupDaemonWorkspacesAndProjectsViaWs;
+  /**
    * The Lead-mailbox rotation settle (v0.0.20, ADR 0013 §4's last arm):
    * `retireSeat` fires it right after a Project's Lead is archived, so any
    * un-acked in-flight delivery of that Project's `mailbox.jsonl` returns to
@@ -300,9 +308,21 @@ export function acceptanceSummary(input: { task: string; attempt: number; by: st
  * Automatic archive of an Accepted Task's Paseo workspace (v0.0.23, ADR 0015 §6):
  * looks up `taskWorkspaces[task]` in `<projectStateDir>/project.json`, calls
  * `daemon.workspaces?.archive(workspaceId)` best-effort, and removes the entry
- * from `taskWorkspaces`.
+ * from `taskWorkspaces`. Since v0.0.27 (ADR 0017 §4) it also sweeps the
+ * daemon's own records over the WebSocket (`archive_workspace_request` /
+ * `project.remove.request` via `cleanupDaemonWorkspacesAndProjectsViaWs`) for
+ * workspaces and projects rooted under `<projectStateDir>/worktrees/` or
+ * missing on disk, so the accepted Task's worktree leaves no broken project
+ * entry in Paseo Desktop. The daemon `home` targets the sweep (the caller's
+ * `deps.home`; the spool's legacy 3-arg call falls back to `PASEO_HOME`).
  */
-export async function archiveAcceptedTaskWorkspace(factory: Factory, daemon: SurfaceDaemonApi | undefined, task: string): Promise<void> {
+export async function archiveAcceptedTaskWorkspace(
+  factory: Factory,
+  daemon: SurfaceDaemonApi | undefined,
+  task: string,
+  home?: string,
+  cleanup: typeof cleanupDaemonWorkspacesAndProjectsViaWs = cleanupDaemonWorkspacesAndProjectsViaWs,
+): Promise<void> {
   const contract = factory.contractFor(task);
   if (contract === undefined) return;
   const project = resolveProject(contract.workspace);
@@ -321,6 +341,12 @@ export async function archiveAcceptedTaskWorkspace(factory: Factory, daemon: Sur
     root: project.root,
     taskWorkspaces: { [task]: null },
   });
+  // The daemon-record sweep (v0.0.27): best-effort, never blocks the accept.
+  try {
+    await cleanup(home ?? process.env.PASEO_HOME, { worktreesDir: join(projectStateDir(factory.stateDir, project.slug), "worktrees") });
+  } catch {
+    // best-effort sweep
+  }
 }
 
 /** One companion install's sentence — the source actually used, the ref when one was given. */
@@ -428,6 +454,29 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       : { ok: false, code: "unknown-project" as const, error: `project root ${projectRoot} does not resolve to a git repository — ${project.reason}` };
   };
 
+  /**
+   * The ADR 0017 §2 identity fallback (the lead-mailbox `liveSeatAgentByIdentity`
+   * precedent): a seat started from Paseo's native New Chat picker carries no
+   * `labels.seat` — the Project's `project.json` binding and the role-provider
+   * id name it instead. Only the registration's bound agent id or a
+   * role-provider agent pinned to this Project by label or cwd is accepted, so
+   * a neighbor Project's seat is never grabbed.
+   */
+  const seatAgentByIdentity = (
+    agents: SurfaceAgentSnapshot[],
+    slug: string,
+    seat: "supervisor" | "lead",
+  ): SurfaceAgentSnapshot | undefined => {
+    const registration = readProjectRegistration(deps.stateDir, slug);
+    const bound = seat === "supervisor" ? registration?.supervisor : registration?.lead;
+    return agents.find(
+      (agent) =>
+        (bound !== undefined && agent.id === bound) ||
+        (inferRoleFromProviderId(agent.provider) === seat &&
+          (agent.labels?.project === slug || (registration?.root !== undefined && agent.cwd === registration.root))),
+    );
+  };
+
   /** The live non-archived seat agent — `seat` plus, when scoped, the Project's slug label. */
   const seatOf = async (daemon: SurfaceDaemonApi, seat: "supervisor" | "lead", projectSlug?: string): Promise<SurfaceAgentSnapshot | undefined> => {
     const labels: Record<string, string> = projectSlug === undefined ? { seat } : { seat, project: projectSlug };
@@ -435,7 +484,20 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     for (const entry of page.entries) {
       if (entry.agent.archivedAt === null) return entry.agent;
     }
-    return undefined;
+    if (projectSlug === undefined) return undefined;
+    // The native-picker seat (ADR 0017 §2): unlabeled, but bound in
+    // `project.json` or running under its `factory-*` role provider.
+    let all: { entries: { agent: SurfaceAgentSnapshot }[] };
+    try {
+      all = await daemon.agents.list({ filter: { includeArchived: false } });
+    } catch {
+      return undefined;
+    }
+    return seatAgentByIdentity(
+      all.entries.map((entry) => entry.agent).filter((agent) => agent.archivedAt === null),
+      projectSlug,
+      seat,
+    );
   };
 
   /** The agent → task binding: which live agent works which task, from the ledger's own names. */
@@ -484,7 +546,12 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   };
 
   /** One agent → AgentView, with the Timeline Oracle seqEnd when the daemon answers. */
-  const agentViewOf = async (daemon: SurfaceDaemonApi, agent: SurfaceAgentSnapshot, task: string | null): Promise<AgentView> => {
+  const agentViewOf = async (
+    daemon: SurfaceDaemonApi,
+    agent: SurfaceAgentSnapshot,
+    task: string | null,
+    seatOverride?: "supervisor" | "lead",
+  ): Promise<AgentView> => {
     let seqEnd: number | null = null;
     try {
       const page = await daemon.agents.ref(agent.id).timeline.refetch({ direction: "tail", limit: 1 });
@@ -500,7 +567,8 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       provider: agent.provider,
       model: agent.model,
       ...(agent.thinkingOptionId === undefined ? {} : { thinking: agent.thinkingOptionId }),
-      seat: agent.labels.seat ?? null,
+      // A native-picker seat carries no labels — its recognized seat rides anyway (ADR 0017 §2).
+      seat: agent.labels.seat ?? seatOverride ?? null,
       task,
       seqEnd,
       ...leadTelemetryOf(agent),
@@ -624,11 +692,18 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     }
     if (agent !== undefined) {
       const targetProvider = parsed !== undefined ? `${parsed.provider}/${parsed.model}` : lane;
+      // A `factory-*` role provider (ADR 0017 §2) fences under its lane's
+      // harness family — `resolveEffectiveProviderFamily` resolves it through
+      // Lane config, so a native `Supervisor (Factory)` chat is the same family
+      // as the lane it runs on, never an unhealthy seat to retire.
+      const effectiveFamily =
+        parsed === undefined ? undefined : resolveEffectiveProviderFamily(agent.provider, seat, deps.stateDir, project.slug);
       const sameProviderFamily =
         parsed === undefined ||
         agent.provider === parsed.provider ||
         agent.provider === targetProvider ||
-        agent.provider.startsWith(`${parsed.provider}/`);
+        agent.provider.startsWith(`${parsed.provider}/`) ||
+        effectiveFamily === parsed.provider;
       const sameCwd =
         typeof agent.cwd !== "string" ||
         agent.cwd === "" ||
@@ -830,8 +905,15 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       try {
         const page = await daemon.agents.list({ filter: { includeArchived: false } });
         rawAgents = page.entries.map((entry) => entry.agent).filter((agent) => agent.archivedAt === null);
-        const seatOfProject = (seat: string): SurfaceAgentSnapshot | undefined =>
-          rawAgents.find((agent) => agent.labels.seat === seat && (project === null || agent.labels.project === project.slug));
+        const seatOfProject = (seat: "supervisor" | "lead"): SurfaceAgentSnapshot | undefined => {
+          const byLabels = rawAgents.find(
+            (agent) => agent.labels.seat === seat && (project === null || agent.labels.project === project.slug),
+          );
+          if (byLabels !== undefined || project === null) return byLabels;
+          // The native-picker seat (ADR 0017 §2): unlabeled, but bound in
+          // `project.json` or running under its `factory-*` role provider.
+          return seatAgentByIdentity(rawAgents, project.slug, seat);
+        };
         supervisorRaw = seatOfProject("supervisor");
         leadRaw = seatOfProject("lead");
         providers = await resolveProviders(daemon);
@@ -861,13 +943,15 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       const inScope = (agent: SurfaceAgentSnapshot): boolean => {
         if (project === null) return agent.labels.seat !== undefined || bound.has(agent.id);
         if (agent.labels.seat !== undefined) return agent.labels.project === project.slug;
+        if (supervisorRaw?.id === agent.id || leadRaw?.id === agent.id) return true; // the native-picker seat renders its live state (ADR 0017 §2)
         const task = bound.get(agent.id);
         return task !== undefined && taskInProject(task, project.root);
       };
       const relevant = rawAgents.filter(inScope).slice(0, SEQ_END_CAP);
       const agents: AgentView[] = [];
       for (const agent of relevant) {
-        agents.push(await agentViewOf(daemon, agent, bound.get(agent.id) ?? null));
+        const seatOverride = agent.id === supervisorRaw?.id ? ("supervisor" as const) : agent.id === leadRaw?.id ? ("lead" as const) : undefined;
+        agents.push(await agentViewOf(daemon, agent, bound.get(agent.id) ?? null, seatOverride));
       }
       const supervisor = supervisorRaw === undefined ? null : (agents.find((agent) => agent.id === supervisorRaw!.id) ?? null);
       const lead = leadRaw === undefined ? null : (agents.find((agent) => agent.id === leadRaw!.id) ?? null);
@@ -947,7 +1031,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         // Awaited since v0.0.14: a worktree task's local landing runs before
         // the line records, and the summary carries the outcome.
         const event = await deps.factory.accept({ task: input.task, attempt: input.attempt, accepted_by: "owner" });
-        await archiveAcceptedTaskWorkspace(deps.factory, resolveDaemon(context), input.task);
+        await archiveAcceptedTaskWorkspace(deps.factory, resolveDaemon(context), input.task, deps.home, deps.cleanupDaemonWorkspaces ?? cleanupDaemonWorkspacesAndProjectsViaWs);
         return {
           ok: true as const,
           seq: event.seq,
@@ -1026,6 +1110,22 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         }
       }
       log(`lanes: ${input.lane}=${saved.lanes[input.lane]}${projectSlug === undefined ? "" : ` (project ${projectSlug})`} (${modelSync})`);
+      // The native role providers (v0.0.27, ADR 0017 §1): every lane save
+      // reconciles `factory-{supervisor,lead,peer}` and the single
+      // `Supervisor (Factory)` profile into `<home>/config.json so Paseo's
+      // native picker stays in sync with Lane config — idempotent, so a lane
+      // the providers do not read (watch/retro/freshEyes) writes nothing and
+      // never fires the daemon reload.
+      try {
+        const reconciled = reconcilePaseoRoleProviders(deps.home, saved.lanes, { reloadDaemon: reloadDaemonConfigViaWs });
+        if (reconciled.ok) {
+          if (reconciled.changed) log("role providers: <home>/config.json reconciled — daemon reload requested");
+        } else {
+          log(`role providers: <home>/config.json not reconciled — ${reconciled.reason}`);
+        }
+      } catch (err) {
+        log(`role providers: <home>/config.json reconcile failed — ${messageOf(err)}`);
+      }
       return { ok: true as const, lanes: saved.lanes, modelSync };
     },
 
@@ -1244,6 +1344,21 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         } catch {
           // best-effort branch delete
         }
+      }
+
+      // 4.5. Sweep the daemon's own worktree records (v0.0.27, ADR 0017 §4):
+      // workspaces and projects rooted under the (now removed) worktrees dir
+      // or missing on disk are deleted over the daemon WebSocket, so the
+      // reset never leaves broken project entries in Paseo Desktop.
+      try {
+        const swept = await (deps.cleanupDaemonWorkspaces ?? cleanupDaemonWorkspacesAndProjectsViaWs)(deps.home, { worktreesDir });
+        if (swept.ok && (swept.removedWorkspaceIds.length > 0 || swept.removedProjectIds.length > 0)) {
+          log(
+            `reset: swept ${swept.removedWorkspaceIds.length} daemon workspace(s) and ${swept.removedProjectIds.length} project record(s) under ${worktreesDir}`,
+          );
+        }
+      } catch (err) {
+        log(`reset: the daemon worktree-record sweep did not land — ${messageOf(err)}`);
       }
 
       // 5. Unless keepSeats === true, retire Supervisor and Lead seats for this Project.
@@ -1666,28 +1781,40 @@ export type SurfaceHandlers = ReturnType<typeof createSurfaceHandlers>;
 /**
  * Registers every `factory.*` handler on the plugin server. Each daemon
  * call prefers the PaseoApi the daemon hands the handler (`context.paseo`);
- * the constructor's `daemon` is the fallback (and the tests' fake).
+ * the constructor's `daemon` is the fallback (and the tests' fake). Since
+ * v0.0.27 (ADR 0017 §4) an optional `onContext` fires on EVERY call before
+ * the handler runs — the shell passes its `capturePaseo` so the one
+ * long-lived PaseoApi is captured from the first `factory.*` RPC alone,
+ * before any agent hook (create, session open, a permit ask) ever fires.
  */
-export function registerSurfaceRpc(server: PluginServerContext, handlers: SurfaceHandlers): void {
-  server.handle(snapshot, (input, context) => handlers.snapshot(input, { paseo: context.paseo }));
-  server.handle(taskDetail, (input, context) => handlers.taskDetail(input, { paseo: context.paseo }));
-  server.handle(accept, (input, context) => handlers.accept(input, { paseo: context.paseo }));
-  server.handle(retro, (input, context) => handlers.retro(input, { paseo: context.paseo }));
-  server.handle(lanesSet, (input, context) => handlers.lanesSet(input, { paseo: context.paseo }));
-  server.handle(supervisorEnsure, (input, context) => handlers.supervisorEnsure(input, { paseo: context.paseo }));
-  server.handle(supervisorRevoke, (input, context) => handlers.supervisorRevoke(input, { paseo: context.paseo }));
-  server.handle(leadEnsure, (input, context) => handlers.leadEnsure(input, { paseo: context.paseo }));
-  server.handle(leadRotate, (input, context) => handlers.leadRotate(input, { paseo: context.paseo }));
-  server.handle(projectReset, (input, context) => handlers.projectReset(input, { paseo: context.paseo }));
-  server.handle(leadDispatch, (input, context) => handlers.leadDispatch(input, { paseo: context.paseo }));
-  server.handle(ratifyProposal, (input, context) => handlers.ratifyProposal(input, { paseo: context.paseo }));
-  server.handle(pluginsInstall, (input, context) => handlers.pluginsInstall(input, { paseo: context.paseo }));
-  server.handle(pluginsManage, (input, context) => handlers.pluginsManage(input, { paseo: context.paseo }));
-  server.handle(pluginsCheckUpdates, (input, context) => handlers.pluginsCheckUpdates(input, { paseo: context.paseo }));
-  server.handle(vaultConfigure, (input, context) => handlers.vaultConfigure(input, { paseo: context.paseo }));
-  server.handle(vaultHydrate, (input, context) => handlers.vaultHydrate(input, { paseo: context.paseo }));
-  server.handle(vaultPull, (input, context) => handlers.vaultPull(input, { paseo: context.paseo }));
-  server.handle(vaultPush, (input, context) => handlers.vaultPush(input, { paseo: context.paseo }));
-  server.handle(vaultSync, (input, context) => handlers.vaultSync(input, { paseo: context.paseo }));
-  server.handle(vaultImport, (input, context) => handlers.vaultImport(input, { paseo: context.paseo }));
+export function registerSurfaceRpc(
+  server: PluginServerContext,
+  handlers: SurfaceHandlers,
+  onContext?: (context: { paseo?: unknown }) => void,
+): void {
+  const pass = (context: { paseo?: unknown }): SurfaceCallContext => {
+    if (onContext !== undefined) onContext(context);
+    return { paseo: context.paseo };
+  };
+  server.handle(snapshot, (input, context) => handlers.snapshot(input, pass(context)));
+  server.handle(taskDetail, (input, context) => handlers.taskDetail(input, pass(context)));
+  server.handle(accept, (input, context) => handlers.accept(input, pass(context)));
+  server.handle(retro, (input, context) => handlers.retro(input, pass(context)));
+  server.handle(lanesSet, (input, context) => handlers.lanesSet(input, pass(context)));
+  server.handle(supervisorEnsure, (input, context) => handlers.supervisorEnsure(input, pass(context)));
+  server.handle(supervisorRevoke, (input, context) => handlers.supervisorRevoke(input, pass(context)));
+  server.handle(leadEnsure, (input, context) => handlers.leadEnsure(input, pass(context)));
+  server.handle(leadRotate, (input, context) => handlers.leadRotate(input, pass(context)));
+  server.handle(projectReset, (input, context) => handlers.projectReset(input, pass(context)));
+  server.handle(leadDispatch, (input, context) => handlers.leadDispatch(input, pass(context)));
+  server.handle(ratifyProposal, (input, context) => handlers.ratifyProposal(input, pass(context)));
+  server.handle(pluginsInstall, (input, context) => handlers.pluginsInstall(input, pass(context)));
+  server.handle(pluginsManage, (input, context) => handlers.pluginsManage(input, pass(context)));
+  server.handle(pluginsCheckUpdates, (input, context) => handlers.pluginsCheckUpdates(input, pass(context)));
+  server.handle(vaultConfigure, (input, context) => handlers.vaultConfigure(input, pass(context)));
+  server.handle(vaultHydrate, (input, context) => handlers.vaultHydrate(input, pass(context)));
+  server.handle(vaultPull, (input, context) => handlers.vaultPull(input, pass(context)));
+  server.handle(vaultPush, (input, context) => handlers.vaultPush(input, pass(context)));
+  server.handle(vaultSync, (input, context) => handlers.vaultSync(input, pass(context)));
+  server.handle(vaultImport, (input, context) => handlers.vaultImport(input, pass(context)));
 }

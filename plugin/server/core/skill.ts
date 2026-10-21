@@ -7,7 +7,8 @@
  * dispatch deterministically into the Project's SLP loop —
  * `factory supervisor dispatch` for the directive arm (seat-aware routing into
  * `Supervisor` from a normal chat or into `Lead` from inside `Supervisor`),
- * and the Factory surface's `Start / Open Supervisor` for the bootstrap arm.
+ * and the native `Supervisor (Factory)` New Chat picker for the bootstrap
+ * arm (v0.0.27, ADR 0017 — the Factory surface's Start buttons are gone).
  *
  * Pure Node like every `src/` module: the plugin shell vendors the verbatim
  * copy into `plugin/server/core/` (the `./core/project.ts` precedent) and
@@ -68,7 +69,7 @@ export function renderFactorySkill(input: FactorySkillInput): string {
     "## Mode B — When invoked with NO arguments: bare /factory",
     "",
     `1. **ONLY** when the user invoked bare \`/factory\` with no \`<directive>\` arguments (do NOT run this if you executed Mode A), run \`${input.factoryCmd} status\` (a local ledger read — one line per task; needs-human rows want the Owner's eye first).`,
-    "2. Tell the `Owner` to click **`Start / Open Supervisor`** in the Factory surface's Seats & Models header on Paseo Desktop, or pass `/factory <directive>`.",
+    "2. Tell the `Owner` to open a New Chat and select **`Supervisor (Factory)`** in Paseo's native agent picker on Paseo Desktop, or pass `/factory <directive>`.",
     "",
     "## Notes",
     "",

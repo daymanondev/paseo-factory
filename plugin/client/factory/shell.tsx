@@ -2,10 +2,13 @@
  * The one `<FactoryShell />` every Paseo surface entry renders (ADR 0009 §1):
  * global screen, workspace panel, settings screen — one component, three
  * hosts. It owns the snapshot poll and every RPC action (Accept, Run Retro,
- * lanes.set, the seat bridges, Ratify via Supervisor, task detail); the three
- * panes are pure renders of the view plus action callbacks. The Project scope
- * (v0.0.14, ADR 0010 §1) is the workspace panel's directory when hosted
- * there, else the header's Project Selector pick — the snapshot rides it.
+ * lanes.set, Revoke Supervisor, Rotate Lead, Ratify via Supervisor, task
+ * detail); the three panes are pure renders of the view plus action
+ * callbacks. The Project scope (v0.0.14, ADR 0010 §1) is the workspace
+ * panel's directory when hosted there, else the header's Project Selector
+ * pick — the snapshot rides it. Seats start only from Paseo's native New
+ * Chat picker (v0.0.27, ADR 0017 §3) — the shell's Open actions are pure
+ * navigation jumps to a live seat's conversation.
  * Function components only — no class syntax reaches the Hermes bundle.
  */
 import type { PluginTheme } from "@getpaseo/plugin";
@@ -13,7 +16,7 @@ import { useRpc } from "@getpaseo/plugin/client";
 import { Modal, ScrollView, useToast } from "@getpaseo/plugin/client/react-native";
 import { useEffect, useState } from "react";
 import { Text, View } from "react-native";
-import { accept, lanesSet, leadDispatch, leadEnsure, leadRotate, pluginsInstall, pluginsManage, pluginsCheckUpdates, projectReset, ratifyProposal, retro, snapshot, supervisorEnsure, supervisorRevoke, taskDetail, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
+import { accept, lanesSet, leadRotate, pluginsInstall, pluginsManage, pluginsCheckUpdates, projectReset, ratifyProposal, retro, snapshot, supervisorRevoke, taskDetail, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
 
 import type { FactoryView, LaneName, TaskDetailView } from "../../shared/view.ts";
 import { Btn, Card, TabBar } from "../kit/pill.tsx";
@@ -55,11 +58,8 @@ export function FactoryShell({
   const acceptCall = useRpc(accept);
   const retroCall = useRpc(retro);
   const lanesSetCall = useRpc(lanesSet);
-  const ensureCall = useRpc(supervisorEnsure);
   const revokeCall = useRpc(supervisorRevoke);
-  const leadEnsureCall = useRpc(leadEnsure);
   const leadRotateCall = useRpc(leadRotate);
-  const leadDispatchCall = useRpc(leadDispatch);
   const projectResetCall = useRpc(projectReset);
   const ratifyCall = useRpc(ratifyProposal);
 
@@ -169,37 +169,22 @@ export function FactoryShell({
     );
   }
 
-  // The seat bridges need a resolved Project — the snapshot's own `project`
-  // is the truth (a scope that does not resolve leaves the bridges parked).
+  // The Project-scoped acts need a resolved Project — the snapshot's own
+  // `project` is the truth (a scope that does not resolve leaves them parked).
   const projectRoot = view.project?.root;
-  const openSupervisor = (message: string): void => {
-    if (projectRoot === undefined) return;
-    void act("Supervisor", async () => {
-      const reply = await ensureCall({ projectRoot, message: message.trim() === "" ? undefined : message.trim() });
-      if (!reply.ok) return reply;
-      navigation?.openAgent({ agentId: reply.agentId, serverId });
-      return reply;
-    });
+  // The seat jumps (v0.0.27, ADR 0017 §3): a seat starts only from Paseo's
+  // native New Chat picker ("Supervisor (Factory)"), and the Supervisor
+  // spawns the Lead itself — so Open is a bare navigation to the live seat's
+  // conversation, with no ensure-or-dispatch RPC behind it.
+  const openSupervisor = (): void => {
+    const agentId = view.supervisor?.id;
+    if (agentId === undefined) return;
+    navigation?.openAgent({ agentId, serverId });
   };
-  const openLead = (message?: string): void => {
-    if (projectRoot === undefined) return;
-    const text = message?.trim();
-    void act("Lead", async () => {
-      // A dispatch (v0.0.20, ADR 0013 §4) rides the Lead mailbox pipeline —
-      // factory.lead.dispatch → enqueueLeadMail + pumpProjectLead — so the
-      // directive is durable and held through turns and rotations; a bare
-      // open rides leadEnsure and only opens the seat.
-      if (text === undefined || text === "") {
-        const reply = await leadEnsureCall({ projectRoot });
-        if (!reply.ok) return reply;
-        navigation?.openAgent({ agentId: reply.agentId, serverId });
-        return reply;
-      }
-      const reply = await leadDispatchCall({ projectRoot, message: text });
-      if (!reply.ok) return reply;
-      navigation?.openAgent({ agentId: reply.leadAgentId, serverId });
-      return reply;
-    });
+  const openLead = (): void => {
+    const agentId = view.lead?.id;
+    if (agentId === undefined) return;
+    navigation?.openAgent({ agentId, serverId });
   };
   const resetProject = (): void => {
     if (projectRoot === undefined) return;
@@ -214,8 +199,6 @@ export function FactoryShell({
           view={view}
           at={poll.at}
           now={now}
-          supervisorLive={view.supervisor !== null}
-          leadLive={view.lead !== null}
           actions={{ openSupervisor, openLead, resetProject, pickProject: (root) => setPickedRoot(root), busy }}
 
           busyAct={busyAct}

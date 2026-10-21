@@ -55,6 +55,7 @@ import type { LeadRotationState, ProjectRegistration } from "./core/project.ts";
 import { loadLanes } from "./core/lanes.ts";
 import { buildSeatKickoffPacket } from "./core/preflight.ts";
 import { taskWorktreeBranch, taskWorktreePath } from "./core/workspace.ts";
+import { inferRoleFromProviderId } from "./roles.ts";
 import {
   ackLeadMail as appendMailAcked,
   deliverLeadMail as appendMailDelivered,
@@ -314,13 +315,48 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       return { mailId: queued.mailId };
     });
 
+  /**
+   * The ADR 0017 §2 identity fallback: a seat spawned under its native role
+   * provider (`factory-lead` / `factory-supervisor`) or bound in
+   * `project.json` without labels — the native New Chat path — still answers
+   * when the labels filter finds nothing. Only the registration's bound agent
+   * id or a role-provider agent pinned to this Project by label or cwd is
+   * accepted, so a neighbor Project's seat is never grabbed.
+   */
+  const liveSeatAgentByIdentity = async (
+    daemon: SurfaceDaemonApi,
+    slug: string,
+    seat: "supervisor" | "lead",
+  ): Promise<SurfaceAgentSnapshot | undefined> => {
+    let page: { entries: { agent: SurfaceAgentSnapshot }[] };
+    try {
+      page = await daemon.agents.list({ filter: { includeArchived: false } });
+    } catch {
+      return undefined;
+    }
+    const registration = readProjectRegistration(deps.stateDir, slug);
+    const bound = seat === "supervisor" ? registration?.supervisor : registration?.lead;
+    for (const entry of page.entries) {
+      const agent = entry.agent;
+      if (agent.archivedAt !== null) continue;
+      if (bound !== undefined && agent.id === bound) return agent;
+      if (
+        inferRoleFromProviderId(agent.provider) === seat &&
+        (agent.labels?.project === slug || (registration?.root !== undefined && agent.cwd === registration.root))
+      ) {
+        return agent;
+      }
+    }
+    return undefined;
+  };
+
   /** The live non-archived Lead agent of one Project — the seatOf law, on the runtime's daemon slice. */
   const liveLeadAgent = async (daemon: SurfaceDaemonApi, slug: string): Promise<SurfaceAgentSnapshot | undefined> => {
     const page = await daemon.agents.list({ filter: { labels: { seat: "lead", project: slug }, includeArchived: false } });
     for (const entry of page.entries) {
       if (entry.agent.archivedAt === null) return entry.agent;
     }
-    return undefined;
+    return liveSeatAgentByIdentity(daemon, slug, "lead");
   };
 
   /** The live non-archived Supervisor agent of one Project — the seatOf law, on the runtime's daemon slice. */
@@ -329,7 +365,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     for (const entry of page.entries) {
       if (entry.agent.archivedAt === null) return entry.agent;
     }
-    return undefined;
+    return liveSeatAgentByIdentity(daemon, slug, "supervisor");
   };
 
   /**

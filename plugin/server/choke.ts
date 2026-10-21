@@ -45,7 +45,7 @@ import type { ChokeDecision, MemoryFence } from "./core/choke.ts";
 import { listProjectRegistrations } from "./projects.ts";
 import { readCorrelations } from "./correlations.ts";
 import { parseLane } from "./core/lanes.ts";
-import { SEAT_TITLES } from "./roles.ts";
+import { SEAT_TITLES, inferRoleFromProviderId } from "./roles.ts";
 import type { SeatName } from "./roles.ts";
 import { parseTaskWorktreePath } from "../shared/worktree-shape.mjs";
 import type { AskRequest, SpoolReply } from "./spool.ts";
@@ -65,6 +65,14 @@ export {
 };
 
 /**
+ * The choke-side name for the deterministic seat recognition (v0.0.27, ADR
+ * 0017 §2) — a thin re-export of `roles.ts`'s `inferRoleFromProviderId`, the
+ * single plugin-side mapping (`factory-supervisor` → `supervisor`,
+ * `factory-lead` → `lead`, `factory-peer` / `factory-agent` → `agent`).
+ */
+export { inferRoleFromProviderId as inferSeatFromProviderId } from "./roles.ts";
+
+/**
  * The structural slice of PaseoApi the choke needs — tests pass a fake shaped
  * exactly like the real call path (`agents.ref(id).respondToPermission`).
  */
@@ -81,6 +89,8 @@ export interface PermissionAskedEvent {
   agent: {
     id: string;
     cwd: string;
+    /** The session's provider id — `factory-supervisor` / `factory-lead` name a seat outright (v0.0.27, ADR 0017 §2). */
+    provider?: string | null;
     title?: string | null;
     labels?: Record<string, string>;
   };
@@ -260,9 +270,12 @@ function normalizeBareProviderModel(rawProvider: string, providers?: readonly Pr
  *    prefixes the canonical `<provider>/` so MCP `create_agent` calls do not crash.
  * 2. Strips unsupported `:thinking` suffixes and `thinkingOptionId` when `providers`
  *    advertises `thinkingOptions: []` or options excluding the requested variant.
- * 3. If `labels.seat` is absent and `config.title` uses a reserved seat title
- *    (`"Supervisor — ..."`, `"Lead — ..."`, `"Supervisor"`, `"Lead"`) at a registered
+ * 3. If `labels.seat` is absent and `config.provider` is a factory role
+ *    provider (`factory-supervisor` / `factory-lead`, v0.0.27 ADR 0017 §2) or
+ *    `config.title` uses a reserved seat title (`"Supervisor — ..."`,
+ *    `"Lead — ..."`, `"Supervisor"`, `"Lead"`) at a registered
  *    `<project-root>`, attaches `{ seat: "supervisor" | "lead", project: reg.slug }`.
+ *    Factory role provider ids are canonical — never prefixed as bare models.
  */
 export function normalizeAgentCreateRequest<
   T extends {
@@ -304,7 +317,10 @@ export function normalizeAgentCreateRequest(
     : undefined;
 
   const rawProvider = typeof config.provider === "string" ? config.provider : "";
-  let normalizedProvider = normalizeBareProviderModel(rawProvider, providers);
+  // A native factory role provider id (v0.0.27, ADR 0017 §2) is canonical —
+  // never a bare model to prefix — and is itself deterministic seat identity.
+  const factoryProviderSeat = inferRoleFromProviderId(rawProvider);
+  let normalizedProvider = factoryProviderSeat !== undefined ? rawProvider : normalizeBareProviderModel(rawProvider, providers);
 
   let stripThinkingOptionId = false;
   const parsedLane = parseLane(normalizedProvider);
@@ -331,7 +347,12 @@ export function normalizeAgentCreateRequest(
   const providerChanged = normalizedProvider !== rawProvider;
 
   const existingSeat = config.labels?.seat ?? topLabels?.seat;
-  const inferredSeat = inferReservedSeatFromTitle(config.title);
+  // The provider id outranks the title guess (ADR 0017 §2): a
+  // `factory-supervisor` / `factory-lead` create is a seat no matter what the
+  // chat title says; `factory-peer` keeps the worker labels law untouched.
+  const providerInferredSeat =
+    factoryProviderSeat === "supervisor" || factoryProviderSeat === "lead" ? factoryProviderSeat : undefined;
+  const inferredSeat = providerInferredSeat ?? inferReservedSeatFromTitle(config.title);
   let nextLabels: Record<string, string> | undefined;
   if (
     existingSeat === undefined &&
@@ -390,6 +411,13 @@ export function resolveSeatAtProjectRoot(
   const labelSeat = agent.labels?.seat;
   if (labelSeat === "supervisor" || labelSeat === "lead") {
     return { seat: labelSeat, projectRoot: agent.cwd };
+  }
+  // The deterministic channel (v0.0.27, ADR 0017 §2): a `factory-supervisor` /
+  // `factory-lead` session is a seat regardless of its title or labels — the
+  // user's natural first message is the title on a native picker chat.
+  const providerSeat = inferRoleFromProviderId(agent.provider);
+  if (providerSeat === "supervisor" || providerSeat === "lead") {
+    return { seat: providerSeat, projectRoot: agent.cwd };
   }
   const titleSeat = inferReservedSeatFromTitle(agent.title);
   if (titleSeat !== undefined) {

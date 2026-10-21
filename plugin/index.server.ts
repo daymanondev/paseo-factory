@@ -13,10 +13,12 @@
  */
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { PluginHookContext, PluginServerContext } from "@getpaseo/plugin/server";
+import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { createFactory } from "./server/core/factory.ts";
 import { PLUGIN_ID, pluginDirFor, resolvePaseoHome, stateDirFor } from "./server/paths.ts";
 import { ensureFactorySkillSafe } from "./server/core/skill.ts";
+import { effectiveLanesForReconcile, reconcilePaseoRoleProviders } from "./server/core/role-providers.ts";
+import { reloadDaemonConfigViaWs } from "./server/daemon-cli.ts";
 import { claimCliBinDir, ensureClaimCli, ensureGitShim, injectClaimCliPath } from "./server/shell.ts";
 import { createChoke, normalizeAgentCreateRequest, startGitBlockIngestion } from "./server/choke.ts";
 import { createTimelineFetcher } from "./server/timeline.ts";
@@ -26,7 +28,7 @@ import { createSurfaceHandlers, registerSurfaceRpc } from "./server/surface-rpc.
 import { createLeadMailRuntime } from "./server/lead-mailbox.ts";
 import { injectRoleOnCreate, injectSessionEnv, sanitizeAgentCreateHookResult } from "./server/roles.ts";
 
-const SHELL_VERSION = "0.0.26";
+const SHELL_VERSION = "0.0.27";
 
 const log = (message: string) => console.log(`[${PLUGIN_ID}] ${message}`);
 
@@ -37,12 +39,13 @@ export default function contribute(server: PluginServerContext) {
 
   // The watch's feed (v0.0.6): every hook receives the process's one
   // long-lived PaseoApi (ticket 02 §a) — capture it from whichever fires
-  // first (create, session open, a permit ask) and the factory's watch pass
-  // can read the claiming agent's timeline at verdict. One variable, written
-  // idempotently; undefined until the first hook fires.
+  // first (create, session open, a permit ask, a surface RPC since v0.0.27)
+  // and the factory's watch pass can read the claiming agent's timeline at
+  // verdict. One variable, written idempotently; undefined until the first
+  // hook fires.
   let paseoApi: TimelineSourceApi | undefined;
-  const capturePaseo = (context: PluginHookContext): void => {
-    if (paseoApi === undefined) {
+  const capturePaseo = (context: { paseo?: unknown }): void => {
+    if (paseoApi === undefined && context.paseo !== undefined) {
       paseoApi = context.paseo as unknown as TimelineSourceApi;
       log("watch: captured the daemon API — timeline feeds are live");
     }
@@ -84,6 +87,27 @@ export default function contribute(server: PluginServerContext) {
   for (const skillsRoot of [join(homedir(), ".agents", "skills"), join(homedir(), ".claude", "skills")]) {
     const skillPath = ensureFactorySkillSafe(skillsRoot, { factoryCmd }, log);
     if (skillPath !== null) log(`skill: /factory reconciled at ${skillPath}`);
+  }
+
+  // The native role providers (v0.0.27, ADR 0017 §1): reconcile
+  // `factory-supervisor`, `factory-lead`, and `factory-peer` plus the single
+  // `Supervisor (Factory)` picker profile into `<home>/config.json at boot —
+  // sweeping the orphaned `sw2-*` leftovers — so Paseo's native New Chat
+  // picker starts a fenced Supervisor with zero custom bootstrap buttons. The
+  // lane table is the machine `lanes.json`, or — when the machine never named
+  // its lanes — the cleanest effective table across the registered projects'
+  // overrides. A broken config.json or lanes.json is a named warning, never
+  // a failed boot (the daemon reload is non-blocking by construction).
+  const bootLanes = effectiveLanesForReconcile(stateDir);
+  if (bootLanes.ok) {
+    const reconciled = reconcilePaseoRoleProviders(home, bootLanes.lanes, { reloadDaemon: reloadDaemonConfigViaWs });
+    if (reconciled.ok) {
+      log(reconciled.changed ? "role providers: <home>/config.json reconciled — daemon reload requested" : "role providers: <home>/config.json already reconciled");
+    } else {
+      log(`role providers: <home>/config.json not reconciled — ${reconciled.reason}`);
+    }
+  } else {
+    log(`role providers: lanes unreadable — ${bootLanes.reason}`);
   }
 
   // The choke (v0.0.4): judge every permit ask from a contracted agent,
@@ -220,10 +244,19 @@ export default function contribute(server: PluginServerContext) {
     peerMail: leadMail.notifyPeer,
     daemon: () => paseoApi as never,
     sanitizeLane: (lane) => surface.sanitizeLane(lane),
+    // The accept path's worktree-record sweep targets the real daemon home —
+    // never the PASEO_HOME-env fallback (v0.0.27, ADR 0017 §4).
+    home,
   });
 
   log(`spool listening on ${spoolRootFor(stateDir)}/{requests,replies,processed}`);
-  registerSurfaceRpc(server, surface);
+  // The `factory.*` RPC registrations also capture the daemon's PaseoApi
+  // (v0.0.27, ADR 0017 §4): the first surface call — which can arrive before
+  // any agent hook fires — hands the same long-lived API the hooks capture,
+  // so `paseoApi` exists from the Owner's first UI act alone.
+  registerSurfaceRpc(server, surface, (context) => {
+    if (context.paseo !== undefined) capturePaseo(context);
+  });
 
   const gitBlocks = startGitBlockIngestion(factory, { onLog: log });
 

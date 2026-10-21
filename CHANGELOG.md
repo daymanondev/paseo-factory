@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.27] - 2026-10-21
+
+v0.0.27's one thing: **native Paseo role providers (`factory-supervisor`, `factory-lead`, `factory-peer`) reconciled into `<paseoHome>/config.json` with a single `Supervisor (Factory)` New Chat profile, deterministic provider-based seat recognition regardless of chat title, `ELECTRON_RUN_AS_NODE` hardening for Paseo Desktop, and removal of the `Start Supervisor` / `Start Lead` UI buttons** (ADR 0017).
+
+### Added
+
+- **Role provider reconciler (`src/role-providers.ts`, vendored to `plugin/server/core/role-providers.ts`, wired at boot in `plugin/index.server.ts` and at the end of `lanesSet` in `plugin/server/surface-rpc.ts`, pinned in `test/role-providers.test.ts`)** —
+  `reconcilePaseoRoleProviders` atomically rewrites `<paseoHome>/config.json` (tmp + rename, only on change, with a non-blocking daemon reload): it sweeps the 29 orphaned `sw2-*` profiles and stale `factory-*` entries from `agents.providers` and `daemon.agentProfiles`, writes `factory-supervisor` / `factory-lead` / `factory-peer` (base harness resolved from `lanes.supervisor`/`lanes.lead`/`lanes.worker`, `paseoTools {enabled:false}`, `env.PASEO_FACTORY_SEAT`, `additionalModels`), and registers the single `Supervisor (Factory)` agent profile so the native New Chat picker starts a Supervisor directly; unrelated user providers (`opencode`, `agy`, `glm-acp-agent`) are preserved and a second reconcile is a no-op.
+- **Daemon workspace/project cleanup on archival and reset (`plugin/server/daemon-cli.ts`, `plugin/server/surface-rpc.ts`)** —
+  `registerSurfaceRpc` captures `context.paseo` before any agent hook fires; `archiveAcceptedTaskWorkspace` and `projectReset` additionally sweep daemon workspace/project records rooted under `<projectStateDir>/worktrees/` or missing on disk (`archive_workspace_request` and project removal over the daemon WebSocket), so removed `Task worktree`s never leave broken project entries in Paseo Desktop.
+
+### Changed
+
+- **Deterministic seat recognition by `config.provider` (`plugin/server/roles.ts`, `plugin/server/choke.ts`, `plugin/server/lead-mailbox.ts`, `plugin/server/spool.ts`, pinned in `test/roles.test.ts` and `test/choke.test.ts`)** —
+  `injectRoleOnCreate` recognizes `factory-supervisor` / `factory-lead` / `factory-peer` (`inferRoleFromProviderId`) first, then `env.PASEO_FACTORY_SEAT`, then the legacy title/labels fallback, and resolves the underlying harness family through Lane config so `factory-*` seats receive their exact Layer-1 fence — including Task worktree peer spawns. `injectSessionEnv` binds a native session's `agentId` into `<stateDir>/projects/<slug>/project.json`, and the Factory surface snapshot, `seatOf`, and `ensureSeat` resolve natively started seats via that binding plus provider identity, so a live native Supervisor renders its live state and Ratify no longer displaces it with a duplicate seat.
+- **UI simplification (`plugin/client/factory/header.tsx`, `plugin/client/factory/seats.tsx`, `plugin/client/factory/shell.tsx`, pinned in `test/client-surface.test.ts`)** —
+  the `Start Supervisor` and `Start Lead` buttons are gone from the Header and `Seats & Models`; each seat shows its live state (`idle` / `running` / `not started`) with `Open` (and `Rotate` / `Revoke`) rendered only while the seat is active, plus the `Select "Supervisor (Factory)" in New Chat to start` hint. The `/factory` skill's bootstrap arm (`src/skill.ts`) points at the same native picker.
+
+### Fixed
+
+- `ELECTRON_RUN_AS_NODE: "1"` now guards every spawn path that can hit an Electron `Paseo Helper` `process.execPath`: `mcpServers.paseo_factory.env` in `applyProviderExecutionFence`, `src/pi-home.ts`, `src/agy-home.ts`, and the `bridgeCall` fallback in `plugin/server/daemon-cli.ts`.
+- The spool-side `factory accept` path threads the resolved daemon `home` into the worktree sweep instead of depending on `PASEO_HOME` being set in the plugin process.
+- `package.json` + `SHELL_VERSION` → `0.0.27`.
+
 ## [0.0.26] - 2026-10-21
 
 v0.0.26's one thing: **role-scoped MCP bridge (`paseo_factory`), unforgeable `Correlation token` seat identity (`cor_<uuid>`), 2-step seat launch with Turn-1 `Seat kickoff packet`, process-group `Gate` reaping, and 3-layer execution fence across all 7 Paseo providers (`claude-code`, `codex`, `opencode`, `copilot`, `omp`, `pi`, `antigravity`)** (ADR 0016).

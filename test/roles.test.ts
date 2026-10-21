@@ -6,17 +6,34 @@ import { join, resolve } from "node:path";
 import { renderRoleAppendSystem, renderRoleContract, renderSeatBootstrapPrompt } from "../src/roles-contract.ts";
 import { ROLE_PROMPTS } from "../src/pi-home.ts";
 import { CorrelationRegistry } from "../src/correlations.ts";
+import { readProjectRegistration, resolveProject } from "../plugin/server/core/project.ts";
 import { writeProjectRegistration } from "../plugin/server/projects.ts";
 import {
+  applyProviderExecutionFence,
   injectRoleOnCreate,
   injectSessionEnv,
   renderAgentContract,
   renderSeatBootstrap,
   renderSeatContract,
+  resolveEffectiveProviderFamily,
   sanitizeAgentCreateHookResult,
+  inferRoleFromProviderId,
 } from "../plugin/server/roles.ts";
 import type { AgentCreateRequest } from "../plugin/server/roles.ts";
 import { disposeDir, makeTempDir } from "./helpers.ts";
+
+/** A committed git repository — the Project resolution every seat path needs. */
+function makeGitRepo(dir: string): string {
+  const repoDir = join(dir, "repo");
+  mkdirSync(repoDir, { recursive: true });
+  execFileSync("git", ["init", "-b", "main"], { cwd: repoDir });
+  execFileSync("git", ["config", "user.name", "Test"], { cwd: repoDir });
+  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repoDir });
+  writeFileSync(join(repoDir, "README.md"), "# test\n");
+  execFileSync("git", ["add", "README.md"], { cwd: repoDir });
+  execFileSync("git", ["commit", "-m", "init"], { cwd: repoDir });
+  return repoDir;
+}
 
 test("src/roles-contract.ts is the single source of truth for Supervisor, Lead, and Agent contracts and bootstraps (v0.0.23, ADR 0015)", () => {
   const supervisorContract = renderRoleContract("supervisor", { factoryCmd: "factory", home: "/h/paseo" });
@@ -288,4 +305,216 @@ test("agy-pre-tool-hook.mjs fast-allows unbound sessions and enforces seat-write
     }),
   );
   assert.equal(denyPkill.hookSpecificOutput.permissionDecision, "deny");
+});
+
+test("inferRoleFromProviderId maps the native role providers deterministically and applyProviderExecutionFence always carries ELECTRON_RUN_AS_NODE (v0.0.27, ADR 0017 §2)", (t) => {
+  const dir = makeTempDir("roles-electron-env-");
+  disposeDir(t, dir);
+  assert.equal(inferRoleFromProviderId("factory-supervisor"), "supervisor");
+  assert.equal(inferRoleFromProviderId("factory-lead"), "lead");
+  assert.equal(inferRoleFromProviderId("factory-peer"), "agent");
+  assert.equal(inferRoleFromProviderId("factory-agent"), "agent");
+  assert.equal(inferRoleFromProviderId("factory-supervisor/glm-5.1"), "supervisor", "the provider/model form resolves too");
+  assert.equal(inferRoleFromProviderId("opencode/opencode/glm-5.1"), undefined);
+  assert.equal(inferRoleFromProviderId(undefined), undefined);
+
+  // The Layer-1 fence always carries Node mode for the bridge — even on a
+  // plain node execPath (harmless there, load-bearing under Paseo Desktop).
+  const fenced = applyProviderExecutionFence<AgentCreateRequest["config"]>(
+    { provider: "opencode/opencode/glm-5.1", cwd: "/w/repo" },
+    { role: "supervisor", stateDir: join(dir, "state"), correlationId: "cor_x", projectSlug: "repo-abc123" },
+  );
+  const mcp = (fenced.mcpServers as Record<string, { env: Record<string, string> }>).paseo_factory;
+  assert.equal(mcp.env.ELECTRON_RUN_AS_NODE, "1");
+});
+
+test("injectRoleOnCreate recognizes factory-supervisor by provider id alone — natural-language title, opencode Layer-1 fence via Lane config, ELECTRON_RUN_AS_NODE, and the seat env (v0.0.27, ADR 0017 §2)", (t) => {
+  const dir = makeTempDir("roles-provider-seat-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const userHome = join(dir, "home");
+  const repoDir = makeGitRepo(dir);
+  const resolved = resolveProject(repoDir);
+  assert.ok(resolved.ok, "the fixture repo resolves");
+  const slug = resolved.ok ? resolved.slug : "";
+  // Lane config pins the supervisor harness to opencode — the fence must resolve through it.
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(
+    join(stateDir, "lanes.json"),
+    `${JSON.stringify({ supervisor: "opencode/opencode/glm-5.1", lead: "opencode/opencode/glm-5.1", worker: "opencode/opencode/glm-5.1" }, null, 2)}\n`,
+  );
+  assert.equal(resolveEffectiveProviderFamily("factory-supervisor", "supervisor", stateDir, slug), "opencode");
+  assert.equal(resolveEffectiveProviderFamily("claude-code/opus-4-8", "supervisor", stateDir, slug), "claude");
+
+  const res = injectRoleOnCreate<AgentCreateRequest>(
+    { config: { provider: "factory-supervisor", cwd: repoDir, title: "Hãy xây dựng một tựa game 3D" }, env: {} },
+    stateDir,
+    userHome,
+  );
+  assert.ok(res !== undefined, "the provider id alone injects the role — the title is just the user's message");
+  assert.deepEqual(Object.keys(res).sort(), ["config", "env"]);
+  // The opencode Layer-1 supervisor fence, resolved through lanes.supervisor.
+  assert.equal(res.config.provider, "factory-supervisor", "the provider id rides verbatim for the daemon");
+  assert.equal(res.config.modeId, "plan");
+  assert.equal(res.config.featureValues?.auto_accept, false);
+  assert.deepEqual((res.config.providerOptions as { permission: Record<string, string> }).permission, {
+    edit: "deny",
+    task: "deny",
+  });
+  // paseo_factory MCP with Node mode and the correlation token.
+  const mcp = (res.config.mcpServers as Record<string, { env: Record<string, string>; args: string[] }>).paseo_factory;
+  assert.ok(mcp !== undefined, "factory-supervisor receives config.mcpServers.paseo_factory");
+  assert.equal(mcp.env.ELECTRON_RUN_AS_NODE, "1");
+  assert.equal(mcp.env.PASEO_FACTORY_SEAT, "supervisor");
+  assert.ok(mcp.args.includes(res.env!.PASEO_FACTORY_CORRELATION!));
+  // The seat env and the role contract. (`resolved.root` is git's physical
+  // toplevel — on macOS it may carry the `/private` prefix the tmpdir lacks.)
+  assert.equal(res.env?.PASEO_FACTORY_SEAT, "supervisor");
+  assert.equal(res.env?.PASEO_FACTORY_PROJECT, slug);
+  assert.equal(res.env?.PASEO_FACTORY_PROJECT_ROOT, resolved.ok ? resolved.root : undefined);
+  assert.ok(res.env?.PASEO_FACTORY_CORRELATION?.startsWith("cor_"));
+  assert.match(res.config.systemPrompt ?? "", /paseo-factory role skills:/);
+  // The Project was registered.
+  assert.equal(readProjectRegistration(stateDir, slug)?.root, resolved.ok ? resolved.root : "");
+
+  // factory-lead fences as the opencode Lead ("build"), still by provider alone.
+  const lead = injectRoleOnCreate<AgentCreateRequest>(
+    { config: { provider: "factory-lead", cwd: repoDir, title: "any first message" } },
+    stateDir,
+    userHome,
+  );
+  assert.equal(lead?.config.modeId, "build");
+  assert.equal(lead?.env?.PASEO_FACTORY_SEAT, "lead");
+
+  // factory-peer outside a worktree runs the agent fence — never a seat modeId.
+  const peer = injectRoleOnCreate<AgentCreateRequest>(
+    { config: { provider: "factory-peer", cwd: repoDir, title: "any first message" } },
+    stateDir,
+    userHome,
+  );
+  assert.equal(peer?.env?.PASEO_FACTORY_SEAT, "agent");
+  assert.equal(peer?.config.modeId, undefined);
+  assert.equal((peer?.config.providerOptions as { permission: Record<string, string> } | undefined)?.permission?.task, "deny");
+
+  // The identity ladder: the provider id outranks the title guess, the env
+  // stamp backs up a plain harness provider, and `/factory` titles still
+  // fence as the Owner's dispatcher seat.
+  const peerDespiteTitle = injectRoleOnCreate<AgentCreateRequest>(
+    { config: { provider: "factory-peer", cwd: repoDir, title: "Supervisor — repo" } },
+    stateDir,
+    userHome,
+  );
+  assert.equal(peerDespiteTitle?.env?.PASEO_FACTORY_SEAT, "agent", "the provider id outranks the title guess");
+
+  const envStamped = injectRoleOnCreate<AgentCreateRequest>(
+    { config: { provider: "opencode/opencode/glm-5.1", cwd: repoDir, title: "any first message" }, env: { PASEO_FACTORY_SEAT: "supervisor" } },
+    stateDir,
+    userHome,
+  );
+  assert.equal(envStamped?.config.modeId, "plan", "the PASEO_FACTORY_SEAT env stamp backs up a plain provider");
+  assert.equal(envStamped?.env?.PASEO_FACTORY_SEAT, "supervisor");
+
+  const factoryTitle = injectRoleOnCreate<AgentCreateRequest>(
+    { config: { provider: "opencode/opencode/glm-5.1", cwd: repoDir, title: "/factory lead dispatch --workspace ." } },
+    stateDir,
+    userHome,
+  );
+  assert.equal(factoryTitle?.config.modeId, "plan", "a `/factory` title still fences as the dispatcher seat");
+});
+
+test("injectRoleOnCreate fences a factory-peer Task-worktree spawn under the worker lane's harness — the Layer-1 agent fence resolves through Lane config (v0.0.27, ADR 0017 §2)", (t) => {
+  const dir = makeTempDir("roles-peer-worktree-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  mkdirSync(stateDir, { recursive: true });
+  // The worker lane names opencode — a `factory-peer` spawn must fence as
+  // opencode, never as the unknown family "factory-peer" (which matches no
+  // branch and silently drops the agent fence).
+  writeFileSync(
+    join(stateDir, "lanes.json"),
+    `${JSON.stringify({ supervisor: "opencode/opencode/glm-5.1", lead: "opencode/opencode/glm-5.1", worker: "opencode/opencode/glm-5.1" }, null, 2)}\n`,
+  );
+  const worktreeDir = join(stateDir, "projects", "repo-abc123", "worktrees", "T1");
+  mkdirSync(worktreeDir, { recursive: true });
+
+  const res = injectRoleOnCreate<AgentCreateRequest>(
+    { config: { provider: "factory-peer", cwd: worktreeDir, title: "T1" } },
+    stateDir,
+  );
+  assert.ok(res !== undefined, "the managed-worktree branch fires for a factory-peer spawn");
+  assert.equal(res.env?.PASEO_FACTORY_SEAT, "agent");
+  assert.equal(res.config.modeId, undefined, "the agent fence never sets a seat modeId");
+  assert.deepEqual(
+    (res.config.providerOptions as { permission: Record<string, string> }).permission,
+    { task: "deny" },
+    "the opencode worker-lane Layer-1 agent fence applies by provider family resolution",
+  );
+  const mcp = (res.config.mcpServers as Record<string, { env: Record<string, string> }>).paseo_factory;
+  assert.ok(mcp !== undefined, "paseo_factory MCP is wired");
+  assert.equal(mcp.env.ELECTRON_RUN_AS_NODE, "1");
+
+  // An antigravity worker lane rides the antigravity branch instead: no MCP
+  // server config and the agy plugin provisions (roles.ts's delete-mcpServers law).
+  const agyDir = makeTempDir("roles-peer-worktree-agy-");
+  disposeDir(t, agyDir);
+  const agyStateDir = join(agyDir, "state");
+  mkdirSync(agyStateDir, { recursive: true });
+  writeFileSync(
+    join(agyStateDir, "lanes.json"),
+    `${JSON.stringify({ worker: "agy/agent" }, null, 2)}\n`,
+  );
+  const agyWorktree = join(agyStateDir, "projects", "repo-abc123", "worktrees", "T1");
+  mkdirSync(agyWorktree, { recursive: true });
+  const agyRes = injectRoleOnCreate<AgentCreateRequest>(
+    { config: { provider: "factory-peer", cwd: agyWorktree, title: "T1" } },
+    agyStateDir,
+  );
+  assert.ok(agyRes !== undefined);
+  assert.equal(agyRes.config.mcpServers, undefined, "the antigravity branch deletes mcpServers for an agy worker lane");
+});
+
+test("injectSessionEnv binds provider-recognized supervisor and lead sessions into project.json without displacing another bound session (v0.0.27, ADR 0017 §2)", (t) => {
+  const dir = makeTempDir("roles-session-bind-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const userHome = join(dir, "home");
+  const repoDir = makeGitRepo(dir);
+  const resolved = resolveProject(repoDir);
+  assert.ok(resolved.ok);
+  const slug = resolved.ok ? resolved.slug : "";
+
+  // A native `Supervisor (Factory)` chat opens at the repository.
+  const openedEnv: Record<string, string> = {};
+  const opened = injectSessionEnv(
+    { agentId: "native-sup-1", cwd: repoDir, provider: "factory-supervisor", env: openedEnv },
+    stateDir,
+    userHome,
+  );
+  assert.ok(opened !== undefined, "a provider-recognized session receives its factory env");
+  assert.equal(opened.env.PASEO_FACTORY_SEAT, "supervisor");
+  assert.equal(opened.env.PASEO_FACTORY_PROJECT, slug);
+  assert.equal(opened.env.PASEO_FACTORY_PROJECT_ROOT, resolved.ok ? resolved.root : undefined);
+  assert.equal(readProjectRegistration(stateDir, slug)?.supervisor, "native-sup-1", "session_open binds the supervisor into project.json");
+
+  // A second supervisor session never displaces the bound one.
+  const second = injectSessionEnv(
+    { agentId: "native-sup-2", cwd: repoDir, provider: "factory-supervisor", env: {} },
+    stateDir,
+    userHome,
+  );
+  assert.ok(second !== undefined, "the second session still carries its env");
+  assert.equal(readProjectRegistration(stateDir, slug)?.supervisor, "native-sup-1", "an occupied seat is never displaced");
+
+  // The `PASEO_FACTORY_SEAT` env stamp binds a lead without a factory provider id.
+  const leadOpened = injectSessionEnv(
+    { agentId: "native-lead-1", cwd: repoDir, env: { PASEO_FACTORY_SEAT: "lead" } },
+    stateDir,
+    userHome,
+  );
+  assert.equal(leadOpened?.env.PASEO_FACTORY_SEAT, "lead");
+  assert.equal(readProjectRegistration(stateDir, slug)?.lead, "native-lead-1");
+
+  // An unrelated session at the same repository is untouched.
+  const stranger = injectSessionEnv({ agentId: "stranger-chat", cwd: repoDir, env: {} }, stateDir, userHome);
+  assert.equal(stranger, undefined, "an unrecognized session passes through untouched");
 });
