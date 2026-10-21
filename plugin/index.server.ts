@@ -172,6 +172,7 @@ export default function contribute(server: PluginServerContext) {
   const surface = createSurfaceHandlers({
     ...surfaceDeps,
     onLeadRetired: (input) => leadMail.settleLeadRotation(input.slug),
+    onSeatKickoffSent: (input) => leadMail.markKickoffSent(input.agentId),
     resetProjectMailbox: (slug) => leadMail.resetProjectMailbox(slug),
     leadDispatch: (request) => leadMail.dispatchLead(request),
   });
