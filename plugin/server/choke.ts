@@ -472,6 +472,30 @@ export interface Choke {
   ): T | undefined;
 }
 
+function extractShellCommand(request: AgentPermissionRequest): string | undefined {
+  const detail = request.detail;
+  if (detail !== undefined && detail.type === "shell" && typeof detail.command === "string") {
+    return detail.command;
+  }
+  const lower = request.name.toLowerCase();
+  if ((lower === "shell" || lower === "bash") && typeof request.description === "string" && request.description.trim() !== "") {
+    return request.description;
+  }
+  return undefined;
+}
+
+function extractWriteFilePath(request: AgentPermissionRequest): string | undefined {
+  const detail = request.detail;
+  if (detail !== undefined && (detail.type === "write" || detail.type === "edit") && typeof detail.filePath === "string") {
+    return detail.filePath;
+  }
+  const lower = request.name.toLowerCase();
+  if ((lower === "write" || lower === "edit") && typeof request.description === "string" && request.description.trim() !== "") {
+    return request.description.split("\n")[0]!.trim();
+  }
+  return undefined;
+}
+
 export function createChoke(options: ChokeOptions): Choke {
   const { factory, homeDir } = options;
   const log = options.onLog ?? (() => {});
@@ -509,19 +533,16 @@ export function createChoke(options: ChokeOptions): Choke {
       return { decision: { behavior: "allow" }, command: request.name };
     }
     const roots = writableRootsFor(workspace, factory.stateDir, homeDir);
-    const detail = request.detail;
-    if (detail !== undefined && detail.type === "shell" && typeof detail.command === "string") {
-      return { decision: judgeShellCommand(detail.command, roots, memory), command: detail.command };
+    const shellCmd = extractShellCommand(request);
+    if (shellCmd !== undefined) {
+      return { decision: judgeShellCommand(shellCmd, roots, memory), command: shellCmd };
     }
-    if (
-      detail !== undefined &&
-      (detail.type === "write" || detail.type === "edit") &&
-      typeof detail.filePath === "string"
-    ) {
+    const filePath = extractWriteFilePath(request);
+    if (filePath !== undefined) {
       // The write/edit rider (ticket 01's non-shell twin of S2), fenced over
       // the workspace-root memory files. The file path rides on the line so
       // the ledger names what was aimed at.
-      return { decision: judgeFilePath(detail.filePath, roots, memory), command: detail.filePath };
+      return { decision: judgeFilePath(filePath, roots, memory), command: filePath };
     }
     // No shell line and no file target (plan/question/mode asks, reads): the
     // deny-list has nothing to match — default-allow.
@@ -545,21 +566,18 @@ export function createChoke(options: ChokeOptions): Choke {
     if (isPaseoFactoryToolName(request.name)) {
       return { decision: { behavior: "allow" }, command: request.name };
     }
-    const detail = request.detail;
-    if (detail !== undefined && detail.type === "shell" && typeof detail.command === "string") {
+    const shellCmd = extractShellCommand(request);
+    if (shellCmd !== undefined) {
       return {
-        decision: judgeSeatShellCommand(detail.command, projectRoot, factory.stateDir),
-        command: detail.command,
+        decision: judgeSeatShellCommand(shellCmd, projectRoot, factory.stateDir),
+        command: shellCmd,
       };
     }
-    if (
-      detail !== undefined &&
-      (detail.type === "write" || detail.type === "edit") &&
-      typeof detail.filePath === "string"
-    ) {
+    const filePath = extractWriteFilePath(request);
+    if (filePath !== undefined) {
       return {
-        decision: judgeSeatFilePath(detail.filePath, projectRoot, factory.stateDir),
-        command: detail.filePath,
+        decision: judgeSeatFilePath(filePath, projectRoot, factory.stateDir),
+        command: filePath,
       };
     }
     return { decision: { behavior: "allow" } };
@@ -569,6 +587,11 @@ export function createChoke(options: ChokeOptions): Choke {
     async onPermissionAsked({ agent, request }, paseo) {
       const seatCtx = resolveSeatAskContext(agent);
       if (seatCtx !== undefined) {
+        // Never auto-answer an interactive question form on the Supervisor seat:
+        // OpenCode question forms require user-supplied `answers` from the Owner UI.
+        if (seatCtx.seat === "supervisor" && request.kind === "question") {
+          return;
+        }
         const { decision, command } = decideSeat(request, seatCtx.projectRoot);
         const exactMessage =
           decision.behavior === "deny" && decision.rule === "seat-write-fence" ? decision.reason : undefined;

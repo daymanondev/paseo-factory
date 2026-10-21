@@ -53,15 +53,17 @@ const ROLE_LANE: Record<FactoryRole, "supervisor" | "lead" | "worker"> = {
 const ROLE_ORDER: readonly FactoryRole[] = ["supervisor", "lead", "agent"];
 
 /**
- * The picker profile's `modeId` per base harness — the plan-mode id the
+ * The picker profile's `modeId` per base harness — the mode id the
  * `Supervisor (Factory)` profile pins so the native picker starts the seat
- * fenced (opencode `plan`, copilot's ACP plan session-mode URL, codex `auto`,
- * omp `write`; the harnesses that need none — claude, pi, antigravity — get
- * no `modeId`). The exact ids `applyProviderExecutionFence` pins per family
- * (plugin/server/roles.ts), restated for the daemon config layer.
+ * fenced (opencode `build` — never `plan`, whose synthetic `<system-reminder>`
+ * forbids subagent delegation and unlocks `~/.opencode/plan/*`; copilot's ACP
+ * plan session-mode URL; codex `auto`; omp `write`; the harnesses that need
+ * none — claude, pi, antigravity — get no `modeId`). The exact ids
+ * `applyProviderExecutionFence` pins per family (plugin/server/roles.ts),
+ * restated for the daemon config layer.
  */
 const SUPERVISOR_PROFILE_MODE_ID: Record<string, string> = {
-  opencode: "plan",
+  opencode: "build",
   copilot: "https://agentclientprotocol.com/protocol/session-modes#plan",
   codex: "auto",
   omp: "write",

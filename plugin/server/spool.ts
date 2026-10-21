@@ -19,6 +19,7 @@
  * interrupted Attempt is closed red on the next open, and the still-unreplied
  * request is processed again on boot, opening the next Attempt honestly.
  */
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FactoryError } from "./core/errors.ts";
@@ -794,28 +795,37 @@ async function resolvePeerSpawnProvider(
   projectSlug: string | undefined,
 ): Promise<string> {
   if (daemon?.providers?.listAvailable === undefined) return requestedProvider;
-  if (requestedProvider !== "") {
-    if (projectSlug === undefined) return requestedProvider;
-    const loaded = loadLanes(factory.stateDir, projectSlug);
-    if (!loaded.ok) return requestedProvider;
-    const parsedRequested = parseLane(requestedProvider);
-    const parsedWorker = parseLane(loaded.lanes.worker);
+  const loaded = projectSlug !== undefined ? loadLanes(factory.stateDir, projectSlug) : loadLanes(factory.stateDir);
+  const parsedWorker = loaded.ok ? parseLane(loaded.lanes.worker) : undefined;
+  const parsedRequested = requestedProvider !== "" ? parseLane(requestedProvider) : undefined;
+  if (requestedProvider !== "" && requestedProvider !== FACTORY_SEAT_PROVIDER_IDS.agent && requestedProvider !== "worker") {
+    if (projectSlug === undefined || !loaded.ok) return requestedProvider;
     const isDefaultWorkerLane =
       parsedRequested !== undefined &&
       parsedWorker !== undefined &&
-      parsedRequested.provider === parsedWorker.provider &&
-      parsedRequested.model === parsedWorker.model;
+      (parsedRequested.provider === parsedWorker.provider || parsedRequested.provider === FACTORY_SEAT_PROVIDER_IDS.agent) &&
+      (parsedRequested.model === parsedWorker.model || parsedWorker.model.endsWith(`/${parsedRequested.model}`));
     if (!isDefaultWorkerLane) return requestedProvider; // an explicit override keeps its own model
   }
+  const model = parsedWorker?.model ?? parsedRequested?.model;
+  if (model === undefined || model === "") return requestedProvider;
+  const thinking = parsedRequested?.thinking ?? parsedWorker?.thinking;
   try {
     const listed = await daemon.providers.listAvailable();
     if (!listed.providers.some((entry) => entry.provider === FACTORY_SEAT_PROVIDER_IDS.agent && entry.available)) {
+      if (parsedWorker !== undefined) {
+        return thinking !== undefined
+          ? `${parsedWorker.provider}/${model}:${thinking}`
+          : `${parsedWorker.provider}/${model}`;
+      }
       return requestedProvider;
     }
   } catch {
     return requestedProvider;
   }
-  return FACTORY_SEAT_PROVIDER_IDS.agent;
+  return thinking !== undefined
+    ? `${FACTORY_SEAT_PROVIDER_IDS.agent}/${model}:${thinking}`
+    : `${FACTORY_SEAT_PROVIDER_IDS.agent}/${model}`;
 }
 
 /**
@@ -1034,6 +1044,52 @@ export async function handleSpoolRequest(
       // reply the driver keys its next move on — create the agent, or report
       // the refusal and carry on with the invocation's other tasks. The
       // worktree (v0.0.14) rides the line so claim/gate/choke bind to it.
+      const preSpawnContract = factory.contractFor(request.task);
+      if (preSpawnContract !== undefined) {
+        const allEvents = factory.ledger.events;
+        const epochTaskEvents = allEvents.filter(
+          (e) => e.seq > preSpawnContract.seq && "task" in e && e.task === request.task,
+        );
+        const hasPriorClaims = epochTaskEvents.some((e) => e.event === "claim_reported");
+        const hasAccepted = allEvents.some((e) => "task" in e && e.task === request.task && e.event === "attempt_accepted");
+        const upstreamLandedAfterContract = allEvents.some(
+          (e) => e.seq > preSpawnContract.seq && e.event === "attempt_accepted",
+        );
+        if (!hasPriorClaims && !hasAccepted && upstreamLandedAfterContract && existsSync(preSpawnContract.workspace)) {
+          const headOut = spawnSync("git", ["-C", preSpawnContract.workspace, "rev-parse", "HEAD"], {
+            encoding: "utf8",
+            timeout: 5_000,
+          });
+          const currentHead = headOut.status === 0 ? headOut.stdout.trim() : "";
+          if (/^[0-9a-f]{40}$/i.test(currentHead) && currentHead !== preSpawnContract.base) {
+            factory.setContract({
+              task: preSpawnContract.task,
+              workspace: preSpawnContract.workspace,
+              gate: preSpawnContract.gate,
+              artifact: preSpawnContract.artifact,
+              base: currentHead,
+              ...(preSpawnContract.scope !== undefined ? { scope: [...preSpawnContract.scope] } : {}),
+              ...(preSpawnContract.skills !== undefined ? { skills: [...preSpawnContract.skills] } : {}),
+              ...(preSpawnContract.freshEyes !== undefined ? { freshEyes: preSpawnContract.freshEyes } : {}),
+              ...(preSpawnContract.watch === true ? { watch: true } : {}),
+              ...(preSpawnContract.description !== undefined ? { description: preSpawnContract.description } : {}),
+            });
+            if (request.worktree !== undefined && existsSync(request.worktree)) {
+              const ancOut = spawnSync(
+                "git",
+                ["-C", request.worktree, "merge-base", "--is-ancestor", currentHead, "HEAD"],
+                { encoding: "utf8", timeout: 5_000 },
+              );
+              if (ancOut.status !== 0) {
+                spawnSync("git", ["-C", request.worktree, "checkout", "-B", `factory/${request.task}`, currentHead], {
+                  encoding: "utf8",
+                  timeout: 5_000,
+                });
+              }
+            }
+          }
+        }
+      }
       const sanitizedProvider =
         sanitizeLane !== undefined && request.provider !== ""
           ? await sanitizeLane(request.provider)
@@ -1054,7 +1110,29 @@ export async function handleSpoolRequest(
         // (v0.0.27, ADR 0017 §2) — `paseoTools` off, seat env on — falling back
         // to the requested lane verbatim.
         const peerProvider = await resolvePeerSpawnProvider(factory, resolvedDaemon, sanitizedProvider, spawnMeta.projectSlug);
+        const parsedPeer = parseLane(peerProvider);
+        const peerConfig =
+          parsedPeer?.thinking !== undefined
+            ? { provider: `${parsedPeer.provider}/${parsedPeer.model}`, thinkingOptionId: parsedPeer.thinking }
+            : { provider: peerProvider };
         const contract = factory.contractFor(request.task);
+        let effectivePrompt = request.prompt;
+        if (contract !== undefined && effectivePrompt.startsWith(`Execute task ${request.task}:`)) {
+          const enriched: string[] = [];
+          if (contract.skills !== undefined && contract.skills.length > 0) {
+            enriched.push(
+              `Required skills to open first: ${contract.skills.join(", ")} (read ~/.agents/skills/<skill>/SKILL.md or .agents/skills/<skill>/SKILL.md before starting)`,
+            );
+          }
+          if (contract.description !== undefined && contract.description.trim() !== "") {
+            enriched.push(`Task (${request.task}): ${contract.description.trim()}`);
+          }
+          if (contract.scope !== undefined && contract.scope.length > 0) {
+            enriched.push(`Allowed scope: ${contract.scope.join(", ")}`);
+          }
+          enriched.push(effectivePrompt);
+          effectivePrompt = enriched.join("\n\n");
+        }
         const targetCwd = request.worktree ?? contract?.workspace ?? "";
         const proj = contract !== undefined ? resolveProject(contract.workspace) : undefined;
         const labels: Record<string, string> = {
@@ -1064,20 +1142,20 @@ export async function handleSpoolRequest(
         };
         if (spawnMeta.workspaceId !== undefined && resolvedDaemon.workspaces !== undefined) {
           const created = await resolvedDaemon.workspaces.ref(spawnMeta.workspaceId).agents.create({
-            config: { provider: peerProvider },
+            config: peerConfig,
             title: request.task,
             labels,
-            prompt: request.prompt,
+            prompt: effectivePrompt,
             ...(spawnMeta.leadAgentId !== undefined ? { parent: spawnMeta.leadAgentId } : {}),
           });
           spawnedAgentId = created.id;
         } else if (typeof resolvedDaemon.agents?.create === "function") {
           const created = await resolvedDaemon.agents.create({
-            config: { provider: peerProvider },
+            config: peerConfig,
             cwd: targetCwd,
             title: request.task,
             labels,
-            prompt: request.prompt,
+            prompt: effectivePrompt,
             ...(spawnMeta.leadAgentId !== undefined ? { parent: spawnMeta.leadAgentId } : {}),
           });
           spawnedAgentId = created.id;
@@ -1161,6 +1239,15 @@ export async function handleSpoolRequest(
       if (decision.outcome === "refused") {
         return { id: request.id, ok: false, code: decision.code, message: decision.event.reason };
       }
+      if (effectiveSeat === "lead" && resolvedDaemon?.agents?.ref !== undefined) {
+        try {
+          const contract = factory.contractFor(request.task);
+          const nudge = `Re-poke from Lead on task ${request.task}: continue inside your Task worktree on branch factory/${request.task}, run the gate \`${contract?.gate ?? ""}\`, commit your changes, and call \`paseo-factory_agent_claim\` (or \`agent_claim\`).`;
+          await resolvedDaemon.agents.ref(request.agent).send(nudge);
+        } catch {
+          // best-effort nudge delivery when invoked directly by Lead MCP tool
+        }
+      }
       return {
         id: request.id,
         ok: true,
@@ -1171,7 +1258,34 @@ export async function handleSpoolRequest(
       // The stall's or ceiling's named end (v0.0.10 / v0.0.12): one line,
       // evidence pair attached. The meter's law — a refused submission throws,
       // no line, and the reply carries the code so the driver can report it.
-      const event = factory.needsHuman({ task: request.task, reason: request.reason, evidence: request.evidence });
+      let effectiveEvidence = request.evidence;
+      if (effectiveSeat === "lead") {
+        const contract = factory.contractFor(request.task);
+        if (contract !== undefined) {
+          const epochHistory = factory.ledger.eventsFor(request.task).filter((e) => e.seq >= contract.seq);
+          if (request.reason === "attempt-ceiling") {
+            const gate3 = epochHistory.findLast(
+              (e) => e.event === "gate_finished" && e.attempt === 3 && e.verdict === "red",
+            );
+            if (gate3 !== undefined) {
+              effectiveEvidence = { attempt: 3, gate: gate3.seq };
+            }
+          } else if (request.reason === "denied-again" || request.reason === "silent-after-repoke") {
+            const denial = epochHistory.findLast((e) => e.event === "permit_denied");
+            const repoke = epochHistory.findLast((e) => e.event === "repoke_dispatched");
+            if (denial !== undefined && repoke !== undefined) {
+              effectiveEvidence = { denial: denial.seq, repoke: repoke.seq };
+            }
+          } else if (request.reason === "died-after-respawn") {
+            const spawnEvt = epochHistory.findLast((e) => e.event === "spawn_dispatched");
+            const respawnEvt = epochHistory.findLast((e) => e.event === "respawn_dispatched");
+            if (spawnEvt !== undefined && respawnEvt !== undefined && respawnEvt.seq > spawnEvt.seq) {
+              effectiveEvidence = { spawn: spawnEvt.seq, respawn: respawnEvt.seq };
+            }
+          }
+        }
+      }
+      const event = factory.needsHuman({ task: request.task, reason: request.reason, evidence: effectiveEvidence });
       await archiveTaskAgentBestEffort(resolvedDaemon, lastTaskAgentForTask(factory, request.task));
       const detail =
         "denial" in event.evidence
@@ -1181,12 +1295,14 @@ export async function handleSpoolRequest(
             : `spawn seq ${event.evidence.spawn}, respawn seq ${event.evidence.respawn}`;
       // The peer hook (v0.0.20): a needs-human recording is a terminal Task
       // state the Project's Lead must hear — same lane, same hold law as the
-      // verdict hook above.
-      await peerMailHook?.({
-        task: request.task,
-        kind: "needs_human",
-        text: `Task ${request.task} needs a human: ${event.reason} (${detail})`,
-      });
+      // verdict hook above. Skip when Lead itself invoked `lead_needs_human`.
+      if (effectiveSeat !== "lead") {
+        await peerMailHook?.({
+          task: request.task,
+          kind: "needs_human",
+          text: `Task ${request.task} needs a human: ${event.reason} (${detail})`,
+        });
+      }
       return {
         id: request.id,
         ok: true,

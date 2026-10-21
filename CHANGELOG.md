@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.29] - 2026-10-22
+
+v0.0.29's one thing: **live multi-task wave & OpenCode MCP runtime hardening — automatic `contract.base` refresh across sequential task landings, worktree preservation on contract re-scoping, companion lockfile & `npm install` artifact tolerance, auto-resolved `lead_needs_human` ledger sequences, `Supervisor`/`Lead` write-fence enforcement, and OpenCode `factory-peer` spawn compatibility**.
+
+### Fixed
+
+- **Live multi-task wave & MCP bridge hardening (`src/workspace.ts`, `src/lanes.ts`, `src/choke.ts`, `src/role-providers.ts`, `src/roles-contract.ts`, `plugin/server/spool.ts`, `plugin/server/roles.ts`, `plugin/server/choke.ts`, `plugin/server/daemon-cli.ts`, `plugin/bin/bridge.mjs`, `plugin/index.server.ts`)** —
+  1. *Pre-registered wave `contract.base` & worktree preservation:* When `Lead` pre-registers contracts (`T-01..T-09`) upfront and an earlier task is accepted (`attempt_accepted`), spawning the next un-claimed task automatically refreshes `contract.base` to `<project-root>` `HEAD`. When re-spawning the same task after a contract/scope update whose `baseCommit` is already an ancestor of `worktrees/<task>` `HEAD` on `factory/<task>`, `allocateTaskWorktree` reuses the worktree without wiping committed/in-progress work.
+  2. *Companion lockfiles & untracked `npm install` artifacts:* `scopeCoversFile` automatically covers companion lockfiles (`package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`, `bun.lockb`, `npm-shrinkwrap.json`) whenever `package.json` in the same directory is in `scope`, and `checkCleanAt` ignores untracked `?? node_modules/` and untracked lockfiles left by `npm install`.
+  3. *Auto-resolved `lead_needs_human` ledger sequences & `lead_repoke_agent` delivery:* `lead_needs_human` auto-resolves the corroborating `seq` pair from the current `Contract` epoch in `ledger.jsonl` when omitted or approximate, and `warmPluginDaemonApiViaWs` invokes `plugin.rpc.invoke.request` (`factory.snapshot`) on boot/reload so `paseoApi` is captured within `<100ms`.
+  4. *OpenCode `factory-peer/<model>` spawn format, `auto_accept` preservation, and `opencode` CLI lane invocation:* `resolvePeerSpawnProvider` returns `"factory-peer/<model>"` (`provider/model` format), `reconcilePaseoRoleProviders` sets `defaultPermissions.mode: "auto_accept"` on the `Supervisor (Factory)` profile, `applyProviderExecutionFence` preserves `mode: "auto_accept"` on `Supervisor`/`Lead`/`Peer` while blocking `Supervisor`/`Lead` source writes on `<project-root>` in `choke.ts`, and `laneCliInvocation` avoids duplicating `opencode/` on `opencode/<provider>/<model>` lanes.
+- `package.json` + `SHELL_VERSION` + `bridge.mjs` `serverInfo.version` → `0.0.29`.
+
 ## [0.0.28] - 2026-10-21
 
 v0.0.28's one thing: **airtight `Lead handoff` with three-source Attempt-1 active peer roster resolution, silent seat creation and unified single-turn successor kickoff, a dual-fuse `90s` handoff extraction safeguard, and smart-default `Fresh-eyes review` on `Lead` contracts** (ADR 0018).

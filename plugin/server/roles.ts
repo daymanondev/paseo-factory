@@ -110,6 +110,7 @@ export interface AgentCreateRequest {
     featureValues?: Record<string, unknown>;
     providerOptions?: Record<string, unknown>;
     mcpServers?: Record<string, unknown>;
+    toolPolicy?: { preapproved?: { server: string; tool: string }[] };
   };
   env?: Record<string, string>;
 }
@@ -259,36 +260,42 @@ export function applyProviderExecutionFence<T extends AgentCreateRequest["config
     provisionAgyPlugin({ stateDir, userHome, agyPluginsDir });
   } else {
     const existingMcp = isRecord(config.mcpServers) ? config.mcpServers : {};
+    const bridgeServer = {
+      type: "stdio" as const,
+      command: process.execPath,
+      args: [
+        bridgeBinPath,
+        "--correlation",
+        correlationId,
+        "--role",
+        role,
+        "--state-dir",
+        stateDir,
+        "--project",
+        projectSlug,
+        "--workspace",
+        config.cwd,
+        ...(task !== undefined ? ["--task", task] : []),
+      ],
+      env: {
+        // Paseo Desktop's process.execPath is an Electron helper binary —
+        // without Node mode it aborts at startup and the MCP connection
+        // fails on agent.create (v0.0.27, ADR 0017 §2, problem 3).
+        ELECTRON_RUN_AS_NODE: "1",
+        PASEO_FACTORY_CORRELATION: correlationId,
+        PASEO_FACTORY_SEAT: role,
+        PASEO_FACTORY_STATE_DIR: stateDir,
+        PASEO_FACTORY_PROJECT: projectSlug,
+      },
+    };
     nextConfig.mcpServers = {
       ...existingMcp,
-      paseo_factory: {
-        type: "stdio",
-        command: process.execPath,
-        args: [
-          bridgeBinPath,
-          "--correlation",
-          correlationId,
-          "--role",
-          role,
-          "--state-dir",
-          stateDir,
-          "--project",
-          projectSlug,
-          "--workspace",
-          config.cwd,
-          ...(task !== undefined ? ["--task", task] : []),
-        ],
-        env: {
-          // Paseo Desktop's process.execPath is an Electron helper binary —
-          // without Node mode it aborts at startup and the MCP connection
-          // fails on agent.create (v0.0.27, ADR 0017 §2, problem 3).
-          ELECTRON_RUN_AS_NODE: "1",
-          PASEO_FACTORY_CORRELATION: correlationId,
-          PASEO_FACTORY_SEAT: role,
-          PASEO_FACTORY_STATE_DIR: stateDir,
-          PASEO_FACTORY_PROJECT: projectSlug,
-        },
-      },
+      paseo_factory: bridgeServer,
+      // Paseo's OpenCode v2 bridge-plugin.mjs deletes any tool in input.tools
+      // whose ID starts with "paseo_" when paseoTools.enabled is false.
+      // Registering under "paseo-factory" (with a hyphen) produces tool IDs
+      // starting with "paseo-factory_", which survive that filter.
+      ...(providerFamily === "opencode" ? { "paseo-factory": bridgeServer } : {}),
     };
   }
 
@@ -298,17 +305,36 @@ export function applyProviderExecutionFence<T extends AgentCreateRequest["config
   if (providerFamily === "opencode") {
     const existingPerm = isRecord(existingProviderOpts.permission) ? existingProviderOpts.permission : {};
     if (role === "supervisor" || role === "lead") {
-      nextConfig.featureValues = { ...existingFeatures, auto_accept: false };
-      nextConfig.modeId = role === "supervisor" ? "plan" : "build";
+      // Preserve the user's `Auto-accept` UI toggle (defaulting to true) while
+      // setting `toolPolicy: { preapproved: [] }` so OpenCodeV2Session routes
+      // every permission request through `choke.onPermissionAsked` instead of
+      // bypassing the choke when `auto_accept` is true.
+      nextConfig.featureValues = {
+        ...existingFeatures,
+        auto_accept: typeof existingFeatures.auto_accept === "boolean" ? existingFeatures.auto_accept : true,
+      };
+      nextConfig.toolPolicy = { preapproved: [] };
+      nextConfig.modeId = "build";
+      const skillPerm =
+        role === "supervisor"
+          ? { "*": "deny", grilling: "allow" }
+          : { "*": "deny", "codebase-design": "allow", "domain-modeling": "allow", tdd: "allow" };
       nextConfig.providerOptions = {
         ...existingProviderOpts,
         permission: {
           ...existingPerm,
           edit: "deny",
           task: "deny",
+          bash: "ask",
+          skill: skillPerm,
         },
       };
     } else if (role === "agent") {
+      nextConfig.featureValues = {
+        ...existingFeatures,
+        auto_accept: typeof existingFeatures.auto_accept === "boolean" ? existingFeatures.auto_accept : true,
+      };
+      nextConfig.toolPolicy = { preapproved: [] };
       nextConfig.providerOptions = {
         ...existingProviderOpts,
         permission: {

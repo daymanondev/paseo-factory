@@ -640,6 +640,22 @@ export function reloadDaemonConfigViaWs(home: string): void {
   void call.catch(() => {}); // a failed reload is never the caller's failure
 }
 
+/**
+ * Fires a lightweight loopback `factory.snapshot` RPC over the daemon WebSocket
+ * right after plugin boot/reload so `registerSurfaceRpc` immediately captures
+ * `context.paseo` before any Spool request arrives.
+ */
+export function warmPluginDaemonApiViaWs(home: string): void {
+  const call = daemonWsRequestPayload(
+    home,
+    { type: "plugin.rpc.invoke.request", pluginId: "paseo-factory", method: "factory.snapshot", input: {} },
+    "plugin.rpc.invoke.response",
+    5_000,
+  );
+  if (call === null) return;
+  void call.catch(() => {});
+}
+
 /** True for a plain object — the narrowing helper the cleanup slices use. */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);

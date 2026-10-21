@@ -821,6 +821,38 @@ test("choke.onPermissionAsked enforces seat-write-fence and seat-paseo-tool-fenc
     { seat: "lead", projectRoot: workspace },
   );
   assert.equal(resolveSeatAtProjectRoot(stateDir, { id: "x-peer", cwd: workspace, provider: "factory-peer", title: "nope", labels: {} }), undefined);
+
+  // 4. OpenCode v2 permission requests omit `detail` and place the shell command or file path in `description`.
+  await choke.onPermissionAsked(
+    {
+      agent: { id: "opencode-v2-sup", cwd: workspace, provider: "factory-supervisor", title: "3D Game", labels: {} },
+      request: {
+        id: "ocv2-shell-deny",
+        provider: "opencode",
+        name: "shell",
+        kind: "tool",
+        description: `cat > ${workspace}/src/seams/IInput.ts << 'EOF'\nexport interface IInput {}\nEOF`,
+      },
+    },
+    paseo,
+  );
+  assert.equal(sent.at(-1)?.response.behavior, "deny", "OpenCode v2 detail-less shell write to src/** is denied by seat-write-fence");
+
+  // 5. OpenCode v2 interactive `question` forms on the Supervisor seat are left open for the Owner UI (never auto-answered without answers).
+  const beforeQuestionCount = sent.length;
+  await choke.onPermissionAsked(
+    {
+      agent: { id: "opencode-v2-sup", cwd: workspace, provider: "factory-supervisor", title: "3D Game", labels: {} },
+      request: {
+        id: "ocv2-question-1",
+        provider: "opencode",
+        name: "question",
+        kind: "question",
+      },
+    },
+    paseo,
+  );
+  assert.equal(sent.length, beforeQuestionCount, "Supervisor interactive question form is not auto-answered by choke");
 });
 
 test("normalizeAgentCreateRequest keeps factory role provider ids canonical and labels provider-recognized seats at a registered <project-root> (v0.0.27, ADR 0017 §2)", (t) => {
