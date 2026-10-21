@@ -212,6 +212,8 @@ export const CompanionPluginViewSchema = z.object({
   sidebarLabel: z.string(),
   sidebarIcon: z.string(),
   capabilities: z.array(z.string()),
+  /** Who may install this plugin — public open-source or private invite-only (v0.0.30, ADR 0012 §2). */
+  access: z.enum(["public", "private"]),
   status: CompanionStatusSchema,
   enabled: z.boolean(),
   installKind: CompanionInstallKindSchema.nullable(),

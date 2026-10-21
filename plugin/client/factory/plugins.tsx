@@ -1,12 +1,15 @@
 /**
  * Tab 4 — Plugins, the Core + `Companion plugin` catalog (v0.0.17, ADR 0012;
- * redesigned in v0.0.25, ADR 0012 §1–§4):
+ * redesigned in v0.0.25, ADR 0012 §1–§4; amended in v0.0.30 for the private
+ * companion tier, ADR 0012/0014):
  * - Compact 1-line ecosystem toolbar with active count, update-check status,
  *   `Check for updates`, conditional `Update All (N)` (only when updates exist),
- *   and conditional `Install All` (when any companion is uninstalled).
+ *   and conditional `Install All` (when any `access === "public"` companion is
+ *   uninstalled — a private invite-only companion never keeps it lit).
  * - Core plugin card (`paseo-factory`, `CORE` badge, protected against
  *   `Disable`/`Remove`) at the top, followed by the 3 `Companion plugin` cards.
- * - Compact 2-row card face (Header row with semantic version `vX.Y.Z · sha`,
+ * - Compact 2-row card face (Header row with the `Private · Invite-only` pill
+ *   for `access === "private"` companions, semantic version `vX.Y.Z · sha`,
  *   status pill, update pill, and conditional primary `Install`/`Update` CTA;
  *   plus 1-line `tagline`), with a collapsible `⋯ Manage` / `Custom source…`
  *   drawer housing source metadata, capabilities, and secondary lifecycle acts.
@@ -93,6 +96,9 @@ function CompanionCard({
           <Icon name={companion.sidebarIcon} size={15} color={theme.colors.accent} />
           <Text style={text(theme, "rowTitle")}>{companion.title}</Text>
           {isCore ? <Pill theme={theme} label="CORE" tone="accent" lit /> : null}
+          {!isCore && companion.access === "private" ? (
+            <Pill theme={theme} label="Private · Invite-only" tone="statusWarning" />
+          ) : null}
           <Pill theme={theme} label={companion.id} mono />
           {versionBadge !== null ? <Pill theme={theme} label={versionBadge} mono /> : null}
           <Pill theme={theme} label={status.label} tone={status.tone} lit={status.lit} />
@@ -303,7 +309,9 @@ function CompanionCard({
 
 export function PluginsPane({ theme, view, actions }: { theme: PluginTheme; view: FactoryView; actions: PluginsActions }) {
   const running = view.companions.filter((c) => c.status === "running").length;
-  const anyUninstalled = view.companions.some((c) => c.status === "not_installed");
+  // Public companions only — a private invite-only companion (factory-release-lab) that stays
+  // not_installed must never keep the Install All button lit (v0.0.30, ADR 0012 §2).
+  const anyUninstalled = view.companions.some((c) => c.access === "public" && c.status === "not_installed");
   const allPlugins = [view.corePlugin, ...view.companions];
   const updatableCount = allPlugins.filter(
     (p) => p.status !== "not_installed" && (p.installKind === "git" || p.installKind === "npm") && p.updateAvailable === true,

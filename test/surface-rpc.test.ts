@@ -1994,7 +1994,7 @@ test("pluginsInstall: a named target installs from the catalog's canonical sourc
   );
 });
 
-test("pluginsInstall: target all installs only the uninstalled companions, skipping installed ones", async (t) => {
+test("pluginsInstall: v0.0.30 target all covers only the public companions — all public installed (lab still not_installed) is nothing to do", async (t) => {
   const { handlers, pluginInstalls } = makeSurface(t, [], [
     { id: "paseo-factory", path: "/plugins/paseo-factory", enabled: true, status: "running" },
     {
@@ -2004,48 +2004,48 @@ test("pluginsInstall: target all installs only the uninstalled companions, skipp
       status: "running",
       installation: { identity: { kind: "git", remote: "https://github.com/daymanondev/factory-burn-lab", pluginPath: "plugin" } },
     },
+    {
+      id: "factory-connector",
+      path: "/plugins/factory-connector",
+      enabled: true,
+      status: "running",
+      installation: { identity: { kind: "git", remote: "https://github.com/daymanondev/factory-connector", pluginPath: "plugin" } },
+    },
   ]);
+  // factory-release-lab is deliberately absent — it is access: "private", so a
+  // fully-public batch is complete without it (spec §Testing Decisions 2).
   const reply = await handlers.pluginsInstall({ target: "all" });
   assert.ok(reply.ok, reply.ok ? "" : reply.error);
-  assert.deepEqual(reply.installed, ["factory-connector", "factory-release-lab"], "only the uninstalled companions install (spec §User Story 5)");
-  assert.deepEqual(
-    pluginInstalls.map((call) => call.input),
-    [
-      { id: "factory-connector", source: "git:daymanondev/factory-connector:plugin" },
-      { id: "factory-release-lab", source: "git:daymanondev/factory-release-lab:plugin" },
-    ],
-    "the already-installed burn lab is skipped, the rest install from canonical sources",
-  );
-
-  // Nothing left to install → ok with an empty installed list.
-  const again = await handlers.pluginsInstall({ target: "all" });
-  assert.ok(again.ok, again.ok ? "" : again.error);
-  assert.deepEqual(again.installed, []);
-  assert.equal(again.summary, "every companion is already installed — nothing to do");
-  assert.deepEqual(
-    pluginInstalls.map((call) => call.input),
-    [
-      { id: "factory-connector", source: "git:daymanondev/factory-connector:plugin" },
-      { id: "factory-release-lab", source: "git:daymanondev/factory-release-lab:plugin" },
-    ],
-    "the second batch dispatches nothing",
-  );
+  assert.deepEqual(reply.installed, [], "every PUBLIC companion is already installed — the private lab never rides Install All");
+  assert.equal(reply.summary, "every companion is already installed — nothing to do");
+  assert.deepEqual(pluginInstalls, [], "nothing dispatches — not even the not_installed private lab");
 });
 
-test("pluginsInstall: target all with nothing installed installs every companion in catalog order", async (t) => {
+test("pluginsInstall: target all with nothing installed installs only the public companions in catalog order — factory-release-lab is never dispatched", async (t) => {
   const { handlers, pluginInstalls } = makeSurface(t);
   const reply = await handlers.pluginsInstall({ target: "all" });
   assert.ok(reply.ok, reply.ok ? "" : reply.error);
-  assert.deepEqual(reply.installed, ["factory-burn-lab", "factory-connector", "factory-release-lab"]);
+  assert.deepEqual(reply.installed, ["factory-burn-lab", "factory-connector"]);
   assert.deepEqual(
     pluginInstalls.map((call) => [call.input.id, call.input.source]),
     [
       ["factory-burn-lab", "git:daymanondev/factory-burn-lab:plugin"],
       ["factory-connector", "git:daymanondev/factory-connector:plugin"],
-      ["factory-release-lab", "git:daymanondev/factory-release-lab:plugin"],
     ],
-    "catalog order, canonical sources",
+    "catalog order, canonical sources — the private factory-release-lab is never dispatched (spec §User Story 1)",
   );
+  assert.ok(
+    pluginInstalls.every((call) => call.input.id !== "factory-release-lab"),
+    "no machine without pull access ever hits a private-repo clone failure mid-batch",
+  );
+
+  // A second call with burn + fleet installed (the faithful fake daemon joined
+  // them to the list) is nothing to do — even though the lab is still not_installed.
+  const again = await handlers.pluginsInstall({ target: "all" });
+  assert.ok(again.ok, again.ok ? "" : again.error);
+  assert.deepEqual(again.installed, []);
+  assert.equal(again.summary, "every companion is already installed — nothing to do");
+  assert.equal(pluginInstalls.length, 2, "the second batch dispatches nothing further");
 });
 
 test("pluginsInstall: a custom source and ref forward verbatim to the bridge", async (t) => {
@@ -2067,6 +2067,184 @@ test("pluginsInstall: a custom source with target all refuses — one custom sou
   assert.ok(!reply.ok);
   assert.equal(reply.code, "invalid-target");
   assert.deepEqual(pluginInstalls, [], "nothing dispatches");
+});
+
+// ---- v0.0.30: the private/invite-only factory-release-lab tier (spec §Testing Decisions 1–3) ----
+
+/** A fake `VaultRunner` whose `gh` leg always answers "not logged in" — keeps snapshot vault probes hermetic. */
+function unauthenticatedGhRunner(): { runner: VaultRunner; calls: VaultRunnerCall[] } {
+  return fakeVaultRunner((call) => {
+    if (call.command === "gh" && call.args[1] === "status") {
+      throw new Error("You are not logged into any accounts. Run gh auth login to authenticate.");
+    }
+    return Buffer.alloc(0);
+  });
+}
+
+test("v0.0.30 seam 1 — catalog fold: the access tier rides every card (corePlugin public, burn public, fleet public, lab private)", async (t) => {
+  const { handlers } = makeSurface(t, [], [], unauthenticatedGhRunner().runner);
+  const snap = await withVaultPassphrase(undefined, () => handlers.snapshot({}));
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  assert.equal(snap.view.corePlugin.access, "public", "the Core plugin card carries the public tier");
+  assert.deepEqual(
+    snap.view.companions.map((companion) => [companion.id, companion.access]),
+    [
+      ["factory-burn-lab", "public"],
+      ["factory-connector", "public"],
+      ["factory-release-lab", "private"],
+    ],
+    "foldCompanions populates access straight from COMPANION_CATALOG (spec §Testing Decisions 1)",
+  );
+});
+
+test("v0.0.30 seam 3 — explicit Release Lab install, authorized user: gh auth setup-git then git ls-remote precede the daemon install", async (t) => {
+  const { runner, calls } = fakeVaultRunner((call) => {
+    if (call.command === "gh" && call.args[0] === "auth" && call.args[1] === "status") {
+      return Buffer.from(JSON.stringify({ hosts: { "github.com": { login: "daymanondev", state: "success" } } }));
+    }
+    if (call.command === "git" && call.args[0] === "ls-remote") {
+      return Buffer.from("a91c3f2222\t\trefs/heads/main\n");
+    }
+    return Buffer.alloc(0);
+  });
+  const { handlers, pluginInstalls } = makeSurface(t, [], [], runner);
+  const reply = await handlers.pluginsInstall({ target: "factory-release-lab" });
+  assert.ok(reply.ok, reply.ok ? "" : reply.error);
+  assert.deepEqual(reply.installed, ["factory-release-lab"]);
+  assert.deepEqual(
+    calls.map((call) => [call.command, ...call.args]),
+    [
+      ["gh", "auth", "status", "--json", "hosts"],
+      ["gh", "auth", "setup-git", "--hostname", "github.com"],
+      ["git", "ls-remote", "--heads", "--", "https://github.com/daymanondev/factory-release-lab.git"],
+    ],
+    "the pre-flight order (spec §Testing Decisions 3): probe gh auth, wire the credential helper, verify pull access",
+  );
+  assert.deepEqual(
+    pluginInstalls.map((call) => call.input),
+    [{ id: "factory-release-lab", source: "git:daymanondev/factory-release-lab:plugin" }],
+    "only after ls-remote succeeds does the daemon install dispatch",
+  );
+});
+
+test("v0.0.30 seam 3 — logged-in @friend without collaborator access: private-companion-access-denied names @friend and the repo, install never dispatched", async (t) => {
+  const { runner, calls } = fakeVaultRunner((call) => {
+    if (call.command === "gh" && call.args[0] === "auth" && call.args[1] === "status") {
+      return Buffer.from(JSON.stringify({ hosts: { "github.com": { login: "friend", state: "success" } } }));
+    }
+    if (call.command === "git" && call.args[0] === "ls-remote") {
+      throw new Error("remote: Repository not found.\nfatal: Repository not found.");
+    }
+    return Buffer.alloc(0);
+  });
+  const { handlers, pluginInstalls } = makeSurface(t, [], [], runner);
+  const reply = await handlers.pluginsInstall({ target: "factory-release-lab" });
+  assert.ok(!reply.ok);
+  assert.equal(reply.code, "private-companion-access-denied");
+  assert.equal(
+    reply.error,
+    "GitHub account @friend does not have pull access to private repository daymanondev/factory-release-lab. Ask the repository owner to invite @friend as a collaborator.",
+    "the refusal names @friend and daymanondev/factory-release-lab and says whom to invite (spec §User Story 6)",
+  );
+  assert.deepEqual(pluginInstalls, [], "the daemon install never dispatches on a failed probe");
+  assert.ok(
+    calls.some((call) => call.command === "gh" && call.args[0] === "auth" && call.args[1] === "setup-git"),
+    "a logged-in machine still gets its credential helper wired before the probe",
+  );
+});
+
+test("v0.0.30 seam 3 — unauthenticated machine: private-companion-access-denied instructs gh auth login, install never dispatched", async (t) => {
+  const { runner, calls } = fakeVaultRunner((call) => {
+    if (call.command === "gh" && call.args[0] === "auth" && call.args[1] === "status") {
+      throw new Error("You are not logged into any accounts. Run gh auth login to authenticate.");
+    }
+    if (call.command === "git" && call.args[0] === "ls-remote") {
+      throw new Error("fatal: could not read Username for 'https://github.com': terminal prompts disabled");
+    }
+    return Buffer.alloc(0);
+  });
+  const { handlers, pluginInstalls } = makeSurface(t, [], [], runner);
+  const reply = await handlers.pluginsInstall({ target: "factory-release-lab" });
+  assert.ok(!reply.ok);
+  assert.equal(reply.code, "private-companion-access-denied");
+  assert.equal(
+    reply.error,
+    'daymanondev/factory-release-lab is a private repository. Run "gh auth login --web -p https" with an authorized GitHub account before installing.',
+    "the unauthenticated refusal explains the repository and the exact login command (spec §User Story 5)",
+  );
+  assert.deepEqual(pluginInstalls, [], "the daemon install never dispatches on a failed probe");
+  assert.ok(
+    !calls.some((call) => call.command === "gh" && call.args[0] === "auth" && call.args[1] === "setup-git"),
+    "setup-git only runs for an authenticated gh — an unauthenticated machine goes straight to the login guidance",
+  );
+});
+
+test("v0.0.30 seam 3 — local directory source: the GitHub pre-flight is skipped entirely and installPlugin dispatches directly", async (t) => {
+  const { runner, calls } = fakeVaultRunner(() => Buffer.alloc(0));
+  const { handlers, pluginInstalls } = makeSurface(t, [], [], runner);
+  const reply = await handlers.pluginsInstall({ target: "factory-release-lab", source: "/tmp/local-release-lab" });
+  assert.ok(reply.ok, reply.ok ? "" : reply.error);
+  assert.deepEqual(reply.installed, ["factory-release-lab"]);
+  assert.deepEqual(calls, [], "a local path never touches gh or git — offline directory installs work (spec §User Story 7)");
+  assert.deepEqual(
+    pluginInstalls.map((call) => call.input),
+    [{ id: "factory-release-lab", source: "/tmp/local-release-lab" }],
+  );
+});
+
+test("v0.0.30 seam 3 — ssh:// custom source: the pre-flight probes the SSH remote itself before the daemon install", async (t) => {
+  const { runner, calls } = fakeVaultRunner((call) => {
+    if (call.command === "gh" && call.args[0] === "auth" && call.args[1] === "status") {
+      return Buffer.from(JSON.stringify({ hosts: { "github.com": { login: "daymanondev", state: "success" } } }));
+    }
+    if (call.command === "git" && call.args[0] === "ls-remote") {
+      return Buffer.from("a91c3f2222\t\trefs/heads/main\n");
+    }
+    return Buffer.alloc(0);
+  });
+  const { handlers, pluginInstalls } = makeSurface(t, [], [], runner);
+  const reply = await handlers.pluginsInstall({ target: "factory-release-lab", source: "ssh://git@github.com/daymanondev/factory-release-lab.git" });
+  assert.ok(reply.ok, reply.ok ? "" : reply.error);
+  assert.deepEqual(reply.installed, ["factory-release-lab"]);
+  assert.deepEqual(
+    calls.map((call) => [call.command, ...call.args]),
+    [
+      ["gh", "auth", "status", "--json", "hosts"],
+      ["gh", "auth", "setup-git", "--hostname", "github.com"],
+      ["git", "ls-remote", "--heads", "--", "ssh://git@github.com/daymanondev/factory-release-lab.git"],
+    ],
+    "an ssh:// GitHub source gets the pull-access pre-flight too — probed on its own SSH transport, not rewritten to HTTPS",
+  );
+  assert.deepEqual(
+    pluginInstalls.map((call) => call.input),
+    [{ id: "factory-release-lab", source: "ssh://git@github.com/daymanondev/factory-release-lab.git" }],
+  );
+});
+
+test("v0.0.30 seam 3 — scp-style custom source without access: private-companion-access-denied names the repo, install never dispatched", async (t) => {
+  const { runner, calls } = fakeVaultRunner((call) => {
+    if (call.command === "gh" && call.args[0] === "auth" && call.args[1] === "status") {
+      throw new Error("You are not logged into any accounts. Run gh auth login to authenticate.");
+    }
+    if (call.command === "git" && call.args[0] === "ls-remote") {
+      throw new Error("git@github.com: Permission denied (publickey).");
+    }
+    return Buffer.alloc(0);
+  });
+  const { handlers, pluginInstalls } = makeSurface(t, [], [], runner);
+  const reply = await handlers.pluginsInstall({ target: "factory-release-lab", source: "git@github.com:daymanondev/factory-release-lab.git" });
+  assert.ok(!reply.ok);
+  assert.equal(reply.code, "private-companion-access-denied");
+  assert.equal(
+    reply.error,
+    'daymanondev/factory-release-lab is a private repository. Run "gh auth login --web -p https" with an authorized GitHub account before installing.',
+    "the scp-style source normalizes to the owner/repo slug the refusal names",
+  );
+  assert.deepEqual(pluginInstalls, [], "the daemon install never dispatches on a failed probe");
+  assert.ok(
+    calls.some((call) => call.command === "git" && call.args[0] === "ls-remote" && call.args.includes("git@github.com:daymanondev/factory-release-lab.git")),
+    "the probe runs against the scp-style remote itself",
+  );
 });
 
 test("pluginsInstall: a daemon failure refuses as data — { ok: false, code: 'daemon_failed', error }", async (t) => {
@@ -3576,6 +3754,84 @@ test("v0.0.25 (ADR 0012 §2/§4): pluginsCheckUpdates populates snapshot update 
   assert.ok(updateAll.ok);
   assert.deepEqual(manageCalls, [{ pluginId: "factory-burn-lab", action: "update" }]);
   assert.equal(updateAll.summary, "updated factory-burn-lab (7f8a5cc → a91c3f2)");
+});
+
+test("v0.0.30 seam 4 — per-plugin fault isolation: a batch plugin.source.status rpc_error falls back to per-plugin queries; the private lab's failure never hides the others' updates", async (t) => {
+  const gitRow = (id: string, path: string, revision: string) => ({
+    id,
+    path,
+    enabled: true,
+    status: "running",
+    installation: { identity: { kind: "git", remote: `https://github.com/daymanondev/${id}`, pluginPath: "plugin" }, currentRevision: revision },
+  });
+  const daemon = await startFakeDaemon(t, (message) => {
+    if (message.type === "plugin.list.request") {
+      return {
+        type: "plugin.list.response",
+        payload: {
+          requestId: message.requestId,
+          plugins: [
+            gitRow("factory-burn-lab", "/p/burn", "7f8a5cc111"),
+            gitRow("factory-connector", "/p/fleet", "1122334455"),
+            gitRow("factory-release-lab", "/p/lab", "99aabbcc"),
+          ],
+        },
+      };
+    }
+    if (message.type === "plugin.source.status.request") {
+      const pluginId = typeof message.pluginId === "string" ? message.pluginId : undefined;
+      // The batch call dies the way @getpaseo/server's statusSources does when
+      // one installed repository (the private lab) cannot be reached.
+      if (pluginId === undefined || pluginId === "factory-release-lab") {
+        return { type: "rpc_error", payload: { requestId: message.requestId, error: "Repository not found" } };
+      }
+      const row =
+        pluginId === "factory-burn-lab"
+          ? { id: "factory-burn-lab", source: "git", path: "/p/burn", currentCommit: "7f8a5cc111", latestCommit: "a91c3f2222", commitsBehind: 2, updateAvailable: true }
+          : { id: "factory-connector", source: "git", path: "/p/fleet", currentCommit: "1122334455", latestCommit: "1122334455", commitsBehind: 0, updateAvailable: false };
+      return { type: "plugin.source.status.response", payload: { requestId: message.requestId, plugins: [row] } };
+    }
+    return null;
+  });
+  // Handlers over the fake daemon's home with NO plugin overrides — the real
+  // bridge is the default; the vault runner stays fake so the snapshot's gh
+  // probe never leaves the process.
+  const stateDir = join(daemon.home, "plugin-state", "paseo-factory");
+  const retroRunner = fakeCopilotRunner(() => ({ code: 0, stdout: '{"proposals":[]}' }));
+  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner, eyeCliProbe: () => false });
+  const handlers = createSurfaceHandlers({
+    factory,
+    stateDir,
+    home: daemon.home,
+    daemon: fakeDaemon([]).daemon,
+    vaultRunner: unauthenticatedGhRunner().runner,
+  });
+
+  const check = await handlers.pluginsCheckUpdates({});
+  assert.ok(check.ok, check.ok ? "" : check.error);
+  assert.deepEqual(check.updatesAvailable, ["factory-burn-lab"], "the healthy plugins' rows survive the lab's failed query (spec §Testing Decisions 4)");
+
+  // Wire order: the doomed batch request (no pluginId), the fallback's plugin
+  // list, then one per-plugin status request per installed companion.
+  const statusFrames = daemon.frames.filter((frame) => frame.type === "plugin.source.status.request");
+  assert.equal(statusFrames.length, 4, "one batch request plus one per installed plugin");
+  assert.equal(statusFrames[0]!.message.pluginId, undefined, "the first call is the batch request without pluginId");
+  assert.deepEqual(
+    statusFrames.slice(1).map((frame) => frame.message.pluginId),
+    ["factory-burn-lab", "factory-connector", "factory-release-lab"],
+  );
+
+  const snap = await handlers.snapshot({});
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  const burn = snap.view.companions.find((companion) => companion.id === "factory-burn-lab")!;
+  assert.equal(burn.updateAvailable, true, "burn's update pill renders");
+  assert.equal(burn.latestRevision, "a91c3f2222");
+  assert.equal(burn.commitsBehind, 2);
+  const fleet = snap.view.companions.find((companion) => companion.id === "factory-connector")!;
+  assert.equal(fleet.updateAvailable, false, "fleet's up-to-date pill renders");
+  const lab = snap.view.companions.find((companion) => companion.id === "factory-release-lab")!;
+  assert.equal(lab.status, "running", "the lab stays an installed card");
+  assert.equal(lab.updateAvailable, null, "its own failed status query leaves it unchecked — never a failed Check for updates");
 });
 
 

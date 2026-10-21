@@ -614,6 +614,107 @@ export async function ensureRemoteVaultRepo(repo: string, runner?: VaultRunner):
   return { created: true, repo: stripped };
 }
 
+/**
+ * True for a local filesystem source — an absolute (`/`), relative (`.`), home
+ * (`~`), or Windows drive (`C:\` / `C:/`) path — never a Git remote (v0.0.30,
+ * ADR 0012 §2). Local directory installs skip the GitHub pull-access
+ * pre-flight entirely so they work offline.
+ */
+export function isLocalCompanionGitSource(source: string): boolean {
+  const trimmed = source.trim();
+  return trimmed.startsWith("/") || trimmed.startsWith(".") || trimmed.startsWith("~") || /^[a-zA-Z]:[\\/]/.test(trimmed);
+}
+
+/** A companion source's normalized GitHub remote — the ls-remote URL and the owner/repo slug the refusal messages name. */
+export interface CompanionGitRemote {
+  remoteUrl: string;
+  repoSlug: string;
+}
+
+/**
+ * Normalizes the GitHub source forms a companion install carries —
+ * `git:<owner>/<repo>[:<subpath>]`, `github:<owner>/<repo>`,
+ * `https://github.com/<owner>/<repo>[.git]`, `ssh://git@github.com/<owner>/<repo>[.git]`,
+ * and the scp-style `git@github.com:<owner>/<repo>[.git]` — into
+ * `{ remoteUrl, repoSlug }`. The SSH forms keep their own URL as `remoteUrl`:
+ * the pre-flight must probe the exact remote the daemon will clone, not a
+ * rewritten HTTPS URL that would falsely refuse an SSH-key user without `gh`
+ * HTTPS credentials. Anything else returns null: not a GitHub remote, so no
+ * GitHub pre-flight applies.
+ */
+export function normalizeCompanionGitRemote(source: string): CompanionGitRemote | null {
+  const trimmed = source.trim();
+  const https = /^https:\/\/github\.com\/([^\s/#?]+)\/([^\s/#?]+?)(?:\.git)?\/?$/.exec(trimmed);
+  if (https !== null) {
+    return { remoteUrl: `https://github.com/${https[1]}/${https[2]}.git`, repoSlug: `${https[1]}/${https[2]}` };
+  }
+  const prefixed = /^(?:git|github):([^\s/:]+)\/([^\s/:]+?)(?:\.git)?(?::[^\s]*)?$/.exec(trimmed);
+  if (prefixed !== null) {
+    return { remoteUrl: `https://github.com/${prefixed[1]}/${prefixed[2]}.git`, repoSlug: `${prefixed[1]}/${prefixed[2]}` };
+  }
+  const sshUrl = /^ssh:\/\/git@github\.com\/([^\s/#?]+)\/([^\s/#?]+?)(?:\.git)?\/?$/.exec(trimmed);
+  if (sshUrl !== null) {
+    return { remoteUrl: trimmed, repoSlug: `${sshUrl[1]}/${sshUrl[2]}` };
+  }
+  const scp = /^git@github\.com:([^\s/#?]+)\/([^\s/#?]+?)(?:\.git)?$/.exec(trimmed);
+  if (scp !== null) {
+    return { remoteUrl: trimmed, repoSlug: `${scp[1]}/${scp[2]}` };
+  }
+  return null;
+}
+
+/**
+ * The pre-flight pull-access check for an explicit install of a `private`
+ * companion (v0.0.30, ADR 0012 §2 / ADR 0014 §1): verifies the machine can
+ * actually read the private repository before the daemon's `git clone` runs,
+ * so an unauthorized user gets an actionable message instead of a raw clone
+ * error. Local paths pass immediately (offline directory installs); non-GitHub
+ * sources pass too (nothing to pre-flight). For a GitHub remote:
+ *
+ * 1. `probeGhAuth` — when `gh` is authenticated, run
+ *    `gh auth setup-git --hostname github.com` best-effort so the host's Git
+ *    HTTPS credential helper is wired even on a machine that logged in without
+ *    ever running setup-git.
+ * 2. `git ls-remote --heads -- <remoteUrl>` (the VaultRunner seam's own
+ *    `GIT_TERMINAL_PROMPT: "0"` and augmented PATH) — success means pull
+ *    access; failure refuses with the reason naming either `@<ghUser>` (ask
+ *    the owner to invite them as a collaborator) or the `gh auth login` step.
+ */
+export async function probeCompanionGitAccess(
+  source: string,
+  options?: { runner?: VaultRunner },
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  if (isLocalCompanionGitSource(source)) return { ok: true };
+  const remote = normalizeCompanionGitRemote(source);
+  if (remote === null) return { ok: true };
+  const runner = options?.runner ?? builtinVaultRunner;
+
+  const ghAuth = await probeGhAuth(runner);
+  if (ghAuth.ghAuthenticated) {
+    try {
+      await runner({ command: "gh", args: ["auth", "setup-git", "--hostname", "github.com"] });
+    } catch {
+      // best-effort: setup-git is non-fatal when git credentials are already configured
+    }
+  }
+
+  try {
+    await runner({ command: "git", args: ["ls-remote", "--heads", "--", remote.remoteUrl] });
+    return { ok: true };
+  } catch {
+    if (ghAuth.ghAuthenticated && ghAuth.ghUser !== null) {
+      return {
+        ok: false,
+        reason: `GitHub account @${ghAuth.ghUser} does not have pull access to private repository ${remote.repoSlug}. Ask the repository owner to invite @${ghAuth.ghUser} as a collaborator.`,
+      };
+    }
+    return {
+      ok: false,
+      reason: `${remote.repoSlug} is a private repository. Run "gh auth login --web -p https" with an authorized GitHub account before installing.`,
+    };
+  }
+}
+
 export interface VaultTransportOptions {
   runner?: VaultRunner;
 }

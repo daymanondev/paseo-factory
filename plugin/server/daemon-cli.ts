@@ -584,10 +584,57 @@ function parseSourceStatusRows(raw: unknown): DaemonPluginSourceStatus[] | null 
 }
 
 /**
+ * The per-plugin fallback for a failed batch status request (v0.0.30, spec
+ * Implementation Decision 4): `@getpaseo/server`'s `statusSources` loops the
+ * batch `plugin.source.status.request` without per-plugin isolation, so one
+ * inaccessible private repo (an expired token on `factory-release-lab`)
+ * aborts the whole `Check for updates` call. Re-asking each installed plugin
+ * individually keeps every healthy plugin's row: per-plugin failures are
+ * dropped, and the check only fails when the plugin list itself is
+ * unreachable or no installed plugin could be queried at all.
+ */
+async function checkDaemonPluginUpdatesPerPlugin(
+  home: string,
+  batchReason: string,
+): Promise<{ ok: true; statuses: DaemonPluginSourceStatus[]; checkedAt: string } | { ok: false; reason: string }> {
+  const list = await listDaemonPlugins(home);
+  if (!list.ok) {
+    return {
+      ok: false,
+      reason: `the batch plugin update check failed (${batchReason}) and listing installed plugins failed too (${list.reason})`,
+    };
+  }
+  const rows: DaemonPluginSourceStatus[] = [];
+  for (const item of list.plugins) {
+    const wsCall = daemonWsRequestPayload<{ plugins?: unknown }>(
+      home,
+      { type: "plugin.source.status.request", pluginId: item.id },
+      "plugin.source.status.response",
+      PLUGIN_IO_TIMEOUT_MS,
+    );
+    if (wsCall === null) continue;
+    const reply = await wsCall;
+    if (!reply.ok) continue; // one inaccessible repo never hides the others
+    const parsed = parseSourceStatusRows(reply.payload);
+    if (parsed !== null) rows.push(...parsed);
+  }
+  if (rows.length === 0 && list.plugins.length > 0) {
+    return {
+      ok: false,
+      reason: `the batch plugin update check failed (${batchReason}) and every per-plugin status query failed too`,
+    };
+  }
+  return { ok: true, statuses: rows, checkedAt: new Date().toISOString() };
+}
+
+/**
  * Checks remote update availability for all installed plugins on `home` via
  * `plugin.source.status.request` over the daemon WebSocket (falling back to
  * `paseo --home <home> plugin update --all --check --json`), caching the
  * result per `home` for subsequent snapshot reads (v0.0.25, ADR 0012 §4).
+ * When the batch request errors, it retries plugin-by-plugin so a single
+ * inaccessible repository cannot hide updates for the rest (v0.0.30, spec
+ * Implementation Decision 4).
  */
 export async function checkDaemonPluginUpdates(
   home: string,
@@ -601,9 +648,17 @@ export async function checkDaemonPluginUpdates(
   let rows: DaemonPluginSourceStatus[] | null = null;
   if (wsCall !== null) {
     const reply = await wsCall;
-    if (!reply.ok) return { ok: false, reason: reply.reason };
-    rows = parseSourceStatusRows(reply.payload);
-    if (rows === null) return { ok: false, reason: "the daemon's plugin.source.status.response carried no plugins array" };
+    if (!reply.ok) {
+      // Per-plugin fault isolation: the daemon's batch status loop threw on
+      // one installed plugin — re-ask each plugin individually and keep
+      // whichever rows answer (v0.0.30, spec Implementation Decision 4).
+      const perPlugin = await checkDaemonPluginUpdatesPerPlugin(home, reply.reason);
+      if (!perPlugin.ok) return { ok: false, reason: perPlugin.reason };
+      rows = perPlugin.statuses;
+    } else {
+      rows = parseSourceStatusRows(reply.payload);
+      if (rows === null) return { ok: false, reason: "the daemon's plugin.source.status.response carried no plugins array" };
+    }
   } else {
     const cli = pluginCliJson(home, ["--home", home, "plugin", "update", "--all", "--check", "--json"], PLUGIN_IO_TIMEOUT_MS);
     if (!cli.ok) return { ok: false, reason: cli.reason };

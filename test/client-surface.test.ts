@@ -53,11 +53,15 @@ test("PluginsPane exists as a pure render of the view plus action callbacks — 
   assert.ok(!plugins.includes("useRpc"), "the Shell owns the RPC calls (the TasksPane/SeatsPane/TimelinePane law)");
 });
 
-test("PluginsPane renders the summary header — the ecosystem explainer, X of N active on this daemon, and Install All whenever any companion is not_installed", () => {
+test("PluginsPane renders the summary header — the ecosystem explainer, X of N active on this daemon, and Install All whenever any public companion is not_installed", () => {
   const plugins = read("plugin/client/factory/plugins.tsx");
   assert.match(plugins, /status === "running"/);
   assert.match(plugins, /active on this daemon/);
-  assert.match(plugins, /\.some\(\(c\) => c\.status === "not_installed"\)/, "Install All appears exactly when a companion is uninstalled");
+  assert.match(
+    plugins,
+    /\.some\(\(c\) => c\.access === "public" && c\.status === "not_installed"\)/,
+    "Install All appears exactly when a public companion is uninstalled (v0.0.30: private companions never keep it lit)",
+  );
   assert.match(plugins, /label="Install All"/);
   assert.match(plugins, /actions\.install\("all"\)/);
 });
@@ -278,6 +282,36 @@ test("v0.0.25 (ADR 0012 §1–§4): PluginsPane renders compact 2-row cards, Cor
   assert.match(shell, /pluginsCheckUpdates/, "FactoryShell imports pluginsCheckUpdates RPC");
   assert.match(shell, /useRpc\(pluginsCheckUpdates\)/, "FactoryShell binds useRpc(pluginsCheckUpdates)");
   assert.match(shell, /pluginsCheckUpdatesCall\(\{\}\)/, "FactoryShell invokes pluginsCheckUpdatesCall");
+});
+
+// ---- Private Companion Tier: Private pill & public-only Install All (v0.0.30, ADR 0012/0014) ----
+
+test("v0.0.30 (ADR 0012/0014): CompanionCard renders the Private · Invite-only pill on the header row for private non-core companions", () => {
+  const plugins = read("plugin/client/factory/plugins.tsx");
+  assert.match(
+    plugins,
+    /!isCore && companion\.access === "private"/,
+    "the pill renders only on non-Core cards whose companion is access === \"private\" (Implementation Decision 2)",
+  );
+  assert.match(plugins, /label="Private · Invite-only"/, "the spec's verbatim pill label");
+  assert.match(
+    plugins,
+    /<Pill theme=\{theme\} label="Private · Invite-only" tone="statusWarning" \/>/,
+    "the spec's exact Pill render — warning tone, no lit variant (Implementation Decision 2)",
+  );
+});
+
+test("v0.0.30 (ADR 0012/0014): PluginsPane scopes Install All to public companions — anyUninstalled filters on access === \"public\"", () => {
+  const plugins = read("plugin/client/factory/plugins.tsx");
+  assert.match(
+    plugins,
+    /view\.companions\.some\(\(c\) => c\.access === "public" && c\.status === "not_installed"\)/,
+    "the spec's exact anyUninstalled formula — a not_installed private factory-release-lab never keeps Install All lit (User Story 2)",
+  );
+  assert.ok(
+    !plugins.includes('.some((c) => c.status === "not_installed")'),
+    "the old access-blind formula is replaced, not left duplicated beside the public-only one",
+  );
 });
 
 

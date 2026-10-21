@@ -387,7 +387,7 @@ function resolvePluginVersion(entry: DaemonPluginEntry, fallbackVersion: string 
   return direct ?? fallbackVersion;
 }
 
-/** Shared pure join of a catalog entry (Core or Companion) against its listed daemon row and cached update status. */
+/** Shared pure join of a catalog entry (Core or Companion) against its listed daemon row and cached update status. The catalog entry spreads first, so the declarative card fields — including the v0.0.30 `access` tier — always ride the view verbatim; only live daemon state is layered on top. */
 function foldPluginCard(
   entry: CompanionCatalogEntry | CorePluginCatalogEntry,
   listed: DaemonPluginEntry | undefined,
