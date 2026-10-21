@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.28] - 2026-10-21
+
+v0.0.28's one thing: **airtight `Lead handoff` with three-source Attempt-1 active peer roster resolution, silent seat creation and unified single-turn successor kickoff, a dual-fuse `90s` handoff extraction safeguard, and smart-default `Fresh-eyes review` on `Lead` contracts** (ADR 0018).
+
+### Added
+
+- **Three-source `Machine-Verified Active Peer Roster` resolution (`plugin/server/lead-mailbox.ts`, `plugin/server/spool.ts`, pinned in `test/lead-mailbox.test.ts` and `test/spool.test.ts`)** —
+  `agentOfTask` resolves each unaccepted `Task`'s bound working `Agent` across three deterministic sources in priority order: (1) live non-archived daemon agents whose `cwd` sits at or inside `taskWorktreePath(stateDir, slug, task)` or whose labels bind `{ task }`, (2) the latest `CorrelationRegistry` record (`role: "agent"`) within the current `Contract` epoch (populated on `spawn` as well as `session_open`), and (3) the latest `claim_reported`, `meter_written`, or `repoke_dispatched` `Ledger` event in the current `Contract` epoch — ensuring Attempt-1 workers coding before their first `Claim` are never reported as `agent (none bound)` during `Lead handoff`.
+- **Dual-fuse `90s` `Lead handoff` extraction safeguard (`HANDOFF_EXTRACTION_TIMEOUT_MS = 90_000` in `plugin/server/lead-mailbox.ts`, `plugin/index.server.ts`, pinned in `test/lead-mailbox.test.ts`)** —
+  Fuse 1 immediately bypasses extraction and completes handoff within the same lane turn when the outgoing `Lead` is absent (`code === "no-lead"`), in `status === "error"`, or `daemon.agents.ref(lead.id).send(extractionPrompt)` throws. Fuse 2 schedules an `unref()`ed timer (`handoffTimeoutMs ?? 90_000`) and checks elapsed `handoffRequestedAt` inside `pumpProjectLead(slug)`, automatically retiring a hung outgoing `Lead`, preserving any fresh `lead-handoff.md` written after `handoffRequestedAt` (or injecting the explicit interrupted-extraction fallback note alongside the machine-verified roster and ledger digest), resetting `rotationState = "normal"`, and draining all held mail without paging `Supervisor`.
+- **Smart-default `Fresh-eyes review` on `Lead` contracts (`isEyeLaneUsable` in `src/fresh-eyes.ts`, `src/factory.ts`, `src/index.ts`, `plugin/server/spool.ts`, `plugin/bin/bridge.mjs`, `plugin/bin/factory.mjs`, pinned in `test/factory.test.ts`, `test/fresh-eyes.test.ts`, `test/spool.test.ts`, and `test/bridge-mcp.test.ts`)** —
+  When `Lead` registers a `Contract` (`lead_set_contract` or Spool `contract` with `seat === "lead"` / `by === "lead"` / `role === "lead"` correlation) without explicitly passing `freshEyes: false`, `setContract` probes `isEyeLaneUsable(stateDir, eyeCliProbe)` and automatically enables `freshEyes: true` whenever the configured `freshEyes` lane CLI is available on the host (gracefully leaving `freshEyes` unset on minimal/test hosts without the lane CLI, while explicit `freshEyes: true` still fails fast with `eye-unconfigured` and explicit `freshEyes: false` / `--no-fresh-eyes` opts out).
+
+### Changed
+
+- **Silent seat creation and unified single-turn successor kickoff (`plugin/server/surface-rpc.ts`, `plugin/server/lead-mailbox.ts`, `plugin/index.server.ts`, pinned in `test/lead-mailbox.test.ts` and `test/surface-rpc.test.ts`)** —
+  `ensureSeat` creates `Supervisor` and `Lead` sessions silently without passing `prompt` to `agents.create` (recording `onSeatKickoffSent` when an explicit `input.message` is dispatched). During `completeHandoff`, the successor `Lead` is created silently and receives a single unified Turn-1 `send(...)` call combining `[Seat kickoff packet]`, `[Lead handoff bundle]`, and any queued `Lead mailbox` items (or `[Seat kickoff packet] + [Lead handoff bundle]` when the mailbox is empty, marking `kickoffSentAgentIds` so subsequent turns never re-send the kickoff packet).
+- `package.json` + `SHELL_VERSION` + `bridge.mjs` `serverInfo.version` → `0.0.28`.
+
 ## [0.0.27] - 2026-10-21
 
 v0.0.27's one thing: **native Paseo role providers (`factory-supervisor`, `factory-lead`, `factory-peer`) reconciled into `<paseoHome>/config.json` with a single `Supervisor (Factory)` New Chat profile, deterministic provider-based seat recognition regardless of chat title, `ELECTRON_RUN_AS_NODE` hardening for Paseo Desktop, and removal of the `Start Supervisor` / `Start Lead` UI buttons** (ADR 0017).
