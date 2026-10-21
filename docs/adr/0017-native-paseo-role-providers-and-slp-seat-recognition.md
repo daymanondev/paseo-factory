@@ -33,6 +33,10 @@ In `paseo-factory` through `v0.0.26`, seats were not registered as first-class P
    - Neither the persistent Header ([`plugin/client/factory/header.tsx`](../../plugin/client/factory/header.tsx)) nor the `Seats & Models` view ([`plugin/client/factory/seats.tsx`](../../plugin/client/factory/seats.tsx)) renders `Start Supervisor` or `Start Lead` buttons.
    - Users start `Supervisor (Factory)` directly from Paseo's native agent picker; `Supervisor` spawns `Lead` (`factory-lead`) via `supervisor_dispatch_lead`; and `Lead` spawns `Peer` (`factory-peer`) via `lead_spawn_agent`. When `Supervisor` or `Lead` is already active on a Project, the UI shows its live status and an `Open` link to jump to its conversation, plus `Rotate` / `Revoke`.
 
+4. **Daemon Workspace and Project Record Cleanup on `Project reset` and `Task worktree` Archival.**
+   - The plugin captures the daemon's `PaseoApi` from the first hook or surface RPC that carries one, so cleanup can run even before any agent hook fires.
+   - `archiveAcceptedTaskWorkspace` (the accept path, surface and spool alike) and `projectReset` also sweep the daemon's own records over the session WebSocket (`archive_workspace_request` / `project.remove.request` via `cleanupDaemonWorkspacesAndProjectsViaWs`) for any workspace or project rooted under `<projectStateDir>/worktrees/` or missing on disk, so a removed `Task worktree` directory never leaves a broken project entry in Paseo Desktop. Every sweep is best-effort — it never blocks or fails the accept or reset.
+
 ## Consequences
 
 - **Positive:** Starting a `Supervisor` uses Paseo's native New Chat picker (`Supervisor (Factory)`) with zero custom bootstrap buttons; `server.before("agent.create")` recognizes the role 100% deterministically by `config.provider`; `paseoTools: { enabled: false }` blocks native Paseo agent tools at the daemon config layer; and the UI no longer exposes a confusing `Start Lead` or redundant `Start Supervisor` button.

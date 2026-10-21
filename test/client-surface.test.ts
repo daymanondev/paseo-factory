@@ -116,30 +116,52 @@ test("the one FactoryShell still hosts all three entries — the fourth tab need
   assert.equal((entries.match(/<FactoryShell/g) ?? []).length, 3, "global screen, settings screen, and workspace panel all render the one shell");
 });
 
-// ---- the always-visible seat buttons + Lead telemetry (v0.0.20, ADR 0013 §6) ----------------
+// ---- native seat starts & live seat states (v0.0.27, ADR 0017 §3) ---------------------------
 
-test("the Header renders the Supervisor seat button whenever a Project is selected — Start when vacant, Open when live", () => {
+test("v0.0.27 (ADR 0017 §3): the Header renders no Start Supervisor / Start Lead buttons — a live seat shows its state plus an Open jump, a vacant seat shows the picker hint", () => {
   const header = read("plugin/client/factory/header.tsx");
-  assert.match(header, /supervisorLive \? "Open Supervisor" : "Start Supervisor"/, "the label flips on the live seat (supervisorLive is view.supervisor !== null by shell construction)");
-  assert.match(header, /onPress=\{\(\) => actions\.openSupervisor\(""\)\}/, "both labels ride the existing ensure-then-open action");
-  assert.ok(
-    !header.includes("supervisorLive && view.supervisor !== null"),
-    "the old guard is gone — a brand-new Project (view.supervisor === null) still shows the header's seat action",
-  );
+  assert.ok(!header.includes("Start Supervisor"), "the Start Supervisor button is gone from the persistent Header");
+  assert.ok(!header.includes("Start Lead"), "the Start Lead button is gone from the persistent Header");
+  assert.match(header, /view\.supervisor !== null \?/, "the Supervisor controls render only while the seat lives (agentId !== null)");
+  assert.match(header, /view\.lead !== null \?/, "the Lead controls render only while the seat lives (agentId !== null)");
+  assert.match(header, /label="Open Supervisor"/, "a live Supervisor renders the Open Supervisor jump");
+  assert.match(header, /label="Open Lead"/, "a live Lead renders the Open Lead jump");
+  assert.match(header, /onPress=\{\(\) => actions\.openSupervisor\(\)\}/, "Open Supervisor rides the bare navigation action");
+  assert.match(header, /onPress=\{\(\) => actions\.openLead\(\)\}/, "Open Lead rides the bare navigation action");
+  assert.match(header, /name="Supervisor" status=\{view\.supervisor\.status\}/, "the live Supervisor's daemon state (running / idle) renders beside the jump");
+  assert.match(header, /name="Lead" status=\{view\.lead\.status\}/, "the live Lead's daemon state renders beside the jump");
+  assert.ok(header.includes('Select "Supervisor (Factory)" in New Chat to start'), "the vacant Supervisor hint is verbatim from Implementation Decision 3");
+  assert.ok(header.includes("Spawned automatically by Supervisor"), "the vacant Lead hint is verbatim from Implementation Decision 3");
 });
 
-test("the Header renders the symmetric Lead seat button beside it, wiring the once-voided leadLive prop", () => {
-  const header = read("plugin/client/factory/header.tsx");
-  assert.match(header, /leadLive \? "Open Lead" : "Start Lead"/, "the label flips on the live seat (leadLive is view.lead !== null by shell construction)");
-  assert.match(header, /onPress=\{\(\) => actions\.openLead\(\)\}/, "the button rides the existing openLead action");
-  assert.ok(!header.includes("void leadLive;"), "the prop is wired, no longer voided");
+test("v0.0.27 (ADR 0017 §3): Seats & Models renders no Start Supervisor / Start Lead buttons — vacant seats carry the picker hints, live seats keep Open / Rotate / Revoke", () => {
+  const seats = read("plugin/client/factory/seats.tsx");
+  assert.ok(!seats.includes("Start Supervisor"), "the Seats & Models view renders no Start Supervisor button");
+  assert.ok(!seats.includes("Start Lead"), "the Seats & Models view renders no Start Lead button");
+  assert.match(seats, /title="Supervisor — not started"/, "the vacant Supervisor node names its not-started state");
+  assert.match(seats, /title="Lead — not started"/, "the vacant Lead node names its not-started state");
+  assert.ok(seats.includes('Select "Supervisor (Factory)" in New Chat to start'), "the vacant Supervisor node carries the verbatim picker hint");
+  assert.ok(seats.includes("Spawned automatically by Supervisor"), "the vacant Lead node carries the verbatim spawned-by-Supervisor hint");
+  assert.match(seats, /label="Open"/, "a live seat's card keeps its Open jump link");
+  assert.match(seats, /actions\.openAgent\(agent\.id\)/, "the Open link rides navigation to the live agent's conversation");
+  assert.match(seats, /retireLabel="Revoke Supervisor"/, "a live Supervisor keeps its Revoke action");
+  assert.match(seats, /retireLabel="Rotate Lead"/, "a live Lead keeps its Rotate action");
+  assert.match(seats, /onRetire=\{actions\.revokeSupervisor\}/, "Revoke rides the revokeSupervisor action");
+  assert.match(seats, /onRetire=\{actions\.rotateLead\}/, "Rotate rides the rotateLead action");
 });
 
-test("the seat buttons live unconditionally inside the Project Scope Bar's action row — no live-seat condition wraps them", () => {
-  const header = read("plugin/client/factory/header.tsx");
-  assert.match(header, /\{project !== null \? \(\n\s*<View style=\{\{ flexDirection: "row", alignItems: "center", gap: SPACING\[1\.5\]/, "the pair renders as one row gated only on a selected Project");
-  assert.ok(!header.includes("? (\n            <Btn"), "no conditional hides a seat button behind a live seat");
+test("v0.0.27 (ADR 0017 §3): FactoryShell drops the ensure/dispatch seat wiring — Open jumps navigate straight to the live seat's conversation", () => {
+  const shell = read("plugin/client/factory/shell.tsx");
+  assert.ok(!shell.includes("supervisorEnsure"), "the supervisorEnsure RPC import and binding are gone");
+  assert.ok(!shell.includes("leadEnsure"), "the leadEnsure RPC import and binding are gone");
+  assert.ok(!shell.includes("leadDispatch"), "the leadDispatch RPC import and binding are gone");
+  assert.match(shell, /const agentId = view\.supervisor\?\.id;/, "Open Supervisor resolves the live Supervisor's agentId from the snapshot");
+  assert.match(shell, /const agentId = view\.lead\?\.id;/, "Open Lead resolves the live Lead's agentId from the snapshot");
+  assert.match(shell, /navigation\?\.openAgent\(\{ agentId, serverId \}\)/, "both jumps ride navigation.openAgent — no act() and no RPC behind them");
+  assert.ok(!shell.includes("supervisorLive") && !shell.includes("leadLive"), "the dead live-boolean props are deleted, not left dangling");
 });
+
+// ---- the Lead telemetry trio (v0.0.20, ADR 0013 §6) ----------------
 
 test("the Lead card renders the 128k telemetry trio — usage pill, rotationState badge, queued mail count", () => {
   const seats = read("plugin/client/factory/seats.tsx");

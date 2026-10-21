@@ -4,9 +4,10 @@
  * dot, the five tabular-num KPI Stat Tiles (Needs Human, Running, Ready to
  * Accept, Accepted, Total Cost), the Project Selector (the panel auto-binds
  * its workspace's Project; the global screen picks across discovered
- * Projects), and the seat bridges — Start/Open Supervisor and Start/Open Lead,
- * always rendered once a Project is selected (v0.0.20, ADR 0013 §3) so a
- * brand-new Project offers its header action on day one.
+ * Projects), and the seat states (v0.0.27, ADR 0017 §3) — each seat reports
+ * its live status with an Open jump while it lives, or the picker hint while
+ * vacant; seats start only from Paseo's native New Chat picker, never from a
+ * header button.
  */
 import type { PluginTheme } from "@getpaseo/plugin";
 import { Icon, TextInput } from "@getpaseo/plugin/client/react-native";
@@ -57,9 +58,10 @@ export interface VaultImportInput {
 
 /** The header's whole action surface — the Shell owns the RPC calls. */
 export interface HeaderActions {
-  openSupervisor(message: string): void;
-  /** Ensure-or-open the Project's Lead; the optional message dispatches. */
-  openLead(message?: string): void;
+  /** Jump to the live Supervisor's conversation (v0.0.27, ADR 0017 §3) — the seat itself starts from Paseo's native New Chat picker, never here. */
+  openSupervisor(): void;
+  /** Jump to the live Lead's conversation — the Supervisor spawns the seat via supervisor_dispatch_lead. */
+  openLead(): void;
   /** The Project Selector's pick — null returns to the unscoped global view. */
   pickProject(root: string | null): void;
   /** Owner-only clean-slate reset of the selected Project (v0.0.24, ADR 0015 §6). */
@@ -527,14 +529,18 @@ function projectLabel(slug: string, root: string): string {
   return last.length > 0 ? (last[last.length - 1] as string) : slug;
 }
 
+/** One standing seat's live state chip (v0.0.27, ADR 0017 §3) — the daemon's own status while the seat lives. */
+function SeatState({ theme, name, status }: { theme: PluginTheme; name: string; status: string }) {
+  const running = status === "running";
+  return <Pill theme={theme} label={`${name}: ${status}`} tone={running ? "accent" : "foregroundMuted"} lit={running} />;
+}
+
 export function Header({
   theme,
   view,
   at,
   now,
   actions,
-  supervisorLive,
-  leadLive,
   busyAct = null,
   vaultNote = null,
   onVaultSync = () => {},
@@ -548,8 +554,6 @@ export function Header({
   at: number | null;
   now: number;
   actions: HeaderActions;
-  supervisorLive: boolean;
-  leadLive: boolean;
   busyAct?: string | null;
   vaultNote?: VaultNote | null;
   onVaultSync?: (input?: VaultSyncInput) => void;
@@ -678,31 +682,29 @@ export function Header({
           />
           <View style={{ marginLeft: "auto", flexDirection: "row", alignItems: "center", gap: SPACING[1.5], flexWrap: "wrap" }}>
             {project !== null ? <Pill theme={theme} label={project.slug} mono /> : null}
-            {/* The seat bridges (v0.0.20, ADR 0013 §3): ALWAYS rendered once a
-                Project is selected — Start when the seat is vacant, Open when
-                it lives — so a brand-new Project offers its header action on
-                day one. Both ride the shell's ensure-then-open wiring, which
-                creates the seat when none exists. */}
+            {/* The seat states (v0.0.27, ADR 0017 §3): a seat starts only from
+                Paseo's native New Chat picker ("Supervisor (Factory)") — the
+                Supervisor spawns the Lead itself. The Header reports each
+                seat's live status with an Open jump to its conversation while
+                it lives, and the picker hint while it is vacant. */}
             {project !== null ? (
               <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1.5], flexWrap: "wrap" }}>
-                <Btn
-                  theme={theme}
-                  small
-                  icon="Shield"
-                  label={supervisorLive ? "Open Supervisor" : "Start Supervisor"}
-                  tone="accent"
-                  disabled={actions.busy}
-                  onPress={() => actions.openSupervisor("")}
-                />
-                <Btn
-                  theme={theme}
-                  small
-                  icon="Compass"
-                  label={leadLive ? "Open Lead" : "Start Lead"}
-                  tone="accent"
-                  disabled={actions.busy}
-                  onPress={() => actions.openLead()}
-                />
+                {view.supervisor !== null ? (
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1.5], flexWrap: "wrap" }}>
+                    <SeatState theme={theme} name="Supervisor" status={view.supervisor.status} />
+                    <Btn theme={theme} small icon="Shield" label="Open Supervisor" tone="accent" onPress={() => actions.openSupervisor()} />
+                  </View>
+                ) : (
+                  <Text style={text(theme, "meta")}>Select "Supervisor (Factory)" in New Chat to start</Text>
+                )}
+                {view.lead !== null ? (
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1.5], flexWrap: "wrap" }}>
+                    <SeatState theme={theme} name="Lead" status={view.lead.status} />
+                    <Btn theme={theme} small icon="Compass" label="Open Lead" tone="accent" onPress={() => actions.openLead()} />
+                  </View>
+                ) : (
+                  <Text style={text(theme, "meta")}>Spawned automatically by Supervisor</Text>
+                )}
                 {confirmingReset ? (
                   <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1] }}>
                     <Btn

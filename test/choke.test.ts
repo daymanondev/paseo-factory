@@ -6,7 +6,13 @@ import { join } from "node:path";
 import type { AgentPermissionRequest, AgentPermissionResponse } from "@getpaseo/protocol/agent-types";
 import { createFactory } from "../plugin/server/core/factory.ts";
 import { writeProjectRegistration } from "../plugin/server/core/project.ts";
-import { createChoke, isContractedAgentCwd, normalizeAgentCreateRequest } from "../plugin/server/choke.ts";
+import {
+  createChoke,
+  inferSeatFromProviderId,
+  isContractedAgentCwd,
+  normalizeAgentCreateRequest,
+  resolveSeatAtProjectRoot,
+} from "../plugin/server/choke.ts";
 import type { PaseoResponderApi } from "../plugin/server/choke.ts";
 import { isSeatMemoryPathAllowed, judgeFilePath, judgeShellCommand, refuseGitArgv, shellTokens, writableRootsFor } from "../src/choke.ts";
 import { GIT_ARGV_CASES, SHELL_CASES, shellRoots } from "./choke-cases.ts";
@@ -739,6 +745,115 @@ test("choke.onPermissionAsked enforces seat-paseo-tool-fence and denies factory 
     (e) => e.event === "permit_denied" && e.rule === "seat-paseo-tool-fence",
   );
   assert.equal(toolFenceEvents.length, 5);
+});
+
+test("choke.onPermissionAsked enforces seat-write-fence and seat-paseo-tool-fence on factory-supervisor / factory-lead provider sessions regardless of title or labels (v0.0.27, ADR 0017 §2)", async (t) => {
+  const dir = makeTempDir("choke-provider-seat-");
+  disposeDir(t, dir);
+  const workspace = join(dir, "repo");
+  const stateDir = join(dir, "state");
+  mkdirSync(workspace, { recursive: true });
+  writeFileSync(join(workspace, "probe.txt"), "x\n");
+  gitCommitAll(workspace, "base");
+
+  const factory = createFactory({ stateDir });
+  const choke = createChoke({ factory, homeDir: "/fake-home" });
+
+  const sent: { agentId: string; requestId: string; response: AgentPermissionResponse }[] = [];
+  const paseo: PaseoResponderApi = {
+    agents: {
+      ref(agentId: string) {
+        return {
+          async respondToPermission({ requestId, response }) {
+            sent.push({ agentId, requestId, response });
+          },
+        };
+      },
+    },
+  };
+
+  // The re-exported recognition map, pinned at the choke seam.
+  assert.equal(inferSeatFromProviderId("factory-supervisor"), "supervisor");
+  assert.equal(inferSeatFromProviderId("factory-lead"), "lead");
+  assert.equal(inferSeatFromProviderId("factory-peer"), "agent");
+  assert.equal(inferSeatFromProviderId("opencode/opencode/glm-5.1"), undefined);
+
+  // 1. Provider id alone — an arbitrary natural-language title and empty labels —
+  //    denies product-source writes with seat-write-fence.
+  for (const [index, provider] of ["factory-supervisor", "factory-lead"].entries()) {
+    await choke.onPermissionAsked(
+      {
+        agent: { id: `picker-${index}`, cwd: workspace, provider, title: "Hãy xây dựng một tựa game 3D", labels: {} },
+        request: {
+          id: `prov-write-${index}`,
+          provider: "opencode",
+          name: "Write",
+          kind: "tool",
+          detail: { type: "write", filePath: "src/GameStore.ts", content: "export const x = 1;\n" },
+        },
+      },
+      paseo,
+    );
+    const denial = sent.at(-1)?.response;
+    assert.equal(denial?.behavior, "deny", `${provider} session denied a product-source write by provider id alone`);
+    if (denial?.behavior === "deny") {
+      assert.match(denial.message ?? "", /Seat write fence/);
+    }
+  }
+  const seatDenials = factory.ledger.events.filter((e) => e.event === "permit_denied" && e.rule === "seat-write-fence");
+  assert.equal(seatDenials.length, 2, "both provider-recognized denials ledger as seat-write-fence");
+
+  // 2. The raw Paseo tool fence holds on a provider-recognized session too.
+  await choke.onPermissionAsked(
+    {
+      agent: { id: "picker-tool", cwd: workspace, provider: "factory-supervisor", title: "anything", labels: {} },
+      request: { id: "prov-tool-1", provider: "opencode", name: "mcp__paseo__create_agent", kind: "tool" },
+    },
+    paseo,
+  );
+  assert.equal(sent.at(-1)?.response.behavior, "deny", "the raw Paseo agent tool is denied on a factory-supervisor session");
+  const toolFence = factory.ledger.events.filter((e) => e.event === "permit_denied" && e.rule === "seat-paseo-tool-fence");
+  assert.equal(toolFence.length, 1);
+
+  // 3. resolveSeatAtProjectRoot maps the provider id directly, title and labels aside.
+  assert.deepEqual(
+    resolveSeatAtProjectRoot(stateDir, { id: "x-lead", cwd: workspace, provider: "factory-lead", title: "nope", labels: {} }),
+    { seat: "lead", projectRoot: workspace },
+  );
+  assert.equal(resolveSeatAtProjectRoot(stateDir, { id: "x-peer", cwd: workspace, provider: "factory-peer", title: "nope", labels: {} }), undefined);
+});
+
+test("normalizeAgentCreateRequest keeps factory role provider ids canonical and labels provider-recognized seats at a registered <project-root> (v0.0.27, ADR 0017 §2)", (t) => {
+  const dir = makeTempDir("choke-normalize-factory-");
+  disposeDir(t, dir);
+  const workspace = join(dir, "ai-test");
+  const stateDir = join(dir, "state");
+  mkdirSync(workspace, { recursive: true });
+
+  writeProjectRegistration(stateDir, "ai-test-043c7e", {
+    root: workspace,
+    supervisor: "sup-1",
+    lead: "lead-1",
+  });
+
+  const sup = normalizeAgentCreateRequest(
+    { config: { provider: "factory-supervisor", cwd: workspace, title: "Hãy xây dựng một tựa game 3D" } },
+    stateDir,
+  );
+  assert.equal(sup.config.provider, "factory-supervisor", "the role provider id is never prefixed as a bare model");
+  assert.deepEqual(sup.config.labels, { seat: "supervisor", project: "ai-test-043c7e" });
+  assert.deepEqual(sup.labels, { seat: "supervisor", project: "ai-test-043c7e" });
+
+  const lead = normalizeAgentCreateRequest({ config: { provider: "factory-lead", cwd: workspace, title: "any message" } }, stateDir);
+  assert.equal(lead.config.provider, "factory-lead");
+  assert.deepEqual(lead.config.labels, { seat: "lead", project: "ai-test-043c7e" });
+
+  // factory-peer is a working-agent provider, not a seat-fence seat — no labels
+  // attached, and the id stays canonical.
+  const peer = normalizeAgentCreateRequest({ config: { provider: "factory-peer", cwd: workspace } }, stateDir);
+  assert.equal(peer.config.provider, "factory-peer");
+  assert.equal(peer.config.labels, undefined);
+  assert.equal(peer.labels, undefined);
 });
 
 

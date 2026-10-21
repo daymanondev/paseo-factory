@@ -9,6 +9,7 @@
 import { chmodSync, copyFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { isElectronNodeBinary } from "./pi-home.ts";
 
 export interface ProvisionAgyPluginOptions {
   stateDir: string;
@@ -108,6 +109,9 @@ export function provisionAgyPlugin(options: ProvisionAgyPluginOptions): string {
       paseo_factory: {
         command: nodePath,
         args: [bridgeBinPath, "--state-dir", options.stateDir],
+        // Paseo Desktop's execPath is an Electron helper — bridge.mjs must run
+        // in Node mode (v0.0.27, ADR 0017 §2).
+        ...(isElectronNodeBinary(nodePath) ? { env: { ELECTRON_RUN_AS_NODE: "1" } } : {}),
       },
     },
   };
@@ -120,7 +124,9 @@ export function provisionAgyPlugin(options: ProvisionAgyPluginOptions): string {
           hooks: [
             {
               type: "command",
-              command: `${quoted(nodePath)} ${quoted(agyHookBinPath)}`,
+              // The hook is a Node script too — under Paseo Desktop it runs the
+              // same Electron binary in Node mode.
+              command: `${isElectronNodeBinary(nodePath) ? "ELECTRON_RUN_AS_NODE=1 " : ""}${quoted(nodePath)} ${quoted(agyHookBinPath)}`,
             },
           ],
         },

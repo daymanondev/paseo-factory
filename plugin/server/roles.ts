@@ -1,14 +1,17 @@
 /**
- * The role-contract layer (v0.0.14, ADR 0010 §1–§2/§6; v0.0.26, ADR 0016 §1/§3):
- * additive injection of the `Supervisor`, `Lead`, and working-`Agent` role
- * contracts, `Correlation token` issuance/association, `paseo_factory` MCP
- * bridge wiring, and Layer-1 provider execution fences across all 7 providers
- * (`opencode`, `claude`, `codex`, `pi`, `copilot`, `omp`, `antigravity`).
+ * The role-contract layer (v0.0.14, ADR 0010 §1–§2/§6; v0.0.26, ADR 0016 §1/§3;
+ * v0.0.27, ADR 0017 §2): additive injection of the `Supervisor`, `Lead`, and
+ * working-`Agent` role contracts, `Correlation token` issuance/association,
+ * `paseo_factory` MCP bridge wiring, Layer-1 provider execution fences across
+ * all 7 providers (`opencode`, `claude`, `codex`, `pi`, `copilot`, `omp`,
+ * `antigravity`), and deterministic seat recognition by native role provider
+ * id (`factory-supervisor`, `factory-lead`, `factory-peer`).
  */
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { provisionAgyPlugin, ensureFactoryBinScripts } from "./core/agy-home.ts";
 import { CorrelationRegistry } from "./core/correlations.ts";
+import { loadLanes, parseLane } from "./core/lanes.ts";
 import { resolveProject } from "./core/project.ts";
 import { provisionPiAgentHome } from "./core/pi-home.ts";
 import {
@@ -19,7 +22,7 @@ import {
   renderSeatBootstrapPrompt,
 } from "./core/roles-contract.ts";
 import type { ProjectIdentity, RoleName, SeatBootstrapInput, SeatName } from "./core/roles-contract.ts";
-import { listProjectRegistrations } from "./projects.ts";
+import { ensureProjectRegistered, listProjectRegistrations, readProjectRegistration, writeProjectRegistration } from "./projects.ts";
 import { parseTaskWorktreePath } from "../shared/worktree-shape.mjs";
 
 export { ROLE_SKILL_INDEX, SEAT_TITLES } from "./core/roles-contract.ts";
@@ -110,6 +113,44 @@ export interface AgentCreateRequest {
   env?: Record<string, string>;
 }
 
+// ---- deterministic seat identity by provider id (v0.0.27, ADR 0017 §2) ----------------------
+
+/**
+ * The canonical native Paseo role provider ids (ADR 0017 §2): one provider per
+ * factory role, reconciled into `<paseoHome>/config.json` by the role-provider
+ * reconciler (`src/role-providers.ts`). This table is the plugin-side
+ * recognition map only — the provider definitions live with the reconciler.
+ */
+export const FACTORY_SEAT_PROVIDER_IDS: Readonly<Record<RoleName, string>> = {
+  supervisor: "factory-supervisor",
+  lead: "factory-lead",
+  agent: "factory-peer",
+};
+
+const FACTORY_ROLE_BY_PROVIDER_ID: Readonly<Partial<Record<string, RoleName>>> = {
+  "factory-supervisor": "supervisor",
+  "factory-lead": "lead",
+  "factory-peer": "agent",
+  "factory-agent": "agent",
+};
+
+/**
+ * The deterministic seat recognition (ADR 0017 §2): `factory-supervisor` →
+ * `supervisor`, `factory-lead` → `lead`, `factory-peer` / `factory-agent` →
+ * `agent` — straight from the provider id, regardless of title or labels.
+ * Accepts the bare provider id or a `provider/model` form; anything else is
+ * undefined, never a guess.
+ */
+export function inferRoleFromProviderId(provider: unknown): RoleName | undefined {
+  if (typeof provider !== "string") return undefined;
+  return FACTORY_ROLE_BY_PROVIDER_ID[provider.trim().split("/")[0] ?? ""];
+}
+
+/** The three factory role names as they appear in `PASEO_FACTORY_SEAT`. */
+function parseRoleName(value: unknown): RoleName | undefined {
+  return value === "supervisor" || value === "lead" || value === "agent" ? value : undefined;
+}
+
 function inferRoleSeatFromTitleOrLabels(
   title: string | null | undefined,
   labels?: Record<string, string>,
@@ -136,7 +177,48 @@ function inferRoleSeatFromTitleOrLabels(
   ) {
     return "lead";
   }
+  // The normal-chat `/factory <directive>` entrypoint (ADR 0015 §5) — the
+  // Owner's dispatcher session fences as a Supervisor seat (ADR 0017 §2).
+  if (trimmed.startsWith("/factory")) {
+    return "supervisor";
+  }
   return undefined;
+}
+
+/**
+ * The provider family a fence keys on: the id before the first `/`, with the
+ * two Paseo aliases normalized (`claude-code` → `claude`, `agy` → `antigravity`).
+ */
+function providerFamilyOf(rawProvider: string): string {
+  const rawFamily = rawProvider.split("/")[0]?.trim().toLowerCase() ?? "";
+  return rawFamily === "claude-code" ? "claude" : rawFamily === "agy" ? "antigravity" : rawFamily;
+}
+
+/** The Lane config key naming the harness behind one factory role. */
+function laneNameForRole(role: RoleName): "supervisor" | "lead" | "worker" {
+  return role === "supervisor" ? "supervisor" : role === "lead" ? "lead" : "worker";
+}
+
+/**
+ * Resolves the harness family a `factory-*` role provider actually runs on
+ * (v0.0.27, ADR 0017 §2): the role's Lane config names the underlying harness,
+ * so `factory-supervisor` under an `opencode/...` supervisor lane fences
+ * exactly like a raw `opencode` session. Non-factory providers resolve to
+ * their own family; an unreadable Lane config degrades to the raw provider's
+ * family — never a guess.
+ */
+export function resolveEffectiveProviderFamily(
+  provider: string | undefined,
+  role: RoleName,
+  stateDir: string,
+  projectSlug: string,
+): string {
+  const rawProvider = typeof provider === "string" ? provider.trim() : "";
+  if (inferRoleFromProviderId(rawProvider) === undefined) return providerFamilyOf(rawProvider);
+  const loaded = loadLanes(stateDir, projectSlug);
+  const lane = loaded.ok ? loaded.lanes[laneNameForRole(role)] : undefined;
+  const parsed = lane !== undefined ? parseLane(lane) : undefined;
+  return parsed === undefined ? providerFamilyOf(rawProvider) : providerFamilyOf(parsed.provider);
 }
 
 /**
@@ -154,12 +236,17 @@ export function applyProviderExecutionFence<T extends AgentCreateRequest["config
     task?: string;
     userHome?: string;
     agyPluginsDir?: string;
+    /**
+     * The harness family the fence keys on (v0.0.27, ADR 0017 §2) — pass
+     * `resolveEffectiveProviderFamily(...)` so a `factory-*` role provider
+     * fences like its underlying harness. Defaults to the config's own family.
+     */
+    providerFamily?: string;
   },
 ): T {
   const { role, stateDir, correlationId, projectSlug, task, userHome, agyPluginsDir } = input;
   const rawProvider = typeof config.provider === "string" ? config.provider.trim() : "";
-  const rawFamily = rawProvider.split("/")[0]?.trim().toLowerCase() ?? "";
-  const providerFamily = rawFamily === "claude-code" ? "claude" : rawFamily === "agy" ? "antigravity" : rawFamily;
+  const providerFamily = input.providerFamily ?? providerFamilyOf(rawProvider);
 
   const { bridgeBinPath } = ensureFactoryBinScripts(stateDir);
   const nextConfig: Record<string, unknown> = { ...config };
@@ -191,6 +278,10 @@ export function applyProviderExecutionFence<T extends AgentCreateRequest["config
           ...(task !== undefined ? ["--task", task] : []),
         ],
         env: {
+          // Paseo Desktop's process.execPath is an Electron helper binary —
+          // without Node mode it aborts at startup and the MCP connection
+          // fails on agent.create (v0.0.27, ADR 0017 §2, problem 3).
+          ELECTRON_RUN_AS_NODE: "1",
           PASEO_FACTORY_CORRELATION: correlationId,
           PASEO_FACTORY_SEAT: role,
           PASEO_FACTORY_STATE_DIR: stateDir,
@@ -307,74 +398,104 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
   const reqLabels =
     (request as { labels?: Record<string, string> }).labels ??
     (request.config as { labels?: Record<string, string> }).labels;
-  const seat = inferRoleSeatFromTitleOrLabels(request.config.title, reqLabels);
   const correlations = new CorrelationRegistry(stateDir);
 
-  if (seat !== undefined) {
-    const project = resolveProject(request.config.cwd);
-    if (!project.ok) return undefined; // a seat title on a non-repo cwd is not ours to guess about
-    const issued = correlations.issue({
-      role: seat,
-      projectSlug: project.slug,
-      projectRoot: project.root,
-    });
-    const fencedConfig = applyProviderExecutionFence(
-      {
-        ...request.config,
-        systemPrompt: appendContract(request.config.systemPrompt, renderSeatContract(seat, project)),
-      },
-      {
-        role: seat,
-        stateDir,
-        correlationId: issued.correlationId,
-        projectSlug: project.slug,
-        userHome,
-      },
-    );
-    return sanitizeAgentCreateHookResult({
-      config: fencedConfig,
-      env: {
-        ...(request.env ?? {}),
-        ...factoryEnvFor(seat, { stateDir, project, correlationId: issued.correlationId, userHome }),
-      },
-    }) as R;
+  // The deterministic identity ladder (v0.0.27, ADR 0017 §2): the native role
+  // provider id first, then the `PASEO_FACTORY_SEAT` env stamp, then the
+  // legacy title/labels inference (titles starting with `/factory` included).
+  const providerSeat = inferRoleFromProviderId(request.config.provider);
+  const envSeat = parseRoleName(request.env?.PASEO_FACTORY_SEAT);
+  const titleSeat = inferRoleSeatFromTitleOrLabels(request.config.title, reqLabels);
+  const role: RoleName | undefined = providerSeat ?? envSeat ?? titleSeat;
+
+  // A managed Task worktree keeps its task-bound path — the correlation and
+  // the contract both carry the task id — whatever named the role.
+  if (role === undefined || role === "agent") {
+    const worktree = parseTaskWorktreePath(stateDir, request.config.cwd);
+    if (worktree !== null) {
+      const reg = listProjectRegistrations(stateDir).find((r) => r.slug === worktree.slug);
+      const projectRoot = reg?.root ?? "";
+      const issued = correlations.issue({
+        role: "agent",
+        projectSlug: worktree.slug,
+        projectRoot: projectRoot !== "" ? projectRoot : request.config.cwd,
+        task: worktree.task,
+      });
+      const fencedConfig = applyProviderExecutionFence(
+        {
+          ...request.config,
+          systemPrompt: appendContract(request.config.systemPrompt, renderAgentContract(worktree.task, worktree.slug)),
+        },
+        {
+          role: "agent",
+          stateDir,
+          correlationId: issued.correlationId,
+          projectSlug: worktree.slug,
+          task: worktree.task,
+          userHome,
+          // A `factory-peer` spawn (ADR 0017 §2) fences under the worker
+          // lane's harness — without this, `providerFamilyOf("factory-peer")`
+          // matches no family and the Layer-1 agent fence silently no-ops.
+          providerFamily: resolveEffectiveProviderFamily(request.config.provider, "agent", stateDir, worktree.slug),
+        },
+      );
+      return sanitizeAgentCreateHookResult({
+        config: fencedConfig,
+        env: {
+          ...(request.env ?? {}),
+          ...factoryEnvFor("agent", {
+            stateDir,
+            project: { root: projectRoot, slug: worktree.slug },
+            task: worktree.task,
+            correlationId: issued.correlationId,
+            userHome,
+          }),
+        },
+      }) as R;
+    }
+    if (role === undefined) return undefined;
   }
 
-  const worktree = parseTaskWorktreePath(stateDir, request.config.cwd);
-  if (worktree === null) return undefined;
-  const reg = listProjectRegistrations(stateDir).find((r) => r.slug === worktree.slug);
-  const projectRoot = reg?.root ?? "";
+  // The seat path (v0.0.27, ADR 0017 §2): provider/env-recognized seats and
+  // title-inferred seats alike register the Project, issue a Correlation
+  // token, and fence under the harness resolved from Lane config — so a
+  // `factory-supervisor` chat with the user's message as its title still gets
+  // its underlying harness's Layer-1 fence.
+  const project = resolveProject(request.config.cwd);
+  if (!project.ok) return undefined; // a seat identity on a non-repo cwd is not ours to guess about
+  const registered = ensureProjectRegistered(stateDir, project.root);
+  const projectIdentity: ProjectIdentity = registered.ok
+    ? { root: registered.root, slug: registered.slug }
+    : { root: project.root, slug: project.slug };
   const issued = correlations.issue({
-    role: "agent",
-    projectSlug: worktree.slug,
-    projectRoot: projectRoot !== "" ? projectRoot : request.config.cwd,
-    task: worktree.task,
+    role,
+    projectSlug: projectIdentity.slug,
+    projectRoot: projectIdentity.root,
   });
   const fencedConfig = applyProviderExecutionFence(
     {
       ...request.config,
-      systemPrompt: appendContract(request.config.systemPrompt, renderAgentContract(worktree.task, worktree.slug)),
+      systemPrompt: appendContract(
+        request.config.systemPrompt,
+        role === "agent"
+          ? renderRoleContract("agent", { factoryCmd: "factory", project: projectIdentity })
+          : renderSeatContract(role, projectIdentity),
+      ),
     },
     {
-      role: "agent",
+      role,
       stateDir,
       correlationId: issued.correlationId,
-      projectSlug: worktree.slug,
-      task: worktree.task,
+      projectSlug: projectIdentity.slug,
       userHome,
+      providerFamily: resolveEffectiveProviderFamily(request.config.provider, role, stateDir, projectIdentity.slug),
     },
   );
   return sanitizeAgentCreateHookResult({
     config: fencedConfig,
     env: {
       ...(request.env ?? {}),
-      ...factoryEnvFor("agent", {
-        stateDir,
-        project: { root: projectRoot, slug: worktree.slug },
-        task: worktree.task,
-        correlationId: issued.correlationId,
-        userHome,
-      }),
+      ...factoryEnvFor(role, { stateDir, project: projectIdentity, correlationId: issued.correlationId, userHome }),
     },
   }) as R;
 }
@@ -384,12 +505,43 @@ function appendContract(existing: string | undefined, contract: string): string 
 }
 
 /**
+ * The ADR 0017 §2 seat binding: a session recognized as `supervisor` or
+ * `lead` records `<seat>: agentId` in `<stateDir>/projects/<slug>/project.json`
+ * — the binding Lead completion reports (`to: "supervisor"`) route back into —
+ * but never displaces another session already bound to the seat: the
+ * rotate/revoke paths clear a dead binding first, so an occupied seat means a
+ * live session holds it. Returns whether `agentId` owns the seat afterwards.
+ */
+function bindSeatAgentId(
+  stateDir: string,
+  slug: string,
+  root: string,
+  seat: "supervisor" | "lead",
+  agentId: string,
+): boolean {
+  const registration = readProjectRegistration(stateDir, slug);
+  const bound = seat === "supervisor" ? registration?.supervisor : registration?.lead;
+  if (bound === agentId) return true;
+  if (bound !== undefined) return false; // another live session holds the seat
+  writeProjectRegistration(stateDir, slug, { root, ...(seat === "supervisor" ? { supervisor: agentId } : { lead: agentId }) });
+  return true;
+}
+
+/**
  * The `agent.session_open` injection (channel 3): every launch of a seat or
- * working-agent shell re-carries its `PASEO_FACTORY_*` identity and associates
- * the live `agentId` with its `Correlation token` in `<stateDir>/correlations.json`.
+ * working-agent shell re-carries its `PASEO_FACTORY_*` identity, associates
+ * the live `agentId` with its `Correlation token` in `<stateDir>/correlations.json`,
+ * and — since v0.0.27 (ADR 0017 §2) — binds a provider- or env-recognized
+ * `supervisor` / `lead` session to its Project's `project.json`.
  */
 export function injectSessionEnv<
-  R extends { agentId: string; cwd: string; env: Record<string, string>; config?: { env?: Record<string, string> } },
+  R extends {
+    agentId: string;
+    cwd: string;
+    env: Record<string, string>;
+    provider?: string | null;
+    config?: { env?: Record<string, string> };
+  },
 >(
   request: R,
   stateDir: string,
@@ -402,6 +554,12 @@ export function injectSessionEnv<
   if (typeof existingCorrId === "string" && existingCorrId.trim() !== "") {
     const associated = correlations.associate(existingCorrId.trim(), request.agentId);
     if (associated !== undefined) {
+      if (associated.role === "supervisor" || associated.role === "lead") {
+        const project = resolveProject(request.cwd);
+        if (project.ok && project.slug === associated.projectSlug) {
+          bindSeatAgentId(stateDir, project.slug, project.root, associated.role, request.agentId);
+        }
+      }
       return {
         ...request,
         env: {
@@ -495,6 +653,37 @@ export function injectSessionEnv<
         }),
       },
     };
+  }
+
+  // The native role-provider channel (v0.0.27, ADR 0017 §2): a
+  // `factory-supervisor` / `factory-lead` session (or one stamped
+  // `PASEO_FACTORY_SEAT`) opening at a Git repository binds its `agentId` to
+  // the Project's seat in `project.json` — never displacing another bound
+  // session — and re-carries its factory env, so a native `Supervisor
+  // (Factory)` chat needs no custom bootstrap to own the Project's mailbox.
+  const identitySeat = inferRoleFromProviderId(request.provider) ?? parseRoleName(request.env?.PASEO_FACTORY_SEAT);
+  if (identitySeat === "supervisor" || identitySeat === "lead") {
+    const project = resolveProject(request.cwd);
+    if (project.ok) {
+      bindSeatAgentId(stateDir, project.slug, project.root, identitySeat, request.agentId);
+      const record = resolveOrAssociate({
+        role: identitySeat,
+        projectSlug: project.slug,
+        projectRoot: project.root,
+      });
+      return {
+        ...request,
+        env: {
+          ...request.env,
+          ...factoryEnvFor(identitySeat, {
+            stateDir,
+            project,
+            correlationId: record?.correlationId,
+            userHome,
+          }),
+        },
+      };
+    }
   }
   return undefined;
 }

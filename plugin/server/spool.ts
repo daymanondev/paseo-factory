@@ -27,7 +27,9 @@ import { needsHumanEvidenceIsValid, NEEDS_HUMAN_REASONS } from "./core/events.ts
 import type { Factory } from "./core/factory.ts";
 import type { LedgerEvent, MeterUsage, NeedsHumanEvidence, NeedsHumanReason, Verdict } from "./core/events.ts";
 import { readCorrelations } from "./core/correlations.ts";
+import { loadLanes, parseLane } from "./core/lanes.ts";
 import { listProjectRegistrations, readProjectRegistration, resolveProject, writeProjectRegistration } from "./core/project.ts";
+import { FACTORY_SEAT_PROVIDER_IDS } from "./roles.ts";
 import { acceptanceSummary, archiveAcceptedTaskWorkspace } from "./surface-rpc.ts";
 import type { SurfaceDaemonApi } from "./surface-rpc.ts";
 
@@ -779,6 +781,44 @@ async function resolveSpawnWorkspaceAndParent(
 }
 
 /**
+ * The peer spawn's effective provider (v0.0.27, ADR 0017 §2): the reconciled
+ * `factory-peer` role provider when the daemon advertises it and the spawn
+ * rides the Project's configured `worker` lane (or names no provider at all);
+ * any explicit provider/model override — and any daemon without the role
+ * provider — keeps the requested lane verbatim (full backward compatibility).
+ */
+async function resolvePeerSpawnProvider(
+  factory: Factory,
+  daemon: SurfaceDaemonApi | undefined,
+  requestedProvider: string,
+  projectSlug: string | undefined,
+): Promise<string> {
+  if (daemon?.providers?.listAvailable === undefined) return requestedProvider;
+  if (requestedProvider !== "") {
+    if (projectSlug === undefined) return requestedProvider;
+    const loaded = loadLanes(factory.stateDir, projectSlug);
+    if (!loaded.ok) return requestedProvider;
+    const parsedRequested = parseLane(requestedProvider);
+    const parsedWorker = parseLane(loaded.lanes.worker);
+    const isDefaultWorkerLane =
+      parsedRequested !== undefined &&
+      parsedWorker !== undefined &&
+      parsedRequested.provider === parsedWorker.provider &&
+      parsedRequested.model === parsedWorker.model;
+    if (!isDefaultWorkerLane) return requestedProvider; // an explicit override keeps its own model
+  }
+  try {
+    const listed = await daemon.providers.listAvailable();
+    if (!listed.providers.some((entry) => entry.provider === FACTORY_SEAT_PROVIDER_IDS.agent && entry.available)) {
+      return requestedProvider;
+    }
+  } catch {
+    return requestedProvider;
+  }
+  return FACTORY_SEAT_PROVIDER_IDS.agent;
+}
+
+/**
  * Runs one request through the factory — the single place a spool request
  * becomes Ledger events or a Gate run. Never throws: every failure becomes a
  * red-flagged reply, so the waiting CLI always hears something. `ask` requests
@@ -797,6 +837,7 @@ export async function handleSpoolRequest(
   daemon?: SurfaceDaemonApi | (() => SurfaceDaemonApi | undefined),
   projectResetHandler?: ProjectResetHandler,
   sanitizeLane?: SanitizeLaneHandler,
+  home?: string,
 ): Promise<SpoolReply> {
   const resolvedDaemon = resolveDaemonArg(daemon);
   try {
@@ -1008,6 +1049,10 @@ export async function handleSpoolRequest(
       const spawnMeta = await resolveSpawnWorkspaceAndParent(factory, resolvedDaemon, request.task, request.worktree);
       let spawnedAgentId: string | undefined;
       if (request.prompt !== undefined && request.prompt !== "" && resolvedDaemon !== undefined) {
+        // The Peer spawns under the `factory-peer` role provider when it can
+        // (v0.0.27, ADR 0017 §2) — `paseoTools` off, seat env on — falling back
+        // to the requested lane verbatim.
+        const peerProvider = await resolvePeerSpawnProvider(factory, resolvedDaemon, sanitizedProvider, spawnMeta.projectSlug);
         const contract = factory.contractFor(request.task);
         const targetCwd = request.worktree ?? contract?.workspace ?? "";
         const proj = contract !== undefined ? resolveProject(contract.workspace) : undefined;
@@ -1018,7 +1063,7 @@ export async function handleSpoolRequest(
         };
         if (spawnMeta.workspaceId !== undefined && resolvedDaemon.workspaces !== undefined) {
           const created = await resolvedDaemon.workspaces.ref(spawnMeta.workspaceId).agents.create({
-            config: { provider: sanitizedProvider },
+            config: { provider: peerProvider },
             title: request.task,
             labels,
             prompt: request.prompt,
@@ -1027,7 +1072,7 @@ export async function handleSpoolRequest(
           spawnedAgentId = created.id;
         } else if (typeof resolvedDaemon.agents?.create === "function") {
           const created = await resolvedDaemon.agents.create({
-            config: { provider: sanitizedProvider },
+            config: { provider: peerProvider },
             cwd: targetCwd,
             title: request.task,
             labels,
@@ -1150,7 +1195,7 @@ export async function handleSpoolRequest(
     // stamp; the Lead's conditional authority is judged below in the factory.
     const acceptedBy = request.by ?? request.submitter;
     const accepted = await factory.accept({ task: request.task, attempt: request.attempt, accepted_by: acceptedBy });
-    await archiveAcceptedTaskWorkspace(factory, resolvedDaemon, request.task);
+    await archiveAcceptedTaskWorkspace(factory, resolvedDaemon, request.task, home);
     return {
       id: request.id,
       ok: true,
@@ -1192,6 +1237,12 @@ export interface SpoolOptions {
   daemon?: SurfaceDaemonApi | (() => SurfaceDaemonApi | undefined);
   /** Sanitizes `<provider>/<model>[:<thinking>]` lane strings before spawn/respawn (v0.0.24, ADR 0015 §1). */
   sanitizeLane?: SanitizeLaneHandler;
+  /**
+   * The daemon `home` the accept path's worktree-record sweep targets
+   * (v0.0.27, ADR 0017 §4) — the resolved `<paseoHome>`, never the
+   * `PASEO_HOME`-env fallback the daemon may not set in this process.
+   */
+  home?: string;
 }
 
 export type SpoolDeps = SpoolOptions;
@@ -1248,6 +1299,7 @@ export function startSpool(stateDir: string, factory: Factory, options: SpoolOpt
         options.daemon,
         options.projectReset,
         options.sanitizeLane,
+        options.home,
       )
         .catch(() => {})
         .finally(() => inFlight.delete(id));
@@ -1281,6 +1333,7 @@ async function handleRequestFile(
   daemon?: SurfaceDaemonApi | (() => SurfaceDaemonApi | undefined),
   projectResetHandler?: ProjectResetHandler,
   sanitizeLane?: SanitizeLaneHandler,
+  home?: string,
 ): Promise<void> {
   let reply: SpoolReply;
   let request: SpoolRequest | undefined;
@@ -1305,6 +1358,7 @@ async function handleRequestFile(
       daemon,
       projectResetHandler,
       sanitizeLane,
+      home,
     );
 
     // The v0.0.9 stamps make the two Owner acts attributable in the log too —

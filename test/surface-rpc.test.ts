@@ -706,6 +706,50 @@ test("supervisor.ensure: a projectRoot git cannot answer for is a named refusal"
   assert.equal(reply.code, "unknown-project");
 });
 
+// ---- the native-picker seats (v0.0.27, ADR 0017 §2) -----------------------------------------
+
+test("snapshot: a native unlabeled factory-supervisor session bound in project.json renders its live state and stays revocable — never a vacant hint (v0.0.27, ADR 0017 §2)", async (t) => {
+  const project = makeProject(t, "native-snap");
+  const other = makeProject(t, "native-snap-other");
+  const { stateDir, handlers, stopped, fake } = makeSurface(t, [
+    // The native New Chat path: the user's message is the title, labels stay
+    // empty, and only the session_open binding names the seat.
+    { id: "native-sup-1", provider: "factory-supervisor", title: "Hãy xây dựng một tựa game 3D", cwd: project.root },
+    { id: "neighbor-sup", provider: "factory-supervisor", title: "a neighbor chat", cwd: other.root },
+  ]);
+  writeProjectRegistration(stateDir, project.slug, { root: project.root, supervisor: "native-sup-1" });
+
+  const snap = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  assert.ok(snap.view.supervisor !== null && snap.view.supervisor.id === "native-sup-1", "the bound native session is the Project's supervisor");
+  assert.equal(snap.view.supervisor.seat, "supervisor", "the recognized seat rides the AgentView the Header and Seat Graph render");
+  assert.ok(snap.view.agents.some((agent) => agent.id === "native-sup-1"), "the native session is in scope as an agent card");
+  assert.equal(snap.view.agents.some((agent) => agent.id === "neighbor-sup"), false, "a neighbor Project's native seat stays out");
+
+  const revoked = await handlers.supervisorRevoke({ projectRoot: project.root });
+  assert.ok(revoked.ok, revoked.ok ? "" : revoked.error);
+  assert.equal(revoked.agentId, "native-sup-1");
+  assert.deepEqual(stopped, ["native-sup-1"], "Revoke finds the native session by identity");
+  assert.deepEqual(fake.archived, ["native-sup-1"], "then archives it");
+});
+
+test("supervisor.ensure: a project.json-bound factory-supervisor session is the Project's seat — never duplicated, retired, or displaced (v0.0.27, ADR 0017 §2)", async (t) => {
+  const project = makeProject(t, "native-ensure");
+  const { stateDir, handlers, fake } = makeSurface(t, [
+    { id: "native-sup-1", provider: "factory-supervisor", title: "any first message", cwd: project.root },
+  ]);
+  writeLanes(stateDir, { supervisor: "opencode/opencode/glm-5.1" });
+  writeProjectRegistration(stateDir, project.slug, { root: project.root, supervisor: "native-sup-1" });
+
+  const reply = await handlers.supervisorEnsure({ projectRoot: project.root });
+  assert.ok(reply.ok, reply.ok ? "" : reply.error);
+  assert.equal(reply.created, false, "the native session is reused as the Project's supervisor");
+  assert.equal(reply.agentId, "native-sup-1");
+  assert.equal(fake.created.length, 0, "no duplicate supervisor is spawned under the raw lane");
+  assert.deepEqual(fake.archived, [], "the user's live native chat is never archived as an 'unhealthy' seat over a factory-* provider id");
+  assert.equal(readProjectRegistration(stateDir, project.slug)?.supervisor, "native-sup-1", "the project.json binding is not displaced");
+});
+
 test("supervisor.revoke: stops and archives the Project's supervisor; none is a named refusal", async (t) => {
   const project = makeProject(t, "revoke-sup");
   const { handlers, stopped, fake } = makeSurface(t, [{ id: "agent-sup-9", labels: { seat: "supervisor", project: project.slug } }]);

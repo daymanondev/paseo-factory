@@ -4,8 +4,10 @@
  * Default Worker, Watch & Retro, Fresh-eyes) opening the live
  * provider/model/thinking picker modal, and below them the orthogonal Seat
  * Graph — Owner ⇄ Supervisor ⇄ Lead ⇄ Working Agents — with live Timeline
- * Oracle seqEnd, Open Session (navigation.openAgent), Revoke Supervisor, and
- * Rotate Lead.
+ * Oracle seqEnd, Open (navigation.openAgent), Revoke Supervisor, and Rotate
+ * Lead on live seats (v0.0.27, ADR 0017 §3); vacant seats carry their picker
+ * hints — the Supervisor starts from Paseo's native New Chat picker, the
+ * Lead is spawned automatically by the Supervisor.
  */
 import type { PluginTheme } from "@getpaseo/plugin";
 import { Icon, Modal, ScrollView, TextInput } from "@getpaseo/plugin/client/react-native";
@@ -604,7 +606,7 @@ function AgentCard({
           {retireLabel !== undefined && onRetire !== undefined ? (
             <Btn theme={theme} small icon="RotateCcw" label={retireLabel} tone="statusDanger" disabled={actions.busy} onPress={onRetire} />
           ) : null}
-          <Btn theme={theme} small icon="ExternalLink" label="Open Session" onPress={() => actions.openAgent(agent.id)} />
+          <Btn theme={theme} small icon="ExternalLink" label="Open" onPress={() => actions.openAgent(agent.id)} />
         </View>
       </View>
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: SPACING[1.5] }}>
@@ -773,9 +775,9 @@ export function SeatsPane({
         ) : (
           <SeatNode
             theme={theme}
-            title="Supervisor — vacant"
+            title="Supervisor — not started"
             icon="Shield"
-            subtitle="Conversational delegate for the Owner — chat directly in your Paseo conversation."
+            subtitle={'Select "Supervisor (Factory)" in New Chat to start'}
             pills={[{ label: "seat=supervisor", tone: "foregroundMuted" }, { label: view.lanes.supervisor, mono: true }]}
           />
         )}
@@ -791,9 +793,9 @@ export function SeatsPane({
         ) : (
           <SeatNode
             theme={theme}
-            title="Lead — standby"
+            title="Lead — not started"
             icon="Compass"
-            subtitle="Standing technical seat under the Supervisor — decomposes directives into contracted Tasks and runs the Driver."
+            subtitle="Spawned automatically by Supervisor"
             pills={[{ label: "seat=lead", tone: "foregroundMuted" }, { label: view.lanes.lead, mono: true }]}
           />
         )}

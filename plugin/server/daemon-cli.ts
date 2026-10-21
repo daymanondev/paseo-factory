@@ -20,6 +20,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { delimiter as pathDelimiter, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { isElectronNodeBinary } from "./core/pi-home.ts";
 
 export type DaemonReply = { ok: true } | { ok: false; reason: string };
 
@@ -168,7 +169,15 @@ function bridgeCall(method: string, args: unknown[], home?: string): Promise<Dae
     return Promise.resolve({ ok: false, reason: "the paseo CLI was not found on the plugin's PATH — cannot reach the daemon methods the in-process API lacks" });
   }
   return new Promise((resolve) => {
-    const env = home === undefined ? { ...process.env, NO_COLOR: "1" } : { ...process.env, PASEO_HOME: home, NO_COLOR: "1" };
+    const env = {
+      ...process.env,
+      ...(home === undefined ? {} : { PASEO_HOME: home }),
+      NO_COLOR: "1",
+      // Under Paseo Desktop process.execPath is the Electron helper — the
+      // Node `-e` module eval aborts without Node mode (v0.0.27, ADR 0017 §2,
+      // problem 3 — the bridge.mjs precedent).
+      ...(isElectronNodeBinary(process.execPath) ? { ELECTRON_RUN_AS_NODE: "1" } : {}),
+    };
     const child = spawn(process.execPath, ["--input-type=module", "-e", BRIDGE, pathToFileURL(utils).href, method], {
       env,
       stdio: ["pipe", "pipe", "pipe"],
@@ -605,4 +614,141 @@ export async function checkDaemonPluginUpdates(
   for (const row of rows) map.set(row.id, row);
   pluginUpdateCache.set(home, { statuses: map, checkedAt });
   return { ok: true, statuses: rows, checkedAt };
+}
+
+// ---- the config reload + worktree cleanup bridge (v0.0.27, ADR 0017 §1/§4) ------------------
+//
+// The role-provider reconcile rewrites `<home>/config.json` behind the
+// daemon's back, and removed Task worktree directories strand workspace and
+// project records in Paseo Desktop. Both ride the same session WebSocket the
+// plugin lifecycle speaks: `daemon.config.reload.request` makes the daemon
+// re-read its config, and `archive_workspace_request` +
+// `project.remove.request` are the daemon's delete acts for a workspace and
+// a project (there is no literal `workspace.delete.request` in the protocol
+// — archiving the workspace record is the daemon's own deletion path, the
+// one `handleProjectRemoveRequest` itself walks per workspace).
+
+/**
+ * Asks the daemon to reload its config (`daemon.config.reload.request`) after
+ * `<home>/config.json` changed — fire-and-forget by design: the reconcile
+ * never blocks on the daemon, and a daemon that cannot answer (down, busy,
+ * no socket yet) simply picks the config up on its next restart.
+ */
+export function reloadDaemonConfigViaWs(home: string): void {
+  const call = daemonWsRequestPayload(home, { type: "daemon.config.reload.request" }, "daemon.config.reload.response");
+  if (call === null) return;
+  void call.catch(() => {}); // a failed reload is never the caller's failure
+}
+
+/** True for a plain object — the narrowing helper the cleanup slices use. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** One workspace row from `fetch_workspaces_response` — the structural slice the cleanup reads. */
+export interface DaemonWorkspaceEntry {
+  id: string;
+  projectId?: string | null;
+  projectRootPath?: string | null;
+  workspaceDirectory?: string | null;
+  archivingAt?: string | null;
+}
+
+/** One project row from `project.list.response` — the structural slice the cleanup reads. */
+export interface DaemonProjectEntry {
+  projectId: string;
+  projectRootPath?: string | null;
+}
+
+function daemonWorkspaceEntries(raw: unknown): DaemonWorkspaceEntry[] | null {
+  const entries = isRecord(raw) && Array.isArray((raw as { entries?: unknown }).entries) ? (raw as { entries: unknown[] }).entries : null;
+  if (entries === null) return null;
+  const out: DaemonWorkspaceEntry[] = [];
+  for (const entry of entries) {
+    if (!isRecord(entry) || typeof entry.id !== "string" || entry.id === "") continue;
+    out.push({
+      id: entry.id,
+      ...(typeof entry.projectId === "string" ? { projectId: entry.projectId } : {}),
+      ...(typeof entry.projectRootPath === "string" ? { projectRootPath: entry.projectRootPath } : {}),
+      ...(typeof entry.workspaceDirectory === "string" ? { workspaceDirectory: entry.workspaceDirectory } : {}),
+      ...(typeof entry.archivingAt === "string" ? { archivingAt: entry.archivingAt } : {}),
+    });
+  }
+  return out;
+}
+
+function daemonProjectEntries(raw: unknown): DaemonProjectEntry[] | null {
+  const projects = isRecord(raw) && Array.isArray((raw as { projects?: unknown }).projects) ? (raw as { projects: unknown[] }).projects : null;
+  if (projects === null) return null;
+  const out: DaemonProjectEntry[] = [];
+  for (const entry of projects) {
+    if (!isRecord(entry) || typeof entry.projectId !== "string" || entry.projectId === "") continue;
+    out.push({ projectId: entry.projectId, ...(typeof entry.projectRootPath === "string" ? { projectRootPath: entry.projectRootPath } : {}) });
+  }
+  return out;
+}
+
+/** True when a recorded root sits under the factory worktrees dir or no longer exists on disk. */
+function underWorktreesOrMissing(path: string | null | undefined, worktreesDir: string): boolean {
+  if (typeof path !== "string" || path === "") return false;
+  return path === worktreesDir || path.startsWith(`${worktreesDir}/`) || !existsSync(path);
+}
+
+/**
+ * Sweeps the daemon's broken worktree leftovers (v0.0.27, ADR 0017 §4):
+ * every workspace or project whose recorded root sits under
+ * `<projectStateDir>/worktrees/` or is missing on disk is deleted over the
+ * daemon WebSocket (`archive_workspace_request` / `project.remove.request`),
+ * so a removed Task worktree never leaves a broken project entry in Paseo
+ * Desktop. A daemon with no session socket (`<home>/paseo.pid` absent —
+ * tests, a dev shell) has nothing to sweep and answers ok with empty lists;
+ * every delete is best-effort — one stuck row never fails the sweep.
+ */
+export async function cleanupDaemonWorkspacesAndProjectsViaWs(
+  home: string | undefined,
+  input: { worktreesDir: string },
+): Promise<{ ok: true; removedWorkspaceIds: string[]; removedProjectIds: string[] } | { ok: false; reason: string }> {
+  const targetHome = home ?? process.env.PASEO_HOME;
+  if (targetHome === undefined) {
+    return { ok: false, reason: "no daemon home to sweep — pass home or set PASEO_HOME" };
+  }
+  const listWorkspaces = daemonWsRequestPayload<unknown>(targetHome, { type: "fetch_workspaces_request" }, "fetch_workspaces_response");
+  if (listWorkspaces === null) return { ok: true, removedWorkspaceIds: [], removedProjectIds: [] }; // no daemon socket — nothing to sweep
+  const listProjects = daemonWsRequestPayload<unknown>(targetHome, { type: "project.list.request" }, "project.list.response");
+  const removedWorkspaceIds: string[] = [];
+  const removedProjectIds: string[] = [];
+  try {
+    const workspacesReply = await listWorkspaces;
+    if (!workspacesReply.ok) return { ok: false, reason: workspacesReply.reason };
+    const workspaces = daemonWorkspaceEntries(workspacesReply.payload) ?? [];
+    for (const workspace of workspaces) {
+      if (workspace.archivingAt !== null && workspace.archivingAt !== undefined) continue; // already on its way out
+      const root = workspace.workspaceDirectory ?? workspace.projectRootPath ?? null;
+      if (!underWorktreesOrMissing(root, input.worktreesDir)) continue;
+      const archive = daemonWsRequest(targetHome, { type: "archive_workspace_request", workspaceId: workspace.id }, "archive_workspace_response");
+      if (archive === null) continue;
+      const reply = await archive;
+      if (reply.ok) removedWorkspaceIds.push(workspace.id);
+    }
+  } catch {
+    // best-effort — the project sweep below still runs
+  }
+  try {
+    if (listProjects !== null) {
+      const projectsReply = await listProjects;
+      if (projectsReply.ok) {
+        const projects = daemonProjectEntries(projectsReply.payload) ?? [];
+        for (const project of projects) {
+          if (!underWorktreesOrMissing(project.projectRootPath ?? null, input.worktreesDir)) continue;
+          const remove = daemonWsRequest(targetHome, { type: "project.remove.request", projectId: project.projectId }, "project.remove.response");
+          if (remove === null) continue;
+          const reply = await remove;
+          if (reply.ok) removedProjectIds.push(project.projectId);
+        }
+      }
+    }
+  } catch {
+    // best-effort — a stuck project row never fails the reset/archive that called
+  }
+  return { ok: true, removedWorkspaceIds, removedProjectIds };
 }
