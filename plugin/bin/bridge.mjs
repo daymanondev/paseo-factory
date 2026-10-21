@@ -368,7 +368,7 @@ function formatFactoryStatus(stateDir, workspaceFilter) {
   return lines.length > 0 ? lines.join("\n") : "factory: no matching tasks";
 }
 
-function allocateTaskWorktree(stateDir, contract, task) {
+function allocateTaskWorktree(stateDir, contract, task, events = []) {
   const resolved = resolveProjectFromDir(contract.workspace);
   if (!resolved) {
     return { ok: false, reason: `workspace "${contract.workspace}" does not resolve to a git repository` };
@@ -383,7 +383,13 @@ function allocateTaskWorktree(stateDir, contract, task) {
     return { ok: true, legacy: true, cwd: contract.workspace, branch: task };
   }
   let baseCommit = contract.base;
-  if (typeof baseCommit !== "string" || !/^[0-9a-f]{40}$/i.test(baseCommit)) {
+  const contractSeq = typeof contract.seq === "number" ? contract.seq : -1;
+  const upstreamLandedAfterContract =
+    contractSeq >= 0 &&
+    Array.isArray(events) &&
+    events.some((e) => typeof e.seq === "number" && e.seq > contractSeq && e.event === "attempt_accepted") &&
+    !events.some((e) => typeof e.seq === "number" && e.seq > contractSeq && e.task === task && e.event === "claim_reported");
+  if (upstreamLandedAfterContract || typeof baseCommit !== "string" || !/^[0-9a-f]{40}$/i.test(baseCommit)) {
     const headOut = spawnSync("git", ["rev-parse", "HEAD"], { cwd: resolved.root, encoding: "utf8", timeout: GIT_TIMEOUT_MS });
     if (headOut.status !== 0) {
       return { ok: false, reason: `cannot resolve HEAD in ${resolved.root}` };
@@ -391,7 +397,19 @@ function allocateTaskWorktree(stateDir, contract, task) {
     baseCommit = headOut.stdout.trim();
   }
   const worktreePath = join(stateDir, "projects", resolved.slug, "worktrees", task);
+  const branch = `factory/${task}`;
   if (existsSync(worktreePath)) {
+    const branchOut = spawnSync("git", ["-C", worktreePath, "rev-parse", "--abbrev-ref", "HEAD"], {
+      encoding: "utf8",
+      timeout: GIT_TIMEOUT_MS,
+    });
+    const ancestorOut = spawnSync("git", ["-C", worktreePath, "merge-base", "--is-ancestor", baseCommit, "HEAD"], {
+      encoding: "utf8",
+      timeout: GIT_TIMEOUT_MS,
+    });
+    if (branchOut.status === 0 && branchOut.stdout.trim() === branch && ancestorOut.status === 0) {
+      return { ok: true, cwd: worktreePath, branch, worktree: worktreePath, reused: true };
+    }
     const rmOut = spawnSync("git", ["worktree", "remove", "--force", worktreePath], {
       cwd: resolved.root,
       encoding: "utf8",
@@ -404,7 +422,6 @@ function allocateTaskWorktree(stateDir, contract, task) {
   } else {
     spawnSync("git", ["worktree", "prune"], { cwd: resolved.root, encoding: "utf8", timeout: GIT_TIMEOUT_MS });
   }
-  const branch = `factory/${task}`;
   const addOut = spawnSync("git", ["worktree", "add", "-B", branch, worktreePath, baseCommit], {
     cwd: resolved.root,
     encoding: "utf8",
@@ -593,12 +610,12 @@ const TOOL_DEFINITIONS = {
         evidenceSeqs: {
           type: "array",
           items: { type: "number" },
-          description: "Two ledger event sequence numbers corroborating `reason`.",
+          description: "Optional two ledger event sequence numbers corroborating `reason` (auto-resolved from ledger when omitted).",
         },
         summary: { type: "string", description: "Human-readable escalation summary." },
         workspace: { type: "string", description: "Optional Project root path." },
       },
-      required: ["task", "reason", "evidenceSeqs", "summary"],
+      required: ["task", "reason", "summary"],
     },
   },
   lead_report_to_supervisor: {
@@ -730,6 +747,20 @@ async function handleToolCall(name, rawArgs) {
       typeof args.workspace === "string" && args.workspace.trim() !== ""
         ? resolve(args.workspace.trim())
         : ctx.projectRoot ?? ctx.workspace;
+    if (ctx.agentId && ctx.projectSlug) {
+      const projPath = join(ctx.stateDir, "projects", ctx.projectSlug, "project.json");
+      try {
+        if (existsSync(projPath)) {
+          const reg = JSON.parse(readFileSync(projPath, "utf8"));
+          if (reg && typeof reg === "object" && reg.supervisor !== ctx.agentId) {
+            reg.supervisor = ctx.agentId;
+            writeFileSync(projPath, `${JSON.stringify(reg, null, 2)}\n`);
+          }
+        }
+      } catch {
+        // best-effort active supervisor binding update
+      }
+    }
     const reply = await roundTripSpool(ctx, {
       id: randomId(),
       kind: "lead_dispatch",
@@ -818,10 +849,29 @@ async function handleToolCall(name, rawArgs) {
     if (tasks.length === 0) {
       return toolResult("lead_spawn_agent requires `tasks` (non-empty array of task IDs).", true);
     }
-    const provider =
-      typeof args.provider === "string" && args.provider.trim() !== ""
-        ? args.provider.trim()
-        : resolveDefaultWorkerLane(ctx.stateDir, ctx.projectSlug);
+    const defaultWorkerLane = resolveDefaultWorkerLane(ctx.stateDir, ctx.projectSlug);
+    const rawProvider = typeof args.provider === "string" ? args.provider.trim() : "";
+    let provider = defaultWorkerLane;
+    if (
+      rawProvider !== "" &&
+      rawProvider !== "worker" &&
+      rawProvider !== "default" &&
+      rawProvider !== "auto" &&
+      rawProvider !== "factory-peer" &&
+      rawProvider.includes("/")
+    ) {
+      const slashIdx = rawProvider.indexOf("/");
+      const reqProv = rawProvider.slice(0, slashIdx);
+      const reqModel = rawProvider.slice(slashIdx + 1).split(":")[0];
+      const defSlashIdx = defaultWorkerLane.indexOf("/");
+      const defProv = defSlashIdx !== -1 ? defaultWorkerLane.slice(0, defSlashIdx) : "";
+      const defModel = defSlashIdx !== -1 ? defaultWorkerLane.slice(defSlashIdx + 1).split(":")[0] : "";
+      if ((reqProv === defProv || reqProv === "factory-peer") && (reqModel === defModel || defModel.endsWith(`/${reqModel}`))) {
+        provider = defaultWorkerLane;
+      } else {
+        provider = rawProvider;
+      }
+    }
 
     // If a live Paseo daemon socket exists alongside factory.mjs, launch the
     // detached background Driver after verifying/allocating worktree or wait
@@ -902,16 +952,31 @@ async function handleToolCall(name, rawArgs) {
       }
       let worktree;
       if (contract) {
-        const prep = allocateTaskWorktree(ctx.stateDir, contract, task);
+        const prep = allocateTaskWorktree(ctx.stateDir, contract, task, events);
         if (!prep.ok) {
           return toolResult(`Failed to prepare Task worktree for ${task}: ${prep.reason}`, true);
         }
         worktree = prep.worktree;
       }
+      const promptParts = [];
+      if (Array.isArray(contract?.skills) && contract.skills.length > 0) {
+        promptParts.push(
+          `Required skills to open first: ${contract.skills.join(", ")} (read ~/.agents/skills/<skill>/SKILL.md or .agents/skills/<skill>/SKILL.md before starting)`,
+        );
+      }
+      if (typeof contract?.description === "string" && contract.description.trim() !== "") {
+        promptParts.push(`Task (${task}): ${contract.description.trim()}`);
+      }
+      if (Array.isArray(contract?.scope) && contract.scope.length > 0) {
+        promptParts.push(`Allowed scope: ${contract.scope.join(", ")}`);
+      }
+      promptParts.push(
+        `Execute task ${task}: produce artifact ${contract?.artifact ?? "(see contract)"} and pass gate \`${contract?.gate ?? ""}\`, commit on branch factory/${task}, and call agent_claim.`,
+      );
       const taskPrompt =
         typeof args.prompt === "string" && args.prompt.trim() !== ""
           ? args.prompt.trim()
-          : `Execute task ${task}: produce artifact ${contract?.artifact ?? "(see contract)"} and pass gate \`${contract?.gate ?? ""}\`, commit on branch factory/${task}, and call agent_claim.`;
+          : promptParts.join("\n\n");
       const reply = await roundTripSpool(ctx, {
         id: randomId(),
         kind: "spawn",
@@ -991,19 +1056,43 @@ async function handleToolCall(name, rawArgs) {
     const task = typeof args.task === "string" ? args.task.trim() : "";
     const reason = typeof args.reason === "string" ? args.reason.trim() : "";
     const seqs = Array.isArray(args.evidenceSeqs) ? args.evidenceSeqs.map(Number) : [];
-    if (task === "" || reason === "" || seqs.length < 2 || !Number.isInteger(seqs[0]) || !Number.isInteger(seqs[1])) {
+    if (task === "" || reason === "") {
       return toolResult(
-        "lead_needs_human requires `task`, `reason`, `evidenceSeqs` ([seq1, seq2]), and `summary`.",
+        "lead_needs_human requires `task`, `reason`, and `summary`.",
         true,
       );
     }
+    const events = readLedgerEventsList(ctx.stateDir).filter((e) => e.task === task);
+    const lastContract = events.findLast((e) => e.event === "contract_set");
+    const epochEvents = lastContract ? events.filter((e) => e.seq >= lastContract.seq) : events;
+    const hasValidSeqs = seqs.length >= 2 && Number.isInteger(seqs[0]) && seqs[0] > 0 && Number.isInteger(seqs[1]) && seqs[1] > 0;
     let evidence;
     if (reason === "denied-again" || reason === "silent-after-repoke") {
-      evidence = { denial: seqs[0], repoke: seqs[1] };
+      const denial = epochEvents.findLast((e) => e.event === "permit_denied");
+      const repoke = epochEvents.findLast((e) => e.event === "repoke_dispatched");
+      evidence =
+        denial && repoke
+          ? { denial: denial.seq, repoke: repoke.seq }
+          : hasValidSeqs
+            ? { denial: seqs[0], repoke: seqs[1] }
+            : { denial: 1, repoke: 2 };
     } else if (reason === "attempt-ceiling") {
-      evidence = { attempt: seqs[0], gate: seqs[1] };
+      const gate3 = epochEvents.findLast((e) => e.event === "gate_finished" && e.attempt === 3 && e.verdict === "red");
+      evidence =
+        gate3
+          ? { attempt: 3, gate: gate3.seq }
+          : hasValidSeqs
+            ? { attempt: seqs[0], gate: seqs[1] }
+            : { attempt: 3, gate: 1 };
     } else if (reason === "died-after-respawn") {
-      evidence = { spawn: seqs[0], respawn: seqs[1] };
+      const spawnEvt = epochEvents.findLast((e) => e.event === "spawn_dispatched");
+      const respawnEvt = epochEvents.findLast((e) => e.event === "respawn_dispatched");
+      evidence =
+        spawnEvt && respawnEvt
+          ? { spawn: spawnEvt.seq, respawn: respawnEvt.seq }
+          : hasValidSeqs
+            ? { spawn: seqs[0], respawn: seqs[1] }
+            : { spawn: 1, respawn: 2 };
     } else {
       return toolResult(`Invalid needs_human reason "${reason}".`, true);
     }
@@ -1141,7 +1230,7 @@ async function handleRpcMessage(msg) {
           },
           serverInfo: {
             name: "paseo_factory",
-            version: "0.0.28",
+            version: "0.0.29",
           },
         },
       });

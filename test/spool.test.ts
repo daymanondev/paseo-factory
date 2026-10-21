@@ -935,13 +935,26 @@ test("handleSpoolRequest smart-defaults freshEyes on Lead contracts, reports 'fr
   }
   assert.equal(factory.contractFor("T-FE-2")?.freshEyes, undefined);
 
-  // 3. Spawn with prompt and daemon records worker correlation in CorrelationRegistry.
+  // 3. Spawn with prompt and daemon records worker correlation in CorrelationRegistry
+  //    and formats config.provider as "factory-peer/<model>" when factory-peer is available.
+  const createdConfigs: Array<{ provider?: string; thinkingOptionId?: string }> = [];
   const fakeDaemon = {
+    providers: {
+      async listAvailable() {
+        return {
+          providers: [
+            { provider: "opencode", available: true },
+            { provider: "factory-peer", available: true },
+          ],
+        };
+      },
+    },
     agents: {
       async list() {
         return { entries: [] };
       },
-      async create() {
+      async create(opts: { config: { provider?: string; thinkingOptionId?: string } }) {
+        createdConfigs.push(opts.config);
         return { id: "agent-spawned-worker-1" };
       },
       ref() {
@@ -973,6 +986,12 @@ test("handleSpoolRequest smart-defaults freshEyes on Lead contracts, reports 'fr
   if (sp.ok) {
     assert.equal(sp.agentId, "agent-spawned-worker-1");
   }
+  assert.equal(createdConfigs.length, 1);
+  assert.equal(
+    createdConfigs[0]?.provider,
+    "factory-peer/zai/glm-5.3",
+    "resolvePeerSpawnProvider formats config.provider in 'provider/model' format (factory-peer/<model>), never bare 'factory-peer'",
+  );
   const correlations = new CorrelationRegistry(stateDir);
   const workerCorr = correlations.findByAgentId("agent-spawned-worker-1");
   assert.ok(workerCorr, "spawned worker has a CorrelationRegistry record bound to its agentId");

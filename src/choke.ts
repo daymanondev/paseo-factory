@@ -525,8 +525,11 @@ export function isPaseoFactoryToolName(toolName: string | undefined): boolean {
   const trimmed = toolName.trim();
   return (
     trimmed.startsWith("mcp__paseo_factory__") ||
+    trimmed.startsWith("mcp__paseo-factory__") ||
     trimmed.startsWith("paseo_factory_") ||
     trimmed.startsWith("paseo_factory/") ||
+    trimmed.startsWith("paseo-factory_") ||
+    trimmed.startsWith("paseo-factory/") ||
     trimmed.startsWith("supervisor_") ||
     trimmed.startsWith("lead_") ||
     trimmed.startsWith("agent_") ||

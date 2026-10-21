@@ -167,7 +167,7 @@ test("v0.0.27 (ADR 0017 §1): reconcilePaseoRoleProviders sweeps the 29 sw2-* or
     name: "Supervisor (Factory)",
     provider: "factory-supervisor",
     model: "glm-5.1",
-    modeId: "plan", // the opencode harness pins plan mode
+    modeId: "build", // the opencode harness pins build mode so opencode.plan never injects its subagent-forbidding reminder
   });
 
   // Everything else the daemon owns is preserved byte-identically.

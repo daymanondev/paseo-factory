@@ -45,6 +45,34 @@ export function resolveClaimedCommit(cwd: string, sha: string): Promise<CommitRe
   );
 }
 
+const PACKAGE_LOCKFILES = new Set([
+  "package-lock.json",
+  "npm-shrinkwrap.json",
+  "pnpm-lock.yaml",
+  "yarn.lock",
+  "bun.lock",
+  "bun.lockb",
+]);
+
+function isUntrackedInstallArtifact(porcelainLine: string): boolean {
+  if (!porcelainLine.startsWith("?? ")) return false;
+  const rel = porcelainLine
+    .slice(3)
+    .trim()
+    .replace(/^"(.*)"$/, "$1");
+  if (
+    rel === "node_modules" ||
+    rel === "node_modules/" ||
+    rel.endsWith("/node_modules") ||
+    rel.endsWith("/node_modules/")
+  ) {
+    return true;
+  }
+  const slashIdx = rel.lastIndexOf("/");
+  const baseName = slashIdx === -1 ? rel : rel.slice(slashIdx + 1);
+  return PACKAGE_LOCKFILES.has(baseName);
+}
+
 /**
  * The Workspace must sit clean with HEAD at the claimed commit — checked before
  * the Gate starts and again after it ends (ADR 0002). Anything else means the
@@ -59,7 +87,9 @@ export function checkCleanAt(cwd: string, expectedFull: string): Promise<TreeChe
       }
       return git(cwd, ["status", "--porcelain"]).then(
         ({ stdout: status }) => {
-          const changes = status.split("\n").filter((line) => line.trim() !== "");
+          const changes = status
+            .split("\n")
+            .filter((line) => line.trim() !== "" && !isUntrackedInstallArtifact(line));
           if (changes.length > 0) {
             return { ok: false as const, reason: cap(`tree not clean (${changes.length} change${changes.length === 1 ? "" : "s"}): ${changes[0]}`) };
           }
@@ -102,7 +132,16 @@ function git(cwd: string, args: string[]): Promise<{ stdout: string; stderr: str
  * boundary judge (v0.0.14).
  */
 export function scopeCoversFile(scope: readonly string[], file: string): boolean {
-  return scope.some((prefix) => file === prefix || file.startsWith(prefix.endsWith("/") ? prefix : `${prefix}/`));
+  const directMatch = (target: string): boolean =>
+    scope.some((prefix) => target === prefix || target.startsWith(prefix.endsWith("/") ? prefix : `${prefix}/`));
+  if (directMatch(file)) return true;
+  const slashIdx = file.lastIndexOf("/");
+  const baseName = slashIdx === -1 ? file : file.slice(slashIdx + 1);
+  if (PACKAGE_LOCKFILES.has(baseName)) {
+    const companionPkgJson = slashIdx === -1 ? "package.json" : `${file.slice(0, slashIdx)}/package.json`;
+    if (directMatch(companionPkgJson)) return true;
+  }
+  return false;
 }
 
 /**

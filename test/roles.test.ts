@@ -204,12 +204,17 @@ test("injectRoleOnCreate wires Layer-1 provider fence, paseo_factory MCP, and co
       assert.equal(res.config.modeId, "auto");
       assert.equal((res.config.providerOptions as { features: { multi_agent_v2: boolean } }).features.multi_agent_v2, false);
     } else if (family === "opencode") {
-      assert.equal(res.config.modeId, "plan");
-      assert.equal(res.config.featureValues?.auto_accept, false);
-      assert.deepEqual((res.config.providerOptions as { permission: Record<string, string> }).permission, {
+      assert.equal(res.config.modeId, "build");
+      assert.equal(res.config.featureValues?.auto_accept, true);
+      assert.deepEqual(res.config.toolPolicy, { preapproved: [] });
+      assert.deepEqual((res.config.providerOptions as { permission: Record<string, unknown> }).permission, {
         edit: "deny",
         task: "deny",
+        bash: "ask",
+        skill: { "*": "deny", grilling: "allow" },
       });
+      const hyphenMcp = (res.config.mcpServers as Record<string, { command: string; args: string[] }>)?.["paseo-factory"];
+      assert.ok(hyphenMcp !== undefined, "opencode also receives config.mcpServers['paseo-factory'] to survive bridge-plugin.mjs");
     } else if (family === "copilot") {
       assert.equal(res.config.modeId, "https://agentclientprotocol.com/protocol/session-modes#plan");
       assert.equal(res.config.featureValues?.auto_accept, false);
@@ -355,15 +360,20 @@ test("injectRoleOnCreate recognizes factory-supervisor by provider id alone — 
   assert.deepEqual(Object.keys(res).sort(), ["config", "env"]);
   // The opencode Layer-1 supervisor fence, resolved through lanes.supervisor.
   assert.equal(res.config.provider, "factory-supervisor", "the provider id rides verbatim for the daemon");
-  assert.equal(res.config.modeId, "plan");
-  assert.equal(res.config.featureValues?.auto_accept, false);
-  assert.deepEqual((res.config.providerOptions as { permission: Record<string, string> }).permission, {
+  assert.equal(res.config.modeId, "build");
+  assert.equal(res.config.featureValues?.auto_accept, true);
+  assert.deepEqual(res.config.toolPolicy, { preapproved: [] });
+  assert.deepEqual((res.config.providerOptions as { permission: Record<string, unknown> }).permission, {
     edit: "deny",
     task: "deny",
+    bash: "ask",
+    skill: { "*": "deny", grilling: "allow" },
   });
-  // paseo_factory MCP with Node mode and the correlation token.
+  // paseo_factory MCP (plus paseo-factory alias for OpenCode v2 bridge-plugin.mjs) with Node mode and the correlation token.
   const mcp = (res.config.mcpServers as Record<string, { env: Record<string, string>; args: string[] }>).paseo_factory;
+  const hyphenMcp = (res.config.mcpServers as Record<string, { env: Record<string, string>; args: string[] }>)["paseo-factory"];
   assert.ok(mcp !== undefined, "factory-supervisor receives config.mcpServers.paseo_factory");
+  assert.ok(hyphenMcp !== undefined, "factory-supervisor on opencode receives config.mcpServers['paseo-factory']");
   assert.equal(mcp.env.ELECTRON_RUN_AS_NODE, "1");
   assert.equal(mcp.env.PASEO_FACTORY_SEAT, "supervisor");
   assert.ok(mcp.args.includes(res.env!.PASEO_FACTORY_CORRELATION!));
@@ -411,7 +421,7 @@ test("injectRoleOnCreate recognizes factory-supervisor by provider id alone — 
     stateDir,
     userHome,
   );
-  assert.equal(envStamped?.config.modeId, "plan", "the PASEO_FACTORY_SEAT env stamp backs up a plain provider");
+  assert.equal(envStamped?.config.modeId, "build", "the PASEO_FACTORY_SEAT env stamp backs up a plain provider");
   assert.equal(envStamped?.env?.PASEO_FACTORY_SEAT, "supervisor");
 
   const factoryTitle = injectRoleOnCreate<AgentCreateRequest>(
@@ -419,7 +429,7 @@ test("injectRoleOnCreate recognizes factory-supervisor by provider id alone — 
     stateDir,
     userHome,
   );
-  assert.equal(factoryTitle?.config.modeId, "plan", "a `/factory` title still fences as the dispatcher seat");
+  assert.equal(factoryTitle?.config.modeId, "build", "a `/factory` title still fences as the dispatcher seat");
 });
 
 test("injectRoleOnCreate fences a factory-peer Task-worktree spawn under the worker lane's harness — the Layer-1 agent fence resolves through Lane config (v0.0.27, ADR 0017 §2)", (t) => {

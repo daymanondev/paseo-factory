@@ -288,7 +288,14 @@ export function laneCliInvocation(lane: string): LaneCliInvocation | undefined {
     case "opencode":
       return {
         command: "opencode",
-        args: ["run", "--standalone", "--auto", "-m", `opencode/${model}`, ...(thinking === undefined ? [] : ["--variant", thinking])],
+        args: [
+          "run",
+          "--standalone",
+          "--auto",
+          "-m",
+          model.includes("/") ? model : `opencode/${model}`,
+          ...(thinking === undefined ? [] : ["--variant", thinking]),
+        ],
       };
     default:
       return undefined;

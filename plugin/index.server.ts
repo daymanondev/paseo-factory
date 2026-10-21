@@ -19,7 +19,7 @@ import { ensureFactoryBinScripts } from "./server/core/agy-home.ts";
 import { PLUGIN_ID, pluginDirFor, resolvePaseoHome, stateDirFor } from "./server/paths.ts";
 import { ensureFactorySkillSafe } from "./server/core/skill.ts";
 import { effectiveLanesForReconcile, reconcilePaseoRoleProviders } from "./server/core/role-providers.ts";
-import { reloadDaemonConfigViaWs } from "./server/daemon-cli.ts";
+import { reloadDaemonConfigViaWs, warmPluginDaemonApiViaWs } from "./server/daemon-cli.ts";
 import { claimCliBinDir, ensureClaimCli, ensureGitShim, injectClaimCliPath } from "./server/shell.ts";
 import { createChoke, normalizeAgentCreateRequest, startGitBlockIngestion } from "./server/choke.ts";
 import { createTimelineFetcher } from "./server/timeline.ts";
@@ -29,7 +29,7 @@ import { createSurfaceHandlers, registerSurfaceRpc } from "./server/surface-rpc.
 import { createLeadMailRuntime } from "./server/lead-mailbox.ts";
 import { injectRoleOnCreate, injectSessionEnv, sanitizeAgentCreateHookResult } from "./server/roles.ts";
 
-const SHELL_VERSION = "0.0.28";
+const SHELL_VERSION = "0.0.29";
 
 const log = (message: string) => console.log(`[${PLUGIN_ID}] ${message}`);
 
@@ -261,6 +261,12 @@ export default function contribute(server: PluginServerContext) {
   registerSurfaceRpc(server, surface, (context) => {
     if (context.paseo !== undefined) capturePaseo(context);
   });
+  const warmupTimer = setTimeout(() => {
+    if (paseoApi === undefined) {
+      warmPluginDaemonApiViaWs(home);
+    }
+  }, 50);
+  warmupTimer.unref?.();
 
   const gitBlocks = startGitBlockIngestion(factory, { onLog: log });
 
@@ -281,6 +287,7 @@ export default function contribute(server: PluginServerContext) {
   });
 
   return () => {
+    clearTimeout(warmupTimer);
     offPermissionAsked();
     offAgentCreate();
     offSessionOpen();
