@@ -705,7 +705,7 @@ test("choke.onPermissionAsked enforces seat-paseo-tool-fence and denies factory 
       request: {
         id: "ask-paseo-factory-ok",
         provider: "claude",
-        name: "mcp__paseo_factory__lead_contract_and_run",
+        name: "mcp__paseo_factory__lead_set_contract",
         kind: "tool",
       },
     },

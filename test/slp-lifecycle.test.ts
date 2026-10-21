@@ -270,13 +270,13 @@ test("Full SLP lifecycle: Owner -> Supervisor -> Lead -> Agent -> Lead -> Superv
   });
   assert.notEqual(spawnAgentRes.isError, true, spawnAgentRes.text);
 
-  const workerAgent = agents.find((a) => a.id !== supAgent.id && a.id !== leadAgent.id);
-  assert.ok(workerAgent !== undefined, "Task Agent spawned in isolated worktree");
-  assert.ok(workerAgent.env.PASEO_FACTORY_CORRELATION?.startsWith("cor_"), "Task Agent issued correlationId");
-  assert.equal(correlations.findByAgentId(workerAgent.id)?.role, "agent");
+  const taskAgent = agents.find((a) => a.id !== supAgent.id && a.id !== leadAgent.id);
+  assert.ok(taskAgent !== undefined, "Task Agent spawned in isolated worktree");
+  assert.ok(taskAgent.env.PASEO_FACTORY_CORRELATION?.startsWith("cor_"), "Task Agent issued correlationId");
+  assert.equal(correlations.findByAgentId(taskAgent.id)?.role, "agent");
 
   // 4. Agent writes contracted artifact in worktree, commits, and calls agent_claim
-  const worktreeDir = workerAgent.cwd;
+  const worktreeDir = taskAgent.cwd;
   mkdirSync(join(worktreeDir, "src"), { recursive: true });
   writeFileSync(join(worktreeDir, "src", "greet.ts"), "export const greet = () => 'hello';\n");
   execFileSync("git", ["add", "src/greet.ts"], { cwd: worktreeDir });
@@ -285,9 +285,9 @@ test("Full SLP lifecycle: Owner -> Supervisor -> Lead -> Agent -> Lead -> Superv
 
   const claimStart = Date.now();
   const claimRes = await callMcpTool({
-    args: ["--correlation", workerAgent.env.PASEO_FACTORY_CORRELATION!, "--state-dir", stateDir],
+    args: ["--correlation", taskAgent.env.PASEO_FACTORY_CORRELATION!, "--state-dir", stateDir],
     toolName: "agent_claim",
-    toolArgs: { sha },
+    toolArgs: { commit: sha },
   });
   const claimElapsed = Date.now() - claimStart;
   assert.notEqual(claimRes.isError, true, claimRes.text);

@@ -356,23 +356,30 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     }
     if (lead === undefined) return; // no live Lead — the next dispatch ensures one and pumps again
     if (lead.status !== "idle" || isBlockedByAttention(lead)) return; // a running or permission-waiting Lead is never interrupted (§User Story 12)
-    let prompt = renderMailPrompt(state.queued);
-    if (!kickoffSentAgentIds.has(lead.id)) {
-      const reg = readProjectRegistration(deps.stateDir, slug);
-      const loadedLanes = loadLanes(deps.stateDir, slug);
-      const kickoff = buildSeatKickoffPacket({
-        role: "lead",
-        projectSlug: slug,
-        projectRoot: reg?.root ?? lead.cwd ?? "",
-        ledgerEvents: deps.factory.ledger.events,
-        ...(loadedLanes.ok ? { lanes: loadedLanes.lanes } : {}),
-      });
-      prompt = `${kickoff}\n${prompt}`;
-      kickoffSentAgentIds.add(lead.id);
-    }
+    const prompt = prependKickoffPacketIfFirstTurn("lead", slug, lead, renderMailPrompt(state.queued));
     await daemon.agents.ref(lead.id).send(prompt);
     appendMailDelivered(path, { mailIds: state.queued.map((item) => item.mailId), toAgentId: lead.id });
     log(`lead-mailbox: delivered ${state.queued.length} item(s) to the lead of ${slug} (${lead.id})`);
+  };
+
+  const prependKickoffPacketIfFirstTurn = (
+    role: "supervisor" | "lead",
+    slug: string,
+    agent: SurfaceAgentSnapshot,
+    prompt: string,
+  ): string => {
+    if (kickoffSentAgentIds.has(agent.id)) return prompt;
+    const reg = readProjectRegistration(deps.stateDir, slug);
+    const loadedLanes = loadLanes(deps.stateDir, slug);
+    const kickoff = buildSeatKickoffPacket({
+      role,
+      projectSlug: slug,
+      projectRoot: reg?.root ?? agent.cwd ?? "",
+      ledgerEvents: deps.factory.ledger.events,
+      ...(loadedLanes.ok ? { lanes: loadedLanes.lanes } : {}),
+    });
+    kickoffSentAgentIds.add(agent.id);
+    return `${kickoff}\n${prompt}`;
   };
 
   /**
@@ -413,20 +420,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     }
     if (supervisor === undefined) return;
     if (supervisor.status !== "idle" || isBlockedByAttention(supervisor)) return;
-    let prompt = renderSupervisorMailBatch(state.supervisorQueued);
-    if (!kickoffSentAgentIds.has(supervisor.id)) {
-      const reg = readProjectRegistration(deps.stateDir, slug);
-      const loadedLanes = loadLanes(deps.stateDir, slug);
-      const kickoff = buildSeatKickoffPacket({
-        role: "supervisor",
-        projectSlug: slug,
-        projectRoot: reg?.root ?? supervisor.cwd ?? "",
-        ledgerEvents: deps.factory.ledger.events,
-        ...(loadedLanes.ok ? { lanes: loadedLanes.lanes } : {}),
-      });
-      prompt = `${kickoff}\n${prompt}`;
-      kickoffSentAgentIds.add(supervisor.id);
-    }
+    const prompt = prependKickoffPacketIfFirstTurn("supervisor", slug, supervisor, renderSupervisorMailBatch(state.supervisorQueued));
     await daemon.agents.ref(supervisor.id).send(prompt);
     appendMailDelivered(path, {
       to: "supervisor",

@@ -93,8 +93,6 @@ export function ensureGitShim(stateDir: string, pluginDir: string, nodeBinary: s
   }
 }
 
-export const installGitShim = ensureGitShim;
-
 function ensureGeneratedWrapper(input: {
   target: string;
   script: string;

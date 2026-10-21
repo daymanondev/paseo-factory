@@ -146,7 +146,7 @@ test("injectRoleOnCreate wires Layer-1 provider fence, paseo_factory MCP, and co
     "codex/gpt-5.4",
     "opencode/glm-5.1",
     "copilot/gpt-4.1",
-    "cursor/claude-3.7-sonnet",
+    "omp/claude-3.7-sonnet",
     "pi/zai/glm-5.3",
     "antigravity/gemini-2.5-pro",
   ]) {
@@ -180,30 +180,43 @@ test("injectRoleOnCreate wires Layer-1 provider fence, paseo_factory MCP, and co
     }
 
     if (family === "claude-code") {
-      assert.equal(res.config.modeId, "default");
-      assert.equal(res.config.featureValues?.auto_accept, false);
       const disallowed = (res.config.providerOptions as { disallowedTools: string[] }).disallowedTools;
       assert.ok(disallowed.includes("Write") && disallowed.includes("Edit") && disallowed.includes("Task"));
       assert.ok(disallowed.includes("mcp__paseo__create_agent"));
     } else if (family === "codex") {
-      assert.equal(res.config.modeId, "default");
-      assert.equal(res.config.featureValues?.auto_accept, false);
+      assert.equal(res.config.modeId, "auto");
       assert.equal((res.config.providerOptions as { features: { multi_agent_v2: boolean } }).features.multi_agent_v2, false);
     } else if (family === "opencode") {
-      assert.equal(res.config.modeId, "default");
+      assert.equal(res.config.modeId, "plan");
       assert.equal(res.config.featureValues?.auto_accept, false);
       assert.deepEqual((res.config.providerOptions as { permission: Record<string, string> }).permission, {
         edit: "deny",
         task: "deny",
       });
-    } else if (family === "copilot" || family === "cursor") {
-      assert.equal(res.config.modeId, "default");
+    } else if (family === "copilot") {
+      assert.equal(res.config.modeId, "https://agentclientprotocol.com/protocol/session-modes#plan");
       assert.equal(res.config.featureValues?.auto_accept, false);
+    } else if (family === "omp") {
+      assert.equal(res.config.modeId, "write");
     }
   }
 
+  // Lead modeId checks for opencode ("build") and copilot ("...#agent")
+  const leadOpencode = injectRoleOnCreate<AgentCreateRequest>(
+    { config: { provider: "opencode/glm-5.1", cwd: repoDir, title: "Lead — repo" } },
+    stateDir,
+    userHome,
+  );
+  assert.equal(leadOpencode?.config.modeId, "build");
+  const leadCopilot = injectRoleOnCreate<AgentCreateRequest>(
+    { config: { provider: "copilot/gpt-4.1", cwd: repoDir, title: "Lead — repo" } },
+    stateDir,
+    userHome,
+  );
+  assert.equal(leadCopilot?.config.modeId, "https://agentclientprotocol.com/protocol/session-modes#agent");
+
   const correlations = new CorrelationRegistry(stateDir).list();
-  assert.equal(correlations.length, 7, "all 7 seat creations recorded correlation tokens");
+  assert.equal(correlations.length, 9, "all seat creations recorded correlation tokens");
   assert.deepEqual(
     Object.keys(sanitizeAgentCreateHookResult({ config: { cwd: repoDir, labels: { seat: "lead" } } as never, env: { A: "1" } })).sort(),
     ["config", "env"],

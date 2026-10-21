@@ -781,6 +781,8 @@ async function handleToolCall(name, rawArgs) {
     const skills = Array.isArray(args.skills)
       ? args.skills.map((s) => String(s).trim()).filter(Boolean)
       : undefined;
+    const base =
+      typeof args.base === "string" && args.base.trim() !== "" ? args.base.trim() : undefined;
     const description =
       typeof args.description === "string" && args.description.trim() !== "" ? args.description.trim() : undefined;
 
@@ -791,6 +793,7 @@ async function handleToolCall(name, rawArgs) {
       workspace,
       gate,
       artifact,
+      ...(base ? { base } : {}),
       ...(scope && scope.length > 0 ? { scope } : {}),
       ...(skills && skills.length > 0 ? { skills } : {}),
       ...(args.freshEyes === true ? { freshEyes: true } : {}),
@@ -1020,7 +1023,8 @@ async function handleToolCall(name, rawArgs) {
     if (task === "") {
       return toolResult("agent_claim requires `task` (or a task-bound correlation token).", true);
     }
-    let sha = typeof args.commit === "string" && args.commit.trim() !== "" ? args.commit.trim() : "";
+    const rawCommit = typeof args.commit === "string" && args.commit.trim() !== "" ? args.commit.trim() : typeof args.sha === "string" && args.sha.trim() !== "" ? args.sha.trim() : "";
+    let sha = rawCommit;
     if (sha === "") {
       let worktreeCwd = process.cwd();
       if (ctx.projectSlug) {

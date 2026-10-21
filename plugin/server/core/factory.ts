@@ -78,6 +78,10 @@ export interface ContractInput {
   gate: string;
   artifact: string;
   /**
+   * Optional explicit base commit ref/SHA (defaults to the workspace's `HEAD`).
+   */
+  base?: string;
+  /**
    * Path prefixes (workspace-relative) the task may touch — the mechanical
    * task boundary (ticket 14). Omitted or empty = unrestricted, v0.0.1
    * behavior. A diff outside the scope is a red Verdict naming the files.
@@ -379,7 +383,7 @@ export function createFactory(options: FactoryOptions): Factory {
     stateDir,
     recoveredAttempts,
 
-    setContract({ task, workspace, gate, artifact, scope, freshEyes, watch, description, skills, by }) {
+    setContract({ task, workspace, gate, artifact, base: inputBase, scope, freshEyes, watch, description, skills, by }) {
       assertTaskId(task);
       if (gate.trim() === "") throw new FactoryError("invalid-contract", "gate command must be a non-empty string");
       if (artifact.trim() === "") throw new FactoryError("invalid-contract", "artifact path must be a non-empty string");
@@ -428,7 +432,7 @@ export function createFactory(options: FactoryOptions): Factory {
       }
       // The base commit is recorded on every Contract since v0.0.2 (ticket 03
       // R2): it is the diff range for the scope check and the fresh-eyes pass.
-      const base = headCommitSync(workspace);
+      const base = headCommitSync(workspace, inputBase ?? "HEAD");
       if (base === undefined) {
         throw new FactoryError(
           "invalid-contract",

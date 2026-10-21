@@ -205,9 +205,9 @@ export function applyProviderExecutionFence<T extends AgentCreateRequest["config
 
   if (providerFamily === "opencode") {
     const existingPerm = isRecord(existingProviderOpts.permission) ? existingProviderOpts.permission : {};
-    nextConfig.modeId = "default";
-    nextConfig.featureValues = { ...existingFeatures, auto_accept: false };
     if (role === "supervisor" || role === "lead") {
+      nextConfig.featureValues = { ...existingFeatures, auto_accept: false };
+      nextConfig.modeId = role === "supervisor" ? "plan" : "build";
       nextConfig.providerOptions = {
         ...existingProviderOpts,
         permission: {
@@ -229,8 +229,6 @@ export function applyProviderExecutionFence<T extends AgentCreateRequest["config
     const existingDisallowed = Array.isArray(existingProviderOpts.disallowedTools)
       ? existingProviderOpts.disallowedTools.filter((x): x is string => typeof x === "string")
       : [];
-    nextConfig.modeId = "default";
-    nextConfig.featureValues = { ...existingFeatures, auto_accept: false };
     if (role === "supervisor" || role === "lead") {
       const merged = Array.from(new Set([...existingDisallowed, ...CLAUDE_SEAT_WRITE_TOOLS, ...FORBIDDEN_PASEO_TOOLS]));
       nextConfig.providerOptions = {
@@ -238,6 +236,7 @@ export function applyProviderExecutionFence<T extends AgentCreateRequest["config
         disallowedTools: merged,
       };
     } else if (role === "agent") {
+      nextConfig.modeId = "default";
       const merged = Array.from(new Set([...existingDisallowed, ...FORBIDDEN_PASEO_TOOLS]));
       nextConfig.providerOptions = {
         ...existingProviderOpts,
@@ -246,8 +245,9 @@ export function applyProviderExecutionFence<T extends AgentCreateRequest["config
     }
   } else if (providerFamily === "codex") {
     const existingCodexFeatures = isRecord(existingProviderOpts.features) ? existingProviderOpts.features : {};
-    nextConfig.modeId = "default";
-    nextConfig.featureValues = { ...existingFeatures, auto_accept: false };
+    if (role === "supervisor" || role === "lead") {
+      nextConfig.modeId = "auto";
+    }
     nextConfig.providerOptions = {
       ...existingProviderOpts,
       features: {
@@ -255,9 +255,18 @@ export function applyProviderExecutionFence<T extends AgentCreateRequest["config
         multi_agent_v2: false,
       },
     };
-  } else if (providerFamily === "copilot" || providerFamily === "cursor") {
-    nextConfig.modeId = "default";
-    nextConfig.featureValues = { ...existingFeatures, auto_accept: false };
+  } else if (providerFamily === "copilot") {
+    if (role === "supervisor" || role === "lead") {
+      nextConfig.featureValues = { ...existingFeatures, auto_accept: false };
+      nextConfig.modeId =
+        role === "supervisor"
+          ? "https://agentclientprotocol.com/protocol/session-modes#plan"
+          : "https://agentclientprotocol.com/protocol/session-modes#agent";
+    }
+  } else if (providerFamily === "omp") {
+    if (role === "supervisor" || role === "lead") {
+      nextConfig.modeId = "write";
+    }
   }
 
   return nextConfig as T;
@@ -409,26 +418,39 @@ export function injectSessionEnv<
     }
   }
 
+  const resolveOrAssociate = (input: { role: RoleName; projectSlug: string; projectRoot: string; task?: string }) => {
+    const existing = correlations.resolve(request.agentId);
+    if (existing !== undefined) return existing;
+    const unassociated = correlations
+      .list()
+      .reverse()
+      .find(
+        (r) =>
+          r.role === input.role &&
+          r.projectSlug === input.projectSlug &&
+          (input.task === undefined || r.task === input.task) &&
+          r.agentId === undefined,
+      );
+    if (unassociated !== undefined) {
+      return correlations.associate(unassociated.correlationId, request.agentId);
+    }
+    return correlations.issue({
+      role: input.role,
+      projectSlug: input.projectSlug,
+      projectRoot: input.projectRoot,
+      ...(input.task !== undefined ? { task: input.task } : {}),
+      agentId: request.agentId,
+    });
+  };
+
   const worktree = parseTaskWorktreePath(stateDir, request.cwd);
   if (worktree !== null) {
-    let record = correlations.resolve(request.agentId);
-    if (record === undefined) {
-      const unassociated = correlations
-        .list()
-        .reverse()
-        .find((r) => r.role === "agent" && r.projectSlug === worktree.slug && r.task === worktree.task && r.agentId === undefined);
-      if (unassociated !== undefined) {
-        record = correlations.associate(unassociated.correlationId, request.agentId);
-      } else {
-        record = correlations.issue({
-          role: "agent",
-          projectSlug: worktree.slug,
-          projectRoot: request.cwd,
-          task: worktree.task,
-          agentId: request.agentId,
-        });
-      }
-    }
+    const record = resolveOrAssociate({
+      role: "agent",
+      projectSlug: worktree.slug,
+      projectRoot: request.cwd,
+      task: worktree.task,
+    });
     return {
       ...request,
       env: {
@@ -456,23 +478,11 @@ export function injectSessionEnv<
           ? "lead"
           : undefined;
     if (seat === undefined) continue;
-    let record = correlations.resolve(request.agentId);
-    if (record === undefined) {
-      const unassociated = correlations
-        .list()
-        .reverse()
-        .find((r) => r.role === seat && r.projectSlug === registration.slug && r.agentId === undefined);
-      if (unassociated !== undefined) {
-        record = correlations.associate(unassociated.correlationId, request.agentId);
-      } else {
-        record = correlations.issue({
-          role: seat,
-          projectSlug: registration.slug,
-          projectRoot: registration.root,
-          agentId: request.agentId,
-        });
-      }
-    }
+    const record = resolveOrAssociate({
+      role: seat,
+      projectSlug: registration.slug,
+      projectRoot: registration.root,
+    });
     return {
       ...request,
       env: {

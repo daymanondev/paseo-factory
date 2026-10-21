@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.0.26] - 2026-10-21
 
-v0.0.26's one thing: **role-scoped MCP bridge (`paseo_factory`), unforgeable `Correlation token` seat identity (`cor_<uuid>`), 2-step seat launch with Turn-1 `Seat kickoff packet`, process-group `Gate` reaping, and 3-layer execution fence across all 7 Paseo providers (`claude-code`, `codex`, `opencode`, `copilot`, `cursor`, `pi`, `antigravity`)** (ADR 0016).
+v0.0.26's one thing: **role-scoped MCP bridge (`paseo_factory`), unforgeable `Correlation token` seat identity (`cor_<uuid>`), 2-step seat launch with Turn-1 `Seat kickoff packet`, process-group `Gate` reaping, and 3-layer execution fence across all 7 Paseo providers (`claude-code`, `codex`, `opencode`, `copilot`, `omp`, `pi`, `antigravity`)** (ADR 0016).
 
 ### Added
 

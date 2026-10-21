@@ -41,6 +41,7 @@ export interface ContractRequest {
   workspace: string;
   gate: string;
   artifact: string;
+  base?: string;
   scope?: string[];
   /** Marks the fresh-eyes pass ON (ADR 0005 default: off). Exactly `true` passes; anything else is rejected. */
   freshEyes?: true;
@@ -467,6 +468,7 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     if (skills !== undefined && (!Array.isArray(skills) || skills.some((s) => typeof s !== "string"))) return undefined;
     if (req.freshEyes !== undefined && req.freshEyes !== true) return undefined;
     if (req.watch !== undefined && req.watch !== true) return undefined;
+    if (req.base !== undefined && (typeof req.base !== "string" || req.base.trim() === "")) return undefined;
     if (req.description !== undefined && (typeof req.description !== "string" || req.description.trim() === "")) return undefined;
     return {
       id: req.id,
@@ -475,6 +477,7 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       workspace: req.workspace,
       gate: req.gate,
       artifact: req.artifact,
+      ...(req.base === undefined ? {} : { base: req.base }),
       ...(scope === undefined ? {} : { scope: scope as string[] }),
       ...(skills === undefined ? {} : { skills: skills as string[] }),
       ...(req.freshEyes === undefined ? {} : { freshEyes: true }),
@@ -850,6 +853,7 @@ export async function handleSpoolRequest(
         workspace: request.workspace,
         gate: request.gate,
         artifact: request.artifact,
+        ...(request.base === undefined ? {} : { base: request.base }),
         ...(request.scope === undefined ? {} : { scope: request.scope }),
         ...(request.skills === undefined || request.skills.length === 0 ? {} : { skills: request.skills }),
         ...(request.freshEyes === undefined ? {} : { freshEyes: true }),

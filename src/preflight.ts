@@ -149,12 +149,12 @@ export function buildSeatKickoffPacket(input: SeatKickoffPacketInput): string {
   const roleTools =
     input.role === "supervisor"
       ? "`supervisor_dispatch_lead`, `supervisor_accept_task`, `factory_status`"
-      : "`lead_contract_and_run`, `lead_accept_task`, `lead_report_to_supervisor`, `lead_respawn_task`, `lead_repoke_task`, `lead_escalate_needs_human`, `factory_status`";
+      : "`lead_set_contract`, `lead_spawn_agent`, `lead_accept_task`, `lead_repoke_agent`, `lead_needs_human`, `lead_report_to_supervisor`, `factory_status`";
 
   const fireAndEndTurn =
     input.role === "supervisor"
       ? "Fire-and-End-Turn: call `supervisor_dispatch_lead` (or run `factory lead dispatch`) and IMMEDIATELY end your turn — never poll, never sleep, and never edit product source code."
-      : "Fire-and-End-Turn: decompose into tasks (`T-01..`), call `lead_contract_and_run` (or `factory contract` + `factory run`) for each task, and IMMEDIATELY end your turn — never poll, never sleep, and never edit product source code on `<project-root>`.";
+      : "Fire-and-End-Turn: decompose into tasks (`T-01..`), call `lead_set_contract` then `lead_spawn_agent` (or `factory contract` + `factory run`) for each task, and IMMEDIATELY end your turn — never poll, never sleep, and never edit product source code on `<project-root>`.";
 
   return [
     `--- [paseo-factory seat kickoff packet · role=${input.role} · project=${input.projectSlug}] ---`,
