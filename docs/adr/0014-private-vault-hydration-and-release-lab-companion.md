@@ -1,12 +1,12 @@
 # ADR 0014 — Built-in `Private vault` header sync (`gh` guided onboarding, auto-repo creation, 1-click bidirectional `Sync`), dual-mode secret envelopes, multi-node `Ledger` reconciliation, and `factory-release-lab` in `COMPANION_CATALOG`
 
-- **Status:** Accepted — 2026-10-19; amended 2026-10-20 after live UX review (ratified by Andrew over `/grill-with-docs`; words "toàn bộ theo khuyến nghị của bạn")
+- **Status:** Accepted — 2026-10-19; amended 2026-10-20 after live UX review; amended 2026-10-22 for `v0.0.30` to mark `factory-release-lab` as `access: "private"` (invite-only) in `COMPANION_CATALOG` (ratified by Andrew over `/grill-with-docs`; words "toàn bộ theo bạn khuyến nghị")
 - **Grounded in:** `research/private-vault-and-state-sync.md` · `research/vault-zero-config-sync-ux.md` · `src/ledger.ts` (`Ledger.open`, lines 66–76) · `src/project.ts` (`projectSlug`, lines 65–66) · `plugin/shared/companions.ts` (`COMPANION_CATALOG`) · `daymanondev/factory-release-lab` (`src/asc-adapter.ts`, `src/gplay-adapter.ts`, `src/signing-hygiene.ts`, `src/workflow-engine.ts`) · `.scratch/release-lab-upstream/issues/01-register-release-lab-in-companion-catalog.md` · `.scratch/factory-v0.0.22/issues/01..04`
-- **Amends:** ADR 0012 §2 (expands `COMPANION_CATALOG` from two to three first-party `Companion plugin`s by registering `factory-release-lab` alongside `factory-burn-lab` and `factory-connector`) · ADR 0009 §2 (adds the built-in `Private vault` sync bar directly into the persistent `Factory surface` `Header`, keeping the `Plugins` tab strictly for installable `Companion plugin`s)
+- **Amends:** ADR 0012 §2 (expands `COMPANION_CATALOG` from two to three first-party `Companion plugin`s by registering `factory-release-lab` as `access: "private"` alongside public `factory-burn-lab` and `factory-connector`) · ADR 0009 §2 (adds the built-in `Private vault` sync bar directly into the persistent `Factory surface` `Header`, keeping the `Plugins` tab strictly for installable `Companion plugin`s)
 
 ## Context
 
-All plugins in the Paseo Factory ecosystem (`paseo-factory`, `factory-burn-lab`, `factory-connector`, `factory-release-lab`) are open-source repositories. Operating the factory and running mobile store releases across multiple machines (primary Mac, secondary Macs, Windows/WSL2 nodes, or fresh hosts) requires two classes of private, Owner-owned state that can never live in open-source plugin repositories:
+While `paseo-factory`, `factory-burn-lab`, and `factory-connector` are public open-source repositories (and `factory-release-lab` is a private, invite-only companion repository for the Owner and invited collaborators), operating the factory and running mobile store releases across multiple machines (primary Mac, secondary Macs, Windows/WSL2 nodes, or fresh hosts) requires two classes of private, Owner-owned state that can never live in plugin source repositories:
 
 1. **Store & Signing Credentials:**
    - Apple App Store Connect API `.p8` ECDSA private key (`ASC_KEY_PATH`, `ASC_KEY_ID`, `ASC_ISSUER`) and Google Play Developer API Service Account JSON (`GPLAY_KEY_PATH`).
@@ -31,7 +31,7 @@ Testing the initial v0.0.21 shipment on Paseo Desktop exposed five concrete UX a
 
 1. **Built-in `Private vault` Sync Bar in the persistent `Factory surface` `Header` (never inside the `Plugins` tab) + 3-Plugin `COMPANION_CATALOG`.**
    - `Private vault` is a built-in core capability rendered as a compact, always-visible **Cloud Vault Sync Bar** inside `<Header />` (`plugin/client/factory/header.tsx`) across all tabs and on the `Settings` screen.
-   - The `Plugins` tab (`plugin/client/factory/plugins.tsx`) exclusively renders the three installable `Companion plugin`s in `COMPANION_CATALOG`: `factory-burn-lab` (`Burn Lab` · `Flame`), `factory-connector` (`Fleet Connector` · `Network`), and `factory-release-lab` (`Release Lab` · `Rocket`).
+   - The `Plugins` tab (`plugin/client/factory/plugins.tsx`) exclusively renders the Core plugin (`paseo-factory`) plus the three installable `Companion plugin`s in `COMPANION_CATALOG`: public `factory-burn-lab` (`Burn Lab` · `Flame`), public `factory-connector` (`Fleet Connector` · `Network`), and private/invite-only `factory-release-lab` (`Release Lab` · `Rocket`, skipped by `Install All` and gated on pull-access verification when explicitly installed).
 
 2. **Guided 3-State `gh` Onboarding & Automatic Private Repository Provisioning.**
    - `VaultRunner` augments `PATH` with `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin` so Paseo Desktop launched from macOS Finder/Spotlight always locates `gh` and `git`.

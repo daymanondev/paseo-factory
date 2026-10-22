@@ -1230,7 +1230,7 @@ async function handleRpcMessage(msg) {
           },
           serverInfo: {
             name: "paseo_factory",
-            version: "0.0.29",
+            version: "0.0.30",
           },
         },
       });

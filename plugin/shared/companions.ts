@@ -10,12 +10,22 @@
  * prefers `../` sibling directories on the host disk, so installation behaves
  * identically on user and developer machines, macOS and Windows alike.
  */
+/**
+ * A companion's access tier (v0.0.30, ADR 0012 §2 / ADR 0014 §1): `public`
+ * repos install for anyone (and ride `Install All`); `private` repos are
+ * invite-only — skipped by `Install All` and gated on a pull-access pre-flight
+ * when explicitly installed.
+ */
+export type PluginAccessTier = "public" | "private";
+
 export interface CompanionCatalogEntry {
   id: "factory-burn-lab" | "factory-connector" | "factory-release-lab";
   title: string;
   tagline: string;
   description: string;
   canonicalSource: string;
+  /** Who may install this repository — public open-source or private invite-only (v0.0.30). */
+  access: PluginAccessTier;
   sidebarLabel: string;
   sidebarIcon: string;
   capabilities: readonly string[];
@@ -27,6 +37,8 @@ export interface CorePluginCatalogEntry {
   tagline: string;
   description: string;
   canonicalSource: string;
+  /** The Core plugin is always publicly installable — the tier rides the card like any companion (v0.0.30). */
+  access: PluginAccessTier;
   sidebarLabel: string;
   sidebarIcon: string;
   capabilities: readonly string[];
@@ -43,6 +55,7 @@ export const CORE_PLUGIN_ENTRY: CorePluginCatalogEntry = {
   description:
     "Verification core for Paseo agents: owner-set contracts, a gate the agent cannot grade itself with, an append-only ledger, and standing Supervisor/Lead project seats.",
   canonicalSource: "git:daymanondev/paseo-factory:plugin",
+  access: "public",
   sidebarLabel: "Factory",
   sidebarIcon: "Blocks",
   capabilities: ["Contracts & Gates", "Append-Only Ledger", "Supervisor & Lead Seats", "Fresh-Eyes & Watch", "Private Vault Sync"],
@@ -68,6 +81,7 @@ export const COMPANION_CATALOG: readonly CompanionCatalogEntry[] = [
     description:
       "An autonomous OpenCode free-model burner supervised by each Project's Supervisor — it takes factory work through free-model burns under the standing Supervisor seat's watch.",
     canonicalSource: "git:daymanondev/factory-burn-lab:plugin",
+    access: "public",
     sidebarLabel: "Burn Lab",
     sidebarIcon: "Flame",
     capabilities: ["Scout Pool", "OSS Lab", "Proto Arena", "Night Shift", "Self-Evolve"],
@@ -79,6 +93,7 @@ export const COMPANION_CATALOG: readonly CompanionCatalogEntry[] = [
     description:
       "A symmetric peer Fleet over Tailscale with 1-click Handoff, Burst, and Git-native sync — it connects this factory to peer factories for handoffs and cooperative bursts.",
     canonicalSource: "git:daymanondev/factory-connector:plugin",
+    access: "public",
     sidebarLabel: "Fleet Connector",
     sidebarIcon: "Network",
     capabilities: ["Tailscale Fleet Surface", "1-Click Handoff", "Cooperative Burst", "Git Mirror & Ref Sync"],
@@ -90,6 +105,7 @@ export const COMPANION_CATALOG: readonly CompanionCatalogEntry[] = [
     description:
       "An agent-managed 7-phase iOS (App Store Connect) and Android (Google Play) release workflow engine with Day-0 bootstrap, signing & Firebase SHA hygiene, Screenshot Studio, and idempotent IAP reconciliation.",
     canonicalSource: "git:daymanondev/factory-release-lab:plugin",
+    access: "private",
     sidebarLabel: "Release Lab",
     sidebarIcon: "Rocket",
     capabilities: [

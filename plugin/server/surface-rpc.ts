@@ -27,7 +27,7 @@ import { readLeadMailbox } from "./core/mailbox.ts";
 import { loadLanes, parseLane, saveLanes } from "./core/lanes.ts";
 import { listProjectRegistrations, projectStateDir, readProjectRegistration, resolveProject } from "./core/project.ts";
 import type { ProjectResolution } from "./core/project.ts";
-import { hydrateVaultDirect, importVaultSecrets, loadVaultConfig, probeGhAuth, pullVault, pushVault, readVaultStatus, saveVaultConfig, syncVault } from "./core/vault.ts";
+import { hydrateVaultDirect, importVaultSecrets, isLocalCompanionGitSource, loadVaultConfig, probeCompanionGitAccess, probeGhAuth, pullVault, pushVault, readVaultStatus, saveVaultConfig, syncVault } from "./core/vault.ts";
 import type { ImportVaultSecretsInput, SyncVaultOptions, VaultConfig, VaultRunner } from "./core/vault.ts";
 import { join } from "node:path";
 import type { LandingResult } from "./core/workspace.ts";
@@ -1490,8 +1490,11 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       }
       let targets: readonly CompanionCatalogEntry[];
       if (input.target === "all") {
-        // Batch installs only the currently uninstalled companions — the list
-        // decides, and an unavailable list refuses rather than reinstall blind.
+        // Batch installs only the uninstalled PUBLIC companions (v0.0.30, ADR
+        // 0012 §2) — a private invite-only repository never rides Install All,
+        // so a machine without pull access never hits a clone failure mid-batch
+        // and the button retires once every public companion is installed. The
+        // list decides, and an unavailable list refuses rather than reinstall blind.
         const lister = deps.listPlugins ?? listDaemonPlugins;
         let listedIds: Set<string> | undefined;
         let listReason = "";
@@ -1505,7 +1508,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         if (listedIds === undefined) {
           return failure("daemon_failed", `cannot tell which companions are already installed — the daemon plugin list is unavailable: ${listReason}`);
         }
-        targets = COMPANION_CATALOG.filter((entry) => !listedIds!.has(entry.id));
+        targets = COMPANION_CATALOG.filter((entry) => entry.access === "public" && !listedIds!.has(entry.id));
       } else {
         const entry = COMPANION_CATALOG.find((candidate) => candidate.id === input.target);
         if (entry === undefined) return failure("unknown-companion", `${input.target} is not a Factory companion — the surface manages only the catalog's own family`);
@@ -1518,6 +1521,17 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         // The catalog's canonicalSource is the default — no code path probes
         // or prefers `../` sibling directories on the host disk.
         const source = input.source ?? entry.canonicalSource;
+        // The private-companion pre-flight (v0.0.30, ADR 0012 §2): an explicit
+        // install of a `private` companion verifies pull access before the
+        // daemon clones — `gh auth setup-git` when logged in, then
+        // `git ls-remote`. Production always enforces (no installPlugin
+        // override); tests enforce whenever the vaultRunner seam is injected,
+        // so legacy unit tests faking only installPlugin never touch the
+        // network. A local directory source skips GitHub entirely.
+        if (entry.access === "private" && !isLocalCompanionGitSource(source) && (deps.installPlugin === undefined || deps.vaultRunner !== undefined)) {
+          const probe = await probeCompanionGitAccess(source, vaultRunnerOptions());
+          if (!probe.ok) return failure("private-companion-access-denied", probe.reason);
+        }
         const reply = await installer(deps.home, { id: entry.id, source, ...(input.ref !== undefined ? { ref: input.ref } : {}) });
         if (!reply.ok) return failure("daemon_failed", reply.reason);
         installed.push(entry.id);
