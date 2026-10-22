@@ -2,7 +2,7 @@ import { test } from "node:test";
 import type { TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { execSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createFactory } from "../plugin/server/core/factory.ts";
 import { resolveProject } from "../plugin/server/core/project.ts";
@@ -412,6 +412,65 @@ test("peer hooks: a needs_human recording lands its peer mail on the owning Proj
   assert.equal(queued?.kind, "needs_human");
   assert.equal(queued?.task, "T3");
   assert.ok(String(queued?.text).includes("denied-again"));
+});
+
+// ---- the offline deduplication drain (v0.0.31, ADR 0017 §6) --------------------------------
+
+test("startSpool deduplicates pre-seeded duplicate claim files into ONE Gate attempt with mirrored replies for the duplicate ids", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const projectRoot = join(dir, "repo");
+  mkdirSync(projectRoot, { recursive: true });
+  writeFileSync(join(projectRoot, "README.md"), "x\n");
+  gitCommitAll(projectRoot);
+  const stateDir = join(dir, "state");
+  const factory = createFactory({ stateDir });
+  factory.setContract({ task: "DEDUP-B", workspace: projectRoot, gate: "true", artifact: "README.md" });
+  const sha = execSync("git rev-parse HEAD", { cwd: projectRoot, encoding: "utf8" }).trim();
+
+  const spoolRoot = spoolRootFor(stateDir);
+  // The offline window's residue, exactly the spec's Problem 5 stack: three
+  // identical claim files already sitting in spool/requests/ before boot,
+  // each with its own id.
+  const ids = ["dup-a", "dup-b", "dup-c"];
+  for (const id of ids) {
+    dropRequest(spoolRoot, { id, kind: "claim", task: "DEDUP-B", sha });
+  }
+
+  const spool = startSpool(stateDir, factory, { pollMs: POLL_MS });
+  t.after(() => spool.stop());
+
+  await until(() => {
+    for (const id of ids) assert.ok(existsSync(join(spoolRoot, "replies", `${id}.json`)), `reply for ${id} landed`);
+  });
+
+  // ONE Gate attempt: a single claim round against the contract, attempt 1.
+  assert.deepEqual(
+    factory.ledger.eventsFor("DEDUP-B").map((e) => e.event),
+    ["contract_set", "claim_reported", "gate_started", "gate_finished", "report_written"],
+    "exactly one claim round — no second Gate, no second Ledger mutation",
+  );
+  const primary = readReply(spoolRoot, "dup-a"); // filename order makes dup-a the primary
+  assert.equal(primary.ok, true);
+  assert.equal(primary.attempt, 1);
+  assert.equal(primary.verdict, "green");
+
+  // The duplicates' replies are mirrored from the primary under their own ids.
+  for (const dup of ["dup-b", "dup-c"]) {
+    const mirrored = readReply(spoolRoot, dup);
+    assert.equal(mirrored.id, dup, "the mirrored reply carries the duplicate's own id");
+    assert.equal(mirrored.ok, primary.ok);
+    assert.equal(mirrored.attempt, primary.attempt);
+    assert.equal(mirrored.verdict, primary.verdict);
+    assert.equal(mirrored.summary, primary.summary);
+    assert.ok(existsSync(join(spoolRoot, "processed", `${dup}.json`)), `${dup} moved to processed/`);
+  }
+  assert.ok(existsSync(join(spoolRoot, "processed", "dup-a.json")), "the primary moved to processed/");
+  assert.deepEqual(
+    readdirSync(join(spoolRoot, "requests")).filter((name) => name.endsWith(".json")),
+    [],
+    "the drained queue is empty",
+  );
 });
 
 // ---- the startup recovery (ADR 0013 Decision 3's restart rule) ---------------------------

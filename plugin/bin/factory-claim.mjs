@@ -74,10 +74,13 @@ submit(spoolRoot, request);
 const reply = await awaitReply(spoolRoot, request.id, waitSecs * 1000);
 
 if (reply === null) {
+  // The stop-on-timeout instruction (v0.0.31, ADR 0017 §6): the single
+  // deduplicated request stays durably queued in spool/requests/ — reloading
+  // the plugin resumes the pipeline — so the caller must stop retrying and
+  // end its turn immediately.
   console.error(
-    `factory-claim: no reply from the factory plugin after ${waitSecs}s — it may be down, or the gate may still be queued.\n` +
-      `The claim (${request.id}) stays in the spool and may still be processed; do not resubmit blindly, ` +
-      `that would open another attempt. Ask the Owner to check the plugin.`,
+    `factory-claim: No reply from the factory plugin after ${waitSecs}s (request ${request.id} remains queued in spool/requests/). ` +
+      `The paseo-factory plugin may be stopped — DO NOT retry or call this tool again; end your turn immediately so the plugin can process the queued request when reloaded.`,
   );
   process.exit(2);
 }

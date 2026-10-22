@@ -19,7 +19,7 @@ import type { ProjectResolution } from "./project.ts";
 export type ProjectIdentity = Pick<Extract<ProjectResolution, { ok: true }>, "root" | "slug">;
 
 /** The seat titles the surface's ensure mints — how the create hook tells a seat from a stranger. */
-export const SEAT_TITLES = { supervisor: "Supervisor (paseo-factory)", lead: "Lead (paseo-factory)" } as const;
+export const SEAT_TITLES = { supervisor: "Supervisor", lead: "Lead" } as const;
 
 export type SeatName = keyof typeof SEAT_TITLES;
 

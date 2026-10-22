@@ -62,6 +62,50 @@ export function renderSeatBootstrap(input: SeatBootstrapInput): string {
   return renderSeatBootstrapPrompt(input);
 }
 
+// ---- the Agent tab titles (v0.0.31, ADR 0017 §2/§5) -----------------------------------------
+
+/** The working Agent's tab title inside its Task worktree Workspace — `Peer · <Task>`. */
+export function formatPeerAgentTitle(task: string): string {
+  return `Peer · ${task}`;
+}
+
+/** The cap on a Peer worktree Workspace title's summary clause (ADR 0017 §5). */
+const PEER_TITLE_SUMMARY_CAP = 56;
+
+/** The ellipsis appended when the summary clause is truncated. */
+const PEER_TITLE_ELLIPSIS = "…";
+
+/**
+ * The first clause of a `contract.description` — the text before the earliest
+ * of the clause separators (`—`, `. `, `: `, `; `), trimmed and capped at 56
+ * characters (appending `…` when truncated). An absent or whitespace-only
+ * description yields no clause at all.
+ */
+function firstSummaryClause(description: string | undefined): string {
+  if (typeof description !== "string") return "";
+  const separators = ["—", ". ", ": ", "; "];
+  let cut = description.length;
+  for (const separator of separators) {
+    const index = description.indexOf(separator);
+    if (index >= 0 && index < cut) cut = index;
+  }
+  const clause = description.slice(0, cut).trim();
+  if (clause === "") return "";
+  return clause.length > PEER_TITLE_SUMMARY_CAP
+    ? `${clause.slice(0, PEER_TITLE_SUMMARY_CAP)}${PEER_TITLE_ELLIPSIS}`
+    : clause;
+}
+
+/**
+ * The Task worktree Workspace's sidebar title (ADR 0017 §5): `Peer · <Task> —
+ * <short summary>` from the contract description's first clause, or just
+ * `Peer · <Task>` when no usable clause exists — never the `<project-slug>` hash.
+ */
+export function formatPeerWorkspaceTitle(task: string, description?: string): string {
+  const summary = firstSummaryClause(description);
+  return summary === "" ? formatPeerAgentTitle(task) : `${formatPeerAgentTitle(task)} — ${summary}`;
+}
+
 // ---- the PASEO_FACTORY_* env channel -------------------------------------------------------
 
 /**
@@ -393,7 +437,10 @@ export function applyProviderExecutionFence<T extends AgentCreateRequest["config
 /**
  * Strips any top-level keys other than `config` and `env` (and strips
  * `config.labels`) so Paseo `0.11.2`'s strict `agent.create` before-hook Zod
- * schema (`{ config, env? }`) never rejects the hook return value.
+ * schema (`{ config, env? }`) never rejects the hook return value. Every other
+ * config field rides verbatim — `config.title` included (v0.0.31, ADR 0017
+ * §2): the role title stamped by `injectRoleOnCreate` must survive the return
+ * trip so Paseo names the Agent tab `Supervisor` / `Lead` / `Peer · <Task>`.
  */
 export function sanitizeAgentCreateHookResult<R extends { config: unknown; env?: Record<string, string> }>(result: R): {
   config: R["config"];
@@ -451,6 +498,9 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
       const fencedConfig = applyProviderExecutionFence(
         {
           ...request.config,
+          // The Agent tab inside the Task worktree Workspace reads `Peer · <Task>`
+          // (ADR 0017 §2) — never the bare task id or the raw spawn prompt.
+          title: formatPeerAgentTitle(worktree.task),
           systemPrompt: appendContract(request.config.systemPrompt, renderAgentContract(worktree.task, worktree.slug)),
         },
         {
@@ -502,6 +552,9 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
   const fencedConfig = applyProviderExecutionFence(
     {
       ...request.config,
+      // The Agent tab inside the main Workspace reads the clean seat title
+      // (ADR 0017 §2) — `Supervisor` / `Lead`, never the raw first message.
+      title: role === "supervisor" || role === "lead" ? SEAT_TITLES[role] : request.config.title,
       systemPrompt: appendContract(
         request.config.systemPrompt,
         role === "agent"
@@ -555,6 +608,25 @@ function bindSeatAgentId(
 }
 
 /**
+ * The co-location half of the ADR 0017 §5 seat binding: a `supervisor` (or
+ * `lead`) session opening inside a Paseo Workspace persists that Workspace's
+ * id as the Project registration's `workspaceId` — the main Workspace
+ * `ensureSeat("lead")` reuses so `Supervisor` and `Lead` sit side-by-side as
+ * two Agent tabs. The merge law of `writeProjectRegistration` preserves every
+ * other registration field; an absent, empty, or non-string `workspaceId`
+ * writes nothing (and role `agent` never persists one).
+ */
+function persistSeatWorkspaceId(
+  stateDir: string,
+  slug: string,
+  root: string,
+  workspaceId: string | null | undefined,
+): void {
+  if (typeof workspaceId !== "string" || workspaceId === "") return;
+  writeProjectRegistration(stateDir, slug, { root, workspaceId });
+}
+
+/**
  * The `agent.session_open` injection (channel 3): every launch of a seat or
  * working-agent shell re-carries its `PASEO_FACTORY_*` identity, associates
  * the live `agentId` with its `Correlation token` in `<stateDir>/correlations.json`,
@@ -568,6 +640,8 @@ export function injectSessionEnv<
     env: Record<string, string>;
     provider?: string | null;
     config?: { env?: Record<string, string> };
+    /** The Paseo Workspace the session opened in (v0.0.31, ADR 0017 §5) — persisted for seat sessions. */
+    workspaceId?: string | null;
   },
 >(
   request: R,
@@ -584,7 +658,13 @@ export function injectSessionEnv<
       if (associated.role === "supervisor" || associated.role === "lead") {
         const project = resolveProject(request.cwd);
         if (project.ok && project.slug === associated.projectSlug) {
-          bindSeatAgentId(stateDir, project.slug, project.root, associated.role, request.agentId);
+          // Only a session that actually holds the seat persists its
+          // workspaceId (Implementation Decision 1): bindSeatAgentId returns
+          // false when another live session already owns it, and a seat it
+          // does not own must not re-point the Project's main Workspace.
+          if (bindSeatAgentId(stateDir, project.slug, project.root, associated.role, request.agentId)) {
+            persistSeatWorkspaceId(stateDir, project.slug, project.root, request.workspaceId);
+          }
         }
       }
       return {
@@ -692,7 +772,11 @@ export function injectSessionEnv<
   if (identitySeat === "supervisor" || identitySeat === "lead") {
     const project = resolveProject(request.cwd);
     if (project.ok) {
-      bindSeatAgentId(stateDir, project.slug, project.root, identitySeat, request.agentId);
+      // Same law as the correlation arm above: only a session that actually
+      // holds the seat persists its workspaceId (Implementation Decision 1).
+      if (bindSeatAgentId(stateDir, project.slug, project.root, identitySeat, request.agentId)) {
+        persistSeatWorkspaceId(stateDir, project.slug, project.root, request.workspaceId);
+      }
       const record = resolveOrAssociate({
         role: identitySeat,
         projectSlug: project.slug,

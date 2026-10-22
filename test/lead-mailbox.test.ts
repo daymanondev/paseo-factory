@@ -678,6 +678,33 @@ test("onLeadTurnEnded performs a bounded 1-shot self-healing retry per mailId fo
   assert.ok(callOrder.includes("drainSupervisorMailbox:list"), "drainSupervisorMailbox ran after ensureSupervisor");
 });
 
+test("pumpAll pumps a registered Project's queued Lead and Supervisor mail exactly once (v0.0.31, ADR 0017 §5/§6)", async (t) => {
+  const lead: FakeAgent = { id: "agent-lead-1", title: "Lead", status: "idle", labels: {} };
+  const { stateDir, slug, leadMail, fake } = makeSpooledRuntime(t, [lead]);
+  lead.labels = { seat: "lead", project: slug };
+
+  // Queued mail with no pump: enqueueLeadMail only appends mail_queued.
+  await leadMail.enqueueLeadMail(slug, { from: "supervisor", kind: "directive", text: "pumpAll lead directive" });
+  await leadMail.enqueueLeadMail(slug, { to: "supervisor", from: "owner", kind: "directive", text: "pumpAll supervisor directive" });
+  assert.equal(fake.sent.length, 0, "enqueueing alone delivers nothing");
+
+  // The boot capture's pump: every registered Project's Lead lane then
+  // Supervisor lane, each queued batch delivered exactly once.
+  await leadMail.pumpAll();
+
+  assert.equal(fake.sent.length, 2, "one delivery per lane — Lead and Supervisor");
+  assert.equal(fake.sent.filter((s) => s.text.includes("pumpAll lead directive")).length, 1, "the Lead's queued mail was pumped once");
+  assert.equal(fake.sent.filter((s) => s.text.includes("pumpAll supervisor directive")).length, 1, "the Supervisor's queued mail was pumped once");
+
+  const events = readMailboxLines(stateDir, slug);
+  assert.equal(events.filter((e) => e.type === "mail_queued").length, 2);
+  assert.equal(events.filter((e) => e.type === "mail_delivered").length, 2);
+
+  // An empty-queue pumpAll is a no-op — never a re-delivery of the un-acked batch.
+  await leadMail.pumpAll();
+  assert.equal(fake.sent.length, 2, "a second pumpAll with nothing new queued sends nothing");
+});
+
 test("resetProjectMailbox clears in-memory retry and handoff state for the target project slug (v0.0.24, T-02)", async (t) => {
   const { stateDir, slug, projectRoot, leadMail, fake } = makeSpooledRuntime(t);
   const mailboxPath = join(projectStateDir(stateDir, slug), "mailbox.jsonl");

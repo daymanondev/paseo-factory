@@ -10,6 +10,8 @@ import { readProjectRegistration, resolveProject } from "../plugin/server/core/p
 import { writeProjectRegistration } from "../plugin/server/projects.ts";
 import {
   applyProviderExecutionFence,
+  formatPeerAgentTitle,
+  formatPeerWorkspaceTitle,
   injectRoleOnCreate,
   injectSessionEnv,
   renderAgentContract,
@@ -18,6 +20,7 @@ import {
   resolveEffectiveProviderFamily,
   sanitizeAgentCreateHookResult,
   inferRoleFromProviderId,
+  SEAT_TITLES,
 } from "../plugin/server/roles.ts";
 import type { AgentCreateRequest } from "../plugin/server/roles.ts";
 import { disposeDir, makeTempDir, repoRoot } from "./helpers.ts";
@@ -527,6 +530,170 @@ test("injectSessionEnv binds provider-recognized supervisor and lead sessions in
   // An unrelated session at the same repository is untouched.
   const stranger = injectSessionEnv({ agentId: "stranger-chat", cwd: repoDir, env: {} }, stateDir, userHome);
   assert.equal(stranger, undefined, "an unrecognized session passes through untouched");
+});
+
+test("injectRoleOnCreate stamps clean role titles — Supervisor / Lead on the seat path, Peer · <Task> on the Task worktree path (v0.0.31, ADR 0017 §2)", (t) => {
+  const dir = makeTempDir("roles-seat-titles-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const userHome = join(dir, "home");
+  const repoDir = makeGitRepo(dir);
+
+  // SEAT_TITLES drops the legacy "(paseo-factory)" suffix — the Agent tab reads the bare role.
+  assert.deepEqual(SEAT_TITLES, { supervisor: "Supervisor", lead: "Lead" });
+
+  const sup = injectRoleOnCreate<AgentCreateRequest>(
+    { config: { provider: "factory-supervisor", cwd: repoDir, title: "Hãy xây dựng một tựa game 3D" }, env: {} },
+    stateDir,
+    userHome,
+  );
+  assert.ok(sup !== undefined, "the supervisor create injects");
+  assert.equal(sup.config.title, "Supervisor", "the Supervisor Agent tab title replaces the raw first message");
+
+  const lead = injectRoleOnCreate<AgentCreateRequest>(
+    { config: { provider: "factory-lead", cwd: repoDir, title: "any first message" } },
+    stateDir,
+    userHome,
+  );
+  assert.equal(lead?.config.title, "Lead", "the Lead Agent tab title replaces the raw first message");
+
+  // A factory-peer spawn inside a managed Task worktree gets the Peer tab title.
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(
+    join(stateDir, "lanes.json"),
+    `${JSON.stringify({ supervisor: "opencode/opencode/glm-5.1", lead: "opencode/opencode/glm-5.1", worker: "opencode/opencode/glm-5.1" }, null, 2)}\n`,
+  );
+  const worktreeDir = join(stateDir, "projects", "repo-abc123", "worktrees", "T-08");
+  mkdirSync(worktreeDir, { recursive: true });
+  const peer = injectRoleOnCreate<AgentCreateRequest>(
+    { config: { provider: "factory-peer", cwd: worktreeDir, title: "T-08" } },
+    stateDir,
+  );
+  assert.ok(peer !== undefined, "the managed-worktree branch fires for the peer create");
+  assert.equal(peer.config.title, "Peer · T-08", "the Task worktree Agent tab reads Peer · <Task>");
+
+  // sanitizeAgentCreateHookResult keeps config.title on the returned config —
+  // the stamped role title must survive the strict agent.create return schema.
+  const sanitized = sanitizeAgentCreateHookResult({
+    config: { cwd: repoDir, title: "Supervisor", labels: { seat: "supervisor" } } as never,
+    env: { A: "1" },
+  });
+  assert.equal((sanitized.config as { title?: string }).title, "Supervisor", "config.title survives sanitizeAgentCreateHookResult");
+});
+
+test("formatPeerWorkspaceTitle derives the first summary clause — separators, the 56-char cap, and the no-description fallback (v0.0.31, ADR 0017 §5)", () => {
+  assert.equal(formatPeerAgentTitle("T-08"), "Peer · T-08");
+  assert.equal(formatPeerWorkspaceTitle("T-08"), "Peer · T-08", "no description yields the bare Peer title");
+  assert.equal(formatPeerWorkspaceTitle("T-08", "   "), "Peer · T-08", "whitespace-only description yields no clause");
+  assert.equal(formatPeerWorkspaceTitle("T-08", "— only a second clause"), "Peer · T-08", "an empty first clause yields no summary");
+  assert.equal(formatPeerWorkspaceTitle("T-08", "Add login screen. Second sentence dropped."), "Peer · T-08 — Add login screen");
+  assert.equal(formatPeerWorkspaceTitle("T-08", "Fix crash: the tail drops"), "Peer · T-08 — Fix crash");
+  assert.equal(formatPeerWorkspaceTitle("T-08", "First clause; second clause"), "Peer · T-08 — First clause");
+  assert.equal(formatPeerWorkspaceTitle("T-08", "First clause — second clause"), "Peer · T-08 — First clause");
+  assert.equal(formatPeerWorkspaceTitle("T-08", "One. Two — three"), "Peer · T-08 — One", "the earliest separator wins");
+  assert.equal(
+    formatPeerWorkspaceTitle("T-08", "Colon:no-space is not a separator"),
+    "Peer · T-08 — Colon:no-space is not a separator",
+    "the separators need their trailing space",
+  );
+  assert.equal(formatPeerWorkspaceTitle("T-08", "a".repeat(56)), `Peer · T-08 — ${"a".repeat(56)}`, "exactly 56 chars is not truncated");
+  assert.equal(formatPeerWorkspaceTitle("T-08", "a".repeat(57)), `Peer · T-08 — ${"a".repeat(56)}…`, "the clause caps at 56 chars with an ellipsis");
+});
+
+test("injectSessionEnv persists the Supervisor's workspaceId into the project registration JSON — never for an agent-role session (v0.0.31, ADR 0017 §5)", (t) => {
+  const dir = makeTempDir("roles-session-workspace-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const userHome = join(dir, "home");
+  const repoDir = makeGitRepo(dir);
+  const resolved = resolveProject(repoDir);
+  assert.ok(resolved.ok);
+  const slug = resolved.ok ? resolved.slug : "";
+
+  // The identity arm: a native Supervisor session opens carrying its workspaceId.
+  const opened = injectSessionEnv(
+    { agentId: "sup-wks-1", cwd: repoDir, provider: "factory-supervisor", env: {}, workspaceId: "wks_sup_main" },
+    stateDir,
+    userHome,
+  );
+  assert.ok(opened !== undefined, "the supervisor session receives its factory env");
+  const registrationPath = join(stateDir, "projects", slug, "project.json");
+  const onDisk = JSON.parse(readFileSync(registrationPath, "utf8")) as Record<string, unknown>;
+  assert.equal(onDisk.workspaceId, "wks_sup_main", "workspaceId lands in the registration JSON under the state dir");
+  const bound = readProjectRegistration(stateDir, slug);
+  assert.equal(bound?.workspaceId, "wks_sup_main");
+  assert.equal(bound?.supervisor, "sup-wks-1");
+
+  // An agent-role session inside a Task worktree never persists a workspaceId.
+  const worktreeDir = join(stateDir, "projects", slug, "worktrees", "T-08");
+  mkdirSync(worktreeDir, { recursive: true });
+  const peerEnv: Record<string, string> = {};
+  const peer = injectSessionEnv(
+    { agentId: "peer-wks-1", cwd: worktreeDir, provider: "factory-peer", env: peerEnv, workspaceId: "wks_peer" },
+    stateDir,
+    userHome,
+  );
+  assert.ok(peer !== undefined, "the peer session receives its factory env");
+  assert.equal(peer.env.PASEO_FACTORY_SEAT, "agent");
+  assert.equal(
+    readProjectRegistration(stateDir, slug)?.workspaceId,
+    "wks_sup_main",
+    "an agent-role session never overwrites the persisted workspaceId",
+  );
+
+  // The associated-correlation arm: the token issued at create time carries the bind.
+  const created = injectRoleOnCreate<AgentCreateRequest>(
+    { config: { provider: "factory-lead", cwd: repoDir, title: "Lead" } },
+    stateDir,
+    userHome,
+  );
+  const correlationId = created?.env?.PASEO_FACTORY_CORRELATION;
+  assert.ok(correlationId !== undefined, "the lead create issued a correlation token");
+  const leadOpened = injectSessionEnv(
+    { agentId: "lead-wks-1", cwd: repoDir, env: { PASEO_FACTORY_CORRELATION: correlationId }, workspaceId: "wks_sup_main" },
+    stateDir,
+    userHome,
+  );
+  assert.ok(leadOpened !== undefined, "the associated lead session receives its factory env");
+  const afterLead = readProjectRegistration(stateDir, slug);
+  assert.equal(afterLead?.lead, "lead-wks-1", "the associated-correlation arm binds the lead seat");
+  assert.equal(afterLead?.workspaceId, "wks_sup_main", "persisting workspaceId again keeps the same main workspace");
+  assert.equal(afterLead?.supervisor, "sup-wks-1", "the workspaceId write never clobbers the supervisor binding");
+});
+
+test("injectSessionEnv never persists workspaceId from a session that did not bind the seat — an occupied supervisor keeps its Workspace (v0.0.31, ADR 0017 §5)", (t) => {
+  const dir = makeTempDir("roles-seat-workspace-occupied-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const userHome = join(dir, "home");
+  const repoDir = makeGitRepo(dir);
+  const resolved = resolveProject(repoDir);
+  assert.ok(resolved.ok);
+  const slug = resolved.ok ? resolved.slug : "";
+
+  // The first Supervisor session binds the seat and persists its Workspace.
+  const firstEnv: Record<string, string> = {};
+  const first = injectSessionEnv(
+    { agentId: "sup-a", cwd: repoDir, provider: "factory-supervisor", env: firstEnv, workspaceId: "wks_sup_main" },
+    stateDir,
+    userHome,
+  );
+  assert.ok(first !== undefined, "the first supervisor session receives its factory env");
+  assert.equal(readProjectRegistration(stateDir, slug)?.workspaceId, "wks_sup_main");
+
+  // A second supervisor session in a DIFFERENT Workspace never re-points the
+  // registration's workspaceId: it did not bind the seat, so per
+  // Implementation Decision 1 it must not persist its Workspace either.
+  const secondEnv: Record<string, string> = {};
+  const second = injectSessionEnv(
+    { agentId: "sup-b", cwd: repoDir, provider: "factory-supervisor", env: secondEnv, workspaceId: "wks_other" },
+    stateDir,
+    userHome,
+  );
+  assert.ok(second !== undefined, "the second session still carries its env");
+  const reg = readProjectRegistration(stateDir, slug);
+  assert.equal(reg?.supervisor, "sup-a", "an occupied seat is never displaced");
+  assert.equal(reg?.workspaceId, "wks_sup_main", "a session that did not bind the seat never persists its workspaceId");
 });
 
 test("CJS bundle regression: ensureFactoryBinScripts, injectRoleOnCreate, and injectSessionEnv materialize <stateDir>/bin/bridge.mjs even when esbuild strips import.meta.url in CJS mode", async (t) => {

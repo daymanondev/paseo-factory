@@ -256,6 +256,14 @@ export interface LeadMailRuntime {
   onLeadTurnEnded(input: LeadTurnEndedInput): Promise<void>;
   startupRecovery(): void;
   /**
+   * Pump every registered Project's Lead lane then Supervisor lane (v0.0.31,
+   * ADR 0017 §5/§6) — invoked the moment the daemon API is captured at boot
+   * (`onPaseoCaptured`), so mail requeued by `startupRecovery()` or queued by
+   * an early spool drain (before `paseoApi` arrived) delivers immediately
+   * instead of waiting for the next dispatch.
+   */
+  pumpAll(): Promise<void>;
+  /**
    * The rotation settle (ADR 0013 Decision 3's last arm): requeue any
    * un-acked in-flight delivery of one Project's mailbox as `mail_requeued`
    * (`reason: "lead-rotated"`) — the surface's `retireSeat` fires it through
@@ -1161,6 +1169,18 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   };
 
   /**
+   * Pump all registered Projects' Lead and Supervisor lanes once the daemon
+   * API is captured at boot, so mail requeued by `startupRecovery()` or queued
+   * by an early spool drain (before `paseoApi` arrived) delivers immediately.
+   */
+  const pumpAll = async (): Promise<void> => {
+    for (const registration of listProjectRegistrations(deps.stateDir)) {
+      await pumpProjectLead(registration.slug);
+      await pumpProjectSupervisor(registration.slug);
+    }
+  };
+
+  /**
    * The rotation settle (ADR 0013 Decision 3's last arm, wired through the
    * surface's `onLeadRetired` door): a Lead retired while a delivery is live
    * can never receive its turn-end ack, so any un-acked `inFlight` batch
@@ -1218,6 +1238,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     pumpProjectSupervisor,
     onLeadTurnEnded,
     startupRecovery,
+    pumpAll,
     settleLeadRotation,
     resetProjectMailbox,
     markKickoffSent,

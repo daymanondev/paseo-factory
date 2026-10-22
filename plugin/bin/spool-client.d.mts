@@ -15,3 +15,17 @@ export declare function submit(spoolRoot: string, request: { id: string; kind: s
 export declare function awaitReply(spoolRoot: string, id: string, timeoutMs: number, pollMs?: number): Promise<Record<string, unknown> | null>;
 /** Time-prefixed request id — filenames sort in submission order. */
 export declare function randomId(): string;
+/**
+ * The canonical semantic key of a spool request (v0.0.31, ADR 0017 §6): the
+ * stable JSON serialization of every request field EXCEPT `id`.
+ */
+export declare function spoolRequestSemanticKey(req: unknown): string;
+/**
+ * Finds an un-replied request whose semantic key matches the incoming one —
+ * the offline-dedup seam. Returns `{ id, path }` of the pending original, or
+ * undefined when nothing matches.
+ */
+export declare function findPendingSemanticDuplicate(
+  spoolRoot: string,
+  request: unknown,
+): { id: string; path: string } | undefined;
