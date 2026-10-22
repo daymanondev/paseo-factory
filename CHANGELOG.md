@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.30] - 2026-10-22
+
+v0.0.30's one thing: **a private/invite-only companion tier for `factory-release-lab` — an explicit `access: "public" | "private"` across the catalog and view, public-only `Install All`, a pre-flight pull-access probe on explicit private installs, and per-plugin fault isolation for update checks** (ADR 0012 + ADR 0014 amendments).
+
+### Added
+
+- **Private companion access tier (`plugin/shared/companions.ts`, `plugin/shared/view.ts`, `plugin/server/view.ts`, pinned in `test/surface-rpc.test.ts`)** —
+  `PluginAccessTier` lands on `CorePluginCatalogEntry` and `CompanionCatalogEntry` (`paseo-factory`, `factory-burn-lab`, `factory-connector` → `"public"`; `factory-release-lab` → `"private"`), flows through `CompanionPluginViewSchema` via `foldCompanions`/`foldCorePlugin`, and `CompanionCard` renders a `Private · Invite-only` pill for private non-core companions.
+- **Pre-flight pull-access probe for private companions (`src/vault.ts` → `plugin/server/core/vault.ts`, `plugin/server/surface-rpc.ts`)** —
+  `probeCompanionGitAccess` normalizes `git:`/`github:`/`https://github.com/` (plus `ssh://git@github.com/…` and scp-style `git@github.com:…`) sources, runs `gh auth setup-git --hostname github.com` best-effort when `gh` is authenticated, verifies pull access with `git ls-remote --heads --`, and — when verification fails — refuses with `code: "private-companion-access-denied"` naming `@<ghUser>` and the repository (or instructing `gh auth login`) before the daemon is ever invoked. Local directory sources skip the probe.
+
+### Changed
+
+- **`Install All` is public-only (server + client)** — `pluginsInstall({ target: "all" })` filters `COMPANION_CATALOG` to uninstalled `access === "public"` entries so batch installs never trip on the private repository, and `PluginsPane`'s toolbar button uses the same predicate, so it disappears once every public companion is installed while `factory-release-lab` remains `not_installed`.
+
+### Fixed
+
+- **Per-plugin update fault isolation (`plugin/server/daemon-cli.ts`)** — when the batch `plugin.source.status.request` fails (e.g. an installed plugin's repository became inaccessible), `checkDaemonPluginUpdates` now falls back to one `plugin.source.status.request` per installed plugin, collecting every succeeding row, so one broken repository no longer hides `Check for updates` for the rest of the ecosystem.
+- `package.json` + both `package-lock.json` version spots + `SHELL_VERSION` + `bridge.mjs` `serverInfo.version` → `0.0.30`.
+
 ## [0.0.29] - 2026-10-22
 
 v0.0.29's one thing: **live multi-task wave & OpenCode MCP runtime hardening — automatic `contract.base` refresh across sequential task landings, worktree preservation on contract re-scoping, companion lockfile & `npm install` artifact tolerance, auto-resolved `lead_needs_human` ledger sequences, `Supervisor`/`Lead` write-fence enforcement, and OpenCode `factory-peer` spawn compatibility**.
