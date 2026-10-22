@@ -1,10 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createFactory } from "../plugin/server/core/factory.ts";
-import { startSpool } from "../plugin/server/spool.ts";
+import { spoolRootFor, spoolRequestSemanticKey, startSpool } from "../plugin/server/spool.ts";
+import { randomId, spoolRequestSemanticKey as binSemanticKey, submit } from "../plugin/bin/spool-client.mjs";
 import { copyFixture, disposeDir, eyeAnswer, gitCommitAll, gitCommitChanges, makeTempDir, repoRoot, startFakeEye, writeEyeConfig, writeLanes } from "./helpers.ts";
 
 /**
@@ -38,6 +39,27 @@ function run(script: string, args: string[], extraEnv: Record<string, string>): 
       resolve({ status, stdout, stderr });
     });
   });
+}
+
+/** Waits (bounded) until the condition holds — spool answers are asynchronous by design. */
+async function until(assertion: () => void, ms = 5000): Promise<void> {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    try {
+      assertion();
+      return;
+    } catch (err) {
+      if (Date.now() >= deadline) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  }
+}
+
+/** Every `*.json` request filename currently queued in `spool/requests/`. */
+function queuedRequestIds(spoolRoot: string): string[] {
+  const dir = join(spoolRoot, "requests");
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir).filter((name) => name.endsWith(".json")).map((name) => name.slice(0, -".json".length)).sort();
 }
 
 test("the whole loop over the spool: contract → red claim → green claim → accept", async (t) => {
@@ -312,9 +334,79 @@ test("a claim with no plugin answering times out honestly and exits 2", async (t
 
   const result = await run(claimCli, ["--task", "T1", "--sha", "abc", "--wait-secs", "1"], { FACTORY_STATE_DIR: stateDir });
   assert.equal(result.status, 2);
-  assert.match(result.stderr, /no reply from the factory plugin/);
-  assert.match(result.stderr, /do not resubmit/);
-  assert.ok(existsSync(join(stateDir, "spool", "requests")), "the request is durably queued, not lost");
+  // v0.0.31 (ADR 0017 §6): the timeout is the explicit stop-and-end-turn
+  // instruction — the single deduplicated request stays durably queued.
+  assert.match(result.stderr, /No reply from the factory plugin after 1s/);
+  assert.match(result.stderr, /remains queued in spool\/requests\//);
+  assert.match(result.stderr, /DO NOT retry or call this tool again/);
+  assert.match(result.stderr, /end your turn immediately/);
+  assert.deepEqual(queuedRequestIds(spoolRootFor(stateDir)).length, 1, "the request is durably queued, not lost");
+});
+
+test("the spool semantic key's two exported definitions cannot drift, and `id` never participates (v0.0.31, ADR 0017 §6)", () => {
+  const bodies = [
+    { id: "a", kind: "claim", task: "T1", sha: "s1", agent: "ag-1" },
+    { id: "b", kind: "claim", task: "T1", sha: "s1", agent: "ag-1" },
+    { id: "c", kind: "contract", task: "T1", workspace: "/w", gate: "true", artifact: "a", submitter: "owner", scope: ["s2", "s1"], freshEyes: true },
+    { id: "d", kind: "lead_dispatch", project: "demo", message: "Go", seat: "lead", submitter: "owner" },
+    { id: "e", kind: "needs_human", task: "T9", reason: "denied-again", evidence: { repoke: 4, denial: 3 } },
+  ];
+  for (const body of bodies) {
+    assert.equal(binSemanticKey(body), spoolRequestSemanticKey(body), `bin and server keys agree for ${body.kind}`);
+  }
+  // `id` is the one field the key ignores; key-order differences cancel too.
+  assert.equal(binSemanticKey(bodies[0]), binSemanticKey(bodies[1]));
+  assert.equal(spoolRequestSemanticKey(bodies[0]), spoolRequestSemanticKey(bodies[1]));
+  assert.equal(
+    binSemanticKey({ kind: "claim", task: "T1", sha: "s1" }),
+    binSemanticKey({ sha: "s1", task: "T1", kind: "claim" }),
+    "object key order never changes the key",
+  );
+  // Any semantic field changing changes the key.
+  assert.notEqual(binSemanticKey(bodies[0]), binSemanticKey({ ...bodies[0], sha: "s2" }));
+  assert.notEqual(binSemanticKey(bodies[0]), binSemanticKey({ ...bodies[0], agent: "ag-2" }));
+});
+
+test("three identical claims while the watcher is stopped leave ONE request file; the spool then runs ONE Gate attempt (v0.0.31, ADR 0017 §6)", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const workspace = join(dir, "workspace");
+  copyFixture("sample-workspace", workspace);
+  const sha = gitCommitAll(workspace);
+  const home = join(dir, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
+  factory.setContract({ task: "DEDUP1", workspace, gate: "true", artifact: "src/format.ts" });
+  const spoolRoot = spoolRootFor(stateDir);
+
+  // The offline window: a Peer retries agent_claim three times, each retry
+  // minting a fresh request id — exactly the spec's Problem 5 stack.
+  const awaitedIds: string[] = [];
+  for (let i = 0; i < 3; i += 1) {
+    const request = { id: randomId(), kind: "claim" as const, task: "DEDUP1", sha, agent: "agent-dedup-1" };
+    submit(spoolRoot, request);
+    awaitedIds.push(request.id);
+  }
+  assert.equal(new Set(awaitedIds).size, 1, "every submit reused the one pending request's id");
+  assert.deepEqual(queuedRequestIds(spoolRoot), [awaitedIds[0]!], "exactly ONE request file sits in spool/requests/");
+
+  // The plugin comes back: the single queued claim runs exactly one Gate attempt.
+  const spool = startSpool(stateDir, factory, { pollMs: 20 });
+  t.after(() => spool.stop());
+  const replyPath = join(spoolRoot, "replies", `${awaitedIds[0]}.json`);
+  await until(() => {
+    assert.ok(existsSync(replyPath), "the single reply landed");
+  });
+  const reply = JSON.parse(readFileSync(replyPath, "utf8")) as Record<string, unknown>;
+  assert.equal(reply.ok, true);
+  assert.equal(reply.attempt, 1, "one Gate attempt — attempt: 1");
+  assert.equal(reply.verdict, "green");
+  assert.deepEqual(
+    factory.ledger.eventsFor("DEDUP1").map((e) => e.event),
+    ["contract_set", "claim_reported", "gate_started", "gate_finished", "report_written"],
+    "exactly one claim round — no second Gate, no second Ledger mutation",
+  );
+  assert.deepEqual(queuedRequestIds(spoolRoot), [], "the drained queue is empty");
 });
 
 test("the loop with --fresh-eyes: the eye's line lands through the real CLIs and spool", async (t) => {

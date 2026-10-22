@@ -17,6 +17,7 @@ import { handleSpoolRequest } from "../plugin/server/spool.ts";
 import {
   BRIDGE_TIMEOUT_MS,
   checkDaemonPluginUpdates,
+  cleanupDaemonWorkspacesAndProjectsViaWs,
   cliUtils,
   getCachedPluginUpdateStatus,
   installDaemonPlugin,
@@ -61,6 +62,8 @@ interface FakeAgent {
   cwd?: string;
   /** The live usage slice the 128k Lead sensor reads (ticket 07's SurfaceAgentSnapshot extension). */
   lastUsage?: { contextWindowUsedTokens?: number; contextWindowMaxTokens?: number } | null;
+  /** The Paseo Workspace the agent's session lives in (v0.0.31, ADR 0017 §5). */
+  workspaceId?: string | null;
 }
 
 function fakeDaemon(agents: FakeAgent[]) {
@@ -96,6 +99,7 @@ function fakeDaemon(agents: FakeAgent[]) {
               attentionReason: null,
               updatedAt: "2026-10-15T00:00:00.000Z",
               cwd: agent.cwd ?? "/tmp",
+              ...(agent.workspaceId === undefined ? {} : { workspaceId: agent.workspaceId }),
               ...(agent.lastUsage === undefined ? {} : { lastUsage: agent.lastUsage }),
             },
           })),
@@ -662,7 +666,7 @@ test("supervisor.ensure: seats the agent AT the project root — no AGENTS.md wr
   assert.equal(fake.created.length, 1);
   assert.equal(fake.created[0]!.config.provider, "copilot/gpt-5.4", "spawned under the configured supervisor lane");
   assert.deepEqual(fake.created[0]!.labels, { seat: "supervisor", project: project.slug }, "the seat + project labels are how every later ensure finds it");
-  assert.equal(fake.created[0]!.title, "Supervisor (paseo-factory)");
+  assert.equal(fake.created[0]!.title, "Supervisor");
   assert.equal(fake.created[0]!.cwd, project.root, "the seat stands at cwd = <project-root>");
   assert.equal(fake.created[0]!.prompt, undefined, "seat creation is silent — no bootstrap prompt inside agents.create (v0.0.28, ADR 0018 §2)");
   assert.deepEqual(fake.sent, [{ agentId: reply.agentId, text: "Check the T1 verdict." }], "the quick dispatch rode the create");
@@ -799,7 +803,7 @@ test("lead.ensure: seats the Lead at the project root under lanes.lead with the 
   assert.equal(fake.created[0]!.config.provider, "claude/opus-4-8", "spawned under the configured lead lane");
   assert.equal(fake.created[0]!.cwd, project.root);
   assert.deepEqual(fake.created[0]!.labels, { seat: "lead", project: project.slug });
-  assert.equal(fake.created[0]!.title, "Lead (paseo-factory)");
+  assert.equal(fake.created[0]!.title, "Lead");
   assert.equal(fake.created[0]!.prompt, undefined, "seat creation is silent — no bootstrap prompt inside agents.create (v0.0.28, ADR 0018 §2)");
   assert.deepEqual(fake.sent, [{ agentId: reply.agentId, text: "Split the directive." }]);
 
@@ -2933,7 +2937,9 @@ test("v0.0.23 (ADR 0015 §6): spool spawn/respawn registers Task worktree worksp
   }
   assert.deepEqual(createdWorkspaces, [
     {
-      title: `${project.slug} T-WS-1`,
+      // v0.0.31 (ADR 0017 §5): the Task worktree Workspace title is role-first
+      // (`Peer · <Task>`, no <project-slug> hash) — the parallel titles track's law.
+      title: "Peer · T-WS-1",
       source: { kind: "directory", path: wtPath, projectId: "prj-proj-root" },
     },
   ]);
@@ -2998,6 +3004,418 @@ test("v0.0.23 (ADR 0015 §6): spool spawn/respawn registers Task worktree worksp
     readProjectRegistration(stateDir, project.slug)?.taskWorkspaces?.["T-WS-1"],
     undefined,
     "accept removed taskWorkspaces[T-WS-1] from project.json",
+  );
+});
+
+// ---- v0.0.31 (ADR 0017 §5): the co-located Supervisor/Lead workspace & safe record sweep seams ----
+
+test("v0.0.31 (ADR 0017 §2/§5): spawn titles the Task worktree Workspace `Peer · <Task> — <short summary>` and workspaces.open never overwrites a persisted workspaceId", async (t) => {
+  const { factory, fake, stateDir } = makeSurface(t, []);
+  const project = makeProject(t, "ws-task-title");
+  writeLanes(stateDir, { agent: "opencode/glm-5.1" });
+
+  const createdWorkspaces: { title: string; source: { kind: "directory"; path: string; projectId?: string } }[] = [];
+  fake.daemon.workspaces = {
+    // The spec's Problem-1 trap: opening the project root resolves a
+    // DIFFERENT `local_checkout` Workspace than the Supervisor's main one.
+    open: async () => ({ id: "ws-local-checkout", projectId: "prj-backfill" }),
+    create: async ({ title, source }) => {
+      createdWorkspaces.push({ title, source });
+      return { id: `ws-wt-${createdWorkspaces.length}`, projectId: source.projectId ?? null };
+    },
+    archive: async () => ({ archivedAt: new Date().toISOString(), error: null }),
+    ref: () => ({
+      agents: {
+        create: async (options) => fake.daemon.agents.create({ ...options, cwd: project.root }),
+      },
+    }),
+  };
+
+  // What injectSessionEnv persisted when the native Supervisor opened: the
+  // main workspaceId, but no paseoProjectId yet (unknown until backfill).
+  writeProjectRegistration(stateDir, project.slug, { root: project.root, workspaceId: "wks_sup_main" });
+
+  factory.setContract({
+    task: "T-WS-2",
+    workspace: project.root,
+    gate: "test -f out.txt",
+    artifact: "out.txt",
+    by: "lead",
+    description: "Add login screen. More detail follows in the second clause.",
+  });
+  const wtPrep = prepareTaskWorktree({ stateDir, workspace: project.root, task: "T-WS-2" });
+  assert.ok(wtPrep.ok, wtPrep.ok ? "" : wtPrep.reason);
+  writeFileSync(join(wtPrep.path, "out.txt"), "ok\n");
+  gitCommitAll(wtPrep.path, "out");
+
+  const spawnReply = await handleSpoolRequest(
+    factory,
+    { id: "sp-ws-2", kind: "spawn", task: "T-WS-2", provider: "opencode/glm-5.1", arity: 1, worktree: wtPrep.path },
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    fake.daemon,
+  );
+  assert.equal(spawnReply.ok, true);
+  // Testing Decision seam 1's description arm: the first clause of
+  // contract.description rides the title — `Peer · <Task> — <short summary>`,
+  // never a <project-slug> prefix.
+  assert.deepEqual(createdWorkspaces, [
+    {
+      title: "Peer · T-WS-2 — Add login screen",
+      source: { kind: "directory", path: wtPrep.path, projectId: "prj-backfill" },
+    },
+  ]);
+  // The never-overwrite law: the open only backfilled the unknown
+  // paseoProjectId — the Supervisor's persisted workspaceId survives.
+  const reg = readProjectRegistration(stateDir, project.slug);
+  assert.equal(reg?.workspaceId, "wks_sup_main", "workspaces.open never overwrites the persisted Supervisor workspaceId");
+  assert.equal(reg?.paseoProjectId, "prj-backfill", "the open backfilled the unknown paseoProjectId");
+  assert.equal(reg?.taskWorkspaces?.["T-WS-2"], "ws-wt-1");
+});
+
+test("v0.0.31 (ADR 0017 §5): leadEnsure creates Lead INSIDE the Supervisor's wks_sup_main via workspaces.ref(...).agents.create — no second workspace opened", async (t) => {
+  const project = makeProject(t, "colocated-lead");
+  const { stateDir, handlers, fake } = makeSurface(t, [
+    // The native New Chat Supervisor: session_open bound it and its workspace.
+    { id: "native-sup-1", provider: "factory-supervisor", title: "Build the game", cwd: project.root, workspaceId: "wks_sup_main" },
+  ]);
+  writeLanes(stateDir, { lead: "opencode/glm-5.1" });
+  // What the session_open binding persisted (injectSessionEnv's law): the
+  // Supervisor's workspaceId plus the daemon's project id.
+  writeProjectRegistration(stateDir, project.slug, {
+    root: project.root,
+    supervisor: "native-sup-1",
+    workspaceId: "wks_sup_main",
+    paseoProjectId: "prj_sup_main",
+  });
+
+  const openedWorkspaces: string[] = [];
+  const wsCreatedAgents: { workspaceId: string; title: string; parent?: string }[] = [];
+  fake.daemon.workspaces = {
+    open: async ({ cwd }) => {
+      openedWorkspaces.push(cwd);
+      return { id: "wks_other_checkout", projectId: "prj_other" };
+    },
+    create: async () => ({ id: "wks-unused", projectId: null }),
+    archive: async () => ({ archivedAt: new Date().toISOString() }),
+    ref: (workspaceId: string) => ({
+      agents: {
+        create: async (options) => {
+          wsCreatedAgents.push({ workspaceId, title: options.title, ...(options.parent === undefined ? {} : { parent: options.parent }) });
+          return fake.daemon.agents.create({ ...options, cwd: project.root });
+        },
+      },
+    }),
+  };
+
+  const reply = await handlers.leadEnsure({ projectRoot: project.root });
+  assert.ok(reply.ok, reply.ok ? "" : reply.error);
+  assert.equal(reply.created, true);
+  assert.deepEqual(openedWorkspaces, [], "no second workspace is opened — Lead joins the Supervisor's main workspace as a second Agent tab");
+  assert.equal(wsCreatedAgents.length, 1, "Lead was created through workspaces.ref(workspaceId).agents.create");
+  assert.equal(wsCreatedAgents[0]!.workspaceId, "wks_sup_main");
+  assert.equal(wsCreatedAgents[0]!.title, "Lead");
+  assert.equal(wsCreatedAgents[0]!.parent, "native-sup-1", "Lead carries parent: the live Supervisor's agent id");
+  assert.equal(fake.created.length, 1);
+  assert.equal(fake.created[0]!.title, "Lead");
+  // The registration keeps the Supervisor's workspace — never displaced.
+  const reg = readProjectRegistration(stateDir, project.slug);
+  assert.equal(reg?.workspaceId, "wks_sup_main");
+  assert.equal(reg?.paseoProjectId, "prj_sup_main");
+  assert.equal(reg?.lead, reply.agentId);
+});
+
+test("v0.0.31 (ADR 0017 §5): a backfill workspaces.open never displaces the Supervisor's resolved workspaceId", async (t) => {
+  const project = makeProject(t, "backfill-ws");
+  const { stateDir, handlers, fake } = makeSurface(t, [
+    { id: "agent-sup-live", labels: { seat: "supervisor", project: project.slug }, title: "Supervisor", cwd: project.root, workspaceId: "wks_sup_live" },
+  ]);
+  // session_open persisted the workspaceId but no paseoProjectId yet.
+  writeProjectRegistration(stateDir, project.slug, { root: project.root, supervisor: "agent-sup-live", workspaceId: "wks_sup_live" });
+
+  const openedWorkspaces: string[] = [];
+  const wsCreatedAgents: { workspaceId: string; title: string }[] = [];
+  fake.daemon.workspaces = {
+    open: async ({ cwd }) => {
+      openedWorkspaces.push(cwd);
+      return { id: "wks_fresh_checkout", projectId: "prj_fresh" };
+    },
+    create: async () => ({ id: "wks-unused", projectId: null }),
+    archive: async () => ({ archivedAt: new Date().toISOString() }),
+    ref: (workspaceId: string) => ({
+      agents: {
+        create: async (options) => {
+          wsCreatedAgents.push({ workspaceId, title: options.title });
+          return fake.daemon.agents.create({ ...options, cwd: project.root });
+        },
+      },
+    }),
+  };
+
+  const reply = await handlers.leadEnsure({ projectRoot: project.root });
+  assert.ok(reply.ok, reply.ok ? "" : reply.error);
+  assert.deepEqual(openedWorkspaces, [project.root], "exactly one open flew — solely to backfill the unknown paseoProjectId");
+  assert.equal(wsCreatedAgents.length, 1);
+  assert.equal(wsCreatedAgents[0]!.workspaceId, "wks_sup_live", "Lead still lands in the Supervisor's workspace — never the freshly opened one");
+  const reg = readProjectRegistration(stateDir, project.slug);
+  assert.equal(reg?.workspaceId, "wks_sup_live");
+  assert.equal(reg?.paseoProjectId, "prj_fresh", "the open's projectId is the backfill that landed");
+});
+
+test("v0.0.31 (ADR 0017 §4–§5): the daemon record sweep retires only the target/missing worktree, keeps siblings on disk, and sweeps orphaned local_checkouts by keep/active sets", async (t) => {
+  const base = makeTempDir();
+  disposeDir(t, base);
+  const worktreesDir = join(base, "worktrees");
+  // Sibling worktrees that still exist on disk; T-14 stays missing entirely.
+  for (const task of ["T-11", "T-12", "T-13"]) mkdirSync(join(worktreesDir, task), { recursive: true });
+  const project = makeProject(t, "sweep-rules");
+
+  const daemon = await startFakeDaemon(t, (message) => {
+    if (message.type === "fetch_workspaces_request") {
+      return {
+        type: "fetch_workspaces_response",
+        payload: {
+          requestId: message.requestId,
+          entries: [
+            { id: "wks-t11", workspaceDirectory: join(worktreesDir, "T-11") },
+            { id: "wks-t12", workspaceDirectory: join(worktreesDir, "T-12") },
+            { id: "wks-t13", workspaceDirectory: join(worktreesDir, "T-13") },
+            { id: "wks-t14", workspaceDirectory: join(worktreesDir, "T-14") },
+            { id: "wks-sup-main", projectRootPath: project.root },
+            { id: "wks-user-live", workspaceDirectory: project.root },
+            { id: "wks-orphan-1", workspaceDirectory: project.root },
+            { id: "wks-stranger", workspaceDirectory: base },
+          ],
+        },
+      };
+    }
+    if (message.type === "project.list.request") {
+      return {
+        type: "project.list.response",
+        payload: {
+          requestId: message.requestId,
+          projects: [
+            { projectId: "prj-wt", projectRootPath: join(worktreesDir, "T-12") },
+            { projectId: "prj-main", projectRootPath: project.root },
+            { projectId: "prj-missing", projectRootPath: join(base, "gone") },
+          ],
+        },
+      };
+    }
+    if (message.type === "archive_workspace_request") {
+      return { type: "archive_workspace_response", payload: { requestId: message.requestId } };
+    }
+    if (message.type === "project.remove.request") {
+      return { type: "project.remove.response", payload: { requestId: message.requestId } };
+    }
+    return null;
+  });
+
+  const swept = await cleanupDaemonWorkspacesAndProjectsViaWs(daemon.home, {
+    worktreesDir,
+    targetWorktreePath: join(worktreesDir, "T-12"),
+    projectRoot: project.root,
+    keepWorkspaceIds: ["wks-sup-main"],
+    activeWorkspaceIds: ["wks-sup-main", "wks-user-live"],
+  });
+  assert.ok(swept.ok, swept.ok ? "" : swept.reason);
+  assert.deepEqual(
+    swept.removedWorkspaceIds,
+    ["wks-t12", "wks-t14", "wks-orphan-1"],
+    "the retired target + the missing-dir worktree record + the zero-agent local_checkout — nothing else (T-11/T-13 on disk, the kept supervisor workspace, the live-agent workspace, and the stranger all stay)",
+  );
+  assert.deepEqual(swept.removedProjectIds, ["prj-wt", "prj-missing"], "worktree-rooted and missing project rows always go; the live project row stays");
+
+  // Without a target, sibling worktrees on disk survive even while another
+  // task's acceptance sweeps — only records whose directory is gone archive,
+  // and with no projectRoot the local_checkout rows are not the accept's business.
+  const passive = await cleanupDaemonWorkspacesAndProjectsViaWs(daemon.home, { worktreesDir });
+  assert.ok(passive.ok);
+  assert.deepEqual(passive.removedWorkspaceIds, ["wks-t14"], "no target: only the missing-dir record archives — T-11/T-12/T-13 on disk are never touched");
+  assert.deepEqual(passive.removedProjectIds, ["prj-wt", "prj-missing"]);
+});
+
+test("v0.0.31 (ADR 0017 §4): accepting T-12 while worktrees/T-11 and worktrees/T-13 still exist archives only the retired T-12 workspace (plus missing-dir records) — never the siblings", async (t) => {
+  const project = makeProject(t, "accept-siblings");
+  const { stateDir, factory, fake } = makeSurface(t, []);
+  writeLanes(stateDir, { worker: "pi/zai/glm-5.3" });
+
+  const worktreesDir = join(stateDir, "projects", project.slug, "worktrees");
+  // Sibling parallel tasks whose worktree directories still exist on disk.
+  for (const task of ["T-11", "T-13"]) mkdirSync(join(worktreesDir, task), { recursive: true });
+
+  const archiveRequests: string[] = [];
+  const daemon = await startFakeDaemon(t, (message) => {
+    if (message.type === "fetch_workspaces_request") {
+      return {
+        type: "fetch_workspaces_response",
+        payload: {
+          requestId: message.requestId,
+          entries: [
+            { id: "wks-t11", workspaceDirectory: join(worktreesDir, "T-11") },
+            { id: "wks-t12", workspaceDirectory: join(worktreesDir, "T-12") },
+            { id: "wks-t13", workspaceDirectory: join(worktreesDir, "T-13") },
+            { id: "wks-t14", workspaceDirectory: join(worktreesDir, "T-14") },
+          ],
+        },
+      };
+    }
+    if (message.type === "project.list.request") {
+      return { type: "project.list.response", payload: { requestId: message.requestId, projects: [] } };
+    }
+    if (message.type === "archive_workspace_request") {
+      archiveRequests.push(String(message.workspaceId));
+      return { type: "archive_workspace_response", payload: { requestId: message.requestId } };
+    }
+    return null;
+  });
+
+  const archivedWorkspaces: string[] = [];
+  fake.daemon.workspaces = {
+    open: async () => ({ id: "ws-main", projectId: "prj-main" }),
+    create: async () => ({ id: "ws-wt", projectId: "prj-main" }),
+    archive: async (wsId: string) => {
+      archivedWorkspaces.push(wsId);
+    },
+    ref: () => ({
+      agents: {
+        create: async (opts) => fake.daemon.agents.create({ ...opts, cwd: project.root }),
+      },
+    }),
+  };
+  // deps.home targets the fake WS daemon so the REAL bridge sweep runs.
+  const handlers = createSurfaceHandlers({ factory, stateDir, home: daemon.home, daemon: fake.daemon });
+
+  // A green, landed T-12 whose daemon workspace record still exists.
+  factory.setContract({ task: "T-12", workspace: project.root, gate: "test -f README.md", artifact: "README.md" });
+  const wt = prepareTaskWorktree({ stateDir, workspace: project.root, task: "T-12" });
+  assert.ok(wt.ok, wt.ok ? "" : wt.reason);
+  writeFileSync(join(wt.path, "t12.txt"), "ok\n");
+  const headSha = gitCommitAll(wt.path, "T-12 work");
+  factory.requestSpawn({ task: "T-12", provider: "pi/zai/glm-5.3", arity: 1, worktree: wt.path });
+  const claim = await factory.claim({ task: "T-12", sha: headSha, agent: "agent-t12" });
+  assert.equal(claim.verdict, "green");
+  writeProjectRegistration(stateDir, project.slug, { root: project.root, taskWorkspaces: { "T-12": "wks-t12" } });
+
+  const reply = await handlers.accept({ task: "T-12", attempt: 1 });
+  assert.ok(reply.ok, reply.ok ? "" : reply.error);
+
+  // The accepted task's own workspace archives (the direct in-process act)…
+  assert.deepEqual(archivedWorkspaces, ["wks-t12"]);
+  // …and the daemon-record sweep retires exactly the T-12 row (the landing
+  // removed its worktree directory, and it is the explicitly retired target)
+  // plus the missing-dir T-14 record — never the sibling T-11/T-13 rows
+  // whose directories still exist on disk.
+  assert.deepEqual(archiveRequests, ["wks-t12", "wks-t14"]);
+});
+
+test("v0.0.31 (ADR 0017 §5): a Supervisor ensure sweeps the Project's orphaned local_checkout workspaces — the active Supervisor workspace and any workspace hosting a live agent survive", async (t) => {
+  const project = makeProject(t, "orphan-sweep");
+  const { stateDir, factory, fake } = makeSurface(t, [
+    { id: "agent-sup-live", labels: { seat: "supervisor", project: project.slug }, title: "Supervisor", cwd: project.root, workspaceId: "wks-sup-main" },
+    // A user's active chat at the same project root — never ours to touch.
+    { id: "agent-user-chat", title: "Refactor the parser", cwd: project.root, workspaceId: "wks-user-live" },
+  ]);
+  writeProjectRegistration(stateDir, project.slug, { root: project.root, supervisor: "agent-sup-live", workspaceId: "wks-sup-main" });
+
+  const worktreesDir = join(stateDir, "projects", project.slug, "worktrees");
+  mkdirSync(join(worktreesDir, "T-77"), { recursive: true }); // a sibling worktree still on disk
+
+  const archiveRequests: string[] = [];
+  const daemon = await startFakeDaemon(t, (message) => {
+    if (message.type === "fetch_workspaces_request") {
+      return {
+        type: "fetch_workspaces_response",
+        payload: {
+          requestId: message.requestId,
+          entries: [
+            { id: "wks-sup-main", workspaceDirectory: project.root },
+            { id: "wks-user-live", projectRootPath: project.root },
+            { id: "wks-orphan-1", workspaceDirectory: project.root },
+            { id: "wks-orphan-2", projectRootPath: project.root },
+            { id: "wks-t77", workspaceDirectory: join(worktreesDir, "T-77") },
+          ],
+        },
+      };
+    }
+    if (message.type === "project.list.request") {
+      return { type: "project.list.response", payload: { requestId: message.requestId, projects: [] } };
+    }
+    if (message.type === "archive_workspace_request") {
+      archiveRequests.push(String(message.workspaceId));
+      return { type: "archive_workspace_response", payload: { requestId: message.requestId } };
+    }
+    return null;
+  });
+
+  const handlers = createSurfaceHandlers({ factory, stateDir, home: daemon.home, daemon: fake.daemon });
+
+  const reply = await handlers.supervisorEnsure({ projectRoot: project.root });
+  assert.ok(reply.ok, reply.ok ? "" : reply.error);
+  assert.equal(reply.created, false, "the live Supervisor is reused, not duplicated");
+  assert.deepEqual(
+    archiveRequests,
+    ["wks-orphan-1", "wks-orphan-2"],
+    "only the zero-agent local_checkout rows archive — the Supervisor's workspace, the live user chat's workspace, and the on-disk sibling worktree all survive",
+  );
+  // The registration's binding is untouched by the sweep.
+  const reg = readProjectRegistration(stateDir, project.slug);
+  assert.equal(reg?.supervisor, "agent-sup-live");
+  assert.equal(reg?.workspaceId, "wks-sup-main");
+});
+
+test("v0.0.31 (ADR 0017 §5): projectReset sweeps the Project's orphaned local_checkout workspaces while the still-live Supervisor/Lead workspace survives", async (t) => {
+  const project = makeProject(t, "reset-orphans");
+  const { stateDir, factory, fake } = makeSurface(t, []);
+  writeProjectRegistration(stateDir, project.slug, { root: project.root, workspaceId: "ws-main" });
+
+  const archiveRequests: string[] = [];
+  const daemon = await startFakeDaemon(t, (message) => {
+    if (message.type === "fetch_workspaces_request") {
+      return {
+        type: "fetch_workspaces_response",
+        payload: {
+          requestId: message.requestId,
+          entries: [
+            { id: "ws-main", workspaceDirectory: project.root },
+            { id: "wks-orphan-1", workspaceDirectory: project.root },
+            { id: "wks-orphan-2", projectRootPath: project.root },
+          ],
+        },
+      };
+    }
+    if (message.type === "project.list.request") {
+      return { type: "project.list.response", payload: { requestId: message.requestId, projects: [] } };
+    }
+    if (message.type === "archive_workspace_request") {
+      archiveRequests.push(String(message.workspaceId));
+      return { type: "archive_workspace_response", payload: { requestId: message.requestId } };
+    }
+    return null;
+  });
+
+  fake.daemon.workspaces = {
+    open: async () => ({ id: "ws-main", projectId: "prj-main" }),
+    create: async () => ({ id: "ws-wt", projectId: "prj-main" }),
+    archive: async () => ({ archivedAt: new Date().toISOString() }),
+    ref: () => ({
+      agents: {
+        create: async (opts) => fake.daemon.agents.create({ ...opts, cwd: project.root }),
+      },
+    }),
+  };
+  const handlers = createSurfaceHandlers({ factory, stateDir, home: daemon.home, daemon: fake.daemon });
+
+  const reply = await handlers.projectReset({ projectRoot: project.root });
+  assert.ok(reply.ok, reply.ok ? "" : reply.error);
+  assert.deepEqual(
+    archiveRequests,
+    ["wks-orphan-1", "wks-orphan-2"],
+    "the reset archives the zero-agent local_checkout rows; the registration's ws-main rode the keep set at sweep time (seats retire after the sweep)",
   );
 });
 

@@ -30,7 +30,7 @@ import type { LedgerEvent, MeterUsage, NeedsHumanEvidence, NeedsHumanReason, Ver
 import { CorrelationRegistry, readCorrelations } from "./core/correlations.ts";
 import { loadLanes, parseLane } from "./core/lanes.ts";
 import { listProjectRegistrations, readProjectRegistration, resolveProject, writeProjectRegistration } from "./core/project.ts";
-import { FACTORY_SEAT_PROVIDER_IDS } from "./roles.ts";
+import { FACTORY_SEAT_PROVIDER_IDS, formatPeerAgentTitle, formatPeerWorkspaceTitle } from "./roles.ts";
 import { acceptanceSummary, archiveAcceptedTaskWorkspace } from "./surface-rpc.ts";
 import type { SurfaceDaemonApi } from "./surface-rpc.ts";
 
@@ -432,6 +432,42 @@ export function spoolRootFor(stateDir: string): string {
   return join(stateDir, "spool");
 }
 
+/**
+ * Stable JSON serialization of any value — object keys sorted, recursively
+ * (arrays keep their order). Pure: the same body always serializes to the
+ * same string.
+ */
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const keys = Object.keys(record).sort();
+    return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+/**
+ * The canonical semantic key of a spool request (v0.0.31, ADR 0017 §6): the
+ * stable JSON serialization of every request field EXCEPT `id`. Duplicate
+ * pending files left by an offline window — a `Peer` retrying `agent_claim`
+ * three times, each retry minting a fresh id — key identically, so both the
+ * submit side (`plugin/bin/spool-client.mjs` `submit`, `plugin/bin/bridge.mjs`
+ * `submitSpoolRequest`) and `startSpool`'s drain deduplicate on it. The
+ * definition is deliberately duplicated across the three files (the bin .mjs
+ * files import no plugin server code, ADR 0004, and bridge.mjs is copied
+ * standalone into `<stateDir>/bin/`); `test/cli.test.ts` guards the copies
+ * against drift.
+ */
+export function spoolRequestSemanticKey(req: unknown): string {
+  if (req !== null && typeof req === "object" && !Array.isArray(req) && "id" in req) {
+    const rest: Record<string, unknown> = { ...(req as Record<string, unknown>) };
+    delete rest.id;
+    return stableStringify(rest);
+  }
+  return stableStringify(req);
+}
+
 function parseOptionalSeat(value: unknown): { ok: true; seat?: SpoolSeat } | { ok: false } {
   if (value === undefined) return { ok: true };
   if (value === "supervisor" || value === "lead" || value === "agent") return { ok: true, seat: value };
@@ -731,7 +767,11 @@ async function resolveSpawnWorkspaceAndParent(
   if (paseoProjectId === undefined && daemon?.workspaces?.open !== undefined) {
     try {
       const opened = await daemon.workspaces.open({ cwd: project.root });
-      if (typeof opened?.id === "string" && opened.id !== "") projectWorkspaceId = opened.id;
+      // `workspaces.open` only seeds an UNKNOWN workspaceId or backfills
+      // `paseoProjectId` — an already-persisted workspaceId (the Supervisor's
+      // main Workspace, v0.0.31 ADR 0017 §5) is never overwritten by a fresh
+      // open, mirroring ensureSeat's law (surface-rpc.ts).
+      if (projectWorkspaceId === undefined && typeof opened?.id === "string" && opened.id !== "") projectWorkspaceId = opened.id;
       if (typeof opened?.projectId === "string" && opened.projectId !== "") paseoProjectId = opened.projectId;
     } catch {
       // best-effort workspace open
@@ -754,7 +794,10 @@ async function resolveSpawnWorkspaceAndParent(
   if (workspaceId === undefined && worktree !== undefined && daemon?.workspaces?.create !== undefined) {
     try {
       const created = await daemon.workspaces.create({
-        title: `${project.slug} ${task}`,
+        // The Task worktree Workspace's sidebar title (v0.0.31, ADR 0017 §2/§5):
+        // `Peer · <Task> — <short summary>` from the contract description's
+        // first clause — never the internal `<project-slug>` hash.
+        title: formatPeerWorkspaceTitle(task, contract.description),
         source: { kind: "directory", path: worktree, ...(paseoProjectId !== undefined ? { projectId: paseoProjectId } : {}) },
       });
       if (typeof created?.id === "string" && created.id !== "") workspaceId = created.id;
@@ -1143,7 +1186,9 @@ export async function handleSpoolRequest(
         if (spawnMeta.workspaceId !== undefined && resolvedDaemon.workspaces !== undefined) {
           const created = await resolvedDaemon.workspaces.ref(spawnMeta.workspaceId).agents.create({
             config: peerConfig,
-            title: request.task,
+            // The Agent tab inside the Task worktree Workspace reads
+            // `Peer · <Task>` (v0.0.31, ADR 0017 §2) — never the bare task id.
+            title: formatPeerAgentTitle(request.task),
             labels,
             prompt: effectivePrompt,
             ...(spawnMeta.leadAgentId !== undefined ? { parent: spawnMeta.leadAgentId } : {}),
@@ -1153,7 +1198,9 @@ export async function handleSpoolRequest(
           const created = await resolvedDaemon.agents.create({
             config: peerConfig,
             cwd: targetCwd,
-            title: request.task,
+            // The Agent tab reads `Peer · <Task>` on the legacy shared-checkout
+            // path too (v0.0.31, ADR 0017 §2).
+            title: formatPeerAgentTitle(request.task),
             labels,
             prompt: effectivePrompt,
             ...(spawnMeta.leadAgentId !== undefined ? { parent: spawnMeta.leadAgentId } : {}),
@@ -1392,6 +1439,13 @@ export interface Spool {
  * reply, move the request to `processed/`. Requests are handled concurrently —
  * a long Gate must not delay the Owner's contract or accept — which is safe
  * because the factory itself refuses overlapping Attempts on one task.
+ *
+ * v0.0.31 (ADR 0017 §6) adds drain-time semantic deduplication: pending files
+ * whose `spoolRequestSemanticKey` repeats one already handled in the same
+ * drain/in-flight pass never run a second Gate attempt or second Ledger
+ * mutation — once the primary's reply lands, the duplicate's reply is mirrored
+ * from it and the duplicate file moves to `processed/`, so a retried `claim`
+ * stacked during an offline window executes exactly once.
  */
 export function startSpool(stateDir: string, factory: Factory, options: SpoolOptions = {}): Spool {
   const root = spoolRootFor(stateDir);
@@ -1404,6 +1458,52 @@ export function startSpool(stateDir: string, factory: Factory, options: SpoolOpt
 
   const log = options.onLog ?? (() => {});
   const inFlight = new Set<string>();
+  /** semanticKey → primaryId — the drain's live dedup window (v0.0.31, ADR 0017 §6). */
+  const inFlightSemanticKeys = new Map<string, string>();
+  /** primaryId → the duplicates mirroring it while it is in flight. */
+  const duplicatesByPrimaryId = new Map<string, DuplicateMirror[]>();
+
+  interface DuplicateMirror {
+    dupId: string;
+    dupRequestPath: string;
+    dupReplyPath: string;
+    dupProcessedPath: string;
+  }
+
+  /**
+   * Settles one primary's duplicates when its own handling finishes: with a
+   * reply on disk, every duplicate gets the same outcome mirrored under its
+   * own id and its request file moves to `processed/`; without one (the
+   * primary's own handling failed), the duplicates are released back to the
+   * queue for a fresh drain — never lost, never run blind.
+   */
+  const settleDuplicateMirrors = (primaryId: string, primaryReplyPath: string): void => {
+    const duplicates = duplicatesByPrimaryId.get(primaryId);
+    if (duplicates === undefined) return;
+    duplicatesByPrimaryId.delete(primaryId);
+    if (!existsSync(primaryReplyPath)) {
+      for (const mirror of duplicates) inFlight.delete(mirror.dupId);
+      return;
+    }
+    let reply: Record<string, unknown>;
+    try {
+      reply = JSON.parse(readFileSync(primaryReplyPath, "utf8")) as Record<string, unknown>;
+    } catch {
+      for (const mirror of duplicates) inFlight.delete(mirror.dupId);
+      return;
+    }
+    for (const mirror of duplicates) {
+      try {
+        writeJsonAtomic(mirror.dupReplyPath, { ...reply, id: mirror.dupId });
+        renameSync(mirror.dupRequestPath, mirror.dupProcessedPath);
+        log(`request ${mirror.dupId}: duplicate of ${primaryId} — reply mirrored (no second gate)`);
+      } catch (err) {
+        log(`request ${mirror.dupId}: mirroring ${primaryId}'s reply failed — requeued (${err instanceof Error ? err.message : String(err)})`);
+      } finally {
+        inFlight.delete(mirror.dupId);
+      }
+    }
+  };
 
   const drain = (): void => {
     for (const name of readdirSync(requestsDir).sort()) {
@@ -1417,6 +1517,32 @@ export function startSpool(stateDir: string, factory: Factory, options: SpoolOpt
         renameSync(requestPath, join(processedDir, name));
         log(`request ${id}: reply already existed — skipped (no second gate)`);
         continue;
+      }
+      let semanticKey: string | undefined;
+      try {
+        semanticKey = spoolRequestSemanticKey(JSON.parse(readFileSync(requestPath, "utf8")));
+      } catch {
+        semanticKey = undefined; // unreadable body — no dedup, handled as its own request
+      }
+      if (semanticKey !== undefined) {
+        const primaryId = inFlightSemanticKeys.get(semanticKey);
+        if (primaryId !== undefined && primaryId !== id) {
+          // A pending duplicate from an offline window: mirror the primary's
+          // outcome, run nothing here.
+          inFlight.add(id);
+          const mirror: DuplicateMirror = {
+            dupId: id,
+            dupRequestPath: requestPath,
+            dupReplyPath: replyPath,
+            dupProcessedPath: join(processedDir, name),
+          };
+          const queue = duplicatesByPrimaryId.get(primaryId);
+          if (queue === undefined) duplicatesByPrimaryId.set(primaryId, [mirror]);
+          else queue.push(mirror);
+          log(`request ${id}: duplicate of in-flight ${primaryId} — mirroring (no second gate)`);
+          continue;
+        }
+        inFlightSemanticKeys.set(semanticKey, id);
       }
       inFlight.add(id);
       void handleRequestFile(
@@ -1438,7 +1564,13 @@ export function startSpool(stateDir: string, factory: Factory, options: SpoolOpt
         options.home,
       )
         .catch(() => {})
-        .finally(() => inFlight.delete(id));
+        .finally(() => {
+          inFlight.delete(id);
+          if (semanticKey !== undefined && inFlightSemanticKeys.get(semanticKey) === id) {
+            inFlightSemanticKeys.delete(semanticKey);
+          }
+          settleDuplicateMirrors(id, replyPath);
+        });
     }
   };
 

@@ -29,7 +29,7 @@ import { createSurfaceHandlers, registerSurfaceRpc } from "./server/surface-rpc.
 import { createLeadMailRuntime } from "./server/lead-mailbox.ts";
 import { injectRoleOnCreate, injectSessionEnv, sanitizeAgentCreateHookResult } from "./server/roles.ts";
 
-const SHELL_VERSION = "0.0.30";
+const SHELL_VERSION = "0.0.31";
 
 const log = (message: string) => console.log(`[${PLUGIN_ID}] ${message}`);
 
@@ -45,10 +45,12 @@ export default function contribute(server: PluginServerContext) {
   // verdict. One variable, written idempotently; undefined until the first
   // hook fires.
   let paseoApi: TimelineSourceApi | undefined;
+  let onPaseoCaptured: (() => void) | undefined;
   const capturePaseo = (context: { paseo?: unknown }): void => {
     if (paseoApi === undefined && context.paseo !== undefined) {
       paseoApi = context.paseo as unknown as TimelineSourceApi;
       log("watch: captured the daemon API — timeline feeds are live");
+      onPaseoCaptured?.();
     }
   };
   const fetchTimeline = createTimelineFetcher(() => paseoApi);
@@ -195,6 +197,12 @@ export default function contribute(server: PluginServerContext) {
     onLog: log,
   });
   leadMail.startupRecovery();
+  onPaseoCaptured = () => {
+    void leadMail.pumpAll();
+  };
+  if (paseoApi !== undefined) {
+    void leadMail.pumpAll();
+  }
   // The turn boundary (v0.0.20, ADR 0013 §5; v0.0.23, ADR 0015 §3): every
   // `agent.turn_ended` hands the Lead-mailbox runtime the event — it settles
   // the in-flight batch (`mail_acked` on completed, `mail_requeued` otherwise)
@@ -283,6 +291,15 @@ export default function contribute(server: PluginServerContext) {
     // The role identity re-applies on every provider launch (v0.0.14): a
     // seat's or worker's shell can always ask which seat it is.
     const withEnv = injectSessionEnv(next, stateDir);
+    // The new-Supervisor session sweep (v0.0.31, ADR 0017 §5): a Supervisor
+    // session opening/binding for a Project archives that Project's orphaned
+    // `local_checkout` workspaces over the daemon records — the same sweep
+    // `ensureSeat("supervisor")` and `projectReset` run. Fire-and-forget:
+    // the session never waits on the sweep, and its rules never touch the
+    // active Supervisor/Lead workspace or any workspace hosting a live agent.
+    if (withEnv !== undefined && withEnv.env?.PASEO_FACTORY_SEAT === "supervisor") {
+      void surface.sweepProjectWorkspaces({ projectRoot: next.cwd });
+    }
     return withEnv === undefined ? (next === request ? undefined : next) : withEnv;
   });
 

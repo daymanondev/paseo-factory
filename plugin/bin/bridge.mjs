@@ -11,12 +11,87 @@
  */
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
 const DEFAULT_WAIT_MS = 60_000;
 const GIT_TIMEOUT_MS = 15_000;
+
+/**
+ * The spool round-trip wait, overridable for tests and tight operator loops
+ * through `PASEO_FACTORY_SPOOL_WAIT_MS` (milliseconds); anything that is not a
+ * positive finite number keeps the 60s default.
+ */
+function resolveSpoolWaitMs() {
+  const raw = process.env.PASEO_FACTORY_SPOOL_WAIT_MS;
+  if (raw === undefined || raw === "") return DEFAULT_WAIT_MS;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_WAIT_MS;
+}
+const SPOOL_WAIT_MS = resolveSpoolWaitMs();
+
+/**
+ * Stable JSON serialization of any value — object keys sorted, recursively
+ * (arrays keep their order). Pure: the same body always serializes to the
+ * same string.
+ */
+function stableStringify(value) {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const record = value;
+    const keys = Object.keys(record).sort();
+    return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+/**
+ * The canonical semantic key of a spool request (v0.0.31, ADR 0017 §6): the
+ * stable JSON serialization of every request field EXCEPT `id`. Duplicated on
+ * purpose in `plugin/bin/spool-client.mjs` and `plugin/server/spool.ts` — this
+ * file is copied standalone into `<stateDir>/bin/bridge.mjs`, so it may import
+ * no sibling module — with `test/cli.test.ts` guarding the copies against
+ * drift.
+ */
+function spoolRequestSemanticKey(req) {
+  if (req !== null && typeof req === "object" && !Array.isArray(req) && "id" in req) {
+    const rest = { ...req };
+    delete rest.id;
+    return stableStringify(rest);
+  }
+  return stableStringify(req);
+}
+
+/**
+ * Scans `spool/requests/*.json` (filename order = submission order) for an
+ * un-replied request whose semantic key matches — the offline-dedup seam
+ * (ADR 0017 §6). Returns `{ id, path }` of the pending original, or undefined.
+ */
+function findPendingSemanticDuplicate(spoolRoot, request) {
+  const requestsDir = join(spoolRoot, "requests");
+  let names;
+  try {
+    names = readdirSync(requestsDir).sort();
+  } catch {
+    return undefined;
+  }
+  const key = spoolRequestSemanticKey(request);
+  for (const name of names) {
+    if (!name.endsWith(".json")) continue;
+    if (existsSync(join(spoolRoot, "replies", name))) continue;
+    let body;
+    try {
+      body = JSON.parse(readFileSync(join(requestsDir, name), "utf8"));
+    } catch {
+      continue; // a half-written or corrupt file is never a dedup match
+    }
+    if (spoolRequestSemanticKey(body) === key) {
+      return { id: name.slice(0, -".json".length), path: join(requestsDir, name) };
+    }
+  }
+  return undefined;
+}
 
 function parseCliArgs(argv) {
   const out = {};
@@ -198,9 +273,23 @@ function randomId() {
   return `${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
 }
 
+/**
+ * Drops a request file and returns its path — unless an un-replied request
+ * with the identical semantic payload already sits in `spool/requests/`
+ * (v0.0.31, ADR 0017 §6), in which case that pending request's id and file are
+ * reused and NO second file is written: a `Peer` retrying `agent_claim` while
+ * the plugin process is stopped stacks zero duplicate files. On dedup the
+ * incoming `request.id` is mutated to the reused id, so the caller polls the
+ * reply of the request that is actually queued.
+ */
 function submitSpoolRequest(spoolRoot, request) {
   const requestsDir = join(spoolRoot, "requests");
   mkdirSync(requestsDir, { recursive: true });
+  const pending = findPendingSemanticDuplicate(spoolRoot, request);
+  if (pending !== undefined) {
+    request.id = pending.id;
+    return pending.path;
+  }
   const path = join(requestsDir, `${request.id}.json`);
   const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
   writeFileSync(tmp, `${JSON.stringify(request)}\n`);
@@ -231,7 +320,7 @@ function awaitSpoolReply(spoolRoot, id, timeoutMs = DEFAULT_WAIT_MS, pollMs = 50
   });
 }
 
-async function roundTripSpool(ctx, request, timeoutMs = DEFAULT_WAIT_MS) {
+async function roundTripSpool(ctx, request, timeoutMs = SPOOL_WAIT_MS) {
   const submitter = ctx.agentId ?? ctx.correlationId ?? ctx.role ?? "owner";
   const payload = {
     ...request,
@@ -241,10 +330,17 @@ async function roundTripSpool(ctx, request, timeoutMs = DEFAULT_WAIT_MS) {
   submitSpoolRequest(ctx.spoolRoot, payload);
   const reply = await awaitSpoolReply(ctx.spoolRoot, payload.id, timeoutMs);
   if (reply === null) {
+    // The stop-on-timeout instruction (v0.0.31, ADR 0017 §6): the single
+    // deduplicated request stays durably queued in spool/requests/ — the
+    // plugin resumes the pipeline when reloaded — so the caller must stop
+    // retrying and end its turn immediately. This bridge NEVER auto-reloads
+    // or restarts plugins behind the Owner's back (spec §Out of Scope).
     return {
       ok: false,
       code: "spool-timeout",
-      message: `No reply from the factory plugin after ${Math.round(timeoutMs / 1000)}s (request ${payload.id}).`,
+      message:
+        `No reply from the factory plugin after ${Math.round(timeoutMs / 1000)}s (request ${payload.id} remains queued in spool/requests/). ` +
+        `The paseo-factory plugin may be stopped — DO NOT retry or call this tool again; end your turn immediately so the plugin can process the queued request when reloaded.`,
     };
   }
   return reply;
@@ -1230,7 +1326,7 @@ async function handleRpcMessage(msg) {
           },
           serverInfo: {
             name: "paseo_factory",
-            version: "0.0.30",
+            version: "0.0.31",
           },
         },
       });

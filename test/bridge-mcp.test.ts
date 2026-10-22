@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { CorrelationRegistry } from "../src/correlations.ts";
@@ -461,6 +461,62 @@ test("bridge.mjs executes Supervisor, Lead, and Agent tools end-to-end over the 
     assert.match(statusRes.content[0].text, /feat-x.*accepted=yes/);
   } finally {
     spool.stop();
+    rmSync(homeDir, { recursive: true, force: true });
+    rmSync(repoDir, { recursive: true, force: true });
+  }
+});
+
+test("v0.0.31 (ADR 0017 §6): an offline agent_claim deduplicates through the bridge and spool-timeout instructs stop-and-end-turn, leaving the single request queued", async () => {
+  const homeDir = mkdtempSync(join(tmpdir(), "factory-bridge-offline-"));
+  const stateDir = join(homeDir, "plugin-state", "paseo-factory");
+  const repoDir = makeGitRepo();
+  const spoolRoot = join(stateDir, "spool");
+  const correlations = new CorrelationRegistry(stateDir);
+  const agentCorr = correlations.issue({
+    role: "agent",
+    projectSlug: "proj",
+    projectRoot: repoDir,
+    task: "t-off-1",
+    agentId: "agent-off-1",
+  });
+
+  // No spool watcher on this home — the plugin process is "stopped". The
+  // bridge's wait is tightened through its test seam env so the round trip
+  // times out in 1s instead of the 60s default.
+  try {
+    const responses = await runMcpSession({
+      args: ["--correlation", agentCorr.correlationId, "--state-dir", stateDir],
+      cwd: repoDir,
+      env: { PATH: process.env.PATH, PASEO_FACTORY_SPOOL_WAIT_MS: "1000" },
+      requests: [
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "agent_claim", arguments: {} } },
+        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "agent_claim", arguments: {} } },
+      ],
+    });
+
+    const requestIdOf = (index: number): string => {
+      const result = responses[index].result as { isError?: boolean; content: Array<{ text: string }> };
+      assert.equal(result.isError, true, "the timed-out agent_claim is an error result");
+      const text = result.content[0].text;
+      assert.match(text, /spool-timeout/);
+      assert.match(text, /No reply from the factory plugin after 1s/);
+      assert.match(text, /remains queued in spool\/requests\//);
+      assert.match(text, /DO NOT retry or call this tool again/);
+      assert.match(text, /end your turn immediately/);
+      const id = /request (\S+) remains queued/.exec(text)?.[1];
+      assert.ok(id, "the message names the queued request's id");
+      return id;
+    };
+    const firstId = requestIdOf(0);
+    const secondId = requestIdOf(1);
+    assert.equal(secondId, firstId, "the retried claim deduplicated onto the one pending request");
+
+    // The single deduplicated request file stays durably queued in spool/requests/.
+    const queued = readdirSync(join(spoolRoot, "requests")).filter((name) => name.endsWith(".json"));
+    assert.deepEqual(queued, [`${firstId}.json`], "exactly ONE request file remains queued");
+    const repliesDir = join(spoolRoot, "replies");
+    assert.equal(existsSync(repliesDir) ? readdirSync(repliesDir).length : 0, 0, "no reply was written — the plugin is stopped");
+  } finally {
     rmSync(homeDir, { recursive: true, force: true });
     rmSync(repoDir, { recursive: true, force: true });
   }

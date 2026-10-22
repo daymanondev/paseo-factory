@@ -1,6 +1,6 @@
 # ADR 0017 — Native Paseo Role Providers (`factory-supervisor`, `factory-lead`, `factory-peer`), Single `Supervisor (Factory)` Picker Profile, and Removal of `Start Supervisor` / `Start Lead` UI Buttons
 
-- **Status:** Accepted — 2026-10-21 (ratified by Andrew over `/grill-with-docs` comparing `paseo-factory` against `paseo-room` and `seatworks`)
+- **Status:** Accepted — 2026-10-21; amended 2026-10-22 (ratified by Andrew over `/grill-with-docs` comparing `paseo-factory` against `paseo-room` and `seatworks`, and refining Paseo workspace co-location, role/worktree titles, orphan workspace sweeping, and offline spool deduplication)
 - **Grounded in:** `cuongntr/paseo-room` (`src/paseo.ts`, `src/runtime-plugin/server/{recognition,hooks}.ts`) · `daymanondev/seatworks` (`plugin/server/catalog/providers.ts`, `plugin/roles.json`, `plugin/server/runtime/runtime.ts`) · Live Paseo Desktop trace (`~/.paseo/config.json`, `ai-test` run 2026-10-21)
 - **Amends:** ADR 0010 §2–§4, ADR 0013 §3, ADR 0015 §1–§4, and ADR 0016 §3 (replaces title-based seat guessing and custom `Start Supervisor` / `Start Lead` UI buttons with native Paseo Role providers `factory-supervisor`, `factory-lead`, `factory-peer` reconciled from `Lane config` into `<paseoHome>/config.json`)
 
@@ -27,15 +27,27 @@ In `paseo-factory` through `v0.0.26`, seats were not registered as first-class P
 
 2. **Deterministic Seat Recognition by `config.provider` (`factory-supervisor`, `factory-lead`, `factory-peer`).**
    - `injectRoleOnCreate`, `injectSessionEnv`, `normalizeAgentCreateRequest`, and `resolveSeatAtProjectRoot` recognize `factory-supervisor` → `supervisor`, `factory-lead` → `lead`, and `factory-peer` / `factory-agent` → `agent` directly from `config.provider` (as well as `PASEO_FACTORY_SEAT` in `env`), resolving the underlying harness family (`opencode`, `claude`, `codex`, `pi`, `copilot`, `omp`, `antigravity`) from `Lane config` so `applyProviderExecutionFence` applies the exact harness-specific Layer-1 fence and `paseo_factory` MCP server (`ELECTRON_RUN_AS_NODE: "1"`).
-   - When a user starts `Supervisor (Factory)` from Paseo's native New Chat picker in a Git repository and `server.before("agent.session_open")` fires, `paseo-factory` automatically records `supervisor: request.agentId` in `<stateDir>/projects/<slug>/project.json` so subsequent `Lead` reports (`to: "supervisor"`) route back into that exact session.
+   - When a user starts `Supervisor (Factory)` from Paseo's native New Chat picker in a Git repository and `server.before("agent.session_open")` fires, `paseo-factory` automatically records `supervisor: request.agentId` and `workspaceId: request.workspaceId` in `<stateDir>/projects/<slug>/project.json` so subsequent `Lead` creation and `Lead` reports (`to: "supervisor"`) route back into that exact session and Workspace.
 
-3. **Remove `Start Supervisor` and `Start Lead` Buttons from the `Factory surface`.**
+3. **Shared Main Workspace Co-location and Scannable Role / Worktree Titles.**
+   - **Main Workspace Co-location (`Supervisor` + `Lead`):** When `ensureSeat("lead")` creates or ensures `Lead`, it resolves the active `Supervisor`'s `workspaceId` (from the live `Supervisor` agent snapshot or `<projectStateDir>/project.json` `workspaceId`) before falling back to `daemon.workspaces.open({ cwd: project.root })`. As a result, `Supervisor` and `Lead` live side by side as two tabs inside the Project's single active main Workspace rather than splitting across stale historical `local_checkout` Workspaces.
+   - **Agent Tab Titles:** `server.before("agent.create")` (`injectRoleOnCreate`) and `ensureSeat` stamp concise, role-explicit tab titles: **`Supervisor`** for the Supervisor seat, **`Lead`** for the Lead seat, and **`Peer · <Task>`** (e.g. `Peer · T-08`) for working Agents, while preserving Paseo's natural mission title on the outer main Workspace row in the sidebar.
+   - **Peer Worktree Workspace Titles:** When `resolveSpawnWorkspaceAndParent` registers a Task worktree Workspace in Paseo, it names the Workspace **`Peer · <Task> — <short summary>`** (derived from the first clause of `contract.description`, omitting the internal `<project-slug>` hash; or **`Peer · <Task>`** when no description is set).
+
+4. **Remove `Start Supervisor` and `Start Lead` Buttons from the `Factory surface`.**
    - Neither the persistent Header ([`plugin/client/factory/header.tsx`](../../plugin/client/factory/header.tsx)) nor the `Seats & Models` view ([`plugin/client/factory/seats.tsx`](../../plugin/client/factory/seats.tsx)) renders `Start Supervisor` or `Start Lead` buttons.
    - Users start `Supervisor (Factory)` directly from Paseo's native agent picker; `Supervisor` spawns `Lead` (`factory-lead`) via `supervisor_dispatch_lead`; and `Lead` spawns `Peer` (`factory-peer`) via `lead_spawn_agent`. When `Supervisor` or `Lead` is already active on a Project, the UI shows its live status and an `Open` link to jump to its conversation, plus `Rotate` / `Revoke`.
 
-4. **Daemon Workspace and Project Record Cleanup on `Project reset` and `Task worktree` Archival.**
-   - The plugin captures the daemon's `PaseoApi` from the first hook or surface RPC that carries one, so cleanup can run even before any agent hook fires.
-   - `archiveAcceptedTaskWorkspace` (the accept path, surface and spool alike) and `projectReset` also sweep the daemon's own records over the session WebSocket (`archive_workspace_request` / `project.remove.request` via `cleanupDaemonWorkspacesAndProjectsViaWs`) for any workspace or project rooted under `<projectStateDir>/worktrees/` or missing on disk, so a removed `Task worktree` directory never leaves a broken project entry in Paseo Desktop. Every sweep is best-effort — it never blocks or fails the accept or reset.
+5. **Daemon Workspace and Project Record Cleanup on `Project reset`, `Task worktree` Archival, and New `Supervisor` Creation.**
+   - The plugin captures the daemon's `PaseoApi` from the first hook or surface RPC that carries one (and immediately pumps all registered `Lead` and `Supervisor` mailboxes via `leadMail.pumpAll()` once captured), so cleanup and startup mail delivery never stall behind hook ordering.
+   - `archiveAcceptedTaskWorkspace` (the accept path, surface and spool alike), `projectReset`, and new `Supervisor` seat registration sweep the daemon's own records over the session WebSocket (`archive_workspace_request` / `project.remove.request` via `cleanupDaemonWorkspacesAndProjectsViaWs`) for:
+     - any workspace or project rooted under `<projectStateDir>/worktrees/` or missing on disk, and
+     - any orphaned `local_checkout` workspace at `<project-root>` (excluding the active `Supervisor`/`Lead` workspace) that has zero active (non-archived) agents.
+
+6. **Offline Spool Deduplication and Non-Retry Turn Guidance (`spool-timeout`).**
+   - The MCP bridge (`bridge.mjs`) and CLI (`spool-client.mjs`) **never** auto-reload or restart daemon plugins behind the user's back.
+   - When submitting a request to `<stateDir>/spool/requests/` and when draining requests on plugin boot (`startSpool`), duplicate pending requests carrying the same semantic payload (`(kind, task, sha)` for `claim`, `(kind, project/workspace, from, message)` for mailbox dispatches/reports) are deduplicated so at most one request file remains queued.
+   - If a request hits `spool-timeout` because the `paseo-factory` plugin process is stopped (e.g., after macOS sleep), the single deduplicated request file remains durably queued in `spool/requests/` (so reloading the plugin resumes the pipeline automatically) and the caller receives an explicit instruction to **stop retrying and end its turn immediately**.
 
 ## Consequences
 

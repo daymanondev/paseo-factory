@@ -766,18 +766,73 @@ function underWorktreesOrMissing(path: string | null | undefined, worktreesDir: 
 }
 
 /**
- * Sweeps the daemon's broken worktree leftovers (v0.0.27, ADR 0017 §4):
- * every workspace or project whose recorded root sits under
- * `<projectStateDir>/worktrees/` or is missing on disk is deleted over the
- * daemon WebSocket (`archive_workspace_request` / `project.remove.request`),
- * so a removed Task worktree never leaves a broken project entry in Paseo
- * Desktop. A daemon with no session socket (`<home>/paseo.pid` absent —
- * tests, a dev shell) has nothing to sweep and answers ok with empty lists;
- * every delete is best-effort — one stuck row never fails the sweep.
+ * A recorded root's comparison form (v0.0.31, ADR 0017 §5): the physical path
+ * when the directory exists (a symlinked `/tmp` never splits two spellings of
+ * one worktree), the recorded string otherwise — a missing root compares raw
+ * against missing roots, never against a realpath'd live one.
+ */
+function normalizedRoot(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+}
+
+/** True when `root` is `dir` itself or nested under it — raw or normalized compare. */
+function rootInsideDir(root: string, dir: string): boolean {
+  if (root === dir || root.startsWith(`${dir}/`)) return true;
+  const normalized = normalizedRoot(root);
+  const normalizedDir = normalizedRoot(dir);
+  return normalized === normalizedDir || normalized.startsWith(`${normalizedDir}/`);
+}
+
+/** True when two recorded roots name the same directory — raw or normalized compare. */
+function rootsEqual(left: string, right: string): boolean {
+  return left === right || normalizedRoot(left) === normalizedRoot(right);
+}
+
+/** The workspace/project record sweep's input (v0.0.31, ADR 0017 §4–§5). */
+export interface CleanupDaemonWorkspacesInput {
+  worktreesDir: string;
+  /** Specific task worktree path being retired (optional). */
+  targetWorktreePath?: string;
+  /** Project root path when sweeping orphaned local_checkout workspaces (optional). */
+  projectRoot?: string;
+  /** Workspace IDs that must never be archived (e.g., active Supervisor/Lead workspace). */
+  keepWorkspaceIds?: readonly string[];
+  /** Workspace IDs that currently host at least one non-archived agent. */
+  activeWorkspaceIds?: readonly string[];
+}
+
+/**
+ * Sweeps the daemon's broken worktree leftovers (v0.0.27, ADR 0017 §4) and —
+ * since v0.0.31 (ADR 0017 §4–§5) — the Project's orphaned `local_checkout`
+ * workspaces, all over the daemon WebSocket (`archive_workspace_request` /
+ * `project.remove.request`). Three rules, strictly separated:
+ *
+ * - **Task worktree workspaces** (root under `worktreesDir`) archive ONLY
+ *   when their directory no longer exists on disk or the root IS the
+ *   explicitly retired `targetWorktreePath` — sibling worktree workspaces
+ *   whose directories still exist (parallel Tasks with live Peers) are NEVER
+ *   archived, so accepting one task never kills the rest of a wave.
+ * - **Top-level Project rows** whose `projectRootPath` sits under
+ *   `worktreesDir` or is missing on disk are always removed (a Task worktree
+ *   must never be a standalone Project row), plus any workspace row whose
+ *   root is gone from disk (the v0.0.27 broken-record law).
+ * - **Orphaned `local_checkout` workspaces**: when `projectRoot` AND
+ *   `activeWorkspaceIds` are provided, a workspace rooted at `projectRoot`
+ *   archives exactly when its id is in neither `keepWorkspaceIds` (the active
+ *   Supervisor/Lead workspace) nor `activeWorkspaceIds` (zero non-archived
+ *   agents reside there) — an active user chat is never touched.
+ *
+ * A daemon with no session socket (`<home>/paseo.pid` absent — tests, a dev
+ * shell) has nothing to sweep and answers ok with empty lists; every delete
+ * is best-effort — one stuck row never fails the sweep.
  */
 export async function cleanupDaemonWorkspacesAndProjectsViaWs(
   home: string | undefined,
-  input: { worktreesDir: string },
+  input: CleanupDaemonWorkspacesInput,
 ): Promise<{ ok: true; removedWorkspaceIds: string[]; removedProjectIds: string[] } | { ok: false; reason: string }> {
   const targetHome = home ?? process.env.PASEO_HOME;
   if (targetHome === undefined) {
@@ -786,6 +841,8 @@ export async function cleanupDaemonWorkspacesAndProjectsViaWs(
   const listWorkspaces = daemonWsRequestPayload<unknown>(targetHome, { type: "fetch_workspaces_request" }, "fetch_workspaces_response");
   if (listWorkspaces === null) return { ok: true, removedWorkspaceIds: [], removedProjectIds: [] }; // no daemon socket — nothing to sweep
   const listProjects = daemonWsRequestPayload<unknown>(targetHome, { type: "project.list.request" }, "project.list.response");
+  const keepIds = input.keepWorkspaceIds === undefined ? null : new Set(input.keepWorkspaceIds);
+  const activeIds = input.activeWorkspaceIds === undefined ? null : new Set(input.activeWorkspaceIds);
   const removedWorkspaceIds: string[] = [];
   const removedProjectIds: string[] = [];
   try {
@@ -794,8 +851,21 @@ export async function cleanupDaemonWorkspacesAndProjectsViaWs(
     const workspaces = daemonWorkspaceEntries(workspacesReply.payload) ?? [];
     for (const workspace of workspaces) {
       if (workspace.archivingAt !== null && workspace.archivingAt !== undefined) continue; // already on its way out
+      if (keepIds !== null && keepIds.has(workspace.id)) continue; // never archived — the active Supervisor/Lead workspace
       const root = workspace.workspaceDirectory ?? workspace.projectRootPath ?? null;
-      if (!underWorktreesOrMissing(root, input.worktreesDir)) continue;
+      if (typeof root !== "string" || root === "") continue;
+      const retiredTarget = input.targetWorktreePath !== undefined && rootsEqual(root, input.targetWorktreePath);
+      // Rule 1 (ADR 0017 §4): a Task worktree workspace archives only when its
+      // directory is gone or it is the explicitly retired target — siblings on
+      // disk stay. Rule 2 (the v0.0.27 broken-record law): any root missing
+      // from disk is a dead record. Rule 3 (ADR 0017 §5): an orphaned
+      // local_checkout at projectRoot archives exactly when no live agent and
+      // no keep-set entry holds it.
+      const worktreeRetired = rootInsideDir(root, input.worktreesDir) && (!existsSync(root) || retiredTarget);
+      const missingRecord = !existsSync(root);
+      const orphanedCheckout =
+        input.projectRoot !== undefined && activeIds !== null && rootsEqual(root, input.projectRoot) && !activeIds.has(workspace.id);
+      if (!worktreeRetired && !missingRecord && !orphanedCheckout) continue;
       const archive = daemonWsRequest(targetHome, { type: "archive_workspace_request", workspaceId: workspace.id }, "archive_workspace_response");
       if (archive === null) continue;
       const reply = await archive;

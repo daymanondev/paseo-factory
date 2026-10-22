@@ -96,6 +96,13 @@ export interface SurfaceAgentSnapshot {
    * `.jsonl` fallback's path across daemon restarts (v0.0.20, ADR 0013 §5).
    */
   persistence?: { nativeHandle?: string } | null;
+  /**
+   * The Paseo Workspace the agent's session lives in (v0.0.31, ADR 0017 §5)
+   * — carried on the daemon's own agent row, so `ensureSeat` can co-locate
+   * Lead inside the Supervisor's main Workspace. Null/absent when the daemon
+   * reports none.
+   */
+  workspaceId?: string | null;
 }
 
 /** One provider entry resolved from the daemon's provider & model catalog. */
@@ -343,9 +350,14 @@ export async function archiveAcceptedTaskWorkspace(
     root: project.root,
     taskWorkspaces: { [task]: null },
   });
-  // The daemon-record sweep (v0.0.27): best-effort, never blocks the accept.
+  // The daemon-record sweep (v0.0.27; v0.0.31's safe rules, ADR 0017 §4):
+  // best-effort, never blocks the accept. The accepted task's worktree is the
+  // ONE explicitly retired target — sibling worktree workspaces whose
+  // directories still exist on disk (parallel Tasks with live Peers) are
+  // never archived.
   try {
-    await cleanup(home ?? process.env.PASEO_HOME, { worktreesDir: join(projectStateDir(factory.stateDir, project.slug), "worktrees") });
+    const worktreesDir = join(projectStateDir(factory.stateDir, project.slug), "worktrees");
+    await cleanup(home ?? process.env.PASEO_HOME, { worktreesDir, targetWorktreePath: join(worktreesDir, task) });
   } catch {
     // best-effort sweep
   }
@@ -500,6 +512,70 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       projectSlug,
       seat,
     );
+  };
+
+  /**
+   * The keep/active workspace-id sets the orphaned `local_checkout` sweep
+   * keys on (v0.0.31, ADR 0017 §5): `keepWorkspaceIds` collects the Project's
+   * live Supervisor/Lead workspace ids (the labeled seat agents first, the
+   * `project.json` binding and registration fallback), `activeWorkspaceIds`
+   * every workspace id a live non-archived agent resides in. Null when the
+   * daemon cannot answer or reports no workspace ids at all — the sweep never
+   * runs blind over a census it could not read.
+   */
+  const resolveSweepWorkspaceSets = async (
+    daemon: SurfaceDaemonApi,
+    project: { slug: string; root: string },
+  ): Promise<{ keepWorkspaceIds: string[]; activeWorkspaceIds: string[] } | null> => {
+    let liveAgents: SurfaceAgentSnapshot[] = [];
+    try {
+      const page = await daemon.agents.list({ filter: { includeArchived: false } });
+      liveAgents = page.entries.map((entry) => entry.agent).filter((agent) => agent.archivedAt === null);
+    } catch {
+      return null; // no daemon answer — never sweep blind
+    }
+    const registration = readProjectRegistration(deps.stateDir, project.slug);
+    const keep = new Set<string>();
+    for (const seat of ["supervisor", "lead"] as const) {
+      const seatAgent =
+        liveAgents.find((agent) => agent.labels.seat === seat && agent.labels.project === project.slug) ??
+        seatAgentByIdentity(liveAgents, project.slug, seat);
+      if (typeof seatAgent?.workspaceId === "string" && seatAgent.workspaceId !== "") keep.add(seatAgent.workspaceId);
+    }
+    if (typeof registration?.workspaceId === "string" && registration.workspaceId !== "") keep.add(registration.workspaceId);
+    const active = new Set(
+      liveAgents
+        .map((agent) => agent.workspaceId)
+        .filter((id): id is string => typeof id === "string" && id !== ""),
+    );
+    if (keep.size === 0 && active.size === 0) return null; // the daemon reports no workspace ids — never sweep blind
+    return { keepWorkspaceIds: [...keep], activeWorkspaceIds: [...active] };
+  };
+
+  /**
+   * The orphaned `local_checkout` sweep (v0.0.31, ADR 0017 §4–§5): archives
+   * the Project's daemon workspace records whose root sits at the project
+   * root and host zero live agents — never the active Supervisor/Lead
+   * workspace, never a workspace with a live agent, and among worktree
+   * records only directories already gone from disk. Best-effort by design:
+   * a sweep that cannot land logs and returns, never a failed caller.
+   */
+  const sweepOrphanedLocalCheckoutWorkspaces = async (daemon: SurfaceDaemonApi, project: { slug: string; root: string }): Promise<void> => {
+    const sets = await resolveSweepWorkspaceSets(daemon, project);
+    if (sets === null) return;
+    try {
+      const swept = await (deps.cleanupDaemonWorkspaces ?? cleanupDaemonWorkspacesAndProjectsViaWs)(deps.home, {
+        worktreesDir: join(projectStateDir(deps.stateDir, project.slug), "worktrees"),
+        projectRoot: project.root,
+        keepWorkspaceIds: sets.keepWorkspaceIds,
+        activeWorkspaceIds: sets.activeWorkspaceIds,
+      });
+      if (swept.ok && swept.removedWorkspaceIds.length > 0) {
+        log(`${project.slug}: swept ${swept.removedWorkspaceIds.length} orphaned daemon workspace(s) at ${project.root}`);
+      }
+    } catch (err) {
+      log(`${project.slug}: the orphaned local_checkout sweep did not land — ${messageOf(err)}`);
+    }
   };
 
   /** The agent → task binding: which live agent works which task, from the ledger's own names. */
@@ -732,15 +808,44 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         }
       }
     }
+    // The co-located main Workspace (v0.0.31, ADR 0017 §5): before opening
+    // anything, resolve the Project's EXISTING main workspace — the live
+    // Supervisor agent's own workspaceId first, then `project.json` — so a
+    // Lead ensure creates its agent inside the Supervisor's Workspace as a
+    // second Agent tab, never a second `local_checkout` Workspace.
+    const registration = readProjectRegistration(deps.stateDir, project.slug);
+    let supervisorSnapshot: SurfaceAgentSnapshot | undefined;
+    if (seat === "supervisor") {
+      supervisorSnapshot = agent;
+    } else {
+      try {
+        supervisorSnapshot = await seatOf(daemon, "supervisor", project.slug);
+      } catch {
+        // best-effort — the registration's workspaceId is the fallback below
+      }
+    }
+    const resolvedWorkspaceId = [supervisorSnapshot?.workspaceId, registration?.workspaceId].find(
+      (id): id is string => typeof id === "string" && id !== "",
+    );
     let workspaceId: string | undefined;
     let paseoProjectId: string | undefined;
     if (daemon.workspaces !== undefined) {
-      try {
-        const opened = await daemon.workspaces.open({ cwd: project.root });
-        if (typeof opened?.id === "string" && opened.id !== "") workspaceId = opened.id;
-        if (typeof opened?.projectId === "string" && opened.projectId !== "") paseoProjectId = opened.projectId;
-      } catch (err) {
-        log(`${seat}: workspaces.open(${project.root}) did not resolve (${messageOf(err)}) — falling back to daemon.agents.create`);
+      if (resolvedWorkspaceId !== undefined) workspaceId = resolvedWorkspaceId;
+      if (typeof registration?.paseoProjectId === "string" && registration.paseoProjectId !== "") paseoProjectId = registration.paseoProjectId;
+      // `workspaces.open` only when nothing is known yet, or to backfill
+      // `paseoProjectId` — an already-resolved workspaceId is never
+      // overwritten by a fresh open (v0.0.31, ADR 0017 §5).
+      if (workspaceId === undefined || paseoProjectId === undefined) {
+        try {
+          const opened = await daemon.workspaces.open({ cwd: project.root });
+          if (workspaceId === undefined && typeof opened?.id === "string" && opened.id !== "") workspaceId = opened.id;
+          if (typeof opened?.projectId === "string" && opened.projectId !== "") paseoProjectId = opened.projectId;
+        } catch (err) {
+          log(
+            `${seat}: workspaces.open(${project.root}) did not resolve (${messageOf(err)})` +
+              (workspaceId === undefined ? " — falling back to daemon.agents.create" : " — keeping the resolved workspace"),
+          );
+        }
       }
     }
     let created = false;
@@ -755,15 +860,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         parsed?.thinking !== undefined
           ? { provider: `${parsed.provider}/${parsed.model}`, thinkingOptionId: parsed.thinking }
           : { provider: lane };
-      let parent: string | undefined;
-      if (seat === "lead") {
-        try {
-          const sup = await seatOf(daemon, "supervisor", project.slug);
-          if (sup !== undefined) parent = sup.id;
-        } catch {
-          // best-effort parent lookup
-        }
-      }
+      const parent = seat === "lead" ? supervisorSnapshot?.id : undefined;
       try {
         const handle =
           workspaceId !== undefined && daemon.workspaces !== undefined
@@ -793,6 +890,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           attentionReason: null,
           updatedAt: new Date().toISOString(),
           cwd: project.root,
+          ...(workspaceId !== undefined ? { workspaceId } : {}),
         };
         created = true;
         log(`${seat}: created agent ${handle.id} under ${lane} at ${project.root} (project ${project.slug})`);
@@ -808,6 +906,14 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       ...(workspaceId !== undefined ? { workspaceId } : {}),
       ...(paseoProjectId !== undefined ? { paseoProjectId } : {}),
     });
+    // The new-Supervisor sweep (v0.0.31, ADR 0017 §5): a Supervisor seat
+    // landing on a Project archives that Project's orphaned `local_checkout`
+    // workspaces — the ones at the project root with zero live agents —
+    // never the active Supervisor/Lead workspace nor any workspace hosting a
+    // live agent.
+    if (seat === "supervisor") {
+      await sweepOrphanedLocalCheckoutWorkspaces(daemon, project);
+    }
     const message = input.message?.trim();
     if (message !== undefined && message !== "") {
       try {
@@ -1163,6 +1269,19 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     },
 
     /**
+     * The session-open sweep door (v0.0.31, ADR 0017 §5): the shell's
+     * `agent.session_open` hook calls this when a Supervisor session opens or
+     * binds for a Project — the same orphaned `local_checkout` sweep
+     * `ensureSeat("supervisor")` and `projectReset` run. Void by design: the
+     * sweep is best-effort and never its caller's failure.
+     */
+    async sweepProjectWorkspaces(input: { projectRoot: string }, context?: SurfaceCallContext): Promise<void> {
+      const project = projectOrRefusal(input.projectRoot);
+      if (!project.ok) return;
+      await sweepOrphanedLocalCheckoutWorkspaces(resolveDaemon(context), project);
+    },
+
+    /**
      * Owner-only Project reset (v0.0.24, ADR 0015 §5): stops and archives bound
      * working Agents, archives temporary Paseo worktree workspaces, deletes
      * task worktrees and `factory/<task>` branches, retires Supervisor/Lead
@@ -1337,12 +1456,19 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         }
       }
 
-      // 4.5. Sweep the daemon's own worktree records (v0.0.27, ADR 0017 §4):
-      // workspaces and projects rooted under the (now removed) worktrees dir
-      // or missing on disk are deleted over the daemon WebSocket, so the
-      // reset never leaves broken project entries in Paseo Desktop.
+      // 4.5. Sweep the daemon's own worktree records (v0.0.27, ADR 0017 §4)
+      // and — since v0.0.31 (ADR 0017 §5) — the Project's orphaned
+      // `local_checkout` workspaces: workspaces and projects rooted under the
+      // (now removed) worktrees dir or missing on disk are deleted over the
+      // daemon WebSocket, and a workspace at the project root archives only
+      // when neither the keep set (the still-live Supervisor/Lead workspace —
+      // seats retire at step 5, after this sweep) nor a live agent holds it.
       try {
-        const swept = await (deps.cleanupDaemonWorkspaces ?? cleanupDaemonWorkspacesAndProjectsViaWs)(deps.home, { worktreesDir });
+        const sets = await resolveSweepWorkspaceSets(daemon, project);
+        const swept = await (deps.cleanupDaemonWorkspaces ?? cleanupDaemonWorkspacesAndProjectsViaWs)(deps.home, {
+          worktreesDir,
+          ...(sets === null ? {} : { projectRoot: project.root, keepWorkspaceIds: sets.keepWorkspaceIds, activeWorkspaceIds: sets.activeWorkspaceIds }),
+        });
         if (swept.ok && (swept.removedWorkspaceIds.length > 0 || swept.removedProjectIds.length > 0)) {
           log(
             `reset: swept ${swept.removedWorkspaceIds.length} daemon workspace(s) and ${swept.removedProjectIds.length} project record(s) under ${worktreesDir}`,
