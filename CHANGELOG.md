@@ -29,6 +29,8 @@ v0.0.31's one thing: **co-located `Supervisor` & `Lead` inside one main Project 
   `cleanupDaemonWorkspacesAndProjectsViaWs` archives a worktree Workspace only when its directory no longer exists on disk or it is the explicitly retired `targetWorktreePath`; sibling Workspaces whose worktree directories still exist (`T-10`, `T-11`, `T-13`, … running mid-wave) are never archived, while top-level Project rows under `worktreesDir` or missing on disk are always removed.
 - **Spawn path no longer clobbers the persisted main workspaceId (`plugin/server/spool.ts`)** —
   `resolveSpawnWorkspaceAndParent` seeds the registration's `workspaceId` from `workspaces.open` only when the registration carries none, mirroring `ensureSeat`'s never-overwrite law, so an early `lead_spawn_agent` can no longer re-point the Project at a different `local_checkout` Workspace.
+- **`drainLeadMailbox` auto-ensures a closed/archived `Lead` seat and `driverWaveInFlight` ignores dead worktree spawn rounds (`plugin/server/lead-mailbox.ts`, pinned in `test/lead-mailbox.test.ts`)** —
+  `drainLeadMailbox` now mirrors `drainSupervisorMailbox` by calling `deps.ensureLead({ projectRoot })` when mail is queued and no live `Lead` is present, and `driverWaveInFlight` cross-checks worktree `spawn_dispatched` rounds against live non-archived `running`/`initializing` agents on the daemon so an orphaned historical spawn round never holds subsequent `Peer` verdicts.
 - `persistSeatWorkspaceId` is gated on `bindSeatAgentId`'s boolean return — a second session that does not own the seat can no longer overwrite the registration's `workspaceId`.
 - `package.json` + both `package-lock.json` version spots + `SHELL_VERSION` + `bridge.mjs` `serverInfo.version` → `0.0.31`.
 

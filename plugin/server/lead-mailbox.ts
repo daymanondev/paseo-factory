@@ -438,6 +438,22 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       log(`lead-mailbox: cannot read the daemon's agents for ${slug} — holding ${state.queued.length} item(s) queued (${messageOf(err)})`);
       return;
     }
+    if (lead === undefined) {
+      const registration = readProjectRegistration(deps.stateDir, slug);
+      if (deps.ensureLead !== undefined && registration?.root !== undefined) {
+        const ensured = await deps.ensureLead({ projectRoot: registration.root });
+        if (!ensured.ok) {
+          log(`lead-mailbox: cannot ensure lead for ${slug} (${ensured.code}: ${ensured.error}) — holding ${state.queued.length} item(s)`);
+          return;
+        }
+        try {
+          lead = await liveLeadAgent(daemon, slug);
+        } catch (err) {
+          log(`lead-mailbox: cannot read the daemon's agents for ${slug} — holding ${state.queued.length} item(s) queued (${messageOf(err)})`);
+          return;
+        }
+      }
+    }
     if (lead === undefined) return; // no live Lead — the next dispatch ensures one and pumps again
     if (lead.status !== "idle" || isBlockedByAttention(lead)) return; // a running or permission-waiting Lead is never interrupted (§User Story 12)
     const pendingHandoff = pendingHandoffByAgentId.get(lead.id);
@@ -1142,7 +1158,14 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
         });
         await pumpProjectSupervisor(resolved.slug);
       }
-      if (driverWaveInFlight(deps.factory.ledger.events)) return; // held in mailbox.jsonl — the wave's last outcome pumps it
+      let liveAgents: SurfaceAgentSnapshot[] | undefined;
+      try {
+        const listed = await resolveDaemon().agents.list({ filter: { includeArchived: false } });
+        liveAgents = listed.entries.map((entry) => entry.agent).filter((agent) => agent.archivedAt === null);
+      } catch {
+        // best-effort live agent inspection for dead/orphaned worktree spawn rounds
+      }
+      if (driverWaveInFlight(deps.factory.ledger.events, liveAgents)) return; // held in mailbox.jsonl — the wave's last outcome pumps it
       await pumpProjectLead(resolved.slug);
     } catch (err) {
       log(`lead-mailbox: peer notification for ${input.task} failed — the outcome stays in the ledger (${messageOf(err)})`);
@@ -1453,13 +1476,30 @@ function contractWorkspaceOf(events: readonly LedgerEvent[], task: string): stri
  * after it. The wave's last terminal outcome clears the predicate, and that
  * outcome's own peer hook pumps the held batch.
  */
-function driverWaveInFlight(events: readonly LedgerEvent[]): boolean {
-  const openRounds = new Map<string, number>();
+function driverWaveInFlight(
+  events: readonly LedgerEvent[],
+  liveAgents?: readonly SurfaceAgentSnapshot[],
+): boolean {
+  const openRounds = new Map<string, Extract<LedgerEvent, { event: "spawn_dispatched" }>>();
   for (const evt of events) {
     if (!("task" in evt) || typeof evt.task !== "string") continue;
-    if (evt.event === "spawn_dispatched") openRounds.set(evt.task, evt.seq);
+    if (evt.event === "spawn_dispatched") openRounds.set(evt.task, evt);
     else if (evt.event === "contract_set" || evt.event === "gate_finished" || evt.event === "needs_human") {
       openRounds.delete(evt.task);
+    }
+  }
+  if (openRounds.size > 0 && liveAgents !== undefined) {
+    for (const [task, spawnEvt] of [...openRounds.entries()]) {
+      const wt = spawnEvt.worktree;
+      if (typeof wt !== "string" || wt === "") continue;
+      const hasRunningPeer = liveAgents.some(
+        (agent) =>
+          agent.archivedAt === null &&
+          (agent.status === "running" || agent.status === "initializing") &&
+          ((typeof agent.cwd === "string" && (agent.cwd === wt || agent.cwd.startsWith(`${wt}/`))) ||
+            agent.labels?.task === task),
+      );
+      if (!hasRunningPeer) openRounds.delete(task);
     }
   }
   return openRounds.size > 0;

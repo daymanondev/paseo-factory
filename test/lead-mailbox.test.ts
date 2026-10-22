@@ -705,6 +705,50 @@ test("pumpAll pumps a registered Project's queued Lead and Supervisor mail exact
   assert.equal(fake.sent.length, 2, "a second pumpAll with nothing new queued sends nothing");
 });
 
+test("drainLeadMailbox auto-ensures Lead when absent/archived and notifyPeer ignores orphaned non-running worktree spawn_dispatched rounds (v0.0.31)", async (t) => {
+  const { stateDir, slug, projectRoot, factory, leadMail, fake } = makeSpooledRuntime(t);
+
+  // 1. Seed a stale spawn_dispatched round (T-15) with a worktree path that has NO running agent on the daemon,
+  //    plus a live task T-08 that finishes GREEN.
+  await factory.ledger.append({
+    event: "contract_set",
+    task: "T-15",
+    workspace: projectRoot,
+    gate: "true",
+    artifact: "x.ts",
+    scope: ["x.ts"],
+  });
+  await factory.ledger.append({
+    event: "spawn_dispatched",
+    task: "T-15",
+    provider: "claude",
+    arity: 1,
+    worktree: join(projectRoot, ".worktrees/T-15"),
+  });
+  await factory.ledger.append({
+    event: "contract_set",
+    task: "T-08",
+    workspace: projectRoot,
+    gate: "true",
+    artifact: "y.ts",
+    scope: ["y.ts"],
+  });
+
+  // 2. No Lead agent exists yet (or previous Lead was archived). When T-08 notifies GREEN:
+  //    - driverWaveInFlight sees no running agent for T-15's worktree and does NOT hold T-08's verdict.
+  //    - drainLeadMailbox sees lead === undefined and auto-ensures Lead via ensureLead, delivering the verdict.
+  await leadMail.notifyPeer({
+    kind: "verdict",
+    task: "T-08",
+    text: "Task T-08 attempt 1 ended GREEN — note: all tests passed",
+  });
+
+  assert.equal(fake.created.length, 1, "drainLeadMailbox auto-created the missing Lead seat");
+  assert.deepEqual(fake.created[0]?.labels, { seat: "lead", project: slug });
+  assert.equal(fake.sent.length, 1, "peer verdict was delivered immediately without being held by dead T-15 spawn_dispatched");
+  assert.match(fake.sent[0]?.text ?? "", /Task T-08 attempt 1 ended GREEN/);
+});
+
 test("resetProjectMailbox clears in-memory retry and handoff state for the target project slug (v0.0.24, T-02)", async (t) => {
   const { stateDir, slug, projectRoot, leadMail, fake } = makeSpooledRuntime(t);
   const mailboxPath = join(projectStateDir(stateDir, slug), "mailbox.jsonl");
