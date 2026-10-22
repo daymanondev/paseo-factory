@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.31] - 2026-10-22
+
+v0.0.31's one thing: **co-located `Supervisor` & `Lead` inside one main Project Workspace, role-first seat & `Peer` worktree titles, safe `Task worktree` cleanup that never kills sibling running Peers, an orphaned `local_checkout` Workspace sweep, and offline spool request deduplication with an explicit stop-on-timeout instruction** (ADR 0017 §2/§4/§5/§6).
+
+### Added
+
+- **Co-located `Supervisor` & `Lead` workspace binding (`plugin/server/roles.ts`, `plugin/server/surface-rpc.ts`, pinned in `test/roles.test.ts` and `test/surface-rpc.test.ts`)** —
+  `injectSessionEnv` accepts the seat session's `workspaceId` and persists it into `<projectStateDir>/project.json` (only when the session actually binds the seat), `SurfaceAgentSnapshot` carries `workspaceId`, and `ensureSeat` resolves the Project's main Workspace from the live `Supervisor` snapshot → the project registration before ever calling `workspaces.open`, creating `Lead` via `workspaces.ref(workspaceId).agents.create` so `Supervisor` and `Lead` sit side-by-side as two Agent tabs in ONE main Workspace instead of splitting across two `local_checkout` Workspaces.
+- **Role-first agent tab titles & clean `Peer` worktree Workspace titles (`src/roles-contract.ts`, `plugin/server/roles.ts`, `plugin/server/spool.ts`)** —
+  `SEAT_TITLES` becomes `Supervisor` / `Lead` (legacy `"Supervisor (paseo-factory)"`-style titles still recognized), `injectRoleOnCreate` stamps `config.title` on all three create paths, and the new `formatPeerAgentTitle` / `formatPeerWorkspaceTitle` helpers title each `Task worktree` Workspace `Peer · <Task> — <short summary>` (first clause of the contract description, capped at 56 chars, never the internal project-slug hash) with the `Peer` Agent tab inside titled `Peer · <Task>`.
+- **Orphaned `local_checkout` Workspace sweep (`plugin/server/daemon-cli.ts`, `plugin/server/surface-rpc.ts`, `plugin/index.server.ts`)** —
+  on `factory.project.reset`, `ensureSeat("supervisor")`, and a new `Supervisor` `agent.session_open`, any `local_checkout` Workspace of the Project with zero non-archived agents (excluding the keep-set — the active `Supervisor`/`Lead` Workspace) is archived; active user chats and Workspaces hosting live agents are never touched.
+- **Offline spool request deduplication & stop-on-timeout instruction (`plugin/bin/bridge.mjs`, `plugin/bin/spool-client.mjs`, `plugin/server/spool.ts`, `plugin/bin/factory-claim.mjs`, `plugin/bin/factory.mjs`)** —
+  a canonical semantic key (every request field except `id`) deduplicates pending requests at submit time (an identical un-replied request reuses the pending id instead of writing a second file) and at drain time (`startSpool` mirrors the primary's reply to duplicate ids and moves their files to `processed/` without a second Gate attempt or Ledger mutation); `spool-timeout` now returns the explicit "DO NOT retry … end your turn immediately" instruction while the single deduplicated request stays queued in `spool/requests/`. A stopped plugin is never auto-reloaded from `bridge.mjs`.
+- **`leadMail.pumpAll()` on `capturePaseo` (`plugin/server/lead-mailbox.ts`, `plugin/index.server.ts`)** —
+  queued Lead/Supervisor mail pumps immediately on the first `paseoApi` capture transition (and at boot when already captured), closing the startup race where an early spool drain enqueued a verdict before the daemon API was available to wake `Lead`.
+- `PASEO_FACTORY_SPOOL_WAIT_MS` env override for the bridge's spool wait (default unchanged at 60s) — additive hook so the timeout arm is testable at test scale.
+
+### Fixed
+
+- **Accepting one task no longer mass-archives sibling running `Task worktree`s (`plugin/server/daemon-cli.ts`, `plugin/server/surface-rpc.ts`)** —
+  `cleanupDaemonWorkspacesAndProjectsViaWs` archives a worktree Workspace only when its directory no longer exists on disk or it is the explicitly retired `targetWorktreePath`; sibling Workspaces whose worktree directories still exist (`T-10`, `T-11`, `T-13`, … running mid-wave) are never archived, while top-level Project rows under `worktreesDir` or missing on disk are always removed.
+- **Spawn path no longer clobbers the persisted main workspaceId (`plugin/server/spool.ts`)** —
+  `resolveSpawnWorkspaceAndParent` seeds the registration's `workspaceId` from `workspaces.open` only when the registration carries none, mirroring `ensureSeat`'s never-overwrite law, so an early `lead_spawn_agent` can no longer re-point the Project at a different `local_checkout` Workspace.
+- `persistSeatWorkspaceId` is gated on `bindSeatAgentId`'s boolean return — a second session that does not own the seat can no longer overwrite the registration's `workspaceId`.
+- `package.json` + both `package-lock.json` version spots + `SHELL_VERSION` + `bridge.mjs` `serverInfo.version` → `0.0.31`.
+
 ## [0.0.30] - 2026-10-22
 
 v0.0.30's one thing: **a private/invite-only companion tier for `factory-release-lab` — an explicit `access: "public" | "private"` across the catalog and view, public-only `Install All`, a pre-flight pull-access probe on explicit private installs, and per-plugin fault isolation for update checks** (ADR 0012 + ADR 0014 amendments).
