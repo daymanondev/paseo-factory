@@ -327,6 +327,22 @@ test("runLaneCli records the lane's command and argv, prompt on stdin", async ()
   assert.ok(fake.calls[0]!.cwd.length > 0, "the scratch cwd is a real dir");
 });
 
+test("OpenCode permission configuration stays isolated from other lane providers", async () => {
+  for (const lane of ["pi/zai/glm-5.3", "claude/opus-4-8", "copilot/gpt-5.4"]) {
+    const fake = fakeLaneRunner(() => ({ code: 0, stdout: "answer" }));
+    const result = await core.runLaneCli({ lane, stdin: "p", timeoutMs: 5_000, runner: fake.runner });
+    assert.ok(result.ok, lane);
+    assert.equal(fake.calls[0]!.env, undefined, `${lane} inherits its environment unchanged`);
+  }
+  for (const lane of ["codex/gpt-6", "omp/model", "antigravity/model"]) {
+    const fake = fakeLaneRunner(() => ({ code: 0, stdout: "answer" }));
+    assert.equal(core.laneCliInvocation(lane), undefined, `${lane} still has no tool-less CLI form`);
+    const result = await core.runLaneCli({ lane, stdin: "p", timeoutMs: 5_000, runner: fake.runner });
+    assert.ok(!result.ok, lane);
+    assert.equal(fake.calls.length, 0, `${lane} never launches a child`);
+  }
+});
+
 test("runLaneCli failures name the command: nonzero exit, deadline, unknown lane", async () => {
   const exited = await runLaneCli({
     lane: "copilot/gpt-5.4",
@@ -402,20 +418,20 @@ test("runLaneCli on a pi lane passes a clean headless PI_CODING_AGENT_DIR to the
 // laneCliInvocation, runLaneCli, TOOLLESS_OPENCODE_CONFIG, the three passes —
 // is imported through `core`, never from ../src/lanes.ts directly.
 
-test("opencode/<model> maps to its exact headless tool-less argv — the fourth family", () => {
+test("opencode/<model> stays headless without auto-approving read permission", () => {
   assert.deepEqual(core.laneCliInvocation("opencode/deepseek-v4.1-flash-free"), {
     command: "opencode",
-    args: ["run", "--standalone", "--auto", "-m", "opencode/deepseek-v4.1-flash-free"],
+    args: ["run", "--standalone", "-m", "opencode/deepseek-v4.1-flash-free"],
   });
   assert.deepEqual(
     core.laneCliInvocation("opencode/glm-5.3-flash-free:high"),
-    { command: "opencode", args: ["run", "--standalone", "--auto", "-m", "opencode/glm-5.3-flash-free", "--variant", "high"] },
+    { command: "opencode", args: ["run", "--standalone", "-m", "opencode/glm-5.3-flash-free", "--variant", "high"] },
     "the :thinking suffix rides --variant — the last-colon split the other three families use",
   );
   assert.equal(core.laneCliInvocation("opencode/"), undefined, "a malformed lane never reaches the switch");
 });
 
-test("runLaneCli on an opencode lane denies every tool by construction — config and CI reach the child env", async () => {
+test("runLaneCli keeps the OpenCode read schema for Zen while headless mode rejects reads", async () => {
   assert.equal(typeof core.TOOLLESS_OPENCODE_CONFIG, "string", "the barrel exports the tool-less opencode config");
   const fake = fakeLaneRunner(() => ({ code: 0, stdout: "answer" }));
 
@@ -423,14 +439,14 @@ test("runLaneCli on an opencode lane denies every tool by construction — confi
   assert.ok(result.ok);
   assert.equal(fake.calls.length, 1);
   assert.equal(fake.calls[0]!.command, "opencode");
-  assert.deepEqual(fake.calls[0]!.args, ["run", "--standalone", "--auto", "-m", "opencode/deepseek-v4.1-flash-free"]);
+  assert.deepEqual(fake.calls[0]!.args, ["run", "--standalone", "-m", "opencode/deepseek-v4.1-flash-free"]);
   assert.equal(fake.calls[0]!.stdin, "the prompt", "the prompt stays on stdin — the shared discipline since amendment 2");
   assert.equal(fake.calls[0]!.env?.OPENCODE_CONFIG_CONTENT, core.TOOLLESS_OPENCODE_CONFIG, "the tool-less permission set reaches the child verbatim");
   assert.equal(fake.calls[0]!.env?.CI, "1", "CI=1 — no interactive prompt can hang the pass");
   assert.equal(fake.calls[0]!.env?.PI_CODING_AGENT_DIR, undefined, "only pi lanes carry the Pi home — opencode needs no stateDir");
 
-  // The permission set itself is the spec's literal block: everything denied,
-  // read included — the prompt on stdin is the whole material.
+  // Zen requires the read tool schema; asking in non-interactive standalone
+  // mode rejects reads while retaining the schema. All other tools stay denied.
   const parsed = JSON.parse(core.TOOLLESS_OPENCODE_CONFIG) as { permission: Record<string, unknown> };
   assert.deepEqual(parsed.permission, {
     "*": "deny",
@@ -440,7 +456,7 @@ test("runLaneCli on an opencode lane denies every tool by construction — confi
     edit: "deny",
     write: "deny",
     bash: "deny",
-    read: { "*": "deny" },
+    read: { "*": "ask" },
   });
 
   // The no-headless-form refusal names the fourth family among the usable forms.
@@ -468,7 +484,7 @@ test("an opencode lane completes the Watch, the Retro, and the Fresh-eyes CLI pa
   disposeDir(t, dir);
   const stateDir = join(dir, "factory");
   const lane = "opencode/deepseek-v4.1-flash-free";
-  const expectedArgs = ["run", "--standalone", "--auto", "-m", "opencode/deepseek-v4.1-flash-free"];
+  const expectedArgs = ["run", "--standalone", "-m", "opencode/deepseek-v4.1-flash-free"];
 
   // A real git workspace at base, then the Agent's committed work — the diff every pass reads.
   const workspace = join(dir, "ws");

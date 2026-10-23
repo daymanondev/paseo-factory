@@ -17,9 +17,9 @@
  *                     --no-skills --no-context-files --model <model>`
  *   copilot/<model>→ `copilot -s --model <model> --reasoning-effort medium`
  *   claude/<model> → `claude -p --model <model> --tools ""`
- *   opencode/<model> → `opencode run --standalone --auto -m opencode/<model>`
- *                     (tools denied a second way: the runner injects
- *                     TOOLLESS_OPENCODE_CONFIG, v0.0.18)
+ *   opencode/<model> → `opencode run --standalone -m opencode/<model>`
+ *                     (the runner injects TOOLLESS_OPENCODE_CONFIG; read
+ *                     asks are rejected by non-interactive standalone mode)
  * The prompt rides stdin (the watch's discipline since amendment 2); the
  * runner owns a scratch cwd and a SIGKILL deadline. `eye.json` is not a CLI
  * lane — it is the fresh-eyes pass's legacy direct-HTTP configuration, legal
@@ -233,11 +233,11 @@ export interface LaneCliInvocation {
 }
 
 /**
- * The opencode lane's tool-less permission set (v0.0.18, spec
- * §Implementation Decisions 3), injected as `OPENCODE_CONFIG_CONTENT` so
- * every tool is denied by construction — the second line of defense beside
- * the argv's own `--standalone --auto`. `read` denies even file reads: the
- * prompt on stdin is the whole material, exactly like the other families.
+ * The OpenCode lane's tool-less permission set (v0.0.32, ADR 0019 §2),
+ * injected as `OPENCODE_CONFIG_CONTENT`. Zen free models require the read
+ * schema, so read asks for permission while every other tool is denied.
+ * Non-interactive `--standalone` without `--auto` rejects those read asks;
+ * the prompt on stdin remains the whole material.
  */
 export const TOOLLESS_OPENCODE_CONFIG = JSON.stringify({
   permission: {
@@ -248,7 +248,7 @@ export const TOOLLESS_OPENCODE_CONFIG = JSON.stringify({
     edit: "deny",
     write: "deny",
     bash: "deny",
-    read: { "*": "deny" },
+    read: { "*": "ask" },
   },
 });
 
@@ -291,7 +291,6 @@ export function laneCliInvocation(lane: string): LaneCliInvocation | undefined {
         args: [
           "run",
           "--standalone",
-          "--auto",
           "-m",
           model.includes("/") ? model : `opencode/${model}`,
           ...(thinking === undefined ? [] : ["--variant", thinking]),
@@ -346,8 +345,9 @@ export function laneCliAvailable(lane: string): boolean {
  * so `pi --print` never resolves the operator's user packages or reads
  * `~/.pi/agent/APPEND_SYSTEM.md` (on top of the argv's own `--no-extensions
  * --no-skills --no-context-files` flags). An `opencode/<model>` lane runs
- * with every tool denied a second way (v0.0.18): `OPENCODE_CONFIG_CONTENT`
- * carries TOOLLESS_OPENCODE_CONFIG and `CI=1` keeps the CLI non-interactive,
+ * with tools fenced by permissions and headless rejection (ADR 0019 §2):
+ * `OPENCODE_CONFIG_CONTENT` carries TOOLLESS_OPENCODE_CONFIG, `--auto` is
+ * omitted, and `CI=1` keeps permission asks non-interactive,
  * independent of any `stateDir`. Every other lane, and a pi caller without a
  * `stateDir`, inherits the parent environment, exactly as before.
  */
