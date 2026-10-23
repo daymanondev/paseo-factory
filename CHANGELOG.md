@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.33] - 2026-10-23
+
+### Added
+
+- Stable Ledger event and Contract-epoch identities, source-to-local reference mapping, and writer-owned staged imports with explicit pending/applied/conflicted outcomes.
+- Explicit history preflight, byte/mode/hash-verified backups, activation, resume and guarded restore. Startup exposes recovery controls while ordinary work remains deferred.
+- Checked canonical policies with committed standalone outputs, generated/core drift checks, isolated installed-plugin checks, and push/PR CI on Node 22 and 24.
+- Validation report and history-upgrade runbook covering local regressions and disposable trial evidence.
+
+### Changed
+
+- Task and Attempt projection is shared by acceptance and CLI/MCP/UI diagnostics; Spool dependencies and command execution use explicit interfaces.
+- Vault codec, transport, configuration and materialization are separated behind the existing public interface. Downloads stage durably while Tasks run; associated files remain under owner maintenance, and retries release held imports without duplicating facts.
+
+### Fixed
+
+- Authenticated Lead acceptance cannot bypass required review or Needs-human restrictions through omitted or forged attribution; every role still requires green evidence.
+- Artifact paths cannot escape the actual execution Workspace through absolute paths, parent traversal or symlinks.
+- Gate completion waits for bounded descendant cleanup, and command shims preserve nonzero exits and signal termination.
+- Scope globs agree across supported fences, including Antigravity; worktree includes copy only selected files and preserve clean-tree hygiene.
+- Imports preserve existing local sequence addresses and evidence citations; divergent or ambiguous history retains original bytes instead of choosing by timestamp or append order.
+- CLI/MCP readers reject complete corruption and invalid v2 timestamps consistently, exclude unterminated tails, and leave read-only files unchanged.
+- Recovery startup no longer strands interrupted upgrades; late external Vault refusal feedback cannot downgrade an applied import.
+- Large upgrade/Vault JSON replies flush completely before CLI exit.
+
+### Verification
+
+- Required checks pass with 885 tests on Node 22.22.0 and 24.21.0; installed packaging checks pass independently.
+- Disposable trial runs verify authenticated acceptance, deferred/imported/conflicted history, backup/restore, recovery boot/resume, busy CLI-to-owner Vault retries and exact cleanup. The real root Ledger remains legacy; persistent upgrade is explicit and is not performed at boot.
+
 ## [0.0.32] - 2026-10-23
 
 ### Added
