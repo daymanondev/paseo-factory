@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { execFileSync } from "node:child_process";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
-import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { resolveProject } from "./project.ts";
@@ -68,9 +68,30 @@ function isUntrackedInstallArtifact(porcelainLine: string): boolean {
   ) {
     return true;
   }
+  const directories = rel.split("/").slice(0, -1);
+  if (directories.some((name) => ["playwright-report", "test-results", "coverage", ".nyc_output"].includes(name) || name.endsWith("-snapshots"))) {
+    return true;
+  }
   const slashIdx = rel.lastIndexOf("/");
   const baseName = slashIdx === -1 ? rel : rel.slice(slashIdx + 1);
   return PACKAGE_LOCKFILES.has(baseName);
+}
+
+/**
+ * Expand untracked paths so collapsed parent directories cannot hide transient
+ * outputs. Exclude install and test-output trees from expansion to keep them
+ * out of the child-process buffer; tracked-only status still catches edits to
+ * any tracked dependency files.
+ */
+async function workspaceStatus(cwd: string): Promise<{ stdout: string }> {
+  const tracked = await git(cwd, ["status", "--porcelain", "--untracked-files=no"]);
+  const expanded = await git(cwd, [
+    "status", "--porcelain", "--untracked-files=all", "--", ":(top,glob)**",
+    ...["node_modules", "playwright-report", "test-results", "coverage", ".nyc_output", "*-snapshots"]
+      .map((directory) => `:(top,exclude,glob)**/${directory}/**`),
+  ]);
+  const untracked = expanded.stdout.split("\n").filter((line) => line.startsWith("?? "));
+  return { stdout: [tracked.stdout.trimEnd(), ...untracked].filter(Boolean).join("\n") };
 }
 
 /**
@@ -85,7 +106,7 @@ export function checkCleanAt(cwd: string, expectedFull: string): Promise<TreeChe
       if (head !== expectedFull) {
         return { ok: false as const, reason: cap(`HEAD is ${shortSha(head)}, not the claimed ${shortSha(expectedFull)}`) };
       }
-      return git(cwd, ["status", "--porcelain"]).then(
+      return workspaceStatus(cwd).then(
         ({ stdout: status }) => {
           const changes = status
             .split("\n")
@@ -125,15 +146,15 @@ function git(cwd: string, args: string[]): Promise<{ stdout: string; stderr: str
   return execFileAsync("git", args, { cwd, timeout: GIT_TIMEOUT_MS });
 }
 
-/**
- * True when a declared scope prefix owns `file` — the boundary law ticket 14
- * fixed: a prefix owns itself and everything under it as a directory. One
- * shared spelling for the scope check, the memory write fence, and any later
- * boundary judge (v0.0.14).
- */
+/** A scope entry owns literal file/directory prefixes or paths matched by its glob. */
 export function scopeCoversFile(scope: readonly string[], file: string): boolean {
   const directMatch = (target: string): boolean =>
-    scope.some((prefix) => target === prefix || target.startsWith(prefix.endsWith("/") ? prefix : `${prefix}/`));
+    scope.some((entry) => {
+      const prefix = normalizeScopePath(entry);
+      const path = normalizeScopePath(target);
+      if (!/[*?]/.test(prefix)) return path === prefix || path.startsWith(`${prefix}/`);
+      return scopeGlob(prefix).test(path);
+    });
   if (directMatch(file)) return true;
   const slashIdx = file.lastIndexOf("/");
   const baseName = slashIdx === -1 ? file : file.slice(slashIdx + 1);
@@ -142,6 +163,34 @@ export function scopeCoversFile(scope: readonly string[], file: string): boolean
     if (directMatch(companionPkgJson)) return true;
   }
   return false;
+}
+
+/** Restore the whole branch diff from the Contract base, including previously committed files. */
+export function scopeRecoveryCommands(base: string, files: readonly string[]): string {
+  const quote = (value: string): string => /^[A-Za-z0-9_./-]+$/.test(value) ? value : `'${value.replace(/'/g, "'\\''")}'`;
+  return files.map((file) => `git restore --source=${quote(base)} -- ${quote(file)}`).join("; ");
+}
+
+/** Contract paths are relative Git paths; tolerate the conventional ./ and trailing slash. */
+export function normalizeScopePath(path: string): string {
+  return path.replace(/^(?:\.\/)+/, "").replace(/\/+$/, "");
+}
+
+function scopeGlob(pattern: string): RegExp {
+  let expression = "^";
+  for (let i = 0; i < pattern.length; i++) {
+    const char = pattern[i];
+    if (char === "*" && pattern[i + 1] === "*") {
+      i++;
+      if (pattern[i + 1] === "/") {
+        expression += "(?:[^/]+/)*";
+        i++;
+      } else expression += ".*";
+    } else if (char === "*") expression += "[^/]*";
+    else if (char === "?") expression += "[^/]";
+    else expression += char.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+  return new RegExp(`${expression}$`);
 }
 
 /**
@@ -241,8 +290,24 @@ export async function landTaskWorktree(options: {
   /** The Contract's base — the fast-forward test HEAD compares against. */
   base?: string;
   branch: string;
+  /** A pending acceptance may have accumulated conflict-resolution commits. */
+  retry?: boolean;
 }): Promise<LandingResult> {
-  const { projectRoot, worktree, claimedCommit, base, branch } = options;
+  const { projectRoot, worktree, base, branch } = options;
+  let claimedCommit = options.claimedCommit;
+  if (options.retry === true) {
+    const tips = [headCommitSync(worktree), headCommitSync(projectRoot, branch)].filter((tip): tip is string => tip !== undefined);
+    if (tips.length === 0) return { landing: "pending-conflict", note: `cannot resolve the pending task tip for ${branch}; preserve the worktree and repair its branch` };
+    for (const tip of tips) {
+      if (tip === claimedCommit) continue;
+      const advanced = await gitExit(projectRoot, ["merge-base", "--is-ancestor", claimedCommit, tip]);
+      if (advanced.status === 0) claimedCommit = tip;
+      else {
+        const behind = await gitExit(projectRoot, ["merge-base", "--is-ancestor", tip, claimedCommit]);
+        if (behind.status !== 0) return { landing: "pending-conflict", note: `pending task tip for ${branch} diverged from its verified claim; preserve both histories and resolve manually` };
+      }
+    }
+  }
   // Idempotency door: exit 0 means the claimed commit is ALREADY in the
   // root's history (a crash between merge and attempt_accepted, or a manual
   // land) — finish the cleanup and land as done. Exit 1 (not an ancestor) is
@@ -268,9 +333,13 @@ async function landCleanly(
   branch: string,
 ): Promise<LandingResult> {
   const conflict = (note: string): LandingResult => ({ landing: "pending-conflict", note: cap(note) });
-  const status = await gitExit(projectRoot, ["status", "--porcelain"]);
-  if (status.status !== 0) return conflict(`could not read the project root's status: ${gitDetail(status)}`);
-  const changes = status.stdout.split("\n").filter((line) => line.trim() !== "");
+  let status: { stdout: string };
+  try {
+    status = await workspaceStatus(projectRoot);
+  } catch (err) {
+    return conflict(`could not read the project root's status: ${gitDetail(err)}`);
+  }
+  const changes = status.stdout.split("\n").filter((line) => line.trim() !== "" && !isUntrackedInstallArtifact(line));
   if (changes.length > 0) {
     return conflict(
       `project root not clean (${changes.length} change${changes.length === 1 ? "" : "s"}): ${changes[0]!.trim()} — commit or stash before landing branch ${branch}`,
@@ -293,8 +362,49 @@ async function landCleanly(
   return finishLanding(projectRoot, worktree);
 }
 
-/** Removes the landed task's worktree; a cleanup failure rides the note, never the outcome. */
+/** Keep the verified installation alive until it is safely available in the root. */
+function hydrateDependencies(projectRoot: string, worktree: string): void {
+  const source = join(worktree, "node_modules");
+  const destination = join(projectRoot, "node_modules");
+  if (!existsSync(join(projectRoot, "package.json")) || !existsSync(source) || !lstatSync(source).isDirectory()) return;
+  const destinationExists = existsSync(destination) || lstatSync(destination, { throwIfNoEntry: false }) !== undefined;
+  if (existsSync(destination)) {
+    const installed = statSync(destination);
+    if (!installed.isDirectory()) throw new Error("root node_modules is obstructed by a non-directory");
+    if (installed.mtimeMs >= statSync(join(projectRoot, "package.json")).mtimeMs) return;
+  }
+  const staging = mkdtempSync(join(projectRoot, ".factory-dependencies-"));
+  let retainBackup = false;
+  try {
+    // Copy into the destination filesystem; source and root may be on different volumes.
+    cpSync(source, join(staging, "installation"), { recursive: true, verbatimSymlinks: true });
+    const backup = join(staging, "previous");
+    if (destinationExists) renameSync(destination, backup);
+    try {
+      renameSync(join(staging, "installation"), destination);
+    } catch (err) {
+      if (destinationExists) {
+        try {
+          renameSync(backup, destination);
+        } catch (restoreError) {
+          retainBackup = true;
+          throw new Error(`could not restore prior dependencies; backup retained at ${backup}`, { cause: restoreError });
+        }
+      }
+      throw err;
+    }
+  } finally {
+    if (!retainBackup) rmSync(staging, { recursive: true, force: true });
+  }
+}
+
+/** Hydrates dependencies before either worktree cleanup path can delete them. */
 async function finishLanding(projectRoot: string, worktree: string): Promise<LandingResult> {
+  try {
+    hydrateDependencies(projectRoot, worktree);
+  } catch (err) {
+    return { landing: "pending-conflict", note: cap(`dependency hydration failed; worktree retained: ${err instanceof Error ? err.message : String(err)}`) };
+  }
   const removed = await gitExit(projectRoot, ["worktree", "remove", "--force", worktree]);
   if (removed.status === 0) return { landing: "landed" };
   // A stale or unregistered directory: best-effort remove, then prune.
@@ -352,7 +462,7 @@ export interface PrepareTaskWorktreeOptions {
   /** Optional explicit branch name override. Defaults to taskWorktreeBranch(task) (`factory/<task>`). */
   branchName?: string;
   /**
-   * When true and `<projectRoot>/node_modules` exists, creates a directory
+   * Unless explicitly false, when `<projectRoot>/node_modules` exists, creates a directory
    * symlink (`junction` on win32, `dir` on POSIX) in the worktree and excludes
    * `node_modules` in the per-worktree `factory-excludes` file so
    * `checkCleanAt` stays clean.
@@ -408,7 +518,7 @@ export function prepareTaskWorktree(options: PrepareTaskWorktreeOptions): Prepar
   if (added.error !== undefined || added.status !== 0) {
     return { ok: false, reason: cap(`could not create the task worktree at ${path} on ${branch}: ${firstLine(added.stderr ?? added.error?.message ?? "")}`) };
   }
-  const linked = symlinkNodeModules === true && linkNodeModules(root, path);
+  const linked = symlinkNodeModules !== false && linkNodeModules(root, path);
   copyWorktreeIncludes(root, path, linked ? ["node_modules"] : []);
   return { ok: true, path, branch, reset };
 }

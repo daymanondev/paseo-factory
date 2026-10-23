@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { CorrelationRegistry } from "../src/correlations.ts";
@@ -652,3 +652,78 @@ test("v0.0.28 (ADR 0018 §4): lead_set_contract smart-defaults freshEyes to true
   }
 });
 
+
+
+test("bridge Task allocation inherits root dependencies and keeps them clean", async () => {
+  const homeDir = mkdtempSync(join(tmpdir(), "factory-bridge-deps-"));
+  const stateDir = join(homeDir, "plugin-state", "paseo-factory");
+  const repoDir = makeGitRepo();
+  writeFileSync(join(repoDir, ".gitignore"), "node_modules/\n");
+  execFileSync("git", ["add", ".gitignore"], { cwd: repoDir });
+  execFileSync("git", ["commit", "-m", "ignore installed dependencies"], { cwd: repoDir });
+  const rootDependencies = join(repoDir, "node_modules");
+  mkdirSync(rootDependencies);
+  writeFileSync(join(rootDependencies, "root-package"), "root install\n");
+  const commonExclude = readFileSync(join(repoDir, ".git", "info", "exclude"), "utf8");
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
+  const reg = ensureProjectRegistered(stateDir, repoDir);
+  assert.equal(reg.ok, true);
+  factory.setContract({ task: "deps", workspace: repoDir, gate: "true", artifact: "README.md", scope: ["README.md"] });
+  const correlation = new CorrelationRegistry(stateDir).issue({ role: "lead", projectSlug: reg.slug, projectRoot: repoDir });
+  const spool = startSpool(stateDir, factory, { pollMs: 25 });
+  const spawnTask = async () => {
+    const responses = await runMcpSession({
+      args: ["--correlation", correlation.correlationId, "--state-dir", stateDir, "--home", homeDir],
+      cwd: repoDir,
+      requests: [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_spawn_agent", arguments: { tasks: ["deps"] } } }],
+    });
+    const result = responses[0].result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.notEqual(result.isError, true, result.content[0].text);
+    const worktree = factory.worktreeFor("deps");
+    assert.ok(worktree);
+    return worktree;
+  };
+  try {
+    const worktree = await spawnTask();
+    const inherited = join(worktree, "node_modules");
+    assert.equal(lstatSync(inherited).isSymbolicLink(), true);
+    assert.equal(realpathSync(inherited), realpathSync(rootDependencies));
+    assert.equal(readFileSync(join(inherited, "root-package"), "utf8"), "root install\n");
+    // A resumed task keeps its commits and gains dependencies if the previous
+    // allocation predated the root install (or its inherited link was removed).
+    writeFileSync(join(worktree, "README.md"), "# task progress\n");
+    execFileSync("git", ["add", "README.md"], { cwd: worktree });
+    execFileSync("git", ["commit", "-m", "task progress"], { cwd: worktree });
+    const taskHead = execFileSync("git", ["rev-parse", "HEAD"], { cwd: worktree, encoding: "utf8" }).trim();
+    unlinkSync(inherited);
+    assert.equal(await spawnTask(), worktree);
+    assert.equal(lstatSync(inherited).isSymbolicLink(), true, "reuse also inherits missing dependencies");
+    assert.equal(realpathSync(inherited), realpathSync(rootDependencies));
+    assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: worktree, encoding: "utf8" }).trim(), taskHead);
+    unlinkSync(inherited);
+    mkdirSync(inherited);
+    writeFileSync(join(inherited, "task-package"), "task installation\n");
+    await spawnTask();
+    assert.equal(lstatSync(inherited).isDirectory(), true, "reuse preserves a real task installation");
+    assert.equal(readFileSync(join(inherited, "task-package"), "utf8"), "task installation\n");
+    assert.equal(existsSync(join(inherited, "root-package")), false, "root packages do not overwrite task dependencies");
+
+    rmSync(inherited, { recursive: true });
+    const alternate = join(homeDir, "alternate-dependencies");
+    mkdirSync(alternate);
+    symlinkSync(alternate, inherited, "dir");
+    await spawnTask();
+    assert.equal(realpathSync(inherited), realpathSync(alternate), "reuse preserves an existing dependency link");
+    rmSync(alternate, { recursive: true });
+    await spawnTask();
+    assert.equal(readlinkSync(inherited), alternate, "a dangling existing link is not replaced either");
+    assert.equal(readFileSync(join(rootDependencies, "root-package"), "utf8"), "root install\n");
+    assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: worktree, encoding: "utf8" }).trim(), "");
+    assert.equal(readFileSync(join(repoDir, ".git", "info", "exclude"), "utf8"), commonExclude);
+    assert.equal(readFileSync(join(repoDir, ".gitignore"), "utf8"), "node_modules/\n");
+  } finally {
+    spool.stop();
+    rmSync(homeDir, { recursive: true, force: true });
+    rmSync(repoDir, { recursive: true, force: true });
+  }
+});

@@ -40,8 +40,8 @@ export function injectClaimCliPath<T extends PluginSessionOpenRequest>(
 ): T {
   const raw = typeof request.env?.PATH === "string" && request.env.PATH !== "" ? request.env.PATH : basePath;
   const entries = raw.split(delimiter).filter((entry) => entry !== "");
-  if (entries.includes(binDir)) return request;
-  const path = [binDir, ...entries].join(delimiter);
+  const path = [binDir, ...entries.filter((entry) => entry !== binDir)].join(delimiter);
+  if (request.env?.PATH === path) return request;
   return { ...request, env: { ...request.env, PATH: path } };
 }
 
@@ -82,7 +82,7 @@ export function ensureGitShim(stateDir: string, pluginDir: string, nodeBinary: s
     nodeBinary,
   });
   const execShimScript = join(pluginDir, "bin", "exec-shim.mjs");
-  for (const tool of ["pkill", "kill", "killall", "paseo", "gh"] as const) {
+  for (const tool of ["pkill", "kill", "killall", "paseo", "gh", "npm", "npx", "pnpm", "yarn", "bun"] as const) {
     ensureGeneratedWrapper({
       target: join(binDir, tool),
       script: execShimScript,

@@ -705,6 +705,26 @@ function quoteAwareWords(segment: string): string[] {
   return words;
 }
 
+/**
+ * A deliberately conservative delegation boundary: every command segment must
+ * resolve a bare installed shim. Unknown commands, shell expansion, redirects,
+ * environment overrides and shell wrappers retain ask-time enforcement.
+ */
+export function isStrictlyLayer3ShimmedCommand(command: string, installedTools: readonly string[]): boolean {
+  if (/[\\$`<>(){}#]/.test(command) || /(?<!&)&(?!&)/.test(command)) return false;
+  const shimTools = new Set(["git", "gh", "npm", "npx", "pnpm", "yarn", "bun"]);
+  const installed = new Set(installedTools);
+  const segments = splitShellSegments(command);
+  return segments.length > 0 && segments.every((segment) => {
+    const words = quoteAwareWords(segment);
+    const tool = words[0];
+    if (tool === "git" && words.slice(1).some((word) =>
+      word === "-c" || word.startsWith("-c") || word.startsWith("--config-env") || word.startsWith("--exec-path"),
+    )) return false;
+    return tool !== undefined && shimTools.has(tool) && installed.has(tool);
+  });
+}
+
 function isFactoryCliSegment(
   segment: string,
   projectRoot: string,

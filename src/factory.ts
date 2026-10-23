@@ -13,7 +13,7 @@ import { runWatchPass, watchLaneAvailable } from "./watch.ts";
 import type { CopilotRunner, TimelineFetcher } from "./watch.ts";
 import { buildRetroDigest, retroDay, retroLaneAvailable, runRetroPass, writtenRetroForDay } from "./retro.ts";
 import type { RetroOutcome } from "./retro.ts";
-import { changedFiles, checkCleanAt, headCommitSync, landTaskWorktree, resolveClaimedCommit, scopeCoversFile } from "./workspace.ts";
+import { changedFiles, checkCleanAt, headCommitSync, landTaskWorktree, resolveClaimedCommit, scopeCoversFile, normalizeScopePath, scopeRecoveryCommands } from "./workspace.ts";
 import { MEMORY_FILES } from "./choke.ts";
 import { projectStateDir } from "./project.ts";
 import { FactoryError } from "./errors.ts";
@@ -327,11 +327,12 @@ export interface Factory {
    * The live Contract whose workspace contains `cwd`, if any — the choke's
    * mechanical "contracted agent" test (v0.0.4 map decision 5: asks from
    * agents without a live Contract are not the factory's business). Live =
-   * contract set and no accepted Attempt yet. When several live Contracts
+   * contract set and no settled acceptance yet (pending landings stay live). When several live Contracts
    * cover the same tree, the latest in ledger order wins. Since v0.0.14 a
    * cwd inside the task's recorded Task worktree binds too — the worktree
    * sits outside the workspace (under `<stateDir>/projects/`), so the spawn
-   * line's `worktree` field is what ties the tree to its Contract.
+   * line's `worktree` field is what ties the tree to its Contract, including
+   * across a re-contract while the historical worktree still exists.
    */
   liveContractFor(cwd: string): ContractSet | undefined;
   /**
@@ -344,8 +345,9 @@ export interface Factory {
    * The managed Task worktree the task's latest dispatch runs in (v0.0.14,
    * ADR 0010 §4) — the one lookup that binds a task to its execution tree:
    * the claim's gate cwd and the choke's worktree agent both resolve through
-   * it. Undefined when no spawn recorded one (the legacy shared-checkout
-   * path, pre-0.0.14 lines).
+   * it. Re-contracting inherits the latest dispatch while its directory
+   * survives. Undefined for settled tasks or when no spawn recorded one
+   * (the legacy shared-checkout path, pre-0.0.14 lines).
    */
   worktreeFor(task: string): string | undefined;
   /** Completed gate verdicts for `task` in its current Contract epoch (v0.0.24). */
@@ -440,7 +442,12 @@ export function createFactory(options: FactoryOptions): Factory {
       }
       // The base commit is recorded on every Contract since v0.0.2 (ticket 03
       // R2): it is the diff range for the scope check and the fresh-eyes pass.
-      const base = headCommitSync(workspace, inputBase ?? "HEAD");
+      const priorContract = this.contractFor(task);
+      const liveWorktree = this.worktreeFor(task);
+      const priorBase = priorContract?.workspace === workspace && liveWorktree !== undefined && directoryExists(liveWorktree)
+        ? priorContract.base
+        : undefined;
+      const base = headCommitSync(workspace, (inputBase === "" ? undefined : inputBase) ?? priorBase ?? "HEAD");
       if (base === undefined) {
         throw new FactoryError(
           "invalid-contract",
@@ -735,7 +742,7 @@ export function createFactory(options: FactoryOptions): Factory {
               {
                 exit: result.exit,
                 verdict: "red",
-                note: `changes outside declared scope: ${outside.join(", ")}`,
+                note: `changes outside declared scope: ${outside.join(", ")}. Restore relative to the Contract base (${contract.base}..${resolved.full}): ${scopeRecoveryCommands(contract.base, outside)}; then stage the restored files and commit.`,
                 timedOut: false,
               },
               resolved.full,
@@ -783,7 +790,7 @@ export function createFactory(options: FactoryOptions): Factory {
         throw new FactoryError("unknown-attempt", `task ${task} has no attempt ${attempt}`);
       }
       const priorAccept = acceptedAttempt(fullHistory);
-      if (priorAccept !== undefined) {
+      if (priorAccept !== undefined && priorAccept.landing !== "pending-conflict") {
         throw new FactoryError(
           "already-accepted",
           `task ${task} was already accepted at attempt ${priorAccept.attempt}; the ledger is append-only`,
@@ -824,7 +831,10 @@ export function createFactory(options: FactoryOptions): Factory {
       // the outcome (`landed`, or `pending-conflict` with the reason and the
       // preserved factory/<task> branch). Legacy shared-checkout tasks skip
       // the step and record exactly as before. Never a git push.
-      const worktree = this.worktreeFor(task);
+      const historicalWorktree = priorAccept?.landing === "pending-conflict"
+        ? fullHistory.findLast((event): event is SpawnDispatched => event.event === "spawn_dispatched" && typeof event.worktree === "string" && event.worktree !== "")?.worktree
+        : undefined;
+      const worktree = this.worktreeFor(task) ?? historicalWorktree;
       let landing: "landed" | "pending-conflict" | undefined;
       let landingNote: string | undefined;
       if (worktree !== undefined && gate.sha !== undefined) {
@@ -832,11 +842,15 @@ export function createFactory(options: FactoryOptions): Factory {
           projectRoot: contract.workspace,
           worktree,
           claimedCommit: gate.sha,
+          ...(priorAccept?.landing === "pending-conflict" ? { retry: true } : {}),
           ...(contract.base === undefined ? {} : { base: contract.base }),
           branch: `factory/${task}`,
         });
         landing = result.landing;
         landingNote = result.note;
+      } else if (priorAccept?.landing === "pending-conflict") {
+        landing = "pending-conflict";
+        landingNote = "cannot resolve the pending task's worktree or verified commit; repair its task branch before retrying";
       }
       return ledger.append({
         event: "attempt_accepted",
@@ -1131,27 +1145,17 @@ export function createFactory(options: FactoryOptions): Factory {
 
     liveContractFor(cwd) {
       const accepted = acceptedTasks(ledger);
-      // Only each unaccepted task's latest contract_set (and any spawn_dispatched
-      // in that current epoch) is live.
+      // Re-contracting changes the criteria, not the task's still-live worktree.
       const latestContracts = new Map<string, ContractSet>();
       for (const evt of ledger.events) {
         if (evt.event === "contract_set" && !accepted.has(evt.task)) {
           latestContracts.set(evt.task, evt);
         }
       }
-      const worktrees = new Map<string, string>();
-      for (const evt of ledger.events) {
-        if (evt.event === "spawn_dispatched" && typeof evt.worktree === "string" && evt.worktree !== "") {
-          const contract = latestContracts.get(evt.task);
-          if (contract !== undefined && evt.seq >= contract.seq) {
-            worktrees.set(evt.task, evt.worktree);
-          }
-        }
-      }
       let match: ContractSet | undefined;
       for (const evt of latestContracts.values()) {
         if (covers(evt, cwd)) match = evt;
-        const worktree = worktrees.get(evt.task);
+        const worktree = this.worktreeFor(evt.task);
         if (worktree !== undefined && (cwd === worktree || cwd.startsWith(`${worktree}/`))) match = evt;
       }
       return match;
@@ -1162,10 +1166,20 @@ export function createFactory(options: FactoryOptions): Factory {
     },
 
     worktreeFor(task) {
-      for (const evt of epochEventsFor(ledger, task).reverse()) {
+      const history = ledger.eventsFor(task);
+      const acceptance = acceptedAttempt(history);
+      if (acceptance !== undefined && acceptance.landing !== "pending-conflict") return undefined;
+      const epoch = epochEventsFor(ledger, task);
+      for (const evt of epoch.toReversed()) {
         if (evt.event === "spawn_dispatched" && typeof evt.worktree === "string" && evt.worktree !== "") return evt.worktree;
       }
-      return undefined;
+      // A new spawn supersedes the previous binding, including legacy spawns
+      // without a worktree. Only an epoch with no spawn inherits its predecessor.
+      if (epoch.some((evt) => evt.event === "spawn_dispatched")) return undefined;
+      const spawn = history.findLast((evt): evt is SpawnDispatched => evt.event === "spawn_dispatched");
+      return spawn?.worktree !== undefined && spawn.worktree !== "" && directoryExists(spawn.worktree)
+        ? spawn.worktree
+        : undefined;
     },
 
     attemptsOf(task) {
@@ -1372,6 +1386,15 @@ function inFlightAttempt(history: readonly LedgerEvent[]): number | undefined {
   return undefined;
 }
 
+/** A historical worktree binding is live only while its directory survives. */
+function directoryExists(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 /** A Contract covers a cwd when the cwd is the workspace or sits inside it. */
 function covers(contract: ContractSet, cwd: string): boolean {
   return cwd === contract.workspace || cwd.startsWith(`${contract.workspace}/`);
@@ -1399,11 +1422,14 @@ function taskInNeedsHuman(history: readonly LedgerEvent[]): boolean {
   return needs !== undefined && needs.seq > lastGateSeq;
 }
 
-/** Every task with an accepted Attempt — acceptance retires a Contract (live = set and unaccepted). */
+/** Settled acceptances retire a Contract; pending landings keep their write fence live. */
 function acceptedTasks(ledger: Ledger): Set<string> {
   const accepted = new Set<string>();
   for (const evt of ledger.events) {
-    if (evt.event === "attempt_accepted") accepted.add(evt.task);
+    if (evt.event === "attempt_accepted") {
+      if (evt.landing === "pending-conflict") accepted.delete(evt.task);
+      else accepted.add(evt.task);
+    }
   }
   return accepted;
 }
@@ -1474,6 +1500,16 @@ function scopesOverlap(a: readonly string[] | undefined, b: readonly string[] | 
   for (const mine of a) {
     for (const theirs of b) {
       if (scopeCoversFile([mine], theirs) || scopeCoversFile([theirs], mine)) return `${mine} ↔ ${theirs}`;
+      const minePath = normalizeScopePath(mine);
+      const theirPath = normalizeScopePath(theirs);
+      const mineWildcard = minePath.search(/[*?]/);
+      const theirWildcard = theirPath.search(/[*?]/);
+      if (mineWildcard < 0 && theirWildcard < 0) continue;
+      // A glob's static prefix reserves its possible territory conservatively:
+      // a partial filename prefix may overlap a different glob or directory.
+      const minePrefix = mineWildcard < 0 ? `${minePath}/` : minePath.slice(0, mineWildcard);
+      const theirPrefix = theirWildcard < 0 ? `${theirPath}/` : theirPath.slice(0, theirWildcard);
+      if (minePrefix.startsWith(theirPrefix) || theirPrefix.startsWith(minePrefix)) return `${mine} ↔ ${theirs}`;
     }
   }
   return undefined;

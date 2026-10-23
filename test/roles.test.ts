@@ -120,6 +120,25 @@ test("src/roles-contract.ts is the single source of truth for Supervisor, Lead, 
   }
 });
 
+test("Supervisor contract diagnoses run failures read-only and dispatches repairs to Lead", () => {
+  const contract = renderRoleContract("supervisor");
+  assert.match(contract, /Diagnostics & Run-Verification Law:/);
+  assert.match(contract, /Owner reports.*cannot run.*command fails/);
+  assert.match(contract, /read-only.*`ls -la`.*`cat package.json`.*`node_modules\/\.bin`/);
+  assert.match(contract, /Never run package-mutating.*`npm install`.*git-mutating commands/);
+  assert.match(contract, /immediately dispatch.*`supervisor_dispatch_lead`/);
+});
+
+test("Lead contracts scope dependency lockfiles and verify scaffold entrypoints", () => {
+  const contract = renderRoleContract("lead");
+  assert.match(contract, /Entrypoint Integration & Lockfile Law:/);
+  assert.match(contract, /`scope` includes `package\.json`.*corresponding lockfile/);
+  for (const lockfile of ["package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb"]) {
+    assert.ok(contract.includes(`\`${lockfile}\``), `includes ${lockfile}`);
+  }
+  assert.match(contract, /initial application scaffold or UI entrypoint.*`index\.html`.*`src\/main\.ts`.*explicitly.*`scope`.*verified by `checks`/);
+});
+
 test("injectSessionEnv injects PASEO_FACTORY_SEAT=supervisor for normal-chat agentIds recorded in reg.dispatchers at <project-root> (v0.0.24, T-03)", (t) => {
   const dir = makeTempDir("roles-dispatcher-env-");
   disposeDir(t, dir);

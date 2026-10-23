@@ -24,7 +24,7 @@
  *   on every conflict path.
  */
 import { spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { projectStateDir, resolveProject } from "./project.mjs";
 import { taskWorktreePath } from "../shared/worktree-shape.mjs";
@@ -94,6 +94,7 @@ export function prepareTaskWorktree({ stateDir, workspace, task, base }) {
     return { ok: false, reason: `could not create the task worktree at ${path} on ${branch}: ${firstLine(added.stderr ?? added.error?.message ?? "")}` };
   }
   copyWorktreeIncludes(root, path);
+  inheritNodeModules(root, path);
   return { ok: true, path, branch, reset };
 }
 
@@ -166,13 +167,38 @@ function copyWorktreeIncludes(root, worktreePath) {
       // missing and the include list stays the operator's hint, not a promise.
     }
   }
-  if (copied.length === 0) return;
+  excludeFromWorktree(root, worktreePath, copied);
+}
+
+/** Directory links must be excluded as `node_modules`, not `node_modules/`. */
+function inheritNodeModules(root, worktreePath) {
+  const source = join(root, "node_modules");
+  const target = join(worktreePath, "node_modules");
+  try {
+    if (!statSync(source).isDirectory()) return;
+    try {
+      lstatSync(target); // preserve an installed directory or any existing link
+    } catch (error) {
+      if (error.code !== "ENOENT") return;
+      symlinkSync(source, target, "dir");
+    }
+    excludeFromWorktree(root, worktreePath, ["node_modules"]);
+  } catch {
+    // Missing or inaccessible root dependencies do not refuse allocation.
+  }
+}
+
+function excludeFromWorktree(root, worktreePath, entries) {
+  if (entries.length === 0) return;
   try {
     const gitDirOut = gitIn(worktreePath, ["rev-parse", "--git-dir"]);
     if (gitDirOut.error !== undefined || gitDirOut.status !== 0) return;
     const gitDir = resolve(worktreePath, gitDirOut.stdout.trim());
     const excludesFile = join(gitDir, "factory-excludes");
-    writeFileSync(excludesFile, `${copied.join("\n")}\n`);
+    let existing = "";
+    try { existing = readFileSync(excludesFile, "utf8"); } catch { /* first allocation */ }
+    const patterns = new Set([...existing.split("\n").filter(Boolean), ...entries]);
+    writeFileSync(excludesFile, `${[...patterns].join("\n")}\n`);
     gitIn(root, ["config", "extensions.worktreeConfig", "true"]); // idempotent, enables `--worktree`
     gitIn(worktreePath, ["config", "--worktree", "core.excludesFile", excludesFile]);
   } catch {
