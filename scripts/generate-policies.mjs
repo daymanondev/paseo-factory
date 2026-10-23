@@ -24,6 +24,7 @@ async function compile(source, globalName) {
 
 const targets = [
   ["src/vault.ts", "plugin/bin/vault.mjs"],
+  ["src/task-status.ts", "plugin/bin/task-status.mjs"],
   ["src/history-upgrade.ts", "plugin/bin/history-upgrade.mjs"],
   ["src/history-import.ts", "plugin/bin/history-import.mjs"],
   ["src/history-stage.ts", "plugin/bin/history-stage.mjs"],
@@ -33,6 +34,7 @@ const targets = [
   ["src/process-policy.ts", "plugin/bin/process-policy.mjs"],
 ];
 const sections = [
+  ["src/task-status.ts", "plugin/bin/bridge.mjs", "GENERATED TASK STATUS POLICY", "taskStatusPolicy"],
   ["src/ledger-validation.ts", "plugin/bin/bridge.mjs", "GENERATED LEDGER POLICY", "ledgerValidationPolicy"],
   ["src/scope-policy.ts", "plugin/bin/agy-pre-tool-hook.mjs", "GENERATED SCOPE POLICY", "scopePolicy"],
   ["src/worktree-policy.ts", "plugin/bin/bridge.mjs", "GENERATED WORKTREE POLICY", "worktreePolicy"],

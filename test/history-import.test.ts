@@ -156,7 +156,6 @@ for (const scenario of [
   { name: "Report precedes Gate", events: [{ event: "claim_reported", task: "T", attempt: 1, sha: "abc" }, { event: "report_written", task: "T", attempt: 1, path: "/local/report" }], reason: /Report/ },
   { name: "Watch precedes Gate", events: [{ event: "claim_reported", task: "T", attempt: 1, sha: "abc" }, { event: "watch_written", task: "T", attempt: 1, model: "fixture", outcome: "failed", error: "interrupted", durationMs: 1 }], reason: /Watch/ },
   { name: "Gate attests another SHA", events: [{ event: "claim_reported", task: "T", attempt: 1, sha: "abc" }, { event: "gate_finished", task: "T", attempt: 1, verdict: "green", exit: 0, note: "passed", sha: "def" }], reason: /SHA/ },
-  { name: "green Gate has a nonzero exit", events: [{ event: "claim_reported", task: "T", attempt: 1, sha: "abc" }, { event: "gate_finished", task: "T", attempt: 1, verdict: "green", exit: 2, note: "passed", sha: "abc" }], reason: /green/ },
   { name: "Contract replaces an open pipeline", events: [{ event: "claim_reported", task: "T", attempt: 1, sha: "abc" }, { ...contract, gate: "new" }], reason: /Contract.*pipeline/ },
 ] satisfies { name: string; events: import("../src/events.ts").PendingEvent[]; reason: RegExp }[]) {
   test(`causal import refuses ${scenario.name}`, (t) => {
@@ -376,4 +375,19 @@ test("a symbolic Claim needs explicit commit resolution rather than a guessed cu
   const input = { existingLines: local.raw(), sources: [{ nodeId: "holder", lines: incoming.raw() }], bindings: [binding] };
   assert.equal(planHistoryImport(input).status, "conflicted");
   assert.equal(planHistoryImport({ ...input, bindings: [{ ...binding, claims: [{ eventId: claim.event_id!, sha: "abc" }] }] }).status, "ready");
+});
+
+
+test("import retains contradictory v2 green Gate bytes without activation", (t) => {
+  const local = snapshot(t);
+  const incoming = snapshot(t);
+  incoming.ledger.append(contract);
+  incoming.ledger.append({ event: "claim_reported", task: "T", attempt: 1, sha: "abc" });
+  incoming.ledger.append({ event: "gate_finished", task: "T", attempt: 1, verdict: "green", exit: 0, note: "passed", sha: "abc" });
+  const damaged = incoming.raw().replace('"exit":0', '"exit":7');
+  const plan = planHistoryImport({ existingLines: local.raw(), sources: [{ nodeId: "source", lines: damaged }] });
+  assert.equal(plan.status, "conflicted");
+  assert.match(plan.conflicts.map(item => item.reason).join("\n"), /valid ledger event/);
+  assert.equal(plan.sources[0]!.lines, damaged);
+  assert.equal(plan.lines, local.raw());
 });

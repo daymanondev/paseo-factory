@@ -18,6 +18,12 @@ import { copyFixture, disposeDir, gitCommitAll, makeTempDir, repoRoot } from "./
 const ownerCli = join(repoRoot, "plugin", "bin", "factory.mjs");
 const claimCli = join(repoRoot, "plugin", "bin", "factory-claim.mjs");
 
+// Compatibility assertions below retain the established fields. The reader
+// conformance corpus separately checks every additive eligibility field.
+function establishedFields(text: string): string {
+  return text.replace(/ review=\S+ owner-eligible=\S+ lead-eligible=\S+/g, "");
+}
+
 interface CliResult {
   status: number | null;
   stdout: string;
@@ -80,7 +86,7 @@ test("status tracks a whole loop: contract → red claim → green claim → acc
   // A contract with no attempts yet: counts start at zero, nothing to show.
   const idle = await run(ownerCli, ["status"], ownerEnv);
   assert.equal(idle.status, 0, idle.stderr);
-  assert.equal(idle.stdout, "LOOP9 attempts=0 verdict=- sha=- accepted=no eye=- choke=0/0/0\n");
+  assert.equal(establishedFields(idle.stdout), "LOOP9 attempts=0 verdict=- sha=- accepted=no eye=- choke=0/0/0\n");
 
   // Attempt 1: a claim whose sha resolves to nothing is red before the gate
   // even runs — so this attempt has no attested sha to show.
@@ -88,21 +94,21 @@ test("status tracks a whole loop: contract → red claim → green claim → acc
   assert.equal(red.status, 1, `expected red\nstdout: ${red.stdout}\nstderr: ${red.stderr}`);
   const afterRed = await run(ownerCli, ["status"], ownerEnv);
   assert.equal(afterRed.status, 0, afterRed.stderr);
-  assert.equal(afterRed.stdout, "LOOP9 attempts=1 verdict=red sha=- accepted=no eye=- choke=0/0/0\n");
+  assert.equal(establishedFields(afterRed.stdout), "LOOP9 attempts=1 verdict=red sha=- accepted=no eye=- choke=0/0/0\n");
 
   // Attempt 2: the real commit — green, and the verdict attests it (short sha).
   const green = await run(claimCli, ["--task", "LOOP9", "--sha", baseSha, "--wait-secs", "60"], agentEnv);
   assert.equal(green.status, 0, `expected green\nstdout: ${green.stdout}\nstderr: ${green.stderr}`);
   const afterGreen = await run(ownerCli, ["status"], ownerEnv);
   assert.equal(afterGreen.status, 0, afterGreen.stderr);
-  assert.equal(afterGreen.stdout, `LOOP9 attempts=2 verdict=green sha=${baseSha.slice(0, 7)} accepted=no eye=- choke=0/0/0\n`);
+  assert.equal(establishedFields(afterGreen.stdout), `LOOP9 attempts=2 verdict=green sha=${baseSha.slice(0, 7)} accepted=no eye=- choke=0/0/0\n`);
 
   // Acceptance is the Owner's act; status shows its effect on the task.
   const accept = await run(ownerCli, ["accept", "LOOP9", "--attempt", "2"], ownerEnv);
   assert.equal(accept.status, 0, accept.stderr);
   const afterAccept = await run(ownerCli, ["status"], ownerEnv);
   assert.equal(afterAccept.status, 0, afterAccept.stderr);
-  assert.equal(afterAccept.stdout, `LOOP9 attempts=2 verdict=green sha=${baseSha.slice(0, 7)} accepted=yes eye=- choke=0/0/0\n`);
+  assert.equal(establishedFields(afterAccept.stdout), `LOOP9 attempts=2 verdict=green sha=${baseSha.slice(0, 7)} accepted=yes eye=- choke=0/0/0\n`);
 });
 
 test("status prints one line per task in first-appearance order, including mid-gate tasks", async (t) => {
@@ -130,7 +136,7 @@ test("status prints one line per task in first-appearance order, including mid-g
   const status = await run(ownerCli, ["status"], { PASEO_HOME: dir });
   assert.equal(status.status, 0, status.stderr);
   assert.equal(
-    status.stdout,
+    establishedFields(status.stdout),
     [
       "T-BETA attempts=1 verdict=green sha=a1b2c3d accepted=yes eye=clear choke=0/0/0",
       "T-ALPHA attempts=1 verdict=- sha=- accepted=no eye=- choke=0/0/0",
@@ -174,7 +180,7 @@ test("status shows the last fresh-eyes outcome per task, or - when the task has 
   const status = await run(ownerCli, ["status"], { PASEO_HOME: dir });
   assert.equal(status.status, 0, status.stderr);
   assert.equal(
-    status.stdout,
+    establishedFields(status.stdout),
     [
       "E-CONCERN attempts=1 verdict=green sha=a1b2c3d accepted=no eye=concern choke=0/0/0",
       "E-CLEAR attempts=2 verdict=green sha=a1b2c3d accepted=no eye=clear choke=0/0/0",
@@ -208,7 +214,7 @@ test("status prints one trailing retro line when a retro ever ran — the last o
   const status = await run(ownerCli, ["status"], { PASEO_HOME: dir });
   assert.equal(status.status, 0, status.stderr);
   assert.equal(
-    status.stdout,
+    establishedFields(status.stdout),
     ["T-ONE attempts=1 verdict=green sha=a1b2c3d accepted=no eye=- choke=0/0/0", "retro last=2026-10-10 outcome=failed"].join("\n") + "\n",
   );
 
@@ -283,7 +289,7 @@ test("an unterminated last ledger line is ignored, not printed (it was never ack
 
   const result = await run(ownerCli, ["status"], { PASEO_HOME: dir });
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout, "T1 attempts=0 verdict=- sha=- accepted=no eye=- choke=0/0/0\n");
+  assert.equal(establishedFields(result.stdout), "T1 attempts=0 verdict=- sha=- accepted=no eye=- choke=0/0/0\n");
 });
 
 test("a read error that is not a missing file is reported, not swallowed", async (t) => {
@@ -325,7 +331,7 @@ test("status counts a ledger's choke events onto the task line; untasked git blo
 
   const result = await run(ownerCli, ["--home", home, "status"], { PASEO_HOME: home });
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout.trimEnd(), "T1 attempts=1 verdict=green sha=abc1234 accepted=no eye=- choke=1/1/0");
+  assert.equal(establishedFields(result.stdout).trimEnd(), "T1 attempts=1 verdict=green sha=abc1234 accepted=no eye=- choke=1/1/0");
   assert.ok(!result.stdout.includes("undefined"), "the untasked git_blocked never invents a task line");
 });
 
@@ -359,7 +365,7 @@ test("status accumulates choke counts per task — counted tasks sum their event
   const status = await run(ownerCli, ["status"], { PASEO_HOME: dir });
   assert.equal(status.status, 0, status.stderr);
   assert.equal(
-    status.stdout,
+    establishedFields(status.stdout),
     [
       "T-CHOKY attempts=0 verdict=- sha=- accepted=no eye=- choke=3/2/1",
       "T-QUIET attempts=1 verdict=green sha=a1b2c3d accepted=no eye=- choke=0/0/0",
@@ -367,7 +373,7 @@ test("status accumulates choke counts per task — counted tasks sum their event
   );
 });
 
-test("status reads a ledger with spawn events through — no new fields, no invented lines", async (t) => {
+test("status reads spawn events without inventing Task lines", async (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);
   const stateDir = join(dir, "plugin-state", "paseo-factory");
@@ -387,7 +393,7 @@ test("status reads a ledger with spawn events through — no new fields, no inve
   const status = await run(ownerCli, ["status"], { PASEO_HOME: dir });
   assert.equal(status.status, 0, status.stderr);
   assert.equal(
-    status.stdout,
+    establishedFields(status.stdout),
     [
       "SP-A attempts=1 verdict=green sha=a1b2c3d accepted=no eye=- choke=0/0/0",
       "SP-B attempts=0 verdict=- sha=- accepted=no eye=- choke=0/0/0",
@@ -420,7 +426,7 @@ test("status reads a ledger with meter lines through — the Cost read's event, 
   ]);
   const result = await run(ownerCli, ["status"], { PASEO_HOME: dir });
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout, "M1 attempts=0 verdict=- sha=- accepted=no eye=- choke=0/0/0\n", "the meter line counts toward no status field — `factory cost` is its reader");
+  assert.equal(establishedFields(result.stdout), "M1 attempts=0 verdict=- sha=- accepted=no eye=- choke=0/0/0\n", "the meter line counts toward no status field — `factory cost` is its reader");
 });
 
 test("status reads the Lead's lines through — repokes count nothing, needs-human is the glance's own marker (v0.0.10)", async (t) => {
@@ -440,7 +446,7 @@ test("status reads the Lead's lines through — repokes count nothing, needs-hum
   const result = await run(ownerCli, ["status"], { PASEO_HOME: dir });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(
-    result.stdout,
+    establishedFields(result.stdout),
     [
       "LEAD-ST attempts=0 verdict=- sha=- accepted=no eye=- choke=0/1/0 needs-human=denied-again",
       "LEAD-QUIET attempts=0 verdict=- sha=- accepted=no eye=- choke=0/1/0",
@@ -469,7 +475,7 @@ test("status scopes attempts, verdict, sha, eye, and needs-human to the task's c
   const result = await run(ownerCli, ["status"], { PASEO_HOME: dir });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(
-    result.stdout,
+    establishedFields(result.stdout),
     "T-EPOCH attempts=0 verdict=- sha=- accepted=no eye=- choke=0/0/0\n",
     "re-contracting an unaccepted task resets its status glance for the new Contract epoch",
   );

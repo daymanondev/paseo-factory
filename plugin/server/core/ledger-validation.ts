@@ -10,7 +10,8 @@ export function isValidLedgerEvent(value: unknown): value is LedgerEvent {
     Number.isSafeInteger(event.seq) && (event.seq as number) > 0 &&
     typeof event.ts === "string" &&
     typeof event.event === "string" && (EVENT_NAMES as readonly string[]).includes(event.event) &&
-    shapeIsValid(value as LedgerEvent);
+    shapeIsValid(value as LedgerEvent) &&
+    (event.schema_version !== 2 || v2PayloadIsValid(event));
 }
 
 function nonempty(value: unknown): value is string { return typeof value === "string" && value.trim() !== ""; }
@@ -197,3 +198,50 @@ export function usageIsValid(usage: unknown): boolean {
   return true;
 }
 
+/** Identified history promises typed evidence; legacy readers retain their historical shape contract. */
+function v2PayloadIsValid(event: Record<string, unknown>): boolean {
+  const string = (key: string) => typeof event[key] === "string";
+  const optionalString = (key: string) => event[key] === undefined || string(key);
+  const strings = (key: string) => event[key] === undefined || Array.isArray(event[key]) && event[key].every((item: unknown) => typeof item === "string");
+  const duration = () => typeof event.durationMs === "number" && Number.isFinite(event.durationMs) && event.durationMs >= 0;
+  if (event.task !== undefined && !nonempty(event.task)) return false;
+  if (event.attempt !== undefined && (!Number.isSafeInteger(event.attempt) || (event.attempt as number) < 1)) return false;
+  if (event.attempt !== undefined && !["claim_reported", "gate_started", "gate_finished", "fresh_eyes_written", "watch_written", "report_written", "attempt_accepted"].includes(event.event as string)) return false;
+  if (event.event === "needs_human" && record(event.evidence) && !Object.values(event.evidence).every(value => Number.isSafeInteger(value) && (value as number) > 0)) return false;
+  if (event.arity !== undefined && (!Number.isSafeInteger(event.arity) || (event.arity as number) < 1)) return false;
+  if (event.event === "ledger_schema" || event.event === "retro_written") {
+    if (event.task !== undefined || event.attempt !== undefined) return false;
+  }
+  switch (event.event) {
+    case "ledger_schema": return true;
+    case "contract_set": return string("workspace") && string("gate") && string("artifact") &&
+      strings("scope") && strings("skills") && optionalString("base") && optionalString("description") && optionalString("by") &&
+      (event.freshEyes === undefined || event.freshEyes === true) && (event.watch === undefined || event.watch === true);
+    case "claim_reported": return string("sha") && optionalString("agent");
+    case "gate_started": return string("cmd");
+    case "gate_finished": return (event.exit === null || Number.isSafeInteger(event.exit)) &&
+      (event.verdict === "red" || event.verdict === "green") &&
+      (event.verdict !== "green" || event.exit === 0 && nonempty(event.sha)) &&
+      string("note") && optionalString("sha") && optionalString("outputPath");
+    case "fresh_eyes_written": return string("model") && ["concern", "clear", "failed"].includes(event.outcome as string) && string("finding") && duration();
+    case "watch_written": {
+      if (!string("model") || !["written", "failed"].includes(event.outcome as string) || !duration() || !optionalString("error")) return false;
+      if (event.answers !== undefined && (!record(event.answers) || !Object.values(event.answers).every(value => value === null || typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1))) return false;
+      if (event.usage !== undefined && (!record(event.usage) || ![event.usage.input_tokens, event.usage.cost].every(value => typeof value === "number" && Number.isFinite(value) && value >= 0))) return false;
+      return event.outcome !== "failed" || string("error");
+    }
+    case "report_written": return string("path");
+    case "attempt_accepted": return optionalString("accepted_by") && optionalString("landingNote") && (event.landing === undefined || event.landing === "landed" || event.landing === "pending-conflict");
+    case "permit_allowed": case "permit_denied": return string("name") && string("kind") && optionalString("command") && (event.event !== "permit_denied" || string("reason"));
+    case "git_blocked": return string("reason");
+    case "spawn_dispatched": return optionalString("worktree");
+    case "retro_written": return string("model") && duration() && optionalString("error") && optionalString("proposalsPath") &&
+      (event.proposalCount === undefined || Number.isSafeInteger(event.proposalCount) && (event.proposalCount as number) >= 0) &&
+      (event.outcome === "written" ? string("proposalsPath") && event.proposalCount !== undefined : event.outcome === "failed" && string("error"));
+    default: return true; // Remaining required fields are checked by the historical shape predicate.
+  }
+}
+
+function record(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}

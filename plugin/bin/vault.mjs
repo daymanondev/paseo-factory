@@ -76,7 +76,7 @@ function needsHumanEvidenceIsValid(evidence, reason) {
 function isValidLedgerEvent(value) {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const event = value;
-  return (event.schema_version === void 0 || event.schema_version === 1 || event.schema_version === 2) && (event.schema_version !== 2 || identityMetadataIsValid(event)) && Number.isSafeInteger(event.seq) && event.seq > 0 && typeof event.ts === "string" && typeof event.event === "string" && EVENT_NAMES.includes(event.event) && shapeIsValid(value);
+  return (event.schema_version === void 0 || event.schema_version === 1 || event.schema_version === 2) && (event.schema_version !== 2 || identityMetadataIsValid(event)) && Number.isSafeInteger(event.seq) && event.seq > 0 && typeof event.ts === "string" && typeof event.event === "string" && EVENT_NAMES.includes(event.event) && shapeIsValid(value) && (event.schema_version !== 2 || v2PayloadIsValid(event));
 }
 function nonempty(value) {
   return typeof value === "string" && value.trim() !== "";
@@ -191,6 +191,58 @@ function usageIsValid(usage) {
     if (typeof value !== "number" || !Number.isFinite(value)) return false;
   }
   return true;
+}
+function v2PayloadIsValid(event) {
+  const string = (key) => typeof event[key] === "string";
+  const optionalString = (key) => event[key] === void 0 || string(key);
+  const strings = (key) => event[key] === void 0 || Array.isArray(event[key]) && event[key].every((item) => typeof item === "string");
+  const duration = () => typeof event.durationMs === "number" && Number.isFinite(event.durationMs) && event.durationMs >= 0;
+  if (event.task !== void 0 && !nonempty(event.task)) return false;
+  if (event.attempt !== void 0 && (!Number.isSafeInteger(event.attempt) || event.attempt < 1)) return false;
+  if (event.attempt !== void 0 && !["claim_reported", "gate_started", "gate_finished", "fresh_eyes_written", "watch_written", "report_written", "attempt_accepted"].includes(event.event)) return false;
+  if (event.event === "needs_human" && record(event.evidence) && !Object.values(event.evidence).every((value) => Number.isSafeInteger(value) && value > 0)) return false;
+  if (event.arity !== void 0 && (!Number.isSafeInteger(event.arity) || event.arity < 1)) return false;
+  if (event.event === "ledger_schema" || event.event === "retro_written") {
+    if (event.task !== void 0 || event.attempt !== void 0) return false;
+  }
+  switch (event.event) {
+    case "ledger_schema":
+      return true;
+    case "contract_set":
+      return string("workspace") && string("gate") && string("artifact") && strings("scope") && strings("skills") && optionalString("base") && optionalString("description") && optionalString("by") && (event.freshEyes === void 0 || event.freshEyes === true) && (event.watch === void 0 || event.watch === true);
+    case "claim_reported":
+      return string("sha") && optionalString("agent");
+    case "gate_started":
+      return string("cmd");
+    case "gate_finished":
+      return (event.exit === null || Number.isSafeInteger(event.exit)) && (event.verdict === "red" || event.verdict === "green") && (event.verdict !== "green" || event.exit === 0 && nonempty(event.sha)) && string("note") && optionalString("sha") && optionalString("outputPath");
+    case "fresh_eyes_written":
+      return string("model") && ["concern", "clear", "failed"].includes(event.outcome) && string("finding") && duration();
+    case "watch_written": {
+      if (!string("model") || !["written", "failed"].includes(event.outcome) || !duration() || !optionalString("error")) return false;
+      if (event.answers !== void 0 && (!record(event.answers) || !Object.values(event.answers).every((value) => value === null || typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1))) return false;
+      if (event.usage !== void 0 && (!record(event.usage) || ![event.usage.input_tokens, event.usage.cost].every((value) => typeof value === "number" && Number.isFinite(value) && value >= 0))) return false;
+      return event.outcome !== "failed" || string("error");
+    }
+    case "report_written":
+      return string("path");
+    case "attempt_accepted":
+      return optionalString("accepted_by") && optionalString("landingNote") && (event.landing === void 0 || event.landing === "landed" || event.landing === "pending-conflict");
+    case "permit_allowed":
+    case "permit_denied":
+      return string("name") && string("kind") && optionalString("command") && (event.event !== "permit_denied" || string("reason"));
+    case "git_blocked":
+      return string("reason");
+    case "spawn_dispatched":
+      return optionalString("worktree");
+    case "retro_written":
+      return string("model") && duration() && optionalString("error") && optionalString("proposalsPath") && (event.proposalCount === void 0 || Number.isSafeInteger(event.proposalCount) && event.proposalCount >= 0) && (event.outcome === "written" ? string("proposalsPath") && event.proposalCount !== void 0 : event.outcome === "failed" && string("error"));
+    default:
+      return true;
+  }
+}
+function record(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 // src/history-identity.ts
@@ -1030,9 +1082,9 @@ function discoverProjects(stateDir, liveSeatAgents, home) {
       if (Array.isArray(parsed)) {
         for (const entry of parsed) {
           if (entry === null || typeof entry !== "object") continue;
-          const record = entry;
-          if (record.archivedAt !== null || typeof record.rootPath !== "string" || record.rootPath === "") continue;
-          const resolved = resolveProject(record.rootPath);
+          const record2 = entry;
+          if (record2.archivedAt !== null || typeof record2.rootPath !== "string" || record2.rootPath === "") continue;
+          const resolved = resolveProject(record2.rootPath);
           if (resolved.ok && !roots.has(resolved.slug)) {
             roots.set(resolved.slug, resolved.root);
           }
@@ -1097,15 +1149,15 @@ var Ledger = class _Ledger {
       if (task !== void 0 && epoch === void 0 && !eventAllowsUnboundEpoch(evt.event)) throw new FactoryError("invalid-event-epoch", `Task ${task} has no current Contract epoch`);
       Object.assign(identity, { schema_version: 2, event_id: eventId, provenance: { writer_id: this.#writerId }, ...epoch === void 0 ? {} : { epoch_id: epoch } });
     }
-    const record = { ...evt, seq: this.#nextSeq, ts: (/* @__PURE__ */ new Date()).toISOString(), ...identity };
+    const record2 = { ...evt, seq: this.#nextSeq, ts: (/* @__PURE__ */ new Date()).toISOString(), ...identity };
     if (this.#schema !== void 0) {
-      const context2 = [...this.#events, record];
-      const resolved = remapLedgerReferences(record, context2, context2);
+      const context2 = [...this.#events, record2];
+      const resolved = remapLedgerReferences(record2, context2, context2);
       if (!resolved.ok) throw new FactoryError("invalid-event-reference", resolved.reasons.join("; "));
-      Object.assign(record, resolved.event);
-      if (!isValidLedgerEvent(record)) throw new FactoryError("invalid-event", "record does not satisfy the active Ledger schema");
+      Object.assign(record2, resolved.event);
+      if (!isValidLedgerEvent(record2)) throw new FactoryError("invalid-event", "record does not satisfy the active Ledger schema");
     }
-    const line = `${JSON.stringify(record)}
+    const line = `${JSON.stringify(record2)}
 `;
     const fd = openSync2(this.#path, "a");
     try {
@@ -1114,7 +1166,7 @@ var Ledger = class _Ledger {
     } catch (error) {
       try {
         const actual = this.#readDisk();
-        if (actual === this.#rawSnapshot + line) this.#install(actual, [...this.#events, record]);
+        if (actual === this.#rawSnapshot + line) this.#install(actual, [...this.#events, record2]);
         else if (actual !== this.#rawSnapshot) this.#poisoned = true;
       } catch {
         this.#poisoned = true;
@@ -1124,9 +1176,9 @@ var Ledger = class _Ledger {
       closeSync2(fd);
     }
     this.#rawSnapshot += line;
-    this.#events.push(record);
+    this.#events.push(record2);
     this.#nextSeq += 1;
-    return record;
+    return record2;
   }
   get path() {
     return this.#path;
@@ -2180,9 +2232,9 @@ function paxPath(data) {
   for (const line of data.toString("utf8").split("\n")) {
     const space = line.indexOf(" ");
     if (space <= 0) continue;
-    const record = line.slice(space + 1);
-    const eq = record.indexOf("=");
-    if (eq > 0 && record.slice(0, eq) === "path") return record.slice(eq + 1);
+    const record2 = line.slice(space + 1);
+    const eq = record2.indexOf("=");
+    if (eq > 0 && record2.slice(0, eq) === "path") return record2.slice(eq + 1);
   }
   return null;
 }
@@ -2538,18 +2590,18 @@ function readJsonFile(path) {
     return null;
   }
 }
-function jsonStringField(record, field) {
-  const value = record?.[field];
+function jsonStringField(record2, field) {
+  const value = record2?.[field];
   return typeof value === "string" && value !== "" ? value : null;
 }
-function arrayField(record, field) {
-  const value = record?.[field];
+function arrayField(record2, field) {
+  const value = record2?.[field];
   if (!Array.isArray(value)) return [];
   return value.filter((entry) => typeof entry === "object" && entry !== null && !Array.isArray(entry));
 }
-function nestedJsonStringField(record, path) {
-  if (record === null) return null;
-  const inner = record[path[0]];
+function nestedJsonStringField(record2, path) {
+  if (record2 === null) return null;
+  const inner = record2[path[0]];
   if (typeof inner !== "object" || inner === null || Array.isArray(inner)) return null;
   return jsonStringField(inner, path[1]);
 }
