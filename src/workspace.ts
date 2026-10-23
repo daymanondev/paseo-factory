@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { execFileSync } from "node:child_process";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
-import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { resolveProject } from "./project.ts";
@@ -341,8 +341,49 @@ async function landCleanly(
   return finishLanding(projectRoot, worktree);
 }
 
-/** Removes the landed task's worktree; a cleanup failure rides the note, never the outcome. */
+/** Keep the verified installation alive until it is safely available in the root. */
+function hydrateDependencies(projectRoot: string, worktree: string): void {
+  const source = join(worktree, "node_modules");
+  const destination = join(projectRoot, "node_modules");
+  if (!existsSync(join(projectRoot, "package.json")) || !existsSync(source) || !lstatSync(source).isDirectory()) return;
+  const destinationExists = existsSync(destination) || lstatSync(destination, { throwIfNoEntry: false }) !== undefined;
+  if (existsSync(destination)) {
+    const installed = statSync(destination);
+    if (!installed.isDirectory()) throw new Error("root node_modules is obstructed by a non-directory");
+    if (installed.mtimeMs >= statSync(join(projectRoot, "package.json")).mtimeMs) return;
+  }
+  const staging = mkdtempSync(join(projectRoot, ".factory-dependencies-"));
+  let retainBackup = false;
+  try {
+    // Copy into the destination filesystem; source and root may be on different volumes.
+    cpSync(source, join(staging, "installation"), { recursive: true, verbatimSymlinks: true });
+    const backup = join(staging, "previous");
+    if (destinationExists) renameSync(destination, backup);
+    try {
+      renameSync(join(staging, "installation"), destination);
+    } catch (err) {
+      if (destinationExists) {
+        try {
+          renameSync(backup, destination);
+        } catch (restoreError) {
+          retainBackup = true;
+          throw new Error(`could not restore prior dependencies; backup retained at ${backup}`, { cause: restoreError });
+        }
+      }
+      throw err;
+    }
+  } finally {
+    if (!retainBackup) rmSync(staging, { recursive: true, force: true });
+  }
+}
+
+/** Hydrates dependencies before either worktree cleanup path can delete them. */
 async function finishLanding(projectRoot: string, worktree: string): Promise<LandingResult> {
+  try {
+    hydrateDependencies(projectRoot, worktree);
+  } catch (err) {
+    return { landing: "pending-conflict", note: cap(`dependency hydration failed; worktree retained: ${err instanceof Error ? err.message : String(err)}`) };
+  }
   const removed = await gitExit(projectRoot, ["worktree", "remove", "--force", worktree]);
   if (removed.status === 0) return { landing: "landed" };
   // A stale or unregistered directory: best-effort remove, then prune.
