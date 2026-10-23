@@ -196,7 +196,7 @@ test("through the generated wrapper, pass-through does not recurse into itself",
     cwd: dir,
     encoding: "utf8",
     timeout: 10_000,
-    env: { ...process.env, PATH: `${join(stateDir, "bin")}${delimiter ?? ":"}${stubBin}` },
+    env: { ...process.env, NODE_OPTIONS: "--no-experimental-strip-types", PATH: `${join(stateDir, "bin")}${delimiter ?? ":"}${stubBin}` },
   });
   assert.equal(result.status, 0, `pass-through through the wrapper: ${result.stderr}`);
   assert.match(result.stdout ?? "", /STUB-OK/);
@@ -240,7 +240,7 @@ test("installed agent git shim accepts glob scopes and gives branch-base recover
   ensureGitShim(stateDir, join(repoRoot, "plugin"), process.execPath);
   const run = (args: string[]) => spawnSync(join(stateDir, "bin", "git"), args, {
     cwd: workspace, encoding: "utf8", timeout: 10_000,
-    env: { ...process.env, PASEO_FACTORY_SEAT: "agent", PASEO_FACTORY_TASK: "GLOB" },
+    env: { ...process.env, NODE_OPTIONS: "--no-experimental-strip-types", PASEO_FACTORY_SEAT: "agent", PASEO_FACTORY_TASK: "GLOB" },
   });
   writeFileSync(join(workspace, "src", "main.ts"), "export const main = 2;\n");
   writeFileSync(join(workspace, "README.md"), "out of scope\n");
@@ -277,4 +277,46 @@ test("installed agent git shim accepts glob scopes and gives branch-base recover
   writeFileSync(join(workspace, "src", "main.ts"), "export const main = 4;\n");
   const excludedRepair = run(["commit", "-m", "repair excluded by pathspec", "--", "src/main.ts"]);
   assert.equal(excludedRepair.status, 126, excludedRepair.stderr);
+});
+
+test("installed shim follows live worktree bindings through re-contract, replacement spawn, acceptance, and reset", (t) => {
+  const dir = makeTempDir("git-shim-binding-");
+  disposeDir(t, dir);
+  const workspace = join(dir, "repo");
+  const worktree = join(dir, "task");
+  mkdirSync(workspace);
+  writeFileSync(join(workspace, "README.md"), "before\n");
+  gitCommitAll(workspace);
+  execFileSync("git", ["worktree", "add", "-b", "factory/BIND", worktree], { cwd: workspace, stdio: "pipe" });
+  const stateDir = join(dir, "state");
+  const factory = createFactory({ stateDir });
+  const contract = () => factory.setContract({ task: "BIND", workspace, gate: "true", artifact: "README.md", scope: ["src"] });
+  const spawn = (path?: string) => factory.requestSpawn({ task: "BIND", provider: "claude", arity: 1, ...(path ? { worktree: path } : {}) });
+  contract();
+  spawn(worktree);
+  ensureGitShim(stateDir, join(repoRoot, "plugin"), process.execPath);
+  writeFileSync(join(worktree, "README.md"), "staged outside scope\n");
+  execFileSync("git", ["add", "README.md"], { cwd: worktree });
+  const run = () => spawnSync(join(stateDir, "bin", "git"), ["commit", "--dry-run", "-m", "probe scope"], {
+    cwd: worktree, encoding: "utf8", timeout: 10_000,
+    env: { ...process.env, NODE_OPTIONS: "--no-experimental-strip-types", PASEO_FACTORY_SEAT: "agent", PASEO_FACTORY_TASK: "BIND" },
+  });
+  const expectStatus = (status: number, message: string) => {
+    const result = run();
+    assert.equal(result.status, status, `${message}: ${result.stderr}`);
+  };
+  contract();
+  expectStatus(126, "re-contract inherits a surviving historical worktree");
+  spawn();
+  expectStatus(0, "a new spawn without worktree supersedes the historical binding");
+  contract();
+  expectStatus(0, "another re-contract cannot resurrect the superseded worktree");
+  spawn(worktree);
+  factory.ledger.append({ event: "attempt_accepted", task: "BIND", attempt: 1, landing: "pending-conflict" });
+  expectStatus(126, "pending landing keeps the scope fence live");
+  factory.ledger.append({ event: "attempt_accepted", task: "BIND", attempt: 1, landing: "landed" });
+  expectStatus(0, "settled acceptance retires the binding");
+  factory.resetProject(workspace);
+  contract();
+  expectStatus(0, "project reset discards historical worktrees");
 });

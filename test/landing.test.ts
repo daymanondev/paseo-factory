@@ -28,8 +28,8 @@ function landingFixture(t: TestContext) {
 test("untracked test outputs in root and worktree do not block claim or landing", async (t) => {
   const { factory, task, workspace, worktree, claimed } = landingFixture(t);
   for (const cwd of [workspace, worktree]) {
-    for (const name of ["playwright-report", "test-results", "coverage", ".nyc_output", "app-snapshots"]) {
-      mkdirSync(join(cwd, name));
+    for (const name of ["playwright-report", "test-results", "coverage", ".nyc_output", "app-snapshots", "artifacts/playwright-report", "results/nested/test-results", "nested/node_modules/pkg"]) {
+      mkdirSync(join(cwd, name), { recursive: true });
       writeFileSync(join(cwd, name, "output.txt"), "test output\n");
     }
   }
@@ -108,9 +108,52 @@ test("artifact exclusions preserve dirty checks for tracked edits and unrelated 
     writeFileSync(join(worktree, "coverage", "tracked.txt"), "changed tracked fixture\n");
     assert.equal((await factory.claim({ task, sha: claimed })).verdict, "red");
   });
-  await t.test("unrelated untracked file remains dirty", async (t) => {
-    const { factory, task, worktree, claimed } = landingFixture(t);
-    writeFileSync(join(worktree, "coverage"), "a regular file is not an output directory\n");
+  await t.test("tracked dependency remains dirty", async (t) => {
+    const { factory, task, worktree } = landingFixture(t);
+    mkdirSync(join(worktree, "node_modules", "fixture"), { recursive: true });
+    writeFileSync(join(worktree, "node_modules", "fixture", "index.js"), "tracked dependency\n");
+    const claimed = gitCommitChanges(worktree, "track a dependency fixture");
+    writeFileSync(join(worktree, "node_modules", "fixture", "index.js"), "changed dependency\n");
     assert.equal((await factory.claim({ task, sha: claimed })).verdict, "red");
   });
+  await t.test("a regular file named coverage remains dirty", async (t) => {
+    const { factory, task, worktree, claimed } = landingFixture(t);
+    writeFileSync(join(worktree, "coverage"), "a file is not an output directory\n");
+    assert.equal((await factory.claim({ task, sha: claimed })).verdict, "red");
+  });
+  await t.test("unrelated untracked file remains dirty", async (t) => {
+    const { factory, task, worktree, claimed } = landingFixture(t);
+    mkdirSync(join(worktree, "artifacts", "playwright-report"), { recursive: true });
+    writeFileSync(join(worktree, "artifacts", "playwright-report", "index.html"), "ignored artifact\n");
+    writeFileSync(join(worktree, "artifacts", "owner.txt"), "unrelated untracked file\n");
+    assert.equal((await factory.claim({ task, sha: claimed })).verdict, "red");
+  });
+});
+
+test("claim from a repository subdirectory still rejects untracked sibling dirt", async (t) => {
+  const { factory, workspace } = landingFixture(t);
+  factory.resetProject(workspace);
+  const subdirectory = join(workspace, "app");
+  mkdirSync(subdirectory);
+  writeFileSync(join(subdirectory, "index.txt"), "nested application\n");
+  const sha = gitCommitChanges(workspace, "add application subdirectory");
+  factory.setContract({ task: "SUBDIR", workspace: subdirectory, gate: "true", artifact: "index.txt" });
+  writeFileSync(join(workspace, "owner.txt"), "untracked sibling\n");
+  assert.equal((await factory.claim({ task: "SUBDIR", sha })).verdict, "red");
+});
+
+test("large untracked dependency trees do not overflow cleanliness inspection", async (t) => {
+  const { factory, task, workspace, worktree, claimed } = landingFixture(t);
+  for (const cwd of [workspace, worktree]) {
+    // Expanded porcelain would exceed execFile's default 1 MiB buffer.
+    for (let directory = 0; directory < 16; directory++) {
+      const dependency = join(cwd, "node_modules", `package-${directory}-${"x".repeat(140)}`);
+      mkdirSync(dependency, { recursive: true });
+      for (let file = 0; file < 256; file++) {
+        writeFileSync(join(dependency, `${file}-${"y".repeat(140)}.js`), "verified fixture\n");
+      }
+    }
+  }
+  assert.equal((await factory.claim({ task, sha: claimed })).verdict, "green");
+  assert.equal((await factory.accept({ task, attempt: 1 })).landing, "landed");
 });

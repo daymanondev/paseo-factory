@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import type { AgentPermissionRequest, AgentPermissionResponse } from "@getpaseo/protocol/agent-types";
 import { createFactory } from "../plugin/server/core/factory.ts";
 import { writeProjectRegistration } from "../plugin/server/core/project.ts";
@@ -15,7 +15,7 @@ import {
   normalizeAgentCreateRequest,
   resolveSeatAtProjectRoot,
 } from "../plugin/server/choke.ts";
-import { ensureGitShim } from "../plugin/server/shell.ts";
+import { ensureGitShim, injectClaimCliPath } from "../plugin/server/shell.ts";
 import type { PaseoResponderApi } from "../plugin/server/choke.ts";
 import { isSeatMemoryPathAllowed, judgeFilePath, judgeShellCommand, refuseGitArgv, shellTokens, writableRootsFor } from "../src/choke.ts";
 import { GIT_ARGV_CASES, SHELL_CASES, shellRoots } from "./choke-cases.ts";
@@ -916,9 +916,18 @@ test("OpenCode delegates installed bare package shims while other providers and 
     assert.equal((await ask("opencode/mimo-v2-pro-free", command)).behavior, "allow", command);
   }
   assert.equal(factory.ledger.events.filter((event) => event.event === "permit_denied").length, 0);
-  const refused = spawnSync(join(factory.stateDir, "bin", "npm"), ["install"], {
+  const earlierBin = join(dir, "earlier-bin");
+  mkdirSync(earlierBin);
+  writeFileSync(join(earlierBin, "npm"), "#!/bin/sh\necho UNSHIMMED\nexit 0\n", { mode: 0o755 });
+  const factoryBin = join(factory.stateDir, "bin");
+  const launch = injectClaimCliPath({
+    agentId: "seat", workspaceId: null, provider: "opencode", cwd: workspace,
+    reason: "create", purpose: "interactive",
+    env: { PATH: [earlierBin, factoryBin, "/usr/bin", factoryBin].join(delimiter) },
+  }, factoryBin);
+  const refused = spawnSync("/bin/sh", ["-c", "npm install"], {
     cwd: workspace, encoding: "utf8", timeout: 10_000,
-    env: { ...process.env, PASEO_FACTORY_SEAT: "supervisor" },
+    env: { ...process.env, ...launch.env, PASEO_FACTORY_SEAT: "supervisor" },
   });
   assert.equal(refused.status, 126);
   startGitBlockIngestion(factory).stop();

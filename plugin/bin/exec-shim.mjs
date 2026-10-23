@@ -105,14 +105,31 @@ if ((seat === "supervisor" || seat === "lead") && packageTools.has(tool)) {
     "--prefix", "--cache", "--registry", "--userconfig", "--globalconfig", "--location", "--workspace", "-w",
     "--dir", "-C", "--cwd", "--filter", "-F", "--store-dir", "--modules-dir", "--config",
     "--cache-folder", "--mutex", "--network-timeout", "--use-yarnrc",
+    "--loglevel", "--logs-dir", "--tag", "--access", "--omit", "--include", "--before",
+    "--script-shell", "--node-options", "--fetch-retries", "--fetch-timeout",
+    "--cafile", "--cert", "--key", "--proxy", "--https-proxy", "--noproxy",
   ]);
+  // Only a known command boundary makes subsequent words arguments/scripts.
+  // Unknown configuration options may consume a value: neither an unfamiliar
+  // option nor its first positional value proves that a later install is safe.
+  const commandBoundaries = new Set([
+    "run", "run-script", "test", "t", "start", "stop", "restart", "view", "info", "show",
+    "ls", "list", "outdated", "why", "explain", "help", "root", "prefix", "bin",
+    "ping", "doctor", "completion", "search",
+  ]);
+  const booleanFlags = new Set(["--global", "-g", "--silent", "--verbose", "--offline", "--version", "-v", "--help", "-h"]);
   let sub;
+  let possibleOptionValue = false;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (valueFlags.has(arg)) { i += 1; continue; }
-    if (arg.startsWith("-")) continue;
-    sub = arg;
-    break;
+    if (arg.startsWith("-")) {
+      possibleOptionValue = !arg.includes("=") && !booleanFlags.has(arg);
+      continue;
+    }
+    if (packageMutations.has(arg)) { sub = arg; break; }
+    if (possibleOptionValue) { possibleOptionValue = false; continue; }
+    if (commandBoundaries.has(arg)) { sub = arg; break; }
   }
   const informational = argv.some((arg) => ["--version", "-v", "--help", "-h"].includes(arg));
   if (tool === "npx" || (tool === "yarn" && sub === undefined && !informational) || packageMutations.has(sub)) {
