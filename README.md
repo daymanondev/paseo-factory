@@ -53,6 +53,12 @@ npm test
 ```
 
 Edit the core in `src/`, then run `npm run sync:plugin-core` and commit both.
+Scope, worktree hydration, Ledger reading and subprocess policies also generate
+standalone installed assets: run `npm run generate:policies` after editing their
+canonical TypeScript sources, and commit the generated files. The bridge and
+Antigravity hook embed their policies so each remains usable when copied alone.
+`npm run generate:policies:check` reports stale outputs without rewriting them.
+Generation uses development dependencies; plugin installation needs no build.
 
 ## Run the loop on a trial daemon
 

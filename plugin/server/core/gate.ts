@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { inspectArtifact } from "./artifact.ts";
+import { killProcessGroup } from "./process-policy.ts";
 import { DEFAULT_GATE_TIMEOUT_MS, GATE_OUTPUT_CAP_BYTES, REPORT_NOTE_MAX_CHARS } from "./constants.ts";
 import type { Verdict } from "./events.ts";
 
@@ -80,15 +81,15 @@ export function runGate(input: GateInput): Promise<GateResult> {
     let graceKillTimer: ReturnType<typeof setTimeout> | undefined;
     let cleanup: Promise<void> | undefined;
     const reapGroup = (immediateSigKill = false): Promise<void> => {
-      if (immediateSigKill) killGroup(child, "SIGKILL");
+      if (immediateSigKill) killProcessGroup(child, "SIGKILL");
       if (cleanup !== undefined) return cleanup;
       if (immediateSigKill) {
         cleanup = Promise.resolve();
       } else {
-        killGroup(child, "SIGTERM");
+        killProcessGroup(child, "SIGTERM");
         cleanup = new Promise((done) => {
           graceKillTimer = setTimeout(() => {
-            killGroup(child, "SIGKILL");
+            killProcessGroup(child, "SIGKILL");
             done();
           }, 50);
         });
@@ -148,18 +149,6 @@ export function runGate(input: GateInput): Promise<GateResult> {
       resolve({ exit: code, verdict, note, timedOut: false, output: raw, ...(artifact === undefined ? {} : { artifactPresent: true }) });
     });
   });
-}
-
-function killGroup(child: import("node:child_process").ChildProcess, signal: NodeJS.Signals = "SIGKILL"): void {
-  if (child.pid === undefined || process.platform === "win32") {
-    child.kill(signal);
-    return;
-  }
-  try {
-    process.kill(-child.pid, signal);
-  } catch {
-    child.kill(signal);
-  }
 }
 
 /**

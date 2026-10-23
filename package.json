@@ -17,6 +17,8 @@
     "factory": "node plugin/bin/factory.mjs",
     "sync:plugin-core": "node scripts/sync-plugin-core.mjs",
     "sync:plugin-core:check": "node scripts/sync-plugin-core.mjs --check",
+    "generate:policies": "node scripts/generate-policies.mjs",
+    "generate:policies:check": "node scripts/generate-policies.mjs --check",
     "check:bundle": "node scripts/check-bundle.mjs"
   },
   "devDependencies": {
