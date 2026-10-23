@@ -2622,7 +2622,7 @@ test("vault.hydrate: refusals are data — unconfigured, a non-GitHub repo, and 
   assert.match(settled.error, /gh: rate limit exceeded/);
 });
 
-test("vault.pull: Vault sync through the handlers — cached checkout hydrated, sync stamp, node ledgers reconciled", async (t) => {
+test("vault.pull: Vault sync through the handlers — cached checkout hydrated and legacy node history staged honestly", async (t) => {
   // A prior pull's cached checkout at <home>/vault: an obfuscated envelope, a
   // config file, and another machine's node-scoped ledger snapshot.
   const { runner, calls } = fakeVaultRunner(() => Buffer.alloc(0));
@@ -2654,14 +2654,10 @@ test("vault.pull: Vault sync through the handlers — cached checkout hydrated, 
   assert.equal(reply.vault.lastHydrateMode, "sync");
   assert.equal(reply.vault.cloneExists, true, "the cached checkout is exactly what cloneExists reports");
 
-  // The mergeLedgers leg: both machines' events land in the global ledger, re-indexed monotonic.
-  const merged = readFileSync(join(stateDir, "ledger.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line) as { seq: number; task: string });
-  assert.deepEqual(
-    merged.map((entry) => entry.task).sort(),
-    ["T-LOCAL", "T-REMOTE"],
-    "the node snapshot folded into this machine's global ledger",
-  );
-  assert.deepEqual(merged.map((entry) => entry.seq), merged.map((_, index) => index + 1), "seq re-indexed strictly monotonic 1..N");
+  assert.deepEqual(factory.ledger.events.filter((event) => event.event === "contract_set").map((event) => event.task), ["T-LOCAL"]);
+  assert.equal(factory.history.status()[0]?.status, "conflicted", "legacy histories need explicit migration before admission");
+  assert.equal(reply.historyImports?.[0]?.status, "pending", "transport completion reports staging before the outer operation drains");
+
 });
 
 test("vault.push: packages the runtime tree plus this node's ledger snapshot, commits and pushes through the handlers", async (t) => {

@@ -65,6 +65,8 @@ import {
   vaultHydrate,
   vaultImport,
   vaultPull,
+  historyImport,
+  historyImports,
   vaultPush,
   vaultSync,
 } from "../shared/rpc.ts";
@@ -908,7 +910,13 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     return { ok: true as const, agentId: agent.id };
   };
 
-  return {
+  const handlers = {
+    async historyImport(input: { project?: string; sources?: import("./core/history-import.ts").HistoryImportSource[] }) {
+      if (input.sources !== undefined) { if (input.project !== undefined) deps.factory.history.stageForProject(input.project, input.sources); else deps.factory.history.stage(input.sources); }
+      else deps.factory.history.drain();
+      return { ok: true as const, imports: deps.factory.history.allStatus() };
+    },
+    async historyImports() { return { ok: true as const, imports: deps.factory.history.allStatus() }; },
     cachedProviders(): readonly ProviderEntry[] {
       return cachedProviderList ?? [];
     },
@@ -926,7 +934,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       if (!lanes.ok) return failure("lanes-unreadable", lanes.reason);
       const daemon = resolveDaemon(context);
       const bound = agentTaskIndex();
-      const allEvents = deps.factory.ledger.events;
+      const allEvents = [...deps.factory.ledger.events];
 
       let rawAgents: SurfaceAgentSnapshot[] = [];
       let providers: ProviderEntry[] = [];
@@ -1297,7 +1305,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       const bound = agentTaskIndex();
       let rawAgents: SurfaceAgentSnapshot[] = [];
       try {
-        const page = await daemon.agents.list({ filter: { includeArchived: false } });
+      const page = await daemon.agents.list({ filter: { includeArchived: false } });
         rawAgents = page.entries.map((entry) => entry.agent).filter((agent) => agent.archivedAt === null);
       } catch {
         // best-effort agent listing
@@ -1397,7 +1405,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       // when neither the keep set (the still-live Supervisor/Lead workspace —
       // seats retire at step 5, after this sweep) nor a live agent holds it.
       try {
-        const sets = await resolveSweepWorkspaceSets(daemon, project);
+      const sets = await resolveSweepWorkspaceSets(daemon, project);
         const swept = await (deps.cleanupDaemonWorkspaces ?? cleanupDaemonWorkspacesAndProjectsViaWs)(deps.home, {
           worktreesDir,
           ...(sets === null ? {} : { projectRoot: project.root, keepWorkspaceIds: sets.keepWorkspaceIds, activeWorkspaceIds: sets.activeWorkspaceIds }),
@@ -1727,7 +1735,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     async vaultHydrate(
       input: { repo?: string; ref?: string },
       _context?: SurfaceCallContext,
-    ): Promise<{ ok: true; vault: VaultStatusView; hydratedFiles: string[]; summary: string } | { ok: false; code: string; error: string }> {
+    ): Promise<{ ok: true; vault: VaultStatusView; hydratedFiles: string[]; summary: string; historyImports?: import("./core/history-stage.ts").ImportStatus[] } | { ok: false; code: string; error: string }> {
       try {
         const result = await hydrateVaultDirect(deps.home, {
           ...(input.repo === undefined ? {} : { repo: input.repo }),
@@ -1737,7 +1745,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         const vault = await vaultStatusOf();
         const summary = `Direct hydrate unpacked ${result.hydratedFiles.length} file(s) from ${vault.repo ?? input.repo ?? "vault"}.`;
         log(`vault: direct hydrate wrote ${result.hydratedFiles.length} files from the gh api tarball stream (no clone left behind)`);
-        return { ok: true as const, vault, hydratedFiles: result.hydratedFiles, summary };
+        return { ok: true as const, vault, hydratedFiles: result.hydratedFiles, summary, historyImports: result.historyImports };
       } catch (err) {
         return failure(codeOf(err), messageOf(err));
       }
@@ -1746,16 +1754,16 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     async vaultPull(
       input: { mergeLedgers?: boolean },
       _context?: SurfaceCallContext,
-    ): Promise<{ ok: true; vault: VaultStatusView; hydratedFiles: string[]; summary: string } | { ok: false; code: string; error: string }> {
+    ): Promise<{ ok: true; vault: VaultStatusView; hydratedFiles: string[]; summary: string; historyImports?: import("./core/history-stage.ts").ImportStatus[] } | { ok: false; code: string; error: string }> {
       try {
         const result = await pullVault(deps.home, {
           ...(input.mergeLedgers === undefined ? {} : { mergeLedgers: input.mergeLedgers }),
           ...vaultRunnerOptions(),
         });
         const vault = await vaultStatusOf();
-        const summary = `Pulled and hydrated ${result.hydratedFiles.length} file(s) from ${vault.repo ?? "vault"}${input.mergeLedgers === true ? " (ledgers reconciled)" : ""}.`;
-        log(`vault: sync pull hydrated ${result.hydratedFiles.length} files from the cached checkout${input.mergeLedgers === true ? " and reconciled node ledgers" : ""}`);
-        return { ok: true as const, vault, hydratedFiles: result.hydratedFiles, summary };
+        const summary = `Pulled and hydrated ${result.hydratedFiles.length} file(s) from ${vault.repo ?? "vault"}${input.mergeLedgers === true ? " (history staged for writer admission)" : ""}.`;
+        log(`vault: sync pull hydrated ${result.hydratedFiles.length} files from the cached checkout${input.mergeLedgers === true ? " and staged node history" : ""}`);
+        return { ok: true as const, vault, hydratedFiles: result.hydratedFiles, summary, historyImports: result.historyImports };
       } catch (err) {
         return failure(codeOf(err), messageOf(err));
       }
@@ -1835,6 +1843,16 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       }
     },
   };
+  const reads = new Set(["cachedProviders", "sanitizeLane", "snapshot", "taskDetail", "pluginsCheckUpdates", "historyImport", "historyImports"]);
+  const wrappers = new Map<PropertyKey, unknown>();
+  return new Proxy(handlers, {
+    get(target, key, receiver) {
+      const value = Reflect.get(target, key, receiver);
+      if (typeof key !== "string" || typeof value !== "function" || reads.has(key)) return value;
+      if (!wrappers.has(key)) wrappers.set(key, (...args: unknown[]) => key === "projectReset" && !deps.factory.history.maintenanceActive ? deps.factory.history.withExclusiveMaintenance(() => value.apply(receiver, args)) : deps.factory.history.runOperation(() => value.apply(receiver, args), { newWork: true }));
+      return wrappers.get(key);
+    },
+  });
 }
 
 // ---- the server wiring --------------------------------------------------------------------
@@ -1877,6 +1895,8 @@ export function registerSurfaceRpc(
   server.handle(pluginsCheckUpdates, (input, context) => handlers.pluginsCheckUpdates(input, pass(context)));
   server.handle(vaultConfigure, (input, context) => handlers.vaultConfigure(input, pass(context)));
   server.handle(vaultHydrate, (input, context) => handlers.vaultHydrate(input, pass(context)));
+  server.handle(historyImport, (input) => handlers.historyImport(input));
+  server.handle(historyImports, () => handlers.historyImports());
   server.handle(vaultPull, (input, context) => handlers.vaultPull(input, pass(context)));
   server.handle(vaultPush, (input, context) => handlers.vaultPush(input, pass(context)));
   server.handle(vaultSync, (input, context) => handlers.vaultSync(input, pass(context)));

@@ -16,6 +16,8 @@ import { FactoryViewSchema, LaneNameSchema, TaskDetailViewSchema, VaultStatusVie
 /** Every handler's refusal shape: a stable machine code plus the human sentence. */
 export const Failure = z.object({ ok: z.literal(false), code: z.string(), error: z.string() });
 
+export const ImportStatusSchema = z.object({ id: z.string(), target: z.string(), status: z.enum(["staged", "pending", "applied", "conflicted"]), added: z.number().optional(), duplicates: z.number().optional(), conflicts: z.array(z.object({ reason: z.string(), sourceId: z.string().optional(), eventId: z.string().optional() })).optional(), diagnostics: z.array(z.string()) });
+
 export const snapshot = defineRpc({
   name: "factory.snapshot",
   input: z.object({
@@ -266,7 +268,7 @@ export const vaultHydrate = defineRpc({
     /** The tarball ref — omitted uses the configured branch. */
     ref: z.string().optional(),
   }),
-  output: z.union([z.object({ ok: z.literal(true), vault: VaultStatusViewSchema, hydratedFiles: z.array(z.string()), summary: z.string() }), Failure]),
+  output: z.union([z.object({ ok: z.literal(true), vault: VaultStatusViewSchema, hydratedFiles: z.array(z.string()), summary: z.string(), historyImports: z.array(ImportStatusSchema).optional() }), Failure]),
 });
 
 export const vaultPull = defineRpc({
@@ -275,7 +277,7 @@ export const vaultPull = defineRpc({
     /** Reconcile the vault's `state/nodes/*` ledger snapshots into this machine's ledgers after hydrating. */
     mergeLedgers: z.boolean().optional(),
   }),
-  output: z.union([z.object({ ok: z.literal(true), vault: VaultStatusViewSchema, hydratedFiles: z.array(z.string()), summary: z.string() }), Failure]),
+  output: z.union([z.object({ ok: z.literal(true), vault: VaultStatusViewSchema, hydratedFiles: z.array(z.string()), summary: z.string(), historyImports: z.array(ImportStatusSchema).optional() }), Failure]),
 });
 
 export const vaultPush = defineRpc({
@@ -339,3 +341,7 @@ export const vaultImport = defineRpc({
     Failure,
   ]),
 });
+
+
+export const historyImport = defineRpc({ name: "factory.history.import", input: z.object({ project: z.string().optional(), sources: z.array(z.object({ nodeId: z.string(), lines: z.string() })).optional() }), output: z.object({ ok: z.literal(true), imports: z.array(ImportStatusSchema) }) });
+export const historyImports = defineRpc({ name: "factory.history.imports", input: z.object({}), output: z.object({ ok: z.literal(true), imports: z.array(ImportStatusSchema) }) });

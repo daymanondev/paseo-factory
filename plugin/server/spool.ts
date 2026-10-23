@@ -33,6 +33,8 @@ import { listProjectRegistrations, readProjectRegistration, resolveProject, writ
 import { FACTORY_SEAT_PROVIDER_IDS, formatPeerAgentTitle, formatPeerWorkspaceTitle } from "./roles.ts";
 import { acceptanceSummary, executeAcceptance } from "./commands.ts";
 import type { SurfaceDaemonApi } from "./surface-rpc.ts";
+import type { HistoryImportSource } from "./core/history-import.ts";
+import type { ImportStatus } from "./core/history-stage.ts";
 
 /** Seat identity stamped from `PASEO_FACTORY_SEAT` (v0.0.23, ADR 0015 §1). */
 export type SpoolSeat = "supervisor" | "lead" | "agent";
@@ -333,6 +335,7 @@ export interface AskRequest {
 }
 
 export type SpoolRequest =
+  | { id: string; kind: "history_import" | "history_import_status"; sources?: HistoryImportSource[]; project?: string; submitter?: string; seat?: SpoolSeat }
   | ContractRequest
   | ClaimRequest
   | AcceptRequest
@@ -422,6 +425,7 @@ export type SpoolReply =
       removedFiles?: number;
       archivedSeats?: string[];
       archivedAgents?: string[];
+      historyImports?: ImportStatus[];
     }
   | { id: string; ok: false; code: string; message: string; event?: LedgerEvent };
 
@@ -494,6 +498,11 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
   const submitterParsed = parseOptionalSubmitter(req.submitter);
   if (!submitterParsed.ok) return undefined;
   const submitterField = submitterParsed.submitter === undefined ? {} : { submitter: submitterParsed.submitter };
+  if (req.kind === "history_import" || req.kind === "history_import_status") {
+    if (req.project !== undefined && typeof req.project !== "string") return undefined;
+    if (req.sources !== undefined && (!Array.isArray(req.sources) || req.sources.some((source: unknown) => typeof source !== "object" || source === null || typeof (source as Record<string, unknown>).nodeId !== "string" || typeof (source as Record<string, unknown>).lines !== "string"))) return undefined;
+    return { id: req.id, kind: req.kind, ...(req.project === undefined ? {} : { project: req.project }), ...(req.sources === undefined ? {} : { sources: req.sources as HistoryImportSource[] }), ...seatField, ...submitterField };
+  }
   if (req.kind === "contract") {
     if (typeof req.task !== "string" || typeof req.workspace !== "string" || typeof req.gate !== "string" || typeof req.artifact !== "string") {
       return undefined;
@@ -883,10 +892,25 @@ export async function handleSpoolRequest(
   request: SpoolRequest,
   deps: SpoolDeps = {},
 ): Promise<SpoolReply> {
+  if (request.kind === "history_import" || request.kind === "history_import_status") return handleAdmittedSpoolRequest(factory, request, deps);
+  if (request.kind === "reset" && !factory.history.maintenanceActive) return factory.history.withExclusiveMaintenance(() => handleAdmittedSpoolRequest(factory, request, deps));
+  return factory.history.runOperation(() => handleAdmittedSpoolRequest(factory, request, deps), { newWork: !["ask", "meter", "repoke", "respawn", "needs_human"].includes(request.kind) });
+}
+
+async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolRequest, deps: SpoolDeps): Promise<SpoolReply> {
   const { ask: askHandler, leadRotate: leadRotateHandler, leadDispatch: leadDispatchHandler, peerMail: peerMailHook, supervisorDispatch: supervisorDispatchHandler, supervisorReport: supervisorReportHandler, daemon, projectReset: projectResetHandler, sanitizeLane, home } = deps;
   const resolvedDaemon = resolveDaemonArg(daemon);
   try {
     const effectiveSeat = await resolveEffectiveSeat(factory, resolvedDaemon, request);
+    if (request.kind === "history_import" || request.kind === "history_import_status") {
+      if (effectiveSeat === "agent" || effectiveSeat === "lead") return { id: request.id, ok: false, code: "seat-cannot-import", message: "History admission requires Owner authority" };
+      if (request.kind === "history_import" && request.sources !== undefined) {
+        if (request.project === undefined) factory.history.stage(request.sources);
+        else factory.history.stageForProject(request.project, request.sources);
+      }
+      else factory.history.drain();
+      return { id: request.id, ok: true, summary: "Ledger import admission status", historyImports: factory.history.allStatus() };
+    }
     // Hard Spool Command Authority by Seat (v0.0.23, ADR 0015 §1; v0.0.24, ADR 0015 §6).
     if (
       request.kind === "reset" &&
@@ -1368,6 +1392,7 @@ export async function handleSpoolRequest(
     // runs before the line records, and the reply carries the outcome. The
     // `--by` seat, when the request claims one, overrides the submitter
     // stamp; the Lead's conditional authority is judged below in the factory.
+    if (request.kind !== "accept") return { id: request.id, ok: false, code: "bad-request", message: "unsupported Factory command" };
     const acceptedBy = request.by ?? request.submitter;
     const accepted = await executeAcceptance(factory, { task: request.task, attempt: request.attempt, accepted_by: acceptedBy }, { authority: effectiveSeat ?? (request.by === "lead" ? "lead" : "owner"), daemon: resolvedDaemon, home });
     return {
@@ -1497,6 +1522,7 @@ export function startSpool(stateDir: string, factory: Factory, options: SpoolOpt
   };
 
   const drain = (): void => {
+    if (factory.history.maintenanceActive) return;
     for (const name of readdirSync(requestsDir).sort()) {
       if (!name.endsWith(".json")) continue;
       const id = name.slice(0, -".json".length);
@@ -1546,12 +1572,12 @@ export function startSpool(stateDir: string, factory: Factory, options: SpoolOpt
         options,
       )
         .catch(() => {})
-        .finally(() => {
+        .finally(async () => {
           inFlight.delete(id);
           if (semanticKey !== undefined && inFlightSemanticKeys.get(semanticKey) === id) {
             inFlightSemanticKeys.delete(semanticKey);
           }
-          settleDuplicateMirrors(id, replyPath);
+          await factory.history.runOperation(() => settleDuplicateMirrors(id, replyPath));
         });
     }
   };
@@ -1567,7 +1593,7 @@ export function startSpool(stateDir: string, factory: Factory, options: SpoolOpt
 
 export const startSpoolWatcher = startSpool;
 
-async function handleRequestFile(
+async function handleAdmittedRequestFile(
   id: string,
   requestPath: string,
   replyPath: string,
@@ -1607,4 +1633,12 @@ function writeJsonAtomic(path: string, value: unknown): void {
   const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
   writeFileSync(tmp, `${JSON.stringify(value)}\n`);
   renameSync(tmp, path);
+}
+
+async function handleRequestFile(id: string, requestPath: string, replyPath: string, processedPath: string, factory: Factory, log: (message: string) => void, deps: SpoolDeps): Promise<void> {
+  let kind = "";
+  try { kind = String(JSON.parse(readFileSync(requestPath, "utf8")).kind); } catch { /* malformed requests still receive a reply */ }
+  const work = () => handleAdmittedRequestFile(id, requestPath, replyPath, processedPath, factory, log, deps);
+  if (kind === "reset") await factory.history.withExclusiveMaintenance(work);
+  else await factory.history.runOperation(work, { newWork: !["ask", "meter", "repoke", "respawn", "needs_human", "history_import", "history_import_status", ""].includes(kind) });
 }

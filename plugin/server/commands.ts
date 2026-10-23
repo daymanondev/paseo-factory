@@ -19,9 +19,11 @@ export async function executeAcceptance(
     cleanup?: typeof cleanupDaemonWorkspacesAndProjectsViaWs;
   },
 ) {
-  const event = await factory.accept({ ...input, authority: deps.authority });
-  await archiveAcceptedTaskWorkspace(factory, deps.daemon, input.task, deps.home, deps.cleanup);
-  return event;
+  return factory.history.runOperation(async () => {
+    const event = await factory.accept({ ...input, authority: deps.authority });
+    await archiveAcceptedTaskWorkspace(factory, deps.daemon, input.task, deps.home, deps.cleanup);
+    return event;
+  }, { newWork: true });
 }
 
 /**

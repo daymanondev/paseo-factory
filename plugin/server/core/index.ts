@@ -13,6 +13,9 @@ export { resolveClaimedCommit, checkCleanAt, diffBetween, changedFiles, scopeCov
 export type { CommitResolution, TreeCheck, LandingResult, PrepareTaskWorktreeOptions, PrepareTaskWorktreeResult } from "./workspace.ts";
 export { Ledger, usageIsValid, isValidLedgerEvent, parseLedgerJsonl } from "./ledger.ts";
 export { readLedgerEvents } from "./ledger-read.ts";
+export { stageLedgerImport, readLedgerImports } from "./history-stage.ts";
+export type { ImportStatus } from "./history-stage.ts";
+export { LedgerAdmission } from "./history-admission.ts";
 export { runGate } from "./gate.ts";
 export type { GateInput, GateResult } from "./gate.ts";
 export { eyeConfigPath, isEyeLaneUsable, loadEyeConfig, resolveEyeLane, runFreshEyesPass, tailWithMarker, parseEyeAnswer } from "./fresh-eyes.ts";

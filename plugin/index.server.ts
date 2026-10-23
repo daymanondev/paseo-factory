@@ -59,6 +59,7 @@ export default function contribute(server: PluginServerContext) {
   // fails the plugin loudly) and closes attempts interrupted by a previous
   // lifetime: red, reported, and logged, never silently dropped (ADR 0003).
   const factory = createFactory({ stateDir, fetchTimeline });
+  factory.history.start();
   for (const { task, attempt } of factory.recoveredAttempts) {
     log(`recovered on open: attempt ${attempt} of task ${task} closed red — interrupted by a restart`);
   }
@@ -124,7 +125,7 @@ export default function contribute(server: PluginServerContext) {
     capturePaseo(context);
     void choke.onPermissionAsked(event, context.paseo);
   });
-  const offAgentCreate = server.before("agent.create", ({ request }, context) => {
+  const offAgentCreate = server.before("agent.create", ({ request }, context) => factory.history.runOperation(() => {
     capturePaseo(context);
     let next = request;
     const normalized = normalizeAgentCreateRequest(next, { stateDir, providers: surface.cachedProviders() });
@@ -150,7 +151,7 @@ export default function contribute(server: PluginServerContext) {
     }
     const candidate = injected === undefined ? (next === request ? undefined : next) : injected;
     return candidate === undefined ? undefined : sanitizeAgentCreateHookResult(candidate);
-  });
+  }));
 
   // The Factory surface's RPC handlers (v0.0.13, ADR 0009 §4): every
   // `factory.*` call runs in-process against this same single Factory
@@ -278,7 +279,7 @@ export default function contribute(server: PluginServerContext) {
 
   const gitBlocks = startGitBlockIngestion(factory, { onLog: log });
 
-  const offSessionOpen = server.before("agent.session_open", ({ request }, context) => {
+  const offSessionOpen = server.before("agent.session_open", ({ request }, context) => factory.history.runOperation(() => {
     capturePaseo(context);
     let next = request;
     if (pluginDir !== undefined) {
@@ -301,7 +302,7 @@ export default function contribute(server: PluginServerContext) {
       void surface.sweepProjectWorkspaces({ projectRoot: next.cwd });
     }
     return withEnv === undefined ? (next === request ? undefined : next) : withEnv;
-  });
+  }));
 
   return () => {
     clearTimeout(warmupTimer);
@@ -312,6 +313,7 @@ export default function contribute(server: PluginServerContext) {
     gitBlocks.stop();
     spool.stop();
     leadMail.stop();
+    factory.history.stop();
     log(`down v${SHELL_VERSION}`);
   };
 }
