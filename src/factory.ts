@@ -790,7 +790,7 @@ export function createFactory(options: FactoryOptions): Factory {
         throw new FactoryError("unknown-attempt", `task ${task} has no attempt ${attempt}`);
       }
       const priorAccept = acceptedAttempt(fullHistory);
-      if (priorAccept !== undefined) {
+      if (priorAccept !== undefined && priorAccept.landing !== "pending-conflict") {
         throw new FactoryError(
           "already-accepted",
           `task ${task} was already accepted at attempt ${priorAccept.attempt}; the ledger is append-only`,
@@ -839,6 +839,7 @@ export function createFactory(options: FactoryOptions): Factory {
           projectRoot: contract.workspace,
           worktree,
           claimedCommit: gate.sha,
+          ...(priorAccept?.landing === "pending-conflict" ? { retry: true } : {}),
           ...(contract.base === undefined ? {} : { base: contract.base }),
           branch: `factory/${task}`,
         });

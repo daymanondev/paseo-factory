@@ -233,7 +233,7 @@ test("the core barrel's prepareTaskWorktree: symlinked node_modules and .worktre
   assert.equal(project.ok, true, "the fixture workspace is a git Project");
 
   // The core allocation (v0.0.18): companion-facing options on the proven driver behavior.
-  const prepared = prepareTaskWorktree({ stateDir, workspace, task: "COREWT1", base, symlinkNodeModules: true });
+  const prepared = prepareTaskWorktree({ stateDir, workspace, task: "COREWT1", base });
   assert.ok(prepared.ok, prepared.ok ? "" : prepared.reason);
   if (!prepared.ok) return;
   assert.equal(prepared.path, join(stateDir, "projects", project.ok ? project.slug : "", "worktrees", "COREWT1"));
