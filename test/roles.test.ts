@@ -2,11 +2,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { renderRoleAppendSystem, renderRoleContract, renderSeatBootstrapPrompt } from "../src/roles-contract.ts";
 import { ROLE_PROMPTS } from "../src/pi-home.ts";
 import { CorrelationRegistry } from "../src/correlations.ts";
-import { readProjectRegistration, resolveProject } from "../plugin/server/core/project.ts";
+import { ensureGitRepository, readProjectRegistration, resolveOrBootstrapProject, resolveProject } from "../plugin/server/core/project.ts";
 import { writeProjectRegistration } from "../plugin/server/projects.ts";
 import {
   applyProviderExecutionFence,
@@ -794,3 +795,149 @@ test("CJS bundle regression: ensureFactoryBinScripts, injectRoleOnCreate, and in
   assert.ok(opened);
   assert.equal(existsSync(join(stateDir2, "bin", "bridge.mjs")), true, "injectSessionEnv in CJS mode materializes bridge.mjs on disk");
 });
+
+test("resolveOrBootstrapProject / ensureGitRepository: initializes Git and creates an initial empty commit on non-Git or unborn directories while refusing unsafe or missing paths (v0.0.35, ADR 0024)", (t) => {
+  const dir = makeTempDir("bootstrap-git-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const userHome = join(dir, "user-home");
+  mkdirSync(stateDir, { recursive: true });
+  mkdirSync(userHome, { recursive: true });
+
+  // 1. Plain existing directory without .git -> initializes git + initial empty commit
+  const plainDir = join(dir, "greenfield-app");
+  mkdirSync(plainDir, { recursive: true });
+  assert.equal(resolveProject(plainDir).ok, false, "plain directory is not yet a git repository");
+
+  const bootstrapped = resolveOrBootstrapProject(plainDir, { stateDir, userHome });
+  assert.equal(bootstrapped.ok, true, "greenfield directory is bootstrapped into a Git repository");
+  if (bootstrapped.ok) {
+    assert.equal(bootstrapped.bootstrapped, true);
+    assert.match(bootstrapped.slug, /^greenfield-app-[0-9a-f]{6}$/);
+    const headSha = execFileSync("git", ["rev-parse", "--verify", "HEAD"], { cwd: plainDir, encoding: "utf8" }).trim();
+    assert.match(headSha, /^[0-9a-f]{40}$/, "HEAD resolves to an initial commit so per-Task worktrees work immediately");
+    const subject = execFileSync("git", ["log", "-1", "--pretty=%s"], { cwd: plainDir, encoding: "utf8" }).trim();
+    assert.equal(subject, "chore: initialize repository");
+  }
+
+  // Subsequent call on already-initialized repo returns bootstrapped: false without adding commits
+  const headBefore = execFileSync("git", ["rev-parse", "HEAD"], { cwd: plainDir, encoding: "utf8" }).trim();
+  const second = ensureGitRepository(plainDir, { stateDir, userHome });
+  assert.equal(second.ok, true);
+  if (second.ok) {
+    assert.equal(second.bootstrapped, false);
+    const headAfter = execFileSync("git", ["rev-parse", "HEAD"], { cwd: plainDir, encoding: "utf8" }).trim();
+    assert.equal(headAfter, headBefore, "existing HEAD commit is preserved untouched");
+  }
+
+  // 2. Unborn git repository (git init ran, but 0 commits so HEAD does not exist) -> creates initial empty commit
+  const unbornDir = join(dir, "unborn-app");
+  mkdirSync(unbornDir, { recursive: true });
+  execFileSync("git", ["init"], { cwd: unbornDir });
+  const unbornRes = resolveOrBootstrapProject(unbornDir, { stateDir, userHome });
+  assert.equal(unbornRes.ok, true);
+  if (unbornRes.ok) {
+    assert.equal(unbornRes.bootstrapped, true);
+    const headSha = execFileSync("git", ["rev-parse", "--verify", "HEAD"], { cwd: unbornDir, encoding: "utf8" }).trim();
+    assert.match(headSha, /^[0-9a-f]{40}$/);
+  }
+
+  // 3. Safety guards: refuses non-existent directory, '/', os.homedir(), userHome, and paths inside stateDir
+  const missingRes = resolveOrBootstrapProject(join(dir, "does-not-exist"), { stateDir, userHome });
+  assert.equal(missingRes.ok, false);
+  if (!missingRes.ok) assert.equal(missingRes.code, "missing-directory");
+
+  const rootRes = resolveOrBootstrapProject("/", { stateDir, userHome });
+  assert.equal(rootRes.ok, false);
+  if (!rootRes.ok) assert.equal(rootRes.code, "unsafe-directory");
+
+  const osHomeRes = resolveOrBootstrapProject(homedir(), { stateDir, userHome });
+  assert.equal(osHomeRes.ok, false);
+  if (!osHomeRes.ok) assert.equal(osHomeRes.code, "unsafe-directory");
+
+  const userHomeRes = resolveOrBootstrapProject(userHome, { stateDir, userHome });
+  assert.equal(userHomeRes.ok, false);
+  if (!userHomeRes.ok) assert.equal(userHomeRes.code, "unsafe-directory");
+
+  const stateSubdir = join(stateDir, "projects", "foo");
+  mkdirSync(stateSubdir, { recursive: true });
+  const stateRes = resolveOrBootstrapProject(stateSubdir, { stateDir, userHome });
+  assert.equal(stateRes.ok, false);
+  if (!stateRes.ok) assert.equal(stateRes.code, "unsafe-directory");
+});
+
+test("injectRoleOnCreate and injectSessionEnv: starting Supervisor (Factory) or Lead (Factory) in a greenfield non-Git folder bootstraps Git, injects role contract & MCP, and registers the Project (v0.0.35, ADR 0024)", (t) => {
+  const dir = makeTempDir("roles-greenfield-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const userHome = join(dir, "user-home");
+  mkdirSync(stateDir, { recursive: true });
+  mkdirSync(userHome, { recursive: true });
+
+  // 1. Create a brand-new folder without .git and invoke injectRoleOnCreate for factory-supervisor
+  const greenfieldSupDir = join(dir, "new-workspace-sup");
+  mkdirSync(greenfieldSupDir, { recursive: true });
+  assert.equal(existsSync(join(greenfieldSupDir, ".git")), false);
+
+  const supInjected = injectRoleOnCreate<AgentCreateRequest>(
+    {
+      config: {
+        provider: "factory-supervisor",
+        cwd: greenfieldSupDir,
+        title: "Build a todo app",
+      },
+    },
+    stateDir,
+    userHome,
+  );
+  assert.ok(supInjected !== undefined, "injectRoleOnCreate succeeds on a greenfield non-Git folder for factory-supervisor");
+  assert.equal(existsSync(join(greenfieldSupDir, ".git")), true, ".git was automatically initialized");
+  const headSha = execFileSync("git", ["rev-parse", "--verify", "HEAD"], { cwd: greenfieldSupDir, encoding: "utf8" }).trim();
+  assert.match(headSha, /^[0-9a-f]{40}$/, "initial empty commit was created so HEAD resolves");
+  assert.equal(supInjected.config.title, SEAT_TITLES.supervisor);
+  assert.match(supInjected.config.systemPrompt ?? "", /Supervisor seat of the paseo-factory/);
+  assert.ok((supInjected.config.mcpServers as Record<string, unknown>)?.paseo_factory !== undefined, "paseo_factory MCP server injected");
+  const slug = supInjected.env?.PASEO_FACTORY_PROJECT ?? "";
+  assert.match(slug, /^new-workspace-sup-[0-9a-f]{6}$/);
+  const reg = readProjectRegistration(stateDir, slug);
+  assert.ok(reg !== undefined, "project registration written to <stateDir>/projects/<slug>/project.json");
+  assert.equal(reg.root, resolveProject(greenfieldSupDir).ok ? (resolveProject(greenfieldSupDir) as { ok: true; root: string }).root : "");
+
+  // 2. Also verify factory-lead on a greenfield non-Git folder via injectSessionEnv directly
+  const greenfieldLeadDir = join(dir, "new-workspace-lead");
+  mkdirSync(greenfieldLeadDir, { recursive: true });
+  const leadEnv: Record<string, string> = {};
+  const leadOpened = injectSessionEnv(
+    {
+      agentId: "lead-green-1",
+      cwd: greenfieldLeadDir,
+      provider: "factory-lead",
+      env: leadEnv,
+      workspaceId: "wks_lead_green",
+    },
+    stateDir,
+    userHome,
+  );
+  assert.ok(leadOpened !== undefined, "injectSessionEnv succeeds on a greenfield non-Git folder for factory-lead");
+  const leadSlug = leadOpened.env.PASEO_FACTORY_PROJECT ?? "";
+  assert.match(leadSlug, /^new-workspace-lead-[0-9a-f]{6}$/);
+  assert.equal(readProjectRegistration(stateDir, leadSlug)?.lead, "lead-green-1");
+  assert.equal(readProjectRegistration(stateDir, leadSlug)?.workspaceId, "wks_lead_green");
+
+  // 3. Refuses to bootstrap userHome or '/' when starting a seat there
+  const refusedHome = injectRoleOnCreate(
+    {
+      config: {
+        provider: "factory-supervisor",
+        cwd: userHome,
+        title: "Accidental home launch",
+      },
+    },
+    stateDir,
+    userHome,
+  );
+  assert.equal(refusedHome, undefined, "refuses to initialize Git in userHome");
+  assert.equal(existsSync(join(userHome, ".git")), false);
+});
+
+

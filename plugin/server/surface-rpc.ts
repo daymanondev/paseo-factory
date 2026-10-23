@@ -24,16 +24,16 @@ export { acceptanceSummary, archiveAcceptedTaskWorkspace } from "./commands.ts";
  */
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readdirSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { FactoryError } from "./core/errors.ts";
 import type { Factory } from "./core/factory.ts";
 import { readLeadMailbox } from "./core/mailbox.ts";
 import { loadLanes, parseLane, saveLanes } from "./core/lanes.ts";
-import { listProjectRegistrations, projectStateDir, readProjectRegistration, resolveProject } from "./core/project.ts";
+import { ensureProjectRegistered, listProjectRegistrations, projectStateDir, readProjectRegistration, resolveOrBootstrapProject, resolveProject } from "./core/project.ts";
 import type { ProjectResolution } from "./core/project.ts";
 import { hydrateVaultDirect, importVaultSecrets, isLocalCompanionGitSource, loadVaultConfig, probeCompanionGitAccess, probeGhAuth, pullVault, pushVault, readVaultStatus, saveVaultConfig, syncVault } from "./core/vault.ts";
 import type { ImportVaultSecretsInput, SyncVaultOptions, VaultConfig, VaultRunner } from "./core/vault.ts";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { FACTORY_VIEW_VERSION } from "../shared/view.ts";
 import { foldRetro, foldTasks, foldView, readTailed } from "./view.ts";
 import { setAgentModelViaCli, setAgentThinkingViaCli, stopAgentViaCli } from "./daemon-cli.ts";
@@ -56,6 +56,7 @@ import {
   pluginsCheckUpdates,
   pluginsInstall,
   pluginsManage,
+  projectAdd,
   projectReset,
   ratifyProposal,
   retro,
@@ -529,10 +530,26 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   };
 
   /** One task's contract workspace sits inside the Project root (equal or nested). */
-  const taskInProject = (task: string, root: string): boolean => {
+  const taskInProject = (task: string, root: string, slug?: string): boolean => {
     const contract = deps.factory.contractFor(task);
     if (contract === undefined) return false;
-    return contract.workspace === root || contract.workspace.startsWith(`${root}/`);
+    const normRoot = realpathSafe(resolve(root));
+    const normWs = realpathSafe(resolve(contract.workspace));
+    if (
+      contract.workspace === root ||
+      contract.workspace.startsWith(`${root}/`) ||
+      normWs === normRoot ||
+      normWs.startsWith(`${normRoot}/`)
+    ) {
+      return true;
+    }
+    if (slug !== undefined) {
+      const worktreesDir = join(projectStateDir(deps.stateDir, slug), "worktrees");
+      if (contract.workspace === worktreesDir || contract.workspace.startsWith(`${worktreesDir}/`)) {
+        return true;
+      }
+    }
+    return false;
   };
 
   /**
@@ -935,9 +952,35 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
 
     async snapshot(input: { projectRoot?: string }, context?: SurfaceCallContext) {
       // An unresolvable scope degrades to the global view — the panel must
-      // render outside git repos; the seats-only acts refuse instead.
-      const resolved = input.projectRoot === undefined ? undefined : resolveProject(input.projectRoot);
-      const project: ProjectView | null = resolved !== undefined && resolved.ok ? { slug: resolved.slug, root: resolved.root } : null;
+      // render outside git repos; the seats-only acts refuse instead. When a
+      // registered Project's directory was deleted on disk (v0.0.35, ADR 0024),
+      // reconstruct its identity from `<stateDir>/projects/<slug>/project.json`
+      // with `missingRoot: true` rather than snapping back to `All projects`.
+      let project: ProjectView | null = null;
+      if (input.projectRoot !== undefined && input.projectRoot.trim() !== "") {
+        const rawRoot = input.projectRoot.trim();
+        const resolved = resolveProject(rawRoot);
+        if (resolved.ok) {
+          project = { slug: resolved.slug, root: resolved.root };
+        } else {
+          const normInput = realpathSafe(resolve(rawRoot));
+          const matched = listProjectRegistrations(deps.stateDir).find(
+            (reg) =>
+              reg.root === rawRoot ||
+              resolve(reg.root) === resolve(rawRoot) ||
+              realpathSafe(resolve(reg.root)) === normInput ||
+              reg.slug === rawRoot,
+          );
+          if (matched !== undefined) {
+            const missing = !existsSync(matched.root);
+            project = {
+              slug: matched.slug,
+              root: matched.root,
+              ...(missing ? { missingRoot: true } : {}),
+            };
+          }
+        }
+      }
       const lanes = loadLanes(deps.stateDir, project?.slug);
       if (!lanes.ok) return failure("lanes-unreadable", lanes.reason);
       const daemon = resolveDaemon(context);
@@ -956,7 +999,10 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           const byLabels = rawAgents.find(
             (agent) => agent.labels.seat === seat && (project === null || agent.labels.project === project.slug),
           );
-          if (byLabels !== undefined || project === null) return byLabels;
+          if (byLabels !== undefined) return byLabels;
+          if (project === null) {
+            return rawAgents.find((agent) => inferRoleFromProviderId(agent.provider) === seat);
+          }
           // The native-picker seat (ADR 0017 §2): unlabeled, but bound in
           // `project.json` or running under its `factory-*` role provider.
           return seatAgentByIdentity(rawAgents, project.slug, seat);
@@ -988,11 +1034,18 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       // inside the project root. Unscoped, every seat and bound worker shows
       // (the global surface shows seats, not a census — strangers stay out).
       const inScope = (agent: SurfaceAgentSnapshot): boolean => {
-        if (project === null) return agent.labels.seat !== undefined || bound.has(agent.id);
+        if (project === null) {
+          return (
+            agent.labels.seat !== undefined ||
+            inferRoleFromProviderId(agent.provider) === "supervisor" ||
+            inferRoleFromProviderId(agent.provider) === "lead" ||
+            bound.has(agent.id)
+          );
+        }
         if (agent.labels.seat !== undefined) return agent.labels.project === project.slug;
         if (supervisorRaw?.id === agent.id || leadRaw?.id === agent.id) return true; // the native-picker seat renders its live state (ADR 0017 §2)
         const task = bound.get(agent.id);
-        return task !== undefined && taskInProject(task, project.root);
+        return task !== undefined && taskInProject(task, project.root, project.slug);
       };
       const relevant = rawAgents.filter(inScope).slice(0, SEQ_END_CAP);
       const agents: AgentView[] = [];
@@ -1006,12 +1059,17 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       const events =
         project === null
           ? allEvents
-          : allEvents.filter((evt) => !("task" in evt) || (typeof evt.task === "string" && taskInProject(evt.task, project.root)));
+          : allEvents.filter((evt) => !("task" in evt) || (typeof evt.task === "string" && taskInProject(evt.task, project.root, project.slug)));
       const projects = discoverProjects(
         deps.stateDir,
-        rawAgents.filter((agent) => agent.labels.seat !== undefined),
+        rawAgents.filter(
+          (agent) =>
+            agent.labels.seat !== undefined ||
+            inferRoleFromProviderId(agent.provider) === "supervisor" ||
+            inferRoleFromProviderId(agent.provider) === "lead",
+        ),
         deps.home,
-      ).filter((entry): entry is { slug: string; root: string } => entry.root !== null);
+      ).filter((entry): entry is { slug: string; root: string; missingRoot?: boolean } => entry.root !== null);
 
       const updateSnap = localUpdateSnapshot ?? getCachedPluginUpdateStatus(deps.home);
       const view = foldView({
@@ -1228,6 +1286,46 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       const project = projectOrRefusal(input.projectRoot);
       if (!project.ok) return;
       await sweepOrphanedLocalCheckoutWorkspaces(resolveDaemon(context), project);
+    },
+
+    /**
+     * Add or select a Project directory from the Factory surface (v0.0.35, ADR 0024):
+     * automatically bootstraps Git (`git init` + initial empty commit) when given an
+     * existing non-Git folder (or an unborn Git repo without `HEAD`), registers
+     * `<stateDir>/projects/<slug>/project.json`, and returns the scoped snapshot.
+     */
+    async projectAdd(
+      input: { projectRoot?: string; path?: string },
+      context?: SurfaceCallContext,
+    ) {
+      const rawPath = (input.projectRoot ?? input.path ?? "").trim();
+      if (rawPath === "") {
+        return failure("missing-directory", "project directory path cannot be empty");
+      }
+      const resolved = resolveOrBootstrapProject(rawPath, {
+        stateDir: deps.stateDir,
+        userHome: deps.home,
+      });
+      if (!resolved.ok) {
+        return failure(resolved.code, resolved.reason);
+      }
+      ensureProjectRegistered(deps.stateDir, resolved);
+      const snap = await this.snapshot({ projectRoot: resolved.root }, context);
+      const project: ProjectView = { slug: resolved.slug, root: resolved.root };
+      const summary = resolved.bootstrapped
+        ? `Initialized Git repository and added project ${resolved.name} (${resolved.slug}).`
+        : `Added project ${resolved.name} (${resolved.slug}).`;
+      log(`project.add: ${summary}`);
+      return {
+        ok: true as const,
+        path: resolved.root,
+        projectRoot: resolved.root,
+        slug: resolved.slug,
+        project,
+        bootstrapped: resolved.bootstrapped,
+        summary,
+        ...(snap.ok ? { view: snap.view } : {}),
+      };
     },
 
     /**
@@ -1903,6 +2001,7 @@ export function registerSurfaceRpc(
   server.handle(supervisorRevoke, (input, context) => handlers.supervisorRevoke(input, pass(context)));
   server.handle(leadEnsure, (input, context) => handlers.leadEnsure(input, pass(context)));
   server.handle(leadRotate, (input, context) => handlers.leadRotate(input, pass(context)));
+  server.handle(projectAdd, (input, context) => handlers.projectAdd(input, pass(context)));
   server.handle(projectReset, (input, context) => handlers.projectReset(input, pass(context)));
   server.handle(leadDispatch, (input, context) => handlers.leadDispatch(input, pass(context)));
   server.handle(ratifyProposal, (input, context) => handlers.ratifyProposal(input, pass(context)));

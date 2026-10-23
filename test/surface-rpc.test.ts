@@ -2,9 +2,10 @@ import { test } from "node:test";
 import type { TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
 import type { Duplex } from "node:stream";
-import { existsSync, chmodSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, chmodSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { basename, delimiter, dirname, join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { sealVaultBuffer } from "../src/index.ts";
@@ -4782,3 +4783,97 @@ test("v0.0.34 seam 1.5 — batch Update All orders paseo-factory last so Compani
   );
   assert.equal(res.summary, "updated factory-burn-lab (7f8a5cc → a91c3f2) · updated paseo-factory (0285a1c → 383385c)");
 });
+
+test("Seam 1.1: projectAdd bootstraps greenfield non-Git folders and discoverProjects / snapshot include live factory-supervisor & factory-lead Role-provider sessions even without labels.seat (v0.0.35, ADR 0024)", async (t) => {
+  const roleSupRepo = makeProject(t, "role-sup-repo");
+  const roleLeadRepo = makeProject(t, "role-lead-repo");
+  const { dir, home, stateDir, handlers } = makeSurface(t, [
+    // Live Role-provider sessions with NO labels.seat and NO labels.project
+    { id: "role-sup-1", provider: "factory-supervisor", title: "Supervisor", cwd: roleSupRepo.root, labels: {} },
+    { id: "role-lead-1", provider: "factory-lead", title: "Lead", cwd: roleLeadRepo.root, labels: {} },
+  ]);
+
+  // 1. projectAdd on a plain greenfield directory without .git
+  const greenfieldDir = join(dir, "greenfield-project");
+  mkdirSync(greenfieldDir, { recursive: true });
+  assert.equal(existsSync(join(greenfieldDir, ".git")), false);
+
+  const addRes = await handlers.projectAdd({ projectRoot: greenfieldDir });
+  assert.ok(addRes.ok, addRes.ok ? "" : addRes.error);
+  assert.equal(addRes.bootstrapped, true);
+  assert.equal(existsSync(join(greenfieldDir, ".git")), true, "projectAdd initialized .git");
+  const headSha = execFileSync("git", ["rev-parse", "--verify", "HEAD"], { cwd: greenfieldDir, encoding: "utf8" }).trim();
+  assert.match(headSha, /^[0-9a-f]{40}$/, "projectAdd created initial empty commit");
+  const reg = readProjectRegistration(stateDir, addRes.slug);
+  assert.ok(reg !== undefined, "projectAdd registered project.json in stateDir");
+  assert.equal(reg.root, addRes.projectRoot);
+  assert.equal(addRes.view?.project?.slug, addRes.slug);
+
+  // 2. Also seed a Paseo workspace in <home>/projects/projects.json (wrapped in { version, projects })
+  const paseoWsRepo = makeProject(t, "paseo-ws-repo");
+  mkdirSync(join(home, "projects"), { recursive: true });
+  writeFileSync(
+    join(home, "projects", "projects.json"),
+    JSON.stringify({
+      version: 1,
+      projects: [{ projectId: "p-ws-1", rootPath: paseoWsRepo.root, kind: "git", archivedAt: null }],
+    }),
+  );
+
+  // 3. Snapshot discovers the greenfield project, both unlabeled Role-provider seat projects, and the Paseo workspace
+  const snap = await handlers.snapshot({});
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  const discoveredSlugs = snap.view.projects.map((p) => p.slug);
+  assert.ok(discoveredSlugs.includes(addRes.slug), "greenfield project is in view.projects");
+  assert.ok(discoveredSlugs.includes(roleSupRepo.slug), "unlabeled factory-supervisor session's project is discovered");
+  assert.ok(discoveredSlugs.includes(roleLeadRepo.slug), "unlabeled factory-lead session's project is discovered");
+  assert.ok(discoveredSlugs.includes(paseoWsRepo.slug), "Paseo projects.json workspace is discovered");
+});
+
+test("Seam 1.2: deleting a registered Project's folder on disk marks it missingRoot: true and snapshot({ projectRoot }) resolves view.project from persisted registration instead of returning null (v0.0.35, ADR 0024)", async (t) => {
+  const deletedProject = makeProject(t, "deleted-finder-repo");
+  const liveProject = makeProject(t, "live-neighbor-repo");
+  const { stateDir, factory, handlers } = makeSurface(t);
+
+  // Register both projects, save a per-project lane override on deletedProject, and record an accepted task
+  writeProjectRegistration(stateDir, deletedProject.slug, { root: deletedProject.root });
+  writeProjectRegistration(stateDir, liveProject.slug, { root: liveProject.root });
+  saveLanes(stateDir, { supervisor: "claude/opus-4-8" }, deletedProject.slug);
+
+  seedGreenTask(factory, stateDir, "T-DEL-1", deletedProject.root);
+  factory.ledger.append({ event: "attempt_accepted", task: "T-DEL-1", attempt: 1, sha: "full0001", accepted_by: "owner" });
+  seedGreenTask(factory, stateDir, "T-LIVE-1", liveProject.root);
+
+  // Simulate the Owner deleting deletedProject's folder in Finder
+  rmSync(deletedProject.root, { recursive: true, force: true });
+  assert.equal(existsSync(deletedProject.root), false);
+
+  // 1. discoverProjects marks deletedProject with missingRoot: true, while liveProject has no missingRoot flag
+  const discovered = discoverProjects(stateDir, []);
+  const discDeleted = discovered.find((p) => p.slug === deletedProject.slug);
+  const discLive = discovered.find((p) => p.slug === liveProject.slug);
+  assert.deepEqual(discDeleted, { slug: deletedProject.slug, root: deletedProject.root, missingRoot: true });
+  assert.deepEqual(discLive, { slug: liveProject.slug, root: liveProject.root });
+
+  // 2. Selecting the deleted project via snapshot({ projectRoot: deletedProject.root }) resolves view.project with missingRoot: true
+  const snap = await handlers.snapshot({ projectRoot: deletedProject.root });
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  assert.deepEqual(
+    snap.view.project,
+    { slug: deletedProject.slug, root: deletedProject.root, missingRoot: true },
+    "view.project resolves from persisted registration with missingRoot: true instead of snapping back to null",
+  );
+  const viewDeletedEntry = snap.view.projects.find((p) => p.slug === deletedProject.slug);
+  assert.deepEqual(viewDeletedEntry, { slug: deletedProject.slug, root: deletedProject.root, missingRoot: true });
+
+  // 3. Tasks, KPIs, and lanes scope cleanly to the missing-root project without crashing
+  assert.deepEqual(snap.view.tasks.map((task) => task.task), ["T-DEL-1"]);
+  assert.equal(snap.view.kpis.accepted, 1);
+  assert.equal(snap.view.lanes.supervisor, "claude/opus-4-8");
+
+  // 4. Selecting by slug also resolves view.project with missingRoot: true
+  const snapBySlug = await handlers.snapshot({ projectRoot: deletedProject.slug });
+  assert.ok(snapBySlug.ok, snapBySlug.ok ? "" : snapBySlug.error);
+  assert.deepEqual(snapBySlug.view.project, { slug: deletedProject.slug, root: deletedProject.root, missingRoot: true });
+});
+
