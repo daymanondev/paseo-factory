@@ -82,7 +82,7 @@ test("numeric Needs-human references resolve by stable identity while Attempt or
   const ts = "2026-10-23T00:00:00.000Z";
   const rows = [
     { seq: 10, ts, ...contract },
-    { seq: 20, ts, event: "permit_denied", task: "T", agent: "peer", rule: "scope", reason: "denied" },
+    { seq: 20, ts, event: "permit_denied", task: "T", agent: "peer", name: "Write", kind: "tool", rule: "scope", reason: "denied" },
     { seq: 30, ts, event: "repoke_dispatched", task: "T", agent: "peer" },
     { seq: 40, ts, event: "needs_human", task: "T", reason: "denied-again", evidence: { denial: 20, repoke: 30 } },
     { seq: 50, ts, event: "gate_finished", task: "T", attempt: 3, verdict: "red", exit: 1, note: "failed" },
@@ -111,7 +111,7 @@ test("same stable identity deduplicates semantic facts across local numbering an
   const ts = "2026-10-23T00:00:00.000Z";
   const rows = [
     { seq: 1, ts, ...contract },
-    { seq: 2, ts, event: "permit_denied", task: "T", agent: "peer", rule: "scope" },
+    { seq: 2, ts, event: "permit_denied", task: "T", agent: "peer", name: "Write", kind: "tool", rule: "scope", reason: "denied" },
     { seq: 3, ts, event: "repoke_dispatched", task: "T", agent: "peer" },
     { seq: 4, ts, event: "needs_human", task: "T", reason: "denied-again", evidence: { denial: 2, repoke: 3 } },
   ];

@@ -369,6 +369,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     } catch (err) {
       return {
         configured: false,
+        historyImports: deps.factory.history.allStatus(),
         repo: null,
         branch: "main",
         nodeId: "node",
@@ -1740,17 +1741,19 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     },
 
     async vaultHydrate(
-      input: { repo?: string; ref?: string },
+      input: { repo?: string; ref?: string; mergeLedgers?: boolean; overwriteConfigs?: boolean },
       _context?: SurfaceCallContext,
     ): Promise<{ ok: true; vault: VaultStatusView; hydratedFiles: string[]; summary: string; historyImports?: import("./core/history-stage.ts").ImportStatus[] } | { ok: false; code: string; error: string }> {
       try {
         const result = await hydrateVaultDirect(deps.home, {
           ...(input.repo === undefined ? {} : { repo: input.repo }),
           ...(input.ref === undefined ? {} : { ref: input.ref }),
+          ...(input.mergeLedgers === undefined ? {} : { mergeLedgers: input.mergeLedgers }),
+          ...(input.overwriteConfigs === undefined ? {} : { overwriteConfigs: input.overwriteConfigs }),
           ...vaultRunnerOptions(),
         });
         const vault = await vaultStatusOf();
-        const summary = `Direct hydrate unpacked ${result.hydratedFiles.length} file(s) from ${vault.repo ?? input.repo ?? "vault"}.`;
+        const summary = `Direct hydrate unpacked ${result.hydratedFiles.length} file(s) from ${vault.repo ?? input.repo ?? "vault"}${result.historyImports?.length ? `; history ${result.historyImports.map((item) => item.status).join(", ")}` : ""}.`;
         log(`vault: direct hydrate wrote ${result.hydratedFiles.length} files from the gh api tarball stream (no clone left behind)`);
         return { ok: true as const, vault, hydratedFiles: result.hydratedFiles, summary, historyImports: result.historyImports };
       } catch (err) {
@@ -1768,7 +1771,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           ...vaultRunnerOptions(),
         });
         const vault = await vaultStatusOf();
-        const summary = `Pulled and hydrated ${result.hydratedFiles.length} file(s) from ${vault.repo ?? "vault"}${input.mergeLedgers === true ? " (history staged for writer admission)" : ""}.`;
+        const summary = `Pulled and hydrated ${result.hydratedFiles.length} file(s) from ${vault.repo ?? "vault"}${result.historyImports?.length ? `; history ${result.historyImports.map((item) => item.status).join(", ")}` : ""}.`;
         log(`vault: sync pull hydrated ${result.hydratedFiles.length} files from the cached checkout${input.mergeLedgers === true ? " and staged node history" : ""}`);
         return { ok: true as const, vault, hydratedFiles: result.hydratedFiles, summary, historyImports: result.historyImports };
       } catch (err) {
@@ -1800,7 +1803,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       input: Omit<SyncVaultOptions, "runner">,
       _context?: SurfaceCallContext,
     ): Promise<
-      | { ok: true; vault: VaultStatusView; createdRepo: boolean; hydratedFiles: string[]; pushedFiles: string[]; pushed: boolean; summary: string }
+      | { ok: true; vault: VaultStatusView; createdRepo: boolean; hydratedFiles: string[]; pushedFiles: string[]; pushed: boolean; summary: string; historyImports?: import("./core/history-stage.ts").ImportStatus[] }
       | { ok: false; code: string; error: string }
     > {
       try {
@@ -1813,6 +1816,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         return {
           ok: true as const,
           vault,
+          historyImports: result.historyImports,
           createdRepo: result.createdRepo,
           hydratedFiles: result.hydratedFiles,
           pushedFiles: result.pushedFiles,
@@ -1828,7 +1832,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       input: Omit<ImportVaultSecretsInput, "runner">,
       _context?: SurfaceCallContext,
     ): Promise<
-      | { ok: true; vault: VaultStatusView; importedFiles: string[]; pushed: boolean; summary: string }
+      | { ok: true; vault: VaultStatusView; importedFiles: string[]; pushed: boolean; summary: string; historyImports?: import("./core/history-stage.ts").ImportStatus[] }
       | { ok: false; code: string; error: string }
     > {
       try {
@@ -1841,6 +1845,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         return {
           ok: true as const,
           vault,
+          historyImports: result.synced?.historyImports,
           importedFiles: result.importedFiles,
           pushed: result.synced?.pushed ?? false,
           summary: result.summary,
@@ -1850,7 +1855,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       }
     },
   };
-  const reads = new Set(["cachedProviders", "sanitizeLane", "snapshot", "taskDetail", "pluginsCheckUpdates", "historyImport", "historyImports", "historyUpgrade"]);
+  const reads = new Set(["cachedProviders", "sanitizeLane", "snapshot", "taskDetail", "pluginsCheckUpdates", "historyImport", "historyImports", "historyUpgrade", "vaultHydrate", "vaultPull", "vaultPush", "vaultSync", "vaultImport"]);
   const wrappers = new Map<PropertyKey, unknown>();
   return new Proxy(handlers, {
     get(target, key, receiver) {

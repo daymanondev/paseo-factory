@@ -5,6 +5,7 @@
  * reference survives on Hermes (the typeof guard), no node built-ins.
  */
 import { useEffect, useRef, useState } from "react";
+import { createResponseOrder } from "./response-order.ts";
 
 export const BUSY_MS = 5000;
 export const QUIET_MS = 30000;
@@ -32,6 +33,7 @@ export function usePoll<T>(
   latest.current = { load, every };
   useEffect(() => {
     let live = true;
+    const order = createResponseOrder();
     let timer: ReturnType<typeof setTimeout> | undefined;
     let last: T | null = null;
     const again = () => {
@@ -39,11 +41,15 @@ export function usePoll<T>(
     };
     const tick = async () => {
       if (hidden()) return again();
+      const request = order.begin();
+      clearTimeout(timer);
       try {
         const r = await latest.current.load();
+        if (!live || !order.current(request)) return;
         if (r.ok) last = r.value;
         if (live) setState((s) => (r.ok ? { value: r.value, error: null, at: Date.now() } : { ...s, error: { code: r.code, message: r.error } }));
       } catch (error) {
+        if (!order.current(request)) return;
         if (live) setState((s) => ({ ...s, error: { code: "failed", message: String(error) } }));
       }
       again();
@@ -58,6 +64,7 @@ export function usePoll<T>(
     page?.addEventListener?.("visibilitychange", shown);
     return () => {
       live = false;
+      order.invalidate();
       clearTimeout(timer);
       page?.removeEventListener?.("visibilitychange", shown);
     };

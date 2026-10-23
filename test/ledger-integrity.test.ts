@@ -5,6 +5,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Ledger } from "../src/ledger.ts";
+import { planLegacyIdentity } from "../src/history-identity.ts";
 import { readDriverLedger } from "../plugin/bin/driver.mjs";
 import { disposeDir, factoryErrorCode, makeTempDir, repoRoot } from "./helpers.ts";
 
@@ -169,4 +170,154 @@ test("MCP status excludes a complete-looking unterminated green event and leaves
   assert.match(response.result.content[0].text, /verdict=-/);
   assert.doesNotMatch(response.result.content[0].text, /verdict=green/);
   assert.equal(readFileSync(path, "utf8"), bytes);
+});
+
+
+test("v2 green Gate missing its exit is corrupt at CLI, copied MCP, driver and Ledger entrances", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const stateDir = join(dir, "plugin-state/paseo-factory");
+  mkdirSync(stateDir, { recursive: true });
+  const rows = [
+    { seq: 1, ts, event: "contract_set", task: "T", workspace: dir, gate: "true", artifact: "out" },
+    { seq: 2, ts, event: "claim_reported", task: "T", attempt: 1, sha: "abc" },
+    { seq: 3, ts, event: "gate_started", task: "T", attempt: 1, cmd: "true" },
+    { seq: 4, ts, event: "gate_finished", task: "T", attempt: 1, exit: 0, verdict: "green", note: "passed", sha: "abc", outputPath: "gate.log" },
+  ];
+  const plan = planLegacyIdentity(rows.map(row => JSON.stringify(row) + "\n").join(""), { writerId: "local" });
+  assert.equal(plan.ok, true);
+  const gate = plan.events.find(event => event.event === "gate_finished")! as unknown as Record<string, unknown>;
+  delete gate.exit;
+  const raw = plan.events.map(row => JSON.stringify(row) + "\n").join("");
+  const path = join(stateDir, "ledger.jsonl");
+  writeFileSync(path, raw);
+  const bridge = join(dir, "bridge.mjs");
+  copyFileSync(join(repoRoot, "plugin/bin/bridge.mjs"), bridge);
+  const cli = spawnSync(process.execPath, [join(repoRoot, "plugin/bin/factory.mjs"), "status", "--home", dir], { encoding: "utf8" });
+  assert.equal(cli.status, 2, cli.stdout);
+  assert.match(cli.stderr, /line 4.*valid ledger event/);
+  assert.match(mcpStatus(stateDir, bridge).error?.message ?? "", /line 4.*valid ledger event/);
+  assert.throws(() => readDriverLedger(stateDir), /line 4.*valid ledger event/);
+  assert.throws(() => Ledger.open(path), factoryErrorCode("corrupted-ledger"));
+  assert.equal(readFileSync(path, "utf8"), raw);
+});
+
+test("identified readers enforce each event's typed payload while legacy records retain their historical read contract", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const path = join(dir, "ledger.jsonl");
+  const base = { seq: 1, ts, event: "contract_set", task: "T", workspace: dir, gate: "true", artifact: "out" };
+  const cases: Array<{ row: Record<string, unknown>; required: string[]; invalid?: Record<string, unknown>[] }> = [
+    { row: { ...base, scope: ["src"], freshEyes: true, watch: true, skills: ["tdd"] }, required: ["workspace", "gate", "artifact"], invalid: [{ scope: "src" }, { freshEyes: "true" }, { watch: 1 }, { skills: [5] }, { base: 5 }, { description: null }, { by: [] }, { attempt: 1 }] },
+    { row: { event: "claim_reported", attempt: 1, sha: "abc" }, required: ["sha"], invalid: [{ agent: 5 }, { attempt: Number.MAX_SAFE_INTEGER + 1 }] },
+    { row: { event: "gate_started", attempt: 1, cmd: "true" }, required: ["cmd"] },
+    { row: { event: "gate_finished", attempt: 1, exit: 0, verdict: "green", note: "passed", sha: "abc" }, required: ["exit", "verdict", "note"], invalid: [{ exit: "0" }, { exit: 0.5 }, { verdict: "yellow" }, { sha: 4 }, { outputPath: null }] },
+    { row: { event: "fresh_eyes_written", attempt: 1, model: "eye", outcome: "clear", finding: "clear", durationMs: 1 }, required: ["model", "outcome", "finding", "durationMs"], invalid: [{ outcome: "green" }, { outcome: ["clear"] }, { durationMs: -1 }] },
+    { row: { event: "watch_written", attempt: 1, model: "watch", outcome: "written", durationMs: 1, answers: { safe: 0.5 }, usage: { input_tokens: 1, cost: 0 } }, required: ["model", "outcome", "durationMs"], invalid: [{ answers: [] }, { answers: { safe: 2 } }, { usage: { input_tokens: "1", cost: 0 } }, { error: 5 }, { outcome: "clear" }] },
+    { row: { event: "report_written", attempt: 1, path: "report.md" }, required: ["path"] },
+    { row: { event: "attempt_accepted", attempt: 1, accepted_by: "owner", landing: "landed" }, required: [], invalid: [{ accepted_by: 5 }, { landing: "maybe" }, { landingNote: 1 }] },
+    { row: { event: "permit_allowed", agent: "peer", name: "Write", kind: "tool" }, required: ["name", "kind"], invalid: [{ command: 2 }] },
+    { row: { event: "permit_denied", agent: "peer", name: "Write", kind: "tool", rule: "scope", reason: "outside scope" }, required: ["name", "kind", "reason"] },
+    { row: { event: "git_blocked", agent: "peer", command: "git push", rule: "push", reason: "forbidden", cwd: dir, blockId: "block" }, required: ["reason"] },
+    { row: { event: "spawn_dispatched", provider: "model", arity: 1, worktree: dir }, required: [], invalid: [{ worktree: 2 }] },
+    { row: { event: "retro_written", model: "retro", outcome: "written", durationMs: 1, proposalsPath: "retro.md", proposalCount: 0 }, required: ["proposalsPath", "proposalCount"], invalid: [{ proposalCount: -1 }, { error: 5 }] },
+  ];
+  for (const fixture of cases) {
+    const source = fixture.row.event === "contract_set" ? [{ ...fixture.row, seq: 1, ts }] : [base, { ...fixture.row, seq: 2, ts, ...(fixture.row.event === "retro_written" ? {} : { task: "T" }) }];
+    const plan = planLegacyIdentity(source.map(row => JSON.stringify(row) + "\n").join(""), { writerId: "local" });
+    assert.equal(plan.ok, true, String(fixture.row.event));
+    const valid = plan.events.map(row => JSON.stringify(row) + "\n").join("");
+    writeFileSync(path, valid);
+    assert.doesNotThrow(() => Ledger.open(path));
+    for (const change of [...fixture.required.map(key => ({ [key]: undefined })), ...(fixture.invalid ?? [])]) {
+      const mutated = structuredClone(plan.events);
+      Object.assign(mutated.find(event => event.event === fixture.row.event)!, change);
+      writeFileSync(path, mutated.map(row => JSON.stringify(row) + "\n").join(""));
+      assert.throws(() => Ledger.open(path), factoryErrorCode("corrupted-ledger"), `${fixture.row.event}: ${Object.keys(change)}`);
+    }
+  }
+  // A historical Claim's payload was not checked by the original reader.
+  writeFileSync(path, JSON.stringify(base) + "\n" + JSON.stringify({ seq: 2, ts, event: "claim_reported", task: "T", attempt: 1 }) + "\n");
+  assert.equal(Ledger.open(path).events.length, 2);
+});
+
+test("CLI and copied-alone MCP status share current-epoch review and acceptance eligibility without global Task rows", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const stateDir = join(dir, "plugin-state/paseo-factory");
+  mkdirSync(stateDir, { recursive: true });
+  const path = join(stateDir, "ledger.jsonl");
+  const bridge = join(dir, "bridge.mjs");
+  copyFileSync(join(repoRoot, "plugin/bin/bridge.mjs"), bridge);
+  const contract = { event: "contract_set", task: "T", workspace: dir, gate: "true", artifact: "out", freshEyes: true };
+  const attempt = [
+    { event: "claim_reported", task: "T", attempt: 1, sha: "abc" },
+    { event: "gate_started", task: "T", attempt: 1, cmd: "true" },
+    { event: "gate_finished", task: "T", attempt: 1, exit: 0, verdict: "green", note: "passed", sha: "abc" },
+  ];
+  for (const outcome of [undefined, "failed", "concern", "clear"] as const) {
+    const old = [contract, ...attempt, { event: "fresh_eyes_written", task: "T", attempt: 1, model: "eye", outcome: "clear", finding: "clear", durationMs: 1 }];
+    const rows = [...old, contract, ...attempt, ...(outcome === undefined ? [] : [
+      { event: "fresh_eyes_written", task: "T", attempt: 1, model: "eye", outcome, finding: "review", durationMs: 1 },
+      { event: "report_written", task: "T", attempt: 1, path: "report.md" },
+    ]), { event: "git_blocked", command: "git push", rule: "push", reason: "no", cwd: dir, blockId: "global-block" }];
+    const plan = planLegacyIdentity(rows.map((row, index) => JSON.stringify({ ...row, seq: index + 1, ts }) + "\n").join(""), { writerId: "local" });
+    assert.equal(plan.ok, true);
+    writeFileSync(path, plan.events.map(row => JSON.stringify(row) + "\n").join(""));
+    const cli = spawnSync(process.execPath, [join(repoRoot, "plugin/bin/factory.mjs"), "status", "--home", dir], { encoding: "utf8" });
+    assert.equal(cli.status, 0, cli.stderr);
+    const text = mcpStatus(stateDir, bridge).result.content[0].text;
+    assert.equal(cli.stdout.trim(), text);
+    assert.equal(text.split("\n").length, 1, "schema and unbound global facts cannot create Task rows");
+    assert.match(text, new RegExp(`review=${outcome ?? "pending"}(?: |$)`));
+    assert.match(text, /owner-eligible=1(?: |$)/);
+    assert.match(text, new RegExp(`lead-eligible=${outcome === "clear" ? "1" : "-"}(?: |$)`));
+  }
+});
+
+test("v2 status refuses contradictory green Gates while valid red and historical reads remain available", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const stateDir = join(dir, "plugin-state/paseo-factory");
+  mkdirSync(stateDir, { recursive: true });
+  const path = join(stateDir, "ledger.jsonl");
+  const bridge = join(dir, "bridge.mjs");
+  copyFileSync(join(repoRoot, "plugin/bin/bridge.mjs"), bridge);
+  const rows = [
+    { seq: 1, ts, event: "contract_set", task: "T", workspace: dir, gate: "true", artifact: "out" },
+    { seq: 2, ts, event: "claim_reported", task: "T", attempt: 1, sha: "abc" },
+    { seq: 3, ts, event: "gate_started", task: "T", attempt: 1, cmd: "true" },
+    { seq: 4, ts, event: "gate_finished", task: "T", attempt: 1, exit: 0, verdict: "green", note: "passed", sha: "abc", outputPath: "gate.log" },
+  ];
+  const identified = planLegacyIdentity(rows.map(row => JSON.stringify(row) + "\n").join(""), { writerId: "local" });
+  assert.equal(identified.ok, true);
+  for (const change of [{ exit: 7 }, { exit: null }, { sha: undefined }, { sha: "" }, { sha: "  " }]) {
+    await t.test(JSON.stringify(change), () => {
+      const events = structuredClone(identified.events);
+      Object.assign(events.find(event => event.event === "gate_finished")!, change);
+      const raw = events.map(event => JSON.stringify(event) + "\n").join("");
+      writeFileSync(path, raw);
+      const cli = spawnSync(process.execPath, [join(repoRoot, "plugin/bin/factory.mjs"), "status", "--home", dir], { encoding: "utf8" });
+      assert.equal(cli.status, 2, cli.stdout);
+      assert.equal(cli.stdout, "");
+      assert.match(mcpStatus(stateDir, bridge).error?.message ?? "", /line 4.*valid ledger event/);
+      assert.throws(() => readDriverLedger(stateDir), /line 4.*valid ledger event/);
+      assert.throws(() => Ledger.open(path), factoryErrorCode("corrupted-ledger"));
+      assert.equal(readFileSync(path, "utf8"), raw);
+    });
+  }
+  for (const exit of [null, 1]) {
+    const events = structuredClone(identified.events);
+    Object.assign(events.find(event => event.event === "gate_finished")!, { verdict: "red", exit, sha: undefined });
+    writeFileSync(path, events.map(event => JSON.stringify(event) + "\n").join(""));
+    const cli = spawnSync(process.execPath, [join(repoRoot, "plugin/bin/factory.mjs"), "status", "--home", dir], { encoding: "utf8" });
+    assert.equal(cli.status, 0, cli.stderr);
+    assert.match(cli.stdout, /verdict=red.*owner-eligible=- lead-eligible=-/);
+    assert.match(mcpStatus(stateDir, bridge).result.content[0].text, /verdict=red/);
+    assert.equal(Ledger.open(path).events.length, 5);
+  }
+  // Read-only legacy compatibility does not invent a repaired v2 fact.
+  rows[3]!.exit = 7;
+  writeFileSync(path, rows.map(event => JSON.stringify(event) + "\n").join(""));
+  assert.equal(Ledger.open(path).events.length, 4);
 });

@@ -173,6 +173,7 @@ export type {
 export { EVENT_NAMES, MAX_ATTEMPTS } from "./events.ts";
 
 export { projectTask } from "./task-state.ts";
+export { taskStatusLines } from "./task-status.ts";
 export type { AcceptanceRole, AttemptState, ReviewState } from "./task-state.ts";
 
 export { legacyIdentityMappingIsValid, planLegacyIdentity, resolveLedgerReference, remapLedgerReferences, classifyEventIdentities, semanticEventContent, canonicalHistoryJson, historyHash } from "./history-identity.ts";

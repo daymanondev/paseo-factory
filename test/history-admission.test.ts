@@ -318,3 +318,39 @@ test("symlink aliases share actual writer ownership and route standalone staging
   assert.equal(factory.history.status().length, 1);
   assert.equal(factory.ledger.events.filter((event) => event.event === "contract_set" && event.task === "REMOTE").length, 1);
 });
+
+test("Project A retains Project B snapshots while its own registered root is admitted", async (t) => {
+  const { factory, workspace, stateDir, dir, sources } = fixture(t);
+  const { resolveProject, writeProjectRegistration, projectStateDir } = await import("../plugin/server/core/project.ts");
+  const other = join(dir, "other"); mkdirSync(other); writeFileSync(join(other, "artifact.txt"), "other\n"); gitCommitAll(other);
+  const a = resolveProject(other), b = resolveProject(workspace); assert.ok(a.ok && b.ok); if (!a.ok || !b.ok) return;
+  writeProjectRegistration(stateDir, a.slug, { root: other });
+  writeProjectRegistration(stateDir, b.slug, { root: workspace });
+  const target = join(projectStateDir(stateDir, a.slug), "ledger.jsonl");
+  const initial = planLegacyIdentity("", { writerId: "local" }).events.map((event) => JSON.stringify(event) + "\n").join("");
+  writeFileSync(target, initial);
+  const handlers = createSurfaceHandlers({ factory, stateDir, home: dir, daemon: {} as SurfaceDaemonApi });
+  const reply = await handlers.historyImport({ project: a.slug, sources });
+  assert.equal(reply.imports[0]?.status, "conflicted");
+  assert.match(JSON.stringify(reply), /binding/);
+  assert.equal(readFileSync(target, "utf8"), initial);
+  const localSource = join(dir, "a-source.jsonl"); writeFileSync(localSource, initial);
+  const ledger = Ledger.open(localSource, { writerId: "local" });
+  ledger.append({ event: "contract_set", task: "A", workspace: other, gate: "true", artifact: "artifact.txt", scope: ["a"] });
+  const admitted = await handlers.historyImport({ project: a.slug, sources: [{ nodeId: "a", lines: readFileSync(localSource, "utf8") }] });
+  assert.ok(admitted.imports.some((item) => item.status === "applied"), JSON.stringify(admitted));
+});
+
+for (const omitted of ["start", "log"] as const) test(`owner retains imported green Gate without ${omitted} evidence`, async (t) => {
+  const { factory, sources, sha, dir } = fixture(t);
+  const path = join(dir, "green.jsonl"); writeFileSync(path, sources[0]!.lines);
+  const ledger = Ledger.open(path, { writerId: "remote" });
+  ledger.append({ event: "claim_reported", task: "REMOTE", attempt: 1, sha });
+  if (omitted !== "start") ledger.append({ event: "gate_started", task: "REMOTE", attempt: 1, cmd: "true" });
+  ledger.append({ event: "gate_finished", task: "REMOTE", attempt: 1, sha, verdict: "green", exit: 0, note: "passed" });
+  const before = readFileSync(factory.ledger.path, "utf8");
+  const reply = await handleSpoolRequest(factory, { id: "green", kind: "history_import", sources: [{ nodeId: "remote", lines: readFileSync(path, "utf8") }] });
+  assert.equal(reply.ok && reply.historyImports?.[0]?.status, "conflicted");
+  assert.match(JSON.stringify(reply), omitted === "start" ? /Gate start/ : /output log/);
+  assert.equal(readFileSync(factory.ledger.path, "utf8"), before);
+});

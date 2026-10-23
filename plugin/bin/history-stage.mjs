@@ -72,7 +72,7 @@ function needsHumanEvidenceIsValid(evidence, reason) {
 function isValidLedgerEvent(value) {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const event = value;
-  return (event.schema_version === void 0 || event.schema_version === 1 || event.schema_version === 2) && (event.schema_version !== 2 || identityMetadataIsValid(event)) && Number.isSafeInteger(event.seq) && event.seq > 0 && typeof event.ts === "string" && typeof event.event === "string" && EVENT_NAMES.includes(event.event) && shapeIsValid(value);
+  return (event.schema_version === void 0 || event.schema_version === 1 || event.schema_version === 2) && (event.schema_version !== 2 || identityMetadataIsValid(event)) && Number.isSafeInteger(event.seq) && event.seq > 0 && typeof event.ts === "string" && typeof event.event === "string" && EVENT_NAMES.includes(event.event) && shapeIsValid(value) && (event.schema_version !== 2 || v2PayloadIsValid(event));
 }
 function nonempty(value) {
   return typeof value === "string" && value.trim() !== "";
@@ -187,6 +187,58 @@ function usageIsValid(usage) {
     if (typeof value !== "number" || !Number.isFinite(value)) return false;
   }
   return true;
+}
+function v2PayloadIsValid(event) {
+  const string = (key) => typeof event[key] === "string";
+  const optionalString = (key) => event[key] === void 0 || string(key);
+  const strings = (key) => event[key] === void 0 || Array.isArray(event[key]) && event[key].every((item) => typeof item === "string");
+  const duration = () => typeof event.durationMs === "number" && Number.isFinite(event.durationMs) && event.durationMs >= 0;
+  if (event.task !== void 0 && !nonempty(event.task)) return false;
+  if (event.attempt !== void 0 && (!Number.isSafeInteger(event.attempt) || event.attempt < 1)) return false;
+  if (event.attempt !== void 0 && !["claim_reported", "gate_started", "gate_finished", "fresh_eyes_written", "watch_written", "report_written", "attempt_accepted"].includes(event.event)) return false;
+  if (event.event === "needs_human" && record(event.evidence) && !Object.values(event.evidence).every((value) => Number.isSafeInteger(value) && value > 0)) return false;
+  if (event.arity !== void 0 && (!Number.isSafeInteger(event.arity) || event.arity < 1)) return false;
+  if (event.event === "ledger_schema" || event.event === "retro_written") {
+    if (event.task !== void 0 || event.attempt !== void 0) return false;
+  }
+  switch (event.event) {
+    case "ledger_schema":
+      return true;
+    case "contract_set":
+      return string("workspace") && string("gate") && string("artifact") && strings("scope") && strings("skills") && optionalString("base") && optionalString("description") && optionalString("by") && (event.freshEyes === void 0 || event.freshEyes === true) && (event.watch === void 0 || event.watch === true);
+    case "claim_reported":
+      return string("sha") && optionalString("agent");
+    case "gate_started":
+      return string("cmd");
+    case "gate_finished":
+      return (event.exit === null || Number.isSafeInteger(event.exit)) && (event.verdict === "red" || event.verdict === "green") && (event.verdict !== "green" || event.exit === 0 && nonempty(event.sha)) && string("note") && optionalString("sha") && optionalString("outputPath");
+    case "fresh_eyes_written":
+      return string("model") && ["concern", "clear", "failed"].includes(event.outcome) && string("finding") && duration();
+    case "watch_written": {
+      if (!string("model") || !["written", "failed"].includes(event.outcome) || !duration() || !optionalString("error")) return false;
+      if (event.answers !== void 0 && (!record(event.answers) || !Object.values(event.answers).every((value) => value === null || typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1))) return false;
+      if (event.usage !== void 0 && (!record(event.usage) || ![event.usage.input_tokens, event.usage.cost].every((value) => typeof value === "number" && Number.isFinite(value) && value >= 0))) return false;
+      return event.outcome !== "failed" || string("error");
+    }
+    case "report_written":
+      return string("path");
+    case "attempt_accepted":
+      return optionalString("accepted_by") && optionalString("landingNote") && (event.landing === void 0 || event.landing === "landed" || event.landing === "pending-conflict");
+    case "permit_allowed":
+    case "permit_denied":
+      return string("name") && string("kind") && optionalString("command") && (event.event !== "permit_denied" || string("reason"));
+    case "git_blocked":
+      return string("reason");
+    case "spawn_dispatched":
+      return optionalString("worktree");
+    case "retro_written":
+      return string("model") && duration() && optionalString("error") && optionalString("proposalsPath") && (event.proposalCount === void 0 || Number.isSafeInteger(event.proposalCount) && event.proposalCount >= 0) && (event.outcome === "written" ? string("proposalsPath") && event.proposalCount !== void 0 : event.outcome === "failed" && string("error"));
+    default:
+      return true;
+  }
+}
+function record(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 // src/history-identity.ts
@@ -586,6 +638,10 @@ function bindingProblems(event, events, binding, files) {
   if (contract.base !== void 0 && binding.base !== contract.base) reasons.push("Contract base commit has no verified local binding");
   if (event.event === "spawn_dispatched" && event.worktree !== void 0 && (binding.worktree !== event.worktree || !isAbsolute2(event.worktree))) reasons.push("spawn has no verified local Task worktree binding");
   if (event.event === "gate_finished") {
+    if (event.verdict === "green") {
+      if (!events.some((candidate) => candidate.event === "gate_started" && candidate.epoch_id === event.epoch_id && candidate.attempt === event.attempt && candidate.seq < event.seq)) reasons.push("green Gate has no prior Gate start evidence; retain the original history for resolution");
+      if (typeof event.outputPath !== "string" || event.outputPath.trim() === "") reasons.push("green Gate has no output log with a verified local event binding");
+    }
     if (event.sha !== void 0 && !binding.commits?.includes(event.sha)) reasons.push("Gate commit is unavailable in the verified local Workspace");
     const claim = events.find((candidate) => candidate.event === "claim_reported" && candidate.epoch_id === event.epoch_id && candidate.attempt === event.attempt);
     if (event.sha !== void 0 && claim?.event === "claim_reported" && !/^[a-f0-9]+$/i.test(claim.sha) && !binding.claims?.some((resolution) => resolution.eventId === claim.event_id && resolution.sha === event.sha)) reasons.push("symbolic Claim has no demonstrated commit resolution; current HEAD cannot stand in for source evidence");
@@ -601,6 +657,13 @@ function bindingProblems(event, events, binding, files) {
 }
 
 // src/history-stage.ts
+function projectHistoryTarget(stateDir, slug) {
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(slug)) throw new FactoryError("unknown-project", "history target must name a local Project");
+  const path = join(stateDir, "projects", slug, "ledger.jsonl");
+  const expected = join(historyTargetPath(stateDir), "projects", slug, "ledger.jsonl");
+  if (historyTargetPath(path) !== expected) throw new FactoryError("history-target-alias", "Project history target aliases another state directory; restore an isolated Project state directory before import");
+  return path;
+}
 function historyTargetPath(path) {
   let ancestor = resolve2(path);
   const missing = [];
@@ -730,6 +793,7 @@ export {
   loadImportManifest,
   makeDurableDirectory,
   observeStagedImports,
+  projectHistoryTarget,
   publicImportStatus,
   readLedgerImports,
   saveImportManifest,

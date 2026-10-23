@@ -100,9 +100,10 @@ test("imported acceptance never establishes local landing without independent lo
   const incoming = snapshot(t);
   const epoch = incoming.ledger.append(contract);
   incoming.ledger.append({ event: "claim_reported", task: "T", attempt: 1, sha: "abc" });
-  incoming.ledger.append({ event: "gate_finished", task: "T", attempt: 1, verdict: "green", exit: 0, note: "passed", sha: "abc" });
+  incoming.ledger.append({ event: "gate_started", task: "T", attempt: 1, cmd: "true" });
+  const gate = incoming.ledger.append({ event: "gate_finished", task: "T", attempt: 1, outputPath: "/local/gate.log", verdict: "green", exit: 0, note: "passed", sha: "abc" });
   const accepted = incoming.ledger.append({ event: "attempt_accepted", task: "T", attempt: 1, accepted_by: "historical-attribution", landing: "landed" });
-  const binding = { epochId: epoch.epoch_id!, workspace: contract.workspace, commits: ["abc"], artifactPresent: true };
+  const binding = { epochId: epoch.epoch_id!, workspace: contract.workspace, commits: ["abc"], artifactPresent: true, files: [{ eventId: gate.event_id!, path: gate.outputPath! }] };
   const input = { existingLines: local.raw(), sources: [{ nodeId: "source", lines: incoming.raw() }], bindings: [binding] };
   const staged = planHistoryImport(input);
   assert.equal(staged.status, "conflicted");
@@ -155,7 +156,6 @@ for (const scenario of [
   { name: "Report precedes Gate", events: [{ event: "claim_reported", task: "T", attempt: 1, sha: "abc" }, { event: "report_written", task: "T", attempt: 1, path: "/local/report" }], reason: /Report/ },
   { name: "Watch precedes Gate", events: [{ event: "claim_reported", task: "T", attempt: 1, sha: "abc" }, { event: "watch_written", task: "T", attempt: 1, model: "fixture", outcome: "failed", error: "interrupted", durationMs: 1 }], reason: /Watch/ },
   { name: "Gate attests another SHA", events: [{ event: "claim_reported", task: "T", attempt: 1, sha: "abc" }, { event: "gate_finished", task: "T", attempt: 1, verdict: "green", exit: 0, note: "passed", sha: "def" }], reason: /SHA/ },
-  { name: "green Gate has a nonzero exit", events: [{ event: "claim_reported", task: "T", attempt: 1, sha: "abc" }, { event: "gate_finished", task: "T", attempt: 1, verdict: "green", exit: 2, note: "passed", sha: "abc" }], reason: /green/ },
   { name: "Contract replaces an open pipeline", events: [{ event: "claim_reported", task: "T", attempt: 1, sha: "abc" }, { ...contract, gate: "new" }], reason: /Contract.*pipeline/ },
 ] satisfies { name: string; events: import("../src/events.ts").PendingEvent[]; reason: RegExp }[]) {
   test(`causal import refuses ${scenario.name}`, (t) => {
@@ -302,11 +302,12 @@ test("two Contract epochs can each contain Attempt 1 without merging their evide
   const report = incoming.ledger.append({ event: "report_written", task: "T", attempt: 1, path: "/local/first-report.md" });
   const secondEpoch = incoming.ledger.append({ ...contract, freshEyes: true });
   incoming.ledger.append({ event: "claim_reported", task: "T", attempt: 1, sha: "def" });
-  incoming.ledger.append({ event: "gate_finished", task: "T", attempt: 1, verdict: "green", exit: 0, note: "second", sha: "def" });
+  incoming.ledger.append({ event: "gate_started", task: "T", attempt: 1, cmd: "true" });
+  const gate = incoming.ledger.append({ event: "gate_finished", task: "T", attempt: 1, outputPath: "/local/gate.log", verdict: "green", exit: 0, note: "second", sha: "def" });
   const secondReport = incoming.ledger.append({ event: "report_written", task: "T", attempt: 1, path: "/local/second-report.md" });
   const plan = planHistoryImport({ existingLines: local.raw(), sources: [{ nodeId: "source", lines: incoming.raw() }], bindings: [
     { epochId: firstEpoch.epoch_id!, workspace: contract.workspace, commits: ["abc"], files: [{ eventId: report.event_id!, path: report.path }] },
-    { epochId: secondEpoch.epoch_id!, workspace: contract.workspace, commits: ["def"], artifactPresent: true, files: [{ eventId: secondReport.event_id!, path: secondReport.path }] },
+    { epochId: secondEpoch.epoch_id!, workspace: contract.workspace, commits: ["def"], artifactPresent: true, files: [{ eventId: gate.event_id!, path: gate.outputPath! }, { eventId: secondReport.event_id!, path: secondReport.path }] },
   ] });
   assert.equal(plan.status, "ready", JSON.stringify(plan.conflicts));
   const projected = projectTask(plan.events, "T");
@@ -368,9 +369,25 @@ test("a symbolic Claim needs explicit commit resolution rather than a guessed cu
   const incoming = snapshot(t);
   const epoch = incoming.ledger.append(contract);
   const claim = incoming.ledger.append({ event: "claim_reported", task: "T", attempt: 1, sha: "HEAD" });
-  incoming.ledger.append({ event: "gate_finished", task: "T", attempt: 1, verdict: "green", exit: 0, note: "passed", sha: "abc" });
-  const binding = { epochId: epoch.epoch_id!, workspace: contract.workspace, commits: ["abc"], artifactPresent: true };
+  incoming.ledger.append({ event: "gate_started", task: "T", attempt: 1, cmd: "true" });
+  const gate = incoming.ledger.append({ event: "gate_finished", task: "T", attempt: 1, outputPath: "/local/gate.log", verdict: "green", exit: 0, note: "passed", sha: "abc" });
+  const binding = { epochId: epoch.epoch_id!, workspace: contract.workspace, commits: ["abc"], artifactPresent: true, files: [{ eventId: gate.event_id!, path: gate.outputPath! }] };
   const input = { existingLines: local.raw(), sources: [{ nodeId: "holder", lines: incoming.raw() }], bindings: [binding] };
   assert.equal(planHistoryImport(input).status, "conflicted");
   assert.equal(planHistoryImport({ ...input, bindings: [{ ...binding, claims: [{ eventId: claim.event_id!, sha: "abc" }] }] }).status, "ready");
+});
+
+
+test("import retains contradictory v2 green Gate bytes without activation", (t) => {
+  const local = snapshot(t);
+  const incoming = snapshot(t);
+  incoming.ledger.append(contract);
+  incoming.ledger.append({ event: "claim_reported", task: "T", attempt: 1, sha: "abc" });
+  incoming.ledger.append({ event: "gate_finished", task: "T", attempt: 1, verdict: "green", exit: 0, note: "passed", sha: "abc" });
+  const damaged = incoming.raw().replace('"exit":0', '"exit":7');
+  const plan = planHistoryImport({ existingLines: local.raw(), sources: [{ nodeId: "source", lines: damaged }] });
+  assert.equal(plan.status, "conflicted");
+  assert.match(plan.conflicts.map(item => item.reason).join("\n"), /valid ledger event/);
+  assert.equal(plan.sources[0]!.lines, damaged);
+  assert.equal(plan.lines, local.raw());
 });

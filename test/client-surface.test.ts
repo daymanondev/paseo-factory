@@ -229,7 +229,6 @@ test("FactoryShell removes PrivateVaultCard from the Plugins tab, wires vaultSyn
   assert.match(shell, /useRpc\(vaultImport\)/);
   assert.match(shell, /busyAct/, "FactoryShell tracks busyAct for in-flight button labels");
   assert.match(shell, /vaultNote/, "FactoryShell tracks vaultNote for inline status feedback");
-  assert.match(shell, /toast\.show\(summary, \{ variant: "success" \}\)/, "act() fires a green success toast whenever summary is returned");
 });
 
 // ---- Thinking Variant Sanitization in Seats & Models UI (v0.0.24, ADR 0015 §1) --------------

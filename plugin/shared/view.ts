@@ -256,7 +256,10 @@ export type LedgerLineView = z.infer<typeof LedgerLineViewSchema>;
  * gather is a pure filesystem probe the snapshot handler owns; this file is
  * the wire shape alone.
  */
+export const ImportStatusSchema = z.object({ id: z.string(), target: z.string(), status: z.enum(["staged", "pending", "applied", "conflicted"]), added: z.number().optional(), duplicates: z.number().optional(), conflicts: z.array(z.object({ reason: z.string(), sourceId: z.string().optional(), eventId: z.string().optional() })).optional(), diagnostics: z.array(z.string()) });
+
 export const VaultStatusViewSchema = z.object({
+  historyImports: z.array(ImportStatusSchema).optional(),
   configured: z.boolean(),
   repo: z.string().nullable(),
   branch: z.string(),

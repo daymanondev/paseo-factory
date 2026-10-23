@@ -430,7 +430,7 @@ function needsHumanEvidenceIsValid(evidence, reason) {
 function isValidLedgerEvent(value) {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const event = value;
-  return (event.schema_version === void 0 || event.schema_version === 1 || event.schema_version === 2) && (event.schema_version !== 2 || identityMetadataIsValid(event)) && Number.isSafeInteger(event.seq) && event.seq > 0 && typeof event.ts === "string" && typeof event.event === "string" && EVENT_NAMES.includes(event.event) && shapeIsValid(value);
+  return (event.schema_version === void 0 || event.schema_version === 1 || event.schema_version === 2) && (event.schema_version !== 2 || identityMetadataIsValid(event)) && Number.isSafeInteger(event.seq) && event.seq > 0 && typeof event.ts === "string" && typeof event.event === "string" && EVENT_NAMES.includes(event.event) && shapeIsValid(value) && (event.schema_version !== 2 || v2PayloadIsValid(event));
 }
 function nonempty(value) {
   return typeof value === "string" && value.trim() !== "";
@@ -546,6 +546,58 @@ function usageIsValid(usage) {
   }
   return true;
 }
+function v2PayloadIsValid(event) {
+  const string = (key) => typeof event[key] === "string";
+  const optionalString = (key) => event[key] === void 0 || string(key);
+  const strings = (key) => event[key] === void 0 || Array.isArray(event[key]) && event[key].every((item) => typeof item === "string");
+  const duration = () => typeof event.durationMs === "number" && Number.isFinite(event.durationMs) && event.durationMs >= 0;
+  if (event.task !== void 0 && !nonempty(event.task)) return false;
+  if (event.attempt !== void 0 && (!Number.isSafeInteger(event.attempt) || event.attempt < 1)) return false;
+  if (event.attempt !== void 0 && !["claim_reported", "gate_started", "gate_finished", "fresh_eyes_written", "watch_written", "report_written", "attempt_accepted"].includes(event.event)) return false;
+  if (event.event === "needs_human" && record(event.evidence) && !Object.values(event.evidence).every((value) => Number.isSafeInteger(value) && value > 0)) return false;
+  if (event.arity !== void 0 && (!Number.isSafeInteger(event.arity) || event.arity < 1)) return false;
+  if (event.event === "ledger_schema" || event.event === "retro_written") {
+    if (event.task !== void 0 || event.attempt !== void 0) return false;
+  }
+  switch (event.event) {
+    case "ledger_schema":
+      return true;
+    case "contract_set":
+      return string("workspace") && string("gate") && string("artifact") && strings("scope") && strings("skills") && optionalString("base") && optionalString("description") && optionalString("by") && (event.freshEyes === void 0 || event.freshEyes === true) && (event.watch === void 0 || event.watch === true);
+    case "claim_reported":
+      return string("sha") && optionalString("agent");
+    case "gate_started":
+      return string("cmd");
+    case "gate_finished":
+      return (event.exit === null || Number.isSafeInteger(event.exit)) && (event.verdict === "red" || event.verdict === "green") && (event.verdict !== "green" || event.exit === 0 && nonempty(event.sha)) && string("note") && optionalString("sha") && optionalString("outputPath");
+    case "fresh_eyes_written":
+      return string("model") && ["concern", "clear", "failed"].includes(event.outcome) && string("finding") && duration();
+    case "watch_written": {
+      if (!string("model") || !["written", "failed"].includes(event.outcome) || !duration() || !optionalString("error")) return false;
+      if (event.answers !== void 0 && (!record(event.answers) || !Object.values(event.answers).every((value) => value === null || typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1))) return false;
+      if (event.usage !== void 0 && (!record(event.usage) || ![event.usage.input_tokens, event.usage.cost].every((value) => typeof value === "number" && Number.isFinite(value) && value >= 0))) return false;
+      return event.outcome !== "failed" || string("error");
+    }
+    case "report_written":
+      return string("path");
+    case "attempt_accepted":
+      return optionalString("accepted_by") && optionalString("landingNote") && (event.landing === void 0 || event.landing === "landed" || event.landing === "pending-conflict");
+    case "permit_allowed":
+    case "permit_denied":
+      return string("name") && string("kind") && optionalString("command") && (event.event !== "permit_denied" || string("reason"));
+    case "git_blocked":
+      return string("reason");
+    case "spawn_dispatched":
+      return optionalString("worktree");
+    case "retro_written":
+      return string("model") && duration() && optionalString("error") && optionalString("proposalsPath") && (event.proposalCount === void 0 || Number.isSafeInteger(event.proposalCount) && event.proposalCount >= 0) && (event.outcome === "written" ? string("proposalsPath") && event.proposalCount !== void 0 : event.outcome === "failed" && string("error"));
+    default:
+      return true;
+  }
+}
+function record(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   isValidLedgerEvent,
@@ -570,100 +622,104 @@ function readLedgerEventsList(stateDir) {
   return read.events;
 }
 
+// BEGIN GENERATED TASK STATUS POLICY
+import { createRequire as taskStatusPolicyRequire } from "node:module";
+const taskStatusPolicy = (() => {
+const require = taskStatusPolicyRequire(import.meta.url);
+const module = { exports: {} };
+// Generated by scripts/generate-policies.mjs from checked TypeScript. Do not edit.
+"use strict";
+var __defProp = Object.defineProperty;
+var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __export = (target, all) => {
+  for (var name in all)
+    __defProp(target, name, { get: all[name], enumerable: true });
+};
+var __copyProps = (to, from, except, desc) => {
+  if (from && typeof from === "object" || typeof from === "function") {
+    for (let key of __getOwnPropNames(from))
+      if (!__hasOwnProp.call(to, key) && key !== except)
+        __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
+  }
+  return to;
+};
+var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
+
+// src/task-status.ts
+var task_status_exports = {};
+__export(task_status_exports, {
+  taskStatusLines: () => taskStatusLines
+});
+module.exports = __toCommonJS(task_status_exports);
+
+// src/task-state.ts
+function last(events, kind) {
+  return events.findLast((event) => event.event === kind);
+}
+function projectTask(events, task) {
+  const history = events.filter((event) => "task" in event && event.task === task);
+  const contract = last(history, "contract_set");
+  const epochSeq = contract?.seq ?? 0;
+  const epochId = contract?.epoch_id;
+  const epoch = history.filter((event) => epochId === void 0 ? event.seq >= epochSeq : event.epoch_id === epochId);
+  const acceptance = last(history, "attempt_accepted");
+  const settled = acceptance !== void 0 && acceptance.landing !== "pending-conflict";
+  const latestGate = last(epoch, "gate_finished");
+  const needs = last(epoch, "needs_human");
+  const needsHuman = needs !== void 0 && needs.seq > (latestGate?.seq ?? -1);
+  const numbers = [...new Set(epoch.flatMap((event) => "attempt" in event ? [event.attempt] : []))].sort((a, b) => a - b);
+  const attempts = numbers.map((attempt) => {
+    const own = epoch.filter((event) => "attempt" in event && event.attempt === attempt);
+    const gate = last(own, "gate_finished");
+    const review = last(own, "fresh_eyes_written");
+    const started = own.some((event) => event.event === "claim_reported" || event.event === "gate_started");
+    const reportComplete = last(own, "report_written") !== void 0;
+    const reviewState = review?.outcome ?? (contract?.freshEyes === true ? reportComplete ? "incomplete" : "pending" : "off");
+    const ownerEligible = !settled && gate?.verdict === "green";
+    const leadRefusal = needsHuman ? "task is in needs_human" : reviewState === "concern" ? "attempt carries a fresh-eyes CONCERN" : contract?.freshEyes === true && reviewState !== "clear" ? `required fresh-eyes review is ${reviewState}; completed CLEAR is required` : void 0;
+    return { attempt, events: own, gate, review, reviewState, gateOpen: started && gate === void 0, reportComplete, open: started && !reportComplete, ownerEligible, leadEligible: ownerEligible && leadRefusal === void 0, leadRefusal };
+  });
+  const dispatch = epoch.findLast((event) => event.event === "spawn_dispatched" || event.event === "respawn_dispatched");
+  const status = acceptance !== void 0 ? "accepted" : needsHuman ? "needs-human" : attempts.some((attempt) => attempt.open) || dispatch !== void 0 && dispatch.seq > (latestGate?.seq ?? -1) ? "running" : numbers.length === 0 ? "waiting" : latestGate?.verdict === "green" ? "ready-to-accept" : "red";
+  return { task, history, contract, epochSeq, epochId, epoch, attempts, acceptance, settled, pendingLanding: acceptance?.landing === "pending-conflict", needsHuman, needs: needsHuman ? needs : void 0, status, maxAttempt: numbers.at(-1) ?? 0, inFlightAttempt: attempts.find((attempt) => attempt.open)?.attempt };
+}
+
+// src/task-status.ts
+function taskStatusLines(events, workspaceFilter) {
+  const tasks = [...new Set(events.flatMap((event) => event.event === "contract_set" ? [event.task] : []))];
+  const lines = [];
+  for (const task of tasks) {
+    const state = projectTask(events, task);
+    if (workspaceFilter && state.contract?.workspace && state.contract.workspace !== workspaceFilter) continue;
+    const gate = state.epoch.findLast((event) => event.event === "gate_finished");
+    const current = state.attempts.at(-1);
+    const review = current?.review;
+    const count = (kind) => state.epoch.filter((event) => event.event === kind).length;
+    const eligible = (role) => state.attempts.filter((attempt) => attempt[role]).map((attempt) => attempt.attempt).join(",") || "-";
+    lines.push(`${task} attempts=${state.maxAttempt} verdict=${gate?.verdict ?? "-"} sha=${gate?.sha?.slice(0, 7) ?? "-"} accepted=${state.acceptance === void 0 ? "no" : "yes"} eye=${review?.outcome ?? "-"} choke=${count("permit_allowed")}/${count("permit_denied")}/${count("git_blocked")}` + (state.needs === void 0 ? "" : ` needs-human=${state.needs.reason}`) + ` review=${current?.reviewState ?? (state.contract?.freshEyes === true ? "pending" : "off")} owner-eligible=${eligible("ownerEligible")} lead-eligible=${eligible("leadEligible")}`);
+  }
+  const retro = events.findLast((event) => event.event === "retro_written");
+  if (retro !== void 0) {
+    const count = retro.outcome === "written" && Number.isInteger(retro.proposalCount) ? ` proposals=${retro.proposalCount}` : "";
+    lines.push(`retro last=${retro.ts.slice(0, 10)} outcome=${retro.outcome}${count}`);
+  }
+  return lines;
+}
+// Annotate the CommonJS export names for ESM import in node:
+0 && (module.exports = {
+  taskStatusLines
+});
+
+return module.exports;
+})();
+// END GENERATED TASK STATUS POLICY
+
 function formatFactoryStatus(stateDir, workspaceFilter) {
   const events = readLedgerEventsList(stateDir);
-  if (events.length === 0) {
-    return `factory: no tasks yet (ledger: ${join(stateDir, "ledger.jsonl")})`;
-  }
-  const NO_ATTEMPT_EVENTS = new Set([
-    "contract_set",
-    "permit_allowed",
-    "permit_denied",
-    "git_blocked",
-    "spawn_dispatched",
-    "spawn_refused",
-    "meter_written",
-    "repoke_dispatched",
-    "repoke_refused",
-    "respawn_dispatched",
-    "respawn_refused",
-    "needs_human",
-    "retro_written",
-  ]);
-  const order = [];
-  const byTask = new Map();
-  let retro;
-  for (const evt of events) {
-    if (evt.event === "retro_written") {
-      retro = evt;
-      continue;
-    }
-    if (evt.event !== "contract_set" && NO_ATTEMPT_EVENTS.has(evt.event)) {
-      const counted = byTask.get(evt.task);
-      if (counted !== undefined) {
-        if (evt.event === "permit_allowed") counted.allowed += 1;
-        else if (evt.event === "permit_denied") counted.denied += 1;
-        else if (evt.event === "git_blocked") counted.blocked += 1;
-        else if (evt.event === "needs_human") counted.needsHuman = evt.reason;
-      }
-      continue;
-    }
-    let state = byTask.get(evt.task);
-    if (state === undefined) {
-      state = {
-        attempts: 0,
-        verdict: undefined,
-        sha: undefined,
-        eye: undefined,
-        accepted: false,
-        allowed: 0,
-        denied: 0,
-        blocked: 0,
-        needsHuman: undefined,
-        workspace: undefined,
-      };
-      byTask.set(evt.task, state);
-      order.push(evt.task);
-    }
-    if (evt.event === "contract_set") {
-      state.workspace = evt.workspace;
-      if (!state.accepted) {
-        state.attempts = 0;
-        state.verdict = undefined;
-        state.sha = undefined;
-        state.eye = undefined;
-        state.needsHuman = undefined;
-        state.allowed = 0;
-        state.denied = 0;
-        state.blocked = 0;
-      }
-      continue;
-    }
-    if (evt.attempt > state.attempts) state.attempts = evt.attempt;
-    if (evt.event === "gate_finished") {
-      state.verdict = evt.verdict;
-      state.sha = typeof evt.sha === "string" ? evt.sha.slice(0, 7) : undefined;
-    }
-    if (evt.event === "fresh_eyes_written") {
-      state.eye = typeof evt.outcome === "string" ? evt.outcome : undefined;
-    }
-    if (evt.event === "attempt_accepted") state.accepted = true;
-  }
-
-  const lines = [];
-  for (const task of order) {
-    const s = byTask.get(task);
-    if (workspaceFilter && s.workspace && s.workspace !== workspaceFilter) continue;
-    lines.push(
-      `${task} attempts=${s.attempts} verdict=${s.verdict ?? "-"} sha=${s.sha ?? "-"} accepted=${s.accepted ? "yes" : "no"} eye=${s.eye ?? "-"} choke=${s.allowed}/${s.denied}/${s.blocked}` +
-        `${s.needsHuman === undefined ? "" : ` needs-human=${s.needsHuman}`}`,
-    );
-  }
-  if (retro !== undefined) {
-    const day = typeof retro.ts === "string" ? retro.ts.slice(0, 10) : "-";
-    const count = retro.outcome === "written" && Number.isInteger(retro.proposalCount) ? ` proposals=${retro.proposalCount}` : "";
-    lines.push(`retro last=${day} outcome=${retro.outcome ?? "-"}${count}`);
-  }
+  if (events.length === 0) return `factory: no tasks yet (ledger: ${join(stateDir, "ledger.jsonl")})`;
+  const lines = taskStatusPolicy.taskStatusLines(events, workspaceFilter);
   return lines.length > 0 ? lines.join("\n") : "factory: no matching tasks";
 }
 
