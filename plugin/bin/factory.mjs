@@ -39,6 +39,7 @@ import { parseArgs } from "node:util";
 import { existsSync } from "node:fs";
 import { join, resolve as resolvePath } from "node:path";
 import { readLedgerEvents } from "./ledger-read.mjs";
+import { taskStatusLines } from "./task-status.mjs";
 import { awaitReply, randomId, resolveHome, spoolRootFor, stateDirFor, submit } from "./spool-client.mjs";
 import { LANE_NAMES, loadLanes, resolveRunProvider, saveLanes } from "./lanes-config.mjs";
 import { resolveProject } from "./project.mjs";
@@ -326,9 +327,6 @@ const stampedCorrelation =
 const submitter = stampedAgent !== "" ? stampedAgent : stampedCorrelation !== "" ? stampedCorrelation : "owner";
 const rawSeat = typeof process.env.PASEO_FACTORY_SEAT === "string" ? process.env.PASEO_FACTORY_SEAT.trim() : "";
 const stampedSeat = rawSeat === "supervisor" || rawSeat === "lead" || rawSeat === "agent" ? rawSeat : undefined;
-
-// Task-level events do not advance the Attempt count in the status projection.
-const NO_ATTEMPT_EVENTS = new Set(["contract_set", "permit_allowed", "permit_denied", "git_blocked", "spawn_dispatched", "spawn_refused", "meter_written", "repoke_dispatched", "repoke_refused", "respawn_dispatched", "respawn_refused", "needs_human", "retro_written"]);
 
 function fail(message) {
   console.error(`factory: ${message}\n\n${usage}`);
@@ -756,7 +754,7 @@ if (command === "status") {
     console.log(`factory: no tasks yet (ledger: ${ledgerPath})`);
     process.exit(0);
   }
-  for (const line of statusLines(events)) console.log(line);
+  for (const line of taskStatusLines(events)) console.log(line);
   process.exit(0);
 }
 
@@ -951,78 +949,6 @@ if (command === "vault") {
 }
 
 fail(`unknown command "${command}"`);
-
-/** One line per task, in first-appearance (ledger) order — the Owner's glance at the factory. */
-function statusLines(events) {
-  const order = [];
-  const byTask = new Map();
-  let retro;
-  for (const evt of events) {
-    if (evt.event === "retro_written") {
-      // The one factory-level event (v0.0.7): it belongs to no task line —
-      // the last retro on record prints once, after every task.
-      retro = evt;
-      continue;
-    }
-    if (evt.event !== "contract_set" && NO_ATTEMPT_EVENTS.has(evt.event)) {
-      // The choke events (v0.0.4) carry no Attempt: they count toward their
-      // task's line — a live Contract always precedes them in the ledger — and
-      // an untasked git block counts toward no line at all. The spawn events
-      // (v0.0.5) ride the ledger as the spawn record itself: validated and read
-      // through, counted toward no field — the driver's output and the ledger
-      // name refusals, the glance does not repeat them.
-      const counted = byTask.get(evt.task);
-      if (counted !== undefined) {
-        if (evt.event === "permit_allowed") counted.allowed += 1;
-        else if (evt.event === "permit_denied") counted.denied += 1;
-        else if (evt.event === "git_blocked") counted.blocked += 1;
-        else if (evt.event === "needs_human") counted.needsHuman = evt.reason; // the last one on record — the glance's needs-human marker (v0.0.10)
-      }
-      continue;
-    }
-    let state = byTask.get(evt.task);
-    if (state === undefined) {
-      state = { attempts: 0, verdict: undefined, sha: undefined, eye: undefined, accepted: false, allowed: 0, denied: 0, blocked: 0, needsHuman: undefined };
-      byTask.set(evt.task, state);
-      order.push(evt.task);
-    }
-    if (evt.event === "contract_set") {
-      if (!state.accepted) {
-        state.attempts = 0;
-        state.verdict = undefined;
-        state.sha = undefined;
-        state.eye = undefined;
-        state.needsHuman = undefined;
-        state.allowed = 0;
-        state.denied = 0;
-        state.blocked = 0;
-      }
-      continue;
-    }
-    if (evt.attempt > state.attempts) state.attempts = evt.attempt;
-    if (evt.event === "gate_finished") {
-      state.verdict = evt.verdict; // the last verdict on record, even while a newer attempt runs
-      state.sha = typeof evt.sha === "string" ? evt.sha.slice(0, 7) : undefined; // git's short length
-    }
-    if (evt.event === "fresh_eyes_written") {
-      state.eye = typeof evt.outcome === "string" ? evt.outcome : undefined; // the last eye on record
-    }
-    if (evt.event === "attempt_accepted") state.accepted = true;
-  }
-  const lines = order.map((task) => {
-    const s = byTask.get(task);
-    return (
-      `${task} attempts=${s.attempts} verdict=${s.verdict ?? "-"} sha=${s.sha ?? "-"} accepted=${s.accepted ? "yes" : "no"} eye=${s.eye ?? "-"} choke=${s.allowed}/${s.denied}/${s.blocked}` +
-      `${s.needsHuman === undefined ? "" : ` needs-human=${s.needsHuman}`}`
-    );
-  });
-  if (retro !== undefined) {
-    const day = typeof retro.ts === "string" ? retro.ts.slice(0, 10) : "-";
-    const count = retro.outcome === "written" && Number.isInteger(retro.proposalCount) ? ` proposals=${retro.proposalCount}` : "";
-    lines.push(`retro last=${day} outcome=${retro.outcome ?? "-"}${count}`);
-  }
-  return lines;
-}
 
 function die(message) {
   console.error(`factory: ${message}`);
