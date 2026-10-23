@@ -24,10 +24,11 @@
  *   on every conflict path.
  */
 import { spawnSync } from "node:child_process";
-import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { existsSync, realpathSync, rmSync } from "node:fs";
+
 import { projectStateDir, resolveProject } from "./project.mjs";
 import { taskWorktreePath } from "../shared/worktree-shape.mjs";
+import { hydrateTaskWorktree } from "./worktree-policy.mjs";
 
 const GIT_TIMEOUT_MS = 15_000;
 
@@ -93,8 +94,7 @@ export function prepareTaskWorktree({ stateDir, workspace, task, base }) {
   if (added.error !== undefined || added.status !== 0) {
     return { ok: false, reason: `could not create the task worktree at ${path} on ${branch}: ${firstLine(added.stderr ?? added.error?.message ?? "")}` };
   }
-  copyWorktreeIncludes(root, path);
-  inheritNodeModules(root, path);
+  hydrateTaskWorktree(root, path);
   return { ok: true, path, branch, reset };
 }
 
@@ -104,107 +104,6 @@ function headOf(root) {
   if (out.error !== undefined || out.status !== 0) return undefined;
   const sha = out.stdout.trim();
   return /^[0-9a-f]{40}$/i.test(sha) ? sha : undefined;
-}
-
-/** One `.worktreeinclude` pattern as a match predicate over workspace-relative paths. */
-function patternMatches(pattern, file) {
-  if (pattern.endsWith("/")) return file.startsWith(pattern);
-  let re = "";
-  for (const ch of pattern) {
-    if (ch === "*") re += "[^/]*";
-    else if (ch === "?") re += "[^/]";
-    else re += ch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  }
-  return new RegExp(`^${re}$`).test(file);
-}
-
-/**
- * Copies the untracked files `<project-root>/.worktreeinclude` names (env
- * files, local secrets — one pattern per line, `#` comments) into the fresh
- * worktree, then hides the copies from the WORKTREE's own `git status` via a
- * per-worktree `core.excludesFile` (git's `info/exclude` resolves through the
- * COMMON dir, shared with `<project-root>` — writing there would hide the
- * user's own untracked files at the root, so the worktree-private
- * `<gitdir-of-worktree>/factory-excludes` + `git config --worktree` is the
- * mechanism instead; the file dies with the worktree registration). The
- * Claim's clean-tree station reads that status — a copied `.env` must never
- * redden an honest attempt. Missing include file: nothing is copied, no
- * failure — the common case.
- */
-function copyWorktreeIncludes(root, worktreePath) {
-  let raw;
-  try {
-    raw = readFileSync(join(root, ".worktreeinclude"), "utf8");
-  } catch {
-    return; // no include file — the common case
-  }
-  const patterns = raw
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line !== "" && !line.startsWith("#"));
-  if (patterns.length === 0) return;
-  const untracked = new Set();
-  for (const extra of [[], ["--ignored"]]) {
-    const listed = gitIn(root, ["ls-files", "--others", "--exclude-standard", ...extra]);
-    if (listed.error !== undefined || listed.status !== 0) continue;
-    for (const line of listed.stdout.split("\n")) {
-      const file = line.trim();
-      if (file !== "") untracked.add(file);
-    }
-  }
-  const copied = [];
-  for (const file of untracked) {
-    if (!patterns.some((pattern) => patternMatches(pattern, file))) continue;
-    const from = join(root, file);
-    const to = join(worktreePath, file);
-    try {
-      if (!statSync(from).isFile()) continue;
-      mkdirSync(dirname(to), { recursive: true });
-      cpSync(from, to);
-      copied.push(file);
-    } catch {
-      // One uncopiable file never fails the allocation — the agent will see it
-      // missing and the include list stays the operator's hint, not a promise.
-    }
-  }
-  excludeFromWorktree(root, worktreePath, copied);
-}
-
-/** Directory links must be excluded as `node_modules`, not `node_modules/`. */
-function inheritNodeModules(root, worktreePath) {
-  const source = join(root, "node_modules");
-  const target = join(worktreePath, "node_modules");
-  try {
-    if (!statSync(source).isDirectory()) return;
-    try {
-      lstatSync(target); // preserve an installed directory or any existing link
-    } catch (error) {
-      if (error.code !== "ENOENT") return;
-      symlinkSync(source, target, "dir");
-    }
-    excludeFromWorktree(root, worktreePath, ["node_modules"]);
-  } catch {
-    // Missing or inaccessible root dependencies do not refuse allocation.
-  }
-}
-
-function excludeFromWorktree(root, worktreePath, entries) {
-  if (entries.length === 0) return;
-  try {
-    const gitDirOut = gitIn(worktreePath, ["rev-parse", "--git-dir"]);
-    if (gitDirOut.error !== undefined || gitDirOut.status !== 0) return;
-    const gitDir = resolve(worktreePath, gitDirOut.stdout.trim());
-    const excludesFile = join(gitDir, "factory-excludes");
-    let existing = "";
-    try { existing = readFileSync(excludesFile, "utf8"); } catch { /* first allocation */ }
-    const patterns = new Set([...existing.split("\n").filter(Boolean), ...entries]);
-    writeFileSync(excludesFile, `${[...patterns].join("\n")}\n`);
-    gitIn(root, ["config", "extensions.worktreeConfig", "true"]); // idempotent, enables `--worktree`
-    gitIn(worktreePath, ["config", "--worktree", "core.excludesFile", excludesFile]);
-  } catch {
-    // Best-effort only — a failed exclude shows as an untracked file the gate
-    // would surface, never a lost allocation.
-  }
 }
 
 /**

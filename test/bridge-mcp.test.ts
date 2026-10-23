@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { CorrelationRegistry } from "../src/correlations.ts";
@@ -29,9 +29,10 @@ async function runMcpSession(options: {
   env?: NodeJS.ProcessEnv;
   cwd?: string;
   framing?: "newline" | "content-length";
+  script?: string;
   requests: Array<Record<string, unknown>>;
 }): Promise<Array<Record<string, unknown>>> {
-  const child = spawn(process.execPath, [BRIDGE_BIN, ...(options.args ?? [])], {
+  const child = spawn(process.execPath, [options.script ?? BRIDGE_BIN, ...(options.args ?? [])], {
     cwd: options.cwd ?? process.cwd(),
     env: options.env ?? process.env,
     stdio: ["pipe", "pipe", "pipe"],
@@ -659,11 +660,20 @@ test("bridge Task allocation inherits root dependencies and keeps them clean", a
   const stateDir = join(homeDir, "plugin-state", "paseo-factory");
   const repoDir = makeGitRepo();
   writeFileSync(join(repoDir, ".gitignore"), "node_modules/\n");
-  execFileSync("git", ["add", ".gitignore"], { cwd: repoDir });
+  writeFileSync(join(repoDir, ".worktreeinclude"), "runtime/**/*.json\n.env.local\n");
+  execFileSync("git", ["add", ".gitignore", ".worktreeinclude"], { cwd: repoDir });
   execFileSync("git", ["commit", "-m", "ignore installed dependencies"], { cwd: repoDir });
   const rootDependencies = join(repoDir, "node_modules");
   mkdirSync(rootDependencies);
   writeFileSync(join(rootDependencies, "root-package"), "root install\n");
+  mkdirSync(join(repoDir, "runtime/deep"), { recursive: true });
+  writeFileSync(join(repoDir, "runtime/config.json"), "selected at root\n");
+  writeFileSync(join(repoDir, "runtime/deep/config.json"), "selected nested\n");
+  writeFileSync(join(repoDir, ".env.local"), "selected env\n");
+  writeFileSync(join(repoDir, "private.txt"), "unselected private content\n");
+  writeFileSync(join(repoDir, "runtime/private.txt"), "unselected nested private content\n");
+  const copiedBridge = join(homeDir, "bridge.mjs");
+  copyFileSync(BRIDGE_BIN, copiedBridge);
   const commonExclude = readFileSync(join(repoDir, ".git", "info", "exclude"), "utf8");
   const factory = createFactory({ stateDir, eyeCliProbe: () => false });
   const reg = ensureProjectRegistered(stateDir, repoDir);
@@ -673,6 +683,7 @@ test("bridge Task allocation inherits root dependencies and keeps them clean", a
   const spool = startSpool(stateDir, factory, { pollMs: 25 });
   const spawnTask = async () => {
     const responses = await runMcpSession({
+      script: copiedBridge,
       args: ["--correlation", correlation.correlationId, "--state-dir", stateDir, "--home", homeDir],
       cwd: repoDir,
       requests: [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_spawn_agent", arguments: { tasks: ["deps"] } } }],
@@ -685,6 +696,12 @@ test("bridge Task allocation inherits root dependencies and keeps them clean", a
   };
   try {
     const worktree = await spawnTask();
+    assert.equal(existsSync(join(worktree, "private.txt")), false);
+    assert.equal(existsSync(join(worktree, "runtime/private.txt")), false);
+    assert.equal(readFileSync(join(worktree, "runtime/config.json"), "utf8"), "selected at root\n");
+    assert.equal(readFileSync(join(worktree, "runtime/deep/config.json"), "utf8"), "selected nested\n");
+    assert.equal(readFileSync(join(worktree, ".env.local"), "utf8"), "selected env\n");
+    assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: worktree, encoding: "utf8" }).trim(), "");
     const inherited = join(worktree, "node_modules");
     assert.equal(lstatSync(inherited).isSymbolicLink(), true);
     assert.equal(realpathSync(inherited), realpathSync(rootDependencies));

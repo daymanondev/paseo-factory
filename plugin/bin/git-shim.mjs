@@ -26,6 +26,7 @@
 import { appendFileSync, constants as fsConstants, existsSync, mkdirSync, accessSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
+import { inheritChildOutcome } from "./process-policy.mjs";
 import {
   isSeatMemoryRelativePathAllowed,
   parseGitSubcommand,
@@ -388,21 +389,6 @@ if (realGit === undefined) {
 }
 
 const child = spawn(realGit, argv, { stdio: "inherit" });
-const forward = new Set(["SIGINT", "SIGTERM", "SIGHUP"]);
-for (const signal of forward) {
-  process.on(signal, () => child.kill(signal));
-}
-child.on("error", (err) => {
+inheritChildOutcome(child, (err) => {
   console.error(`git: paseo-factory shim could not run ${realGit}: ${err.message}`);
-  process.exit(127);
-});
-child.on("close", (code, signal) => {
-  if (signal !== null) {
-    // Die by the same signal (default disposition restored first, so this
-    // actually terminates rather than re-entering the forwarder above).
-    for (const s of forward) process.removeAllListeners(s);
-    process.kill(process.pid, signal);
-  } else {
-    process.exit(code ?? 1);
-  }
 });
