@@ -17,7 +17,7 @@ import { Modal, ScrollView, useToast } from "@getpaseo/plugin/client/react-nativ
 import { useEffect, useRef, useState } from "react";
 import { Text, View } from "react-native";
 import { accept, lanesSet, leadRotate, pluginsInstall, pluginsManage, pluginsCheckUpdates, projectReset, ratifyProposal, retro, snapshot, supervisorRevoke, taskDetail, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
-
+import type { ManageablePluginId } from "../../shared/companions.ts";
 import type { FactoryView, LaneName, TaskDetailView } from "../../shared/view.ts";
 import { Btn, Card, TabBar } from "../kit/pill.tsx";
 import type { TabId } from "../kit/pill.tsx";
@@ -123,6 +123,26 @@ export function FactoryShell({
   const elapsedSeconds = activePluginAct === null ? 0 : Math.max(0, Math.floor((now - activePluginAct.startedAt) / 1000));
   useEffect(() => { if (view !== null) setVaultNote(null); }, [view]);
 
+  const clearPluginCardError = (target: ManageablePluginId | "all"): void => {
+    if (target === "all") {
+      setPluginCardErrors({});
+      return;
+    }
+    setPluginCardErrors((prev) => {
+      if (!(target in prev)) return prev;
+      const next = { ...prev };
+      delete next[target];
+      return next;
+    });
+  };
+
+  const recordPluginActFailure = (actName: string, target: ManageablePluginId | "all", errorMessage: string): void => {
+    setPluginsNote({ text: `${actName}: ${errorMessage}`, tone: "statusDanger", pluginId: target });
+    if (target !== "all") {
+      setPluginCardErrors((prev) => ({ ...prev, [target]: errorMessage }));
+    }
+  };
+
   // While `paseo-factory` is restarting after a self-update or self-reload, poll
   // `factory.snapshot` every 1s and evaluate `resolveCoreRestartWatch`.
   useEffect(() => {
@@ -131,9 +151,13 @@ export function FactoryShell({
   }, [activePluginAct?.kind, now]);
 
   useEffect(() => {
-    if (activePluginAct?.kind !== "restarting-core" || view === null) return;
+    if (activePluginAct?.kind !== "restarting-core") return;
+    const freshView =
+      poll.value !== null && poll.error === null && poll.at !== null && poll.at >= activePluginAct.startedAt
+        ? poll.value
+        : null;
     const resolution = resolveCoreRestartWatch({
-      view,
+      view: freshView,
       previousRevision: activePluginAct.fromRevision ?? null,
       targetRevision: activePluginAct.targetRevision ?? null,
       action: activePluginAct.action === "reload" ? "reload" : "update",
@@ -143,18 +167,13 @@ export function FactoryShell({
     setActivePluginAct(null);
     setPluginsNote(resolution.note);
     if (resolution.status === "completed") {
-      setPluginCardErrors((prev) => {
-        if (!("paseo-factory" in prev)) return prev;
-        const next = { ...prev };
-        delete next["paseo-factory"];
-        return next;
-      });
+      clearPluginCardError("paseo-factory");
       toast.show(resolution.note.text, { variant: "success" });
     } else {
       setPluginCardErrors((prev) => ({ ...prev, "paseo-factory": resolution.note.text }));
       toast.error(resolution.note.text);
     }
-  }, [activePluginAct, view, now]);
+  }, [activePluginAct, poll.value, poll.error, poll.at, now]);
 
   // Automatically check for plugin updates once when the Owner opens the Plugins tab
   // if update status has never been checked or is older than 5 minutes (v0.0.25, ADR 0012 §4).
@@ -367,13 +386,7 @@ export function FactoryShell({
             pluginsNote={pluginsNote}
             cardErrors={pluginCardErrors}
             dismissNote={() => setPluginsNote(null)}
-            dismissCardError={(id) =>
-              setPluginCardErrors((prev) => {
-                const next = { ...prev };
-                delete next[id];
-                return next;
-              })
-            }
+            dismissCardError={(id) => clearPluginCardError(id as ManageablePluginId)}
             actions={{
               busy: busy || activePluginAct !== null,
               checkingUpdates,
@@ -390,11 +403,11 @@ export function FactoryShell({
                         pluginId: "all",
                       });
                     } else {
-                      setPluginsNote({ text: `Check Updates: ${reply.error}`, tone: "statusDanger", pluginId: "all" });
+                      recordPluginActFailure("Check Updates", "all", reply.error);
                     }
                     return reply;
                   } catch (error) {
-                    setPluginsNote({ text: `Check Updates: ${String(error)}`, tone: "statusDanger", pluginId: "all" });
+                    recordPluginActFailure("Check Updates", "all", String(error));
                     throw error;
                   } finally {
                     setCheckingUpdates(false);
@@ -403,15 +416,7 @@ export function FactoryShell({
                 });
               },
               install: (target, source, ref) => {
-                if (target === "all") {
-                  setPluginCardErrors({});
-                } else {
-                  setPluginCardErrors((prev) => {
-                    const next = { ...prev };
-                    delete next[target];
-                    return next;
-                  });
-                }
+                clearPluginCardError(target);
                 setActivePluginAct({ kind: "install", target, startedAt: Date.now() });
                 void act("Install", async () => {
                   try {
@@ -419,18 +424,11 @@ export function FactoryShell({
                     if (reply.ok) {
                       setPluginsNote({ text: reply.summary, tone: "statusSuccess", pluginId: target });
                     } else {
-                      setPluginsNote({ text: `Install: ${reply.error}`, tone: "statusDanger", pluginId: target });
-                      if (target !== "all") {
-                        setPluginCardErrors((prev) => ({ ...prev, [target]: reply.error }));
-                      }
+                      recordPluginActFailure("Install", target, reply.error);
                     }
                     return reply;
                   } catch (error) {
-                    const msg = String(error);
-                    setPluginsNote({ text: `Install: ${msg}`, tone: "statusDanger", pluginId: target });
-                    if (target !== "all") {
-                      setPluginCardErrors((prev) => ({ ...prev, [target]: msg }));
-                    }
+                    recordPluginActFailure("Install", target, String(error));
                     throw error;
                   } finally {
                     setActivePluginAct(null);
@@ -452,21 +450,13 @@ export function FactoryShell({
                 const targetRevision =
                   action === "update"
                     ? coreTargeted
-                      ? view.corePlugin.latestRevision
+                      ? (view.corePlugin.latestRevision ?? view.corePlugin.currentRevision)
                       : (targetPlugin?.latestRevision ?? null)
                     : action === "reload" && coreTargeted
                       ? view.corePlugin.currentRevision
                       : null;
 
-                if (pluginId === "all") {
-                  setPluginCardErrors({});
-                } else {
-                  setPluginCardErrors((prev) => {
-                    const next = { ...prev };
-                    delete next[pluginId];
-                    return next;
-                  });
-                }
+                clearPluginCardError(pluginId);
 
                 setActivePluginAct({
                   kind: "manage",
@@ -503,10 +493,7 @@ export function FactoryShell({
                         enterCoreRestart();
                         return { ok: true, summary: "" };
                       }
-                      setPluginsNote({ text: `${actName}: ${reply.error}`, tone: "statusDanger", pluginId });
-                      if (pluginId !== "all") {
-                        setPluginCardErrors((prev) => ({ ...prev, [pluginId]: reply.error }));
-                      }
+                      recordPluginActFailure(actName, pluginId, reply.error);
                       return reply;
                     }
                     setPluginsNote({ text: reply.summary, tone: "statusSuccess", pluginId });
@@ -517,10 +504,7 @@ export function FactoryShell({
                       enterCoreRestart();
                       return { ok: true, summary: "" };
                     }
-                    setPluginsNote({ text: `${actName}: ${msg}`, tone: "statusDanger", pluginId });
-                    if (pluginId !== "all") {
-                      setPluginCardErrors((prev) => ({ ...prev, [pluginId]: msg }));
-                    }
+                    recordPluginActFailure(actName, pluginId, msg);
                     throw error;
                   } finally {
                     if (!restartingCore) {

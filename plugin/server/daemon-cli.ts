@@ -502,36 +502,24 @@ function findPluginUpdateEntry(raw: unknown, pluginId: string): Record<string, u
   return undefined;
 }
 
-function extractUpdateRow(raw: unknown, pluginId: string): DaemonPluginUpdateRow | undefined {
-  const entry = findPluginUpdateEntry(raw, pluginId);
-  if (entry === undefined) return undefined;
+function extractUpdateRow(
+  entry: Record<string, unknown>,
+  pluginId: string,
+  options?: { fallbackEntry?: Record<string, unknown>; defaultUpdated?: boolean },
+): DaemonPluginUpdateRow | undefined {
+  const fallback = options?.fallbackEntry;
+  const currentObj = isRecord(entry.current) ? entry.current : isRecord(fallback?.current) ? fallback.current : undefined;
+  const proposalObj = isRecord(entry.proposal) ? entry.proposal : isRecord(fallback?.proposal) ? fallback.proposal : undefined;
+  const proposalExpected = isRecord(proposalObj?.expected) ? proposalObj.expected : undefined;
+  const pluginObj = isRecord(entry.plugin) ? entry.plugin : undefined;
+  const installObj = isRecord(pluginObj?.installation) ? pluginObj.installation : undefined;
+
   if (typeof entry.outcome === "string") {
     if (entry.outcome === "error" || entry.outcome === "local") return undefined;
-    const currentObj = isRecord(entry.current) ? entry.current : undefined;
-    const proposalObj = isRecord(entry.proposal) ? entry.proposal : undefined;
-    const proposalExpected = isRecord(proposalObj?.expected) ? proposalObj.expected : undefined;
-    const pluginObj = isRecord(entry.plugin) ? entry.plugin : undefined;
-    const installObj = isRecord(pluginObj?.installation) ? pluginObj.installation : undefined;
-    if (entry.outcome === "updated") {
-      const previousCommit =
-        nonEmptyString(proposalExpected?.revision) ??
-        nonEmptyString(currentObj?.currentRevision) ??
-        nonEmptyString(entry.previousCommit);
-      const currentCommit =
-        nonEmptyString(installObj?.currentRevision) ??
-        nonEmptyString(pluginObj?.commit) ??
-        extractTargetRevision(entry.target) ??
-        extractTargetRevision(proposalObj?.target) ??
-        nonEmptyString(entry.currentCommit);
-      return {
-        id: pluginId,
-        ...(previousCommit !== undefined ? { previousCommit } : {}),
-        ...(currentCommit !== undefined ? { currentCommit } : {}),
-        ...(typeof entry.commits === "number" ? { commits: entry.commits } : {}),
-        updated: true,
-      };
+    if (entry.outcome === "update" && isRecord(entry.proposal) && options?.defaultUpdated !== true) {
+      return undefined;
     }
-    if (entry.outcome === "current" || entry.outcome === "installed-newer") {
+    if (entry.outcome === "current" || entry.outcome === "installed-newer" || (entry.outcome === "update" && !isRecord(entry.proposal))) {
       const currentCommit =
         nonEmptyString(currentObj?.currentRevision) ??
         nonEmptyString(installObj?.currentRevision) ??
@@ -545,38 +533,79 @@ function extractUpdateRow(raw: unknown, pluginId: string): DaemonPluginUpdateRow
         updated: false,
       };
     }
+  } else if (typeof entry.updated === "boolean") {
+    const previousCommit = nonEmptyString(entry.previousCommit);
+    const currentCommit = nonEmptyString(entry.currentCommit);
+    return {
+      id: pluginId,
+      ...(previousCommit !== undefined ? { previousCommit } : {}),
+      ...(currentCommit !== undefined ? { currentCommit } : {}),
+      ...(typeof entry.commits === "number" ? { commits: entry.commits } : {}),
+      updated: entry.updated,
+    };
   }
-  if (typeof entry.updated !== "boolean") return undefined;
-  const previousCommit = nonEmptyString(entry.previousCommit);
-  const currentCommit = nonEmptyString(entry.currentCommit);
-  return {
-    id: pluginId,
-    ...(previousCommit !== undefined ? { previousCommit } : {}),
-    ...(currentCommit !== undefined ? { currentCommit } : {}),
-    ...(typeof entry.commits === "number" ? { commits: entry.commits } : {}),
-    updated: entry.updated,
-  };
+
+  if (entry.outcome === "updated" || options?.defaultUpdated === true) {
+    const previousCommit =
+      nonEmptyString(proposalExpected?.revision) ??
+      nonEmptyString(currentObj?.currentRevision) ??
+      nonEmptyString(entry.previousCommit) ??
+      nonEmptyString(fallback?.previousCommit);
+    const currentCommit =
+      nonEmptyString(installObj?.currentRevision) ??
+      nonEmptyString(pluginObj?.commit) ??
+      extractTargetRevision(entry.target) ??
+      extractTargetRevision(proposalObj?.target) ??
+      extractTargetRevision(fallback?.target) ??
+      nonEmptyString(entry.currentCommit);
+    return {
+      id: pluginId,
+      ...(previousCommit !== undefined ? { previousCommit } : {}),
+      ...(currentCommit !== undefined ? { currentCommit } : {}),
+      ...(typeof entry.commits === "number" ? { commits: entry.commits } : {}),
+      updated: true,
+    };
+  }
+  return undefined;
 }
 
 function extractUpdateOutcome(
   raw: unknown,
   pluginId: string,
-): { ok: true; plugin?: DaemonPluginItem; update?: DaemonPluginUpdateRow } | { ok: false; reason: string } {
+  options?: {
+    fallbackEntry?: Record<string, unknown>;
+    missingReason?: string;
+    errorPrefix?: string;
+    defaultUpdated?: boolean;
+  },
+): { ok: true; entry?: Record<string, unknown>; plugin?: DaemonPluginItem; update?: DaemonPluginUpdateRow } | { ok: false; reason: string } {
   const entry = findPluginUpdateEntry(raw, pluginId);
-  if (entry === undefined) return { ok: true };
+  if (entry === undefined) {
+    if (options?.missingReason !== undefined) return { ok: false, reason: options.missingReason };
+    return { ok: true };
+  }
   if (entry.outcome === "error") {
-    return { ok: false, reason: nonEmptyString(entry.error) ?? `update failed for ${pluginId}` };
+    return { ok: false, reason: nonEmptyString(entry.error) ?? `${options?.errorPrefix ?? "update failed"} for ${pluginId}` };
   }
   if (entry.outcome === "local") {
     return { ok: false, reason: `${pluginId} is installed from a local directory — use Reload after editing` };
   }
-  const row = extractUpdateRow(raw, pluginId);
+  const row = extractUpdateRow(entry, pluginId, options);
   const plugin = isDaemonPluginItem(entry.plugin) ? enrichDaemonPluginItem(entry.plugin) : undefined;
   return {
     ok: true,
+    entry,
     ...(plugin !== undefined ? { plugin } : {}),
     ...(row !== undefined ? { update: row } : {}),
   };
+}
+
+function toManageReply(
+  outcome: { ok: true; entry?: Record<string, unknown>; plugin?: DaemonPluginItem; update?: DaemonPluginUpdateRow } | { ok: false; reason: string },
+): { ok: true; plugin?: DaemonPluginItem; update?: DaemonPluginUpdateRow } | { ok: false; reason: string } {
+  if (!outcome.ok) return outcome;
+  const { entry: _entry, ...rest } = outcome;
+  return rest;
 }
 
 function isUnknownUpdatePreviewRequestError(reason: string): boolean {
@@ -619,42 +648,17 @@ export async function manageDaemonPlugin(
           if (legacyCall === null) return { ok: false, reason: previewReply.reason };
           const legacyReply = await legacyCall;
           if (!legacyReply.ok) return { ok: false, reason: legacyReply.reason };
-          const row = extractUpdateRow(legacyReply.payload, pluginId);
-          return row === undefined ? { ok: true } : { ok: true, update: row };
+          return toManageReply(extractUpdateOutcome(legacyReply.payload, pluginId));
         }
         return { ok: false, reason: previewReply.reason };
       }
-      const item = findPluginUpdateEntry(previewReply.payload, pluginId);
-      if (item === undefined) {
-        return { ok: false, reason: `the daemon's plugin.source.update.preview.response carried no entry for ${pluginId}` };
-      }
-      if (typeof item.outcome !== "string" && typeof item.updated === "boolean") {
-        const row = extractUpdateRow(previewReply.payload, pluginId);
-        return row === undefined ? { ok: true } : { ok: true, update: row };
-      }
-      if (item.outcome === "error") {
-        return { ok: false, reason: nonEmptyString(item.error) ?? `update preview failed for ${pluginId}` };
-      }
-      if (item.outcome === "local") {
-        return { ok: false, reason: `${pluginId} is installed from a local directory — use Reload after editing` };
-      }
-      if (item.outcome === "current" || item.outcome === "installed-newer" || !isRecord(item.proposal)) {
-        const previewCurrent = isRecord(item.current) ? item.current : undefined;
-        const currentCommit =
-          nonEmptyString(previewCurrent?.currentRevision) ??
-          extractTargetRevision(item.target) ??
-          nonEmptyString(item.currentCommit);
-        return {
-          ok: true,
-          update: {
-            id: pluginId,
-            ...(currentCommit !== undefined ? { previousCommit: currentCommit, currentCommit } : {}),
-            commits: 0,
-            updated: false,
-          },
-        };
-      }
-      if (item.outcome === "update" && isRecord(item.proposal)) {
+      const previewOutcome = extractUpdateOutcome(previewReply.payload, pluginId, {
+        missingReason: `the daemon's plugin.source.update.preview.response carried no entry for ${pluginId}`,
+        errorPrefix: "update preview failed",
+      });
+      if (!previewOutcome.ok) return previewOutcome;
+      const item = previewOutcome.entry;
+      if (item?.outcome === "update" && isRecord(item.proposal)) {
         const applyCall = daemonWsRequestPayload<Record<string, unknown>>(
           home,
           { type: "plugin.source.update.apply.request", proposals: [item.proposal] },
@@ -666,48 +670,16 @@ export async function manageDaemonPlugin(
         }
         const applyReply = await applyCall;
         if (!applyReply.ok) return { ok: false, reason: applyReply.reason };
-        const applied = findPluginUpdateEntry(applyReply.payload, pluginId);
-        if (applied === undefined) {
-          return { ok: false, reason: `the daemon's plugin.source.update.apply.response carried no entry for ${pluginId}` };
-        }
-        if (applied.outcome === "error") {
-          return { ok: false, reason: nonEmptyString(applied.error) ?? `update apply failed for ${pluginId}` };
-        }
-        if (applied.outcome === "local") {
-          return { ok: false, reason: `${pluginId} is installed from a local directory — use Reload after editing` };
-        }
-        const proposalExpected = isRecord(item.proposal.expected) ? item.proposal.expected : undefined;
-        const previewCurrent = isRecord(item.current) ? item.current : undefined;
-        const appliedCurrent = isRecord(applied.current) ? applied.current : undefined;
-        const previousCommit =
-          nonEmptyString(proposalExpected?.revision) ??
-          nonEmptyString(previewCurrent?.currentRevision) ??
-          nonEmptyString(appliedCurrent?.currentRevision) ??
-          nonEmptyString(applied.previousCommit);
-        const appliedPlugin = isDaemonPluginItem(applied.plugin) ? enrichDaemonPluginItem(applied.plugin) : undefined;
-        const appliedPluginObj = isRecord(applied.plugin) ? applied.plugin : undefined;
-        const appliedInstallObj = isRecord(appliedPluginObj?.installation) ? appliedPluginObj.installation : undefined;
-        const currentCommit =
-          nonEmptyString(appliedInstallObj?.currentRevision) ??
-          nonEmptyString(appliedPluginObj?.commit) ??
-          extractTargetRevision(applied.target) ??
-          extractTargetRevision(item.proposal.target) ??
-          extractTargetRevision(item.target) ??
-          nonEmptyString(applied.currentCommit);
-        return {
-          ok: true,
-          ...(appliedPlugin !== undefined ? { plugin: appliedPlugin } : {}),
-          update: {
-            id: pluginId,
-            ...(previousCommit !== undefined ? { previousCommit } : {}),
-            ...(currentCommit !== undefined ? { currentCommit } : {}),
-            ...(typeof applied.commits === "number" ? { commits: applied.commits } : {}),
-            updated: true,
-          },
-        };
+        return toManageReply(
+          extractUpdateOutcome(applyReply.payload, pluginId, {
+            fallbackEntry: item,
+            missingReason: `the daemon's plugin.source.update.apply.response carried no entry for ${pluginId}`,
+            errorPrefix: "update apply failed",
+            defaultUpdated: true,
+          }),
+        );
       }
-      const row = extractUpdateRow(previewReply.payload, pluginId);
-      return row === undefined ? { ok: true } : { ok: true, update: row };
+      return toManageReply(previewOutcome);
     }
   } else {
     const requestType = `plugin.${action}.request`;
@@ -727,7 +699,7 @@ export async function manageDaemonPlugin(
   const cli = pluginCliJson(home, argv, timeoutMs);
   if (!cli.ok) return { ok: false, reason: cli.reason };
   if (action === "update") {
-    return extractUpdateOutcome(cli.value, pluginId);
+    return toManageReply(extractUpdateOutcome(cli.value, pluginId));
   }
   return { ok: true };
 }

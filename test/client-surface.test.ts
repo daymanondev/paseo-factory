@@ -16,6 +16,7 @@ import {
   formatPluginCardProgressPill,
   formatToolbarProgressPill,
   isCoreSelfRestartError,
+  isPluginTargetedByAct,
   resolveCoreRestartWatch,
 } from "../plugin/client/factory/plugin-feedback.ts";
 import type { CompanionPluginView, FactoryView } from "../plugin/shared/view.ts";
@@ -501,6 +502,36 @@ test("v0.0.34 Seam 2.1b: resolveCoreRestartWatch waits on previousRevision, comp
       pluginId: "paseo-factory",
     },
   });
+
+  // When no fresh post-restart snapshot has arrived yet (view === null), wait until timeoutMs, then fail.
+  assert.deepEqual(
+    resolveCoreRestartWatch({
+      view: null,
+      previousRevision: "383385c",
+      targetRevision: "383385c",
+      action: "reload",
+      elapsedMs: 2_000,
+    }),
+    { status: "waiting" },
+  );
+  assert.deepEqual(
+    resolveCoreRestartWatch({
+      view: null,
+      previousRevision: "383385c",
+      targetRevision: "383385c",
+      action: "reload",
+      elapsedMs: 45_000,
+      timeoutMs: 45_000,
+    }),
+    {
+      status: "failed",
+      note: {
+        text: "Timed out waiting for paseo-factory to finish restarting on the daemon.",
+        tone: "statusDanger",
+        pluginId: "paseo-factory",
+      },
+    },
+  );
 });
 
 test("v0.0.34 Seam 2.2: formatPluginCardProgressPill and formatToolbarProgressPill format live elapsed strings for update, restarting-core, install, and reload", () => {
@@ -595,6 +626,24 @@ test("v0.0.34 Seam 2.2: formatPluginCardProgressPill and formatToolbarProgressPi
     "non-targeted cards show no progress pill",
   );
 
+  assert.equal(
+    isPluginTargetedByAct(
+      coreCard,
+      { kind: "restarting-core", target: "paseo-factory", action: "reload", startedAt: 1000 },
+      { kind: "restarting-core", action: "reload" },
+    ),
+    true,
+  );
+  assert.equal(
+    isPluginTargetedByAct(
+      coreCard,
+      { kind: "restarting-core", target: "paseo-factory", action: "reload", startedAt: 1000 },
+      { kind: "restarting-core", action: "update" },
+    ),
+    false,
+    "a Core reload restart must not match an update-targeted check",
+  );
+
   assert.equal(formatToolbarProgressPill(null, true, 0), "Checking updates…");
   assert.equal(
     formatToolbarProgressPill({ kind: "manage", target: "paseo-factory", action: "update", startedAt: 1000 }, false, 4),
@@ -650,6 +699,16 @@ test("v0.0.34 Seam 2.3: PluginsPane and FactoryShell wire live elapsed progress 
   assert.match(shell, /isCoreSelfRestartError/, "FactoryShell classifies Core self-restart errors");
   assert.match(shell, /restarting-core/, "FactoryShell transitions into restarting-core polling state");
   assert.match(shell, /resolveCoreRestartWatch/, "FactoryShell resolves Core restart completion/failure against polled snapshots");
+  assert.match(
+    shell,
+    /poll\.value !== null && poll\.error === null && poll\.at !== null && poll\.at >= activePluginAct\.startedAt/,
+    "FactoryShell only evaluates fresh post-restart snapshots in resolveCoreRestartWatch",
+  );
+  assert.match(
+    plugins,
+    /isRestartingCoreForReload/,
+    "CompanionCard separates Core reload restart from Core update restart so Reload never lights up Update buttons",
+  );
 });
 
 

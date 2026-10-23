@@ -46,62 +46,134 @@ export function isCoreSelfRestartError(input: {
 
 export const DEFAULT_CORE_RESTART_TIMEOUT_MS = 45_000;
 
+const MANAGE_ACTION_VERB: Readonly<Record<"update" | "reload" | "enable" | "disable" | "remove", string>> = {
+  update: "Updating",
+  reload: "Reloading",
+  enable: "Enabling",
+  disable: "Disabling",
+  remove: "Removing",
+};
+
+function manageActionVerb(action: ActivePluginAct["action"]): string | null {
+  if (action === undefined || action === "restarting-core") return null;
+  return MANAGE_ACTION_VERB[action] ?? null;
+}
+
+/**
+ * Returns true when `activeAct` targets `companion` directly or as part of a
+ * batch (`"all"`) act, optionally filtering by `expected.kind` / `expected.action`.
+ */
+export function isPluginTargetedByAct(
+  companion: CompanionPluginView,
+  activeAct: ActivePluginAct | null,
+  expected?: { kind?: ActivePluginAct["kind"]; action?: ActivePluginAct["action"] },
+): boolean {
+  if (activeAct === null || activeAct.kind === "check") return false;
+  const effectiveKind = activeAct.action === "restarting-core" ? "restarting-core" : activeAct.kind;
+  if (expected?.kind !== undefined && effectiveKind !== expected.kind) return false;
+  if (expected?.action !== undefined && activeAct.action !== expected.action) return false;
+
+  if (effectiveKind === "restarting-core") {
+    return companion.id === "paseo-factory" && (activeAct.target === companion.id || activeAct.target === "all");
+  }
+  if (effectiveKind === "install") {
+    return (
+      activeAct.target === companion.id ||
+      (activeAct.target === "all" &&
+        companion.id !== "paseo-factory" &&
+        companion.access === "public" &&
+        companion.status === "not_installed")
+    );
+  }
+  if (effectiveKind === "manage") {
+    return (
+      activeAct.target === companion.id ||
+      (activeAct.target === "all" &&
+        activeAct.action === "update" &&
+        companion.status !== "not_installed" &&
+        (companion.installKind === "git" || companion.installKind === "npm") &&
+        companion.updateAvailable === true)
+    );
+  }
+  return false;
+}
+
 /**
  * Evaluates a polled `FactoryView` while waiting for `paseo-factory` to finish
- * restarting after a self-update or self-reload.
+ * restarting after a self-update or self-reload. When `view` is `null` (no
+ * fresh post-restart snapshot has arrived yet), only the timeout is evaluated.
  */
 export function resolveCoreRestartWatch(input: {
-  view: Pick<FactoryView, "corePlugin">;
+  view: Pick<FactoryView, "corePlugin"> | null;
   previousRevision: string | null;
   targetRevision: string | null;
   action: "update" | "reload";
   elapsedMs: number;
   timeoutMs?: number;
 }): { status: "waiting" } | { status: "completed"; note: PluginsNote } | { status: "failed"; note: PluginsNote } {
-  const { corePlugin } = input.view;
-  if (corePlugin.status === "failed" || corePlugin.error !== null) {
-    return {
-      status: "failed",
-      note: {
-        text: `${input.action === "reload" ? "Reload" : "Update"} failed on paseo-factory: ${corePlugin.error ?? "Core plugin entered failed state"}`,
-        tone: "statusDanger",
-        pluginId: "paseo-factory",
-      },
-    };
-  }
-
-  if (input.action === "update") {
-    const landed =
-      corePlugin.status === "running" &&
-      corePlugin.currentRevision !== null &&
-      (input.targetRevision !== null
-        ? corePlugin.currentRevision.startsWith(input.targetRevision.slice(0, 7)) ||
-          input.targetRevision.startsWith(corePlugin.currentRevision.slice(0, 7))
-        : corePlugin.currentRevision !== input.previousRevision);
-    if (landed && corePlugin.currentRevision !== null) {
-      const prevShort = (input.previousRevision ?? "prev").slice(0, 7);
-      const currShort = corePlugin.currentRevision.slice(0, 7);
-      const versionSuffix = corePlugin.version ? ` · v${corePlugin.version.replace(/^v/, "")} is now running` : "";
+  if (input.view !== null) {
+    const { corePlugin } = input.view;
+    if (corePlugin.status === "failed" || corePlugin.error !== null) {
       return {
-        status: "completed",
+        status: "failed",
         note: {
-          text: `Updated paseo-factory (${prevShort} → ${currShort})${versionSuffix}`,
-          tone: "statusSuccess",
+          text: `${input.action === "reload" ? "Reload" : "Update"} failed on paseo-factory: ${corePlugin.error ?? "Core plugin entered failed state"}`,
+          tone: "statusDanger",
           pluginId: "paseo-factory",
         },
       };
     }
-  } else if (input.action === "reload") {
-    if (corePlugin.status === "running" && input.elapsedMs >= 500) {
-      const versionSuffix = corePlugin.version ? ` (v${corePlugin.version.replace(/^v/, "")})` : "";
-      return {
-        status: "completed",
-        note: {
-          text: `Reloaded paseo-factory on the daemon${versionSuffix}`,
-          tone: "statusSuccess",
-          pluginId: "paseo-factory",
-        },
-      };
+
+    if (input.action === "update") {
+      const targetMatchesPrev =
+        input.targetRevision !== null &&
+        input.previousRevision !== null &&
+        (input.targetRevision.startsWith(input.previousRevision.slice(0, 7)) ||
+          input.previousRevision.startsWith(input.targetRevision.slice(0, 7)));
+      const matchesTarget =
+        input.targetRevision !== null &&
+        corePlugin.currentRevision !== null &&
+        (corePlugin.currentRevision.startsWith(input.targetRevision.slice(0, 7)) ||
+          input.targetRevision.startsWith(corePlugin.currentRevision.slice(0, 7)));
+      const changedFromPrev =
+        corePlugin.currentRevision !== null &&
+        corePlugin.currentRevision !== input.previousRevision &&
+        (input.previousRevision === null ||
+          (!corePlugin.currentRevision.startsWith(input.previousRevision.slice(0, 7)) &&
+            !input.previousRevision.startsWith(corePlugin.currentRevision.slice(0, 7))));
+      const landed =
+        corePlugin.status === "running" &&
+        corePlugin.currentRevision !== null &&
+        (input.targetRevision !== null
+          ? targetMatchesPrev
+            ? changedFromPrev || (matchesTarget && input.elapsedMs >= 500)
+            : matchesTarget
+          : changedFromPrev);
+      if (landed && corePlugin.currentRevision !== null) {
+        const prevShort = (input.previousRevision ?? "prev").slice(0, 7);
+        const currShort = corePlugin.currentRevision.slice(0, 7);
+        const versionSuffix = corePlugin.version ? ` · v${corePlugin.version.replace(/^v/, "")} is now running` : "";
+        return {
+          status: "completed",
+          note: {
+            text: `Updated paseo-factory (${prevShort} → ${currShort})${versionSuffix}`,
+            tone: "statusSuccess",
+            pluginId: "paseo-factory",
+          },
+        };
+      }
+    } else if (input.action === "reload") {
+      if (corePlugin.status === "running" && input.elapsedMs >= 500) {
+        const versionSuffix = corePlugin.version ? ` (v${corePlugin.version.replace(/^v/, "")})` : "";
+        return {
+          status: "completed",
+          note: {
+            text: `Reloaded paseo-factory on the daemon${versionSuffix}`,
+            tone: "statusSuccess",
+            pluginId: "paseo-factory",
+          },
+        };
+      }
     }
   }
 
@@ -128,53 +200,26 @@ export function formatPluginCardProgressPill(
   activeAct: ActivePluginAct | null,
   elapsedSeconds: number,
 ): string | null {
-  if (activeAct === null || activeAct.kind === "check") return null;
+  if (!isPluginTargetedByAct(companion, activeAct) || activeAct === null) return null;
 
   if (activeAct.kind === "restarting-core" || activeAct.action === "restarting-core") {
-    if (companion.id !== "paseo-factory") return null;
     return `Reloading Core${activeAct.targetRevision ? ` → ${activeAct.targetRevision.slice(0, 7)}` : ""}… · ${elapsedSeconds}s`;
   }
 
   if (activeAct.kind === "install") {
-    const targeted =
-      activeAct.target === companion.id ||
-      (activeAct.target === "all" &&
-        companion.id !== "paseo-factory" &&
-        companion.access === "public" &&
-        companion.status === "not_installed");
-    if (!targeted) return null;
     return `Installing from GitHub… · ${elapsedSeconds}s`;
   }
 
   if (activeAct.kind === "manage") {
-    const targeted =
-      activeAct.target === companion.id ||
-      (activeAct.target === "all" &&
-        activeAct.action === "update" &&
-        companion.status !== "not_installed" &&
-        (companion.installKind === "git" || companion.installKind === "npm") &&
-        companion.updateAvailable === true);
-    if (!targeted) return null;
-
-    switch (activeAct.action) {
-      case "update": {
-        const rawCurrent = activeAct.fromRevision ?? companion.currentRevision;
-        const rawTarget = activeAct.targetRevision ?? companion.latestRevision;
-        const shortCurrent = rawCurrent ? rawCurrent.slice(0, 7) : null;
-        const shortTarget = rawTarget ? rawTarget.slice(0, 7) : null;
-        return `Updating${shortCurrent && shortTarget && shortCurrent !== shortTarget ? ` ${shortCurrent} → ${shortTarget}` : ""}… · ${elapsedSeconds}s`;
-      }
-      case "reload":
-        return `Reloading plugin… · ${elapsedSeconds}s`;
-      case "enable":
-        return `Enabling plugin… · ${elapsedSeconds}s`;
-      case "disable":
-        return `Disabling plugin… · ${elapsedSeconds}s`;
-      case "remove":
-        return `Removing plugin… · ${elapsedSeconds}s`;
-      default:
-        return null;
+    if (activeAct.action === "update") {
+      const rawCurrent = activeAct.fromRevision ?? companion.currentRevision;
+      const rawTarget = activeAct.targetRevision ?? companion.latestRevision;
+      const shortCurrent = rawCurrent ? rawCurrent.slice(0, 7) : null;
+      const shortTarget = rawTarget ? rawTarget.slice(0, 7) : null;
+      return `Updating${shortCurrent && shortTarget && shortCurrent !== shortTarget ? ` ${shortCurrent} → ${shortTarget}` : ""}… · ${elapsedSeconds}s`;
     }
+    const verb = manageActionVerb(activeAct.action);
+    return verb === null ? null : `${verb} plugin… · ${elapsedSeconds}s`;
   }
 
   return null;
@@ -202,20 +247,8 @@ export function formatToolbarProgressPill(
     }
     if (activeAct.kind === "manage") {
       const targetLabel = activeAct.target === "all" ? "All" : activeAct.target;
-      switch (activeAct.action) {
-        case "update":
-          return `Updating ${targetLabel}… · ${elapsedSeconds}s`;
-        case "reload":
-          return `Reloading ${targetLabel}… · ${elapsedSeconds}s`;
-        case "enable":
-          return `Enabling ${targetLabel}… · ${elapsedSeconds}s`;
-        case "disable":
-          return `Disabling ${targetLabel}… · ${elapsedSeconds}s`;
-        case "remove":
-          return `Removing ${targetLabel}… · ${elapsedSeconds}s`;
-        default:
-          break;
-      }
+      const verb = manageActionVerb(activeAct.action);
+      if (verb !== null) return `${verb} ${targetLabel}… · ${elapsedSeconds}s`;
     }
   }
   if (checkingUpdates) return "Checking updates…";

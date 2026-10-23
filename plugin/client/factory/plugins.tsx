@@ -30,6 +30,7 @@ import {
   formatPluginCardProgressPill,
   formatToolbarProgressPill,
   isCoreSelfRestartError,
+  isPluginTargetedByAct,
   resolveCoreRestartWatch,
 } from "./plugin-feedback.ts";
 import type { ActivePluginAct, PluginsNote } from "./plugin-feedback.ts";
@@ -39,6 +40,7 @@ export {
   formatPluginCardProgressPill,
   formatToolbarProgressPill,
   isCoreSelfRestartError,
+  isPluginTargetedByAct,
   resolveCoreRestartWatch,
 };
 export type { ActivePluginAct, PluginsNote };
@@ -111,30 +113,15 @@ function CompanionCard({
   const shortLatest = companion.latestRevision === null ? null : companion.latestRevision.slice(0, 7);
   const versionBadge = installed || isCore ? formatVersionBadge(companion, shortRevision) : null;
   const progressPill = formatPluginCardProgressPill(companion, activeAct, elapsedSeconds);
-  const isRestartingThisCore =
-    isCore &&
-    activeAct !== null &&
-    (activeAct.kind === "restarting-core" || activeAct.action === "restarting-core") &&
-    (activeAct.target === companion.id || activeAct.target === "all");
-  const isUpdatingThis =
-    activeAct !== null &&
-    activeAct.kind === "manage" &&
-    activeAct.action === "update" &&
-    (activeAct.target === companion.id ||
-      (activeAct.target === "all" && installed && remote && companion.updateAvailable === true));
-  const isInstallingThis =
-    activeAct !== null &&
-    activeAct.kind === "install" &&
-    (activeAct.target === companion.id ||
-      (activeAct.target === "all" && !isCore && companion.access === "public" && !installed));
-  const isReloadingThis =
-    activeAct !== null && activeAct.kind === "manage" && activeAct.target === companion.id && activeAct.action === "reload";
-  const isEnablingThis =
-    activeAct !== null && activeAct.kind === "manage" && activeAct.target === companion.id && activeAct.action === "enable";
-  const isDisablingThis =
-    activeAct !== null && activeAct.kind === "manage" && activeAct.target === companion.id && activeAct.action === "disable";
-  const isRemovingThis =
-    activeAct !== null && activeAct.kind === "manage" && activeAct.target === companion.id && activeAct.action === "remove";
+  const isRestartingThisCore = isCore && isPluginTargetedByAct(companion, activeAct, { kind: "restarting-core" });
+  const isRestartingCoreForReload = isRestartingThisCore && activeAct?.action === "reload";
+  const isRestartingCoreForUpdate = isRestartingThisCore && activeAct?.action !== "reload";
+  const isUpdatingThis = isPluginTargetedByAct(companion, activeAct, { kind: "manage", action: "update" });
+  const isInstallingThis = isPluginTargetedByAct(companion, activeAct, { kind: "install" });
+  const isReloadingThis = isPluginTargetedByAct(companion, activeAct, { kind: "manage", action: "reload" });
+  const isEnablingThis = isPluginTargetedByAct(companion, activeAct, { kind: "manage", action: "enable" });
+  const isDisablingThis = isPluginTargetedByAct(companion, activeAct, { kind: "manage", action: "disable" });
+  const isRemovingThis = isPluginTargetedByAct(companion, activeAct, { kind: "manage", action: "remove" });
   const trimmedSource = source.trim();
   const trimmedRef = ref.trim();
 
@@ -195,12 +182,12 @@ function CompanionCard({
             </>
           ) : (
             <>
-              {(remote && companion.updateAvailable === true) || isUpdatingThis || isRestartingThisCore ? (
+              {(remote && companion.updateAvailable === true) || isUpdatingThis || isRestartingCoreForUpdate ? (
                 <Btn
                   theme={theme}
                   small
                   label={
-                    isRestartingThisCore
+                    isRestartingCoreForUpdate
                       ? `Reloading Core… (${elapsedSeconds}s)`
                       : isUpdatingThis
                         ? `Updating… (${elapsedSeconds}s)`
@@ -360,11 +347,11 @@ function CompanionCard({
                   <Btn theme={theme} small label="Enable" disabled={actions.busy} onPress={() => actions.manage(id, "enable")} />
                 )
               ) : null}
-              {isReloadingThis || (isRestartingThisCore && activeAct?.action === "reload") ? (
+              {isReloadingThis || isRestartingCoreForReload ? (
                 <Btn
                   theme={theme}
                   small
-                  label={isRestartingThisCore ? `Reloading Core… (${elapsedSeconds}s)` : "Reloading…"}
+                  label={isRestartingCoreForReload ? `Reloading Core… (${elapsedSeconds}s)` : "Reloading…"}
                   tone="foregroundMuted"
                   disabled={actions.busy}
                   onPress={() => actions.manage(manageId, "reload")}
@@ -373,7 +360,7 @@ function CompanionCard({
                 <Btn theme={theme} small label="Reload" tone="foregroundMuted" disabled={actions.busy} onPress={() => actions.manage(manageId, "reload")} />
               )}
               {companion.installKind === "git" || companion.installKind === "npm" ? (
-                isRestartingThisCore ? (
+                isRestartingCoreForUpdate ? (
                   <Btn
                     theme={theme}
                     small
