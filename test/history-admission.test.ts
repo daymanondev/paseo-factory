@@ -166,6 +166,9 @@ test("Spool ignores forged owner bindings and refuses overlapping current Contra
   const incoming = sources[0]!;
   const modified = incoming.lines.trim().split("\n").map((line) => JSON.parse(line));
   modified[1].scope = ["local/subtree"];
+  const { symlinkSync } = await import("node:fs");
+  const alias = join(workspace, "..", "workspace-alias"); symlinkSync(workspace, alias, "dir");
+  modified[1].workspace = alias;
   const reply = await handleSpoolRequest(factory, { id: "forged", kind: "history_import", sources: [{ ...incoming, lines: modified.map((event) => JSON.stringify(event)).join("\n") + "\n" }], bindings: [{ workspace, landedCommits: ["forged"] }] } as never);
   assert.ok(reply.ok);
   assert.equal(reply.ok && reply.historyImports?.[0]?.status, "conflicted");
@@ -292,4 +295,26 @@ test("an interrupted owner acquisition fails closed before Ledger recovery or mu
   writeFileSync(join(stateDir, "ledger-owner-acquire"), "");
   assert.throws(() => createFactory({ stateDir, writerId: "local" }), (error: unknown) => (error as { code: string }).code === "ledger-owner-acquisition-busy");
   assert.equal(readFileSync(join(stateDir, "ledger.jsonl"), "utf8"), bytes);
+});
+
+test("symlink aliases share actual writer ownership and route standalone staging to that writer", { timeout: 10_000 }, async (t) => {
+  const entered = deferred(), resume = deferred();
+  const { factory, stateDir, sources, dir } = fixture(t, { retroCopilotProbe: () => true, retroCopilotRunner: async () => { entered.resolve(); await resume.promise; return { code: 0, stdout: '{"proposals":[]}', stderr: "", timedOut: false }; } });
+  writeLanes(stateDir, { retro: "claude/example" });
+  const { symlinkSync } = await import("node:fs");
+  const { execFileSync } = await import("node:child_process");
+  const alias = join(dir, "state-alias"); symlinkSync(stateDir, alias, "dir");
+  const operation = factory.retro(); await entered.promise;
+  try {
+    assert.throws(() => createFactory({ stateDir: alias, writerId: "competing" }), (error: unknown) => (error as { code: string }).code === "ledger-writer-active");
+    const stageUrl = new URL("../plugin/bin/history-stage.mjs", import.meta.url).href;
+    const output = execFileSync(process.execPath, ["--input-type=module", "-e", `import {stageLedgerImport} from ${JSON.stringify(stageUrl)}; console.log(JSON.stringify(stageLedgerImport(${JSON.stringify(join(alias, "ledger.jsonl"))},${JSON.stringify(sources)})));`], { encoding: "utf8", timeout: 5000 });
+    assert.equal(JSON.parse(output).status, "pending");
+    assert.equal(factory.history.status().length, 1);
+    assert.equal(factory.contractFor("REMOTE"), undefined);
+  } finally { resume.resolve(); await operation; }
+  assert.equal(factory.history.status()[0]?.status, "applied");
+  assert.equal(factory.history.stage(sources).status, "applied");
+  assert.equal(factory.history.status().length, 1);
+  assert.equal(factory.ledger.events.filter((event) => event.event === "contract_set" && event.task === "REMOTE").length, 1);
 });

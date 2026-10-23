@@ -11,7 +11,7 @@ import { historyHash } from "./history-identity.ts";
 import { parseLedgerJsonl } from "./ledger-validation.ts";
 import { planHistoryImport } from "./history-import.ts";
 import type { HistoryImportSource, VerifiedImportBinding } from "./history-import.ts";
-import { fsyncDirectory, makeDurableDirectory, importDirectory, importSources, loadImportManifest, observeStagedImports, readLedgerImports, saveImportManifest, stageLedgerImport, writeDurableFile } from "./history-stage.ts";
+import { historyTargetPath, fsyncDirectory, makeDurableDirectory, importDirectory, importSources, loadImportManifest, observeStagedImports, readLedgerImports, saveImportManifest, stageLedgerImport, writeDurableFile } from "./history-stage.ts";
 import type { ImportStatus } from "./history-stage.ts";
 import { listProjectRegistrations, readProjectRegistration, projectStateDir } from "./project.ts";
 import { Ledger } from "./ledger.ts";
@@ -23,6 +23,7 @@ export class LedgerAdmission {
   /** Serialize check/open/register across processes. An interrupted acquisition
    * deliberately fails closed instead of stealing an unverifiable new owner. */
   static reserve(path: string): () => void {
+    path = historyTargetPath(path);
     makeDurableDirectory(dirname(path));
     const guard = join(dirname(path), "ledger-owner-acquire");
     let fd: number;
@@ -36,7 +37,8 @@ export class LedgerAdmission {
     return () => { rmSync(guard); fsyncDirectory(dirname(path)); };
   }
   static assertAvailable(path: string): void {
-    const owner = owners.get(resolve(path));
+    path = historyTargetPath(path);
+    const owner = owners.get(historyTargetPath(path));
     if (owner !== undefined && (owner.#active > 0 || owner.#timer !== undefined || owner.#maintenance > 0 || owner.#exclusive || owner.#waiters.size > 0)) throw new FactoryError("ledger-writer-active", "another Factory is using this Ledger");
     const marker = join(dirname(path), "ledger-owner.json");
     if (!existsSync(marker)) return;
@@ -69,11 +71,11 @@ export class LedgerAdmission {
     this.#unobserve = observeStagedImports(ledger.path, () => this.drain());
     // Opening a replacement in a recovery fixture may supersede an idle owner;
     // an active owner can never be replaced or acquire a competing counter.
-    const previous = owners.get(resolve(ledger.path));
+    const previous = owners.get(historyTargetPath(ledger.path));
     if (previous !== undefined && (previous.#active > 0 || previous.#maintenance > 0 || previous.#exclusive || previous.#waiters.size > 0)) throw new FactoryError("ledger-writer-active", "another Factory is using this Ledger");
     previous?.stop();
-    owners.set(resolve(ledger.path), this);
-    writeDurableFile(join(dirname(ledger.path), "ledger-owner.json"), JSON.stringify({ version: 1, pid: process.pid, token: this.#token, target: resolve(ledger.path), startedAt: new Date().toISOString() }));
+    owners.set(historyTargetPath(ledger.path), this);
+    writeDurableFile(join(dirname(ledger.path), "ledger-owner.json"), JSON.stringify({ version: 1, pid: process.pid, token: this.#token, target: historyTargetPath(ledger.path), startedAt: new Date().toISOString() }));
     ledger.setAdmissionGuards(() => {
       this.#assertOwner();
       if (this.#exclusive && !this.#nested()) throw new FactoryError("history-maintenance-busy", "Ledger maintenance is active");
@@ -88,7 +90,7 @@ export class LedgerAdmission {
   get maintenanceActive(): boolean { return this.#exclusive; }
   #nested(): boolean { const current = context.getStore(); return current?.owner === this && current.live; }
   #assertOwner(): void {
-    if (this.#stopped || owners.get(resolve(this.ledger.path)) !== this) throw new FactoryError("ledger-writer-active", "this Factory was superseded by the current Ledger owner");
+    if (this.#stopped || owners.get(historyTargetPath(this.ledger.path)) !== this) throw new FactoryError("ledger-writer-active", "this Factory was superseded by the current Ledger owner");
   }
   #pending(): boolean { return [this.ledger.path, ...this.#projectTargets()].some((path) => readLedgerImports(path).some((item) => item.status === "pending" || item.status === "staged")); }
   #wake(): void { for (const wake of this.#waiters) wake(); this.#waiters.clear(); }
@@ -155,14 +157,14 @@ export class LedgerAdmission {
   }
   status(): ImportStatus[] { return readLedgerImports(this.ledger.path).map((item) => this.#error !== undefined && item.status === "pending" ? { ...item, diagnostics: [...item.diagnostics, this.#error] } : item); }
   allStatus(): ImportStatus[] {
-    return [...this.status(), ...this.#projectTargets().flatMap((path) => owners.get(resolve(path))?.status() ?? readLedgerImports(path))];
+    return [...this.status(), ...this.#projectTargets().flatMap((path) => owners.get(historyTargetPath(path))?.status() ?? readLedgerImports(path))];
   }
   get error(): string | undefined { return this.#error; }
 
   /** Synchronous activation cannot interleave with an ordinary JS mutation. */
   drain(): void {
-    if (this.#stopped || owners.get(resolve(this.ledger.path)) !== this) return;
-    const root = owners.get(resolve(join(this.stateDir, "ledger.jsonl")));
+    if (this.#stopped || owners.get(historyTargetPath(this.ledger.path)) !== this) return;
+    const root = owners.get(historyTargetPath(join(this.stateDir, "ledger.jsonl")));
     if (root !== undefined && root !== this && (root.#active > 0 || root.#exclusive || root.#maintenance > 0)) return;
     if (this.#draining || this.#active > 0 || this.#exclusive || this.#maintenance > 0) return;
     this.#draining = true;
@@ -183,11 +185,17 @@ export class LedgerAdmission {
         const sources = importSources(manifest);
         const plan = planHistoryImport({ existingLines: current, sources, bindings: this.#bindings(sources) });
         if (plan.status !== "conflicted") {
-          const latest = new Map(plan.events.filter((event) => event.event === "contract_set").map((event) => [event.task, event]));
-          const accepted = acceptedTasks({ events: plan.events });
+          // Audit paths stay intact; collision checks compare actual local trees,
+          // so an alias cannot manufacture a disjoint execution Workspace.
+          const projection = plan.events.map((event) => {
+            if (event.event !== "contract_set") return event;
+            try { return { ...event, workspace: realpathSync(event.workspace) }; } catch { return event; }
+          });
+          const latest = new Map(projection.filter((event) => event.event === "contract_set").map((event) => [event.task, event]));
+          const accepted = acceptedTasks({ events: projection });
           for (const contract of latest.values()) {
             if (accepted.has(contract.task)) continue;
-            const conflict = liveWorkspaceConflict({ events: plan.events }, contract.workspace, contract.task, contract.scope);
+            const conflict = liveWorkspaceConflict({ events: projection }, contract.workspace, contract.task, contract.scope);
             if (conflict !== undefined) plan.conflicts.push({ reason: `workspace conflict: ${contract.task} overlaps ${conflict.task}` });
           }
           if (plan.conflicts.length > 0) plan.status = "conflicted";
@@ -238,8 +246,8 @@ export class LedgerAdmission {
   }
   #projectOwner(slug: string): LedgerAdmission {
     const path = this.#projectPath(slug);
-    if (resolve(path) === resolve(this.ledger.path)) return this;
-    let owner = owners.get(resolve(path));
+    if (historyTargetPath(path) === historyTargetPath(this.ledger.path)) return this;
+    let owner = owners.get(historyTargetPath(path));
     if (owner === undefined) {
       const release = LedgerAdmission.reserve(path);
       try {
@@ -309,7 +317,7 @@ export class LedgerAdmission {
         catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
       }
     }
-    writeDurableFile(marker, JSON.stringify({ version: 1, pid: process.pid, token: this.#token, target: resolve(this.ledger.path), startedAt: new Date().toISOString() }));
+    writeDurableFile(marker, JSON.stringify({ version: 1, pid: process.pid, token: this.#token, target: historyTargetPath(this.ledger.path), startedAt: new Date().toISOString() }));
     this.#timer = setInterval(() => this.drain(), 100);
     this.#timer.unref?.();
     this.drain();
@@ -319,7 +327,7 @@ export class LedgerAdmission {
     if (this.#timer !== undefined) clearInterval(this.#timer);
     this.#timer = undefined;
     this.#unobserve();
-    if (owners.get(resolve(this.ledger.path)) === this) owners.delete(resolve(this.ledger.path));
+    if (owners.get(historyTargetPath(this.ledger.path)) === this) owners.delete(historyTargetPath(this.ledger.path));
     for (const owner of this.#targets.values()) owner.stop();
     const marker = join(dirname(this.ledger.path), "ledger-owner.json");
     try { const prior = JSON.parse(readFileSync(marker, "utf8")); if (prior.token === this.#token) rmSync(marker); } catch { /* preserve unknown ownership */ }

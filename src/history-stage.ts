@@ -1,6 +1,6 @@
 /** Durable transport staging. This module never opens or replaces a Ledger. */
-import { closeSync, existsSync, fchmodSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { closeSync, existsSync, fchmodSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { planHistoryImport } from "./history-import.ts";
 import type { HistoryImportSource, ImportConflict } from "./history-import.ts";
@@ -28,14 +28,30 @@ export interface ImportManifest extends ImportStatus {
   sequenceMaps?: unknown;
 }
 
+/** One physical target identity, including paths whose final directories do not exist yet. */
+export function historyTargetPath(path: string): string {
+  let ancestor = resolve(path);
+  const missing: string[] = [];
+  for (;;) {
+    try { return join(realpathSync(ancestor), ...missing); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      const parent = dirname(ancestor);
+      if (parent === ancestor) throw error;
+      missing.unshift(basename(ancestor));
+      ancestor = parent;
+    }
+  }
+}
+
 const listeners = new Map<string, () => void>();
 export function observeStagedImports(target: string, notify: () => void): () => void {
-  const key = resolve(target);
+  const key = historyTargetPath(target);
   listeners.set(key, notify);
   return () => { if (listeners.get(key) === notify) listeners.delete(key); };
 }
 export function importDirectory(target: string, id?: string): string {
-  return id === undefined ? join(dirname(resolve(target)), "history-imports") : join(dirname(resolve(target)), "history-imports", id);
+  return id === undefined ? join(dirname(historyTargetPath(target)), "history-imports") : join(dirname(historyTargetPath(target)), "history-imports", id);
 }
 export function fsyncDirectory(path: string): void {
   const fd = openSync(path, "r");
@@ -54,6 +70,7 @@ export function makeDurableDirectory(path: string): void {
   }
 }
 export function writeDurableFile(path: string, bytes: string | Uint8Array, options: { mode?: number; afterRename?: () => void } = {}): void {
+  path = historyTargetPath(path);
   makeDurableDirectory(dirname(path));
   const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
   writeFileSync(temp, bytes, { mode: options.mode ?? 0o600 });
@@ -69,7 +86,7 @@ export function saveImportManifest(manifest: ImportManifest): void {
 export function loadImportManifest(target: string, id: string): ImportManifest {
   if (!/^[a-f0-9]{64}$/.test(id)) throw new FactoryError("invalid-import", "invalid staged import identity");
   const manifest = JSON.parse(readFileSync(join(importDirectory(target, id), "manifest.json"), "utf8")) as ImportManifest;
-  if (manifest.version !== 1 || manifest.id !== id || resolve(manifest.target) !== resolve(target) || !Array.isArray(manifest.sources) || !["staged", "pending", "applied", "conflicted"].includes(manifest.status)) {
+  if (manifest.version !== 1 || manifest.id !== id || historyTargetPath(manifest.target) !== historyTargetPath(target) || !Array.isArray(manifest.sources) || !["staged", "pending", "applied", "conflicted"].includes(manifest.status)) {
     throw new FactoryError("invalid-import", `damaged import manifest ${id}`);
   }
   return manifest;
@@ -89,7 +106,7 @@ export function readLedgerImports(target: string): ImportStatus[] {
 }
 
 export function stageLedgerImport(targetPath: string, sources: readonly HistoryImportSource[]): ImportStatus {
-  const target = resolve(targetPath);
+  const target = historyTargetPath(targetPath);
   const id = planHistoryImport({ existingLines: "", sources }).id;
   const destination = importDirectory(target, id);
   if (!existsSync(join(destination, "manifest.json"))) {
