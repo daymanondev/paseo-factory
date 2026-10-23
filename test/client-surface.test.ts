@@ -12,6 +12,14 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { repoRoot } from "./helpers.ts";
+import {
+  formatPluginCardProgressPill,
+  formatToolbarProgressPill,
+  isCoreSelfRestartError,
+  isPluginTargetedByAct,
+  resolveCoreRestartWatch,
+} from "../plugin/client/factory/plugin-feedback.ts";
+import type { CompanionPluginView, FactoryView } from "../plugin/shared/view.ts";
 
 const read = (rel: string): string => readFileSync(join(repoRoot, rel), "utf8");
 
@@ -312,5 +320,399 @@ test("v0.0.30 (ADR 0012/0014): PluginsPane scopes Install All to public companio
     "the old access-blind formula is replaced, not left duplicated beside the public-only one",
   );
 });
+
+// ---- Seam 2: Pure Plugin Progress / Core Self-Restart Helpers & UI Source Pins (v0.0.34, ADR 0012) ----
+
+test("v0.0.34 Seam 2.1a: isCoreSelfRestartError recognizes Plugin stopped: paseo-factory and transient disconnect during Core update/reload or Update All with Core", () => {
+  assert.equal(
+    isCoreSelfRestartError({
+      target: "paseo-factory",
+      action: "update",
+      errorMessage: "Plugin stopped: paseo-factory",
+      coreTargeted: true,
+    }),
+    true,
+  );
+  assert.equal(
+    isCoreSelfRestartError({
+      target: "paseo-factory",
+      action: "reload",
+      errorMessage: "Error: Plugin stopped: paseo-factory",
+      coreTargeted: true,
+    }),
+    true,
+  );
+  assert.equal(
+    isCoreSelfRestartError({
+      target: "all",
+      action: "update",
+      errorMessage: "daemon socket closed before response",
+      coreTargeted: true,
+    }),
+    true,
+  );
+  assert.equal(
+    isCoreSelfRestartError({
+      target: "all",
+      action: "update",
+      errorMessage: "Plugin stopped: paseo-factory",
+      coreTargeted: false,
+    }),
+    false,
+    "Update All when Core is not targeted must not mask errors as Core self-restart",
+  );
+  assert.equal(
+    isCoreSelfRestartError({
+      target: "factory-burn-lab",
+      action: "update",
+      errorMessage: "Plugin stopped: factory-burn-lab",
+      coreTargeted: false,
+    }),
+    false,
+    "non-Core plugin errors are never classified as Core self-restart",
+  );
+  assert.equal(
+    isCoreSelfRestartError({
+      target: "paseo-factory",
+      action: "update",
+      errorMessage: "Update the client to review plugin updates before applying them.",
+      coreTargeted: true,
+    }),
+    false,
+    "unrelated protocol or git errors on paseo-factory must surface as real errors",
+  );
+});
+
+function makeCorePluginFixture(overrides: Partial<CompanionPluginView> = {}): CompanionPluginView {
+  return {
+    id: "paseo-factory",
+    title: "Factory Core",
+    tagline: "The verification core.",
+    description: "Verification core.",
+    canonicalSource: "git:daymanondev/paseo-factory:plugin",
+    sidebarLabel: "Factory",
+    sidebarIcon: "Blocks",
+    capabilities: ["Contracts & Gates"],
+    access: "public",
+    status: "running",
+    enabled: true,
+    installKind: "git",
+    installedSource: "git:daymanondev/paseo-factory:plugin",
+    currentRevision: "0285a1c",
+    version: "0.0.33",
+    latestRevision: "383385c",
+    commitsBehind: 1,
+    updateAvailable: true,
+    error: null,
+    ...overrides,
+  };
+}
+
+function makeViewWithCore(coreOverrides: Partial<CompanionPluginView> = {}): FactoryView {
+  return {
+    corePlugin: makeCorePluginFixture(coreOverrides),
+  } as FactoryView;
+}
+
+test("v0.0.34 Seam 2.1b: resolveCoreRestartWatch waits on previousRevision, completes with statusSuccess on targetRevision, and fails with statusDanger on daemon error or timeout", () => {
+  const waiting = resolveCoreRestartWatch({
+    view: makeViewWithCore({ status: "running", currentRevision: "0285a1c" }),
+    previousRevision: "0285a1c",
+    targetRevision: "383385c",
+    action: "update",
+    elapsedMs: 2_000,
+  });
+  assert.deepEqual(waiting, { status: "waiting" });
+
+  const completed = resolveCoreRestartWatch({
+    view: makeViewWithCore({
+      status: "running",
+      currentRevision: "383385c9999999",
+      version: "0.0.34",
+      updateAvailable: false,
+    }),
+    previousRevision: "0285a1c1111111",
+    targetRevision: "383385c",
+    action: "update",
+    elapsedMs: 3_000,
+  });
+  assert.deepEqual(completed, {
+    status: "completed",
+    note: {
+      text: "Updated paseo-factory (0285a1c → 383385c) · v0.0.34 is now running",
+      tone: "statusSuccess",
+      pluginId: "paseo-factory",
+    },
+  });
+
+  const reloadWaiting = resolveCoreRestartWatch({
+    view: makeViewWithCore({ status: "running", currentRevision: "383385c", version: "0.0.34" }),
+    previousRevision: "383385c",
+    targetRevision: "383385c",
+    action: "reload",
+    elapsedMs: 200,
+  });
+  assert.deepEqual(reloadWaiting, { status: "waiting" });
+
+  const reloadCompleted = resolveCoreRestartWatch({
+    view: makeViewWithCore({ status: "running", currentRevision: "383385c", version: "0.0.34" }),
+    previousRevision: "383385c",
+    targetRevision: "383385c",
+    action: "reload",
+    elapsedMs: 1_000,
+  });
+  assert.deepEqual(reloadCompleted, {
+    status: "completed",
+    note: {
+      text: "Reloaded paseo-factory on the daemon (v0.0.34)",
+      tone: "statusSuccess",
+      pluginId: "paseo-factory",
+    },
+  });
+
+  const failedByError = resolveCoreRestartWatch({
+    view: makeViewWithCore({ status: "failed", error: "Bundle syntax error in server/index.mjs" }),
+    previousRevision: "0285a1c",
+    targetRevision: "383385c",
+    action: "update",
+    elapsedMs: 4_000,
+  });
+  assert.deepEqual(failedByError, {
+    status: "failed",
+    note: {
+      text: "Update failed on paseo-factory: Bundle syntax error in server/index.mjs",
+      tone: "statusDanger",
+      pluginId: "paseo-factory",
+    },
+  });
+
+  const failedByTimeout = resolveCoreRestartWatch({
+    view: makeViewWithCore({ status: "running", currentRevision: "0285a1c" }),
+    previousRevision: "0285a1c",
+    targetRevision: "383385c",
+    action: "update",
+    elapsedMs: 45_000,
+    timeoutMs: 45_000,
+  });
+  assert.deepEqual(failedByTimeout, {
+    status: "failed",
+    note: {
+      text: "Timed out waiting for paseo-factory to finish restarting on the daemon.",
+      tone: "statusDanger",
+      pluginId: "paseo-factory",
+    },
+  });
+
+  // When no fresh post-restart snapshot has arrived yet (view === null), wait until timeoutMs, then fail.
+  assert.deepEqual(
+    resolveCoreRestartWatch({
+      view: null,
+      previousRevision: "383385c",
+      targetRevision: "383385c",
+      action: "reload",
+      elapsedMs: 2_000,
+    }),
+    { status: "waiting" },
+  );
+  assert.deepEqual(
+    resolveCoreRestartWatch({
+      view: null,
+      previousRevision: "383385c",
+      targetRevision: "383385c",
+      action: "reload",
+      elapsedMs: 45_000,
+      timeoutMs: 45_000,
+    }),
+    {
+      status: "failed",
+      note: {
+        text: "Timed out waiting for paseo-factory to finish restarting on the daemon.",
+        tone: "statusDanger",
+        pluginId: "paseo-factory",
+      },
+    },
+  );
+});
+
+test("v0.0.34 Seam 2.2: formatPluginCardProgressPill and formatToolbarProgressPill format live elapsed strings for update, restarting-core, install, and reload", () => {
+  const coreCard = makeCorePluginFixture({
+    currentRevision: "0285a1c",
+    latestRevision: "383385c",
+    updateAvailable: true,
+  });
+  const burnLabNotInstalled = makeCorePluginFixture({
+    id: "factory-burn-lab",
+    title: "Burn Lab",
+    status: "not_installed",
+    enabled: false,
+    installKind: null,
+    installedSource: null,
+    currentRevision: null,
+    latestRevision: null,
+    updateAvailable: null,
+  });
+
+  assert.equal(
+    formatPluginCardProgressPill(
+      coreCard,
+      {
+        kind: "manage",
+        target: "paseo-factory",
+        action: "update",
+        startedAt: 1000,
+        fromRevision: "0285a1c",
+        targetRevision: "383385c",
+      },
+      4,
+    ),
+    "Updating 0285a1c → 383385c… · 4s",
+  );
+
+  assert.equal(
+    formatPluginCardProgressPill(
+      coreCard,
+      {
+        kind: "restarting-core",
+        target: "paseo-factory",
+        action: "update",
+        startedAt: 1000,
+        fromRevision: "0285a1c",
+        targetRevision: "383385c",
+      },
+      3,
+    ),
+    "Reloading Core → 383385c… · 3s",
+  );
+
+  assert.equal(
+    formatPluginCardProgressPill(
+      burnLabNotInstalled,
+      {
+        kind: "install",
+        target: "factory-burn-lab",
+        startedAt: 1000,
+      },
+      5,
+    ),
+    "Installing from GitHub… · 5s",
+  );
+
+  assert.equal(
+    formatPluginCardProgressPill(
+      coreCard,
+      {
+        kind: "manage",
+        target: "paseo-factory",
+        action: "reload",
+        startedAt: 1000,
+      },
+      2,
+    ),
+    "Reloading plugin… · 2s",
+  );
+
+  assert.equal(
+    formatPluginCardProgressPill(
+      burnLabNotInstalled,
+      {
+        kind: "manage",
+        target: "paseo-factory",
+        action: "update",
+        startedAt: 1000,
+      },
+      4,
+    ),
+    null,
+    "non-targeted cards show no progress pill",
+  );
+
+  assert.equal(
+    isPluginTargetedByAct(
+      coreCard,
+      { kind: "restarting-core", target: "paseo-factory", action: "reload", startedAt: 1000 },
+      { kind: "restarting-core", action: "reload" },
+    ),
+    true,
+  );
+  assert.equal(
+    isPluginTargetedByAct(
+      coreCard,
+      { kind: "restarting-core", target: "paseo-factory", action: "reload", startedAt: 1000 },
+      { kind: "restarting-core", action: "update" },
+    ),
+    false,
+    "a Core reload restart must not match an update-targeted check",
+  );
+
+  assert.equal(formatToolbarProgressPill(null, true, 0), "Checking updates…");
+  assert.equal(
+    formatToolbarProgressPill({ kind: "manage", target: "paseo-factory", action: "update", startedAt: 1000 }, false, 4),
+    "Updating paseo-factory… · 4s",
+  );
+  assert.equal(
+    formatToolbarProgressPill({ kind: "restarting-core", target: "paseo-factory", action: "update", startedAt: 1000 }, false, 3),
+    "Reloading Core paseo-factory… · 3s",
+  );
+  assert.equal(
+    formatToolbarProgressPill({ kind: "manage", target: "all", action: "update", startedAt: 1000 }, false, 6),
+    "Updating All… · 6s",
+  );
+  assert.equal(
+    formatToolbarProgressPill({ kind: "install", target: "factory-burn-lab", startedAt: 1000 }, false, 2),
+    "Installing factory-burn-lab… · 2s",
+  );
+  assert.equal(formatToolbarProgressPill(null, false, 0), null);
+});
+
+test("v0.0.34 Seam 2.3: PluginsPane and FactoryShell wire live elapsed progress pills, in-flight button labels, persistent inline pluginsNote banner, per-card cardError, and Core self-restart tracking", () => {
+  const plugins = read("plugin/client/factory/plugins.tsx");
+  assert.match(plugins, /formatPluginCardProgressPill/, "PluginsPane re-exports and invokes formatPluginCardProgressPill");
+  assert.match(plugins, /formatToolbarProgressPill/, "PluginsPane re-exports and invokes formatToolbarProgressPill");
+  assert.match(plugins, /isCoreSelfRestartError/, "plugins.tsx re-exports isCoreSelfRestartError");
+  assert.match(plugins, /resolveCoreRestartWatch/, "plugins.tsx re-exports resolveCoreRestartWatch");
+  assert.match(plugins, /ActivePluginAct/, "plugins.tsx re-exports ActivePluginAct");
+  assert.match(plugins, /PluginsNote/, "plugins.tsx re-exports PluginsNote");
+
+  assert.match(plugins, /pluginsNote !== null/, "PluginsPane renders the persistent inline pluginsNote banner");
+  assert.match(plugins, /label="Dismiss"/, "pluginsNote banner includes a Dismiss button");
+  assert.match(
+    plugins,
+    /\[companion\.error,\s*cardError\]\.filter\(Boolean\)\.join\(" · "\)/,
+    "CompanionCard renders both daemon error and action cardError in the red error box",
+  );
+
+  assert.match(plugins, /Updating… \(\$\{elapsedSeconds\}s\)/, "card Update button shows elapsed seconds");
+  assert.match(plugins, /Reloading Core… \(\$\{elapsedSeconds\}s\)/, "Core Update/Reload button shows Reloading Core with elapsed seconds");
+  assert.match(plugins, /Installing… \(\$\{elapsedSeconds\}s\)/, "card Install button shows elapsed seconds");
+  assert.match(plugins, /Updating All… \(\$\{elapsedSeconds\}s\)/, "toolbar Update All button shows elapsed seconds");
+  assert.match(plugins, /Installing All… \(\$\{elapsedSeconds\}s\)/, "toolbar Install All button shows elapsed seconds");
+  assert.match(plugins, /Reloading…/, "drawer Reload button shows Reloading… in flight");
+  assert.match(plugins, /Enabling…/, "drawer Enable button shows Enabling… in flight");
+  assert.match(plugins, /Disabling…/, "drawer Disable button shows Disabling… in flight");
+  assert.match(plugins, /Removing…/, "drawer Remove button shows Removing… in flight");
+
+  const shell = read("plugin/client/factory/shell.tsx");
+  assert.match(shell, /activePluginAct/, "FactoryShell tracks activePluginAct");
+  assert.match(shell, /elapsedSeconds/, "FactoryShell derives elapsedSeconds from now - activePluginAct.startedAt");
+  assert.match(shell, /pluginsNote/, "FactoryShell tracks pluginsNote and passes it to PluginsPane");
+  assert.match(shell, /pluginCardErrors/, "FactoryShell tracks per-card pluginCardErrors and passes cardErrors to PluginsPane");
+  assert.match(shell, /isCoreSelfRestartError/, "FactoryShell classifies Core self-restart errors");
+  assert.match(shell, /restarting-core/, "FactoryShell transitions into restarting-core polling state");
+  assert.match(shell, /resolveCoreRestartWatch/, "FactoryShell resolves Core restart completion/failure against polled snapshots");
+  assert.match(
+    shell,
+    /poll\.value !== null && poll\.error === null && poll\.at !== null && poll\.at >= activePluginAct\.startedAt/,
+    "FactoryShell only evaluates fresh post-restart snapshots in resolveCoreRestartWatch",
+  );
+  assert.match(
+    plugins,
+    /isRestartingCoreForReload/,
+    "CompanionCard separates Core reload restart from Core update restart so Reload never lights up Update buttons",
+  );
+});
+
+
+
+
 
 

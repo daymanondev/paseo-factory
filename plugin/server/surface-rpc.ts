@@ -1637,10 +1637,11 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           return kind === "git" || kind === "npm";
         });
         const updateSnap = localUpdateSnapshot ?? getCachedPluginUpdateStatus(deps.home);
-        const targets =
+        const targets = (
           updateSnap === null
-            ? remoteInstalled
-            : remoteInstalled.filter((p) => updateSnap.statuses.get(p.id)?.updateAvailable === true);
+            ? [...remoteInstalled]
+            : remoteInstalled.filter((p) => updateSnap.statuses.get(p.id)?.updateAvailable === true)
+        ).sort((a, b) => (a.id === CORE_PLUGIN_ENTRY.id ? 1 : b.id === CORE_PLUGIN_ENTRY.id ? -1 : 0));
         localUpdateSnapshot = null;
         if (targets.length === 0) {
           return { ok: true as const, pluginId: "all", action: "update", summary: "All installed Factory plugins are already up to date." };
