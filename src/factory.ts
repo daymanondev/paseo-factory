@@ -1,3 +1,5 @@
+import { pendingUpgradeFor } from "./upgrade-state.ts";
+import { readLocalWriterIdentity } from "./writer-identity.ts";
 import { liveWorkspaceConflict, normalized, acceptedTasks } from "./workspace-conflict.ts";
 import { createHash } from "node:crypto";
 import { projectTask } from "./task-state.ts";
@@ -396,8 +398,9 @@ export function createFactory(options: FactoryOptions): Factory {
   let history: LedgerAdmission;
   try {
     LedgerAdmission.assertAvailable(join(dataDir, "ledger.jsonl"));
-    ledger = Ledger.open(join(dataDir, "ledger.jsonl"), { writerId: options.writerId });
-    recoveredAttempts = recoverInterruptedAttempts(ledger, dataDir);
+    const pendingUpgrade = pendingUpgradeFor(stateDir);
+    ledger = Ledger.open(join(dataDir, "ledger.jsonl"), { writerId: options.writerId ?? readLocalWriterIdentity(stateDir, options.projectSlug), recoverTail: pendingUpgrade === undefined });
+    recoveredAttempts = pendingUpgrade === undefined ? recoverInterruptedAttempts(ledger, dataDir) : [];
     history = new LedgerAdmission(ledger, stateDir, { fault: options.historyFault });
   } finally { release(); }
 

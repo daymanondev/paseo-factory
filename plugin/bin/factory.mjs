@@ -201,7 +201,7 @@ commands:
              fabricated zero. Whole ledger always, no filters in v1. A local
              read; the plugin need not be running.
 
-  vault      The Private vault's seven verbs (v0.0.21–v0.0.22, ADR 0014):
+  upgrade    preflight | apply | resume | restore [--project <registered-slug>]\n             [--transaction <id>] [--dry-run] — explicit Owner-only history maintenance.\n\n  vault      The Private vault's seven verbs (v0.0.21–v0.0.22, ADR 0014):
              status | hydrate | pull | push | seal | sync | import against the
              Owner's private GitHub repository. Every verb prints one JSON
              object on stdout — vault operations script and verify mechanically
@@ -404,6 +404,22 @@ async function roundTrip(request, waitSecs) {
     process.exit(2);
   }
   return reply;
+}
+
+if (command === "upgrade") {
+  const parsed = parseCommandOptions({ project: { type: "string" }, transaction: { type: "string" }, "dry-run": { type: "boolean" }, "wait-secs": { type: "string" } });
+  const action = parsed.values["dry-run"] ? "preflight" : parsed.positionals[0] ?? "preflight";
+  if (!["preflight", "apply", "resume", "restore"].includes(action) || parsed.positionals.length > 1) fail("upgrade: use preflight | apply | resume | restore [--project <registered-slug>] [--transaction <id>]");
+  if ((action === "resume" || action === "restore") && parsed.values.transaction === undefined) fail("upgrade: --transaction <id> is required");
+  const input = { action, ...(parsed.values.project === undefined ? {} : { projectSlug: parsed.values.project }), ...(parsed.values.transaction === undefined ? {} : { transactionId: parsed.values.transaction }) };
+  if (action === "preflight") {
+    const { preflightUpgrade } = await import("./history-upgrade.mjs");
+    try { const result = preflightUpgrade(stateDir, input); console.log(JSON.stringify(result, null, 2)); process.exit(result.ok ? 0 : 2); }
+    catch (error) { console.error(`factory: upgrade preflight: ${error.message}`); process.exit(2); }
+  }
+  const reply = await roundTrip({ id: randomId(), kind: "upgrade", ...input }, waitSeconds(parsed, 120));
+  if (!reply.ok) { console.error(`factory: ${reply.code}: ${reply.message}`); process.exit(2); }
+  console.log(JSON.stringify(reply.upgrade, null, 2)); process.exit(0);
 }
 
 if (command === "contract") {

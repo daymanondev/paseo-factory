@@ -1,3 +1,5 @@
+import { pendingUpgradeFor } from "./upgrade-state.ts";
+import { readLocalWriterIdentity } from "./writer-identity.ts";
 import { liveWorkspaceConflict, acceptedTasks } from "./workspace-conflict.ts";
 /** The live writer's operation/admission boundary. Downloads only stage bytes. */
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -78,6 +80,7 @@ export class LedgerAdmission {
     writeDurableFile(join(dirname(ledger.path), "ledger-owner.json"), JSON.stringify({ version: 1, pid: process.pid, token: this.#token, target: historyTargetPath(ledger.path), startedAt: new Date().toISOString() }));
     ledger.setAdmissionGuards(() => {
       this.#assertOwner();
+      this.#assertNormalWork();
       if (this.#exclusive && !this.#nested()) throw new FactoryError("history-maintenance-busy", "Ledger maintenance is active");
     }, () => {
       this.#assertOwner();
@@ -92,6 +95,11 @@ export class LedgerAdmission {
   #assertOwner(): void {
     if (this.#stopped || owners.get(historyTargetPath(this.ledger.path)) !== this) throw new FactoryError("ledger-writer-active", "this Factory was superseded by the current Ledger owner");
   }
+  #assertNormalWork(): void {
+    if (this.#exclusive && this.#nested()) return;
+    const id = pendingUpgradeFor(this.stateDir);
+    if (id !== undefined) throw new FactoryError("upgrade-recovery-required", `Upgrade ${id} is incomplete; resume or inspect maintenance before ordinary mutations`);
+  }
   #pending(): boolean { return [this.ledger.path, ...this.#projectTargets()].some((path) => readLedgerImports(path).some((item) => item.status === "pending" || item.status === "staged")); }
   #wake(): void { for (const wake of this.#waiters) wake(); this.#waiters.clear(); }
   async #waitUntil(predicate: () => boolean): Promise<void> {
@@ -100,6 +108,7 @@ export class LedgerAdmission {
 
   async runOperation<T>(fn: () => T | Promise<T>, options: { newWork?: boolean } = {}): Promise<T> {
     this.#assertOwner();
+    this.#assertNormalWork();
     if (this.#nested()) return await fn();
     this.drain();
     // New long-running work waits for pending imports. Permits and shim/Spool
@@ -117,6 +126,7 @@ export class LedgerAdmission {
 
   runSync<T>(fn: () => T): T {
     this.#assertOwner();
+    this.#assertNormalWork();
     if (this.#exclusive && !this.#nested()) throw new FactoryError("history-maintenance-busy", "Ledger maintenance is active; retry after it completes");
     if (this.#nested()) return fn();
     this.#active += 1;
@@ -137,7 +147,7 @@ export class LedgerAdmission {
         return true;
       });
       return await context.run(lease, () => {
-        const target = options.projectSlug === undefined ? this : this.#projectOwner(options.projectSlug);
+        const target = options.projectSlug === undefined ? this : this.#projectOwner(options.projectSlug, true);
         return target === this ? fn(this.ledger) : target.withExclusiveMaintenance(fn);
       });
     } finally { lease.live = false; this.#exclusive = false; this.#maintenance -= 1; this.drain(); this.#wake(); }
@@ -166,6 +176,7 @@ export class LedgerAdmission {
     if (this.#stopped || owners.get(historyTargetPath(this.ledger.path)) !== this) return;
     const root = owners.get(historyTargetPath(join(this.stateDir, "ledger.jsonl")));
     if (root !== undefined && root !== this && (root.#active > 0 || root.#exclusive || root.#maintenance > 0)) return;
+    if (pendingUpgradeFor(this.stateDir) !== undefined) return;
     if (this.#draining || this.#active > 0 || this.#exclusive || this.#maintenance > 0) return;
     this.#draining = true;
     try {
@@ -244,7 +255,7 @@ export class LedgerAdmission {
     if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(slug) || readProjectRegistration(this.stateDir, slug) === undefined) throw new FactoryError("unknown-project", "history target must be a registered local Project");
     return join(projectStateDir(this.stateDir, slug), "ledger.jsonl");
   }
-  #projectOwner(slug: string): LedgerAdmission {
+  #projectOwner(slug: string, preserveTail = false): LedgerAdmission {
     const path = this.#projectPath(slug);
     if (historyTargetPath(path) === historyTargetPath(this.ledger.path)) return this;
     let owner = owners.get(historyTargetPath(path));
@@ -252,7 +263,7 @@ export class LedgerAdmission {
       const release = LedgerAdmission.reserve(path);
       try {
         LedgerAdmission.assertAvailable(path);
-        owner = new LedgerAdmission(Ledger.open(path, { writerId: this.ledger.writerId }), this.stateDir, { deferDrain: true });
+        owner = new LedgerAdmission(Ledger.open(path, { writerId: readLocalWriterIdentity(this.stateDir, slug) ?? this.ledger.writerId, recoverTail: !preserveTail }), this.stateDir, { deferDrain: true });
         this.#targets.set(path, owner);
       } finally { release(); }
     }

@@ -47,7 +47,7 @@ export class Ledger {
   }
 
   /** Loads and validates an existing ledger, or starts a fresh one at seq 1. */
-  static open(path: string, options: { writerId?: string } = {}): Ledger {
+  static open(path: string, options: { writerId?: string; recoverTail?: boolean } = {}): Ledger {
     mkdirSync(dirname(path), { recursive: true });
     let raw: string;
     try {
@@ -57,7 +57,7 @@ export class Ledger {
       else throw err;
     }
 
-    if (raw !== "" && !raw.endsWith("\n")) {
+    if (raw !== "" && !raw.endsWith("\n") && options.recoverTail !== false) {
       raw = quarantineUnterminatedTail(path, raw);
     }
 

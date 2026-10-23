@@ -1,3 +1,5 @@
+import { upgradeFactory } from "./core/history-upgrade.ts";
+import type { UpgradeInput } from "./core/history-upgrade.ts";
 import { acceptanceSummary, executeAcceptance } from "./commands.ts";
 export { acceptanceSummary, archiveAcceptedTaskWorkspace } from "./commands.ts";
 /**
@@ -65,6 +67,7 @@ import {
   vaultHydrate,
   vaultImport,
   vaultPull,
+  historyUpgrade,
   historyImport,
   historyImports,
   vaultPush,
@@ -911,6 +914,10 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   };
 
   const handlers = {
+    async historyUpgrade(input: UpgradeInput) {
+      try { return { ok: true as const, result: await upgradeFactory(deps.factory, input) }; }
+      catch (error) { return failure(codeOf(error), messageOf(error)); }
+    },
     async historyImport(input: { project?: string; sources?: import("./core/history-import.ts").HistoryImportSource[] }) {
       if (input.sources !== undefined) { if (input.project !== undefined) deps.factory.history.stageForProject(input.project, input.sources); else deps.factory.history.stage(input.sources); }
       else deps.factory.history.drain();
@@ -1843,7 +1850,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       }
     },
   };
-  const reads = new Set(["cachedProviders", "sanitizeLane", "snapshot", "taskDetail", "pluginsCheckUpdates", "historyImport", "historyImports"]);
+  const reads = new Set(["cachedProviders", "sanitizeLane", "snapshot", "taskDetail", "pluginsCheckUpdates", "historyImport", "historyImports", "historyUpgrade"]);
   const wrappers = new Map<PropertyKey, unknown>();
   return new Proxy(handlers, {
     get(target, key, receiver) {
@@ -1878,6 +1885,7 @@ export function registerSurfaceRpc(
     if (onContext !== undefined) onContext(context);
     return { paseo: context.paseo };
   };
+  server.handle(historyUpgrade, (input) => handlers.historyUpgrade(input));
   server.handle(snapshot, (input, context) => handlers.snapshot(input, pass(context)));
   server.handle(taskDetail, (input, context) => handlers.taskDetail(input, pass(context)));
   server.handle(accept, (input, context) => handlers.accept(input, pass(context)));

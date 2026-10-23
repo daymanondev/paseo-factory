@@ -1,3 +1,5 @@
+import { upgradeFactory, upgradeReply, recordUpgradeControlReply } from "./core/history-upgrade.ts";
+import type { UpgradeInput, UpgradeResult, UpgradePreflight } from "./core/history-upgrade.ts";
 /**
  * The spool (ADR 0004): the plugin process is the only Ledger writer and the
  * only Gate runner; the CLIs (`factory-claim`, `factory contract`,
@@ -335,6 +337,7 @@ export interface AskRequest {
 }
 
 export type SpoolRequest =
+  | ({ id: string; kind: "upgrade"; submitter?: string; seat?: SpoolSeat } & Omit<UpgradeInput, "controlId">)
   | { id: string; kind: "history_import" | "history_import_status"; sources?: HistoryImportSource[]; project?: string; submitter?: string; seat?: SpoolSeat }
   | ContractRequest
   | ClaimRequest
@@ -389,6 +392,7 @@ export type SpoolReply =
       id: string;
       ok: true;
       summary: string;
+      upgrade?: UpgradeResult | UpgradePreflight;
       /** Claim replies: which Attempt the Claim opened and how it ended. */
       attempt?: number;
       verdict?: Verdict;
@@ -498,6 +502,10 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
   const submitterParsed = parseOptionalSubmitter(req.submitter);
   if (!submitterParsed.ok) return undefined;
   const submitterField = submitterParsed.submitter === undefined ? {} : { submitter: submitterParsed.submitter };
+  if (req.kind === "upgrade") {
+    if (!["preflight", "apply", "resume", "restore"].includes(String(req.action)) || (req.transactionId !== undefined && typeof req.transactionId !== "string") || (req.projectSlug !== undefined && typeof req.projectSlug !== "string")) return undefined;
+    return { id: req.id, kind: "upgrade", action: req.action as UpgradeInput["action"], ...(req.transactionId === undefined ? {} : { transactionId: req.transactionId as string }), ...(req.projectSlug === undefined ? {} : { projectSlug: req.projectSlug as string }), ...seatField, ...submitterField };
+  }
   if (req.kind === "history_import" || req.kind === "history_import_status") {
     if (req.project !== undefined && typeof req.project !== "string") return undefined;
     if (req.sources !== undefined && (!Array.isArray(req.sources) || req.sources.some((source: unknown) => typeof source !== "object" || source === null || typeof (source as Record<string, unknown>).nodeId !== "string" || typeof (source as Record<string, unknown>).lines !== "string"))) return undefined;
@@ -892,7 +900,7 @@ export async function handleSpoolRequest(
   request: SpoolRequest,
   deps: SpoolDeps = {},
 ): Promise<SpoolReply> {
-  if (request.kind === "history_import" || request.kind === "history_import_status") return handleAdmittedSpoolRequest(factory, request, deps);
+  if (request.kind === "upgrade" || request.kind === "history_import" || request.kind === "history_import_status") return handleAdmittedSpoolRequest(factory, request, deps);
   if (request.kind === "reset" && !factory.history.maintenanceActive) return factory.history.withExclusiveMaintenance(() => handleAdmittedSpoolRequest(factory, request, deps));
   return factory.history.runOperation(() => handleAdmittedSpoolRequest(factory, request, deps), { newWork: !["ask", "meter", "repoke", "respawn", "needs_human"].includes(request.kind) });
 }
@@ -902,6 +910,10 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
   const resolvedDaemon = resolveDaemonArg(daemon);
   try {
     const effectiveSeat = await resolveEffectiveSeat(factory, resolvedDaemon, request);
+    if (request.kind === "upgrade") {
+      if (effectiveSeat !== undefined) return { id: request.id, ok: false, code: "seat-cannot-upgrade", message: "Persistent history upgrade/restore requires Owner authority" };
+      return upgradeReply(request.id, await upgradeFactory(factory, { ...request, controlId: request.id }));
+    }
     if (request.kind === "history_import" || request.kind === "history_import_status") {
       if (effectiveSeat === "agent" || effectiveSeat === "lead") return { id: request.id, ok: false, code: "seat-cannot-import", message: "History admission requires Owner authority" };
       if (request.kind === "history_import" && request.sources !== undefined) {
@@ -1577,7 +1589,7 @@ export function startSpool(stateDir: string, factory: Factory, options: SpoolOpt
           if (semanticKey !== undefined && inFlightSemanticKeys.get(semanticKey) === id) {
             inFlightSemanticKeys.delete(semanticKey);
           }
-          await factory.history.runOperation(() => settleDuplicateMirrors(id, replyPath));
+          try { await factory.history.runOperation(() => settleDuplicateMirrors(id, replyPath)); } catch { /* interrupted maintenance retains mirrors for a later drain */ }
         });
     }
   };
@@ -1624,6 +1636,10 @@ async function handleAdmittedRequestFile(
         : `request ${id}: ${request.kind}${"task" in request ? ` ${request.task}` : ""}${stamp} → ${reply.ok ? (reply.decision ?? "ok") : `rejected (${reply.code})`}`,
     );
   }
+  if (request?.kind === "upgrade") {
+    const transaction = reply.ok && reply.upgrade !== undefined && "id" in reply.upgrade ? reply.upgrade.id : request.transactionId;
+    if (transaction !== undefined) { try { recordUpgradeControlReply(factory.stateDir, transaction, request.id, reply); } catch { /* preserve the primary reply and fail closed on unknown journal transitions */ } }
+  }
   writeJsonAtomic(replyPath, reply);
   renameSync(requestPath, processedPath);
 }
@@ -1639,6 +1655,7 @@ async function handleRequestFile(id: string, requestPath: string, replyPath: str
   let kind = "";
   try { kind = String(JSON.parse(readFileSync(requestPath, "utf8")).kind); } catch { /* malformed requests still receive a reply */ }
   const work = () => handleAdmittedRequestFile(id, requestPath, replyPath, processedPath, factory, log, deps);
-  if (kind === "reset") await factory.history.withExclusiveMaintenance(work);
+  if (kind === "upgrade") await work();
+  else if (kind === "reset") await factory.history.withExclusiveMaintenance(work);
   else await factory.history.runOperation(work, { newWork: !["ask", "meter", "repoke", "respawn", "needs_human", "history_import", "history_import_status", ""].includes(kind) });
 }
