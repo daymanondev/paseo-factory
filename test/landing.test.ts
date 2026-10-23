@@ -68,3 +68,49 @@ test("pending landing retries preserve newer task commits even when the old clai
   assert.equal(readFileSync(join(workspace, "followup.txt"), "utf8"), "resolved additional work\n");
   assert.equal(existsSync(worktree), false);
 });
+
+test("pending landing can use the surviving task branch after its worktree was removed", async (t) => {
+  const { factory, task, workspace, worktree, claimed } = landingFixture(t);
+  factory.setContract({ task, workspace, gate: "true", artifact: "app.txt" });
+  assert.equal((await factory.claim({ task, sha: claimed })).verdict, "green");
+  writeFileSync(join(workspace, "owner.txt"), "owner edit\n");
+  assert.equal((await factory.accept({ task, attempt: 1 })).landing, "pending-conflict");
+  writeFileSync(join(worktree, "followup.txt"), "branch repair\n");
+  const tip = gitCommitChanges(worktree, "repair before worktree removal");
+  execFileSync("git", ["worktree", "remove", "--force", worktree], { cwd: workspace, stdio: "pipe" });
+  rmSync(join(workspace, "owner.txt"));
+  assert.equal((await factory.accept({ task, attempt: 1 })).landing, "landed");
+  assert.equal(spawnSync("git", ["merge-base", "--is-ancestor", tip, "HEAD"], { cwd: workspace }).status, 0);
+});
+
+test("a divergent pending task tip stays pending and preserves the worktree", async (t) => {
+  const { factory, task, workspace, worktree, claimed, base } = landingFixture(t);
+  assert.equal((await factory.claim({ task, sha: claimed })).verdict, "green");
+  writeFileSync(join(workspace, "owner.txt"), "owner edit\n");
+  assert.equal((await factory.accept({ task, attempt: 1 })).landing, "pending-conflict");
+  execFileSync("git", ["reset", "--hard", base], { cwd: worktree, stdio: "pipe" });
+  writeFileSync(join(worktree, "unrelated.txt"), "different history\n");
+  gitCommitChanges(worktree, "unrelated branch work");
+  rmSync(join(workspace, "owner.txt"));
+  const retried = await factory.accept({ task, attempt: 1 });
+  assert.equal(retried.landing, "pending-conflict");
+  assert.match(retried.landingNote ?? "", /diverged/);
+  assert.equal(existsSync(worktree), true);
+  assert.equal(readFileSync(join(worktree, "unrelated.txt"), "utf8"), "different history\n");
+});
+
+test("artifact exclusions preserve dirty checks for tracked edits and unrelated untracked files", async (t) => {
+  await t.test("tracked output remains dirty", async (t) => {
+    const { factory, task, worktree } = landingFixture(t);
+    mkdirSync(join(worktree, "coverage"));
+    writeFileSync(join(worktree, "coverage", "tracked.txt"), "tracked fixture\n");
+    const claimed = gitCommitChanges(worktree, "track an output fixture");
+    writeFileSync(join(worktree, "coverage", "tracked.txt"), "changed tracked fixture\n");
+    assert.equal((await factory.claim({ task, sha: claimed })).verdict, "red");
+  });
+  await t.test("unrelated untracked file remains dirty", async (t) => {
+    const { factory, task, worktree, claimed } = landingFixture(t);
+    writeFileSync(join(worktree, "coverage"), "a regular file is not an output directory\n");
+    assert.equal((await factory.claim({ task, sha: claimed })).verdict, "red");
+  });
+});
