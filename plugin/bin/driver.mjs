@@ -162,9 +162,8 @@ export function renderRunBanner(tasks, provider) {
 
 /**
  * Reads the ledger's complete lines — through the shared reader
- * (ledger-read.mjs) under the driver's own policy: the plugin is the only
- * writer (ADR 0004) and validated each line when it appended it, so blank
- * lines are skipped and only unparseable JSON refuses. A missing ledger is
+ * (ledger-read.mjs) under the same integrity policy as status: complete
+ * records must validate and have strictly increasing safe sequences. A missing ledger is
  * an empty one (the plugin has never run); anything else unreadable throws —
  * the driver refuses to guess.
  */
