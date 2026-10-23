@@ -328,6 +328,12 @@ const submitter = stampedAgent !== "" ? stampedAgent : stampedCorrelation !== ""
 const rawSeat = typeof process.env.PASEO_FACTORY_SEAT === "string" ? process.env.PASEO_FACTORY_SEAT.trim() : "";
 const stampedSeat = rawSeat === "supervisor" || rawSeat === "lead" || rawSeat === "agent" ? rawSeat : undefined;
 
+/** Pipe writes are asynchronous: immediate process.exit can truncate large machine-readable output. */
+async function writeJsonAndExit(value, code = 0) {
+  await new Promise((resolve, reject) => process.stdout.write(`${JSON.stringify(value, null, 2)}\n`, (error) => error ? reject(error) : resolve()));
+  process.exit(code);
+}
+
 function fail(message) {
   console.error(`factory: ${message}\n\n${usage}`);
   process.exit(2);
@@ -412,12 +418,12 @@ if (command === "upgrade") {
   const input = { action, ...(parsed.values.project === undefined ? {} : { projectSlug: parsed.values.project }), ...(parsed.values.transaction === undefined ? {} : { transactionId: parsed.values.transaction }) };
   if (action === "preflight") {
     const { preflightUpgrade } = await import("./history-upgrade.mjs");
-    try { const result = preflightUpgrade(stateDir, input); console.log(JSON.stringify(result, null, 2)); process.exit(result.ok ? 0 : 2); }
+    try { const result = preflightUpgrade(stateDir, input); await writeJsonAndExit(result, result.ok ? 0 : 2); }
     catch (error) { console.error(`factory: upgrade preflight: ${error.message}`); process.exit(2); }
   }
   const reply = await roundTrip({ id: randomId(), kind: "upgrade", ...input }, waitSeconds(parsed, 120));
   if (!reply.ok) { console.error(`factory: ${reply.code}: ${reply.message}`); process.exit(2); }
-  console.log(JSON.stringify(reply.upgrade, null, 2)); process.exit(0);
+  await writeJsonAndExit(reply.upgrade);
 }
 
 if (command === "contract") {
@@ -827,8 +833,7 @@ if (command === "vault") {
       refuseOptions("status", []);
       // The pure local read (the status/cost lineage): the config file and the
       // runtime probes, no spool round trip, no plugin needed.
-      console.log(JSON.stringify(vault.readVaultStatus(home), null, 2));
-      process.exit(0);
+      await writeJsonAndExit(vault.readVaultStatus(home));
     }
 
     if (sub === "hydrate") {
@@ -840,8 +845,7 @@ if (command === "vault") {
         ...(values["merge-ledgers"] ? { mergeLedgers: true } : {}),
         ...(values["overwrite-configs"] ? { overwriteConfigs: true } : {}),
       });
-      console.log(JSON.stringify({ ok: true, mode: "direct", repo: result.repo, ref: result.ref, hydratedFiles: result.hydratedFiles, historyImports: result.historyImports, vault: vault.readVaultStatus(home) }, null, 2));
-      process.exit(0);
+      await writeJsonAndExit({ ok: true, mode: "direct", repo: result.repo, ref: result.ref, hydratedFiles: result.hydratedFiles, historyImports: result.historyImports, vault: vault.readVaultStatus(home) });
     }
 
     if (sub === "pull") {
@@ -851,16 +855,14 @@ if (command === "vault") {
         ...(values["merge-ledgers"] ? { mergeLedgers: true } : {}),
         ...(values["overwrite-configs"] ? { overwriteConfigs: true } : {}),
       });
-      console.log(JSON.stringify({ ok: true, mode: "sync", hydratedFiles: result.hydratedFiles, historyImports: result.historyImports, vault: vault.readVaultStatus(home) }, null, 2));
-      process.exit(0);
+      await writeJsonAndExit({ ok: true, mode: "sync", hydratedFiles: result.hydratedFiles, historyImports: result.historyImports, vault: vault.readVaultStatus(home) });
     }
 
     if (sub === "push") {
       if (parsed.positionals.length > 1) fail(`vault push: unexpected positional "${parsed.positionals[1]}"`);
       refuseOptions("push", ["include-ledger"]);
       const result = await vault.pushVault(home, ...(values["include-ledger"] ? [{ includeLedger: true }] : []));
-      console.log(JSON.stringify({ ok: true, pushed: result.pushed, pushedFiles: result.pushedFiles, vault: vault.readVaultStatus(home) }, null, 2));
-      process.exit(0);
+      await writeJsonAndExit({ ok: true, pushed: result.pushed, pushedFiles: result.pushedFiles, vault: vault.readVaultStatus(home) });
     }
 
     if (sub === "sync") {
@@ -872,8 +874,7 @@ if (command === "vault") {
         ...(typeof values.passphrase === "string" && values.passphrase !== "" ? { passphrase: values.passphrase } : {}),
         ...(values["overwrite-configs"] ? { overwriteConfigs: true } : {}),
       });
-      console.log(JSON.stringify({ ok: true, ...result, vault: vault.readVaultStatus(home) }, null, 2));
-      process.exit(0);
+      await writeJsonAndExit({ ok: true, ...result, vault: vault.readVaultStatus(home) });
     }
 
     if (sub === "import") {
@@ -914,8 +915,7 @@ if (command === "vault") {
           : {}),
         ...(values["no-sync"] ? { syncAfterImport: false } : {}),
       });
-      console.log(JSON.stringify({ ok: true, ...result, pushed: result.synced?.pushed ?? false, vault: vault.readVaultStatus(home) }, null, 2));
-      process.exit(0);
+      await writeJsonAndExit({ ok: true, ...result, pushed: result.synced?.pushed ?? false, vault: vault.readVaultStatus(home) });
     }
 
     if (sub === "seal") {
@@ -937,8 +937,7 @@ if (command === "vault") {
         vaultPath,
         ...(typeof values.passphrase === "string" && values.passphrase !== "" ? [values.passphrase] : []),
       );
-      console.log(JSON.stringify({ ok: true, ...result }, null, 2));
-      process.exit(0);
+      await writeJsonAndExit({ ok: true, ...result });
     }
 
     fail(`vault: unknown subcommand "${sub}" — use "vault status | hydrate | pull | push | seal | sync | import"`);

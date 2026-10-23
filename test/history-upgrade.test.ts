@@ -272,3 +272,25 @@ test("ambiguous reused legacy Report paths refuse activation without repair", as
   const before = snapshot(stateDir), checked = preflightUpgrade(stateDir);
   assert.equal(checked.ok, false); assert.match(checked.conflicts.join("\n"), /different Contract epochs/); assert.deepEqual(snapshot(stateDir), before);
 });
+
+test("CLI preflight flushes a large inventory through pipes with success and refusal exit codes", async (t) => {
+  const dir = makeTempDir(); disposeDir(t, dir);
+  const home = join(dir, "home"), stateDir = join(home, "plugin-state/paseo-factory");
+  mkdirSync(stateDir, { recursive: true });
+  for (let index = 0; index < 600; index++) writeFileSync(join(stateDir, `retained-${index.toString().padStart(4, "0")}.txt`), "evidence\n");
+  const before = snapshot(stateDir);
+  const good = await cli(home, ["preflight"]);
+  assert.equal(good.code, 0, good.stderr);
+  const output = JSON.parse(good.stdout);
+  assert.equal(output.ok, true);
+  assert.equal(output.inventory.filter((entry: { kind: string }) => entry.kind === "file").length, 600);
+  assert.deepEqual(snapshot(stateDir), before);
+  writeFileSync(join(stateDir, "ledger.jsonl"), '{"seq":1,"ts":"now","event":"unknown"}\n');
+  const damaged = snapshot(stateDir);
+  const refused = await cli(home, ["preflight"]);
+  assert.equal(refused.code, 2, refused.stderr);
+  const failure = JSON.parse(refused.stdout);
+  assert.equal(failure.ok, false);
+  assert.match(failure.conflicts.join("\n"), /valid ledger event/);
+  assert.deepEqual(snapshot(stateDir), damaged);
+});
