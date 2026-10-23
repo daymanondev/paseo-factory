@@ -777,6 +777,20 @@ function loadImportManifest(target, id) {
     throw new FactoryError("invalid-import", `damaged import manifest ${id}`);
   }
   if (manifest.materialization !== void 0 && (typeof manifest.materialization !== "object" || manifest.materialization === null || !["pending", "applied", "refused"].includes(manifest.materialization.status) || !Array.isArray(manifest.materialization.diagnostics) || !manifest.materialization.diagnostics.every((line) => typeof line === "string"))) throw new FactoryError("invalid-import", `damaged materialization hold ${id}`);
+  if (manifest.materialization !== void 0 && manifest.materialization.status !== "applied") {
+    for (const status of ["applied", "refused"]) {
+      let outcome;
+      try {
+        outcome = JSON.parse(readFileSync(join(importDirectory(target, id), `materialization-${status}.json`), "utf8"));
+      } catch (error) {
+        if (error.code === "ENOENT") continue;
+        throw new FactoryError("invalid-import", `damaged materialization outcome ${id}`);
+      }
+      if (outcome.status !== status || !Array.isArray(outcome.diagnostics) || !outcome.diagnostics.every((line) => typeof line === "string")) throw new FactoryError("invalid-import", `damaged materialization outcome ${id}`);
+      manifest.materialization = outcome;
+      break;
+    }
+  }
   return manifest;
 }
 function importSources(manifest) {
@@ -830,8 +844,8 @@ function updateImportMaterialization(imports, materialization) {
   for (const item of imports) {
     const manifest = loadImportManifest(item.target, item.id);
     if (manifest.status === "applied" || manifest.materialization === void 0 || manifest.materialization.status === "applied") continue;
-    manifest.materialization = materialization;
-    saveImportManifest(manifest);
+    const path = join(importDirectory(item.target, item.id), `materialization-${materialization.status}.json`);
+    writeDurableFile(path, JSON.stringify(materialization) + "\n");
     listeners.get(historyTargetPath(item.target))?.();
   }
 }
