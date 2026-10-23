@@ -132,13 +132,19 @@ test("missing and empty Ledgers remain successful empty reads across entrances",
   }
 });
 
-test("Vault validates imported records when filesystem writes are denied", () => {
+test("Vault plans legacy refusal without filesystem writes and retains the original source", () => {
   const moduleUrl = pathToFileURL(join(repoRoot, "src/vault.ts")).href;
-  const script = `import { reconcileVaultLedgers } from ${JSON.stringify(moduleUrl)}; console.log(reconcileVaultLedgers("", [{ nodeId: "remote", lines: ${JSON.stringify(`${JSON.stringify(contract)}\n`)} }]));`;
+  const raw = `${JSON.stringify({ ...contract, workspace: "/fixture/project", gate: "true", artifact: "out" })}\n`;
+  const script = `import { reconcileVaultLedgers } from ${JSON.stringify(moduleUrl)}; try { reconcileVaultLedgers("", [{ nodeId: "remote", lines: ${JSON.stringify(raw)} }]); throw new Error("legacy history unexpectedly activated"); } catch(error) { if (!error.plan) throw error; console.log(JSON.stringify({code:error.code,status:error.plan.status,lines:error.plan.lines,source:error.plan.sources[0].lines,reasons:error.plan.conflicts.map(conflict=>conflict.reason)})); }`;
   const result = spawnSync(process.execPath, ["--permission", `--allow-fs-read=${repoRoot}`, "--input-type=module", "-e", script], { encoding: "utf8" });
 
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout.trim()), contract);
+  const refusal = JSON.parse(result.stdout);
+  assert.equal(refusal.code, "history-import-conflict");
+  assert.equal(refusal.status, "conflicted");
+  assert.equal(refusal.lines, "");
+  assert.equal(refusal.source, raw);
+  assert.match(refusal.reasons.join("\n"), /explicit legacy migration/);
 });
 
 test("pure record validation recognizes legacy and supported versions without filesystem writes", () => {
