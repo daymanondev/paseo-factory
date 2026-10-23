@@ -67,6 +67,7 @@ export const MAX_ATTEMPTS = 3;
  * (v0.0.7) closes as the one factory-level event.
  */
 export const EVENT_NAMES = [
+  "ledger_schema",
   "contract_set",
   "claim_reported",
   "gate_started",
@@ -94,7 +95,38 @@ export type EventName = (typeof EVENT_NAMES)[number];
 /** Assigned by the ledger at append time — ISO 8601 UTC (ADR 0003). */
 export type Timestamp = string;
 
-export interface ContractSet {
+/** Optional on readable legacy records; required by the v2 validator. */
+export interface EventIdentityMetadata {
+  schema_version?: 1 | 2;
+  event_id?: string;
+  epoch_id?: string;
+  provenance?: { writer_id: string | null };
+  /** Stable targets for numeric Ledger references (never Attempt/mailbox numbers). */
+  references?: Partial<Record<LedgerReferenceField, string>>;
+}
+
+export const LEDGER_REFERENCE_KINDS = { denial: "permit_denied", repoke: "repoke_dispatched", gate: "gate_finished", spawn: "spawn_dispatched", respawn: "respawn_dispatched" } as const;
+export type LedgerReferenceField = keyof typeof LEDGER_REFERENCE_KINDS;
+
+/** Unknown-Task dispatch refusals are factual records outside any Contract. */
+export function eventAllowsUnboundEpoch(kind: string): boolean {
+  return kind === "spawn_refused" || kind === "respawn_refused" || kind === "repoke_refused";
+}
+
+/** A newly assigned final sequence fences upgraded files from older writers.
+ * Existing rows keep their original sequence addresses before this marker.
+ */
+export interface LedgerSchema extends EventIdentityMetadata {
+  seq: number;
+  ts: Timestamp;
+  event: "ledger_schema";
+  schema_version: 2;
+  version: 2;
+  ledger_id: string;
+  writer_id: string;
+}
+
+export interface ContractSet extends EventIdentityMetadata {
   seq: number;
   ts: Timestamp;
   event: "contract_set";
@@ -143,7 +175,7 @@ export interface ContractSet {
   by?: string;
 }
 
-export interface ClaimReported {
+export interface ClaimReported extends EventIdentityMetadata {
   seq: number;
   ts: Timestamp;
   event: "claim_reported";
@@ -159,7 +191,7 @@ export interface ClaimReported {
   agent?: string;
 }
 
-export interface GateStarted {
+export interface GateStarted extends EventIdentityMetadata {
   seq: number;
   ts: Timestamp;
   event: "gate_started";
@@ -168,7 +200,7 @@ export interface GateStarted {
   cmd: string;
 }
 
-export interface GateFinished {
+export interface GateFinished extends EventIdentityMetadata {
   seq: number;
   ts: Timestamp;
   event: "gate_finished";
@@ -193,7 +225,7 @@ export interface GateFinished {
  * after a green Verdict. `outcome` is the countable noise instrument; on
  * `failed`, `finding` carries the error — deaths are visible, never swallowed.
  */
-export interface FreshEyesWritten {
+export interface FreshEyesWritten extends EventIdentityMetadata {
   seq: number;
   ts: Timestamp;
   event: "fresh_eyes_written";
@@ -219,7 +251,7 @@ export interface FreshEyesWritten {
  * is the operator's act at close-out. On `failed`, `error` carries the
  * reason — deaths are visible.
  */
-export interface WatchWritten {
+export interface WatchWritten extends EventIdentityMetadata {
   seq: number;
   ts: Timestamp;
   event: "watch_written";
@@ -242,7 +274,7 @@ export interface WatchWritten {
   error?: string;
 }
 
-export interface ReportWritten {
+export interface ReportWritten extends EventIdentityMetadata {
   seq: number;
   ts: Timestamp;
   event: "report_written";
@@ -251,7 +283,7 @@ export interface ReportWritten {
   path: string;
 }
 
-export interface AttemptAccepted {
+export interface AttemptAccepted extends EventIdentityMetadata {
   seq: number;
   ts: Timestamp;
   event: "attempt_accepted";
@@ -288,7 +320,7 @@ export interface AttemptAccepted {
  * judged ask — allowed asks are the permit parade made countable; paseo
  * persists permission decisions nowhere, so this line is the only record.
  */
-export interface PermitAllowed {
+export interface PermitAllowed extends EventIdentityMetadata {
   seq: number;
   ts: Timestamp;
   event: "permit_allowed";
@@ -319,7 +351,7 @@ export interface PermitDenied extends Omit<PermitAllowed, "event"> {
  * lifetimes. `task` is present exactly when the refusal's cwd sat inside a
  * live Contract's workspace — the shim refuses regardless.
  */
-export interface GitBlocked {
+export interface GitBlocked extends EventIdentityMetadata {
   seq: number;
   ts: Timestamp;
   event: "git_blocked";
@@ -345,7 +377,7 @@ export interface GitBlocked {
  * The agent id is deliberately absent: the plugin writes this line before
  * the agent exists (the driver's RPC create comes after the ok).
  */
-export interface SpawnDispatched {
+export interface SpawnDispatched extends EventIdentityMetadata {
   seq: number;
   ts: Timestamp;
   event: "spawn_dispatched";
@@ -371,7 +403,7 @@ export interface SpawnDispatched {
  * that fired, so a refused spawn is a recorded fact, not a CLI complaint.
  * No agent exists for this line; the driver reports it and moves on.
  */
-export interface SpawnRefused {
+export interface SpawnRefused extends EventIdentityMetadata {
   seq: number;
   ts: Timestamp;
   event: "spawn_refused";
@@ -410,7 +442,7 @@ export interface MeterUsage {
  * second line, and the Cost read takes the latest. A recorder, never a
  * judge: no budgets, no alerts, verdicts unchanged.
  */
-export interface MeterWritten {
+export interface MeterWritten extends EventIdentityMetadata {
   seq: number;
   ts: Timestamp;
   event: "meter_written";
@@ -432,7 +464,7 @@ export interface MeterWritten {
  * socket. Delivery truth is the timeline's message-id only; no delivery
  * event exists in v1 — the claim-or-restall outcome is the observable.
  */
-export interface RepokeDispatched {
+export interface RepokeDispatched extends EventIdentityMetadata {
   seq: number;
   ts: Timestamp;
   event: "repoke_dispatched";
@@ -450,7 +482,7 @@ export interface RepokeDispatched {
  * `repoke:accepted-task` and `repoke:invalid-request` beside it in the spawn
  * rules' own order.
  */
-export interface RepokeRefused {
+export interface RepokeRefused extends EventIdentityMetadata {
   seq: number;
   ts: Timestamp;
   event: "repoke_refused";
@@ -470,7 +502,7 @@ export interface RepokeRefused {
  * spent a respawn since the latest progress marker (`spawn_dispatched` or
  * `gate_finished`). Recorded before the replacement agent is created.
  */
-export interface RespawnDispatched {
+export interface RespawnDispatched extends EventIdentityMetadata {
   seq: number;
   ts: Timestamp;
   event: "respawn_dispatched";
@@ -487,7 +519,7 @@ export interface RespawnDispatched {
  * `respawn:invalid-task`, `respawn:invalid-request`), mirroring `spawn_refused`
  * and `repoke_refused`.
  */
-export interface RespawnRefused {
+export interface RespawnRefused extends EventIdentityMetadata {
   seq: number;
   ts: Timestamp;
   event: "respawn_refused";
@@ -541,7 +573,7 @@ export function needsHumanEvidenceIsValid(evidence: unknown, reason?: unknown): 
  * next turn, batched at leisure — no push exists in v1. An Owner answer
  * wakes the task through the ordinary spawn path; only Acceptance closes it.
  */
-export interface NeedsHuman {
+export interface NeedsHuman extends EventIdentityMetadata {
   seq: number;
   ts: Timestamp;
   event: "needs_human";
@@ -563,7 +595,7 @@ export interface NeedsHuman {
  * A refused Retro (copilot unusable, same-day duplicate) writes no line at
  * all — nothing changed, so nothing is recorded.
  */
-export interface RetroWritten {
+export interface RetroWritten extends EventIdentityMetadata {
   seq: number;
   ts: Timestamp;
   event: "retro_written";
@@ -580,6 +612,7 @@ export interface RetroWritten {
 }
 
 export type LedgerEvent =
+  | LedgerSchema
   | ContractSet
   | ClaimReported
   | GateStarted
@@ -602,24 +635,5 @@ export type LedgerEvent =
   | RetroWritten;
 
 /** What callers hand to Ledger.append — same shape, `seq` and `ts` not yet assigned. */
-export type PendingEvent =
-  | Omit<ContractSet, "seq" | "ts">
-  | Omit<ClaimReported, "seq" | "ts">
-  | Omit<GateStarted, "seq" | "ts">
-  | Omit<GateFinished, "seq" | "ts">
-  | Omit<FreshEyesWritten, "seq" | "ts">
-  | Omit<WatchWritten, "seq" | "ts">
-  | Omit<ReportWritten, "seq" | "ts">
-  | Omit<AttemptAccepted, "seq" | "ts">
-  | Omit<PermitAllowed, "seq" | "ts">
-  | Omit<PermitDenied, "seq" | "ts">
-  | Omit<GitBlocked, "seq" | "ts">
-  | Omit<SpawnDispatched, "seq" | "ts">
-  | Omit<SpawnRefused, "seq" | "ts">
-  | Omit<MeterWritten, "seq" | "ts">
-  | Omit<RepokeDispatched, "seq" | "ts">
-  | Omit<RepokeRefused, "seq" | "ts">
-  | Omit<RespawnDispatched, "seq" | "ts">
-  | Omit<RespawnRefused, "seq" | "ts">
-  | Omit<NeedsHuman, "seq" | "ts">
-  | Omit<RetroWritten, "seq" | "ts">;
+type PendingOf<T> = T extends LedgerSchema ? never : T extends LedgerEvent ? Omit<T, "seq" | "ts" | keyof EventIdentityMetadata> : never;
+export type PendingEvent = PendingOf<LedgerEvent>;

@@ -2059,9 +2059,12 @@ function hydratedAppKeys(paseoHome: string): string[] {
   }
 }
 
-/** One node's ledger snapshot, as staged under `state/nodes/<nodeId>/`. */
+/** A snapshot holder's Ledger bytes. nodeId names the holder, never proves the original writer. */
 export interface VaultLedgerSource {
   nodeId: string;
+  /** Optional persisted source namespace/mapping; original snapshots remain recoverable. */
+  identityMapping?: import("./history-identity.ts").LegacyIdentityMapping;
+  snapshotHash?: string;
   /** The raw JSONL text of the snapshot. */
   lines: string;
 }

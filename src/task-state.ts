@@ -29,7 +29,8 @@ export function projectTask(events: readonly LedgerEvent[], task: string) {
   const history = events.filter((event) => "task" in event && event.task === task);
   const contract: ContractSet | undefined = last(history, "contract_set");
   const epochSeq = contract?.seq ?? 0;
-  const epoch = history.filter((event) => event.seq >= epochSeq);
+  const epochId = contract?.epoch_id;
+  const epoch = history.filter((event) => epochId === undefined ? event.seq >= epochSeq : event.epoch_id === epochId);
   const acceptance: AttemptAccepted | undefined = last(history, "attempt_accepted");
   const settled = acceptance !== undefined && acceptance.landing !== "pending-conflict";
   const latestGate = last(epoch, "gate_finished");
@@ -49,5 +50,5 @@ export function projectTask(events: readonly LedgerEvent[], task: string) {
   });
   const dispatch = epoch.findLast((event) => event.event === "spawn_dispatched" || event.event === "respawn_dispatched");
   const status: TaskStateStatus = acceptance !== undefined ? "accepted" : needsHuman ? "needs-human" : attempts.some((attempt) => attempt.open) || (dispatch !== undefined && dispatch.seq > (latestGate?.seq ?? -1)) ? "running" : numbers.length === 0 ? "waiting" : latestGate?.verdict === "green" ? "ready-to-accept" : "red";
-  return { task, history, contract, epochSeq, epoch, attempts, acceptance, settled, pendingLanding: acceptance?.landing === "pending-conflict", needsHuman, needs: needsHuman ? needs : undefined, status, maxAttempt: numbers.at(-1) ?? 0, inFlightAttempt: attempts.find((attempt) => attempt.open)?.attempt };
+  return { task, history, contract, epochSeq, epochId, epoch, attempts, acceptance, settled, pendingLanding: acceptance?.landing === "pending-conflict", needsHuman, needs: needsHuman ? needs : undefined, status, maxAttempt: numbers.at(-1) ?? 0, inFlightAttempt: attempts.find((attempt) => attempt.open)?.attempt };
 }

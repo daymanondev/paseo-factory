@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { projectTask } from "./task-state.ts";
 import type { AcceptanceRole } from "./task-state.ts";
 import { readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -1541,7 +1542,7 @@ async function finish(
   const { task, ledger, stateDir, dataDir, contract, eyeBudgetMs, eyeRunner } = ctx;
   let outputPath: string | undefined;
   if (result.output !== undefined) {
-    outputPath = join(dataDir, `gate-${task}-${attempt}.log`);
+    outputPath = join(dataDir, `gate-${attemptEvidenceName(task, attempt, contract)}.log`);
     writeFileSync(outputPath, result.output);
   }
   const gate = ledger.append({
@@ -1608,10 +1609,17 @@ async function finish(
   return { attempt, verdict: result.verdict, gate, reportPath };
 }
 
+/** V2 evidence belongs to a stable Contract epoch; legacy paths remain usable. */
+function attemptEvidenceName(task: string, attempt: number, contract: ContractSet | undefined): string {
+  const epoch = contract?.epoch_id;
+  return epoch === undefined ? `${task}-${attempt}` : `${task}-${createHash("sha256").update(epoch).digest("hex")}-${attempt}`;
+}
+
 /** Every Attempt ends the same way: report rendered from the ledger, written, acknowledged. */
 function writeAttemptReport(task: string, attempt: number, ledger: Ledger, dataDir: string): string {
   const markdown = renderReport(task, attempt, epochEventsFor(ledger, task));
-  const reportPath = join(dataDir, `report-${task}-${attempt}.md`);
+  const contract = projectTask(ledger.eventsFor(task), task).contract;
+  const reportPath = join(dataDir, `report-${attemptEvidenceName(task, attempt, contract)}.md`);
   writeFileSync(reportPath, markdown);
   ledger.append({ event: "report_written", task, attempt, path: reportPath });
   return reportPath;
