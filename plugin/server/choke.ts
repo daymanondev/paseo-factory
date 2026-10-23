@@ -20,7 +20,8 @@
  * escape) — that path answers in the spool reply instead of
  * `respondToPermission`, because there is no daemon ask to answer.
  */
-import { readFileSync } from "node:fs";
+import { accessSync, constants as fsConstants, readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { AgentPermissionRequest, AgentPermissionResponse, AgentSessionConfig } from "@getpaseo/protocol/agent-types";
 import type { Factory } from "./core/factory.ts";
 import type { ContractSet } from "./core/events.ts";
@@ -33,6 +34,7 @@ import {
   isPaseoFactoryToolName,
   isProcessKillAgainstFactory,
   isProtectedFactoryStatePath,
+  isStrictlyLayer3ShimmedCommand,
   isSeatMemoryPathAllowed,
   isSeatMemoryRelativePathAllowed,
   judgeFilePath,
@@ -45,7 +47,7 @@ import type { ChokeDecision, MemoryFence } from "./core/choke.ts";
 import { listProjectRegistrations } from "./projects.ts";
 import { readCorrelations } from "./correlations.ts";
 import { parseLane } from "./core/lanes.ts";
-import { SEAT_TITLES, inferRoleFromProviderId } from "./roles.ts";
+import { SEAT_TITLES, inferRoleFromProviderId, resolveEffectiveProviderFamily } from "./roles.ts";
 import type { SeatName } from "./roles.ts";
 import { parseTaskWorktreePath } from "../shared/worktree-shape.mjs";
 import type { AskRequest, SpoolReply } from "./spool.ts";
@@ -583,6 +585,29 @@ export function createChoke(options: ChokeOptions): Choke {
     return { decision: { behavior: "allow" } };
   };
 
+  const delegateToShim = (
+    agent: PermissionAskedEvent["agent"], request: AgentPermissionRequest, decision: ChokeDecision, seat: SeatName | "agent",
+  ): ChokeDecision => {
+    if (decision.behavior !== "deny" || !["seat-write-fence", "git-commit"].includes(decision.rule)) return decision;
+    const command = extractShellCommand(request);
+    if (command === undefined) return decision;
+    const projectSlug = agent.labels?.project
+      ?? readCorrelations(factory.stateDir).find((record) => record.agentId === agent.id)?.projectSlug
+      ?? listProjectRegistrations(factory.stateDir).find((registration) => registration.root === agent.cwd)?.slug
+      ?? "";
+    const family = resolveEffectiveProviderFamily(agent.provider ?? request.provider, seat, factory.stateDir, projectSlug);
+    if (family !== "opencode") return decision;
+    const installed = ["git", "gh", "npm", "npx", "pnpm", "yarn", "bun"].filter((tool) => {
+      try {
+        accessSync(join(factory.stateDir, "bin", tool), fsConstants.X_OK);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    return isStrictlyLayer3ShimmedCommand(command, installed) ? { behavior: "allow" } : decision;
+  };
+
   return {
     async onPermissionAsked({ agent, request }, paseo) {
       const seatCtx = resolveSeatAskContext(agent);
@@ -592,7 +617,9 @@ export function createChoke(options: ChokeOptions): Choke {
         if (seatCtx.seat === "supervisor" && request.kind === "question") {
           return;
         }
-        const { decision, command } = decideSeat(request, seatCtx.projectRoot);
+        const judged = decideSeat(request, seatCtx.projectRoot);
+        const command = judged.command;
+        const decision = delegateToShim(agent, request, judged.decision, seatCtx.seat);
         const exactMessage =
           decision.behavior === "deny" && decision.rule === "seat-write-fence" ? decision.reason : undefined;
         const response = recordAsk(
@@ -629,7 +656,9 @@ export function createChoke(options: ChokeOptions): Choke {
         return;
       }
       if (contract === undefined) return; // not a contracted agent — not our ask to answer
-      const { decision, command } = decide(request, executionRootOf(contract.task, contract.workspace), fenceOf(contract));
+      const judged = decide(request, executionRootOf(contract.task, contract.workspace), fenceOf(contract));
+      const command = judged.command;
+      const decision = delegateToShim(agent, request, judged.decision, "agent");
       const response = recordAsk(factory, log, {
         task: contract.task,
         agent: agent.id,
