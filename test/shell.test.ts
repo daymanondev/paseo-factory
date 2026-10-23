@@ -168,7 +168,7 @@ test("ensureGitShim generates the git wrapper beside factory-claim, rewriting on
   assert.match(readFileSync(target, "utf8"), /daemon\/node-v2/, "a moved node binary moves the wrapper");
 });
 
-test("the agent PATH surface is exactly factory-claim and the git shim — the factory CLI never rides it (US17's mechanical half)", (t) => {
+test("the agent PATH surface contains factory-claim and policy shims — the factory CLI never rides it (US17's mechanical half)", (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);
   const stateDir = join(dir, "state");
@@ -179,7 +179,7 @@ test("the agent PATH surface is exactly factory-claim and the git shim — the f
   ensureGitShim(stateDir, pluginDir, "/daemon/node");
   assert.deepEqual(
     readdirSync(claimCliBinDir(stateDir)).sort(),
-    ["factory-claim", "gh", "git", "kill", "killall", "paseo", "pkill"],
+    ["bun", "factory-claim", "gh", "git", "kill", "killall", "npm", "npx", "paseo", "pkill", "pnpm", "yarn"],
     "the one dir injectClaimCliPath puts on every agent's PATH holds the claim CLI and the OS PATH shims — never the Owner CLI (factory.mjs), whose every wrapper would be an orchestration door",
   );
   // And the wrapper that IS there points at factory-claim.mjs, not factory.mjs.
@@ -318,3 +318,62 @@ test("ensureGitShim OS PATH shims (pkill, kill, killall, paseo, gh) block forbid
   assert.match(unboundPaseo.stdout, /STUB-paseo: agent list/);
 });
 
+
+
+test("package-manager PATH shims refuse seat mutations with role guidance and preserve agent and read-only execution", (t) => {
+  const dir = makeTempDir("package-shims-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const stubBin = join(dir, "real-bin");
+  mkdirSync(stubBin, { recursive: true });
+  for (const tool of ["npm", "npx", "pnpm", "yarn", "bun"]) {
+    writeFileSync(join(stubBin, tool), `#!/bin/sh\necho "${tool}: $*"\nexit 7\n`, { mode: 0o755 });
+  }
+  ensureGitShim(stateDir, join(repoRoot, "plugin"), process.execPath);
+  const run = (tool: string, args: string[], seat: string) => spawnSync(join(stateDir, "bin", tool), args, {
+    cwd: dir, encoding: "utf8", timeout: 10_000,
+    env: { ...process.env, PATH: `${join(stateDir, "bin")}${delimiter}${stubBin}`, PASEO_FACTORY_SEAT: seat },
+  });
+  for (const seat of ["supervisor", "lead"]) {
+    for (const [tool, args] of [["npm", ["install"]], ["npx", ["vite"]], ["pnpm", ["add", "react"]], ["yarn", []], ["bun", ["install"]]] as const) {
+      const result = run(tool, [...args], seat);
+      assert.equal(result.status, 126, `${seat}: ${tool} ${args.join(" ")}`);
+      assert.match(result.stderr, seat === "supervisor" ? /supervisor_dispatch_lead/ : /lead_set_contract.*lead_spawn_agent/);
+    }
+  }
+  const lines = readFileSync(join(stateDir, "git-blocked.log"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.equal(lines.length, 10, "one audit record per refusal");
+  assert.ok(lines.every((line) => line.rule === "seat-write-fence"));
+  for (const args of [["test"], ["run", "build"], ["--version"]]) {
+    const result = run("npm", args, "supervisor");
+    assert.equal(result.status, 7);
+    assert.equal(result.stdout.trim(), `npm: ${args.join(" ")}`);
+  }
+  for (const seat of ["agent", ""]) {
+    assert.equal(run("npm", ["install"], seat).status, 7);
+    assert.equal(run("npx", ["playwright", "test"], seat).status, 7);
+  }
+});
+
+
+test("package-manager shims recognize mutation verbs after global option values and implicit yarn installs", (t) => {
+  const dir = makeTempDir("package-shim-options-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const stubBin = join(dir, "real-bin");
+  mkdirSync(stubBin);
+  for (const tool of ["npm", "pnpm", "yarn", "bun"]) writeFileSync(join(stubBin, tool), "#!/bin/sh\nexit 7\n", { mode: 0o755 });
+  ensureGitShim(stateDir, join(repoRoot, "plugin"), process.execPath);
+  const run = (tool: string, args: string[]) => spawnSync(join(stateDir, "bin", tool), args, {
+    encoding: "utf8", timeout: 10_000,
+    env: { ...process.env, PATH: `${join(stateDir, "bin")}${delimiter}${stubBin}`, PASEO_FACTORY_SEAT: "lead" },
+  });
+  for (const [tool, args] of [
+    ["npm", ["--prefix", "/tmp/app", "install"]], ["pnpm", ["--dir", "/tmp/app", "add", "react"]],
+    ["yarn", ["--cwd", "/tmp/app"]], ["yarn", ["--silent"]], ["bun", ["--cwd", "/tmp/app", "update"]],
+    ["npm", ["upgrade"]], ["pnpm", ["unlink"]],
+  ] as const) assert.equal(run(tool, [...args]).status, 126, `${tool} ${args.join(" ")}`);
+  for (const [tool, args] of [["npm", ["run", "install"]], ["yarn", ["--version"]], ["yarn", ["--cwd", "/tmp/app", "test"]]] as const) {
+    assert.equal(run(tool, [...args]).status, 7, `${tool} ${args.join(" ")}`);
+  }
+});

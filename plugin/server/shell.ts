@@ -82,7 +82,7 @@ export function ensureGitShim(stateDir: string, pluginDir: string, nodeBinary: s
     nodeBinary,
   });
   const execShimScript = join(pluginDir, "bin", "exec-shim.mjs");
-  for (const tool of ["pkill", "kill", "killall", "paseo", "gh"] as const) {
+  for (const tool of ["pkill", "kill", "killall", "paseo", "gh", "npm", "npx", "pnpm", "yarn", "bun"] as const) {
     ensureGeneratedWrapper({
       target: join(binDir, tool),
       script: execShimScript,
