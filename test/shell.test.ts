@@ -372,8 +372,17 @@ test("package-manager shims recognize mutation verbs after global option values 
     ["npm", ["--prefix", "/tmp/app", "install"]], ["pnpm", ["--dir", "/tmp/app", "add", "react"]],
     ["yarn", ["--cwd", "/tmp/app"]], ["yarn", ["--silent"]], ["bun", ["--cwd", "/tmp/app", "update"]],
     ["npm", ["upgrade"]], ["pnpm", ["unlink"]],
+    ["npm", ["--loglevel", "silent", "install"]], ["npm", ["--loglevel=silent", "install"]],
+    ["npm", ["--depth", "1", "install"]], ["npm", ["--unknown-config", "value", "install"]],
   ] as const) assert.equal(run(tool, [...args]).status, 126, `${tool} ${args.join(" ")}`);
-  for (const [tool, args] of [["npm", ["run", "install"]], ["yarn", ["--version"]], ["yarn", ["--cwd", "/tmp/app", "test"]]] as const) {
+  for (const [tool, args] of [["npm", ["run", "install"]], ["npm", ["view", "install"]], ["yarn", ["--version"]], ["yarn", ["--cwd", "/tmp/app", "test"]]] as const) {
     assert.equal(run(tool, [...args]).status, 7, `${tool} ${args.join(" ")}`);
   }
+});
+
+test("injectClaimCliPath moves an existing factory bin ahead of real binaries and removes duplicates", () => {
+  const request = sessionOpenRequest("resume", { PATH: "/other/bin:/state/bin:/usr/bin:/state/bin" });
+  const next = injectClaimCliPath(request, "/state/bin");
+  assert.equal(next.env.PATH, "/state/bin:/other/bin:/usr/bin");
+  assert.equal(injectClaimCliPath(next, "/state/bin"), next);
 });

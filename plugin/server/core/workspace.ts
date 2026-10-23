@@ -78,6 +78,23 @@ function isUntrackedInstallArtifact(porcelainLine: string): boolean {
 }
 
 /**
+ * Expand untracked paths so collapsed parent directories cannot hide transient
+ * outputs. Exclude install and test-output trees from expansion to keep them
+ * out of the child-process buffer; tracked-only status still catches edits to
+ * any tracked dependency files.
+ */
+async function workspaceStatus(cwd: string): Promise<{ stdout: string }> {
+  const tracked = await git(cwd, ["status", "--porcelain", "--untracked-files=no"]);
+  const expanded = await git(cwd, [
+    "status", "--porcelain", "--untracked-files=all", "--", ":(top,glob)**",
+    ...["node_modules", "playwright-report", "test-results", "coverage", ".nyc_output", "*-snapshots"]
+      .map((directory) => `:(top,exclude,glob)**/${directory}/**`),
+  ]);
+  const untracked = expanded.stdout.split("\n").filter((line) => line.startsWith("?? "));
+  return { stdout: [tracked.stdout.trimEnd(), ...untracked].filter(Boolean).join("\n") };
+}
+
+/**
  * The Workspace must sit clean with HEAD at the claimed commit — checked before
  * the Gate starts and again after it ends (ADR 0002). Anything else means the
  * Verdict would attest a moving target.
@@ -89,7 +106,7 @@ export function checkCleanAt(cwd: string, expectedFull: string): Promise<TreeChe
       if (head !== expectedFull) {
         return { ok: false as const, reason: cap(`HEAD is ${shortSha(head)}, not the claimed ${shortSha(expectedFull)}`) };
       }
-      return git(cwd, ["status", "--porcelain"]).then(
+      return workspaceStatus(cwd).then(
         ({ stdout: status }) => {
           const changes = status
             .split("\n")
@@ -316,8 +333,12 @@ async function landCleanly(
   branch: string,
 ): Promise<LandingResult> {
   const conflict = (note: string): LandingResult => ({ landing: "pending-conflict", note: cap(note) });
-  const status = await gitExit(projectRoot, ["status", "--porcelain"]);
-  if (status.status !== 0) return conflict(`could not read the project root's status: ${gitDetail(status)}`);
+  let status: { stdout: string };
+  try {
+    status = await workspaceStatus(projectRoot);
+  } catch (err) {
+    return conflict(`could not read the project root's status: ${gitDetail(err)}`);
+  }
   const changes = status.stdout.split("\n").filter((line) => line.trim() !== "" && !isUntrackedInstallArtifact(line));
   if (changes.length > 0) {
     return conflict(

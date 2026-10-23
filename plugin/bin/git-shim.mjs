@@ -23,7 +23,7 @@
  * daemon's node binary and FACTORY_STATE_DIR baked in. Direct dev runs must
  * set FACTORY_STATE_DIR themselves.
  */
-import { appendFileSync, constants as fsConstants, existsSync, mkdirSync, accessSync, readdirSync, realpathSync } from "node:fs";
+import { appendFileSync, constants as fsConstants, existsSync, mkdirSync, accessSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import {
@@ -34,7 +34,7 @@ import {
 } from "./git-refusals.mjs";
 
 import { readLedgerEvents } from "./ledger-read.mjs";
-import { scopeCoversFile, scopeRecoveryCommands } from "../server/core/workspace.ts";
+import { scopeCoversFile, scopeRecoveryCommands } from "./scope.mjs";
 
 const argv = process.argv.slice(2);
 const stateDir = process.env.FACTORY_STATE_DIR;
@@ -248,17 +248,32 @@ function scopedContractAt(cwd) {
     const reset = result.events.findLastIndex((event) => event.event === "project_reset");
     const events = result.events.slice(reset + 1);
     const contracts = new Map();
-    const worktrees = new Map();
+    const histories = new Map();
     const accepted = new Set();
     for (const event of events) {
+      if (!histories.has(event.task)) histories.set(event.task, []);
+      histories.get(event.task).push(event);
       if (event.event === "contract_set") contracts.set(event.task, event);
-      if (event.event === "spawn_dispatched" && event.worktree) worktrees.set(event.task, event.worktree);
-      if (event.event === "attempt_accepted" && event.landing !== "pending-conflict") accepted.add(event.task);
+      if (event.event === "attempt_accepted") {
+        if (event.landing === "pending-conflict") accepted.delete(event.task);
+        else accepted.add(event.task);
+      }
     }
     for (const [task, contract] of contracts) {
       if (accepted.has(task)) continue;
       if (process.env.PASEO_FACTORY_TASK && task !== process.env.PASEO_FACTORY_TASK) continue;
-      if (covers(worktrees.get(task))) return contract;
+      // Mirror Factory.worktreeFor: an epoch with a spawn never inherits an
+      // older binding; an epoch without one inherits only a surviving directory.
+      const history = histories.get(task);
+      const epoch = history.filter((event) => event.seq >= contract.seq);
+      let worktree = epoch.findLast((event) => event.event === "spawn_dispatched" && typeof event.worktree === "string" && event.worktree !== "")?.worktree;
+      if (worktree === undefined && !epoch.some((event) => event.event === "spawn_dispatched")) {
+        const previous = history.findLast((event) => event.event === "spawn_dispatched")?.worktree;
+        if (typeof previous === "string" && previous !== "") {
+          try { if (statSync(previous).isDirectory()) worktree = previous; } catch { /* removed historical worktree */ }
+        }
+      }
+      if (covers(worktree)) return contract;
       if (covers(contract.workspace)) rootMatch = contract;
     }
   }

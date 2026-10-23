@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import type { AgentPermissionRequest, AgentPermissionResponse } from "@getpaseo/protocol/agent-types";
 import { createFactory } from "../plugin/server/core/factory.ts";
 import { writeProjectRegistration } from "../plugin/server/core/project.ts";
@@ -15,7 +15,7 @@ import {
   normalizeAgentCreateRequest,
   resolveSeatAtProjectRoot,
 } from "../plugin/server/choke.ts";
-import { ensureGitShim } from "../plugin/server/shell.ts";
+import { ensureGitShim, injectClaimCliPath } from "../plugin/server/shell.ts";
 import type { PaseoResponderApi } from "../plugin/server/choke.ts";
 import { isSeatMemoryPathAllowed, judgeFilePath, judgeShellCommand, refuseGitArgv, shellTokens, writableRootsFor } from "../src/choke.ts";
 import { GIT_ARGV_CASES, SHELL_CASES, shellRoots } from "./choke-cases.ts";
@@ -916,9 +916,18 @@ test("OpenCode delegates installed bare package shims while other providers and 
     assert.equal((await ask("opencode/mimo-v2-pro-free", command)).behavior, "allow", command);
   }
   assert.equal(factory.ledger.events.filter((event) => event.event === "permit_denied").length, 0);
-  const refused = spawnSync(join(factory.stateDir, "bin", "npm"), ["install"], {
+  const earlierBin = join(dir, "earlier-bin");
+  mkdirSync(earlierBin);
+  writeFileSync(join(earlierBin, "npm"), "#!/bin/sh\necho UNSHIMMED\nexit 0\n", { mode: 0o755 });
+  const factoryBin = join(factory.stateDir, "bin");
+  const launch = injectClaimCliPath({
+    agentId: "seat", workspaceId: null, provider: "opencode", cwd: workspace,
+    reason: "create", purpose: "interactive",
+    env: { PATH: [earlierBin, factoryBin, "/usr/bin", factoryBin].join(delimiter) },
+  }, factoryBin);
+  const refused = spawnSync("/bin/sh", ["-c", "npm install"], {
     cwd: workspace, encoding: "utf8", timeout: 10_000,
-    env: { ...process.env, PASEO_FACTORY_SEAT: "supervisor" },
+    env: { ...process.env, ...launch.env, PASEO_FACTORY_SEAT: "supervisor" },
   });
   assert.equal(refused.status, 126);
   startGitBlockIngestion(factory).stop();
@@ -961,4 +970,39 @@ test("native factory seats use their configured provider family before delegatin
   writeFileSync(join(projectDir, "lanes.json"), JSON.stringify({ lead: "codex/gpt-5" }));
   await ask();
   assert.equal(responses.at(-1)?.behavior, "deny", "native role on a non-OpenCode lane keeps Layer-2 refusal");
+});
+
+test("OpenCode orchestration seats deny isolated explicit-path git writes while other providers retain their policy", async (t) => {
+  const dir = makeTempDir("choke-opencode-explicit-git-");
+  disposeDir(t, dir);
+  const workspace = join(dir, "workspace");
+  mkdirSync(workspace);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  ensureGitShim(factory.stateDir, join(repoRoot, "plugin"), process.execPath);
+  const choke = createChoke({ factory, homeDir: "/fake-home" });
+  const responses: AgentPermissionResponse[] = [];
+  const paseo: PaseoResponderApi = { agents: { ref: () => ({ respondToPermission: async ({ response }) => { responses.push(response); } }) } };
+  const ask = async (seat: "lead" | "supervisor", provider: string, command: string) => {
+    await choke.onPermissionAsked({
+      agent: { id: "seat", cwd: workspace, provider, labels: { seat } },
+      request: { id: "ask", provider, name: "Bash", kind: "tool", detail: { type: "shell", command, cwd: workspace } },
+    }, paseo);
+    return responses.at(-1)!;
+  };
+  for (const seat of ["supervisor", "lead"] as const) {
+    for (const command of ["/usr/bin/git commit -m x", "./tools/git -C /repo merge feature"]) {
+      const response = await ask(seat, "opencode", command);
+      assert.equal(response.behavior, "deny", `${seat}: ${command}`);
+      if (response.behavior === "deny") {
+        assert.match(response.message ?? "", /Seat write fence/);
+        assert.match(response.message ?? "", seat === "supervisor" ? /supervisor_dispatch_lead/ : /lead_set_contract.*lead_spawn_agent/);
+      }
+      for (const provider of ["claude", "codex", "pi", "copilot", "omp", "antigravity"]) {
+        assert.equal((await ask(seat, provider, command)).behavior, "allow", `${provider} retains existing explicit-path policy`);
+      }
+    }
+    for (const command of ["git commit -m x", "git status --short", "/usr/bin/git status --short"]) {
+      assert.equal((await ask(seat, "opencode", command)).behavior, "allow", `${seat}: ${command} retains existing policy`);
+    }
+  }
 });
