@@ -3,7 +3,7 @@
  */
 import { createHash } from "node:crypto";
 import { eventAllowsUnboundEpoch, LEDGER_REFERENCE_KINDS } from "./events.ts";
-import { parseLedgerJsonl } from "./ledger-validation.ts";
+import { isValidLedgerEvent, parseLedgerJsonl } from "./ledger-validation.ts";
 import type { LedgerEvent, LedgerReferenceField, LedgerSchema } from "./events.ts";
 
 export interface IdentityMappingEntry {
@@ -58,7 +58,7 @@ function priorContentMatches(event: LedgerEvent, expected: string, current: stri
 
 export function planLegacyIdentity(raw: string, options: { holderId?: string; writerId: string; previous?: LegacyIdentityMapping }): IdentityPlan {
   const snapshotHash = historyHash(raw);
-  let namespace = options.previous?.namespace ?? `legacy-${snapshotHash}`;
+  let namespace = typeof options.previous?.namespace === "string" ? options.previous.namespace : `legacy-${snapshotHash}`;
   const acknowledged = raw.slice(0, raw.lastIndexOf("\n") + 1);
   const tail = raw.slice(acknowledged.length);
   const plan: IdentityPlan = {
@@ -199,6 +199,7 @@ export function classifyEventIdentities(existing: readonly LedgerEvent[], incomi
   const conflicts: { eventId?: string; reason: string }[] = [];
   const seen = new Map<string, { event: LedgerEvent; context: readonly LedgerEvent[] }>();
   for (const event of existing) {
+    if (!isValidLedgerEvent(event) || event.schema_version !== 2) { conflicts.push({ reason: `local seq ${event.seq} lacks valid versioned identity metadata` }); continue; }
     if (event.event === "ledger_schema") continue;
     if (event.event_id === undefined) { conflicts.push({ reason: `local seq ${event.seq} has unresolved legacy identity` }); continue; }
     const references = remapLedgerReferences(event, existing, existing);
@@ -207,6 +208,7 @@ export function classifyEventIdentities(existing: readonly LedgerEvent[], incomi
     seen.set(event.event_id, { event, context: existing });
   }
   for (const event of incoming) {
+    if (!isValidLedgerEvent(event) || event.schema_version !== 2) { conflicts.push({ reason: `incoming seq ${event.seq} lacks valid versioned identity metadata` }); continue; }
     if (event.event === "ledger_schema") continue;
     const eventId = event.event_id;
     if (eventId === undefined) { conflicts.push({ reason: `incoming seq ${event.seq} has unresolved legacy identity` }); continue; }

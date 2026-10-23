@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { readLedgerEvents as standaloneRead } from "../plugin/bin/ledger-read.mjs";
 import { Ledger, parseLedgerJsonl } from "../src/ledger.ts";
 import { classifyEventIdentities, planLegacyIdentity, remapLedgerReferences } from "../src/history-identity.ts";
 import { createFactory } from "../src/factory.ts";
@@ -48,6 +49,9 @@ test("prepared v2 history reopens with stable identities and new Attempts bind t
   const reopened = Ledger.open(path);
   assert.deepEqual(reopened.events.map((event) => event.event_id), upgraded.events.map((event) => event.event_id));
   assert.deepEqual(reopened.events.map((event) => event.seq), [1, 2, 3, 4, 5]);
+  const standalone = standaloneRead(path);
+  assert.ok("events" in standalone);
+  if ("events" in standalone) assert.deepEqual(standalone.events, reopened.events);
 });
 
 test("persisted legacy mapping survives source growth and refuses damaged earlier assignments", (t) => {
@@ -264,4 +268,14 @@ test("v2 live Needs-human records retain numeric fields and persist stable evide
   assert.equal(readFileSync(path, "utf8"), before, "invalid reference append cannot mutate acknowledged history");
   ledger.purgeWhere(() => true);
   assert.equal(Ledger.open(path).events[0]!.event, "ledger_schema", "Owner reset retains the format fence");
+});
+
+
+test("legacy copied metadata cannot manufacture historical writer provenance", () => {
+  const raw = JSON.stringify({ seq: 1, ts: "2026-10-23T00:00:00.000Z", ...contract, by: "owner", event_id: "old-unversioned-mapping", provenance: { writer_id: "snapshot-holder" } }) + "\n";
+  const plan = planLegacyIdentity(raw, { holderId: "snapshot-holder", writerId: "new-writer" });
+  assert.equal(plan.ok, false);
+  assert.match(plan.conflicts.join("\n"), /unversioned/);
+  assert.equal(plan.events[0]!.provenance?.writer_id, null);
+  assert.equal(plan.events[0]!.event === "contract_set" && plan.events[0]!.by, "owner");
 });
