@@ -125,15 +125,15 @@ function git(cwd: string, args: string[]): Promise<{ stdout: string; stderr: str
   return execFileAsync("git", args, { cwd, timeout: GIT_TIMEOUT_MS });
 }
 
-/**
- * True when a declared scope prefix owns `file` — the boundary law ticket 14
- * fixed: a prefix owns itself and everything under it as a directory. One
- * shared spelling for the scope check, the memory write fence, and any later
- * boundary judge (v0.0.14).
- */
+/** A scope entry owns literal file/directory prefixes or paths matched by its glob. */
 export function scopeCoversFile(scope: readonly string[], file: string): boolean {
   const directMatch = (target: string): boolean =>
-    scope.some((prefix) => target === prefix || target.startsWith(prefix.endsWith("/") ? prefix : `${prefix}/`));
+    scope.some((entry) => {
+      const prefix = normalizeScopePath(entry);
+      const path = normalizeScopePath(target);
+      if (!/[*?]/.test(prefix)) return path === prefix || path.startsWith(`${prefix}/`);
+      return scopeGlob(prefix).test(path);
+    });
   if (directMatch(file)) return true;
   const slashIdx = file.lastIndexOf("/");
   const baseName = slashIdx === -1 ? file : file.slice(slashIdx + 1);
@@ -142,6 +142,34 @@ export function scopeCoversFile(scope: readonly string[], file: string): boolean
     if (directMatch(companionPkgJson)) return true;
   }
   return false;
+}
+
+/** Restore the whole branch diff from the Contract base, including previously committed files. */
+export function scopeRecoveryCommands(base: string, files: readonly string[]): string {
+  const quote = (value: string): string => /^[A-Za-z0-9_./-]+$/.test(value) ? value : `'${value.replace(/'/g, "'\\''")}'`;
+  return files.map((file) => `git restore --source=${quote(base)} -- ${quote(file)}`).join("; ");
+}
+
+/** Contract paths are relative Git paths; tolerate the conventional ./ and trailing slash. */
+export function normalizeScopePath(path: string): string {
+  return path.replace(/^(?:\.\/)+/, "").replace(/\/+$/, "");
+}
+
+function scopeGlob(pattern: string): RegExp {
+  let expression = "^";
+  for (let i = 0; i < pattern.length; i++) {
+    const char = pattern[i];
+    if (char === "*" && pattern[i + 1] === "*") {
+      i++;
+      if (pattern[i + 1] === "/") {
+        expression += "(?:[^/]+/)*";
+        i++;
+      } else expression += ".*";
+    } else if (char === "*") expression += "[^/]*";
+    else if (char === "?") expression += "[^/]";
+    else expression += char.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+  return new RegExp(`${expression}$`);
 }
 
 /**
