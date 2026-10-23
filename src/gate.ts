@@ -78,18 +78,22 @@ export function runGate(input: GateInput): Promise<GateResult> {
     });
 
     let graceKillTimer: ReturnType<typeof setTimeout> | undefined;
-    const reapGroup = (immediateSigKill = false): void => {
+    let cleanup: Promise<void> | undefined;
+    const reapGroup = (immediateSigKill = false): Promise<void> => {
+      if (immediateSigKill) killGroup(child, "SIGKILL");
+      if (cleanup !== undefined) return cleanup;
       if (immediateSigKill) {
-        killGroup(child, "SIGKILL");
-        return;
+        cleanup = Promise.resolve();
+      } else {
+        killGroup(child, "SIGTERM");
+        cleanup = new Promise((done) => {
+          graceKillTimer = setTimeout(() => {
+            killGroup(child, "SIGKILL");
+            done();
+          }, 50);
+        });
       }
-      killGroup(child, "SIGTERM");
-      if (graceKillTimer === undefined) {
-        graceKillTimer = setTimeout(() => {
-          killGroup(child, "SIGKILL");
-        }, 50);
-        graceKillTimer.unref?.();
-      }
+      return cleanup;
     };
 
     const timer = setTimeout(() => {
@@ -98,7 +102,10 @@ export function runGate(input: GateInput): Promise<GateResult> {
     }, timeoutMs);
 
     child.on("exit", () => {
-      reapGroup(false);
+      // Command execution ended. Cleanup has its own bound and must finish
+      // even when redirected descendants let both output streams close early.
+      clearTimeout(timer);
+      void reapGroup(false);
     });
 
     child.on("error", (err) => {
@@ -109,11 +116,12 @@ export function runGate(input: GateInput): Promise<GateResult> {
       reject(err);
     });
 
-    child.on("close", (code) => {
+    child.on("close", async (code) => {
+      if (settled) return;
+      clearTimeout(timer);
+      await reapGroup(false);
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
-      if (graceKillTimer !== undefined) clearTimeout(graceKillTimer);
 
       const artifactState = artifact === undefined ? undefined : inspectArtifact(cwd, artifact);
       if (timedOut) {
