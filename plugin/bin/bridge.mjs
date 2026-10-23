@@ -11,7 +11,7 @@
  */
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
@@ -504,6 +504,7 @@ function allocateTaskWorktree(stateDir, contract, task, events = []) {
       timeout: GIT_TIMEOUT_MS,
     });
     if (branchOut.status === 0 && branchOut.stdout.trim() === branch && ancestorOut.status === 0) {
+      inheritWorktreeNodeModules(resolved.root, worktreePath);
       return { ok: true, cwd: worktreePath, branch, worktree: worktreePath, reused: true };
     }
     const rmOut = spawnSync("git", ["worktree", "remove", "--force", worktreePath], {
@@ -559,7 +560,44 @@ function allocateTaskWorktree(stateDir, contract, task, events = []) {
   } catch {
     // best-effort include copy
   }
+  inheritWorktreeNodeModules(resolved.root, worktreePath);
   return { ok: true, cwd: worktreePath, branch, worktree: worktreePath };
+}
+
+/**
+ * Standalone bridge copy of the allocator's dependency inheritance: bridge.mjs
+ * is installed by itself into stateDir/bin, so it cannot import a sibling.
+ */
+function inheritWorktreeNodeModules(root, worktreePath) {
+  const source = join(root, "node_modules");
+  const target = join(worktreePath, "node_modules");
+  try {
+    if (!statSync(source).isDirectory()) return;
+    try {
+      lstatSync(target); // preserve worktree-local installs and existing links
+    } catch (error) {
+      if (error.code !== "ENOENT") return;
+      symlinkSync(source, target, "dir");
+    }
+    const gitDirOut = spawnSync("git", ["rev-parse", "--git-dir"], {
+      cwd: worktreePath, encoding: "utf8", timeout: GIT_TIMEOUT_MS,
+    });
+    if (gitDirOut.status !== 0) return;
+    const excludesFile = join(resolve(worktreePath, gitDirOut.stdout.trim()), "factory-excludes");
+    let existing = "";
+    try { existing = readFileSync(excludesFile, "utf8"); } catch { /* first allocation */ }
+    // Git treats directory symlinks as files, so a trailing slash cannot hide it.
+    const patterns = new Set([...existing.split("\n").filter(Boolean), "node_modules"]);
+    writeFileSync(excludesFile, `${[...patterns].join("\n")}\n`);
+    spawnSync("git", ["config", "extensions.worktreeConfig", "true"], {
+      cwd: root, encoding: "utf8", timeout: GIT_TIMEOUT_MS,
+    });
+    spawnSync("git", ["config", "--worktree", "core.excludesFile", excludesFile], {
+      cwd: worktreePath, encoding: "utf8", timeout: GIT_TIMEOUT_MS,
+    });
+  } catch {
+    // Missing or inaccessible root dependencies do not refuse allocation.
+  }
 }
 
 function resolveDefaultWorkerLane(stateDir, projectSlug) {
