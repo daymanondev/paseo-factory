@@ -1898,16 +1898,59 @@ test("daemon plugin bridge: a failing CLI fallback reports the CLI's first error
 });
 
 test("daemon plugin bridge: manageDaemonPlugin dispatches enable, disable, reload, remove, and update", async (t) => {
+  const proposal = {
+    id: "factory-burn-lab",
+    expected: {
+      identity: { kind: "git" as const, remote: "https://github.com/daymanondev/factory-burn-lab", pluginPath: "plugin" },
+      installationRoot: "/plugins/factory-burn-lab",
+      revision: "abc1234",
+    },
+    target: { kind: "git" as const, commit: "def5678" },
+  };
   const daemon = await startFakeDaemon(t, (message) => {
     const type = String(message.type);
-    if (type === "plugin.source.update.request") {
+    if (type === "plugin.source.update.preview.request") {
       return {
-        type: "plugin.source.update.response",
+        type: "plugin.source.update.preview.response",
         payload: {
           requestId: message.requestId,
           plugins: [
-            { id: "factory-burn-lab", previousCommit: "abc1234", currentCommit: "def5678", commits: 3, updated: true },
-            { id: "some-other-plugin", updated: false },
+            {
+              id: "factory-burn-lab",
+              outcome: "update",
+              current: {
+                identity: { kind: "git", remote: "https://github.com/daymanondev/factory-burn-lab", pluginPath: "plugin" },
+                currentRevision: "abc1234",
+              },
+              target: { kind: "git", commit: "def5678" },
+              links: [],
+              proposal,
+            },
+            { id: "some-other-plugin", outcome: "current", links: [] },
+          ],
+        },
+      };
+    }
+    if (type === "plugin.source.update.apply.request") {
+      return {
+        type: "plugin.source.update.apply.response",
+        payload: {
+          requestId: message.requestId,
+          plugins: [
+            {
+              id: "factory-burn-lab",
+              outcome: "updated",
+              plugin: {
+                id: "factory-burn-lab",
+                path: "/plugins/factory-burn-lab",
+                enabled: true,
+                status: "running",
+                installation: {
+                  identity: { kind: "git", remote: "https://github.com/daymanondev/factory-burn-lab", pluginPath: "plugin" },
+                  currentRevision: "def5678",
+                },
+              },
+            },
           ],
         },
       };
@@ -1941,17 +1984,28 @@ test("daemon plugin bridge: manageDaemonPlugin dispatches enable, disable, reloa
   assert.ok(remove.ok, remove.ok ? "" : remove.reason);
   const update = await manageDaemonPlugin(daemon.home, "factory-burn-lab", "update");
   assert.ok(update.ok, update.ok ? "" : update.reason);
+  assert.equal(update.update?.previousCommit, "abc1234");
   assert.equal(update.update?.currentCommit, "def5678", "the update answer is the row matching the pluginId — the payload is an array");
   assert.equal(update.update?.updated, true);
 
   assert.deepEqual(
     daemon.frames.map((frame) => frame.type),
-    ["plugin.enable.request", "plugin.disable.request", "plugin.reload.request", "plugin.remove.request", "plugin.source.update.request"],
+    [
+      "plugin.enable.request",
+      "plugin.disable.request",
+      "plugin.reload.request",
+      "plugin.remove.request",
+      "plugin.source.update.preview.request",
+      "plugin.source.update.apply.request",
+    ],
   );
-  for (const frame of daemon.frames) {
+  for (const frame of daemon.frames.slice(0, 5)) {
     assert.deepEqual(Object.keys(frame.message).sort(), ["pluginId", "requestId", "type"]);
     assert.equal(frame.message.pluginId, "factory-burn-lab", "every manage request names its plugin — an update without pluginId would update every plugin");
   }
+  const applyFrame = daemon.frames[5]!;
+  assert.deepEqual(Object.keys(applyFrame.message).sort(), ["proposals", "requestId", "type"]);
+  assert.deepEqual(applyFrame.message.proposals, [proposal]);
 });
 
 test("daemon plugin bridge: with no paseo.pid the list falls back to the paseo CLI", async (t) => {
@@ -4253,4 +4307,478 @@ test("Vault snapshots and existing RPC schemas expose pending then conflicted ad
   assert.equal(conflicted.view.vault.historyImports?.[0]?.status, "conflicted");
   assert.equal(conflicted.view.vault.lastHydratedAt, null);
   assert.match(JSON.stringify(conflicted.view.vault.historyImports), /invalid|migration|JSON/);
+});
+
+// ---- v0.0.34 Seam 1: Two-phase reviewed plugin update protocol & Core-last Update All -------
+
+test("v0.0.34 seam 1.1 — two-phase WebSocket update: manageDaemonPlugin sends preview then apply when outcome === 'update', never sends retired plugin.source.update.request, and pluginsManage formats the revision transition", async (t) => {
+  const proposal = {
+    id: "paseo-factory",
+    expected: {
+      identity: { kind: "git" as const, remote: "https://github.com/daymanondev/paseo-factory", pluginPath: "plugin" },
+      installationRoot: "/plugins/paseo-factory",
+      revision: "0285a1c",
+    },
+    target: { kind: "git" as const, commit: "383385c" },
+  };
+  const daemon = await startFakeDaemon(t, (message) => {
+    if (message.type === "plugin.source.update.request") {
+      return {
+        type: "rpc_error",
+        payload: { requestId: message.requestId, error: "Update the client to review plugin updates before applying them." },
+      };
+    }
+    if (message.type === "plugin.source.update.preview.request") {
+      return {
+        type: "plugin.source.update.preview.response",
+        payload: {
+          requestId: message.requestId,
+          plugins: [
+            {
+              id: "paseo-factory",
+              outcome: "update",
+              current: {
+                identity: { kind: "git", remote: "https://github.com/daymanondev/paseo-factory", pluginPath: "plugin" },
+                currentRevision: "0285a1c",
+              },
+              target: { kind: "git", commit: "383385c" },
+              links: [],
+              proposal,
+            },
+          ],
+        },
+      };
+    }
+    if (message.type === "plugin.source.update.apply.request") {
+      return {
+        type: "plugin.source.update.apply.response",
+        payload: {
+          requestId: message.requestId,
+          plugins: [
+            {
+              id: "paseo-factory",
+              outcome: "updated",
+              plugin: {
+                id: "paseo-factory",
+                path: "/plugins/paseo-factory",
+                enabled: true,
+                status: "running",
+                installation: {
+                  identity: { kind: "git", remote: "https://github.com/daymanondev/paseo-factory", pluginPath: "plugin" },
+                  currentRevision: "383385c",
+                },
+              },
+            },
+          ],
+        },
+      };
+    }
+    return null;
+  });
+
+  const res = await manageDaemonPlugin(daemon.home, "paseo-factory", "update");
+  assert.ok(res.ok, res.ok ? "" : res.reason);
+  assert.deepEqual(res.update, {
+    id: "paseo-factory",
+    previousCommit: "0285a1c",
+    currentCommit: "383385c",
+    updated: true,
+  });
+  assert.equal(
+    daemon.frames.some((frame) => frame.type === "plugin.source.update.request"),
+    false,
+    "never sends the retired plugin.source.update.request",
+  );
+  assert.deepEqual(
+    daemon.frames.map((frame) => frame.type),
+    ["plugin.source.update.preview.request", "plugin.source.update.apply.request"],
+  );
+  assert.equal(daemon.frames[0]!.message.pluginId, "paseo-factory");
+  assert.deepEqual(daemon.frames[1]!.message.proposals, [proposal]);
+
+  // Verify through SurfaceHandlers.pluginsManage over the wire.
+  const stateDir = join(daemon.home, "plugin-state", "paseo-factory");
+  const retroRunner = fakeCopilotRunner(() => ({ code: 0, stdout: '{"proposals":[]}' }));
+  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner, eyeCliProbe: () => false });
+  const handlers = createSurfaceHandlers({ factory, stateDir, home: daemon.home, daemon: fakeDaemon([]).daemon });
+  const manageReply = await handlers.pluginsManage({ pluginId: "paseo-factory", action: "update" });
+  assert.ok(manageReply.ok, manageReply.ok ? "" : manageReply.error);
+  assert.equal(manageReply.summary, "updated paseo-factory (0285a1c → 383385c)");
+});
+
+test("v0.0.34 seam 1.2 — preview already up to date: outcome === 'current' and 'installed-newer' stop after preview without calling apply and report already up to date", async (t) => {
+  let nextOutcome: "current" | "installed-newer" = "current";
+  const daemon = await startFakeDaemon(t, (message) => {
+    if (message.type === "plugin.source.update.preview.request") {
+      return {
+        type: "plugin.source.update.preview.response",
+        payload: {
+          requestId: message.requestId,
+          plugins: [
+            {
+              id: message.pluginId ?? "paseo-factory",
+              outcome: nextOutcome,
+              current: {
+                identity: { kind: "git", remote: "https://github.com/daymanondev/paseo-factory", pluginPath: "plugin" },
+                currentRevision: "383385c",
+              },
+              target: { kind: "git", commit: "383385c" },
+              links: [],
+            },
+          ],
+        },
+      };
+    }
+    return null;
+  });
+
+  const currentRes = await manageDaemonPlugin(daemon.home, "paseo-factory", "update");
+  assert.ok(currentRes.ok, currentRes.ok ? "" : currentRes.reason);
+  assert.deepEqual(currentRes.update, {
+    id: "paseo-factory",
+    previousCommit: "383385c",
+    currentCommit: "383385c",
+    commits: 0,
+    updated: false,
+  });
+  assert.equal(
+    daemon.frames.some((frame) => frame.type === "plugin.source.update.apply.request"),
+    false,
+    "zero plugin.source.update.apply.request frames sent when outcome === 'current'",
+  );
+
+  nextOutcome = "installed-newer";
+  const newerRes = await manageDaemonPlugin(daemon.home, "factory-burn-lab", "update");
+  assert.ok(newerRes.ok, newerRes.ok ? "" : newerRes.reason);
+  assert.deepEqual(newerRes.update, {
+    id: "factory-burn-lab",
+    previousCommit: "383385c",
+    currentCommit: "383385c",
+    commits: 0,
+    updated: false,
+  });
+  assert.equal(
+    daemon.frames.some((frame) => frame.type === "plugin.source.update.apply.request"),
+    false,
+    "zero plugin.source.update.apply.request frames sent when outcome === 'installed-newer'",
+  );
+
+  const stateDir = join(daemon.home, "plugin-state", "paseo-factory");
+  const retroRunner = fakeCopilotRunner(() => ({ code: 0, stdout: '{"proposals":[]}' }));
+  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner, eyeCliProbe: () => false });
+  const handlers = createSurfaceHandlers({ factory, stateDir, home: daemon.home, daemon: fakeDaemon([]).daemon });
+  const manageReply = await handlers.pluginsManage({ pluginId: "paseo-factory", action: "update" });
+  assert.ok(manageReply.ok, manageReply.ok ? "" : manageReply.error);
+  assert.equal(manageReply.summary, "paseo-factory is already up to date (383385c)");
+});
+
+test("v0.0.34 seam 1.3 — preview and apply errors: outcome === 'local' and outcome === 'error' return { ok: false, reason } and pluginsManage surfaces daemon_failed", async (t) => {
+  let mode: "local" | "preview-error" | "apply-error" = "local";
+  const proposal = {
+    id: "paseo-factory",
+    expected: {
+      identity: { kind: "git" as const, remote: "https://github.com/daymanondev/paseo-factory", pluginPath: "plugin" },
+      installationRoot: "/plugins/paseo-factory",
+      revision: "0285a1c",
+    },
+    target: { kind: "git" as const, commit: "383385c" },
+  };
+  const daemon = await startFakeDaemon(t, (message) => {
+    if (message.type === "plugin.source.update.preview.request") {
+      if (mode === "local") {
+        return {
+          type: "plugin.source.update.preview.response",
+          payload: {
+            requestId: message.requestId,
+            plugins: [{ id: "paseo-factory", outcome: "local", links: [] }],
+          },
+        };
+      }
+      if (mode === "preview-error") {
+        return {
+          type: "plugin.source.update.preview.response",
+          payload: {
+            requestId: message.requestId,
+            plugins: [{ id: "paseo-factory", outcome: "error", error: "git fetch failed: could not resolve host github.com", links: [] }],
+          },
+        };
+      }
+      return {
+        type: "plugin.source.update.preview.response",
+        payload: {
+          requestId: message.requestId,
+          plugins: [
+            {
+              id: "paseo-factory",
+              outcome: "update",
+              current: {
+                identity: { kind: "git", remote: "https://github.com/daymanondev/paseo-factory", pluginPath: "plugin" },
+                currentRevision: "0285a1c",
+              },
+              target: { kind: "git", commit: "383385c" },
+              links: [],
+              proposal,
+            },
+          ],
+        },
+      };
+    }
+    if (message.type === "plugin.source.update.apply.request") {
+      return {
+        type: "plugin.source.update.apply.response",
+        payload: {
+          requestId: message.requestId,
+          plugins: [{ id: "paseo-factory", outcome: "error", error: "bundle build failed during hot swap" }],
+        },
+      };
+    }
+    return null;
+  });
+
+  // 1. outcome === "local" on preview
+  const localRes = await manageDaemonPlugin(daemon.home, "paseo-factory", "update");
+  assert.deepEqual(localRes, {
+    ok: false,
+    reason: "paseo-factory is installed from a local directory — use Reload after editing",
+  });
+  assert.equal(daemon.frames.some((f) => f.type === "plugin.source.update.apply.request"), false);
+
+  // 2. outcome === "error" on preview
+  mode = "preview-error";
+  const previewErrRes = await manageDaemonPlugin(daemon.home, "paseo-factory", "update");
+  assert.deepEqual(previewErrRes, {
+    ok: false,
+    reason: "git fetch failed: could not resolve host github.com",
+  });
+  assert.equal(daemon.frames.some((f) => f.type === "plugin.source.update.apply.request"), false);
+
+  // 3. outcome === "error" on apply (and through SurfaceHandlers.pluginsManage)
+  mode = "apply-error";
+  const applyErrRes = await manageDaemonPlugin(daemon.home, "paseo-factory", "update");
+  assert.deepEqual(applyErrRes, {
+    ok: false,
+    reason: "bundle build failed during hot swap",
+  });
+
+  const stateDir = join(daemon.home, "plugin-state", "paseo-factory");
+  const retroRunner = fakeCopilotRunner(() => ({ code: 0, stdout: '{"proposals":[]}' }));
+  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner, eyeCliProbe: () => false });
+  const handlers = createSurfaceHandlers({ factory, stateDir, home: daemon.home, daemon: fakeDaemon([]).daemon });
+  const manageReply = await handlers.pluginsManage({ pluginId: "paseo-factory", action: "update" });
+  assert.deepEqual(manageReply, {
+    ok: false,
+    code: "daemon_failed",
+    error: "bundle build failed during hot swap",
+  });
+});
+
+test("v0.0.34 seam 1.4 — CLI fallback (paseo plugin update <id> --yes --json): parses outcome 'updated', 'current', 'installed-newer', 'local', 'error', and legacy { updated: boolean } rows", async (t) => {
+  const home = makeTempDir("paseo-factory-cli-update-outcome-");
+  disposeDir(t, home);
+
+  // 1. outcome === "updated" (array top-level shape from paseo plugin update --yes --json)
+  {
+    fakePaseoCli(
+      t,
+      `${JSON.stringify([
+        {
+          id: "paseo-factory",
+          outcome: "updated",
+          current: { currentRevision: "0285a1c" },
+          target: { kind: "git", commit: "383385c" },
+          plugin: {
+            id: "paseo-factory",
+            path: "/plugins/paseo-factory",
+            enabled: true,
+            status: "running",
+            installation: {
+              identity: { kind: "git", remote: "https://github.com/daymanondev/paseo-factory", pluginPath: "plugin" },
+              currentRevision: "383385c",
+            },
+          },
+        },
+      ])}\n`,
+    );
+    const res = await manageDaemonPlugin(home, "paseo-factory", "update");
+    assert.ok(res.ok, res.ok ? "" : res.reason);
+    assert.deepEqual(res.update, {
+      id: "paseo-factory",
+      previousCommit: "0285a1c",
+      currentCommit: "383385c",
+      updated: true,
+    });
+  }
+
+  // 2. outcome === "current"
+  {
+    fakePaseoCli(
+      t,
+      `${JSON.stringify({
+        plugins: [
+          {
+            id: "paseo-factory",
+            outcome: "current",
+            current: { currentRevision: "383385c" },
+            target: { kind: "git", commit: "383385c" },
+          },
+        ],
+      })}\n`,
+    );
+    const res = await manageDaemonPlugin(home, "paseo-factory", "update");
+    assert.ok(res.ok, res.ok ? "" : res.reason);
+    assert.deepEqual(res.update, {
+      id: "paseo-factory",
+      previousCommit: "383385c",
+      currentCommit: "383385c",
+      commits: 0,
+      updated: false,
+    });
+  }
+
+  // 3. outcome === "local"
+  {
+    fakePaseoCli(t, `${JSON.stringify([{ id: "paseo-factory", outcome: "local" }])}\n`);
+    const res = await manageDaemonPlugin(home, "paseo-factory", "update");
+    assert.deepEqual(res, {
+      ok: false,
+      reason: "paseo-factory is installed from a local directory — use Reload after editing",
+    });
+  }
+
+  // 4. outcome === "error"
+  {
+    fakePaseoCli(t, `${JSON.stringify([{ id: "paseo-factory", outcome: "error", error: "git fetch failed in CLI" }])}\n`);
+    const res = await manageDaemonPlugin(home, "paseo-factory", "update");
+    assert.deepEqual(res, {
+      ok: false,
+      reason: "git fetch failed in CLI",
+    });
+  }
+
+  // 5. Legacy { id, previousCommit, currentCommit, commits, updated } row
+  {
+    fakePaseoCli(
+      t,
+      `${JSON.stringify({
+        plugins: [{ id: "factory-burn-lab", previousCommit: "1111111", currentCommit: "2222222", commits: 1, updated: true }],
+      })}\n`,
+    );
+    const res = await manageDaemonPlugin(home, "factory-burn-lab", "update");
+    assert.ok(res.ok, res.ok ? "" : res.reason);
+    assert.deepEqual(res.update, {
+      id: "factory-burn-lab",
+      previousCommit: "1111111",
+      currentCommit: "2222222",
+      commits: 1,
+      updated: true,
+    });
+  }
+});
+
+test("v0.0.34 seam 1.5 — batch Update All orders paseo-factory last so Companion plugins update before Core self-restarts", async (t) => {
+  const dir = makeTempDir("surface-plugins-v34-batch-order-");
+  disposeDir(t, dir);
+  const home = join(dir, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const retroRunner = fakeCopilotRunner(() => ({ code: 0, stdout: '{"proposals":[]}' }));
+  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner, eyeCliProbe: () => false });
+
+  const manageOrder: string[] = [];
+  const handlers = createSurfaceHandlers({
+    factory,
+    stateDir,
+    home,
+    daemon: fakeDaemon([]).daemon,
+    listPlugins: async () => ({
+      ok: true,
+      plugins: [
+        {
+          id: "paseo-factory",
+          path: "/plugins/paseo-factory",
+          enabled: true,
+          status: "running",
+          version: "0.0.33",
+          installation: {
+            identity: { kind: "git", remote: "https://github.com/daymanondev/paseo-factory", pluginPath: "plugin" },
+            currentRevision: "0285a1c",
+          },
+        },
+        {
+          id: "factory-burn-lab",
+          path: "/plugins/factory-burn-lab",
+          enabled: true,
+          status: "running",
+          version: "0.0.5",
+          installation: {
+            identity: { kind: "git", remote: "https://github.com/daymanondev/factory-burn-lab", pluginPath: "plugin" },
+            currentRevision: "7f8a5cc",
+          },
+        },
+        {
+          id: "factory-connector",
+          path: "/plugins/factory-connector",
+          enabled: true,
+          status: "running",
+          version: "0.0.3",
+          installation: {
+            identity: { kind: "git", remote: "https://github.com/daymanondev/factory-connector", pluginPath: "plugin" },
+            currentRevision: "1122334",
+          },
+        },
+      ],
+    }),
+    checkPluginUpdates: async () => ({
+      ok: true,
+      checkedAt: "2026-10-23T12:00:00.000Z",
+      statuses: [
+        {
+          id: "paseo-factory",
+          currentRevision: "0285a1c",
+          latestRevision: "383385c",
+          commitsBehind: 1,
+          updateAvailable: true,
+        },
+        {
+          id: "factory-burn-lab",
+          currentRevision: "7f8a5cc",
+          latestRevision: "a91c3f2",
+          commitsBehind: 2,
+          updateAvailable: true,
+        },
+        {
+          id: "factory-connector",
+          currentRevision: "1122334",
+          latestRevision: "1122334",
+          commitsBehind: 0,
+          updateAvailable: false,
+        },
+      ],
+    }),
+    managePlugin: async (_home, pluginId, action) => {
+      if (action === "update") manageOrder.push(pluginId);
+      if (pluginId === "factory-burn-lab") {
+        return {
+          ok: true,
+          update: { id: "factory-burn-lab", previousCommit: "7f8a5cc", currentCommit: "a91c3f2", updated: true },
+        };
+      }
+      if (pluginId === "paseo-factory") {
+        return {
+          ok: true,
+          update: { id: "paseo-factory", previousCommit: "0285a1c", currentCommit: "383385c", updated: true },
+        };
+      }
+      return { ok: true };
+    },
+  });
+
+  await handlers.pluginsCheckUpdates({});
+  const res = await handlers.pluginsManage({ pluginId: "all", action: "update" });
+  assert.ok(res.ok, res.ok ? "" : res.error);
+  assert.deepEqual(
+    manageOrder,
+    ["factory-burn-lab", "paseo-factory"],
+    "Companion plugins update first and paseo-factory (Core) updates last",
+  );
+  assert.equal(res.summary, "updated factory-burn-lab (7f8a5cc → a91c3f2) · updated paseo-factory (0285a1c → 383385c)");
 });
