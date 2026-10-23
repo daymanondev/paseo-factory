@@ -22,7 +22,11 @@
  */
 import { accessSync, constants as fsConstants, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { AgentPermissionRequest, AgentPermissionResponse, AgentSessionConfig } from "@getpaseo/protocol/agent-types";
+import type { PluginBeforeRequests, PluginLifecycleEvents } from "@getpaseo/plugin/server";
+
+type AgentPermissionRequest = PluginLifecycleEvents["agent.permission_requested"]["request"];
+type AgentPermissionResponse = PluginLifecycleEvents["agent.permission_resolved"]["resolution"];
+type AgentSessionConfig = PluginBeforeRequests["agent.create"]["config"];
 import type { Factory } from "./core/factory.ts";
 import type { ContractSet } from "./core/events.ts";
 import { FactoryError } from "./core/errors.ts";

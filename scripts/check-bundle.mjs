@@ -67,11 +67,10 @@ function placeOf(file) {
 
 function installError(specifier, importer, typeOnly) {
   if (specifier.startsWith(".") || path.isAbsolute(specifier) || SDK.includes(specifier) || HOST.test(specifier) || isBuiltin(specifier) || specifier === "@types/node") return null;
-  // A type-only import is erased at compile time and never reaches the
-  // runtime bundle, so it resolves against the repo's installation (the
-  // typecheck's own view); a runtime import must resolve from the isolated
-  // copy itself, exactly as the daemon's node_modules-less plugin dir would.
-  const from = typeOnly ? path.join(pluginRoot, "index.ts") : importer;
+  // Paseo's runtime boundary resolves both type-only and runtime imports from
+  // the isolated checkout directory (which has no node_modules), so any
+  // non-SDK, non-HOST package specifier fails `paseo plugin install git:...`.
+  const from = importer;
   try {
     createRequire(from).resolve(specifier);
     return null;
