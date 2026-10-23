@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
-import { resolve as resolvePath } from "node:path";
+import { inspectArtifact } from "./artifact.ts";
+import { killProcessGroup } from "./process-policy.ts";
 import { DEFAULT_GATE_TIMEOUT_MS, GATE_OUTPUT_CAP_BYTES, REPORT_NOTE_MAX_CHARS } from "./constants.ts";
 import type { Verdict } from "./events.ts";
 
@@ -9,7 +9,7 @@ export interface GateInput {
   cmd: string;
   /** Task workspace — the command's cwd and the base for the artifact path. */
   cwd: string;
-  /** Required artifact path (relative to cwd). Its existence is part of a green verdict. */
+  /** Required relative path. The existing target must resolve inside cwd for a green verdict. */
   artifact?: string | undefined;
   /** Kill + red after this long. Defaults to DEFAULT_GATE_TIMEOUT_MS. */
   timeoutMs?: number | undefined;
@@ -28,7 +28,7 @@ export interface GateResult {
    */
   output?: string;
   /**
-   * Whether the contract's artifact existed when the gate closed (v0.0.6):
+   * Whether the contract's artifact existed inside the execution Workspace when the gate closed:
    * the watch's `artifact_check` code answer, as a fact rather than a parsed
    * note. True/false whenever the gate ran with an artifact; undefined when
    * there was no artifact or no gate run.
@@ -39,7 +39,7 @@ export interface GateResult {
 /**
  * Runs the contract's gate command and returns the facts: exit code, a capped
  * one-line note from the output tail, and the verdict. The verdict is green
- * only when the command exits 0 AND the contract's artifact exists.
+ * only when the command exits 0 AND the contract's artifact exists inside its Workspace.
  *
  * Timeout policy stays minimal: kill the process group and record red. The
  * captured output survives in full (capped at 2 MB) in the result and, one
@@ -79,18 +79,22 @@ export function runGate(input: GateInput): Promise<GateResult> {
     });
 
     let graceKillTimer: ReturnType<typeof setTimeout> | undefined;
-    const reapGroup = (immediateSigKill = false): void => {
+    let cleanup: Promise<void> | undefined;
+    const reapGroup = (immediateSigKill = false): Promise<void> => {
+      if (immediateSigKill) killProcessGroup(child, "SIGKILL");
+      if (cleanup !== undefined) return cleanup;
       if (immediateSigKill) {
-        killGroup(child, "SIGKILL");
-        return;
+        cleanup = Promise.resolve();
+      } else {
+        killProcessGroup(child, "SIGTERM");
+        cleanup = new Promise((done) => {
+          graceKillTimer = setTimeout(() => {
+            killProcessGroup(child, "SIGKILL");
+            done();
+          }, 50);
+        });
       }
-      killGroup(child, "SIGTERM");
-      if (graceKillTimer === undefined) {
-        graceKillTimer = setTimeout(() => {
-          killGroup(child, "SIGKILL");
-        }, 50);
-        graceKillTimer.unref?.();
-      }
+      return cleanup;
     };
 
     const timer = setTimeout(() => {
@@ -99,7 +103,10 @@ export function runGate(input: GateInput): Promise<GateResult> {
     }, timeoutMs);
 
     child.on("exit", () => {
-      reapGroup(false);
+      // Command execution ended. Cleanup has its own bound and must finish
+      // even when redirected descendants let both output streams close early.
+      clearTimeout(timer);
+      void reapGroup(false);
     });
 
     child.on("error", (err) => {
@@ -110,20 +117,22 @@ export function runGate(input: GateInput): Promise<GateResult> {
       reject(err);
     });
 
-    child.on("close", (code) => {
+    child.on("close", async (code) => {
+      if (settled) return;
+      clearTimeout(timer);
+      await reapGroup(false);
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
-      if (graceKillTimer !== undefined) clearTimeout(graceKillTimer);
 
+      const artifactState = artifact === undefined ? undefined : inspectArtifact(cwd, artifact);
       if (timedOut) {
-        resolve({ exit: null, verdict: "red", note: `gate killed after ${timeoutMs}ms (timeout)`, timedOut: true, output: raw, ...(artifact === undefined ? {} : { artifactPresent: existsSync(resolvePath(cwd, artifact)) }) });
+        resolve({ exit: null, verdict: "red", note: `gate killed after ${timeoutMs}ms (timeout)`, timedOut: true, output: raw, ...(artifactState === undefined ? {} : { artifactPresent: artifactState.present }) });
         return;
       }
 
       const outputNote = clipNote(raw);
-      if (artifact !== undefined && !existsSync(resolvePath(cwd, artifact))) {
-        const missingNote = `artifact "${artifact}" not found`;
+      if (artifactState !== undefined && !artifactState.present) {
+        const missingNote = artifactState.note;
         resolve({
           exit: code,
           verdict: "red",
@@ -140,18 +149,6 @@ export function runGate(input: GateInput): Promise<GateResult> {
       resolve({ exit: code, verdict, note, timedOut: false, output: raw, ...(artifact === undefined ? {} : { artifactPresent: true }) });
     });
   });
-}
-
-function killGroup(child: import("node:child_process").ChildProcess, signal: NodeJS.Signals = "SIGKILL"): void {
-  if (child.pid === undefined || process.platform === "win32") {
-    child.kill(signal);
-    return;
-  }
-  try {
-    process.kill(-child.pid, signal);
-  } catch {
-    child.kill(signal);
-  }
 }
 
 /**

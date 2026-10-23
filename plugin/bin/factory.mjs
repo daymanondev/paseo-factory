@@ -39,6 +39,7 @@ import { parseArgs } from "node:util";
 import { existsSync } from "node:fs";
 import { join, resolve as resolvePath } from "node:path";
 import { readLedgerEvents } from "./ledger-read.mjs";
+import { taskStatusLines } from "./task-status.mjs";
 import { awaitReply, randomId, resolveHome, spoolRootFor, stateDirFor, submit } from "./spool-client.mjs";
 import { LANE_NAMES, loadLanes, resolveRunProvider, saveLanes } from "./lanes-config.mjs";
 import { resolveProject } from "./project.mjs";
@@ -201,7 +202,7 @@ commands:
              fabricated zero. Whole ledger always, no filters in v1. A local
              read; the plugin need not be running.
 
-  vault      The Private vault's seven verbs (v0.0.21–v0.0.22, ADR 0014):
+  upgrade    preflight | apply | resume | restore [--project <registered-slug>]\n             [--transaction <id>] [--dry-run] — explicit Owner-only history maintenance.\n\n  vault      The Private vault's seven verbs (v0.0.21–v0.0.22, ADR 0014):
              status | hydrate | pull | push | seal | sync | import against the
              Owner's private GitHub repository. Every verb prints one JSON
              object on stdout — vault operations script and verify mechanically
@@ -327,30 +328,10 @@ const submitter = stampedAgent !== "" ? stampedAgent : stampedCorrelation !== ""
 const rawSeat = typeof process.env.PASEO_FACTORY_SEAT === "string" ? process.env.PASEO_FACTORY_SEAT.trim() : "";
 const stampedSeat = rawSeat === "supervisor" || rawSeat === "lead" || rawSeat === "agent" ? rawSeat : undefined;
 
-// The event vocabulary the status reader understands — mirrored from
-// src/events.ts because the CLIs import no src/ code (ADR 0004). Kept on one
-// line so test/status.test.ts can guard this copy against drift. Kept in sync
-// with the writer by the same suite, the way test/cli.test.ts guards the spool.
-const EVENT_NAMES = ["contract_set", "claim_reported", "gate_started", "gate_finished", "fresh_eyes_written", "watch_written", "report_written", "attempt_accepted", "permit_allowed", "permit_denied", "git_blocked", "spawn_dispatched", "spawn_refused", "meter_written", "repoke_dispatched", "repoke_refused", "respawn_dispatched", "respawn_refused", "needs_human", "retro_written"];
-// Events without an Attempt number: contract_set owns the Task, the choke
-// events (v0.0.4) belong to the Task's whole life, git_blocked may carry no
-// task at all (the shim refuses no matter who runs it), the spawn events
-// (v0.0.5) precede any attempt — the plugin records them before an agent
-// exists — meter_written (v0.0.8) spans the task's whole run, the Lead's
-// three lines (v0.0.10) and the respawn pair (v0.0.12) are task-scoped, and
-// retro_written (v0.0.7) is factory-level: no task either.
-const NO_ATTEMPT_EVENTS = new Set(["contract_set", "permit_allowed", "permit_denied", "git_blocked", "spawn_dispatched", "spawn_refused", "meter_written", "repoke_dispatched", "repoke_refused", "respawn_dispatched", "respawn_refused", "needs_human", "retro_written"]);
-
-/**
- * The status reader's shape rule — every event is in the vocabulary above and
- * carries task/attempt per the NO_ATTEMPT rule. Handed to the shared reader
- * (ledger-read.mjs) as its strictness: a line failing it is corruption, named
- * with its line number.
- */
-function isValidLedgerEvent(evt) {
-  const taskOk = NO_ATTEMPT_EVENTS.has(evt.event) || typeof evt.task === "string";
-  const attemptOk = NO_ATTEMPT_EVENTS.has(evt.event) || (Number.isInteger(evt.attempt) && evt.attempt >= 1);
-  return EVENT_NAMES.includes(evt.event) && taskOk && attemptOk;
+/** Pipe writes are asynchronous: immediate process.exit can truncate large machine-readable output. */
+async function writeJsonAndExit(value, code = 0) {
+  await new Promise((resolve, reject) => process.stdout.write(`${JSON.stringify(value, null, 2)}\n`, (error) => error ? reject(error) : resolve()));
+  process.exit(code);
 }
 
 function fail(message) {
@@ -427,6 +408,22 @@ async function roundTrip(request, waitSecs) {
     process.exit(2);
   }
   return reply;
+}
+
+if (command === "upgrade") {
+  const parsed = parseCommandOptions({ project: { type: "string" }, transaction: { type: "string" }, "dry-run": { type: "boolean" }, "wait-secs": { type: "string" } });
+  const action = parsed.values["dry-run"] ? "preflight" : parsed.positionals[0] ?? "preflight";
+  if (!["preflight", "apply", "resume", "restore"].includes(action) || parsed.positionals.length > 1) fail("upgrade: use preflight | apply | resume | restore [--project <registered-slug>] [--transaction <id>]");
+  if ((action === "resume" || action === "restore") && parsed.values.transaction === undefined) fail("upgrade: --transaction <id> is required");
+  const input = { action, ...(parsed.values.project === undefined ? {} : { projectSlug: parsed.values.project }), ...(parsed.values.transaction === undefined ? {} : { transactionId: parsed.values.transaction }) };
+  if (action === "preflight") {
+    const { preflightUpgrade } = await import("./history-upgrade.mjs");
+    try { const result = preflightUpgrade(stateDir, input); await writeJsonAndExit(result, result.ok ? 0 : 2); }
+    catch (error) { console.error(`factory: upgrade preflight: ${error.message}`); process.exit(2); }
+  }
+  const reply = await roundTrip({ id: randomId(), kind: "upgrade", ...input }, waitSeconds(parsed, 120));
+  if (!reply.ok) { console.error(`factory: ${reply.code}: ${reply.message}`); process.exit(2); }
+  await writeJsonAndExit(reply.upgrade);
 }
 
 if (command === "contract") {
@@ -753,7 +750,7 @@ if (command === "status") {
   // The read is the shared one (ledger-read.mjs) under status's strict
   // policy; anything unreadable is reported (exit 2), never guessed around.
   const ledgerPath = join(stateDir, "ledger.jsonl");
-  const read = readLedgerEvents(ledgerPath, { validateEvent: isValidLedgerEvent });
+  const read = readLedgerEvents(ledgerPath);
   if (read.failed !== undefined) {
     die(`cannot read ${ledgerPath}: ${read.failed instanceof Error ? read.failed.message : String(read.failed)}`);
   }
@@ -763,7 +760,7 @@ if (command === "status") {
     console.log(`factory: no tasks yet (ledger: ${ledgerPath})`);
     process.exit(0);
   }
-  for (const line of statusLines(events)) console.log(line);
+  for (const line of taskStatusLines(events)) console.log(line);
   process.exit(0);
 }
 
@@ -775,7 +772,7 @@ if (command === "cost") {
   // shaped for the ladder's cost row. Every duration is ts-derived; every
   // dollar is metered or absent — zero price constants live here (the law).
   const ledgerPath = join(stateDir, "ledger.jsonl");
-  const read = readLedgerEvents(ledgerPath, { validateEvent: isValidLedgerEvent });
+  const read = readLedgerEvents(ledgerPath);
   if (read.failed !== undefined) {
     die(`cannot read ${ledgerPath}: ${read.failed instanceof Error ? read.failed.message : String(read.failed)}`);
   }
@@ -836,8 +833,7 @@ if (command === "vault") {
       refuseOptions("status", []);
       // The pure local read (the status/cost lineage): the config file and the
       // runtime probes, no spool round trip, no plugin needed.
-      console.log(JSON.stringify(vault.readVaultStatus(home), null, 2));
-      process.exit(0);
+      await writeJsonAndExit(vault.readVaultStatus(home));
     }
 
     if (sub === "hydrate") {
@@ -849,8 +845,7 @@ if (command === "vault") {
         ...(values["merge-ledgers"] ? { mergeLedgers: true } : {}),
         ...(values["overwrite-configs"] ? { overwriteConfigs: true } : {}),
       });
-      console.log(JSON.stringify({ ok: true, mode: "direct", repo: result.repo, ref: result.ref, hydratedFiles: result.hydratedFiles, vault: vault.readVaultStatus(home) }, null, 2));
-      process.exit(0);
+      await writeJsonAndExit({ ok: true, mode: "direct", repo: result.repo, ref: result.ref, hydratedFiles: result.hydratedFiles, historyImports: result.historyImports, materialization: result.materialization, vault: vault.readVaultStatus(home) });
     }
 
     if (sub === "pull") {
@@ -860,16 +855,14 @@ if (command === "vault") {
         ...(values["merge-ledgers"] ? { mergeLedgers: true } : {}),
         ...(values["overwrite-configs"] ? { overwriteConfigs: true } : {}),
       });
-      console.log(JSON.stringify({ ok: true, mode: "sync", hydratedFiles: result.hydratedFiles, vault: vault.readVaultStatus(home) }, null, 2));
-      process.exit(0);
+      await writeJsonAndExit({ ok: true, mode: "sync", hydratedFiles: result.hydratedFiles, historyImports: result.historyImports, materialization: result.materialization, vault: vault.readVaultStatus(home) });
     }
 
     if (sub === "push") {
       if (parsed.positionals.length > 1) fail(`vault push: unexpected positional "${parsed.positionals[1]}"`);
       refuseOptions("push", ["include-ledger"]);
       const result = await vault.pushVault(home, ...(values["include-ledger"] ? [{ includeLedger: true }] : []));
-      console.log(JSON.stringify({ ok: true, pushed: result.pushed, pushedFiles: result.pushedFiles, vault: vault.readVaultStatus(home) }, null, 2));
-      process.exit(0);
+      await writeJsonAndExit({ ok: true, pushed: result.pushed, pushedFiles: result.pushedFiles, vault: vault.readVaultStatus(home) });
     }
 
     if (sub === "sync") {
@@ -881,8 +874,7 @@ if (command === "vault") {
         ...(typeof values.passphrase === "string" && values.passphrase !== "" ? { passphrase: values.passphrase } : {}),
         ...(values["overwrite-configs"] ? { overwriteConfigs: true } : {}),
       });
-      console.log(JSON.stringify({ ok: true, ...result, vault: vault.readVaultStatus(home) }, null, 2));
-      process.exit(0);
+      await writeJsonAndExit({ ok: true, ...result, vault: vault.readVaultStatus(home) });
     }
 
     if (sub === "import") {
@@ -923,8 +915,7 @@ if (command === "vault") {
           : {}),
         ...(values["no-sync"] ? { syncAfterImport: false } : {}),
       });
-      console.log(JSON.stringify({ ok: true, ...result, pushed: result.synced?.pushed ?? false, vault: vault.readVaultStatus(home) }, null, 2));
-      process.exit(0);
+      await writeJsonAndExit({ ok: true, ...result, materialization: result.synced?.materialization, pushed: result.synced?.pushed ?? false, vault: vault.readVaultStatus(home) });
     }
 
     if (sub === "seal") {
@@ -946,8 +937,7 @@ if (command === "vault") {
         vaultPath,
         ...(typeof values.passphrase === "string" && values.passphrase !== "" ? [values.passphrase] : []),
       );
-      console.log(JSON.stringify({ ok: true, ...result }, null, 2));
-      process.exit(0);
+      await writeJsonAndExit({ ok: true, ...result });
     }
 
     fail(`vault: unknown subcommand "${sub}" — use "vault status | hydrate | pull | push | seal | sync | import"`);
@@ -958,78 +948,6 @@ if (command === "vault") {
 }
 
 fail(`unknown command "${command}"`);
-
-/** One line per task, in first-appearance (ledger) order — the Owner's glance at the factory. */
-function statusLines(events) {
-  const order = [];
-  const byTask = new Map();
-  let retro;
-  for (const evt of events) {
-    if (evt.event === "retro_written") {
-      // The one factory-level event (v0.0.7): it belongs to no task line —
-      // the last retro on record prints once, after every task.
-      retro = evt;
-      continue;
-    }
-    if (evt.event !== "contract_set" && NO_ATTEMPT_EVENTS.has(evt.event)) {
-      // The choke events (v0.0.4) carry no Attempt: they count toward their
-      // task's line — a live Contract always precedes them in the ledger — and
-      // an untasked git block counts toward no line at all. The spawn events
-      // (v0.0.5) ride the ledger as the spawn record itself: validated and read
-      // through, counted toward no field — the driver's output and the ledger
-      // name refusals, the glance does not repeat them.
-      const counted = byTask.get(evt.task);
-      if (counted !== undefined) {
-        if (evt.event === "permit_allowed") counted.allowed += 1;
-        else if (evt.event === "permit_denied") counted.denied += 1;
-        else if (evt.event === "git_blocked") counted.blocked += 1;
-        else if (evt.event === "needs_human") counted.needsHuman = evt.reason; // the last one on record — the glance's needs-human marker (v0.0.10)
-      }
-      continue;
-    }
-    let state = byTask.get(evt.task);
-    if (state === undefined) {
-      state = { attempts: 0, verdict: undefined, sha: undefined, eye: undefined, accepted: false, allowed: 0, denied: 0, blocked: 0, needsHuman: undefined };
-      byTask.set(evt.task, state);
-      order.push(evt.task);
-    }
-    if (evt.event === "contract_set") {
-      if (!state.accepted) {
-        state.attempts = 0;
-        state.verdict = undefined;
-        state.sha = undefined;
-        state.eye = undefined;
-        state.needsHuman = undefined;
-        state.allowed = 0;
-        state.denied = 0;
-        state.blocked = 0;
-      }
-      continue;
-    }
-    if (evt.attempt > state.attempts) state.attempts = evt.attempt;
-    if (evt.event === "gate_finished") {
-      state.verdict = evt.verdict; // the last verdict on record, even while a newer attempt runs
-      state.sha = typeof evt.sha === "string" ? evt.sha.slice(0, 7) : undefined; // git's short length
-    }
-    if (evt.event === "fresh_eyes_written") {
-      state.eye = typeof evt.outcome === "string" ? evt.outcome : undefined; // the last eye on record
-    }
-    if (evt.event === "attempt_accepted") state.accepted = true;
-  }
-  const lines = order.map((task) => {
-    const s = byTask.get(task);
-    return (
-      `${task} attempts=${s.attempts} verdict=${s.verdict ?? "-"} sha=${s.sha ?? "-"} accepted=${s.accepted ? "yes" : "no"} eye=${s.eye ?? "-"} choke=${s.allowed}/${s.denied}/${s.blocked}` +
-      `${s.needsHuman === undefined ? "" : ` needs-human=${s.needsHuman}`}`
-    );
-  });
-  if (retro !== undefined) {
-    const day = typeof retro.ts === "string" ? retro.ts.slice(0, 10) : "-";
-    const count = retro.outcome === "written" && Number.isInteger(retro.proposalCount) ? ` proposals=${retro.proposalCount}` : "";
-    lines.push(`retro last=${day} outcome=${retro.outcome ?? "-"}${count}`);
-  }
-  return lines;
-}
 
 function die(message) {
   console.error(`factory: ${message}`);

@@ -331,7 +331,8 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
 
   const projectLane = <T>(slug: string, run: () => Promise<T>): Promise<T> => {
     const prior = lanes.get(slug) ?? Promise.resolve();
-    const job = prior.then(run, run);
+    const admitted = () => deps.factory.history.runOperation(run);
+    const job = prior.then(admitted, admitted);
     lanes.set(
       slug,
       job.then(
@@ -1251,7 +1252,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     }
   };
 
-  return {
+  const runtime: LeadMailRuntime = {
     dispatchLead,
     dispatchSupervisor,
     reportSupervisor,
@@ -1267,6 +1268,12 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     markKickoffSent,
     stop,
   };
+  const sync = new Set(["startupRecovery", "settleLeadRotation", "resetProjectMailbox", "markKickoffSent"]);
+  return new Proxy(runtime, { get(target, key, receiver) {
+    const value = Reflect.get(target, key, receiver);
+    if (typeof value !== "function" || key === "stop") return value;
+    return (...args: unknown[]) => sync.has(String(key)) ? deps.factory.history.runSync(() => value.apply(receiver, args)) : deps.factory.history.runOperation(() => value.apply(receiver, args));
+  } });
 }
 
 // ---- the handoff renderers (ADR 0013 §5 — fixed prose, machine-verified payload) ------------

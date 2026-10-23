@@ -17,6 +17,7 @@ import { Text, View } from "react-native";
 import type { FactoryView, VaultStatusView } from "../../shared/view.ts";
 import { Btn, Card, Chip, Pill } from "../kit/pill.tsx";
 import { CONTROL_H, CONTROL_SM, DOT, RADIUS, SPACING, text, tint } from "../kit/theme.ts";
+import { historyFeedback } from "./vault-feedback.ts";
 import type { Colour } from "../kit/theme.ts";
 import { GRACE_MS, pollEvery } from "../kit/poll.ts";
 
@@ -35,7 +36,7 @@ export function isVaultActName(name: string): name is VaultActName {
 
 export interface VaultNote {
   text: string;
-  tone: "statusSuccess" | "statusDanger";
+  tone: "statusSuccess" | "statusWarning" | "statusDanger";
 }
 
 export interface VaultSyncInput {
@@ -170,6 +171,7 @@ export function VaultSyncBar({
   const syncing = busyAct === "Vault Sync";
   const importing = busyAct === "Vault Import";
   const suggestedRepo = vault.suggestedRepo ?? (vault.ghUser !== null ? `${vault.ghUser}/factory-vault` : "owner/factory-vault");
+  const history = historyFeedback(vault.historyImports);
   const lastSyncStamp = vault.lastPushedAt ?? vault.lastHydratedAt;
   const syncAgeSeconds =
     lastSyncStamp !== null && !Number.isNaN(Date.parse(lastSyncStamp))
@@ -271,10 +273,10 @@ export function VaultSyncBar({
             {vault.hasPassphrase ? <Pill theme={theme} label="Passphrase" tone="accent" lit /> : null}
             <Text style={text(theme, "meta")}>
               {syncAgeSeconds !== null
-                ? `synced ${readAgo(syncAgeSeconds)}`
+                ? `transported ${readAgo(syncAgeSeconds)}`
                 : lastSyncStamp !== null
-                  ? `synced ${lastSyncStamp.slice(0, 19).replace("T", " ")}`
-                  : "not synced yet"}
+                  ? `transported ${lastSyncStamp.slice(0, 19).replace("T", " ")}`
+                  : "no transport yet"}
             </Text>
           </View>
           <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5] }}>
@@ -312,6 +314,8 @@ export function VaultSyncBar({
           </View>
         </View>
       ) : null}
+
+      {history !== null ? <Text style={text(theme, "label", history.tone)}>{history.text}</Text> : null}
 
       {vaultNote !== null ? (
         <View

@@ -2622,7 +2622,7 @@ test("vault.hydrate: refusals are data — unconfigured, a non-GitHub repo, and 
   assert.match(settled.error, /gh: rate limit exceeded/);
 });
 
-test("vault.pull: Vault sync through the handlers — cached checkout hydrated, sync stamp, node ledgers reconciled", async (t) => {
+test("vault.pull: Vault sync through the handlers — cached checkout hydrated and legacy node history staged honestly", async (t) => {
   // A prior pull's cached checkout at <home>/vault: an obfuscated envelope, a
   // config file, and another machine's node-scoped ledger snapshot.
   const { runner, calls } = fakeVaultRunner(() => Buffer.alloc(0));
@@ -2654,14 +2654,14 @@ test("vault.pull: Vault sync through the handlers — cached checkout hydrated, 
   assert.equal(reply.vault.lastHydrateMode, "sync");
   assert.equal(reply.vault.cloneExists, true, "the cached checkout is exactly what cloneExists reports");
 
-  // The mergeLedgers leg: both machines' events land in the global ledger, re-indexed monotonic.
-  const merged = readFileSync(join(stateDir, "ledger.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line) as { seq: number; task: string });
-  assert.deepEqual(
-    merged.map((entry) => entry.task).sort(),
-    ["T-LOCAL", "T-REMOTE"],
-    "the node snapshot folded into this machine's global ledger",
-  );
-  assert.deepEqual(merged.map((entry) => entry.seq), merged.map((_, index) => index + 1), "seq re-indexed strictly monotonic 1..N");
+  assert.deepEqual(factory.ledger.events.filter((event) => event.event === "contract_set").map((event) => event.task), ["T-LOCAL"]);
+  assert.equal(factory.history.status()[0]?.status, "conflicted", "legacy histories need explicit migration before admission");
+  assert.equal(reply.historyImports?.[0]?.status, "conflicted", "the reply includes the writer decision after the maintenance lease drains");
+  const { vaultPull } = await import("../plugin/shared/rpc.ts");
+  const wire = vaultPull.output.parse(reply); assert.ok(wire.ok);
+  assert.deepEqual(wire.historyImports, reply.historyImports);
+  assert.equal(wire.vault.historyImports?.[0]?.status, "conflicted");
+
 });
 
 test("vault.push: packages the runtime tree plus this node's ledger snapshot, commits and pushes through the handlers", async (t) => {
@@ -2921,13 +2921,7 @@ test("v0.0.23 (ADR 0015 §6): spool spawn/respawn registers Task worktree worksp
   const spawnReply = await handleSpoolRequest(
     factory,
     { id: "sp-ws-1", kind: "spawn", task: "T-WS-1", provider: "opencode/glm-5.1", arity: 1, worktree: wtPath },
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    fake.daemon,
+    { daemon: fake.daemon },
   );
   assert.equal(spawnReply.ok, true);
   if (spawnReply.ok) {
@@ -2955,13 +2949,7 @@ test("v0.0.23 (ADR 0015 §6): spool spawn/respawn registers Task worktree worksp
   const respawnReply = await handleSpoolRequest(
     factory,
     { id: "rsp-ws-1", kind: "respawn", task: "T-WS-1", provider: "opencode/glm-5.1", died_agent: deadWorker.id },
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    fake.daemon,
+    { daemon: fake.daemon },
   );
   assert.equal(respawnReply.ok, true);
   if (respawnReply.ok) {
@@ -2985,13 +2973,7 @@ test("v0.0.23 (ADR 0015 §6): spool spawn/respawn registers Task worktree worksp
   const meterReply = await handleSpoolRequest(
     factory,
     { id: "m-ws-1", kind: "meter", task: "T-WS-1", provider: "opencode/glm-5.1", agent: liveWorker.id, usage: { inputTokens: 100, outputTokens: 50 } },
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    fake.daemon,
+    { daemon: fake.daemon },
   );
   assert.equal(meterReply.ok, true);
   assert.ok(fake.archived.includes(liveWorker.id), "meter archived finished working Agent");
@@ -3051,13 +3033,7 @@ test("v0.0.31 (ADR 0017 §2/§5): spawn titles the Task worktree Workspace `Peer
   const spawnReply = await handleSpoolRequest(
     factory,
     { id: "sp-ws-2", kind: "spawn", task: "T-WS-2", provider: "opencode/glm-5.1", arity: 1, worktree: wtPrep.path },
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    fake.daemon,
+    { daemon: fake.daemon },
   );
   assert.equal(spawnReply.ok, true);
   // Testing Decision seam 1's description arm: the first clause of
@@ -4256,3 +4232,25 @@ test("v0.0.30 seam 4 — per-plugin fault isolation: a batch plugin.source.statu
 
 
 
+
+test("Vault snapshots and existing RPC schemas expose pending then conflicted admission without changing transport stamps", async (t) => {
+  const { handlers, factory } = makeSurface(t);
+  await handlers.vaultConfigure({ repo: "owner/vault", branch: "main" });
+  let release!: () => void, entered!: () => void;
+  const ready = new Promise<void>((done) => { entered = done; });
+  const held = new Promise<void>((done) => { release = done; });
+  const operation = factory.history.runOperation(async () => { entered(); await held; });
+  await ready;
+  try {
+    const staged = await handlers.historyImport({ sources: [{ nodeId: "remote", lines: "retained original\n" }] });
+    assert.equal(staged.imports[0]?.status, "pending");
+    const pending = await handlers.snapshot({}); assert.ok(pending.ok); if (!pending.ok) return;
+    const { VaultStatusViewSchema } = await import("../plugin/shared/view.ts");
+    assert.equal(VaultStatusViewSchema.parse(pending.view.vault).historyImports?.[0]?.status, "pending");
+    assert.equal(pending.view.vault.lastHydratedAt, null);
+  } finally { release(); await operation; }
+  const conflicted = await handlers.snapshot({}); assert.ok(conflicted.ok); if (!conflicted.ok) return;
+  assert.equal(conflicted.view.vault.historyImports?.[0]?.status, "conflicted");
+  assert.equal(conflicted.view.vault.lastHydratedAt, null);
+  assert.match(JSON.stringify(conflicted.view.vault.historyImports), /invalid|migration|JSON/);
+});

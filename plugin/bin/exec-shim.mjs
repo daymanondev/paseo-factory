@@ -21,6 +21,7 @@ import { accessSync, appendFileSync, constants as fsConstants, existsSync, mkdir
 import { homedir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
+import { inheritChildOutcome } from "./process-policy.mjs";
 
 const tool = process.argv[2] ?? "";
 const argv = process.argv.slice(3);
@@ -238,17 +239,6 @@ if (realBin === undefined) {
 }
 
 const child = spawn(realBin, argv, { stdio: "inherit" });
-for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
-  process.on(sig, () => child.kill(sig));
-}
-child.on("error", (err) => {
+inheritChildOutcome(child, (err) => {
   console.error(`exec-shim: failed to exec ${realBin}: ${err.message}`);
-  process.exit(127);
-});
-child.on("exit", (code, signal) => {
-  if (signal !== null) {
-    process.kill(process.pid, signal);
-    return;
-  }
-  process.exit(code ?? 1);
 });

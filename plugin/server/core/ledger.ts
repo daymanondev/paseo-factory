@@ -1,8 +1,14 @@
-import { appendFileSync, closeSync, fsyncSync, ftruncateSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { appendFileSync, closeSync, fsyncSync, ftruncateSync, mkdirSync, openSync, readFileSync, statSync, writeSync } from "node:fs";
 import { dirname } from "node:path";
 import { FactoryError } from "./errors.ts";
-import { EVENT_NAMES, NEEDS_HUMAN_REASONS, needsHumanEvidenceIsValid } from "./events.ts";
-import type { LedgerEvent, PendingEvent } from "./events.ts";
+import { eventAllowsUnboundEpoch } from "./events.ts";
+import { remapLedgerReferences } from "./history-identity.ts";
+import { isValidLedgerEvent, parseLedgerJsonl } from "./ledger-validation.ts";
+export { isValidLedgerEvent, parseLedgerJsonl, usageIsValid } from "./ledger-validation.ts";
+import type { EventIdentityMetadata, LedgerEvent, LedgerSchema, PendingEvent } from "./events.ts";
+import { historyHash } from "./history-identity.ts";
+import { writeDurableFile } from "./history-stage.ts";
 
 /**
  * Append-only JSONL ledger. Lines are never mutated or rewritten — the file is
@@ -23,15 +29,25 @@ export class Ledger {
   readonly #path: string;
   readonly #events: LedgerEvent[] = [];
   #nextSeq: number;
+  #schema: LedgerSchema | undefined;
+  #writerId: string | undefined;
+  #mutationGuard?: () => void;
+  #activationGuard?: () => void;
+  #rawSnapshot: string;
+  #hasTail = false;
+  #poisoned = false;
 
-  private constructor(path: string, events: readonly LedgerEvent[]) {
+  private constructor(path: string, events: readonly LedgerEvent[], raw: string, writerId?: string) {
+    this.#rawSnapshot = raw;
+    this.#writerId = writerId;
     this.#path = path;
     this.#events.push(...events);
     this.#nextSeq = (events.at(-1)?.seq ?? 0) + 1;
+    this.#schema = events.find((event): event is LedgerSchema => event.event === "ledger_schema");
   }
 
   /** Loads and validates an existing ledger, or starts a fresh one at seq 1. */
-  static open(path: string): Ledger {
+  static open(path: string, options: { writerId?: string; recoverTail?: boolean } = {}): Ledger {
     mkdirSync(dirname(path), { recursive: true });
     let raw: string;
     try {
@@ -41,50 +57,36 @@ export class Ledger {
       else throw err;
     }
 
-    if (raw !== "" && !raw.endsWith("\n")) {
+    if (raw !== "" && !raw.endsWith("\n") && options.recoverTail !== false) {
       raw = quarantineUnterminatedTail(path, raw);
     }
 
-    const events: LedgerEvent[] = [];
-    if (raw !== "") {
-      const lines = raw.split("\n");
-      let prevSeq = 0;
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i]!;
-        if (line === "") {
-          if (i === lines.length - 1) break; // trailing newline after the last event is fine
-          throw new FactoryError("corrupted-ledger", `blank line at line ${i + 1} of ${path}`);
-        }
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(line);
-        } catch {
-          throw new FactoryError("corrupted-ledger", `line ${i + 1} of ${path} is not valid JSON: ${line.slice(0, 80)}`);
-        }
-        const evt = parsed as LedgerEvent;
-        const valid =
-          typeof evt === "object" &&
-          evt !== null &&
-          typeof (evt as { seq?: unknown }).seq === "number" &&
-          Number.isInteger((evt as { seq: number }).seq) &&
-          (evt as { seq: number }).seq > prevSeq &&
-          typeof (evt as { event?: unknown }).event === "string" &&
-          (EVENT_NAMES as readonly string[]).includes((evt as { event: string }).event) &&
-          typeof (evt as { ts?: unknown }).ts === "string" &&
-          shapeIsValid(evt);
-        if (!valid) {
-          throw new FactoryError("corrupted-ledger", `line ${i + 1} of ${path} is not a valid ledger event`);
-        }
-        prevSeq = (evt as { seq: number }).seq;
-        events.push(evt);
-      }
-    }
-    return new Ledger(path, events);
+    const read = parseLedgerJsonl(raw);
+    if (read.corrupt !== undefined) throw new FactoryError("corrupted-ledger", `${read.corrupt} of ${path}`);
+    return new Ledger(path, read.events, raw, options.writerId);
   }
 
   /** Assigns the next seq, stamps `ts`, appends one JSONL line, fsyncs, and returns the event. */
-  append<T extends PendingEvent>(evt: T): T & { seq: number; ts: string } {
-    const record = { seq: this.#nextSeq, ts: new Date().toISOString(), ...evt } as T & { seq: number; ts: string };
+  append<T extends PendingEvent>(evt: T): T & { seq: number; ts: string } & EventIdentityMetadata {
+    this.#mutationGuard?.();
+    this.#assertWritable();
+    const identity: EventIdentityMetadata = {};
+    if (this.#schema !== undefined) {
+      if (this.#writerId === undefined || this.#writerId.trim() === "") throw new FactoryError("writer-identity-required", "v2 append requires a demonstrable local writer identity; a copied schema fence is not writer authority");
+      const eventId = `event:${randomUUID()}`;
+      const task = "task" in evt ? evt.task : undefined;
+      const epoch = evt.event === "contract_set" ? eventId : task === undefined ? undefined : this.#events.findLast((event) => event.event === "contract_set" && event.task === task)?.epoch_id;
+      if (task !== undefined && epoch === undefined && !eventAllowsUnboundEpoch(evt.event)) throw new FactoryError("invalid-event-epoch", `Task ${task} has no current Contract epoch`);
+      Object.assign(identity, { schema_version: 2, event_id: eventId, provenance: { writer_id: this.#writerId }, ...(epoch === undefined ? {} : { epoch_id: epoch }) });
+    }
+    const record = { ...evt, seq: this.#nextSeq, ts: new Date().toISOString(), ...identity } as T & { seq: number; ts: string } & EventIdentityMetadata;
+    if (this.#schema !== undefined) {
+      const context = [...this.#events, record as LedgerEvent];
+      const resolved = remapLedgerReferences(record as LedgerEvent, context, context);
+      if (!resolved.ok) throw new FactoryError("invalid-event-reference", resolved.reasons.join("; "));
+      Object.assign(record, resolved.event);
+      if (!isValidLedgerEvent(record)) throw new FactoryError("invalid-event", "record does not satisfy the active Ledger schema");
+    }
     const line = `${JSON.stringify(record)}\n`;
     // O_APPEND + a single write makes the line land atomically at EOF; fsync
     // puts it on disk before append returns. Sync I/O also keeps seq assignment
@@ -93,9 +95,17 @@ export class Ledger {
     try {
       writeSync(fd, line);
       fsyncSync(fd);
+    } catch (error) {
+      try {
+        const actual = this.#readDisk();
+        if (actual === this.#rawSnapshot + line) this.#install(actual, [...this.#events, record as LedgerEvent]);
+        else if (actual !== this.#rawSnapshot) this.#poisoned = true;
+      } catch { this.#poisoned = true; }
+      throw error;
     } finally {
       closeSync(fd);
     }
+    this.#rawSnapshot += line;
     this.#events.push(record as LedgerEvent);
     this.#nextSeq += 1;
     return record;
@@ -103,6 +113,69 @@ export class Ledger {
 
   get path(): string {
     return this.#path;
+  }
+
+  #assertWritable(): void {
+    if (this.#poisoned || this.#hasTail) throw new FactoryError("history-refresh-required", "Ledger must be reconciled before further writes");
+  }
+  #readDisk(): string {
+    try { return readFileSync(this.#path, "utf8"); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return ""; throw error; }
+  }
+  #install(lines: string, events: readonly LedgerEvent[], writerId?: string | null): void {
+    this.#events.splice(0, this.#events.length, ...events);
+    this.#nextSeq = (events.at(-1)?.seq ?? 0) + 1;
+    this.#schema = events.find((event): event is LedgerSchema => event.event === "ledger_schema");
+    if (writerId !== undefined) this.#writerId = writerId ?? undefined;
+    this.#rawSnapshot = lines;
+    this.#hasTail = lines !== "" && !lines.endsWith("\n");
+    this.#poisoned = false;
+  }
+  #commit(lines: string, options: { expectedHash?: string; writerId?: string | null; mode?: number; afterRename?: () => void }): void {
+    if (typeof options.writerId === "string" && options.writerId.trim() === "") throw new FactoryError("writer-identity-required", "writer identity must be non-empty");
+    const parsed = parseLedgerJsonl(lines);
+    if (parsed.corrupt !== undefined || (lines !== "" && !lines.endsWith("\n"))) throw new FactoryError("corrupted-ledger", parsed.corrupt ?? "activation requires acknowledged records");
+    const current = this.#readDisk();
+    if (historyHash(current) !== historyHash(this.#rawSnapshot)) {
+      this.#poisoned = true;
+      throw new FactoryError("history-base-changed", "Ledger disk state differs from the writer; refresh before retrying");
+    }
+    if (options.expectedHash !== undefined && historyHash(current) !== options.expectedHash) throw new FactoryError("history-base-changed", "Ledger changed before activation; replan before retrying");
+    let mode = options.mode;
+    if (mode === undefined) { try { mode = statSync(this.#path).mode & 0o777; } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; } }
+    try { writeDurableFile(this.#path, lines, { mode, afterRename: options.afterRename }); }
+    catch (error) {
+      // Rename is the commit point. A failed directory sync cannot leave the
+      // writer's counter behind the bytes that are already visible on disk.
+      try {
+        const actual = this.#readDisk();
+        if (actual === lines) this.#install(lines, parsed.events, options.writerId);
+        else if (actual !== current) this.#poisoned = true;
+      } catch { this.#poisoned = true; }
+      throw error;
+    }
+    this.#install(lines, parsed.events, options.writerId);
+  }
+  /** Owner-only atomic activation. null explicitly clears writer authority. */
+  activateHistory(lines: string, options: { expectedHash?: string; writerId?: string | null; mode?: number; afterRename?: () => void } = {}): void {
+    this.#activationGuard?.();
+    this.#commit(lines, options);
+  }
+  /** Refresh after an exclusively restored file without rewriting bytes or modes. */
+  refreshHistoryFromDisk(options: { writerId?: string | null } = {}): void {
+    this.#activationGuard?.();
+    if (typeof options.writerId === "string" && options.writerId.trim() === "") throw new FactoryError("writer-identity-required", "writer identity must be non-empty");
+    const raw = this.#readDisk();
+    const parsed = parseLedgerJsonl(raw);
+    if (parsed.corrupt !== undefined) { this.#poisoned = true; throw new FactoryError("corrupted-ledger", parsed.corrupt); }
+    this.#install(raw, parsed.events, options.writerId);
+  }
+
+  get writerId(): string | undefined { return this.#writerId; }
+
+  setAdmissionGuards(mutate: () => void, activate: () => void): void {
+    this.#mutationGuard = mutate;
+    this.#activationGuard = activate;
   }
 
   get events(): readonly LedgerEvent[] {
@@ -121,134 +194,21 @@ export class Ledger {
    * purged events.
    */
   purgeWhere(predicate: (event: LedgerEvent) => boolean): number {
+    this.#mutationGuard?.();
+    this.#assertWritable();
     const remaining: LedgerEvent[] = [];
     let purged = 0;
     for (const evt of this.#events) {
-      if (predicate(evt)) {
+      if (evt.event !== "ledger_schema" && predicate(evt)) {
         purged += 1;
       } else {
         remaining.push(evt);
       }
     }
-    this.#events.splice(0, this.#events.length, ...remaining);
-    this.#nextSeq = (this.#events.at(-1)?.seq ?? 0) + 1;
-    mkdirSync(dirname(this.#path), { recursive: true });
     const content = remaining.map((evt) => `${JSON.stringify(evt)}\n`).join("");
-    const tmpPath = `${this.#path}.${process.pid}.${Date.now()}.tmp`;
-    const fd = openSync(tmpPath, "w");
-    try {
-      if (content !== "") writeSync(fd, content);
-      fsyncSync(fd);
-    } finally {
-      closeSync(fd);
-    }
-    renameSync(tmpPath, this.#path);
+    this.#commit(content, {});
     return purged;
   }
-}
-
-/**
- * Per-event required shape. The attempt-scoped loop (ADR 0003) carries a
- * positive-integer Attempt on every post-Contract event; the v0.0.4 choke
- * events carry none — permit events need their task and agent, `git_blocked`
- * needs its command/rule/cwd/blockId and may lack a task entirely (the shim
- * refuses no matter who runs it, bindable or not). The v0.0.5 spawn events
- * carry none either — they precede any attempt — and need their task,
- * provider, arity, and (for a refusal) rule and reason. The v0.0.7
- * `retro_written` carries neither task nor attempt — the factory-level
- * event — and needs its model, outcome and duration. The v0.0.8
- * `meter_written` carries no attempt (usage spans the run) and needs its
- * task, provider, and a usage object of the four daemon fields. The v0.0.10
- * Lead lines carry no attempt either (the stall precedes any Claim): the
- * repoke pair needs task and agent (a refusal adds rule and reason, the
- * spawn pair's own law), and `needs_human` needs task, a fixed-vocabulary
- * reason, and its two evidence seqs (the vocabulary's own shape predicate,
- * events.ts).
- */
-function shapeIsValid(evt: LedgerEvent): boolean {
-  const asRecord = evt as unknown as Record<string, unknown>;
-  const taskIsString = typeof asRecord.task === "string";
-  if (evt.event === "contract_set") return taskIsString;
-  if (evt.event === "retro_written") {
-    return (
-      typeof asRecord.model === "string" &&
-      (asRecord.outcome === "written" || asRecord.outcome === "failed") &&
-      typeof asRecord.durationMs === "number" &&
-      Number.isFinite(asRecord.durationMs) &&
-      asRecord.durationMs >= 0
-    );
-  }
-  if (evt.event === "permit_allowed" || evt.event === "permit_denied") {
-    return taskIsString && typeof asRecord.agent === "string" && (evt.event === "permit_allowed" || typeof asRecord.rule === "string");
-  }
-  if (evt.event === "git_blocked") {
-    return (
-      (asRecord.task === undefined || taskIsString) &&
-      (asRecord.agent === undefined || typeof asRecord.agent === "string") &&
-      typeof asRecord.command === "string" &&
-      typeof asRecord.rule === "string" &&
-      typeof asRecord.cwd === "string" &&
-      typeof asRecord.blockId === "string"
-    );
-  }
-  if (evt.event === "spawn_dispatched" || evt.event === "spawn_refused") {
-    return (
-      taskIsString &&
-      typeof asRecord.provider === "string" &&
-      typeof asRecord.arity === "number" &&
-      Number.isInteger(asRecord.arity) &&
-      asRecord.arity >= 1 &&
-      (evt.event === "spawn_dispatched" || (typeof asRecord.rule === "string" && typeof asRecord.reason === "string"))
-    );
-  }
-  if (evt.event === "meter_written") {
-    return (
-      taskIsString &&
-      typeof asRecord.provider === "string" &&
-      (asRecord.agent === undefined || typeof asRecord.agent === "string") &&
-      usageIsValid(asRecord.usage)
-    );
-  }
-  if (evt.event === "repoke_dispatched" || evt.event === "repoke_refused") {
-    return (
-      taskIsString &&
-      typeof asRecord.agent === "string" &&
-      (evt.event === "repoke_dispatched" || (typeof asRecord.rule === "string" && typeof asRecord.reason === "string"))
-    );
-  }
-  if (evt.event === "respawn_dispatched" || evt.event === "respawn_refused") {
-    return (
-      taskIsString &&
-      typeof asRecord.provider === "string" &&
-      typeof asRecord.died_agent === "string" &&
-      (evt.event === "respawn_dispatched" || (typeof asRecord.rule === "string" && typeof asRecord.reason === "string"))
-    );
-  }
-  if (evt.event === "needs_human") {
-    return (
-      taskIsString &&
-      typeof asRecord.reason === "string" &&
-      (NEEDS_HUMAN_REASONS as readonly string[]).includes(asRecord.reason) &&
-      needsHumanEvidenceIsValid(asRecord.evidence, asRecord.reason)
-    );
-  }
-  const attempt = asRecord.attempt;
-  return taskIsString && typeof attempt === "number" && Number.isInteger(attempt) && attempt >= 1;
-}
-
-/**
- * The Meter's usage slot (v0.0.8): an object (possibly empty — the honest
- * "the lane reported nothing") whose keys are exactly the daemon's four
- * metered fields, each a finite number when present. Anything else is a
- * corrupted line, never a guessed-at reading.
- */
-export function usageIsValid(usage: unknown): boolean {
-  if (typeof usage !== "object" || usage === null || Array.isArray(usage)) return false;
-  for (const [key, value] of Object.entries(usage)) {
-    if (!["inputTokens", "cachedInputTokens", "outputTokens", "totalCostUsd"].includes(key)) return false;
-    if (typeof value !== "number" || !Number.isFinite(value)) return false;
-  }
-  return true;
 }
 
 /**

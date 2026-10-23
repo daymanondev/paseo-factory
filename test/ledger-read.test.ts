@@ -5,16 +5,7 @@ import { join } from "node:path";
 import { readLedgerEvents } from "../plugin/bin/ledger-read.mjs";
 import { disposeDir, makeTempDir, repoRoot } from "./helpers.ts";
 
-/**
- * The shared ledger reader (plugin/bin/ledger-read.mjs) — the read both CLIs
- * make, under each one's policy: `factory status`'s strict read (a validator
- * is handed in; blank lines and shape refusals are corruption, named with
- * their line number) and the driver's lenient read (no validator; blank lines
- * are skipped and only unparseable JSON refuses, without a line number).
- * The CLIs' end-to-end behavior around these verdicts is covered by
- * test/status.test.ts and test/driver.test.ts; here the verdicts themselves
- * are the subject.
- */
+/** The standalone reader applies canonical integrity rules, with optional extra caller restrictions. */
 
 const ts = "2026-10-09T09:00:00.000Z";
 
@@ -93,19 +84,13 @@ test("the strict read hands back the complete lines, in order", (t) => {
   assert.deepEqual(readLedgerEvents(path, { validateEvent: inVocabulary }).events, [first, second]);
 });
 
-test("the lenient read skips blank lines, passes any parseable JSON through, and reports junk without a line number", (t) => {
+test("the default read refuses complete damage with the same integrity rules as status", (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);
+  assert.deepEqual(readLedgerEvents(writeLedger(dir, "\n")), { corrupt: "blank line at line 1" });
+  assert.deepEqual(readLedgerEvents(writeLedger(dir, "[1, 2, 3]\n")), { corrupt: "line 1 is not a valid ledger event" });
   const good = event(1, "contract_set", { task: "T1" });
-
-  const skipped = readLedgerEvents(writeLedger(dir, `\n${good}\n   \n\t\n${event(2, "claim_reported", { task: "T1", attempt: 1 })}\n\n`));
-  assert.equal(skipped.events?.length, 2, "blank and whitespace-only lines are skipped");
-
-  const passthrough = readLedgerEvents(writeLedger(dir, "[1, 2, 3]\n"));
-  assert.deepEqual(passthrough.events, [[1, 2, 3]], "the lenient read validates nothing — the writer already did (ADR 0004)");
-
-  const junk = readLedgerEvents(writeLedger(dir, `${good}\nnot json\n`));
-  assert.deepEqual(junk, { corrupt: "line is not valid JSON" }, "the driver's long-standing shape: no line number");
+  assert.deepEqual(readLedgerEvents(writeLedger(dir, `${good}\nnot json\n`)), { corrupt: "line 2 is not valid JSON" });
 });
 
 test("a read that fails at the filesystem is handed to the caller, not swallowed", (t) => {

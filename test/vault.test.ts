@@ -22,7 +22,9 @@ import {
   pullVault,
   pushVault,
   readVaultStatus,
+  readLedgerImports,
   reconcileVaultLedgers,
+  planLegacyIdentity,
   resolveProject,
   resolveVaultApps,
   saveVaultConfig,
@@ -1048,94 +1050,29 @@ function ledgerLine(seq: number, ts: string, event: string, extra: Record<string
   return JSON.stringify({ seq, ts, event, ...extra });
 }
 
-/** Writes JSONL text to a real file — the `Ledger.open` proof needs a path. */
-function writeJsonl(t: TestContext, content: string, name = "ledger.jsonl"): string {
-  const dir = makeTempDir("paseo-factory-vault-ledger-");
-  disposeDir(t, dir);
-  const path = join(dir, name);
-  writeFileSync(path, content);
-  return path;
-}
-
-test("reconcileVaultLedgers dedupes by the real-vocabulary fingerprint, sorts by (ts, node, seq), and re-indexes 1..N", (t) => {
-  // the shared history every node carries (mini-m2's copy sits at different seqs — fingerprints ignore seq)
-  const retro = ledgerLine(1, "2026-10-20T08:00:00.000Z", "retro_written", { model: "copilot/gpt-5.4", outcome: "written", durationMs: 1200 });
-  const contract = ledgerLine(2, "2026-10-20T09:00:00.000Z", "contract_set", { task: "t01", workspace: "/w", gate: "npm test", artifact: "report.md", base: "e5b52cc" });
-  const claim = ledgerLine(3, "2026-10-20T09:05:00.000Z", "claim_reported", { task: "t01", attempt: 1, sha: "8fd67b4", agent: "pi" });
-
-  const local = [
-    retro,
-    contract,
-    claim,
-    ledgerLine(4, "2026-10-20T09:20:00.000Z", "gate_finished", { task: "t01", attempt: 1, exit: 0, verdict: "green", note: "all gates green", sha: "8fd67b4" }),
-    ledgerLine(5, "2026-10-20T09:25:00.000Z", "report_written", { task: "t01", attempt: 1, path: "reports/t01.md" }),
-  ].join("\n") + "\n";
-
-  const mini = [
-    ledgerLine(5, "2026-10-20T09:00:00.000Z", "contract_set", { task: "t01", workspace: "/w", gate: "npm test", artifact: "report.md", base: "e5b52cc" }),
-    ledgerLine(6, "2026-10-20T09:05:00.000Z", "claim_reported", { task: "t01", attempt: 1, sha: "8fd67b4", agent: "pi" }),
-    ledgerLine(7, "2026-10-20T10:40:00.000Z", "gate_finished", { task: "t01", attempt: 2, exit: 1, verdict: "red", note: "flaky wall clock", sha: "b6f93a1" }),
-    ledgerLine(8, "2026-10-20T10:45:00.000Z", "attempt_accepted", { task: "t01", attempt: 2, accepted_by: "owner" }),
-  ].join("\n") + "\n";
-
-  // this machine's own earlier push still sitting in the vault — a full duplicate of local
-  const selfPush = local;
-
-  const reconciled = reconcileVaultLedgers(local, [
-    { nodeId: "mini-m2", lines: mini },
-    { nodeId: "mac-studio", lines: selfPush },
-  ]);
-
-  const events = reconciled.split("\n").filter((line) => line !== "").map((line) => JSON.parse(line) as Record<string, unknown>);
-  assert.equal(events.length, 7, "the shared base dedupes to one copy each; only genuinely divergent events survive");
-  for (let i = 0; i < events.length; i++) {
-    assert.equal(events[i]!.seq, i + 1, `event ${i} re-indexed to ${i + 1}`);
-  }
-  assert.deepEqual(
-    events.map((evt) => evt.event),
-    ["retro_written", "contract_set", "claim_reported", "gate_finished", "report_written", "gate_finished", "attempt_accepted"],
-    "chronological by ts, both nodes' divergent gate_finished lines preserved",
-  );
-  assert.deepEqual(
-    events.map((evt) => evt.ts),
-    [...events.map((evt) => evt.ts)].sort(),
-    "ts ordering is monotonic across the reconciled file",
-  );
-  assert.equal(events.filter((evt) => evt.event === "contract_set").length, 1, "three copies of the contract (local, mini at other seqs, self-push) collapse to one");
-  assert.equal((events[3] as { verdict?: string }).verdict, "green", "payload fields ride the reconcile verbatim");
-  assert.equal((events[5] as { verdict?: string }).verdict, "red");
-
-  // the reconciled file loads through the ledger's own reader — the monotonic gate never fires
-  const path = writeJsonl(t, reconciled);
-  const opened = Ledger.open(path);
-  assert.equal(opened.events.length, 7);
-  for (let i = 0; i < opened.events.length; i++) assert.equal(opened.events[i]!.seq, i + 1);
-
-  // the union-merge control: `.gitattributes merge=union` of the same two files refuses to open
-  const unionPath = writeJsonl(t, `${local}${mini}`);
-  assert.throws(() => Ledger.open(unionPath), factoryErrorCode("corrupted-ledger"), "a union merge hits the non-monotonic seq and throws — the reconciler exists for exactly this");
+test("reconcileVaultLedgers preserves existing sequence addresses and deduplicates identified snapshots", () => {
+  const legacy = ledgerLine(10, "2026-10-20T09:00:00.000Z", "contract_set", { task: "t01", workspace: "/local/project", gate: "true", artifact: "out" }) + "\n";
+  const prepared = planLegacyIdentity(legacy, { writerId: "local-writer" });
+  const local = prepared.events.map((event) => JSON.stringify(event) + "\n").join("");
+  assert.equal(reconcileVaultLedgers(local, [{ nodeId: "copied-holder", lines: local }]), local);
+  const incoming = planLegacyIdentity(ledgerLine(3, "2020-01-01T00:00:00Z", "contract_set", { task: "new-task", workspace: "/local/other", gate: "true", artifact: "out" }) + "\n", { writerId: "other-writer" });
+  const source = incoming.events.map((event) => JSON.stringify(event) + "\n").join("");
+  const merged = reconcileVaultLedgers(local, [{ nodeId: "holder", lines: source }], { bindings: [{ epochId: incoming.events[0]!.epoch_id!, workspace: "/local/other" }] });
+  assert.ok(merged.startsWith(local));
+  assert.deepEqual(merged.trimEnd().split("\n").map((line) => JSON.parse(line).seq), [10, 11, 12]);
 });
 
-test("reconcileVaultLedgers skips damaged and foreign lines instead of failing the merge", () => {
-  const good = ledgerLine(1, "2026-10-20T09:00:00.000Z", "contract_set", { task: "t01", workspace: "/w", gate: "npm test", artifact: "report.md" });
-  const damaged = [
-    good,
-    "this line is not json",
-    ledgerLine(2, "2026-10-20T09:01:00.000Z", "not_a_real_event", { task: "t01" }),
-    ledgerLine(3, "2026-10-20T09:02:00.000Z", "claim_reported", { task: "t02", attempt: 0, sha: "x" }), // attempt must be >= 1
-    "",
-    ledgerLine(4, "2026-10-20T09:03:00.000Z", "claim_reported", { task: "t03", attempt: 1, sha: "y" }),
-  ].join("\n") + "\n";
-
-  const reconciled = reconcileVaultLedgers("", [{ nodeId: "mini-m2", lines: damaged }]);
-  const events = reconciled.split("\n").filter((line) => line !== "").map((line) => JSON.parse(line) as Record<string, unknown>);
-  assert.equal(events.length, 2, "only the records the ledger's own validity law accepts survive");
-  assert.equal(events[0]!.event, "contract_set");
-  assert.equal(events[1]!.event, "claim_reported");
-  assert.equal(events[1]!.seq, 2, "survivors re-index 1..N over the gaps");
+test("reconcileVaultLedgers refuses damaged history and retains original source bytes", () => {
+  const damaged = 'not-json\n{"seq":2}\n';
+  assert.throws(() => reconcileVaultLedgers("", [{ nodeId: "damaged", lines: damaged }]), (error: unknown) => {
+    const value = error as { code: string; plan: { sources: { lines: string }[] } };
+    assert.equal(value.code, "history-import-conflict");
+    assert.equal(value.plan.sources[0]!.lines, damaged);
+    return true;
+  });
 });
 
-test("pullVault with mergeLedgers reconciles two nodes' snapshots into the local ledgers — then pushes them back node-scoped", async (t) => {
+test("pullVault retains ambiguous legacy snapshots and leaves existing Ledger bytes unchanged", async (t) => {
   const parent = makeProjectParent(t);
   const patigame = join(parent, "patigame");
   mkdirSync(patigame, { recursive: true });
@@ -1195,33 +1132,17 @@ test("pullVault with mergeLedgers reconciles two nodes' snapshots into the local
   ].join("\n") + "\n");
 
   saveVaultConfig(home, { repo: bare, nodeId: "mini-m2" });
-  await pullVault(home, { mergeLedgers: true });
+  const beforeProject = readFileSync(localProjectLedger, "utf8");
+  const beforeGlobal = readFileSync(localGlobalLedger, "utf8");
+  const pulled = await pullVault(home, { mergeLedgers: true });
+  assert.ok(pulled.historyImports?.every((status) => status.status === "pending"));
+  assert.equal(readLedgerImports(localProjectLedger)[0]?.status, "pending");
 
-  // the per-project ledger: union of both nodes' + local events, deduped, strictly 1..N, openable
-  const opened = Ledger.open(localProjectLedger);
-  assert.deepEqual(
-    opened.events.map((evt) => `${evt.event}:${(evt as { verdict?: string }).verdict ?? ""}`),
-    [
-      "contract_set:",
-      "claim_reported:",
-      "gate_finished:green", // mac-studio's append, missing locally before the pull
-      "gate_finished:red",
-      "attempt_accepted:",
-      "report_written:", // the local append the snapshots lacked
-    ],
-    "ts order, one contract, both verdicts, the local tail",
-  );
-  for (let i = 0; i < opened.events.length; i++) assert.equal(opened.events[i]!.seq, i + 1);
+  assert.equal(readFileSync(localProjectLedger, "utf8"), beforeProject);
+  assert.equal(readFileSync(localGlobalLedger, "utf8"), beforeGlobal);
+  assert.equal(readFileSync(join(home, "vault-runtime/state/nodes/mac-studio/projects/patigame/ledger.jsonl"), "utf8"), macStudioSnapshot);
 
-  // the global ledger reconciles through the same law
-  const openedGlobal = Ledger.open(localGlobalLedger);
-  assert.deepEqual(
-    openedGlobal.events.map((evt) => evt.event),
-    ["contract_set", "meter_written", "retro_written"],
-    "the node's global snapshot folds into the local global ledger, deduped",
-  );
-
-  // the push side: this node's reconciled ledgers ride the vault under its own namespace
+  // Export preserves the unchanged local histories under this snapshot holder.
   const push = await pushVault(home, { includeLedger: true });
   assert.equal(push.pushed, true, "the reconciled per-project snapshot is new content in the vault");
   assert.ok(push.pushedFiles.includes(`state/nodes/mini-m2/projects/patigame/ledger.jsonl`), "the per-project ledger lands under the canonical app key");
@@ -1237,7 +1158,7 @@ test("pullVault with mergeLedgers reconciles two nodes' snapshots into the local
   );
 });
 
-test("hydrateVaultDirect with mergeLedgers reconciles on the zero-clone path too — no vault/.git ever appears", async (t) => {
+test("hydrateVaultDirect stages ambiguous legacy admission on the zero-clone path", async (t) => {
   const parent = makeProjectParent(t);
   const patigame = join(parent, "patigame");
   mkdirSync(patigame, { recursive: true });
@@ -1267,11 +1188,10 @@ test("hydrateVaultDirect with mergeLedgers reconciles on the zero-clone path too
   writeFileSync(localProjectLedger, `${contract}\n`); // a fresh machine that only ever saw the contract
   saveVaultConfig(home, { repo: "daymanondev/factory-vault" });
 
-  await hydrateVaultDirect(home, { runner: fakeTarballRunner(tarball).runner, mergeLedgers: true });
-
-  const opened = Ledger.open(localProjectLedger);
-  assert.deepEqual(opened.events.map((evt) => evt.event), ["contract_set", "claim_reported"], "the node snapshot's append folds in");
-  assert.equal(opened.events[1]!.seq, 2);
+  const hydrated = await hydrateVaultDirect(home, { runner: fakeTarballRunner(tarball).runner, mergeLedgers: true });
+  assert.equal(hydrated.historyImports?.[0]?.status, "pending");
+  assert.equal(readFileSync(localProjectLedger, "utf8"), `${contract}\n`);
+  assert.equal(readFileSync(join(home, "vault-runtime/state/nodes/mac-studio/projects/patigame/ledger.jsonl"), "utf8"), nodeSnapshot);
   assert.ok(!existsSync(join(home, "vault")), "still zero-clone — no checkout, no .git");
 });
 
@@ -1644,18 +1564,17 @@ test("syncVault auto-detects @daymanondev via probeGhAuth, auto-creates daymanon
   assert.ok(sync1.summary.length > 0);
   assert.equal(loadVaultConfig(home1)?.repo, "daymanondev/factory-vault");
 
-  // Machine 2: single syncVault call hydrates configs and reconciles ledger
+  // Machine 2: transport-only sync hydrates configuration without activating legacy history.
   const home2 = makeTempDir();
   disposeDir(t, home2);
-  const sync2 = await syncVault(home2, { runner: hybridRunner });
+  const sync2 = await syncVault(home2, { runner: hybridRunner, mergeLedgers: false });
   assert.equal(sync2.createdRepo, false, "repo already exists on second sync");
   assert.equal(sync2.repo, "daymanondev/factory-vault");
   assert.ok(sync2.hydratedFiles.includes("config/lanes.json"));
   assert.equal(readFileSync(join(home2, "plugin-state", "paseo-factory", "lanes.json"), "utf8"), JSON.stringify({ worker: "pi/zai/glm-5.3" }));
   assert.equal(readFileSync(join(home2, "connector", "fleet.json"), "utf8"), JSON.stringify({ peers: [] }));
   assert.equal(readFileSync(join(home2, "burn-lab", "free-pool.json"), "utf8"), JSON.stringify({ pool: ["free"] }));
-  const openedLedger2 = Ledger.open(join(home2, "plugin-state", "paseo-factory", "ledger.jsonl"));
-  assert.equal(openedLedger2.events.length, 2, "global ledger reconciled onto machine 2");
+  assert.ok(!existsSync(join(home2, "plugin-state", "paseo-factory", "ledger.jsonl")), "transport-only sync cannot activate legacy history");
 
   // Unconfigured home with unauthenticated gh refuses with vault-not-configured
   const homeUnauth = makeTempDir();
@@ -1795,3 +1714,154 @@ test("importVaultSecrets imports .p8, ASC credentials, Google Play JSON (sealed 
 
 
 
+
+test("Vault status distinguishes transported bytes from durable pending and conflicted history", async (t) => {
+  const home = makeTempDir(); disposeDir(t, home);
+  const state = join(home, "plugin-state", "paseo-factory");
+  const { stageLedgerImport, loadImportManifest, saveImportManifest } = await import("../src/history-stage.ts");
+  saveVaultConfig(home, { repo: "owner/vault", lastHydratedAt: "2026-10-23T01:00:00Z" });
+  const staged = stageLedgerImport(join(state, "ledger.jsonl"), [{ nodeId: "remote", lines: "original bytes\n" }]);
+  const pending = readVaultStatus(home);
+  assert.equal(pending.historyImports?.find((item) => item.id === staged.id)?.status, "pending");
+  assert.equal(pending.lastHydratedAt, "2026-10-23T01:00:00Z");
+  const manifest = loadImportManifest(join(state, "ledger.jsonl"), staged.id);
+  manifest.status = "conflicted"; manifest.conflicts = [{ reason: "unverified root" }]; saveImportManifest(manifest);
+  assert.equal(readVaultStatus(home).historyImports?.[0]?.status, "conflicted");
+  assert.equal(readVaultStatus(home).lastHydratedAt, pending.lastHydratedAt);
+});
+
+test("Vault fetch completes while a pipeline holds the writer but associated materialization waits for maintenance", async (t) => {
+  const home = makeTempDir(); disposeDir(t, home);
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const { createFactory } = await import("../src/factory.ts");
+  const factory = createFactory({ stateDir }); t.after(() => factory.history.stop());
+  let release!: () => void, entered!: () => void;
+  const ready = new Promise<void>((done) => { entered = done; });
+  const held = new Promise<void>((done) => { release = done; });
+  const operation = factory.history.runOperation(async () => { entered(); await held; });
+  await ready;
+  let fetched = false;
+  const tarball = buildTarball([{ path: "daymanondev-factory-vault-abc1234/config/lanes.json", data: Buffer.from("{}\n") }]);
+  const hydration = hydrateVaultDirect(home, { repo: "owner/vault", runner: async () => { fetched = true; return tarball; } });
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(fetched, true);
+  assert.equal(existsSync(join(stateDir, "lanes.json")), false);
+  release(); await operation; const result = await hydration;
+  assert.equal(result.repo, "owner/vault"); assert.equal(result.ref, "main");
+  assert.equal(readFileSync(join(stateDir, "lanes.json"), "utf8"), "{}\n");
+});
+
+test("Vault publishes only acknowledged Ledger records and preserves a local unterminated tail", async (t) => {
+  const home = makeTempDir(); disposeDir(t, home);
+  saveVaultConfig(home, { repo: "owner/vault", nodeId: "local" });
+  mkdirSync(join(home, "vault", ".git"), { recursive: true });
+  const state = join(home, "plugin-state", "paseo-factory", "ledger.jsonl");
+  const acknowledged = `${JSON.stringify({ event: "contract_set", seq: 1, ts: "2026-10-23T00:00:00Z", task: "T" })}\n`;
+  writeFileSync(state, acknowledged + '{"unacknowledged":');
+  const result = await pushVault(home, { includeLedger: true, runner: async () => Buffer.alloc(0) });
+  assert.ok(result.pushedFiles.includes("state/nodes/local/global-ledger.jsonl"));
+  assert.equal(readFileSync(join(home, "vault", "state", "nodes", "local", "global-ledger.jsonl"), "utf8"), acknowledged);
+  assert.equal(readFileSync(state, "utf8"), acknowledged + '{"unacknowledged":');
+});
+
+test("standalone Vault refuses another process's live owner after fetching without materializing state", async (t) => {
+  const home = makeTempDir(); disposeDir(t, home);
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const { createFactory } = await import("../src/factory.ts");
+  const factory = createFactory({ stateDir }); t.after(() => factory.history.stop());
+  const tar = buildTarball([{ path: "daymanondev-factory-vault-abc1234/config/lanes.json", data: "{}\n" }]);
+  const moduleUrl = new URL("../plugin/bin/vault.mjs", import.meta.url).href;
+  const script = `import {hydrateVaultDirect} from ${JSON.stringify(moduleUrl)}; let fetched=false; try { await hydrateVaultDirect(${JSON.stringify(home)}, {repo:'owner/vault',runner:async()=>{fetched=true;return Buffer.from('${tar.toString("base64")}','base64')}}); } catch(error){console.log(JSON.stringify({code:error.code,message:error.message,fetched}));}`;
+  const result = JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8" }));
+  assert.equal(result.code, "vault-owner-required"); assert.equal(result.fetched, true);
+  assert.match(result.message, /RPC/);
+  assert.equal(existsSync(join(stateDir, "lanes.json")), false);
+});
+
+test("an incomplete explicit upgrade blocks Vault configuration and materialization until resume", async (t) => {
+  const home = makeTempDir(); disposeDir(t, home);
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const { createFactory } = await import("../src/factory.ts");
+  const { upgradeFactory } = await import("../src/history-upgrade.ts");
+  const factory = createFactory({ stateDir }); t.after(() => factory.history.stop());
+  await assert.rejects(upgradeFactory(factory, { action: "apply", transactionId: "11111111-2222-4333-8444-555555555555" }, { fault: (at) => { if (at === "backed-up") throw new Error("interrupted"); } }), /interrupted/);
+  const { readdirSync } = await import("node:fs");
+  const snapshot = (root: string): unknown => readdirSync(root).sort().map((name) => { const path = join(root, name), st = statSync(path); return [name, st.mode & 0o7777, st.isDirectory() ? snapshot(path) : readFileSync(path).toString("base64")]; });
+  const before = snapshot(stateDir);
+  assert.throws(() => saveVaultConfig(home, { repo: "owner/vault" }), factoryErrorCode("upgrade-recovery-required"));
+  const tar = buildTarball([{ path: "daymanondev-factory-vault-abc1234/config/lanes.json", data: "{}\n" }, { path: "daymanondev-factory-vault-abc1234/state/nodes/remote/global-ledger.jsonl", data: "retained original\n" }]);
+  await assert.rejects(hydrateVaultDirect(home, { repo: "owner/vault", mergeLedgers: true, runner: async () => tar }), factoryErrorCode("upgrade-recovery-required"));
+  assert.equal(existsSync(join(stateDir, "lanes.json")), false);
+  assert.deepEqual(readLedgerImports(factory.ledger.path), []);
+  assert.deepEqual(snapshot(stateDir), before);
+  const resumed = await upgradeFactory(factory, { action: "resume", transactionId: "11111111-2222-4333-8444-555555555555" });
+  assert.ok("status" in resumed); assert.equal(resumed.status, "applied");
+});
+
+test("Vault canonical app routing refuses a Project Ledger alias before staging into another target", async (t) => {
+  const home = makeTempDir(); disposeDir(t, home);
+  const workspace = join(home, "workspace"); mkdirSync(workspace); writeFileSync(join(workspace, "README"), "fixture"); gitCommitAll(workspace);
+  const project = resolveProject(workspace); assert.ok(project.ok); if (!project.ok) return;
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  writeProjectRegistration(stateDir, project.slug, { root: workspace });
+  const global = join(stateDir, "ledger.jsonl"); writeFileSync(global, "");
+  const { symlinkSync } = await import("node:fs"); symlinkSync(global, join(stateDir, "projects", project.slug, "ledger.jsonl"));
+  const tar = buildTarball([
+    { path: "daymanondev-factory-vault-abc1234/vault.manifest.json", data: JSON.stringify({ app: { repoBasename: "workspace" } }) },
+    { path: "daymanondev-factory-vault-abc1234/state/nodes/remote/projects/app/ledger.jsonl", data: "retained original\n" },
+  ]);
+  await assert.rejects(hydrateVaultDirect(home, { repo: "owner/vault", mergeLedgers: true, runner: async () => tar }), factoryErrorCode("history-target-alias"));
+  assert.deepEqual(readLedgerImports(global), []);
+  assert.equal(readFileSync(global, "utf8"), "");
+});
+
+test("secret import reports successful transport with pending history in its existing summary", async (t) => {
+  const home = makeTempDir(); disposeDir(t, home);
+  saveVaultConfig(home, { repo: join(home, "local-remote") });
+  const node = join(home, "vault", "state", "nodes", "remote"); mkdirSync(node, { recursive: true });
+  mkdirSync(join(home, "vault", ".git"));
+  writeFileSync(join(node, "global-ledger.jsonl"), "retained original\n");
+  const result = await importVaultSecrets(home, { ascKeyId: "fixture", runner: async () => Buffer.alloc(0) });
+  assert.ok(result.importedFiles.includes("secrets/shared/asc-credentials.json"));
+  assert.equal(result.synced?.historyImports?.[0]?.status, "pending");
+  assert.match(result.summary, /history pending/);
+});
+
+for (const transport of ["direct", "pull"] as const) test(`Vault ${transport} durably stages fetched history while verification holds materialization`, async (t) => {
+  const home = makeTempDir(); disposeDir(t, home);
+  const workspace = join(home, "workspace"); mkdirSync(workspace); writeFileSync(join(workspace, "out"), "artifact"); gitCommitAll(workspace);
+  saveVaultConfig(home, { repo: "owner/vault" });
+  const stateDir = join(home, "plugin-state/paseo-factory");
+  const fence = planLegacyIdentity("", { writerId: "local" }).events.map((event) => JSON.stringify(event) + "\n").join("");
+  writeFileSync(join(stateDir, "ledger.jsonl"), fence);
+  const { createFactory } = await import("../src/factory.ts");
+  const factory = createFactory({ stateDir, writerId: "local" }); t.after(() => factory.history.stop());
+  factory.setContract({ task: "LOCAL", workspace, gate: "true", artifact: "out", scope: ["local"] });
+  const source = planLegacyIdentity(JSON.stringify({ seq: 1, ts: "2026-10-23T00:00:00Z", event: "contract_set", task: "REMOTE", workspace, gate: "true", artifact: "out", scope: ["remote"] }) + "\n", { writerId: "remote" }).events.map((event) => JSON.stringify(event) + "\n").join("");
+  const entries = [{ path: "daymanondev-factory-vault-abc1234/state/nodes/remote/global-ledger.jsonl", data: source }, { path: "daymanondev-factory-vault-abc1234/config/lanes.json", data: "{}\n" }];
+  const tar = buildTarball(entries);
+  if (transport === "pull") {
+    mkdirSync(join(home, "vault/.git"), { recursive: true });
+    for (const entry of entries) { const path = join(home, "vault", entry.path.split("/").slice(1).join("/")); mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, entry.data); }
+  }
+  let release!: () => void, entered!: () => void;
+  const ready = new Promise<void>((done) => { entered = done; }), held = new Promise<void>((done) => { release = done; });
+  const operation = factory.history.runOperation(async () => { entered(); await held; }); await ready;
+  let fetched = false;
+  const runner: VaultRunner = async () => { fetched = true; return transport === "direct" ? tar : Buffer.alloc(0); };
+  const download = transport === "direct" ? hydrateVaultDirect(home, { mergeLedgers: true, runner }) : pullVault(home, { mergeLedgers: true, runner });
+  try {
+    await new Promise(setImmediate);
+    assert.equal(fetched, true);
+    const pending = readLedgerImports(factory.ledger.path);
+    assert.equal(pending[0]?.status, "pending");
+    assert.equal(pending[0]?.materialization?.status, "pending");
+    assert.equal(factory.contractFor("REMOTE"), undefined);
+    assert.equal(existsSync(join(stateDir, "lanes.json")), false);
+  } finally { release(); await operation; }
+  const result = await download;
+  assert.equal(result.materialization?.status, "applied");
+  assert.equal(result.historyImports?.[0]?.status, "applied");
+  assert.equal(factory.contractFor("REMOTE")?.workspace, workspace);
+  assert.equal(readFileSync(join(stateDir, "lanes.json"), "utf8"), "{}\n");
+});

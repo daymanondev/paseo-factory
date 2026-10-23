@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 // The companion SDK surface (v0.0.18, ADR 0012): one import from the top-level
 // core barrel pulling every symbol spec §Testing Decisions 2, bullet 1 names —
 // the registry four, prepareTaskWorktree, headCommitSync, changesOutsideScope,
@@ -247,12 +247,11 @@ test("the core barrel's prepareTaskWorktree: symlinked node_modules and .worktre
   // The .worktreeinclude-matched untracked file rides over.
   assert.equal(readFileSync(join(prepared.path, ".env.local"), "utf8"), "TOKEN=abc\n", "the ignored untracked file rides over");
 
-  // Both the copies and the link are recorded in the worktree's own factory-excludes.
-  const gitDir = resolve(execFileSync("git", ["rev-parse", "--git-dir"], { cwd: prepared.path, encoding: "utf8" }).trim());
+  // Git ignores the runtime copy and dependency link in this worktree.
   assert.equal(
-    readFileSync(join(gitDir, "factory-excludes"), "utf8"),
+    execFileSync("git", ["check-ignore", "--no-index", ".env.local", "node_modules"], { cwd: prepared.path, encoding: "utf8" }),
     ".env.local\nnode_modules\n",
-    "the per-worktree excludes record the copied file AND the node_modules link",
+    "the copied file AND the node_modules link are excluded",
   );
 
   // The station the Claim reads: clean tree at the claimed commit — with a symlink that
@@ -316,8 +315,7 @@ test("the core barrel's prepareTaskWorktree lands companion overrides: custom wo
   assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: arena, encoding: "utf8" }).trim(), base, "checked out at the Contract's base commit");
   assert.ok(execFileSync("git", ["worktree", "list"], { cwd: workspace, encoding: "utf8" }).includes(arena), "a linked worktree of the project checkout");
   assert.ok(lstatSync(join(arena, "node_modules")).isSymbolicLink(), "node_modules is a link, not a copy");
-  const gitDir = resolve(execFileSync("git", ["rev-parse", "--git-dir"], { cwd: arena, encoding: "utf8" }).trim());
-  assert.equal(readFileSync(join(gitDir, "factory-excludes"), "utf8"), "node_modules\n", "no include file matched, yet the link is excluded");
+  assert.equal(execFileSync("git", ["check-ignore", "--no-index", "node_modules"], { cwd: arena, encoding: "utf8" }), "node_modules\n", "no include file matched, yet the link is excluded");
   assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: arena, encoding: "utf8" }).trim(), "", "the arena sits clean");
   assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: workspace, encoding: "utf8" }).trim(), "", "the root stays clean");
 

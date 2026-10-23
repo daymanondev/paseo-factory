@@ -58,6 +58,9 @@ export const AttemptViewSchema = z.object({
   /** The attempt's latest gate verdict; null while the attempt is still open. */
   verdict: z.enum(["red", "green"]).nullable(),
   /** True between claim and report — the run is in flight. */
+  reviewState: z.enum(["off", "pending", "incomplete", "clear", "concern", "failed"]).optional(),
+  ownerEligible: z.boolean().optional(),
+  leadEligible: z.boolean().optional(),
   open: z.boolean(),
   exit: z.number().int().nullable(),
   note: z.string().nullable(),
@@ -95,6 +98,9 @@ export const TaskViewSchema = z.object({
   workspace: z.string(),
   description: z.string().nullable(),
   status: TaskStatusSchema,
+  ownerEligible: z.boolean().optional(),
+  leadEligible: z.boolean().optional(),
+  pendingLanding: z.boolean().optional(),
   accepted: z.boolean(),
   acceptedBy: z.string().nullable(),
   /** The latest meter/spawn provider string, when a run ever named one. */
@@ -250,7 +256,12 @@ export type LedgerLineView = z.infer<typeof LedgerLineViewSchema>;
  * gather is a pure filesystem probe the snapshot handler owns; this file is
  * the wire shape alone.
  */
+export const ImportMaterializationSchema = z.object({ status: z.enum(["pending", "applied", "refused"]), diagnostics: z.array(z.string()) });
+
+export const ImportStatusSchema = z.object({ materialization: ImportMaterializationSchema.optional(), id: z.string(), target: z.string(), status: z.enum(["staged", "pending", "applied", "conflicted"]), added: z.number().optional(), duplicates: z.number().optional(), conflicts: z.array(z.object({ reason: z.string(), sourceId: z.string().optional(), eventId: z.string().optional() })).optional(), diagnostics: z.array(z.string()) });
+
 export const VaultStatusViewSchema = z.object({
+  historyImports: z.array(ImportStatusSchema).optional(),
   configured: z.boolean(),
   repo: z.string().nullable(),
   branch: z.string(),

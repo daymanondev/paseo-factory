@@ -10,27 +10,17 @@ claims the task is finished at a specific commit, and the factory — never the
 agent — runs the gate and records every step in an append-only ledger it
 cannot edit. A green verdict is evidence, not acceptance.
 
-**Status: v0.0.13, pre-release.** The pure verification core is complete and
-tested (306 tests); the plugin loads on a Paseo 0.10/0.11 daemon, owns the
-ledger and the gate as the single writer (ADR 0004), and serves the whole loop
-over both the file spool (CLI) and in-process Paseo plugin RPCs (`factory.*`,
-ADR 0009): the Owner's `factory` CLI and the Paseo **Factory surface** UI
-(Global Screen + Sidebar item, Workspace Panel, Settings Screen) inspect and
-steer the verification line, the Agent's `factory-claim` CLI submits Claims (it
-rides every agent's PATH), and each Claim opens a numbered Attempt that ends in
-a Verdict and a per-attempt report — proven end-to-end against a live trial
-daemon by `scripts/smoke-loop.mjs`. Since that first wiring the loop has gained
-the driver (`factory run`), the record-only watch, the on-demand Retro, the
-Cost read backed by the Meter, and the seat layer (ADR 0006): v0.0.9's
-Supervisor seat — the delegated Owner conversation, every act stamped by who
-submitted it — and v0.0.10's Lead seat, the deterministic presider that spends
-one re-poke at a denial-stall and otherwise ends in a needs-human line. v0.0.11
-grounds death itself in the daemon's own timeline (ADR 0007, the two doors),
-v0.0.12 bounds both repair axes (ADR 0008: one automatic Respawn per progress
-marker on Substrate death, and three Attempts per Task), and v0.0.13 unifies
-all five model-backed seats/passes under `<stateDir>/lanes.json` (defaulting to
-`pi/zai/glm-5.3` over tool-less CLI execution) and ships the Paseo client UI +
-one-click Supervisor bridge (ADR 0009). Nothing is published yet.
+**Status: v0.0.33.** The verification core and installed plugin are covered by
+885 tests on Node 22 and 24. The Paseo 0.11 plugin owns the Ledger as its single
+writer and serves CLI, MCP and surface RPC entrances. Acceptance uses trusted
+caller authority and shared Task/Attempt state; Vault history is staged before
+writer-owned admission, preserving local evidence addresses.
+
+Persistent history upgrades are explicit: inspect the
+[upgrade and recovery runbook](docs/runbooks/history-upgrade.md) before applying
+one. The [hardening validation report](docs/validation/codebase-hardening-2026-10-23.md)
+records regression checks, disposable trial results and their limits. Release
+notes are in [CHANGELOG.md](CHANGELOG.md).
 
 ## Layout
 
@@ -53,6 +43,38 @@ npm test
 ```
 
 Edit the core in `src/`, then run `npm run sync:plugin-core` and commit both.
+Scope, worktree hydration, Ledger reading and subprocess policies also generate
+standalone installed assets: run `npm run generate:policies` after editing their
+canonical TypeScript sources, and commit the generated files. The bridge and
+Antigravity hook embed their policies so each remains usable when copied alone.
+`npm run generate:policies:check` reports stale outputs without rewriting them.
+Generation uses development dependencies; plugin installation needs no build.
+
+## Required checks
+
+Use Node 22.22.0 or 24.21.0 and the committed lockfile:
+
+```sh
+npm ci
+npm run check
+```
+
+Push and pull-request CI runs these same commands on both versions. The check
+command verifies copied-core and generated-output drift, typechecks the actual
+canonical TypeScript policy bodies, compiles the isolated installed client/server
+bundles, and runs every behavior test. The tests include standalone assets
+copied without source or development dependencies, the bridge copied alone, and
+negative fixtures for stale outputs and forbidden or unavailable dependencies.
+`npm run check:installed` runs that packaging subset when iterating locally.
+
+The installed bundle check reads tracked files (including staged additions), so
+stage intended new plugin modules before running it. Untracked files cannot
+satisfy the installed view, and imports or symlinks cannot reach outside the
+isolated plugin. Development dependencies supply compiler tools only; they
+cannot satisfy installed runtime or type imports. Regenerate changed outputs
+with `npm run sync:plugin-core` and `npm run generate:policies`, then commit them;
+checks never silently repair stale artifacts. Plugin installation remains
+build-free.
 
 ## Run the loop on a trial daemon
 

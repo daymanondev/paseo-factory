@@ -11,10 +11,12 @@
  */
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
-import { FactoryViewSchema, LaneNameSchema, TaskDetailViewSchema, VaultStatusViewSchema } from "./view.ts";
+import { ImportMaterializationSchema, ImportStatusSchema, FactoryViewSchema, LaneNameSchema, TaskDetailViewSchema, VaultStatusViewSchema } from "./view.ts";
 
 /** Every handler's refusal shape: a stable machine code plus the human sentence. */
 export const Failure = z.object({ ok: z.literal(false), code: z.string(), error: z.string() });
+
+export { ImportStatusSchema } from "./view.ts";
 
 export const snapshot = defineRpc({
   name: "factory.snapshot",
@@ -204,6 +206,8 @@ export const pluginsInstall = defineRpc({
     source: z.string().optional(),
     /** Optional Git branch, tag, or commit ref when installing from a Git source. */
     ref: z.string().optional(),
+    mergeLedgers: z.boolean().optional(),
+    overwriteConfigs: z.boolean().optional(),
   }),
   output: z.union([z.object({ ok: z.literal(true), installed: z.array(z.string()), summary: z.string() }), Failure]),
 });
@@ -265,8 +269,10 @@ export const vaultHydrate = defineRpc({
     repo: z.string().optional(),
     /** The tarball ref — omitted uses the configured branch. */
     ref: z.string().optional(),
+    mergeLedgers: z.boolean().optional(),
+    overwriteConfigs: z.boolean().optional(),
   }),
-  output: z.union([z.object({ ok: z.literal(true), vault: VaultStatusViewSchema, hydratedFiles: z.array(z.string()), summary: z.string() }), Failure]),
+  output: z.union([z.object({ ok: z.literal(true), vault: VaultStatusViewSchema, hydratedFiles: z.array(z.string()), summary: z.string(), materialization: ImportMaterializationSchema.optional(), historyImports: z.array(ImportStatusSchema).optional() }), Failure]),
 });
 
 export const vaultPull = defineRpc({
@@ -275,7 +281,7 @@ export const vaultPull = defineRpc({
     /** Reconcile the vault's `state/nodes/*` ledger snapshots into this machine's ledgers after hydrating. */
     mergeLedgers: z.boolean().optional(),
   }),
-  output: z.union([z.object({ ok: z.literal(true), vault: VaultStatusViewSchema, hydratedFiles: z.array(z.string()), summary: z.string() }), Failure]),
+  output: z.union([z.object({ ok: z.literal(true), vault: VaultStatusViewSchema, hydratedFiles: z.array(z.string()), summary: z.string(), materialization: ImportMaterializationSchema.optional(), historyImports: z.array(ImportStatusSchema).optional() }), Failure]),
 });
 
 export const vaultPush = defineRpc({
@@ -301,6 +307,7 @@ export const vaultSync = defineRpc({
     z.object({
       ok: z.literal(true),
       vault: VaultStatusViewSchema,
+      materialization: ImportMaterializationSchema.optional(), historyImports: z.array(ImportStatusSchema).optional(),
       createdRepo: z.boolean(),
       hydratedFiles: z.array(z.string()),
       pushedFiles: z.array(z.string()),
@@ -332,10 +339,21 @@ export const vaultImport = defineRpc({
     z.object({
       ok: z.literal(true),
       vault: VaultStatusViewSchema,
+      materialization: ImportMaterializationSchema.optional(), historyImports: z.array(ImportStatusSchema).optional(),
       importedFiles: z.array(z.string()),
       pushed: z.boolean(),
       summary: z.string(),
     }),
     Failure,
   ]),
+});
+
+
+export const historyImport = defineRpc({ name: "factory.history.import", input: z.object({ project: z.string().optional(), sources: z.array(z.object({ nodeId: z.string(), lines: z.string() })).optional() }), output: z.object({ ok: z.literal(true), imports: z.array(ImportStatusSchema) }) });
+export const historyImports = defineRpc({ name: "factory.history.imports", input: z.object({}), output: z.object({ ok: z.literal(true), imports: z.array(ImportStatusSchema) }) });
+
+export const historyUpgrade = defineRpc({
+  name: "factory.history.upgrade",
+  input: z.object({ action: z.enum(["preflight", "apply", "resume", "restore"]), transactionId: z.string().optional(), projectSlug: z.string().optional() }),
+  output: z.union([z.object({ ok: z.literal(true), result: z.unknown() }), Failure]),
 });

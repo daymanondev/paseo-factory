@@ -1,3 +1,7 @@
+import { upgradeFactory } from "./core/history-upgrade.ts";
+import type { UpgradeInput } from "./core/history-upgrade.ts";
+import { acceptanceSummary, executeAcceptance } from "./commands.ts";
+export { acceptanceSummary, archiveAcceptedTaskWorkspace } from "./commands.ts";
 /**
  * The Factory surface's in-process single-writer handlers (v0.0.13, ADR
  * 0009 §2/§4, the amendment to ADR 0004): every `factory.*` RPC runs inside
@@ -30,7 +34,6 @@ import type { ProjectResolution } from "./core/project.ts";
 import { hydrateVaultDirect, importVaultSecrets, isLocalCompanionGitSource, loadVaultConfig, probeCompanionGitAccess, probeGhAuth, pullVault, pushVault, readVaultStatus, saveVaultConfig, syncVault } from "./core/vault.ts";
 import type { ImportVaultSecretsInput, SyncVaultOptions, VaultConfig, VaultRunner } from "./core/vault.ts";
 import { join } from "node:path";
-import type { LandingResult } from "./core/workspace.ts";
 import { FACTORY_VIEW_VERSION } from "../shared/view.ts";
 import { foldRetro, foldTasks, foldView, readTailed } from "./view.ts";
 import { setAgentModelViaCli, setAgentThinkingViaCli, stopAgentViaCli } from "./daemon-cli.ts";
@@ -64,6 +67,9 @@ import {
   vaultHydrate,
   vaultImport,
   vaultPull,
+  historyUpgrade,
+  historyImport,
+  historyImports,
   vaultPush,
   vaultSync,
 } from "../shared/rpc.ts";
@@ -296,73 +302,6 @@ function codeOf(err: unknown): string {
   return err instanceof FactoryError ? err.code : "failed";
 }
 
-/**
- * The one acceptance sentence both reply surfaces print — the spool's accept
- * reply (the CLI's `factory accept`) and the surface's `factory.accept` RPC
- * (the UI's Accept). One wording, both doors; `landing` absent is the legacy
- * shared-checkout path (no landing ran).
- */
-export function acceptanceSummary(input: { task: string; attempt: number; by: string; landing?: LandingResult["landing"]; landingNote?: string }): string {
-  return (
-    `task ${input.task} accepted at attempt ${input.attempt} by ${input.by}` +
-    (input.landing === "landed"
-      ? " · landed into <project-root>"
-      : input.landing === "pending-conflict"
-        ? ` · landing pending-conflict: ${input.landingNote ?? "(no reason recorded)"} — branch factory/${input.task} is preserved`
-        : "")
-  );
-}
-
-/**
- * Automatic archive of an Accepted Task's Paseo workspace (v0.0.23, ADR 0015 §6):
- * looks up `taskWorkspaces[task]` in `<projectStateDir>/project.json`, calls
- * `daemon.workspaces?.archive(workspaceId)` best-effort, and removes the entry
- * from `taskWorkspaces`. Since v0.0.27 (ADR 0017 §4) it also sweeps the
- * daemon's own records over the WebSocket (`archive_workspace_request` /
- * `project.remove.request` via `cleanupDaemonWorkspacesAndProjectsViaWs`) for
- * workspaces and projects rooted under `<projectStateDir>/worktrees/` or
- * missing on disk, so the accepted Task's worktree leaves no broken project
- * entry in Paseo Desktop. The daemon `home` targets the sweep (the caller's
- * `deps.home`; the spool's legacy 3-arg call falls back to `PASEO_HOME`).
- */
-export async function archiveAcceptedTaskWorkspace(
-  factory: Factory,
-  daemon: SurfaceDaemonApi | undefined,
-  task: string,
-  home?: string,
-  cleanup: typeof cleanupDaemonWorkspacesAndProjectsViaWs = cleanupDaemonWorkspacesAndProjectsViaWs,
-): Promise<void> {
-  const contract = factory.contractFor(task);
-  if (contract === undefined) return;
-  const project = resolveProject(contract.workspace);
-  if (!project.ok) return;
-  const reg = readProjectRegistration(factory.stateDir, project.slug);
-  const workspaceId = reg?.taskWorkspaces?.[task];
-  if (workspaceId === undefined) return;
-  if (daemon?.workspaces?.archive !== undefined) {
-    try {
-      await daemon.workspaces.archive(workspaceId);
-    } catch {
-      // best-effort archive
-    }
-  }
-  writeProjectRegistration(factory.stateDir, project.slug, {
-    root: project.root,
-    taskWorkspaces: { [task]: null },
-  });
-  // The daemon-record sweep (v0.0.27; v0.0.31's safe rules, ADR 0017 §4):
-  // best-effort, never blocks the accept. The accepted task's worktree is the
-  // ONE explicitly retired target — sibling worktree workspaces whose
-  // directories still exist on disk (parallel Tasks with live Peers) are
-  // never archived.
-  try {
-    const worktreesDir = join(projectStateDir(factory.stateDir, project.slug), "worktrees");
-    await cleanup(home ?? process.env.PASEO_HOME, { worktreesDir, targetWorktreePath: join(worktreesDir, task) });
-  } catch {
-    // best-effort sweep
-  }
-}
-
 /** One companion install's sentence — the source actually used, the ref when one was given. */
 function pluginsInstallSummary(input: { ids: readonly string[]; source: string; ref?: string; batch: boolean }): string {
   if (input.ids.length === 0) return "every companion is already installed — nothing to do";
@@ -430,6 +369,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     } catch (err) {
       return {
         configured: false,
+        historyImports: deps.factory.history.allStatus(),
         repo: null,
         branch: "main",
         nodeId: "node",
@@ -974,7 +914,17 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     return { ok: true as const, agentId: agent.id };
   };
 
-  return {
+  const handlers = {
+    async historyUpgrade(input: UpgradeInput) {
+      try { return { ok: true as const, result: await upgradeFactory(deps.factory, input) }; }
+      catch (error) { return failure(codeOf(error), messageOf(error)); }
+    },
+    async historyImport(input: { project?: string; sources?: import("./core/history-import.ts").HistoryImportSource[] }) {
+      if (input.sources !== undefined) { if (input.project !== undefined) deps.factory.history.stageForProject(input.project, input.sources); else deps.factory.history.stage(input.sources); }
+      else deps.factory.history.drain();
+      return { ok: true as const, imports: deps.factory.history.allStatus() };
+    },
+    async historyImports() { return { ok: true as const, imports: deps.factory.history.allStatus() }; },
     cachedProviders(): readonly ProviderEntry[] {
       return cachedProviderList ?? [];
     },
@@ -992,7 +942,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       if (!lanes.ok) return failure("lanes-unreadable", lanes.reason);
       const daemon = resolveDaemon(context);
       const bound = agentTaskIndex();
-      const allEvents = deps.factory.ledger.events;
+      const allEvents = [...deps.factory.ledger.events];
 
       let rawAgents: SurfaceAgentSnapshot[] = [];
       let providers: ProviderEntry[] = [];
@@ -1127,8 +1077,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       try {
         // Awaited since v0.0.14: a worktree task's local landing runs before
         // the line records, and the summary carries the outcome.
-        const event = await deps.factory.accept({ task: input.task, attempt: input.attempt, accepted_by: "owner" });
-        await archiveAcceptedTaskWorkspace(deps.factory, resolveDaemon(context), input.task, deps.home, deps.cleanupDaemonWorkspaces ?? cleanupDaemonWorkspacesAndProjectsViaWs);
+        const event = await executeAcceptance(deps.factory, { task: input.task, attempt: input.attempt, accepted_by: "owner" }, { authority: "owner", daemon: resolveDaemon(context), home: deps.home, cleanup: deps.cleanupDaemonWorkspaces });
         return {
           ok: true as const,
           seq: event.seq,
@@ -1364,7 +1313,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       const bound = agentTaskIndex();
       let rawAgents: SurfaceAgentSnapshot[] = [];
       try {
-        const page = await daemon.agents.list({ filter: { includeArchived: false } });
+      const page = await daemon.agents.list({ filter: { includeArchived: false } });
         rawAgents = page.entries.map((entry) => entry.agent).filter((agent) => agent.archivedAt === null);
       } catch {
         // best-effort agent listing
@@ -1464,7 +1413,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       // when neither the keep set (the still-live Supervisor/Lead workspace —
       // seats retire at step 5, after this sweep) nor a live agent holds it.
       try {
-        const sets = await resolveSweepWorkspaceSets(daemon, project);
+      const sets = await resolveSweepWorkspaceSets(daemon, project);
         const swept = await (deps.cleanupDaemonWorkspaces ?? cleanupDaemonWorkspacesAndProjectsViaWs)(deps.home, {
           worktreesDir,
           ...(sets === null ? {} : { projectRoot: project.root, keepWorkspaceIds: sets.keepWorkspaceIds, activeWorkspaceIds: sets.activeWorkspaceIds }),
@@ -1792,19 +1741,21 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     },
 
     async vaultHydrate(
-      input: { repo?: string; ref?: string },
+      input: { repo?: string; ref?: string; mergeLedgers?: boolean; overwriteConfigs?: boolean },
       _context?: SurfaceCallContext,
-    ): Promise<{ ok: true; vault: VaultStatusView; hydratedFiles: string[]; summary: string } | { ok: false; code: string; error: string }> {
+    ): Promise<{ ok: true; vault: VaultStatusView; hydratedFiles: string[]; summary: string; materialization?: import("./core/history-stage.ts").ImportMaterialization; historyImports?: import("./core/history-stage.ts").ImportStatus[] } | { ok: false; code: string; error: string }> {
       try {
         const result = await hydrateVaultDirect(deps.home, {
           ...(input.repo === undefined ? {} : { repo: input.repo }),
           ...(input.ref === undefined ? {} : { ref: input.ref }),
+          ...(input.mergeLedgers === undefined ? {} : { mergeLedgers: input.mergeLedgers }),
+          ...(input.overwriteConfigs === undefined ? {} : { overwriteConfigs: input.overwriteConfigs }),
           ...vaultRunnerOptions(),
         });
         const vault = await vaultStatusOf();
-        const summary = `Direct hydrate unpacked ${result.hydratedFiles.length} file(s) from ${vault.repo ?? input.repo ?? "vault"}.`;
+        const summary = `Direct hydrate unpacked ${result.hydratedFiles.length} file(s) from ${vault.repo ?? input.repo ?? "vault"}${result.historyImports?.length ? `; history ${result.historyImports.map((item) => item.status).join(", ")}` : ""}; materialization ${result.materialization?.status ?? "applied"}.`;
         log(`vault: direct hydrate wrote ${result.hydratedFiles.length} files from the gh api tarball stream (no clone left behind)`);
-        return { ok: true as const, vault, hydratedFiles: result.hydratedFiles, summary };
+        return { ok: true as const, vault, hydratedFiles: result.hydratedFiles, summary, materialization: result.materialization, historyImports: result.historyImports };
       } catch (err) {
         return failure(codeOf(err), messageOf(err));
       }
@@ -1813,16 +1764,16 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     async vaultPull(
       input: { mergeLedgers?: boolean },
       _context?: SurfaceCallContext,
-    ): Promise<{ ok: true; vault: VaultStatusView; hydratedFiles: string[]; summary: string } | { ok: false; code: string; error: string }> {
+    ): Promise<{ ok: true; vault: VaultStatusView; hydratedFiles: string[]; summary: string; materialization?: import("./core/history-stage.ts").ImportMaterialization; historyImports?: import("./core/history-stage.ts").ImportStatus[] } | { ok: false; code: string; error: string }> {
       try {
         const result = await pullVault(deps.home, {
           ...(input.mergeLedgers === undefined ? {} : { mergeLedgers: input.mergeLedgers }),
           ...vaultRunnerOptions(),
         });
         const vault = await vaultStatusOf();
-        const summary = `Pulled and hydrated ${result.hydratedFiles.length} file(s) from ${vault.repo ?? "vault"}${input.mergeLedgers === true ? " (ledgers reconciled)" : ""}.`;
-        log(`vault: sync pull hydrated ${result.hydratedFiles.length} files from the cached checkout${input.mergeLedgers === true ? " and reconciled node ledgers" : ""}`);
-        return { ok: true as const, vault, hydratedFiles: result.hydratedFiles, summary };
+        const summary = `Pulled and hydrated ${result.hydratedFiles.length} file(s) from ${vault.repo ?? "vault"}${result.historyImports?.length ? `; history ${result.historyImports.map((item) => item.status).join(", ")}` : ""}; materialization ${result.materialization?.status ?? "applied"}.`;
+        log(`vault: sync pull hydrated ${result.hydratedFiles.length} files from the cached checkout${input.mergeLedgers === true ? " and staged node history" : ""}`);
+        return { ok: true as const, vault, hydratedFiles: result.hydratedFiles, summary, materialization: result.materialization, historyImports: result.historyImports };
       } catch (err) {
         return failure(codeOf(err), messageOf(err));
       }
@@ -1852,7 +1803,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       input: Omit<SyncVaultOptions, "runner">,
       _context?: SurfaceCallContext,
     ): Promise<
-      | { ok: true; vault: VaultStatusView; createdRepo: boolean; hydratedFiles: string[]; pushedFiles: string[]; pushed: boolean; summary: string }
+      | { ok: true; vault: VaultStatusView; createdRepo: boolean; hydratedFiles: string[]; pushedFiles: string[]; pushed: boolean; summary: string; materialization?: import("./core/history-stage.ts").ImportMaterialization; historyImports?: import("./core/history-stage.ts").ImportStatus[] }
       | { ok: false; code: string; error: string }
     > {
       try {
@@ -1865,6 +1816,8 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         return {
           ok: true as const,
           vault,
+          materialization: result.materialization,
+          historyImports: result.historyImports,
           createdRepo: result.createdRepo,
           hydratedFiles: result.hydratedFiles,
           pushedFiles: result.pushedFiles,
@@ -1880,7 +1833,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       input: Omit<ImportVaultSecretsInput, "runner">,
       _context?: SurfaceCallContext,
     ): Promise<
-      | { ok: true; vault: VaultStatusView; importedFiles: string[]; pushed: boolean; summary: string }
+      | { ok: true; vault: VaultStatusView; importedFiles: string[]; pushed: boolean; summary: string; materialization?: import("./core/history-stage.ts").ImportMaterialization; historyImports?: import("./core/history-stage.ts").ImportStatus[] }
       | { ok: false; code: string; error: string }
     > {
       try {
@@ -1893,6 +1846,8 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         return {
           ok: true as const,
           vault,
+          materialization: result.synced?.materialization,
+          historyImports: result.synced?.historyImports,
           importedFiles: result.importedFiles,
           pushed: result.synced?.pushed ?? false,
           summary: result.summary,
@@ -1902,6 +1857,16 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       }
     },
   };
+  const reads = new Set(["cachedProviders", "sanitizeLane", "snapshot", "taskDetail", "pluginsCheckUpdates", "historyImport", "historyImports", "historyUpgrade", "vaultHydrate", "vaultPull", "vaultPush", "vaultSync", "vaultImport"]);
+  const wrappers = new Map<PropertyKey, unknown>();
+  return new Proxy(handlers, {
+    get(target, key, receiver) {
+      const value = Reflect.get(target, key, receiver);
+      if (typeof key !== "string" || typeof value !== "function" || reads.has(key)) return value;
+      if (!wrappers.has(key)) wrappers.set(key, (...args: unknown[]) => key === "projectReset" && !deps.factory.history.maintenanceActive ? deps.factory.history.withExclusiveMaintenance(() => value.apply(receiver, args)) : deps.factory.history.runOperation(() => value.apply(receiver, args), { newWork: true }));
+      return wrappers.get(key);
+    },
+  });
 }
 
 // ---- the server wiring --------------------------------------------------------------------
@@ -1927,6 +1892,7 @@ export function registerSurfaceRpc(
     if (onContext !== undefined) onContext(context);
     return { paseo: context.paseo };
   };
+  server.handle(historyUpgrade, (input, context) => { pass(context); return handlers.historyUpgrade(input); });
   server.handle(snapshot, (input, context) => handlers.snapshot(input, pass(context)));
   server.handle(taskDetail, (input, context) => handlers.taskDetail(input, pass(context)));
   server.handle(accept, (input, context) => handlers.accept(input, pass(context)));
@@ -1944,6 +1910,8 @@ export function registerSurfaceRpc(
   server.handle(pluginsCheckUpdates, (input, context) => handlers.pluginsCheckUpdates(input, pass(context)));
   server.handle(vaultConfigure, (input, context) => handlers.vaultConfigure(input, pass(context)));
   server.handle(vaultHydrate, (input, context) => handlers.vaultHydrate(input, pass(context)));
+  server.handle(historyImport, (input) => handlers.historyImport(input));
+  server.handle(historyImports, () => handlers.historyImports());
   server.handle(vaultPull, (input, context) => handlers.vaultPull(input, pass(context)));
   server.handle(vaultPush, (input, context) => handlers.vaultPush(input, pass(context)));
   server.handle(vaultSync, (input, context) => handlers.vaultSync(input, pass(context)));

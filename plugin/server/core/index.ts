@@ -11,7 +11,11 @@ export { resolveProject, projectStateDir, readProjectRegistration, writeProjectR
 export type { ProjectResolution, ProjectRegistration } from "./project.ts";
 export { resolveClaimedCommit, checkCleanAt, diffBetween, changedFiles, scopeCoversFile, headCommitSync, changesOutsideScope, landTaskWorktree, taskWorktreePath, parseTaskWorktreePath, taskWorktreeBranch, prepareTaskWorktree } from "./workspace.ts";
 export type { CommitResolution, TreeCheck, LandingResult, PrepareTaskWorktreeOptions, PrepareTaskWorktreeResult } from "./workspace.ts";
-export { Ledger, usageIsValid } from "./ledger.ts";
+export { Ledger, usageIsValid, isValidLedgerEvent, parseLedgerJsonl } from "./ledger.ts";
+export { readLedgerEvents } from "./ledger-read.ts";
+export { stageLedgerImport, readLedgerImports } from "./history-stage.ts";
+export type { ImportStatus } from "./history-stage.ts";
+export { LedgerAdmission } from "./history-admission.ts";
 export { runGate } from "./gate.ts";
 export type { GateInput, GateResult } from "./gate.ts";
 export { eyeConfigPath, isEyeLaneUsable, loadEyeConfig, resolveEyeLane, runFreshEyesPass, tailWithMarker, parseEyeAnswer } from "./fresh-eyes.ts";
@@ -167,3 +171,18 @@ export type {
   RetroWritten,
 } from "./events.ts";
 export { EVENT_NAMES, MAX_ATTEMPTS } from "./events.ts";
+
+export { projectTask } from "./task-state.ts";
+export { taskStatusLines } from "./task-status.ts";
+export type { AcceptanceRole, AttemptState, ReviewState } from "./task-state.ts";
+
+export { legacyIdentityMappingIsValid, planLegacyIdentity, resolveLedgerReference, remapLedgerReferences, classifyEventIdentities, semanticEventContent, canonicalHistoryJson, historyHash } from "./history-identity.ts";
+export type { IdentityMappingEntry, LegacyIdentityMapping, IdentityPlan, ReferenceResolution } from "./history-identity.ts";
+export type { EventIdentityMetadata, LedgerSchema, LedgerReferenceField } from "./events.ts";
+
+export { planHistoryImport, validateHistoryCausality, reconcileHistory, HistoryImportError } from "./history-import.ts";
+export type { HistoryImportInput, HistoryImportSource, HistoryImportPlan, ImportSourcePlan, ImportConflict, VerifiedImportBinding, VerifiedImportFile, HistoryArtifact } from "./history-import.ts";
+
+export { preflightUpgrade, upgradeFactory, upgradeDirectory } from "./history-upgrade.ts";
+export type { UpgradeAction, UpgradeInput, UpgradeResult, UpgradePreflight } from "./history-upgrade.ts";
+export { readLocalWriterIdentity, localWriterPath } from "./writer-identity.ts";

@@ -1,8 +1,15 @@
+import { pendingUpgradeFor } from "./upgrade-state.ts";
+import { readLocalWriterIdentity } from "./writer-identity.ts";
+import { liveWorkspaceConflict, normalized, acceptedTasks } from "./workspace-conflict.ts";
+import { createHash } from "node:crypto";
+import { projectTask } from "./task-state.ts";
+import type { AcceptanceRole } from "./task-state.ts";
 import { readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { Ledger, usageIsValid } from "./ledger.ts";
 import { MAX_ATTEMPTS, NEEDS_HUMAN_REASONS, needsHumanEvidenceIsValid } from "./events.ts";
 import { runGate } from "./gate.ts";
+import { artifactPathProblem } from "./artifact.ts";
 import { renderReport } from "./report.ts";
 import { laneCliAvailable } from "./lanes.ts";
 import { EYE_JSON_LANE } from "./lanes.ts";
@@ -13,17 +20,21 @@ import { runWatchPass, watchLaneAvailable } from "./watch.ts";
 import type { CopilotRunner, TimelineFetcher } from "./watch.ts";
 import { buildRetroDigest, retroDay, retroLaneAvailable, runRetroPass, writtenRetroForDay } from "./retro.ts";
 import type { RetroOutcome } from "./retro.ts";
-import { changedFiles, checkCleanAt, headCommitSync, landTaskWorktree, resolveClaimedCommit, scopeCoversFile, normalizeScopePath, scopeRecoveryCommands } from "./workspace.ts";
+import { changedFiles, checkCleanAt, headCommitSync, landTaskWorktree, resolveClaimedCommit, scopeCoversFile, scopeRecoveryCommands } from "./workspace.ts";
 import { MEMORY_FILES } from "./choke.ts";
 import { projectStateDir } from "./project.ts";
 import { FactoryError } from "./errors.ts";
-import type { AttemptAccepted, ContractSet, FreshEyesWritten, GateFinished, GitBlocked, LedgerEvent, MeterWritten, MeterUsage, NeedsHuman, NeedsHumanEvidence, NeedsHumanReason, RepokeDispatched, RepokeRefused, RespawnDispatched, RespawnRefused, SpawnDispatched, SpawnRefused, Verdict } from "./events.ts";
+import type { AttemptAccepted, ContractSet, GateFinished, GitBlocked, LedgerEvent, MeterWritten, MeterUsage, NeedsHuman, NeedsHumanEvidence, NeedsHumanReason, RepokeDispatched, RepokeRefused, RespawnDispatched, RespawnRefused, SpawnDispatched, SpawnRefused, Verdict } from "./events.ts";
 import type { GateResult } from "./gate.ts";
+import { LedgerAdmission } from "./history-admission.ts";
 
 /** Task ids become report filenames, so they stay flat and filename-safe. */
 const TASK_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 export interface FactoryOptions {
+  historyFault?: (boundary: "prepared" | "renamed" | "activated" | "applied") => void;
+  /** Demonstrable local writer identity, provisioned independently of imported history. */
+  writerId?: string;
   /** Directory for `ledger.jsonl`, `report-<task>-<n>.md` and `gate-<task>-<n>.log` files. */
   stateDir: string;
   /**
@@ -146,18 +157,13 @@ export interface ClaimOutcome {
 export interface AcceptInput {
   task: string;
   attempt: number;
-  /**
-   * Who accepted (v0.0.9) — the spool's submitting-shell stamp, recorded
-   * verbatim ("the Ledger always records who accepted", ADR 0006). The three
-   * seat names carry authority semantics (v0.0.14, ADR 0010 §3): `owner` and
-   * `supervisor` are the unconditional override (the Supervisor acts on the
-   * Owner's word), `lead` is the intermediate acceptance — permitted only on
-   * a green Verdict with no fresh-eyes CONCERN on the attempt and no
-   * undisplaced `needs_human`, else `lead-accept-refused`. Any other string
-   * (a delegated agent's id, the v0.0.9 spelling) records verbatim with no
-   * seat privileges.
+  /** Readable attribution retained verbatim. Trusted authority is independent.
+   * Direct legacy callers may still use `lead` to request Lead policy; other
+   * legacy stamps remain delegated Owner calls when no authority is supplied.
    */
   accepted_by?: string;
+  /** Trusted execution authority, separate from readable attribution. */
+  authority?: AcceptanceRole;
 }
 
 export interface SpawnInput {
@@ -244,6 +250,7 @@ export interface NeedsHumanInput {
 }
 
 export interface Factory {
+  readonly history: LedgerAdmission;
   readonly ledger: Ledger;
   readonly stateDir: string;
   /** Attempts the factory closed red while opening (ADR 0003 recovery) — for the shell to log loudly. */
@@ -266,7 +273,7 @@ export interface Factory {
    * Supervisor, ADR 0006) may submit it on the Owner's word; the
    * `accepted_by` stamp records whose act each line is. Since v0.0.14
    * (ADR 0010 §3–§4) `accepted_by: "lead"` is the intermediate acceptance
-   * (green + no fresh-eyes CONCERN on the attempt + not in needs_human,
+   * (green + required Fresh-eyes completed CLEAR + not in needs_human,
    * else `lead-accept-refused`), and a task that ran in a managed Task
    * worktree lands its claimedCommit into `<project-root>`'s local branch
    * before the line records — async git is why the call awaits.
@@ -385,10 +392,21 @@ export function createFactory(options: FactoryOptions): Factory {
   // for every factory, and the root data tree remains the no-scope default
   // (the legacy single-ledger layout).
   const dataDir = options.projectSlug === undefined ? stateDir : projectStateDir(stateDir, options.projectSlug);
-  const ledger = Ledger.open(join(dataDir, "ledger.jsonl"));
-  const recoveredAttempts = recoverInterruptedAttempts(ledger, dataDir);
+  const release = LedgerAdmission.reserve(join(dataDir, "ledger.jsonl"));
+  let ledger: Ledger;
+  let recoveredAttempts: ReturnType<typeof recoverInterruptedAttempts>;
+  let history: LedgerAdmission;
+  try {
+    LedgerAdmission.assertAvailable(join(dataDir, "ledger.jsonl"));
+    const pendingUpgrade = pendingUpgradeFor(stateDir);
+    ledger = Ledger.open(join(dataDir, "ledger.jsonl"), { writerId: options.writerId ?? readLocalWriterIdentity(stateDir, options.projectSlug), recoverTail: pendingUpgrade === undefined });
+    recoveredAttempts = pendingUpgrade === undefined ? recoverInterruptedAttempts(ledger, dataDir) : [];
+    history = new LedgerAdmission(ledger, stateDir, { fault: options.historyFault });
+  } finally { release(); }
 
-  return {
+
+  const factory: Factory = {
+    history,
     ledger,
     stateDir,
     recoveredAttempts,
@@ -396,7 +414,8 @@ export function createFactory(options: FactoryOptions): Factory {
     setContract({ task, workspace, gate, artifact, base: inputBase, scope, freshEyes, watch, description, skills, by, seat }) {
       assertTaskId(task);
       if (gate.trim() === "") throw new FactoryError("invalid-contract", "gate command must be a non-empty string");
-      if (artifact.trim() === "") throw new FactoryError("invalid-contract", "artifact path must be a non-empty string");
+      const artifactProblem = artifactPathProblem(artifact);
+      if (artifactProblem !== undefined) throw new FactoryError("invalid-contract", artifactProblem);
       if (freshEyes !== undefined && typeof freshEyes !== "boolean") {
         throw new FactoryError("invalid-contract", "freshEyes must be a boolean (true or false) — omit it to use the caller default");
       }
@@ -774,7 +793,7 @@ export function createFactory(options: FactoryOptions): Factory {
       return finish(finishCtx, attempt, result, resolved.full, watchContext());
     },
 
-    async accept({ task, attempt, accepted_by }) {
+    async accept({ task, attempt, accepted_by, authority }) {
       assertTaskId(task);
       if (!Number.isInteger(attempt) || attempt < 1) {
         throw new FactoryError("invalid-attempt", `attempt must be a positive integer, got ${attempt}`);
@@ -803,27 +822,14 @@ export function createFactory(options: FactoryOptions): Factory {
           `attempt ${attempt} of task ${task} has no green verdict — the Owner accepts evidence, and there is none`,
         );
       }
-      // The Lead's intermediate acceptance (v0.0.14, ADR 0010 §3): green is
-      // necessary (checked above) and sufficient for the override seats, but
-      // the Lead additionally needs a CONCERN-free attempt and a task that is
-      // not escalated — flagged or exhausted work is the Owner's to answer,
-      // never the Lead's self-acceptance.
-      if (accepted_by === "lead") {
-        const concern = events.findLast(
-          (e): e is FreshEyesWritten => e.event === "fresh_eyes_written" && e.attempt === attempt && e.outcome === "concern",
-        );
-        if (concern !== undefined) {
-          throw new FactoryError(
-            "lead-accept-refused",
-            `attempt ${attempt} of task ${task} carries a fresh-eyes CONCERN — a flagged attempt needs the Owner's or Supervisor's override, never the Lead's acceptance`,
-          );
-        }
-        if (taskInNeedsHuman(history)) {
-          throw new FactoryError(
-            "lead-accept-refused",
-            `task ${task} is in needs_human — an escalated task is the Owner's to answer; the Lead may spawn a corrective attempt or escalate, never self-accept`,
-          );
-        }
+      const state = projectTask(fullHistory, task);
+      const attemptState = state.attempts.find((entry) => entry.attempt === attempt)!;
+      // Direct Owner callers retain compatibility. Transport callers always supply
+      // server-resolved authority, so attribution cannot select a weaker policy.
+      const role = authority ?? (accepted_by === "lead" ? "lead" : "owner");
+      if (role === "agent") throw new FactoryError("agent-cannot-orchestrate", "Working Agents cannot accept Tasks");
+      if (role === "lead" && !attemptState.leadEligible) {
+        throw new FactoryError("lead-accept-refused", `${attemptState.leadRefusal ?? "attempt is ineligible"} — the Owner or delegated Supervisor must override`);
       }
       // Local landing (v0.0.14, ADR 0010 §4): a task that ran in a managed
       // Task worktree integrates its claimedCommit into <project-root>'s
@@ -1162,7 +1168,7 @@ export function createFactory(options: FactoryOptions): Factory {
     },
 
     contractFor(task) {
-      return ledger.eventsFor(task).findLast((e): e is ContractSet => e.event === "contract_set");
+      return projectTask(ledger.eventsFor(task), task).contract;
     },
 
     worktreeFor(task) {
@@ -1353,6 +1359,22 @@ export function createFactory(options: FactoryOptions): Factory {
       return outcome;
     },
   };
+  const asyncOperations = new Set(["claim", "accept", "retro"]);
+  const syncOperations = new Set(["setContract", "requestSpawn", "meter", "repoke", "respawn", "needsHuman", "resetProject"]);
+  const wrappers = new Map<PropertyKey, unknown>();
+  return new Proxy(factory, {
+    get(target, key, receiver) {
+      const value = Reflect.get(target, key, receiver);
+      if (typeof key !== "string" || typeof value !== "function" || (!asyncOperations.has(key) && !syncOperations.has(key))) return value;
+      if (!wrappers.has(key)) wrappers.set(key, (...args: unknown[]) => {
+        if (key === "resetProject" && history.activeOperations > 0 && !history.maintenanceActive) throw new FactoryError("history-maintenance-busy", "reset requires settled operations; use the asynchronous Owner reset entrance");
+        return asyncOperations.has(key)
+          ? history.runOperation(() => value.apply(receiver, args), { newWork: true })
+          : history.runSync(() => value.apply(receiver, args));
+      });
+      return wrappers.get(key);
+    },
+  });
 }
 
 /**
@@ -1361,29 +1383,21 @@ export function createFactory(options: FactoryOptions): Factory {
  * (`seq >= latestContractSeq(ledger, task)`).
  */
 export function latestContractSeq(ledger: Ledger, task: string): number {
-  const latest = ledger.eventsFor(task).findLast((e): e is ContractSet => e.event === "contract_set");
-  return latest?.seq ?? 0;
+  return projectTask(ledger.eventsFor(task), task).epochSeq;
 }
 
 /** All ledger events for `task` in its current Contract epoch (`seq >= latestContractSeq`). */
 function epochEventsFor(ledger: Ledger, task: string): LedgerEvent[] {
-  const minSeq = latestContractSeq(ledger, task);
-  return ledger.eventsFor(task).filter((e) => e.seq >= minSeq);
+  return projectTask(ledger.eventsFor(task), task).epoch;
 }
 
 /**
  * Returns the attempt number of an in-flight Attempt in the given epoch history
- * (a `claim_reported` or `gate_started` with no matching `gate_finished`), or
+ * (a `claim_reported` or `gate_started` with no matching `report_written`), or
  * `undefined` if no Attempt is currently running.
  */
 function inFlightAttempt(history: readonly LedgerEvent[]): number | undefined {
-  for (const evt of history) {
-    if (evt.event === "claim_reported" || evt.event === "gate_started") {
-      const finished = history.some((e) => e.event === "gate_finished" && e.attempt === evt.attempt);
-      if (!finished) return evt.attempt;
-    }
-  }
-  return undefined;
+  return historyState(history)?.inFlightAttempt;
 }
 
 /** A historical worktree binding is live only while its directory survives. */
@@ -1400,9 +1414,14 @@ function covers(contract: ContractSet, cwd: string): boolean {
   return cwd === contract.workspace || cwd.startsWith(`${contract.workspace}/`);
 }
 
+function historyState(history: readonly LedgerEvent[]) {
+  const event = history.find((entry) => "task" in entry && typeof entry.task === "string");
+  return event !== undefined && "task" in event && typeof event.task === "string" ? projectTask(history, event.task) : undefined;
+}
+
 /** The task's acceptance, when the Owner has accepted — the closed-marker every closer reads. */
 function acceptedAttempt(history: readonly LedgerEvent[]): AttemptAccepted | undefined {
-  return history.findLast((e): e is AttemptAccepted => e.event === "attempt_accepted");
+  return historyState(history)?.acceptance;
 }
 
 /**
@@ -1413,25 +1432,7 @@ function acceptedAttempt(history: readonly LedgerEvent[]): AttemptAccepted | und
  * gate) displaces the marker, and the Lead may accept THAT attempt.
  */
 function taskInNeedsHuman(history: readonly LedgerEvent[]): boolean {
-  let needs: NeedsHuman | undefined;
-  let lastGateSeq = -1;
-  for (const evt of history) {
-    if (evt.event === "needs_human") needs = evt;
-    else if (evt.event === "gate_finished" && evt.seq > lastGateSeq) lastGateSeq = evt.seq;
-  }
-  return needs !== undefined && needs.seq > lastGateSeq;
-}
-
-/** Settled acceptances retire a Contract; pending landings keep their write fence live. */
-function acceptedTasks(ledger: Ledger): Set<string> {
-  const accepted = new Set<string>();
-  for (const evt of ledger.events) {
-    if (evt.event === "attempt_accepted") {
-      if (evt.landing === "pending-conflict") accepted.delete(evt.task);
-      else accepted.add(evt.task);
-    }
-  }
-  return accepted;
+  return historyState(history)?.needsHuman ?? false;
 }
 
 /** How one workspace relates to another — the workspace-conflict key (v0.0.5). */
@@ -1442,82 +1443,6 @@ function relationText(relation: WorkspaceRelation): string {
   if (relation === "equal") return "is the same tree as";
   if (relation === "inside") return "sits inside";
   return "contains";
-}
-
-/**
- * The live-Contract workspace scan (H1/H2 guard): finds the first live
- * Contract — set, not accepted, another task — whose workspace equals, nests
- * inside, or contains `workspace`. Comparison is on the paths as contracted
- * (absolute, `resolve`d by the CLI); trailing slashes are tolerated, symlink
- * aliasing is not — the Owner contracts one spelling of a tree per run.
- * Since v0.0.14 (ADR 0010 §4) the EQUAL relation is exempt when both
- * Contracts declare disjoint scopes (`myScope` is the asking task's scope —
- * the contract's own on the spawn path, the input's on the setContract path
- * where the line has not landed yet): same-Project Tasks each execute in
- * their own managed worktree, so the single-checkout collision cannot
- * happen, and the scopes are the declared boundary. On an overlapping equal
- * pair the returned conflict names the overlapping prefixes.
- */
-function liveWorkspaceConflict(
-  ledger: Ledger,
-  workspace: string,
-  task: string,
-  myScope?: string[],
-): { task: string; workspace: string; relation: WorkspaceRelation; overlapping?: string } | undefined {
-  const mine = normalized(workspace);
-  const accepted = acceptedTasks(ledger);
-  const latestContracts = new Map<string, ContractSet>();
-  for (const evt of ledger.events) {
-    if (evt.event === "contract_set" && evt.task !== task && !accepted.has(evt.task)) {
-      latestContracts.set(evt.task, evt);
-    }
-  }
-  for (const evt of latestContracts.values()) {
-    const theirs = normalized(evt.workspace);
-    let relation: WorkspaceRelation | undefined;
-    if (mine === theirs) relation = "equal";
-    else if (mine.startsWith(`${theirs}/`)) relation = "inside";
-    else if (theirs.startsWith(`${mine}/`)) relation = "contains";
-    if (relation === undefined) continue;
-    if (relation === "equal") {
-      const overlap = scopesOverlap(myScope, evt.scope);
-      if (overlap === undefined) continue; // the worktree exemption — disjoint scopes, one Project
-      return { task: evt.task, workspace: evt.workspace, relation, overlapping: overlap };
-    }
-    return { task: evt.task, workspace: evt.workspace, relation };
-  }
-  return undefined;
-}
-
-/**
- * The first pair of scope prefixes that overlap (either covers the other's
- * territory), or undefined when the scopes are disjoint — the exemption's
- * one question. Unrestricted (empty/undefined) scope means "everywhere", so
- * it overlaps everything and never rides the exemption.
- */
-function scopesOverlap(a: readonly string[] | undefined, b: readonly string[] | undefined): string | undefined {
-  if (a === undefined || a.length === 0 || b === undefined || b.length === 0) return "one contract is unscoped";
-  for (const mine of a) {
-    for (const theirs of b) {
-      if (scopeCoversFile([mine], theirs) || scopeCoversFile([theirs], mine)) return `${mine} ↔ ${theirs}`;
-      const minePath = normalizeScopePath(mine);
-      const theirPath = normalizeScopePath(theirs);
-      const mineWildcard = minePath.search(/[*?]/);
-      const theirWildcard = theirPath.search(/[*?]/);
-      if (mineWildcard < 0 && theirWildcard < 0) continue;
-      // A glob's static prefix reserves its possible territory conservatively:
-      // a partial filename prefix may overlap a different glob or directory.
-      const minePrefix = mineWildcard < 0 ? `${minePath}/` : minePath.slice(0, mineWildcard);
-      const theirPrefix = theirWildcard < 0 ? `${theirPath}/` : theirPath.slice(0, theirWildcard);
-      if (minePrefix.startsWith(theirPrefix) || theirPrefix.startsWith(minePrefix)) return `${mine} ↔ ${theirs}`;
-    }
-  }
-  return undefined;
-}
-
-/** Workspace paths as contracted, with a tolerated trailing slash gone. */
-function normalized(path: string): string {
-  return path.length > 1 && path.endsWith("/") ? path.slice(0, -1) : path;
 }
 
 function realpathSafe(path: string): string {
@@ -1564,7 +1489,7 @@ async function finish(
   const { task, ledger, stateDir, dataDir, contract, eyeBudgetMs, eyeRunner } = ctx;
   let outputPath: string | undefined;
   if (result.output !== undefined) {
-    outputPath = join(dataDir, `gate-${task}-${attempt}.log`);
+    outputPath = join(dataDir, `gate-${attemptEvidenceName(task, attempt, contract)}.log`);
     writeFileSync(outputPath, result.output);
   }
   const gate = ledger.append({
@@ -1631,10 +1556,17 @@ async function finish(
   return { attempt, verdict: result.verdict, gate, reportPath };
 }
 
+/** V2 evidence belongs to a stable Contract epoch; legacy paths remain usable. */
+function attemptEvidenceName(task: string, attempt: number, contract: ContractSet | undefined): string {
+  const epoch = contract?.epoch_id;
+  return epoch === undefined ? `${task}-${attempt}` : `${task}-${createHash("sha256").update(epoch).digest("hex")}-${attempt}`;
+}
+
 /** Every Attempt ends the same way: report rendered from the ledger, written, acknowledged. */
 function writeAttemptReport(task: string, attempt: number, ledger: Ledger, dataDir: string): string {
   const markdown = renderReport(task, attempt, epochEventsFor(ledger, task));
-  const reportPath = join(dataDir, `report-${task}-${attempt}.md`);
+  const contract = projectTask(ledger.eventsFor(task), task).contract;
+  const reportPath = join(dataDir, `report-${attemptEvidenceName(task, attempt, contract)}.md`);
   writeFileSync(reportPath, markdown);
   ledger.append({ event: "report_written", task, attempt, path: reportPath });
   return reportPath;
@@ -1642,11 +1574,7 @@ function writeAttemptReport(task: string, attempt: number, ledger: Ledger, dataD
 
 /** The highest Attempt number a task's history mentions, or 0 when none opened yet. */
 function maxAttempt(history: readonly LedgerEvent[]): number {
-  let max = 0;
-  for (const evt of history) {
-    if ("attempt" in evt && evt.attempt > max) max = evt.attempt;
-  }
-  return max;
+  return historyState(history)?.maxAttempt ?? 0;
 }
 
 /** One Attempt's own events — Contracts and choke events belong to the Task, not to any Attempt. */
@@ -1661,8 +1589,7 @@ function attemptEvents(history: readonly LedgerEvent[], attempt: number): Ledger
  * usually means one of them is running.
  */
 function attemptIsOpen(history: readonly LedgerEvent[], attempt: number): boolean {
-  const events = attemptEvents(history, attempt);
-  return events.length > 0 && !events.some((e) => e.event === "report_written");
+  return historyState(history)?.attempts.find((entry) => entry.attempt === attempt)?.open ?? false;
 }
 
 /**

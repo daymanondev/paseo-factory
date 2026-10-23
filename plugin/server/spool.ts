@@ -1,3 +1,7 @@
+import { recordUpgradeControlReceipt } from "./core/history-upgrade.ts";
+import { pendingUpgradeFor } from "./core/upgrade-state.ts";
+import { upgradeFactory, upgradeReply, recordUpgradeControlReply } from "./core/history-upgrade.ts";
+import type { UpgradeInput, UpgradeResult, UpgradePreflight } from "./core/history-upgrade.ts";
 /**
  * The spool (ADR 0004): the plugin process is the only Ledger writer and the
  * only Gate runner; the CLIs (`factory-claim`, `factory contract`,
@@ -21,7 +25,7 @@
  */
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { FactoryError } from "./core/errors.ts";
 import { usageIsValid } from "./core/ledger.ts";
 import { needsHumanEvidenceIsValid, NEEDS_HUMAN_REASONS } from "./core/events.ts";
@@ -31,8 +35,10 @@ import { CorrelationRegistry, readCorrelations } from "./core/correlations.ts";
 import { loadLanes, parseLane } from "./core/lanes.ts";
 import { listProjectRegistrations, readProjectRegistration, resolveProject, writeProjectRegistration } from "./core/project.ts";
 import { FACTORY_SEAT_PROVIDER_IDS, formatPeerAgentTitle, formatPeerWorkspaceTitle } from "./roles.ts";
-import { acceptanceSummary, archiveAcceptedTaskWorkspace } from "./surface-rpc.ts";
+import { acceptanceSummary, executeAcceptance } from "./commands.ts";
 import type { SurfaceDaemonApi } from "./surface-rpc.ts";
+import type { HistoryImportSource } from "./core/history-import.ts";
+import type { ImportStatus } from "./core/history-stage.ts";
 
 /** Seat identity stamped from `PASEO_FACTORY_SEAT` (v0.0.23, ADR 0015 §1). */
 export type SpoolSeat = "supervisor" | "lead" | "agent";
@@ -333,6 +339,8 @@ export interface AskRequest {
 }
 
 export type SpoolRequest =
+  | ({ id: string; kind: "upgrade"; submitter?: string; seat?: SpoolSeat } & Omit<UpgradeInput, "controlId">)
+  | { id: string; kind: "history_import" | "history_import_status"; sources?: HistoryImportSource[]; project?: string; submitter?: string; seat?: SpoolSeat }
   | ContractRequest
   | ClaimRequest
   | AcceptRequest
@@ -386,6 +394,7 @@ export type SpoolReply =
       id: string;
       ok: true;
       summary: string;
+      upgrade?: UpgradeResult | UpgradePreflight;
       /** Claim replies: which Attempt the Claim opened and how it ended. */
       attempt?: number;
       verdict?: Verdict;
@@ -422,6 +431,7 @@ export type SpoolReply =
       removedFiles?: number;
       archivedSeats?: string[];
       archivedAgents?: string[];
+      historyImports?: ImportStatus[];
     }
   | { id: string; ok: false; code: string; message: string; event?: LedgerEvent };
 
@@ -494,6 +504,15 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
   const submitterParsed = parseOptionalSubmitter(req.submitter);
   if (!submitterParsed.ok) return undefined;
   const submitterField = submitterParsed.submitter === undefined ? {} : { submitter: submitterParsed.submitter };
+  if (req.kind === "upgrade") {
+    if (!["preflight", "apply", "resume", "restore"].includes(String(req.action)) || (req.transactionId !== undefined && typeof req.transactionId !== "string") || (req.projectSlug !== undefined && typeof req.projectSlug !== "string")) return undefined;
+    return { id: req.id, kind: "upgrade", action: req.action as UpgradeInput["action"], ...(req.transactionId === undefined ? {} : { transactionId: req.transactionId as string }), ...(req.projectSlug === undefined ? {} : { projectSlug: req.projectSlug as string }), ...seatField, ...submitterField };
+  }
+  if (req.kind === "history_import" || req.kind === "history_import_status") {
+    if (req.project !== undefined && typeof req.project !== "string") return undefined;
+    if (req.sources !== undefined && (!Array.isArray(req.sources) || req.sources.some((source: unknown) => typeof source !== "object" || source === null || typeof (source as Record<string, unknown>).nodeId !== "string" || typeof (source as Record<string, unknown>).lines !== "string"))) return undefined;
+    return { id: req.id, kind: req.kind, ...(req.project === undefined ? {} : { project: req.project }), ...(req.sources === undefined ? {} : { sources: req.sources as HistoryImportSource[] }), ...seatField, ...submitterField };
+  }
   if (req.kind === "contract") {
     if (typeof req.task !== "string" || typeof req.workspace !== "string" || typeof req.gate !== "string" || typeof req.artifact !== "string") {
       return undefined;
@@ -881,20 +900,31 @@ async function resolvePeerSpawnProvider(
 export async function handleSpoolRequest(
   factory: Factory,
   request: SpoolRequest,
-  askHandler?: AskHandler,
-  leadRotateHandler?: LeadRotateHandler,
-  leadDispatchHandler?: LeadDispatchHandler,
-  peerMailHook?: PeerMailHook,
-  supervisorDispatchHandler?: SupervisorDispatchHandler,
-  supervisorReportHandler?: SupervisorReportHandler,
-  daemon?: SurfaceDaemonApi | (() => SurfaceDaemonApi | undefined),
-  projectResetHandler?: ProjectResetHandler,
-  sanitizeLane?: SanitizeLaneHandler,
-  home?: string,
+  deps: SpoolDeps = {},
 ): Promise<SpoolReply> {
+  if (request.kind === "upgrade" || request.kind === "history_import" || request.kind === "history_import_status") return handleAdmittedSpoolRequest(factory, request, deps);
+  if (request.kind === "reset" && !factory.history.maintenanceActive) return factory.history.withExclusiveMaintenance(() => handleAdmittedSpoolRequest(factory, request, deps));
+  return factory.history.runOperation(() => handleAdmittedSpoolRequest(factory, request, deps), { newWork: !["ask", "meter", "repoke", "respawn", "needs_human"].includes(request.kind) });
+}
+
+async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolRequest, deps: SpoolDeps): Promise<SpoolReply> {
+  const { ask: askHandler, leadRotate: leadRotateHandler, leadDispatch: leadDispatchHandler, peerMail: peerMailHook, supervisorDispatch: supervisorDispatchHandler, supervisorReport: supervisorReportHandler, daemon, projectReset: projectResetHandler, sanitizeLane, home } = deps;
   const resolvedDaemon = resolveDaemonArg(daemon);
   try {
     const effectiveSeat = await resolveEffectiveSeat(factory, resolvedDaemon, request);
+    if (request.kind === "upgrade") {
+      if (effectiveSeat !== undefined) return { id: request.id, ok: false, code: "seat-cannot-upgrade", message: "Persistent history upgrade/restore requires Owner authority" };
+      return upgradeReply(request.id, await upgradeFactory(factory, { ...request, controlId: request.id }));
+    }
+    if (request.kind === "history_import" || request.kind === "history_import_status") {
+      if (effectiveSeat === "agent" || effectiveSeat === "lead") return { id: request.id, ok: false, code: "seat-cannot-import", message: "History admission requires Owner authority" };
+      if (request.kind === "history_import" && request.sources !== undefined) {
+        if (request.project === undefined) factory.history.stage(request.sources);
+        else factory.history.stageForProject(request.project, request.sources);
+      }
+      else factory.history.drain();
+      return { id: request.id, ok: true, summary: "Ledger import admission status", historyImports: factory.history.allStatus() };
+    }
     // Hard Spool Command Authority by Seat (v0.0.23, ADR 0015 §1; v0.0.24, ADR 0015 §6).
     if (
       request.kind === "reset" &&
@@ -1376,9 +1406,9 @@ export async function handleSpoolRequest(
     // runs before the line records, and the reply carries the outcome. The
     // `--by` seat, when the request claims one, overrides the submitter
     // stamp; the Lead's conditional authority is judged below in the factory.
+    if (request.kind !== "accept") return { id: request.id, ok: false, code: "bad-request", message: "unsupported Factory command" };
     const acceptedBy = request.by ?? request.submitter;
-    const accepted = await factory.accept({ task: request.task, attempt: request.attempt, accepted_by: acceptedBy });
-    await archiveAcceptedTaskWorkspace(factory, resolvedDaemon, request.task, home);
+    const accepted = await executeAcceptance(factory, { task: request.task, attempt: request.attempt, accepted_by: acceptedBy }, { authority: effectiveSeat ?? (request.by === "lead" ? "lead" : "owner"), daemon: resolvedDaemon, home });
     return {
       id: request.id,
       ok: true,
@@ -1402,6 +1432,8 @@ export interface SpoolOptions {
   onLog?: (message: string) => void;
   /** Reply poll cadence for the drain loop. Default 250ms. */
   pollMs?: number;
+  /** Recovery/read controls remain live until ordinary startup has completed. */
+  ordinaryReady?: () => boolean;
   /** The choke's synthetic-ask handler (v0.0.4); without it `ask` requests are refused. */
   ask?: AskHandler;
   /** The Lead-rotation handler (v0.0.14); without it `lead_rotate` requests are refused. */
@@ -1428,7 +1460,7 @@ export interface SpoolOptions {
   home?: string;
 }
 
-export type SpoolDeps = SpoolOptions;
+export type SpoolDeps = Omit<SpoolOptions, "onLog" | "pollMs">;
 
 export interface Spool {
   stop(): void;
@@ -1452,9 +1484,12 @@ export function startSpool(stateDir: string, factory: Factory, options: SpoolOpt
   const requestsDir = join(root, "requests");
   const repliesDir = join(root, "replies");
   const processedDir = join(root, "processed");
-  mkdirSync(requestsDir, { recursive: true });
-  mkdirSync(repliesDir, { recursive: true });
-  mkdirSync(processedDir, { recursive: true });
+  const ensureDirectories = () => {
+    mkdirSync(requestsDir, { recursive: true });
+    mkdirSync(repliesDir, { recursive: true });
+    mkdirSync(processedDir, { recursive: true });
+  };
+  if (pendingUpgradeFor(stateDir) === undefined) ensureDirectories();
 
   const log = options.onLog ?? (() => {});
   const inFlight = new Set<string>();
@@ -1506,11 +1541,21 @@ export function startSpool(stateDir: string, factory: Factory, options: SpoolOpt
   };
 
   const drain = (): void => {
+    if (factory.history.maintenanceActive) return;
+    const recovering = pendingUpgradeFor(stateDir) !== undefined || options.ordinaryReady?.() === false;
+    if (!recovering) ensureDirectories();
+    if (!existsSync(requestsDir)) return;
     for (const name of readdirSync(requestsDir).sort()) {
       if (!name.endsWith(".json")) continue;
       const id = name.slice(0, -".json".length);
       if (inFlight.has(id)) continue;
       const requestPath = join(requestsDir, name);
+      // Recovery controls remain reachable; unrelated queued work keeps its
+      // exact request/reply/processed state until ordinary admission resumes.
+      if (recovering) {
+        try { if (JSON.parse(readFileSync(requestPath, "utf8")).kind !== "upgrade") continue; }
+        catch { continue; }
+      }
       const replyPath = join(repliesDir, name);
       if (existsSync(replyPath)) {
         // Already answered (retried or replayed request): pass it along, run nothing.
@@ -1552,24 +1597,15 @@ export function startSpool(stateDir: string, factory: Factory, options: SpoolOpt
         join(processedDir, name),
         factory,
         log,
-        options.ask,
-        options.leadRotate,
-        options.leadDispatch,
-        options.peerMail,
-        options.supervisorDispatch,
-        options.supervisorReport,
-        options.daemon,
-        options.projectReset,
-        options.sanitizeLane,
-        options.home,
+        options,
       )
         .catch(() => {})
-        .finally(() => {
+        .finally(async () => {
           inFlight.delete(id);
           if (semanticKey !== undefined && inFlightSemanticKeys.get(semanticKey) === id) {
             inFlightSemanticKeys.delete(semanticKey);
           }
-          settleDuplicateMirrors(id, replyPath);
+          try { await factory.history.runOperation(() => settleDuplicateMirrors(id, replyPath)); } catch { /* interrupted maintenance retains mirrors for a later drain */ }
         });
     }
   };
@@ -1585,26 +1621,27 @@ export function startSpool(stateDir: string, factory: Factory, options: SpoolOpt
 
 export const startSpoolWatcher = startSpool;
 
-async function handleRequestFile(
+async function handleAdmittedRequestFile(
   id: string,
   requestPath: string,
   replyPath: string,
   processedPath: string,
   factory: Factory,
   log: (message: string) => void,
-  askHandler?: AskHandler,
-  leadRotateHandler?: LeadRotateHandler,
-  leadDispatchHandler?: LeadDispatchHandler,
-  peerMailHook?: PeerMailHook,
-  supervisorDispatchHandler?: SupervisorDispatchHandler,
-  supervisorReportHandler?: SupervisorReportHandler,
-  daemon?: SurfaceDaemonApi | (() => SurfaceDaemonApi | undefined),
-  projectResetHandler?: ProjectResetHandler,
-  sanitizeLane?: SanitizeLaneHandler,
-  home?: string,
+  deps: SpoolDeps,
 ): Promise<void> {
   let reply: SpoolReply;
   let request: SpoolRequest | undefined;
+  const recovering = pendingUpgradeFor(factory.stateDir);
+  let recoveryControl = false;
+  if (recovering !== undefined) {
+    try {
+      if (JSON.parse(readFileSync(requestPath, "utf8")).kind === "upgrade") {
+        recordUpgradeControlReceipt(factory.stateDir, recovering, id);
+        recoveryControl = true;
+      }
+    } catch { /* unverified controls remain ordinary inventory; never forgive their bytes */ }
+  }
   try {
     request = parseSpoolRequest(JSON.parse(readFileSync(requestPath, "utf8")));
   } catch {
@@ -1614,20 +1651,7 @@ async function handleRequestFile(
     reply = { id, ok: false, code: "bad-request", message: `request file ${requestPath} is not a valid spool request` };
     log(`request ${id}: REJECTED — malformed`);
   } else {
-    reply = await handleSpoolRequest(
-      factory,
-      request,
-      askHandler,
-      leadRotateHandler,
-      leadDispatchHandler,
-      peerMailHook,
-      supervisorDispatchHandler,
-      supervisorReportHandler,
-      daemon,
-      projectResetHandler,
-      sanitizeLane,
-      home,
-    );
+    reply = await handleSpoolRequest(factory, request, deps);
 
     // The v0.0.9 stamps make the two Owner acts attributable in the log too —
     // the same visibility the claim line always had.
@@ -1638,6 +1662,14 @@ async function handleRequestFile(
         : `request ${id}: ${request.kind}${"task" in request ? ` ${request.task}` : ""}${stamp} → ${reply.ok ? (reply.decision ?? "ok") : `rejected (${reply.code})`}`,
     );
   }
+  if (request?.kind === "upgrade" || recoveryControl) {
+    const transaction = recoveryControl ? recovering : reply.ok && reply.upgrade !== undefined && "id" in reply.upgrade ? reply.upgrade.id : request?.kind === "upgrade" ? request.transactionId : undefined;
+    if (transaction !== undefined) { try { recordUpgradeControlReply(factory.stateDir, transaction, id, reply); } catch { /* preserve the primary reply and fail closed on unknown journal transitions */ } }
+  }
+  if (recoveryControl) {
+    mkdirSync(dirname(replyPath), { recursive: true });
+    mkdirSync(dirname(processedPath), { recursive: true });
+  }
   writeJsonAtomic(replyPath, reply);
   renameSync(requestPath, processedPath);
 }
@@ -1647,4 +1679,13 @@ function writeJsonAtomic(path: string, value: unknown): void {
   const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
   writeFileSync(tmp, `${JSON.stringify(value)}\n`);
   renameSync(tmp, path);
+}
+
+async function handleRequestFile(id: string, requestPath: string, replyPath: string, processedPath: string, factory: Factory, log: (message: string) => void, deps: SpoolDeps): Promise<void> {
+  let kind = "";
+  try { kind = String(JSON.parse(readFileSync(requestPath, "utf8")).kind); } catch { /* malformed requests still receive a reply */ }
+  const work = () => handleAdmittedRequestFile(id, requestPath, replyPath, processedPath, factory, log, deps);
+  if (kind === "upgrade") await work();
+  else if (kind === "reset") await factory.history.withExclusiveMaintenance(work);
+  else await factory.history.runOperation(work, { newWork: !["ask", "meter", "repoke", "respawn", "needs_human", "history_import", "history_import_status", ""].includes(kind) });
 }
