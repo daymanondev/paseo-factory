@@ -69,7 +69,12 @@ function needsHumanEvidenceIsValid(evidence, reason) {
 function isValidLedgerEvent(value) {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const event = value;
-  return (event.schema_version === void 0 || event.schema_version === 1 || event.schema_version === 2) && (event.schema_version !== 2 || identityMetadataIsValid(event)) && Number.isSafeInteger(event.seq) && event.seq > 0 && typeof event.ts === "string" && typeof event.event === "string" && EVENT_NAMES.includes(event.event) && shapeIsValid(value) && (event.schema_version !== 2 || v2PayloadIsValid(event));
+  return (event.schema_version === void 0 || event.schema_version === 1 || event.schema_version === 2) && (event.schema_version !== 2 || identityMetadataIsValid(event)) && Number.isSafeInteger(event.seq) && event.seq > 0 && typeof event.ts === "string" && (event.schema_version !== 2 || utcTimestampIsValid(event.ts)) && typeof event.event === "string" && EVENT_NAMES.includes(event.event) && shapeIsValid(value) && (event.schema_version !== 2 || v2PayloadIsValid(event));
+}
+function utcTimestampIsValid(value) {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|\+00:?00)$/.test(value)) return false;
+  const instant = new Date(value);
+  return Number.isFinite(instant.getTime()) && instant.toISOString().slice(0, 19) === value.slice(0, 19);
 }
 function nonempty(value) {
   return typeof value === "string" && value.trim() !== "";
@@ -110,6 +115,8 @@ function parseLedgerJsonl(raw, options = {}) {
     } catch {
       return { corrupt: `line ${at} is not valid JSON` };
     }
+    const timestamped = value;
+    if (timestamped !== null && typeof timestamped === "object" && timestamped.schema_version === 2 && (typeof timestamped.ts !== "string" || !utcTimestampIsValid(timestamped.ts))) return { corrupt: `line ${at} has an invalid ISO 8601 UTC timestamp` };
     if (!isValidLedgerEvent(value) || value.seq <= previousSeq || options.validateEvent !== void 0 && !options.validateEvent(value)) {
       return { corrupt: `line ${at} is not a valid ledger event` };
     }
@@ -583,11 +590,12 @@ function loadImportManifest(target, id) {
   if (manifest.version !== 1 || manifest.id !== id || historyTargetPath(manifest.target) !== historyTargetPath(target) || !Array.isArray(manifest.sources) || !["staged", "pending", "applied", "conflicted"].includes(manifest.status)) {
     throw new FactoryError("invalid-import", `damaged import manifest ${id}`);
   }
+  if (manifest.materialization !== void 0 && (typeof manifest.materialization !== "object" || manifest.materialization === null || !["pending", "applied", "refused"].includes(manifest.materialization.status) || !Array.isArray(manifest.materialization.diagnostics) || !manifest.materialization.diagnostics.every((line) => typeof line === "string"))) throw new FactoryError("invalid-import", `damaged materialization hold ${id}`);
   return manifest;
 }
 function publicImportStatus(manifest) {
-  const { id, target, status, added, duplicates, conflicts, diagnostics } = manifest;
-  return { id, target, status, ...added === void 0 ? {} : { added }, ...duplicates === void 0 ? {} : { duplicates }, ...conflicts === void 0 ? {} : { conflicts }, diagnostics };
+  const { id, target, status, added, duplicates, conflicts, diagnostics, materialization } = manifest;
+  return { id, target, status, ...materialization === void 0 ? {} : { materialization }, ...added === void 0 ? {} : { added }, ...duplicates === void 0 ? {} : { duplicates }, ...conflicts === void 0 ? {} : { conflicts }, diagnostics };
 }
 function readLedgerImports(target) {
   let entries;
@@ -858,9 +866,13 @@ function changed(actual, expected) {
     return a?.hash !== b?.hash || a?.mode !== b?.mode || a?.kind !== b?.kind;
   });
 }
+function controlDirectory(journal, path, current, expected) {
+  return journal.controls.length > 0 && ["spool", "spool/requests", "spool/replies", "spool/processed"].includes(path) && !expected.some((entry) => entry.path === path) && current.some((entry) => entry.path === path && entry.kind === "directory");
+}
 function assertInventory(journal, mixed = false) {
   const current = inventory(journal.stateDir, journal.projectSlug, journal.controls);
-  const differences = changed(current, mixed ? journal.before : journal.after);
+  const expected = mixed ? journal.before : journal.after;
+  const differences = changed(current, expected).filter((path) => !controlDirectory(journal, path, current, expected));
   const unexpected = mixed ? differences.filter((path) => {
     if (!journal.changes.some((change) => change.path === path)) return true;
     const actual = current.find((entry) => entry.path === path), after = journal.after.find((entry) => entry.path === path);
@@ -895,6 +907,11 @@ function addControl(journal, id) {
 }
 function upgradeReply(id, result) {
   return { id, ok: true, summary: "id" in result ? `Upgrade ${result.id}: ${result.status}` : `Upgrade preflight: ${result.ok ? "ready" : "conflicted"}`, upgrade: result };
+}
+function recordUpgradeControlReceipt(stateDir, transactionId, id) {
+  const journal = load(stateDir, transactionId);
+  addControl(journal, id);
+  save(journal);
 }
 function recordUpgradeControlReply(stateDir, transactionId, id, reply) {
   const journal = load(stateDir, transactionId);
@@ -967,7 +984,8 @@ async function upgradeFactory(factory, input, options = {}) {
           options.fault?.(`restored:${change.path}`);
         }
         ledger.refreshHistoryFromDisk({ writerId: journal.beforeWriter });
-        const differences = changed(inventory(stateDir, journal.projectSlug, journal.controls), journal.before);
+        const restored = inventory(stateDir, journal.projectSlug, journal.controls);
+        const differences = changed(restored, journal.before).filter((path) => !controlDirectory(journal, path, restored, journal.before));
         if (differences.length > 0) throw new FactoryError("upgrade-restore-mismatch", differences.join(", "));
         journal.phase = "restored";
         save(journal);
@@ -1049,6 +1067,7 @@ async function upgradeFactory(factory, input, options = {}) {
 }
 export {
   preflightUpgrade,
+  recordUpgradeControlReceipt,
   recordUpgradeControlReply,
   upgradeDirectory,
   upgradeFactory,

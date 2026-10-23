@@ -6,7 +6,13 @@ import { planHistoryImport } from "./history-import.ts";
 import type { HistoryImportSource, ImportConflict } from "./history-import.ts";
 import { FactoryError } from "./errors.ts";
 
+export interface ImportMaterialization {
+  status: "pending" | "applied" | "refused";
+  diagnostics: string[];
+}
+
 export interface ImportStatus {
+  materialization?: ImportMaterialization;
   id: string;
   target: string;
   status: "staged" | "pending" | "applied" | "conflicted";
@@ -98,14 +104,15 @@ export function loadImportManifest(target: string, id: string): ImportManifest {
   if (manifest.version !== 1 || manifest.id !== id || historyTargetPath(manifest.target) !== historyTargetPath(target) || !Array.isArray(manifest.sources) || !["staged", "pending", "applied", "conflicted"].includes(manifest.status)) {
     throw new FactoryError("invalid-import", `damaged import manifest ${id}`);
   }
+  if (manifest.materialization !== undefined && (typeof manifest.materialization !== "object" || manifest.materialization === null || !["pending", "applied", "refused"].includes(manifest.materialization.status) || !Array.isArray(manifest.materialization.diagnostics) || !manifest.materialization.diagnostics.every((line) => typeof line === "string"))) throw new FactoryError("invalid-import", `damaged materialization hold ${id}`);
   return manifest;
 }
 export function importSources(manifest: ImportManifest): HistoryImportSource[] {
   return manifest.sources.map((source) => ({ ...source, bytes: Buffer.from(source.bytes, "base64"), artifacts: source.artifacts.map((file) => ({ path: file.path, bytes: Buffer.from(file.bytes, "base64") })) }));
 }
 export function publicImportStatus(manifest: ImportManifest): ImportStatus {
-  const { id, target, status, added, duplicates, conflicts, diagnostics } = manifest;
-  return { id, target, status, ...(added === undefined ? {} : { added }), ...(duplicates === undefined ? {} : { duplicates }), ...(conflicts === undefined ? {} : { conflicts }), diagnostics };
+  const { id, target, status, added, duplicates, conflicts, diagnostics, materialization } = manifest;
+  return { id, target, status, ...(materialization === undefined ? {} : { materialization }), ...(added === undefined ? {} : { added }), ...(duplicates === undefined ? {} : { duplicates }), ...(conflicts === undefined ? {} : { conflicts }), diagnostics };
 }
 export function readLedgerImports(target: string): ImportStatus[] {
   let entries: string[];
@@ -114,7 +121,7 @@ export function readLedgerImports(target: string): ImportStatus[] {
   return entries.filter((id) => /^[a-f0-9]{64}$/.test(id) && existsSync(join(importDirectory(target, id), "manifest.json"))).sort().map((id) => publicImportStatus(loadImportManifest(target, id)));
 }
 
-export function stageLedgerImport(targetPath: string, sources: readonly HistoryImportSource[]): ImportStatus {
+export function stageLedgerImport(targetPath: string, sources: readonly HistoryImportSource[], options: { materialization?: ImportMaterialization } = {}): ImportStatus {
   const target = historyTargetPath(targetPath);
   const id = planHistoryImport({ existingLines: "", sources }).id;
   const destination = importDirectory(target, id);
@@ -130,7 +137,7 @@ export function stageLedgerImport(targetPath: string, sources: readonly HistoryI
       });
       return { ...source, bytes: bytes.toString("base64"), artifacts };
     });
-    const manifest: ImportManifest = { version: 1, id, target, status: "pending", sources: stored, createdAt: new Date().toISOString(), diagnostics: ["snapshot fetched and staged; Ledger owner admission pending"] };
+    const manifest: ImportManifest = { version: 1, id, target, status: "pending", ...(options.materialization === undefined ? {} : { materialization: options.materialization }), sources: stored, createdAt: new Date().toISOString(), diagnostics: ["snapshot fetched and staged; Ledger owner admission pending"] };
     writeDurableFile(join(dir, "manifest.json"), `${JSON.stringify(manifest)}\n`);
     try { renameSync(dir, destination); fsyncDirectory(dirname(destination)); }
     catch (error) {
@@ -141,4 +148,15 @@ export function stageLedgerImport(targetPath: string, sources: readonly HistoryI
   }
   listeners.get(target)?.();
   return publicImportStatus(loadImportManifest(target, id));
+}
+
+/** Complete only an existing Vault hold; transport retries never downgrade an admitted batch. */
+export function updateImportMaterialization(imports: readonly ImportStatus[], materialization: ImportMaterialization): void {
+  for (const item of imports) {
+    const manifest = loadImportManifest(item.target, item.id);
+    if (manifest.status === "applied" || manifest.materialization === undefined || manifest.materialization.status === "applied") continue;
+    manifest.materialization = materialization;
+    saveImportManifest(manifest);
+    listeners.get(historyTargetPath(item.target))?.();
+  }
 }

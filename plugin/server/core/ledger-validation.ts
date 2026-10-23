@@ -8,10 +8,17 @@ export function isValidLedgerEvent(value: unknown): value is LedgerEvent {
   return (event.schema_version === undefined || event.schema_version === 1 || event.schema_version === 2) &&
     (event.schema_version !== 2 || identityMetadataIsValid(event)) &&
     Number.isSafeInteger(event.seq) && (event.seq as number) > 0 &&
-    typeof event.ts === "string" &&
+    typeof event.ts === "string" && (event.schema_version !== 2 || utcTimestampIsValid(event.ts)) &&
     typeof event.event === "string" && (EVENT_NAMES as readonly string[]).includes(event.event) &&
     shapeIsValid(value as LedgerEvent) &&
     (event.schema_version !== 2 || v2PayloadIsValid(event));
+}
+
+/** A recorded time fact must name an actual calendar instant explicitly in UTC. */
+function utcTimestampIsValid(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|\+00:?00)$/.test(value)) return false;
+  const instant = new Date(value);
+  return Number.isFinite(instant.getTime()) && instant.toISOString().slice(0, 19) === value.slice(0, 19);
 }
 
 function nonempty(value: unknown): value is string { return typeof value === "string" && value.trim() !== ""; }
@@ -56,6 +63,8 @@ export function parseLedgerJsonl(raw: string, options: LedgerValidationOptions =
     let value: unknown;
     try { value = JSON.parse(line); }
     catch { return { corrupt: `line ${at} is not valid JSON` }; }
+    const timestamped = value as { schema_version?: unknown; ts?: unknown } | null;
+    if (timestamped !== null && typeof timestamped === "object" && timestamped.schema_version === 2 && (typeof timestamped.ts !== "string" || !utcTimestampIsValid(timestamped.ts))) return { corrupt: `line ${at} has an invalid ISO 8601 UTC timestamp` };
     if (!isValidLedgerEvent(value) || value.seq <= previousSeq ||
         (options.validateEvent !== undefined && !options.validateEvent(value as unknown as Record<string, unknown>))) {
       return { corrupt: `line ${at} is not a valid ledger event` };

@@ -141,7 +141,7 @@ test("disposable Project writer identity reloads independently while root remain
   factory.ledger.append({ event: "contract_set", task: "ROOT", workspace: "/root-work", gate: "true", artifact: "out" });
   const original = readFileSync(factory.ledger.path);
   writeProjectRegistration(stateDir, "disposable", { root: "/project-work" });
-  writeFileSync(join(stateDir, "projects", "disposable", "ledger.jsonl"), JSON.stringify({ seq: 9, ts: "now", event: "contract_set", task: "COPY", workspace: "/project-work", gate: "true", artifact: "out" }) + "\n");
+  writeFileSync(join(stateDir, "projects", "disposable", "ledger.jsonl"), JSON.stringify({ seq: 9, ts: "2026-10-23T00:00:00.000Z", event: "contract_set", task: "COPY", workspace: "/project-work", gate: "true", artifact: "out" }) + "\n");
   await upgradeFactory(factory, { action: "apply", projectSlug: "disposable" });
   const writer = readLocalWriterIdentity(stateDir, "disposable"); assert.ok(writer);
   assert.equal(readLocalWriterIdentity(stateDir), undefined);
@@ -266,7 +266,7 @@ test("ambiguous reused legacy Report paths refuse activation without repair", as
       { event: "gate_started", task: "T", attempt: 1, cmd: "true" },
       { event: "gate_finished", task: "T", attempt: 1, verdict: "green", exit: 0, note: "", sha },
       { event: "report_written", task: "T", attempt: 1, path: report },
-    ]) records.push({ ...event, seq: records.length + 1, ts: "now" });
+    ]) records.push({ ...event, seq: records.length + 1, ts: "2026-10-23T00:00:00.000Z" });
   }
   writeFileSync(path, records.map((event) => JSON.stringify(event) + "\n").join("")); writeFileSync(report, "only later bytes survived\n");
   const before = snapshot(stateDir), checked = preflightUpgrade(stateDir);
@@ -293,4 +293,17 @@ test("CLI preflight flushes a large inventory through pipes with success and ref
   assert.equal(failure.ok, false);
   assert.match(failure.conflicts.join("\n"), /valid ledger event/);
   assert.deepEqual(snapshot(stateDir), damaged);
+});
+
+test("upgrade preflight refuses an invalid legacy time fact without rewriting the readable original", (t) => {
+  const dir = makeTempDir(); disposeDir(t, dir);
+  const stateDir = join(dir, "state"); mkdirSync(stateDir);
+  const raw = JSON.stringify({ seq: 1, ts: "not-a-time", event: "retro_written", model: "fixture", outcome: "failed", durationMs: 1, error: "unavailable" }) + "\n";
+  const path = join(stateDir, "ledger.jsonl"); writeFileSync(path, raw);
+  const before = snapshot(stateDir);
+  const result = preflightUpgrade(stateDir);
+  assert.equal(result.ok, false);
+  assert.match(result.conflicts.join("\n"), /timestamp|ISO 8601|UTC/i);
+  assert.deepEqual(snapshot(stateDir), before);
+  assert.equal(readFileSync(path, "utf8"), raw);
 });

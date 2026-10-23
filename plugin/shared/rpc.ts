@@ -11,7 +11,7 @@
  */
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
-import { ImportStatusSchema, FactoryViewSchema, LaneNameSchema, TaskDetailViewSchema, VaultStatusViewSchema } from "./view.ts";
+import { ImportMaterializationSchema, ImportStatusSchema, FactoryViewSchema, LaneNameSchema, TaskDetailViewSchema, VaultStatusViewSchema } from "./view.ts";
 
 /** Every handler's refusal shape: a stable machine code plus the human sentence. */
 export const Failure = z.object({ ok: z.literal(false), code: z.string(), error: z.string() });
@@ -269,8 +269,10 @@ export const vaultHydrate = defineRpc({
     repo: z.string().optional(),
     /** The tarball ref — omitted uses the configured branch. */
     ref: z.string().optional(),
+    mergeLedgers: z.boolean().optional(),
+    overwriteConfigs: z.boolean().optional(),
   }),
-  output: z.union([z.object({ ok: z.literal(true), vault: VaultStatusViewSchema, hydratedFiles: z.array(z.string()), summary: z.string(), historyImports: z.array(ImportStatusSchema).optional() }), Failure]),
+  output: z.union([z.object({ ok: z.literal(true), vault: VaultStatusViewSchema, hydratedFiles: z.array(z.string()), summary: z.string(), materialization: ImportMaterializationSchema.optional(), historyImports: z.array(ImportStatusSchema).optional() }), Failure]),
 });
 
 export const vaultPull = defineRpc({
@@ -279,7 +281,7 @@ export const vaultPull = defineRpc({
     /** Reconcile the vault's `state/nodes/*` ledger snapshots into this machine's ledgers after hydrating. */
     mergeLedgers: z.boolean().optional(),
   }),
-  output: z.union([z.object({ ok: z.literal(true), vault: VaultStatusViewSchema, hydratedFiles: z.array(z.string()), summary: z.string(), historyImports: z.array(ImportStatusSchema).optional() }), Failure]),
+  output: z.union([z.object({ ok: z.literal(true), vault: VaultStatusViewSchema, hydratedFiles: z.array(z.string()), summary: z.string(), materialization: ImportMaterializationSchema.optional(), historyImports: z.array(ImportStatusSchema).optional() }), Failure]),
 });
 
 export const vaultPush = defineRpc({
@@ -305,7 +307,7 @@ export const vaultSync = defineRpc({
     z.object({
       ok: z.literal(true),
       vault: VaultStatusViewSchema,
-      historyImports: z.array(ImportStatusSchema).optional(),
+      materialization: ImportMaterializationSchema.optional(), historyImports: z.array(ImportStatusSchema).optional(),
       createdRepo: z.boolean(),
       hydratedFiles: z.array(z.string()),
       pushedFiles: z.array(z.string()),
@@ -337,7 +339,7 @@ export const vaultImport = defineRpc({
     z.object({
       ok: z.literal(true),
       vault: VaultStatusViewSchema,
-      historyImports: z.array(ImportStatusSchema).optional(),
+      materialization: ImportMaterializationSchema.optional(), historyImports: z.array(ImportStatusSchema).optional(),
       importedFiles: z.array(z.string()),
       pushed: z.boolean(),
       summary: z.string(),

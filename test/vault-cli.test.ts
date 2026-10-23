@@ -1039,3 +1039,53 @@ test("the CLI's vault mirror imports no src/ or plugin-server code, and carries 
     }
   }
 });
+
+test("busy-owner CLI hydrate retains pending history and refused materialization for an idempotent Owner RPC retry", { timeout: 15_000 }, async (t) => {
+  const home = makeTempDir(); disposeDir(t, home);
+  saveVaultConfig(home, { repo: "owner/vault", nodeId: "local" });
+  const configPath = join(home, "plugin-state/paseo-factory/vault-config.json");
+  const configBefore = readFileSync(configPath);
+  const stateDir = join(home, "plugin-state/paseo-factory");
+  const { createFactory } = await import("../plugin/server/core/factory.ts");
+  const { planLegacyIdentity } = await import("../src/history-identity.ts");
+  const { createSurfaceHandlers } = await import("../plugin/server/surface-rpc.ts");
+  const { vaultHydrate } = await import("../plugin/shared/rpc.ts");
+  const encode = (model: string) => planLegacyIdentity(JSON.stringify({ seq: 1, ts: "2026-10-23T00:00:00Z", event: "retro_written", model, outcome: "failed", durationMs: 1, error: "unavailable" }) + "\n", { writerId: "remote" }).events.map((event) => JSON.stringify(event) + "\n").join("");
+  writeFileSync(join(stateDir, "ledger.jsonl"), planLegacyIdentity("", { writerId: "local" }).events.map((event) => JSON.stringify(event) + "\n").join(""));
+  let factory = createFactory({ stateDir, writerId: "local" }); t.after(() => factory.history.stop()); factory.history.start();
+  let release!: () => void, entered!: () => void;
+  const ready = new Promise<void>((done) => { entered = done; }), held = new Promise<void>((done) => { release = done; });
+  const operation = factory.history.runOperation(async () => { entered(); await held; }); await ready;
+  const top = "daymanondev-factory-vault-abc1234";
+  const original = encode("held-retro");
+  const tar = buildTarball([{ path: `${top}/state/nodes/remote/global-ledger.jsonl`, data: original }, { path: `${top}/config/lanes.json`, data: "{}\n" }]);
+  const { binDir } = makeGhShim(t, tar);
+  const cli = () => runFactory(["--home", home, "vault", "hydrate", "--merge-ledgers"], { PATH: `${binDir}:${process.env.PATH ?? ""}` });
+  let pending: any;
+  try {
+    const downloaded = await cli(); assert.equal(downloaded.status, 0, downloaded.stderr); pending = JSON.parse(downloaded.stdout);
+    assert.equal(pending.materialization.status, "refused"); assert.match(pending.materialization.diagnostics.join("\n"), /RPC/);
+    assert.deepEqual(pending.hydratedFiles, []); assert.equal(pending.historyImports[0]?.status, "pending");
+    assert.equal(pending.historyImports[0]?.materialization.status, "refused");
+    assert.deepEqual(readFileSync(configPath), configBefore);
+    assert.equal(existsSync(join(stateDir, "lanes.json")), false);
+    const manifest = loadImportManifest(factory.ledger.path, pending.historyImports[0].id);
+    assert.equal(importSources(manifest)[0]?.lines, original);
+    assert.equal(factory.ledger.events.some((event) => event.event === "retro_written"), false);
+  } finally { release(); await operation; }
+  // Held materialization cannot block unrelated ordinary work or safe imports.
+  assert.equal(await factory.history.runOperation(() => "ordinary", { newWork: true }), "ordinary");
+  assert.equal(factory.history.stage([{ nodeId: "independent", lines: encode("independent-retro") }]).status, "applied");
+  factory.history.stop(); factory = createFactory({ stateDir, writerId: "local" }); factory.history.start();
+  assert.equal(factory.history.status().find((item) => item.id === pending.historyImports[0].id)?.status, "pending");
+  const handlers = createSurfaceHandlers({ factory, stateDir, home, daemon: {} as never, vaultRunner: async () => tar });
+  const input = vaultHydrate.input.parse({ mergeLedgers: true });
+  const retried = vaultHydrate.output.parse(await handlers.vaultHydrate(input)); assert.ok(retried.ok);
+  assert.equal(retried.materialization?.status, "applied");
+  assert.equal(retried.historyImports?.[0]?.status, "applied");
+  assert.equal(retried.historyImports?.[0]?.id, pending.historyImports[0].id);
+  assert.equal(readFileSync(join(stateDir, "lanes.json"), "utf8"), "{}\n");
+  assert.equal(factory.ledger.events.filter((event) => event.event === "retro_written" && event.model === "held-retro").length, 1);
+  const duplicate = await cli(); assert.equal(duplicate.status, 0, duplicate.stderr);
+  assert.equal(JSON.parse(duplicate.stdout).historyImports[0].status, "applied", "a later transport retry never downgrades an admitted batch");
+});

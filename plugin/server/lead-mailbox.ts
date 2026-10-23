@@ -1268,10 +1268,10 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     markKickoffSent,
     stop,
   };
-  const sync = new Set(["startupRecovery", "settleLeadRotation", "resetProjectMailbox", "markKickoffSent", "stop"]);
+  const sync = new Set(["startupRecovery", "settleLeadRotation", "resetProjectMailbox", "markKickoffSent"]);
   return new Proxy(runtime, { get(target, key, receiver) {
     const value = Reflect.get(target, key, receiver);
-    if (typeof value !== "function") return value;
+    if (typeof value !== "function" || key === "stop") return value;
     return (...args: unknown[]) => sync.has(String(key)) ? deps.factory.history.runSync(() => value.apply(receiver, args)) : deps.factory.history.runOperation(() => value.apply(receiver, args));
   } });
 }

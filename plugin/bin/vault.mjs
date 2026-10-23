@@ -76,7 +76,12 @@ function needsHumanEvidenceIsValid(evidence, reason) {
 function isValidLedgerEvent(value) {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const event = value;
-  return (event.schema_version === void 0 || event.schema_version === 1 || event.schema_version === 2) && (event.schema_version !== 2 || identityMetadataIsValid(event)) && Number.isSafeInteger(event.seq) && event.seq > 0 && typeof event.ts === "string" && typeof event.event === "string" && EVENT_NAMES.includes(event.event) && shapeIsValid(value) && (event.schema_version !== 2 || v2PayloadIsValid(event));
+  return (event.schema_version === void 0 || event.schema_version === 1 || event.schema_version === 2) && (event.schema_version !== 2 || identityMetadataIsValid(event)) && Number.isSafeInteger(event.seq) && event.seq > 0 && typeof event.ts === "string" && (event.schema_version !== 2 || utcTimestampIsValid(event.ts)) && typeof event.event === "string" && EVENT_NAMES.includes(event.event) && shapeIsValid(value) && (event.schema_version !== 2 || v2PayloadIsValid(event));
+}
+function utcTimestampIsValid(value) {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|\+00:?00)$/.test(value)) return false;
+  const instant = new Date(value);
+  return Number.isFinite(instant.getTime()) && instant.toISOString().slice(0, 19) === value.slice(0, 19);
 }
 function nonempty(value) {
   return typeof value === "string" && value.trim() !== "";
@@ -117,6 +122,8 @@ function parseLedgerJsonl(raw, options = {}) {
     } catch {
       return { corrupt: `line ${at} is not valid JSON` };
     }
+    const timestamped = value;
+    if (timestamped !== null && typeof timestamped === "object" && timestamped.schema_version === 2 && (typeof timestamped.ts !== "string" || !utcTimestampIsValid(timestamped.ts))) return { corrupt: `line ${at} has an invalid ISO 8601 UTC timestamp` };
     if (!isValidLedgerEvent(value) || value.seq <= previousSeq || options.validateEvent !== void 0 && !options.validateEvent(value)) {
       return { corrupt: `line ${at} is not a valid ledger event` };
     }
@@ -769,14 +776,15 @@ function loadImportManifest(target, id) {
   if (manifest.version !== 1 || manifest.id !== id || historyTargetPath(manifest.target) !== historyTargetPath(target) || !Array.isArray(manifest.sources) || !["staged", "pending", "applied", "conflicted"].includes(manifest.status)) {
     throw new FactoryError("invalid-import", `damaged import manifest ${id}`);
   }
+  if (manifest.materialization !== void 0 && (typeof manifest.materialization !== "object" || manifest.materialization === null || !["pending", "applied", "refused"].includes(manifest.materialization.status) || !Array.isArray(manifest.materialization.diagnostics) || !manifest.materialization.diagnostics.every((line) => typeof line === "string"))) throw new FactoryError("invalid-import", `damaged materialization hold ${id}`);
   return manifest;
 }
 function importSources(manifest) {
   return manifest.sources.map((source) => ({ ...source, bytes: Buffer.from(source.bytes, "base64"), artifacts: source.artifacts.map((file) => ({ path: file.path, bytes: Buffer.from(file.bytes, "base64") })) }));
 }
 function publicImportStatus(manifest) {
-  const { id, target, status, added, duplicates, conflicts, diagnostics } = manifest;
-  return { id, target, status, ...added === void 0 ? {} : { added }, ...duplicates === void 0 ? {} : { duplicates }, ...conflicts === void 0 ? {} : { conflicts }, diagnostics };
+  const { id, target, status, added, duplicates, conflicts, diagnostics, materialization } = manifest;
+  return { id, target, status, ...materialization === void 0 ? {} : { materialization }, ...added === void 0 ? {} : { added }, ...duplicates === void 0 ? {} : { duplicates }, ...conflicts === void 0 ? {} : { conflicts }, diagnostics };
 }
 function readLedgerImports(target) {
   let entries;
@@ -788,7 +796,7 @@ function readLedgerImports(target) {
   }
   return entries.filter((id) => /^[a-f0-9]{64}$/.test(id) && existsSync(join(importDirectory(target, id), "manifest.json"))).sort().map((id) => publicImportStatus(loadImportManifest(target, id)));
 }
-function stageLedgerImport(targetPath, sources) {
+function stageLedgerImport(targetPath, sources, options = {}) {
   const target = historyTargetPath(targetPath);
   const id = planHistoryImport({ existingLines: "", sources }).id;
   const destination = importDirectory(target, id);
@@ -804,7 +812,7 @@ function stageLedgerImport(targetPath, sources) {
       });
       return { ...source, bytes: bytes.toString("base64"), artifacts };
     });
-    const manifest = { version: 1, id, target, status: "pending", sources: stored, createdAt: (/* @__PURE__ */ new Date()).toISOString(), diagnostics: ["snapshot fetched and staged; Ledger owner admission pending"] };
+    const manifest = { version: 1, id, target, status: "pending", ...options.materialization === void 0 ? {} : { materialization: options.materialization }, sources: stored, createdAt: (/* @__PURE__ */ new Date()).toISOString(), diagnostics: ["snapshot fetched and staged; Ledger owner admission pending"] };
     writeDurableFile(join(dir, "manifest.json"), `${JSON.stringify(manifest)}
 `);
     try {
@@ -817,6 +825,15 @@ function stageLedgerImport(targetPath, sources) {
   }
   listeners.get(target)?.();
   return publicImportStatus(loadImportManifest(target, id));
+}
+function updateImportMaterialization(imports, materialization) {
+  for (const item of imports) {
+    const manifest = loadImportManifest(item.target, item.id);
+    if (manifest.status === "applied" || manifest.materialization === void 0 || manifest.materialization.status === "applied") continue;
+    manifest.materialization = materialization;
+    saveImportManifest(manifest);
+    listeners.get(historyTargetPath(item.target))?.();
+  }
 }
 
 // src/upgrade-state.ts
@@ -1453,7 +1470,7 @@ var LedgerAdmission = class _LedgerAdmission {
     if (id !== void 0) throw new FactoryError("upgrade-recovery-required", `Upgrade ${id} is incomplete; resume or inspect maintenance before ordinary mutations`);
   }
   #pending() {
-    return [this.ledger.path, ...this.#projectTargets()].some((path) => readLedgerImports(path).some((item) => item.status === "pending" || item.status === "staged"));
+    return [this.ledger.path, ...this.#projectTargets()].some((path) => readLedgerImports(path).some((item) => (item.status === "pending" || item.status === "staged") && (item.materialization === void 0 || item.materialization.status === "applied")));
   }
   #wake() {
     for (const wake of this.#waiters) wake();
@@ -1555,6 +1572,7 @@ var LedgerAdmission = class _LedgerAdmission {
       for (const status of this.status()) {
         if (status.status !== "pending" && status.status !== "staged") continue;
         const manifest = loadImportManifest(this.ledger.path, status.id);
+        if (manifest.materialization !== void 0 && manifest.materialization.status !== "applied") continue;
         const current = this.#raw();
         if (manifest.afterHash !== void 0 && historyHash(current) === manifest.afterHash) {
           this.ledger.refreshHistoryFromDisk();
@@ -1607,7 +1625,7 @@ var LedgerAdmission = class _LedgerAdmission {
       }
       this.#error = void 0;
       for (const path of this.#projectTargets()) {
-        if (!readLedgerImports(path).some((item) => item.status === "pending" || item.status === "staged")) continue;
+        if (!readLedgerImports(path).some((item) => (item.status === "pending" || item.status === "staged") && (item.materialization === void 0 || item.materialization.status === "applied"))) continue;
         const owner = this.#projectOwner(basename5(dirname5(path)));
         owner.drain();
         if (owner.error !== void 0) this.#error = owner.error;
@@ -2398,14 +2416,6 @@ function sealVaultFile(paseoHome, sourcePath, vaultPath, passphrase) {
 import { execFileSync as execFileSync3 } from "node:child_process";
 import { readFileSync as readFileSync10, mkdirSync as mkdirSync5, chmodSync, writeFileSync as writeFileSync5, readdirSync as readdirSync5, existsSync as existsSync6, copyFileSync as copyFileSync2 } from "node:fs";
 import { join as join8, basename as basename7, isAbsolute as isAbsolute5, resolve as resolvePath, dirname as dirname7 } from "node:path";
-function hydrateRuntimeFromTree(paseoHome, treeRoot, passphrase) {
-  const written = [];
-  for (const rel of walkFiles(treeRoot, () => false)) {
-    writeRuntimeFile(paseoHome, rel, unsealVaultBuffer(readFileSync10(join8(treeRoot, rel)), passphrase));
-    written.push(rel);
-  }
-  return written.sort();
-}
 function writeRuntimeFile(paseoHome, vaultPath, data) {
   assertSafeVaultPath(vaultPath);
   const runtimeRoot = join8(paseoHome, "vault-runtime");
@@ -2802,34 +2812,6 @@ import { dirname as dirname8, join as join9 } from "node:path";
 function reconcileVaultLedgers(existingLines, sources, options = {}) {
   return reconcileHistory(existingLines, sources, options);
 }
-function reconcileVaultLedgerState(paseoHome) {
-  const stateDir = vaultStateDir(paseoHome);
-  const runtimeRoot = join9(paseoHome, "vault-runtime");
-  const imports = mergeLedgerFile(join9(stateDir, "ledger.jsonl"), nodeLedgerSourcesAt(runtimeRoot, ["global-ledger.jsonl"]));
-  for (const app of resolveVaultApps(paseoHome, readVaultManifestAt(runtimeRoot))) {
-    if (app.projectSlug === null) continue;
-    imports.push(...mergeLedgerFile(
-      projectHistoryTarget(stateDir, app.projectSlug),
-      nodeLedgerSourcesAt(runtimeRoot, ["projects", app.canonicalAppKey, "ledger.jsonl"])
-    ));
-  }
-  return imports;
-}
-function nodeLedgerSourcesAt(vaultTreeRoot, rel) {
-  const nodesDir = join9(vaultTreeRoot, "state", "nodes");
-  const out = [];
-  for (const nodeId of listDirNames(nodesDir)) {
-    const path = join9(nodesDir, nodeId, ...rel);
-    if (existsSync7(path)) {
-      const bytes = readFileSync11(path);
-      out.push({ nodeId, lines: bytes.toString("utf8"), bytes });
-    }
-  }
-  return out;
-}
-function mergeLedgerFile(localPath, sources) {
-  return sources.length === 0 ? [] : [stageLedgerImport(localPath, sources)];
-}
 function listDirNames(dir) {
   try {
     return readdirSync6(dir).sort();
@@ -2857,6 +2839,25 @@ function snapshotVaultLedger(source, target) {
   if (parsed.corrupt !== void 0) throw new FactoryError("vault-ledger-corrupt", `Cannot publish Ledger ${source}: ${parsed.corrupt}`);
   mkdirSync6(dirname8(target), { recursive: true });
   writeFileSync6(target, prefix);
+}
+function stageFetchedVaultHistory(paseoHome, files) {
+  const stateDir = vaultStateDir(paseoHome);
+  const upgrade = pendingUpgradeFor(stateDir);
+  if (upgrade !== void 0) throw new FactoryError("upgrade-recovery-required", `Upgrade ${upgrade} is incomplete; resume or restore before staging new Vault history`);
+  const manifestBytes = files.get("vault.manifest.json");
+  const manifest = manifestBytes === void 0 ? readVaultManifestAt(join9(paseoHome, "vault-runtime")) : parseVaultManifest(manifestBytes.toString("utf8"));
+  const snapshots = (relative2) => [...files].flatMap(([path, bytes]) => {
+    const match = /^state\/nodes\/([^/]+)\/(.+)$/.exec(path);
+    return match?.[2] === relative2 ? [{ nodeId: match[1], lines: bytes.toString("utf8"), bytes }] : [];
+  });
+  const hold = { status: "pending", diagnostics: ["downloaded history retained; associated Vault files await owner materialization before admission"] };
+  const stage = (target, sources) => sources.length === 0 ? [] : [stageLedgerImport(target, sources, { materialization: hold })];
+  const imports = stage(join9(stateDir, "ledger.jsonl"), snapshots("global-ledger.jsonl"));
+  for (const app of resolveVaultApps(paseoHome, manifest)) {
+    if (app.projectSlug === null) continue;
+    imports.push(...stage(projectHistoryTarget(stateDir, app.projectSlug), snapshots(`projects/${app.canonicalAppKey}/ledger.jsonl`)));
+  }
+  return imports;
 }
 
 // src/vault-config.ts
@@ -2990,7 +2991,7 @@ function vaultStateDir(paseoHome) {
 }
 
 // src/vault.ts
-import { existsSync as existsSync9, mkdirSync as mkdirSync8 } from "node:fs";
+import { existsSync as existsSync9, mkdirSync as mkdirSync8, readFileSync as readFileSync13 } from "node:fs";
 import { join as join11, dirname as dirname10 } from "node:path";
 import { gunzipSync } from "node:zlib";
 async function hydrateVaultDirect(paseoHome, options = {}) {
@@ -3008,23 +3009,19 @@ async function hydrateVaultDirect(paseoHome, options = {}) {
   const env = options.token !== void 0 && options.token !== "" ? { GH_TOKEN: options.token } : void 0;
   const tarball = await runner({ command: "gh", args: ["api", `repos/${slug}/tarball/${ref}`], env });
   const archive = tarball.length > 2 && tarball[0] === 31 && tarball[1] === 139 ? gunzipSync(tarball) : tarball;
-  return LedgerAdmission.withStateMaintenance(vaultStateDir(paseoHome), () => {
-    const passphrase = resolveVaultPassphrase(config?.passphrase);
-    const hydratedFiles = [];
-    for (const entry of parseTarEntries(archive)) {
-      const vaultPath = vaultPathFromArchivePath(entry.path);
-      if (vaultPath === null) continue;
-      writeRuntimeFile(paseoHome, vaultPath, unsealVaultBuffer(entry.data, passphrase));
-      hydratedFiles.push(vaultPath);
-    }
-    applyVaultHydration(paseoHome, options.overwriteConfigs ?? false);
-    const historyImports = options.mergeLedgers === true ? reconcileVaultLedgerState(paseoHome) : [];
-    stampVaultConfig(paseoHome, config, repo, { lastHydratedAt: nowIso(), lastHydrateMode: "direct" });
-    return { repo, ref, hydratedFiles: hydratedFiles.sort(), historyImports };
-  }).then((result) => ({ ...result, historyImports: refreshVaultImports(result.historyImports) }));
+  const files = /* @__PURE__ */ new Map();
+  for (const entry of parseTarEntries(archive)) {
+    const path = vaultPathFromArchivePath(entry.path);
+    if (path === null) continue;
+    assertSafeVaultPath(path);
+    files.set(path, unsealVaultBuffer(entry.data, resolveVaultPassphrase(config?.passphrase)));
+  }
+  return { repo, ref, ...await materializeFetchedVault(paseoHome, files, options, () => stampVaultConfig(paseoHome, config, repo, { lastHydratedAt: nowIso(), lastHydrateMode: "direct" })) };
 }
 async function pullVault(paseoHome, options = {}) {
-  const config = requiredVaultConfig(paseoHome);
+  return pullConfiguredVault(paseoHome, requiredVaultConfig(paseoHome), options);
+}
+async function pullConfiguredVault(paseoHome, config, options, configure = false) {
   const runner = options.runner ?? builtinVaultRunner;
   const vaultDir = join11(paseoHome, "vault");
   if (existsSync9(join11(vaultDir, ".git"))) {
@@ -3041,13 +3038,15 @@ async function pullVault(paseoHome, options = {}) {
   } else {
     await ensureVaultCheckout(runner, config, vaultDir);
   }
-  return LedgerAdmission.withStateMaintenance(vaultStateDir(paseoHome), () => {
-    const hydratedFiles = hydrateRuntimeFromTree(paseoHome, vaultDir, resolveVaultPassphrase(config.passphrase));
-    applyVaultHydration(paseoHome, options.overwriteConfigs ?? false);
-    const historyImports = options.mergeLedgers === true ? reconcileVaultLedgerState(paseoHome) : [];
+  const files = /* @__PURE__ */ new Map();
+  for (const path of walkFiles(vaultDir, () => false)) {
+    assertSafeVaultPath(path);
+    files.set(path, unsealVaultBuffer(readFileSync13(join11(vaultDir, path)), resolveVaultPassphrase(config.passphrase)));
+  }
+  return materializeFetchedVault(paseoHome, files, options, () => {
+    if (configure) saveVaultConfig(paseoHome, config);
     stampVaultConfig(paseoHome, config, config.repo, { lastHydratedAt: nowIso(), lastHydrateMode: "sync" });
-    return { hydratedFiles, historyImports };
-  }).then((result) => ({ ...result, historyImports: refreshVaultImports(result.historyImports) }));
+  });
 }
 async function pushVault(paseoHome, options = {}) {
   const config = requiredVaultConfig(paseoHome);
@@ -3120,7 +3119,7 @@ async function syncVault(paseoHome, options = {}) {
   const passphrase = options.passphrase === void 0 ? existing?.passphrase : options.passphrase === "" ? void 0 : options.passphrase;
   const ensured = await ensureRemoteVaultRepo(repo, options.runner);
   repo = ensured.repo;
-  saveVaultConfig(paseoHome, {
+  const desired = withConfigDefaults({
     repo,
     branch,
     ...existing?.nodeId === void 0 ? {} : { nodeId: existing.nodeId },
@@ -3129,21 +3128,22 @@ async function syncVault(paseoHome, options = {}) {
     ...existing?.lastHydrateMode === void 0 ? {} : { lastHydrateMode: existing.lastHydrateMode },
     ...existing?.lastPushedAt === void 0 ? {} : { lastPushedAt: existing.lastPushedAt }
   });
-  const pullResult = await pullVault(paseoHome, {
+  const pullResult = await pullConfiguredVault(paseoHome, desired, {
     mergeLedgers: options.mergeLedgers ?? true,
     overwriteConfigs: options.overwriteConfigs ?? false,
     runner: options.runner
-  });
-  const pushResult = await pushVault(paseoHome, {
+  }, true);
+  const pushResult = pullResult.materialization?.status === "refused" ? { pushedFiles: [], pushed: false } : await pushVault(paseoHome, {
     includeLedger: options.includeLedger ?? true,
     runner: options.runner
   });
   const createdNote = ensured.created ? `created private repo ${repo}; ` : "";
-  const pushNote = pushResult.pushed ? `pushed ${pushResult.pushedFiles.length} file(s)` : `up to date (${pushResult.pushedFiles.length} file(s) tracked)`;
-  const summary = `Vault synced with ${repo} (${branch}): ${createdNote}hydrated ${pullResult.hydratedFiles.length} file(s), ${pushNote}; history ${(pullResult.historyImports ?? []).map((item) => item.status).join(", ") || "not requested"}.`;
+  const pushNote = pullResult.materialization?.status === "refused" ? "push deferred until materialization" : pushResult.pushed ? `pushed ${pushResult.pushedFiles.length} file(s)` : `up to date (${pushResult.pushedFiles.length} file(s) tracked)`;
+  const summary = `Vault ${pullResult.materialization?.status === "refused" ? "fetched from" : "synced with"} ${repo} (${branch}): ${createdNote}hydrated ${pullResult.hydratedFiles.length} file(s), ${pushNote}; history ${(pullResult.historyImports ?? []).map((item) => item.status).join(", ") || "not requested"}; materialization ${pullResult.materialization?.status ?? "applied"}.`;
   return {
     createdRepo: ensured.created,
     historyImports: pullResult.historyImports,
+    materialization: pullResult.materialization,
     repo,
     branch,
     hydratedFiles: pullResult.hydratedFiles,
@@ -3151,6 +3151,23 @@ async function syncVault(paseoHome, options = {}) {
     pushed: pushResult.pushed,
     summary
   };
+}
+async function materializeFetchedVault(paseoHome, files, options, stamp) {
+  const historyImports = options.mergeLedgers === true ? stageFetchedVaultHistory(paseoHome, files) : [];
+  try {
+    await LedgerAdmission.withStateMaintenance(vaultStateDir(paseoHome), () => {
+      for (const [path, bytes] of files) writeRuntimeFile(paseoHome, path, bytes);
+      applyVaultHydration(paseoHome, options.overwriteConfigs ?? false);
+      stamp();
+      updateImportMaterialization(historyImports, { status: "applied", diagnostics: ["associated Vault files materialized by the owner maintenance boundary"] });
+    });
+    return { hydratedFiles: [...files.keys()].sort(), historyImports: refreshVaultImports(historyImports), materialization: { status: "applied", diagnostics: [] } };
+  } catch (error) {
+    const materialization = { status: "refused", diagnostics: [error instanceof Error ? error.message : String(error)] };
+    updateImportMaterialization(historyImports, materialization);
+    if (!(error instanceof FactoryError) || !["vault-owner-required", "upgrade-recovery-required"].includes(error.code) || historyImports.length === 0) throw error;
+    return { hydratedFiles: [], historyImports: refreshVaultImports(historyImports), materialization };
+  }
 }
 export {
   buildVaultPath,
@@ -3175,5 +3192,6 @@ export {
   sealVaultBuffer,
   sealVaultFile,
   syncVault,
-  unsealVaultBuffer
+  unsealVaultBuffer,
+  withConfigDefaults
 };

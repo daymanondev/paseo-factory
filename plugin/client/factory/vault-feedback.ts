@@ -13,11 +13,17 @@ export function historyFeedback(imports?: readonly Import[]): VaultFeedback | nu
     const reason = conflicts.flatMap((item) => item.conflicts?.map((conflict) => conflict.reason) ?? item.diagnostics)[0];
     return { text: `History: ${conflicts.length} conflicted; originals retained${reason ? ` — ${reason}` : ""}${pending.length > 0 ? `; ${pending.length} pending` : ""}`, tone: "statusWarning" };
   }
-  if (pending.length > 0) return { text: `History: ${pending.length} pending writer admission`, tone: "statusWarning" };
+  if (pending.length > 0) {
+    const held = pending.find((item) => item.materialization !== undefined && item.materialization.status !== "applied");
+    const detail = held?.materialization?.diagnostics[0];
+    return { text: `History: ${pending.length} pending writer admission${detail ? ` — ${detail}` : ""}`, tone: "statusWarning" };
+  }
   return { text: `History: ${imports.length} applied`, tone: "statusSuccess" };
 }
 
-export function actionFeedback(reply: { summary?: string; historyImports?: readonly Import[]; vault?: { historyImports?: readonly Import[] } }): VaultFeedback {
+export function actionFeedback(reply: { summary?: string; materialization?: Import["materialization"]; historyImports?: readonly Import[]; vault?: { historyImports?: readonly Import[] } }): VaultFeedback {
   const history = historyFeedback(reply.historyImports ?? reply.vault?.historyImports);
-  return { text: [reply.summary, history?.text].filter(Boolean).join("; "), tone: history?.tone ?? "statusSuccess" };
+  const refused = reply.materialization !== undefined && reply.materialization.status !== "applied";
+  const materialization = refused ? `Vault files ${reply.materialization!.status}: ${reply.materialization!.diagnostics.join("; ")}` : undefined;
+  return { text: [reply.summary, history?.text, materialization].filter(Boolean).join("; "), tone: refused ? "statusWarning" : history?.tone ?? "statusSuccess" };
 }
