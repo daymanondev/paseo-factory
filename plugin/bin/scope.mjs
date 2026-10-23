@@ -53,4 +53,3 @@ function scopeGlob(pattern) {
   }
   return new RegExp(`${expression}$`);
 }
-
