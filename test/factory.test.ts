@@ -1243,6 +1243,87 @@ test("spawn records the driver's worktree; worktreeFor reads it back, claim and 
   assert.equal(legacyOutcome.verdict, "green", "no worktree — the claim runs at the contract workspace, v0.0.5's law");
 });
 
+test("re-contract preserves the live worktree and original base so its commits still claim and land", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact, sha: base } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir: join(dir, "factory") });
+  const worktree = makeTaskWorktree(dir, workspace, "RECONTRACT", base);
+  factory.setContract({ task: "RECONTRACT", workspace, gate: "true", artifact, scope: ["src"] });
+  assert.equal(factory.requestSpawn({ task: "RECONTRACT", provider: "claude", arity: 1, worktree }).outcome, "dispatched");
+  writeFileSync(join(worktree, artifact), "export const implemented = true;\n");
+  const claimed = gitCommitChanges(worktree, "work before re-contract");
+  writeFileSync(join(workspace, "other.txt"), "root advanced\n");
+  const rootHead = gitCommitChanges(workspace, "advance root");
+
+  const contract = factory.setContract({ task: "RECONTRACT", workspace, gate: "true", artifact, scope: ["src", "test"] });
+  assert.equal(contract.base, base, "scope changes retain the branch's original diff base");
+  assert.notEqual(contract.base, rootHead);
+  assert.equal(factory.worktreeFor("RECONTRACT"), worktree);
+  assert.equal(factory.liveContractFor(worktree)?.seq, contract.seq);
+  assert.equal(factory.liveContractFor(join(worktree, "src"))?.seq, contract.seq);
+  assert.equal((await factory.claim({ task: "RECONTRACT", sha: claimed })).verdict, "green");
+  assert.equal((await factory.accept({ task: "RECONTRACT", attempt: 1, accepted_by: "lead" })).landing, "landed");
+  assert.equal(spawnSync("git", ["merge-base", "--is-ancestor", claimed, "HEAD"], { cwd: workspace }).status, 0);
+  assert.equal(readFileSync(join(workspace, artifact), "utf8"), "export const implemented = true;\n");
+});
+
+test("re-contract treats an empty base as omitted and still honors an explicit base", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact, sha: base } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir: join(dir, "factory") });
+  const worktree = makeTaskWorktree(dir, workspace, "BASE", base);
+  factory.setContract({ task: "BASE", workspace, gate: "true", artifact });
+  factory.requestSpawn({ task: "BASE", provider: "claude", arity: 1, worktree });
+  writeFileSync(join(workspace, "other.txt"), "root advanced\n");
+  const rootHead = gitCommitChanges(workspace, "advance root");
+  assert.equal(factory.setContract({ task: "BASE", workspace, gate: "true", artifact, base: "" }).base, base);
+  assert.equal(factory.setContract({ task: "BASE", workspace, gate: "true", artifact, base: rootHead }).base, rootHead);
+});
+
+test("re-contract never resurrects a removed worktree or history purged by project reset", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact, sha: base } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir: join(dir, "factory") });
+  const worktree = makeTaskWorktree(dir, workspace, "REMOVED", base);
+  factory.setContract({ task: "REMOVED", workspace, gate: "true", artifact });
+  factory.requestSpawn({ task: "REMOVED", provider: "claude", arity: 1, worktree });
+  execFileSync("git", ["worktree", "remove", "--force", worktree], { cwd: workspace });
+  writeFileSync(join(workspace, "other.txt"), "root advanced\n");
+  const rootHead = gitCommitChanges(workspace, "advance root");
+  const contract = factory.setContract({ task: "REMOVED", workspace, gate: "true", artifact });
+  assert.equal(contract.base, rootHead, "a missing worktree gets a fresh base");
+  assert.equal(factory.worktreeFor("REMOVED"), undefined);
+  assert.equal(factory.liveContractFor(worktree), undefined);
+
+  factory.resetProject(workspace);
+  const remainingWorktree = makeTaskWorktree(dir, workspace, "RESET", rootHead);
+  factory.setContract({ task: "RESET", workspace, gate: "true", artifact });
+  factory.requestSpawn({ task: "RESET", provider: "claude", arity: 1, worktree: remainingWorktree });
+  factory.resetProject(workspace);
+  assert.equal(existsSync(remainingWorktree), true, "reset may leave a directory behind");
+  factory.setContract({ task: "RESET", workspace, gate: "true", artifact });
+  assert.equal(factory.worktreeFor("RESET"), undefined, "purged history cannot restore an old worktree");
+  assert.equal(factory.liveContractFor(remainingWorktree), undefined);
+});
+
+test("a new epoch spawn supersedes the inherited worktree binding", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact, sha: base } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir: join(dir, "factory") });
+  const worktree = makeTaskWorktree(dir, workspace, "REPLACED", base);
+  factory.setContract({ task: "REPLACED", workspace, gate: "true", artifact });
+  factory.requestSpawn({ task: "REPLACED", provider: "claude", arity: 1, worktree });
+  factory.setContract({ task: "REPLACED", workspace, gate: "true", artifact });
+  assert.equal(factory.worktreeFor("REPLACED"), worktree);
+  assert.equal(factory.requestSpawn({ task: "REPLACED", provider: "claude", arity: 1 }).outcome, "dispatched");
+  assert.equal(factory.worktreeFor("REPLACED"), undefined, "a legacy spawn replaces the previous task execution");
+  assert.equal(factory.liveContractFor(worktree), undefined);
+});
+
 test("acceptance retires the worktree binding too — the choke does not outlive the task", (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);
@@ -1254,6 +1335,7 @@ test("acceptance retires the worktree binding too — the choke does not outlive
   assert.equal(factory.liveContractFor(worktree)?.task, "WTC");
   factory.ledger.append({ event: "attempt_accepted", task: "WTC", attempt: 1 });
   assert.equal(factory.liveContractFor(worktree), undefined, "accepted — the worktree binds no live contract either");
+  assert.equal(factory.worktreeFor("WTC"), undefined, "a retired task no longer resolves its worktree");
 });
 
 // ---- same-Project parallel Tasks (v0.0.14, ADR 0010 §4): the worktree exemption of the H1/H2 guard ----
@@ -1491,6 +1573,8 @@ test("a dirty root lands pending-conflict: the acceptance records, the branch an
 
   const accepted = await factory.accept({ task: "LW3", attempt: 1, accepted_by: "owner" });
   assert.equal(accepted.landing, "pending-conflict");
+  assert.equal(factory.worktreeFor("LW3"), worktree, "pending landing keeps its worktree binding");
+  assert.equal(factory.liveContractFor(worktree)?.task, "LW3", "the write fence stays bound until landing succeeds");
   assert.match(accepted.landingNote ?? "", /not clean/);
   assert.equal(gitFact(workspace, ["rev-parse", "HEAD"]), base, "the root never moved");
   assert.ok(readFileSync(join(workspace, "dirt.txt"), "utf8") === "uncommitted\n", "the dirty edit is untouched");
