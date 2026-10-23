@@ -23,7 +23,7 @@
  */
 import { build } from "esbuild";
 import { execFileSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { createRequire, isBuiltin } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -43,11 +43,12 @@ const pluginRoot = path.join(repoRoot, "plugin");
 /** A temp copy of the plugin directory's tracked files — the loader's view, no untracked strays. */
 function trackedCopy(source) {
   const copy = realpathSync.native(mkdtempSync(path.join(tmpdir(), "factory-bundle-")));
-  const files = execFileSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], { cwd: source }).toString("utf8").split("\0").filter(Boolean);
+  const files = execFileSync("git", ["ls-files", "-z", "--cached"], { cwd: source }).toString("utf8").split("\0").filter(Boolean);
   for (const file of files) {
     if (!existsSync(path.join(source, file))) continue;
     mkdirSync(path.dirname(path.join(copy, file)), { recursive: true });
-    copyFileSync(path.join(source, file), path.join(copy, file));
+    if (lstatSync(path.join(source, file)).isSymbolicLink()) symlinkSync(readlinkSync(path.join(source, file)), path.join(copy, file));
+    else copyFileSync(path.join(source, file), path.join(copy, file));
   }
   return copy;
 }
@@ -89,10 +90,11 @@ function specifierError(specifier, owner) {
 }
 
 function placementError(specifier, importer, owner) {
-  if (!specifier.startsWith(".")) return null;
+  if (!specifier.startsWith(".") && !path.isAbsolute(specifier)) return null;
   const place = placeOf(path.resolve(path.dirname(importer), specifier));
   if (place === "invalid") return `Plugin modules belong in client/, server/, or shared/: ${specifier} imported by ${importer}`;
-  if (place === null || place === "outside" || place === "shared" || place === owner) return null;
+  if (place === "outside") return `Module escapes installed plugin: ${specifier} imported by ${importer}`;
+  if (place === null || place === "shared" || place === owner) return null;
   return `${place}-only module cannot be imported into the plugin ${owner} bundle: ${specifier} imported by ${importer}`;
 }
 
@@ -108,7 +110,9 @@ function boundary(target) {
     name: `factory-${target}-boundary`,
     setup(context) {
       context.onLoad({ filter: /\.[cm]?[jt]sx?$/ }, (args) => {
-        if (placeOf(args.path) === null) return null;
+        const place = placeOf(args.path);
+        if (place === "outside") return { errors: [{ text: `Module escapes installed plugin: ${args.path}` }] };
+        if (place === null) return null;
         for (const match of readFileSync(args.path, "utf8").matchAll(IMPORTS)) {
           const specifier = match[2] ?? match[3];
           const error = check(specifier, args.path) ?? installError(specifier, args.path, Boolean(match[1]));
