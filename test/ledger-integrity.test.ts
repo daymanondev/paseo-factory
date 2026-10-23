@@ -211,7 +211,7 @@ test("identified readers enforce each event's typed payload while legacy records
     { row: { ...base, scope: ["src"], freshEyes: true, watch: true, skills: ["tdd"] }, required: ["workspace", "gate", "artifact"], invalid: [{ scope: "src" }, { freshEyes: "true" }, { watch: 1 }, { skills: [5] }, { base: 5 }, { description: null }, { by: [] }, { attempt: 1 }] },
     { row: { event: "claim_reported", attempt: 1, sha: "abc" }, required: ["sha"], invalid: [{ agent: 5 }, { attempt: Number.MAX_SAFE_INTEGER + 1 }] },
     { row: { event: "gate_started", attempt: 1, cmd: "true" }, required: ["cmd"] },
-    { row: { event: "gate_finished", attempt: 1, exit: 0, verdict: "green", note: "passed" }, required: ["exit", "verdict", "note"], invalid: [{ exit: "0" }, { exit: 0.5 }, { verdict: "yellow" }, { sha: 4 }, { outputPath: null }] },
+    { row: { event: "gate_finished", attempt: 1, exit: 0, verdict: "green", note: "passed", sha: "abc" }, required: ["exit", "verdict", "note"], invalid: [{ exit: "0" }, { exit: 0.5 }, { verdict: "yellow" }, { sha: 4 }, { outputPath: null }] },
     { row: { event: "fresh_eyes_written", attempt: 1, model: "eye", outcome: "clear", finding: "clear", durationMs: 1 }, required: ["model", "outcome", "finding", "durationMs"], invalid: [{ outcome: "green" }, { outcome: ["clear"] }, { durationMs: -1 }] },
     { row: { event: "watch_written", attempt: 1, model: "watch", outcome: "written", durationMs: 1, answers: { safe: 0.5 }, usage: { input_tokens: 1, cost: 0 } }, required: ["model", "outcome", "durationMs"], invalid: [{ answers: [] }, { answers: { safe: 2 } }, { usage: { input_tokens: "1", cost: 0 } }, { error: 5 }, { outcome: "clear" }] },
     { row: { event: "report_written", attempt: 1, path: "report.md" }, required: ["path"] },
@@ -273,4 +273,51 @@ test("CLI and copied-alone MCP status share current-epoch review and acceptance 
     assert.match(text, /owner-eligible=1(?: |$)/);
     assert.match(text, new RegExp(`lead-eligible=${outcome === "clear" ? "1" : "-"}(?: |$)`));
   }
+});
+
+test("v2 status refuses contradictory green Gates while valid red and historical reads remain available", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const stateDir = join(dir, "plugin-state/paseo-factory");
+  mkdirSync(stateDir, { recursive: true });
+  const path = join(stateDir, "ledger.jsonl");
+  const bridge = join(dir, "bridge.mjs");
+  copyFileSync(join(repoRoot, "plugin/bin/bridge.mjs"), bridge);
+  const rows = [
+    { seq: 1, ts, event: "contract_set", task: "T", workspace: dir, gate: "true", artifact: "out" },
+    { seq: 2, ts, event: "claim_reported", task: "T", attempt: 1, sha: "abc" },
+    { seq: 3, ts, event: "gate_started", task: "T", attempt: 1, cmd: "true" },
+    { seq: 4, ts, event: "gate_finished", task: "T", attempt: 1, exit: 0, verdict: "green", note: "passed", sha: "abc", outputPath: "gate.log" },
+  ];
+  const identified = planLegacyIdentity(rows.map(row => JSON.stringify(row) + "\n").join(""), { writerId: "local" });
+  assert.equal(identified.ok, true);
+  for (const change of [{ exit: 7 }, { exit: null }, { sha: undefined }, { sha: "" }, { sha: "  " }]) {
+    await t.test(JSON.stringify(change), () => {
+      const events = structuredClone(identified.events);
+      Object.assign(events.find(event => event.event === "gate_finished")!, change);
+      const raw = events.map(event => JSON.stringify(event) + "\n").join("");
+      writeFileSync(path, raw);
+      const cli = spawnSync(process.execPath, [join(repoRoot, "plugin/bin/factory.mjs"), "status", "--home", dir], { encoding: "utf8" });
+      assert.equal(cli.status, 2, cli.stdout);
+      assert.equal(cli.stdout, "");
+      assert.match(mcpStatus(stateDir, bridge).error?.message ?? "", /line 4.*valid ledger event/);
+      assert.throws(() => readDriverLedger(stateDir), /line 4.*valid ledger event/);
+      assert.throws(() => Ledger.open(path), factoryErrorCode("corrupted-ledger"));
+      assert.equal(readFileSync(path, "utf8"), raw);
+    });
+  }
+  for (const exit of [null, 1]) {
+    const events = structuredClone(identified.events);
+    Object.assign(events.find(event => event.event === "gate_finished")!, { verdict: "red", exit, sha: undefined });
+    writeFileSync(path, events.map(event => JSON.stringify(event) + "\n").join(""));
+    const cli = spawnSync(process.execPath, [join(repoRoot, "plugin/bin/factory.mjs"), "status", "--home", dir], { encoding: "utf8" });
+    assert.equal(cli.status, 0, cli.stderr);
+    assert.match(cli.stdout, /verdict=red.*owner-eligible=- lead-eligible=-/);
+    assert.match(mcpStatus(stateDir, bridge).result.content[0].text, /verdict=red/);
+    assert.equal(Ledger.open(path).events.length, 5);
+  }
+  // Read-only legacy compatibility does not invent a repaired v2 fact.
+  rows[3]!.exit = 7;
+  writeFileSync(path, rows.map(event => JSON.stringify(event) + "\n").join(""));
+  assert.equal(Ledger.open(path).events.length, 4);
 });

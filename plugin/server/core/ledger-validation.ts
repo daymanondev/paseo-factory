@@ -221,6 +221,7 @@ function v2PayloadIsValid(event: Record<string, unknown>): boolean {
     case "gate_started": return string("cmd");
     case "gate_finished": return (event.exit === null || Number.isSafeInteger(event.exit)) &&
       (event.verdict === "red" || event.verdict === "green") &&
+      (event.verdict !== "green" || event.exit === 0 && nonempty(event.sha)) &&
       string("note") && optionalString("sha") && optionalString("outputPath");
     case "fresh_eyes_written": return string("model") && ["concern", "clear", "failed"].includes(event.outcome as string) && string("finding") && duration();
     case "watch_written": {
