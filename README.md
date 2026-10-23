@@ -60,6 +60,32 @@ Antigravity hook embed their policies so each remains usable when copied alone.
 `npm run generate:policies:check` reports stale outputs without rewriting them.
 Generation uses development dependencies; plugin installation needs no build.
 
+## Required checks
+
+Use Node 22.22.0 or 24.21.0 and the committed lockfile:
+
+```sh
+npm ci
+npm run check
+```
+
+Push and pull-request CI runs these same commands on both versions. The check
+command verifies copied-core and generated-output drift, typechecks the actual
+canonical TypeScript policy bodies, compiles the isolated installed client/server
+bundles, and runs every behavior test. The tests include standalone assets
+copied without source or development dependencies, the bridge copied alone, and
+negative fixtures for stale outputs and forbidden or unavailable dependencies.
+`npm run check:installed` runs that packaging subset when iterating locally.
+
+The installed bundle check reads tracked files (including staged additions), so
+stage intended new plugin modules before running it. Untracked files cannot
+satisfy the installed view, and imports or symlinks cannot reach outside the
+isolated plugin. Development dependencies supply compiler tools only; they
+cannot satisfy installed runtime or type imports. Regenerate changed outputs
+with `npm run sync:plugin-core` and `npm run generate:policies`, then commit them;
+checks never silently repair stale artifacts. Plugin installation remains
+build-free.
+
 ## Run the loop on a trial daemon
 
 Use a dedicated daemon home — never the default `~/.paseo`:
