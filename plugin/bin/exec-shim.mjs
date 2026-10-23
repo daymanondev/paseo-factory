@@ -21,6 +21,7 @@ import { accessSync, appendFileSync, constants as fsConstants, existsSync, mkdir
 import { homedir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
+import { inheritChildOutcome } from "./process-policy.mjs";
 
 const tool = process.argv[2] ?? "";
 const argv = process.argv.slice(3);
@@ -238,20 +239,6 @@ if (realBin === undefined) {
 }
 
 const child = spawn(realBin, argv, { stdio: "inherit" });
-const forward = new Set(["SIGINT", "SIGTERM", "SIGHUP"]);
-for (const signal of forward) {
-  process.on(signal, () => child.kill(signal));
-}
-child.on("error", (err) => {
+inheritChildOutcome(child, (err) => {
   console.error(`exec-shim: failed to exec ${realBin}: ${err.message}`);
-  process.exit(127);
-});
-child.on("close", (code, signal) => {
-  if (signal !== null) {
-    // Restore default disposition before self-signalling, as in git-shim.
-    for (const s of forward) process.removeAllListeners(s);
-    process.kill(process.pid, signal);
-    return;
-  }
-  process.exit(code ?? 1);
 });

@@ -1,10 +1,13 @@
 import { execFile } from "node:child_process";
 import { execFileSync } from "node:child_process";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
-import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { cpSync, existsSync, lstatSync, mkdtempSync, realpathSync, renameSync, rmSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import { resolveProject } from "./project.ts";
+import { hydrateTaskWorktree } from "./worktree-policy.ts";
+import { PACKAGE_LOCKFILES, scopeCoversFile } from "./scope-policy.ts";
+export { scopeCoversFile, scopeRecoveryCommands, normalizeScopePath } from "./scope-policy.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -45,14 +48,6 @@ export function resolveClaimedCommit(cwd: string, sha: string): Promise<CommitRe
   );
 }
 
-const PACKAGE_LOCKFILES = new Set([
-  "package-lock.json",
-  "npm-shrinkwrap.json",
-  "pnpm-lock.yaml",
-  "yarn.lock",
-  "bun.lock",
-  "bun.lockb",
-]);
 
 function isUntrackedInstallArtifact(porcelainLine: string): boolean {
   if (!porcelainLine.startsWith("?? ")) return false;
@@ -144,53 +139,6 @@ export function headCommitSync(cwd: string, ref = "HEAD"): string | undefined {
 
 function git(cwd: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
   return execFileAsync("git", args, { cwd, timeout: GIT_TIMEOUT_MS });
-}
-
-/** A scope entry owns literal file/directory prefixes or paths matched by its glob. */
-export function scopeCoversFile(scope: readonly string[], file: string): boolean {
-  const directMatch = (target: string): boolean =>
-    scope.some((entry) => {
-      const prefix = normalizeScopePath(entry);
-      const path = normalizeScopePath(target);
-      if (!/[*?]/.test(prefix)) return path === prefix || path.startsWith(`${prefix}/`);
-      return scopeGlob(prefix).test(path);
-    });
-  if (directMatch(file)) return true;
-  const slashIdx = file.lastIndexOf("/");
-  const baseName = slashIdx === -1 ? file : file.slice(slashIdx + 1);
-  if (PACKAGE_LOCKFILES.has(baseName)) {
-    const companionPkgJson = slashIdx === -1 ? "package.json" : `${file.slice(0, slashIdx)}/package.json`;
-    if (directMatch(companionPkgJson)) return true;
-  }
-  return false;
-}
-
-/** Restore the whole branch diff from the Contract base, including previously committed files. */
-export function scopeRecoveryCommands(base: string, files: readonly string[]): string {
-  const quote = (value: string): string => /^[A-Za-z0-9_./-]+$/.test(value) ? value : `'${value.replace(/'/g, "'\\''")}'`;
-  return files.map((file) => `git restore --source=${quote(base)} -- ${quote(file)}`).join("; ");
-}
-
-/** Contract paths are relative Git paths; tolerate the conventional ./ and trailing slash. */
-export function normalizeScopePath(path: string): string {
-  return path.replace(/^(?:\.\/)+/, "").replace(/\/+$/, "");
-}
-
-function scopeGlob(pattern: string): RegExp {
-  let expression = "^";
-  for (let i = 0; i < pattern.length; i++) {
-    const char = pattern[i];
-    if (char === "*" && pattern[i + 1] === "*") {
-      i++;
-      if (pattern[i + 1] === "/") {
-        expression += "(?:[^/]+/)*";
-        i++;
-      } else expression += ".*";
-    } else if (char === "*") expression += "[^/]*";
-    else if (char === "?") expression += "[^/]";
-    else expression += char.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  }
-  return new RegExp(`${expression}$`);
 }
 
 /**
@@ -518,8 +466,7 @@ export function prepareTaskWorktree(options: PrepareTaskWorktreeOptions): Prepar
   if (added.error !== undefined || added.status !== 0) {
     return { ok: false, reason: cap(`could not create the task worktree at ${path} on ${branch}: ${firstLine(added.stderr ?? added.error?.message ?? "")}`) };
   }
-  const linked = symlinkNodeModules !== false && linkNodeModules(root, path);
-  copyWorktreeIncludes(root, path, linked ? ["node_modules"] : []);
+  hydrateTaskWorktree(root, path, { inheritNodeModules: symlinkNodeModules !== false });
   return { ok: true, path, branch, reset };
 }
 
@@ -530,112 +477,6 @@ function gitIn(cwd: string, args: string[]): SpawnSyncReturns<string> {
 
 function firstLine(text: string): string {
   return text.trim() !== "" ? text.trim().split("\n")[0]! : "unknown git failure";
-}
-
-/**
- * Links `<worktreePath>/node_modules` at the root's own directory — `junction`
- * on win32, `dir` symlink on POSIX, idempotent on the exact same target.
- * Returns whether the link exists after the call, so the caller only excludes
- * what it linked.
- */
-function linkNodeModules(root: string, worktreePath: string): boolean {
-  const target = join(root, "node_modules");
-  try {
-    if (!statSync(target).isDirectory()) return false;
-  } catch {
-    return false; // no node_modules at the root — nothing to link, no failure
-  }
-  const linkPath = join(worktreePath, "node_modules");
-  try {
-    if (lstatSync(linkPath).isSymbolicLink() && realpathSync(linkPath) === realpathSync(target)) return true;
-  } catch {
-    // absent or unreadable — created below
-  }
-  try {
-    symlinkSync(target, linkPath, process.platform === "win32" ? "junction" : "dir");
-  } catch {
-    return false; // best-effort: a missing link never dirties the tree
-  }
-  return true;
-}
-
-/** One `.worktreeinclude` pattern as a match predicate over workspace-relative paths. */
-function patternMatches(pattern: string, file: string): boolean {
-  if (pattern.endsWith("/")) return file.startsWith(pattern);
-  let re = "";
-  for (const ch of pattern) {
-    if (ch === "*") re += "[^/]*";
-    else if (ch === "?") re += "[^/]";
-    else re += ch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  }
-  return new RegExp(`^${re}$`).test(file);
-}
-
-/**
- * Copies the untracked files `<project-root>/.worktreeinclude` names (env
- * files, local secrets — one pattern per line, `#` comments) into the fresh
- * worktree, then hides the copies — plus any `extraExcludes` (the
- * `node_modules` link) — from the WORKTREE's own `git status` via a
- * per-worktree `core.excludesFile` (git's `info/exclude` resolves through the
- * COMMON dir, shared with `<project-root>` — writing there would hide the
- * user's own untracked files at the root, so the worktree-private
- * `<gitdir-of-worktree>/factory-excludes` + `git config --worktree` is the
- * mechanism instead; the file dies with the worktree registration). The
- * Claim's clean-tree station reads that status — a copied `.env` must never
- * redden an honest attempt. Missing include file: nothing is copied, no
- * failure — the common case; `extraExcludes` still lands when a link was made.
- */
-function copyWorktreeIncludes(root: string, worktreePath: string, extraExcludes: readonly string[] = []): void {
-  let raw = "";
-  try {
-    raw = readFileSync(join(root, ".worktreeinclude"), "utf8");
-  } catch {
-    // no include file — the common case; extras may still need excluding
-  }
-  const patterns = raw
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line !== "" && !line.startsWith("#"));
-  const untracked = new Set<string>();
-  if (patterns.length > 0) {
-    for (const extra of [[], ["--ignored"]]) {
-      const listed = gitIn(root, ["ls-files", "--others", "--exclude-standard", ...extra]);
-      if (listed.error !== undefined || listed.status !== 0) continue;
-      for (const line of listed.stdout.split("\n")) {
-        const file = line.trim();
-        if (file !== "") untracked.add(file);
-      }
-    }
-  }
-  const copied: string[] = [];
-  for (const file of untracked) {
-    if (!patterns.some((pattern) => patternMatches(pattern, file))) continue;
-    const from = join(root, file);
-    const to = join(worktreePath, file);
-    try {
-      if (!statSync(from).isFile()) continue;
-      mkdirSync(dirname(to), { recursive: true });
-      cpSync(from, to);
-      copied.push(file);
-    } catch {
-      // One uncopiable file never fails the allocation — the agent will see it
-      // missing and the include list stays the operator's hint, not a promise.
-    }
-  }
-  const excludeLines = [...copied, ...extraExcludes];
-  if (excludeLines.length === 0) return;
-  try {
-    const gitDirOut = gitIn(worktreePath, ["rev-parse", "--git-dir"]);
-    if (gitDirOut.error !== undefined || gitDirOut.status !== 0) return;
-    const gitDir = resolve(worktreePath, gitDirOut.stdout.trim());
-    const excludesFile = join(gitDir, "factory-excludes");
-    writeFileSync(excludesFile, `${excludeLines.join("\n")}\n`);
-    gitIn(root, ["config", "extensions.worktreeConfig", "true"]); // idempotent, enables `--worktree`
-    gitIn(worktreePath, ["config", "--worktree", "core.excludesFile", excludesFile]);
-  } catch {
-    // Best-effort only — a failed exclude shows as an untracked file the gate
-    // would surface, never a lost allocation.
-  }
 }
 
 function firstStderrLine(result: { stderr?: unknown }): string | undefined {
