@@ -68,6 +68,10 @@ function isUntrackedInstallArtifact(porcelainLine: string): boolean {
   ) {
     return true;
   }
+  const directories = rel.split("/").slice(0, -1);
+  if (directories.some((name) => ["playwright-report", "test-results", "coverage", ".nyc_output"].includes(name) || name.endsWith("-snapshots"))) {
+    return true;
+  }
   const slashIdx = rel.lastIndexOf("/");
   const baseName = slashIdx === -1 ? rel : rel.slice(slashIdx + 1);
   return PACKAGE_LOCKFILES.has(baseName);
@@ -269,8 +273,24 @@ export async function landTaskWorktree(options: {
   /** The Contract's base — the fast-forward test HEAD compares against. */
   base?: string;
   branch: string;
+  /** A pending acceptance may have accumulated conflict-resolution commits. */
+  retry?: boolean;
 }): Promise<LandingResult> {
-  const { projectRoot, worktree, claimedCommit, base, branch } = options;
+  const { projectRoot, worktree, base, branch } = options;
+  let claimedCommit = options.claimedCommit;
+  if (options.retry === true) {
+    const tips = [headCommitSync(worktree), headCommitSync(projectRoot, branch)].filter((tip): tip is string => tip !== undefined);
+    if (tips.length === 0) return { landing: "pending-conflict", note: `cannot resolve the pending task tip for ${branch}; preserve the worktree and repair its branch` };
+    for (const tip of tips) {
+      if (tip === claimedCommit) continue;
+      const advanced = await gitExit(projectRoot, ["merge-base", "--is-ancestor", claimedCommit, tip]);
+      if (advanced.status === 0) claimedCommit = tip;
+      else {
+        const behind = await gitExit(projectRoot, ["merge-base", "--is-ancestor", tip, claimedCommit]);
+        if (behind.status !== 0) return { landing: "pending-conflict", note: `pending task tip for ${branch} diverged from its verified claim; preserve both histories and resolve manually` };
+      }
+    }
+  }
   // Idempotency door: exit 0 means the claimed commit is ALREADY in the
   // root's history (a crash between merge and attempt_accepted, or a manual
   // land) — finish the cleanup and land as done. Exit 1 (not an ancestor) is
@@ -298,7 +318,7 @@ async function landCleanly(
   const conflict = (note: string): LandingResult => ({ landing: "pending-conflict", note: cap(note) });
   const status = await gitExit(projectRoot, ["status", "--porcelain"]);
   if (status.status !== 0) return conflict(`could not read the project root's status: ${gitDetail(status)}`);
-  const changes = status.stdout.split("\n").filter((line) => line.trim() !== "");
+  const changes = status.stdout.split("\n").filter((line) => line.trim() !== "" && !isUntrackedInstallArtifact(line));
   if (changes.length > 0) {
     return conflict(
       `project root not clean (${changes.length} change${changes.length === 1 ? "" : "s"}): ${changes[0]!.trim()} — commit or stash before landing branch ${branch}`,
@@ -380,7 +400,7 @@ export interface PrepareTaskWorktreeOptions {
   /** Optional explicit branch name override. Defaults to taskWorktreeBranch(task) (`factory/<task>`). */
   branchName?: string;
   /**
-   * When true and `<projectRoot>/node_modules` exists, creates a directory
+   * Unless explicitly false, when `<projectRoot>/node_modules` exists, creates a directory
    * symlink (`junction` on win32, `dir` on POSIX) in the worktree and excludes
    * `node_modules` in the per-worktree `factory-excludes` file so
    * `checkCleanAt` stays clean.
@@ -436,7 +456,7 @@ export function prepareTaskWorktree(options: PrepareTaskWorktreeOptions): Prepar
   if (added.error !== undefined || added.status !== 0) {
     return { ok: false, reason: cap(`could not create the task worktree at ${path} on ${branch}: ${firstLine(added.stderr ?? added.error?.message ?? "")}`) };
   }
-  const linked = symlinkNodeModules === true && linkNodeModules(root, path);
+  const linked = symlinkNodeModules !== false && linkNodeModules(root, path);
   copyWorktreeIncludes(root, path, linked ? ["node_modules"] : []);
   return { ok: true, path, branch, reset };
 }
