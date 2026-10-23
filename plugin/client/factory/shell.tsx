@@ -31,6 +31,8 @@ import { TasksPane } from "./tasks.tsx";
 import { SeatsPane } from "./seats.tsx";
 import { TimelinePane } from "./timeline.tsx";
 import { PluginsPane } from "./plugins.tsx";
+import { isCoreSelfRestartError, resolveCoreRestartWatch } from "./plugin-feedback.ts";
+import type { ActivePluginAct, PluginsNote } from "./plugin-feedback.ts";
 
 /** The navigation slice the shell uses — `openAgent` jumps to a session. */
 export interface Navigation {
@@ -82,6 +84,9 @@ export function FactoryShell({
   const [busyAct, setBusyAct] = useState<string | null>(null);
   const [checkingUpdates, setCheckingUpdates] = useState(false);
   const [autoCheckedPlugins, setAutoCheckedPlugins] = useState(false);
+  const [activePluginAct, setActivePluginAct] = useState<ActivePluginAct | null>(null);
+  const [pluginsNote, setPluginsNote] = useState<PluginsNote | null>(null);
+  const [pluginCardErrors, setPluginCardErrors] = useState<Readonly<Record<string, string>>>({});
   const vaultResponses = useRef(createResponseOrder());
   const [vaultNote, setVaultNote] = useState<VaultNote | null>(null);
   const [laneNote, setLaneNote] = useState<string | null>(null);
@@ -89,6 +94,7 @@ export function FactoryShell({
   const [detail, setDetail] = useState<DetailState | null>(null);
   /** The global screen's Project Selector pick — the panel's dir wins when hosted. */
   const [pickedRoot, setPickedRoot] = useState<string | null>(null);
+  const lastViewRef = useRef<FactoryView | null>(null);
   const refresh = () => setBump((n) => n + 1);
 
   // The active Project scope: the workspace panel's directory (auto-bound),
@@ -103,11 +109,52 @@ export function FactoryShell({
       return { ok: true as const, value: r.view };
     },
     `factory:${scopeRoot ?? "global"}:${bump}`,
-    (view) => pollEvery((view?.kpis.running ?? 0) + (view?.kpis.needsHuman ?? 0) > 0 || (view?.vault.historyImports ?? []).some((item) => item.status === "pending" || item.status === "staged")),
+    (view) =>
+      activePluginAct?.kind === "restarting-core"
+        ? 1000
+        : pollEvery(
+            (view?.kpis.running ?? 0) + (view?.kpis.needsHuman ?? 0) > 0 ||
+              (view?.vault.historyImports ?? []).some((item) => item.status === "pending" || item.status === "staged"),
+          ),
   );
-  const view = poll.value;
+  if (poll.value !== null) lastViewRef.current = poll.value;
+  const view = poll.value ?? lastViewRef.current;
   const now = useNow(1000);
+  const elapsedSeconds = activePluginAct === null ? 0 : Math.max(0, Math.floor((now - activePluginAct.startedAt) / 1000));
   useEffect(() => { if (view !== null) setVaultNote(null); }, [view]);
+
+  // While `paseo-factory` is restarting after a self-update or self-reload, poll
+  // `factory.snapshot` every 1s and evaluate `resolveCoreRestartWatch`.
+  useEffect(() => {
+    if (activePluginAct?.kind !== "restarting-core") return;
+    refresh();
+  }, [activePluginAct?.kind, now]);
+
+  useEffect(() => {
+    if (activePluginAct?.kind !== "restarting-core" || view === null) return;
+    const resolution = resolveCoreRestartWatch({
+      view,
+      previousRevision: activePluginAct.fromRevision ?? null,
+      targetRevision: activePluginAct.targetRevision ?? null,
+      action: activePluginAct.action === "reload" ? "reload" : "update",
+      elapsedMs: Math.max(0, Date.now() - activePluginAct.startedAt),
+    });
+    if (resolution.status === "waiting") return;
+    setActivePluginAct(null);
+    setPluginsNote(resolution.note);
+    if (resolution.status === "completed") {
+      setPluginCardErrors((prev) => {
+        if (!("paseo-factory" in prev)) return prev;
+        const next = { ...prev };
+        delete next["paseo-factory"];
+        return next;
+      });
+      toast.show(resolution.note.text, { variant: "success" });
+    } else {
+      setPluginCardErrors((prev) => ({ ...prev, "paseo-factory": resolution.note.text }));
+      toast.error(resolution.note.text);
+    }
+  }, [activePluginAct, view, now]);
 
   // Automatically check for plugin updates once when the Owner opens the Plugins tab
   // if update status has never been checked or is older than 5 minutes (v0.0.25, ADR 0012 §4).
@@ -315,25 +362,172 @@ export function FactoryShell({
           <PluginsPane
             theme={theme}
             view={view}
+            activeAct={activePluginAct}
+            elapsedSeconds={elapsedSeconds}
+            pluginsNote={pluginsNote}
+            cardErrors={pluginCardErrors}
+            dismissNote={() => setPluginsNote(null)}
+            dismissCardError={(id) =>
+              setPluginCardErrors((prev) => {
+                const next = { ...prev };
+                delete next[id];
+                return next;
+              })
+            }
             actions={{
-              busy,
+              busy: busy || activePluginAct !== null,
               checkingUpdates,
               checkUpdates: () => {
+                setActivePluginAct({ kind: "check", target: "all", startedAt: Date.now() });
                 void act("Check Updates", async () => {
                   setCheckingUpdates(true);
                   try {
-                    return await pluginsCheckUpdatesCall({});
+                    const reply = await pluginsCheckUpdatesCall({});
+                    if (reply.ok) {
+                      setPluginsNote({
+                        text: reply.summary,
+                        tone: reply.updatesAvailable.length > 0 ? "statusWarning" : "statusSuccess",
+                        pluginId: "all",
+                      });
+                    } else {
+                      setPluginsNote({ text: `Check Updates: ${reply.error}`, tone: "statusDanger", pluginId: "all" });
+                    }
+                    return reply;
+                  } catch (error) {
+                    setPluginsNote({ text: `Check Updates: ${String(error)}`, tone: "statusDanger", pluginId: "all" });
+                    throw error;
                   } finally {
                     setCheckingUpdates(false);
+                    setActivePluginAct(null);
                   }
                 });
               },
               install: (target, source, ref) => {
-                void act("Install", () => pluginsInstallCall({ target, source, ref }));
+                if (target === "all") {
+                  setPluginCardErrors({});
+                } else {
+                  setPluginCardErrors((prev) => {
+                    const next = { ...prev };
+                    delete next[target];
+                    return next;
+                  });
+                }
+                setActivePluginAct({ kind: "install", target, startedAt: Date.now() });
+                void act("Install", async () => {
+                  try {
+                    const reply = await pluginsInstallCall({ target, source, ref });
+                    if (reply.ok) {
+                      setPluginsNote({ text: reply.summary, tone: "statusSuccess", pluginId: target });
+                    } else {
+                      setPluginsNote({ text: `Install: ${reply.error}`, tone: "statusDanger", pluginId: target });
+                      if (target !== "all") {
+                        setPluginCardErrors((prev) => ({ ...prev, [target]: reply.error }));
+                      }
+                    }
+                    return reply;
+                  } catch (error) {
+                    const msg = String(error);
+                    setPluginsNote({ text: `Install: ${msg}`, tone: "statusDanger", pluginId: target });
+                    if (target !== "all") {
+                      setPluginCardErrors((prev) => ({ ...prev, [target]: msg }));
+                    }
+                    throw error;
+                  } finally {
+                    setActivePluginAct(null);
+                  }
+                });
               },
               manage: (pluginId, action) => {
                 // The toast names the act — "Update: …", "Remove: …" (the act() law).
-                void act(`${action[0]!.toUpperCase()}${action.slice(1)}`, () => pluginsManageCall({ pluginId, action }));
+                const actName = `${action[0]!.toUpperCase()}${action.slice(1)}`;
+                const allPlugins = [view.corePlugin, ...view.companions];
+                const targetPlugin = pluginId === "all" ? null : (allPlugins.find((p) => p.id === pluginId) ?? null);
+                const coreTargeted =
+                  pluginId === "paseo-factory" ||
+                  (pluginId === "all" &&
+                    action === "update" &&
+                    (view.corePlugin.installKind === "git" || view.corePlugin.installKind === "npm") &&
+                    view.corePlugin.updateAvailable === true);
+                const fromRevision = coreTargeted ? view.corePlugin.currentRevision : (targetPlugin?.currentRevision ?? null);
+                const targetRevision =
+                  action === "update"
+                    ? coreTargeted
+                      ? view.corePlugin.latestRevision
+                      : (targetPlugin?.latestRevision ?? null)
+                    : action === "reload" && coreTargeted
+                      ? view.corePlugin.currentRevision
+                      : null;
+
+                if (pluginId === "all") {
+                  setPluginCardErrors({});
+                } else {
+                  setPluginCardErrors((prev) => {
+                    const next = { ...prev };
+                    delete next[pluginId];
+                    return next;
+                  });
+                }
+
+                setActivePluginAct({
+                  kind: "manage",
+                  target: pluginId,
+                  action,
+                  startedAt: Date.now(),
+                  fromRevision,
+                  targetRevision,
+                });
+
+                void act(actName, async () => {
+                  let restartingCore = false;
+                  const enterCoreRestart = () => {
+                    restartingCore = true;
+                    setActivePluginAct({
+                      kind: "restarting-core",
+                      target: "paseo-factory",
+                      action,
+                      startedAt: Date.now(),
+                      fromRevision: view.corePlugin.currentRevision,
+                      targetRevision,
+                    });
+                    setPluginsNote({
+                      text: `Reloading Core (paseo-factory)${targetRevision ? ` → ${targetRevision.slice(0, 7)}` : ""}…`,
+                      tone: "statusWarning",
+                      pluginId: "paseo-factory",
+                    });
+                  };
+
+                  try {
+                    const reply = await pluginsManageCall({ pluginId, action });
+                    if (!reply.ok) {
+                      if (isCoreSelfRestartError({ target: pluginId, action, errorMessage: reply.error, coreTargeted })) {
+                        enterCoreRestart();
+                        return { ok: true, summary: "" };
+                      }
+                      setPluginsNote({ text: `${actName}: ${reply.error}`, tone: "statusDanger", pluginId });
+                      if (pluginId !== "all") {
+                        setPluginCardErrors((prev) => ({ ...prev, [pluginId]: reply.error }));
+                      }
+                      return reply;
+                    }
+                    setPluginsNote({ text: reply.summary, tone: "statusSuccess", pluginId });
+                    return reply;
+                  } catch (error) {
+                    const msg = error instanceof Error ? error.message : String(error);
+                    if (isCoreSelfRestartError({ target: pluginId, action, errorMessage: msg, coreTargeted })) {
+                      enterCoreRestart();
+                      return { ok: true, summary: "" };
+                    }
+                    setPluginsNote({ text: `${actName}: ${msg}`, tone: "statusDanger", pluginId });
+                    if (pluginId !== "all") {
+                      setPluginCardErrors((prev) => ({ ...prev, [pluginId]: msg }));
+                    }
+                    throw error;
+                  } finally {
+                    if (!restartingCore) {
+                      setActivePluginAct(null);
+                    }
+                  }
+                });
               },
             }}
           />
