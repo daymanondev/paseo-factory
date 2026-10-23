@@ -12,12 +12,14 @@ import {
   loadVaultConfig,
   pullVault,
   readVaultStatus,
+  readLedgerImports,
   resolveProject,
   saveVaultConfig,
   sealVaultBuffer,
   unsealVaultBuffer,
   writeProjectRegistration,
 } from "../src/index.ts";
+import { importSources, loadImportManifest } from "../src/history-stage.ts";
 import type { VaultRunner } from "../src/index.ts";
 import {
   sealVaultBuffer as sealVaultBufferMjs,
@@ -729,7 +731,7 @@ test("factory vault pull and push handle an empty bare remote cleanly (empty-rem
   assert.ok(bareHead(emptyBare2, "main").length > 0, "refs/heads/main created on empty bare remote");
 });
 
-test("factory vault pull preserves hydration/config parity while refusing unsafe legacy admission", async (t) => {
+test("factory vault pull preserves hydration/config parity and stages legacy snapshots without activating them", async (t) => {
   const bare = makeBareRemote(t);
   const keystore = randomBytes(512);
   const signing = JSON.stringify({ storePassword: "correct-horse-battery", keyAlias: "upload", keyPassword: "correct-horse-battery" });
@@ -806,10 +808,25 @@ test("factory vault pull preserves hydration/config parity while refusing unsafe
   const cliTwin = setupTwinHome();
   const coreTwin = setupTwinHome();
 
+  const initialProject = readFileSync(cliTwin.projLedger, "utf8");
+  const initialGlobal = readFileSync(cliTwin.globalLedger, "utf8");
   const cliPull = await runFactory(["--home", cliTwin.home, "vault", "pull", "--merge-ledgers"]);
-  assert.equal(cliPull.status, 2);
-  assert.match(cliPull.stderr, /history-import-conflict/);
-  await assert.rejects(() => pullVault(coreTwin.home, { mergeLedgers: true }), (error: unknown) => (error as { code: string }).code === "history-import-conflict");
+  assert.equal(cliPull.status, 0, cliPull.stderr);
+  assert.equal(JSON.parse(cliPull.stdout).ok, true, "fetch/hydration succeeded; owner admission is separate");
+  const corePull = await pullVault(coreTwin.home, { mergeLedgers: true });
+  assert.ok(corePull.historyImports?.every((status) => status.status === "pending"));
+  for (const twin of [cliTwin, coreTwin]) {
+    assert.equal(readFileSync(twin.projLedger, "utf8"), initialProject, "staging cannot replace active Project history");
+    assert.equal(readFileSync(twin.globalLedger, "utf8"), initialGlobal, "staging cannot replace active root history");
+    for (const [target, originals] of [[twin.projLedger, [macStudioProjSnapshot, miniProjSnapshot]], [twin.globalLedger, [globalNodeSnapshot]]] as const) {
+      const batches = readLedgerImports(target);
+      assert.equal(batches.length, 1);
+      assert.equal(batches[0]?.status, "pending", "no standalone CLI may independently activate a Ledger");
+      const retained = importSources(loadImportManifest(target, batches[0]!.id));
+      assert.deepEqual(retained.map((source) => source.lines).sort(), [...originals].sort());
+      for (const source of retained) assert.deepEqual(Buffer.from(source.bytes!), Buffer.from(source.lines), "retained original bytes survive transport completion");
+    }
+  }
 
   // Per-Project secret materialization + git exclude & worktreeinclude hygiene
   assert.deepEqual(readFileSync(join(cliTwin.repo, "android/app/release.keystore")), keystore);
@@ -830,9 +847,9 @@ test("factory vault pull preserves hydration/config parity while refusing unsafe
   await runFactory(["--home", cliTwin.home, "vault", "pull", "--overwrite-configs"]);
   assert.equal(readFileSync(join(cliTwin.stateDir, "lanes.json"), "utf8"), vaultLanes, "--overwrite-configs restores vault config");
 
-  // Reconciled ledgers match src/vault.ts byte-for-byte and open cleanly through Ledger.open
-  assert.equal(readFileSync(cliTwin.projLedger, "utf8"), readFileSync(coreTwin.projLedger, "utf8"), "CLI and core reconcile per-project ledger identically");
-  assert.equal(readFileSync(cliTwin.globalLedger, "utf8"), readFileSync(coreTwin.globalLedger, "utf8"), "CLI and core reconcile global ledger identically");
+  // Staged CLI/core transports leave the same acknowledged active history intact.
+  assert.equal(readFileSync(cliTwin.projLedger, "utf8"), readFileSync(coreTwin.projLedger, "utf8"), "CLI and core preserve per-project ledger identically");
+  assert.equal(readFileSync(cliTwin.globalLedger, "utf8"), readFileSync(coreTwin.globalLedger, "utf8"), "CLI and core preserve global ledger identically");
   assert.equal(Ledger.open(cliTwin.projLedger).events.length, 3);
   assert.equal(Ledger.open(cliTwin.globalLedger).events.length, 2);
 });
@@ -982,12 +999,24 @@ test("factory vault sync and factory vault import work end-to-end across machine
   assert.ok(sync1Payload.pushedFiles.includes("state/nodes/mac-studio/global-ledger.jsonl"));
   assert.ok(typeof sync1Payload.summary === "string" && sync1Payload.summary.length > 0);
 
-  // 3. `factory vault sync --repo <bare>` on a brand-new unconfigured home2 configures, pulls, hydrates, and reconciles ledgers in one command
+  // 3. A new home configures, pulls and hydrates while history waits durably for its owner.
   const home2 = makeTempDir();
   disposeDir(t, home2);
   const sync2 = await runFactory(["--home", home2, "vault", "sync", "--repo", bare]);
-  assert.equal(sync2.status, 2);
-  assert.match(sync2.stderr, /history-import-conflict/);
+  assert.equal(sync2.status, 0, sync2.stderr);
+  const sync2Payload = JSON.parse(sync2.stdout);
+  assert.equal(sync2Payload.ok, true);
+  assert.equal(sync2Payload.historyImports[0]?.status, "pending");
+  assert.match(sync2Payload.summary, /history pending/);
+  const rootTarget = join(home2, "plugin-state", "paseo-factory", "ledger.jsonl");
+  const pending = readLedgerImports(rootTarget);
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0]?.status, "pending");
+  const retained = importSources(loadImportManifest(rootTarget, pending[0]!.id));
+  assert.equal(retained[0]?.lines, LEDGER_LINES);
+  assert.deepEqual(Buffer.from(retained[0]!.bytes!), Buffer.from(LEDGER_LINES));
+  assert.equal(readFileSync(join(home2, "vault-runtime", "state/nodes/mac-studio/global-ledger.jsonl"), "utf8"), LEDGER_LINES);
+  assert.equal(loadVaultConfig(home2)?.repo, bare, "transport configuration survives successful staging");
   assert.equal(readFileSync(join(home2, "vault-runtime", "secrets/shared/gplay-service-account.json"), "utf8"), GCP_SERVICE_ACCOUNT);
   assert.equal(readFileSync(join(home2, "plugin-state", "paseo-factory", "lanes.json"), "utf8"), JSON.stringify({ worker: "pi/zai/glm-5.3" }));
   assert.ok(!existsSync(join(home2, "plugin-state", "paseo-factory", "ledger.jsonl")), "CLI cannot activate unplanned legacy history");
