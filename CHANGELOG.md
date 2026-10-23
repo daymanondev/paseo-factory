@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.34] - 2026-10-23
+
+v0.0.34's one thing: **two-phase reviewed plugin update protocol (`preview` → `apply`), Core-last batch `Update All`, graceful Core self-restart tracking, live per-card & toolbar elapsed progress (`Ns`), and persistent inline status/error banners in the `Plugins` view** (ADR 0012).
+
+### Added
+
+- **Live Per-Card & Toolbar Elapsed Progress (`plugin/client/factory/plugin-feedback.ts`, `plugin/client/factory/plugins.tsx`, `plugin/client/factory/shell.tsx`)** — Active plugin actions (`check`, `install`, `manage`, `restarting-core`) render live `accent`-toned progress pills on both the `Plugins` toolbar (`Updating paseo-factory… · 4s`, `Reloading Core paseo-factory… · 3s`, `Updating All… · 6s`, `Installing factory-burn-lab… · 2s`) and the targeted plugin card (`Updating 0285a1c → 383385c… · 4s`, `Reloading Core → 383385c… · 3s`, `Installing from GitHub… · 5s`), alongside elapsed-second button labels (`Updating… (4s)`, `Installing… (5s)`, `Updating All… (6s)`, `Installing All… (4s)`).
+- **Persistent Inline Status/Error Banners & Per-Card Error Boxes (`plugin/client/factory/plugins.tsx`, `plugin/client/factory/shell.tsx`)** — The `Plugins` toolbar renders a dismissible inline status/error banner (`pluginsNote` with `statusSuccess` / `statusWarning` / `statusDanger` tone) recording the exact outcome of the latest `Check for updates`, `Install`, or `Manage` act, and any per-plugin failure also renders directly inside that plugin card's red error box (`cardError`) until dismissed or retried.
+- **Graceful Core Self-Update & Self-Reload Restart Tracking (`isCoreSelfRestartError`, `resolveCoreRestartWatch`)** — When updating or reloading `paseo-factory` stops the running Core worker mid-RPC (`"Plugin stopped: paseo-factory"`), `FactoryShell` transitions into `Reloading Core…` and polls `factory.snapshot` at 1s intervals until a fresh post-restart snapshot confirms `corePlugin` is `running` on the target revision (or surfaces a `statusDanger` failure on daemon error or 45s timeout).
+
+### Fixed
+
+- **Two-Phase Reviewed Plugin Update Protocol (`plugin/server/daemon-cli.ts`)** — Replaced the retired `plugin.source.update.request` (rejected in 1ms by `@getpaseo/server@0.11.4` with `"Update the client to review plugin updates before applying them."`) with Paseo's two-phase `plugin.source.update.preview.request` → `plugin.source.update.apply.request` protocol on the 300s plugin-I/O timeout, handling `"current"`, `"installed-newer"`, `"local"`, `"error"`, and `"update"` outcomes and unified CLI fallback `outcome` parsing.
+- **Core-Last Batch `Update All` (`plugin/server/surface-rpc.ts`)** — `SurfaceHandlers.pluginsManage({ pluginId: "all", action: "update" })` sorts `Companion plugin`s ahead of `paseo-factory` (`CORE_PLUGIN_ENTRY.id`) so companion updates finish before the Core plugin restarts its own worker.
+
 ## [0.0.33] - 2026-10-23
 
 ### Added

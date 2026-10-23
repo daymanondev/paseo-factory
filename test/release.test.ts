@@ -12,8 +12,8 @@ import { repoRoot } from "./helpers.ts";
  * `## [<version>] - <date>` entry for it. The v0.0.12 close proved the drift
  * is real (the lock rode a different PR than the manifest); this pins it.
  */
-test("release invariants: package.json, package-lock.json, SHELL_VERSION, and the CHANGELOG heading all carry 0.0.33 (v0.0.33)", () => {
-  const version = "0.0.33";
+test("release invariants: package.json, package-lock.json, SHELL_VERSION, and the CHANGELOG heading all carry 0.0.34 (v0.0.34)", () => {
+  const version = "0.0.34";
 
   const pkg = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")) as { version: string };
   assert.equal(pkg.version, version);
