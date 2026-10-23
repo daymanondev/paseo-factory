@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { execFileSync } from "node:child_process";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
-import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { resolveProject } from "./project.ts";
@@ -66,6 +66,10 @@ function isUntrackedInstallArtifact(porcelainLine: string): boolean {
     rel.endsWith("/node_modules") ||
     rel.endsWith("/node_modules/")
   ) {
+    return true;
+  }
+  const directories = rel.split("/").slice(0, -1);
+  if (directories.some((name) => ["playwright-report", "test-results", "coverage", ".nyc_output"].includes(name) || name.endsWith("-snapshots"))) {
     return true;
   }
   const slashIdx = rel.lastIndexOf("/");
@@ -269,8 +273,24 @@ export async function landTaskWorktree(options: {
   /** The Contract's base — the fast-forward test HEAD compares against. */
   base?: string;
   branch: string;
+  /** A pending acceptance may have accumulated conflict-resolution commits. */
+  retry?: boolean;
 }): Promise<LandingResult> {
-  const { projectRoot, worktree, claimedCommit, base, branch } = options;
+  const { projectRoot, worktree, base, branch } = options;
+  let claimedCommit = options.claimedCommit;
+  if (options.retry === true) {
+    const tips = [headCommitSync(worktree), headCommitSync(projectRoot, branch)].filter((tip): tip is string => tip !== undefined);
+    if (tips.length === 0) return { landing: "pending-conflict", note: `cannot resolve the pending task tip for ${branch}; preserve the worktree and repair its branch` };
+    for (const tip of tips) {
+      if (tip === claimedCommit) continue;
+      const advanced = await gitExit(projectRoot, ["merge-base", "--is-ancestor", claimedCommit, tip]);
+      if (advanced.status === 0) claimedCommit = tip;
+      else {
+        const behind = await gitExit(projectRoot, ["merge-base", "--is-ancestor", tip, claimedCommit]);
+        if (behind.status !== 0) return { landing: "pending-conflict", note: `pending task tip for ${branch} diverged from its verified claim; preserve both histories and resolve manually` };
+      }
+    }
+  }
   // Idempotency door: exit 0 means the claimed commit is ALREADY in the
   // root's history (a crash between merge and attempt_accepted, or a manual
   // land) — finish the cleanup and land as done. Exit 1 (not an ancestor) is
@@ -298,7 +318,7 @@ async function landCleanly(
   const conflict = (note: string): LandingResult => ({ landing: "pending-conflict", note: cap(note) });
   const status = await gitExit(projectRoot, ["status", "--porcelain"]);
   if (status.status !== 0) return conflict(`could not read the project root's status: ${gitDetail(status)}`);
-  const changes = status.stdout.split("\n").filter((line) => line.trim() !== "");
+  const changes = status.stdout.split("\n").filter((line) => line.trim() !== "" && !isUntrackedInstallArtifact(line));
   if (changes.length > 0) {
     return conflict(
       `project root not clean (${changes.length} change${changes.length === 1 ? "" : "s"}): ${changes[0]!.trim()} — commit or stash before landing branch ${branch}`,
@@ -321,8 +341,49 @@ async function landCleanly(
   return finishLanding(projectRoot, worktree);
 }
 
-/** Removes the landed task's worktree; a cleanup failure rides the note, never the outcome. */
+/** Keep the verified installation alive until it is safely available in the root. */
+function hydrateDependencies(projectRoot: string, worktree: string): void {
+  const source = join(worktree, "node_modules");
+  const destination = join(projectRoot, "node_modules");
+  if (!existsSync(join(projectRoot, "package.json")) || !existsSync(source) || !lstatSync(source).isDirectory()) return;
+  const destinationExists = existsSync(destination) || lstatSync(destination, { throwIfNoEntry: false }) !== undefined;
+  if (existsSync(destination)) {
+    const installed = statSync(destination);
+    if (!installed.isDirectory()) throw new Error("root node_modules is obstructed by a non-directory");
+    if (installed.mtimeMs >= statSync(join(projectRoot, "package.json")).mtimeMs) return;
+  }
+  const staging = mkdtempSync(join(projectRoot, ".factory-dependencies-"));
+  let retainBackup = false;
+  try {
+    // Copy into the destination filesystem; source and root may be on different volumes.
+    cpSync(source, join(staging, "installation"), { recursive: true, verbatimSymlinks: true });
+    const backup = join(staging, "previous");
+    if (destinationExists) renameSync(destination, backup);
+    try {
+      renameSync(join(staging, "installation"), destination);
+    } catch (err) {
+      if (destinationExists) {
+        try {
+          renameSync(backup, destination);
+        } catch (restoreError) {
+          retainBackup = true;
+          throw new Error(`could not restore prior dependencies; backup retained at ${backup}`, { cause: restoreError });
+        }
+      }
+      throw err;
+    }
+  } finally {
+    if (!retainBackup) rmSync(staging, { recursive: true, force: true });
+  }
+}
+
+/** Hydrates dependencies before either worktree cleanup path can delete them. */
 async function finishLanding(projectRoot: string, worktree: string): Promise<LandingResult> {
+  try {
+    hydrateDependencies(projectRoot, worktree);
+  } catch (err) {
+    return { landing: "pending-conflict", note: cap(`dependency hydration failed; worktree retained: ${err instanceof Error ? err.message : String(err)}`) };
+  }
   const removed = await gitExit(projectRoot, ["worktree", "remove", "--force", worktree]);
   if (removed.status === 0) return { landing: "landed" };
   // A stale or unregistered directory: best-effort remove, then prune.
@@ -380,7 +441,7 @@ export interface PrepareTaskWorktreeOptions {
   /** Optional explicit branch name override. Defaults to taskWorktreeBranch(task) (`factory/<task>`). */
   branchName?: string;
   /**
-   * When true and `<projectRoot>/node_modules` exists, creates a directory
+   * Unless explicitly false, when `<projectRoot>/node_modules` exists, creates a directory
    * symlink (`junction` on win32, `dir` on POSIX) in the worktree and excludes
    * `node_modules` in the per-worktree `factory-excludes` file so
    * `checkCleanAt` stays clean.
@@ -436,7 +497,7 @@ export function prepareTaskWorktree(options: PrepareTaskWorktreeOptions): Prepar
   if (added.error !== undefined || added.status !== 0) {
     return { ok: false, reason: cap(`could not create the task worktree at ${path} on ${branch}: ${firstLine(added.stderr ?? added.error?.message ?? "")}`) };
   }
-  const linked = symlinkNodeModules === true && linkNodeModules(root, path);
+  const linked = symlinkNodeModules !== false && linkNodeModules(root, path);
   copyWorktreeIncludes(root, path, linked ? ["node_modules"] : []);
   return { ok: true, path, branch, reset };
 }

@@ -790,7 +790,7 @@ export function createFactory(options: FactoryOptions): Factory {
         throw new FactoryError("unknown-attempt", `task ${task} has no attempt ${attempt}`);
       }
       const priorAccept = acceptedAttempt(fullHistory);
-      if (priorAccept !== undefined) {
+      if (priorAccept !== undefined && priorAccept.landing !== "pending-conflict") {
         throw new FactoryError(
           "already-accepted",
           `task ${task} was already accepted at attempt ${priorAccept.attempt}; the ledger is append-only`,
@@ -831,7 +831,10 @@ export function createFactory(options: FactoryOptions): Factory {
       // the outcome (`landed`, or `pending-conflict` with the reason and the
       // preserved factory/<task> branch). Legacy shared-checkout tasks skip
       // the step and record exactly as before. Never a git push.
-      const worktree = this.worktreeFor(task);
+      const historicalWorktree = priorAccept?.landing === "pending-conflict"
+        ? fullHistory.findLast((event): event is SpawnDispatched => event.event === "spawn_dispatched" && typeof event.worktree === "string" && event.worktree !== "")?.worktree
+        : undefined;
+      const worktree = this.worktreeFor(task) ?? historicalWorktree;
       let landing: "landed" | "pending-conflict" | undefined;
       let landingNote: string | undefined;
       if (worktree !== undefined && gate.sha !== undefined) {
@@ -839,11 +842,15 @@ export function createFactory(options: FactoryOptions): Factory {
           projectRoot: contract.workspace,
           worktree,
           claimedCommit: gate.sha,
+          ...(priorAccept?.landing === "pending-conflict" ? { retry: true } : {}),
           ...(contract.base === undefined ? {} : { base: contract.base }),
           branch: `factory/${task}`,
         });
         landing = result.landing;
         landingNote = result.note;
+      } else if (priorAccept?.landing === "pending-conflict") {
+        landing = "pending-conflict";
+        landingNote = "cannot resolve the pending task's worktree or verified commit; repair its task branch before retrying";
       }
       return ledger.append({
         event: "attempt_accepted",

@@ -1,7 +1,7 @@
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   agentFate,
@@ -206,6 +206,37 @@ test("prepareTaskWorktree: linked worktree at <projectStateDir>/worktrees/<task>
   // The project root is untouched — its branch, its HEAD, its clean tree.
   assert.equal(gitAt(workspace, ["rev-parse", "HEAD"]), base);
   assert.equal(gitAt(workspace, ["status", "--porcelain"]), "");
+});
+
+test("Task allocators inherit root dependencies without copying or dirtying either checkout", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const workspace = join(dir, "ws");
+  copyFixture("sample-workspace", workspace);
+  writeFileSync(join(workspace, ".gitignore"), "node_modules/\n");
+  writeFileSync(join(workspace, ".worktreeinclude"), "secret.txt\n");
+  const base = gitCommitAll(workspace);
+  const dependencies = join(workspace, "node_modules");
+  mkdirSync(join(dependencies, ".bin"), { recursive: true });
+  writeFileSync(join(dependencies, ".bin", "vite"), "root installation\n");
+  writeFileSync(join(workspace, "secret.txt"), "local secret\n");
+  const commonExclude = readFileSync(join(workspace, ".git", "info", "exclude"), "utf8");
+  const stateDir = join(dir, "state");
+
+  const direct = prepareTaskWorktree({ stateDir, workspace, task: "deps-direct", base });
+  if (!direct.ok) return void assert.fail(direct.reason);
+  const routed = prepareTaskWorkspace(stateDir, { workspace, base }, "deps-workspace");
+  if (!routed.ok) return void assert.fail(routed.reason);
+  for (const path of [direct.path, routed.cwd]) {
+    assert.equal(lstatSync(join(path, "node_modules")).isSymbolicLink(), true);
+    assert.equal(realpathSync(join(path, "node_modules")), realpathSync(dependencies));
+    assert.equal(readFileSync(join(path, "node_modules", ".bin", "vite"), "utf8"), "root installation\n");
+    assert.equal(readFileSync(join(path, "secret.txt"), "utf8"), "local secret\n");
+    assert.equal(gitAt(path, ["status", "--porcelain"]), "", "the symlink and include stay excluded together");
+  }
+  assert.equal(gitAt(workspace, ["status", "--porcelain"]), "?? secret.txt", "root visibility stays unchanged");
+  assert.equal(readFileSync(join(workspace, ".git", "info", "exclude"), "utf8"), commonExclude);
+  assert.equal(readFileSync(join(workspace, ".gitignore"), "utf8"), "node_modules/\n");
 });
 
 test("prepareTaskWorktree: a re-run resets the worktree back to base — committed or dirty fragments are gone", (t) => {
