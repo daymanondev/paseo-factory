@@ -344,9 +344,9 @@ export function TasksPane({
           <Pill
             theme={theme}
             icon="DollarSign"
-            label={`Total Cost $${view.kpis.totalCostUsd.toFixed(2)}`}
-            tone={view.kpis.totalCostUsd > 0 ? "accent" : "foregroundMuted"}
-            lit={view.kpis.totalCostUsd > 0}
+            label={`Total Cost $${view.kpis.totalCostUsd.toFixed(2)} · ${(view.kpis.totalTokens ?? 0).toLocaleString()} tok`}
+            tone={view.kpis.totalCostUsd > 0 || (view.kpis.totalTokens ?? 0) > 0 ? "accent" : "foregroundMuted"}
+            lit={view.kpis.totalCostUsd > 0 || (view.kpis.totalTokens ?? 0) > 0}
             mono
           />
         </View>

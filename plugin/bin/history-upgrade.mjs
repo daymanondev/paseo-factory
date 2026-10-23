@@ -652,6 +652,8 @@ function readProjectRegistration(stateDir, slug) {
     return {
       slug,
       root: parsed.root,
+      ...typeof parsed.name === "string" && parsed.name !== "" ? { name: parsed.name } : {},
+      ...typeof parsed.commonDir === "string" && parsed.commonDir !== "" ? { commonDir: parsed.commonDir } : {},
       ...typeof parsed.supervisor === "string" && parsed.supervisor !== "" ? { supervisor: parsed.supervisor } : {},
       ...typeof parsed.lead === "string" && parsed.lead !== "" ? { lead: parsed.lead } : {},
       ...typeof parsed.rotationState === "string" && LEAD_ROTATION_STATES.includes(parsed.rotationState) ? { rotationState: parsed.rotationState } : {},

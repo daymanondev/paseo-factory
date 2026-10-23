@@ -16,10 +16,10 @@ import type { FactoryView, ProjectView } from "../../shared/view.ts";
 import { Btn, Card, Chip, Pill } from "../kit/pill.tsx";
 import { CONTROL_SM, DOT, RADIUS, SPACING, text, tint } from "../kit/theme.ts";
 import { GRACE_MS, pollEvery } from "../kit/poll.ts";
-import { isVaultActName, VaultPane, VaultSyncBar } from "./vault.tsx";
+import { isVaultActName, readAgo, VaultPane, VaultSyncBar } from "./vault.tsx";
 import type { VaultActName, VaultImportInput, VaultNote, VaultSyncInput } from "./vault.tsx";
 
-export { isVaultActName, VaultPane, VaultSyncBar };
+export { isVaultActName, readAgo, VaultPane, VaultSyncBar };
 export type { VaultActName, VaultImportInput, VaultNote, VaultSyncInput };
 
 /** The header's whole action surface — the Shell owns the RPC calls. */
@@ -47,13 +47,6 @@ function headlineOf(view: FactoryView): string {
   if (view.kpis.readyToAccept > 0) return `${view.kpis.readyToAccept} green attempt${view.kpis.readyToAccept === 1 ? "" : "s"} await acceptance`;
   if (view.kpis.accepted > 0) return "Everything accepted";
   return "No tasks yet";
-}
-
-function readAgo(seconds: number): string {
-  if (seconds < 5) return "now";
-  if (seconds < 60) return `${seconds}s ago`;
-  if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;
-  return `${Math.round(seconds / 3600)}h ago`;
 }
 
 /** One selector chip's label — explicit name,else the root's last path segment, falling back to the slug. */
@@ -114,6 +107,12 @@ export function Header({
   const busy = view.kpis.running + view.kpis.needsHuman > 0;
   const fresh = at !== null && now - at <= pollEvery(busy) + GRACE_MS;
   const project = view.project;
+  const allProjectsCount =
+    project === null
+      ? view.tasks.length
+      : view.projects.some((p) => typeof p.activeTaskCount === "number")
+        ? view.projects.reduce((sum, p) => sum + (p.activeTaskCount ?? 0), 0)
+        : view.tasks.length;
 
   const submitPath = (): void => {
     const trimmed = customPath.trim();
@@ -203,7 +202,7 @@ export function Header({
             theme={theme}
             label="All projects"
             active={project === null}
-            count={project === null ? view.tasks.length : 0}
+            count={allProjectsCount}
             icon="Layers"
             onPress={() => actions.pickProject(null)}
           />
@@ -280,7 +279,7 @@ export function Header({
                     label={entry.root}
                     tone="foregroundMuted"
                     onPress={() => {
-                      actions.pickProject(entry.root);
+                      actions.addProject ? actions.addProject(entry.root) : actions.pickProject(entry.root);
                       setPickingPath(false);
                     }}
                   />

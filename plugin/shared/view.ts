@@ -33,6 +33,7 @@ export const KpisSchema = z.object({
   readyToAccept: z.number().int(),
   accepted: z.number().int(),
   totalCostUsd: z.number(),
+  totalTokens: z.number().int(),
 });
 export type Kpis = z.infer<typeof KpisSchema>;
 
@@ -108,6 +109,7 @@ export const TaskViewSchema = z.object({
   /** The cost cell's honest states — the Cost read's own law, never a fabricated zero. */
   costState: z.enum(["none", "metered", "subscription", "absent"]),
   costUsd: z.number().nullable(),
+  totalTokens: z.number().int().optional(),
   needsHumanReason: z.string().nullable(),
   /** Choke counts for the Evidence Pills: allowed / denied / git blocks. */
   choke: z.object({ allowed: z.number().int(), denied: z.number().int(), blocked: z.number().int() }),

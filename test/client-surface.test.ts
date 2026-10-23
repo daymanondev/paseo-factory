@@ -243,6 +243,9 @@ test("v0.0.35 Seam 2.1: VaultPane / VaultSyncBar moves out of Header into the de
   const shell = read("plugin/client/factory/shell.tsx");
   assert.match(shell, /tab === "vault" \?/, "FactoryShell renders VaultPane in the tab === \"vault\" slot");
   assert.match(shell, /<VaultPane/, "FactoryShell mounts VaultPane");
+  assert.equal((shell.match(/<VaultPane/g) ?? []).length, 1, "FactoryShell defines a single shared <VaultPane element rather than duplicating JSX");
+  assert.match(vault, /export function readAgo\(/, "vault.tsx exports shared readAgo helper");
+  assert.ok(!header.includes("function readAgo("), "header.tsx imports readAgo from vault.tsx instead of duplicating it");
 });
 
 test("FactoryShell removes PrivateVaultCard from the Plugins tab, wires vaultSync & vaultImport, and provides 3-layer feedback in act()", () => {
@@ -302,6 +305,16 @@ test("v0.0.35 Seam 2.2 (ADR 0024/0025): Header renders prominent Project Switche
   assert.match(header, /label="Delete Project"/, "Header renders Delete Project button when a project is selected");
   assert.match(header, /label="Confirm Delete"/, "first click on Delete Project flips to Confirm Delete");
   assert.match(header, /actions\.deleteProject/, "Confirm Delete invokes actions.deleteProject()");
+  assert.match(
+    header,
+    /actions\.addProject \? actions\.addProject\(entry\.root\) : actions\.pickProject\(entry\.root\)/,
+    "clicking a Paseo workspace suggestion in the + Add Project drawer invokes actions.addProject when available",
+  );
+  assert.match(
+    header,
+    /view\.projects\.reduce\(/,
+    "All projects chip count sums activeTaskCount across view.projects when a single project is selected",
+  );
 
   const shell = read("plugin/client/factory/shell.tsx");
   assert.match(shell, /projectDelete/, "FactoryShell imports projectDelete RPC");
@@ -832,6 +845,7 @@ test("v0.0.35 Seam 2.3b (ADR 0025): TasksPane renders the 5-column horizontal Ka
   assert.match(tasks, /ScrollView horizontal/, "TasksPane renders a horizontal Kanban board container");
   assert.match(tasks, /Total Cost/, "board toolbar renders compact Total Cost summary pill");
   assert.match(tasks, /view\.kpis\.totalCostUsd/, "Total Cost pill reads view.kpis.totalCostUsd");
+  assert.match(tasks, /view\.kpis\.totalTokens/, "Total Cost pill also reads view.kpis.totalTokens");
   assert.ok(!tasks.includes("group.workspace"), "redundant workspace-path group headers are removed from TasksPane");
   assert.match(tasks, /view\.project === null/, "KanbanCard shows a Project pill only when view.project === null (All projects mode)");
   assert.match(tasks, /projectNameForTask/, "KanbanCard resolves the Project pill label via projectNameForTask");

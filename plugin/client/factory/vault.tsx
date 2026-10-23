@@ -54,7 +54,7 @@ export interface VaultImportInput {
   syncAfterImport?: boolean;
 }
 
-function readAgo(seconds: number): string {
+export function readAgo(seconds: number): string {
   if (seconds < 5) return "now";
   if (seconds < 60) return `${seconds}s ago`;
   if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;

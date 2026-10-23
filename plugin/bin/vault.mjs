@@ -1035,8 +1035,9 @@ function isUnsafeBootstrapDirectory(target, options) {
       return `refusing to initialize Git directly in user home directory (${target})`;
     }
   }
-  if (typeof options?.home === "string" && options.home.trim() !== "") {
-    const ph = options.home.trim();
+  const paseoHome = options?.paseoHome ?? options?.home;
+  if (typeof paseoHome === "string" && paseoHome.trim() !== "") {
+    const ph = paseoHome.trim();
     const resPh = resolve3(ph);
     const normPh = realpathSafe(ph);
     if (target === resPh || target === normPh || target.startsWith(`${resPh}/`) || target.startsWith(`${normPh}/`)) {
@@ -1113,6 +1114,8 @@ function readProjectRegistration(stateDir, slug) {
     return {
       slug,
       root: parsed.root,
+      ...typeof parsed.name === "string" && parsed.name !== "" ? { name: parsed.name } : {},
+      ...typeof parsed.commonDir === "string" && parsed.commonDir !== "" ? { commonDir: parsed.commonDir } : {},
       ...typeof parsed.supervisor === "string" && parsed.supervisor !== "" ? { supervisor: parsed.supervisor } : {},
       ...typeof parsed.lead === "string" && parsed.lead !== "" ? { lead: parsed.lead } : {},
       ...typeof parsed.rotationState === "string" && LEAD_ROTATION_STATES.includes(parsed.rotationState) ? { rotationState: parsed.rotationState } : {},
@@ -1144,12 +1147,25 @@ function listProjectRegistrations(stateDir) {
 function isSeatAgentForDiscovery(agent) {
   const seat = agent.labels?.seat;
   if (seat !== void 0 && seat !== "") return true;
+  const project = agent.labels?.project;
+  if (project !== void 0 && project !== "") return true;
   const provider = agent.provider;
   if (typeof provider === "string" && provider !== "") {
     const head = provider.split("/")[0];
-    if (head === "factory-supervisor" || head === "factory-lead") return true;
+    if (head === "factory-supervisor" || head === "factory-lead" || head === "factory-peer") return true;
   }
   return false;
+}
+function inferAgentSeatRole(agent) {
+  if (agent.labels?.seat === "supervisor" || agent.labels?.seat === "lead") {
+    return agent.labels.seat;
+  }
+  if (typeof agent.provider === "string" && agent.provider !== "") {
+    const head = agent.provider.split("/")[0];
+    if (head === "factory-supervisor") return "supervisor";
+    if (head === "factory-lead") return "lead";
+  }
+  return null;
 }
 function discoverProjects(stateDir, liveSeatAgents, home) {
   const entries = /* @__PURE__ */ new Map();
@@ -1158,21 +1174,57 @@ function discoverProjects(stateDir, liveSeatAgents, home) {
     const missing = !existsSync2(registration.root);
     entries.set(registration.slug, {
       slug: registration.slug,
+      name: registration.name ?? (basename4(registration.root) || registration.slug),
       root: registration.root,
-      ...missing ? { missingRoot: true } : {}
+      commonDir: registration.commonDir ?? join4(registration.root, ".git"),
+      ...missing ? { missingRoot: true } : {},
+      supervisorId: registration.supervisor ?? null,
+      leadId: registration.lead ?? null,
+      activeTaskCount: 0
     });
   }
   for (const agent of liveSeatAgents) {
     if (!isSeatAgentForDiscovery(agent)) continue;
+    const seatRole = inferAgentSeatRole(agent);
+    const agentId = typeof agent.id === "string" && agent.id !== "" ? agent.id : null;
     const slug = agent.labels?.project;
     if (typeof slug === "string" && slug !== "") {
-      if (!entries.has(slug)) entries.set(slug, { slug, root: agent.cwd ?? null });
+      const existing = entries.get(slug);
+      if (existing === void 0) {
+        const root = agent.cwd ?? null;
+        entries.set(slug, {
+          slug,
+          name: (root !== null ? basename4(root) : "") || slug,
+          root,
+          commonDir: root !== null ? join4(root, ".git") : ".git",
+          supervisorId: seatRole === "supervisor" ? agentId : null,
+          leadId: seatRole === "lead" ? agentId : null,
+          activeTaskCount: 0
+        });
+      } else if (agentId !== null) {
+        if (seatRole === "supervisor" && existing.supervisorId === null) existing.supervisorId = agentId;
+        if (seatRole === "lead" && existing.leadId === null) existing.leadId = agentId;
+      }
       continue;
     }
     if (typeof agent.cwd === "string" && agent.cwd !== "") {
       const resolved = resolveProject(agent.cwd);
-      if (resolved.ok && !resolve3(resolved.root).startsWith(projectsPrefix) && !entries.has(resolved.slug)) {
-        entries.set(resolved.slug, { slug: resolved.slug, root: resolved.root });
+      if (resolved.ok && !resolve3(resolved.root).startsWith(projectsPrefix)) {
+        const existing = entries.get(resolved.slug);
+        if (existing === void 0) {
+          entries.set(resolved.slug, {
+            slug: resolved.slug,
+            name: basename4(resolved.root) || resolved.slug,
+            root: resolved.root,
+            commonDir: resolved.gitCommonDir,
+            supervisorId: seatRole === "supervisor" ? agentId : null,
+            leadId: seatRole === "lead" ? agentId : null,
+            activeTaskCount: 0
+          });
+        } else if (agentId !== null) {
+          if (seatRole === "supervisor" && existing.supervisorId === null) existing.supervisorId = agentId;
+          if (seatRole === "lead" && existing.leadId === null) existing.leadId = agentId;
+        }
       }
     }
   }
@@ -1189,16 +1241,33 @@ function discoverProjects(stateDir, liveSeatAgents, home) {
         const resolved = resolveProject(record2.rootPath);
         if (resolved.ok) {
           if (!resolve3(resolved.root).startsWith(projectsPrefix) && !entries.has(resolved.slug)) {
-            entries.set(resolved.slug, { slug: resolved.slug, root: resolved.root });
+            entries.set(resolved.slug, {
+              slug: resolved.slug,
+              name: basename4(resolved.root) || resolved.slug,
+              root: resolved.root,
+              commonDir: resolved.gitCommonDir,
+              supervisorId: null,
+              leadId: null,
+              activeTaskCount: 0
+            });
           }
         } else if (existsSync2(record2.rootPath)) {
           const abs = resolve3(record2.rootPath);
           const normRoot = realpathSafe(abs);
-          if (!normRoot.startsWith(projectsPrefix) && isUnsafeBootstrapDirectory(normRoot, { stateDir, home }) === null) {
-            const hash = createHash3("sha1").update(join4(normRoot, ".git")).digest("hex").slice(0, 6);
+          if (!normRoot.startsWith(projectsPrefix) && isUnsafeBootstrapDirectory(normRoot, { stateDir, paseoHome: home }) === null) {
+            const commonDir = join4(normRoot, ".git");
+            const hash = createHash3("sha1").update(commonDir).digest("hex").slice(0, 6);
             const slug = `${basename4(normRoot)}-${hash}`;
             if (!entries.has(slug)) {
-              entries.set(slug, { slug, root: normRoot });
+              entries.set(slug, {
+                slug,
+                name: basename4(normRoot) || slug,
+                root: normRoot,
+                commonDir,
+                supervisorId: null,
+                leadId: null,
+                activeTaskCount: 0
+              });
             }
           }
         }

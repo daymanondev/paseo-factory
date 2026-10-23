@@ -26,6 +26,7 @@ export type ProjectResolution =
 export interface BootstrapProjectOptions {
   stateDir?: string;
   userHome?: string;
+  paseoHome?: string;
   home?: string;
 }
 
@@ -47,8 +48,13 @@ export type BootstrapProjectResolution =
 
 export interface DiscoveredProject {
   slug: string;
+  name: string;
   root: string | null;
+  commonDir: string;
   missingRoot?: boolean;
+  supervisorId: string | null;
+  leadId: string | null;
+  activeTaskCount: number;
 }
 
 function realpathSafe(path: string): string {
@@ -74,8 +80,9 @@ function isUnsafeBootstrapDirectory(target: string, options?: BootstrapProjectOp
       return `refusing to initialize Git directly in user home directory (${target})`;
     }
   }
-  if (typeof options?.home === "string" && options.home.trim() !== "") {
-    const ph = options.home.trim();
+  const paseoHome = options?.paseoHome ?? options?.home;
+  if (typeof paseoHome === "string" && paseoHome.trim() !== "") {
+    const ph = paseoHome.trim();
     const resPh = resolve(ph);
     const normPh = realpathSafe(ph);
     if (target === resPh || target === normPh || target.startsWith(`${resPh}/`) || target.startsWith(`${normPh}/`)) {
@@ -282,6 +289,8 @@ export type LeadRotationState = "normal" | "rotation_pending" | "handing_over";
 export interface ProjectRegistration {
   slug: string;
   root: string;
+  name?: string;
+  commonDir?: string;
   supervisor?: string;
   lead?: string;
   /** The Lead rotation state's durable record (v0.0.20, ADR 0013 §5) — absent reads as "normal". */
@@ -324,6 +333,8 @@ export function readProjectRegistration(stateDir: string, slug: string): Project
     return {
       slug,
       root: parsed.root,
+      ...(typeof parsed.name === "string" && parsed.name !== "" ? { name: parsed.name } : {}),
+      ...(typeof parsed.commonDir === "string" && parsed.commonDir !== "" ? { commonDir: parsed.commonDir } : {}),
       ...(typeof parsed.supervisor === "string" && parsed.supervisor !== "" ? { supervisor: parsed.supervisor } : {}),
       ...(typeof parsed.lead === "string" && parsed.lead !== "" ? { lead: parsed.lead } : {}),
       ...(typeof parsed.rotationState === "string" && LEAD_ROTATION_STATES.includes(parsed.rotationState)
@@ -357,6 +368,8 @@ export function writeProjectRegistration(
   slug: string,
   patch: {
     root: string;
+    name?: string | null;
+    commonDir?: string | null;
     supervisor?: string | null;
     lead?: string | null;
     rotationState?: LeadRotationState | null;
@@ -368,6 +381,8 @@ export function writeProjectRegistration(
   },
 ): void {
   const prior = readProjectRegistration(stateDir, slug);
+  const name = patch.name === null ? undefined : patch.name ?? prior?.name;
+  const commonDir = patch.commonDir === null ? undefined : patch.commonDir ?? prior?.commonDir;
   const supervisor = patch.supervisor === null ? undefined : patch.supervisor ?? prior?.supervisor;
   const lead = patch.lead === null ? undefined : patch.lead ?? prior?.lead;
   const rotationState = patch.rotationState === null ? undefined : patch.rotationState ?? prior?.rotationState;
@@ -405,6 +420,8 @@ export function writeProjectRegistration(
     dispatchers = prior?.dispatchers;
   }
   const record: Record<string, unknown> = { root: patch.root };
+  if (name !== undefined) record.name = name;
+  if (commonDir !== undefined) record.commonDir = commonDir;
   if (supervisor !== undefined) record.supervisor = supervisor;
   if (lead !== undefined) record.lead = lead;
   if (rotationState !== undefined) record.rotationState = rotationState;
@@ -423,7 +440,7 @@ export function writeProjectRegistration(
  */
 export function ensureProjectRegistered(
   stateDir: string,
-  cwdOrProject: string | { root: string; slug: string; gitCommonDir?: string },
+  cwdOrProject: string | { root: string; slug: string; gitCommonDir?: string; name?: string },
 ): ProjectResolution {
   const resolved: ProjectResolution =
     typeof cwdOrProject === "string"
@@ -436,8 +453,21 @@ export function ensureProjectRegistered(
         };
   if (!resolved.ok) return resolved;
   const existing = readProjectRegistration(stateDir, resolved.slug);
-  if (existing === undefined || existing.root !== resolved.root) {
-    writeProjectRegistration(stateDir, resolved.slug, { root: resolved.root });
+  const name =
+    (typeof cwdOrProject === "object" && typeof cwdOrProject.name === "string" && cwdOrProject.name !== ""
+      ? cwdOrProject.name
+      : basename(resolved.root)) || resolved.slug;
+  if (
+    existing === undefined ||
+    existing.root !== resolved.root ||
+    existing.name !== name ||
+    existing.commonDir !== resolved.gitCommonDir
+  ) {
+    writeProjectRegistration(stateDir, resolved.slug, {
+      root: resolved.root,
+      name,
+      commonDir: resolved.gitCommonDir,
+    });
   }
   return resolved;
 }
@@ -462,24 +492,38 @@ export function listProjectRegistrations(stateDir: string): ProjectRegistration[
 function isSeatAgentForDiscovery(agent: { labels?: Record<string, string>; provider?: string | null }): boolean {
   const seat = agent.labels?.seat;
   if (seat !== undefined && seat !== "") return true;
+  const project = agent.labels?.project;
+  if (project !== undefined && project !== "") return true;
   const provider = agent.provider;
   if (typeof provider === "string" && provider !== "") {
     const head = provider.split("/")[0];
-    if (head === "factory-supervisor" || head === "factory-lead") return true;
+    if (head === "factory-supervisor" || head === "factory-lead" || head === "factory-peer") return true;
   }
   return false;
+}
+
+function inferAgentSeatRole(agent: { labels?: Record<string, string>; provider?: string | null }): "supervisor" | "lead" | null {
+  if (agent.labels?.seat === "supervisor" || agent.labels?.seat === "lead") {
+    return agent.labels.seat;
+  }
+  if (typeof agent.provider === "string" && agent.provider !== "") {
+    const head = agent.provider.split("/")[0];
+    if (head === "factory-supervisor") return "supervisor";
+    if (head === "factory-lead") return "lead";
+  }
+  return null;
 }
 
 /**
  * Every discovered project for the surface's Project Selector: the registry
  * files (durable, root always known, marked `missingRoot: true` if the directory
  * was deleted on disk) plus live seat agents the daemon lists (`labels: {seat,
- * project}` or Role-provider sessions `factory-supervisor` / `factory-lead`)
+ * project}` or Role-provider sessions `factory-supervisor` / `factory-lead` / `factory-peer`)
  * plus Paseo's `<home>/projects/projects.json`. Registry wins on conflicts.
  */
 export function discoverProjects(
   stateDir: string,
-  liveSeatAgents: readonly { labels?: Record<string, string>; cwd?: string; provider?: string | null }[],
+  liveSeatAgents: readonly { id?: string; labels?: Record<string, string>; cwd?: string; provider?: string | null }[],
   home?: string,
 ): DiscoveredProject[] {
   const entries = new Map<string, DiscoveredProject>();
@@ -488,21 +532,57 @@ export function discoverProjects(
     const missing = !existsSync(registration.root);
     entries.set(registration.slug, {
       slug: registration.slug,
+      name: registration.name ?? (basename(registration.root) || registration.slug),
       root: registration.root,
+      commonDir: registration.commonDir ?? join(registration.root, ".git"),
       ...(missing ? { missingRoot: true } : {}),
+      supervisorId: registration.supervisor ?? null,
+      leadId: registration.lead ?? null,
+      activeTaskCount: 0,
     });
   }
   for (const agent of liveSeatAgents) {
     if (!isSeatAgentForDiscovery(agent)) continue;
+    const seatRole = inferAgentSeatRole(agent);
+    const agentId = typeof agent.id === "string" && agent.id !== "" ? agent.id : null;
     const slug = agent.labels?.project;
     if (typeof slug === "string" && slug !== "") {
-      if (!entries.has(slug)) entries.set(slug, { slug, root: agent.cwd ?? null });
+      const existing = entries.get(slug);
+      if (existing === undefined) {
+        const root = agent.cwd ?? null;
+        entries.set(slug, {
+          slug,
+          name: (root !== null ? basename(root) : "") || slug,
+          root,
+          commonDir: root !== null ? join(root, ".git") : ".git",
+          supervisorId: seatRole === "supervisor" ? agentId : null,
+          leadId: seatRole === "lead" ? agentId : null,
+          activeTaskCount: 0,
+        });
+      } else if (agentId !== null) {
+        if (seatRole === "supervisor" && existing.supervisorId === null) existing.supervisorId = agentId;
+        if (seatRole === "lead" && existing.leadId === null) existing.leadId = agentId;
+      }
       continue;
     }
     if (typeof agent.cwd === "string" && agent.cwd !== "") {
       const resolved = resolveProject(agent.cwd);
-      if (resolved.ok && !resolve(resolved.root).startsWith(projectsPrefix) && !entries.has(resolved.slug)) {
-        entries.set(resolved.slug, { slug: resolved.slug, root: resolved.root });
+      if (resolved.ok && !resolve(resolved.root).startsWith(projectsPrefix)) {
+        const existing = entries.get(resolved.slug);
+        if (existing === undefined) {
+          entries.set(resolved.slug, {
+            slug: resolved.slug,
+            name: basename(resolved.root) || resolved.slug,
+            root: resolved.root,
+            commonDir: resolved.gitCommonDir,
+            supervisorId: seatRole === "supervisor" ? agentId : null,
+            leadId: seatRole === "lead" ? agentId : null,
+            activeTaskCount: 0,
+          });
+        } else if (agentId !== null) {
+          if (seatRole === "supervisor" && existing.supervisorId === null) existing.supervisorId = agentId;
+          if (seatRole === "lead" && existing.leadId === null) existing.leadId = agentId;
+        }
       }
     }
   }
@@ -523,16 +603,33 @@ export function discoverProjects(
         const resolved = resolveProject(record.rootPath);
         if (resolved.ok) {
           if (!resolve(resolved.root).startsWith(projectsPrefix) && !entries.has(resolved.slug)) {
-            entries.set(resolved.slug, { slug: resolved.slug, root: resolved.root });
+            entries.set(resolved.slug, {
+              slug: resolved.slug,
+              name: basename(resolved.root) || resolved.slug,
+              root: resolved.root,
+              commonDir: resolved.gitCommonDir,
+              supervisorId: null,
+              leadId: null,
+              activeTaskCount: 0,
+            });
           }
         } else if (existsSync(record.rootPath)) {
           const abs = resolve(record.rootPath);
           const normRoot = realpathSafe(abs);
-          if (!normRoot.startsWith(projectsPrefix) && isUnsafeBootstrapDirectory(normRoot, { stateDir, home }) === null) {
-            const hash = createHash("sha1").update(join(normRoot, ".git")).digest("hex").slice(0, 6);
+          if (!normRoot.startsWith(projectsPrefix) && isUnsafeBootstrapDirectory(normRoot, { stateDir, paseoHome: home }) === null) {
+            const commonDir = join(normRoot, ".git");
+            const hash = createHash("sha1").update(commonDir).digest("hex").slice(0, 6);
             const slug = `${basename(normRoot)}-${hash}`;
             if (!entries.has(slug)) {
-              entries.set(slug, { slug, root: normRoot });
+              entries.set(slug, {
+                slug,
+                name: basename(normRoot) || slug,
+                root: normRoot,
+                commonDir,
+                supervisorId: null,
+                leadId: null,
+                activeTaskCount: 0,
+              });
             }
           }
         }

@@ -306,6 +306,31 @@ export function FactoryShell({
     });
   };
 
+  const vaultPane = (
+    <VaultPane
+      theme={theme}
+      vault={view.vault}
+      busy={busy}
+      busyAct={busyAct}
+      vaultNote={vaultNote}
+      onVaultSync={(input) => {
+        void act("Vault Sync", () => vaultSyncCall(input ?? {}));
+      }}
+      onVaultImport={(input) => {
+        void act("Vault Import", () => vaultImportCall(input));
+      }}
+      onVaultConfigure={(input) => {
+        void act("Vault Save", () => vaultConfigureCall(input));
+      }}
+      onVaultHydrate={(repo, ref) => {
+        void act("Vault Hydrate", () =>
+          vaultHydrateCall({ ...(repo === undefined ? {} : { repo }), ...(ref === undefined ? {} : { ref }) }),
+        );
+      }}
+      onRefresh={refresh}
+    />
+  );
+
   return (
     <View style={{ flex: 1, backgroundColor: theme.colors.surface0 }}>
       <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: SPACING[4], paddingBottom: SPACING[6], gap: SPACING[4] }}>
@@ -334,30 +359,7 @@ export function FactoryShell({
               <Text style={text(theme, "code")}>daemon: {view.daemonError ?? "healthy"}</Text>
               <Text style={text(theme, "code")}>project: {view.project === null ? "(unscoped)" : `${view.project.slug} · ${view.project.root}`}</Text>
             </Card>
-            {tab !== "vault" ? (
-              <VaultPane
-                theme={theme}
-                vault={view.vault}
-                busy={busy}
-                busyAct={busyAct}
-                vaultNote={vaultNote}
-                onVaultSync={(input) => {
-                  void act("Vault Sync", () => vaultSyncCall(input ?? {}));
-                }}
-                onVaultImport={(input) => {
-                  void act("Vault Import", () => vaultImportCall(input));
-                }}
-                onVaultConfigure={(input) => {
-                  void act("Vault Save", () => vaultConfigureCall(input));
-                }}
-                onVaultHydrate={(repo, ref) => {
-                  void act("Vault Hydrate", () =>
-                    vaultHydrateCall({ ...(repo === undefined ? {} : { repo }), ...(ref === undefined ? {} : { ref }) }),
-                  );
-                }}
-                onRefresh={refresh}
-              />
-            ) : null}
+            {tab !== "vault" ? vaultPane : null}
           </>
         ) : null}
         <TabBar
@@ -372,30 +374,7 @@ export function FactoryShell({
             plugins: view.companions.filter((c) => c.status === "running").length,
           }}
         />
-        {tab === "vault" ? (
-          <VaultPane
-            theme={theme}
-            vault={view.vault}
-            busy={busy}
-            busyAct={busyAct}
-            vaultNote={vaultNote}
-            onVaultSync={(input) => {
-              void act("Vault Sync", () => vaultSyncCall(input ?? {}));
-            }}
-            onVaultImport={(input) => {
-              void act("Vault Import", () => vaultImportCall(input));
-            }}
-            onVaultConfigure={(input) => {
-              void act("Vault Save", () => vaultConfigureCall(input));
-            }}
-            onVaultHydrate={(repo, ref) => {
-              void act("Vault Hydrate", () =>
-                vaultHydrateCall({ ...(repo === undefined ? {} : { repo }), ...(ref === undefined ? {} : { ref }) }),
-              );
-            }}
-            onRefresh={refresh}
-          />
-        ) : null}
+        {tab === "vault" ? vaultPane : null}
         {tab === "tasks" ? (
           <TasksPane
             theme={theme}

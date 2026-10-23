@@ -864,6 +864,16 @@ test("resolveOrBootstrapProject / ensureGitRepository: initializes Git and creat
   const stateRes = resolveOrBootstrapProject(stateSubdir, { stateDir, userHome });
   assert.equal(stateRes.ok, false);
   if (!stateRes.ok) assert.equal(stateRes.code, "unsafe-directory");
+
+  const paseoHome = join(userHome, ".paseo-factory");
+  const paseoSubdir = join(paseoHome, "projects");
+  mkdirSync(paseoSubdir, { recursive: true });
+  const paseoHomeRes = resolveOrBootstrapProject(paseoHome, { stateDir, paseoHome });
+  assert.equal(paseoHomeRes.ok, false, "refuses paseoHome directory itself");
+  if (!paseoHomeRes.ok) assert.equal(paseoHomeRes.code, "unsafe-directory");
+  const paseoSubRes = resolveOrBootstrapProject(paseoSubdir, { stateDir, paseoHome });
+  assert.equal(paseoSubRes.ok, false, "refuses subdirectories inside paseoHome");
+  if (!paseoSubRes.ok) assert.equal(paseoSubRes.code, "unsafe-directory");
 });
 
 test("injectRoleOnCreate and injectSessionEnv: starting Supervisor (Factory) or Lead (Factory) in a greenfield non-Git folder bootstraps Git, injects role contract & MCP, and registers the Project (v0.0.35, ADR 0024)", (t) => {
@@ -901,7 +911,10 @@ test("injectRoleOnCreate and injectSessionEnv: starting Supervisor (Factory) or 
   assert.match(slug, /^new-workspace-sup-[0-9a-f]{6}$/);
   const reg = readProjectRegistration(stateDir, slug);
   assert.ok(reg !== undefined, "project registration written to <stateDir>/projects/<slug>/project.json");
-  assert.equal(reg.root, resolveProject(greenfieldSupDir).ok ? (resolveProject(greenfieldSupDir) as { ok: true; root: string }).root : "");
+  const resolvedSup = resolveProject(greenfieldSupDir);
+  assert.equal(reg.root, resolvedSup.ok ? resolvedSup.root : "");
+  assert.equal(reg.name, "new-workspace-sup", "ensureProjectRegistered persists name in project.json");
+  assert.equal(reg.commonDir, resolvedSup.ok ? resolvedSup.gitCommonDir : "", "ensureProjectRegistered persists commonDir in project.json");
 
   // 2. Also verify factory-lead on a greenfield non-Git folder via injectSessionEnv directly
   const greenfieldLeadDir = join(dir, "new-workspace-lead");

@@ -126,6 +126,12 @@ export function foldTasks(events: readonly AnyEvent[]): TaskView[] {
     const spawn = lastOf(epochSlice, "spawn_dispatched");
     const lane = meter?.provider ?? spawn?.provider ?? null;
     const dollars = meter !== undefined && typeof meter.usage.totalCostUsd === "number" && Number.isFinite(meter.usage.totalCostUsd) ? meter.usage.totalCostUsd : undefined;
+    const totalTokens =
+      meter !== undefined
+        ? (typeof meter.usage.inputTokens === "number" && Number.isFinite(meter.usage.inputTokens) ? meter.usage.inputTokens : 0) +
+          (typeof meter.usage.cachedInputTokens === "number" && Number.isFinite(meter.usage.cachedInputTokens) ? meter.usage.cachedInputTokens : 0) +
+          (typeof meter.usage.outputTokens === "number" && Number.isFinite(meter.usage.outputTokens) ? meter.usage.outputTokens : 0)
+        : 0;
     const costState = meter === undefined ? "none" : dollars !== undefined ? "metered" : lane !== null && laneFamily(lane) === "copilot" ? "subscription" : "absent";
     const attempts: AttemptView[] = [];
     let previousEndSeq = contract?.seq ?? 0;
@@ -156,6 +162,7 @@ export function foldTasks(events: readonly AnyEvent[]): TaskView[] {
       lane,
       costState,
       costUsd: dollars ?? null,
+      totalTokens,
       needsHumanReason: state.needs?.reason ?? null,
       choke: { allowed, denied, blocked },
       attempts,
@@ -166,20 +173,22 @@ export function foldTasks(events: readonly AnyEvent[]): TaskView[] {
 }
 
 /** The header's five tiles, derived from the same fold the cards read. */
-export function foldKpis(tasks: readonly TaskView[]): { needsHuman: number; running: number; readyToAccept: number; accepted: number; totalCostUsd: number } {
+export function foldKpis(tasks: readonly TaskView[]): { needsHuman: number; running: number; readyToAccept: number; accepted: number; totalCostUsd: number; totalTokens: number } {
   let needsHuman = 0;
   let running = 0;
   let readyToAccept = 0;
   let accepted = 0;
   let totalCostUsd = 0;
+  let totalTokens = 0;
   for (const task of tasks) {
     if (task.status === "needs-human") needsHuman += 1;
     else if (task.status === "running") running += 1;
     else if (task.status === "ready-to-accept") readyToAccept += 1;
     else if (task.status === "accepted") accepted += 1;
     if (task.costState === "metered" && task.costUsd !== null) totalCostUsd += task.costUsd;
+    if (typeof task.totalTokens === "number") totalTokens += task.totalTokens;
   }
-  return { needsHuman, running, readyToAccept, accepted, totalCostUsd };
+  return { needsHuman, running, readyToAccept, accepted, totalCostUsd, totalTokens };
 }
 
 // ---- the retro fold -----------------------------------------------------------------------

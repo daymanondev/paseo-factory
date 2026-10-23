@@ -964,6 +964,196 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     return { ok: true as const, agentId: agent.id };
   };
 
+  /**
+   * Shared cleanup seam for `projectDelete` and `projectReset`:
+   * 1. Collects all tasks belonging to the Project (from Ledger contracts/spawns, `taskWorkspaces`, and `worktrees/*`).
+   * 2. Stops and archives bound agents (working agents always; standing/native seats when `includeSeats: true`).
+   * 3. Archives temporary Paseo worktree workspaces (and the main Project workspace when `archiveMainWorkspace: true`).
+   * 4. Removes `<projectStateDir>/worktrees/<task>` directories and deletes local `factory/*` git branches (when the root exists on disk).
+   */
+  const cleanupProjectArtifacts = async (
+    daemon: SurfaceDaemonApi,
+    project: { slug: string; root: string },
+    options: { includeSeats: boolean; archiveMainWorkspace: boolean },
+  ) => {
+    const stop = deps.stopAgent ?? stopAgentViaCli;
+    const projectDir = projectStateDir(deps.stateDir, project.slug);
+    const worktreesDir = join(projectDir, "worktrees");
+    const reg = readProjectRegistration(deps.stateDir, project.slug);
+
+    // 1. Collect all tasks belonging to this Project (from ledger contracts/spawns, taskWorkspaces, and worktrees/*).
+    const projectTaskSet = new Set<string>();
+    for (const evt of deps.factory.ledger.events) {
+      if (
+        evt.event === "contract_set" &&
+        (evt.workspace === project.root ||
+          evt.workspace.startsWith(`${project.root}/`) ||
+          evt.workspace === worktreesDir ||
+          evt.workspace.startsWith(`${worktreesDir}/`))
+      ) {
+        projectTaskSet.add(evt.task);
+      } else if (
+        evt.event === "spawn_dispatched" &&
+        typeof evt.worktree === "string" &&
+        (evt.worktree === worktreesDir || evt.worktree.startsWith(`${worktreesDir}/`))
+      ) {
+        projectTaskSet.add(evt.task);
+      }
+    }
+    for (const task of Object.keys(reg?.taskWorkspaces ?? {})) {
+      if (task !== "") projectTaskSet.add(task);
+    }
+    try {
+      for (const entry of readdirSync(worktreesDir)) {
+        if (entry !== "") projectTaskSet.add(entry);
+      }
+    } catch {
+      // worktrees dir may not exist
+    }
+
+    // 2. Find and stop + archive all non-archived agents bound to this Project.
+    const archivedSeats: string[] = [];
+    const archivedAgents: string[] = [];
+    const bound = agentTaskIndex();
+    let rawAgents: SurfaceAgentSnapshot[] = [];
+    try {
+      const page = await daemon.agents.list({ filter: { includeArchived: false } });
+      rawAgents = page.entries.map((entry) => entry.agent).filter((agent) => agent.archivedAt === null);
+    } catch {
+      // best-effort agent listing
+    }
+    const normRoot = realpathSafe(project.root);
+    for (const agent of rawAgents) {
+      const seatLabel = agent.labels.seat;
+      const inferredRole = inferRoleFromProviderId(agent.provider);
+      const isSeatRole =
+        seatLabel === "supervisor" ||
+        seatLabel === "lead" ||
+        inferredRole === "supervisor" ||
+        inferredRole === "lead" ||
+        agent.id === reg?.supervisor ||
+        agent.id === reg?.lead;
+      if (!options.includeSeats && (seatLabel === "supervisor" || seatLabel === "lead")) continue;
+      const isLeadRole = seatLabel === "lead" || inferredRole === "lead" || agent.id === reg?.lead;
+      const boundTask = bound.get(agent.id) ?? agent.labels.task;
+      const inWorktree = agent.cwd === worktreesDir || agent.cwd.startsWith(`${worktreesDir}/`);
+      const normCwd = realpathSafe(agent.cwd);
+      const inProjectRoot =
+        agent.cwd === project.root ||
+        agent.cwd.startsWith(`${project.root}/`) ||
+        normCwd === normRoot ||
+        normCwd.startsWith(`${normRoot}/`);
+      const matchesProject = options.includeSeats
+        ? agent.labels.project === project.slug ||
+          agent.id === reg?.supervisor ||
+          agent.id === reg?.lead ||
+          inProjectRoot ||
+          inWorktree ||
+          (typeof boundTask === "string" && (projectTaskSet.has(boundTask) || taskInProject(boundTask, project.root)))
+        : (seatLabel === "agent" && agent.labels.project === project.slug) ||
+          (typeof boundTask === "string" && (projectTaskSet.has(boundTask) || taskInProject(boundTask, project.root))) ||
+          inWorktree;
+      if (!matchesProject) continue;
+
+      if (options.includeSeats && isLeadRole) {
+        try {
+          deps.onLeadRetired?.({ slug: project.slug, agentId: agent.id });
+        } catch {
+          // best-effort
+        }
+      }
+      try {
+        await stop(agent.id, deps.home);
+      } catch {
+        // best-effort cancel
+      }
+      try {
+        await daemon.agents.ref(agent.id).archive();
+        if (options.includeSeats && isSeatRole) archivedSeats.push(agent.id);
+        else archivedAgents.push(agent.id);
+      } catch {
+        // best-effort archive
+      }
+    }
+
+    // 3. Archive temporary Paseo worktree workspaces (and the main Project workspace when requested).
+    if (daemon.workspaces?.archive !== undefined) {
+      const wsIds = new Set<string>();
+      for (const wsId of Object.values(reg?.taskWorkspaces ?? {})) {
+        if (typeof wsId === "string" && wsId !== "") wsIds.add(wsId);
+      }
+      if (options.archiveMainWorkspace && typeof reg?.workspaceId === "string" && reg.workspaceId !== "") {
+        wsIds.add(reg.workspaceId);
+      }
+      for (const wsId of wsIds) {
+        try {
+          await daemon.workspaces.archive(wsId);
+        } catch {
+          // best-effort workspace archive
+        }
+      }
+    }
+
+    // 4. Remove <projectStateDir>/worktrees/<task> directories and delete local factory/* git branches when the root exists on disk.
+    const rootExists = existsSync(project.root);
+    for (const task of projectTaskSet) {
+      const wtPath = join(worktreesDir, task);
+      if (rootExists) {
+        try {
+          spawnSync("git", ["worktree", "remove", "--force", wtPath], {
+            cwd: project.root,
+            encoding: "utf8",
+            timeout: 10_000,
+          });
+        } catch {
+          // best-effort git worktree remove
+        }
+      }
+      try {
+        rmSync(wtPath, { recursive: true, force: true });
+      } catch {
+        // best-effort rm
+      }
+    }
+    try {
+      rmSync(worktreesDir, { recursive: true, force: true });
+    } catch {
+      // best-effort rm worktrees root
+    }
+    if (rootExists) {
+      try {
+        spawnSync("git", ["worktree", "prune"], { cwd: project.root, encoding: "utf8", timeout: 10_000 });
+      } catch {
+        // best-effort prune
+      }
+      const branchesToDelete = new Set<string>([...projectTaskSet].map((task) => `factory/${task}`));
+      try {
+        const refs = spawnSync("git", ["for-each-ref", "--format=%(refname:short)", "refs/heads/factory/"], {
+          cwd: project.root,
+          encoding: "utf8",
+          timeout: 10_000,
+        });
+        if (refs.status === 0 && typeof refs.stdout === "string") {
+          for (const line of refs.stdout.split("\n")) {
+            const branch = line.trim();
+            if (branch.startsWith("factory/")) branchesToDelete.add(branch);
+          }
+        }
+      } catch {
+        // best-effort branch discovery
+      }
+      for (const branch of branchesToDelete) {
+        try {
+          spawnSync("git", ["branch", "-D", branch], { cwd: project.root, encoding: "utf8", timeout: 10_000 });
+        } catch {
+          // best-effort branch delete
+        }
+      }
+    }
+
+    return { projectDir, worktreesDir, reg, projectTaskSet, archivedSeats, archivedAgents };
+  };
+
   const handlers = {
     async historyUpgrade(input: UpgradeInput) {
       try { return { ok: true as const, result: await upgradeFactory(deps.factory, input) }; }
@@ -994,7 +1184,12 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         const rawRoot = input.projectRoot.trim();
         const resolved = resolveProject(rawRoot);
         if (resolved.ok) {
-          project = { slug: resolved.slug, root: resolved.root };
+          project = {
+            slug: resolved.slug,
+            root: resolved.root,
+            name: basename(resolved.root) || resolved.slug,
+            commonDir: resolved.gitCommonDir,
+          };
         } else {
           const normInput = realpathSafe(resolve(rawRoot));
           const matched = listProjectRegistrations(deps.stateDir).find(
@@ -1009,8 +1204,24 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
             project = {
               slug: matched.slug,
               root: matched.root,
+              name: matched.name ?? (basename(matched.root) || matched.slug),
+              ...(matched.commonDir !== undefined ? { commonDir: matched.commonDir } : {}),
               ...(missing ? { missingRoot: true } : {}),
             };
+          } else if (existsSync(rawRoot)) {
+            const bootstrapped = resolveOrBootstrapProject(rawRoot, {
+              stateDir: deps.stateDir,
+              paseoHome: deps.home,
+            });
+            if (bootstrapped.ok) {
+              ensureProjectRegistered(deps.stateDir, bootstrapped);
+              project = {
+                slug: bootstrapped.slug,
+                root: bootstrapped.root,
+                name: bootstrapped.name,
+                commonDir: bootstrapped.gitCommonDir,
+              };
+            }
           }
         }
       }
@@ -1089,20 +1300,63 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       const supervisor = supervisorRaw === undefined ? null : (agents.find((agent) => agent.id === supervisorRaw!.id) ?? null);
       const lead = leadRaw === undefined ? null : (agents.find((agent) => agent.id === leadRaw!.id) ?? null);
 
+      const allTasks = foldTasks(allEvents);
+      const scopedProject = project;
       const events =
-        project === null
+        scopedProject === null
           ? allEvents
-          : allEvents.filter((evt) => !("task" in evt) || (typeof evt.task === "string" && taskInProject(evt.task, project.root, project.slug)));
+          : allEvents.filter(
+              (evt) => !("task" in evt) || (typeof evt.task === "string" && taskInProject(evt.task, scopedProject.root, scopedProject.slug)),
+            );
+      const enrichProjectView = (entry: {
+        slug: string;
+        root: string;
+        name?: string;
+        commonDir?: string;
+        missingRoot?: boolean;
+        supervisorId?: string | null;
+        leadId?: string | null;
+      }): ProjectView => {
+        const reg = readProjectRegistration(deps.stateDir, entry.slug);
+        const liveSup =
+          rawAgents.find((a) => a.labels.seat === "supervisor" && a.labels.project === entry.slug) ??
+          seatAgentByIdentity(rawAgents, entry.slug, "supervisor");
+        const liveLead =
+          rawAgents.find((a) => a.labels.seat === "lead" && a.labels.project === entry.slug) ??
+          seatAgentByIdentity(rawAgents, entry.slug, "lead");
+        const resolvedCommonDir =
+          entry.commonDir ??
+          reg?.commonDir ??
+          (!entry.missingRoot && existsSync(entry.root)
+            ? (() => {
+                const r = resolveProject(entry.root);
+                return r.ok ? r.gitCommonDir : join(entry.root, ".git");
+              })()
+            : join(entry.root, ".git"));
+        return {
+          slug: entry.slug,
+          root: entry.root,
+          name: entry.name ?? reg?.name ?? (basename(entry.root) || entry.slug),
+          ...(resolvedCommonDir !== undefined ? { commonDir: resolvedCommonDir } : {}),
+          ...(entry.missingRoot ? { missingRoot: true } : {}),
+          supervisorId: liveSup?.id ?? reg?.supervisor ?? entry.supervisorId ?? null,
+          leadId: liveLead?.id ?? reg?.lead ?? entry.leadId ?? null,
+          activeTaskCount: allTasks.filter((t) => taskInProject(t.task, entry.root, entry.slug)).length,
+        };
+      };
       const projects = discoverProjects(
         deps.stateDir,
         rawAgents.filter(
           (agent) =>
             agent.labels.seat !== undefined ||
-            inferRoleFromProviderId(agent.provider) === "supervisor" ||
-            inferRoleFromProviderId(agent.provider) === "lead",
+            agent.labels.project !== undefined ||
+            inferRoleFromProviderId(agent.provider) !== undefined,
         ),
         deps.home,
-      ).filter((entry): entry is { slug: string; root: string; missingRoot?: boolean } => entry.root !== null);
+      )
+        .filter((entry): entry is typeof entry & { root: string } => entry.root !== null)
+        .map(enrichProjectView);
+      const enrichedProject = scopedProject === null ? null : enrichProjectView(scopedProject);
 
       const updateSnap = localUpdateSnapshot ?? getCachedPluginUpdateStatus(deps.home);
       const view = foldView({
@@ -1122,7 +1376,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         // snapshot the way the companion list is — a probe that cannot answer
         // degrades inside the view's own `error` field, never a refusal.
         vault: await vaultStatusOf(),
-        project,
+        project: enrichedProject,
         projects,
       });
       return { ok: true as const, view };
@@ -1325,7 +1579,8 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
      * Add or select a Project directory from the Factory surface (v0.0.35, ADR 0024):
      * automatically bootstraps Git (`git init` + initial empty commit) when given an
      * existing non-Git folder (or an unborn Git repo without `HEAD`), registers
-     * `<stateDir>/projects/<slug>/project.json`, and returns the scoped snapshot.
+     * `<stateDir>/projects/<slug>/project.json`, synchronizes Paseo's workspace
+     * registry when `daemon.workspaces.open` is available, and returns the scoped snapshot.
      */
     async projectAdd(
       input: { projectRoot?: string; path?: string },
@@ -1337,14 +1592,50 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       }
       const resolved = resolveOrBootstrapProject(rawPath, {
         stateDir: deps.stateDir,
-        userHome: deps.home,
+        paseoHome: deps.home,
       });
       if (!resolved.ok) {
         return failure(resolved.code, resolved.reason);
       }
       ensureProjectRegistered(deps.stateDir, resolved);
+      const daemon = resolveDaemon(context);
+      const existingReg = readProjectRegistration(deps.stateDir, resolved.slug);
+      let workspaceId = existingReg?.workspaceId;
+      let paseoProjectId = existingReg?.paseoProjectId;
+      if (daemon.workspaces?.open !== undefined && (workspaceId === undefined || paseoProjectId === undefined)) {
+        try {
+          const opened = await daemon.workspaces.open({ cwd: resolved.root });
+          if (workspaceId === undefined && typeof opened?.id === "string" && opened.id !== "") {
+            workspaceId = opened.id;
+          }
+          if (paseoProjectId === undefined && typeof opened?.projectId === "string" && opened.projectId !== "") {
+            paseoProjectId = opened.projectId;
+          }
+          if (workspaceId !== undefined || paseoProjectId !== undefined) {
+            writeProjectRegistration(deps.stateDir, resolved.slug, {
+              root: resolved.root,
+              ...(workspaceId !== undefined ? { workspaceId } : {}),
+              ...(paseoProjectId !== undefined ? { paseoProjectId } : {}),
+            });
+          }
+        } catch (err) {
+          log(`project.add: workspaces.open(${resolved.root}) did not resolve (${messageOf(err)})`);
+        }
+      }
       const snap = await this.snapshot({ projectRoot: resolved.root }, context);
-      const project: ProjectView = { slug: resolved.slug, root: resolved.root };
+      const project: ProjectView =
+        snap.ok && snap.view.project !== null
+          ? { ...snap.view.project, missingRoot: false }
+          : {
+              slug: resolved.slug,
+              root: resolved.root,
+              name: resolved.name,
+              commonDir: resolved.gitCommonDir,
+              missingRoot: false,
+              supervisorId: null,
+              leadId: null,
+              activeTaskCount: 0,
+            };
       const summary = resolved.bootstrapped
         ? `Initialized Git repository and added project ${resolved.name} (${resolved.slug}).`
         : `Added project ${resolved.name} (${resolved.slug}).`;
@@ -1363,8 +1654,8 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
 
     /**
      * Native OS folder picker (v0.0.35, ADR 0024): opens the native folder dialog
-     * (or invokes `deps.pickFolder` in tests), then auto-bootstraps and registers
-     * the chosen directory into Factory and returns the refreshed snapshot.
+     * (or invokes `deps.pickFolder` in tests), then delegates to `projectAdd` so
+     * bootstrap, safety refusal, registration, and Paseo workspace sync share one seam.
      */
     async projectPickFolder(
       input: { prompt?: string } = {},
@@ -1380,36 +1671,11 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       if (chosen === null || typeof chosen !== "string" || chosen.trim() === "") {
         return { ok: true as const, cancelled: true as const, path: null };
       }
-      const resolved = resolveOrBootstrapProject(chosen.trim(), {
-        stateDir: deps.stateDir,
-        userHome: deps.home,
-      });
-      if (!resolved.ok) {
-        return failure(resolved.code, resolved.reason);
-      }
-      ensureProjectRegistered(deps.stateDir, resolved);
-      const snap = await this.snapshot({ projectRoot: resolved.root }, context);
-      const project: ProjectView = {
-        slug: resolved.slug,
-        root: resolved.root,
-        name: resolved.name,
-        commonDir: resolved.gitCommonDir,
-        missingRoot: false,
-      };
-      const summary = resolved.bootstrapped
-        ? `Initialized Git repository and added project ${resolved.name} (${resolved.slug}).`
-        : `Added project ${resolved.name} (${resolved.slug}).`;
-      log(`project.pickFolder: ${summary}`);
+      const added = await this.projectAdd({ projectRoot: chosen.trim() }, context);
+      if (!added.ok) return added;
       return {
-        ok: true as const,
+        ...added,
         cancelled: false as const,
-        path: resolved.root,
-        projectRoot: resolved.root,
-        slug: resolved.slug,
-        project,
-        bootstrapped: resolved.bootstrapped,
-        summary,
-        ...(snap.ok ? { view: snap.view } : {}),
       };
     },
 
@@ -1488,176 +1754,11 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       }
 
       const daemon = resolveDaemon(context);
-      const stop = deps.stopAgent ?? stopAgentViaCli;
-      const projectDir = projectStateDir(deps.stateDir, project.slug);
-      const worktreesDir = join(projectDir, "worktrees");
-      const reg = readProjectRegistration(deps.stateDir, project.slug);
-
-      // 1. Collect all tasks belonging to this Project (from ledger contracts/spawns, taskWorkspaces, and worktrees/*).
-      const projectTaskSet = new Set<string>();
-      for (const evt of deps.factory.ledger.events) {
-        if (
-          evt.event === "contract_set" &&
-          (evt.workspace === project.root ||
-            evt.workspace.startsWith(`${project.root}/`) ||
-            evt.workspace === worktreesDir ||
-            evt.workspace.startsWith(`${worktreesDir}/`))
-        ) {
-          projectTaskSet.add(evt.task);
-        } else if (
-          evt.event === "spawn_dispatched" &&
-          typeof evt.worktree === "string" &&
-          (evt.worktree === worktreesDir || evt.worktree.startsWith(`${worktreesDir}/`))
-        ) {
-          projectTaskSet.add(evt.task);
-        }
-      }
-      for (const task of Object.keys(reg?.taskWorkspaces ?? {})) {
-        if (task !== "") projectTaskSet.add(task);
-      }
-      try {
-        for (const entry of readdirSync(worktreesDir)) {
-          if (entry !== "") projectTaskSet.add(entry);
-        }
-      } catch {
-        // worktrees dir may not exist
-      }
-
-      // 2. Find and stop + archive all non-archived agents (Supervisor, Lead, unlabeled Role-provider seats, and working Agents) bound to this Project.
-      const archivedSeats: string[] = [];
-      const archivedAgents: string[] = [];
-      const bound = agentTaskIndex();
-      let rawAgents: SurfaceAgentSnapshot[] = [];
-      try {
-        const page = await daemon.agents.list({ filter: { includeArchived: false } });
-        rawAgents = page.entries.map((entry) => entry.agent).filter((agent) => agent.archivedAt === null);
-      } catch {
-        // best-effort agent listing
-      }
-      const normRoot = realpathSafe(project.root);
-      for (const agent of rawAgents) {
-        const seatLabel = agent.labels.seat;
-        const inferredRole = inferRoleFromProviderId(agent.provider);
-        const isSeatRole =
-          seatLabel === "supervisor" ||
-          seatLabel === "lead" ||
-          inferredRole === "supervisor" ||
-          inferredRole === "lead" ||
-          agent.id === reg?.supervisor ||
-          agent.id === reg?.lead;
-        const isLeadRole = seatLabel === "lead" || inferredRole === "lead" || agent.id === reg?.lead;
-        const boundTask = bound.get(agent.id) ?? agent.labels.task;
-        const inWorktree = agent.cwd === worktreesDir || agent.cwd.startsWith(`${worktreesDir}/`);
-        const normCwd = realpathSafe(agent.cwd);
-        const inProjectRoot =
-          agent.cwd === project.root ||
-          agent.cwd.startsWith(`${project.root}/`) ||
-          normCwd === normRoot ||
-          normCwd.startsWith(`${normRoot}/`);
-        const matchesProject =
-          agent.labels.project === project.slug ||
-          agent.id === reg?.supervisor ||
-          agent.id === reg?.lead ||
-          inProjectRoot ||
-          inWorktree ||
-          (typeof boundTask === "string" && (projectTaskSet.has(boundTask) || taskInProject(boundTask, project.root)));
-        if (!matchesProject) continue;
-
-        if (isLeadRole) {
-          try {
-            deps.onLeadRetired?.({ slug: project.slug, agentId: agent.id });
-          } catch {
-            // best-effort
-          }
-        }
-        try {
-          await stop(agent.id, deps.home);
-        } catch {
-          // best-effort cancel
-        }
-        try {
-          await daemon.agents.ref(agent.id).archive();
-          if (isSeatRole) archivedSeats.push(agent.id);
-          else archivedAgents.push(agent.id);
-        } catch {
-          // best-effort archive
-        }
-      }
-
-      // 3. Archive temporary Paseo worktree workspaces and the main Project workspace if recorded.
-      if (daemon.workspaces?.archive !== undefined) {
-        const wsIds = new Set<string>();
-        for (const wsId of Object.values(reg?.taskWorkspaces ?? {})) {
-          if (typeof wsId === "string" && wsId !== "") wsIds.add(wsId);
-        }
-        if (typeof reg?.workspaceId === "string" && reg.workspaceId !== "") {
-          wsIds.add(reg.workspaceId);
-        }
-        for (const wsId of wsIds) {
-          try {
-            await daemon.workspaces.archive(wsId);
-          } catch {
-            // best-effort workspace archive
-          }
-        }
-      }
-
-      // 4. Remove <projectStateDir>/worktrees/<task> directories and delete local factory/* git branches when the root exists on disk.
-      const rootExists = existsSync(project.root);
-      for (const task of projectTaskSet) {
-        const wtPath = join(worktreesDir, task);
-        if (rootExists) {
-          try {
-            spawnSync("git", ["worktree", "remove", "--force", wtPath], {
-              cwd: project.root,
-              encoding: "utf8",
-              timeout: 10_000,
-            });
-          } catch {
-            // best-effort git worktree remove
-          }
-        }
-        try {
-          rmSync(wtPath, { recursive: true, force: true });
-        } catch {
-          // best-effort rm
-        }
-      }
-      try {
-        rmSync(worktreesDir, { recursive: true, force: true });
-      } catch {
-        // best-effort rm worktrees root
-      }
-      if (rootExists) {
-        try {
-          spawnSync("git", ["worktree", "prune"], { cwd: project.root, encoding: "utf8", timeout: 10_000 });
-        } catch {
-          // best-effort prune
-        }
-        const branchesToDelete = new Set<string>([...projectTaskSet].map((task) => `factory/${task}`));
-        try {
-          const refs = spawnSync("git", ["for-each-ref", "--format=%(refname:short)", "refs/heads/factory/"], {
-            cwd: project.root,
-            encoding: "utf8",
-            timeout: 10_000,
-          });
-          if (refs.status === 0 && typeof refs.stdout === "string") {
-            for (const line of refs.stdout.split("\n")) {
-              const branch = line.trim();
-              if (branch.startsWith("factory/")) branchesToDelete.add(branch);
-            }
-          }
-        } catch {
-          // best-effort branch discovery
-        }
-        for (const branch of branchesToDelete) {
-          try {
-            spawnSync("git", ["branch", "-D", branch], { cwd: project.root, encoding: "utf8", timeout: 10_000 });
-          } catch {
-            // best-effort branch delete
-          }
-        }
-      }
+      const { projectDir, worktreesDir, projectTaskSet, archivedSeats, archivedAgents } =
+        await cleanupProjectArtifacts(daemon, project, {
+          includeSeats: true,
+          archiveMainWorkspace: true,
+        });
 
       // 5. Sweep Paseo's daemon workspaces and project records (including the main project record) and prune <home>/projects/projects.json.
       try {
@@ -1766,131 +1867,11 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       }
 
       const daemon = resolveDaemon(context);
-      const stop = deps.stopAgent ?? stopAgentViaCli;
-      const projectDir = projectStateDir(deps.stateDir, project.slug);
-      const worktreesDir = join(projectDir, "worktrees");
-      const reg = readProjectRegistration(deps.stateDir, project.slug);
-
-      // 1. Collect all tasks belonging to this Project (from ledger contracts/spawns, taskWorkspaces, and worktrees/*).
-      const projectTaskSet = new Set<string>();
-      for (const evt of deps.factory.ledger.events) {
-        if (evt.event === "contract_set" && (evt.workspace === project.root || evt.workspace.startsWith(`${project.root}/`))) {
-          projectTaskSet.add(evt.task);
-        } else if (
-          evt.event === "spawn_dispatched" &&
-          typeof evt.worktree === "string" &&
-          (evt.worktree === worktreesDir || evt.worktree.startsWith(`${worktreesDir}/`))
-        ) {
-          projectTaskSet.add(evt.task);
-        }
-      }
-      for (const task of Object.keys(reg?.taskWorkspaces ?? {})) {
-        if (task !== "") projectTaskSet.add(task);
-      }
-      try {
-        for (const entry of readdirSync(worktreesDir)) {
-          if (entry !== "") projectTaskSet.add(entry);
-        }
-      } catch {
-        // worktrees dir may not exist
-      }
-
-      // 2. Find and stop + archive all non-archived working Agents bound to this Project.
-      const archivedAgents: string[] = [];
-      const bound = agentTaskIndex();
-      let rawAgents: SurfaceAgentSnapshot[] = [];
-      try {
-      const page = await daemon.agents.list({ filter: { includeArchived: false } });
-        rawAgents = page.entries.map((entry) => entry.agent).filter((agent) => agent.archivedAt === null);
-      } catch {
-        // best-effort agent listing
-      }
-      for (const agent of rawAgents) {
-        const seat = agent.labels.seat;
-        if (seat === "supervisor" || seat === "lead") continue;
-        const boundTask = bound.get(agent.id) ?? agent.labels.task;
-        const inWorktree = agent.cwd === worktreesDir || agent.cwd.startsWith(`${worktreesDir}/`);
-        const matchesProject =
-          (seat === "agent" && agent.labels.project === project.slug) ||
-          (typeof boundTask === "string" && (projectTaskSet.has(boundTask) || taskInProject(boundTask, project.root))) ||
-          inWorktree;
-        if (!matchesProject) continue;
-        try {
-          await stop(agent.id, deps.home);
-        } catch {
-          // best-effort cancel
-        }
-        try {
-          await daemon.agents.ref(agent.id).archive();
-          archivedAgents.push(agent.id);
-        } catch {
-          // best-effort archive
-        }
-      }
-
-      // 3. Archive any temporary Paseo worktree workspaces recorded in reg.taskWorkspaces.
-      if (daemon.workspaces?.archive !== undefined && reg?.taskWorkspaces !== undefined) {
-        for (const wsId of Object.values(reg.taskWorkspaces)) {
-          if (typeof wsId !== "string" || wsId === "") continue;
-          try {
-            await daemon.workspaces.archive(wsId);
-          } catch {
-            // best-effort workspace archive
-          }
-        }
-      }
-
-      // 4. Remove all <projectStateDir>/worktrees/<task> directories and delete local factory/<task> git branches.
-      for (const task of projectTaskSet) {
-        const wtPath = join(worktreesDir, task);
-        try {
-          spawnSync("git", ["worktree", "remove", "--force", wtPath], {
-            cwd: project.root,
-            encoding: "utf8",
-            timeout: 10_000,
-          });
-        } catch {
-          // best-effort git worktree remove
-        }
-        try {
-          rmSync(wtPath, { recursive: true, force: true });
-        } catch {
-          // best-effort rm
-        }
-      }
-      try {
-        rmSync(worktreesDir, { recursive: true, force: true });
-      } catch {
-        // best-effort rm worktrees root
-      }
-      try {
-        spawnSync("git", ["worktree", "prune"], { cwd: project.root, encoding: "utf8", timeout: 10_000 });
-      } catch {
-        // best-effort prune
-      }
-      const branchesToDelete = new Set<string>([...projectTaskSet].map((task) => `factory/${task}`));
-      try {
-        const refs = spawnSync("git", ["for-each-ref", "--format=%(refname:short)", "refs/heads/factory/"], {
-          cwd: project.root,
-          encoding: "utf8",
-          timeout: 10_000,
+      const { projectDir, worktreesDir, projectTaskSet, archivedAgents } =
+        await cleanupProjectArtifacts(daemon, project, {
+          includeSeats: false,
+          archiveMainWorkspace: false,
         });
-        if (refs.status === 0 && typeof refs.stdout === "string") {
-          for (const line of refs.stdout.split("\n")) {
-            const branch = line.trim();
-            if (branch.startsWith("factory/")) branchesToDelete.add(branch);
-          }
-        }
-      } catch {
-        // best-effort branch discovery
-      }
-      for (const branch of branchesToDelete) {
-        try {
-          spawnSync("git", ["branch", "-D", branch], { cwd: project.root, encoding: "utf8", timeout: 10_000 });
-        } catch {
-          // best-effort branch delete
-        }
-      }
 
       // 4.5. Sweep the daemon's own worktree records (v0.0.27, ADR 0017 §4)
       // and — since v0.0.31 (ADR 0017 §5) — the Project's orphaned

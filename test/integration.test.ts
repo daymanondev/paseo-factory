@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 // The companion SDK surface (v0.0.18, ADR 0012): one import from the top-level
 // core barrel pulling every symbol spec §Testing Decisions 2, bullet 1 names —
 // the registry four, prepareTaskWorktree, headCommitSync, changesOutsideScope,
@@ -402,11 +402,11 @@ test("the core barrel's discoverProjects merges registry, live seat agents, and 
   writeProjectRegistration(stateDir, acme.slug, { root: acme.root, supervisor: "agent-sup-1" });
 
   // Live seat agents: a same-slug conflict (registry wins), a fresh slug the registry has never seated,
-  // and an agent missing labels.seat (skipped — a seat label is required).
+  // an agent with labels.project only (included), and an unlabeled stranger without role provider (skipped).
   const liveSeatAgents: { labels: Record<string, string>; cwd: string }[] = [
     { labels: { seat: "supervisor", project: acme.slug }, cwd: "/w/elsewhere" },
     { labels: { seat: "lead", project: "other-xyz789" }, cwd: "/w/other" },
-    { labels: { project: "no-seat-label" }, cwd: "/w/noseat" },
+    { labels: {}, cwd: "/w/unlabeled-stranger" },
   ];
 
   // Paseo's <home>/projects/projects.json: one non-archived real repo (resolved through git),
@@ -427,18 +427,61 @@ test("the core barrel's discoverProjects merges registry, live seat agents, and 
   assert.deepEqual(
     discovered,
     [
-      { slug: "other-xyz789", root: "/w/other" },
-      { slug: paseoUi.slug, root: paseoUi.root },
-      { slug: acme.slug, root: acme.root },
+      {
+        slug: "other-xyz789",
+        name: "other",
+        root: "/w/other",
+        commonDir: "/w/other/.git",
+        supervisorId: null,
+        leadId: null,
+        activeTaskCount: 0,
+      },
+      {
+        slug: paseoUi.slug,
+        name: "paseo-ui",
+        root: paseoUi.root,
+        commonDir: join(paseoUi.root, ".git"),
+        supervisorId: null,
+        leadId: null,
+        activeTaskCount: 0,
+      },
+      {
+        slug: acme.slug,
+        name: "acme-api",
+        root: acme.root,
+        commonDir: join(acme.root, ".git"),
+        supervisorId: "agent-sup-1",
+        leadId: null,
+        activeTaskCount: 0,
+      },
     ].sort((a, b) => a.slug.localeCompare(b.slug)),
     "registry files, live seat agents, and non-archived Paseo projects all feed the discovery, slug order",
   );
 
   // Without a home there is no projects.json leg — registry plus live agents only.
-  assert.deepEqual(discoverProjects(stateDir, liveSeatAgents), [
-    { slug: "other-xyz789", root: "/w/other" },
-    { slug: acme.slug, root: acme.root },
-  ].sort((a, b) => a.slug.localeCompare(b.slug)));
+  assert.deepEqual(
+    discoverProjects(stateDir, liveSeatAgents),
+    [
+      {
+        slug: "other-xyz789",
+        name: "other",
+        root: "/w/other",
+        commonDir: "/w/other/.git",
+        supervisorId: null,
+        leadId: null,
+        activeTaskCount: 0,
+      },
+      {
+        slug: acme.slug,
+        name: "acme-api",
+        root: acme.root,
+        commonDir: join(acme.root, ".git"),
+        supervisorId: "agent-sup-1",
+        leadId: null,
+        activeTaskCount: 0,
+      },
+    ].sort((a, b) => a.slug.localeCompare(b.slug)),
+  );
 });
 
 // ---- the complete core barrel (v0.0.18, ADR 0012): the companion SDK in one import ----
@@ -503,5 +546,19 @@ test("the complete core barrel: every spec §Testing Decisions 2 symbol from src
   const registration: ProjectRegistration | undefined = readProjectRegistration(stateDir, project.slug);
   assert.deepEqual(registration, { slug: project.slug, root: project.root, supervisor: "agent-sup-1" });
   assert.deepEqual(listProjectRegistrations(stateDir).map((r) => r.slug), [project.slug]);
-  assert.deepEqual(discoverProjects(stateDir, []), [{ slug: project.slug, root: project.root }], "registry-only discovery needs no home");
+  assert.deepEqual(
+    discoverProjects(stateDir, []),
+    [
+      {
+        slug: project.slug,
+        name: basename(project.root) || project.slug,
+        root: project.root,
+        commonDir: join(project.root, ".git"),
+        supervisorId: "agent-sup-1",
+        leadId: null,
+        activeTaskCount: 0,
+      },
+    ],
+    "registry-only discovery needs no home",
+  );
 });
