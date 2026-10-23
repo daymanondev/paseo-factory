@@ -5,7 +5,8 @@ import { homedir, hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { FactoryError } from "./errors.ts";
-import { isValidLedgerEvent } from "./ledger-validation.ts";
+import { reconcileHistory } from "./history-import.ts";
+import type { HistoryImportInput, HistoryImportSource } from "./history-import.ts";
 import { discoverProjects, listProjectRegistrations, resolveProject } from "./project.ts";
 
 /**
@@ -2059,84 +2060,13 @@ function hydratedAppKeys(paseoHome: string): string[] {
   }
 }
 
-/** A snapshot holder's Ledger bytes. nodeId names the holder, never proves the original writer. */
-export interface VaultLedgerSource {
-  nodeId: string;
-  /** Optional persisted source namespace/mapping; original snapshots remain recoverable. */
-  identityMapping?: import("./history-identity.ts").LegacyIdentityMapping;
-  snapshotHash?: string;
-  /** The raw JSONL text of the snapshot. */
-  lines: string;
-}
+/** A snapshot holder's Ledger bytes, never proof of the original writer. */
+export interface VaultLedgerSource extends HistoryImportSource {}
 
-/**
- * The deterministic multi-node `Ledger` reconciler (spec §Implementation
- * Decisions 2, in the codebase's own vocabulary — `LedgerEvent` discriminates
- * on `event` and carries `sha`/`base`, never `type`/`commit`): parses every
- * valid JSONL record across the local ledger and all node snapshots,
- * deduplicates identical events by a canonical fingerprint (the record minus
- * `seq` — `ts`, `event`, `task`/`attempt`/`agent`/`sha`/`base`, plus every
- * event-specific payload key, stably ordered), sorts chronologically by
- * `Date.parse(evt.ts)` with ties broken by `(sourceNodeId, originalSeq)`, and
- * re-indexes `seq: 1..N` strictly monotonically — so the file this text lands
- * in always opens through `Ledger.open`'s `evt.seq > prevSeq` gate
- * (`src/ledger.ts:69-75`), where a `.gitattributes merge=union` of the same
- * inputs throws `corrupted-ledger`. Invalid lines are skipped, never fatal:
- * a merge is a recovery act, and damaged input degrades to what parses.
- */
-export function reconcileVaultLedgers(existingLines: string, nodeLedgerLines: readonly VaultLedgerSource[]): string {
-  const seen = new Map<string, { evt: Record<string, unknown>; sourceNodeId: string; originalSeq: number; sortTs: number }>();
-  const carry = (lines: string, sourceNodeId: string): void => {
-    for (const raw of lines.split("\n")) {
-      const line = raw.trim();
-      if (line === "") continue;
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(line);
-      } catch {
-        continue; // a torn or foreign line is skipped, not trusted
-      }
-      if (!isValidLedgerEvent(parsed) || parsed.ts === "") continue;
-      const evt = parsed as unknown as Record<string, unknown>;
-      const fingerprint = stableStringify(omitSeq(evt));
-      if (!seen.has(fingerprint)) {
-        const ts = Date.parse(String(evt.ts));
-        seen.set(fingerprint, {
-          evt,
-          sourceNodeId,
-          originalSeq: evt.seq as number,
-          sortTs: Number.isNaN(ts) ? 0 : ts, // an unparseable clock sorts earliest, deterministically
-        });
-      }
-    }
-  };
-
-  carry(existingLines, ""); // the local ledger's source id sorts before every node id on ties
-  for (const source of nodeLedgerLines) carry(source.lines, source.nodeId);
-
-  const ordered = [...seen.values()].sort(
-    (a, b) => a.sortTs - b.sortTs || (a.sourceNodeId < b.sourceNodeId ? -1 : a.sourceNodeId > b.sourceNodeId ? 1 : 0) || a.originalSeq - b.originalSeq,
-  );
-  return ordered.map((carried, index) => `${JSON.stringify({ ...carried.evt, seq: index + 1 })}\n`).join("");
-}
-
-/** The record minus its `seq` — the identity of an event independent of where it was numbered. */
-function omitSeq(evt: Record<string, unknown>): Record<string, unknown> {
-  const rest: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(evt)) {
-    if (key !== "seq") rest[key] = value;
-  }
-  return rest;
-}
-
-/** JSON with recursively sorted keys — two identical records always stringify identically, whatever wrote them. */
-function stableStringify(value: unknown): string {
-  if (typeof value !== "object" || value === null) return JSON.stringify(value) ?? "null";
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
-  const entries = Object.entries(value as Record<string, unknown>)
-    .filter(([, v]) => v !== undefined)
-    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableStringify(v)}`).join(",")}}`;
+/** Pure validated history plan behind the existing string API. Refusal carries
+ * original snapshots and diagnostics; writer admission owns activation. */
+export function reconcileVaultLedgers(existingLines: string, sources: readonly VaultLedgerSource[], options: Pick<HistoryImportInput, "bindings" | "files"> = {}): string {
+  return reconcileHistory(existingLines, sources, options);
 }
 
 /**

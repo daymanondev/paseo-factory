@@ -729,7 +729,7 @@ test("factory vault pull and push handle an empty bare remote cleanly (empty-rem
   assert.ok(bareHead(emptyBare2, "main").length > 0, "refs/heads/main created on empty bare remote");
 });
 
-test("factory vault pull --merge-ledgers materializes per-Project secrets, configs (--overwrite-configs), and reconciles ledgers in parity with pullVault", async (t) => {
+test("factory vault pull preserves hydration/config parity while refusing unsafe legacy admission", async (t) => {
   const bare = makeBareRemote(t);
   const keystore = randomBytes(512);
   const signing = JSON.stringify({ storePassword: "correct-horse-battery", keyAlias: "upload", keyPassword: "correct-horse-battery" });
@@ -807,8 +807,9 @@ test("factory vault pull --merge-ledgers materializes per-Project secrets, confi
   const coreTwin = setupTwinHome();
 
   const cliPull = await runFactory(["--home", cliTwin.home, "vault", "pull", "--merge-ledgers"]);
-  assert.equal(cliPull.status, 0, cliPull.stderr);
-  await pullVault(coreTwin.home, { mergeLedgers: true });
+  assert.equal(cliPull.status, 2);
+  assert.match(cliPull.stderr, /history-import-conflict/);
+  await assert.rejects(() => pullVault(coreTwin.home, { mergeLedgers: true }), (error: unknown) => (error as { code: string }).code === "history-import-conflict");
 
   // Per-Project secret materialization + git exclude & worktreeinclude hygiene
   assert.deepEqual(readFileSync(join(cliTwin.repo, "android/app/release.keystore")), keystore);
@@ -832,8 +833,8 @@ test("factory vault pull --merge-ledgers materializes per-Project secrets, confi
   // Reconciled ledgers match src/vault.ts byte-for-byte and open cleanly through Ledger.open
   assert.equal(readFileSync(cliTwin.projLedger, "utf8"), readFileSync(coreTwin.projLedger, "utf8"), "CLI and core reconcile per-project ledger identically");
   assert.equal(readFileSync(cliTwin.globalLedger, "utf8"), readFileSync(coreTwin.globalLedger, "utf8"), "CLI and core reconcile global ledger identically");
-  assert.equal(Ledger.open(cliTwin.projLedger).events.length, 5);
-  assert.equal(Ledger.open(cliTwin.globalLedger).events.length, 3);
+  assert.equal(Ledger.open(cliTwin.projLedger).events.length, 3);
+  assert.equal(Ledger.open(cliTwin.globalLedger).events.length, 2);
 });
 
 test("factory vault push --include-ledger collects local configs, store-manifest.json, seals eye.json, and snapshots both global and per-Project ledgers", async (t) => {
@@ -985,14 +986,11 @@ test("factory vault sync and factory vault import work end-to-end across machine
   const home2 = makeTempDir();
   disposeDir(t, home2);
   const sync2 = await runFactory(["--home", home2, "vault", "sync", "--repo", bare]);
-  assert.equal(sync2.status, 0, sync2.stderr);
-  const sync2Payload = JSON.parse(sync2.stdout);
-  assert.equal(sync2Payload.ok, true);
-  assert.equal(sync2Payload.repo, bare);
-  assert.ok(sync2Payload.hydratedFiles.includes("secrets/shared/asc-api-key.p8"));
+  assert.equal(sync2.status, 2);
+  assert.match(sync2.stderr, /history-import-conflict/);
   assert.equal(readFileSync(join(home2, "vault-runtime", "secrets/shared/gplay-service-account.json"), "utf8"), GCP_SERVICE_ACCOUNT);
   assert.equal(readFileSync(join(home2, "plugin-state", "paseo-factory", "lanes.json"), "utf8"), JSON.stringify({ worker: "pi/zai/glm-5.3" }));
-  assert.equal(Ledger.open(join(home2, "plugin-state", "paseo-factory", "ledger.jsonl")).events.length, 2);
+  assert.ok(!existsSync(join(home2, "plugin-state", "paseo-factory", "ledger.jsonl")), "CLI cannot activate unplanned legacy history");
 });
 
 // ---- the mirror law (ADR 0004) ---------------------------------------------------------------
