@@ -1,3 +1,5 @@
+import { projectTask } from "./core/task-state.ts";
+import type { AttemptState } from "./core/task-state.ts";
 /**
  * The Factory surface's server-side fold (v0.0.13, ADR 0009 §2): ledger
  * events + lanes + daemon agents → the one versioned FactoryView the client
@@ -9,7 +11,7 @@
 import { readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { FACTORY_VIEW_VERSION } from "../shared/view.ts";
-import type { AgentView, AttemptView, CompanionPluginView, CompanionStatus, FactoryView, LedgerLineView, Lanes, ProjectView, RetroView, TaskStatus, TaskView, VaultStatusView } from "../shared/view.ts";
+import type { AgentView, AttemptView, CompanionPluginView, CompanionStatus, FactoryView, LedgerLineView, Lanes, ProjectView, RetroView, TaskView, VaultStatusView } from "../shared/view.ts";
 import { COMPANION_CATALOG, CORE_PLUGIN_DEFAULT_VERSION, CORE_PLUGIN_ENTRY } from "../shared/companions.ts";
 import type { CompanionCatalogEntry, CorePluginCatalogEntry } from "../shared/companions.ts";
 import { readPluginVersionFromDisk } from "./daemon-cli.ts";
@@ -43,13 +45,6 @@ function slicesByTask(events: readonly AnyEvent[]): Map<string, AnyEvent[]> {
   return byTask;
 }
 
-/** The attempt numbers a slice mentions, ascending. */
-function attemptNumbers(slice: readonly AnyEvent[]): number[] {
-  const numbers = new Set<number>();
-  for (const evt of slice) if ("attempt" in evt && typeof evt.attempt === "number") numbers.add(evt.attempt);
-  return [...numbers].sort((a, b) => a - b);
-}
-
 /** The slice's last event of one kind, or undefined. */
 function lastOf<K extends AnyEvent["event"]>(slice: readonly AnyEvent[], kind: K): Extract<AnyEvent, { event: K }> | undefined {
   let found: Extract<AnyEvent, { event: K }> | undefined;
@@ -63,35 +58,14 @@ function laneFamily(provider: string): string {
   return at === -1 ? provider : provider.slice(0, at);
 }
 
-/** One task's verification-line status — the fold's state machine (see TaskStatus in shared/view.ts). */
-function statusOf(slice: readonly AnyEvent[]): TaskStatus {
-  if (slice.some((e) => e.event === "attempt_accepted")) return "accepted";
-  const needs = lastOf(slice, "needs_human");
-  const gate = lastOf(slice, "gate_finished");
-  if (needs !== undefined && (gate === undefined || needs.seq > gate.seq)) return "needs-human";
-  const numbers = attemptNumbers(slice);
-  for (const n of numbers) {
-    const events = slice.filter((e) => "attempt" in e && e.attempt === n);
-    if (events.some((e) => e.event === "claim_reported" || e.event === "gate_started") && !events.some((e) => e.event === "report_written")) {
-      return "running"; // an attempt is open — the gate or a pass is in flight
-    }
-  }
-  const spawn = lastOf(slice, "spawn_dispatched");
-  const respawn = lastOf(slice, "respawn_dispatched");
-  const dispatch = spawn === undefined ? respawn : respawn === undefined ? spawn : spawn.seq >= respawn.seq ? spawn : respawn;
-  if (dispatch !== undefined && (gate === undefined || dispatch.seq > gate.seq)) return "running"; // dispatched or respawned, no verdict yet
-  if (numbers.length === 0) return "waiting"; // contracted, never run
-  if (gate?.verdict === "green") return "ready-to-accept";
-  return "red";
-}
-
 /** One rung of the Attempt Ladder, folded from the attempt's own events. */
-function attemptView(slice: readonly AnyEvent[], n: number, previousEndSeq: number): AttemptView {
-  const events = slice.filter((e) => "attempt" in e && e.attempt === n);
-  const gate = lastOf(events, "gate_finished");
+function attemptView(slice: readonly AnyEvent[], attempt: AttemptState, previousEndSeq: number): AttemptView {
+  const n = attempt.attempt;
+  const events = attempt.events;
+  const gate = attempt.gate;
   const report = lastOf(events, "report_written");
   const watch = lastOf(events, "watch_written");
-  const eye = lastOf(events, "fresh_eyes_written");
+  const eye = attempt.review;
   const firstClaim = events.find((e) => e.event === "claim_reported");
   const respawned =
     firstClaim !== undefined && slice.some((e) => e.event === "respawn_dispatched" && e.seq > previousEndSeq && e.seq <= firstClaim.seq);
@@ -109,7 +83,10 @@ function attemptView(slice: readonly AnyEvent[], n: number, previousEndSeq: numb
   return {
     n,
     verdict: gate?.verdict ?? null,
-    open: events.some((e) => e.event === "claim_reported" || e.event === "gate_started") && report === undefined,
+    open: attempt.open,
+    reviewState: attempt.reviewState,
+    ownerEligible: attempt.ownerEligible,
+    leadEligible: attempt.leadEligible,
     exit: gate?.exit ?? null,
     note: gate?.note ?? null,
     sha: gate?.sha ?? null,
@@ -137,23 +114,24 @@ export function foldTasks(events: readonly AnyEvent[]): TaskView[] {
   const byTask = slicesByTask(events);
   const views: TaskView[] = [];
   for (const [task, slice] of byTask) {
-    const contract = lastOf(slice, "contract_set");
-    const epochSlice = contract === undefined ? slice : slice.filter((e) => e.seq >= contract.seq);
-    const numbers = attemptNumbers(epochSlice);
+    const state = projectTask(slice, task);
+    const contract = state.contract;
+    const epochSlice = state.epoch;
+    const numbers = state.attempts.map((attempt) => attempt.attempt);
     if (contract === undefined && numbers.length === 0 && (task === "supervisor" || task === "lead")) {
       continue;
     }
-    const accepted = lastOf(slice, "attempt_accepted");
+    const accepted = state.acceptance;
     const meter = lastOf(epochSlice, "meter_written");
     const spawn = lastOf(epochSlice, "spawn_dispatched");
     const lane = meter?.provider ?? spawn?.provider ?? null;
     const dollars = meter !== undefined && typeof meter.usage.totalCostUsd === "number" && Number.isFinite(meter.usage.totalCostUsd) ? meter.usage.totalCostUsd : undefined;
     const costState = meter === undefined ? "none" : dollars !== undefined ? "metered" : lane !== null && laneFamily(lane) === "copilot" ? "subscription" : "absent";
-    const needs = lastOf(epochSlice, "needs_human");
     const attempts: AttemptView[] = [];
     let previousEndSeq = contract?.seq ?? 0;
     for (const n of numbers) {
-      attempts.push(attemptView(epochSlice, n, previousEndSeq));
+      const attempt = state.attempts.find((entry) => entry.attempt === n)!;
+      attempts.push(attemptView(epochSlice, attempt, previousEndSeq));
       const attemptEvents = epochSlice.filter((e) => "attempt" in e && e.attempt === n);
       previousEndSeq = Math.max(previousEndSeq, ...attemptEvents.map((e) => e.seq));
     }
@@ -169,13 +147,16 @@ export function foldTasks(events: readonly AnyEvent[]): TaskView[] {
       task,
       workspace: contract?.workspace ?? "",
       description: contract?.description ?? null,
-      status: statusOf(epochSlice),
+      status: state.status,
+      ownerEligible: state.attempts.some((attempt) => attempt.ownerEligible),
+      leadEligible: state.attempts.some((attempt) => attempt.leadEligible),
+      pendingLanding: state.pendingLanding,
       accepted: accepted !== undefined,
       acceptedBy: accepted?.accepted_by ?? null,
       lane,
       costState,
       costUsd: dollars ?? null,
-      needsHumanReason: needs?.reason ?? null,
+      needsHumanReason: state.needs?.reason ?? null,
       choke: { allowed, denied, blocked },
       attempts,
       lastSeq: slice.reduce((max, evt) => Math.max(max, evt.seq), 0),

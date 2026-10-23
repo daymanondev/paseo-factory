@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createFactory } from "../src/factory.ts";
+import { foldTasks } from "../plugin/server/view.ts";
 import { isEyeLaneUsable, parseEyeAnswer } from "../src/fresh-eyes.ts";
 import { EYE_DIFF_MAX_CHARS, EYE_GATE_OUTPUT_MAX_CHARS } from "../src/constants.ts";
 import type { Factory } from "../src/factory.ts";
@@ -552,3 +553,106 @@ test("v0.0.13: a CLI-lane eye that breaks the output contract is an honest faile
   assert.match(eye.finding, /output contract/);
   assert.equal(eye.model, "pi/zai/glm-5.3");
 });
+
+test("Lead acceptance waits for completed CLEAR", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact } = makeWorkspaceAtBase(dir);
+  const stateDir = join(dir, "factory");
+  writeLanes(stateDir, { freshEyes: "claude/opus-4-8" });
+  let entered!: () => void;
+  const reviewing = new Promise<void>((resolve) => { entered = resolve; });
+  let complete!: (answer: { code: number; stdout: string; stderr: string; timedOut: boolean }) => void;
+  const answer = new Promise<{ code: number; stdout: string; stderr: string; timedOut: boolean }>((resolve) => { complete = resolve; });
+  const factory = createFactory({ stateDir, eyeCliProbe: () => true, eyeCliRunner: async () => { entered(); return answer; } });
+  factory.setContract({ task: "REVIEW", workspace, gate: "true", artifact, freshEyes: true });
+  const claiming = factory.claim({ task: "REVIEW", sha: commitFix(workspace, artifact) });
+  try {
+    await reviewing;
+    const view = foldTasks(factory.ledger.events)[0]!;
+    assert.equal(view.leadEligible, false);
+    assert.equal(view.ownerEligible, true);
+    assert.equal(view.attempts[0]!.reviewState, "pending");
+    assert.throws(() => factory.setContract({ task: "REVIEW", workspace, gate: "true", artifact, freshEyes: true }), factoryErrorCode("gate-running"));
+    await assert.rejects(factory.accept({ task: "REVIEW", attempt: 1, accepted_by: "lead" }), factoryErrorCode("lead-accept-refused"));
+  } finally {
+    complete({ code: 0, stdout: "CLEAR\nNothing to add.", stderr: "", timedOut: false });
+    await claiming;
+  }
+  assert.equal((await factory.accept({ task: "REVIEW", attempt: 1, accepted_by: "lead" })).accepted_by, "lead");
+});
+
+
+test("restart preserves green evidence but represents missing required review as incomplete", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact } = makeWorkspaceAtBase(dir);
+  const stateDir = join(dir, "factory");
+  writeLanes(stateDir, { freshEyes: "claude/opus-4-8" });
+  const before = createFactory({ stateDir, eyeCliProbe: () => true, eyeCliRunner: async () => ({ code: 0, stdout: "CLEAR\nNothing to add.", stderr: "", timedOut: false }) });
+  before.setContract({ task: "RESTART-EYE", workspace, gate: "true", artifact, freshEyes: true });
+  const sha = commitFix(workspace, artifact);
+  await before.claim({ task: "RESTART-EYE", sha });
+  assert.equal(foldTasks(before.ledger.events)[0]!.leadEligible, true);
+  before.setContract({ task: "RESTART-EYE", workspace, gate: "true", artifact, freshEyes: true });
+  // Durable crash fixture: Gate finished, daemon stopped during required review.
+  before.ledger.append({ event: "claim_reported", task: "RESTART-EYE", attempt: 1, sha });
+  before.ledger.append({ event: "gate_started", task: "RESTART-EYE", attempt: 1, cmd: "true" });
+  before.ledger.append({ event: "gate_finished", task: "RESTART-EYE", attempt: 1, verdict: "green", exit: 0, note: "", sha });
+  const restarted = createFactory({ stateDir, eyeCliProbe: () => true, eyeCliRunner: async () => { throw new Error("restart must not rerun review"); } });
+  const view = foldTasks(restarted.ledger.events)[0]!;
+  assert.equal(view.attempts.length, 1, "Attempt 1 from the prior epoch is outside the current ladder");
+  assert.equal(view.attempts[0]!.reviewState, "incomplete");
+  assert.equal(view.leadEligible, false);
+  assert.equal(view.ownerEligible, true);
+  await assert.rejects(restarted.accept({ task: "RESTART-EYE", attempt: 1, accepted_by: "lead" }), factoryErrorCode("lead-accept-refused"));
+  assert.equal((await restarted.accept({ task: "RESTART-EYE", attempt: 1, accepted_by: "owner" })).accepted_by, "owner");
+});
+
+test("Owner may accept green evidence while required review is pending", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact } = makeWorkspaceAtBase(dir);
+  const stateDir = join(dir, "factory");
+  writeLanes(stateDir, { freshEyes: "claude/opus-4-8" });
+  let entered!: () => void;
+  const reviewing = new Promise<void>((resolve) => { entered = resolve; });
+  let complete!: () => void;
+  const paused = new Promise<void>((resolve) => { complete = resolve; });
+  const factory = createFactory({ stateDir, eyeCliProbe: () => true, eyeCliRunner: async () => { entered(); await paused; return { code: 0, stdout: "CONCERN\nOwner must decide.", stderr: "", timedOut: false }; } });
+  factory.setContract({ task: "OVERRIDE-EYE", workspace, gate: "true", artifact, freshEyes: true });
+  const claiming = factory.claim({ task: "OVERRIDE-EYE", sha: commitFix(workspace, artifact) });
+  try {
+    await reviewing;
+    const event = await factory.accept({ task: "OVERRIDE-EYE", attempt: 1, accepted_by: "owner", authority: "owner" });
+    assert.equal(event.accepted_by, "owner");
+  } finally {
+    complete();
+    await claiming;
+  }
+  assert.equal(foldTasks(factory.ledger.events)[0]!.acceptedBy, "owner");
+});
+
+for (const [label, result] of [
+  ["failed", { code: 1, stdout: "", stderr: "unavailable", timedOut: false }],
+  ["timed out", { code: null, stdout: "", stderr: "", timedOut: true }],
+  ["interrupted", { code: null, stdout: "", stderr: "terminated", timedOut: false }],
+] as const) {
+  test(`Lead cannot accept after required review ${label}; delegated Supervisor may override`, async (t) => {
+    const dir = makeTempDir();
+    disposeDir(t, dir);
+    const { workspace, artifact } = makeWorkspaceAtBase(dir);
+    const stateDir = join(dir, "factory");
+    writeLanes(stateDir, { freshEyes: "claude/opus-4-8" });
+    const factory = createFactory({ stateDir, eyeCliProbe: () => true, eyeCliRunner: async () => result });
+    factory.setContract({ task: "FAILED-EYE", workspace, gate: "true", artifact, freshEyes: true });
+    assert.equal((await factory.claim({ task: "FAILED-EYE", sha: commitFix(workspace, artifact) })).verdict, "green");
+    const view = foldTasks(factory.ledger.events)[0]!;
+    assert.equal(view.leadEligible, false);
+    assert.equal(view.ownerEligible, true);
+    assert.equal(view.attempts[0]!.reviewState, "failed");
+    await assert.rejects(factory.accept({ task: "FAILED-EYE", attempt: 1, authority: "lead", accepted_by: "owner" }), factoryErrorCode("lead-accept-refused"));
+    const event = await factory.accept({ task: "FAILED-EYE", attempt: 1, authority: "supervisor", accepted_by: "supervisor" });
+    assert.equal(event.accepted_by, "supervisor");
+  });
+}

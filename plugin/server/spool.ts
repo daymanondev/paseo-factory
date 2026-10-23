@@ -31,7 +31,7 @@ import { CorrelationRegistry, readCorrelations } from "./core/correlations.ts";
 import { loadLanes, parseLane } from "./core/lanes.ts";
 import { listProjectRegistrations, readProjectRegistration, resolveProject, writeProjectRegistration } from "./core/project.ts";
 import { FACTORY_SEAT_PROVIDER_IDS, formatPeerAgentTitle, formatPeerWorkspaceTitle } from "./roles.ts";
-import { acceptanceSummary, archiveAcceptedTaskWorkspace } from "./surface-rpc.ts";
+import { acceptanceSummary, executeAcceptance } from "./commands.ts";
 import type { SurfaceDaemonApi } from "./surface-rpc.ts";
 
 /** Seat identity stamped from `PASEO_FACTORY_SEAT` (v0.0.23, ADR 0015 §1). */
@@ -881,17 +881,9 @@ async function resolvePeerSpawnProvider(
 export async function handleSpoolRequest(
   factory: Factory,
   request: SpoolRequest,
-  askHandler?: AskHandler,
-  leadRotateHandler?: LeadRotateHandler,
-  leadDispatchHandler?: LeadDispatchHandler,
-  peerMailHook?: PeerMailHook,
-  supervisorDispatchHandler?: SupervisorDispatchHandler,
-  supervisorReportHandler?: SupervisorReportHandler,
-  daemon?: SurfaceDaemonApi | (() => SurfaceDaemonApi | undefined),
-  projectResetHandler?: ProjectResetHandler,
-  sanitizeLane?: SanitizeLaneHandler,
-  home?: string,
+  deps: SpoolDeps = {},
 ): Promise<SpoolReply> {
+  const { ask: askHandler, leadRotate: leadRotateHandler, leadDispatch: leadDispatchHandler, peerMail: peerMailHook, supervisorDispatch: supervisorDispatchHandler, supervisorReport: supervisorReportHandler, daemon, projectReset: projectResetHandler, sanitizeLane, home } = deps;
   const resolvedDaemon = resolveDaemonArg(daemon);
   try {
     const effectiveSeat = await resolveEffectiveSeat(factory, resolvedDaemon, request);
@@ -1377,8 +1369,7 @@ export async function handleSpoolRequest(
     // `--by` seat, when the request claims one, overrides the submitter
     // stamp; the Lead's conditional authority is judged below in the factory.
     const acceptedBy = request.by ?? request.submitter;
-    const accepted = await factory.accept({ task: request.task, attempt: request.attempt, accepted_by: acceptedBy });
-    await archiveAcceptedTaskWorkspace(factory, resolvedDaemon, request.task, home);
+    const accepted = await executeAcceptance(factory, { task: request.task, attempt: request.attempt, accepted_by: acceptedBy }, { authority: effectiveSeat ?? (request.by === "lead" ? "lead" : "owner"), daemon: resolvedDaemon, home });
     return {
       id: request.id,
       ok: true,
@@ -1428,7 +1419,7 @@ export interface SpoolOptions {
   home?: string;
 }
 
-export type SpoolDeps = SpoolOptions;
+export type SpoolDeps = Omit<SpoolOptions, "onLog" | "pollMs">;
 
 export interface Spool {
   stop(): void;
@@ -1552,16 +1543,7 @@ export function startSpool(stateDir: string, factory: Factory, options: SpoolOpt
         join(processedDir, name),
         factory,
         log,
-        options.ask,
-        options.leadRotate,
-        options.leadDispatch,
-        options.peerMail,
-        options.supervisorDispatch,
-        options.supervisorReport,
-        options.daemon,
-        options.projectReset,
-        options.sanitizeLane,
-        options.home,
+        options,
       )
         .catch(() => {})
         .finally(() => {
@@ -1592,16 +1574,7 @@ async function handleRequestFile(
   processedPath: string,
   factory: Factory,
   log: (message: string) => void,
-  askHandler?: AskHandler,
-  leadRotateHandler?: LeadRotateHandler,
-  leadDispatchHandler?: LeadDispatchHandler,
-  peerMailHook?: PeerMailHook,
-  supervisorDispatchHandler?: SupervisorDispatchHandler,
-  supervisorReportHandler?: SupervisorReportHandler,
-  daemon?: SurfaceDaemonApi | (() => SurfaceDaemonApi | undefined),
-  projectResetHandler?: ProjectResetHandler,
-  sanitizeLane?: SanitizeLaneHandler,
-  home?: string,
+  deps: SpoolDeps,
 ): Promise<void> {
   let reply: SpoolReply;
   let request: SpoolRequest | undefined;
@@ -1614,20 +1587,7 @@ async function handleRequestFile(
     reply = { id, ok: false, code: "bad-request", message: `request file ${requestPath} is not a valid spool request` };
     log(`request ${id}: REJECTED — malformed`);
   } else {
-    reply = await handleSpoolRequest(
-      factory,
-      request,
-      askHandler,
-      leadRotateHandler,
-      leadDispatchHandler,
-      peerMailHook,
-      supervisorDispatchHandler,
-      supervisorReportHandler,
-      daemon,
-      projectResetHandler,
-      sanitizeLane,
-      home,
-    );
+    reply = await handleSpoolRequest(factory, request, deps);
 
     // The v0.0.9 stamps make the two Owner acts attributable in the log too —
     // the same visibility the claim line always had.

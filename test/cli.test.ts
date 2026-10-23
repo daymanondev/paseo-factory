@@ -4,6 +4,7 @@ import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createFactory } from "../plugin/server/core/factory.ts";
+import { CorrelationRegistry } from "../plugin/server/core/correlations.ts";
 import { spoolRootFor, spoolRequestSemanticKey, startSpool } from "../plugin/server/spool.ts";
 import { randomId, spoolRequestSemanticKey as binSemanticKey, submit } from "../plugin/bin/spool-client.mjs";
 import { copyFixture, disposeDir, eyeAnswer, gitCommitAll, gitCommitChanges, makeTempDir, repoRoot, startFakeEye, writeEyeConfig, writeLanes } from "./helpers.ts";
@@ -669,6 +670,17 @@ test("factory accept --by <seat>: the flag rides the spool; the Lead's rules ans
   assert.match(leadRefused.stderr, /lead-accept-refused/);
   assert.match(leadRefused.stderr, /CONCERN/);
   assert.equal(factory.ledger.eventsFor("SEAT2").some((e) => e.event === "attempt_accepted"), false, "no line for the refused act");
+
+  // The daemon binding, rather than the caller's attribution flag, selects
+  // Lead policy, including a CLI call that omits --by entirely.
+  const boundLead = new CorrelationRegistry(stateDir).issue({ role: "lead", projectSlug: "project", projectRoot: workspace, agentId: "bound-lead" });
+  for (const submitter of [boundLead.correlationId, "bound-lead"]) {
+    for (const by of [undefined, "owner", "supervisor"]) {
+      const reply = await run(ownerCli, ["accept", "SEAT2", "--attempt", "1", ...(by === undefined ? [] : ["--by", by])], { ...ownerEnv, PASEO_AGENT_ID: submitter });
+      assert.equal(reply.status, 2, reply.stdout);
+      assert.match(reply.stderr, /lead-accept-refused/);
+    }
+  }
 
   // The usage guard: --by takes exactly the three seats.
   const badSeat = await run(ownerCli, ["accept", "SEAT2", "--attempt", "1", "--by", "boss"], ownerEnv);
