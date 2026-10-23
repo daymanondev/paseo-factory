@@ -1,3 +1,4 @@
+import type { HistoryImportSource, HistoryImportInput } from "../server/core/history-import.ts";
 /**
  * The Private-vault mirror's declaration — see vault.mjs for why it exists
  * (plain .mjs, no build step, no src/ imports per ADR 0004).
@@ -78,10 +79,7 @@ export interface ResolvedVaultApp {
   projectSlug: string | null;
 }
 
-export interface VaultLedgerSource {
-  nodeId: string;
-  lines: string;
-}
+export interface VaultLedgerSource extends HistoryImportSource {}
 
 export interface SyncVaultOptions {
   repo?: string;
@@ -185,4 +183,5 @@ export declare function ensureLocalGitExcludeAndWorktreeInclude(
 export declare function reconcileVaultLedgers(
   existingLines: string,
   nodeLedgerLines: readonly VaultLedgerSource[],
+  options?: Pick<HistoryImportInput, "bindings" | "files">,
 ): string;

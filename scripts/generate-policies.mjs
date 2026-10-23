@@ -23,6 +23,7 @@ async function compile(source, globalName) {
 }
 
 const targets = [
+  ["src/history-import.ts", "plugin/bin/history-import.mjs"],
   ["src/scope-policy.ts", "plugin/bin/scope.mjs"],
   ["src/ledger-read.ts", "plugin/bin/ledger-read.mjs"],
   ["src/worktree-policy.ts", "plugin/bin/worktree-policy.mjs"],

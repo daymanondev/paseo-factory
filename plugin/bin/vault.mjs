@@ -15,6 +15,7 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSy
 import { homedir, hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { gunzipSync } from "node:zlib";
+import { reconcileHistory } from "./history-import.mjs";
 import { projectStateDir, resolveProject } from "./project.mjs";
 
 /** The core's FactoryError, mirrored as a plain Error carrying the stable code. */
@@ -1768,56 +1769,8 @@ function isValidVaultLedgerRecord(evt) {
   return shapeIsValid(evt);
 }
 
-export function reconcileVaultLedgers(existingLines, nodeLedgerLines) {
-  const seen = new Map();
-  const carry = (lines, sourceNodeId) => {
-    for (const raw of lines.split("\n")) {
-      const line = raw.trim();
-      if (line === "") continue;
-      let parsed;
-      try {
-        parsed = JSON.parse(line);
-      } catch {
-        continue;
-      }
-      if (!isValidVaultLedgerRecord(parsed)) continue;
-      const fingerprint = stableStringify(omitSeq(parsed));
-      if (!seen.has(fingerprint)) {
-        const ts = Date.parse(String(parsed.ts));
-        seen.set(fingerprint, {
-          evt: parsed,
-          sourceNodeId,
-          originalSeq: parsed.seq,
-          sortTs: Number.isNaN(ts) ? 0 : ts,
-        });
-      }
-    }
-  };
-
-  carry(existingLines, "");
-  for (const source of nodeLedgerLines) carry(source.lines, source.nodeId);
-
-  const ordered = [...seen.values()].sort(
-    (a, b) => a.sortTs - b.sortTs || (a.sourceNodeId < b.sourceNodeId ? -1 : a.sourceNodeId > b.sourceNodeId ? 1 : 0) || a.originalSeq - b.originalSeq,
-  );
-  return ordered.map((carried, index) => `${JSON.stringify({ ...carried.evt, seq: index + 1 })}\n`).join("");
-}
-
-function omitSeq(evt) {
-  const rest = {};
-  for (const [key, value] of Object.entries(evt)) {
-    if (key !== "seq") rest[key] = value;
-  }
-  return rest;
-}
-
-function stableStringify(value) {
-  if (typeof value !== "object" || value === null) return JSON.stringify(value) ?? "null";
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
-  const entries = Object.entries(value)
-    .filter(([, v]) => v !== undefined)
-    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableStringify(v)}`).join(",")}}`;
+export function reconcileVaultLedgers(existingLines, sources, options = {}) {
+  return reconcileHistory(existingLines, sources, options);
 }
 
 function reconcileVaultLedgerState(paseoHome) {
