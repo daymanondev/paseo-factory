@@ -58,6 +58,9 @@ export const AttemptViewSchema = z.object({
   /** The attempt's latest gate verdict; null while the attempt is still open. */
   verdict: z.enum(["red", "green"]).nullable(),
   /** True between claim and report — the run is in flight. */
+  reviewState: z.enum(["off", "pending", "incomplete", "clear", "concern", "failed"]).optional(),
+  ownerEligible: z.boolean().optional(),
+  leadEligible: z.boolean().optional(),
   open: z.boolean(),
   exit: z.number().int().nullable(),
   note: z.string().nullable(),
@@ -95,6 +98,9 @@ export const TaskViewSchema = z.object({
   workspace: z.string(),
   description: z.string().nullable(),
   status: TaskStatusSchema,
+  ownerEligible: z.boolean().optional(),
+  leadEligible: z.boolean().optional(),
+  pendingLanding: z.boolean().optional(),
   accepted: z.boolean(),
   acceptedBy: z.string().nullable(),
   /** The latest meter/spawn provider string, when a run ever named one. */

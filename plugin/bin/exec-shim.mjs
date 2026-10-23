@@ -238,15 +238,18 @@ if (realBin === undefined) {
 }
 
 const child = spawn(realBin, argv, { stdio: "inherit" });
-for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
-  process.on(sig, () => child.kill(sig));
+const forward = new Set(["SIGINT", "SIGTERM", "SIGHUP"]);
+for (const signal of forward) {
+  process.on(signal, () => child.kill(signal));
 }
 child.on("error", (err) => {
   console.error(`exec-shim: failed to exec ${realBin}: ${err.message}`);
   process.exit(127);
 });
-child.on("exit", (code, signal) => {
+child.on("close", (code, signal) => {
   if (signal !== null) {
+    // Restore default disposition before self-signalling, as in git-shim.
+    for (const s of forward) process.removeAllListeners(s);
     process.kill(process.pid, signal);
     return;
   }

@@ -2921,13 +2921,7 @@ test("v0.0.23 (ADR 0015 §6): spool spawn/respawn registers Task worktree worksp
   const spawnReply = await handleSpoolRequest(
     factory,
     { id: "sp-ws-1", kind: "spawn", task: "T-WS-1", provider: "opencode/glm-5.1", arity: 1, worktree: wtPath },
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    fake.daemon,
+    { daemon: fake.daemon },
   );
   assert.equal(spawnReply.ok, true);
   if (spawnReply.ok) {
@@ -2955,13 +2949,7 @@ test("v0.0.23 (ADR 0015 §6): spool spawn/respawn registers Task worktree worksp
   const respawnReply = await handleSpoolRequest(
     factory,
     { id: "rsp-ws-1", kind: "respawn", task: "T-WS-1", provider: "opencode/glm-5.1", died_agent: deadWorker.id },
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    fake.daemon,
+    { daemon: fake.daemon },
   );
   assert.equal(respawnReply.ok, true);
   if (respawnReply.ok) {
@@ -2985,13 +2973,7 @@ test("v0.0.23 (ADR 0015 §6): spool spawn/respawn registers Task worktree worksp
   const meterReply = await handleSpoolRequest(
     factory,
     { id: "m-ws-1", kind: "meter", task: "T-WS-1", provider: "opencode/glm-5.1", agent: liveWorker.id, usage: { inputTokens: 100, outputTokens: 50 } },
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    fake.daemon,
+    { daemon: fake.daemon },
   );
   assert.equal(meterReply.ok, true);
   assert.ok(fake.archived.includes(liveWorker.id), "meter archived finished working Agent");
@@ -3051,13 +3033,7 @@ test("v0.0.31 (ADR 0017 §2/§5): spawn titles the Task worktree Workspace `Peer
   const spawnReply = await handleSpoolRequest(
     factory,
     { id: "sp-ws-2", kind: "spawn", task: "T-WS-2", provider: "opencode/glm-5.1", arity: 1, worktree: wtPrep.path },
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    fake.daemon,
+    { daemon: fake.daemon },
   );
   assert.equal(spawnReply.ok, true);
   // Testing Decision seam 1's description arm: the first clause of

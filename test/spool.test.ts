@@ -128,11 +128,10 @@ test("lead_rotate rides the injected rotation handler and is refused loudly with
   const withHandler = await handleSpoolRequest(
     factory,
     { id: "r1", kind: "lead_rotate", projectRoot: "/w/repo" },
-    undefined,
-    async (request) => {
+    { leadRotate: async (request) => {
       rotated.push(request.projectRoot);
       return { id: request.id, ok: true, summary: "lead rotated — agent agent-lead-1 cancelled + archived", agentId: "agent-lead-1" };
-    },
+    } },
   );
   assert.ok(withHandler.ok);
   assert.equal(withHandler.agentId, "agent-lead-1");
@@ -297,13 +296,13 @@ test("handleSpoolRequest routes asks to the choke handler and refuses loudly wit
     assert.match(refused.message, /synthetic asks/);
   }
 
-  const answered = await handleSpoolRequest(factory, { id: "r2", kind: "ask", task: "T1", command: "x" }, (req) => ({
+  const answered = await handleSpoolRequest(factory, { id: "r2", kind: "ask", task: "T1", command: "x" }, { ask: (req) => ({
     id: req.id,
     ok: true,
     summary: "ask denied (test)",
     decision: "denied",
     rule: "policy:S1-git-vocabulary",
-  }));
+  }) });
   assert.deepEqual(answered, {
     id: "r2",
     ok: true,
@@ -707,13 +706,7 @@ test("spool command authority (v0.0.23, ADR 0015 §1): refuses contract/spawn/re
       submitter: "live-sup-1",
       seat: "lead", // spoofed seat!
     },
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    fakeDaemon as unknown as Parameters<typeof handleSpoolRequest>[8],
+    { daemon: fakeDaemon as unknown as NonNullable<import("../plugin/server/spool.ts").SpoolDeps["daemon"]> },
   );
   assert.equal(spoofedSupContract.ok, false);
   if (!spoofedSupContract.ok) {
@@ -730,13 +723,7 @@ test("spool command authority (v0.0.23, ADR 0015 §1): refuses contract/spawn/re
       submitter: "live-worker-1",
       // seat omitted!
     },
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    fakeDaemon as unknown as Parameters<typeof handleSpoolRequest>[8],
+    { daemon: fakeDaemon as unknown as NonNullable<import("../plugin/server/spool.ts").SpoolDeps["daemon"]> },
   );
   assert.equal(omittedWorkerAccept.ok, false);
   if (!omittedWorkerAccept.ok) {
@@ -803,14 +790,7 @@ test("handleSpoolRequest refuses reset from supervisor, lead, and agent with sea
       keepSeats: true,
       submitter: "owner",
     },
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    async (req) => {
+    { projectReset: async (req) => {
       handlerCalledWith = { ...req };
       const res = factory.resetProject(ws, "ws");
       return {
@@ -824,7 +804,7 @@ test("handleSpoolRequest refuses reset from supervisor, lead, and agent with sea
         archivedSeats: [],
         archivedAgents: [],
       };
-    },
+    } },
   );
   assert.equal(okRes.ok, true);
   if (okRes.ok) {
@@ -851,15 +831,7 @@ test("handleSpoolRequest sanitizes spawn and respawn provider via sanitizeLane b
   const spawned = await handleSpoolRequest(
     factory,
     { id: "sp-san-1", kind: "spawn", task: "SAN-SP-1", provider: "opencode/opencode/nemotron-3-ultra-free:max", arity: 1 },
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    sanitizeLane,
+    { sanitizeLane: sanitizeLane },
   );
   assert.equal(spawned.ok, true);
   if (spawned.ok) {
@@ -870,15 +842,7 @@ test("handleSpoolRequest sanitizes spawn and respawn provider via sanitizeLane b
   const respawned = await handleSpoolRequest(
     factory,
     { id: "rsp-san-1", kind: "respawn", task: "SAN-SP-1", provider: "opencode/opencode/nemotron-3-ultra-free:max", died_agent: "ag-dead-1" },
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    sanitizeLane,
+    { sanitizeLane: sanitizeLane },
   );
   assert.equal(respawned.ok, true);
   if (respawned.ok) {
@@ -974,13 +938,7 @@ test("handleSpoolRequest smart-defaults freshEyes on Lead contracts, reports 'fr
       submitter: "agent-lead-1",
       seat: "lead",
     },
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    fakeDaemon as unknown as Parameters<typeof handleSpoolRequest>[8],
+    { daemon: fakeDaemon as unknown as NonNullable<import("../plugin/server/spool.ts").SpoolDeps["daemon"]> },
   );
   assert.equal(sp.ok, true);
   if (sp.ok) {
@@ -1002,3 +960,26 @@ test("handleSpoolRequest smart-defaults freshEyes on Lead contracts, reports 'fr
 
 
 
+
+test("correlated Lead cannot turn attribution into Owner acceptance authority", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const workspace = join(dir, "ws");
+  mkdirSync(workspace);
+  writeFileSync(join(workspace, "artifact"), "ok\n");
+  const sha = gitCommitAll(workspace);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  factory.setContract({ task: "BOUND", workspace, artifact: "artifact", gate: "true" });
+  await factory.claim({ task: "BOUND", sha });
+  factory.ledger.append({ event: "fresh_eyes_written", task: "BOUND", attempt: 1, model: "eye", outcome: "concern", finding: "needs Owner", durationMs: 1 });
+  const lead = new CorrelationRegistry(factory.stateDir).issue({ role: "lead", projectSlug: "project", projectRoot: workspace, agentId: "lead-agent" });
+  for (const submitter of [lead.correlationId, "lead-agent"]) {
+    for (const by of [undefined, "owner", "supervisor", "lead"] as const) {
+      const reply = await handleSpoolRequest(factory, { id: `${submitter}-${by}`, kind: "accept", task: "BOUND", attempt: 1, submitter, ...(by === undefined ? {} : { by }) });
+      assert.equal(reply.ok, false, `${submitter}/${by} must retain Lead restrictions`);
+      if (!reply.ok) assert.equal(reply.code, "lead-accept-refused");
+    }
+  }
+  const override = await handleSpoolRequest(factory, { id: "owner", kind: "accept", task: "BOUND", attempt: 1, submitter: "owner" });
+  assert.equal(override.ok, true);
+});

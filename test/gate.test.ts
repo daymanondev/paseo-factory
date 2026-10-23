@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { runGate } from "../src/gate.ts";
 import { REPORT_NOTE_MAX_CHARS } from "../src/constants.ts";
@@ -122,4 +123,70 @@ test("runGate reaps background subprocesses holding stdout open and finishes in 
   assert.equal(result.exit, 0);
   assert.match(result.output ?? "", /gate-done/);
   assert.ok(elapsed < 2_000, `runGate must reap background children and finish in <2s (took ${elapsed}ms)`);
+});
+
+
+
+for (const scenario of [
+  { name: "redirected pipes", stdio: "ignore", exit: 0, ignoreTerm: true },
+  { name: "inherited pipes and a nonzero exit", stdio: "inherit", exit: 7, ignoreTerm: true },
+  { name: "a cooperative SIGTERM handler", stdio: "ignore", exit: 0, ignoreTerm: false },
+  { name: "a timed-out command", stdio: "ignore", exit: undefined, ignoreTerm: true },
+] as const) {
+  test(`Gate finishes descendant cleanup with ${scenario.name}`, { skip: process.platform === "win32" }, async (t) => {
+    const dir = makeTempDir();
+    const pidPath = join(dir, "descendant.pid");
+    // Register process cleanup before directory cleanup, including failure paths.
+    t.after(() => {
+      if (!existsSync(pidPath)) return;
+      try { process.kill(Number(readFileSync(pidPath, "utf8")), "SIGKILL"); } catch { /* already dead */ }
+    });
+    disposeDir(t, dir);
+    const termPath = join(dir, "term-received");
+    writeFileSync(join(dir, "descendant.mjs"), `
+      import { writeFileSync } from "node:fs";
+      process.on("SIGTERM", () => {
+        writeFileSync(${JSON.stringify(termPath)}, "received");
+        ${scenario.ignoreTerm ? "" : "process.exit(0);"}
+      });
+      setInterval(() => {}, 1000);
+      writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));
+    `);
+    writeFileSync(join(dir, "parent.mjs"), `
+      import { spawn } from "node:child_process";
+      import { existsSync } from "node:fs";
+      spawn(process.execPath, ["descendant.mjs"], { stdio: ${JSON.stringify(scenario.stdio)} });
+      const ready = setInterval(() => {
+        if (existsSync(${JSON.stringify(pidPath)})) {
+          clearInterval(ready);
+          console.log("gate-done");
+          ${scenario.exit === undefined ? "setInterval(() => {}, 1000);" : `process.exit(${scenario.exit});`}
+        }
+      }, 5);
+    `);
+
+    const start = Date.now();
+    const result = await runGate({ cmd: `exec '${process.execPath}' parent.mjs`, cwd: dir, timeoutMs: 1_000 });
+    const pid = Number(readFileSync(pidPath, "utf8"));
+    const status = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim();
+
+    assert.equal(result.verdict, scenario.exit === 0 ? "green" : "red");
+    assert.equal(result.exit, scenario.exit ?? null);
+    assert.equal(result.timedOut, scenario.exit === undefined);
+    assert.match(result.output ?? "", /gate-done/);
+    if (scenario.exit === undefined) assert.match(result.note, /timeout/);
+    else assert.ok(existsSync(termPath), "descendant received SIGTERM before final cleanup");
+    assert.ok(status === "" || status.startsWith("Z"), `descendant ${pid} still running after Gate completion: ${status}`);
+    assert.ok(Date.now() - start < 2_000, "cleanup must remain bounded");
+  });
+}
+
+test("a signal-terminated Gate remains red with no exit code", { skip: process.platform === "win32" }, async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const result = await runGate({ cmd: "kill -TERM $$", cwd: dir });
+  assert.equal(result.verdict, "red");
+  assert.equal(result.exit, null);
+  assert.equal(result.timedOut, false);
+  assert.equal(result.note, "killed by signal");
 });

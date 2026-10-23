@@ -727,3 +727,36 @@ test("bridge Task allocation inherits root dependencies and keeps them clean", a
     rmSync(repoDir, { recursive: true, force: true });
   }
 });
+
+test("MCP Lead acceptance binds its authenticated role despite forged attribution arguments", async (t) => {
+  const repoDir = makeGitRepo();
+  const stateDir = mkdtempSync(join(tmpdir(), "factory-mcp-auth-"));
+  t.after(() => { rmSync(repoDir, { recursive: true, force: true }); rmSync(stateDir, { recursive: true, force: true }); });
+  const reg = ensureProjectRegistered(stateDir, repoDir);
+  assert.ok(reg.ok);
+  const factory = createFactory({ stateDir });
+  factory.setContract({ task: "mcp-bound", workspace: repoDir, gate: "true", artifact: "README.md" });
+  const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoDir, encoding: "utf8" }).trim();
+  await factory.claim({ task: "mcp-bound", sha });
+  factory.ledger.append({ event: "fresh_eyes_written", task: "mcp-bound", attempt: 1, model: "eye", outcome: "concern", finding: "Owner decision needed", durationMs: 1 });
+  const registry = new CorrelationRegistry(stateDir);
+  const lead = registry.issue({ role: "lead", projectSlug: reg.slug, projectRoot: repoDir, agentId: "mcp-lead" });
+  const supervisor = registry.issue({ role: "supervisor", projectSlug: reg.slug, projectRoot: repoDir, agentId: "mcp-supervisor" });
+  const spool = startSpool(stateDir, factory, { pollMs: 10 });
+  t.after(() => spool.stop());
+  const refused = await runMcpSession({
+    args: ["--correlation", lead.correlationId, "--state-dir", stateDir], cwd: repoDir,
+    requests: [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_accept_task", arguments: { task: "mcp-bound", attempt: 1, by: "owner", submitter: "owner" } } }],
+  });
+  const denied = refused[0]!.result as { isError?: boolean; content: Array<{ text: string }> };
+  assert.equal(denied.isError, true);
+  assert.match(denied.content[0]!.text, /lead-accept-refused/);
+  assert.equal(factory.ledger.eventsFor("mcp-bound").some((event) => event.event === "attempt_accepted"), false);
+  const allowed = await runMcpSession({
+    args: ["--correlation", supervisor.correlationId, "--state-dir", stateDir], cwd: repoDir,
+    requests: [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "supervisor_accept_task", arguments: { task: "mcp-bound", attempt: 1 } } }],
+  });
+  const accepted = allowed[0]!.result as { isError?: boolean; content: Array<{ text: string }> };
+  assert.notEqual(accepted.isError, true, accepted.content[0]!.text);
+  assert.equal(factory.ledger.eventsFor("mcp-bound").findLast((event) => event.event === "attempt_accepted")?.accepted_by, "supervisor");
+});
