@@ -971,3 +971,38 @@ test("native factory seats use their configured provider family before delegatin
   await ask();
   assert.equal(responses.at(-1)?.behavior, "deny", "native role on a non-OpenCode lane keeps Layer-2 refusal");
 });
+
+test("OpenCode orchestration seats deny isolated explicit-path git writes while other providers retain their policy", async (t) => {
+  const dir = makeTempDir("choke-opencode-explicit-git-");
+  disposeDir(t, dir);
+  const workspace = join(dir, "workspace");
+  mkdirSync(workspace);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  ensureGitShim(factory.stateDir, join(repoRoot, "plugin"), process.execPath);
+  const choke = createChoke({ factory, homeDir: "/fake-home" });
+  const responses: AgentPermissionResponse[] = [];
+  const paseo: PaseoResponderApi = { agents: { ref: () => ({ respondToPermission: async ({ response }) => { responses.push(response); } }) } };
+  const ask = async (seat: "lead" | "supervisor", provider: string, command: string) => {
+    await choke.onPermissionAsked({
+      agent: { id: "seat", cwd: workspace, provider, labels: { seat } },
+      request: { id: "ask", provider, name: "Bash", kind: "tool", detail: { type: "shell", command, cwd: workspace } },
+    }, paseo);
+    return responses.at(-1)!;
+  };
+  for (const seat of ["supervisor", "lead"] as const) {
+    for (const command of ["/usr/bin/git commit -m x", "./tools/git -C /repo merge feature"]) {
+      const response = await ask(seat, "opencode", command);
+      assert.equal(response.behavior, "deny", `${seat}: ${command}`);
+      if (response.behavior === "deny") {
+        assert.match(response.message ?? "", /Seat write fence/);
+        assert.match(response.message ?? "", seat === "supervisor" ? /supervisor_dispatch_lead/ : /lead_set_contract.*lead_spawn_agent/);
+      }
+      for (const provider of ["claude", "codex", "pi", "copilot", "omp", "antigravity"]) {
+        assert.equal((await ask(seat, provider, command)).behavior, "allow", `${provider} retains existing explicit-path policy`);
+      }
+    }
+    for (const command of ["git commit -m x", "git status --short", "/usr/bin/git status --short"]) {
+      assert.equal((await ask(seat, "opencode", command)).behavior, "allow", `${seat}: ${command} retains existing policy`);
+    }
+  }
+});
