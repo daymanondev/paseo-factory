@@ -235,6 +235,8 @@ export function foldRetro(events: readonly AnyEvent[]): RetroView[] {
 /** One ledger line, rendered — the stream's whole payload. */
 export function renderLedgerLine(evt: AnyEvent): string {
   switch (evt.event) {
+    case "ledger_schema":
+      return `ledger schema v${evt.version}`;
     case "contract_set":
       return `contract gate="${evt.gate}" artifact=${evt.artifact}${evt.scope === undefined ? "" : ` scope=[${evt.scope.join(",")}]`}${evt.skills === undefined ? "" : ` skills=[${evt.skills.join(",")}]`}`;
     case "claim_reported":

@@ -1,9 +1,12 @@
+import { randomUUID } from "node:crypto";
 import { appendFileSync, closeSync, fsyncSync, ftruncateSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from "node:fs";
 import { dirname } from "node:path";
 import { FactoryError } from "./errors.ts";
-import { parseLedgerJsonl } from "./ledger-validation.ts";
+import { eventAllowsUnboundEpoch } from "./events.ts";
+import { remapLedgerReferences } from "./history-identity.ts";
+import { isValidLedgerEvent, parseLedgerJsonl } from "./ledger-validation.ts";
 export { isValidLedgerEvent, parseLedgerJsonl, usageIsValid } from "./ledger-validation.ts";
-import type { LedgerEvent, PendingEvent } from "./events.ts";
+import type { EventIdentityMetadata, LedgerEvent, LedgerSchema, PendingEvent } from "./events.ts";
 
 /**
  * Append-only JSONL ledger. Lines are never mutated or rewritten — the file is
@@ -24,15 +27,19 @@ export class Ledger {
   readonly #path: string;
   readonly #events: LedgerEvent[] = [];
   #nextSeq: number;
+  readonly #schema: LedgerSchema | undefined;
+  readonly #writerId: string | undefined;
 
-  private constructor(path: string, events: readonly LedgerEvent[]) {
+  private constructor(path: string, events: readonly LedgerEvent[], writerId?: string) {
+    this.#writerId = writerId;
     this.#path = path;
     this.#events.push(...events);
     this.#nextSeq = (events.at(-1)?.seq ?? 0) + 1;
+    this.#schema = events.find((event): event is LedgerSchema => event.event === "ledger_schema");
   }
 
   /** Loads and validates an existing ledger, or starts a fresh one at seq 1. */
-  static open(path: string): Ledger {
+  static open(path: string, options: { writerId?: string } = {}): Ledger {
     mkdirSync(dirname(path), { recursive: true });
     let raw: string;
     try {
@@ -48,12 +55,28 @@ export class Ledger {
 
     const read = parseLedgerJsonl(raw);
     if (read.corrupt !== undefined) throw new FactoryError("corrupted-ledger", `${read.corrupt} of ${path}`);
-    return new Ledger(path, read.events);
+    return new Ledger(path, read.events, options.writerId);
   }
 
   /** Assigns the next seq, stamps `ts`, appends one JSONL line, fsyncs, and returns the event. */
-  append<T extends PendingEvent>(evt: T): T & { seq: number; ts: string } {
-    const record = { seq: this.#nextSeq, ts: new Date().toISOString(), ...evt } as T & { seq: number; ts: string };
+  append<T extends PendingEvent>(evt: T): T & { seq: number; ts: string } & EventIdentityMetadata {
+    const identity: EventIdentityMetadata = {};
+    if (this.#schema !== undefined) {
+      if (this.#writerId === undefined || this.#writerId.trim() === "") throw new FactoryError("writer-identity-required", "v2 append requires a demonstrable local writer identity; a copied schema fence is not writer authority");
+      const eventId = `event:${randomUUID()}`;
+      const task = "task" in evt ? evt.task : undefined;
+      const epoch = evt.event === "contract_set" ? eventId : task === undefined ? undefined : this.#events.findLast((event) => event.event === "contract_set" && event.task === task)?.epoch_id;
+      if (task !== undefined && epoch === undefined && !eventAllowsUnboundEpoch(evt.event)) throw new FactoryError("invalid-event-epoch", `Task ${task} has no current Contract epoch`);
+      Object.assign(identity, { schema_version: 2, event_id: eventId, provenance: { writer_id: this.#writerId }, ...(epoch === undefined ? {} : { epoch_id: epoch }) });
+    }
+    const record = { ...evt, seq: this.#nextSeq, ts: new Date().toISOString(), ...identity } as T & { seq: number; ts: string } & EventIdentityMetadata;
+    if (this.#schema !== undefined) {
+      const context = [...this.#events, record as LedgerEvent];
+      const resolved = remapLedgerReferences(record as LedgerEvent, context, context);
+      if (!resolved.ok) throw new FactoryError("invalid-event-reference", resolved.reasons.join("; "));
+      Object.assign(record, resolved.event);
+      if (!isValidLedgerEvent(record)) throw new FactoryError("invalid-event", "record does not satisfy the active Ledger schema");
+    }
     const line = `${JSON.stringify(record)}\n`;
     // O_APPEND + a single write makes the line land atomically at EOF; fsync
     // puts it on disk before append returns. Sync I/O also keeps seq assignment
@@ -93,7 +116,7 @@ export class Ledger {
     const remaining: LedgerEvent[] = [];
     let purged = 0;
     for (const evt of this.#events) {
-      if (predicate(evt)) {
+      if (evt.event !== "ledger_schema" && predicate(evt)) {
         purged += 1;
       } else {
         remaining.push(evt);

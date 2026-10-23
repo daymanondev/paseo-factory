@@ -382,6 +382,7 @@ module.exports = __toCommonJS(ledger_validation_exports);
 
 // src/events.ts
 var EVENT_NAMES = [
+  "ledger_schema",
   "contract_set",
   "claim_reported",
   "gate_started",
@@ -403,6 +404,10 @@ var EVENT_NAMES = [
   "needs_human",
   "retro_written"
 ];
+var LEDGER_REFERENCE_KINDS = { denial: "permit_denied", repoke: "repoke_dispatched", gate: "gate_finished", spawn: "spawn_dispatched", respawn: "respawn_dispatched" };
+function eventAllowsUnboundEpoch(kind) {
+  return kind === "spawn_refused" || kind === "respawn_refused" || kind === "repoke_refused";
+}
 var NEEDS_HUMAN_REASONS = ["denied-again", "silent-after-repoke", "attempt-ceiling", "died-after-respawn"];
 function posInt(value) {
   return typeof value === "number" && Number.isInteger(value) && value >= 1;
@@ -425,7 +430,31 @@ function needsHumanEvidenceIsValid(evidence, reason) {
 function isValidLedgerEvent(value) {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const event = value;
-  return (event.schema_version === void 0 || event.schema_version === 1) && Number.isSafeInteger(event.seq) && event.seq > 0 && typeof event.ts === "string" && typeof event.event === "string" && EVENT_NAMES.includes(event.event) && shapeIsValid(value);
+  return (event.schema_version === void 0 || event.schema_version === 1 || event.schema_version === 2) && (event.schema_version !== 2 || identityMetadataIsValid(event)) && Number.isSafeInteger(event.seq) && event.seq > 0 && typeof event.ts === "string" && typeof event.event === "string" && EVENT_NAMES.includes(event.event) && shapeIsValid(value);
+}
+function nonempty(value) {
+  return typeof value === "string" && value.trim() !== "";
+}
+function identityMetadataIsValid(event) {
+  if (!nonempty(event.event_id)) return false;
+  if (typeof event.provenance !== "object" || event.provenance === null || Array.isArray(event.provenance)) return false;
+  const writer = event.provenance.writer_id;
+  if (writer !== null && !nonempty(writer)) return false;
+  if (event.task !== void 0 && !nonempty(event.epoch_id) && !(event.epoch_id === void 0 && eventAllowsUnboundEpoch(String(event.event)))) return false;
+  if (event.task === void 0 && event.epoch_id !== void 0) return false;
+  if (event.event === "contract_set" && event.epoch_id !== event.event_id) return false;
+  if (event.references !== void 0) {
+    if (event.event !== "needs_human" || typeof event.references !== "object" || event.references === null || Array.isArray(event.references)) return false;
+    for (const [key, target] of Object.entries(event.references)) if (!["denial", "repoke", "gate", "spawn", "respawn"].includes(key) || !nonempty(target)) return false;
+  }
+  if (event.event === "needs_human") {
+    if (event.references === void 0) return false;
+    const evidence = event.evidence;
+    if (typeof evidence !== "object" || evidence === null || Array.isArray(evidence)) return false;
+    const fields = Object.keys(evidence).filter((field) => field !== "attempt").sort();
+    if (fields.join(",") !== Object.keys(event.references).sort().join(",")) return false;
+  }
+  return true;
 }
 function parseLedgerJsonl(raw, options = {}) {
   const lines = raw.split("\n");
@@ -448,11 +477,39 @@ function parseLedgerJsonl(raw, options = {}) {
     previousSeq = value.seq;
     events.push(value);
   }
+  const fences = events.filter((event) => event.event === "ledger_schema");
+  const versioned = events.some((event) => event.schema_version === 2);
+  if (fences.length > 1 || versioned && fences.length !== 1 || fences.length === 1 && events.some((event) => event.schema_version !== 2)) return { corrupt: "v2 history requires exactly one schema fence and identified records" };
+  const ids = /* @__PURE__ */ new Set();
+  for (const event of events) {
+    if (event.event_id === void 0) continue;
+    if (ids.has(event.event_id)) return { corrupt: `duplicate stable event identity at seq ${event.seq}` };
+    ids.add(event.event_id);
+  }
+  if (versioned) {
+    const epochs = /* @__PURE__ */ new Map();
+    const prior = /* @__PURE__ */ new Map();
+    for (const event of events) {
+      if (event.event === "contract_set") epochs.set(event.task, event.event_id);
+      if ("task" in event && typeof event.task === "string" && epochs.get(event.task) !== event.epoch_id) return { corrupt: `seq ${event.seq} is outside its current Contract epoch` };
+      if (event.event === "needs_human") {
+        for (const [field, seq] of Object.entries(event.evidence)) {
+          if (field === "attempt") continue;
+          const target = prior.get(seq);
+          const key = field;
+          if (target === void 0 || target.event !== LEDGER_REFERENCE_KINDS[key] || !("task" in target) || target.task !== event.task || target.epoch_id !== event.epoch_id || target.event_id !== event.references?.[key]) return { corrupt: `seq ${event.seq} has an unresolved ${field} reference` };
+          if (field === "gate" && (target.event !== "gate_finished" || target.verdict !== "red" || target.attempt !== event.evidence.attempt)) return { corrupt: `seq ${event.seq} has invalid red Attempt evidence` };
+        }
+      }
+      prior.set(event.seq, event);
+    }
+  }
   return { events };
 }
 function shapeIsValid(evt) {
   const asRecord = evt;
   const taskIsString = typeof asRecord.task === "string";
+  if (evt.event === "ledger_schema") return asRecord.schema_version === 2 && asRecord.version === 2 && nonempty(asRecord.ledger_id) && nonempty(asRecord.writer_id) && asRecord.provenance?.writer_id === asRecord.writer_id;
   if (evt.event === "contract_set") return taskIsString;
   if (evt.event === "retro_written") {
     return typeof asRecord.model === "string" && (asRecord.outcome === "written" || asRecord.outcome === "failed") && typeof asRecord.durationMs === "number" && Number.isFinite(asRecord.durationMs) && asRecord.durationMs >= 0;

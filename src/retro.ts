@@ -211,6 +211,10 @@ export function buildRetroDigest(events: readonly LedgerEvent[], stateDir: strin
   const attached = { logs: 0 };
 
   for (const evt of events) {
+    if (evt.event === "ledger_schema") {
+      factoryLines.push(`[${evt.seq}] ledger_schema version=${evt.version} ledger=${evt.ledger_id}`);
+      continue;
+    }
     if (evt.event === "retro_written") {
       // Prior Retros render as factory-level one-liners; their proposals
       // files are not re-fed (v1).
