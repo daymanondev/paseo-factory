@@ -25,6 +25,23 @@ import type { CompanionPluginView, CompanionStatus, FactoryView } from "../../sh
 import { Btn, Card, Pill } from "../kit/pill.tsx";
 import { CONTROL_H, RADIUS, SPACING, text, tint } from "../kit/theme.ts";
 import type { Colour } from "../kit/theme.ts";
+import {
+  DEFAULT_CORE_RESTART_TIMEOUT_MS,
+  formatPluginCardProgressPill,
+  formatToolbarProgressPill,
+  isCoreSelfRestartError,
+  resolveCoreRestartWatch,
+} from "./plugin-feedback.ts";
+import type { ActivePluginAct, PluginsNote } from "./plugin-feedback.ts";
+
+export {
+  DEFAULT_CORE_RESTART_TIMEOUT_MS,
+  formatPluginCardProgressPill,
+  formatToolbarProgressPill,
+  isCoreSelfRestartError,
+  resolveCoreRestartWatch,
+};
+export type { ActivePluginAct, PluginsNote };
 
 /** The companion ids the catalog carries — the install RPC targets minus "all". */
 type CompanionId = CompanionCatalogEntry["id"];
@@ -68,11 +85,19 @@ function CompanionCard({
   companion,
   actions,
   isCore = false,
+  activeAct = null,
+  elapsedSeconds = 0,
+  cardError,
+  onDismissError,
 }: {
   theme: PluginTheme;
   companion: CompanionPluginView;
   actions: PluginsActions;
   isCore?: boolean;
+  activeAct?: ActivePluginAct | null;
+  elapsedSeconds?: number;
+  cardError?: string;
+  onDismissError?: () => void;
 }) {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [source, setSource] = useState("");
@@ -85,6 +110,31 @@ function CompanionCard({
   const shortRevision = companion.currentRevision === null ? null : companion.currentRevision.slice(0, 7);
   const shortLatest = companion.latestRevision === null ? null : companion.latestRevision.slice(0, 7);
   const versionBadge = installed || isCore ? formatVersionBadge(companion, shortRevision) : null;
+  const progressPill = formatPluginCardProgressPill(companion, activeAct, elapsedSeconds);
+  const isRestartingThisCore =
+    isCore &&
+    activeAct !== null &&
+    (activeAct.kind === "restarting-core" || activeAct.action === "restarting-core") &&
+    (activeAct.target === companion.id || activeAct.target === "all");
+  const isUpdatingThis =
+    activeAct !== null &&
+    activeAct.kind === "manage" &&
+    activeAct.action === "update" &&
+    (activeAct.target === companion.id ||
+      (activeAct.target === "all" && installed && remote && companion.updateAvailable === true));
+  const isInstallingThis =
+    activeAct !== null &&
+    activeAct.kind === "install" &&
+    (activeAct.target === companion.id ||
+      (activeAct.target === "all" && !isCore && companion.access === "public" && !installed));
+  const isReloadingThis =
+    activeAct !== null && activeAct.kind === "manage" && activeAct.target === companion.id && activeAct.action === "reload";
+  const isEnablingThis =
+    activeAct !== null && activeAct.kind === "manage" && activeAct.target === companion.id && activeAct.action === "enable";
+  const isDisablingThis =
+    activeAct !== null && activeAct.kind === "manage" && activeAct.target === companion.id && activeAct.action === "disable";
+  const isRemovingThis =
+    activeAct !== null && activeAct.kind === "manage" && activeAct.target === companion.id && activeAct.action === "remove";
   const trimmedSource = source.trim();
   const trimmedRef = ref.trim();
 
@@ -123,12 +173,17 @@ function CompanionCard({
           {installed && remote && companion.updateAvailable === false ? (
             <Pill theme={theme} label="Up to date" tone="statusSuccess" />
           ) : null}
+          {progressPill !== null ? <Pill theme={theme} label={progressPill} tone="accent" lit /> : null}
         </View>
 
         <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5] }}>
           {!installed ? (
             <>
-              <Btn theme={theme} small label="Install" solid disabled={actions.busy} onPress={() => actions.install(id)} />
+              {isInstallingThis ? (
+                <Btn theme={theme} small label={`Installing… (${elapsedSeconds}s)`} solid disabled={actions.busy} onPress={() => actions.install(id)} />
+              ) : (
+                <Btn theme={theme} small label="Install" solid disabled={actions.busy} onPress={() => actions.install(id)} />
+              )}
               <Btn
                 theme={theme}
                 small
@@ -140,11 +195,17 @@ function CompanionCard({
             </>
           ) : (
             <>
-              {remote && companion.updateAvailable === true ? (
+              {(remote && companion.updateAvailable === true) || isUpdatingThis || isRestartingThisCore ? (
                 <Btn
                   theme={theme}
                   small
-                  label="Update"
+                  label={
+                    isRestartingThisCore
+                      ? `Reloading Core… (${elapsedSeconds}s)`
+                      : isUpdatingThis
+                        ? `Updating… (${elapsedSeconds}s)`
+                        : "Update"
+                  }
                   solid
                   disabled={actions.busy}
                   onPress={() => actions.manage(manageId, "update")}
@@ -168,9 +229,14 @@ function CompanionCard({
         {companion.tagline}
       </Text>
 
-      {companion.error !== null ? (
+      {companion.error !== null || cardError !== undefined ? (
         <View
           style={{
+            flexDirection: "row",
+            alignItems: "center",
+            justifyContent: "space-between",
+            flexWrap: "wrap",
+            gap: SPACING[2],
             borderWidth: 1,
             borderColor: tint(theme.colors.statusDanger, "66"),
             borderRadius: RADIUS.md,
@@ -178,7 +244,12 @@ function CompanionCard({
             padding: SPACING[2],
           }}
         >
-          <Text style={text(theme, "label", "statusDanger")}>{companion.error}</Text>
+          <Text style={{ ...text(theme, "label", "statusDanger"), flexShrink: 1 }}>
+            {[companion.error, cardError].filter(Boolean).join(" · ")}
+          </Text>
+          {cardError !== undefined && onDismissError !== undefined ? (
+            <Btn theme={theme} small label="Dismiss" tone="foregroundMuted" onPress={onDismissError} />
+          ) : null}
         </View>
       ) : null}
 
@@ -269,7 +340,7 @@ function CompanionCard({
               <Btn
                 theme={theme}
                 small
-                label="Install Custom"
+                label={isInstallingThis ? `Installing… (${elapsedSeconds}s)` : "Install Custom"}
                 disabled={actions.busy || trimmedSource === ""}
                 onPress={() => actions.install(id, trimmedSource, trimmedRef === "" ? undefined : trimmedRef)}
               />
@@ -278,24 +349,65 @@ function CompanionCard({
             <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5] }}>
               {!isCore ? (
                 companion.enabled ? (
-                  <Btn theme={theme} small label="Disable" disabled={actions.busy} onPress={() => actions.manage(id, "disable")} />
+                  isDisablingThis ? (
+                    <Btn theme={theme} small label="Disabling…" disabled={actions.busy} onPress={() => actions.manage(id, "disable")} />
+                  ) : (
+                    <Btn theme={theme} small label="Disable" disabled={actions.busy} onPress={() => actions.manage(id, "disable")} />
+                  )
+                ) : isEnablingThis ? (
+                  <Btn theme={theme} small label="Enabling…" disabled={actions.busy} onPress={() => actions.manage(id, "enable")} />
                 ) : (
                   <Btn theme={theme} small label="Enable" disabled={actions.busy} onPress={() => actions.manage(id, "enable")} />
                 )
               ) : null}
-              <Btn theme={theme} small label="Reload" tone="foregroundMuted" disabled={actions.busy} onPress={() => actions.manage(manageId, "reload")} />
-              {companion.installKind === "git" || companion.installKind === "npm" ? (
+              {isReloadingThis || (isRestartingThisCore && activeAct?.action === "reload") ? (
                 <Btn
                   theme={theme}
                   small
-                  label="Update"
+                  label={isRestartingThisCore ? `Reloading Core… (${elapsedSeconds}s)` : "Reloading…"}
                   tone="foregroundMuted"
                   disabled={actions.busy}
-                  onPress={() => actions.manage(manageId, "update")}
+                  onPress={() => actions.manage(manageId, "reload")}
                 />
+              ) : (
+                <Btn theme={theme} small label="Reload" tone="foregroundMuted" disabled={actions.busy} onPress={() => actions.manage(manageId, "reload")} />
+              )}
+              {companion.installKind === "git" || companion.installKind === "npm" ? (
+                isRestartingThisCore ? (
+                  <Btn
+                    theme={theme}
+                    small
+                    label={`Reloading Core… (${elapsedSeconds}s)`}
+                    tone="foregroundMuted"
+                    disabled={actions.busy}
+                    onPress={() => actions.manage(manageId, "update")}
+                  />
+                ) : isUpdatingThis ? (
+                  <Btn
+                    theme={theme}
+                    small
+                    label={`Updating… (${elapsedSeconds}s)`}
+                    tone="foregroundMuted"
+                    disabled={actions.busy}
+                    onPress={() => actions.manage(manageId, "update")}
+                  />
+                ) : (
+                  <Btn
+                    theme={theme}
+                    small
+                    label="Update"
+                    tone="foregroundMuted"
+                    disabled={actions.busy}
+                    onPress={() => actions.manage(manageId, "update")}
+                  />
+                )
               ) : null}
               {!isCore ? (
-                <Btn theme={theme} small label="Remove" tone="statusDanger" disabled={actions.busy} onPress={() => actions.manage(id, "remove")} />
+                isRemovingThis ? (
+                  <Btn theme={theme} small label="Removing…" tone="statusDanger" disabled={actions.busy} onPress={() => actions.manage(id, "remove")} />
+                ) : (
+                  <Btn theme={theme} small label="Remove" tone="statusDanger" disabled={actions.busy} onPress={() => actions.manage(id, "remove")} />
+                )
               ) : (
                 <Pill theme={theme} label="Core plugin protected (Disable/Remove locked)" tone="foregroundMuted" />
               )}
@@ -307,7 +419,27 @@ function CompanionCard({
   );
 }
 
-export function PluginsPane({ theme, view, actions }: { theme: PluginTheme; view: FactoryView; actions: PluginsActions }) {
+export function PluginsPane({
+  theme,
+  view,
+  actions,
+  activeAct = null,
+  elapsedSeconds = 0,
+  pluginsNote = null,
+  cardErrors = {},
+  dismissNote,
+  dismissCardError,
+}: {
+  theme: PluginTheme;
+  view: FactoryView;
+  actions: PluginsActions;
+  activeAct?: ActivePluginAct | null;
+  elapsedSeconds?: number;
+  pluginsNote?: PluginsNote | null;
+  cardErrors?: Readonly<Record<string, string>>;
+  dismissNote?: () => void;
+  dismissCardError?: (pluginId: string) => void;
+}) {
   const running = view.companions.filter((c) => c.status === "running").length;
   // Public companions only — a private invite-only companion (factory-release-lab) that stays
   // not_installed must never keep the Install All button lit (v0.0.30, ADR 0012 §2).
@@ -316,6 +448,9 @@ export function PluginsPane({ theme, view, actions }: { theme: PluginTheme; view
   const updatableCount = allPlugins.filter(
     (p) => p.status !== "not_installed" && (p.installKind === "git" || p.installKind === "npm") && p.updateAvailable === true,
   ).length;
+  const toolbarProgress = formatToolbarProgressPill(activeAct, actions.checkingUpdates === true, elapsedSeconds);
+  const isUpdatingAll = activeAct !== null && activeAct.kind === "manage" && activeAct.target === "all" && activeAct.action === "update";
+  const isInstallingAll = activeAct !== null && activeAct.kind === "install" && activeAct.target === "all";
 
   return (
     <View style={{ gap: SPACING[2.5] }}>
@@ -326,8 +461,8 @@ export function PluginsPane({ theme, view, actions }: { theme: PluginTheme; view
             <Text style={text(theme, "section")}>Factory plugins</Text>
             <Pill theme={theme} label={`Core + ${view.companions.length} Companions`} />
             <Pill theme={theme} label={`${running} of ${view.companions.length} active on this daemon`} tone={running > 0 ? "statusSuccess" : "foregroundMuted"} />
-            {actions.checkingUpdates === true ? (
-              <Pill theme={theme} label="Checking updates…" tone="accent" lit />
+            {toolbarProgress !== null ? (
+              <Pill theme={theme} label={toolbarProgress} tone="accent" lit />
             ) : updatableCount > 0 ? (
               <Pill theme={theme} label={`${updatableCount} update${updatableCount > 1 ? "s" : ""} available`} tone="statusWarning" lit />
             ) : view.pluginsCheckedAt !== null ? (
@@ -343,27 +478,73 @@ export function PluginsPane({ theme, view, actions }: { theme: PluginTheme; view
               disabled={actions.busy || actions.checkingUpdates === true}
               onPress={() => actions.checkUpdates()}
             />
-            {updatableCount > 0 ? (
+            {updatableCount > 0 || isUpdatingAll ? (
               <Btn
                 theme={theme}
                 small
-                label={`Update All (${updatableCount})`}
+                label={isUpdatingAll ? `Updating All… (${elapsedSeconds}s)` : `Update All (${updatableCount})`}
                 solid
                 disabled={actions.busy}
                 onPress={() => actions.manage("all", "update")}
               />
             ) : null}
-            {anyUninstalled ? (
-              <Btn theme={theme} small label="Install All" solid disabled={actions.busy} onPress={() => actions.install("all")} />
+            {anyUninstalled || isInstallingAll ? (
+              isInstallingAll ? (
+                <Btn theme={theme} small label={`Installing All… (${elapsedSeconds}s)`} solid disabled={actions.busy} onPress={() => actions.install("all")} />
+              ) : (
+                <Btn theme={theme} small label="Install All" solid disabled={actions.busy} onPress={() => actions.install("all")} />
+              )
             ) : null}
           </View>
         </View>
+
+        {pluginsNote !== null ? (
+          <View
+            style={{
+              flexDirection: "row",
+              alignItems: "center",
+              justifyContent: "space-between",
+              flexWrap: "wrap",
+              gap: SPACING[2],
+              borderWidth: 1,
+              borderColor: tint(theme.colors[pluginsNote.tone], "66"),
+              borderRadius: RADIUS.md,
+              backgroundColor: tint(theme.colors[pluginsNote.tone], "12"),
+              paddingHorizontal: SPACING[2.5],
+              paddingVertical: SPACING[1.5],
+            }}
+          >
+            <Text style={{ ...text(theme, "label", pluginsNote.tone), flexShrink: 1 }}>{pluginsNote.text}</Text>
+            {dismissNote !== undefined ? (
+              <Btn theme={theme} small label="Dismiss" tone="foregroundMuted" onPress={dismissNote} />
+            ) : null}
+          </View>
+        ) : null}
       </Card>
 
       {/* Core plugin card at top, followed by the 3 Companion plugin cards */}
-      <CompanionCard key={view.corePlugin.id} theme={theme} companion={view.corePlugin} actions={actions} isCore />
+      <CompanionCard
+        key={view.corePlugin.id}
+        theme={theme}
+        companion={view.corePlugin}
+        actions={actions}
+        isCore
+        activeAct={activeAct}
+        elapsedSeconds={elapsedSeconds}
+        cardError={cardErrors[view.corePlugin.id]}
+        onDismissError={dismissCardError ? () => dismissCardError(view.corePlugin.id) : undefined}
+      />
       {view.companions.map((companion) => (
-        <CompanionCard key={companion.id} theme={theme} companion={companion} actions={actions} />
+        <CompanionCard
+          key={companion.id}
+          theme={theme}
+          companion={companion}
+          actions={actions}
+          activeAct={activeAct}
+          elapsedSeconds={elapsedSeconds}
+          cardError={cardErrors[companion.id]}
+          onDismissError={dismissCardError ? () => dismissCardError(companion.id) : undefined}
+        />
       ))}
     </View>
   );
