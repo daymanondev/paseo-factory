@@ -167,3 +167,6 @@ export type {
   RetroWritten,
 } from "./events.ts";
 export { EVENT_NAMES, MAX_ATTEMPTS } from "./events.ts";
+
+export { projectTask } from "./task-state.ts";
+export type { AcceptanceRole, AttemptState, ReviewState } from "./task-state.ts";

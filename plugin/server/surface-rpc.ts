@@ -1,3 +1,5 @@
+import { acceptanceSummary, executeAcceptance } from "./commands.ts";
+export { acceptanceSummary, archiveAcceptedTaskWorkspace } from "./commands.ts";
 /**
  * The Factory surface's in-process single-writer handlers (v0.0.13, ADR
  * 0009 §2/§4, the amendment to ADR 0004): every `factory.*` RPC runs inside
@@ -30,7 +32,6 @@ import type { ProjectResolution } from "./core/project.ts";
 import { hydrateVaultDirect, importVaultSecrets, isLocalCompanionGitSource, loadVaultConfig, probeCompanionGitAccess, probeGhAuth, pullVault, pushVault, readVaultStatus, saveVaultConfig, syncVault } from "./core/vault.ts";
 import type { ImportVaultSecretsInput, SyncVaultOptions, VaultConfig, VaultRunner } from "./core/vault.ts";
 import { join } from "node:path";
-import type { LandingResult } from "./core/workspace.ts";
 import { FACTORY_VIEW_VERSION } from "../shared/view.ts";
 import { foldRetro, foldTasks, foldView, readTailed } from "./view.ts";
 import { setAgentModelViaCli, setAgentThinkingViaCli, stopAgentViaCli } from "./daemon-cli.ts";
@@ -294,73 +295,6 @@ function messageOf(err: unknown): string {
 
 function codeOf(err: unknown): string {
   return err instanceof FactoryError ? err.code : "failed";
-}
-
-/**
- * The one acceptance sentence both reply surfaces print — the spool's accept
- * reply (the CLI's `factory accept`) and the surface's `factory.accept` RPC
- * (the UI's Accept). One wording, both doors; `landing` absent is the legacy
- * shared-checkout path (no landing ran).
- */
-export function acceptanceSummary(input: { task: string; attempt: number; by: string; landing?: LandingResult["landing"]; landingNote?: string }): string {
-  return (
-    `task ${input.task} accepted at attempt ${input.attempt} by ${input.by}` +
-    (input.landing === "landed"
-      ? " · landed into <project-root>"
-      : input.landing === "pending-conflict"
-        ? ` · landing pending-conflict: ${input.landingNote ?? "(no reason recorded)"} — branch factory/${input.task} is preserved`
-        : "")
-  );
-}
-
-/**
- * Automatic archive of an Accepted Task's Paseo workspace (v0.0.23, ADR 0015 §6):
- * looks up `taskWorkspaces[task]` in `<projectStateDir>/project.json`, calls
- * `daemon.workspaces?.archive(workspaceId)` best-effort, and removes the entry
- * from `taskWorkspaces`. Since v0.0.27 (ADR 0017 §4) it also sweeps the
- * daemon's own records over the WebSocket (`archive_workspace_request` /
- * `project.remove.request` via `cleanupDaemonWorkspacesAndProjectsViaWs`) for
- * workspaces and projects rooted under `<projectStateDir>/worktrees/` or
- * missing on disk, so the accepted Task's worktree leaves no broken project
- * entry in Paseo Desktop. The daemon `home` targets the sweep (the caller's
- * `deps.home`; the spool's legacy 3-arg call falls back to `PASEO_HOME`).
- */
-export async function archiveAcceptedTaskWorkspace(
-  factory: Factory,
-  daemon: SurfaceDaemonApi | undefined,
-  task: string,
-  home?: string,
-  cleanup: typeof cleanupDaemonWorkspacesAndProjectsViaWs = cleanupDaemonWorkspacesAndProjectsViaWs,
-): Promise<void> {
-  const contract = factory.contractFor(task);
-  if (contract === undefined) return;
-  const project = resolveProject(contract.workspace);
-  if (!project.ok) return;
-  const reg = readProjectRegistration(factory.stateDir, project.slug);
-  const workspaceId = reg?.taskWorkspaces?.[task];
-  if (workspaceId === undefined) return;
-  if (daemon?.workspaces?.archive !== undefined) {
-    try {
-      await daemon.workspaces.archive(workspaceId);
-    } catch {
-      // best-effort archive
-    }
-  }
-  writeProjectRegistration(factory.stateDir, project.slug, {
-    root: project.root,
-    taskWorkspaces: { [task]: null },
-  });
-  // The daemon-record sweep (v0.0.27; v0.0.31's safe rules, ADR 0017 §4):
-  // best-effort, never blocks the accept. The accepted task's worktree is the
-  // ONE explicitly retired target — sibling worktree workspaces whose
-  // directories still exist on disk (parallel Tasks with live Peers) are
-  // never archived.
-  try {
-    const worktreesDir = join(projectStateDir(factory.stateDir, project.slug), "worktrees");
-    await cleanup(home ?? process.env.PASEO_HOME, { worktreesDir, targetWorktreePath: join(worktreesDir, task) });
-  } catch {
-    // best-effort sweep
-  }
 }
 
 /** One companion install's sentence — the source actually used, the ref when one was given. */
@@ -1127,8 +1061,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       try {
         // Awaited since v0.0.14: a worktree task's local landing runs before
         // the line records, and the summary carries the outcome.
-        const event = await deps.factory.accept({ task: input.task, attempt: input.attempt, accepted_by: "owner" });
-        await archiveAcceptedTaskWorkspace(deps.factory, resolveDaemon(context), input.task, deps.home, deps.cleanupDaemonWorkspaces ?? cleanupDaemonWorkspacesAndProjectsViaWs);
+        const event = await executeAcceptance(deps.factory, { task: input.task, attempt: input.attempt, accepted_by: "owner" }, { authority: "owner", daemon: resolveDaemon(context), home: deps.home, cleanup: deps.cleanupDaemonWorkspaces });
         return {
           ok: true as const,
           seq: event.seq,

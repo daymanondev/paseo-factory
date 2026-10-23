@@ -1,3 +1,5 @@
+import { projectTask } from "./task-state.ts";
+import type { AcceptanceRole } from "./task-state.ts";
 import { readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { Ledger, usageIsValid } from "./ledger.ts";
@@ -17,7 +19,7 @@ import { changedFiles, checkCleanAt, headCommitSync, landTaskWorktree, resolveCl
 import { MEMORY_FILES } from "./choke.ts";
 import { projectStateDir } from "./project.ts";
 import { FactoryError } from "./errors.ts";
-import type { AttemptAccepted, ContractSet, FreshEyesWritten, GateFinished, GitBlocked, LedgerEvent, MeterWritten, MeterUsage, NeedsHuman, NeedsHumanEvidence, NeedsHumanReason, RepokeDispatched, RepokeRefused, RespawnDispatched, RespawnRefused, SpawnDispatched, SpawnRefused, Verdict } from "./events.ts";
+import type { AttemptAccepted, ContractSet, GateFinished, GitBlocked, LedgerEvent, MeterWritten, MeterUsage, NeedsHuman, NeedsHumanEvidence, NeedsHumanReason, RepokeDispatched, RepokeRefused, RespawnDispatched, RespawnRefused, SpawnDispatched, SpawnRefused, Verdict } from "./events.ts";
 import type { GateResult } from "./gate.ts";
 
 /** Task ids become report filenames, so they stay flat and filename-safe. */
@@ -146,18 +148,13 @@ export interface ClaimOutcome {
 export interface AcceptInput {
   task: string;
   attempt: number;
-  /**
-   * Who accepted (v0.0.9) — the spool's submitting-shell stamp, recorded
-   * verbatim ("the Ledger always records who accepted", ADR 0006). The three
-   * seat names carry authority semantics (v0.0.14, ADR 0010 §3): `owner` and
-   * `supervisor` are the unconditional override (the Supervisor acts on the
-   * Owner's word), `lead` is the intermediate acceptance — permitted only on
-   * a green Verdict with no fresh-eyes CONCERN on the attempt and no
-   * undisplaced `needs_human`, else `lead-accept-refused`. Any other string
-   * (a delegated agent's id, the v0.0.9 spelling) records verbatim with no
-   * seat privileges.
+  /** Readable attribution retained verbatim. Trusted authority is independent.
+   * Direct legacy callers may still use `lead` to request Lead policy; other
+   * legacy stamps remain delegated Owner calls when no authority is supplied.
    */
   accepted_by?: string;
+  /** Trusted execution authority, separate from readable attribution. */
+  authority?: AcceptanceRole;
 }
 
 export interface SpawnInput {
@@ -266,7 +263,7 @@ export interface Factory {
    * Supervisor, ADR 0006) may submit it on the Owner's word; the
    * `accepted_by` stamp records whose act each line is. Since v0.0.14
    * (ADR 0010 §3–§4) `accepted_by: "lead"` is the intermediate acceptance
-   * (green + no fresh-eyes CONCERN on the attempt + not in needs_human,
+   * (green + required Fresh-eyes completed CLEAR + not in needs_human,
    * else `lead-accept-refused`), and a task that ran in a managed Task
    * worktree lands its claimedCommit into `<project-root>`'s local branch
    * before the line records — async git is why the call awaits.
@@ -774,7 +771,7 @@ export function createFactory(options: FactoryOptions): Factory {
       return finish(finishCtx, attempt, result, resolved.full, watchContext());
     },
 
-    async accept({ task, attempt, accepted_by }) {
+    async accept({ task, attempt, accepted_by, authority }) {
       assertTaskId(task);
       if (!Number.isInteger(attempt) || attempt < 1) {
         throw new FactoryError("invalid-attempt", `attempt must be a positive integer, got ${attempt}`);
@@ -803,27 +800,14 @@ export function createFactory(options: FactoryOptions): Factory {
           `attempt ${attempt} of task ${task} has no green verdict — the Owner accepts evidence, and there is none`,
         );
       }
-      // The Lead's intermediate acceptance (v0.0.14, ADR 0010 §3): green is
-      // necessary (checked above) and sufficient for the override seats, but
-      // the Lead additionally needs a CONCERN-free attempt and a task that is
-      // not escalated — flagged or exhausted work is the Owner's to answer,
-      // never the Lead's self-acceptance.
-      if (accepted_by === "lead") {
-        const concern = events.findLast(
-          (e): e is FreshEyesWritten => e.event === "fresh_eyes_written" && e.attempt === attempt && e.outcome === "concern",
-        );
-        if (concern !== undefined) {
-          throw new FactoryError(
-            "lead-accept-refused",
-            `attempt ${attempt} of task ${task} carries a fresh-eyes CONCERN — a flagged attempt needs the Owner's or Supervisor's override, never the Lead's acceptance`,
-          );
-        }
-        if (taskInNeedsHuman(history)) {
-          throw new FactoryError(
-            "lead-accept-refused",
-            `task ${task} is in needs_human — an escalated task is the Owner's to answer; the Lead may spawn a corrective attempt or escalate, never self-accept`,
-          );
-        }
+      const state = projectTask(fullHistory, task);
+      const attemptState = state.attempts.find((entry) => entry.attempt === attempt)!;
+      // Direct Owner callers retain compatibility. Transport callers always supply
+      // server-resolved authority, so attribution cannot select a weaker policy.
+      const role = authority ?? (accepted_by === "lead" ? "lead" : "owner");
+      if (role === "agent") throw new FactoryError("agent-cannot-orchestrate", "Working Agents cannot accept Tasks");
+      if (role === "lead" && !attemptState.leadEligible) {
+        throw new FactoryError("lead-accept-refused", `${attemptState.leadRefusal ?? "attempt is ineligible"} — the Owner or delegated Supervisor must override`);
       }
       // Local landing (v0.0.14, ADR 0010 §4): a task that ran in a managed
       // Task worktree integrates its claimedCommit into <project-root>'s
@@ -1162,7 +1146,7 @@ export function createFactory(options: FactoryOptions): Factory {
     },
 
     contractFor(task) {
-      return ledger.eventsFor(task).findLast((e): e is ContractSet => e.event === "contract_set");
+      return projectTask(ledger.eventsFor(task), task).contract;
     },
 
     worktreeFor(task) {
@@ -1361,29 +1345,21 @@ export function createFactory(options: FactoryOptions): Factory {
  * (`seq >= latestContractSeq(ledger, task)`).
  */
 export function latestContractSeq(ledger: Ledger, task: string): number {
-  const latest = ledger.eventsFor(task).findLast((e): e is ContractSet => e.event === "contract_set");
-  return latest?.seq ?? 0;
+  return projectTask(ledger.eventsFor(task), task).epochSeq;
 }
 
 /** All ledger events for `task` in its current Contract epoch (`seq >= latestContractSeq`). */
 function epochEventsFor(ledger: Ledger, task: string): LedgerEvent[] {
-  const minSeq = latestContractSeq(ledger, task);
-  return ledger.eventsFor(task).filter((e) => e.seq >= minSeq);
+  return projectTask(ledger.eventsFor(task), task).epoch;
 }
 
 /**
  * Returns the attempt number of an in-flight Attempt in the given epoch history
- * (a `claim_reported` or `gate_started` with no matching `gate_finished`), or
+ * (a `claim_reported` or `gate_started` with no matching `report_written`), or
  * `undefined` if no Attempt is currently running.
  */
 function inFlightAttempt(history: readonly LedgerEvent[]): number | undefined {
-  for (const evt of history) {
-    if (evt.event === "claim_reported" || evt.event === "gate_started") {
-      const finished = history.some((e) => e.event === "gate_finished" && e.attempt === evt.attempt);
-      if (!finished) return evt.attempt;
-    }
-  }
-  return undefined;
+  return historyState(history)?.inFlightAttempt;
 }
 
 /** A historical worktree binding is live only while its directory survives. */
@@ -1400,9 +1376,14 @@ function covers(contract: ContractSet, cwd: string): boolean {
   return cwd === contract.workspace || cwd.startsWith(`${contract.workspace}/`);
 }
 
+function historyState(history: readonly LedgerEvent[]) {
+  const event = history.find((entry) => "task" in entry && typeof entry.task === "string");
+  return event !== undefined && "task" in event && typeof event.task === "string" ? projectTask(history, event.task) : undefined;
+}
+
 /** The task's acceptance, when the Owner has accepted — the closed-marker every closer reads. */
 function acceptedAttempt(history: readonly LedgerEvent[]): AttemptAccepted | undefined {
-  return history.findLast((e): e is AttemptAccepted => e.event === "attempt_accepted");
+  return historyState(history)?.acceptance;
 }
 
 /**
@@ -1413,13 +1394,7 @@ function acceptedAttempt(history: readonly LedgerEvent[]): AttemptAccepted | und
  * gate) displaces the marker, and the Lead may accept THAT attempt.
  */
 function taskInNeedsHuman(history: readonly LedgerEvent[]): boolean {
-  let needs: NeedsHuman | undefined;
-  let lastGateSeq = -1;
-  for (const evt of history) {
-    if (evt.event === "needs_human") needs = evt;
-    else if (evt.event === "gate_finished" && evt.seq > lastGateSeq) lastGateSeq = evt.seq;
-  }
-  return needs !== undefined && needs.seq > lastGateSeq;
+  return historyState(history)?.needsHuman ?? false;
 }
 
 /** Settled acceptances retire a Contract; pending landings keep their write fence live. */
@@ -1642,11 +1617,7 @@ function writeAttemptReport(task: string, attempt: number, ledger: Ledger, dataD
 
 /** The highest Attempt number a task's history mentions, or 0 when none opened yet. */
 function maxAttempt(history: readonly LedgerEvent[]): number {
-  let max = 0;
-  for (const evt of history) {
-    if ("attempt" in evt && evt.attempt > max) max = evt.attempt;
-  }
-  return max;
+  return historyState(history)?.maxAttempt ?? 0;
 }
 
 /** One Attempt's own events — Contracts and choke events belong to the Task, not to any Attempt. */
@@ -1661,8 +1632,7 @@ function attemptEvents(history: readonly LedgerEvent[], attempt: number): Ledger
  * usually means one of them is running.
  */
 function attemptIsOpen(history: readonly LedgerEvent[], attempt: number): boolean {
-  const events = attemptEvents(history, attempt);
-  return events.length > 0 && !events.some((e) => e.event === "report_written");
+  return historyState(history)?.attempts.find((entry) => entry.attempt === attempt)?.open ?? false;
 }
 
 /**
