@@ -1,11 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createFactory } from "../plugin/server/core/factory.ts";
 import { startSpool } from "../plugin/server/spool.ts";
-import { EVENT_NAMES } from "../src/events.ts";
 import { copyFixture, disposeDir, gitCommitAll, makeTempDir, repoRoot } from "./helpers.ts";
 
 /**
@@ -51,13 +50,6 @@ function writeLedger(stateDir: string, events: Record<string, unknown>[]): void 
   mkdirSync(stateDir, { recursive: true });
   writeFileSync(join(stateDir, "ledger.jsonl"), `${events.map((e) => JSON.stringify(e)).join("\n")}\n`);
 }
-
-test("the status reader's event vocabulary is in sync with src/events.ts", () => {
-  const cli = readFileSync(join(repoRoot, "plugin", "bin", "factory.mjs"), "utf8");
-  const match = cli.match(/^const EVENT_NAMES = \[(.*)\];$/m);
-  assert.ok(match, "factory.mjs keeps EVENT_NAMES on one line for this drift guard");
-  assert.deepEqual(JSON.parse(`[${match![1]}]`), [...EVENT_NAMES]);
-});
 
 test("status tracks a whole loop: contract → red claim → green claim → accept", async (t) => {
   const dir = makeTempDir();
@@ -344,7 +336,7 @@ test("status accumulates choke counts per task — counted tasks sum their event
   const full = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0";
 
   function ask(seq: number, event: "permit_allowed" | "permit_denied", task: string, command: string): Record<string, unknown> {
-    return { seq, ts, event, task, agent: "ag1", name: "Bash", kind: "tool", command };
+    return { seq, ts, event, task, agent: "ag1", name: "Bash", kind: "tool", command, ...(event === "permit_denied" ? { rule: "tool:denied" } : {}) };
   }
 
   writeLedger(stateDir, [
@@ -404,17 +396,17 @@ test("status reads a ledger with spawn events through — no new fields, no inve
   );
 });
 
-test("status is lenient about spawn-event field depth the way it is for choke events — the writer's open-time validation is the shape guard", async (t) => {
+test("status refuses malformed spawn events with the writer's shape validation", async (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);
   const stateDir = join(dir, "plugin-state", "paseo-factory");
   writeLedger(stateDir, [
     contractEvent(1, "T1"),
-    { seq: 2, ts, event: "spawn_refused", task: "T1", provider: "claude", arity: 2, rule: "spawn:scope-mandatory" }, // no reason — still readable
+    { seq: 2, ts, event: "spawn_refused", task: "T1", provider: "claude", arity: 2, rule: "spawn:scope-mandatory" }, // missing required reason
   ]);
   const result = await run(ownerCli, ["status"], { PASEO_HOME: dir });
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout, "T1 attempts=0 verdict=- sha=- accepted=no eye=- choke=0/0/0\n");
+  assert.equal(result.status, 2, result.stdout);
+  assert.match(result.stderr, /line 2 is not a valid ledger event/);
 });
 
 test("status reads a ledger with meter lines through — the Cost read's event, not the glance's", async (t) => {

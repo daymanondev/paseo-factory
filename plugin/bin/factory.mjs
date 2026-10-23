@@ -327,31 +327,8 @@ const submitter = stampedAgent !== "" ? stampedAgent : stampedCorrelation !== ""
 const rawSeat = typeof process.env.PASEO_FACTORY_SEAT === "string" ? process.env.PASEO_FACTORY_SEAT.trim() : "";
 const stampedSeat = rawSeat === "supervisor" || rawSeat === "lead" || rawSeat === "agent" ? rawSeat : undefined;
 
-// The event vocabulary the status reader understands — mirrored from
-// src/events.ts because the CLIs import no src/ code (ADR 0004). Kept on one
-// line so test/status.test.ts can guard this copy against drift. Kept in sync
-// with the writer by the same suite, the way test/cli.test.ts guards the spool.
-const EVENT_NAMES = ["contract_set", "claim_reported", "gate_started", "gate_finished", "fresh_eyes_written", "watch_written", "report_written", "attempt_accepted", "permit_allowed", "permit_denied", "git_blocked", "spawn_dispatched", "spawn_refused", "meter_written", "repoke_dispatched", "repoke_refused", "respawn_dispatched", "respawn_refused", "needs_human", "retro_written"];
-// Events without an Attempt number: contract_set owns the Task, the choke
-// events (v0.0.4) belong to the Task's whole life, git_blocked may carry no
-// task at all (the shim refuses no matter who runs it), the spawn events
-// (v0.0.5) precede any attempt — the plugin records them before an agent
-// exists — meter_written (v0.0.8) spans the task's whole run, the Lead's
-// three lines (v0.0.10) and the respawn pair (v0.0.12) are task-scoped, and
-// retro_written (v0.0.7) is factory-level: no task either.
+// Task-level events do not advance the Attempt count in the status projection.
 const NO_ATTEMPT_EVENTS = new Set(["contract_set", "permit_allowed", "permit_denied", "git_blocked", "spawn_dispatched", "spawn_refused", "meter_written", "repoke_dispatched", "repoke_refused", "respawn_dispatched", "respawn_refused", "needs_human", "retro_written"]);
-
-/**
- * The status reader's shape rule — every event is in the vocabulary above and
- * carries task/attempt per the NO_ATTEMPT rule. Handed to the shared reader
- * (ledger-read.mjs) as its strictness: a line failing it is corruption, named
- * with its line number.
- */
-function isValidLedgerEvent(evt) {
-  const taskOk = NO_ATTEMPT_EVENTS.has(evt.event) || typeof evt.task === "string";
-  const attemptOk = NO_ATTEMPT_EVENTS.has(evt.event) || (Number.isInteger(evt.attempt) && evt.attempt >= 1);
-  return EVENT_NAMES.includes(evt.event) && taskOk && attemptOk;
-}
 
 function fail(message) {
   console.error(`factory: ${message}\n\n${usage}`);
@@ -753,7 +730,7 @@ if (command === "status") {
   // The read is the shared one (ledger-read.mjs) under status's strict
   // policy; anything unreadable is reported (exit 2), never guessed around.
   const ledgerPath = join(stateDir, "ledger.jsonl");
-  const read = readLedgerEvents(ledgerPath, { validateEvent: isValidLedgerEvent });
+  const read = readLedgerEvents(ledgerPath);
   if (read.failed !== undefined) {
     die(`cannot read ${ledgerPath}: ${read.failed instanceof Error ? read.failed.message : String(read.failed)}`);
   }
@@ -775,7 +752,7 @@ if (command === "cost") {
   // shaped for the ladder's cost row. Every duration is ts-derived; every
   // dollar is metered or absent — zero price constants live here (the law).
   const ledgerPath = join(stateDir, "ledger.jsonl");
-  const read = readLedgerEvents(ledgerPath, { validateEvent: isValidLedgerEvent });
+  const read = readLedgerEvents(ledgerPath);
   if (read.failed !== undefined) {
     die(`cannot read ${ledgerPath}: ${read.failed instanceof Error ? read.failed.message : String(read.failed)}`);
   }

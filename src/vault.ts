@@ -1,13 +1,12 @@
 import { execFile, execFileSync } from "node:child_process";
 import { createCipheriv, createDecipheriv, randomBytes, randomUUID, scryptSync } from "node:crypto";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { homedir, hostname, tmpdir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { FactoryError } from "./errors.ts";
-import { EVENT_NAMES } from "./events.ts";
+import { isValidLedgerEvent } from "./ledger-validation.ts";
 import { discoverProjects, listProjectRegistrations, resolveProject } from "./project.ts";
-import { Ledger } from "./ledger.ts";
 
 /**
  * The Private vault engine, stage A (ADR 0014 Decisions 1 & 3): dual-mode
@@ -2094,8 +2093,8 @@ export function reconcileVaultLedgers(existingLines: string, nodeLedgerLines: re
       } catch {
         continue; // a torn or foreign line is skipped, not trusted
       }
-      if (!isValidVaultLedgerRecord(parsed)) continue;
-      const evt = parsed as Record<string, unknown>;
+      if (!isValidLedgerEvent(parsed) || parsed.ts === "") continue;
+      const evt = parsed as unknown as Record<string, unknown>;
       const fingerprint = stableStringify(omitSeq(evt));
       if (!seen.has(fingerprint)) {
         const ts = Date.parse(String(evt.ts));
@@ -2115,7 +2114,6 @@ export function reconcileVaultLedgers(existingLines: string, nodeLedgerLines: re
   const ordered = [...seen.values()].sort(
     (a, b) => a.sortTs - b.sortTs || (a.sourceNodeId < b.sourceNodeId ? -1 : a.sourceNodeId > b.sourceNodeId ? 1 : 0) || a.originalSeq - b.originalSeq,
   );
-  disposeRecordProbe();
   return ordered.map((carried, index) => `${JSON.stringify({ ...carried.evt, seq: index + 1 })}\n`).join("");
 }
 
@@ -2136,43 +2134,6 @@ function stableStringify(value: unknown): string {
     .filter(([, v]) => v !== undefined)
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
   return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableStringify(v)}`).join(",")}}`;
-}
-
-/**
- * The probe file the per-record validity check opens through `Ledger.open` —
- * the real per-kind shape law lives in the ledger's reader, and this module
- * judges records with that law instead of duplicating it (a copy would drift).
- */
-let vaultRecordProbePath: string | null = null;
-
-/**
- * A record is valid when `Ledger.open` would accept it: the cheap structural
- * gate here (object, positive-integer `seq`, non-empty `ts`, `event` in
- * `EVENT_NAMES`), then the ledger's own full per-kind shape check — one
- * single-record ledger at `seq: 1` opens exactly when the record is valid.
- */
-function isValidVaultLedgerRecord(evt: unknown): boolean {
-  if (typeof evt !== "object" || evt === null || Array.isArray(evt)) return false;
-  const rec = evt as Record<string, unknown>;
-  if (typeof rec.seq !== "number" || !Number.isInteger(rec.seq) || rec.seq < 1) return false;
-  if (typeof rec.ts !== "string" || rec.ts === "") return false;
-  if (typeof rec.event !== "string" || !(EVENT_NAMES as readonly string[]).includes(rec.event)) return false;
-  vaultRecordProbePath ??= join(tmpdir(), `paseo-factory-vault-reconcile-${process.pid}-${randomUUID()}.jsonl`);
-  try {
-    writeFileSync(vaultRecordProbePath, `${JSON.stringify({ ...rec, seq: 1 })}\n`);
-    Ledger.open(vaultRecordProbePath);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/** Removes the probe file — a reconcile leaves nothing behind. */
-function disposeRecordProbe(): void {
-  if (vaultRecordProbePath !== null) {
-    rmSync(vaultRecordProbePath, { force: true });
-    vaultRecordProbePath = null;
-  }
 }
 
 /**
