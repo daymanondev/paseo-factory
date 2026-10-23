@@ -1002,16 +1002,60 @@ function acceptedTasks(ledger) {
 // src/history-admission.ts
 import { AsyncLocalStorage } from "node:async_hooks";
 import { execFileSync as execFileSync2 } from "node:child_process";
-import { closeSync as closeSync3, existsSync as existsSync3, fsyncSync as fsyncSync3, openSync as openSync3, readFileSync as readFileSync6, readdirSync as readdirSync4, realpathSync as realpathSync4, rmSync as rmSync2, statSync as statSync2 } from "node:fs";
+import { closeSync as closeSync3, existsSync as existsSync3, fsyncSync as fsyncSync3, openSync as openSync3, readFileSync as readFileSync6, readdirSync as readdirSync4, realpathSync as realpathSync4, rmSync as rmSync2, statSync as statSync3 } from "node:fs";
 import { basename as basename5, dirname as dirname5, join as join5, resolve as resolve4 } from "node:path";
 import { randomUUID as randomUUID3 } from "node:crypto";
 
 // src/project.ts
 import { execFileSync } from "node:child_process";
 import { createHash as createHash3 } from "node:crypto";
-import { existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync4, readdirSync as readdirSync3, realpathSync as realpathSync3, writeFileSync as writeFileSync2 } from "node:fs";
-import { isAbsolute as isAbsolute3, basename as basename4, join as join4, resolve as resolve3 } from "node:path";
+import { existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync4, readdirSync as readdirSync3, realpathSync as realpathSync3, statSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { homedir } from "node:os";
+import { isAbsolute as isAbsolute3, basename as basename4, join as join4, parse, resolve as resolve3 } from "node:path";
 var GIT_TIMEOUT_MS = 1e4;
+function realpathSafe(path) {
+  try {
+    return realpathSync3(path);
+  } catch {
+    return resolve3(path);
+  }
+}
+function isUnsafeBootstrapDirectory(target, options) {
+  const parsed = parse(target);
+  if (target === parsed.root) {
+    return `refusing to initialize Git at filesystem root (${target})`;
+  }
+  const sysHome = homedir();
+  if (sysHome !== "" && (target === resolve3(sysHome) || target === realpathSafe(sysHome))) {
+    return `refusing to initialize Git directly in home directory (${target})`;
+  }
+  if (typeof options?.userHome === "string" && options.userHome.trim() !== "") {
+    const uh = options.userHome.trim();
+    if (target === resolve3(uh) || target === realpathSafe(uh)) {
+      return `refusing to initialize Git directly in user home directory (${target})`;
+    }
+  }
+  if (typeof options?.home === "string" && options.home.trim() !== "") {
+    const ph = options.home.trim();
+    const resPh = resolve3(ph);
+    const normPh = realpathSafe(ph);
+    if (target === resPh || target === normPh || target.startsWith(`${resPh}/`) || target.startsWith(`${normPh}/`)) {
+      return `refusing to initialize Git inside Paseo home directory (${target})`;
+    }
+  }
+  if (typeof options?.stateDir === "string" && options.stateDir.trim() !== "") {
+    const sd = options.stateDir.trim();
+    const resSd = resolve3(sd);
+    const normSd = realpathSafe(sd);
+    if (target === resSd || target === normSd || target.startsWith(`${resSd}/`) || target.startsWith(`${normSd}/`)) {
+      return `refusing to initialize Git inside Factory state directory (${target})`;
+    }
+  }
+  if (target.includes("/plugin-state/paseo-factory")) {
+    return `refusing to initialize Git inside Factory state directory (${target})`;
+  }
+  return null;
+}
 function resolveProject(cwd) {
   let stdout;
   try {
@@ -1097,39 +1141,77 @@ function listProjectRegistrations(stateDir) {
   }
   return out.sort((a, b) => a.slug.localeCompare(b.slug));
 }
+function isSeatAgentForDiscovery(agent) {
+  const seat = agent.labels?.seat;
+  if (seat !== void 0 && seat !== "") return true;
+  const provider = agent.provider;
+  if (typeof provider === "string" && provider !== "") {
+    const head = provider.split("/")[0];
+    if (head === "factory-supervisor" || head === "factory-lead") return true;
+  }
+  return false;
+}
 function discoverProjects(stateDir, liveSeatAgents, home) {
-  const roots = /* @__PURE__ */ new Map();
+  const entries = /* @__PURE__ */ new Map();
+  const projectsPrefix = `${resolve3(stateDir, "projects")}/`;
   for (const registration of listProjectRegistrations(stateDir)) {
-    roots.set(registration.slug, registration.root);
+    const missing = !existsSync2(registration.root);
+    entries.set(registration.slug, {
+      slug: registration.slug,
+      root: registration.root,
+      ...missing ? { missingRoot: true } : {}
+    });
   }
   for (const agent of liveSeatAgents) {
-    const slug = agent.labels.project;
-    if (slug === void 0 || agent.labels.seat === void 0) continue;
-    if (!roots.has(slug)) roots.set(slug, agent.cwd);
+    if (!isSeatAgentForDiscovery(agent)) continue;
+    const slug = agent.labels?.project;
+    if (typeof slug === "string" && slug !== "") {
+      if (!entries.has(slug)) entries.set(slug, { slug, root: agent.cwd ?? null });
+      continue;
+    }
+    if (typeof agent.cwd === "string" && agent.cwd !== "") {
+      const resolved = resolveProject(agent.cwd);
+      if (resolved.ok && !resolve3(resolved.root).startsWith(projectsPrefix) && !entries.has(resolved.slug)) {
+        entries.set(resolved.slug, { slug: resolved.slug, root: resolved.root });
+      }
+    }
   }
   if (home !== void 0) {
     try {
       const parsed = JSON.parse(readFileSync4(join4(home, "projects", "projects.json"), "utf8"));
-      if (Array.isArray(parsed)) {
-        for (const entry of parsed) {
-          if (entry === null || typeof entry !== "object") continue;
-          const record2 = entry;
-          if (record2.archivedAt !== null || typeof record2.rootPath !== "string" || record2.rootPath === "") continue;
-          const resolved = resolveProject(record2.rootPath);
-          if (resolved.ok && !roots.has(resolved.slug)) {
-            roots.set(resolved.slug, resolved.root);
+      const list = Array.isArray(parsed) ? parsed : parsed !== null && typeof parsed === "object" && Array.isArray(parsed.projects) ? parsed.projects : [];
+      for (const entry of list) {
+        if (entry === null || typeof entry !== "object") continue;
+        const record2 = entry;
+        if (record2.archivedAt !== null && record2.archivedAt !== void 0 || typeof record2.rootPath !== "string" || record2.rootPath === "") {
+          continue;
+        }
+        const resolved = resolveProject(record2.rootPath);
+        if (resolved.ok) {
+          if (!resolve3(resolved.root).startsWith(projectsPrefix) && !entries.has(resolved.slug)) {
+            entries.set(resolved.slug, { slug: resolved.slug, root: resolved.root });
+          }
+        } else if (existsSync2(record2.rootPath)) {
+          const abs = resolve3(record2.rootPath);
+          const normRoot = realpathSafe(abs);
+          if (!normRoot.startsWith(projectsPrefix) && isUnsafeBootstrapDirectory(normRoot, { stateDir, home }) === null) {
+            const hash = createHash3("sha1").update(join4(normRoot, ".git")).digest("hex").slice(0, 6);
+            const slug = `${basename4(normRoot)}-${hash}`;
+            if (!entries.has(slug)) {
+              entries.set(slug, { slug, root: normRoot });
+            }
           }
         }
       }
     } catch {
     }
   }
-  return [...roots.entries()].map(([slug, root]) => ({ slug, root })).sort((a, b) => a.slug.localeCompare(b.slug));
+  return [...entries.values()].sort((a, b) => a.slug.localeCompare(b.slug));
 }
 
 // src/ledger.ts
 import { randomUUID as randomUUID2 } from "node:crypto";
-import { appendFileSync, closeSync as closeSync2, fsyncSync as fsyncSync2, ftruncateSync, mkdirSync as mkdirSync3, openSync as openSync2, readFileSync as readFileSync5, statSync, writeSync } from "node:fs";
+import { appendFileSync, closeSync as closeSync2, fsyncSync as fsyncSync2, ftruncateSync, mkdirSync as mkdirSync3, openSync as openSync2, readFileSync as readFileSync5, statSync as statSync2, writeSync } from "node:fs";
 import { dirname as dirname4 } from "node:path";
 var Ledger = class _Ledger {
   #path;
@@ -1247,7 +1329,7 @@ var Ledger = class _Ledger {
     let mode = options.mode;
     if (mode === void 0) {
       try {
-        mode = statSync(this.#path).mode & 511;
+        mode = statSync2(this.#path).mode & 511;
       } catch (error) {
         if (error.code !== "ENOENT") throw error;
       }
@@ -1723,7 +1805,7 @@ var LedgerAdmission = class _LedgerAdmission {
         let root;
         try {
           root = realpathSync4(contract.workspace);
-          if (!statSync2(root).isDirectory() || !knownRoots.has(root)) continue;
+          if (!statSync3(root).isDirectory() || !knownRoots.has(root)) continue;
         } catch {
           continue;
         }
@@ -2276,12 +2358,12 @@ function stripTrailingNul(text) {
 
 // src/vault-secrets.ts
 import { existsSync as existsSync5, readFileSync as readFileSync9 } from "node:fs";
-import { homedir } from "node:os";
+import { homedir as homedir2 } from "node:os";
 import { join as join7 } from "node:path";
 function expandImportPath(rawPath) {
   const trimmed = rawPath.trim();
-  if (trimmed === "~") return homedir();
-  if (trimmed.startsWith("~/")) return join7(homedir(), trimmed.slice(2));
+  if (trimmed === "~") return homedir2();
+  if (trimmed.startsWith("~/")) return join7(homedir2(), trimmed.slice(2));
   return trimmed;
 }
 function readImportFile(rawPath, label) {

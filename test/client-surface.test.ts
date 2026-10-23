@@ -19,7 +19,14 @@ import {
   isPluginTargetedByAct,
   resolveCoreRestartWatch,
 } from "../plugin/client/factory/plugin-feedback.ts";
-import type { CompanionPluginView, FactoryView } from "../plugin/shared/view.ts";
+import {
+  KANBAN_COLUMNS,
+  groupTasksForKanban,
+  kanbanColumnForStatus,
+  projectNameForTask,
+} from "../plugin/client/factory/kanban.ts";
+import type { KanbanColumnId } from "../plugin/client/factory/kanban.ts";
+import type { CompanionPluginView, FactoryView, TaskView } from "../plugin/shared/view.ts";
 
 const read = (rel: string): string => readFileSync(join(repoRoot, rel), "utf8");
 
@@ -747,6 +754,103 @@ test("v0.0.34 Seam 2.3: PluginsPane and FactoryShell wire live elapsed progress 
     "CompanionCard separates Core reload restart from Core update restart so Reload never lights up Update buttons",
   );
 });
+
+// ---- 5-Column Kanban Tasks Board (v0.0.35 Seam 2.3, ADR 0025) ----
+
+test("v0.0.35 Seam 2.3a: KANBAN_COLUMNS and groupTasksForKanban map all TaskStatus values into the 5 canonical Kanban columns in order", () => {
+  const columnIds: KanbanColumnId[] = KANBAN_COLUMNS.map((c) => c.id);
+  assert.deepEqual(columnIds, [
+    "queued",
+    "in_progress",
+    "needs_attention",
+    "ready_to_accept",
+    "accepted",
+  ]);
+  assert.deepEqual(
+    KANBAN_COLUMNS.map((c) => c.title),
+    ["Queued", "In Progress", "Needs Attention", "Ready to Accept", "Accepted"],
+  );
+
+  assert.equal(kanbanColumnForStatus("contracted"), "queued");
+  assert.equal(kanbanColumnForStatus("waiting"), "queued");
+  assert.equal(kanbanColumnForStatus("running"), "in_progress");
+  assert.equal(kanbanColumnForStatus("needs-human"), "needs_attention");
+  assert.equal(kanbanColumnForStatus("red"), "needs_attention");
+  assert.equal(kanbanColumnForStatus("ready-to-accept"), "ready_to_accept");
+  assert.equal(kanbanColumnForStatus("accepted"), "accepted");
+
+  const tasks = [
+    { task: "t-contracted", status: "contracted" as const, workspace: "/repo/a" },
+    { task: "t-waiting", status: "waiting" as const, workspace: "/repo/a" },
+    { task: "t-running", status: "running" as const, workspace: "/repo/a" },
+    { task: "t-needs-human", status: "needs-human" as const, workspace: "/repo/a" },
+    { task: "t-red", status: "red" as const, workspace: "/repo/a" },
+    { task: "t-ready", status: "ready-to-accept" as const, workspace: "/repo/a" },
+    { task: "t-accepted", status: "accepted" as const, workspace: "/repo/a" },
+  ];
+
+  const grouped = groupTasksForKanban(tasks);
+  assert.deepEqual(
+    grouped.queued.map((t) => t.task),
+    ["t-contracted", "t-waiting"],
+  );
+  assert.deepEqual(
+    grouped.in_progress.map((t) => t.task),
+    ["t-running"],
+  );
+  assert.deepEqual(
+    grouped.needs_attention.map((t) => t.task),
+    ["t-needs-human", "t-red"],
+  );
+  assert.deepEqual(
+    grouped.ready_to_accept.map((t) => t.task),
+    ["t-ready"],
+  );
+  assert.deepEqual(
+    grouped.accepted.map((t) => t.task),
+    ["t-accepted"],
+  );
+
+  // Also verify projectNameForTask resolves project names from discovered projects or workspace paths
+  const projects = [
+    { slug: "alpha-123456", root: "/Users/dev/alpha", name: "Alpha App" },
+    { slug: "beta-654321", root: "/Users/dev/beta" },
+  ];
+  assert.equal(projectNameForTask({ workspace: "/Users/dev/alpha" }, projects), "Alpha App");
+  assert.equal(
+    projectNameForTask({ workspace: "/Users/dev/.paseo/projects/beta-654321/worktrees/t-01" }, projects),
+    "beta",
+  );
+  assert.equal(projectNameForTask({ workspace: "/Users/dev/unregistered-repo" }, projects), "unregistered-repo");
+});
+
+test("v0.0.35 Seam 2.3b (ADR 0025): TasksPane renders the 5-column horizontal Kanban board with column counts, Total Cost pill, Project pill in All projects mode, Attempt #n/3 rung badges, evidence pills, direct Accept #n CTA on ready-to-accept cards, and TaskDetailModal without redundant workspace-path headers", () => {
+  const tasks = read("plugin/client/factory/tasks.tsx");
+  assert.match(tasks, /KANBAN_COLUMNS/, "tasks.tsx exports and iterates KANBAN_COLUMNS");
+  assert.match(tasks, /groupTasksForKanban/, "tasks.tsx exports and invokes groupTasksForKanban");
+  assert.match(tasks, /KanbanColumnId/, "tasks.tsx exports KanbanColumnId");
+  assert.match(tasks, /ScrollView horizontal/, "TasksPane renders a horizontal Kanban board container");
+  assert.match(tasks, /Total Cost/, "board toolbar renders compact Total Cost summary pill");
+  assert.match(tasks, /view\.kpis\.totalCostUsd/, "Total Cost pill reads view.kpis.totalCostUsd");
+  assert.ok(!tasks.includes("group.workspace"), "redundant workspace-path group headers are removed from TasksPane");
+  assert.match(tasks, /view\.project === null/, "KanbanCard shows a Project pill only when view.project === null (All projects mode)");
+  assert.match(tasks, /projectNameForTask/, "KanbanCard resolves the Project pill label via projectNameForTask");
+  assert.match(tasks, /\/3/, "KanbanCard renders Attempt rung badge (#n/3)");
+  assert.match(tasks, /↻ Respawned/, "KanbanCard renders ↻ Respawned badge when respawned");
+  assert.match(tasks, /Gate green/, "KanbanCard renders Gate evidence pill");
+  assert.match(tasks, /Eye \$\{lastEye\.outcome\.toUpperCase\(\)\}/, "KanbanCard renders Eye CLEAR/CONCERN evidence pill");
+  assert.match(tasks, /Watch /, "KanbanCard renders Watch evidence pill");
+  assert.match(tasks, /Cost \$\{costLabel\(task\)\}/, "KanbanCard renders Cost evidence pill");
+  assert.match(tasks, /label=\{`Accept #\$\{green\.n\}`\}/, "ready-to-accept cards render direct Accept #n button");
+  assert.match(tasks, /actions\.accept\(task\.task,\s*green!?\.n\)/, "Accept #n button invokes actions.accept");
+  assert.match(tasks, /actions\.openDetail\(task\.task\)/, "clicking a Kanban card or Details opens TaskDetailModal");
+  assert.match(tasks, /export function TaskDetailModal\(/, "tasks.tsx exports TaskDetailModal");
+
+  const shell = read("plugin/client/factory/shell.tsx");
+  assert.match(shell, /TaskDetailModal/, "FactoryShell renders TaskDetailModal for selected Kanban cards");
+});
+
+
 
 
 

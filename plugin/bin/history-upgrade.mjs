@@ -623,8 +623,8 @@ function readLedgerImports(target) {
 }
 
 // src/project.ts
-import { existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync2, readdirSync as readdirSync2, realpathSync as realpathSync2, writeFileSync as writeFileSync2 } from "node:fs";
-import { isAbsolute as isAbsolute3, basename as basename2, join as join2, resolve as resolve3 } from "node:path";
+import { existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync2, readdirSync as readdirSync2, realpathSync as realpathSync2, statSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { isAbsolute as isAbsolute3, basename as basename2, join as join2, parse, resolve as resolve3 } from "node:path";
 function projectStateDir(stateDir, projectSlug) {
   return join2(stateDir, "projects", projectSlug);
 }
