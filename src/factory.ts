@@ -13,7 +13,7 @@ import { runWatchPass, watchLaneAvailable } from "./watch.ts";
 import type { CopilotRunner, TimelineFetcher } from "./watch.ts";
 import { buildRetroDigest, retroDay, retroLaneAvailable, runRetroPass, writtenRetroForDay } from "./retro.ts";
 import type { RetroOutcome } from "./retro.ts";
-import { changedFiles, checkCleanAt, headCommitSync, landTaskWorktree, resolveClaimedCommit, scopeCoversFile } from "./workspace.ts";
+import { changedFiles, checkCleanAt, headCommitSync, landTaskWorktree, resolveClaimedCommit, scopeCoversFile, normalizeScopePath, scopeRecoveryCommands } from "./workspace.ts";
 import { MEMORY_FILES } from "./choke.ts";
 import { projectStateDir } from "./project.ts";
 import { FactoryError } from "./errors.ts";
@@ -735,7 +735,7 @@ export function createFactory(options: FactoryOptions): Factory {
               {
                 exit: result.exit,
                 verdict: "red",
-                note: `changes outside declared scope: ${outside.join(", ")}`,
+                note: `changes outside declared scope: ${outside.join(", ")}. Restore relative to the Contract base (${contract.base}..${resolved.full}): ${scopeRecoveryCommands(contract.base, outside)}; then stage the restored files and commit.`,
                 timedOut: false,
               },
               resolved.full,
@@ -1474,6 +1474,16 @@ function scopesOverlap(a: readonly string[] | undefined, b: readonly string[] | 
   for (const mine of a) {
     for (const theirs of b) {
       if (scopeCoversFile([mine], theirs) || scopeCoversFile([theirs], mine)) return `${mine} ↔ ${theirs}`;
+      const minePath = normalizeScopePath(mine);
+      const theirPath = normalizeScopePath(theirs);
+      const mineWildcard = minePath.search(/[*?]/);
+      const theirWildcard = theirPath.search(/[*?]/);
+      if (mineWildcard < 0 && theirWildcard < 0) continue;
+      // A glob's static prefix reserves its possible territory conservatively:
+      // a partial filename prefix may overlap a different glob or directory.
+      const minePrefix = mineWildcard < 0 ? `${minePath}/` : minePath.slice(0, mineWildcard);
+      const theirPrefix = theirWildcard < 0 ? `${theirPath}/` : theirPath.slice(0, theirWildcard);
+      if (minePrefix.startsWith(theirPrefix) || theirPrefix.startsWith(minePrefix)) return `${mine} ↔ ${theirs}`;
     }
   }
   return undefined;
