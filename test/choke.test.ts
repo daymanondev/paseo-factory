@@ -1,6 +1,7 @@
+import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentPermissionRequest, AgentPermissionResponse } from "@getpaseo/protocol/agent-types";
@@ -8,15 +9,17 @@ import { createFactory } from "../plugin/server/core/factory.ts";
 import { writeProjectRegistration } from "../plugin/server/core/project.ts";
 import {
   createChoke,
+  startGitBlockIngestion,
   inferSeatFromProviderId,
   isContractedAgentCwd,
   normalizeAgentCreateRequest,
   resolveSeatAtProjectRoot,
 } from "../plugin/server/choke.ts";
+import { ensureGitShim } from "../plugin/server/shell.ts";
 import type { PaseoResponderApi } from "../plugin/server/choke.ts";
 import { isSeatMemoryPathAllowed, judgeFilePath, judgeShellCommand, refuseGitArgv, shellTokens, writableRootsFor } from "../src/choke.ts";
 import { GIT_ARGV_CASES, SHELL_CASES, shellRoots } from "./choke-cases.ts";
-import { disposeDir, gitCommitAll, makeTempDir } from "./helpers.ts";
+import { disposeDir, gitCommitAll, makeTempDir, repoRoot } from "./helpers.ts";
 
 /**
  * The choke policy against ticket 01's exact-token contract: the shared case
@@ -891,3 +894,71 @@ test("normalizeAgentCreateRequest keeps factory role provider ids canonical and 
 
 
 
+
+test("OpenCode delegates installed bare package shims while other providers and unsafe shell forms retain Layer-2 denials", async (t) => {
+  const dir = makeTempDir("choke-opencode-shims-");
+  disposeDir(t, dir);
+  const workspace = join(dir, "workspace");
+  mkdirSync(workspace);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  ensureGitShim(factory.stateDir, join(repoRoot, "plugin"), process.execPath);
+  const choke = createChoke({ factory, homeDir: "/fake-home" });
+  const responses: AgentPermissionResponse[] = [];
+  const paseo: PaseoResponderApi = { agents: { ref: () => ({ respondToPermission: async ({ response }) => { responses.push(response); } }) } };
+  const ask = async (provider: string, command: string) => {
+    await choke.onPermissionAsked({
+      agent: { id: "seat", cwd: workspace, provider, labels: { seat: "supervisor" } },
+      request: { id: "ask", provider, name: "Bash", kind: "tool", detail: { type: "shell", command, cwd: workspace } },
+    }, paseo);
+    return responses.at(-1)!;
+  };
+  for (const command of ["npm install", "npx vite", "git status --short && npm install", "npm install | npm test"]) {
+    assert.equal((await ask("opencode/mimo-v2-pro-free", command)).behavior, "allow", command);
+  }
+  assert.equal(factory.ledger.events.filter((event) => event.event === "permit_denied").length, 0);
+  const refused = spawnSync(join(factory.stateDir, "bin", "npm"), ["install"], {
+    cwd: workspace, encoding: "utf8", timeout: 10_000,
+    env: { ...process.env, PASEO_FACTORY_SEAT: "supervisor" },
+  });
+  assert.equal(refused.status, 126);
+  startGitBlockIngestion(factory).stop();
+  startGitBlockIngestion(factory).stop();
+  assert.equal(factory.ledger.events.filter((event) => event.event === "git_blocked").length, 1, "delegated refusal is ingested exactly once, including after restart");
+  for (const provider of ["claude", "codex", "pi", "copilot", "omp", "antigravity"]) {
+    const response = await ask(provider, "npm install");
+    assert.equal(response.behavior, "deny", provider);
+    if (response.behavior === "deny") assert.match(response.message ?? "", /Seat write fence/);
+  }
+  for (const command of [
+    "npm install > foo.txt", "npm install; rm -rf src", "/usr/bin/npm install", "/usr/bin/git commit -m x; npm install",
+    "npm install $(touch src/a)", "npm install `touch src/a`", "PATH=/usr/bin npm install", "env npm install",
+    "npm install; git -c alias.mutate='!touch src/a' mutate", "npm install; git --exec-path=/tmp status",
+    "npm install; node -e 'require(\"fs\").writeFileSync(\"src/a\",\"x\")'", "npm install & touch src/a",
+  ]) assert.equal((await ask("opencode", command)).behavior, "deny", command);
+  rmSync(join(factory.stateDir, "bin", "npm"));
+  assert.equal((await ask("opencode", "npm install")).behavior, "deny", "missing shim is never delegated");
+});
+
+
+test("native factory seats use their configured provider family before delegating shell refusals", async (t) => {
+  const dir = makeTempDir("choke-native-opencode-");
+  disposeDir(t, dir);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  ensureGitShim(factory.stateDir, join(repoRoot, "plugin"), process.execPath);
+  const projectDir = join(factory.stateDir, "projects", "example");
+  mkdirSync(projectDir, { recursive: true });
+  writeFileSync(join(factory.stateDir, "lanes.json"), JSON.stringify({ lead: "pi/zai/glm-5.3" }));
+  writeFileSync(join(projectDir, "lanes.json"), JSON.stringify({ lead: "opencode/opencode/mimo-v2-pro-free" }));
+  const choke = createChoke({ factory, homeDir: "/fake-home" });
+  const responses: AgentPermissionResponse[] = [];
+  const paseo: PaseoResponderApi = { agents: { ref: () => ({ respondToPermission: async ({ response }) => { responses.push(response); } }) } };
+  const ask = async () => choke.onPermissionAsked({
+    agent: { id: "native-lead", cwd: dir, provider: "factory-lead", labels: { project: "example" } },
+    request: { id: "ask", provider: "factory-lead", name: "bash", kind: "tool", description: "npm install" },
+  }, paseo);
+  await ask();
+  assert.equal(responses.at(-1)?.behavior, "allow", "project lane resolves native factory role to OpenCode");
+  writeFileSync(join(projectDir, "lanes.json"), JSON.stringify({ lead: "codex/gpt-5" }));
+  await ask();
+  assert.equal(responses.at(-1)?.behavior, "deny", "native role on a non-OpenCode lane keeps Layer-2 refusal");
+});

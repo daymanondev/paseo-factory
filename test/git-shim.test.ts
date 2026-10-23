@@ -1,13 +1,14 @@
 import { test } from "node:test";
 import type { TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
+import { createFactory } from "../src/factory.ts";
 import { refuseGitArgv } from "../src/choke.ts";
 import { refuseGitArgv as mirrorRefuseGitArgv } from "../plugin/bin/git-refusals.mjs";
 import { ensureGitShim } from "../plugin/server/shell.ts";
-import { disposeDir, makeTempDir, repoRoot } from "./helpers.ts";
+import { disposeDir, gitCommitAll, gitCommitChanges, makeTempDir, repoRoot } from "./helpers.ts";
 import { GIT_ARGV_CASES } from "./choke-cases.ts";
 
 /**
@@ -222,4 +223,58 @@ test("the generated wrapper shape matches the claim CLI's law (shell wrapper, ba
   assert.equal(refused.status, REFUSAL_EXIT, "the wrapper reaches the shim exactly as agents reach it");
   const lines = readFileSync(join(dir, "state", "git-blocked.log"), "utf8").trimEnd().split("\n");
   assert.equal((JSON.parse(lines[0]!) as Record<string, string>).rule, "git:clean-force");
+});
+
+
+test("installed agent git shim accepts glob scopes and gives branch-base recovery for staged or committed violations", (t) => {
+  const dir = makeTempDir("git-shim-scope-");
+  disposeDir(t, dir);
+  const workspace = join(dir, "ws");
+  mkdirSync(join(workspace, "src"), { recursive: true });
+  writeFileSync(join(workspace, "src", "main.ts"), "export const main = 1;\n");
+  writeFileSync(join(workspace, "README.md"), "original\n");
+  const base = gitCommitAll(workspace);
+  const stateDir = join(dir, "state");
+  const factory = createFactory({ stateDir });
+  factory.setContract({ task: "GLOB", workspace, gate: "true", artifact: "src/main.ts", scope: ["src/**/*.ts"] });
+  ensureGitShim(stateDir, join(repoRoot, "plugin"), process.execPath);
+  const run = (args: string[]) => spawnSync(join(stateDir, "bin", "git"), args, {
+    cwd: workspace, encoding: "utf8", timeout: 10_000,
+    env: { ...process.env, PASEO_FACTORY_SEAT: "agent", PASEO_FACTORY_TASK: "GLOB" },
+  });
+  writeFileSync(join(workspace, "src", "main.ts"), "export const main = 2;\n");
+  writeFileSync(join(workspace, "README.md"), "out of scope\n");
+  execFileSync("git", ["add", "."], { cwd: workspace });
+  const staged = run(["commit", "-m", "bad staged file"]);
+  assert.equal(staged.status, 126, staged.stderr);
+  assert.ok(staged.stderr.includes(`git restore --source=${base} -- README.md`), staged.stderr);
+  assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: workspace, encoding: "utf8" }).trim(), base);
+  gitCommitChanges(workspace, "simulate file already committed outside shim");
+  const committed = run(["commit", "--allow-empty", "-m", "still bad branch range"]);
+  assert.equal(committed.status, 126, committed.stderr);
+  assert.ok(committed.stderr.includes(`git restore --source=${base} -- README.md`), committed.stderr);
+  assert.equal(run(["restore", `--source=${base}`, "--", "README.md"]).status, 0);
+  assert.equal(run(["add", "README.md"]).status, 0);
+  const repaired = run(["commit", "-m", "restore from branch base"]);
+  assert.equal(repaired.status, 0, repaired.stderr);
+  assert.deepEqual(execFileSync("git", ["diff", "--name-only", base, "HEAD"], { cwd: workspace, encoding: "utf8" }).trim().split("\n"), ["src/main.ts"]);
+  const records = readFileSync(join(stateDir, "git-blocked.log"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.equal(records.length, 2);
+  assert.ok(records.every((record) => record.rule === "out-of-scope"));
+  writeFileSync(join(workspace, "README.md"), "unstaged outside scope\n");
+  writeFileSync(join(workspace, "src", "main.ts"), "export const main = 3;\n");
+  assert.equal(run(["add", "src/main.ts"]).status, 0);
+  const scopedOnly = run(["commit", "-mplain"]);
+  assert.equal(scopedOnly.status, 0, scopedOnly.stderr);
+  for (const args of [["commit", "-am", "all tracked files"], ["commit", "-m", "explicit path", "--", "README.md"]]) {
+    const refused = run(args);
+    assert.equal(refused.status, 126, refused.stderr);
+    assert.ok(refused.stderr.includes(`git restore --source=${base} -- README.md`), refused.stderr);
+  }
+  gitCommitChanges(workspace, "simulate a second earlier out-of-scope commit");
+  assert.equal(run(["restore", `--source=${base}`, "--", "README.md"]).status, 0);
+  assert.equal(run(["add", "README.md"]).status, 0);
+  writeFileSync(join(workspace, "src", "main.ts"), "export const main = 4;\n");
+  const excludedRepair = run(["commit", "-m", "repair excluded by pathspec", "--", "src/main.ts"]);
+  assert.equal(excludedRepair.status, 126, excludedRepair.stderr);
 });

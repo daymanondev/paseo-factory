@@ -402,7 +402,7 @@ test("scoped contract: one file outside scope is red with that file named", asyn
   const { workspace, artifact } = makeWorkspace(dir);
   const factory = createFactory({ stateDir: join(dir, "factory") });
 
-  factory.setContract({ task: "SC2", workspace, gate: "true", artifact, scope: ["src"] });
+  const contract = factory.setContract({ task: "SC2", workspace, gate: "true", artifact, scope: ["src"] });
   writeFileSync(join(workspace, "src", "extra.ts"), "export const extra = 1;\n");
   writeFileSync(join(workspace, "README.md"), "# touched out of scope\n");
   const sha2 = gitCommitChanges(workspace, "add extra module and touch README");
@@ -413,6 +413,10 @@ test("scoped contract: one file outside scope is red with that file named", asyn
   assert.ok(outcome.gate.note.includes("changes outside declared scope"), outcome.gate.note);
   assert.ok(outcome.gate.note.includes("README.md"), "the offending file is named");
   assert.ok(!outcome.gate.note.includes("extra.ts"), "in-scope files are not named");
+  assert.ok(outcome.gate.note.includes(`git restore --source=${contract.base} -- README.md`), outcome.gate.note);
+  execFileSync("git", ["restore", `--source=${contract.base}`, "--", "README.md"], { cwd: workspace });
+  const repaired = gitCommitChanges(workspace, "restore out-of-scope file from contract base");
+  assert.equal((await factory.claim({ task: "SC2", sha: repaired })).verdict, "green");
 });
 
 test("omitted scope keeps the unrestricted v0.0.1 behavior", async (t) => {
@@ -1864,3 +1868,23 @@ test("v0.0.28 (ADR 0018 §4): Lead contracts smart-default freshEyes to true whe
 });
 
 
+
+test("same-project contracts reject overlap under glob scopes and permit disjoint static prefixes", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact } = makeWorkspace(dir);
+  const cases: [string, string, boolean][] = [
+    ["tests/e2e/**", "tests/e2e/smoke.spec.ts", true],
+    ["src/**/*.ts", "src/*.js", true],
+    ["src/component*.ts", "src/components/**", true],
+    ["src/**/*.ts", "docs/**", false],
+    ["src", "src-other/**", false],
+  ];
+  cases.forEach(([first, second, overlap], index) => {
+    const factory = createFactory({ stateDir: join(dir, `factory-${index}`) });
+    factory.setContract({ task: "FIRST", workspace, gate: "true", artifact, scope: [first] });
+    const setSecond = () => factory.setContract({ task: "SECOND", workspace, gate: "true", artifact, scope: [second] });
+    if (overlap) assert.throws(setSecond, factoryErrorCode("workspace-conflict"), `${first} overlaps ${second}`);
+    else assert.doesNotThrow(setSecond, `${first} is disjoint from ${second}`);
+  });
+});

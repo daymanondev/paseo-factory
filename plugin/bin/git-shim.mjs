@@ -23,7 +23,7 @@
  * daemon's node binary and FACTORY_STATE_DIR baked in. Direct dev runs must
  * set FACTORY_STATE_DIR themselves.
  */
-import { appendFileSync, constants as fsConstants, existsSync, mkdirSync, accessSync } from "node:fs";
+import { appendFileSync, constants as fsConstants, existsSync, mkdirSync, accessSync, readdirSync, realpathSync } from "node:fs";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import {
@@ -32,6 +32,9 @@ import {
   refuseGitArgv,
   refuseSupervisorGitArgv,
 } from "./git-refusals.mjs";
+
+import { readLedgerEvents } from "./ledger-read.mjs";
+import { scopeCoversFile, scopeRecoveryCommands } from "../server/core/workspace.ts";
 
 const argv = process.argv.slice(2);
 const stateDir = process.env.FACTORY_STATE_DIR;
@@ -224,6 +227,102 @@ function checkLeadGitCommit(realGit, argvTokens) {
   return undefined;
 }
 
+/** Read the live binding without becoming a Ledger writer. Worktree matches beat root matches. */
+function scopedContractAt(cwd) {
+  const canonical = (path) => {
+    try { return realpathSync(path); } catch { return resolve(path); }
+  };
+  const actual = canonical(cwd);
+  const covers = (path) => typeof path === "string" && (actual === canonical(path) || actual.startsWith(`${canonical(path)}/`));
+  const ledgers = [join(stateDir, "ledger.jsonl")];
+  const projects = join(stateDir, "projects");
+  if (existsSync(projects)) {
+    for (const entry of readdirSync(projects, { withFileTypes: true })) {
+      if (entry.isDirectory()) ledgers.push(join(projects, entry.name, "ledger.jsonl"));
+    }
+  }
+  let rootMatch;
+  for (const path of ledgers) {
+    const result = readLedgerEvents(path);
+    if (!result.events) continue;
+    const reset = result.events.findLastIndex((event) => event.event === "project_reset");
+    const events = result.events.slice(reset + 1);
+    const contracts = new Map();
+    const worktrees = new Map();
+    const accepted = new Set();
+    for (const event of events) {
+      if (event.event === "contract_set") contracts.set(event.task, event);
+      if (event.event === "spawn_dispatched" && event.worktree) worktrees.set(event.task, event.worktree);
+      if (event.event === "attempt_accepted" && event.landing !== "pending-conflict") accepted.add(event.task);
+    }
+    for (const [task, contract] of contracts) {
+      if (accepted.has(task)) continue;
+      if (process.env.PASEO_FACTORY_TASK && task !== process.env.PASEO_FACTORY_TASK) continue;
+      if (covers(worktrees.get(task))) return contract;
+      if (covers(contract.workspace)) rootMatch = contract;
+    }
+  }
+  return rootMatch;
+}
+
+function checkAgentCommitScope(realGit, argvTokens) {
+  const { globalFlags, sub, args } = parseGitSubcommand(argvTokens);
+  if (sub !== "commit" || realGit === undefined) return undefined;
+  const contract = scopedContractAt(resolveEffectiveCwd(globalFlags));
+  if (!contract?.base || !Array.isArray(contract.scope) || contract.scope.length === 0) return undefined;
+  const query = (args) => {
+    const result = spawnSync(realGit, [...globalFlags, ...args], {
+      cwd: process.cwd(), encoding: "utf8", timeout: 10_000,
+    });
+    if (result.status !== 0) throw new Error(result.stderr || "git could not inspect the proposed commit");
+    return result.stdout.split("\0").filter(Boolean);
+  };
+  let paths;
+  try {
+    const pathspecs = extractCommitPathspecs(args);
+    let all = false;
+    for (let i = 0; i < args.length; i++) {
+      const arg = args[i];
+      if (arg === "--") break;
+      if (arg === "--all") all = true;
+      else if (COMMIT_LONG_VALUE_FLAGS.has(arg)) i++;
+      else if (arg.startsWith("-") && !arg.startsWith("--")) {
+        for (let at = 1; at < arg.length; at++) {
+          const letter = arg[at];
+          if (letter === "a") all = true;
+          if (COMMIT_SHORT_VALUE_LETTERS.has(letter)) {
+            if (at === arg.length - 1) i++;
+            break;
+          }
+        }
+      }
+    }
+    if (pathspecs.some((path) => path.startsWith("--pathspec-from-file"))) {
+      throw new Error("--pathspec-from-file cannot be scope-checked; stage explicit files and commit without that option");
+    }
+    if (pathspecs.length > 0 && !args.includes("--include") && !args.includes("-i")) {
+      // A path-limited commit takes selected paths from the working tree and
+      // leaves every other path at HEAD, even when a repair is staged there.
+      const selected = new Set(query(["ls-files", "-z", "--full-name", "--", ...pathspecs]));
+      paths = [
+        ...query(["diff", "--name-only", "-z", contract.base, "HEAD"]).filter((path) => !selected.has(path)),
+        ...query(["diff", "--name-only", "-z", contract.base, "--", ...pathspecs]),
+      ];
+    } else {
+      paths = query(["diff", ...(all ? [] : ["--cached"]), "--name-only", "-z", contract.base]);
+      if (pathspecs.length > 0) paths.push(...query(["diff", "--name-only", "-z", contract.base, "--", ...pathspecs]));
+    }
+  } catch (error) {
+    return { rule: "out-of-scope", reason: `could not check the commit against Contract base ${contract.base}: ${error.message}` };
+  }
+  const outside = [...new Set(paths)].filter((file) => !scopeCoversFile(contract.scope, file));
+  if (outside.length === 0) return undefined;
+  return {
+    rule: "out-of-scope",
+    reason: `changes outside declared scope: ${outside.join(", ")}. Restore relative to the Contract base (${contract.base}..HEAD): ${scopeRecoveryCommands(contract.base, outside)}; then stage the restored files and commit.`,
+  };
+}
+
 // ---- the refusal -------------------------------------------------------------------------------
 
 const seat = (process.env.PASEO_FACTORY_SEAT ?? "").trim();
@@ -233,6 +332,9 @@ if (refusal === undefined && seat === "supervisor") {
 }
 if (refusal === undefined && seat === "lead") {
   refusal = checkLeadGitCommit(resolveRealGit(), argv);
+}
+if (refusal === undefined && seat === "agent") {
+  refusal = checkAgentCommitScope(resolveRealGit(), argv);
 }
 if (refusal !== undefined) {
   const command = ["git", ...argv].join(" ");
@@ -256,7 +358,9 @@ if (refusal !== undefined) {
     console.error(`git shim: WARNING could not append the block line: ${err instanceof Error ? err.message : String(err)}`);
   }
   console.error(`git: paseo-factory refused to run: ${refusal.reason} [${refusal.rule}]`);
-  console.error(`git: nothing was executed; adapt the command (e.g. --force-with-lease) and retry.`);
+  console.error(refusal.rule === "out-of-scope"
+    ? "git: nothing was executed; restore out-of-scope files from the Contract base, stage them, and retry."
+    : "git: nothing was executed; adapt the command (e.g. --force-with-lease) and retry.");
   process.exit(REFUSAL_EXIT);
 }
 
