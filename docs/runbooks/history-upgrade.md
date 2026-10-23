@@ -37,13 +37,21 @@ Activation validates prepared JSONL, lifecycle, epochs and typed references befo
 
 ## Interruption and restore
 
-A partial transaction blocks ordinary mutations with `upgrade-recovery-required`, including after restart. Its reads remain available. Resume the same ID; do not start another transaction or replace the Ledger manually. Recovery uses recorded bytes/hashes/mappings, not timestamps, and recognizes activation that survived before its final journal stamp. No new model review or verification is manufactured during upgrade recovery.
+A partial transaction blocks ordinary mutations with `upgrade-recovery-required`, including after restart. The plugin keeps read, Owner recovery RPC and Spool recovery controls available while ordinary boot reconciliation, mailbox delivery and Git-block ingestion defer. Ordinary queued work remains durable and resumes after recovery completes. Resume the same ID; do not start another transaction or replace the Ledger manually. Recovery uses recorded bytes/hashes/mappings, not timestamps, and recognizes activation that survived before its final journal stamp. No new model review or verification is manufactured during upgrade recovery.
 
 Restore first verifies backup integrity and the complete protected inventory against the predicted applied state. Any intervening Ledger append, queued request/reply, mailbox/config change, evidence file or relevant mode/presence change refuses and names the paths. Precisely identified maintenance command/reply transitions are recorded separately; unrelated files are never hidden by a `spool/` wildcard. A new queued request during maintenance is retained and can prevent blind restore. Keep the backup and inspect the reported changes; do not delete new work merely to force rollback.
 
 With no intervening work, restore recovers original bytes, modes and absence and refreshes the same writer cache. A restored unacknowledged tail stays preserved and blocks append until the existing recovery policy handles it; restore does not silently quarantine it. Backups and transaction evidence remain available after restore.
 
 Writer acquisition uses a short durable `ledger-owner-acquire` guard plus `ledger-owner.json`. Ordinary upgrade/import fault points occur after this startup guard has been released and recover through their journals. If startup itself crashes while acquiring ownership, a retained guard deliberately fails closed with `ledger-owner-acquisition-busy`. Inspect the adjacent owner registration, verify its PID/command and the trial daemon's actual state, and establish that every writer for that target is stopped. Preserve the guard outside mutable state before removing/moving that exact stale guard, then restart the intended owner. Do not infer absence of a writer from a failed RPC/status call, steal a live registration or remove Ledgers/backups. An unreadable/unsupported owner registration also requires inspection.
+
+## Held Vault imports
+
+A Vault fetch can durably stage history while an ordinary Claim/review pipeline is busy. History admission and associated-file materialization are separate outcomes: `pending` history with materialization `pending` or `refused` remains held until the required local files are safely materialized. A standalone CLI cannot borrow a live owner's maintenance authority. Its `materialization.status: refused` and empty `hydratedFiles` mean the fetched source is retained but associated local files were not written, even if an existing history batch is already applied.
+
+Retry the matching hydrate/pull through the existing Owner surface with history merging enabled. The Owner waits for active operations, materializes under exclusive maintenance, then releases the same batch for automatic admission; another Sync is not required. Stable batch identity and original source bytes remain retained. An applied outcome takes precedence over late external refusal feedback. Inspect the reported diagnostics for a failed materialization rather than treating transport success as active-history acceptance.
+
+An incomplete explicit upgrade is different from ordinary busy work: new Vault staging into its protected state refuses with `upgrade-recovery-required`, preserving the upgrade inventory. Resume or restore that transaction first; do not add files or edit manifests to bypass the guard.
 
 ## Verification
 
