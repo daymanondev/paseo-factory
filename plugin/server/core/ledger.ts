@@ -28,8 +28,10 @@ export class Ledger {
   readonly #events: LedgerEvent[] = [];
   #nextSeq: number;
   readonly #schema: LedgerSchema | undefined;
+  readonly #writerId: string | undefined;
 
-  private constructor(path: string, events: readonly LedgerEvent[]) {
+  private constructor(path: string, events: readonly LedgerEvent[], writerId?: string) {
+    this.#writerId = writerId;
     this.#path = path;
     this.#events.push(...events);
     this.#nextSeq = (events.at(-1)?.seq ?? 0) + 1;
@@ -37,7 +39,7 @@ export class Ledger {
   }
 
   /** Loads and validates an existing ledger, or starts a fresh one at seq 1. */
-  static open(path: string): Ledger {
+  static open(path: string, options: { writerId?: string } = {}): Ledger {
     mkdirSync(dirname(path), { recursive: true });
     let raw: string;
     try {
@@ -53,18 +55,19 @@ export class Ledger {
 
     const read = parseLedgerJsonl(raw);
     if (read.corrupt !== undefined) throw new FactoryError("corrupted-ledger", `${read.corrupt} of ${path}`);
-    return new Ledger(path, read.events);
+    return new Ledger(path, read.events, options.writerId);
   }
 
   /** Assigns the next seq, stamps `ts`, appends one JSONL line, fsyncs, and returns the event. */
   append<T extends PendingEvent>(evt: T): T & { seq: number; ts: string } & EventIdentityMetadata {
     const identity: EventIdentityMetadata = {};
     if (this.#schema !== undefined) {
+      if (this.#writerId === undefined || this.#writerId.trim() === "") throw new FactoryError("writer-identity-required", "v2 append requires a demonstrable local writer identity; a copied schema fence is not writer authority");
       const eventId = `event:${randomUUID()}`;
       const task = "task" in evt ? evt.task : undefined;
       const epoch = evt.event === "contract_set" ? eventId : task === undefined ? undefined : this.#events.findLast((event) => event.event === "contract_set" && event.task === task)?.epoch_id;
       if (task !== undefined && epoch === undefined && !eventAllowsUnboundEpoch(evt.event)) throw new FactoryError("invalid-event-epoch", `Task ${task} has no current Contract epoch`);
-      Object.assign(identity, { schema_version: 2, event_id: eventId, provenance: { writer_id: this.#schema.writer_id }, ...(epoch === undefined ? {} : { epoch_id: epoch }) });
+      Object.assign(identity, { schema_version: 2, event_id: eventId, provenance: { writer_id: this.#writerId }, ...(epoch === undefined ? {} : { epoch_id: epoch }) });
     }
     const record = { ...evt, seq: this.#nextSeq, ts: new Date().toISOString(), ...identity } as T & { seq: number; ts: string } & EventIdentityMetadata;
     if (this.#schema !== undefined) {

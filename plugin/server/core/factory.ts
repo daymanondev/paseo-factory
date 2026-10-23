@@ -28,6 +28,8 @@ import type { GateResult } from "./gate.ts";
 const TASK_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 export interface FactoryOptions {
+  /** Demonstrable local writer identity, provisioned independently of imported history. */
+  writerId?: string;
   /** Directory for `ledger.jsonl`, `report-<task>-<n>.md` and `gate-<task>-<n>.log` files. */
   stateDir: string;
   /**
@@ -384,7 +386,7 @@ export function createFactory(options: FactoryOptions): Factory {
   // for every factory, and the root data tree remains the no-scope default
   // (the legacy single-ledger layout).
   const dataDir = options.projectSlug === undefined ? stateDir : projectStateDir(stateDir, options.projectSlug);
-  const ledger = Ledger.open(join(dataDir, "ledger.jsonl"));
+  const ledger = Ledger.open(join(dataDir, "ledger.jsonl"), { writerId: options.writerId });
   const recoveredAttempts = recoverInterruptedAttempts(ledger, dataDir);
 
   return {

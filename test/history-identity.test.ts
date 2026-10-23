@@ -39,7 +39,7 @@ test("prepared v2 history reopens with stable identities and new Attempts bind t
   legacy.append({ event: "claim_reported", task: "T", attempt: 1, sha: "first" });
   const plan = planLegacyIdentity(readFileSync(path, "utf8"), { writerId: "this-writer" });
   writeFileSync(path, plan.events.map((event) => JSON.stringify(event) + "\n").join(""));
-  const upgraded = Ledger.open(path);
+  const upgraded = Ledger.open(path, { writerId: "this-writer" });
   const secondContract = upgraded.append(contract);
   const secondClaim = upgraded.append({ event: "claim_reported", task: "T", attempt: 1, sha: "second" });
   assert.equal(secondContract.epoch_id, secondContract.event_id);
@@ -200,7 +200,7 @@ test("v2 re-contract preserves both epochs' Report and Gate evidence at Attempt 
   mkdirSync(stateDir);
   const plan = planLegacyIdentity("", { writerId: "writer" });
   writeFileSync(join(stateDir, "ledger.jsonl"), plan.events.map((event) => JSON.stringify(event) + "\n").join(""));
-  const factory = createFactory({ stateDir });
+  const factory = createFactory({ stateDir, writerId: "writer" });
   factory.setContract({ ...contract, workspace, gate: "printf first" });
   const first = await factory.claim({ task: "T", sha });
   const firstReport = readFileSync(first.reportPath, "utf8");
@@ -241,7 +241,7 @@ test("upgraded Factory still records an unknown Task spawn refusal without inven
   const path = join(dir, "ledger.jsonl");
   const plan = planLegacyIdentity("", { writerId: "writer" });
   writeFileSync(path, plan.events.map((event) => JSON.stringify(event) + "\n").join(""));
-  const factory = createFactory({ stateDir: dir });
+  const factory = createFactory({ stateDir: dir, writerId: "writer" });
   const refusal = factory.requestSpawn({ task: "UNKNOWN", provider: "claude", arity: 1 });
   assert.equal(refusal.outcome, "refused");
   assert.equal(refusal.event.epoch_id, undefined);
@@ -255,7 +255,7 @@ test("v2 live Needs-human records retain numeric fields and persist stable evide
   const path = join(dir, "ledger.jsonl");
   const plan = planLegacyIdentity("", { writerId: "writer" });
   writeFileSync(path, plan.events.map((event) => JSON.stringify(event) + "\n").join(""));
-  const ledger = Ledger.open(path);
+  const ledger = Ledger.open(path, { writerId: "writer" });
   ledger.append(contract);
   const denied = ledger.append({ event: "permit_denied", task: "T", agent: "peer", name: "Bash", kind: "tool", command: "blocked", rule: "scope", reason: "out of scope" });
   const poked = ledger.append({ event: "repoke_dispatched", task: "T", agent: "peer" });
@@ -278,4 +278,18 @@ test("legacy copied metadata cannot manufacture historical writer provenance", (
   assert.match(plan.conflicts.join("\n"), /unversioned/);
   assert.equal(plan.events[0]!.provenance?.writer_id, null);
   assert.equal(plan.events[0]!.event === "contract_set" && plan.events[0]!.by, "owner");
+});
+
+test("a copied v2 fence never supplies the authority to claim a remote writer for new local events", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const path = join(dir, "copied.jsonl");
+  const source = planLegacyIdentity("", { writerId: "original-remote-writer" });
+  writeFileSync(path, source.events.map((event) => JSON.stringify(event) + "\n").join(""));
+  const local = Ledger.open(path, { writerId: "demonstrable-local-writer" });
+  const event = local.append(contract);
+  assert.equal(event.provenance?.writer_id, "demonstrable-local-writer");
+  assert.equal(local.events[0]!.provenance?.writer_id, "original-remote-writer");
+  const unconfigured = Ledger.open(path);
+  assert.throws(() => unconfigured.append(contract), /local writer identity/);
 });
