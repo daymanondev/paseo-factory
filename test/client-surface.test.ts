@@ -23,9 +23,10 @@ import type { CompanionPluginView, FactoryView } from "../plugin/shared/view.ts"
 
 const read = (rel: string): string => readFileSync(join(repoRoot, rel), "utf8");
 
-test("TabId grows its fourth value and the TabBar renders the Plugins tab with the Blocks icon", () => {
+test("TabId grows its five values (including vault) and the TabBar renders the Vault and Plugins tabs", () => {
   const pill = read("plugin/client/kit/pill.tsx");
-  assert.match(pill, /export type TabId = "tasks" \| "seats" \| "timeline" \| "plugins";/);
+  assert.match(pill, /export type TabId = "tasks" \| "seats" \| "timeline" \| "vault" \| "plugins";/);
+  assert.match(pill, /\{ id: "vault", label: "Vault", icon: "Shield" \}/);
   assert.match(pill, /\{ id: "plugins", label: "Plugins", icon: "Blocks" \}/);
 });
 
@@ -197,35 +198,44 @@ test("the Lead card renders the 128k telemetry trio — usage pill, rotationStat
   assert.match(seats, /agent\.queuedMailCount !== undefined && agent\.queuedMailCount > 0/, "the queued pill appears only when mail actually waits");
 });
 
-// ---- Built-In Header VaultSyncBar & 3-Layer Feedback (v0.0.22, ADR 0014) --------------------
+// ---- Dedicated Vault Tab & De-cluttered Header (v0.0.35 Seam 2.1, ADR 0025, amending ADR 0009/0014) ----
 
-test("Header exports and renders VaultSyncBar across all tabs with the 3-state gh onboarding, Sync Vault, + Import Key drawer, and ⚙ drawer", () => {
+test("v0.0.35 Seam 2.1: VaultPane / VaultSyncBar moves out of Header into the dedicated Vault tab (tab === \"vault\") and Settings screen with 3-state gh onboarding, Sync Vault, + Import Key drawer, and ⚙ drawer, while Header drops <VaultSyncBar and KPI StatTile cards", () => {
   const header = read("plugin/client/factory/header.tsx");
-  assert.match(header, /export function VaultSyncBar\(/, "VaultSyncBar is exported from header.tsx");
-  assert.match(header, /<VaultSyncBar/, "Header renders VaultSyncBar inside the persistent header");
+  assert.ok(!header.includes("<VaultSyncBar"), "Header no longer renders VaultSyncBar above the TabBar");
+  assert.ok(!header.includes("function StatTile("), "Header no longer defines the 5 KPI StatTile cards");
+  assert.ok(!header.includes("<StatTile"), "Header no longer renders KPI StatTile cards above the TabBar");
+
+  const vault = read("plugin/client/factory/vault.tsx");
+  assert.match(vault, /export function VaultSyncBar\(/, "VaultSyncBar is exported from vault.tsx");
+  assert.match(vault, /export function VaultPane\(/, "VaultPane is exported from vault.tsx");
   // State 1: !vault.configured && !vault.ghAuthenticated
-  assert.match(header, /gh auth login --web -p https/, "State 1 shows the exact gh auth login command");
-  assert.match(header, /Copy Command/, "State 1 offers a 1-click Copy Command button");
-  assert.match(header, /Check GitHub Login/, "State 1 offers a Check GitHub Login button");
+  assert.match(vault, /gh auth login --web -p https/, "State 1 shows the exact gh auth login command");
+  assert.match(vault, /Copy Command/, "State 1 offers a 1-click Copy Command button");
+  assert.match(vault, /Check GitHub Login/, "State 1 offers a Check GitHub Login button");
   // State 2: !vault.configured && vault.ghAuthenticated
-  assert.match(header, /Enable & Sync Vault/, "State 2 offers the single primary Enable & Sync Vault CTA");
-  assert.match(header, /Setting up & Syncing…/, "State 2 shows in-flight Setting up & Syncing… label");
+  assert.match(vault, /Enable & Sync Vault/, "State 2 offers the single primary Enable & Sync Vault CTA");
+  assert.match(vault, /Setting up & Syncing…/, "State 2 shows in-flight Setting up & Syncing… label");
   // State 3: vault.configured
-  assert.match(header, /Sync Vault/, "State 3 offers the single primary Sync Vault CTA");
-  assert.match(header, /Syncing Vault…/, "State 3 shows in-flight Syncing Vault… label");
-  assert.match(header, /ASC \.p8/, "readiness pill for ASC .p8");
-  assert.match(header, /GPlay JSON/, "readiness pill for GPlay JSON");
-  assert.match(header, /Apps: \$\{vault\.hydratedApps\.length\}/, "readiness pill for hydrated Apps count");
+  assert.match(vault, /Sync Vault/, "State 3 offers the single primary Sync Vault CTA");
+  assert.match(vault, /Syncing Vault…/, "State 3 shows in-flight Syncing Vault… label");
+  assert.match(vault, /ASC \.p8/, "readiness pill for ASC .p8");
+  assert.match(vault, /GPlay JSON/, "readiness pill for GPlay JSON");
+  assert.match(vault, /Apps: \$\{vault\.hydratedApps\.length\}/, "readiness pill for hydrated Apps count");
   // + Import Key drawer & ⚙ drawer
-  assert.match(header, /\+ Import Key/, "renders + Import Key drawer toggle");
-  assert.match(header, /Import & Sync/, "Import Key drawer submits via Import & Sync");
-  assert.match(header, /ascKeyPath/, "Import Key drawer collects ascKeyPath");
-  assert.match(header, /ascKeyId/, "Import Key drawer collects ascKeyId");
-  assert.match(header, /ascIssuer/, "Import Key drawer collects ascIssuer");
-  assert.match(header, /gplayKeyPath/, "Import Key drawer collects gplayKeyPath");
-  assert.match(header, /Save Config/, "⚙ drawer keeps Save Config for custom repo/branch/passphrase");
-  assert.match(header, /Direct Hydrate \(gh api\)/, "⚙ drawer keeps Direct Hydrate (gh api)");
-  assert.match(header, /vaultNote/, "VaultSyncBar renders the inline vaultNote banner");
+  assert.match(vault, /\+ Import Key/, "renders + Import Key drawer toggle");
+  assert.match(vault, /Import & Sync/, "Import Key drawer submits via Import & Sync");
+  assert.match(vault, /ascKeyPath/, "Import Key drawer collects ascKeyPath");
+  assert.match(vault, /ascKeyId/, "Import Key drawer collects ascKeyId");
+  assert.match(vault, /ascIssuer/, "Import Key drawer collects ascIssuer");
+  assert.match(vault, /gplayKeyPath/, "Import Key drawer collects gplayKeyPath");
+  assert.match(vault, /Save Config/, "⚙ drawer keeps Save Config for custom repo/branch/passphrase");
+  assert.match(vault, /Direct Hydrate \(gh api\)/, "⚙ drawer keeps Direct Hydrate (gh api)");
+  assert.match(vault, /vaultNote/, "VaultSyncBar renders the inline vaultNote banner");
+
+  const shell = read("plugin/client/factory/shell.tsx");
+  assert.match(shell, /tab === "vault" \?/, "FactoryShell renders VaultPane in the tab === \"vault\" slot");
+  assert.match(shell, /<VaultPane/, "FactoryShell mounts VaultPane");
 });
 
 test("FactoryShell removes PrivateVaultCard from the Plugins tab, wires vaultSync & vaultImport, and provides 3-layer feedback in act()", () => {
@@ -253,7 +263,7 @@ test("v0.0.24 (ADR 0015 §1): Seats & Models lane modal distinguishes thinkingOp
   );
 });
 
-// ---- Owner-Only Project Reset Header Button & RPC Wiring (v0.0.24, ADR 0015 §6) --------------
+// ---- Owner-Only Project Reset & Delete + Project-Centered Header (v0.0.24 ADR 0015 §6; v0.0.35 Seam 2.2, ADR 0024/0025) ----
 
 test("v0.0.24 (ADR 0015 §6): Header renders two-step Reset Project -> Confirm Reset + Cancel with 5s auto-cancel, wired to projectReset RPC in FactoryShell", () => {
   const header = read("plugin/client/factory/header.tsx");
@@ -268,6 +278,33 @@ test("v0.0.24 (ADR 0015 §6): Header renders two-step Reset Project -> Confirm R
   assert.match(shell, /projectReset/, "FactoryShell imports projectReset RPC");
   assert.match(shell, /useRpc\(projectReset\)/, "FactoryShell binds useRpc(projectReset)");
   assert.match(shell, /resetProject/, "FactoryShell passes resetProject action to Header");
+});
+
+test("v0.0.35 Seam 2.2 (ADR 0024/0025): Header renders prominent Project Switcher, Missing folder statusDanger badge, + Add Project native folder picker with Paste path… fallback, Reset Project (hidden when missingRoot), and two-step Delete Project -> Confirm Delete wired to projectDelete in FactoryShell", () => {
+  const header = read("plugin/client/factory/header.tsx");
+  assert.match(header, /PROJECT SWITCHER|Project Switcher/i, "Header renders the prominent Project Switcher");
+  assert.match(header, /label="All projects"/, "Project Switcher includes the All projects pill");
+  assert.match(header, /missingRoot/, "Header checks missingRoot on discovered and active projects");
+  assert.match(header, /label="Missing folder"/, "Header renders Missing folder badge when missingRoot is true");
+  assert.match(header, /Folder deleted on disk/, "Header warns when active project folder was deleted on disk");
+  assert.match(header, /label="\+ Add Project"/, "Header renders + Add Project primary action");
+  assert.match(header, /actions\.pickProjectFolder/, "+ Add Project invokes actions.pickProjectFolder()");
+  assert.match(header, /Paste path…/, "Header offers collapsible Paste path… fallback toggle");
+  assert.match(header, /!project\.missingRoot/, "Reset Project is hidden when project.missingRoot === true");
+  assert.match(header, /deleteProject\?:\s*\(\)\s*=>\s*void|deleteProject\(\):\s*void/, "HeaderActions declares deleteProject()");
+  assert.match(header, /label="Delete Project"/, "Header renders Delete Project button when a project is selected");
+  assert.match(header, /label="Confirm Delete"/, "first click on Delete Project flips to Confirm Delete");
+  assert.match(header, /actions\.deleteProject/, "Confirm Delete invokes actions.deleteProject()");
+
+  const shell = read("plugin/client/factory/shell.tsx");
+  assert.match(shell, /projectDelete/, "FactoryShell imports projectDelete RPC");
+  assert.match(shell, /projectPickFolder/, "FactoryShell imports projectPickFolder RPC");
+  assert.match(shell, /projectAdd/, "FactoryShell imports projectAdd RPC");
+  assert.match(shell, /useRpc\(projectDelete\)/, "FactoryShell binds useRpc(projectDelete)");
+  assert.match(shell, /useRpc\(projectPickFolder\)/, "FactoryShell binds useRpc(projectPickFolder)");
+  assert.match(shell, /useRpc\(projectAdd\)/, "FactoryShell binds useRpc(projectAdd)");
+  assert.match(shell, /deleteProject/, "FactoryShell wires deleteProject into Header actions");
+  assert.match(shell, /pickProjectFolder/, "FactoryShell wires pickProjectFolder into Header actions");
 });
 
 // ---- Compact Plugins Tab, Core Card, Version Pills & On-Demand Update Check (v0.0.25, ADR 0012 §1–§4) ----

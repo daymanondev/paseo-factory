@@ -230,9 +230,9 @@ export function Chip({
   );
 }
 
-export type TabId = "tasks" | "seats" | "timeline" | "plugins";
+export type TabId = "tasks" | "seats" | "timeline" | "vault" | "plugins";
 
-/** The four-tab segmented bar — one Shell, four views of the verification line. */
+/** The five-tab segmented bar — one Shell, five views of the verification line. */
 export function TabBar({
   theme,
   active,
@@ -248,6 +248,7 @@ export function TabBar({
     { id: "tasks", label: "Tasks", icon: "CheckSquare" },
     { id: "seats", label: "Seats & Models", icon: "Cpu" },
     { id: "timeline", label: "Timeline & Retro", icon: "Activity" },
+    { id: "vault", label: "Vault", icon: "Shield" },
     { id: "plugins", label: "Plugins", icon: "Blocks" },
   ];
   return (
