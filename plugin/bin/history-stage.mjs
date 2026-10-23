@@ -72,7 +72,12 @@ function needsHumanEvidenceIsValid(evidence, reason) {
 function isValidLedgerEvent(value) {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const event = value;
-  return (event.schema_version === void 0 || event.schema_version === 1 || event.schema_version === 2) && (event.schema_version !== 2 || identityMetadataIsValid(event)) && Number.isSafeInteger(event.seq) && event.seq > 0 && typeof event.ts === "string" && typeof event.event === "string" && EVENT_NAMES.includes(event.event) && shapeIsValid(value) && (event.schema_version !== 2 || v2PayloadIsValid(event));
+  return (event.schema_version === void 0 || event.schema_version === 1 || event.schema_version === 2) && (event.schema_version !== 2 || identityMetadataIsValid(event)) && Number.isSafeInteger(event.seq) && event.seq > 0 && typeof event.ts === "string" && (event.schema_version !== 2 || utcTimestampIsValid(event.ts)) && typeof event.event === "string" && EVENT_NAMES.includes(event.event) && shapeIsValid(value) && (event.schema_version !== 2 || v2PayloadIsValid(event));
+}
+function utcTimestampIsValid(value) {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|\+00:?00)$/.test(value)) return false;
+  const instant = new Date(value);
+  return Number.isFinite(instant.getTime()) && instant.toISOString().slice(0, 19) === value.slice(0, 19);
 }
 function nonempty(value) {
   return typeof value === "string" && value.trim() !== "";
@@ -113,6 +118,8 @@ function parseLedgerJsonl(raw, options = {}) {
     } catch {
       return { corrupt: `line ${at} is not valid JSON` };
     }
+    const timestamped = value;
+    if (timestamped !== null && typeof timestamped === "object" && timestamped.schema_version === 2 && (typeof timestamped.ts !== "string" || !utcTimestampIsValid(timestamped.ts))) return { corrupt: `line ${at} has an invalid ISO 8601 UTC timestamp` };
     if (!isValidLedgerEvent(value) || value.seq <= previousSeq || options.validateEvent !== void 0 && !options.validateEvent(value)) {
       return { corrupt: `line ${at} is not a valid ledger event` };
     }
@@ -736,14 +743,29 @@ function loadImportManifest(target, id) {
   if (manifest.version !== 1 || manifest.id !== id || historyTargetPath(manifest.target) !== historyTargetPath(target) || !Array.isArray(manifest.sources) || !["staged", "pending", "applied", "conflicted"].includes(manifest.status)) {
     throw new FactoryError("invalid-import", `damaged import manifest ${id}`);
   }
+  if (manifest.materialization !== void 0 && (typeof manifest.materialization !== "object" || manifest.materialization === null || !["pending", "applied", "refused"].includes(manifest.materialization.status) || !Array.isArray(manifest.materialization.diagnostics) || !manifest.materialization.diagnostics.every((line) => typeof line === "string"))) throw new FactoryError("invalid-import", `damaged materialization hold ${id}`);
+  if (manifest.materialization !== void 0 && manifest.materialization.status !== "applied") {
+    for (const status of ["applied", "refused"]) {
+      let outcome;
+      try {
+        outcome = JSON.parse(readFileSync(join(importDirectory(target, id), `materialization-${status}.json`), "utf8"));
+      } catch (error) {
+        if (error.code === "ENOENT") continue;
+        throw new FactoryError("invalid-import", `damaged materialization outcome ${id}`);
+      }
+      if (outcome.status !== status || !Array.isArray(outcome.diagnostics) || !outcome.diagnostics.every((line) => typeof line === "string")) throw new FactoryError("invalid-import", `damaged materialization outcome ${id}`);
+      manifest.materialization = outcome;
+      break;
+    }
+  }
   return manifest;
 }
 function importSources(manifest) {
   return manifest.sources.map((source) => ({ ...source, bytes: Buffer.from(source.bytes, "base64"), artifacts: source.artifacts.map((file) => ({ path: file.path, bytes: Buffer.from(file.bytes, "base64") })) }));
 }
 function publicImportStatus(manifest) {
-  const { id, target, status, added, duplicates, conflicts, diagnostics } = manifest;
-  return { id, target, status, ...added === void 0 ? {} : { added }, ...duplicates === void 0 ? {} : { duplicates }, ...conflicts === void 0 ? {} : { conflicts }, diagnostics };
+  const { id, target, status, added, duplicates, conflicts, diagnostics, materialization } = manifest;
+  return { id, target, status, ...materialization === void 0 ? {} : { materialization }, ...added === void 0 ? {} : { added }, ...duplicates === void 0 ? {} : { duplicates }, ...conflicts === void 0 ? {} : { conflicts }, diagnostics };
 }
 function readLedgerImports(target) {
   let entries;
@@ -755,7 +777,7 @@ function readLedgerImports(target) {
   }
   return entries.filter((id) => /^[a-f0-9]{64}$/.test(id) && existsSync(join(importDirectory(target, id), "manifest.json"))).sort().map((id) => publicImportStatus(loadImportManifest(target, id)));
 }
-function stageLedgerImport(targetPath, sources) {
+function stageLedgerImport(targetPath, sources, options = {}) {
   const target = historyTargetPath(targetPath);
   const id = planHistoryImport({ existingLines: "", sources }).id;
   const destination = importDirectory(target, id);
@@ -771,7 +793,7 @@ function stageLedgerImport(targetPath, sources) {
       });
       return { ...source, bytes: bytes.toString("base64"), artifacts };
     });
-    const manifest = { version: 1, id, target, status: "pending", sources: stored, createdAt: (/* @__PURE__ */ new Date()).toISOString(), diagnostics: ["snapshot fetched and staged; Ledger owner admission pending"] };
+    const manifest = { version: 1, id, target, status: "pending", ...options.materialization === void 0 ? {} : { materialization: options.materialization }, sources: stored, createdAt: (/* @__PURE__ */ new Date()).toISOString(), diagnostics: ["snapshot fetched and staged; Ledger owner admission pending"] };
     writeDurableFile(join(dir, "manifest.json"), `${JSON.stringify(manifest)}
 `);
     try {
@@ -784,6 +806,15 @@ function stageLedgerImport(targetPath, sources) {
   }
   listeners.get(target)?.();
   return publicImportStatus(loadImportManifest(target, id));
+}
+function updateImportMaterialization(imports, materialization) {
+  for (const item of imports) {
+    const manifest = loadImportManifest(item.target, item.id);
+    if (manifest.status === "applied" || manifest.materialization === void 0 || manifest.materialization.status === "applied") continue;
+    const path = join(importDirectory(item.target, item.id), `materialization-${materialization.status}.json`);
+    writeDurableFile(path, JSON.stringify(materialization) + "\n");
+    listeners.get(historyTargetPath(item.target))?.();
+  }
 }
 export {
   fsyncDirectory,
@@ -798,5 +829,6 @@ export {
   readLedgerImports,
   saveImportManifest,
   stageLedgerImport,
+  updateImportMaterialization,
   writeDurableFile
 };

@@ -893,7 +893,7 @@ export function startGitBlockIngestion(factory: Factory, options: GitBlockOption
 
   const ingest = (): void => {
     try { factory.history.runSync(ingestAdmitted); }
-    catch (error) { if (!(error instanceof Error) || !("code" in error) || error.code !== "history-maintenance-busy") throw error; }
+    catch (error) { if (!(error instanceof Error) || !("code" in error) || !["history-maintenance-busy", "upgrade-recovery-required"].includes(String(error.code))) throw error; }
   };
   const timer = setInterval(ingest, options.pollMs ?? 250);
   ingest();

@@ -1,3 +1,5 @@
+import { recordUpgradeControlReceipt } from "./core/history-upgrade.ts";
+import { pendingUpgradeFor } from "./core/upgrade-state.ts";
 import { upgradeFactory, upgradeReply, recordUpgradeControlReply } from "./core/history-upgrade.ts";
 import type { UpgradeInput, UpgradeResult, UpgradePreflight } from "./core/history-upgrade.ts";
 /**
@@ -23,7 +25,7 @@ import type { UpgradeInput, UpgradeResult, UpgradePreflight } from "./core/histo
  */
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { FactoryError } from "./core/errors.ts";
 import { usageIsValid } from "./core/ledger.ts";
 import { needsHumanEvidenceIsValid, NEEDS_HUMAN_REASONS } from "./core/events.ts";
@@ -1430,6 +1432,8 @@ export interface SpoolOptions {
   onLog?: (message: string) => void;
   /** Reply poll cadence for the drain loop. Default 250ms. */
   pollMs?: number;
+  /** Recovery/read controls remain live until ordinary startup has completed. */
+  ordinaryReady?: () => boolean;
   /** The choke's synthetic-ask handler (v0.0.4); without it `ask` requests are refused. */
   ask?: AskHandler;
   /** The Lead-rotation handler (v0.0.14); without it `lead_rotate` requests are refused. */
@@ -1480,9 +1484,12 @@ export function startSpool(stateDir: string, factory: Factory, options: SpoolOpt
   const requestsDir = join(root, "requests");
   const repliesDir = join(root, "replies");
   const processedDir = join(root, "processed");
-  mkdirSync(requestsDir, { recursive: true });
-  mkdirSync(repliesDir, { recursive: true });
-  mkdirSync(processedDir, { recursive: true });
+  const ensureDirectories = () => {
+    mkdirSync(requestsDir, { recursive: true });
+    mkdirSync(repliesDir, { recursive: true });
+    mkdirSync(processedDir, { recursive: true });
+  };
+  if (pendingUpgradeFor(stateDir) === undefined) ensureDirectories();
 
   const log = options.onLog ?? (() => {});
   const inFlight = new Set<string>();
@@ -1535,11 +1542,20 @@ export function startSpool(stateDir: string, factory: Factory, options: SpoolOpt
 
   const drain = (): void => {
     if (factory.history.maintenanceActive) return;
+    const recovering = pendingUpgradeFor(stateDir) !== undefined || options.ordinaryReady?.() === false;
+    if (!recovering) ensureDirectories();
+    if (!existsSync(requestsDir)) return;
     for (const name of readdirSync(requestsDir).sort()) {
       if (!name.endsWith(".json")) continue;
       const id = name.slice(0, -".json".length);
       if (inFlight.has(id)) continue;
       const requestPath = join(requestsDir, name);
+      // Recovery controls remain reachable; unrelated queued work keeps its
+      // exact request/reply/processed state until ordinary admission resumes.
+      if (recovering) {
+        try { if (JSON.parse(readFileSync(requestPath, "utf8")).kind !== "upgrade") continue; }
+        catch { continue; }
+      }
       const replyPath = join(repliesDir, name);
       if (existsSync(replyPath)) {
         // Already answered (retried or replayed request): pass it along, run nothing.
@@ -1616,6 +1632,16 @@ async function handleAdmittedRequestFile(
 ): Promise<void> {
   let reply: SpoolReply;
   let request: SpoolRequest | undefined;
+  const recovering = pendingUpgradeFor(factory.stateDir);
+  let recoveryControl = false;
+  if (recovering !== undefined) {
+    try {
+      if (JSON.parse(readFileSync(requestPath, "utf8")).kind === "upgrade") {
+        recordUpgradeControlReceipt(factory.stateDir, recovering, id);
+        recoveryControl = true;
+      }
+    } catch { /* unverified controls remain ordinary inventory; never forgive their bytes */ }
+  }
   try {
     request = parseSpoolRequest(JSON.parse(readFileSync(requestPath, "utf8")));
   } catch {
@@ -1636,9 +1662,13 @@ async function handleAdmittedRequestFile(
         : `request ${id}: ${request.kind}${"task" in request ? ` ${request.task}` : ""}${stamp} → ${reply.ok ? (reply.decision ?? "ok") : `rejected (${reply.code})`}`,
     );
   }
-  if (request?.kind === "upgrade") {
-    const transaction = reply.ok && reply.upgrade !== undefined && "id" in reply.upgrade ? reply.upgrade.id : request.transactionId;
-    if (transaction !== undefined) { try { recordUpgradeControlReply(factory.stateDir, transaction, request.id, reply); } catch { /* preserve the primary reply and fail closed on unknown journal transitions */ } }
+  if (request?.kind === "upgrade" || recoveryControl) {
+    const transaction = recoveryControl ? recovering : reply.ok && reply.upgrade !== undefined && "id" in reply.upgrade ? reply.upgrade.id : request?.kind === "upgrade" ? request.transactionId : undefined;
+    if (transaction !== undefined) { try { recordUpgradeControlReply(factory.stateDir, transaction, id, reply); } catch { /* preserve the primary reply and fail closed on unknown journal transitions */ } }
+  }
+  if (recoveryControl) {
+    mkdirSync(dirname(replyPath), { recursive: true });
+    mkdirSync(dirname(processedPath), { recursive: true });
   }
   writeJsonAtomic(replyPath, reply);
   renameSync(requestPath, processedPath);

@@ -1,13 +1,15 @@
 import { FactoryError } from "./errors.ts";
 import { LedgerAdmission } from "./history-admission.ts";
-import type { ImportStatus } from "./history-stage.ts";
-import { loadVaultConfig, stampVaultConfig, nowIso, requiredVaultConfig, vaultStateDir, saveVaultConfig } from "./vault-config.ts";
+import { updateImportMaterialization } from "./history-stage.ts";
+import type { ImportMaterialization, ImportStatus } from "./history-stage.ts";
+import type { VaultConfig } from "./vault-config.ts";
+import { loadVaultConfig, stampVaultConfig, nowIso, requiredVaultConfig, vaultStateDir, saveVaultConfig, withConfigDefaults } from "./vault-config.ts";
 import { resolveVaultPassphrase, unsealVaultBuffer, stageRuntimeFileIntoCheckout } from "./vault-envelope.ts";
-import { snapshotVaultLedger, refreshVaultImports, reconcileVaultLedgerState, listDirNames } from "./vault-history.ts";
-import { writeRuntimeFile, applyVaultHydration, hydrateRuntimeFromTree, collectLocalStateIntoRuntime, walkFiles, resolveVaultApps, readVaultManifestAt } from "./vault-materialization.ts";
+import { snapshotVaultLedger, refreshVaultImports, stageFetchedVaultHistory, listDirNames } from "./vault-history.ts";
+import { writeRuntimeFile, applyVaultHydration, assertSafeVaultPath, collectLocalStateIntoRuntime, walkFiles, resolveVaultApps, readVaultManifestAt } from "./vault-materialization.ts";
 import { githubRepoSlug, builtinVaultRunner, parseTarEntries, vaultPathFromArchivePath, isEmptyOrUnbornPullError, ensureVaultCheckout, probeGhAuth, ensureRemoteVaultRepo } from "./vault-transport.ts";
 import type { VaultRunner } from "./vault-transport.ts";
-import { existsSync, mkdirSync, copyFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { gunzipSync } from "node:zlib";
 
@@ -19,7 +21,7 @@ export type { VaultStatusView } from "./vault-config.ts";
 export { sealVaultBuffer } from "./vault-envelope.ts";
 export { unsealVaultBuffer } from "./vault-envelope.ts";
 export { loadVaultConfig } from "./vault-config.ts";
-export { saveVaultConfig } from "./vault-config.ts";
+export { saveVaultConfig, withConfigDefaults } from "./vault-config.ts";
 export { readVaultStatus } from "./vault-config.ts";
 export type { VaultRunnerCall } from "./vault-transport.ts";
 export type { VaultRunner } from "./vault-transport.ts";
@@ -95,6 +97,7 @@ export interface SyncVaultOptions extends VaultTransportOptions {
 }
 
 export interface SyncVaultResult {
+  materialization?: ImportMaterialization;
   historyImports?: ImportStatus[];
   createdRepo: boolean;
   repo: string;
@@ -128,6 +131,7 @@ export interface ImportVaultSecretsResult {
 }
 
 export interface VaultHydrationResult {
+  materialization?: ImportMaterialization;
   historyImports?: ImportStatus[];
   repo?: string;
   ref?: string;
@@ -168,21 +172,15 @@ export async function hydrateVaultDirect(paseoHome: string, options: HydrateVaul
   const tarball = await runner({ command: "gh", args: ["api", `repos/${slug}/tarball/${ref}`], env });
   const archive = tarball.length > 2 && tarball[0] === 0x1f && tarball[1] === 0x8b ? gunzipSync(tarball) : tarball;
 
-  return LedgerAdmission.withStateMaintenance(vaultStateDir(paseoHome), () => {
-    const passphrase = resolveVaultPassphrase(config?.passphrase);
-    const hydratedFiles: string[] = [];
-    for (const entry of parseTarEntries(archive)) {
-      const vaultPath = vaultPathFromArchivePath(entry.path);
-      if (vaultPath === null) continue;
-      writeRuntimeFile(paseoHome, vaultPath, unsealVaultBuffer(entry.data, passphrase));
-      hydratedFiles.push(vaultPath);
-    }
+  const files = new Map<string, Buffer>();
+  for (const entry of parseTarEntries(archive)) {
+    const path = vaultPathFromArchivePath(entry.path);
+    if (path === null) continue;
+    assertSafeVaultPath(path);
+    files.set(path, unsealVaultBuffer(entry.data, resolveVaultPassphrase(config?.passphrase)));
+  }
+  return { repo, ref, ...await materializeFetchedVault(paseoHome, files, options, () => stampVaultConfig(paseoHome, config, repo, { lastHydratedAt: nowIso(), lastHydrateMode: "direct" })) };
 
-    applyVaultHydration(paseoHome, options.overwriteConfigs ?? false);
-    const historyImports = options.mergeLedgers === true ? reconcileVaultLedgerState(paseoHome) : [];
-    stampVaultConfig(paseoHome, config, repo, { lastHydratedAt: nowIso(), lastHydrateMode: "direct" });
-    return { repo, ref, hydratedFiles: hydratedFiles.sort(), historyImports };
-  }).then((result) => ({ ...result, historyImports: refreshVaultImports(result.historyImports) }));
 }
 
 /**
@@ -193,7 +191,10 @@ export async function hydrateVaultDirect(paseoHome: string, options: HydrateVaul
  * `lastHydrateMode: "sync"`.
  */
 export async function pullVault(paseoHome: string, options: PullVaultOptions = {}): Promise<VaultHydrationResult> {
-  const config = requiredVaultConfig(paseoHome);
+  return pullConfiguredVault(paseoHome, requiredVaultConfig(paseoHome), options);
+}
+
+async function pullConfiguredVault(paseoHome: string, config: VaultConfig, options: PullVaultOptions, configure = false): Promise<VaultHydrationResult> {
   const runner = options.runner ?? builtinVaultRunner;
   const vaultDir = join(paseoHome, "vault");
 
@@ -212,13 +213,16 @@ export async function pullVault(paseoHome: string, options: PullVaultOptions = {
     await ensureVaultCheckout(runner, config, vaultDir);
   }
 
-  return LedgerAdmission.withStateMaintenance(vaultStateDir(paseoHome), () => {
-    const hydratedFiles = hydrateRuntimeFromTree(paseoHome, vaultDir, resolveVaultPassphrase(config.passphrase));
-    applyVaultHydration(paseoHome, options.overwriteConfigs ?? false);
-    const historyImports = options.mergeLedgers === true ? reconcileVaultLedgerState(paseoHome) : [];
+  const files = new Map<string, Buffer>();
+  for (const path of walkFiles(vaultDir, () => false)) {
+    assertSafeVaultPath(path);
+    files.set(path, unsealVaultBuffer(readFileSync(join(vaultDir, path)), resolveVaultPassphrase(config.passphrase)));
+  }
+  return materializeFetchedVault(paseoHome, files, options, () => {
+    if (configure) saveVaultConfig(paseoHome, config);
     stampVaultConfig(paseoHome, config, config.repo, { lastHydratedAt: nowIso(), lastHydrateMode: "sync" });
-    return { hydratedFiles, historyImports };
-  }).then((result) => ({ ...result, historyImports: refreshVaultImports(result.historyImports) }));
+  });
+
 }
 
 /**
@@ -320,7 +324,7 @@ export async function syncVault(paseoHome: string, options: SyncVaultOptions = {
   const ensured = await ensureRemoteVaultRepo(repo, options.runner);
   repo = ensured.repo;
 
-  saveVaultConfig(paseoHome, {
+  const desired = withConfigDefaults({
     repo,
     branch,
     ...(existing?.nodeId === undefined ? {} : { nodeId: existing.nodeId }),
@@ -330,26 +334,27 @@ export async function syncVault(paseoHome: string, options: SyncVaultOptions = {
     ...(existing?.lastPushedAt === undefined ? {} : { lastPushedAt: existing.lastPushedAt }),
   });
 
-  const pullResult = await pullVault(paseoHome, {
+  const pullResult = await pullConfiguredVault(paseoHome, desired, {
     mergeLedgers: options.mergeLedgers ?? true,
     overwriteConfigs: options.overwriteConfigs ?? false,
     runner: options.runner,
-  });
+  }, true);
 
-  const pushResult = await pushVault(paseoHome, {
+  const pushResult = pullResult.materialization?.status === "refused" ? { pushedFiles: [], pushed: false } : await pushVault(paseoHome, {
     includeLedger: options.includeLedger ?? true,
     runner: options.runner,
   });
 
   const createdNote = ensured.created ? `created private repo ${repo}; ` : "";
-  const pushNote = pushResult.pushed
+  const pushNote = pullResult.materialization?.status === "refused" ? "push deferred until materialization" : pushResult.pushed
     ? `pushed ${pushResult.pushedFiles.length} file(s)`
     : `up to date (${pushResult.pushedFiles.length} file(s) tracked)`;
-  const summary = `Vault synced with ${repo} (${branch}): ${createdNote}hydrated ${pullResult.hydratedFiles.length} file(s), ${pushNote}; history ${(pullResult.historyImports ?? []).map((item) => item.status).join(", ") || "not requested"}.`;
+  const summary = `Vault ${pullResult.materialization?.status === "refused" ? "fetched from" : "synced with"} ${repo} (${branch}): ${createdNote}hydrated ${pullResult.hydratedFiles.length} file(s), ${pushNote}; history ${(pullResult.historyImports ?? []).map((item) => item.status).join(", ") || "not requested"}; materialization ${pullResult.materialization?.status ?? "applied"}.`;
 
   return {
     createdRepo: ensured.created,
     historyImports: pullResult.historyImports,
+    materialization: pullResult.materialization,
     repo,
     branch,
     hydratedFiles: pullResult.hydratedFiles,
@@ -357,4 +362,23 @@ export async function syncVault(paseoHome: string, options: SyncVaultOptions = {
     pushed: pushResult.pushed,
     summary,
   };
+}
+
+/** Fetch/staging is independent; this lease covers only associated local mutations. */
+async function materializeFetchedVault(paseoHome: string, files: ReadonlyMap<string, Buffer>, options: Pick<HydrateVaultDirectOptions, "mergeLedgers" | "overwriteConfigs">, stamp: () => void): Promise<VaultHydrationResult> {
+  const historyImports = options.mergeLedgers === true ? stageFetchedVaultHistory(paseoHome, files) : [];
+  try {
+    await LedgerAdmission.withStateMaintenance(vaultStateDir(paseoHome), () => {
+      for (const [path, bytes] of files) writeRuntimeFile(paseoHome, path, bytes);
+      applyVaultHydration(paseoHome, options.overwriteConfigs ?? false);
+      stamp();
+      updateImportMaterialization(historyImports, { status: "applied", diagnostics: ["associated Vault files materialized by the owner maintenance boundary"] });
+    });
+    return { hydratedFiles: [...files.keys()].sort(), historyImports: refreshVaultImports(historyImports), materialization: { status: "applied", diagnostics: [] } };
+  } catch (error) {
+    const materialization: ImportMaterialization = { status: "refused", diagnostics: [error instanceof Error ? error.message : String(error)] };
+    updateImportMaterialization(historyImports, materialization);
+    if (!(error instanceof FactoryError) || !["vault-owner-required", "upgrade-recovery-required"].includes(error.code) || historyImports.length === 0) throw error;
+    return { hydratedFiles: [], historyImports: refreshVaultImports(historyImports), materialization };
+  }
 }

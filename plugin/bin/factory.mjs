@@ -845,7 +845,7 @@ if (command === "vault") {
         ...(values["merge-ledgers"] ? { mergeLedgers: true } : {}),
         ...(values["overwrite-configs"] ? { overwriteConfigs: true } : {}),
       });
-      await writeJsonAndExit({ ok: true, mode: "direct", repo: result.repo, ref: result.ref, hydratedFiles: result.hydratedFiles, historyImports: result.historyImports, vault: vault.readVaultStatus(home) });
+      await writeJsonAndExit({ ok: true, mode: "direct", repo: result.repo, ref: result.ref, hydratedFiles: result.hydratedFiles, historyImports: result.historyImports, materialization: result.materialization, vault: vault.readVaultStatus(home) });
     }
 
     if (sub === "pull") {
@@ -855,7 +855,7 @@ if (command === "vault") {
         ...(values["merge-ledgers"] ? { mergeLedgers: true } : {}),
         ...(values["overwrite-configs"] ? { overwriteConfigs: true } : {}),
       });
-      await writeJsonAndExit({ ok: true, mode: "sync", hydratedFiles: result.hydratedFiles, historyImports: result.historyImports, vault: vault.readVaultStatus(home) });
+      await writeJsonAndExit({ ok: true, mode: "sync", hydratedFiles: result.hydratedFiles, historyImports: result.historyImports, materialization: result.materialization, vault: vault.readVaultStatus(home) });
     }
 
     if (sub === "push") {
@@ -915,7 +915,7 @@ if (command === "vault") {
           : {}),
         ...(values["no-sync"] ? { syncAfterImport: false } : {}),
       });
-      await writeJsonAndExit({ ok: true, ...result, pushed: result.synced?.pushed ?? false, vault: vault.readVaultStatus(home) });
+      await writeJsonAndExit({ ok: true, ...result, materialization: result.synced?.materialization, pushed: result.synced?.pushed ?? false, vault: vault.readVaultStatus(home) });
     }
 
     if (sub === "seal") {

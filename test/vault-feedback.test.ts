@@ -26,3 +26,12 @@ test("delayed pending poll/action responses cannot overwrite newer applied admis
   assert.equal(visible, "applied");
   order.invalidate(); assert.equal(order.current(newer), false);
 });
+
+test("associated-file refusal remains a warning even when history is absent or already applied", () => {
+  const materialization = { status: "refused" as const, diagnostics: ["use the Owner Vault RPC to materialize local files"] };
+  for (const historyImports of [undefined, [{ id: "admitted", target: "/state/ledger.jsonl", status: "applied" as const, diagnostics: [] }]]) {
+    const feedback = actionFeedback({ summary: "history fetched", materialization, historyImports });
+    assert.equal(feedback.tone, "statusWarning");
+    assert.match(feedback.text, /Owner Vault RPC/);
+  }
+});

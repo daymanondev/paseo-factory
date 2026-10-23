@@ -134,7 +134,7 @@ export class LedgerAdmission {
     const id = pendingUpgradeFor(this.stateDir);
     if (id !== undefined) throw new FactoryError("upgrade-recovery-required", `Upgrade ${id} is incomplete; resume or inspect maintenance before ordinary mutations`);
   }
-  #pending(): boolean { return [this.ledger.path, ...this.#projectTargets()].some((path) => readLedgerImports(path).some((item) => item.status === "pending" || item.status === "staged")); }
+  #pending(): boolean { return [this.ledger.path, ...this.#projectTargets()].some((path) => readLedgerImports(path).some((item) => (item.status === "pending" || item.status === "staged") && (item.materialization === undefined || item.materialization.status === "applied"))); }
   #wake(): void { for (const wake of this.#waiters) wake(); this.#waiters.clear(); }
   async #waitUntil(predicate: () => boolean): Promise<void> {
     while (!predicate()) await new Promise<void>((done) => this.#waiters.add(done));
@@ -217,6 +217,7 @@ export class LedgerAdmission {
       for (const status of this.status()) {
         if (status.status !== "pending" && status.status !== "staged") continue;
         const manifest = loadImportManifest(this.ledger.path, status.id);
+        if (manifest.materialization !== undefined && manifest.materialization.status !== "applied") continue;
         const current = this.#raw();
         if (manifest.afterHash !== undefined && historyHash(current) === manifest.afterHash) {
           // Activation survived a crash before the applied stamp. The opened
@@ -265,7 +266,7 @@ export class LedgerAdmission {
       }
       this.#error = undefined;
       for (const path of this.#projectTargets()) {
-        if (!readLedgerImports(path).some((item) => item.status === "pending" || item.status === "staged")) continue;
+        if (!readLedgerImports(path).some((item) => (item.status === "pending" || item.status === "staged") && (item.materialization === undefined || item.materialization.status === "applied"))) continue;
         const owner = this.#projectOwner(basename(dirname(path)));
         owner.drain();
         if (owner.error !== undefined) this.#error = owner.error;

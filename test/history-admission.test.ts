@@ -354,3 +354,33 @@ for (const omitted of ["start", "log"] as const) test(`owner retains imported gr
   assert.match(JSON.stringify(reply), omitted === "start" ? /Gate start/ : /output log/);
   assert.equal(readFileSync(factory.ledger.path, "utf8"), before);
 });
+
+test("a delayed external materialization refusal cannot replace the live writer's applied history decision", { timeout: 10_000 }, async (t) => {
+  const { factory, sources, dir } = fixture(t);
+  const { stageLedgerImport, updateImportMaterialization } = await import("../src/history-stage.ts");
+  const { spawn } = await import("node:child_process");
+  const batch = stageLedgerImport(factory.ledger.path, sources, { materialization: { status: "pending", diagnostics: [] } });
+  const paused = join(dir, "refusal-paused"), release = join(dir, "refusal-release");
+  const moduleUrl = new URL("../plugin/bin/history-stage.mjs", import.meta.url).href;
+  // Pause the external actor at its filesystem read boundary after retaining
+  // an old status snapshot, then allow the actual writer to admit the batch.
+  const script = `import fs from 'node:fs';import{syncBuiltinESMExports}from'node:module';import{updateImportMaterialization}from ${JSON.stringify(moduleUrl)};const read=fs.readFileSync;let paused=false;fs.readFileSync=function(path,...args){const value=read.call(this,path,...args);if(!paused&&String(path).endsWith('/manifest.json')){paused=true;fs.writeFileSync(${JSON.stringify(paused)},'ready');while(!fs.existsSync(${JSON.stringify(release)}))Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10);}return value};syncBuiltinESMExports();updateImportMaterialization(${JSON.stringify([batch])},{status:'refused',diagnostics:['external owner refusal']});`;
+  const child = spawn(process.execPath, ["--input-type=module", "-e", script], { stdio: ["ignore", "pipe", "pipe"] });
+  let stderr = ""; child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+  const exited = new Promise<void>((done, reject) => { child.on("error", reject); child.on("close", (code) => code === 0 ? done() : reject(new Error(stderr))); });
+  t.after(() => { child.kill(); factory.history.stop(); });
+  try {
+    const { existsSync } = await import("node:fs");
+    const deadline = Date.now() + 5000;
+    while (!existsSync(paused)) { assert.ok(Date.now() < deadline, stderr || "external status read reached"); await new Promise((done) => setTimeout(done, 10)); }
+    await factory.history.withExclusiveMaintenance(() => updateImportMaterialization([batch], { status: "applied", diagnostics: [] }));
+    assert.equal(factory.history.status()[0]?.status, "applied");
+    assert.ok(factory.contractFor("REMOTE"));
+  } finally { writeFileSync(release, "continue"); }
+  await exited;
+  assert.equal(factory.history.status()[0]?.status, "applied");
+  assert.equal(factory.history.status()[0]?.materialization?.status, "applied");
+  factory.history.drain();
+  assert.equal(factory.history.status()[0]?.status, "applied");
+  assert.equal(factory.ledger.events.filter((event) => event.event === "contract_set" && event.task === "REMOTE").length, 1);
+});

@@ -14,6 +14,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
+import { pendingUpgradeFor } from "./server/core/upgrade-state.ts";
 import { createFactory } from "./server/core/factory.ts";
 import { ensureFactoryBinScripts } from "./server/core/agy-home.ts";
 import { PLUGIN_ID, pluginDirFor, resolvePaseoHome, stateDirFor } from "./server/paths.ts";
@@ -64,57 +65,66 @@ export default function contribute(server: PluginServerContext) {
     log(`recovered on open: attempt ${attempt} of task ${task} closed red — interrupted by a restart`);
   }
 
-  if (pluginDir === undefined) {
-    ensureFactoryBinScripts(stateDir);
-    log(`up v${SHELL_VERSION} — WARNING: plugin directory not recorded in ${home}/config.json; ` +
-      `factory-claim and the git shim cannot be put on agent PATHs until the plugin is installed from a directory`);
-  } else {
-    ensureClaimCli(stateDir, pluginDir, process.execPath);
-    ensureGitShim(stateDir, pluginDir, process.execPath);
-    ensureFactoryBinScripts(stateDir, pluginDir);
-    log(`up v${SHELL_VERSION} — state ${stateDir}, plugin ${pluginDir}, claim CLI + git shim ${claimCliBinDir(stateDir)}`);
-  }
+  let booted = false;
+  const initializeOrdinaryRuntime = (): void => {
+    if (booted || pendingUpgradeFor(stateDir) !== undefined) return;
+    factory.history.runSync(() => {
+      if (pluginDir === undefined) {
+        ensureFactoryBinScripts(stateDir);
+        log(`up v${SHELL_VERSION} — WARNING: plugin directory not recorded in ${home}/config.json; ` +
+          `factory-claim and the git shim cannot be put on agent PATHs until the plugin is installed from a directory`);
+      } else {
+        ensureClaimCli(stateDir, pluginDir, process.execPath);
+        ensureGitShim(stateDir, pluginDir, process.execPath);
+        ensureFactoryBinScripts(stateDir, pluginDir);
+        log(`up v${SHELL_VERSION} — state ${stateDir}, plugin ${pluginDir}, claim CLI + git shim ${claimCliBinDir(stateDir)}`);
+      }
 
-  // The global `/factory` skill (v0.0.20, ADR 0013 §3; v0.0.23, ADR 0015 §5):
-  // reconcile both `~/.agents/skills/factory/SKILL.md` (pi / opencode) and
-  // `~/.claude/skills/factory/SKILL.md` (claude) at boot so the Owner can type
-  // `/factory <directive>` in any session and bootstrap or dispatch into the
-  // Project's SLP loop via `factory supervisor dispatch`. The skill carries
-  // this install's exact factory CLI invocation (the seats' `factoryCmd`
-  // precedent) but never a `--home` — the file is global across daemons, so
-  // the body names the default-home law and the override instead. The SAFE
-  // door: unlike the stateDir writes above, `~/.agents` and `~/.claude` are
-  // operator-global and not preconditions the plugin depends on, so an
-  // unwritable skills root warns and the boot continues (choke, spool,
-  // mailbox runtime) — a skill never kills a boot.
-  const quoted = (value: string) => (/\s/.test(value) ? `"${value}"` : value);
-  const runner = /Paseo Helper/i.test(process.execPath) ? `ELECTRON_RUN_AS_NODE=1 ${quoted(process.execPath)}` : quoted(process.execPath);
-  const factoryCmd = pluginDir === undefined ? "factory" : `${runner} ${quoted(join(pluginDir, "bin", "factory.mjs"))}`;
-  for (const skillsRoot of [join(homedir(), ".agents", "skills"), join(homedir(), ".claude", "skills")]) {
-    const skillPath = ensureFactorySkillSafe(skillsRoot, { factoryCmd }, log);
-    if (skillPath !== null) log(`skill: /factory reconciled at ${skillPath}`);
-  }
+      // The global `/factory` skill (v0.0.20, ADR 0013 §3; v0.0.23, ADR 0015 §5):
+      // reconcile both `~/.agents/skills/factory/SKILL.md` (pi / opencode) and
+      // `~/.claude/skills/factory/SKILL.md` (claude) at boot so the Owner can type
+      // `/factory <directive>` in any session and bootstrap or dispatch into the
+      // Project's SLP loop via `factory supervisor dispatch`. The skill carries
+      // this install's exact factory CLI invocation (the seats' `factoryCmd`
+      // precedent) but never a `--home` — the file is global across daemons, so
+      // the body names the default-home law and the override instead. The SAFE
+      // door: unlike the stateDir writes above, `~/.agents` and `~/.claude` are
+      // operator-global and not preconditions the plugin depends on, so an
+      // unwritable skills root warns and the boot continues (choke, spool,
+      // mailbox runtime) — a skill never kills a boot.
+      const quoted = (value: string) => (/\s/.test(value) ? `"${value}"` : value);
+      const runner = /Paseo Helper/i.test(process.execPath) ? `ELECTRON_RUN_AS_NODE=1 ${quoted(process.execPath)}` : quoted(process.execPath);
+      const factoryCmd = pluginDir === undefined ? "factory" : `${runner} ${quoted(join(pluginDir, "bin", "factory.mjs"))}`;
+      for (const skillsRoot of [join(homedir(), ".agents", "skills"), join(homedir(), ".claude", "skills")]) {
+        const skillPath = ensureFactorySkillSafe(skillsRoot, { factoryCmd }, log);
+        if (skillPath !== null) log(`skill: /factory reconciled at ${skillPath}`);
+      }
 
-  // The native role providers (v0.0.27, ADR 0017 §1): reconcile
-  // `factory-supervisor`, `factory-lead`, and `factory-peer` plus the single
-  // `Supervisor (Factory)` picker profile into `<home>/config.json at boot —
-  // sweeping the orphaned `sw2-*` leftovers — so Paseo's native New Chat
-  // picker starts a fenced Supervisor with zero custom bootstrap buttons. The
-  // lane table is the machine `lanes.json`, or — when the machine never named
-  // its lanes — the cleanest effective table across the registered projects'
-  // overrides. A broken config.json or lanes.json is a named warning, never
-  // a failed boot (the daemon reload is non-blocking by construction).
-  const bootLanes = effectiveLanesForReconcile(stateDir);
-  if (bootLanes.ok) {
-    const reconciled = reconcilePaseoRoleProviders(home, bootLanes.lanes, { reloadDaemon: reloadDaemonConfigViaWs });
-    if (reconciled.ok) {
-      log(reconciled.changed ? "role providers: <home>/config.json reconciled — daemon reload requested" : "role providers: <home>/config.json already reconciled");
-    } else {
-      log(`role providers: <home>/config.json not reconciled — ${reconciled.reason}`);
-    }
-  } else {
-    log(`role providers: lanes unreadable — ${bootLanes.reason}`);
-  }
+      // The native role providers (v0.0.27, ADR 0017 §1): reconcile
+      // `factory-supervisor`, `factory-lead`, and `factory-peer` plus the single
+      // `Supervisor (Factory)` picker profile into `<home>/config.json at boot —
+      // sweeping the orphaned `sw2-*` leftovers — so Paseo's native New Chat
+      // picker starts a fenced Supervisor with zero custom bootstrap buttons. The
+      // lane table is the machine `lanes.json`, or — when the machine never named
+      // its lanes — the cleanest effective table across the registered projects'
+      // overrides. A broken config.json or lanes.json is a named warning, never
+      // a failed boot (the daemon reload is non-blocking by construction).
+      const bootLanes = effectiveLanesForReconcile(stateDir);
+      if (bootLanes.ok) {
+        const reconciled = reconcilePaseoRoleProviders(home, bootLanes.lanes, { reloadDaemon: reloadDaemonConfigViaWs });
+        if (reconciled.ok) {
+          log(reconciled.changed ? "role providers: <home>/config.json reconciled — daemon reload requested" : "role providers: <home>/config.json already reconciled");
+        } else {
+          log(`role providers: <home>/config.json not reconciled — ${reconciled.reason}`);
+        }
+      } else {
+        log(`role providers: lanes unreadable — ${bootLanes.reason}`);
+      }
+    });
+    booted = true;
+  };
+  initializeOrdinaryRuntime();
+  if (!booted) log(`up v${SHELL_VERSION} — incomplete upgrade; recovery/read entrances available, ordinary startup deferred`);
 
   // The choke (v0.0.4): judge every permit ask from a contracted agent,
   // answer it, and leave one ledger line per judged ask. The permission mode
@@ -123,7 +133,7 @@ export default function contribute(server: PluginServerContext) {
   const choke = createChoke({ factory, homeDir: homedir(), onLog: log });
   const offPermissionAsked = server.on("agent.permission_requested", (event, context) => {
     capturePaseo(context);
-    void choke.onPermissionAsked(event, context.paseo);
+    void choke.onPermissionAsked(event, context.paseo).catch((error) => log(`choke: permission recording deferred — ${String(error)}`));
   });
   const offAgentCreate = server.before("agent.create", ({ request }, context) => factory.history.runOperation(() => {
     capturePaseo(context);
@@ -197,13 +207,22 @@ export default function contribute(server: PluginServerContext) {
     retireLead: (input) => surface.leadRotate(input),
     onLog: log,
   });
-  leadMail.startupRecovery();
-  onPaseoCaptured = () => {
-    void leadMail.pumpAll();
+  let mailRecovered = false;
+  const resumeOrdinaryRuntime = (): void => {
+    if (pendingUpgradeFor(stateDir) !== undefined) return;
+    initializeOrdinaryRuntime();
+    if (!mailRecovered) {
+      leadMail.startupRecovery();
+      mailRecovered = true;
+    }
+    if (paseoApi !== undefined) void leadMail.pumpAll().catch((error) => log(`lead-mailbox: pump deferred — ${String(error)}`));
   };
-  if (paseoApi !== undefined) {
-    void leadMail.pumpAll();
-  }
+  resumeOrdinaryRuntime();
+  onPaseoCaptured = resumeOrdinaryRuntime;
+  const recoveryTimer = setInterval(() => {
+    if (!booted || !mailRecovered) resumeOrdinaryRuntime();
+  }, 100);
+  recoveryTimer.unref?.();
   // The turn boundary (v0.0.20, ADR 0013 §5; v0.0.23, ADR 0015 §3): every
   // `agent.turn_ended` hands the Lead-mailbox runtime the event — it settles
   // the in-flight batch (`mail_acked` on completed, `mail_requeued` otherwise)
@@ -212,9 +231,10 @@ export default function contribute(server: PluginServerContext) {
   // the turn.
   const offTurnEnded = server.on("agent.turn_ended", (event, context) => {
     capturePaseo(context);
-    void leadMail.onLeadTurnEnded({ agentId: event.agent.id, outcome: event.outcome, timeline: event.timeline });
+    void leadMail.onLeadTurnEnded({ agentId: event.agent.id, outcome: event.outcome, timeline: event.timeline }).catch((error) => log(`lead-mailbox: turn settle deferred — ${String(error)}`));
   });
   const spool = startSpool(stateDir, factory, {
+    ordinaryReady: () => booted && mailRecovered,
     onLog: log,
     ask: choke.spoolAskHandler,
     leadRotate: async (request) => {
@@ -306,6 +326,7 @@ export default function contribute(server: PluginServerContext) {
 
   return () => {
     clearTimeout(warmupTimer);
+    clearInterval(recoveryTimer);
     offPermissionAsked();
     offAgentCreate();
     offSessionOpen();

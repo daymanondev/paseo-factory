@@ -172,9 +172,16 @@ function changed(actual: Entry[], expected: Entry[]): string[] {
     return a?.hash !== b?.hash || a?.mode !== b?.mode || a?.kind !== b?.kind;
   });
 }
+/** Recovery may need its control-only service directories on a previously offline state.
+ * Existing directories/modes and every unrelated file remain part of the inventory. */
+function controlDirectory(journal: Journal, path: string, current: Entry[], expected: Entry[]): boolean {
+  return journal.controls.length > 0 && ["spool", "spool/requests", "spool/replies", "spool/processed"].includes(path) && !expected.some((entry) => entry.path === path) && current.some((entry) => entry.path === path && entry.kind === "directory");
+}
+
 function assertInventory(journal: Journal, mixed = false): void {
   const current = inventory(journal.stateDir, journal.projectSlug, journal.controls);
-  const differences = changed(current, mixed ? journal.before : journal.after);
+  const expected = mixed ? journal.before : journal.after;
+  const differences = changed(current, expected).filter((path) => !controlDirectory(journal, path, current, expected));
   const unexpected = mixed ? differences.filter((path) => {
     if (!journal.changes.some((change) => change.path === path)) return true;
     const actual = current.find((entry) => entry.path === path), after = journal.after.find((entry) => entry.path === path);
@@ -210,6 +217,13 @@ function addControl(journal: Journal, id?: string): void {
 export function upgradeReply(id: string, result: UpgradeResult | UpgradePreflight) {
   return { id, ok: true as const, summary: "id" in result ? `Upgrade ${result.id}: ${result.status}` : `Upgrade preflight: ${result.ok ? "ready" : "conflicted"}`, upgrade: result };
 }
+/** Record the exact Owner recovery control even when its requested transaction is refused. */
+export function recordUpgradeControlReceipt(stateDir: string, transactionId: string, id: string): void {
+  const journal = load(stateDir, transactionId);
+  addControl(journal, id);
+  save(journal);
+}
+
 export function recordUpgradeControlReply(stateDir: string, transactionId: string, id: string, reply: unknown): void {
   const journal = load(stateDir, transactionId);
   const control = journal.controls.find((item) => item.id === id);
@@ -276,7 +290,8 @@ export async function upgradeFactory(factory: Factory, input: UpgradeInput, opti
         options.fault?.(`restored:${change.path}`);
       }
       ledger.refreshHistoryFromDisk({ writerId: journal.beforeWriter });
-      const differences = changed(inventory(stateDir, journal.projectSlug, journal.controls), journal.before);
+      const restored = inventory(stateDir, journal.projectSlug, journal.controls);
+      const differences = changed(restored, journal.before).filter((path) => !controlDirectory(journal, path, restored, journal.before));
       if (differences.length > 0) throw new FactoryError("upgrade-restore-mismatch", differences.join(", "));
       journal.phase = "restored"; save(journal); options.fault?.("restored");
     } else if (journal.phase !== "applied" && journal.phase !== "restored") {

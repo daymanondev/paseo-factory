@@ -1785,10 +1785,17 @@ test("an incomplete explicit upgrade blocks Vault configuration and materializat
   const { upgradeFactory } = await import("../src/history-upgrade.ts");
   const factory = createFactory({ stateDir }); t.after(() => factory.history.stop());
   await assert.rejects(upgradeFactory(factory, { action: "apply", transactionId: "11111111-2222-4333-8444-555555555555" }, { fault: (at) => { if (at === "backed-up") throw new Error("interrupted"); } }), /interrupted/);
+  const { readdirSync } = await import("node:fs");
+  const snapshot = (root: string): unknown => readdirSync(root).sort().map((name) => { const path = join(root, name), st = statSync(path); return [name, st.mode & 0o7777, st.isDirectory() ? snapshot(path) : readFileSync(path).toString("base64")]; });
+  const before = snapshot(stateDir);
   assert.throws(() => saveVaultConfig(home, { repo: "owner/vault" }), factoryErrorCode("upgrade-recovery-required"));
-  const tar = buildTarball([{ path: "daymanondev-factory-vault-abc1234/config/lanes.json", data: "{}\n" }]);
-  await assert.rejects(hydrateVaultDirect(home, { repo: "owner/vault", runner: async () => tar }), factoryErrorCode("upgrade-recovery-required"));
+  const tar = buildTarball([{ path: "daymanondev-factory-vault-abc1234/config/lanes.json", data: "{}\n" }, { path: "daymanondev-factory-vault-abc1234/state/nodes/remote/global-ledger.jsonl", data: "retained original\n" }]);
+  await assert.rejects(hydrateVaultDirect(home, { repo: "owner/vault", mergeLedgers: true, runner: async () => tar }), factoryErrorCode("upgrade-recovery-required"));
   assert.equal(existsSync(join(stateDir, "lanes.json")), false);
+  assert.deepEqual(readLedgerImports(factory.ledger.path), []);
+  assert.deepEqual(snapshot(stateDir), before);
+  const resumed = await upgradeFactory(factory, { action: "resume", transactionId: "11111111-2222-4333-8444-555555555555" });
+  assert.ok("status" in resumed); assert.equal(resumed.status, "applied");
 });
 
 test("Vault canonical app routing refuses a Project Ledger alias before staging into another target", async (t) => {
@@ -1818,4 +1825,43 @@ test("secret import reports successful transport with pending history in its exi
   assert.ok(result.importedFiles.includes("secrets/shared/asc-credentials.json"));
   assert.equal(result.synced?.historyImports?.[0]?.status, "pending");
   assert.match(result.summary, /history pending/);
+});
+
+for (const transport of ["direct", "pull"] as const) test(`Vault ${transport} durably stages fetched history while verification holds materialization`, async (t) => {
+  const home = makeTempDir(); disposeDir(t, home);
+  const workspace = join(home, "workspace"); mkdirSync(workspace); writeFileSync(join(workspace, "out"), "artifact"); gitCommitAll(workspace);
+  saveVaultConfig(home, { repo: "owner/vault" });
+  const stateDir = join(home, "plugin-state/paseo-factory");
+  const fence = planLegacyIdentity("", { writerId: "local" }).events.map((event) => JSON.stringify(event) + "\n").join("");
+  writeFileSync(join(stateDir, "ledger.jsonl"), fence);
+  const { createFactory } = await import("../src/factory.ts");
+  const factory = createFactory({ stateDir, writerId: "local" }); t.after(() => factory.history.stop());
+  factory.setContract({ task: "LOCAL", workspace, gate: "true", artifact: "out", scope: ["local"] });
+  const source = planLegacyIdentity(JSON.stringify({ seq: 1, ts: "2026-10-23T00:00:00Z", event: "contract_set", task: "REMOTE", workspace, gate: "true", artifact: "out", scope: ["remote"] }) + "\n", { writerId: "remote" }).events.map((event) => JSON.stringify(event) + "\n").join("");
+  const entries = [{ path: "daymanondev-factory-vault-abc1234/state/nodes/remote/global-ledger.jsonl", data: source }, { path: "daymanondev-factory-vault-abc1234/config/lanes.json", data: "{}\n" }];
+  const tar = buildTarball(entries);
+  if (transport === "pull") {
+    mkdirSync(join(home, "vault/.git"), { recursive: true });
+    for (const entry of entries) { const path = join(home, "vault", entry.path.split("/").slice(1).join("/")); mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, entry.data); }
+  }
+  let release!: () => void, entered!: () => void;
+  const ready = new Promise<void>((done) => { entered = done; }), held = new Promise<void>((done) => { release = done; });
+  const operation = factory.history.runOperation(async () => { entered(); await held; }); await ready;
+  let fetched = false;
+  const runner: VaultRunner = async () => { fetched = true; return transport === "direct" ? tar : Buffer.alloc(0); };
+  const download = transport === "direct" ? hydrateVaultDirect(home, { mergeLedgers: true, runner }) : pullVault(home, { mergeLedgers: true, runner });
+  try {
+    await new Promise(setImmediate);
+    assert.equal(fetched, true);
+    const pending = readLedgerImports(factory.ledger.path);
+    assert.equal(pending[0]?.status, "pending");
+    assert.equal(pending[0]?.materialization?.status, "pending");
+    assert.equal(factory.contractFor("REMOTE"), undefined);
+    assert.equal(existsSync(join(stateDir, "lanes.json")), false);
+  } finally { release(); await operation; }
+  const result = await download;
+  assert.equal(result.materialization?.status, "applied");
+  assert.equal(result.historyImports?.[0]?.status, "applied");
+  assert.equal(factory.contractFor("REMOTE")?.workspace, workspace);
+  assert.equal(readFileSync(join(stateDir, "lanes.json"), "utf8"), "{}\n");
 });

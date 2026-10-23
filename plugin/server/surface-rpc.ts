@@ -1743,7 +1743,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     async vaultHydrate(
       input: { repo?: string; ref?: string; mergeLedgers?: boolean; overwriteConfigs?: boolean },
       _context?: SurfaceCallContext,
-    ): Promise<{ ok: true; vault: VaultStatusView; hydratedFiles: string[]; summary: string; historyImports?: import("./core/history-stage.ts").ImportStatus[] } | { ok: false; code: string; error: string }> {
+    ): Promise<{ ok: true; vault: VaultStatusView; hydratedFiles: string[]; summary: string; materialization?: import("./core/history-stage.ts").ImportMaterialization; historyImports?: import("./core/history-stage.ts").ImportStatus[] } | { ok: false; code: string; error: string }> {
       try {
         const result = await hydrateVaultDirect(deps.home, {
           ...(input.repo === undefined ? {} : { repo: input.repo }),
@@ -1753,9 +1753,9 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           ...vaultRunnerOptions(),
         });
         const vault = await vaultStatusOf();
-        const summary = `Direct hydrate unpacked ${result.hydratedFiles.length} file(s) from ${vault.repo ?? input.repo ?? "vault"}${result.historyImports?.length ? `; history ${result.historyImports.map((item) => item.status).join(", ")}` : ""}.`;
+        const summary = `Direct hydrate unpacked ${result.hydratedFiles.length} file(s) from ${vault.repo ?? input.repo ?? "vault"}${result.historyImports?.length ? `; history ${result.historyImports.map((item) => item.status).join(", ")}` : ""}; materialization ${result.materialization?.status ?? "applied"}.`;
         log(`vault: direct hydrate wrote ${result.hydratedFiles.length} files from the gh api tarball stream (no clone left behind)`);
-        return { ok: true as const, vault, hydratedFiles: result.hydratedFiles, summary, historyImports: result.historyImports };
+        return { ok: true as const, vault, hydratedFiles: result.hydratedFiles, summary, materialization: result.materialization, historyImports: result.historyImports };
       } catch (err) {
         return failure(codeOf(err), messageOf(err));
       }
@@ -1764,16 +1764,16 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     async vaultPull(
       input: { mergeLedgers?: boolean },
       _context?: SurfaceCallContext,
-    ): Promise<{ ok: true; vault: VaultStatusView; hydratedFiles: string[]; summary: string; historyImports?: import("./core/history-stage.ts").ImportStatus[] } | { ok: false; code: string; error: string }> {
+    ): Promise<{ ok: true; vault: VaultStatusView; hydratedFiles: string[]; summary: string; materialization?: import("./core/history-stage.ts").ImportMaterialization; historyImports?: import("./core/history-stage.ts").ImportStatus[] } | { ok: false; code: string; error: string }> {
       try {
         const result = await pullVault(deps.home, {
           ...(input.mergeLedgers === undefined ? {} : { mergeLedgers: input.mergeLedgers }),
           ...vaultRunnerOptions(),
         });
         const vault = await vaultStatusOf();
-        const summary = `Pulled and hydrated ${result.hydratedFiles.length} file(s) from ${vault.repo ?? "vault"}${result.historyImports?.length ? `; history ${result.historyImports.map((item) => item.status).join(", ")}` : ""}.`;
+        const summary = `Pulled and hydrated ${result.hydratedFiles.length} file(s) from ${vault.repo ?? "vault"}${result.historyImports?.length ? `; history ${result.historyImports.map((item) => item.status).join(", ")}` : ""}; materialization ${result.materialization?.status ?? "applied"}.`;
         log(`vault: sync pull hydrated ${result.hydratedFiles.length} files from the cached checkout${input.mergeLedgers === true ? " and staged node history" : ""}`);
-        return { ok: true as const, vault, hydratedFiles: result.hydratedFiles, summary, historyImports: result.historyImports };
+        return { ok: true as const, vault, hydratedFiles: result.hydratedFiles, summary, materialization: result.materialization, historyImports: result.historyImports };
       } catch (err) {
         return failure(codeOf(err), messageOf(err));
       }
@@ -1803,7 +1803,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       input: Omit<SyncVaultOptions, "runner">,
       _context?: SurfaceCallContext,
     ): Promise<
-      | { ok: true; vault: VaultStatusView; createdRepo: boolean; hydratedFiles: string[]; pushedFiles: string[]; pushed: boolean; summary: string; historyImports?: import("./core/history-stage.ts").ImportStatus[] }
+      | { ok: true; vault: VaultStatusView; createdRepo: boolean; hydratedFiles: string[]; pushedFiles: string[]; pushed: boolean; summary: string; materialization?: import("./core/history-stage.ts").ImportMaterialization; historyImports?: import("./core/history-stage.ts").ImportStatus[] }
       | { ok: false; code: string; error: string }
     > {
       try {
@@ -1816,6 +1816,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         return {
           ok: true as const,
           vault,
+          materialization: result.materialization,
           historyImports: result.historyImports,
           createdRepo: result.createdRepo,
           hydratedFiles: result.hydratedFiles,
@@ -1832,7 +1833,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       input: Omit<ImportVaultSecretsInput, "runner">,
       _context?: SurfaceCallContext,
     ): Promise<
-      | { ok: true; vault: VaultStatusView; importedFiles: string[]; pushed: boolean; summary: string; historyImports?: import("./core/history-stage.ts").ImportStatus[] }
+      | { ok: true; vault: VaultStatusView; importedFiles: string[]; pushed: boolean; summary: string; materialization?: import("./core/history-stage.ts").ImportMaterialization; historyImports?: import("./core/history-stage.ts").ImportStatus[] }
       | { ok: false; code: string; error: string }
     > {
       try {
@@ -1845,6 +1846,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         return {
           ok: true as const,
           vault,
+          materialization: result.synced?.materialization,
           historyImports: result.synced?.historyImports,
           importedFiles: result.importedFiles,
           pushed: result.synced?.pushed ?? false,
@@ -1890,7 +1892,7 @@ export function registerSurfaceRpc(
     if (onContext !== undefined) onContext(context);
     return { paseo: context.paseo };
   };
-  server.handle(historyUpgrade, (input) => handlers.historyUpgrade(input));
+  server.handle(historyUpgrade, (input, context) => { pass(context); return handlers.historyUpgrade(input); });
   server.handle(snapshot, (input, context) => handlers.snapshot(input, pass(context)));
   server.handle(taskDetail, (input, context) => handlers.taskDetail(input, pass(context)));
   server.handle(accept, (input, context) => handlers.accept(input, pass(context)));
