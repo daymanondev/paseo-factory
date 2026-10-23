@@ -3,6 +3,7 @@
 - **Status:** Accepted — 2026-10-15 (ratified by Andrew over a two-round `/grill-with-docs`, all-recommended; words "toàn bộ theo khuyến nghị của bạn")
 - **Grounded in:** `research/project-start-harness-memory-mcp-skills.md` · `sting9k/seatworks` (`v3`, `plugin/server/desk/{project,slots,opening}.ts`, `plugin/content/records/notebook.md`) · `cuongntr/paseo-room` (`v0.9.0`/`v0.19.0`, `src/runtime-plugin/server/{git,controller}.ts`, `src/room/prompts/contract/{supervisor,lead,peer}.md`) · `sting8k/piggery` (`internal/core/{found,team,cwd}.go`) · `@getpaseo/server@0.11.1` (`agent-manager.js`, `paseo-tool-policy.js`, `providers/{claude,pi,codex}`)
 - **Amends:** ADR 0006 §2–§3 (graduates `Lead` from a zero-model mechanical rider to a standing model-backed agent seat per project with intermediate task acceptance authority `accepted_by: "lead"`, while retaining the Driver's mechanical watch/respawn/ceiling underneath; moves `Supervisor` from a single `<home>-supervisor` directory to each project's root `cwd`) · ADR 0009 §2–§3 (adds `lead` to `lanes.json` and the `Seats & Models` lane switcher; scopes `Supervisor`, `Lead`, `Ledger`, `Reports`, `Retro`, and `Worktrees` per project via `gitCommonDir`)
+- **Amended by:** [ADR 0024](0024-greenfield-project-bootstrap-and-project-deletion.md) (automatic Git bootstrap on greenfield directories when starting a seat or adding a Project, selectable missing-root Projects, and full `Project delete`)
 
 ## Decision
 
