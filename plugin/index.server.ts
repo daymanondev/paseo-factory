@@ -274,6 +274,40 @@ export default function contribute(server: PluginServerContext) {
             message: reply.error,
           };
     },
+    projectDelete: async (request) => {
+      const reply = await surface.projectDelete(
+        {
+          ...(request.projectRoot !== undefined
+            ? { projectRoot: request.projectRoot }
+            : request.workspace !== undefined
+              ? { projectRoot: request.workspace }
+              : {}),
+          ...(request.projectSlug !== undefined ? { projectSlug: request.projectSlug } : {}),
+          ...(request.project !== undefined ? { project: request.project } : {}),
+          ...(request.seat !== undefined ? { seat: request.seat } : {}),
+        },
+        { paseo: paseoApi as never },
+      );
+      return reply.ok
+        ? {
+            id: request.id,
+            ok: true as const,
+            summary: reply.summary,
+            project: reply.project,
+            projectRoot: reply.projectRoot,
+            purgedEvents: reply.purgedEvents,
+            tasks: reply.tasks,
+            removedFiles: reply.removedFiles,
+            archivedSeats: reply.archivedSeats,
+            archivedAgents: reply.archivedAgents,
+          }
+        : {
+            id: request.id,
+            ok: false as const,
+            code: reply.code,
+            message: reply.error,
+          };
+    },
     peerMail: leadMail.notifyPeer,
     daemon: () => paseoApi as never,
     sanitizeLane: (lane) => surface.sanitizeLane(lane),

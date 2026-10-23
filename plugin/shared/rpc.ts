@@ -174,6 +174,59 @@ export const projectAdd = defineRpc({
   ]),
 });
 
+export const projectDelete = defineRpc({
+  name: "factory.project.delete",
+  input: z.object({
+    projectRoot: z.string().optional(),
+    projectSlug: z.string().optional(),
+    project: z.string().optional(),
+    seat: z.string().optional(),
+  }),
+  output: z.union([
+    z.object({
+      ok: z.literal(true),
+      project: z.string(),
+      projectRoot: z.string(),
+      purgedEvents: z.number().int(),
+      tasks: z.array(z.string()),
+      removedFiles: z.number().int(),
+      archivedSeats: z.array(z.string()),
+      archivedAgents: z.array(z.string()),
+      summary: z.string(),
+      view: FactoryViewSchema.optional(),
+    }),
+    Failure,
+  ]),
+});
+
+export const projectPickFolder = defineRpc({
+  name: "factory.project.pick.folder",
+  input: z
+    .object({
+      prompt: z.string().optional(),
+    })
+    .optional(),
+  output: z.union([
+    z.object({
+      ok: z.literal(true),
+      cancelled: z.literal(true),
+      path: z.null(),
+    }),
+    z.object({
+      ok: z.literal(true),
+      cancelled: z.literal(false),
+      path: z.string(),
+      projectRoot: z.string(),
+      slug: z.string(),
+      project: ProjectViewSchema,
+      bootstrapped: z.boolean(),
+      summary: z.string(),
+      view: FactoryViewSchema.optional(),
+    }),
+    Failure,
+  ]),
+});
+
 // The UI's quick dispatch (v0.0.20, ADR 0013 §4): the third internal caller
 // of the in-process `enqueueLeadMail()` pipeline — the same door the spool's
 // `lead_dispatch` rides (auto-ensure the Lead seat, queue the directive in

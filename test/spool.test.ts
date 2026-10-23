@@ -983,3 +983,88 @@ test("correlated Lead cannot turn attribution into Owner acceptance authority", 
   const override = await handleSpoolRequest(factory, { id: "owner", kind: "accept", task: "BOUND", attempt: 1, submitter: "owner" });
   assert.equal(override.ok, true);
 });
+
+test("handleSpoolRequest refuses delete from supervisor, lead, and agent with seat-cannot-delete and executes for owner (v0.0.35, ADR 0024)", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const ws = join(dir, "ws");
+  mkdirSync(ws, { recursive: true });
+  writeFileSync(join(ws, "README.md"), "# ws\n");
+  gitCommitAll(ws);
+
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  await handleSpoolRequest(factory, {
+    id: "c-del-1",
+    kind: "contract",
+    task: "D-1",
+    workspace: ws,
+    gate: "true",
+    artifact: "README.md",
+    submitter: "owner",
+  });
+  assert.equal(factory.ledger.eventsFor("D-1").length, 1);
+
+  assert.deepEqual(parseSpoolRequest({ id: "p-del-1", kind: "delete", workspace: ws, seat: "lead" }), {
+    id: "p-del-1",
+    kind: "delete",
+    workspace: ws,
+    seat: "lead",
+  });
+  assert.deepEqual(parseSpoolRequest({ id: "p-del-2", kind: "project_delete", projectRoot: ws, projectSlug: "ws" }), {
+    id: "p-del-2",
+    kind: "delete",
+    projectRoot: ws,
+    projectSlug: "ws",
+  });
+
+  for (const seat of ["supervisor", "lead", "agent"] as const) {
+    const refused = await handleSpoolRequest(factory, {
+      id: `refuse-del-${seat}`,
+      kind: "delete",
+      workspace: ws,
+      submitter: `agent-${seat}-1`,
+      seat,
+    });
+    assert.equal(refused.ok, false, `expected ${seat} delete to be refused`);
+    if (!refused.ok) {
+      assert.equal(refused.code, "seat-cannot-delete");
+    }
+  }
+  assert.equal(factory.ledger.eventsFor("D-1").length, 1, "events untouched after refused deletes");
+
+  let deleteCalledWith: Record<string, unknown> | undefined;
+  const okRes = await handleSpoolRequest(
+    factory,
+    {
+      id: "owner-del-1",
+      kind: "delete",
+      workspace: ws,
+      submitter: "owner",
+    },
+    {
+      projectDelete: async (req) => {
+        deleteCalledWith = { ...req };
+        const res = factory.resetProject(ws, "ws");
+        return {
+          id: req.id,
+          ok: true,
+          summary: `Deleted project ws and purged all Factory state`,
+          project: "ws",
+          projectRoot: ws,
+          purgedEvents: res.purgedEvents,
+          tasks: res.tasks,
+          removedFiles: res.removedFiles,
+          archivedSeats: [],
+          archivedAgents: [],
+        };
+      },
+    },
+  );
+  assert.equal(okRes.ok, true);
+  if (okRes.ok) {
+    assert.match(okRes.summary, /Deleted project ws and purged all Factory state/);
+  }
+  assert.equal(deleteCalledWith?.workspace, ws);
+  assert.equal(factory.ledger.eventsFor("D-1").length, 0);
+});
+

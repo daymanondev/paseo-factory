@@ -225,6 +225,24 @@ export interface SpoolResetRequest {
   seat?: SpoolSeat;
 }
 
+/**
+ * Owner-only Project Delete (v0.0.35, ADR 0024): `factory project delete` /
+ * `factory delete` purges all Factory state, worktrees, branches, correlations,
+ * `<stateDir>/projects/<slug>/` (including `project.json` and `lanes.json`),
+ * and Paseo workspace/project records. Refused with `code: "seat-cannot-delete"`
+ * when called from any non-Owner seat (`supervisor`, `lead`, `agent`).
+ */
+export interface SpoolDeleteRequest {
+  id: string;
+  kind: "delete";
+  workspace?: string;
+  projectRoot?: string;
+  projectSlug?: string;
+  project?: string;
+  submitter?: string;
+  seat?: SpoolSeat;
+}
+
 
 /**
  * The Lead's one automatic Respawn per progress marker (v0.0.12, ADR 0008):
@@ -350,6 +368,7 @@ export type SpoolRequest =
   | SpoolSupervisorDispatchRequest
   | SpoolSupervisorReportRequest
   | SpoolResetRequest
+  | SpoolDeleteRequest
   | SpawnRequest
   | RespawnRequest
   | MeterRequest
@@ -374,6 +393,9 @@ export type SupervisorReportHandler = (request: SpoolSupervisorReportRequest) =>
 
 /** Resets a Project — the surface handlers' `projectReset` is the implementation (v0.0.24, ADR 0015 §6). */
 export type ProjectResetHandler = (request: SpoolResetRequest) => Promise<SpoolReply>;
+
+/** Deletes a Project completely — the surface handlers' `projectDelete` is the implementation (v0.0.35, ADR 0024). */
+export type ProjectDeleteHandler = (request: SpoolDeleteRequest) => Promise<SpoolReply>;
 
 /** Sanitizes a `<provider>/<model>[:<thinking>]` lane string against the daemon's provider catalog (v0.0.24, ADR 0015 §1). */
 export type SanitizeLaneHandler = (laneValue: string) => Promise<string> | string;
@@ -425,7 +447,8 @@ export type SpoolReply =
       /** Spawn / respawn replies (v0.0.23, ADR 0015 §6): the Task worktree's Paseo workspace id and owning Project slug. */
       workspaceId?: string;
       projectSlug?: string;
-      /** Project-reset replies (v0.0.24, ADR 0015 §6). */
+      /** Project-reset / project-delete replies (v0.0.24, ADR 0015 §6; v0.0.35, ADR 0024). */
+      projectRoot?: string;
       purgedEvents?: number;
       tasks?: string[];
       removedFiles?: number;
@@ -644,6 +667,22 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       ...(req.project === undefined ? {} : { project: req.project }),
       ...(req.workspace === undefined ? {} : { workspace: req.workspace }),
       ...(req.keepSeats === undefined ? {} : { keepSeats: req.keepSeats }),
+      ...submitterField,
+      ...seatField,
+    };
+  }
+  if (req.kind === "delete" || req.kind === "project_delete") {
+    if (req.project !== undefined && (typeof req.project !== "string" || req.project.trim() === "")) return undefined;
+    if (req.projectSlug !== undefined && (typeof req.projectSlug !== "string" || req.projectSlug.trim() === "")) return undefined;
+    if (req.projectRoot !== undefined && (typeof req.projectRoot !== "string" || req.projectRoot.trim() === "")) return undefined;
+    if (req.workspace !== undefined && (typeof req.workspace !== "string" || req.workspace.trim() === "")) return undefined;
+    return {
+      id: req.id,
+      kind: "delete",
+      ...(req.project === undefined ? {} : { project: req.project }),
+      ...(req.projectSlug === undefined ? {} : { projectSlug: req.projectSlug }),
+      ...(req.projectRoot === undefined ? {} : { projectRoot: req.projectRoot }),
+      ...(req.workspace === undefined ? {} : { workspace: req.workspace }),
       ...submitterField,
       ...seatField,
     };
@@ -903,12 +942,12 @@ export async function handleSpoolRequest(
   deps: SpoolDeps = {},
 ): Promise<SpoolReply> {
   if (request.kind === "upgrade" || request.kind === "history_import" || request.kind === "history_import_status") return handleAdmittedSpoolRequest(factory, request, deps);
-  if (request.kind === "reset" && !factory.history.maintenanceActive) return factory.history.withExclusiveMaintenance(() => handleAdmittedSpoolRequest(factory, request, deps));
+  if ((request.kind === "reset" || request.kind === "delete") && !factory.history.maintenanceActive) return factory.history.withExclusiveMaintenance(() => handleAdmittedSpoolRequest(factory, request, deps));
   return factory.history.runOperation(() => handleAdmittedSpoolRequest(factory, request, deps), { newWork: !["ask", "meter", "repoke", "respawn", "needs_human"].includes(request.kind) });
 }
 
 async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolRequest, deps: SpoolDeps): Promise<SpoolReply> {
-  const { ask: askHandler, leadRotate: leadRotateHandler, leadDispatch: leadDispatchHandler, peerMail: peerMailHook, supervisorDispatch: supervisorDispatchHandler, supervisorReport: supervisorReportHandler, daemon, projectReset: projectResetHandler, sanitizeLane, home } = deps;
+  const { ask: askHandler, leadRotate: leadRotateHandler, leadDispatch: leadDispatchHandler, peerMail: peerMailHook, supervisorDispatch: supervisorDispatchHandler, supervisorReport: supervisorReportHandler, daemon, projectReset: projectResetHandler, projectDelete: projectDeleteHandler, sanitizeLane, home } = deps;
   const resolvedDaemon = resolveDaemonArg(daemon);
   try {
     const effectiveSeat = await resolveEffectiveSeat(factory, resolvedDaemon, request);
@@ -925,7 +964,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
       else factory.history.drain();
       return { id: request.id, ok: true, summary: "Ledger import admission status", historyImports: factory.history.allStatus() };
     }
-    // Hard Spool Command Authority by Seat (v0.0.23, ADR 0015 §1; v0.0.24, ADR 0015 §6).
+    // Hard Spool Command Authority by Seat (v0.0.23, ADR 0015 §1; v0.0.24, ADR 0015 §6; v0.0.35, ADR 0024).
     if (
       request.kind === "reset" &&
       (effectiveSeat === "supervisor" || effectiveSeat === "lead" || effectiveSeat === "agent")
@@ -935,6 +974,17 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         ok: false,
         code: "seat-cannot-reset",
         message: `Seat ${effectiveSeat} cannot call factory reset; project reset is an Owner-only action.`,
+      };
+    }
+    if (
+      request.kind === "delete" &&
+      (effectiveSeat === "supervisor" || effectiveSeat === "lead" || effectiveSeat === "agent")
+    ) {
+      return {
+        id: request.id,
+        ok: false,
+        code: "seat-cannot-delete",
+        message: `Seat ${effectiveSeat} cannot call factory project delete; project deletion is an Owner-only action.`,
       };
     }
     if (
@@ -1110,6 +1160,17 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         };
       }
       return await projectResetHandler(request);
+    }
+    if (request.kind === "delete") {
+      if (projectDeleteHandler === undefined) {
+        return {
+          id: request.id,
+          ok: false,
+          code: "project-delete-unavailable",
+          message: "this daemon's factory plugin does not handle Project deletion — update the plugin to v0.0.35+",
+        };
+      }
+      return await projectDeleteHandler(request);
     }
 
     if (request.kind === "spawn") {
@@ -1446,6 +1507,8 @@ export interface SpoolOptions {
   supervisorReport?: SupervisorReportHandler;
   /** The Project-reset handler (v0.0.24); without it `reset` requests are refused. */
   projectReset?: ProjectResetHandler;
+  /** The Project-delete handler (v0.0.35); without it `delete` requests are refused. */
+  projectDelete?: ProjectDeleteHandler;
   /** The peer-outcome notifier (v0.0.20) — verdicts and needs_human recordings land as Lead mail. */
   peerMail?: PeerMailHook;
   /** The daemon API for workspace registration and worker/workspace archiving (v0.0.23, ADR 0015 §6). */
@@ -1686,6 +1749,6 @@ async function handleRequestFile(id: string, requestPath: string, replyPath: str
   try { kind = String(JSON.parse(readFileSync(requestPath, "utf8")).kind); } catch { /* malformed requests still receive a reply */ }
   const work = () => handleAdmittedRequestFile(id, requestPath, replyPath, processedPath, factory, log, deps);
   if (kind === "upgrade") await work();
-  else if (kind === "reset") await factory.history.withExclusiveMaintenance(work);
+  else if (kind === "reset" || kind === "delete" || kind === "project_delete") await factory.history.withExclusiveMaintenance(work);
   else await factory.history.runOperation(work, { newWork: !["ask", "meter", "repoke", "respawn", "needs_human", "history_import", "history_import_status", ""].includes(kind) });
 }

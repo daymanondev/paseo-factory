@@ -1293,7 +1293,7 @@ export function createFactory(options: FactoryOptions): Factory {
               (entry.startsWith(`gate-${task}-`) && entry.endsWith(".log")),
           );
           const matchesRetroFile =
-            (otherProjectTasks.size === 0 || dir === projectDir) &&
+            (otherProjectTasks.size === 0 || dir === projectDir || (slug !== "" && entry.startsWith(`retro-${slug}`))) &&
             entry.startsWith("retro-") &&
             (entry.endsWith(".md") || entry.endsWith(".json"));
           if (matchesTaskFile || matchesRetroFile) {
