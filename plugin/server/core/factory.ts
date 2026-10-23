@@ -5,6 +5,7 @@ import { isAbsolute, join } from "node:path";
 import { Ledger, usageIsValid } from "./ledger.ts";
 import { MAX_ATTEMPTS, NEEDS_HUMAN_REASONS, needsHumanEvidenceIsValid } from "./events.ts";
 import { runGate } from "./gate.ts";
+import { artifactPathProblem } from "./artifact.ts";
 import { renderReport } from "./report.ts";
 import { laneCliAvailable } from "./lanes.ts";
 import { EYE_JSON_LANE } from "./lanes.ts";
@@ -393,7 +394,8 @@ export function createFactory(options: FactoryOptions): Factory {
     setContract({ task, workspace, gate, artifact, base: inputBase, scope, freshEyes, watch, description, skills, by, seat }) {
       assertTaskId(task);
       if (gate.trim() === "") throw new FactoryError("invalid-contract", "gate command must be a non-empty string");
-      if (artifact.trim() === "") throw new FactoryError("invalid-contract", "artifact path must be a non-empty string");
+      const artifactProblem = artifactPathProblem(artifact);
+      if (artifactProblem !== undefined) throw new FactoryError("invalid-contract", artifactProblem);
       if (freshEyes !== undefined && typeof freshEyes !== "boolean") {
         throw new FactoryError("invalid-contract", "freshEyes must be a boolean (true or false) — omit it to use the caller default");
       }
