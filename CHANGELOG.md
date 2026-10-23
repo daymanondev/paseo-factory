@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Re-contracting preserves active task worktrees and their original base commit.
 - Pending-conflict acceptance can retry landing; transient untracked test outputs no longer block verification or landing.
 - Task worktrees inherit root dependencies, and successful landing hydrates root dependencies from real worktree installs before cleanup.
+- Git-installed plugin bundle boundary: `plugin/server/choke.ts` resolves hook/permission types from `@getpaseo/plugin/server` (instead of `@getpaseo/protocol/agent-types`), and `scripts/check-bundle.mjs` enforces isolated-checkout type resolution so `paseo plugin install git:daymanondev/paseo-factory:plugin` builds cleanly without a root `node_modules`.
 
 ## [0.0.31] - 2026-10-22
 
