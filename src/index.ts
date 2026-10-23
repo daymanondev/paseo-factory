@@ -181,3 +181,7 @@ export type { EventIdentityMetadata, LedgerSchema, LedgerReferenceField } from "
 
 export { planHistoryImport, validateHistoryCausality, reconcileHistory, HistoryImportError } from "./history-import.ts";
 export type { HistoryImportInput, HistoryImportSource, HistoryImportPlan, ImportSourcePlan, ImportConflict, VerifiedImportBinding, VerifiedImportFile, HistoryArtifact } from "./history-import.ts";
+
+export { preflightUpgrade, upgradeFactory, upgradeDirectory } from "./history-upgrade.ts";
+export type { UpgradeAction, UpgradeInput, UpgradeResult, UpgradePreflight } from "./history-upgrade.ts";
+export { readLocalWriterIdentity, localWriterPath } from "./writer-identity.ts";

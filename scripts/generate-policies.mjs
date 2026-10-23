@@ -23,6 +23,7 @@ async function compile(source, globalName) {
 }
 
 const targets = [
+  ["src/history-upgrade.ts", "plugin/bin/history-upgrade.mjs"],
   ["src/history-import.ts", "plugin/bin/history-import.mjs"],
   ["src/history-stage.ts", "plugin/bin/history-stage.mjs"],
   ["src/scope-policy.ts", "plugin/bin/scope.mjs"],

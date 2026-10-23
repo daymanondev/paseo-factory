@@ -345,3 +345,9 @@ export const vaultImport = defineRpc({
 
 export const historyImport = defineRpc({ name: "factory.history.import", input: z.object({ project: z.string().optional(), sources: z.array(z.object({ nodeId: z.string(), lines: z.string() })).optional() }), output: z.object({ ok: z.literal(true), imports: z.array(ImportStatusSchema) }) });
 export const historyImports = defineRpc({ name: "factory.history.imports", input: z.object({}), output: z.object({ ok: z.literal(true), imports: z.array(ImportStatusSchema) }) });
+
+export const historyUpgrade = defineRpc({
+  name: "factory.history.upgrade",
+  input: z.object({ action: z.enum(["preflight", "apply", "resume", "restore"]), transactionId: z.string().optional(), projectSlug: z.string().optional() }),
+  output: z.union([z.object({ ok: z.literal(true), result: z.unknown() }), Failure]),
+});
