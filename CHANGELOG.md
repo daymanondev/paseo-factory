@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.32] - 2026-10-23
+
+### Added
+
+- Package-manager seat fences and OpenCode-only delegation to installed command shims, so refusals return actionable tool output without aborting the turn.
+- Glob-aware contract scopes and concrete recovery commands against the contract base.
+- Supervisor diagnostics and Lead entrypoint/lockfile laws.
+
+### Fixed
+
+- OpenCode headless lanes retain the read tool schema while rejecting runtime tool access.
+- Re-contracting preserves active task worktrees and their original base commit.
+- Pending-conflict acceptance can retry landing; transient untracked test outputs no longer block verification or landing.
+- Task worktrees inherit root dependencies, and successful landing hydrates root dependencies from real worktree installs before cleanup.
+
 ## [0.0.31] - 2026-10-22
 
 v0.0.31's one thing: **co-located `Supervisor` & `Lead` inside one main Project Workspace, role-first seat & `Peer` worktree titles, safe `Task worktree` cleanup that never kills sibling running Peers, an orphaned `local_checkout` Workspace sweep, and offline spool request deduplication with an explicit stop-on-timeout instruction** (ADR 0017 §2/§4/§5/§6).
