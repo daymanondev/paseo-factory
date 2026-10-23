@@ -16,6 +16,7 @@ import { homedir, hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { reconcileHistory } from "./history-import.mjs";
+import { stageLedgerImport } from "./history-stage.mjs";
 import { projectStateDir, resolveProject } from "./project.mjs";
 
 /** The core's FactoryError, mirrored as a plain Error carrying the stable code. */
@@ -517,9 +518,9 @@ export async function hydrateVaultDirect(paseoHome, options = {}) {
   }
 
   applyVaultHydration(paseoHome, options.overwriteConfigs ?? false);
-  if (options.mergeLedgers === true) reconcileVaultLedgerState(paseoHome);
+  const historyImports = options.mergeLedgers === true ? reconcileVaultLedgerState(paseoHome) : [];
   stampVaultConfig(paseoHome, config, repo, { lastHydratedAt: nowIso(), lastHydrateMode: "direct" });
-  return { repo, ref, hydratedFiles: hydratedFiles.sort() };
+  return { repo, ref, hydratedFiles: hydratedFiles.sort(), historyImports };
 }
 
 /**
@@ -550,9 +551,9 @@ export async function pullVault(paseoHome, options = {}) {
 
   const hydratedFiles = hydrateRuntimeFromTree(paseoHome, vaultDir, resolveVaultPassphrase(config.passphrase));
   applyVaultHydration(paseoHome, options.overwriteConfigs ?? false);
-  if (options.mergeLedgers === true) reconcileVaultLedgerState(paseoHome);
+  const historyImports = options.mergeLedgers === true ? reconcileVaultLedgerState(paseoHome) : [];
   stampVaultConfig(paseoHome, config, config.repo, { lastHydratedAt: nowIso(), lastHydrateMode: "sync" });
-  return { hydratedFiles };
+  return { hydratedFiles, historyImports };
 }
 
 /**
@@ -672,10 +673,11 @@ export async function syncVault(paseoHome, options = {}) {
   const pushNote = pushResult.pushed
     ? `pushed ${pushResult.pushedFiles.length} file(s)`
     : `up to date (${pushResult.pushedFiles.length} file(s) tracked)`;
-  const summary = `Vault synced with ${repo} (${branch}): ${createdNote}hydrated ${pullResult.hydratedFiles.length} file(s), ${pushNote}.`;
+  const summary = `Vault synced with ${repo} (${branch}): ${createdNote}hydrated ${pullResult.hydratedFiles.length} file(s), ${pushNote}; history ${(pullResult.historyImports ?? []).map((item) => item.status).join(", ") || "not requested"}.`;
 
   return {
     createdRepo: ensured.created,
+    historyImports: pullResult.historyImports,
     repo,
     branch,
     hydratedFiles: pullResult.hydratedFiles,
@@ -1776,14 +1778,15 @@ export function reconcileVaultLedgers(existingLines, sources, options = {}) {
 function reconcileVaultLedgerState(paseoHome) {
   const stateDir = vaultStateDir(paseoHome);
   const runtimeRoot = join(paseoHome, "vault-runtime");
-  mergeLedgerFile(join(stateDir, "ledger.jsonl"), nodeLedgerSourcesAt(runtimeRoot, ["global-ledger.jsonl"]));
+  const imports = mergeLedgerFile(join(stateDir, "ledger.jsonl"), nodeLedgerSourcesAt(runtimeRoot, ["global-ledger.jsonl"]));
   for (const app of resolveVaultApps(paseoHome, readVaultManifestAt(runtimeRoot))) {
     if (app.projectSlug === null) continue;
-    mergeLedgerFile(
+    imports.push(...mergeLedgerFile(
       join(stateDir, "projects", app.projectSlug, "ledger.jsonl"),
       nodeLedgerSourcesAt(runtimeRoot, ["projects", app.canonicalAppKey, "ledger.jsonl"]),
-    );
+    ));
   }
+  return imports;
 }
 
 function nodeLedgerSourcesAt(vaultTreeRoot, rel) {
@@ -1791,25 +1794,13 @@ function nodeLedgerSourcesAt(vaultTreeRoot, rel) {
   const out = [];
   for (const nodeId of listDirNames(nodesDir)) {
     const path = join(nodesDir, nodeId, ...rel);
-    if (existsSync(path)) out.push({ nodeId, lines: readFileSync(path, "utf8") });
+    if (existsSync(path)) { const bytes = readFileSync(path); out.push({ nodeId, lines: bytes.toString("utf8"), bytes }); }
   }
   return out;
 }
 
 function mergeLedgerFile(localPath, sources) {
-  if (sources.length === 0) return;
-  let existing = "";
-  try {
-    existing = readFileSync(localPath, "utf8");
-  } catch {
-    // no local ledger yet
-  }
-  const reconciled = reconcileVaultLedgers(existing, sources);
-  if (reconciled === "") return;
-  mkdirSync(dirname(localPath), { recursive: true });
-  const tmp = `${localPath}.reconcile-${process.pid}-${randomUUID()}`;
-  writeFileSync(tmp, reconciled);
-  renameSync(tmp, localPath);
+  return sources.length === 0 ? [] : [stageLedgerImport(localPath, sources)];
 }
 
 function listDirNames(dir) {

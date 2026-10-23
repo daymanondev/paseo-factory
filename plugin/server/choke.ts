@@ -637,7 +637,7 @@ export function createChoke(options: ChokeOptions): Choke {
     return isStrictlyLayer3ShimmedCommand(command, installed) ? { behavior: "allow" } : decision;
   };
 
-  return {
+  const choke: Choke = {
     async onPermissionAsked({ agent, request }, paseo) {
       const seatCtx = resolveSeatAskContext(agent);
       if (seatCtx !== undefined) {
@@ -766,6 +766,11 @@ export function createChoke(options: ChokeOptions): Choke {
       return { ...config, modeId: PINNED_MODE_ID };
     },
   };
+  return {
+    onPermissionAsked: (event, paseo) => factory.history.runOperation(() => choke.onPermissionAsked(event, paseo)),
+    spoolAskHandler: (request) => factory.history.runSync(() => choke.spoolAskHandler(request)),
+    pinCreateMode: (config, labels) => factory.history.runSync(() => choke.pinCreateMode(config, labels)),
+  };
 }
 
 /**
@@ -839,7 +844,7 @@ export function startGitBlockIngestion(factory: Factory, options: GitBlockOption
     factory.ledger.events.filter((e) => e.event === "git_blocked").map((e) => e.blockId),
   );
 
-  const ingest = (): void => {
+  const ingestAdmitted = (): void => {
     let raw: string;
     try {
       raw = readFileSync(gitBlockLogPath(stateDir), "utf8");
@@ -870,7 +875,6 @@ export function startGitBlockIngestion(factory: Factory, options: GitBlockOption
         continue;
       }
       if (seen.has(record.id)) continue;
-      seen.add(record.id);
       const contract = factory.liveContractFor(record.cwd);
       factory.ledger.append({
         event: "git_blocked",
@@ -882,10 +886,15 @@ export function startGitBlockIngestion(factory: Factory, options: GitBlockOption
         cwd: record.cwd,
         blockId: record.id,
       });
+      seen.add(record.id);
       log(`git blocked: ${record.command} (${record.rule})${contract === undefined ? "" : ` — task ${contract.task}`}`);
     }
   };
 
+  const ingest = (): void => {
+    try { factory.history.runSync(ingestAdmitted); }
+    catch (error) { if (!(error instanceof Error) || !("code" in error) || error.code !== "history-maintenance-busy") throw error; }
+  };
   const timer = setInterval(ingest, options.pollMs ?? 250);
   ingest();
   return {

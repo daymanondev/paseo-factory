@@ -1,3 +1,4 @@
+import { liveWorkspaceConflict, normalized, acceptedTasks } from "./workspace-conflict.ts";
 import { createHash } from "node:crypto";
 import { projectTask } from "./task-state.ts";
 import type { AcceptanceRole } from "./task-state.ts";
@@ -17,17 +18,19 @@ import { runWatchPass, watchLaneAvailable } from "./watch.ts";
 import type { CopilotRunner, TimelineFetcher } from "./watch.ts";
 import { buildRetroDigest, retroDay, retroLaneAvailable, runRetroPass, writtenRetroForDay } from "./retro.ts";
 import type { RetroOutcome } from "./retro.ts";
-import { changedFiles, checkCleanAt, headCommitSync, landTaskWorktree, resolveClaimedCommit, scopeCoversFile, normalizeScopePath, scopeRecoveryCommands } from "./workspace.ts";
+import { changedFiles, checkCleanAt, headCommitSync, landTaskWorktree, resolveClaimedCommit, scopeCoversFile, scopeRecoveryCommands } from "./workspace.ts";
 import { MEMORY_FILES } from "./choke.ts";
 import { projectStateDir } from "./project.ts";
 import { FactoryError } from "./errors.ts";
 import type { AttemptAccepted, ContractSet, GateFinished, GitBlocked, LedgerEvent, MeterWritten, MeterUsage, NeedsHuman, NeedsHumanEvidence, NeedsHumanReason, RepokeDispatched, RepokeRefused, RespawnDispatched, RespawnRefused, SpawnDispatched, SpawnRefused, Verdict } from "./events.ts";
 import type { GateResult } from "./gate.ts";
+import { LedgerAdmission } from "./history-admission.ts";
 
 /** Task ids become report filenames, so they stay flat and filename-safe. */
 const TASK_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 export interface FactoryOptions {
+  historyFault?: (boundary: "prepared" | "renamed" | "activated" | "applied") => void;
   /** Demonstrable local writer identity, provisioned independently of imported history. */
   writerId?: string;
   /** Directory for `ledger.jsonl`, `report-<task>-<n>.md` and `gate-<task>-<n>.log` files. */
@@ -245,6 +248,7 @@ export interface NeedsHumanInput {
 }
 
 export interface Factory {
+  readonly history: LedgerAdmission;
   readonly ledger: Ledger;
   readonly stateDir: string;
   /** Attempts the factory closed red while opening (ADR 0003 recovery) — for the shell to log loudly. */
@@ -386,10 +390,20 @@ export function createFactory(options: FactoryOptions): Factory {
   // for every factory, and the root data tree remains the no-scope default
   // (the legacy single-ledger layout).
   const dataDir = options.projectSlug === undefined ? stateDir : projectStateDir(stateDir, options.projectSlug);
-  const ledger = Ledger.open(join(dataDir, "ledger.jsonl"), { writerId: options.writerId });
-  const recoveredAttempts = recoverInterruptedAttempts(ledger, dataDir);
+  const release = LedgerAdmission.reserve(join(dataDir, "ledger.jsonl"));
+  let ledger: Ledger;
+  let recoveredAttempts: ReturnType<typeof recoverInterruptedAttempts>;
+  let history: LedgerAdmission;
+  try {
+    LedgerAdmission.assertAvailable(join(dataDir, "ledger.jsonl"));
+    ledger = Ledger.open(join(dataDir, "ledger.jsonl"), { writerId: options.writerId });
+    recoveredAttempts = recoverInterruptedAttempts(ledger, dataDir);
+    history = new LedgerAdmission(ledger, stateDir, { fault: options.historyFault });
+  } finally { release(); }
 
-  return {
+
+  const factory: Factory = {
+    history,
     ledger,
     stateDir,
     recoveredAttempts,
@@ -1342,6 +1356,22 @@ export function createFactory(options: FactoryOptions): Factory {
       return outcome;
     },
   };
+  const asyncOperations = new Set(["claim", "accept", "retro"]);
+  const syncOperations = new Set(["setContract", "requestSpawn", "meter", "repoke", "respawn", "needsHuman", "resetProject"]);
+  const wrappers = new Map<PropertyKey, unknown>();
+  return new Proxy(factory, {
+    get(target, key, receiver) {
+      const value = Reflect.get(target, key, receiver);
+      if (typeof key !== "string" || typeof value !== "function" || (!asyncOperations.has(key) && !syncOperations.has(key))) return value;
+      if (!wrappers.has(key)) wrappers.set(key, (...args: unknown[]) => {
+        if (key === "resetProject" && history.activeOperations > 0 && !history.maintenanceActive) throw new FactoryError("history-maintenance-busy", "reset requires settled operations; use the asynchronous Owner reset entrance");
+        return asyncOperations.has(key)
+          ? history.runOperation(() => value.apply(receiver, args), { newWork: true })
+          : history.runSync(() => value.apply(receiver, args));
+      });
+      return wrappers.get(key);
+    },
+  });
 }
 
 /**
@@ -1402,18 +1432,6 @@ function taskInNeedsHuman(history: readonly LedgerEvent[]): boolean {
   return historyState(history)?.needsHuman ?? false;
 }
 
-/** Settled acceptances retire a Contract; pending landings keep their write fence live. */
-function acceptedTasks(ledger: Ledger): Set<string> {
-  const accepted = new Set<string>();
-  for (const evt of ledger.events) {
-    if (evt.event === "attempt_accepted") {
-      if (evt.landing === "pending-conflict") accepted.delete(evt.task);
-      else accepted.add(evt.task);
-    }
-  }
-  return accepted;
-}
-
 /** How one workspace relates to another — the workspace-conflict key (v0.0.5). */
 type WorkspaceRelation = "equal" | "inside" | "contains";
 
@@ -1422,82 +1440,6 @@ function relationText(relation: WorkspaceRelation): string {
   if (relation === "equal") return "is the same tree as";
   if (relation === "inside") return "sits inside";
   return "contains";
-}
-
-/**
- * The live-Contract workspace scan (H1/H2 guard): finds the first live
- * Contract — set, not accepted, another task — whose workspace equals, nests
- * inside, or contains `workspace`. Comparison is on the paths as contracted
- * (absolute, `resolve`d by the CLI); trailing slashes are tolerated, symlink
- * aliasing is not — the Owner contracts one spelling of a tree per run.
- * Since v0.0.14 (ADR 0010 §4) the EQUAL relation is exempt when both
- * Contracts declare disjoint scopes (`myScope` is the asking task's scope —
- * the contract's own on the spawn path, the input's on the setContract path
- * where the line has not landed yet): same-Project Tasks each execute in
- * their own managed worktree, so the single-checkout collision cannot
- * happen, and the scopes are the declared boundary. On an overlapping equal
- * pair the returned conflict names the overlapping prefixes.
- */
-function liveWorkspaceConflict(
-  ledger: Ledger,
-  workspace: string,
-  task: string,
-  myScope?: string[],
-): { task: string; workspace: string; relation: WorkspaceRelation; overlapping?: string } | undefined {
-  const mine = normalized(workspace);
-  const accepted = acceptedTasks(ledger);
-  const latestContracts = new Map<string, ContractSet>();
-  for (const evt of ledger.events) {
-    if (evt.event === "contract_set" && evt.task !== task && !accepted.has(evt.task)) {
-      latestContracts.set(evt.task, evt);
-    }
-  }
-  for (const evt of latestContracts.values()) {
-    const theirs = normalized(evt.workspace);
-    let relation: WorkspaceRelation | undefined;
-    if (mine === theirs) relation = "equal";
-    else if (mine.startsWith(`${theirs}/`)) relation = "inside";
-    else if (theirs.startsWith(`${mine}/`)) relation = "contains";
-    if (relation === undefined) continue;
-    if (relation === "equal") {
-      const overlap = scopesOverlap(myScope, evt.scope);
-      if (overlap === undefined) continue; // the worktree exemption — disjoint scopes, one Project
-      return { task: evt.task, workspace: evt.workspace, relation, overlapping: overlap };
-    }
-    return { task: evt.task, workspace: evt.workspace, relation };
-  }
-  return undefined;
-}
-
-/**
- * The first pair of scope prefixes that overlap (either covers the other's
- * territory), or undefined when the scopes are disjoint — the exemption's
- * one question. Unrestricted (empty/undefined) scope means "everywhere", so
- * it overlaps everything and never rides the exemption.
- */
-function scopesOverlap(a: readonly string[] | undefined, b: readonly string[] | undefined): string | undefined {
-  if (a === undefined || a.length === 0 || b === undefined || b.length === 0) return "one contract is unscoped";
-  for (const mine of a) {
-    for (const theirs of b) {
-      if (scopeCoversFile([mine], theirs) || scopeCoversFile([theirs], mine)) return `${mine} ↔ ${theirs}`;
-      const minePath = normalizeScopePath(mine);
-      const theirPath = normalizeScopePath(theirs);
-      const mineWildcard = minePath.search(/[*?]/);
-      const theirWildcard = theirPath.search(/[*?]/);
-      if (mineWildcard < 0 && theirWildcard < 0) continue;
-      // A glob's static prefix reserves its possible territory conservatively:
-      // a partial filename prefix may overlap a different glob or directory.
-      const minePrefix = mineWildcard < 0 ? `${minePath}/` : minePath.slice(0, mineWildcard);
-      const theirPrefix = theirWildcard < 0 ? `${theirPath}/` : theirPath.slice(0, theirWildcard);
-      if (minePrefix.startsWith(theirPrefix) || theirPrefix.startsWith(minePrefix)) return `${mine} ↔ ${theirs}`;
-    }
-  }
-  return undefined;
-}
-
-/** Workspace paths as contracted, with a tolerated trailing slash gone. */
-function normalized(path: string): string {
-  return path.length > 1 && path.endsWith("/") ? path.slice(0, -1) : path;
 }
 
 function realpathSafe(path: string): string {

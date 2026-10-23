@@ -22,6 +22,7 @@ import {
   pullVault,
   pushVault,
   readVaultStatus,
+  readLedgerImports,
   reconcileVaultLedgers,
   planLegacyIdentity,
   resolveProject,
@@ -1133,12 +1134,10 @@ test("pullVault retains ambiguous legacy snapshots and leaves existing Ledger by
   saveVaultConfig(home, { repo: bare, nodeId: "mini-m2" });
   const beforeProject = readFileSync(localProjectLedger, "utf8");
   const beforeGlobal = readFileSync(localGlobalLedger, "utf8");
-  await assert.rejects(() => pullVault(home, { mergeLedgers: true }), (error: unknown) => {
-    const refused = error as { code: string; plan: { sources: { lines: string }[] } };
-    assert.equal(refused.code, "history-import-conflict");
-    assert.ok(refused.plan.sources.length > 0);
-    return true;
-  });
+  const pulled = await pullVault(home, { mergeLedgers: true });
+  assert.ok(pulled.historyImports?.every((status) => status.status === "pending"));
+  assert.equal(readLedgerImports(localProjectLedger)[0]?.status, "pending");
+
   assert.equal(readFileSync(localProjectLedger, "utf8"), beforeProject);
   assert.equal(readFileSync(localGlobalLedger, "utf8"), beforeGlobal);
   assert.equal(readFileSync(join(home, "vault-runtime/state/nodes/mac-studio/projects/patigame/ledger.jsonl"), "utf8"), macStudioSnapshot);
@@ -1159,7 +1158,7 @@ test("pullVault retains ambiguous legacy snapshots and leaves existing Ledger by
   );
 });
 
-test("hydrateVaultDirect refuses ambiguous legacy admission on the zero-clone path", async (t) => {
+test("hydrateVaultDirect stages ambiguous legacy admission on the zero-clone path", async (t) => {
   const parent = makeProjectParent(t);
   const patigame = join(parent, "patigame");
   mkdirSync(patigame, { recursive: true });
@@ -1189,7 +1188,8 @@ test("hydrateVaultDirect refuses ambiguous legacy admission on the zero-clone pa
   writeFileSync(localProjectLedger, `${contract}\n`); // a fresh machine that only ever saw the contract
   saveVaultConfig(home, { repo: "daymanondev/factory-vault" });
 
-  await assert.rejects(() => hydrateVaultDirect(home, { runner: fakeTarballRunner(tarball).runner, mergeLedgers: true }), (error: unknown) => (error as { code: string }).code === "history-import-conflict");
+  const hydrated = await hydrateVaultDirect(home, { runner: fakeTarballRunner(tarball).runner, mergeLedgers: true });
+  assert.equal(hydrated.historyImports?.[0]?.status, "pending");
   assert.equal(readFileSync(localProjectLedger, "utf8"), `${contract}\n`);
   assert.equal(readFileSync(join(home, "vault-runtime/state/nodes/mac-studio/projects/patigame/ledger.jsonl"), "utf8"), nodeSnapshot);
   assert.ok(!existsSync(join(home, "vault")), "still zero-clone — no checkout, no .git");
