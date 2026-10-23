@@ -246,6 +246,10 @@ function bindingProblems(event: LedgerEvent, events: readonly LedgerEvent[], bin
   if (contract.base !== undefined && binding.base !== contract.base) reasons.push("Contract base commit has no verified local binding");
   if (event.event === "spawn_dispatched" && event.worktree !== undefined && (binding.worktree !== event.worktree || !isAbsolute(event.worktree))) reasons.push("spawn has no verified local Task worktree binding");
   if (event.event === "gate_finished") {
+    if (event.verdict === "green") {
+      if (!events.some((candidate) => candidate.event === "gate_started" && candidate.epoch_id === event.epoch_id && candidate.attempt === event.attempt && candidate.seq < event.seq)) reasons.push("green Gate has no prior Gate start evidence; retain the original history for resolution");
+      if (typeof event.outputPath !== "string" || event.outputPath.trim() === "") reasons.push("green Gate has no output log with a verified local event binding");
+    }
     if (event.sha !== undefined && !binding.commits?.includes(event.sha)) reasons.push("Gate commit is unavailable in the verified local Workspace");
     const claim = events.find((candidate) => candidate.event === "claim_reported" && candidate.epoch_id === event.epoch_id && candidate.attempt === event.attempt);
     if (event.sha !== undefined && claim?.event === "claim_reported" && !/^[a-f0-9]+$/i.test(claim.sha) && !binding.claims?.some((resolution) => resolution.eventId === claim.event_id && resolution.sha === event.sha)) reasons.push("symbolic Claim has no demonstrated commit resolution; current HEAD cannot stand in for source evidence");

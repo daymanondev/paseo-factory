@@ -14,7 +14,7 @@
 import type { PluginTheme } from "@getpaseo/plugin";
 import { useRpc } from "@getpaseo/plugin/client";
 import { Modal, ScrollView, useToast } from "@getpaseo/plugin/client/react-native";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Text, View } from "react-native";
 import { accept, lanesSet, leadRotate, pluginsInstall, pluginsManage, pluginsCheckUpdates, projectReset, ratifyProposal, retro, snapshot, supervisorRevoke, taskDetail, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
 
@@ -25,6 +25,8 @@ import { SPACING, text } from "../kit/theme.ts";
 import { useNow, usePoll, pollEvery } from "../kit/poll.ts";
 import { Header, isVaultActName } from "./header.tsx";
 import type { VaultNote } from "./header.tsx";
+import { actionFeedback, createResponseOrder } from "./vault-feedback.ts";
+import type { VaultStatusView } from "../../shared/view.ts";
 import { TasksPane } from "./tasks.tsx";
 import { SeatsPane } from "./seats.tsx";
 import { TimelinePane } from "./timeline.tsx";
@@ -80,6 +82,7 @@ export function FactoryShell({
   const [busyAct, setBusyAct] = useState<string | null>(null);
   const [checkingUpdates, setCheckingUpdates] = useState(false);
   const [autoCheckedPlugins, setAutoCheckedPlugins] = useState(false);
+  const vaultResponses = useRef(createResponseOrder());
   const [vaultNote, setVaultNote] = useState<VaultNote | null>(null);
   const [laneNote, setLaneNote] = useState<string | null>(null);
   const [retroNote, setRetroNote] = useState<string | null>(null);
@@ -96,13 +99,15 @@ export function FactoryShell({
     async () => {
       const r = await snapshotCall({ projectRoot: scopeRoot });
       if (!r.ok) return { ok: false as const, code: r.code, error: r.error };
+      vaultResponses.current.invalidate();
       return { ok: true as const, value: r.view };
     },
     `factory:${scopeRoot ?? "global"}:${bump}`,
-    (view) => pollEvery((view?.kpis.running ?? 0) + (view?.kpis.needsHuman ?? 0) > 0),
+    (view) => pollEvery((view?.kpis.running ?? 0) + (view?.kpis.needsHuman ?? 0) > 0 || (view?.vault.historyImports ?? []).some((item) => item.status === "pending" || item.status === "staged")),
   );
   const view = poll.value;
   const now = useNow(1000);
+  useEffect(() => { if (view !== null) setVaultNote(null); }, [view]);
 
   // Automatically check for plugin updates once when the Owner opens the Plugins tab
   // if update status has never been checked or is older than 5 minutes (v0.0.25, ADR 0012 §4).
@@ -122,28 +127,30 @@ export function FactoryShell({
     });
   }, [tab, view?.pluginsCheckedAt, checkingUpdates, autoCheckedPlugins]);
 
-  const act = async (name: string, run: () => Promise<{ ok: boolean; error?: string | null; summary?: string }>): Promise<boolean> => {
+  const act = async (name: string, run: () => Promise<{ ok: boolean; error?: string | null; summary?: string; historyImports?: VaultStatusView["historyImports"]; vault?: VaultStatusView }>): Promise<boolean> => {
     setBusy(true);
     setBusyAct(name);
     const isVaultAct = isVaultActName(name);
+    const request = vaultResponses.current.begin();
     try {
       const reply = await run();
       if (!reply.ok) {
         const message = reply.error ?? "failed";
         toast.error(`${name}: ${message}`);
-        if (isVaultAct) setVaultNote({ text: `${name}: ${message}`, tone: "statusDanger" });
+        if (isVaultAct && vaultResponses.current.current(request)) setVaultNote({ text: `${name}: ${message}`, tone: "statusDanger" });
         return false;
       }
       const summary = (reply as { summary?: string }).summary;
       if (typeof summary === "string" && summary.trim() !== "") {
-        toast.show(summary, { variant: "success" });
-        if (isVaultAct) setVaultNote({ text: summary, tone: "statusSuccess" });
+        const feedback = actionFeedback(reply);
+        toast.show(feedback.text, { variant: feedback.tone === "statusSuccess" ? "success" : "warning" });
+        if (isVaultAct && vaultResponses.current.current(request)) setVaultNote(feedback);
       }
       return true;
     } catch (error) {
       const message = String(error);
       toast.error(`${name}: ${message}`);
-      if (isVaultAct) setVaultNote({ text: `${name}: ${message}`, tone: "statusDanger" });
+      if (isVaultAct && vaultResponses.current.current(request)) setVaultNote({ text: `${name}: ${message}`, tone: "statusDanger" });
       return false;
     } finally {
       setBusy(false);

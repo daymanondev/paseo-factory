@@ -2656,7 +2656,11 @@ test("vault.pull: Vault sync through the handlers — cached checkout hydrated a
 
   assert.deepEqual(factory.ledger.events.filter((event) => event.event === "contract_set").map((event) => event.task), ["T-LOCAL"]);
   assert.equal(factory.history.status()[0]?.status, "conflicted", "legacy histories need explicit migration before admission");
-  assert.equal(reply.historyImports?.[0]?.status, "pending", "transport completion reports staging before the outer operation drains");
+  assert.equal(reply.historyImports?.[0]?.status, "conflicted", "the reply includes the writer decision after the maintenance lease drains");
+  const { vaultPull } = await import("../plugin/shared/rpc.ts");
+  const wire = vaultPull.output.parse(reply); assert.ok(wire.ok);
+  assert.deepEqual(wire.historyImports, reply.historyImports);
+  assert.equal(wire.vault.historyImports?.[0]?.status, "conflicted");
 
 });
 
@@ -4228,3 +4232,25 @@ test("v0.0.30 seam 4 — per-plugin fault isolation: a batch plugin.source.statu
 
 
 
+
+test("Vault snapshots and existing RPC schemas expose pending then conflicted admission without changing transport stamps", async (t) => {
+  const { handlers, factory } = makeSurface(t);
+  await handlers.vaultConfigure({ repo: "owner/vault", branch: "main" });
+  let release!: () => void, entered!: () => void;
+  const ready = new Promise<void>((done) => { entered = done; });
+  const held = new Promise<void>((done) => { release = done; });
+  const operation = factory.history.runOperation(async () => { entered(); await held; });
+  await ready;
+  try {
+    const staged = await handlers.historyImport({ sources: [{ nodeId: "remote", lines: "retained original\n" }] });
+    assert.equal(staged.imports[0]?.status, "pending");
+    const pending = await handlers.snapshot({}); assert.ok(pending.ok); if (!pending.ok) return;
+    const { VaultStatusViewSchema } = await import("../plugin/shared/view.ts");
+    assert.equal(VaultStatusViewSchema.parse(pending.view.vault).historyImports?.[0]?.status, "pending");
+    assert.equal(pending.view.vault.lastHydratedAt, null);
+  } finally { release(); await operation; }
+  const conflicted = await handlers.snapshot({}); assert.ok(conflicted.ok); if (!conflicted.ok) return;
+  assert.equal(conflicted.view.vault.historyImports?.[0]?.status, "conflicted");
+  assert.equal(conflicted.view.vault.lastHydratedAt, null);
+  assert.match(JSON.stringify(conflicted.view.vault.historyImports), /invalid|migration|JSON/);
+});

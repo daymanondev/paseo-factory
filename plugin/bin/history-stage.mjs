@@ -586,6 +586,10 @@ function bindingProblems(event, events, binding, files) {
   if (contract.base !== void 0 && binding.base !== contract.base) reasons.push("Contract base commit has no verified local binding");
   if (event.event === "spawn_dispatched" && event.worktree !== void 0 && (binding.worktree !== event.worktree || !isAbsolute2(event.worktree))) reasons.push("spawn has no verified local Task worktree binding");
   if (event.event === "gate_finished") {
+    if (event.verdict === "green") {
+      if (!events.some((candidate) => candidate.event === "gate_started" && candidate.epoch_id === event.epoch_id && candidate.attempt === event.attempt && candidate.seq < event.seq)) reasons.push("green Gate has no prior Gate start evidence; retain the original history for resolution");
+      if (typeof event.outputPath !== "string" || event.outputPath.trim() === "") reasons.push("green Gate has no output log with a verified local event binding");
+    }
     if (event.sha !== void 0 && !binding.commits?.includes(event.sha)) reasons.push("Gate commit is unavailable in the verified local Workspace");
     const claim = events.find((candidate) => candidate.event === "claim_reported" && candidate.epoch_id === event.epoch_id && candidate.attempt === event.attempt);
     if (event.sha !== void 0 && claim?.event === "claim_reported" && !/^[a-f0-9]+$/i.test(claim.sha) && !binding.claims?.some((resolution) => resolution.eventId === claim.event_id && resolution.sha === event.sha)) reasons.push("symbolic Claim has no demonstrated commit resolution; current HEAD cannot stand in for source evidence");
@@ -601,6 +605,13 @@ function bindingProblems(event, events, binding, files) {
 }
 
 // src/history-stage.ts
+function projectHistoryTarget(stateDir, slug) {
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(slug)) throw new FactoryError("unknown-project", "history target must name a local Project");
+  const path = join(stateDir, "projects", slug, "ledger.jsonl");
+  const expected = join(historyTargetPath(stateDir), "projects", slug, "ledger.jsonl");
+  if (historyTargetPath(path) !== expected) throw new FactoryError("history-target-alias", "Project history target aliases another state directory; restore an isolated Project state directory before import");
+  return path;
+}
 function historyTargetPath(path) {
   let ancestor = resolve2(path);
   const missing = [];
@@ -730,6 +741,7 @@ export {
   loadImportManifest,
   makeDurableDirectory,
   observeStagedImports,
+  projectHistoryTarget,
   publicImportStatus,
   readLedgerImports,
   saveImportManifest,

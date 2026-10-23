@@ -11,12 +11,12 @@
  */
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
-import { FactoryViewSchema, LaneNameSchema, TaskDetailViewSchema, VaultStatusViewSchema } from "./view.ts";
+import { ImportStatusSchema, FactoryViewSchema, LaneNameSchema, TaskDetailViewSchema, VaultStatusViewSchema } from "./view.ts";
 
 /** Every handler's refusal shape: a stable machine code plus the human sentence. */
 export const Failure = z.object({ ok: z.literal(false), code: z.string(), error: z.string() });
 
-export const ImportStatusSchema = z.object({ id: z.string(), target: z.string(), status: z.enum(["staged", "pending", "applied", "conflicted"]), added: z.number().optional(), duplicates: z.number().optional(), conflicts: z.array(z.object({ reason: z.string(), sourceId: z.string().optional(), eventId: z.string().optional() })).optional(), diagnostics: z.array(z.string()) });
+export { ImportStatusSchema } from "./view.ts";
 
 export const snapshot = defineRpc({
   name: "factory.snapshot",
@@ -206,6 +206,8 @@ export const pluginsInstall = defineRpc({
     source: z.string().optional(),
     /** Optional Git branch, tag, or commit ref when installing from a Git source. */
     ref: z.string().optional(),
+    mergeLedgers: z.boolean().optional(),
+    overwriteConfigs: z.boolean().optional(),
   }),
   output: z.union([z.object({ ok: z.literal(true), installed: z.array(z.string()), summary: z.string() }), Failure]),
 });
@@ -303,6 +305,7 @@ export const vaultSync = defineRpc({
     z.object({
       ok: z.literal(true),
       vault: VaultStatusViewSchema,
+      historyImports: z.array(ImportStatusSchema).optional(),
       createdRepo: z.boolean(),
       hydratedFiles: z.array(z.string()),
       pushedFiles: z.array(z.string()),
@@ -334,6 +337,7 @@ export const vaultImport = defineRpc({
     z.object({
       ok: z.literal(true),
       vault: VaultStatusViewSchema,
+      historyImports: z.array(ImportStatusSchema).optional(),
       importedFiles: z.array(z.string()),
       pushed: z.boolean(),
       summary: z.string(),

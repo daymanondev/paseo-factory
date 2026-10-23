@@ -13,12 +13,13 @@ import { historyHash } from "./history-identity.ts";
 import { parseLedgerJsonl } from "./ledger-validation.ts";
 import { planHistoryImport } from "./history-import.ts";
 import type { HistoryImportSource, VerifiedImportBinding } from "./history-import.ts";
-import { historyTargetPath, fsyncDirectory, makeDurableDirectory, importDirectory, importSources, loadImportManifest, observeStagedImports, readLedgerImports, saveImportManifest, stageLedgerImport, writeDurableFile } from "./history-stage.ts";
+import { projectHistoryTarget, historyTargetPath, fsyncDirectory, makeDurableDirectory, importDirectory, importSources, loadImportManifest, observeStagedImports, readLedgerImports, saveImportManifest, stageLedgerImport, writeDurableFile } from "./history-stage.ts";
 import type { ImportStatus } from "./history-stage.ts";
-import { listProjectRegistrations, readProjectRegistration, projectStateDir } from "./project.ts";
+import { listProjectRegistrations, readProjectRegistration } from "./project.ts";
 import { Ledger } from "./ledger.ts";
 
 const owners = new Map<string, LedgerAdmission>();
+const offlineMaintenance = new AsyncLocalStorage<{ state: string; live: boolean }>();
 const context = new AsyncLocalStorage<{ owner: LedgerAdmission; live: boolean }>();
 
 export class LedgerAdmission {
@@ -50,6 +51,39 @@ export class LedgerAdmission {
     try { process.kill(prior.pid, 0); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ESRCH") return; throw error; }
     throw new FactoryError("ledger-writer-active", `Ledger owner process ${prior.pid} is active`);
+  }
+  /** Canonical associated-file boundary for Vault and offline maintenance callers.
+   * A separate CLI cannot borrow a running process's ownership. */
+  static async withStateMaintenance<T>(stateDir: string, fn: () => T | Promise<T>): Promise<T> {
+    const assertReady = () => {
+      const id = pendingUpgradeFor(stateDir);
+      if (id !== undefined) throw new FactoryError("upgrade-recovery-required", `Upgrade ${id} is incomplete; resume or restore before Vault materialization`);
+    };
+    assertReady();
+    const path = join(stateDir, "ledger.jsonl");
+    const owner = owners.get(historyTargetPath(path));
+    if (owner !== undefined) return owner.withExclusiveMaintenance(() => { assertReady(); return fn(); });
+    const release = LedgerAdmission.reserve(path);
+    try {
+      LedgerAdmission.assertAvailable(path); assertReady();
+      const lease = { state: historyTargetPath(stateDir), live: true };
+      try { return await offlineMaintenance.run(lease, fn); } finally { lease.live = false; }
+    }
+    catch (error) {
+      if (error instanceof FactoryError && error.code === "ledger-writer-active") throw new FactoryError("vault-owner-required", "Vault materialization requires the running Factory owner; use the Vault RPC or stop the owner before an offline CLI operation. History snapshots can still be staged separately.");
+      throw error;
+    } finally { release(); }
+  }
+  static stateMutation<T>(stateDir: string, fn: () => T): T {
+    const lease = offlineMaintenance.getStore();
+    if (lease?.live && lease.state === historyTargetPath(stateDir)) return fn();
+    const id = pendingUpgradeFor(stateDir);
+    if (id !== undefined) throw new FactoryError("upgrade-recovery-required", `Upgrade ${id} is incomplete; resume or restore before changing Vault configuration`);
+    const path = join(stateDir, "ledger.jsonl");
+    const owner = owners.get(historyTargetPath(path));
+    if (owner !== undefined) return owner.runSync(fn);
+    const release = LedgerAdmission.reserve(path);
+    try { LedgerAdmission.assertAvailable(path); return fn(); } finally { release(); }
   }
   readonly ledger: Ledger;
   readonly stateDir: string;
@@ -253,7 +287,7 @@ export class LedgerAdmission {
   }
   #projectPath(slug: string): string {
     if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(slug) || readProjectRegistration(this.stateDir, slug) === undefined) throw new FactoryError("unknown-project", "history target must be a registered local Project");
-    return join(projectStateDir(this.stateDir, slug), "ledger.jsonl");
+    return projectHistoryTarget(this.stateDir, slug);
   }
   #projectOwner(slug: string, preserveTail = false): LedgerAdmission {
     const path = this.#projectPath(slug);
@@ -275,11 +309,15 @@ export class LedgerAdmission {
   }
   #bindings(sources: readonly HistoryImportSource[]): VerifiedImportBinding[] {
     const knownRoots = new Set<string>();
-    for (const event of this.ledger.events) if (event.event === "contract_set") {
-      try { knownRoots.add(realpathSync(event.workspace)); } catch { /* unavailable roots establish no binding */ }
-    }
-    for (const project of listProjectRegistrations(this.stateDir)) {
+    const global = historyTargetPath(this.ledger.path) === historyTargetPath(join(this.stateDir, "ledger.jsonl"));
+    const registrations = global ? listProjectRegistrations(this.stateDir) : [readProjectRegistration(this.stateDir, basename(dirname(this.ledger.path)))].filter((project) => project !== undefined);
+    for (const project of registrations) {
       try { knownRoots.add(realpathSync(project.root)); } catch { /* unavailable Project */ }
+    }
+    // Unregistered legacy/global Tasks can still prove their own local root.
+    // A Project target's existing payload cannot expand its registry binding.
+    if (global) for (const event of this.ledger.events) if (event.event === "contract_set") {
+      try { knownRoots.add(realpathSync(event.workspace)); } catch { /* unavailable roots establish no binding */ }
     }
     const bindings = new Map<string, VerifiedImportBinding>();
     for (const source of sources) {

@@ -842,7 +842,7 @@ if (command === "vault") {
         ...(values["merge-ledgers"] ? { mergeLedgers: true } : {}),
         ...(values["overwrite-configs"] ? { overwriteConfigs: true } : {}),
       });
-      console.log(JSON.stringify({ ok: true, mode: "direct", repo: result.repo, ref: result.ref, hydratedFiles: result.hydratedFiles, vault: vault.readVaultStatus(home) }, null, 2));
+      console.log(JSON.stringify({ ok: true, mode: "direct", repo: result.repo, ref: result.ref, hydratedFiles: result.hydratedFiles, historyImports: result.historyImports, vault: vault.readVaultStatus(home) }, null, 2));
       process.exit(0);
     }
 
@@ -853,7 +853,7 @@ if (command === "vault") {
         ...(values["merge-ledgers"] ? { mergeLedgers: true } : {}),
         ...(values["overwrite-configs"] ? { overwriteConfigs: true } : {}),
       });
-      console.log(JSON.stringify({ ok: true, mode: "sync", hydratedFiles: result.hydratedFiles, vault: vault.readVaultStatus(home) }, null, 2));
+      console.log(JSON.stringify({ ok: true, mode: "sync", hydratedFiles: result.hydratedFiles, historyImports: result.historyImports, vault: vault.readVaultStatus(home) }, null, 2));
       process.exit(0);
     }
 

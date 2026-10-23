@@ -28,6 +28,15 @@ export interface ImportManifest extends ImportStatus {
   sequenceMaps?: unknown;
 }
 
+/** A Project destination is isolated state, never a filesystem alias to another Ledger. */
+export function projectHistoryTarget(stateDir: string, slug: string): string {
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(slug)) throw new FactoryError("unknown-project", "history target must name a local Project");
+  const path = join(stateDir, "projects", slug, "ledger.jsonl");
+  const expected = join(historyTargetPath(stateDir), "projects", slug, "ledger.jsonl");
+  if (historyTargetPath(path) !== expected) throw new FactoryError("history-target-alias", "Project history target aliases another state directory; restore an isolated Project state directory before import");
+  return path;
+}
+
 /** One physical target identity, including paths whose final directories do not exist yet. */
 export function historyTargetPath(path: string): string {
   let ancestor = resolve(path);
