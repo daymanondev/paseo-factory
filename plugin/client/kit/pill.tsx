@@ -238,16 +238,18 @@ export function TabBar({
   active,
   onPick,
   counts,
+  compact = false,
 }: {
   theme: PluginTheme;
   active: TabId;
   onPick: (tab: TabId) => void;
   counts?: Partial<Record<TabId, number>>;
+  compact?: boolean;
 }) {
-  const tabs: { id: TabId; label: string; icon: string }[] = [
+  const tabs: { id: TabId; label: string; shortLabel?: string; icon: string }[] = [
     { id: "tasks", label: "Tasks", icon: "CheckSquare" },
-    { id: "seats", label: "Seats & Models", icon: "Cpu" },
-    { id: "timeline", label: "Timeline & Retro", icon: "Activity" },
+    { id: "seats", label: "Seats & Models", shortLabel: "Seats", icon: "Cpu" },
+    { id: "timeline", label: "Timeline & Retro", shortLabel: "Timeline", icon: "Activity" },
     { id: "vault", label: "Vault", icon: "Shield" },
     { id: "plugins", label: "Plugins", icon: "Blocks" },
   ];
@@ -256,7 +258,7 @@ export function TabBar({
       style={{
         flexDirection: "row",
         alignItems: "center",
-        alignSelf: "flex-start",
+        alignSelf: compact ? "stretch" : "flex-start",
         flexWrap: "wrap",
         gap: 4,
         padding: 3,
@@ -276,7 +278,7 @@ export function TabBar({
             onPress={() => onPick(tab.id)}
             style={(state) => ({
               minHeight: CONTROL_H - 4,
-              paddingHorizontal: SPACING[3],
+              paddingHorizontal: compact ? SPACING[2] : SPACING[3],
               paddingVertical: 4,
               borderRadius: RADIUS.md,
               borderWidth: 1,
@@ -288,6 +290,8 @@ export function TabBar({
                   : "transparent",
               flexDirection: "row",
               alignItems: "center",
+              justifyContent: "center",
+              ...(compact ? { flexGrow: 1 } : {}),
               gap: SPACING[1.5],
             })}
           >
@@ -295,11 +299,13 @@ export function TabBar({
             <Text
               style={{
                 ...text(theme, "section"),
+                fontSize: compact ? 12 : 13,
                 fontWeight: on ? "600" : "500",
                 color: on ? theme.colors.accent : theme.colors.foreground,
               }}
+              numberOfLines={1}
             >
-              {tab.label}
+              {compact && tab.shortLabel !== undefined ? tab.shortLabel : tab.label}
             </Text>
             {typeof count === "number" && count > 0 ? (
               <View

@@ -13,18 +13,18 @@ export const SCREEN_ID = "paseo-factory";
 
 /** The global screen: every workspace's verification line. */
 export function FactoryScreen({ theme, layout, navigation, host }: PluginSurfaceProps) {
-  return <FactoryShell theme={theme} navigation={navigation} serverId={host.id} />;
+  return <FactoryShell theme={theme} layout={layout} navigation={navigation} serverId={host.id} />;
 }
 
 /** The settings screen: lane config, supervisor controls, diagnostics — opens on Seats & Models. */
 export function FactorySettings({ theme, layout, navigation, host }: PluginSurfaceProps) {
-  return <FactoryShell theme={theme} navigation={navigation} serverId={host.id} initialTab="seats" showDiagnostics />;
+  return <FactoryShell theme={theme} layout={layout} navigation={navigation} serverId={host.id} initialTab="seats" showDiagnostics />;
 }
 
 /** The workspace panel: the shell scoped to this workspace's directory. */
 export function FactoryPanel({ theme, layout, navigation, host, workspaceId }: PluginWorkspacePanelProps) {
   const dir = useWorkspace(workspaceId, (workspace) => workspace.directory);
-  return <FactoryShell theme={theme} dir={dir ?? undefined} navigation={navigation} serverId={host.id} />;
+  return <FactoryShell theme={theme} layout={layout} dir={dir ?? undefined} navigation={navigation} serverId={host.id} />;
 }
 
 /** The sidebar header item: one row, opens the global screen. */

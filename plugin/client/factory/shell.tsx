@@ -45,6 +45,7 @@ type DetailState = TaskDetailModalState;
 
 export function FactoryShell({
   theme,
+  layout,
   dir,
   navigation,
   serverId,
@@ -52,6 +53,7 @@ export function FactoryShell({
   showDiagnostics = false,
 }: {
   theme: PluginTheme;
+  layout?: { compact: boolean; platform?: "ios" | "android" | "web" };
   /** The workspace panel's directory scope; undefined on the global screen. */
   dir?: string;
   navigation?: Navigation;
@@ -97,14 +99,22 @@ export function FactoryShell({
   const [laneNote, setLaneNote] = useState<string | null>(null);
   const [retroNote, setRetroNote] = useState<string | null>(null);
   const [detail, setDetail] = useState<DetailState | null>(null);
-  /** The global screen's Project Selector pick — the panel's dir wins when hosted. */
+  /** The Project Switcher's pick — overrides the panel's `dir` once the Owner explicitly picks a project or All projects. */
   const [pickedRoot, setPickedRoot] = useState<string | null>(null);
+  const [hasPickedScope, setHasPickedScope] = useState(false);
+  const [containerWidth, setContainerWidth] = useState<number>(0);
   const lastViewRef = useRef<FactoryView | null>(null);
   const refresh = () => setBump((n) => n + 1);
 
-  // The active Project scope: the workspace panel's directory (auto-bound),
-  // else the selector's pick on the global screen.
-  const scopeRoot = dir ?? pickedRoot ?? undefined;
+  useEffect(() => {
+    setHasPickedScope(false);
+    setPickedRoot(null);
+  }, [dir]);
+
+  // The active Project scope: the Owner's explicit Project Switcher pick when
+  // made (`hasPickedScope`), else the workspace panel's directory (auto-bound).
+  const scopeRoot = hasPickedScope ? (pickedRoot ?? undefined) : (dir ?? pickedRoot ?? undefined);
+  const isCompact = layout?.compact === true || (containerWidth > 0 && containerWidth < 640);
 
   const poll = usePoll(
     async () => {
@@ -268,15 +278,17 @@ export function FactoryShell({
     if (projectRoot === undefined) return;
     void act("Reset Project", () => projectResetCall({ projectRoot }));
   };
-  const deleteProject = (): void => {
-    const projectSlug = view.project?.slug;
-    if (projectRoot === undefined && projectSlug === undefined) return;
+  const deleteProject = (target?: { root?: string; slug?: string }): void => {
+    const targetRoot = target?.root ?? projectRoot;
+    const targetSlug = target?.slug ?? view.project?.slug;
+    if (targetRoot === undefined && targetSlug === undefined) return;
     void act("Delete Project", async () => {
       const reply = await projectDeleteCall({
-        ...(projectRoot === undefined ? {} : { projectRoot }),
-        ...(projectSlug === undefined ? {} : { projectSlug, project: projectSlug }),
+        ...(targetRoot === undefined ? {} : { projectRoot: targetRoot }),
+        ...(targetSlug === undefined ? {} : { projectSlug: targetSlug, project: targetSlug }),
       });
       if (reply.ok) {
+        setHasPickedScope(true);
         setPickedRoot(null);
         setDetail(null);
       }
@@ -287,6 +299,7 @@ export function FactoryShell({
     void act("Add Project", async () => {
       const reply = await projectPickFolderCall({});
       if (reply.ok && !reply.cancelled && typeof reply.path === "string") {
+        setHasPickedScope(true);
         setPickedRoot(reply.path);
         setDetail(null);
       }
@@ -299,6 +312,7 @@ export function FactoryShell({
     void act("Add Project", async () => {
       const reply = await projectAddCall({ projectRoot: trimmed, path: trimmed });
       if (reply.ok) {
+        setHasPickedScope(true);
         setPickedRoot(reply.path);
         setDetail(null);
       }
@@ -332,13 +346,27 @@ export function FactoryShell({
   );
 
   return (
-    <View style={{ flex: 1, backgroundColor: theme.colors.surface0 }}>
-      <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: SPACING[4], paddingBottom: SPACING[6], gap: SPACING[4] }}>
+    <View
+      style={{ flex: 1, backgroundColor: theme.colors.surface0 }}
+      onLayout={(e) => {
+        const w = e.nativeEvent.layout.width;
+        if (w > 0 && Math.abs(w - containerWidth) >= 4) setContainerWidth(w);
+      }}
+    >
+      <ScrollView
+        style={{ flex: 1 }}
+        contentContainerStyle={{
+          padding: isCompact ? SPACING[3] : SPACING[4],
+          paddingBottom: SPACING[6],
+          gap: isCompact ? SPACING[3] : SPACING[4],
+        }}
+      >
         <Header
           theme={theme}
           view={view}
           at={poll.at}
           now={now}
+          compact={isCompact}
           actions={{
             openSupervisor,
             openLead,
@@ -346,7 +374,10 @@ export function FactoryShell({
             deleteProject,
             pickProjectFolder,
             addProject,
-            pickProject: (root) => setPickedRoot(root),
+            pickProject: (root) => {
+              setHasPickedScope(true);
+              setPickedRoot(root);
+            },
             busy,
           }}
         />
@@ -366,6 +397,7 @@ export function FactoryShell({
           theme={theme}
           active={tab}
           onPick={setTab}
+          compact={isCompact}
           counts={{
             tasks: view.tasks.length,
             seats: view.agents.length,
@@ -379,7 +411,9 @@ export function FactoryShell({
           <TasksPane
             theme={theme}
             view={view}
-            dir={dir}
+            dir={hasPickedScope ? undefined : dir}
+            compact={isCompact}
+            containerWidth={containerWidth}
             actions={{
               busy,
               openDetail,

@@ -38,7 +38,13 @@ export interface HeaderActions {
   resetProject(): void;
   /** Owner-only permanent deletion of the selected Project and all its Factory/Paseo records (v0.0.35, ADR 0024/0025). */
   deleteProject(): void;
+  deleteProject(target?: { root?: string; slug?: string }): void;
   busy: boolean;
+}
+
+/** Shortens `/Users/<name>/...` or `/home/<name>/...` to `~/...` so long paths fit cleanly on narrow headers. */
+export function shortenHomePath(path: string): string {
+  return path.replace(/^\/(?:Users|home)\/[^/]+(?=\/|$)/, "~");
 }
 
 function headlineOf(view: FactoryView): string {
@@ -79,18 +85,21 @@ export function Header({
   view,
   at,
   now,
+  compact = false,
   actions,
 }: {
   theme: PluginTheme;
   view: FactoryView;
   at: number | null;
   now: number;
+  compact?: boolean;
   actions: HeaderActions;
 }) {
   const [pickingPath, setPickingPath] = useState(false);
   const [customPath, setCustomPath] = useState("");
   const [confirmingReset, setConfirmingReset] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [confirmingDeleteSlug, setConfirmingDeleteSlug] = useState<string | null>(null);
 
   useEffect(() => {
     if (!confirmingReset) return;
@@ -103,6 +112,12 @@ export function Header({
     const timer = setTimeout(() => setConfirmingDelete(false), 5000);
     return () => clearTimeout(timer);
   }, [confirmingDelete]);
+
+  useEffect(() => {
+    if (confirmingDeleteSlug === null) return;
+    const timer = setTimeout(() => setConfirmingDeleteSlug(null), 5000);
+    return () => clearTimeout(timer);
+  }, [confirmingDeleteSlug]);
 
   const busy = view.kpis.running + view.kpis.needsHuman > 0;
   const fresh = at !== null && now - at <= pollEvery(busy) + GRACE_MS;
@@ -207,7 +222,25 @@ export function Header({
             onPress={() => actions.pickProject(null)}
           />
           {view.projects.map((entry) => (
-            <View key={entry.slug} style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1] }}>
+            <View
+              key={entry.slug}
+              style={{
+                flexDirection: "row",
+                alignItems: "center",
+                flexWrap: "wrap",
+                gap: SPACING[1],
+                ...(entry.missingRoot
+                  ? {
+                      padding: 2,
+                      paddingRight: SPACING[1.5],
+                      borderRadius: RADIUS.md,
+                      borderWidth: 1,
+                      borderColor: tint(theme.colors.statusDanger, "55"),
+                      backgroundColor: tint(theme.colors.statusDanger, "10"),
+                    }
+                  : {}),
+              }}
+            >
               <Chip
                 theme={theme}
                 label={projectLabel(entry.slug, entry.root, entry.name)}
@@ -216,10 +249,63 @@ export function Header({
                 icon={entry.missingRoot ? "AlertTriangle" : "FolderGit2"}
                 onPress={() => actions.pickProject(entry.root)}
               />
-              {entry.missingRoot ? <Pill theme={theme} label="Missing folder" tone="statusDanger" lit /> : null}
+              {entry.missingRoot ? (
+                <>
+                  <Pill theme={theme} label="Missing folder" tone="statusDanger" lit />
+                  {confirmingDeleteSlug === entry.slug ? (
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1] }}>
+                      <Btn
+                        theme={theme}
+                        small
+                        solid
+                        icon="Trash2"
+                        label="Confirm Delete"
+                        tone="statusDanger"
+                        disabled={actions.busy}
+                        onPress={() => {
+                          setConfirmingDeleteSlug(null);
+                          actions.deleteProject({ root: entry.root, slug: entry.slug });
+                        }}
+                      />
+                      <Btn
+                        theme={theme}
+                        small
+                        icon="X"
+                        label="Cancel"
+                        tone="foregroundMuted"
+                        disabled={actions.busy}
+                        onPress={() => setConfirmingDeleteSlug(null)}
+                      />
+                    </View>
+                  ) : (
+                    <Btn
+                      theme={theme}
+                      small
+                      solid
+                      icon="Trash2"
+                      label="Delete"
+                      tone="statusDanger"
+                      disabled={actions.busy}
+                      onPress={() => {
+                        setConfirmingReset(false);
+                        setConfirmingDelete(false);
+                        setConfirmingDeleteSlug(entry.slug);
+                      }}
+                    />
+                  )}
+                </>
+              ) : null}
             </View>
           ))}
-          <View style={{ marginLeft: "auto", flexDirection: "row", alignItems: "center", gap: SPACING[1.5], flexWrap: "wrap" }}>
+          <View
+            style={{
+              ...(compact ? { width: "100%", paddingTop: SPACING[0.5] } : { marginLeft: "auto" }),
+              flexDirection: "row",
+              alignItems: "center",
+              gap: SPACING[1.5],
+              flexWrap: "wrap",
+            }}
+          >
             <Btn
               theme={theme}
               small
@@ -298,20 +384,31 @@ export function Header({
               flexWrap: "wrap",
               gap: SPACING[2],
               borderTopWidth: 1,
-              borderTopColor: theme.colors.border,
+              borderTopColor: project.missingRoot ? tint(theme.colors.statusDanger, "55") : theme.colors.border,
               paddingTop: SPACING[2],
+              ...(project.missingRoot
+                ? {
+                    padding: SPACING[2.5],
+                    borderRadius: RADIUS.md,
+                    borderWidth: 1,
+                    borderColor: tint(theme.colors.statusDanger, "66"),
+                    backgroundColor: tint(theme.colors.statusDanger, "12"),
+                  }
+                : {}),
             }}
           >
             <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5], flexShrink: 1 }}>
               <Text style={text(theme, "rowTitle")}>{projectLabel(project.slug, project.root, project.name)}</Text>
               <Pill theme={theme} label={project.slug} mono />
-              <Text style={text(theme, "code")} numberOfLines={1}>
-                {project.root}
+              <Text style={{ ...text(theme, "code"), color: theme.colors.foregroundMuted }} numberOfLines={1}>
+                {shortenHomePath(project.root)}
               </Text>
               {project.missingRoot ? (
                 <>
                   <Pill theme={theme} label="Missing folder" tone="statusDanger" lit />
-                  <Text style={text(theme, "label", "statusDanger")}>Folder deleted on disk</Text>
+                  <Text style={text(theme, "label", "statusDanger")}>
+                    Folder deleted on disk — delete this project to purge all tasks, seats, and Paseo records
+                  </Text>
                 </>
               ) : null}
             </View>
@@ -320,24 +417,29 @@ export function Header({
                 Paseo's native New Chat picker ("Supervisor (Factory)") — the
                 Supervisor spawns the Lead itself. The Header reports each
                 seat's live status with an Open jump to its conversation while
-                it lives, and the picker hint while it is vacant. */}
+                it lives, and the picker hint while it is vacant (suppressed
+                when the project's folder is missing on disk). */}
             <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1.5], flexWrap: "wrap" }}>
-              {view.supervisor !== null ? (
-                <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1.5], flexWrap: "wrap" }}>
-                  <SeatState theme={theme} name="Supervisor" status={view.supervisor.status} />
-                  <Btn theme={theme} small icon="Shield" label="Open Supervisor" tone="accent" onPress={() => actions.openSupervisor()} />
-                </View>
-              ) : (
-                <Text style={text(theme, "meta")}>Select "Supervisor (Factory)" in New Chat to start</Text>
-              )}
-              {view.lead !== null ? (
-                <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1.5], flexWrap: "wrap" }}>
-                  <SeatState theme={theme} name="Lead" status={view.lead.status} />
-                  <Btn theme={theme} small icon="Compass" label="Open Lead" tone="accent" onPress={() => actions.openLead()} />
-                </View>
-              ) : (
-                <Text style={text(theme, "meta")}>Spawned automatically by Supervisor</Text>
-              )}
+              {!project.missingRoot ? (
+                <>
+                  {view.supervisor !== null ? (
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1.5], flexWrap: "wrap" }}>
+                      <SeatState theme={theme} name="Supervisor" status={view.supervisor.status} />
+                      <Btn theme={theme} small icon="Shield" label="Open Supervisor" tone="accent" onPress={() => actions.openSupervisor()} />
+                    </View>
+                  ) : (
+                    <Text style={text(theme, "meta")}>Select "Supervisor (Factory)" in New Chat to start</Text>
+                  )}
+                  {view.lead !== null ? (
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1.5], flexWrap: "wrap" }}>
+                      <SeatState theme={theme} name="Lead" status={view.lead.status} />
+                      <Btn theme={theme} small icon="Compass" label="Open Lead" tone="accent" onPress={() => actions.openLead()} />
+                    </View>
+                  ) : (
+                    <Text style={text(theme, "meta")}>Spawned automatically by Supervisor</Text>
+                  )}
+                </>
+              ) : null}
               {!project.missingRoot ? (
                 confirmingReset ? (
                   <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1] }}>
@@ -375,6 +477,7 @@ export function Header({
                       disabled={actions.busy}
                       onPress={() => {
                         setConfirmingDelete(false);
+                        setConfirmingDeleteSlug(null);
                         setConfirmingReset(true);
                       }}
                     />
@@ -393,7 +496,7 @@ export function Header({
                     disabled={actions.busy}
                     onPress={() => {
                       setConfirmingDelete(false);
-                      actions.deleteProject();
+                      actions.deleteProject({ root: project.root, slug: project.slug });
                     }}
                   />
                   <Btn
@@ -418,6 +521,7 @@ export function Header({
                     disabled={actions.busy}
                     onPress={() => {
                       setConfirmingReset(false);
+                      setConfirmingDeleteSlug(null);
                       setConfirmingDelete(true);
                     }}
                   />
