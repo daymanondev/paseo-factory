@@ -1,6 +1,6 @@
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -24,7 +24,8 @@ import {
 } from "../plugin/bin/driver.mjs";
 import { prepareTaskWorkspace, prepareTaskWorktree, parseTaskWorktreePath } from "../plugin/bin/task-worktree.mjs";
 import { resolveProject } from "../plugin/bin/project.mjs";
-import { copyFixture, disposeDir, gitCommitAll, gitCommitChanges, makeTempDir } from "./helpers.ts";
+import { lanesPath, projectLanesPath, resolveRunProvider, saveLanes } from "../plugin/bin/lanes-config.mjs";
+import { copyFixture, disposeDir, gitCommitAll, gitCommitChanges, makeTempDir, repoRoot } from "./helpers.ts";
 import { awaitReply, submit } from "../plugin/bin/spool-client.mjs";
 
 /**
@@ -1414,3 +1415,90 @@ test("leadDecision and taskOutcome scope to the task's current Contract epoch (v
   });
 });
 
+
+// ---- the run provider's Project scoping (v0.0.38, ADR 0026 §3) --------------------------------
+
+test("resolveRunProvider threads projectSlug: the Project's worker lane wins over the machine table, an explicit --provider still wins, and a broken project override is a named refusal", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const workspace = join(dir, "ws");
+  copyFixture("sample-workspace", workspace);
+  gitCommitAll(workspace);
+  const resolved = resolveProject(workspace);
+  assert.ok(resolved.ok, resolved.ok ? "" : resolved.reason);
+  const slug = resolved.ok ? resolved.slug : "";
+
+  // Machine table names one worker; the Project's override names another.
+  saveLanes(stateDir, { worker: "claude/claude-opus-4-6" });
+  saveLanes(stateDir, { worker: "opencode/glm-5.1" }, slug);
+
+  assert.deepEqual(resolveRunProvider(stateDir, undefined, slug), { ok: true, provider: "opencode/glm-5.1" }, "the Project's worker override is honored (v0.0.38)");
+  assert.deepEqual(resolveRunProvider(stateDir, undefined), { ok: true, provider: "claude/claude-opus-4-6" }, "no slug keeps the machine table (the v0.0.13 law)");
+  assert.deepEqual(resolveRunProvider(stateDir, "copilot/gpt-5.4", slug), { ok: true, provider: "copilot/gpt-5.4" }, "an explicit --provider still wins (ADR 0009 §3 precedence)");
+
+  // A broken project override is a named refusal naming the Project's file.
+  writeFileSync(projectLanesPath(stateDir, slug), "{ broken");
+  const broken = resolveRunProvider(stateDir, undefined, slug);
+  assert.ok(!broken.ok);
+  assert.match(broken.reason, new RegExp(slug));
+  assert.equal(existsSync(lanesPath(stateDir)), true, "the machine file stands untouched by the refusal");
+});
+
+/** Runs the Owner CLI as a child process — the test/cli.test.ts pattern, plus the cwd knob the run resolver's fallback anchor reads. */
+function runOwnerCli(args: string[], extraEnv: Record<string, string>, options: { cwd?: string } = {}): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  const ownerCli = join(repoRoot, "plugin", "bin", "factory.mjs");
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [ownerCli, ...args], { env: { ...process.env, ...extraEnv }, ...(options.cwd === undefined ? {} : { cwd: options.cwd }) });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
+    child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
+    const killer = setTimeout(() => child.kill("SIGKILL"), 30_000);
+    child.on("close", (status) => {
+      clearTimeout(killer);
+      resolve({ status, stdout, stderr });
+    });
+  });
+}
+
+test("factory run resolves the first task's Contract.workspace Project when --provider is omitted, and falls back to the cwd Project when no contract names one (v0.0.38, ADR 0026 §3)", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const home = join(dir, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const workspace = join(dir, "ws");
+  copyFixture("sample-workspace", workspace);
+  gitCommitAll(workspace);
+  const second = join(dir, "ws2");
+  copyFixture("sample-workspace", second);
+  gitCommitAll(second);
+
+  const { createFactory } = await import("../plugin/server/core/factory.ts");
+  const factory = createFactory({ stateDir });
+  factory.setContract({ task: "RUNSCOPE1", workspace, gate: "true", artifact: "src/format.ts" });
+
+  // Machine worker vs the first task's Project worker — the banner names which one resolved.
+  saveLanes(stateDir, { worker: "claude/claude-opus-4-6" });
+  const slug = resolveProject(workspace);
+  const slug2 = resolveProject(second);
+  assert.ok(slug.ok && slug2.ok);
+  saveLanes(stateDir, { worker: "opencode/glm-5.1" }, slug.ok ? slug.slug : "");
+  saveLanes(stateDir, { worker: "claude/claude-haiku-4-5" }, slug2.ok ? slug2.slug : "");
+  const env = { PASEO_HOME: home };
+
+  // No daemon lives here — the run dies right after the banner, which is the seam under test.
+  const scoped = await runOwnerCli(["run", "RUNSCOPE1"], env);
+  assert.equal(scoped.status, 2);
+  assert.match(scoped.stdout, /cannot reach the daemon/);
+  assert.match(scoped.stdout, /— provider opencode\/glm-5\.1/, "the first task's Contract.workspace Project worker lane resolved");
+
+  const explicit = await runOwnerCli(["run", "RUNSCOPE1", "--provider", "copilot/gpt-5.4"], env);
+  assert.equal(explicit.status, 2);
+  assert.match(explicit.stdout, /— provider copilot\/gpt-5\.4/, "an explicit --provider overrides the Project lane (ADR 0009 §3)");
+
+  // No contract for the task: the cwd's Project is the anchor (here ws2 via the child's cwd).
+  const cwdAnchored = await runOwnerCli(["run", "NOLANE1"], env, { cwd: second });
+  assert.equal(cwdAnchored.status, 2);
+  assert.match(cwdAnchored.stdout, /— provider claude\/claude-haiku-4-5/, "the current working directory's Project worker lane resolved");
+});

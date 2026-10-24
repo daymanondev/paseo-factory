@@ -32,6 +32,26 @@ import { dirname, join } from "node:path";
 import { provisionPiAgentHome } from "./pi-home.ts";
 import { projectStateDir } from "./project.ts";
 
+// ---- Owner-authored Lane profiles (v0.0.38, ADR 0026 §2) -----------------------------------
+// The Lane profile store and its pure operations live in ./lane-profiles.ts
+// and are re-exported here — the one lane-config surface the plugin server's
+// vendored core imports (the `./core/project.ts` precedent).
+
+export {
+  applyLaneProfile,
+  deleteLaneProfile,
+  getLaneProfile,
+  laneProfileIdFromName,
+  laneProfilesPath,
+  listLaneProfiles,
+  mergeLaneProfilesFiles,
+  readLaneProfilesFile,
+  resetProjectLanes,
+  saveLaneProfile,
+  saveLanesBatch,
+} from "./lane-profiles.ts";
+export type { LaneProfile, LaneProfileTombstone, LaneProfilesFile } from "./lane-profiles.ts";
+
 /** The six model-bearing roles — the file's exact key set (5 UI cards; supervisor and lead pair under Seats). */
 export const LANE_NAMES = ["supervisor", "lead", "worker", "watch", "retro", "freshEyes"] as const;
 

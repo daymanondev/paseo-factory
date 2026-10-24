@@ -4,6 +4,8 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { join } from "node:path";
 import { createFactory } from "../plugin/server/core/factory.ts";
 import { CorrelationRegistry } from "../plugin/server/core/correlations.ts";
+import { resolveProject } from "../plugin/server/core/project.ts";
+import { saveLanes } from "../src/lanes.ts";
 import { handleSpoolRequest, parseSpoolRequest, spoolRootFor, startSpool } from "../plugin/server/spool.ts";
 import { disposeDir, gitCommitAll, makeTempDir } from "./helpers.ts";
 
@@ -900,7 +902,8 @@ test("handleSpoolRequest smart-defaults freshEyes on Lead contracts, reports 'fr
   assert.equal(factory.contractFor("T-FE-2")?.freshEyes, undefined);
 
   // 3. Spawn with prompt and daemon records worker correlation in CorrelationRegistry
-  //    and formats config.provider as "factory-peer/<model>" when factory-peer is available.
+  //    and resolves the spawn's provider from the worker lane DIRECTLY — never a
+  //    factory-peer prefix rewrite (v0.0.38, ADR 0026 §1).
   const createdConfigs: Array<{ provider?: string; thinkingOptionId?: string }> = [];
   const fakeDaemon = {
     providers: {
@@ -947,8 +950,8 @@ test("handleSpoolRequest smart-defaults freshEyes on Lead contracts, reports 'fr
   assert.equal(createdConfigs.length, 1);
   assert.equal(
     createdConfigs[0]?.provider,
-    "factory-peer/zai/glm-5.3",
-    "resolvePeerSpawnProvider formats config.provider in 'provider/model' format (factory-peer/<model>), never bare 'factory-peer'",
+    "pi/zai/glm-5.3",
+    "the worker lane restated resolves to the lane's own provider/model — never a factory-peer/<model> prefix rewrite",
   );
   const correlations = new CorrelationRegistry(stateDir);
   const workerCorr = correlations.findByAgentId("agent-spawned-worker-1");
@@ -1068,3 +1071,91 @@ test("handleSpoolRequest refuses delete from supervisor, lead, and agent with se
   assert.equal(factory.ledger.eventsFor("D-1").length, 0);
 });
 
+
+// ---- Seam 2 (v0.0.38, ADR 0026 §1): the peer spawn rides the Project's own worker lane ----
+
+test("Seam 2: resolvePeerSpawnProvider returns Project B's worker lane directly — never a factory-peer prefix rewrite (v0.0.38, ADR 0026 §1)", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const ws = join(dir, "ws");
+  mkdirSync(ws);
+  writeFileSync(join(ws, "artifact"), "ok\n");
+  gitCommitAll(ws, "seed workspace");
+  const resolvedProject = resolveProject(ws);
+  assert.ok(resolvedProject.ok, resolvedProject.ok ? "" : resolvedProject.reason);
+
+  const stateDir = join(dir, "state");
+  const factory = createFactory({ stateDir, eyeCliProbe: () => true });
+  factory.setContract({ task: "T-W", workspace: ws, artifact: "artifact", gate: "true" });
+
+  // Project B's worker lane runs claude — while the machine default (and any
+  // daemon-global factory-peer.extends) would say otherwise.
+  saveLanes(stateDir, { worker: "claude/claude-sonnet-4-6" }, resolvedProject.slug);
+
+  const createdConfigs: Array<{ provider?: string; thinkingOptionId?: string }> = [];
+  const fakeDaemon = {
+    providers: {
+      async listAvailable() {
+        return {
+          providers: [
+            { provider: "opencode", available: true },
+            { provider: "claude", available: true },
+            { provider: "factory-peer", available: true },
+          ],
+        };
+      },
+    },
+    agents: {
+      async list() {
+        return { entries: [] };
+      },
+      async create(opts: { config: { provider?: string; thinkingOptionId?: string } }) {
+        createdConfigs.push(opts.config);
+        return { id: "agent-worker-b1" };
+      },
+      ref() {
+        return { async archive() {} };
+      },
+    },
+  };
+  const deps = { daemon: fakeDaemon as unknown as NonNullable<import("../plugin/server/spool.ts").SpoolDeps["daemon"]> };
+
+  // 1. The default worker-lane spelling ("worker"): the Project's own lane answers.
+  const omitted = await handleSpoolRequest(
+    factory,
+    { id: "sp-b-1", kind: "spawn", task: "T-W", provider: "worker", arity: 1, prompt: "Execute T-W", submitter: "lead-1", seat: "lead" },
+    deps,
+  );
+  assert.equal(omitted.ok, true);
+  assert.equal(createdConfigs.at(-1)?.provider, "claude/claude-sonnet-4-6", "the default worker-lane spelling resolves the Project's worker lane verbatim");
+  assert.notEqual(createdConfigs.at(-1)?.provider, "factory-peer/claude-sonnet-4-6", "never the daemon-global factory-peer prefix");
+
+  // 2. The factory-peer restatement of the same lane: still the Project's lane.
+  const restated = await handleSpoolRequest(
+    factory,
+    { id: "sp-b-2", kind: "spawn", task: "T-W", provider: "factory-peer/claude-sonnet-4-6", arity: 1, prompt: "Execute T-W", submitter: "lead-1", seat: "lead" },
+    deps,
+  );
+  assert.equal(restated.ok, true);
+  assert.equal(createdConfigs.at(-1)?.provider, "claude/claude-sonnet-4-6", "a factory-peer/<model> restatement resolves back onto the Project's worker lane");
+
+  // 3. An explicit override naming a different model keeps its own value verbatim.
+  const override = await handleSpoolRequest(
+    factory,
+    { id: "sp-b-3", kind: "spawn", task: "T-W", provider: "codex/gpt-5.4", arity: 1, prompt: "Execute T-W", submitter: "lead-1", seat: "lead" },
+    deps,
+  );
+  assert.equal(override.ok, true);
+  assert.equal(createdConfigs.at(-1)?.provider, "codex/gpt-5.4", "an explicit provider/model override is never rewritten");
+
+  // 4. The Project's worker lane with a thinking level carries the suffix.
+  saveLanes(stateDir, { worker: "claude/claude-sonnet-4-6:high" }, resolvedProject.slug);
+  const withThinking = await handleSpoolRequest(
+    factory,
+    { id: "sp-b-4", kind: "spawn", task: "T-W", provider: "worker", arity: 1, prompt: "Execute T-W", submitter: "lead-1", seat: "lead" },
+    deps,
+  );
+  assert.equal(withThinking.ok, true);
+  assert.equal(createdConfigs.at(-1)?.provider, "claude/claude-sonnet-4-6");
+  assert.equal(createdConfigs.at(-1)?.thinkingOptionId, "high", "the worker lane's :thinking rides the resolved provider");
+});

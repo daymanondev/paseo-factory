@@ -35,13 +35,18 @@ const MAX_ATTEMPTS = 2;
  * The retro's whole availability surface: the retro lane loads and its CLI
  * answers `--version` (the watch's amendment-2 precedent, generalized).
  * `factory.retro()` refuses before any ask on a `ok: false` here; `probe`
- * overrides the real version probe (tests) and receives the lane.
+ * overrides the real version probe (tests) and receives the lane. The
+ * optional `projectSlug` (v0.0.38, ADR 0026 §1) resolves the retro lane
+ * from the Project's own lanes.json override, falling back to the machine
+ * table when the Project never named one.
  */
 export function retroLaneAvailable(
   stateDir: string,
   probe?: (lane: string) => boolean,
+  projectSlug?: string,
 ): { ok: true; lane: string } | { ok: false; reason: string } {
-  const lanes = loadLanes(stateDir);
+  const scope = projectSlug?.trim();
+  const lanes = loadLanes(stateDir, scope === "" ? undefined : scope);
   if (!lanes.ok) return { ok: false, reason: lanes.reason };
   const lane = lanes.lanes.retro;
   const invocation = laneCliInvocation(lane);
@@ -471,7 +476,8 @@ export type RetroOutcome = Omit<RetroWritten, "seq" | "ts" | "event">;
 
 /**
  * What one pass needs: where the proposals file lands (the stateDir — the
- * retro lane reads from `<stateDir>/lanes.json`), the corpus to prompt with,
+ * retro lane reads from `<stateDir>/lanes.json`, or the Project's own
+ * override when `projectSlug` scopes the pass), the corpus to prompt with,
  * and the two test seams the watch also carries — the budget override and
  * the fake CLI runner.
  */
@@ -489,6 +495,13 @@ export interface RetroPassInput {
   budgetMs?: number;
   /** Lane CLI runner override (tests) — the lane and its tool-less flags stay fixed regardless. */
   copilotRunner?: CopilotRunner;
+  /**
+   * The Project scope (v0.0.38, ADR 0026 §1) — the per-Project lanes.json
+   * override the pass honors; the trailing parameter with the same name
+   * wins when both are given. The retro has no Contract to auto-resolve
+   * from, so an omitted scope keeps the machine-wide lane.
+   */
+  projectSlug?: string;
 }
 
 /**
@@ -499,11 +512,14 @@ export interface RetroPassInput {
  * at the deadline, stderr squash) under two deliberate divergences (ticket
  * 03 item 5+7): the budget is 10 minutes, and parse failures retry once too
  * — a multi-minute generation dying on one malformed brace must not cost the
- * Owner a whole re-run.
+ * Owner a whole re-run. The lane resolves per Project when a scope is given
+ * (v0.0.38, ADR 0026 §1).
  */
-export async function runRetroPass(input: RetroPassInput): Promise<RetroOutcome> {
+export async function runRetroPass(input: RetroPassInput, projectSlug?: string): Promise<RetroOutcome> {
   const started = Date.now();
-  const lanes = loadLanes(input.stateDir);
+  const scopeParam = (projectSlug ?? input.projectSlug)?.trim();
+  const scope = scopeParam === undefined || scopeParam === "" ? undefined : scopeParam;
+  const lanes = loadLanes(input.stateDir, scope);
   const lane = lanes.ok ? lanes.lanes.retro : undefined;
   const failed = (error: string): RetroOutcome => ({
     model: lane ?? "unconfigured",

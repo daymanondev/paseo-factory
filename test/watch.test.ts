@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createFactory } from "../src/factory.ts";
-import { buildCodeAnswers, buildWatchPrompt, renderTimelineTranscript, runWatchPass, WATCH_QUESTIONS } from "../src/watch.ts";
+import { buildCodeAnswers, buildWatchPrompt, renderTimelineTranscript, runWatchPass, watchLaneAvailable, WATCH_QUESTIONS } from "../src/watch.ts";
+import { resolveProject } from "../src/project.ts";
 import { WATCH_TIMELINE_MAX_CHARS } from "../src/constants.ts";
 import type { Factory } from "../src/factory.ts";
 import type { ContractSet, WatchWritten } from "../src/events.ts";
@@ -671,4 +672,86 @@ test("v0.0.13: the watch reads its lane from lanes.json — a pi lane dispatches
     ["--print", "--no-session", "--no-tools", "--no-extensions", "--no-skills", "--no-context-files", "--model", "zai/glm-5.3"],
     "the tool-less flags are the invariant — the pass cannot act by construction",
   );
+});
+
+// ---- the v0.0.38 Project-scoped watch lane (ADR 0026 §1) --------------------------------------
+
+/** Writes one Project's lanes.json override under `<stateDir>/projects/<slug>/`. */
+function writeProjectLanes(stateDir: string, slug: string, lanes: Record<string, string>): void {
+  mkdirSync(join(stateDir, "projects", slug), { recursive: true });
+  writeFileSync(join(stateDir, "projects", slug, "lanes.json"), `${JSON.stringify(lanes, null, 2)}\n`);
+}
+
+test("v0.0.38: watchLaneAvailable and runWatchPass honor the Contract workspace's Project lane — Project A and B differ", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const stateDir = join(dir, "factory");
+
+  // Two real git workspaces — two Projects, two watch lanes; the machine
+  // table names a third, so a wrong scope is always visible in the model.
+  const repoA = join(dir, "ws-a");
+  const repoB = join(dir, "ws-b");
+  const bases = new Map<string, string>();
+  for (const repo of [repoA, repoB]) {
+    mkdirSync(join(repo, "src"), { recursive: true });
+    writeFileSync(join(repo, "src", "format.ts"), "export function pad() {}\n");
+    bases.set(repo, gitCommitAll(repo));
+  }
+  const projectA = resolveProject(repoA);
+  const projectB = resolveProject(repoB);
+  assert.ok(projectA.ok && projectB.ok);
+  assert.notEqual(projectA.slug, projectB.slug);
+  writeLanes(stateDir, { watch: "pi/zai/glm-5.3" });
+  writeProjectLanes(stateDir, projectA.slug, { watch: "claude/claude-sonnet-4-6" });
+  writeProjectLanes(stateDir, projectB.slug, { watch: "copilot/gpt-5.4" });
+
+  const probed: string[] = [];
+  const scopedA = watchLaneAvailable(stateDir, (lane) => (probed.push(lane), true), projectA.slug);
+  assert.ok(scopedA.ok, scopedA.ok ? "" : scopedA.reason);
+  assert.equal(scopedA.lane, "claude/claude-sonnet-4-6", "availability probes the PROJECT's watch lane");
+  const unscoped = watchLaneAvailable(stateDir, (lane) => (probed.push(lane), true));
+  assert.ok(unscoped.ok && unscoped.lane === "pi/zai/glm-5.3", "no slug keeps the machine table");
+  assert.deepEqual(probed, ["claude/claude-sonnet-4-6", "pi/zai/glm-5.3"]);
+
+  const fake = fakeCopilotRunner(() => ({ code: 0, stdout: copilotAnswerLines(ALL_FIVE) }));
+  const contractOf = (workspace: string, task: string): ContractSet => ({
+    seq: 1,
+    ts: "2026-10-24T09:00:00.000Z",
+    event: "contract_set",
+    task,
+    workspace,
+    gate: "true",
+    artifact: "src/format.ts",
+    base: bases.get(workspace)!,
+    watch: true,
+  });
+  const inputOf = (workspace: string, task: string) => ({
+    stateDir,
+    contract: contractOf(workspace, task),
+    task,
+    attempt: 1,
+    sha: bases.get(workspace)!,
+    gateResult: { exit: 0, verdict: "green" as const, note: "", timedOut: false, output: "", artifactPresent: true },
+    gateOutputPath: undefined,
+    scopeViolations: [] as string[],
+    agent: `agent-${task}`,
+    fetchTimeline: timelineFetcher(TIMELINE).fetch,
+    gitBlocks: [] as { rule: string; command: string }[],
+    copilotRunner: fake.runner,
+    budgetMs: 5_000,
+  });
+
+  const outcomeA = await runWatchPass(inputOf(repoA, "W38A"));
+  assert.equal(outcomeA.outcome, "written");
+  assert.equal(outcomeA.model, "claude/claude-sonnet-4-6", "Project A's watch lane answered");
+  assert.equal(fake.calls[0]!.command, "claude");
+
+  const outcomeB = await runWatchPass(inputOf(repoB, "W38B"));
+  assert.equal(outcomeB.outcome, "written");
+  assert.equal(outcomeB.model, "copilot/gpt-5.4", "Project B's watch lane answered — a different family, same machine table");
+  assert.equal(fake.calls[1]!.command, "copilot");
+
+  // The trailing parameter pins the scope explicitly, workspace or not.
+  const pinned = await runWatchPass(inputOf(repoA, "W38C"), projectB.slug);
+  assert.equal(pinned.model, "copilot/gpt-5.4", "an explicit trailing slug overrides the workspace's own Project");
 });

@@ -1888,3 +1888,51 @@ test("same-project contracts reject overlap under glob scopes and permit disjoin
     else assert.doesNotThrow(setSecond, `${first} is disjoint from ${second}`);
   });
 });
+
+// ---- the v0.0.38 Project-scoped station lanes at contract time (ADR 0026 §1) ------------------
+
+/** Writes one Project's lanes.json override under `<stateDir>/projects/<slug>/`. */
+function writeProjectLaneOverrides(stateDir: string, slug: string, lanes: Record<string, string>): void {
+  mkdirSync(join(stateDir, "projects", slug), { recursive: true });
+  writeFileSync(join(stateDir, "projects", slug, "lanes.json"), `${JSON.stringify(lanes, null, 2)}\n`);
+}
+
+test("v0.0.38 (ADR 0026 §1): setContract resolves the freshEyes and watch lanes from the Contract workspace's Project", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact } = makeWorkspace(dir);
+  const project = resolveProject(workspace);
+  assert.ok(project.ok, project.ok ? "" : project.reason);
+  const stateDir = join(dir, "factory");
+  writeProjectLaneOverrides(stateDir, project.slug, { freshEyes: "claude/claude-sonnet-4-6", watch: "claude/claude-opus-4-6" });
+
+  // The fail-fast probes vouch for the PROJECT's lanes — the machine table
+  // (absent here, so the default would be pi/zai/glm-5.3) never answers.
+  const eyeProbes: string[] = [];
+  const watchProbes: string[] = [];
+  const factory = createFactory({
+    stateDir,
+    eyeCliProbe: (lane) => (eyeProbes.push(lane), true),
+    watchCopilotProbe: (lane) => (watchProbes.push(lane), true),
+  });
+  const contract = factory.setContract({ task: "PSC1", workspace, gate: "true", artifact, freshEyes: true, watch: true });
+  assert.equal(contract.freshEyes, true);
+  assert.equal(contract.watch, true);
+  assert.deepEqual(eyeProbes, ["claude/claude-sonnet-4-6"], "the eye probe vouches for the Project's lane");
+  assert.deepEqual(watchProbes, ["claude/claude-opus-4-6"], "the watch probe vouches for the Project's lane");
+
+  // A Project lane whose CLI the host refuses fails fast on the PROJECT lane
+  // — the refusal names it, proving the machine default was never consulted.
+  const refusing = createFactory({ stateDir: join(dir, "factory-refuse"), eyeCliProbe: () => false });
+  writeProjectLaneOverrides(join(dir, "factory-refuse"), project.slug, { freshEyes: "claude/claude-sonnet-4-6" });
+  assert.throws(
+    () => refusing.setContract({ task: "PSC2", workspace, gate: "true", artifact, freshEyes: true }),
+    (err: unknown) => err instanceof Error && factoryErrorCode("eye-unconfigured")(err) && /claude\/claude-sonnet-4-6/.test(err.message),
+  );
+
+  // The Lead smart-default reads the Project's lane too: usable → freshEyes on.
+  const lead = createFactory({ stateDir: join(dir, "factory-lead"), eyeCliProbe: () => true });
+  writeProjectLaneOverrides(join(dir, "factory-lead"), project.slug, { freshEyes: "claude/claude-sonnet-4-6" });
+  const leadContract = lead.setContract({ task: "PSC3", workspace, gate: "true", artifact, seat: "lead" });
+  assert.equal(leadContract.freshEyes, true);
+});

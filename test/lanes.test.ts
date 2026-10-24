@@ -6,15 +6,25 @@ import { join } from "node:path";
 import {
   DEFAULT_LANE,
   LANE_NAMES,
+  applyLaneProfile,
+  defaultLanes,
+  deleteLaneProfile,
+  getLaneProfile,
   laneCliInvocation,
   laneError,
+  laneProfilesPath,
   lanesPath,
+  listLaneProfiles,
   loadLanes,
+  mergeLaneProfilesFiles,
   parseLane,
+  resetProjectLanes,
   runLaneCli,
+  saveLaneProfile,
   saveLanes,
+  saveLanesBatch,
 } from "../src/lanes.ts";
-import type { LaneCliRunner } from "../src/lanes.ts";
+import type { LaneCliRunner, LaneProfile, LaneProfilesFile } from "../src/lanes.ts";
 import { resolveEyeLane } from "../src/fresh-eyes.ts";
 import {
   DEFAULT_LANE as DEFAULT_LANE_MJS,
@@ -24,7 +34,7 @@ import {
   parseLane as parseLaneMjs,
   resolveRunProvider as resolveRunProviderMjs,
 } from "../plugin/bin/lanes-config.mjs";
-import { copilotAnswerLines, disposeDir, gitCommitAll, gitCommitChanges, makeTempDir, repoRoot, writeLanes } from "./helpers.ts";
+import { copilotAnswerLines, disposeDir, factoryErrorCode, gitCommitAll, gitCommitChanges, makeTempDir, repoRoot, writeLanes } from "./helpers.ts";
 import * as core from "../src/index.ts";
 
 /**
@@ -792,3 +802,180 @@ function runCli(args: string[], extraEnv: Record<string, string>): Promise<{ sta
     });
   });
 }
+
+// ---- Owner-authored Lane profiles (v0.0.38, ADR 0026 §2) ------------------------------------
+
+/** A complete 6-lane table with per-call variation. */
+function profileLanes(overrides: Partial<Record<(typeof LANE_NAMES)[number], string>> = {}): LaneProfile["lanes"] {
+  return { ...defaultLanes(), ...overrides };
+}
+
+test("Lane profiles start empty (zero built-ins) and run the save→apply→batch→reset→delete lifecycle", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const stateDir = join(dir, "factory");
+
+  // The store starts clean: no file, no profiles (the Out of Scope law).
+  assert.equal(existsSync(laneProfilesPath(stateDir)), false);
+  assert.deepEqual(listLaneProfiles(stateDir), []);
+
+  // Save derives the id slug from the name; the file appears on first save.
+  const cheap = saveLaneProfile(stateDir, { name: "Cheap Nightly", lanes: profileLanes({ worker: "pi/zai/glm-5.3" }) });
+  assert.equal(cheap.id, "cheap-nightly");
+  const zed = saveLaneProfile(stateDir, { name: "Zed Setup", lanes: profileLanes(), id: "zed" });
+  const alpha = saveLaneProfile(stateDir, { name: "Alpha Setup", lanes: profileLanes(), id: "alpha-2" });
+  assert.deepEqual(
+    listLaneProfiles(stateDir).map((profile) => profile.id),
+    ["alpha-2", "cheap-nightly", "zed"],
+    "list sorts by name, then id",
+  );
+  assert.deepEqual(getLaneProfile(stateDir, "zed"), zed);
+  assert.equal(getLaneProfile(stateDir, "nope"), undefined);
+
+  // Re-saving an existing id updates it in place with a newer updatedAt.
+  const updated = saveLaneProfile(stateDir, { id: "zed", name: "Zed Setup v2", lanes: profileLanes({ lead: "claude/opus-4-8" }), updatedAt: "2026-10-24T12:00:00.000Z" });
+  assert.equal(updated.name, "Zed Setup v2");
+  assert.equal(updated.updatedAt, "2026-10-24T12:00:00.000Z");
+  assert.equal(getLaneProfile(stateDir, "zed")!.lanes.lead, "claude/opus-4-8");
+
+  // Copy-on-apply, per Project: all six lanes land in the Project's own file,
+  // self-contained; the machine table is untouched; the scope is recorded.
+  const appliedProject = applyLaneProfile(stateDir, "cheap-nightly", "acme-api-abc123");
+  assert.equal(appliedProject.path, join(stateDir, "projects", "acme-api-abc123", "lanes.json"));
+  assert.deepEqual(
+    JSON.parse(readFileSync(appliedProject.path, "utf8")),
+    profileLanes({ worker: "pi/zai/glm-5.3" }),
+    "the project file holds exactly the profile's six lanes — no pointer back to profiles.json",
+  );
+  assert.equal(existsSync(lanesPath(stateDir)), false, "a project apply never touches the machine file");
+  let profilesFile = JSON.parse(readFileSync(laneProfilesPath(stateDir), "utf8")) as LaneProfilesFile;
+  assert.deepEqual(profilesFile.activeProfileByScope, { "acme-api-abc123": "cheap-nightly" });
+
+  // Copy-on-apply, machine-wide: "All projects" writes the machine file.
+  const appliedGlobal = applyLaneProfile(stateDir, "cheap-nightly");
+  assert.equal(appliedGlobal.path, lanesPath(stateDir));
+  assert.deepEqual(JSON.parse(readFileSync(lanesPath(stateDir), "utf8")), profileLanes({ worker: "pi/zai/glm-5.3" }));
+  profilesFile = JSON.parse(readFileSync(laneProfilesPath(stateDir), "utf8")) as LaneProfilesFile;
+  assert.deepEqual(profilesFile.activeProfileByScope, { "acme-api-abc123": "cheap-nightly", global: "cheap-nightly" });
+
+  // saveLanesBatch: ONE atomic multi-lane write — an invalid lane anywhere in
+  // the batch refuses the WHOLE batch and writes nothing.
+  const projectLanesPath = join(stateDir, "projects", "acme-api-abc123", "lanes.json");
+  const beforeBatch = readFileSync(projectLanesPath, "utf8");
+  assert.throws(
+    () => saveLanesBatch(stateDir, { watch: "claude/claude-opus-4-6:high", retro: "auto" }, "acme-api-abc123"),
+    factoryErrorCode("invalid-lane"),
+  );
+  assert.equal(readFileSync(projectLanesPath, "utf8"), beforeBatch, "a refused batch leaves the target file byte-identical");
+  const batch = saveLanesBatch(stateDir, { watch: "claude/claude-opus-4-6:high", retro: "claude/claude-opus-4-6:high" }, "acme-api-abc123");
+  assert.deepEqual(
+    JSON.parse(readFileSync(batch.path, "utf8")),
+    profileLanes({ worker: "pi/zai/glm-5.3", watch: "claude/claude-opus-4-6:high", retro: "claude/claude-opus-4-6:high" }),
+    "the batch lands whole in one write",
+  );
+  assert.equal(batch.lanes.watch, "claude/claude-opus-4-6:high");
+
+  // resetProjectLanes: the override file is removed, the scope pointer
+  // cleared, and the reply carries the effective machine table.
+  const reset = resetProjectLanes(stateDir, "acme-api-abc123");
+  assert.equal(reset.removed, true);
+  assert.equal(existsSync(projectLanesPath), false);
+  assert.equal(reset.lanes.watch, "pi/zai/glm-5.3", "the reply is the machine table the Project inherits again");
+  assert.equal(reset.lanes.worker, "pi/zai/glm-5.3");
+  profilesFile = JSON.parse(readFileSync(laneProfilesPath(stateDir), "utf8")) as LaneProfilesFile;
+  assert.deepEqual(profilesFile.activeProfileByScope, { global: "cheap-nightly" }, "the project's scope entry is cleared, the machine's stands");
+  const resetAgain = resetProjectLanes(stateDir, "acme-api-abc123");
+  assert.equal(resetAgain.removed, false, "a second reset names that there was nothing to remove");
+
+  // deleteLaneProfile: tombstone into `deleted`, activeProfileByScope entries
+  // naming the profile removed, the live entry gone.
+  assert.equal(deleteLaneProfile(stateDir, "cheap-nightly", "2026-10-24T13:00:00.000Z"), true);
+  assert.equal(getLaneProfile(stateDir, "cheap-nightly"), undefined);
+  profilesFile = JSON.parse(readFileSync(laneProfilesPath(stateDir), "utf8")) as LaneProfilesFile;
+  assert.deepEqual(profilesFile.deleted, { "cheap-nightly": { deletedAt: "2026-10-24T13:00:00.000Z" } });
+  assert.equal(
+    profilesFile.activeProfileByScope,
+    undefined,
+    "the global scope entry naming the deleted profile is gone — an empty scope map writes no key",
+  );
+  assert.equal(deleteLaneProfile(stateDir, "cheap-nightly"), false, "an unknown id deletes nothing");
+  assert.equal(deleteLaneProfile(stateDir, "never-existed"), false);
+
+  // Re-creating a deleted id clears its tombstone — the profile is live again.
+  const revived = saveLaneProfile(stateDir, { id: "cheap-nightly", name: "Cheap Nightly", lanes: profileLanes() });
+  assert.equal(revived.id, "cheap-nightly");
+  profilesFile = JSON.parse(readFileSync(laneProfilesPath(stateDir), "utf8")) as LaneProfilesFile;
+  assert.equal(profilesFile.deleted, undefined, "the tombstone retired with the revival");
+});
+
+test("Lane profile saves refuse bad ids, missing lanes, and invalid lanes — never a guessed profile", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const stateDir = join(dir, "factory");
+
+  assert.throws(() => saveLaneProfile(stateDir, { id: "Bad_Id!", name: "x", lanes: profileLanes() }), factoryErrorCode("invalid-profile-id"));
+  assert.throws(() => saveLaneProfile(stateDir, { id: "-nope", name: "x", lanes: profileLanes() }), factoryErrorCode("invalid-profile-id"));
+  assert.throws(() => saveLaneProfile(stateDir, { name: "x", lanes: profileLanes({ worker: "auto" }) }), factoryErrorCode("invalid-lane"));
+  const missing = profileLanes();
+  delete (missing as Partial<Record<(typeof LANE_NAMES)[number], string>>).watch;
+  assert.throws(() => saveLaneProfile(stateDir, { name: "x", lanes: missing }), factoryErrorCode("invalid-profile"));
+  assert.throws(() => saveLaneProfile(stateDir, { name: "  ", lanes: profileLanes() }), factoryErrorCode("invalid-profile"));
+  assert.equal(existsSync(laneProfilesPath(stateDir)), false, "a refused save writes no file");
+  assert.throws(() => applyLaneProfile(stateDir, "ghost", "acme-api-abc123"), factoryErrorCode("profile-not-found"));
+  // A name with no slug-able character still derives an addressable id.
+  assert.equal(saveLaneProfile(stateDir, { name: "!!!", lanes: profileLanes() }).id, "profile");
+});
+
+test("mergeLaneProfilesFiles: newer edit wins, deletion tombstones win, disjoint ids union — two machines, one file", () => {
+  const lanesOf = (lead: string) => profileLanes({ lead });
+  // Machine A: edited "shared" at 10:00, created "a-only", still holds "gone".
+  const machineA: LaneProfilesFile = {
+    profiles: {
+      shared: { name: "Shared", lanes: lanesOf("claude/opus-4-8"), updatedAt: "2026-10-24T10:00:00.000Z" },
+      "a-only": { name: "A only", lanes: lanesOf("pi/zai/glm-5.3"), updatedAt: "2026-10-24T09:00:00.000Z" },
+      gone: { name: "Gone", lanes: lanesOf("pi/zai/glm-5.3"), updatedAt: "2026-10-24T08:00:00.000Z" },
+    },
+    activeProfileByScope: { global: "shared" },
+  };
+  // Machine B: edited "shared" LATER at 11:00, created "b-only", deleted "gone".
+  const machineB: LaneProfilesFile = {
+    profiles: {
+      shared: { name: "Shared (B edit)", lanes: lanesOf("copilot/gpt-5.4"), updatedAt: "2026-10-24T11:00:00.000Z" },
+      "b-only": { name: "B only", lanes: lanesOf("claude/claude-sonnet-4-6"), updatedAt: "2026-10-24T09:30:00.000Z" },
+    },
+    deleted: { gone: { deletedAt: "2026-10-24T09:00:00.000Z" } },
+    activeProfileByScope: { "proj-b": "gone" },
+  };
+
+  const merged = mergeLaneProfilesFiles(machineA, machineB);
+  assert.deepEqual(
+    Object.keys(merged.profiles).sort(),
+    ["a-only", "b-only", "shared"],
+    "both sides' ids union — profiles created on different machines combine",
+  );
+  assert.equal(merged.profiles.shared!.name, "Shared (B edit)", "the newer updatedAt edit wins deterministically");
+  assert.equal(merged.profiles.shared!.lanes.lead, "copilot/gpt-5.4");
+  assert.equal(merged.profiles["a-only"]!.name, "A only");
+  assert.equal(merged.deleted?.gone?.deletedAt, "2026-10-24T09:00:00.000Z", "the deletion tombstone wins over the older profile edit");
+  assert.equal(merged.profiles.gone, undefined);
+  assert.deepEqual(merged.activeProfileByScope, { global: "shared" }, "a scope naming a deleted profile is dropped; disjoint scopes union");
+
+  // The reverse argument order is symmetric in outcome: newer still wins.
+  const reversed = mergeLaneProfilesFiles(machineB, machineA);
+  assert.equal(reversed.profiles.shared!.name, "Shared (B edit)");
+  assert.equal(reversed.deleted?.gone?.deletedAt, "2026-10-24T09:00:00.000Z");
+
+  // An exact tie breaks to the local side by default, the remote with preferRemote.
+  const tieA: LaneProfilesFile = { profiles: { t: { name: "T (A)", lanes: lanesOf("pi/zai/glm-5.3"), updatedAt: "2026-10-24T10:00:00.000Z" } } };
+  const tieB: LaneProfilesFile = { profiles: { t: { name: "T (B)", lanes: lanesOf("pi/zai/glm-5.3"), updatedAt: "2026-10-24T10:00:00.000Z" } } };
+  assert.equal(mergeLaneProfilesFiles(tieA, tieB).profiles.t!.name, "T (A)");
+  assert.equal(mergeLaneProfilesFiles(tieA, tieB, { preferRemote: true }).profiles.t!.name, "T (B)");
+
+  // A profile re-saved AFTER its deletion is live again — the newer act wins.
+  const revivedOnA: LaneProfilesFile = {
+    profiles: { gone: { name: "Gone revived", lanes: lanesOf("pi/zai/glm-5.3"), updatedAt: "2026-10-24T10:00:00.000Z" } },
+  };
+  const revived = mergeLaneProfilesFiles(machineB, revivedOnA);
+  assert.equal(revived.profiles.gone!.name, "Gone revived");
+  assert.equal(revived.deleted?.gone, undefined, "the stale tombstone retires when the re-save is newer");
+});

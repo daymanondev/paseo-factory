@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { provisionPiAgentHome, ROLE_PROMPTS } from "../src/pi-home.ts";
 import { disposeDir, makeTempDir } from "./helpers.ts";
@@ -494,4 +494,56 @@ test("provisioning retires pre-isolation contamination left in the harness home 
     ROLE_PROMPTS.agent,
     "a leftover operator APPEND_SYSTEM.md is replaced by the managed role contract (v0.0.20, ADR 0013)",
   );
+});
+
+// ---- the v0.0.38 idempotent symlink provisioning (ADR 0026 §1) -------------------------------
+
+test("v0.0.38 (ADR 0026 §1): an already-correct symlink is left untouched (ino/mtime stable); a wrong one is fixed", (t) => {
+  const dir = makeTempDir("pi-home-test-");
+  disposeDir(t, dir);
+  const source = makeFakePiAgent(dir);
+  const stateDir = join(dir, "factory-state");
+
+  // First provision makes the links: the shared-state links (auth.json) and,
+  // for supervisor, the operator-command links (prompts, skills) the
+  // forbidden-name sweep would previously churn on EVERY call.
+  const first = provisionPiAgentHome({ stateDir, role: "supervisor", sourceAgentDir: source });
+  const watched = ["auth.json", "prompts", "skills"].map((name) => join(first, name));
+  const before = watched.map((path) => {
+    const stat = lstatSync(path);
+    assert.ok(stat.isSymbolicLink(), `${path} starts as a symlink`);
+    return { ino: stat.ino, mtimeMs: stat.mtimeMs };
+  });
+
+  // A re-provision leaves every already-correct link byte-for-byte the same
+  // entry: same inode, same mtime — no remove/recreate race window.
+  const second = provisionPiAgentHome({ stateDir, role: "supervisor", sourceAgentDir: source });
+  assert.equal(second, first);
+  watched.forEach((path, i) => {
+    const stat = lstatSync(path);
+    assert.equal(stat.ino, before[i]!.ino, `${path}: the symlink entry is untouched, never re-made`);
+    assert.equal(stat.mtimeMs, before[i]!.mtimeMs, `${path}: the symlink's mtime is stable across a re-provision`);
+    assert.equal(realpathSync(path), realpathSync(join(source, ["auth.json", "prompts", "skills"][i]!)), `${path} still points at the source home`);
+  });
+
+  // A WRONG link is still fixed: retitle prompts at a stray directory and
+  // re-provision — the sweep retires it and re-links the expected source.
+  const stray = join(dir, "stray-target");
+  mkdirSync(stray, { recursive: true });
+  rmSync(join(second, "prompts"));
+  symlinkSync(stray, join(second, "prompts"));
+  assert.notEqual(lstatSync(join(second, "prompts")).ino, before[1]!.ino, "the tampered link is a new entry");
+  provisionPiAgentHome({ stateDir, role: "supervisor", sourceAgentDir: source });
+  assert.equal(realpathSync(join(second, "prompts")), realpathSync(join(source, "prompts")), "a wrong link is re-linked to the expected source");
+  assert.notEqual(lstatSync(join(second, "prompts")).ino, lstatSync(stray).ino);
+
+  // Contamination still retires: a regular directory named "skills" (not a
+  // link) is swept and re-linked — the sweep keeps its teeth.
+  rmSync(join(second, "skills"));
+  mkdirSync(join(second, "skills"));
+  writeFileSync(join(second, "skills", "evil.txt"), "contamination\n");
+  provisionPiAgentHome({ stateDir, role: "supervisor", sourceAgentDir: source });
+  assert.ok(lstatSync(join(second, "skills")).isSymbolicLink(), "a non-link skills directory is replaced by the expected symlink");
+  assert.equal(realpathSync(join(second, "skills")), realpathSync(join(source, "skills")));
+  assert.equal(existsSync(join(second, "skills", "evil.txt")), false, "the swept directory's contents are gone");
 });

@@ -1,31 +1,61 @@
 /**
  * Tab 2 — Seats & Models (ADR 0009 §2; the Lead lane and live Lead seat
- * arrive in v0.0.14, ADR 0010 §2): five Lane Cards (Supervisor, Lead,
- * Default Worker, Watch & Retro, Fresh-eyes) opening the live
- * provider/model/thinking picker modal, and below them the orthogonal Seat
- * Graph — Owner ⇄ Supervisor ⇄ Lead ⇄ Working Agents — with live Timeline
- * Oracle seqEnd, Open (navigation.openAgent), Revoke Supervisor, and Rotate
- * Lead on live seats (v0.0.27, ADR 0017 §3); vacant seats carry their picker
- * hints — the Supervisor starts from Paseo's native New Chat picker, the
- * Lead is spawned automatically by the Supervisor.
+ * arrive in v0.0.14, ADR 0010 §2): the Lane Profiles bar (v0.0.38, ADR 0026
+ * §2) above five Lane Cards (Supervisor, Lead, Default Worker, Watch &
+ * Retro, Fresh-eyes) opening the live provider/model/thinking picker modal,
+ * and below them the orthogonal Seat Graph — Owner ⇄ Supervisor ⇄ Lead ⇄
+ * Working Agents — with live Timeline Oracle seqEnd, Open
+ * (navigation.openAgent), Revoke Supervisor, and Rotate Lead on live seats
+ * (v0.0.27, ADR 0017 §3); vacant seats carry their picker hints — the
+ * Supervisor starts from Paseo's native New Chat picker, the Lead is spawned
+ * automatically by the Supervisor. A multi-lane card saves through ONE
+ * atomic setLanesBatch RPC (v0.0.38, ADR 0026 §5 — the dual-RPC race is
+ * gone), and any lane act that moves a live Supervisor/Lead seat crosses
+ * the Live-Seat Transition Law first (ADR 0026 §3): no impact → straight
+ * through; an impact → the Confirm & Apply modal before the RPC.
  */
 import type { PluginTheme } from "@getpaseo/plugin";
 import { Icon, Modal, ScrollView, TextInput } from "@getpaseo/plugin/client/react-native";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Pressable, Text, View } from "react-native";
-import type { AgentView, FactoryView, LaneName, Lanes, ProviderModelView } from "../../shared/view.ts";
+import type { AgentView, FactoryView, LaneName, LaneProfileView, Lanes, ProviderModelView } from "../../shared/view.ts";
 import { Btn, Card, Chip, Pill } from "../kit/pill.tsx";
 import { CONTROL_H, CONTROL_SM, RADIUS, SPACING, hoveredOf, text, tint } from "../kit/theme.ts";
 import type { Colour } from "../kit/theme.ts";
+import { planLiveSeatTransitions } from "../kit/live-seats.ts";
+import type { LiveSeatTransition } from "../kit/live-seats.ts";
 
 /** The Seats tab's whole action surface — the Shell owns the RPC calls. */
 export interface SeatsActions {
   setLane(lane: LaneName, value: string): void;
-  revokeSupervisor(): void;
+  /**
+   * One atomic batch save — every named lane in a single `factory.lanes.setBatch`
+   * RPC (v0.0.38, ADR 0026 §5), never concurrent single-lane calls.
+   */
+  setLanesBatch(lanes: LaneName[], value: string): void;
+  /** Save the scope's current 6-lane table as a new named Lane profile. */
+  saveProfile(name: string, description?: string): void;
+  /** Overwrite one saved profile with the scope's current 6-lane table. */
+  updateProfile(profileId: string, name: string): void;
+  /** Copy-on-Apply a saved profile's six lanes into the selected scope. */
+  applyProfile(profileId: string): void;
+  /** Remove one saved Lane profile (behind the chip's two-step confirm). */
+  deleteProfile(profileId: string): void;
+  /** Remove the Project's lane override so it inherits the machine table again. */
+  resetLanes(): void;
   /** Retire the Project's Lead (cancel + archive) so the next dispatch starts fresh. */
   rotateLead(): void;
+  revokeSupervisor(): void;
   openAgent(agentId: string): void;
   busy: boolean;
+}
+
+/** One confirmed-pending lane act — the live-seat impact modal's whole world. */
+type PendingLaneAct = { transitions: LiveSeatTransition[]; run: () => void };
+
+/** The modal's seat label — the standing seats' own names. */
+function seatLabel(seat: "supervisor" | "lead"): string {
+  return seat === "supervisor" ? "Supervisor" : "Lead";
 }
 
 /** Which lanes a card covers — "Watch & Retro" writes both lanes, one value. */
@@ -640,6 +670,180 @@ function AgentCard({
   );
 }
 
+/**
+ * The Lane Profiles bar (v0.0.38, ADR 0026 §2) — one chip per saved profile,
+ * applied to the selected scope in one click; `+ Save as Profile…` names and
+ * saves the current 6-lane table; a modified scope offers `Update "<Profile>"`
+ * and `+ Save as New Profile…`; each chip carries a two-step Delete; an
+ * overridden Project offers Reset to Machine Default.
+ */
+function LaneProfilesBar({
+  theme,
+  view,
+  actions,
+  deletingProfileId,
+  onRequestDelete,
+  onApplyProfile,
+  onUpdateProfile,
+  onSaveAsProfile,
+  onResetLanes,
+}: {
+  theme: PluginTheme;
+  view: FactoryView;
+  actions: SeatsActions;
+  deletingProfileId: string | null;
+  /** Two-step Delete's armer — `null` disarms (Confirm fired / Cancel). */
+  onRequestDelete: (profileId: string | null) => void;
+  onApplyProfile: (profile: LaneProfileView) => void;
+  onUpdateProfile: (profile: LaneProfileView) => void;
+  onSaveAsProfile: () => void;
+  onResetLanes: () => void;
+}) {
+  const activeProfile = view.profiles.find((profile) => profile.id === view.activeProfileId) ?? null;
+  return (
+    <Card theme={theme} gap={SPACING[2.5]}>
+      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: SPACING[2] }}>
+        <View style={{ gap: 2, flex: 1 }}>
+          <Text style={text(theme, "section")}>Lane Profiles</Text>
+          <Text style={text(theme, "meta")}>
+            One click copies a saved 6-lane table into {view.project === null ? "the machine-wide Lane config" : `project ${view.project.slug}`} — Copy-on-Apply, no live pointer.
+          </Text>
+        </View>
+        {view.activeProfileModified && activeProfile !== null ? (
+          <Pill theme={theme} label={`Modified from "${activeProfile.name}"`} tone="statusWarning" lit />
+        ) : null}
+      </View>
+
+      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: SPACING[2.5], alignItems: "stretch" }}>
+        {view.profiles.map((profile) => (
+          <View key={profile.id} style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1] }}>
+            <Chip
+              theme={theme}
+              label={profile.name}
+              active={profile.id === view.activeProfileId}
+              count={0}
+              onPress={() => onApplyProfile(profile)}
+            />
+            {deletingProfileId === profile.id ? (
+              <>
+                <Btn
+                  theme={theme}
+                  small
+                  solid
+                  icon="Trash2"
+                  label="Confirm Delete"
+                  tone="statusDanger"
+                  disabled={actions.busy}
+                  onPress={() => {
+                    onRequestDelete(null);
+                    actions.deleteProfile(profile.id);
+                  }}
+                />
+                <Btn theme={theme} small icon="X" label="Cancel" tone="foregroundMuted" disabled={actions.busy} onPress={() => onRequestDelete(null)} />
+              </>
+            ) : (
+              <Btn
+                theme={theme}
+                small
+                icon="Trash2"
+                label="Delete"
+                tone="foregroundMuted"
+                disabled={actions.busy}
+                onPress={() => onRequestDelete(profile.id)}
+              />
+            )}
+          </View>
+        ))}
+        {view.profiles.length === 0 ? (
+          <Text style={text(theme, "meta")}>No Lane profiles yet — configure the cards below and save the 6-lane table as your first profile.</Text>
+        ) : null}
+      </View>
+
+      <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5] }}>
+        {view.activeProfileModified && activeProfile !== null ? (
+          <>
+            <Btn
+              theme={theme}
+              small
+              icon="Save"
+              label={`Update "${activeProfile.name}"`}
+              disabled={actions.busy}
+              onPress={() => onUpdateProfile(activeProfile)}
+            />
+            <Btn theme={theme} small icon="Plus" label="+ Save as New Profile…" disabled={actions.busy} onPress={onSaveAsProfile} />
+          </>
+        ) : (
+          <Btn theme={theme} small icon="Plus" label="+ Save as Profile…" disabled={actions.busy} onPress={onSaveAsProfile} />
+        )}
+        {view.hasProjectLaneOverride ? (
+          <Btn theme={theme} small icon="RotateCcw" label="Reset to Machine Default" tone="statusWarning" disabled={actions.busy} onPress={onResetLanes} />
+        ) : null}
+      </View>
+    </Card>
+  );
+}
+
+/**
+ * The Live-Seat Transition Law's confirmation modal (v0.0.38, ADR 0026 §3):
+ * each affected standing seat, its fromLane → toLane, and whether confirming
+ * updates the model in-place or retires/rotates the session. Confirm &
+ * Apply dispatches the parked RPC; Cancel drops it.
+ */
+function LiveSeatConfirmModal({ theme, pending, busy, onConfirm, onCancel }: { theme: PluginTheme; pending: PendingLaneAct | null; busy: boolean; onConfirm: () => void; onCancel: () => void }) {
+  const rows: { seat: "supervisor" | "lead"; agentId: string; fromLane: string; toLane: string; impact: string; danger: boolean }[] =
+    pending === null
+      ? []
+      : pending.transitions.map((transition) => ({
+          seat: transition.seat,
+          agentId: transition.agentId,
+          fromLane: transition.fromLane,
+          toLane: transition.toLane,
+          impact:
+            transition.mode === "in-place"
+              ? "Update model in-place (keeps current session)"
+              : "Retire/Rotate live seat (provider family changed — current session will be archived and recreated on next turn)",
+          danger: transition.mode === "retire",
+        }));
+  return (
+    <Modal open={pending !== null} onOpenChange={(open) => (open ? undefined : onCancel())} title="Confirm live seat impact">
+      <Modal.Content>
+        {pending === null ? null : (
+          <View style={{ gap: SPACING[3] }}>
+            <Text style={text(theme, "meta")}>
+              This lane change moves a live standing seat — Confirm & Apply executes it; Cancel leaves every lane and session untouched.
+            </Text>
+            {rows.map((row) => (
+              <Card key={`${row.seat}-${row.agentId}`} theme={theme} gap={SPACING[1.5]}>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1.5], flexWrap: "wrap" }}>
+                  <Icon name={row.seat === "supervisor" ? "Shield" : "Compass"} size={14} color={theme.colors.accent} />
+                  <Text style={text(theme, "rowTitle")}>{seatLabel(row.seat)}</Text>
+                  <Pill theme={theme} label={row.agentId.slice(0, 12)} mono />
+                </View>
+                <Text style={text(theme, "code")}>
+                  {row.fromLane} → {row.toLane}
+                </Text>
+                <Text style={text(theme, "label", row.danger ? "statusDanger" : "statusWarning")}>{row.impact}</Text>
+              </Card>
+            ))}
+            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "flex-end", gap: SPACING[2] }}>
+              <Btn theme={theme} label="Cancel" tone="foregroundMuted" disabled={busy} onPress={onCancel} />
+              <Btn
+                theme={theme}
+                solid
+                icon="Check"
+                label="Confirm & Apply"
+                tone={rows.some((row) => row.danger) ? "statusDanger" : "statusWarning"}
+                disabled={busy}
+                onPress={onConfirm}
+              />
+            </View>
+          </View>
+        )}
+      </Modal.Content>
+    </Modal>
+  );
+}
+
 export function SeatsPane({
   theme,
   view,
@@ -652,11 +856,80 @@ export function SeatsPane({
   modelSyncNote: string | null;
 }) {
   const [editing, setEditing] = useState<LaneCard | null>(null);
+  /** The save-as-profile drawer's two fields (v0.0.38, ADR 0026 §2). */
+  const [naming, setNaming] = useState(false);
+  const [nameDraft, setNameDraft] = useState("");
+  const [descriptionDraft, setDescriptionDraft] = useState("");
+  /** The chip two-step Delete's armed profile (the header Reset/Delete pattern). */
+  const [deletingProfileId, setDeletingProfileId] = useState<string | null>(null);
+  /** The Live-Seat Transition Law's parked act (v0.0.38, ADR 0026 §3). */
+  const [pending, setPending] = useState<PendingLaneAct | null>(null);
   const workers = view.agents.filter((agent) => agent.id !== view.supervisor?.id && agent.id !== view.lead?.id);
+
+  // The two-step confirm auto-rearms after 5s — the header's Reset/Delete law.
+  useEffect(() => {
+    if (deletingProfileId === null) return;
+    const timer = setTimeout(() => setDeletingProfileId(null), 5000);
+    return () => clearTimeout(timer);
+  }, [deletingProfileId]);
+
+  /**
+   * The Live-Seat Transition Law's gate (v0.0.38, ADR 0026 §3): on a Project
+   * scope, an act that changes supervisor/lead while that seat is live parks
+   * behind the Confirm & Apply modal; everything else — and every act on the
+   * machine-wide scope — goes straight through with no modal.
+   */
+  const requestLaneChange = (nextLanes: Lanes, run: () => void): void => {
+    if (view.project === null) {
+      run();
+      return;
+    }
+    const transitions = planLiveSeatTransitions(view.lanes, nextLanes, { supervisor: view.supervisor, lead: view.lead });
+    if (transitions.length === 0) {
+      run();
+      return;
+    }
+    setPending({ transitions, run });
+  };
+
+  /**
+   * Reset rides the same exact gate (v0.0.38, ADR 0026 §3, Implementation
+   * Decision 4): the machine table the Project re-inherits rides the view
+   * (`machineLanes`), so the reset plans its live-seat transitions like every
+   * other act — an override that leaves supervisor/lead untouched runs
+   * immediately with no modal (User Story 17).
+   */
+  const requestResetLanes = (): void => {
+    requestLaneChange(view.machineLanes, actions.resetLanes);
+  };
+
   const save = (card: LaneCard, value: string): void => {
-    for (const lane of card.lanes) actions.setLane(lane, value);
+    const next: Lanes = { ...view.lanes };
+    for (const lane of card.lanes) next[lane] = value;
+    // v0.0.38 (ADR 0026 §5): a multi-lane card rides ONE atomic setLanesBatch
+    // RPC — the two concurrent single-lane saves raced (the Watch & Retro
+    // defect); a single-lane card keeps the single setLane act.
+    const commit = (): void => {
+      if (card.lanes.length === 1) actions.setLane(card.lanes[0]!, value);
+      else actions.setLanesBatch(card.lanes, value);
+    };
+    requestLaneChange(next, commit);
     setEditing(null);
   };
+
+  const openSaveAsProfile = (): void => {
+    setNameDraft("");
+    setDescriptionDraft("");
+    setNaming(true);
+  };
+
+  const saveAsProfile = (): void => {
+    const name = nameDraft.trim();
+    if (name === "") return;
+    actions.saveProfile(name, descriptionDraft.trim() === "" ? undefined : descriptionDraft.trim());
+    setNaming(false);
+  };
+
   return (
     <View style={{ gap: SPACING[4] }}>
       {/* Section 1: Lane Switcher Grid */}
@@ -670,6 +943,18 @@ export function SeatsPane({
           </View>
           {modelSyncNote !== null ? <Pill theme={theme} label={modelSyncNote} tone="accent" lit /> : null}
         </View>
+
+        <LaneProfilesBar
+          theme={theme}
+          view={view}
+          actions={actions}
+          deletingProfileId={deletingProfileId}
+          onRequestDelete={setDeletingProfileId}
+          onApplyProfile={(profile) => requestLaneChange(profile.lanes, () => actions.applyProfile(profile.id))}
+          onUpdateProfile={(profile) => actions.updateProfile(profile.id, profile.name)}
+          onSaveAsProfile={openSaveAsProfile}
+          onResetLanes={requestResetLanes}
+        />
 
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: SPACING[2.5], alignItems: "stretch" }}>
           {LANE_CARDS.map((card) => {
@@ -836,6 +1121,82 @@ export function SeatsPane({
           )}
         </Modal.Content>
       </Modal>
+
+      {/* The save-as-profile drawer (v0.0.38, ADR 0026 §2): name (and an
+          optional description) for the current 6-lane table, with the table
+          itself previewed — what confirming persists. */}
+      <Modal open={naming} onOpenChange={(open) => (open ? undefined : setNaming(false))} title="Save Lane profile">
+        <Modal.Content>
+          <View style={{ gap: SPACING[3] }}>
+            <View style={{ gap: SPACING[1.5] }}>
+              <Text style={text(theme, "badge")}>PROFILE NAME</Text>
+              <View
+                style={{
+                  minHeight: CONTROL_H,
+                  justifyContent: "center",
+                  borderWidth: 1,
+                  borderColor: theme.colors.border,
+                  borderRadius: RADIUS.md,
+                  backgroundColor: theme.colors.surface1,
+                }}
+              >
+                <TextInput
+                  value={nameDraft}
+                  onChangeText={setNameDraft}
+                  placeholder="e.g. Fast & Cheap"
+                  placeholderTextColor={theme.colors.foregroundMuted}
+                  style={{ paddingHorizontal: SPACING[2.5], paddingVertical: 5, color: theme.colors.foreground, fontSize: 12 }}
+                />
+              </View>
+            </View>
+            <View style={{ gap: SPACING[1.5] }}>
+              <Text style={text(theme, "badge")}>DESCRIPTION (OPTIONAL)</Text>
+              <View
+                style={{
+                  minHeight: CONTROL_H,
+                  justifyContent: "center",
+                  borderWidth: 1,
+                  borderColor: theme.colors.border,
+                  borderRadius: RADIUS.md,
+                  backgroundColor: theme.colors.surface1,
+                }}
+              >
+                <TextInput
+                  value={descriptionDraft}
+                  onChangeText={setDescriptionDraft}
+                  placeholder="What this 6-lane setup is for"
+                  placeholderTextColor={theme.colors.foregroundMuted}
+                  style={{ paddingHorizontal: SPACING[2.5], paddingVertical: 5, color: theme.colors.foreground, fontSize: 12 }}
+                />
+              </View>
+            </View>
+            <View style={{ gap: SPACING[1] }}>
+              <Text style={text(theme, "badge")}>THE SIX LANES BEING SAVED</Text>
+              {(["supervisor", "lead", "worker", "watch", "retro", "freshEyes"] as LaneName[]).map((lane) => (
+                <Text key={lane} style={text(theme, "code")}>
+                  {lane}={view.lanes[lane]}
+                </Text>
+              ))}
+            </View>
+            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "flex-end", gap: SPACING[2] }}>
+              <Btn theme={theme} label="Cancel" tone="foregroundMuted" onPress={() => setNaming(false)} />
+              <Btn theme={theme} solid icon="Save" label="Save Profile" disabled={nameDraft.trim() === "" || actions.busy} onPress={saveAsProfile} />
+            </View>
+          </View>
+        </Modal.Content>
+      </Modal>
+
+      <LiveSeatConfirmModal
+        theme={theme}
+        pending={pending}
+        busy={actions.busy}
+        onConfirm={() => {
+          const run = pending?.run;
+          setPending(null);
+          if (run !== undefined) run();
+        }}
+        onCancel={() => setPending(null)}
+      />
     </View>
   );
 }

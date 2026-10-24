@@ -460,6 +460,19 @@ export function foldCompanions(
   });
 }
 
+/**
+ * The fold's half of the v3 view (v0.0.38, ADR 0026 §5): the `Lane profile`
+ * fields (`profiles`, `activeProfileId`, `activeProfileModified`,
+ * `hasProjectLaneOverride`) and the machine-only `machineLanes` table are
+ * gatherer-owned filesystem probes the snapshot handler (surface-rpc.ts)
+ * layers over this fold — the vault-status precedent, the fold stays pure
+ * over its inputs.
+ */
+export type FactoryViewFold = Omit<
+  FactoryView,
+  "profiles" | "activeProfileId" | "activeProfileModified" | "hasProjectLaneOverride" | "machineLanes"
+>;
+
 /** Builds the one snapshot from its halves: ledger fold + lanes + daemon reads. */
 export function foldView(input: {
   stateDir: string;
@@ -480,7 +493,7 @@ export function foldView(input: {
    * fold stays pure over its inputs.
    */
   vault: VaultStatusView;
-}): FactoryView {
+}): FactoryViewFold {
   const tasks = foldTasks(input.events);
   return {
     version: FACTORY_VIEW_VERSION,

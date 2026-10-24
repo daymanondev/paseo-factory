@@ -10,7 +10,7 @@ import { writeProjectRegistration } from "../plugin/server/projects.ts";
 import { FACTORY_ROLE_PROVIDERS, effectiveLanesForReconcile, reconcilePaseoConfigObject, reconcilePaseoRoleProviders } from "../src/role-providers.ts";
 import { projectLanesPath, saveLanes } from "../src/lanes.ts";
 import type { Lanes } from "../src/lanes.ts";
-import { disposeDir, fakeCopilotRunner, makeTempDir, writeLanes } from "./helpers.ts";
+import { disposeDir, fakeCopilotRunner, gitCommitAll, makeTempDir, writeLanes } from "./helpers.ts";
 
 /**
  * The Role Provider Reconciliation seam (v0.0.27, ADR 0017 §1, spec §Testing
@@ -347,4 +347,62 @@ test("v0.0.27 (ADR 0017 §1): lanesSet reconciles <home>/config.json when a Supe
   const watchSave = await handlers.lanesSet({ lane: "watch", value: "copilot/gpt-5.4" });
   assert.ok(watchSave.ok, "the watch save itself succeeds");
   assert.equal(readFileSync(join(home, "config.json"), "utf8"), rawBefore, "an unrelated lane leaves config.json untouched");
+});
+
+// ---- Seam 2 (v0.0.38, ADR 0026 §1): a Project's save never clobbers the daemon-global providers ----
+
+test("v0.0.38 (ADR 0026 §1): a project-scoped lanesSet reconciles <home>/config.json from the MACHINE table — Project A's overrides never land in the global factory-* providers or the Supervisor (Factory) picker row", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const home = join(dir, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const projectA = join(dir, "project-a");
+  const projectB = join(dir, "project-b");
+  mkdirSync(projectA, { recursive: true });
+  mkdirSync(projectB, { recursive: true });
+  writeFileSync(join(projectA, "README.md"), "# a\n");
+  writeFileSync(join(projectB, "README.md"), "# b\n");
+  gitCommitAll(projectA, "seed a");
+  gitCommitAll(projectB, "seed b");
+  writeProjectRegistration(stateDir, "project-a-111111", { root: projectA });
+  writeProjectRegistration(stateDir, "project-b-222222", { root: projectB });
+  const factory = createFactory({ stateDir });
+  const handlers = createSurfaceHandlers({ factory, stateDir, home, daemon: emptyDaemon(), onLog: () => {} });
+  writeConfig(home, liveLikeConfig());
+
+  // The machine table anchors every daemon-global provider.
+  writeLanes(stateDir, { supervisor: "codex/gpt-5.5", lead: "omp/qwen3-coder", worker: "pi/zai/glm-5.3" });
+  const boot = await handlers.lanesSet({ lane: "watch", value: "pi/zai/glm-5.3" });
+  assert.ok(boot.ok, "the machine-anchored save succeeds");
+  const anchored = readConfig(home);
+  assert.equal(
+    ((anchored.agents as { providers: Record<string, { additionalModels?: { id: string }[] }> }).providers[FACTORY_ROLE_PROVIDERS.supervisor]?.additionalModels?.[0]?.id),
+    "gpt-5.5",
+    "the global factory-supervisor maps the machine supervisor lane",
+  );
+
+  // Project A's matrix (the spec's seam-2 table): saving it must NOT move the
+  // daemon-global entries — A's overrides live in A's own lanes.json alone.
+  const aSave = await handlers.lanesSet({ lane: "supervisor", value: "claude/claude-opus-4-6:high", projectRoot: projectA });
+  assert.ok(aSave.ok, aSave.ok ? "" : aSave.error);
+  const aBatch = await handlers.lanesSetBatch({ lanes: { lead: "codex/gpt-5.4:high", worker: "opencode/glm-5.1" }, projectRoot: projectA });
+  assert.ok(aBatch.ok, aBatch.ok ? "" : aBatch.error);
+  const afterA = readConfig(home);
+  const providers = (afterA.agents as { providers: Record<string, { extends?: string; additionalModels?: { id: string }[] }> }).providers;
+  assert.equal(providers[FACTORY_ROLE_PROVIDERS.supervisor]?.additionalModels?.[0]?.id, "gpt-5.5", "factory-supervisor still maps the machine lane after A's saves");
+  assert.equal(providers[FACTORY_ROLE_PROVIDERS.lead]?.extends, "omp", "factory-lead still maps the machine lead family");
+  assert.equal(providers[FACTORY_ROLE_PROVIDERS.agent]?.additionalModels?.[0]?.id, "zai/glm-5.3", "factory-peer still maps the machine worker lane");
+  const profile = ((afterA.daemon) as { agentProfiles: { id: string; model?: string }[] }).agentProfiles.find((row) => row.id === "factory-supervisor");
+  assert.equal(profile?.model, "gpt-5.5", "the Supervisor (Factory) picker row keeps the machine model");
+  assert.equal(JSON.stringify(afterA), JSON.stringify(anchored), "a project-scoped save leaves config.json byte-identical — no churn, no reload");
+
+  // The machine save stays the one door that moves the globals.
+  const machineSave = await handlers.lanesSet({ lane: "supervisor", value: "opencode/glm-5.1" });
+  assert.ok(machineSave.ok, machineSave.ok ? "" : machineSave.error);
+  const afterMachine = readConfig(home);
+  assert.equal(
+    ((afterMachine.agents as { providers: Record<string, { additionalModels?: { id: string }[] }> }).providers[FACTORY_ROLE_PROVIDERS.supervisor]?.additionalModels?.[0]?.id),
+    "glm-5.1",
+    "an UNSCOPED save still reconciles the globals from the machine table it just wrote",
+  );
 });

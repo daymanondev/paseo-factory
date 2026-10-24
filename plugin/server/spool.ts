@@ -267,12 +267,18 @@ export interface RespawnRequest {
  * drops this and the plugin does everything — digest, copilot pass,
  * proposals file, the one factory-level `retro_written` line (the one-writer
  * law). Deliberately a NEW kind, not a contract reuse: different validation,
- * different act. No arguments exist to carry: whole-ledger always, no
- * `--since`, no task filter (v1).
+ * different act. The whole-ledger scope is always whole — no `--since`, no
+ * task filter (v1) — but since v0.0.38 (ADR 0026 §1) the optional Project
+ * scope (`projectSlug`, or `projectRoot` resolved to its slug) names whose
+ * `retro` lane override the pass runs under.
  */
 export interface RetroRequest {
   id: string;
   kind: "retro";
+  /** The Project's registered slug — the registry door. */
+  projectSlug?: string;
+  /** Any directory inside the Project's repository — resolved to its canonical slug. */
+  projectRoot?: string;
   submitter?: string;
   /** Caller seat stamped from `PASEO_FACTORY_SEAT` when present (v0.0.23, ADR 0015 §1). */
   seat?: SpoolSeat;
@@ -689,11 +695,23 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
   }
 
   if (req.kind === "retro") {
-    // The Retro carries nothing but its kind (plus optional submitter and seat stamps) —
-    // whole-ledger always. Any extra field makes it not-a-retro.
-    const keys = Object.keys(req).filter((key) => key !== "id" && key !== "kind" && key !== "seat" && key !== "submitter");
+    // The Retro carries its kind plus the optional Project scope (v0.0.38,
+    // ADR 0026 §1) and the submitter/seat stamps — whole-ledger always. Any
+    // extra field makes it not-a-retro.
+    if (req.projectSlug !== undefined && (typeof req.projectSlug !== "string" || req.projectSlug.trim() === "")) return undefined;
+    if (req.projectRoot !== undefined && (typeof req.projectRoot !== "string" || req.projectRoot.trim() === "")) return undefined;
+    const keys = Object.keys(req).filter(
+      (key) => key !== "id" && key !== "kind" && key !== "seat" && key !== "submitter" && key !== "projectSlug" && key !== "projectRoot",
+    );
     if (keys.length > 0) return undefined;
-    return { id: req.id, kind: "retro", ...submitterField, ...seatField };
+    return {
+      id: req.id,
+      kind: "retro",
+      ...(req.projectSlug === undefined ? {} : { projectSlug: req.projectSlug }),
+      ...(req.projectRoot === undefined ? {} : { projectRoot: req.projectRoot }),
+      ...submitterField,
+      ...seatField,
+    };
   }
   if (req.kind === "meter") {
     if (typeof req.task !== "string" || typeof req.provider !== "string" || req.provider.trim() === "") return undefined;
@@ -883,23 +901,30 @@ async function resolveSpawnWorkspaceAndParent(
 }
 
 /**
- * The peer spawn's effective provider (v0.0.27, ADR 0017 §2): the reconciled
- * `factory-peer` role provider when the daemon advertises it and the spawn
- * rides the Project's configured `worker` lane (or names no provider at all);
- * any explicit provider/model override — and any daemon without the role
- * provider — keeps the requested lane verbatim (full backward compatibility).
+ * The peer spawn's effective provider (v0.0.27, ADR 0017 §2; v0.0.38, ADR
+ * 0026 §1): when the spawn rides the Project's configured `worker` lane —
+ * no explicit provider, the `worker` alias, a `factory-peer` id, or the
+ * worker lane restated — it resolves THAT Project's (or the machine table's)
+ * worker lane and returns its `<provider>/<model>[:<thinking>]` DIRECTLY.
+ * The prefix is never rewritten to the daemon-global `factory-peer/<model>`:
+ * `factory-peer` extends whatever the machine table last reconciled, so a
+ * Project on another provider family would land on the wrong adapter and
+ * die at spawn. An explicit provider/model override naming a different lane
+ * keeps the requested value verbatim (full backward compatibility).
  */
 async function resolvePeerSpawnProvider(
   factory: Factory,
-  daemon: SurfaceDaemonApi | undefined,
   requestedProvider: string,
   projectSlug: string | undefined,
 ): Promise<string> {
-  if (daemon?.providers?.listAvailable === undefined) return requestedProvider;
   const loaded = projectSlug !== undefined ? loadLanes(factory.stateDir, projectSlug) : loadLanes(factory.stateDir);
   const parsedWorker = loaded.ok ? parseLane(loaded.lanes.worker) : undefined;
   const parsedRequested = requestedProvider !== "" ? parseLane(requestedProvider) : undefined;
-  if (requestedProvider !== "" && requestedProvider !== FACTORY_SEAT_PROVIDER_IDS.agent && requestedProvider !== "worker") {
+  const ridesWorkerLane =
+    requestedProvider === "" ||
+    requestedProvider === "worker" ||
+    requestedProvider.split("/")[0] === FACTORY_SEAT_PROVIDER_IDS.agent;
+  if (!ridesWorkerLane) {
     if (projectSlug === undefined || !loaded.ok) return requestedProvider;
     const isDefaultWorkerLane =
       parsedRequested !== undefined &&
@@ -908,25 +933,11 @@ async function resolvePeerSpawnProvider(
       (parsedRequested.model === parsedWorker.model || parsedWorker.model.endsWith(`/${parsedRequested.model}`));
     if (!isDefaultWorkerLane) return requestedProvider; // an explicit override keeps its own model
   }
-  const model = parsedWorker?.model ?? parsedRequested?.model;
-  if (model === undefined || model === "") return requestedProvider;
-  const thinking = parsedRequested?.thinking ?? parsedWorker?.thinking;
-  try {
-    const listed = await daemon.providers.listAvailable();
-    if (!listed.providers.some((entry) => entry.provider === FACTORY_SEAT_PROVIDER_IDS.agent && entry.available)) {
-      if (parsedWorker !== undefined) {
-        return thinking !== undefined
-          ? `${parsedWorker.provider}/${model}:${thinking}`
-          : `${parsedWorker.provider}/${model}`;
-      }
-      return requestedProvider;
-    }
-  } catch {
-    return requestedProvider;
-  }
+  if (parsedWorker === undefined) return requestedProvider; // no usable worker lane — never a guess
+  const thinking = parsedRequested?.thinking ?? parsedWorker.thinking;
   return thinking !== undefined
-    ? `${FACTORY_SEAT_PROVIDER_IDS.agent}/${model}:${thinking}`
-    : `${FACTORY_SEAT_PROVIDER_IDS.agent}/${model}`;
+    ? `${parsedWorker.provider}/${parsedWorker.model}:${thinking}`
+    : `${parsedWorker.provider}/${parsedWorker.model}`;
 }
 
 /**
@@ -1243,7 +1254,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         // The Peer spawns under the `factory-peer` role provider when it can
         // (v0.0.27, ADR 0017 §2) — `paseoTools` off, seat env on — falling back
         // to the requested lane verbatim.
-        const peerProvider = await resolvePeerSpawnProvider(factory, resolvedDaemon, sanitizedProvider, spawnMeta.projectSlug);
+        const peerProvider = await resolvePeerSpawnProvider(factory, sanitizedProvider, spawnMeta.projectSlug);
         const parsedPeer = parseLane(peerProvider);
         const peerConfig =
           parsedPeer?.thinking !== undefined
@@ -1451,7 +1462,10 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
       // The Owner's on-demand pass (v0.0.7): the plugin runs it whole. A
       // `failed` outcome already ledgered its visible line — the reply still
       // refuses (exit 2), so the Owner sees the error at the terminal too.
-      const outcome = await factory.retro();
+      // The optional Project scope (v0.0.38, ADR 0026 §1) forwards as-is: the
+      // core normalizes a slug or resolves a root, and the pass honors that
+      // Project's own `retro` lane before the machine table.
+      const outcome = await factory.retro(request.projectSlug ?? request.projectRoot);
       if (outcome.outcome === "failed") {
         return { id: request.id, ok: false, code: "retro-failed", message: outcome.error ?? "(no reason recorded)" };
       }

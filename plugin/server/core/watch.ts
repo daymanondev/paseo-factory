@@ -33,7 +33,7 @@ import {
 } from "./constants.ts";
 import { laneCliAvailable, laneCliInvocation, loadLanes, runLaneCli } from "./lanes.ts";
 import type { LaneCliRunner } from "./lanes.ts";
-import { tailWithMarker } from "./fresh-eyes.ts";
+import { projectSlugOfWorkspace, tailWithMarker } from "./fresh-eyes.ts";
 import { diffBetween } from "./workspace.ts";
 import type { ContractSet, WatchWritten } from "./events.ts";
 import type { GateResult } from "./gate.ts";
@@ -106,13 +106,18 @@ export const WATCH_QUESTIONS: readonly WatchQuestion[] = [
  * 0009 §3): the watch lane loads and its CLI answers `--version`. No key
  * file, nothing to configure — the daemon's provider surface owns auth.
  * `contract_set` fail-fasts on a `ok: false` here. `probe` overrides the
- * real version probe (tests); it receives the lane it is vouching for.
+ * real version probe (tests); it receives the lane it is vouching for. The
+ * optional `projectSlug` (v0.0.38, ADR 0026 §1) resolves the watch lane
+ * from the Project's own lanes.json override, falling back to the machine
+ * table when the Project never named one.
  */
 export function watchLaneAvailable(
   stateDir: string,
   probe?: (lane: string) => boolean,
+  projectSlug?: string,
 ): { ok: true; lane: string } | { ok: false; reason: string } {
-  const lanes = loadLanes(stateDir);
+  const scope = projectSlug?.trim();
+  const lanes = loadLanes(stateDir, scope === "" ? undefined : scope);
   if (!lanes.ok) return { ok: false, reason: lanes.reason };
   const lane = lanes.lanes.watch;
   const invocation = laneCliInvocation(lane);
@@ -361,6 +366,13 @@ export interface WatchPassInput {
   budgetMs?: number;
   /** Lane CLI runner override (tests) — the lane and its tool-less flags stay fixed regardless. */
   copilotRunner?: CopilotRunner;
+  /**
+   * The Project scope (v0.0.38, ADR 0026 §1) — the per-Project lanes.json
+   * override the pass honors; the trailing parameter with the same name
+   * wins when both are given. Omitted, the pass resolves the scope from
+   * `contract.workspace` itself.
+   */
+  projectSlug?: string;
 }
 
 /** The state's fixed orientation — one field, so the named sections resolve for a reader with no prior context. */
@@ -378,11 +390,15 @@ const WATCH_STATE_NOTE =
  * is the one input whose absence fails the pass without an ask: the
  * questions are about the run, and a run with no readable timeline (no agent
  * bound to the claim, or a daemon restart wiped the in-memory store) gets an
- * honest `failed` line, never a guessed ask.
+ * honest `failed` line, never a guessed ask. The watch lane resolves per
+ * Project when a scope is given or `contract.workspace` resolves one
+ * (v0.0.38, ADR 0026 §1).
  */
-export async function runWatchPass(input: WatchPassInput): Promise<WatchOutcome> {
+export async function runWatchPass(input: WatchPassInput, projectSlug?: string): Promise<WatchOutcome> {
   const started = Date.now();
-  const lanes = loadLanes(input.stateDir);
+  const scopeParam = (projectSlug ?? input.projectSlug)?.trim();
+  const scope = (scopeParam === undefined || scopeParam === "" ? undefined : scopeParam) ?? projectSlugOfWorkspace(input.contract.workspace);
+  const lanes = loadLanes(input.stateDir, scope);
   const lane = lanes.ok ? lanes.lanes.watch : undefined;
   const failed = (error: string): WatchOutcome => ({
     model: lane ?? "unconfigured",

@@ -35,6 +35,7 @@ import { factoryEnvFor, injectRoleOnCreate, injectSessionEnv, renderAgentContrac
 import type { AgentCreateRequest } from "../plugin/server/roles.ts";
 import { discoverProjects, readProjectRegistration, writeProjectRegistration } from "../plugin/server/projects.ts";
 import { lanesPath, loadLanes, saveLanes } from "../src/lanes.ts";
+import { FACTORY_ROLE_PROVIDERS } from "../src/role-providers.ts";
 import { prepareTaskWorktree } from "../src/workspace.ts";
 import { deliverLeadMail, enqueueLeadMail } from "../src/mailbox.ts";
 import { disposeDir, fakeCopilotRunner, gitCommitAll, makeTempDir, writeLanes } from "./helpers.ts";
@@ -165,6 +166,9 @@ function makeSurface(t: TestContext, agents: FakeAgent[] = [], plugins: DaemonPl
   const modelSyncs: { agentId: string; model: string }[] = [];
   const thinkingSyncs: { agentId: string; thinkingOptionId: string }[] = [];
   const stopped: string[] = [];
+  // The Lead-rotation settle hook (v0.0.38): the live-seat transition law's
+  // retire arm fires `onLeadRetired` so queued mail requeues — captured here.
+  const leadRetired: { slug: string; agentId: string }[] = [];
   // The plugin lifecycle overrides (v0.0.17): the daemon's plugin list is
   // mutable so a test can seed installed companions, and every capture array
   // records the `home` the handler targeted — the ADR 0012 §4 isolation proof.
@@ -189,6 +193,9 @@ function makeSurface(t: TestContext, agents: FakeAgent[] = [], plugins: DaemonPl
       stopped.push(agentId);
       return { ok: true };
     },
+    onLeadRetired: (input) => {
+      leadRetired.push(input);
+    },
     listPlugins: async (listHome) => {
       pluginListHomes.push(listHome);
       return { ok: true, plugins: listedPlugins };
@@ -208,7 +215,7 @@ function makeSurface(t: TestContext, agents: FakeAgent[] = [], plugins: DaemonPl
     // zero network — the same law listPlugins/installPlugin carry.
     ...(vaultRunner === undefined ? {} : { vaultRunner }),
   });
-  return { dir, home, stateDir, factory, handlers, fake, modelSyncs, thinkingSyncs, stopped, listedPlugins, pluginListHomes, pluginInstalls, pluginManages };
+  return { dir, home, stateDir, factory, handlers, fake, modelSyncs, thinkingSyncs, stopped, leadRetired, listedPlugins, pluginListHomes, pluginInstalls, pluginManages };
 }
 
 /** Appends a green task's whole ledger slice + files, the fold's richest input. */
@@ -840,21 +847,47 @@ test("lead.rotate: cancels + archives the active Lead and clears its registratio
   assert.equal(none.code, "no-lead");
 });
 
-test("lanes.set: a lead save live-syncs the Project's Lead agent and writes the Project override file", async (t) => {
+test("lanes.set: a project-scoped seat save follows the Live-Seat Transition Law — same family syncs in place, a family change retires the live Lead (v0.0.38, ADR 0026 §3/§4)", async (t) => {
   const project = makeProject(t, "lanes-lead");
-  const { stateDir, handlers, modelSyncs } = makeSurface(t, [
+  const { stateDir, handlers, modelSyncs, thinkingSyncs, stopped, fake, leadRetired } = makeSurface(t, [
     { id: "agent-lead-2", labels: { seat: "lead", project: project.slug }, provider: "pi/zai/glm-5.3" },
   ]);
-  const reply = await handlers.lanesSet({ lane: "lead", value: "claude/opus-4-8", projectRoot: project.root });
-  assert.ok(reply.ok, reply.ok ? "" : reply.error);
-  assert.equal(reply.lanes.lead, "claude/opus-4-8");
-  assert.match(reply.modelSync, /applied — agent agent-le now runs claude\/opus-4-8/);
-  assert.deepEqual(modelSyncs, [{ agentId: "agent-lead-2", model: "opus-4-8" }], "the live Lead's modelId (provider prefix stripped) was synced");
+  writeProjectRegistration(stateDir, project.slug, { root: project.root, lead: "agent-lead-2" });
+
+  // Same provider family (pi → pi): the live Lead's model updates in place —
+  // no stop, no archive, the session and its conversation survive.
+  const inPlace = await handlers.lanesSet({ lane: "lead", value: "pi/zai/glm-5.3:max", projectRoot: project.root });
+  assert.ok(inPlace.ok, inPlace.ok ? "" : inPlace.error);
+  assert.equal(inPlace.lanes.lead, "pi/zai/glm-5.3:max");
+  assert.match(inPlace.modelSync, /applied — agent agent-le.*in place/);
+  assert.deepEqual(modelSyncs, [{ agentId: "agent-lead-2", model: "zai/glm-5.3" }], "the live Lead's modelId (provider prefix stripped) was synced");
+  assert.deepEqual(thinkingSyncs, [{ agentId: "agent-lead-2", thinkingOptionId: "max" }]);
+  assert.deepEqual(stopped, [], "a same-family change never cancels the live session");
+  assert.deepEqual(fake.archived, [], "a same-family change never archives the live session");
+
   // The save landed in the Project's override file alone — the machine table
   // was never seeded, so a project-scoped save must not materialize it.
   assert.equal(existsSync(lanesPath(stateDir)), false, "a project-scoped save never materializes machine lanes");
   const override = JSON.parse(readFileSync(join(stateDir, "projects", project.slug, "lanes.json"), "utf8")) as Record<string, unknown>;
-  assert.deepEqual(override, { lead: "claude/opus-4-8" });
+  assert.deepEqual(override, { lead: "pi/zai/glm-5.3:max" });
+
+  // Cross provider family (pi → claude): the live Lead retires through the
+  // leadRotate door — cancel + archive, the registration binding clears, and
+  // onLeadRetired fires so queued Lead mail requeues for the next Lead.
+  writeFileSync(
+    join(stateDir, "projects", project.slug, "mailbox.jsonl"),
+    `${JSON.stringify({ id: "mail-1", from: "owner", text: "queued directive", state: "queued" })}\n`,
+  );
+  const retired = await handlers.lanesSet({ lane: "lead", value: "claude/opus-4-8", projectRoot: project.root });
+  assert.ok(retired.ok, retired.ok ? "" : retired.error);
+  assert.equal(retired.lanes.lead, "claude/opus-4-8");
+  assert.match(retired.modelSync, /retired — agent agent-le.*rotated onto claude\/opus-4-8's provider family/);
+  assert.deepEqual(stopped, ["agent-lead-2"], "a family change cancels the live Lead");
+  assert.deepEqual(fake.archived, ["agent-lead-2"], "then archives it — the next dispatch spawns a fresh Lead");
+  assert.equal(readProjectRegistration(stateDir, project.slug)?.lead, undefined, "the registration forgets the retired Lead");
+  assert.deepEqual(leadRetired, [{ slug: project.slug, agentId: "agent-lead-2" }], "onLeadRetired fires so queued mail requeues for the next Lead");
+  assert.equal(modelSyncs.length, 1, "no model push ever lands on a session whose adapter family changed");
+  assert.ok(existsSync(join(stateDir, "projects", project.slug, "mailbox.jsonl")), "the queued Lead mail file survives the rotation");
 
   // No live Lead → skipped, named.
   const other = makeProject(t, "lanes-lead-other");
@@ -5265,3 +5298,197 @@ test("Seam 1.3b: projectPickFolder handles native dialog cancellation and auto-b
 });
 
 
+
+// ---- Seam 2 (v0.0.38, ADR 0026 §1/§2/§5): cross-Project isolation + the Lane profile lifecycle ----
+
+/** Reads the daemon-global `<home>/config.json` the role providers reconcile into. */
+function readHomeConfig(home: string): { providers: Record<string, { extends?: string; additionalModels?: { id: string }[] }>; profiles: { id: string; model?: string }[] } {
+  const parsed = JSON.parse(readFileSync(join(home, "config.json"), "utf8")) as {
+    agents?: { providers?: Record<string, { extends?: string; additionalModels?: { id: string }[] }> };
+    daemon?: { agentProfiles?: { id: string; model?: string }[] };
+  };
+  return { providers: parsed.agents?.providers ?? {}, profiles: parsed.daemon?.agentProfiles ?? [] };
+}
+
+test("Seam 2: saving lanes, batching, or applying a profile on Project A never rewrites the daemon-global factory-* providers — and the Lane profile lifecycle updates FactoryView (v0.0.38, ADR 0026 §1/§2/§5)", async (t) => {
+  const projectA = makeProject(t, "iso-a");
+  const projectB = makeProject(t, "iso-b");
+  const { home, stateDir, handlers } = makeSurface(t, []);
+  // The machine table every daemon-global provider must stay anchored to.
+  writeLanes(stateDir, {
+    supervisor: "pi/zai/glm-5.3",
+    lead: "pi/zai/glm-5.3",
+    worker: "pi/zai/glm-5.3",
+    watch: "pi/zai/glm-5.3",
+    retro: "pi/zai/glm-5.3",
+    freshEyes: "pi/zai/glm-5.3",
+  });
+  mkdirSync(home, { recursive: true });
+  writeFileSync(join(home, "config.json"), `${JSON.stringify({ agents: { providers: {} }, daemon: { agentProfiles: [] } }, null, 2)}\n`);
+
+  // 1. A single project-scoped save on Project A (the spec's matrix supervisor lane).
+  const supSave = await handlers.lanesSet({ lane: "supervisor", value: "claude/claude-opus-4-6:high", projectRoot: projectA.root });
+  assert.ok(supSave.ok, supSave.ok ? "" : supSave.error);
+  const afterSave = readHomeConfig(home);
+  assert.equal(
+    afterSave.providers[FACTORY_ROLE_PROVIDERS.supervisor]?.additionalModels?.[0]?.id,
+    "zai/glm-5.3",
+    "factory-supervisor still maps the MACHINE supervisor lane — Project A's override never lands in <paseoHome>/config.json",
+  );
+  assert.equal(afterSave.profiles.find((row) => row.id === FACTORY_ROLE_PROVIDERS.supervisor)?.model, "zai/glm-5.3");
+
+  // 2. The atomic batch save lands A's remaining matrix lanes in ONE write.
+  const batch = await handlers.lanesSetBatch({ lanes: { lead: "codex/gpt-5.4:high", worker: "opencode/glm-5.1" }, projectRoot: projectA.root });
+  assert.ok(batch.ok, batch.ok ? "" : batch.error);
+  assert.equal(batch.lanes.supervisor, "claude/claude-opus-4-6:high");
+  assert.equal(batch.lanes.lead, "codex/gpt-5.4:high");
+  assert.equal(batch.lanes.worker, "opencode/glm-5.1");
+  const afterBatch = readHomeConfig(home);
+  assert.equal(afterBatch.providers[FACTORY_ROLE_PROVIDERS.lead]?.additionalModels?.[0]?.id, "zai/glm-5.3", "factory-lead stays on the machine lane");
+  assert.equal(afterBatch.providers[FACTORY_ROLE_PROVIDERS.agent]?.additionalModels?.[0]?.id, "zai/glm-5.3", "factory-peer stays on the machine worker lane");
+
+  // 3. Save the current 6-lane table as a profile (the + Save as Profile… act).
+  const savedProfile = await handlers.profilesSave({ name: "A Setup", projectRoot: projectA.root });
+  assert.ok(savedProfile.ok, savedProfile.ok ? "" : savedProfile.error);
+  assert.equal(savedProfile.profile.id, "a-setup");
+  assert.equal(savedProfile.profile.lanes.supervisor, "claude/claude-opus-4-6:high");
+  assert.equal(savedProfile.profile.lanes.lead, "codex/gpt-5.4:high");
+  assert.equal(savedProfile.profile.lanes.worker, "opencode/glm-5.1");
+  assert.equal(savedProfile.profile.description, null);
+
+  // The scoped snapshot carries the library and A's override state.
+  const snapA = await handlers.snapshot({ projectRoot: projectA.root });
+  assert.ok(snapA.ok, snapA.ok ? "" : snapA.error);
+  assert.equal(snapA.view.profiles.length, 1);
+  assert.equal(snapA.view.profiles[0]?.name, "A Setup");
+  assert.equal(snapA.view.hasProjectLaneOverride, true, "A's own lanes.json names lanes");
+  assert.equal(snapA.view.machineLanes.supervisor, "pi/zai/glm-5.3", "the machine-only table rides the scoped view — the reset gate's next table (Implementation Decision 4)");
+  assert.equal(snapA.view.machineLanes.lead, "pi/zai/glm-5.3");
+  assert.equal(snapA.view.lanes.supervisor, "claude/claude-opus-4-6:high", "the scoped effective table still carries A's overrides beside the machine half");
+  assert.equal(snapA.view.activeProfileId, "a-setup", "a profile whose 6 lanes match the table is the active one");
+  assert.equal(snapA.view.activeProfileModified, false, "the table still matches the saved profile");
+  const snapGlobal = await handlers.snapshot({});
+  assert.ok(snapGlobal.ok, snapGlobal.ok ? "" : snapGlobal.error);
+  assert.equal(snapGlobal.view.hasProjectLaneOverride, false, "the unscoped view has no Project override");
+  assert.equal(snapGlobal.view.activeProfileId, null, "the machine table matches no profile");
+  assert.deepEqual(snapGlobal.view.machineLanes, snapGlobal.view.lanes, "the unscoped view's machine half equals its effective table");
+
+  // 4. Apply Copy-on-Apply to Project B — one atomic 6-lane write, recorded scope.
+  const applied = await handlers.profilesApply({ profileId: "a-setup", projectRoot: projectB.root });
+  assert.ok(applied.ok, applied.ok ? "" : applied.error);
+  assert.equal(applied.lanes.worker, "opencode/glm-5.1");
+  assert.match(applied.modelSync, /skipped — no live supervisor agent for project/, "B has no live seats to transition");
+  const snapB = await handlers.snapshot({ projectRoot: projectB.root });
+  assert.ok(snapB.ok, snapB.ok ? "" : snapB.error);
+  assert.equal(snapB.view.activeProfileId, "a-setup", "the recorded activeProfileByScope entry names the applied profile");
+  assert.equal(snapB.view.activeProfileModified, false);
+  assert.equal(snapB.view.hasProjectLaneOverride, true, "the apply wrote B's own override file");
+  assert.equal(snapB.view.lanes.lead, "codex/gpt-5.4:high");
+  const afterApply = readHomeConfig(home);
+  assert.equal(
+    afterApply.providers[FACTORY_ROLE_PROVIDERS.supervisor]?.additionalModels?.[0]?.id,
+    "zai/glm-5.3",
+    "applying a profile on Project B never rewrites the daemon-global providers either",
+  );
+
+  // 5. Tweak one lane on B — only B's override changes, the profile shows modified.
+  const tweak = await handlers.lanesSetBatch({ lanes: { worker: "claude/claude-sonnet-4-6" }, projectRoot: projectB.root });
+  assert.ok(tweak.ok, tweak.ok ? "" : tweak.error);
+  const snapBModified = await handlers.snapshot({ projectRoot: projectB.root });
+  assert.ok(snapBModified.ok, snapBModified.ok ? "" : snapBModified.error);
+  assert.equal(snapBModified.view.activeProfileId, "a-setup", "the recorded profile stays active through a tweak");
+  assert.equal(snapBModified.view.activeProfileModified, true, "the table now differs from the recorded profile");
+  const lanesAAfterTweak = loadLanes(stateDir, projectA.slug);
+  assert.ok(lanesAAfterTweak.ok, lanesAAfterTweak.ok ? "" : lanesAAfterTweak.reason);
+  assert.equal(lanesAAfterTweak.lanes.worker, "opencode/glm-5.1", "Project A's override is untouched by B's tweak");
+
+  // 6. Reset B to the machine default — override gone, scope entry cleared.
+  const reset = await handlers.lanesReset({ projectRoot: projectB.root });
+  assert.ok(reset.ok, reset.ok ? "" : reset.error);
+  assert.equal(reset.removed, true);
+  assert.equal(reset.lanes.worker, "pi/zai/glm-5.3", "B inherits the machine table again");
+  assert.equal(existsSync(join(stateDir, "projects", projectB.slug, "lanes.json")), false);
+  const snapBReset = await handlers.snapshot({ projectRoot: projectB.root });
+  assert.ok(snapBReset.ok, snapBReset.ok ? "" : snapBReset.error);
+  assert.equal(snapBReset.view.hasProjectLaneOverride, false);
+  assert.equal(snapBReset.view.activeProfileId, null, "the reset cleared the scope's recorded profile and the machine table matches none");
+  assert.equal(snapBReset.view.activeProfileModified, false);
+
+  // 7. Delete the profile — Copy-on-Apply means no Project's lanes change.
+  const deleted = await handlers.profilesDelete({ profileId: "a-setup" });
+  assert.ok(deleted.ok, deleted.ok ? "" : deleted.error);
+  assert.equal(deleted.deleted, true);
+  const snapAfterDelete = await handlers.snapshot({ projectRoot: projectA.root });
+  assert.ok(snapAfterDelete.ok, snapAfterDelete.ok ? "" : snapAfterDelete.error);
+  assert.deepEqual(snapAfterDelete.view.profiles, []);
+  assert.equal(snapAfterDelete.view.activeProfileId, null);
+  assert.equal(snapAfterDelete.view.lanes.supervisor, "claude/claude-opus-4-6:high", "A's own override file survives the profile delete");
+
+  // Refusals are data: an unknown profile id, an invalid lane batch, an unresolvable root.
+  const unknownProfile = await handlers.profilesApply({ profileId: "nope", projectRoot: projectB.root });
+  assert.ok(!unknownProfile.ok);
+  assert.equal(unknownProfile.code, "profile-not-found");
+  const badBatch = await handlers.lanesSetBatch({ lanes: { watch: "auto" }, projectRoot: projectB.root });
+  assert.ok(!badBatch.ok);
+  assert.equal(badBatch.code, "invalid-lane");
+  const unknownRoot = await handlers.lanesReset({ projectRoot: join(home, "not-a-repo") });
+  assert.ok(!unknownRoot.ok);
+  assert.equal(unknownRoot.code, "unknown-project");
+});
+
+test("Seam 2: profilesApply and lanesReset follow the Live-Seat Transition Law — same family syncs the live seat in place, a family change retires the live Supervisor and rotates the Lead (v0.0.38, ADR 0026 §3/§4)", async (t) => {
+  const projectA = makeProject(t, "live-a");
+  const { home, stateDir, handlers, modelSyncs, thinkingSyncs, stopped, fake, leadRetired } = makeSurface(t, [
+    { id: "a-sup", labels: { seat: "supervisor", project: projectA.slug }, provider: "claude/claude-sonnet-4-6" },
+    { id: "a-lead", labels: { seat: "lead", project: projectA.slug }, provider: "codex/gpt-5.4" },
+  ]);
+  writeProjectRegistration(stateDir, projectA.slug, { root: projectA.root, supervisor: "a-sup", lead: "a-lead" });
+  void home;
+
+  // A profile that keeps A's supervisor in the claude family (in-place) but
+  // moves its lead to claude (a codex → claude family change: retire/rotate).
+  const saved = await handlers.profilesSave({
+    id: "mixed-families",
+    name: "Mixed families",
+    lanes: {
+      supervisor: "claude/claude-opus-4-6:high",
+      lead: "claude/claude-sonnet-4-6",
+      worker: "opencode/glm-5.1",
+      watch: "pi/zai/glm-5.3",
+      retro: "pi/zai/glm-5.3",
+      freshEyes: "pi/zai/glm-5.3",
+    },
+  });
+  assert.ok(saved.ok, saved.ok ? "" : saved.error);
+
+  const applied = await handlers.profilesApply({ profileId: "mixed-families", projectRoot: projectA.root });
+  assert.ok(applied.ok, applied.ok ? "" : applied.error);
+
+  // Supervisor: claude → claude — model and thinking update IN PLACE, the session survives.
+  assert.deepEqual(modelSyncs, [{ agentId: "a-sup", model: "claude-opus-4-6" }], "the live Supervisor's model was pushed in place");
+  assert.deepEqual(thinkingSyncs, [{ agentId: "a-sup", thinkingOptionId: "high" }]);
+  assert.ok(!stopped.includes("a-sup"), "a same-family change never cancels the live Supervisor");
+  assert.ok(!fake.archived.includes("a-sup"), "a same-family change never archives the live Supervisor");
+  assert.match(applied.modelSync, /applied — agent a-sup.*in place/);
+
+  // Lead: codex → claude — retired through the leadRotate door, mail preserved for the next Lead.
+  assert.deepEqual(stopped, ["a-lead"], "the family change cancels the live Lead");
+  assert.deepEqual(fake.archived, ["a-lead"], "then archives it");
+  assert.equal(readProjectRegistration(stateDir, projectA.slug)?.lead, undefined, "the registration binding clears");
+  assert.deepEqual(leadRetired, [{ slug: projectA.slug, agentId: "a-lead" }], "onLeadRetired fires so queued Lead mail requeues for the next Lead");
+  assert.equal(modelSyncs.length, 1, "no model push ever lands on a session whose adapter family changed");
+  assert.match(applied.modelSync, /retired — agent a-lead rotated onto claude\/claude-sonnet-4-6's provider family/);
+
+  // Reset to the machine default: the (still live, claude-family) Supervisor's
+  // lane falls back to the machine pi lane — a family change, so the seat
+  // rotates for the next turn/dispatch.
+  writeLanes(stateDir, { supervisor: "pi/zai/glm-5.3" });
+  const reset = await handlers.lanesReset({ projectRoot: projectA.root });
+  assert.ok(reset.ok, reset.ok ? "" : reset.error);
+  assert.equal(reset.removed, true);
+  assert.deepEqual(stopped, ["a-lead", "a-sup"], "the reset retires the live Supervisor whose family changed");
+  assert.deepEqual(fake.archived, ["a-lead", "a-sup"]);
+  assert.equal(readProjectRegistration(stateDir, projectA.slug)?.supervisor, undefined, "the Supervisor binding clears so the next turn spawns fresh");
+  assert.match(reset.modelSync, /retired — agent a-sup rotated onto pi\/zai\/glm-5\.3's provider family/);
+  assert.match(reset.modelSync, /skipped — no live lead agent for project/, "the already-rotated Lead seat has nothing left to transition");
+});

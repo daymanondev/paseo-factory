@@ -11,7 +11,7 @@
  */
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
-import { ImportMaterializationSchema, ImportStatusSchema, FactoryViewSchema, LaneNameSchema, ProjectViewSchema, TaskDetailViewSchema, VaultStatusViewSchema } from "./view.ts";
+import { ImportMaterializationSchema, ImportStatusSchema, FactoryViewSchema, LaneNameSchema, LaneProfileViewSchema, LanesSchema, LanesUpdateSchema, ProjectViewSchema, TaskDetailViewSchema, VaultStatusViewSchema } from "./view.ts";
 
 /** Every handler's refusal shape: a stable machine code plus the human sentence. */
 export const Failure = z.object({ ok: z.literal(false), code: z.string(), error: z.string() });
@@ -50,7 +50,14 @@ export const accept = defineRpc({
 
 export const retro = defineRpc({
   name: "factory.retro",
-  input: z.object({}),
+  input: z.object({
+    /**
+     * The Project scope (v0.0.38, ADR 0026 §1) — any directory inside the
+     * Project's repository. The pass resolves that Project's own `retro` lane
+     * override before the machine table; omitted keeps the machine lane.
+     */
+    projectRoot: z.string().optional(),
+  }),
   output: z.union([
     z.object({
       ok: z.literal(true),
@@ -85,6 +92,102 @@ export const lanesSet = defineRpc({
       /** What the live seat model sync did: applied / skipped (no live seat agent) / failed (reason). */
       modelSync: z.string(),
     }),
+    Failure,
+  ]),
+});
+
+// The atomic batch lane save (v0.0.38, ADR 0026 §1 — the Watch & Retro race
+// fix): every lane in `lanes` lands in ONE write, so two cards never race on
+// `lanes.json` or the daemon config reload. (The spec's camelCase spelling
+// `factory.lanes.setBatch` ships as `factory.lanes.set.batch` — method names
+// must match /^[a-z][a-z0-9._-]*$/, the `factory.task.detail` precedent.)
+export const lanesSetBatch = defineRpc({
+  name: "factory.lanes.set.batch",
+  input: z.object({
+    /** The lanes to persist — at least one; a refused lane writes nothing, anywhere. */
+    lanes: LanesUpdateSchema.refine((update) => Object.values(update).some((value) => value !== undefined), {
+      message: "lanes must name at least one lane",
+    }),
+    /** The Project scope — the batch targets its override file and the seat sync finds its seat agents. */
+    projectRoot: z.string().optional(),
+  }),
+  output: z.union([
+    z.object({
+      ok: z.literal(true),
+      lanes: LanesSchema,
+      /** What the live seat transition did per seat: applied in-place / retired / skipped (no live seat) / failed (reason). */
+      modelSync: z.string(),
+    }),
+    Failure,
+  ]),
+});
+
+// The per-Project override reset (v0.0.38, ADR 0026 §2): removes the Project's
+// `lanes.json` so it inherits the machine table again.
+export const lanesReset = defineRpc({
+  name: "factory.lanes.reset",
+  input: z.object({
+    /** The Project whose override file is removed — required; the machine table has nothing to reset. */
+    projectRoot: z.string().min(1),
+  }),
+  output: z.union([
+    z.object({
+      ok: z.literal(true),
+      lanes: LanesSchema,
+      /** Whether a `<projectStateDir>/lanes.json` override actually existed and was removed. */
+      removed: z.boolean(),
+      /** What the live seat transition did per seat: applied in-place / retired / skipped / failed (reason). */
+      modelSync: z.string(),
+    }),
+    Failure,
+  ]),
+});
+
+// The `Lane profile` CRUD + apply (v0.0.38, ADR 0026 §2/§5) — Owner-authored
+// 6-lane presets in `<stateDir>/profiles.json`, applied Copy-on-Apply.
+export const profilesSave = defineRpc({
+  name: "factory.profiles.save",
+  input: z.object({
+    /** The profile id — a normalized slug (`[a-z0-9][a-z0-9-_]{0,63}`); omitted derives one from `name`. */
+    id: z.string().optional(),
+    name: z.string().min(1),
+    description: z.string().optional(),
+    /** The 6 lanes whole; omitted saves the scope's current effective table (`projectRoot`'s, else the machine's). */
+    lanes: LanesSchema.optional(),
+    /** The scope whose CURRENT lanes become the profile when `lanes` is omitted. */
+    projectRoot: z.string().optional(),
+  }),
+  output: z.union([
+    z.object({ ok: z.literal(true), profile: LaneProfileViewSchema, summary: z.string() }),
+    Failure,
+  ]),
+});
+
+export const profilesApply = defineRpc({
+  name: "factory.profiles.apply",
+  input: z.object({
+    profileId: z.string().min(1),
+    /** The Project scope — omitted applies Copy-on-Apply to the machine table (the "All projects" act). */
+    projectRoot: z.string().optional(),
+  }),
+  output: z.union([
+    z.object({
+      ok: z.literal(true),
+      lanes: LanesSchema,
+      /** What the live seat transition did per seat: applied in-place / retired / skipped / failed (reason). */
+      modelSync: z.string(),
+    }),
+    Failure,
+  ]),
+});
+
+export const profilesDelete = defineRpc({
+  name: "factory.profiles.delete",
+  input: z.object({
+    profileId: z.string().min(1),
+  }),
+  output: z.union([
+    z.object({ ok: z.literal(true), deleted: z.boolean(), summary: z.string() }),
     Failure,
   ]),
 });
