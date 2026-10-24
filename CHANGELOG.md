@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.36] - 2026-10-24
+
+v0.0.36's one thing: **responsive 3-tier Kanban `Tasks` board (`wide` / `medium` / `compact`) with adaptive empty-column collapsing and multi-column card grids, status-accented 3-tier `KanbanCard` with `AttemptTrail` dots and compact `Accepted` density, and inline `Missing folder` Project deletion & Workspace Panel scope override** (ADR 0024, ADR 0025).
+
+### Added
+
+- **Responsive 3-Tier Kanban Layout (`plugin/client/factory/entries.tsx`, `plugin/client/factory/shell.tsx`, `plugin/client/factory/kanban.ts`, `plugin/client/factory/tasks.tsx`, `plugin/client/kit/pill.tsx`)** — Forwarded Paseo's `layout` context to `FactoryShell` and measured container width via `onLayout` (`resolveKanbanLayoutMode`):
+  - **Wide (`>= 960px`)**: Empty (`0`-task) columns collapse into slim `132px` rails when `filter === "all"` and other columns have tasks; populated columns expand and flow heavy columns (such as 15 `Accepted` tasks) into a 2–3 column internal card grid (`computeCardGridColumns`), while 4–5 populated columns flex down (`minWidth: 180`) to fit inside `1024px` split windows without horizontal clipping.
+  - **Medium (`640px – 959px`) & Compact (`< 640px` / `layout.compact`)**: Collapses empty stages into a compact `EMPTY STAGES` strip above multi-column wrapping (`medium`) or single-column vertical stacking (`compact`), shortens home paths (`/Users/<user>/...` → `~/...` via `shortenHomePath`), and adapts `TabBar` labels on compact viewports.
+- **Status-Accented 3-Tier `KanbanCard` & `AttemptTrail` Dots (`plugin/client/factory/kanban.ts`, `plugin/client/factory/tasks.tsx`)** — Added 3px status accent borders on cards and columns, condensed multi-attempt history into bounded colored status dots (`summarizeAttemptTrail` / `AttemptTrail`) instead of rendering 6–9 separate pill boxes per card, rendered `Accepted` cards in a compact 2-row completed density, and removed the redundant `Details` button from the card face.
+- **Inline `Missing folder` Project Deletion & Danger Callout Banner (`plugin/client/factory/header.tsx`, `plugin/client/factory/shell.tsx`, `plugin/server/surface-rpc.ts`)** — Surfaced an inline two-step `Delete` → `Confirm Delete` / `Cancel` button directly on `missingRoot: true` project chips in the Project Switcher bar, replaced vacant-seat startup hints (`Select "Supervisor (Factory)" in New Chat to start` / `Spawned automatically by Supervisor`) with a red danger callout banner when a missing-folder Project is selected, and fixed `FactoryShell` (`hasPickedScope`) so selecting a Project or `All projects` in the Project Switcher overrides the default `dir` prop in `FactoryPanel`.
+
 ## [0.0.35] - 2026-10-24
 
 v0.0.35's one thing: **greenfield Git bootstrap on Project onboarding, selectable missing-root Projects & Owner-only `Project delete`, a Project-centered Header with native macOS Finder folder picker, a 5-column Kanban `Tasks` board, and a dedicated `Vault` tab** (ADR 0024, ADR 0025).
