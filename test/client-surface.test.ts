@@ -22,6 +22,7 @@ import {
 import {
   KANBAN_COLUMNS,
   computeCardGridColumns,
+  computeEqualColumnWidth,
   groupTasksForKanban,
   kanbanColumnForStatus,
   projectNameForTask,
@@ -901,20 +902,35 @@ test("v0.0.35 Seam 2.3b (ADR 0025): TasksPane renders the 5-column horizontal Ka
   assert.match(shell, /TaskDetailModal/, "FactoryShell renders TaskDetailModal for selected Kanban cards");
 });
 
-test("v0.0.35 Responsive Kanban & 3-tier Card hierarchy (ADR 0025): resolveKanbanLayoutMode, computeCardGridColumns, summarizeAttemptTrail, collapsed empty columns, and compact Accepted cards", () => {
+test("v0.0.35 Responsive Kanban & 3-tier Card hierarchy (ADR 0025): resolveKanbanLayoutMode, computeEqualColumnWidth, vertical card stacking, summarizeAttemptTrail, and compact cards", () => {
   assert.equal(resolveKanbanLayoutMode({ compact: true, containerWidth: 1200 }), "compact");
   assert.equal(resolveKanbanLayoutMode({ compact: false, containerWidth: 420 }), "compact");
   assert.equal(resolveKanbanLayoutMode({ compact: false, containerWidth: 800 }), "medium");
   assert.equal(resolveKanbanLayoutMode({ compact: false, containerWidth: 1280 }), "wide");
 
-  // Single populated column with many tasks (e.g. 15 Accepted tasks in ai-test) uses a multi-column card grid on wide/medium viewports
+  // All 5 columns receive the exact same width regardless of whether 0, 1, or 5 columns have tasks
+  assert.equal(
+    computeEqualColumnWidth({ containerWidth: 1408, columnCount: 5, gap: 10, minColumnWidth: 190 }),
+    Math.floor((1408 - 40) / 5),
+  );
+  assert.equal(
+    computeEqualColumnWidth({ containerWidth: 992, columnCount: 5, gap: 10, minColumnWidth: 190 }),
+    Math.floor((992 - 40) / 5),
+  );
+  // Narrower horizontal viewports clamp to minColumnWidth so horizontal ScrollView scrolls cleanly
+  assert.equal(
+    computeEqualColumnWidth({ containerWidth: 700, columnCount: 5, gap: 10, minColumnWidth: 190 }),
+    190,
+  );
+
+  // Tasks inside a Kanban column always stack vertically (1 column per stage)
   assert.equal(
     computeCardGridColumns({ layoutMode: "wide", containerWidth: 1360, activeColumnCount: 1, cardCount: 15 }),
-    3,
+    1,
   );
   assert.equal(
     computeCardGridColumns({ layoutMode: "wide", containerWidth: 1024, activeColumnCount: 1, cardCount: 15 }),
-    2,
+    1,
   );
   assert.equal(
     computeCardGridColumns({ layoutMode: "compact", containerWidth: 420, activeColumnCount: 1, cardCount: 15 }),
@@ -939,7 +955,7 @@ test("v0.0.35 Responsive Kanban & 3-tier Card hierarchy (ADR 0025): resolveKanba
 
   const tasks = read("plugin/client/factory/tasks.tsx");
   assert.match(tasks, /resolveKanbanLayoutMode/, "TasksPane adapts layout using resolveKanbanLayoutMode");
-  assert.match(tasks, /computeCardGridColumns/, "TasksPane arranges multi-card columns using computeCardGridColumns");
+  assert.match(tasks, /computeEqualColumnWidth/, "TasksPane sizes all visible columns equally via computeEqualColumnWidth");
   assert.match(tasks, /summarizeAttemptTrail/, "KanbanCard renders compact attempt trail dots via summarizeAttemptTrail");
   assert.ok(!tasks.includes('label="Details"'), "Redundant Details button is removed from KanbanCard face");
 });
