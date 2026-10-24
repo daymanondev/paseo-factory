@@ -1,0 +1,38 @@
+# ADR 0026 — Per-Project Multi-Provider Lane Isolation, Live-Seat Transition Warning, and Owner-Authored `Lane profile`s
+
+- **Status:** Accepted — 2026-10-24 (`grill-with-docs` Q1–Q9; ratified by Andrew)
+- **Amends:** [ADR 0009](0009-factory-surface-and-lane-config.md) §2–§3 (`Lane config` and `Seats & Models`), [ADR 0010](0010-project-scoped-slp-worktrees-and-lead-agent.md) §2/§5 (per-Project `lanes.json` scope), [ADR 0014](0014-private-vault-hydration-and-release-lab-companion.md) §3 (`Private vault` config sync), and [ADR 0017](0017-native-paseo-role-providers-and-slp-seat-recognition.md) §1–§2 (`Role provider` reconciliation and `agent.create` recognition)
+
+## Context
+
+When running multiple Projects concurrently where each Project assigns different providers and models to its six roles (`supervisor`, `lead`, `worker`, `watch`, `retro`, `freshEyes`), six cross-project and cross-provider defects surfaced in `v0.0.37`:
+
+1. **Daemon-Global `<paseoHome>/config.json` Clobbering (`plugin/server/surface-rpc.ts:1511`):** Saving a lane override for a single Project passed that Project's `saved.lanes` into `reconcilePaseoRoleProviders`, overwriting the daemon-wide `factory-supervisor`, `factory-lead`, `factory-peer` entries and the `Supervisor (Factory)` New Chat picker profile in `<paseoHome>/config.json`.
+2. **Spool Peer Spawn Provider Collision (`plugin/server/spool.ts:892-930`):** `resolvePeerSpawnProvider` rewrote a Project's default `worker` lane from `<provider>/<model>` to `factory-peer/<model>`, routing Project B's Peer onto whichever provider Project A last wrote into `factory-peer.extends` in `<paseoHome>/config.json`.
+3. **Unscoped `Fresh-eyes review`, `Watch`, `Retro`, and CLI `factory run` (`src/fresh-eyes.ts`, `src/watch.ts`, `src/retro.ts`, `plugin/bin/lanes-config.mjs`):** `resolveEyeLane`, `isEyeLaneUsable`, `watchLaneAvailable`, `runWatchPass`, `retroLaneAvailable`, `runRetroPass`, and `resolveRunProvider` read `loadLanes(stateDir)` without `projectSlug`, ignoring per-Project `<projectStateDir>/lanes.json` overrides at execution time.
+4. **Silent Cross-Provider Live Seat Mismatch (`plugin/server/surface-rpc.ts:1469-1509`):** When changing `supervisor` or `lead` on a Project with a live seat, `lanesSet` ran `paseo agent model set <id> --model <model>` without checking whether the seat's provider family changed, leaving an existing harness session (e.g. `opencode`) running with an incompatible provider's model ID and stale Layer-1 fence, and without warning the Owner before mutating active seats.
+5. **Dual-RPC Save Race on `Watch & Retro` (`plugin/client/factory/seats.tsx:656-659`):** Saving the `Watch & Retro` card fired two unawaited `lanes.set` RPCs concurrently.
+6. **No Reusable `Lane profile` Mechanism:** Applying a 6-lane multi-provider setup to a Project required configuring five cards one by one, and `Private vault` did not synchronize `profiles.json` or per-app `lanes.json`.
+
+## Decision
+
+1. **Strict Cross-Project Isolation of `Role provider`s, Spool Peer Spawns, and Verification Stations.**
+   - `<paseoHome>/config.json` (`factory-supervisor`, `factory-lead`, `factory-peer`, and `Supervisor (Factory)`) is reconciled exclusively from `effectiveLanesForReconcile(stateDir)` (the machine-level `lanes.json`, or majority fallback when absent) — never overwritten by a single Project's lane or profile save.
+   - In `server.before("agent.create")` (`normalizeAgentCreateRequest` in `plugin/server/choke.ts`), when a session is created with `config.provider` naming `factory-supervisor` or `factory-lead` at a Project root (`config.cwd`), the hook resolves `loadLanes(stateDir, project.slug)[seat]` and rewrites `config.provider` to the Project's `<provider>/<model>` (and `thinkingOptionId`) while attaching `labels: { seat, project: project.slug }`.
+   - `resolvePeerSpawnProvider` (`plugin/server/spool.ts`) returns the Project's resolved `${parsed.provider}/${parsed.model}${suffix}` directly rather than rewriting the provider prefix to global `factory-peer/...`.
+   - `resolveEyeLane`, `isEyeLaneUsable`, `runFreshEyesPass`, `watchLaneAvailable`, `runWatchPass`, `retroLaneAvailable`, `runRetroPass`, and `resolveRunProvider` thread `projectSlug` (resolved from `contract.workspace` or the active Project) so per-Project `freshEyes`, `watch`, `retro`, and `worker` lanes are honored everywhere.
+   - `provisionPiAgentHome` (`src/pi-home.ts`) checks existing symlink targets before replacing them so concurrent Pi session opens across Projects never race on `<stateDir>/pi-agent/<role>`.
+
+2. **Owner-Authored `Lane profile`s (`<stateDir>/profiles.json`) with Copy-on-Apply Semantics.**
+   - A **`Lane profile`** is an Owner-authored, named 6-lane map (`supervisor`, `lead`, `worker`, `watch`, `retro`, `freshEyes`) persisted in `<stateDir>/profiles.json` with an `updatedAt` timestamp (and optional tombstone records for deleted profile IDs). No built-in presets are pre-populated; the Owner creates profiles on demand from the current 6-lane configuration (`+ Save as Profile…` in `Seats & Models` or `factory profile save <id>`).
+   - Applying a `Lane profile` uses **Copy-on-Apply**: it atomically writes all 6 lane values into `<projectStateDir>/lanes.json` (when a Project is selected) or `<stateDir>/lanes.json` (when `All projects` is selected) in a single batch operation (`lanes.setBatch` / `profiles.apply`), recording `activeProfile` metadata without creating a fragile live pointer. Tweaking a single lane afterward affects only that scope (`Modified from <Profile>`, with `Update "<Profile>"` or `+ Save as New Profile…`).
+   - When a Project has a `<projectStateDir>/lanes.json` override (`hasProjectLaneOverride: true`), `Seats & Models` and `factory lanes reset --project <dir>` expose **`Reset to Machine Default`** to remove the Project's override file and inherit `<stateDir>/lanes.json`.
+
+3. **Live-Seat Impact Warning Modal & Provider-Family Transition Law.**
+   - Whenever the Owner saves a lane, applies a `Lane profile`, or clicks `Reset to Machine Default` on a Project that has a live `Supervisor` (`view.supervisor !== null`) and/or a live `Lead` (`view.lead !== null`), and the change mutates `lanes.supervisor` or `lanes.lead`, `Seats & Models` presents a confirmation modal (`Confirm & Apply` / `Cancel`) before executing the RPC:
+     - **Same provider family** (e.g. `claude/claude-sonnet-4-6` → `claude/claude-opus-4-6:high`): the modal states that the live seat's model/thinking will be updated in-place via `setAgentModelViaCli`, preserving the conversation session.
+     - **Different provider family** (e.g. `opencode/glm-5.1` → `claude/claude-opus-4-6:high`): the modal warns that the live seat's provider harness is changing, so confirming will **retire/rotate** the existing seat session (`rotateLead` for `Lead`, preserving all queued `Lead mailbox` items; cancel + archive + unbind for `Supervisor`) so the next turn/dispatch spawns a fresh seat on the new provider harness with the matching Layer-1 fence.
+   - Changes that only touch `worker`, `watch`, `retro`, or `freshEyes` (or when no affected seat is live) apply immediately without a confirmation modal.
+
+4. **`Private vault` Synchronization (`config/profiles.json` & Per-App `lanes.json`).**
+   - `collectLocalStateIntoRuntime` and `applyVaultHydration` (`src/vault-materialization.ts`) synchronize `<stateDir>/profiles.json` ↔ `config/profiles.json` using a key-level merge by `profileId` where the newer `updatedAt` timestamp wins (preserving profiles authored on different machines), and synchronize per-Project `<projectStateDir>/lanes.json` ↔ `config/apps/<canonicalAppKey>/lanes.json` alongside store manifests.
