@@ -1725,6 +1725,8 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
             const bySlug = readProjectRegistration(deps.stateDir, rawSlug);
             if (bySlug !== undefined) {
               project = { slug: bySlug.slug, root: bySlug.root, name: basename(bySlug.root) || bySlug.slug };
+            } else {
+              project = { slug: rawSlug, root: rawRoot, name: basename(rawRoot) || rawSlug };
             }
           }
           if (project === undefined) {

@@ -21,9 +21,12 @@ import {
 } from "../plugin/client/factory/plugin-feedback.ts";
 import {
   KANBAN_COLUMNS,
+  computeCardGridColumns,
   groupTasksForKanban,
   kanbanColumnForStatus,
   projectNameForTask,
+  resolveKanbanLayoutMode,
+  summarizeAttemptTrail,
 } from "../plugin/client/factory/kanban.ts";
 import type { KanbanColumnId } from "../plugin/client/factory/kanban.ts";
 import type { CompanionPluginView, FactoryView, TaskView } from "../plugin/shared/view.ts";
@@ -325,6 +328,40 @@ test("v0.0.35 Seam 2.2 (ADR 0024/0025): Header renders prominent Project Switche
   assert.match(shell, /useRpc\(projectAdd\)/, "FactoryShell binds useRpc(projectAdd)");
   assert.match(shell, /deleteProject/, "FactoryShell wires deleteProject into Header actions");
   assert.match(shell, /pickProjectFolder/, "FactoryShell wires pickProjectFolder into Header actions");
+});
+
+test("v0.0.35 Missing-folder UX & Workspace Panel scope override (ADR 0024/0025): inline Delete on missingRoot switcher entries, no vacant-seat startup hints on missing-folder projects, and picked scope overrides panel dir", () => {
+  const header = read("plugin/client/factory/header.tsx");
+  assert.match(
+    header,
+    /confirmingDeleteSlug/,
+    "Header tracks per-project inline delete confirmation for missingRoot entries right on the Project Switcher bar",
+  );
+  assert.match(
+    header,
+    /actions\.deleteProject\(\{\s*root:\s*entry\.root,\s*slug:\s*entry\.slug\s*\}\)/,
+    "Confirming inline delete on a missingRoot switcher chip passes { root: entry.root, slug: entry.slug } to actions.deleteProject",
+  );
+  assert.match(
+    header,
+    /!project\.missingRoot[\s\S]*Select "Supervisor \(Factory\)" in New Chat to start/,
+    "Vacant seat startup hints are suppressed when the active project has missingRoot === true",
+  );
+
+  const shell = read("plugin/client/factory/shell.tsx");
+  assert.match(
+    shell,
+    /hasPickedScope/,
+    "FactoryShell tracks hasPickedScope so picking a project or All projects in the switcher works even inside FactoryPanel (when dir is passed)",
+  );
+  assert.match(
+    shell,
+    /target\?:\s*\{\s*root\?:\s*string;\s*slug\?:\s*string\s*\}/,
+    "FactoryShell deleteProject accepts an explicit { root, slug } target from inline Missing folder deletion",
+  );
+
+  const entries = read("plugin/client/factory/entries.tsx");
+  assert.match(entries, /layout=\{layout\}/, "entries.tsx forwards Paseo's layout prop to FactoryShell");
 });
 
 // ---- Compact Plugins Tab, Core Card, Version Pills & On-Demand Update Check (v0.0.25, ADR 0012 §1–§4) ----
@@ -862,6 +899,49 @@ test("v0.0.35 Seam 2.3b (ADR 0025): TasksPane renders the 5-column horizontal Ka
 
   const shell = read("plugin/client/factory/shell.tsx");
   assert.match(shell, /TaskDetailModal/, "FactoryShell renders TaskDetailModal for selected Kanban cards");
+});
+
+test("v0.0.35 Responsive Kanban & 3-tier Card hierarchy (ADR 0025): resolveKanbanLayoutMode, computeCardGridColumns, summarizeAttemptTrail, collapsed empty columns, and compact Accepted cards", () => {
+  assert.equal(resolveKanbanLayoutMode({ compact: true, containerWidth: 1200 }), "compact");
+  assert.equal(resolveKanbanLayoutMode({ compact: false, containerWidth: 420 }), "compact");
+  assert.equal(resolveKanbanLayoutMode({ compact: false, containerWidth: 800 }), "medium");
+  assert.equal(resolveKanbanLayoutMode({ compact: false, containerWidth: 1280 }), "wide");
+
+  // Single populated column with many tasks (e.g. 15 Accepted tasks in ai-test) uses a multi-column card grid on wide/medium viewports
+  assert.equal(
+    computeCardGridColumns({ layoutMode: "wide", containerWidth: 1360, activeColumnCount: 1, cardCount: 15 }),
+    3,
+  );
+  assert.equal(
+    computeCardGridColumns({ layoutMode: "wide", containerWidth: 1024, activeColumnCount: 1, cardCount: 15 }),
+    2,
+  );
+  assert.equal(
+    computeCardGridColumns({ layoutMode: "compact", containerWidth: 420, activeColumnCount: 1, cardCount: 15 }),
+    1,
+  );
+
+  // Attempt trail summarizes long multi-epoch attempt histories into bounded dots + overflow count
+  const trail = summarizeAttemptTrail(
+    [
+      { n: 1, verdict: "red", open: false, respawned: false },
+      { n: 2, verdict: "red", open: false, respawned: true },
+      { n: 3, verdict: "red", open: false, respawned: false },
+      { n: 1, verdict: "red", open: false, respawned: false },
+      { n: 2, verdict: "red", open: false, respawned: false },
+      { n: 3, verdict: "green", open: false, respawned: true },
+    ],
+    4,
+  );
+  assert.equal(trail.visible.length, 4);
+  assert.equal(trail.hiddenCount, 2);
+  assert.equal(trail.respawnCount, 2);
+
+  const tasks = read("plugin/client/factory/tasks.tsx");
+  assert.match(tasks, /resolveKanbanLayoutMode/, "TasksPane adapts layout using resolveKanbanLayoutMode");
+  assert.match(tasks, /computeCardGridColumns/, "TasksPane arranges multi-card columns using computeCardGridColumns");
+  assert.match(tasks, /summarizeAttemptTrail/, "KanbanCard renders compact attempt trail dots via summarizeAttemptTrail");
+  assert.ok(!tasks.includes('label="Details"'), "Redundant Details button is removed from KanbanCard face");
 });
 
 

@@ -15,6 +15,15 @@ export type KanbanColumnId =
 
 export type KanbanTaskStatus = TaskStatus | "contracted";
 
+export type KanbanLayoutMode = "wide" | "medium" | "compact";
+
+export interface AttemptTrailItem {
+  n: number;
+  verdict: "red" | "green" | null;
+  open: boolean;
+  respawned: boolean;
+}
+
 export interface KanbanColumnDef {
   id: KanbanColumnId;
   title: string;
@@ -122,4 +131,64 @@ export function projectNameForTask(
     return lastPathSegment(matched.root) || matched.slug;
   }
   return lastPathSegment(ws) || "workspace";
+}
+
+/**
+ * Resolves the responsive Kanban layout tier from the measured container width
+ * and Paseo's `layout.compact` flag:
+ * - `"compact"`: `< 640px` or `compact === true` (Workspace Panel / mobile)
+ * - `"medium"`: `640px – 959px` (split window / tablet)
+ * - `"wide"`: `>= 960px` (desktop global screen)
+ */
+export function resolveKanbanLayoutMode(input: {
+  containerWidth?: number;
+  compact?: boolean;
+}): KanbanLayoutMode {
+  if (input.compact === true) return "compact";
+  const w = input.containerWidth ?? 0;
+  if (w > 0 && w < 640) return "compact";
+  if (w > 0 && w < 960) return "medium";
+  return "wide";
+}
+
+/**
+ * Computes how many card columns a populated Kanban column should use internally
+ * so a single heavy column (e.g. 15 `Accepted` tasks when the other 4 columns
+ * are empty) flows as a balanced 2–3 column grid instead of a tall single tower.
+ */
+export function computeCardGridColumns(input: {
+  layoutMode: KanbanLayoutMode;
+  containerWidth?: number;
+  activeColumnCount: number;
+  cardCount: number;
+}): number {
+  if (input.layoutMode === "compact" || input.cardCount < 4) return 1;
+  const w = input.containerWidth ?? 1200;
+  if (input.activeColumnCount <= 1) {
+    if (input.layoutMode === "wide" && w >= 1260 && input.cardCount >= 6) return 3;
+    return 2;
+  }
+  if (input.activeColumnCount === 2 && input.layoutMode === "wide" && w >= 1280 && input.cardCount >= 6) {
+    return 2;
+  }
+  return 1;
+}
+
+/**
+ * Condenses a Task's attempt history into a bounded status-dot trail so cards
+ * with multi-epoch retry histories (`#1..#9`) stay scannable on a single line.
+ */
+export function summarizeAttemptTrail<T extends AttemptTrailItem>(
+  attempts: readonly T[],
+  maxDots = 5,
+): {
+  visible: readonly T[];
+  hiddenCount: number;
+  respawnCount: number;
+} {
+  const cap = Math.max(1, maxDots);
+  const hiddenCount = Math.max(0, attempts.length - cap);
+  const visible = hiddenCount > 0 ? attempts.slice(attempts.length - cap) : attempts;
+  const respawnCount = attempts.filter((a) => a.respawned).length;
+  return { visible, hiddenCount, respawnCount };
 }
