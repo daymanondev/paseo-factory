@@ -413,7 +413,7 @@ export function FactoryShell({
             view={view}
             dir={hasPickedScope ? undefined : dir}
             compact={isCompact}
-            containerWidth={containerWidth}
+            containerWidth={Math.max(0, containerWidth - (isCompact ? SPACING[3] * 2 : SPACING[4] * 2))}
             actions={{
               busy,
               openDetail,

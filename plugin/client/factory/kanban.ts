@@ -152,9 +152,30 @@ export function resolveKanbanLayoutMode(input: {
 }
 
 /**
- * Computes how many card columns a populated Kanban column should use internally
- * so a single heavy column (e.g. 15 `Accepted` tasks when the other 4 columns
- * are empty) flows as a balanced 2–3 column grid instead of a tall single tower.
+ * Computes the equal pixel width for every Kanban column in horizontal board mode
+ * so all 5 columns (`Queued`, `In Progress`, `Needs Attention`, `Ready to Accept`,
+ * `Accepted`) always have the exact same width regardless of whether 0, 1, or all 5
+ * columns contain tasks (preventing `react-native-web` horizontal `ScrollView`
+ * `max-content` text expansion from distorting populated vs empty columns).
+ */
+export function computeEqualColumnWidth(input: {
+  containerWidth?: number;
+  columnCount: number;
+  gap?: number;
+  minColumnWidth?: number;
+}): number {
+  const count = Math.max(1, input.columnCount);
+  const gap = input.gap ?? 10;
+  const minW = input.minColumnWidth ?? (count === 1 ? 280 : 190);
+  const w = input.containerWidth ?? 0;
+  if (w <= 0) return count === 1 ? 480 : 240;
+  const available = Math.floor((w - gap * (count - 1)) / count);
+  return Math.max(minW, available);
+}
+
+/**
+ * Legacy helper retained for compatibility — tasks inside a Kanban column now
+ * always stack vertically (`1` column per lane).
  */
 export function computeCardGridColumns(input: {
   layoutMode: KanbanLayoutMode;
@@ -162,15 +183,7 @@ export function computeCardGridColumns(input: {
   activeColumnCount: number;
   cardCount: number;
 }): number {
-  if (input.layoutMode === "compact" || input.cardCount < 4) return 1;
-  const w = input.containerWidth ?? 1200;
-  if (input.activeColumnCount <= 1) {
-    if (input.layoutMode === "wide" && w >= 1260 && input.cardCount >= 6) return 3;
-    return 2;
-  }
-  if (input.activeColumnCount === 2 && input.layoutMode === "wide" && w >= 1280 && input.cardCount >= 6) {
-    return 2;
-  }
+  void input;
   return 1;
 }
 

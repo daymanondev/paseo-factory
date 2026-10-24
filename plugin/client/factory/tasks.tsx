@@ -25,6 +25,7 @@ import { DOT, PILL_H, RADIUS, SPACING, hoveredOf, text, tint } from "../kit/them
 import {
   KANBAN_COLUMNS,
   computeCardGridColumns,
+  computeEqualColumnWidth,
   groupTasksForKanban,
   kanbanColumnForStatus,
   projectNameForTask,
@@ -42,6 +43,7 @@ import type {
 export {
   KANBAN_COLUMNS,
   computeCardGridColumns,
+  computeEqualColumnWidth,
   groupTasksForKanban,
   kanbanColumnForStatus,
   projectNameForTask,
@@ -224,23 +226,17 @@ function KanbanCard({
   showProjectPill,
   projectLabel,
   actions,
-  gridColumns = 1,
 }: {
   theme: PluginTheme;
   task: TaskView;
   showProjectPill: boolean;
   projectLabel: string;
   actions: TasksActions;
-  gridColumns?: number;
 }) {
   const green = task.attempts.findLast((attempt) => attempt.verdict === "green" && !attempt.open);
-  const lastAttempt = task.attempts.at(-1);
-  const lastEye = task.attempts.findLast((a) => a.eye !== null)?.eye ?? null;
-  const lastWatch = task.attempts.findLast((a) => a.watch !== null)?.watch ?? null;
   const pills = statusPill(task.status, task.needsHumanReason);
   const isAccepted = task.status === "accepted";
   const accentColour = theme.colors[statusTone(task.status)];
-  const hasChokeAnomaly = task.choke.denied > 0 || task.choke.blocked > 0;
 
   return (
     <Pressable
@@ -249,12 +245,9 @@ function KanbanCard({
       style={(state) => {
         const hovered = hoveredOf(state);
         return {
-          ...(gridColumns > 1
-            ? {
-                flexBasis: gridColumns >= 3 ? 220 : 240,
-                flexGrow: 1,
-              }
-            : {}),
+          width: "100%",
+          minWidth: 0,
+          overflow: "hidden",
           borderWidth: 1,
           borderLeftWidth: 3,
           borderColor: hovered ? theme.colors.foregroundMuted : theme.colors.border,
@@ -264,145 +257,92 @@ function KanbanCard({
             : isAccepted
               ? tint(theme.colors.surface0, "d8")
               : theme.colors.surface0,
-          borderRadius: RADIUS.lg,
-          padding: isAccepted ? SPACING[2] : SPACING[2.5],
-          gap: isAccepted ? SPACING[1.5] : SPACING[2],
+          borderRadius: RADIUS.md,
+          paddingHorizontal: SPACING[2],
+          paddingVertical: SPACING[1.5],
+          gap: SPACING[1],
         };
       }}
     >
-      {/* Tier 1: Card Header — Task ID, Project pill (All projects mode), short Lane tag, and primary status/cost */}
-      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: SPACING[1.5] }}>
-        <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1.5], flexWrap: "wrap", flexShrink: 1 }}>
-          {isAccepted ? <Icon name="CheckCircle2" size={13} color={theme.colors.statusSuccess} /> : null}
-          <Text style={text(theme, "rowTitle")}>#{task.task}</Text>
-          {showProjectPill ? <Pill theme={theme} icon="FolderGit2" label={projectLabel} /> : null}
-          {!isAccepted && task.lane !== null ? <Pill theme={theme} label={shortLaneLabel(task.lane)} mono /> : null}
+      {/* Row 1: Compact Header — Task ID on left, Attempt trail or lane pill on right */}
+      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: SPACING[1], minWidth: 0 }}>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1], flexShrink: 1, minWidth: 0 }}>
+          {isAccepted ? <Icon name="CheckCircle2" size={12} color={theme.colors.statusSuccess} /> : null}
+          <Text style={{ ...text(theme, "section"), fontSize: 12, lineHeight: 16, flexShrink: 0 }} numberOfLines={1}>
+            #{task.task}
+          </Text>
+          {showProjectPill ? (
+            <View style={{ flexShrink: 1, minWidth: 0, overflow: "hidden" }}>
+              <Pill theme={theme} icon="FolderGit2" label={projectLabel} />
+            </View>
+          ) : null}
         </View>
-        <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1], flexWrap: "wrap" }}>
-          {isAccepted ? (
-            <>
-              <AttemptTrail theme={theme} attempts={task.attempts} compact />
-              {task.costState === "metered" ? (
-                <Pill theme={theme} label={`Cost ${costLabel(task)}`} mono />
-              ) : null}
-            </>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 4, flexShrink: 0 }}>
+          {task.attempts.length > 0 ? (
+            <AttemptTrail theme={theme} attempts={task.attempts} compact />
+          ) : task.lane !== null ? (
+            <Pill theme={theme} label={shortLaneLabel(task.lane)} mono />
           ) : (
             <Pill theme={theme} label={pills.label} tone={pills.tone} lit={pills.lit} />
           )}
         </View>
       </View>
 
-      {/* Tier 2: Concise Description & Needs-Human Blocker Callout */}
+      {/* Row 2: Compact Description (1 line for Accepted, max 2 lines for active tasks) */}
       {task.description !== null ? (
         <Text
           style={{
             ...text(theme, "meta"),
-            ...(isAccepted ? { fontSize: 12, lineHeight: 16 } : {}),
+            fontSize: 11,
+            lineHeight: 15,
           }}
-          numberOfLines={2}
+          numberOfLines={isAccepted ? 1 : 2}
         >
           {task.description}
         </Text>
       ) : null}
 
+      {/* Row 3: Actionable Blocker callout or Direct Accept CTA (all other telemetry lives in TaskDetailModal) */}
       {task.needsHumanReason !== null ? (
         <View
           style={{
-            paddingHorizontal: SPACING[2],
-            paddingVertical: SPACING[1.5],
-            borderRadius: RADIUS.md,
+            paddingHorizontal: SPACING[1.5],
+            paddingVertical: 3,
+            borderRadius: RADIUS.sm,
             borderWidth: 1,
             borderColor: tint(theme.colors.statusWarning, "66"),
             backgroundColor: tint(theme.colors.statusWarning, "14"),
             flexDirection: "row",
             alignItems: "center",
-            gap: SPACING[1.5],
+            gap: SPACING[1],
+            minWidth: 0,
           }}
         >
-          <Icon name="AlertTriangle" size={12} color={theme.colors.statusWarning} />
-          <Text style={{ ...text(theme, "label", "statusWarning"), flexShrink: 1 }}>
+          <Icon name="AlertTriangle" size={11} color={theme.colors.statusWarning} />
+          <Text style={{ ...text(theme, "badge", "statusWarning"), flexShrink: 1 }} numberOfLines={1}>
             Blocker: {task.needsHumanReason}
           </Text>
         </View>
-      ) : null}
-
-      {/* Tier 3: Active Card Telemetry & Direct Accept CTA (omitted on already-accepted compact cards unless anomalies exist) */}
-      {!isAccepted ? (
+      ) : task.status === "ready-to-accept" && green !== undefined ? (
         <View
           style={{
             flexDirection: "row",
             alignItems: "center",
-            justifyContent: "space-between",
-            flexWrap: "wrap",
-            gap: SPACING[1.5],
+            justifyContent: "flex-end",
             paddingTop: 2,
+            minWidth: 0,
           }}
         >
-          <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1] }}>
-            <AttemptTrail theme={theme} attempts={task.attempts} />
-            {lastAttempt !== undefined && lastAttempt.verdict !== null ? (
-              <Pill
-                theme={theme}
-                label={lastAttempt.verdict === "green" ? "Gate green" : "Gate red"}
-                tone={lastAttempt.verdict === "green" ? "statusSuccess" : "statusDanger"}
-                lit
-              />
-            ) : null}
-            {hasChokeAnomaly ? (
-              <Pill
-                theme={theme}
-                label={`Choke ${task.choke.allowed}/${task.choke.denied}/${task.choke.blocked}`}
-                tone="statusWarning"
-                lit
-                mono
-              />
-            ) : null}
-            {lastEye !== null ? (
-              <Pill
-                theme={theme}
-                label={`Eye ${lastEye.outcome.toUpperCase()}`}
-                tone={lastEye.outcome === "concern" ? "statusWarning" : "statusSuccess"}
-                lit
-              />
-            ) : null}
-            {lastWatch !== null && lastWatch.maxProbability !== null ? (
-              <Pill
-                theme={theme}
-                label={`Watch ${lastWatch.maxProbability.toFixed(2)}`}
-                tone={lastWatch.maxProbability >= 0.5 ? "statusWarning" : "foregroundMuted"}
-                lit={lastWatch.maxProbability >= 0.5}
-                mono
-              />
-            ) : null}
-            <Pill theme={theme} label={`Cost ${costLabel(task)}`} mono />
-          </View>
-
-          {task.status === "ready-to-accept" && green !== undefined ? (
-            <Btn
-              theme={theme}
-              small
-              solid
-              icon="Check"
-              label={`Accept #${green.n}`}
-              tone="statusSuccess"
-              disabled={actions.busy}
-              onPress={() => actions.accept(task.task, green!.n)}
-            />
-          ) : null}
-        </View>
-      ) : hasChokeAnomaly || lastEye?.outcome === "concern" ? (
-        <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1] }}>
-          {hasChokeAnomaly ? (
-            <Pill theme={theme} label={`Choke ${task.choke.allowed}/${task.choke.denied}/${task.choke.blocked}`} mono />
-          ) : null}
-          {lastEye !== null ? (
-            <Pill
-              theme={theme}
-              label={`Eye ${lastEye.outcome.toUpperCase()}`}
-              tone={lastEye.outcome === "concern" ? "statusWarning" : "statusSuccess"}
-              lit={lastEye.outcome === "concern"}
-            />
-          ) : null}
+          <Btn
+            theme={theme}
+            small
+            solid
+            icon="Check"
+            label={`Accept #${green.n}`}
+            tone="statusSuccess"
+            disabled={actions.busy}
+            onPress={() => actions.accept(task.task, green!.n)}
+          />
         </View>
       ) : null}
     </Pressable>
@@ -446,105 +386,80 @@ export function TasksPane({
   const layoutMode = resolveKanbanLayoutMode({ containerWidth: effectiveWidth, compact });
   const populatedColumns = visibleColumns.filter((col) => grouped[col.id].length > 0);
   const emptyColumns = visibleColumns.filter((col) => grouped[col.id].length === 0);
-  const collapseEmptyInStack = filter === "all" && populatedColumns.length > 0 && emptyColumns.length > 0;
+  const collapseEmptyInStack =
+    layoutMode === "compact" && filter === "all" && populatedColumns.length > 0 && emptyColumns.length > 0;
+  const equalColWidth = computeEqualColumnWidth({
+    containerWidth: effectiveWidth,
+    columnCount: visibleColumns.length,
+    gap: SPACING[2.5],
+    minColumnWidth: visibleColumns.length === 1 ? 280 : 190,
+  });
 
-  const renderColumnCard = (column: KanbanColumnDef, activeColumnCount: number) => {
+  const renderColumnCard = (column: KanbanColumnDef) => {
     const columnTasks = grouped[column.id];
     const toneColour = theme.colors[column.tone];
     const isEmpty = columnTasks.length === 0;
-    const isCollapsedRail =
-      layoutMode === "wide" && filter === "all" && isEmpty && populatedColumns.length > 0;
-    const gridColumns = computeCardGridColumns({
-      layoutMode,
-      containerWidth: effectiveWidth,
-      activeColumnCount,
-      cardCount: columnTasks.length,
-    });
-
-    if (isCollapsedRail) {
-      return (
-        <Pressable
-          key={column.id}
-          accessibilityRole="button"
-          onPress={() => setFilter(column.id)}
-          style={(state) => ({
-            width: 132,
-            flexGrow: 0,
-            flexShrink: 0,
-            borderWidth: 1,
-            borderTopWidth: 2,
-            borderColor: hoveredOf(state) ? theme.colors.foregroundMuted : theme.colors.border,
-            borderTopColor: tint(toneColour, "66"),
-            backgroundColor: tint(theme.colors.surface1, "88"),
-            borderRadius: RADIUS.lg,
-            padding: SPACING[2],
-            gap: SPACING[1],
-            opacity: 0.78,
-          })}
-        >
-          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: SPACING[1] }}>
-            <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1], flexShrink: 1 }}>
-              <Icon name={column.icon} size={12} color={theme.colors.foregroundMuted} />
-              <Text style={{ ...text(theme, "label"), fontWeight: "600" }} numberOfLines={1}>
-                {column.title}
-              </Text>
-            </View>
-            <Text style={{ ...text(theme, "badge"), fontVariant: ["tabular-nums"] }}>0</Text>
-          </View>
-          <Text style={{ ...text(theme, "badge"), fontWeight: "400" }} numberOfLines={2}>
-            {column.emptyCopy}
-          </Text>
-        </Pressable>
-      );
-    }
+    const colWidth = visibleColumns.length === 1 && effectiveWidth > 0 ? effectiveWidth : equalColWidth;
 
     return (
       <View
         key={column.id}
         style={{
-          ...(layoutMode === "wide"
-            ? {
-                minWidth: activeColumnCount <= 1 ? 320 : activeColumnCount >= 4 ? 180 : 240,
-                flex: gridColumns >= 3 ? 3 : gridColumns === 2 ? 2 : 1,
-              }
-            : layoutMode === "medium"
+          ...(layoutMode !== "compact"
+            ? effectiveWidth > 0
               ? {
-                  flexBasis: activeColumnCount <= 1 ? "100%" : 280,
-                  flexGrow: 1,
+                  width: colWidth,
+                  minWidth: colWidth,
+                  maxWidth: colWidth,
+                  flexBasis: colWidth,
+                  flexGrow: 0,
+                  flexShrink: 0,
                 }
               : {
-                  width: "100%",
-                }),
+                  flexGrow: 1,
+                  flexShrink: 1,
+                  flexBasis: 0,
+                  minWidth: visibleColumns.length === 1 ? 280 : 190,
+                }
+            : {
+                width: "100%",
+                minWidth: 0,
+              }),
+          overflow: "hidden",
           borderWidth: 1,
           borderTopWidth: 3,
           borderColor: theme.colors.border,
           borderTopColor: isEmpty ? tint(toneColour, "66") : toneColour,
           backgroundColor: theme.colors.surface1,
           borderRadius: RADIUS.lg,
-          padding: SPACING[2.5],
-          gap: SPACING[2],
+          padding: SPACING[2],
+          gap: SPACING[1.5],
         }}
       >
         {/* Column Header: Accent Dot, Icon, Title, and Live Task Count Badge */}
-        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: SPACING[2] }}>
-          <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1.5] }}>
+        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: SPACING[1.5], minWidth: 0 }}>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1], flexShrink: 1, minWidth: 0 }}>
             <View
               style={{
-                width: DOT,
-                height: DOT,
+                width: DOT - 2,
+                height: DOT - 2,
                 borderRadius: DOT,
                 backgroundColor: toneColour,
+                flexShrink: 0,
               }}
             />
-            <Icon name={column.icon} size={13} color={toneColour} />
-            <Text style={text(theme, "section")}>{column.title}</Text>
+            <Icon name={column.icon} size={12} color={toneColour} />
+            <Text style={{ ...text(theme, "section"), fontSize: 12, lineHeight: 16 }} numberOfLines={1}>
+              {column.title}
+            </Text>
           </View>
           <View
             style={{
-              paddingHorizontal: SPACING[2],
+              paddingHorizontal: 6,
               paddingVertical: 1,
               borderRadius: RADIUS.sm,
               backgroundColor: columnTasks.length > 0 ? tint(toneColour, "26") : theme.colors.surface2,
+              flexShrink: 0,
             }}
           >
             <Text
@@ -559,11 +474,11 @@ export function TasksPane({
           </View>
         </View>
 
-        {/* Column Cards or Empty Placeholder */}
+        {/* Column Cards (always stacked vertically top-to-bottom) or Empty Placeholder */}
         {isEmpty ? (
           <View
             style={{
-              paddingVertical: SPACING[3],
+              paddingVertical: SPACING[2.5],
               paddingHorizontal: SPACING[2],
               borderRadius: RADIUS.md,
               borderWidth: 1,
@@ -572,21 +487,12 @@ export function TasksPane({
               alignItems: "center",
             }}
           >
-            <Text style={text(theme, "meta")}>{column.emptyCopy}</Text>
+            <Text style={{ ...text(theme, "meta"), fontSize: 11, lineHeight: 15 }} numberOfLines={1}>
+              {column.emptyCopy}
+            </Text>
           </View>
         ) : (
-          <View
-            style={{
-              gap: SPACING[2],
-              ...(gridColumns > 1
-                ? {
-                    flexDirection: "row",
-                    flexWrap: "wrap",
-                    alignItems: "stretch",
-                  }
-                : {}),
-            }}
-          >
+          <View style={{ flexDirection: "column", gap: SPACING[1.5], width: "100%", minWidth: 0 }}>
             {columnTasks.map((task) => (
               <KanbanCard
                 key={task.task}
@@ -595,7 +501,6 @@ export function TasksPane({
                 showProjectPill={showProjectPill}
                 projectLabel={projectNameForTask(task, view.projects)}
                 actions={actions}
-                gridColumns={gridColumns}
               />
             ))}
           </View>
@@ -654,12 +559,10 @@ export function TasksPane({
         </Card>
       ) : null}
 
-      {/* Responsive Kanban Board: Wide horizontal rails vs Medium/Compact adaptive stack */}
-      {layoutMode === "wide" ? (
-        <ScrollView horizontal showsHorizontalScrollIndicator contentContainerStyle={{ gap: SPACING[2.5], alignItems: "flex-start", minWidth: "100%" }}>
-          {visibleColumns.map((column) =>
-            renderColumnCard(column, Math.max(1, populatedColumns.length)),
-          )}
+      {/* Responsive Kanban Board: 5 Equal-Width Columns on >=640px, Vertical Stack on <640px */}
+      {layoutMode !== "compact" ? (
+        <ScrollView horizontal showsHorizontalScrollIndicator contentContainerStyle={{ gap: SPACING[2.5], alignItems: "stretch", width: "100%", minWidth: "100%", flexGrow: 1 }}>
+          {visibleColumns.map((column) => renderColumnCard(column))}
         </ScrollView>
       ) : (
         <View style={{ gap: SPACING[2.5] }}>
@@ -684,17 +587,8 @@ export function TasksPane({
               ))}
             </View>
           ) : null}
-          <View
-            style={{
-              flexDirection: layoutMode === "medium" ? "row" : "column",
-              flexWrap: layoutMode === "medium" ? "wrap" : "nowrap",
-              gap: SPACING[2.5],
-              alignItems: "stretch",
-            }}
-          >
-            {(collapseEmptyInStack ? populatedColumns : visibleColumns).map((column) =>
-              renderColumnCard(column, Math.max(1, populatedColumns.length)),
-            )}
+          <View style={{ flexDirection: "column", gap: SPACING[2.5], alignItems: "stretch" }}>
+            {(collapseEmptyInStack ? populatedColumns : visibleColumns).map((column) => renderColumnCard(column))}
           </View>
         </View>
       )}
@@ -737,8 +631,52 @@ export function TaskDetailModal({
 
 export function TaskDetailBody({ theme, detail }: { theme: PluginTheme; detail: TaskDetailView }) {
   const contract = detail.contract;
+  const task = detail.task;
+  const lastAttempt = task.attempts.at(-1);
+  const lastEye = task.attempts.findLast((a) => a.eye !== null)?.eye ?? null;
+  const lastWatch = task.attempts.findLast((a) => a.watch !== null)?.watch ?? null;
+  const hasChokeAnomaly = task.choke.denied > 0 || task.choke.blocked > 0;
+
   return (
     <View style={{ gap: SPACING[3] }}>
+      <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1] }}>
+        <AttemptTrail theme={theme} attempts={task.attempts} />
+        {lastAttempt !== undefined && lastAttempt.verdict !== null ? (
+          <Pill
+            theme={theme}
+            label={lastAttempt.verdict === "green" ? "Gate green" : "Gate red"}
+            tone={lastAttempt.verdict === "green" ? "statusSuccess" : "statusDanger"}
+            lit
+          />
+        ) : null}
+        {hasChokeAnomaly ? (
+          <Pill
+            theme={theme}
+            label={`Choke ${task.choke.allowed}/${task.choke.denied}/${task.choke.blocked}`}
+            tone="statusWarning"
+            lit
+            mono
+          />
+        ) : null}
+        {lastEye !== null ? (
+          <Pill
+            theme={theme}
+            label={`Eye ${lastEye.outcome.toUpperCase()}`}
+            tone={lastEye.outcome === "concern" ? "statusWarning" : "statusSuccess"}
+            lit
+          />
+        ) : null}
+        {lastWatch !== null && lastWatch.maxProbability !== null ? (
+          <Pill
+            theme={theme}
+            label={`Watch ${lastWatch.maxProbability.toFixed(2)}`}
+            tone={lastWatch.maxProbability >= 0.5 ? "statusWarning" : "foregroundMuted"}
+            lit={lastWatch.maxProbability >= 0.5}
+            mono
+          />
+        ) : null}
+        {task.costState === "metered" ? <Pill theme={theme} label={`Cost ${costLabel(task)}`} mono /> : null}
+      </View>
       <View style={{ gap: 2 }}>
         <Text style={text(theme, "section")}>Contract</Text>
         <Text style={text(theme, "code")}>gate: {contract.gate}</Text>

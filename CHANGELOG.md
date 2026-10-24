@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.37] - 2026-10-24
+
+v0.0.37's one thing: **equal-width 5-column Kanban board across all task states, strict vertical task stacking inside every column (`flexDirection: "column"`), and compact scannable `KanbanCard`s under `react-native-web`** (ADR 0025).
+
+### Fixed
+
+- **Equal-Width 5-Column Kanban Layout in `react-native-web` (`plugin/client/factory/kanban.ts`, `plugin/client/factory/tasks.tsx`, `plugin/client/factory/shell.tsx`)** — Added `computeEqualColumnWidth` and locked all visible columns on horizontal viewports (`>= 640px`) to identical pixel widths (`width`, `minWidth`, `maxWidth`, `flexBasis`, `flexGrow: 0`, `flexShrink: 0`, `overflow: "hidden"`), with a `flexBasis: 0` equal-flex fallback when `containerWidth === 0` and `contentContainerStyle={{ width: "100%", minWidth: "100%", flexGrow: 1 }}` on the horizontal `ScrollView`. Removed `isCollapsedRail` (`width: 132`) so all 5 columns remain 100% equal width whether 0, 1, or all 5 columns contain tasks.
+- **Vertical Task Stacking Inside Every Column (`plugin/client/factory/kanban.ts`, `plugin/client/factory/tasks.tsx`)** — Changed `computeCardGridColumns` to always return `1` and set every column's task list container to `flexDirection: "column", width: "100%", minWidth: 0`, eliminating horizontal row expansion inside `<ScrollView horizontal>` in `react-native-web`.
+- **Compact Scannable `KanbanCard` with Detail-on-Click (`plugin/client/factory/tasks.tsx`)** — Simplified `KanbanCard` to a compact 2-row card (`#Task` with `flexShrink: 0` + `AttemptTrail` dots or worker badge on Row 1, 1–2 line truncated description on Row 2, plus a single-line blocker banner on `Needs Attention` or `Accept #n` button on `Ready to Accept`), moving the full telemetry pill strip (`Gate`, `Eye`, `Watch`, `Choke`, `Cost`) into `TaskDetailModal`.
+
 ## [0.0.36] - 2026-10-24
 
 v0.0.36's one thing: **responsive 3-tier Kanban `Tasks` board (`wide` / `medium` / `compact`) with adaptive empty-column collapsing and multi-column card grids, status-accented 3-tier `KanbanCard` with `AttemptTrail` dots and compact `Accepted` density, and inline `Missing folder` Project deletion & Workspace Panel scope override** (ADR 0024, ADR 0025).
