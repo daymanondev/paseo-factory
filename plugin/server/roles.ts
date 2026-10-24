@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { provisionAgyPlugin, ensureFactoryBinScripts } from "./core/agy-home.ts";
 import { CorrelationRegistry } from "./core/correlations.ts";
 import { loadLanes, parseLane } from "./core/lanes.ts";
-import { resolveProject } from "./core/project.ts";
+import { resolveOrBootstrapProject, resolveProject } from "./core/project.ts";
 import { provisionPiAgentHome } from "./core/pi-home.ts";
 import {
   FOOTER_MARK,
@@ -533,14 +533,18 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
     if (role === undefined) return undefined;
   }
 
-  // The seat path (v0.0.27, ADR 0017 §2): provider/env-recognized seats and
-  // title-inferred seats alike register the Project, issue a Correlation
-  // token, and fence under the harness resolved from Lane config — so a
-  // `factory-supervisor` chat with the user's message as its title still gets
-  // its underlying harness's Layer-1 fence.
-  const project = resolveProject(request.config.cwd);
-  if (!project.ok) return undefined; // a seat identity on a non-repo cwd is not ours to guess about
-  const registered = ensureProjectRegistered(stateDir, project.root);
+  // The seat path (v0.0.27, ADR 0017 §2; v0.0.35, ADR 0024): provider/env-recognized
+  // seats and title-inferred seats alike bootstrap a greenfield non-Git folder
+  // (refusing `$HOME`, `/`, and internal stateDir), register the Project, issue
+  // a Correlation token, and fence under the harness resolved from Lane config —
+  // so a `factory-supervisor` chat with the user's message as its title still
+  // gets its underlying harness's Layer-1 fence.
+  const project =
+    role === "supervisor" || role === "lead"
+      ? resolveOrBootstrapProject(request.config.cwd, { stateDir, userHome })
+      : resolveProject(request.config.cwd);
+  if (!project.ok) return undefined; // a seat identity on an unresolvable/unsafe cwd is not ours to guess about
+  const registered = ensureProjectRegistered(stateDir, project);
   const projectIdentity: ProjectIdentity = registered.ok
     ? { root: registered.root, slug: registered.slug }
     : { root: project.root, slug: project.slug };
@@ -656,8 +660,9 @@ export function injectSessionEnv<
     const associated = correlations.associate(existingCorrId.trim(), request.agentId);
     if (associated !== undefined) {
       if (associated.role === "supervisor" || associated.role === "lead") {
-        const project = resolveProject(request.cwd);
+        const project = resolveOrBootstrapProject(request.cwd, { stateDir, userHome });
         if (project.ok && project.slug === associated.projectSlug) {
+          ensureProjectRegistered(stateDir, project);
           // Only a session that actually holds the seat persists its
           // workspaceId (Implementation Decision 1): bindSeatAgentId returns
           // false when another live session already owns it, and a seat it
@@ -770,8 +775,9 @@ export function injectSessionEnv<
   // (Factory)` chat needs no custom bootstrap to own the Project's mailbox.
   const identitySeat = inferRoleFromProviderId(request.provider) ?? parseRoleName(request.env?.PASEO_FACTORY_SEAT);
   if (identitySeat === "supervisor" || identitySeat === "lead") {
-    const project = resolveProject(request.cwd);
+    const project = resolveOrBootstrapProject(request.cwd, { stateDir, userHome });
     if (project.ok) {
+      ensureProjectRegistered(stateDir, project);
       // Same law as the correlation arm above: only a session that actually
       // holds the seat persists its workspaceId (Implementation Decision 1).
       if (bindSeatAgentId(stateDir, project.slug, project.root, identitySeat, request.agentId)) {

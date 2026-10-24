@@ -2,12 +2,14 @@ import { test } from "node:test";
 import type { TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
 import type { Duplex } from "node:stream";
-import { existsSync, chmodSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, chmodSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { basename, delimiter, dirname, join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { sealVaultBuffer } from "../src/index.ts";
+import { CorrelationRegistry } from "../src/correlations.ts";
 import type { VaultRunner, VaultRunnerCall } from "../src/index.ts";
 import { createFactory } from "../plugin/server/core/factory.ts";
 import { resolveProject } from "../plugin/server/core/project.ts";
@@ -223,7 +225,13 @@ function seedGreenTask(factory: ReturnType<typeof createFactory>, stateDir: stri
   const report = join(stateDir, `report-${task}-1.md`);
   writeFileSync(report, `# Report ${task} 1\n\nGREEN\n`);
   factory.ledger.append({ event: "report_written", task, attempt: 1, path: report });
-  factory.ledger.append({ event: "meter_written", task, provider: "pi/zai/glm-5.3", usage: { totalCostUsd: 0.04 }, agent: "agent-worker-1" });
+  factory.ledger.append({
+    event: "meter_written",
+    task,
+    provider: "pi/zai/glm-5.3",
+    usage: { inputTokens: 1200, cachedInputTokens: 300, outputTokens: 500, totalCostUsd: 0.04 },
+    agent: "agent-worker-1",
+  });
 }
 
 // ---- the snapshot ------------------------------------------------------------------------
@@ -245,6 +253,7 @@ test("snapshot: versioned view folding ledger + lanes + daemon agents + provider
   assert.equal(view.kpis.readyToAccept, 1, "one green unaccepted task");
   assert.equal(view.kpis.accepted, 0);
   assert.equal(view.kpis.totalCostUsd, 0.04, "the metered dollars sum");
+  assert.equal(view.kpis.totalTokens, 2000, "the metered tokens sum across input + cachedInput + output");
 
   const task = view.tasks.find((entry) => entry.task === "T1")!;
   assert.equal(task.status, "ready-to-accept");
@@ -874,8 +883,20 @@ test("snapshot: a projectRoot scopes lanes, seats, and tasks to the Project and 
   assert.ok(snap.ok, snap.ok ? "" : snap.error);
   const view = snap.view;
   assert.equal(view.version, 3);
-  assert.deepEqual(view.project, { slug: project.slug, root: project.root });
-  assert.ok(view.projects.some((entry) => entry.slug === project.slug && entry.root === project.root), "the registry feeds the Project Selector");
+  assert.deepEqual(view.project, {
+    slug: project.slug,
+    name: basename(project.root),
+    root: project.root,
+    commonDir: join(project.root, ".git"),
+    supervisorId: "agent-sup-1",
+    leadId: "agent-lead-1",
+    activeTaskCount: 1,
+  });
+  assert.ok(view.projects.some((entry) => entry.slug === project.slug && entry.root === project.root && entry.activeTaskCount === 1), "the registry feeds the Project Selector");
+  assert.ok(
+    view.projects.some((entry) => entry.slug === other.slug && entry.root === other.root && entry.activeTaskCount === 1),
+    "unselected project retains its full activeTaskCount from the Ledger even when snapshot is scoped",
+  );
   assert.equal(view.lanes.supervisor, "claude/opus-4-8", "the Project override lane wins");
   assert.equal(view.lanes.worker, "copilot/gpt-5.4", "the machine table fills the rest");
   assert.ok(view.supervisor !== null && view.supervisor.id === "agent-sup-1", "the Project's supervisor is the snapshot's supervisor");
@@ -892,11 +913,10 @@ test("snapshot: a projectRoot scopes lanes, seats, and tasks to the Project and 
   assert.deepEqual(global.view.tasks.map((task) => task.task).sort(), ["IN1", "OUT1"]);
 
   // An unresolvable scope degrades to the global view, never a failure.
-  const outside = makeTempDir();
-  disposeDir(t, outside);
+  const outside = join(makeTempDir(), "nonexistent-scope");
   const degraded = await handlers.snapshot({ projectRoot: outside });
   assert.ok(degraded.ok);
-  assert.equal(degraded.view.project, null, "a non-repo scope renders the global view");
+  assert.equal(degraded.view.project, null, "an unresolvable scope renders the global view");
 });
 
 // ---- the Lead telemetry join (v0.0.20, ADR 0013 §6, ticket 08) ------------------------------
@@ -1423,13 +1443,37 @@ test("projects: the registration records the slug→root binding and both seat i
       { projectId: "p2", rootPath: "/nonexistent/archived", kind: "git", archivedAt: "2026-01-01T00:00:00Z" },
     ]),
   );
-  const discovered = discoverProjects(stateDir, [{ labels: { seat: "lead", project: "other-xyz789" }, cwd: "/w/other" }], homeDir);
+  const discovered = discoverProjects(stateDir, [{ id: "agent-other-lead", labels: { seat: "lead", project: "other-xyz789" }, cwd: "/w/other" }], homeDir);
   assert.deepEqual(
     discovered,
     [
-      { slug: "other-xyz789", root: "/w/other" },
-      { slug: paseoProject.slug, root: paseoProject.root },
-      { slug: project.slug, root: project.root },
+      {
+        slug: "other-xyz789",
+        name: "other",
+        root: "/w/other",
+        commonDir: "/w/other/.git",
+        supervisorId: null,
+        leadId: "agent-other-lead",
+        activeTaskCount: 0,
+      },
+      {
+        slug: paseoProject.slug,
+        name: basename(paseoProject.root),
+        root: paseoProject.root,
+        commonDir: join(paseoProject.root, ".git"),
+        supervisorId: null,
+        leadId: null,
+        activeTaskCount: 0,
+      },
+      {
+        slug: project.slug,
+        name: basename(project.root),
+        root: project.root,
+        commonDir: join(project.root, ".git"),
+        supervisorId: "agent-sup-1",
+        leadId: null,
+        activeTaskCount: 0,
+      },
     ].sort((a, b) => a.slug.localeCompare(b.slug)),
     "registry files, live seat agents, and Paseo's projects.json all feed the Project Selector, slug order",
   );
@@ -4782,3 +4826,442 @@ test("v0.0.34 seam 1.5 — batch Update All orders paseo-factory last so Compani
   );
   assert.equal(res.summary, "updated factory-burn-lab (7f8a5cc → a91c3f2) · updated paseo-factory (0285a1c → 383385c)");
 });
+
+test("Seam 1.1: projectAdd bootstraps greenfield non-Git folders and discoverProjects / snapshot include live factory-supervisor & factory-lead Role-provider sessions even without labels.seat (v0.0.35, ADR 0024)", async (t) => {
+  const roleSupRepo = makeProject(t, "role-sup-repo");
+  const roleLeadRepo = makeProject(t, "role-lead-repo");
+  const rolePeerRepo = makeProject(t, "role-peer-repo");
+  const labelProjectRepo = makeProject(t, "label-project-repo");
+  const { dir, home, stateDir, fake, handlers } = makeSurface(t, [
+    // Live Role-provider sessions with NO labels.seat and NO labels.project
+    { id: "role-sup-1", provider: "factory-supervisor", title: "Supervisor", cwd: roleSupRepo.root, labels: {} },
+    { id: "role-lead-1", provider: "factory-lead", title: "Lead", cwd: roleLeadRepo.root, labels: {} },
+    { id: "role-peer-1", provider: "factory-peer", title: "Peer", cwd: rolePeerRepo.root, labels: {} },
+    { id: "label-proj-1", provider: "claude/opus-4-8", title: "Labeled", cwd: labelProjectRepo.root, labels: { project: labelProjectRepo.slug } },
+  ]);
+  const openedCwds: string[] = [];
+  fake.daemon.workspaces = {
+    open: async ({ cwd }) => {
+      openedCwds.push(cwd);
+      return { id: "wks-greenfield-1", projectId: "prj-greenfield-1" };
+    },
+    create: async () => ({ id: "wks-wt", projectId: "prj-greenfield-1" }),
+    archive: async () => ({}),
+    ref: () => ({
+      agents: {
+        create: async (opts) => fake.daemon.agents.create({ ...opts, cwd: dir }),
+      },
+    }),
+  };
+
+  // 1. projectAdd on a plain greenfield directory without .git
+  const greenfieldDir = join(dir, "greenfield-project");
+  mkdirSync(greenfieldDir, { recursive: true });
+  assert.equal(existsSync(join(greenfieldDir, ".git")), false);
+
+  const addRes = await handlers.projectAdd({ projectRoot: greenfieldDir });
+  assert.ok(addRes.ok, addRes.ok ? "" : addRes.error);
+  assert.equal(addRes.bootstrapped, true);
+  assert.equal(existsSync(join(greenfieldDir, ".git")), true, "projectAdd initialized .git");
+  const headSha = execFileSync("git", ["rev-parse", "--verify", "HEAD"], { cwd: greenfieldDir, encoding: "utf8" }).trim();
+  assert.match(headSha, /^[0-9a-f]{40}$/, "projectAdd created initial empty commit");
+  const reg = readProjectRegistration(stateDir, addRes.slug);
+  assert.ok(reg !== undefined, "projectAdd registered project.json in stateDir");
+  assert.equal(reg.root, addRes.projectRoot);
+  assert.equal(reg.name, "greenfield-project", "projectAdd persisted name in project.json");
+  assert.equal(reg.workspaceId, "wks-greenfield-1", "projectAdd synchronized workspaceId via daemon.workspaces.open");
+  assert.equal(reg.paseoProjectId, "prj-greenfield-1", "projectAdd synchronized paseoProjectId via daemon.workspaces.open");
+  assert.deepEqual(openedCwds, [addRes.projectRoot]);
+  assert.equal(addRes.view?.project?.slug, addRes.slug);
+
+  // Refuses bootstrapping inside paseoHome (deps.home)
+  const insidePaseoHome = join(home, "sub-workspace");
+  mkdirSync(insidePaseoHome, { recursive: true });
+  const refusedPaseoSub = await handlers.projectAdd({ projectRoot: insidePaseoHome });
+  assert.equal(refusedPaseoSub.ok, false, "projectAdd refuses directories inside paseoHome");
+  if (!refusedPaseoSub.ok) assert.equal(refusedPaseoSub.code, "unsafe-directory");
+
+  // 2. Also seed a git Paseo workspace and a non-Git Paseo workspace in <home>/projects/projects.json
+  const paseoWsRepo = makeProject(t, "paseo-ws-repo");
+  const paseoNonGitDir = join(dir, "paseo-nongit-ws");
+  mkdirSync(paseoNonGitDir, { recursive: true });
+  mkdirSync(join(home, "projects"), { recursive: true });
+  writeFileSync(
+    join(home, "projects", "projects.json"),
+    JSON.stringify({
+      version: 1,
+      projects: [
+        { projectId: "p-ws-1", rootPath: paseoWsRepo.root, kind: "git", archivedAt: null },
+        { projectId: "p-ws-2", rootPath: paseoNonGitDir, kind: "non_git", archivedAt: null },
+      ],
+    }),
+  );
+
+  // 3. Snapshot discovers the greenfield project, unlabeled Role-provider projects, labels.project agent, and both Paseo workspaces
+  const snap = await handlers.snapshot({});
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  const discoveredSlugs = snap.view.projects.map((p) => p.slug);
+  assert.ok(discoveredSlugs.includes(addRes.slug), "greenfield project is in view.projects");
+  assert.ok(discoveredSlugs.includes(roleSupRepo.slug), "unlabeled factory-supervisor session's project is discovered");
+  assert.ok(discoveredSlugs.includes(roleLeadRepo.slug), "unlabeled factory-lead session's project is discovered");
+  assert.ok(discoveredSlugs.includes(rolePeerRepo.slug), "unlabeled factory-peer session's project is discovered");
+  assert.ok(discoveredSlugs.includes(labelProjectRepo.slug), "labels.project session's project is discovered");
+  assert.ok(discoveredSlugs.includes(paseoWsRepo.slug), "Paseo projects.json workspace is discovered");
+  const nonGitEntry = snap.view.projects.find((p) => p.name === "paseo-nongit-ws");
+  assert.ok(nonGitEntry !== undefined, "non-Git Paseo workspace is discovered in view.projects");
+
+  // 4. Selecting the discovered non-Git Paseo workspace via snapshot({ projectRoot }) auto-bootstraps Git and selects it
+  const selectNonGit = await handlers.snapshot({ projectRoot: nonGitEntry.root });
+  assert.ok(selectNonGit.ok, selectNonGit.ok ? "" : selectNonGit.error);
+  assert.ok(selectNonGit.view.project !== null, "selecting a non-Git Paseo workspace resolves view.project instead of null");
+  assert.equal(selectNonGit.view.project?.name, "paseo-nongit-ws");
+  assert.equal(existsSync(join(paseoNonGitDir, ".git")), true, "snapshot({ projectRoot }) initialized .git on non-Git Paseo workspace");
+});
+
+test("Seam 1.2: deleting a registered Project's folder on disk marks it missingRoot: true and snapshot({ projectRoot }) resolves view.project from persisted registration instead of returning null (v0.0.35, ADR 0024)", async (t) => {
+  const deletedProject = makeProject(t, "deleted-finder-repo");
+  const liveProject = makeProject(t, "live-neighbor-repo");
+  const { stateDir, factory, handlers } = makeSurface(t);
+
+  // Register both projects, save a per-project lane override on deletedProject, and record an accepted task
+  writeProjectRegistration(stateDir, deletedProject.slug, { root: deletedProject.root });
+  writeProjectRegistration(stateDir, liveProject.slug, { root: liveProject.root });
+  saveLanes(stateDir, { supervisor: "claude/opus-4-8" }, deletedProject.slug);
+
+  seedGreenTask(factory, stateDir, "T-DEL-1", deletedProject.root);
+  factory.ledger.append({ event: "attempt_accepted", task: "T-DEL-1", attempt: 1, sha: "full0001", accepted_by: "owner" });
+  seedGreenTask(factory, stateDir, "T-LIVE-1", liveProject.root);
+
+  // Simulate the Owner deleting deletedProject's folder in Finder
+  rmSync(deletedProject.root, { recursive: true, force: true });
+  assert.equal(existsSync(deletedProject.root), false);
+
+  // 1. discoverProjects marks deletedProject with missingRoot: true, while liveProject has no missingRoot flag
+  const discovered = discoverProjects(stateDir, []);
+  const discDeleted = discovered.find((p) => p.slug === deletedProject.slug);
+  const discLive = discovered.find((p) => p.slug === liveProject.slug);
+  assert.deepEqual(discDeleted, {
+    slug: deletedProject.slug,
+    name: basename(deletedProject.root),
+    root: deletedProject.root,
+    commonDir: join(deletedProject.root, ".git"),
+    missingRoot: true,
+    supervisorId: null,
+    leadId: null,
+    activeTaskCount: 0,
+  });
+  assert.deepEqual(discLive, {
+    slug: liveProject.slug,
+    name: basename(liveProject.root),
+    root: liveProject.root,
+    commonDir: join(liveProject.root, ".git"),
+    supervisorId: null,
+    leadId: null,
+    activeTaskCount: 0,
+  });
+
+  // 2. Selecting the deleted project via snapshot({ projectRoot: deletedProject.root }) resolves view.project with missingRoot: true
+  const snap = await handlers.snapshot({ projectRoot: deletedProject.root });
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  const expectedDeletedView = {
+    slug: deletedProject.slug,
+    name: basename(deletedProject.root),
+    root: deletedProject.root,
+    commonDir: join(deletedProject.root, ".git"),
+    missingRoot: true,
+    supervisorId: null,
+    leadId: null,
+    activeTaskCount: 1,
+  };
+  assert.deepEqual(
+    snap.view.project,
+    expectedDeletedView,
+    "view.project resolves from persisted registration with missingRoot: true instead of snapping back to null",
+  );
+  const viewDeletedEntry = snap.view.projects.find((p) => p.slug === deletedProject.slug);
+  assert.deepEqual(viewDeletedEntry, expectedDeletedView);
+
+  // 3. Tasks, KPIs, and lanes scope cleanly to the missing-root project without crashing
+  assert.deepEqual(snap.view.tasks.map((task) => task.task), ["T-DEL-1"]);
+  assert.equal(snap.view.kpis.accepted, 1);
+  assert.equal(snap.view.lanes.supervisor, "claude/opus-4-8");
+
+  // 4. Selecting by slug also resolves view.project with missingRoot: true
+  const snapBySlug = await handlers.snapshot({ projectRoot: deletedProject.slug });
+  assert.ok(snapBySlug.ok, snapBySlug.ok ? "" : snapBySlug.error);
+  assert.deepEqual(snapBySlug.view.project, expectedDeletedView);
+});
+
+test("Seam 1.3a: projectDelete refuses seats with seat-cannot-delete and purges all Factory state, worktrees, branches, correlations, and Paseo records for live and missing-root Projects (v0.0.35, ADR 0024)", async (t) => {
+  const targetProject = makeProject(t, "delete-target-repo");
+  const siblingProject = makeProject(t, "delete-sibling-repo");
+  const missingProject = makeProject(t, "delete-missing-repo");
+
+  const agents: FakeAgent[] = [
+    { id: "agent-sup-target", labels: { seat: "supervisor", project: targetProject.slug }, cwd: targetProject.root, workspaceId: "wks-target-main" },
+    { id: "agent-lead-target", labels: { seat: "lead", project: targetProject.slug }, cwd: targetProject.root, workspaceId: "wks-target-main" },
+    { id: "agent-role-unlabeled", provider: "factory-supervisor", cwd: targetProject.root, labels: {}, workspaceId: "wks-target-main" },
+    { id: "agent-worker-target", labels: { seat: "agent", project: targetProject.slug, task: "T-DEL-1" }, cwd: targetProject.root, workspaceId: "wks-target-t1" },
+    { id: "agent-sup-sibling", labels: { seat: "supervisor", project: siblingProject.slug }, cwd: siblingProject.root, workspaceId: "wks-sibling-main" },
+  ];
+  const { stateDir, factory, fake, stopped } = makeSurface(t, agents);
+
+  const archiveWorkspaceReqs: string[] = [];
+  const removeProjectReqs: string[] = [];
+  const daemon = await startFakeDaemon(t, (message) => {
+    if (message.type === "fetch_workspaces_request") {
+      return {
+        type: "fetch_workspaces_response",
+        payload: {
+          requestId: message.requestId,
+          entries: [
+            { id: "wks-target-main", workspaceDirectory: targetProject.root, projectRootPath: targetProject.root },
+            { id: "wks-target-t1", workspaceDirectory: join(stateDir, "projects", targetProject.slug, "worktrees", "T-DEL-1") },
+            { id: "wks-sibling-main", workspaceDirectory: siblingProject.root, projectRootPath: siblingProject.root },
+          ],
+        },
+      };
+    }
+    if (message.type === "project.list.request") {
+      return {
+        type: "project.list.response",
+        payload: {
+          requestId: message.requestId,
+          projects: [
+            { projectId: "prj-target-main", projectRootPath: targetProject.root },
+            { projectId: "prj-target-wt", projectRootPath: join(stateDir, "projects", targetProject.slug, "worktrees", "T-DEL-1") },
+            { projectId: "prj-missing-main", projectRootPath: missingProject.root },
+            { projectId: "prj-sibling-main", projectRootPath: siblingProject.root },
+          ],
+        },
+      };
+    }
+    if (message.type === "archive_workspace_request") {
+      archiveWorkspaceReqs.push(String(message.workspaceId));
+      return { type: "archive_workspace_response", payload: { requestId: message.requestId } };
+    }
+    if (message.type === "project.remove.request") {
+      removeProjectReqs.push(String(message.projectId));
+      return { type: "project.remove.response", payload: { requestId: message.requestId } };
+    }
+    return null;
+  });
+
+  const archivedWorkspaces: string[] = [];
+  fake.daemon.workspaces = {
+    open: async () => ({ id: "wks-target-main", projectId: "prj-target-main" }),
+    create: async () => ({ id: "wks-target-t1", projectId: "prj-target-main" }),
+    archive: async (wsId: string) => {
+      archivedWorkspaces.push(wsId);
+      return { archivedAt: new Date().toISOString(), error: null };
+    },
+    ref: () => ({
+      agents: {
+        create: async (opts) => fake.daemon.agents.create({ ...opts, cwd: targetProject.root }),
+      },
+    }),
+  };
+
+  let resetMailboxSlug: string | undefined;
+  const handlers = createSurfaceHandlers({
+    factory,
+    stateDir,
+    home: daemon.home,
+    daemon: fake.daemon,
+    listPlugins: async () => ({ ok: true, plugins: [] }),
+    stopAgent: async (agentId) => {
+      stopped.push(agentId);
+      return { ok: true };
+    },
+    resetProjectMailbox: (slug) => {
+      resetMailboxSlug = slug;
+    },
+  });
+
+  // Seed registrations, per-project lanes, worktree + branch, tasks, retro, correlations, mailbox, and Paseo projects.json
+  const wtPrep = prepareTaskWorktree({ stateDir, workspace: targetProject.root, task: "T-DEL-1" });
+  assert.ok(wtPrep.ok, wtPrep.ok ? "" : wtPrep.reason);
+  writeFileSync(join(wtPrep.path, "feature.txt"), "hello\n");
+  gitCommitAll(wtPrep.path, "worktree commit");
+
+  writeProjectRegistration(stateDir, targetProject.slug, {
+    root: targetProject.root,
+    workspaceId: "wks-target-main",
+    paseoProjectId: "prj-target-main",
+    supervisor: "agent-sup-target",
+    lead: "agent-lead-target",
+    taskWorkspaces: { "T-DEL-1": "wks-target-t1" },
+  });
+  saveLanes(stateDir, { supervisor: "claude/opus-4-8", lead: "opencode/glm-5.1" }, targetProject.slug);
+
+  writeProjectRegistration(stateDir, siblingProject.slug, {
+    root: siblingProject.root,
+    workspaceId: "wks-sibling-main",
+    paseoProjectId: "prj-sibling-main",
+    supervisor: "agent-sup-sibling",
+  });
+  saveLanes(stateDir, { supervisor: "pi/zai/glm-5.3" }, siblingProject.slug);
+
+  seedGreenTask(factory, stateDir, "T-DEL-1", targetProject.root);
+  seedGreenTask(factory, stateDir, "T-DEL-WT", wtPrep.path);
+  seedGreenTask(factory, stateDir, "T-SIB-1", siblingProject.root);
+  const retroFile = join(stateDir, `retro-${targetProject.slug}-1.json`);
+  writeFileSync(retroFile, '{"proposals":[]}\n');
+  enqueueLeadMail(join(stateDir, "projects", targetProject.slug, "mailbox.jsonl"), {
+    from: "peer",
+    kind: "verdict",
+    task: "T-DEL-1",
+    text: "green",
+  });
+
+  const correlations = new CorrelationRegistry(stateDir);
+  correlations.issue({ role: "supervisor", projectSlug: targetProject.slug, projectRoot: targetProject.root, agentId: "agent-sup-target" });
+  correlations.issue({ role: "agent", projectSlug: targetProject.slug, projectRoot: wtPrep.path, task: "T-DEL-1", agentId: "agent-worker-target" });
+  correlations.issue({ role: "supervisor", projectSlug: siblingProject.slug, projectRoot: siblingProject.root, agentId: "agent-sup-sibling" });
+
+  mkdirSync(join(daemon.home, "projects"), { recursive: true });
+  writeFileSync(
+    join(daemon.home, "projects", "projects.json"),
+    JSON.stringify({
+      version: 1,
+      projects: [
+        { projectId: "prj-target-main", rootPath: targetProject.root, kind: "git", archivedAt: null },
+        { projectId: "prj-target-wt", rootPath: wtPrep.path, kind: "git", archivedAt: null },
+        { projectId: "prj-missing-main", rootPath: missingProject.root, kind: "git", archivedAt: null },
+        { projectId: "prj-sibling-main", rootPath: siblingProject.root, kind: "git", archivedAt: null },
+      ],
+    }),
+  );
+
+  // 1. Refuse seats (supervisor, lead, agent) with seat-cannot-delete
+  for (const seat of ["supervisor", "lead", "agent"] as const) {
+    const refused = await handlers.projectDelete({ projectRoot: targetProject.root, seat });
+    assert.equal(refused.ok, false, `expected ${seat} to be refused projectDelete`);
+    if (!refused.ok) {
+      assert.equal(refused.code, "seat-cannot-delete");
+    }
+  }
+  assert.equal(existsSync(join(stateDir, "projects", targetProject.slug, "project.json")), true, "refused delete leaves project.json intact");
+
+  // 2. Owner deletes live targetProject
+  const delRes = await handlers.projectDelete({ projectRoot: targetProject.root });
+  assert.ok(delRes.ok, delRes.ok ? "" : delRes.error);
+  assert.equal(delRes.project, targetProject.slug);
+  assert.equal(delRes.projectRoot, targetProject.root);
+  assert.ok(delRes.purgedEvents > 0, "purged ledger events for targetProject");
+  assert.deepEqual(delRes.tasks.sort(), ["T-DEL-1", "T-DEL-WT"]);
+  assert.ok(delRes.archivedSeats.includes("agent-sup-target"));
+  assert.ok(delRes.archivedSeats.includes("agent-lead-target"));
+  assert.ok(delRes.archivedSeats.includes("agent-role-unlabeled"));
+  assert.ok(delRes.archivedAgents.includes("agent-worker-target"));
+  assert.equal(delRes.archivedSeats.includes("agent-sup-sibling"), false, "sibling project seat untouched");
+  assert.ok(archivedWorkspaces.includes("wks-target-t1"), "archived task workspace");
+  assert.ok(archivedWorkspaces.includes("wks-target-main"), "archived main project workspace");
+  assert.equal(resetMailboxSlug, targetProject.slug, "reset in-memory mailbox for deleted project");
+
+  // Entire <stateDir>/projects/<slug>/ directory (including project.json and lanes.json) is gone
+  assert.equal(existsSync(join(stateDir, "projects", targetProject.slug)), false, "entire <stateDir>/projects/<slug>/ directory removed");
+  assert.equal(existsSync(join(stateDir, "projects", siblingProject.slug, "project.json")), true, "sibling project.json preserved");
+  assert.equal(existsSync(join(stateDir, "projects", siblingProject.slug, "lanes.json")), true, "sibling lanes.json preserved");
+
+  // Git worktree and factory/* branch removed from targetProject.root
+  const branchesAfter = execFileSync("git", ["branch", "--list", "factory/*"], { cwd: targetProject.root, encoding: "utf8" }).trim();
+  assert.equal(branchesAfter, "", "factory/* branches removed from targetProject git repo");
+
+  // Ledger events, gate logs, reports, and retro files for targetProject removed
+  assert.equal(factory.ledger.eventsFor("T-DEL-1").length, 0);
+  assert.equal(factory.ledger.eventsFor("T-DEL-WT").length, 0);
+  assert.ok(factory.ledger.eventsFor("T-SIB-1").length > 0, "sibling ledger events preserved");
+  assert.equal(existsSync(join(stateDir, "gate-T-DEL-1-1.log")), false);
+  assert.equal(existsSync(join(stateDir, "report-T-DEL-1-1.md")), false);
+  assert.equal(existsSync(retroFile), false);
+
+  // CorrelationRegistry entries for targetProject purged, siblingProject preserved
+  const freshCorrelations = new CorrelationRegistry(stateDir);
+  assert.equal(freshCorrelations.findByAgentId("agent-sup-target"), undefined);
+  assert.equal(freshCorrelations.findByAgentId("agent-worker-target"), undefined);
+  assert.ok(freshCorrelations.findByAgentId("agent-sup-sibling") !== undefined, "sibling correlation preserved");
+
+  // Daemon WS workspaces and projects swept (including main project record)
+  assert.ok(archiveWorkspaceReqs.includes("wks-target-main"), "daemon WS swept target main workspace");
+  assert.ok(archiveWorkspaceReqs.includes("wks-target-t1"), "daemon WS swept target worktree workspace");
+  assert.equal(archiveWorkspaceReqs.includes("wks-sibling-main"), false, "daemon WS preserved sibling workspace");
+  assert.ok(removeProjectReqs.includes("prj-target-main"), "daemon WS removed target main project record");
+  assert.ok(removeProjectReqs.includes("prj-target-wt"), "daemon WS removed target worktree project record");
+  assert.equal(removeProjectReqs.includes("prj-sibling-main"), false, "daemon WS preserved sibling project record");
+
+  // <home>/projects/projects.json pruned of targetProject and its worktree
+  const paseoProjectsAfter = JSON.parse(readFileSync(join(daemon.home, "projects", "projects.json"), "utf8")) as {
+    projects: Array<{ projectId: string; rootPath: string }>;
+  };
+  assert.equal(paseoProjectsAfter.projects.some((p) => p.rootPath === targetProject.root), false, "targetProject pruned from projects.json");
+  assert.equal(paseoProjectsAfter.projects.some((p) => p.rootPath === wtPrep.path), false, "worktree pruned from projects.json");
+  assert.equal(paseoProjectsAfter.projects.some((p) => p.rootPath === siblingProject.root), true, "siblingProject kept in projects.json");
+
+  // Refreshed view has project: null and no longer lists targetProject
+  assert.equal(delRes.view?.project, null, "refreshed view clears active project to null");
+  assert.equal(delRes.view?.projects.some((p) => p.slug === targetProject.slug), false, "deleted project absent from view.projects");
+  assert.equal(delRes.view?.projects.some((p) => p.slug === siblingProject.slug), true, "sibling project remains in view.projects");
+  assert.match(delRes.summary, /Deleted project .* and purged all Factory state/);
+
+  // 3. Delete a missing-root Project (folder already deleted in Finder)
+  writeProjectRegistration(stateDir, missingProject.slug, { root: missingProject.root });
+  saveLanes(stateDir, { supervisor: "claude/opus-4-8" }, missingProject.slug);
+  seedGreenTask(factory, stateDir, "T-MISS-1", missingProject.root);
+  rmSync(missingProject.root, { recursive: true, force: true });
+  assert.equal(existsSync(missingProject.root), false);
+
+  const missingDelRes = await handlers.projectDelete({ projectRoot: missingProject.root });
+  assert.ok(missingDelRes.ok, missingDelRes.ok ? "" : missingDelRes.error);
+  assert.equal(missingDelRes.project, missingProject.slug);
+  assert.equal(existsSync(join(stateDir, "projects", missingProject.slug)), false, "missing-root project directory completely removed");
+  assert.equal(factory.ledger.eventsFor("T-MISS-1").length, 0, "missing-root project ledger events purged");
+  assert.equal(missingDelRes.view?.projects.some((p) => p.slug === missingProject.slug), false, "missing-root project removed from view.projects");
+});
+
+test("Seam 1.3b: projectPickFolder handles native dialog cancellation and auto-bootstraps/registers chosen greenfield folders (v0.0.35, ADR 0024)", async (t) => {
+  const { dir, home, stateDir, factory, fake } = makeSurface(t);
+  let nextPickedPath: string | null = null;
+  const receivedPrompts: Array<string | undefined> = [];
+
+  const handlers = createSurfaceHandlers({
+    factory,
+    stateDir,
+    home,
+    daemon: fake.daemon,
+    pickFolder: async (prompt) => {
+      receivedPrompts.push(prompt);
+      return nextPickedPath;
+    },
+  });
+
+  // 1. User cancels the native OS folder picker dialog
+  nextPickedPath = null;
+  const cancelRes = await handlers.projectPickFolder({ prompt: "Pick a folder" });
+  assert.ok(cancelRes.ok, cancelRes.ok ? "" : cancelRes.error);
+  assert.equal(cancelRes.cancelled, true);
+  assert.equal(cancelRes.path, null);
+  assert.deepEqual(receivedPrompts, ["Pick a folder"]);
+
+  // 2. User selects a greenfield non-Git folder -> auto-bootstraps Git, registers project, and returns refreshed view
+  const greenfieldDir = join(dir, "picked-greenfield-app");
+  mkdirSync(greenfieldDir, { recursive: true });
+  nextPickedPath = greenfieldDir;
+
+  const pickedRes = await handlers.projectPickFolder({});
+  assert.ok(pickedRes.ok, pickedRes.ok ? "" : pickedRes.error);
+  assert.equal(pickedRes.cancelled, false);
+  if (!pickedRes.cancelled) {
+    assert.equal(pickedRes.bootstrapped, true);
+    assert.equal(existsSync(join(greenfieldDir, ".git")), true, "projectPickFolder bootstrapped .git");
+    assert.equal(pickedRes.project.slug, pickedRes.slug);
+    assert.equal(pickedRes.project.missingRoot, false);
+    assert.equal(pickedRes.view?.project?.slug, pickedRes.slug);
+    assert.match(pickedRes.summary, /added project picked-greenfield-app/i);
+    const reg = readProjectRegistration(stateDir, pickedRes.slug);
+    assert.ok(reg !== undefined, "projectPickFolder persisted project.json");
+    assert.equal(reg.root, pickedRes.projectRoot);
+  }
+});
+
+

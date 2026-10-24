@@ -13,10 +13,19 @@
  * Decisions 1). This module is the backward-compatible re-export layer.
  */
 export {
+  resolveProject,
+  resolveOrBootstrapProject,
+  ensureGitRepository,
   readProjectRegistration,
   writeProjectRegistration,
   ensureProjectRegistered,
   listProjectRegistrations,
   discoverProjects,
 } from "./core/project.ts";
-export type { ProjectRegistration } from "./core/project.ts";
+export type {
+  ProjectResolution,
+  BootstrapProjectOptions,
+  BootstrapProjectResolution,
+  DiscoveredProject,
+  ProjectRegistration,
+} from "./core/project.ts";

@@ -11,7 +11,7 @@
  */
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
-import { ImportMaterializationSchema, ImportStatusSchema, FactoryViewSchema, LaneNameSchema, TaskDetailViewSchema, VaultStatusViewSchema } from "./view.ts";
+import { ImportMaterializationSchema, ImportStatusSchema, FactoryViewSchema, LaneNameSchema, ProjectViewSchema, TaskDetailViewSchema, VaultStatusViewSchema } from "./view.ts";
 
 /** Every handler's refusal shape: a stable machine code plus the human sentence. */
 export const Failure = z.object({ ok: z.literal(false), code: z.string(), error: z.string() });
@@ -146,6 +146,80 @@ export const projectReset = defineRpc({
       removedFiles: z.number().int(),
       archivedSeats: z.array(z.string()),
       archivedAgents: z.array(z.string()),
+      summary: z.string(),
+      view: FactoryViewSchema.optional(),
+    }),
+    Failure,
+  ]),
+});
+
+export const projectAdd = defineRpc({
+  name: "factory.project.add",
+  input: z.object({
+    projectRoot: z.string().min(1).optional(),
+    path: z.string().min(1).optional(),
+  }),
+  output: z.union([
+    z.object({
+      ok: z.literal(true),
+      path: z.string(),
+      projectRoot: z.string(),
+      slug: z.string(),
+      project: ProjectViewSchema,
+      bootstrapped: z.boolean(),
+      summary: z.string(),
+      view: FactoryViewSchema.optional(),
+    }),
+    Failure,
+  ]),
+});
+
+export const projectDelete = defineRpc({
+  name: "factory.project.delete",
+  input: z.object({
+    projectRoot: z.string().optional(),
+    projectSlug: z.string().optional(),
+    project: z.string().optional(),
+    seat: z.string().optional(),
+  }),
+  output: z.union([
+    z.object({
+      ok: z.literal(true),
+      project: z.string(),
+      projectRoot: z.string(),
+      purgedEvents: z.number().int(),
+      tasks: z.array(z.string()),
+      removedFiles: z.number().int(),
+      archivedSeats: z.array(z.string()),
+      archivedAgents: z.array(z.string()),
+      summary: z.string(),
+      view: FactoryViewSchema.optional(),
+    }),
+    Failure,
+  ]),
+});
+
+export const projectPickFolder = defineRpc({
+  name: "factory.project.pick.folder",
+  input: z
+    .object({
+      prompt: z.string().optional(),
+    })
+    .optional(),
+  output: z.union([
+    z.object({
+      ok: z.literal(true),
+      cancelled: z.literal(true),
+      path: z.null(),
+    }),
+    z.object({
+      ok: z.literal(true),
+      cancelled: z.literal(false),
+      path: z.string(),
+      projectRoot: z.string(),
+      slug: z.string(),
+      project: ProjectViewSchema,
+      bootstrapped: z.boolean(),
       summary: z.string(),
       view: FactoryViewSchema.optional(),
     }),

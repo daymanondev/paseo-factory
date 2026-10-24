@@ -24,20 +24,21 @@ export { acceptanceSummary, archiveAcceptedTaskWorkspace } from "./commands.ts";
  */
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readdirSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import { CorrelationRegistry } from "./core/correlations.ts";
 import { FactoryError } from "./core/errors.ts";
 import type { Factory } from "./core/factory.ts";
 import { readLeadMailbox } from "./core/mailbox.ts";
 import { loadLanes, parseLane, saveLanes } from "./core/lanes.ts";
-import { listProjectRegistrations, projectStateDir, readProjectRegistration, resolveProject } from "./core/project.ts";
+import { ensureProjectRegistered, listProjectRegistrations, projectStateDir, readProjectRegistration, resolveOrBootstrapProject, resolveProject } from "./core/project.ts";
 import type { ProjectResolution } from "./core/project.ts";
 import { hydrateVaultDirect, importVaultSecrets, isLocalCompanionGitSource, loadVaultConfig, probeCompanionGitAccess, probeGhAuth, pullVault, pushVault, readVaultStatus, saveVaultConfig, syncVault } from "./core/vault.ts";
 import type { ImportVaultSecretsInput, SyncVaultOptions, VaultConfig, VaultRunner } from "./core/vault.ts";
-import { join } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { FACTORY_VIEW_VERSION } from "../shared/view.ts";
 import { foldRetro, foldTasks, foldView, readTailed } from "./view.ts";
 import { setAgentModelViaCli, setAgentThinkingViaCli, stopAgentViaCli } from "./daemon-cli.ts";
-import { checkDaemonPluginUpdates, cleanupDaemonWorkspacesAndProjectsViaWs, getCachedPluginUpdateStatus, installDaemonPlugin, listDaemonPlugins, manageDaemonPlugin, reloadDaemonConfigViaWs } from "./daemon-cli.ts";
+import { checkDaemonPluginUpdates, cleanupDaemonWorkspacesAndProjectsViaWs, getCachedPluginUpdateStatus, installDaemonPlugin, listDaemonPlugins, manageDaemonPlugin, prunePaseoProjectRegistry, reloadDaemonConfigViaWs } from "./daemon-cli.ts";
 import type { DaemonPluginAction, DaemonPluginItem, DaemonPluginSourceStatus, DaemonPluginUpdateRow, DaemonReply } from "./daemon-cli.ts";
 import { reconcilePaseoRoleProviders } from "./core/role-providers.ts";
 import { SEAT_TITLES, inferRoleFromProviderId, resolveEffectiveProviderFamily } from "./roles.ts";
@@ -56,6 +57,9 @@ import {
   pluginsCheckUpdates,
   pluginsInstall,
   pluginsManage,
+  projectAdd,
+  projectDelete,
+  projectPickFolder,
   projectReset,
   ratifyProposal,
   retro,
@@ -280,6 +284,10 @@ export interface SurfaceDeps {
    * fixtures, zero network.
    */
   vaultRunner?: VaultRunner;
+  /** Native OS folder picker override (v0.0.35, ADR 0024; tests) — `osascript` on macOS by default. */
+  pickFolder?: (prompt?: string) => Promise<string | null> | string | null;
+  /** Alias for pickFolder. */
+  folderPicker?: (prompt?: string) => Promise<string | null> | string | null;
   onLog?: (message: string) => void;
 }
 
@@ -300,6 +308,32 @@ function messageOf(err: unknown): string {
 
 function codeOf(err: unknown): string {
   return err instanceof FactoryError ? err.code : "failed";
+}
+
+function defaultPickFolderOnMac(prompt = "Select a project folder for Factory:"): string | null {
+  if (process.platform !== "darwin") {
+    throw new FactoryError(
+      "folder-picker-unsupported",
+      `Native folder picker is only supported on macOS (current platform: ${process.platform}); paste a path instead.`,
+    );
+  }
+  const escapedPrompt = prompt.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  const res = spawnSync("osascript", ["-e", `POSIX path of (choose folder with prompt "${escapedPrompt}")`], {
+    encoding: "utf8",
+    timeout: 120_000,
+  });
+  if (res.status === 0 && typeof res.stdout === "string") {
+    const trimmed = res.stdout.trim();
+    return trimmed === "" ? null : trimmed.replace(/\/+$/, "") || "/";
+  }
+  const stderr = typeof res.stderr === "string" ? res.stderr : "";
+  if (res.status === 1 || /user canceled|-128/i.test(stderr)) {
+    return null;
+  }
+  throw new FactoryError(
+    "folder-picker-failed",
+    `Failed to open native folder picker: ${stderr.trim() || res.error?.message || `exit ${res.status ?? "unknown"}`}`,
+  );
 }
 
 /** One companion install's sentence — the source actually used, the ref when one was given. */
@@ -529,10 +563,26 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   };
 
   /** One task's contract workspace sits inside the Project root (equal or nested). */
-  const taskInProject = (task: string, root: string): boolean => {
+  const taskInProject = (task: string, root: string, slug?: string): boolean => {
     const contract = deps.factory.contractFor(task);
     if (contract === undefined) return false;
-    return contract.workspace === root || contract.workspace.startsWith(`${root}/`);
+    const normRoot = realpathSafe(resolve(root));
+    const normWs = realpathSafe(resolve(contract.workspace));
+    if (
+      contract.workspace === root ||
+      contract.workspace.startsWith(`${root}/`) ||
+      normWs === normRoot ||
+      normWs.startsWith(`${normRoot}/`)
+    ) {
+      return true;
+    }
+    if (slug !== undefined) {
+      const worktreesDir = join(projectStateDir(deps.stateDir, slug), "worktrees");
+      if (contract.workspace === worktreesDir || contract.workspace.startsWith(`${worktreesDir}/`)) {
+        return true;
+      }
+    }
+    return false;
   };
 
   /**
@@ -914,6 +964,196 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     return { ok: true as const, agentId: agent.id };
   };
 
+  /**
+   * Shared cleanup seam for `projectDelete` and `projectReset`:
+   * 1. Collects all tasks belonging to the Project (from Ledger contracts/spawns, `taskWorkspaces`, and `worktrees/*`).
+   * 2. Stops and archives bound agents (working agents always; standing/native seats when `includeSeats: true`).
+   * 3. Archives temporary Paseo worktree workspaces (and the main Project workspace when `archiveMainWorkspace: true`).
+   * 4. Removes `<projectStateDir>/worktrees/<task>` directories and deletes local `factory/*` git branches (when the root exists on disk).
+   */
+  const cleanupProjectArtifacts = async (
+    daemon: SurfaceDaemonApi,
+    project: { slug: string; root: string },
+    options: { includeSeats: boolean; archiveMainWorkspace: boolean },
+  ) => {
+    const stop = deps.stopAgent ?? stopAgentViaCli;
+    const projectDir = projectStateDir(deps.stateDir, project.slug);
+    const worktreesDir = join(projectDir, "worktrees");
+    const reg = readProjectRegistration(deps.stateDir, project.slug);
+
+    // 1. Collect all tasks belonging to this Project (from ledger contracts/spawns, taskWorkspaces, and worktrees/*).
+    const projectTaskSet = new Set<string>();
+    for (const evt of deps.factory.ledger.events) {
+      if (
+        evt.event === "contract_set" &&
+        (evt.workspace === project.root ||
+          evt.workspace.startsWith(`${project.root}/`) ||
+          evt.workspace === worktreesDir ||
+          evt.workspace.startsWith(`${worktreesDir}/`))
+      ) {
+        projectTaskSet.add(evt.task);
+      } else if (
+        evt.event === "spawn_dispatched" &&
+        typeof evt.worktree === "string" &&
+        (evt.worktree === worktreesDir || evt.worktree.startsWith(`${worktreesDir}/`))
+      ) {
+        projectTaskSet.add(evt.task);
+      }
+    }
+    for (const task of Object.keys(reg?.taskWorkspaces ?? {})) {
+      if (task !== "") projectTaskSet.add(task);
+    }
+    try {
+      for (const entry of readdirSync(worktreesDir)) {
+        if (entry !== "") projectTaskSet.add(entry);
+      }
+    } catch {
+      // worktrees dir may not exist
+    }
+
+    // 2. Find and stop + archive all non-archived agents bound to this Project.
+    const archivedSeats: string[] = [];
+    const archivedAgents: string[] = [];
+    const bound = agentTaskIndex();
+    let rawAgents: SurfaceAgentSnapshot[] = [];
+    try {
+      const page = await daemon.agents.list({ filter: { includeArchived: false } });
+      rawAgents = page.entries.map((entry) => entry.agent).filter((agent) => agent.archivedAt === null);
+    } catch {
+      // best-effort agent listing
+    }
+    const normRoot = realpathSafe(project.root);
+    for (const agent of rawAgents) {
+      const seatLabel = agent.labels.seat;
+      const inferredRole = inferRoleFromProviderId(agent.provider);
+      const isSeatRole =
+        seatLabel === "supervisor" ||
+        seatLabel === "lead" ||
+        inferredRole === "supervisor" ||
+        inferredRole === "lead" ||
+        agent.id === reg?.supervisor ||
+        agent.id === reg?.lead;
+      if (!options.includeSeats && (seatLabel === "supervisor" || seatLabel === "lead")) continue;
+      const isLeadRole = seatLabel === "lead" || inferredRole === "lead" || agent.id === reg?.lead;
+      const boundTask = bound.get(agent.id) ?? agent.labels.task;
+      const inWorktree = agent.cwd === worktreesDir || agent.cwd.startsWith(`${worktreesDir}/`);
+      const normCwd = realpathSafe(agent.cwd);
+      const inProjectRoot =
+        agent.cwd === project.root ||
+        agent.cwd.startsWith(`${project.root}/`) ||
+        normCwd === normRoot ||
+        normCwd.startsWith(`${normRoot}/`);
+      const matchesProject = options.includeSeats
+        ? agent.labels.project === project.slug ||
+          agent.id === reg?.supervisor ||
+          agent.id === reg?.lead ||
+          inProjectRoot ||
+          inWorktree ||
+          (typeof boundTask === "string" && (projectTaskSet.has(boundTask) || taskInProject(boundTask, project.root)))
+        : (seatLabel === "agent" && agent.labels.project === project.slug) ||
+          (typeof boundTask === "string" && (projectTaskSet.has(boundTask) || taskInProject(boundTask, project.root))) ||
+          inWorktree;
+      if (!matchesProject) continue;
+
+      if (options.includeSeats && isLeadRole) {
+        try {
+          deps.onLeadRetired?.({ slug: project.slug, agentId: agent.id });
+        } catch {
+          // best-effort
+        }
+      }
+      try {
+        await stop(agent.id, deps.home);
+      } catch {
+        // best-effort cancel
+      }
+      try {
+        await daemon.agents.ref(agent.id).archive();
+        if (options.includeSeats && isSeatRole) archivedSeats.push(agent.id);
+        else archivedAgents.push(agent.id);
+      } catch {
+        // best-effort archive
+      }
+    }
+
+    // 3. Archive temporary Paseo worktree workspaces (and the main Project workspace when requested).
+    if (daemon.workspaces?.archive !== undefined) {
+      const wsIds = new Set<string>();
+      for (const wsId of Object.values(reg?.taskWorkspaces ?? {})) {
+        if (typeof wsId === "string" && wsId !== "") wsIds.add(wsId);
+      }
+      if (options.archiveMainWorkspace && typeof reg?.workspaceId === "string" && reg.workspaceId !== "") {
+        wsIds.add(reg.workspaceId);
+      }
+      for (const wsId of wsIds) {
+        try {
+          await daemon.workspaces.archive(wsId);
+        } catch {
+          // best-effort workspace archive
+        }
+      }
+    }
+
+    // 4. Remove <projectStateDir>/worktrees/<task> directories and delete local factory/* git branches when the root exists on disk.
+    const rootExists = existsSync(project.root);
+    for (const task of projectTaskSet) {
+      const wtPath = join(worktreesDir, task);
+      if (rootExists) {
+        try {
+          spawnSync("git", ["worktree", "remove", "--force", wtPath], {
+            cwd: project.root,
+            encoding: "utf8",
+            timeout: 10_000,
+          });
+        } catch {
+          // best-effort git worktree remove
+        }
+      }
+      try {
+        rmSync(wtPath, { recursive: true, force: true });
+      } catch {
+        // best-effort rm
+      }
+    }
+    try {
+      rmSync(worktreesDir, { recursive: true, force: true });
+    } catch {
+      // best-effort rm worktrees root
+    }
+    if (rootExists) {
+      try {
+        spawnSync("git", ["worktree", "prune"], { cwd: project.root, encoding: "utf8", timeout: 10_000 });
+      } catch {
+        // best-effort prune
+      }
+      const branchesToDelete = new Set<string>([...projectTaskSet].map((task) => `factory/${task}`));
+      try {
+        const refs = spawnSync("git", ["for-each-ref", "--format=%(refname:short)", "refs/heads/factory/"], {
+          cwd: project.root,
+          encoding: "utf8",
+          timeout: 10_000,
+        });
+        if (refs.status === 0 && typeof refs.stdout === "string") {
+          for (const line of refs.stdout.split("\n")) {
+            const branch = line.trim();
+            if (branch.startsWith("factory/")) branchesToDelete.add(branch);
+          }
+        }
+      } catch {
+        // best-effort branch discovery
+      }
+      for (const branch of branchesToDelete) {
+        try {
+          spawnSync("git", ["branch", "-D", branch], { cwd: project.root, encoding: "utf8", timeout: 10_000 });
+        } catch {
+          // best-effort branch delete
+        }
+      }
+    }
+
+    return { projectDir, worktreesDir, reg, projectTaskSet, archivedSeats, archivedAgents };
+  };
+
   const handlers = {
     async historyUpgrade(input: UpgradeInput) {
       try { return { ok: true as const, result: await upgradeFactory(deps.factory, input) }; }
@@ -935,9 +1175,56 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
 
     async snapshot(input: { projectRoot?: string }, context?: SurfaceCallContext) {
       // An unresolvable scope degrades to the global view — the panel must
-      // render outside git repos; the seats-only acts refuse instead.
-      const resolved = input.projectRoot === undefined ? undefined : resolveProject(input.projectRoot);
-      const project: ProjectView | null = resolved !== undefined && resolved.ok ? { slug: resolved.slug, root: resolved.root } : null;
+      // render outside git repos; the seats-only acts refuse instead. When a
+      // registered Project's directory was deleted on disk (v0.0.35, ADR 0024),
+      // reconstruct its identity from `<stateDir>/projects/<slug>/project.json`
+      // with `missingRoot: true` rather than snapping back to `All projects`.
+      let project: ProjectView | null = null;
+      if (input.projectRoot !== undefined && input.projectRoot.trim() !== "") {
+        const rawRoot = input.projectRoot.trim();
+        const resolved = resolveProject(rawRoot);
+        if (resolved.ok) {
+          project = {
+            slug: resolved.slug,
+            root: resolved.root,
+            name: basename(resolved.root) || resolved.slug,
+            commonDir: resolved.gitCommonDir,
+          };
+        } else {
+          const normInput = realpathSafe(resolve(rawRoot));
+          const matched = listProjectRegistrations(deps.stateDir).find(
+            (reg) =>
+              reg.root === rawRoot ||
+              resolve(reg.root) === resolve(rawRoot) ||
+              realpathSafe(resolve(reg.root)) === normInput ||
+              reg.slug === rawRoot,
+          );
+          if (matched !== undefined) {
+            const missing = !existsSync(matched.root);
+            project = {
+              slug: matched.slug,
+              root: matched.root,
+              name: matched.name ?? (basename(matched.root) || matched.slug),
+              ...(matched.commonDir !== undefined ? { commonDir: matched.commonDir } : {}),
+              ...(missing ? { missingRoot: true } : {}),
+            };
+          } else if (existsSync(rawRoot)) {
+            const bootstrapped = resolveOrBootstrapProject(rawRoot, {
+              stateDir: deps.stateDir,
+              paseoHome: deps.home,
+            });
+            if (bootstrapped.ok) {
+              ensureProjectRegistered(deps.stateDir, bootstrapped);
+              project = {
+                slug: bootstrapped.slug,
+                root: bootstrapped.root,
+                name: bootstrapped.name,
+                commonDir: bootstrapped.gitCommonDir,
+              };
+            }
+          }
+        }
+      }
       const lanes = loadLanes(deps.stateDir, project?.slug);
       if (!lanes.ok) return failure("lanes-unreadable", lanes.reason);
       const daemon = resolveDaemon(context);
@@ -956,7 +1243,10 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           const byLabels = rawAgents.find(
             (agent) => agent.labels.seat === seat && (project === null || agent.labels.project === project.slug),
           );
-          if (byLabels !== undefined || project === null) return byLabels;
+          if (byLabels !== undefined) return byLabels;
+          if (project === null) {
+            return rawAgents.find((agent) => inferRoleFromProviderId(agent.provider) === seat);
+          }
           // The native-picker seat (ADR 0017 §2): unlabeled, but bound in
           // `project.json` or running under its `factory-*` role provider.
           return seatAgentByIdentity(rawAgents, project.slug, seat);
@@ -988,11 +1278,18 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       // inside the project root. Unscoped, every seat and bound worker shows
       // (the global surface shows seats, not a census — strangers stay out).
       const inScope = (agent: SurfaceAgentSnapshot): boolean => {
-        if (project === null) return agent.labels.seat !== undefined || bound.has(agent.id);
+        if (project === null) {
+          return (
+            agent.labels.seat !== undefined ||
+            inferRoleFromProviderId(agent.provider) === "supervisor" ||
+            inferRoleFromProviderId(agent.provider) === "lead" ||
+            bound.has(agent.id)
+          );
+        }
         if (agent.labels.seat !== undefined) return agent.labels.project === project.slug;
         if (supervisorRaw?.id === agent.id || leadRaw?.id === agent.id) return true; // the native-picker seat renders its live state (ADR 0017 §2)
         const task = bound.get(agent.id);
-        return task !== undefined && taskInProject(task, project.root);
+        return task !== undefined && taskInProject(task, project.root, project.slug);
       };
       const relevant = rawAgents.filter(inScope).slice(0, SEQ_END_CAP);
       const agents: AgentView[] = [];
@@ -1003,15 +1300,63 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       const supervisor = supervisorRaw === undefined ? null : (agents.find((agent) => agent.id === supervisorRaw!.id) ?? null);
       const lead = leadRaw === undefined ? null : (agents.find((agent) => agent.id === leadRaw!.id) ?? null);
 
+      const allTasks = foldTasks(allEvents);
+      const scopedProject = project;
       const events =
-        project === null
+        scopedProject === null
           ? allEvents
-          : allEvents.filter((evt) => !("task" in evt) || (typeof evt.task === "string" && taskInProject(evt.task, project.root)));
+          : allEvents.filter(
+              (evt) => !("task" in evt) || (typeof evt.task === "string" && taskInProject(evt.task, scopedProject.root, scopedProject.slug)),
+            );
+      const enrichProjectView = (entry: {
+        slug: string;
+        root: string;
+        name?: string;
+        commonDir?: string;
+        missingRoot?: boolean;
+        supervisorId?: string | null;
+        leadId?: string | null;
+      }): ProjectView => {
+        const reg = readProjectRegistration(deps.stateDir, entry.slug);
+        const liveSup =
+          rawAgents.find((a) => a.labels.seat === "supervisor" && a.labels.project === entry.slug) ??
+          seatAgentByIdentity(rawAgents, entry.slug, "supervisor");
+        const liveLead =
+          rawAgents.find((a) => a.labels.seat === "lead" && a.labels.project === entry.slug) ??
+          seatAgentByIdentity(rawAgents, entry.slug, "lead");
+        const resolvedCommonDir =
+          entry.commonDir ??
+          reg?.commonDir ??
+          (!entry.missingRoot && existsSync(entry.root)
+            ? (() => {
+                const r = resolveProject(entry.root);
+                return r.ok ? r.gitCommonDir : join(entry.root, ".git");
+              })()
+            : join(entry.root, ".git"));
+        return {
+          slug: entry.slug,
+          root: entry.root,
+          name: entry.name ?? reg?.name ?? (basename(entry.root) || entry.slug),
+          ...(resolvedCommonDir !== undefined ? { commonDir: resolvedCommonDir } : {}),
+          ...(entry.missingRoot ? { missingRoot: true } : {}),
+          supervisorId: liveSup?.id ?? reg?.supervisor ?? entry.supervisorId ?? null,
+          leadId: liveLead?.id ?? reg?.lead ?? entry.leadId ?? null,
+          activeTaskCount: allTasks.filter((t) => taskInProject(t.task, entry.root, entry.slug)).length,
+        };
+      };
       const projects = discoverProjects(
         deps.stateDir,
-        rawAgents.filter((agent) => agent.labels.seat !== undefined),
+        rawAgents.filter(
+          (agent) =>
+            agent.labels.seat !== undefined ||
+            agent.labels.project !== undefined ||
+            inferRoleFromProviderId(agent.provider) !== undefined,
+        ),
         deps.home,
-      ).filter((entry): entry is { slug: string; root: string } => entry.root !== null);
+      )
+        .filter((entry): entry is typeof entry & { root: string } => entry.root !== null)
+        .map(enrichProjectView);
+      const enrichedProject = scopedProject === null ? null : enrichProjectView(scopedProject);
 
       const updateSnap = localUpdateSnapshot ?? getCachedPluginUpdateStatus(deps.home);
       const view = foldView({
@@ -1031,7 +1376,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         // snapshot the way the companion list is — a probe that cannot answer
         // degrades inside the view's own `error` field, never a refusal.
         vault: await vaultStatusOf(),
-        project,
+        project: enrichedProject,
         projects,
       });
       return { ok: true as const, view };
@@ -1231,6 +1576,249 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     },
 
     /**
+     * Add or select a Project directory from the Factory surface (v0.0.35, ADR 0024):
+     * automatically bootstraps Git (`git init` + initial empty commit) when given an
+     * existing non-Git folder (or an unborn Git repo without `HEAD`), registers
+     * `<stateDir>/projects/<slug>/project.json`, synchronizes Paseo's workspace
+     * registry when `daemon.workspaces.open` is available, and returns the scoped snapshot.
+     */
+    async projectAdd(
+      input: { projectRoot?: string; path?: string },
+      context?: SurfaceCallContext,
+    ) {
+      const rawPath = (input.projectRoot ?? input.path ?? "").trim();
+      if (rawPath === "") {
+        return failure("missing-directory", "project directory path cannot be empty");
+      }
+      const resolved = resolveOrBootstrapProject(rawPath, {
+        stateDir: deps.stateDir,
+        paseoHome: deps.home,
+      });
+      if (!resolved.ok) {
+        return failure(resolved.code, resolved.reason);
+      }
+      ensureProjectRegistered(deps.stateDir, resolved);
+      const daemon = resolveDaemon(context);
+      const existingReg = readProjectRegistration(deps.stateDir, resolved.slug);
+      let workspaceId = existingReg?.workspaceId;
+      let paseoProjectId = existingReg?.paseoProjectId;
+      if (daemon.workspaces?.open !== undefined && (workspaceId === undefined || paseoProjectId === undefined)) {
+        try {
+          const opened = await daemon.workspaces.open({ cwd: resolved.root });
+          if (workspaceId === undefined && typeof opened?.id === "string" && opened.id !== "") {
+            workspaceId = opened.id;
+          }
+          if (paseoProjectId === undefined && typeof opened?.projectId === "string" && opened.projectId !== "") {
+            paseoProjectId = opened.projectId;
+          }
+          if (workspaceId !== undefined || paseoProjectId !== undefined) {
+            writeProjectRegistration(deps.stateDir, resolved.slug, {
+              root: resolved.root,
+              ...(workspaceId !== undefined ? { workspaceId } : {}),
+              ...(paseoProjectId !== undefined ? { paseoProjectId } : {}),
+            });
+          }
+        } catch (err) {
+          log(`project.add: workspaces.open(${resolved.root}) did not resolve (${messageOf(err)})`);
+        }
+      }
+      const snap = await this.snapshot({ projectRoot: resolved.root }, context);
+      const project: ProjectView =
+        snap.ok && snap.view.project !== null
+          ? { ...snap.view.project, missingRoot: false }
+          : {
+              slug: resolved.slug,
+              root: resolved.root,
+              name: resolved.name,
+              commonDir: resolved.gitCommonDir,
+              missingRoot: false,
+              supervisorId: null,
+              leadId: null,
+              activeTaskCount: 0,
+            };
+      const summary = resolved.bootstrapped
+        ? `Initialized Git repository and added project ${resolved.name} (${resolved.slug}).`
+        : `Added project ${resolved.name} (${resolved.slug}).`;
+      log(`project.add: ${summary}`);
+      return {
+        ok: true as const,
+        path: resolved.root,
+        projectRoot: resolved.root,
+        slug: resolved.slug,
+        project,
+        bootstrapped: resolved.bootstrapped,
+        summary,
+        ...(snap.ok ? { view: snap.view } : {}),
+      };
+    },
+
+    /**
+     * Native OS folder picker (v0.0.35, ADR 0024): opens the native folder dialog
+     * (or invokes `deps.pickFolder` in tests), then delegates to `projectAdd` so
+     * bootstrap, safety refusal, registration, and Paseo workspace sync share one seam.
+     */
+    async projectPickFolder(
+      input: { prompt?: string } = {},
+      context?: SurfaceCallContext,
+    ) {
+      const picker = deps.pickFolder ?? deps.folderPicker ?? defaultPickFolderOnMac;
+      let chosen: string | null;
+      try {
+        chosen = await picker(input?.prompt);
+      } catch (err) {
+        return failure(codeOf(err), messageOf(err));
+      }
+      if (chosen === null || typeof chosen !== "string" || chosen.trim() === "") {
+        return { ok: true as const, cancelled: true as const, path: null };
+      }
+      const added = await this.projectAdd({ projectRoot: chosen.trim() }, context);
+      if (!added.ok) return added;
+      return {
+        ...added,
+        cancelled: false as const,
+      };
+    },
+
+    /**
+     * Owner-only full Project delete (v0.0.35, ADR 0024): refuses seats with
+     * `seat-cannot-delete`, cancels and archives all bound daemon agents and
+     * workspaces, deletes temporary task worktrees and `factory/*` branches
+     * (when the root still exists on disk), purges all Ledger events, reports,
+     * gate logs, retro files, and correlation records for the Project, removes
+     * the entire `<stateDir>/projects/<slug>/` directory (including `project.json`
+     * and `lanes.json`), sweeps Paseo's daemon workspaces/projects and
+     * `<home>/projects/projects.json`, and returns a refreshed `FactoryView`.
+     */
+    async projectDelete(
+      input: { projectRoot?: string; projectSlug?: string; project?: string; seat?: string } = {},
+      context?: SurfaceCallContext & { seat?: string },
+    ) {
+      const callerSeat =
+        typeof input?.seat === "string" && input.seat.trim() !== ""
+          ? input.seat.trim()
+          : typeof context?.seat === "string" && context.seat.trim() !== ""
+            ? context.seat.trim()
+            : "";
+      if (callerSeat === "supervisor" || callerSeat === "lead" || callerSeat === "agent") {
+        return failure(
+          "seat-cannot-delete",
+          `${callerSeat} seat cannot run factory project delete — Project deletion is an Owner-only act`,
+        );
+      }
+
+      const rawRoot = (input.projectRoot ?? "").trim();
+      const rawSlug = (input.projectSlug ?? input.project ?? "").trim();
+      let project: { slug: string; root: string; name: string } | undefined;
+
+      if (rawRoot !== "") {
+        const resolved = resolveProject(rawRoot);
+        if (resolved.ok) {
+          project = { slug: resolved.slug, root: resolved.root, name: basename(resolved.root) || resolved.slug };
+        } else {
+          const registrations = listProjectRegistrations(deps.stateDir);
+          const byMatch = registrations.find(
+            (reg) => reg.root === rawRoot || realpathSafe(reg.root) === realpathSafe(rawRoot) || reg.slug === rawRoot,
+          );
+          if (byMatch !== undefined) {
+            project = { slug: byMatch.slug, root: byMatch.root, name: basename(byMatch.root) || byMatch.slug };
+          } else if (rawSlug !== "") {
+            const bySlug = readProjectRegistration(deps.stateDir, rawSlug);
+            if (bySlug !== undefined) {
+              project = { slug: bySlug.slug, root: bySlug.root, name: basename(bySlug.root) || bySlug.slug };
+            }
+          }
+          if (project === undefined) {
+            return failure("unknown-project", `project root ${rawRoot} does not resolve to a registered project or git repository — ${resolved.reason}`);
+          }
+        }
+      } else if (rawSlug !== "") {
+        const reg = readProjectRegistration(deps.stateDir, rawSlug);
+        if (reg !== undefined) {
+          project = { slug: reg.slug, root: reg.root, name: basename(reg.root) || reg.slug };
+        } else {
+          return failure("unknown-project", `project "${rawSlug}" is not registered — pass projectRoot or a known projectSlug`);
+        }
+      } else {
+        const registrations = listProjectRegistrations(deps.stateDir);
+        if (registrations.length === 1) {
+          const only = registrations[0]!;
+          project = { slug: only.slug, root: only.root, name: basename(only.root) || only.slug };
+        } else if (registrations.length === 0) {
+          return failure("unknown-project", "no project specified and no project is registered");
+        } else {
+          return failure(
+            "ambiguous-project",
+            `more than one project is registered (${registrations.map((r) => r.slug).join(", ")}) — pass projectRoot or projectSlug to name the one to delete`,
+          );
+        }
+      }
+
+      const daemon = resolveDaemon(context);
+      const { projectDir, worktreesDir, projectTaskSet, archivedSeats, archivedAgents } =
+        await cleanupProjectArtifacts(daemon, project, {
+          includeSeats: true,
+          archiveMainWorkspace: true,
+        });
+
+      // 5. Sweep Paseo's daemon workspaces and project records (including the main project record) and prune <home>/projects/projects.json.
+      try {
+        prunePaseoProjectRegistry(deps.home, { projectRoot: project.root, worktreesDir });
+      } catch {
+        // best-effort registry prune
+      }
+      try {
+        const swept = await (deps.cleanupDaemonWorkspaces ?? cleanupDaemonWorkspacesAndProjectsViaWs)(deps.home, {
+          worktreesDir,
+          projectRoot: project.root,
+          removeMainProjectRecord: true,
+          removeProjectRoot: true,
+        });
+        if (swept.ok && (swept.removedWorkspaceIds.length > 0 || swept.removedProjectIds.length > 0)) {
+          log(
+            `delete: swept ${swept.removedWorkspaceIds.length} daemon workspace(s) and ${swept.removedProjectIds.length} project record(s) for ${project.slug}`,
+          );
+        }
+      } catch (err) {
+        log(`delete: the daemon workspace/project sweep did not land — ${messageOf(err)}`);
+      }
+
+      // 6. Reset in-memory mailbox, purge Ledger events/reports/gate logs/retro files, purge CorrelationRegistry, and delete <stateDir>/projects/<slug>/ completely.
+      try {
+        deps.resetProjectMailbox?.(project.slug);
+      } catch {
+        // best-effort mailbox reset
+      }
+      const { purgedEvents, tasks: purgedTasks, removedFiles } = deps.factory.resetProject(project.root, project.slug);
+      const tasks = [...new Set([...purgedTasks, ...projectTaskSet])];
+      try {
+        new CorrelationRegistry(deps.stateDir).purgeProject(project.slug, project.root, tasks);
+      } catch {
+        // best-effort correlation purge
+      }
+      try {
+        rmSync(projectDir, { recursive: true, force: true });
+      } catch {
+        // best-effort project state directory deletion
+      }
+
+      const snap = await this.snapshot({}, context);
+      const summary = `Deleted project ${project.name} and purged all Factory state (${purgedEvents} event${purgedEvents === 1 ? "" : "s"}, ${tasks.length} task${tasks.length === 1 ? "" : "s"}).`;
+      log(`delete: ${summary}`);
+      return {
+        ok: true as const,
+        project: project.slug,
+        projectRoot: project.root,
+        purgedEvents,
+        tasks,
+        removedFiles,
+        archivedSeats,
+        archivedAgents,
+        summary,
+        ...(snap.ok ? { view: snap.view } : {}),
+      };
+    },
+
+    /**
      * Owner-only Project reset (v0.0.24, ADR 0015 §5): stops and archives bound
      * working Agents, archives temporary Paseo worktree workspaces, deletes
      * task worktrees and `factory/<task>` branches, retires Supervisor/Lead
@@ -1279,131 +1867,11 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       }
 
       const daemon = resolveDaemon(context);
-      const stop = deps.stopAgent ?? stopAgentViaCli;
-      const projectDir = projectStateDir(deps.stateDir, project.slug);
-      const worktreesDir = join(projectDir, "worktrees");
-      const reg = readProjectRegistration(deps.stateDir, project.slug);
-
-      // 1. Collect all tasks belonging to this Project (from ledger contracts/spawns, taskWorkspaces, and worktrees/*).
-      const projectTaskSet = new Set<string>();
-      for (const evt of deps.factory.ledger.events) {
-        if (evt.event === "contract_set" && (evt.workspace === project.root || evt.workspace.startsWith(`${project.root}/`))) {
-          projectTaskSet.add(evt.task);
-        } else if (
-          evt.event === "spawn_dispatched" &&
-          typeof evt.worktree === "string" &&
-          (evt.worktree === worktreesDir || evt.worktree.startsWith(`${worktreesDir}/`))
-        ) {
-          projectTaskSet.add(evt.task);
-        }
-      }
-      for (const task of Object.keys(reg?.taskWorkspaces ?? {})) {
-        if (task !== "") projectTaskSet.add(task);
-      }
-      try {
-        for (const entry of readdirSync(worktreesDir)) {
-          if (entry !== "") projectTaskSet.add(entry);
-        }
-      } catch {
-        // worktrees dir may not exist
-      }
-
-      // 2. Find and stop + archive all non-archived working Agents bound to this Project.
-      const archivedAgents: string[] = [];
-      const bound = agentTaskIndex();
-      let rawAgents: SurfaceAgentSnapshot[] = [];
-      try {
-      const page = await daemon.agents.list({ filter: { includeArchived: false } });
-        rawAgents = page.entries.map((entry) => entry.agent).filter((agent) => agent.archivedAt === null);
-      } catch {
-        // best-effort agent listing
-      }
-      for (const agent of rawAgents) {
-        const seat = agent.labels.seat;
-        if (seat === "supervisor" || seat === "lead") continue;
-        const boundTask = bound.get(agent.id) ?? agent.labels.task;
-        const inWorktree = agent.cwd === worktreesDir || agent.cwd.startsWith(`${worktreesDir}/`);
-        const matchesProject =
-          (seat === "agent" && agent.labels.project === project.slug) ||
-          (typeof boundTask === "string" && (projectTaskSet.has(boundTask) || taskInProject(boundTask, project.root))) ||
-          inWorktree;
-        if (!matchesProject) continue;
-        try {
-          await stop(agent.id, deps.home);
-        } catch {
-          // best-effort cancel
-        }
-        try {
-          await daemon.agents.ref(agent.id).archive();
-          archivedAgents.push(agent.id);
-        } catch {
-          // best-effort archive
-        }
-      }
-
-      // 3. Archive any temporary Paseo worktree workspaces recorded in reg.taskWorkspaces.
-      if (daemon.workspaces?.archive !== undefined && reg?.taskWorkspaces !== undefined) {
-        for (const wsId of Object.values(reg.taskWorkspaces)) {
-          if (typeof wsId !== "string" || wsId === "") continue;
-          try {
-            await daemon.workspaces.archive(wsId);
-          } catch {
-            // best-effort workspace archive
-          }
-        }
-      }
-
-      // 4. Remove all <projectStateDir>/worktrees/<task> directories and delete local factory/<task> git branches.
-      for (const task of projectTaskSet) {
-        const wtPath = join(worktreesDir, task);
-        try {
-          spawnSync("git", ["worktree", "remove", "--force", wtPath], {
-            cwd: project.root,
-            encoding: "utf8",
-            timeout: 10_000,
-          });
-        } catch {
-          // best-effort git worktree remove
-        }
-        try {
-          rmSync(wtPath, { recursive: true, force: true });
-        } catch {
-          // best-effort rm
-        }
-      }
-      try {
-        rmSync(worktreesDir, { recursive: true, force: true });
-      } catch {
-        // best-effort rm worktrees root
-      }
-      try {
-        spawnSync("git", ["worktree", "prune"], { cwd: project.root, encoding: "utf8", timeout: 10_000 });
-      } catch {
-        // best-effort prune
-      }
-      const branchesToDelete = new Set<string>([...projectTaskSet].map((task) => `factory/${task}`));
-      try {
-        const refs = spawnSync("git", ["for-each-ref", "--format=%(refname:short)", "refs/heads/factory/"], {
-          cwd: project.root,
-          encoding: "utf8",
-          timeout: 10_000,
+      const { projectDir, worktreesDir, projectTaskSet, archivedAgents } =
+        await cleanupProjectArtifacts(daemon, project, {
+          includeSeats: false,
+          archiveMainWorkspace: false,
         });
-        if (refs.status === 0 && typeof refs.stdout === "string") {
-          for (const line of refs.stdout.split("\n")) {
-            const branch = line.trim();
-            if (branch.startsWith("factory/")) branchesToDelete.add(branch);
-          }
-        }
-      } catch {
-        // best-effort branch discovery
-      }
-      for (const branch of branchesToDelete) {
-        try {
-          spawnSync("git", ["branch", "-D", branch], { cwd: project.root, encoding: "utf8", timeout: 10_000 });
-        } catch {
-          // best-effort branch delete
-        }
-      }
 
       // 4.5. Sweep the daemon's own worktree records (v0.0.27, ADR 0017 §4)
       // and — since v0.0.31 (ADR 0017 §5) — the Project's orphaned
@@ -1858,13 +2326,13 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       }
     },
   };
-  const reads = new Set(["cachedProviders", "sanitizeLane", "snapshot", "taskDetail", "pluginsCheckUpdates", "historyImport", "historyImports", "historyUpgrade", "vaultHydrate", "vaultPull", "vaultPush", "vaultSync", "vaultImport"]);
+  const reads = new Set(["cachedProviders", "sanitizeLane", "snapshot", "taskDetail", "pluginsCheckUpdates", "projectPickFolder", "historyImport", "historyImports", "historyUpgrade", "vaultHydrate", "vaultPull", "vaultPush", "vaultSync", "vaultImport"]);
   const wrappers = new Map<PropertyKey, unknown>();
   return new Proxy(handlers, {
     get(target, key, receiver) {
       const value = Reflect.get(target, key, receiver);
       if (typeof key !== "string" || typeof value !== "function" || reads.has(key)) return value;
-      if (!wrappers.has(key)) wrappers.set(key, (...args: unknown[]) => key === "projectReset" && !deps.factory.history.maintenanceActive ? deps.factory.history.withExclusiveMaintenance(() => value.apply(receiver, args)) : deps.factory.history.runOperation(() => value.apply(receiver, args), { newWork: true }));
+      if (!wrappers.has(key)) wrappers.set(key, (...args: unknown[]) => (key === "projectReset" || key === "projectDelete") && !deps.factory.history.maintenanceActive ? deps.factory.history.withExclusiveMaintenance(() => value.apply(receiver, args)) : deps.factory.history.runOperation(() => value.apply(receiver, args), { newWork: true }));
       return wrappers.get(key);
     },
   });
@@ -1903,6 +2371,9 @@ export function registerSurfaceRpc(
   server.handle(supervisorRevoke, (input, context) => handlers.supervisorRevoke(input, pass(context)));
   server.handle(leadEnsure, (input, context) => handlers.leadEnsure(input, pass(context)));
   server.handle(leadRotate, (input, context) => handlers.leadRotate(input, pass(context)));
+  server.handle(projectAdd, (input, context) => handlers.projectAdd(input, pass(context)));
+  server.handle(projectPickFolder, (input, context) => handlers.projectPickFolder(input ?? {}, pass(context)));
+  server.handle(projectDelete, (input, context) => handlers.projectDelete(input, pass(context)));
   server.handle(projectReset, (input, context) => handlers.projectReset(input, pass(context)));
   server.handle(leadDispatch, (input, context) => handlers.leadDispatch(input, pass(context)));
   server.handle(ratifyProposal, (input, context) => handlers.ratifyProposal(input, pass(context)));

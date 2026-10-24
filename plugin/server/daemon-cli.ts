@@ -17,7 +17,7 @@
  */
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { delimiter as pathDelimiter, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { isElectronNodeBinary } from "./core/pi-home.ts";
@@ -976,6 +976,71 @@ export interface CleanupDaemonWorkspacesInput {
   keepWorkspaceIds?: readonly string[];
   /** Workspace IDs that currently host at least one non-archived agent. */
   activeWorkspaceIds?: readonly string[];
+  /** When true (full project delete, v0.0.35), also removes the main project record and all workspaces at projectRoot. */
+  removeMainProjectRecord?: boolean;
+  /** Alias for removeMainProjectRecord. */
+  removeProjectRoot?: boolean;
+}
+
+/**
+ * Prunes `<home>/projects/projects.json` entries whose root matches `projectRoot`
+ * or sits under `worktreesDir` (v0.0.35, ADR 0024).
+ */
+export function prunePaseoProjectRegistry(
+  home: string | undefined,
+  options: { projectRoot?: string; worktreesDir?: string },
+): number {
+  if (typeof home !== "string" || home.trim() === "") return 0;
+  const registryPath = join(home, "projects", "projects.json");
+  if (!existsSync(registryPath)) return 0;
+  try {
+    const parsed = JSON.parse(readFileSync(registryPath, "utf8")) as unknown;
+    const isArrayRoot = Array.isArray(parsed);
+    const entries = isArrayRoot
+      ? (parsed as unknown[])
+      : isRecord(parsed) && Array.isArray(parsed.projects)
+        ? (parsed.projects as unknown[])
+        : null;
+    if (entries === null) return 0;
+
+    let removed = 0;
+    const kept = entries.filter((item) => {
+      if (!isRecord(item)) return true;
+      const rawPath =
+        typeof item.rootPath === "string"
+          ? item.rootPath.trim()
+          : typeof item.projectRootPath === "string"
+            ? item.projectRootPath.trim()
+            : typeof item.path === "string"
+              ? item.path.trim()
+              : "";
+      if (rawPath === "") return true;
+      const matchesProjectRoot =
+        options.projectRoot !== undefined &&
+        options.projectRoot !== "" &&
+        (rootsEqual(rawPath, options.projectRoot) || rootInsideDir(rawPath, options.projectRoot));
+      const matchesWorktrees =
+        options.worktreesDir !== undefined &&
+        options.worktreesDir !== "" &&
+        rootInsideDir(rawPath, options.worktreesDir);
+      if (matchesProjectRoot || matchesWorktrees) {
+        removed++;
+        return false;
+      }
+      return true;
+    });
+
+    if (removed > 0) {
+      mkdirSync(dirname(registryPath), { recursive: true });
+      const nextPayload = isArrayRoot ? kept : { ...(parsed as Record<string, unknown>), projects: kept };
+      const tmp = `${registryPath}.${process.pid}.${Date.now()}.tmp`;
+      writeFileSync(tmp, `${JSON.stringify(nextPayload, null, 2)}\n`);
+      renameSync(tmp, registryPath);
+    }
+    return removed;
+  } catch {
+    return 0;
+  }
 }
 
 /**
@@ -1011,6 +1076,10 @@ export async function cleanupDaemonWorkspacesAndProjectsViaWs(
   if (targetHome === undefined) {
     return { ok: false, reason: "no daemon home to sweep — pass home or set PASEO_HOME" };
   }
+  const removeMain = input.removeMainProjectRecord === true || input.removeProjectRoot === true;
+  if (removeMain) {
+    prunePaseoProjectRegistry(targetHome, { projectRoot: input.projectRoot, worktreesDir: input.worktreesDir });
+  }
   const listWorkspaces = daemonWsRequestPayload<unknown>(targetHome, { type: "fetch_workspaces_request" }, "fetch_workspaces_response");
   if (listWorkspaces === null) return { ok: true, removedWorkspaceIds: [], removedProjectIds: [] }; // no daemon socket — nothing to sweep
   const listProjects = daemonWsRequestPayload<unknown>(targetHome, { type: "project.list.request" }, "project.list.response");
@@ -1024,9 +1093,13 @@ export async function cleanupDaemonWorkspacesAndProjectsViaWs(
     const workspaces = daemonWorkspaceEntries(workspacesReply.payload) ?? [];
     for (const workspace of workspaces) {
       if (workspace.archivingAt !== null && workspace.archivingAt !== undefined) continue; // already on its way out
-      if (keepIds !== null && keepIds.has(workspace.id)) continue; // never archived — the active Supervisor/Lead workspace
+      if (!removeMain && keepIds !== null && keepIds.has(workspace.id)) continue; // never archived — the active Supervisor/Lead workspace
       const root = workspace.workspaceDirectory ?? workspace.projectRootPath ?? null;
       if (typeof root !== "string" || root === "") continue;
+      const projectDeleted =
+        removeMain &&
+        (rootInsideDir(root, input.worktreesDir) ||
+          (input.projectRoot !== undefined && (rootsEqual(root, input.projectRoot) || rootInsideDir(root, input.projectRoot))));
       const retiredTarget = input.targetWorktreePath !== undefined && rootsEqual(root, input.targetWorktreePath);
       // Rule 1 (ADR 0017 §4): a Task worktree workspace archives only when its
       // directory is gone or it is the explicitly retired target — siblings on
@@ -1038,7 +1111,7 @@ export async function cleanupDaemonWorkspacesAndProjectsViaWs(
       const missingRecord = !existsSync(root);
       const orphanedCheckout =
         input.projectRoot !== undefined && activeIds !== null && rootsEqual(root, input.projectRoot) && !activeIds.has(workspace.id);
-      if (!worktreeRetired && !missingRecord && !orphanedCheckout) continue;
+      if (!projectDeleted && !worktreeRetired && !missingRecord && !orphanedCheckout) continue;
       const archive = daemonWsRequest(targetHome, { type: "archive_workspace_request", workspaceId: workspace.id }, "archive_workspace_response");
       if (archive === null) continue;
       const reply = await archive;
@@ -1053,7 +1126,13 @@ export async function cleanupDaemonWorkspacesAndProjectsViaWs(
       if (projectsReply.ok) {
         const projects = daemonProjectEntries(projectsReply.payload) ?? [];
         for (const project of projects) {
-          if (!underWorktreesOrMissing(project.projectRootPath ?? null, input.worktreesDir)) continue;
+          const mainProjectDeleted =
+            removeMain &&
+            input.projectRoot !== undefined &&
+            typeof project.projectRootPath === "string" &&
+            project.projectRootPath !== "" &&
+            (rootsEqual(project.projectRootPath, input.projectRoot) || rootInsideDir(project.projectRootPath, input.projectRoot));
+          if (!underWorktreesOrMissing(project.projectRootPath ?? null, input.worktreesDir) && !mainProjectDeleted) continue;
           const remove = daemonWsRequest(targetHome, { type: "project.remove.request", projectId: project.projectId }, "project.remove.response");
           if (remove === null) continue;
           const reply = await remove;

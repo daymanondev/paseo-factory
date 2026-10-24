@@ -33,6 +33,7 @@ export const KpisSchema = z.object({
   readyToAccept: z.number().int(),
   accepted: z.number().int(),
   totalCostUsd: z.number(),
+  totalTokens: z.number().int(),
 });
 export type Kpis = z.infer<typeof KpisSchema>;
 
@@ -108,6 +109,7 @@ export const TaskViewSchema = z.object({
   /** The cost cell's honest states — the Cost read's own law, never a fabricated zero. */
   costState: z.enum(["none", "metered", "subscription", "absent"]),
   costUsd: z.number().nullable(),
+  totalTokens: z.number().int().optional(),
   needsHumanReason: z.string().nullable(),
   /** Choke counts for the Evidence Pills: allowed / denied / git blocks. */
   choke: z.object({ allowed: z.number().int(), denied: z.number().int(), blocked: z.number().int() }),
@@ -153,12 +155,19 @@ export const AgentViewSchema = z.object({
 });
 export type AgentView = z.infer<typeof AgentViewSchema>;
 
-/** One discovered Project (v0.0.14, ADR 0010 §1) — the canonical slug and its root. */
+/** One discovered Project (v0.0.14, ADR 0010 §1; v0.0.35, ADR 0024) — the canonical slug and its root, plus optional missingRoot flag. */
 export const ProjectViewSchema = z.object({
   slug: z.string(),
   root: z.string(),
+  name: z.string().optional(),
+  commonDir: z.string().optional(),
+  missingRoot: z.boolean().optional(),
+  supervisorId: z.string().nullable().optional(),
+  leadId: z.string().nullable().optional(),
+  activeTaskCount: z.number().int().optional(),
 });
 export type ProjectView = z.infer<typeof ProjectViewSchema>;
+export type ProjectInfo = ProjectView;
 
 /** One thinking option a provider model advertises. */
 export const ThinkingOptionViewSchema = z.object({

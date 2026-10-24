@@ -30,7 +30,7 @@ import { createSurfaceHandlers, registerSurfaceRpc } from "./server/surface-rpc.
 import { createLeadMailRuntime } from "./server/lead-mailbox.ts";
 import { injectRoleOnCreate, injectSessionEnv, sanitizeAgentCreateHookResult } from "./server/roles.ts";
 
-const SHELL_VERSION = "0.0.34";
+const SHELL_VERSION = "0.0.35";
 
 const log = (message: string) => console.log(`[${PLUGIN_ID}] ${message}`);
 
@@ -261,6 +261,40 @@ export default function contribute(server: PluginServerContext) {
             ok: true as const,
             summary: reply.summary,
             project: reply.project,
+            purgedEvents: reply.purgedEvents,
+            tasks: reply.tasks,
+            removedFiles: reply.removedFiles,
+            archivedSeats: reply.archivedSeats,
+            archivedAgents: reply.archivedAgents,
+          }
+        : {
+            id: request.id,
+            ok: false as const,
+            code: reply.code,
+            message: reply.error,
+          };
+    },
+    projectDelete: async (request) => {
+      const reply = await surface.projectDelete(
+        {
+          ...(request.projectRoot !== undefined
+            ? { projectRoot: request.projectRoot }
+            : request.workspace !== undefined
+              ? { projectRoot: request.workspace }
+              : {}),
+          ...(request.projectSlug !== undefined ? { projectSlug: request.projectSlug } : {}),
+          ...(request.project !== undefined ? { project: request.project } : {}),
+          ...(request.seat !== undefined ? { seat: request.seat } : {}),
+        },
+        { paseo: paseoApi as never },
+      );
+      return reply.ok
+        ? {
+            id: request.id,
+            ok: true as const,
+            summary: reply.summary,
+            project: reply.project,
+            projectRoot: reply.projectRoot,
             purgedEvents: reply.purgedEvents,
             tasks: reply.tasks,
             removedFiles: reply.removedFiles,

@@ -162,4 +162,32 @@ export class CorrelationRegistry {
     this.reloadFromDisk();
     return [...this.byCorrelationId.values()];
   }
+
+  /**
+   * Purge all correlation records belonging to `projectSlug`, `projectRoot`,
+   * the project's managed `<stateDir>/projects/<slug>/worktrees/` tree, or any
+   * of `tasks` (v0.0.35, ADR 0024).
+   */
+  purgeProject(projectSlug: string, projectRoot?: string, tasks?: Iterable<string>): number {
+    this.reloadFromDisk();
+    const taskSet = new Set(tasks ?? []);
+    const cleanRoot = typeof projectRoot === "string" && projectRoot.trim() !== "" ? projectRoot.trim().replace(/\/+$/, "") : undefined;
+    const worktreesPrefix = `${join(this.stateDir, "projects", projectSlug, "worktrees").replace(/\/+$/, "")}/`;
+    let removed = 0;
+    for (const [key, rec] of this.byCorrelationId.entries()) {
+      const recRoot = rec.projectRoot.replace(/\/+$/, "");
+      const matchesRoot =
+        cleanRoot !== undefined && (recRoot === cleanRoot || recRoot.startsWith(`${cleanRoot}/`));
+      const matchesWorktree = recRoot.startsWith(worktreesPrefix);
+      const matchesTask = rec.task !== undefined && taskSet.has(rec.task);
+      if (rec.projectSlug === projectSlug || matchesRoot || matchesWorktree || matchesTask) {
+        this.byCorrelationId.delete(key);
+        removed++;
+      }
+    }
+    if (removed > 0) {
+      writeCorrelationsAtomic(this.stateDir, [...this.byCorrelationId.values()]);
+    }
+    return removed;
+  }
 }

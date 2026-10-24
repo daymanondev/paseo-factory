@@ -13,21 +13,23 @@
  */
 import type { PluginTheme } from "@getpaseo/plugin";
 import { useRpc } from "@getpaseo/plugin/client";
-import { Modal, ScrollView, useToast } from "@getpaseo/plugin/client/react-native";
+import { ScrollView, useToast } from "@getpaseo/plugin/client/react-native";
 import { useEffect, useRef, useState } from "react";
 import { Text, View } from "react-native";
-import { accept, lanesSet, leadRotate, pluginsInstall, pluginsManage, pluginsCheckUpdates, projectReset, ratifyProposal, retro, snapshot, supervisorRevoke, taskDetail, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
+import { accept, lanesSet, leadRotate, pluginsInstall, pluginsManage, pluginsCheckUpdates, projectAdd, projectDelete, projectPickFolder, projectReset, ratifyProposal, retro, snapshot, supervisorRevoke, taskDetail, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
 import type { ManageablePluginId } from "../../shared/companions.ts";
-import type { FactoryView, LaneName, TaskDetailView } from "../../shared/view.ts";
-import { Btn, Card, TabBar } from "../kit/pill.tsx";
+import type { FactoryView, LaneName } from "../../shared/view.ts";
+import { Card, TabBar } from "../kit/pill.tsx";
 import type { TabId } from "../kit/pill.tsx";
 import { SPACING, text } from "../kit/theme.ts";
 import { useNow, usePoll, pollEvery } from "../kit/poll.ts";
-import { Header, isVaultActName } from "./header.tsx";
-import type { VaultNote } from "./header.tsx";
+import { Header } from "./header.tsx";
+import { VaultPane, isVaultActName } from "./vault.tsx";
+import type { VaultNote } from "./vault.tsx";
 import { actionFeedback, createResponseOrder } from "./vault-feedback.ts";
 import type { VaultStatusView } from "../../shared/view.ts";
-import { TasksPane } from "./tasks.tsx";
+import { TaskDetailModal, TasksPane } from "./tasks.tsx";
+import type { TaskDetailModalState } from "./tasks.tsx";
 import { SeatsPane } from "./seats.tsx";
 import { TimelinePane } from "./timeline.tsx";
 import { PluginsPane } from "./plugins.tsx";
@@ -39,7 +41,7 @@ export interface Navigation {
   openAgent(input: { agentId: string; serverId?: string }): void;
 }
 
-type DetailState = { task: string; loading: boolean; detail: TaskDetailView | null; error: string | null };
+type DetailState = TaskDetailModalState;
 
 export function FactoryShell({
   theme,
@@ -65,6 +67,9 @@ export function FactoryShell({
   const revokeCall = useRpc(supervisorRevoke);
   const leadRotateCall = useRpc(leadRotate);
   const projectResetCall = useRpc(projectReset);
+  const projectDeleteCall = useRpc(projectDelete);
+  const projectPickFolderCall = useRpc(projectPickFolder);
+  const projectAddCall = useRpc(projectAdd);
   const ratifyCall = useRpc(ratifyProposal);
 
   const detailCall = useRpc(taskDetail);
@@ -263,6 +268,68 @@ export function FactoryShell({
     if (projectRoot === undefined) return;
     void act("Reset Project", () => projectResetCall({ projectRoot }));
   };
+  const deleteProject = (): void => {
+    const projectSlug = view.project?.slug;
+    if (projectRoot === undefined && projectSlug === undefined) return;
+    void act("Delete Project", async () => {
+      const reply = await projectDeleteCall({
+        ...(projectRoot === undefined ? {} : { projectRoot }),
+        ...(projectSlug === undefined ? {} : { projectSlug, project: projectSlug }),
+      });
+      if (reply.ok) {
+        setPickedRoot(null);
+        setDetail(null);
+      }
+      return reply;
+    });
+  };
+  const pickProjectFolder = (): void => {
+    void act("Add Project", async () => {
+      const reply = await projectPickFolderCall({});
+      if (reply.ok && !reply.cancelled && typeof reply.path === "string") {
+        setPickedRoot(reply.path);
+        setDetail(null);
+      }
+      return reply;
+    });
+  };
+  const addProject = (path: string): void => {
+    const trimmed = path.trim();
+    if (trimmed === "") return;
+    void act("Add Project", async () => {
+      const reply = await projectAddCall({ projectRoot: trimmed, path: trimmed });
+      if (reply.ok) {
+        setPickedRoot(reply.path);
+        setDetail(null);
+      }
+      return reply;
+    });
+  };
+
+  const vaultPane = (
+    <VaultPane
+      theme={theme}
+      vault={view.vault}
+      busy={busy}
+      busyAct={busyAct}
+      vaultNote={vaultNote}
+      onVaultSync={(input) => {
+        void act("Vault Sync", () => vaultSyncCall(input ?? {}));
+      }}
+      onVaultImport={(input) => {
+        void act("Vault Import", () => vaultImportCall(input));
+      }}
+      onVaultConfigure={(input) => {
+        void act("Vault Save", () => vaultConfigureCall(input));
+      }}
+      onVaultHydrate={(repo, ref) => {
+        void act("Vault Hydrate", () =>
+          vaultHydrateCall({ ...(repo === undefined ? {} : { repo }), ...(ref === undefined ? {} : { ref }) }),
+        );
+      }}
+      onRefresh={refresh}
+    />
+  );
 
   return (
     <View style={{ flex: 1, backgroundColor: theme.colors.surface0 }}>
@@ -272,34 +339,28 @@ export function FactoryShell({
           view={view}
           at={poll.at}
           now={now}
-          actions={{ openSupervisor, openLead, resetProject, pickProject: (root) => setPickedRoot(root), busy }}
-
-          busyAct={busyAct}
-          vaultNote={vaultNote}
-          onVaultSync={(input) => {
-            void act("Vault Sync", () => vaultSyncCall(input ?? {}));
+          actions={{
+            openSupervisor,
+            openLead,
+            resetProject,
+            deleteProject,
+            pickProjectFolder,
+            addProject,
+            pickProject: (root) => setPickedRoot(root),
+            busy,
           }}
-          onVaultImport={(input) => {
-            void act("Vault Import", () => vaultImportCall(input));
-          }}
-          onVaultConfigure={(input) => {
-            void act("Vault Save", () => vaultConfigureCall(input));
-          }}
-          onVaultHydrate={(repo, ref) => {
-            void act("Vault Hydrate", () =>
-              vaultHydrateCall({ ...(repo === undefined ? {} : { repo }), ...(ref === undefined ? {} : { ref }) }),
-            );
-          }}
-          onRefresh={refresh}
         />
         {showDiagnostics ? (
-          <Card theme={theme} gap={SPACING[1]}>
-            <Text style={text(theme, "section")}>Daemon & State Diagnostics</Text>
-            <Text style={text(theme, "code")}>stateDir: {view.stateDir}</Text>
-            <Text style={text(theme, "code")}>serverId: {serverId ?? "local"}</Text>
-            <Text style={text(theme, "code")}>daemon: {view.daemonError ?? "healthy"}</Text>
-            <Text style={text(theme, "code")}>project: {view.project === null ? "(unscoped)" : `${view.project.slug} · ${view.project.root}`}</Text>
-          </Card>
+          <>
+            <Card theme={theme} gap={SPACING[1]}>
+              <Text style={text(theme, "section")}>Daemon & State Diagnostics</Text>
+              <Text style={text(theme, "code")}>stateDir: {view.stateDir}</Text>
+              <Text style={text(theme, "code")}>serverId: {serverId ?? "local"}</Text>
+              <Text style={text(theme, "code")}>daemon: {view.daemonError ?? "healthy"}</Text>
+              <Text style={text(theme, "code")}>project: {view.project === null ? "(unscoped)" : `${view.project.slug} · ${view.project.root}`}</Text>
+            </Card>
+            {tab !== "vault" ? vaultPane : null}
+          </>
         ) : null}
         <TabBar
           theme={theme}
@@ -309,9 +370,11 @@ export function FactoryShell({
             tasks: view.tasks.length,
             seats: view.agents.length,
             timeline: view.retro.length,
+            vault: view.vault.hydratedApps.length,
             plugins: view.companions.filter((c) => c.status === "running").length,
           }}
         />
+        {tab === "vault" ? vaultPane : null}
         {tab === "tasks" ? (
           <TasksPane
             theme={theme}
@@ -519,76 +582,7 @@ export function FactoryShell({
       </ScrollView>
 
       {/* The Detail Modal: Contract, per-attempt Report.md, Gate Log, Watch & Eye breakdown. */}
-      <Modal open={detail !== null} onOpenChange={(open) => (open ? undefined : setDetail(null))} title={detail === null ? "" : `${detail.task} — detail`} icon={undefined}>
-        <Modal.Content>
-          {detail === null || detail.loading ? (
-            <Text style={text(theme, "meta")}>Loading…</Text>
-          ) : detail.error !== null ? (
-            <Text style={text(theme, "label", "statusWarning")}>{detail.error}</Text>
-          ) : detail.detail === null ? null : (
-            <DetailBody theme={theme} detail={detail.detail} />
-          )}
-          <View style={{ paddingTop: SPACING[2] }}>
-            <Btn theme={theme} small label="Close" tone="foregroundMuted" onPress={() => setDetail(null)} />
-          </View>
-        </Modal.Content>
-      </Modal>
-    </View>
-  );
-}
-
-function DetailBody({ theme, detail }: { theme: PluginTheme; detail: TaskDetailView }) {
-  const contract = detail.contract;
-  return (
-    <View style={{ gap: SPACING[3] }}>
-      <View style={{ gap: 2 }}>
-        <Text style={text(theme, "section")}>Contract</Text>
-        <Text style={text(theme, "code")}>gate: {contract.gate}</Text>
-        <Text style={text(theme, "code")}>artifact: {contract.artifact}</Text>
-        <Text style={text(theme, "code")}>scope: {contract.scope === null ? "unrestricted" : contract.scope.join(", ")}</Text>
-        <Text style={text(theme, "code")}>skills: {contract.skills === null ? "none mandated" : contract.skills.join(", ")}</Text>
-        <Text style={text(theme, "code")}>workspace: {contract.workspace}</Text>
-        {contract.description !== null ? <Text style={text(theme, "meta")}>{contract.description}</Text> : null}
-        <Text style={text(theme, "label")}>
-          watch {contract.watch ? "on" : "off"} · fresh-eyes {contract.freshEyes ? "on" : "off"} · by {contract.by ?? "—"}
-        </Text>
-      </View>
-      {detail.attempts.map((attempt, index) => {
-        const view = detail.task.attempts[index]!;
-        return (
-          <View key={attempt.n} style={{ gap: 2, borderTopWidth: 1, borderTopColor: theme.colors.border, paddingTop: SPACING[2] }}>
-            <Text style={text(theme, "rowTitle")}>
-              #{attempt.n} {attempt.verdict ?? "—"} {view.respawned ? "↻" : ""}
-            </Text>
-            {view.note !== null ? <Text style={text(theme, "meta")}>note: {view.note}</Text> : null}
-            {view.eye !== null ? <Text style={text(theme, "meta")}>fresh-eyes ({view.eye.model}): {view.eye.outcome} — {view.eye.finding}</Text> : null}
-            {view.watch !== null ? (
-              <View style={{ gap: 1 }}>
-                <Text style={text(theme, "meta")}>watch ({view.watch.model}): {view.watch.outcome}{view.watch.error !== null ? ` — ${view.watch.error}` : ""}</Text>
-                {view.watch.answers !== null
-                  ? Object.entries(view.watch.answers).map(([name, probability]) => (
-                      <Text key={name} style={text(theme, "code")}>
-                        {name}: {probability === null ? "—" : probability.toFixed(2)}
-                      </Text>
-                    ))
-                  : null}
-              </View>
-            ) : null}
-            {attempt.report !== null ? (
-              <View style={{ gap: 1 }}>
-                <Text style={text(theme, "label")}>Report.md</Text>
-                <Text style={text(theme, "code")}>{attempt.report}</Text>
-              </View>
-            ) : null}
-            {attempt.gateLog !== null ? (
-              <View style={{ gap: 1 }}>
-                <Text style={text(theme, "label")}>Gate log</Text>
-                <Text style={text(theme, "code")}>{attempt.gateLog}</Text>
-              </View>
-            ) : null}
-          </View>
-        );
-      })}
+      <TaskDetailModal theme={theme} detail={detail} onClose={() => setDetail(null)} />
     </View>
   );
 }

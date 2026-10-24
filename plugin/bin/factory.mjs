@@ -652,16 +652,49 @@ if (command === "supervisor") {
   fail(`supervisor: unknown subcommand "${sub ?? "(none)"}" — use "supervisor dispatch --workspace <dir> --message \\"<text>\\"" or "supervisor report --workspace <dir> --message \\"<text>\\""`);
 }
 
-if (command === "reset") {
+if (command === "reset" || command === "delete" || command === "project") {
   const parsed = parseCommandOptions({
     workspace: { type: "string" },
     project: { type: "string" },
     "keep-seats": { type: "boolean", default: false },
     "wait-secs": { type: "string" },
   });
-  if (parsed.positionals.length > 0) {
-    fail(`reset: unexpected positional "${parsed.positionals[0]}"`);
+  let act = command;
+  if (command === "project") {
+    const sub = parsed.positionals[0];
+    if (sub !== "delete" && sub !== "reset") {
+      fail(`project: unknown subcommand "${sub ?? "(none)"}" — use "project delete [--workspace <dir>] [--project <slug>]" or "project reset [--workspace <dir>] [--project <slug>]"`);
+    }
+    if (parsed.positionals.length > 1) {
+      fail(`project ${sub}: unexpected positional "${parsed.positionals[1]}"`);
+    }
+    act = sub;
+  } else if (parsed.positionals.length > 0) {
+    fail(`${command}: unexpected positional "${parsed.positionals[0]}"`);
   }
+
+  if (act === "delete") {
+    if (stampedSeat === "supervisor" || stampedSeat === "lead" || stampedSeat === "agent") {
+      console.error(
+        `factory: seat-cannot-delete: Seat ${stampedSeat} cannot call factory project delete; project deletion is an Owner-only action.`,
+      );
+      process.exit(2);
+    }
+    const hasWorkspace = typeof parsed.values.workspace === "string" && parsed.values.workspace.trim() !== "";
+    const hasProject = typeof parsed.values.project === "string" && parsed.values.project.trim() !== "";
+    const reply = await roundTrip(
+      {
+        id: randomId(),
+        kind: "delete",
+        ...(hasWorkspace ? { workspace: resolvePath(parsed.values.workspace) } : {}),
+        ...(hasProject ? { project: parsed.values.project.trim() } : {}),
+      },
+      waitSeconds(parsed),
+    );
+    console.log(`factory: ${reply.summary}`);
+    process.exit(0);
+  }
+
   if (stampedSeat === "supervisor" || stampedSeat === "lead" || stampedSeat === "agent") {
     console.error(
       `factory: seat-cannot-reset: Seat ${stampedSeat} cannot call factory reset; project reset is an Owner-only action.`,

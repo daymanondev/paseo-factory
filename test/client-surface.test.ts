@@ -19,13 +19,21 @@ import {
   isPluginTargetedByAct,
   resolveCoreRestartWatch,
 } from "../plugin/client/factory/plugin-feedback.ts";
-import type { CompanionPluginView, FactoryView } from "../plugin/shared/view.ts";
+import {
+  KANBAN_COLUMNS,
+  groupTasksForKanban,
+  kanbanColumnForStatus,
+  projectNameForTask,
+} from "../plugin/client/factory/kanban.ts";
+import type { KanbanColumnId } from "../plugin/client/factory/kanban.ts";
+import type { CompanionPluginView, FactoryView, TaskView } from "../plugin/shared/view.ts";
 
 const read = (rel: string): string => readFileSync(join(repoRoot, rel), "utf8");
 
-test("TabId grows its fourth value and the TabBar renders the Plugins tab with the Blocks icon", () => {
+test("TabId grows its five values (including vault) and the TabBar renders the Vault and Plugins tabs", () => {
   const pill = read("plugin/client/kit/pill.tsx");
-  assert.match(pill, /export type TabId = "tasks" \| "seats" \| "timeline" \| "plugins";/);
+  assert.match(pill, /export type TabId = "tasks" \| "seats" \| "timeline" \| "vault" \| "plugins";/);
+  assert.match(pill, /\{ id: "vault", label: "Vault", icon: "Shield" \}/);
   assert.match(pill, /\{ id: "plugins", label: "Plugins", icon: "Blocks" \}/);
 });
 
@@ -197,35 +205,47 @@ test("the Lead card renders the 128k telemetry trio — usage pill, rotationStat
   assert.match(seats, /agent\.queuedMailCount !== undefined && agent\.queuedMailCount > 0/, "the queued pill appears only when mail actually waits");
 });
 
-// ---- Built-In Header VaultSyncBar & 3-Layer Feedback (v0.0.22, ADR 0014) --------------------
+// ---- Dedicated Vault Tab & De-cluttered Header (v0.0.35 Seam 2.1, ADR 0025, amending ADR 0009/0014) ----
 
-test("Header exports and renders VaultSyncBar across all tabs with the 3-state gh onboarding, Sync Vault, + Import Key drawer, and ⚙ drawer", () => {
+test("v0.0.35 Seam 2.1: VaultPane / VaultSyncBar moves out of Header into the dedicated Vault tab (tab === \"vault\") and Settings screen with 3-state gh onboarding, Sync Vault, + Import Key drawer, and ⚙ drawer, while Header drops <VaultSyncBar and KPI StatTile cards", () => {
   const header = read("plugin/client/factory/header.tsx");
-  assert.match(header, /export function VaultSyncBar\(/, "VaultSyncBar is exported from header.tsx");
-  assert.match(header, /<VaultSyncBar/, "Header renders VaultSyncBar inside the persistent header");
+  assert.ok(!header.includes("<VaultSyncBar"), "Header no longer renders VaultSyncBar above the TabBar");
+  assert.ok(!header.includes("function StatTile("), "Header no longer defines the 5 KPI StatTile cards");
+  assert.ok(!header.includes("<StatTile"), "Header no longer renders KPI StatTile cards above the TabBar");
+
+  const vault = read("plugin/client/factory/vault.tsx");
+  assert.match(vault, /export function VaultSyncBar\(/, "VaultSyncBar is exported from vault.tsx");
+  assert.match(vault, /export function VaultPane\(/, "VaultPane is exported from vault.tsx");
   // State 1: !vault.configured && !vault.ghAuthenticated
-  assert.match(header, /gh auth login --web -p https/, "State 1 shows the exact gh auth login command");
-  assert.match(header, /Copy Command/, "State 1 offers a 1-click Copy Command button");
-  assert.match(header, /Check GitHub Login/, "State 1 offers a Check GitHub Login button");
+  assert.match(vault, /gh auth login --web -p https/, "State 1 shows the exact gh auth login command");
+  assert.match(vault, /Copy Command/, "State 1 offers a 1-click Copy Command button");
+  assert.match(vault, /Check GitHub Login/, "State 1 offers a Check GitHub Login button");
   // State 2: !vault.configured && vault.ghAuthenticated
-  assert.match(header, /Enable & Sync Vault/, "State 2 offers the single primary Enable & Sync Vault CTA");
-  assert.match(header, /Setting up & Syncing…/, "State 2 shows in-flight Setting up & Syncing… label");
+  assert.match(vault, /Enable & Sync Vault/, "State 2 offers the single primary Enable & Sync Vault CTA");
+  assert.match(vault, /Setting up & Syncing…/, "State 2 shows in-flight Setting up & Syncing… label");
   // State 3: vault.configured
-  assert.match(header, /Sync Vault/, "State 3 offers the single primary Sync Vault CTA");
-  assert.match(header, /Syncing Vault…/, "State 3 shows in-flight Syncing Vault… label");
-  assert.match(header, /ASC \.p8/, "readiness pill for ASC .p8");
-  assert.match(header, /GPlay JSON/, "readiness pill for GPlay JSON");
-  assert.match(header, /Apps: \$\{vault\.hydratedApps\.length\}/, "readiness pill for hydrated Apps count");
+  assert.match(vault, /Sync Vault/, "State 3 offers the single primary Sync Vault CTA");
+  assert.match(vault, /Syncing Vault…/, "State 3 shows in-flight Syncing Vault… label");
+  assert.match(vault, /ASC \.p8/, "readiness pill for ASC .p8");
+  assert.match(vault, /GPlay JSON/, "readiness pill for GPlay JSON");
+  assert.match(vault, /Apps: \$\{vault\.hydratedApps\.length\}/, "readiness pill for hydrated Apps count");
   // + Import Key drawer & ⚙ drawer
-  assert.match(header, /\+ Import Key/, "renders + Import Key drawer toggle");
-  assert.match(header, /Import & Sync/, "Import Key drawer submits via Import & Sync");
-  assert.match(header, /ascKeyPath/, "Import Key drawer collects ascKeyPath");
-  assert.match(header, /ascKeyId/, "Import Key drawer collects ascKeyId");
-  assert.match(header, /ascIssuer/, "Import Key drawer collects ascIssuer");
-  assert.match(header, /gplayKeyPath/, "Import Key drawer collects gplayKeyPath");
-  assert.match(header, /Save Config/, "⚙ drawer keeps Save Config for custom repo/branch/passphrase");
-  assert.match(header, /Direct Hydrate \(gh api\)/, "⚙ drawer keeps Direct Hydrate (gh api)");
-  assert.match(header, /vaultNote/, "VaultSyncBar renders the inline vaultNote banner");
+  assert.match(vault, /\+ Import Key/, "renders + Import Key drawer toggle");
+  assert.match(vault, /Import & Sync/, "Import Key drawer submits via Import & Sync");
+  assert.match(vault, /ascKeyPath/, "Import Key drawer collects ascKeyPath");
+  assert.match(vault, /ascKeyId/, "Import Key drawer collects ascKeyId");
+  assert.match(vault, /ascIssuer/, "Import Key drawer collects ascIssuer");
+  assert.match(vault, /gplayKeyPath/, "Import Key drawer collects gplayKeyPath");
+  assert.match(vault, /Save Config/, "⚙ drawer keeps Save Config for custom repo/branch/passphrase");
+  assert.match(vault, /Direct Hydrate \(gh api\)/, "⚙ drawer keeps Direct Hydrate (gh api)");
+  assert.match(vault, /vaultNote/, "VaultSyncBar renders the inline vaultNote banner");
+
+  const shell = read("plugin/client/factory/shell.tsx");
+  assert.match(shell, /tab === "vault" \?/, "FactoryShell renders VaultPane in the tab === \"vault\" slot");
+  assert.match(shell, /<VaultPane/, "FactoryShell mounts VaultPane");
+  assert.equal((shell.match(/<VaultPane/g) ?? []).length, 1, "FactoryShell defines a single shared <VaultPane element rather than duplicating JSX");
+  assert.match(vault, /export function readAgo\(/, "vault.tsx exports shared readAgo helper");
+  assert.ok(!header.includes("function readAgo("), "header.tsx imports readAgo from vault.tsx instead of duplicating it");
 });
 
 test("FactoryShell removes PrivateVaultCard from the Plugins tab, wires vaultSync & vaultImport, and provides 3-layer feedback in act()", () => {
@@ -253,7 +273,7 @@ test("v0.0.24 (ADR 0015 §1): Seats & Models lane modal distinguishes thinkingOp
   );
 });
 
-// ---- Owner-Only Project Reset Header Button & RPC Wiring (v0.0.24, ADR 0015 §6) --------------
+// ---- Owner-Only Project Reset & Delete + Project-Centered Header (v0.0.24 ADR 0015 §6; v0.0.35 Seam 2.2, ADR 0024/0025) ----
 
 test("v0.0.24 (ADR 0015 §6): Header renders two-step Reset Project -> Confirm Reset + Cancel with 5s auto-cancel, wired to projectReset RPC in FactoryShell", () => {
   const header = read("plugin/client/factory/header.tsx");
@@ -268,6 +288,43 @@ test("v0.0.24 (ADR 0015 §6): Header renders two-step Reset Project -> Confirm R
   assert.match(shell, /projectReset/, "FactoryShell imports projectReset RPC");
   assert.match(shell, /useRpc\(projectReset\)/, "FactoryShell binds useRpc(projectReset)");
   assert.match(shell, /resetProject/, "FactoryShell passes resetProject action to Header");
+});
+
+test("v0.0.35 Seam 2.2 (ADR 0024/0025): Header renders prominent Project Switcher, Missing folder statusDanger badge, + Add Project native folder picker with Paste path… fallback, Reset Project (hidden when missingRoot), and two-step Delete Project -> Confirm Delete wired to projectDelete in FactoryShell", () => {
+  const header = read("plugin/client/factory/header.tsx");
+  assert.match(header, /PROJECT SWITCHER|Project Switcher/i, "Header renders the prominent Project Switcher");
+  assert.match(header, /label="All projects"/, "Project Switcher includes the All projects pill");
+  assert.match(header, /missingRoot/, "Header checks missingRoot on discovered and active projects");
+  assert.match(header, /label="Missing folder"/, "Header renders Missing folder badge when missingRoot is true");
+  assert.match(header, /Folder deleted on disk/, "Header warns when active project folder was deleted on disk");
+  assert.match(header, /label="\+ Add Project"/, "Header renders + Add Project primary action");
+  assert.match(header, /actions\.pickProjectFolder/, "+ Add Project invokes actions.pickProjectFolder()");
+  assert.match(header, /Paste path…/, "Header offers collapsible Paste path… fallback toggle");
+  assert.match(header, /!project\.missingRoot/, "Reset Project is hidden when project.missingRoot === true");
+  assert.match(header, /deleteProject\?:\s*\(\)\s*=>\s*void|deleteProject\(\):\s*void/, "HeaderActions declares deleteProject()");
+  assert.match(header, /label="Delete Project"/, "Header renders Delete Project button when a project is selected");
+  assert.match(header, /label="Confirm Delete"/, "first click on Delete Project flips to Confirm Delete");
+  assert.match(header, /actions\.deleteProject/, "Confirm Delete invokes actions.deleteProject()");
+  assert.match(
+    header,
+    /actions\.addProject \? actions\.addProject\(entry\.root\) : actions\.pickProject\(entry\.root\)/,
+    "clicking a Paseo workspace suggestion in the + Add Project drawer invokes actions.addProject when available",
+  );
+  assert.match(
+    header,
+    /view\.projects\.reduce\(/,
+    "All projects chip count sums activeTaskCount across view.projects when a single project is selected",
+  );
+
+  const shell = read("plugin/client/factory/shell.tsx");
+  assert.match(shell, /projectDelete/, "FactoryShell imports projectDelete RPC");
+  assert.match(shell, /projectPickFolder/, "FactoryShell imports projectPickFolder RPC");
+  assert.match(shell, /projectAdd/, "FactoryShell imports projectAdd RPC");
+  assert.match(shell, /useRpc\(projectDelete\)/, "FactoryShell binds useRpc(projectDelete)");
+  assert.match(shell, /useRpc\(projectPickFolder\)/, "FactoryShell binds useRpc(projectPickFolder)");
+  assert.match(shell, /useRpc\(projectAdd\)/, "FactoryShell binds useRpc(projectAdd)");
+  assert.match(shell, /deleteProject/, "FactoryShell wires deleteProject into Header actions");
+  assert.match(shell, /pickProjectFolder/, "FactoryShell wires pickProjectFolder into Header actions");
 });
 
 // ---- Compact Plugins Tab, Core Card, Version Pills & On-Demand Update Check (v0.0.25, ADR 0012 §1–§4) ----
@@ -710,6 +767,104 @@ test("v0.0.34 Seam 2.3: PluginsPane and FactoryShell wire live elapsed progress 
     "CompanionCard separates Core reload restart from Core update restart so Reload never lights up Update buttons",
   );
 });
+
+// ---- 5-Column Kanban Tasks Board (v0.0.35 Seam 2.3, ADR 0025) ----
+
+test("v0.0.35 Seam 2.3a: KANBAN_COLUMNS and groupTasksForKanban map all TaskStatus values into the 5 canonical Kanban columns in order", () => {
+  const columnIds: KanbanColumnId[] = KANBAN_COLUMNS.map((c) => c.id);
+  assert.deepEqual(columnIds, [
+    "queued",
+    "in_progress",
+    "needs_attention",
+    "ready_to_accept",
+    "accepted",
+  ]);
+  assert.deepEqual(
+    KANBAN_COLUMNS.map((c) => c.title),
+    ["Queued", "In Progress", "Needs Attention", "Ready to Accept", "Accepted"],
+  );
+
+  assert.equal(kanbanColumnForStatus("contracted"), "queued");
+  assert.equal(kanbanColumnForStatus("waiting"), "queued");
+  assert.equal(kanbanColumnForStatus("running"), "in_progress");
+  assert.equal(kanbanColumnForStatus("needs-human"), "needs_attention");
+  assert.equal(kanbanColumnForStatus("red"), "needs_attention");
+  assert.equal(kanbanColumnForStatus("ready-to-accept"), "ready_to_accept");
+  assert.equal(kanbanColumnForStatus("accepted"), "accepted");
+
+  const tasks = [
+    { task: "t-contracted", status: "contracted" as const, workspace: "/repo/a" },
+    { task: "t-waiting", status: "waiting" as const, workspace: "/repo/a" },
+    { task: "t-running", status: "running" as const, workspace: "/repo/a" },
+    { task: "t-needs-human", status: "needs-human" as const, workspace: "/repo/a" },
+    { task: "t-red", status: "red" as const, workspace: "/repo/a" },
+    { task: "t-ready", status: "ready-to-accept" as const, workspace: "/repo/a" },
+    { task: "t-accepted", status: "accepted" as const, workspace: "/repo/a" },
+  ];
+
+  const grouped = groupTasksForKanban(tasks);
+  assert.deepEqual(
+    grouped.queued.map((t) => t.task),
+    ["t-contracted", "t-waiting"],
+  );
+  assert.deepEqual(
+    grouped.in_progress.map((t) => t.task),
+    ["t-running"],
+  );
+  assert.deepEqual(
+    grouped.needs_attention.map((t) => t.task),
+    ["t-needs-human", "t-red"],
+  );
+  assert.deepEqual(
+    grouped.ready_to_accept.map((t) => t.task),
+    ["t-ready"],
+  );
+  assert.deepEqual(
+    grouped.accepted.map((t) => t.task),
+    ["t-accepted"],
+  );
+
+  // Also verify projectNameForTask resolves project names from discovered projects or workspace paths
+  const projects = [
+    { slug: "alpha-123456", root: "/Users/dev/alpha", name: "Alpha App" },
+    { slug: "beta-654321", root: "/Users/dev/beta" },
+  ];
+  assert.equal(projectNameForTask({ workspace: "/Users/dev/alpha" }, projects), "Alpha App");
+  assert.equal(
+    projectNameForTask({ workspace: "/Users/dev/.paseo/projects/beta-654321/worktrees/t-01" }, projects),
+    "beta",
+  );
+  assert.equal(projectNameForTask({ workspace: "/Users/dev/unregistered-repo" }, projects), "unregistered-repo");
+});
+
+test("v0.0.35 Seam 2.3b (ADR 0025): TasksPane renders the 5-column horizontal Kanban board with column counts, Total Cost pill, Project pill in All projects mode, Attempt #n/3 rung badges, evidence pills, direct Accept #n CTA on ready-to-accept cards, and TaskDetailModal without redundant workspace-path headers", () => {
+  const tasks = read("plugin/client/factory/tasks.tsx");
+  assert.match(tasks, /KANBAN_COLUMNS/, "tasks.tsx exports and iterates KANBAN_COLUMNS");
+  assert.match(tasks, /groupTasksForKanban/, "tasks.tsx exports and invokes groupTasksForKanban");
+  assert.match(tasks, /KanbanColumnId/, "tasks.tsx exports KanbanColumnId");
+  assert.match(tasks, /ScrollView horizontal/, "TasksPane renders a horizontal Kanban board container");
+  assert.match(tasks, /Total Cost/, "board toolbar renders compact Total Cost summary pill");
+  assert.match(tasks, /view\.kpis\.totalCostUsd/, "Total Cost pill reads view.kpis.totalCostUsd");
+  assert.match(tasks, /view\.kpis\.totalTokens/, "Total Cost pill also reads view.kpis.totalTokens");
+  assert.ok(!tasks.includes("group.workspace"), "redundant workspace-path group headers are removed from TasksPane");
+  assert.match(tasks, /view\.project === null/, "KanbanCard shows a Project pill only when view.project === null (All projects mode)");
+  assert.match(tasks, /projectNameForTask/, "KanbanCard resolves the Project pill label via projectNameForTask");
+  assert.match(tasks, /\/3/, "KanbanCard renders Attempt rung badge (#n/3)");
+  assert.match(tasks, /↻ Respawned/, "KanbanCard renders ↻ Respawned badge when respawned");
+  assert.match(tasks, /Gate green/, "KanbanCard renders Gate evidence pill");
+  assert.match(tasks, /Eye \$\{lastEye\.outcome\.toUpperCase\(\)\}/, "KanbanCard renders Eye CLEAR/CONCERN evidence pill");
+  assert.match(tasks, /Watch /, "KanbanCard renders Watch evidence pill");
+  assert.match(tasks, /Cost \$\{costLabel\(task\)\}/, "KanbanCard renders Cost evidence pill");
+  assert.match(tasks, /label=\{`Accept #\$\{green\.n\}`\}/, "ready-to-accept cards render direct Accept #n button");
+  assert.match(tasks, /actions\.accept\(task\.task,\s*green!?\.n\)/, "Accept #n button invokes actions.accept");
+  assert.match(tasks, /actions\.openDetail\(task\.task\)/, "clicking a Kanban card or Details opens TaskDetailModal");
+  assert.match(tasks, /export function TaskDetailModal\(/, "tasks.tsx exports TaskDetailModal");
+
+  const shell = read("plugin/client/factory/shell.tsx");
+  assert.match(shell, /TaskDetailModal/, "FactoryShell renders TaskDetailModal for selected Kanban cards");
+});
+
+
 
 
 
