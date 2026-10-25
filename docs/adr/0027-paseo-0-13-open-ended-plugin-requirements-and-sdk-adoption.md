@@ -51,7 +51,7 @@ Inspecting the diff between `@getpaseo/*@0.11.2` and `@getpaseo/*@0.13.0` surfac
    - In `paseo-factory`:
      - Render `contract.description` and `attempt.report` in `TaskDetailModal` (`plugin/client/factory/tasks.tsx`) and `proposal.text` in `TimelinePane` (`plugin/client/factory/timeline.tsx`) with `<Markdown>`, and add 1-click `Copy` buttons (`copyText`) on `Report.md`, `Gate log`, and `Retro` proposals.
      - Persist the active `FactoryShell` tab (`tasks` / `seats` / `timeline` / `vault` / `plugins`) and Project Switcher scope (`pickedRoot`, `hasPickedScope`) via `useTabState(panelTab, FactoryTabStateSchema, ...)` (`plugin/client/factory/shell.tsx`, `plugin/client/factory/entries.tsx`).
-     - Register four `⌘K` Command Center shortcuts in `plugin/index.client.tsx` (`Factory: Open Verification Board`, `Factory: Open Workspace Panel`, `Factory: Run Daily Retro`, `Factory: Sync Private Vault`).
+     - Register four `⌘K` Command Center shortcuts in `plugin/index.client.tsx` (`factory-open-screen`, `factory-open-panel`, `factory-run-retro`, `factory-sync-vault` — matching Paseo's `/^[a-z][a-z0-9-]*$/` client contribution ID law).
 
 ## Consequences
 
