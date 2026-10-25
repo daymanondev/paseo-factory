@@ -1124,3 +1124,21 @@ test("v0.0.38 Seam 4 (ADR 0026 §2/§5): FactoryShell owns the five new lane/pro
 function seats_includes_useRpc(): boolean {
   return read("plugin/client/factory/seats.tsx").includes("useRpc");
 }
+
+test("v0.0.39 (ADR 0027): index.client.tsx Command Center items and client contributions strictly match Paseo's /^[a-z][a-z0-9-]*$/ id law", () => {
+  const indexClient = read("plugin/index.client.tsx");
+  const idPattern = /^[a-z][a-z0-9-]*$/;
+  const ids = [...indexClient.matchAll(/\bid:\s*"([^"]+)"/g)].map((m) => m[1]!);
+  assert.deepEqual(ids, [
+    "paseo-factory",
+    "paseo-factory",
+    "factory-open-screen",
+    "factory-open-panel",
+    "factory-run-retro",
+    "factory-sync-vault",
+  ]);
+  for (const id of ids) {
+    assert.match(id, idPattern, `client contribution id "${id}" must match /^[a-z][a-z0-9-]*$/ (no dots)`);
+  }
+});
+

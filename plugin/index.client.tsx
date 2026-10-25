@@ -24,7 +24,7 @@ export default function contribute(client: PluginClientContext) {
     }),
     client.addSettingsScreen({ id: "paseo-factory", title: "Factory", icon: "Settings2", Component: FactorySettings }),
     client.addCommandCenterItem({
-      id: "factory.open-screen",
+      id: "factory-open-screen",
       title: "Factory: Open Verification Board",
       icon: "Activity",
       keywords: ["factory", "kanban", "tasks", "slp", "verification"],
@@ -34,7 +34,7 @@ export default function contribute(client: PluginClientContext) {
       },
     }),
     client.addCommandCenterItem({
-      id: "factory.open-panel",
+      id: "factory-open-panel",
       title: "Factory: Open Workspace Panel",
       icon: "Activity",
       keywords: ["factory", "panel", "kanban", "workspace"],
@@ -44,7 +44,7 @@ export default function contribute(client: PluginClientContext) {
       },
     }),
     client.addCommandCenterItem({
-      id: "factory.run-retro",
+      id: "factory-run-retro",
       title: "Factory: Run Daily Retro",
       icon: "Sparkles",
       keywords: ["factory", "retro", "proposals"],
@@ -55,7 +55,7 @@ export default function contribute(client: PluginClientContext) {
       },
     }),
     client.addCommandCenterItem({
-      id: "factory.sync-vault",
+      id: "factory-sync-vault",
       title: "Factory: Sync Private Vault",
       icon: "CloudUpload",
       keywords: ["factory", "vault", "sync"],
