@@ -138,7 +138,7 @@ test("v0.0.27 (ADR 0017 §1): reconcilePaseoRoleProviders sweeps the 29 sw2-* or
   for (const key of ["opencode", "claude", "codex", "omp", "agy", "glm-acp-agent", "muse"]) {
     assert.deepEqual(providers[key], (before.agents as { providers: Record<string, unknown> }).providers[key], `user provider ${key} is untouched`);
   }
-  // The three role providers carry the ADR 0017 shape.
+  // The three role providers carry the ADR 0017 / ADR 0026 replacement `models` shape.
   assert.deepEqual(providers[FACTORY_ROLE_PROVIDERS.supervisor], {
     extends: "opencode",
     label: "Supervisor (Factory)",
@@ -146,18 +146,18 @@ test("v0.0.27 (ADR 0017 §1): reconcilePaseoRoleProviders sweeps the 29 sw2-* or
     enabled: true,
     paseoTools: { enabled: false },
     env: { PASEO_FACTORY_SEAT: "supervisor" },
-    additionalModels: [{ id: "glm-5.1", label: "glm-5.1", isDefault: true }],
+    models: [{ id: "glm-5.1", label: "glm-5.1", isDefault: true }],
   });
   const lead = providers[FACTORY_ROLE_PROVIDERS.lead]!;
   assert.equal(lead.extends, "claude", "a claude-code lane maps onto the claude builtin");
   assert.equal(lead.enabled, true);
   assert.deepEqual(lead.paseoTools, { enabled: false });
   assert.deepEqual(lead.env, { PASEO_FACTORY_SEAT: "lead" });
-  assert.deepEqual(lead.additionalModels, [{ id: "claude-opus-5", label: "claude-opus-5", isDefault: true }]);
+  assert.deepEqual(lead.models, [{ id: "claude-opus-5", label: "claude-opus-5", isDefault: true }]);
   const peer = providers[FACTORY_ROLE_PROVIDERS.agent]!;
   assert.equal(peer.extends, "pi", "a pi lane maps onto the pi builtin verbatim");
   assert.deepEqual(peer.env, { PASEO_FACTORY_SEAT: "agent" });
-  assert.deepEqual(peer.additionalModels, [{ id: "zai/glm-5.3", label: "zai/glm-5.3", isDefault: true }]);
+  assert.deepEqual(peer.models, [{ id: "zai/glm-5.3", label: "zai/glm-5.3", isDefault: true }]);
 
   // The picker: all 29 sw2-* rows swept, exactly one Supervisor (Factory) profile prepended.
   const profiles = (after.daemon as { agentProfiles: Record<string, unknown>[] }).agentProfiles;
@@ -227,12 +227,23 @@ test("v0.0.27 (ADR 0017 §1): an agy lane inherits the user's custom agy provide
   );
   assert.equal(profiles[0]!.modeId, "https://agentclientprotocol.com/protocol/session-modes#plan", "the copilot harness pins its ACP plan session-mode");
 
-  // Without a custom agy entry, the same lane falls back to the antigravity builtin.
+  // Without a custom agy entry (or with an antigravity plugin lane), extends falls back
+  // to a valid built-in provider ("pi") so @getpaseo/protocol's ProviderOverridesSchema
+  // (validExtendsValues) never rejects <home>/config.json on daemon reload.
   delete (after.agents as { providers: Record<string, unknown> }).providers.agy;
   writeConfig(home, after);
-  const fallback = reconcilePaseoRoleProviders(home, { ...LANES, worker: "agy/gemini-3-pro" });
+  const fallback = reconcilePaseoRoleProviders(home, { ...LANES, supervisor: "antigravity/gemini-3.1-pro-high", worker: "agy/gemini-3-pro" });
   assert.ok(fallback.ok && fallback.changed === true);
-  assert.equal(((readConfig(home).agents as { providers: Record<string, { extends?: string }> }).providers[FACTORY_ROLE_PROVIDERS.agent]!.extends), "antigravity");
+  const fallbackConfig = readConfig(home);
+  const fallbackProviders = (fallbackConfig.agents as { providers: Record<string, { extends?: string; models?: { id: string }[] }> }).providers;
+  assert.equal(fallbackProviders[FACTORY_ROLE_PROVIDERS.agent]!.extends, "pi");
+  assert.equal(fallbackProviders[FACTORY_ROLE_PROVIDERS.supervisor]!.extends, "pi");
+  assert.deepEqual(fallbackProviders[FACTORY_ROLE_PROVIDERS.supervisor]!.models, [
+    { id: "gemini-3.1-pro-high", label: "gemini-3.1-pro-high", isDefault: true },
+  ]);
+  const fallbackProfile = (fallbackConfig.daemon as { agentProfiles: Record<string, unknown>[] }).agentProfiles[0]!;
+  assert.equal(fallbackProfile.model, "gemini-3.1-pro-high");
+  assert.equal("modeId" in fallbackProfile, false, "antigravity supervisor does not attach a foreign modeId");
 
   // The pure transform refuses nothing — an unparseable lane writes no provider, never a guess.
   const pure = reconcilePaseoConfigObject(liveLikeConfig(), { ...LANES, worker: "eye.json" });
@@ -326,15 +337,22 @@ test("v0.0.27 (ADR 0017 §1): lanesSet reconciles <home>/config.json when a Supe
   assert.equal(profile.model, "gpt-5.5", "the supervisor model follows the lane");
   assert.equal(profile.modeId, "auto", "the codex harness pins auto mode");
   assert.equal(profile.thinkingOptionId, "high", "the lane's thinking level rides the profile");
-  const provider = (afterSupervisor.agents as { providers: Record<string, { additionalModels?: { id: string }[] }> }).providers["factory-supervisor"];
-  assert.deepEqual(provider.additionalModels, [{ id: "gpt-5.5", label: "gpt-5.5", isDefault: true }]);
+  const provider = (afterSupervisor.agents as { providers: Record<string, { models?: { id: string; thinkingOptions?: { id: string }[] }[] }> }).providers["factory-supervisor"];
+  assert.deepEqual(provider.models, [
+    {
+      id: "gpt-5.5",
+      label: "gpt-5.5",
+      isDefault: true,
+      thinkingOptions: [{ id: "high", label: "high", isDefault: true }],
+    },
+  ]);
 
   // A worker lane change rewrites factory-peer's base provider and model.
   const workerSave = await handlers.lanesSet({ lane: "worker", value: "claude-code/claude-opus-5" });
   assert.ok(workerSave.ok);
-  const peer = ((readConfig(home).agents) as { providers: Record<string, { extends?: string; additionalModels?: { id: string }[] }> }).providers["factory-peer"];
+  const peer = ((readConfig(home).agents) as { providers: Record<string, { extends?: string; models?: { id: string }[] }> }).providers["factory-peer"];
   assert.equal(peer.extends, "claude", "the worker lane change re-maps factory-peer onto claude");
-  assert.deepEqual(peer.additionalModels, [{ id: "claude-opus-5", label: "claude-opus-5", isDefault: true }]);
+  assert.deepEqual(peer.models, [{ id: "claude-opus-5", label: "claude-opus-5", isDefault: true }]);
 
   // A lead lane change lands in factory-lead the same way.
   const leadSave = await handlers.lanesSet({ lane: "lead", value: "omp/qwen3-coder" });
@@ -349,9 +367,9 @@ test("v0.0.27 (ADR 0017 §1): lanesSet reconciles <home>/config.json when a Supe
   assert.equal(readFileSync(join(home, "config.json"), "utf8"), rawBefore, "an unrelated lane leaves config.json untouched");
 });
 
-// ---- Seam 2 (v0.0.38, ADR 0026 §1): a Project's save never clobbers the daemon-global providers ----
+// ---- Seam 2 (ADR 0026 §1): active-scope picker sync + reset to machine default ----
 
-test("v0.0.38 (ADR 0026 §1): a project-scoped lanesSet reconciles <home>/config.json from the MACHINE table — Project A's overrides never land in the global factory-* providers or the Supervisor (Factory) picker row", async (t) => {
+test("ADR 0026 §1: a project-scoped lanesSet or lanesSetBatch reconciles <home>/config.json from the active scope's effective lanes so the New Chat picker immediately shows the configured model, and lanesReset restores the machine default", async (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);
   const home = join(dir, "paseo-home");
@@ -370,39 +388,49 @@ test("v0.0.38 (ADR 0026 §1): a project-scoped lanesSet reconciles <home>/config
   const handlers = createSurfaceHandlers({ factory, stateDir, home, daemon: emptyDaemon(), onLog: () => {} });
   writeConfig(home, liveLikeConfig());
 
-  // The machine table anchors every daemon-global provider.
+  // The machine table starts as the baseline.
   writeLanes(stateDir, { supervisor: "codex/gpt-5.5", lead: "omp/qwen3-coder", worker: "pi/zai/glm-5.3" });
   const boot = await handlers.lanesSet({ lane: "watch", value: "pi/zai/glm-5.3" });
   assert.ok(boot.ok, "the machine-anchored save succeeds");
   const anchored = readConfig(home);
   assert.equal(
-    ((anchored.agents as { providers: Record<string, { additionalModels?: { id: string }[] }> }).providers[FACTORY_ROLE_PROVIDERS.supervisor]?.additionalModels?.[0]?.id),
+    ((anchored.agents as { providers: Record<string, { models?: { id: string }[] }> }).providers[FACTORY_ROLE_PROVIDERS.supervisor]?.models?.[0]?.id),
     "gpt-5.5",
     "the global factory-supervisor maps the machine supervisor lane",
   );
 
-  // Project A's matrix (the spec's seam-2 table): saving it must NOT move the
-  // daemon-global entries — A's overrides live in A's own lanes.json alone.
+  // Saving Project A's lanes reconciles <home>/config.json from Project A's effective lanes
+  // so Paseo Desktop's New Chat picker immediately shows Project A's Supervisor model.
   const aSave = await handlers.lanesSet({ lane: "supervisor", value: "claude/claude-opus-4-6:high", projectRoot: projectA });
   assert.ok(aSave.ok, aSave.ok ? "" : aSave.error);
   const aBatch = await handlers.lanesSetBatch({ lanes: { lead: "codex/gpt-5.4:high", worker: "opencode/glm-5.1" }, projectRoot: projectA });
   assert.ok(aBatch.ok, aBatch.ok ? "" : aBatch.error);
   const afterA = readConfig(home);
-  const providers = (afterA.agents as { providers: Record<string, { extends?: string; additionalModels?: { id: string }[] }> }).providers;
-  assert.equal(providers[FACTORY_ROLE_PROVIDERS.supervisor]?.additionalModels?.[0]?.id, "gpt-5.5", "factory-supervisor still maps the machine lane after A's saves");
-  assert.equal(providers[FACTORY_ROLE_PROVIDERS.lead]?.extends, "omp", "factory-lead still maps the machine lead family");
-  assert.equal(providers[FACTORY_ROLE_PROVIDERS.agent]?.additionalModels?.[0]?.id, "zai/glm-5.3", "factory-peer still maps the machine worker lane");
-  const profile = ((afterA.daemon) as { agentProfiles: { id: string; model?: string }[] }).agentProfiles.find((row) => row.id === "factory-supervisor");
-  assert.equal(profile?.model, "gpt-5.5", "the Supervisor (Factory) picker row keeps the machine model");
-  assert.equal(JSON.stringify(afterA), JSON.stringify(anchored), "a project-scoped save leaves config.json byte-identical — no churn, no reload");
+  const providers = (afterA.agents as { providers: Record<string, { extends?: string; models?: { id: string }[] }> }).providers;
+  assert.equal(providers[FACTORY_ROLE_PROVIDERS.supervisor]?.models?.[0]?.id, "claude-opus-4-6", "factory-supervisor updates to Project A's saved supervisor model");
+  assert.equal(providers[FACTORY_ROLE_PROVIDERS.lead]?.extends, "codex", "factory-lead updates to Project A's saved lead family");
+  assert.equal(providers[FACTORY_ROLE_PROVIDERS.agent]?.models?.[0]?.id, "glm-5.1", "factory-peer updates to Project A's saved worker model");
+  const profile = ((afterA.daemon) as { agentProfiles: { id: string; model?: string; thinkingOptionId?: string }[] }).agentProfiles.find((row) => row.id === "factory-supervisor");
+  assert.equal(profile?.model, "claude-opus-4-6", "the Supervisor (Factory) picker row immediately displays Project A's model");
+  assert.equal(profile?.thinkingOptionId, "high");
 
-  // The machine save stays the one door that moves the globals.
+  // Resetting Project A back to the machine default reconciles <home>/config.json back to the machine table.
+  const resetA = await handlers.lanesReset({ projectRoot: projectA });
+  assert.ok(resetA.ok, resetA.ok ? "" : resetA.error);
+  const afterReset = readConfig(home);
+  assert.equal(
+    ((afterReset.agents as { providers: Record<string, { models?: { id: string }[] }> }).providers[FACTORY_ROLE_PROVIDERS.supervisor]?.models?.[0]?.id),
+    "gpt-5.5",
+    "lanesReset restores the machine supervisor model in <home>/config.json",
+  );
+
+  // An unscoped save also reconciles <home>/config.json from the machine table.
   const machineSave = await handlers.lanesSet({ lane: "supervisor", value: "opencode/glm-5.1" });
   assert.ok(machineSave.ok, machineSave.ok ? "" : machineSave.error);
   const afterMachine = readConfig(home);
   assert.equal(
-    ((afterMachine.agents as { providers: Record<string, { additionalModels?: { id: string }[] }> }).providers[FACTORY_ROLE_PROVIDERS.supervisor]?.additionalModels?.[0]?.id),
+    ((afterMachine.agents as { providers: Record<string, { models?: { id: string }[] }> }).providers[FACTORY_ROLE_PROVIDERS.supervisor]?.models?.[0]?.id),
     "glm-5.1",
-    "an UNSCOPED save still reconciles the globals from the machine table it just wrote",
+    "an UNSCOPED save reconciles the globals from the machine table it just wrote",
   );
 });

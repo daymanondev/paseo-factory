@@ -261,7 +261,7 @@ export function resolveEffectiveProviderFamily(
 ): string {
   const rawProvider = typeof provider === "string" ? provider.trim() : "";
   if (inferRoleFromProviderId(rawProvider) === undefined) return providerFamilyOf(rawProvider);
-  const loaded = loadLanes(stateDir, projectSlug);
+  const loaded = loadLanes(stateDir, projectSlug !== "" ? projectSlug : undefined);
   const lane = loaded.ok ? loaded.lanes[laneNameForRole(role)] : undefined;
   const parsed = lane !== undefined ? parseLane(lane) : undefined;
   return parsed === undefined ? providerFamilyOf(rawProvider) : providerFamilyOf(parsed.provider);
@@ -392,6 +392,10 @@ export function applyProviderExecutionFence<T extends AgentCreateRequest["config
       ? existingProviderOpts.disallowedTools.filter((x): x is string => typeof x === "string")
       : [];
     if (role === "supervisor" || role === "lead") {
+      const validClaudeModes = new Set(["plan", "default", "acceptEdits", "auto", "bypassPermissions"]);
+      if (typeof nextConfig.modeId === "string" && !validClaudeModes.has(nextConfig.modeId)) {
+        delete nextConfig.modeId;
+      }
       const merged = Array.from(new Set([...existingDisallowed, ...CLAUDE_SEAT_WRITE_TOOLS, ...FORBIDDEN_PASEO_TOOLS]));
       nextConfig.providerOptions = {
         ...existingProviderOpts,
@@ -429,6 +433,8 @@ export function applyProviderExecutionFence<T extends AgentCreateRequest["config
     if (role === "supervisor" || role === "lead") {
       nextConfig.modeId = "write";
     }
+  } else if (providerFamily === "pi" || providerFamily === "antigravity") {
+    delete nextConfig.modeId;
   }
 
   return nextConfig as T;

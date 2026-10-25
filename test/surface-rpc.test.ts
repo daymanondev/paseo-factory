@@ -5302,19 +5302,19 @@ test("Seam 1.3b: projectPickFolder handles native dialog cancellation and auto-b
 // ---- Seam 2 (v0.0.38, ADR 0026 §1/§2/§5): cross-Project isolation + the Lane profile lifecycle ----
 
 /** Reads the daemon-global `<home>/config.json` the role providers reconcile into. */
-function readHomeConfig(home: string): { providers: Record<string, { extends?: string; additionalModels?: { id: string }[] }>; profiles: { id: string; model?: string }[] } {
+function readHomeConfig(home: string): { providers: Record<string, { extends?: string; models?: { id: string }[] }>; profiles: { id: string; model?: string }[] } {
   const parsed = JSON.parse(readFileSync(join(home, "config.json"), "utf8")) as {
-    agents?: { providers?: Record<string, { extends?: string; additionalModels?: { id: string }[] }> };
+    agents?: { providers?: Record<string, { extends?: string; models?: { id: string }[] }> };
     daemon?: { agentProfiles?: { id: string; model?: string }[] };
   };
   return { providers: parsed.agents?.providers ?? {}, profiles: parsed.daemon?.agentProfiles ?? [] };
 }
 
-test("Seam 2: saving lanes, batching, or applying a profile on Project A never rewrites the daemon-global factory-* providers — and the Lane profile lifecycle updates FactoryView (v0.0.38, ADR 0026 §1/§2/§5)", async (t) => {
+test("Seam 2: saving lanes, batching, or applying a profile on Project A reconciles the New Chat picker to the active scope while preserving per-Project lanes.json isolation (ADR 0026 §1/§2/§5)", async (t) => {
   const projectA = makeProject(t, "iso-a");
   const projectB = makeProject(t, "iso-b");
   const { home, stateDir, handlers } = makeSurface(t, []);
-  // The machine table every daemon-global provider must stay anchored to.
+  // The machine table baseline.
   writeLanes(stateDir, {
     supervisor: "pi/zai/glm-5.3",
     lead: "pi/zai/glm-5.3",
@@ -5326,16 +5326,16 @@ test("Seam 2: saving lanes, batching, or applying a profile on Project A never r
   mkdirSync(home, { recursive: true });
   writeFileSync(join(home, "config.json"), `${JSON.stringify({ agents: { providers: {} }, daemon: { agentProfiles: [] } }, null, 2)}\n`);
 
-  // 1. A single project-scoped save on Project A (the spec's matrix supervisor lane).
+  // 1. A single project-scoped save on Project A updates the New Chat picker to A's supervisor model.
   const supSave = await handlers.lanesSet({ lane: "supervisor", value: "claude/claude-opus-4-6:high", projectRoot: projectA.root });
   assert.ok(supSave.ok, supSave.ok ? "" : supSave.error);
   const afterSave = readHomeConfig(home);
   assert.equal(
-    afterSave.providers[FACTORY_ROLE_PROVIDERS.supervisor]?.additionalModels?.[0]?.id,
-    "zai/glm-5.3",
-    "factory-supervisor still maps the MACHINE supervisor lane — Project A's override never lands in <paseoHome>/config.json",
+    afterSave.providers[FACTORY_ROLE_PROVIDERS.supervisor]?.models?.[0]?.id,
+    "claude-opus-4-6",
+    "factory-supervisor reflects the active scope's supervisor model in <paseoHome>/config.json",
   );
-  assert.equal(afterSave.profiles.find((row) => row.id === FACTORY_ROLE_PROVIDERS.supervisor)?.model, "zai/glm-5.3");
+  assert.equal(afterSave.profiles.find((row) => row.id === FACTORY_ROLE_PROVIDERS.supervisor)?.model, "claude-opus-4-6");
 
   // 2. The atomic batch save lands A's remaining matrix lanes in ONE write.
   const batch = await handlers.lanesSetBatch({ lanes: { lead: "codex/gpt-5.4:high", worker: "opencode/glm-5.1" }, projectRoot: projectA.root });
@@ -5344,8 +5344,8 @@ test("Seam 2: saving lanes, batching, or applying a profile on Project A never r
   assert.equal(batch.lanes.lead, "codex/gpt-5.4:high");
   assert.equal(batch.lanes.worker, "opencode/glm-5.1");
   const afterBatch = readHomeConfig(home);
-  assert.equal(afterBatch.providers[FACTORY_ROLE_PROVIDERS.lead]?.additionalModels?.[0]?.id, "zai/glm-5.3", "factory-lead stays on the machine lane");
-  assert.equal(afterBatch.providers[FACTORY_ROLE_PROVIDERS.agent]?.additionalModels?.[0]?.id, "zai/glm-5.3", "factory-peer stays on the machine worker lane");
+  assert.equal(afterBatch.providers[FACTORY_ROLE_PROVIDERS.lead]?.models?.[0]?.id, "gpt-5.4", "factory-lead updates to Project A's lead model");
+  assert.equal(afterBatch.providers[FACTORY_ROLE_PROVIDERS.agent]?.models?.[0]?.id, "glm-5.1", "factory-peer updates to Project A's worker model");
 
   // 3. Save the current 6-lane table as a profile (the + Save as Profile… act).
   const savedProfile = await handlers.profilesSave({ name: "A Setup", projectRoot: projectA.root });
@@ -5386,9 +5386,9 @@ test("Seam 2: saving lanes, batching, or applying a profile on Project A never r
   assert.equal(snapB.view.lanes.lead, "codex/gpt-5.4:high");
   const afterApply = readHomeConfig(home);
   assert.equal(
-    afterApply.providers[FACTORY_ROLE_PROVIDERS.supervisor]?.additionalModels?.[0]?.id,
-    "zai/glm-5.3",
-    "applying a profile on Project B never rewrites the daemon-global providers either",
+    afterApply.providers[FACTORY_ROLE_PROVIDERS.supervisor]?.models?.[0]?.id,
+    "claude-opus-4-6",
+    "applying a profile on Project B reconciles the New Chat picker to the applied profile's supervisor model",
   );
 
   // 5. Tweak one lane on B — only B's override changes, the profile shows modified.
@@ -5402,12 +5402,18 @@ test("Seam 2: saving lanes, batching, or applying a profile on Project A never r
   assert.ok(lanesAAfterTweak.ok, lanesAAfterTweak.ok ? "" : lanesAAfterTweak.reason);
   assert.equal(lanesAAfterTweak.lanes.worker, "opencode/glm-5.1", "Project A's override is untouched by B's tweak");
 
-  // 6. Reset B to the machine default — override gone, scope entry cleared.
+  // 6. Reset B to the machine default — override gone, scope entry cleared, and picker reconciled to B's effective (machine) table.
   const reset = await handlers.lanesReset({ projectRoot: projectB.root });
   assert.ok(reset.ok, reset.ok ? "" : reset.error);
   assert.equal(reset.removed, true);
   assert.equal(reset.lanes.worker, "pi/zai/glm-5.3", "B inherits the machine table again");
   assert.equal(existsSync(join(stateDir, "projects", projectB.slug, "lanes.json")), false);
+  const afterResetB = readHomeConfig(home);
+  assert.equal(
+    afterResetB.providers[FACTORY_ROLE_PROVIDERS.supervisor]?.models?.[0]?.id,
+    "zai/glm-5.3",
+    "resetting B reconciles <paseoHome>/config.json to B's inherited machine lanes while A's lanes.json stays intact",
+  );
   const snapBReset = await handlers.snapshot({ projectRoot: projectB.root });
   assert.ok(snapBReset.ok, snapBReset.ok ? "" : snapBReset.error);
   assert.equal(snapBReset.view.hasProjectLaneOverride, false);

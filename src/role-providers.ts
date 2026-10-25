@@ -71,6 +71,23 @@ const SUPERVISOR_PROFILE_MODE_ID: Record<string, string> = {
 
 // ---- the config shapes (structural slices of `<paseoHome>/config.json`) ---------------------
 
+/** One thinking option on a replacement/additional model entry in `agents.providers`. */
+export interface PaseoProviderThinkingOption {
+  id: string;
+  label: string;
+  description?: string;
+  isDefault?: boolean;
+}
+
+/** One model entry in `agents.providers.<id>.models` or `additionalModels`. */
+export interface PaseoProviderModelEntry {
+  id: string;
+  label: string;
+  description?: string;
+  isDefault?: boolean;
+  thinkingOptions?: PaseoProviderThinkingOption[];
+}
+
 /** One `agents.providers` entry — user fields beyond the slice survive untouched. */
 export interface PaseoProviderEntry {
   extends?: string;
@@ -80,7 +97,8 @@ export interface PaseoProviderEntry {
   env?: Record<string, string>;
   enabled?: boolean;
   paseoTools?: { enabled?: boolean; disabledTools?: string[] };
-  additionalModels?: { id: string; label: string; description?: string; isDefault?: boolean }[];
+  models?: PaseoProviderModelEntry[];
+  additionalModels?: PaseoProviderModelEntry[];
   [key: string]: unknown;
 }
 
@@ -121,33 +139,79 @@ function isSweptProfile(profile: PaseoAgentProfile): boolean {
 }
 
 /**
- * Maps one lane's provider family to the base Paseo provider it extends:
- * `claude-code` → the `claude` builtin, `agy` → the user's custom
- * `agents.providers.agy` (`extends`/`command`/`env`) when present, else the
- * `antigravity` builtin, and every other family (`opencode`, `codex`, `pi`,
- * `copilot`, `omp`, or a user-installed provider id) verbatim.
+ * Paseo 0.13.0's `ProviderOverridesSchema` (`@getpaseo/protocol`) validates
+ * `agents.providers.<id>.extends` against `BUILTIN_PROVIDER_IDS` (`claude`,
+ * `codex`, `copilot`, `opencode`, `pi`, `omp`) plus `acp` (which requires a
+ * non-empty `command` array). Plugin-contributed providers such as
+ * `antigravity` are not in `validExtendsValues`, so extending them directly in
+ * `<paseoHome>/config.json` fails schema validation and aborts daemon config
+ * reload. When a lane uses a non-builtin provider without a custom `acp`
+ * command, the picker entry extends a valid built-in provider (`pi` or the
+ * first non-disabled built-in) with a replacement `models` catalog, while
+ * `server.before("agent.create")` rewrites `{ provider, model }` onto the real
+ * runtime provider (ADR 0026 §1).
+ */
+const PASEO_BUILTIN_EXTENDS = new Set(["claude", "codex", "copilot", "opencode", "pi", "omp"]);
+const FALLBACK_BUILTIN_ORDER = ["pi", "opencode", "claude", "codex", "copilot", "omp"] as const;
+
+function fallbackBuiltinExtends(providers: Record<string, PaseoProviderEntry>): string {
+  for (const candidate of FALLBACK_BUILTIN_ORDER) {
+    const entry = providers[candidate];
+    if (!isRecord(entry) || entry.enabled !== false) return candidate;
+  }
+  return "pi";
+}
+
+/**
+ * Maps one lane's provider family to the base Paseo provider it extends in
+ * `<paseoHome>/config.json`:
+ * - `claude-code` → the `claude` builtin;
+ * - `agy` (or any custom entry in `agents.providers`) → inherits the user's
+ *   custom `extends`/`command`/`env` when its `extends` is in
+ *   `PASEO_BUILTIN_EXTENDS` or is `acp` with a non-empty `command` array;
+ * - any built-in provider in `PASEO_BUILTIN_EXTENDS` → verbatim;
+ * - any plugin-contributed provider not in `PASEO_BUILTIN_EXTENDS` (such as
+ *   `antigravity`, or `agy` without a custom `acp` command) → falls back to
+ *   `fallbackBuiltinExtends(providers)` (`"pi"`) so `ProviderOverridesSchema`
+ *   always accepts `<paseoHome>/config.json`.
  */
 function baseProviderFor(
   laneProvider: string,
   providers: Record<string, PaseoProviderEntry>,
 ): { extends: string; command?: string[]; inheritedEnv?: Record<string, string> } {
   if (laneProvider === "claude-code") return { extends: "claude" };
-  if (laneProvider === "agy") {
-    const custom = providers.agy;
-    if (isRecord(custom)) {
-      const entry = custom as PaseoProviderEntry;
-      const out: { extends: string; command?: string[]; inheritedEnv?: Record<string, string> } = {
-        extends: typeof entry.extends === "string" && entry.extends !== "" ? entry.extends : "antigravity",
+  const custom = providers[laneProvider];
+  if (isRecord(custom)) {
+    const entry = custom as PaseoProviderEntry;
+    const rawExtends = typeof entry.extends === "string" && entry.extends !== "" ? entry.extends : "";
+    const hasValidCommand =
+      Array.isArray(entry.command) && entry.command.length > 0 && entry.command.every((part) => typeof part === "string");
+    const inheritedEnv = isRecord(entry.env) ? (entry.env as Record<string, string>) : undefined;
+    if (rawExtends === "acp" && hasValidCommand) {
+      return {
+        extends: "acp",
+        command: entry.command as string[],
+        ...(inheritedEnv === undefined ? {} : { inheritedEnv }),
       };
-      if (Array.isArray(entry.command) && entry.command.every((part) => typeof part === "string")) {
-        out.command = entry.command as string[];
-      }
-      if (isRecord(entry.env)) out.inheritedEnv = entry.env as Record<string, string>;
-      return out;
     }
-    return { extends: "antigravity" };
+    if (PASEO_BUILTIN_EXTENDS.has(rawExtends)) {
+      return {
+        extends: rawExtends,
+        ...(hasValidCommand ? { command: entry.command as string[] } : {}),
+        ...(inheritedEnv === undefined ? {} : { inheritedEnv }),
+      };
+    }
+    if (!PASEO_BUILTIN_EXTENDS.has(laneProvider)) {
+      return {
+        extends: fallbackBuiltinExtends(providers),
+        ...(inheritedEnv === undefined ? {} : { inheritedEnv }),
+      };
+    }
   }
-  return { extends: laneProvider };
+  if (PASEO_BUILTIN_EXTENDS.has(laneProvider)) {
+    return { extends: laneProvider };
+  }
+  return { extends: fallbackBuiltinExtends(providers) };
 }
 
 /** One role provider's English description — the picker's hover text. */
@@ -158,17 +222,20 @@ const ROLE_DESCRIPTIONS: Record<FactoryRole, string> = {
 };
 
 /**
- * The pure config transform (spec v0.0.27 §Implementation Decisions 1):
- * sweeps `sw2-*` and unknown `factory-*` provider keys, writes
- * `factory-supervisor` / `factory-lead` / `factory-peer` mapped from the
- * role's lane with `enabled: true`, `paseoTools: { enabled: false }`,
- * `env.PASEO_FACTORY_SEAT`, and the lane's model as the default
- * `additionalModels` entry, sweeps every `sw2-*` / `factory-*` picker
- * profile, and prepends the single `Supervisor (Factory)` profile (model,
- * plan-mode `modeId` when the harness needs one, `thinkingOptionId` when the
- * supervisor lane names a thinking level). A lane that does not parse leaves
- * its provider unwritten (its stale entry is swept, never guessed). Returns
- * the next config plus `changed` — the caller writes only on a real change.
+ * The pure config transform (spec v0.0.27 §Implementation Decisions 1, ADR
+ * 0017 §1, ADR 0026 §1): sweeps `sw2-*` and unknown `factory-*` provider keys,
+ * writes `factory-supervisor` / `factory-lead` / `factory-peer` mapped from
+ * the role's lane with `enabled: true`, `paseoTools: { enabled: false }`,
+ * `env.PASEO_FACTORY_SEAT`, and the lane's model as the sole replacement
+ * `models` entry (including `thinkingOptions` when the lane names a thinking
+ * level, so Paseo Desktop's New Chat composer cannot stay stuck on a cached
+ * base-provider model in `AsyncStorage`), sweeps every `sw2-*` / `factory-*`
+ * picker profile, and prepends the single `Supervisor (Factory)` profile
+ * (model, plan-mode `modeId` when the harness needs one, `thinkingOptionId`
+ * when the supervisor lane names a thinking level). A lane that does not parse
+ * leaves its provider unwritten (its stale entry is swept, never guessed).
+ * Returns the next config plus `changed` — the caller writes only on a real
+ * change.
  */
 export function reconcilePaseoConfigObject(config: PaseoConfigObject, lanes: Lanes): { changed: boolean; config: PaseoConfigObject } {
   const original = config;
@@ -188,6 +255,16 @@ export function reconcilePaseoConfigObject(config: PaseoConfigObject, lanes: Lan
     if (parsed === undefined) continue; // an unparseable lane writes nothing, never a guessed provider
     const base = baseProviderFor(parsed.provider, providers);
     const env: Record<string, string> = { ...(base.inheritedEnv ?? {}), PASEO_FACTORY_SEAT: role };
+    const modelEntry: PaseoProviderModelEntry = {
+      id: parsed.model,
+      label: parsed.model,
+      isDefault: true,
+      ...(parsed.thinking === undefined
+        ? {}
+        : {
+            thinkingOptions: [{ id: parsed.thinking, label: parsed.thinking, isDefault: true }],
+          }),
+    };
     const entry: PaseoProviderEntry = {
       extends: base.extends,
       label: FACTORY_ROLE_LABELS[role],
@@ -196,7 +273,7 @@ export function reconcilePaseoConfigObject(config: PaseoConfigObject, lanes: Lan
       enabled: true,
       paseoTools: { enabled: false },
       env,
-      additionalModels: [{ id: parsed.model, label: parsed.model, isDefault: true }],
+      models: [modelEntry],
     };
     providers[FACTORY_ROLE_PROVIDERS[role]] = entry;
   }
@@ -209,8 +286,13 @@ export function reconcilePaseoConfigObject(config: PaseoConfigObject, lanes: Lan
   const profiles: PaseoAgentProfile[] = [...keptProfiles];
   const supervisorLane = parseLane(lanes.supervisor);
   if (supervisorLane !== undefined) {
-    const base = baseProviderFor(supervisorLane.provider, providers);
-    const modeId = SUPERVISOR_PROFILE_MODE_ID[base.extends];
+    const normalizedSupervisorFamily =
+      supervisorLane.provider === "claude-code"
+        ? "claude"
+        : supervisorLane.provider === "agy"
+          ? "antigravity"
+          : supervisorLane.provider;
+    const modeId = SUPERVISOR_PROFILE_MODE_ID[normalizedSupervisorFamily];
     profiles.unshift({
       id: FACTORY_ROLE_PROVIDERS.supervisor,
       name: FACTORY_ROLE_LABELS.supervisor,
@@ -278,17 +360,52 @@ export function reconcilePaseoRoleProviders(
 }
 
 /**
- * The lane table the role providers reconcile from at plugin boot (ADR 0017
- * §1): the machine `lanes.json` when it exists; otherwise — a machine that
- * never named its lanes — the cleanest effective table across the registered
- * projects' own override files: per lane, the value the majority of projects
- * run, ties broken by the first registration (slug order, deterministic),
- * absent everywhere → the safe default. A broken machine file is the same
- * named refusal `loadLanes` gives (boot logs it and skips the reconcile);
- * a broken project entry is skipped, never trusted.
+ * The lane table the role providers reconcile from (ADR 0017 §1, ADR 0026 §1):
+ * when `preferredProjectSlug` is given, that Project's effective `Lanes` table;
+ * otherwise, when `<stateDir>/lanes.json` exists, the most recently modified
+ * valid scope between `<stateDir>/lanes.json` and any registered Project's
+ * `<projectStateDir>/lanes.json` (so plugin boot reflects the latest Project or
+ * machine lane save); otherwise — a machine that never named its lanes — the
+ * cleanest effective table across the registered projects' own override files:
+ * per lane, the value the majority of projects run, ties broken by the first
+ * registration (slug order, deterministic), absent everywhere → the safe
+ * default. A broken machine file is the same named refusal `loadLanes` gives
+ * (boot logs it and skips the reconcile); a broken project entry is skipped,
+ * never trusted.
  */
-export function effectiveLanesForReconcile(stateDir: string): LanesResult {
-  if (existsSync(lanesPath(stateDir))) return loadLanes(stateDir);
+export function effectiveLanesForReconcile(stateDir: string, preferredProjectSlug?: string): LanesResult {
+  if (preferredProjectSlug !== undefined) {
+    return loadLanes(stateDir, preferredProjectSlug);
+  }
+  const machineFile = lanesPath(stateDir);
+  if (existsSync(machineFile)) {
+    const machineLoaded = loadLanes(stateDir);
+    if (!machineLoaded.ok) return machineLoaded;
+    let newestMtime = 0;
+    try {
+      newestMtime = statSync(machineFile).mtimeMs;
+    } catch {
+      return machineLoaded;
+    }
+    let newestProjectLanes: LanesResult | undefined;
+    for (const registration of listProjectRegistrations(stateDir)) {
+      const projFile = projectLanesPath(stateDir, registration.slug);
+      if (!existsSync(projFile)) continue;
+      try {
+        const mtime = statSync(projFile).mtimeMs;
+        if (mtime > newestMtime) {
+          const candidate = loadLanes(stateDir, registration.slug);
+          if (candidate.ok) {
+            newestMtime = mtime;
+            newestProjectLanes = candidate;
+          }
+        }
+      } catch {
+        // skip unreadable project override
+      }
+    }
+    return newestProjectLanes ?? machineLoaded;
+  }
   const lanes = defaultLanes();
   const tally = new Map<LaneName, { counts: Map<string, number>; first: string }>();
   for (const registration of listProjectRegistrations(stateDir)) {

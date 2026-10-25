@@ -30,7 +30,7 @@ import { createSurfaceHandlers, registerSurfaceRpc } from "./server/surface-rpc.
 import { createLeadMailRuntime } from "./server/lead-mailbox.ts";
 import { injectRoleOnCreate, injectSessionEnv, sanitizeAgentCreateHookResult } from "./server/roles.ts";
 
-const SHELL_VERSION = "0.0.40";
+const SHELL_VERSION = "0.0.41";
 
 const log = (message: string) => console.log(`[${PLUGIN_ID}] ${message}`);
 
