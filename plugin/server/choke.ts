@@ -51,7 +51,8 @@ import {
 import type { ChokeDecision, MemoryFence } from "./core/choke.ts";
 import { listProjectRegistrations } from "./projects.ts";
 import { readCorrelations } from "./correlations.ts";
-import { parseLane } from "./core/lanes.ts";
+import { loadLanes, parseLane } from "./core/lanes.ts";
+import { resolveOrBootstrapProject } from "./core/project.ts";
 import { SEAT_TITLES, inferRoleFromProviderId, resolveEffectiveProviderFamily } from "./roles.ts";
 import type { SeatName } from "./roles.ts";
 import { parseTaskWorktreePath } from "../shared/worktree-shape.mjs";
@@ -218,6 +219,24 @@ function inferReservedSeatFromTitle(title: string | null | undefined): SeatName 
   return undefined;
 }
 
+/**
+ * Resolves the Project a factory seat provider create stands in (v0.0.38,
+ * ADR 0026 §1): the registered root binding first (a registered Project may
+ * not be a Git checkout yet), then `resolveOrBootstrapProject` — a Git
+ * repository resolves as-is; a greenfield folder bootstraps exactly the way
+ * `injectRoleOnCreate`'s own seat path would a moment later. `undefined`
+ * means the cwd names no Project — never a guess.
+ */
+function resolveFactorySeatProject(
+  stateDir: string,
+  cwd: string,
+): { slug: string; root: string } | undefined {
+  const registered = listProjectRegistrations(stateDir).find((reg) => reg.root === cwd);
+  if (registered !== undefined) return { slug: registered.slug, root: registered.root };
+  const resolved = resolveOrBootstrapProject(cwd, { stateDir });
+  return resolved.ok ? { slug: resolved.slug, root: resolved.root } : undefined;
+}
+
 function normalizeBareProviderModel(rawProvider: string, providers?: readonly ProviderCatalogEntry[]): string {
   const trimmed = rawProvider.trim();
   if (trimmed === "" || trimmed.includes("/")) return rawProvider;
@@ -283,6 +302,14 @@ function normalizeBareProviderModel(rawProvider: string, providers?: readonly Pr
  *    `"Lead — ..."`, `"Supervisor"`, `"Lead"`) at a registered
  *    `<project-root>`, attaches `{ seat: "supervisor" | "lead", project: reg.slug }`.
  *    Factory role provider ids are canonical — never prefixed as bare models.
+ * 4. The per-Project seat provider rewrite (v0.0.38, ADR 0026 §1): when
+ *    `config.provider` is `factory-supervisor` / `factory-lead` and
+ *    `config.cwd` resolves to a Project (registered or bootstrappable), the
+ *    request is rewritten onto THAT Project's lane — `config.provider`
+ *    becomes the Project's `<provider>/<model>`, `thinkingOptionId` is set
+ *    from the lane's thinking level when the advertised catalog supports it
+ *    (stripped otherwise), and `{ seat, project: slug }` labels attach — so
+ *    the daemon-global role providers never steer another Project's seat.
  */
 export function normalizeAgentCreateRequest<
   T extends {
@@ -293,7 +320,7 @@ export function normalizeAgentCreateRequest<
   request: T,
   stateDirOrOptions?: string | NormalizeCreateOptions,
   providers?: readonly ProviderCatalogEntry[],
-): T & { labels?: Record<string, string>; config: T["config"] & { labels?: Record<string, string> } };
+): T & { labels?: Record<string, string>; config: T["config"] & { labels?: Record<string, string>; thinkingOptionId?: string } };
 export function normalizeAgentCreateRequest<
   T extends { provider?: string; thinkingOptionId?: string; cwd?: string; title?: string | null; labels?: Record<string, string> },
 >(
@@ -380,16 +407,69 @@ export function normalizeAgentCreateRequest(
     }
   }
 
-  if (!providerChanged && !stripThinkingOptionId && nextLabels === undefined) {
+  // The per-Project provider rewrite (v0.0.38, ADR 0026 §1): a
+  // `factory-supervisor` / `factory-lead` create inside a Project resolves
+  // THAT Project's Lane config and rewrites the session onto the Project's
+  // own `<provider>/<model>` — so starting `Supervisor (Factory)` in Project
+  // B always runs Project B's supervisor lane, never whatever Project A last
+  // saved into the daemon-global role providers. The thinking level is set
+  // from the lane when the advertised catalog supports it (or no catalog
+  // answered — the daemon validates) and stripped otherwise; a stale
+  // `thinkingOptionId` that named the role provider's model never survives
+  // the rewrite. An unresolvable cwd, an unreadable Lane config, or an
+  // unparseable lane keeps the canonical role provider id — never a guess.
+  let seatRewrite:
+    | { provider: string; thinkingOptionId?: string; labels: Record<string, string>; slug: string }
+    | undefined;
+  if (
+    providerInferredSeat !== undefined &&
+    typeof config.cwd === "string" &&
+    config.cwd !== "" &&
+    typeof stateDir === "string" &&
+    stateDir !== ""
+  ) {
+    const project = resolveFactorySeatProject(stateDir, config.cwd);
+    if (project !== undefined) {
+      const projectLanes = loadLanes(stateDir, project.slug);
+      const lane = projectLanes.ok ? projectLanes.lanes[providerInferredSeat] : undefined;
+      const parsed = lane !== undefined ? parseLane(lane) : undefined;
+      const mergedLabels = { ...(topLabels ?? {}), ...(config.labels ?? {}), seat: providerInferredSeat, project: project.slug };
+      if (parsed !== undefined) {
+        const thinkingOptions = findCatalogModelMeta(parsed.provider, parsed.model, providers)?.thinkingOptions;
+        const thinkingSupported =
+          parsed.thinking !== undefined &&
+          (thinkingOptions === undefined ||
+            thinkingOptions === null ||
+            (thinkingOptions.length > 0 && thinkingOptions.some((o) => o.id === parsed.thinking)));
+        seatRewrite = {
+          provider: `${parsed.provider}/${parsed.model}`,
+          ...(thinkingSupported ? { thinkingOptionId: parsed.thinking } : {}),
+          labels: mergedLabels,
+          slug: project.slug,
+        };
+      } else {
+        // Recognition alone still lands: the seat + project labels ride even
+        // when the lane cannot name a provider to rewrite onto.
+        seatRewrite = { provider: rawProvider, labels: mergedLabels, slug: project.slug };
+      }
+    }
+  }
+
+  if (seatRewrite === undefined && !providerChanged && !stripThinkingOptionId && nextLabels === undefined) {
     return requestOrConfig;
   }
 
   const updatedConfig: Record<string, unknown> = {
     ...config,
-    ...(providerChanged ? { provider: normalizedProvider } : {}),
-    ...(nextLabels !== undefined ? { labels: nextLabels } : {}),
+    provider: seatRewrite?.provider ?? (providerChanged ? normalizedProvider : config.provider),
+    ...(seatRewrite?.thinkingOptionId !== undefined ? { thinkingOptionId: seatRewrite.thinkingOptionId } : {}),
+    ...(seatRewrite !== undefined ? { labels: seatRewrite.labels } : nextLabels !== undefined ? { labels: nextLabels } : {}),
   };
-  if (stripThinkingOptionId) {
+  // A seat rewrite owns the thinking field: the request's old
+  // `thinkingOptionId` named the role provider's model, not the Project lane's.
+  if (seatRewrite !== undefined && seatRewrite.thinkingOptionId === undefined) {
+    delete updatedConfig.thinkingOptionId;
+  } else if (stripThinkingOptionId) {
     delete updatedConfig.thinkingOptionId;
   }
 
@@ -397,10 +477,11 @@ export function normalizeAgentCreateRequest(
     return updatedConfig;
   }
 
+  const effectiveLabels = seatRewrite?.labels ?? nextLabels;
   return {
     ...requestOrConfig,
     config: updatedConfig,
-    ...(nextLabels !== undefined ? { labels: nextLabels } : {}),
+    ...(effectiveLabels !== undefined ? { labels: effectiveLabels } : {}),
   };
 }
 

@@ -7,6 +7,7 @@ import { createFactory } from "../plugin/server/core/factory.ts";
 import { CorrelationRegistry } from "../plugin/server/core/correlations.ts";
 import { spoolRootFor, spoolRequestSemanticKey, startSpool } from "../plugin/server/spool.ts";
 import { randomId, spoolRequestSemanticKey as binSemanticKey, submit } from "../plugin/bin/spool-client.mjs";
+import { resolveProject } from "../plugin/bin/project.mjs";
 import { copyFixture, disposeDir, eyeAnswer, gitCommitAll, gitCommitChanges, makeTempDir, repoRoot, startFakeEye, writeEyeConfig, writeLanes } from "./helpers.ts";
 
 /**
@@ -1036,6 +1037,245 @@ test("factory reset CLI: refuses supervisor/lead/agent with seat-cannot-reset an
   assert.equal(resets[0]?.workspace, workspace);
   assert.equal(resets[0]?.keepSeats, true);
   assert.equal(resets[0]?.submitter, "owner");
+});
+
+// ---- the Lane profile store & Project lane reset (v0.0.38, ADR 0026 §2; Seam 3) ----------------
+
+/** Parses the whole stdout as one JSON document — every --json verb prints exactly one. */
+function jsonOf(result: CliResult): any {
+  assert.equal(result.status, 0, result.stderr);
+  return JSON.parse(result.stdout);
+}
+
+test("factory profile + lanes reset: the Owner's whole Lane profile lifecycle over the real CLI (v0.0.38, ADR 0026 §2)", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const home = join(dir, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const env = { PASEO_HOME: home };
+  const repo = join(dir, "repo");
+  mkdirSync(repo, { recursive: true });
+  writeFileSync(join(repo, "README.md"), "x\n");
+  gitCommitAll(repo);
+  const resolved = resolveProject(repo);
+  assert.equal(resolved.ok, true, resolved.ok ? "" : resolved.reason);
+  const slug = resolved.ok ? resolved.slug : "";
+
+  // The store starts empty — zero built-ins, by Owner decision.
+  const empty = jsonOf(await run(ownerCli, ["profile", "list", "--json"], env));
+  assert.deepEqual(empty, { profiles: [] });
+  const emptyText = await run(ownerCli, ["profile", "list"], env);
+  assert.equal(emptyText.status, 0);
+  assert.match(emptyText.stdout, /no lane profiles yet/);
+
+  // Configure the machine table, then save it as a named profile (id from the positional).
+  const machineSet = await run(ownerCli, ["lanes", "set", "worker", "opencode/glm-5.1"], env);
+  assert.equal(machineSet.status, 0, machineSet.stderr);
+  const saved = jsonOf(
+    await run(ownerCli, ["profile", "save", "fast-stack", "--name", "Fast Stack", "--description", "Cheap and quick", "--json"], env),
+  );
+  assert.equal(saved.created, true);
+  assert.equal(saved.profile.id, "fast-stack");
+  assert.equal(saved.profile.name, "Fast Stack");
+  assert.equal(saved.profile.description, "Cheap and quick");
+  assert.equal(saved.profile.lanes.worker, "opencode/glm-5.1");
+  assert.equal(saved.profile.lanes.supervisor, "pi/zai/glm-5.3");
+  assert.equal(typeof saved.profile.updatedAt, "string");
+
+  // list carries it (sorted by name then id); show answers by id AND by exact name.
+  const listed = jsonOf(await run(ownerCli, ["profile", "list", "--json"], env));
+  assert.deepEqual(listed.profiles.map((p: { id: string }) => p.id), ["fast-stack"]);
+  const shownById = jsonOf(await run(ownerCli, ["profile", "show", "fast-stack", "--json"], env));
+  assert.deepEqual(shownById.profile, saved.profile);
+  const shownByName = jsonOf(await run(ownerCli, ["profile", "show", "Fast Stack", "--json"], env));
+  assert.deepEqual(shownByName.profile, saved.profile);
+
+  // save by NAME updates the same profile (the id-or-name law) — id stable, label moves.
+  const updated = jsonOf(await run(ownerCli, ["profile", "save", "Fast Stack", "--name", "Fast Stack v2", "--json"], env));
+  assert.equal(updated.created, false);
+  assert.equal(updated.profile.id, "fast-stack");
+  assert.equal(updated.profile.name, "Fast Stack v2");
+
+  // An id outside the slug law is a named refusal; nothing is written.
+  const badId = await run(ownerCli, ["profile", "save", "Bad Id!"], env);
+  assert.equal(badId.status, 2);
+  assert.match(badId.stderr, /must match \[a-z0-9\]\[a-z0-9-_\]\{0,63\}/);
+
+  // apply --project copies all six lanes into the Project's override file, one atomic write.
+  const applied = jsonOf(await run(ownerCli, ["profile", "apply", "fast-stack", "--project", repo, "--json"], env));
+  assert.equal(applied.scope, slug);
+  assert.equal(applied.path, join(stateDir, "projects", slug, "lanes.json"));
+  assert.equal(applied.lanes.worker, "opencode/glm-5.1");
+  const projectLanes = JSON.parse(readFileSync(join(stateDir, "projects", slug, "lanes.json"), "utf8")) as Record<string, string>;
+  assert.deepEqual(Object.keys(projectLanes).sort(), ["freshEyes", "lead", "retro", "supervisor", "watch", "worker"], "Copy-on-Apply writes all six lanes");
+  const profilesFile = JSON.parse(readFileSync(join(stateDir, "profiles.json"), "utf8")) as { activeProfileByScope?: Record<string, string> };
+  assert.equal(profilesFile.activeProfileByScope?.[slug], "fast-stack", "the scope's active profile pointer is recorded");
+
+  // list --project annotates the scope's active profile.
+  const scoped = jsonOf(await run(ownerCli, ["profile", "list", "--project", repo, "--json"], env));
+  assert.equal(scoped.activeProfileId, "fast-stack");
+
+  // lanes reset --project removes the override and clears the scope pointer.
+  const reset = jsonOf(await run(ownerCli, ["lanes", "reset", "--project", repo, "--json"], env));
+  assert.equal(reset.removed, true);
+  assert.equal(reset.project, slug);
+  assert.equal(reset.lanes.worker, "opencode/glm-5.1", "the machine table stands again");
+  assert.ok(!existsSync(join(stateDir, "projects", slug, "lanes.json")), "the override file is gone");
+  const afterReset = JSON.parse(readFileSync(join(stateDir, "profiles.json"), "utf8")) as { activeProfileByScope?: Record<string, string> };
+  assert.equal(afterReset.activeProfileByScope?.[slug], undefined, "the scope's active profile pointer is cleared");
+  const resetAgain = jsonOf(await run(ownerCli, ["lanes", "reset", "--project", repo, "--json"], env));
+  assert.equal(resetAgain.removed, false, "a second reset is an idempotent no-op");
+
+  // apply --global writes the machine table and points the "global" scope.
+  const globalApply = jsonOf(await run(ownerCli, ["profile", "apply", "fast-stack", "--global", "--json"], env));
+  assert.equal(globalApply.scope, "global");
+  assert.equal(globalApply.path, join(stateDir, "lanes.json"));
+  const afterGlobal = JSON.parse(readFileSync(join(stateDir, "profiles.json"), "utf8")) as { activeProfileByScope?: Record<string, string> };
+  assert.equal(afterGlobal.activeProfileByScope?.global, "fast-stack");
+
+  // A corrupted profile lane is a named refusal at apply time — the validator mirror.
+  const corrupted = {
+    profiles: { "fast-stack": { name: "Fast Stack v2", lanes: { ...saved.profile.lanes, worker: "auto" }, updatedAt: "2026-10-24T00:00:00.000Z" } },
+  };
+  writeFileSync(join(stateDir, "profiles.json"), `${JSON.stringify(corrupted)}\n`);
+  const refusedApply = await run(ownerCli, ["profile", "apply", "fast-stack", "--global"], env);
+  assert.equal(refusedApply.status, 2);
+  assert.match(refusedApply.stderr, /lane worker="auto"/);
+
+  // delete keeps a tombstone and drops every scope pointer naming the profile.
+  writeFileSync(join(stateDir, "profiles.json"), `${JSON.stringify(afterGlobal)}\n`); // restore the valid store
+  const deleted = jsonOf(await run(ownerCli, ["profile", "delete", "fast-stack", "--json"], env));
+  assert.deepEqual(deleted, { deleted: true, id: "fast-stack" });
+  const tombstoned = JSON.parse(readFileSync(join(stateDir, "profiles.json"), "utf8")) as {
+    profiles: Record<string, unknown>;
+    deleted?: Record<string, { deletedAt: string }>;
+    activeProfileByScope?: Record<string, string>;
+  };
+  assert.deepEqual(tombstoned.profiles, {});
+  assert.equal(typeof tombstoned.deleted?.["fast-stack"]?.deletedAt, "string", "the vault merge's deletion record");
+  assert.equal(tombstoned.activeProfileByScope?.global, undefined, "the global pointer naming the deleted profile is dropped");
+  assert.deepEqual(jsonOf(await run(ownerCli, ["profile", "list", "--json"], env)), { profiles: [] }, "a tombstoned profile never lists");
+  const deleteUnknown = await run(ownerCli, ["profile", "delete", "fast-stack"], env);
+  assert.equal(deleteUnknown.status, 2);
+  assert.match(deleteUnknown.stderr, /no lane profile "fast-stack" is saved/);
+
+  // Usage refusals: a subcommand is required, apply names exactly one target, reset needs --project.
+  const noSub = await run(ownerCli, ["profile"], env);
+  assert.equal(noSub.status, 2);
+  assert.match(noSub.stderr, /unknown subcommand/);
+  const bothTargets = await run(ownerCli, ["profile", "apply", "x", "--project", repo, "--global"], env);
+  assert.equal(bothTargets.status, 2);
+  assert.match(bothTargets.stderr, /exactly one target/);
+  const noProject = await run(ownerCli, ["lanes", "reset"], env);
+  assert.equal(noProject.status, 2);
+  assert.match(noProject.stderr, /--project <dir> is required/);
+  const badDir = await run(ownerCli, ["lanes", "reset", "--project", join(dir, "plain")], env);
+  assert.equal(badDir.status, 2);
+  assert.match(badDir.stderr, /does not resolve to a git repository/);
+});
+
+test("the Lane profile store's two implementations cannot drift: plugin/bin/lanes-config.mjs mirrors the core's src/lanes.ts operations (v0.0.38, ADR 0026 §2)", async (t) => {
+  // The spool semantic-key precedent: the CLIs import no src/ code (ADR 0004),
+  // so every profiles.json operation exists twice — pinned here against drift.
+  const core = await import("../plugin/server/core/lanes.ts");
+  for (const name of ["listLaneProfiles", "getLaneProfile", "saveLaneProfile", "deleteLaneProfile", "applyLaneProfile", "saveLanesBatch", "resetProjectLanes"] as const) {
+    assert.equal(typeof (core as Record<string, unknown>)[name], "function", `the core's src/lanes.ts must export ${name} (vendored into plugin/server/core/ by scripts/sync-plugin-core.mjs)`);
+  }
+  const bin = await import("../plugin/bin/lanes-config.mjs");
+
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const coreDir = join(dir, "core");
+  const binDir = join(dir, "bin");
+  mkdirSync(coreDir, { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  /** The parsed profiles.json of one side — order-insensitive comparison. */
+  const fileOf = (stateDir: string): unknown => JSON.parse(readFileSync(join(stateDir, "profiles.json"), "utf8"));
+
+  const lanesA = {
+    supervisor: "claude/claude-opus-4-6:high",
+    lead: "codex/gpt-5.4",
+    worker: "opencode/glm-5.1",
+    watch: "pi/zai/glm-5.3",
+    retro: "pi/zai/glm-5.3",
+    freshEyes: "eye.json",
+  };
+  const lanesB = { ...lanesA, worker: "claude/claude-sonnet-4-6", freshEyes: "claude/claude-haiku-4-5" };
+
+  // Creation: id derives from the name; explicit updatedAt keeps both sides
+  // comparable. The core answers its value directly (throwing on refusal —
+  // FactoryError); the bin answers the CLIs' own { ok, reason } refusal —
+  // the drift compared here is behavior, never error style.
+  const coreSaved = core.saveLaneProfile(coreDir, { name: "Team A", lanes: lanesA, updatedAt: "2026-10-24T10:00:00.000Z" });
+  const binSaved = bin.saveLaneProfile(binDir, { name: "Team A", lanes: lanesA, updatedAt: "2026-10-24T10:00:00.000Z" });
+  assert.ok(binSaved.ok, binSaved.ok ? "" : binSaved.reason);
+  assert.deepEqual(binSaved.profile, coreSaved, "saveLaneProfile agrees on the whole profile record");
+  assert.deepEqual(fileOf(binDir), fileOf(coreDir), "profiles.json carries the same schema on both sides");
+
+  // A second profile with the SAME name sorts by id (list's ordering law).
+  core.saveLaneProfile(coreDir, { id: "team-a-2", name: "Team A", lanes: lanesB, updatedAt: "2026-10-24T11:00:00.000Z" });
+  bin.saveLaneProfile(binDir, { id: "team-a-2", name: "Team A", lanes: lanesB, updatedAt: "2026-10-24T11:00:00.000Z" });
+  const coreList = core.listLaneProfiles(coreDir);
+  const binList = bin.listLaneProfiles(binDir);
+  assert.ok(binList.ok, binList.ok ? "" : binList.reason);
+  assert.deepEqual(binList.profiles.map((p: { id: string }) => p.id), coreList.map((p: { id: string }) => p.id), "listLaneProfiles sorts by name then id identically");
+
+  // Validation: an invalid lane refuses on both sides, writing nothing.
+  assert.throws(() => core.saveLaneProfile(coreDir, { id: "broken", name: "Broken", lanes: { ...lanesA, lead: "auto" } }), /lane lead="auto"/);
+  const binRefused = bin.saveLaneProfile(binDir, { id: "broken", name: "Broken", lanes: { ...lanesA, lead: "auto" } });
+  assert.ok(!binRefused.ok);
+  assert.match(binRefused.reason, /lane lead="auto"/);
+
+  // Copy-on-Apply into a Project scope + the active-profile pointer.
+  const slug = "demo-a1b2c3";
+  const coreApplied = core.applyLaneProfile(coreDir, "team-a", slug);
+  const binApplied = bin.applyLaneProfile(binDir, "team-a", slug);
+  assert.ok(binApplied.ok, binApplied.ok ? "" : binApplied.reason);
+  assert.deepEqual(binApplied.lanes, coreApplied.lanes);
+  assert.equal(binApplied.path, join(binDir, "projects", slug, "lanes.json"));
+  assert.equal(coreApplied.path, join(coreDir, "projects", slug, "lanes.json"));
+  assert.deepEqual(JSON.parse(readFileSync(join(binDir, "projects", slug, "lanes.json"), "utf8")), JSON.parse(readFileSync(join(coreDir, "projects", slug, "lanes.json"), "utf8")), "the Project override file carries the same six lanes");
+  assert.deepEqual(fileOf(binDir), fileOf(coreDir), "the activeProfileByScope pointer matches");
+
+  // Batch save parity: one partial multi-lane update, one file.
+  const coreBatch = core.saveLanesBatch(coreDir, { watch: "copilot/gpt-5.4", retro: "copilot/gpt-5.4" }, slug);
+  const binBatch = bin.saveLanesBatch(binDir, { watch: "copilot/gpt-5.4", retro: "copilot/gpt-5.4" }, slug);
+  assert.ok(binBatch.ok, binBatch.ok ? "" : binBatch.reason);
+  assert.deepEqual(binBatch.lanes, coreBatch.lanes);
+  assert.deepEqual(JSON.parse(readFileSync(join(binDir, "projects", slug, "lanes.json"), "utf8")), JSON.parse(readFileSync(join(coreDir, "projects", slug, "lanes.json"), "utf8")));
+
+  // Reset removes the override, clears the pointer, and returns the machine table.
+  const coreReset = core.resetProjectLanes(coreDir, slug);
+  const binReset = bin.resetProjectLanes(binDir, slug);
+  assert.ok(binReset.ok, binReset.ok ? "" : binReset.reason);
+  assert.equal(binReset.removed, coreReset.removed);
+  assert.deepEqual(binReset.lanes, coreReset.lanes);
+  assert.ok(!existsSync(join(binDir, "projects", slug, "lanes.json")));
+  assert.deepEqual(fileOf(binDir), fileOf(coreDir));
+
+  // Deletion: tombstone + every scope pointer naming the profile goes.
+  assert.equal(core.deleteLaneProfile(coreDir, "team-a", "2026-10-24T12:00:00.000Z"), true);
+  const binDeleted = bin.deleteLaneProfile(binDir, "team-a", "2026-10-24T12:00:00.000Z");
+  assert.ok(binDeleted.ok && binDeleted.deleted === true);
+  assert.deepEqual(fileOf(binDir), fileOf(coreDir), "tombstone shapes match");
+  const goneBin = bin.getLaneProfile(binDir, "team-a");
+  assert.ok(goneBin.ok);
+  assert.deepEqual(goneBin.profile, core.getLaneProfile(coreDir, "team-a"), "a deleted profile answers identically on both sides");
+
+  // A damaged profiles.json refuses the reset BEFORE the override file is
+  // touched — the core throws (FactoryError), the bin answers { ok: false }
+  // naming the file, and neither half-applies the reset
+  // (validate-before-mutate, the loadLanes law).
+  core.applyLaneProfile(coreDir, "team-a-2", slug);
+  bin.applyLaneProfile(binDir, "team-a-2", slug);
+  writeFileSync(join(coreDir, "profiles.json"), "{ broken");
+  writeFileSync(join(binDir, "profiles.json"), "{ broken");
+  assert.throws(() => core.resetProjectLanes(coreDir, slug), /profiles\.json is not valid JSON/);
+  const binResetDamaged = bin.resetProjectLanes(binDir, slug);
+  assert.ok(!binResetDamaged.ok, "the bin refuses a damaged profiles.json instead of silently succeeding");
+  assert.match(binResetDamaged.reason, /profiles\.json is not valid JSON/);
+  assert.equal(existsSync(join(coreDir, "projects", slug, "lanes.json")), true, "the core's refusal leaves the override file in place — never a half-applied reset");
+  assert.equal(existsSync(join(binDir, "projects", slug, "lanes.json")), true, "the bin's refusal leaves the override file in place identically");
 });
 
 

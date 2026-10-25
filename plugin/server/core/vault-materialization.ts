@@ -1,4 +1,6 @@
 import { FactoryError } from "./errors.ts";
+import { mergeLaneProfilesFiles, projectLanesPath, readLaneProfilesFile } from "./lanes.ts";
+import type { LaneProfile, LaneProfilesFile } from "./lanes.ts";
 import { listProjectRegistrations, discoverProjects, resolveProject } from "./project.ts";
 import { vaultStateDir, sharedSecretExists, SHARED_SECRET_FILES, loadVaultConfig } from "./vault-config.ts";
 import type { VaultRuntimeEnv } from "./vault-config.ts";
@@ -408,11 +410,18 @@ export function renderKeystoreProperties(signing: Record<string, unknown> | null
  * Collects local state and config files from `<paseoHome>` into `<paseoHome>/vault-runtime/`
  * before staging into `<paseoHome>/vault`:
  * - `<stateDir>/lanes.json` -> `config/lanes.json`
+ * - `<stateDir>/profiles.json` -> `config/profiles.json` (key-level MERGE with any existing
+ *   runtime copy via `mergeLaneProfilesFiles`, so profiles authored on different machines
+ *   combine rather than overwrite — v0.0.38, ADR 0026 §4)
  * - `<paseoHome>/connector/fleet.json` -> `config/fleet.json`
  * - `<paseoHome>/burn-lab/free-pool.json` -> `config/free-pool.json`
  * - `<stateDir>/eye.json` -> `secrets/shared/eye.json` (when not already present in `vault-runtime`)
  * - For every registered local `Project` with `.store-release/manifest.json`, copies it into
  *   `config/apps/<canonicalAppKey>/store-manifest.json` and updates `vault.manifest.json`.
+ * - For every registered local `Project` with a per-Project `<projectStateDir>/lanes.json`
+ *   override, stages it into `config/apps/<canonicalAppKey>/lanes.json` and updates the
+ *   manifest's routing legs (v0.0.38, ADR 0026 §4) — the canonical key routes the override
+ *   back to the same repository on another machine, whose local slug differs.
  */
 export function collectLocalStateIntoRuntime(paseoHome: string): void {
   const stateDir = vaultStateDir(paseoHome);
@@ -425,6 +434,20 @@ export function collectLocalStateIntoRuntime(paseoHome: string): void {
     if (existsSync(src)) {
       writeRuntimeFile(paseoHome, vaultRel, readFileSync(src));
     }
+  }
+
+  // Lane profiles merge key-level by `updatedAt`/`deletedAt` (v0.0.38, ADR
+  // 0026 §4): the runtime copy may hold profiles another machine authored,
+  // so the fresh local side merges INTO it — the local edit wins ties. A
+  // damaged runtime cache rebuilds from the local side; a damaged LOCAL
+  // profiles.json is a named refusal (the readLaneProfilesFile law).
+  const localProfilesPath = join(stateDir, "profiles.json");
+  if (existsSync(localProfilesPath)) {
+    const local = readLaneProfilesFile(stateDir);
+    const runtimeProfilesPath = join(paseoHome, "vault-runtime", "config", "profiles.json");
+    const existing = readLaneProfilesCacheOrNull(runtimeProfilesPath) ?? { profiles: {} };
+    const merged = mergeLaneProfilesFiles(existing, local, { preferRemote: true });
+    writeRuntimeFile(paseoHome, "config/profiles.json", Buffer.from(`${JSON.stringify(merged, null, 2)}\n`, "utf8"));
   }
 
   const localEye = join(stateDir, "eye.json");
@@ -462,15 +485,27 @@ export function collectLocalStateIntoRuntime(paseoHome: string): void {
     if (facts === null || seenRoots.has(facts.root)) continue;
     seenRoots.add(facts.root);
     const storeManifestPath = join(facts.root, ".store-release", "manifest.json");
-    if (!existsSync(storeManifestPath)) continue;
+    const hasStoreManifest = existsSync(storeManifestPath);
+    // The per-Project lanes.json override rides the same per-app routing as
+    // store manifests (v0.0.38, ADR 0026 §4): keyed by canonical app key so
+    // another machine's DIFFERENT local slug still finds its checkout.
+    const projectLanes = projectLanesPath(stateDir, facts.slug);
+    const hasProjectLanes = existsSync(projectLanes);
+    if (!hasStoreManifest && !hasProjectLanes) continue;
 
     let canonicalAppKey = matchManifestAppKey(manifest, facts);
-    if (canonicalAppKey === null) {
+    if (canonicalAppKey === null && hasStoreManifest) {
       const storeManifestObj = readJsonFile(storeManifestPath);
       canonicalAppKey = jsonStringField(storeManifestObj, "appKey") ?? facts.basename;
     }
+    if (canonicalAppKey === null) canonicalAppKey = facts.basename;
 
-    writeRuntimeFile(paseoHome, `config/apps/${canonicalAppKey}/store-manifest.json`, readFileSync(storeManifestPath));
+    if (hasStoreManifest) {
+      writeRuntimeFile(paseoHome, `config/apps/${canonicalAppKey}/store-manifest.json`, readFileSync(storeManifestPath));
+    }
+    if (hasProjectLanes) {
+      writeRuntimeFile(paseoHome, `config/apps/${canonicalAppKey}/lanes.json`, readFileSync(projectLanes));
+    }
     const priorEntry = manifest[canonicalAppKey] ?? {};
     manifest[canonicalAppKey] = {
       ...priorEntry,
@@ -488,8 +523,45 @@ export function collectLocalStateIntoRuntime(paseoHome: string): void {
 }
 
 /**
+ * Reads a runtime `config/profiles.json` cache LENIENTLY — absent returns an
+ * empty file, damaged returns null (the caller rebuilds it from the local
+ * side). Collect's cache-rebuild path only; hydration applies the strict
+ * `readLaneProfilesFile` law to whatever it writes.
+ */
+function readLaneProfilesCacheOrNull(path: string): LaneProfilesFile | null {
+  if (!existsSync(path)) return { profiles: {} };
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<LaneProfilesFile>;
+    if (parsed.profiles === undefined || parsed.profiles === null || typeof parsed.profiles !== "object" || Array.isArray(parsed.profiles)) {
+      return null;
+    }
+    const file: LaneProfilesFile = { profiles: parsed.profiles as Record<string, Omit<LaneProfile, "id">> };
+    if (parsed.deleted !== undefined && parsed.deleted !== null && typeof parsed.deleted === "object" && !Array.isArray(parsed.deleted)) {
+      file.deleted = parsed.deleted;
+    }
+    if (
+      parsed.activeProfileByScope !== undefined &&
+      parsed.activeProfileByScope !== null &&
+      typeof parsed.activeProfileByScope === "object" &&
+      !Array.isArray(parsed.activeProfileByScope)
+    ) {
+      file.activeProfileByScope = parsed.activeProfileByScope;
+    }
+    return file;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Materializes `config/{lanes,fleet,free-pool}.json` from `<paseoHome>/vault-runtime/`
- * into their local `<paseoHome>` destinations when absent locally (or when `overwriteConfigs === true`).
+ * into their local `<paseoHome>` destinations when absent locally (or when `overwriteConfigs === true`),
+ * plus the two v0.0.38 additions (ADR 0026 §4): `config/profiles.json` merges
+ * key-level into `<stateDir>/profiles.json` (`preferRemote: overwriteConfigs`
+ * — newer `updatedAt`/`deletedAt` wins either way, so profiles authored on
+ * different machines combine), and each `config/apps/<canonicalAppKey>/lanes.json`
+ * materializes into its resolved Project's `<projectStateDir>/lanes.json`
+ * when absent locally (or when `overwriteConfigs === true`).
  */
 export function materializeConfigsFromRuntime(paseoHome: string, overwriteConfigs = false): void {
   const runtimeConfigDir = join(paseoHome, "vault-runtime", "config");
@@ -504,13 +576,44 @@ export function materializeConfigsFromRuntime(paseoHome: string, overwriteConfig
     mkdirSync(dirname(dest), { recursive: true });
     copyFileSync(src, dest);
   }
+
+  // Lane profiles: a key-level merge, never a blind copy — the local file's
+  // own newer edits survive a hydration that carries an older remote copy.
+  const stateDir = vaultStateDir(paseoHome);
+  const runtimeProfiles = join(runtimeConfigDir, "profiles.json");
+  if (existsSync(runtimeProfiles)) {
+    const local = readLaneProfilesFile(stateDir); // a damaged local file is a named refusal, never silently replaced
+    const remote = readLaneProfilesCacheOrNull(runtimeProfiles);
+    if (remote !== null) {
+      const merged = mergeLaneProfilesFiles(local, remote, { preferRemote: overwriteConfigs });
+      mkdirSync(dirname(join(stateDir, "profiles.json")), { recursive: true });
+      writeFileSync(join(stateDir, "profiles.json"), `${JSON.stringify(merged, null, 2)}\n`);
+    }
+  }
+
+  // Per-app lanes overrides: route each staged canonical key back to its
+  // local Project and materialize the override beside its own state tree.
+  if (existsSync(join(runtimeConfigDir, "apps"))) {
+    const manifest = readVaultManifestAt(join(paseoHome, "vault-runtime"));
+    for (const app of resolveVaultApps(paseoHome, manifest)) {
+      if (app.projectSlug === null) continue; // no local checkout behind this key on this machine
+      const src = join(runtimeConfigDir, "apps", app.canonicalAppKey, "lanes.json");
+      if (!existsSync(src)) continue;
+      const dest = projectLanesPath(stateDir, app.projectSlug);
+      if (!overwriteConfigs && existsSync(dest)) continue;
+      mkdirSync(dirname(dest), { recursive: true });
+      copyFileSync(src, dest);
+    }
+  }
 }
 
 /**
  * The stage-C hydration tail both transports share: route `vault.manifest.json`
  * canonical keys to local `Project`s, materialize per-app files into every
- * resolved checkout with hygiene registered, materialize global config files,
- * and write the `<paseoHome>/vault-runtime/env.json` pointer index (`0o600`) —
+ * resolved checkout with hygiene registered, materialize global config files
+ * (Lane profiles merge key-level; per-app lanes overrides land in their
+ * Project's own `<projectStateDir>/lanes.json` — v0.0.38, ADR 0026 §4), and
+ * write the `<paseoHome>/vault-runtime/env.json` pointer index (`0o600`) —
  * the zero-shell-config hand-off `factory-release-lab` reads (ADR 0014 Decision 5).
  */
 export function applyVaultHydration(paseoHome: string, overwriteConfigs = false): void {

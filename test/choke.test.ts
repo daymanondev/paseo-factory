@@ -18,6 +18,7 @@ import {
 import { ensureGitShim, injectClaimCliPath } from "../plugin/server/shell.ts";
 import type { PaseoResponderApi } from "../plugin/server/choke.ts";
 import { isSeatMemoryPathAllowed, judgeFilePath, judgeShellCommand, refuseGitArgv, shellTokens, writableRootsFor } from "../src/choke.ts";
+import { saveLanes } from "../src/lanes.ts";
 import { GIT_ARGV_CASES, SHELL_CASES, shellRoots } from "./choke-cases.ts";
 import { disposeDir, gitCommitAll, makeTempDir, repoRoot } from "./helpers.ts";
 
@@ -858,7 +859,7 @@ test("choke.onPermissionAsked enforces seat-write-fence and seat-paseo-tool-fenc
   assert.equal(sent.length, beforeQuestionCount, "Supervisor interactive question form is not auto-answered by choke");
 });
 
-test("normalizeAgentCreateRequest keeps factory role provider ids canonical and labels provider-recognized seats at a registered <project-root> (v0.0.27, ADR 0017 §2)", (t) => {
+test("normalizeAgentCreateRequest rewrites factory seat providers onto the Project's own lane and labels the seat — factory-peer stays canonical (v0.0.27 ADR 0017 §2; v0.0.38 ADR 0026 §1)", (t) => {
   const dir = makeTempDir("choke-normalize-factory-");
   disposeDir(t, dir);
   const workspace = join(dir, "ai-test");
@@ -871,24 +872,86 @@ test("normalizeAgentCreateRequest keeps factory role provider ids canonical and 
     lead: "lead-1",
   });
 
+  // No Lane config named: the Project's effective lane is the safe default —
+  // the picker alias resolves onto it, never stays a bare role provider id.
   const sup = normalizeAgentCreateRequest(
     { config: { provider: "factory-supervisor", cwd: workspace, title: "Hãy xây dựng một tựa game 3D" } },
     stateDir,
   );
-  assert.equal(sup.config.provider, "factory-supervisor", "the role provider id is never prefixed as a bare model");
+  assert.equal(sup.config.provider, "pi/zai/glm-5.3", "the seat runs the Project's effective supervisor lane (defaults included)");
   assert.deepEqual(sup.config.labels, { seat: "supervisor", project: "ai-test-043c7e" });
   assert.deepEqual(sup.labels, { seat: "supervisor", project: "ai-test-043c7e" });
 
   const lead = normalizeAgentCreateRequest({ config: { provider: "factory-lead", cwd: workspace, title: "any message" } }, stateDir);
-  assert.equal(lead.config.provider, "factory-lead");
+  assert.equal(lead.config.provider, "pi/zai/glm-5.3");
   assert.deepEqual(lead.config.labels, { seat: "lead", project: "ai-test-043c7e" });
 
-  // factory-peer is a working-agent provider, not a seat-fence seat — no labels
-  // attached, and the id stays canonical.
+  // factory-peer is a working-agent provider, not a seat-fence seat — no
+  // rewrite, no labels; the id stays canonical.
   const peer = normalizeAgentCreateRequest({ config: { provider: "factory-peer", cwd: workspace } }, stateDir);
   assert.equal(peer.config.provider, "factory-peer");
   assert.equal(peer.config.labels, undefined);
   assert.equal(peer.labels, undefined);
+
+  // A cwd that names no Project (nothing registered, nothing on disk) keeps
+  // the canonical role provider id — never a guess.
+  const nowhere = normalizeAgentCreateRequest(
+    { config: { provider: "factory-supervisor", cwd: join(dir, "no-such-directory") } },
+    stateDir,
+  );
+  assert.equal(nowhere.config.provider, "factory-supervisor");
+  assert.equal(nowhere.config.labels, undefined);
+});
+
+test("Seam 2: a factory-supervisor create rewrites onto Project A's supervisor lane in Project A and Project B's in Project B — with thinking set from the lane and stale thinkingOptionId stripped (v0.0.38, ADR 0026 §1)", (t) => {
+  const dir = makeTempDir("choke-project-rewrite-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const projectA = join(dir, "project-a");
+  const projectB = join(dir, "project-b");
+  mkdirSync(projectA, { recursive: true });
+  mkdirSync(projectB, { recursive: true });
+  writeProjectRegistration(stateDir, "project-a-111111", { root: projectA });
+  writeProjectRegistration(stateDir, "project-b-222222", { root: projectB });
+  // The spec's Project matrix: A runs claude for its Supervisor, B runs codex.
+  saveLanes(stateDir, { supervisor: "claude/claude-opus-4-6:high", lead: "codex/gpt-5.4:high", worker: "opencode/glm-5.1" }, "project-a-111111");
+  saveLanes(stateDir, { supervisor: "codex/gpt-5.4", lead: "claude/claude-sonnet-4-6", worker: "claude/claude-sonnet-4-6" }, "project-b-222222");
+
+  const inA = normalizeAgentCreateRequest(
+    { config: { provider: "factory-supervisor", cwd: projectA, title: "Ship the game", thinkingOptionId: "medium" } },
+    stateDir,
+  );
+  assert.equal(inA.config.provider, "claude/claude-opus-4-6", "Project A's supervisor lane wins inside Project A");
+  assert.equal(inA.config.thinkingOptionId, "high", "the lane's thinking level rides the rewrite");
+  assert.deepEqual(inA.config.labels, { seat: "supervisor", project: "project-a-111111" });
+
+  const inB = normalizeAgentCreateRequest(
+    { config: { provider: "factory-supervisor", cwd: projectB, title: "Ship the game", thinkingOptionId: "high" } },
+    stateDir,
+  );
+  assert.equal(inB.config.provider, "codex/gpt-5.4", "the SAME picker entry resolves Project B's own supervisor lane inside Project B");
+  assert.equal("thinkingOptionId" in inB.config, false, "the lane names no thinking level — the stale option naming the role provider's model never survives");
+  assert.deepEqual(inB.config.labels, { seat: "supervisor", project: "project-b-222222" });
+
+  const leadInA = normalizeAgentCreateRequest({ config: { provider: "factory-lead", cwd: projectA } }, stateDir);
+  assert.equal(leadInA.config.provider, "codex/gpt-5.4");
+  assert.equal(leadInA.config.thinkingOptionId, "high");
+  assert.deepEqual(leadInA.config.labels, { seat: "lead", project: "project-a-111111" });
+
+  // The advertised catalog sanitizes the lane's thinking: a model whose
+  // thinkingOptions exclude the lane's level lands without it.
+  const catalog = [
+    {
+      provider: "claude",
+      models: [{ id: "claude-opus-4-6", label: "Opus", thinkingOptions: [{ id: "medium", label: "Medium" }] }],
+    },
+  ];
+  const sanitized = normalizeAgentCreateRequest(
+    { config: { provider: "factory-supervisor", cwd: projectA } },
+    { stateDir, providers: catalog },
+  );
+  assert.equal(sanitized.config.provider, "claude/claude-opus-4-6");
+  assert.equal("thinkingOptionId" in sanitized.config, false, "an unadvertised :high is stripped against thinkingOptions");
 });
 
 

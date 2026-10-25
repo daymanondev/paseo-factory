@@ -4,10 +4,14 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createFactory } from "../src/factory.ts";
 import { foldTasks } from "../plugin/server/view.ts";
-import { isEyeLaneUsable, parseEyeAnswer } from "../src/fresh-eyes.ts";
+import { isEyeLaneUsable, parseEyeAnswer, resolveEyeLane, runFreshEyesPass } from "../src/fresh-eyes.ts";
+import { projectLanesPath } from "../src/lanes.ts";
+import { execFileSync } from "node:child_process";
+import { resolveProject } from "../src/project.ts";
 import { EYE_DIFF_MAX_CHARS, EYE_GATE_OUTPUT_MAX_CHARS } from "../src/constants.ts";
 import type { Factory } from "../src/factory.ts";
 import type { GateFinished, FreshEyesWritten } from "../src/events.ts";
+import type { ContractSet } from "../src/events.ts";
 import {
   disposeDir,
   eyeAnswer,
@@ -656,3 +660,121 @@ for (const [label, result] of [
     assert.equal(event.accepted_by, "supervisor");
   });
 }
+
+// ---- the v0.0.38 Project-scoped eye lane (ADR 0026 §1) ----------------------------------------
+
+/** Writes one Project's lanes.json override under `<stateDir>/projects/<slug>/`. */
+function writeProjectLanes(stateDir: string, slug: string, lanes: Record<string, string>): void {
+  mkdirSync(join(stateDir, "projects", slug), { recursive: true });
+  writeFileSync(projectLanesPath(stateDir, slug), `${JSON.stringify(lanes, null, 2)}\n`);
+}
+
+/** A minimal Contract for a direct pass — the workspace is the only field the scope resolver reads. */
+function contractFor(workspace: string, base: string, task: string): ContractSet {
+  return { seq: 1, ts: "2026-10-24T09:00:00.000Z", event: "contract_set", task, workspace, gate: "true", artifact: "src/format.ts", base };
+}
+
+/** The repo's current HEAD sha. */
+function headOf(repo: string): string {
+  return execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
+}
+
+test("v0.0.38: a Project's freshEyes override wins over the machine table AND the legacy eye.json; the machine fallback order stands", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const stateDir = join(dir, "factory");
+  const { workspace } = makeWorkspaceAtBase(dir);
+  const project = resolveProject(workspace);
+  assert.ok(project.ok, project.ok ? "" : project.reason);
+
+  // Machine: an unrelated lane save (no freshEyes named) plus a legacy eye.json —
+  // the upgrade-retention law keeps the eye answering machine-wide.
+  writeLanes(stateDir, { worker: "claude/opus-4-8" });
+  writeEyeConfig(stateDir, "http://127.0.0.1:1", "legacy-eye-1");
+  writeProjectLanes(stateDir, project.slug, { freshEyes: "claude/claude-sonnet-4-6" });
+
+  const scoped = resolveEyeLane(stateDir, project.slug);
+  assert.ok(scoped.ok, scoped.ok ? "" : scoped.reason);
+  assert.equal(scoped.lane, "claude/claude-sonnet-4-6", "the Project's explicit freshEyes shadows the machine table and the legacy eye.json");
+
+  const machineWide = resolveEyeLane(stateDir);
+  assert.ok(machineWide.ok && machineWide.lane === "eye.json", "no slug keeps the v0.0.13 fallback order exactly");
+  const otherProject = resolveEyeLane(stateDir, "unscoped-proj-xyz789");
+  assert.ok(otherProject.ok && otherProject.lane === "eye.json", "a Project with no override file inherits the machine answer");
+
+  const probed: string[] = [];
+  assert.equal(
+    isEyeLaneUsable(
+      stateDir,
+      (lane) => (probed.push(lane), true),
+      project.slug,
+    ),
+    true,
+  );
+  assert.deepEqual(probed, ["claude/claude-sonnet-4-6"], "the usability probe vouches for the PROJECT's lane, not the machine's");
+
+  // A Project whose override file names an INVALID lane is a named refusal —
+  // never a fallback to the machine table.
+  writeProjectLanes(stateDir, project.slug, { freshEyes: "auto" });
+  const broken = resolveEyeLane(stateDir, project.slug);
+  assert.ok(!broken.ok && /freshEyes/.test(broken.reason), `a broken project override refuses by name, got ${JSON.stringify(broken)}`);
+});
+
+test("v0.0.38: runFreshEyesPass resolves the lane from the Contract workspace's Project — Project A and Project B each run their own eye", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const stateDir = join(dir, "factory");
+
+  // Two real git workspaces — two distinct Project slugs, two distinct lanes.
+  const repoA = join(dir, "ws-a");
+  const repoB = join(dir, "ws-b");
+  const bases = new Map<string, string>();
+  for (const repo of [repoA, repoB]) {
+    mkdirSync(join(repo, "src"), { recursive: true });
+    writeFileSync(join(repo, "src", "format.ts"), "export function pad() {}\n");
+    bases.set(repo, gitCommitAll(repo));
+  }
+  const projectA = resolveProject(repoA);
+  const projectB = resolveProject(repoB);
+  assert.ok(projectA.ok && projectB.ok);
+  assert.notEqual(projectA.slug, projectB.slug, "the two repos resolve to two Projects");
+  writeProjectLanes(stateDir, projectA.slug, { freshEyes: "claude/claude-sonnet-4-6" });
+  writeProjectLanes(stateDir, projectB.slug, { freshEyes: "copilot/gpt-5.4" });
+
+  const fake = fakeCopilotRunner(() => ({ code: 0, stdout: "CLEAR\nNothing to add." }));
+  const pass = (workspace: string, task: string) => {
+    const base = bases.get(workspace)!;
+    return runFreshEyesPass({
+      stateDir,
+      contract: contractFor(workspace, base, task),
+      claimedSha: base,
+      gateOutputPath: undefined,
+      cliRunner: fake.runner,
+      budgetMs: 5_000,
+    });
+  };
+
+  const outcomeA = await pass(repoA, "FE38A");
+  assert.equal(outcomeA.outcome, "clear");
+  assert.equal(outcomeA.model, "claude/claude-sonnet-4-6", "Project A's eye lane ran");
+  assert.equal(fake.calls[0]!.command, "claude");
+
+  const outcomeB = await pass(repoB, "FE38B");
+  assert.equal(outcomeB.outcome, "clear");
+  assert.equal(outcomeB.model, "copilot/gpt-5.4", "Project B's eye lane ran — a different family, same machine table");
+  assert.equal(fake.calls[1]!.command, "copilot");
+
+  // The trailing parameter pins the scope explicitly, workspace or not.
+  const pinned = await runFreshEyesPass(
+    {
+      stateDir,
+      contract: contractFor(repoA, bases.get(repoA)!, "FE38C"),
+      claimedSha: bases.get(repoA)!,
+      gateOutputPath: undefined,
+      cliRunner: fake.runner,
+      budgetMs: 5_000,
+    },
+    projectB.slug,
+  );
+  assert.equal(pinned.model, "copilot/gpt-5.4", "an explicit trailing slug overrides the workspace's own Project");
+});

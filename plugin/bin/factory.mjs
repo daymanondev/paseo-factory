@@ -36,12 +36,24 @@
  * the factory, no reply from the plugin, or an unreadable ledger).
  */
 import { parseArgs } from "node:util";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join, resolve as resolvePath } from "node:path";
 import { readLedgerEvents } from "./ledger-read.mjs";
 import { taskStatusLines } from "./task-status.mjs";
 import { awaitReply, randomId, resolveHome, spoolRootFor, stateDirFor, submit } from "./spool-client.mjs";
-import { LANE_NAMES, loadLanes, resolveRunProvider, saveLanes } from "./lanes-config.mjs";
+import {
+  LANE_NAMES,
+  applyLaneProfile,
+  deleteLaneProfile,
+  findLaneProfile,
+  listLaneProfiles,
+  loadLanes,
+  laneProfilesPath,
+  resolveRunProvider,
+  resetProjectLanes,
+  saveLaneProfile,
+  saveLanes,
+} from "./lanes-config.mjs";
 import { resolveProject } from "./project.mjs";
 
 // The contract stanza's authoring-law block mirrors docs/runbooks/live-run.md
@@ -98,7 +110,12 @@ commands:
              run <task> [<task>…] [--provider <provider[/model]>]
              --provider is optional since v0.0.13: omitted reads the worker
              lane from <stateDir>/lanes.json (default pi/zai/glm-5.3); an
-             explicit --provider overrides the lane (ADR 0009 §3).
+             explicit --provider overrides the lane (ADR 0009 §3). Since
+             v0.0.38 (ADR 0026 §3) the omitted path is Project-scoped: the
+             first task's Contract.workspace (or the current working
+             directory) resolves its Project, whose
+             <stateDir>/projects/<slug>/lanes.json worker override is
+             honored before the machine table.
              The task count is the parallelism ceiling (no --parallel knob);
              arity ≥ 2 requires scoped contracts. The driver creates the
              branch named after the task, submits one spawn request per task
@@ -124,6 +141,43 @@ commands:
                                       file under --project (only the lanes
                                       ever named persist — a refused value
                                       writes nothing, exit 2)
+             lanes reset --project <dir> [--json]
+                                      (v0.0.38, ADR 0026 §2) remove the
+                                      Project's override file so it inherits
+                                      the machine-wide Lane config again, and
+                                      clear its active Lane profile pointer
+
+  profile    The Owner's Lane profile store (v0.0.38, ADR 0026 §2) — named
+             6-lane tables saved in <stateDir>/profiles.json and applied
+             Copy-on-Apply in one act. Zero built-ins: every profile is
+             created here or on the Factory surface. A local read/write —
+             the plugin need not be running.
+             profile list [--project <dir>] [--json]
+                                      every saved profile (sorted by name,
+                                      then id); --project also reports the
+                                      scope's active profile
+             profile show <id> [--json]
+                                      one profile's six lanes (the id or the
+                                      exact name)
+             profile save <id-or-name> [--name <label>] [--description <text>]
+                          [--project <dir>] [--json]
+                                      save the scope's current effective
+                                      6-lane table (--project reads that
+                                      Project's merged table) as a profile —
+                                      a positional matching a saved profile's
+                                      id or name UPDATES it, anything else is
+                                      a new id ([a-z0-9][a-z0-9-_]{0,63},
+                                      derived from --name when omitted)
+             profile apply <id> [--project <dir> | --global] [--json]
+                                      copy all six lanes into the Project's
+                                      override file (--project) or the
+                                      machine table (--global, the default)
+                                      in one atomic write, recording the
+                                      scope's active profile
+             profile delete <id> [--json]
+                                      remove the profile (a tombstone keeps
+                                      the vault merge's deletion record);
+                                      every scope pointer naming it goes
 
   lead       Rotate a Project's Lead seat or dispatch into its Lead mailbox.
              lead rotate --project <dir>   (v0.0.14, ADR 0010 §2) cancel and
@@ -505,23 +559,20 @@ if (command === "accept") {
 }
 
 if (command === "lanes") {
-  const parsed = parseCommandOptions({ project: { type: "string" } });
+  const parsed = parseCommandOptions({ project: { type: "string" }, json: { type: "boolean" } });
   const sub = parsed.positionals[0] ?? "get";
 
   // v0.0.14 (ADR 0010 §5): --project <dir> resolves the directory's canonical
   // Project and targets its override file — get merges it over the machine
-  // table, set writes into it alone.
+  // table, set writes into it alone, reset (v0.0.38) removes it.
   let projectSlug;
   if (typeof parsed.values.project === "string") {
-    const projectDir = resolvePath(parsed.values.project);
-    const project = resolveProject(projectDir);
-    if (!project.ok) {
-      fail(`lanes: --project ${parsed.values.project} does not resolve to a git repository — ${project.reason}`);
-    }
-    projectSlug = project.slug;
+    const resolved = resolveProjectSlug("lanes", parsed.values.project);
+    projectSlug = resolved.slug;
   }
 
   if (sub === "get") {
+    if (parsed.values.json) fail("lanes get: --json is not a get option");
     if (parsed.positionals.length > 2) fail(`lanes get: unexpected positional "${parsed.positionals[2]}"`);
     const lanes = loadLanes(stateDir, projectSlug);
     if (!lanes.ok) fail(`lanes: ${lanes.reason}`);
@@ -536,6 +587,7 @@ if (command === "lanes") {
   }
 
   if (sub === "set") {
+    if (parsed.values.json) fail("lanes set: --json is not a set option");
     const lane = parsed.positionals[1];
     const value = parsed.positionals[2];
     if (parsed.positionals.length !== 3) fail("lanes set: exactly two arguments — factory lanes set <lane> <value> [--project <dir>]");
@@ -546,7 +598,210 @@ if (command === "lanes") {
     process.exit(0);
   }
 
-  fail(`lanes: unknown subcommand "${sub}" — use "lanes [get [<lane>] | set <lane> <value>] [--project <dir>]"`);
+  if (sub === "reset") {
+    // v0.0.38 (ADR 0026 §2): the Reset to Machine Default act — remove the
+    // Project's override file so it inherits the machine-wide table again,
+    // and clear the scope's active Lane profile pointer.
+    if (parsed.positionals.length > 1) fail(`lanes reset: unexpected positional "${parsed.positionals[1]}"`);
+    if (typeof parsed.values.project !== "string" || parsed.values.project.trim() === "") {
+      fail("lanes reset: --project <dir> is required — any directory inside the Project's repository");
+    }
+    const reset = resetProjectLanes(stateDir, projectSlug);
+    if (!reset.ok) fail(`lanes reset: ${reset.reason}`);
+    if (parsed.values.json) {
+      await writeJsonAndExit({ ok: true, project: projectSlug, lanes: reset.lanes, removed: reset.removed });
+    }
+    console.log(
+      reset.removed
+        ? `factory: project ${projectSlug} lanes reset to machine default (${reset.lanes.worker} worker stands)`
+        : `factory: project ${projectSlug} had no lane override — the machine table already stands (${reset.lanes.worker} worker)`,
+    );
+    process.exit(0);
+  }
+
+  fail(`lanes: unknown subcommand "${sub}" — use "lanes [get [<lane>] | set <lane> <value>] [--project <dir>]" or "lanes reset --project <dir>"`);
+}
+
+/**
+ * Resolves a --project <dir> flag to its canonical Project slug — the lanes
+ * and profile commands' one shared door (v0.0.14 / v0.0.38). A directory git
+ * cannot answer for is a named refusal (exit 2), never a guess.
+ */
+function resolveProjectSlug(commandName, projectDir) {
+  const project = resolveProject(resolvePath(projectDir));
+  if (!project.ok) {
+    fail(`${commandName}: --project ${projectDir} does not resolve to a git repository — ${project.reason}`);
+  }
+  return { slug: project.slug, root: project.root };
+}
+
+if (command === "profile") {
+  // v0.0.38 (ADR 0026 §2): the Owner's Lane profile store — a local
+  // read/write of <stateDir>/profiles.json (the plugin need not be running),
+  // the same file the Factory surface's profiles.* RPCs edit. Copy-on-Apply:
+  // applying writes all six lanes into the target scope in one atomic save.
+  const parsed = parseCommandOptions({
+    project: { type: "string" },
+    name: { type: "string" },
+    description: { type: "string" },
+    global: { type: "boolean" },
+    json: { type: "boolean" },
+  });
+  const sub = parsed.positionals[0];
+  const values = parsed.values;
+  const refuseOptions = (verb, allowed) => {
+    for (const key of Object.keys(values)) {
+      if (!allowed.includes(key)) fail(`profile ${verb}: --${key} is not a ${verb} option`);
+    }
+  };
+  /** The profile JSON the CLI emits — description null when never set (the view's shape). */
+  const profileJson = (profile) => ({
+    id: profile.id,
+    name: profile.name,
+    description: typeof profile.description === "string" ? profile.description : null,
+    lanes: profile.lanes,
+    updatedAt: profile.updatedAt,
+  });
+
+  if (sub === "list") {
+    refuseOptions("list", ["project", "json"]);
+    if (parsed.positionals.length > 1) fail(`profile list: unexpected positional "${parsed.positionals[1]}"`);
+    const listed = listLaneProfiles(stateDir);
+    if (!listed.ok) fail(`profile list: ${listed.reason}`);
+    let scopeActive;
+    if (typeof values.project === "string") {
+      const resolved = resolveProjectSlug("profile", values.project);
+      // The scope's active pointer, as profiles.json records it — null when
+      // no profile was ever applied to this scope (or its file was reset).
+      const raw = listRawScopes(stateDir);
+      if (!raw.ok) fail(`profile list: ${raw.reason}`);
+      scopeActive = raw.scopes[resolved.slug] ?? null;
+    }
+    if (values.json) {
+      await writeJsonAndExit({
+        profiles: listed.profiles.map(profileJson),
+        ...(scopeActive === undefined ? {} : { scope: "project", activeProfileId: scopeActive }),
+      });
+    }
+    if (listed.profiles.length === 0) {
+      console.log("factory: no lane profiles yet — save one with `factory profile save <id-or-name>`");
+      process.exit(0);
+    }
+    for (const profile of listed.profiles) {
+      const active = scopeActive === profile.id ? " (active)" : "";
+      console.log(`${profile.id}  ${profile.name}${active}  ${profile.updatedAt}`);
+    }
+    process.exit(0);
+  }
+
+  if (sub === "show") {
+    refuseOptions("show", ["json"]);
+    const target = parsed.positionals[1];
+    if (target === undefined) fail("profile show: a profile id (or exact name) is required");
+    if (parsed.positionals.length > 2) fail(`profile show: unexpected positional "${parsed.positionals[2]}"`);
+    const found = findLaneProfile(stateDir, target);
+    if (!found.ok) fail(`profile show: ${found.reason}`);
+    if (found.profile === undefined) fail(`profile show: no lane profile "${target}" is saved`);
+    if (values.json) await writeJsonAndExit({ profile: profileJson(found.profile) });
+    console.log(`factory: ${found.profile.id} — ${found.profile.name}${typeof found.profile.description === "string" ? ` (${found.profile.description})` : ""}`);
+    for (const name of LANE_NAMES) console.log(`${name}=${found.profile.lanes[name]}`);
+    process.exit(0);
+  }
+
+  if (sub === "save") {
+    refuseOptions("save", ["project", "name", "description", "json"]);
+    const target = parsed.positionals[1];
+    if (target === undefined) fail("profile save: an id-or-name is required (factory profile save <id-or-name> [--name <label>])");
+    if (parsed.positionals.length > 2) fail(`profile save: unexpected positional "${parsed.positionals[2]}"`);
+    let projectSlug;
+    if (typeof values.project === "string") {
+      const resolved = resolveProjectSlug("profile", values.project);
+      projectSlug = resolved.slug;
+    }
+    // The positional resolves against the store first: a saved id or exact
+    // name UPDATES that profile; anything else is a new id (validated by the
+    // store's own slug law). --name carries the label (defaulting to the
+    // positional on a fresh create).
+    const existing = findLaneProfile(stateDir, target);
+    if (!existing.ok) fail(`profile save: ${existing.reason}`);
+    const updating = existing.profile;
+    const id = updating !== undefined ? updating.id : target;
+    const name = typeof values.name === "string" && values.name.trim() !== "" ? values.name.trim() : updating !== undefined ? updating.name : id;
+    // The saved table is the scope's current effective 6 lanes.
+    const lanes = loadLanes(stateDir, projectSlug);
+    if (!lanes.ok) fail(`profile save: ${lanes.reason}`);
+    const saved = saveLaneProfile(stateDir, {
+      id,
+      name,
+      ...(typeof values.description === "string" && values.description.trim() !== "" ? { description: values.description.trim() } : updating !== undefined && typeof updating.description === "string" ? { description: updating.description } : {}),
+      lanes: lanes.lanes,
+    });
+    if (!saved.ok) fail(`profile save: ${saved.reason}`);
+    if (values.json) await writeJsonAndExit({ profile: profileJson(saved.profile), created: saved.created });
+    console.log(`factory: profile ${saved.profile.id} (${saved.profile.name}) ${saved.created ? "saved" : "updated"} — 6 lanes → ${laneProfilesPath(stateDir)}`);
+    process.exit(0);
+  }
+
+  if (sub === "apply") {
+    refuseOptions("apply", ["project", "global", "json"]);
+    const target = parsed.positionals[1];
+    if (target === undefined) fail("profile apply: a profile id (or exact name) is required");
+    if (parsed.positionals.length > 2) fail(`profile apply: unexpected positional "${parsed.positionals[2]}"`);
+    const hasProject = typeof values.project === "string" && values.project.trim() !== "";
+    if (!hasProject && !values.global && values.project !== undefined) fail("profile apply: --project needs a directory");
+    if (hasProject && values.global) fail("profile apply: name exactly one target — --project <dir> or --global");
+    const found = findLaneProfile(stateDir, target);
+    if (!found.ok) fail(`profile apply: ${found.reason}`);
+    if (found.profile === undefined) fail(`profile apply: no lane profile "${target}" is saved`);
+    let projectSlug;
+    let scopeRoot;
+    if (hasProject) {
+      const resolved = resolveProjectSlug("profile", values.project);
+      projectSlug = resolved.slug;
+      scopeRoot = resolved.root;
+    }
+    const applied = applyLaneProfile(stateDir, found.profile.id, projectSlug);
+    if (!applied.ok) fail(`profile apply: ${applied.reason}`);
+    if (values.json) await writeJsonAndExit({ profile: profileJson(applied.profile), lanes: applied.lanes, path: applied.path, scope: projectSlug === undefined ? "global" : projectSlug });
+    console.log(
+      `factory: profile ${applied.profile.id} applied to ${projectSlug === undefined ? "the machine-wide Lane config" : `project ${projectSlug} (${scopeRoot})`} — ${applied.path}`,
+    );
+    process.exit(0);
+  }
+
+  if (sub === "delete") {
+    refuseOptions("delete", ["json"]);
+    const target = parsed.positionals[1];
+    if (target === undefined) fail("profile delete: a profile id (or exact name) is required");
+    if (parsed.positionals.length > 2) fail(`profile delete: unexpected positional "${parsed.positionals[2]}"`);
+    const found = findLaneProfile(stateDir, target);
+    if (!found.ok) fail(`profile delete: ${found.reason}`);
+    if (found.profile === undefined) fail(`profile delete: no lane profile "${target}" is saved`);
+    const deleted = deleteLaneProfile(stateDir, found.profile.id);
+    if (!deleted.ok) fail(`profile delete: ${deleted.reason}`);
+    if (values.json) await writeJsonAndExit({ deleted: deleted.deleted, id: found.profile.id });
+    console.log(`factory: profile ${found.profile.id} (${found.profile.name}) deleted — a tombstone keeps the vault merge's record`);
+    process.exit(0);
+  }
+
+  fail(`profile: unknown subcommand "${sub ?? "(none)"}" — use "profile list | show <id> | save <id-or-name> | apply <id> | delete <id>"`);
+}
+
+/** The raw activeProfileByScope map as profiles.json records it (list's --project annotation). */
+function listRawScopes(stateDir) {
+  let raw;
+  try {
+    raw = readFileSync(laneProfilesPath(stateDir), "utf8");
+  } catch {
+    return { ok: true, scopes: {} }; // no profiles.json yet — no scope was ever pointed
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { ok: false, reason: `${laneProfilesPath(stateDir)} is not valid JSON` };
+  }
+  return { ok: true, scopes: typeof parsed.activeProfileByScope === "object" && parsed.activeProfileByScope !== null ? parsed.activeProfileByScope : {} };
 }
 
 if (command === "lead") {
@@ -739,9 +994,27 @@ if (command === "run") {
   }
   // v0.0.13 precedence (ADR 0009 §3): explicit --provider wins; omitted
   // resolves through lanes.worker (default pi/zai/glm-5.3) — the resolver's
-  // own refusal names a broken lanes.json, never a silent default.
+  // own refusal names a broken lanes.json, never a silent default. Since
+  // v0.0.38 (ADR 0026 §3) the omitted path is Project-scoped: the FIRST
+  // task's Contract.workspace (or the current working directory, when no
+  // contract names one) resolves to its Project slug, and that Project's
+  // <projectStateDir>/lanes.json worker override is honored — a directory
+  // git cannot answer for falls back to the machine table, never a guess.
   const provider = typeof parsed.values.provider === "string" && parsed.values.provider.trim() !== "" ? parsed.values.provider.trim() : undefined;
-  const resolved = resolveRunProvider(stateDir, provider);
+  let runProjectSlug;
+  if (provider === undefined) {
+    const { readDriverLedger, contractFromLedger } = await import("./driver.mjs");
+    let anchor;
+    try {
+      const events = readDriverLedger(stateDir);
+      anchor = contractFromLedger(events, tasks[0])?.workspace;
+    } catch {
+      anchor = undefined; // the driver's own ledger read names the failure
+    }
+    const project = resolveProject(anchor ?? process.cwd());
+    if (project.ok) runProjectSlug = project.slug;
+  }
+  const resolved = resolveRunProvider(stateDir, provider, runProjectSlug);
   if (!resolved.ok) fail(`run: ${resolved.reason}`);
   const seen = new Set();
   for (const task of tasks) {

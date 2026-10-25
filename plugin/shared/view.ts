@@ -26,6 +26,32 @@ export const LanesSchema = z.object({
 });
 export type Lanes = z.infer<typeof LanesSchema>;
 
+/** A partial lane table — the batch save's payload (`factory.lanes.setBatch`). */
+export const LanesUpdateSchema = z.object({
+  supervisor: z.string().optional(),
+  lead: z.string().optional(),
+  worker: z.string().optional(),
+  watch: z.string().optional(),
+  retro: z.string().optional(),
+  freshEyes: z.string().optional(),
+});
+export type LanesUpdate = z.infer<typeof LanesUpdateSchema>;
+
+/**
+ * One Owner-authored `Lane profile` as the Lane Profiles bar reads it
+ * (v0.0.38, ADR 0026 §2) — a named 6-lane preset persisted in
+ * `<stateDir>/profiles.json`, always whole (Copy-on-Apply), never a live
+ * pointer into a Project's `lanes.json`.
+ */
+export const LaneProfileViewSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  description: z.string().nullable(),
+  lanes: LanesSchema,
+  updatedAt: z.string(),
+});
+export type LaneProfileView = z.infer<typeof LaneProfileViewSchema>;
+
 /** The five header tiles — counts the fold derives, the header just lights. */
 export const KpisSchema = z.object({
   needsHuman: z.number().int(),
@@ -301,6 +327,15 @@ export const FactoryViewSchema = z.object({
   stateDir: z.string(),
   generatedAt: z.string(),
   lanes: LanesSchema,
+  /**
+   * The machine-only Lane table (v0.0.38, ADR 0026 §3) — what
+   * `Reset to Machine Default` re-inherits and the client's reset gate plans
+   * live-seat transitions against (`planLiveSeatTransitions(view.lanes,
+   * view.machineLanes, …)`). Additive field on a v3 view: an older client
+   * ignores the extra JSON key, so the version stays (the vault field's own
+   * precedent). Equals `lanes` on the unscoped machine view.
+   */
+  machineLanes: LanesSchema,
   kpis: KpisSchema,
   tasks: z.array(TaskViewSchema),
   agents: z.array(AgentViewSchema),
@@ -330,6 +365,23 @@ export const FactoryViewSchema = z.object({
    * field's own precedent).
    */
   vault: VaultStatusViewSchema,
+  /**
+   * The Owner-authored `Lane profile` library (v0.0.38, ADR 0026 §2/§5) —
+   * every profile in `<stateDir>/profiles.json`, name-then-id order. Additive
+   * fields on a v3 view: an older client ignores the extra JSON keys, so the
+   * version stays (the companions/vault field's own precedent).
+   */
+  profiles: z.array(LaneProfileViewSchema),
+  /**
+   * The scope's active `Lane profile` — the recorded `activeProfileByScope`
+   * entry when the profile still lives, else a profile whose 6 lanes match
+   * `lanes` — null when neither names one.
+   */
+  activeProfileId: z.string().nullable(),
+  /** True when the recorded active profile's lanes differ from `lanes` — the "Modified from <Profile>" state. */
+  activeProfileModified: z.boolean(),
+  /** True when the scoped Project's own `<projectStateDir>/lanes.json` names at least one lane (v0.0.38, ADR 0026 §2). */
+  hasProjectLaneOverride: z.boolean(),
 });
 export type FactoryView = z.infer<typeof FactoryViewSchema>;
 

@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { repoRoot } from "./helpers.ts";
+import { planLiveSeatTransitions, providerFamilyOf } from "../plugin/client/kit/live-seats.ts";
 import {
   formatPluginCardProgressPill,
   formatToolbarProgressPill,
@@ -30,7 +31,7 @@ import {
   summarizeAttemptTrail,
 } from "../plugin/client/factory/kanban.ts";
 import type { KanbanColumnId } from "../plugin/client/factory/kanban.ts";
-import type { CompanionPluginView, FactoryView, TaskView } from "../plugin/shared/view.ts";
+import type { AgentView, CompanionPluginView, FactoryView, TaskView } from "../plugin/shared/view.ts";
 
 const read = (rel: string): string => readFileSync(join(repoRoot, rel), "utf8");
 
@@ -967,3 +968,159 @@ test("v0.0.35 Responsive Kanban & 3-tier Card hierarchy (ADR 0025): resolveKanba
 
 
 
+
+// ---- Lane Profiles bar & Live-Seat Transition Warning (v0.0.38 Seam 4, ADR 0026 §2/§3) ----
+
+test("v0.0.38 Seam 4 (ADR 0026 §3): planLiveSeatTransitions returns [] with no live seats, [] when only worker/watch/retro/freshEyes change, \"in-place\" within one provider family, and \"retire\" across families", () => {
+  const baseLanes = {
+    supervisor: "claude/claude-sonnet-4-6",
+    lead: "opencode/glm-5.1",
+    worker: "pi/zai/glm-5.3",
+    watch: "pi/zai/glm-5.3",
+    retro: "pi/zai/glm-5.3",
+    freshEyes: "eye.json",
+  };
+  const supervisorAgent = { id: "agent-supervisor-1", title: null, status: "running", provider: "claude", model: null, thinking: null, seat: "supervisor", task: null, seqEnd: null, requiresAttention: null, cwd: null } as unknown as AgentView;
+  const leadAgent = { id: "agent-lead-1", title: null, status: "running", provider: "opencode", model: null, thinking: null, seat: "lead", task: null, seqEnd: null, requiresAttention: null, cwd: null } as unknown as AgentView;
+
+  // (a) No live seats: nothing to warn about, whatever the lanes do.
+  assert.deepEqual(
+    planLiveSeatTransitions(baseLanes, { ...baseLanes, supervisor: "codex/gpt-5.4" }, { supervisor: null, lead: null }),
+    [],
+  );
+
+  // (b) Only worker/watch/retro/freshEyes change — the standing seats are untouched.
+  assert.deepEqual(
+    planLiveSeatTransitions(baseLanes, { ...baseLanes, worker: "claude/claude-opus-4-6", watch: "copilot/gpt-5.4", retro: "copilot/gpt-5.4", freshEyes: "claude/claude-haiku-4-5" }, { supervisor: supervisorAgent, lead: leadAgent }),
+    [],
+    "a live seat whose lane value never changes is unaffected (User Story 17)",
+  );
+
+  // (c) Live Supervisor changes within the same provider family → in-place.
+  const inPlace = planLiveSeatTransitions(baseLanes, { ...baseLanes, supervisor: "claude/claude-opus-4-6:high" }, { supervisor: supervisorAgent, lead: leadAgent });
+  assert.deepEqual(inPlace, [
+    {
+      seat: "supervisor",
+      agentId: "agent-supervisor-1",
+      fromLane: "claude/claude-sonnet-4-6",
+      toLane: "claude/claude-opus-4-6:high",
+      fromProviderFamily: "claude",
+      toProviderFamily: "claude",
+      mode: "in-place",
+    },
+  ]);
+
+  // (d) Live Supervisor AND Lead both cross provider families → retire (the Lead keeps its lane here, only the Supervisor moves).
+  const retired = planLiveSeatTransitions(baseLanes, { ...baseLanes, supervisor: "codex/gpt-5.4:high", lead: "claude/claude-sonnet-4-6" }, { supervisor: supervisorAgent, lead: leadAgent });
+  assert.deepEqual(retired, [
+    {
+      seat: "supervisor",
+      agentId: "agent-supervisor-1",
+      fromLane: "claude/claude-sonnet-4-6",
+      toLane: "codex/gpt-5.4:high",
+      fromProviderFamily: "claude",
+      toProviderFamily: "codex",
+      mode: "retire",
+    },
+    {
+      seat: "lead",
+      agentId: "agent-lead-1",
+      fromLane: "opencode/glm-5.1",
+      toLane: "claude/claude-sonnet-4-6",
+      fromProviderFamily: "opencode",
+      toProviderFamily: "claude",
+      mode: "retire",
+    },
+  ]);
+
+  // The provider family is the segment before the first "/" — a model id with its own slash (pi/zai/glm-5.3) still names the family "pi".
+  assert.equal(providerFamilyOf("pi/zai/glm-5.3"), "pi");
+  assert.equal(providerFamilyOf("claude/claude-opus-4-6:high"), "claude");
+});
+
+test("v0.0.38 Seam 4 (ADR 0026 §2): SeatsPane renders the Lane Profiles bar above the five Lane Cards — chips, + Save as Profile…, Update \"<Profile>\", + Save as New Profile…, two-step Delete, and Reset to Machine Default", () => {
+  const seats = read("plugin/client/factory/seats.tsx");
+  assert.match(seats, /function LaneProfilesBar\(/, "the bar is its own component");
+  assert.match(seats, /<LaneProfilesBar/, "SeatsPane mounts the LaneProfilesBar above the Lane Cards grid");
+  assert.match(seats, /view\.profiles\.map\(\(profile\) =>/, "one chip per saved profile");
+  assert.match(seats, /profile\.id === view\.activeProfileId/, "the active scope's profile chip is lit");
+  assert.match(seats, /label="\+ Save as Profile…"/, "the base save action");
+  assert.match(seats, /Update "\$\{activeProfile\.name\}"/, "the modified-scope Update action names the active profile");
+  assert.match(seats, /view\.activeProfileModified && activeProfile !== null/, "Update and Save-as-New appear only when the scope drifted from its active profile");
+  assert.match(seats, /label="\+ Save as New Profile…"/, "the modified-scope save-as-new action");
+  assert.match(seats, /label="Confirm Delete"/, "the chip delete's second step");
+  assert.match(seats, /label="Delete"/, "the chip delete's first step");
+  assert.match(seats, /label="Cancel"/, "the chip delete's Cancel");
+  assert.match(seats, /view\.hasProjectLaneOverride \?/, "Reset to Machine Default renders only for an overridden Project");
+  assert.match(seats, /label="Reset to Machine Default"/, "the reset action's verbatim label");
+  assert.match(seats, /actions\.deleteProfile\(profile\.id\)/, "Confirm Delete dispatches deleteProfile");
+  assert.match(seats, /setTimeout\(\(\) => setDeletingProfileId\(null\), 5000\)/, "the two-step confirm auto-rearms after 5s — the header Reset/Delete pattern");
+  assert.ok(!seats.includes("for (const lane of card.lanes) actions.setLane(lane, value)"), "the old per-lane save loop is gone, not left beside the batch path");
+});
+
+test("v0.0.38 Seam 4 (ADR 0026 §5): the Watch & Retro card saves through exactly ONE setLanesBatch RPC — single-lane cards keep setLane", () => {
+  const seats = read("plugin/client/factory/seats.tsx");
+  assert.match(
+    seats,
+    /if \(card\.lanes\.length === 1\) actions\.setLane\(card\.lanes\[0\]!, value\);\s*else actions\.setLanesBatch\(card\.lanes, value\);/,
+    "one commit path: a single-lane card rides setLane, a multi-lane card (Watch & Retro) rides ONE actions.setLanesBatch(card.lanes, value)",
+  );
+  assert.match(seats, /setLanesBatch\(lanes: LaneName\[\], value: string\): void;/, "SeatsActions declares the batch action");
+
+  const shell = read("plugin/client/factory/shell.tsx");
+  assert.match(shell, /const update: Partial<Record<LaneName, string>> = {};/, "the shell folds the card's lanes into one batch update object");
+  assert.match(shell, /lanesSetBatchCall\(\{ lanes: update/, "one factory.lanes.setBatch RPC per card save");
+});
+
+test("v0.0.38 Seam 4 (ADR 0026 §3): the Confirm & Apply / Cancel modal appears only when live-seat transitions exist and dispatches the parked RPC on confirm", () => {
+  const seats = read("plugin/client/factory/seats.tsx");
+  assert.match(seats, /const transitions = planLiveSeatTransitions\(view\.lanes, nextLanes, \{ supervisor: view\.supervisor, lead: view\.lead \}\);/, "the spec's exact planning call (Implementation Decision 4)");
+  assert.match(seats, /if \(view\.project === null\) \{\s*run\(\);\s*return;\s*\}/, "the machine-wide scope never gates — straight through");
+  assert.match(seats, /if \(transitions\.length === 0\) \{\s*run\(\);\s*return;\s*\}/, "zero transitions execute the RPC immediately with no modal (User Story 17)");
+  assert.match(seats, /setPending\(\{ transitions, run \}\)/, "any transition parks the act behind the modal");
+  assert.match(seats, /function LiveSeatConfirmModal\(/, "the modal is its own component");
+  assert.match(seats, /open=\{pending !== null\}/, "the modal opens exactly while an act is parked");
+  assert.match(seats, /label="Confirm & Apply"/, "the spec's verbatim confirm button");
+  assert.match(seats, /Update model in-place \(keeps current session\)/, "the same-family impact copy");
+  assert.match(seats, /Retire\/Rotate live seat \(provider family changed — current session will be archived and recreated on next turn\)/, "the cross-family impact copy");
+  assert.match(seats, /transition\.mode === "in-place"/, "the row's copy follows the transition's mode");
+  assert.match(seats, /onConfirm=\{\(\) => \{\s*const run = pending\?\.run;\s*setPending\(null\);\s*if \(run !== undefined\) run\(\);\s*\}\}/, "Confirm & Apply dispatches the parked RPC");
+  assert.match(seats, /onCancel=\{\(\) => setPending\(null\)\}/, "Cancel drops the parked act");
+  // Reset rides the SAME exact gate (Implementation Decision 4): the machine
+  // table rides the view (`machineLanes`), so the reset plans its live-seat
+  // transitions like every other act — an override that leaves supervisor/lead
+  // untouched runs immediately with no modal (User Story 17).
+  assert.match(
+    seats,
+    /requestLaneChange\(view\.machineLanes, actions\.resetLanes\)/,
+    "reset gates on the exact machine-table transitions, never a conservative any-live-seat guess",
+  );
+});
+
+test("v0.0.38 Seam 4 (ADR 0026 §2/§5): FactoryShell owns the five new lane/profile RPCs — one useRpc per contract, dispatched through act()", () => {
+  const shell = read("plugin/client/factory/shell.tsx");
+  assert.match(shell, /lanesSetBatch,/, "the setBatch contract import");
+  assert.match(shell, /lanesReset,/, "the reset contract import");
+  assert.match(shell, /profilesSave,/, "the profiles.save contract import");
+  assert.match(shell, /profilesApply,/, "the profiles.apply contract import");
+  assert.match(shell, /profilesDelete,/, "the profiles.delete contract import");
+  assert.match(shell, /useRpc\(lanesSetBatch\)/);
+  assert.match(shell, /useRpc\(lanesReset\)/);
+  assert.match(shell, /useRpc\(profilesSave\)/);
+  assert.match(shell, /useRpc\(profilesApply\)/);
+  assert.match(shell, /useRpc\(profilesDelete\)/);
+  assert.match(shell, /profilesApplyCall\(\{ profileId/, "apply rides the profileId input field");
+  assert.match(shell, /profilesDeleteCall\(\{ profileId \}\)/, "delete rides the profileId input field");
+  assert.match(shell, /lanesResetCall\(\{ projectRoot \}\)/, "reset rides the required projectRoot input field");
+  assert.match(shell, /setLanesBatch: \(lanes: LaneName\[\], value\) =>/, "the batch action is wired into SeatsPane");
+  assert.match(shell, /saveProfile: \(name, description\) =>/, "the save action is wired into SeatsPane");
+  assert.match(shell, /updateProfile: \(profileId, name\) =>/, "the update action is wired into SeatsPane");
+  assert.match(shell, /applyProfile: \(profileId\) =>/, "the apply action is wired into SeatsPane");
+  assert.match(shell, /deleteProfile: \(profileId\) =>/, "the delete action is wired into SeatsPane");
+  assert.match(shell, /resetLanes: \(\) =>/, "the reset action is wired into SeatsPane");
+  assert.ok(!seats_includes_useRpc(), "SeatsPane stays a pure render — no useRpc inside (the panes' law)");
+});
+
+function seats_includes_useRpc(): boolean {
+  return read("plugin/client/factory/seats.tsx").includes("useRpc");
+}

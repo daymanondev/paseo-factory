@@ -4,7 +4,8 @@ import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createFactory } from "../plugin/server/core/factory.ts";
-import { buildRetroDigest, buildRetroPrompt, parseRetroProposals, retroDay, retroFilePath } from "../src/retro.ts";
+import { buildRetroDigest, buildRetroPrompt, parseRetroProposals, retroDay, retroFilePath, retroLaneAvailable } from "../src/retro.ts";
+import { resolveProject } from "../src/project.ts";
 import { handleSpoolRequest, parseSpoolRequest, startSpool } from "../plugin/server/spool.ts";
 import type { Factory } from "../plugin/server/core/factory.ts";
 import type { RetroWritten } from "../src/events.ts";
@@ -634,4 +635,77 @@ test("v0.0.13: the retro runner seam records the lane's command — claude -p, t
   assert.equal(fake.calls[0]!.command, "claude");
   assert.deepEqual(fake.calls[0]!.args, ["-p", "--model", "opus-4-8", "--tools", ""], "tools off by construction");
   assert.match(fake.calls[0]!.stdin, /retro corpus/);
+});
+
+// ---- the v0.0.38 Project-scoped retro lane (ADR 0026 §1) --------------------------------------
+
+/** Writes one Project's lanes.json override under `<stateDir>/projects/<slug>/`. */
+function writeProjectLanes(stateDir: string, slug: string, lanes: Record<string, string>): void {
+  mkdirSync(join(stateDir, "projects", slug), { recursive: true });
+  writeFileSync(join(stateDir, "projects", slug, "lanes.json"), `${JSON.stringify(lanes, null, 2)}\n`);
+}
+
+test("v0.0.38: retroLaneAvailable and Factory.retro honor the Project's retro lane — slug, root, and the factory's own scope", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace } = makeWorkspaceAtBase(dir);
+  const project = resolveProject(workspace);
+  assert.ok(project.ok, project.ok ? "" : project.reason);
+
+  // Every sub-case gets its own factory: one successful retro per ledger day.
+  const seed = (stateDir: string): void => {
+    pinRetroLane(stateDir); // machine retro lane: copilot/gpt-5.4
+    writeProjectLanes(stateDir, project.slug, { retro: "claude/claude-sonnet-4-6" });
+  };
+  // An honest empty-proposals answer — HAPPY_JSON cites seqs an empty ledger
+  // does not hold; an empty list needs no evidence and parses clean.
+  const runner = () => fakeCopilotRunner(() => ({ code: 0, stdout: '{"proposals":[]}' }));
+
+  // Availability: the scoped probe receives the PROJECT's lane.
+  const stateDirA = join(dir, "factory-a");
+  seed(stateDirA);
+  const probed: string[] = [];
+  const scoped = retroLaneAvailable(stateDirA, (lane) => (probed.push(lane), true), project.slug);
+  assert.ok(scoped.ok, scoped.ok ? "" : scoped.reason);
+  assert.equal(scoped.lane, "claude/claude-sonnet-4-6");
+  const unscoped = retroLaneAvailable(stateDirA, (lane) => (probed.push(lane), true));
+  assert.ok(unscoped.ok && unscoped.lane === "copilot/gpt-5.4", "no slug keeps the machine table");
+  assert.deepEqual(probed, ["claude/claude-sonnet-4-6", "copilot/gpt-5.4"]);
+
+  // Factory.retro(): a root factory with no argument keeps the machine lane.
+  const fakeA = runner();
+  const factoryA = createFactory({ stateDir: stateDirA, retroCopilotProbe: () => true, retroCopilotRunner: fakeA.runner });
+  const machineRetro = await factoryA.retro();
+  assert.equal(machineRetro.outcome, "written");
+  assert.equal(machineRetro.model, "copilot/gpt-5.4", "no scope: the machine lane, exactly as before");
+
+  // Factory.retro(slug): the Project's lane answers.
+  const stateDirB = join(dir, "factory-b");
+  seed(stateDirB);
+  const fakeB = runner();
+  const factoryB = createFactory({ stateDir: stateDirB, retroCopilotProbe: () => true, retroCopilotRunner: fakeB.runner });
+  const bySlug = await factoryB.retro(project.slug);
+  assert.equal(bySlug.outcome, "written");
+  assert.equal(bySlug.model, "claude/claude-sonnet-4-6", "an explicit slug threads the Project lane into the pass");
+  assert.equal(fakeB.calls[0]!.command, "claude");
+  assert.deepEqual(fakeB.calls[0]!.args, ["-p", "--model", "claude-sonnet-4-6", "--tools", ""], "the tool-less claude argv, per the Project lane");
+
+  // Factory.retro(projectRoot): a root argument resolves to its slug.
+  const stateDirC = join(dir, "factory-c");
+  seed(stateDirC);
+  const fakeC = runner();
+  const factoryC = createFactory({ stateDir: stateDirC, retroCopilotProbe: () => true, retroCopilotRunner: fakeC.runner });
+  const byRoot = await factoryC.retro(workspace);
+  assert.equal(byRoot.model, "claude/claude-sonnet-4-6", "a project ROOT argument resolves to its slug");
+  // An unresolvable root is a named refusal, never a guessed scope.
+  await assert.rejects(factoryC.retro(join(dir, "no-such-root")), codeIs("unknown-project")); // codeIs: the vendored core throws its own FactoryError class
+
+  // A project-scoped factory defaults the retro lane to its own Project.
+  const stateDirD = join(dir, "factory-d");
+  seed(stateDirD);
+  const fakeD = runner();
+  const factoryD = createFactory({ stateDir: stateDirD, projectSlug: project.slug, retroCopilotProbe: () => true, retroCopilotRunner: fakeD.runner });
+  const ownScope = await factoryD.retro();
+  assert.equal(ownScope.outcome, "written");
+  assert.equal(ownScope.model, "claude/claude-sonnet-4-6", "a project-scoped factory needs no argument to honor its Project lane");
 });

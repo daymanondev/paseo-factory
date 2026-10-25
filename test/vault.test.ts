@@ -3,7 +3,7 @@ import type { TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { gzipSync } from "node:zlib";
 import {
@@ -45,6 +45,9 @@ import type {
   VaultStatusView,
 } from "../src/index.ts";
 import { disposeDir, factoryErrorCode, gitCommitAll, makeTempDir } from "./helpers.ts";
+import { applyVaultHydration, collectLocalStateIntoRuntime } from "../src/vault-materialization.ts";
+import { defaultLanes, projectLanesPath, saveLaneProfile } from "../src/lanes.ts";
+import type { LaneProfilesFile } from "../src/lanes.ts";
 
 /**
  * The Private vault engine, stage A (ticket 01): dual-mode secret envelopes,
@@ -1864,4 +1867,88 @@ for (const transport of ["direct", "pull"] as const) test(`Vault ${transport} du
   assert.equal(result.historyImports?.[0]?.status, "applied");
   assert.equal(factory.contractFor("REMOTE")?.workspace, workspace);
   assert.equal(readFileSync(join(stateDir, "lanes.json"), "utf8"), "{}\n");
+});
+
+// ---- the v0.0.38 Lane profile + per-app lanes.json vault sync (ADR 0026 §4) -------------------
+
+test("v0.0.38 (ADR 0026 §4): Lane profiles and per-Project lanes.json round-trip through the vault runtime", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const paseoHome = join(dir, "paseo-home");
+  const stateDir = join(paseoHome, "plugin-state", "paseo-factory");
+
+  // One registered local Project — a real git checkout, its slug resolved.
+  const repo = join(dir, "app-one");
+  mkdirSync(repo, { recursive: true });
+  writeFileSync(join(repo, "file.txt"), "x\n");
+  gitCommitAll(repo);
+  const project = resolveProject(repo);
+  assert.ok(project.ok, project.ok ? "" : project.reason);
+  writeProjectRegistration(stateDir, project.slug, { root: repo, name: "app-one" });
+
+  // Local Lane profiles: two, distinct ids and edit times.
+  const lanesAlpha = { ...defaultLanes(), worker: "claude/claude-sonnet-4-6" };
+  const lanesBeta = { ...defaultLanes(), worker: "copilot/gpt-5.4" };
+  const lanesGamma = { ...defaultLanes(), worker: "pi/zai/glm-5.3" };
+  saveLaneProfile(stateDir, { id: "alpha", name: "Alpha", lanes: lanesAlpha, updatedAt: "2026-10-24T10:00:00.000Z" });
+  saveLaneProfile(stateDir, { id: "beta", name: "Beta", lanes: lanesBeta, updatedAt: "2026-10-24T11:00:00.000Z" });
+  // A profile another machine authored earlier — already sitting in the
+  // runtime cache; the collect must MERGE, not overwrite it away.
+  mkdirSync(join(paseoHome, "vault-runtime", "config"), { recursive: true });
+  writeFileSync(
+    join(paseoHome, "vault-runtime", "config", "profiles.json"),
+    `${JSON.stringify({ profiles: { gamma: { name: "Gamma", lanes: lanesGamma, updatedAt: "2026-10-23T09:00:00.000Z" } } }, null, 2)}\n`,
+  );
+  // The Project's own lanes.json override.
+  mkdirSync(join(stateDir, "projects", project.slug), { recursive: true });
+  writeFileSync(projectLanesPath(stateDir, project.slug), `${JSON.stringify({ watch: "claude/claude-opus-4-6:high" }, null, 2)}\n`);
+
+  collectLocalStateIntoRuntime(paseoHome);
+
+  // config/profiles.json: merged per profileId — union of both machines.
+  const stagedProfiles = JSON.parse(readFileSync(join(paseoHome, "vault-runtime", "config", "profiles.json"), "utf8")) as LaneProfilesFile;
+  assert.deepEqual(Object.keys(stagedProfiles.profiles).sort(), ["alpha", "beta", "gamma"], "profiles merge key-level, never overwrite");
+  assert.equal(stagedProfiles.profiles.alpha!.lanes.worker, "claude/claude-sonnet-4-6");
+
+  // config/apps/<canonicalAppKey>/lanes.json staged, manifest legs updated.
+  const manifest = JSON.parse(readFileSync(join(paseoHome, "vault-runtime", "vault.manifest.json"), "utf8")) as Record<string, { repoBasename?: string }>;
+  const key = Object.keys(manifest).find((candidate) => manifest[candidate]!.repoBasename === "app-one");
+  assert.ok(key, `the manifest carries a routing entry for app-one, got ${JSON.stringify(manifest)}`);
+  const stagedAppLanes = JSON.parse(readFileSync(join(paseoHome, "vault-runtime", "config", "apps", key!, "lanes.json"), "utf8"));
+  assert.deepEqual(stagedAppLanes, { watch: "claude/claude-opus-4-6:high" }, "the per-Project override staged under its canonical app key");
+
+  // Hydration restores both on a machine that lost them: profiles merge back
+  // (key-level), the Project's override materializes when absent locally.
+  rmSync(join(stateDir, "profiles.json"));
+  rmSync(projectLanesPath(stateDir, project.slug));
+  applyVaultHydration(paseoHome);
+  const hydratedProfiles = JSON.parse(readFileSync(join(stateDir, "profiles.json"), "utf8")) as LaneProfilesFile;
+  assert.deepEqual(Object.keys(hydratedProfiles.profiles).sort(), ["alpha", "beta", "gamma"], "the merged profile set materialized");
+  assert.deepEqual(
+    JSON.parse(readFileSync(projectLanesPath(stateDir, project.slug), "utf8")),
+    { watch: "claude/claude-opus-4-6:high" },
+    "the per-app lanes override materialized into the Project's own state tree",
+  );
+
+  // A NEWER local edit survives a non-overwrite hydration — the merge is
+  // key-level, so the remote's older copy never clobbers it.
+  saveLaneProfile(stateDir, { id: "beta", name: "Beta (local edit)", lanes: lanesBeta, updatedAt: "2026-10-25T10:00:00.000Z" });
+  applyVaultHydration(paseoHome);
+  const kept = JSON.parse(readFileSync(join(stateDir, "profiles.json"), "utf8")) as LaneProfilesFile;
+  assert.equal(kept.profiles.beta!.name, "Beta (local edit)", "the newer local edit wins the merge");
+  // An existing per-Project override is NOT clobbered without overwriteConfigs.
+  writeFileSync(projectLanesPath(stateDir, project.slug), `${JSON.stringify({ retro: "copilot/gpt-5.4" }, null, 2)}\n`);
+  applyVaultHydration(paseoHome);
+  assert.deepEqual(
+    JSON.parse(readFileSync(projectLanesPath(stateDir, project.slug), "utf8")),
+    { retro: "copilot/gpt-5.4" },
+    "without overwriteConfigs an existing local override stands",
+  );
+  // overwriteConfigs === true: the vault copy wins back.
+  applyVaultHydration(paseoHome, true);
+  assert.deepEqual(
+    JSON.parse(readFileSync(projectLanesPath(stateDir, project.slug), "utf8")),
+    { watch: "claude/claude-opus-4-6:high" },
+    "overwriteConfigs materializes the vault copy over the local override",
+  );
 });

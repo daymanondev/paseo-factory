@@ -2,13 +2,15 @@
  * The one `<FactoryShell />` every Paseo surface entry renders (ADR 0009 §1):
  * global screen, workspace panel, settings screen — one component, three
  * hosts. It owns the snapshot poll and every RPC action (Accept, Run Retro,
- * lanes.set, Revoke Supervisor, Rotate Lead, Ratify via Supervisor, task
- * detail); the three panes are pure renders of the view plus action
- * callbacks. The Project scope (v0.0.14, ADR 0010 §1) is the workspace
- * panel's directory when hosted there, else the header's Project Selector
- * pick — the snapshot rides it. Seats start only from Paseo's native New
- * Chat picker (v0.0.27, ADR 0017 §3) — the shell's Open actions are pure
- * navigation jumps to a live seat's conversation.
+ * lanes.set, the v0.0.38 batch/profile/reset lane acts — lanes.setBatch,
+ * lanes.reset, profiles.save/apply/delete (ADR 0026 §2/§5) — Revoke
+ * Supervisor, Rotate Lead, Ratify via Supervisor, task detail); the three
+ * panes are pure renders of the view plus action callbacks. The Project
+ * scope (v0.0.14, ADR 0010 §1) is the workspace panel's directory when
+ * hosted there, else the header's Project Selector pick — the snapshot rides
+ * it. Seats start only from Paseo's native New Chat picker (v0.0.27, ADR
+ * 0017 §3) — the shell's Open actions are pure navigation jumps to a live
+ * seat's conversation.
  * Function components only — no class syntax reaches the Hermes bundle.
  */
 import type { PluginTheme } from "@getpaseo/plugin";
@@ -16,7 +18,7 @@ import { useRpc } from "@getpaseo/plugin/client";
 import { ScrollView, useToast } from "@getpaseo/plugin/client/react-native";
 import { useEffect, useRef, useState } from "react";
 import { Text, View } from "react-native";
-import { accept, lanesSet, leadRotate, pluginsInstall, pluginsManage, pluginsCheckUpdates, projectAdd, projectDelete, projectPickFolder, projectReset, ratifyProposal, retro, snapshot, supervisorRevoke, taskDetail, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
+import { accept, lanesReset, lanesSet, lanesSetBatch, leadRotate, pluginsInstall, pluginsManage, pluginsCheckUpdates, profilesApply, profilesDelete, profilesSave, projectAdd, projectDelete, projectPickFolder, projectReset, ratifyProposal, retro, snapshot, supervisorRevoke, taskDetail, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
 import type { ManageablePluginId } from "../../shared/companions.ts";
 import type { FactoryView, LaneName } from "../../shared/view.ts";
 import { Card, TabBar } from "../kit/pill.tsx";
@@ -66,6 +68,14 @@ export function FactoryShell({
   const acceptCall = useRpc(accept);
   const retroCall = useRpc(retro);
   const lanesSetCall = useRpc(lanesSet);
+  // The v0.0.38 lane acts (ADR 0026 §2/§5): one useRpc per contract, every
+  // dispatch through act() — the SeatsPane stays a pure render of the view
+  // plus action callbacks (the panes' law).
+  const lanesSetBatchCall = useRpc(lanesSetBatch);
+  const lanesResetCall = useRpc(lanesReset);
+  const profilesSaveCall = useRpc(profilesSave);
+  const profilesApplyCall = useRpc(profilesApply);
+  const profilesDeleteCall = useRpc(profilesDelete);
   const revokeCall = useRpc(supervisorRevoke);
   const leadRotateCall = useRpc(leadRotate);
   const projectResetCall = useRpc(projectReset);
@@ -444,6 +454,47 @@ export function FactoryShell({
                   if (reply.ok) setLaneNote(`${lane} → ${reply.lanes[lane]} (${reply.modelSync})`);
                   return reply;
                 });
+              },
+              // One atomic batch RPC for a multi-lane card (v0.0.38, ADR 0026
+              // §5) — the SeatsPane gates it behind the live-seat modal.
+              setLanesBatch: (lanes: LaneName[], value) => {
+                void act("Lane Batch", async () => {
+                  const update: Partial<Record<LaneName, string>> = {};
+                  for (const lane of lanes) update[lane] = value;
+                  const reply = await lanesSetBatchCall({ lanes: update, ...(projectRoot === undefined ? {} : { projectRoot }) });
+                  if (reply.ok) setLaneNote(`${lanes.join(" + ")} → ${value} (${reply.modelSync})`);
+                  return reply;
+                });
+              },
+              saveProfile: (name, description) => {
+                void act("Save Profile", () =>
+                  profilesSaveCall({
+                    name,
+                    ...(description === undefined ? {} : { description }),
+                    lanes: view.lanes,
+                    ...(projectRoot === undefined ? {} : { projectRoot }),
+                  }),
+                );
+              },
+              updateProfile: (profileId, name) => {
+                void act("Update Profile", () =>
+                  profilesSaveCall({
+                    id: profileId,
+                    name,
+                    lanes: view.lanes,
+                    ...(projectRoot === undefined ? {} : { projectRoot }),
+                  }),
+                );
+              },
+              applyProfile: (profileId) => {
+                void act("Apply Profile", () => profilesApplyCall({ profileId, ...(projectRoot === undefined ? {} : { projectRoot }) }));
+              },
+              deleteProfile: (profileId) => {
+                void act("Delete Profile", () => profilesDeleteCall({ profileId }));
+              },
+              resetLanes: () => {
+                if (projectRoot === undefined) return;
+                void act("Reset to Machine Default", () => lanesResetCall({ projectRoot }));
               },
             }}
           />

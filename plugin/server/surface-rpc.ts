@@ -24,12 +24,13 @@ export { acceptanceSummary, archiveAcceptedTaskWorkspace } from "./commands.ts";
  */
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { CorrelationRegistry } from "./core/correlations.ts";
 import { FactoryError } from "./core/errors.ts";
 import type { Factory } from "./core/factory.ts";
 import { readLeadMailbox } from "./core/mailbox.ts";
-import { loadLanes, parseLane, saveLanes } from "./core/lanes.ts";
+import { LANE_NAMES, loadLanes, parseLane, saveLanes, projectLanesPath, listLaneProfiles, getLaneProfile, readLaneProfilesFile, saveLaneProfile, deleteLaneProfile, applyLaneProfile, saveLanesBatch, resetProjectLanes } from "./core/lanes.ts";
+import type { LaneProfile } from "./core/lanes.ts";
 import { ensureProjectRegistered, listProjectRegistrations, projectStateDir, readProjectRegistration, resolveOrBootstrapProject, resolveProject } from "./core/project.ts";
 import type { ProjectResolution } from "./core/project.ts";
 import { hydrateVaultDirect, importVaultSecrets, isLocalCompanionGitSource, loadVaultConfig, probeCompanionGitAccess, probeGhAuth, pullVault, pushVault, readVaultStatus, saveVaultConfig, syncVault } from "./core/vault.ts";
@@ -40,7 +41,7 @@ import { foldRetro, foldTasks, foldView, readTailed } from "./view.ts";
 import { setAgentModelViaCli, setAgentThinkingViaCli, stopAgentViaCli } from "./daemon-cli.ts";
 import { checkDaemonPluginUpdates, cleanupDaemonWorkspacesAndProjectsViaWs, getCachedPluginUpdateStatus, installDaemonPlugin, listDaemonPlugins, manageDaemonPlugin, prunePaseoProjectRegistry, reloadDaemonConfigViaWs } from "./daemon-cli.ts";
 import type { DaemonPluginAction, DaemonPluginItem, DaemonPluginSourceStatus, DaemonPluginUpdateRow, DaemonReply } from "./daemon-cli.ts";
-import { reconcilePaseoRoleProviders } from "./core/role-providers.ts";
+import { effectiveLanesForReconcile, reconcilePaseoRoleProviders } from "./core/role-providers.ts";
 import { SEAT_TITLES, inferRoleFromProviderId, resolveEffectiveProviderFamily } from "./roles.ts";
 import type { SeatName } from "./roles.ts";
 import { discoverProjects, writeProjectRegistration } from "./projects.ts";
@@ -51,12 +52,17 @@ import type { SpoolLeadDispatchRequest, SpoolReply } from "./spool.ts";
 import {
   accept,
   lanesSet,
+  lanesReset,
+  lanesSetBatch,
   leadDispatch,
   leadEnsure,
   leadRotate,
   pluginsCheckUpdates,
   pluginsInstall,
   pluginsManage,
+  profilesApply,
+  profilesDelete,
+  profilesSave,
   projectAdd,
   projectDelete,
   projectPickFolder,
@@ -77,7 +83,7 @@ import {
   vaultPush,
   vaultSync,
 } from "../shared/rpc.ts";
-import type { AgentView, LaneName, Lanes, ProjectView, VaultStatusView } from "../shared/view.ts";
+import type { AgentView, LaneName, LaneProfileView, Lanes, ProjectView, VaultStatusView } from "../shared/view.ts";
 
 // ---- the daemon slice ---------------------------------------------------------------------
 
@@ -1154,6 +1160,204 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     return { projectDir, worktreesDir, reg, projectTaskSet, archivedSeats, archivedAgents };
   };
 
+  // ---- the Lane profile gather + the machine-anchored reconcile (v0.0.38, ADR 0026 §1–§2) -------
+
+  /** One core `LaneProfile` → the wire `LaneProfileView` (description normalized to null). */
+  const laneProfileViewOf = (profile: LaneProfile): LaneProfileView => ({
+    id: profile.id,
+    name: profile.name,
+    description: profile.description ?? null,
+    lanes: profile.lanes,
+    updatedAt: profile.updatedAt,
+  });
+
+  /**
+   * The snapshot's `Lane profile` half (v0.0.38, ADR 0026 §5): the Owner's
+   * whole profile library plus the scope's active-profile state. The gather
+   * is a filesystem probe the snapshot handler owns (the vault-status
+   * precedent — the fold stays pure over its inputs), so a damaged
+   * `profiles.json` degrades to an empty library, never a failed snapshot.
+   */
+  const laneProfilesGather = (
+    scopeSlug: string | undefined,
+    lanes: Lanes,
+  ): { profiles: LaneProfileView[]; activeProfileId: string | null; activeProfileModified: boolean; hasProjectLaneOverride: boolean } => {
+    let library: LaneProfile[] = [];
+    let recordedId: string | null = null;
+    try {
+      library = listLaneProfiles(deps.stateDir);
+      const scope = scopeSlug ?? "global";
+      recordedId = readLaneProfilesFile(deps.stateDir).activeProfileByScope?.[scope] ?? null;
+    } catch {
+      // an unreadable profiles.json is not a snapshot failure — the bar renders empty
+    }
+    const profiles = library.map(laneProfileViewOf);
+    const lanesMatch = (candidate: Lanes): boolean => LANE_NAMES.every((name) => candidate[name] === lanes[name]);
+    // The recorded entry stands only while the profile it names still lives;
+    // otherwise a profile whose 6 lanes match the effective table is the
+    // active one — neither names one, the bar says none.
+    let recordedProfile: LaneProfile | undefined;
+    if (recordedId !== null) {
+      try {
+        recordedProfile = getLaneProfile(deps.stateDir, recordedId);
+      } catch {
+        // a torn profiles.json read degrades to the match fallback
+      }
+    }
+    const active =
+      recordedProfile !== undefined
+        ? laneProfileViewOf(recordedProfile)
+        : (profiles.find((profile) => lanesMatch(profile.lanes)) ?? null);
+    let hasProjectLaneOverride = false;
+    if (scopeSlug !== undefined) {
+      try {
+        const parsed: unknown = JSON.parse(readFileSync(projectLanesPath(deps.stateDir, scopeSlug), "utf8"));
+        if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+          hasProjectLaneOverride = LANE_NAMES.some((name) => typeof (parsed as Record<string, unknown>)[name] === "string");
+        }
+      } catch {
+        // an absent override file is the common case — false
+      }
+    }
+    return {
+      profiles,
+      activeProfileId: active?.id ?? null,
+      // Only a RECORDED active profile can be "modified from" — a match-found
+      // profile agrees with the table by construction.
+      activeProfileModified: recordedProfile !== undefined && !lanesMatch(recordedProfile.lanes),
+      hasProjectLaneOverride,
+    };
+  };
+
+  /**
+   * The daemon-global role providers reconcile, anchored STRICTLY to the
+   * machine-level table (v0.0.38, ADR 0026 §1): `effectiveLanesForReconcile`
+   * reads `<stateDir>/lanes.json` (the majority fallback across Project
+   * overrides when the machine never named its lanes) — never a single
+   * Project's saved lanes, so Project A's override save can never rewrite the
+   * daemon-wide `factory-supervisor` / `factory-lead` / `factory-peer`
+   * entries or the `Supervisor (Factory)` picker row Project B launches from.
+   */
+  const reconcileRoleProvidersFromMachine = (): void => {
+    try {
+      const effective = effectiveLanesForReconcile(deps.stateDir);
+      if (!effective.ok) {
+        log(`role providers: lanes unreadable — <home>/config.json not reconciled — ${effective.reason}`);
+        return;
+      }
+      const reconciled = reconcilePaseoRoleProviders(deps.home, effective.lanes, { reloadDaemon: reloadDaemonConfigViaWs });
+      if (reconciled.ok) {
+        if (reconciled.changed) log("role providers: <home>/config.json reconciled — daemon reload requested");
+      } else {
+        log(`role providers: <home>/config.json not reconciled — ${reconciled.reason}`);
+      }
+    } catch (err) {
+      log(`role providers: <home>/config.json reconcile failed — ${messageOf(err)}`);
+    }
+  };
+
+  /**
+   * The Live-Seat Transition Law's server-side execution (v0.0.38, ADR 0026
+   * §3/§4), shared by every project-scoped lane mutation (`lanesSet`,
+   * `lanesSetBatch`, `profilesApply`, `lanesReset`): for each live
+   * supervisor/lead seat whose lane value changed —
+   * - same provider family (the LIVE AGENT's family vs the new lane's
+   *   provider): the model and thinking level update in place, preserving the
+   *   session and its conversation;
+   * - different family: the seat retires — the Lead through the `leadRotate`
+   *   flow (cancel + archive, clear `reg.lead`, `onLeadRetired` requeues the
+   *   queued Lead mailbox items for the next Lead), the Supervisor by cancel +
+   *   archive + clearing `reg.supervisor` — so the next turn/dispatch spawns a
+   *   fresh seat on the new provider harness with the matching Layer-1 fence.
+   * A live session can never switch its provider adapter in place; the reply
+   * names what happened per seat.
+   */
+  const syncLiveSeatsAfterLaneUpdate = async (input: {
+    projectSlug: string;
+    projectRoot: string;
+    /** The Project's effective lanes BEFORE the write. */
+    before: Lanes;
+    /** The Project's effective lanes AFTER the write. */
+    after: Lanes;
+    /** Only these seats are considered (the lanes the act actually touches). */
+    seats?: readonly ("supervisor" | "lead")[];
+    context?: SurfaceCallContext;
+  }): Promise<string> => {
+    const daemon = resolveDaemon(input.context);
+    const parts: string[] = [];
+    for (const seat of input.seats ?? (["supervisor", "lead"] as const)) {
+      const fromLane = input.before[seat];
+      const toLane = input.after[seat];
+      if (fromLane === toLane) continue; // the seat's lane is untouched — the seat is unaffected
+      const parsed = parseLane(toLane);
+      let agent: SurfaceAgentSnapshot | undefined;
+      try {
+        agent = await seatOf(daemon, seat, input.projectSlug);
+      } catch (err) {
+        parts.push(`failed — reading the daemon's agents threw (${messageOf(err)}) (lanes.json is the config of record)`);
+        continue;
+      }
+      if (agent === undefined) {
+        parts.push(`skipped — no live ${seat} agent for project ${input.projectSlug}`);
+        continue;
+      }
+      // The live agent's family — a `factory-*` role provider resolves through
+      // the MACHINE table (what `<home>/config.json` maps it onto), so a
+      // native-picker seat compares against the adapter it actually runs on.
+      const effectiveFamily = resolveEffectiveProviderFamily(agent.provider, seat, deps.stateDir, "");
+      const sameProviderFamily =
+        parsed !== undefined &&
+        (agent.provider === parsed.provider ||
+          agent.provider === `${parsed.provider}/${parsed.model}` ||
+          agent.provider.startsWith(`${parsed.provider}/`) ||
+          effectiveFamily === parsed.provider);
+      if (sameProviderFamily) {
+        const sync = deps.setAgentModel ?? setAgentModelViaCli;
+        const syncThinking = deps.setAgentThinking ?? setAgentThinkingViaCli;
+        const slash = toLane.indexOf("/");
+        const modelId = parsed?.model ?? (slash === -1 ? toLane : toLane.slice(slash + 1));
+        try {
+          const reply = await sync(agent.id, modelId, deps.home);
+          if (!reply.ok) {
+            parts.push(`failed — ${reply.reason} (lanes.json is the config of record; the next ensure/create runs it)`);
+            continue;
+          }
+          const targetThinking = parsed?.thinking ?? "";
+          if ((agent.thinkingOptionId ?? "") !== targetThinking || targetThinking !== "") {
+            const thinkingReply = await syncThinking(agent.id, targetThinking, deps.home);
+            parts.push(
+              thinkingReply.ok
+                ? `applied — agent ${agent.id.slice(0, 8)} now runs ${toLane} in place`
+                : `applied model (${modelId}); thinking sync failed — ${thinkingReply.reason}`,
+            );
+          } else {
+            parts.push(`applied — agent ${agent.id.slice(0, 8)} now runs ${toLane} in place`);
+          }
+        } catch (err) {
+          parts.push(`failed — ${messageOf(err)} (lanes.json is the config of record)`);
+        }
+        continue;
+      }
+      // Cross-provider family: retire/rotate through the same door the Owner's
+      // rotate/revoke acts ride — cancel + archive, clear the registration
+      // binding, and (Lead) settle the mailbox so queued mail requeues.
+      const retired = await retireSeat(seat, input.projectSlug, input.projectRoot, input.context);
+      if (retired.ok) {
+        parts.push(
+          seat === "lead"
+            ? `retired — agent ${agent.id.slice(0, 8)} rotated onto ${toLane}'s provider family (queued Lead mail requeues for the next Lead)`
+            : `retired — agent ${agent.id.slice(0, 8)} rotated onto ${toLane}'s provider family (the next turn/dispatch spawns a fresh Supervisor)`,
+        );
+      } else {
+        parts.push(`retire failed — ${retired.error}`);
+      }
+    }
+    if (parts.length === 0) {
+      return `skipped — no live supervisor or lead lane changed for project ${input.projectSlug} (applies to the next create)`;
+    }
+    return parts.join("; ");
+  };
+
   const handlers = {
     async historyUpgrade(input: UpgradeInput) {
       try { return { ok: true as const, result: await upgradeFactory(deps.factory, input) }; }
@@ -1227,6 +1431,13 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       }
       const lanes = loadLanes(deps.stateDir, project?.slug);
       if (!lanes.ok) return failure("lanes-unreadable", lanes.reason);
+      // The machine-only table (v0.0.38, ADR 0026 §3): what a Reset to
+      // Machine Default re-inherits — the client's reset gate plans
+      // live-seat transitions against it (Implementation Decision 4). The
+      // machine half of the merged load above already parsed, so a refusal
+      // here is unreachable in practice but answered by the same law.
+      const machineLanes = loadLanes(deps.stateDir);
+      if (!machineLanes.ok) return failure("lanes-unreadable", machineLanes.reason);
       const daemon = resolveDaemon(context);
       const bound = agentTaskIndex();
       const allEvents = [...deps.factory.ledger.events];
@@ -1379,7 +1590,14 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         project: enrichedProject,
         projects,
       });
-      return { ok: true as const, view };
+      // v0.0.38 (ADR 0026 §5): the Lane profile half — the gatherer-owned
+      // filesystem probe layered over the fold (the vault-status precedent),
+      // so the view carries the Owner's profile library and the scope's
+      // active-profile / override state without the fold learning files.
+      return {
+        ok: true as const,
+        view: { ...view, machineLanes: machineLanes.lanes, ...laneProfilesGather(enrichedProject?.slug, view.lanes) },
+      };
     },
 
     async taskDetail(input: { task: string }, _context?: SurfaceCallContext) {
@@ -1433,9 +1651,12 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       }
     },
 
-    async retro(_input: {}, _context?: SurfaceCallContext) {
+    async retro(input: { projectRoot?: string }, _context?: SurfaceCallContext) {
       try {
-        const outcome = await deps.factory.retro();
+        // v0.0.38 (ADR 0026 §1): the pass honors the active Project's own
+        // `retro` lane — a root or slug forwards into the core, which resolves
+        // the scope and falls back to the machine lane when omitted.
+        const outcome = await deps.factory.retro(input?.projectRoot);
         return {
           ok: true as const,
           outcome: outcome.outcome,
@@ -1450,10 +1671,12 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
 
     async lanesSet(input: { lane: LaneName; value: string; projectRoot?: string }, context?: SurfaceCallContext) {
       let projectSlug: string | undefined;
+      let projectRoot: string | undefined;
       if (input.projectRoot !== undefined) {
         const project = projectOrRefusal(input.projectRoot);
         if (!project.ok) return project;
         projectSlug = project.slug;
+        projectRoot = project.root;
       }
       const daemon = resolveDaemon(context);
       let providers: ProviderEntry[] = [];
@@ -1463,61 +1686,245 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         // best-effort provider catalog lookup
       }
       const sanitizedValue = sanitizeLaneWithProviders(input.value.trim(), providers);
+      const before = projectSlug !== undefined ? loadLanes(deps.stateDir, projectSlug) : undefined;
+      if (projectSlug !== undefined && before !== undefined && !before.ok) return failure("lanes-unreadable", before.reason);
       const saved = saveLanes(deps.stateDir, { [input.lane]: sanitizedValue }, projectSlug);
       if (!saved.ok) return failure("invalid-lane", saved.reason);
-      // The live seat sync (v0.0.14): a supervisor or lead save pushes the
-      // model to that seat's live agent — project-scoped when the save was,
-      // else the first live seat of the lane. The message names what happened.
-      let modelSync = "skipped — not a seat lane (applies to the next create)";
-      if (input.lane === "supervisor" || input.lane === "lead") {
-        const seat = input.lane;
-        try {
-          const agent = await seatOf(daemon, seat, projectSlug);
-          if (agent !== undefined) {
-            const sync = deps.setAgentModel ?? setAgentModelViaCli;
-            const syncThinking = deps.setAgentThinking ?? setAgentThinkingViaCli;
-            const laneValue = saved.lanes[seat];
-            const parsed = parseLane(laneValue);
-            const slash = laneValue.indexOf("/");
-            const modelId = parsed?.model ?? (slash === -1 ? laneValue : laneValue.slice(slash + 1));
-            const reply = await sync(agent.id, modelId, deps.home);
-            const hadThinkingInInput = parseLane(input.value.trim())?.thinking !== undefined;
-            const shouldClearThinking = parsed?.thinking === undefined && ((agent.thinkingOptionId ?? "") !== "" || hadThinkingInInput);
-            if (reply.ok && (parsed?.thinking !== undefined || shouldClearThinking)) {
-              const thinkingReply = await syncThinking(agent.id, parsed?.thinking ?? "", deps.home);
-              modelSync = thinkingReply.ok
-                ? `applied — agent ${agent.id.slice(0, 8)} now runs ${laneValue}`
-                : `applied model (${modelId}); thinking sync failed — ${thinkingReply.reason}`;
+      let modelSync: string;
+      if (projectSlug !== undefined && projectRoot !== undefined && before?.ok) {
+        // The project-scoped Live-Seat Transition Law (v0.0.38, ADR 0026 §3/§4):
+        // same provider family updates the live seat in place; a family change
+        // retires/rotates it — never a blind model push across adapters.
+        if (input.lane === "supervisor" || input.lane === "lead") {
+          modelSync = await syncLiveSeatsAfterLaneUpdate({
+            projectSlug,
+            projectRoot,
+            before: before.lanes,
+            after: saved.lanes,
+            seats: [input.lane],
+            context,
+          });
+        } else {
+          modelSync = "skipped — not a seat lane (applies to the next create)";
+        }
+      } else {
+        // The legacy unscoped sync (v0.0.14): a supervisor or lead save pushes
+        // the model to that lane's first live seat — the machine table save.
+        modelSync = "skipped — not a seat lane (applies to the next create)";
+        if (input.lane === "supervisor" || input.lane === "lead") {
+          const seat = input.lane;
+          try {
+            const agent = await seatOf(daemon, seat, projectSlug);
+            if (agent !== undefined) {
+              const sync = deps.setAgentModel ?? setAgentModelViaCli;
+              const syncThinking = deps.setAgentThinking ?? setAgentThinkingViaCli;
+              const laneValue = saved.lanes[seat];
+              const parsed = parseLane(laneValue);
+              const slash = laneValue.indexOf("/");
+              const modelId = parsed?.model ?? (slash === -1 ? laneValue : laneValue.slice(slash + 1));
+              const reply = await sync(agent.id, modelId, deps.home);
+              const hadThinkingInInput = parseLane(input.value.trim())?.thinking !== undefined;
+              const shouldClearThinking = parsed?.thinking === undefined && ((agent.thinkingOptionId ?? "") !== "" || hadThinkingInInput);
+              if (reply.ok && (parsed?.thinking !== undefined || shouldClearThinking)) {
+                const thinkingReply = await syncThinking(agent.id, parsed?.thinking ?? "", deps.home);
+                modelSync = thinkingReply.ok
+                  ? `applied — agent ${agent.id.slice(0, 8)} now runs ${laneValue}`
+                  : `applied model (${modelId}); thinking sync failed — ${thinkingReply.reason}`;
+              } else {
+                modelSync = reply.ok
+                  ? `applied — agent ${agent.id.slice(0, 8)} now runs ${laneValue}`
+                  : `failed — ${reply.reason} (lanes.json is the config of record; the next ensure/create runs it)`;
+              }
             } else {
-              modelSync = reply.ok
-                ? `applied — agent ${agent.id.slice(0, 8)} now runs ${laneValue}`
-                : `failed — ${reply.reason} (lanes.json is the config of record; the next ensure/create runs it)`;
+              modelSync = `skipped — no live ${seat} agent${projectSlug === undefined ? "" : ` for project ${projectSlug}`} on this daemon`;
             }
-          } else {
-            modelSync = `skipped — no live ${seat} agent${projectSlug === undefined ? "" : ` for project ${projectSlug}`} on this daemon`;
+          } catch (err) {
+            modelSync = `failed — ${messageOf(err)} (lanes.json is the config of record)`;
           }
-        } catch (err) {
-          modelSync = `failed — ${messageOf(err)} (lanes.json is the config of record)`;
         }
       }
       log(`lanes: ${input.lane}=${saved.lanes[input.lane]}${projectSlug === undefined ? "" : ` (project ${projectSlug})`} (${modelSync})`);
-      // The native role providers (v0.0.27, ADR 0017 §1): every lane save
-      // reconciles `factory-{supervisor,lead,peer}` and the single
-      // `Supervisor (Factory)` profile into `<home>/config.json so Paseo's
-      // native picker stays in sync with Lane config — idempotent, so a lane
-      // the providers do not read (watch/retro/freshEyes) writes nothing and
-      // never fires the daemon reload.
-      try {
-        const reconciled = reconcilePaseoRoleProviders(deps.home, saved.lanes, { reloadDaemon: reloadDaemonConfigViaWs });
-        if (reconciled.ok) {
-          if (reconciled.changed) log("role providers: <home>/config.json reconciled — daemon reload requested");
-        } else {
-          log(`role providers: <home>/config.json not reconciled — ${reconciled.reason}`);
-        }
-      } catch (err) {
-        log(`role providers: <home>/config.json reconcile failed — ${messageOf(err)}`);
-      }
+      // The native role providers (v0.0.27, ADR 0017 §1; v0.0.38, ADR 0026
+      // §1): reconciled STRICTLY from the machine-level table — a single
+      // Project's override save never rewrites the daemon-global
+      // `factory-{supervisor,lead,peer}` entries or the picker row.
+      reconcileRoleProvidersFromMachine();
       return { ok: true as const, lanes: saved.lanes, modelSync };
+    },
+
+    /**
+     * The atomic batch lane save (v0.0.38, ADR 0026 §1/§5): every lane lands
+     * in ONE write (the Watch & Retro card's dual-save race fix), the live
+     * seats follow the same transition law a single save does, and the daemon
+     * config reconciles from the machine table alone.
+     */
+    async lanesSetBatch(input: { lanes: Partial<Record<LaneName, string>>; projectRoot?: string }, context?: SurfaceCallContext) {
+      let projectSlug: string | undefined;
+      let projectRoot: string | undefined;
+      if (input.projectRoot !== undefined) {
+        const project = projectOrRefusal(input.projectRoot);
+        if (!project.ok) return project;
+        projectSlug = project.slug;
+        projectRoot = project.root;
+      }
+      const daemon = resolveDaemon(context);
+      let providers: ProviderEntry[] = [];
+      try {
+        providers = await resolveProviders(daemon);
+      } catch {
+        // best-effort provider catalog lookup
+      }
+      const sanitized: Partial<Record<LaneName, string>> = {};
+      for (const [lane, value] of Object.entries(input.lanes)) {
+        if (value === undefined) continue;
+        sanitized[lane as LaneName] = sanitizeLaneWithProviders(value.trim(), providers);
+      }
+      const before = projectSlug !== undefined ? loadLanes(deps.stateDir, projectSlug) : undefined;
+      if (projectSlug !== undefined && before !== undefined && !before.ok) return failure("lanes-unreadable", before.reason);
+      let saved: { lanes: Lanes; path: string };
+      try {
+        saved = saveLanesBatch(deps.stateDir, sanitized, projectSlug);
+      } catch (err) {
+        return failure(codeOf(err), messageOf(err));
+      }
+      let modelSync = "skipped — not a seat lane (applies to the next create)";
+      if (projectSlug !== undefined && projectRoot !== undefined && before?.ok) {
+        const seats = (["supervisor", "lead"] as const).filter((seat) => sanitized[seat] !== undefined);
+        if (seats.length > 0) {
+          modelSync = await syncLiveSeatsAfterLaneUpdate({
+            projectSlug,
+            projectRoot,
+            before: before.lanes,
+            after: saved.lanes,
+            seats,
+            context,
+          });
+        }
+      }
+      log(`lanes: batch ${Object.keys(sanitized).join("+")}${projectSlug === undefined ? "" : ` (project ${projectSlug})`} → ${saved.path} (${modelSync})`);
+      reconcileRoleProvidersFromMachine();
+      return { ok: true as const, lanes: saved.lanes, modelSync };
+    },
+
+    /**
+     * The per-Project override reset (v0.0.38, ADR 0026 §2): removes the
+     * Project's `lanes.json` so it inherits the machine table again, clearing
+     * its recorded active profile — live seats follow the transition law
+     * against the machine lanes they now run under.
+     */
+    async lanesReset(input: { projectRoot: string }, context?: SurfaceCallContext) {
+      const project = projectOrRefusal(input.projectRoot);
+      if (!project.ok) return project;
+      const before = loadLanes(deps.stateDir, project.slug);
+      if (!before.ok) return failure("lanes-unreadable", before.reason);
+      let reset: { lanes: Lanes; removed: boolean };
+      try {
+        reset = resetProjectLanes(deps.stateDir, project.slug);
+      } catch (err) {
+        return failure(codeOf(err), messageOf(err));
+      }
+      const modelSync = await syncLiveSeatsAfterLaneUpdate({
+        projectSlug: project.slug,
+        projectRoot: project.root,
+        before: before.lanes,
+        after: reset.lanes,
+        context,
+      });
+      log(`lanes: reset project ${project.slug} to the machine table (removed=${reset.removed}) (${modelSync})`);
+      reconcileRoleProvidersFromMachine();
+      return { ok: true as const, lanes: reset.lanes, removed: reset.removed, modelSync };
+    },
+
+    /**
+     * `Lane profile` save (v0.0.38, ADR 0026 §2/§5): creates or updates one
+     * Owner-authored 6-lane preset — the current scope's effective table when
+     * `lanes` is omitted (the `+ Save as Profile…` act), validated whole
+     * before anything is written.
+     */
+    async profilesSave(input: { id?: string; name: string; description?: string; lanes?: Lanes; projectRoot?: string }, _context?: SurfaceCallContext) {
+      let lanes = input.lanes;
+      if (lanes === undefined) {
+        let projectSlug: string | undefined;
+        if (input.projectRoot !== undefined) {
+          const project = projectOrRefusal(input.projectRoot);
+          if (!project.ok) return project;
+          projectSlug = project.slug;
+        }
+        const current = loadLanes(deps.stateDir, projectSlug);
+        if (!current.ok) return failure("lanes-unreadable", current.reason);
+        lanes = current.lanes;
+      }
+      try {
+        const profile = saveLaneProfile(deps.stateDir, {
+          ...(input.id === undefined ? {} : { id: input.id }),
+          name: input.name,
+          ...(input.description === undefined ? {} : { description: input.description }),
+          lanes,
+        });
+        const summary = `Saved Lane profile "${profile.name}" (${profile.id}).`;
+        log(`profiles: ${summary}`);
+        return { ok: true as const, profile: laneProfileViewOf(profile), summary };
+      } catch (err) {
+        return failure(codeOf(err), messageOf(err));
+      }
+    },
+
+    /**
+     * `Lane profile` apply (v0.0.38, ADR 0026 §2/§5): Copy-on-Apply — all six
+     * lanes land in ONE atomic write into the Project's override file (or the
+     * machine table when no `projectRoot` is given), `activeProfileByScope`
+     * records the act, and live seats follow the transition law.
+     */
+    async profilesApply(input: { profileId: string; projectRoot?: string }, context?: SurfaceCallContext) {
+      let projectSlug: string | undefined;
+      let projectRoot: string | undefined;
+      if (input.projectRoot !== undefined) {
+        const project = projectOrRefusal(input.projectRoot);
+        if (!project.ok) return project;
+        projectSlug = project.slug;
+        projectRoot = project.root;
+      }
+      const before = projectSlug !== undefined ? loadLanes(deps.stateDir, projectSlug) : loadLanes(deps.stateDir);
+      if (!before.ok) return failure("lanes-unreadable", before.reason);
+      let applied: { profile: LaneProfile; lanes: Lanes; path: string };
+      try {
+        applied = applyLaneProfile(deps.stateDir, input.profileId, projectSlug);
+      } catch (err) {
+        return failure(codeOf(err), messageOf(err));
+      }
+      let modelSync = "skipped — applied to the machine table (no Project seats to sync)";
+      if (projectSlug !== undefined && projectRoot !== undefined) {
+        modelSync = await syncLiveSeatsAfterLaneUpdate({
+          projectSlug,
+          projectRoot,
+          before: before.lanes,
+          after: applied.lanes,
+          context,
+        });
+      }
+      log(`profiles: applied "${applied.profile.name}" (${applied.profile.id})${projectSlug === undefined ? " to the machine table" : ` to project ${projectSlug}`} → ${applied.path} (${modelSync})`);
+      // A machine-table apply IS a machine lane change — the daemon config follows it.
+      reconcileRoleProvidersFromMachine();
+      return { ok: true as const, lanes: applied.lanes, modelSync };
+    },
+
+    /**
+     * `Lane profile` delete (v0.0.38, ADR 0026 §2/§5): tombstones the id and
+     * clears every `activeProfileByScope` entry naming it — Copy-on-Apply
+     * means no Project's `lanes.json` changes.
+     */
+    async profilesDelete(input: { profileId: string }, _context?: SurfaceCallContext) {
+      let deleted: boolean;
+      try {
+        deleted = deleteLaneProfile(deps.stateDir, input.profileId);
+      } catch (err) {
+        return failure(codeOf(err), messageOf(err));
+      }
+      const summary = deleted
+        ? `Deleted Lane profile ${input.profileId}.`
+        : `No Lane profile ${input.profileId} exists — nothing deleted.`;
+      log(`profiles: ${summary}`);
+      return { ok: true as const, deleted, summary };
     },
 
     async supervisorEnsure(input: { projectRoot: string; message?: string }, context?: SurfaceCallContext) {
@@ -2369,6 +2776,11 @@ export function registerSurfaceRpc(
   server.handle(accept, (input, context) => handlers.accept(input, pass(context)));
   server.handle(retro, (input, context) => handlers.retro(input, pass(context)));
   server.handle(lanesSet, (input, context) => handlers.lanesSet(input, pass(context)));
+  server.handle(lanesSetBatch, (input, context) => handlers.lanesSetBatch(input, pass(context)));
+  server.handle(lanesReset, (input, context) => handlers.lanesReset(input, pass(context)));
+  server.handle(profilesSave, (input, context) => handlers.profilesSave(input, pass(context)));
+  server.handle(profilesApply, (input, context) => handlers.profilesApply(input, pass(context)));
+  server.handle(profilesDelete, (input, context) => handlers.profilesDelete(input, pass(context)));
   server.handle(supervisorEnsure, (input, context) => handlers.supervisorEnsure(input, pass(context)));
   server.handle(supervisorRevoke, (input, context) => handlers.supervisorRevoke(input, pass(context)));
   server.handle(leadEnsure, (input, context) => handlers.leadEnsure(input, pass(context)));

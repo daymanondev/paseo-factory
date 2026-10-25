@@ -26,7 +26,11 @@
  * returns a plain env record, never a Promise): a second call finds the same
  * home in the same state, re-synchronizing `mcp.json` so operator edits
  * propagate on the next session open or create, and never duplicates or
- * breaks a symlink it already made.
+ * breaks a symlink it already made. Since v0.0.38 (ADR 0026 §1) an
+ * already-correct symlink is never removed and recreated — the supervisor's
+ * forbidden-name sweep spares the operator-command links the same pass
+ * links right back, closing the brief filesystem race window two Projects
+ * opening Pi sessions concurrently could meet.
  *
  * Placement: this file is pure Node (zero Paseo imports) and lives in `src/`
  * because two consumers on opposite sides of the placement law need it —
@@ -34,7 +38,7 @@
  * the verbatim copy `scripts/sync-plugin-core.mjs` vendors into
  * `plugin/server/core/` (the `./core/project.ts` precedent).
  */
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { renderRoleAppendSystem } from "./roles-contract.ts";
@@ -131,6 +135,14 @@ export function provisionPiAgentHome(input: ProvisionPiHomeOptions): string {
   const roleHome = join(input.stateDir, "pi-agent", input.role);
   mkdirSync(roleHome, { recursive: true });
   for (const forbidden of FORBIDDEN_NAMES) {
+    // v0.0.38, ADR 0026 §1 — the sweep must never churn a symlink the same
+    // provision pass links right back: `supervisor`'s prompts/skills are both
+    // forbidden names and operator-command links, so an already-correct link
+    // stays untouched. The remove/recreate window is what two Projects
+    // opening Pi sessions concurrently could race inside.
+    if (input.role === "supervisor" && (OPERATOR_COMMAND_NAMES as readonly string[]).includes(forbidden)) {
+      if (symlinkPointsAt(join(roleHome, forbidden), join(sourceAgentDir, forbidden))) continue;
+    }
     rmSync(join(roleHome, forbidden), { recursive: true, force: true });
   }
   // Strictly after the sweep — anything written or linked before it would
@@ -262,16 +274,29 @@ function withoutAuth(entry: Record<string, unknown>): Record<string, unknown> {
 }
 
 /**
+ * Whether `linkPath` is a symlink already pointing at `target` — checked
+ * with `lstatSync`/`readlinkSync` BEFORE any removal (v0.0.38, ADR 0026 §1):
+ * the raw link text matches, or both sides resolve to the same real path
+ * (a link spelled relatively or through a resolved symlink chain). Never
+ * throws; anything absent or unreadable is simply not the expected link.
+ */
+function symlinkPointsAt(linkPath: string, target: string): boolean {
+  try {
+    if (!lstatSync(linkPath).isSymbolicLink()) return false;
+    if (readlinkSync(linkPath) === target) return true;
+    return realpathSync(linkPath) === realpathSync(target);
+  } catch {
+    return false; // absent, broken, or unreadable — the caller (re)creates it
+  }
+}
+
+/**
  * Points `linkPath` at `target`, replacing whatever else sits there — unless
  * the exact link already exists, in which case it is left untouched: a
  * re-provision never duplicates or breaks a symlink it already made.
  */
 function ensureSymlink(target: string, linkPath: string): void {
-  try {
-    if (lstatSync(linkPath).isSymbolicLink() && realpathSync(linkPath) === realpathSync(target)) return;
-  } catch {
-    // absent or unreadable — (re)created below
-  }
+  if (symlinkPointsAt(linkPath, target)) return;
   rmSync(linkPath, { recursive: true, force: true });
   symlinkSync(target, linkPath);
 }
