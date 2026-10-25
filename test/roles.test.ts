@@ -284,13 +284,70 @@ test("agy-pre-tool-hook.mjs fast-allows unbound sessions and enforces seat-write
   );
   assert.equal(unboundOut.decision, "allow", "unbound session exits immediately with decision=allow");
 
-  // 2. Supervisor seat: denies write_file on product source code, allows CONTEXT.md, denies invoke_subagent & pkill plugin-process.js
+  const ALLOWED_AGY_PROTO_KEYS = new Set(["decision", "reason", "permissionOverrides", "overwrite"]);
+  const assertValidAgyProtoOutput = (out: Record<string, unknown>, context: string) => {
+    const unknown = Object.keys(out).filter((k) => !ALLOWED_AGY_PROTO_KEYS.has(k));
+    assert.deepEqual(unknown, [], `${context}: PreToolUse output must not include unknown protojson fields (e.g. hookSpecificOutput)`);
+  };
+
+  // 2. Supervisor seat: denies write_file on product source code, allows CONTEXT.md, allows read_file & call_mcp_tool (supervisor_dispatch_lead), denies invoke_subagent & pkill plugin-process.js
   const supEnv = {
     PATH: process.env.PATH,
     PASEO_FACTORY_SEAT: "supervisor",
     PASEO_FACTORY_STATE_DIR: stateDir,
     PASEO_FACTORY_PROJECT_ROOT: repoDir,
   };
+  const allowRead = JSON.parse(
+    execFileSync(process.execPath, [hookBin], {
+      input: JSON.stringify({
+        toolCall: { name: "read_file", args: { Path: join(repoDir, "package.json") } },
+        workspacePaths: [repoDir],
+      }),
+      env: supEnv,
+      encoding: "utf8",
+    }),
+  );
+  assert.equal(allowRead.decision, "allow", "Supervisor allowed to call read_file");
+  assertValidAgyProtoOutput(allowRead, "allowRead");
+
+  const allowDispatchMcp = JSON.parse(
+    execFileSync(process.execPath, [hookBin], {
+      input: JSON.stringify({
+        toolCall: {
+          name: "call_mcp_tool",
+          args: {
+            ServerName: "paseo-factory_paseo_factory",
+            ToolName: "supervisor_dispatch_lead",
+            Arguments: { workspace: repoDir, message: "Ship feature" },
+          },
+        },
+        workspacePaths: [repoDir],
+      }),
+      env: supEnv,
+      encoding: "utf8",
+    }),
+  );
+  assert.equal(allowDispatchMcp.decision, "allow", "Supervisor allowed to call supervisor_dispatch_lead via call_mcp_tool");
+  assertValidAgyProtoOutput(allowDispatchMcp, "allowDispatchMcp");
+
+  const denyWriteNative = JSON.parse(
+    execFileSync(process.execPath, [hookBin], {
+      input: JSON.stringify({
+        toolCall: { name: "write_file", args: { Path: "src/index.ts" } },
+        workspacePaths: [repoDir],
+      }),
+      env: {
+        PATH: process.env.PATH,
+        PASEO_FACTORY_SEAT: "supervisor",
+        PASEO_FACTORY_STATE_DIR: stateDir,
+      },
+      encoding: "utf8",
+    }),
+  );
+  assert.equal(denyWriteNative.decision, "deny", "Native Antigravity toolCall payload with workspacePaths enforces seat-write-fence");
+  assert.match(String(denyWriteNative.reason), /Seat write fence/);
+  assertValidAgyProtoOutput(denyWriteNative, "denyWriteNative");
+
   const denyWrite = JSON.parse(
     execFileSync(process.execPath, [hookBin], {
       input: JSON.stringify({ tool_name: "write_file", tool_input: { Path: join(repoDir, "src/index.ts") }, cwd: repoDir }),
@@ -299,7 +356,8 @@ test("agy-pre-tool-hook.mjs fast-allows unbound sessions and enforces seat-write
     }),
   );
   assert.equal(denyWrite.decision, "deny");
-  assert.equal(denyWrite.hookSpecificOutput.permissionDecision, "deny");
+  assert.match(String(denyWrite.reason), /Seat write fence/);
+  assertValidAgyProtoOutput(denyWrite, "denyWrite");
 
   const allowContext = JSON.parse(
     execFileSync(process.execPath, [hookBin], {
@@ -309,28 +367,30 @@ test("agy-pre-tool-hook.mjs fast-allows unbound sessions and enforces seat-write
     }),
   );
   assert.equal(allowContext.decision, "allow", "Supervisor allowed to edit CONTEXT.md");
+  assertValidAgyProtoOutput(allowContext, "allowContext");
 
   const denySubagent = JSON.parse(
     execFileSync(process.execPath, [hookBin], {
-      input: JSON.stringify({ tool_name: "invoke_subagent", tool_input: {}, cwd: repoDir }),
+      input: JSON.stringify({ toolCall: { name: "invoke_subagent", args: {} }, workspacePaths: [repoDir] }),
       env: supEnv,
       encoding: "utf8",
     }),
   );
-  assert.equal(denySubagent.hookSpecificOutput.permissionDecision, "deny");
+  assert.equal(denySubagent.decision, "deny");
+  assertValidAgyProtoOutput(denySubagent, "denySubagent");
 
   const denyPkill = JSON.parse(
     execFileSync(process.execPath, [hookBin], {
       input: JSON.stringify({
-        tool_name: "run_command",
-        tool_input: { CommandLine: "pkill -f plugin-process.js" },
-        cwd: repoDir,
+        toolCall: { name: "run_command", args: { CommandLine: "pkill -f plugin-process.js" } },
+        workspacePaths: [repoDir],
       }),
       env: supEnv,
       encoding: "utf8",
     }),
   );
-  assert.equal(denyPkill.hookSpecificOutput.permissionDecision, "deny");
+  assert.equal(denyPkill.decision, "deny");
+  assertValidAgyProtoOutput(denyPkill, "denyPkill");
 });
 
 test("inferRoleFromProviderId maps the native role providers deterministically and applyProviderExecutionFence always carries ELECTRON_RUN_AS_NODE (v0.0.27, ADR 0017 §2)", (t) => {
