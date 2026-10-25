@@ -377,6 +377,7 @@ export class DaemonRpc {
             clientId: `paseo-factory-driver-${randomUUID().slice(0, 8)}`,
             clientType: "cli",
             protocolVersion: 1,
+            capabilities: { all_providers: true },
             auth: { kind: "localCredential", token },
           }),
         );

@@ -39,7 +39,7 @@ import { basename, join, resolve } from "node:path";
 import { FACTORY_VIEW_VERSION } from "../shared/view.ts";
 import { foldRetro, foldTasks, foldView, readTailed } from "./view.ts";
 import { setAgentModelViaCli, setAgentThinkingViaCli, stopAgentViaCli } from "./daemon-cli.ts";
-import { checkDaemonPluginUpdates, cleanupDaemonWorkspacesAndProjectsViaWs, getCachedPluginUpdateStatus, installDaemonPlugin, listDaemonPlugins, manageDaemonPlugin, prunePaseoProjectRegistry, reloadDaemonConfigViaWs } from "./daemon-cli.ts";
+import { checkDaemonPluginUpdates, cleanupDaemonWorkspacesAndProjectsViaWs, getCachedPluginUpdateStatus, installDaemonPlugin, isPaseoWorkspaceArchivedOnDisk, listDaemonPlugins, manageDaemonPlugin, prunePaseoProjectRegistry, reloadDaemonConfigViaWs, restoreDaemonWorkspaceViaWs } from "./daemon-cli.ts";
 import type { DaemonPluginAction, DaemonPluginItem, DaemonPluginSourceStatus, DaemonPluginUpdateRow, DaemonReply } from "./daemon-cli.ts";
 import { effectiveLanesForReconcile, reconcilePaseoRoleProviders } from "./core/role-providers.ts";
 import { SEAT_TITLES, inferRoleFromProviderId, resolveEffectiveProviderFamily } from "./roles.ts";
@@ -523,6 +523,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   const resolveSweepWorkspaceSets = async (
     daemon: SurfaceDaemonApi,
     project: { slug: string; root: string },
+    extraKeepWorkspaceIds?: readonly string[],
   ): Promise<{ keepWorkspaceIds: string[]; activeWorkspaceIds: string[] } | null> => {
     let liveAgents: SurfaceAgentSnapshot[] = [];
     try {
@@ -533,11 +534,23 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     }
     const registration = readProjectRegistration(deps.stateDir, project.slug);
     const keep = new Set<string>();
+    if (extraKeepWorkspaceIds !== undefined) {
+      for (const id of extraKeepWorkspaceIds) {
+        if (typeof id === "string" && id.trim() !== "") keep.add(id.trim());
+      }
+    }
     for (const seat of ["supervisor", "lead"] as const) {
       const seatAgent =
         liveAgents.find((agent) => agent.labels.seat === seat && agent.labels.project === project.slug) ??
         seatAgentByIdentity(liveAgents, project.slug, seat);
       if (typeof seatAgent?.workspaceId === "string" && seatAgent.workspaceId !== "") keep.add(seatAgent.workspaceId);
+    }
+    const normProjectRoot = realpathSafe(project.root);
+    for (const agent of liveAgents) {
+      if (typeof agent.workspaceId !== "string" || agent.workspaceId === "") continue;
+      if (agent.labels.project === project.slug || realpathSafe(agent.cwd) === normProjectRoot) {
+        keep.add(agent.workspaceId);
+      }
     }
     if (typeof registration?.workspaceId === "string" && registration.workspaceId !== "") keep.add(registration.workspaceId);
     const active = new Set(
@@ -557,8 +570,12 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
    * records only directories already gone from disk. Best-effort by design:
    * a sweep that cannot land logs and returns, never a failed caller.
    */
-  const sweepOrphanedLocalCheckoutWorkspaces = async (daemon: SurfaceDaemonApi, project: { slug: string; root: string }): Promise<void> => {
-    const sets = await resolveSweepWorkspaceSets(daemon, project);
+  const sweepOrphanedLocalCheckoutWorkspaces = async (
+    daemon: SurfaceDaemonApi,
+    project: { slug: string; root: string },
+    extraKeepWorkspaceIds?: readonly string[],
+  ): Promise<void> => {
+    const sets = await resolveSweepWorkspaceSets(daemon, project, extraKeepWorkspaceIds);
     if (sets === null) return;
     try {
       const swept = await (deps.cleanupDaemonWorkspaces ?? cleanupDaemonWorkspacesAndProjectsViaWs)(deps.home, {
@@ -837,9 +854,19 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         // best-effort — the registration's workspaceId is the fallback below
       }
     }
-    const resolvedWorkspaceId = [supervisorSnapshot?.workspaceId, registration?.workspaceId].find(
+    if (
+      typeof supervisorSnapshot?.workspaceId === "string" &&
+      supervisorSnapshot.workspaceId !== "" &&
+      isPaseoWorkspaceArchivedOnDisk(deps.home, supervisorSnapshot.workspaceId)
+    ) {
+      await restoreDaemonWorkspaceViaWs(deps.home, supervisorSnapshot.workspaceId);
+    }
+    const candidateWorkspaceIds = [supervisorSnapshot?.workspaceId, registration?.workspaceId].filter(
       (id): id is string => typeof id === "string" && id !== "",
     );
+    const resolvedWorkspaceId =
+      candidateWorkspaceIds.find((id) => !isPaseoWorkspaceArchivedOnDisk(deps.home, id)) ??
+      (agent === undefined ? candidateWorkspaceIds[0] : undefined);
     let workspaceId: string | undefined;
     let paseoProjectId: string | undefined;
     if (daemon.workspaces !== undefined) {
@@ -874,22 +901,80 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           ? { provider: `${parsed.provider}/${parsed.model}`, thinkingOptionId: parsed.thinking }
           : { provider: lane };
       const parent = seat === "lead" ? supervisorSnapshot?.id : undefined;
+      const createInWorkspace = async (targetWorkspaceId: string): Promise<{ id: string }> =>
+        daemon.workspaces!.ref(targetWorkspaceId).agents.create({
+          config,
+          title,
+          labels: { seat, project: project.slug },
+          ...(parent !== undefined ? { parent } : {}),
+        });
       try {
-        const handle =
-          workspaceId !== undefined && daemon.workspaces !== undefined
-            ? await daemon.workspaces.ref(workspaceId).agents.create({
-                config,
-                title,
-                labels: { seat, project: project.slug },
-                ...(parent !== undefined ? { parent } : {}),
-              })
-            : await daemon.agents.create({
+        let handle: { id: string } | undefined;
+        if (workspaceId !== undefined && daemon.workspaces !== undefined) {
+          try {
+            handle = await createInWorkspace(workspaceId);
+          } catch (wsErr) {
+            log(`${seat}: workspaces.ref(${workspaceId}).agents.create failed (${messageOf(wsErr)}) — attempting workspace recovery`);
+            const restored = await restoreDaemonWorkspaceViaWs(deps.home, workspaceId);
+            if (restored.ok) {
+              try {
+                handle = await createInWorkspace(workspaceId);
+              } catch {
+                // fall through to alternate workspace recovery
+              }
+            }
+            if (
+              handle === undefined &&
+              typeof registration?.workspaceId === "string" &&
+              registration.workspaceId !== "" &&
+              registration.workspaceId !== workspaceId &&
+              !isPaseoWorkspaceArchivedOnDisk(deps.home, registration.workspaceId)
+            ) {
+              try {
+                handle = await createInWorkspace(registration.workspaceId);
+                workspaceId = registration.workspaceId;
+              } catch {
+                // fall through to workspaces.open
+              }
+            }
+            if (handle === undefined && typeof daemon.workspaces.open === "function") {
+              try {
+                const reopened = await daemon.workspaces.open({ cwd: project.root });
+                if (typeof reopened?.projectId === "string" && reopened.projectId !== "") {
+                  paseoProjectId = reopened.projectId;
+                }
+                if (typeof reopened?.id === "string" && reopened.id !== "") {
+                  handle = await createInWorkspace(reopened.id);
+                  workspaceId = reopened.id;
+                }
+              } catch {
+                // fall through to daemon.agents.create
+              }
+            }
+            if (handle === undefined) {
+              const parentHasFailedWorkspace =
+                parent !== undefined &&
+                typeof supervisorSnapshot?.workspaceId === "string" &&
+                supervisorSnapshot.workspaceId === workspaceId;
+              handle = await daemon.agents.create({
                 config,
                 cwd: project.root,
                 title,
                 labels: { seat, project: project.slug },
-                ...(parent !== undefined ? { parent } : {}),
+                ...(parent !== undefined && !parentHasFailedWorkspace ? { parent } : {}),
               });
+              workspaceId = undefined;
+            }
+          }
+        } else {
+          handle = await daemon.agents.create({
+            config,
+            cwd: project.root,
+            title,
+            labels: { seat, project: project.slug },
+            ...(parent !== undefined ? { parent } : {}),
+          });
+        }
         agent = {
           id: handle.id,
           provider: config.provider,
@@ -925,7 +1010,8 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     // never the active Supervisor/Lead workspace nor any workspace hosting a
     // live agent.
     if (seat === "supervisor") {
-      await sweepOrphanedLocalCheckoutWorkspaces(daemon, project);
+      const keepIds = [workspaceId, agent.workspaceId].filter((id): id is string => typeof id === "string" && id !== "");
+      await sweepOrphanedLocalCheckoutWorkspaces(daemon, project, keepIds);
     }
     const message = input.message?.trim();
     if (message !== undefined && message !== "") {
@@ -2095,10 +2181,13 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
      * `ensureSeat("supervisor")` and `projectReset` run. Void by design: the
      * sweep is best-effort and never its caller's failure.
      */
-    async sweepProjectWorkspaces(input: { projectRoot: string }, context?: SurfaceCallContext): Promise<void> {
+    async sweepProjectWorkspaces(
+      input: { projectRoot: string; keepWorkspaceIds?: readonly string[] },
+      context?: SurfaceCallContext,
+    ): Promise<void> {
       const project = projectOrRefusal(input.projectRoot);
       if (!project.ok) return;
-      await sweepOrphanedLocalCheckoutWorkspaces(resolveDaemon(context), project);
+      await sweepOrphanedLocalCheckoutWorkspaces(resolveDaemon(context), project, input.keepWorkspaceIds);
     },
 
     /**

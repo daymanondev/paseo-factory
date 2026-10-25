@@ -36,6 +36,7 @@ import { loadLanes, parseLane } from "./core/lanes.ts";
 import { listProjectRegistrations, readProjectRegistration, resolveProject, writeProjectRegistration } from "./core/project.ts";
 import { FACTORY_SEAT_PROVIDER_IDS, formatPeerAgentTitle, formatPeerWorkspaceTitle } from "./roles.ts";
 import { acceptanceSummary, executeAcceptance } from "./commands.ts";
+import { isPaseoWorkspaceArchivedOnDisk, restoreDaemonWorkspaceViaWs } from "./daemon-cli.ts";
 import type { SurfaceDaemonApi } from "./surface-rpc.ts";
 import type { HistoryImportSource } from "./core/history-import.ts";
 import type { ImportStatus } from "./core/history-stage.ts";
@@ -837,6 +838,7 @@ async function resolveSpawnWorkspaceAndParent(
   daemon: SurfaceDaemonApi | undefined,
   task: string,
   explicitWorktree?: string,
+  home?: string,
 ): Promise<{ leadAgentId?: string; workspaceId?: string; projectSlug?: string }> {
   const contract = factory.contractFor(task);
   if (contract === undefined) return {};
@@ -872,6 +874,10 @@ async function resolveSpawnWorkspaceAndParent(
 
   const worktree = explicitWorktree ?? factory.worktreeFor(task);
   let workspaceId = reg?.taskWorkspaces?.[task];
+  if (workspaceId !== undefined && isPaseoWorkspaceArchivedOnDisk(home, workspaceId)) {
+    const restored = await restoreDaemonWorkspaceViaWs(home, workspaceId);
+    if (!restored.ok) workspaceId = undefined;
+  }
   if (workspaceId === undefined && worktree !== undefined && daemon?.workspaces?.create !== undefined) {
     try {
       const created = await daemon.workspaces.create({
@@ -1253,7 +1259,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
       if (decision.outcome === "refused") {
         return { id: request.id, ok: false, code: decision.code, message: decision.event.reason, event: decision.event };
       }
-      const spawnMeta = await resolveSpawnWorkspaceAndParent(factory, resolvedDaemon, request.task, request.worktree);
+      const spawnMeta = await resolveSpawnWorkspaceAndParent(factory, resolvedDaemon, request.task, request.worktree, home);
       let spawnedAgentId: string | undefined;
       if (request.prompt !== undefined && request.prompt !== "" && resolvedDaemon !== undefined) {
         // The Peer spawns under the `factory-peer` role provider when it can
@@ -1290,8 +1296,8 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
           task: request.task,
           ...(proj?.ok ? { project: proj.slug } : {}),
         };
-        if (spawnMeta.workspaceId !== undefined && resolvedDaemon.workspaces !== undefined) {
-          const created = await resolvedDaemon.workspaces.ref(spawnMeta.workspaceId).agents.create({
+        const createPeerInWorkspace = async (targetWorkspaceId: string): Promise<{ id: string }> =>
+          resolvedDaemon.workspaces!.ref(targetWorkspaceId).agents.create({
             config: peerConfig,
             // The Agent tab inside the Task worktree Workspace reads
             // `Peer · <Task>` (v0.0.31, ADR 0017 §2) — never the bare task id.
@@ -1300,7 +1306,61 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
             prompt: effectivePrompt,
             ...(spawnMeta.leadAgentId !== undefined ? { parent: spawnMeta.leadAgentId } : {}),
           });
-          spawnedAgentId = created.id;
+        if (spawnMeta.workspaceId !== undefined && resolvedDaemon.workspaces !== undefined) {
+          try {
+            const created = await createPeerInWorkspace(spawnMeta.workspaceId);
+            spawnedAgentId = created.id;
+          } catch {
+            const restored = await restoreDaemonWorkspaceViaWs(home, spawnMeta.workspaceId);
+            if (restored.ok) {
+              try {
+                const created = await createPeerInWorkspace(spawnMeta.workspaceId);
+                spawnedAgentId = created.id;
+              } catch {
+                // fall through to workspace recreate / daemon.agents.create
+              }
+            }
+            if (
+              spawnedAgentId === undefined &&
+              targetCwd !== "" &&
+              typeof resolvedDaemon.workspaces.create === "function"
+            ) {
+              try {
+                const reg = proj?.ok ? readProjectRegistration(factory.stateDir, proj.slug) : undefined;
+                const recreated = await resolvedDaemon.workspaces.create({
+                  title: formatPeerWorkspaceTitle(request.task, contract?.description),
+                  source: {
+                    kind: "directory",
+                    path: targetCwd,
+                    ...(reg?.paseoProjectId !== undefined ? { projectId: reg.paseoProjectId } : {}),
+                  },
+                });
+                if (typeof recreated?.id === "string" && recreated.id !== "") {
+                  spawnMeta.workspaceId = recreated.id;
+                  if (proj?.ok) {
+                    writeProjectRegistration(factory.stateDir, proj.slug, {
+                      root: proj.root,
+                      taskWorkspaces: { [request.task]: recreated.id },
+                    });
+                  }
+                  const created = await createPeerInWorkspace(recreated.id);
+                  spawnedAgentId = created.id;
+                }
+              } catch {
+                // fall through to daemon.agents.create
+              }
+            }
+            if (spawnedAgentId === undefined && typeof resolvedDaemon.agents?.create === "function") {
+              const created = await resolvedDaemon.agents.create({
+                config: peerConfig,
+                cwd: targetCwd,
+                title: formatPeerAgentTitle(request.task),
+                labels,
+                prompt: effectivePrompt,
+              });
+              spawnedAgentId = created.id;
+            }
+          }
         } else if (typeof resolvedDaemon.agents?.create === "function") {
           const created = await resolvedDaemon.agents.create({
             config: peerConfig,
@@ -1360,7 +1420,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         return { id: request.id, ok: false, code: decision.code, message: decision.event.reason, event: decision.event };
       }
       await archiveTaskAgentBestEffort(resolvedDaemon, request.died_agent);
-      const spawnMeta = await resolveSpawnWorkspaceAndParent(factory, resolvedDaemon, request.task);
+      const spawnMeta = await resolveSpawnWorkspaceAndParent(factory, resolvedDaemon, request.task, undefined, home);
       return {
         id: request.id,
         ok: true,

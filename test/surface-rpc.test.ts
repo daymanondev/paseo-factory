@@ -5606,3 +5606,114 @@ test("daemon plugin bridge: self-heals a v0.0.40 poisoned factory-supervisor ext
     { id: "gemini-4-argon-high", label: "gemini-4-argon-high", isDefault: true },
   ]);
 });
+
+test("leadEnsure: recovers when supervisorSnapshot.workspaceId throws 'Workspace <id> has no available directory' via workspace recovery or workspaces.open / daemon.agents.create fallback", async (t) => {
+  const project = makeProject(t, "profile-max");
+  const agents: FakeAgent[] = [
+    {
+      id: "sup-archived-ws",
+      provider: "antigravity/gemini-4-argon-high",
+      cwd: project.root,
+      labels: { seat: "supervisor", project: project.slug },
+      workspaceId: "wks_archived_sup",
+    },
+  ];
+  const { stateDir, handlers, fake } = makeSurface(t, agents);
+  writeProjectRegistration(stateDir, project.slug, {
+    root: project.root,
+    supervisor: "sup-archived-ws",
+    workspaceId: "wks_archived_sup",
+  });
+
+  const wsCreateAttempts: string[] = [];
+  let reopenCalls = 0;
+  fake.daemon.workspaces = {
+    open: async () => {
+      reopenCalls += 1;
+      return { id: "wks_reopened_main", projectId: "prj_profile_max" };
+    },
+    create: async () => ({ id: "wks_created_unused" }),
+    archive: async () => ({}),
+    ref: (workspaceId: string) => ({
+      agents: {
+        create: async (options) => {
+          wsCreateAttempts.push(workspaceId);
+          if (workspaceId === "wks_archived_sup") {
+            throw new Error(`Workspace ${workspaceId} has no available directory`);
+          }
+          const id = `lead-in-${workspaceId}`;
+          agents.push({
+            id,
+            title: options.title ?? undefined,
+            provider: options.config.provider,
+            cwd: project.root,
+            labels: options.labels,
+            workspaceId,
+          });
+          return { id };
+        },
+      },
+    }),
+  };
+
+  const ensured = await handlers.leadEnsure({
+    projectRoot: project.root,
+    message: "Audit and implement wave 1.",
+  });
+  assert.ok(ensured.ok, ensured.ok ? "" : ensured.error);
+  assert.equal(ensured.created, true);
+  assert.equal(ensured.agentId, "lead-in-wks_reopened_main");
+  assert.ok(reopenCalls >= 1, "reopened main workspace after archived workspace threw");
+  assert.deepEqual(wsCreateAttempts, ["wks_archived_sup", "wks_reopened_main"]);
+  assert.deepEqual(fake.sent, [{ agentId: "lead-in-wks_reopened_main", text: "Audit and implement wave 1." }]);
+  const reg = readProjectRegistration(stateDir, project.slug);
+  assert.equal(reg?.lead, "lead-in-wks_reopened_main");
+  assert.equal(reg?.workspaceId, "wks_reopened_main", "healed project.json workspaceId to the reopened workspace");
+  assert.equal(reg?.paseoProjectId, "prj_profile_max");
+});
+
+test("sweepProjectWorkspaces: keepWorkspaceIds preserves an opening Supervisor session's workspaceId before the agent is listed in daemon.agents.list() or bound in project.json", async (t) => {
+  const project = makeProject(t, "profile-max-open");
+  // Simulate an older Supervisor bound in project.json (`wks_old_sup`) while a new Supervisor
+  // session is in `server.before("agent.session_open")` on `wks_opening_sup` (not yet in agents.list()).
+  const agents: FakeAgent[] = [
+    {
+      id: "sup-old",
+      provider: "antigravity/gemini-4-argon-high",
+      cwd: project.root,
+      labels: { seat: "supervisor", project: project.slug },
+      workspaceId: "wks_old_sup",
+    },
+  ];
+  const { home, stateDir, factory, fake } = makeSurface(t, agents);
+  writeProjectRegistration(stateDir, project.slug, {
+    root: project.root,
+    supervisor: "sup-old",
+    workspaceId: "wks_old_sup",
+  });
+
+  const capturedKeepIds: string[][] = [];
+  const handlers = createSurfaceHandlers({
+    factory,
+    stateDir,
+    home,
+    daemon: fake.daemon,
+    cleanupDaemonWorkspaces: async (_cleanupHome, input) => {
+      capturedKeepIds.push([...(input.keepWorkspaceIds ?? [])]);
+      return { ok: true, removedWorkspaceIds: [], removedProjectIds: [] };
+    },
+  });
+
+  await handlers.sweepProjectWorkspaces({
+    projectRoot: project.root,
+    keepWorkspaceIds: ["wks_opening_sup"],
+  });
+
+  assert.equal(capturedKeepIds.length, 1);
+  assert.ok(
+    capturedKeepIds[0]!.includes("wks_opening_sup"),
+    "opening Supervisor workspaceId is protected in keepWorkspaceIds during session_open sweep",
+  );
+  assert.ok(capturedKeepIds[0]!.includes("wks_old_sup"));
+});
+

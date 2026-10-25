@@ -30,7 +30,7 @@ import { createSurfaceHandlers, registerSurfaceRpc } from "./server/surface-rpc.
 import { createLeadMailRuntime } from "./server/lead-mailbox.ts";
 import { injectRoleOnCreate, injectSessionEnv, sanitizeAgentCreateHookResult } from "./server/roles.ts";
 
-const SHELL_VERSION = "0.0.44";
+const SHELL_VERSION = "0.0.45";
 
 const log = (message: string) => console.log(`[${PLUGIN_ID}] ${message}`);
 
@@ -381,7 +381,12 @@ export default function contribute(server: PluginServerContext) {
     // the session never waits on the sweep, and its rules never touch the
     // active Supervisor/Lead workspace or any workspace hosting a live agent.
     if (withEnv !== undefined && withEnv.env?.PASEO_FACTORY_SEAT === "supervisor") {
-      void surface.sweepProjectWorkspaces({ projectRoot: next.cwd });
+      const openingWorkspaceId =
+        typeof next.workspaceId === "string" && next.workspaceId.trim() !== "" ? next.workspaceId.trim() : undefined;
+      void surface.sweepProjectWorkspaces({
+        projectRoot: next.cwd,
+        ...(openingWorkspaceId !== undefined ? { keepWorkspaceIds: [openingWorkspaceId] } : {}),
+      });
     }
     return withEnv === undefined ? (next === request ? undefined : next) : withEnv;
   }));

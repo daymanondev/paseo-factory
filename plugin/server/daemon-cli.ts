@@ -82,6 +82,7 @@ function daemonWsRequestPayload<T>(
           clientId: `paseo-factory-surface-${randomUUID().slice(0, 8)}`,
           clientType: "cli",
           protocolVersion: 1,
+          capabilities: { all_providers: true },
           auth: { kind: "localCredential", token },
         }),
       );
@@ -1154,3 +1155,55 @@ export async function cleanupDaemonWorkspacesAndProjectsViaWs(
   }
   return { ok: true, removedWorkspaceIds, removedProjectIds };
 }
+
+/**
+ * Checks `<home>/projects/workspaces.json` on disk and returns `true` only when
+ * `workspaceId` is explicitly recorded with a non-empty `archivedAt` timestamp.
+ * Never throws; returns `false` when the registry or entry is absent.
+ */
+export function isPaseoWorkspaceArchivedOnDisk(home: string | undefined, workspaceId: string): boolean {
+  const targetHome = home ?? process.env.PASEO_HOME;
+  if (typeof targetHome !== "string" || targetHome.trim() === "" || typeof workspaceId !== "string" || workspaceId.trim() === "") {
+    return false;
+  }
+  const workspacesPath = join(targetHome, "projects", "workspaces.json");
+  if (!existsSync(workspacesPath)) return false;
+  try {
+    const parsed = JSON.parse(readFileSync(workspacesPath, "utf8")) as { workspaces?: unknown };
+    const entries = Array.isArray(parsed)
+      ? parsed
+      : Array.isArray(parsed?.workspaces)
+        ? parsed.workspaces
+        : [];
+    for (const entry of entries) {
+      if (typeof entry !== "object" || entry === null) continue;
+      const item = entry as { workspaceId?: unknown; id?: unknown; archivedAt?: unknown };
+      const id = typeof item.workspaceId === "string" ? item.workspaceId : typeof item.id === "string" ? item.id : null;
+      if (id === workspaceId) {
+        return typeof item.archivedAt === "string" && item.archivedAt.trim() !== "";
+      }
+    }
+  } catch {
+    // ignore unreadable or malformed workspaces.json
+  }
+  return false;
+}
+
+/**
+ * Unarchives a previously archived Paseo workspace over the daemon's WebSocket
+ * (`workspace.recovery.restore.request` -> `workspace.recovery.restore.response`).
+ */
+export function restoreDaemonWorkspaceViaWs(home: string | undefined, workspaceId: string): Promise<DaemonReply> {
+  const targetHome = home ?? process.env.PASEO_HOME;
+  if (typeof targetHome !== "string" || targetHome.trim() === "" || typeof workspaceId !== "string" || workspaceId.trim() === "") {
+    return Promise.resolve({ ok: false, reason: "no daemon home or workspaceId to restore" });
+  }
+  const wsCall = daemonWsRequest(
+    targetHome,
+    { type: "workspace.recovery.restore.request", workspaceId },
+    "workspace.recovery.restore.response",
+  );
+  if (wsCall === null) return Promise.resolve({ ok: false, reason: "no daemon socket" });
+  return wsCall;
+}
+

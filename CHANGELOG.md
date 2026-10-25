@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.45] - 2026-10-26
+
+v0.0.45's one thing: **protecting opening `Supervisor` workspaces during `agent.session_open` workspace sweeps, self-healing archived workspaces (`workspace.recovery.restore.request` + `workspaces.open` / `daemon.agents.create` fallback) in `ensureSeat` and `spool` so `supervisor_dispatch_lead` never fails with `Workspace <id> has no available directory`, and declaring `capabilities: { all_providers: true }` on daemon WebSocket `hello` handshakes** (ADR 0017 §5 amendment).
+
+### Fixed
+
+- **Opening Session Workspace Protection in `agent.session_open` (`plugin/index.server.ts`, `plugin/server/surface-rpc.ts`)** — Because Paseo `0.13.0` fires `server.before("agent.session_open")` inside `buildLaunchContext` before the opening session is registered in `agentManager` (`daemon.agents.list()`), `plugin/index.server.ts` now passes `keepWorkspaceIds: [request.workspaceId]` to `sweepProjectWorkspaces`, and `resolveSweepWorkspaceSets` preserves any workspace hosting a live agent rooted at `project.root` or labeled for `project.slug`, preventing the sweep from archiving the newly opened `Supervisor` workspace 1–2s after launch.
+- **Archived Workspace Recovery & Multi-Tier Fallback in `ensureSeat` and `spool` (`plugin/server/surface-rpc.ts`, `plugin/server/spool.ts`, `plugin/server/daemon-cli.ts`)** — Added `isPaseoWorkspaceArchivedOnDisk` (`<home>/projects/workspaces.json`) and `restoreDaemonWorkspaceViaWs` (`workspace.recovery.restore.request` over WebSocket). When `daemon.workspaces.ref(workspaceId).agents.create(...)` throws (e.g., `Workspace <id> has no available directory` for an archived workspace), `ensureSeat` and `spool` (`spawn`) automatically restore the workspace or fall back through `registration.workspaceId`, `daemon.workspaces.open({ cwd: project.root })` / `daemon.workspaces.create(...)`, and `daemon.agents.create(...)`, healing `project.json`'s `workspaceId` in place.
+- **`capabilities: { all_providers: true }` on Daemon WebSocket `hello` Handshakes (`plugin/server/daemon-cli.ts`, `plugin/bin/driver.mjs`)** — Both `daemonWsRequestPayload` and `driver.mjs` now declare `capabilities: { all_providers: true }` in their WebSocket `hello` handshake so Paseo `0.13.0`'s `isProviderVisibleToClient` never filters out `antigravity`, `pi`, `copilot`, `omp`, or `factory-*` agents from WebSocket responses.
+
 ## [0.0.44] - 2026-10-26
 
 v0.0.44's one thing: **self-contained `<stateDir>/runtime-bin/` script staging, newest-managed-checkout resolution across Paseo `0.13.0` `updateSource` (`startExplicit` → `patchSource` → `removeVersion`), and real-git binary resolution (`resolveRealGitBinary`) in `bridge.mjs` so `<stateDir>/bin/*` wrappers and `lead_spawn_agent` worktree allocation never break after a plugin update** (ADR 0016 amendment).
