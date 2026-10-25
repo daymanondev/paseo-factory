@@ -98,7 +98,7 @@ test("src/roles-contract.ts is the single source of truth for Supervisor, Lead, 
   assert.equal(ROLE_PROMPTS.lead, renderRoleAppendSystem("lead"), "pi-home ROLE_PROMPTS.lead delegates to roles-contract");
 
   for (const surface of [leadContract, leadSeat, leadBootstrap, ROLE_PROMPTS.lead]) {
-    assert.match(surface, /contract --task <id> --workspace <dir> --gate <cmd> --artifact <path>/);
+    assert.match(surface, /contract --task <id> --workspace <dir> --gate <cmd> \[--artifact <path>\]/);
     assert.match(surface, /run <task>/);
     assert.match(surface, /accept <task> --attempt <n> --by lead/);
     assert.match(surface, /supervisor report --workspace "<project-root>" --message "<summary>"/);
@@ -130,14 +130,12 @@ test("Supervisor contract diagnoses run failures read-only and dispatches repair
   assert.match(contract, /immediately dispatch.*`supervisor_dispatch_lead`/);
 });
 
-test("Lead contracts scope dependency lockfiles and verify scaffold entrypoints", () => {
+test("Lead contracts follow the Outcome & Regression-Gate Law without pre-solving file scopes (ADR 0028)", () => {
   const contract = renderRoleContract("lead");
-  assert.match(contract, /Entrypoint Integration & Lockfile Law:/);
-  assert.match(contract, /`scope` includes `package\.json`.*corresponding lockfile/);
-  for (const lockfile of ["package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb"]) {
-    assert.ok(contract.includes(`\`${lockfile}\``), `includes ${lockfile}`);
-  }
-  assert.match(contract, /initial application scaffold or UI entrypoint.*`index\.html`.*`src\/main\.ts`.*explicitly.*`scope`.*verified by `checks`/);
+  assert.match(contract, /Outcome & Regression-Gate Law:/);
+  assert.match(contract, /desired behavioral outcome and regression invariants/);
+  assert.match(contract, /never pre-solve or handcuff which code files the working Agent may touch/);
+  assert.match(contract, /entrypoint integration.*`index\.html`.*`src\/main\.ts`.*AND the repository's existing test\/typecheck\/build suite/);
 });
 
 test("injectSessionEnv injects PASEO_FACTORY_SEAT=supervisor for normal-chat agentIds recorded in reg.dispatchers at <project-root> (v0.0.24, T-03)", (t) => {

@@ -341,7 +341,7 @@ export class LedgerAdmission {
         if (dispatch?.event === "spawn_dispatched" && dispatch.worktree !== undefined && existsSync(dispatch.worktree)) binding.worktree = dispatch.worktree;
         const execution = binding.worktree ?? root;
         const gates = events.filter((event) => event.event === "gate_finished");
-        binding.artifactPresent = gates.every((event) => event.event !== "gate_finished" || event.verdict !== "green" || (event.sha !== undefined && this.#git(execution, ["rev-parse", "HEAD"]) === event.sha && this.#git(execution, ["status", "--porcelain"]) === "" && inspectArtifact(execution, contract.artifact).present));
+        binding.artifactPresent = gates.every((event) => event.event !== "gate_finished" || event.verdict !== "green" || (event.sha !== undefined && this.#git(execution, ["rev-parse", "HEAD"]) === event.sha && this.#git(execution, ["status", "--porcelain"]) === "" && (contract.artifact.trim() === "" || inspectArtifact(execution, contract.artifact).present)));
         binding.files = events.flatMap((event) => {
           const prior = this.ledger.events.find((local) => local.event_id === event.event_id);
           const path = prior?.event === "gate_finished" ? prior.outputPath : prior?.event === "report_written" ? prior.path : undefined;

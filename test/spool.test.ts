@@ -358,13 +358,9 @@ test("handleSpoolRequest answers a spawn either way — dispatched rides ok, ref
   assert.equal(dispatched.ok, true);
   if (dispatched.ok) assert.match(dispatched.summary, /spawn dispatched for RUN-1 under claude/);
 
-  // Scope-mandatory: RUN-2 has no scope and the invocation carries two tasks.
-  const refused = await handleSpoolRequest(factory, { id: "r2", kind: "spawn", task: "RUN-2", provider: "claude", arity: 2 });
-  assert.equal(refused.ok, false);
-  if (!refused.ok) {
-    assert.equal(refused.code, "spawn-scope-mandatory");
-    assert.match(refused.message, /no scope/);
-  }
+  // ADR 0028 §2: unscoped contracts dispatch in parallel too (each Task runs in its own isolated Task worktree).
+  const dispatched2 = await handleSpoolRequest(factory, { id: "r2", kind: "spawn", task: "RUN-2", provider: "claude", arity: 2 });
+  assert.equal(dispatched2.ok, true);
 
   // Unknown task: refused with its line too — the plugin never dispatches blind.
   const ghost = await handleSpoolRequest(factory, { id: "r3", kind: "spawn", task: "GHOST", provider: "claude", arity: 1 });
@@ -374,7 +370,7 @@ test("handleSpoolRequest answers a spawn either way — dispatched rides ok, ref
   const spawnLines = factory.ledger.events.filter((e) => e.event === "spawn_dispatched" || e.event === "spawn_refused");
   assert.deepEqual(
     spawnLines.map((e) => `${e.event}:${e.task}`),
-    ["spawn_dispatched:RUN-1", "spawn_refused:RUN-2", "spawn_refused:GHOST"],
+    ["spawn_dispatched:RUN-1", "spawn_dispatched:RUN-2", "spawn_refused:GHOST"],
     "one ledger line per spawn request, either way",
   );
 });

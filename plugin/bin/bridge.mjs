@@ -991,18 +991,14 @@ const TOOL_DEFINITIONS = {
   lead_set_contract: {
     name: "lead_set_contract",
     description:
-      "Register a Task's immutable Contract (`gate`, `artifact`, optional `scope`, `skills`, `freshEyes`, `watch`, `description`) before spawning its working Agent.",
+      "Register a Task's immutable Contract (`gate`, optional `description`, `artifact`, `skills`, `freshEyes`, `watch`) before spawning its working Agent.",
     inputSchema: {
       type: "object",
       properties: {
         task: { type: "string", description: "Unique Task ID (letters, digits, '.', '_', '-')." },
-        gate: { type: "string", description: "Gate command to verify the Task." },
-        artifact: { type: "string", description: "Workspace-relative artifact path that must exist and be non-empty." },
+        gate: { type: "string", description: "Gate command to verify the Task's outcome and regression invariants." },
+        artifact: { type: "string", description: "Optional workspace-relative deliverable file path that must exist and be non-empty when specified." },
         base: { type: "string", description: "Optional base commit SHA." },
-        scope: {
-          oneOf: [{ type: "string" }, { type: "array", items: { type: "string" } }],
-          description: "Optional comma-separated path prefixes or array of path prefixes the task may touch.",
-        },
         skills: {
           type: "array",
           items: { type: "string" },
@@ -1014,10 +1010,10 @@ const TOOL_DEFINITIONS = {
             "Enable or disable the advisory fresh-eyes review pass on green verdicts (defaults to true for Lead when the freshEyes lane is usable; pass false to opt out).",
         },
         watch: { type: "boolean", description: "Enable the post-verdict watch pass." },
-        description: { type: "string", description: "Optional task assignment description." },
+        description: { type: "string", description: "Task assignment description stating desired outcome and regression invariants." },
         workspace: { type: "string", description: "Optional Project root path (defaults to current project root)." },
       },
-      required: ["task", "gate", "artifact"],
+      required: ["task", "gate"],
     },
   },
   lead_spawn_agent: {
@@ -1270,9 +1266,10 @@ async function handleToolCall(name, rawArgs) {
   if (name === "lead_set_contract") {
     const task = typeof args.task === "string" ? args.task.trim() : "";
     const gate = typeof args.gate === "string" ? args.gate.trim() : "";
-    const artifact = typeof args.artifact === "string" ? args.artifact.trim() : "";
-    if (task === "" || gate === "" || artifact === "") {
-      return toolResult("lead_set_contract requires non-empty `task`, `gate`, and `artifact`.", true);
+    const artifact =
+      typeof args.artifact === "string" && args.artifact.trim() !== "" ? args.artifact.trim() : undefined;
+    if (task === "" || gate === "") {
+      return toolResult("lead_set_contract requires non-empty `task` and `gate`.", true);
     }
     const workspace =
       typeof args.workspace === "string" && args.workspace.trim() !== ""
@@ -1301,7 +1298,7 @@ async function handleToolCall(name, rawArgs) {
       task,
       workspace,
       gate,
-      artifact,
+      ...(artifact === undefined ? {} : { artifact }),
       ...(base ? { base } : {}),
       ...(scope && scope.length > 0 ? { scope } : {}),
       ...(skills && skills.length > 0 ? { skills } : {}),
@@ -1444,8 +1441,12 @@ async function handleToolCall(name, rawArgs) {
       if (Array.isArray(contract?.scope) && contract.scope.length > 0) {
         promptParts.push(`Allowed scope: ${contract.scope.join(", ")}`);
       }
+      const artifactClause =
+        typeof contract?.artifact === "string" && contract.artifact.trim() !== ""
+          ? `produce artifact ${contract.artifact} and `
+          : "";
       promptParts.push(
-        `Execute task ${task}: produce artifact ${contract?.artifact ?? "(see contract)"} and pass gate \`${contract?.gate ?? ""}\`, commit on branch factory/${task}, and call agent_claim.`,
+        `Execute task ${task}: ${artifactClause}pass gate \`${contract?.gate ?? ""}\`, commit on branch factory/${task}, and call agent_claim.`,
       );
       const taskPrompt =
         typeof args.prompt === "string" && args.prompt.trim() !== ""

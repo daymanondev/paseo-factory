@@ -188,7 +188,7 @@ export function validateHistoryCausality(events: readonly LedgerEvent[]): string
       const claim = attempt?.events.find((item) => item.event === "claim_reported");
       if (event.event !== "contract_set" && !eventAllowsUnboundEpoch(event.event) && state.contract === undefined) reject("Task fact has no prior Contract");
       if (event.event === "contract_set") {
-        if (!text(event.workspace) || !isAbsolute(event.workspace) || !text(event.gate) || !text(event.artifact) || artifactPathProblem(event.artifact) !== undefined) reject("Contract has invalid Workspace, Gate or Artifact criteria");
+        if (!text(event.workspace) || !isAbsolute(event.workspace) || !text(event.gate) || typeof event.artifact !== "string" || (text(event.artifact) && artifactPathProblem(event.artifact) !== undefined)) reject("Contract has invalid Workspace, Gate or Artifact criteria");
         if (state.inFlightAttempt !== undefined) reject("Contract replaces an open Claim pipeline");
         if (state.acceptance !== undefined) reject("Contract follows Task acceptance");
       }
@@ -253,7 +253,7 @@ function bindingProblems(event: LedgerEvent, events: readonly LedgerEvent[], bin
     if (event.sha !== undefined && !binding.commits?.includes(event.sha)) reasons.push("Gate commit is unavailable in the verified local Workspace");
     const claim = events.find((candidate) => candidate.event === "claim_reported" && candidate.epoch_id === event.epoch_id && candidate.attempt === event.attempt);
     if (event.sha !== undefined && claim?.event === "claim_reported" && !/^[a-f0-9]+$/i.test(claim.sha) && !binding.claims?.some((resolution) => resolution.eventId === claim.event_id && resolution.sha === event.sha)) reasons.push("symbolic Claim has no demonstrated commit resolution; current HEAD cannot stand in for source evidence");
-    if (event.verdict === "green" && binding.artifactPresent !== true) reasons.push("green Gate Artifact is unavailable in the verified execution Workspace");
+    if (event.verdict === "green" && contract.artifact.trim() !== "" && binding.artifactPresent !== true) reasons.push("green Gate Artifact is unavailable in the verified execution Workspace");
   }
   if (event.event === "attempt_accepted") {
     const gate = events.findLast((candidate) => candidate.event === "gate_finished" && candidate.epoch_id === event.epoch_id && candidate.attempt === event.attempt);

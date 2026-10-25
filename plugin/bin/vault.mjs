@@ -610,7 +610,7 @@ function validateHistoryCausality(events) {
       const claim = attempt?.events.find((item) => item.event === "claim_reported");
       if (event.event !== "contract_set" && !eventAllowsUnboundEpoch(event.event) && state.contract === void 0) reject("Task fact has no prior Contract");
       if (event.event === "contract_set") {
-        if (!text(event.workspace) || !isAbsolute2(event.workspace) || !text(event.gate) || !text(event.artifact) || artifactPathProblem(event.artifact) !== void 0) reject("Contract has invalid Workspace, Gate or Artifact criteria");
+        if (!text(event.workspace) || !isAbsolute2(event.workspace) || !text(event.gate) || typeof event.artifact !== "string" || text(event.artifact) && artifactPathProblem(event.artifact) !== void 0) reject("Contract has invalid Workspace, Gate or Artifact criteria");
         if (state.inFlightAttempt !== void 0) reject("Contract replaces an open Claim pipeline");
         if (state.acceptance !== void 0) reject("Contract follows Task acceptance");
       }
@@ -672,7 +672,7 @@ function bindingProblems(event, events, binding, files) {
     if (event.sha !== void 0 && !binding.commits?.includes(event.sha)) reasons.push("Gate commit is unavailable in the verified local Workspace");
     const claim = events.find((candidate) => candidate.event === "claim_reported" && candidate.epoch_id === event.epoch_id && candidate.attempt === event.attempt);
     if (event.sha !== void 0 && claim?.event === "claim_reported" && !/^[a-f0-9]+$/i.test(claim.sha) && !binding.claims?.some((resolution) => resolution.eventId === claim.event_id && resolution.sha === event.sha)) reasons.push("symbolic Claim has no demonstrated commit resolution; current HEAD cannot stand in for source evidence");
-    if (event.verdict === "green" && binding.artifactPresent !== true) reasons.push("green Gate Artifact is unavailable in the verified execution Workspace");
+    if (event.verdict === "green" && contract.artifact.trim() !== "" && binding.artifactPresent !== true) reasons.push("green Gate Artifact is unavailable in the verified execution Workspace");
   }
   if (event.event === "attempt_accepted") {
     const gate = events.findLast((candidate) => candidate.event === "gate_finished" && candidate.epoch_id === event.epoch_id && candidate.attempt === event.attempt);
@@ -971,7 +971,7 @@ function liveWorkspaceConflict(ledger, workspace, task, myScope) {
   return void 0;
 }
 function scopesOverlap(a, b) {
-  if (a === void 0 || a.length === 0 || b === void 0 || b.length === 0) return "one contract is unscoped";
+  if (a === void 0 || a.length === 0 || b === void 0 || b.length === 0) return void 0;
   for (const mine of a) {
     for (const theirs of b) {
       if (scopeCoversFile([mine], theirs) || scopeCoversFile([theirs], mine)) return `${mine} \u2194 ${theirs}`;
@@ -1888,7 +1888,7 @@ var LedgerAdmission = class _LedgerAdmission {
         if (dispatch?.event === "spawn_dispatched" && dispatch.worktree !== void 0 && existsSync3(dispatch.worktree)) binding.worktree = dispatch.worktree;
         const execution = binding.worktree ?? root;
         const gates = events.filter((event) => event.event === "gate_finished");
-        binding.artifactPresent = gates.every((event) => event.event !== "gate_finished" || event.verdict !== "green" || event.sha !== void 0 && this.#git(execution, ["rev-parse", "HEAD"]) === event.sha && this.#git(execution, ["status", "--porcelain"]) === "" && inspectArtifact(execution, contract.artifact).present);
+        binding.artifactPresent = gates.every((event) => event.event !== "gate_finished" || event.verdict !== "green" || event.sha !== void 0 && this.#git(execution, ["rev-parse", "HEAD"]) === event.sha && this.#git(execution, ["status", "--porcelain"]) === "" && (contract.artifact.trim() === "" || inspectArtifact(execution, contract.artifact).present));
         binding.files = events.flatMap((event) => {
           const prior = this.ledger.events.find((local) => local.event_id === event.event_id);
           const path = prior?.event === "gate_finished" ? prior.outputPath : prior?.event === "report_written" ? prior.path : void 0;
@@ -2123,7 +2123,7 @@ function renderSeatCommandBlock(seat, cmdPrefix) {
   return [
     "Primary `paseo-factory` / `paseo_factory` MCP tools (prefer calling these directly):",
     "",
-    '  paseo-factory_lead_set_contract({ task: "<id>", gate: "<cmd>", artifact: "<path>", scope: "<p1,p2>", skills: ["tdd"], description: "<text>" })  (or lead_set_contract)',
+    '  paseo-factory_lead_set_contract({ task: "<id>", gate: "<cmd>", description: "<outcome + regression invariants>", skills: ["tdd"] })  (or lead_set_contract)',
     '  paseo-factory_lead_spawn_agent({ tasks: ["<id>"] })  (or lead_spawn_agent)',
     '  paseo-factory_lead_accept_task({ task: "<id>", attempt: <n> })  (or lead_accept_task)',
     '  paseo-factory_lead_repoke_agent({ task: "<id>" })  (or lead_repoke_agent)',
@@ -2133,7 +2133,7 @@ function renderSeatCommandBlock(seat, cmdPrefix) {
     "",
     "Day-one Lead commands (the Owner CLI \u2014 never on a Worker agent's PATH):",
     "",
-    `  ${cmdPrefix} contract --task <id> --workspace <dir> --gate <cmd> --artifact <path> [--scope <p1,p2>] [--skills <s1,s2>] [--watch] [--fresh-eyes] [--description <text>]`,
+    `  ${cmdPrefix} contract --task <id> --workspace <dir> --gate <cmd> [--artifact <path>] [--skills <s1,s2>] [--watch] [--fresh-eyes] [--description <text>]`,
     `  ${cmdPrefix} run <task> [<task>...]`,
     `  ${cmdPrefix} status`,
     `  ${cmdPrefix} lanes get`,
@@ -2163,10 +2163,10 @@ function renderRoleContract(role, options = {}) {
   }
   if (role === "lead") {
     return [
-      `You are the Lead seat of the paseo-factory verification loop${projectSuffix}: read and inspect the repository, decompose the Supervisor's directive into Tasks with isolated write scopes, set each Contract (gate, artifact, scope, skills) with \`paseo-factory_lead_set_contract\` / \`lead_set_contract\` (or \`${cmdPrefix} contract\`), and spawn Working Agents with \`paseo-factory_lead_spawn_agent\` / \`lead_spawn_agent\` (or \`${cmdPrefix} run\`).`,
+      `You are the Lead seat of the paseo-factory verification loop${projectSuffix}: read and inspect the repository, decompose the Supervisor's directive into Tasks around clear Outcomes and Regression Gates, set each Contract (gate, description, optional artifact, skills) with \`paseo-factory_lead_set_contract\` / \`lead_set_contract\` (or \`${cmdPrefix} contract\`), and spawn Working Agents with \`paseo-factory_lead_spawn_agent\` / \`lead_spawn_agent\` (or \`${cmdPrefix} run\`).`,
       "Seat write fence: Never write or commit product source code directly on `<project-root>`; all product source code is written by spawned working Agents inside isolated Task worktrees. You may update this repository's AGENTS.md or CONTEXT.md (and docs/** / .scratch/**) when the Owner ratifies a rule; working Agents never may.",
-      "Entrypoint Integration & Lockfile Law: Whenever a Contract's `scope` includes `package.json`, also include the corresponding lockfile (`package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, or `bun.lockb`) in `scope`. Whenever decomposing an initial application scaffold or UI entrypoint, ensure the root HTML/bootstrap entrypoint (`index.html`, `src/main.ts`, etc.) is explicitly included in a Task's `scope` and verified by `checks`.",
-      `You may accept an intermediate Task's green, CONCERN-free Attempt via \`paseo-factory_lead_accept_task\` / \`lead_accept_task\` (or \`${cmdPrefix} accept --by lead\`); a CONCERN or a needs-human task is never yours to accept \u2014 correct it or escalate. Calling \`paseo-factory_lead_set_contract\` / \`lead_set_contract\` again on any unaccepted Task updates its Contract (\`scope\`, \`gate\`, \`base\`, \`description\`) and opens a fresh 3-attempt epoch.`,
+      "Outcome & Regression-Gate Law: Specify the desired behavioral outcome and regression invariants in each Contract's `description` \u2014 never pre-solve or handcuff which code files the working Agent may touch inside its isolated Task worktree. Every Contract's `gate` command must verify both the new behavior (and entrypoint integration such as `index.html` / `src/main.ts` when applicable) AND the repository's existing test/typecheck/build suite so legacy features are never broken.",
+      `You may accept an intermediate Task's green, CONCERN-free Attempt via \`paseo-factory_lead_accept_task\` / \`lead_accept_task\` (or \`${cmdPrefix} accept --by lead\`); a CONCERN or a needs-human task is never yours to accept \u2014 correct it or escalate. Calling \`paseo-factory_lead_set_contract\` / \`lead_set_contract\` again on any unaccepted Task updates its Contract (\`gate\`, \`base\`, \`description\`, \`artifact\`) and opens a fresh 3-attempt epoch.`,
       `Fire-and-End-Turn Law: Inspect the Verdict / Fresh-eyes / Watch / Report evidence, and when the directive's wave completes or needs an Owner decision, call \`paseo-factory_lead_report_to_supervisor\` / \`lead_report_to_supervisor\` (or \`${cmdPrefix} supervisor report --workspace "<project-root>" --message "<summary>"\`) and immediately end your turn (never run \`sleep\` or poll files).`,
       "",
       ...renderSeatCommandBlock("lead", cmdPrefix),
