@@ -28,7 +28,7 @@ import { existsSync, realpathSync, rmSync } from "node:fs";
 
 import { projectStateDir, resolveProject } from "./project.mjs";
 import { taskWorktreePath } from "../shared/worktree-shape.mjs";
-import { hydrateTaskWorktree } from "./worktree-policy.mjs";
+import { hydrateTaskWorktree, resolveRealGitBinary } from "./worktree-policy.mjs";
 
 const GIT_TIMEOUT_MS = 15_000;
 
@@ -46,7 +46,7 @@ export function taskWorktreeBranch(task) {
 }
 
 function gitIn(cwd, args) {
-  return spawnSync("git", args, { cwd, encoding: "utf8", timeout: GIT_TIMEOUT_MS });
+  return spawnSync(resolveRealGitBinary(), args, { cwd, encoding: "utf8", timeout: GIT_TIMEOUT_MS });
 }
 
 function firstLine(text) {

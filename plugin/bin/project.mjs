@@ -10,6 +10,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { basename, isAbsolute, join, resolve } from "node:path";
+import { resolveRealGitBinary } from "./worktree-policy.mjs";
 
 const GIT_TIMEOUT_MS = 10_000;
 
@@ -28,7 +29,7 @@ export function projectStateDir(stateDir, projectSlug) {
 export function resolveProject(cwd) {
   let stdout;
   try {
-    stdout = execFileSync("git", ["rev-parse", "--show-toplevel", "--git-common-dir"], {
+    stdout = execFileSync(resolveRealGitBinary(), ["rev-parse", "--show-toplevel", "--git-common-dir"], {
       cwd,
       encoding: "utf8",
       timeout: GIT_TIMEOUT_MS,

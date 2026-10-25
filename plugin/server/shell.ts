@@ -15,13 +15,80 @@
  * exec-time net for PATH-resolved dangerous git (the ask-time net is the
  * choke in `plugin/server/choke.ts`).
  */
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, join } from "node:path";
 import type { PluginSessionOpenRequest } from "@getpaseo/plugin/server";
 
 /** Where the generated `factory-claim` wrapper lives. */
 export function claimCliBinDir(stateDir: string): string {
   return join(stateDir, "bin");
+}
+
+/**
+ * Self-contained staging directory for `plugin/bin/*.mjs` runtime scripts under
+ * `<stateDir>/runtime-bin` (kept separate from `<stateDir>/bin` so only the 12
+ * wrapper executables sit on agent PATHs). Staging scripts here ensures
+ * `<stateDir>/bin/*` wrappers survive when Paseo's `PluginService.updateSource`
+ * deletes an older `<paseoHome>/plugins/paseo-factory/<uuid>` checkout.
+ */
+export function runtimeBinDir(stateDir: string): string {
+  return join(stateDir, "runtime-bin");
+}
+
+function syncFileIfChanged(srcPath: string, destPath: string, mode = 0o755): void {
+  const body = readFileSync(srcPath);
+  if (existsSync(destPath)) {
+    try {
+      if (readFileSync(destPath).equals(body)) return;
+    } catch {
+      // rewrite if unreadable
+    }
+  }
+  writeFileSync(destPath, body);
+  chmodSync(destPath, mode);
+}
+
+/**
+ * Stages `plugin/bin/*.mjs` into `<stateDir>/runtime-bin/` (and
+ * `plugin/shared/*.mjs` into `<stateDir>/shared/` for `../shared/*` relative
+ * imports) and returns `<stateDir>/runtime-bin`. Falls back to
+ * `join(pluginDir, "bin")` only when `pluginDir/bin` is a synthetic test
+ * directory with no `.mjs` files and `<stateDir>/runtime-bin` has not been
+ * populated.
+ */
+export function stagePluginBinScripts(stateDir: string, pluginDir: string): string {
+  const srcBinDir = join(pluginDir, "bin");
+  const stagedBinDir = runtimeBinDir(stateDir);
+  let mjsFiles: string[] = [];
+  try {
+    mjsFiles = readdirSync(srcBinDir).filter((name) => name.endsWith(".mjs"));
+  } catch {
+    mjsFiles = [];
+  }
+  if (mjsFiles.length > 0) {
+    mkdirSync(stagedBinDir, { recursive: true });
+    for (const name of mjsFiles) {
+      syncFileIfChanged(join(srcBinDir, name), join(stagedBinDir, name), 0o755);
+    }
+    const srcSharedDir = join(pluginDir, "shared");
+    try {
+      const sharedFiles = readdirSync(srcSharedDir).filter((name) => name.endsWith(".mjs"));
+      if (sharedFiles.length > 0) {
+        const destSharedDir = join(stateDir, "shared");
+        mkdirSync(destSharedDir, { recursive: true });
+        for (const name of sharedFiles) {
+          syncFileIfChanged(join(srcSharedDir, name), join(destSharedDir, name), 0o644);
+        }
+      }
+    } catch {
+      // optional shared dir in synthetic test fixtures
+    }
+    return stagedBinDir;
+  }
+  if (existsSync(join(stagedBinDir, "git-shim.mjs")) || existsSync(join(stagedBinDir, "factory-claim.mjs"))) {
+    return stagedBinDir;
+  }
+  return srcBinDir;
 }
 
 /**
@@ -58,9 +125,10 @@ function shellQuote(value: string): string {
  * component dies silently).
  */
 export function ensureClaimCli(stateDir: string, pluginDir: string, nodeBinary: string): void {
+  const scriptDir = stagePluginBinScripts(stateDir, pluginDir);
   ensureGeneratedWrapper({
     target: join(claimCliBinDir(stateDir), "factory-claim"),
-    script: join(pluginDir, "bin", "factory-claim.mjs"),
+    script: join(scriptDir, "factory-claim.mjs"),
     stateDir,
     nodeBinary,
   });
@@ -75,13 +143,14 @@ export function ensureClaimCli(stateDir: string, pluginDir: string, nodeBinary: 
  */
 export function ensureGitShim(stateDir: string, pluginDir: string, nodeBinary: string): void {
   const binDir = claimCliBinDir(stateDir);
+  const scriptDir = stagePluginBinScripts(stateDir, pluginDir);
   ensureGeneratedWrapper({
     target: join(binDir, "git"),
-    script: join(pluginDir, "bin", "git-shim.mjs"),
+    script: join(scriptDir, "git-shim.mjs"),
     stateDir,
     nodeBinary,
   });
-  const execShimScript = join(pluginDir, "bin", "exec-shim.mjs");
+  const execShimScript = join(scriptDir, "exec-shim.mjs");
   for (const tool of ["pkill", "kill", "killall", "paseo", "gh", "npm", "npx", "pnpm", "yarn", "bun"] as const) {
     ensureGeneratedWrapper({
       target: join(binDir, tool),

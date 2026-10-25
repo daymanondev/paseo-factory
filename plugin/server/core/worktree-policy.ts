@@ -1,10 +1,58 @@
 import { spawnSync } from "node:child_process";
-import { cpSync, lstatSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { accessSync, constants as fsConstants, cpSync, lstatSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { normalizeScopePath, scopeGlob } from "./scope-policy.ts";
 
+const GIT_FALLBACKS = ["/opt/homebrew/bin/git", "/usr/local/bin/git", "/usr/bin/git"];
+
+function isExecutableFile(path: string): boolean {
+  try {
+    accessSync(path, fsConstants.X_OK);
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function isFactoryShimGit(candidate: string, skipDirs: ReadonlySet<string>): boolean {
+  const dir = dirname(candidate);
+  if (skipDirs.has(dir) || dir.endsWith("/plugin-state/paseo-factory/bin")) return true;
+  try {
+    const head = readFileSync(candidate, "utf8").slice(0, 512);
+    if (head.includes("git-shim.mjs") || head.includes("FACTORY_STATE_DIR=")) return true;
+  } catch {
+    // binary or unreadable
+  }
+  return false;
+}
+
+/**
+ * Resolves the real system `git` binary, skipping `<stateDir>/bin`,
+ * `<stateDir>/runtime-bin`, `dirname(process.argv[1])`, and any factory `git`
+ * shim wrapper on `PATH` so internal worktree/project metadata commands never
+ * route through `<stateDir>/bin/git`.
+ */
+export function resolveRealGitBinary(stateDirHint?: string): string {
+  const skip = new Set<string>();
+  for (const s of [stateDirHint, process.env.FACTORY_STATE_DIR, process.env.PASEO_FACTORY_STATE_DIR]) {
+    if (typeof s === "string" && s.trim() !== "") {
+      skip.add(join(s.trim(), "bin"));
+      skip.add(join(s.trim(), "runtime-bin"));
+    }
+  }
+  if (typeof process.argv[1] === "string" && process.argv[1] !== "") {
+    skip.add(dirname(process.argv[1]));
+  }
+  for (const dir of (process.env.PATH ?? "").split(delimiter)) {
+    if (dir === "" || dir === "." || skip.has(dir)) continue;
+    const candidate = join(dir, "git");
+    if (isExecutableFile(candidate) && !isFactoryShimGit(candidate, skip)) return candidate;
+  }
+  return GIT_FALLBACKS.find(isExecutableFile) ?? "git";
+}
+
 function gitIn(cwd: string, args: string[]) {
-  return spawnSync("git", args, { cwd, encoding: "utf8", timeout: 15_000 });
+  return spawnSync(resolveRealGitBinary(), args, { cwd, encoding: "utf8", timeout: 15_000 });
 }
 
 /** Include patterns select whole directory prefixes or the same glob semantics used by scope fences. */

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { pluginDirFor, resolvePaseoHome, stateDirFor } from "../plugin/server/paths.ts";
 import { claimCliBinDir, ensureClaimCli, ensureGitShim, injectClaimCliPath } from "../plugin/server/shell.ts";
@@ -385,4 +385,84 @@ test("injectClaimCliPath moves an existing factory bin ahead of real binaries an
   const next = injectClaimCliPath(request, "/state/bin");
   assert.equal(next.env.PATH, "/state/bin:/other/bin:/usr/bin");
   assert.equal(injectClaimCliPath(next, "/state/bin"), next);
+});
+
+test("pluginDirFor resolves the newest active managed checkout across Paseo updateSource (startExplicit -> patchSource -> removeVersion)", (t) => {
+  const home = makeTempDir("plugin-dir-managed-");
+  disposeDir(t, home);
+  const oldUuid = "4a2d08ae-314c-4be6-a586-73a51c6a8577";
+  const newUuid = "7615f22f-7223-4bf3-a112-e94361435609";
+  const oldDir = join(home, "plugins", "paseo-factory", oldUuid, "checkout", "plugin");
+  const newDir = join(home, "plugins", "paseo-factory", newUuid, "checkout", "plugin");
+  mkdirSync(join(oldDir, "bin"), { recursive: true });
+  writeFileSync(join(oldDir, "paseo.plugin.json"), JSON.stringify({ id: "paseo-factory" }));
+
+  // Config still points to oldUuid while Paseo's updateSource places newUuid and calls startExplicit before patchSource
+  writeFileSync(
+    join(home, "config.json"),
+    JSON.stringify({
+      plugins: {
+        "paseo-factory": {
+          source: "directory",
+          path: oldDir,
+          enabled: true,
+        },
+      },
+    }),
+  );
+  assert.equal(pluginDirFor(home), oldDir, "when only oldUuid exists, resolves oldDir");
+
+  // Place newUuid with a newer mtime on its versionRoot
+  mkdirSync(join(newDir, "bin"), { recursive: true });
+  writeFileSync(join(newDir, "paseo.plugin.json"), JSON.stringify({ id: "paseo-factory" }));
+  const futureTime = new Date(Date.now() + 10_000);
+  // Touch the new version directory so its mtime is strictly newer
+  writeFileSync(join(home, "plugins", "paseo-factory", newUuid, "marker"), "new");
+  utimesSync(join(home, "plugins", "paseo-factory", newUuid), futureTime, futureTime);
+  utimesSync(newDir, futureTime, futureTime);
+
+  assert.equal(
+    pluginDirFor(home),
+    newDir,
+    "during startExplicit (before patchSource updates config.json), pluginDirFor selects the newly placed managed checkout",
+  );
+
+  // After removeVersion deletes oldUuid, even if config.json was stale, pluginDirFor still resolves newDir
+  rmSync(join(home, "plugins", "paseo-factory", oldUuid), { recursive: true, force: true });
+  assert.equal(pluginDirFor(home), newDir, "after removeVersion deletes oldUuid, pluginDirFor resolves the surviving managed checkout");
+});
+
+test("ensureClaimCli and ensureGitShim stage self-contained runtime-bin scripts so <stateDir>/bin/* survives deletion of the old plugin checkout UUID", (t) => {
+  const dir = makeTempDir("self-contained-bin-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const volatilePluginDir = join(dir, "plugins", "paseo-factory", "4a2d08ae-314c-4be6-a586-73a51c6a8577", "checkout", "plugin");
+  cpSync(join(repoRoot, "plugin", "bin"), join(volatilePluginDir, "bin"), { recursive: true });
+
+  ensureClaimCli(stateDir, volatilePluginDir, process.execPath);
+  ensureGitShim(stateDir, volatilePluginDir, process.execPath);
+
+  // Simulate Paseo's managedSources.removeVersion deleting the old UUID directory after plugin update
+  rmSync(volatilePluginDir, { recursive: true, force: true });
+  assert.equal(existsSync(volatilePluginDir), false, "old plugin checkout directory was deleted");
+
+  // <stateDir>/bin/ must still hold only the 12 wrapper executables
+  assert.deepEqual(
+    readdirSync(claimCliBinDir(stateDir)).sort(),
+    ["bun", "factory-claim", "gh", "git", "kill", "killall", "npm", "npx", "paseo", "pkill", "pnpm", "yarn"],
+  );
+
+  // And <stateDir>/bin/git must still execute cleanly without MODULE_NOT_FOUND!
+  const ws = join(dir, "ws");
+  mkdirSync(ws, { recursive: true });
+  writeFileSync(join(ws, "README.md"), "# ws\n");
+  gitCommitAll(ws, "init");
+  const gitWrapper = join(claimCliBinDir(stateDir), "git");
+  const pathWithShim = `${claimCliBinDir(stateDir)}${delimiter}${process.env.PATH ?? "/usr/bin:/bin"}`;
+  const statusOut = spawnSync(gitWrapper, ["status", "--short"], {
+    cwd: ws,
+    encoding: "utf8",
+    env: { ...process.env, FACTORY_STATE_DIR: stateDir, PATH: pathWithShim, PASEO_FACTORY_SEAT: "lead" },
+  });
+  assert.equal(statusOut.status, 0, `git wrapper failed after plugin checkout deletion: ${statusOut.stderr}`);
 });

@@ -6,9 +6,9 @@
  * provisions `<agyPluginsDir>/paseo-factory/{plugin.json,mcp_config.json,hooks.json}`
  * alongside `<stateDir>/bin/agy-pre-tool-hook.mjs` and `<stateDir>/bin/bridge.mjs`.
  */
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isElectronNodeBinary } from "./pi-home.ts";
 
 export interface ProvisionAgyPluginOptions {
@@ -49,9 +49,49 @@ function defaultRepoBinDir(): string {
   return "";
 }
 
+function resolveNewestManagedCheckout(recordedPath: string, paseoHome?: string): string {
+  const homes = paseoHome ? [paseoHome] : [resolve(recordedPath, "../../../..")];
+  for (const home of homes) {
+    const managedRoot = join(home, "plugins", "paseo-factory");
+    const rel = relative(managedRoot, recordedPath);
+    if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) continue;
+    const parts = rel.split(sep);
+    const subpath = parts.slice(1).join(sep);
+    let entries;
+    try {
+      entries = readdirSync(managedRoot, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    let bestPath: string | undefined;
+    let bestMtime = -1;
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+      const versionDir = join(managedRoot, entry.name);
+      const candidate = subpath !== "" ? join(versionDir, subpath) : versionDir;
+      if (!existsSync(candidate)) continue;
+      let mtime = 0;
+      try {
+        mtime = Math.max(statSync(versionDir).mtimeMs, statSync(candidate).mtimeMs);
+      } catch {
+        continue;
+      }
+      if (mtime > bestMtime || (mtime === bestMtime && candidate !== recordedPath)) {
+        bestMtime = mtime;
+        bestPath = candidate;
+      }
+    }
+    if (bestPath !== undefined) return bestPath;
+  }
+  return recordedPath;
+}
+
 function resolvePluginBinDir(stateDir: string, pluginDir?: string): string {
-  if (pluginDir !== undefined && existsSync(join(pluginDir, "bin"))) {
-    return join(pluginDir, "bin");
+  if (pluginDir !== undefined) {
+    const resolved = resolveNewestManagedCheckout(pluginDir);
+    if (existsSync(join(resolved, "bin"))) {
+      return join(resolved, "bin");
+    }
   }
   const configCandidates = [
     resolve(stateDir, "../..", "config.json"),
@@ -65,12 +105,19 @@ function resolvePluginBinDir(stateDir: string, pluginDir?: string): string {
         plugins?: Record<string, { path?: unknown }>;
       };
       const recordedPath = cfg.plugins?.["paseo-factory"]?.path;
-      if (typeof recordedPath === "string" && existsSync(join(recordedPath, "bin"))) {
-        return join(recordedPath, "bin");
+      if (typeof recordedPath === "string") {
+        const resolved = resolveNewestManagedCheckout(recordedPath, dirname(configPath));
+        if (existsSync(join(resolved, "bin"))) {
+          return join(resolved, "bin");
+        }
       }
     } catch {
       // ignore unreadable config.json
     }
+  }
+  const stagedRuntimeBin = join(stateDir, "runtime-bin");
+  if (existsSync(join(stagedRuntimeBin, "bridge.mjs"))) {
+    return stagedRuntimeBin;
   }
   return defaultRepoBinDir();
 }
@@ -93,6 +140,23 @@ export function ensureFactoryBinScripts(stateDir: string, pluginDir?: string): {
     if (existsSync(srcHook)) {
       copyFileSync(srcHook, agyHookBinPath);
       chmodSync(agyHookBinPath, 0o755);
+    }
+    const stagedRuntimeBin = join(stateDir, "runtime-bin");
+    if (resolve(sourceBinDir) !== resolve(stagedRuntimeBin)) {
+      try {
+        const mjsFiles = readdirSync(sourceBinDir).filter((name) => name.endsWith(".mjs"));
+        if (mjsFiles.length > 0) {
+          mkdirSync(stagedRuntimeBin, { recursive: true });
+          for (const name of mjsFiles) {
+            const srcFile = join(sourceBinDir, name);
+            const destFile = join(stagedRuntimeBin, name);
+            copyFileSync(srcFile, destFile);
+            chmodSync(destFile, 0o755);
+          }
+        }
+      } catch {
+        // ignore if sourceBinDir is not listable
+      }
     }
   }
   return { bridgeBinPath, agyHookBinPath };

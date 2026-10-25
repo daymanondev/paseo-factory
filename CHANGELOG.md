@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.44] - 2026-10-26
+
+v0.0.44's one thing: **self-contained `<stateDir>/runtime-bin/` script staging, newest-managed-checkout resolution across Paseo `0.13.0` `updateSource` (`startExplicit` → `patchSource` → `removeVersion`), and real-git binary resolution (`resolveRealGitBinary`) in `bridge.mjs` so `<stateDir>/bin/*` wrappers and `lead_spawn_agent` worktree allocation never break after a plugin update** (ADR 0016 amendment).
+
+### Fixed
+
+- **Self-Contained `<stateDir>/runtime-bin/` Staging (`plugin/server/shell.ts`, `src/agy-home.ts`)** — `ensureClaimCli`, `ensureGitShim`, and `ensureFactoryBinScripts` now stage `plugin/bin/*.mjs` into `<stateDir>/runtime-bin/` (and `plugin/shared/*.mjs` into `<stateDir>/shared/`) and point all 12 `<stateDir>/bin/*` wrappers (`git`, `factory-claim`, `npm`, `npx`, `pnpm`, `yarn`, `bun`, `pkill`, `kill`, `killall`, `paseo`, `gh`) at `<stateDir>/runtime-bin/<script>.mjs`, eliminating `MODULE_NOT_FOUND` failures when Paseo deletes an outgoing `<paseoHome>/plugins/paseo-factory/<old-uuid>` checkout directory.
+- **Newest Managed Checkout Resolution Across Paseo `updateSource` (`plugin/server/paths.ts`, `src/agy-home.ts`, `plugin/index.server.ts`)** — Because Paseo `0.13.0`'s `PluginService.updateSource` calls `startExplicit(pluginId, candidate.directory)` before `patchSource(...)` updates `config.json` and before `removeVersion(...)` deletes `<old-uuid>`, `pluginDirFor(paseoHome)` and `resolvePluginBinDir` now scan `<paseoHome>/plugins/paseo-factory/` for the newest existing sibling `<versionId>/<subpath>` directory, and `plugin/index.server.ts` re-evaluates and re-syncs plugin artifacts after `contribute()` ready and before `agent.create` / `agent.session_open`.
+- **Real System `git` Binary Resolution in `bridge.mjs` & Worktree Allocation (`src/worktree-policy.ts`, `plugin/bin/bridge.mjs`, `plugin/bin/project.mjs`, `plugin/bin/task-worktree.mjs`, `src/roles-contract.ts`)** — Added `resolveRealGitBinary` to skip `<stateDir>/bin`, `<stateDir>/runtime-bin`, and any factory `git` shim wrapper on `PATH` so `resolveProjectFromDir` and `allocateTaskWorktree` never route internal repository/worktree queries through `<stateDir>/bin/git`, and updated the `Lead` role contract to report unrecoverable `lead_set_contract` / `lead_spawn_agent` infrastructure blockers via `lead_report_to_supervisor`.
+
 ## [0.0.43] - 2026-10-25
 
 v0.0.43's one thing: **Antigravity (`agy`) `PreToolUse` `protojson` output and `toolCall` input compatibility (`plugin/bin/agy-pre-tool-hook.mjs`), JSON-string `arguments` coercion in `plugin/bin/bridge.mjs`, and direct Turn-1 `supervisor_dispatch_lead` delegation when the Owner provides a complete specification** (ADR 0016 amendment).

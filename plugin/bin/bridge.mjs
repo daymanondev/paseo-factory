@@ -159,9 +159,10 @@ function readCorrelationsFile(stateDir) {
   }
 }
 
-function resolveProjectFromDir(cwd) {
+function resolveProjectFromDir(cwd, stateDirHint) {
+  const gitBin = worktreePolicy.resolveRealGitBinary(stateDirHint);
   try {
-    const stdout = execFileSync("git", ["rev-parse", "--show-toplevel", "--git-common-dir"], {
+    const stdout = execFileSync(gitBin, ["rev-parse", "--show-toplevel", "--git-common-dir"], {
       cwd,
       encoding: "utf8",
       timeout: GIT_TIMEOUT_MS,
@@ -174,8 +175,11 @@ function resolveProjectFromDir(cwd) {
     const commonDirAbs = isAbsolute(commonDirRaw) ? commonDirRaw : resolve(cwd, commonDirRaw);
     const gitCommonDir = realpathSync(commonDirAbs);
     const hash = createHash("sha1").update(gitCommonDir).digest("hex").slice(0, 6);
+    resolveProjectFromDir.lastError = "";
     return { root, gitCommonDir, slug: `${basename(root)}-${hash}` };
-  } catch {
+  } catch (err) {
+    const stderr = typeof err?.stderr === "string" && err.stderr.trim() !== "" ? err.stderr.trim().split("\n")[0] : "";
+    resolveProjectFromDir.lastError = stderr || (err instanceof Error ? err.message : String(err));
     return null;
   }
 }
@@ -245,7 +249,7 @@ function resolveBridgeContext() {
   let projectRoot = record?.projectRoot;
 
   if ((!projectSlug || !projectRoot) && workspace) {
-    const resolved = resolveProjectFromDir(workspace);
+    const resolved = resolveProjectFromDir(workspace, stateDir);
     if (resolved) {
       if (!projectSlug) projectSlug = resolved.slug;
       if (!projectRoot) projectRoot = resolved.root;
@@ -731,9 +735,11 @@ function formatFactoryStatus(stateDir, workspaceFilter) {
 }
 
 function allocateTaskWorktree(stateDir, contract, task, events = []) {
-  const resolved = resolveProjectFromDir(contract.workspace);
+  const gitBin = worktreePolicy.resolveRealGitBinary(stateDir);
+  const resolved = resolveProjectFromDir(contract.workspace, stateDir);
   if (!resolved) {
-    return { ok: false, reason: `workspace "${contract.workspace}" does not resolve to a git repository` };
+    const detail = resolveProjectFromDir.lastError ? ` (${resolveProjectFromDir.lastError})` : "";
+    return { ok: false, reason: `workspace "${contract.workspace}" does not resolve to a git repository${detail}` };
   }
   let isRoot = false;
   try {
@@ -752,7 +758,7 @@ function allocateTaskWorktree(stateDir, contract, task, events = []) {
     events.some((e) => typeof e.seq === "number" && e.seq > contractSeq && e.event === "attempt_accepted") &&
     !events.some((e) => typeof e.seq === "number" && e.seq > contractSeq && e.task === task && e.event === "claim_reported");
   if (upstreamLandedAfterContract || typeof baseCommit !== "string" || !/^[0-9a-f]{40}$/i.test(baseCommit)) {
-    const headOut = spawnSync("git", ["rev-parse", "HEAD"], { cwd: resolved.root, encoding: "utf8", timeout: GIT_TIMEOUT_MS });
+    const headOut = spawnSync(gitBin, ["rev-parse", "HEAD"], { cwd: resolved.root, encoding: "utf8", timeout: GIT_TIMEOUT_MS });
     if (headOut.status !== 0) {
       return { ok: false, reason: `cannot resolve HEAD in ${resolved.root}` };
     }
@@ -761,11 +767,11 @@ function allocateTaskWorktree(stateDir, contract, task, events = []) {
   const worktreePath = join(stateDir, "projects", resolved.slug, "worktrees", task);
   const branch = `factory/${task}`;
   if (existsSync(worktreePath)) {
-    const branchOut = spawnSync("git", ["-C", worktreePath, "rev-parse", "--abbrev-ref", "HEAD"], {
+    const branchOut = spawnSync(gitBin, ["-C", worktreePath, "rev-parse", "--abbrev-ref", "HEAD"], {
       encoding: "utf8",
       timeout: GIT_TIMEOUT_MS,
     });
-    const ancestorOut = spawnSync("git", ["-C", worktreePath, "merge-base", "--is-ancestor", baseCommit, "HEAD"], {
+    const ancestorOut = spawnSync(gitBin, ["-C", worktreePath, "merge-base", "--is-ancestor", baseCommit, "HEAD"], {
       encoding: "utf8",
       timeout: GIT_TIMEOUT_MS,
     });
@@ -773,19 +779,19 @@ function allocateTaskWorktree(stateDir, contract, task, events = []) {
       worktreePolicy.hydrateTaskWorktree(resolved.root, worktreePath, { copyIncludes: false });
       return { ok: true, cwd: worktreePath, branch, worktree: worktreePath, reused: true };
     }
-    const rmOut = spawnSync("git", ["worktree", "remove", "--force", worktreePath], {
+    const rmOut = spawnSync(gitBin, ["worktree", "remove", "--force", worktreePath], {
       cwd: resolved.root,
       encoding: "utf8",
       timeout: GIT_TIMEOUT_MS,
     });
     if (rmOut.status !== 0) {
       rmSync(worktreePath, { recursive: true, force: true });
-      spawnSync("git", ["worktree", "prune"], { cwd: resolved.root, encoding: "utf8", timeout: GIT_TIMEOUT_MS });
+      spawnSync(gitBin, ["worktree", "prune"], { cwd: resolved.root, encoding: "utf8", timeout: GIT_TIMEOUT_MS });
     }
   } else {
-    spawnSync("git", ["worktree", "prune"], { cwd: resolved.root, encoding: "utf8", timeout: GIT_TIMEOUT_MS });
+    spawnSync(gitBin, ["worktree", "prune"], { cwd: resolved.root, encoding: "utf8", timeout: GIT_TIMEOUT_MS });
   }
-  const addOut = spawnSync("git", ["worktree", "add", "-B", branch, worktreePath, baseCommit], {
+  const addOut = spawnSync(gitBin, ["worktree", "add", "-B", branch, worktreePath, baseCommit], {
     cwd: resolved.root,
     encoding: "utf8",
     timeout: GIT_TIMEOUT_MS,
@@ -826,6 +832,7 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 var worktree_policy_exports = {};
 __export(worktree_policy_exports, {
   hydrateTaskWorktree: () => hydrateTaskWorktree,
+  resolveRealGitBinary: () => resolveRealGitBinary,
   worktreeIncludeMatches: () => worktreeIncludeMatches
 });
 module.exports = __toCommonJS(worktree_policy_exports);
@@ -855,8 +862,45 @@ function scopeGlob(pattern) {
 }
 
 // src/worktree-policy.ts
+var GIT_FALLBACKS = ["/opt/homebrew/bin/git", "/usr/local/bin/git", "/usr/bin/git"];
+function isExecutableFile(path) {
+  try {
+    (0, import_node_fs.accessSync)(path, import_node_fs.constants.X_OK);
+    return (0, import_node_fs.statSync)(path).isFile();
+  } catch {
+    return false;
+  }
+}
+function isFactoryShimGit(candidate, skipDirs) {
+  const dir = (0, import_node_path.dirname)(candidate);
+  if (skipDirs.has(dir) || dir.endsWith("/plugin-state/paseo-factory/bin")) return true;
+  try {
+    const head = (0, import_node_fs.readFileSync)(candidate, "utf8").slice(0, 512);
+    if (head.includes("git-shim.mjs") || head.includes("FACTORY_STATE_DIR=")) return true;
+  } catch {
+  }
+  return false;
+}
+function resolveRealGitBinary(stateDirHint) {
+  const skip = /* @__PURE__ */ new Set();
+  for (const s of [stateDirHint, process.env.FACTORY_STATE_DIR, process.env.PASEO_FACTORY_STATE_DIR]) {
+    if (typeof s === "string" && s.trim() !== "") {
+      skip.add((0, import_node_path.join)(s.trim(), "bin"));
+      skip.add((0, import_node_path.join)(s.trim(), "runtime-bin"));
+    }
+  }
+  if (typeof process.argv[1] === "string" && process.argv[1] !== "") {
+    skip.add((0, import_node_path.dirname)(process.argv[1]));
+  }
+  for (const dir of (process.env.PATH ?? "").split(import_node_path.delimiter)) {
+    if (dir === "" || dir === "." || skip.has(dir)) continue;
+    const candidate = (0, import_node_path.join)(dir, "git");
+    if (isExecutableFile(candidate) && !isFactoryShimGit(candidate, skip)) return candidate;
+  }
+  return GIT_FALLBACKS.find(isExecutableFile) ?? "git";
+}
 function gitIn(cwd, args) {
-  return (0, import_node_child_process.spawnSync)("git", args, { cwd, encoding: "utf8", timeout: 15e3 });
+  return (0, import_node_child_process.spawnSync)(resolveRealGitBinary(), args, { cwd, encoding: "utf8", timeout: 15e3 });
 }
 function worktreeIncludeMatches(pattern, file) {
   const clean = normalizeScopePath(pattern);
@@ -933,6 +977,7 @@ function excludeFromWorktree(root, worktree, files) {
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   hydrateTaskWorktree,
+  resolveRealGitBinary,
   worktreeIncludeMatches
 });
 
@@ -1352,17 +1397,22 @@ async function handleToolCall(name, rawArgs) {
     const daemonSockExists = existsSync(join(ctx.home, "endpoint.sock"));
     let factoryBinCandidate = join(dirname(new URL(import.meta.url).pathname), "factory.mjs");
     if (!existsSync(factoryBinCandidate)) {
-      try {
-        const cfgPath = join(ctx.home, "config.json");
-        if (existsSync(cfgPath)) {
-          const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
-          const pluginPath = cfg?.plugins?.["paseo-factory"]?.path;
-          if (typeof pluginPath === "string" && existsSync(join(pluginPath, "bin", "factory.mjs"))) {
-            factoryBinCandidate = join(pluginPath, "bin", "factory.mjs");
+      const stagedFactory = join(ctx.stateDir, "runtime-bin", "factory.mjs");
+      if (existsSync(stagedFactory)) {
+        factoryBinCandidate = stagedFactory;
+      } else {
+        try {
+          const cfgPath = join(ctx.home, "config.json");
+          if (existsSync(cfgPath)) {
+            const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
+            const pluginPath = cfg?.plugins?.["paseo-factory"]?.path;
+            if (typeof pluginPath === "string" && existsSync(join(pluginPath, "bin", "factory.mjs"))) {
+              factoryBinCandidate = join(pluginPath, "bin", "factory.mjs");
+            }
           }
+        } catch {
+          // ignore unreadable config.json
         }
-      } catch {
-        // ignore unreadable config.json
       }
     }
     if (daemonSockExists && existsSync(factoryBinCandidate)) {
@@ -1614,7 +1664,7 @@ async function handleToolCall(name, rawArgs) {
         const candidate = join(ctx.stateDir, "projects", ctx.projectSlug, "worktrees", task);
         if (existsSync(candidate)) worktreeCwd = candidate;
       }
-      const headOut = spawnSync("git", ["rev-parse", "HEAD"], {
+      const headOut = spawnSync(worktreePolicy.resolveRealGitBinary(ctx.stateDir), ["rev-parse", "HEAD"], {
         cwd: worktreeCwd,
         encoding: "utf8",
         timeout: GIT_TIMEOUT_MS,

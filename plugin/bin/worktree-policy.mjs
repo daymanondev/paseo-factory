@@ -2,8 +2,8 @@
 
 // src/worktree-policy.ts
 import { spawnSync } from "node:child_process";
-import { cpSync, lstatSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { accessSync, constants as fsConstants, cpSync, lstatSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { delimiter, dirname, join, resolve } from "node:path";
 
 // src/scope-policy.ts
 function normalizeScopePath(path) {
@@ -27,8 +27,45 @@ function scopeGlob(pattern) {
 }
 
 // src/worktree-policy.ts
+var GIT_FALLBACKS = ["/opt/homebrew/bin/git", "/usr/local/bin/git", "/usr/bin/git"];
+function isExecutableFile(path) {
+  try {
+    accessSync(path, fsConstants.X_OK);
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+function isFactoryShimGit(candidate, skipDirs) {
+  const dir = dirname(candidate);
+  if (skipDirs.has(dir) || dir.endsWith("/plugin-state/paseo-factory/bin")) return true;
+  try {
+    const head = readFileSync(candidate, "utf8").slice(0, 512);
+    if (head.includes("git-shim.mjs") || head.includes("FACTORY_STATE_DIR=")) return true;
+  } catch {
+  }
+  return false;
+}
+function resolveRealGitBinary(stateDirHint) {
+  const skip = /* @__PURE__ */ new Set();
+  for (const s of [stateDirHint, process.env.FACTORY_STATE_DIR, process.env.PASEO_FACTORY_STATE_DIR]) {
+    if (typeof s === "string" && s.trim() !== "") {
+      skip.add(join(s.trim(), "bin"));
+      skip.add(join(s.trim(), "runtime-bin"));
+    }
+  }
+  if (typeof process.argv[1] === "string" && process.argv[1] !== "") {
+    skip.add(dirname(process.argv[1]));
+  }
+  for (const dir of (process.env.PATH ?? "").split(delimiter)) {
+    if (dir === "" || dir === "." || skip.has(dir)) continue;
+    const candidate = join(dir, "git");
+    if (isExecutableFile(candidate) && !isFactoryShimGit(candidate, skip)) return candidate;
+  }
+  return GIT_FALLBACKS.find(isExecutableFile) ?? "git";
+}
 function gitIn(cwd, args) {
-  return spawnSync("git", args, { cwd, encoding: "utf8", timeout: 15e3 });
+  return spawnSync(resolveRealGitBinary(), args, { cwd, encoding: "utf8", timeout: 15e3 });
 }
 function worktreeIncludeMatches(pattern, file) {
   const clean = normalizeScopePath(pattern);
@@ -104,5 +141,6 @@ function excludeFromWorktree(root, worktree, files) {
 }
 export {
   hydrateTaskWorktree,
+  resolveRealGitBinary,
   worktreeIncludeMatches
 };

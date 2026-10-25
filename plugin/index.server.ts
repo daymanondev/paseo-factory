@@ -30,14 +30,36 @@ import { createSurfaceHandlers, registerSurfaceRpc } from "./server/surface-rpc.
 import { createLeadMailRuntime } from "./server/lead-mailbox.ts";
 import { injectRoleOnCreate, injectSessionEnv, sanitizeAgentCreateHookResult } from "./server/roles.ts";
 
-const SHELL_VERSION = "0.0.43";
+const SHELL_VERSION = "0.0.44";
 
 const log = (message: string) => console.log(`[${PLUGIN_ID}] ${message}`);
 
 export default function contribute(server: PluginServerContext) {
   const home = resolvePaseoHome(process.env, homedir());
   const stateDir = stateDirFor(home);
-  const pluginDir = pluginDirFor(home);
+  let pluginDir = pluginDirFor(home);
+
+  const reconcileGlobalFactorySkills = (activePluginDir: string | undefined, logReconciled = false): void => {
+    const quoted = (value: string) => (/\s/.test(value) ? `"${value}"` : value);
+    const runner = /Paseo Helper/i.test(process.execPath) ? `ELECTRON_RUN_AS_NODE=1 ${quoted(process.execPath)}` : quoted(process.execPath);
+    const factoryCmd = activePluginDir === undefined ? "factory" : `${runner} ${quoted(join(activePluginDir, "bin", "factory.mjs"))}`;
+    for (const skillsRoot of [join(homedir(), ".agents", "skills"), join(homedir(), ".claude", "skills")]) {
+      const skillPath = ensureFactorySkillSafe(skillsRoot, { factoryCmd }, log);
+      if (logReconciled && skillPath !== null) log(`skill: /factory reconciled at ${skillPath}`);
+    }
+  };
+
+  const refreshPluginInstallation = (): void => {
+    const latest = pluginDirFor(home);
+    if (latest !== undefined && latest !== pluginDir) {
+      pluginDir = latest;
+      ensureClaimCli(stateDir, pluginDir, process.execPath);
+      ensureGitShim(stateDir, pluginDir, process.execPath);
+      ensureFactoryBinScripts(stateDir, pluginDir);
+      reconcileGlobalFactorySkills(pluginDir, false);
+      log(`re-synced plugin checkout -> ${pluginDir}`);
+    }
+  };
 
   // The watch's feed (v0.0.6): every hook receives the process's one
   // long-lived PaseoApi (ticket 02 §a) — capture it from whichever fires
@@ -69,6 +91,7 @@ export default function contribute(server: PluginServerContext) {
   const initializeOrdinaryRuntime = (): void => {
     if (booted || pendingUpgradeFor(stateDir) !== undefined) return;
     factory.history.runSync(() => {
+      pluginDir = pluginDirFor(home) ?? pluginDir;
       if (pluginDir === undefined) {
         ensureFactoryBinScripts(stateDir);
         log(`up v${SHELL_VERSION} — WARNING: plugin directory not recorded in ${home}/config.json; ` +
@@ -92,13 +115,7 @@ export default function contribute(server: PluginServerContext) {
       // operator-global and not preconditions the plugin depends on, so an
       // unwritable skills root warns and the boot continues (choke, spool,
       // mailbox runtime) — a skill never kills a boot.
-      const quoted = (value: string) => (/\s/.test(value) ? `"${value}"` : value);
-      const runner = /Paseo Helper/i.test(process.execPath) ? `ELECTRON_RUN_AS_NODE=1 ${quoted(process.execPath)}` : quoted(process.execPath);
-      const factoryCmd = pluginDir === undefined ? "factory" : `${runner} ${quoted(join(pluginDir, "bin", "factory.mjs"))}`;
-      for (const skillsRoot of [join(homedir(), ".agents", "skills"), join(homedir(), ".claude", "skills")]) {
-        const skillPath = ensureFactorySkillSafe(skillsRoot, { factoryCmd }, log);
-        if (skillPath !== null) log(`skill: /factory reconciled at ${skillPath}`);
-      }
+      reconcileGlobalFactorySkills(pluginDir, true);
 
       // The native role providers (v0.0.27, ADR 0017 §1): reconcile
       // `factory-supervisor`, `factory-lead`, and `factory-peer` plus the single
@@ -141,6 +158,7 @@ export default function contribute(server: PluginServerContext) {
   });
   const offAgentCreate = server.before("agent.create", ({ request }, context) => factory.history.runOperation(() => {
     capturePaseo(context);
+    refreshPluginInstallation();
     let next = request;
     const normalized = normalizeAgentCreateRequest(next, { stateDir, providers: surface.cachedProviders() });
     if (normalized !== next) {
@@ -215,6 +233,7 @@ export default function contribute(server: PluginServerContext) {
   const resumeOrdinaryRuntime = (): void => {
     if (pendingUpgradeFor(stateDir) !== undefined) return;
     initializeOrdinaryRuntime();
+    refreshPluginInstallation();
     if (!mailRecovered) {
       leadMail.startupRecovery();
       mailRecovered = true;
@@ -223,6 +242,10 @@ export default function contribute(server: PluginServerContext) {
   };
   resumeOrdinaryRuntime();
   onPaseoCaptured = resumeOrdinaryRuntime;
+  const postReadySyncTimer = setTimeout(() => {
+    if (booted) refreshPluginInstallation();
+  }, 250);
+  postReadySyncTimer.unref?.();
   const recoveryTimer = setInterval(() => {
     if (!booted || !mailRecovered) resumeOrdinaryRuntime();
   }, 100);
@@ -339,6 +362,7 @@ export default function contribute(server: PluginServerContext) {
 
   const offSessionOpen = server.before("agent.session_open", ({ request }, context) => factory.history.runOperation(() => {
     capturePaseo(context);
+    refreshPluginInstallation();
     let next = request;
     if (pluginDir !== undefined) {
       const withCli = injectClaimCliPath(next, claimCliBinDir(stateDir));
@@ -364,6 +388,7 @@ export default function contribute(server: PluginServerContext) {
 
   return () => {
     clearTimeout(warmupTimer);
+    clearTimeout(postReadySyncTimer);
     clearInterval(recoveryTimer);
     offPermissionAsked();
     offAgentCreate();

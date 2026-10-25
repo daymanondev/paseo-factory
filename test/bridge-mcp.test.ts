@@ -777,3 +777,66 @@ test("MCP Lead acceptance binds its authenticated role despite forged attributio
   assert.notEqual(accepted.isError, true, accepted.content[0]!.text);
   assert.equal(factory.ledger.eventsFor("mcp-bound").findLast((event) => event.event === "attempt_accepted")?.accepted_by, "supervisor");
 });
+
+test("bridge lead_spawn_agent resolves real system git and ignores a broken <stateDir>/bin/git shim on PATH", async (t) => {
+  const homeDir = mkdtempSync(join(tmpdir(), "factory-bridge-realgit-"));
+  const stateDir = join(homeDir, "plugin-state", "paseo-factory");
+  const repoDir = makeGitRepo();
+  t.after(() => {
+    rmSync(homeDir, { recursive: true, force: true });
+    rmSync(repoDir, { recursive: true, force: true });
+  });
+
+  // Put a broken <stateDir>/bin/git first on PATH (simulating a stale/broken git shim)
+  const brokenBinDir = join(stateDir, "bin");
+  mkdirSync(brokenBinDir, { recursive: true });
+  writeFileSync(
+    join(brokenBinDir, "git"),
+    "#!/bin/sh\necho \"Error: Cannot find module '/deleted/git-shim.mjs'\" >&2\nexit 1\n",
+    { mode: 0o755 },
+  );
+
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
+  const reg = ensureProjectRegistered(stateDir, repoDir);
+  assert.equal(reg.ok, true);
+  factory.setContract({
+    task: "T-01",
+    workspace: repoDir,
+    gate: "/usr/bin/true",
+    artifact: "README.md",
+  });
+  const leadCorr = new CorrelationRegistry(stateDir).issue({
+    role: "lead",
+    projectSlug: reg.slug,
+    projectRoot: repoDir,
+    agentId: "lead-realgit-1",
+  });
+  const spool = startSpool(stateDir, factory, { pollMs: 20 });
+  t.after(() => spool.stop());
+
+  const responses = await runMcpSession({
+    args: ["--correlation", leadCorr.correlationId, "--state-dir", stateDir, "--home", homeDir],
+    cwd: repoDir,
+    env: {
+      PATH: `${brokenBinDir}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+      PASEO_FACTORY_STATE_DIR: stateDir,
+      PASEO_FACTORY_SEAT: "lead",
+    },
+    requests: [
+      {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {
+          name: "lead_spawn_agent",
+          arguments: { tasks: ["T-01"], workspace: repoDir },
+        },
+      },
+    ],
+  });
+
+  const spawnRes = responses[0]!.result as { isError?: boolean; content: Array<{ text: string }> };
+  assert.notEqual(spawnRes.isError, true, `Expected lead_spawn_agent to succeed even with broken <stateDir>/bin/git, got: ${spawnRes.content[0]?.text}`);
+  const worktree = factory.worktreeFor("T-01");
+  assert.ok(worktree && existsSync(worktree), "Task worktree was allocated using real system git");
+});
