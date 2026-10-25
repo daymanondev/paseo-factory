@@ -4,7 +4,7 @@
  * theme colours only. PigMonitor's shapes, factory vocabulary.
  */
 import type { PluginTheme } from "@getpaseo/plugin";
-import { Icon } from "@getpaseo/plugin/client/react-native";
+import { Icon } from "@getpaseo/plugin/client/ui";
 import type { ReactNode } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { ViewStyle } from "react-native";

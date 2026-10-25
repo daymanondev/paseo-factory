@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.39] - 2026-10-25
+
+v0.0.39's one thing: **Paseo `0.13.0` upgrade with open-ended `>=0.13.0` plugin requirements across all four factory plugins, on-demand tail-timeline refetch in `Lead handoff` (`agent.turn_ended` `timeline: []` compatibility), `includeBackground: true` across internal agent/workspace resolution, and Paseo `0.13.0` UI/SDK adoption (`<Markdown>`, `copyText`, `useTabState`, and `⌘K` Command Center shortcuts)** (ADR 0027).
+
+### Added
+
+- **`<Markdown>` Rendering & `Copy` Buttons in `Tasks` & `Timeline & Retro` (`plugin/client/factory/tasks.tsx`, `plugin/client/factory/timeline.tsx`)** — `TaskDetailModal` renders `contract.description` and `attempt.report` with `<Markdown>` from `@getpaseo/plugin/client/ui` and adds 1-click `Copy` buttons (`copyText`) on `Report.md` and `Gate log`. `TimelinePane` renders `Retro` proposals with `<Markdown>` and a per-proposal `Copy` button.
+- **`useTabState` Workspace Panel Persistence (`plugin/client/factory/entries.tsx`, `plugin/client/factory/shell.tsx`)** — Forwarded `panelTab` (`tab`) from `FactoryPanel` into `FactoryShell` and bound `useTabState(panelTab ?? fallbackTab, FactoryTabStateSchema, ...)` so active tab (`tasks` / `seats` / `timeline` / `vault` / `plugins`) and Project Switcher scope (`pickedRoot`, `hasPickedScope`) persist across Paseo tab switches and reloads.
+- **`⌘K` Command Center Shortcuts (`plugin/index.client.tsx`)** — Registered `client.addCommandCenterItem` contributions for `Factory: Open Verification Board`, `Factory: Open Workspace Panel`, `Factory: Run Daily Retro`, and `Factory: Sync Private Vault`.
+
+### Changed
+
+- **Open-Ended `>=0.13.0` Paseo Requirement & `@getpaseo/{plugin,protocol}@0.13.0` (`plugin/paseo-plugin.json`, `package.json`, `scripts/check-bundle.mjs`)** — Replaced the upper-bounded `>=0.11.0 <0.12.0` requirement with `"paseo": ">=0.13.0"` across `paseo-factory` and its three companion plugins (`factory-burn-lab`, `factory-connector`, `factory-release-lab`), migrated all `@getpaseo/plugin/client/react-native` imports to `@getpaseo/plugin/client/ui`, removed deprecated `context: "workspace"` from `addWorkspacePanel`, and added `loader: { ".svg": "text" }` to `scripts/check-bundle.mjs`.
+
+### Fixed
+
+- **`Lead handoff` Tail-Timeline Refetch on Paseo `0.13.0` (`plugin/server/lead-mailbox.ts`)** — In `@getpaseo/server@0.13.0`, `agent.turn_ended` always emits `timeline: []`. When `completeHandoff` finds no fresh `<projectStateDir>/lead-handoff.md` on disk and `input.timeline` is empty, it now refetches the outgoing Lead's tail timeline (`daemon.agents.ref(input.agentId).timeline.refetch({ direction: "tail", limit: 20 })`) so `lastAssistantText` still captures assistant-text handoff summaries.
+- **`includeBackground: true` in Internal Agent & Workspace Queries (`plugin/server/lead-mailbox.ts`, `plugin/server/surface-rpc.ts`, `plugin/server/spool.ts`, `plugin/server/daemon-cli.ts`)** — Passed `includeBackground: true` in `daemon.agents.list` and `fetch_workspaces_request` so background agents/workspaces introduced in Paseo `0.13.0` are never missed during seat resolution or worktree cleanup.
+
 ## [0.0.38] - 2026-10-25
 
 v0.0.38's one thing: **strict per-Project multi-provider lane isolation across every seat, Spool spawn, and station; owner-authored `Lane profile`s with Copy-on-Apply, `Reset to Machine Default`, atomic batch lane saves, a `factory profile` CLI, and `Private vault` sync of profiles & per-Project lanes; and a live-seat transition warning modal (same-provider-family in-place model update vs cross-family retire/rotate)** (ADR 0026).

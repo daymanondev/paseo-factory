@@ -16,7 +16,7 @@
  *   cards, and click-to-open `TaskDetailModal`.
  */
 import type { PluginTheme } from "@getpaseo/plugin";
-import { Icon, Modal, ScrollView } from "@getpaseo/plugin/client/react-native";
+import { Icon, Markdown, Modal, ScrollView, copyText } from "@getpaseo/plugin/client/ui";
 import { useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { FactoryView, TaskDetailView, TaskStatus, TaskView } from "../../shared/view.ts";
@@ -684,7 +684,7 @@ export function TaskDetailBody({ theme, detail }: { theme: PluginTheme; detail: 
         <Text style={text(theme, "code")}>scope: {contract.scope === null ? "unrestricted" : contract.scope.join(", ")}</Text>
         <Text style={text(theme, "code")}>skills: {contract.skills === null ? "none mandated" : contract.skills.join(", ")}</Text>
         <Text style={text(theme, "code")}>workspace: {contract.workspace}</Text>
-        {contract.description !== null ? <Text style={text(theme, "meta")}>{contract.description}</Text> : null}
+        {contract.description !== null ? <Markdown>{contract.description}</Markdown> : null}
         <Text style={text(theme, "label")}>
           watch {contract.watch ? "on" : "off"} · fresh-eyes {contract.freshEyes ? "on" : "off"} · by {contract.by ?? "—"}
         </Text>
@@ -718,14 +718,38 @@ export function TaskDetailBody({ theme, detail }: { theme: PluginTheme; detail: 
               </View>
             ) : null}
             {attempt.report !== null ? (
-              <View style={{ gap: 1 }}>
-                <Text style={text(theme, "label")}>Report.md</Text>
-                <Text style={text(theme, "code")}>{attempt.report}</Text>
+              <View style={{ gap: SPACING[1] }}>
+                <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: SPACING[1.5] }}>
+                  <Text style={text(theme, "label")}>Report.md</Text>
+                  <Btn
+                    theme={theme}
+                    small
+                    icon="Copy"
+                    label="Copy"
+                    tone="foregroundMuted"
+                    onPress={() => {
+                      void copyText(attempt.report!).catch(() => {});
+                    }}
+                  />
+                </View>
+                <Markdown>{attempt.report}</Markdown>
               </View>
             ) : null}
             {attempt.gateLog !== null ? (
-              <View style={{ gap: 1 }}>
-                <Text style={text(theme, "label")}>Gate log</Text>
+              <View style={{ gap: SPACING[1] }}>
+                <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: SPACING[1.5] }}>
+                  <Text style={text(theme, "label")}>Gate log</Text>
+                  <Btn
+                    theme={theme}
+                    small
+                    icon="Copy"
+                    label="Copy"
+                    tone="foregroundMuted"
+                    onPress={() => {
+                      void copyText(attempt.gateLog!).catch(() => {});
+                    }}
+                  />
+                </View>
                 <Text style={text(theme, "code")}>{attempt.gateLog}</Text>
               </View>
             ) : null}

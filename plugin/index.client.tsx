@@ -8,21 +8,63 @@
  * scripts/check-bundle.mjs.
  */
 import type { PluginClientContext } from "@getpaseo/plugin/client";
-import { FactoryPanel, FactoryScreen, FactorySettings, FactorySidebarItem, SCREEN_ID } from "./client/factory/entries.tsx";
+import { retro, vaultSync } from "./shared/rpc.ts";
+import { FactoryPanel, FactoryScreen, FactorySettings, FactorySidebarItem, PANEL_ID, SCREEN_ID } from "./client/factory/entries.tsx";
 
 export default function contribute(client: PluginClientContext) {
   const cleanups = [
     client.addScreen({ id: SCREEN_ID, title: "Factory", Component: FactoryScreen }),
     client.addSidebarHeaderItem({ id: "paseo-factory", title: "Factory", Component: FactorySidebarItem }),
     client.addWorkspacePanel({
-      id: "paseo-factory",
+      id: PANEL_ID,
       title: "Factory",
       icon: "Activity",
-      context: "workspace",
       locations: ["explorer", "workspace"],
       Component: FactoryPanel,
     }),
     client.addSettingsScreen({ id: "paseo-factory", title: "Factory", icon: "Settings2", Component: FactorySettings }),
+    client.addCommandCenterItem({
+      id: "factory.open-screen",
+      title: "Factory: Open Verification Board",
+      icon: "Activity",
+      keywords: ["factory", "kanban", "tasks", "slp", "verification"],
+      context: "global",
+      onSelect({ openScreen }) {
+        openScreen({ screenId: SCREEN_ID });
+      },
+    }),
+    client.addCommandCenterItem({
+      id: "factory.open-panel",
+      title: "Factory: Open Workspace Panel",
+      icon: "Activity",
+      keywords: ["factory", "panel", "kanban", "workspace"],
+      context: "workspace",
+      onSelect({ openPanel }) {
+        openPanel(PANEL_ID);
+      },
+    }),
+    client.addCommandCenterItem({
+      id: "factory.run-retro",
+      title: "Factory: Run Daily Retro",
+      icon: "Sparkles",
+      keywords: ["factory", "retro", "proposals"],
+      context: "global",
+      async onSelect({ rpc, openScreen }) {
+        await rpc(retro, {});
+        openScreen({ screenId: SCREEN_ID });
+      },
+    }),
+    client.addCommandCenterItem({
+      id: "factory.sync-vault",
+      title: "Factory: Sync Private Vault",
+      icon: "CloudUpload",
+      keywords: ["factory", "vault", "sync"],
+      context: "global",
+      async onSelect({ rpc, openScreen }) {
+        await rpc(vaultSync, {});
+        openScreen({ screenId: SCREEN_ID });
+      },
+    }),
   ];
   return () => {
     for (const off of cleanups) off();

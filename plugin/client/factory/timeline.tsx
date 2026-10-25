@@ -5,7 +5,7 @@
  * searchable/filterable ledger event stream.
  */
 import type { PluginTheme } from "@getpaseo/plugin";
-import { Icon, TextInput } from "@getpaseo/plugin/client/react-native";
+import { Icon, Markdown, TextInput, copyText } from "@getpaseo/plugin/client/ui";
 import { useState } from "react";
 import { ScrollView, Text, View } from "react-native";
 import type { AgentView, FactoryView, TaskView } from "../../shared/view.ts";
@@ -242,16 +242,28 @@ export function TimelinePane({
                       <Pill theme={theme} label={`R${proposal.id}`} tone="accent" lit mono />
                       <Pill theme={theme} label={proposal.cls} mono />
                     </View>
-                    <Btn
-                      theme={theme}
-                      small
-                      icon="Check"
-                      label="Ratify via Supervisor"
-                      disabled={actions.busy || view.project === null}
-                      onPress={() => actions.ratify(retro.day, proposal.id)}
-                    />
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1.5] }}>
+                      <Btn
+                        theme={theme}
+                        small
+                        icon="Copy"
+                        label="Copy"
+                        tone="foregroundMuted"
+                        onPress={() => {
+                          void copyText(proposal.text).catch(() => {});
+                        }}
+                      />
+                      <Btn
+                        theme={theme}
+                        small
+                        icon="Check"
+                        label="Ratify via Supervisor"
+                        disabled={actions.busy || view.project === null}
+                        onPress={() => actions.ratify(retro.day, proposal.id)}
+                      />
+                    </View>
                   </View>
-                  <Text style={text(theme, "meta")}>{proposal.text}</Text>
+                  <Markdown>{proposal.text}</Markdown>
                 </View>
               ))}
             </Card>

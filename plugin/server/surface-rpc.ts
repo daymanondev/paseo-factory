@@ -173,7 +173,10 @@ export function sanitizeLaneWithProviders(laneValue: string, providers: readonly
  */
 export interface SurfaceDaemonApi {
   agents: {
-    list(options?: { filter?: { labels?: Record<string, string>; includeArchived?: boolean } }): Promise<{ entries: { agent: SurfaceAgentSnapshot }[] }>;
+    list(options?: {
+      includeBackground?: boolean;
+      filter?: { labels?: Record<string, string>; includeArchived?: boolean; includeBackground?: boolean };
+    }): Promise<{ entries: { agent: SurfaceAgentSnapshot }[] }>;
     create(options: {
       config: { provider: string; thinkingOptionId?: string };
       cwd: string;
@@ -185,7 +188,12 @@ export interface SurfaceDaemonApi {
     ref(id: string): {
       send(text: string): Promise<void>;
       archive(): Promise<{ archivedAt: string }>;
-      timeline: { refetch(options?: { direction?: "tail"; limit?: number }): Promise<{ entries?: { seqEnd?: number }[]; error?: string | null }> };
+      timeline: {
+        refetch(options?: {
+          direction?: "tail";
+          limit?: number;
+        }): Promise<{ entries?: { seqEnd?: number; item?: { type?: string; text?: string } }[]; error?: string | null }>;
+      };
     };
   };
   workspaces?: {
@@ -474,7 +482,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   /** The live non-archived seat agent — `seat` plus, when scoped, the Project's slug label. */
   const seatOf = async (daemon: SurfaceDaemonApi, seat: "supervisor" | "lead", projectSlug?: string): Promise<SurfaceAgentSnapshot | undefined> => {
     const labels: Record<string, string> = projectSlug === undefined ? { seat } : { seat, project: projectSlug };
-    const page = await daemon.agents.list({ filter: { labels, includeArchived: false } });
+    const page = await daemon.agents.list({ filter: { labels, includeArchived: false, includeBackground: true } });
     for (const entry of page.entries) {
       if (entry.agent.archivedAt === null) return entry.agent;
     }
@@ -483,7 +491,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     // `project.json` or running under its `factory-*` role provider.
     let all: { entries: { agent: SurfaceAgentSnapshot }[] };
     try {
-      all = await daemon.agents.list({ filter: { includeArchived: false } });
+      all = await daemon.agents.list({ filter: { includeArchived: false, includeBackground: true } });
     } catch {
       return undefined;
     }
@@ -509,7 +517,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   ): Promise<{ keepWorkspaceIds: string[]; activeWorkspaceIds: string[] } | null> => {
     let liveAgents: SurfaceAgentSnapshot[] = [];
     try {
-      const page = await daemon.agents.list({ filter: { includeArchived: false } });
+      const page = await daemon.agents.list({ filter: { includeArchived: false, includeBackground: true } });
       liveAgents = page.entries.map((entry) => entry.agent).filter((agent) => agent.archivedAt === null);
     } catch {
       return null; // no daemon answer — never sweep blind
@@ -1023,7 +1031,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     const bound = agentTaskIndex();
     let rawAgents: SurfaceAgentSnapshot[] = [];
     try {
-      const page = await daemon.agents.list({ filter: { includeArchived: false } });
+      const page = await daemon.agents.list({ filter: { includeArchived: false, includeBackground: true } });
       rawAgents = page.entries.map((entry) => entry.agent).filter((agent) => agent.archivedAt === null);
     } catch {
       // best-effort agent listing
@@ -1448,7 +1456,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       let supervisorRaw: SurfaceAgentSnapshot | undefined;
       let leadRaw: SurfaceAgentSnapshot | undefined;
       try {
-        const page = await daemon.agents.list({ filter: { includeArchived: false } });
+        const page = await daemon.agents.list({ filter: { includeArchived: false, includeBackground: true } });
         rawAgents = page.entries.map((entry) => entry.agent).filter((agent) => agent.archivedAt === null);
         const seatOfProject = (seat: "supervisor" | "lead"): SurfaceAgentSnapshot | undefined => {
           const byLabels = rawAgents.find(
@@ -1944,7 +1952,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         const daemon = resolveDaemon(context);
         let live: SurfaceAgentSnapshot[] = [];
         try {
-          const page = await daemon.agents.list({ filter: { labels: { seat: "supervisor" }, includeArchived: false } });
+          const page = await daemon.agents.list({ filter: { labels: { seat: "supervisor" }, includeArchived: false, includeBackground: true } });
           live = page.entries.map((entry) => entry.agent).filter((agent) => agent.archivedAt === null);
         } catch (err) {
           return failure("daemon-unavailable", `cannot read the daemon's agents: ${messageOf(err)}`);
