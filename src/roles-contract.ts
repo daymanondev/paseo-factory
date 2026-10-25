@@ -91,7 +91,7 @@ function renderSeatCommandBlock(seat: SeatName, cmdPrefix: string): string[] {
   return [
     "Primary `paseo-factory` / `paseo_factory` MCP tools (prefer calling these directly):",
     "",
-    '  paseo-factory_lead_set_contract({ task: "<id>", gate: "<cmd>", artifact: "<path>", scope: "<p1,p2>", skills: ["tdd"], description: "<text>" })  (or lead_set_contract)',
+    '  paseo-factory_lead_set_contract({ task: "<id>", gate: "<cmd>", description: "<outcome + regression invariants>", skills: ["tdd"] })  (or lead_set_contract)',
     '  paseo-factory_lead_spawn_agent({ tasks: ["<id>"] })  (or lead_spawn_agent)',
     '  paseo-factory_lead_accept_task({ task: "<id>", attempt: <n> })  (or lead_accept_task)',
     '  paseo-factory_lead_repoke_agent({ task: "<id>" })  (or lead_repoke_agent)',
@@ -101,7 +101,7 @@ function renderSeatCommandBlock(seat: SeatName, cmdPrefix: string): string[] {
     "",
     "Day-one Lead commands (the Owner CLI — never on a Worker agent's PATH):",
     "",
-    `  ${cmdPrefix} contract --task <id> --workspace <dir> --gate <cmd> --artifact <path> [--scope <p1,p2>] [--skills <s1,s2>] [--watch] [--fresh-eyes] [--description <text>]`,
+    `  ${cmdPrefix} contract --task <id> --workspace <dir> --gate <cmd> [--artifact <path>] [--skills <s1,s2>] [--watch] [--fresh-eyes] [--description <text>]`,
     `  ${cmdPrefix} run <task> [<task>...]`,
     `  ${cmdPrefix} status`,
     `  ${cmdPrefix} lanes get`,
@@ -143,10 +143,10 @@ export function renderRoleContract(role: RoleName, options: RoleContractOptions 
 
   if (role === "lead") {
     return [
-      `You are the Lead seat of the paseo-factory verification loop${projectSuffix}: read and inspect the repository, decompose the Supervisor's directive into Tasks with isolated write scopes, set each Contract (gate, artifact, scope, skills) with \`paseo-factory_lead_set_contract\` / \`lead_set_contract\` (or \`${cmdPrefix} contract\`), and spawn Working Agents with \`paseo-factory_lead_spawn_agent\` / \`lead_spawn_agent\` (or \`${cmdPrefix} run\`).`,
+      `You are the Lead seat of the paseo-factory verification loop${projectSuffix}: read and inspect the repository, decompose the Supervisor's directive into Tasks around clear Outcomes and Regression Gates, set each Contract (gate, description, optional artifact, skills) with \`paseo-factory_lead_set_contract\` / \`lead_set_contract\` (or \`${cmdPrefix} contract\`), and spawn Working Agents with \`paseo-factory_lead_spawn_agent\` / \`lead_spawn_agent\` (or \`${cmdPrefix} run\`).`,
       "Seat write fence: Never write or commit product source code directly on `<project-root>`; all product source code is written by spawned working Agents inside isolated Task worktrees. You may update this repository's AGENTS.md or CONTEXT.md (and docs/** / .scratch/**) when the Owner ratifies a rule; working Agents never may.",
-      "Entrypoint Integration & Lockfile Law: Whenever a Contract's `scope` includes `package.json`, also include the corresponding lockfile (`package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, or `bun.lockb`) in `scope`. Whenever decomposing an initial application scaffold or UI entrypoint, ensure the root HTML/bootstrap entrypoint (`index.html`, `src/main.ts`, etc.) is explicitly included in a Task's `scope` and verified by `checks`.",
-      `You may accept an intermediate Task's green, CONCERN-free Attempt via \`paseo-factory_lead_accept_task\` / \`lead_accept_task\` (or \`${cmdPrefix} accept --by lead\`); a CONCERN or a needs-human task is never yours to accept — correct it or escalate. Calling \`paseo-factory_lead_set_contract\` / \`lead_set_contract\` again on any unaccepted Task updates its Contract (\`scope\`, \`gate\`, \`base\`, \`description\`) and opens a fresh 3-attempt epoch.`,
+      "Outcome & Regression-Gate Law: Specify the desired behavioral outcome and regression invariants in each Contract's `description` — never pre-solve or handcuff which code files the working Agent may touch inside its isolated Task worktree. Every Contract's `gate` command must verify both the new behavior (and entrypoint integration such as `index.html` / `src/main.ts` when applicable) AND the repository's existing test/typecheck/build suite so legacy features are never broken.",
+      `You may accept an intermediate Task's green, CONCERN-free Attempt via \`paseo-factory_lead_accept_task\` / \`lead_accept_task\` (or \`${cmdPrefix} accept --by lead\`); a CONCERN or a needs-human task is never yours to accept — correct it or escalate. Calling \`paseo-factory_lead_set_contract\` / \`lead_set_contract\` again on any unaccepted Task updates its Contract (\`gate\`, \`base\`, \`description\`, \`artifact\`) and opens a fresh 3-attempt epoch.`,
       `Fire-and-End-Turn Law: Inspect the Verdict / Fresh-eyes / Watch / Report evidence, and when the directive's wave completes or needs an Owner decision, call \`paseo-factory_lead_report_to_supervisor\` / \`lead_report_to_supervisor\` (or \`${cmdPrefix} supervisor report --workspace "<project-root>" --message "<summary>"\`) and immediately end your turn (never run \`sleep\` or poll files).`,
       "",
       ...renderSeatCommandBlock("lead", cmdPrefix),

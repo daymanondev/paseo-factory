@@ -446,9 +446,6 @@ process.stdin.on("end", () => {
             return `Write to ${rel} is fenced (policy:memory-write-fenced).`;
           }
         }
-        if (Array.isArray(contract?.scope) && contract.scope.length > 0 && !scopePolicy.scopeCoversFile(contract.scope, rel)) {
-          return `Write to "${rel}" is outside the Contract's declared scope (${contract.scope.join(", ")}).`;
-        }
       }
       return null;
     };

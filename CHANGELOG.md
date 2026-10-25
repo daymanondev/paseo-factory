@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.40] - 2026-10-25
+
+v0.0.40's one thing: **outcome-and-gate contracts without file-scope handcuffs — retiring general code-file `Contract.scope` blocking at claim/commit/hook time while preserving the `AGENTS.md`/`CLAUDE.md`/`CONTEXT.md` Memory Write Fence, permitting unscoped parallel spawns across isolated `Task worktree`s, making `Contract.artifact` optional, rewriting `LEAD_CONTRACT` around the Outcome & Regression-Gate Law, and allowing `git checkout --` / `git restore` inside isolated `Task worktree`s** (ADR 0028).
+
+### Changed
+
+- **Retire Code-File `Contract.scope` Handcuffs; Preserve Memory Write Fence (`src/factory.ts`, `plugin/bin/git-shim.mjs`, `plugin/bin/agy-pre-tool-hook.mjs`, `plugin/bin/bridge.mjs`)** — Station 4 in `factory.claim` no longer fails a green Gate with `verdict: "red"` when a working Agent modifies code, test, or config files outside `Contract.scope` (`scopeViolations` remains advisory telemetry for the `Watch` pass), `git-shim.mjs` no longer blocks commits with `out-of-scope`, `agy-pre-tool-hook.mjs` no longer denies code writes outside `scope`, and `scope` is removed from the advertised `lead_set_contract` MCP `inputSchema`. Project memory files (`AGENTS.md`, `CLAUDE.md`, `CONTEXT.md`) remain strictly fenced at ask, commit, and claim time unless explicitly listed in `Contract.scope`.
+- **Unscoped Same-Project Contracts & Parallel Spawns (`src/workspace-conflict.ts`, `src/factory.ts`)** — `scopesOverlap` returns `undefined` whenever either Contract omits `scope`, and `factory.requestSpawn` removes the `spawn-scope-mandatory` (`arity >= 2`) refusal so multiple unscoped Contracts on the same Project root can register and spawn in parallel inside their isolated `Task worktree`s (`<projectStateDir>/worktrees/<task>`).
+- **Optional `Contract.artifact` (`src/factory.ts`, `src/history-import.ts`, `src/history-admission.ts`, `src/report.ts`, `src/fresh-eyes.ts`, `plugin/server/spool.ts`, `plugin/bin/bridge.mjs`, `plugin/bin/factory.mjs`)** — `artifact` is now optional (`artifact?: string`) across `lead_set_contract`, `factory contract`, Spool `contract` requests, and `factory.setContract` (defaulting to `""` on `contract_set` when omitted and skipping single-file `inspectArtifact` verification).
+- **Lead Outcome & Regression-Gate Law (`src/roles-contract.ts`)** — Replaced the file-scope and lockfile mandates in `LEAD_CONTRACT` with the **Outcome & Regression-Gate Law**: `Lead` specifies the desired behavioral outcome and regression invariants in `description` and sets a `gate` command that verifies both the new behavior and the repository's existing test/typecheck/build suite without pre-solving file lists.
+- **Permit Working-Tree Discard Inside Isolated `Task worktree`s (`src/choke.ts`, `plugin/bin/git-shim.mjs`)** — `judgeShellCommand` (`judgeS1`) and `git-shim.mjs` now permit `git checkout -- <file>` and `git restore <file>` (`git:checkout-discard`, `git:restore-discard`) when executed inside an isolated `Task worktree`, while keeping them blocked on `<project-root>`.
+
 ## [0.0.39] - 2026-10-25
 
 v0.0.39's one thing: **Paseo `0.13.0` upgrade with open-ended `>=0.13.0` plugin requirements across all four factory plugins, on-demand tail-timeline refetch in `Lead handoff` (`agent.turn_ended` `timeline: []` compatibility), `includeBackground: true` across internal agent/workspace resolution, and Paseo `0.13.0` UI/SDK adoption (`<Markdown>`, `copyText`, `useTabState`, and `⌘K` Command Center shortcuts)** (ADR 0027).

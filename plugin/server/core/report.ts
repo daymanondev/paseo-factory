@@ -55,7 +55,7 @@ export function renderReport(task: string, attempt: number, events: readonly Led
   const lines = [
     `# ${task} — ${formatTimestamp(gate.ts)}`,
     `- Attempt: ${attempt} of ${totalAttempts}`,
-    `- Contract: \`${contract.gate}\` green · file \`${contract.artifact}\` exists${
+    `- Contract: \`${contract.gate}\` green${contract.artifact.trim() === "" ? "" : ` · file \`${contract.artifact}\` exists`}${
       contract.scope === undefined ? "" : ` · scope: ${contract.scope.map((s) => `\`${s}\``).join(", ")}`
     }`,
     `- Workspace: ${contract.workspace}`,

@@ -37,8 +37,21 @@ test("scope patterns agree across core, installed shims and Antigravity", (t) =>
       env: { ...process.env, PASEO_FACTORY_SEAT: "agent", PASEO_FACTORY_STATE_DIR: dir, PASEO_FACTORY_TASK: "SCOPE", PASEO_FACTORY_PROJECT_ROOT: dir },
     });
     assert.equal(hook.status, 0, hook.stderr);
-    assert.equal(JSON.parse(hook.stdout).decision, expected ? "allow" : "deny", `Antigravity: ${scope.join(",")} covers ${file}`);
+    assert.equal(JSON.parse(hook.stdout).decision, "allow", `Antigravity allows code files inside worktree without scope handcuffs: ${file}`);
   }
+  // Memory files remain fenced in Antigravity hook unless explicitly listed in Contract.scope
+  writeFileSync(join(dir, "ledger.jsonl"), `${JSON.stringify({ seq: 1, ts: "2026-10-23T00:00:00Z", event: "contract_set", task: "SCOPE", workspace: dir, scope: ["src"] })}\n`);
+  const deniedMemory = spawnSync(process.execPath, [hookPath], {
+    encoding: "utf8", input: JSON.stringify({ tool_name: "write_file", tool_input: { path: "AGENTS.md" } }),
+    env: { ...process.env, PASEO_FACTORY_SEAT: "agent", PASEO_FACTORY_STATE_DIR: dir, PASEO_FACTORY_TASK: "SCOPE", PASEO_FACTORY_PROJECT_ROOT: dir },
+  });
+  assert.equal(JSON.parse(deniedMemory.stdout).decision, "deny");
+  writeFileSync(join(dir, "ledger.jsonl"), `${JSON.stringify({ seq: 1, ts: "2026-10-23T00:00:00Z", event: "contract_set", task: "SCOPE", workspace: dir, scope: ["AGENTS.md"] })}\n`);
+  const allowedMemory = spawnSync(process.execPath, [hookPath], {
+    encoding: "utf8", input: JSON.stringify({ tool_name: "write_file", tool_input: { path: "AGENTS.md" } }),
+    env: { ...process.env, PASEO_FACTORY_SEAT: "agent", PASEO_FACTORY_STATE_DIR: dir, PASEO_FACTORY_TASK: "SCOPE", PASEO_FACTORY_PROJECT_ROOT: dir },
+  });
+  assert.equal(JSON.parse(allowedMemory.stdout).decision, "allow");
 });
 
 test("scope recovery commands quote branch bases and file names for both core and installed shim", () => {

@@ -396,27 +396,30 @@ test("scoped contract: an in-scope-only diff behaves exactly as today", async (t
   assert.ok(report.includes("scope: `src`"), "the report shows the declared boundary");
 });
 
-test("scoped contract: one file outside scope is red with that file named", async (t) => {
+test("ADR 0028: general code files outside declared scope do not red a green Gate, and artifact is optional", async (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);
   const { workspace, artifact } = makeWorkspace(dir);
   const factory = createFactory({ stateDir: join(dir, "factory") });
 
-  const contract = factory.setContract({ task: "SC2", workspace, gate: "true", artifact, scope: ["src"] });
+  factory.setContract({ task: "SC2", workspace, gate: "true", artifact, scope: ["src"] });
   writeFileSync(join(workspace, "src", "extra.ts"), "export const extra = 1;\n");
-  writeFileSync(join(workspace, "README.md"), "# touched out of scope\n");
+  writeFileSync(join(workspace, "README.md"), "# touched helper/doc file outside scope\n");
   const sha2 = gitCommitChanges(workspace, "add extra module and touch README");
   const outcome = await factory.claim({ task: "SC2", sha: sha2 });
 
-  assert.equal(outcome.verdict, "red");
-  assert.equal(outcome.gate.exit, 0, "the gate passed — the overreach is what is red");
-  assert.ok(outcome.gate.note.includes("changes outside declared scope"), outcome.gate.note);
-  assert.ok(outcome.gate.note.includes("README.md"), "the offending file is named");
-  assert.ok(!outcome.gate.note.includes("extra.ts"), "in-scope files are not named");
-  assert.ok(outcome.gate.note.includes(`git restore --source=${contract.base} -- README.md`), outcome.gate.note);
-  execFileSync("git", ["restore", `--source=${contract.base}`, "--", "README.md"], { cwd: workspace });
-  const repaired = gitCommitChanges(workspace, "restore out-of-scope file from contract base");
-  assert.equal((await factory.claim({ task: "SC2", sha: repaired })).verdict, "green");
+  assert.equal(outcome.verdict, "green", "general code/doc files never handcuff or red a green Gate (ADR 0028 §1)");
+  assert.equal(outcome.gate.exit, 0);
+
+  // Optional artifact (ADR 0028 §3): omitting artifact stores "" and verifies purely by gate + commit cleanliness
+  const wsNoArt = join(dir, "ws-no-art");
+  mkdirSync(join(wsNoArt, "src"), { recursive: true });
+  writeFileSync(join(wsNoArt, "src", "index.ts"), "export const ok = true;\n");
+  const shaNoArt = gitCommitAll(wsNoArt);
+  const contractNoArt = factory.setContract({ task: "NO-ART", workspace: wsNoArt, gate: "true" });
+  assert.equal(contractNoArt.artifact, "");
+  const claimNoArt = await factory.claim({ task: "NO-ART", sha: shaNoArt });
+  assert.equal(claimNoArt.verdict, "green");
 });
 
 test("omitted scope keeps the unrestricted v0.0.1 behavior", async (t) => {
@@ -452,8 +455,7 @@ test("the memory write fence on claims: AGENTS.md/CLAUDE.md/CONTEXT.md edits red
   assert.match(unscoped.gate.note, /memory/i);
   assert.ok(!unscoped.gate.note.includes("outside declared scope"), "an unscoped contract speaks the fence's words, not the scope check's");
 
-  // A scoped contract that does NOT list the file: the scope check reds it
-  // (the fence and the scope check agree — the file is outside the boundary).
+  // A scoped contract that does NOT list the memory file: the memory fence reds it.
   const ws2 = join(dir, "ws2");
   mkdirSync(join(ws2, "src"), { recursive: true });
   writeFileSync(join(ws2, artifact), "export function pad() {}\n");
@@ -463,7 +465,7 @@ test("the memory write fence on claims: AGENTS.md/CLAUDE.md/CONTEXT.md edits red
   const fencedScoped = gitCommitChanges(ws2, "edit CLAUDE.md");
   const scoped = await factory.claim({ task: "F2", sha: fencedScoped });
   assert.equal(scoped.verdict, "red");
-  assert.match(scoped.gate.note, /outside declared scope/);
+  assert.match(scoped.gate.note, /changes to fenced memory files/);
   assert.match(scoped.gate.note, /CLAUDE\.md/);
 
   // The opt-in: a Contract that explicitly scopes the memory file admits the
@@ -719,11 +721,11 @@ test("setContract refuses a workspace overlapping another live contract — equa
   }
   gitCommitAll(dir); // the parent tree of them all — for the "contains" arm
   const factory = createFactory({ stateDir: join(dir, "state") });
-  factory.setContract({ task: "A", workspace: wsA, gate: "true", artifact: "src/x.ts" });
+  factory.setContract({ task: "A", workspace: wsA, gate: "true", artifact: "src/x.ts", scope: ["src"] });
 
-  // Same tree, different task — equal.
+  // Same tree, overlapping explicit scope — equal conflict.
   assert.throws(
-    () => factory.setContract({ task: "SAME", workspace: wsA, gate: "true", artifact: "src/x.ts" }),
+    () => factory.setContract({ task: "SAME", workspace: wsA, gate: "true", artifact: "src/x.ts", scope: ["src"] }),
     (err: unknown) => err instanceof FactoryError && err.code === "workspace-conflict" && /is the same tree as.*task A/.test(err.message),
   );
   // A contract inside A's tree — nests.
@@ -736,9 +738,9 @@ test("setContract refuses a workspace overlapping another live contract — equa
     () => factory.setContract({ task: "WIDE", workspace: dir, gate: "true", artifact: "wsA/src/x.ts" }),
     (err: unknown) => err instanceof FactoryError && err.code === "workspace-conflict" && /contains/.test(err.message),
   );
-  // A trailing slash on the same tree is still the same tree.
+  // A trailing slash on the same tree with overlapping scope is still the same tree.
   assert.throws(
-    () => factory.setContract({ task: "SLASH", workspace: `${wsA}/`, gate: "true", artifact: "src/x.ts" }),
+    () => factory.setContract({ task: "SLASH", workspace: `${wsA}/`, gate: "true", artifact: "src/x.ts", scope: ["src"] }),
     factoryErrorCode("workspace-conflict"),
   );
   // Every refusal left the ledger untouched.
@@ -749,8 +751,13 @@ test("setContract refuses a workspace overlapping another live contract — equa
 
   // Acceptance retires the tree: A accepted, the same workspace contracts again.
   factory.ledger.append({ event: "attempt_accepted", task: "A", attempt: 1 });
-  const next = factory.setContract({ task: "REUSE", workspace: wsA, gate: "true", artifact: "src/x.ts" });
+  const next = factory.setContract({ task: "REUSE", workspace: wsA, gate: "true", artifact: "src/x.ts", scope: ["src"] });
   assert.equal(next.event, "contract_set");
+
+  // Unscoped Contracts on the same Project root coexist without conflict (ADR 0028 §2).
+  const unscopedSame = createFactory({ stateDir: join(dir, "state-unscoped") });
+  unscopedSame.setContract({ task: "U1", workspace: wsA, gate: "true", artifact: "src/x.ts" });
+  assert.equal(unscopedSame.setContract({ task: "U2", workspace: wsA, gate: "true", artifact: "src/x.ts" }).event, "contract_set");
 
   // Sibling trees never conflicted in the first place.
   const sibling = createFactory({ stateDir: join(dir, "state2") });
@@ -813,15 +820,11 @@ test("requestSpawn refuses and records one spawn_refused line per rule", async (
   assert.equal(invalid.outcome, "refused");
   if (invalid.outcome === "refused") assert.equal(invalid.event.rule, "spawn:invalid-task");
 
-  // Scope-mandatory fires at arity ≥ 2 only — n=1 dispatches the bare contract.
+  // Unscoped contracts dispatch at both arity 1 and arity ≥ 2 (ADR 0028 §2: Task worktrees isolate parallel runs).
   const bare1 = factory.requestSpawn({ task: "BARE", provider: "claude", arity: 1 });
-  assert.equal(bare1.outcome, "dispatched", "a lone run may carry an unscoped contract (v0.0.1 behavior)");
+  assert.equal(bare1.outcome, "dispatched");
   const bare2 = factory.requestSpawn({ task: "BARE", provider: "claude", arity: 2 });
-  assert.equal(bare2.outcome, "refused");
-  if (bare2.outcome === "refused") {
-    assert.equal(bare2.code, "spawn-scope-mandatory");
-    assert.match(bare2.event.reason, /must be scoped to run in parallel/);
-  }
+  assert.equal(bare2.outcome, "dispatched");
 
   // Accepted task — closed to spawns.
   await factory.claim({ task: "KNOWN", sha });
@@ -831,7 +834,7 @@ test("requestSpawn refuses and records one spawn_refused line per rule", async (
   if (accepted.outcome === "refused") assert.equal(accepted.event.rule, "spawn:accepted-task");
 
   const lines = factory.ledger.events.filter((e) => e.event === "spawn_refused");
-  assert.equal(lines.length, 4, "every refusal is exactly one line");
+  assert.equal(lines.length, 3, "every refusal is exactly one line");
   assert.ok(lines.every((e) => e.event === "spawn_refused" && typeof e.provider === "string" && e.arity >= 1));
 });
 
@@ -1368,22 +1371,16 @@ test("the exemption is the declared boundary: overlapping scopes, an unscoped si
     (err: unknown) => err instanceof FactoryError && err.code === "workspace-conflict" && /overlap/.test(err.message),
     "overlapping scopes refuse, naming the overlap",
   );
-  // Unrestricted scope means "everywhere" — it overlaps everything, refused.
-  assert.throws(
-    () => factory.setContract({ task: "PO3", workspace, gate: "true", artifact }),
-    factoryErrorCode("workspace-conflict"),
-    "an unscoped sibling cannot declare disjointness",
-  );
-  // A scoped contract against an unscoped incumbent: same refusal, other side.
+  // ADR 0028 §2: unscoped siblings on the same Project root are permitted (each Task gets its own isolated worktree).
+  assert.equal(factory.setContract({ task: "PO3", workspace, gate: "true", artifact }).event, "contract_set");
   const dir2 = makeTempDir();
   disposeDir(t, dir2);
   const { workspace: ws2, artifact: artifact2 } = makeWorkspace(dir2);
   const factory2 = createFactory({ stateDir: join(dir2, "state") });
   factory2.setContract({ task: "PO4", workspace: ws2, gate: "true", artifact: artifact2 });
-  assert.throws(
-    () => factory2.setContract({ task: "PO5", workspace: ws2, gate: "true", artifact: artifact2, scope: ["docs/"] }),
-    factoryErrorCode("workspace-conflict"),
-    "a scoped sibling of an unscoped incumbent refuses too",
+  assert.equal(
+    factory2.setContract({ task: "PO5", workspace: ws2, gate: "true", artifact: artifact2, scope: ["docs/"] }).event,
+    "contract_set",
   );
   // Nesting never rides the exemption — only the SAME tree does.
   const deep = join(workspace, "deep");

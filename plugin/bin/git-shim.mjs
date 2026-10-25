@@ -274,18 +274,26 @@ function scopedContractAt(cwd) {
           try { if (statSync(previous).isDirectory()) worktree = previous; } catch { /* removed historical worktree */ }
         }
       }
-      if (covers(worktree)) return contract;
+      if (covers(worktree)) return { ...contract, _matchedWorktree: worktree };
       if (covers(contract.workspace)) rootMatch = contract;
     }
   }
   return rootMatch;
 }
 
+const MEMORY_FILES = ["AGENTS.md", "CLAUDE.md", "CONTEXT.md"];
+
+function isIsolatedTaskWorktree(cwd) {
+  if (/\/projects\/[^/]+\/worktrees\/[^/]+(?:\/|$)/.test(cwd)) return true;
+  const contract = scopedContractAt(cwd);
+  return typeof contract?._matchedWorktree === "string" && contract._matchedWorktree !== "";
+}
+
 function checkAgentCommitScope(realGit, argvTokens) {
   const { globalFlags, sub, args } = parseGitSubcommand(argvTokens);
   if (sub !== "commit" || realGit === undefined) return undefined;
   const contract = scopedContractAt(resolveEffectiveCwd(globalFlags));
-  if (!contract?.base || !Array.isArray(contract.scope) || contract.scope.length === 0) return undefined;
+  if (!contract?.base) return undefined;
   const query = (args) => {
     const result = spawnSync(realGit, [...globalFlags, ...args], {
       cwd: process.cwd(), encoding: "utf8", timeout: 10_000,
@@ -329,13 +337,14 @@ function checkAgentCommitScope(realGit, argvTokens) {
       if (pathspecs.length > 0) paths.push(...query(["diff", "--name-only", "-z", contract.base, "--", ...pathspecs]));
     }
   } catch (error) {
-    return { rule: "out-of-scope", reason: `could not check the commit against Contract base ${contract.base}: ${error.message}` };
+    return { rule: "memory-write-fenced", reason: `could not check the commit against Contract base ${contract.base}: ${error.message}` };
   }
-  const outside = [...new Set(paths)].filter((file) => !scopeCoversFile(contract.scope, file));
-  if (outside.length === 0) return undefined;
+  const scope = Array.isArray(contract.scope) ? contract.scope : [];
+  const fenced = [...new Set(paths)].filter((file) => MEMORY_FILES.includes(file) && !scopeCoversFile(scope, file));
+  if (fenced.length === 0) return undefined;
   return {
-    rule: "out-of-scope",
-    reason: `changes outside declared scope: ${outside.join(", ")}. Restore relative to the Contract base (${contract.base}..HEAD): ${scopeRecoveryCommands(contract.base, outside)}; then stage the restored files and commit.`,
+    rule: "memory-write-fenced",
+    reason: `changes to fenced memory files: ${fenced.join(", ")}. Restore relative to the Contract base (${contract.base}..HEAD): ${scopeRecoveryCommands(contract.base, fenced)}; then stage the restored files and commit.`,
   };
 }
 
@@ -343,6 +352,12 @@ function checkAgentCommitScope(realGit, argvTokens) {
 
 const seat = (process.env.PASEO_FACTORY_SEAT ?? "").trim();
 let refusal = refuseGitArgv(argv);
+if (
+  (refusal?.rule === "git:checkout-discard" || refusal?.rule === "git:restore-discard") &&
+  isIsolatedTaskWorktree(resolveEffectiveCwd(parseGitSubcommand(argv).globalFlags))
+) {
+  refusal = undefined;
+}
 if (refusal === undefined && seat === "supervisor") {
   refusal = refuseSupervisorGitArgv(argv);
 }
@@ -374,8 +389,8 @@ if (refusal !== undefined) {
     console.error(`git shim: WARNING could not append the block line: ${err instanceof Error ? err.message : String(err)}`);
   }
   console.error(`git: paseo-factory refused to run: ${refusal.reason} [${refusal.rule}]`);
-  console.error(refusal.rule === "out-of-scope"
-    ? "git: nothing was executed; restore out-of-scope files from the Contract base, stage them, and retry."
+  console.error(refusal.rule === "out-of-scope" || refusal.rule === "memory-write-fenced"
+    ? "git: nothing was executed; restore fenced files from the Contract base, stage them, and retry."
     : "git: nothing was executed; adapt the command (e.g. --force-with-lease) and retry.");
   process.exit(REFUSAL_EXIT);
 }

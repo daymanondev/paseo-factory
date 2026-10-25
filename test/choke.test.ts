@@ -1069,3 +1069,30 @@ test("OpenCode orchestration seats deny isolated explicit-path git writes while 
     }
   }
 });
+
+test("ADR 0028 §5: judgeShellCommand blocks git checkout/restore working-tree discard on <project-root> but permits it inside isolated Task worktrees", () => {
+  const rootWorkspace = { workspace: "/ws/project", stateDir: "/state/factory", homeDir: "/home/u", tmp: ["/tmp"] };
+  const worktreeWorkspace = {
+    workspace: "/state/factory/projects/proj-123/worktrees/T-01",
+    stateDir: "/state/factory",
+    homeDir: "/home/u",
+    tmp: ["/tmp"],
+  };
+
+  for (const cmd of ["git checkout -- src/main.ts", "git restore src/main.ts", "git checkout ."]) {
+    assert.equal(judgeShellCommand(cmd, rootWorkspace).behavior, "deny", `${cmd} denied on <project-root>`);
+    assert.equal(
+      judgeShellCommand(cmd, worktreeWorkspace, { workspace: "/ws/project", worktree: worktreeWorkspace.workspace }).behavior,
+      "allow",
+      `${cmd} allowed inside isolated Task worktree`,
+    );
+  }
+  // Destructive history/remote commands remain denied even inside an isolated Task worktree
+  for (const dangerous of ["git reset --hard HEAD~1", "git push --force", "git clean -fd"]) {
+    assert.equal(
+      judgeShellCommand(dangerous, worktreeWorkspace, { workspace: "/ws/project", worktree: worktreeWorkspace.workspace }).behavior,
+      "deny",
+      `${dangerous} remains denied in Task worktree`,
+    );
+  }
+});

@@ -293,7 +293,7 @@ async function buildEyePrompt(input: FreshEyesPassInput): Promise<{ ok: true; pr
     "## The contract (the task's done-criteria, fixed before the work started)",
     `- Task: ${contract.task}`,
     `- Gate command: \`${contract.gate}\``,
-    `- Required artifact: ${contract.artifact}`,
+    `- Required artifact: ${contract.artifact.trim() === "" ? "(none — verified by gate and commit diff)" : contract.artifact}`,
     `- Scope (the only paths the task may touch): ${contract.scope === undefined || contract.scope.length === 0 ? "unrestricted" : contract.scope.join(", ")}`,
     "",
     "## The diff (base..claimed)",

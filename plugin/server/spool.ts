@@ -49,7 +49,7 @@ export interface ContractRequest {
   task: string;
   workspace: string;
   gate: string;
-  artifact: string;
+  artifact?: string;
   base?: string;
   scope?: string[];
   /** Marks the fresh-eyes pass ON or OFF (`true` | `false`, or omitted for caller default; anything else is rejected). */
@@ -543,7 +543,12 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     return { id: req.id, kind: req.kind, ...(req.project === undefined ? {} : { project: req.project }), ...(req.sources === undefined ? {} : { sources: req.sources as HistoryImportSource[] }), ...seatField, ...submitterField };
   }
   if (req.kind === "contract") {
-    if (typeof req.task !== "string" || typeof req.workspace !== "string" || typeof req.gate !== "string" || typeof req.artifact !== "string") {
+    if (
+      typeof req.task !== "string" ||
+      typeof req.workspace !== "string" ||
+      typeof req.gate !== "string" ||
+      (req.artifact !== undefined && typeof req.artifact !== "string")
+    ) {
       return undefined;
     }
     // The v0.0.9 stamp: a contract without a submitter is malformed — the
@@ -563,7 +568,7 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       task: req.task,
       workspace: req.workspace,
       gate: req.gate,
-      artifact: req.artifact,
+      ...(req.artifact === undefined ? {} : { artifact: req.artifact }),
       ...(req.base === undefined ? {} : { base: req.base }),
       ...(scope === undefined ? {} : { scope: scope as string[] }),
       ...(skills === undefined ? {} : { skills: skills as string[] }),
@@ -1037,7 +1042,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         task: request.task,
         workspace: request.workspace,
         gate: request.gate,
-        artifact: request.artifact,
+        ...(request.artifact === undefined ? {} : { artifact: request.artifact }),
         ...(request.base === undefined ? {} : { base: request.base }),
         ...(request.scope === undefined ? {} : { scope: request.scope }),
         ...(request.skills === undefined || request.skills.length === 0 ? {} : { skills: request.skills }),

@@ -479,7 +479,7 @@ function validateHistoryCausality(events) {
       const claim = attempt?.events.find((item) => item.event === "claim_reported");
       if (event.event !== "contract_set" && !eventAllowsUnboundEpoch(event.event) && state.contract === void 0) reject("Task fact has no prior Contract");
       if (event.event === "contract_set") {
-        if (!text(event.workspace) || !isAbsolute2(event.workspace) || !text(event.gate) || !text(event.artifact) || artifactPathProblem(event.artifact) !== void 0) reject("Contract has invalid Workspace, Gate or Artifact criteria");
+        if (!text(event.workspace) || !isAbsolute2(event.workspace) || !text(event.gate) || typeof event.artifact !== "string" || text(event.artifact) && artifactPathProblem(event.artifact) !== void 0) reject("Contract has invalid Workspace, Gate or Artifact criteria");
         if (state.inFlightAttempt !== void 0) reject("Contract replaces an open Claim pipeline");
         if (state.acceptance !== void 0) reject("Contract follows Task acceptance");
       }

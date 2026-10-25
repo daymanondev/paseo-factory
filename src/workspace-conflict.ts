@@ -34,12 +34,13 @@ export function liveWorkspaceConflict(
 
 /**
  * The first pair of scope prefixes that overlap (either covers the other's
- * territory), or undefined when the scopes are disjoint — the exemption's
- * one question. Unrestricted (empty/undefined) scope means "everywhere", so
- * it overlaps everything and never rides the exemption.
+ * territory), or undefined when the scopes are disjoint or either Contract
+ * omits `scope` (ADR 0028: each Task executes in its own isolated Task
+ * worktree and merges via `landTaskWorktree` at Acceptance, so unscoped
+ * Contracts on the same Project root never conflict).
  */
 function scopesOverlap(a: readonly string[] | undefined, b: readonly string[] | undefined): string | undefined {
-  if (a === undefined || a.length === 0 || b === undefined || b.length === 0) return "one contract is unscoped";
+  if (a === undefined || a.length === 0 || b === undefined || b.length === 0) return undefined;
   for (const mine of a) {
     for (const theirs of b) {
       if (scopeCoversFile([mine], theirs) || scopeCoversFile([theirs], mine)) return `${mine} ↔ ${theirs}`;

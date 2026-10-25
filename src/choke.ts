@@ -310,12 +310,12 @@ function isGitWord(token: string): boolean {
  * inseparable from arm 4's requirement, and ticket 01's FP boundary is the
  * observed agent corpus (which this module's case table replays).
  */
-function judgeS1(tokens: readonly string[]): ChokeDecision {
+function judgeS1(tokens: readonly string[], allowWorktreeDiscard = false): ChokeDecision {
   const words = tokens.filter((t) => !WRAPPER_WORDS.has(t) && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(t));
   for (let i = 0; i < words.length; i++) {
     if (!isGitWord(words[i])) continue;
     const refusal = refuseGitArgv(words.slice(i + 1));
-    if (refusal) {
+    if (refusal && !(allowWorktreeDiscard && (refusal.rule === "git:checkout-discard" || refusal.rule === "git:restore-discard"))) {
       return { behavior: "deny", rule: "policy:S1-git-vocabulary", reason: `dangerous git invocation (${refusal.rule}: ${refusal.reason})` };
     }
   }
@@ -914,7 +914,10 @@ export function judgeShellCommand(command: string, roots: WritableRoots, memory?
     };
   }
   const tokens = shellTokens(command);
-  const s1 = judgeS1(tokens);
+  const inIsolatedWorktree =
+    (memory?.worktree !== undefined && memory.worktree.trim() !== "") ||
+    /\/projects\/[^/]+\/worktrees\/[^/]+(?:\/|$)/.test(roots.workspace);
+  const s1 = judgeS1(tokens, inIsolatedWorktree);
   if (s1.behavior === "deny") return s1;
   const s2 = judgeS2(tokens, roots);
   if (s2.behavior === "deny") return s2;

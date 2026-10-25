@@ -226,57 +226,55 @@ test("the generated wrapper shape matches the claim CLI's law (shell wrapper, ba
 });
 
 
-test("installed agent git shim accepts glob scopes and gives branch-base recovery for staged or committed violations", (t) => {
+test("installed agent git shim allows general code commits, fences AGENTS.md/CLAUDE.md/CONTEXT.md, and allows checkout/restore discard inside isolated Task worktrees (ADR 0028)", (t) => {
   const dir = makeTempDir("git-shim-scope-");
   disposeDir(t, dir);
   const workspace = join(dir, "ws");
   mkdirSync(join(workspace, "src"), { recursive: true });
   writeFileSync(join(workspace, "src", "main.ts"), "export const main = 1;\n");
   writeFileSync(join(workspace, "README.md"), "original\n");
+  writeFileSync(join(workspace, "AGENTS.md"), "original rules\n");
   const base = gitCommitAll(workspace);
   const stateDir = join(dir, "state");
   const factory = createFactory({ stateDir });
   factory.setContract({ task: "GLOB", workspace, gate: "true", artifact: "src/main.ts", scope: ["src/**/*.ts"] });
   ensureGitShim(stateDir, join(repoRoot, "plugin"), process.execPath);
-  const run = (args: string[]) => spawnSync(join(stateDir, "bin", "git"), args, {
-    cwd: workspace, encoding: "utf8", timeout: 10_000,
+  const run = (args: string[], cwd = workspace) => spawnSync(join(stateDir, "bin", "git"), args, {
+    cwd, encoding: "utf8", timeout: 10_000,
     env: { ...process.env, NODE_OPTIONS: "--no-experimental-strip-types", PASEO_FACTORY_SEAT: "agent", PASEO_FACTORY_TASK: "GLOB" },
   });
+
+  // General code/doc files (even outside declared scope) commit cleanly without out-of-scope blocking (ADR 0028 §1)
   writeFileSync(join(workspace, "src", "main.ts"), "export const main = 2;\n");
-  writeFileSync(join(workspace, "README.md"), "out of scope\n");
-  execFileSync("git", ["add", "."], { cwd: workspace });
-  const staged = run(["commit", "-m", "bad staged file"]);
-  assert.equal(staged.status, 126, staged.stderr);
-  assert.ok(staged.stderr.includes(`git restore --source=${base} -- README.md`), staged.stderr);
-  assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: workspace, encoding: "utf8" }).trim(), base);
-  gitCommitChanges(workspace, "simulate file already committed outside shim");
-  const committed = run(["commit", "--allow-empty", "-m", "still bad branch range"]);
-  assert.equal(committed.status, 126, committed.stderr);
-  assert.ok(committed.stderr.includes(`git restore --source=${base} -- README.md`), committed.stderr);
-  assert.equal(run(["restore", `--source=${base}`, "--", "README.md"]).status, 0);
-  assert.equal(run(["add", "README.md"]).status, 0);
-  const repaired = run(["commit", "-m", "restore from branch base"]);
-  assert.equal(repaired.status, 0, repaired.stderr);
-  assert.deepEqual(execFileSync("git", ["diff", "--name-only", base, "HEAD"], { cwd: workspace, encoding: "utf8" }).trim().split("\n"), ["src/main.ts"]);
+  writeFileSync(join(workspace, "README.md"), "helper doc edit\n");
+  execFileSync("git", ["add", "src/main.ts", "README.md"], { cwd: workspace });
+  const allowedCodeCommit = run(["commit", "-m", "code and readme edit"]);
+  assert.equal(allowedCodeCommit.status, 0, allowedCodeCommit.stderr);
+
+  // Fenced memory files (AGENTS.md, CLAUDE.md, CONTEXT.md) are blocked unless explicitly in Contract.scope
+  writeFileSync(join(workspace, "AGENTS.md"), "unauthorized memory edit\n");
+  execFileSync("git", ["add", "AGENTS.md"], { cwd: workspace });
+  const stagedMemory = run(["commit", "-m", "bad memory file"]);
+  assert.equal(stagedMemory.status, 126, stagedMemory.stderr);
+  assert.ok(stagedMemory.stderr.includes(`git restore --source=${base} -- AGENTS.md`), stagedMemory.stderr);
+  assert.equal(run(["restore", `--source=${base}`, "--", "AGENTS.md"]).status, 0);
   const records = readFileSync(join(stateDir, "git-blocked.log"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
-  assert.equal(records.length, 2);
-  assert.ok(records.every((record) => record.rule === "out-of-scope"));
-  writeFileSync(join(workspace, "README.md"), "unstaged outside scope\n");
-  writeFileSync(join(workspace, "src", "main.ts"), "export const main = 3;\n");
-  assert.equal(run(["add", "src/main.ts"]).status, 0);
-  const scopedOnly = run(["commit", "-mplain"]);
-  assert.equal(scopedOnly.status, 0, scopedOnly.stderr);
-  for (const args of [["commit", "-am", "all tracked files"], ["commit", "-m", "explicit path", "--", "README.md"]]) {
-    const refused = run(args);
-    assert.equal(refused.status, 126, refused.stderr);
-    assert.ok(refused.stderr.includes(`git restore --source=${base} -- README.md`), refused.stderr);
-  }
-  gitCommitChanges(workspace, "simulate a second earlier out-of-scope commit");
-  assert.equal(run(["restore", `--source=${base}`, "--", "README.md"]).status, 0);
-  assert.equal(run(["add", "README.md"]).status, 0);
-  writeFileSync(join(workspace, "src", "main.ts"), "export const main = 4;\n");
-  const excludedRepair = run(["commit", "-m", "repair excluded by pathspec", "--", "src/main.ts"]);
-  assert.equal(excludedRepair.status, 126, excludedRepair.stderr);
+  assert.equal(records.length, 1);
+  assert.equal(records[0].rule, "memory-write-fenced");
+
+  // Working-tree discard (git checkout -- / git restore) is refused on <project-root> but allowed inside isolated Task worktree (ADR 0028 §5)
+  writeFileSync(join(workspace, "README.md"), "dirty on root\n");
+  assert.equal(run(["checkout", "--", "README.md"], workspace).status, 126);
+  execFileSync("git", ["restore", `--source=${base}`, "--", "README.md"], { cwd: workspace });
+
+  const worktree = join(stateDir, "projects", "ws-slug", "worktrees", "GLOB");
+  mkdirSync(join(stateDir, "projects", "ws-slug", "worktrees"), { recursive: true });
+  execFileSync("git", ["worktree", "add", "-b", "factory/GLOB", worktree], { cwd: workspace, stdio: "pipe" });
+  factory.requestSpawn({ task: "GLOB", provider: "claude", arity: 1, worktree });
+  writeFileSync(join(worktree, "README.md"), "dirty in worktree\n");
+  assert.equal(run(["checkout", "--", "README.md"], worktree).status, 0, "checkout -- allowed in isolated Task worktree");
+  writeFileSync(join(worktree, "README.md"), "dirty in worktree 2\n");
+  assert.equal(run(["restore", "README.md"], worktree).status, 0, "restore allowed in isolated Task worktree");
 });
 
 test("installed shim follows live worktree bindings through re-contract, replacement spawn, acceptance, and reset", (t) => {
@@ -286,6 +284,7 @@ test("installed shim follows live worktree bindings through re-contract, replace
   const worktree = join(dir, "task");
   mkdirSync(workspace);
   writeFileSync(join(workspace, "README.md"), "before\n");
+  writeFileSync(join(workspace, "AGENTS.md"), "memory before\n");
   gitCommitAll(workspace);
   execFileSync("git", ["worktree", "add", "-b", "factory/BIND", worktree], { cwd: workspace, stdio: "pipe" });
   const stateDir = join(dir, "state");
@@ -295,9 +294,9 @@ test("installed shim follows live worktree bindings through re-contract, replace
   contract();
   spawn(worktree);
   ensureGitShim(stateDir, join(repoRoot, "plugin"), process.execPath);
-  writeFileSync(join(worktree, "README.md"), "staged outside scope\n");
-  execFileSync("git", ["add", "README.md"], { cwd: worktree });
-  const run = () => spawnSync(join(stateDir, "bin", "git"), ["commit", "--dry-run", "-m", "probe scope"], {
+  writeFileSync(join(worktree, "AGENTS.md"), "staged fenced memory file\n");
+  execFileSync("git", ["add", "AGENTS.md"], { cwd: worktree });
+  const run = () => spawnSync(join(stateDir, "bin", "git"), ["commit", "--dry-run", "-m", "probe memory fence"], {
     cwd: worktree, encoding: "utf8", timeout: 10_000,
     env: { ...process.env, NODE_OPTIONS: "--no-experimental-strip-types", PASEO_FACTORY_SEAT: "agent", PASEO_FACTORY_TASK: "BIND" },
   });
@@ -313,7 +312,7 @@ test("installed shim follows live worktree bindings through re-contract, replace
   expectStatus(0, "another re-contract cannot resurrect the superseded worktree");
   spawn(worktree);
   factory.ledger.append({ event: "attempt_accepted", task: "BIND", attempt: 1, landing: "pending-conflict" });
-  expectStatus(126, "pending landing keeps the scope fence live");
+  expectStatus(126, "pending landing keeps the memory fence live");
   factory.ledger.append({ event: "attempt_accepted", task: "BIND", attempt: 1, landing: "landed" });
   expectStatus(0, "settled acceptance retires the binding");
   factory.resetProject(workspace);

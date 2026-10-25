@@ -498,7 +498,6 @@ if (command === "contract") {
   if (typeof v.task !== "string") fail("contract: --task is required");
   if (typeof v.workspace !== "string") fail("contract: --workspace is required");
   if (typeof v.gate !== "string") fail("contract: --gate is required");
-  if (typeof v.artifact !== "string") fail("contract: --artifact is required");
   if (v["fresh-eyes"] && v["no-fresh-eyes"]) fail("contract: pass either --fresh-eyes or --no-fresh-eyes, not both");
   if (typeof v.description === "string" && v.description.trim() === "") {
     fail("contract: --description must be a non-empty text — omit it when the task has no assignment text");
@@ -511,7 +510,7 @@ if (command === "contract") {
     task: v.task,
     workspace: resolvePath(v.workspace), // fixed, absolute — the agent never picks a cwd
     gate: v.gate,
-    artifact: v.artifact,
+    ...(typeof v.artifact === "string" ? { artifact: v.artifact } : {}),
     ...(v.scope === undefined
       ? {}
       : { scope: v.scope.split(",").map((s) => s.trim()).filter((s) => s !== "") }),

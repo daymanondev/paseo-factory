@@ -20,7 +20,7 @@ import { runWatchPass, watchLaneAvailable } from "./watch.ts";
 import type { CopilotRunner, TimelineFetcher } from "./watch.ts";
 import { buildRetroDigest, retroDay, retroLaneAvailable, runRetroPass, writtenRetroForDay } from "./retro.ts";
 import type { RetroOutcome } from "./retro.ts";
-import { changedFiles, checkCleanAt, headCommitSync, landTaskWorktree, resolveClaimedCommit, scopeCoversFile, scopeRecoveryCommands } from "./workspace.ts";
+import { changedFiles, checkCleanAt, headCommitSync, landTaskWorktree, resolveClaimedCommit, scopeCoversFile } from "./workspace.ts";
 import { MEMORY_FILES } from "./choke.ts";
 import { projectStateDir, resolveProject } from "./project.ts";
 import { FactoryError } from "./errors.ts";
@@ -88,7 +88,7 @@ export interface ContractInput {
    */
   workspace: string;
   gate: string;
-  artifact: string;
+  artifact?: string | undefined;
   /**
    * Optional explicit base commit ref/SHA (defaults to the workspace's `HEAD`).
    */
@@ -435,8 +435,11 @@ export function createFactory(options: FactoryOptions): Factory {
     setContract({ task, workspace, gate, artifact, base: inputBase, scope, freshEyes, watch, description, skills, by, seat }) {
       assertTaskId(task);
       if (gate.trim() === "") throw new FactoryError("invalid-contract", "gate command must be a non-empty string");
-      const artifactProblem = artifactPathProblem(artifact);
-      if (artifactProblem !== undefined) throw new FactoryError("invalid-contract", artifactProblem);
+      const resolvedArtifact = artifact === undefined ? "" : artifact;
+      if (artifact !== undefined) {
+        const artifactProblem = artifactPathProblem(artifact);
+        if (artifactProblem !== undefined) throw new FactoryError("invalid-contract", artifactProblem);
+      }
       if (freshEyes !== undefined && typeof freshEyes !== "boolean") {
         throw new FactoryError("invalid-contract", "freshEyes must be a boolean (true or false) — omit it to use the caller default");
       }
@@ -585,7 +588,7 @@ export function createFactory(options: FactoryOptions): Factory {
         task,
         workspace,
         gate,
-        artifact,
+        artifact: resolvedArtifact,
         ...(scope === undefined || scope.length === 0 ? {} : { scope }),
         base,
         ...(effectiveFreshEyes === true ? { freshEyes: true } : {}),
@@ -702,7 +705,7 @@ export function createFactory(options: FactoryOptions): Factory {
         result = await runGate({
           cmd: contract.gate,
           cwd: executionDir,
-          artifact: contract.artifact,
+          ...(contract.artifact.trim() === "" ? {} : { artifact: contract.artifact }),
           timeoutMs: options.timeoutMs,
         });
       } catch (err) {
@@ -776,23 +779,7 @@ export function createFactory(options: FactoryOptions): Factory {
           );
         }
         if (scopeDeclared) {
-          const outside = diff.files.filter((file) => !scopeCoversFile(contract.scope!, file));
-          if (outside.length > 0) {
-            scopeViolations = outside;
-            return finish(
-              finishCtx,
-              attempt,
-              {
-                exit: result.exit,
-                verdict: "red",
-                note: `changes outside declared scope: ${outside.join(", ")}. Restore relative to the Contract base (${contract.base}..${resolved.full}): ${scopeRecoveryCommands(contract.base, outside)}; then stage the restored files and commit.`,
-                timedOut: false,
-              },
-              resolved.full,
-              watchContext(),
-            );
-          }
-          scopeViolations = [];
+          scopeViolations = diff.files.filter((file) => !scopeCoversFile(contract.scope!, file));
         }
         const fenced = diff.files.filter((file) => (MEMORY_FILES as readonly string[]).includes(file) && !scopeCoversFile(contract.scope ?? [], file));
         if (fenced.length > 0) {
@@ -938,13 +925,6 @@ export function createFactory(options: FactoryOptions): Factory {
           "attempt-ceiling",
           "spawn:attempt-ceiling",
           `task ${task} reached the attempt ceiling (${MAX_ATTEMPTS} red attempts) — no further Attempt may open`,
-        );
-      }
-      if (arity >= 2 && (contract.scope === undefined || contract.scope.length === 0)) {
-        return refuse(
-          "spawn-scope-mandatory",
-          "spawn:scope-mandatory",
-          `task ${task} has no scope — contracts must be scoped to run in parallel (this invocation carries ${arity} tasks)`,
         );
       }
       const conflict = liveWorkspaceConflict(ledger, contract.workspace, task, contract.scope);
