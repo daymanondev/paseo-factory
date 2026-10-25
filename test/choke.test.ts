@@ -873,17 +873,20 @@ test("normalizeAgentCreateRequest rewrites factory seat providers onto the Proje
   });
 
   // No Lane config named: the Project's effective lane is the safe default —
-  // the picker alias resolves onto it, never stays a bare role provider id.
+  // the picker alias resolves onto its runtime provider ID and model, never
+  // stays a bare role provider id.
   const sup = normalizeAgentCreateRequest(
     { config: { provider: "factory-supervisor", cwd: workspace, title: "Hãy xây dựng một tựa game 3D" } },
     stateDir,
   );
-  assert.equal(sup.config.provider, "pi/zai/glm-5.3", "the seat runs the Project's effective supervisor lane (defaults included)");
+  assert.equal(sup.config.provider, "pi", "the seat runs the Project's effective supervisor runtime provider");
+  assert.equal((sup.config as { model?: string }).model, "zai/glm-5.3", "the seat runs the Project's effective supervisor model");
   assert.deepEqual(sup.config.labels, { seat: "supervisor", project: "ai-test-043c7e" });
   assert.deepEqual(sup.labels, { seat: "supervisor", project: "ai-test-043c7e" });
 
   const lead = normalizeAgentCreateRequest({ config: { provider: "factory-lead", cwd: workspace, title: "any message" } }, stateDir);
-  assert.equal(lead.config.provider, "pi/zai/glm-5.3");
+  assert.equal(lead.config.provider, "pi");
+  assert.equal((lead.config as { model?: string }).model, "zai/glm-5.3");
   assert.deepEqual(lead.config.labels, { seat: "lead", project: "ai-test-043c7e" });
 
   // factory-peer is a working-agent provider, not a seat-fence seat — no
@@ -903,7 +906,7 @@ test("normalizeAgentCreateRequest rewrites factory seat providers onto the Proje
   assert.equal(nowhere.config.labels, undefined);
 });
 
-test("Seam 2: a factory-supervisor create rewrites onto Project A's supervisor lane in Project A and Project B's in Project B — with thinking set from the lane and stale thinkingOptionId stripped (v0.0.38, ADR 0026 §1)", (t) => {
+test("Seam 2: a factory-supervisor create rewrites onto Project A's supervisor provider + model in Project A and Project B's in Project B — with thinking set from the lane and stale thinkingOptionId stripped (v0.0.38, ADR 0026 §1)", (t) => {
   const dir = makeTempDir("choke-project-rewrite-");
   disposeDir(t, dir);
   const stateDir = join(dir, "state");
@@ -921,7 +924,8 @@ test("Seam 2: a factory-supervisor create rewrites onto Project A's supervisor l
     { config: { provider: "factory-supervisor", cwd: projectA, title: "Ship the game", thinkingOptionId: "medium" } },
     stateDir,
   );
-  assert.equal(inA.config.provider, "claude/claude-opus-4-6", "Project A's supervisor lane wins inside Project A");
+  assert.equal(inA.config.provider, "claude", "Project A's supervisor runtime provider wins inside Project A");
+  assert.equal((inA.config as { model?: string }).model, "claude-opus-4-6", "Project A's supervisor model wins inside Project A");
   assert.equal(inA.config.thinkingOptionId, "high", "the lane's thinking level rides the rewrite");
   assert.deepEqual(inA.config.labels, { seat: "supervisor", project: "project-a-111111" });
 
@@ -929,12 +933,14 @@ test("Seam 2: a factory-supervisor create rewrites onto Project A's supervisor l
     { config: { provider: "factory-supervisor", cwd: projectB, title: "Ship the game", thinkingOptionId: "high" } },
     stateDir,
   );
-  assert.equal(inB.config.provider, "codex/gpt-5.4", "the SAME picker entry resolves Project B's own supervisor lane inside Project B");
+  assert.equal(inB.config.provider, "codex", "the SAME picker entry resolves Project B's own supervisor runtime provider inside Project B");
+  assert.equal((inB.config as { model?: string }).model, "gpt-5.4", "the SAME picker entry resolves Project B's own supervisor model inside Project B");
   assert.equal("thinkingOptionId" in inB.config, false, "the lane names no thinking level — the stale option naming the role provider's model never survives");
   assert.deepEqual(inB.config.labels, { seat: "supervisor", project: "project-b-222222" });
 
   const leadInA = normalizeAgentCreateRequest({ config: { provider: "factory-lead", cwd: projectA } }, stateDir);
-  assert.equal(leadInA.config.provider, "codex/gpt-5.4");
+  assert.equal(leadInA.config.provider, "codex");
+  assert.equal((leadInA.config as { model?: string }).model, "gpt-5.4");
   assert.equal(leadInA.config.thinkingOptionId, "high");
   assert.deepEqual(leadInA.config.labels, { seat: "lead", project: "project-a-111111" });
 
@@ -950,8 +956,18 @@ test("Seam 2: a factory-supervisor create rewrites onto Project A's supervisor l
     { config: { provider: "factory-supervisor", cwd: projectA } },
     { stateDir, providers: catalog },
   );
-  assert.equal(sanitized.config.provider, "claude/claude-opus-4-6");
+  assert.equal(sanitized.config.provider, "claude");
+  assert.equal((sanitized.config as { model?: string }).model, "claude-opus-4-6");
   assert.equal("thinkingOptionId" in sanitized.config, false, "an unadvertised :high is stripped against thinkingOptions");
+
+  // Antigravity plugin provider lane rewrites to runtime provider "antigravity" and model "gemini-3.1-pro-high".
+  saveLanes(stateDir, { supervisor: "antigravity/gemini-3.1-pro-high" }, "project-a-111111");
+  const agyInA = normalizeAgentCreateRequest(
+    { config: { provider: "factory-supervisor", cwd: projectA, model: "zai/glm-5.3" } },
+    stateDir,
+  );
+  assert.equal(agyInA.config.provider, "antigravity");
+  assert.equal((agyInA.config as { model?: string }).model, "gemini-3.1-pro-high");
 });
 
 

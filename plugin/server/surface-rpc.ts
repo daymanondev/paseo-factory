@@ -486,7 +486,6 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     for (const entry of page.entries) {
       if (entry.agent.archivedAt === null) return entry.agent;
     }
-    if (projectSlug === undefined) return undefined;
     // The native-picker seat (ADR 0017 §2): unlabeled, but bound in
     // `project.json` or running under its `factory-*` role provider.
     let all: { entries: { agent: SurfaceAgentSnapshot }[] };
@@ -495,8 +494,18 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     } catch {
       return undefined;
     }
+    const liveAgents = all.entries.map((entry) => entry.agent).filter((agent) => agent.archivedAt === null);
+    if (projectSlug === undefined) {
+      const byRoleProvider = liveAgents.find((agent) => inferRoleFromProviderId(agent.provider) === seat);
+      if (byRoleProvider !== undefined) return byRoleProvider;
+      for (const reg of listProjectRegistrations(deps.stateDir)) {
+        const matched = seatAgentByIdentity(liveAgents, reg.slug, seat);
+        if (matched !== undefined) return matched;
+      }
+      return undefined;
+    }
     return seatAgentByIdentity(
-      all.entries.map((entry) => entry.agent).filter((agent) => agent.archivedAt === null),
+      liveAgents,
       projectSlug,
       seat,
     );
@@ -1246,14 +1255,28 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
    * daemon-wide `factory-supervisor` / `factory-lead` / `factory-peer`
    * entries or the `Supervisor (Factory)` picker row Project B launches from.
    */
-  const reconcileRoleProvidersFromMachine = (): void => {
+  /**
+   * Reconciles `<home>/config.json` (`factory-supervisor`, `factory-lead`,
+   * `factory-peer`, plus the `Supervisor (Factory)` New Chat picker row) from
+   * the active scope's effective `Lanes` (ADR 0017 §1, ADR 0026 §1) so Paseo's
+   * New Chat picker immediately reflects the model and thinking level the Owner
+   * just saved or applied, while `server.before("agent.create")` enforces each
+   * Project's own `<projectStateDir>/lanes.json` at agent launch time.
+   */
+  const reconcileRoleProvidersFromScope = (lanesOverride?: Lanes): void => {
     try {
-      const effective = effectiveLanesForReconcile(deps.stateDir);
-      if (!effective.ok) {
-        log(`role providers: lanes unreadable — <home>/config.json not reconciled — ${effective.reason}`);
-        return;
+      let lanesToReconcile: Lanes;
+      if (lanesOverride !== undefined) {
+        lanesToReconcile = lanesOverride;
+      } else {
+        const effective = effectiveLanesForReconcile(deps.stateDir);
+        if (!effective.ok) {
+          log(`role providers: lanes unreadable — <home>/config.json not reconciled — ${effective.reason}`);
+          return;
+        }
+        lanesToReconcile = effective.lanes;
       }
-      const reconciled = reconcilePaseoRoleProviders(deps.home, effective.lanes, { reloadDaemon: reloadDaemonConfigViaWs });
+      const reconciled = reconcilePaseoRoleProviders(deps.home, lanesToReconcile, { reloadDaemon: reloadDaemonConfigViaWs });
       if (reconciled.ok) {
         if (reconciled.changed) log("role providers: <home>/config.json reconciled — daemon reload requested");
       } else {
@@ -1266,9 +1289,9 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
 
   /**
    * The Live-Seat Transition Law's server-side execution (v0.0.38, ADR 0026
-   * §3/§4), shared by every project-scoped lane mutation (`lanesSet`,
-   * `lanesSetBatch`, `profilesApply`, `lanesReset`): for each live
-   * supervisor/lead seat whose lane value changed —
+   * §3/§4), shared by every lane mutation (`lanesSet`, `lanesSetBatch`,
+   * `profilesApply`, `lanesReset`): for each live supervisor/lead seat whose
+   * lane value changed —
    * - same provider family (the LIVE AGENT's family vs the new lane's
    *   provider): the model and thinking level update in place, preserving the
    *   session and its conversation;
@@ -1297,6 +1320,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       const fromLane = input.before[seat];
       const toLane = input.after[seat];
       if (fromLane === toLane) continue; // the seat's lane is untouched — the seat is unaffected
+      const fromParsed = parseLane(fromLane);
       const parsed = parseLane(toLane);
       let agent: SurfaceAgentSnapshot | undefined;
       try {
@@ -1309,16 +1333,22 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         parts.push(`skipped — no live ${seat} agent for project ${input.projectSlug}`);
         continue;
       }
-      // The live agent's family — a `factory-*` role provider resolves through
-      // the MACHINE table (what `<home>/config.json` maps it onto), so a
-      // native-picker seat compares against the adapter it actually runs on.
-      const effectiveFamily = resolveEffectiveProviderFamily(agent.provider, seat, deps.stateDir, "");
+      // The live agent's family BEFORE the lane write: if `agent.provider` is a
+      // `factory-*` role provider, `saveLanes` has already written `after` to
+      // disk, so `fromParsed` (the lane before the write) names the family the
+      // live session was running on.
+      const effectiveFamily =
+        inferRoleFromProviderId(agent.provider) !== undefined && fromParsed !== undefined
+          ? resolveEffectiveProviderFamily(fromParsed.provider, seat, deps.stateDir, input.projectSlug)
+          : resolveEffectiveProviderFamily(agent.provider, seat, deps.stateDir, input.projectSlug);
+      const targetFamily =
+        parsed !== undefined ? resolveEffectiveProviderFamily(parsed.provider, seat, deps.stateDir, input.projectSlug) : "";
       const sameProviderFamily =
         parsed !== undefined &&
         (agent.provider === parsed.provider ||
           agent.provider === `${parsed.provider}/${parsed.model}` ||
           agent.provider.startsWith(`${parsed.provider}/`) ||
-          effectiveFamily === parsed.provider);
+          (effectiveFamily !== "" && effectiveFamily === targetFamily));
       if (sameProviderFamily) {
         const sync = deps.setAgentModel ?? setAgentModelViaCli;
         const syncThinking = deps.setAgentThinking ?? setAgentThinkingViaCli;
@@ -1364,6 +1394,55 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       return `skipped — no live supervisor or lead lane changed for project ${input.projectSlug} (applies to the next create)`;
     }
     return parts.join("; ");
+  };
+
+  const captureProjectLanesBeforeMachineWrite = (): Map<string, { root: string; lanes: Lanes }> => {
+    const map = new Map<string, { root: string; lanes: Lanes }>();
+    for (const reg of listProjectRegistrations(deps.stateDir)) {
+      if (reg.root === "") continue;
+      const loaded = loadLanes(deps.stateDir, reg.slug);
+      if (loaded.ok) map.set(reg.slug, { root: reg.root, lanes: loaded.lanes });
+    }
+    return map;
+  };
+
+  const syncInheritedProjectSeatsAfterMachineWrite = async (
+    beforeByProject: Map<string, { root: string; lanes: Lanes }>,
+    seats: readonly ("supervisor" | "lead")[],
+    context?: SurfaceCallContext,
+  ): Promise<string | undefined> => {
+    if (seats.length === 0 || beforeByProject.size === 0) return undefined;
+    const daemon = resolveDaemon(context);
+    const summaries: string[] = [];
+    for (const [slug, beforeProj] of beforeByProject.entries()) {
+      const afterProj = loadLanes(deps.stateDir, slug);
+      if (!afterProj.ok) continue;
+      const changedSeats = seats.filter((s) => beforeProj.lanes[s] !== afterProj.lanes[s]);
+      if (changedSeats.length === 0) continue;
+      let hasLiveSeat = false;
+      for (const seat of changedSeats) {
+        try {
+          if ((await seatOf(daemon, seat, slug)) !== undefined) {
+            hasLiveSeat = true;
+            break;
+          }
+        } catch {
+          // ignore probe error
+        }
+      }
+      if (!hasLiveSeat) continue;
+      summaries.push(
+        await syncLiveSeatsAfterLaneUpdate({
+          projectSlug: slug,
+          projectRoot: beforeProj.root,
+          before: beforeProj.lanes,
+          after: afterProj.lanes,
+          seats: changedSeats,
+          context,
+        }),
+      );
+    }
+    return summaries.length > 0 ? summaries.join("; ") : undefined;
   };
 
   const handlers = {
@@ -1464,7 +1543,13 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           );
           if (byLabels !== undefined) return byLabels;
           if (project === null) {
-            return rawAgents.find((agent) => inferRoleFromProviderId(agent.provider) === seat);
+            const byRoleProvider = rawAgents.find((agent) => inferRoleFromProviderId(agent.provider) === seat);
+            if (byRoleProvider !== undefined) return byRoleProvider;
+            for (const reg of listProjectRegistrations(deps.stateDir)) {
+              const matched = seatAgentByIdentity(rawAgents, reg.slug, seat);
+              if (matched !== undefined) return matched;
+            }
+            return undefined;
           }
           // The native-picker seat (ADR 0017 §2): unlabeled, but bound in
           // `project.json` or running under its `factory-*` role provider.
@@ -1500,6 +1585,8 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         if (project === null) {
           return (
             agent.labels.seat !== undefined ||
+            supervisorRaw?.id === agent.id ||
+            leadRaw?.id === agent.id ||
             inferRoleFromProviderId(agent.provider) === "supervisor" ||
             inferRoleFromProviderId(agent.provider) === "lead" ||
             bound.has(agent.id)
@@ -1696,6 +1783,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       const sanitizedValue = sanitizeLaneWithProviders(input.value.trim(), providers);
       const before = projectSlug !== undefined ? loadLanes(deps.stateDir, projectSlug) : undefined;
       if (projectSlug !== undefined && before !== undefined && !before.ok) return failure("lanes-unreadable", before.reason);
+      const beforeByProject = projectSlug === undefined ? captureProjectLanesBeforeMachineWrite() : undefined;
       const saved = saveLanes(deps.stateDir, { [input.lane]: sanitizedValue }, projectSlug);
       if (!saved.ok) return failure("invalid-lane", saved.reason);
       let modelSync: string;
@@ -1716,47 +1804,57 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           modelSync = "skipped — not a seat lane (applies to the next create)";
         }
       } else {
-        // The legacy unscoped sync (v0.0.14): a supervisor or lead save pushes
-        // the model to that lane's first live seat — the machine table save.
+        // The unscoped machine-table save: first apply the Live-Seat Transition
+        // Law across any registered Project inheriting the machine lane; if no
+        // registered Project has a live seat, fall back to the legacy unscoped
+        // seat lookup.
         modelSync = "skipped — not a seat lane (applies to the next create)";
         if (input.lane === "supervisor" || input.lane === "lead") {
           const seat = input.lane;
-          try {
-            const agent = await seatOf(daemon, seat, projectSlug);
-            if (agent !== undefined) {
-              const sync = deps.setAgentModel ?? setAgentModelViaCli;
-              const syncThinking = deps.setAgentThinking ?? setAgentThinkingViaCli;
-              const laneValue = saved.lanes[seat];
-              const parsed = parseLane(laneValue);
-              const slash = laneValue.indexOf("/");
-              const modelId = parsed?.model ?? (slash === -1 ? laneValue : laneValue.slice(slash + 1));
-              const reply = await sync(agent.id, modelId, deps.home);
-              const hadThinkingInInput = parseLane(input.value.trim())?.thinking !== undefined;
-              const shouldClearThinking = parsed?.thinking === undefined && ((agent.thinkingOptionId ?? "") !== "" || hadThinkingInInput);
-              if (reply.ok && (parsed?.thinking !== undefined || shouldClearThinking)) {
-                const thinkingReply = await syncThinking(agent.id, parsed?.thinking ?? "", deps.home);
-                modelSync = thinkingReply.ok
-                  ? `applied — agent ${agent.id.slice(0, 8)} now runs ${laneValue}`
-                  : `applied model (${modelId}); thinking sync failed — ${thinkingReply.reason}`;
+          const inheritedSync =
+            beforeByProject !== undefined
+              ? await syncInheritedProjectSeatsAfterMachineWrite(beforeByProject, [seat], context)
+              : undefined;
+          if (inheritedSync !== undefined) {
+            modelSync = inheritedSync;
+          } else {
+            try {
+              const agent = await seatOf(daemon, seat, projectSlug);
+              if (agent !== undefined) {
+                const sync = deps.setAgentModel ?? setAgentModelViaCli;
+                const syncThinking = deps.setAgentThinking ?? setAgentThinkingViaCli;
+                const laneValue = saved.lanes[seat];
+                const parsed = parseLane(laneValue);
+                const slash = laneValue.indexOf("/");
+                const modelId = parsed?.model ?? (slash === -1 ? laneValue : laneValue.slice(slash + 1));
+                const reply = await sync(agent.id, modelId, deps.home);
+                const hadThinkingInInput = parseLane(input.value.trim())?.thinking !== undefined;
+                const shouldClearThinking = parsed?.thinking === undefined && ((agent.thinkingOptionId ?? "") !== "" || hadThinkingInInput);
+                if (reply.ok && (parsed?.thinking !== undefined || shouldClearThinking)) {
+                  const thinkingReply = await syncThinking(agent.id, parsed?.thinking ?? "", deps.home);
+                  modelSync = thinkingReply.ok
+                    ? `applied — agent ${agent.id.slice(0, 8)} now runs ${laneValue}`
+                    : `applied model (${modelId}); thinking sync failed — ${thinkingReply.reason}`;
+                } else {
+                  modelSync = reply.ok
+                    ? `applied — agent ${agent.id.slice(0, 8)} now runs ${laneValue}`
+                    : `failed — ${reply.reason} (lanes.json is the config of record; the next ensure/create runs it)`;
+                }
               } else {
-                modelSync = reply.ok
-                  ? `applied — agent ${agent.id.slice(0, 8)} now runs ${laneValue}`
-                  : `failed — ${reply.reason} (lanes.json is the config of record; the next ensure/create runs it)`;
+                modelSync = `skipped — no live ${seat} agent${projectSlug === undefined ? "" : ` for project ${projectSlug}`} on this daemon`;
               }
-            } else {
-              modelSync = `skipped — no live ${seat} agent${projectSlug === undefined ? "" : ` for project ${projectSlug}`} on this daemon`;
+            } catch (err) {
+              modelSync = `failed — ${messageOf(err)} (lanes.json is the config of record)`;
             }
-          } catch (err) {
-            modelSync = `failed — ${messageOf(err)} (lanes.json is the config of record)`;
           }
         }
       }
       log(`lanes: ${input.lane}=${saved.lanes[input.lane]}${projectSlug === undefined ? "" : ` (project ${projectSlug})`} (${modelSync})`);
-      // The native role providers (v0.0.27, ADR 0017 §1; v0.0.38, ADR 0026
-      // §1): reconciled STRICTLY from the machine-level table — a single
-      // Project's override save never rewrites the daemon-global
-      // `factory-{supervisor,lead,peer}` entries or the picker row.
-      reconcileRoleProvidersFromMachine();
+      // Reconcile `<home>/config.json` from the active scope's effective lanes
+      // (ADR 0026 §1) so Paseo's New Chat picker immediately shows the model
+      // and thinking level just saved, while `server.before("agent.create")`
+      // enforces each Project's own `<projectStateDir>/lanes.json` at launch.
+      reconcileRoleProvidersFromScope(saved.lanes);
       return { ok: true as const, lanes: saved.lanes, modelSync };
     },
 
@@ -1764,7 +1862,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
      * The atomic batch lane save (v0.0.38, ADR 0026 §1/§5): every lane lands
      * in ONE write (the Watch & Retro card's dual-save race fix), the live
      * seats follow the same transition law a single save does, and the daemon
-     * config reconciles from the machine table alone.
+     * config reconciles from the saved scope's effective lanes.
      */
     async lanesSetBatch(input: { lanes: Partial<Record<LaneName, string>>; projectRoot?: string }, context?: SurfaceCallContext) {
       let projectSlug: string | undefined;
@@ -1789,6 +1887,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       }
       const before = projectSlug !== undefined ? loadLanes(deps.stateDir, projectSlug) : undefined;
       if (projectSlug !== undefined && before !== undefined && !before.ok) return failure("lanes-unreadable", before.reason);
+      const beforeByProject = projectSlug === undefined ? captureProjectLanesBeforeMachineWrite() : undefined;
       let saved: { lanes: Lanes; path: string };
       try {
         saved = saveLanesBatch(deps.stateDir, sanitized, projectSlug);
@@ -1796,8 +1895,8 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         return failure(codeOf(err), messageOf(err));
       }
       let modelSync = "skipped — not a seat lane (applies to the next create)";
+      const seats = (["supervisor", "lead"] as const).filter((seat) => sanitized[seat] !== undefined);
       if (projectSlug !== undefined && projectRoot !== undefined && before?.ok) {
-        const seats = (["supervisor", "lead"] as const).filter((seat) => sanitized[seat] !== undefined);
         if (seats.length > 0) {
           modelSync = await syncLiveSeatsAfterLaneUpdate({
             projectSlug,
@@ -1808,9 +1907,12 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
             context,
           });
         }
+      } else if (beforeByProject !== undefined && seats.length > 0) {
+        const inheritedSync = await syncInheritedProjectSeatsAfterMachineWrite(beforeByProject, seats, context);
+        if (inheritedSync !== undefined) modelSync = inheritedSync;
       }
       log(`lanes: batch ${Object.keys(sanitized).join("+")}${projectSlug === undefined ? "" : ` (project ${projectSlug})`} → ${saved.path} (${modelSync})`);
-      reconcileRoleProvidersFromMachine();
+      reconcileRoleProvidersFromScope(saved.lanes);
       return { ok: true as const, lanes: saved.lanes, modelSync };
     },
 
@@ -1839,7 +1941,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         context,
       });
       log(`lanes: reset project ${project.slug} to the machine table (removed=${reset.removed}) (${modelSync})`);
-      reconcileRoleProvidersFromMachine();
+      reconcileRoleProvidersFromScope(reset.lanes);
       return { ok: true as const, lanes: reset.lanes, removed: reset.removed, modelSync };
     },
 
@@ -1894,6 +1996,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       }
       const before = projectSlug !== undefined ? loadLanes(deps.stateDir, projectSlug) : loadLanes(deps.stateDir);
       if (!before.ok) return failure("lanes-unreadable", before.reason);
+      const beforeByProject = projectSlug === undefined ? captureProjectLanesBeforeMachineWrite() : undefined;
       let applied: { profile: LaneProfile; lanes: Lanes; path: string };
       try {
         applied = applyLaneProfile(deps.stateDir, input.profileId, projectSlug);
@@ -1909,10 +2012,18 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           after: applied.lanes,
           context,
         });
+      } else if (beforeByProject !== undefined) {
+        const inheritedSync = await syncInheritedProjectSeatsAfterMachineWrite(
+          beforeByProject,
+          ["supervisor", "lead"],
+          context,
+        );
+        if (inheritedSync !== undefined) modelSync = inheritedSync;
       }
       log(`profiles: applied "${applied.profile.name}" (${applied.profile.id})${projectSlug === undefined ? " to the machine table" : ` to project ${projectSlug}`} → ${applied.path} (${modelSync})`);
-      // A machine-table apply IS a machine lane change — the daemon config follows it.
-      reconcileRoleProvidersFromMachine();
+      // Reconcile `<home>/config.json` from the applied scope's effective lanes
+      // so Paseo's New Chat picker immediately shows the applied Supervisor model.
+      reconcileRoleProvidersFromScope(applied.lanes);
       return { ok: true as const, lanes: applied.lanes, modelSync };
     },
 

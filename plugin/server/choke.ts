@@ -407,19 +407,25 @@ export function normalizeAgentCreateRequest(
     }
   }
 
-  // The per-Project provider rewrite (v0.0.38, ADR 0026 §1): a
+  // The per-Project provider + model rewrite (v0.0.38, ADR 0026 §1): a
   // `factory-supervisor` / `factory-lead` create inside a Project resolves
   // THAT Project's Lane config and rewrites the session onto the Project's
-  // own `<provider>/<model>` — so starting `Supervisor (Factory)` in Project
-  // B always runs Project B's supervisor lane, never whatever Project A last
-  // saved into the daemon-global role providers. The thinking level is set
-  // from the lane when the advertised catalog supports it (or no catalog
-  // answered — the daemon validates) and stripped otherwise; a stale
-  // `thinkingOptionId` that named the role provider's model never survives
-  // the rewrite. An unresolvable cwd, an unreadable Lane config, or an
-  // unparseable lane keeps the canonical role provider id — never a guess.
+  // own runtime `provider` ID and `model` — so starting `Supervisor (Factory)`
+  // in Project B always runs Project B's supervisor lane, never whatever
+  // Project A last saved into the daemon-global role providers. Because
+  // `@getpaseo/server`'s `AgentManager.createAgentInternal` passes `{ provider,
+  // model }` already split into `before("agent.create")` and immediately calls
+  // `this.requireEnabledProvider(storedConfig.provider)`, `provider` must be
+  // the runtime Paseo provider ID alone (`claude-code` → `claude`, `agy` →
+  // `antigravity` unless a custom `agy` provider is advertised) and `model`
+  // must be `parsed.model`. The thinking level is set from the lane when the
+  // advertised catalog supports it (or no catalog answered — the daemon
+  // validates) and stripped otherwise; a stale `thinkingOptionId` that named
+  // the role provider's model never survives the rewrite. An unresolvable cwd,
+  // an unreadable Lane config, or an unparseable lane keeps the canonical role
+  // provider id — never a guess.
   let seatRewrite:
-    | { provider: string; thinkingOptionId?: string; labels: Record<string, string>; slug: string }
+    | { provider: string; model?: string; thinkingOptionId?: string; labels: Record<string, string>; slug: string }
     | undefined;
   if (
     providerInferredSeat !== undefined &&
@@ -435,14 +441,25 @@ export function normalizeAgentCreateRequest(
       const parsed = lane !== undefined ? parseLane(lane) : undefined;
       const mergedLabels = { ...(topLabels ?? {}), ...(config.labels ?? {}), seat: providerInferredSeat, project: project.slug };
       if (parsed !== undefined) {
-        const thinkingOptions = findCatalogModelMeta(parsed.provider, parsed.model, providers)?.thinkingOptions;
+        const runtimeProvider =
+          parsed.provider === "claude-code"
+            ? "claude"
+            : parsed.provider === "agy"
+              ? providers?.some((entry) => entry.provider === "agy")
+                ? "agy"
+                : "antigravity"
+              : parsed.provider;
+        const thinkingOptions =
+          findCatalogModelMeta(parsed.provider, parsed.model, providers)?.thinkingOptions ??
+          findCatalogModelMeta(runtimeProvider, parsed.model, providers)?.thinkingOptions;
         const thinkingSupported =
           parsed.thinking !== undefined &&
           (thinkingOptions === undefined ||
             thinkingOptions === null ||
             (thinkingOptions.length > 0 && thinkingOptions.some((o) => o.id === parsed.thinking)));
         seatRewrite = {
-          provider: `${parsed.provider}/${parsed.model}`,
+          provider: runtimeProvider,
+          model: parsed.model,
           ...(thinkingSupported ? { thinkingOptionId: parsed.thinking } : {}),
           labels: mergedLabels,
           slug: project.slug,
@@ -462,6 +479,7 @@ export function normalizeAgentCreateRequest(
   const updatedConfig: Record<string, unknown> = {
     ...config,
     provider: seatRewrite?.provider ?? (providerChanged ? normalizedProvider : config.provider),
+    ...(seatRewrite?.model !== undefined ? { model: seatRewrite.model } : {}),
     ...(seatRewrite?.thinkingOptionId !== undefined ? { thinkingOptionId: seatRewrite.thinkingOptionId } : {}),
     ...(seatRewrite !== undefined ? { labels: seatRewrite.labels } : nextLabels !== undefined ? { labels: nextLabels } : {}),
   };
