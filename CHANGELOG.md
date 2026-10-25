@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.42] - 2026-10-25
+
+v0.0.42's one thing: **pre-WebSocket `<paseoHome>/config.json` role-provider self-healing (`healFactoryRoleProvidersInConfig`) so stale or non-builtin `factory-*` `extends` values (such as `"extends": "antigravity"` left by `v0.0.40`) never cause Paseo `0.13.0` to reject new daemon WebSocket `hello` handshakes with `4002 ("Invalid hello")` during `Check Updates` or plugin listing** (ADR 0026).
+
+### Fixed
+
+- **Pre-WebSocket `<paseoHome>/config.json` Self-Healing (`src/role-providers.ts`, `plugin/server/daemon-cli.ts`, `plugin/index.server.ts`)** — Added `healFactoryRoleProvidersObject` and `healFactoryRoleProvidersInConfig(paseoHome)` and wired them into `daemonWsRequestPayload`, `bridgeCall`, `pluginCliJson`, and plugin boot fallback. Before opening any daemon WebSocket connection, the bridge repairs any `agents.providers.factory-*` entry whose `extends` is outside `@getpaseo/protocol`'s `BUILTIN_PROVIDER_IDS` (or `acp` with a valid `command` array) — such as `"extends": "antigravity"` written by `v0.0.40` — onto a valid built-in `extends` (`"pi"` or custom `acp` `command`), sweeps orphaned `sw2-*` / unknown `factory-*` keys, and promotes `additionalModels` to `models`, preventing Paseo `0.13.0`'s `new Session()` (`loadPersistedConfig`) from closing WebSocket handshakes with `daemon socket closed before response`.
+
 ## [0.0.41] - 2026-10-25
 
 v0.0.41's one thing: **active-scope `Supervisor (Factory)` New Chat picker synchronization with replacement `models` catalog, Paseo `0.13.0` `ProviderOverridesSchema` (`validExtendsValues`) compatibility for `antigravity` / plugin providers, split `{ provider, model }` rewrite in `server.before("agent.create")`, and `Live-Seat Transition Law` enforcement on unscoped `All projects` saves** (ADR 0026 amendment).

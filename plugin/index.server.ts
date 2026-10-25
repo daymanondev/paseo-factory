@@ -19,7 +19,7 @@ import { createFactory } from "./server/core/factory.ts";
 import { ensureFactoryBinScripts } from "./server/core/agy-home.ts";
 import { PLUGIN_ID, pluginDirFor, resolvePaseoHome, stateDirFor } from "./server/paths.ts";
 import { ensureFactorySkillSafe } from "./server/core/skill.ts";
-import { effectiveLanesForReconcile, reconcilePaseoRoleProviders } from "./server/core/role-providers.ts";
+import { effectiveLanesForReconcile, healFactoryRoleProvidersInConfig, reconcilePaseoRoleProviders } from "./server/core/role-providers.ts";
 import { reloadDaemonConfigViaWs, warmPluginDaemonApiViaWs } from "./server/daemon-cli.ts";
 import { claimCliBinDir, ensureClaimCli, ensureGitShim, injectClaimCliPath } from "./server/shell.ts";
 import { createChoke, normalizeAgentCreateRequest, startGitBlockIngestion } from "./server/choke.ts";
@@ -30,7 +30,7 @@ import { createSurfaceHandlers, registerSurfaceRpc } from "./server/surface-rpc.
 import { createLeadMailRuntime } from "./server/lead-mailbox.ts";
 import { injectRoleOnCreate, injectSessionEnv, sanitizeAgentCreateHookResult } from "./server/roles.ts";
 
-const SHELL_VERSION = "0.0.41";
+const SHELL_VERSION = "0.0.42";
 
 const log = (message: string) => console.log(`[${PLUGIN_ID}] ${message}`);
 
@@ -118,6 +118,10 @@ export default function contribute(server: PluginServerContext) {
           log(`role providers: <home>/config.json not reconciled — ${reconciled.reason}`);
         }
       } else {
+        if (healFactoryRoleProvidersInConfig(home)) {
+          log("role providers: healed invalid factory-* extends in <home>/config.json");
+          reloadDaemonConfigViaWs(home);
+        }
         log(`role providers: lanes unreadable — ${bootLanes.reason}`);
       }
     });

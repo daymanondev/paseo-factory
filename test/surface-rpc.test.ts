@@ -1617,6 +1617,32 @@ async function startFakeDaemon(t: TestContext, reply: (message: Record<string, u
       for (const text of decoded.texts) {
         const envelope = JSON.parse(text) as Record<string, unknown>;
         if (envelope.type === "hello") {
+          const configPath = join(home, "config.json");
+          if (existsSync(configPath)) {
+            try {
+              const parsed = JSON.parse(readFileSync(configPath, "utf8")) as {
+                agents?: { providers?: Record<string, { extends?: string; command?: unknown }> };
+              };
+              const validBuiltins = new Set(["claude", "codex", "copilot", "opencode", "pi", "omp"]);
+              for (const [key, entry] of Object.entries(parsed.agents?.providers ?? {})) {
+                if (!key.startsWith("factory-") && !key.startsWith("sw2-")) continue;
+                const ext = entry?.extends ?? "";
+                const validAcp =
+                  ext === "acp" &&
+                  Array.isArray(entry?.command) &&
+                  entry.command.length > 0 &&
+                  entry.command.every((part) => typeof part === "string");
+                if (!validBuiltins.has(ext) && !validAcp) {
+                  // Mirror Paseo 0.13.0's new Session() -> loadPersistedConfig failure: close with 4002 ("Invalid hello").
+                  socket.write(Buffer.from([0x88, 0x02, 0x0f, 0xa2]));
+                  socket.end();
+                  return;
+                }
+              }
+            } catch {
+              // ignore non-JSON in tests that explicitly test corrupt config
+            }
+          }
           socket.write(
             encodeWsText(
               JSON.stringify({
@@ -5497,4 +5523,86 @@ test("Seam 2: profilesApply and lanesReset follow the Live-Seat Transition Law �
   assert.equal(readProjectRegistration(stateDir, projectA.slug)?.supervisor, undefined, "the Supervisor binding clears so the next turn spawns fresh");
   assert.match(reset.modelSync, /retired — agent a-sup rotated onto pi\/zai\/glm-5\.3's provider family/);
   assert.match(reset.modelSync, /skipped — no live lead agent for project/, "the already-rotated Lead seat has nothing left to transition");
+});
+
+test("daemon plugin bridge: self-heals a v0.0.40 poisoned factory-supervisor extends ('antigravity') in <home>/config.json before opening the WebSocket so Check Updates and plugin listing never fail with 'daemon socket closed before response'", async (t) => {
+  const daemon = await startFakeDaemon(t, (message) => {
+    if (message.type === "plugin.source.status.request") {
+      return {
+        type: "plugin.source.status.response",
+        payload: {
+          requestId: message.requestId,
+          plugins: [
+            {
+              id: "paseo-factory",
+              source: "git",
+              path: "/plugins/paseo-factory",
+              currentCommit: "39c3fe6",
+              latestCommit: "80190a4",
+              commitsBehind: 1,
+              updateAvailable: true,
+            },
+          ],
+        },
+      };
+    }
+    if (message.type === "plugin.list.request") {
+      return {
+        type: "plugin.list.response",
+        payload: {
+          requestId: message.requestId,
+          plugins: [{ id: "paseo-factory", path: "/plugins/paseo-factory", enabled: true, status: "running" }],
+        },
+      };
+    }
+    return null;
+  });
+
+  // Seed <home>/config.json with the exact v0.0.40 poison-pill ("extends": "antigravity")
+  // that causes Paseo 0.13.0's new Session() -> loadPersistedConfig(paseoHome) to throw
+  // and close the WebSocket with 4002 ("Invalid hello").
+  writeFileSync(
+    join(daemon.home, "config.json"),
+    `${JSON.stringify(
+      {
+        version: 3,
+        agents: {
+          providers: {
+            opencode: { enabled: true },
+            "factory-supervisor": {
+              extends: "antigravity",
+              label: "Supervisor (Factory)",
+              enabled: true,
+              paseoTools: { enabled: false },
+              env: { PASEO_FACTORY_SEAT: "supervisor" },
+              additionalModels: [{ id: "gemini-4-argon-high", label: "gemini-4-argon-high", isDefault: true }],
+            },
+          },
+        },
+      },
+      null,
+      2,
+    )}\n`,
+  );
+
+  const stateDir = join(daemon.home, "plugin-state", "paseo-factory");
+  const retroRunner = fakeCopilotRunner(() => ({ code: 0, stdout: '{"proposals":[]}' }));
+  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner, eyeCliProbe: () => false });
+  const handlers = createSurfaceHandlers({
+    factory,
+    stateDir,
+    home: daemon.home,
+    daemon: fakeDaemon([]).daemon,
+    vaultRunner: unauthenticatedGhRunner().runner,
+  });
+
+  const check = await handlers.pluginsCheckUpdates({});
+  assert.ok(check.ok, check.ok ? "" : check.error);
+  assert.deepEqual(check.updatesAvailable, ["paseo-factory"]);
+
+  const healed = readHomeConfig(daemon.home);
+  assert.equal(healed.providers["factory-supervisor"]?.extends, "pi", "healed 'antigravity' extends to 'pi' before opening the WebSocket");
+  assert.deepEqual(healed.providers["factory-supervisor"]?.models, [
+    { id: "gemini-4-argon-high", label: "gemini-4-argon-high", isDefault: true },
+  ]);
 });
