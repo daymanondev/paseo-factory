@@ -7,7 +7,13 @@ import { createFactory } from "../plugin/server/core/factory.ts";
 import { createSurfaceHandlers } from "../plugin/server/surface-rpc.ts";
 import type { SurfaceDaemonApi } from "../plugin/server/surface-rpc.ts";
 import { writeProjectRegistration } from "../plugin/server/projects.ts";
-import { FACTORY_ROLE_PROVIDERS, effectiveLanesForReconcile, reconcilePaseoConfigObject, reconcilePaseoRoleProviders } from "../src/role-providers.ts";
+import {
+  FACTORY_ROLE_PROVIDERS,
+  effectiveLanesForReconcile,
+  healFactoryRoleProvidersInConfig,
+  reconcilePaseoConfigObject,
+  reconcilePaseoRoleProviders,
+} from "../src/role-providers.ts";
 import { projectLanesPath, saveLanes } from "../src/lanes.ts";
 import type { Lanes } from "../src/lanes.ts";
 import { disposeDir, fakeCopilotRunner, gitCommitAll, makeTempDir, writeLanes } from "./helpers.ts";
@@ -433,4 +439,57 @@ test("ADR 0026 §1: a project-scoped lanesSet or lanesSetBatch reconciles <home>
     "glm-5.1",
     "an UNSCOPED save reconciles the globals from the machine table it just wrote",
   );
+});
+
+test("ADR 0026 §1: healFactoryRoleProvidersInConfig repairs v0.0.40 poisoned extends ('antigravity', commandless 'acp') and promotes additionalModels to models in place without creating missing files", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const missingHome = join(dir, "missing-home");
+  assert.equal(healFactoryRoleProvidersInConfig(missingHome), false, "never creates a missing config.json");
+  assert.equal(existsSync(join(missingHome, "config.json")), false);
+
+  const home = join(dir, "poisoned-home");
+  const poisoned = liveLikeConfig();
+  const providers = (poisoned.agents as { providers: Record<string, Record<string, unknown>> }).providers;
+  providers["factory-supervisor"] = {
+    extends: "antigravity",
+    label: "Supervisor (Factory)",
+    enabled: true,
+    paseoTools: { enabled: false },
+    env: { PASEO_FACTORY_SEAT: "supervisor" },
+    additionalModels: [{ id: "gemini-4-argon-high", label: "gemini-4-argon-high", isDefault: true }],
+  };
+  providers["factory-lead"] = {
+    extends: "acp",
+    label: "Lead (Factory)",
+    enabled: true,
+    paseoTools: { enabled: false },
+    env: { PASEO_FACTORY_SEAT: "lead" },
+    models: [{ id: "claude-opus-4-6", label: "claude-opus-4-6", isDefault: true }],
+  };
+  providers["factory-peer"] = {
+    extends: "agy",
+    label: "Peer (Factory)",
+    enabled: true,
+    paseoTools: { enabled: false },
+    env: { PASEO_FACTORY_SEAT: "agent" },
+    models: [{ id: "gemini-3-pro", label: "gemini-3-pro", isDefault: true }],
+  };
+  providers["sw2-supervisor-claude"] = { extends: "claude", enabled: true };
+  writeConfig(home, poisoned);
+
+  assert.equal(healFactoryRoleProvidersInConfig(home), true, "heals the poisoned config on the first call");
+  assert.equal(healFactoryRoleProvidersInConfig(home), false, "second call is a no-op");
+
+  const healed = readConfig(home);
+  const healedProviders = (healed.agents as { providers: Record<string, Record<string, unknown>> }).providers;
+  assert.equal("sw2-supervisor-claude" in healedProviders, false, "sweeps orphaned sw2-* provider keys");
+  assert.equal(healedProviders["factory-supervisor"]?.extends, "pi", "heals 'antigravity' extends onto a valid built-in provider");
+  assert.deepEqual(healedProviders["factory-supervisor"]?.models, [
+    { id: "gemini-4-argon-high", label: "gemini-4-argon-high", isDefault: true },
+  ]);
+  assert.equal("additionalModels" in (healedProviders["factory-supervisor"] ?? {}), false, "promotes additionalModels to models");
+  assert.equal(healedProviders["factory-lead"]?.extends, "pi", "heals commandless 'acp' extends onto a valid built-in provider");
+  assert.equal(healedProviders["factory-peer"]?.extends, "acp", "inherits custom agy acp command when present");
+  assert.deepEqual(healedProviders["factory-peer"]?.command, ["npx", "-y", "paseo-agy-acp@2.4.0"]);
 });

@@ -21,6 +21,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFil
 import { delimiter as pathDelimiter, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { isElectronNodeBinary } from "./core/pi-home.ts";
+import { healFactoryRoleProvidersInConfig } from "./core/role-providers.ts";
 
 export type DaemonReply = { ok: true } | { ok: false; reason: string };
 
@@ -46,6 +47,7 @@ function daemonWsRequestPayload<T>(
   responseType: string,
   timeoutMs: number = BRIDGE_TIMEOUT_MS,
 ): Promise<DaemonPayloadReply<T>> | null {
+  healFactoryRoleProvidersInConfig(home);
   const pidPath = join(home, "paseo.pid");
   const credPath = join(home, "local-credential");
   if (!existsSync(pidPath) || !existsSync(credPath)) return null;
@@ -164,6 +166,8 @@ export function cliUtils(searchPath: string = process.env.PATH ?? "", separator:
 
 /** One bridge method call — JSON over stdio, one deadline, a named reason on any death. */
 function bridgeCall(method: string, args: unknown[], home?: string): Promise<DaemonReply> {
+  const targetHome = home ?? process.env.PASEO_HOME;
+  if (targetHome !== undefined && targetHome !== "") healFactoryRoleProvidersInConfig(targetHome);
   const utils = cliUtils();
   if (utils === null) {
     return Promise.resolve({ ok: false, reason: "the paseo CLI was not found on the plugin's PATH — cannot reach the daemon methods the in-process API lacks" });
@@ -338,6 +342,7 @@ function isDaemonPluginItem(value: unknown): value is DaemonPluginItem {
 
 /** One `paseo` CLI invocation answering parsed `--json` stdout — a named reason on any death. */
 function pluginCliJson(home: string, argv: string[], timeoutMs: number): { ok: true; value: unknown } | { ok: false; reason: string } {
+  healFactoryRoleProvidersInConfig(home);
   const env = { ...process.env, PASEO_HOME: home, NO_COLOR: "1" };
   const probe = spawnSync("paseo", argv, { encoding: "utf8", timeout: timeoutMs, env });
   if (probe.error !== undefined) return { ok: false, reason: probe.error.message };

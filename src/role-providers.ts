@@ -360,6 +360,116 @@ export function reconcilePaseoRoleProviders(
 }
 
 /**
+ * Pure sanitizer for an existing `<paseoHome>/config.json` object: sweeps
+ * orphaned `sw2-*` / unknown `factory-*` provider entries and heals any
+ * `factory-supervisor` / `factory-lead` / `factory-peer` entry whose `extends`
+ * would be rejected by Paseo 0.13.0's `ProviderOverridesSchema` (such as
+ * `"extends": "antigravity"` left by v0.0.40 or `"extends": "acp"` without a
+ * non-empty `command` array) onto a valid built-in `extends` (`"pi"` or custom
+ * `acp` command), promoting `additionalModels` to `models` when `models` is
+ * absent.
+ */
+export function healFactoryRoleProvidersObject(config: PaseoConfigObject): { changed: boolean; config: PaseoConfigObject } {
+  const original = config;
+  if (!isRecord(original.agents) || !isRecord(original.agents.providers)) {
+    return { changed: false, config: original };
+  }
+  const agents = original.agents;
+  const rawProviders = agents.providers as Record<string, unknown>;
+  const providers: Record<string, PaseoProviderEntry> = {};
+  for (const [key, value] of Object.entries(rawProviders)) {
+    if (isSweptProviderKey(key)) continue;
+    providers[key] = value as PaseoProviderEntry;
+  }
+  for (const role of ROLE_ORDER) {
+    const key = FACTORY_ROLE_PROVIDERS[role];
+    const rawEntry = providers[key];
+    if (!isRecord(rawEntry)) continue;
+    const entry: PaseoProviderEntry = { ...(rawEntry as PaseoProviderEntry) };
+    const rawExtends = typeof entry.extends === "string" && entry.extends !== "" ? entry.extends : "";
+    const hasValidCommand =
+      Array.isArray(entry.command) && entry.command.length > 0 && entry.command.every((part) => typeof part === "string");
+    const isValidExtends = PASEO_BUILTIN_EXTENDS.has(rawExtends) || (rawExtends === "acp" && hasValidCommand);
+    if (!isValidExtends) {
+      const base = baseProviderFor(rawExtends, providers);
+      entry.extends = base.extends;
+      if (base.command !== undefined) {
+        entry.command = base.command;
+      } else if (!hasValidCommand) {
+        delete entry.command;
+      }
+    }
+    if (entry.models === undefined && Array.isArray(entry.additionalModels)) {
+      entry.models = entry.additionalModels;
+      delete entry.additionalModels;
+    }
+    providers[key] = entry;
+  }
+  let nextDaemon = original.daemon;
+  if (isRecord(original.daemon) && Array.isArray(original.daemon.agentProfiles)) {
+    const filteredProfiles = original.daemon.agentProfiles.filter((profile) => {
+      if (!isRecord(profile)) return true;
+      const id = typeof profile.id === "string" ? profile.id : "";
+      const prov = typeof profile.provider === "string" ? profile.provider : "";
+      return !isSweptProviderKey(id) && !isSweptProviderKey(prov);
+    });
+    if (filteredProfiles.length !== original.daemon.agentProfiles.length) {
+      nextDaemon = { ...original.daemon, agentProfiles: filteredProfiles };
+    }
+  }
+  const next: PaseoConfigObject = {
+    ...original,
+    agents: { ...agents, providers },
+    ...(nextDaemon === original.daemon ? {} : { daemon: nextDaemon }),
+  };
+  const changed = JSON.stringify(next) !== JSON.stringify(original);
+  return { changed, config: next };
+}
+
+/**
+ * Self-heals an existing `<paseoHome>/config.json` on disk before the plugin
+ * opens a new daemon WebSocket session. In Paseo 0.13.0, every WebSocket
+ * `hello` handshake constructs `new Session()`, which synchronously calls
+ * `loadPersistedConfig(paseoHome)` from disk and closes the socket with code
+ * `4002 ("Invalid hello")` if any `agents.providers.factory-*` entry has an
+ * `extends` outside `BUILTIN_PROVIDER_IDS ∪ {"acp"}` (for example,
+ * `"extends": "antigravity"` written by v0.0.40). Healing the file on disk
+ * before connecting lets the running daemon's `hello` handshake succeed
+ * immediately without a daemon restart. Never creates a missing file and never
+ * throws.
+ */
+export function healFactoryRoleProvidersInConfig(paseoHome: string): boolean {
+  if (typeof paseoHome !== "string" || paseoHome.trim() === "") return false;
+  const path = join(paseoHome, "config.json");
+  if (!existsSync(path)) return false;
+  let config: PaseoConfigObject;
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+    if (!isRecord(parsed)) return false;
+    config = parsed as PaseoConfigObject;
+  } catch {
+    return false;
+  }
+  const { changed, config: next } = healFactoryRoleProvidersObject(config);
+  if (!changed) return false;
+  try {
+    let mode = 0o600;
+    try {
+      mode = statSync(path).mode & 0o777;
+    } catch {
+      // keep 0o600 default
+    }
+    const tmp = `${path}.tmp-${process.pid}`;
+    writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`);
+    chmodSync(tmp, mode);
+    renameSync(tmp, path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The lane table the role providers reconcile from (ADR 0017 §1, ADR 0026 §1):
  * when `preferredProjectSlug` is given, that Project's effective `Lanes` table;
  * otherwise, when `<stateDir>/lanes.json` exists, the most recently modified
