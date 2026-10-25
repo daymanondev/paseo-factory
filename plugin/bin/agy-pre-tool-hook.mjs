@@ -285,11 +285,18 @@ function isForbiddenSeatGit(command) {
     /\bgit\s+push\s+.*(?:--force|-f|--delete|-d)\b/.test(command);
 }
 
-function resolveContext() {
+function resolveContext(payload) {
   const home = process.env.PASEO_HOME || join(homedir(), ".paseo");
   const stateDir = process.env.PASEO_FACTORY_STATE_DIR || join(home, "plugin-state", "paseo-factory");
   let seat = rawSeatEnv;
-  let projectRoot = process.env.PASEO_FACTORY_PROJECT_ROOT || process.cwd();
+  const workspacePath =
+    Array.isArray(payload?.workspacePaths) &&
+    typeof payload.workspacePaths[0] === "string" &&
+    payload.workspacePaths[0].trim() !== ""
+      ? payload.workspacePaths[0].trim()
+      : "";
+  const payloadCwd = typeof payload?.cwd === "string" && payload.cwd.trim() !== "" ? payload.cwd.trim() : "";
+  let projectRoot = process.env.PASEO_FACTORY_PROJECT_ROOT || payloadCwd || workspacePath || process.cwd();
   let projectSlug = process.env.PASEO_FACTORY_PROJECT || "";
   let task = process.env.PASEO_FACTORY_TASK || "";
 
@@ -337,30 +344,12 @@ function loadContractForTask(stateDir, task) {
 }
 
 function allow() {
-  process.stdout.write(
-    `${JSON.stringify({
-      decision: "allow",
-      hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        permissionDecision: "allow",
-      },
-    })}\n`,
-  );
+  process.stdout.write('{"decision":"allow"}\n');
   process.exit(0);
 }
 
 function deny(reason) {
-  process.stdout.write(
-    `${JSON.stringify({
-      decision: "deny",
-      reason,
-      hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        permissionDecision: "deny",
-        permissionDecisionReason: reason,
-      },
-    })}\n`,
-  );
+  process.stdout.write(`${JSON.stringify({ decision: "deny", reason })}\n`);
   process.exit(0);
 }
 
@@ -377,21 +366,36 @@ process.stdin.on("end", () => {
     allow();
   }
 
-  const ctx = resolveContext();
+  const ctx = resolveContext(payload);
   if (ctx.seat !== "supervisor" && ctx.seat !== "lead" && ctx.seat !== "agent") {
     allow();
   }
 
-  const toolName = String(payload.tool_name ?? payload.toolName ?? payload.name ?? "").trim();
+  const toolCallObj =
+    typeof payload.toolCall === "object" && payload.toolCall !== null ? payload.toolCall : null;
+  const toolName = String(
+    toolCallObj?.name ?? payload.tool_name ?? payload.toolName ?? payload.name ?? "",
+  ).trim();
+  const rawInput =
+    toolCallObj?.args ??
+    toolCallObj?.arguments ??
+    payload.tool_input ??
+    payload.toolInput ??
+    payload.input ??
+    payload.arguments;
   const toolInput =
-    typeof (payload.tool_input ?? payload.toolInput ?? payload.input ?? payload.arguments) === "object" &&
-    (payload.tool_input ?? payload.toolInput ?? payload.input ?? payload.arguments) !== null
-      ? (payload.tool_input ?? payload.toolInput ?? payload.input ?? payload.arguments)
-      : {};
+    typeof rawInput === "object" && rawInput !== null ? rawInput : {};
+  const mcpCalledToolName =
+    toolName === "call_mcp_tool" ? String(toolInput.ToolName ?? toolInput.toolName ?? "").trim() : "";
 
-  if (FORBIDDEN_PASEO_TOOLS.has(toolName) || toolName.startsWith("mcp__paseo__")) {
+  if (
+    FORBIDDEN_PASEO_TOOLS.has(toolName) ||
+    toolName.startsWith("mcp__paseo__") ||
+    (mcpCalledToolName !== "" && (FORBIDDEN_PASEO_TOOLS.has(mcpCalledToolName) || mcpCalledToolName.startsWith("mcp__paseo__")))
+  ) {
+    const blockedName = mcpCalledToolName || toolName;
     deny(
-      `Direct Paseo agent-lifecycle tool "${toolName}" is forbidden for factory seats (seat-paseo-tool-fence); use paseo_factory MCP tools instead.`,
+      `Direct Paseo agent-lifecycle tool "${blockedName}" is forbidden for factory seats (seat-paseo-tool-fence); use paseo_factory MCP tools instead.`,
     );
   }
 

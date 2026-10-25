@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.43] - 2026-10-25
+
+v0.0.43's one thing: **Antigravity (`agy`) `PreToolUse` `protojson` output and `toolCall` input compatibility (`plugin/bin/agy-pre-tool-hook.mjs`), JSON-string `arguments` coercion in `plugin/bin/bridge.mjs`, and direct Turn-1 `supervisor_dispatch_lead` delegation when the Owner provides a complete specification** (ADR 0016 amendment).
+
+### Fixed
+
+- **Antigravity `PreToolUse` `protojson` Output & `toolCall` Input Compatibility (`plugin/bin/agy-pre-tool-hook.mjs`)** — Removed Claude Code's `hookSpecificOutput` wrapper from `allow()` (`{"decision":"allow"}`) and `deny(reason)` (`{"decision":"deny","reason":...}`) so Antigravity's `protojson` unmarshaler never rejects `read_file`, `call_mcp_tool`, or `run_command` tool calls with `proto: unknown field "hookSpecificOutput"` on `Supervisor`, `Lead`, and `Agent` seats. Added native Antigravity `{ toolCall: { name, args }, workspacePaths }` stdin parsing and `call_mcp_tool` inner `ToolName` checking alongside flat `{ tool_name, tool_input, cwd }` payloads.
+- **Lazy-Loaded `call_mcp_tool` String `arguments` Parsing (`plugin/bin/bridge.mjs`)** — `tools/call` in `bridge.mjs` now parses `params.arguments` when passed as a JSON string by lazy MCP callers (`call_mcp_tool`).
+- **Turn-1 Complete-Specification Delegation Boundary (`src/roles-contract.ts`, `plugin/server/core/roles-contract.ts`, `plugin/bin/vault.mjs`)** — Clarified `Delegation Boundary` in the `Supervisor` role contract so that when the Owner provides a complete specification on Turn 1 (or answers clarifying questions), `Supervisor` invokes `supervisor_dispatch_lead` (including Antigravity's `call_mcp_tool` on `paseo-factory_paseo_factory`) immediately without reading `grilling/SKILL.md` or asking redundant questions.
+
 ## [0.0.42] - 2026-10-25
 
 v0.0.42's one thing: **pre-WebSocket `<paseoHome>/config.json` role-provider self-healing (`healFactoryRoleProvidersInConfig`) so stale or non-builtin `factory-*` `extends` values (such as `"extends": "antigravity"` left by `v0.0.40`) never cause Paseo `0.13.0` to reject new daemon WebSocket `hello` handshakes with `4002 ("Invalid hello")` during `Check Updates` or plugin listing** (ADR 0026).

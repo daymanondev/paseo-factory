@@ -1731,7 +1731,15 @@ async function handleRpcMessage(msg) {
 
     if (method === "tools/call") {
       const toolName = typeof params?.name === "string" ? params.name : "";
-      const toolArgs = params?.arguments ?? {};
+      let toolArgs = params?.arguments ?? {};
+      if (typeof toolArgs === "string") {
+        try {
+          const parsed = JSON.parse(toolArgs);
+          if (typeof parsed === "object" && parsed !== null) toolArgs = parsed;
+        } catch {
+          // keep as-is
+        }
+      }
       const result = await handleToolCall(toolName, toolArgs);
       writeJsonRpcMessage({
         jsonrpc: "2.0",
