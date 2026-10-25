@@ -14,10 +14,12 @@
  * Function components only — no class syntax reaches the Hermes bundle.
  */
 import type { PluginTheme } from "@getpaseo/plugin";
-import { useRpc } from "@getpaseo/plugin/client";
-import { ScrollView, useToast } from "@getpaseo/plugin/client/react-native";
-import { useEffect, useRef, useState } from "react";
+import type { PluginTab } from "@getpaseo/plugin/client";
+import { useRpc, useTabState } from "@getpaseo/plugin/client";
+import { ScrollView, useToast } from "@getpaseo/plugin/client/ui";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Text, View } from "react-native";
+import { z } from "zod";
 import { accept, lanesReset, lanesSet, lanesSetBatch, leadRotate, pluginsInstall, pluginsManage, pluginsCheckUpdates, profilesApply, profilesDelete, profilesSave, projectAdd, projectDelete, projectPickFolder, projectReset, ratifyProposal, retro, snapshot, supervisorRevoke, taskDetail, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
 import type { ManageablePluginId } from "../../shared/companions.ts";
 import type { FactoryView, LaneName } from "../../shared/view.ts";
@@ -45,6 +47,12 @@ export interface Navigation {
 
 type DetailState = TaskDetailModalState;
 
+const FactoryTabStateSchema = z.object({
+  tab: z.enum(["tasks", "seats", "timeline", "vault", "plugins"]),
+  pickedRoot: z.string().nullable(),
+  hasPickedScope: z.boolean(),
+});
+
 export function FactoryShell({
   theme,
   layout,
@@ -53,6 +61,7 @@ export function FactoryShell({
   serverId,
   initialTab = "tasks",
   showDiagnostics = false,
+  panelTab,
 }: {
   theme: PluginTheme;
   layout?: { compact: boolean; platform?: "ios" | "android" | "web" };
@@ -62,6 +71,8 @@ export function FactoryShell({
   serverId?: string;
   initialTab?: TabId;
   showDiagnostics?: boolean;
+  /** Paseo 0.13 persisted workspace panel tab handle (`useTabState`). */
+  panelTab?: PluginTab;
 }) {
   const toast = useToast();
   const snapshotCall = useRpc(snapshot);
@@ -95,7 +106,30 @@ export function FactoryShell({
   const vaultSyncCall = useRpc(vaultSync);
   const vaultImportCall = useRpc(vaultImport);
 
-  const [tab, setTab] = useState<TabId>(initialTab);
+  const [localTabState, setLocalTabState] = useState<unknown>(undefined);
+  const fallbackPluginTab: PluginTab = useMemo(
+    () => ({
+      state: localTabState,
+      setState: (next) => setLocalTabState(next),
+      setModified: () => {},
+    }),
+    [localTabState],
+  );
+  const [persistedState, setPersistedState] = useTabState(
+    panelTab ?? fallbackPluginTab,
+    FactoryTabStateSchema,
+    { tab: initialTab, pickedRoot: null, hasPickedScope: false },
+  );
+  const tab = persistedState.tab;
+  const pickedRoot = persistedState.pickedRoot;
+  const hasPickedScope = persistedState.hasPickedScope;
+  const setTab = (nextTab: TabId): void => {
+    setPersistedState({ ...persistedState, tab: nextTab });
+  };
+  const setPickedScope = (nextRoot: string | null, nextHasPicked = true): void => {
+    setPersistedState({ ...persistedState, pickedRoot: nextRoot, hasPickedScope: nextHasPicked });
+  };
+
   const [bump, setBump] = useState(0);
   const [busy, setBusy] = useState(false);
   const [busyAct, setBusyAct] = useState<string | null>(null);
@@ -109,16 +143,16 @@ export function FactoryShell({
   const [laneNote, setLaneNote] = useState<string | null>(null);
   const [retroNote, setRetroNote] = useState<string | null>(null);
   const [detail, setDetail] = useState<DetailState | null>(null);
-  /** The Project Switcher's pick — overrides the panel's `dir` once the Owner explicitly picks a project or All projects. */
-  const [pickedRoot, setPickedRoot] = useState<string | null>(null);
-  const [hasPickedScope, setHasPickedScope] = useState(false);
   const [containerWidth, setContainerWidth] = useState<number>(0);
   const lastViewRef = useRef<FactoryView | null>(null);
   const refresh = () => setBump((n) => n + 1);
 
+  const prevDirRef = useRef<string | undefined>(dir);
   useEffect(() => {
-    setHasPickedScope(false);
-    setPickedRoot(null);
+    if (prevDirRef.current !== dir) {
+      prevDirRef.current = dir;
+      setPickedScope(null, false);
+    }
   }, [dir]);
 
   // The active Project scope: the Owner's explicit Project Switcher pick when
@@ -298,8 +332,7 @@ export function FactoryShell({
         ...(targetSlug === undefined ? {} : { projectSlug: targetSlug, project: targetSlug }),
       });
       if (reply.ok) {
-        setHasPickedScope(true);
-        setPickedRoot(null);
+        setPickedScope(null, true);
         setDetail(null);
       }
       return reply;
@@ -309,8 +342,7 @@ export function FactoryShell({
     void act("Add Project", async () => {
       const reply = await projectPickFolderCall({});
       if (reply.ok && !reply.cancelled && typeof reply.path === "string") {
-        setHasPickedScope(true);
-        setPickedRoot(reply.path);
+        setPickedScope(reply.path, true);
         setDetail(null);
       }
       return reply;
@@ -322,8 +354,7 @@ export function FactoryShell({
     void act("Add Project", async () => {
       const reply = await projectAddCall({ projectRoot: trimmed, path: trimmed });
       if (reply.ok) {
-        setHasPickedScope(true);
-        setPickedRoot(reply.path);
+        setPickedScope(reply.path, true);
         setDetail(null);
       }
       return reply;
@@ -385,8 +416,7 @@ export function FactoryShell({
             pickProjectFolder,
             addProject,
             pickProject: (root) => {
-              setHasPickedScope(true);
-              setPickedRoot(root);
+              setPickedScope(root, true);
             },
             busy,
           }}

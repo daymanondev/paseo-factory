@@ -1378,6 +1378,62 @@ test("Fuse 2: handing_over timeout (via scheduled timer and via pumpProjectLead)
   }
 });
 
+test("Paseo 0.13.0 compatibility: completeHandoff refetches tail timeline via daemon.agents.ref(id).timeline.refetch when agent.turn_ended timeline is empty, and paseo-plugin.json uses open-ended >=0.13.0 requirement (v0.0.39, ADR 0027)", async (t) => {
+  const manifest = JSON.parse(readFileSync(join(process.cwd(), "plugin", "paseo-plugin.json"), "utf8")) as {
+    requirements?: { paseo?: string };
+  };
+  assert.equal(manifest.requirements?.paseo, ">=0.13.0");
+
+  const lead: FakeAgent = {
+    id: "agent-lead-013",
+    title: "Lead",
+    status: "idle",
+    labels: {},
+    lastUsage: { contextWindowUsedTokens: 135_000, contextWindowMaxTokens: 200_000 },
+  };
+  const { slug, projectRoot, surface, leadMail, fake } = makeSpooledRuntime(t, [lead]);
+  lead.labels = { seat: "lead", project: slug };
+  lead.cwd = projectRoot;
+  await surface.leadEnsure({ projectRoot });
+
+  const refetchCalls: { id: string; opts: unknown }[] = [];
+  const origRef = fake.daemon.agents.ref.bind(fake.daemon.agents);
+  fake.daemon.agents.ref = (id: string) => {
+    const base = origRef(id);
+    if (id === "agent-lead-013") {
+      return {
+        ...base,
+        timeline: {
+          refetch: async (opts?: { direction?: "tail" | "head"; limit?: number }) => {
+            refetchCalls.push({ id, opts });
+            return {
+              entries: [
+                { item: { type: "user_message", text: "Extract handoff" } },
+                { item: { type: "assistant_message", text: "# Handoff from Paseo 0.13.0 tail refetch\nWave 2 ready." } },
+              ],
+            };
+          },
+        },
+      };
+    }
+    return base;
+  };
+
+  // Turn 1 ends at 135k -> enters handing_over
+  await leadMail.onLeadTurnEnded({ agentId: "agent-lead-013", outcome: { kind: "completed" }, timeline: [] });
+  // Extraction turn ends with Paseo 0.13.0's always-empty timeline: []
+  await leadMail.onLeadTurnEnded({ agentId: "agent-lead-013", outcome: { kind: "completed" }, timeline: [] });
+
+  assert.equal(refetchCalls.length, 1);
+  assert.deepEqual(refetchCalls[0], { id: "agent-lead-013", opts: { direction: "tail", limit: 20 } });
+
+  const successorId = "agent-created-1";
+  const successorSends = fake.sent.filter((s) => s.agentId === successorId);
+  assert.equal(successorSends.length, 1);
+  assert.match(successorSends[0]!.text, /# Handoff from Paseo 0\.13\.0 tail refetch\nWave 2 ready\./);
+});
+
+
 
 
 

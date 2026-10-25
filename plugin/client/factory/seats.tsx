@@ -15,7 +15,7 @@
  * through; an impact → the Confirm & Apply modal before the RPC.
  */
 import type { PluginTheme } from "@getpaseo/plugin";
-import { Icon, Modal, ScrollView, TextInput } from "@getpaseo/plugin/client/react-native";
+import { Icon, Modal, ScrollView, TextInput } from "@getpaseo/plugin/client/ui";
 import { useEffect, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { AgentView, FactoryView, LaneName, LaneProfileView, Lanes, ProviderModelView } from "../../shared/view.ts";

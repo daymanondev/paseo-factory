@@ -2,6 +2,6 @@
   "id": "paseo-factory",
   "description": "Verification core for Paseo agents: owner-set contracts, a gate the agent cannot grade itself with, an append-only ledger.",
   "requirements": {
-    "paseo": ">=0.11.0 <0.12.0"
+    "paseo": ">=0.13.0"
   }
 }

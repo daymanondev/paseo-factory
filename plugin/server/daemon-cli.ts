@@ -1080,7 +1080,11 @@ export async function cleanupDaemonWorkspacesAndProjectsViaWs(
   if (removeMain) {
     prunePaseoProjectRegistry(targetHome, { projectRoot: input.projectRoot, worktreesDir: input.worktreesDir });
   }
-  const listWorkspaces = daemonWsRequestPayload<unknown>(targetHome, { type: "fetch_workspaces_request" }, "fetch_workspaces_response");
+  const listWorkspaces = daemonWsRequestPayload<unknown>(
+    targetHome,
+    { type: "fetch_workspaces_request", includeBackground: true, filter: { includeBackground: true } },
+    "fetch_workspaces_response",
+  );
   if (listWorkspaces === null) return { ok: true, removedWorkspaceIds: [], removedProjectIds: [] }; // no daemon socket — nothing to sweep
   const listProjects = daemonWsRequestPayload<unknown>(targetHome, { type: "project.list.request" }, "project.list.response");
   const keepIds = input.keepWorkspaceIds === undefined ? null : new Set(input.keepWorkspaceIds);

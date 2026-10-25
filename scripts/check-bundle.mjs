@@ -135,6 +135,7 @@ function bundle(entry, target) {
     bundle: true,
     format: "cjs",
     jsx: "automatic",
+    loader: { ".svg": "text" },
     platform: target === "server" ? "node" : "neutral",
     target: target === "server" ? "node20" : "es2020",
     mainFields: target === "client" ? ["module", "main"] : undefined,

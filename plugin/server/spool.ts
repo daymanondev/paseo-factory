@@ -787,7 +787,7 @@ async function resolveEffectiveSeat(
     }
     if (daemon?.agents?.list !== undefined) {
       try {
-        const page = await daemon.agents.list({ filter: { includeArchived: false } });
+        const page = await daemon.agents.list({ filter: { includeArchived: false, includeBackground: true } });
         const matched = page.entries.find((e) => e.agent.id === submitter && e.agent.archivedAt === null)?.agent;
         const liveSeat = matched?.labels?.seat;
         if (liveSeat === "supervisor" || liveSeat === "lead" || liveSeat === "agent") {
@@ -856,7 +856,7 @@ async function resolveSpawnWorkspaceAndParent(
   let leadAgentId: string | undefined;
   if (daemon !== undefined) {
     try {
-      const page = await daemon.agents.list({ filter: { labels: { seat: "lead", project: project.slug }, includeArchived: false } });
+      const page = await daemon.agents.list({ filter: { labels: { seat: "lead", project: project.slug }, includeArchived: false, includeBackground: true } });
       const liveLead = page.entries.find((e) => e.agent.archivedAt === null)?.agent;
       if (liveLead !== undefined) leadAgentId = liveLead.id;
     } catch {

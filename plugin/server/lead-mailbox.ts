@@ -379,7 +379,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   ): Promise<SurfaceAgentSnapshot | undefined> => {
     let page: { entries: { agent: SurfaceAgentSnapshot }[] };
     try {
-      page = await daemon.agents.list({ filter: { includeArchived: false } });
+      page = await daemon.agents.list({ filter: { includeArchived: false, includeBackground: true } });
     } catch {
       return undefined;
     }
@@ -401,7 +401,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
 
   /** The live non-archived Lead agent of one Project — the seatOf law, on the runtime's daemon slice. */
   const liveLeadAgent = async (daemon: SurfaceDaemonApi, slug: string): Promise<SurfaceAgentSnapshot | undefined> => {
-    const page = await daemon.agents.list({ filter: { labels: { seat: "lead", project: slug }, includeArchived: false } });
+    const page = await daemon.agents.list({ filter: { labels: { seat: "lead", project: slug }, includeArchived: false, includeBackground: true } });
     for (const entry of page.entries) {
       if (entry.agent.archivedAt === null) return entry.agent;
     }
@@ -410,7 +410,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
 
   /** The live non-archived Supervisor agent of one Project — the seatOf law, on the runtime's daemon slice. */
   const liveSupervisorAgent = async (daemon: SurfaceDaemonApi, slug: string): Promise<SurfaceAgentSnapshot | undefined> => {
-    const page = await daemon.agents.list({ filter: { labels: { seat: "supervisor", project: slug }, includeArchived: false } });
+    const page = await daemon.agents.list({ filter: { labels: { seat: "supervisor", project: slug }, includeArchived: false, includeBackground: true } });
     for (const entry of page.entries) {
       if (entry.agent.archivedAt === null) return entry.agent;
     }
@@ -859,7 +859,33 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       }
     }
     if ((handoffText === null || handoffText.trim() === "") && input.outcome.kind === "completed" && input.fuseReason === undefined) {
-      const fromTurn = lastAssistantText(input.timeline);
+      let turnTimeline = input.timeline;
+      if (turnTimeline.length === 0 && input.agentId !== "") {
+        try {
+          const ref = resolveDaemon().agents.ref(input.agentId);
+          if (ref.timeline !== undefined && typeof ref.timeline.refetch === "function") {
+            const page = await ref.timeline.refetch({ direction: "tail", limit: 20 });
+            if (Array.isArray(page?.entries)) {
+              turnTimeline = page.entries.flatMap((entry) => {
+                const rawItem =
+                  typeof entry === "object" &&
+                  entry !== null &&
+                  "item" in entry &&
+                  typeof (entry as { item?: unknown }).item === "object" &&
+                  (entry as { item?: unknown }).item !== null
+                    ? (entry as { item: { type?: unknown; text?: unknown } }).item
+                    : (entry as { type?: unknown; text?: unknown });
+                return typeof rawItem?.type === "string"
+                  ? [{ type: rawItem.type, ...(typeof rawItem.text === "string" ? { text: rawItem.text } : {}) }]
+                  : [];
+              });
+            }
+          }
+        } catch {
+          // best-effort fallback when Paseo 0.13+ emits empty event.timeline on agent.turn_ended
+        }
+      }
+      const fromTurn = lastAssistantText(turnTimeline);
       if (fromTurn !== null) {
         mkdirSync(statePath, { recursive: true });
         writeFileSync(handoffPath, fromTurn);
@@ -924,7 +950,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   const liveAgentsById = async (): Promise<Map<string, SurfaceAgentSnapshot>> => {
     const live = new Map<string, SurfaceAgentSnapshot>();
     try {
-      const page = await resolveDaemon().agents.list({ filter: { includeArchived: false } });
+      const page = await resolveDaemon().agents.list({ filter: { includeArchived: false, includeBackground: true } });
       for (const entry of page.entries) live.set(entry.agent.id, entry.agent);
     } catch {
       // the roster renders without live statuses — the ledger half still carries it
@@ -1161,7 +1187,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       }
       let liveAgents: SurfaceAgentSnapshot[] | undefined;
       try {
-        const listed = await resolveDaemon().agents.list({ filter: { includeArchived: false } });
+        const listed = await resolveDaemon().agents.list({ filter: { includeArchived: false, includeBackground: true } });
         liveAgents = listed.entries.map((entry) => entry.agent).filter((agent) => agent.archivedAt === null);
       } catch {
         // best-effort live agent inspection for dead/orphaned worktree spawn rounds
