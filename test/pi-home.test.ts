@@ -609,3 +609,15 @@ test("syncMcpJson injects zai-vision from auth.json zai.key (overriding stale ke
     exposure: "direct",
   });
 });
+
+test("headless settings override operator high thinking without changing interactive defaults", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const source = makeFakePiAgent(dir);
+  writeFileSync(join(source, "settings.json"), JSON.stringify({ defaultThinkingLevel: "high" }));
+  const stateDir = join(dir, "state");
+  for (const role of ["headless", "lead", "supervisor", "agent"] as const) {
+    const home = provisionPiAgentHome({ stateDir, role, sourceAgentDir: source });
+    assert.equal(JSON.parse(readFileSync(join(home, "settings.json"), "utf8")).defaultThinkingLevel, role === "headless" ? "off" : "high");
+  }
+});

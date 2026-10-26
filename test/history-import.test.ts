@@ -314,7 +314,7 @@ test("two Contract epochs can each contain Attempt 1 without merging their evide
   assert.equal(projected.epochId, secondEpoch.epoch_id);
   assert.equal(projected.attempts[0]!.attempt, 1);
   assert.equal(projected.attempts[0]!.reviewState, "incomplete", "missing restarted review cannot become CLEAR");
-  assert.equal(projected.attempts[0]!.leadEligible, false);
+  assert.equal(projected.attempts[0]!.leadEligible, true);
   assert.equal(plan.events.filter((event) => event.event === "gate_finished" && event.attempt === 1).length, 2);
 });
 

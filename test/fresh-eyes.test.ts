@@ -115,6 +115,24 @@ test("freshEyes: non-boolean is refused with invalid-contract, while freshEyes: 
   assert.equal("freshEyes" in optedOut, false);
 });
 
+test("Lead contracts default to Gate-only claims regardless of eye availability or caller identity", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact } = makeWorkspaceAtBase(dir);
+  const factory = createFactory({
+    stateDir: join(dir, "factory"),
+    eyeCliProbe: () => true,
+    eyeCliRunner: async () => { throw new Error("default claims must not run Fresh-eyes"); },
+  });
+  for (const [task, caller] of [["SEAT", { seat: "lead" as const }], ["BY", { by: "lead" }]] as const) {
+    const contract = factory.setContract({ task, workspace, gate: "true", artifact, ...caller });
+    assert.equal(contract.freshEyes, undefined);
+    assert.equal((await factory.claim({ task, sha: contract.base! })).verdict, "green");
+    assert.equal(factory.ledger.eventsFor(task).some((event) => event.event === "fresh_eyes_written"), false);
+    assert.equal((await factory.accept({ task, attempt: 1, accepted_by: "lead", authority: "lead" })).accepted_by, "lead");
+  }
+});
+
 test("a green marked claim runs the eye: ledger order, event fields, gate log, report line", async (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);
@@ -558,7 +576,7 @@ test("v0.0.13: a CLI-lane eye that breaks the output contract is an honest faile
   assert.equal(eye.model, "pi/zai/glm-5.3");
 });
 
-test("Lead acceptance waits for completed CLEAR", async (t) => {
+test("Lead eligibility ignores a pending legacy review", async (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);
   const { workspace, artifact } = makeWorkspaceAtBase(dir);
@@ -574,16 +592,16 @@ test("Lead acceptance waits for completed CLEAR", async (t) => {
   try {
     await reviewing;
     const view = foldTasks(factory.ledger.events)[0]!;
-    assert.equal(view.leadEligible, false);
+    assert.equal(view.leadEligible, true);
     assert.equal(view.ownerEligible, true);
     assert.equal(view.attempts[0]!.reviewState, "pending");
     assert.throws(() => factory.setContract({ task: "REVIEW", workspace, gate: "true", artifact, freshEyes: true }), factoryErrorCode("gate-running"));
-    await assert.rejects(factory.accept({ task: "REVIEW", attempt: 1, accepted_by: "lead" }), factoryErrorCode("lead-accept-refused"));
+    assert.equal((await factory.accept({ task: "REVIEW", attempt: 1, accepted_by: "lead" })).accepted_by, "lead");
   } finally {
     complete({ code: 0, stdout: "CLEAR\nNothing to add.", stderr: "", timedOut: false });
     await claiming;
   }
-  assert.equal((await factory.accept({ task: "REVIEW", attempt: 1, accepted_by: "lead" })).accepted_by, "lead");
+  assert.equal(foldTasks(factory.ledger.events)[0]!.acceptedBy, "lead");
 });
 
 
@@ -607,10 +625,9 @@ test("restart preserves green evidence but represents missing required review as
   const view = foldTasks(restarted.ledger.events)[0]!;
   assert.equal(view.attempts.length, 1, "Attempt 1 from the prior epoch is outside the current ladder");
   assert.equal(view.attempts[0]!.reviewState, "incomplete");
-  assert.equal(view.leadEligible, false);
+  assert.equal(view.leadEligible, true);
   assert.equal(view.ownerEligible, true);
-  await assert.rejects(restarted.accept({ task: "RESTART-EYE", attempt: 1, accepted_by: "lead" }), factoryErrorCode("lead-accept-refused"));
-  assert.equal((await restarted.accept({ task: "RESTART-EYE", attempt: 1, accepted_by: "owner" })).accepted_by, "owner");
+  assert.equal((await restarted.accept({ task: "RESTART-EYE", attempt: 1, accepted_by: "lead" })).accepted_by, "lead");
 });
 
 test("Owner may accept green evidence while required review is pending", async (t) => {
@@ -642,7 +659,7 @@ for (const [label, result] of [
   ["timed out", { code: null, stdout: "", stderr: "", timedOut: true }],
   ["interrupted", { code: null, stdout: "", stderr: "terminated", timedOut: false }],
 ] as const) {
-  test(`Lead cannot accept after required review ${label}; delegated Supervisor may override`, async (t) => {
+  test(`Lead can accept GREEN after legacy review ${label}`, async (t) => {
     const dir = makeTempDir();
     disposeDir(t, dir);
     const { workspace, artifact } = makeWorkspaceAtBase(dir);
@@ -652,12 +669,11 @@ for (const [label, result] of [
     factory.setContract({ task: "FAILED-EYE", workspace, gate: "true", artifact, freshEyes: true });
     assert.equal((await factory.claim({ task: "FAILED-EYE", sha: commitFix(workspace, artifact) })).verdict, "green");
     const view = foldTasks(factory.ledger.events)[0]!;
-    assert.equal(view.leadEligible, false);
+    assert.equal(view.leadEligible, true);
     assert.equal(view.ownerEligible, true);
     assert.equal(view.attempts[0]!.reviewState, "failed");
-    await assert.rejects(factory.accept({ task: "FAILED-EYE", attempt: 1, authority: "lead", accepted_by: "owner" }), factoryErrorCode("lead-accept-refused"));
-    const event = await factory.accept({ task: "FAILED-EYE", attempt: 1, authority: "supervisor", accepted_by: "supervisor" });
-    assert.equal(event.accepted_by, "supervisor");
+    const event = await factory.accept({ task: "FAILED-EYE", attempt: 1, authority: "lead", accepted_by: "lead" });
+    assert.equal(event.accepted_by, "lead");
   });
 }
 

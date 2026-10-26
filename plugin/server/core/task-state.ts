@@ -45,7 +45,7 @@ export function projectTask(events: readonly LedgerEvent[], task: string) {
     const reportComplete = last(own, "report_written") !== undefined;
     const reviewState: ReviewState = review?.outcome ?? (contract?.freshEyes === true ? reportComplete ? "incomplete" : "pending" : "off");
     const ownerEligible = !settled && gate?.verdict === "green";
-    const leadRefusal = needsHuman ? "task is in needs_human" : reviewState === "concern" ? "attempt carries a fresh-eyes CONCERN" : contract?.freshEyes === true && reviewState !== "clear" ? `required fresh-eyes review is ${reviewState}; completed CLEAR is required` : undefined;
+    const leadRefusal = needsHuman ? "task is in needs_human" : undefined;
     return { attempt, events: own, gate, review, reviewState, gateOpen: started && gate === undefined, reportComplete, open: started && !reportComplete, ownerEligible, leadEligible: ownerEligible && leadRefusal === undefined, leadRefusal };
   });
   const dispatch = epoch.findLast((event) => event.event === "spawn_dispatched" || event.event === "respawn_dispatched");

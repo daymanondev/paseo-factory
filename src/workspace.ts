@@ -179,20 +179,19 @@ export function changesOutsideScope(
   });
 }
 
-/**
- * The full patch between the Contract's base commit and the claimed commit —
- * the fresh-eyes input bundle's diff section (ticket 03 §4). Facts only: size
- * caps belong to the bundle builder, not to git.
- */
-export function diffBetween(
+/** Full change summary followed by the source patch, without package lockfile churn. */
+export async function diffBetween(
   cwd: string,
   base: string,
   claimed: string,
 ): Promise<{ ok: true; diff: string } | { ok: false; reason: string }> {
-  return git(cwd, ["diff", base, claimed]).then(
-    ({ stdout }) => ({ ok: true as const, diff: stdout }),
-    (err: unknown) => ({ ok: false as const, reason: cap(gitDetail(err)) }),
-  );
+  try {
+    const { stdout: stat } = await git(cwd, ["diff", "--stat", base, claimed]);
+    const { stdout: patch } = await git(cwd, ["diff", base, claimed, "--", ".", ...[...PACKAGE_LOCKFILES].map((file) => `:(exclude,glob)**/${file}`)]);
+    return { ok: true, diff: stat && patch ? `${stat}\n\n${patch}` : stat || patch };
+  } catch (err) {
+    return { ok: false, reason: cap(gitDetail(err)) };
+  }
 }
 
 /**

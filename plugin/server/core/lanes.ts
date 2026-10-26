@@ -295,7 +295,7 @@ export function laneCliInvocation(lane: string): LaneCliInvocation | undefined {
           "--no-context-files",
           "--model",
           model,
-          ...(thinking === undefined ? [] : ["--thinking", thinking]),
+          "--thinking", thinking ?? "off",
         ],
       };
     case "copilot":

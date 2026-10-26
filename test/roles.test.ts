@@ -1030,13 +1030,14 @@ test("role surfaces teach bounded serial waves, closure, and structured challeng
   }
   for (const surface of [renderRoleContract("lead"), renderRoleAppendSystem("lead"), bootstrap("lead"),
     buildSeatKickoffPacket({ role: "lead", projectSlug: "repo", projectRoot: root, ledgerEvents: [] })]) {
+    assert.doesNotMatch(surface, /Fresh-eyes|wait for CLEAR|CONCERN-free/);
     for (const law of [/Serial Waves by Default/, /~120K/, /single-task.*focused bugfix/i,
       /Never pass.*multi-subsystem.*single monolithic Task/, /single.file.*index.html/,
       /current wave only/, /up to 3.*genuinely disjoint/, /shared foundation/,
       /Bounded Outcome/, /Contract Boundary & Regression Invariants/,
       /Excluded \/ Deferred to Later Waves/, /Verification.*exact.*Gate/,
       /git show --stat/, /git diff/, /lead_accept_task/, /final wave.*before.*lead_report_to_supervisor/,
-      /next wave.*same turn/, /CONCERN.*Needs-human/,
+      /next wave.*same turn/, /Never accept.*Needs-human/, /two-party separation of judgment/i, /re-contract.*lead_set_contract/,
       /REOPEN_REQUEST/, /foundation.*dependency.*lifecycle.*API.*ownership.*verification/,
       /DEPENDENCY_REQUEST/, /BLOCKED/]) assert.match(surface, law);
   }

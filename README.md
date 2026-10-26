@@ -16,6 +16,14 @@ writer and serves CLI, MCP and surface RPC entrances. Acceptance uses trusted
 caller authority and shared Task/Attempt state; Vault history is staged before
 writer-owned admission, preserving local evidence addresses.
 
+Lead owns semantic review: after a GREEN Gate, inspect `git show --stat "<sha>"`
+and `git diff "<sha>^" "<sha>"` against the Contract, then accept or re-contract.
+Fresh-eyes is off by default for all callers and never blocks Lead acceptance;
+legacy explicit CLI opt-ins, configuration and Ledger evidence remain supported.
+Seats & Models exposes the five active lanes: supervisor, lead, worker, watch
+and retro. Headless Pi passes default to thinking off unless their lane specifies
+an explicit level. MCP Spool requests wait up to ten minutes for a reply.
+
 Persistent history upgrades are explicit: inspect the
 [upgrade and recovery runbook](docs/runbooks/history-upgrade.md) before applying
 one. The [hardening validation report](docs/validation/codebase-hardening-2026-10-23.md)

@@ -24,7 +24,7 @@ function projectTask(events, task) {
     const reportComplete = last(own, "report_written") !== void 0;
     const reviewState = review?.outcome ?? (contract?.freshEyes === true ? reportComplete ? "incomplete" : "pending" : "off");
     const ownerEligible = !settled && gate?.verdict === "green";
-    const leadRefusal = needsHuman ? "task is in needs_human" : reviewState === "concern" ? "attempt carries a fresh-eyes CONCERN" : contract?.freshEyes === true && reviewState !== "clear" ? `required fresh-eyes review is ${reviewState}; completed CLEAR is required` : void 0;
+    const leadRefusal = needsHuman ? "task is in needs_human" : void 0;
     return { attempt, events: own, gate, review, reviewState, gateOpen: started && gate === void 0, reportComplete, open: started && !reportComplete, ownerEligible, leadEligible: ownerEligible && leadRefusal === void 0, leadRefusal };
   });
   const dispatch = epoch.findLast((event) => event.event === "spawn_dispatched" || event.event === "respawn_dispatched");

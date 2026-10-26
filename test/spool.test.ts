@@ -849,7 +849,7 @@ test("handleSpoolRequest sanitizes spawn and respawn provider via sanitizeLane b
   }
 });
 
-test("handleSpoolRequest smart-defaults freshEyes on Lead contracts, reports 'fresh eyes ON' in summary, and records worker correlation on spawn (v0.0.28, ADR 0018)", async (t) => {
+test("handleSpoolRequest keeps Lead contracts Gate-only and records worker correlation on spawn (ADR 0030)", async (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);
   const ws = join(dir, "ws");
@@ -860,7 +860,7 @@ test("handleSpoolRequest smart-defaults freshEyes on Lead contracts, reports 'fr
   const stateDir = join(dir, "state");
   const factory = createFactory({ stateDir, eyeCliProbe: () => true });
 
-  // 1. Lead omits freshEyes -> smart-defaults to true and summary includes 'fresh eyes ON'.
+  // Lead omits freshEyes: no headless review is enabled.
   const r1 = await handleSpoolRequest(factory, {
     id: "sp-fe-1",
     kind: "contract",
@@ -874,9 +874,9 @@ test("handleSpoolRequest smart-defaults freshEyes on Lead contracts, reports 'fr
   });
   assert.equal(r1.ok, true);
   if (r1.ok) {
-    assert.match(r1.summary, /fresh eyes ON/);
+    assert.doesNotMatch(r1.summary, /fresh eyes ON/);
   }
-  assert.equal(factory.contractFor("T-FE-1")?.freshEyes, true);
+  assert.equal(factory.contractFor("T-FE-1")?.freshEyes, undefined);
 
   // 2. Lead explicitly passes freshEyes: false -> omits freshEyes and summary does not report 'fresh eyes ON'.
   const r2 = await handleSpoolRequest(factory, {
@@ -971,6 +971,9 @@ test("correlated Lead cannot turn attribution into Owner acceptance authority", 
   factory.setContract({ task: "BOUND", workspace, artifact: "artifact", gate: "true" });
   await factory.claim({ task: "BOUND", sha });
   factory.ledger.append({ event: "fresh_eyes_written", task: "BOUND", attempt: 1, model: "eye", outcome: "concern", finding: "needs Owner", durationMs: 1 });
+  const denial = factory.ledger.append({ event: "permit_denied", task: "BOUND", agent: "peer", name: "Bash", kind: "tool", rule: "scope", reason: "denied" });
+  const poke = factory.ledger.append({ event: "repoke_dispatched", task: "BOUND", agent: "peer" });
+  factory.ledger.append({ event: "needs_human", task: "BOUND", reason: "denied-again", evidence: { denial: denial.seq, repoke: poke.seq } });
   const lead = new CorrelationRegistry(factory.stateDir).issue({ role: "lead", projectSlug: "project", projectRoot: workspace, agentId: "lead-agent" });
   for (const submitter of [lead.correlationId, "lead-agent"]) {
     for (const by of [undefined, "owner", "supervisor", "lead"] as const) {

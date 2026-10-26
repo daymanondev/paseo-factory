@@ -483,7 +483,7 @@ test("v0.0.31 (ADR 0017 §6): an offline agent_claim deduplicates through the br
 
   // No spool watcher on this home — the plugin process is "stopped". The
   // bridge's wait is tightened through its test seam env so the round trip
-  // times out in 1s instead of the 60s default.
+  // times out in 1s instead of the 600s default.
   try {
     const responses = await runMcpSession({
       args: ["--correlation", agentCorr.correlationId, "--state-dir", stateDir],
@@ -523,137 +523,54 @@ test("v0.0.31 (ADR 0017 §6): an offline agent_claim deduplicates through the br
   }
 });
 
-test("v0.0.28 (ADR 0018 §4): lead_set_contract smart-defaults freshEyes to true when usable, omits when unavailable, respects freshEyes: false, and fails fast on freshEyes: true when unconfigured", async () => {
+test("Lead MCP contracts expose no Fresh-eyes option and never forward legacy opt-ins", async (t) => {
   const repoDir = makeGitRepo();
-
-  // 1. Usable freshEyes lane (eyeCliProbe: () => true)
-  const homeUsable = mkdtempSync(join(tmpdir(), "factory-bridge-fe-on-"));
-  const stateUsable = join(homeUsable, "plugin-state", "paseo-factory");
-  const factoryUsable = createFactory({ stateDir: stateUsable, eyeCliProbe: () => true });
-  const spoolUsable = startSpool(stateUsable, factoryUsable, { pollMs: 25 });
-
-  // 2. Unusable freshEyes lane (eyeCliProbe: () => false)
-  const homeUnusable = mkdtempSync(join(tmpdir(), "factory-bridge-fe-off-"));
-  const stateUnusable = join(homeUnusable, "plugin-state", "paseo-factory");
-  const factoryUnusable = createFactory({ stateDir: stateUnusable, eyeCliProbe: () => false });
-  const spoolUnusable = startSpool(stateUnusable, factoryUnusable, { pollMs: 25 });
-
-  try {
-    const corrUsable = new CorrelationRegistry(stateUsable).issue({
-      role: "lead",
-      projectSlug: "demo-usable",
-      projectRoot: repoDir,
-      agentId: "lead-usable-1",
-    });
-
-    const usableResponses = await runMcpSession({
-      args: ["--correlation", corrUsable.correlationId, "--state-dir", stateUsable],
-      cwd: repoDir,
-      requests: [
-        {
-          jsonrpc: "2.0",
-          id: 1,
-          method: "tools/call",
-          params: {
-            name: "lead_set_contract",
-            arguments: {
-              task: "t-default-on",
-              gate: "/usr/bin/true",
-              artifact: "README.md",
-              scope: "src/a",
-            },
-          },
-        },
-        {
-          jsonrpc: "2.0",
-          id: 2,
-          method: "tools/call",
-          params: {
-            name: "lead_set_contract",
-            arguments: {
-              task: "t-explicit-off",
-              gate: "/usr/bin/true",
-              artifact: "README.md",
-              scope: "src/b",
-              freshEyes: false,
-            },
-          },
-        },
-      ],
-    });
-
-    const resDefaultOn = usableResponses[0].result as { isError?: boolean; content: Array<{ text: string }> };
-    assert.notEqual(resDefaultOn.isError, true, resDefaultOn.content[0].text);
-    assert.match(resDefaultOn.content[0].text, /fresh eyes ON/);
-    assert.equal(factoryUsable.contractFor("t-default-on")?.freshEyes, true);
-
-    const resExplicitOff = usableResponses[1].result as { isError?: boolean; content: Array<{ text: string }> };
-    assert.notEqual(resExplicitOff.isError, true, resExplicitOff.content[0].text);
-    assert.doesNotMatch(resExplicitOff.content[0].text, /fresh eyes ON/);
-    assert.equal(factoryUsable.contractFor("t-explicit-off")?.freshEyes, undefined);
-
-    const corrUnusable = new CorrelationRegistry(stateUnusable).issue({
-      role: "lead",
-      projectSlug: "demo-unusable",
-      projectRoot: repoDir,
-      agentId: "lead-unusable-1",
-    });
-
-    const unusableResponses = await runMcpSession({
-      args: ["--correlation", corrUnusable.correlationId, "--state-dir", stateUnusable],
-      cwd: repoDir,
-      requests: [
-        {
-          jsonrpc: "2.0",
-          id: 1,
-          method: "tools/call",
-          params: {
-            name: "lead_set_contract",
-            arguments: {
-              task: "t-degraded-off",
-              gate: "/usr/bin/true",
-              artifact: "README.md",
-              scope: "src/c",
-            },
-          },
-        },
-        {
-          jsonrpc: "2.0",
-          id: 2,
-          method: "tools/call",
-          params: {
-            name: "lead_set_contract",
-            arguments: {
-              task: "t-explicit-on-fail",
-              gate: "/usr/bin/true",
-              artifact: "README.md",
-              scope: "src/d",
-              freshEyes: true,
-            },
-          },
-        },
-      ],
-    });
-
-    const resDegraded = unusableResponses[0].result as { isError?: boolean; content: Array<{ text: string }> };
-    assert.notEqual(resDegraded.isError, true, resDegraded.content[0].text);
-    assert.doesNotMatch(resDegraded.content[0].text, /fresh eyes ON/);
-    assert.equal(factoryUnusable.contractFor("t-degraded-off")?.freshEyes, undefined);
-
-    const resFailFast = unusableResponses[1].result as { isError?: boolean; content: Array<{ text: string }> };
-    assert.equal(resFailFast.isError, true);
-    assert.match(resFailFast.content[0].text, /eye-unconfigured/);
-    assert.equal(factoryUnusable.contractFor("t-explicit-on-fail"), undefined);
-  } finally {
-    spoolUsable.stop();
-    spoolUnusable.stop();
-    rmSync(homeUsable, { recursive: true, force: true });
-    rmSync(homeUnusable, { recursive: true, force: true });
-    rmSync(repoDir, { recursive: true, force: true });
+  const stateDir = mkdtempSync(join(tmpdir(), "factory-bridge-retired-eye-"));
+  t.after(() => { rmSync(repoDir, { recursive: true, force: true }); rmSync(stateDir, { recursive: true, force: true }); });
+  const factory = createFactory({ stateDir, eyeCliProbe: () => true });
+  const lead = new CorrelationRegistry(stateDir).issue({ role: "lead", projectSlug: "demo", projectRoot: repoDir, agentId: "lead-1" });
+  const spool = startSpool(stateDir, factory, { pollMs: 10 });
+  t.after(() => spool.stop());
+  const responses = await runMcpSession({
+    args: ["--correlation", lead.correlationId, "--state-dir", stateDir], cwd: repoDir,
+    requests: [
+      { jsonrpc: "2.0", id: 1, method: "tools/list" },
+      { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "DEFAULT", gate: "true", artifact: "README.md" } } },
+      { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "LEGACY", gate: "true", artifact: "README.md", freshEyes: true, fresh_eyes: true } } },
+    ],
+  });
+  const tools = (responses[0]!.result as { tools: Array<{ name: string; inputSchema: { properties: Record<string, unknown> } }> }).tools;
+  const contract = tools.find((tool) => tool.name === "lead_set_contract")!;
+  assert.equal(contract.inputSchema.properties.freshEyes, undefined);
+  assert.equal(contract.inputSchema.properties.fresh_eyes, undefined);
+  for (const response of responses.slice(1)) {
+    const result = response.result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.notEqual(result.isError, true, result.content[0]!.text);
+    assert.doesNotMatch(result.content[0]!.text, /fresh eyes ON/);
   }
+  assert.equal(factory.contractFor("DEFAULT")?.freshEyes, undefined);
+  assert.equal(factory.contractFor("LEGACY")?.freshEyes, undefined);
 });
 
-
+test("bridge default Spool wait is 600 seconds, including an invalid override", async (t) => {
+  const repoDir = makeGitRepo();
+  const stateDir = mkdtempSync(join(tmpdir(), "factory-bridge-wait-"));
+  t.after(() => { rmSync(repoDir, { recursive: true, force: true }); rmSync(stateDir, { recursive: true, force: true }); });
+  const clock = join(stateDir, "clock.mjs");
+  // Advance wall time at the process boundary; exercise the real timeout response without a ten-minute wait.
+  writeFileSync(clock, "let now = Date.now(); Date.now = () => (now += 601_000);\n");
+  const agent = new CorrelationRegistry(stateDir).issue({ role: "agent", projectSlug: "demo", projectRoot: repoDir, task: "WAIT", agentId: "agent-1" });
+  for (const override of ["", "invalid"]) {
+    const responses = await runMcpSession({
+      args: ["--correlation", agent.correlationId, "--state-dir", stateDir], cwd: repoDir,
+      env: { ...process.env, NODE_OPTIONS: `--import=${clock}`, PASEO_FACTORY_SPOOL_WAIT_MS: override },
+      requests: [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "agent_claim", arguments: {} } }],
+    });
+    const result = responses[0]!.result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.equal(result.isError, true);
+    assert.match(result.content[0]!.text, /No reply from the factory plugin after 600s/);
+  }
+});
 
 test("bridge Task allocation inherits root dependencies and keeps them clean", async () => {
   const homeDir = mkdtempSync(join(tmpdir(), "factory-bridge-deps-"));
@@ -756,6 +673,9 @@ test("MCP Lead acceptance binds its authenticated role despite forged attributio
   const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoDir, encoding: "utf8" }).trim();
   await factory.claim({ task: "mcp-bound", sha });
   factory.ledger.append({ event: "fresh_eyes_written", task: "mcp-bound", attempt: 1, model: "eye", outcome: "concern", finding: "Owner decision needed", durationMs: 1 });
+  const denial = factory.ledger.append({ event: "permit_denied", task: "mcp-bound", agent: "peer", name: "Bash", kind: "tool", rule: "scope", reason: "denied" });
+  const poke = factory.ledger.append({ event: "repoke_dispatched", task: "mcp-bound", agent: "peer" });
+  factory.ledger.append({ event: "needs_human", task: "mcp-bound", reason: "denied-again", evidence: { denial: denial.seq, repoke: poke.seq } });
   const registry = new CorrelationRegistry(stateDir);
   const lead = registry.issue({ role: "lead", projectSlug: reg.slug, projectRoot: repoDir, agentId: "mcp-lead" });
   const supervisor = registry.issue({ role: "supervisor", projectSlug: reg.slug, projectRoot: repoDir, agentId: "mcp-supervisor" });

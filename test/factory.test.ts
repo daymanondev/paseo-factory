@@ -4,6 +4,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { projectTask } from "../src/task-state.ts";
 import { createFactory } from "../src/factory.ts";
 import { CorrelationRegistry } from "../src/correlations.ts";
 import { projectStateDir, resolveProject } from "../src/project.ts";
@@ -1401,7 +1402,7 @@ test("the exemption is the declared boundary: overlapping scopes, an unscoped si
   assert.equal(factory3.requestSpawn({ task: "PO8", provider: "claude", arity: 1 }).outcome, "dispatched");
 });
 
-// ---- accept authority (v0.0.14, ADR 0010 §3): the Lead accepts green + CLEAR, never CONCERN or Needs-human ----
+// ---- accept authority (ADR 0030): Lead owns semantic review; Needs-human still requires escalation ----
 
 /** A green attempt on a fresh contract, the lead-rule tests' shared setup. */
 async function greenAttempt(dir: string, task: string): Promise<{ factory: ReturnType<typeof createFactory>; workspace: string; artifact: string }> {
@@ -1425,31 +1426,28 @@ test("accept authority: the Lead accepts a green attempt with no fresh-eyes CONC
   assert.equal(accepted.accepted_by, "lead");
 });
 
-test("a fresh-eyes CONCERN on the attempt refuses the Lead — the Owner's and Supervisor's word still land", async (t) => {
-  const dir = makeTempDir();
-  disposeDir(t, dir);
-  const { factory } = await greenAttempt(dir, "LA2");
-  factory.ledger.append({ event: "fresh_eyes_written", task: "LA2", attempt: 1, model: "fake-eye", outcome: "concern", finding: "the fix does not match the contract", durationMs: 5 });
-
-  await assert.rejects(
-    factory.accept({ task: "LA2", attempt: 1, accepted_by: "lead" }),
-    (err: unknown) => err instanceof FactoryError && err.code === "lead-accept-refused" && /CONCERN/.test(err.message),
-    "the eye's concern is the Lead's hard stop",
-  );
-  // Nothing landed for the refused act.
-  assert.equal(factory.ledger.eventsFor("LA2").some((e) => e.event === "attempt_accepted"), false);
-  // The override seats are unconditional on the same evidence.
-  const bySupervisor = await factory.accept({ task: "LA2", attempt: 1, accepted_by: "supervisor" });
-  assert.equal(bySupervisor.accepted_by, "supervisor");
-
-  // A CLEAR eye on the attempt does NOT refuse the Lead — and a CONCERN on a
-  // DIFFERENT attempt is not this attempt's business.
-  const dir2 = makeTempDir();
-  disposeDir(t, dir2);
-  const { factory: f2 } = await greenAttempt(dir2, "LA3");
-  f2.ledger.append({ event: "fresh_eyes_written", task: "LA3", attempt: 1, model: "fake-eye", outcome: "clear", finding: "nothing to add", durationMs: 5 });
-  assert.equal((await f2.accept({ task: "LA3", attempt: 1, accepted_by: "lead" })).accepted_by, "lead");
-});
+for (const outcome of ["pending", "incomplete", "failed", "concern", "clear"] as const) {
+  test(`Lead accepts historical GREEN evidence with ${outcome} Fresh-eyes state after restart`, async (t) => {
+    const dir = makeTempDir();
+    disposeDir(t, dir);
+    const { workspace, artifact, sha } = makeWorkspace(dir);
+    const stateDir = join(dir, "state");
+    const factory = createFactory({ stateDir });
+    factory.ledger.append({ event: "contract_set", task: "LEGACY", workspace, artifact, gate: "true", base: sha, freshEyes: true });
+    factory.ledger.append({ event: "claim_reported", task: "LEGACY", attempt: 1, sha });
+    factory.ledger.append({ event: "gate_finished", task: "LEGACY", attempt: 1, verdict: "green", exit: 0, note: "", sha });
+    if (outcome === "failed" || outcome === "concern" || outcome === "clear") {
+      factory.ledger.append({ event: "fresh_eyes_written", task: "LEGACY", attempt: 1, model: "legacy", outcome, finding: "historical", durationMs: 1 });
+    }
+    if (outcome !== "pending") factory.ledger.append({ event: "report_written", task: "LEGACY", attempt: 1, path: "Report.md" });
+    const state = projectTask(factory.ledger.events, "LEGACY");
+    assert.equal(state.attempts[0]!.reviewState, outcome);
+    assert.equal(state.attempts[0]!.leadEligible, true);
+    const restarted = createFactory({ stateDir });
+    assert.equal((await restarted.accept({ task: "LEGACY", attempt: 1, accepted_by: "lead", authority: "lead" })).accepted_by, "lead");
+    assert.equal(projectTask(restarted.ledger.events, "LEGACY").attempts[0]!.leadEligible, false, "settled attempts cannot be accepted again");
+  });
+}
 
 test("a task in needs_human refuses the Lead until activity displaces the marker", async (t) => {
   const dir = makeTempDir();
@@ -1764,12 +1762,12 @@ test("resetProject purges target project tasks, events, reports, and gate logs w
   assert.equal(recontracted.task, "A-1");
 });
 
-test("v0.0.28 (ADR 0018 §4): Lead contracts smart-default freshEyes to true when the freshEyes lane is usable, omit when unavailable, respect explicit freshEyes: false, and fail fast on explicit freshEyes: true when unconfigured", (t) => {
+test("ADR 0030: Lead contracts leave Fresh-eyes off for all identities and retain explicit legacy validation", (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);
   const { workspace } = makeWorkspace(dir);
 
-  // 1. Usable freshEyes lane: Lead omitting freshEyes gets freshEyes: true (by seat="lead", by="lead", or Lead correlation).
+  // A usable lane never enables Fresh-eyes implicitly, including correlated Lead callers.
   const stateDirUsable = join(dir, "state-usable");
   const correlations = new CorrelationRegistry(stateDirUsable);
   const leadCorr = correlations.issue({ role: "lead", projectSlug: "proj-1", projectRoot: workspace, agentId: "agent-lead-99" });
@@ -1784,7 +1782,7 @@ test("v0.0.28 (ADR 0018 §4): Lead contracts smart-default freshEyes to true whe
     seat: "lead",
     by: "some-agent",
   });
-  assert.equal(cSeat.freshEyes, true, "seat='lead' omitting freshEyes defaults to true when lane is usable");
+  assert.equal(cSeat.freshEyes, undefined, "Lead defaults to Gate-only");
 
   const cByLead = factoryUsable.setContract({
     task: "SD-2",
@@ -1794,7 +1792,7 @@ test("v0.0.28 (ADR 0018 §4): Lead contracts smart-default freshEyes to true whe
     scope: ["src/two"],
     by: "lead",
   });
-  assert.equal(cByLead.freshEyes, true, "by='lead' omitting freshEyes defaults to true when lane is usable");
+  assert.equal(cByLead.freshEyes, undefined, "Lead defaults to Gate-only");
 
   const cCorr = factoryUsable.setContract({
     task: "SD-3",
@@ -1804,7 +1802,7 @@ test("v0.0.28 (ADR 0018 §4): Lead contracts smart-default freshEyes to true whe
     scope: ["src/three"],
     by: leadCorr.agentId,
   });
-  assert.equal(cCorr.freshEyes, true, "Lead-correlated submitter omitting freshEyes defaults to true when lane is usable");
+  assert.equal(cCorr.freshEyes, undefined, "Lead defaults to Gate-only");
 
   // Explicit freshEyes: false from Lead opts out even when the lane is usable.
   const cOptOut = factoryUsable.setContract({
@@ -1927,9 +1925,9 @@ test("v0.0.38 (ADR 0026 §1): setContract resolves the freshEyes and watch lanes
     (err: unknown) => err instanceof Error && factoryErrorCode("eye-unconfigured")(err) && /claude\/claude-sonnet-4-6/.test(err.message),
   );
 
-  // The Lead smart-default reads the Project's lane too: usable → freshEyes on.
+  // Project lane availability never enables Fresh-eyes implicitly.
   const lead = createFactory({ stateDir: join(dir, "factory-lead"), eyeCliProbe: () => true });
   writeProjectLaneOverrides(join(dir, "factory-lead"), project.slug, { freshEyes: "claude/claude-sonnet-4-6" });
   const leadContract = lead.setContract({ task: "PSC3", workspace, gate: "true", artifact, seat: "lead" });
-  assert.equal(leadContract.freshEyes, true);
+  assert.equal(leadContract.freshEyes, undefined);
 });

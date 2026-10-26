@@ -271,7 +271,7 @@ test("CLI and copied-alone MCP status share current-epoch review and acceptance 
     assert.equal(text.split("\n").length, 1, "schema and unbound global facts cannot create Task rows");
     assert.match(text, new RegExp(`review=${outcome ?? "pending"}(?: |$)`));
     assert.match(text, /owner-eligible=1(?: |$)/);
-    assert.match(text, new RegExp(`lead-eligible=${outcome === "clear" ? "1" : "-"}(?: |$)`));
+    assert.match(text, /lead-eligible=1(?: |$)/);
   }
 });
 

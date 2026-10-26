@@ -665,11 +665,14 @@ test("factory accept --by <seat>: the flag rides the spool; the Lead's rules ans
   assert.equal(green.status, 0, `expected green\nstdout: ${green.stdout}\nstderr: ${green.stderr}`);
   assert.equal(fake.requests.length, 1, "the eye ran on the green attempt");
 
-  // The Lead may not accept its own CONCERN-flagged attempt.
+  // Needs-human remains a hard stop even with historical Fresh-eyes evidence.
+  const denial = factory.ledger.append({ event: "permit_denied", task: "SEAT2", agent: "peer", name: "Bash", kind: "tool", rule: "scope", reason: "denied" });
+  const poke = factory.ledger.append({ event: "repoke_dispatched", task: "SEAT2", agent: "peer" });
+  factory.ledger.append({ event: "needs_human", task: "SEAT2", reason: "denied-again", evidence: { denial: denial.seq, repoke: poke.seq } });
   const leadRefused = await run(ownerCli, ["accept", "SEAT2", "--attempt", "1", "--by", "lead"], ownerEnv);
   assert.equal(leadRefused.status, 2);
   assert.match(leadRefused.stderr, /lead-accept-refused/);
-  assert.match(leadRefused.stderr, /CONCERN/);
+  assert.match(leadRefused.stderr, /needs_human/);
   assert.equal(factory.ledger.eventsFor("SEAT2").some((e) => e.event === "attempt_accepted"), false, "no line for the refused act");
 
   // The daemon binding, rather than the caller's attribution flag, selects

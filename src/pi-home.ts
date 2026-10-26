@@ -231,6 +231,7 @@ function writeSettingsJson(sourceAgentDir: string, roleHome: string, role: PiAge
     settings.skills = ["!*", ...CORE_AGENT_SKILLS.map((skill) => `+${join(agentsSkillsDir, skill)}`)];
   } else if (role === "headless") {
     settings.skills = ["!*"];
+    settings.defaultThinkingLevel = "off";
   }
   writeFileSync(join(roleHome, "settings.json"), `${JSON.stringify(settings, null, 2)}\n`);
 }

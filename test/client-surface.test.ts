@@ -1038,7 +1038,7 @@ test("v0.0.38 Seam 4 (ADR 0026 §3): planLiveSeatTransitions returns [] with no 
   assert.equal(providerFamilyOf("claude/claude-opus-4-6:high"), "claude");
 });
 
-test("v0.0.38 Seam 4 (ADR 0026 §2): SeatsPane renders the Lane Profiles bar above the five Lane Cards — chips, + Save as Profile…, Update \"<Profile>\", + Save as New Profile…, two-step Delete, and Reset to Machine Default", () => {
+test("v0.0.38 Seam 4 (ADR 0026 §2): SeatsPane renders the Lane Profiles bar above the four active Lane Cards — chips, + Save as Profile…, Update \"<Profile>\", + Save as New Profile…, two-step Delete, and Reset to Machine Default", () => {
   const seats = read("plugin/client/factory/seats.tsx");
   assert.match(seats, /function LaneProfilesBar\(/, "the bar is its own component");
   assert.match(seats, /<LaneProfilesBar/, "SeatsPane mounts the LaneProfilesBar above the Lane Cards grid");

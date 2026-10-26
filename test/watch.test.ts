@@ -669,7 +669,7 @@ test("v0.0.13: the watch reads its lane from lanes.json — a pi lane dispatches
   assert.equal(fake.calls[0]!.command, "pi");
   assert.deepEqual(
     fake.calls[0]!.args,
-    ["--print", "--no-session", "--no-tools", "--no-extensions", "--no-skills", "--no-context-files", "--model", "zai/glm-5.3"],
+    ["--print", "--no-session", "--no-tools", "--no-extensions", "--no-skills", "--no-context-files", "--model", "zai/glm-5.3", "--thinking", "off"],
     "the tool-less flags are the invariant — the pass cannot act by construction",
   );
 });

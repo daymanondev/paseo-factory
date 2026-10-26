@@ -295,7 +295,7 @@ export interface AttemptAccepted extends EventIdentityMetadata {
    * the delegated Owner agent's id or `owner`. Pre-0.0.9 lines predate it.
    * Since v0.0.14 (ADR 0010 §3) the three seat names carry authority
    * semantics — `owner`/`supervisor` unconditional, `lead` conditional on a
-   * CONCERN-free green attempt outside needs_human (`lead-accept-refused`
+   * green attempt outside needs_human (ADR 0030; `lead-accept-refused`
    * otherwise); any other string records verbatim with no seat privileges.
    */
   accepted_by?: string;

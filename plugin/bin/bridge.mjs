@@ -15,13 +15,13 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameS
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
-const DEFAULT_WAIT_MS = 60_000;
+const DEFAULT_WAIT_MS = 600_000;
 const GIT_TIMEOUT_MS = 15_000;
 
 /**
  * The spool round-trip wait, overridable for tests and tight operator loops
  * through `PASEO_FACTORY_SPOOL_WAIT_MS` (milliseconds); anything that is not a
- * positive finite number keeps the 60s default.
+ * positive finite number keeps the 600s default.
  */
 function resolveSpoolWaitMs() {
   const raw = process.env.PASEO_FACTORY_SPOOL_WAIT_MS;
@@ -689,7 +689,7 @@ function projectTask(events, task) {
     const reportComplete = last(own, "report_written") !== void 0;
     const reviewState = review?.outcome ?? (contract?.freshEyes === true ? reportComplete ? "incomplete" : "pending" : "off");
     const ownerEligible = !settled && gate?.verdict === "green";
-    const leadRefusal = needsHuman ? "task is in needs_human" : reviewState === "concern" ? "attempt carries a fresh-eyes CONCERN" : contract?.freshEyes === true && reviewState !== "clear" ? `required fresh-eyes review is ${reviewState}; completed CLEAR is required` : void 0;
+    const leadRefusal = needsHuman ? "task is in needs_human" : void 0;
     return { attempt, events: own, gate, review, reviewState, gateOpen: started && gate === void 0, reportComplete, open: started && !reportComplete, ownerEligible, leadEligible: ownerEligible && leadRefusal === void 0, leadRefusal };
   });
   const dispatch = epoch.findLast((event) => event.event === "spawn_dispatched" || event.event === "respawn_dispatched");
@@ -1036,7 +1036,7 @@ const TOOL_DEFINITIONS = {
   lead_set_contract: {
     name: "lead_set_contract",
     description:
-      "Register a Task's immutable Contract (`gate`, optional `description`, `artifact`, `skills`, `freshEyes`, `watch`) before spawning its working Agent.",
+      "Register a Task's immutable Contract (`gate`, optional `description`, `artifact`, `skills`, `watch`) before spawning its working Agent.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1048,11 +1048,6 @@ const TOOL_DEFINITIONS = {
           type: "array",
           items: { type: "string" },
           description: "Optional list of SKILL.md names the working Agent must open first.",
-        },
-        freshEyes: {
-          type: "boolean",
-          description:
-            "Enable or disable the advisory fresh-eyes review pass on green verdicts (defaults to true for Lead when the freshEyes lane is usable; pass false to opt out).",
         },
         watch: { type: "boolean", description: "Enable the post-verdict watch pass." },
         description: { type: "string", description: "Task assignment description stating desired outcome and regression invariants." },
@@ -1085,7 +1080,7 @@ const TOOL_DEFINITIONS = {
   lead_accept_task: {
     name: "lead_accept_task",
     description:
-      "Accept a green, CONCERN-free Attempt of a Task (`by: lead`) and land its Task worktree commit into `<project-root>`.",
+      "Accept a green Attempt after Lead diff inspection (`by: lead`) and land its Task worktree commit into `<project-root>`.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1347,7 +1342,6 @@ async function handleToolCall(name, rawArgs) {
       ...(base ? { base } : {}),
       ...(scope && scope.length > 0 ? { scope } : {}),
       ...(skills && skills.length > 0 ? { skills } : {}),
-      ...(typeof args.freshEyes === "boolean" ? { freshEyes: args.freshEyes } : {}),
       ...(args.watch === true ? { watch: true } : {}),
       ...(description ? { description } : {}),
       seat: "lead",

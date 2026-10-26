@@ -1,10 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { scopeCoversFile, scopeRecoveryCommands } from "../src/workspace.ts";
-import { disposeDir, makeTempDir, repoRoot } from "./helpers.ts";
+import { diffBetween, scopeCoversFile, scopeRecoveryCommands } from "../src/workspace.ts";
+import { disposeDir, gitCommitAll, gitCommitChanges, makeTempDir, repoRoot } from "./helpers.ts";
 
 import { scopeCoversFile as shimScopeCoversFile, scopeRecoveryCommands as shimRecoveryCommands } from "../plugin/bin/scope.mjs";
 
@@ -58,4 +58,31 @@ test("scope recovery commands quote branch bases and file names for both core an
   const expected = "git restore --source=abc123 -- README.md; git restore --source=abc123 -- 'a file.txt'";
   assert.equal(scopeRecoveryCommands("abc123", ["README.md", "a file.txt"]), expected);
   assert.equal(shimRecoveryCommands("abc123", ["README.md", "a file.txt"]), expected);
+});
+
+test("workspace diffs summarize all files while excluding root and nested package lockfile patches", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  mkdirSync(join(dir, "nested"));
+  writeFileSync(join(dir, "source.ts"), "export const value = 1;\n");
+  const base = gitCommitAll(dir);
+  for (const lockfile of ["package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb", "bun.lock", "npm-shrinkwrap.json"]) {
+    for (const prefix of ["", "nested/"]) writeFileSync(join(dir, prefix + lockfile), "LOCKFILE-PATCH-SENTINEL\n");
+  }
+  const locks = gitCommitChanges(dir, "lockfiles only");
+  writeFileSync(join(dir, "source.ts"), "export const value = 2;\n");
+  const claimed = gitCommitChanges(dir, "source change");
+  const read = await diffBetween(dir, base, claimed);
+  assert.ok(read.ok);
+  assert.match(read.diff, /13 files changed/);
+  assert.ok(read.diff.indexOf("files changed") < read.diff.indexOf("diff --git"), "summary precedes the patch");
+  assert.match(read.diff, /\+export const value = 2/);
+  assert.match(read.diff, /nested\/package-lock.json/);
+  assert.doesNotMatch(read.diff, /LOCKFILE-PATCH-SENTINEL|diff --git.*(?:lock|shrinkwrap)/);
+  const onlyLocks = await diffBetween(dir, base, locks);
+  assert.ok(onlyLocks.ok);
+  assert.match(onlyLocks.diff, /12 files changed/);
+  assert.doesNotMatch(onlyLocks.diff, /diff --git|LOCKFILE-PATCH-SENTINEL/);
+  assert.deepEqual(await diffBetween(dir, base, base), { ok: true, diff: "" });
+  assert.equal((await diffBetween(dir, base, "missing-ref")).ok, false);
 });

@@ -14,8 +14,7 @@ import { renderReport } from "./report.ts";
 import { laneCliAvailable } from "./lanes.ts";
 import { EYE_JSON_LANE } from "./lanes.ts";
 import type { LaneCliRunner } from "./lanes.ts";
-import { isEyeLaneUsable, loadEyeConfig, projectSlugOfWorkspace, resolveEyeLane, runFreshEyesPass } from "./fresh-eyes.ts";
-import { readCorrelations } from "./correlations.ts";
+import { loadEyeConfig, projectSlugOfWorkspace, resolveEyeLane, runFreshEyesPass } from "./fresh-eyes.ts";
 import { runWatchPass, watchLaneAvailable } from "./watch.ts";
 import type { CopilotRunner, TimelineFetcher } from "./watch.ts";
 import { buildRetroDigest, retroDay, retroLaneAvailable, runRetroPass, writtenRetroForDay } from "./retro.ts";
@@ -100,10 +99,10 @@ export interface ContractInput {
    */
   scope?: string[];
   /**
-   * Marks the fresh-eyes pass ON or OFF for this task (ADR 0005 / ADR 0018 §4):
+   * Legacy opt-in for the advisory fresh-eyes pass (ADR 0030):
    * - `true`: explicitly turns fresh-eyes ON (fails fast with `eye-unconfigured` when unusable).
-   * - `false`: explicitly opts out (leaves fresh-eyes OFF even when the caller is `Lead`).
-   * - `undefined`: uses the caller default (`Lead` turns it ON when the `freshEyes` lane is usable; `Owner` leaves it OFF).
+   * - `false`: explicitly opts out.
+   * - `undefined`: OFF for every caller; Lead owns semantic diff review (ADR 0030).
    */
   freshEyes?: boolean;
   /**
@@ -132,9 +131,7 @@ export interface ContractInput {
    */
   by?: string;
   /**
-   * Optional caller seat (v0.0.28, ADR 0018 §4): when `"lead"` (or when `by`
-   * resolves to `Lead`) and `freshEyes` is omitted, `setContract` smart-defaults
-   * `freshEyes: true` whenever the `freshEyes` lane is usable.
+   * Optional caller seat for attribution; never enables Fresh-eyes (ADR 0030).
    */
   seat?: "supervisor" | "lead" | "agent";
 }
@@ -273,7 +270,7 @@ export interface Factory {
    * Supervisor, ADR 0006) may submit it on the Owner's word; the
    * `accepted_by` stamp records whose act each line is. Since v0.0.14
    * (ADR 0010 §3–§4) `accepted_by: "lead"` is the intermediate acceptance
-   * (green + required Fresh-eyes completed CLEAR + not in needs_human,
+   * (green + not in needs_human,
    * else `lead-accept-refused`), and a task that ran in a managed Task
    * worktree lands its claimedCommit into `<project-root>`'s local branch
    * before the line records — async git is why the call awaits.
@@ -432,7 +429,7 @@ export function createFactory(options: FactoryOptions): Factory {
     stateDir,
     recoveredAttempts,
 
-    setContract({ task, workspace, gate, artifact, base: inputBase, scope, freshEyes, watch, description, skills, by, seat }) {
+    setContract({ task, workspace, gate, artifact, base: inputBase, scope, freshEyes, watch, description, skills, by }) {
       assertTaskId(task);
       if (gate.trim() === "") throw new FactoryError("invalid-contract", "gate command must be a non-empty string");
       const resolvedArtifact = artifact === undefined ? "" : artifact;
@@ -497,14 +494,8 @@ export function createFactory(options: FactoryOptions): Factory {
           "the workspace must be a git workspace with a resolvable HEAD — the Contract's base commit is the diff base for the scope check and the fresh-eyes pass",
         );
       }
-      // Fresh-eyes fails fast here when explicitly requested (`freshEyes === true`):
-      // marking a Contract without a usable eye must error before any Agent work
-      // starts, not 60s into a green claim (ticket 04 §3). Since v0.0.28 (ADR 0018 §4),
-      // when `Lead` omits `freshEyes`, it smart-defaults to `true` if `isEyeLaneUsable`
-      // is true and degrades gracefully to `undefined` otherwise; `freshEyes === false`
-      // explicitly opts out. The lane resolves per Project (v0.0.38, ADR 0026 §1):
-      // the workspace's canonical slug names the per-Project lanes.json override
-      // the eye and the watch below must honor.
+      // Retain explicit legacy opt-in, but never enable a headless review by caller role.
+      // Lead owns semantic diff inspection (ADR 0030). Lanes resolve per Project.
       const contractProjectSlug = projectSlugOfWorkspace(workspace);
       let effectiveFreshEyes: true | undefined;
       if (freshEyes === true) {
@@ -527,21 +518,6 @@ export function createFactory(options: FactoryOptions): Factory {
           }
         }
         effectiveFreshEyes = true;
-      } else if (freshEyes === false) {
-        effectiveFreshEyes = undefined;
-      } else {
-        const trimmedBy = typeof by === "string" ? by.trim() : "";
-        const isLeadCaller =
-          seat === "lead" ||
-          trimmedBy === "lead" ||
-          (trimmedBy !== "" &&
-            trimmedBy !== "owner" &&
-            readCorrelations(stateDir).some(
-              (rec) => rec.role === "lead" && (rec.correlationId === trimmedBy || rec.agentId === trimmedBy),
-            ));
-        if (isLeadCaller && isEyeLaneUsable(stateDir, options.eyeCliProbe, contractProjectSlug)) {
-          effectiveFreshEyes = true;
-        }
       }
       if (watch === true) {
         const usable = watchLaneAvailable(stateDir, options.watchCopilotProbe, contractProjectSlug);

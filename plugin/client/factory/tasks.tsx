@@ -686,7 +686,7 @@ export function TaskDetailBody({ theme, detail }: { theme: PluginTheme; detail: 
         <Text style={text(theme, "code")}>workspace: {contract.workspace}</Text>
         {contract.description !== null ? <Markdown>{contract.description}</Markdown> : null}
         <Text style={text(theme, "label")}>
-          watch {contract.watch ? "on" : "off"} · fresh-eyes {contract.freshEyes ? "on" : "off"} · by {contract.by ?? "—"}
+          watch {contract.watch ? "on" : "off"} · by {contract.by ?? "—"}
         </Text>
       </View>
       {detail.attempts.map((attempt, index) => {

@@ -269,7 +269,7 @@ test("saveLanes(stateDir, patch, slug) writes only the Project file — machine 
 test("each provider family maps to its exact tool-less argv — the invariant is the flags, not a promise", () => {
   assert.deepEqual(laneCliInvocation("pi/zai/glm-5.3"), {
     command: "pi",
-    args: ["--print", "--no-session", "--no-tools", "--no-extensions", "--no-skills", "--no-context-files", "--model", "zai/glm-5.3"],
+    args: ["--print", "--no-session", "--no-tools", "--no-extensions", "--no-skills", "--no-context-files", "--model", "zai/glm-5.3", "--thinking", "off"],
   });
   assert.deepEqual(laneCliInvocation("pi/zai/glm-5.3:max"), {
     command: "pi",
@@ -331,7 +331,7 @@ test("runLaneCli records the lane's command and argv, prompt on stdin", async ()
   assert.equal(result.stdout, "answer");
   assert.equal(fake.calls.length, 1);
   assert.equal(fake.calls[0]!.command, "pi");
-  assert.deepEqual(fake.calls[0]!.args, ["--print", "--no-session", "--no-tools", "--no-extensions", "--no-skills", "--no-context-files", "--model", "zai/glm-5.3"]);
+  assert.deepEqual(fake.calls[0]!.args, ["--print", "--no-session", "--no-tools", "--no-extensions", "--no-skills", "--no-context-files", "--model", "zai/glm-5.3", "--thinking", "off"]);
   assert.equal(fake.calls[0]!.stdin, "the prompt");
   assert.ok(fake.calls[0]!.timeoutMs > 0);
   assert.ok(fake.calls[0]!.cwd.length > 0, "the scratch cwd is a real dir");

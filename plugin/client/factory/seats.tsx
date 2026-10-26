@@ -1,8 +1,8 @@
 /**
  * Tab 2 — Seats & Models (ADR 0009 §2; the Lead lane and live Lead seat
  * arrive in v0.0.14, ADR 0010 §2): the Lane Profiles bar (v0.0.38, ADR 0026
- * §2) above five Lane Cards (Supervisor, Lead, Default Worker, Watch &
- * Retro, Fresh-eyes) opening the live provider/model/thinking picker modal,
+ * §2) above four Lane Cards (Supervisor, Lead, Default Worker, Watch &
+ * Retro) opening the live provider/model/thinking picker modal,
  * and below them the orthogonal Seat Graph — Owner ⇄ Supervisor ⇄ Lead ⇄
  * Working Agents — with live Timeline Oracle seqEnd, Open
  * (navigation.openAgent), Revoke Supervisor, and Rotate Lead on live seats
@@ -106,15 +106,7 @@ const LANE_CARDS: LaneCard[] = [
     lanes: ["watch", "retro"],
     value: (l) => (l.watch === l.retro ? l.watch : `${l.watch} · ${l.retro}`),
   },
-  {
-    id: "fresh-eyes",
-    title: "Fresh-eyes",
-    icon: "Sparkles",
-    tier: "Reviewer · ≠ Worker",
-    hint: "Second-opinion reviewer on green diffs from a different family than Worker, or eye.json.",
-    lanes: ["freshEyes"],
-    value: (l) => l.freshEyes,
-  },
+
 ];
 
 const FALLBACK_THINKING_OPTIONS: { id: string; label: string }[] = [
@@ -706,7 +698,7 @@ function LaneProfilesBar({
         <View style={{ gap: 2, flex: 1 }}>
           <Text style={text(theme, "section")}>Lane Profiles</Text>
           <Text style={text(theme, "meta")}>
-            One click copies a saved 6-lane table into {view.project === null ? "the machine-wide Lane config" : `project ${view.project.slug}`} — Copy-on-Apply, no live pointer.
+            One click copies a saved Lane profile into {view.project === null ? "the machine-wide Lane config" : `project ${view.project.slug}`} — Copy-on-Apply, no live pointer.
           </Text>
         </View>
         {view.activeProfileModified && activeProfile !== null ? (
@@ -755,7 +747,7 @@ function LaneProfilesBar({
           </View>
         ))}
         {view.profiles.length === 0 ? (
-          <Text style={text(theme, "meta")}>No Lane profiles yet — configure the cards below and save the 6-lane table as your first profile.</Text>
+          <Text style={text(theme, "meta")}>No Lane profiles yet — configure the cards below and save your first profile.</Text>
         ) : null}
       </View>
 
@@ -1123,7 +1115,7 @@ export function SeatsPane({
       </Modal>
 
       {/* The save-as-profile drawer (v0.0.38, ADR 0026 §2): name (and an
-          optional description) for the current 6-lane table, with the table
+          optional description) for the current Lane config, with the active lanes
           itself previewed — what confirming persists. */}
       <Modal open={naming} onOpenChange={(open) => (open ? undefined : setNaming(false))} title="Save Lane profile">
         <Modal.Content>
@@ -1164,15 +1156,15 @@ export function SeatsPane({
                 <TextInput
                   value={descriptionDraft}
                   onChangeText={setDescriptionDraft}
-                  placeholder="What this 6-lane setup is for"
+                  placeholder="What this lane setup is for"
                   placeholderTextColor={theme.colors.foregroundMuted}
                   style={{ paddingHorizontal: SPACING[2.5], paddingVertical: 5, color: theme.colors.foreground, fontSize: 12 }}
                 />
               </View>
             </View>
             <View style={{ gap: SPACING[1] }}>
-              <Text style={text(theme, "badge")}>THE SIX LANES BEING SAVED</Text>
-              {(["supervisor", "lead", "worker", "watch", "retro", "freshEyes"] as LaneName[]).map((lane) => (
+              <Text style={text(theme, "badge")}>ACTIVE LANES</Text>
+              {(["supervisor", "lead", "worker", "watch", "retro"] as LaneName[]).map((lane) => (
                 <Text key={lane} style={text(theme, "code")}>
                   {lane}={view.lanes[lane]}
                 </Text>
