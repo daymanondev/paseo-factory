@@ -567,3 +567,45 @@ test("v0.0.38 (ADR 0026 §1): an already-correct symlink is left untouched (ino/
   assert.equal(realpathSync(join(second, "skills")), realpathSync(join(source, "skills")));
   assert.equal(existsSync(join(second, "skills", "evil.txt")), false, "the swept directory's contents are gone");
 });
+
+test("syncMcpJson injects zai-vision from auth.json zai.key (overriding stale keys) and exa from web-search.json with exposure: direct", (t) => {
+  const dir = makeTempDir("pi-home-test-");
+  disposeDir(t, dir);
+  const source = makeFakePiAgent(dir);
+  const stateDir = join(dir, "factory-state");
+
+  writeFileSync(
+    join(source, "auth.json"),
+    JSON.stringify({ zai: { type: "api_key", key: "zai-fresh-key-999" } }),
+  );
+  writeFileSync(
+    join(dir, "pi-home", ".pi", "web-search.json"),
+    JSON.stringify({ exaApiKey: "exa-key-123" }),
+  );
+  writeFileSync(
+    join(source, "mcp.json"),
+    JSON.stringify({
+      mcpServers: {
+        context7: { command: "npx", args: ["-y", "@upstash/context7-mcp"] },
+        "zai-vision": {
+          command: "npx",
+          args: ["-y", "@z_ai/mcp-server"],
+          env: { Z_AI_API_KEY: "stale-old-key", Z_AI_MODE: "ZAI" },
+        },
+      },
+    }),
+  );
+
+  const agentHome = provisionPiAgentHome({ stateDir, role: "agent", sourceAgentDir: source });
+  const mcp = JSON.parse(readFileSync(join(agentHome, "mcp.json"), "utf8"));
+  assert.deepEqual(mcp.mcpServers["zai-vision"], {
+    command: "npx",
+    args: ["-y", "@z_ai/mcp-server"],
+    env: { Z_AI_API_KEY: "zai-fresh-key-999", Z_AI_MODE: "ZAI" },
+    exposure: "direct",
+  });
+  assert.deepEqual(mcp.mcpServers.exa, {
+    url: "https://mcp.exa.ai/mcp?exaApiKey=exa-key-123",
+    exposure: "direct",
+  });
+});

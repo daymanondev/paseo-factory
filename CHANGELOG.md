@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.48] - 2026-10-26
+
+v0.0.48's one thing: **auto-provisioning `zai-vision` (`@z_ai/mcp-server` with live `Z_AI_API_KEY` synced from `auth.json` `zai.key`) and `exa` (`https://mcp.exa.ai/mcp` from `web-search.json` `exaApiKey`) with `exposure: "direct"` in Pi harness `mcp.json`, plus `Supervisor` architectural-trap `grilling` before Turn-1 dispatch** (ADR 0011 / ADR 0029).
+
+### Added
+
+- **Automatic `zai-vision` & `exa` MCP Provisioning in Pi Harness Homes (`src/pi-home.ts`, `plugin/server/core/pi-home.ts`)** — `syncMcpJson` now reads `zai.key` from `<sourceAgentDir>/auth.json` to inject or refresh `zai-vision` (`npx -y @z_ai/mcp-server`, `Z_AI_MODE: "ZAI"`, `exposure: "direct"`) so text-only models like `glm-5.3` always have direct visual inspection tools (`mcp__zai_vision__analyze_image`, `mcp__zai_vision__ui_diff_check`, etc.) with the latest Z.AI API key, and reads `exaApiKey` from `web-search.json` to inject `exa` (`https://mcp.exa.ai/mcp`, `exposure: "direct"`) for web research.
+- **`Supervisor` Architectural-Trap Grilling on Turn 1 (`src/roles-contract.ts`, `plugin/bin/vault.mjs`, `CONTEXT.md`)** — `Supervisor`'s `Outcome & Architecture Boundary` and `Delegation Boundary` now challenge unconfirmed single-file consolidation of multi-subsystem applications (such as forcing an entire game/app into `index.html`) via `grilling` and recommend a modular multi-file architecture before dispatching to `Lead`.
+
 ## [0.0.47] - 2026-10-26
 
 v0.0.47's one thing: **filtering `Lead`'s Pi harness `settings.skills` to its three core role skills (`codebase-design`, `domain-modeling`, `tdd`) so `Lead` never auto-discovers unrequested global user skills (`frontend-design`, etc.) from `~/.agents/skills`** (ADR 0010 §6 / ADR 0011).

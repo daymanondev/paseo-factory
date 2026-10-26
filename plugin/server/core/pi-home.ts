@@ -40,7 +40,7 @@
  */
 import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { renderRoleAppendSystem } from "./roles-contract.ts";
 
 export { renderRoleAppendSystem } from "./roles-contract.ts";
@@ -257,6 +257,29 @@ function syncMcpJson(sourceAgentDir: string, roleHome: string, role: PiAgentRole
       mcpServers[name] = isJsonObject(entry) && entry.auth === "oauth" ? withoutAuth(entry) : entry;
     }
   }
+  const zaiKey = readZaiApiKey(sourceAgentDir);
+  if (zaiKey !== undefined) {
+    const existing = isJsonObject(mcpServers["zai-vision"]) ? mcpServers["zai-vision"] : {};
+    const existingEnv = isJsonObject(existing.env) ? existing.env : {};
+    mcpServers["zai-vision"] = {
+      ...existing,
+      command: typeof existing.command === "string" ? existing.command : "npx",
+      args: Array.isArray(existing.args) ? existing.args : ["-y", "@z_ai/mcp-server"],
+      env: {
+        ...existingEnv,
+        Z_AI_API_KEY: zaiKey,
+        Z_AI_MODE: typeof existingEnv.Z_AI_MODE === "string" ? existingEnv.Z_AI_MODE : "ZAI",
+      },
+      exposure: "direct",
+    };
+  }
+  const exaKey = readExaApiKey(sourceAgentDir);
+  if (exaKey !== undefined && mcpServers.exa === undefined) {
+    mcpServers.exa = {
+      url: `https://mcp.exa.ai/mcp?exaApiKey=${encodeURIComponent(exaKey)}`,
+      exposure: "direct",
+    };
+  }
   mcpServers.paseo_factory = {
     command: process.execPath,
     args: [join(stateDir, "bin", "bridge.mjs"), "--role", role, "--state-dir", stateDir],
@@ -267,6 +290,23 @@ function syncMcpJson(sourceAgentDir: string, roleHome: string, role: PiAgentRole
   };
   const restSource = source !== undefined && servers !== undefined ? source : {};
   writeFileSync(target, `${JSON.stringify({ ...restSource, mcpServers }, null, 2)}\n`);
+}
+
+function readZaiApiKey(sourceAgentDir: string): string | undefined {
+  const auth = readJsonObject(join(sourceAgentDir, "auth.json"));
+  if (auth === undefined || !isJsonObject(auth.zai)) return undefined;
+  const key = auth.zai.key;
+  return typeof key === "string" && key.trim() !== "" ? key.trim() : undefined;
+}
+
+function readExaApiKey(sourceAgentDir: string): string | undefined {
+  for (const candidate of [join(sourceAgentDir, "web-search.json"), join(dirname(sourceAgentDir), "web-search.json")]) {
+    const config = readJsonObject(candidate);
+    if (config !== undefined && typeof config.exaApiKey === "string" && config.exaApiKey.trim() !== "") {
+      return config.exaApiKey.trim();
+    }
+  }
+  return undefined;
 }
 
 /** A copy of `entry` without its `auth` field, key order otherwise preserved. */
