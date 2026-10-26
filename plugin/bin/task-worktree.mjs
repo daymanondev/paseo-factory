@@ -121,7 +121,7 @@ function headOf(root) {
  * to switching branches inside `<project-root>` (that path would dirty the
  * root the worktree law exists to protect).
  */
-export function prepareTaskWorkspace(stateDir, contract, task) {
+export function prepareTaskWorkspace(stateDir, contract, task, events = []) {
   const project = resolveProject(contract.workspace);
   if (!project.ok) {
     return { ok: false, reason: `workspace "${contract.workspace}" does not resolve to a git Project — ${project.reason}` };
@@ -129,7 +129,14 @@ export function prepareTaskWorkspace(stateDir, contract, task) {
   if (!samePath(contract.workspace, project.root)) {
     return { ok: true, legacy: true, cwd: contract.workspace, branch: task };
   }
-  const prepared = prepareTaskWorktree({ stateDir, workspace: contract.workspace, task, base: contract?.base });
+  // A pre-contracted next wave follows the latest landed checkpoint, while
+  // a retry with Claims in this Contract epoch retains its original base.
+  const upstreamLandedAfterContract =
+    typeof contract.seq === "number" &&
+    events.some((e) => typeof e.seq === "number" && e.seq > contract.seq && e.event === "attempt_accepted") &&
+    !events.some((e) => typeof e.seq === "number" && e.seq > contract.seq && e.task === task && e.event === "claim_reported");
+  const base = upstreamLandedAfterContract ? undefined : contract.base;
+  const prepared = prepareTaskWorktree({ stateDir, workspace: contract.workspace, task, base });
   if (prepared.ok) {
     return { ok: true, cwd: prepared.path, branch: prepared.branch, worktree: prepared.path, reset: prepared.reset };
   }

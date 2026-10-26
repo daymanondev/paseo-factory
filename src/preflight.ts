@@ -10,6 +10,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { LEAD_WAVE_LAWS } from "./roles-contract.ts";
 import type { LedgerEvent } from "./events.ts";
 
 export interface SeatKickoffPacketInput {
@@ -154,7 +155,7 @@ export function buildSeatKickoffPacket(input: SeatKickoffPacketInput): string {
   const fireAndEndTurn =
     input.role === "supervisor"
       ? "Fire-and-End-Turn: call `supervisor_dispatch_lead` (or run `factory lead dispatch`) and IMMEDIATELY end your turn — never poll, never sleep, and never edit product source code."
-      : "Fire-and-End-Turn: decompose into tasks (`T-01..`), call `lead_set_contract` then `lead_spawn_agent` (or `factory contract` + `factory run`) for each task, and IMMEDIATELY end your turn — never poll, never sleep, and never edit product source code on `<project-root>`.";
+      : "Fire-and-End-Turn: outline the serial-wave roadmap, call `lead_set_contract` then `lead_spawn_agent` (or `factory contract` + `factory run`) for the current wave only, and IMMEDIATELY end your turn — never poll, never sleep, and never edit product source code on `<project-root>`.";
 
   return [
     `--- [paseo-factory seat kickoff packet · role=${input.role} · project=${input.projectSlug}] ---`,
@@ -167,6 +168,7 @@ export function buildSeatKickoffPacket(input: SeatKickoffPacketInput): string {
     `- Ledger tasks: ${tasksSummary}`,
     `- Role MCP tools (paseo_factory): ${roleTools}`,
     `- Law: ${fireAndEndTurn}`,
+    ...(input.role === "lead" ? LEAD_WAVE_LAWS.map((law) => `- Law: ${law}`) : []),
     `--- [end seat kickoff packet] ---`,
     "",
   ].join("\n");

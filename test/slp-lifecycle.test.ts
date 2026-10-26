@@ -4,6 +4,8 @@ import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { delimiter, join, resolve } from "node:path";
 import type { AgentPermissionResponse } from "@getpaseo/protocol/agent-types";
+import { contractFromLedger, readDriverLedger } from "../plugin/bin/driver.mjs";
+import { prepareTaskWorkspace } from "../plugin/bin/task-worktree.mjs";
 import { CorrelationRegistry } from "../src/correlations.ts";
 import { createFactory } from "../plugin/server/core/factory.ts";
 import { createChoke } from "../plugin/server/choke.ts";
@@ -214,7 +216,7 @@ test("Full SLP lifecycle: Owner -> Supervisor -> Lead -> Agent -> Lead -> Superv
   const ownerDispatch = await callMcpTool({
     args: ["--state-dir", stateDir, "--workspace", projectRoot],
     toolName: "factory_dispatch_supervisor",
-    toolArgs: { workspace: projectRoot, message: "Ship feature greet.ts" },
+    toolArgs: { workspace: projectRoot, message: "Ship greet.ts, then a greeting consumer" },
   });
   assert.notEqual(ownerDispatch.isError, true, ownerDispatch.text);
   const supAgent = agents.find((a) => a.labels.seat === "supervisor");
@@ -222,7 +224,7 @@ test("Full SLP lifecycle: Owner -> Supervisor -> Lead -> Agent -> Lead -> Superv
   assert.ok(supAgent.env.PASEO_FACTORY_CORRELATION?.startsWith("cor_"), "Supervisor issued correlationId");
   assert.equal(correlations.findByAgentId(supAgent.id)?.role, "supervisor", "Correlation bound to Supervisor agentId");
 
-  const supTurn1 = sentPrompts.find((p) => p.agentId === supAgent.id && p.text.includes("Ship feature greet.ts"));
+  const supTurn1 = sentPrompts.find((p) => p.agentId === supAgent.id && p.text.includes("Ship greet.ts, then a greeting consumer"));
   assert.ok(supTurn1 !== undefined, "Supervisor received directive");
   assert.match(supTurn1.text, /\[paseo-factory seat kickoff packet · role=supervisor/, "Supervisor Turn 1 includes kickoff packet");
 
@@ -294,7 +296,20 @@ test("Full SLP lifecycle: Owner -> Supervisor -> Lead -> Agent -> Lead -> Superv
   assert.match(claimRes.text, /GREEN/i);
   assert.ok(claimElapsed < 4_000, `Gate reaped background 'sleep 30 &' promptly (${claimElapsed}ms)`);
 
-  // 5. Lead accepts task (lands into projectRoot) and reports to Supervisor
+  // Pre-contract the dependent wave before acceptance to exercise CLI base advancement.
+  const waveTwoContract = await callMcpTool({
+    args: ["--correlation", leadAgent.env.PASEO_FACTORY_CORRELATION!, "--state-dir", stateDir],
+    toolName: "lead_set_contract",
+    toolArgs: { task: "T-02", artifact: "src/consumer.ts", gate: "test -f src/greet.ts && test -f src/consumer.ts", freshEyes: false },
+  });
+  assert.notEqual(waveTwoContract.isError, true, waveTwoContract.text);
+  const staleContract = contractFromLedger(readDriverLedger(stateDir), "T-02");
+  assert.ok(staleContract);
+  assert.ok(typeof staleContract.workspace === "string");
+  assert.ok(typeof staleContract.base === "string");
+  assert.ok(typeof staleContract.seq === "number");
+
+  // 5. Accept the foundation checkpoint, then build and accept the dependent wave.
   const leadAccept = await callMcpTool({
     args: ["--correlation", leadAgent.env.PASEO_FACTORY_CORRELATION!, "--state-dir", stateDir],
     toolName: "lead_accept_task",
@@ -303,18 +318,51 @@ test("Full SLP lifecycle: Owner -> Supervisor -> Lead -> Agent -> Lead -> Superv
   assert.notEqual(leadAccept.isError, true, leadAccept.text);
   assert.ok(existsSync(join(projectRoot, "src", "greet.ts")), "Landing on Accept merged src/greet.ts into <project-root>");
 
+  const checkpoint = execFileSync("git", ["rev-parse", "HEAD"], { cwd: projectRoot, encoding: "utf8" }).trim();
+  const prepared = prepareTaskWorkspace(stateDir, {
+    workspace: staleContract.workspace, base: staleContract.base, seq: staleContract.seq,
+  }, "T-02", readDriverLedger(stateDir));
+  assert.ok(prepared.ok, prepared.ok ? "" : prepared.reason);
+  assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: prepared.cwd, encoding: "utf8" }).trim(), checkpoint);
+  assert.ok(existsSync(join(prepared.cwd, "src/greet.ts")), "CLI allocation contains the landed foundation");
+  const secondSpawn = await callMcpTool({
+    args: ["--correlation", leadAgent.env.PASEO_FACTORY_CORRELATION!, "--state-dir", stateDir],
+    toolName: "lead_spawn_agent", toolArgs: { task: "T-02", prompt: "Consume the landed greeting" },
+  });
+  assert.notEqual(secondSpawn.isError, true, secondSpawn.text);
+  const secondAgent = agents.at(-1)!;
+  assert.notEqual(secondAgent.id, taskAgent.id);
+  assert.equal(readFileSync(join(secondAgent.cwd, "src/greet.ts"), "utf8"), "export const greet = () => 'hello';\n");
+  writeFileSync(join(secondAgent.cwd, "src/consumer.ts"), "import { greet } from './greet.ts';\nexport const message = greet();\n");
+  execFileSync("git", ["add", "src/consumer.ts"], { cwd: secondAgent.cwd });
+  execFileSync("git", ["commit", "-m", "feat: consume greeting"], { cwd: secondAgent.cwd });
+  const finalSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: secondAgent.cwd, encoding: "utf8" }).trim();
+  const secondClaim = await callMcpTool({
+    args: ["--correlation", secondAgent.env.PASEO_FACTORY_CORRELATION!, "--state-dir", stateDir],
+    toolName: "agent_claim", toolArgs: { commit: finalSha },
+  });
+  assert.notEqual(secondClaim.isError, true, secondClaim.text);
+  assert.match(secondClaim.text, /GREEN/);
+  const finalAccept = await callMcpTool({
+    args: ["--correlation", leadAgent.env.PASEO_FACTORY_CORRELATION!, "--state-dir", stateDir],
+    toolName: "lead_accept_task", toolArgs: { task: "T-02", attempt: 1 },
+  });
+  assert.notEqual(finalAccept.isError, true, finalAccept.text);
+  assert.ok(existsSync(join(projectRoot, "src/consumer.ts")), "final wave is landed before reporting");
+  assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: projectRoot, encoding: "utf8" }).trim(), finalSha);
+
   // Complete Supervisor Turn 1 so Supervisor is idle for Lead's report
   await leadMail.onLeadTurnEnded({ agentId: supAgent.id, outcome: { kind: "completed" }, timeline: [] });
 
   const leadReport = await callMcpTool({
     args: ["--correlation", leadAgent.env.PASEO_FACTORY_CORRELATION!, "--state-dir", stateDir],
     toolName: "lead_report_to_supervisor",
-    toolArgs: { message: "T-01 landed cleanly and passed gate." },
+    toolArgs: { message: "T-01 and T-02 landed cleanly and passed gates." },
   });
   assert.notEqual(leadReport.isError, true, leadReport.text);
 
   const supTurn2 = sentPrompts.find(
-    (p) => p.agentId === supAgent.id && p.text.includes("T-01 landed cleanly and passed gate."),
+    (p) => p.agentId === supAgent.id && p.text.includes("T-01 and T-02 landed cleanly and passed gates."),
   );
   assert.ok(supTurn2 !== undefined, "Supervisor received Lead's completion report");
   assert.doesNotMatch(supTurn2.text, /\[paseo-factory seat kickoff packet/, "Turn 2 omits kickoff packet");

@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { renderRoleAppendSystem, renderRoleContract, renderSeatBootstrapPrompt } from "../src/roles-contract.ts";
+import { buildSeatKickoffPacket } from "../src/preflight.ts";
 import { ROLE_PROMPTS } from "../src/pi-home.ts";
 import { CorrelationRegistry } from "../src/correlations.ts";
 import { ensureGitRepository, readProjectRegistration, resolveOrBootstrapProject, resolveProject } from "../plugin/server/core/project.ts";
@@ -1012,3 +1013,37 @@ test("injectRoleOnCreate and injectSessionEnv: starting Supervisor (Factory) or 
 });
 
 
+
+
+test("role surfaces teach bounded serial waves, closure, and structured challenges (ADR 0029)", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const root = makeGitRepo(dir);
+  const bootstrap = (seat: "supervisor" | "lead") => renderSeatBootstrapPrompt({
+    seat, home: "/trial", stateDir: "/trial/state", nodePath: process.execPath,
+    path: "/usr/bin", lane: "codex", project: { root, slug: "repo" },
+  });
+  for (const surface of [renderRoleContract("supervisor"), renderRoleAppendSystem("supervisor"), bootstrap("supervisor")]) {
+    assert.match(surface, /Outcome & Architecture Boundary/);
+    assert.match(surface, /Owner.*explicitly requested/);
+    assert.match(surface, /single-file.*index.html/);
+  }
+  for (const surface of [renderRoleContract("lead"), renderRoleAppendSystem("lead"), bootstrap("lead"),
+    buildSeatKickoffPacket({ role: "lead", projectSlug: "repo", projectRoot: root, ledgerEvents: [] })]) {
+    for (const law of [/Serial Waves by Default/, /~120K/, /single-task.*focused bugfix/i,
+      /Never pass.*multi-subsystem.*single monolithic Task/, /single.file.*index.html/,
+      /current wave only/, /up to 3.*genuinely disjoint/, /shared foundation/,
+      /Bounded Outcome/, /Contract Boundary & Regression Invariants/,
+      /Excluded \/ Deferred to Later Waves/, /Verification.*exact.*Gate/,
+      /git show --stat/, /git diff/, /lead_accept_task/, /final wave.*before.*lead_report_to_supervisor/,
+      /next wave.*same turn/, /CONCERN.*Needs-human/,
+      /REOPEN_REQUEST/, /foundation.*dependency.*lifecycle.*API.*ownership.*verification/,
+      /DEPENDENCY_REQUEST/, /BLOCKED/]) assert.match(surface, law);
+  }
+  for (const surface of [renderRoleContract("agent"), renderRoleAppendSystem("agent")]) {
+    for (const law of [/Excluded \/ Deferred to Later Waves/, /third fix attempt.*same symptom/,
+      /stop local patching.*underlying mechanism/, /commit any independent completed work/,
+      /REOPEN_REQUEST/, /foundation.*dependency.*lifecycle.*API.*ownership.*verification/,
+      /DEPENDENCY_REQUEST/, /BLOCKED/, /agent_escalate_blocker/, /current commit SHA/]) assert.match(surface, law);
+  }
+});

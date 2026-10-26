@@ -1349,7 +1349,7 @@ export async function runDriver({ home, stateDir, spoolRoot, tasks, provider, wa
     // landing on accept either, exactly as before worktrees existed.
     let prep;
     if (contract !== undefined) {
-      const prepared = prepareTaskWorkspace(stateDir, contract, task);
+      const prepared = prepareTaskWorkspace(stateDir, contract, task, ledgerAtStart);
       if (!prepared.ok) {
         problems.push(bad(task, "refused locally", prepared.reason));
         continue;

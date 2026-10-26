@@ -56,6 +56,7 @@ export interface PreparedLegacyWorkspace {
 }
 export declare function prepareTaskWorkspace(
   stateDir: string,
-  contract: { workspace: string; base?: string },
+  contract: { workspace: string; base?: string; seq?: number },
   task: string,
+  events?: readonly { seq?: unknown; event?: unknown; task?: unknown }[],
 ): PreparedTaskWorkspace | PreparedLegacyWorkspace | { ok: false; reason: string };

@@ -1502,3 +1502,29 @@ test("factory run resolves the first task's Contract.workspace Project when --pr
   assert.equal(cwdAnchored.status, 2);
   assert.match(cwdAnchored.stdout, /— provider claude\/claude-haiku-4-5/, "the current working directory's Project worker lane resolved");
 });
+
+
+test("pre-contracted wave starts at the landed checkpoint unless its current epoch already claimed", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const workspace = join(dir, "repo");
+  copyFixture("sample-workspace", workspace);
+  const base = gitCommitAll(workspace);
+  writeFileSync(join(workspace, "foundation.txt"), "wave one landed\n");
+  const checkpoint = gitCommitChanges(workspace, "land foundation");
+  const contract = { workspace, base, seq: 10 };
+  const stateDir = join(dir, "state");
+  for (const [name, events, expected] of [
+    ["next-wave", [{ seq: 11, event: "attempt_accepted", task: "T-01" }], checkpoint],
+    ["claimed", [{ seq: 11, event: "claim_reported", task: "claimed" }, { seq: 12, event: "attempt_accepted", task: "T-01" }], base],
+    ["old-accept", [{ seq: 9, event: "attempt_accepted", task: "T-01" }], base],
+    ["new-epoch", [{ seq: 9, event: "claim_reported", task: "new-epoch" }, { seq: 11, event: "attempt_accepted", task: "T-01" }], checkpoint],
+    ["unrelated-claim", [{ seq: 11, event: "claim_reported", task: "other" }, { seq: 12, event: "attempt_accepted", task: "T-01" }], checkpoint],
+    ["no-events", [], base],
+  ] as const) {
+    const prepared = prepareTaskWorkspace(stateDir, contract, name, events);
+    assert.ok(prepared.ok, prepared.ok ? "" : prepared.reason);
+    assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: prepared.cwd, encoding: "utf8" }).trim(), expected, name);
+    assert.equal(existsSync(join(prepared.cwd, "foundation.txt")), expected === checkpoint, name);
+  }
+});
