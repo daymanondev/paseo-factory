@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.46] - 2026-10-26
+
+v0.0.46's one thing: **serial-wave-first task decomposition anchored to each Stable Checkpoint (`<project-root>` `HEAD`), one bounded outcome per Task (`~120K` peak context ceiling) with 4-part `Contract.description` briefs (`Bounded Outcome`, `Contract Boundary & Regression Invariants`, `Excluded / Deferred to Later Waves`, `Verification`), `Supervisor` Outcome & Architecture Boundary, `Peer` Challenge Signals (`REOPEN_REQUEST` across 6 layers, `DEPENDENCY_REQUEST`, `BLOCKED`) and Anti-Whack-a-Mole law, and CLI `Driver` checkpoint-anchored worktree base advancement (`prepareTaskWorkspace`)** (ADR 0029).
+
+### Added
+
+- **Serial-Wave-First Decomposition, 4-Part Briefs, & Wave Closure (`src/roles-contract.ts`, `src/preflight.ts`, `plugin/bin/vault.mjs`)** — Aligned `Supervisor`, `Lead`, and `Agent` (`Peer`) role contracts and `Seat kickoff packet` with `paseo-room` and `codex-room` operational laws: `Supervisor` preserves Owner outcomes without inventing unrequested single-file consolidation constraints; `Lead` defaults to sequential vertical-slice waves anchored to `<project-root>` `HEAD` (forbidding monolithic 1-task passthrough of multi-subsystem directives even for single-file deliverables, sizing each slice under `~120K` peak context, and using parallel tasks up to 3 only after a shared foundation exists and surfaces are disjoint), structures every `Contract.description` into four sections (`Bounded Outcome`, `Contract Boundary & Regression Invariants`, `Excluded / Deferred to Later Waves`, `Verification`), and inspects `git diff` + calls `lead_accept_task` on every `GREEN`, `CONCERN`-free wave (including the final wave before `lead_report_to_supervisor`).
+- **`Peer` Challenge Signals & Anti-Whack-a-Mole Law (`src/roles-contract.ts`, `plugin/bin/vault.mjs`)** — `Peer` honors `Excluded / Deferred to Later Waves`, stops local patching after a third failed fix attempt with the same symptom to diagnose the root mechanism, and commits independent completed work before escalating via `agent_escalate_blocker` with `REOPEN_REQUEST` (`foundation | dependency | lifecycle | API | ownership | verification`), `DEPENDENCY_REQUEST`, or `BLOCKED` plus concrete evidence and the current SHA.
+
+### Fixed
+
+- **CLI `Driver` Pre-Spawn Worktree Base Advancement After Upstream Acceptance (`plugin/bin/task-worktree.mjs`, `plugin/bin/driver.mjs`)** — `prepareTaskWorkspace(stateDir, contract, task, events)` now checks whether any `attempt_accepted` event landed after `contract.seq` (while `task` has no Claims in the current `Contract epoch`) and advances pre-spawn worktree allocation to `<project-root>`'s current `HEAD`, matching the Spool and MCP bridge checkpoint rule.
+
 ## [0.0.45] - 2026-10-26
 
 v0.0.45's one thing: **protecting opening `Supervisor` workspaces during `agent.session_open` workspace sweeps, self-healing archived workspaces (`workspace.recovery.restore.request` + `workspaces.open` / `daemon.agents.create` fallback) in `ensureSeat` and `spool` so `supervisor_dispatch_lead` never fails with `Workspace <id> has no available directory`, and declaring `capabilities: { all_providers: true }` on daemon WebSocket `hello` handshakes** (ADR 0017 §5 amendment).
