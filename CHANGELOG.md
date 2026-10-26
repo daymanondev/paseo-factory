@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.49] - 2026-10-26
+
+Lead owns semantic diff review after the mechanical Gate (ADR 0030). Fresh-eyes no longer defaults on for Lead contracts or blocks acceptance of historical GREEN Attempts.
+
+### Changed
+
+- Lead role contracts and kickoff packets require direct `git show --stat` and `git diff` inspection against the four-part brief before acceptance, or re-contracting when defects remain.
+- Lead MCP contracts no longer expose or forward Fresh-eyes opt-ins. Seats & Models shows five active lanes; historical Ledger events, explicit core/Owner CLI opt-ins, and Lane config/profile fields remain compatible.
+
+### Fixed
+
+- Headless Pi lanes without an explicit thinking suffix pass `--thinking off`; headless role homes override inherited operator thinking defaults to off. Explicit lane thinking levels remain authoritative.
+- Workspace diffs prepend a complete file summary and exclude all six standard package lockfiles from patches, including nested lockfiles. Lockfile-only diffs retain their summary.
+- MCP Spool wait defaults to 600 seconds, matching the claim CLI, so long Gate runs do not time out after 60 seconds.
+- Historical Fresh-eyes pending, incomplete, failed and concern states no longer refuse Lead acceptance. Needs-human and authenticated seat restrictions remain enforced.
+
+### Validation
+
+- `npm run check`: 951/951 tests, typecheck, core/policy synchronization and installed bundle checks pass. Independent Standards and Spec reviews have no remaining findings. See `docs/validation/factory-v0.0.49.md`.
+
 ## [0.0.48] - 2026-10-26
 
 v0.0.48's one thing: **auto-provisioning `zai-vision` (`@z_ai/mcp-server` with live `Z_AI_API_KEY` synced from `auth.json` `zai.key`) and `exa` (`https://mcp.exa.ai/mcp` from `web-search.json` `exaApiKey`) with `exposure: "direct"` in Pi harness `mcp.json`, plus `Supervisor` architectural-trap `grilling` before Turn-1 dispatch** (ADR 0011 / ADR 0029).
