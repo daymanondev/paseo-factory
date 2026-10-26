@@ -112,6 +112,9 @@ const OPERATOR_COMMAND_NAMES = ["prompts", "skills"] as const;
 /** The only source-settings keys the clean room preserves, and only when strings. */
 const OPERATOR_DEFAULT_KEYS = ["defaultProvider", "defaultModel", "defaultThinkingLevel"] as const;
 
+/** The three core Lead skills (ADR 0010 §6) — the `lead` role's whole `<available_skills>`. */
+const CORE_LEAD_SKILLS = ["codebase-design", "domain-modeling", "tdd"] as const;
+
 /** The three core working-Agent skills (ADR 0010 §6) — the `agent` role's whole `<available_skills>`. */
 const CORE_AGENT_SKILLS = ["tdd", "diagnosing-bugs", "codebase-design"] as const;
 
@@ -197,9 +200,9 @@ function writeAppendSystemMd(roleHome: string, role: PiAgentRole, appendSystemPr
  * `extensions: ["-builtin:llama.cpp"]` (keeping `builtin:mcp`,
  * `builtin:codemode`, and `builtin:tool-search` enabled), `quietStartup`,
  * and `defaultProjectTrust: "always"` so `<project-root>/.pi/mcp.json`
- * overrides work. Per role: `agent` filters skills down to the three core
- * skills under `agentsSkillsDir` (Pi's `~` form by default); `supervisor`
- * and `lead` leave `"skills"` out so pi auto-discovers all of
+ * overrides work. Per role: `lead` and `agent` filter skills down to their
+ * three core role skills under `agentsSkillsDir` (Pi's `~` form by default);
+ * `supervisor` leaves `"skills"` out so pi auto-discovers all of
  * `~/.agents/skills`; `headless` denies every skill and every interactive
  * builtin extension on top of the CLI's own `--no-*` flags.
  */
@@ -222,7 +225,9 @@ function writeSettingsJson(sourceAgentDir: string, roleHome: string, role: PiAge
   if (role === "supervisor" || role === "lead") {
     settings.defaultTools = ["read", "bash", "grep", "find", "ls"];
   }
-  if (role === "agent") {
+  if (role === "lead") {
+    settings.skills = ["!*", ...CORE_LEAD_SKILLS.map((skill) => `+${join(agentsSkillsDir, skill)}`)];
+  } else if (role === "agent") {
     settings.skills = ["!*", ...CORE_AGENT_SKILLS.map((skill) => `+${join(agentsSkillsDir, skill)}`)];
   } else if (role === "headless") {
     settings.skills = ["!*"];

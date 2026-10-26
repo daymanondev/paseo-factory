@@ -228,7 +228,7 @@ test("appendSystemPrompt overrides the role default; an empty override writes no
   assert.ok(!existsSync(join(empty, "APPEND_SYSTEM.md")), "an empty appendSystemPrompt writes no file");
 });
 
-test("each role gets its skills policy: agent filtered, supervisor/lead unfiltered, headless fully denied (v0.0.16, ADR 0011)", (t) => {
+test("each role gets its skills policy: lead and agent filtered to role skills, supervisor unfiltered, headless fully denied (v0.0.16, ADR 0011)", (t) => {
   const dir = makeTempDir("pi-home-test-");
   disposeDir(t, dir);
   const source = makeFakePiAgent(dir);
@@ -255,13 +255,27 @@ test("each role gets its skills policy: agent filtered, supervisor/lead unfilter
   assert.ok(existsSync(join(agentHome, "mcp.json")), "the agent still gets the sanitized mcp.json");
   assert.ok(lstatSync(join(agentHome, "auth.json")).isSymbolicLink(), "the agent still shares auth");
 
-  // The seats leave "skills" out entirely so pi auto-discovers all of ~/.agents/skills.
-  for (const seat of ["supervisor", "lead"] as const) {
-    const seatHome = provisionPiAgentHome({ stateDir, role: seat, sourceAgentDir: source });
-    const seatSettings = JSON.parse(readFileSync(join(seatHome, "settings.json"), "utf8"));
-    assert.ok(!("skills" in seatSettings), `${seat} keeps skills unfiltered for ~/.agents/skills auto-discovery`);
-    assert.deepEqual(seatSettings.extensions, ["-builtin:llama.cpp"]);
-  }
+  // Lead sees only its three core role skills (`codebase-design`, `domain-modeling`, `tdd`).
+  const leadHome = provisionPiAgentHome({
+    stateDir,
+    role: "lead",
+    sourceAgentDir: source,
+    agentsSkillsDir: catalogRoot,
+  });
+  const leadSettings = JSON.parse(readFileSync(join(leadHome, "settings.json"), "utf8"));
+  assert.deepEqual(leadSettings.skills, [
+    "!*",
+    `+${join(catalogRoot, "codebase-design")}`,
+    `+${join(catalogRoot, "domain-modeling")}`,
+    `+${join(catalogRoot, "tdd")}`,
+  ]);
+  assert.deepEqual(leadSettings.extensions, ["-builtin:llama.cpp"]);
+
+  // Supervisor alone leaves "skills" out entirely so pi auto-discovers all of ~/.agents/skills.
+  const supHome = provisionPiAgentHome({ stateDir, role: "supervisor", sourceAgentDir: source });
+  const supSettings = JSON.parse(readFileSync(join(supHome, "settings.json"), "utf8"));
+  assert.ok(!("skills" in supSettings), "supervisor keeps skills unfiltered for ~/.agents/skills auto-discovery");
+  assert.deepEqual(supSettings.extensions, ["-builtin:llama.cpp"]);
 
   // The tool-less headless pass denies every skill and every interactive
   // builtin extension, and never sees an mcp.json — but still shares sessions.
@@ -387,6 +401,12 @@ test("optional sources stay optional: absent stores are not linked, sessions are
     quietStartup: true,
     defaultProjectTrust: "always",
     defaultTools: ["read", "bash", "grep", "find", "ls"],
+    skills: [
+      "!*",
+      "+~/.agents/skills/codebase-design",
+      "+~/.agents/skills/domain-modeling",
+      "+~/.agents/skills/tdd",
+    ],
   });
   for (const absent of ["auth.json", "models.json", "models-store.json", "mcp-oauth", "mcp-oauth.json", "oauth", "credentials"]) {
     assert.ok(!existsSync(join(home, absent)), `${absent} is not invented when the source has none`);

@@ -1374,13 +1374,15 @@ test("roles: agent.create injection launches every seat and working agent in its
   );
   assert.deepEqual(
     JSON.parse(readFileSync(join(stateDir, "pi-agent", "lead", "settings.json"), "utf8")),
-    cleanRoomSettings({ defaultTools: ["read", "bash", "grep", "find", "ls"] }),
+    cleanRoomSettings({
+      defaultTools: ["read", "bash", "grep", "find", "ls"],
+      skills: ["!*", "+~/.agents/skills/codebase-design", "+~/.agents/skills/domain-modeling", "+~/.agents/skills/tdd"],
+    }),
   );
-  // Skills policy per role: supervisor and lead stay unfiltered (all of
-  // ~/.agents/skills auto-discovers); only the working agent is filtered down
-  // to its three core skills in Pi's `~` form.
+  // Skills policy per role: supervisor stays unfiltered (all of
+  // ~/.agents/skills auto-discovers); lead and working agent are filtered down
+  // to their three core role skills in Pi's `~` form.
   assert.ok(!("skills" in JSON.parse(readFileSync(join(stateDir, "pi-agent", "supervisor", "settings.json"), "utf8"))), "supervisor skills unfiltered");
-  assert.ok(!("skills" in JSON.parse(readFileSync(join(stateDir, "pi-agent", "lead", "settings.json"), "utf8"))), "lead skills unfiltered");
   assert.deepEqual(
     JSON.parse(readFileSync(join(stateDir, "pi-agent", "agent", "settings.json"), "utf8")),
     cleanRoomSettings({ skills: ["!*", "+~/.agents/skills/tdd", "+~/.agents/skills/diagnosing-bugs", "+~/.agents/skills/codebase-design"] }),

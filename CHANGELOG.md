@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.47] - 2026-10-26
+
+v0.0.47's one thing: **filtering `Lead`'s Pi harness `settings.skills` to its three core role skills (`codebase-design`, `domain-modeling`, `tdd`) so `Lead` never auto-discovers unrequested global user skills (`frontend-design`, etc.) from `~/.agents/skills`** (ADR 0010 §6 / ADR 0011).
+
+### Fixed
+
+- **`Lead` Pi Harness Skill Isolation (`src/pi-home.ts`, `plugin/server/core/pi-home.ts`)** — `writeSettingsJson` now filters `settings.skills` for `role === "lead"` down to `CORE_LEAD_SKILLS` (`["!*", "+~/.agents/skills/codebase-design", "+~/.agents/skills/domain-modeling", "+~/.agents/skills/tdd"]`), matching `ROLE_SKILL_INDEX.lead` and `seatworks` role skill isolation while keeping `supervisor` unfiltered for full Owner skill parity.
+
 ## [0.0.46] - 2026-10-26
 
 v0.0.46's one thing: **serial-wave-first task decomposition anchored to each Stable Checkpoint (`<project-root>` `HEAD`), one bounded outcome per Task (`~120K` peak context ceiling) with 4-part `Contract.description` briefs (`Bounded Outcome`, `Contract Boundary & Regression Invariants`, `Excluded / Deferred to Later Waves`, `Verification`), `Supervisor` Outcome & Architecture Boundary, `Peer` Challenge Signals (`REOPEN_REQUEST` across 6 layers, `DEPENDENCY_REQUEST`, `BLOCKED`) and Anti-Whack-a-Mole law, and CLI `Driver` checkpoint-anchored worktree base advancement (`prepareTaskWorkspace`)** (ADR 0029).
