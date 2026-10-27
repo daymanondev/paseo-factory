@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.51] - 2026-10-27
+
+Harden Claim retries, single-Peer execution, Lead handoff, and role-scoped MCP isolation.
+
+### Fixed
+
+- Same-SHA GREEN Claims reuse completed evidence within the current Contract epoch; RED Claims remain retryable. Acceptance refuses in-flight Attempts, and accepted evidence stays GREEN in CLI/MCP status and the Factory UI despite historical ghost Attempts.
+- Re-contracting cancels and archives prior Peers. Spawn refuses a running or initializing Peer, retires stopped Peers before replacement, and serializes concurrent lifecycle requests per Task.
+- Active Peer rosters prefer running Peers and current-epoch bindings. Lead handoff holds an empty-mailbox kickoff while a Peer runs and combines it with terminal mail, or releases it when all Peers stop.
+- Pi coordination homes expose only `paseo_factory`; helper MCP servers remain Agent-only. Pi client timeouts are explicit: 600 seconds for `paseo_factory`, 300 seconds for `zai-vision`.
+- Coordination-seat fences permit MCP stdio server `npx` launches while blocking general package execution. Ingested seat-fence blocks remain project-level; Task attribution follows contracted Agent execution directories.
+
+### Validation
+
+- `npm run check`: 965/965 tests plus typecheck, bundle, core synchronization, and generated-policy checks pass. Independent Standards and Spec reviews have zero outstanding findings.
+
 ## [0.0.50] - 2026-10-27
 
 v0.0.50's one thing: **direct `Open Peer` conversation navigation from Kanban cards and per-Attempt rows in `TaskDetailModal`, backed by per-Attempt and per-Task Peer `agentId` resolution across Ledger events and `CorrelationRegistry`**.
