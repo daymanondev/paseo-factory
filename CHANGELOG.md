@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.50] - 2026-10-27
+
+v0.0.50's one thing: **direct `Open Peer` conversation navigation from Kanban cards and per-Attempt rows in `TaskDetailModal`, backed by per-Attempt and per-Task Peer `agentId` resolution across Ledger events and `CorrelationRegistry`**.
+
+### Added
+
+- **Per-Attempt and Per-Task Peer `agentId` Folding & Correlation Enrichment (`plugin/shared/view.ts`, `plugin/server/view.ts`, `plugin/server/surface-rpc.ts`)** — `AttemptView`, `TaskView`, and `TaskDetailView.attempts` now carry `agentId`, folded from each Attempt's `claim_reported` / Peer ledger events in the active Contract epoch and enriched in `snapshot` / `taskDetail` from `<stateDir>/correlations.json` and live daemon workers when a Peer has not yet claimed.
+- **`Open Peer` Conversation Actions on `KanbanCard` and `TaskDetailModal` (`plugin/client/factory/tasks.tsx`, `plugin/client/factory/shell.tsx`)** — `KanbanCard` and `TaskDetailBody` (both at the Task header and on each individual `#1`, `#2`, `#3` Attempt row) render an `Open Peer` action wired to `navigation.openAgent({ agentId, serverId })` so the Owner can inspect any active or archived Peer conversation directly.
+
 ## [0.0.49] - 2026-10-26
 
 Lead owns semantic diff review after the mechanical Gate (ADR 0030). Fresh-eyes no longer defaults on for Lead contracts or blocks acceptance of historical GREEN Attempts.

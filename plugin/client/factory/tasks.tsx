@@ -64,6 +64,7 @@ type BoardFilter = "all" | KanbanColumnId;
 export interface TasksActions {
   accept(task: string, attempt: number): void;
   openDetail(task: string): void;
+  openAgent?(agentId: string): void;
   busy: boolean;
 }
 
@@ -234,6 +235,10 @@ function KanbanCard({
   actions: TasksActions;
 }) {
   const green = task.attempts.findLast((attempt) => attempt.verdict === "green" && !attempt.open);
+  const peerAgentId =
+    task.agentId ??
+    task.attempts.findLast((attempt) => typeof attempt.agentId === "string" && attempt.agentId !== "")?.agentId ??
+    null;
   const pills = statusPill(task.status, task.needsHumanReason);
   const isAccepted = task.status === "accepted";
   const accentColour = theme.colors[statusTone(task.status)];
@@ -302,7 +307,7 @@ function KanbanCard({
         </Text>
       ) : null}
 
-      {/* Row 3: Actionable Blocker callout or Direct Accept CTA (all other telemetry lives in TaskDetailModal) */}
+      {/* Row 3: Actionable Blocker callout or Direct Accept / Open Peer CTA (all other telemetry lives in TaskDetailModal) */}
       {task.needsHumanReason !== null ? (
         <View
           style={{
@@ -314,35 +319,60 @@ function KanbanCard({
             backgroundColor: tint(theme.colors.statusWarning, "14"),
             flexDirection: "row",
             alignItems: "center",
+            justifyContent: "space-between",
             gap: SPACING[1],
             minWidth: 0,
           }}
         >
-          <Icon name="AlertTriangle" size={11} color={theme.colors.statusWarning} />
-          <Text style={{ ...text(theme, "badge", "statusWarning"), flexShrink: 1 }} numberOfLines={1}>
-            Blocker: {task.needsHumanReason}
-          </Text>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1], flexShrink: 1, minWidth: 0 }}>
+            <Icon name="AlertTriangle" size={11} color={theme.colors.statusWarning} />
+            <Text style={{ ...text(theme, "badge", "statusWarning"), flexShrink: 1 }} numberOfLines={1}>
+              Blocker: {task.needsHumanReason}
+            </Text>
+          </View>
+          {peerAgentId !== null && actions.openAgent !== undefined ? (
+            <Btn
+              theme={theme}
+              small
+              icon="ExternalLink"
+              label="Peer"
+              onPress={() => actions.openAgent!(peerAgentId)}
+            />
+          ) : null}
         </View>
-      ) : task.status === "ready-to-accept" && green !== undefined ? (
+      ) : (task.status === "ready-to-accept" && green !== undefined) || (peerAgentId !== null && actions.openAgent !== undefined) ? (
         <View
           style={{
             flexDirection: "row",
             alignItems: "center",
             justifyContent: "flex-end",
+            gap: SPACING[1],
             paddingTop: 2,
             minWidth: 0,
           }}
         >
-          <Btn
-            theme={theme}
-            small
-            solid
-            icon="Check"
-            label={`Accept #${green.n}`}
-            tone="statusSuccess"
-            disabled={actions.busy}
-            onPress={() => actions.accept(task.task, green!.n)}
-          />
+          {peerAgentId !== null && actions.openAgent !== undefined ? (
+            <Btn
+              theme={theme}
+              small
+              icon="ExternalLink"
+              label="Open Peer"
+              tone="foregroundMuted"
+              onPress={() => actions.openAgent!(peerAgentId)}
+            />
+          ) : null}
+          {task.status === "ready-to-accept" && green !== undefined ? (
+            <Btn
+              theme={theme}
+              small
+              solid
+              icon="Check"
+              label={`Accept #${green.n}`}
+              tone="statusSuccess"
+              disabled={actions.busy}
+              onPress={() => actions.accept(task.task, green!.n)}
+            />
+          ) : null}
         </View>
       ) : null}
     </Pressable>
@@ -601,10 +631,12 @@ export function TaskDetailModal({
   theme,
   detail,
   onClose,
+  onOpenAgent,
 }: {
   theme: PluginTheme;
   detail: TaskDetailModalState | null;
   onClose: () => void;
+  onOpenAgent?: (agentId: string) => void;
 }) {
   return (
     <Modal
@@ -619,7 +651,7 @@ export function TaskDetailModal({
         ) : detail.error !== null ? (
           <Text style={text(theme, "label", "statusWarning")}>{detail.error}</Text>
         ) : detail.detail === null ? null : (
-          <TaskDetailBody theme={theme} detail={detail.detail} />
+          <TaskDetailBody theme={theme} detail={detail.detail} openAgent={onOpenAgent} />
         )}
         <View style={{ paddingTop: SPACING[2] }}>
           <Btn theme={theme} small label="Close" tone="foregroundMuted" onPress={onClose} />
@@ -629,10 +661,22 @@ export function TaskDetailModal({
   );
 }
 
-export function TaskDetailBody({ theme, detail }: { theme: PluginTheme; detail: TaskDetailView }) {
+export function TaskDetailBody({
+  theme,
+  detail,
+  openAgent,
+}: {
+  theme: PluginTheme;
+  detail: TaskDetailView;
+  openAgent?: (agentId: string) => void;
+}) {
   const contract = detail.contract;
   const task = detail.task;
   const lastAttempt = task.attempts.at(-1);
+  const taskAgentId =
+    task.agentId ??
+    task.attempts.findLast((a) => typeof a.agentId === "string" && a.agentId !== "")?.agentId ??
+    null;
   const lastEye = task.attempts.findLast((a) => a.eye !== null)?.eye ?? null;
   const lastWatch = task.attempts.findLast((a) => a.watch !== null)?.watch ?? null;
   const hasChokeAnomaly = task.choke.denied > 0 || task.choke.blocked > 0;
@@ -676,6 +720,19 @@ export function TaskDetailBody({ theme, detail }: { theme: PluginTheme; detail: 
           />
         ) : null}
         {task.costState === "metered" ? <Pill theme={theme} label={`Cost ${costLabel(task)}`} mono /> : null}
+        {taskAgentId !== null ? (
+          openAgent !== undefined ? (
+            <Btn
+              theme={theme}
+              small
+              icon="ExternalLink"
+              label={`Open Peer (${taskAgentId.slice(0, 8)})`}
+              onPress={() => openAgent(taskAgentId)}
+            />
+          ) : (
+            <Pill theme={theme} label={`Peer ${taskAgentId.slice(0, 8)}`} mono />
+          )
+        ) : null}
       </View>
       <View style={{ gap: 2 }}>
         <Text style={text(theme, "section")}>Contract</Text>
@@ -691,11 +748,27 @@ export function TaskDetailBody({ theme, detail }: { theme: PluginTheme; detail: 
       </View>
       {detail.attempts.map((attempt, index) => {
         const view = detail.task.attempts[index]!;
+        const attemptAgentId = attempt.agentId ?? view.agentId ?? null;
         return (
           <View key={attempt.n} style={{ gap: 2, borderTopWidth: 1, borderTopColor: theme.colors.border, paddingTop: SPACING[2] }}>
-            <Text style={text(theme, "rowTitle")}>
-              #{attempt.n} {attempt.verdict ?? "—"} {view.respawned ? "↻" : ""}
-            </Text>
+            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: SPACING[1.5] }}>
+              <Text style={text(theme, "rowTitle")}>
+                #{attempt.n} {attempt.verdict ?? "—"} {view.respawned ? "↻" : ""}
+              </Text>
+              {attemptAgentId !== null ? (
+                openAgent !== undefined ? (
+                  <Btn
+                    theme={theme}
+                    small
+                    icon="ExternalLink"
+                    label={`Open Peer (${attemptAgentId.slice(0, 8)})`}
+                    onPress={() => openAgent(attemptAgentId)}
+                  />
+                ) : (
+                  <Pill theme={theme} label={`Peer ${attemptAgentId.slice(0, 8)}`} mono />
+                )
+              ) : null}
+            </View>
             {view.note !== null ? <Text style={text(theme, "meta")}>note: {view.note}</Text> : null}
             {view.eye !== null ? (
               <Text style={text(theme, "meta")}>

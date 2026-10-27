@@ -1080,6 +1080,58 @@ test("taskDetail: the contract's mandated skills ride the detail (v0.0.14)", asy
   assert.deepEqual(reply.detail.contract.skills, ["tdd", "diagnosing-bugs"]);
 });
 
+test("taskDetail & snapshot: Peer agentId rides TaskView and per-attempt AttemptView from ledger claims and CorrelationRegistry", async (t) => {
+  const { stateDir, factory, handlers } = makeSurface(t);
+  factory.ledger.append({
+    event: "contract_set",
+    task: "PEER-1",
+    workspace: "/w/peer",
+    gate: "npm test",
+    artifact: "src/peer.ts",
+    base: "base0001",
+  });
+  factory.ledger.append({ event: "claim_reported", task: "PEER-1", attempt: 1, sha: "1111111", agent: "peer-agent-attempt-1" });
+  factory.ledger.append({ event: "gate_started", task: "PEER-1", attempt: 1, cmd: "npm test" });
+  factory.ledger.append({ event: "gate_finished", task: "PEER-1", attempt: 1, exit: 1, verdict: "red", note: "failed" });
+  factory.ledger.append({ event: "report_written", task: "PEER-1", attempt: 1, path: "report-PEER-1-1.md" });
+
+  factory.ledger.append({ event: "claim_reported", task: "PEER-1", attempt: 2, sha: "2222222", agent: "peer-agent-attempt-2" });
+  factory.ledger.append({ event: "gate_started", task: "PEER-1", attempt: 2, cmd: "npm test" });
+  factory.ledger.append({ event: "gate_finished", task: "PEER-1", attempt: 2, exit: 0, verdict: "green", note: "ok", sha: "2222222" });
+  factory.ledger.append({ event: "report_written", task: "PEER-1", attempt: 2, path: "report-PEER-1-2.md" });
+
+  const detailReply = await handlers.taskDetail({ task: "PEER-1" });
+  assert.ok(detailReply.ok, detailReply.ok ? "" : detailReply.error);
+  assert.equal(detailReply.detail.task.agentId, "peer-agent-attempt-2");
+  assert.equal(detailReply.detail.attempts.length, 2);
+  assert.equal(detailReply.detail.attempts[0]?.agentId, "peer-agent-attempt-1");
+  assert.equal(detailReply.detail.attempts[1]?.agentId, "peer-agent-attempt-2");
+  assert.equal(detailReply.detail.task.attempts[0]?.agentId, "peer-agent-attempt-1");
+  assert.equal(detailReply.detail.task.attempts[1]?.agentId, "peer-agent-attempt-2");
+
+  // Also verify CorrelationRegistry enrichment for a spawned task before any claim
+  factory.ledger.append({
+    event: "contract_set",
+    task: "PEER-2",
+    workspace: "/w/peer",
+    gate: "npm test",
+    artifact: "src/peer2.ts",
+    base: "base0001",
+  });
+  factory.ledger.append({ event: "spawn_dispatched", task: "PEER-2", provider: "opencode/glm-5.1", arity: 1 });
+  new CorrelationRegistry(stateDir).issue({
+    role: "agent",
+    projectSlug: "peer-123456",
+    projectRoot: "/w/peer",
+    task: "PEER-2",
+    agentId: "peer-agent-spawned-only",
+  });
+
+  const detailReply2 = await handlers.taskDetail({ task: "PEER-2" });
+  assert.ok(detailReply2.ok, detailReply2.ok ? "" : detailReply2.error);
+  assert.equal(detailReply2.detail.task.agentId, "peer-agent-spawned-only");
+});
+
 test("retro proposals parse into R1..Rn for the Timeline tab", async (t) => {
   const { stateDir, factory, handlers } = makeSurface(t);
   mkdirSync(stateDir, { recursive: true });

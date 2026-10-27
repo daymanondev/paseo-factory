@@ -1142,3 +1142,12 @@ test("v0.0.39 (ADR 0027): index.client.tsx Command Center items and client contr
   }
 });
 
+test("TasksPane and TaskDetailModal wire Open Peer navigation for active and archived Peer conversations", () => {
+  const tasks = read("plugin/client/factory/tasks.tsx");
+  const shell = read("plugin/client/factory/shell.tsx");
+  assert.match(tasks, /Open Peer/, "TasksPane and TaskDetailModal render Open Peer button");
+  assert.match(tasks, /openAgent\?\(agentId: string\): void/, "TasksActions includes optional openAgent callback");
+  assert.match(tasks, /onOpenAgent\?: \(agentId: string\) => void/, "TaskDetailModal accepts onOpenAgent callback");
+  assert.match(shell, /onOpenAgent=\{\(agentId\) => navigation\?\.openAgent\(\{ agentId, serverId \}\)\}/, "FactoryShell wires onOpenAgent into TaskDetailModal");
+});
+

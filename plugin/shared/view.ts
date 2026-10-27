@@ -94,6 +94,8 @@ export const AttemptViewSchema = z.object({
   sha: z.string().nullable(),
   /** A respawn_dispatched landed since the previous attempt — the ↻ badge. */
   respawned: z.boolean(),
+  /** The Peer agent id that produced this attempt, when recorded on the claim or run events. */
+  agentId: z.string().nullable().optional(),
   /** The gate log / report file names in the stateDir, when they exist. */
   gateLog: z.string().nullable(),
   report: z.string().nullable(),
@@ -132,6 +134,8 @@ export const TaskViewSchema = z.object({
   acceptedBy: z.string().nullable(),
   /** The latest meter/spawn provider string, when a run ever named one. */
   lane: z.string().nullable(),
+  /** The latest Peer agent id bound to this task in its current Contract epoch, when known. */
+  agentId: z.string().nullable().optional(),
   /** The cost cell's honest states — the Cost read's own law, never a fabricated zero. */
   costState: z.enum(["none", "metered", "subscription", "absent"]),
   costUsd: z.number().nullable(),
@@ -407,6 +411,7 @@ export const TaskDetailViewSchema = z.object({
     z.object({
       n: z.number().int(),
       verdict: z.enum(["red", "green"]).nullable(),
+      agentId: z.string().nullable().optional(),
       report: z.string().nullable(),
       gateLog: z.string().nullable(),
     }),

@@ -83,7 +83,7 @@ import {
   vaultPush,
   vaultSync,
 } from "../shared/rpc.ts";
-import type { AgentView, LaneName, LaneProfileView, Lanes, ProjectView, VaultStatusView } from "../shared/view.ts";
+import type { AgentView, LaneName, LaneProfileView, Lanes, ProjectView, TaskView, VaultStatusView } from "../shared/view.ts";
 
 // ---- the daemon slice ---------------------------------------------------------------------
 
@@ -600,6 +600,42 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       if ("task" in evt && typeof evt.task === "string" && typeof agent === "string" && agent !== "") index.set(agent, evt.task);
     }
     return index;
+  };
+
+  /**
+   * Enriches folded `TaskView` rows with Peer `agentId` bindings from
+   * `<stateDir>/correlations.json` (and live daemon agents when present) so a
+   * spawned Peer conversation is reachable even before its first Claim or when
+   * a claim arrived without an agent stamp.
+   */
+  const enrichTaskPeerAgents = (tasks: readonly TaskView[], liveAgents: readonly SurfaceAgentSnapshot[] = []): TaskView[] => {
+    const correlations = new CorrelationRegistry(deps.stateDir).list();
+    return tasks.map((taskView) => {
+      const contract = deps.factory.contractFor(taskView.task);
+      const livePeer = liveAgents.find(
+        (a) => a.labels.seat === "agent" && a.labels.task === taskView.task && typeof a.id === "string" && a.id !== "",
+      );
+      const corrPeer = correlations.findLast(
+        (r) =>
+          r.role === "agent" &&
+          r.task === taskView.task &&
+          typeof r.agentId === "string" &&
+          r.agentId !== "" &&
+          (contract === undefined || r.issuedAt >= contract.ts),
+      );
+      const fallbackAgentId = livePeer?.id ?? corrPeer?.agentId ?? null;
+      const resolvedTaskAgentId = taskView.agentId ?? fallbackAgentId;
+      const attempts = taskView.attempts.map((attempt, idx) =>
+        (attempt.agentId === null || attempt.agentId === undefined) && idx === taskView.attempts.length - 1 && resolvedTaskAgentId !== null
+          ? { ...attempt, agentId: resolvedTaskAgentId }
+          : attempt,
+      );
+      return {
+        ...taskView,
+        agentId: resolvedTaskAgentId,
+        attempts,
+      };
+    });
   };
 
   /** One task's contract workspace sits inside the Project root (equal or nested). */
@@ -1777,7 +1813,12 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       // active-profile / override state without the fold learning files.
       return {
         ok: true as const,
-        view: { ...view, machineLanes: machineLanes.lanes, ...laneProfilesGather(enrichedProject?.slug, view.lanes) },
+        view: {
+          ...view,
+          tasks: enrichTaskPeerAgents(view.tasks, rawAgents),
+          machineLanes: machineLanes.lanes,
+          ...laneProfilesGather(enrichedProject?.slug, view.lanes),
+        },
       };
     },
 
@@ -1787,8 +1828,9 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         return failure("unknown-task", `no contract set for task ${input.task}`);
       }
       if (!loadLanes(deps.stateDir).ok) return failure("lanes-unreadable", `the lane table under ${deps.stateDir} is unreadable`);
-      const task = foldTasks(deps.factory.ledger.events).find((entry) => entry.task === input.task);
-      if (task === undefined) return failure("unknown-task", `no foldable history for task ${input.task}`);
+      const folded = foldTasks(deps.factory.ledger.events).find((entry) => entry.task === input.task);
+      if (folded === undefined) return failure("unknown-task", `no foldable history for task ${input.task}`);
+      const task = enrichTaskPeerAgents([folded])[0]!;
       return {
         ok: true as const,
         detail: {
@@ -1810,6 +1852,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           attempts: task.attempts.map((attempt) => ({
             n: attempt.n,
             verdict: attempt.verdict,
+            agentId: attempt.agentId ?? null,
             report: attempt.report === null ? null : readTailed(deps.stateDir, attempt.report),
             gateLog: attempt.gateLog === null ? null : readTailed(deps.stateDir, attempt.gateLog),
           })),

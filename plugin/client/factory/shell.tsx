@@ -457,6 +457,7 @@ export function FactoryShell({
             actions={{
               busy,
               openDetail,
+              openAgent: (agentId) => navigation?.openAgent({ agentId, serverId }),
               accept: (task, attempt) => {
                 void act("Accept", () => acceptCall({ task, attempt }));
               },
@@ -697,7 +698,12 @@ export function FactoryShell({
       </ScrollView>
 
       {/* The Detail Modal: Contract, per-attempt Report.md, Gate Log, Watch & Eye breakdown. */}
-      <TaskDetailModal theme={theme} detail={detail} onClose={() => setDetail(null)} />
+      <TaskDetailModal
+        theme={theme}
+        detail={detail}
+        onClose={() => setDetail(null)}
+        onOpenAgent={(agentId) => navigation?.openAgent({ agentId, serverId })}
+      />
     </View>
   );
 }

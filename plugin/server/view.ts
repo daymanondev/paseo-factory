@@ -58,8 +58,26 @@ function laneFamily(provider: string): string {
   return at === -1 ? provider : provider.slice(0, at);
 }
 
+/** Extracts a non-empty Peer agent id from a task-scoped ledger event when present. */
+function eventPeerAgentId(evt: AnyEvent): string | null {
+  if (
+    evt.event === "claim_reported" ||
+    evt.event === "meter_written" ||
+    evt.event === "repoke_dispatched" ||
+    evt.event === "permit_allowed" ||
+    evt.event === "permit_denied" ||
+    evt.event === "git_blocked"
+  ) {
+    return typeof evt.agent === "string" && evt.agent.trim() !== "" ? evt.agent.trim() : null;
+  }
+  if (evt.event === "respawn_dispatched") {
+    return typeof evt.died_agent === "string" && evt.died_agent.trim() !== "" ? evt.died_agent.trim() : null;
+  }
+  return null;
+}
+
 /** One rung of the Attempt Ladder, folded from the attempt's own events. */
-function attemptView(slice: readonly AnyEvent[], attempt: AttemptState, previousEndSeq: number): AttemptView {
+function attemptView(slice: readonly AnyEvent[], attempt: AttemptState, previousEndSeq: number, nextAttemptStartSeq?: number): AttemptView {
   const n = attempt.attempt;
   const events = attempt.events;
   const gate = attempt.gate;
@@ -69,6 +87,18 @@ function attemptView(slice: readonly AnyEvent[], attempt: AttemptState, previous
   const firstClaim = events.find((e) => e.event === "claim_reported");
   const respawned =
     firstClaim !== undefined && slice.some((e) => e.event === "respawn_dispatched" && e.seq > previousEndSeq && e.seq <= firstClaim.seq);
+  let agentId: string | null =
+    firstClaim !== undefined && typeof firstClaim.agent === "string" && firstClaim.agent.trim() !== ""
+      ? firstClaim.agent.trim()
+      : null;
+  if (agentId === null) {
+    for (const evt of slice) {
+      if (evt.seq <= previousEndSeq) continue;
+      if (nextAttemptStartSeq !== undefined && evt.seq >= nextAttemptStartSeq) break;
+      const candidate = eventPeerAgentId(evt);
+      if (candidate !== null) agentId = candidate;
+    }
+  }
   const answers =
     watch?.outcome === "written" && watch.answers !== undefined
       ? Object.fromEntries(Object.entries(watch.answers).map(([name, value]) => [name, value ?? null]))
@@ -91,6 +121,7 @@ function attemptView(slice: readonly AnyEvent[], attempt: AttemptState, previous
     note: gate?.note ?? null,
     sha: gate?.sha ?? null,
     respawned,
+    agentId,
     gateLog: gate?.outputPath === undefined ? null : basename(gate.outputPath),
     report: report === undefined ? null : basename(report.path),
     claimedAt: firstClaim?.ts ?? null,
@@ -135,11 +166,23 @@ export function foldTasks(events: readonly AnyEvent[]): TaskView[] {
     const costState = meter === undefined ? "none" : dollars !== undefined ? "metered" : lane !== null && laneFamily(lane) === "copilot" ? "subscription" : "absent";
     const attempts: AttemptView[] = [];
     let previousEndSeq = contract?.seq ?? 0;
-    for (const n of numbers) {
+    for (let idx = 0; idx < numbers.length; idx += 1) {
+      const n = numbers[idx]!;
       const attempt = state.attempts.find((entry) => entry.attempt === n)!;
-      attempts.push(attemptView(epochSlice, attempt, previousEndSeq));
+      const nextN = numbers[idx + 1];
+      const nextAttemptEvents = nextN !== undefined ? epochSlice.filter((e) => "attempt" in e && e.attempt === nextN) : [];
+      const nextAttemptStartSeq = nextAttemptEvents.length > 0 ? Math.min(...nextAttemptEvents.map((e) => e.seq)) : undefined;
+      attempts.push(attemptView(epochSlice, attempt, previousEndSeq, nextAttemptStartSeq));
       const attemptEvents = epochSlice.filter((e) => "attempt" in e && e.attempt === n);
       previousEndSeq = Math.max(previousEndSeq, ...attemptEvents.map((e) => e.seq));
+    }
+    let taskAgentId: string | null = null;
+    for (const evt of epochSlice) {
+      const candidate = eventPeerAgentId(evt);
+      if (candidate !== null) taskAgentId = candidate;
+    }
+    if (taskAgentId === null) {
+      taskAgentId = attempts.findLast((a) => typeof a.agentId === "string" && a.agentId !== "")?.agentId ?? null;
     }
     let allowed = 0;
     let denied = 0;
@@ -160,6 +203,7 @@ export function foldTasks(events: readonly AnyEvent[]): TaskView[] {
       accepted: accepted !== undefined,
       acceptedBy: accepted?.accepted_by ?? null,
       lane,
+      agentId: taskAgentId,
       costState,
       costUsd: dollars ?? null,
       totalTokens,
