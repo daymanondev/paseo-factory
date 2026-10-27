@@ -135,14 +135,16 @@ function AttemptTrail({
   theme,
   attempts,
   compact = false,
+  currentAttempt,
 }: {
   theme: PluginTheme;
   attempts: readonly AttemptTrailItem[];
   compact?: boolean;
+  currentAttempt?: number;
 }) {
   if (attempts.length === 0) return null;
   const trail = summarizeAttemptTrail(attempts, compact ? 4 : 5);
-  const last = attempts[attempts.length - 1]!;
+  const last = attempts.find(attempt => attempt.n === currentAttempt) ?? attempts[attempts.length - 1]!;
   const lastColour =
     last.verdict === "green"
       ? theme.colors.statusSuccess
@@ -284,7 +286,7 @@ function KanbanCard({
         </View>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 4, flexShrink: 0 }}>
           {task.attempts.length > 0 ? (
-            <AttemptTrail theme={theme} attempts={task.attempts} compact />
+            <AttemptTrail theme={theme} attempts={task.attempts} currentAttempt={task.currentAttempt} compact />
           ) : task.lane !== null ? (
             <Pill theme={theme} label={shortLaneLabel(task.lane)} mono />
           ) : (
@@ -672,7 +674,7 @@ export function TaskDetailBody({
 }) {
   const contract = detail.contract;
   const task = detail.task;
-  const lastAttempt = task.attempts.at(-1);
+  const lastAttempt = task.attempts.find(attempt => attempt.n === task.currentAttempt) ?? task.attempts.at(-1);
   const taskAgentId =
     task.agentId ??
     task.attempts.findLast((a) => typeof a.agentId === "string" && a.agentId !== "")?.agentId ??
@@ -684,7 +686,7 @@ export function TaskDetailBody({
   return (
     <View style={{ gap: SPACING[3] }}>
       <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1] }}>
-        <AttemptTrail theme={theme} attempts={task.attempts} />
+        <AttemptTrail theme={theme} attempts={task.attempts} currentAttempt={task.currentAttempt} />
         {lastAttempt !== undefined && lastAttempt.verdict !== null ? (
           <Pill
             theme={theme}

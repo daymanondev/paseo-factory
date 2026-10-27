@@ -66,6 +66,7 @@ import {
   requeueLeadMail as appendMailRequeued,
 } from "./core/mailbox.ts";
 import type { LeadMailFrom, LeadMailItem, LeadMailKind, MailRecipient } from "./core/mailbox.ts";
+import { boundTaskPeers, peerIsRunning } from "./task-peers.ts";
 import { foldTasks, renderLedgerLine } from "./view.ts";
 import type { TaskView } from "../shared/view.ts";
 import type {
@@ -429,7 +430,9 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   const drainLeadMailbox = async (slug: string): Promise<void> => {
     const path = mailboxPath(slug);
     const state = readLeadMailbox(path);
-    if (state.inFlight !== null || state.queued.length === 0) return; // a live delivery awaits its turn-end settle (ticket 07) — or nothing waits
+    if (state.inFlight !== null) return; // a live delivery awaits its turn-end settle
+    const registeredLead = readProjectRegistration(deps.stateDir, slug)?.lead;
+    if (state.queued.length === 0 && (registeredLead === undefined || !pendingHandoffByAgentId.has(registeredLead))) return;
     if ((readRotationState(slug) ?? "normal") !== "normal") return; // rotation_pending / handing_over hold the mailbox (ticket 07's machine)
     const daemon = resolveDaemon();
     let lead: SurfaceAgentSnapshot | undefined;
@@ -458,12 +461,13 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     if (lead === undefined) return; // no live Lead — the next dispatch ensures one and pumps again
     if (lead.status !== "idle" || isBlockedByAttention(lead)) return; // a running or permission-waiting Lead is never interrupted (§User Story 12)
     const pendingHandoff = pendingHandoffByAgentId.get(lead.id);
-    const mailPrompt = renderMailPrompt(state.queued);
+    if (state.queued.length === 0 && (pendingHandoff === undefined || await projectPeerInFlight(slug))) return;
+    const mailPrompt = state.queued.length === 0 ? "" : renderMailPrompt(state.queued);
     const body = pendingHandoff !== undefined ? `${pendingHandoff}\n\n${mailPrompt}` : mailPrompt;
     const prompt = prependKickoffPacketIfFirstTurn("lead", slug, lead, body);
     await daemon.agents.ref(lead.id).send(prompt);
     if (pendingHandoff !== undefined) pendingHandoffByAgentId.delete(lead.id);
-    appendMailDelivered(path, { mailIds: state.queued.map((item) => item.mailId), toAgentId: lead.id });
+    if (state.queued.length > 0) appendMailDelivered(path, { mailIds: state.queued.map((item) => item.mailId), toAgentId: lead.id });
     log(`lead-mailbox: delivered ${state.queued.length} item(s) to the lead of ${slug} (${lead.id})`);
   };
 
@@ -924,18 +928,8 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     handingOverBySlug.delete(slug);
     writeRotationState(slug, root, { rotationState: "normal", handoffRequestedAt: null });
     await drainLeadMailbox(slug);
-    if (pendingHandoffByAgentId.has(ensured.agentId)) {
-      pendingHandoffByAgentId.delete(ensured.agentId);
-      const kickoffPrompt = prependKickoffPacketIfFirstTurn(
-        "lead",
-        slug,
-        { id: ensured.agentId, cwd: root },
-        handoffBundle,
-      );
-      await resolveDaemon().agents.ref(ensured.agentId).send(kickoffPrompt);
-    }
     const retiredLabel = retired.ok ? retired.agentId : (input.agentId || "absent-lead");
-    log(`lead-mailbox: handoff of ${slug} complete — ${retiredLabel} archived, successor ${ensured.agentId} kicked off, rotation reset to normal`);
+    log(`lead-mailbox: handoff of ${slug} complete — ${retiredLabel} archived, successor ${ensured.agentId} kickoff ${pendingHandoffByAgentId.has(ensured.agentId) ? "held for Peer completion" : "delivered"}, rotation reset to normal`);
   };
 
   /** The Project's ledger slice — every event whose task's contract workspace sits inside the root (the snapshot's own scoping law). */
@@ -956,6 +950,15 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       // the roster renders without live statuses — the ledger half still carries it
     }
     return live;
+  };
+
+  const projectPeerInFlight = async (slug: string): Promise<boolean> => {
+    const reg = readProjectRegistration(deps.stateDir, slug);
+    if (reg?.root === undefined) return false;
+    const events = projectEventsOf(reg.root);
+    const live = [...(await liveAgentsById()).values()];
+    return driverWaveInFlight(events, live) || foldTasks(events).some(task => !task.accepted &&
+      boundTaskPeers({ stateDir: deps.stateDir, slug, task: task.task, events, live }).some(peerIsRunning));
   };
 
   /** Resolves `--workspace` or `--project` to `{ root, slug }` or a structured `unknown-project` refusal. */
@@ -1444,17 +1447,7 @@ function agentOfTask(
   const index = new Map<string, string>(ledgerAgents);
   for (const task of tasks) {
     if (task.accepted || task.status === "accepted") continue;
-    const wt = taskWorktreePath(stateDir, slug, task.task);
-    let matchedLive: string | undefined;
-    for (const agent of livePeers) {
-      const cwdMatch = typeof agent.cwd === "string" && (agent.cwd === wt || agent.cwd.startsWith(`${wt}/`));
-      const labelMatch =
-        agent.labels?.task === task.task &&
-        (agent.labels?.project === undefined || agent.labels?.project === slug);
-      if (cwdMatch || labelMatch) {
-        matchedLive = agent.id;
-      }
-    }
+    const matchedLive = boundTaskPeers({ stateDir, slug, task: task.task, events, live: livePeers })[0]?.id;
     if (matchedLive !== undefined) {
       index.set(task.task, matchedLive);
       continue;

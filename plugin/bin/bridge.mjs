@@ -694,7 +694,9 @@ function projectTask(events, task) {
   });
   const dispatch = epoch.findLast((event) => event.event === "spawn_dispatched" || event.event === "respawn_dispatched");
   const status = acceptance !== void 0 ? "accepted" : needsHuman ? "needs-human" : attempts.some((attempt) => attempt.open) || dispatch !== void 0 && dispatch.seq > (latestGate?.seq ?? -1) ? "running" : numbers.length === 0 ? "waiting" : latestGate?.verdict === "green" ? "ready-to-accept" : "red";
-  return { task, history, contract, epochSeq, epochId, epoch, attempts, acceptance, settled, pendingLanding: acceptance?.landing === "pending-conflict", needsHuman, needs: needsHuman ? needs : void 0, status, maxAttempt: numbers.at(-1) ?? 0, inFlightAttempt: attempts.find((attempt) => attempt.open)?.attempt };
+  const currentAttempt = acceptance === void 0 ? attempts.at(-1) : attempts.find((entry) => entry.attempt === acceptance.attempt);
+  const verdict = acceptance === void 0 ? currentAttempt?.gate?.verdict : "green";
+  return { currentAttempt, verdict, task, history, contract, epochSeq, epochId, epoch, attempts, acceptance, settled, pendingLanding: acceptance?.landing === "pending-conflict", needsHuman, needs: needsHuman ? needs : void 0, status, maxAttempt: numbers.at(-1) ?? 0, inFlightAttempt: attempts.find((attempt) => attempt.open)?.attempt };
 }
 
 // src/task-status.ts
@@ -704,12 +706,12 @@ function taskStatusLines(events, workspaceFilter) {
   for (const task of tasks) {
     const state = projectTask(events, task);
     if (workspaceFilter && state.contract?.workspace && state.contract.workspace !== workspaceFilter) continue;
-    const gate = state.epoch.findLast((event) => event.event === "gate_finished");
-    const current = state.attempts.at(-1);
+    const gate = state.currentAttempt?.gate;
+    const current = state.currentAttempt;
     const review = current?.review;
     const count = (kind) => state.epoch.filter((event) => event.event === kind).length;
     const eligible = (role) => state.attempts.filter((attempt) => attempt[role]).map((attempt) => attempt.attempt).join(",") || "-";
-    lines.push(`${task} attempts=${state.maxAttempt} verdict=${gate?.verdict ?? "-"} sha=${gate?.sha?.slice(0, 7) ?? "-"} accepted=${state.acceptance === void 0 ? "no" : "yes"} eye=${review?.outcome ?? "-"} choke=${count("permit_allowed")}/${count("permit_denied")}/${count("git_blocked")}` + (state.needs === void 0 ? "" : ` needs-human=${state.needs.reason}`) + ` review=${current?.reviewState ?? (state.contract?.freshEyes === true ? "pending" : "off")} owner-eligible=${eligible("ownerEligible")} lead-eligible=${eligible("leadEligible")}`);
+    lines.push(`${task} attempts=${state.maxAttempt} verdict=${state.verdict ?? "-"} sha=${gate?.sha?.slice(0, 7) ?? "-"} accepted=${state.acceptance === void 0 ? "no" : "yes"} eye=${review?.outcome ?? "-"} choke=${count("permit_allowed")}/${count("permit_denied")}/${count("git_blocked")}` + (state.needs === void 0 ? "" : ` needs-human=${state.needs.reason}`) + ` review=${current?.reviewState ?? (state.contract?.freshEyes === true ? "pending" : "off")} owner-eligible=${eligible("ownerEligible")} lead-eligible=${eligible("leadEligible")}`);
   }
   const retro = events.findLast((event) => event.event === "retro_written");
   if (retro !== void 0) {

@@ -202,6 +202,8 @@ export function foldTasks(events: readonly AnyEvent[]): TaskView[] {
       pendingLanding: state.pendingLanding,
       accepted: accepted !== undefined,
       acceptedBy: accepted?.accepted_by ?? null,
+      currentAttempt: state.currentAttempt?.attempt,
+      verdict: state.verdict,
       lane,
       agentId: taskAgentId,
       costState,

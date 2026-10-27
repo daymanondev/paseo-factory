@@ -237,7 +237,8 @@ function writeSettingsJson(sourceAgentDir: string, roleHome: string, role: PiAge
 }
 
 /**
- * Synchronizes the source `mcp.json` into the harness home sanitized for Pi
+ * Copies operator helper servers only into the working Agent home. Coordination
+ * seats get only the bridge, with an explicit client timeout. Sanitizes for Pi
  * v1.3.0's native `builtin:mcp`: every server entry whose `auth` is the
  * legacy `pi-mcp-adapter` string `"oauth"` loses `auth`, while valid object
  * shapes (`auth: { provider: "..." }`) and every other field pass through
@@ -253,13 +254,13 @@ function syncMcpJson(sourceAgentDir: string, roleHome: string, role: PiAgentRole
   const source = readJsonObject(join(sourceAgentDir, "mcp.json"));
   const servers = source !== undefined && isJsonObject(source.mcpServers) ? source.mcpServers : undefined;
   const mcpServers: Record<string, unknown> = {};
-  if (servers !== undefined) {
+  if (role === "agent" && servers !== undefined) {
     for (const [name, entry] of Object.entries(servers)) {
       mcpServers[name] = isJsonObject(entry) && entry.auth === "oauth" ? withoutAuth(entry) : entry;
     }
   }
   const zaiKey = readZaiApiKey(sourceAgentDir);
-  if (zaiKey !== undefined) {
+  if (role === "agent" && zaiKey !== undefined) {
     const existing = isJsonObject(mcpServers["zai-vision"]) ? mcpServers["zai-vision"] : {};
     const existingEnv = isJsonObject(existing.env) ? existing.env : {};
     mcpServers["zai-vision"] = {
@@ -272,10 +273,12 @@ function syncMcpJson(sourceAgentDir: string, roleHome: string, role: PiAgentRole
         Z_AI_MODE: typeof existingEnv.Z_AI_MODE === "string" ? existingEnv.Z_AI_MODE : "ZAI",
       },
       exposure: "direct",
+      timeout: 300,
     };
   }
+  if (isJsonObject(mcpServers["zai-vision"])) mcpServers["zai-vision"].timeout = 300;
   const exaKey = readExaApiKey(sourceAgentDir);
-  if (exaKey !== undefined && mcpServers.exa === undefined) {
+  if (role === "agent" && exaKey !== undefined && mcpServers.exa === undefined) {
     mcpServers.exa = {
       url: `https://mcp.exa.ai/mcp?exaApiKey=${encodeURIComponent(exaKey)}`,
       exposure: "direct",
@@ -285,6 +288,7 @@ function syncMcpJson(sourceAgentDir: string, roleHome: string, role: PiAgentRole
     command: process.execPath,
     args: [join(stateDir, "bin", "bridge.mjs"), "--role", role, "--state-dir", stateDir],
     exposure: "direct",
+    timeout: 600,
     // Paseo Desktop's execPath is an Electron helper — bridge.mjs must run in
     // Node mode (v0.0.27, ADR 0017 §2).
     ...(isElectronNodeBinary(process.execPath) ? { env: { ELECTRON_RUN_AS_NODE: "1" } } : {}),

@@ -4,6 +4,8 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { foldTasks } from "../plugin/server/view.ts";
+import { taskStatusLines } from "../src/task-status.ts";
 import { projectTask } from "../src/task-state.ts";
 import { createFactory } from "../src/factory.ts";
 import { CorrelationRegistry } from "../src/correlations.ts";
@@ -1930,4 +1932,49 @@ test("v0.0.38 (ADR 0026 §1): setContract resolves the freshEyes and watch lanes
   writeProjectLaneOverrides(join(dir, "factory-lead"), project.slug, { freshEyes: "claude/claude-sonnet-4-6" });
   const leadContract = lead.setContract({ task: "PSC3", workspace, gate: "true", artifact, seat: "lead" });
   assert.equal(leadContract.freshEyes, undefined);
+});
+
+test("same-SHA GREEN claims reuse completed evidence within their epoch", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact, sha } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir: join(dir, "factory") });
+  factory.setContract({ task: "retry", workspace, gate: "true", artifact });
+  const first = await factory.claim({ task: "retry", sha });
+  const count = factory.ledger.events.length;
+  assert.deepEqual(await factory.claim({ task: "retry", sha }), first);
+  assert.equal(factory.ledger.events.length, count);
+  factory.setContract({ task: "retry", workspace, gate: "false", artifact });
+  assert.equal((await factory.claim({ task: "retry", sha })).verdict, "red");
+  assert.equal((await factory.claim({ task: "retry", sha })).attempt, 2);
+});
+
+test("accept refuses while another attempt is in flight", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact, sha } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir: join(dir, "factory") });
+  factory.setContract({ task: "busy", workspace, gate: "true", artifact });
+  await factory.claim({ task: "busy", sha });
+  factory.ledger.append({ event: "claim_reported", task: "busy", attempt: 2, sha });
+  factory.ledger.append({ event: "gate_started", task: "busy", attempt: 2, cmd: "true" });
+  await assert.rejects(factory.accept({ task: "busy", attempt: 1 }), factoryErrorCode("gate-running"));
+});
+
+test("accepted task projection retains accepted GREEN evidence after a ghost RED attempt", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact, sha } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir: join(dir, "factory") });
+  factory.setContract({ task: "ghost", workspace, gate: "true", artifact });
+  await factory.claim({ task: "ghost", sha });
+  await factory.accept({ task: "ghost", attempt: 1 });
+  factory.ledger.append({ event: "gate_finished", task: "ghost", attempt: 2, verdict: "red", exit: 1, note: "ghost" });
+  const state = projectTask(factory.ledger.events, "ghost");
+  assert.equal(state.status, "accepted");
+  assert.equal(state.currentAttempt?.attempt, 1);
+  assert.equal(state.verdict, "green");
+  assert.match(taskStatusLines(factory.ledger.events)[0]!, /verdict=green/);
+  assert.equal(foldTasks(factory.ledger.events)[0]!.currentAttempt, 1);
+  assert.equal(foldTasks(factory.ledger.events)[0]!.verdict, "green");
 });

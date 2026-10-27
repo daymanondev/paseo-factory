@@ -17,6 +17,7 @@
  *   (`seat-write-fence`).
  * - All other invocations pass through transparently to the real binary on PATH.
  */
+import { isMcpStdioLaunch } from "./mcp-launch-policy.mjs";
 import { accessSync, appendFileSync, constants as fsConstants, existsSync, mkdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
@@ -133,7 +134,7 @@ if ((seat === "supervisor" || seat === "lead") && packageTools.has(tool)) {
     if (commandBoundaries.has(arg)) { sub = arg; break; }
   }
   const informational = argv.some((arg) => ["--version", "-v", "--help", "-h"].includes(arg));
-  if (tool === "npx" || (tool === "yarn" && sub === undefined && !informational) || packageMutations.has(sub)) {
+  if ((tool === "npx" && !isMcpStdioLaunch(argv)) || (tool === "yarn" && sub === undefined && !informational) || packageMutations.has(sub)) {
     const guidance = seat === "supervisor"
       ? "Supervisor must dispatch repairs via supervisor_dispatch_lead"
       : "Lead must contract and spawn a Task Agent via lead_set_contract + lead_spawn_agent";

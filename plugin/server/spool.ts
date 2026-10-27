@@ -36,6 +36,9 @@ import { loadLanes, parseLane } from "./core/lanes.ts";
 import { listProjectRegistrations, readProjectRegistration, resolveProject, writeProjectRegistration } from "./core/project.ts";
 import { FACTORY_SEAT_PROVIDER_IDS, formatPeerAgentTitle, formatPeerWorkspaceTitle } from "./roles.ts";
 import { acceptanceSummary, executeAcceptance } from "./commands.ts";
+import { boundTaskPeers, peerIsRunning } from "./task-peers.ts";
+import { stopAgentViaCli } from "./daemon-cli.ts";
+import type { DaemonReply } from "./daemon-cli.ts";
 import { isPaseoWorkspaceArchivedOnDisk, restoreDaemonWorkspaceViaWs } from "./daemon-cli.ts";
 import type { SurfaceDaemonApi } from "./surface-rpc.ts";
 import type { HistoryImportSource } from "./core/history-import.ts";
@@ -958,6 +961,8 @@ async function resolvePeerSpawnProvider(
  * need the choke's handler (the shell passes `createChoke(...).spoolAskHandler`);
  * without one they are refused loudly, never silently allowed.
  */
+const peerLifecycleByFactory = new WeakMap<Factory, Map<string, Promise<unknown>>>();
+
 export async function handleSpoolRequest(
   factory: Factory,
   request: SpoolRequest,
@@ -965,7 +970,17 @@ export async function handleSpoolRequest(
 ): Promise<SpoolReply> {
   if (request.kind === "upgrade" || request.kind === "history_import" || request.kind === "history_import_status") return handleAdmittedSpoolRequest(factory, request, deps);
   if ((request.kind === "reset" || request.kind === "delete") && !factory.history.maintenanceActive) return factory.history.withExclusiveMaintenance(() => handleAdmittedSpoolRequest(factory, request, deps));
-  return factory.history.runOperation(() => handleAdmittedSpoolRequest(factory, request, deps), { newWork: !["ask", "meter", "repoke", "respawn", "needs_human"].includes(request.kind) });
+  const run = () => factory.history.runOperation(() => handleAdmittedSpoolRequest(factory, request, deps), { newWork: !["ask", "meter", "repoke", "respawn", "needs_human"].includes(request.kind) });
+  if (request.kind !== "spawn" && request.kind !== "contract") return run();
+  // Spool requests run concurrently. Serialize only Peer lifecycle operations
+  // for this Task, so two different spawn prompts cannot pass the same census.
+  let lanes = peerLifecycleByFactory.get(factory);
+  if (lanes === undefined) { lanes = new Map(); peerLifecycleByFactory.set(factory, lanes); }
+  const previous = lanes.get(request.task) ?? Promise.resolve();
+  const pending = previous.catch(() => {}).then(run);
+  lanes.set(request.task, pending);
+  try { return await pending; }
+  finally { if (lanes.get(request.task) === pending) lanes.delete(request.task); }
 }
 
 async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolRequest, deps: SpoolDeps): Promise<SpoolReply> {
@@ -1043,7 +1058,22 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         message: `Working Agent cannot call factory ${request.kind}; working Agents may only submit claims via 'factory-claim --task <task> --sha <sha>'.`,
       };
     }
+    const taskPeers = async (task: string) => {
+      const contract = factory.contractFor(task);
+      const project = contract === undefined ? undefined : resolveProject(contract.workspace);
+      if (resolvedDaemon === undefined || !project?.ok) return [];
+      const page = await resolvedDaemon.agents.list({ filter: { includeArchived: false, includeBackground: true } });
+      return boundTaskPeers({ stateDir: factory.stateDir, slug: project.slug, task, events: factory.ledger.events, live: page.entries.map(entry => entry.agent) });
+    };
+    const retirePeers = async (peers: Awaited<ReturnType<typeof taskPeers>>) => {
+      for (const peer of peers) {
+        const stopped = await (deps.stopAgent ?? stopAgentViaCli)(peer.id, home);
+        if (!stopped.ok) throw new FactoryError("peer-stop-failed", `cannot stop Peer ${peer.id}: ${stopped.reason}`);
+        await resolvedDaemon!.agents.ref(peer.id).archive();
+      }
+    };
     if (request.kind === "contract") {
+      const previousPeers = await taskPeers(request.task);
       const contractEvt = factory.setContract({
         task: request.task,
         workspace: request.workspace,
@@ -1058,6 +1088,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         by: request.submitter,
         ...(effectiveSeat === undefined ? {} : { seat: effectiveSeat }),
       });
+      await retirePeers(previousPeers);
       return {
         id: request.id,
         ok: true,
@@ -1196,6 +1227,14 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
     }
 
     if (request.kind === "spawn") {
+      const peers = await taskPeers(request.task);
+      const running = peers.find(peerIsRunning);
+      if (running !== undefined) {
+        const message = `Peer ${running.id} is already running in the Task worktree for ${request.task}; wait for its completion mail or call lead_set_contract first to open a new epoch`;
+        const event = factory.ledger.append({ event: "spawn_refused", task: request.task, provider: request.provider, arity: request.arity, rule: "spawn:peer-already-running", reason: "peer-already-running" });
+        return { id: request.id, ok: false, code: "peer-already-running", message, event };
+      }
+      await retirePeers(peers);
       // The driver's arrival (v0.0.5): one ledger line either way, then the
       // reply the driver keys its next move on — create the agent, or report
       // the refusal and carry on with the invocation's other tasks. The
@@ -1600,6 +1639,8 @@ export interface SpoolOptions {
    * `PASEO_HOME`-env fallback the daemon may not set in this process.
    */
   home?: string;
+  /** Lifecycle cancellation override; defaults to the daemon bridge. */
+  stopAgent?: (agentId: string, home?: string) => Promise<DaemonReply>;
 }
 
 export type SpoolDeps = Omit<SpoolOptions, "onLog" | "pollMs">;

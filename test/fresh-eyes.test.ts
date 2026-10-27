@@ -576,7 +576,7 @@ test("v0.0.13: a CLI-lane eye that breaks the output contract is an honest faile
   assert.equal(eye.model, "pi/zai/glm-5.3");
 });
 
-test("Lead eligibility ignores a pending legacy review", async (t) => {
+test("Lead eligibility ignores legacy review state, but acceptance waits for the in-flight report", async (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);
   const { workspace, artifact } = makeWorkspaceAtBase(dir);
@@ -596,11 +596,12 @@ test("Lead eligibility ignores a pending legacy review", async (t) => {
     assert.equal(view.ownerEligible, true);
     assert.equal(view.attempts[0]!.reviewState, "pending");
     assert.throws(() => factory.setContract({ task: "REVIEW", workspace, gate: "true", artifact, freshEyes: true }), factoryErrorCode("gate-running"));
-    assert.equal((await factory.accept({ task: "REVIEW", attempt: 1, accepted_by: "lead" })).accepted_by, "lead");
+    await assert.rejects(factory.accept({ task: "REVIEW", attempt: 1, accepted_by: "lead" }), factoryErrorCode("gate-running"));
   } finally {
     complete({ code: 0, stdout: "CLEAR\nNothing to add.", stderr: "", timedOut: false });
     await claiming;
   }
+  assert.equal((await factory.accept({ task: "REVIEW", attempt: 1, accepted_by: "lead" })).accepted_by, "lead");
   assert.equal(foldTasks(factory.ledger.events)[0]!.acceptedBy, "lead");
 });
 
@@ -630,7 +631,7 @@ test("restart preserves green evidence but represents missing required review as
   assert.equal((await restarted.accept({ task: "RESTART-EYE", attempt: 1, accepted_by: "lead" })).accepted_by, "lead");
 });
 
-test("Owner may accept green evidence while required review is pending", async (t) => {
+test("Owner acceptance waits for the in-flight report even with GREEN evidence", async (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);
   const { workspace, artifact } = makeWorkspaceAtBase(dir);
@@ -645,12 +646,12 @@ test("Owner may accept green evidence while required review is pending", async (
   const claiming = factory.claim({ task: "OVERRIDE-EYE", sha: commitFix(workspace, artifact) });
   try {
     await reviewing;
-    const event = await factory.accept({ task: "OVERRIDE-EYE", attempt: 1, accepted_by: "owner", authority: "owner" });
-    assert.equal(event.accepted_by, "owner");
+    await assert.rejects(factory.accept({ task: "OVERRIDE-EYE", attempt: 1, accepted_by: "owner", authority: "owner" }), factoryErrorCode("gate-running"));
   } finally {
     complete();
     await claiming;
   }
+  assert.equal((await factory.accept({ task: "OVERRIDE-EYE", attempt: 1, accepted_by: "owner", authority: "owner" })).accepted_by, "owner");
   assert.equal(foldTasks(factory.ledger.events)[0]!.acceptedBy, "owner");
 });
 

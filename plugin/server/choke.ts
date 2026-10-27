@@ -977,7 +977,7 @@ export function startGitBlockIngestion(factory: Factory, options: GitBlockOption
       const contract = factory.liveContractFor(record.cwd);
       factory.ledger.append({
         event: "git_blocked",
-        ...(contract === undefined ? {} : { task: contract.task }),
+        ...(contract !== undefined && isContractedAgentCwd(factory, record.cwd) && !["seat-write-fence", "supervisor-git-fence", "lead-git-fence"].includes(record.rule) ? { task: contract.task } : {}),
         ...(record.agent === undefined || record.agent === "" ? {} : { agent: record.agent }),
         command: record.command,
         rule: record.rule,

@@ -1112,3 +1112,51 @@ test("ADR 0028 §5: judgeShellCommand blocks git checkout/restore working-tree d
     );
   }
 });
+
+test("coordination seats permit MCP stdio npx launches while refusing general package execution", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const workspace = join(dir, "ws");
+  mkdirSync(workspace);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  const choke = createChoke({ factory, homeDir: dir });
+  const commands = ["chrome-devtools-mcp", "@notionhq/notion-mcp-server", "@z_ai/mcp-server", "@upstash/context7-mcp", "@modelcontextprotocol/server-filesystem@latest", "mcp-demo", "demo-mcp-server"];
+  for (const seat of ["supervisor", "lead"] as const) {
+    for (const pkg of [...commands, "create-vite@latest", "tsx script.ts"]) {
+      let behavior: string | undefined;
+      await choke.onPermissionAsked({
+        agent: { id: seat, cwd: workspace, provider: "pi", labels: { seat } },
+        request: { id: pkg, provider: "pi", name: "Bash", kind: "tool", detail: { type: "shell", command: `npx -y ${pkg}`, cwd: workspace } },
+      }, { agents: { ref: () => ({ respondToPermission: async ({ response }) => { behavior = response.behavior; } }) } });
+      assert.equal(behavior, commands.includes(pkg) ? "allow" : "deny", `${seat}: ${pkg}`);
+    }
+  }
+});
+
+test("git_blocked ingestion attributes only contracted Peer worktree commands to a Task", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const workspace = join(dir, "ws");
+  const worktree = join(dir, "task-worktree");
+  mkdirSync(workspace);
+  mkdirSync(worktree);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  writeFileSync(join(workspace, "README.md"), "test");
+  gitCommitAll(workspace);
+  factory.setContract({ task: "telemetry", workspace, gate: "true" });
+  factory.requestSpawn({ task: "telemetry", provider: "pi/model", arity: 1, worktree });
+  const records = [
+    { cwd: workspace, rule: "seat-write-fence" },
+    { cwd: workspace, rule: "dangerous-git" },
+    { cwd: worktree, rule: "seat-write-fence" },
+    { cwd: worktree, rule: "supervisor-git-fence" },
+    { cwd: worktree, rule: "lead-git-fence" },
+    { cwd: worktree, rule: "dangerous-git" },
+  ].map((record, index) => ({ ...record, id: String(index), command: "blocked", reason: "test" }));
+  writeFileSync(join(factory.stateDir, "git-blocked.log"), records.map(record => JSON.stringify(record)).join("\n") + "\n");
+  startGitBlockIngestion(factory).stop();
+  startGitBlockIngestion(factory).stop();
+  const blocks = factory.ledger.events.filter(event => event.event === "git_blocked");
+  assert.equal(blocks.length, 6);
+  assert.deepEqual(blocks.map(event => event.task), [undefined, undefined, undefined, undefined, undefined, "telemetry"]);
+});

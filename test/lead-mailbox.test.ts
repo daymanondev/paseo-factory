@@ -950,6 +950,8 @@ test("completeHandoff resolves Attempt-1 working Agents via live daemon worktree
     cwd: "/tmp",
   });
 
+  await leadMail.enqueueLeadMail(slug, { from: "owner", kind: "directive", text: "Review the current Peer roster" });
+
   // Trigger handoff: turn 1 ends at 135k -> locks handing_over -> turn 2 ends -> completes handoff
   await leadMail.onLeadTurnEnded({ agentId: "agent-lead-1", outcome: { kind: "completed" }, timeline: [] });
   assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "handing_over");
@@ -1441,3 +1443,58 @@ test("Paseo 0.13.0 compatibility: completeHandoff refetches tail timeline via da
 
 
 
+
+test("handoff holds an empty mailbox for the current running Peer and combines its verdict with kickoff", async (t) => {
+  const lead: FakeAgent = { id: "agent-lead-1", status: "idle", lastUsage: { contextWindowUsedTokens: 135_000 } };
+  const { stateDir, slug, projectRoot, factory, surface, leadMail, fake } = makeSpooledRuntime(t, [lead]);
+  lead.labels = { seat: "lead", project: slug };
+  lead.cwd = projectRoot;
+  await surface.leadEnsure({ projectRoot });
+  factory.setContract({ task: "wave", workspace: readProjectRegistration(stateDir, slug)!.root!, gate: "true" });
+  const cwd = taskWorktreePath(stateDir, slug, "wave");
+  factory.requestSpawn({ task: "wave", provider: "pi/model", arity: 1, worktree: cwd });
+  const current: FakeAgent = { id: "current", status: "running", cwd, labels: { seat: "agent", project: slug, task: "wave" } };
+  const stale: FakeAgent = { id: "stale", status: "idle", cwd, labels: { seat: "agent", project: slug, task: "wave" } };
+  fake.agents.unshift(current, stale); // daemon order is newest first
+  await leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [] });
+  await leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [{ type: "assistant_message", text: "# Handoff\nWait for wave." }] });
+  const successorId = "agent-created-1";
+  assert.equal(fake.sent.filter(s => s.agentId === successorId).length, 0, "successor stays at zero context while Peer runs");
+  await leadMail.pumpProjectLead(slug);
+  assert.equal(fake.sent.filter(s => s.agentId === successorId).length, 0);
+  current.status = "idle";
+  factory.ledger.append({ event: "gate_finished", task: "wave", attempt: 1, verdict: "green", exit: 0, note: "" });
+  await leadMail.notifyPeer({ task: "wave", kind: "verdict", text: "wave GREEN" });
+  const sent = fake.sent.filter(s => s.agentId === successorId);
+  assert.equal(sent.length, 1);
+  assert.match(sent[0]!.text, /agent current \(live: running\)/);
+  assert.doesNotMatch(sent[0]!.text, /agent stale/);
+  assert.match(sent[0]!.text, /# Lead handoff/);
+  assert.match(sent[0]!.text, /wave GREEN/);
+});
+
+test("a held handoff pumps after its Peer stops even without verdict mail", async (t) => {
+  const lead: FakeAgent = { id: "lead", status: "idle", lastUsage: { contextWindowUsedTokens: 135_000 } };
+  const { stateDir, slug, projectRoot, factory, surface, leadMail, fake } = makeSpooledRuntime(t, [lead]);
+  lead.labels = { seat: "lead", project: slug };
+  lead.cwd = projectRoot;
+  await surface.leadEnsure({ projectRoot });
+  factory.setContract({ task: "wave", workspace: readProjectRegistration(stateDir, slug)!.root!, gate: "true" });
+  const peer: FakeAgent = { id: "peer", status: "initializing", cwd: taskWorktreePath(stateDir, slug, "wave"), labels: { seat: "agent", project: slug, task: "wave" } };
+  fake.agents.push(peer);
+  await leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [] });
+  await leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [] });
+  assert.equal(fake.sent.filter(s => s.agentId === "agent-created-1").length, 0);
+  peer.status = "error";
+  await leadMail.pumpProjectLead(slug);
+  assert.equal(fake.sent.filter(s => s.agentId === "agent-created-1").length, 1);
+  await leadMail.pumpProjectLead(slug);
+  assert.equal(fake.sent.filter(s => s.agentId === "agent-created-1").length, 1);
+});
+
+test("pumping an empty project without a held handoff does not create a Lead", async (t) => {
+  const { slug, leadMail, fake } = makeSpooledRuntime(t);
+  await leadMail.pumpProjectLead(slug);
+  assert.equal(fake.created.length, 0);
+  assert.equal(fake.sent.length, 0);
+});

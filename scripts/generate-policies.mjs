@@ -31,6 +31,7 @@ const targets = [
   ["src/scope-policy.ts", "plugin/bin/scope.mjs"],
   ["src/ledger-read.ts", "plugin/bin/ledger-read.mjs"],
   ["src/worktree-policy.ts", "plugin/bin/worktree-policy.mjs"],
+  ["src/mcp-launch-policy.ts", "plugin/bin/mcp-launch-policy.mjs"],
   ["src/process-policy.ts", "plugin/bin/process-policy.mjs"],
 ];
 const sections = [

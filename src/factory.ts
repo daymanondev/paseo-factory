@@ -613,6 +613,16 @@ export function createFactory(options: FactoryOptions): Factory {
           `attempt ${lastAttempt} of task ${task} is still open — wait for its verdict before claiming again`,
         );
       }
+      const completed = projectTask(fullHistory, task).attempts.findLast(
+        (entry) => !entry.open && entry.gate?.verdict === "green" &&
+          (entry.gate.sha === sha || entry.events.some(event => event.event === "claim_reported" && event.sha === sha)),
+      );
+      if (completed?.gate !== undefined) {
+        const report = completed.events.findLast((event) => event.event === "report_written");
+        if (report?.event === "report_written") {
+          return { attempt: completed.attempt, verdict: "green", gate: completed.gate, reportPath: report.path };
+        }
+      }
       if (lastAttempt >= MAX_ATTEMPTS) {
         throw new FactoryError(
           "attempt-ceiling",
@@ -790,6 +800,9 @@ export function createFactory(options: FactoryOptions): Factory {
       const contract = this.contractFor(task);
       if (contract === undefined) {
         throw new FactoryError("unknown-task", `no contract set for task ${task} — register one first`);
+      }
+      if (inFlightAttempt(history) !== undefined) {
+        throw new FactoryError("gate-running", `task ${task} has an in-flight Attempt — wait for its report before accepting`);
       }
       const events = attemptEvents(history, attempt);
       if (events.length === 0) {

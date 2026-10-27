@@ -16,6 +16,7 @@
  * Judging is mechanical: exact tokens, never substrings, so
  * `--force-with-lease`, `fetch -f`, `checkout -b` and `clean -n` stay clear.
  */
+import { isMcpStdioLaunch } from "./mcp-launch-policy.ts";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { scopeCoversFile } from "./workspace.ts";
@@ -781,7 +782,7 @@ function isPackageMutationSegment(tokens: readonly string[]): boolean {
   if (cmd === undefined) return false;
   const bin = cmd.split("/").at(-1) ?? cmd;
   const sub = words.slice(1).find((t) => !t.startsWith("-"));
-  if (bin === "npx") return true;
+  if (bin === "npx") return !isMcpStdioLaunch(words.slice(1));
   if (bin === "npm") return sub !== undefined && NPM_MUTATION_SUBCOMMANDS.has(sub);
   if (bin === "pnpm") return sub !== undefined && PNPM_MUTATION_SUBCOMMANDS.has(sub);
   if (bin === "yarn") return sub === undefined || YARN_MUTATION_SUBCOMMANDS.has(sub);

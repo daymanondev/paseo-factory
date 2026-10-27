@@ -1488,13 +1488,11 @@ test("roles: session_open re-carries PI_CODING_AGENT_DIR and keeps the harness h
   const mcp = JSON.parse(readFileSync(join(roleHome, "mcp.json"), "utf8"));
   assert.deepEqual(mcp, {
     mcpServers: {
-      "legacy-http": { url: "https://x" },
-      "stdio-ok": { command: "npx", args: ["-y", "mcp"] },
-      "modern-oauth": { url: "https://y", auth: { provider: "anthropic" } },
       paseo_factory: {
         command: process.execPath,
         args: [join(stateDir, "bin", "bridge.mjs"), "--role", "supervisor", "--state-dir", stateDir],
         exposure: "direct",
+        timeout: 600,
       },
     },
   });

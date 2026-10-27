@@ -132,6 +132,9 @@ export const TaskViewSchema = z.object({
   pendingLanding: z.boolean().optional(),
   accepted: z.boolean(),
   acceptedBy: z.string().nullable(),
+  /** Accepted evidence wins over any later anomalous Attempt. */
+  currentAttempt: z.number().optional(),
+  verdict: z.enum(["green", "red"]).optional(),
   /** The latest meter/spawn provider string, when a run ever named one. */
   lane: z.string().nullable(),
   /** The latest Peer agent id bound to this task in its current Contract epoch, when known. */

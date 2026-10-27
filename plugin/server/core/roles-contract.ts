@@ -147,7 +147,7 @@ export function renderRoleContract(role: RoleName, options: RoleContractOptions 
       "",
       ...renderSeatCommandBlock("supervisor", cmdPrefix),
       "",
-      "This instruction is additive: the repository's own AGENTS.md / CLAUDE.md, MCP servers, and skills catalog load natively alongside it — never overwrite them.",
+      "Your role-scoped MCP server is paseo_factory; external helper MCP tools belong to the working Agent. This instruction is additive: the repository's own AGENTS.md / CLAUDE.md and skills catalog load natively alongside this instruction — never overwrite them.",
       "",
       skillFooter("supervisor"),
     ].join("\n");
@@ -164,7 +164,7 @@ export function renderRoleContract(role: RoleName, options: RoleContractOptions 
       "",
       ...renderSeatCommandBlock("lead", cmdPrefix),
       "",
-      "This instruction is additive: the repository's own AGENTS.md / CLAUDE.md, MCP servers, and skills catalog load natively alongside it — never overwrite them.",
+      "Your role-scoped MCP server is paseo_factory; external helper MCP tools belong to the working Agent. This instruction is additive: the repository's own AGENTS.md / CLAUDE.md and skills catalog load natively alongside this instruction — never overwrite them.",
       "",
       skillFooter("lead"),
     ].join("\n");

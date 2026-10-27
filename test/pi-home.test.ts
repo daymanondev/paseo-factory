@@ -118,13 +118,11 @@ test("provisionPiAgentHome materializes a clean supervisor Pi harness home (v0.0
   const mcp = JSON.parse(readFileSync(join(roleHome, "mcp.json"), "utf8"));
   assert.deepEqual(mcp, {
     mcpServers: {
-      "legacy-http": { url: "https://x" },
-      "stdio-ok": { command: "npx", args: ["-y", "mcp"] },
-      "modern-oauth": { url: "https://y", auth: { provider: "anthropic" } },
       paseo_factory: {
         command: process.execPath,
         args: [join(stateDir, "bin", "bridge.mjs"), "--role", "supervisor", "--state-dir", stateDir],
         exposure: "direct",
+        timeout: 600,
       },
     },
   });
@@ -350,12 +348,11 @@ test("provisioning is idempotent and re-synchronizes mcp.json on every call (v0.
   provisionPiAgentHome({ stateDir, role: "supervisor", sourceAgentDir: source });
   assert.deepEqual(JSON.parse(readFileSync(join(second, "mcp.json"), "utf8")), {
     mcpServers: {
-      "legacy-http": { url: "https://x" },
-      added: { command: "node", args: ["server.js"] },
       paseo_factory: {
         command: process.execPath,
         args: [join(stateDir, "bin", "bridge.mjs"), "--role", "supervisor", "--state-dir", stateDir],
         exposure: "direct",
+        timeout: 600,
       },
     },
   });
@@ -369,6 +366,7 @@ test("provisioning is idempotent and re-synchronizes mcp.json on every call (v0.
         command: process.execPath,
         args: [join(stateDir, "bin", "bridge.mjs"), "--role", "supervisor", "--state-dir", stateDir],
         exposure: "direct",
+        timeout: 600,
       },
     },
   });
@@ -417,6 +415,7 @@ test("optional sources stay optional: absent stores are not linked, sessions are
         command: process.execPath,
         args: [join(stateDir, "bin", "bridge.mjs"), "--role", "lead", "--state-dir", stateDir],
         exposure: "direct",
+        timeout: 600,
       },
     },
   });
@@ -434,6 +433,7 @@ test("optional sources stay optional: absent stores are not linked, sessions are
         command: process.execPath,
         args: [join(stateDir, "bin", "bridge.mjs"), "--role", "lead", "--state-dir", stateDir],
         exposure: "direct",
+        timeout: 600,
       },
     },
   });
@@ -445,6 +445,7 @@ test("optional sources stay optional: absent stores are not linked, sessions are
         command: process.execPath,
         args: [join(stateDir, "bin", "bridge.mjs"), "--role", "lead", "--state-dir", stateDir],
         exposure: "direct",
+        timeout: 600,
       },
     },
   });
@@ -603,6 +604,7 @@ test("syncMcpJson injects zai-vision from auth.json zai.key (overriding stale ke
     args: ["-y", "@z_ai/mcp-server"],
     env: { Z_AI_API_KEY: "zai-fresh-key-999", Z_AI_MODE: "ZAI" },
     exposure: "direct",
+    timeout: 300,
   });
   assert.deepEqual(mcp.mcpServers.exa, {
     url: "https://mcp.exa.ai/mcp?exaApiKey=exa-key-123",
@@ -619,5 +621,24 @@ test("headless settings override operator high thinking without changing interac
   for (const role of ["headless", "lead", "supervisor", "agent"] as const) {
     const home = provisionPiAgentHome({ stateDir, role, sourceAgentDir: source });
     assert.equal(JSON.parse(readFileSync(join(home, "settings.json"), "utf8")).defaultThinkingLevel, role === "headless" ? "off" : "high");
+  }
+});
+
+test("coordination homes isolate MCP servers and every role sets the bridge timeout", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const source = makeFakePiAgent(dir);
+  writeFileSync(join(source, "auth.json"), JSON.stringify({ zai: { key: "test-key" } }));
+  writeFileSync(join(source, "mcp.json"), JSON.stringify({ mcpServers: { context7: { command: "npx", args: ["-y", "@upstash/context7-mcp"] } } }));
+  for (const role of ["supervisor", "lead", "agent"] as const) {
+    const home = provisionPiAgentHome({ stateDir: join(dir, "state"), role, sourceAgentDir: source });
+    const { mcpServers } = JSON.parse(readFileSync(join(home, "mcp.json"), "utf8"));
+    assert.equal(mcpServers.paseo_factory.timeout, 600);
+    if (role === "agent") {
+      assert.equal(mcpServers["zai-vision"].timeout, 300);
+      assert.ok(mcpServers.context7);
+    } else {
+      assert.deepEqual(Object.keys(mcpServers), ["paseo_factory"]);
+    }
   }
 });

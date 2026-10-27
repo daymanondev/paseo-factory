@@ -87,3 +87,20 @@ for (const wrapper of wrappers) {
     });
   }
 }
+
+test("npx shim permits MCP stdio servers for coordination seats and blocks general execution", (t) => {
+  const { executable, env, wrappedArgs } = stage(t, { name: "exec", tool: "npx", script: "exec-shim.mjs" });
+  writeFileSync(executable, `#!${process.execPath}\nconsole.log(process.argv.slice(2).join(' '));\n`, { mode: 0o755 });
+  for (const seat of ["supervisor", "lead"]) {
+    for (const pkg of ["chrome-devtools-mcp", "@notionhq/notion-mcp-server", "@z_ai/mcp-server", "@upstash/context7-mcp", "@modelcontextprotocol/server-filesystem@latest", "mcp-demo", "demo-mcp-server"]) {
+      const result = spawnSync(process.execPath, [...wrappedArgs, "-y", pkg], { env: { ...env, PASEO_FACTORY_SEAT: seat }, encoding: "utf8" });
+      assert.equal(result.status, 0, `${seat}: ${pkg}: ${result.stderr}`);
+      assert.equal(result.stdout.trim(), `-y ${pkg}`);
+    }
+    for (const args of [["create-vite@latest"], ["tsx", "script.ts"], ["-p", "chrome-devtools-mcp", "tsx"], ["chrome-devtools-mcp", "--call=touch a"], ["./chrome-devtools-mcp"]]) {
+      const result = spawnSync(process.execPath, [...wrappedArgs, ...args], { env: { ...env, PASEO_FACTORY_SEAT: seat }, encoding: "utf8" });
+      assert.equal(result.status, 126, args.join(" "));
+      assert.match(result.stderr, /seat-write-fence/);
+    }
+  }
+});

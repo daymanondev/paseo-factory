@@ -486,7 +486,9 @@ function projectTask(events, task) {
   });
   const dispatch = epoch.findLast((event) => event.event === "spawn_dispatched" || event.event === "respawn_dispatched");
   const status = acceptance !== void 0 ? "accepted" : needsHuman ? "needs-human" : attempts.some((attempt) => attempt.open) || dispatch !== void 0 && dispatch.seq > (latestGate?.seq ?? -1) ? "running" : numbers.length === 0 ? "waiting" : latestGate?.verdict === "green" ? "ready-to-accept" : "red";
-  return { task, history, contract, epochSeq, epochId, epoch, attempts, acceptance, settled, pendingLanding: acceptance?.landing === "pending-conflict", needsHuman, needs: needsHuman ? needs : void 0, status, maxAttempt: numbers.at(-1) ?? 0, inFlightAttempt: attempts.find((attempt) => attempt.open)?.attempt };
+  const currentAttempt = acceptance === void 0 ? attempts.at(-1) : attempts.find((entry) => entry.attempt === acceptance.attempt);
+  const verdict = acceptance === void 0 ? currentAttempt?.gate?.verdict : "green";
+  return { currentAttempt, verdict, task, history, contract, epochSeq, epochId, epoch, attempts, acceptance, settled, pendingLanding: acceptance?.landing === "pending-conflict", needsHuman, needs: needsHuman ? needs : void 0, status, maxAttempt: numbers.at(-1) ?? 0, inFlightAttempt: attempts.find((attempt) => attempt.open)?.attempt };
 }
 
 // src/history-import.ts
@@ -2165,7 +2167,7 @@ function renderRoleContract(role, options = {}) {
       "",
       ...renderSeatCommandBlock("supervisor", cmdPrefix),
       "",
-      "This instruction is additive: the repository's own AGENTS.md / CLAUDE.md, MCP servers, and skills catalog load natively alongside it \u2014 never overwrite them.",
+      "Your role-scoped MCP server is paseo_factory; external helper MCP tools belong to the working Agent. This instruction is additive: the repository's own AGENTS.md / CLAUDE.md and skills catalog load natively alongside this instruction \u2014 never overwrite them.",
       "",
       skillFooter("supervisor")
     ].join("\n");
@@ -2181,7 +2183,7 @@ function renderRoleContract(role, options = {}) {
       "",
       ...renderSeatCommandBlock("lead", cmdPrefix),
       "",
-      "This instruction is additive: the repository's own AGENTS.md / CLAUDE.md, MCP servers, and skills catalog load natively alongside it \u2014 never overwrite them.",
+      "Your role-scoped MCP server is paseo_factory; external helper MCP tools belong to the working Agent. This instruction is additive: the repository's own AGENTS.md / CLAUDE.md and skills catalog load natively alongside this instruction \u2014 never overwrite them.",
       "",
       skillFooter("lead")
     ].join("\n");

@@ -1158,3 +1158,84 @@ test("Seam 2: resolvePeerSpawnProvider returns Project B's worker lane directly 
   assert.equal(createdConfigs.at(-1)?.provider, "claude/claude-sonnet-4-6");
   assert.equal(createdConfigs.at(-1)?.thinkingOptionId, "high", "the worker lane's :thinking rides the resolved provider");
 });
+
+test("spool enforces one live Peer per Task and retires peers on re-contract", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const workspace = join(dir, "ws");
+  mkdirSync(workspace);
+  writeFileSync(join(workspace, "a"), "a");
+  gitCommitAll(workspace);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  factory.setContract({ task: "solo", workspace, gate: "true" });
+  const project = resolveProject(workspace);
+  assert.ok(project.ok);
+  const peers = [{ id: "old", status: "running", archivedAt: null as string | null, cwd: workspace, labels: { seat: "agent", task: "solo", project: project.slug }, provider: "pi" }];
+  const actions: string[] = [];
+  const daemon = { agents: {
+    list: async () => ({ entries: peers.filter(p => p.archivedAt === null).map(agent => ({ agent })) }),
+    create: async () => { actions.push("create"); return { id: "new" }; },
+    ref: (id: string) => ({ archive: async () => { actions.push(`archive:${id}`); peers[0]!.archivedAt = "now"; return { archivedAt: "now" }; } }),
+  } } as unknown as import("../plugin/server/surface-rpc.ts").SurfaceDaemonApi;
+  const deps = { daemon, stopAgent: async (id: string) => { actions.push(`stop:${id}`); return { ok: true as const }; } };
+  const spawn = { id: "s", kind: "spawn" as const, task: "solo", provider: "pi/model", arity: 1, prompt: "work" };
+  for (const status of ["running", "initializing"]) {
+    peers[0]!.status = status;
+    const refused = await handleSpoolRequest(factory, spawn, deps);
+    assert.equal(refused.ok, false);
+    if (!refused.ok) assert.equal(refused.code, "peer-already-running");
+  }
+  assert.deepEqual(actions, []);
+  assert.equal(factory.ledger.events.filter(e => e.event === "spawn_refused").length, 2);
+  peers[0]!.status = "idle";
+  assert.equal((await handleSpoolRequest(factory, spawn, deps)).ok, true);
+  assert.deepEqual(actions, ["stop:old", "archive:old", "create"]);
+  actions.length = 0;
+  peers[0]!.archivedAt = null;
+  peers[0]!.status = "error";
+  assert.equal((await handleSpoolRequest(factory, spawn, deps)).ok, true);
+  assert.deepEqual(actions, ["stop:old", "archive:old", "create"]);
+  actions.length = 0;
+  peers[0]!.archivedAt = null;
+  const failed = await handleSpoolRequest(factory, spawn, { ...deps, stopAgent: async () => ({ ok: false as const, reason: "cannot stop" }) });
+  assert.equal(failed.ok, false);
+  if (!failed.ok) assert.equal(failed.code, "peer-stop-failed");
+  assert.deepEqual(actions, [], "a failed cancellation must not archive or replace the Peer");
+  peers[0]!.status = "running";
+  const reply = await handleSpoolRequest(factory, { id: "c", kind: "contract", task: "solo", workspace, gate: "true", submitter: "owner" }, deps);
+  assert.equal(reply.ok, true);
+  assert.deepEqual(actions, ["stop:old", "archive:old"]);
+});
+
+test("concurrent distinct Spawn requests cannot create two Peers in one worktree", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const workspace = join(dir, "ws");
+  mkdirSync(workspace);
+  writeFileSync(join(workspace, "a"), "a");
+  gitCommitAll(workspace);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  factory.setContract({ task: "race", workspace, gate: "true" });
+  const project = resolveProject(workspace);
+  assert.ok(project.ok);
+  const peers: import("../plugin/server/surface-rpc.ts").SurfaceAgentSnapshot[] = [];
+  let created = 0;
+  const daemon = { agents: {
+    list: async () => ({ entries: peers.map(agent => ({ agent })) }),
+    create: async () => {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      const id = `peer-${++created}`;
+      peers.push({ id, archivedAt: null, status: "running", cwd: workspace, provider: "pi", labels: { seat: "agent", project: project.slug, task: "race" }, title: null, model: null, requiresAttention: false, attentionReason: null, updatedAt: new Date().toISOString() });
+      return { id };
+    },
+  } } as unknown as import("../plugin/server/surface-rpc.ts").SurfaceDaemonApi;
+  const request = { id: "s", kind: "spawn" as const, task: "race", provider: "pi/model", arity: 1, prompt: "first" };
+  const replies = await Promise.all([
+    handleSpoolRequest(factory, request, { daemon }),
+    handleSpoolRequest(factory, { ...request, id: "s2", prompt: "different" }, { daemon }),
+  ]);
+  assert.deepEqual(replies.map(reply => reply.ok), [true, false]);
+  assert.equal(created, 1);
+  const refusal = factory.ledger.events.find(event => event.event === "spawn_refused");
+  assert.equal(refusal?.reason, "peer-already-running");
+});

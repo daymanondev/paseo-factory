@@ -50,5 +50,7 @@ export function projectTask(events: readonly LedgerEvent[], task: string) {
   });
   const dispatch = epoch.findLast((event) => event.event === "spawn_dispatched" || event.event === "respawn_dispatched");
   const status: TaskStateStatus = acceptance !== undefined ? "accepted" : needsHuman ? "needs-human" : attempts.some((attempt) => attempt.open) || (dispatch !== undefined && dispatch.seq > (latestGate?.seq ?? -1)) ? "running" : numbers.length === 0 ? "waiting" : latestGate?.verdict === "green" ? "ready-to-accept" : "red";
-  return { task, history, contract, epochSeq, epochId, epoch, attempts, acceptance, settled, pendingLanding: acceptance?.landing === "pending-conflict", needsHuman, needs: needsHuman ? needs : undefined, status, maxAttempt: numbers.at(-1) ?? 0, inFlightAttempt: attempts.find((attempt) => attempt.open)?.attempt };
+  const currentAttempt = acceptance === undefined ? attempts.at(-1) : attempts.find((entry) => entry.attempt === acceptance.attempt);
+  const verdict = acceptance === undefined ? currentAttempt?.gate?.verdict : "green";
+  return { currentAttempt, verdict, task, history, contract, epochSeq, epochId, epoch, attempts, acceptance, settled, pendingLanding: acceptance?.landing === "pending-conflict", needsHuman, needs: needsHuman ? needs : undefined, status, maxAttempt: numbers.at(-1) ?? 0, inFlightAttempt: attempts.find((attempt) => attempt.open)?.attempt };
 }
