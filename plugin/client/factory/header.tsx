@@ -1,3 +1,4 @@
+import { ExecutionSelector } from "./scrum.tsx";
 /**
  * The persistent Project-centered header (v0.0.35, ADR 0025, amending ADR 0009 §2
  * and ADR 0014 §1): plain-language headline, freshness dot, and the prominent
@@ -24,6 +25,7 @@ export type { VaultActName, VaultImportInput, VaultNote, VaultSyncInput };
 
 /** The header's whole action surface — the Shell owns the RPC calls. */
 export interface HeaderActions {
+  setMode?(mode: "slp" | "scrum"): void;
   /** Jump to the live Supervisor's conversation (v0.0.27, ADR 0017 §3) — the seat itself starts from Paseo's native New Chat picker, never here. */
   openSupervisor(): void;
   /** Jump to the live Lead's conversation — the Supervisor spawns the seat via supervisor_dispatch_lead. */
@@ -143,6 +145,7 @@ export function Header({
 
   return (
     <View style={{ gap: SPACING[3] }}>
+      <ExecutionSelector theme={theme} view={view} setMode={actions.setMode} busy={actions.busy} />
       {/* Top status bar: Headline + Freshness */}
       <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: SPACING[2] }}>
         <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[2], flexShrink: 1 }}>

@@ -20,7 +20,7 @@ import { ScrollView, useToast } from "@getpaseo/plugin/client/ui";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Text, View } from "react-native";
 import { z } from "zod";
-import { accept, lanesReset, lanesSet, lanesSetBatch, leadRotate, pluginsInstall, pluginsManage, pluginsCheckUpdates, profilesApply, profilesDelete, profilesSave, projectAdd, projectDelete, projectPickFolder, projectReset, ratifyProposal, retro, snapshot, supervisorRevoke, taskDetail, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
+import { accept, executionSetMode, scrumCommand, lanesReset, lanesSet, lanesSetBatch, leadRotate, pluginsInstall, pluginsManage, pluginsCheckUpdates, profilesApply, profilesDelete, profilesSave, projectAdd, projectDelete, projectPickFolder, projectReset, ratifyProposal, retro, snapshot, supervisorRevoke, taskDetail, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
 import type { ManageablePluginId } from "../../shared/companions.ts";
 import type { FactoryView, LaneName } from "../../shared/view.ts";
 import { Card, TabBar } from "../kit/pill.tsx";
@@ -75,6 +75,8 @@ export function FactoryShell({
   panelTab?: PluginTab;
 }) {
   const toast = useToast();
+  const executionSetModeCall = useRpc(executionSetMode);
+  const scrumCommandCall = useRpc(scrumCommand);
   const snapshotCall = useRpc(snapshot);
   const acceptCall = useRpc(accept);
   const retroCall = useRpc(retro);
@@ -409,6 +411,7 @@ export function FactoryShell({
           now={now}
           compact={isCompact}
           actions={{
+            setMode: mode => { void act("Execution mode", () => executionSetModeCall({ mode, projectRoot })); },
             openSupervisor,
             openLead,
             resetProject,
@@ -470,6 +473,12 @@ export function FactoryShell({
             view={view}
             modelSyncNote={laneNote}
             actions={{
+              setMode: mode => { void act("Execution mode", () => executionSetModeCall({ mode, projectRoot })); },
+              scrum: async (operation, payload, runId, expectedRevision) => {
+                const reply = await scrumCommandCall({ operation, payload, runId, expectedRevision, projectRoot, requestId: `ui-${Date.now()}-${Math.random().toString(36).slice(2)}` });
+                await act(`Scrum ${operation}`, async () => reply);
+                return reply;
+              },
               busy,
               openAgent: (agentId) => navigation?.openAgent({ agentId, serverId }),
               revokeSupervisor: () => {

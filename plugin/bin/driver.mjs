@@ -1301,7 +1301,7 @@ async function submitMeter(spoolRoot, entry, provider, log) {
  * meter is a recorder and never re-judges a green run. Exit 0 iff every task
  * ended green and nothing was refused or failed along the way; else exit 2.
  */
-export async function runDriver({ home, stateDir, spoolRoot, tasks, provider, waitSecs = 60, pollMs = POLL_MS, staggerMs = STAGGER_MS, log = (m) => console.log(m) }) {
+export async function runDriver({ runId, role, providerExplicit, home, stateDir, spoolRoot, tasks, provider, waitSecs = 60, pollMs = POLL_MS, staggerMs = STAGGER_MS, log = (m) => console.log(m) }) {
   // These change spawn routing when the driver itself runs under an agent —
   // the driver spawns as itself, never as somebody's child (scout §a caveat).
   delete process.env.PASEO_AGENT_ID;
@@ -1373,6 +1373,9 @@ export async function runDriver({ home, stateDir, spoolRoot, tasks, provider, wa
     const request = stampDriverRequest({
       id: randomId(),
       kind: "spawn",
+      ...(runId === undefined ? {} : { runId }),
+      ...(role === undefined ? {} : { role }),
+      ...(providerExplicit === undefined ? {} : { providerExplicit }),
       task,
       provider,
       arity: tasks.length,

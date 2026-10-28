@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Opt-in Project Scrum execution with separate rosters/profiles, frozen run configuration, specialist Contract bindings and Project/run/epoch-scoped harnesses.
+- Durable run decisions, semantic readiness and digest-bound UI approval with an isolated accepted mockup preview.
+- Structural Scrum document linting, QA regression bundles, unchanged-test promotion, bounded fix reservations and a product completion check separate from GREEN Task acceptance.
+- Factory execution selector and eight-role Scrum roster; CLI/RPC configuration, run and decision operations, optional Vault entries and scoped cleanup.
+
 ## [0.0.51] - 2026-10-27
 
 Harden Claim retries, single-Peer execution, Lead handoff, and role-scoped MCP isolation.

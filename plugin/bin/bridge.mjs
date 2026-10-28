@@ -384,6 +384,23 @@ __export(ledger_validation_exports, {
 });
 module.exports = __toCommonJS(ledger_validation_exports);
 
+// src/scrum/types.ts
+var SPECIALIST_ROLES = ["pm", "ux", "architect", "dev", "qa"];
+function safeId(value) {
+  return typeof value === "string" && /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(value) && value !== "..";
+}
+function safePath(value) {
+  return typeof value === "string" && value.length > 0 && !value.includes("\\") && !value.includes("\0") && value.split("/").every((p) => p !== "" && p !== "." && p !== "..");
+}
+function artifactRefIsValid(value) {
+  const v = value;
+  return !!v && safePath(v.path) && /^[a-f0-9]{40}$/.test(v.commit) && /^[a-f0-9]{64}$/.test(v.sha256);
+}
+function scrumBindingIsValid(value) {
+  const v = value;
+  return !!v && v.mode === "scrum" && safeId(v.runId) && SPECIALIST_ROLES.includes(v.role) && typeof v.policyRevision === "string" && v.policyRevision.length > 0 && Number.isSafeInteger(v.configRevision) && v.configRevision >= 0 && Array.isArray(v.artifactRefs) && v.artifactRefs.every(artifactRefIsValid);
+}
+
 // src/events.ts
 var EVENT_NAMES = [
   "ledger_schema",
@@ -434,7 +451,7 @@ function needsHumanEvidenceIsValid(evidence, reason) {
 function isValidLedgerEvent(value) {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const event = value;
-  return (event.schema_version === void 0 || event.schema_version === 1 || event.schema_version === 2) && (event.schema_version !== 2 || identityMetadataIsValid(event)) && Number.isSafeInteger(event.seq) && event.seq > 0 && typeof event.ts === "string" && (event.schema_version !== 2 || utcTimestampIsValid(event.ts)) && typeof event.event === "string" && EVENT_NAMES.includes(event.event) && shapeIsValid(value) && (event.schema_version !== 2 || v2PayloadIsValid(event));
+  return (event.schema_version === void 0 || event.schema_version === 1 || event.schema_version === 2) && (event.schema_version !== 2 || identityMetadataIsValid(event)) && Number.isSafeInteger(event.seq) && event.seq > 0 && typeof event.ts === "string" && (event.schema_version !== 2 || utcTimestampIsValid(event.ts)) && typeof event.event === "string" && EVENT_NAMES.includes(event.event) && (event.event !== "contract_set" || event.execution === void 0 || scrumBindingIsValid(event.execution)) && shapeIsValid(value) && (event.schema_version !== 2 || v2PayloadIsValid(event));
 }
 function utcTimestampIsValid(value) {
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|\+00:?00)$/.test(value)) return false;
@@ -574,7 +591,7 @@ function v2PayloadIsValid(event) {
     case "ledger_schema":
       return true;
     case "contract_set":
-      return string("workspace") && string("gate") && string("artifact") && strings("scope") && strings("skills") && optionalString("base") && optionalString("description") && optionalString("by") && (event.freshEyes === void 0 || event.freshEyes === true) && (event.watch === void 0 || event.watch === true);
+      return (event.execution === void 0 || scrumBindingIsValid(event.execution)) && string("workspace") && string("gate") && string("artifact") && strings("scope") && strings("skills") && optionalString("base") && optionalString("description") && optionalString("by") && (event.freshEyes === void 0 || event.freshEyes === true) && (event.watch === void 0 || event.watch === true);
     case "claim_reported":
       return string("sha") && optionalString("agent");
     case "gate_started":
@@ -1016,6 +1033,8 @@ const TOOL_DEFINITIONS = {
     inputSchema: {
       type: "object",
       properties: {
+        runId: { type: "string", description: "Explicit Scrum run binding; omitted for SLP." },
+        scrum: { type: "object", description: "New Scrum admission: initiativeId, track (small/backend/ui), rationale, ownedPaths, optional finite budgets." },
         message: { type: "string", description: "The directive text for Lead." },
         workspace: { type: "string", description: "Optional Project root path (defaults to current project root)." },
       },
@@ -1042,6 +1061,9 @@ const TOOL_DEFINITIONS = {
     inputSchema: {
       type: "object",
       properties: {
+        runId: { type: "string", description: "Explicit Scrum run binding; omitted for SLP." },
+        role: { type: "string", enum: ["pm", "ux", "architect", "dev", "qa"], description: "Scrum specialization; assertion only when spawning." },
+        artifactRefs: { type: "array", items: { type: "object" }, description: "Exact landed upstream artifact path/commit/sha256 references." },
         task: { type: "string", description: "Unique Task ID (letters, digits, '.', '_', '-')." },
         gate: { type: "string", description: "Gate command to verify the Task's outcome and regression invariants." },
         artifact: { type: "string", description: "Optional workspace-relative deliverable file path that must exist and be non-empty when specified." },
@@ -1065,6 +1087,8 @@ const TOOL_DEFINITIONS = {
     inputSchema: {
       type: "object",
       properties: {
+        runId: { type: "string", description: "Explicit Scrum run binding; omitted for SLP." },
+        role: { type: "string", enum: ["pm", "ux", "architect", "dev", "qa"], description: "Scrum specialization; assertion only when spawning." },
         tasks: {
           type: "array",
           items: { type: "string" },
@@ -1137,6 +1161,9 @@ const TOOL_DEFINITIONS = {
     inputSchema: {
       type: "object",
       properties: {
+        runId: { type: "string", description: "Explicit Scrum run binding; omitted for SLP." },
+        reportType: { type: "string", enum: ["ui-review", "completed"] },
+        scrum: { type: "object", description: "Structured runId, designRevision/digest for UI review." },
         message: { type: "string", description: "Report message for Supervisor." },
         workspace: { type: "string", description: "Optional Project root path." },
       },
@@ -1276,6 +1303,8 @@ async function handleToolCall(name, rawArgs) {
     const reply = await roundTripSpool(ctx, {
       id: randomId(),
       kind: "lead_dispatch",
+      ...(args.runId === undefined ? {} : { runId: args.runId }),
+      ...(args.scrum === undefined ? {} : { scrum: args.scrum }),
       ...(workspace ? { workspace } : ctx.projectSlug ? { project: ctx.projectSlug } : {}),
       from: "supervisor",
       message,
@@ -1337,6 +1366,9 @@ async function handleToolCall(name, rawArgs) {
     const reply = await roundTripSpool(ctx, {
       id: randomId(),
       kind: "contract",
+      ...(args.runId === undefined ? {} : { runId: args.runId }),
+      ...(args.role === undefined ? {} : { role: args.role }),
+      ...(args.artifactRefs === undefined ? {} : { artifactRefs: args.artifactRefs }),
       task,
       workspace,
       gate,
@@ -1421,7 +1453,9 @@ async function handleToolCall(name, rawArgs) {
           ctx.home,
           "run",
           ...tasks,
-          ...(provider ? ["--provider", provider] : []),
+          ...(rawProvider ? ["--provider", provider] : []),
+          ...(args.runId === undefined ? [] : ["--run", args.runId]),
+          ...(args.role === undefined ? [] : ["--role", args.role]),
         ],
         {
           cwd: ctx.projectRoot ?? ctx.workspace,
@@ -1468,6 +1502,7 @@ async function handleToolCall(name, rawArgs) {
         if (evt.event === "contract_set" && evt.task === task) contract = evt;
       }
       let worktree;
+      if (args.runId !== undefined && contract?.execution?.runId !== args.runId || args.role !== undefined && contract?.execution?.role !== args.role) return toolResult("task-execution-mismatch: spawn assertions disagree with persisted Contract", true);
       if (contract) {
         const prep = allocateTaskWorktree(ctx.stateDir, contract, task, events);
         if (!prep.ok) {
@@ -1501,6 +1536,9 @@ async function handleToolCall(name, rawArgs) {
       const reply = await roundTripSpool(ctx, {
         id: randomId(),
         kind: "spawn",
+        ...(args.runId === undefined ? {} : { runId: args.runId }),
+        ...(args.role === undefined ? {} : { role: args.role }),
+        providerExplicit: rawProvider !== "",
         task,
         provider,
         arity: tasks.length,
@@ -1639,6 +1677,8 @@ async function handleToolCall(name, rawArgs) {
     const reply = await roundTripSpool(ctx, {
       id: randomId(),
       kind: "supervisor_report",
+      ...(args.reportType === undefined ? {} : { reportType: args.reportType }),
+      ...(args.scrum === undefined ? {} : { scrum: args.scrum }),
       ...(workspace ? { workspace } : ctx.projectSlug ? { project: ctx.projectSlug } : {}),
       message,
       seat: "lead",
@@ -1696,6 +1736,7 @@ async function handleToolCall(name, rawArgs) {
     const reply = await roundTripSpool(ctx, {
       id: randomId(),
       kind: "lead_dispatch",
+      ...(ctx.task ? { task: ctx.task } : {}),
       ...(workspace ? { workspace } : ctx.projectSlug ? { project: ctx.projectSlug } : {}),
       from: "peer",
       message: `${prefix}${message}`,

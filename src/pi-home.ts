@@ -55,6 +55,8 @@ export interface ProvisionPiHomeOptions {
   /** The factory state directory — the harness home is materialized at `<stateDir>/pi-agent/<role>`. */
   stateDir: string;
   role: PiAgentRole;
+  /** Explicit isolated destination for opt-in execution adapters. */
+  roleHome?: string;
   /**
    * The operator's Pi agent home the shared-state symlinks point back at.
    * Default `<homedir>/.pi/agent`; hermetic tests pass a temp directory and
@@ -135,7 +137,7 @@ export function isElectronNodeBinary(execPath: string): boolean {
  */
 export function provisionPiAgentHome(input: ProvisionPiHomeOptions): string {
   const sourceAgentDir = input.sourceAgentDir ?? join(homedir(), ".pi", "agent");
-  const roleHome = join(input.stateDir, "pi-agent", input.role);
+  const roleHome = input.roleHome ?? join(input.stateDir, "pi-agent", input.role);
   mkdirSync(roleHome, { recursive: true });
   for (const forbidden of FORBIDDEN_NAMES) {
     // v0.0.38, ADR 0026 §1 — the sweep must never churn a symlink the same

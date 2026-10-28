@@ -5769,3 +5769,20 @@ test("sweepProjectWorkspaces: keepWorkspaceIds preserves an opening Supervisor s
   assert.ok(capturedKeepIds[0]!.includes("wks_old_sup"));
 });
 
+
+test("execution mode refuses pending Tasks/mail and isolates Scrum snapshot failures", async t => {
+  const { handlers, factory, stateDir } = makeSurface(t);
+  const project = makeProject(t, "mode-project");
+  factory.setContract({ task: "unfinished", workspace: project.root, gate: "true" });
+  const busy = await handlers.executionSetMode({ projectRoot: project.root, mode: "scrum" });
+  assert.equal(busy.ok, false); if (!busy.ok) { assert.equal(busy.code, "execution-mode-busy"); assert.match(busy.error, /unfinished/); }
+  assert.equal(existsSync(join(stateDir, "projects", project.slug, "scrum-lanes.json")), false);
+  const other = makeProject(t, "scrum-project");
+  const switched = await handlers.executionSetMode({ projectRoot: other.root, mode: "scrum" });
+  assert.equal(switched.ok, true, JSON.stringify(switched));
+  writeFileSync(join(stateDir, "projects", other.slug, "scrum-lanes.json"), "broken");
+  const broken = await handlers.snapshot({ projectRoot: other.root });
+  assert.equal(broken.ok, true); if (broken.ok) assert.match(broken.view.execution?.error ?? "", /scrum-config-invalid/);
+  const slp = await handlers.snapshot({ projectRoot: project.root });
+  assert.equal(slp.ok, true); if (slp.ok) assert.equal(slp.view.execution?.selectedMode, "slp");
+});

@@ -209,6 +209,7 @@ export default function contribute(server: PluginServerContext) {
   // pipeline the spool's lead_dispatch rides.
   const surface = createSurfaceHandlers({
     ...surfaceDeps,
+    handoffPending: slug => leadMail.hasPendingHandoff(slug),
     onLeadRetired: (input) => leadMail.settleLeadRotation(input.slug),
     onSeatKickoffSent: (input) => leadMail.markKickoffSent(input.agentId),
     resetProjectMailbox: (slug) => leadMail.resetProjectMailbox(slug),
@@ -334,6 +335,14 @@ export default function contribute(server: PluginServerContext) {
             code: reply.code,
             message: reply.error,
           };
+    },
+    executionSetMode: async request => {
+      const reply = await surface.executionSetMode(request, { paseo: paseoApi as never });
+      return reply.ok ? { id: request.id, ok: true, summary: "execution selection saved", data: reply.data } : { id: request.id, ok: false, code: reply.code, message: reply.error };
+    },
+    scrumCommand: async (request, caller) => {
+      const reply = await surface.scrumCommand(request, { paseo: paseoApi as never }, caller);
+      return reply.ok ? { id: request.id, ok: true, summary: `Scrum ${request.operation}`, data: reply.data } : { id: request.id, ok: false, code: reply.code, message: reply.error };
     },
     peerMail: leadMail.notifyPeer,
     daemon: () => paseoApi as never,

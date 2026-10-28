@@ -10,7 +10,7 @@
  *   node scripts/sync-plugin-core.mjs --check  exit 1 if out of sync, copy nothing
  */
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -20,8 +20,15 @@ const check = process.argv.includes("--check");
 
 if (!check) mkdirSync(coreDir, { recursive: true });
 
-const sources = readdirSync(srcDir).filter((name) => name.endsWith(".ts"));
-const copies = existsSync(coreDir) ? readdirSync(coreDir).filter((name) => name.endsWith(".ts")) : [];
+function modules(root, prefix = "") {
+  if (!existsSync(root)) return [];
+  return readdirSync(root, { withFileTypes: true }).flatMap(entry => {
+    const name = prefix + entry.name;
+    return entry.isDirectory() ? modules(join(root, entry.name), name + "/") : entry.isFile() && name.endsWith(".ts") ? [name] : [];
+  }).sort();
+}
+const sources = modules(srcDir);
+const copies = modules(coreDir);
 const problems = [];
 
 for (const name of sources) {
@@ -29,7 +36,7 @@ for (const name of sources) {
   const target = join(coreDir, name);
   if (!existsSync(target) || readFileSync(target, "utf8") !== source) {
     problems.push(name);
-    if (!check) writeFileSync(target, source);
+    if (!check) { mkdirSync(dirname(target), { recursive: true }); writeFileSync(target, source); }
   }
 }
 

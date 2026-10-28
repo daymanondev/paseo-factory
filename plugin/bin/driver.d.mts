@@ -162,6 +162,9 @@ export declare function observeTasks(
 ): Promise<void>;
 
 export interface RunDriverInput {
+  runId?: string;
+  role?: string;
+  providerExplicit?: boolean;
   home: string;
   stateDir: string;
   spoolRoot: string;

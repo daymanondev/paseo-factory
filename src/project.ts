@@ -1,3 +1,4 @@
+import { registerExecutionSelection } from "./scrum/selection.ts";
 /**
  * The canonical Project identity (v0.0.14, ADR 0010 §1/§5): any directory
  * inside a Git repository resolves to ONE Project — `root` (the top-level
@@ -453,6 +454,7 @@ export function ensureProjectRegistered(
         };
   if (!resolved.ok) return resolved;
   const existing = readProjectRegistration(stateDir, resolved.slug);
+  if (existing === undefined) registerExecutionSelection(stateDir, resolved.slug);
   const name =
     (typeof cwdOrProject === "object" && typeof cwdOrProject.name === "string" && cwdOrProject.name !== ""
       ? cwdOrProject.name

@@ -1,3 +1,8 @@
+import { bindScrumDirective, bindScrumBlocker } from "./scrum.ts";
+import { withExecutionLane } from "./core/scrum/execution.ts";
+import { readExecution } from "./core/scrum/config.ts";
+import { readRun, listRuns, terminalRun } from "./core/scrum/run-journal.ts";
+import { renderScrumPrompt } from "./core/scrum/prompts.ts";
 /**
  * The Lead mailbox runtime (v0.0.20, ADR 0013 Decisions 3–5): the plugin-side
  * single writer around one `<projectStateDir>/mailbox.jsonl` per Project. The
@@ -238,6 +243,7 @@ export interface LeadMailRuntimeDeps {
 
 /** One runtime's public face — see the module doc for each member's law. */
 export interface LeadMailRuntime {
+  hasPendingHandoff(slug: string): boolean;
   dispatchLead(request: SpoolLeadDispatchRequest): Promise<SpoolReply>;
   dispatchSupervisor(request: SpoolSupervisorDispatchRequest): Promise<SpoolReply>;
   reportSupervisor(request: SpoolSupervisorReportRequest): Promise<SpoolReply>;
@@ -332,7 +338,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
 
   const projectLane = <T>(slug: string, run: () => Promise<T>): Promise<T> => {
     const prior = lanes.get(slug) ?? Promise.resolve();
-    const admitted = () => deps.factory.history.runOperation(run);
+    const admitted = () => withExecutionLane(deps.stateDir, slug, () => deps.factory.history.runOperation(run));
     const job = prior.then(admitted, admitted);
     lanes.set(
       slug,
@@ -480,7 +486,9 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     if (kickoffSentAgentIds.has(agent.id)) return prompt;
     const reg = readProjectRegistration(deps.stateDir, slug);
     const loadedLanes = loadLanes(deps.stateDir, slug);
-    const kickoff = buildSeatKickoffPacket({
+    const selection = readExecution(deps.stateDir, slug);
+    const activeRun = selection.mode === "scrum" ? listRuns(deps.stateDir, slug).find(r => !terminalRun(r)) : undefined;
+    const kickoff = selection.mode === "scrum" ? renderScrumPrompt(role, { project: slug, runId: activeRun?.runId }) + `\nLive Scrum state: ${JSON.stringify(activeRun ?? { phase: "idle" })}\n` : buildSeatKickoffPacket({
       role,
       projectSlug: slug,
       projectRoot: reg?.root ?? agent.cwd ?? "",
@@ -1026,11 +1034,12 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     const laneOutcome = await projectLane(
       slug,
       async (): Promise<{ ok: true; agentId: string; mailId: string } | { ok: false; code: string; error: string }> => {
+        const bound = request.from === "peer" ? bindScrumBlocker(deps.factory, slug, request) : bindScrumDirective(deps.factory, root, slug, request);
         const ensured = await deps.ensureLead({ projectRoot: root });
         if (!ensured.ok) return ensured;
         const from = request.from ?? "owner";
         const kind = from === "peer" ? "needs_human" : "directive";
-        const queued = appendMailQueued(mailboxPath(slug), { from, kind, text: request.message });
+        const queued = appendMailQueued(mailboxPath(slug), { ...(bound.execution === undefined ? {} : { requestId: request.id }), from, kind, text: bound.packet ? `${bound.packet}\n${request.message}` : request.message, ...(bound.execution === undefined ? {} : { execution: bound.execution }) });
         return { ok: true, agentId: ensured.agentId, mailId: queued.mailId };
       },
     );
@@ -1065,6 +1074,8 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       const leadReply = await dispatchLead({
         id: request.id,
         kind: "lead_dispatch",
+        ...(request.runId === undefined ? {} : { runId: request.runId }),
+        ...(request.scrum === undefined ? {} : { scrum: request.scrum }),
         ...(request.project === undefined ? {} : { project: request.project }),
         ...(request.workspace === undefined ? {} : { workspace: request.workspace }),
         from: "supervisor",
@@ -1134,6 +1145,12 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     const target = resolveTargetProject(request, "supervisor report");
     if (!target.ok) return target;
     const { root, slug } = target;
+    if (request.reportType !== undefined) {
+      if (readExecution(deps.stateDir, slug).mode !== "scrum" || typeof request.scrum?.runId !== "string") return { id: request.id, ok: false, code: "execution-mode-mismatch", message: "structured Scrum report needs explicit Scrum run" };
+      const run = readRun(deps.stateDir, slug, request.scrum.runId);
+      if (request.reportType === "completed" && run.phase !== "completed") return { id: request.id, ok: false, code: "scrum-completion-blocked", message: "run controller has not verified completion" };
+      if (request.reportType === "ui-review" && (!run.design || run.design.digest !== request.scrum.digest || run.design.revision !== request.scrum.designRevision)) return { id: request.id, ok: false, code: "stale-design-decision", message: "report must pin current design digest and revision" };
+    }
     const laneOutcome = await projectLane(
       slug,
       async (): Promise<{ ok: true; agentId: string; mailId: string } | { ok: false; code: string; error: string }> => {
@@ -1143,6 +1160,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
           to: "supervisor",
           from: "lead",
           kind: "report",
+          ...(request.reportType === undefined ? {} : { reportType: request.reportType, scrum: request.scrum, requestId: request.id }),
           text: request.message,
         });
         return { ok: true, agentId: ensured.agentId, mailId: queued.mailId };
@@ -1282,6 +1300,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   };
 
   const runtime: LeadMailRuntime = {
+    hasPendingHandoff: slug => { const id = readProjectRegistration(deps.stateDir, slug)?.lead; return id !== undefined && pendingHandoffByAgentId.has(id); },
     dispatchLead,
     dispatchSupervisor,
     reportSupervisor,
@@ -1297,7 +1316,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     markKickoffSent,
     stop,
   };
-  const sync = new Set(["startupRecovery", "settleLeadRotation", "resetProjectMailbox", "markKickoffSent"]);
+  const sync = new Set(["startupRecovery", "settleLeadRotation", "resetProjectMailbox", "markKickoffSent", "hasPendingHandoff"]);
   return new Proxy(runtime, { get(target, key, receiver) {
     const value = Reflect.get(target, key, receiver);
     if (typeof value !== "function" || key === "stop") return value;

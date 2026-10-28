@@ -65,11 +65,28 @@ function needsHumanEvidenceIsValid(evidence, reason) {
   return isDenialRepoke || isAttemptGate || isSpawnRespawn;
 }
 
+// src/scrum/types.ts
+var SPECIALIST_ROLES = ["pm", "ux", "architect", "dev", "qa"];
+function safeId(value) {
+  return typeof value === "string" && /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(value) && value !== "..";
+}
+function safePath(value) {
+  return typeof value === "string" && value.length > 0 && !value.includes("\\") && !value.includes("\0") && value.split("/").every((p) => p !== "" && p !== "." && p !== "..");
+}
+function artifactRefIsValid(value) {
+  const v = value;
+  return !!v && safePath(v.path) && /^[a-f0-9]{40}$/.test(v.commit) && /^[a-f0-9]{64}$/.test(v.sha256);
+}
+function scrumBindingIsValid(value) {
+  const v = value;
+  return !!v && v.mode === "scrum" && safeId(v.runId) && SPECIALIST_ROLES.includes(v.role) && typeof v.policyRevision === "string" && v.policyRevision.length > 0 && Number.isSafeInteger(v.configRevision) && v.configRevision >= 0 && Array.isArray(v.artifactRefs) && v.artifactRefs.every(artifactRefIsValid);
+}
+
 // src/ledger-validation.ts
 function isValidLedgerEvent(value) {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const event = value;
-  return (event.schema_version === void 0 || event.schema_version === 1 || event.schema_version === 2) && (event.schema_version !== 2 || identityMetadataIsValid(event)) && Number.isSafeInteger(event.seq) && event.seq > 0 && typeof event.ts === "string" && (event.schema_version !== 2 || utcTimestampIsValid(event.ts)) && typeof event.event === "string" && EVENT_NAMES.includes(event.event) && shapeIsValid(value) && (event.schema_version !== 2 || v2PayloadIsValid(event));
+  return (event.schema_version === void 0 || event.schema_version === 1 || event.schema_version === 2) && (event.schema_version !== 2 || identityMetadataIsValid(event)) && Number.isSafeInteger(event.seq) && event.seq > 0 && typeof event.ts === "string" && (event.schema_version !== 2 || utcTimestampIsValid(event.ts)) && typeof event.event === "string" && EVENT_NAMES.includes(event.event) && (event.event !== "contract_set" || event.execution === void 0 || scrumBindingIsValid(event.execution)) && shapeIsValid(value) && (event.schema_version !== 2 || v2PayloadIsValid(event));
 }
 function utcTimestampIsValid(value) {
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|\+00:?00)$/.test(value)) return false;
@@ -209,7 +226,7 @@ function v2PayloadIsValid(event) {
     case "ledger_schema":
       return true;
     case "contract_set":
-      return string("workspace") && string("gate") && string("artifact") && strings("scope") && strings("skills") && optionalString("base") && optionalString("description") && optionalString("by") && (event.freshEyes === void 0 || event.freshEyes === true) && (event.watch === void 0 || event.watch === true);
+      return (event.execution === void 0 || scrumBindingIsValid(event.execution)) && string("workspace") && string("gate") && string("artifact") && strings("scope") && strings("skills") && optionalString("base") && optionalString("description") && optionalString("by") && (event.freshEyes === void 0 || event.freshEyes === true) && (event.watch === void 0 || event.watch === true);
     case "claim_reported":
       return string("sha") && optionalString("agent");
     case "gate_started":

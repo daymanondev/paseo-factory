@@ -268,3 +268,5 @@ that ride agent PATHs.
 ## License
 
 MIT.
+
+Opt-in [Agile Scrum execution](docs/runbooks/scrum.md) adds isolated specialist rosters, durable design decisions and QA evidence while preserving the default SLP workflow.
