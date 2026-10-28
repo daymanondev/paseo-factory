@@ -553,10 +553,12 @@ test("v0.0.38 (ADR 0026 §1): an already-correct symlink is left untouched (ino/
   mkdirSync(stray, { recursive: true });
   rmSync(join(second, "prompts"));
   symlinkSync(stray, join(second, "prompts"));
-  assert.notEqual(lstatSync(join(second, "prompts")).ino, before[1]!.ino, "the tampered link is a new entry");
+  // Filesystems may immediately reuse a removed symlink inode. Verify the
+  // wrong-target fixture directly rather than depending on allocation policy.
+  assert.equal(realpathSync(join(second, "prompts")), realpathSync(stray), "the tampered link points at the stray target");
   provisionPiAgentHome({ stateDir, role: "supervisor", sourceAgentDir: source });
   assert.equal(realpathSync(join(second, "prompts")), realpathSync(join(source, "prompts")), "a wrong link is re-linked to the expected source");
-  assert.notEqual(lstatSync(join(second, "prompts")).ino, lstatSync(stray).ino);
+  assert.ok(lstatSync(join(second, "prompts")).isSymbolicLink(), "repair restores a symlink");
 
   // Contamination still retires: a regular directory named "skills" (not a
   // link) is swept and re-linked — the sweep keeps its teeth.

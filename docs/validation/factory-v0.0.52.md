@@ -38,3 +38,8 @@ real spool, Gate, managed worktree, acceptance and landing protocol. SLP and
 Scrum Dev used native model Agents. The trial does not claim a wholly autonomous
 specialist initiative. Parallel design is verified by the managed-worktree
 integration test; live browser planning Tasks ran sequentially.
+
+Release CI also exposed a pre-existing Linux symlink fixture assertion that
+assumed a removed inode could not be reused. The fixture now checks the wrong
+target directly and verifies repair restores the expected symlink; stable
+inode/mtime checks for already-correct links remain unchanged.
