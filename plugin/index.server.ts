@@ -32,7 +32,7 @@ import { createSurfaceHandlers, registerSurfaceRpc } from "./server/surface-rpc.
 import { createLeadMailRuntime } from "./server/lead-mailbox.ts";
 import { injectRoleOnCreate, injectSessionEnv, sanitizeAgentCreateHookResult } from "./server/roles.ts";
 
-const SHELL_VERSION = "0.0.53";
+const SHELL_VERSION = "0.0.54";
 
 const log = (message: string) => console.log(`[${PLUGIN_ID}] ${message}`);
 
@@ -179,7 +179,7 @@ export default function contribute(server: PluginServerContext) {
     // creates and managed-worktree creates carry their role contract in
     // config.systemPrompt (mapped per provider by the daemon) plus their
     // PASEO_FACTORY_* env — nothing under any project root is written.
-    const injected = injectRoleOnCreate(next, stateDir);
+    const injected = injectRoleOnCreate(next, stateDir, undefined, surface.cachedProviders());
     if (injected !== undefined) {
       log(`roles: injected the ${injected.env?.PASEO_FACTORY_SEAT ?? "agent"} contract into the agent created in ${next.config.cwd}`);
     }

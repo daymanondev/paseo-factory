@@ -1,3 +1,6 @@
+import { resolveScrumIdentity } from "./core/scrum/harness.ts";
+import { resolveRoleLane, laneProviderConfig, findCatalogModelMeta } from "./provider-lanes.ts";
+import type { ProviderCatalogEntry } from "./provider-lanes.ts";
 /**
  * The choke (v0.0.4) — factory-side policy over every permit ask from a
  * contracted agent, plus the git shim's ledger ingestion.
@@ -159,40 +162,10 @@ const KNOWN_PROVIDER_IDS = new Set([
   "acp",
 ]);
 
-export interface ProviderCatalogModel {
-  id: string;
-  thinkingOptions?: readonly { id: string; label?: string | null }[] | null;
-}
-
-export interface ProviderCatalogEntry {
-  id?: string;
-  provider?: string;
-  models?: readonly ProviderCatalogModel[] | null;
-}
-
+export type { ProviderCatalogEntry, ProviderCatalogModel } from "./provider-lanes.ts";
 export interface NormalizeCreateOptions {
   stateDir?: string;
   providers?: readonly ProviderCatalogEntry[];
-}
-
-function findCatalogModelMeta(
-  provider: string,
-  model: string,
-  providers?: readonly ProviderCatalogEntry[],
-): ProviderCatalogModel | undefined {
-  if (providers === undefined || providers.length === 0) return undefined;
-  const entry = providers.find((p) => (p.provider ?? p.id) === provider);
-  const models = entry?.models;
-  if (models === undefined || models === null) return undefined;
-  const strippedModel = model.replace(/^[^/]+\//, "");
-  return models.find(
-    (m) =>
-      m.id === model ||
-      `${provider}/${m.id}` === model ||
-      m.id === `${provider}/${model}` ||
-      m.id === strippedModel ||
-      m.id.replace(/^[^/]+\//, "") === strippedModel,
-  );
 }
 
 function inferReservedSeatFromTitle(title: string | null | undefined): SeatName | undefined {
@@ -427,40 +400,24 @@ export function normalizeAgentCreateRequest(
   let seatRewrite:
     | { provider: string; model?: string; thinkingOptionId?: string; labels: Record<string, string>; slug: string }
     | undefined;
+  const worktree = stateDir && config.cwd ? parseTaskWorktreePath(stateDir, config.cwd) : null;
+  const scrumTask = worktree && stateDir && resolveScrumIdentity(stateDir, worktree.slug, worktree.task) !== undefined ? worktree : null;
+  const rewriteRole = scrumTask ? "agent" : providerInferredSeat;
   if (
-    providerInferredSeat !== undefined &&
+    rewriteRole !== undefined &&
     typeof config.cwd === "string" &&
     config.cwd !== "" &&
     typeof stateDir === "string" &&
     stateDir !== ""
   ) {
-    const project = resolveFactorySeatProject(stateDir, config.cwd);
+    const project = scrumTask ?? resolveFactorySeatProject(stateDir, config.cwd);
     if (project !== undefined) {
-      const projectLanes = loadLanes(stateDir, project.slug);
-      const lane = projectLanes.ok ? projectLanes.lanes[providerInferredSeat] : undefined;
+      const lane = resolveRoleLane(stateDir, project.slug, rewriteRole, scrumTask?.task);
       const parsed = lane !== undefined ? parseLane(lane) : undefined;
-      const mergedLabels = { ...(topLabels ?? {}), ...(config.labels ?? {}), seat: providerInferredSeat, project: project.slug };
+      const mergedLabels = { ...(topLabels ?? {}), ...(config.labels ?? {}), seat: rewriteRole, project: project.slug, ...(scrumTask ? { task: scrumTask.task } : {}) };
       if (parsed !== undefined) {
-        const runtimeProvider =
-          parsed.provider === "claude-code"
-            ? "claude"
-            : parsed.provider === "agy"
-              ? providers?.some((entry) => entry.provider === "agy")
-                ? "agy"
-                : "antigravity"
-              : parsed.provider;
-        const thinkingOptions =
-          findCatalogModelMeta(parsed.provider, parsed.model, providers)?.thinkingOptions ??
-          findCatalogModelMeta(runtimeProvider, parsed.model, providers)?.thinkingOptions;
-        const thinkingSupported =
-          parsed.thinking !== undefined &&
-          (thinkingOptions === undefined ||
-            thinkingOptions === null ||
-            (thinkingOptions.length > 0 && thinkingOptions.some((o) => o.id === parsed.thinking)));
         seatRewrite = {
-          provider: runtimeProvider,
-          model: parsed.model,
-          ...(thinkingSupported ? { thinkingOptionId: parsed.thinking } : {}),
+          ...laneProviderConfig(lane!, providers),
           labels: mergedLabels,
           slug: project.slug,
         };
@@ -716,7 +673,7 @@ export function createChoke(options: ChokeOptions): Choke {
       ?? readCorrelations(factory.stateDir).find((record) => record.agentId === agent.id)?.projectSlug
       ?? listProjectRegistrations(factory.stateDir).find((registration) => registration.root === agent.cwd)?.slug
       ?? "";
-    const family = resolveEffectiveProviderFamily(agent.provider ?? request.provider, seat, factory.stateDir, projectSlug);
+    const family = resolveEffectiveProviderFamily(agent.provider ?? request.provider, seat, factory.stateDir, projectSlug, agent.labels?.task ?? readCorrelations(factory.stateDir).find(record => record.agentId === agent.id)?.task);
     if (family !== "opencode") return decision;
     if (seat !== "agent" && decision.behavior === "allow" && hasExplicitGitWrite(command)) {
       const guidance = seat === "supervisor"

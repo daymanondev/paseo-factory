@@ -161,6 +161,12 @@ test("mixed Projects preserve SLP homes and freeze Scrum role/model through crea
   });
   assert.equal(wt.ok, true);
   if (!wt.ok) return;
+  const { normalizeAgentCreateRequest } = await import("../plugin/server/choke.ts");
+  const normalizedTask = normalizeAgentCreateRequest({ config: { cwd: wt.path, provider: "factory-peer", thinkingOptionId: "stale" } }, { stateDir: state });
+  assert.equal(normalizedTask.config.provider, "claude");
+  assert.equal(Object.hasOwn(normalizedTask.config, "thinkingOptionId"), false);
+  const { resolveEffectiveProviderFamily } = await import("../plugin/server/roles.ts");
+  assert.equal(resolveEffectiveProviderFamily("factory-peer", "agent", state, project.slug, "plan"), "claude");
   const injected = injectRoleOnCreate(
     {
       config: { cwd: wt.path, provider: "pi/wrong-default" },
@@ -738,4 +744,36 @@ test("parallel UX and Architect land disjoint artifacts from one accepted PRD in
   });
   assert.equal(dev.ok, false);
   if (!dev.ok) assert.equal(dev.code, "scrum-run-blocked");
+});
+
+test("Scrum seat create and permission families use the Scrum roster and catalog", async t => {
+  const { resolveProject, ensureProjectRegistered } = await import("../plugin/server/core/project.ts");
+  const { switchExecution } = await import("../plugin/server/core/scrum/execution.ts");
+  const { ensureScrumConfig, saveScrumConfig } = await import("../plugin/server/core/scrum/config.ts");
+  const { normalizeAgentCreateRequest } = await import("../plugin/server/choke.ts");
+  const { injectRoleOnCreate, resolveEffectiveProviderFamily } = await import("../plugin/server/roles.ts");
+  const state = makeTempDir(), repo = makeTempDir(), userHome = makeTempDir();
+  for (const dir of [state, repo, userHome]) disposeDir(t, dir);
+  writeFileSync(join(repo, "README.md"), "fixture"); gitCommitAll(repo);
+  const project = resolveProject(repo); assert.ok(project.ok); if (!project.ok) return;
+  ensureProjectRegistered(state, project);
+  await switchExecution({ state, slug: project.slug, mode: "scrum", blockers: [], rotate: async () => {} });
+  const config = ensureScrumConfig(state, project.slug);
+  saveScrumConfig(state, { ...config, lanes: { ...config.lanes, supervisor: "claude-code/opus:high", lead: "opencode/fast:high" } }, project.slug);
+  const providers = [{ provider: "claude", models: [{ id: "opus", thinkingOptions: [] }] }, { provider: "opencode", models: [{ id: "fast", thinkingOptions: [] }] }];
+  const request = { config: { cwd: repo, provider: "factory-supervisor", thinkingOptionId: "stale" } };
+  const normalized = normalizeAgentCreateRequest(request, { stateDir: state, providers });
+  assert.equal(normalized.config.provider, "claude");
+  assert.equal(Object.hasOwn(normalized.config, "thinkingOptionId"), false);
+  const injected = injectRoleOnCreate(normalized as AgentCreateRequest, state, userHome, providers)!;
+  assert.equal(injected.config.provider, "claude");
+  assert.equal(Object.hasOwn(injected.config, "thinkingOptionId"), false);
+  assert.equal(resolveEffectiveProviderFamily("factory-lead", "lead", state, project.slug), "opencode");
+  saveScrumConfig(state, { ...config, lanes: { ...config.lanes, supervisor: "agy/gemini:high" } }, project.slug);
+  const agy = injectRoleOnCreate(request as AgentCreateRequest, state, userHome, [{ provider: "antigravity", models: [{ id: "gemini", thinkingOptions: [] }] }])!;
+  assert.equal(agy.config.provider, "antigravity");
+  assert.equal(Object.hasOwn(agy.config, "thinkingOptionId"), false);
+  assert.equal(agy.config.mcpServers, undefined, "Antigravity must receive its provider-specific fence");
+  const supported = injectRoleOnCreate(request as AgentCreateRequest, state, userHome, [{ provider: "antigravity", models: [{ id: "gemini", thinkingOptions: [{ id: "high" }] }] }])!;
+  assert.equal(supported.config.thinkingOptionId, "high");
 });

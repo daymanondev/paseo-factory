@@ -1445,14 +1445,15 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     projectSlug: string;
     projectRoot: string;
     /** The Project's effective lanes BEFORE the write. */
-    before: Lanes;
+    before: Pick<Lanes, "supervisor" | "lead">;
     /** The Project's effective lanes AFTER the write. */
-    after: Lanes;
+    after: Pick<Lanes, "supervisor" | "lead">;
+    executionMode?: "slp" | "scrum";
     /** Only these seats are considered (the lanes the act actually touches). */
     seats?: readonly ("supervisor" | "lead")[];
     context?: SurfaceCallContext;
   }): Promise<string> => {
-    if (!projectUsesSlp(input.projectSlug)) return "skipped — SLP config saved for a future SLP selection";
+    if (input.executionMode === "scrum" ? readExecution(deps.stateDir, input.projectSlug).mode !== "scrum" : !projectUsesSlp(input.projectSlug)) return "skipped — config saved for a future execution selection";
     const daemon = resolveDaemon(input.context);
     const parts: string[] = [];
     for (const seat of input.seats ?? (["supervisor", "lead"] as const)) {
@@ -1588,28 +1589,74 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     try {
       const selection = readExecution(deps.stateDir, slug);
       const pending = slug ? readSwitchIntent(deps.stateDir, slug) : undefined;
-      const base = { selectedMode: selection.mode, revision: selection.revision, ...(pending?.status === "pending" ? { pendingMode: pending.target.mode } : {}) };
-      if (selection.mode === "slp") return base;
+      const base = {
+        selectedMode: selection.mode,
+        revision: selection.revision,
+        pendingSwitch:
+          pending?.status === "pending"
+            ? { from: pending.previous.mode, to: pending.target.mode }
+            : null,
+        ...(pending?.status === "pending"
+          ? { pendingMode: pending.target.mode }
+          : {}),
+      };
       try {
         const runs = slug ? listRuns(deps.stateDir, slug) : [];
-        return { ...base, config: readScrumConfig(deps.stateDir, slug), profiles: readScrumProfiles(deps.stateDir).profiles, run: runs.find(r => !terminalRun(r)) ?? runs.at(-1) };
-      } catch (error) { return { ...base, error: messageOf(error) }; }
-    } catch (error) { return { selectedMode: "slp" as const, revision: 0, error: messageOf(error) }; }
+        const config = readScrumConfig(deps.stateDir, slug);
+        const profiles = readScrumProfiles(deps.stateDir).profiles;
+        const activePath = join(
+          scopeDir(deps.stateDir, slug),
+          "scrum-active-profile.json",
+        );
+        const recorded = existsSync(activePath)
+          ? (JSON.parse(readFileSync(activePath, "utf8")) as { id: string })
+          : undefined;
+        const activeProfileId =
+          profiles.find((p) => p.id === recorded?.id)?.id ?? null;
+        const run = runs.find((r) => !terminalRun(r)) ?? runs.at(-1);
+        const skippedPhases =
+          run?.track === "small" &&
+          !run.tasks.some((t) => ["ux", "architect"].includes(t.role))
+            ? [{ phase: "design", reason: `Small track: ${run.rationale}` }]
+            : [];
+        return {
+          ...base,
+          scope: slug ? "project" : "global",
+          project: slug ?? null,
+          newProjectDefaultMode: readExecution(deps.stateDir).mode,
+          machineConfig: readScrumConfig(deps.stateDir),
+          config,
+          profiles,
+          activeProfileId,
+          activeProfileModified: !!config && profiles.some(profile => profile.id === activeProfileId && (JSON.stringify(profile.config.lanes) !== JSON.stringify(config.lanes) || profile.config.requireUiApproval !== config.requireUiApproval)),
+          run: run ? { ...run, skippedPhases } : undefined,
+          activeRun: run ? { ...run, skippedPhases } : undefined,
+        };
+      } catch (error) {
+        return { ...base, error: messageOf(error) };
+      }
+    } catch (error) {
+      return {
+        selectedMode: "slp" as const,
+        revision: 0,
+        error: messageOf(error),
+      };
+    }
   };
-  const executionWork = async (project: { slug: string; root: string }, context?: SurfaceCallContext) => {
+  const executionWork = async (project: { slug: string; root: string }, context?: SurfaceCallContext, cachedAgents?: readonly SurfaceAgentSnapshot[]) => {
     const blockers: string[] = [];
-    for (const event of deps.factory.ledger.events) if (event.event === "contract_set" && event.workspace === project.root) {
+    for (const event of deps.factory.ledger.events) if (event.event === "contract_set" && taskInProject(event.task, project.root, project.slug)) {
       const task = projectTask(deps.factory.ledger.events, event.task);
       if (!task.settled || task.pendingLanding || task.inFlightAttempt !== undefined) blockers.push(`Task ${event.task}: ${task.status}${task.pendingLanding ? " pending-conflict" : ""}`);
     }
     const mailbox = readLeadMailbox(join(scopeDir(deps.stateDir, project.slug), "mailbox.jsonl"));
     const pendingDirectives = mailbox.queued.some(m => m.kind === "directive") || mailbox.supervisorQueued.some(m => m.kind === "directive") || mailbox.inFlight !== null || mailbox.supervisorInFlight !== null;
-    if (pendingDirectives) blockers.push("pending/in-flight mailbox delivery");
+    if (mailbox.queued.length || mailbox.supervisorQueued.length || mailbox.inFlight !== null || mailbox.supervisorInFlight !== null) blockers.push("pending/in-flight mailbox delivery");
     const reg = readProjectRegistration(deps.stateDir, project.slug);
     if (reg?.rotationState && reg.rotationState !== "normal") blockers.push(`Lead handoff: ${reg.rotationState}`);
     if (deps.handoffPending?.(project.slug)) blockers.push("unfinished Lead handoff kickoff");
-    const page = await resolveDaemon(context).agents.list({ filter: { includeArchived: false, includeBackground: true } });
-    const agents = page.entries.map(e => e.agent).filter(a => a.archivedAt === null && (a.labels.project === project.slug || a.cwd === project.root) && ["running", "initializing"].includes(a.status));
+    const live = cachedAgents ?? (await resolveDaemon(context).agents.list({ filter: { includeArchived: false, includeBackground: true } })).entries.map(e => e.agent);
+    const agents = live.filter(a => a.archivedAt === null && (a.labels.project === project.slug || a.cwd === project.root) && ["running", "initializing"].includes(a.status));
     blockers.push(...agents.map(a => `Agent ${a.id}: ${a.status}`));
     if (readExecution(deps.stateDir, project.slug).mode === "scrum") for (const run of listRuns(deps.stateDir, project.slug)) { if (!terminalRun(run)) blockers.push(`Scrum ${run.runId}: ${run.phase}`); else if (run.phase === "completed" && run.completionRequest && !run.completionReported) blockers.push(`Scrum ${run.runId}: completion report pending`); }
     return { blockers: [...new Set(blockers)], activeAgents: agents.filter(a => a.labels.seat === "agent").map(a => a.id), pendingDirectives };
@@ -1626,10 +1673,6 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
             for (const seat of ["lead", "supervisor"] as const) {
               const retired = await retireSeat(seat, project.slug, project.root, context);
               if (!retired.ok && !["no-lead", "no-supervisor"].includes(retired.code)) throw new FactoryError(retired.code, retired.error);
-            }
-            for (const seat of ["supervisor", "lead"] as const) {
-              const ensured = await ensureSeat(seat, { projectRoot: project.root }, context);
-              if (!ensured.ok) throw new FactoryError(ensured.code, ensured.error);
             }
           } });
         });
@@ -1662,7 +1705,14 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         }
         const execute = async () => {
           const currentWork = project?.ok ? await executionWork(project, context) : work;
-          return { ok: true as const, data: scrumOperation(input, { factory: deps.factory, ...(project?.ok ? { slug: project.slug, root: project.root } : {}), authority, actor: caller?.actor ?? "owner", activeAgents: currentWork.activeAgents, pendingDirectives: currentWork.pendingDirectives }) };
+          const updatesRoster = ["config.set", "config.reset", "profile.apply"].includes(input.operation);
+          const before = project?.ok && updatesRoster ? readScrumConfig(deps.stateDir, project.slug) : undefined;
+          const data = scrumOperation(input, { factory: deps.factory, ...(project?.ok ? { slug: project.slug, root: project.root } : {}), authority, actor: caller?.actor ?? "owner", activeAgents: currentWork.activeAgents, pendingDirectives: currentWork.pendingDirectives });
+          if (project?.ok && before && updatesRoster && readExecution(deps.stateDir, project.slug).mode === "scrum" && !listRuns(deps.stateDir, project.slug).some(run => !terminalRun(run))) {
+            const after = readScrumConfig(deps.stateDir, project.slug);
+            if (after) await syncLiveSeatsAfterLaneUpdate({ projectSlug: project.slug, projectRoot: project.root, before: before.lanes, after: after.lanes, executionMode: "scrum", context });
+          }
+          return { ok: true as const, data };
         };
         return project?.ok ? await withExecutionLane(deps.stateDir, project.slug, execute) : await execute();
       } catch (error) { return failure(codeOf(error), messageOf(error)); }
@@ -1860,6 +1910,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
                 return r.ok ? r.gitCommonDir : join(entry.root, ".git");
               })()
             : join(entry.root, ".git"));
+        const execution = executionView(entry.slug);
         return {
           slug: entry.slug,
           root: entry.root,
@@ -1868,6 +1919,8 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           ...(entry.missingRoot ? { missingRoot: true } : {}),
           supervisorId: liveSup?.id ?? reg?.supervisor ?? entry.supervisorId ?? null,
           leadId: liveLead?.id ?? reg?.lead ?? entry.leadId ?? null,
+          executionMode: execution.selectedMode,
+          activeScrumPhase: (() => { const run = execution.run; return run && !["completed", "cancelled"].includes(run.phase) ? run.phase : null; })(),
           activeTaskCount: allTasks.filter((t) => taskInProject(t.task, entry.root, entry.slug)).length,
         };
       };
@@ -1910,11 +1963,16 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       // filesystem probe layered over the fold (the vault-status precedent),
       // so the view carries the Owner's profile library and the scope's
       // active-profile / override state without the fold learning files.
+      const execution = executionView(enrichedProject?.slug);
+      if (enrichedProject) {
+        try { execution.busyReason = (await executionWork(enrichedProject, context, rawAgents)).blockers.join("; ") || null; }
+        catch (error) { execution.error ??= messageOf(error); execution.busyReason = "Execution state needs recovery: " + messageOf(error); }
+      }
       return {
         ok: true as const,
         view: {
           ...view,
-          execution: executionView(enrichedProject?.slug),
+          execution,
           tasks: enrichTaskPeerAgents(view.tasks, rawAgents),
           machineLanes: machineLanes.lanes,
           ...laneProfilesGather(enrichedProject?.slug, view.lanes),

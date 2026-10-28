@@ -1,4 +1,5 @@
-import { ExecutionSelector, ScrumSeatsPane } from "./scrum.tsx";
+import { SeatNode, Rail, AgentCard } from "./seat-graph.tsx";
+import { MODE_OPTIONS, ScrumSeatsPane } from "./scrum.tsx";
 import type { ScrumAction } from "./scrum.tsx";
 /**
  * Tab 2 — Seats & Models (ADR 0009 §2; the Lead lane and live Lead seat
@@ -21,7 +22,7 @@ import { Icon, Modal, ScrollView, TextInput } from "@getpaseo/plugin/client/ui";
 import { useEffect, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { AgentView, FactoryView, LaneName, LaneProfileView, Lanes, ProviderModelView } from "../../shared/view.ts";
-import { Btn, Card, Chip, Pill } from "../kit/pill.tsx";
+import { Btn, Card, Chip, Pill, SegmentedControl } from "../kit/pill.tsx";
 import { CONTROL_H, CONTROL_SM, RADIUS, SPACING, hoveredOf, text, tint } from "../kit/theme.ts";
 import type { Colour } from "../kit/theme.ts";
 import { planLiveSeatTransitions } from "../kit/live-seats.ts";
@@ -558,114 +559,6 @@ function LaneModalBody({
   );
 }
 
-function SeatNode({
-  theme,
-  title,
-  icon,
-  subtitle,
-  pills,
-}: {
-  theme: PluginTheme;
-  title: string;
-  icon: string;
-  subtitle: string;
-  pills: { label: string; tone?: Colour; lit?: boolean; mono?: boolean }[];
-}) {
-  return (
-    <Card theme={theme} gap={SPACING[1.5]}>
-      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: SPACING[2] }}>
-        <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1.5] }}>
-          <Icon name={icon} size={14} color={theme.colors.foregroundMuted} />
-          <Text style={text(theme, "rowTitle")}>{title}</Text>
-        </View>
-        {pills.length > 0 ? (
-          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: SPACING[1] }}>
-            {pills.map((pill) => (
-              <Pill key={pill.label} theme={theme} label={pill.label} tone={pill.tone ?? "foregroundMuted"} lit={pill.lit} mono={pill.mono} />
-            ))}
-          </View>
-        ) : null}
-      </View>
-      <Text style={text(theme, "meta")} numberOfLines={1}>
-        {subtitle}
-      </Text>
-    </Card>
-  );
-}
-
-/** The orthogonal rail between graph levels — a clean vertical connector. */
-function Rail({ theme, height = SPACING[2.5] }: { theme: PluginTheme; height?: number }) {
-  return <View style={{ width: 2, height, backgroundColor: theme.colors.border, marginLeft: SPACING[4] }} />;
-}
-
-function AgentCard({
-  theme,
-  agent,
-  actions,
-  retireLabel,
-  onRetire,
-}: {
-  theme: PluginTheme;
-  agent: AgentView;
-  actions: SeatsActions;
-  retireLabel?: string;
-  onRetire?: () => void;
-}) {
-  const icon = agent.seat === "supervisor" ? "Shield" : agent.seat === "lead" ? "Compass" : "Cpu";
-  return (
-    <Card theme={theme} gap={SPACING[2]}>
-      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: SPACING[2], flexWrap: "wrap" }}>
-        <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1.5], flexShrink: 1 }}>
-          <Icon name={icon} size={14} color={theme.colors.accent} />
-          <Text style={text(theme, "rowTitle")} numberOfLines={1}>
-            {agent.title ?? agent.id.slice(0, 12)}
-          </Text>
-          <Pill
-            theme={theme}
-            label={agent.status}
-            tone={agent.status === "error" ? "statusDanger" : agent.status === "running" ? "accent" : "statusSuccess"}
-            lit={agent.status === "running" || agent.status === "error"}
-          />
-          {agent.requiresAttention === true ? <Pill theme={theme} label="attention" tone="statusWarning" lit /> : null}
-        </View>
-        <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1.5] }}>
-          {retireLabel !== undefined && onRetire !== undefined ? (
-            <Btn theme={theme} small icon="RotateCcw" label={retireLabel} tone="statusDanger" disabled={actions.busy} onPress={onRetire} />
-          ) : null}
-          <Btn theme={theme} small icon="ExternalLink" label="Open" onPress={() => actions.openAgent(agent.id)} />
-        </View>
-      </View>
-      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: SPACING[1.5] }}>
-        <Pill theme={theme} label={agent.provider} mono />
-        {agent.model !== null && agent.model !== agent.provider ? <Pill theme={theme} label={agent.model} mono /> : null}
-        {agent.thinking !== undefined && agent.thinking !== null ? (
-          <Pill theme={theme} label={`thinking: ${agent.thinking}`} tone="accent" lit />
-        ) : null}
-        {agent.task !== null ? <Pill theme={theme} label={`task ${agent.task}`} tone="accent" lit /> : null}
-        {agent.seqEnd !== null ? <Pill theme={theme} label={`seqEnd ${agent.seqEnd}`} mono /> : null}
-        {/* The Lead telemetry trio (v0.0.20, ADR 0013 §6): live context usage
-            against the fixed 128k handoff mark, the rotation state, and the
-            queued mailbox count — present only on the Lead's view, so every
-            other seat's card simply skips them. */}
-        {agent.contextUsedTokens !== undefined && agent.contextUsedTokens !== null ? (
-          <Pill theme={theme} label={`${Math.round(agent.contextUsedTokens / 1000)}k / 128k handoff`} mono />
-        ) : null}
-        {agent.rotationState !== undefined ? (
-          <Pill
-            theme={theme}
-            label={agent.rotationState}
-            tone={agent.rotationState === "handing_over" ? "accent" : agent.rotationState === "rotation_pending" ? "statusWarning" : "foregroundMuted"}
-            lit={agent.rotationState !== "normal"}
-          />
-        ) : null}
-        {agent.queuedMailCount !== undefined && agent.queuedMailCount > 0 ? (
-          <Pill theme={theme} label={`${agent.queuedMailCount} queued`} tone="accent" lit />
-        ) : null}
-      </View>
-    </Card>
-  );
-}
-
 /**
  * The Lane Profiles bar (v0.0.38, ADR 0026 §2) — one chip per saved profile,
  * applied to the selected scope in one click; `+ Save as Profile…` names and
@@ -852,6 +745,7 @@ export function SeatsPane({
   modelSyncNote: string | null;
 }) {
   const [editing, setEditing] = useState<LaneCard | null>(null);
+  const [machineRoster, setMachineRoster] = useState<"slp" | "scrum">("slp");
   /** The save-as-profile drawer's two fields (v0.0.38, ADR 0026 §2). */
   const [naming, setNaming] = useState(false);
   const [nameDraft, setNameDraft] = useState("");
@@ -926,11 +820,18 @@ export function SeatsPane({
     setNaming(false);
   };
 
-  if (view.execution?.selectedMode === "scrum") return <ScrumSeatsPane theme={theme} view={view} busy={actions.busy} action={actions.scrum} setMode={actions.setMode} renderEditor={(title, current, save, close) => <Modal open onOpenChange={open => { if (!open) close(); }} title={title}><Modal.Content><LaneModalBody theme={theme} view={view} card={{ id: "scrum", title, icon: "Cpu", tier: "Specialist", hint: "Independent Scrum lane", lanes: [], value: () => current }} onSave={save} onClose={close} busy={actions.busy} /></Modal.Content></Modal>} />;
+  const machineControls = view.project === null ? <Card theme={theme} gap={SPACING[3]}>
+    <Text style={text(theme, "section")}>New-Project Default Execution Mode</Text>
+    <Text style={text(theme, "meta")}>Applies only to newly registered Projects.</Text>
+    <SegmentedControl theme={theme} options={MODE_OPTIONS} value={view.execution?.newProjectDefaultMode ?? view.execution?.selectedMode ?? "slp"} onChange={mode => actions.setMode?.(mode)} disabled={actions.busy} />
+    <Text style={text(theme, "section")}>Machine Default Roster Editor</Text>
+    <SegmentedControl theme={theme} options={[{ value: "slp", label: "Machine SLP Lanes (6)" }, { value: "scrum", label: "Machine Agile Scrum Roster (8)" }]} value={machineRoster} onChange={setMachineRoster} />
+  </Card> : null;
+  if ((view.project ? view.execution?.selectedMode : machineRoster) === "scrum") return <View style={{ gap: SPACING[4] }}>{machineControls}<ScrumSeatsPane theme={theme} view={view} busy={actions.busy} action={actions.scrum} actions={actions} renderEditor={(title, current, save, close) => <Modal open onOpenChange={open => { if (!open) close(); }} title={title}><Modal.Content><LaneModalBody theme={theme} view={view} card={{ id: "scrum", title, icon: "Cpu", tier: "Specialist", hint: "Independent Scrum lane", lanes: [], value: () => current }} onSave={save} onClose={close} busy={actions.busy} /></Modal.Content></Modal>} /></View>;
 
   return (
     <View style={{ gap: SPACING[4] }}>
-      <ExecutionSelector theme={theme} view={view} setMode={actions.setMode} busy={actions.busy} />
+      {machineControls}
       {/* Section 1: Lane Switcher Grid */}
       <View style={{ gap: SPACING[2.5] }}>
         <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: SPACING[2] }}>

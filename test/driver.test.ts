@@ -1180,7 +1180,7 @@ test("automatic Respawn on Substrate death (ADR 0008 §2): meters dead Agent 1, 
     writeFileSync(untrackedPath, "untracked leftover\n");
 
     const terminals: { fate?: string; agentId?: string }[] = [];
-    const entry = { task: "LEAD1", agentId: "ag-lead1", workspace: harness.workspace };
+    const entry = { task: "LEAD1", agentId: "ag-lead1", workspace: harness.workspace, provider: "claude/pm-frozen" };
     const run = observeTasks(harness.rpc, [entry], {
       pollMs: 10,
       stateDir: harness.stateDir,
@@ -1202,15 +1202,16 @@ test("automatic Respawn on Substrate death (ADR 0008 §2): meters dead Agent 1, 
     const metersAfterRespawn = harness.factory.ledger.events.filter((e) => e.event === "meter_written") as { agent?: string; provider?: string }[];
     assert.equal(metersAfterRespawn.length, 1, "dead Agent 1 metered before Respawn");
     assert.equal(metersAfterRespawn[0].agent, "ag-lead1");
-    assert.equal(metersAfterRespawn[0].provider, "claude/opus-4-7");
+    assert.equal(metersAfterRespawn[0].provider, "claude/pm-frozen");
 
     // Uncommitted worktree fragments were cleaned before Agent 2 was created.
     assert.equal(readFileSync(trackedPath, "utf8"), originalTracked, "git checkout -- . restored tracked file");
     assert.ok(!readdirSync(join(harness.workspace, "src")).includes("leftover.tmp"), "git clean -fd removed untracked file");
 
     // Replacement agent create was keyed by LEAD1-respawn-<seq>.
-    const respawnEvt = harness.factory.ledger.events.find((e) => e.event === "respawn_dispatched") as { seq: number; died_agent: string } | undefined;
+    const respawnEvt = harness.factory.ledger.events.find((e) => e.event === "respawn_dispatched") as { seq: number; died_agent: string; provider: string } | undefined;
     assert.equal(respawnEvt?.died_agent, "ag-lead1");
+    assert.equal(respawnEvt?.provider, "claude/pm-frozen", "respawn preserves the entry's bound lane over the CLI default");
     const createMsg = harness.sent.find((m) => m.type === "agent.create.request") as { idempotencyKey?: string } | undefined;
     assert.equal(createMsg?.idempotencyKey, `LEAD1-respawn-${respawnEvt?.seq}`);
 

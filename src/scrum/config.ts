@@ -126,9 +126,6 @@ export function saveScrumConfig(
       configRevision: (previous?.configRevision ?? 0) + 1,
     };
     atomicJson(join(scopeDir(state, slug), "scrum-lanes.json"), next);
-    rmSync(join(scopeDir(state, slug), "scrum-active-profile.json"), {
-      force: true,
-    });
     return structuredClone(next);
   });
 }
@@ -140,32 +137,39 @@ export function ensureScrumConfig(
   return scrumMutation(state, () => {
     const current = readScrumConfig(state, slug);
     if (current !== undefined && !reset) return current;
-    const machine = slug === undefined ? undefined : readScrumConfig(state);
-    if (machine !== undefined) return saveScrumConfig(state, machine, slug);
-    // Reset seeds missing machine defaults from MACHINE SLP, never Project SLP.
-    if (reset && slug !== undefined)
-      return saveScrumConfig(state, ensureScrumConfig(state), slug);
-    const slp = loadLanes(state, slug);
-    if (!slp.ok) throw new FactoryError("lanes-unreadable", slp.reason);
-    const { supervisor, lead, worker, watch, retro } = slp.lanes;
-    return saveScrumConfig(
-      state,
-      {
-        schemaVersion: 1,
-        requireUiApproval: true,
-        lanes: {
-          supervisor,
-          lead,
-          pm: lead,
-          ux: worker,
-          architect: lead,
-          dev: worker,
-          qa: worker,
-          watch,
-          retro,
+    const next = (() => {
+      const machine = slug === undefined ? undefined : readScrumConfig(state);
+      if (machine !== undefined) return saveScrumConfig(state, machine, slug);
+      // Reset seeds missing machine defaults from MACHINE SLP, never Project SLP.
+      if (reset && slug !== undefined)
+        return saveScrumConfig(state, ensureScrumConfig(state), slug);
+      const slp = loadLanes(state, slug);
+      if (!slp.ok) throw new FactoryError("lanes-unreadable", slp.reason);
+      const { supervisor, lead, worker, watch, retro } = slp.lanes;
+      return saveScrumConfig(
+        state,
+        {
+          schemaVersion: 1,
+          requireUiApproval: true,
+          lanes: {
+            supervisor,
+            lead,
+            pm: lead,
+            ux: worker,
+            architect: lead,
+            dev: worker,
+            qa: worker,
+            watch,
+            retro,
+          },
         },
-      },
-      slug,
-    );
+        slug,
+      );
+    })();
+    if (reset)
+      rmSync(join(scopeDir(state, slug), "scrum-active-profile.json"), {
+        force: true,
+      });
+    return next;
   });
 }

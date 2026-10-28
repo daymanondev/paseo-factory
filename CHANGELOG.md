@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.54] - 2026-10-28
+
+Improve the Scrum surface and isolate concurrent SLP and Scrum Projects (ADR 0033).
+
+### Added
+
+- Scrum standing-seat and specialist workflow graph, inline mockup decisions, roster/profile parity, and mode badges and filters across Projects (ADR 0033).
+- Separate machine roster editors and new-Project execution defaults.
+
+### Fixed
+
+- Switch Project execution modes optimistically from one high-contrast Header control, retiring live seats without starting idle replacements.
+- Keep concurrent SLP and Scrum provider/thinking configuration, permission fences, MCP dispatch reports and Driver respawns on their own bound lanes.
+- Skip steady-state Scrum recovery before entering execution or history locks.
+- Block mode switches for nested Project Tasks and all pending mailbox deliveries; isolate corrupt Scrum journals in snapshot error metadata.
+- Preserve active Scrum profile identity across roster edits and link workflow Tasks to live replacement Agents.
+
 ## [0.0.53] - 2026-10-28
 
 Retire the `factory-connector` companion plugin in favor of Paseo 0.13 native connected hosts (`paseo host add`).
