@@ -760,3 +760,50 @@ test("bridge lead_spawn_agent resolves real system git and ignores a broken <sta
   const worktree = factory.worktreeFor("T-01");
   assert.ok(worktree && existsSync(worktree), "Task worktree was allocated using real system git");
 });
+
+test("background MCP spawn reports the dispatched specialist lane", async t => {
+  const home = mkdtempSync(join(tmpdir(), "factory-bridge-background-"));
+  const stateDir = join(home, "plugin-state", "paseo-factory"), repo = makeGitRepo();
+  t.after(() => { rmSync(home, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); });
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
+  const project = ensureProjectRegistered(stateDir, repo);
+  assert.ok(project.ok); if (!project.ok) return;
+  factory.setContract({ task: "specialist", workspace: repo, gate: "true" });
+  const correlation = new CorrelationRegistry(stateDir).issue({ role: "lead", projectSlug: project.slug, projectRoot: repo, agentId: "lead-fixture" });
+  const bin = join(home, "fixture-bin"); mkdirSync(bin);
+  copyFileSync(BRIDGE_BIN, join(bin, "bridge.mjs"));
+  writeFileSync(join(home, "endpoint.sock"), "fixture presence marker");
+  // The external Driver boundary publishes its actual dispatch, which differs from the configured SLP worker.
+  writeFileSync(join(bin, "factory.mjs"), `import { appendFileSync } from 'node:fs';\nappendFileSync(${JSON.stringify(join(stateDir, "ledger.jsonl"))}, JSON.stringify({ seq: 2, ts: new Date().toISOString(), event: 'spawn_dispatched', task: 'specialist', provider: 'claude/pm-frozen', arity: 1 }) + '\\n');\n`);
+  const responses = await runMcpSession({ script: join(bin, "bridge.mjs"), cwd: repo, args: ["--home", home, "--state-dir", stateDir, "--correlation", correlation.correlationId], requests: [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_spawn_agent", arguments: { tasks: ["specialist"] } } }] });
+  assert.ok(responses[0].result, JSON.stringify(responses));
+  const result = responses[0].result as { isError?: boolean; content: { text: string }[] };
+  assert.notEqual(result.isError, true, result.content[0].text);
+  assert.match(result.content[0].text, /under claude\/pm-frozen/);
+});
+
+test("Scrum MCP spawn defaults to the task's frozen specialist roster", async t => {
+  const home = mkdtempSync(join(tmpdir(), "factory-bridge-scrum-"));
+  const stateDir = join(home, "plugin-state", "paseo-factory"), repo = makeGitRepo();
+  t.after(() => { rmSync(home, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); });
+  const { switchExecution } = await import("../plugin/server/core/scrum/execution.ts");
+  const { ensureScrumConfig, saveScrumConfig } = await import("../plugin/server/core/scrum/config.ts");
+  const { createScrumRun } = await import("../plugin/server/core/scrum/run-journal.ts");
+  const { handleSpoolRequest } = await import("../plugin/server/spool.ts");
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
+  const project = ensureProjectRegistered(stateDir, repo); assert.ok(project.ok); if (!project.ok) return;
+  await switchExecution({ state: stateDir, slug: project.slug, mode: "scrum", blockers: [], rotate: async () => {} });
+  const seed = ensureScrumConfig(stateDir, project.slug);
+  const config = saveScrumConfig(stateDir, { ...seed, lanes: { ...seed.lanes, pm: "claude/pm-frozen" } }, project.slug);
+  createScrumRun({ state: stateDir, slug: project.slug, runId: "r", initiativeId: "mcp", config, configRevision: config.configRevision!, track: "backend", rationale: "API", requestId: "create", ownedPaths: [".scratch/mcp/prd.md", ".scratch/mcp/decisions/plan.jsonl"] });
+  const contract = await handleSpoolRequest(factory, { id: "contract", kind: "contract", task: "plan", workspace: repo, gate: "true", role: "pm", runId: "r", submitter: "owner" });
+  assert.ok(contract.ok, JSON.stringify(contract));
+  const correlation = new CorrelationRegistry(stateDir).issue({ role: "lead", projectSlug: project.slug, projectRoot: repo, agentId: "scrum-lead" });
+  const spool = startSpool(stateDir, factory, { pollMs: 20 }); t.after(() => spool.stop());
+  const responses = await runMcpSession({ cwd: repo, args: ["--home", home, "--state-dir", stateDir, "--correlation", correlation.correlationId], requests: [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_spawn_agent", arguments: { tasks: ["plan"] } } }] });
+  assert.ok(responses[0].result, JSON.stringify(responses));
+  const result = responses[0].result as { isError?: boolean; content: { text: string }[] };
+  assert.notEqual(result.isError, true, result.content[0].text);
+  assert.match(result.content[0].text, /claude\/pm-frozen/);
+  assert.equal(factory.ledger.events.findLast(e => e.event === "spawn_dispatched")?.provider, "claude/pm-frozen");
+});

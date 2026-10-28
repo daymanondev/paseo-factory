@@ -1498,3 +1498,28 @@ test("pumping an empty project without a held handoff does not create a Lead", a
   assert.equal(fake.created.length, 0);
   assert.equal(fake.sent.length, 0);
 });
+
+test("Scrum-only recovery skips steady Projects and reconciles pending cancellation", async t => {
+  const { factory, stateDir, slug, fake } = makeSpooledRuntime(t);
+  const { switchExecution } = await import("../plugin/server/core/scrum/execution.ts");
+  const { ensureScrumConfig } = await import("../plugin/server/core/scrum/config.ts");
+  const { createScrumRun, commandRun } = await import("../plugin/server/core/scrum/run-journal.ts");
+  const reconciled: string[] = [];
+  const runtime = createLeadMailRuntime({ factory, stateDir, daemon: fake.daemon,
+    ensureLead: async () => { throw new Error("unexpected seat"); },
+    ensureSupervisor: async () => { throw new Error("unexpected seat"); },
+    retireLead: async () => { throw new Error("unexpected retirement"); },
+    reconcileScrum: async project => { reconciled.push(project.slug); },
+  });
+  t.after(() => runtime.stop());
+  await runtime.pumpAll({ reconcileScrumOnly: true });
+  assert.deepEqual(reconciled, []);
+  await switchExecution({ state: stateDir, slug, mode: "scrum", blockers: [], rotate: async () => {} });
+  const config = ensureScrumConfig(stateDir, slug);
+  const run = createScrumRun({ state: stateDir, slug, runId: "pending", initiativeId: "pending", config, configRevision: config.configRevision!, track: "small", rationale: "fixture", requestId: "create", ownedPaths: [] });
+  await runtime.pumpAll({ reconcileScrumOnly: true });
+  assert.deepEqual(reconciled, [], "a steady Scrum run must not enter the reconciliation writer");
+  commandRun(stateDir, slug, run.runId, { type: "cancellation_requested", requestId: "cancel", expectedRevision: run.revision, actor: "owner", reason: "stop" });
+  await runtime.pumpAll({ reconcileScrumOnly: true });
+  assert.deepEqual(reconciled, [slug]);
+});

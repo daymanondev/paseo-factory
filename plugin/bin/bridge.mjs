@@ -1004,7 +1004,19 @@ return module.exports;
 })();
 // END GENERATED WORKTREE POLICY
 
-function resolveDefaultWorkerLane(stateDir, projectSlug) {
+function resolveDefaultWorkerLane(stateDir, projectSlug, task) {
+  if (projectSlug && task) {
+    const contract = readLedgerEventsList(stateDir).findLast(e => e.event === "contract_set" && e.task === task);
+    if (contract?.execution?.mode === "scrum") {
+      const binding = contract.execution;
+      const journal = join(stateDir, "projects", projectSlug, "scrum/runs", binding.runId, "events.jsonl");
+      const events = readFileSync(journal, "utf8").trim().split("\n").map(line => JSON.parse(line));
+      const frozen = events[0]?.payload?.run?.config?.lanes?.[binding.role];
+      const selected = events.findLast(e => e.payload?.type === "provider_selected" && e.payload.task === task && e.payload.epoch === contract.seq)?.payload.provider;
+      if (typeof (selected ?? frozen) !== "string") throw new Error("Missing frozen Scrum role lane");
+      return selected ?? frozen;
+    }
+  }
   const DEFAULT_LANE = "pi/zai/glm-5.3";
   try {
     if (projectSlug) {
@@ -1393,7 +1405,7 @@ async function handleToolCall(name, rawArgs) {
     if (tasks.length === 0) {
       return toolResult("lead_spawn_agent requires `tasks` (non-empty array of task IDs).", true);
     }
-    const defaultWorkerLane = resolveDefaultWorkerLane(ctx.stateDir, ctx.projectSlug);
+    const defaultWorkerLane = resolveDefaultWorkerLane(ctx.stateDir, ctx.projectSlug, tasks[0]);
     const rawProvider = typeof args.provider === "string" ? args.provider.trim() : "";
     let provider = defaultWorkerLane;
     if (
@@ -1473,6 +1485,7 @@ async function handleToolCall(name, rawArgs) {
       child.unref();
 
       // Wait briefly (up to 4s) for spawn_dispatched / spawn_refused to record
+      let dispatchedLanes = provider;
       const deadline = Date.now() + 4_000;
       while (Date.now() < deadline) {
         const eventsNow = readLedgerEventsList(ctx.stateDir).slice(eventsBefore);
@@ -1484,12 +1497,13 @@ async function handleToolCall(name, rawArgs) {
           if (refused) {
             return toolResult(`spawn refused for ${refused.task}: ${refused.rule} — ${refused.reason}`, true);
           }
+          dispatchedLanes = [...new Set(spawnEvents.map(e => e.provider ?? provider))].join(", ");
           break;
         }
         await new Promise((r) => setTimeout(r, 75));
       }
       return toolResult(
-        `Driver launched in background for task(s): ${tasks.join(", ")} under ${provider}. End your turn now and wait for the completion report in your mailbox.`,
+        `Driver launched in background for task(s): ${tasks.join(", ")} under ${dispatchedLanes}. End your turn now and wait for the completion report in your mailbox.`,
       );
     }
 
@@ -1540,7 +1554,7 @@ async function handleToolCall(name, rawArgs) {
         ...(args.role === undefined ? {} : { role: args.role }),
         providerExplicit: rawProvider !== "",
         task,
-        provider,
+        provider: rawProvider ? provider : resolveDefaultWorkerLane(ctx.stateDir, ctx.projectSlug, task),
         arity: tasks.length,
         ...(worktree ? { worktree } : {}),
         prompt: taskPrompt,

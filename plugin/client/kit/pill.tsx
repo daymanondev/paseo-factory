@@ -364,3 +364,90 @@ export function Card({
     </View>
   );
 }
+
+/** A single-choice recessed track; selection retains full contrast even when locked. */
+export function SegmentedControl<T extends string>({
+  theme,
+  options,
+  value,
+  onChange,
+  disabled = false,
+  size = "md",
+}: {
+  theme: PluginTheme;
+  options: readonly {
+    value: T;
+    label: string;
+    icon?: string;
+    badge?: string;
+  }[];
+  value: T;
+  onChange: (value: T) => void;
+  disabled?: boolean;
+  size?: "sm" | "md";
+}) {
+  return (
+    <View
+      accessibilityRole="radiogroup"
+      style={{
+        flexDirection: "row",
+        flexWrap: "wrap",
+        padding: 2,
+        gap: 2,
+        borderRadius: RADIUS.md,
+        borderWidth: 1,
+        borderColor: theme.colors.border,
+        backgroundColor: theme.colors.surface0,
+        alignSelf: "flex-start",
+      }}
+    >
+      {options.map((option) => {
+        const active = option.value === value;
+        const color = active
+          ? theme.colors.accent
+          : theme.colors.foregroundMuted;
+        return (
+          <Pressable
+            key={option.value}
+            accessibilityRole="radio"
+            accessibilityState={{ selected: active, disabled }}
+            accessibilityLabel={option.label}
+            disabled={disabled}
+            onPress={() => {
+              if (!active) onChange(option.value);
+            }}
+            style={{
+              opacity: 1,
+              minHeight: size === "sm" ? CONTROL_SM : CONTROL_H,
+              paddingHorizontal: SPACING[2.5],
+              paddingVertical: 4,
+              flexDirection: "row",
+              gap: SPACING[1],
+              alignItems: "center",
+              borderRadius: RADIUS.md,
+              borderWidth: 1.5,
+              borderColor: active ? theme.colors.accent : "transparent",
+              backgroundColor: active
+                ? tint(theme.colors.accent, "20")
+                : "transparent",
+            }}
+          >
+            {option.icon ? (
+              <Icon name={option.icon} color={color} size={13} />
+            ) : null}
+            <Text
+              style={{
+                ...text(theme, "label"),
+                color,
+                fontWeight: active ? "700" : "400",
+              }}
+            >
+              {option.label}
+              {option.badge ? ` (${option.badge})` : ""}
+            </Text>
+          </Pressable>
+        );
+      })}
+    </View>
+  );
+}

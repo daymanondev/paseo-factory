@@ -1252,7 +1252,13 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   const pumpAll = async (options: { reconcileScrumOnly?: boolean } = {}): Promise<void> => {
     for (const registration of listProjectRegistrations(deps.stateDir)) {
       if (options.reconcileScrumOnly) {
-        try { if (readExecution(deps.stateDir, registration.slug).mode !== "scrum") continue; }
+        try {
+          if (readExecution(deps.stateDir, registration.slug).mode !== "scrum") continue;
+          const pending = listRuns(deps.stateDir, registration.slug).some(run =>
+            (!terminalRun(run) && (run.cancellation !== undefined || run.completionRequest !== undefined)) ||
+            (run.phase === "completed" && run.completionRequest !== undefined && !run.completionReported));
+          if (!pending) continue;
+        }
         catch (error) { log(`scrum selection of ${registration.slug} deferred: ${messageOf(error)}`); continue; }
       }
       try { await deps.reconcileScrum?.(registration); } catch (error) { log(`scrum recovery of ${registration.slug} deferred: ${messageOf(error)}`); }

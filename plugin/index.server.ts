@@ -179,7 +179,7 @@ export default function contribute(server: PluginServerContext) {
     // creates and managed-worktree creates carry their role contract in
     // config.systemPrompt (mapped per provider by the daemon) plus their
     // PASEO_FACTORY_* env — nothing under any project root is written.
-    const injected = injectRoleOnCreate(next, stateDir);
+    const injected = injectRoleOnCreate(next, stateDir, undefined, surface.cachedProviders());
     if (injected !== undefined) {
       log(`roles: injected the ${injected.env?.PASEO_FACTORY_SEAT ?? "agent"} contract into the agent created in ${next.config.cwd}`);
     }

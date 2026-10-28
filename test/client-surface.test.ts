@@ -160,7 +160,7 @@ test("v0.0.27 (ADR 0017 §3): the Header renders no Start Supervisor / Start Lea
 });
 
 test("v0.0.27 (ADR 0017 §3): Seats & Models renders no Start Supervisor / Start Lead buttons — vacant seats carry the picker hints, live seats keep Open / Rotate / Revoke", () => {
-  const seats = read("plugin/client/factory/seats.tsx");
+  const seats = read("plugin/client/factory/seats.tsx") + read("plugin/client/factory/seat-graph.tsx");
   assert.ok(!seats.includes("Start Supervisor"), "the Seats & Models view renders no Start Supervisor button");
   assert.ok(!seats.includes("Start Lead"), "the Seats & Models view renders no Start Lead button");
   assert.match(seats, /title="Supervisor — not started"/, "the vacant Supervisor node names its not-started state");
@@ -189,7 +189,7 @@ test("v0.0.27 (ADR 0017 §3): FactoryShell drops the ensure/dispatch seat wiring
 // ---- the Lead telemetry trio (v0.0.20, ADR 0013 §6) ----------------
 
 test("the Lead card renders the 128k telemetry trio — usage pill, rotationState badge, queued mail count", () => {
-  const seats = read("plugin/client/factory/seats.tsx");
+  const seats = read("plugin/client/factory/seat-graph.tsx").replace(/\s+/g, " ");
   assert.match(
     seats,
     /label=\{`\$\{Math\.round\(agent\.contextUsedTokens \/ 1000\)\}k \/ 128k handoff`\}/,

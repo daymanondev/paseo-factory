@@ -2095,9 +2095,6 @@ function saveScrumConfig(state, config, slug) {
       configRevision: (previous?.configRevision ?? 0) + 1
     };
     atomicJson(join8(scopeDir(state, slug), "scrum-lanes.json"), next);
-    rmSync4(join8(scopeDir(state, slug), "scrum-active-profile.json"), {
-      force: true
-    });
     return structuredClone(next);
   });
 }
@@ -2105,32 +2102,39 @@ function ensureScrumConfig(state, slug, reset = false) {
   return scrumMutation(state, () => {
     const current = readScrumConfig(state, slug);
     if (current !== void 0 && !reset) return current;
-    const machine = slug === void 0 ? void 0 : readScrumConfig(state);
-    if (machine !== void 0) return saveScrumConfig(state, machine, slug);
-    if (reset && slug !== void 0)
-      return saveScrumConfig(state, ensureScrumConfig(state), slug);
-    const slp = loadLanes(state, slug);
-    if (!slp.ok) throw new FactoryError("lanes-unreadable", slp.reason);
-    const { supervisor, lead, worker, watch, retro } = slp.lanes;
-    return saveScrumConfig(
-      state,
-      {
-        schemaVersion: 1,
-        requireUiApproval: true,
-        lanes: {
-          supervisor,
-          lead,
-          pm: lead,
-          ux: worker,
-          architect: lead,
-          dev: worker,
-          qa: worker,
-          watch,
-          retro
-        }
-      },
-      slug
-    );
+    const next = (() => {
+      const machine = slug === void 0 ? void 0 : readScrumConfig(state);
+      if (machine !== void 0) return saveScrumConfig(state, machine, slug);
+      if (reset && slug !== void 0)
+        return saveScrumConfig(state, ensureScrumConfig(state), slug);
+      const slp = loadLanes(state, slug);
+      if (!slp.ok) throw new FactoryError("lanes-unreadable", slp.reason);
+      const { supervisor, lead, worker, watch, retro } = slp.lanes;
+      return saveScrumConfig(
+        state,
+        {
+          schemaVersion: 1,
+          requireUiApproval: true,
+          lanes: {
+            supervisor,
+            lead,
+            pm: lead,
+            ux: worker,
+            architect: lead,
+            dev: worker,
+            qa: worker,
+            watch,
+            retro
+          }
+        },
+        slug
+      );
+    })();
+    if (reset)
+      rmSync4(join8(scopeDir(state, slug), "scrum-active-profile.json"), {
+        force: true
+      });
+    return next;
   });
 }
 export {

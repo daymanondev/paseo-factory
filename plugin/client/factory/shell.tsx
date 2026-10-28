@@ -16,14 +16,14 @@
 import type { PluginTheme } from "@getpaseo/plugin";
 import type { PluginTab } from "@getpaseo/plugin/client";
 import { useRpc, useTabState } from "@getpaseo/plugin/client";
-import { ScrollView, useToast } from "@getpaseo/plugin/client/ui";
+import { Modal, ScrollView, useToast } from "@getpaseo/plugin/client/ui";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Text, View } from "react-native";
 import { z } from "zod";
 import { accept, executionSetMode, scrumCommand, lanesReset, lanesSet, lanesSetBatch, leadRotate, pluginsInstall, pluginsManage, pluginsCheckUpdates, profilesApply, profilesDelete, profilesSave, projectAdd, projectDelete, projectPickFolder, projectReset, ratifyProposal, retro, snapshot, supervisorRevoke, taskDetail, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
 import type { ManageablePluginId } from "../../shared/companions.ts";
 import type { FactoryView, LaneName } from "../../shared/view.ts";
-import { Card, TabBar } from "../kit/pill.tsx";
+import { Btn, Card, TabBar } from "../kit/pill.tsx";
 import type { TabId } from "../kit/pill.tsx";
 import { SPACING, text } from "../kit/theme.ts";
 import { useNow, usePoll, pollEvery } from "../kit/poll.ts";
@@ -133,6 +133,8 @@ export function FactoryShell({
   };
 
   const [bump, setBump] = useState(0);
+  const [optimisticMode, setOptimisticMode] = useState<{ root: string; scope: string | undefined; mode: "slp" | "scrum"; revision: number } | null>(null);
+  const [pendingMode, setPendingMode] = useState<"slp" | "scrum" | null>(null);
   const [busy, setBusy] = useState(false);
   const [busyAct, setBusyAct] = useState<string | null>(null);
   const [checkingUpdates, setCheckingUpdates] = useState(false);
@@ -179,7 +181,17 @@ export function FactoryShell({
           ),
   );
   if (poll.value !== null) lastViewRef.current = poll.value;
-  const view = poll.value ?? lastViewRef.current;
+  const serverView = poll.value ?? lastViewRef.current;
+  const optimistic = optimisticMode && optimisticMode.root === serverView?.project?.root && (serverView.execution?.revision ?? 0) <= optimisticMode.revision ? optimisticMode : null;
+  const view = serverView && optimistic && serverView.execution ? {
+    ...serverView,
+    project: serverView.project ? { ...serverView.project, executionMode: optimistic.mode, activeScrumPhase: null } : null,
+    projects: serverView.projects.map(project => project.root === optimistic.root ? { ...project, executionMode: optimistic.mode, activeScrumPhase: null } : project),
+    execution: { ...serverView.execution, selectedMode: optimistic.mode },
+  } : serverView;
+  useEffect(() => {
+    if (optimisticMode && (scopeRoot !== optimisticMode.scope || (serverView?.execution?.revision ?? 0) > optimisticMode.revision)) setOptimisticMode(null);
+  }, [scopeRoot, serverView?.execution?.revision, optimisticMode]);
   const now = useNow(1000);
   const elapsedSeconds = activePluginAct === null ? 0 : Math.max(0, Math.floor((now - activePluginAct.startedAt) / 1000));
   useEffect(() => { if (view !== null) setVaultNote(null); }, [view]);
@@ -306,6 +318,14 @@ export function FactoryShell({
   // The Project-scoped acts need a resolved Project — the snapshot's own
   // `project` is the truth (a scope that does not resolve leaves them parked).
   const projectRoot = view.project?.root;
+  const applyMode = (mode: "slp" | "scrum"): void => {
+    setPendingMode(null);
+    if (projectRoot) setOptimisticMode({ root: projectRoot, scope: scopeRoot, mode, revision: serverView?.execution?.revision ?? 0 });
+    void act("Execution mode", () => executionSetModeCall({ mode, projectRoot })).then(ok => { if (!ok) setOptimisticMode(null); });
+  };
+  const requestMode = (mode: "slp" | "scrum"): void => {
+    if (projectRoot && (view.supervisor || view.lead)) setPendingMode(mode); else applyMode(mode);
+  };
   // The seat jumps (v0.0.27, ADR 0017 §3): a seat starts only from Paseo's
   // native New Chat picker ("Supervisor (Factory)"), and the Supervisor
   // spawns the Lead itself — so Open is a bare navigation to the live seat's
@@ -396,6 +416,9 @@ export function FactoryShell({
         if (w > 0 && Math.abs(w - containerWidth) >= 4) setContainerWidth(w);
       }}
     >
+      <Modal open={pendingMode !== null} onOpenChange={open => { if (!open) setPendingMode(null); }} title="Switch Project execution mode?">
+        <Modal.Content><View style={{ gap: SPACING[3] }}><Text style={text(theme, "meta")}>The live Supervisor and Lead sessions will be archived. The next turn starts with the new mode's instructions.</Text><Btn theme={theme} label="Archive seats & Switch" disabled={busy} onPress={() => { if (pendingMode) applyMode(pendingMode); }} /><Btn theme={theme} label="Cancel" onPress={() => setPendingMode(null)} /></View></Modal.Content>
+      </Modal>
       <ScrollView
         style={{ flex: 1 }}
         contentContainerStyle={{
@@ -411,7 +434,7 @@ export function FactoryShell({
           now={now}
           compact={isCompact}
           actions={{
-            setMode: mode => { void act("Execution mode", () => executionSetModeCall({ mode, projectRoot })); },
+            setMode: requestMode,
             openSupervisor,
             openLead,
             resetProject,
@@ -473,7 +496,7 @@ export function FactoryShell({
             view={view}
             modelSyncNote={laneNote}
             actions={{
-              setMode: mode => { void act("Execution mode", () => executionSetModeCall({ mode, projectRoot })); },
+              setMode: requestMode,
               scrum: async (operation, payload, runId, expectedRevision) => {
                 const reply = await scrumCommandCall({ operation, payload, runId, expectedRevision, projectRoot, requestId: `ui-${Date.now()}-${Math.random().toString(36).slice(2)}` });
                 await act(`Scrum ${operation}`, async () => reply);

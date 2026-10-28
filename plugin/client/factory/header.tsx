@@ -145,7 +145,6 @@ export function Header({
 
   return (
     <View style={{ gap: SPACING[3] }}>
-      <ExecutionSelector theme={theme} view={view} setMode={actions.setMode} busy={actions.busy} />
       {/* Top status bar: Headline + Freshness */}
       <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: SPACING[2] }}>
         <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[2], flexShrink: 1 }}>
@@ -246,7 +245,7 @@ export function Header({
             >
               <Chip
                 theme={theme}
-                label={projectLabel(entry.slug, entry.root, entry.name)}
+                label={`${projectLabel(entry.slug, entry.root, entry.name)} · ${entry.executionMode === "scrum" ? `Scrum${entry.activeScrumPhase ? ` · ${entry.activeScrumPhase}` : ""}` : "SLP"}`}
                 active={project?.slug === entry.slug}
                 count={projectTaskCount(view, entry)}
                 icon={entry.missingRoot ? "AlertTriangle" : "FolderGit2"}
@@ -330,6 +329,7 @@ export function Header({
           </View>
         </View>
 
+        {project ? <ExecutionSelector theme={theme} view={view} setMode={actions.setMode} busy={actions.busy} /> : null}
         {pickingPath ? (
           <View style={{ gap: SPACING[1.5], borderTopWidth: 1, borderTopColor: theme.colors.border, paddingTop: SPACING[2] }}>
             <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[2] }}>

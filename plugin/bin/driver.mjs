@@ -956,7 +956,7 @@ export async function observeTasks(
 
     if (spentRespawn === undefined && lastSpawn !== undefined && !hasGreen && maxAttempt < MAX_ATTEMPTS) {
       const diedAgentId = entry.agentId;
-      const request = stampDriverRequest({ id: randomId(), kind: "respawn", task: entry.task, provider, died_agent: diedAgentId });
+      const request = stampDriverRequest({ id: randomId(), kind: "respawn", task: entry.task, provider: entry.provider ?? provider, died_agent: diedAgentId });
       submit(spoolRoot, request);
       const reply = await awaitReply(spoolRoot, request.id, LEAD_WAIT_MS);
       if (reply === null) {

@@ -1,3 +1,5 @@
+import { resolveRoleLane, laneProviderConfig } from "./provider-lanes.ts";
+import type { ProviderCatalogEntry } from "./provider-lanes.ts";
 import { provisionScrumHarness, resolveScrumIdentity, scrumIdentityLane, scopeScrumCapabilities } from "./core/scrum/harness.ts";
 import type { ScrumHarnessIdentity } from "./core/scrum/harness.ts";
 import { SCRUM_PROMPT_MARK, SCRUM_ROLE_TITLES, renderScrumPrompt } from "./core/scrum/prompts.ts";
@@ -14,7 +16,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { provisionAgyPlugin, ensureFactoryBinScripts } from "./core/agy-home.ts";
 import { CorrelationRegistry } from "./core/correlations.ts";
-import { loadLanes, parseLane } from "./core/lanes.ts";
+import { parseLane } from "./core/lanes.ts";
 import { resolveOrBootstrapProject, resolveProject } from "./core/project.ts";
 import { provisionPiAgentHome } from "./core/pi-home.ts";
 import {
@@ -152,6 +154,7 @@ export function factoryEnvFor(
 export interface AgentCreateRequest {
   config: {
     provider?: string;
+    thinkingOptionId?: string;
     cwd: string;
     title?: string | null;
     systemPrompt?: string;
@@ -245,11 +248,6 @@ function providerFamilyOf(rawProvider: string): string {
   return rawFamily === "claude-code" ? "claude" : rawFamily === "agy" ? "antigravity" : rawFamily;
 }
 
-/** The Lane config key naming the harness behind one factory role. */
-function laneNameForRole(role: RoleName): "supervisor" | "lead" | "worker" {
-  return role === "supervisor" ? "supervisor" : role === "lead" ? "lead" : "worker";
-}
-
 /**
  * Resolves the harness family a `factory-*` role provider actually runs on
  * (v0.0.27, ADR 0017 §2): the role's Lane config names the underlying harness,
@@ -263,11 +261,11 @@ export function resolveEffectiveProviderFamily(
   role: RoleName,
   stateDir: string,
   projectSlug: string,
+  taskId?: string,
 ): string {
   const rawProvider = typeof provider === "string" ? provider.trim() : "";
   if (inferRoleFromProviderId(rawProvider) === undefined) return providerFamilyOf(rawProvider);
-  const loaded = loadLanes(stateDir, projectSlug !== "" ? projectSlug : undefined);
-  const lane = loaded.ok ? loaded.lanes[laneNameForRole(role)] : undefined;
+  const lane = resolveRoleLane(stateDir, projectSlug, role, taskId);
   const parsed = lane !== undefined ? parseLane(lane) : undefined;
   return parsed === undefined ? providerFamilyOf(rawProvider) : providerFamilyOf(parsed.provider);
 }
@@ -478,12 +476,14 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
   request: R,
   stateDir: string,
   userHome?: string,
+  providers?: readonly ProviderCatalogEntry[],
 ): R | undefined {
   if ((request.config.systemPrompt ?? "").includes(FOOTER_MARK) || (request.config.systemPrompt ?? "").includes(SCRUM_PROMPT_MARK)) return undefined; // already injected — idempotent
   const reqLabels =
     (request as { labels?: Record<string, string> }).labels ??
     (request.config as { labels?: Record<string, string> }).labels;
   const correlations = new CorrelationRegistry(stateDir);
+  request = { ...request, config: { ...request.config } };
 
   // The deterministic identity ladder (v0.0.27, ADR 0017 §2): the native role
   // provider id first, then the `PASEO_FACTORY_SEAT` env stamp, then the
@@ -501,6 +501,7 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
       const reg = listProjectRegistrations(stateDir).find((r) => r.slug === worktree.slug);
       const projectRoot = reg?.root ?? "";
       const execution = resolveScrumIdentity(stateDir, worktree.slug, worktree.task);
+      if (execution) delete request.config.thinkingOptionId;
       const issued = correlations.issue({
         ...(execution === undefined ? {} : { execution }),
         role: "agent",
@@ -511,7 +512,7 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
       const fencedConfig = applyProviderExecutionFence(
         {
           ...request.config,
-          ...(execution === undefined ? {} : scrumProviderConfig(stateDir, worktree.slug, "agent", execution)),
+          ...(execution === undefined ? {} : scrumProviderConfig(stateDir, worktree.slug, "agent", execution, providers)),
           // The Agent tab inside the Task worktree Workspace reads `Peer · <Task>`
           // (ADR 0017 §2) — never the bare task id or the raw spawn prompt.
           title: execution?.kind === "task" ? `${SCRUM_ROLE_TITLES[execution.binding.role]} · ${worktree.task}` : formatPeerAgentTitle(worktree.task),
@@ -527,7 +528,7 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
           // A `factory-peer` spawn (ADR 0017 §2) fences under the worker
           // lane's harness — without this, `providerFamilyOf("factory-peer")`
           // matches no family and the Layer-1 agent fence silently no-ops.
-          providerFamily: execution === undefined ? resolveEffectiveProviderFamily(request.config.provider, "agent", stateDir, worktree.slug) : parseLane(scrumIdentityLane(stateDir, worktree.slug, "agent", execution))!.provider,
+          providerFamily: execution === undefined ? resolveEffectiveProviderFamily(request.config.provider, "agent", stateDir, worktree.slug) : providerFamilyOf(scrumIdentityLane(stateDir, worktree.slug, "agent", execution)),
         },
       );
       return sanitizeAgentCreateHookResult({
@@ -563,6 +564,7 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
     ? { root: registered.root, slug: registered.slug }
     : { root: project.root, slug: project.slug };
   const execution = resolveScrumIdentity(stateDir, projectIdentity.slug);
+  if (execution) delete request.config.thinkingOptionId;
   const issued = correlations.issue({
     ...(execution === undefined ? {} : { execution }),
     role,
@@ -572,7 +574,7 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
   const fencedConfig = applyProviderExecutionFence(
     {
       ...request.config,
-      ...(execution === undefined ? {} : scrumProviderConfig(stateDir, projectIdentity.slug, role, execution)),
+      ...(execution === undefined ? {} : scrumProviderConfig(stateDir, projectIdentity.slug, role, execution, providers)),
       // The Agent tab inside the main Workspace reads the clean seat title
       // (ADR 0017 §2) — `Supervisor` / `Lead`, never the raw first message.
       title: role === "lead" && execution ? "Scrum Lead" : role === "supervisor" || role === "lead" ? SEAT_TITLES[role] : request.config.title,
@@ -589,7 +591,7 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
       correlationId: issued.correlationId,
       projectSlug: projectIdentity.slug,
       userHome,
-      providerFamily: execution === undefined ? resolveEffectiveProviderFamily(request.config.provider, role, stateDir, projectIdentity.slug) : parseLane(scrumIdentityLane(stateDir, projectIdentity.slug, role, execution))!.provider,
+      providerFamily: execution === undefined ? resolveEffectiveProviderFamily(request.config.provider, role, stateDir, projectIdentity.slug) : providerFamilyOf(scrumIdentityLane(stateDir, projectIdentity.slug, role, execution)),
     },
   );
   return sanitizeAgentCreateHookResult({
@@ -823,8 +825,8 @@ export function injectSessionEnv<
   return undefined;
 }
 
-function scrumProviderConfig(state: string, slug: string, role: RoleName, identity: ScrumHarnessIdentity) {
-  const lane = parseLane(scrumIdentityLane(state, slug, role, identity));
+function scrumProviderConfig(state: string, slug: string, role: RoleName, identity: ScrumHarnessIdentity, providers?: readonly ProviderCatalogEntry[]) {
+  const lane = resolveRoleLane(state, slug, role, identity.kind === "task" ? identity.task : undefined);
   if (!lane) throw new Error("invalid frozen Scrum lane");
-  return { provider: lane.provider, model: lane.model, thinkingOptionId: lane.thinking };
+  return laneProviderConfig(lane, providers);
 }
