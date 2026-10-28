@@ -7,12 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.52] - 2026-10-28
+
+Add isolated, opt-in Agile Scrum execution while retaining the default SLP workflow.
+
 ### Added
 
 - Opt-in Project Scrum execution with separate rosters/profiles, frozen run configuration, specialist Contract bindings and Project/run/epoch-scoped harnesses.
 - Durable run decisions, semantic readiness and digest-bound UI approval with an isolated accepted mockup preview.
 - Structural Scrum document linting, QA regression bundles, unchanged-test promotion, bounded fix reservations and a product completion check separate from GREEN Task acceptance.
 - Factory execution selector and eight-role Scrum roster; CLI/RPC configuration, run and decision operations, optional Vault entries and scoped cleanup.
+
+### Fixed
+
+- Persist recoverable Contract retirement and rejection dispositions, pin cleanup to the original Agents, and block new dispatch while cancellation is pending.
+- Keep QA report retries idempotent, require explicit PRD-to-backlog mappings, and bind approval to the complete accepted design revision.
+- Reconcile durable Scrum completion and cancellation during the daemon lifetime without draining held coordinator mail or bypassing delivery retry limits.
+
+### Validation
+
+- `npm run check`: 993/993 tests on Node 22.22.0 and 24.21.0; installed-artifact checks: 58/58. Independent Standards and Spec reviews have zero outstanding findings.
+- Trial verification covers native SLP/Dev Agents, offline browser design rejection/revision/approval, and a real QA defect/test-promotion/fix/re-audit flow. See `docs/validation/factory-v0.0.52.md`.
 
 ## [0.0.51] - 2026-10-27
 
