@@ -90,6 +90,7 @@ export function validateQaReport(value: unknown): string[] {
   )
     return ["invalid QA report identity/status"];
   const issues: string[] = [];
+  if (typeof r.activeSuite !== "boolean") issues.push("activeSuite must explicitly be a boolean");
   if (
     !executionValid(r.baseline) ||
     r.baseline.exit !== 0 ||

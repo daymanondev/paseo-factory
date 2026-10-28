@@ -40,6 +40,7 @@ function validateQaReport(value) {
   if (!r || r.schemaVersion !== 1 || !safeId(r.auditId) || !/^[a-f0-9]{40}$/.test(r.productSha) || !["clean", "defects_found", "blocked", "inconclusive"].includes(r.status))
     return ["invalid QA report identity/status"];
   const issues = [];
+  if (typeof r.activeSuite !== "boolean") issues.push("activeSuite must explicitly be a boolean");
   if (!executionValid(r.baseline) || r.baseline.exit !== 0 || r.baseline.passed !== r.baseline.tests || !r.baseline.firstAttempt || r.baseline.skipped || r.baseline.expectedFailures)
     issues.push("pre-existing baseline must pass with evidence");
   if (!Array.isArray(r.runs) || !r.runs.every(executionValid))
@@ -311,7 +312,9 @@ function lintScrumDoc(kind, files) {
       if (!sourceIds.has(match[0]))
         add("sprint-backlog.md", 1, "dangling", `undefined source ${match[0]}`);
     for (const d of sources)
-      if (!text.includes(d.id))
+      if (!new Set(text.match(/\b(?:FR|NFR|UJ)-[1-9]\d*\b/g) ?? []).has(
+        d.id
+      ))
         add("sprint-backlog.md", 1, "coverage", `${d.id} has no R mapping`);
   }
   if (kind === "qa" && files["qa-report.json"]) {

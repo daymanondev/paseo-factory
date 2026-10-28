@@ -5786,3 +5786,37 @@ test("execution mode refuses pending Tasks/mail and isolates Scrum snapshot fail
   const slp = await handlers.snapshot({ projectRoot: project.root });
   assert.equal(slp.ok, true); if (slp.ok) assert.equal(slp.view.execution?.selectedMode, "slp");
 });
+
+test("Scrum cancellation checks revision before stopping Agents and recovers a persisted interrupted intent", async t => {
+  const agents: FakeAgent[] = [];
+  const { handlers, factory, stateDir, home, fake } = makeSurface(t, agents);
+  const project = makeProject(t, "cancel-project");
+  assert.equal((await handlers.executionSetMode({ projectRoot: project.root, mode: "scrum" })).ok, true);
+  const created = await handlers.scrumCommand({ projectRoot: project.root, operation: "run.create", runId: "cancel-run", requestId: "create", payload: { initiativeId: "cancel-fixture", track: "small", rationale: "test cancellation", ownedPaths: [] } });
+  assert.equal(created.ok, true);
+  agents.push({ id: "owned-dev", provider: "pi/test", status: "running", labels: { seat: "agent", project: project.slug, run: "cancel-run" } });
+  const stops: string[] = []; let failStop = true;
+  const restarted = createSurfaceHandlers({ factory, stateDir, home, daemon: fake.daemon, stopAgent: async id => { stops.push(id); if (failStop) throw new Error("connection lost"); return { ok: true }; } });
+  const stale = await restarted.scrumCommand({ projectRoot: project.root, operation: "run.cancel", runId: "cancel-run", requestId: "cancel", expectedRevision: 99, payload: { reason: "Owner cancellation" } });
+  assert.equal(stale.ok, false); assert.deepEqual(stops, []); assert.equal(fake.archived.length, 0);
+  const interrupted = await restarted.scrumCommand({ projectRoot: project.root, operation: "run.cancel", runId: "cancel-run", requestId: "cancel", expectedRevision: 1, payload: { reason: "Owner cancellation" } });
+  assert.equal(interrupted.ok, false);
+  const { readRun } = await import("../plugin/server/core/scrum/run-journal.ts");
+  const pending = readRun(stateDir, project.slug, "cancel-run");
+  assert.equal(pending.cancellation?.requestId, "cancel"); assert.notEqual(pending.phase, "cancelled");
+  failStop = false;
+  const resumed = await restarted.scrumCommand({ projectRoot: project.root, operation: "run.cancel", runId: "cancel-run", requestId: "cancel", expectedRevision: pending.revision, payload: { reason: "Owner cancellation" } });
+  assert.equal(resumed.ok, true, JSON.stringify(resumed)); assert.equal(readRun(stateDir, project.slug, "cancel-run").phase, "cancelled"); assert.ok(fake.archived.includes("owned-dev"));
+});
+
+test("Scrum completion sees an in-flight mailbox delivery after its queue becomes empty", async t => {
+  const { handlers, stateDir } = makeSurface(t);
+  const project = makeProject(t, "completion-flight");
+  assert.equal((await handlers.executionSetMode({ projectRoot: project.root, mode: "scrum" })).ok, true);
+  assert.equal((await handlers.scrumCommand({ operation: "run.create", projectRoot: project.root, runId: "r", requestId: "create", payload: { initiativeId: "completion-flight", track: "small", rationale: "fixture", ownedPaths: [] } })).ok, true);
+  const mailbox = join(stateDir, "projects", project.slug, "mailbox.jsonl");
+  const mail = enqueueLeadMail(mailbox, { from: "owner", kind: "directive", text: "verify before completion" });
+  deliverLeadMail(mailbox, { mailIds: [mail.mailId], toAgentId: "lead" });
+  const result = await handlers.scrumCommand({ operation: "run.complete", projectRoot: project.root, runId: "r", requestId: "complete", expectedRevision: 1 });
+  assert.equal(result.ok, false); if (!result.ok) assert.match(result.error, /Agents\/directives still in flight/);
+});

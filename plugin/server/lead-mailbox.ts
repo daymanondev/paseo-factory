@@ -1,7 +1,7 @@
 import { bindScrumDirective, bindScrumBlocker } from "./scrum.ts";
 import { withExecutionLane } from "./core/scrum/execution.ts";
 import { readExecution } from "./core/scrum/config.ts";
-import { readRun, listRuns, terminalRun } from "./core/scrum/run-journal.ts";
+import { readRun, listRuns, commandRun, terminalRun } from "./core/scrum/run-journal.ts";
 import { renderScrumPrompt } from "./core/scrum/prompts.ts";
 /**
  * The Lead mailbox runtime (v0.0.20, ADR 0013 Decisions 3–5): the plugin-side
@@ -236,6 +236,7 @@ export interface LeadMailRuntimeDeps {
    * Optional override for the `handing_over` extraction fuse timeout in ms
    * (v0.0.28, ADR 0018 §3; defaults to `HANDOFF_EXTRACTION_TIMEOUT_MS = 90_000`).
    */
+  reconcileScrum?: (project: { slug: string; root: string }) => Promise<void>;
   handoffTimeoutMs?: number;
   onLog?: (message: string) => void;
   logger?: { warn?: (message: string) => void; info?: (message: string) => void; error?: (message: string) => void };
@@ -1146,7 +1147,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     if (!target.ok) return target;
     const { root, slug } = target;
     if (request.reportType !== undefined) {
-      if (readExecution(deps.stateDir, slug).mode !== "scrum" || typeof request.scrum?.runId !== "string") return { id: request.id, ok: false, code: "execution-mode-mismatch", message: "structured Scrum report needs explicit Scrum run" };
+      if (typeof request.scrum?.runId !== "string") return { id: request.id, ok: false, code: "execution-mode-mismatch", message: "structured Scrum report needs explicit Scrum run" };
       const run = readRun(deps.stateDir, slug, request.scrum.runId);
       if (request.reportType === "completed" && run.phase !== "completed") return { id: request.id, ok: false, code: "scrum-completion-blocked", message: "run controller has not verified completion" };
       if (request.reportType === "ui-review" && (!run.design || run.design.digest !== request.scrum.digest || run.design.revision !== request.scrum.designRevision)) return { id: request.id, ok: false, code: "stale-design-decision", message: "report must pin current design digest and revision" };
@@ -1163,6 +1164,10 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
           ...(request.reportType === undefined ? {} : { reportType: request.reportType, scrum: request.scrum, requestId: request.id }),
           text: request.message,
         });
+        if (request.reportType === "completed" && typeof request.scrum?.runId === "string") {
+          const completed = readRun(deps.stateDir, slug, request.scrum.runId);
+          if (!completed.completionReported) commandRun(deps.stateDir, slug, completed.runId, { type: "completion_reported", requestId: `${completed.completionRequest?.requestId ?? request.id}:reported`, expectedRevision: completed.revision, mailId: queued.mailId });
+        }
         return { ok: true, agentId: ensured.agentId, mailId: queued.mailId };
       },
     );
@@ -1246,8 +1251,9 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
    */
   const pumpAll = async (): Promise<void> => {
     for (const registration of listProjectRegistrations(deps.stateDir)) {
-      await pumpProjectLead(registration.slug);
-      await pumpProjectSupervisor(registration.slug);
+      try { await deps.reconcileScrum?.(registration); } catch (error) { log(`scrum recovery of ${registration.slug} deferred: ${messageOf(error)}`); }
+      try { await pumpProjectLead(registration.slug); } catch (error) { log(`lead mailbox of ${registration.slug} deferred: ${messageOf(error)}`); }
+      try { await pumpProjectSupervisor(registration.slug); } catch (error) { log(`supervisor mailbox of ${registration.slug} deferred: ${messageOf(error)}`); }
     }
   };
 

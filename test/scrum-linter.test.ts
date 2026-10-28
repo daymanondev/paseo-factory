@@ -85,3 +85,12 @@ test("installed lint-scrum-doc CLI has distinct valid, findings, and invocation 
   assert.equal(cli("--kind", "unknown", "--dir", dir).status, 2);
   assert.equal(cli("--kind", "prd", "--dir", join(dir, "absent")).status, 2);
 });
+
+test("FR-10 cannot satisfy mandatory FR-1 coverage", () => {
+  const diagnostics = lintScrumDoc("backlog", {
+    "prd.md": "# FR-1: authentication required\n# FR-10: heading\n",
+    "sprint-backlog.md":
+      "# R1: heading\nSource: FR-10\n# S-01: heading story\nCovers: R1\nTests: heading.test.js\n",
+  });
+  assert.ok(diagnostics.some((d) => d.message === "FR-1 has no R mapping"));
+});

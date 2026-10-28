@@ -1,3 +1,5 @@
+import { readExecution } from "./server/core/scrum/selection.ts";
+import { listRuns, readRun, terminalRun } from "./server/core/scrum/run-journal.ts";
 /**
  * paseo-factory plugin server entry — the shell around the pure core.
  *
@@ -225,6 +227,18 @@ export default function contribute(server: PluginServerContext) {
     factory,
     stateDir,
     daemon: () => paseoApi as never,
+    reconcileScrum: async project => {
+      if (readExecution(stateDir, project.slug).mode !== "scrum") return;
+      for (let run of listRuns(stateDir, project.slug)) {
+        if (run.cancellation && !terminalRun(run)) {
+          await surface.scrumCommand({ operation: "run.cancel", projectRoot: project.root, runId: run.runId, requestId: run.cancellation.requestId, expectedRevision: run.revision, payload: { reason: run.cancellation.reason } }, undefined, { authority: "owner", actor: run.cancellation.actor });
+        } else if (run.completionRequest && !terminalRun(run)) {
+          await surface.scrumCommand({ operation: "run.complete", projectRoot: project.root, runId: run.runId, requestId: run.completionRequest.requestId, expectedRevision: run.revision }, undefined, { authority: "lead", actor: run.completionRequest.actor });
+        }
+        run = readRun(stateDir, project.slug, run.runId);
+        if (run.phase === "completed" && run.completionRequest && !run.completionReported) await leadMail.reportSupervisor({ id: `${run.completionRequest.requestId}:report`, kind: "supervisor_report", workspace: project.root, reportType: "completed", scrum: { runId: run.runId }, message: `Scrum run ${run.runId} completed after verification. ${JSON.stringify(run.telemetry)}`, seat: "lead" });
+      }
+    },
     ensureLead: (input) => surface.leadEnsure(input),
     ensureSupervisor: (input) => surface.supervisorEnsure(input),
     retireLead: (input) => surface.leadRotate(input),

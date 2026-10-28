@@ -129,6 +129,14 @@ test("a GREEN QA artifact reproduces a real defect, Dev promotes unchanged tests
     `${qaRoot}/a2/qa-report.json`,
     `${qaRoot}/a2/qa-report.md`,
   ];
+  const { switchExecution } = await import("../src/scrum/execution.ts");
+  await switchExecution({
+    state,
+    slug: "fixture",
+    mode: "scrum",
+    blockers: [],
+    rotate: async () => {},
+  });
   let run = createScrumRun({
     state,
     slug: "fixture",
@@ -425,4 +433,28 @@ test("a GREEN QA artifact reproduces a real defect, Dev promotes unchanged tests
     }),
     [],
   );
+  const { scrumOperation } = await import("../src/scrum/controller.ts");
+  const context = {
+    factory,
+    root: repo,
+    slug: "fixture",
+    authority: "lead" as const,
+    actor: "lead",
+    activeAgents: [],
+    pendingDirectives: true,
+  };
+  const complete = {
+    operation: "run.complete",
+    runId: run.runId,
+    requestId: "complete",
+    expectedRevision: run.revision,
+  };
+  const pending = scrumOperation(complete, context) as typeof run;
+  assert.notEqual(pending.phase, "completed");
+  assert.equal(pending.completionRequest?.requestId, "complete");
+  const completed = scrumOperation(
+    { ...complete, expectedRevision: pending.revision },
+    { ...context, pendingDirectives: false },
+  ) as typeof run;
+  assert.equal(completed.phase, "completed");
 });

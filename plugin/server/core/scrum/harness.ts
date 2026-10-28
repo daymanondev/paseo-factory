@@ -162,10 +162,60 @@ export function provisionScrumHarness(input: {
 }
 
 /** The same authority/tool policy is applied to every supported provider's create request. */
-export function scopeScrumCapabilities<T extends { provider?: string; mcpServers?: Record<string, unknown>; providerOptions?: Record<string, unknown>; systemPrompt?: string }>(config: T, authority: "supervisor" | "lead" | "agent", identity: ScrumHarnessIdentity): T {
-  const helpers = identity.kind === "task" && ["ux", "dev", "qa"].includes(identity.binding.role) ? /context7|exa|search|research|vision|chrome|playwright|browser/i : /context7|exa|search|research|notion/i;
-  const mcpServers = Object.fromEntries(Object.entries(config.mcpServers ?? {}).filter(([name]) => name === "paseo_factory" || name === "paseo-factory" || authority === "agent" && helpers.test(name)));
-  const skills = identity.kind === "task" ? SCRUM_ROLE_SKILLS[identity.binding.role] : authority === "supervisor" ? ["grilling", "domain-modeling"] : ["codebase-design", "domain-modeling", "tdd"];
-  const options = config.providerOptions ?? {}, permission = typeof options.permission === "object" && options.permission !== null ? options.permission : {};
-  return { ...config, ...(config.mcpServers === undefined ? {} : { mcpServers }), ...(config.provider === "opencode" || config.provider?.startsWith("opencode/") ? { providerOptions: { ...options, permission: { ...permission, skill: { "*": "deny", ...Object.fromEntries(skills.map(skill => [skill, "allow"])) } } } } : {}), systemPrompt: `${config.systemPrompt ?? ""}\nRequired role skills to open first: ${skills.join(", ")}.\n` };
+export function scopeScrumCapabilities<
+  T extends {
+    provider?: string;
+    mcpServers?: Record<string, unknown>;
+    providerOptions?: Record<string, unknown>;
+    systemPrompt?: string;
+  },
+>(
+  config: T,
+  authority: "supervisor" | "lead" | "agent",
+  identity: ScrumHarnessIdentity,
+): T {
+  const helpers =
+    identity.kind === "task" &&
+    ["ux", "dev", "qa"].includes(identity.binding.role)
+      ? /context7|exa|search|research|vision|chrome|playwright|browser/i
+      : /context7|exa|search|research|notion/i;
+  const mcpServers = Object.fromEntries(
+    Object.entries(config.mcpServers ?? {}).filter(
+      ([name]) =>
+        name === "paseo_factory" ||
+        name === "paseo-factory" ||
+        (authority === "agent" && helpers.test(name)),
+    ),
+  );
+  const skills =
+    identity.kind === "task"
+      ? SCRUM_ROLE_SKILLS[identity.binding.role]
+      : authority === "supervisor"
+        ? ["grilling", "domain-modeling"]
+        : ["codebase-design", "domain-modeling", "tdd"];
+  const options = config.providerOptions ?? {},
+    permission =
+      typeof options.permission === "object" && options.permission !== null
+        ? options.permission
+        : {};
+  return {
+    ...config,
+    ...(config.mcpServers === undefined ? {} : { mcpServers }),
+    ...(config.provider === "opencode" ||
+    config.provider?.startsWith("opencode/")
+      ? {
+          providerOptions: {
+            ...options,
+            permission: {
+              ...permission,
+              skill: {
+                "*": "deny",
+                ...Object.fromEntries(skills.map((skill) => [skill, "allow"])),
+              },
+            },
+          },
+        }
+      : {}),
+    systemPrompt: `${config.systemPrompt ?? ""}\nRequired role skills to open first: ${skills.join(", ")}.\n`,
+  };
 }

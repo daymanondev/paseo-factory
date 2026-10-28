@@ -1,7 +1,9 @@
+import { boundTaskPeers } from "./task-peers.ts";
+import { scrumTelemetry } from "./core/scrum/telemetry.ts";
 import { scrumOperation } from "./core/scrum/controller.ts";
 import type { ScrumOperation } from "./core/scrum/controller.ts";
 import { readExecution, readScrumConfig, saveExecutionDefault, ensureScrumConfig, scopeDir } from "./core/scrum/config.ts";
-import { listRuns, terminalRun, commandRun } from "./core/scrum/run-journal.ts";
+import { listRuns, readRun, terminalRun, commandRun } from "./core/scrum/run-journal.ts";
 import { readScrumProfiles } from "./core/scrum/profiles.ts";
 import { readSwitchIntent, switchExecution, withExecutionLane } from "./core/scrum/execution.ts";
 import { projectTask } from "./core/task-state.ts";
@@ -1609,8 +1611,8 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     const page = await resolveDaemon(context).agents.list({ filter: { includeArchived: false, includeBackground: true } });
     const agents = page.entries.map(e => e.agent).filter(a => a.archivedAt === null && (a.labels.project === project.slug || a.cwd === project.root) && ["running", "initializing"].includes(a.status));
     blockers.push(...agents.map(a => `Agent ${a.id}: ${a.status}`));
-    if (readExecution(deps.stateDir, project.slug).mode === "scrum") for (const run of listRuns(deps.stateDir, project.slug)) if (!terminalRun(run)) blockers.push(`Scrum ${run.runId}: ${run.phase}`);
-    return { blockers: [...new Set(blockers)], activeAgents: agents.filter(a => a.labels.seat === "agent").map(a => a.id), pendingDirectives: mailbox.queued.some(m => m.kind === "directive") || mailbox.supervisorQueued.some(m => m.kind === "directive") };
+    if (readExecution(deps.stateDir, project.slug).mode === "scrum") for (const run of listRuns(deps.stateDir, project.slug)) { if (!terminalRun(run)) blockers.push(`Scrum ${run.runId}: ${run.phase}`); else if (run.phase === "completed" && run.completionRequest && !run.completionReported) blockers.push(`Scrum ${run.runId}: completion report pending`); }
+    return { blockers: [...new Set(blockers)], activeAgents: agents.filter(a => a.labels.seat === "agent").map(a => a.id), pendingDirectives };
   };
   const handlers = {
     async executionSetMode(input: { mode: "slp" | "scrum"; projectRoot?: string }, context?: SurfaceCallContext) {
@@ -1643,15 +1645,26 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         if (input.operation === "run.cancel") {
           if (authority !== "owner" && authority !== "supervisor") throw new FactoryError("scrum-cancel-unauthorized", "Owner/Supervisor required");
           if (!project?.ok || !input.runId) throw new FactoryError("project-required", "Project and run required");
-          const page = await resolveDaemon(context).agents.list({ filter: { includeArchived: false, includeBackground: true } });
-          for (const { agent } of page.entries) if (agent.labels.project === project.slug && agent.labels.run === input.runId && agent.labels.seat === "agent") {
-            const stopped = await (deps.stopAgent ?? stopAgentViaCli)(agent.id, deps.home);
-            if (!stopped.ok) throw new FactoryError("agent-stop-failed", stopped.reason);
-            await resolveDaemon(context).agents.ref(agent.id).archive();
-          }
-          return { ok: true as const, data: commandRun(deps.stateDir, project.slug, input.runId, { requestId: input.requestId, expectedRevision: input.expectedRevision!, type: "phase_changed", phase: "cancelled", reason: String(input.payload?.reason ?? "Owner cancellation; unresolved Tasks retained") }) };
+          return await withExecutionLane(deps.stateDir, project.slug, async () => {
+            const requested = commandRun(deps.stateDir, project.slug, input.runId!, { type: "cancellation_requested", requestId: input.requestId, expectedRevision: input.expectedRevision!, reason: String(input.payload?.reason ?? "Owner cancellation; unresolved Tasks retained"), actor: caller?.actor ?? "owner" });
+            if (requested.phase === "cancelled") return { ok: true as const, data: requested };
+            const page = await resolveDaemon(context).agents.list({ filter: { includeArchived: false, includeBackground: true } });
+            const peers = new Map(requested.tasks.flatMap(task => boundTaskPeers({ stateDir: deps.stateDir, slug: project.slug, task: task.task, events: deps.factory.ledger.events, live: page.entries.map(e => e.agent) })).map(agent => [agent.id, agent]));
+            for (const { agent } of page.entries) if (agent.archivedAt === null && agent.labels.project === project.slug && agent.labels.run === input.runId && agent.labels.seat === "agent") peers.set(agent.id, agent);
+            for (const agent of peers.values()) {
+              const stopped = await (deps.stopAgent ?? stopAgentViaCli)(agent.id, deps.home);
+              if (!stopped.ok) throw new FactoryError("agent-stop-failed", stopped.reason);
+              await resolveDaemon(context).agents.ref(agent.id).archive();
+            }
+            const current = readRun(deps.stateDir, project.slug, input.runId!);
+            return { ok: true as const, data: commandRun(deps.stateDir, project.slug, input.runId!, { requestId: `${input.requestId}:cancelled`, expectedRevision: current.revision, type: "phase_changed", phase: "cancelled", reason: requested.cancellation!.reason, telemetry: scrumTelemetry(current, deps.factory.ledger.events) }) };
+          });
         }
-        return { ok: true as const, data: scrumOperation(input, { factory: deps.factory, ...(project?.ok ? { slug: project.slug, root: project.root } : {}), authority, actor: caller?.actor ?? "owner", activeAgents: work.activeAgents, pendingDirectives: work.pendingDirectives }) };
+        const execute = async () => {
+          const currentWork = project?.ok ? await executionWork(project, context) : work;
+          return { ok: true as const, data: scrumOperation(input, { factory: deps.factory, ...(project?.ok ? { slug: project.slug, root: project.root } : {}), authority, actor: caller?.actor ?? "owner", activeAgents: currentWork.activeAgents, pendingDirectives: currentWork.pendingDirectives }) };
+        };
+        return project?.ok ? await withExecutionLane(deps.stateDir, project.slug, execute) : await execute();
       } catch (error) { return failure(codeOf(error), messageOf(error)); }
     },
     async historyUpgrade(input: UpgradeInput) {

@@ -147,7 +147,7 @@ test("UI decisions pin exact revisions, reject self-approval, survive restart, a
     ownedPaths,
   });
   const refs = ownedPaths
-    .slice(0, 3)
+    .filter((path) => path !== ownedPaths[3])
     .map((path) => artifactAt(repo, sha, path));
   run = commandRun(state, "p", run.runId, {
     requestId: "design1",
@@ -225,7 +225,7 @@ test("UI decisions pin exact revisions, reject self-approval, survive restart, a
   );
   const second = gitCommitChanges(repo, "new UX revision Task");
   const refs2 = ownedPaths
-    .slice(0, 3)
+    .filter((path) => path !== ownedPaths[3])
     .map((path) => artifactAt(repo, second, path));
   run = commandRun(state, "p", run.runId, {
     requestId: "design2",
@@ -250,4 +250,233 @@ test("UI decisions pin exact revisions, reject self-approval, survive restart, a
   );
   assert.equal(readRun(state, "p", run.runId).design?.revision, 2);
   assert.equal(readRun(state, "p", run.runId).design?.decision, undefined);
+});
+
+test("duplicate run admission keeps the original frozen config after future roster edits", async (t) => {
+  const { createFactory } = await import("../src/factory.ts");
+  const { saveScrumConfig } = await import("../src/scrum/config.ts");
+  const { scrumOperation } = await import("../src/scrum/controller.ts");
+  const { gitCommitAll } = await import("./helpers.ts");
+  const { writeFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const state = makeTempDir();
+  disposeDir(t, state);
+  const root = makeTempDir();
+  disposeDir(t, root);
+  writeFileSync(join(root, "README.md"), "fixture");
+  gitCommitAll(root);
+  const { switchExecution } = await import("../src/scrum/execution.ts");
+  const factory = createFactory({ stateDir: state });
+  await switchExecution({
+    state,
+    slug: "p",
+    mode: "scrum",
+    blockers: [],
+    rotate: async () => {},
+  });
+  const ctx = {
+    factory,
+    root,
+    slug: "p",
+    authority: "owner" as const,
+    actor: "owner",
+    activeAgents: [],
+    pendingDirectives: false,
+  };
+  const request = {
+    operation: "run.create",
+    runId: "one",
+    requestId: "admit",
+    payload: {
+      initiativeId: "unused",
+      track: "small",
+      rationale: "small work",
+      ownedPaths: [],
+    },
+  };
+  const first = scrumOperation(request, ctx) as ReturnType<typeof readRun>;
+  const config = ensureScrumConfig(state, "p");
+  saveScrumConfig(
+    state,
+    {
+      ...config,
+      requireUiApproval: false,
+      lanes: { ...config.lanes, dev: "pi/future" },
+    },
+    "p",
+  );
+  const duplicate = scrumOperation(request, ctx) as ReturnType<typeof readRun>;
+  assert.equal(
+    duplicate.config.requireUiApproval,
+    first.config.requireUiApproval,
+  );
+  assert.equal(duplicate.config.lanes.dev, first.config.lanes.dev);
+  assert.equal(duplicate.revision, first.revision);
+});
+
+test("controller requires complete design digests and journals a frozen-policy waiver without unlocking unsafe readiness", async (t) => {
+  const { createFactory } = await import("../src/factory.ts");
+  const { scrumOperation } = await import("../src/scrum/controller.ts");
+  const { artifactAt, designDigest, sha256 } = await import(
+    "../src/scrum/artifacts.ts"
+  );
+  const { assertDevReady } = await import("../src/scrum/approval.ts");
+  const { gitCommitAll } = await import("./helpers.ts");
+  const { mkdirSync, writeFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const state = makeTempDir();
+  disposeDir(t, state);
+  const root = makeTempDir();
+  disposeDir(t, root);
+  const prefix = ".scratch/ui-policy";
+  const paths = [
+    "DESIGN.md",
+    "EXPERIENCE.md",
+    "mockups/index.html",
+    "mockups/screen.png",
+    "mockups/browser.json",
+  ].map((p) => `${prefix}/${p}`);
+  mkdirSync(join(root, prefix, "mockups"), { recursive: true });
+  for (const path of paths.slice(0, 4))
+    writeFileSync(
+      join(root, path),
+      path.endsWith(".html")
+        ? "<html><head><title>UI</title></head><body><button>Calculate</button></body></html>"
+        : "fixture bytes",
+    );
+  writeFileSync(
+    join(root, paths[4]),
+    JSON.stringify({
+      network: "disabled",
+      consoleErrors: [],
+      viewports: [
+        {
+          width: 800,
+          height: 600,
+          screenshot: { path: paths[3], sha256: sha256("fixture bytes") },
+        },
+      ],
+      states: [
+        "empty",
+        "loading",
+        "populated",
+        "error",
+        "offline",
+        "permission-denied",
+      ].map((state) => ({
+        screen: "calculator",
+        state,
+        keyboard: true,
+        passed: true,
+      })),
+    }),
+  );
+  const { switchExecution } = await import("../src/scrum/execution.ts");
+  await switchExecution({
+    state,
+    slug: "p",
+    mode: "scrum",
+    blockers: [],
+    rotate: async () => {},
+  });
+  const sha = gitCommitAll(root),
+    config = { ...ensureScrumConfig(state), requireUiApproval: false };
+  let run = createScrumRun({
+    state,
+    slug: "p",
+    runId: "policy",
+    initiativeId: "ui-policy",
+    config,
+    configRevision: 1,
+    track: "ui",
+    rationale: "fixture",
+    requestId: "create",
+    ownedPaths: paths,
+  });
+  const factory = createFactory({ stateDir: state });
+  run = commandRun(state, "p", run.runId, {
+    requestId: "reserve",
+    expectedRevision: run.revision,
+    type: "task_reserved",
+    task: "ux-policy",
+    role: "ux",
+    required: true,
+  });
+  const contract = factory.setContract({
+    task: "ux-policy",
+    workspace: root,
+    gate: "true",
+    execution: {
+      mode: "scrum",
+      runId: run.runId,
+      role: "ux",
+      policyRevision: run.policyRevision,
+      configRevision: run.configRevision,
+      artifactRefs: [],
+    },
+  });
+  run = commandRun(state, "p", run.runId, {
+    requestId: "bind",
+    expectedRevision: run.revision,
+    type: "task_bound",
+    task: contract.task,
+    epoch: contract.seq,
+  });
+  const claim = await factory.claim({ task: contract.task, sha });
+  await factory.accept({ task: contract.task, attempt: claim.attempt });
+  const refs = paths.slice(0, 4).map((path) => artifactAt(root, sha, path)),
+    browserEvidence = [artifactAt(root, sha, paths[4])];
+  const ctx = {
+    factory,
+    slug: "p",
+    root,
+    authority: "lead" as const,
+    actor: "lead",
+    activeAgents: [],
+    pendingDirectives: false,
+  };
+  const subset = [refs[2]];
+  assert.throws(
+    () =>
+      scrumOperation(
+        {
+          operation: "run.command",
+          runId: run.runId,
+          requestId: "subset",
+          expectedRevision: run.revision,
+          payload: {
+            type: "design_review_requested",
+            design: {
+              revision: 1,
+              digest: designDigest(subset),
+              refs: subset,
+              browserEvidence,
+            },
+          },
+        },
+        ctx,
+      ),
+    /complete design|DESIGN/,
+  );
+  run = scrumOperation(
+    {
+      operation: "run.command",
+      runId: run.runId,
+      requestId: "full",
+      expectedRevision: run.revision,
+      payload: {
+        type: "design_review_requested",
+        design: {
+          revision: 1,
+          digest: designDigest(refs),
+          refs,
+          browserEvidence,
+        },
+      },
+    },
+    ctx,
+  ) as typeof run;
+  assert.equal(run.design?.decision, "waived");
+  assert.match(run.design?.actor ?? "", /^policy:/);
+  assert.throws(() => assertDevReady(root, run), /resolve contradictions/);
 });

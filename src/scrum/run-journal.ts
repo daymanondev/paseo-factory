@@ -72,6 +72,12 @@ export interface RunTask {
   epoch?: number;
   required: boolean;
   provider?: string;
+  contractIntents?: {
+    requestId: string;
+    fingerprint: string;
+    previousEpoch?: number;
+    epoch?: number;
+  }[];
   result?: RoleResult;
 }
 export interface ScrumRun {
@@ -92,6 +98,9 @@ export interface ScrumRun {
   tasks: RunTask[];
   ownedPaths: string[];
   artifacts: ArtifactRef[];
+  cancellation?: { requestId: string; reason: string; actor: string };
+  completionRequest?: { requestId: string; actor: string };
+  completionReported?: { mailId: string };
   telemetry?: ScrumTelemetry;
   qaResult?: { status: string; productSha: string; confirmedDefects: number };
   readiness?: Readiness;
@@ -119,7 +128,17 @@ export type RunCommand = BaseCommand &
         role: ScrumRoleName;
         required: boolean;
       }
-    | { type: "task_bound"; task: string; epoch: number }
+    | { type: "cancellation_requested"; reason: string; actor: string }
+    | { type: "completion_requested"; actor: string }
+    | { type: "completion_reported"; mailId: string }
+    | {
+        type: "contract_intended";
+        task: string;
+        operationId: string;
+        fingerprint: string;
+        previousEpoch?: number;
+      }
+    | { type: "task_bound"; task: string; epoch: number; intentId?: string }
     | {
         type: "provider_selected";
         task: string;
@@ -202,7 +221,8 @@ function append(path: string, event: RunEvent): void {
 const fingerprint = (v: unknown): string =>
   createHash("sha256").update(JSON.stringify(v)).digest("hex");
 function apply(run: ScrumRun, cmd: RunCommand, now: number): void {
-  if (terminalRun(run)) throw new FactoryError("scrum-run-terminal", run.phase);
+  if (terminalRun(run) && cmd.type !== "completion_reported")
+    throw new FactoryError("scrum-run-terminal", run.phase);
   const task =
     "task" in cmd ? run.tasks.find((t) => t.task === cmd.task) : undefined;
   switch (cmd.type) {
@@ -215,6 +235,40 @@ function apply(run: ScrumRun, cmd: RunCommand, now: number): void {
       // Completion is admitted only by controller after inspecting live core/git evidence.
       run.phase = cmd.phase;
       if (cmd.telemetry) run.telemetry = cmd.telemetry;
+      break;
+    case "cancellation_requested":
+      if (!cmd.reason?.trim() || !cmd.actor?.trim())
+        throw new FactoryError(
+          "invalid-cancellation",
+          "actor and reason required",
+        );
+      if (run.cancellation && run.cancellation.requestId !== cmd.requestId)
+        throw new FactoryError(
+          "run-cancellation-pending",
+          `resume request ${run.cancellation.requestId}`,
+        );
+      run.cancellation = {
+        requestId: cmd.requestId,
+        reason: cmd.reason,
+        actor: cmd.actor,
+      };
+      run.phase = "blocked";
+      break;
+    case "completion_reported":
+      if (run.phase !== "completed" || !cmd.mailId?.trim())
+        throw new FactoryError(
+          "invalid-completion-report",
+          "completed run and mail ID required",
+        );
+      run.completionReported = { mailId: cmd.mailId };
+      break;
+    case "completion_requested":
+      if (!cmd.actor?.trim() || run.cancellation)
+        throw new FactoryError(
+          "invalid-completion",
+          "active cancellation or missing actor",
+        );
+      run.completionRequest = { requestId: cmd.requestId, actor: cmd.actor };
       break;
     case "task_reserved":
       if (task !== undefined) {
@@ -241,10 +295,44 @@ function apply(run: ScrumRun, cmd: RunCommand, now: number): void {
         required: cmd.required,
       });
       break;
+    case "contract_intended": {
+      if (!task || !cmd.operationId || !/^[a-f0-9]{64}$/.test(cmd.fingerprint))
+        throw new FactoryError(
+          "invalid-contract-intent",
+          "Task and fingerprint required",
+        );
+      const intents = (task.contractIntents ??= []);
+      const previous = intents.find(
+        (intent) => intent.requestId === cmd.operationId,
+      );
+      if (previous && previous.fingerprint !== cmd.fingerprint)
+        throw new FactoryError("contract-request-conflict", cmd.operationId);
+      if (!previous)
+        intents.push({
+          requestId: cmd.operationId,
+          fingerprint: cmd.fingerprint,
+          previousEpoch: cmd.previousEpoch,
+        });
+      if (["pm", "ux", "architect"].includes(task.role))
+        run.readiness = undefined;
+      break;
+    }
     case "task_bound":
       if (!task || !Number.isSafeInteger(cmd.epoch) || cmd.epoch < 1)
         throw new FactoryError("task-binding-invalid", String(cmd.epoch));
+      if (task.epoch !== cmd.epoch) {
+        task.provider = undefined;
+        task.result = undefined;
+      }
       task.epoch = cmd.epoch;
+      if (cmd.intentId) {
+        const intent = task.contractIntents?.find(
+          (intent) => intent.requestId === cmd.intentId,
+        );
+        if (!intent)
+          throw new FactoryError("missing-contract-intent", cmd.intentId);
+        intent.epoch = cmd.epoch;
+      }
       break;
     case "provider_selected":
       if (!task || task.epoch !== cmd.epoch || !cmd.provider)
@@ -258,9 +346,9 @@ function apply(run: ScrumRun, cmd: RunCommand, now: number): void {
         !task ||
         !["complete", "partial", "blocked"].includes(cmd.result?.status) ||
         !cmd.result.artifactRefs.every(artifactRefIsValid) ||
-        !Array.isArray(cmd.result.assumptions) ||
-        !Array.isArray(cmd.result.conflicts) ||
-        !Array.isArray(cmd.result.openQuestions)
+        !Array.isArray(cmd.result.assumptions) || cmd.result.assumptions.some(a => !a || typeof a.id !== "string" || typeof a.unsafe !== "boolean" || typeof a.resolved !== "boolean" || typeof a.rationale !== "string" || !a.rationale.trim()) ||
+        !Array.isArray(cmd.result.conflicts) || cmd.result.conflicts.some(v => typeof v !== "string") ||
+        !Array.isArray(cmd.result.openQuestions) || cmd.result.openQuestions.some(v => typeof v !== "string")
       )
         throw new FactoryError(
           "invalid-role-result",
@@ -297,7 +385,7 @@ function apply(run: ScrumRun, cmd: RunCommand, now: number): void {
       break;
     case "readiness_recorded":
       if (
-        !cmd.readiness.refs.every(artifactRefIsValid) ||
+        !Array.isArray(cmd.readiness.refs) || !cmd.readiness.refs.every(artifactRefIsValid) || ![cmd.readiness.contradictions, cmd.readiness.unsafeAssumptions, cmd.readiness.missingCoverage].every(values => Array.isArray(values) && values.every(v => typeof v === "string")) ||
         !cmd.readiness.rationale?.trim()
       )
         throw new FactoryError(
@@ -364,6 +452,15 @@ function apply(run: ScrumRun, cmd: RunCommand, now: number): void {
         rationale: cmd.rationale,
       };
       run.decisions++;
+      if (
+        cmd.decision !== "changes_requested" &&
+        run.readiness &&
+        !run.readiness.contradictions.length &&
+        !run.readiness.unsafeAssumptions.length &&
+        !run.readiness.missingCoverage.length &&
+        !run.blockers.length
+      )
+        run.phase = "implementation";
       if (cmd.decision === "changes_requested") {
         run.phase = "design";
         run.readiness = undefined;
@@ -456,13 +553,24 @@ export function createScrumRun(input: {
   budgets?: Partial<RunBudgets>;
   ownedPaths?: string[];
 }): ScrumRun {
+  if (typeof input.requestId !== "string" || !input.requestId.trim())
+    throw new FactoryError(
+      "invalid-run-request",
+      "nonempty request ID required",
+    );
+  const {
+    config: _config,
+    configRevision: _configRevision,
+    ...admission
+  } = input;
+  const admissionFingerprint = fingerprint(admission);
   return scrumMutation(input.state, () => {
     const path = runPath(input.state, input.slug, input.runId);
     if (existsSync(path)) {
       const first = eventsAt(path)[0];
       if (
         first.requestId === input.requestId &&
-        first.fingerprint === fingerprint(input)
+        first.fingerprint === admissionFingerprint
       )
         return readRun(input.state, input.slug, input.runId);
       throw new FactoryError("scrum-run-exists", input.runId);
@@ -530,7 +638,7 @@ export function createScrumRun(input: {
     append(path, {
       revision: 1,
       requestId: input.requestId,
-      fingerprint: fingerprint(input),
+      fingerprint: admissionFingerprint,
       ts: createdAt,
       payload: { type: "created", run },
     });
@@ -542,6 +650,13 @@ function commandFingerprint(cmd: RunCommand): string {
   return fingerprint(content);
 }
 
+export function replayRunCommand(state: string, slug: string, id: string, cmd: RunCommand): ScrumRun | undefined {
+  const events = eventsAt(runPath(state, slug, id));
+  const previous = events.find(event => event.requestId === cmd.requestId);
+  if (!previous) return undefined;
+  if (previous.fingerprint !== commandFingerprint(cmd)) throw new FactoryError("run-request-conflict", cmd.requestId);
+  return project(events);
+}
 export function commandRun(
   state: string,
   slug: string,

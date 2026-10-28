@@ -217,19 +217,190 @@ test("mixed Projects preserve SLP homes and freeze Scrum role/model through crea
   assert.equal(existsSync(join(state, "pi-agent/pm")), false);
 });
 
-test("Scrum create hooks preserve authority and provider-specific fences across all supported families", async t => {
-  const { scopeScrumCapabilities } = await import("../plugin/server/core/scrum/harness.ts");
-  const { applyProviderExecutionFence } = await import("../plugin/server/roles.ts");
-  const state = makeTempDir(); disposeDir(t, state);
-  const home = makeTempDir(); disposeDir(t, home);
-  const identity = { kind: "task" as const, task: "ux", epoch: 1, binding: { mode: "scrum" as const, runId: "r", role: "ux" as const, policyRevision: "1", configRevision: 1, artifactRefs: [] } };
-  for (const provider of ["pi", "claude", "codex", "opencode", "copilot", "omp", "antigravity"]) {
-    const config = applyProviderExecutionFence({ cwd: home, provider, mcpServers: { "zai-vision": {}, dangerousCoordinator: {} }, systemPrompt: "UX role" }, { role: "agent", stateDir: state, projectSlug: "p", task: "ux", correlationId: "cor-ux", userHome: home });
+test("Scrum create hooks preserve authority and provider-specific fences across all supported families", async (t) => {
+  const { scopeScrumCapabilities } = await import(
+    "../plugin/server/core/scrum/harness.ts"
+  );
+  const { applyProviderExecutionFence } = await import(
+    "../plugin/server/roles.ts"
+  );
+  const state = makeTempDir();
+  disposeDir(t, state);
+  const home = makeTempDir();
+  disposeDir(t, home);
+  const identity = {
+    kind: "task" as const,
+    task: "ux",
+    epoch: 1,
+    binding: {
+      mode: "scrum" as const,
+      runId: "r",
+      role: "ux" as const,
+      policyRevision: "1",
+      configRevision: 1,
+      artifactRefs: [],
+    },
+  };
+  for (const provider of [
+    "pi",
+    "claude",
+    "codex",
+    "opencode",
+    "copilot",
+    "omp",
+    "antigravity",
+  ]) {
+    const config = applyProviderExecutionFence(
+      {
+        cwd: home,
+        provider,
+        mcpServers: { "zai-vision": {}, dangerousCoordinator: {} },
+        systemPrompt: "UX role",
+      },
+      {
+        role: "agent",
+        stateDir: state,
+        projectSlug: "p",
+        task: "ux",
+        correlationId: "cor-ux",
+        userHome: home,
+      },
+    );
     const scoped = scopeScrumCapabilities(config, "agent", identity);
     assert.match(scoped.systemPrompt!, /frontend-design/);
     assert.equal(scoped.mcpServers?.dangerousCoordinator, undefined);
-    if (provider !== "antigravity") assert.ok((scoped.mcpServers as Record<string, unknown>)?.paseo_factory);
-    const standing = scopeScrumCapabilities(config, "lead", { kind: "seat", selectionRevision: 1, config: { schemaVersion: 1, requireUiApproval: true, lanes: Object.fromEntries(["supervisor", "lead", "pm", "ux", "architect", "dev", "qa", "watch", "retro"].map(k => [k, "pi/model"])) as import("../src/scrum/config.ts").ScrumConfig["lanes"] } });
+    if (provider !== "antigravity")
+      assert.ok((scoped.mcpServers as Record<string, unknown>)?.paseo_factory);
+    const standing = scopeScrumCapabilities(config, "lead", {
+      kind: "seat",
+      selectionRevision: 1,
+      config: {
+        schemaVersion: 1,
+        requireUiApproval: true,
+        lanes: Object.fromEntries(
+          [
+            "supervisor",
+            "lead",
+            "pm",
+            "ux",
+            "architect",
+            "dev",
+            "qa",
+            "watch",
+            "retro",
+          ].map((k) => [k, "pi/model"]),
+        ) as import("../src/scrum/config.ts").ScrumConfig["lanes"],
+      },
+    });
     assert.equal(standing.mcpServers?.["zai-vision"], undefined);
   }
+});
+
+test("a new Scrum contract request opens an epoch and retires the prior Agent; exact replay keeps that epoch", async (t) => {
+  const { createFactory } = await import("../plugin/server/core/factory.ts");
+  const { resolveProject } = await import("../plugin/server/core/project.ts");
+  const { ensureScrumConfig } = await import(
+    "../plugin/server/core/scrum/config.ts"
+  );
+  const { switchExecution } = await import(
+    "../plugin/server/core/scrum/execution.ts"
+  );
+  const { createScrumRun, readRun } = await import(
+    "../plugin/server/core/scrum/run-journal.ts"
+  );
+  const { handleSpoolRequest } = await import("../plugin/server/spool.ts");
+  const state = makeTempDir();
+  disposeDir(t, state);
+  const repo = makeTempDir();
+  disposeDir(t, repo);
+  writeFileSync(join(repo, "README.md"), "fixture");
+  gitCommitAll(repo);
+  const project = resolveProject(repo);
+  assert.ok(project.ok);
+  if (!project.ok) return;
+  const factory = createFactory({ stateDir: state });
+  await switchExecution({
+    state,
+    slug: project.slug,
+    mode: "scrum",
+    blockers: [],
+    rotate: async () => {},
+  });
+  createScrumRun({
+    state,
+    slug: project.slug,
+    runId: "r",
+    initiativeId: "recontract",
+    config: ensureScrumConfig(state, project.slug),
+    configRevision: 1,
+    track: "backend",
+    rationale: "planning",
+    requestId: "create",
+    ownedPaths: [".scratch/recontract/prd.md"],
+  });
+  const first = {
+    id: "first",
+    kind: "contract" as const,
+    task: "pm",
+    workspace: repo,
+    gate: "true",
+    role: "pm" as const,
+    runId: "r",
+    submitter: "owner",
+  };
+  assert.equal((await handleSpoolRequest(factory, first)).ok, true);
+  const epoch1 = factory.contractFor("pm")!.seq;
+  const stopped: string[] = [],
+    archived: string[] = [];
+  const daemon = {
+    agents: {
+      list: async () => ({
+        entries: [
+          {
+            agent: {
+              id: "old-peer",
+              provider: "pi/test",
+              status: "running",
+              model: null,
+              title: "PM",
+              labels: { project: project.slug, task: "pm", seat: "agent" },
+              archivedAt: null,
+            },
+          },
+        ],
+      }),
+      ref: (id: string) => ({
+        archive: async () => {
+          archived.push(id);
+        },
+      }),
+    },
+  } as unknown as import("../plugin/server/surface-rpc.ts").SurfaceDaemonApi;
+  const second = {
+    ...first,
+    id: "second",
+    gate: "test -d .",
+    description: "revised bounded planning criteria",
+  };
+  assert.equal(
+    (
+      await handleSpoolRequest(factory, second, {
+        daemon,
+        stopAgent: async (id) => {
+          stopped.push(id);
+          return { ok: true };
+        },
+      })
+    ).ok,
+    true,
+  );
+  const epoch2 = factory.contractFor("pm")!.seq;
+  assert.ok(epoch2 > epoch1);
+  assert.match(factory.contractFor("pm")!.gate, /test -d/);
+  assert.equal(factory.contractFor("pm")!.description, second.description);
+  assert.deepEqual(stopped, ["old-peer"]);
+  assert.deepEqual(archived, ["old-peer"]);
+  assert.equal((await handleSpoolRequest(factory, second)).ok, true);
+  assert.equal(factory.contractFor("pm")!.seq, epoch2);
+  assert.equal(readRun(state, project.slug, "r").tasks[0].epoch, epoch2);
 });

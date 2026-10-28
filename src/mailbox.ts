@@ -293,6 +293,10 @@ export function enqueueLeadMail(
   path: string,
   mail: { requestId?: string; to?: MailRecipient; from: LeadMailFrom; kind: LeadMailKind; task?: string; text: string; execution?: LeadMailItem["execution"]; reportType?: LeadMailItem["reportType"]; scrum?: Record<string, unknown> },
 ): QueuedEvent {
+  if (mail.reportType === "completed" && typeof mail.scrum?.runId === "string") {
+    const previous = readMailboxEvents(path).find(e => e.type === "mail_queued" && e.reportType === "completed" && e.scrum?.runId === mail.scrum!.runId);
+    if (previous?.type === "mail_queued") return previous;
+  }
   if (mail.requestId) {
     const previous = readMailboxEvents(path).find(e => e.type === "mail_queued" && e.requestId === mail.requestId);
     if (previous?.type === "mail_queued") return previous;

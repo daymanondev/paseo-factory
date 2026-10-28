@@ -121,6 +121,8 @@ export declare function usageOf(lastUsage: unknown): MeterUsage;
 export declare function pickUsage(terminal: MeterUsage, refetched: MeterUsage): MeterUsage;
 
 export interface ObserveEntry {
+  /** Bound Scrum Tasks keep their recorded role lane across driver retries/meters. */
+  provider?: string;
   task: string;
   agentId: string;
   workspace?: string;

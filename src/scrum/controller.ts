@@ -20,6 +20,7 @@ import { assertExecutionReady } from "./execution.ts";
 import {
   createScrumRun,
   commandRun,
+  replayRunCommand,
   readRun,
   listRuns,
   terminalRun,
@@ -35,7 +36,11 @@ import {
   designDigest,
   verifyRefs,
 } from "./artifacts.ts";
-import { decideDesign, verifyBrowserEvidence } from "./approval.ts";
+import {
+  decideDesign,
+  verifyBrowserEvidence,
+  verifyCompleteDesign,
+} from "./approval.ts";
 import { completionBlockers } from "./completion.ts";
 import { verifyQaFiles } from "./qa-bundle.ts";
 import { gitBytes } from "./artifacts.ts";
@@ -192,6 +197,7 @@ export function scrumOperation(
       rationale: p.rationale as string,
     });
   if (input.operation === "run.complete") {
+    if (run.phase === "completed") return run;
     const blockers = completionBlockers({
       root,
       run,
@@ -199,14 +205,24 @@ export function scrumOperation(
       activeAgents: ctx.activeAgents,
       pendingDirectives: ctx.pendingDirectives,
     });
-    if (blockers.length) fail("scrum-completion-blocked", blockers.join("; "));
-    return commandRun(state, slug, run.runId, {
+    const critical = blockers.filter(
+      (reason) => reason !== "Agents/directives still in flight",
+    );
+    if (critical.length) fail("scrum-completion-blocked", blockers.join("; "));
+    const requested = commandRun(state, slug, run.runId, {
+      type: "completion_requested",
       requestId: input.requestId,
       expectedRevision: input.expectedRevision!,
+      actor: ctx.actor,
+    });
+    if (blockers.length) return requested;
+    return commandRun(state, slug, run.runId, {
+      requestId: `${input.requestId}:completed`,
+      expectedRevision: requested.revision,
       type: "phase_changed",
       phase: "completed",
-      reason: "controller verified completion",
-      telemetry: scrumTelemetry(run, ctx.factory.ledger.events),
+      reason: "controller verified completion after all work settled",
+      telemetry: scrumTelemetry(requested, ctx.factory.ledger.events),
     });
   }
   if (input.operation === "run.command") {
@@ -217,6 +233,10 @@ export function scrumOperation(
     } as RunCommand;
     if (
       cmd.type === "design_decided" ||
+      cmd.type === "contract_intended" ||
+      cmd.type === "cancellation_requested" ||
+      cmd.type === "completion_requested" ||
+      cmd.type === "completion_reported" ||
       cmd.type === "provider_selected" ||
       cmd.type === "task_bound" ||
       cmd.type === "task_reserved" ||
@@ -224,6 +244,8 @@ export function scrumOperation(
         ["completed", "cancelled"].includes(cmd.phase))
     )
       fail("scrum-command-authority", "use the dedicated verified operation");
+    const replayed = replayRunCommand(state, slug, run.runId, cmd);
+    if (replayed && !(cmd.type === "design_review_requested" && !run.config.requireUiApproval && replayed.design?.digest === cmd.design.digest && replayed.design.decision === undefined)) return replayed;
     if (cmd.type === "artifacts_recorded") {
       verifyRefs(root, cmd.refs, run.ownedPaths);
       acceptedRefs(ctx.factory, run, cmd.refs);
@@ -274,12 +296,27 @@ export function scrumOperation(
     }
     if (cmd.type === "readiness_recorded") {
       const prefix = `.scratch/${run.initiativeId}/`;
-      const files = Object.fromEntries(cmd.readiness.refs.map(ref => [ref.path.slice(prefix.length), gitBytes(root, "show", `${ref.commit}:${ref.path}`).toString()]));
-      const kinds: import("./linter.ts").ScrumDocKind[] = run.track === "small" ? ["backlog"] : run.track === "backend" ? ["prd", "architecture", "backlog"] : ["prd", "ux", "architecture", "backlog"];
-      const diagnostics = kinds.flatMap(kind => lintScrumDoc(kind, files));
-      if (diagnostics.length) fail("scrum-readiness-lint", diagnostics.map(d => `${d.path}:${d.line} ${d.message}`).join("; "));
+      const files = Object.fromEntries(
+        cmd.readiness.refs.map((ref) => [
+          ref.path.slice(prefix.length),
+          gitBytes(root, "show", `${ref.commit}:${ref.path}`).toString(),
+        ]),
+      );
+      const kinds: import("./linter.ts").ScrumDocKind[] =
+        run.track === "small"
+          ? ["backlog"]
+          : run.track === "backend"
+            ? ["prd", "architecture", "backlog"]
+            : ["prd", "ux", "architecture", "backlog"];
+      const diagnostics = kinds.flatMap((kind) => lintScrumDoc(kind, files));
+      if (diagnostics.length)
+        fail(
+          "scrum-readiness-lint",
+          diagnostics.map((d) => `${d.path}:${d.line} ${d.message}`).join("; "),
+        );
     }
     if (cmd.type === "design_review_requested") {
+      verifyCompleteDesign(root, run, cmd.design);
       verifyRefs(root, cmd.design.refs, run.ownedPaths);
       verifyRefs(root, cmd.design.browserEvidence, run.ownedPaths);
       acceptedRefs(ctx.factory, run, [
@@ -307,7 +344,26 @@ export function scrumOperation(
         ).length,
       };
     }
-    return commandRun(state, slug, run.runId, cmd);
+    let updated = commandRun(state, slug, run.runId, cmd);
+    if (
+      cmd.type === "design_review_requested" &&
+      !run.config.requireUiApproval &&
+      updated.design?.digest === cmd.design.digest &&
+      updated.design.decision === undefined
+    ) {
+      updated = commandRun(state, slug, run.runId, {
+        type: "design_decided",
+        requestId: `${input.requestId}:policy-waiver`,
+        expectedRevision: updated.revision,
+        revision: cmd.design.revision,
+        digest: cmd.design.digest,
+        decision: "waived",
+        actor: `policy:${run.policyRevision}`,
+        rationale:
+          "Frozen run policy requireUiApproval=false; browser verification and readiness still required",
+      });
+    }
+    return updated;
   }
   fail("invalid-scrum-operation", input.operation);
 }

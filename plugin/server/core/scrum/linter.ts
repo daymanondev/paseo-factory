@@ -272,7 +272,11 @@ export function lintScrumDoc(
       if (!sourceIds.has(match[0]))
         add("sprint-backlog.md", 1, "dangling", `undefined source ${match[0]}`);
     for (const d of sources)
-      if (!text.includes(d.id))
+      if (
+        !new Set<string>(text.match(/\b(?:FR|NFR|UJ)-[1-9]\d*\b/g) ?? []).has(
+          d.id,
+        )
+      )
         add("sprint-backlog.md", 1, "coverage", `${d.id} has no R mapping`);
   }
   if (kind === "qa" && files["qa-report.json"]) {

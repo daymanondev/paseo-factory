@@ -12,7 +12,12 @@ import { readExecution } from "./core/scrum/config.ts";
 import { assertExecutionReady } from "./core/scrum/execution.ts";
 import { commandRun, readRun, terminalRun } from "./core/scrum/run-journal.ts";
 import { assertDevReady } from "./core/scrum/approval.ts";
-import { gitBytes, artifactAt, verifyRefs } from "./core/scrum/artifacts.ts";
+import {
+  gitBytes,
+  artifactAt,
+  verifyRefs,
+  sha256,
+} from "./core/scrum/artifacts.ts";
 import { SPECIALIST_ROLES } from "./core/scrum/types.ts";
 import type {
   ScrumRoleName,
@@ -39,6 +44,28 @@ export function prepareScrumContract(
   gate?: string;
   existing?: boolean;
 } {
+  const raw = request as unknown as Record<string, unknown>;
+  const requestFingerprint = sha256(
+    JSON.stringify(
+      Object.fromEntries(
+        [
+          "task",
+          "workspace",
+          "gate",
+          "artifact",
+          "base",
+          "scope",
+          "skills",
+          "freshEyes",
+          "watch",
+          "description",
+          "runId",
+          "role",
+          "artifactRefs",
+        ].map((key) => [key, raw[key]]),
+      ),
+    ),
+  );
   const project = resolveProject(request.workspace);
   if (!project.ok) return {};
   assertExecutionReady(factory.stateDir, project.slug);
@@ -59,8 +86,53 @@ export function prepareScrumContract(
   if (!request.runId)
     throw new FactoryError("scrum-run-required", "runId required");
   let run = readRun(factory.stateDir, project.slug, request.runId);
-  if (terminalRun(run)) throw new FactoryError("scrum-run-terminal", run.phase);
-  const role = request.role ?? "dev";
+  const previousContract = factory.contractFor(request.task);
+  const priorIntent = run.tasks
+    .find((task) => task.task === request.task)
+    ?.contractIntents?.find((intent) => intent.requestId === request.id);
+  if (priorIntent) {
+    if (priorIntent.fingerprint !== requestFingerprint)
+      throw new FactoryError("contract-request-conflict", request.id);
+    if (priorIntent.epoch !== undefined)
+      return { existing: true, execution: previousContract?.execution };
+    if (
+      previousContract &&
+      previousContract.seq !== priorIntent.previousEpoch &&
+      previousContract.execution?.runId === run.runId
+    ) {
+      bindScrumEpoch(
+        factory,
+        request.task,
+        previousContract.seq,
+        previousContract.execution,
+        `${request.id}:bound`,
+        request.id,
+      );
+      return { existing: true, execution: previousContract.execution };
+    }
+  }
+  if (terminalRun(run) || run.cancellation)
+    throw new FactoryError("scrum-run-terminal", run.phase);
+  if (
+    factory.ledger.events.some(
+      (event) =>
+        event.event === "attempt_accepted" && event.task === request.task,
+    )
+  )
+    throw new FactoryError("task-accepted", "accepted Task stays closed");
+  if (
+    run.tasks
+      .find((task) => task.task === request.task)
+      ?.contractIntents?.some(
+        (intent) =>
+          intent.epoch === undefined && intent.requestId !== request.id,
+      )
+  )
+    throw new FactoryError(
+      "contract-intent-pending",
+      "reconcile the interrupted Contract request first",
+    );
+  const role = request.role ?? previousContract?.execution?.role ?? "dev";
   if (!SPECIALIST_ROLES.includes(role))
     throw new FactoryError("invalid-specialist-role", String(role));
   verifyRefs(project.root, request.artifactRefs ?? [], run.ownedPaths);
@@ -176,14 +248,6 @@ export function prepareScrumContract(
       "artifact-ownership-required",
       "declare this role's exact artifact paths at run admission",
     );
-  if (existing)
-    bindScrumEpoch(
-      factory,
-      request.task,
-      existing.seq,
-      execution,
-      `${request.id}:reconcile`,
-    );
   let gate: string | undefined;
   if (role !== "dev" && request.gate) {
     ensureFactoryBinScripts(factory.stateDir);
@@ -204,11 +268,20 @@ export function prepareScrumContract(
     const quote = (v: string) => "'" + v.replace(/'/g, "'\\''") + "'";
     gate = `(${request.gate}) && ${quote(process.execPath)} ${quote(join(factory.stateDir, "runtime-bin/factory.mjs"))} lint-scrum-doc --kind ${kind} --dir ${quote(dir)}`;
   }
+  run = readRun(factory.stateDir, project.slug, run.runId);
+  commandRun(factory.stateDir, project.slug, run.runId, {
+    type: "contract_intended",
+    requestId: `${request.id}:intent`,
+    expectedRevision: run.revision,
+    task: request.task,
+    operationId: request.id,
+    fingerprint: requestFingerprint,
+    previousEpoch: existing?.seq,
+  });
   return {
     execution,
     ...(scope === undefined ? {} : { scope }),
     ...(gate === undefined ? {} : { gate }),
-    ...(existing ? { existing: true } : {}),
   };
 }
 export function bindScrumEpoch(
@@ -217,17 +290,26 @@ export function bindScrumEpoch(
   epoch: number,
   execution: ScrumTaskBinding,
   requestId: string,
+  intentId?: string,
 ): void {
   const contract = factory.contractFor(task)!,
     project = resolveProject(contract.workspace);
   if (!project.ok)
     throw new FactoryError("unknown-project", contract.workspace);
   const run = readRun(factory.stateDir, project.slug, execution.runId);
-  if (run.tasks.find((t) => t.task === task)?.epoch === epoch) return;
+  const own = run.tasks.find((t) => t.task === task);
+  if (
+    own?.epoch === epoch &&
+    (intentId === undefined ||
+      own.contractIntents?.find((intent) => intent.requestId === intentId)
+        ?.epoch === epoch)
+  )
+    return;
   commandRun(factory.stateDir, project.slug, run.runId, {
     type: "task_bound",
     task,
     epoch,
+    ...(intentId === undefined ? {} : { intentId }),
     requestId,
     expectedRevision: run.revision,
   });
@@ -367,14 +449,44 @@ export function bindScrumDirective(
   };
 }
 
-export function bindScrumBlocker(factory: Factory, slug: string, request: { id: string; task?: string; submitter?: string; message: string }): { execution?: { mode: "scrum"; runId: string; configRevision: number }; packet?: string } {
-  const caller = readCorrelations(factory.stateDir).find(r => r.correlationId === request.submitter || r.agentId === request.submitter);
+export function bindScrumBlocker(
+  factory: Factory,
+  slug: string,
+  request: { id: string; task?: string; submitter?: string; message: string },
+): {
+  execution?: { mode: "scrum"; runId: string; configRevision: number };
+  packet?: string;
+} {
+  const caller = readCorrelations(factory.stateDir).find(
+    (r) =>
+      r.correlationId === request.submitter || r.agentId === request.submitter,
+  );
   const task = caller?.task ?? request.task;
   const contract = task ? factory.contractFor(task) : undefined;
   if (!contract?.execution) return {};
   const project = resolveProject(contract.workspace);
-  if (!project.ok || project.slug !== slug || caller && caller.projectSlug !== slug) throw new FactoryError("cross-project-refused", "blocker belongs to another Project");
+  if (
+    !project.ok ||
+    project.slug !== slug ||
+    (caller && caller.projectSlug !== slug)
+  )
+    throw new FactoryError(
+      "cross-project-refused",
+      "blocker belongs to another Project",
+    );
   const run = readRun(factory.stateDir, slug, contract.execution.runId);
-  const updated = commandRun(factory.stateDir, slug, run.runId, { type: "blocked", reason: `Task ${task}: ${request.message}`, requestId: `${request.id}:blocker`, expectedRevision: run.revision });
-  return { execution: { mode: "scrum", runId: run.runId, configRevision: run.configRevision }, packet: `# Persisted Scrum blocker\n${JSON.stringify(updated)}\n` };
+  const updated = commandRun(factory.stateDir, slug, run.runId, {
+    type: "blocked",
+    reason: `Task ${task}: ${request.message}`,
+    requestId: `${request.id}:blocker`,
+    expectedRevision: run.revision,
+  });
+  return {
+    execution: {
+      mode: "scrum",
+      runId: run.runId,
+      configRevision: run.configRevision,
+    },
+    packet: `# Persisted Scrum blocker\n${JSON.stringify(updated)}\n`,
+  };
 }

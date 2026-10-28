@@ -2095,7 +2095,9 @@ function saveScrumConfig(state, config, slug) {
       configRevision: (previous?.configRevision ?? 0) + 1
     };
     atomicJson(join8(scopeDir(state, slug), "scrum-lanes.json"), next);
-    rmSync4(join8(scopeDir(state, slug), "scrum-active-profile.json"), { force: true });
+    rmSync4(join8(scopeDir(state, slug), "scrum-active-profile.json"), {
+      force: true
+    });
     return structuredClone(next);
   });
 }

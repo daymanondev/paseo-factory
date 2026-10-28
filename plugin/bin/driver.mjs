@@ -969,7 +969,7 @@ export async function observeTasks(
         const workspace = entry.workspace ?? contract?.workspace;
         cleanWorkspaceForRespawn(workspace); // the TASK WORKTREE on the worktree path — never <project-root>
         const brief = entry.brief ?? renderBrief(entry.task, process.env.PATH ?? "", contract?.description, contract?.skills, entry.branch);
-        const { provider: providerId, model, thinking } = splitProvider(provider);
+        const { provider: providerId, model, thinking } = splitProvider(contract?.execution ? reply.event?.provider ?? entry.provider ?? provider : provider);
         const respawnSeq = reply.event?.seq;
         const idempotencyKey = respawnSeq !== undefined ? `${entry.task}-respawn-${respawnSeq}` : `${entry.task}-respawn`;
         const leadAgentId = reply.leadAgentId ?? entry.leadAgentId;
@@ -1265,6 +1265,7 @@ const METER_WAIT_MS = 15_000;
  * neither turns a green run red — the meter records, it never judges.
  */
 async function submitMeter(spoolRoot, entry, provider, log) {
+  provider = entry.provider ?? provider;
   const request = stampDriverRequest({
     id: randomId(),
     kind: "meter",
@@ -1406,12 +1407,14 @@ export async function runDriver({ runId, role, providerExplicit, home, stateDir,
       const brief = renderBrief(task, process.env.PATH ?? "", contract.description, contract.skills, branch);
       const spawnSeq = reply.event?.seq;
       const idempotencyKey = spawnSeq !== undefined ? `${task}-spawn-${spawnSeq}` : task;
+      const actualLane = contract.execution ? reply.event?.provider ?? provider : provider;
+      const effective = contract.execution ? splitProvider(actualLane) : { provider: providerId, model, thinking };
       const agentId = await createTaskAgent(rpc, {
         task,
         idempotencyKey,
-        provider: providerId,
-        ...(model === undefined ? {} : { model }),
-        ...(thinking === undefined ? {} : { thinking }),
+        provider: effective.provider,
+        ...(effective.model === undefined ? {} : { model: effective.model }),
+        ...(effective.thinking === undefined ? {} : { thinking: effective.thinking }),
         cwd: prep?.cwd ?? contract.workspace,
         brief,
         ...(reply.leadAgentId === undefined ? {} : { parent: reply.leadAgentId }),
@@ -1419,6 +1422,7 @@ export async function runDriver({ runId, role, providerExplicit, home, stateDir,
         ...(reply.projectSlug === undefined ? {} : { projectSlug: reply.projectSlug }),
       });
       entries.push({
+        ...(contract.execution ? { provider: actualLane } : {}),
         task,
         agentId,
         workspace: prep?.cwd ?? contract.workspace,

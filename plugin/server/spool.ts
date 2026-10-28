@@ -1,3 +1,4 @@
+import { withExecutionLane } from "./core/scrum/execution.ts";
 import type { ScrumDirective } from "./scrum.ts";
 import type { ScrumOperation } from "./core/scrum/controller.ts";
 import { prepareScrumContract, bindScrumEpoch, scrumSpawnLane } from "./scrum.ts";
@@ -1017,7 +1018,12 @@ export async function handleSpoolRequest(
 ): Promise<SpoolReply> {
   if (request.kind === "upgrade" || request.kind === "history_import" || request.kind === "history_import_status") return handleAdmittedSpoolRequest(factory, request, deps);
   if ((request.kind === "reset" || request.kind === "delete") && !factory.history.maintenanceActive) return factory.history.withExclusiveMaintenance(() => handleAdmittedSpoolRequest(factory, request, deps));
-  const run = () => factory.history.runOperation(() => handleAdmittedSpoolRequest(factory, request, deps), { newWork: !["ask", "meter", "repoke", "respawn", "needs_human"].includes(request.kind) });
+  const admitted = () => factory.history.runOperation(() => handleAdmittedSpoolRequest(factory, request, deps), { newWork: !["ask", "meter", "repoke", "respawn", "needs_human"].includes(request.kind) });
+  const run = () => {
+    const workspace = request.kind === "contract" ? request.workspace : (request.kind === "spawn" || request.kind === "respawn") ? factory.contractFor(request.task)?.workspace : undefined;
+    const project = workspace === undefined ? undefined : resolveProject(workspace);
+    return project?.ok ? withExecutionLane(factory.stateDir, project.slug, admitted) : admitted();
+  };
   if (request.kind !== "spawn" && request.kind !== "contract") return run();
   // Spool requests run concurrently. Serialize only Peer lifecycle operations
   // for this Task, so two different spawn prompts cannot pass the same census.
@@ -1154,7 +1160,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         by: request.submitter,
         ...(effectiveSeat === undefined ? {} : { seat: effectiveSeat }),
       });
-      if (contractEvt.execution) bindScrumEpoch(factory, request.task, contractEvt.seq, contractEvt.execution, `${request.id}:bound`);
+      if (contractEvt.execution) bindScrumEpoch(factory, request.task, contractEvt.seq, contractEvt.execution, `${request.id}:bound`, request.id);
       await retirePeers(previousPeers);
       return {
         id: request.id,

@@ -3,6 +3,42 @@ import { FactoryError } from "../errors.ts";
 import { designDigest, verifyRefs, gitBytes, artifactAt } from "./artifacts.ts";
 import { commandRun, readRun, terminalRun } from "./run-journal.ts";
 import type { ScrumRun } from "./run-journal.ts";
+export function verifyCompleteDesign(
+  root: string,
+  run: ScrumRun,
+  design: import("./run-journal.ts").DesignReview,
+): void {
+  const prefix = `.scratch/${run.initiativeId}/`;
+  const evidence = new Set(design.browserEvidence.map((ref) => ref.path));
+  const tracked = gitBytes(
+    root,
+    "ls-tree",
+    "-r",
+    "--name-only",
+    "HEAD",
+    "--",
+    `${prefix}mockups/`,
+  )
+    .toString()
+    .trim()
+    .split("\n")
+    .filter(Boolean);
+  const required = [
+    `${prefix}DESIGN.md`,
+    `${prefix}EXPERIENCE.md`,
+    `${prefix}mockups/index.html`,
+    ...tracked.filter(
+      (path) => run.ownedPaths.includes(path) && !evidence.has(path),
+    ),
+  ];
+  const supplied = new Set(design.refs.map((ref) => ref.path));
+  const missing = required.filter((path) => !supplied.has(path));
+  if (missing.length)
+    throw new FactoryError(
+      "incomplete-design-digest",
+      `complete design digest required: ${missing.join(", ")}`,
+    );
+}
 export function assertDevReady(root: string, run: ScrumRun): void {
   if (terminalRun(run) || run.phase === "blocked" || run.blockers.length > 0)
     throw new FactoryError("scrum-run-blocked", run.phase);
@@ -34,6 +70,7 @@ export function assertDevReady(root: string, run: ScrumRun): void {
         "ui-approval-required",
         "current design approval or explicit waiver required",
       );
+    verifyCompleteDesign(root, run, design);
     verifyRefs(root, design.refs, run.ownedPaths);
     verifyRefs(root, design.browserEvidence, run.ownedPaths);
     verifyBrowserEvidence(root, design);
@@ -64,6 +101,7 @@ export function decideDesign(input: {
     );
   const run = readRun(input.state, input.slug, input.runId);
   if (!run.design) throw new FactoryError("ui-review-missing", input.runId);
+  verifyCompleteDesign(input.root, run, run.design);
   verifyRefs(input.root, run.design.refs, run.ownedPaths);
   return commandRun(input.state, input.slug, input.runId, {
     type: "design_decided",

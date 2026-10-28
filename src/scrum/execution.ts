@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { join } from "node:path";
 import { FactoryError } from "../errors.ts";
 import {
@@ -85,14 +86,29 @@ export async function switchExecution(input: {
 
 /** Shared Project ingress lock: mode transition and directive admission cannot overtake each other. */
 const projectJobs = new Map<string, Promise<unknown>>();
+const executionContext = new AsyncLocalStorage<{
+  key: string;
+  live: boolean;
+}>();
 export async function withExecutionLane<T>(
   state: string,
   slug: string,
   job: () => Promise<T>,
 ): Promise<T> {
   const key = join(state, slug),
-    previous = projectJobs.get(key) ?? Promise.resolve();
-  const next = previous.catch(() => {}).then(job);
+    context = executionContext.getStore();
+  if (context?.key === key && context.live) return job();
+  const previous = projectJobs.get(key) ?? Promise.resolve();
+  const next = previous
+    .catch(() => {})
+    .then(async () => {
+      const lease = { key, live: true };
+      try {
+        return await executionContext.run(lease, job);
+      } finally {
+        lease.live = false;
+      }
+    });
   projectJobs.set(key, next);
   try {
     return await next;
