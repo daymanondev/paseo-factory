@@ -265,6 +265,16 @@ export default function contribute(server: PluginServerContext) {
     if (!booted || !mailRecovered) resumeOrdinaryRuntime();
   }, 100);
   recoveryTimer.unref?.();
+  // Durable Scrum intents can become actionable after the command or a turn
+  // finishes. Retry them during this lifetime as well as at startup. The
+  // existing SLP mailbox scheduling remains event-driven.
+  let scrumRecoveryInFlight = false;
+  const scrumRecoveryTimer = setInterval(() => {
+    if (!booted || !mailRecovered || !paseoApi || scrumRecoveryInFlight || pendingUpgradeFor(stateDir) !== undefined) return;
+    scrumRecoveryInFlight = true;
+    void leadMail.pumpAll({ scrumOnly: true }).catch(error => log(`scrum recovery deferred: ${String(error)}`)).finally(() => { scrumRecoveryInFlight = false; });
+  }, 1000);
+  scrumRecoveryTimer.unref?.();
   // The turn boundary (v0.0.20, ADR 0013 §5; v0.0.23, ADR 0015 §3): every
   // `agent.turn_ended` hands the Lead-mailbox runtime the event — it settles
   // the in-flight batch (`mail_acked` on completed, `mail_requeued` otherwise)
@@ -418,6 +428,7 @@ export default function contribute(server: PluginServerContext) {
     clearTimeout(warmupTimer);
     clearTimeout(postReadySyncTimer);
     clearInterval(recoveryTimer);
+    clearInterval(scrumRecoveryTimer);
     offPermissionAsked();
     offAgentCreate();
     offSessionOpen();

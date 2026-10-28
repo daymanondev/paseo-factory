@@ -485,3 +485,257 @@ test("a new Scrum contract request opens an epoch and retires the prior Agent; e
   if (!cancelledSpawn.ok)
     assert.equal(cancelledSpawn.code, "scrum-run-blocked");
 });
+
+test("parallel UX and Architect land disjoint artifacts from one accepted PRD in managed worktrees", async (t) => {
+  const { mkdirSync, readFileSync } = await import("node:fs");
+  const { execFileSync } = await import("node:child_process");
+  const { createFactory } = await import("../plugin/server/core/factory.ts");
+  const { resolveProject } = await import("../plugin/server/core/project.ts");
+  const { ensureScrumConfig } = await import(
+    "../plugin/server/core/scrum/config.ts"
+  );
+  const { switchExecution } = await import(
+    "../plugin/server/core/scrum/execution.ts"
+  );
+  const { createScrumRun, readRun } = await import(
+    "../plugin/server/core/scrum/run-journal.ts"
+  );
+  const { handleSpoolRequest } = await import("../plugin/server/spool.ts");
+  const { prepareTaskWorktree } = await import(
+    "../plugin/server/core/workspace.ts"
+  );
+  const { artifactAt } = await import(
+    "../plugin/server/core/scrum/artifacts.ts"
+  );
+  const { scrumOperation } = await import(
+    "../plugin/server/core/scrum/controller.ts"
+  );
+  const state = makeTempDir(),
+    repo = makeTempDir();
+  disposeDir(t, state);
+  disposeDir(t, repo);
+  writeFileSync(join(repo, ".gitignore"), ".scratch/\n");
+  writeFileSync(join(repo, "product.txt"), "baseline\n");
+  gitCommitAll(repo);
+  mkdirSync(join(repo, ".scratch"), { recursive: true });
+  writeFileSync(
+    join(repo, ".scratch/local-tracker.md"),
+    "must remain untracked",
+  );
+  const project = resolveProject(repo);
+  assert.ok(project.ok);
+  if (!project.ok) return;
+  const slug = project.slug;
+  const factory = createFactory({ stateDir: state });
+  await switchExecution({
+    state,
+    slug: slug,
+    mode: "scrum",
+    blockers: [],
+    rotate: async () => {},
+  });
+  const prefix = ".scratch/parallel";
+  const files = {
+    pm: {
+      "prd.md":
+        "# Outcome\nRead records.\n# Out of Scope\nRemote writes.\n## FR-1: read records\n## NFR-1: offline is read-only\n## UJ-1: inspect record\n",
+      "sprint-backlog.md":
+        "# R1: read records\nSource: FR-1 NFR-1 UJ-1\n# S-01: tracer\nCovers: R1\nTests: product.txt\n",
+      "decisions/pm.jsonl": '{"id":"P1","rationale":"read only"}\n',
+    },
+    ux: {
+      "DESIGN.md":
+        "# Direction\nColor: navy.\nTypography: system-ui.\nSpacing: 8px.\nComponent: record card.\n",
+      "EXPERIENCE.md":
+        "# Information architecture and flow\nOne screen justified for the bounded record viewer. Offline writes permitted.\n| Screen | empty | loading | populated | error | offline | permission-denied |\n| viewer | no record | wait | record | retry | editable | denied |\n",
+      "mockups/index.html":
+        "<!doctype html><html><head><title>Record viewer</title></head><body><main>" +
+        [
+          "empty",
+          "loading",
+          "populated",
+          "error",
+          "offline",
+          "permission-denied",
+        ]
+          .map((s) => `<button data-state="${s}">${s}</button>`)
+          .join("") +
+        "</main></body></html>",
+      "decisions/ux.jsonl":
+        '{"id":"U1","rationale":"offline writes permitted pending reconciliation"}\n',
+    },
+    architect: {
+      "architecture.md":
+        "# Stack\nNode v24 runtime evidence from node --version; product.txt is the existing repository boundary.\n## AD-1: offline ownership\nBinds: API\nPrevents: disconnected writes\nRule: offline is read-only\n",
+      "decisions/architect.jsonl":
+        '{"id":"A1","rationale":"offline writes forbidden"}\n',
+    },
+  };
+  const ownedPaths = Object.values(files).flatMap((f) =>
+    Object.keys(f).map((p) => `${prefix}/${p}`),
+  );
+  createScrumRun({
+    state,
+    slug: slug,
+    runId: "parallel",
+    initiativeId: "parallel",
+    config: ensureScrumConfig(state, slug),
+    configRevision: 1,
+    track: "ui",
+    rationale: "disjoint design wave",
+    requestId: "create",
+    ownedPaths,
+  });
+  const context = {
+    factory,
+    root: repo,
+    slug: slug,
+    authority: "lead" as const,
+    actor: "lead",
+    activeAgents: [],
+    pendingDirectives: false,
+  };
+  const git = (cwd: string, ...args: string[]) =>
+    execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+  async function prepare(role: keyof typeof files) {
+    const task = role;
+    const reply = await handleSpoolRequest(factory, {
+      id: `contract-${task}`,
+      kind: "contract",
+      submitter: "owner",
+      task,
+      workspace: repo,
+      gate: "test -f product.txt",
+      runId: "parallel",
+      role,
+    });
+    assert.equal(reply.ok, true, JSON.stringify(reply));
+    const contract = factory.contractFor(task)!;
+    if (role !== "pm")
+      assert.equal(
+        contract.execution!.artifactRefs[0].path,
+        `${prefix}/prd.md`,
+      );
+    const wt = prepareTaskWorktree({
+      stateDir: state,
+      workspace: repo,
+      task,
+      base: contract.base,
+    });
+    assert.ok(wt.ok);
+    if (!wt.ok) throw Error("worktree");
+    const spawn = await handleSpoolRequest(factory, {
+      id: `spawn-${task}`,
+      kind: "spawn",
+      task,
+      provider: "",
+      arity: 1,
+      worktree: wt.path,
+    });
+    assert.equal(spawn.ok, true, JSON.stringify(spawn));
+    for (const [path, bytes] of Object.entries(files[role])) {
+      const full = join(wt.path, prefix, path);
+      mkdirSync(join(full, ".."), { recursive: true });
+      writeFileSync(full, bytes);
+      git(wt.path, "add", "-f", "--", `${prefix}/${path}`);
+    }
+    git(wt.path, "commit", "-m", `deliver ${role}`);
+    return {
+      task,
+      sha: git(wt.path, "rev-parse", "HEAD"),
+      paths: Object.keys(files[role]).map((p) => `${prefix}/${p}`),
+    };
+  }
+  async function accept(item: Awaited<ReturnType<typeof prepare>>) {
+    const claim = await factory.claim({ task: item.task, sha: item.sha });
+    assert.equal(claim.verdict, "green", claim.gate.note);
+    await factory.accept({
+      task: item.task,
+      attempt: claim.attempt,
+      authority: "owner",
+      accepted_by: "owner",
+    });
+    const run = readRun(state, slug, "parallel");
+    scrumOperation(
+      {
+        operation: "run.command",
+        runId: run.runId,
+        requestId: `result-${item.task}`,
+        expectedRevision: run.revision,
+        payload: {
+          type: "role_result",
+          task: item.task,
+          result: {
+            status: "complete",
+            artifactRefs: item.paths.map((p) => artifactAt(repo, item.sha, p)),
+            assumptions: [],
+            openQuestions: [],
+            conflicts: [],
+          },
+        },
+      },
+      context,
+    );
+  }
+  await accept(await prepare("pm"));
+  const [ux, architect] = await Promise.all([
+    prepare("ux"),
+    prepare("architect"),
+  ]);
+  assert.equal(
+    factory.ledger.events.filter((e) => e.event === "spawn_dispatched").length,
+    3,
+  );
+  assert.equal(
+    factory.ledger.events.filter((e) => e.event === "attempt_accepted").length,
+    1,
+    "both design Tasks are open at the same time",
+  );
+  await accept(ux);
+  await accept(architect);
+  assert.match(
+    readFileSync(join(repo, prefix, "decisions/ux.jsonl"), "utf8"),
+    /U1/,
+  );
+  assert.match(
+    readFileSync(join(repo, prefix, "decisions/architect.jsonl"), "utf8"),
+    /A1/,
+  );
+  assert.equal(git(repo, "status", "--porcelain"), "");
+  assert.equal(git(repo, "ls-files", ".scratch/local-tracker.md"), "");
+  const run = readRun(state, slug, "parallel");
+  const blocked = scrumOperation(
+    {
+      operation: "run.command",
+      runId: run.runId,
+      requestId: "readiness",
+      expectedRevision: run.revision,
+      payload: {
+        type: "readiness_recorded",
+        readiness: {
+          refs: run.tasks.flatMap((t) => t.result!.artifactRefs),
+          contradictions: [
+            "UX permits offline writes; architecture forbids them",
+          ],
+          unsafeAssumptions: [],
+          missingCoverage: [],
+          rationale: "semantic mismatch despite two GREEN artifact Gates",
+        },
+      },
+    },
+    context,
+  ) as typeof run;
+  assert.equal(blocked.phase, "blocked");
+  const dev = await handleSpoolRequest(factory, {
+    id: "dev-blocked",
+    kind: "contract",
+    submitter: "owner",
+    task: "dev",
+    workspace: repo,
+    gate: "true",
+    runId: run.runId,
+    role: "dev",
+  });
+  assert.equal(dev.ok, false);
+  if (!dev.ok) assert.equal(dev.code, "scrum-run-blocked");
+});

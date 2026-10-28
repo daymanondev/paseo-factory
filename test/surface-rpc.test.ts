@@ -5820,3 +5820,23 @@ test("Scrum completion sees an in-flight mailbox delivery after its queue become
   const result = await handlers.scrumCommand({ operation: "run.complete", projectRoot: project.root, runId: "r", requestId: "complete", expectedRevision: 1 });
   assert.equal(result.ok, false); if (!result.ok) assert.match(result.error, /Agents\/directives still in flight/);
 });
+
+test("Owner reset/delete reclaim only target Scrum runtime while reset preserves selection and both rosters", async t => {
+  const {handlers,stateDir}=makeSurface(t);
+  const target=makeProject(t,'scrum-cleanup'),other=makeProject(t,'scrum-untouched');
+  assert.equal((await handlers.executionSetMode({projectRoot:target.root,mode:'scrum'})).ok,true);
+  const dir=join(stateDir,'projects',target.slug),otherDir=join(stateDir,'projects',other.slug);
+  writeFileSync(join(dir,'lanes.json'),JSON.stringify({worker:'pi/preserved'}));
+  const configBefore=['execution.json','lanes.json','scrum-lanes.json'].map(p=>readFileSync(join(dir,p),'utf8'));
+  for(const base of [dir,otherDir]){mkdirSync(join(base,'scrum/runs/r'),{recursive:true});writeFileSync(join(base,'scrum/runs/r/evidence'),'owned');mkdirSync(join(base,'scrum/harness'),{recursive:true});writeFileSync(join(base,'scrum/harness/prompt'),'owned');}
+  // A malformed target journal must still be removable by the Owner.
+  const refused=await handlers.projectDelete({projectRoot:target.root,seat:'lead'});assert.equal(refused.ok,false);assert.equal(existsSync(join(dir,'scrum')),true);
+  const reset=await handlers.projectReset({projectRoot:target.root});assert.equal(reset.ok,true,JSON.stringify(reset));
+  assert.equal(existsSync(join(dir,'scrum')),false);
+  assert.deepEqual(['execution.json','lanes.json','scrum-lanes.json'].map(p=>readFileSync(join(dir,p),'utf8')),configBefore);
+  assert.equal(readFileSync(join(otherDir,'scrum/runs/r/evidence'),'utf8'),'owned');
+  mkdirSync(join(dir,'scrum/harness'),{recursive:true});writeFileSync(join(dir,'scrum/harness/prompt'),'second lifecycle');
+  const removed=await handlers.projectDelete({projectRoot:target.root});assert.equal(removed.ok,true,JSON.stringify(removed));
+  assert.equal(existsSync(dir),false);assert.equal(existsSync(target.root),true);
+  assert.equal(readFileSync(join(otherDir,'scrum/harness/prompt'),'utf8'),'owned');
+});

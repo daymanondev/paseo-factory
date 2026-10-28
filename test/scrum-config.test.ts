@@ -111,3 +111,51 @@ test("busy mode switches have no effects and interrupted seat transitions recove
   assert.equal(readExecution(state, "p").mode, "scrum");
   assert.doesNotThrow(() => assertExecutionReady(state, "p"));
 });
+
+test("old and new Vault files preserve both rosters and leave Project selection local", async (t) => {
+  const {
+    collectScrumVault,
+    materializeScrumVault,
+    collectProjectScrumVault,
+    materializeProjectScrumVault,
+  } = await import("../src/scrum/vault.ts");
+  const { saveScrumProfile, readScrumProfiles } = await import(
+    "../src/scrum/profiles.ts"
+  );
+  const { mkdirSync } = await import("node:fs");
+  const state = makeTempDir(),
+    vault = makeTempDir(),
+    imported = makeTempDir();
+  for (const p of [state, vault, imported]) disposeDir(t, p);
+  saveLanes(state, { worker: "pi/original" });
+  const slp = readFileSync(join(state, "lanes.json"), "utf8");
+  const config = ensureScrumConfig(state);
+  saveExecutionDefault(state, "scrum");
+  saveScrumProfile(state, { id: "daily", name: "Daily", config });
+  ensureScrumConfig(state, "source");
+  collectScrumVault(state, vault);
+  collectProjectScrumVault(state, "source", join(vault, "project"));
+  materializeScrumVault(imported, vault, true);
+  materializeProjectScrumVault(
+    imported,
+    "target",
+    join(vault, "project"),
+    true,
+  );
+  assert.equal(readExecution(imported).mode, "scrum");
+  assert.equal(readExecution(imported, "target").mode, "slp");
+  assert.deepEqual(
+    readScrumConfig(imported, "target"),
+    readScrumConfig(state, "source"),
+  );
+  assert.equal(readScrumProfiles(imported).profiles[0].id, "scrum:daily");
+  const before = readFileSync(join(imported, "scrum-lanes.json"), "utf8");
+  mkdirSync(join(vault, "old"));
+  materializeScrumVault(imported, join(vault, "old"), true);
+  materializeProjectScrumVault(imported, "target", join(vault, "old"), true);
+  assert.equal(
+    readFileSync(join(imported, "scrum-lanes.json"), "utf8"),
+    before,
+  );
+  assert.equal(readFileSync(join(state, "lanes.json"), "utf8"), slp);
+});
