@@ -1,3 +1,5 @@
+import { readExecution } from "./server/core/scrum/selection.ts";
+import { listRuns, readRun, terminalRun } from "./server/core/scrum/run-journal.ts";
 /**
  * paseo-factory plugin server entry — the shell around the pure core.
  *
@@ -30,7 +32,7 @@ import { createSurfaceHandlers, registerSurfaceRpc } from "./server/surface-rpc.
 import { createLeadMailRuntime } from "./server/lead-mailbox.ts";
 import { injectRoleOnCreate, injectSessionEnv, sanitizeAgentCreateHookResult } from "./server/roles.ts";
 
-const SHELL_VERSION = "0.0.51";
+const SHELL_VERSION = "0.0.52";
 
 const log = (message: string) => console.log(`[${PLUGIN_ID}] ${message}`);
 
@@ -209,6 +211,7 @@ export default function contribute(server: PluginServerContext) {
   // pipeline the spool's lead_dispatch rides.
   const surface = createSurfaceHandlers({
     ...surfaceDeps,
+    handoffPending: slug => leadMail.hasPendingHandoff(slug),
     onLeadRetired: (input) => leadMail.settleLeadRotation(input.slug),
     onSeatKickoffSent: (input) => leadMail.markKickoffSent(input.agentId),
     resetProjectMailbox: (slug) => leadMail.resetProjectMailbox(slug),
@@ -224,6 +227,18 @@ export default function contribute(server: PluginServerContext) {
     factory,
     stateDir,
     daemon: () => paseoApi as never,
+    reconcileScrum: async project => {
+      if (readExecution(stateDir, project.slug).mode !== "scrum") return;
+      for (let run of listRuns(stateDir, project.slug)) {
+        if (run.cancellation && !terminalRun(run)) {
+          await surface.scrumCommand({ operation: "run.cancel", projectRoot: project.root, runId: run.runId, requestId: run.cancellation.requestId, expectedRevision: run.revision, payload: { reason: run.cancellation.reason } }, undefined, { authority: "owner", actor: run.cancellation.actor });
+        } else if (run.completionRequest && !terminalRun(run)) {
+          await surface.scrumCommand({ operation: "run.complete", projectRoot: project.root, runId: run.runId, requestId: run.completionRequest.requestId, expectedRevision: run.revision }, undefined, { authority: "lead", actor: run.completionRequest.actor });
+        }
+        run = readRun(stateDir, project.slug, run.runId);
+        if (run.phase === "completed" && run.completionRequest && !run.completionReported) await leadMail.reportSupervisor({ id: `${run.completionRequest.requestId}:report`, kind: "supervisor_report", workspace: project.root, reportType: "completed", scrum: { runId: run.runId }, message: `Scrum run ${run.runId} completed after verification. ${JSON.stringify(run.telemetry)}`, seat: "lead" });
+      }
+    },
     ensureLead: (input) => surface.leadEnsure(input),
     ensureSupervisor: (input) => surface.supervisorEnsure(input),
     retireLead: (input) => surface.leadRotate(input),
@@ -250,6 +265,16 @@ export default function contribute(server: PluginServerContext) {
     if (!booted || !mailRecovered) resumeOrdinaryRuntime();
   }, 100);
   recoveryTimer.unref?.();
+  // Durable Scrum intents can become actionable after the command or a turn
+  // finishes. Retry them during this lifetime as well as at startup. The
+  // existing SLP mailbox scheduling remains event-driven.
+  let scrumRecoveryInFlight = false;
+  const scrumRecoveryTimer = setInterval(() => {
+    if (!booted || !mailRecovered || !paseoApi || scrumRecoveryInFlight || pendingUpgradeFor(stateDir) !== undefined) return;
+    scrumRecoveryInFlight = true;
+    void leadMail.pumpAll({ reconcileScrumOnly: true }).catch(error => log(`scrum recovery deferred: ${String(error)}`)).finally(() => { scrumRecoveryInFlight = false; });
+  }, 1000);
+  scrumRecoveryTimer.unref?.();
   // The turn boundary (v0.0.20, ADR 0013 §5; v0.0.23, ADR 0015 §3): every
   // `agent.turn_ended` hands the Lead-mailbox runtime the event — it settles
   // the in-flight batch (`mail_acked` on completed, `mail_requeued` otherwise)
@@ -335,6 +360,14 @@ export default function contribute(server: PluginServerContext) {
             message: reply.error,
           };
     },
+    executionSetMode: async request => {
+      const reply = await surface.executionSetMode(request, { paseo: paseoApi as never });
+      return reply.ok ? { id: request.id, ok: true, summary: "execution selection saved", data: reply.data } : { id: request.id, ok: false, code: reply.code, message: reply.error };
+    },
+    scrumCommand: async (request, caller) => {
+      const reply = await surface.scrumCommand(request, { paseo: paseoApi as never }, caller);
+      return reply.ok ? { id: request.id, ok: true, summary: `Scrum ${request.operation}`, data: reply.data } : { id: request.id, ok: false, code: reply.code, message: reply.error };
+    },
     peerMail: leadMail.notifyPeer,
     daemon: () => paseoApi as never,
     sanitizeLane: (lane) => surface.sanitizeLane(lane),
@@ -395,6 +428,7 @@ export default function contribute(server: PluginServerContext) {
     clearTimeout(warmupTimer);
     clearTimeout(postReadySyncTimer);
     clearInterval(recoveryTimer);
+    clearInterval(scrumRecoveryTimer);
     offPermissionAsked();
     offAgentCreate();
     offSessionOpen();

@@ -123,6 +123,7 @@ export const TaskStatusSchema = z.enum(["accepted", "needs-human", "running", "r
 export type TaskStatus = z.infer<typeof TaskStatusSchema>;
 
 export const TaskViewSchema = z.object({
+  execution: z.object({ mode: z.literal("scrum"), runId: z.string(), role: z.enum(["pm", "ux", "architect", "dev", "qa"]), configRevision: z.number() }).optional(),
   task: z.string(),
   workspace: z.string(),
   description: z.string().nullable(),
@@ -329,7 +330,12 @@ export const VaultStatusViewSchema = z.object({
 export type VaultStatusView = z.infer<typeof VaultStatusViewSchema>;
 
 /** The whole Factory surface snapshot — one RPC answer, one render. */
+export const ScrumConfigSchema = z.object({ configRevision: z.number().int().optional(), schemaVersion: z.literal(1), requireUiApproval: z.boolean(), lanes: z.object({ supervisor: z.string(), lead: z.string(), pm: z.string(), ux: z.string(), architect: z.string(), dev: z.string(), qa: z.string(), watch: z.string(), retro: z.string() }) });
+export const ExecutionViewSchema = z.object({ selectedMode: z.enum(["slp", "scrum"]), revision: z.number(), pendingMode: z.enum(["slp", "scrum"]).optional(), error: z.string().optional(), config: ScrumConfigSchema.optional(), profiles: z.array(z.object({ id: z.string(), name: z.string(), config: ScrumConfigSchema, updatedAt: z.string() })).optional(), run: z.object({ runId: z.string(), phase: z.string(), revision: z.number(), configRevision: z.number(), config: ScrumConfigSchema, qaResult: z.object({ status: z.string(), productSha: z.string(), confirmedDefects: z.number() }).optional(), fixRounds: z.number(), decisions: z.number(), design: z.object({ revision: z.number(), digest: z.string(), decision: z.string().optional() }).optional() }).optional() });
+export type ExecutionView = z.infer<typeof ExecutionViewSchema>;
+
 export const FactoryViewSchema = z.object({
+  execution: ExecutionViewSchema.optional(),
   version: z.literal(FACTORY_VIEW_VERSION),
   stateDir: z.string(),
   generatedAt: z.string(),

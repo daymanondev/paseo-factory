@@ -18,7 +18,6 @@ export {
   ensureGitRepository,
   readProjectRegistration,
   writeProjectRegistration,
-  ensureProjectRegistered,
   listProjectRegistrations,
   discoverProjects,
 } from "./core/project.ts";
@@ -29,3 +28,18 @@ export type {
   DiscoveredProject,
   ProjectRegistration,
 } from "./core/project.ts";
+
+import { resolveProject as resolveCoreProject, ensureProjectRegistered as ensureCoreProjectRegistered, readProjectRegistration as existingRegistration } from "./core/project.ts";
+import { readExecution } from "./core/scrum/selection.ts";
+import { ensureScrumConfig } from "./core/scrum/config.ts";
+export function ensureProjectRegistered(...args: Parameters<typeof ensureCoreProjectRegistered>): ReturnType<typeof ensureCoreProjectRegistered> {
+  const [state, input] = args;
+  const resolved = typeof input === "string" ? resolveCoreProject(input) : { ok: true as const, slug: input.slug };
+  const isNew = resolved.ok && existingRegistration(state, resolved.slug) === undefined;
+  const result = ensureCoreProjectRegistered(...args);
+  if (isNew && result.ok && readExecution(state, result.slug).mode === "scrum") {
+    // This is an explicit registration/seat creation act, never snapshot/read migration.
+    ensureScrumConfig(state, result.slug);
+  }
+  return result;
+}

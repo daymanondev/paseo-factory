@@ -5769,3 +5769,74 @@ test("sweepProjectWorkspaces: keepWorkspaceIds preserves an opening Supervisor s
   assert.ok(capturedKeepIds[0]!.includes("wks_old_sup"));
 });
 
+
+test("execution mode refuses pending Tasks/mail and isolates Scrum snapshot failures", async t => {
+  const { handlers, factory, stateDir } = makeSurface(t);
+  const project = makeProject(t, "mode-project");
+  factory.setContract({ task: "unfinished", workspace: project.root, gate: "true" });
+  const busy = await handlers.executionSetMode({ projectRoot: project.root, mode: "scrum" });
+  assert.equal(busy.ok, false); if (!busy.ok) { assert.equal(busy.code, "execution-mode-busy"); assert.match(busy.error, /unfinished/); }
+  assert.equal(existsSync(join(stateDir, "projects", project.slug, "scrum-lanes.json")), false);
+  const other = makeProject(t, "scrum-project");
+  const switched = await handlers.executionSetMode({ projectRoot: other.root, mode: "scrum" });
+  assert.equal(switched.ok, true, JSON.stringify(switched));
+  writeFileSync(join(stateDir, "projects", other.slug, "scrum-lanes.json"), "broken");
+  const broken = await handlers.snapshot({ projectRoot: other.root });
+  assert.equal(broken.ok, true); if (broken.ok) assert.match(broken.view.execution?.error ?? "", /scrum-config-invalid/);
+  const slp = await handlers.snapshot({ projectRoot: project.root });
+  assert.equal(slp.ok, true); if (slp.ok) assert.equal(slp.view.execution?.selectedMode, "slp");
+});
+
+test("Scrum cancellation checks revision before stopping Agents and recovers a persisted interrupted intent", async t => {
+  const agents: FakeAgent[] = [];
+  const { handlers, factory, stateDir, home, fake } = makeSurface(t, agents);
+  const project = makeProject(t, "cancel-project");
+  assert.equal((await handlers.executionSetMode({ projectRoot: project.root, mode: "scrum" })).ok, true);
+  const created = await handlers.scrumCommand({ projectRoot: project.root, operation: "run.create", runId: "cancel-run", requestId: "create", payload: { initiativeId: "cancel-fixture", track: "small", rationale: "test cancellation", ownedPaths: [] } });
+  assert.equal(created.ok, true);
+  agents.push({ id: "owned-dev", provider: "pi/test", status: "running", labels: { seat: "agent", project: project.slug, run: "cancel-run" } });
+  const stops: string[] = []; let failStop = true;
+  const restarted = createSurfaceHandlers({ factory, stateDir, home, daemon: fake.daemon, stopAgent: async id => { stops.push(id); if (failStop) throw new Error("connection lost"); return { ok: true }; } });
+  const stale = await restarted.scrumCommand({ projectRoot: project.root, operation: "run.cancel", runId: "cancel-run", requestId: "cancel", expectedRevision: 99, payload: { reason: "Owner cancellation" } });
+  assert.equal(stale.ok, false); assert.deepEqual(stops, []); assert.equal(fake.archived.length, 0);
+  const interrupted = await restarted.scrumCommand({ projectRoot: project.root, operation: "run.cancel", runId: "cancel-run", requestId: "cancel", expectedRevision: 1, payload: { reason: "Owner cancellation" } });
+  assert.equal(interrupted.ok, false);
+  const { readRun } = await import("../plugin/server/core/scrum/run-journal.ts");
+  const pending = readRun(stateDir, project.slug, "cancel-run");
+  assert.equal(pending.cancellation?.requestId, "cancel"); assert.notEqual(pending.phase, "cancelled");
+  failStop = false;
+  const resumed = await restarted.scrumCommand({ projectRoot: project.root, operation: "run.cancel", runId: "cancel-run", requestId: "cancel", expectedRevision: pending.revision, payload: { reason: "Owner cancellation" } });
+  assert.equal(resumed.ok, true, JSON.stringify(resumed)); assert.equal(readRun(stateDir, project.slug, "cancel-run").phase, "cancelled"); assert.ok(fake.archived.includes("owned-dev"));
+});
+
+test("Scrum completion sees an in-flight mailbox delivery after its queue becomes empty", async t => {
+  const { handlers, stateDir } = makeSurface(t);
+  const project = makeProject(t, "completion-flight");
+  assert.equal((await handlers.executionSetMode({ projectRoot: project.root, mode: "scrum" })).ok, true);
+  assert.equal((await handlers.scrumCommand({ operation: "run.create", projectRoot: project.root, runId: "r", requestId: "create", payload: { initiativeId: "completion-flight", track: "small", rationale: "fixture", ownedPaths: [] } })).ok, true);
+  const mailbox = join(stateDir, "projects", project.slug, "mailbox.jsonl");
+  const mail = enqueueLeadMail(mailbox, { from: "owner", kind: "directive", text: "verify before completion" });
+  deliverLeadMail(mailbox, { mailIds: [mail.mailId], toAgentId: "lead" });
+  const result = await handlers.scrumCommand({ operation: "run.complete", projectRoot: project.root, runId: "r", requestId: "complete", expectedRevision: 1 });
+  assert.equal(result.ok, false); if (!result.ok) assert.match(result.error, /Agents\/directives still in flight/);
+});
+
+test("Owner reset/delete reclaim only target Scrum runtime while reset preserves selection and both rosters", async t => {
+  const {handlers,stateDir}=makeSurface(t);
+  const target=makeProject(t,'scrum-cleanup'),other=makeProject(t,'scrum-untouched');
+  assert.equal((await handlers.executionSetMode({projectRoot:target.root,mode:'scrum'})).ok,true);
+  const dir=join(stateDir,'projects',target.slug),otherDir=join(stateDir,'projects',other.slug);
+  writeFileSync(join(dir,'lanes.json'),JSON.stringify({worker:'pi/preserved'}));
+  const configBefore=['execution.json','lanes.json','scrum-lanes.json'].map(p=>readFileSync(join(dir,p),'utf8'));
+  for(const base of [dir,otherDir]){mkdirSync(join(base,'scrum/runs/r'),{recursive:true});writeFileSync(join(base,'scrum/runs/r/evidence'),'owned');mkdirSync(join(base,'scrum/harness'),{recursive:true});writeFileSync(join(base,'scrum/harness/prompt'),'owned');}
+  // A malformed target journal must still be removable by the Owner.
+  const refused=await handlers.projectDelete({projectRoot:target.root,seat:'lead'});assert.equal(refused.ok,false);assert.equal(existsSync(join(dir,'scrum')),true);
+  const reset=await handlers.projectReset({projectRoot:target.root});assert.equal(reset.ok,true,JSON.stringify(reset));
+  assert.equal(existsSync(join(dir,'scrum')),false);
+  assert.deepEqual(['execution.json','lanes.json','scrum-lanes.json'].map(p=>readFileSync(join(dir,p),'utf8')),configBefore);
+  assert.equal(readFileSync(join(otherDir,'scrum/runs/r/evidence'),'utf8'),'owned');
+  mkdirSync(join(dir,'scrum/harness'),{recursive:true});writeFileSync(join(dir,'scrum/harness/prompt'),'second lifecycle');
+  const removed=await handlers.projectDelete({projectRoot:target.root});assert.equal(removed.ok,true,JSON.stringify(removed));
+  assert.equal(existsSync(dir),false);assert.equal(existsSync(target.root),true);
+  assert.equal(readFileSync(join(otherDir,'scrum/harness/prompt'),'utf8'),'owned');
+});

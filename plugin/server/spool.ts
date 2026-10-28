@@ -1,3 +1,11 @@
+import { commandRun as commandScrumRun, readRun as readScrumRun } from "./core/scrum/run-journal.ts";
+import { withExecutionLane } from "./core/scrum/execution.ts";
+import type { ScrumDirective } from "./scrum.ts";
+import type { ScrumOperation } from "./core/scrum/controller.ts";
+import { prepareScrumContract, bindScrumEpoch, scrumSpawnLane } from "./scrum.ts";
+import { SCRUM_ROLE_TITLES } from "./core/scrum/prompts.ts";
+import { SPECIALIST_ROLES, safeId, artifactRefIsValid } from "./core/scrum/types.ts";
+import type { ScrumRoleName, ArtifactRef } from "./core/scrum/types.ts";
 import { recordUpgradeControlReceipt } from "./core/history-upgrade.ts";
 import { pendingUpgradeFor } from "./core/upgrade-state.ts";
 import { upgradeFactory, upgradeReply, recordUpgradeControlReply } from "./core/history-upgrade.ts";
@@ -48,6 +56,9 @@ import type { ImportStatus } from "./core/history-stage.ts";
 export type SpoolSeat = "supervisor" | "lead" | "agent";
 
 export interface ContractRequest {
+  runId?: string;
+  role?: ScrumRoleName;
+  artifactRefs?: ArtifactRef[];
   id: string;
   kind: "contract";
   task: string;
@@ -122,6 +133,9 @@ export interface AcceptRequest {
  * parallel width the scope rule keys on.
  */
 export interface SpawnRequest {
+  runId?: string;
+  role?: ScrumRoleName;
+  providerExplicit?: boolean;
   id: string;
   kind: "spawn";
   task: string;
@@ -169,7 +183,8 @@ export interface LeadRotateRequest {
  * `leadAgentId`, `mailId`, `rotationState`) so the caller never needs a raw
  * Paseo agentId.
  */
-export interface SpoolLeadDispatchRequest {
+export interface SpoolLeadDispatchRequest extends ScrumDirective {
+  task?: string;
   id: string;
   kind: "lead_dispatch";
   project?: string;
@@ -187,7 +202,7 @@ export interface SpoolLeadDispatchRequest {
  * mailbox (`to: "supervisor"`), and when called from inside `Supervisor`
  * (`seat === "supervisor"`) transparently routes to `lead_dispatch` (`to: "lead"`).
  */
-export interface SpoolSupervisorDispatchRequest {
+export interface SpoolSupervisorDispatchRequest extends ScrumDirective {
   id: string;
   kind: "supervisor_dispatch";
   project?: string;
@@ -204,6 +219,8 @@ export interface SpoolSupervisorDispatchRequest {
  * Supervisor lane.
  */
 export interface SpoolSupervisorReportRequest {
+  reportType?: "ui-review" | "completed";
+  scrum?: Record<string, unknown>;
   id: string;
   kind: "supervisor_report";
   project?: string;
@@ -256,6 +273,8 @@ export interface SpoolDeleteRequest {
  * replacement `agent.create.request` idempotency key).
  */
 export interface RespawnRequest {
+  runId?: string;
+  role?: ScrumRoleName;
   id: string;
   kind: "respawn";
   task: string;
@@ -366,7 +385,11 @@ export interface AskRequest {
   seat?: SpoolSeat;
 }
 
+export type ScrumSpoolRequest = ScrumOperation & { id: string; kind: "scrum_command"; projectRoot?: string; submitter: string; seat?: SpoolSeat };
+export type ExecutionSpoolRequest = { id: string; kind: "execution_mode"; mode: "slp" | "scrum"; projectRoot?: string; submitter: string; seat?: SpoolSeat };
 export type SpoolRequest =
+  | ScrumSpoolRequest
+  | ExecutionSpoolRequest
   | ({ id: string; kind: "upgrade"; submitter?: string; seat?: SpoolSeat } & Omit<UpgradeInput, "controlId">)
   | { id: string; kind: "history_import" | "history_import_status"; sources?: HistoryImportSource[]; project?: string; submitter?: string; seat?: SpoolSeat }
   | ContractRequest
@@ -464,6 +487,7 @@ export type SpoolReply =
       removedFiles?: number;
       archivedSeats?: string[];
       archivedAgents?: string[];
+      data?: unknown;
       historyImports?: ImportStatus[];
     }
   | { id: string; ok: false; code: string; message: string; event?: LedgerEvent };
@@ -537,6 +561,11 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
   const submitterParsed = parseOptionalSubmitter(req.submitter);
   if (!submitterParsed.ok) return undefined;
   const submitterField = submitterParsed.submitter === undefined ? {} : { submitter: submitterParsed.submitter };
+  if (req.runId !== undefined && !safeId(req.runId)) return undefined;
+  if (req.role !== undefined && !SPECIALIST_ROLES.includes(req.role as ScrumRoleName)) return undefined;
+  if (req.artifactRefs !== undefined && (!Array.isArray(req.artifactRefs) || !req.artifactRefs.every(artifactRefIsValid))) return undefined;
+  if (req.reportType !== undefined && !["ui-review", "completed"].includes(String(req.reportType))) return undefined;
+  if (req.expectedRevision !== undefined && (!Number.isSafeInteger(req.expectedRevision) || (req.expectedRevision as number) < 1)) return undefined;
   if (req.kind === "upgrade") {
     if (!["preflight", "apply", "resume", "restore"].includes(String(req.action)) || (req.transactionId !== undefined && typeof req.transactionId !== "string") || (req.projectSlug !== undefined && typeof req.projectSlug !== "string")) return undefined;
     return { id: req.id, kind: "upgrade", action: req.action as UpgradeInput["action"], ...(req.transactionId === undefined ? {} : { transactionId: req.transactionId as string }), ...(req.projectSlug === undefined ? {} : { projectSlug: req.projectSlug as string }), ...seatField, ...submitterField };
@@ -545,6 +574,14 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     if (req.project !== undefined && typeof req.project !== "string") return undefined;
     if (req.sources !== undefined && (!Array.isArray(req.sources) || req.sources.some((source: unknown) => typeof source !== "object" || source === null || typeof (source as Record<string, unknown>).nodeId !== "string" || typeof (source as Record<string, unknown>).lines !== "string"))) return undefined;
     return { id: req.id, kind: req.kind, ...(req.project === undefined ? {} : { project: req.project }), ...(req.sources === undefined ? {} : { sources: req.sources as HistoryImportSource[] }), ...seatField, ...submitterField };
+  }
+  if (req.kind === "execution_mode") {
+    if (!["slp", "scrum"].includes(String(req.mode)) || typeof req.submitter !== "string" || req.projectRoot !== undefined && typeof req.projectRoot !== "string") return undefined;
+    return { id: req.id, kind: "execution_mode", mode: req.mode as "slp" | "scrum", ...(req.projectRoot === undefined ? {} : { projectRoot: req.projectRoot as string }), submitter: req.submitter, ...seatField };
+  }
+  if (req.kind === "scrum_command") {
+    if (typeof req.operation !== "string" || typeof req.submitter !== "string" || req.projectRoot !== undefined && typeof req.projectRoot !== "string" || req.runId !== undefined && typeof req.runId !== "string" || req.payload !== undefined && (typeof req.payload !== "object" || req.payload === null || Array.isArray(req.payload))) return undefined;
+    return { id: req.id, kind: "scrum_command", requestId: typeof req.requestId === "string" ? req.requestId : req.id, operation: req.operation, ...(req.projectRoot === undefined ? {} : { projectRoot: req.projectRoot as string }), ...(req.runId === undefined ? {} : { runId: req.runId as string }), ...(req.expectedRevision === undefined ? {} : { expectedRevision: req.expectedRevision as number }), ...(req.payload === undefined ? {} : { payload: req.payload as Record<string, unknown> }), submitter: req.submitter, ...seatField };
   }
   if (req.kind === "contract") {
     if (
@@ -569,6 +606,9 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     return {
       id: req.id,
       kind: "contract",
+      ...(req.runId === undefined ? {} : { runId: req.runId as string }),
+      ...(req.role === undefined ? {} : { role: req.role as ScrumRoleName }),
+      ...(req.artifactRefs === undefined ? {} : { artifactRefs: req.artifactRefs as ArtifactRef[] }),
       task: req.task,
       workspace: req.workspace,
       gate: req.gate,
@@ -613,6 +653,9 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     return {
       id: req.id,
       kind: "spawn",
+      ...(req.runId === undefined ? {} : { runId: req.runId as string }),
+      ...(req.role === undefined ? {} : { role: req.role as ScrumRoleName }),
+      ...(req.providerExplicit === undefined ? {} : { providerExplicit: req.providerExplicit === true }),
       task: req.task,
       provider: req.provider,
       arity: req.arity,
@@ -650,6 +693,9 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     return {
       id: req.id,
       kind: "lead_dispatch",
+      ...(typeof req.task === "string" ? { task: req.task } : {}),
+      ...(req.runId === undefined ? {} : { runId: req.runId as string }),
+      ...(req.scrum === undefined ? {} : { scrum: req.scrum as ScrumDirective["scrum"] }),
       ...(req.project === undefined ? {} : { project: req.project }),
       ...(req.workspace === undefined ? {} : { workspace: req.workspace }),
       ...(req.from === undefined ? {} : { from: req.from }),
@@ -665,6 +711,9 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     return {
       id: req.id,
       kind: req.kind,
+      ...(req.reportType === undefined ? {} : { reportType: req.reportType as "ui-review" | "completed" }),
+      ...(req.runId === undefined ? {} : { runId: req.runId as string }),
+      ...(req.scrum === undefined ? {} : { scrum: req.scrum as ScrumDirective["scrum"] }),
       ...(req.project === undefined ? {} : { project: req.project }),
       ...(req.workspace === undefined ? {} : { workspace: req.workspace }),
       message: req.message,
@@ -887,7 +936,7 @@ async function resolveSpawnWorkspaceAndParent(
         // The Task worktree Workspace's sidebar title (v0.0.31, ADR 0017 §2/§5):
         // `Peer · <Task> — <short summary>` from the contract description's
         // first clause — never the internal `<project-slug>` hash.
-        title: formatPeerWorkspaceTitle(task, contract.description),
+        title: contract.execution ? `${SCRUM_ROLE_TITLES[contract.execution.role]} · ${task}` : formatPeerWorkspaceTitle(task, contract.description),
         source: { kind: "directory", path: worktree, ...(paseoProjectId !== undefined ? { projectId: paseoProjectId } : {}) },
       });
       if (typeof created?.id === "string" && created.id !== "") workspaceId = created.id;
@@ -970,7 +1019,12 @@ export async function handleSpoolRequest(
 ): Promise<SpoolReply> {
   if (request.kind === "upgrade" || request.kind === "history_import" || request.kind === "history_import_status") return handleAdmittedSpoolRequest(factory, request, deps);
   if ((request.kind === "reset" || request.kind === "delete") && !factory.history.maintenanceActive) return factory.history.withExclusiveMaintenance(() => handleAdmittedSpoolRequest(factory, request, deps));
-  const run = () => factory.history.runOperation(() => handleAdmittedSpoolRequest(factory, request, deps), { newWork: !["ask", "meter", "repoke", "respawn", "needs_human"].includes(request.kind) });
+  const admitted = () => factory.history.runOperation(() => handleAdmittedSpoolRequest(factory, request, deps), { newWork: !["ask", "meter", "repoke", "respawn", "needs_human"].includes(request.kind) });
+  const run = () => {
+    const workspace = request.kind === "contract" ? request.workspace : (request.kind === "spawn" || request.kind === "respawn") ? factory.contractFor(request.task)?.workspace : undefined;
+    const project = workspace === undefined ? undefined : resolveProject(workspace);
+    return project?.ok ? withExecutionLane(factory.stateDir, project.slug, admitted) : admitted();
+  };
   if (request.kind !== "spawn" && request.kind !== "contract") return run();
   // Spool requests run concurrently. Serialize only Peer lifecycle operations
   // for this Task, so two different spawn prompts cannot pass the same census.
@@ -988,6 +1042,22 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
   const resolvedDaemon = resolveDaemonArg(daemon);
   try {
     const effectiveSeat = await resolveEffectiveSeat(factory, resolvedDaemon, request);
+    if (request.kind === "scrum_command" || request.kind === "execution_mode") {
+      const correlation = readCorrelations(factory.stateDir).find(r => r.correlationId === request.submitter || r.agentId === request.submitter);
+      if (request.submitter !== "owner" && !correlation) throw new FactoryError("scrum-caller-unauthorized", "authenticated correlation required");
+      if (correlation && request.projectRoot !== undefined) {
+        const target = resolveProject(request.projectRoot);
+        if (!target.ok || target.slug !== correlation.projectSlug) throw new FactoryError("cross-project-refused", "caller belongs to another Project");
+      }
+      const authority = correlation?.role ?? (effectiveSeat ?? "owner");
+      if (request.kind === "execution_mode") {
+        if (authority !== "owner") throw new FactoryError("owner-config-required", "execution selection requires Owner");
+        if (!deps.executionSetMode) throw new FactoryError("execution-unavailable", "no mode adapter installed");
+        return await deps.executionSetMode(request);
+      }
+      if (!deps.scrumCommand) throw new FactoryError("scrum-unavailable", "no Scrum adapter installed");
+      return await deps.scrumCommand(request, { authority, actor: request.submitter });
+    }
     if (request.kind === "upgrade") {
       if (effectiveSeat !== undefined) return { id: request.id, ok: false, code: "seat-cannot-upgrade", message: "Persistent history upgrade/restore requires Owner authority" };
       return upgradeReply(request.id, await upgradeFactory(factory, { ...request, controlId: request.id }));
@@ -1074,10 +1144,32 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
     };
     if (request.kind === "contract") {
       const previousPeers = await taskPeers(request.task);
-      const contractEvt = factory.setContract({
+      const scrum = prepareScrumContract(factory, { ...request, retirePeerIds: previousPeers.map(p => p.id) });
+      const disposition = (type: "contract_retired" | "contract_rejected", error?: FactoryError) => {
+        if (!scrum.execution || !scrum.operationId) return;
+        const project = resolveProject(request.workspace);
+        if (!project.ok) return;
+        const run = readScrumRun(factory.stateDir, project.slug, scrum.execution.runId);
+        commandScrumRun(factory.stateDir, project.slug, run.runId, { type, task: request.task, operationId: scrum.operationId, requestId: `${scrum.operationId}:${type}`, expectedRevision: run.revision, ...(error ? { code: error.code, message: error.message } : {}) } as Parameters<typeof commandScrumRun>[3]);
+      };
+      const finishRetirement = async () => {
+        if (scrum.execution) {
+          const ids = scrum.retirePeerIds ?? [];
+          if (ids.length && !resolvedDaemon) throw new FactoryError("peer-retirement-unavailable", "daemon required to reconcile retirement");
+          await retirePeers(previousPeers.filter(p => ids.includes(p.id)));
+          disposition("contract_retired");
+        } else await retirePeers(previousPeers);
+      };
+      if (scrum.existing) {
+        await finishRetirement();
+        return { id: request.id, ok: true, summary: `reconciled Scrum Contract ${request.task}` };
+      }
+      let contractEvt: ReturnType<typeof factory.setContract>;
+      const previousEpoch = factory.contractFor(request.task)?.seq;
+      try { contractEvt = factory.setContract({
         task: request.task,
         workspace: request.workspace,
-        gate: request.gate,
+        gate: scrum.gate ?? request.gate,
         ...(request.artifact === undefined ? {} : { artifact: request.artifact }),
         ...(request.base === undefined ? {} : { base: request.base }),
         ...(request.scope === undefined ? {} : { scope: request.scope }),
@@ -1085,10 +1177,16 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         ...(request.freshEyes === undefined ? {} : { freshEyes: request.freshEyes }),
         ...(request.watch === undefined ? {} : { watch: true }),
         ...(request.description === undefined ? {} : { description: request.description }),
+        ...(scrum.execution === undefined ? {} : { execution: scrum.execution, scope: scrum.scope }),
         by: request.submitter,
         ...(effectiveSeat === undefined ? {} : { seat: effectiveSeat }),
       });
-      await retirePeers(previousPeers);
+      } catch (error) {
+        if (error instanceof FactoryError && ["invalid-contract", "invalid-task", "eye-unconfigured", "watch-unconfigured", "already-accepted", "gate-running", "workspace-conflict"].includes(error.code) && factory.contractFor(request.task)?.seq === previousEpoch) disposition("contract_rejected", error);
+        throw error;
+      }
+      if (contractEvt.execution) bindScrumEpoch(factory, request.task, contractEvt.seq, contractEvt.execution, `${scrum.operationId}:bound`, scrum.operationId);
+      await finishRetirement();
       return {
         id: request.id,
         ok: true,
@@ -1227,6 +1325,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
     }
 
     if (request.kind === "spawn") {
+      const frozenLane = await scrumSpawnLane(factory, request.task, request, request.providerExplicit ? request.provider : undefined, request.id, sanitizeLane);
       const peers = await taskPeers(request.task);
       const running = peers.find(peerIsRunning);
       if (running !== undefined) {
@@ -1250,7 +1349,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         const upstreamLandedAfterContract = allEvents.some(
           (e) => e.seq > preSpawnContract.seq && e.event === "attempt_accepted",
         );
-        if (!hasPriorClaims && !hasAccepted && upstreamLandedAfterContract && existsSync(preSpawnContract.workspace)) {
+        if (preSpawnContract.execution === undefined && !hasPriorClaims && !hasAccepted && upstreamLandedAfterContract && existsSync(preSpawnContract.workspace)) {
           const headOut = spawnSync("git", ["-C", preSpawnContract.workspace, "rev-parse", "HEAD"], {
             encoding: "utf8",
             timeout: 5_000,
@@ -1268,6 +1367,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
               ...(preSpawnContract.freshEyes !== undefined ? { freshEyes: preSpawnContract.freshEyes } : {}),
               ...(preSpawnContract.watch === true ? { watch: true } : {}),
               ...(preSpawnContract.description !== undefined ? { description: preSpawnContract.description } : {}),
+              ...(preSpawnContract.execution === undefined ? {} : { execution: preSpawnContract.execution }),
             });
             if (request.worktree !== undefined && existsSync(request.worktree)) {
               const ancOut = spawnSync(
@@ -1286,9 +1386,9 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         }
       }
       const sanitizedProvider =
-        sanitizeLane !== undefined && request.provider !== ""
+        frozenLane ?? (sanitizeLane !== undefined && request.provider !== ""
           ? await sanitizeLane(request.provider)
-          : request.provider;
+          : request.provider);
       const decision = factory.requestSpawn({
         task: request.task,
         provider: sanitizedProvider,
@@ -1304,7 +1404,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         // The Peer spawns under the `factory-peer` role provider when it can
         // (v0.0.27, ADR 0017 §2) — `paseoTools` off, seat env on — falling back
         // to the requested lane verbatim.
-        const peerProvider = await resolvePeerSpawnProvider(factory, sanitizedProvider, spawnMeta.projectSlug);
+        const peerProvider = frozenLane === undefined ? await resolvePeerSpawnProvider(factory, sanitizedProvider, spawnMeta.projectSlug) : sanitizedProvider;
         const parsedPeer = parseLane(peerProvider);
         const peerConfig =
           parsedPeer?.thinking !== undefined
@@ -1330,7 +1430,9 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         }
         const targetCwd = request.worktree ?? contract?.workspace ?? "";
         const proj = contract !== undefined ? resolveProject(contract.workspace) : undefined;
+        const peerTitle = contract?.execution ? `${SCRUM_ROLE_TITLES[contract.execution.role]} · ${request.task}` : formatPeerAgentTitle(request.task);
         const labels: Record<string, string> = {
+          ...(contract?.execution ? { execution: "scrum", run: contract.execution.runId, specialization: contract.execution.role, epoch: String(contract.seq) } : {}),
           seat: "agent",
           task: request.task,
           ...(proj?.ok ? { project: proj.slug } : {}),
@@ -1340,7 +1442,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
             config: peerConfig,
             // The Agent tab inside the Task worktree Workspace reads
             // `Peer · <Task>` (v0.0.31, ADR 0017 §2) — never the bare task id.
-            title: formatPeerAgentTitle(request.task),
+            title: peerTitle,
             labels,
             prompt: effectivePrompt,
             ...(spawnMeta.leadAgentId !== undefined ? { parent: spawnMeta.leadAgentId } : {}),
@@ -1393,7 +1495,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
               const created = await resolvedDaemon.agents.create({
                 config: peerConfig,
                 cwd: targetCwd,
-                title: formatPeerAgentTitle(request.task),
+                title: peerTitle,
                 labels,
                 prompt: effectivePrompt,
               });
@@ -1406,7 +1508,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
             cwd: targetCwd,
             // The Agent tab reads `Peer · <Task>` on the legacy shared-checkout
             // path too (v0.0.31, ADR 0017 §2).
-            title: formatPeerAgentTitle(request.task),
+            title: peerTitle,
             labels,
             prompt: effectivePrompt,
             ...(spawnMeta.leadAgentId !== undefined ? { parent: spawnMeta.leadAgentId } : {}),
@@ -1443,13 +1545,14 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
       };
     }
     if (request.kind === "respawn") {
+      const frozenLane = await scrumSpawnLane(factory, request.task, request, undefined, request.id, sanitizeLane);
       // The Lead's one automatic Respawn per progress marker (v0.0.12, ADR 0008):
       // one ledger line either way, with `event` attached so the driver can key
       // the replacement `agent.create.request` by `${task}-respawn-${event.seq}`.
       const sanitizedProvider =
-        sanitizeLane !== undefined && request.provider !== ""
+        frozenLane ?? (sanitizeLane !== undefined && request.provider !== ""
           ? await sanitizeLane(request.provider)
-          : request.provider;
+          : request.provider);
       const decision = factory.respawn({
         task: request.task,
         provider: sanitizedProvider,
@@ -1623,6 +1726,8 @@ export interface SpoolOptions {
   supervisorDispatch?: SupervisorDispatchHandler;
   /** The Supervisor-report handler (v0.0.23); without it `supervisor_report` requests are refused. */
   supervisorReport?: SupervisorReportHandler;
+  scrumCommand?: (request: ScrumSpoolRequest, caller: { authority: "owner" | SpoolSeat; actor: string }) => Promise<SpoolReply>;
+  executionSetMode?: (request: ExecutionSpoolRequest) => Promise<SpoolReply>;
   /** The Project-reset handler (v0.0.24); without it `reset` requests are refused. */
   projectReset?: ProjectResetHandler;
   /** The Project-delete handler (v0.0.35); without it `delete` requests are refused. */

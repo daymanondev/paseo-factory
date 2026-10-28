@@ -534,3 +534,14 @@ export const historyUpgrade = defineRpc({
   input: z.object({ action: z.enum(["preflight", "apply", "resume", "restore"]), transactionId: z.string().optional(), projectSlug: z.string().optional() }),
   output: z.union([z.object({ ok: z.literal(true), result: z.unknown() }), Failure]),
 });
+
+export const executionSetMode = defineRpc({
+  name: "factory.execution.set-mode",
+  input: z.object({ projectRoot: z.string().optional(), mode: z.enum(["slp", "scrum"]) }),
+  output: z.union([z.object({ ok: z.literal(true), data: z.unknown() }), Failure]),
+});
+export const scrumCommand = defineRpc({
+  name: "factory.scrum.command",
+  input: z.object({ projectRoot: z.string().optional(), operation: z.string(), runId: z.string().optional(), requestId: z.string(), expectedRevision: z.number().int().optional(), payload: z.record(z.string(), z.unknown()).optional() }),
+  output: z.union([z.object({ ok: z.literal(true), data: z.unknown() }), Failure]),
+});

@@ -51,6 +51,7 @@
  * only writer of its kinds — the kind itself is the attribution.
  */
 
+import type { ScrumTaskBinding } from "./scrum/types.ts";
 import type { LandingResult } from "./workspace.ts";
 
 export type Verdict = "red" | "green";
@@ -130,6 +131,7 @@ export interface ContractSet extends EventIdentityMetadata {
   seq: number;
   ts: Timestamp;
   event: "contract_set";
+  execution?: ScrumTaskBinding;
   task: string;
   /** The Workspace fixed by the Owner — the Gate's cwd and the artifact base. Absolute path. */
   workspace: string;

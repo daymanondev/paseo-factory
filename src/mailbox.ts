@@ -37,11 +37,15 @@ export type LeadMailboxEvent =
       ts: string;
       type: "mail_queued";
       mailId: string;
+      requestId?: string;
       to?: MailRecipient;
       from: LeadMailFrom;
       kind: LeadMailKind;
       task?: string;
       text: string;
+      execution?: { mode: "scrum"; runId: string; configRevision: number };
+      reportType?: "ui-review" | "completed";
+      scrum?: Record<string, unknown>;
     }
   | {
       seq: number;
@@ -77,6 +81,10 @@ export type MailAckedEvent = Extract<LeadMailboxEvent, { type: "mail_acked" }>;
 export type MailRequeuedEvent = Extract<LeadMailboxEvent, { type: "mail_requeued" }>;
 
 export interface LeadMailItem {
+  requestId?: string;
+  execution?: { mode: "scrum"; runId: string; configRevision: number };
+  reportType?: "ui-review" | "completed";
+  scrum?: Record<string, unknown>;
   mailId: string;
   seq: number;
   ts: string;
@@ -157,6 +165,9 @@ export function foldLeadMailboxEvents(events: readonly LeadMailboxEvent[]): Lead
           kind: evt.kind,
           ...(evt.task === undefined ? {} : { task: evt.task }),
           text: evt.text,
+          ...(evt.requestId === undefined ? {} : { requestId: evt.requestId }),
+          ...(evt.execution === undefined ? {} : { execution: evt.execution }),
+          ...(evt.reportType === undefined ? {} : { reportType: evt.reportType, scrum: evt.scrum }),
           status: "queued",
         });
         break;
@@ -231,6 +242,8 @@ export function foldLeadMailboxEvents(events: readonly LeadMailboxEvent[]): Lead
               kind: item.kind,
               ...(item.task === undefined ? {} : { task: item.task }),
               text: item.text,
+            ...(item.requestId === undefined ? {} : { requestId: item.requestId }),              ...(item.execution === undefined ? {} : { execution: item.execution }),
+              ...(item.reportType === undefined ? {} : { reportType: item.reportType, scrum: item.scrum }),
               status: "queued",
             });
           }
@@ -248,6 +261,8 @@ export function foldLeadMailboxEvents(events: readonly LeadMailboxEvent[]): Lead
             kind: item.kind,
             ...(item.task === undefined ? {} : { task: item.task }),
             text: item.text,
+            ...(item.requestId === undefined ? {} : { requestId: item.requestId }),            ...(item.execution === undefined ? {} : { execution: item.execution }),
+            ...(item.reportType === undefined ? {} : { reportType: item.reportType, scrum: item.scrum }),
             status: "queued",
           });
         }
@@ -276,16 +291,27 @@ export function readLeadMailbox(path: string): LeadMailboxState {
 /** Appends `mail_queued` — the one ingress verb; `mailId` generated, `seq` prior-max+1, `ts` ISO now. */
 export function enqueueLeadMail(
   path: string,
-  mail: { to?: MailRecipient; from: LeadMailFrom; kind: LeadMailKind; task?: string; text: string },
+  mail: { requestId?: string; to?: MailRecipient; from: LeadMailFrom; kind: LeadMailKind; task?: string; text: string; execution?: LeadMailItem["execution"]; reportType?: LeadMailItem["reportType"]; scrum?: Record<string, unknown> },
 ): QueuedEvent {
+  if (mail.reportType === "completed" && typeof mail.scrum?.runId === "string") {
+    const previous = readMailboxEvents(path).find(e => e.type === "mail_queued" && e.reportType === "completed" && e.scrum?.runId === mail.scrum!.runId);
+    if (previous?.type === "mail_queued") return previous;
+  }
+  if (mail.requestId) {
+    const previous = readMailboxEvents(path).find(e => e.type === "mail_queued" && e.requestId === mail.requestId);
+    if (previous?.type === "mail_queued") return previous;
+  }
   return appendMailboxEvent(path, {
     type: "mail_queued",
     mailId: randomUUID(),
+    ...(mail.requestId === undefined ? {} : { requestId: mail.requestId }),
     ...(mail.to === undefined ? {} : { to: mail.to }),
     from: mail.from,
     kind: mail.kind,
     ...(mail.task === undefined ? {} : { task: mail.task }),
     text: mail.text,
+    ...(mail.execution === undefined ? {} : { execution: mail.execution }),
+    ...(mail.reportType === undefined ? {} : { reportType: mail.reportType, scrum: mail.scrum }),
   });
 }
 

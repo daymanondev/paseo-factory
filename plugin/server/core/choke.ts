@@ -851,6 +851,8 @@ export function judgeSeatFilePath(
  * `<project-root>` at accept — the fence covers both roots.
  */
 export interface MemoryFence {
+  /** Scrum planning/QA deliver only owned artifacts. SLP callers omit it. */
+  artifactOnly?: boolean;
   workspace: string;
   scope?: readonly string[];
   /** The task's managed Task worktree (v0.0.14), when its spawn recorded one. */
@@ -889,6 +891,12 @@ function memoryFileOf(rawPath: string, fence: MemoryFence): MemoryFileName | und
  * when the destination is not a fenced file.
  */
 function judgeMemoryDestination(rawPath: string, fence: MemoryFence): ChokeDecision | undefined {
+  if (fence.artifactOnly) {
+    const root = fence.worktree ?? fence.workspace;
+    const destination = resolve(root, rawPath);
+    const relative = destination.startsWith(root + "/") ? destination.slice(root.length + 1) : undefined;
+    if (relative !== undefined && !scopeCoversFile(fence.scope ?? [], relative)) return { behavior: "deny", rule: "policy:scrum-artifact-only", reason: "planning/QA product source is read-only; write only the owned Contract artifacts" };
+  }
   const name = memoryFileOf(rawPath, fence);
   if (name === undefined) return undefined;
   if (fence.scope !== undefined && fence.scope.length > 0 && scopeCoversFile(fence.scope, name)) return undefined;

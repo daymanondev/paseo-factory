@@ -23,6 +23,8 @@ async function compile(source, globalName) {
 }
 
 const targets = [
+  ["src/scrum/cli.ts", "plugin/bin/scrum-doc.mjs"],
+  ["src/scrum/config.ts", "plugin/bin/scrum-config.mjs"],
   ["src/vault.ts", "plugin/bin/vault.mjs"],
   ["src/task-status.ts", "plugin/bin/task-status.mjs"],
   ["src/history-upgrade.ts", "plugin/bin/history-upgrade.mjs"],

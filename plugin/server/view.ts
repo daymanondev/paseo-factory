@@ -194,6 +194,7 @@ export function foldTasks(events: readonly AnyEvent[]): TaskView[] {
     }
     views.push({
       task,
+      ...(contract?.execution === undefined ? {} : { execution: contract.execution }),
       workspace: contract?.workspace ?? "",
       description: contract?.description ?? null,
       status: state.status,

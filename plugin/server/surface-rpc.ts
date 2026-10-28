@@ -1,3 +1,12 @@
+import { boundTaskPeers } from "./task-peers.ts";
+import { scrumTelemetry } from "./core/scrum/telemetry.ts";
+import { scrumOperation } from "./core/scrum/controller.ts";
+import type { ScrumOperation } from "./core/scrum/controller.ts";
+import { readExecution, readScrumConfig, saveExecutionDefault, ensureScrumConfig, scopeDir } from "./core/scrum/config.ts";
+import { listRuns, readRun, terminalRun, commandRun } from "./core/scrum/run-journal.ts";
+import { readScrumProfiles } from "./core/scrum/profiles.ts";
+import { readSwitchIntent, switchExecution, withExecutionLane } from "./core/scrum/execution.ts";
+import { projectTask } from "./core/task-state.ts";
 import { upgradeFactory } from "./core/history-upgrade.ts";
 import type { UpgradeInput } from "./core/history-upgrade.ts";
 import { acceptanceSummary, executeAcceptance } from "./commands.ts";
@@ -31,7 +40,7 @@ import type { Factory } from "./core/factory.ts";
 import { readLeadMailbox } from "./core/mailbox.ts";
 import { LANE_NAMES, loadLanes, parseLane, saveLanes, projectLanesPath, listLaneProfiles, getLaneProfile, readLaneProfilesFile, saveLaneProfile, deleteLaneProfile, applyLaneProfile, saveLanesBatch, resetProjectLanes } from "./core/lanes.ts";
 import type { LaneProfile } from "./core/lanes.ts";
-import { ensureProjectRegistered, listProjectRegistrations, projectStateDir, readProjectRegistration, resolveOrBootstrapProject, resolveProject } from "./core/project.ts";
+import { listProjectRegistrations, projectStateDir, readProjectRegistration, resolveOrBootstrapProject, resolveProject } from "./core/project.ts";
 import type { ProjectResolution } from "./core/project.ts";
 import { hydrateVaultDirect, importVaultSecrets, isLocalCompanionGitSource, loadVaultConfig, probeCompanionGitAccess, probeGhAuth, pullVault, pushVault, readVaultStatus, saveVaultConfig, syncVault } from "./core/vault.ts";
 import type { ImportVaultSecretsInput, SyncVaultOptions, VaultConfig, VaultRunner } from "./core/vault.ts";
@@ -44,13 +53,15 @@ import type { DaemonPluginAction, DaemonPluginItem, DaemonPluginSourceStatus, Da
 import { effectiveLanesForReconcile, reconcilePaseoRoleProviders } from "./core/role-providers.ts";
 import { SEAT_TITLES, inferRoleFromProviderId, resolveEffectiveProviderFamily } from "./roles.ts";
 import type { SeatName } from "./roles.ts";
-import { discoverProjects, writeProjectRegistration } from "./projects.ts";
+import { ensureProjectRegistered, discoverProjects, writeProjectRegistration } from "./projects.ts";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { COMPANION_CATALOG, CORE_PLUGIN_ENTRY, MANAGEABLE_PLUGIN_IDS } from "../shared/companions.ts";
 import type { CompanionCatalogEntry, ManageablePluginId } from "../shared/companions.ts";
 import type { SpoolLeadDispatchRequest, SpoolReply } from "./spool.ts";
 import {
   accept,
+  executionSetMode,
+  scrumCommand,
   lanesSet,
   lanesReset,
   lanesSetBatch,
@@ -83,7 +94,7 @@ import {
   vaultPush,
   vaultSync,
 } from "../shared/rpc.ts";
-import type { AgentView, LaneName, LaneProfileView, Lanes, ProjectView, TaskView, VaultStatusView } from "../shared/view.ts";
+import type { ExecutionView, AgentView, LaneName, LaneProfileView, Lanes, ProjectView, TaskView, VaultStatusView } from "../shared/view.ts";
 
 // ---- the daemon slice ---------------------------------------------------------------------
 
@@ -275,6 +286,7 @@ export interface SurfaceDeps {
    * thrown settle is logged, never a failed rotation (startup recovery
    * remains the net).
    */
+  handoffPending?: (slug: string) => boolean;
   onLeadRetired?: (input: { slug: string; agentId: string }) => void;
   /** Notify LeadMailRuntime when ensureSeat dispatches an explicit initial message to a seat (v0.0.28, ADR 0018 §2). */
   onSeatKickoffSent?: (input: { slug: string; seat: "supervisor" | "lead"; agentId: string }) => void;
@@ -826,7 +838,10 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     } catch {
       // best-effort provider catalog lookup
     }
-    const lane = sanitizeLaneWithProviders(lanes.lanes[seat], providers);
+    const selected = readExecution(deps.stateDir, project.slug);
+    const scrumRoster = selected.mode === "scrum" ? (listRuns(deps.stateDir, project.slug).find(r => !terminalRun(r))?.config ?? readScrumConfig(deps.stateDir, project.slug)) : undefined;
+    if (selected.mode === "scrum" && !scrumRoster) return failure("scrum-config-missing", project.slug);
+    const lane = sanitizeLaneWithProviders(scrumRoster?.lanes[seat] ?? lanes.lanes[seat], providers);
     const parsed = parseLane(lane);
     let agent: SurfaceAgentSnapshot | undefined;
     try {
@@ -853,7 +868,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         agent.cwd === "" ||
         agent.cwd === "/tmp" ||
         realpathSafe(agent.cwd) === realpathSafe(project.root);
-      if (agent.status === "error" || !sameProviderFamily || !sameCwd) {
+      if (agent.status === "error" || !sameProviderFamily || !sameCwd || selected.mode === "scrum" && agent.labels.scrumConfigRevision !== String(scrumRoster?.configRevision ?? 1)) {
         const retired = await retireSeat(seat, project.slug, project.root, context);
         if (!retired.ok) {
           log(`${seat}: retiring unhealthy seat ${agent.id} before recreate did not cleanly settle — ${retired.error}`);
@@ -931,7 +946,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       // seat, the bootstrap prompt carries the orientation, and NOTHING
       // under <project-root> is written (the <home>-supervisor folder and
       // its AGENTS.md overwrite are retired; roles.ts owns the injection).
-      const title = SEAT_TITLES[seat];
+      const title = selected.mode === "scrum" && seat === "lead" ? "Scrum Lead" : SEAT_TITLES[seat];
       const config =
         parsed?.thinking !== undefined
           ? { provider: `${parsed.provider}/${parsed.model}`, thinkingOptionId: parsed.thinking }
@@ -941,7 +956,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         daemon.workspaces!.ref(targetWorkspaceId).agents.create({
           config,
           title,
-          labels: { seat, project: project.slug },
+          labels: { seat, project: project.slug, ...(selected.mode === "scrum" ? { execution: "scrum", scrumConfigRevision: String(scrumRoster?.configRevision ?? 1) } : {}) },
           ...(parent !== undefined ? { parent } : {}),
         });
       try {
@@ -996,7 +1011,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
                 config,
                 cwd: project.root,
                 title,
-                labels: { seat, project: project.slug },
+                labels: { seat, project: project.slug, ...(selected.mode === "scrum" ? { execution: "scrum", scrumConfigRevision: String(scrumRoster?.configRevision ?? 1) } : {}) },
                 ...(parent !== undefined && !parentHasFailedWorkspace ? { parent } : {}),
               });
               workspaceId = undefined;
@@ -1007,7 +1022,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
             config,
             cwd: project.root,
             title,
-            labels: { seat, project: project.slug },
+            labels: { seat, project: project.slug, ...(selected.mode === "scrum" ? { execution: "scrum", scrumConfigRevision: String(scrumRoster?.configRevision ?? 1) } : {}) },
             ...(parent !== undefined ? { parent } : {}),
           });
         }
@@ -1018,7 +1033,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           status: "initializing",
           model: parsed?.model ?? null,
           ...(parsed?.thinking !== undefined ? { thinkingOptionId: parsed.thinking } : {}),
-          labels: { seat, project: project.slug },
+          labels: { seat, project: project.slug, ...(selected.mode === "scrum" ? { execution: "scrum", scrumConfigRevision: String(scrumRoster?.configRevision ?? 1) } : {}) },
           archivedAt: null,
           requiresAttention: false,
           attentionReason: null,
@@ -1425,6 +1440,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
    * A live session can never switch its provider adapter in place; the reply
    * names what happened per seat.
    */
+  const projectUsesSlp = (slug: string): boolean => { try { return readExecution(deps.stateDir, slug).mode === "slp"; } catch { return false; } };
   const syncLiveSeatsAfterLaneUpdate = async (input: {
     projectSlug: string;
     projectRoot: string;
@@ -1436,6 +1452,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     seats?: readonly ("supervisor" | "lead")[];
     context?: SurfaceCallContext;
   }): Promise<string> => {
+    if (!projectUsesSlp(input.projectSlug)) return "skipped — SLP config saved for a future SLP selection";
     const daemon = resolveDaemon(input.context);
     const parts: string[] = [];
     for (const seat of input.seats ?? (["supervisor", "lead"] as const)) {
@@ -1567,7 +1584,89 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     return summaries.length > 0 ? summaries.join("; ") : undefined;
   };
 
+  const executionView = (slug?: string): ExecutionView => {
+    try {
+      const selection = readExecution(deps.stateDir, slug);
+      const pending = slug ? readSwitchIntent(deps.stateDir, slug) : undefined;
+      const base = { selectedMode: selection.mode, revision: selection.revision, ...(pending?.status === "pending" ? { pendingMode: pending.target.mode } : {}) };
+      if (selection.mode === "slp") return base;
+      try {
+        const runs = slug ? listRuns(deps.stateDir, slug) : [];
+        return { ...base, config: readScrumConfig(deps.stateDir, slug), profiles: readScrumProfiles(deps.stateDir).profiles, run: runs.find(r => !terminalRun(r)) ?? runs.at(-1) };
+      } catch (error) { return { ...base, error: messageOf(error) }; }
+    } catch (error) { return { selectedMode: "slp" as const, revision: 0, error: messageOf(error) }; }
+  };
+  const executionWork = async (project: { slug: string; root: string }, context?: SurfaceCallContext) => {
+    const blockers: string[] = [];
+    for (const event of deps.factory.ledger.events) if (event.event === "contract_set" && event.workspace === project.root) {
+      const task = projectTask(deps.factory.ledger.events, event.task);
+      if (!task.settled || task.pendingLanding || task.inFlightAttempt !== undefined) blockers.push(`Task ${event.task}: ${task.status}${task.pendingLanding ? " pending-conflict" : ""}`);
+    }
+    const mailbox = readLeadMailbox(join(scopeDir(deps.stateDir, project.slug), "mailbox.jsonl"));
+    const pendingDirectives = mailbox.queued.some(m => m.kind === "directive") || mailbox.supervisorQueued.some(m => m.kind === "directive") || mailbox.inFlight !== null || mailbox.supervisorInFlight !== null;
+    if (pendingDirectives) blockers.push("pending/in-flight mailbox delivery");
+    const reg = readProjectRegistration(deps.stateDir, project.slug);
+    if (reg?.rotationState && reg.rotationState !== "normal") blockers.push(`Lead handoff: ${reg.rotationState}`);
+    if (deps.handoffPending?.(project.slug)) blockers.push("unfinished Lead handoff kickoff");
+    const page = await resolveDaemon(context).agents.list({ filter: { includeArchived: false, includeBackground: true } });
+    const agents = page.entries.map(e => e.agent).filter(a => a.archivedAt === null && (a.labels.project === project.slug || a.cwd === project.root) && ["running", "initializing"].includes(a.status));
+    blockers.push(...agents.map(a => `Agent ${a.id}: ${a.status}`));
+    if (readExecution(deps.stateDir, project.slug).mode === "scrum") for (const run of listRuns(deps.stateDir, project.slug)) { if (!terminalRun(run)) blockers.push(`Scrum ${run.runId}: ${run.phase}`); else if (run.phase === "completed" && run.completionRequest && !run.completionReported) blockers.push(`Scrum ${run.runId}: completion report pending`); }
+    return { blockers: [...new Set(blockers)], activeAgents: agents.filter(a => a.labels.seat === "agent").map(a => a.id), pendingDirectives };
+  };
   const handlers = {
+    async executionSetMode(input: { mode: "slp" | "scrum"; projectRoot?: string }, context?: SurfaceCallContext) {
+      try {
+        if (!input.projectRoot) { if (input.mode === "scrum") ensureScrumConfig(deps.stateDir); return { ok: true as const, data: saveExecutionDefault(deps.stateDir, input.mode) }; }
+        const project = projectOrRefusal(input.projectRoot);
+        if (!project.ok) return project;
+        const data = await withExecutionLane(deps.stateDir, project.slug, async () => {
+          const work = await executionWork(project, context);
+          return switchExecution({ state: deps.stateDir, slug: project.slug, mode: input.mode, blockers: work.blockers, rotate: async () => {
+            for (const seat of ["lead", "supervisor"] as const) {
+              const retired = await retireSeat(seat, project.slug, project.root, context);
+              if (!retired.ok && !["no-lead", "no-supervisor"].includes(retired.code)) throw new FactoryError(retired.code, retired.error);
+            }
+            for (const seat of ["supervisor", "lead"] as const) {
+              const ensured = await ensureSeat(seat, { projectRoot: project.root }, context);
+              if (!ensured.ok) throw new FactoryError(ensured.code, ensured.error);
+            }
+          } });
+        });
+        return { ok: true as const, data };
+      } catch (error) { return failure(codeOf(error), messageOf(error)); }
+    },
+    async scrumCommand(input: ScrumOperation & { projectRoot?: string }, context?: SurfaceCallContext, caller?: { authority: "owner" | "supervisor" | "lead" | "agent"; actor: string }) {
+      try {
+        const project = input.projectRoot ? projectOrRefusal(input.projectRoot) : undefined;
+        if (project && !project.ok) return project;
+        const work = project?.ok ? await executionWork(project, context) : { activeAgents: [], pendingDirectives: false };
+        const authority = caller?.authority ?? "owner";
+        if (input.operation === "run.cancel") {
+          if (authority !== "owner" && authority !== "supervisor") throw new FactoryError("scrum-cancel-unauthorized", "Owner/Supervisor required");
+          if (!project?.ok || !input.runId) throw new FactoryError("project-required", "Project and run required");
+          return await withExecutionLane(deps.stateDir, project.slug, async () => {
+            const requested = commandRun(deps.stateDir, project.slug, input.runId!, { type: "cancellation_requested", requestId: input.requestId, expectedRevision: input.expectedRevision!, reason: String(input.payload?.reason ?? "Owner cancellation; unresolved Tasks retained"), actor: caller?.actor ?? "owner" });
+            if (requested.phase === "cancelled") return { ok: true as const, data: requested };
+            const page = await resolveDaemon(context).agents.list({ filter: { includeArchived: false, includeBackground: true } });
+            const peers = new Map(requested.tasks.flatMap(task => boundTaskPeers({ stateDir: deps.stateDir, slug: project.slug, task: task.task, events: deps.factory.ledger.events, live: page.entries.map(e => e.agent) })).map(agent => [agent.id, agent]));
+            for (const { agent } of page.entries) if (agent.archivedAt === null && agent.labels.project === project.slug && agent.labels.run === input.runId && agent.labels.seat === "agent") peers.set(agent.id, agent);
+            for (const agent of peers.values()) {
+              const stopped = await (deps.stopAgent ?? stopAgentViaCli)(agent.id, deps.home);
+              if (!stopped.ok) throw new FactoryError("agent-stop-failed", stopped.reason);
+              await resolveDaemon(context).agents.ref(agent.id).archive();
+            }
+            const current = readRun(deps.stateDir, project.slug, input.runId!);
+            return { ok: true as const, data: commandRun(deps.stateDir, project.slug, input.runId!, { requestId: `${input.requestId}:cancelled`, expectedRevision: current.revision, type: "phase_changed", phase: "cancelled", reason: requested.cancellation!.reason, telemetry: scrumTelemetry(current, deps.factory.ledger.events) }) };
+          });
+        }
+        const execute = async () => {
+          const currentWork = project?.ok ? await executionWork(project, context) : work;
+          return { ok: true as const, data: scrumOperation(input, { factory: deps.factory, ...(project?.ok ? { slug: project.slug, root: project.root } : {}), authority, actor: caller?.actor ?? "owner", activeAgents: currentWork.activeAgents, pendingDirectives: currentWork.pendingDirectives }) };
+        };
+        return project?.ok ? await withExecutionLane(deps.stateDir, project.slug, execute) : await execute();
+      } catch (error) { return failure(codeOf(error), messageOf(error)); }
+    },
     async historyUpgrade(input: UpgradeInput) {
       try { return { ok: true as const, result: await upgradeFactory(deps.factory, input) }; }
       catch (error) { return failure(codeOf(error), messageOf(error)); }
@@ -1815,6 +1914,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         ok: true as const,
         view: {
           ...view,
+          execution: executionView(enrichedProject?.slug),
           tasks: enrichTaskPeerAgents(view.tasks, rawAgents),
           machineLanes: machineLanes.lanes,
           ...laneProfilesGather(enrichedProject?.slug, view.lanes),
@@ -1949,7 +2049,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           } else {
             try {
               const agent = await seatOf(daemon, seat, projectSlug);
-              if (agent !== undefined) {
+              if (agent !== undefined && (agent.labels.project === undefined || projectUsesSlp(agent.labels.project))) {
                 const sync = deps.setAgentModel ?? setAgentModelViaCli;
                 const syncThinking = deps.setAgentThinking ?? setAgentThinkingViaCli;
                 const laneValue = saved.lanes[seat];
@@ -2449,6 +2549,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         // best-effort mailbox reset
       }
       const { purgedEvents, tasks: purgedTasks, removedFiles } = deps.factory.resetProject(project.root, project.slug);
+      rmSync(join(projectDir, "scrum"), { recursive: true, force: true });
       const tasks = [...new Set([...purgedTasks, ...projectTaskSet])];
       try {
         new CorrelationRegistry(deps.stateDir).purgeProject(project.slug, project.root, tasks);
@@ -2591,6 +2692,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
 
       // 7. Purge ledger events, contracts, reports, and gate logs in-memory and on disk.
       const { purgedEvents, tasks: purgedTasks, removedFiles } = deps.factory.resetProject(project.root, project.slug);
+      rmSync(join(projectDir, "scrum"), { recursive: true, force: true });
       const tasks = [...new Set([...purgedTasks, ...projectTaskSet])];
       const snap = await this.snapshot({ projectRoot: project.root }, context);
       if (input.keepSeats !== true) {
@@ -3022,6 +3124,8 @@ export function registerSurfaceRpc(
     return { paseo: context.paseo };
   };
   server.handle(historyUpgrade, (input, context) => { pass(context); return handlers.historyUpgrade(input); });
+  server.handle(executionSetMode, (input, context) => handlers.executionSetMode(input, pass(context)));
+  server.handle(scrumCommand, (input, context) => handlers.scrumCommand(input, pass(context)));
   server.handle(snapshot, (input, context) => handlers.snapshot(input, pass(context)));
   server.handle(taskDetail, (input, context) => handlers.taskDetail(input, pass(context)));
   server.handle(accept, (input, context) => handlers.accept(input, pass(context)));

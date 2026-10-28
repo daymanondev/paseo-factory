@@ -1,3 +1,5 @@
+import { ExecutionSelector, ScrumSeatsPane } from "./scrum.tsx";
+import type { ScrumAction } from "./scrum.tsx";
 /**
  * Tab 2 — Seats & Models (ADR 0009 §2; the Lead lane and live Lead seat
  * arrive in v0.0.14, ADR 0010 §2): the Lane Profiles bar (v0.0.38, ADR 0026
@@ -27,6 +29,8 @@ import type { LiveSeatTransition } from "../kit/live-seats.ts";
 
 /** The Seats tab's whole action surface — the Shell owns the RPC calls. */
 export interface SeatsActions {
+  setMode?(mode: "slp" | "scrum"): void;
+  scrum?: ScrumAction;
   setLane(lane: LaneName, value: string): void;
   /**
    * One atomic batch save — every named lane in a single `factory.lanes.setBatch`
@@ -922,8 +926,11 @@ export function SeatsPane({
     setNaming(false);
   };
 
+  if (view.execution?.selectedMode === "scrum") return <ScrumSeatsPane theme={theme} view={view} busy={actions.busy} action={actions.scrum} setMode={actions.setMode} renderEditor={(title, current, save, close) => <Modal open onOpenChange={open => { if (!open) close(); }} title={title}><Modal.Content><LaneModalBody theme={theme} view={view} card={{ id: "scrum", title, icon: "Cpu", tier: "Specialist", hint: "Independent Scrum lane", lanes: [], value: () => current }} onSave={save} onClose={close} busy={actions.busy} /></Modal.Content></Modal>} />;
+
   return (
     <View style={{ gap: SPACING[4] }}>
+      <ExecutionSelector theme={theme} view={view} setMode={actions.setMode} busy={actions.busy} />
       {/* Section 1: Lane Switcher Grid */}
       <View style={{ gap: SPACING[2.5] }}>
         <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: SPACING[2] }}>

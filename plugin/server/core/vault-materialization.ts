@@ -1,3 +1,4 @@
+import { collectScrumVault, collectProjectScrumVault, materializeScrumVault, materializeProjectScrumVault } from "./scrum/vault.ts";
 import { FactoryError } from "./errors.ts";
 import { mergeLaneProfilesFiles, projectLanesPath, readLaneProfilesFile } from "./lanes.ts";
 import type { LaneProfile, LaneProfilesFile } from "./lanes.ts";
@@ -425,6 +426,7 @@ export function renderKeystoreProperties(signing: Record<string, unknown> | null
  */
 export function collectLocalStateIntoRuntime(paseoHome: string): void {
   const stateDir = vaultStateDir(paseoHome);
+  collectScrumVault(stateDir, join(paseoHome, "vault-runtime/config"));
   const configSources: ReadonlyArray<{ src: string; vaultRel: string }> = [
     { src: join(stateDir, "lanes.json"), vaultRel: "config/lanes.json" },
     { src: join(paseoHome, "connector", "fleet.json"), vaultRel: "config/fleet.json" },
@@ -491,7 +493,7 @@ export function collectLocalStateIntoRuntime(paseoHome: string): void {
     // another machine's DIFFERENT local slug still finds its checkout.
     const projectLanes = projectLanesPath(stateDir, facts.slug);
     const hasProjectLanes = existsSync(projectLanes);
-    if (!hasStoreManifest && !hasProjectLanes) continue;
+    if (!hasStoreManifest && !hasProjectLanes && !existsSync(join(stateDir, "projects", facts.slug, "scrum-lanes.json"))) continue;
 
     let canonicalAppKey = matchManifestAppKey(manifest, facts);
     if (canonicalAppKey === null && hasStoreManifest) {
@@ -506,6 +508,7 @@ export function collectLocalStateIntoRuntime(paseoHome: string): void {
     if (hasProjectLanes) {
       writeRuntimeFile(paseoHome, `config/apps/${canonicalAppKey}/lanes.json`, readFileSync(projectLanes));
     }
+    collectProjectScrumVault(stateDir, facts.slug, join(paseoHome, "vault-runtime/config/apps", canonicalAppKey));
     const priorEntry = manifest[canonicalAppKey] ?? {};
     manifest[canonicalAppKey] = {
       ...priorEntry,
@@ -565,6 +568,7 @@ function readLaneProfilesCacheOrNull(path: string): LaneProfilesFile | null {
  */
 export function materializeConfigsFromRuntime(paseoHome: string, overwriteConfigs = false): void {
   const runtimeConfigDir = join(paseoHome, "vault-runtime", "config");
+  materializeScrumVault(vaultStateDir(paseoHome), runtimeConfigDir, overwriteConfigs);
   const targets: ReadonlyArray<{ src: string; dest: string }> = [
     { src: join(runtimeConfigDir, "lanes.json"), dest: join(vaultStateDir(paseoHome), "lanes.json") },
     { src: join(runtimeConfigDir, "fleet.json"), dest: join(paseoHome, "connector", "fleet.json") },
@@ -597,6 +601,7 @@ export function materializeConfigsFromRuntime(paseoHome: string, overwriteConfig
     const manifest = readVaultManifestAt(join(paseoHome, "vault-runtime"));
     for (const app of resolveVaultApps(paseoHome, manifest)) {
       if (app.projectSlug === null) continue; // no local checkout behind this key on this machine
+      materializeProjectScrumVault(stateDir, app.projectSlug, join(runtimeConfigDir, "apps", app.canonicalAppKey), overwriteConfigs);
       const src = join(runtimeConfigDir, "apps", app.canonicalAppKey, "lanes.json");
       if (!existsSync(src)) continue;
       const dest = projectLanesPath(stateDir, app.projectSlug);

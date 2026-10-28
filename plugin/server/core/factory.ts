@@ -1,3 +1,5 @@
+import { scrumBindingIsValid } from "./scrum/types.ts";
+import type { ScrumTaskBinding } from "./scrum/types.ts";
 import { pendingUpgradeFor } from "./upgrade-state.ts";
 import { readLocalWriterIdentity } from "./writer-identity.ts";
 import { liveWorkspaceConflict, normalized, acceptedTasks } from "./workspace-conflict.ts";
@@ -79,6 +81,7 @@ export interface FactoryOptions {
 }
 
 export interface ContractInput {
+  execution?: ScrumTaskBinding;
   task: string;
   /**
    * The Workspace this Task's work lives in — absolute path, chosen by the
@@ -429,8 +432,9 @@ export function createFactory(options: FactoryOptions): Factory {
     stateDir,
     recoveredAttempts,
 
-    setContract({ task, workspace, gate, artifact, base: inputBase, scope, freshEyes, watch, description, skills, by }) {
+    setContract({ task, workspace, gate, artifact, base: inputBase, scope, freshEyes, watch, description, skills, by, execution }) {
       assertTaskId(task);
+      if (execution !== undefined && !scrumBindingIsValid(execution)) throw new FactoryError("invalid-contract", "invalid Scrum execution binding");
       if (gate.trim() === "") throw new FactoryError("invalid-contract", "gate command must be a non-empty string");
       const resolvedArtifact = artifact === undefined ? "" : artifact;
       if (artifact !== undefined) {
@@ -561,6 +565,7 @@ export function createFactory(options: FactoryOptions): Factory {
       }
       return ledger.append({
         event: "contract_set",
+        ...(execution === undefined ? {} : { execution: structuredClone(execution) }),
         task,
         workspace,
         gate,

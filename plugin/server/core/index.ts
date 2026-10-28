@@ -186,3 +186,6 @@ export type { HistoryImportInput, HistoryImportSource, HistoryImportPlan, Import
 export { preflightUpgrade, upgradeFactory, upgradeDirectory } from "./history-upgrade.ts";
 export type { UpgradeAction, UpgradeInput, UpgradeResult, UpgradePreflight } from "./history-upgrade.ts";
 export { readLocalWriterIdentity, localWriterPath } from "./writer-identity.ts";
+
+/** Opt-in orchestration; existing SLP exports and configuration stay unchanged. */
+export * as scrum from "./scrum/index.ts";
