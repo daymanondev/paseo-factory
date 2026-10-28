@@ -8,6 +8,7 @@ export interface ArtifactRef {
 }
 export interface ScrumTaskBinding {
   mode: "scrum";
+  contractRequestId?: string;
   runId: string;
   role: ScrumRoleName;
   policyRevision: string;
@@ -44,6 +45,9 @@ export function scrumBindingIsValid(value: unknown): value is ScrumTaskBinding {
   return (
     !!v &&
     v.mode === "scrum" &&
+    (v.contractRequestId === undefined ||
+      (typeof v.contractRequestId === "string" &&
+        v.contractRequestId.length > 0)) &&
     safeId(v.runId) &&
     SPECIALIST_ROLES.includes(v.role) &&
     typeof v.policyRevision === "string" &&

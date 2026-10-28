@@ -40,7 +40,8 @@ function validateQaReport(value) {
   if (!r || r.schemaVersion !== 1 || !safeId(r.auditId) || !/^[a-f0-9]{40}$/.test(r.productSha) || !["clean", "defects_found", "blocked", "inconclusive"].includes(r.status))
     return ["invalid QA report identity/status"];
   const issues = [];
-  if (typeof r.activeSuite !== "boolean") issues.push("activeSuite must explicitly be a boolean");
+  if (typeof r.activeSuite !== "boolean")
+    issues.push("activeSuite must explicitly be a boolean");
   if (!executionValid(r.baseline) || r.baseline.exit !== 0 || r.baseline.passed !== r.baseline.tests || !r.baseline.firstAttempt || r.baseline.skipped || r.baseline.expectedFailures)
     issues.push("pre-existing baseline must pass with evidence");
   if (!Array.isArray(r.runs) || !r.runs.every(executionValid))
@@ -131,11 +132,12 @@ function definitions(text, pattern) {
         body: lines.slice(i).join("\n")
       });
   }
-  for (let i = 0; i < result.length; i++)
-    result[i].body = lines.slice(
-      result[i].line - 1,
-      result[i + 1]?.line === void 0 ? void 0 : result[i + 1].line - 1
-    ).join("\n");
+  const boundary = /^\s*(?:#{1,6}\s+|[-*]\s+|\|\s*)?\*{0,2}(?:(?:FR|NFR|UJ|AD)-[1-9]\d*|R[1-9]\d*|S-[0-9]+)\*{0,2}(?=\s*[:—–|]|\s+)/;
+  for (const definition of result) {
+    let end = definition.line;
+    while (end < lines.length && !boundary.test(lines[end])) end++;
+    definition.body = lines.slice(definition.line - 1, end).join("\n");
+  }
   return result;
 }
 function lintScrumDoc(kind, files) {
@@ -311,10 +313,15 @@ function lintScrumDoc(kind, files) {
     for (const match of text.matchAll(/\b(?:FR|NFR|UJ)-[1-9]\d*\b/g))
       if (!sourceIds.has(match[0]))
         add("sprint-backlog.md", 1, "dangling", `undefined source ${match[0]}`);
+    const mappedSources = new Set(
+      requirements.flatMap(
+        (r) => [...r.body.matchAll(/^\s*Sources?\s*:\s*([^\n]+)/gim)].flatMap(
+          (m) => m[1].match(/\b(?:FR|NFR|UJ)-[1-9]\d*\b/g) ?? []
+        )
+      )
+    );
     for (const d of sources)
-      if (!new Set(text.match(/\b(?:FR|NFR|UJ)-[1-9]\d*\b/g) ?? []).has(
-        d.id
-      ))
+      if (!mappedSources.has(d.id))
         add("sprint-backlog.md", 1, "coverage", `${d.id} has no R mapping`);
   }
   if (kind === "qa" && files["qa-report.json"]) {

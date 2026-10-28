@@ -38,7 +38,7 @@ function artifactRefIsValid(value) {
 }
 function scrumBindingIsValid(value) {
   const v = value;
-  return !!v && v.mode === "scrum" && safeId(v.runId) && SPECIALIST_ROLES.includes(v.role) && typeof v.policyRevision === "string" && v.policyRevision.length > 0 && Number.isSafeInteger(v.configRevision) && v.configRevision >= 0 && Array.isArray(v.artifactRefs) && v.artifactRefs.every(artifactRefIsValid);
+  return !!v && v.mode === "scrum" && (v.contractRequestId === void 0 || typeof v.contractRequestId === "string" && v.contractRequestId.length > 0) && safeId(v.runId) && SPECIALIST_ROLES.includes(v.role) && typeof v.policyRevision === "string" && v.policyRevision.length > 0 && Number.isSafeInteger(v.configRevision) && v.configRevision >= 0 && Array.isArray(v.artifactRefs) && v.artifactRefs.every(artifactRefIsValid);
 }
 
 // src/scrum/selection.ts

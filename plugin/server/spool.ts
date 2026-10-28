@@ -1,3 +1,4 @@
+import { commandRun as commandScrumRun, readRun as readScrumRun } from "./core/scrum/run-journal.ts";
 import { withExecutionLane } from "./core/scrum/execution.ts";
 import type { ScrumDirective } from "./scrum.ts";
 import type { ScrumOperation } from "./core/scrum/controller.ts";
@@ -1142,10 +1143,30 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
       }
     };
     if (request.kind === "contract") {
-      const scrum = prepareScrumContract(factory, request);
-      if (scrum.existing) return { id: request.id, ok: true, summary: `reconciled Scrum Contract ${request.task}` };
       const previousPeers = await taskPeers(request.task);
-      const contractEvt = factory.setContract({
+      const scrum = prepareScrumContract(factory, { ...request, retirePeerIds: previousPeers.map(p => p.id) });
+      const disposition = (type: "contract_retired" | "contract_rejected", error?: FactoryError) => {
+        if (!scrum.execution || !scrum.operationId) return;
+        const project = resolveProject(request.workspace);
+        if (!project.ok) return;
+        const run = readScrumRun(factory.stateDir, project.slug, scrum.execution.runId);
+        commandScrumRun(factory.stateDir, project.slug, run.runId, { type, task: request.task, operationId: scrum.operationId, requestId: `${scrum.operationId}:${type}`, expectedRevision: run.revision, ...(error ? { code: error.code, message: error.message } : {}) } as Parameters<typeof commandScrumRun>[3]);
+      };
+      const finishRetirement = async () => {
+        if (scrum.execution) {
+          const ids = scrum.retirePeerIds ?? [];
+          if (ids.length && !resolvedDaemon) throw new FactoryError("peer-retirement-unavailable", "daemon required to reconcile retirement");
+          await retirePeers(previousPeers.filter(p => ids.includes(p.id)));
+          disposition("contract_retired");
+        } else await retirePeers(previousPeers);
+      };
+      if (scrum.existing) {
+        await finishRetirement();
+        return { id: request.id, ok: true, summary: `reconciled Scrum Contract ${request.task}` };
+      }
+      let contractEvt: ReturnType<typeof factory.setContract>;
+      const previousEpoch = factory.contractFor(request.task)?.seq;
+      try { contractEvt = factory.setContract({
         task: request.task,
         workspace: request.workspace,
         gate: scrum.gate ?? request.gate,
@@ -1160,8 +1181,12 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         by: request.submitter,
         ...(effectiveSeat === undefined ? {} : { seat: effectiveSeat }),
       });
-      if (contractEvt.execution) bindScrumEpoch(factory, request.task, contractEvt.seq, contractEvt.execution, `${request.id}:bound`, request.id);
-      await retirePeers(previousPeers);
+      } catch (error) {
+        if (error instanceof FactoryError && ["invalid-contract", "invalid-task", "eye-unconfigured", "watch-unconfigured", "already-accepted", "gate-running", "workspace-conflict"].includes(error.code) && factory.contractFor(request.task)?.seq === previousEpoch) disposition("contract_rejected", error);
+        throw error;
+      }
+      if (contractEvt.execution) bindScrumEpoch(factory, request.task, contractEvt.seq, contractEvt.execution, `${scrum.operationId}:bound`, scrum.operationId);
+      await finishRetirement();
       return {
         id: request.id,
         ok: true,

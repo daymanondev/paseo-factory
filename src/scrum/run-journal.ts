@@ -77,6 +77,9 @@ export interface RunTask {
     fingerprint: string;
     previousEpoch?: number;
     epoch?: number;
+    retirePeerIds?: string[];
+    peersRetired?: boolean;
+    rejection?: { code: string; message: string };
   }[];
   result?: RoleResult;
 }
@@ -137,6 +140,15 @@ export type RunCommand = BaseCommand &
         operationId: string;
         fingerprint: string;
         previousEpoch?: number;
+        retirePeerIds?: string[];
+      }
+    | { type: "contract_retired"; task: string; operationId: string }
+    | {
+        type: "contract_rejected";
+        task: string;
+        operationId: string;
+        code: string;
+        message: string;
       }
     | { type: "task_bound"; task: string; epoch: number; intentId?: string }
     | {
@@ -223,6 +235,19 @@ const fingerprint = (v: unknown): string =>
 function apply(run: ScrumRun, cmd: RunCommand, now: number): void {
   if (terminalRun(run) && cmd.type !== "completion_reported")
     throw new FactoryError("scrum-run-terminal", run.phase);
+  if (
+    run.cancellation &&
+    !(cmd.type === "phase_changed" && cmd.phase === "cancelled") &&
+    ![
+      "cancellation_requested",
+      "contract_retired",
+      "contract_rejected",
+    ].includes(cmd.type)
+  )
+    throw new FactoryError(
+      "run-cancellation-pending",
+      `resume request ${run.cancellation.requestId}`,
+    );
   const task =
     "task" in cmd ? run.tasks.find((t) => t.task === cmd.task) : undefined;
   switch (cmd.type) {
@@ -312,9 +337,25 @@ function apply(run: ScrumRun, cmd: RunCommand, now: number): void {
           requestId: cmd.operationId,
           fingerprint: cmd.fingerprint,
           previousEpoch: cmd.previousEpoch,
+          retirePeerIds: cmd.retirePeerIds ?? [],
         });
       if (["pm", "ux", "architect"].includes(task.role))
         run.readiness = undefined;
+      break;
+    }
+    case "contract_retired":
+    case "contract_rejected": {
+      const intent = task?.contractIntents?.find(
+        (i) => i.requestId === cmd.operationId,
+      );
+      if (!intent)
+        throw new FactoryError("missing-contract-intent", cmd.operationId);
+      if (cmd.type === "contract_retired") intent.peersRetired = true;
+      else {
+        if (intent.epoch !== undefined)
+          throw new FactoryError("contract-already-bound", cmd.operationId);
+        intent.rejection = { code: cmd.code, message: cmd.message };
+      }
       break;
     }
     case "task_bound":
@@ -346,9 +387,20 @@ function apply(run: ScrumRun, cmd: RunCommand, now: number): void {
         !task ||
         !["complete", "partial", "blocked"].includes(cmd.result?.status) ||
         !cmd.result.artifactRefs.every(artifactRefIsValid) ||
-        !Array.isArray(cmd.result.assumptions) || cmd.result.assumptions.some(a => !a || typeof a.id !== "string" || typeof a.unsafe !== "boolean" || typeof a.resolved !== "boolean" || typeof a.rationale !== "string" || !a.rationale.trim()) ||
-        !Array.isArray(cmd.result.conflicts) || cmd.result.conflicts.some(v => typeof v !== "string") ||
-        !Array.isArray(cmd.result.openQuestions) || cmd.result.openQuestions.some(v => typeof v !== "string")
+        !Array.isArray(cmd.result.assumptions) ||
+        cmd.result.assumptions.some(
+          (a) =>
+            !a ||
+            typeof a.id !== "string" ||
+            typeof a.unsafe !== "boolean" ||
+            typeof a.resolved !== "boolean" ||
+            typeof a.rationale !== "string" ||
+            !a.rationale.trim(),
+        ) ||
+        !Array.isArray(cmd.result.conflicts) ||
+        cmd.result.conflicts.some((v) => typeof v !== "string") ||
+        !Array.isArray(cmd.result.openQuestions) ||
+        cmd.result.openQuestions.some((v) => typeof v !== "string")
       )
         throw new FactoryError(
           "invalid-role-result",
@@ -385,7 +437,16 @@ function apply(run: ScrumRun, cmd: RunCommand, now: number): void {
       break;
     case "readiness_recorded":
       if (
-        !Array.isArray(cmd.readiness.refs) || !cmd.readiness.refs.every(artifactRefIsValid) || ![cmd.readiness.contradictions, cmd.readiness.unsafeAssumptions, cmd.readiness.missingCoverage].every(values => Array.isArray(values) && values.every(v => typeof v === "string")) ||
+        !Array.isArray(cmd.readiness.refs) ||
+        !cmd.readiness.refs.every(artifactRefIsValid) ||
+        ![
+          cmd.readiness.contradictions,
+          cmd.readiness.unsafeAssumptions,
+          cmd.readiness.missingCoverage,
+        ].every(
+          (values) =>
+            Array.isArray(values) && values.every((v) => typeof v === "string"),
+        ) ||
         !cmd.readiness.rationale?.trim()
       )
         throw new FactoryError(
@@ -647,14 +708,24 @@ export function createScrumRun(input: {
 }
 function commandFingerprint(cmd: RunCommand): string {
   const { expectedRevision: _expected, ...content } = cmd;
+  if (content.type === "qa_recorded") {
+    const { result: _derived, ...input } = content;
+    return fingerprint(input);
+  }
   return fingerprint(content);
 }
 
-export function replayRunCommand(state: string, slug: string, id: string, cmd: RunCommand): ScrumRun | undefined {
+export function replayRunCommand(
+  state: string,
+  slug: string,
+  id: string,
+  cmd: RunCommand,
+): ScrumRun | undefined {
   const events = eventsAt(runPath(state, slug, id));
-  const previous = events.find(event => event.requestId === cmd.requestId);
+  const previous = events.find((event) => event.requestId === cmd.requestId);
   if (!previous) return undefined;
-  if (previous.fingerprint !== commandFingerprint(cmd)) throw new FactoryError("run-request-conflict", cmd.requestId);
+  if (previous.fingerprint !== commandFingerprint(cmd))
+    throw new FactoryError("run-request-conflict", cmd.requestId);
   return project(events);
 }
 export function commandRun(

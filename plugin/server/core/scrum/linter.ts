@@ -45,13 +45,13 @@ function definitions(
         body: lines.slice(i).join("\n"),
       });
   }
-  for (let i = 0; i < result.length; i++)
-    result[i].body = lines
-      .slice(
-        result[i].line - 1,
-        result[i + 1]?.line === undefined ? undefined : result[i + 1].line - 1,
-      )
-      .join("\n");
+  const boundary =
+    /^\s*(?:#{1,6}\s+|[-*]\s+|\|\s*)?\*{0,2}(?:(?:FR|NFR|UJ|AD)-[1-9]\d*|R[1-9]\d*|S-[0-9]+)\*{0,2}(?=\s*[:—–|]|\s+)/;
+  for (const definition of result) {
+    let end = definition.line;
+    while (end < lines.length && !boundary.test(lines[end])) end++;
+    definition.body = lines.slice(definition.line - 1, end).join("\n");
+  }
   return result;
 }
 export function lintScrumDoc(
@@ -271,12 +271,15 @@ export function lintScrumDoc(
     for (const match of text.matchAll(/\b(?:FR|NFR|UJ)-[1-9]\d*\b/g))
       if (!sourceIds.has(match[0]))
         add("sprint-backlog.md", 1, "dangling", `undefined source ${match[0]}`);
+    const mappedSources = new Set(
+      requirements.flatMap((r) =>
+        [...r.body.matchAll(/^\s*Sources?\s*:\s*([^\n]+)/gim)].flatMap(
+          (m) => m[1].match(/\b(?:FR|NFR|UJ)-[1-9]\d*\b/g) ?? [],
+        ),
+      ),
+    );
     for (const d of sources)
-      if (
-        !new Set<string>(text.match(/\b(?:FR|NFR|UJ)-[1-9]\d*\b/g) ?? []).has(
-          d.id,
-        )
-      )
+      if (!mappedSources.has(d.id))
         add("sprint-backlog.md", 1, "coverage", `${d.id} has no R mapping`);
   }
   if (kind === "qa" && files["qa-report.json"]) {

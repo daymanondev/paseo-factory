@@ -94,3 +94,19 @@ test("FR-10 cannot satisfy mandatory FR-1 coverage", () => {
   });
   assert.ok(diagnostics.some((d) => d.message === "FR-1 has no R mapping"));
 });
+
+test("only explicit sources inside R definitions map PRD coverage", () => {
+  const files = {
+    "prd.md": "# FR-1: auth\n# FR-10: heading\n",
+    "sprint-backlog.md":
+      "FR-1 is still undecided.\n# R1: heading\nSource: FR-10\n# S-01: heading story\nCovers: R1\nTests: heading.test.js\nSource: FR-1\n",
+  };
+  assert.ok(
+    lintScrumDoc("backlog", files).some(
+      (d) => d.message === "FR-1 has no R mapping",
+    ),
+  );
+  files["sprint-backlog.md"] =
+    "# R1: auth\nSource: FR-1\nDeferred: Owner explicitly postponed authentication to next wave.\n# R2: heading\nSources: FR-10\n# S-01: heading story\nCovers: R2\nTests: heading.test.js\n";
+  assert.deepEqual(lintScrumDoc("backlog", files), []);
+});

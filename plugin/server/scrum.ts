@@ -37,12 +37,15 @@ export function prepareScrumContract(
     scope?: string[];
     gate?: string;
     artifact?: string;
+    retirePeerIds?: string[];
   },
 ): {
   execution?: ScrumTaskBinding;
   scope?: string[];
   gate?: string;
   existing?: boolean;
+  operationId?: string;
+  retirePeerIds?: string[];
 } {
   const raw = request as unknown as Record<string, unknown>;
   const requestFingerprint = sha256(
@@ -87,28 +90,54 @@ export function prepareScrumContract(
     throw new FactoryError("scrum-run-required", "runId required");
   let run = readRun(factory.stateDir, project.slug, request.runId);
   const previousContract = factory.contractFor(request.task);
-  const priorIntent = run.tasks
-    .find((task) => task.task === request.task)
-    ?.contractIntents?.find((intent) => intent.requestId === request.id);
+  let operationId = request.id;
+  const intents =
+    run.tasks.find((t) => t.task === request.task)?.contractIntents ?? [];
+  const exactIntent = intents.find((i) => i.requestId === request.id);
+  const pendingIntent = intents.find((i) => !i.rejection && !i.peersRetired);
+  const priorIntent =
+    exactIntent ??
+    (pendingIntent?.fingerprint === requestFingerprint
+      ? pendingIntent
+      : undefined);
+
   if (priorIntent) {
     if (priorIntent.fingerprint !== requestFingerprint)
       throw new FactoryError("contract-request-conflict", request.id);
+    operationId = priorIntent.requestId;
+    if (priorIntent.rejection)
+      throw new FactoryError(
+        priorIntent.rejection.code,
+        priorIntent.rejection.message,
+      );
     if (priorIntent.epoch !== undefined)
-      return { existing: true, execution: previousContract?.execution };
+      return {
+        existing: true,
+        execution: previousContract?.execution,
+        operationId,
+        retirePeerIds: priorIntent.peersRetired
+          ? []
+          : (priorIntent.retirePeerIds ?? []),
+      };
     if (
       previousContract &&
       previousContract.seq !== priorIntent.previousEpoch &&
-      previousContract.execution?.runId === run.runId
+      previousContract.execution?.contractRequestId === operationId
     ) {
       bindScrumEpoch(
         factory,
         request.task,
         previousContract.seq,
         previousContract.execution,
-        `${request.id}:bound`,
-        request.id,
+        `${operationId}:bound`,
+        operationId,
       );
-      return { existing: true, execution: previousContract.execution };
+      return {
+        existing: true,
+        execution: previousContract.execution,
+        operationId,
+        retirePeerIds: priorIntent.retirePeerIds ?? [],
+      };
     }
   }
   if (terminalRun(run) || run.cancellation)
@@ -125,7 +154,9 @@ export function prepareScrumContract(
       .find((task) => task.task === request.task)
       ?.contractIntents?.some(
         (intent) =>
-          intent.epoch === undefined && intent.requestId !== request.id,
+          !intent.rejection &&
+          !intent.peersRetired &&
+          intent.requestId !== operationId,
       )
   )
     throw new FactoryError(
@@ -223,6 +254,7 @@ export function prepareScrumContract(
     });
   const execution: ScrumTaskBinding = {
     mode: "scrum",
+    contractRequestId: operationId,
     runId: run.runId,
     role,
     policyRevision: run.policyRevision,
@@ -271,15 +303,18 @@ export function prepareScrumContract(
   run = readRun(factory.stateDir, project.slug, run.runId);
   commandRun(factory.stateDir, project.slug, run.runId, {
     type: "contract_intended",
-    requestId: `${request.id}:intent`,
+    requestId: `${operationId}:intent`,
     expectedRevision: run.revision,
     task: request.task,
-    operationId: request.id,
+    operationId,
     fingerprint: requestFingerprint,
-    previousEpoch: existing?.seq,
+    previousEpoch: priorIntent?.previousEpoch ?? existing?.seq,
+    retirePeerIds: priorIntent?.retirePeerIds ?? request.retirePeerIds ?? [],
   });
   return {
     execution,
+    operationId,
+    retirePeerIds: priorIntent?.retirePeerIds ?? request.retirePeerIds ?? [],
     ...(scope === undefined ? {} : { scope }),
     ...(gate === undefined ? {} : { gate }),
   };
@@ -344,6 +379,10 @@ export async function scrumSpawnLane(
   const run = readRun(factory.stateDir, project.slug, execution.runId);
   if (
     terminalRun(run) ||
+    run.cancellation ||
+    run.tasks
+      .find((t) => t.task === task)
+      ?.contractIntents?.some((i) => !i.rejection && !i.peersRetired) ||
     run.phase === "blocked" ||
     run.configRevision !== execution.configRevision ||
     run.policyRevision !== execution.policyRevision
@@ -442,7 +481,8 @@ export function bindScrumDirective(
       },
     ) as typeof run;
   } else run = readRun(factory.stateDir, slug, runId);
-  if (terminalRun(run)) throw new FactoryError("scrum-run-terminal", run.phase);
+  if (terminalRun(run) || run.cancellation)
+    throw new FactoryError("scrum-run-terminal", run.phase);
   return {
     execution: { mode: "scrum", runId, configRevision: run.configRevision },
     packet: `# Frozen Scrum run\n${JSON.stringify(run)}\n`,

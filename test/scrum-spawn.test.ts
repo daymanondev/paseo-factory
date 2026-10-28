@@ -382,6 +382,32 @@ test("a new Scrum contract request opens an epoch and retires the prior Agent; e
     gate: "test -d .",
     description: "revised bounded planning criteria",
   };
+  const failed = await handleSpoolRequest(factory, second, {
+    daemon,
+    stopAgent: async (id) => {
+      stopped.push(id);
+      return { ok: false, reason: "trial failure" };
+    },
+  });
+  assert.equal(failed.ok, false);
+  assert.equal(archived.length, 0);
+  const pendingEpoch = factory.contractFor("pm")!.seq;
+  const spawn = await handleSpoolRequest(factory, {
+    id: "pending-spawn",
+    kind: "spawn",
+    task: "pm",
+    provider: "pi/test",
+    arity: 1,
+  });
+  assert.equal(spawn.ok, false);
+  if (!spawn.ok) assert.equal(spawn.code, "scrum-run-blocked");
+  const concurrent = await handleSpoolRequest(factory, {
+    ...second,
+    id: "different",
+    gate: "false",
+  });
+  assert.equal(concurrent.ok, false);
+  if (!concurrent.ok) assert.equal(concurrent.code, "contract-intent-pending");
   assert.equal(
     (
       await handleSpoolRequest(factory, second, {
@@ -398,9 +424,64 @@ test("a new Scrum contract request opens an epoch and retires the prior Agent; e
   assert.ok(epoch2 > epoch1);
   assert.match(factory.contractFor("pm")!.gate, /test -d/);
   assert.equal(factory.contractFor("pm")!.description, second.description);
-  assert.deepEqual(stopped, ["old-peer"]);
+  assert.equal(epoch2, pendingEpoch);
+  assert.deepEqual(stopped, ["old-peer", "old-peer"]);
   assert.deepEqual(archived, ["old-peer"]);
   assert.equal((await handleSpoolRequest(factory, second)).ok, true);
   assert.equal(factory.contractFor("pm")!.seq, epoch2);
   assert.equal(readRun(state, project.slug, "r").tasks[0].epoch, epoch2);
+  const invalid = { ...second, id: "invalid", gate: "" };
+  const rejected = await handleSpoolRequest(factory, invalid);
+  assert.equal(rejected.ok, false);
+  if (!rejected.ok) assert.equal(rejected.code, "invalid-contract");
+  assert.equal(
+    (await handleSpoolRequest(factory, { ...second, id: "corrected" })).ok,
+    true,
+  );
+  const epoch3 = factory.contractFor("pm")!.seq;
+  assert.ok(epoch3 > epoch2);
+  assert.equal(
+    (
+      await handleSpoolRequest(factory, second, {
+        daemon,
+        stopAgent: async () => {
+          throw Error("old replay must not stop new epoch");
+        },
+      })
+    ).ok,
+    true,
+  );
+  assert.equal(factory.contractFor("pm")!.seq, epoch3);
+  const { commandRun } = await import(
+    "../plugin/server/core/scrum/run-journal.ts"
+  );
+  const run = readRun(state, project.slug, "r");
+  commandRun(state, project.slug, "r", {
+    type: "cancellation_requested",
+    requestId: "cancel",
+    expectedRevision: run.revision,
+    actor: "owner",
+    reason: "stop",
+  });
+  assert.throws(
+    () =>
+      commandRun(state, project.slug, "r", {
+        type: "phase_changed",
+        phase: "planning",
+        reason: "bypass",
+        requestId: "bypass",
+        expectedRevision: run.revision + 1,
+      }),
+    /resume request cancel/,
+  );
+  const cancelledSpawn = await handleSpoolRequest(factory, {
+    id: "cancelled-spawn",
+    kind: "spawn",
+    task: "pm",
+    provider: "pi/test",
+    arity: 1,
+  });
+  assert.equal(cancelledSpawn.ok, false);
+  if (!cancelledSpawn.ok)
+    assert.equal(cancelledSpawn.code, "scrum-run-blocked");
 });

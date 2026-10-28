@@ -234,6 +234,8 @@ export function scrumOperation(
     if (
       cmd.type === "design_decided" ||
       cmd.type === "contract_intended" ||
+      cmd.type === "contract_retired" ||
+      cmd.type === "contract_rejected" ||
       cmd.type === "cancellation_requested" ||
       cmd.type === "completion_requested" ||
       cmd.type === "completion_reported" ||
@@ -245,7 +247,16 @@ export function scrumOperation(
     )
       fail("scrum-command-authority", "use the dedicated verified operation");
     const replayed = replayRunCommand(state, slug, run.runId, cmd);
-    if (replayed && !(cmd.type === "design_review_requested" && !run.config.requireUiApproval && replayed.design?.digest === cmd.design.digest && replayed.design.decision === undefined)) return replayed;
+    if (
+      replayed &&
+      !(
+        cmd.type === "design_review_requested" &&
+        !run.config.requireUiApproval &&
+        replayed.design?.digest === cmd.design.digest &&
+        replayed.design.decision === undefined
+      )
+    )
+      return replayed;
     if (cmd.type === "artifacts_recorded") {
       verifyRefs(root, cmd.refs, run.ownedPaths);
       acceptedRefs(ctx.factory, run, cmd.refs);

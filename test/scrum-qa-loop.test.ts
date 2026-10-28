@@ -443,6 +443,17 @@ test("a GREEN QA artifact reproduces a real defect, Dev promotes unchanged tests
     activeAgents: [],
     pendingDirectives: true,
   };
+  const qaCommand = {
+    operation: "run.command",
+    runId: run.runId,
+    requestId: "qa-receipt",
+    expectedRevision: run.revision,
+    payload: { type: "qa_recorded", ref: artifactAt(repo, finalSha, paths[7]) },
+  };
+  run = scrumOperation(qaCommand, context) as typeof run;
+  assert.equal(run.qaResult?.status, "clean");
+  const replay = scrumOperation(qaCommand, context) as typeof run;
+  assert.equal(replay.revision, run.revision);
   const complete = {
     operation: "run.complete",
     runId: run.runId,
