@@ -50,8 +50,8 @@ type CompanionId = CompanionCatalogEntry["id"];
 
 /** The Plugins tab's whole action surface — the Shell owns the RPC calls. */
 export interface PluginsActions {
-  /** Install one companion (canonical source by default, or a custom source/ref) or every uninstalled companion ("all"). */
-  install(target: CompanionId | "all", source?: string, ref?: string): void;
+  /** Install or switch the source of a plugin (Core or Companion, canonical source by default or custom source/ref) or every uninstalled companion ("all"). */
+  install(target: ManageablePluginId | "all", source?: string, ref?: string): void;
   /** One lifecycle act on an installed plugin (Core or Companion, or "all" for batch update). */
   manage(pluginId: ManageablePluginId | "all", action: "enable" | "disable" | "reload" | "update" | "remove"): void;
   /** Trigger an on-demand remote update check across installed plugins (v0.0.25, ADR 0012 §4). */
@@ -102,6 +102,7 @@ function CompanionCard({
   onDismissError?: () => void;
 }) {
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [switchSourceOpen, setSwitchSourceOpen] = useState(false);
   const [source, setSource] = useState("");
   const [ref, setRef] = useState("");
   const status = STATUS[companion.status];
@@ -115,7 +116,8 @@ function CompanionCard({
   const progressPill = formatPluginCardProgressPill(companion, activeAct, elapsedSeconds);
   const isRestartingThisCore = isCore && isPluginTargetedByAct(companion, activeAct, { kind: "restarting-core" });
   const isRestartingCoreForReload = isRestartingThisCore && activeAct?.action === "reload";
-  const isRestartingCoreForUpdate = isRestartingThisCore && activeAct?.action !== "reload";
+  const isRestartingCoreForInstall = isRestartingThisCore && activeAct?.action === "install";
+  const isRestartingCoreForUpdate = isRestartingThisCore && activeAct?.action !== "reload" && activeAct?.action !== "install";
   const isUpdatingThis = isPluginTargetedByAct(companion, activeAct, { kind: "manage", action: "update" });
   const isInstallingThis = isPluginTargetedByAct(companion, activeAct, { kind: "install" });
   const isReloadingThis = isPluginTargetedByAct(companion, activeAct, { kind: "manage", action: "reload" });
@@ -182,6 +184,22 @@ function CompanionCard({
             </>
           ) : (
             <>
+              {companion.installKind === "directory" ? (
+                <Btn
+                  theme={theme}
+                  small
+                  label={
+                    isRestartingCoreForInstall
+                      ? `Reloading Core… (${elapsedSeconds}s)`
+                      : isInstallingThis
+                        ? `Switching… (${elapsedSeconds}s)`
+                        : "Switch to GitHub"
+                  }
+                  tone="accent"
+                  disabled={actions.busy}
+                  onPress={() => actions.install(manageId)}
+                />
+              ) : null}
               {(remote && companion.updateAvailable === true) || isUpdatingThis || isRestartingCoreForUpdate ? (
                 <Btn
                   theme={theme}
@@ -333,71 +351,168 @@ function CompanionCard({
               />
             </View>
           ) : (
-            <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5] }}>
-              {!isCore ? (
-                companion.enabled ? (
-                  isDisablingThis ? (
-                    <Btn theme={theme} small label="Disabling…" disabled={actions.busy} onPress={() => actions.manage(id, "disable")} />
+            <View style={{ gap: SPACING[2] }}>
+              <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5] }}>
+                {!isCore ? (
+                  companion.enabled ? (
+                    isDisablingThis ? (
+                      <Btn theme={theme} small label="Disabling…" disabled={actions.busy} onPress={() => actions.manage(id, "disable")} />
+                    ) : (
+                      <Btn theme={theme} small label="Disable" disabled={actions.busy} onPress={() => actions.manage(id, "disable")} />
+                    )
+                  ) : isEnablingThis ? (
+                    <Btn theme={theme} small label="Enabling…" disabled={actions.busy} onPress={() => actions.manage(id, "enable")} />
                   ) : (
-                    <Btn theme={theme} small label="Disable" disabled={actions.busy} onPress={() => actions.manage(id, "disable")} />
+                    <Btn theme={theme} small label="Enable" disabled={actions.busy} onPress={() => actions.manage(id, "enable")} />
                   )
-                ) : isEnablingThis ? (
-                  <Btn theme={theme} small label="Enabling…" disabled={actions.busy} onPress={() => actions.manage(id, "enable")} />
+                ) : null}
+                {isReloadingThis || isRestartingCoreForReload ? (
+                  <Btn
+                    theme={theme}
+                    small
+                    label={isRestartingCoreForReload ? `Reloading Core… (${elapsedSeconds}s)` : "Reloading…"}
+                    tone="foregroundMuted"
+                    disabled={actions.busy}
+                    onPress={() => actions.manage(manageId, "reload")}
+                  />
                 ) : (
-                  <Btn theme={theme} small label="Enable" disabled={actions.busy} onPress={() => actions.manage(id, "enable")} />
-                )
-              ) : null}
-              {isReloadingThis || isRestartingCoreForReload ? (
+                  <Btn theme={theme} small label="Reload" tone="foregroundMuted" disabled={actions.busy} onPress={() => actions.manage(manageId, "reload")} />
+                )}
+                {companion.installKind === "git" || companion.installKind === "npm" ? (
+                  isRestartingCoreForUpdate ? (
+                    <Btn
+                      theme={theme}
+                      small
+                      label={`Reloading Core… (${elapsedSeconds}s)`}
+                      tone="foregroundMuted"
+                      disabled={actions.busy}
+                      onPress={() => actions.manage(manageId, "update")}
+                    />
+                  ) : isUpdatingThis ? (
+                    <Btn
+                      theme={theme}
+                      small
+                      label={`Updating… (${elapsedSeconds}s)`}
+                      tone="foregroundMuted"
+                      disabled={actions.busy}
+                      onPress={() => actions.manage(manageId, "update")}
+                    />
+                  ) : (
+                    <Btn
+                      theme={theme}
+                      small
+                      label="Update"
+                      tone="foregroundMuted"
+                      disabled={actions.busy}
+                      onPress={() => actions.manage(manageId, "update")}
+                    />
+                  )
+                ) : null}
+                {companion.installKind === "directory" ? (
+                  <Btn
+                    theme={theme}
+                    small
+                    label={
+                      isRestartingCoreForInstall
+                        ? `Reloading Core… (${elapsedSeconds}s)`
+                        : isInstallingThis
+                          ? `Switching… (${elapsedSeconds}s)`
+                          : "Switch to GitHub"
+                    }
+                    tone="accent"
+                    disabled={actions.busy}
+                    onPress={() => actions.install(manageId)}
+                  />
+                ) : null}
                 <Btn
                   theme={theme}
                   small
-                  label={isRestartingCoreForReload ? `Reloading Core… (${elapsedSeconds}s)` : "Reloading…"}
+                  label={switchSourceOpen ? "Cancel source…" : "Switch source…"}
                   tone="foregroundMuted"
                   disabled={actions.busy}
-                  onPress={() => actions.manage(manageId, "reload")}
+                  onPress={() => setSwitchSourceOpen(!switchSourceOpen)}
                 />
-              ) : (
-                <Btn theme={theme} small label="Reload" tone="foregroundMuted" disabled={actions.busy} onPress={() => actions.manage(manageId, "reload")} />
-              )}
-              {companion.installKind === "git" || companion.installKind === "npm" ? (
-                isRestartingCoreForUpdate ? (
-                  <Btn
-                    theme={theme}
-                    small
-                    label={`Reloading Core… (${elapsedSeconds}s)`}
-                    tone="foregroundMuted"
-                    disabled={actions.busy}
-                    onPress={() => actions.manage(manageId, "update")}
-                  />
-                ) : isUpdatingThis ? (
-                  <Btn
-                    theme={theme}
-                    small
-                    label={`Updating… (${elapsedSeconds}s)`}
-                    tone="foregroundMuted"
-                    disabled={actions.busy}
-                    onPress={() => actions.manage(manageId, "update")}
-                  />
+                {!isCore ? (
+                  isRemovingThis ? (
+                    <Btn theme={theme} small label="Removing…" tone="statusDanger" disabled={actions.busy} onPress={() => actions.manage(id, "remove")} />
+                  ) : (
+                    <Btn theme={theme} small label="Remove" tone="statusDanger" disabled={actions.busy} onPress={() => actions.manage(id, "remove")} />
+                  )
                 ) : (
-                  <Btn
-                    theme={theme}
-                    small
-                    label="Update"
-                    tone="foregroundMuted"
-                    disabled={actions.busy}
-                    onPress={() => actions.manage(manageId, "update")}
-                  />
-                )
+                  <Pill theme={theme} label="Core plugin protected (Disable/Remove locked)" tone="foregroundMuted" />
+                )}
+              </View>
+
+              {switchSourceOpen ? (
+                <View style={{ gap: SPACING[1.5] }}>
+                  <View style={{ gap: SPACING[1] }}>
+                    <Text style={text(theme, "label")}>Source</Text>
+                    <View
+                      style={{
+                        minHeight: CONTROL_H,
+                        justifyContent: "center",
+                        borderWidth: 1,
+                        borderColor: theme.colors.border,
+                        borderRadius: RADIUS.md,
+                        backgroundColor: theme.colors.surface1,
+                      }}
+                    >
+                      <TextInput
+                        value={source}
+                        onChangeText={setSource}
+                        placeholder={`git:daymanondev/${companion.id}:plugin or /path/to/plugin`}
+                        placeholderTextColor={theme.colors.foregroundMuted}
+                        style={{ paddingHorizontal: SPACING[2.5], paddingVertical: 5, color: theme.colors.foreground, fontSize: 12, fontFamily: "monospace" }}
+                      />
+                    </View>
+                  </View>
+                  <View style={{ gap: SPACING[1] }}>
+                    <Text style={text(theme, "label")}>Ref (branch/tag/commit) — optional</Text>
+                    <View
+                      style={{
+                        minHeight: CONTROL_H,
+                        justifyContent: "center",
+                        borderWidth: 1,
+                        borderColor: theme.colors.border,
+                        borderRadius: RADIUS.md,
+                        backgroundColor: theme.colors.surface1,
+                      }}
+                    >
+                      <TextInput
+                        value={ref}
+                        onChangeText={setRef}
+                        placeholder="e.g. feat/x, v0.2.0, 9f3b2c1"
+                        placeholderTextColor={theme.colors.foregroundMuted}
+                        style={{ paddingHorizontal: SPACING[2.5], paddingVertical: 5, color: theme.colors.foreground, fontSize: 12, fontFamily: "monospace" }}
+                      />
+                    </View>
+                  </View>
+                  <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5] }}>
+                    <Btn
+                      theme={theme}
+                      small
+                      label={
+                        isRestartingCoreForInstall
+                          ? `Reloading Core… (${elapsedSeconds}s)`
+                          : isInstallingThis
+                            ? `Switching… (${elapsedSeconds}s)`
+                            : "Switch Source"
+                      }
+                      solid
+                      disabled={actions.busy || trimmedSource === ""}
+                      onPress={() => actions.install(manageId, trimmedSource, trimmedRef === "" ? undefined : trimmedRef)}
+                    />
+                    <Btn
+                      theme={theme}
+                      small
+                      label={`Use Canonical (${companion.canonicalSource})`}
+                      tone="foregroundMuted"
+                      disabled={actions.busy}
+                      onPress={() => actions.install(manageId)}
+                    />
+                  </View>
+                </View>
               ) : null}
-              {!isCore ? (
-                isRemovingThis ? (
-                  <Btn theme={theme} small label="Removing…" tone="statusDanger" disabled={actions.busy} onPress={() => actions.manage(id, "remove")} />
-                ) : (
-                  <Btn theme={theme} small label="Remove" tone="statusDanger" disabled={actions.busy} onPress={() => actions.manage(id, "remove")} />
-                )
-              ) : (
-                <Pill theme={theme} label="Core plugin protected (Disable/Remove locked)" tone="foregroundMuted" />
-              )}
             </View>
           )}
         </View>

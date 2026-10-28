@@ -377,8 +377,8 @@ export const ratifyProposal = defineRpc({
 export const pluginsInstall = defineRpc({
   name: "factory.plugins.install",
   input: z.object({
-    /** Target companion id ("factory-burn-lab" | "factory-release-lab") or "all" for batch install of uninstalled companions. */
-    target: z.enum(["factory-burn-lab", "factory-release-lab", "all"]),
+    /** Target plugin id ("paseo-factory" | "factory-burn-lab" | "factory-release-lab") or "all" for batch install of uninstalled companions. */
+    target: z.enum(["paseo-factory", "factory-burn-lab", "factory-release-lab", "all"]),
     /** Optional custom source override (Git source, npm spec, or explicit local directory path). Omitted uses canonicalSource. */
     source: z.string().optional(),
     /** Optional Git branch, tag, or commit ref when installing from a Git source. */

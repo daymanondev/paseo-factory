@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.55] - 2026-10-28
+
+Add 1-click source switching (`Switch to GitHub` and `Switch source…`) for `Factory Core` (`paseo-factory`) and Companion plugins in the `Plugins` tab.
+
+### Added
+
+- Render a 1-click `Switch to GitHub` button on the card header and in the `⋯ Manage` drawer whenever `Factory Core` or a Companion plugin is installed from a local directory (`installKind === "directory"`).
+- Add a collapsible `Switch source…` form (`Source` + `Ref` + `Switch Source` + `Use Canonical`) inside `⋯ Manage` for all installed plugins so the Owner can switch between local checkouts and GitHub sources without running CLI commands.
+- Support `target: "paseo-factory"` in `factory.plugins.install` with a detached WebSocket helper (`replaceCoreDaemonPluginViaHelper`) that safely removes and re-installs `paseo-factory` across self-restart with rollback on failure, and auto-normalizes local repository roots containing `plugin/paseo-plugin.json`.
+
 ## [0.0.54] - 2026-10-28
 
 Improve the Scrum surface and isolate concurrent SLP and Scrum Projects (ADR 0033).

@@ -2844,14 +2844,14 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     // ---- the companion plugin lifecycle (v0.0.17, ADR 0012 §3) -----------------------------
 
     async pluginsInstall(
-      input: { target: CompanionCatalogEntry["id"] | "all"; source?: string; ref?: string },
+      input: { target: ManageablePluginId | "all"; source?: string; ref?: string },
       _context?: SurfaceCallContext,
     ): Promise<{ ok: true; installed: string[]; summary: string } | { ok: false; code: string; error: string }> {
-      // A custom source or ref names ONE companion — it cannot ride a batch.
+      // A custom source or ref names ONE plugin — it cannot ride a batch.
       if (input.target === "all" && (input.source !== undefined || input.ref !== undefined)) {
         return failure("invalid-target", 'a custom source or ref targets one companion — pass a named target, not "all"');
       }
-      let targets: readonly CompanionCatalogEntry[];
+      let targets: readonly (CompanionCatalogEntry | typeof CORE_PLUGIN_ENTRY)[];
       if (input.target === "all") {
         // Batch installs only the uninstalled PUBLIC companions (v0.0.30, ADR
         // 0012 §2) — a private invite-only repository never rides Install All,
@@ -2872,6 +2872,8 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           return failure("daemon_failed", `cannot tell which companions are already installed — the daemon plugin list is unavailable: ${listReason}`);
         }
         targets = COMPANION_CATALOG.filter((entry) => entry.access === "public" && !listedIds!.has(entry.id));
+      } else if (input.target === CORE_PLUGIN_ENTRY.id) {
+        targets = [CORE_PLUGIN_ENTRY];
       } else {
         const entry = COMPANION_CATALOG.find((candidate) => candidate.id === input.target);
         if (entry === undefined) return failure("unknown-companion", `${input.target} is not a Factory companion — the surface manages only the catalog's own family`);

@@ -10,7 +10,7 @@ import type { CompanionPluginView, FactoryView } from "../../shared/view.ts";
 export interface ActivePluginAct {
   kind: "check" | "install" | "manage" | "restarting-core";
   target: ManageablePluginId | "all";
-  action?: "enable" | "disable" | "reload" | "update" | "remove" | "restarting-core";
+  action?: "enable" | "disable" | "reload" | "update" | "remove" | "install" | "restarting-core";
   startedAt: number;
   fromRevision?: string | null;
   targetRevision?: string | null;
@@ -40,18 +40,19 @@ export function isCoreSelfRestartError(input: {
     (input.target === "paseo-factory" || input.target === "all") &&
     (input.coreTargeted ?? input.target === "paseo-factory");
   if (!targetsCore) return false;
-  if (input.action !== "update" && input.action !== "reload") return false;
+  if (input.action !== "update" && input.action !== "reload" && input.action !== "install") return false;
   return CORE_RESTART_ERROR_RE.test(input.errorMessage);
 }
 
 export const DEFAULT_CORE_RESTART_TIMEOUT_MS = 45_000;
 
-const MANAGE_ACTION_VERB: Readonly<Record<"update" | "reload" | "enable" | "disable" | "remove", string>> = {
+const MANAGE_ACTION_VERB: Readonly<Record<"update" | "reload" | "enable" | "disable" | "remove" | "install", string>> = {
   update: "Updating",
   reload: "Reloading",
   enable: "Enabling",
   disable: "Disabling",
   remove: "Removing",
+  install: "Installing",
 };
 
 function manageActionVerb(action: ActivePluginAct["action"]): string | null {
@@ -107,7 +108,7 @@ export function resolveCoreRestartWatch(input: {
   view: Pick<FactoryView, "corePlugin"> | null;
   previousRevision: string | null;
   targetRevision: string | null;
-  action: "update" | "reload";
+  action: "update" | "reload" | "install";
   elapsedMs: number;
   timeoutMs?: number;
 }): { status: "waiting" } | { status: "completed"; note: PluginsNote } | { status: "failed"; note: PluginsNote } {
@@ -117,7 +118,7 @@ export function resolveCoreRestartWatch(input: {
       return {
         status: "failed",
         note: {
-          text: `${input.action === "reload" ? "Reload" : "Update"} failed on paseo-factory: ${corePlugin.error ?? "Core plugin entered failed state"}`,
+          text: `${input.action === "reload" ? "Reload" : input.action === "install" ? "Switch source" : "Update"} failed on paseo-factory: ${corePlugin.error ?? "Core plugin entered failed state"}`,
           tone: "statusDanger",
           pluginId: "paseo-factory",
         },
@@ -162,13 +163,17 @@ export function resolveCoreRestartWatch(input: {
           },
         };
       }
-    } else if (input.action === "reload") {
+    } else if (input.action === "reload" || input.action === "install") {
       if (corePlugin.status === "running" && input.elapsedMs >= 500) {
         const versionSuffix = corePlugin.version ? ` (v${corePlugin.version.replace(/^v/, "")})` : "";
+        const sourceLabel = corePlugin.installKind === "directory" ? "local checkout" : "GitHub";
         return {
           status: "completed",
           note: {
-            text: `Reloaded paseo-factory on the daemon${versionSuffix}`,
+            text:
+              input.action === "install"
+                ? `Switched paseo-factory to ${sourceLabel}${versionSuffix}`
+                : `Reloaded paseo-factory on the daemon${versionSuffix}`,
             tone: "statusSuccess",
             pluginId: "paseo-factory",
           },

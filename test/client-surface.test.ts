@@ -1151,3 +1151,53 @@ test("TasksPane and TaskDetailModal wire Open Peer navigation for active and arc
   assert.match(shell, /onOpenAgent=\{\(agentId\) => navigation\?\.openAgent\(\{ agentId, serverId \}\)\}/, "FactoryShell wires onOpenAgent into TaskDetailModal");
 });
 
+test("PluginsPane and FactoryShell support 1-click Switch to GitHub and Switch source… for installed Core and Companion plugins", () => {
+  const plugins = read("plugin/client/factory/plugins.tsx");
+  const shell = read("plugin/client/factory/shell.tsx");
+
+  assert.match(plugins, /Switch to GitHub/, "installed local directory cards render 1-click Switch to GitHub button");
+  assert.match(plugins, /Switch source…/, "installed cards render Switch source… toggle inside Manage drawer");
+  assert.match(plugins, /Switch Source/, "installed cards render Switch Source action button");
+  assert.match(plugins, /install\(target: ManageablePluginId \| "all"/, "PluginsActions.install accepts ManageablePluginId including paseo-factory");
+
+  assert.equal(
+    isCoreSelfRestartError({
+      target: "paseo-factory",
+      action: "install",
+      errorMessage: "Plugin stopped: paseo-factory",
+    }),
+    true,
+    "isCoreSelfRestartError recognizes Core source switch (action: install) disconnect",
+  );
+
+  const switchedToGit = resolveCoreRestartWatch({
+    view: {
+      corePlugin: {
+        id: "paseo-factory",
+        name: "Factory Core",
+        tagline: "",
+        description: "",
+        canonicalSource: "git:daymanondev/paseo-factory:plugin",
+        sidebarIcon: "GitMerge",
+        access: "public",
+        status: "running",
+        enabled: true,
+        installKind: "git",
+        installedSource: "https://github.com/daymanondev/paseo-factory (plugin)",
+        currentRevision: "0ea21a81",
+        error: null,
+      },
+    } as unknown as FactoryView,
+    previousRevision: null,
+    targetRevision: null,
+    action: "install",
+    elapsedMs: 2000,
+  });
+  assert.equal(switchedToGit.status, "completed");
+  if (switchedToGit.status === "completed") {
+    assert.match(switchedToGit.note.text, /Switched paseo-factory to GitHub/);
+  }
+  assert.match(shell, /action: "install"/, "FactoryShell transitions to restarting-core with action: install when switching paseo-factory source");
+});
+
+

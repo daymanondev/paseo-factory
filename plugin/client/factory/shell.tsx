@@ -233,7 +233,7 @@ export function FactoryShell({
       view: freshView,
       previousRevision: activePluginAct.fromRevision ?? null,
       targetRevision: activePluginAct.targetRevision ?? null,
-      action: activePluginAct.action === "reload" ? "reload" : "update",
+      action: activePluginAct.action === "reload" ? "reload" : activePluginAct.action === "install" ? "install" : "update",
       elapsedMs: Math.max(0, Date.now() - activePluginAct.startedAt),
     });
     if (resolution.status === "waiting") return;
@@ -627,22 +627,51 @@ export function FactoryShell({
                 });
               },
               install: (target, source, ref) => {
+                const coreTargeted = target === "paseo-factory";
                 clearPluginCardError(target);
-                setActivePluginAct({ kind: "install", target, startedAt: Date.now() });
+                setActivePluginAct({ kind: "install", target, action: "install", startedAt: Date.now() });
                 void act("Install", async () => {
+                  let restartingCore = false;
+                  const enterCoreRestart = () => {
+                    restartingCore = true;
+                    setActivePluginAct({
+                      kind: "restarting-core",
+                      target: "paseo-factory",
+                      action: "install",
+                      startedAt: Date.now(),
+                      fromRevision: view.corePlugin.currentRevision,
+                      targetRevision: null,
+                    });
+                    setPluginsNote({
+                      text: "Reloading Core (paseo-factory)…",
+                      tone: "statusWarning",
+                      pluginId: "paseo-factory",
+                    });
+                  };
                   try {
                     const reply = await pluginsInstallCall({ target, source, ref });
                     if (reply.ok) {
                       setPluginsNote({ text: reply.summary, tone: "statusSuccess", pluginId: target });
                     } else {
+                      if (isCoreSelfRestartError({ target, action: "install", errorMessage: reply.error, coreTargeted })) {
+                        enterCoreRestart();
+                        return { ok: true, summary: "" };
+                      }
                       recordPluginActFailure("Install", target, reply.error);
                     }
                     return reply;
                   } catch (error) {
-                    recordPluginActFailure("Install", target, String(error));
+                    const msg = error instanceof Error ? error.message : String(error);
+                    if (isCoreSelfRestartError({ target, action: "install", errorMessage: msg, coreTargeted })) {
+                      enterCoreRestart();
+                      return { ok: true, summary: "" };
+                    }
+                    recordPluginActFailure("Install", target, msg);
                     throw error;
                   } finally {
-                    setActivePluginAct(null);
+                    if (!restartingCore) {
+                      setActivePluginAct(null);
+                    }
                   }
                 });
               },

@@ -5906,3 +5906,56 @@ test("mode switches refuse queued non-directive mail for either standing seat", 
     if (!reply.ok) assert.equal(reply.code, "execution-mode-busy");
   }
 });
+
+test("pluginsInstall and installDaemonPlugin support switching paseo-factory between GitHub and local checkout", async t => {
+  const { handlers, home, pluginInstalls } = makeSurface(t);
+  const toGit = await handlers.pluginsInstall({ target: "paseo-factory" });
+  assert.ok(toGit.ok, toGit.ok ? "" : toGit.error);
+  assert.deepEqual(toGit.installed, ["paseo-factory"]);
+  assert.equal(toGit.summary, "installed paseo-factory from git:daymanondev/paseo-factory:plugin");
+  assert.deepEqual(pluginInstalls, [
+    { home, input: { id: "paseo-factory", source: "git:daymanondev/paseo-factory:plugin" } },
+  ]);
+
+  const daemon = await startFakeDaemon(t, (message) => {
+    const type = String(message.type);
+    if (type === "plugin.remove.request") {
+      return { type: "plugin.remove.response", payload: { requestId: message.requestId } };
+    }
+    if (type === "plugin.source.install.request" || type === "plugin.directory.install.request") {
+      return {
+        type: type.replace(".request", ".response"),
+        payload: {
+          requestId: message.requestId,
+          plugin: {
+            id: message.id,
+            path: type === "plugin.directory.install.request" ? message.path : "/plugins/paseo-factory",
+            enabled: true,
+            status: "running",
+          },
+        },
+      };
+    }
+    return null;
+  });
+
+  // Create a local repo checkout with nested plugin/paseo-plugin.json to verify auto-normalization to <repo>/plugin
+  const repoDir = makeTempDir("paseo-factory-checkout-");
+  disposeDir(t, repoDir);
+  mkdirSync(join(repoDir, "plugin"), { recursive: true });
+  writeFileSync(join(repoDir, "plugin", "paseo-plugin.json"), JSON.stringify({ id: "paseo-factory", name: "Factory" }));
+
+  const switchedLocal = await installDaemonPlugin(daemon.home, { id: "paseo-factory", source: repoDir });
+  assert.ok(switchedLocal.ok, switchedLocal.ok ? "" : switchedLocal.reason);
+  assert.deepEqual(
+    daemon.frames.map((f) => f.type),
+    ["plugin.remove.request", "plugin.directory.install.request"],
+    "Core source replacement removes existing paseo-factory before installing the new source via detached helper",
+  );
+  assert.equal(
+    daemon.frames[1]!.message.path,
+    join(repoDir, "plugin"),
+    "repo root containing plugin/paseo-plugin.json auto-normalizes to <repo>/plugin",
+  );
+});
+

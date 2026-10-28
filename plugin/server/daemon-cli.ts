@@ -18,7 +18,8 @@
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
-import { delimiter as pathDelimiter, dirname, join } from "node:path";
+import { homedir } from "node:os";
+import { delimiter as pathDelimiter, dirname, join, resolve as resolvePath } from "node:path";
 import { pathToFileURL } from "node:url";
 import { isElectronNodeBinary } from "./core/pi-home.ts";
 import { healFactoryRoleProvidersInConfig } from "./core/role-providers.ts";
@@ -459,30 +460,239 @@ function isLocalPathSource(source: string): boolean {
   return source.startsWith("/") || source.startsWith(".") || source.startsWith("~") || /^[A-Za-z]:[\\/]/.test(source);
 }
 
+/**
+ * If a local directory source points at a repo root whose plugin manifest lives
+ * under `<dir>/plugin/paseo-plugin.json` (and not `<dir>/paseo-plugin.json`),
+ * resolves to the `plugin` subdirectory; non-existent paths stay literal.
+ */
+function normalizeLocalPluginSource(source: string): string {
+  if (!isLocalPathSource(source) || /^[A-Za-z]:[\\/]/.test(source)) return source;
+  const expanded =
+    source === "~"
+      ? homedir()
+      : source.startsWith("~/")
+        ? join(homedir(), source.slice(2))
+        : resolvePath(source);
+  if (!existsSync(expanded)) return source;
+  if (!existsSync(join(expanded, "paseo-plugin.json")) && existsSync(join(expanded, "plugin", "paseo-plugin.json"))) {
+    return source.startsWith("~/") ? `${source.replace(/\/+$/, "")}/plugin` : join(expanded, "plugin");
+  }
+  return source;
+}
+
+const REPLACE_CORE_PLUGIN_SCRIPT = `
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+
+process.on("SIGHUP", () => {});
+process.stdout.on("error", () => {});
+process.stderr.on("error", () => {});
+
+const [home, source, ref, fallbackSource] = process.argv.slice(1);
+const pidPath = join(home, "paseo.pid");
+const credPath = join(home, "local-credential");
+const pid = JSON.parse(readFileSync(pidPath, "utf8"));
+const token = readFileSync(credPath, "utf8").trim();
+const listen = pid.listen;
+
+function isLocal(s) {
+  return s.startsWith("/") || s.startsWith(".") || s.startsWith("~") || /^[A-Za-z]:[\\\\/]/.test(s);
+}
+
+function buildInstallMsg(s, r) {
+  return isLocal(s)
+    ? { type: "plugin.directory.install.request", path: s, id: "paseo-factory" }
+    : { type: "plugin.source.install.request", source: s, id: "paseo-factory", ...(r ? { ref: r } : {}) };
+}
+
+function wsRequest(message, responseType, timeoutMs = 300000) {
+  const requestId = "factory-core-switch-" + randomUUID().slice(0, 8);
+  return new Promise((resolve) => {
+    const ws = new WebSocket("ws://" + listen + "/ws");
+    let settled = false;
+    const finish = (reply) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { ws.close(); } catch {}
+      resolve(reply);
+    };
+    const timer = setTimeout(() => finish({ ok: false, reason: "no " + responseType + " within " + timeoutMs + "ms" }), timeoutMs);
+    ws.addEventListener("open", () => {
+      ws.send(JSON.stringify({
+        type: "hello",
+        clientId: "paseo-factory-core-switch-" + randomUUID().slice(0, 8),
+        clientType: "cli",
+        protocolVersion: 1,
+        capabilities: { all_providers: true },
+        auth: { kind: "localCredential", token },
+      }));
+    });
+    ws.addEventListener("message", (event) => {
+      let env;
+      try { env = JSON.parse(String(event.data)); } catch { return; }
+      if (env.type === "hello.rejected") {
+        finish({ ok: false, reason: "daemon rejected hello: " + String(env.reason ?? "") });
+        return;
+      }
+      if (env.type !== "session" || typeof env.message !== "object" || env.message === null) return;
+      const msg = env.message;
+      if (msg.type === "status" && msg.payload?.status === "server_info") {
+        ws.send(JSON.stringify({ type: "session", message: { ...message, requestId } }));
+        return;
+      }
+      if (msg.type === "rpc_error" && msg.payload?.requestId === requestId) {
+        finish({ ok: false, reason: msg.payload.error ?? "daemon rpc error" });
+        return;
+      }
+      if (msg.type === responseType && msg.payload?.requestId === requestId) {
+        if (typeof msg.payload.error === "string" && msg.payload.error !== "") {
+          finish({ ok: false, reason: msg.payload.error });
+        } else {
+          finish({ ok: true, payload: msg.payload });
+        }
+      }
+    });
+    ws.addEventListener("error", () => finish({ ok: false, reason: "daemon socket error" }));
+    ws.addEventListener("close", () => finish({ ok: false, reason: "daemon socket closed before response" }));
+  });
+}
+
+await wsRequest({ type: "plugin.remove.request", pluginId: "paseo-factory" }, "plugin.remove.response", 30000);
+const installMsg = buildInstallMsg(source, ref);
+const installRespType = installMsg.type.replace(".request", ".response");
+const installed = await wsRequest(installMsg, installRespType, 300000);
+if (!installed.ok && fallbackSource) {
+  const fbMsg = buildInstallMsg(fallbackSource, "");
+  await wsRequest(fbMsg, fbMsg.type.replace(".request", ".response"), 300000);
+}
+process.stdout.write(JSON.stringify(installed));
+`;
+
+/**
+ * Replaces the active `paseo-factory` Core plugin on `home` via a detached
+ * helper process so that when `plugin.remove.request` stops the current
+ * `paseo-factory` worker, the helper survives to complete the follow-up
+ * `plugin.source.install.request` / `plugin.directory.install.request` (and
+ * rolls back to `fallbackSource` if the new install fails).
+ */
+async function replaceCoreDaemonPluginViaHelper(
+  home: string,
+  input: { source: string; ref?: string; fallbackSource?: string },
+): Promise<{ ok: true; plugin: DaemonPluginItem } | { ok: false; reason: string } | null> {
+  const pidPath = join(home, "paseo.pid");
+  const credPath = join(home, "local-credential");
+  if (!existsSync(pidPath) || !existsSync(credPath)) return null;
+
+  return new Promise((resolve) => {
+    const env = {
+      ...process.env,
+      PASEO_HOME: home,
+      NO_COLOR: "1",
+      ...(isElectronNodeBinary(process.execPath) ? { ELECTRON_RUN_AS_NODE: "1" } : {}),
+    };
+    const child = spawn(
+      process.execPath,
+      ["--input-type=module", "-e", REPLACE_CORE_PLUGIN_SCRIPT, home, input.source, input.ref ?? "", input.fallbackSource ?? ""],
+      {
+        env,
+        detached: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    child.unref();
+    const out: Buffer[] = [];
+    const err: Buffer[] = [];
+    const timer = setTimeout(() => {
+      resolve({ ok: false, reason: `replacing paseo-factory timed out after ${PLUGIN_IO_TIMEOUT_MS}ms` });
+    }, PLUGIN_IO_TIMEOUT_MS);
+    child.stdout.on("data", (chunk: Buffer) => out.push(chunk));
+    child.stderr.on("data", (chunk: Buffer) => err.push(chunk));
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      resolve({ ok: false, reason: error.message });
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      const stdout = Buffer.concat(out).toString("utf8").trim();
+      if (stdout !== "") {
+        try {
+          const parsed = JSON.parse(stdout) as { ok?: boolean; payload?: { plugin?: unknown }; reason?: string };
+          if (parsed.ok && isDaemonPluginItem(parsed.payload?.plugin)) {
+            return resolve({ ok: true, plugin: enrichDaemonPluginItem(parsed.payload.plugin) });
+          }
+          if (parsed.ok === false && typeof parsed.reason === "string") {
+            return resolve({ ok: false, reason: parsed.reason });
+          }
+        } catch {
+          // fall through
+        }
+      }
+      const stderr = Buffer.concat(err).toString("utf8").trim();
+      resolve({ ok: false, reason: stderr || `core plugin switch helper exited with ${code ?? "a signal"}` });
+    });
+  });
+}
+
 /** Installs a plugin (`plugin.source.install.request` / `plugin.directory.install.request`), falling back to the paseo CLI. */
 export async function installDaemonPlugin(
   home: string,
   input: { id: string; source: string; ref?: string },
 ): Promise<{ ok: true; plugin: DaemonPluginItem } | { ok: false; reason: string }> {
+  const source = normalizeLocalPluginSource(input.source);
+  const cachedExisting = pluginListCache.get(home)?.plugins.find((p) => p.id === input.id);
   invalidatePluginListCache(home);
-  const request = isLocalPathSource(input.source)
-    ? { type: "plugin.directory.install.request", path: input.source, id: input.id }
-    : { type: "plugin.source.install.request", source: input.source, id: input.id, ...(input.ref ? { ref: input.ref } : {}) };
-  const responseType = request.type.replace(".request", ".response");
-  const wsCall = daemonWsRequestPayload<{ plugin?: unknown }>(home, request, responseType, PLUGIN_IO_TIMEOUT_MS);
-  if (wsCall !== null) {
-    const reply = await wsCall;
-    if (!reply.ok) return { ok: false, reason: reply.reason };
-    const plugin = (reply.payload as { plugin?: unknown } | undefined)?.plugin;
-    if (!isDaemonPluginItem(plugin)) return { ok: false, reason: `the daemon's ${responseType} carried no plugin` };
-    return { ok: true, plugin };
+
+  if (input.id === "paseo-factory") {
+    const fallbackSource =
+      cachedExisting?.installation?.identity.kind === "directory"
+        ? cachedExisting.installation.identity.path
+        : cachedExisting?.path && cachedExisting.source === "directory"
+          ? cachedExisting.path
+          : "git:daymanondev/paseo-factory:plugin";
+    const helperReply = await replaceCoreDaemonPluginViaHelper(home, {
+      source,
+      ...(input.ref ? { ref: input.ref } : {}),
+      fallbackSource,
+    });
+    if (helperReply !== null) return helperReply;
+    await manageDaemonPlugin(home, "paseo-factory", "remove");
+  } else if (!isLocalPathSource(source) && cachedExisting !== undefined) {
+    // Switching an already-installed companion to a remote Git source: remove
+    // first so @getpaseo/server does not clone and then reject as already configured.
+    await manageDaemonPlugin(home, input.id, "remove");
   }
-  const argv = ["--home", home, "plugin", "install", input.source, "--id", input.id, ...(input.ref ? ["--ref", input.ref] : []), "--json"];
-  const cli = pluginCliJson(home, argv, PLUGIN_IO_TIMEOUT_MS);
-  if (!cli.ok) return { ok: false, reason: cli.reason };
-  const plugin = pluginsFromCliJson(cli.value)[0];
-  if (plugin === undefined) return { ok: false, reason: `paseo plugin install printed no plugin JSON` };
-  return { ok: true, plugin };
+
+  const runSingleInstall = async (): Promise<{ ok: true; plugin: DaemonPluginItem } | { ok: false; reason: string }> => {
+    const request = isLocalPathSource(source)
+      ? { type: "plugin.directory.install.request", path: source, id: input.id }
+      : { type: "plugin.source.install.request", source, id: input.id, ...(input.ref ? { ref: input.ref } : {}) };
+    const responseType = request.type.replace(".request", ".response");
+    const wsCall = daemonWsRequestPayload<{ plugin?: unknown }>(home, request, responseType, PLUGIN_IO_TIMEOUT_MS);
+    if (wsCall !== null) {
+      const reply = await wsCall;
+      if (!reply.ok) return { ok: false, reason: reply.reason };
+      const plugin = (reply.payload as { plugin?: unknown } | undefined)?.plugin;
+      if (!isDaemonPluginItem(plugin)) return { ok: false, reason: `the daemon's ${responseType} carried no plugin` };
+      return { ok: true, plugin: enrichDaemonPluginItem(plugin) };
+    }
+    const argv = ["--home", home, "plugin", "install", source, "--id", input.id, ...(input.ref ? ["--ref", input.ref] : []), "--json"];
+    const cli = pluginCliJson(home, argv, PLUGIN_IO_TIMEOUT_MS);
+    if (!cli.ok) return { ok: false, reason: cli.reason };
+    const plugin = pluginsFromCliJson(cli.value)[0];
+    if (plugin === undefined) return { ok: false, reason: `paseo plugin install printed no plugin JSON` };
+    return { ok: true, plugin: enrichDaemonPluginItem(plugin) };
+  };
+
+  const firstAttempt = await runSingleInstall();
+  if (!firstAttempt.ok && /already configured/i.test(firstAttempt.reason)) {
+    const removed = await manageDaemonPlugin(home, input.id, "remove");
+    if (removed.ok) {
+      return runSingleInstall();
+    }
+  }
+  return firstAttempt;
 }
 
 function nonEmptyString(value: unknown): string | undefined {
