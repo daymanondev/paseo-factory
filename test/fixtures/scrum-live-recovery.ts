@@ -59,6 +59,7 @@ const config = ensureScrumConfig(state, project.slug);
 writeProjectRegistration(state, project.slug, {
   root: project.root,
   supervisor: "sup",
+  lead: "lead",
 });
 // An unrelated SLP mailbox must not be periodically dispatched by the new pump.
 const slpRoot = join(home, "slp");
@@ -87,16 +88,19 @@ const sup = {
     scrumConfigRevision: String(config.configRevision ?? 1),
   },
 };
+const lead = { ...sup, id: "lead", labels: { ...sup.labels, seat: "lead" } };
 const daemon = {
   agents: {
     list: async ({ filter }: any = {}) => ({
-      entries:
-        !filter?.labels ||
-        Object.entries(filter.labels).every(
-          ([k, v]) => (sup.labels as any)[k] === v,
+      entries: [sup, lead]
+        .filter(
+          (agent) =>
+            !filter?.labels ||
+            Object.entries(filter.labels).every(
+              ([k, v]) => (agent.labels as any)[k] === v,
+            ),
         )
-          ? [{ agent: sup }]
-          : [],
+        .map((agent) => ({ agent })),
     }),
     ref: () => ({
       send: async (text: string) => {
@@ -110,6 +114,11 @@ const stop = contribute(server);
 try {
   await handlers.get("factory.snapshot")!({}, { paseo: daemon });
   await new Promise((done) => setTimeout(done, 100));
+  enqueueLeadMail(join(state, "projects", project.slug, "mailbox.jsonl"), {
+    from: "owner",
+    kind: "directive",
+    text: "held Scrum batch must remain event-driven",
+  });
   enqueueLeadMail(join(state, "projects/slp/mailbox.jsonl"), {
     from: "owner",
     kind: "directive",
@@ -161,6 +170,11 @@ try {
   await new Promise((done) => setTimeout(done, 1200));
   assert.equal(
     readLeadMailbox(join(state, "projects/slp/mailbox.jsonl")).queued.length,
+    1,
+  );
+  assert.equal(
+    readLeadMailbox(join(state, "projects", project.slug, "mailbox.jsonl"))
+      .queued.length,
     1,
   );
   assert.equal(

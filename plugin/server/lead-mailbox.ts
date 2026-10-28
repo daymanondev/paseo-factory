@@ -270,7 +270,7 @@ export interface LeadMailRuntime {
    * an early spool drain (before `paseoApi` arrived) delivers immediately
    * instead of waiting for the next dispatch.
    */
-  pumpAll(options?: { scrumOnly?: boolean }): Promise<void>;
+  pumpAll(options?: { reconcileScrumOnly?: boolean }): Promise<void>;
   /**
    * The rotation settle (ADR 0013 Decision 3's last arm): requeue any
    * un-acked in-flight delivery of one Project's mailbox as `mail_requeued`
@@ -1249,13 +1249,14 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
    * API is captured at boot, so mail requeued by `startupRecovery()` or queued
    * by an early spool drain (before `paseoApi` arrived) delivers immediately.
    */
-  const pumpAll = async (options: { scrumOnly?: boolean } = {}): Promise<void> => {
+  const pumpAll = async (options: { reconcileScrumOnly?: boolean } = {}): Promise<void> => {
     for (const registration of listProjectRegistrations(deps.stateDir)) {
-      if (options.scrumOnly) {
+      if (options.reconcileScrumOnly) {
         try { if (readExecution(deps.stateDir, registration.slug).mode !== "scrum") continue; }
         catch (error) { log(`scrum selection of ${registration.slug} deferred: ${messageOf(error)}`); continue; }
       }
       try { await deps.reconcileScrum?.(registration); } catch (error) { log(`scrum recovery of ${registration.slug} deferred: ${messageOf(error)}`); }
+      if (options.reconcileScrumOnly) continue;
       try { await pumpProjectLead(registration.slug); } catch (error) { log(`lead mailbox of ${registration.slug} deferred: ${messageOf(error)}`); }
       try { await pumpProjectSupervisor(registration.slug); } catch (error) { log(`supervisor mailbox of ${registration.slug} deferred: ${messageOf(error)}`); }
     }

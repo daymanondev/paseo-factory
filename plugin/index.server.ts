@@ -272,7 +272,7 @@ export default function contribute(server: PluginServerContext) {
   const scrumRecoveryTimer = setInterval(() => {
     if (!booted || !mailRecovered || !paseoApi || scrumRecoveryInFlight || pendingUpgradeFor(stateDir) !== undefined) return;
     scrumRecoveryInFlight = true;
-    void leadMail.pumpAll({ scrumOnly: true }).catch(error => log(`scrum recovery deferred: ${String(error)}`)).finally(() => { scrumRecoveryInFlight = false; });
+    void leadMail.pumpAll({ reconcileScrumOnly: true }).catch(error => log(`scrum recovery deferred: ${String(error)}`)).finally(() => { scrumRecoveryInFlight = false; });
   }, 1000);
   scrumRecoveryTimer.unref?.();
   // The turn boundary (v0.0.20, ADR 0013 §5; v0.0.23, ADR 0015 §3): every
