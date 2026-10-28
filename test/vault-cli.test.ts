@@ -876,13 +876,10 @@ test("factory vault push --include-ledger collects local configs, store-manifest
   writeProjectRegistration(stateDir, resolved.slug, { root: patigame });
 
   const lanesJson = JSON.stringify({ worker: "pi/zai/glm-5.3" });
-  const fleetJson = JSON.stringify({ peers: [{ id: "mini-m2" }] });
   const freePoolJson = JSON.stringify({ pool: ["free"] });
   const eyeJson = JSON.stringify({ provider: "openrouter", apiKey: "sk-or-secret-999" });
   writeFileSync(join(stateDir, "lanes.json"), lanesJson);
   writeFileSync(join(stateDir, "eye.json"), eyeJson);
-  mkdirSync(join(home, "connector"), { recursive: true });
-  writeFileSync(join(home, "connector", "fleet.json"), fleetJson);
   mkdirSync(join(home, "burn-lab"), { recursive: true });
   writeFileSync(join(home, "burn-lab", "free-pool.json"), freePoolJson);
 
@@ -898,7 +895,6 @@ test("factory vault push --include-ledger collects local configs, store-manifest
   assert.equal(payload.pushed, true);
   assert.deepEqual(payload.pushedFiles, [
     "config/apps/patigame/store-manifest.json",
-    "config/fleet.json",
     "config/free-pool.json",
     "config/lanes.json",
     "secrets/shared/eye.json",
@@ -913,7 +909,6 @@ test("factory vault push --include-ledger collects local configs, store-manifest
   assert.equal(readFileSync(join(probe, "state/nodes/mac-studio/global-ledger.jsonl"), "utf8"), LEDGER_LINES);
   assert.equal(readFileSync(join(probe, "state/nodes/mac-studio/projects/patigame/ledger.jsonl"), "utf8"), LEDGER_LINES);
   assert.equal(readFileSync(join(probe, "config/lanes.json"), "utf8"), lanesJson);
-  assert.equal(readFileSync(join(probe, "config/fleet.json"), "utf8"), fleetJson);
   assert.equal(readFileSync(join(probe, "config/free-pool.json"), "utf8"), freePoolJson);
   assert.equal(readFileSync(join(probe, "config/apps/patigame/store-manifest.json"), "utf8"), storeManifest);
   const remoteEye = readFileSync(join(probe, "secrets/shared/eye.json"), "utf8");

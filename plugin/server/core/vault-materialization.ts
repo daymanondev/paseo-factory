@@ -414,7 +414,6 @@ export function renderKeystoreProperties(signing: Record<string, unknown> | null
  * - `<stateDir>/profiles.json` -> `config/profiles.json` (key-level MERGE with any existing
  *   runtime copy via `mergeLaneProfilesFiles`, so profiles authored on different machines
  *   combine rather than overwrite — v0.0.38, ADR 0026 §4)
- * - `<paseoHome>/connector/fleet.json` -> `config/fleet.json`
  * - `<paseoHome>/burn-lab/free-pool.json` -> `config/free-pool.json`
  * - `<stateDir>/eye.json` -> `secrets/shared/eye.json` (when not already present in `vault-runtime`)
  * - For every registered local `Project` with `.store-release/manifest.json`, copies it into
@@ -429,7 +428,6 @@ export function collectLocalStateIntoRuntime(paseoHome: string): void {
   collectScrumVault(stateDir, join(paseoHome, "vault-runtime/config"));
   const configSources: ReadonlyArray<{ src: string; vaultRel: string }> = [
     { src: join(stateDir, "lanes.json"), vaultRel: "config/lanes.json" },
-    { src: join(paseoHome, "connector", "fleet.json"), vaultRel: "config/fleet.json" },
     { src: join(paseoHome, "burn-lab", "free-pool.json"), vaultRel: "config/free-pool.json" },
   ];
   for (const { src, vaultRel } of configSources) {
@@ -557,7 +555,7 @@ function readLaneProfilesCacheOrNull(path: string): LaneProfilesFile | null {
 }
 
 /**
- * Materializes `config/{lanes,fleet,free-pool}.json` from `<paseoHome>/vault-runtime/`
+ * Materializes `config/{lanes,free-pool}.json` from `<paseoHome>/vault-runtime/`
  * into their local `<paseoHome>` destinations when absent locally (or when `overwriteConfigs === true`),
  * plus the two v0.0.38 additions (ADR 0026 §4): `config/profiles.json` merges
  * key-level into `<stateDir>/profiles.json` (`preferRemote: overwriteConfigs`
@@ -571,7 +569,6 @@ export function materializeConfigsFromRuntime(paseoHome: string, overwriteConfig
   materializeScrumVault(vaultStateDir(paseoHome), runtimeConfigDir, overwriteConfigs);
   const targets: ReadonlyArray<{ src: string; dest: string }> = [
     { src: join(runtimeConfigDir, "lanes.json"), dest: join(vaultStateDir(paseoHome), "lanes.json") },
-    { src: join(runtimeConfigDir, "fleet.json"), dest: join(paseoHome, "connector", "fleet.json") },
     { src: join(runtimeConfigDir, "free-pool.json"), dest: join(paseoHome, "burn-lab", "free-pool.json") },
   ];
   for (const { src, dest } of targets) {

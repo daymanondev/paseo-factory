@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.53] - 2026-10-28
+
+Retire the `factory-connector` companion plugin in favor of Paseo 0.13 native connected hosts (`paseo host add`).
+
+### Removed
+
+- Remove `factory-connector` (`Fleet Connector`) from `COMPANION_CATALOG`, `MANAGEABLE_PLUGIN_IDS`, and the `factory.plugins.install` / `factory.plugins.manage` RPC target enums.
+- Remove `<paseoHome>/connector/fleet.json` (`config/fleet.json`) collection and materialization from the Private Vault runtime sync.
+
 ## [0.0.52] - 2026-10-28
 
 Add isolated, opt-in Agile Scrum execution while retaining the default SLP workflow.

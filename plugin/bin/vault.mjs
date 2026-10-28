@@ -3255,7 +3255,6 @@ function collectLocalStateIntoRuntime(paseoHome) {
   collectScrumVault(stateDir, join13(paseoHome, "vault-runtime/config"));
   const configSources = [
     { src: join13(stateDir, "lanes.json"), vaultRel: "config/lanes.json" },
-    { src: join13(paseoHome, "connector", "fleet.json"), vaultRel: "config/fleet.json" },
     { src: join13(paseoHome, "burn-lab", "free-pool.json"), vaultRel: "config/free-pool.json" }
   ];
   for (const { src, vaultRel } of configSources) {
@@ -3358,7 +3357,6 @@ function materializeConfigsFromRuntime(paseoHome, overwriteConfigs = false) {
   materializeScrumVault(vaultStateDir(paseoHome), runtimeConfigDir, overwriteConfigs);
   const targets = [
     { src: join13(runtimeConfigDir, "lanes.json"), dest: join13(vaultStateDir(paseoHome), "lanes.json") },
-    { src: join13(runtimeConfigDir, "fleet.json"), dest: join13(paseoHome, "connector", "fleet.json") },
     { src: join13(runtimeConfigDir, "free-pool.json"), dest: join13(paseoHome, "burn-lab", "free-pool.json") }
   ];
   for (const { src, dest } of targets) {

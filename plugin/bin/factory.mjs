@@ -323,7 +323,7 @@ commands:
                                  --merge-ledgers is passed
              vault push [--include-ledger]
                                  collect local machine configs (lanes.json,
-                                 fleet.json, free-pool.json), registered
+                                 free-pool.json), registered
                                  Project .store-release/manifest.json files,
                                  and sealed eye.json, package
                                  <paseoHome>/vault-runtime back into the vault

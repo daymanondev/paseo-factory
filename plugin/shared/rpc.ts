@@ -377,8 +377,8 @@ export const ratifyProposal = defineRpc({
 export const pluginsInstall = defineRpc({
   name: "factory.plugins.install",
   input: z.object({
-    /** Target companion id ("factory-burn-lab" | "factory-connector") or "all" for batch install of uninstalled companions. */
-    target: z.enum(["factory-burn-lab", "factory-connector", "factory-release-lab", "all"]),
+    /** Target companion id ("factory-burn-lab" | "factory-release-lab") or "all" for batch install of uninstalled companions. */
+    target: z.enum(["factory-burn-lab", "factory-release-lab", "all"]),
     /** Optional custom source override (Git source, npm spec, or explicit local directory path). Omitted uses canonicalSource. */
     source: z.string().optional(),
     /** Optional Git branch, tag, or commit ref when installing from a Git source. */
@@ -392,7 +392,7 @@ export const pluginsInstall = defineRpc({
 export const pluginsManage = defineRpc({
   name: "factory.plugins.manage",
   input: z.object({
-    pluginId: z.enum(["paseo-factory", "factory-burn-lab", "factory-connector", "factory-release-lab", "all"]),
+    pluginId: z.enum(["paseo-factory", "factory-burn-lab", "factory-release-lab", "all"]),
     action: z.enum(["enable", "disable", "reload", "update", "remove"]),
   }),
   output: z.union([z.object({ ok: z.literal(true), pluginId: z.string(), action: z.string(), summary: z.string() }), Failure]),

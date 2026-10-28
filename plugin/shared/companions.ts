@@ -19,7 +19,7 @@
 export type PluginAccessTier = "public" | "private";
 
 export interface CompanionCatalogEntry {
-  id: "factory-burn-lab" | "factory-connector" | "factory-release-lab";
+  id: "factory-burn-lab" | "factory-release-lab";
   title: string;
   tagline: string;
   description: string;
@@ -68,7 +68,6 @@ export type ManageablePluginId = CorePluginCatalogEntry["id"] | CompanionCatalog
 export const MANAGEABLE_PLUGIN_IDS: ReadonlySet<string> = new Set<string>([
   "paseo-factory",
   "factory-burn-lab",
-  "factory-connector",
   "factory-release-lab",
 ]);
 
@@ -85,18 +84,6 @@ export const COMPANION_CATALOG: readonly CompanionCatalogEntry[] = [
     sidebarLabel: "Burn Lab",
     sidebarIcon: "Flame",
     capabilities: ["Scout Pool", "OSS Lab", "Proto Arena", "Night Shift", "Self-Evolve"],
-  },
-  {
-    id: "factory-connector",
-    title: "Fleet Connector",
-    tagline: "The symmetric peer Fleet over Tailscale.",
-    description:
-      "A symmetric peer Fleet over Tailscale with 1-click Handoff, Burst, and Git-native sync — it connects this factory to peer factories for handoffs and cooperative bursts.",
-    canonicalSource: "git:daymanondev/factory-connector:plugin",
-    access: "public",
-    sidebarLabel: "Fleet Connector",
-    sidebarIcon: "Network",
-    capabilities: ["Tailscale Fleet Surface", "1-Click Handoff", "Cooperative Burst", "Git Mirror & Ref Sync"],
   },
   {
     id: "factory-release-lab",

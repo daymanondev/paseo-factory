@@ -598,7 +598,6 @@ test("pushVault commits the full secret/config/state set and pushes it to the co
     ["secrets/apps/patigame/google-services.json", JSON.stringify({ project_id: "patigame" })],
     ["secrets/apps/patigame/GoogleService-Info.plist", '<?xml version="1.0"?>\n<plist/>\n'],
     ["config/lanes.json", JSON.stringify({ lanes: { default: "pi" } })],
-    ["config/fleet.json", JSON.stringify({ peers: [] })],
     ["config/apps/patigame/store-manifest.json", JSON.stringify({ bundleId: "com.patigame.app" })],
   ];
   const runtime = join(home, "vault-runtime");
@@ -629,7 +628,6 @@ test("pushVault commits the full secret/config/state set and pushes it to the co
   assert.equal(readFileSync(join(probe, "secrets/apps/patigame/google-services.json"), "utf8"), JSON.stringify({ project_id: "patigame" }));
   assert.equal(readFileSync(join(probe, "secrets/apps/patigame/GoogleService-Info.plist"), "utf8"), '<?xml version="1.0"?>\n<plist/>\n');
   assert.equal(readFileSync(join(probe, "config/lanes.json"), "utf8"), JSON.stringify({ lanes: { default: "pi" } }));
-  assert.equal(readFileSync(join(probe, "config/fleet.json"), "utf8"), JSON.stringify({ peers: [] }));
   assert.equal(readFileSync(join(probe, "config/apps/patigame/store-manifest.json"), "utf8"), JSON.stringify({ bundleId: "com.patigame.app" }));
   assert.equal(readFileSync(join(probe, "state/nodes/mac-studio/global-ledger.jsonl"), "utf8"), LEDGER_LINES, "includeLedger snapshots the global ledger under this node's namespace");
 
@@ -1388,7 +1386,7 @@ test("empty-remote bootstrap: pullVault on an empty bare remote returns hydrated
   assert.deepEqual(pullAfterInit.hydratedFiles, ["config/lanes.json"]);
 });
 
-test("pushVault automatically collects lanes.json, fleet.json, free-pool.json, eye.json (sealed on remote), and project .store-release/manifest.json; pullVault and hydrateVaultDirect materialize configs when absent or overwriteConfigs: true", async (t) => {
+test("pushVault automatically collects lanes.json, free-pool.json, eye.json (sealed on remote), and project .store-release/manifest.json; pullVault and hydrateVaultDirect materialize configs when absent or overwriteConfigs: true", async (t) => {
   const bare = makeBareRemote(t);
   const parent = makeProjectParent(t);
   const patigame = join(parent, "patigame");
@@ -1409,14 +1407,11 @@ test("pushVault automatically collects lanes.json, fleet.json, free-pool.json, e
   writeProjectRegistration(stateDir1, resolved.slug, { root: patigame });
 
   const lanesJson = JSON.stringify({ worker: "pi/zai/glm-5.3", supervisor: "copilot/gpt-5.4" });
-  const fleetJson = JSON.stringify({ peers: [{ id: "mini-m2", host: "100.64.0.2" }] });
   const freePoolJson = JSON.stringify({ providers: ["openrouter/free"] });
   const eyeJson = JSON.stringify({ provider: "openrouter", apiKey: "sk-or-secret-12345" });
 
   writeFileSync(join(stateDir1, "lanes.json"), lanesJson);
   writeFileSync(join(stateDir1, "eye.json"), eyeJson);
-  mkdirSync(join(home1, "connector"), { recursive: true });
-  writeFileSync(join(home1, "connector", "fleet.json"), fleetJson);
   mkdirSync(join(home1, "burn-lab"), { recursive: true });
   writeFileSync(join(home1, "burn-lab", "free-pool.json"), freePoolJson);
 
@@ -1424,7 +1419,6 @@ test("pushVault automatically collects lanes.json, fleet.json, free-pool.json, e
   assert.equal(pushed.pushed, true);
   assert.deepEqual(pushed.pushedFiles, [
     "config/apps/patigame/store-manifest.json",
-    "config/fleet.json",
     "config/free-pool.json",
     "config/lanes.json",
     "secrets/shared/eye.json",
@@ -1457,7 +1451,6 @@ test("pushVault automatically collects lanes.json, fleet.json, free-pool.json, e
 
   const stateDir2 = join(home2, "plugin-state", "paseo-factory");
   assert.equal(readFileSync(join(stateDir2, "lanes.json"), "utf8"), lanesJson);
-  assert.equal(readFileSync(join(home2, "connector", "fleet.json"), "utf8"), fleetJson);
   assert.equal(readFileSync(join(home2, "burn-lab", "free-pool.json"), "utf8"), freePoolJson);
 
   // Local edits are preserved on pull when overwriteConfigs is false (default), and overwritten when overwriteConfigs: true
@@ -1476,13 +1469,11 @@ test("pushVault automatically collects lanes.json, fleet.json, free-pool.json, e
   const top = "daymanondev-factory-vault-abc1234";
   const tarball = buildTarball([
     { path: `${top}/config/lanes.json`, data: lanesJson },
-    { path: `${top}/config/fleet.json`, data: fleetJson },
     { path: `${top}/config/free-pool.json`, data: freePoolJson },
   ]);
   await hydrateVaultDirect(home3, { runner: fakeTarballRunner(tarball).runner });
   const stateDir3 = join(home3, "plugin-state", "paseo-factory");
   assert.equal(readFileSync(join(stateDir3, "lanes.json"), "utf8"), lanesJson);
-  assert.equal(readFileSync(join(home3, "connector", "fleet.json"), "utf8"), fleetJson);
   assert.equal(readFileSync(join(home3, "burn-lab", "free-pool.json"), "utf8"), freePoolJson);
   writeFileSync(join(stateDir3, "lanes.json"), localCustomLanes);
   await hydrateVaultDirect(home3, { runner: fakeTarballRunner(tarball).runner, overwriteConfigs: false });
@@ -1531,7 +1522,7 @@ test("syncVault auto-detects @daymanondev via probeGhAuth, auto-creates daymanon
     return defaultRunner({ ...call, args: rewrittenArgs });
   };
 
-  // Machine 1: unconfigured home, gh authenticated as @daymanondev, has local lanes, fleet, free-pool, project store manifest, and ledger
+  // Machine 1: unconfigured home, gh authenticated as @daymanondev, has local lanes, free-pool, project store manifest, and ledger
   const parent = makeProjectParent(t);
   const patigame1 = join(parent, "m1", "patigame");
   mkdirSync(patigame1, { recursive: true });
@@ -1547,8 +1538,6 @@ test("syncVault auto-detects @daymanondev via probeGhAuth, auto-creates daymanon
   const stateDir1 = join(home1, "plugin-state", "paseo-factory");
   writeProjectRegistration(stateDir1, resolved1.slug, { root: patigame1 });
   writeFileSync(join(stateDir1, "lanes.json"), JSON.stringify({ worker: "pi/zai/glm-5.3" }));
-  mkdirSync(join(home1, "connector"), { recursive: true });
-  writeFileSync(join(home1, "connector", "fleet.json"), JSON.stringify({ peers: [] }));
   mkdirSync(join(home1, "burn-lab"), { recursive: true });
   writeFileSync(join(home1, "burn-lab", "free-pool.json"), JSON.stringify({ pool: ["free"] }));
   writeFileSync(join(stateDir1, "ledger.jsonl"), LEDGER_LINES);
@@ -1559,7 +1548,6 @@ test("syncVault auto-detects @daymanondev via probeGhAuth, auto-creates daymanon
   assert.equal(sync1.branch, "main");
   assert.equal(sync1.pushed, true);
   assert.ok(sync1.pushedFiles.includes("config/lanes.json"));
-  assert.ok(sync1.pushedFiles.includes("config/fleet.json"));
   assert.ok(sync1.pushedFiles.includes("config/free-pool.json"));
   assert.ok(sync1.pushedFiles.includes("config/apps/patigame/store-manifest.json"));
   assert.ok(sync1.pushedFiles.includes("vault.manifest.json"));
@@ -1575,7 +1563,6 @@ test("syncVault auto-detects @daymanondev via probeGhAuth, auto-creates daymanon
   assert.equal(sync2.repo, "daymanondev/factory-vault");
   assert.ok(sync2.hydratedFiles.includes("config/lanes.json"));
   assert.equal(readFileSync(join(home2, "plugin-state", "paseo-factory", "lanes.json"), "utf8"), JSON.stringify({ worker: "pi/zai/glm-5.3" }));
-  assert.equal(readFileSync(join(home2, "connector", "fleet.json"), "utf8"), JSON.stringify({ peers: [] }));
   assert.equal(readFileSync(join(home2, "burn-lab", "free-pool.json"), "utf8"), JSON.stringify({ pool: ["free"] }));
   assert.ok(!existsSync(join(home2, "plugin-state", "paseo-factory", "ledger.jsonl")), "transport-only sync cannot activate legacy history");
 

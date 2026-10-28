@@ -61,7 +61,7 @@ export interface HydrateVaultDirectOptions extends VaultTransportOptions {
   token?: string;
   /** Reconcile the vault's `state/nodes/*` ledger snapshots into this machine's ledgers after hydrating (stage C). */
   mergeLedgers?: boolean;
-  /** Overwrite existing local `lanes.json`, `fleet.json`, and `free-pool.json` files with the vault's copies (default false). */
+  /** Overwrite existing local `lanes.json` and `free-pool.json` files with the vault's copies (default false). */
   overwriteConfigs?: boolean;
 }
 
@@ -72,7 +72,7 @@ export interface PullVaultOptions extends VaultTransportOptions {
    * after hydrating (spec §Implementation Decisions 2).
    */
   mergeLedgers?: boolean;
-  /** Overwrite existing local `lanes.json`, `fleet.json`, and `free-pool.json` files with the vault's copies (default false). */
+  /** Overwrite existing local `lanes.json` and `free-pool.json` files with the vault's copies (default false). */
   overwriteConfigs?: boolean;
 }
 
