@@ -1,3 +1,4 @@
+import { projectMemoryPresence } from "./project-memory.ts";
 /**
  * Seat kickoff packet builder (v0.0.26, ADR 0016 §4) — deterministic, <50ms
  * Node-side repository preflight prepended to Turn 1 of every newly created
@@ -149,13 +150,13 @@ export function buildSeatKickoffPacket(input: SeatKickoffPacketInput): string {
 
   const roleTools =
     input.role === "supervisor"
-      ? "`supervisor_dispatch_lead`, `supervisor_accept_task`, `factory_status`"
-      : "`lead_set_contract`, `lead_spawn_agent`, `lead_accept_task`, `lead_repoke_agent`, `lead_needs_human`, `lead_report_to_supervisor`, `factory_status`";
+      ? "`supervisor_dispatch_lead`, `supervisor_read_ledger`, `supervisor_end_cycle`"
+      : "`lead_set_contract`, `lead_dispatch_agent`, `lead_verify`, `lead_merge`, `lead_report_to_supervisor`";
 
   const fireAndEndTurn =
     input.role === "supervisor"
       ? "Fire-and-End-Turn: call `supervisor_dispatch_lead` (or run `factory lead dispatch`) and IMMEDIATELY end your turn — never poll, never sleep, and never edit product source code."
-      : "Fire-and-End-Turn: outline the serial-wave roadmap, call `lead_set_contract` then `lead_spawn_agent` (or `factory contract` + `factory run`) for the current wave only, and IMMEDIATELY end your turn — never poll, never sleep, and never edit product source code on `<project-root>`.";
+      : "Fire-and-End-Turn: outline the serial-wave roadmap, call `lead_set_contract` then `lead_dispatch_agent` (or `factory contract` + `factory run`) for the current wave only, and IMMEDIATELY end your turn — never poll, never sleep, and never edit product source code on `<project-root>`.";
 
   return [
     `--- [paseo-factory seat kickoff packet · role=${input.role} · project=${input.projectSlug}] ---`,
@@ -163,6 +164,7 @@ export function buildSeatKickoffPacket(input: SeatKickoffPacketInput): string {
     `- Git: branch=\`${branch}\`, head=\`${head}\`, status=${statusSummary}`,
     `- Top-level files: ${entries}`,
     `- Memory/docs present: ${memoryDocs}`,
+    `- ${projectMemoryPresence(input.projectRoot)}`,
     `- Build/Test commands: ${scriptsSummary}`,
     `- Active lanes: ${lanesSummary}`,
     `- Ledger tasks: ${tasksSummary}`,

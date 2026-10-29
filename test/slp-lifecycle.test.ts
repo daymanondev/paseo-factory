@@ -249,7 +249,7 @@ test("Full SLP lifecycle: Owner -> Supervisor -> Lead -> Agent -> Lead -> Superv
   // Complete Lead Turn 1 so Lead is idle when the Agent verdict arrives
   await leadMail.onLeadTurnEnded({ agentId: leadAgent.id, outcome: { kind: "completed" }, timeline: [] });
 
-  // 3. Lead -> Agent via lead_set_contract + lead_spawn_agent
+  // 3. Lead -> Agent via lead_set_contract + lead_dispatch_agent
   const setContractRes = await callMcpTool({
     args: ["--correlation", leadAgent.env.PASEO_FACTORY_CORRELATION!, "--state-dir", stateDir],
     toolName: "lead_set_contract",
@@ -264,7 +264,7 @@ test("Full SLP lifecycle: Owner -> Supervisor -> Lead -> Agent -> Lead -> Superv
 
   const spawnAgentRes = await callMcpTool({
     args: ["--correlation", leadAgent.env.PASEO_FACTORY_CORRELATION!, "--state-dir", stateDir],
-    toolName: "lead_spawn_agent",
+    toolName: "lead_dispatch_agent",
     toolArgs: {
       task: "T-01",
       prompt: "Create src/greet.ts",
@@ -312,7 +312,7 @@ test("Full SLP lifecycle: Owner -> Supervisor -> Lead -> Agent -> Lead -> Superv
   // 5. Accept the foundation checkpoint, then build and accept the dependent wave.
   const leadAccept = await callMcpTool({
     args: ["--correlation", leadAgent.env.PASEO_FACTORY_CORRELATION!, "--state-dir", stateDir],
-    toolName: "lead_accept_task",
+    toolName: "lead_merge",
     toolArgs: { task: "T-01", attempt: 1 },
   });
   assert.notEqual(leadAccept.isError, true, leadAccept.text);
@@ -327,7 +327,7 @@ test("Full SLP lifecycle: Owner -> Supervisor -> Lead -> Agent -> Lead -> Superv
   assert.ok(existsSync(join(prepared.cwd, "src/greet.ts")), "CLI allocation contains the landed foundation");
   const secondSpawn = await callMcpTool({
     args: ["--correlation", leadAgent.env.PASEO_FACTORY_CORRELATION!, "--state-dir", stateDir],
-    toolName: "lead_spawn_agent", toolArgs: { task: "T-02", prompt: "Consume the landed greeting" },
+    toolName: "lead_dispatch_agent", toolArgs: { task: "T-02", prompt: "Consume the landed greeting" },
   });
   assert.notEqual(secondSpawn.isError, true, secondSpawn.text);
   const secondAgent = agents.at(-1)!;
@@ -345,7 +345,7 @@ test("Full SLP lifecycle: Owner -> Supervisor -> Lead -> Agent -> Lead -> Superv
   assert.match(secondClaim.text, /GREEN/);
   const finalAccept = await callMcpTool({
     args: ["--correlation", leadAgent.env.PASEO_FACTORY_CORRELATION!, "--state-dir", stateDir],
-    toolName: "lead_accept_task", toolArgs: { task: "T-02", attempt: 1 },
+    toolName: "lead_merge", toolArgs: { task: "T-02", attempt: 1 },
   });
   assert.notEqual(finalAccept.isError, true, finalAccept.text);
   assert.ok(existsSync(join(projectRoot, "src/consumer.ts")), "final wave is landed before reporting");

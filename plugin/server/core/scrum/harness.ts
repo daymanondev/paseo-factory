@@ -131,6 +131,7 @@ export function provisionScrumHarness(input: {
     sourceAgentDir: join(input.userHome ?? homedir(), ".pi/agent"),
     appendSystemPrompt: renderScrumPrompt(role, {
       project: slug,
+      workspace: readProjectRegistration(state, slug)?.root,
       ...(identity.kind === "task"
         ? {
             task: identity.task,

@@ -550,6 +550,7 @@ test("parallel UX and Architect land disjoint artifacts from one accepted PRD in
       "decisions/pm.jsonl": '{"id":"P1","rationale":"read only"}\n',
     },
     ux: {
+      "ux-spec.md": "# UX spec\nSee DESIGN.md, EXPERIENCE.md and mockups/index.html for the complete accepted design.\n",
       "DESIGN.md":
         "# Direction\nColor: navy.\nTypography: system-ui.\nSpacing: 8px.\nComponent: record card.\n",
       "EXPERIENCE.md":

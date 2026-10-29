@@ -1,3 +1,5 @@
+import { scrumSeatOperation } from "./seat-operations.ts";
+import { trackKind } from "./tracks.ts";
 import { lintScrumDoc } from "./linter.ts";
 import { scrumTelemetry } from "./telemetry.ts";
 import { projectTask } from "../task-state.ts";
@@ -75,18 +77,12 @@ function acceptedRefs(
         `${ref.path}: commit must name a landed run Task`,
       );
 }
-export function scrumOperation(
-  input: ScrumOperation,
-  ctx: {
-    factory: Factory;
-    slug?: string;
-    root?: string;
-    authority: "owner" | "supervisor" | "lead" | "agent";
-    actor: string;
-    activeAgents: string[];
-    pendingDirectives: boolean;
-  },
-): unknown {
+export interface ScrumOperationContext {
+  factory: Factory; slug?: string; root?: string;
+  authority: "owner" | "supervisor" | "lead" | "agent";
+  actor: string; activeAgents: string[]; pendingDirectives: boolean;
+}
+export function scrumOperation(input: ScrumOperation, ctx: ScrumOperationContext): unknown {
   const state = ctx.factory.stateDir,
     p = input.payload ?? {},
     owner = ctx.authority === "owner";
@@ -153,6 +149,7 @@ export function scrumOperation(
   assertExecutionReady(state, slug);
   if (readExecution(state, slug).mode !== "scrum")
     fail("execution-mode-mismatch", "Project selection is SLP");
+  if (["lead.operation", "supervisor.decision"].includes(input.operation)) return scrumSeatOperation(input, ctx, scrumOperation);
   if (input.operation === "run.create") {
     if (ctx.authority === "lead")
       fail(
@@ -179,6 +176,11 @@ export function scrumOperation(
   }
   if (!input.runId) fail("scrum-run-required", "explicit runId required");
   const run = readRun(state, slug, input.runId!);
+  if (input.operation === "track.select") {
+    if (ctx.authority !== "lead") fail("scrum-track-authority", "Scrum Lead selects the track");
+    if (run.tasks.some(t => t.role === "dev" && projectTask(ctx.factory.ledger.events, t.task).settled)) fail("scrum-track-frozen", "Dev work already landed");
+    return commandRun(state, slug, run.runId, { type: "track_selected", track: p.track as RunTrack, rationale: p.rationale as string, requestId: input.requestId, expectedRevision: input.expectedRevision! });
+  }
   if (input.operation === "preview") return renderPreview(root, run);
   if (input.operation === "design.decide")
     return decideDesign({
@@ -195,6 +197,9 @@ export function scrumOperation(
       digest: p.digest as string,
       decision: p.decision as "approved" | "changes_requested" | "waived",
       rationale: p.rationale as string,
+      decidedBy: p.decidedBy as string | undefined,
+      designArtifact: p.designArtifact as string | undefined,
+      findings: p.findings as string[] | undefined,
     });
   if (input.operation === "run.complete") {
     if (run.phase === "completed") return run;
@@ -232,6 +237,8 @@ export function scrumOperation(
       expectedRevision: input.expectedRevision,
     } as RunCommand;
     if (
+      cmd.type === "track_selected" ||
+      cmd.type === "paths_registered" ||
       cmd.type === "design_decided" ||
       cmd.type === "contract_intended" ||
       cmd.type === "contract_retired" ||
@@ -283,9 +290,9 @@ export function scrumOperation(
           "planning results incomplete or unsafe",
         );
       const required =
-        run.track === "small"
+        trackKind(run.track) === "small"
           ? ["sprint-backlog.md"]
-          : run.track === "backend"
+          : trackKind(run.track) === "backend"
             ? ["prd.md", "architecture.md", "sprint-backlog.md"]
             : [
                 "prd.md",
@@ -314,9 +321,9 @@ export function scrumOperation(
         ]),
       );
       const kinds: import("./linter.ts").ScrumDocKind[] =
-        run.track === "small"
+        trackKind(run.track) === "small"
           ? ["backlog"]
-          : run.track === "backend"
+          : trackKind(run.track) === "backend"
             ? ["prd", "architecture", "backlog"]
             : ["prd", "ux", "architecture", "backlog"];
       const diagnostics = kinds.flatMap((kind) => lintScrumDoc(kind, files));
@@ -337,6 +344,10 @@ export function scrumOperation(
       verifyBrowserEvidence(root, cmd.design);
       if (designDigest(cmd.design.refs) !== cmd.design.digest)
         fail("invalid-design-digest", "digest differs from accepted artifacts");
+    }
+    if (cmd.type === "bundle_promoted") {
+      verifyRefs(root, [cmd.ref], run.ownedPaths);
+      acceptedRefs(ctx.factory, run, [cmd.ref]);
     }
     if (cmd.type === "qa_recorded") {
       verifyRefs(root, [cmd.ref], run.ownedPaths);

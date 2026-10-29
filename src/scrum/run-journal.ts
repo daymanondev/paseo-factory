@@ -32,7 +32,9 @@ export const PHASES = [
   "cancelled",
 ] as const;
 export type RunPhase = (typeof PHASES)[number];
-export type RunTrack = "small" | "backend" | "ui";
+import { trackKind, validTrack, requiredRoles } from "./tracks.ts";
+import type { RunTrack } from "./tracks.ts";
+export type { RunTrack } from "./tracks.ts";
 export interface RunBudgets {
   maxTasks: number;
   maxElapsedMs: number;
@@ -64,6 +66,10 @@ export interface DesignReview {
   browserEvidence: ArtifactRef[];
   decision?: "approved" | "changes_requested" | "waived";
   actor?: string;
+  decidedBy?: string;
+  actorRole?: string;
+  designArtifact?: string;
+  findings?: string[];
   rationale?: string;
 }
 export interface RunTask {
@@ -91,6 +97,8 @@ export interface ScrumRun {
   configRevision: number;
   config: ScrumConfig;
   track: RunTrack;
+  requiredRoles?: string[];
+  uiApprovalGate?: { status: string; revision: number; digest?: string };
   rationale: string;
   budgets: RunBudgets;
   revision: number;
@@ -166,9 +174,15 @@ export type RunCommand = BaseCommand &
         revision: number;
         digest: string;
         decision: "approved" | "changes_requested" | "waived";
+        decidedBy?: string;
+        actorRole?: string;
+        designArtifact?: string;
+        findings?: string[];
         actor: string;
         rationale: string;
       }
+    | { type: "track_selected"; track: RunTrack; rationale: string }
+    | { type: "paths_registered"; paths: string[] }
     | { type: "fix_reserved"; task: string }
     | {
         type: "qa_recorded";
@@ -187,6 +201,7 @@ interface RunEvent {
   revision: number;
   requestId: string;
   fingerprint: string;
+  event?: string;
   ts: string;
   payload: { type: "created"; run: ScrumRun } | RunCommand;
 }
@@ -251,6 +266,24 @@ function apply(run: ScrumRun, cmd: RunCommand, now: number): void {
   const task =
     "task" in cmd ? run.tasks.find((t) => t.task === cmd.task) : undefined;
   switch (cmd.type) {
+    case "track_selected":
+      if (!validTrack(cmd.track) || !cmd.rationale?.trim())
+        throw new FactoryError("invalid-scrum-track", "track and rationale required");
+      if (run.tasks.some(t => t.role === "dev" && t.result?.status === "complete"))
+        throw new FactoryError("scrum-track-frozen", "Dev work already landed");
+      if (run.track !== cmd.track) {
+        delete run.readiness;
+        delete run.design;
+        run.phase = "planning";
+      }
+      run.track = cmd.track;
+      run.rationale = cmd.rationale;
+      break;
+    case "paths_registered":
+      if (!Array.isArray(cmd.paths) || cmd.paths.some(p => !safePath(p) || p.startsWith("/") || /[*?\[\]{}]/.test(p)))
+        throw new FactoryError("invalid-owned-path", "explicit workspace-relative paths required");
+      run.ownedPaths = [...new Set([...run.ownedPaths, ...cmd.paths])];
+      break;
     case "phase_changed":
       if (!PHASES.includes(cmd.phase) || !cmd.reason?.trim())
         throw new FactoryError(
@@ -460,7 +493,7 @@ function apply(run: ScrumRun, cmd: RunCommand, now: number): void {
         cmd.readiness.unsafeAssumptions.length ||
         cmd.readiness.missingCoverage.length
           ? "blocked"
-          : run.track === "ui"
+          : trackKind(run.track) === "ui"
             ? "awaiting-ui-approval"
             : "implementation";
       break;
@@ -510,6 +543,10 @@ function apply(run: ScrumRun, cmd: RunCommand, now: number): void {
         ...run.design,
         decision: cmd.decision,
         actor: cmd.actor,
+        decidedBy: cmd.decidedBy ?? "owner",
+        actorRole: cmd.actorRole,
+        ...(cmd.designArtifact === undefined ? {} : { designArtifact: cmd.designArtifact }),
+        ...(cmd.findings === undefined ? {} : { findings: cmd.findings }),
         rationale: cmd.rationale,
       };
       run.decisions++;
@@ -575,6 +612,12 @@ function apply(run: ScrumRun, cmd: RunCommand, now: number): void {
       throw new FactoryError("invalid-run-command", "unsupported command");
   }
 }
+function decorateRun(run: ScrumRun): ScrumRun {
+  run.requiredRoles = requiredRoles(run.track);
+  run.uiApprovalGate = { status: run.design?.decision ?? (trackKind(run.track) === "ui" ? "pending" : "not-required"), revision: run.design?.revision ?? 0, ...(run.design ? { digest: run.design.digest } : {}) };
+  return run;
+}
+
 function project(events: RunEvent[]): ScrumRun {
   const first = events[0];
   if (
@@ -589,7 +632,7 @@ function project(events: RunEvent[]): ScrumRun {
     apply(run, event.payload, Date.parse(event.ts));
     run.revision = event.revision;
   }
-  return run;
+  return decorateRun(run);
 }
 export function readRun(state: string, slug: string, runId: string): ScrumRun {
   return project(eventsAt(runPath(state, slug, runId)));
@@ -646,7 +689,7 @@ export function createScrumRun(input: {
     };
     if (
       !safeId(input.initiativeId) ||
-      !["small", "backend", "ui"].includes(input.track) ||
+      !validTrack(input.track) ||
       !input.rationale?.trim() ||
       !scrumConfigIsValid(input.config) ||
       Object.values(budgets).some((v) => !Number.isSafeInteger(v) || v < 0) ||
@@ -663,7 +706,7 @@ export function createScrumRun(input: {
         (p) =>
           !safePath(p) ||
           !p.startsWith(`.scratch/${input.initiativeId}/`) ||
-          !/^(?:prd\.md|DESIGN\.md|EXPERIENCE\.md|architecture\.md|sprint-backlog\.md|qa-report\.(?:json|md)|mockups\/.+|decisions\/[A-Za-z0-9._-]+\.jsonl|qa\/.+)$/.test(
+          !/^(?:prd\.md|ux-spec\.md|release-bundle\.json|DESIGN\.md|EXPERIENCE\.md|architecture\.md|sprint-backlog\.md|qa-report\.(?:json|md)|mockups\/.+|decisions\/[A-Za-z0-9._-]+\.jsonl|qa\/.+)$/.test(
             p.slice(`.scratch/${input.initiativeId}/`.length),
           ),
       )
@@ -703,7 +746,7 @@ export function createScrumRun(input: {
       ts: createdAt,
       payload: { type: "created", run },
     });
-    return run;
+    return decorateRun(run);
   });
 }
 function commandFingerprint(cmd: RunCommand): string {
@@ -783,7 +826,8 @@ export function commandRun(
       fingerprint: commandFingerprint(cmd),
       ts,
       payload: cmd,
+      ...(cmd.type === "track_selected" ? { event: "scrum.track.selected" } : {}),
     });
-    return run;
+    return decorateRun(run);
   });
 }

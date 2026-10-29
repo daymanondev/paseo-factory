@@ -15,7 +15,7 @@ const contract = { seq: 1, ts, event: "contract_set", task: "T1" };
 function mcpStatus(stateDir: string, bridge = join(repoRoot, "plugin/bin/bridge.mjs")): Record<string, any> {
   const result = spawnSync(process.execPath, [bridge, "--state-dir", stateDir, "--role", "supervisor", "--workspace", stateDir], {
     encoding: "utf8", timeout: 10_000,
-    input: `${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "factory_status", arguments: {} } })}\n`,
+    input: `${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "supervisor_read_ledger", arguments: {} } })}\n`,
     env: { PATH: process.env.PATH },
   });
   assert.equal(result.status, 0, result.stderr);

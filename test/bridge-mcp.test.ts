@@ -187,7 +187,7 @@ test("bridge.mjs exposes strictly role-scoped tools in tools/list and enforces r
       ],
     });
     const supTools = ((supResponses[1].result as { tools: Array<{ name: string }> }).tools).map((t) => t.name).sort();
-    assert.deepEqual(supTools, ["factory_status", "supervisor_accept_task", "supervisor_dispatch_lead"]);
+    assert.deepEqual(supTools, ["supervisor_dispatch_lead", "supervisor_end_cycle", "supervisor_read_ledger"]);
     const supIllegalCall = supResponses[2].result as { isError?: boolean; content: Array<{ text: string }> };
     assert.equal(supIllegalCall.isError, true);
     assert.match(supIllegalCall.content[0].text, /not permitted|unauthorized|role/i);
@@ -203,15 +203,7 @@ test("bridge.mjs exposes strictly role-scoped tools in tools/list and enforces r
       ],
     });
     const leadTools = ((leadResponses[1].result as { tools: Array<{ name: string }> }).tools).map((t) => t.name).sort();
-    assert.deepEqual(leadTools, [
-      "factory_status",
-      "lead_accept_task",
-      "lead_needs_human",
-      "lead_repoke_agent",
-      "lead_report_to_supervisor",
-      "lead_set_contract",
-      "lead_spawn_agent",
-    ]);
+    assert.deepEqual(leadTools, ["lead_create_worktree", "lead_dispatch_agent", "lead_merge", "lead_remove_worktree", "lead_report_to_supervisor", "lead_set_contract", "lead_verify"]);
 
     // 3. Working Agent session
     const agentResponses = await runMcpSession({
@@ -220,7 +212,7 @@ test("bridge.mjs exposes strictly role-scoped tools in tools/list and enforces r
       requests: [
         { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
         { jsonrpc: "2.0", id: 2, method: "tools/list" },
-        { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "lead_accept_task", arguments: { task: "t-01", attempt: 1 } } },
+        { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "lead_merge", arguments: { task: "t-01", attempt: 1 } } },
       ],
     });
     const agentTools = ((agentResponses[1].result as { tools: Array<{ name: string }> }).tools).map((t) => t.name).sort();
@@ -323,7 +315,7 @@ test("bridge.mjs executes Supervisor, Lead, and Agent tools end-to-end over the 
     assert.match(supText, /end your turn/i);
     assert.ok(sentPrompts.some((p) => p.id === "lead-1" && p.text.includes("Implement feature-x")));
 
-    // 2. Lead sets contract and spawns agent via lead_set_contract and lead_spawn_agent
+    // 2. Lead sets contract and spawns agent via lead_set_contract and lead_dispatch_agent
     const leadCall = await runMcpSession({
       args: ["--correlation", leadCorr.correlationId, "--state-dir", stateDir],
       cwd: repoDir,
@@ -347,7 +339,7 @@ test("bridge.mjs executes Supervisor, Lead, and Agent tools end-to-end over the 
           id: 2,
           method: "tools/call",
           params: {
-            name: "lead_spawn_agent",
+            name: "lead_dispatch_agent",
             arguments: {
               tasks: ["feat-x"],
             },
@@ -361,7 +353,7 @@ test("bridge.mjs executes Supervisor, Lead, and Agent tools end-to-end over the 
     assert.notEqual(spawnRes.isError, true, spawnRes.content[0].text);
 
     const worktreePath = factory.worktreeFor("feat-x");
-    assert.ok(worktreePath, "lead_spawn_agent must allocate and register the Task worktree");
+    assert.ok(worktreePath, "lead_dispatch_agent must allocate and register the Task worktree");
 
     // 3. Working Agent commits in Task worktree and calls agent_claim (defaulting task & commit to HEAD)
     writeFileSync(join(worktreePath, "feature.txt"), "done\n");
@@ -424,7 +416,7 @@ test("bridge.mjs executes Supervisor, Lead, and Agent tools end-to-end over the 
           id: 1,
           method: "tools/call",
           params: {
-            name: "lead_accept_task",
+            name: "lead_merge",
             arguments: { task: "feat-x", attempt: 1 },
           },
         },
@@ -435,15 +427,6 @@ test("bridge.mjs executes Supervisor, Lead, and Agent tools end-to-end over the 
           params: {
             name: "lead_report_to_supervisor",
             arguments: { message: "Wave complete: feat-x accepted on attempt 1." },
-          },
-        },
-        {
-          jsonrpc: "2.0",
-          id: 3,
-          method: "tools/call",
-          params: {
-            name: "factory_status",
-            arguments: {},
           },
         },
       ],
@@ -457,7 +440,8 @@ test("bridge.mjs executes Supervisor, Lead, and Agent tools end-to-end over the 
     assert.match(reportRes.content[0].text, /end your turn/i);
     assert.ok(sentPrompts.some((p) => p.id === "sup-1" && p.text.includes("Wave complete: feat-x accepted")));
 
-    const statusRes = leadFinishCall[2].result as { isError?: boolean; content: Array<{ text: string }> };
+    const statusCall = await runMcpSession({ args: ["--correlation", supCorr.correlationId, "--state-dir", stateDir], cwd: repoDir, requests: [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "supervisor_read_ledger", arguments: {} } }] });
+    const statusRes = statusCall[0].result as { isError?: boolean; content: Array<{ text: string }> };
     assert.notEqual(statusRes.isError, true, statusRes.content[0].text);
     assert.match(statusRes.content[0].text, /feat-x.*accepted=yes/);
   } finally {
@@ -603,7 +587,7 @@ test("bridge Task allocation inherits root dependencies and keeps them clean", a
       script: copiedBridge,
       args: ["--correlation", correlation.correlationId, "--state-dir", stateDir, "--home", homeDir],
       cwd: repoDir,
-      requests: [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_spawn_agent", arguments: { tasks: ["deps"] } } }],
+      requests: [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_dispatch_agent", arguments: { tasks: ["deps"] } } }],
     });
     const result = responses[0].result as { isError?: boolean; content: Array<{ text: string }> };
     assert.notEqual(result.isError, true, result.content[0].text);
@@ -683,7 +667,7 @@ test("MCP Lead acceptance binds its authenticated role despite forged attributio
   t.after(() => spool.stop());
   const refused = await runMcpSession({
     args: ["--correlation", lead.correlationId, "--state-dir", stateDir], cwd: repoDir,
-    requests: [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_accept_task", arguments: { task: "mcp-bound", attempt: 1, by: "owner", submitter: "owner" } } }],
+    requests: [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_merge", arguments: { task: "mcp-bound", attempt: 1, by: "owner", submitter: "owner" } } }],
   });
   const denied = refused[0]!.result as { isError?: boolean; content: Array<{ text: string }> };
   assert.equal(denied.isError, true);
@@ -694,11 +678,11 @@ test("MCP Lead acceptance binds its authenticated role despite forged attributio
     requests: [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "supervisor_accept_task", arguments: { task: "mcp-bound", attempt: 1 } } }],
   });
   const accepted = allowed[0]!.result as { isError?: boolean; content: Array<{ text: string }> };
-  assert.notEqual(accepted.isError, true, accepted.content[0]!.text);
-  assert.equal(factory.ledger.eventsFor("mcp-bound").findLast((event) => event.event === "attempt_accepted")?.accepted_by, "supervisor");
+  assert.equal(accepted.isError, true);
+  assert.match(accepted.content[0]!.text, /not permitted/);
 });
 
-test("bridge lead_spawn_agent resolves real system git and ignores a broken <stateDir>/bin/git shim on PATH", async (t) => {
+test("bridge lead_dispatch_agent resolves real system git and ignores a broken <stateDir>/bin/git shim on PATH", async (t) => {
   const homeDir = mkdtempSync(join(tmpdir(), "factory-bridge-realgit-"));
   const stateDir = join(homeDir, "plugin-state", "paseo-factory");
   const repoDir = makeGitRepo();
@@ -748,7 +732,7 @@ test("bridge lead_spawn_agent resolves real system git and ignores a broken <sta
         id: 1,
         method: "tools/call",
         params: {
-          name: "lead_spawn_agent",
+          name: "lead_dispatch_agent",
           arguments: { tasks: ["T-01"], workspace: repoDir },
         },
       },
@@ -756,7 +740,7 @@ test("bridge lead_spawn_agent resolves real system git and ignores a broken <sta
   });
 
   const spawnRes = responses[0]!.result as { isError?: boolean; content: Array<{ text: string }> };
-  assert.notEqual(spawnRes.isError, true, `Expected lead_spawn_agent to succeed even with broken <stateDir>/bin/git, got: ${spawnRes.content[0]?.text}`);
+  assert.notEqual(spawnRes.isError, true, `Expected lead_dispatch_agent to succeed even with broken <stateDir>/bin/git, got: ${spawnRes.content[0]?.text}`);
   const worktree = factory.worktreeFor("T-01");
   assert.ok(worktree && existsSync(worktree), "Task worktree was allocated using real system git");
 });
@@ -775,7 +759,7 @@ test("background MCP spawn reports the dispatched specialist lane", async t => {
   writeFileSync(join(home, "endpoint.sock"), "fixture presence marker");
   // The external Driver boundary publishes its actual dispatch, which differs from the configured SLP worker.
   writeFileSync(join(bin, "factory.mjs"), `import { appendFileSync } from 'node:fs';\nappendFileSync(${JSON.stringify(join(stateDir, "ledger.jsonl"))}, JSON.stringify({ seq: 2, ts: new Date().toISOString(), event: 'spawn_dispatched', task: 'specialist', provider: 'claude/pm-frozen', arity: 1 }) + '\\n');\n`);
-  const responses = await runMcpSession({ script: join(bin, "bridge.mjs"), cwd: repo, args: ["--home", home, "--state-dir", stateDir, "--correlation", correlation.correlationId], requests: [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_spawn_agent", arguments: { tasks: ["specialist"] } } }] });
+  const responses = await runMcpSession({ script: join(bin, "bridge.mjs"), cwd: repo, args: ["--home", home, "--state-dir", stateDir, "--correlation", correlation.correlationId], requests: [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_dispatch_agent", arguments: { tasks: ["specialist"] } } }] });
   assert.ok(responses[0].result, JSON.stringify(responses));
   const result = responses[0].result as { isError?: boolean; content: { text: string }[] };
   assert.notEqual(result.isError, true, result.content[0].text);
@@ -800,10 +784,74 @@ test("Scrum MCP spawn defaults to the task's frozen specialist roster", async t 
   assert.ok(contract.ok, JSON.stringify(contract));
   const correlation = new CorrelationRegistry(stateDir).issue({ role: "lead", projectSlug: project.slug, projectRoot: repo, agentId: "scrum-lead" });
   const spool = startSpool(stateDir, factory, { pollMs: 20 }); t.after(() => spool.stop());
-  const responses = await runMcpSession({ cwd: repo, args: ["--home", home, "--state-dir", stateDir, "--correlation", correlation.correlationId], requests: [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_spawn_agent", arguments: { tasks: ["plan"] } } }] });
+  const responses = await runMcpSession({ cwd: repo, args: ["--home", home, "--state-dir", stateDir, "--correlation", correlation.correlationId], requests: [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_dispatch_agent", arguments: { tasks: ["plan"] } } }] });
   assert.ok(responses[0].result, JSON.stringify(responses));
   const result = responses[0].result as { isError?: boolean; content: { text: string }[] };
   assert.notEqual(result.isError, true, result.content[0].text);
   assert.match(result.content[0].text, /claude\/pm-frozen/);
   assert.equal(factory.ledger.events.findLast(e => e.event === "spawn_dispatched")?.provider, "claude/pm-frozen");
+});
+
+test("mode-scoped MCP catalogs isolate schemas and reject cross-mode calls", async () => {
+  const state = mkdtempSync(join(tmpdir(), "bridge-modes-"));
+  try {
+    for (const role of ["supervisor", "lead"]) {
+      for (const mode of ["slp", "scrum"]) {
+        const onlyScrum = role === "lead" ? "lead_scrum_operation" : "supervisor_scrum_decision";
+        const responses = await runMcpSession({ args: ["--state-dir", state, "--role", role, "--mode", mode], requests: [
+          { jsonrpc: "2.0", id: 1, method: "tools/list" },
+          ...(mode === "slp" ? [{ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: onlyScrum, arguments: {} } }] : []),
+        ] });
+        const tools = (responses[0].result as { tools: { name: string; inputSchema: { properties: Record<string, unknown> } }[] }).tools;
+        assert.equal(tools.some(t => t.name === onlyScrum), mode === "scrum");
+        const properties = tools.find(t => t.name === (role === "lead" ? "lead_set_contract" : "supervisor_dispatch_lead"))!.inputSchema.properties;
+        assert.equal("runId" in properties, mode === "scrum");
+        if (role === "lead") {
+          assert.ok("scope" in properties);
+          assert.equal("role" in properties, mode === "scrum");
+          assert.equal("artifactRefs" in properties, mode === "scrum");
+          assert.equal("mutationMode" in properties, mode === "slp");
+        }
+        if (mode === "slp") {
+          assert.equal((responses[1].result as { isError: boolean }).isError, true);
+          assert.match(JSON.stringify(responses[1]), /in mode/);
+        }
+      }
+    }
+  } finally { rmSync(state, { recursive: true, force: true }); }
+});
+
+test("Scrum MCP decisions default the active design identity and keep Lead unable to approve", async t => {
+  const stateDir = mkdtempSync(join(tmpdir(), "scrum-mcp-decision-")), repo = makeGitRepo();
+  t.after(() => { rmSync(stateDir, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); });
+  const { switchExecution } = await import("../plugin/server/core/scrum/execution.ts");
+  const { ensureScrumConfig } = await import("../plugin/server/core/scrum/config.ts");
+  const { createScrumRun, commandRun, readRun } = await import("../plugin/server/core/scrum/run-journal.ts");
+  const { artifactAt, designDigest } = await import("../plugin/server/core/scrum/artifacts.ts");
+  const { scrumOperation } = await import("../plugin/server/core/scrum/controller.ts");
+  const project = ensureProjectRegistered(stateDir, repo); assert.ok(project.ok);
+  await switchExecution({ state: stateDir, slug: project.slug, mode: "scrum", blockers: [], rotate: async () => {} });
+  const paths = ["DESIGN.md", "EXPERIENCE.md", "mockups/index.html"].map(p => `.scratch/review/${p}`);
+  for (const path of paths) { mkdirSync(join(repo, path, ".."), { recursive: true }); writeFileSync(join(repo, path), path.endsWith("html") ? "<html><head></head><body>Farm</body></html>" : "accepted design"); }
+  execFileSync("git", ["add", "."], { cwd: repo }); execFileSync("git", ["commit", "-m", "design fixture"], { cwd: repo });
+  const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
+  const refs = paths.map(path => artifactAt(repo, sha, path));
+  let run = createScrumRun({ state: stateDir, slug: project.slug, runId: "review", initiativeId: "review", config: ensureScrumConfig(stateDir, project.slug), configRevision: 1, track: "ui", rationale: "fixture", ownedPaths: paths, requestId: "create" });
+  run = commandRun(stateDir, project.slug, run.runId, { type: "design_review_requested", requestId: "design", expectedRevision: run.revision, design: { revision: 1, digest: designDigest(refs), refs, browserEvidence: [refs[0]] } });
+  const factory = createFactory({ stateDir });
+  const registry = new CorrelationRegistry(stateDir);
+  const supervisor = registry.issue({ role: "supervisor", projectSlug: project.slug, projectRoot: repo });
+  const lead = registry.issue({ role: "lead", projectSlug: project.slug, projectRoot: repo });
+  const spool = startSpool(stateDir, factory, { pollMs: 10, scrumCommand: async (request, caller) => ({ id: request.id, ok: true, summary: "Scrum", data: scrumOperation(request, { factory, root: repo, slug: project.slug, ...caller, activeAgents: [], pendingDirectives: false }) }) });
+  t.after(() => spool.stop());
+  const call = async (correlation: string, name: string, args: Record<string, unknown>) => (await runMcpSession({ args: ["--state-dir", stateDir, "--correlation", correlation], cwd: repo, requests: [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }] }))[0].result as { isError?: boolean; content: { text: string }[] };
+  assert.equal((await call(lead.correlationId, "supervisor_scrum_decision", { decision: "approved", rationale: "spoof" })).isError, true);
+  const approved = await call(supervisor.correlationId, "supervisor_scrum_decision", { decision: "approved", rationale: "Owner approved this preview" });
+  assert.notEqual(approved.isError, true, JSON.stringify(approved));
+  assert.equal(readRun(stateDir, project.slug, run.runId).design?.decision, "approved");
+  assert.equal(readRun(stateDir, project.slug, run.runId).design?.decidedBy, "owner");
+  const snapshot = await call(lead.correlationId, "lead_scrum_operation", { action: "get" }); assert.notEqual(snapshot.isError, true);
+  const preview = await call(lead.correlationId, "lead_scrum_operation", { action: "preview" }); assert.notEqual(preview.isError, true, JSON.stringify(preview));
+  const reserve = await call(lead.correlationId, "lead_scrum_operation", { action: "fix.reserve", task: "farm-fix" }); assert.notEqual(reserve.isError, true, JSON.stringify(reserve));
+  assert.equal(readRun(stateDir, project.slug, run.runId).fixRounds, 1);
 });

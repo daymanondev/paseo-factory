@@ -1,3 +1,4 @@
+import { readExecution } from "./core/scrum/config.ts";
 import { resolveRoleLane, laneProviderConfig } from "./provider-lanes.ts";
 import type { ProviderCatalogEntry } from "./provider-lanes.ts";
 import { provisionScrumHarness, resolveScrumIdentity, scrumIdentityLane, scopeScrumCapabilities } from "./core/scrum/harness.ts";
@@ -316,6 +317,8 @@ export function applyProviderExecutionFence<T extends AgentCreateRequest["config
         correlationId,
         "--role",
         role,
+        "--mode",
+        readExecution(stateDir, projectSlug).mode,
         "--state-dir",
         stateDir,
         "--project",
@@ -516,7 +519,7 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
           // The Agent tab inside the Task worktree Workspace reads `Peer · <Task>`
           // (ADR 0017 §2) — never the bare task id or the raw spawn prompt.
           title: execution?.kind === "task" ? `${SCRUM_ROLE_TITLES[execution.binding.role]} · ${worktree.task}` : formatPeerAgentTitle(worktree.task),
-          systemPrompt: appendContract(request.config.systemPrompt, execution?.kind === "task" ? renderScrumPrompt(execution.binding.role, { project: worktree.slug, runId: execution.binding.runId, task: worktree.task, epoch: execution.epoch }) : renderAgentContract(worktree.task, worktree.slug)),
+          systemPrompt: appendContract(request.config.systemPrompt, execution?.kind === "task" ? renderScrumPrompt(execution.binding.role, { project: worktree.slug, runId: execution.binding.runId, task: worktree.task, epoch: execution.epoch, workspace: request.config.cwd }) : renderAgentContract(worktree.task, worktree.slug)),
         },
         {
           role: "agent",
@@ -580,7 +583,7 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
       title: role === "lead" && execution ? "Scrum Lead" : role === "supervisor" || role === "lead" ? SEAT_TITLES[role] : request.config.title,
       systemPrompt: appendContract(
         request.config.systemPrompt,
-        execution !== undefined && role !== "agent" ? renderScrumPrompt(role, { project: projectIdentity.slug }) : role === "agent"
+        execution !== undefined && role !== "agent" ? renderScrumPrompt(role, { project: projectIdentity.slug, workspace: request.config.cwd }) : role === "agent"
           ? renderRoleContract("agent", { factoryCmd: "factory", project: projectIdentity })
           : renderSeatContract(role, projectIdentity),
       ),

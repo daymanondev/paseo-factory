@@ -336,7 +336,7 @@ export const ScrumConfigSchema = z.object({ configRevision: z.number().int().opt
 export const ScrumRunViewSchema = z.object({
   runId: z.string(),
   phase: z.string(),
-  track: z.enum(["small", "backend", "ui"]).optional(),
+  track: z.enum(["small", "backend", "ui", "quick", "standard", "enterprise"]).optional(),
   cancellation: z.object({ reason: z.string() }).optional(),
   revision: z.number(),
   configRevision: z.number(),

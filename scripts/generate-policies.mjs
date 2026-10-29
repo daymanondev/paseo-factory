@@ -37,6 +37,7 @@ const targets = [
   ["src/process-policy.ts", "plugin/bin/process-policy.mjs"],
 ];
 const sections = [
+  ["src/mcp/catalog.ts", "plugin/bin/bridge.mjs", "GENERATED MCP CATALOG", "mcpCatalog"],
   ["src/task-status.ts", "plugin/bin/bridge.mjs", "GENERATED TASK STATUS POLICY", "taskStatusPolicy"],
   ["src/ledger-validation.ts", "plugin/bin/bridge.mjs", "GENERATED LEDGER POLICY", "ledgerValidationPolicy"],
   ["src/scope-policy.ts", "plugin/bin/agy-pre-tool-hook.mjs", "GENERATED SCOPE POLICY", "scopePolicy"],

@@ -1036,7 +1036,7 @@ test("role surfaces teach bounded serial waves, closure, and structured challeng
       /current wave only/, /up to 3.*genuinely disjoint/, /shared foundation/,
       /Bounded Outcome/, /Contract Boundary & Regression Invariants/,
       /Excluded \/ Deferred to Later Waves/, /Verification.*exact.*Gate/,
-      /git show --stat/, /git diff/, /lead_accept_task/, /final wave.*before.*lead_report_to_supervisor/,
+      /git show --stat/, /git diff/, /lead_merge/, /final wave.*before.*lead_report_to_supervisor/,
       /next wave.*same turn/, /Never accept.*Needs-human/, /two-party separation of judgment/i, /re-contract.*lead_set_contract/,
       /REOPEN_REQUEST/, /foundation.*dependency.*lifecycle.*API.*ownership.*verification/,
       /DEPENDENCY_REQUEST/, /BLOCKED/]) assert.match(surface, law);

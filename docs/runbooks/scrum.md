@@ -131,3 +131,42 @@ Run `factory lint-scrum-doc --kind prd|ux|architecture|backlog|qa --dir <path>`
 for deterministic JSON diagnostics: exit 0 valid, 1 findings, 2 bad invocation
 or unreadable input. Stable/deprecated ID gaps are allowed. Browser checks,
 Lead semantic review and product QA are separate obligations.
+
+## MCP orchestration and natural directives
+
+The bridge selects the Project's execution mode once at startup. Seat configuration
+passes `--mode`; older provider homes resolve the Project's `execution.json`.
+Supervisor exposes `supervisor_dispatch_lead`, `supervisor_read_ledger`,
+`supervisor_end_cycle`, and (in Scrum only) `supervisor_scrum_decision`.
+Lead uses `lead_set_contract`, `lead_dispatch_agent`, `lead_verify`, `lead_merge`,
+worktree create/remove, and reporting; Scrum adds `lead_scrum_operation`.
+These names replace the former spawn/accept/status coordination tool names.
+Core SLP Contract, Gate, Driver, acceptance, and landing rules are unchanged.
+
+In Scrum, dispatching `{ message }` admits a standard run automatically, or reuses
+an active nonterminal run. Explicit `runId` and partial `scrum` admission overrides
+remain available. Lead refines the track with `track.select` before any Dev Task
+lands. `quick` uses the existing small-track evidence policy; `standard` and
+`enterprise` require the complete planning/design evidence policy. Historical
+`small`, `backend`, and `ui` journals retain their original interpretation.
+
+`lead_scrum_operation` supports `get`, `track.select`, `readiness`, `design.submit`,
+`qa.audit`, `fix.reserve`, `bundle.promote`, `run.complete`, and `preview`. Omit
+`runId` to use the single active run. Evidence mutations use exact landed
+`artifactRefs` (`path`, full `commit`, `sha256`). Record landed specialist results
+with `roleResults: [{ task, result: { status, artifactRefs, assumptions,
+openQuestions, conflicts } }]` on the readiness/QA operation. Readiness without
+`artifactRefs` inspects current readiness; with refs it records verified readiness.
+Design submission additionally requires `browserEvidence`. QA and promotion name
+`auditArtifact` and `bundlePath`. Fix reservation names the new fix `task`.
+Preview returns the existing self-contained, sandboxed HTML payload.
+All evidence and completion checks still run through the verified controller.
+
+After an explicit Owner decision, Supervisor calls `supervisor_scrum_decision`
+with `decision` and `rationale`; run/revision/digest default to the current review.
+Lead cannot approve a design. Specialist Contracts default the canonical artifact
+and their own decision-log path. Planning/QA scope stays in the initiative;
+explicit Dev implementation paths are preserved and journaled as run ownership.
+Add explicit mockup/browser/QA evidence paths to `scope` when contracting them.
+Kickoff and Scrum prompts probe project memory and instruct seats to read only
+present `AGENTS.md`, `CLAUDE.md`, and `CONTEXT.md` files.

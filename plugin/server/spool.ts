@@ -1,8 +1,9 @@
+import { prepareProjectContract } from "./execution-adapters.ts";
 import { commandRun as commandScrumRun, readRun as readScrumRun } from "./core/scrum/run-journal.ts";
 import { withExecutionLane } from "./core/scrum/execution.ts";
 import type { ScrumDirective } from "./scrum.ts";
 import type { ScrumOperation } from "./core/scrum/controller.ts";
-import { prepareScrumContract, bindScrumEpoch, scrumSpawnLane } from "./scrum.ts";
+import { bindScrumEpoch, scrumSpawnLane } from "./scrum.ts";
 import { SCRUM_ROLE_TITLES } from "./core/scrum/prompts.ts";
 import { SPECIALIST_ROLES, safeId, artifactRefIsValid } from "./core/scrum/types.ts";
 import type { ScrumRoleName, ArtifactRef } from "./core/scrum/types.ts";
@@ -1144,7 +1145,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
     };
     if (request.kind === "contract") {
       const previousPeers = await taskPeers(request.task);
-      const scrum = prepareScrumContract(factory, { ...request, retirePeerIds: previousPeers.map(p => p.id) });
+      const scrum = prepareProjectContract(factory, { ...request, retirePeerIds: previousPeers.map(p => p.id) });
       const disposition = (type: "contract_retired" | "contract_rejected", error?: FactoryError) => {
         if (!scrum.execution || !scrum.operationId) return;
         const project = resolveProject(request.workspace);
@@ -1177,7 +1178,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         ...(request.freshEyes === undefined ? {} : { freshEyes: request.freshEyes }),
         ...(request.watch === undefined ? {} : { watch: true }),
         ...(request.description === undefined ? {} : { description: request.description }),
-        ...(scrum.execution === undefined ? {} : { execution: scrum.execution, scope: scrum.scope }),
+        ...(scrum.execution === undefined ? {} : { execution: scrum.execution, scope: scrum.scope, artifact: scrum.artifact }),
         by: request.submitter,
         ...(effectiveSeat === undefined ? {} : { seat: effectiveSeat }),
       });

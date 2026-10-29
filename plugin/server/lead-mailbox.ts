@@ -1,4 +1,5 @@
-import { bindScrumDirective, bindScrumBlocker } from "./scrum.ts";
+import { bindProjectDirective } from "./execution-adapters.ts";
+import { bindScrumBlocker } from "./scrum.ts";
 import { withExecutionLane } from "./core/scrum/execution.ts";
 import { readExecution } from "./core/scrum/config.ts";
 import { readRun, listRuns, commandRun, terminalRun } from "./core/scrum/run-journal.ts";
@@ -489,7 +490,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     const loadedLanes = loadLanes(deps.stateDir, slug);
     const selection = readExecution(deps.stateDir, slug);
     const activeRun = selection.mode === "scrum" ? listRuns(deps.stateDir, slug).find(r => !terminalRun(r)) : undefined;
-    const kickoff = selection.mode === "scrum" ? renderScrumPrompt(role, { project: slug, runId: activeRun?.runId }) + `\nLive Scrum state: ${JSON.stringify(activeRun ?? { phase: "idle" })}\n` : buildSeatKickoffPacket({
+    const kickoff = selection.mode === "scrum" ? renderScrumPrompt(role, { project: slug, runId: activeRun?.runId, workspace: reg?.root ?? agent.cwd ?? undefined }) + `\nLive Scrum state: ${JSON.stringify(activeRun ?? { phase: "idle" })}\n` : buildSeatKickoffPacket({
       role,
       projectSlug: slug,
       projectRoot: reg?.root ?? agent.cwd ?? "",
@@ -1035,7 +1036,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     const laneOutcome = await projectLane(
       slug,
       async (): Promise<{ ok: true; agentId: string; mailId: string } | { ok: false; code: string; error: string }> => {
-        const bound = request.from === "peer" ? bindScrumBlocker(deps.factory, slug, request) : bindScrumDirective(deps.factory, root, slug, request);
+        const bound = request.from === "peer" ? bindScrumBlocker(deps.factory, slug, request) : bindProjectDirective(deps.factory, root, slug, request);
         const ensured = await deps.ensureLead({ projectRoot: root });
         if (!ensured.ok) return ensured;
         const from = request.from ?? "owner";

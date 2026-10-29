@@ -1,3 +1,4 @@
+import { trackKind } from "./tracks.ts";
 import { safePath } from "./types.ts";
 import { FactoryError } from "../errors.ts";
 import { designDigest, verifyRefs, gitBytes, artifactAt } from "./artifacts.ts";
@@ -59,7 +60,7 @@ export function assertDevReady(root: string, run: ScrumRun): void {
       "resolve contradictions, assumptions and coverage before Dev",
     );
   verifyRefs(root, ready.refs, run.ownedPaths);
-  if (run.track === "ui" || run.design !== undefined) {
+  if (trackKind(run.track) === "ui" || run.design !== undefined) {
     const design = run.design;
     if (
       !design ||
@@ -90,6 +91,9 @@ export function decideDesign(input: {
   digest: string;
   decision: "approved" | "changes_requested" | "waived";
   rationale: string;
+  decidedBy?: string;
+  designArtifact?: string;
+  findings?: string[];
 }): ScrumRun {
   if (
     input.authority !== "owner" &&
@@ -112,6 +116,10 @@ export function decideDesign(input: {
     decision: input.decision,
     actor: input.actor,
     rationale: input.rationale,
+    decidedBy: input.decidedBy ?? "owner",
+    actorRole: input.authority,
+    ...(input.designArtifact === undefined ? {} : { designArtifact: input.designArtifact }),
+    ...(input.findings === undefined ? {} : { findings: input.findings }),
   });
 }
 
