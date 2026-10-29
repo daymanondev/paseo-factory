@@ -497,7 +497,10 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
   const role: RoleName | undefined = providerSeat ?? envSeat ?? titleSeat;
   const hasPrompt = (request.config.systemPrompt ?? "").includes(FOOTER_MARK) || (request.config.systemPrompt ?? "").includes(SCRUM_PROMPT_MARK);
   const bound = request.env?.PASEO_FACTORY_CORRELATION ? correlations.resolve(request.env.PASEO_FACTORY_CORRELATION) : undefined;
-  if (hasPrompt && bound !== undefined && bound.role === role && bound.projectSlug === request.env?.PASEO_FACTORY_PROJECT) return undefined;
+  const alreadyProvisioned = (projectSlug: string, execution: ScrumHarnessIdentity | undefined, task?: string) =>
+    hasPrompt && bound !== undefined && bound.role === role && bound.projectSlug === projectSlug &&
+    bound.projectSlug === request.env?.PASEO_FACTORY_PROJECT && bound.task === task &&
+    JSON.stringify(bound.execution ?? null) === JSON.stringify(execution ?? null);
 
 
   // A managed Task worktree keeps its task-bound path — the correlation and
@@ -508,6 +511,7 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
       const reg = listProjectRegistrations(stateDir).find((r) => r.slug === worktree.slug);
       const projectRoot = reg?.root ?? "";
       const execution = resolveScrumIdentity(stateDir, worktree.slug, worktree.task);
+      if (alreadyProvisioned(worktree.slug, execution, worktree.task)) return undefined;
       if (execution) delete request.config.thinkingOptionId;
       const issued = correlations.issue({
         ...(execution === undefined ? {} : { execution }),
@@ -571,6 +575,7 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
     ? { root: registered.root, slug: registered.slug }
     : { root: project.root, slug: project.slug };
   const execution = resolveScrumIdentity(stateDir, projectIdentity.slug);
+  if (alreadyProvisioned(projectIdentity.slug, execution)) return undefined;
   if (execution) delete request.config.thinkingOptionId;
   const issued = correlations.issue({
     ...(execution === undefined ? {} : { execution }),
@@ -610,8 +615,15 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
   }) as R;
 }
 
+const ROLE_CONTEXT_MARK = "<!-- paseo-factory injected role contract -->";
 function appendContract(existing: string | undefined, contract: string): string {
-  return existing === undefined || existing === "" ? contract : existing.includes(contract) ? existing : `${existing}\n\n${contract}`;
+  let prefix = existing ?? "";
+  const markers = [ROLE_CONTEXT_MARK, SCRUM_PROMPT_MARK];
+  // Compatibility with prompts injected before the explicit start marker.
+  if (prefix.includes(FOOTER_MARK)) markers.push("You are the Supervisor seat of the paseo-factory", "You are the Lead seat of the paseo-factory", "You are a working Agent of the paseo-factory");
+  const starts = markers.map(marker => prefix.indexOf(marker)).filter(index => index >= 0);
+  if (starts.length) prefix = prefix.slice(0, Math.min(...starts)).trimEnd();
+  return `${prefix ? prefix + "\n\n" : ""}${ROLE_CONTEXT_MARK}\n${contract}`;
 }
 
 /**

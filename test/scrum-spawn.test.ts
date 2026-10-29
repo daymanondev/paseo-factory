@@ -815,3 +815,21 @@ test("a Scrum Lead title provisions the Lead role when the daemon omits top-leve
   assert.ok(result, "Scrum Lead display title must retain Lead authority without top-level labels");
   assert.equal(result.env?.PASEO_FACTORY_SEAT, "lead"); assert.ok(result.env?.PASEO_FACTORY_CORRELATION);
 });
+
+test("reusing a provisioned request in another Project resolves that Project's mode afresh", async t => {
+  const { injectRoleOnCreate } = await import("../plugin/server/roles.ts");
+  const { ensureProjectRegistered } = await import("../plugin/server/core/project.ts");
+  const { switchExecution } = await import("../plugin/server/core/scrum/execution.ts");
+  const state = makeTempDir(), slp = makeTempDir(), scrum = makeTempDir(), userHome = makeTempDir(); for (const dir of [state, slp, scrum, userHome]) disposeDir(t, dir);
+  for (const repo of [slp, scrum]) { writeFileSync(join(repo, "README.md"), "fixture"); gitCommitAll(repo); }
+  const project = ensureProjectRegistered(state, scrum); assert.ok(project.ok);
+  await switchExecution({ state, slug: project.slug, mode: "scrum", blockers: [], rotate: async () => {} });
+  const original = injectRoleOnCreate({ config: { cwd: slp, provider: "factory-lead", title: "Lead" } } as AgentCreateRequest, state, userHome)!;
+  const moved = injectRoleOnCreate({ ...original, config: { ...original.config, cwd: scrum, title: "Scrum Lead" } }, state, userHome);
+  assert.ok(moved, "stale env must not authenticate the new workspace as the old Project");
+  assert.equal(moved.env?.PASEO_FACTORY_PROJECT, project.slug);
+  assert.notEqual(moved.env?.PASEO_FACTORY_CORRELATION, original.env?.PASEO_FACTORY_CORRELATION);
+  const mcp = moved.config.mcpServers as Record<string, { args: string[] }>;
+  assert.equal(mcp.paseo_factory.args[mcp.paseo_factory.args.indexOf("--mode") + 1], "scrum");
+  assert.doesNotMatch(moved.config.systemPrompt!, /You are the Lead seat of the paseo-factory verification loop/);
+});
