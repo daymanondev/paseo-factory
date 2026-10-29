@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.60] - 2026-10-29
+
+Auto-dispatch Scrum Lead wakeup on UI design approval (`design.decide` / `supervisor.decision`) and exclude human UI review wait time (`awaiting-ui-approval`) from `maxElapsedMs`.
+
+### Fixed
+
+- Dispatch a `lead_dispatch` wakeup message to `Scrum Lead` immediately when `design.decide` or `supervisor.decision` records a UI design decision (`approved`, `changes_requested`, or `waived`) so `Scrum Lead` automatically resumes Stage 4 (`Senior Dev`) or UX rework without staying idle.
+- Extend `run.budgets.maxElapsedMs` by the human wait interval spent in `awaiting-ui-approval` when `design_decided` is folded so human review latency never exhausts the active execution time budget.
+
 ## [0.0.59] - 2026-10-29
 
 Fix Kanban card layout overflow, surface Agile Scrum pipeline and UI Mockup approval directly on the `Tasks` tab, and filter out zombie tasks from cancelled Scrum runs.

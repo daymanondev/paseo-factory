@@ -1707,6 +1707,20 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
             return { ok: true as const, data: commandRun(deps.stateDir, project.slug, input.runId!, { requestId: `${input.requestId}:cancelled`, expectedRevision: current.revision, type: "phase_changed", phase: "cancelled", reason: requested.cancellation!.reason, telemetry: scrumTelemetry(current, deps.factory.ledger.events) }) };
           });
         }
+        const targetRunBefore =
+          project?.ok && (input.operation === "design.decide" || input.operation === "supervisor.decision")
+            ? (() => {
+                try {
+                  return input.runId
+                    ? readRun(deps.stateDir, project.slug, input.runId)
+                    : listRuns(deps.stateDir, project.slug).find((r) => !terminalRun(r) && !r.cancellation);
+                } catch {
+                  return undefined;
+                }
+              })()
+            : undefined;
+        const previousDecision = targetRunBefore?.design?.decision;
+        const previousDecisionDigest = targetRunBefore?.design?.digest;
         const execute = async () => {
           const currentWork = project?.ok ? await executionWork(project, context) : work;
           const updatesRoster = ["config.set", "config.reset", "profile.apply"].includes(input.operation);
@@ -1718,7 +1732,44 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           }
           return { ok: true as const, data };
         };
-        return project?.ok ? await withExecutionLane(deps.stateDir, project.slug, execute) : await execute();
+        const result = project?.ok ? await withExecutionLane(deps.stateDir, project.slug, execute) : await execute();
+        const decidedRun = result.data as {
+          runId?: string;
+          phase?: string;
+          design?: { revision?: number; digest?: string; decision?: string; rationale?: string; findings?: string[] };
+        } | undefined;
+        if (
+          project?.ok &&
+          (input.operation === "design.decide" || input.operation === "supervisor.decision") &&
+          deps.leadDispatch !== undefined &&
+          decidedRun?.runId &&
+          decidedRun.design?.decision &&
+          (previousDecision !== decidedRun.design.decision || previousDecisionDigest !== decidedRun.design.digest)
+        ) {
+          const decision = decidedRun.design.decision;
+          const findingsLine =
+            Array.isArray(decidedRun.design.findings) && decidedRun.design.findings.length > 0
+              ? `\nFindings: ${decidedRun.design.findings.join("; ")}`
+              : "";
+          const nextStep =
+            decision === "changes_requested"
+              ? "Run phase is now 'design'. Dispatch UX rework to address the requested changes, re-verify readiness, and submit a new design review."
+              : "Run phase is now 'implementation'. Proceed immediately with Stage 4 (Senior Dev): contract and spawn the implementation stories from sprint-backlog.md.";
+          try {
+            await deps.leadDispatch({
+              id: `${input.requestId}:lead-notify`,
+              kind: "lead_dispatch",
+              workspace: project.root,
+              runId: decidedRun.runId,
+              from: authority === "supervisor" ? "supervisor" : "owner",
+              ...(authority === "supervisor" ? { seat: "supervisor" as const } : {}),
+              message: `UI DESIGN DECISION RECORDED — run ${decidedRun.runId}, design revision ${decidedRun.design.revision ?? 1} (digest ${decidedRun.design.digest ?? ""}): ${decision.toUpperCase()}.\nRationale: ${decidedRun.design.rationale ?? ""}${findingsLine}\n${nextStep}`,
+            });
+          } catch (err) {
+            log(`scrum: lead wakeup after ${input.operation} failed — ${messageOf(err)}`);
+          }
+        }
+        return result;
       } catch (error) { return failure(codeOf(error), messageOf(error)); }
     },
     async historyUpgrade(input: UpgradeInput) {

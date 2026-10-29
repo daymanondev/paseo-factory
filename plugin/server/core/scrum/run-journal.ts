@@ -507,6 +507,9 @@ function apply(run: ScrumRun, cmd: RunCommand, now: number): void {
           : trackKind(run.track) === "ui"
             ? "awaiting-ui-approval"
             : "implementation";
+      if (run.phase === "awaiting-ui-approval") {
+        (run as { awaitingApprovalSince?: number }).awaitingApprovalSince ??= now;
+      }
       break;
     case "design_review_requested":
       if (
@@ -530,8 +533,9 @@ function apply(run: ScrumRun, cmd: RunCommand, now: number): void {
         );
       run.design = cmd.design;
       run.phase = "awaiting-ui-approval";
+      (run as { awaitingApprovalSince?: number }).awaitingApprovalSince ??= now;
       break;
-    case "design_decided":
+    case "design_decided": {
       if (
         !run.design ||
         cmd.revision !== run.design.revision ||
@@ -550,6 +554,11 @@ function apply(run: ScrumRun, cmd: RunCommand, now: number): void {
           "invalid-design-decision",
           "actor, decision and rationale required",
         );
+      const waitStart = (run as { awaitingApprovalSince?: number }).awaitingApprovalSince;
+      if (typeof waitStart === "number" && Number.isFinite(waitStart) && now > waitStart) {
+        run.budgets.maxElapsedMs += now - waitStart;
+      }
+      delete (run as { awaitingApprovalSince?: number }).awaitingApprovalSince;
       run.design = {
         ...run.design,
         decision: cmd.decision,
@@ -575,6 +584,7 @@ function apply(run: ScrumRun, cmd: RunCommand, now: number): void {
         run.readiness = undefined;
       }
       break;
+    }
     case "fix_reserved":
       if (!safeId(cmd.task)) throw new FactoryError("invalid-task", cmd.task);
       if (run.fixReservations.some((r) => r.task === cmd.task)) break;
@@ -624,6 +634,7 @@ function apply(run: ScrumRun, cmd: RunCommand, now: number): void {
   }
 }
 function decorateRun(run: ScrumRun): ScrumRun {
+  delete (run as { awaitingApprovalSince?: number }).awaitingApprovalSince;
   run.requiredRoles = requiredRoles(run.track);
   run.uiApprovalGate = { status: run.design?.decision ?? (trackKind(run.track) === "ui" ? "pending" : "not-required"), revision: run.design?.revision ?? 0, ...(run.design ? { digest: run.design.digest } : {}) };
   return run;
