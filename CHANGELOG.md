@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.58] - 2026-10-29
+
+Make Project reset a clean-slate operation and strengthen Scrum/MCP lifecycle isolation.
+
+### Fixed
+
+- Resolve standing seats by their registered canonical ID, falling back to the most recently updated seat; retire every duplicate Supervisor/Lead and serialize concurrent seat ensures.
+- Permanently scrub reset/deleted Projects' Git refusal logs and purge stale correlations, retaining standing-seat tokens when `--keep-seats` is used.
+- Reset a Project's current branch to one initial commit and remove previous product files while preserving `.gitignore`, `.worktreeinclude`, `.agents`, `.claude`, and Project Lane/execution configuration. Support linked-worktree Projects and protect the plugin's own repository.
+- Refuse replacement creation after failed seat archival and prevent unscoped Supervisor revocation from crossing Project boundaries.
+- Preserve Scrum lifecycle replay and Lead authority when daemon labels are missing; resolve the current workspace before reusing MCP seat provisioning.
+
+### Added
+
+- Isolated SLP/Scrum MCP catalogs, natural-language Scrum directive admission, and complete lifecycle/worktree bridge primitives.
+
 ## [0.0.56] - 2026-10-29
 
 Enforce mandatory confirmation modal on Project execution mode switches and make `All projects` strictly view-only.
