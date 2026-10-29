@@ -23,7 +23,7 @@ const operation: ToolDefinition = {
 export const scrumCatalog: Catalog = {
   tools: {
     ...sharedTools,
-    supervisor_dispatch_lead: extendTool(sharedTools.supervisor_dispatch_lead, { runId, scrum: { type: "object", description: "Optional admission overrides: initiativeId, track, rationale, ownedPaths, budgets." } }),
+    supervisor_dispatch_lead: extendTool(sharedTools.supervisor_dispatch_lead, { runId, scrum: { type: "object", properties: { initiativeId: string, track: { type: "string", enum: ["quick", "standard", "enterprise", "small", "backend", "ui"] }, rationale: string, ownedPaths: { type: "array", items: string }, budgets: { type: "object" } }, description: "Optional admission overrides; omitted values derive from the directive." } }),
     lead_set_contract: extendTool(sharedTools.lead_set_contract, { runId, role: specialist, artifactRefs: { type: "array", items: { type: "object" } } }),
     lead_spawn_agent: extendTool(sharedTools.lead_spawn_agent, { runId, role: specialist }),
     lead_dispatch_agent: extendTool(sharedTools.lead_dispatch_agent, { runId, role: specialist }),

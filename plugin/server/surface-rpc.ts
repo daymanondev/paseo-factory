@@ -1709,7 +1709,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           const currentWork = project?.ok ? await executionWork(project, context) : work;
           const updatesRoster = ["config.set", "config.reset", "profile.apply"].includes(input.operation);
           const before = project?.ok && updatesRoster ? readScrumConfig(deps.stateDir, project.slug) : undefined;
-          const data = scrumOperation(input, { factory: deps.factory, ...(project?.ok ? { slug: project.slug, root: project.root } : {}), authority, actor: caller?.actor ?? "owner", activeAgents: currentWork.activeAgents, pendingDirectives: currentWork.pendingDirectives });
+          const data = await scrumOperation(input, { factory: deps.factory, ...(project?.ok ? { slug: project.slug, root: project.root } : {}), authority, actor: caller?.actor ?? "owner", activeAgents: currentWork.activeAgents, pendingDirectives: currentWork.pendingDirectives });
           if (project?.ok && before && updatesRoster && readExecution(deps.stateDir, project.slug).mode === "scrum" && !listRuns(deps.stateDir, project.slug).some(run => !terminalRun(run))) {
             const after = readScrumConfig(deps.stateDir, project.slug);
             if (after) await syncLiveSeatsAfterLaneUpdate({ projectSlug: project.slug, projectRoot: project.root, before: before.lanes, after: after.lanes, executionMode: "scrum", context });

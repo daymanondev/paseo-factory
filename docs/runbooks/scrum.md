@@ -159,8 +159,8 @@ openQuestions, conflicts } }]` on the readiness/QA operation. Readiness without
 `artifactRefs` inspects current readiness; with refs it records verified readiness.
 Design submission additionally requires `browserEvidence`. QA and promotion name
 `auditArtifact` and `bundlePath`. Fix reservation names the new fix `task`.
-Preview returns the existing self-contained, sandboxed HTML payload.
-All evidence and completion checks still run through the verified controller.
+Preview returns the attested HTML plus a loopback URL; optional `subpath` chooses an attested HTML entry and `port` chooses the loopback port (0 allocates one). Listeners expire after 15 minutes.
+All evidence and completion checks still run through the verified controller. Durable operation receipts freeze inferred refs and design identity across crash/retry, including completion that makes a run terminal.
 
 After an explicit Owner decision, Supervisor calls `supervisor_scrum_decision`
 with `decision` and `rationale`; run/revision/digest default to the current review.

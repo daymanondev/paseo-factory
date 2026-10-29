@@ -1,10 +1,11 @@
+import { registerOwnedPaths } from "./core/scrum/ownership.ts";
 /** Scrum specialist contract defaults and dynamic ownership. */
 import { dirname, join } from "node:path";
 import { FactoryError } from "./core/errors.ts";
 import type { Factory } from "./core/factory.ts";
 import { resolveProject } from "./core/project.ts";
 import { assertExecutionReady } from "./core/scrum/execution.ts";
-import { commandRun, readRun, listRuns, terminalRun } from "./core/scrum/run-journal.ts";
+import { commandRun, readRun, terminalRun } from "./core/scrum/run-journal.ts";
 import { resolveActiveRun } from "./core/scrum/seat-operations.ts";
 import { assertDevReady } from "./core/scrum/approval.ts";
 import { gitBytes, artifactAt, verifyRefs, sha256 } from "./core/scrum/artifacts.ts";
@@ -251,15 +252,7 @@ export function prepareScrumContract(
   if (scope.some(path => !safePath(path) || path.startsWith("/") || /[*?\[\]{}]/.test(path) ||
       (role !== "dev" && !path.startsWith(prefix)) || (path.startsWith(".scratch/") && !path.startsWith(prefix))))
     throw new FactoryError("artifact-not-owned", "specialists must stay within their initiative; Dev implementation paths must be explicit");
-  const additions = scope.filter(path => !run.ownedPaths.includes(path));
-  const overlaps = (a: string, b: string) => a === b || a.startsWith(b + "/") || b.startsWith(a + "/");
-  for (const other of listRuns(factory.stateDir, project.slug).filter(other => other.runId !== run.runId && !terminalRun(other))) {
-    if (additions.some(path => other.ownedPaths.some(owned => overlaps(path, owned))))
-      throw new FactoryError("artifact-ownership-conflict", "path belongs to another active run");
-  }
-  if (additions.length) run = commandRun(factory.stateDir, project.slug, run.runId, {
-    type: "paths_registered", paths: additions, requestId: `${operationId}:paths`, expectedRevision: run.revision,
-  });
+  run = registerOwnedPaths(factory.stateDir, project.slug, run, scope, `${operationId}:paths`);
   request = { ...request, artifact };
   let gate: string | undefined;
   if (role !== "dev" && request.gate) {

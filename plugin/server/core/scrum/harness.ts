@@ -85,6 +85,7 @@ export function provisionScrumHarness(input: {
   identity: ScrumHarnessIdentity;
   generation: string;
   userHome?: string;
+  workspace?: string;
 }): string {
   const { state, slug, identity, authority } = input;
   const root = scopeDir(state, slug);
@@ -131,7 +132,7 @@ export function provisionScrumHarness(input: {
     sourceAgentDir: join(input.userHome ?? homedir(), ".pi/agent"),
     appendSystemPrompt: renderScrumPrompt(role, {
       project: slug,
-      workspace: readProjectRegistration(state, slug)?.root,
+      workspace: input.workspace ?? (identity.kind === "task" ? join(scopeDir(state, slug), "worktrees", identity.task) : readProjectRegistration(state, slug)?.root),
       ...(identity.kind === "task"
         ? {
             task: identity.task,

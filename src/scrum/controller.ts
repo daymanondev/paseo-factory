@@ -47,6 +47,7 @@ import { completionBlockers } from "./completion.ts";
 import { verifyQaFiles } from "./qa-bundle.ts";
 import { gitBytes } from "./artifacts.ts";
 import { renderPreview } from "./preview.ts";
+import { servePreview } from "./preview-server.ts";
 export interface ScrumOperation {
   operation: string;
   runId?: string;
@@ -178,10 +179,14 @@ export function scrumOperation(input: ScrumOperation, ctx: ScrumOperationContext
   const run = readRun(state, slug, input.runId!);
   if (input.operation === "track.select") {
     if (ctx.authority !== "lead") fail("scrum-track-authority", "Scrum Lead selects the track");
+    const command: RunCommand = { type: "track_selected", track: p.track as RunTrack, rationale: p.rationale as string, requestId: input.requestId, expectedRevision: input.expectedRevision! };
+    const replayed = replayRunCommand(state, slug, run.runId, command);
+    if (replayed) return replayed;
     if (run.tasks.some(t => t.role === "dev" && projectTask(ctx.factory.ledger.events, t.task).settled)) fail("scrum-track-frozen", "Dev work already landed");
-    return commandRun(state, slug, run.runId, { type: "track_selected", track: p.track as RunTrack, rationale: p.rationale as string, requestId: input.requestId, expectedRevision: input.expectedRevision! });
+    return commandRun(state, slug, run.runId, command);
   }
   if (input.operation === "preview") return renderPreview(root, run);
+  if (input.operation === "preview.url") return servePreview(root, run, { subpath: p.subpath as string | undefined, port: p.port as number | undefined });
   if (input.operation === "design.decide")
     return decideDesign({
       state,
@@ -237,6 +242,7 @@ export function scrumOperation(input: ScrumOperation, ctx: ScrumOperationContext
       expectedRevision: input.expectedRevision,
     } as RunCommand;
     if (
+      cmd.type === "operation_intended" ||
       cmd.type === "track_selected" ||
       cmd.type === "paths_registered" ||
       cmd.type === "design_decided" ||

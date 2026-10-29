@@ -64,6 +64,7 @@ export interface DesignReview {
   digest: string;
   refs: ArtifactRef[];
   browserEvidence: ArtifactRef[];
+  waiverReason?: string;
   decision?: "approved" | "changes_requested" | "waived";
   actor?: string;
   decidedBy?: string;
@@ -105,7 +106,7 @@ export interface ScrumRun {
   createdAt: string;
   phase: RunPhase;
   fixRounds: number;
-  fixReservations: { task: string; requestId: string }[];
+  fixReservations: { task: string; requestId: string; parentTaskId?: string; summary?: string; ownedPaths?: string[] }[];
   tasks: RunTask[];
   ownedPaths: string[];
   artifacts: ArtifactRef[];
@@ -120,6 +121,7 @@ export interface ScrumRun {
   qaAudits: ArtifactRef[];
   promotions: ArtifactRef[];
   decisions: number;
+  operationIntents?: { operationId: string; fingerprint: string; payload: Record<string, unknown> }[];
 }
 interface BaseCommand {
   requestId: string;
@@ -181,9 +183,10 @@ export type RunCommand = BaseCommand &
         actor: string;
         rationale: string;
       }
+    | { type: "operation_intended"; operationId: string; fingerprint: string; payload: Record<string, unknown> }
     | { type: "track_selected"; track: RunTrack; rationale: string }
     | { type: "paths_registered"; paths: string[] }
-    | { type: "fix_reserved"; task: string }
+    | { type: "fix_reserved"; task: string; parentTaskId?: string; summary?: string; ownedPaths?: string[] }
     | {
         type: "qa_recorded";
         ref: ArtifactRef;
@@ -266,6 +269,14 @@ function apply(run: ScrumRun, cmd: RunCommand, now: number): void {
   const task =
     "task" in cmd ? run.tasks.find((t) => t.task === cmd.task) : undefined;
   switch (cmd.type) {
+    case "operation_intended": {
+      if (!cmd.operationId || !cmd.fingerprint || !cmd.payload || typeof cmd.payload !== "object")
+        throw new FactoryError("invalid-operation-intent", "operation identity and payload required");
+      const intents = run.operationIntents ??= [];
+      if (intents.some(intent => intent.operationId === cmd.operationId)) throw new FactoryError("run-request-conflict", cmd.operationId);
+      intents.push({ operationId: cmd.operationId, fingerprint: cmd.fingerprint, payload: cmd.payload });
+      break;
+    }
     case "track_selected":
       if (!validTrack(cmd.track) || !cmd.rationale?.trim())
         throw new FactoryError("invalid-scrum-track", "track and rationale required");
@@ -573,7 +584,7 @@ function apply(run: ScrumRun, cmd: RunCommand, now: number): void {
           "qa-fix-budget-exhausted: escalate to Supervisor",
         );
       run.fixRounds++;
-      run.fixReservations.push({ task: cmd.task, requestId: cmd.requestId });
+      run.fixReservations.push({ task: cmd.task, requestId: cmd.requestId, ...(cmd.parentTaskId === undefined ? {} : { parentTaskId: cmd.parentTaskId }), ...(cmd.summary === undefined ? {} : { summary: cmd.summary }), ...(cmd.ownedPaths === undefined ? {} : { ownedPaths: cmd.ownedPaths }) });
       run.phase = "fixing";
       break;
     case "qa_recorded":

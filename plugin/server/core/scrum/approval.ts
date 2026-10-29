@@ -2,7 +2,7 @@ import { trackKind } from "./tracks.ts";
 import { safePath } from "./types.ts";
 import { FactoryError } from "../errors.ts";
 import { designDigest, verifyRefs, gitBytes, artifactAt } from "./artifacts.ts";
-import { commandRun, readRun, terminalRun } from "./run-journal.ts";
+import { commandRun, readRun, terminalRun, replayRunCommand } from "./run-journal.ts";
 import type { ScrumRun } from "./run-journal.ts";
 export function verifyCompleteDesign(
   root: string,
@@ -103,11 +103,7 @@ export function decideDesign(input: {
       "ui-decision-unauthorized",
       "Owner or explicitly instructed Supervisor required",
     );
-  const run = readRun(input.state, input.slug, input.runId);
-  if (!run.design) throw new FactoryError("ui-review-missing", input.runId);
-  verifyCompleteDesign(input.root, run, run.design);
-  verifyRefs(input.root, run.design.refs, run.ownedPaths);
-  return commandRun(input.state, input.slug, input.runId, {
+  const command: import("./run-journal.ts").RunCommand = {
     type: "design_decided",
     requestId: input.requestId,
     expectedRevision: input.expectedRevision,
@@ -120,7 +116,14 @@ export function decideDesign(input: {
     actorRole: input.authority,
     ...(input.designArtifact === undefined ? {} : { designArtifact: input.designArtifact }),
     ...(input.findings === undefined ? {} : { findings: input.findings }),
-  });
+  };
+  const replayed = replayRunCommand(input.state, input.slug, input.runId, command);
+  if (replayed) return replayed;
+  const run = readRun(input.state, input.slug, input.runId);
+  if (!run.design) throw new FactoryError("ui-review-missing", input.runId);
+  verifyCompleteDesign(input.root, run, run.design);
+  verifyRefs(input.root, run.design.refs, run.ownedPaths);
+  return commandRun(input.state, input.slug, input.runId, command);
 }
 
 /** Browser evidence describes real checks; static HTML lint alone never unlocks Dev. */

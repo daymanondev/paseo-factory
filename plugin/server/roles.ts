@@ -130,7 +130,7 @@ export function factoryEnvFor(
 ): Record<string, string> {
   ensureFactoryBinScripts(input.stateDir);
   const execution = input.execution === null ? undefined : input.execution ?? resolveScrumIdentity(input.stateDir, input.project.slug, input.task);
-  const roleHome = execution !== undefined ? provisionScrumHarness({ state: input.stateDir, slug: input.project.slug, authority: role, identity: execution, generation: input.correlationId ?? "initial", userHome: input.userHome }) : provisionPiAgentHome({
+  const roleHome = execution !== undefined ? provisionScrumHarness({ state: input.stateDir, slug: input.project.slug, authority: role, identity: execution, generation: input.correlationId ?? "initial", userHome: input.userHome, workspace: input.task ? join(input.stateDir, "projects", input.project.slug, "worktrees", input.task) : input.project.root }) : provisionPiAgentHome({
     stateDir: input.stateDir,
     role,
     sourceAgentDir: join(input.userHome ?? homedir(), ".pi", "agent"),

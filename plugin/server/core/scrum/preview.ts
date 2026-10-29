@@ -1,3 +1,4 @@
+import { safePath } from "./types.ts";
 import { FactoryError } from "../errors.ts";
 import { designDigest, gitBytes, verifyRefs } from "./artifacts.ts";
 import type { ScrumRun } from "./run-journal.ts";
@@ -5,13 +6,15 @@ import type { ScrumRun } from "./run-journal.ts";
 export function renderPreview(
   root: string,
   run: ScrumRun,
+  subpath = "mockups/index.html",
 ): { html: string; runId: string; revision: number; digest: string } {
   const design = run.design;
   if (!design || designDigest(design.refs) !== design.digest)
     throw new FactoryError("preview-unavailable", "no current accepted design");
   verifyRefs(root, design.refs, run.ownedPaths);
+  if (!safePath(subpath) || subpath.startsWith("/")) throw new FactoryError("invalid-preview-path", subpath);
   const htmlRef = design.refs.find(
-    (r) => r.path === `.scratch/${run.initiativeId}/mockups/index.html`,
+    (r) => r.path === `.scratch/${run.initiativeId}/${subpath.includes("/") ? subpath : "mockups/" + subpath}`,
   );
   if (!htmlRef)
     throw new FactoryError("preview-unavailable", "mockup artifact missing");
@@ -25,7 +28,7 @@ export function renderPreview(
     (match, quote: string, asset: string) => {
       if (asset.startsWith("#") || asset.startsWith("data:")) return match;
       const ref = design.refs.find(
-        (r) => r.path === htmlRef.path.replace(/index\.html$/, "") + asset,
+        (r) => r.path === htmlRef.path.replace(/[^/]+$/, "") + asset,
       );
       if (!ref) throw new FactoryError("preview-missing-asset", asset);
       const bytes = gitBytes(root, "show", `${ref.commit}:${ref.path}`);

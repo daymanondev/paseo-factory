@@ -167,6 +167,8 @@ test("mixed Projects preserve SLP homes and freeze Scrum role/model through crea
   assert.equal(Object.hasOwn(normalizedTask.config, "thinkingOptionId"), false);
   const { resolveEffectiveProviderFamily } = await import("../plugin/server/roles.ts");
   assert.equal(resolveEffectiveProviderFamily("factory-peer", "agent", state, project.slug, "plan"), "claude");
+  writeFileSync(join(repo, "AGENTS.md"), "root-only untracked memory");
+  assert.equal(existsSync(join(wt.path, "AGENTS.md")), false);
   const injected = injectRoleOnCreate(
     {
       config: { cwd: wt.path, provider: "pi/wrong-default" },
@@ -191,6 +193,9 @@ test("mixed Projects preserve SLP homes and freeze Scrum role/model through crea
       String(contract.seq),
     ),
   );
+  const managedPrompt = readFileSync(join(injected.env!.PI_CODING_AGENT_DIR, "APPEND_SYSTEM.md"), "utf8");
+  assert.match(managedPrompt, /AGENTS.md.*absent/);
+  assert.doesNotMatch(managedPrompt, /read before acting: AGENTS.md/);
   saveScrumConfig(
     state,
     { ...config, lanes: { ...config.lanes, pm: "pi/new-plan" } },

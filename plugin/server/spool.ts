@@ -1,3 +1,5 @@
+import { spoolRequestSemanticKey } from "./core/mcp/transport.ts";
+export { spoolRequestSemanticKey } from "./core/mcp/transport.ts";
 import { prepareProjectContract } from "./execution-adapters.ts";
 import { commandRun as commandScrumRun, readRun as readScrumRun } from "./core/scrum/run-journal.ts";
 import { withExecutionLane } from "./core/scrum/execution.ts";
@@ -505,36 +507,7 @@ export function spoolRootFor(stateDir: string): string {
  * (arrays keep their order). Pure: the same body always serializes to the
  * same string.
  */
-function stableStringify(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
-  if (value !== null && typeof value === "object") {
-    const record = value as Record<string, unknown>;
-    const keys = Object.keys(record).sort();
-    return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(",")}}`;
-  }
-  return JSON.stringify(value) ?? "null";
-}
 
-/**
- * The canonical semantic key of a spool request (v0.0.31, ADR 0017 §6): the
- * stable JSON serialization of every request field EXCEPT `id`. Duplicate
- * pending files left by an offline window — a `Peer` retrying `agent_claim`
- * three times, each retry minting a fresh id — key identically, so both the
- * submit side (`plugin/bin/spool-client.mjs` `submit`, `plugin/bin/bridge.mjs`
- * `submitSpoolRequest`) and `startSpool`'s drain deduplicate on it. The
- * definition is deliberately duplicated across the three files (the bin .mjs
- * files import no plugin server code, ADR 0004, and bridge.mjs is copied
- * standalone into `<stateDir>/bin/`); `test/cli.test.ts` guards the copies
- * against drift.
- */
-export function spoolRequestSemanticKey(req: unknown): string {
-  if (req !== null && typeof req === "object" && !Array.isArray(req) && "id" in req) {
-    const rest: Record<string, unknown> = { ...(req as Record<string, unknown>) };
-    delete rest.id;
-    return stableStringify(rest);
-  }
-  return stableStringify(req);
-}
 
 function parseOptionalSeat(value: unknown): { ok: true; seat?: SpoolSeat } | { ok: false } {
   if (value === undefined) return { ok: true };

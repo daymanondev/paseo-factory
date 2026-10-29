@@ -37,11 +37,12 @@ const targets = [
   ["src/process-policy.ts", "plugin/bin/process-policy.mjs"],
 ];
 const sections = [
+  ["src/mcp/primitives.ts", "plugin/bin/bridge.mjs", "GENERATED BRIDGE PRIMITIVES", "bridgePrimitives"],
+  ["src/mcp/transport.ts", "plugin/bin/spool-client.mjs", "GENERATED SPOOL TRANSPORT", "spoolTransport"],
   ["src/mcp/catalog.ts", "plugin/bin/bridge.mjs", "GENERATED MCP CATALOG", "mcpCatalog"],
   ["src/task-status.ts", "plugin/bin/bridge.mjs", "GENERATED TASK STATUS POLICY", "taskStatusPolicy"],
   ["src/ledger-validation.ts", "plugin/bin/bridge.mjs", "GENERATED LEDGER POLICY", "ledgerValidationPolicy"],
   ["src/scope-policy.ts", "plugin/bin/agy-pre-tool-hook.mjs", "GENERATED SCOPE POLICY", "scopePolicy"],
-  ["src/worktree-policy.ts", "plugin/bin/bridge.mjs", "GENERATED WORKTREE POLICY", "worktreePolicy"],
 ];
 const updates = new Map(await Promise.all(targets.map(async ([source, target]) => [target, await compile(source)])));
 for (const [source, target, section, globalName] of sections) {

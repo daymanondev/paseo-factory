@@ -842,7 +842,7 @@ test("Scrum MCP decisions default the active design identity and keep Lead unabl
   const registry = new CorrelationRegistry(stateDir);
   const supervisor = registry.issue({ role: "supervisor", projectSlug: project.slug, projectRoot: repo });
   const lead = registry.issue({ role: "lead", projectSlug: project.slug, projectRoot: repo });
-  const spool = startSpool(stateDir, factory, { pollMs: 10, scrumCommand: async (request, caller) => ({ id: request.id, ok: true, summary: "Scrum", data: scrumOperation(request, { factory, root: repo, slug: project.slug, ...caller, activeAgents: [], pendingDirectives: false }) }) });
+  const spool = startSpool(stateDir, factory, { pollMs: 10, scrumCommand: async (request, caller) => ({ id: request.id, ok: true, summary: "Scrum", data: await scrumOperation(request, { factory, root: repo, slug: project.slug, ...caller, activeAgents: [], pendingDirectives: false }) }) });
   t.after(() => spool.stop());
   const call = async (correlation: string, name: string, args: Record<string, unknown>) => (await runMcpSession({ args: ["--state-dir", stateDir, "--correlation", correlation], cwd: repo, requests: [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }] }))[0].result as { isError?: boolean; content: { text: string }[] };
   assert.equal((await call(lead.correlationId, "supervisor_scrum_decision", { decision: "approved", rationale: "spoof" })).isError, true);
@@ -851,7 +851,10 @@ test("Scrum MCP decisions default the active design identity and keep Lead unabl
   assert.equal(readRun(stateDir, project.slug, run.runId).design?.decision, "approved");
   assert.equal(readRun(stateDir, project.slug, run.runId).design?.decidedBy, "owner");
   const snapshot = await call(lead.correlationId, "lead_scrum_operation", { action: "get" }); assert.notEqual(snapshot.isError, true);
-  const preview = await call(lead.correlationId, "lead_scrum_operation", { action: "preview" }); assert.notEqual(preview.isError, true, JSON.stringify(preview));
+  const preview = await call(lead.correlationId, "lead_scrum_operation", { action: "preview", subpath: "mockups/index.html", port: 0 }); assert.notEqual(preview.isError, true, JSON.stringify(preview));
+  const previewUrl = JSON.parse(preview.content[0].text).data.url;
+  assert.match(previewUrl, /^http:\/\/127\.0\.0\.1:\d+\/$/);
+  assert.match(await (await fetch(previewUrl)).text(), /Farm/);
   const reserve = await call(lead.correlationId, "lead_scrum_operation", { action: "fix.reserve", task: "farm-fix" }); assert.notEqual(reserve.isError, true, JSON.stringify(reserve));
   assert.equal(readRun(stateDir, project.slug, run.runId).fixRounds, 1);
 });
