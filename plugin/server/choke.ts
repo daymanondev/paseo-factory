@@ -182,6 +182,7 @@ function inferReservedSeatFromTitle(title: string | null | undefined): SeatName 
   }
   if (
     trimmed === "Lead" ||
+    trimmed === "Scrum Lead" ||
     trimmed === SEAT_TITLES.lead ||
     trimmed.startsWith("Lead — ") ||
     trimmed.startsWith("Lead - ") ||

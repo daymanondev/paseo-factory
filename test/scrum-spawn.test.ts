@@ -783,3 +783,35 @@ test("Scrum seat create and permission families use the Scrum roster and catalog
   const supported = injectRoleOnCreate(request as AgentCreateRequest, state, userHome, [{ provider: "antigravity", models: [{ id: "gemini", thinkingOptions: [{ id: "high" }] }] }])!;
   assert.equal(supported.config.thinkingOptionId, "high");
 });
+
+test("a pre-rendered Scrum Lead prompt still provisions role correlation and MCP authority", async t => {
+  const { injectRoleOnCreate } = await import("../plugin/server/roles.ts");
+  const { renderScrumPrompt } = await import("../plugin/server/core/scrum/prompts.ts");
+  const { CorrelationRegistry } = await import("../plugin/server/core/correlations.ts");
+  const { ensureProjectRegistered } = await import("../plugin/server/core/project.ts");
+  const { switchExecution } = await import("../plugin/server/core/scrum/execution.ts");
+  const state = makeTempDir(), repo = makeTempDir(), userHome = makeTempDir(); for (const dir of [state, repo, userHome]) disposeDir(t, dir);
+  writeFileSync(join(repo, "README.md"), "fixture"); gitCommitAll(repo);
+  const project = ensureProjectRegistered(state, repo); assert.ok(project.ok);
+  await switchExecution({ state, slug: project.slug, mode: "scrum", blockers: [], rotate: async () => {} });
+  const request = { config: { cwd: repo, provider: "factory-lead", title: "Scrum Lead", systemPrompt: renderScrumPrompt("lead", { project: project.slug, workspace: repo }) } } as AgentCreateRequest;
+  const injected = injectRoleOnCreate(request, state, userHome);
+  assert.ok(injected, "rendered prose alone must not bypass correlation or provider provisioning");
+  assert.equal(injected.env?.PASEO_FACTORY_SEAT, "lead");
+  const correlation = new CorrelationRegistry(state).resolve(injected.env!.PASEO_FACTORY_CORRELATION!);
+  assert.equal(correlation?.role, "lead"); assert.equal(correlation?.projectSlug, project.slug);
+  assert.equal(injectRoleOnCreate(injected, state, userHome), undefined, "already provisioned request stays idempotent");
+});
+
+test("a Scrum Lead title provisions the Lead role when the daemon omits top-level labels", async t => {
+  const { injectRoleOnCreate } = await import("../plugin/server/roles.ts");
+  const { ensureProjectRegistered } = await import("../plugin/server/core/project.ts");
+  const { switchExecution } = await import("../plugin/server/core/scrum/execution.ts");
+  const state = makeTempDir(), repo = makeTempDir(), userHome = makeTempDir(); for (const dir of [state, repo, userHome]) disposeDir(t, dir);
+  writeFileSync(join(repo, "README.md"), "fixture"); gitCommitAll(repo);
+  const project = ensureProjectRegistered(state, repo); assert.ok(project.ok);
+  await switchExecution({ state, slug: project.slug, mode: "scrum", blockers: [], rotate: async () => {} });
+  const result = injectRoleOnCreate({ config: { cwd: repo, provider: "antigravity/claude-sonnet-5-5-high", title: "Scrum Lead" } } as AgentCreateRequest, state, userHome);
+  assert.ok(result, "Scrum Lead display title must retain Lead authority without top-level labels");
+  assert.equal(result.env?.PASEO_FACTORY_SEAT, "lead"); assert.ok(result.env?.PASEO_FACTORY_CORRELATION);
+});

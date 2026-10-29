@@ -226,6 +226,7 @@ function inferRoleSeatFromTitleOrLabels(
   if (
     trimmed === SEAT_TITLES.lead ||
     trimmed === "Lead" ||
+    trimmed === "Scrum Lead" ||
     trimmed.startsWith("Lead — ") ||
     trimmed.startsWith("Lead - ") ||
     trimmed.startsWith("Lead (")
@@ -481,7 +482,6 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
   userHome?: string,
   providers?: readonly ProviderCatalogEntry[],
 ): R | undefined {
-  if ((request.config.systemPrompt ?? "").includes(FOOTER_MARK) || (request.config.systemPrompt ?? "").includes(SCRUM_PROMPT_MARK)) return undefined; // already injected — idempotent
   const reqLabels =
     (request as { labels?: Record<string, string> }).labels ??
     (request.config as { labels?: Record<string, string> }).labels;
@@ -495,6 +495,10 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
   const envSeat = parseRoleName(request.env?.PASEO_FACTORY_SEAT);
   const titleSeat = inferRoleSeatFromTitleOrLabels(request.config.title, reqLabels);
   const role: RoleName | undefined = providerSeat ?? envSeat ?? titleSeat;
+  const hasPrompt = (request.config.systemPrompt ?? "").includes(FOOTER_MARK) || (request.config.systemPrompt ?? "").includes(SCRUM_PROMPT_MARK);
+  const bound = request.env?.PASEO_FACTORY_CORRELATION ? correlations.resolve(request.env.PASEO_FACTORY_CORRELATION) : undefined;
+  if (hasPrompt && bound !== undefined && bound.role === role && bound.projectSlug === request.env?.PASEO_FACTORY_PROJECT) return undefined;
+
 
   // A managed Task worktree keeps its task-bound path — the correlation and
   // the contract both carry the task id — whatever named the role.
@@ -607,7 +611,7 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
 }
 
 function appendContract(existing: string | undefined, contract: string): string {
-  return existing === undefined || existing === "" ? contract : `${existing}\n\n${contract}`;
+  return existing === undefined || existing === "" ? contract : existing.includes(contract) ? existing : `${existing}\n\n${contract}`;
 }
 
 /**
