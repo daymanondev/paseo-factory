@@ -50,6 +50,16 @@ export function shortenHomePath(path: string): string {
 }
 
 function headlineOf(view: FactoryView): string {
+  const scrumPhase =
+    view.project !== null
+      ? view.execution?.selectedMode === "scrum"
+        ? view.execution.run?.phase ?? null
+        : null
+      : (view.projects.find(
+          (p) => p.executionMode === "scrum" && (p.activeScrumPhase === "awaiting-ui-approval" || p.activeScrumPhase === "blocked"),
+        )?.activeScrumPhase ?? null);
+  if (scrumPhase === "awaiting-ui-approval") return "UI mockup awaiting your approval";
+  if (scrumPhase === "blocked") return "Scrum run blocked — needs attention";
   if (view.kpis.needsHuman > 0) return `${view.kpis.needsHuman} task${view.kpis.needsHuman === 1 ? "" : "s"} need${view.kpis.needsHuman === 1 ? "s" : ""} you`;
   if (view.kpis.running > 0) return `${view.kpis.running} under the gate`;
   if (view.kpis.readyToAccept > 0) return `${view.kpis.readyToAccept} green attempt${view.kpis.readyToAccept === 1 ? "" : "s"} await acceptance`;

@@ -6115,3 +6115,57 @@ test("v0.0.58 resets a linked-worktree Project without changing the main branch"
   assert.equal(existsSync(join(worktree, "README.md")), false);
   assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: main.root, encoding: "utf8" }), original);
 });
+
+test("snapshot and executionWork omit unaccepted zombie tasks from cancelled Scrum runs while keeping accepted tasks", async (t) => {
+  const project = makeProject(t, "cancelled-scrum-run");
+  const { handlers, factory, stateDir } = makeSurface(t);
+  await handlers.executionSetMode({ projectRoot: project.root, mode: "scrum" });
+  const runId = "run-cancelled-1";
+  const created = await handlers.scrumCommand({
+    projectRoot: project.root,
+    operation: "run.create",
+    runId,
+    requestId: "create-1",
+    payload: { initiativeId: "farm-3d", track: "ui", rationale: "Greenfield" },
+  });
+  assert.ok(created.ok, JSON.stringify(created));
+
+  // Register a task bound to the Scrum run and dispatch it, then cancel the Scrum run without settling the task
+  factory.setContract({
+    task: "zombie-pm-prd",
+    workspace: project.root,
+    gate: "true",
+    artifact: "prd.md",
+    description: "OUTCOME: Write prd.md",
+    by: "lead",
+    execution: { mode: "scrum", runId, role: "pm", policyRevision: "v1", configRevision: 1, artifactRefs: [] },
+  });
+  factory.requestSpawn({
+    task: "zombie-pm-prd",
+    provider: "zai/glm-5.3",
+    arity: 1,
+    worktree: join(stateDir, "projects", project.slug, "worktrees", "zombie-pm-prd"),
+  });
+
+  const rev = (created.data as { revision: number }).revision;
+  const cancelled = await handlers.scrumCommand({
+    projectRoot: project.root,
+    operation: "run.cancel",
+    runId,
+    expectedRevision: rev,
+    requestId: "cancel-1",
+    payload: { reason: "Switch provider from ZAI" },
+  });
+  assert.ok(cancelled.ok, JSON.stringify(cancelled));
+
+  const snapScoped = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(snapScoped.ok);
+  assert.equal(
+    snapScoped.view.tasks.some((task) => task.task === "zombie-pm-prd"),
+    false,
+    "cancelled Scrum run's unaccepted task does not appear as a zombie In Progress task",
+  );
+  assert.equal(snapScoped.view.kpis.running, 0);
+  assert.equal(snapScoped.view.execution?.busyReason ?? null, null);
+});
+

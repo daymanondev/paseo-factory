@@ -10,7 +10,7 @@ import type { ReactNode } from "react";
 import { Text, View } from "react-native";
 import type { FactoryView } from "../../shared/view.ts";
 import { Btn, Card, Chip, Pill, SegmentedControl } from "../kit/pill.tsx";
-import { RADIUS, SPACING, text, tint } from "../kit/theme.ts";
+import { CONTROL_SM, RADIUS, SPACING, text, tint } from "../kit/theme.ts";
 import { AgentCard, Rail, SeatNode } from "./seat-graph.tsx";
 export type ScrumLane =
   | "supervisor"
@@ -223,33 +223,89 @@ function MockupApproval({
   if (!run?.design)
     return <Text style={text(theme, "meta")}>Awaiting design evidence.</Text>;
   return (
-    <View style={{ gap: SPACING[2] }}>
-      <Text style={text(theme, "rowTitle")}>UI Mockup Preview & Approval</Text>
-      <Text style={text(theme, "code")}>
-        Design r{run.design.revision} · {run.design.digest.slice(0, 16)}
+    <Card
+      theme={theme}
+      gap={SPACING[2]}
+      style={{
+        borderColor: theme.colors.statusWarning,
+        backgroundColor: tint(theme.colors.statusWarning, "10"),
+      }}
+    >
+      <View
+        style={{
+          flexDirection: "row",
+          alignItems: "center",
+          justifyContent: "space-between",
+          flexWrap: "wrap",
+          gap: SPACING[2],
+        }}
+      >
+        <View
+          style={{
+            flexDirection: "row",
+            alignItems: "center",
+            flexWrap: "wrap",
+            gap: SPACING[1.5],
+          }}
+        >
+          <Icon name="Eye" size={14} color={theme.colors.statusWarning} />
+          <Text style={text(theme, "rowTitle")}>
+            UI Mockup Preview & Approval
+          </Text>
+          <Pill
+            theme={theme}
+            label={`Design r${run.design.revision} · ${run.design.digest.slice(0, 12)}`}
+            tone="statusWarning"
+            lit
+            mono
+          />
+        </View>
+        <Btn
+          theme={theme}
+          small
+          solid
+          icon="ExternalLink"
+          label="Open Mockup Preview"
+          tone="accent"
+          disabled={busy}
+          onPress={() =>
+            void action?.("preview", {}, run.runId).then((reply) => {
+              const data = reply.data as
+                | { html?: string; digest?: string }
+                | undefined;
+              if (reply.ok && data?.html && data.digest)
+                setPreview({ html: data.html, digest: data.digest });
+            })
+          }
+        />
+      </View>
+      <Text style={text(theme, "meta")}>
+        Stage 4 (Senior Dev) is paused until you preview the UI mockup and record an Owner decision below.
       </Text>
-      <Btn
-        theme={theme}
-        small
-        icon="ExternalLink"
-        label="Open Mockup Preview"
-        disabled={busy}
-        onPress={() =>
-          void action?.("preview", {}, run.runId).then((reply) => {
-            const data = reply.data as
-              | { html?: string; digest?: string }
-              | undefined;
-            if (reply.ok && data?.html && data.digest)
-              setPreview({ html: data.html, digest: data.digest });
-          })
-        }
-      />
-      <TextInput
-        value={rationale}
-        onChangeText={setRationale}
-        placeholder="Decision rationale"
-        accessibilityLabel="Design decision rationale"
-      />
+      <View
+        style={{
+          minHeight: CONTROL_SM,
+          justifyContent: "center",
+          borderWidth: 1,
+          borderColor: theme.colors.border,
+          borderRadius: RADIUS.md,
+          backgroundColor: theme.colors.surface0,
+        }}
+      >
+        <TextInput
+          value={rationale}
+          onChangeText={setRationale}
+          placeholder="Decision rationale (required to Approve / Request Changes / Waive)…"
+          placeholderTextColor={theme.colors.foregroundMuted}
+          accessibilityLabel="Design decision rationale"
+          style={{
+            paddingHorizontal: SPACING[2.5],
+            paddingVertical: 5,
+            color: theme.colors.foreground,
+            fontSize: 12,
+          }}
+        />
+      </View>
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: SPACING[2] }}>
         {(["approved", "changes_requested", "waived"] as const).map(
           (decision) => (
@@ -257,6 +313,14 @@ function MockupApproval({
               key={decision}
               theme={theme}
               small
+              solid={decision === "approved"}
+              tone={
+                decision === "approved"
+                  ? "statusSuccess"
+                  : decision === "changes_requested"
+                    ? "statusWarning"
+                    : "foregroundMuted"
+              }
               label={
                 decision === "approved"
                   ? "Approve"
@@ -301,6 +365,235 @@ function MockupApproval({
             : null}
         </Modal.Content>
       </Modal>
+    </Card>
+  );
+}
+
+export function ScrumWorkflowPipeline({
+  theme,
+  view,
+  action,
+  actions,
+}: {
+  theme: PluginTheme;
+  view: FactoryView;
+  action?: ScrumAction;
+  actions: { busy: boolean; openAgent(id: string): void };
+}) {
+  const run = view.execution?.run;
+  const currentStage = run
+    ? STAGES.findIndex((stage) => stage.phases.includes(run.phase))
+    : -1;
+  const special = run && ["blocked", "cancelled"].includes(run.phase);
+  const needsUiDecision =
+    run !== undefined &&
+    (run.phase === "awaiting-ui-approval" ||
+      (run.design !== undefined && !run.design.decision));
+  return (
+    <View style={{ gap: SPACING[2] }}>
+      <View
+        style={{
+          flexDirection: "row",
+          gap: SPACING[2],
+          flexWrap: "wrap",
+          alignItems: "center",
+        }}
+      >
+        <Text style={text(theme, "section")}>
+          Specialist execution pipeline
+        </Text>
+        {run ? (
+          <Pill
+            theme={theme}
+            label={`${run.runId} · ${run.phase}`}
+            tone={
+              special
+                ? run.phase === "blocked"
+                  ? "statusDanger"
+                  : "statusWarning"
+                : run.phase === "awaiting-ui-approval"
+                  ? "statusWarning"
+                  : "accent"
+            }
+            lit
+          />
+        ) : (
+          <Pill theme={theme} label="No run started" />
+        )}
+      </View>
+      {special ? (
+        <Text style={text(theme, "meta", "statusWarning")}>
+          {run.blockers?.join(" · ") ||
+            run.cancellation?.reason ||
+            "Run cancelled"}
+        </Text>
+      ) : null}
+      {needsUiDecision ? (
+        <MockupApproval
+          key={`${run.runId}:${run.design?.digest}`}
+          theme={theme}
+          view={view}
+          action={action}
+          busy={actions.busy}
+        />
+      ) : null}
+      <View
+        style={{
+          flexDirection: "row",
+          gap: SPACING[2],
+          flexWrap: "wrap",
+          alignItems: "stretch",
+        }}
+      >
+        {STAGES.map((stage, index) => {
+          const tasks = view.tasks.filter(
+            (task) =>
+              task.execution?.runId === run?.runId &&
+              stage.roles.includes(task.execution?.role ?? ""),
+          );
+          const skipped = run?.skippedPhases?.find((skip) =>
+            stage.phases.includes(skip.phase),
+          );
+          const active = index === currentStage;
+          const completed =
+            run?.phase === "completed" || (currentStage > index && !skipped);
+          return (
+            <View
+              key={stage.title}
+              style={{ minWidth: 190, flexBasis: 200, flexGrow: 1 }}
+            >
+              <Card
+                theme={theme}
+                gap={SPACING[1.5]}
+                style={{
+                  flex: 1,
+                  borderColor: active
+                    ? theme.colors.accent
+                    : special
+                      ? theme.colors[
+                          run.phase === "blocked"
+                            ? "statusDanger"
+                            : "statusWarning"
+                        ]
+                      : theme.colors.border,
+                  backgroundColor: active
+                    ? tint(theme.colors.accent, "0d")
+                    : theme.colors.surface1,
+                }}
+              >
+                <View
+                  style={{
+                    flexDirection: "row",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    flexWrap: "wrap",
+                    gap: SPACING[1],
+                  }}
+                >
+                  <Text style={text(theme, "rowTitle")}>{stage.title}</Text>
+                  <Pill
+                    theme={theme}
+                    label={
+                      skipped
+                        ? "Skipped"
+                        : active
+                          ? run!.phase
+                          : completed
+                            ? "Completed"
+                            : "Waiting"
+                    }
+                    tone={
+                      active
+                        ? run?.phase === "awaiting-ui-approval"
+                          ? "statusWarning"
+                          : "accent"
+                        : completed
+                          ? "statusSuccess"
+                          : "foregroundMuted"
+                    }
+                    lit={active}
+                  />
+                </View>
+                <Text style={text(theme, "meta")}>
+                  {skipped?.reason ?? stage.artifacts}
+                </Text>
+                {index === 4 ? (
+                  <Pill
+                    theme={theme}
+                    label={`Fix rounds ${run?.fixRounds ?? 0}/${run?.budgets?.maxQaFixRounds ?? "—"}`}
+                  />
+                ) : null}
+                {tasks.map((task) => {
+                  const liveAgent =
+                    view.agents.find((agent) => agent.task === task.task) ??
+                    view.agents.find((agent) => agent.id === task.agentId);
+                  const peerId =
+                    liveAgent?.id ??
+                    task.agentId ??
+                    task.attempts.findLast(
+                      (a) => typeof a.agentId === "string" && a.agentId !== "",
+                    )?.agentId ??
+                    null;
+                  return (
+                    <View
+                      key={task.task}
+                      style={{
+                        flexDirection: "row",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        flexWrap: "wrap",
+                        gap: SPACING[1],
+                        paddingTop: SPACING[1],
+                        borderTopWidth: 1,
+                        borderTopColor: theme.colors.border,
+                      }}
+                    >
+                      <Text
+                        style={{
+                          ...text(theme, "code"),
+                          flexShrink: 1,
+                          minWidth: 0,
+                        }}
+                        numberOfLines={1}
+                      >
+                        {task.execution?.role.toUpperCase()} · {task.task}
+                      </Text>
+                      <View
+                        style={{
+                          flexDirection: "row",
+                          alignItems: "center",
+                          gap: SPACING[1],
+                        }}
+                      >
+                        <Pill
+                          theme={theme}
+                          label={task.verdict ?? task.status}
+                          tone={
+                            task.verdict === "green"
+                              ? "statusSuccess"
+                              : task.verdict === "red"
+                                ? "statusDanger"
+                                : "foregroundMuted"
+                          }
+                        />
+                        {peerId ? (
+                          <Btn
+                            theme={theme}
+                            small
+                            label="Open"
+                            icon="ExternalLink"
+                            onPress={() => actions.openAgent(peerId)}
+                          />
+                        ) : null}
+                      </View>
+                    </View>
+                  );
+                })}
+              </Card>
+            </View>
+          );
+        })}
+      </View>
     </View>
   );
 }
@@ -316,12 +609,7 @@ export function ScrumSeatAndWorkflowGraph({
   action?: ScrumAction;
   actions: ScrumSeatActions;
 }) {
-  const run = view.execution?.run,
-    config = view.execution?.config ?? previewScrumConfig(view);
-  const currentStage = run
-    ? STAGES.findIndex((stage) => stage.phases.includes(run.phase))
-    : -1;
-  const special = run && ["blocked", "cancelled"].includes(run.phase);
+  const config = view.execution?.config ?? previewScrumConfig(view);
   return (
     <View style={{ gap: SPACING[2] }}>
       <Text style={text(theme, "section")}>Scrum Seat & Workflow Graph</Text>
@@ -396,166 +684,12 @@ export function ScrumSeatAndWorkflowGraph({
           <Rail theme={theme} />
         </View>
       ))}
-      <View
-        style={{
-          flexDirection: "row",
-          gap: SPACING[2],
-          flexWrap: "wrap",
-          alignItems: "center",
-        }}
-      >
-        <Text style={text(theme, "section")}>
-          Specialist execution pipeline
-        </Text>
-        {run ? (
-          <Pill
-            theme={theme}
-            label={`${run.runId} · ${run.phase}`}
-            tone={
-              special
-                ? run.phase === "blocked"
-                  ? "statusDanger"
-                  : "statusWarning"
-                : "accent"
-            }
-            lit
-          />
-        ) : (
-          <Pill theme={theme} label="No run started" />
-        )}
-      </View>
-      {special ? (
-        <Text style={text(theme, "meta", "statusWarning")}>
-          {run.blockers?.join(" · ") ||
-            run.cancellation?.reason ||
-            "Run cancelled"}
-        </Text>
-      ) : null}
-      <View
-        style={{
-          flexDirection: "row",
-          gap: SPACING[2],
-          flexWrap: "wrap",
-          alignItems: "stretch",
-        }}
-      >
-        {STAGES.map((stage, index) => {
-          const tasks = view.tasks.filter(
-            (task) =>
-              task.execution?.runId === run?.runId &&
-              stage.roles.includes(task.execution?.role ?? ""),
-          );
-          const skipped = run?.skippedPhases?.find((skip) =>
-            stage.phases.includes(skip.phase),
-          );
-          const active = index === currentStage;
-          const completed =
-            run?.phase === "completed" || (currentStage > index && !skipped);
-          return (
-            <View
-              key={stage.title}
-              style={{ flexBasis: 230, flexGrow: 1, gap: SPACING[1] }}
-            >
-              <Card
-                theme={theme}
-                gap={SPACING[2]}
-                style={{
-                  flex: 1,
-                  borderColor: active
-                    ? theme.colors.accent
-                    : special
-                      ? theme.colors[
-                          run.phase === "blocked"
-                            ? "statusDanger"
-                            : "statusWarning"
-                        ]
-                      : theme.colors.border,
-                  backgroundColor: active
-                    ? tint(theme.colors.accent, "0d")
-                    : theme.colors.surface1,
-                }}
-              >
-                <Text style={text(theme, "rowTitle")}>{stage.title}</Text>
-                <Pill
-                  theme={theme}
-                  label={
-                    skipped
-                      ? "Skipped"
-                      : active
-                        ? run!.phase
-                        : completed
-                          ? "Completed"
-                          : "Waiting"
-                  }
-                  tone={
-                    active
-                      ? "accent"
-                      : completed
-                        ? "statusSuccess"
-                        : "foregroundMuted"
-                  }
-                  lit={active}
-                />
-                <Text style={text(theme, "meta")}>
-                  {skipped?.reason ?? stage.artifacts}
-                </Text>
-                {index === 4 ? (
-                  <Pill
-                    theme={theme}
-                    label={`Fix rounds ${run?.fixRounds ?? 0}/${run?.budgets?.maxQaFixRounds ?? "—"}`}
-                  />
-                ) : null}
-                {tasks.map((task) => {
-                  const liveAgent =
-                    view.agents.find((agent) => agent.task === task.task) ??
-                    view.agents.find((agent) => agent.id === task.agentId);
-                  return (
-                    <View key={task.task} style={{ gap: SPACING[1] }}>
-                      <Text style={text(theme, "code")}>
-                        {task.execution?.role.toUpperCase()} · {task.task}
-                      </Text>
-                      <Pill
-                        theme={theme}
-                        label={task.verdict ?? task.status}
-                        tone={
-                          task.verdict === "green"
-                            ? "statusSuccess"
-                            : task.verdict === "red"
-                              ? "statusDanger"
-                              : "foregroundMuted"
-                        }
-                      />
-                      {liveAgent ? (
-                        <Btn
-                          theme={theme}
-                          small
-                          label="Open"
-                          icon="ExternalLink"
-                          onPress={() => actions.openAgent(liveAgent.id)}
-                        />
-                      ) : null}
-                    </View>
-                  );
-                })}
-                {index === 2 &&
-                (run?.phase === "awaiting-ui-approval" ||
-                  (run?.design && !run.design.decision)) ? (
-                  <MockupApproval
-                    key={`${run.runId}:${run.design?.digest}`}
-                    theme={theme}
-                    view={view}
-                    action={action}
-                    busy={actions.busy}
-                  />
-                ) : null}
-              </Card>
-              <Text style={text(theme, "meta")}>
-                {index === 3 ? "⇄ QA audit & fix" : index < 4 ? "──►" : ""}
-              </Text>
-            </View>
-          );
-        })}
-      </View>
+      <ScrumWorkflowPipeline
+        theme={theme}
+        view={view}
+        action={action}
+        actions={actions}
+      />
     </View>
   );
 }
@@ -684,12 +818,24 @@ function ScrumProfilesBar({
       <Modal open={naming} onOpenChange={setNaming} title="Save Scrum Profile">
         <Modal.Content>
           <View style={{ gap: SPACING[3] }}>
-            <TextInput
-              value={name}
-              onChangeText={setName}
-              placeholder="New profile name"
-              accessibilityLabel="Scrum profile name"
-            />
+            <View
+              style={{
+                borderRadius: RADIUS.sm,
+                borderWidth: 1,
+                borderColor: theme.colors.border,
+                backgroundColor: theme.colors.surface0,
+                paddingHorizontal: SPACING[2],
+                paddingVertical: SPACING[1],
+              }}
+            >
+              <TextInput
+                value={name}
+                onChangeText={setName}
+                placeholder="New profile name"
+                placeholderTextColor={theme.colors.foregroundMuted}
+                accessibilityLabel="Scrum profile name"
+              />
+            </View>
             <Btn
               theme={theme}
               label="Save as New Profile"

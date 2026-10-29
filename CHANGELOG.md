@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.59] - 2026-10-29
+
+Fix Kanban card layout overflow, surface Agile Scrum pipeline and UI Mockup approval directly on the `Tasks` tab, and filter out zombie tasks from cancelled Scrum runs.
+
+### Fixed
+
+- Separate `KanbanCard` header `#task-id` + `AttemptTrail` (`#1/3`) from a dedicated horizontal wrapping badges row (`📁 Project`, `Scrum · Role` / `SLP · Peer`, and model lane) so project and role pills never stack vertically or get clipped beside long task names.
+- Extract `ScrumWorkflowPipeline` and render it directly at the top of `TasksPane` when a Scrum project is selected, promoting `MockupApproval` into a full-width highlighted card above the 5 stage cards when `phase === "awaiting-ui-approval"`.
+- Render an **Active Agile Scrum Runs** banner in `All projects` mode on the `Tasks` tab with a 1-click `Review UI Mockup` / `Open Scrum Pipeline` jump and surface `"UI mockup awaiting your approval"` in the Header headline.
+- Filter unaccepted tasks from `cancelled` Scrum runs (`isCancelledScrumTask`) out of `snapshot` and `executionWork` so aborted runs do not leave zombie `In Progress` cards on the Kanban board.
+
 ## [0.0.58] - 2026-10-29
 
 Make Project reset a clean-slate operation and strengthen Scrum/MCP lifecycle isolation.

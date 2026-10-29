@@ -1624,9 +1624,30 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       };
     }
   };
+  const isCancelledScrumTask = (task: string, fallbackSlug?: string): boolean => {
+    const contract = deps.factory.contractFor(task);
+    if (contract?.execution?.mode !== "scrum" || !contract.execution.runId) return false;
+    const projected = projectTask(deps.factory.ledger.events, task);
+    if (projected.settled || projected.inFlightAttempt !== undefined) return false;
+    const slug =
+      fallbackSlug ??
+      (() => {
+        const match = contract.workspace.match(/\/projects\/([^/]+)\/worktrees\//);
+        if (match?.[1]) return match[1];
+        const resolved = resolveProject(contract.workspace);
+        return resolved.ok ? resolved.slug : undefined;
+      })();
+    if (!slug) return false;
+    try {
+      return readRun(deps.stateDir, slug, contract.execution.runId).phase === "cancelled";
+    } catch {
+      return false;
+    }
+  };
   const executionWork = async (project: { slug: string; root: string }, context?: SurfaceCallContext, cachedAgents?: readonly SurfaceAgentSnapshot[]) => {
     const blockers: string[] = [];
     for (const event of deps.factory.ledger.events) if (event.event === "contract_set" && taskInProject(event.task, project.root, project.slug)) {
+      if (isCancelledScrumTask(event.task, project.slug)) continue;
       const task = projectTask(deps.factory.ledger.events, event.task);
       if (!task.settled || task.pendingLanding || task.inFlightAttempt !== undefined) blockers.push(`Task ${event.task}: ${task.status}${task.pendingLanding ? " pending-conflict" : ""}`);
     }
@@ -1781,7 +1802,9 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       if (!machineLanes.ok) return failure("lanes-unreadable", machineLanes.reason);
       const daemon = resolveDaemon(context);
       const bound = agentTaskIndex();
-      const allEvents = [...deps.factory.ledger.events];
+      const allEvents = deps.factory.ledger.events.filter(
+        (evt) => !("task" in evt) || typeof evt.task !== "string" || !isCancelledScrumTask(evt.task),
+      );
 
       let rawAgents: SurfaceAgentSnapshot[] = [];
       let providers: ProviderEntry[] = [];

@@ -1225,5 +1225,38 @@ test("All projects is strictly view-only and selected projects always open the c
   assert.ok(!seats.includes("New-Project Default Execution Mode"), "SeatsPane no longer exposes a global mode switcher in All projects");
 });
 
+test("KanbanCard renders a dedicated horizontal wrapping badges row and TasksPane surfaces ScrumWorkflowPipeline and active Scrum banners", () => {
+  const tasks = read("plugin/client/factory/tasks.tsx");
+  const scrum = read("plugin/client/factory/scrum.tsx");
+  const header = read("plugin/client/factory/header.tsx");
+
+  assert.match(
+    tasks,
+    /Row 1\.5: Horizontal wrapping badges/,
+    "KanbanCard separates Project/Role/Lane pills into a dedicated horizontal flexWrap row so pills never stack vertically beside #task-id",
+  );
+  assert.match(
+    tasks,
+    /<ScrumWorkflowPipeline/,
+    "TasksPane renders ScrumWorkflowPipeline directly on the default Tasks tab when a Scrum project has an active run",
+  );
+  assert.match(
+    tasks,
+    /Active Agile Scrum Runs/,
+    "TasksPane renders an Active Agile Scrum Runs banner in All projects view with a direct jump to Review UI Mockup / Open Scrum Pipeline",
+  );
+  assert.match(
+    scrum,
+    /export function ScrumWorkflowPipeline/,
+    "scrum.tsx exports ScrumWorkflowPipeline with full-width MockupApproval card above the 5 stage cards",
+  );
+  assert.match(
+    header,
+    /UI mockup awaiting your approval/,
+    "Header headline surfaces awaiting-ui-approval Scrum runs immediately",
+  );
+});
+
+
 
 
