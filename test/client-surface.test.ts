@@ -1200,4 +1200,30 @@ test("PluginsPane and FactoryShell support 1-click Switch to GitHub and Switch s
   assert.match(shell, /action: "install"/, "FactoryShell transitions to restarting-core with action: install when switching paseo-factory source");
 });
 
+test("All projects is strictly view-only and selected projects always open the confirmation Modal before switching execution mode", () => {
+  const shell = read("plugin/client/factory/shell.tsx");
+  const header = read("plugin/client/factory/header.tsx");
+  const seats = read("plugin/client/factory/seats.tsx");
+
+  assert.match(
+    shell,
+    /const requestMode = \(mode: "slp" \| "scrum"\): void => \{\s*if \(!projectRoot\) return;\s*const currentMode = view\.execution\?\.selectedMode \?\? "slp";\s*if \(mode === currentMode && !view\.execution\?\.pendingMode\) return;\s*setPendingMode\(mode\);\s*\};/,
+    "requestMode blocks mode switches in All projects (!projectRoot) and always opens the confirmation Modal (setPendingMode) for any selected project",
+  );
+  assert.match(
+    shell,
+    /title="Switch Project execution mode\?"/,
+    "FactoryShell renders the execution mode switch confirmation Modal",
+  );
+  assert.match(
+    shell,
+    /label="Archive seats & Switch"/,
+    "the confirmation Modal uses the explicit danger CTA 'Archive seats & Switch'",
+  );
+  assert.match(header, /All projects · View-only/, "Header displays All projects · View-only pill when no project is selected");
+  assert.match(seats, /All projects · View-only/, "SeatsPane displays All projects · View-only card when no project is selected");
+  assert.ok(!seats.includes("New-Project Default Execution Mode"), "SeatsPane no longer exposes a global mode switcher in All projects");
+});
+
+
 

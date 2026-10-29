@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.56] - 2026-10-29
+
+Enforce mandatory confirmation modal on Project execution mode switches and make `All projects` strictly view-only.
+
+### Fixed
+
+- Always open the `Switch Project execution mode?` confirmation `Modal` (`Archive seats & Switch` / `Cancel`) before switching a selected Project between `SLP` and `Agile Scrum`, even when `view.supervisor` / `view.lead` is not currently live in the snapshot.
+- Make `All projects` (`view.project === null`) strictly view-only: refuse `factory.execution.setMode` without a `projectRoot` (`code: "project-required"`), remove the global mode switcher from `SeatsPane`, and disable all lane/profile/seat mutations when in `All projects`.
+
 ## [0.0.55] - 2026-10-28
 
 Add 1-click source switching (`Switch to GitHub` and `Switch source…`) for `Factory Core` (`paseo-factory`) and Companion plugins in the `Plugins` tab.

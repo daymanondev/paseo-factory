@@ -320,11 +320,15 @@ export function FactoryShell({
   const projectRoot = view.project?.root;
   const applyMode = (mode: "slp" | "scrum"): void => {
     setPendingMode(null);
-    if (projectRoot) setOptimisticMode({ root: projectRoot, scope: scopeRoot, mode, revision: serverView?.execution?.revision ?? 0 });
+    if (!projectRoot) return;
+    setOptimisticMode({ root: projectRoot, scope: scopeRoot, mode, revision: serverView?.execution?.revision ?? 0 });
     void act("Execution mode", () => executionSetModeCall({ mode, projectRoot })).then(ok => { if (!ok) setOptimisticMode(null); });
   };
   const requestMode = (mode: "slp" | "scrum"): void => {
-    if (projectRoot && (view.supervisor || view.lead)) setPendingMode(mode); else applyMode(mode);
+    if (!projectRoot) return;
+    const currentMode = view.execution?.selectedMode ?? "slp";
+    if (mode === currentMode && !view.execution?.pendingMode) return;
+    setPendingMode(mode);
   };
   // The seat jumps (v0.0.27, ADR 0017 §3): a seat starts only from Paseo's
   // native New Chat picker ("Supervisor (Factory)"), and the Supervisor
@@ -416,8 +420,43 @@ export function FactoryShell({
         if (w > 0 && Math.abs(w - containerWidth) >= 4) setContainerWidth(w);
       }}
     >
-      <Modal open={pendingMode !== null} onOpenChange={open => { if (!open) setPendingMode(null); }} title="Switch Project execution mode?">
-        <Modal.Content><View style={{ gap: SPACING[3] }}><Text style={text(theme, "meta")}>The live Supervisor and Lead sessions will be archived. The next turn starts with the new mode's instructions.</Text><Btn theme={theme} label="Archive seats & Switch" disabled={busy} onPress={() => { if (pendingMode) applyMode(pendingMode); }} /><Btn theme={theme} label="Cancel" onPress={() => setPendingMode(null)} /></View></Modal.Content>
+      <Modal open={pendingMode !== null && view.project !== null} onOpenChange={open => { if (!open) setPendingMode(null); }} title="Switch Project execution mode?">
+        <Modal.Content>
+          <View style={{ gap: SPACING[3] }}>
+            <Card
+              theme={theme}
+              gap={SPACING[1.5]}
+              style={{
+                borderColor: theme.colors.statusDanger,
+                backgroundColor: theme.colors.surface1,
+              }}
+            >
+              <Text style={text(theme, "rowTitle", "statusDanger")}>
+                {`Project: ${view.project?.name ?? view.project?.slug ?? ""} (${(view.execution?.selectedMode ?? "slp") === "scrum" ? "Agile Scrum" : "SLP"} → ${pendingMode === "scrum" ? "Agile Scrum" : "SLP"})`}
+              </Text>
+              <Text style={text(theme, "meta")}>
+                The live Supervisor and Lead sessions will be archived. The next turn starts with the new mode's instructions.
+              </Text>
+              <Text style={text(theme, "label", "statusWarning")}>
+                Cảnh báo: Chuyển chế độ thực thi của dự án sẽ lưu trữ (archive) phiên chat Supervisor và Lead hiện tại để tạo phiên mới theo chế độ mới.
+              </Text>
+            </Card>
+            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "flex-end", gap: SPACING[2] }}>
+              <Btn theme={theme} label="Cancel" tone="foregroundMuted" onPress={() => setPendingMode(null)} />
+              <Btn
+                theme={theme}
+                solid
+                icon="AlertTriangle"
+                tone="statusDanger"
+                label="Archive seats & Switch"
+                disabled={busy}
+                onPress={() => {
+                  if (pendingMode) applyMode(pendingMode);
+                }}
+              />
+            </View>
+          </View>
+        </Modal.Content>
       </Modal>
       <ScrollView
         style={{ flex: 1 }}
@@ -496,8 +535,11 @@ export function FactoryShell({
             view={view}
             modelSyncNote={laneNote}
             actions={{
-              setMode: requestMode,
+              setMode: projectRoot ? requestMode : undefined,
               scrum: async (operation, payload, runId, expectedRevision) => {
+                if (projectRoot === undefined) {
+                  return { ok: false, error: "All projects is view-only — select a project first" };
+                }
                 const reply = await scrumCommandCall({ operation, payload, runId, expectedRevision, projectRoot, requestId: `ui-${Date.now()}-${Math.random().toString(36).slice(2)}` });
                 await act(`Scrum ${operation}`, async () => reply);
                 return reply;
@@ -505,6 +547,7 @@ export function FactoryShell({
               busy,
               openAgent: (agentId) => navigation?.openAgent({ agentId, serverId }),
               revokeSupervisor: () => {
+                if (projectRoot === undefined) return;
                 void act("Revoke Supervisor", () => revokeCall({ projectRoot }));
               },
               rotateLead: () => {
@@ -512,6 +555,7 @@ export function FactoryShell({
                 void act("Rotate Lead", () => leadRotateCall({ projectRoot }));
               },
               setLane: (lane: LaneName, value) => {
+                if (projectRoot === undefined) return;
                 void act("Lane", async () => {
                   const reply = await lanesSetCall({ lane, value, projectRoot });
                   if (reply.ok) setLaneNote(`${lane} → ${reply.lanes[lane]} (${reply.modelSync})`);
@@ -521,6 +565,7 @@ export function FactoryShell({
               // One atomic batch RPC for a multi-lane card (v0.0.38, ADR 0026
               // §5) — the SeatsPane gates it behind the live-seat modal.
               setLanesBatch: (lanes: LaneName[], value) => {
+                if (projectRoot === undefined) return;
                 void act("Lane Batch", async () => {
                   const update: Partial<Record<LaneName, string>> = {};
                   for (const lane of lanes) update[lane] = value;
@@ -530,6 +575,7 @@ export function FactoryShell({
                 });
               },
               saveProfile: (name, description) => {
+                if (projectRoot === undefined) return;
                 void act("Save Profile", () =>
                   profilesSaveCall({
                     name,
@@ -540,6 +586,7 @@ export function FactoryShell({
                 );
               },
               updateProfile: (profileId, name) => {
+                if (projectRoot === undefined) return;
                 void act("Update Profile", () =>
                   profilesSaveCall({
                     id: profileId,
@@ -550,9 +597,11 @@ export function FactoryShell({
                 );
               },
               applyProfile: (profileId) => {
+                if (projectRoot === undefined) return;
                 void act("Apply Profile", () => profilesApplyCall({ profileId, ...(projectRoot === undefined ? {} : { projectRoot }) }));
               },
               deleteProfile: (profileId) => {
+                if (projectRoot === undefined) return;
                 void act("Delete Profile", () => profilesDeleteCall({ profileId }));
               },
               resetLanes: () => {

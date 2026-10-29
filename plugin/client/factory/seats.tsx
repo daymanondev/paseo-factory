@@ -1,5 +1,5 @@
 import { SeatNode, Rail, AgentCard } from "./seat-graph.tsx";
-import { MODE_OPTIONS, ScrumSeatsPane } from "./scrum.tsx";
+import { ScrumSeatsPane } from "./scrum.tsx";
 import type { ScrumAction } from "./scrum.tsx";
 /**
  * Tab 2 — Seats & Models (ADR 0009 §2; the Lead lane and live Lead seat
@@ -820,14 +820,29 @@ export function SeatsPane({
     setNaming(false);
   };
 
-  const machineControls = view.project === null ? <Card theme={theme} gap={SPACING[3]}>
-    <Text style={text(theme, "section")}>New-Project Default Execution Mode</Text>
-    <Text style={text(theme, "meta")}>Applies only to newly registered Projects.</Text>
-    <SegmentedControl theme={theme} options={MODE_OPTIONS} value={view.execution?.newProjectDefaultMode ?? view.execution?.selectedMode ?? "slp"} onChange={mode => actions.setMode?.(mode)} disabled={actions.busy} />
-    <Text style={text(theme, "section")}>Machine Default Roster Editor</Text>
-    <SegmentedControl theme={theme} options={[{ value: "slp", label: "Machine SLP Lanes (6)" }, { value: "scrum", label: "Machine Agile Scrum Roster (8)" }]} value={machineRoster} onChange={setMachineRoster} />
-  </Card> : null;
-  if ((view.project ? view.execution?.selectedMode : machineRoster) === "scrum") return <View style={{ gap: SPACING[4] }}>{machineControls}<ScrumSeatsPane theme={theme} view={view} busy={actions.busy} action={actions.scrum} actions={actions} renderEditor={(title, current, save, close) => <Modal open onOpenChange={open => { if (!open) close(); }} title={title}><Modal.Content><LaneModalBody theme={theme} view={view} card={{ id: "scrum", title, icon: "Cpu", tier: "Specialist", hint: "Independent Scrum lane", lanes: [], value: () => current }} onSave={save} onClose={close} busy={actions.busy} /></Modal.Content></Modal>} /></View>;
+  const readOnly = view.project === null;
+  const effectiveActions: SeatsActions = readOnly ? { ...actions, busy: true } : actions;
+  const machineControls = view.project === null ? (
+    <Card theme={theme} gap={SPACING[2.5]}>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1.5], flexWrap: "wrap" }}>
+        <Pill theme={theme} label="All projects · View-only" tone="statusWarning" lit />
+        <Text style={text(theme, "section")}>Read-only Overview</Text>
+      </View>
+      <Text style={text(theme, "meta")}>
+        Mode switching and lane/profile edits are disabled in All projects to protect existing projects. Select a specific project in the Project Switcher above to change its mode or lanes.
+      </Text>
+      <SegmentedControl
+        theme={theme}
+        options={[
+          { value: "slp", label: "View SLP Lanes (6)" },
+          { value: "scrum", label: "View Agile Scrum Roster (8)" },
+        ]}
+        value={machineRoster}
+        onChange={setMachineRoster}
+      />
+    </Card>
+  ) : null;
+  if ((view.project ? view.execution?.selectedMode : machineRoster) === "scrum") return <View style={{ gap: SPACING[4] }}>{machineControls}<ScrumSeatsPane theme={theme} view={view} busy={actions.busy || readOnly} action={readOnly ? undefined : actions.scrum} actions={effectiveActions} renderEditor={(title, current, save, close) => <Modal open onOpenChange={open => { if (!open) close(); }} title={title}><Modal.Content><LaneModalBody theme={theme} view={view} card={{ id: "scrum", title, icon: "Cpu", tier: "Specialist", hint: "Independent Scrum lane", lanes: [], value: () => current }} onSave={save} onClose={close} busy={actions.busy || readOnly} /></Modal.Content></Modal>} /></View>;
 
   return (
     <View style={{ gap: SPACING[4] }}>
@@ -838,7 +853,9 @@ export function SeatsPane({
           <View style={{ gap: 2 }}>
             <Text style={text(theme, "section")}>Model & Thinking Lanes</Text>
             <Text style={text(theme, "label")}>
-              Configure provider, model, and thinking level per role ({view.project === null ? "machine-wide lanes.json" : `project override: ${view.project.slug}`}).
+              {view.project === null
+                ? "Read-only machine default lanes — select a project above to configure project lanes."
+                : `Configure provider, model, and thinking level per role (project override: ${view.project.slug}).`}
             </Text>
           </View>
           {modelSyncNote !== null ? <Pill theme={theme} label={modelSyncNote} tone="accent" lit /> : null}
@@ -847,12 +864,21 @@ export function SeatsPane({
         <LaneProfilesBar
           theme={theme}
           view={view}
-          actions={actions}
+          actions={effectiveActions}
           deletingProfileId={deletingProfileId}
           onRequestDelete={setDeletingProfileId}
-          onApplyProfile={(profile) => requestLaneChange(profile.lanes, () => actions.applyProfile(profile.id))}
-          onUpdateProfile={(profile) => actions.updateProfile(profile.id, profile.name)}
-          onSaveAsProfile={openSaveAsProfile}
+          onApplyProfile={(profile) => {
+            if (readOnly) return;
+            requestLaneChange(profile.lanes, () => actions.applyProfile(profile.id));
+          }}
+          onUpdateProfile={(profile) => {
+            if (readOnly) return;
+            actions.updateProfile(profile.id, profile.name);
+          }}
+          onSaveAsProfile={() => {
+            if (readOnly) return;
+            openSaveAsProfile();
+          }}
           onResetLanes={requestResetLanes}
         />
 
@@ -925,7 +951,7 @@ export function SeatsPane({
                   <Text style={{ ...text(theme, "code"), fontSize: 11, color: theme.colors.foregroundMuted }} numberOfLines={1}>
                     {card.lanes.join(" + ")}
                   </Text>
-                  <Btn theme={theme} small icon="Sliders" label="Configure" disabled={actions.busy} onPress={() => setEditing(card)} />
+                  <Btn theme={theme} small icon="Sliders" label="Configure" disabled={actions.busy || readOnly} onPress={() => { if (!readOnly) setEditing(card); }} />
                 </View>
               </Card>
             );
@@ -953,7 +979,7 @@ export function SeatsPane({
           <AgentCard
             theme={theme}
             agent={view.supervisor}
-            actions={actions}
+            actions={effectiveActions}
             retireLabel="Revoke Supervisor"
             onRetire={actions.revokeSupervisor}
           />
@@ -971,7 +997,7 @@ export function SeatsPane({
           <AgentCard
             theme={theme}
             agent={view.lead}
-            actions={actions}
+            actions={effectiveActions}
             retireLabel="Rotate Lead"
             onRetire={actions.rotateLead}
           />

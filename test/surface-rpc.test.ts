@@ -5959,3 +5959,19 @@ test("pluginsInstall and installDaemonPlugin support switching paseo-factory bet
   );
 });
 
+test("executionSetMode refuses mode switches when projectRoot is omitted (All projects is view-only)", async (t) => {
+  const { handlers } = makeSurface(t);
+  const noProject = await handlers.executionSetMode({ mode: "scrum" });
+  assert.equal(noProject.ok, false);
+  if (!noProject.ok) {
+    assert.equal(noProject.code, "project-required");
+    assert.match(noProject.error, /All projects is view-only/);
+  }
+  const blankProject = await handlers.executionSetMode({ projectRoot: "   ", mode: "scrum" });
+  assert.equal(blankProject.ok, false);
+  if (!blankProject.ok) {
+    assert.equal(blankProject.code, "project-required");
+  }
+});
+
+

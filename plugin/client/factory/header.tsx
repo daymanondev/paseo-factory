@@ -329,7 +329,26 @@ export function Header({
           </View>
         </View>
 
-        {project ? <ExecutionSelector theme={theme} view={view} setMode={actions.setMode} busy={actions.busy} /> : null}
+        {project ? (
+          <ExecutionSelector theme={theme} view={view} setMode={actions.setMode} busy={actions.busy} />
+        ) : (
+          <View
+            style={{
+              flexDirection: "row",
+              alignItems: "center",
+              gap: SPACING[1.5],
+              flexWrap: "wrap",
+              borderTopWidth: 1,
+              borderTopColor: theme.colors.border,
+              paddingTop: SPACING[2],
+            }}
+          >
+            <Pill theme={theme} label="All projects · View-only" tone="statusWarning" lit />
+            <Text style={text(theme, "meta")}>
+              Select a specific project above to switch execution mode or modify settings.
+            </Text>
+          </View>
+        )}
         {pickingPath ? (
           <View style={{ gap: SPACING[1.5], borderTopWidth: 1, borderTopColor: theme.colors.border, paddingTop: SPACING[2] }}>
             <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[2] }}>

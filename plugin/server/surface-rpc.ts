@@ -1664,7 +1664,9 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   const handlers = {
     async executionSetMode(input: { mode: "slp" | "scrum"; projectRoot?: string }, context?: SurfaceCallContext) {
       try {
-        if (!input.projectRoot) { if (input.mode === "scrum") ensureScrumConfig(deps.stateDir); return { ok: true as const, data: saveExecutionDefault(deps.stateDir, input.mode) }; }
+        if (!input.projectRoot || input.projectRoot.trim() === "") {
+          return failure("project-required", "Select a specific project to switch execution mode — All projects is view-only");
+        }
         const project = projectOrRefusal(input.projectRoot);
         if (!project.ok) return project;
         const data = await withExecutionLane(deps.stateDir, project.slug, async () => {
