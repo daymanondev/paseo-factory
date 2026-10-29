@@ -67,6 +67,7 @@ interface FakeAgent {
   lastUsage?: { contextWindowUsedTokens?: number; contextWindowMaxTokens?: number } | null;
   /** The Paseo Workspace the agent's session lives in (v0.0.31, ADR 0017 §5). */
   workspaceId?: string | null;
+  updatedAt?: string;
 }
 
 function fakeDaemon(agents: FakeAgent[]) {
@@ -100,7 +101,7 @@ function fakeDaemon(agents: FakeAgent[]) {
               archivedAt: null,
               requiresAttention: agent.requiresAttention ?? false,
               attentionReason: null,
-              updatedAt: "2026-10-15T00:00:00.000Z",
+              updatedAt: agent.updatedAt ?? "2026-10-15T00:00:00.000Z",
               cwd: agent.cwd ?? "/tmp",
               ...(agent.workspaceId === undefined ? {} : { workspaceId: agent.workspaceId }),
               ...(agent.lastUsage === undefined ? {} : { lastUsage: agent.lastUsage }),
@@ -5975,3 +5976,142 @@ test("executionSetMode refuses mode switches when projectRoot is omitted (All pr
 });
 
 
+
+test("v0.0.58 reset retires every duplicate seat and purges correlations and product history", async (t) => {
+  const project = makeProject(t, "clean-slate");
+  const agents: FakeAgent[] = [
+    { id: "old-lead", labels: { seat: "lead", project: project.slug }, cwd: project.root },
+    { id: "bound-lead", provider: "factory-lead", cwd: project.root },
+    { id: "supervisor", labels: { seat: "supervisor", project: project.slug }, cwd: project.root },
+  ];
+  const { handlers, stateDir, stopped, fake } = makeSurface(t, agents);
+  writeProjectRegistration(stateDir, project.slug, { root: project.root, lead: "bound-lead", supervisor: "supervisor" });
+  const registry = new CorrelationRegistry(stateDir);
+  for (const role of ["lead", "supervisor", "agent"] as const) registry.issue({ role, projectRoot: project.root, projectSlug: project.slug });
+  assert.equal(registry.list().length, 3);
+  const projectDir = join(stateDir, "projects", project.slug);
+  for (const file of ["lanes.json", "scrum-lanes.json", "execution.json"]) writeFileSync(join(projectDir, file), "{}\n");
+  mkdirSync(join(project.root, ".claude"));
+  writeFileSync(join(project.root, ".claude", "CLAUDE.md"), "local rules");
+  writeFileSync(join(project.root, ".worktreeinclude"), ".agents/\n");
+  mkdirSync(join(project.root, ".agents", "skills"), { recursive: true });
+  writeFileSync(join(project.root, ".agents", "skills", "local.md"), "local skill");
+  writeFileSync(join(project.root, ".gitignore"), "node_modules/\n");
+  writeFileSync(join(project.root, "CONTEXT.md"), "old domain");
+  gitCommitAll(project.root);
+  writeFileSync(join(project.root, "untracked.txt"), "old artifact");
+  const result = await handlers.projectReset({ projectRoot: project.root });
+  assert.ok(result.ok, JSON.stringify(result));
+  assert.deepEqual(result.archivedSeats.sort(), ["bound-lead", "old-lead", "supervisor"]);
+  assert.deepEqual([...stopped].sort(), [...fake.archived].sort());
+  assert.equal(new CorrelationRegistry(stateDir).list().length, 0);
+  assert.equal(registry.list().length, 0, "an existing registry cannot retain purged tokens");
+  for (const file of ["lanes.json", "scrum-lanes.json", "execution.json"]) assert.equal(readFileSync(join(projectDir, file), "utf8"), "{}\n");
+  assert.equal(readFileSync(join(project.root, ".claude", "CLAUDE.md"), "utf8"), "local rules");
+  assert.equal(readFileSync(join(project.root, ".worktreeinclude"), "utf8"), ".agents/\n");
+  assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: project.root, encoding: "utf8" }), "");
+  assert.equal(existsSync(join(project.root, "CONTEXT.md")), false);
+  assert.equal(existsSync(join(project.root, "untracked.txt")), false);
+  assert.equal(readFileSync(join(project.root, ".agents", "skills", "local.md"), "utf8"), "local skill");
+  assert.equal(execFileSync("git", ["rev-list", "--count", "HEAD"], { cwd: project.root, encoding: "utf8" }).trim(), "1");
+});
+
+test("v0.0.58 ensure prefers the registered seat and retires all duplicates before dispatch", async (t) => {
+  const project = makeProject(t, "seat-law");
+  const agents: FakeAgent[] = [
+    { id: "old", labels: { seat: "lead", project: project.slug }, cwd: project.root },
+    { id: "canonical", cwd: project.root },
+    { id: "native", provider: "factory-lead", cwd: project.root },
+  ];
+  const { handlers, stateDir, fake, leadRetired } = makeSurface(t, agents);
+  writeProjectRegistration(stateDir, project.slug, { root: project.root, lead: "canonical" });
+  const result = await handlers.leadEnsure({ projectRoot: project.root, message: "fresh directive" });
+  assert.ok(result.ok, JSON.stringify(result));
+  assert.equal(result.agentId, "canonical");
+  assert.deepEqual(fake.archived.sort(), ["native", "old"]);
+  assert.deepEqual(leadRetired.map(event => event.agentId).sort(), ["native", "old"]);
+  assert.equal(fake.sent.at(-1)?.agentId, "canonical");
+});
+
+test("v0.0.58 keepSeats preserves standing correlations and product history only", async (t) => {
+  const project = makeProject(t, "keep-seats");
+  const { handlers, stateDir } = makeSurface(t);
+  const sup = await handlers.supervisorEnsure({ projectRoot: project.root });
+  const lead = await handlers.leadEnsure({ projectRoot: project.root });
+  assert.ok(sup.ok && lead.ok);
+  const registry = new CorrelationRegistry(stateDir);
+  for (const role of ["lead", "supervisor", "agent"] as const) registry.issue({ role, projectRoot: project.root, projectSlug: project.slug });
+  assert.equal(registry.list().length, 3);
+  const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: project.root, encoding: "utf8" });
+  const result = await handlers.projectReset({ projectRoot: project.root, keepSeats: true });
+  assert.ok(result.ok, JSON.stringify(result));
+  assert.deepEqual(registry.list().map(record => record.role).sort(), ["lead", "supervisor"]);
+  assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: project.root, encoding: "utf8" }), head);
+  assert.ok(existsSync(join(project.root, "README.md")));
+});
+
+test("v0.0.58 concurrent ensures create only one active seat", async (t) => {
+  const project = makeProject(t, "concurrent-seat");
+  const { handlers, fake } = makeSurface(t);
+  const results = await Promise.all([handlers.leadEnsure({ projectRoot: project.root }), handlers.leadEnsure({ projectRoot: project.root })]);
+  assert.ok(results.every(result => result.ok));
+  assert.equal(fake.created.length, 1);
+  assert.equal(results[0].ok && results[0].agentId, results[1].ok && results[1].agentId);
+});
+
+test("v0.0.58 unscoped revoke refuses a neighbor's native Supervisor", async (t) => {
+  const a = makeProject(t, "revoke-a"), b = makeProject(t, "revoke-b");
+  const { handlers, fake } = makeSurface(t, [
+    { id: "a", labels: { seat: "supervisor", project: a.slug }, cwd: a.root },
+    { id: "b", provider: "factory-supervisor", cwd: b.root },
+  ]);
+  const result = await handlers.supervisorRevoke({});
+  assert.equal(result.ok, false);
+  assert.deepEqual(fake.archived, []);
+});
+
+test("v0.0.58 unhealthy seat archive failure prevents replacement creation", async (t) => {
+  const project = makeProject(t, "archive-fails");
+  const { factory, stateDir, home, fake } = makeSurface(t, [{ id: "broken", status: "error", labels: { seat: "lead", project: project.slug }, cwd: project.root }]);
+  fake.daemon.agents.ref = () => ({ send: async () => {}, archive: async () => { throw new Error("archive offline"); }, timeline: { refetch: async () => ({ entries: [] }) } });
+  const handlers = createSurfaceHandlers({ factory, stateDir, home, daemon: fake.daemon, stopAgent: async () => { throw new Error("cancel offline"); } });
+  const result = await handlers.leadEnsure({ projectRoot: project.root });
+  assert.equal(result.ok, false);
+  assert.deepEqual(fake.created, []);
+});
+
+test("v0.0.58 refuses resetting the plugin checkout before retiring any seats", async (t) => {
+  const project = makeProject(t, "protected-plugin");
+  const { factory, stateDir, home, fake } = makeSurface(t, [{ id: "lead", labels: { seat: "lead", project: project.slug }, cwd: project.root }]);
+  const handlers = createSurfaceHandlers({ factory, stateDir, home, daemon: fake.daemon, pluginDir: project.root });
+  const result = await handlers.projectReset({ projectRoot: project.root });
+  assert.equal(result.ok, false);
+  assert.deepEqual(fake.archived, []);
+  assert.ok(existsSync(join(project.root, "README.md")));
+});
+
+test("v0.0.58 unbound seats resolve to the most recently updated candidate", async (t) => {
+  const project = makeProject(t, "latest-seat");
+  const { handlers, fake } = makeSurface(t, [
+    { id: "older", labels: { seat: "lead", project: project.slug }, updatedAt: "2026-10-01T00:00:00Z", cwd: project.root },
+    { id: "newer", labels: { seat: "lead", project: project.slug }, updatedAt: "2026-10-29T00:00:00Z", cwd: project.root },
+  ]);
+  const result = await handlers.leadEnsure({ projectRoot: project.root });
+  assert.ok(result.ok, JSON.stringify(result));
+  assert.equal(result.agentId, "newer");
+  assert.deepEqual(fake.archived, ["older"]);
+});
+
+test("v0.0.58 resets a linked-worktree Project without changing the main branch", async (t) => {
+  const main = makeProject(t, "linked-main");
+  const worktree = join(makeTempDir(), "linked");
+  disposeDir(t, dirname(worktree));
+  execFileSync("git", ["worktree", "add", "-b", "linked-project", worktree], { cwd: main.root, stdio: "pipe" });
+  const original = execFileSync("git", ["rev-parse", "HEAD"], { cwd: main.root, encoding: "utf8" });
+  const { handlers } = makeSurface(t);
+  const result = await handlers.projectReset({ projectRoot: worktree });
+  assert.ok(result.ok, JSON.stringify(result));
+  assert.equal(execFileSync("git", ["rev-list", "--count", "HEAD"], { cwd: worktree, encoding: "utf8" }).trim(), "1");
+  assert.equal(existsSync(join(worktree, "README.md")), false);
+  assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: main.root, encoding: "utf8" }), original);
+});

@@ -79,22 +79,11 @@ export class CorrelationRegistry {
   }
 
   private reloadFromDisk(): void {
-    for (const rec of readCorrelations(this.stateDir)) {
-      const existing = this.byCorrelationId.get(rec.correlationId);
-      if (existing === undefined) {
-        this.byCorrelationId.set(rec.correlationId, rec);
-      } else {
-        this.byCorrelationId.set(rec.correlationId, {
-          ...existing,
-          ...rec,
-          ...(rec.agentId !== undefined ? { agentId: rec.agentId } : existing.agentId !== undefined ? { agentId: existing.agentId } : {}),
-        });
-      }
-    }
+    this.byCorrelationId.clear();
+    for (const rec of readCorrelations(this.stateDir)) this.byCorrelationId.set(rec.correlationId, rec);
   }
 
   private persistToDisk(): void {
-    this.reloadFromDisk();
     writeCorrelationsAtomic(this.stateDir, [...this.byCorrelationId.values()]);
   }
 
@@ -104,6 +93,7 @@ export class CorrelationRegistry {
       issuedAt?: string;
     },
   ): SeatCorrelationRecord {
+    this.reloadFromDisk();
     const correlationId =
       typeof input.correlationId === "string" && input.correlationId.trim() !== ""
         ? input.correlationId.trim()
@@ -143,8 +133,6 @@ export class CorrelationRegistry {
   resolve(correlationIdOrAgentId: string): SeatCorrelationRecord | undefined {
     const key = typeof correlationIdOrAgentId === "string" ? correlationIdOrAgentId.trim() : "";
     if (key === "") return undefined;
-    const direct = this.byCorrelationId.get(key);
-    if (direct !== undefined && direct.agentId !== undefined) return direct;
     this.reloadFromDisk();
     const byCorr = this.byCorrelationId.get(key);
     if (byCorr !== undefined) return byCorr;
@@ -171,7 +159,7 @@ export class CorrelationRegistry {
    * the project's managed `<stateDir>/projects/<slug>/worktrees/` tree, or any
    * of `tasks` (v0.0.35, ADR 0024).
    */
-  purgeProject(projectSlug: string, projectRoot?: string, tasks?: Iterable<string>): number {
+  purgeProject(projectSlug: string, projectRoot?: string, tasks?: Iterable<string>, keepSeats = false): number {
     this.reloadFromDisk();
     const taskSet = new Set(tasks ?? []);
     const cleanRoot = typeof projectRoot === "string" && projectRoot.trim() !== "" ? projectRoot.trim().replace(/\/+$/, "") : undefined;
@@ -183,7 +171,7 @@ export class CorrelationRegistry {
         cleanRoot !== undefined && (recRoot === cleanRoot || recRoot.startsWith(`${cleanRoot}/`));
       const matchesWorktree = recRoot.startsWith(worktreesPrefix);
       const matchesTask = rec.task !== undefined && taskSet.has(rec.task);
-      if (rec.projectSlug === projectSlug || matchesRoot || matchesWorktree || matchesTask) {
+      if ((rec.projectSlug === projectSlug || matchesRoot || matchesWorktree || matchesTask) && (!keepSeats || rec.role === "agent" || matchesTask)) {
         this.byCorrelationId.delete(key);
         removed++;
       }

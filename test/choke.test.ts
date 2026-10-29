@@ -1160,3 +1160,21 @@ test("git_blocked ingestion attributes only contracted Peer worktree commands to
   assert.equal(blocks.length, 6);
   assert.deepEqual(blocks.map(event => event.task), [undefined, undefined, undefined, undefined, undefined, "telemetry"]);
 });
+
+test("v0.0.58 reset scrubs refusal sources permanently while preserving other Projects", (t) => {
+  const dir = makeTempDir(); disposeDir(t, dir);
+  const workspace = join(dir, "target"); mkdirSync(workspace);
+  const stateDir = join(dir, "state");
+  const factory = createFactory({ stateDir });
+  const records = [
+    { id: "target", cwd: workspace },
+    { id: "not-yet-ingested", cwd: join(stateDir, "projects", "target", "worktrees", "old") },
+    { id: "neighbor", cwd: join(dir, "neighbor") },
+  ].map(record => ({ ...record, command: "git push", rule: "push", reason: "blocked" }));
+  writeFileSync(join(stateDir, "git-blocked.log"), records.map(record => JSON.stringify(record)).join("\n") + "\n");
+  startGitBlockIngestion(factory).stop();
+  factory.resetProject(workspace, "target");
+  const restarted = createFactory({ stateDir });
+  startGitBlockIngestion(restarted).stop();
+  assert.deepEqual(restarted.ledger.events.filter(event => event.event === "git_blocked").map(event => event.blockId), ["neighbor"]);
+});

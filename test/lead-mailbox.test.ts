@@ -654,7 +654,7 @@ test("onLeadTurnEnded performs a bounded 1-shot self-healing retry per mailId fo
       agents: {
         ...fake.daemon.agents,
         list: async (opts) => {
-          if (opts?.filter?.labels?.seat === "supervisor") callOrder.push("drainSupervisorMailbox:list");
+          callOrder.push("drainSupervisorMailbox:list");
           return fake.daemon.agents.list(opts);
         },
       },

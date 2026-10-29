@@ -1,3 +1,4 @@
+import { liveSeatCandidates } from "./seats.ts";
 import { bindProjectDirective } from "./execution-adapters.ts";
 import { bindScrumBlocker } from "./scrum.ts";
 import { withExecutionLane } from "./core/scrum/execution.ts";
@@ -381,50 +382,10 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
    * id or a role-provider agent pinned to this Project by label or cwd is
    * accepted, so a neighbor Project's seat is never grabbed.
    */
-  const liveSeatAgentByIdentity = async (
-    daemon: SurfaceDaemonApi,
-    slug: string,
-    seat: "supervisor" | "lead",
-  ): Promise<SurfaceAgentSnapshot | undefined> => {
-    let page: { entries: { agent: SurfaceAgentSnapshot }[] };
-    try {
-      page = await daemon.agents.list({ filter: { includeArchived: false, includeBackground: true } });
-    } catch {
-      return undefined;
-    }
-    const registration = readProjectRegistration(deps.stateDir, slug);
-    const bound = seat === "supervisor" ? registration?.supervisor : registration?.lead;
-    for (const entry of page.entries) {
-      const agent = entry.agent;
-      if (agent.archivedAt !== null) continue;
-      if (bound !== undefined && agent.id === bound) return agent;
-      if (
-        inferRoleFromProviderId(agent.provider) === seat &&
-        (agent.labels?.project === slug || (registration?.root !== undefined && agent.cwd === registration.root))
-      ) {
-        return agent;
-      }
-    }
-    return undefined;
-  };
-
-  /** The live non-archived Lead agent of one Project — the seatOf law, on the runtime's daemon slice. */
-  const liveLeadAgent = async (daemon: SurfaceDaemonApi, slug: string): Promise<SurfaceAgentSnapshot | undefined> => {
-    const page = await daemon.agents.list({ filter: { labels: { seat: "lead", project: slug }, includeArchived: false, includeBackground: true } });
-    for (const entry of page.entries) {
-      if (entry.agent.archivedAt === null) return entry.agent;
-    }
-    return liveSeatAgentByIdentity(daemon, slug, "lead");
-  };
-
-  /** The live non-archived Supervisor agent of one Project — the seatOf law, on the runtime's daemon slice. */
-  const liveSupervisorAgent = async (daemon: SurfaceDaemonApi, slug: string): Promise<SurfaceAgentSnapshot | undefined> => {
-    const page = await daemon.agents.list({ filter: { labels: { seat: "supervisor", project: slug }, includeArchived: false, includeBackground: true } });
-    for (const entry of page.entries) {
-      if (entry.agent.archivedAt === null) return entry.agent;
-    }
-    return liveSeatAgentByIdentity(daemon, slug, "supervisor");
-  };
+  const liveLeadAgent = async (daemon: SurfaceDaemonApi, slug: string): Promise<SurfaceAgentSnapshot | undefined> =>
+    (await liveSeatCandidates(daemon, deps.stateDir, "lead", slug))[0];
+  const liveSupervisorAgent = async (daemon: SurfaceDaemonApi, slug: string): Promise<SurfaceAgentSnapshot | undefined> =>
+    (await liveSeatCandidates(daemon, deps.stateDir, "supervisor", slug))[0];
 
   /**
    * The drain (ADR 0013 Decision 3's delivery rule): deliver the queued batch

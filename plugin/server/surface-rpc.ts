@@ -1,3 +1,6 @@
+import { pluginDirFor } from "./paths.ts";
+import { liveSeatCandidates, seatCandidates } from "./seats.ts";
+import { checkProjectResetRepository, resetProjectRepository } from "./project-reset.ts";
 import { boundTaskPeers } from "./task-peers.ts";
 import { scrumTelemetry } from "./core/scrum/telemetry.ts";
 import { scrumOperation } from "./core/scrum/controller.ts";
@@ -481,47 +484,11 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     slug: string,
     seat: "supervisor" | "lead",
   ): SurfaceAgentSnapshot | undefined => {
-    const registration = readProjectRegistration(deps.stateDir, slug);
-    const bound = seat === "supervisor" ? registration?.supervisor : registration?.lead;
-    return agents.find(
-      (agent) =>
-        (bound !== undefined && agent.id === bound) ||
-        (inferRoleFromProviderId(agent.provider) === seat &&
-          (agent.labels?.project === slug || (registration?.root !== undefined && agent.cwd === registration.root))),
-    );
+    return seatCandidates(agents, deps.stateDir, seat, slug)[0];
   };
 
-  /** The live non-archived seat agent — `seat` plus, when scoped, the Project's slug label. */
-  const seatOf = async (daemon: SurfaceDaemonApi, seat: "supervisor" | "lead", projectSlug?: string): Promise<SurfaceAgentSnapshot | undefined> => {
-    const labels: Record<string, string> = projectSlug === undefined ? { seat } : { seat, project: projectSlug };
-    const page = await daemon.agents.list({ filter: { labels, includeArchived: false, includeBackground: true } });
-    for (const entry of page.entries) {
-      if (entry.agent.archivedAt === null) return entry.agent;
-    }
-    // The native-picker seat (ADR 0017 §2): unlabeled, but bound in
-    // `project.json` or running under its `factory-*` role provider.
-    let all: { entries: { agent: SurfaceAgentSnapshot }[] };
-    try {
-      all = await daemon.agents.list({ filter: { includeArchived: false, includeBackground: true } });
-    } catch {
-      return undefined;
-    }
-    const liveAgents = all.entries.map((entry) => entry.agent).filter((agent) => agent.archivedAt === null);
-    if (projectSlug === undefined) {
-      const byRoleProvider = liveAgents.find((agent) => inferRoleFromProviderId(agent.provider) === seat);
-      if (byRoleProvider !== undefined) return byRoleProvider;
-      for (const reg of listProjectRegistrations(deps.stateDir)) {
-        const matched = seatAgentByIdentity(liveAgents, reg.slug, seat);
-        if (matched !== undefined) return matched;
-      }
-      return undefined;
-    }
-    return seatAgentByIdentity(
-      liveAgents,
-      projectSlug,
-      seat,
-    );
-  };
+  const seatOf = async (daemon: SurfaceDaemonApi, seat: "supervisor" | "lead", projectSlug?: string): Promise<SurfaceAgentSnapshot | undefined> =>
+    (await liveSeatCandidates(daemon, deps.stateDir, seat, projectSlug))[0];
 
   /**
    * The keep/active workspace-id sets the orphaned `local_checkout` sweep
@@ -822,7 +789,35 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   // ---- the seat bridges (v0.0.14, ADR 0010 §1–§2) ----------------------------------------
 
   /** Find-or-create one Project's standing seat agent at `cwd = <project-root>` under its lane. */
-  const ensureSeat = async (
+  const archiveSeatAgent = async (daemon: SurfaceDaemonApi, seat: SeatName, agent: SurfaceAgentSnapshot, slug?: string): Promise<void> => {
+    try {
+      const stopped = await (deps.stopAgent ?? stopAgentViaCli)(agent.id, deps.home);
+      if (!stopped.ok) log(`${seat}: cancel before retire failed — ${stopped.reason}`);
+    } catch (err) { log(`${seat}: cancel before retire failed — ${messageOf(err)}`); }
+    await daemon.agents.ref(agent.id).archive();
+    if (seat === "lead" && slug !== undefined) {
+      try { deps.onLeadRetired?.({ slug, agentId: agent.id }); }
+      catch (err) { log(`lead: mailbox settle failed — ${messageOf(err)}`); }
+    }
+  };
+
+  const seatOperations = new Map<string, Promise<unknown>>();
+  const serializeSeat = async <T>(key: string, operation: () => Promise<T>): Promise<T> => {
+    const previous = seatOperations.get(key) ?? Promise.resolve();
+    const pending = previous.catch(() => {}).then(operation);
+    seatOperations.set(key, pending);
+    try { return await pending; }
+    finally { if (seatOperations.get(key) === pending) seatOperations.delete(key); }
+  };
+  const ensureSeat = (seat: SeatName, input: { projectRoot: string; message?: string }, context?: SurfaceCallContext) => {
+    const project = projectOrRefusal(input.projectRoot);
+    if (!project.ok) return Promise.resolve(project);
+    return serializeSeat(`${project.slug}:${seat}`, () => ensureSeatUnlocked(seat, input, context));
+  };
+  const retireSeat = (seat: SeatName, slug: string | undefined, root: string | undefined, context?: SurfaceCallContext) =>
+    serializeSeat(`${slug}:${seat}`, () => retireSeatUnlocked(seat, slug, root, context));
+
+  const ensureSeatUnlocked = async (
     seat: SeatName,
     input: { projectRoot: string; message?: string },
     context?: SurfaceCallContext,
@@ -869,9 +864,9 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         agent.cwd === "/tmp" ||
         realpathSafe(agent.cwd) === realpathSafe(project.root);
       if (agent.status === "error" || !sameProviderFamily || !sameCwd || selected.mode === "scrum" && agent.labels.scrumConfigRevision !== String(scrumRoster?.configRevision ?? 1)) {
-        const retired = await retireSeat(seat, project.slug, project.root, context);
+        const retired = await retireSeatUnlocked(seat, project.slug, project.root, context);
         if (!retired.ok) {
-          log(`${seat}: retiring unhealthy seat ${agent.id} before recreate did not cleanly settle — ${retired.error}`);
+          return retired;
         }
         agent = undefined;
       } else if (parsed !== undefined) {
@@ -1064,6 +1059,9 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       const keepIds = [workspaceId, agent.workspaceId].filter((id): id is string => typeof id === "string" && id !== "");
       await sweepOrphanedLocalCheckoutWorkspaces(daemon, project, keepIds);
     }
+    for (const duplicate of await liveSeatCandidates(daemon, deps.stateDir, seat, project.slug)) {
+      if (duplicate.id !== agent.id) await archiveSeatAgent(daemon, seat, duplicate, project.slug);
+    }
     const message = input.message?.trim();
     if (message !== undefined && message !== "") {
       try {
@@ -1078,50 +1076,33 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   };
 
   /** Cancel + archive one Project's live seat agent — the rotate/revoke retirement. */
-  const retireSeat = async (
+  const retireSeatUnlocked = async (
     seat: "supervisor" | "lead",
     projectSlug: string | undefined,
     projectRoot: string | undefined,
     context?: SurfaceCallContext,
-  ): Promise<{ ok: true; agentId: string } | { ok: false; code: string; error: string }> => {
+  ): Promise<{ ok: true; agentId: string; agentIds: string[] } | { ok: false; code: string; error: string }> => {
     const daemon = resolveDaemon(context);
-    let agent: SurfaceAgentSnapshot | undefined;
+    let agents: SurfaceAgentSnapshot[];
     try {
-      agent = await seatOf(daemon, seat, projectSlug);
+      agents = await liveSeatCandidates(daemon, deps.stateDir, seat, projectSlug);
     } catch (err) {
-      return failure("daemon-unavailable", `cannot read the daemon's agents: ${messageOf(err)}`);
+      return failure("daemon-unavailable", messageOf(err));
     }
-    if (agent === undefined) {
-      return failure(seat === "lead" ? "no-lead" : "no-supervisor", `no live seat=${seat}${projectSlug === undefined ? "" : `, project=${projectSlug}`} agent on this daemon — nothing to retire`);
-    }
-    // Cancel first (best-effort: an idle agent has nothing to cancel), then
-    // archive — the retirement the seat graph reads.
-    const stop = deps.stopAgent ?? stopAgentViaCli;
-    const stopped = await stop(agent.id, deps.home);
-    if (!stopped.ok) log(`${seat}: cancel before retire did not land — ${stopped.reason}`);
-    try {
-      await daemon.agents.ref(agent.id).archive();
-    } catch (err) {
-      return failure("archive-failed", `archiving ${seat} ${agent.id} failed: ${messageOf(err)}`);
-    }
-    if (projectSlug !== undefined && projectRoot !== undefined) {
-      writeProjectRegistration(deps.stateDir, projectSlug, { root: projectRoot, ...(seat === "lead" ? { lead: null } : { supervisor: null }) });
-    }
-    // The Lead's mailbox settle (v0.0.20, ADR 0013 §4's last arm): a retired
-    // Lead can never ack its live delivery, so the un-acked batch returns to
-    // `queued` (`mail_requeued`, reason "lead-rotated") the moment the seat
-    // archives — a manual rotate racing a live delivery delays the mail to
-    // the next Lead, never strands it. The automatic handoff arm rides this
-    // same door as a no-op (its turn boundary settles first).
-    if (seat === "lead" && projectSlug !== undefined) {
+    if (agents.length === 0) return failure(seat === "lead" ? "no-lead" : "no-supervisor", `no live ${seat} seat`);
+    const agentIds: string[] = [];
+    const errors: string[] = [];
+    for (const agent of agents) {
       try {
-        deps.onLeadRetired?.({ slug: projectSlug, agentId: agent.id });
-      } catch (err) {
-        log(`lead: the rotation's mailbox settle of ${projectSlug} failed — startup recovery remains the net (${messageOf(err)})`);
-      }
+        await archiveSeatAgent(daemon, seat, agent, projectSlug);
+        agentIds.push(agent.id);
+      } catch (err) { errors.push(`${agent.id}: ${messageOf(err)}`); }
     }
-    log(`${seat}: retired ${agent.id} (cancelled + archived)`);
-    return { ok: true as const, agentId: agent.id };
+    if (errors.length > 0) return failure("archive-failed", errors.join("; "));
+    if (projectSlug !== undefined && projectRoot !== undefined) {
+      writeProjectRegistration(deps.stateDir, projectSlug, { root: projectRoot, [seat]: null });
+    }
+    return { ok: true as const, agentId: agentIds[0]!, agentIds };
   };
 
   /**
@@ -1193,7 +1174,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         inferredRole === "lead" ||
         agent.id === reg?.supervisor ||
         agent.id === reg?.lead;
-      if (!options.includeSeats && (seatLabel === "supervisor" || seatLabel === "lead")) continue;
+      if (!options.includeSeats && isSeatRole) continue;
       const isLeadRole = seatLabel === "lead" || inferredRole === "lead" || agent.id === reg?.lead;
       const boundTask = bound.get(agent.id) ?? agent.labels.task;
       const inWorktree = agent.cwd === worktreesDir || agent.cwd.startsWith(`${worktreesDir}/`);
@@ -1811,22 +1792,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         const page = await daemon.agents.list({ filter: { includeArchived: false, includeBackground: true } });
         rawAgents = page.entries.map((entry) => entry.agent).filter((agent) => agent.archivedAt === null);
         const seatOfProject = (seat: "supervisor" | "lead"): SurfaceAgentSnapshot | undefined => {
-          const byLabels = rawAgents.find(
-            (agent) => agent.labels.seat === seat && (project === null || agent.labels.project === project.slug),
-          );
-          if (byLabels !== undefined) return byLabels;
-          if (project === null) {
-            const byRoleProvider = rawAgents.find((agent) => inferRoleFromProviderId(agent.provider) === seat);
-            if (byRoleProvider !== undefined) return byRoleProvider;
-            for (const reg of listProjectRegistrations(deps.stateDir)) {
-              const matched = seatAgentByIdentity(rawAgents, reg.slug, seat);
-              if (matched !== undefined) return matched;
-            }
-            return undefined;
-          }
-          // The native-picker seat (ADR 0017 §2): unlabeled, but bound in
-          // `project.json` or running under its `factory-*` role provider.
-          return seatAgentByIdentity(rawAgents, project.slug, seat);
+          return seatCandidates(rawAgents, deps.stateDir, seat, project?.slug)[0];
         };
         supervisorRaw = seatOfProject("supervisor");
         leadRaw = seatOfProject("lead");
@@ -1898,10 +1864,8 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       }): ProjectView => {
         const reg = readProjectRegistration(deps.stateDir, entry.slug);
         const liveSup =
-          rawAgents.find((a) => a.labels.seat === "supervisor" && a.labels.project === entry.slug) ??
           seatAgentByIdentity(rawAgents, entry.slug, "supervisor");
         const liveLead =
-          rawAgents.find((a) => a.labels.seat === "lead" && a.labels.project === entry.slug) ??
           seatAgentByIdentity(rawAgents, entry.slug, "lead");
         const resolvedCommonDir =
           entry.commonDir ??
@@ -2352,8 +2316,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         const daemon = resolveDaemon(context);
         let live: SurfaceAgentSnapshot[] = [];
         try {
-          const page = await daemon.agents.list({ filter: { labels: { seat: "supervisor" }, includeArchived: false, includeBackground: true } });
-          live = page.entries.map((entry) => entry.agent).filter((agent) => agent.archivedAt === null);
+          live = await liveSeatCandidates(daemon, deps.stateDir, "supervisor");
         } catch (err) {
           return failure("daemon-unavailable", `cannot read the daemon's agents: ${messageOf(err)}`);
         }
@@ -2687,6 +2650,11 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         }
       }
 
+      const protectedPluginDir = deps.pluginDir ?? pluginDirFor(deps.home);
+      if (input.keepSeats !== true) {
+        try { checkProjectResetRepository(project.root, protectedPluginDir); }
+        catch (err) { return failure("repository-reset-refused", messageOf(err)); }
+      }
       const daemon = resolveDaemon(context);
       const { projectDir, worktreesDir, projectTaskSet, archivedAgents } =
         await cleanupProjectArtifacts(daemon, project, {
@@ -2721,7 +2689,8 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       if (input.keepSeats !== true) {
         for (const seat of ["supervisor", "lead"] as const) {
           const retired = await retireSeat(seat, project.slug, project.root, context);
-          if (retired.ok) archivedSeats.push(retired.agentId);
+          if (retired.ok) archivedSeats.push(...retired.agentIds);
+          else if (retired.code !== "no-lead" && retired.code !== "no-supervisor") return retired;
         }
       }
 
@@ -2754,6 +2723,9 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       const { purgedEvents, tasks: purgedTasks, removedFiles } = deps.factory.resetProject(project.root, project.slug);
       rmSync(join(projectDir, "scrum"), { recursive: true, force: true });
       const tasks = [...new Set([...purgedTasks, ...projectTaskSet])];
+      new CorrelationRegistry(deps.stateDir).purgeProject(project.slug, project.root, tasks, input.keepSeats === true);
+      if (input.keepSeats !== true) resetProjectRepository(project.root, protectedPluginDir);
+
       const snap = await this.snapshot({ projectRoot: project.root }, context);
       if (input.keepSeats !== true) {
         try {

@@ -6,7 +6,7 @@ import { liveWorkspaceConflict, normalized, acceptedTasks } from "./workspace-co
 import { createHash } from "node:crypto";
 import { projectTask } from "./task-state.ts";
 import type { AcceptanceRole } from "./task-state.ts";
-import { readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { Ledger, usageIsValid } from "./ledger.ts";
 import { MAX_ATTEMPTS, NEEDS_HUMAN_REASONS, needsHumanEvidenceIsValid } from "./events.ts";
@@ -1260,7 +1260,8 @@ export function createFactory(options: FactoryOptions): Factory {
         otherProjectTasks.delete(task);
       }
 
-      const purgedEvents = ledger.purgeWhere((evt) => {
+      const purgedBlockIds = new Set<string>();
+      const shouldPurge = (evt: LedgerEvent): boolean => {
         if ("task" in evt && typeof evt.task === "string" && projectTaskSet.has(evt.task)) {
           return true;
         }
@@ -1272,7 +1273,26 @@ export function createFactory(options: FactoryOptions): Factory {
           return true;
         }
         return false;
-      });
+      };
+      for (const evt of ledger.events) {
+        if (evt.event === "git_blocked" && shouldPurge(evt)) purgedBlockIds.add(evt.blockId);
+      }
+      // Scrub the ingestion source before purging its deduplication evidence.
+      const refusalLog = join(stateDir, "git-blocked.log");
+      if (existsSync(refusalLog)) {
+        const kept = readFileSync(refusalLog, "utf8").split("\n").filter(line => {
+          try {
+            const record = JSON.parse(line);
+            return !(purgedBlockIds.has(record.id) || typeof record.cwd === "string" && (matchesProjectRoot(record.cwd) || matchesProjectState(record.cwd)));
+          } catch { return true; }
+        });
+        const tmp = `${refusalLog}.${process.pid}.tmp`;
+        try {
+          writeFileSync(tmp, kept.join("\n"));
+          renameSync(tmp, refusalLog);
+        } finally { rmSync(tmp, { force: true }); }
+      }
+      const purgedEvents = ledger.purgeWhere(shouldPurge);
 
       const tasks = [...projectTaskSet];
       const dirsToClean = [...new Set([stateDir, dataDir, ...(projectDir !== undefined ? [projectDir] : [])])];
