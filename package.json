@@ -1,7 +1,7 @@
 {
   "name": "paseo-factory",
-  "version": "0.0.61",
-  "description": "Verification core for Paseo agents: done-criteria contracts, an append-only JSONL ledger, a gate runner, and traceable reports. Pure Node \u2014 zero Paseo imports. The Paseo plugin shell loads this core as a plain module.",
+  "version": "0.0.62",
+  "description": "Verification core for Paseo agents: done-criteria contracts, an append-only JSONL ledger, a gate runner, and traceable reports. Pure Node — zero Paseo imports. The Paseo plugin shell loads this core as a plain module.",
   "type": "module",
   "private": true,
   "license": "MIT",
@@ -21,7 +21,9 @@
     "generate:policies:check": "node scripts/generate-policies.mjs --check",
     "check:bundle": "node scripts/check-bundle.mjs",
     "check": "npm run sync:plugin-core:check && npm run generate:policies:check && npm run typecheck && npm test",
-    "check:installed": "node scripts/check-bundle.mjs && node --test test/installed-artifacts.test.ts test/core-sync.test.ts test/policy-assets.test.ts test/bridge-mcp.test.ts test/ledger-integrity.test.ts"
+    "check:installed": "node scripts/check-bundle.mjs && node --test test/installed-artifacts.test.ts test/core-sync.test.ts test/policy-assets.test.ts test/bridge-mcp.test.ts test/ledger-integrity.test.ts",
+    "version:bump": "node scripts/bump-version.mjs",
+    "prepare": "git config core.hooksPath .githooks || true"
   },
   "devDependencies": {
     "@getpaseo/plugin": "0.13.0",

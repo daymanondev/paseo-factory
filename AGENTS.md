@@ -2,12 +2,12 @@
 
 Research and build repo for `paseo-factory` — a thin verification core delivered as a Paseo plugin.
 
-## Trial daemon
+## Runtime & release
 
-All paseo/factory runtime work targets the trial home `~/.paseo-factory` (never
-the default `~/.paseo` — that is prod). `paseo` sits at `~/.local/bin/paseo`;
-node comes from nvm (`~/.nvm/versions/node/`, default v24) — non-interactive
-shells export PATH first. Live runs follow `docs/runbooks/live-run.md`.
+- **Desktop-first runtime**: Live projects run on Paseo Desktop (`~/.paseo` locally, or `ssh andrews-mac-mini` at `~/.paseo-factory` for remote Mac Mini runs) so the Owner has UI visibility into models, errors, and stuck seats. Do not run or test tasks on the local headless trial daemon (`~/.paseo-factory`) unless explicitly asked (`docs/runbooks/live-run.md`).
+- **Release before loading — never hot-patch**: Ship every code change through `npm run version:bump -- <x.y.z>`, `npm run check`, commit + tag + push, and `gh release create` before loading into Paseo. Never copy/rsync files into `~/.paseo/plugins/` or reload a live daemon mid-run, which disrupts active sessions.
+- **Shell PATH**: `paseo` sits at `~/.local/bin/paseo`; node comes from nvm (`~/.nvm/versions/node/`, default v24) — non-interactive shells export PATH first.
+- **Client UI (`plugin/client/`)**: Built with React Native primitives (`@getpaseo/plugin`), not HTML/CSS DOM — skip `modern-web-guidance` for `plugin/client/` edits.
 
 ## Agent skills
 

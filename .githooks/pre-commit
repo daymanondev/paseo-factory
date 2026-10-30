@@ -1,0 +1,13 @@
+#!/usr/bin/env sh
+set -eu
+
+if ! command -v node >/dev/null 2>&1 && [ -d "$HOME/.nvm/versions/node" ]; then
+  latest_node="$(ls -1 "$HOME/.nvm/versions/node" | tail -n 1)"
+  if [ -n "$latest_node" ]; then
+    export PATH="$HOME/.nvm/versions/node/$latest_node/bin:$PATH"
+  fi
+fi
+
+npm run sync:plugin-core:check
+npm run generate:policies:check
+npm run typecheck

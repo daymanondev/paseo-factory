@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.62] - 2026-10-30
+
+Add single-command release version bumper (`npm run version:bump`), `.githooks/pre-commit` guardrail (`sync:plugin-core:check`, `generate:policies:check`, `typecheck`), and Desktop-first runtime + release-before-load rules in `AGENTS.md`.
+
+### Added
+
+- Add `scripts/bump-version.mjs` (`npm run version:bump -- <x.y.z>`) to update `package.json`, `package-lock.json`, `SHELL_VERSION` in `plugin/index.server.ts`, `test/release.test.ts`, `README.md`, and `CHANGELOG.md` in lockstep while syncing `plugin/server/core/` and generated policy assets.
+- Add `.githooks/pre-commit` (wired via `prepare` in `package.json`) to enforce `sync:plugin-core:check`, `generate:policies:check`, and `typecheck` before every commit.
+- Update `AGENTS.md` to establish Paseo Desktop (`~/.paseo` / `andrews-mac-mini`) as the primary live runtime, forbid hot-patching (`cp`/`rsync` into `~/.paseo/plugins/`) before release, and skip `modern-web-guidance` for React Native edits under `plugin/client/`.
+
 ## [0.0.61] - 2026-10-30
 
 Wake idle-unloaded (`closed`) Lead and Supervisor seats on mail delivery, durably recover successor Lead handoff across restarts, isolate project Driver waves on `notify_peer`, and prevent `spawn pi ENOENT` on archived Peer worktrees.
