@@ -87,6 +87,7 @@ export function provisionScrumHarness(input: {
   generation: string;
   userHome?: string;
   workspace?: string;
+  environment?: Record<string, string | undefined>;
 }): string {
   const { state, slug, identity, authority } = input;
   const root = scopeDir(state, slug);
@@ -148,7 +149,7 @@ export function provisionScrumHarness(input: {
   const skills = identity.kind === 'task' ? SCRUM_ROLE_SKILLS[identity.binding.role] : authority === 'supervisor' ? ['grilling', 'domain-modeling'] : ['codebase-design', 'domain-modeling', 'tdd'];
   const ui = identity.kind === 'task' && ['ux', 'dev', 'qa'].includes(identity.binding.role);
   if (!ui) rmSync(join(roleHome, 'skills'), { recursive: true, force: true });
-  const impeccableSkills = ui ? provisionImpeccable(roleHome, input.userHome ?? homedir()) : [];
+  const impeccableSkills = ui ? provisionImpeccable(roleHome, input.userHome ?? homedir(), input.environment?.CODEX_HOME ?? process.env.CODEX_HOME ?? join(input.userHome ?? homedir(), '.codex')) : [];
   settings.skills = ['!*', ...skills.filter(s => s !== 'impeccable').map(s => `+${join(input.userHome ?? homedir(), '.agents/skills', s)}`), ...impeccableSkills.map(s => `+${join(roleHome, 'skills', s)}`)];
   if (ui) settings.extensions.push(join(roleHome, 'impeccable-hook.mjs'));
   writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');

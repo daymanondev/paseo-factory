@@ -831,13 +831,19 @@ test("Scrum MCP decisions default the active design identity and keep Lead unabl
   const { scrumOperation } = await import("../plugin/server/core/scrum/controller.ts");
   const project = ensureProjectRegistered(stateDir, repo); assert.ok(project.ok);
   await switchExecution({ state: stateDir, slug: project.slug, mode: "scrum", blockers: [], rotate: async () => {} });
-  const paths = ["DESIGN.md", "EXPERIENCE.md", "mockups/index.html"].map(p => `.scratch/review/${p}`);
-  for (const path of paths) { mkdirSync(join(repo, path, ".."), { recursive: true }); writeFileSync(join(repo, path), path.endsWith("html") ? "<html><head></head><body>Farm</body></html>" : "accepted design"); }
+  const paths = ["DESIGN.md", "EXPERIENCE.md", "mockups/index.html", "mockups/browser.json", "mockups/screen.png"].map(p => `.scratch/review/${p}`);
+  const { png, states } = await import('./fixtures/scrum-design.ts');
+  const { sha256 } = await import('../src/scrum/artifacts.ts');
+  for (const path of paths) {
+    mkdirSync(join(repo, path, '..'), {recursive:true});
+    const browser = {network:'disabled',consoleErrors:[],viewports:[{width:800,height:600,screenshot:{path:paths[4],sha256:sha256(png)}}],states:states.map(state=>({screen:'farm',state,keyboard:true,passed:true}))};
+    writeFileSync(join(repo,path), path.endsWith('html') ? '<html><head></head><body>Farm</body></html>' : path.endsWith('json') ? JSON.stringify(browser) : path.endsWith('png') ? png : 'accepted design');
+  }
   execFileSync("git", ["add", "."], { cwd: repo }); execFileSync("git", ["commit", "-m", "design fixture"], { cwd: repo });
   const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
-  const refs = paths.map(path => artifactAt(repo, sha, path));
+  const refs = paths.filter(path=>!path.endsWith("browser.json")).map(path => artifactAt(repo, sha, path));
   let run = createScrumRun({ state: stateDir, slug: project.slug, runId: "review", initiativeId: "review", config: ensureScrumConfig(stateDir, project.slug), configRevision: 1, track: "ui", rationale: "fixture", ownedPaths: paths, requestId: "create" });
-  run = commandRun(stateDir, project.slug, run.runId, { type: "design_review_requested", requestId: "design", expectedRevision: run.revision, design: { revision: 1, digest: designDigest(refs), refs, browserEvidence: [refs[0]] } });
+  run = commandRun(stateDir, project.slug, run.runId, { type: "design_review_requested", requestId: "design", expectedRevision: run.revision, design: { revision: 1, digest: designDigest(refs), refs, browserEvidence: [artifactAt(repo, sha, paths[3])] } });
   const factory = createFactory({ stateDir });
   const registry = new CorrelationRegistry(stateDir);
   const supervisor = registry.issue({ role: "supervisor", projectSlug: project.slug, projectRoot: repo });
@@ -853,8 +859,9 @@ test("Scrum MCP decisions default the active design identity and keep Lead unabl
   const snapshot = await call(lead.correlationId, "lead_scrum_operation", { action: "get" }); assert.notEqual(snapshot.isError, true);
   const preview = await call(lead.correlationId, "lead_scrum_operation", { action: "preview", subpath: "mockups/index.html", port: 0 }); assert.notEqual(preview.isError, true, JSON.stringify(preview));
   const previewUrl = JSON.parse(preview.content[0].text).data.url;
-  assert.match(previewUrl, /^http:\/\/127\.0\.0\.1:\d+\/$/);
-  assert.match(await (await fetch(previewUrl)).text(), /Farm/);
+  assert.match(previewUrl, /^http:\/\/127\.0\.0\.1:\d+\/\?token=[a-f0-9]{64}$/);
+  const mockupUrl = new URL(previewUrl); mockupUrl.pathname='/mockup';
+  assert.match(await (await fetch(mockupUrl)).text(), /Farm/);
   const reserve = await call(lead.correlationId, "lead_scrum_operation", { action: "fix.reserve", task: "farm-fix" }); assert.notEqual(reserve.isError, true, JSON.stringify(reserve));
   assert.equal(readRun(stateDir, project.slug, run.runId).fixRounds, 1);
 });

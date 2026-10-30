@@ -1,4 +1,4 @@
-import { impeccableEnvironment } from "./core/scrum/impeccable.ts";
+import { impeccableEnvironment, restoreImpeccableEnvironment } from "./core/scrum/impeccable.ts";
 import { readExecution } from "./core/scrum/config.ts";
 import { resolveRoleLane, laneProviderConfig } from "./provider-lanes.ts";
 import type { ProviderCatalogEntry } from "./provider-lanes.ts";
@@ -131,8 +131,9 @@ export function factoryEnvFor(
   input: { stateDir: string; project: ProjectIdentity; task?: string; correlationId?: string; userHome?: string; execution?: ScrumHarnessIdentity | null; environment?: Record<string, string> },
 ): Record<string, string> {
   ensureFactoryBinScripts(input.stateDir);
+  const environment = restoreImpeccableEnvironment({ ...process.env, ...input.environment });
   const execution = input.execution === null ? undefined : input.execution ?? resolveScrumIdentity(input.stateDir, input.project.slug, input.task);
-  const roleHome = execution !== undefined ? provisionScrumHarness({ state: input.stateDir, slug: input.project.slug, authority: role, identity: execution, generation: input.correlationId ?? "initial", userHome: input.userHome, workspace: input.task ? join(input.stateDir, "projects", input.project.slug, "worktrees", input.task) : input.project.root }) : provisionPiAgentHome({
+  const roleHome = execution !== undefined ? provisionScrumHarness({ state: input.stateDir, slug: input.project.slug, authority: role, identity: execution, generation: input.correlationId ?? "initial", userHome: input.userHome, environment, workspace: input.task ? join(input.stateDir, "projects", input.project.slug, "worktrees", input.task) : input.project.root }) : provisionPiAgentHome({
     stateDir: input.stateDir,
     role,
     sourceAgentDir: join(input.userHome ?? homedir(), ".pi", "agent"),
@@ -142,7 +143,7 @@ export function factoryEnvFor(
     PASEO_FACTORY_PROJECT: input.project.slug,
     PASEO_FACTORY_STATE_DIR: input.stateDir,
     PI_CODING_AGENT_DIR: roleHome,
-    ...(execution?.kind === 'task' && ['ux', 'dev', 'qa'].includes(execution.binding.role) ? impeccableEnvironment(roleHome, { ...process.env, ...input.environment }) : {}),
+    ...(execution?.kind === 'task' && ['ux', 'dev', 'qa'].includes(execution.binding.role) ? impeccableEnvironment(roleHome, environment) : {}),
     ...(execution === undefined ? {} : { PASEO_FACTORY_EXECUTION: JSON.stringify(execution) }),
   };
   if (input.project.root !== "") env.PASEO_FACTORY_PROJECT_ROOT = input.project.root;
@@ -489,7 +490,15 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
     (request as { labels?: Record<string, string> }).labels ??
     (request.config as { labels?: Record<string, string> }).labels;
   const correlations = new CorrelationRegistry(stateDir);
-  request = { ...request, config: { ...request.config } };
+  const oldUiHome = request.env?.PASEO_FACTORY_UI_HOME;
+  request = { ...request, env: restoreImpeccableEnvironment(request.env ?? {}), config: { ...request.config } };
+  if (oldUiHome && request.config.providerOptions) {
+    const options = request.config.providerOptions, extra = options.extraArgs;
+    if (isRecord(extra) && extra['plugin-dir'] === oldUiHome) {
+      const clean = { ...extra }; delete clean['plugin-dir'];
+      request.config.providerOptions = { ...options, extraArgs: clean };
+    }
+  }
 
   // The deterministic identity ladder (v0.0.27, ADR 0017 §2): the native role
   // provider id first, then the `PASEO_FACTORY_SEAT` env stamp, then the
@@ -608,7 +617,7 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
     config: execution === undefined ? fencedConfig : scopeScrumCapabilities(fencedConfig, role, execution),
     env: {
       ...(request.env ?? {}),
-      ...factoryEnvFor(role, { stateDir, project: projectIdentity, correlationId: issued.correlationId, userHome }),
+      ...factoryEnvFor(role, { stateDir, project: projectIdentity, correlationId: issued.correlationId, userHome, environment: request.env }),
     },
   }) as R;
 }
@@ -726,7 +735,7 @@ export function injectSessionEnv<
       return {
         ...request,
         env: {
-          ...request.env,
+          ...restoreImpeccableEnvironment(request.env ?? {}),
           ...factoryEnvFor(associated.role, {
             stateDir,
             project: { root: associated.projectRoot, slug: associated.projectSlug },
@@ -734,6 +743,7 @@ export function injectSessionEnv<
             execution: associated.execution ?? null,
             correlationId: associated.correlationId,
             userHome,
+            environment: request.env,
           }),
         },
       };
@@ -776,13 +786,14 @@ export function injectSessionEnv<
     return {
       ...request,
       env: {
-        ...request.env,
+        ...restoreImpeccableEnvironment(request.env ?? {}),
         ...factoryEnvFor("agent", {
           stateDir,
           project: { root: "", slug: worktree.slug },
           task: worktree.task,
           correlationId: record?.correlationId,
           userHome,
+          environment: request.env,
         }),
       },
     };
@@ -808,12 +819,13 @@ export function injectSessionEnv<
     return {
       ...request,
       env: {
-        ...request.env,
+        ...restoreImpeccableEnvironment(request.env ?? {}),
         ...factoryEnvFor(seat, {
           stateDir,
           project: registration,
           correlationId: record?.correlationId,
           userHome,
+          environment: request.env,
         }),
       },
     };
@@ -843,12 +855,13 @@ export function injectSessionEnv<
       return {
         ...request,
         env: {
-          ...request.env,
+          ...restoreImpeccableEnvironment(request.env ?? {}),
           ...factoryEnvFor(identitySeat, {
             stateDir,
             project,
             correlationId: record?.correlationId,
             userHome,
+            environment: request.env,
           }),
         },
       };

@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readdirSync, symlinkSync, rmSync, writeFileSync,
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 /** Discover whole upstream directories; keep references, scripts and engine together. */
-export function provisionImpeccable(roleHome: string, userHome: string): string[] {
+export function provisionImpeccable(roleHome: string, userHome: string, sourceCodexHome = join(userHome, '.codex')): string[] {
   const skills = new Map<string, string>();
   for (const provider of ['.agents', '.claude', '.gemini', '.pi', '.codex', '.opencode']) {
     const dir = join(userHome, provider, 'skills');
@@ -60,7 +60,7 @@ export default async function({directory}) { return { 'tool.execute.after': asyn
   writeFileSync(join(copilot, 'hooks.json'), JSON.stringify({ version: 1, hooks: { postToolUse: [{ type: 'command', bash: command, timeoutSec: 5 }] } }));
   // Codex reads its native hooks from CODEX_HOME. Preserve auth/provider config.
   for (const name of ['auth.json', 'config.toml']) {
-    const source = join(userHome, '.codex', name), dest = join(roleHome, name);
+    const source = join(sourceCodexHome, name), dest = join(roleHome, name);
     if (existsSync(source) && !existsSync(dest)) { if (name === 'config.toml') copyFileSync(source, dest); else symlinkSync(source, dest); }
   }
   return [...skills.keys()];
@@ -68,14 +68,32 @@ export default async function({directory}) { return { 'tool.execute.after': asyn
 
 /** Launch overlays are confined to the specialist process; preserve operator config. */
 export function impeccableEnvironment(roleHome: string, environment: Record<string, string | undefined>): Record<string, string> {
+  environment = restoreImpeccableEnvironment(environment);
   let openCode: Record<string, unknown> = {};
   try { const parsed = JSON.parse(environment.OPENCODE_CONFIG_CONTENT ?? '{}'); if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) openCode = parsed; } catch { throw new Error('Invalid OPENCODE_CONFIG_CONTENT; cannot safely add the UI scanner'); }
   const existingSkills = typeof openCode.skills === 'object' && openCode.skills ? openCode.skills as Record<string, unknown> : {};
   return {
+    PASEO_FACTORY_UI_BASE_ENV: JSON.stringify(Object.fromEntries(['CODEX_HOME','OPENCODE_CONFIG_CONTENT','OMP_PROFILE','PI_PROFILE'].map(key => [key, environment[key] ?? null]))),
     PASEO_FACTORY_IMPECCABLE: join(roleHome, 'skills/impeccable/scripts/impeccable'),
     PASEO_FACTORY_UI_HOME: roleHome,
     CODEX_HOME: roleHome,
     OMP_PROFILE: '', PI_PROFILE: '',
     OPENCODE_CONFIG_CONTENT: JSON.stringify({ ...openCode, plugin: [...new Set([...(Array.isArray(openCode.plugin) ? openCode.plugin : []), pathToFileURL(join(roleHome, 'impeccable-opencode.mjs')).href])], skills: { ...existingSkills, paths: [...new Set([...(Array.isArray(existingSkills.paths) ? existingSkills.paths : []), join(roleHome, 'skills')])] } }),
   };
+}
+
+/** Remove Factory-owned overlays before changing identity or rebuilding a session. */
+export function restoreImpeccableEnvironment<T extends Record<string, string | undefined>>(environment: T): Record<string, string> {
+  const restored = Object.fromEntries(Object.entries(environment).filter((entry): entry is [string,string] => typeof entry[1] === 'string'));
+  const base = environment.PASEO_FACTORY_UI_BASE_ENV;
+  if (base) {
+    try {
+      const original = JSON.parse(base);
+      for (const key of ['CODEX_HOME','OPENCODE_CONFIG_CONTENT','OMP_PROFILE','PI_PROFILE']) {
+        if (typeof original[key] === 'string') restored[key] = original[key]; else delete restored[key];
+      }
+    } catch { throw new Error('Invalid original UI environment; cannot safely restore role isolation'); }
+  }
+  for (const key of ['PASEO_FACTORY_UI_HOME','PASEO_FACTORY_IMPECCABLE','PASEO_FACTORY_UI_BASE_ENV']) delete restored[key];
+  return restored;
 }

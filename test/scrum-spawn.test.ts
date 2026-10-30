@@ -850,6 +850,11 @@ test('Scrum harness links the full upstream UI skill pack and edit scanner only 
     writeFileSync(join(home, '.claude/skills', skill, 'SKILL.md'), '# Full upstream pack');
     writeFileSync(join(home, '.claude/skills', skill, 'reference/audit.md'), 'Audit instructions');
   }
+  const { switchExecution } = await import('../src/scrum/execution.ts');
+  await switchExecution({state,slug:project.slug,mode:'scrum',blockers:[],rotate:async()=>{}});
+  const customCodex = join(home,'custom-codex'); mkdirSync(customCodex,{recursive:true});
+  writeFileSync(join(customCodex,'auth.json'),'custom-auth');
+  writeFileSync(join(customCodex,'config.toml'),'model_provider = "custom"');
   const launcher = join(home, '.claude/skills/impeccable/scripts/impeccable');
   mkdirSync(join(launcher, '..'), { recursive: true });
   writeFileSync(launcher, '#!/bin/sh\nprintf \"scanner-finding\"\n'); chmodSync(launcher, 0o755);
@@ -879,8 +884,10 @@ test('Scrum harness links the full upstream UI skill pack and edit scanner only 
       const restrictive = scopeScrumCapabilities({provider:'opencode',providerOptions:{permission:{bash:'deny'}}}, 'agent', identity);
       assert.equal((restrictive.providerOptions.permission.bash as unknown as Record<string,string>)['*'], 'deny');
       const { factoryEnvFor } = await import('../plugin/server/roles.ts');
-      const env = factoryEnvFor('agent', {stateDir:state,project:{root:repo,slug:project.slug},execution:identity,userHome:home,environment:{OPENCODE_CONFIG_CONTENT:JSON.stringify({plugin:['operator-plugin'],permission:{bash:'deny'}})}});
+      const env = factoryEnvFor('agent', {stateDir:state,project:{root:repo,slug:project.slug},execution:identity,userHome:home,environment:{CODEX_HOME:customCodex,OPENCODE_CONFIG_CONTENT:JSON.stringify({plugin:['operator-plugin'],permission:{bash:'deny'}})}});
       assert.equal(env.CODEX_HOME, env.PASEO_FACTORY_UI_HOME);
+      assert.equal(readFileSync(join(env.CODEX_HOME,'auth.json'),'utf8'),'custom-auth');
+      assert.equal(readFileSync(join(env.CODEX_HOME,'config.toml'),'utf8'),'model_provider = "custom"');
       const oc = JSON.parse(env.OPENCODE_CONFIG_CONTENT);
       assert.equal(oc.plugin[0],'operator-plugin'); assert.equal(oc.permission.bash,'deny');
       assert.ok(oc.plugin.some((p:string)=>p.endsWith('impeccable-opencode.mjs')));
@@ -890,6 +897,20 @@ test('Scrum harness links the full upstream UI skill pack and edit scanner only 
       const scan = await handler!({toolName:'write',input:{path:'page.html'},content:[]},{cwd:repo});
       assert.match(scan!.content[0].text,/scanner-finding/);
       if(role==='ux') {
+        const { CorrelationRegistry } = await import('../src/correlations.ts');
+        const registry = new CorrelationRegistry(state);
+        const correlation = registry.issue({role:'agent',projectSlug:project.slug,projectRoot:repo,task:role,execution:identity});
+        registry.associate(correlation.correlationId,'native-ux');
+        const { injectSessionEnv, injectRoleOnCreate } = await import('../plugin/server/roles.ts');
+        const correlationEnv: Record<string,string> = {...env,PASEO_FACTORY_CORRELATION:correlation.correlationId};
+        const resumed = injectSessionEnv({agentId:'native-ux',cwd:repo,provider:'opencode',env:correlationEnv},state,home)!;
+        const resumedConfig = JSON.parse(resumed.env.OPENCODE_CONFIG_CONTENT);
+        assert.equal(resumedConfig.plugin[0],'operator-plugin'); assert.equal(resumedConfig.permission.bash,'deny');
+        const lead = injectRoleOnCreate({config:{cwd:repo,provider:'factory-lead',title:'Scrum Lead',providerOptions:native.providerOptions},env:correlationEnv},state,home)!;
+        assert.equal(lead.env?.PASEO_FACTORY_UI_HOME,undefined);
+        assert.equal(lead.env?.CODEX_HOME,customCodex);
+        assert.deepEqual(JSON.parse(lead.env!.OPENCODE_CONFIG_CONTENT),{plugin:['operator-plugin'],permission:{bash:'deny'}});
+        assert.equal((lead.config.providerOptions as {extraArgs?:Record<string,string>}).extraArgs?.['plugin-dir'],undefined);
         const { ensureGitShim } = await import('../plugin/server/shell.ts');
         const { repoRoot } = await import('./helpers.ts');
         const { spawnSync } = await import('node:child_process');

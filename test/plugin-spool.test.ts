@@ -112,12 +112,14 @@ function fakeDaemon(agents: FakeAgent[]) {
 function makeSpooledSurface(t: TestContext, agents: FakeAgent[] = []) {
   const dir = makeTempDir();
   disposeDir(t, dir);
-  const projectRoot = join(dir, "repo");
-  mkdirSync(projectRoot, { recursive: true });
-  writeFileSync(join(projectRoot, "README.md"), "x\n");
-  gitCommitAll(projectRoot);
-  const resolved = resolveProject(projectRoot);
+  const sourceRoot = join(dir, "repo");
+  mkdirSync(sourceRoot, { recursive: true });
+  writeFileSync(join(sourceRoot, "README.md"), "x\n");
+  gitCommitAll(sourceRoot);
+  const resolved = resolveProject(sourceRoot);
   assert.ok(resolved.ok, "the test project must resolve");
+  // Match the production ingress, including macOS /var -> /private/var aliases.
+  const projectRoot = resolved.root;
   const slug = resolved.ok ? resolved.slug : "";
 
   const home = join(dir, "paseo-home");
@@ -331,7 +333,8 @@ test("a dispatch resolves --workspace through resolveProject as the same Project
 // ---- the peer hooks (spec §Implementation Decisions 4, last bullet) -----------------------
 
 test("peer hooks: verdicts and needs_human land peer mail; a Driver wave holds delivery and the wave's last outcome flushes one consolidated batch", async (t) => {
-  const { stateDir, slug, projectRoot, factory, surface, fake } = makeSpooledSurface(t);
+  const livePeers: FakeAgent[] = [];
+  const { stateDir, slug, projectRoot, factory, surface, fake } = makeSpooledSurface(t, livePeers);
   const spoolRoot = spoolRootFor(stateDir);
 
   // A standing idle Lead (ensured bare — no message, so no delivery of its own).
@@ -344,10 +347,15 @@ test("peer hooks: verdicts and needs_human land peer mail; a Driver wave holds d
   factory.setContract({ task: "T2", workspace: projectRoot, gate: "true", artifact: "README.md", scope: ["zone-t2"] });
   const sha = execSync("git rev-parse HEAD", { cwd: projectRoot, encoding: "utf8" }).trim();
 
+  // A Driver round is held only while its dispatched peers are actually live.
+  // Missing peers are orphaned rounds and correctly do not block delivery.
+  for (const task of ["T1", "T2"]) livePeers.push({ id: `peer-${task}`, status: "running", labels: { seat: "agent", project: slug, task } });
+
   // The Driver wave opens: both tasks spawn, neither has a verdict yet.
   dropRequest(spoolRoot, { id: "sp-1", kind: "spawn", task: "T1", provider: "pi/zai/glm-5.3", arity: 1 });
   dropRequest(spoolRoot, { id: "sp-2", kind: "spawn", task: "T2", provider: "pi/zai/glm-5.3", arity: 1 });
   await until(() => {
+    assert.equal(readReply(spoolRoot, "sp-1").ok, true);
     assert.equal(readReply(spoolRoot, "sp-2").ok, true);
   });
 
