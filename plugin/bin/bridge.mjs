@@ -1441,7 +1441,7 @@ var string = { type: "string" };
 var decision = {
   name: "supervisor_scrum_decision",
   description: "Record an explicit Owner design decision. Omitted run/revision/digest resolve from the active run. Never infer Owner approval.",
-  inputSchema: { type: "object", properties: { runId, decision: { type: "string", enum: ["approved", "changes_requested", "waived"] }, rationale: { type: "string", minLength: 1 }, revision: { type: "integer" }, digest: string, decidedBy: string, actorRole: { type: "string", enum: ["supervisor"] }, designArtifact: string, findings: { type: "array", items: string } }, required: ["decision", "rationale"] }
+  inputSchema: { type: "object", properties: { runId, decision: { type: "string", enum: ["approved", "changes_requested", "waived"] }, rationale: { type: "string", minLength: 1 }, revision: { type: "integer" }, digest: string, decidedBy: string, actorRole: { type: "string", enum: ["supervisor"] }, designArtifact: string, findings: { type: "array", items: { type: "object", properties: { screen: string, state: { type: "string", enum: ["empty", "loading", "populated", "error", "offline", "permission-denied"] }, viewport: { type: "string", enum: ["desktop", "tablet", "mobile"] }, selector: string, note: string, status: { type: "string", enum: ["approved", "revise"] } }, required: ["screen", "note"] } }, screenStatuses: { type: "object", additionalProperties: { type: "string", enum: ["approved", "revise"] } } }, required: ["decision", "rationale"] }
 };
 var operation = {
   name: "lead_scrum_operation",

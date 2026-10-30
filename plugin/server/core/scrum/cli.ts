@@ -2,6 +2,8 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { DOC_FILES, lintScrumDoc } from "./linter.ts";
 import type { ScrumDocKind } from "./linter.ts";
+import { verifyBrowserFiles } from "./browser-files.ts";
+import { designScreens } from "./design-contract.ts";
 import { verifyQaFiles } from "./qa-bundle.ts";
 export function lintScrumDirectory(
   kind: string,
@@ -13,7 +15,7 @@ export function lintScrumDirectory(
       diagnostics: [
         {
           category: "invocation",
-          message: "--kind prd|ux|architecture|backlog|qa and --dir required",
+          message: "--kind prd|ux|architecture|backlog|qa|ui and --dir required",
         },
       ],
     };
@@ -32,6 +34,10 @@ export function lintScrumDirectory(
       ...(kind === "backlog" ? ["prd.md"] : []),
     ])
       read(name);
+    if (kind === 'ui') {
+      try { files['EXPERIENCE.md'] = readFileSync(join(dir, '../../EXPERIENCE.md'), 'utf8'); } catch { /* Missing artifact is a diagnostic. */ }
+    }
+    if (kind === "ux") read("mockups/manifest.json");
     if (kind === "ux")
       for (const match of (files["mockups/index.html"] ?? "").matchAll(
         /(?:src|href)\s*=\s*["']([^"']+)["']/gi,
@@ -43,6 +49,9 @@ export function lintScrumDirectory(
         )
           read(`mockups/${match[1]}`);
     const diagnostics = lintScrumDoc(kind as ScrumDocKind, files);
+    if (kind === 'ui' && files['browser.json'] && !diagnostics.length) {
+      for (const message of verifyBrowserFiles(process.cwd(), JSON.parse(files['browser.json']), designScreens(files['EXPERIENCE.md']).map(s => s.id))) diagnostics.push({ path: 'browser.json', line: 1, category: 'browser-evidence', message });
+    }
     if (kind === "qa" && files["qa-report.json"] && !diagnostics.length) {
       const report = JSON.parse(files["qa-report.json"]);
       // Evidence paths are Project-relative; caller passes the initiative under cwd.

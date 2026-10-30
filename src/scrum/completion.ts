@@ -1,3 +1,5 @@
+import { verifyBrowserFiles } from "./browser-files.ts";
+import { previewModel } from "./preview-model.ts";
 import type { LedgerEvent } from "../events.ts";
 import { projectTask } from "../task-state.ts";
 import { assertDevReady } from "./approval.ts";
@@ -63,6 +65,10 @@ export function completionBlockers(input: {
         gitBytes(root, "show", `${audit.commit}:${audit.path}`).toString(),
       ) as QaReport;
       blockers.push(...validateQaReport(report));
+      if (run.design) {
+        const model = previewModel(root, run);
+        if (model.evidence.detector || model.screens.length > 1) blockers.push(...verifyBrowserFiles(root, report.browserEvidence!, model.screens.map(s => s.id)));
+      }
       if (report.status !== "clean" || !report.activeSuite)
         blockers.push("current QA must attest the active required suite clean");
       const reportsOnly = run.ownedPaths.filter(

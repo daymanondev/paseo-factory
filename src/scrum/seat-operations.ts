@@ -45,7 +45,6 @@ export function scrumSeatOperation(input: ScrumOperation, ctx: ScrumOperationCon
   if (supervisor) {
     if (!String(p.rationale ?? "").trim()) throw new FactoryError("invalid-design-decision", "non-empty rationale required");
     if (p.decidedBy !== undefined && (typeof p.decidedBy !== "string" || !p.decidedBy.trim())) throw new FactoryError("invalid-design-decision", "decidedBy must be non-empty");
-    if (p.findings !== undefined && (!Array.isArray(p.findings) || p.findings.some(f => typeof f !== "string"))) throw new FactoryError("invalid-design-decision", "findings must be strings");
     if (p.actorRole !== undefined && p.actorRole !== "supervisor") throw new FactoryError("scrum-seat-unauthorized", "actorRole must be supervisor");
     return call("design.decide", { ...p, explicitOwnerInstruction: true });
   }

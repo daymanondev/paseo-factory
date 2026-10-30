@@ -1730,7 +1730,13 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           const currentWork = project?.ok ? await executionWork(project, context) : work;
           const updatesRoster = ["config.set", "config.reset", "profile.apply"].includes(input.operation);
           const before = project?.ok && updatesRoster ? readScrumConfig(deps.stateDir, project.slug) : undefined;
-          const data = await scrumOperation(input, { factory: deps.factory, ...(project?.ok ? { slug: project.slug, root: project.root } : {}), authority, actor: caller?.actor ?? "owner", activeAgents: currentWork.activeAgents, pendingDirectives: currentWork.pendingDirectives });
+          const data = await scrumOperation(input, { factory: deps.factory, ...(project?.ok ? { slug: project.slug, root: project.root } : {}), authority, actor: caller?.actor ?? "owner", activeAgents: currentWork.activeAgents, pendingDirectives: currentWork.pendingDirectives,
+            previewDecision: async (decision, previewRun): Promise<import('./core/scrum/run-journal.ts').ScrumRun> => {
+              const reply = await handlers.scrumCommand({ operation: 'design.decide', projectRoot: project?.ok ? project.root : undefined, runId: previewRun.runId, requestId: `studio:${previewRun.runId}:${previewRun.revision}:${input.requestId}`, expectedRevision: previewRun.revision, payload: { ...decision, explicitOwnerInstruction: true } }, context);
+              if (!reply.ok) throw new FactoryError(reply.code, reply.error);
+              return reply.data as import('./core/scrum/run-journal.ts').ScrumRun;
+            },
+          });
           if (project?.ok && before && updatesRoster && readExecution(deps.stateDir, project.slug).mode === "scrum" && !listRuns(deps.stateDir, project.slug).some(run => !terminalRun(run))) {
             const after = readScrumConfig(deps.stateDir, project.slug);
             if (after) await syncLiveSeatsAfterLaneUpdate({ projectSlug: project.slug, projectRoot: project.root, before: before.lanes, after: after.lanes, executionMode: "scrum", context });
@@ -1741,7 +1747,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         const decidedRun = result.data as {
           runId?: string;
           phase?: string;
-          design?: { revision?: number; digest?: string; decision?: string; rationale?: string; findings?: string[] };
+          design?: { revision?: number; digest?: string; decision?: string; rationale?: string; findings?: unknown[]; screenStatuses?: Record<string, string> };
         } | undefined;
         if (
           project?.ok &&
@@ -1754,7 +1760,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           const decision = decidedRun.design.decision;
           const findingsLine =
             Array.isArray(decidedRun.design.findings) && decidedRun.design.findings.length > 0
-              ? `\nFindings: ${decidedRun.design.findings.join("; ")}`
+              ? `\nFindings: ${JSON.stringify(decidedRun.design.findings)}`
               : "";
           const nextStep =
             decision === "changes_requested"
@@ -1768,7 +1774,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
               runId: decidedRun.runId,
               from: authority === "supervisor" ? "supervisor" : "owner",
               ...(authority === "supervisor" ? { seat: "supervisor" as const } : {}),
-              message: `UI DESIGN DECISION RECORDED — run ${decidedRun.runId}, design revision ${decidedRun.design.revision ?? 1} (digest ${decidedRun.design.digest ?? ""}): ${decision.toUpperCase()}.\nRationale: ${decidedRun.design.rationale ?? ""}${findingsLine}\n${nextStep}`,
+              message: `UI DESIGN DECISION RECORDED — run ${decidedRun.runId}, design revision ${decidedRun.design.revision ?? 1} (digest ${decidedRun.design.digest ?? ""}): ${decision.toUpperCase()}.\nRationale: ${decidedRun.design.rationale ?? ""}${findingsLine}\nScreen statuses: ${JSON.stringify(decidedRun.design.screenStatuses ?? {})}\n${nextStep}`,
             });
           } catch (err) {
             log(`scrum: lead wakeup after ${input.operation} failed — ${messageOf(err)}`);

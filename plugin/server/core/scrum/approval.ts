@@ -1,4 +1,6 @@
 import { trackKind } from "./tracks.ts";
+import { designScreens, browserCoverageIssues } from "./design-contract.ts";
+import type { BrowserEvidenceReport, ScrumDesignFinding, ScreenStatuses } from "./design-contract.ts";
 import { safePath } from "./types.ts";
 import { FactoryError } from "../errors.ts";
 import { designDigest, verifyRefs, gitBytes, artifactAt } from "./artifacts.ts";
@@ -93,7 +95,8 @@ export function decideDesign(input: {
   rationale: string;
   decidedBy?: string;
   designArtifact?: string;
-  findings?: string[];
+  findings?: (ScrumDesignFinding | string)[];
+  screenStatuses?: ScreenStatuses;
 }): ScrumRun {
   if (
     input.authority !== "owner" &&
@@ -116,102 +119,45 @@ export function decideDesign(input: {
     actorRole: input.authority,
     ...(input.designArtifact === undefined ? {} : { designArtifact: input.designArtifact }),
     ...(input.findings === undefined ? {} : { findings: input.findings }),
+    ...(input.screenStatuses === undefined ? {} : { screenStatuses: input.screenStatuses }),
   };
   const replayed = replayRunCommand(input.state, input.slug, input.runId, command);
   if (replayed) return replayed;
   const run = readRun(input.state, input.slug, input.runId);
   if (!run.design) throw new FactoryError("ui-review-missing", input.runId);
   verifyCompleteDesign(input.root, run, run.design);
+  const experience = run.design.refs.find(r => r.path.endsWith('/EXPERIENCE.md'));
+  const declared = experience ? designScreens(gitBytes(input.root, 'show', `${experience.commit}:${experience.path}`).toString()).map(s => s.id) : [];
+  if (declared.length && [...(input.findings ?? []).flatMap(f => typeof f === 'string' ? [] : [f?.screen]), ...Object.keys(input.screenStatuses ?? {})].some(id => !declared.includes(id)))
+    throw new FactoryError('invalid-design-decision', 'findings and statuses must name declared screens');
   verifyRefs(input.root, run.design.refs, run.ownedPaths);
   return commandRun(input.state, input.slug, input.runId, command);
 }
 
-/** Browser evidence describes real checks; static HTML lint alone never unlocks Dev. */
-export function verifyBrowserEvidence(
-  root: string,
-  design: import("./run-journal.ts").DesignReview,
-): void {
-  const states = [
-    "empty",
-    "loading",
-    "populated",
-    "error",
-    "offline",
-    "permission-denied",
-  ];
-  const reports = design.browserEvidence.filter((r) =>
-    r.path.endsWith(".json"),
-  );
-  if (!reports.length)
-    throw new FactoryError(
-      "browser-evidence-required",
-      "structured offline browser evidence required",
-    );
+/** Browser evidence is pinned to exactly the submitted screenshot blobs. */
+export function verifyBrowserEvidence(root: string, design: import("./run-journal.ts").DesignReview): void {
+  const read = (suffix: string) => {
+    const ref = design.refs.find(r => r.path.endsWith('/' + suffix));
+    return ref ? gitBytes(root, 'show', `${ref.commit}:${ref.path}`).toString() : '';
+  };
+  const declared = designScreens(read('EXPERIENCE.md'), read('mockups/manifest.json')).map(s => s.id);
+  const reports = design.browserEvidence.filter(r => r.path.endsWith('.json'));
+  if (!reports.length) throw new FactoryError('browser-evidence-required', 'structured offline browser evidence required');
   for (const ref of reports) {
-    const report = JSON.parse(
-      gitBytes(root, "show", `${ref.commit}:${ref.path}`).toString(),
-    ) as {
-      network: string;
-      consoleErrors: unknown[];
-      viewports: {
-        width: number;
-        height: number;
-        screenshot: { path: string; sha256: string };
-      }[];
-      states: {
-        screen: string;
-        state: string;
-        keyboard?: boolean;
-        passed?: boolean;
-        notApplicable?: string;
-      }[];
-    };
-    if (
-      report.network !== "disabled" ||
-      !Array.isArray(report.consoleErrors) ||
-      report.consoleErrors.length ||
-      !Array.isArray(report.viewports) ||
-      !report.viewports.length ||
-      !Array.isArray(report.states) ||
-      !report.states.length
-    )
-      throw new FactoryError(
-        "browser-evidence-invalid",
-        "offline network, clean console, viewport/screenshots and state checks required",
-      );
+    let report: BrowserEvidenceReport;
+    try { report = JSON.parse(gitBytes(root, 'show', `${ref.commit}:${ref.path}`).toString()); }
+    catch { throw new FactoryError('browser-evidence-invalid', 'invalid browser JSON'); }
+    const strict = declared.length > 0 || report?.screens !== undefined || report?.detector !== undefined || (report?.viewports?.length ?? 0) > 1;
+    const issues = browserCoverageIssues(report, declared, strict);
+    if (issues.length) throw new FactoryError('browser-evidence-invalid', issues.join('; '));
     for (const viewport of report.viewports) {
-      if (
-        !Number.isFinite(viewport.width) ||
-        viewport.width < 1 ||
-        !Number.isFinite(viewport.height) ||
-        viewport.height < 1 ||
-        !safePath(viewport.screenshot?.path) ||
-        artifactAt(root, ref.commit, viewport.screenshot.path).sha256 !==
-          viewport.screenshot.sha256
-      )
-        throw new FactoryError(
-          "browser-evidence-invalid",
-          "viewport screenshot missing or changed",
-        );
+      const screenshot = viewport.screenshot;
+      const pinned = design.refs.find(r => r.path === screenshot?.path && r.sha256 === screenshot.sha256);
+      if (!Number.isFinite(viewport.width) || viewport.width < 1 || !Number.isFinite(viewport.height) || viewport.height < 1 || !safePath(screenshot?.path) || !pinned)
+        throw new FactoryError('browser-evidence-invalid', 'viewport screenshot missing from design refs or changed');
+      const bytes = gitBytes(root, 'show', `${pinned.commit}:${pinned.path}`);
+      if (artifactAt(root, pinned.commit, pinned.path).sha256 !== screenshot.sha256 || bytes.length <= 8 || !bytes.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10])))
+        throw new FactoryError('browser-evidence-invalid', 'screenshot must be a hash-verified non-empty PNG');
     }
-    for (const screen of new Set(report.states.map((s) => s.screen)))
-      for (const state of states) {
-        const check = report.states.find(
-          (s) => s.screen === screen && s.state === state,
-        );
-        if (
-          !screen ||
-          !check ||
-          !(
-            (check.keyboard === true && check.passed === true) ||
-            (typeof check.notApplicable === "string" &&
-              check.notApplicable.trim().length > 5)
-          )
-        )
-          throw new FactoryError(
-            "browser-evidence-invalid",
-            `${screen}/${state} needs a passing keyboard check or justified N/A`,
-          );
-      }
   }
 }

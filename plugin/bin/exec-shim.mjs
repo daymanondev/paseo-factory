@@ -44,6 +44,7 @@ function isExecutable(p) {
 }
 
 function resolveRealBinary(binName) {
+  if (binName === 'impeccable' && process.env.PASEO_FACTORY_IMPECCABLE && isExecutable(process.env.PASEO_FACTORY_IMPECCABLE)) return process.env.PASEO_FACTORY_IMPECCABLE;
   const skip = new Set([
     ...(stateDir ? [join(stateDir, "bin")] : []),
     dirname(process.argv[1] ?? ""),
@@ -95,6 +96,13 @@ function recordAndRefuse(rule, reason) {
 const seat = (process.env.PASEO_FACTORY_SEAT ?? "").trim();
 const corr = (process.env.PASEO_FACTORY_CORRELATION ?? "").trim();
 const inFactorySeat = seat !== "" || corr !== "";
+
+// The Scrum specialization comes from the frozen Contract identity, never the CLI.
+if (inFactorySeat && tool === 'impeccable' && process.env.PASEO_FACTORY_EXECUTION) {
+  let identity;
+  try { identity = JSON.parse(process.env.PASEO_FACTORY_EXECUTION); } catch { recordAndRefuse('policy:scrum-ui-capability', 'invalid Scrum identity'); }
+  if (identity.kind !== 'task' || !['ux', 'dev', 'qa'].includes(identity.binding?.role)) recordAndRefuse('policy:scrum-ui-capability', 'impeccable is scoped to UX, Dev and QA');
+}
 
 // Package installs belong in isolated Task worktrees, never orchestration seats.
 const packageTools = new Set(["npm", "npx", "pnpm", "yarn", "bun"]);

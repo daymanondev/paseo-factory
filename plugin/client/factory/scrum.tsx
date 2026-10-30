@@ -5,7 +5,7 @@ import {
   SettingsSwitch,
   TextInput,
 } from "@getpaseo/plugin/client/ui";
-import { createElement, useEffect, useState } from "react";
+import { createElement, useEffect, useState, useRef } from "react";
 import type { ReactNode } from "react";
 import { Text, View } from "react-native";
 import type { FactoryView } from "../../shared/view.ts";
@@ -218,8 +218,29 @@ function MockupApproval({
   const [preview, setPreview] = useState<{
     html: string;
     digest: string;
+    model: { screens: Array<{ id: string; title?: string }>; states: string[]; evidence: { detector?: { nonAdvisoryCount: number } } };
+    screenshots: Array<{ screen?: string; name?: string; width: number; height: number; dataUrl?: string }>;
   } | null>(null);
   const [rationale, setRationale] = useState("");
+  const [viewport, setViewport] = useState('desktop');
+  const [screen, setScreen] = useState('');
+  const [designState, setDesignState] = useState('populated');
+  const [stageWidth, setStageWidth] = useState(420);
+  const frame = useRef<HTMLIFrameElement | null>(null);
+  const sizes: Record<string, [number, number]> = { desktop: [1280, 800], tablet: [820, 1180], mobile: [390, 844] };
+  const [designWidth, designHeight] = sizes[viewport];
+  const scale = Math.min(1, stageWidth / designWidth);
+  const switchPreview = () => frame.current?.contentWindow?.postMessage({ type: 'scrum:set-state', screen, state: designState }, '*');
+  useEffect(switchPreview, [screen, designState, preview]);
+  const openStudio = () => {
+    const tab = window.open('about:blank', '_blank');
+    if (tab) tab.opener = null;
+    void action?.('preview.url', {}, run?.runId).then(reply => {
+      const data = reply.data as { url?: string } | undefined;
+      if (reply.ok && data?.url) { if (tab) tab.location.href = data.url; else window.open(data.url, '_blank', 'noopener,noreferrer'); }
+      else tab?.close();
+    }).catch(() => tab?.close());
+  };
   if (!run?.design)
     return <Text style={text(theme, "meta")}>Awaiting design evidence.</Text>;
   return (
@@ -271,14 +292,15 @@ function MockupApproval({
           onPress={() =>
             void action?.("preview", {}, run.runId).then((reply) => {
               const data = reply.data as
-                | { html?: string; digest?: string }
+                | NonNullable<typeof preview>
                 | undefined;
               if (reply.ok && data?.html && data.digest)
-                setPreview({ html: data.html, digest: data.digest });
+                { setPreview(data); setScreen(data.model.screens[0]?.id ?? ''); }
             })
           }
         />
       </View>
+      <Btn theme={theme} label="Open Full Design Studio ↗" icon="ExternalLink" disabled={busy} onPress={openStudio} />
       <Text style={text(theme, "meta")}>
         Stage 4 (Senior Dev) is paused until you preview the UI mockup and record an Owner decision below.
       </Text>
@@ -354,15 +376,26 @@ function MockupApproval({
         title="UI Mockup Preview"
       >
         <Modal.Content>
-          {preview
-            ? createElement("iframe", {
-                title: "Accepted Scrum design preview",
-                sandbox: "allow-scripts",
-                srcDoc: preview.html,
-                referrerPolicy: "no-referrer",
-                style: { width: "100%", height: 520, border: 0 },
-              })
-            : null}
+          <View style={{ gap: SPACING[2] }}>
+            <Btn theme={theme} label="Open Full Design Studio ↗" solid tone="accent" disabled={busy} onPress={openStudio} />
+            <SegmentedControl theme={theme} value={viewport} onChange={setViewport} options={[{ value: 'desktop', label: 'Desktop' }, { value: 'tablet', label: 'Tablet' }, { value: 'mobile', label: 'Mobile' }]} />
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: SPACING[1] }}>
+              {preview?.model.screens.map(s => <Btn key={s.id} theme={theme} small label={s.title ?? s.id} solid={screen === s.id} onPress={() => setScreen(s.id)} />)}
+            </View>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: SPACING[1] }}>
+              {preview?.model.states.map(s => <Btn key={s} theme={theme} small label={s} solid={designState === s} onPress={() => setDesignState(s)} />)}
+            </View>
+            <Text style={text(theme, 'meta')}>{designWidth}×{designHeight} · {Math.round(scale * 100)}% · {preview?.model.evidence.detector ? `${preview.model.evidence.detector.nonAdvisoryCount} non-advisory findings` : 'Legacy browser evidence'}</Text>
+            <View onLayout={event => setStageWidth(event.nativeEvent.layout.width)} style={{ width: '100%', height: designHeight * scale, overflow: 'hidden' }}>
+              {preview ? createElement('iframe', { ref: frame, title: 'Accepted Scrum design preview', sandbox: 'allow-scripts', srcDoc: preview.html, onLoad: switchPreview, referrerPolicy: 'no-referrer', style: { width: designWidth, height: designHeight, border: 0, transform: `scale(${scale})`, transformOrigin: 'top left' } }) : null}
+            </View>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: SPACING[2] }}>
+              {preview?.screenshots.map((capture, i) => <View key={i} style={{ gap: SPACING[1] }}>
+                <Text style={text(theme, 'meta')}>{capture.screen ?? screen} · {capture.width}×{capture.height}</Text>
+                {capture.dataUrl ? createElement('a', { href: capture.dataUrl, target: '_blank', rel: 'noopener noreferrer' }, createElement('img', { src: capture.dataUrl, alt: `${capture.screen ?? screen} verified screenshot`, style: { width: 120, height: 90, objectFit: 'contain', border: `1px solid ${theme.colors.border}` } })) : null}
+              </View>)}
+            </View>
+          </View>
         </Modal.Content>
       </Modal>
     </Card>

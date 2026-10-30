@@ -1,3 +1,4 @@
+import { verifyBrowserFiles } from "./browser-files.ts";
 import { scrumSeatOperation } from "./seat-operations.ts";
 import { trackKind } from "./tracks.ts";
 import { lintScrumDoc } from "./linter.ts";
@@ -46,6 +47,8 @@ import {
 import { completionBlockers } from "./completion.ts";
 import { verifyQaFiles } from "./qa-bundle.ts";
 import { gitBytes } from "./artifacts.ts";
+import { previewModel } from "./preview-model.ts";
+import { previewBridge } from "./preview-bridge.ts";
 import { renderPreview } from "./preview.ts";
 import { servePreview } from "./preview-server.ts";
 export interface ScrumOperation {
@@ -81,6 +84,7 @@ function acceptedRefs(
 export interface ScrumOperationContext {
   factory: Factory; slug?: string; root?: string;
   authority: "owner" | "supervisor" | "lead" | "agent";
+  previewDecision?: (decision: import("./preview-server.ts").PreviewDecision, run: import("./run-journal.ts").ScrumRun) => Promise<import("./run-journal.ts").ScrumRun>;
   actor: string; activeAgents: string[]; pendingDirectives: boolean;
 }
 export function scrumOperation(input: ScrumOperation, ctx: ScrumOperationContext): unknown {
@@ -185,8 +189,22 @@ export function scrumOperation(input: ScrumOperation, ctx: ScrumOperationContext
     if (run.tasks.some(t => t.role === "dev" && projectTask(ctx.factory.ledger.events, t.task).settled)) fail("scrum-track-frozen", "Dev work already landed");
     return commandRun(state, slug, run.runId, command);
   }
-  if (input.operation === "preview") return renderPreview(root, run);
-  if (input.operation === "preview.url") return servePreview(root, run, { subpath: p.subpath as string | undefined, port: p.port as number | undefined });
+  if (input.operation === "preview") {
+    const preview = renderPreview(root, run), model = previewModel(root, run);
+    return { ...preview, html: preview.html.replace(/<\/body>/i, previewBridge(model.screens[0]?.id ?? '', 'populated') + '</body>'), model, screenshots: model.evidence.viewports.map(v => {
+      const ref = run.design!.refs.find(r => r.path === v.screenshot.path && r.sha256 === v.screenshot.sha256);
+      return { ...v, dataUrl: ref ? `data:image/png;base64,${gitBytes(root, 'show', `${ref.commit}:${ref.path}`).toString('base64')}` : undefined };
+    }) };
+  }
+  if (input.operation === "preview.url") return servePreview(root, run, { subpath: p.subpath as string | undefined, port: p.port as number | undefined,
+    current: () => readRun(state, slug, run.runId),
+    decide: decision => {
+      if (ctx.previewDecision) return ctx.previewDecision(decision, run);
+      assertExecutionReady(state, slug);
+      if (readExecution(state, slug).mode !== 'scrum') throw new FactoryError('execution-mode-mismatch', 'Project selection is SLP');
+      return decideDesign({ ...decision, state, slug, root, runId: run.runId, authority: 'owner', actor: 'owner:design-studio', explicitOwnerInstruction: true, requestId: `preview:${run.runId}:${run.revision}:${input.requestId}:decision`, expectedRevision: run.revision });
+    },
+  });
   if (input.operation === "design.decide")
     return decideDesign({
       state,
@@ -204,7 +222,8 @@ export function scrumOperation(input: ScrumOperation, ctx: ScrumOperationContext
       rationale: p.rationale as string,
       decidedBy: p.decidedBy as string | undefined,
       designArtifact: p.designArtifact as string | undefined,
-      findings: p.findings as string[] | undefined,
+      findings: p.findings as import("./run-journal.ts").DesignReview["findings"],
+      screenStatuses: p.screenStatuses as import("./design-contract.ts").ScreenStatuses | undefined,
     });
   if (input.operation === "run.complete") {
     if (run.phase === "completed") return run;
@@ -362,6 +381,10 @@ export function scrumOperation(input: ScrumOperation, ctx: ScrumOperationContext
         gitBytes(root, "show", `${cmd.ref.commit}:${cmd.ref.path}`).toString(),
       );
       const issues = verifyQaFiles(root, report);
+      if (run.design) {
+        const model = previewModel(root, run);
+        if (model.screens.length && (model.evidence.detector || model.screens.length > 1)) issues.push(...verifyBrowserFiles(root, report.browserEvidence, model.screens.map(s => s.id)));
+      }
       if (issues.length) fail("invalid-qa-evidence", issues.join("; "));
       cmd.result = {
         status: report.status,

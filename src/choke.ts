@@ -853,6 +853,7 @@ export function judgeSeatFilePath(
 export interface MemoryFence {
   /** Scrum planning/QA deliver only owned artifacts. SLP callers omit it. */
   artifactOnly?: boolean;
+  scrumRole?: "pm" | "ux" | "architect" | "dev" | "qa";
   workspace: string;
   scope?: readonly string[];
   /** The task's managed Task worktree (v0.0.14), when its spawn recorded one. */
@@ -923,6 +924,8 @@ export function judgeShellCommand(command: string, roots: WritableRoots, memory?
     };
   }
   const tokens = shellTokens(command);
+  if (memory?.scrumRole && !['ux', 'dev', 'qa'].includes(memory.scrumRole) && quoteAwareWords(command).some(word => /(?:^|\/)impeccable$/.test(word)))
+    return { behavior: 'deny', rule: 'policy:scrum-ui-capability', reason: 'impeccable is scoped to UX, Dev and QA' };
   const inIsolatedWorktree =
     (memory?.worktree !== undefined && memory.worktree.trim() !== "") ||
     /\/projects\/[^/]+\/worktrees\/[^/]+(?:\/|$)/.test(roots.workspace);

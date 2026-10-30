@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.63] - 2026-10-30
+
+### Added
+
+- Scrum design studio with token-authenticated loopback routes, a multi-screen Desktop/Mobile artboard canvas, pan/zoom, global state switching, a design token kit and DOM-pinned Owner feedback. Decisions use the existing writer and Lead wakeup path.
+- Logical Desktop/Tablet/Mobile viewport scaling, screen/state controls, verified screenshot filmstrip and full studio launch in the Paseo approval modal.
+- Multi-screen UX lint, pinned PNG hashes, six-state keyboard coverage, and zero non-advisory Impeccable detector evidence across Desktop and Mobile. UI Dev Gates and QA audits enforce the same evidence floor.
+- Complete upstream Impeccable skill discovery/linking for Scrum UX/Dev/QA, a filtered Pi post-edit scanner, native hook manifest, CLI capability scoping, and structured per-screen approval/revision status. See `docs/runbooks/scrum-design-studio.md` for provisioning and evidence formats.
+
 ## [0.0.62] - 2026-10-30
 
 Add single-command release version bumper (`npm run version:bump`), `.githooks/pre-commit` guardrail (`sync:plugin-core:check`, `generate:policies:check`, `typecheck`), and Desktop-first runtime + release-before-load rules in `AGENTS.md`.

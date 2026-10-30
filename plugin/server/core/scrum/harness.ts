@@ -1,3 +1,4 @@
+import { provisionImpeccable } from "./impeccable.ts";
 import { readProjectRegistration } from "../project.ts";
 import { assertDevReady } from "./approval.ts";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -142,16 +143,15 @@ export function provisionScrumHarness(input: {
         : {}),
     }),
   });
+  const settingsPath = join(roleHome, 'settings.json');
+  const settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
+  const skills = identity.kind === 'task' ? SCRUM_ROLE_SKILLS[identity.binding.role] : authority === 'supervisor' ? ['grilling', 'domain-modeling'] : ['codebase-design', 'domain-modeling', 'tdd'];
+  const ui = identity.kind === 'task' && ['ux', 'dev', 'qa'].includes(identity.binding.role);
+  const impeccableSkills = ui ? provisionImpeccable(roleHome, input.userHome ?? homedir()) : [];
+  settings.skills = ['!*', ...skills.filter(s => s !== 'impeccable').map(s => `+${join(input.userHome ?? homedir(), '.agents/skills', s)}`), ...impeccableSkills.map(s => `+${join(roleHome, 'skills', s)}`)];
+  if (ui) settings.extensions.push(join(roleHome, 'impeccable-hook.mjs'));
+  writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
   if (identity.kind === "task") {
-    const path = join(roleHome, "settings.json");
-    const settings = JSON.parse(readFileSync(path, "utf8"));
-    settings.skills = [
-      "!*",
-      ...SCRUM_ROLE_SKILLS[identity.binding.role].map(
-        (s) => `+${join(input.userHome ?? homedir(), ".agents/skills", s)}`,
-      ),
-    ];
-    writeFileSync(path, JSON.stringify(settings, null, 2) + "\n");
     // Planning roles get research helpers, UX/Dev/QA may additionally use vision.
     if (["pm", "architect"].includes(identity.binding.role)) {
       const path = join(roleHome, "mcp.json"),
@@ -210,6 +210,7 @@ export function scopeScrumCapabilities<
             ...options,
             permission: {
               ...permission,
+              bash: { ...(typeof (permission as Record<string, unknown>).bash === 'object' ? (permission as { bash: Record<string, string> }).bash : { '*': 'ask' }), 'impeccable *': identity.kind === 'task' && ['ux', 'dev', 'qa'].includes(identity.binding.role) ? 'allow' : 'deny' },
               skill: {
                 "*": "deny",
                 ...Object.fromEntries(skills.map((skill) => [skill, "allow"])),

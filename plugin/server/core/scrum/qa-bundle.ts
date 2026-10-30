@@ -1,3 +1,6 @@
+import { browserCoverageIssues } from "./design-contract.ts";
+import type { BrowserEvidenceReport } from "./design-contract.ts";
+import { verifyBrowserFiles } from "./browser-files.ts";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { gitBytes, sha256 } from "./artifacts.ts";
@@ -46,6 +49,7 @@ export interface QaBundle {
 }
 export interface QaReport {
   schemaVersion: 1;
+  browserEvidence?: BrowserEvidenceReport;
   auditId: string;
   productSha: string;
   status: "clean" | "defects_found" | "blocked" | "inconclusive";
@@ -90,6 +94,7 @@ export function validateQaReport(value: unknown): string[] {
   )
     return ["invalid QA report identity/status"];
   const issues: string[] = [];
+  if (r.browserEvidence !== undefined) issues.push(...browserCoverageIssues(r.browserEvidence, []));
   if (typeof r.activeSuite !== "boolean")
     issues.push("activeSuite must explicitly be a boolean");
   if (
@@ -195,6 +200,7 @@ export function validateQaReport(value: unknown): string[] {
 export function verifyQaFiles(root: string, report: QaReport): string[] {
   const issues = validateQaReport(report);
   if (issues.length) return issues;
+  if (report.browserEvidence) issues.push(...verifyBrowserFiles(root, report.browserEvidence, []));
   const files = [report.baseline, ...report.runs]
     .flatMap((e) => e.evidence)
     .concat(

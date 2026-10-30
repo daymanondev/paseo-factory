@@ -342,7 +342,7 @@ test("controller requires complete design digests and journals a frozen-policy w
       join(root, path),
       path.endsWith(".html")
         ? "<html><head><title>UI</title></head><body><button>Calculate</button></body></html>"
-        : "fixture bytes",
+        : path.endsWith(".png") ? (await import("./fixtures/scrum-design.ts")).png : "fixture bytes",
     );
   writeFileSync(
     join(root, paths[4]),
@@ -353,7 +353,7 @@ test("controller requires complete design digests and journals a frozen-policy w
         {
           width: 800,
           height: 600,
-          screenshot: { path: paths[3], sha256: sha256("fixture bytes") },
+          screenshot: { path: paths[3], sha256: sha256((await import("./fixtures/scrum-design.ts")).png) },
         },
       ],
       states: [
@@ -479,4 +479,74 @@ test("controller requires complete design digests and journals a frozen-policy w
   assert.equal(run.design?.decision, "waived");
   assert.match(run.design?.actor ?? "", /^policy:/);
   assert.throws(() => assertDevReady(root, run), /resolve contradictions/);
+});
+
+test('design gate rejects a declared screen without mobile evidence and accepts the complete matrix', async t => {
+  const { designFixture } = await import('./fixtures/scrum-design.ts');
+  const { gitCommitChanges } = await import('./helpers.ts');
+  const { writeFileSync } = await import('node:fs');
+  const { artifactAt } = await import('../src/scrum/artifacts.ts');
+  const { verifyBrowserEvidence } = await import('../src/scrum/approval.ts');
+  const f = await designFixture(t);
+  for (const mutate of [
+    (r: typeof f.report) => { r.viewports = r.viewports.filter(v => !(v.screen === 'checkout' && v.name === 'mobile')); },
+    (r: typeof f.report) => { r.states = r.states.filter(s => !(s.screen === 'checkout' && s.state === 'offline')); },
+    (r: typeof f.report) => { r.detector.nonAdvisoryCount = 1; },
+    (r: typeof f.report) => { r.detector.viewportsChecked.pop(); },
+  ]) {
+    const report = structuredClone(f.report); mutate(report);
+    writeFileSync(`${f.root}/.scratch/studio/mockups/browser.json`, JSON.stringify(report));
+    const sha = gitCommitChanges(f.root, 'invalid evidence');
+    const invalid = { ...f.design, browserEvidence: [artifactAt(f.root, sha, '.scratch/studio/mockups/browser.json')] };
+    assert.throws(() => verifyBrowserEvidence(f.root, invalid), { code: 'browser-evidence-invalid' });
+  }
+  writeFileSync(`${f.root}/.scratch/studio/mockups/browser.json`, JSON.stringify(f.report));
+  gitCommitChanges(f.root, 'restore accepted evidence');
+  // The accepted, committed original is still the evidence for submission.
+  const accepted = f.submit() as ReturnType<typeof readRun>;
+  assert.equal(accepted.phase, 'awaiting-ui-approval');
+});
+
+test('loopback studio serves pinned artboards and records origin-protected structured Owner feedback', async t => {
+  const { designFixture, png } = await import('./fixtures/scrum-design.ts');
+  const { scrumOperation } = await import('../src/scrum/controller.ts');
+  const f = await designFixture(t);
+  f.submit();
+  const preview = await scrumOperation({ operation: 'preview.url', runId: f.run.runId, requestId: 'preview' }, f.ctx) as { url: string };
+  const url = new URL(preview.url), token = url.searchParams.get('token');
+  assert.match(token ?? '', /^[a-f0-9]{64}$/);
+  const route = (path: string) => new URL(path + (path.includes('?') ? '&' : '?') + `token=${token}`, url);
+  assert.equal((await fetch(url.origin)).status, 403);
+  const html = await (await fetch(url)).text();
+  for (const title of ['Artboard Canvas', 'Design System Kit', 'Interactive Inspect &amp; Pin Feedback']) assert.ok(html.includes(title));
+  const mockup = await fetch(route('/mockup?screen=checkout&state=error'));
+  assert.match(mockup.headers.get('content-security-policy') ?? '', /connect-src 'none'/);
+  assert.match(await mockup.text(), /scrum:element-picked/);
+  const asset = await fetch(route('/asset?path=.scratch%2Fstudio%2Fmockups%2Fcheckout-mobile.png'));
+  assert.match(asset.headers.get('content-type') ?? '', /image\/png/);
+  assert.deepEqual(Buffer.from(await asset.arrayBuffer()), png);
+  assert.equal((await fetch(route('/asset?path=package.json'))).status, 404);
+  const payload = { revision: 1, digest: f.design.digest, decision: 'changes_requested', rationale: 'Fix checkout contrast', findings: [{ screen: 'checkout', state: 'populated', viewport: 'mobile', selector: 'button.pay-cta', status: 'revise', note: 'Low contrast' }], screenStatuses: { catalog: 'approved', checkout: 'revise' } };
+  const post = (origin: string) => fetch(route('/api/decision'), { method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+  assert.equal((await post('https://evil.example')).status, 403);
+  const response = await post(url.origin);
+  assert.equal(response.status, 200, await response.clone().text());
+  const run = readRun(f.state, 'p', f.run.runId);
+  assert.equal(run.design?.decision, 'changes_requested');
+  assert.deepEqual(run.design?.findings, payload.findings);
+  assert.deepEqual(run.design?.screenStatuses, payload.screenStatuses);
+  assert.equal((await post(url.origin)).status, 409, 'a stale tab cannot replace the submitted decision');
+});
+
+test('controller blocks incomplete multi-screen evidence before Owner review', async t => {
+  const { designFixture } = await import('./fixtures/scrum-design.ts');
+  for (const mutate of [
+    (r: import('../src/scrum/design-contract.ts').BrowserEvidenceReport) => { r.viewports = r.viewports.filter(v => v.screen !== 'checkout' || v.name !== 'mobile'); },
+    (r: import('../src/scrum/design-contract.ts').BrowserEvidenceReport) => { r.states = r.states.filter(s => s.screen !== 'checkout' || s.state !== 'offline'); },
+    (r: import('../src/scrum/design-contract.ts').BrowserEvidenceReport) => { r.detector!.passed = false; },
+  ]) {
+    const f = await designFixture(t, mutate);
+    assert.throws(f.submit, { code: 'browser-evidence-invalid' });
+    assert.equal(readRun(f.state, 'p', f.run.runId).design, undefined);
+  }
 });

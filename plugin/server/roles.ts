@@ -141,6 +141,7 @@ export function factoryEnvFor(
     PASEO_FACTORY_PROJECT: input.project.slug,
     PASEO_FACTORY_STATE_DIR: input.stateDir,
     PI_CODING_AGENT_DIR: roleHome,
+    ...(execution?.kind === 'task' && ['ux', 'dev', 'qa'].includes(execution.binding.role) ? { PASEO_FACTORY_IMPECCABLE: join(roleHome, 'skills/impeccable/scripts/impeccable') } : {}),
     ...(execution === undefined ? {} : { PASEO_FACTORY_EXECUTION: JSON.stringify(execution) }),
   };
   if (input.project.root !== "") env.PASEO_FACTORY_PROJECT_ROOT = input.project.root;

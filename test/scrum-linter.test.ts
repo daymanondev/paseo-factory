@@ -110,3 +110,26 @@ test("only explicit sources inside R definitions map PRD coverage", () => {
     "# R1: auth\nSource: FR-1\nDeferred: Owner explicitly postponed authentication to next wave.\n# R2: heading\nSources: FR-10\n# S-01: heading story\nCovers: R2\nTests: heading.test.js\n";
   assert.deepEqual(lintScrumDoc("backlog", files), []);
 });
+
+test('UX lint requires declared screens, concrete tokens and routed six-state mockups', async () => {
+  const { designFiles } = await import('./fixtures/scrum-design.ts');
+  assert.deepEqual(lintScrumDoc('ux', designFiles), []);
+  for (const [path, content, category] of [
+    ['DESIGN.md', 'color typography spacing component', 'design-token'],
+    ['EXPERIENCE.md', designFiles['EXPERIENCE.md'].replace('## Screen: checkout', '## Screen: Bad_ID'), 'screen'],
+    ['EXPERIENCE.md', designFiles['EXPERIENCE.md'].replace('offline: keyboard accessible offline', 'unavailable'), 'state-cell'],
+    ['mockups/index.html', '<html><head><title>Shop</title></head><body><button>Buy</button></body></html>', 'routing'],
+  ]) {
+    assert.ok(lintScrumDoc('ux', { ...designFiles, [path]: content }).some(d => d.category === category), `${path}: ${category}`);
+  }
+});
+
+test('Dev UI evidence gate rejects missing detector, states and viewports', async () => {
+  const { designFiles, states } = await import('./fixtures/scrum-design.ts');
+  const report = { network: 'disabled', consoleErrors: [], viewports: ['catalog', 'checkout'].flatMap(screen => [{ screen, width: 1280, height: 800 }, { screen, width: 390, height: 844 }]), states: ['catalog', 'checkout'].flatMap(screen => states.map(state => ({ screen, state, keyboard: true, passed: true }))), detector: { tool: 'impeccable', passed: true, nonAdvisoryCount: 0, viewportsChecked: [{ width: 1280, height: 800, nonAdvisoryCount: 0 }, { width: 390, height: 844, nonAdvisoryCount: 0 }] } };
+  const lint = (value: unknown) => lintScrumDoc('ui', { 'EXPERIENCE.md': designFiles['EXPERIENCE.md'], 'browser.json': JSON.stringify(value) });
+  assert.deepEqual(lint(report), []);
+  assert.ok(lint({ ...report, detector: undefined }).some(d => /detector/.test(d.message)));
+  assert.ok(lint({ ...report, states: report.states.slice(1) }).some(d => /empty/.test(d.message)));
+  assert.ok(lint({ ...report, viewports: report.viewports.filter(v => v.width === 1280) }).some(d => /Mobile/.test(d.message)));
+});

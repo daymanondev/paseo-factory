@@ -559,7 +559,7 @@ test("parallel UX and Architect land disjoint artifacts from one accepted PRD in
       "DESIGN.md":
         "# Direction\nColor: navy.\nTypography: system-ui.\nSpacing: 8px.\nComponent: record card.\n",
       "EXPERIENCE.md":
-        "# Information architecture and flow\nOne screen justified for the bounded record viewer. Offline writes permitted.\n| Screen | empty | loading | populated | error | offline | permission-denied |\n| viewer | no record | wait | record | retry | editable | denied |\n",
+        "# Information architecture and flow\n## Screen: viewer\nOne screen justified for the bounded record viewer. Offline writes permitted.\n| Screen | empty | loading | populated | error | offline | permission-denied |\n| viewer | no record | wait | record | retry | editable | denied |\n",
       "mockups/index.html":
         "<!doctype html><html><head><title>Record viewer</title></head><body><main>" +
         [
@@ -572,7 +572,7 @@ test("parallel UX and Architect land disjoint artifacts from one accepted PRD in
         ]
           .map((s) => `<button data-state="${s}">${s}</button>`)
           .join("") +
-        "</main></body></html>",
+        "</main><script>const q=new URLSearchParams(location.search);document.documentElement.dataset.screen=q.get('screen')||'viewer';document.documentElement.dataset.state=q.get('state')||'populated';window.addEventListener('message',e=>{if(e.data.type==='scrum:set-state'){document.documentElement.dataset.screen=e.data.screen;document.documentElement.dataset.state=e.data.state}})</script></body></html>",
       "decisions/ux.jsonl":
         '{"id":"U1","rationale":"offline writes permitted pending reconciliation"}\n',
     },
@@ -832,4 +832,48 @@ test("reusing a provisioned request in another Project resolves that Project's m
   const mcp = moved.config.mcpServers as Record<string, { args: string[] }>;
   assert.equal(mcp.paseo_factory.args[mcp.paseo_factory.args.indexOf("--mode") + 1], "scrum");
   assert.doesNotMatch(moved.config.systemPrompt!, /You are the Lead seat of the paseo-factory verification loop/);
+});
+
+test('Scrum harness links the full upstream UI skill pack and edit scanner only into UI roles', async t => {
+  const { mkdirSync, readFileSync, existsSync } = await import('node:fs');
+  const { provisionScrumHarness, scopeScrumCapabilities } = await import('../src/scrum/harness.ts');
+  const { ensureScrumConfig } = await import('../src/scrum/config.ts');
+  const { createScrumRun } = await import('../src/scrum/run-journal.ts');
+  const { ensureProjectRegistered } = await import('../src/project.ts');
+  const state = makeTempDir(), repo = makeTempDir(), home = makeTempDir();
+  for (const dir of [state, repo, home]) disposeDir(t, dir);
+  writeFileSync(join(repo, 'README.md'), 'fixture'); gitCommitAll(repo);
+  const project = ensureProjectRegistered(state, repo);
+  assert.ok(project.ok); if (!project.ok) return;
+  for (const skill of ['impeccable', 'impeccable-polish']) {
+    mkdirSync(join(home, '.claude/skills', skill, 'reference'), { recursive: true });
+    writeFileSync(join(home, '.claude/skills', skill, 'SKILL.md'), '# Full upstream pack');
+    writeFileSync(join(home, '.claude/skills', skill, 'reference/audit.md'), 'Audit instructions');
+  }
+  const run = createScrumRun({ state, slug: project.slug, runId: 'hooks', initiativeId: 'hooks', config: ensureScrumConfig(state), configRevision: 1, track: 'small', rationale: 'harness', requestId: 'create', ownedPaths: [] });
+  const { commandRun } = await import('../src/scrum/run-journal.ts');
+  commandRun(state, project.slug, run.runId, { type: 'readiness_recorded', requestId: 'ready', expectedRevision: run.revision, readiness: { refs: [], contradictions: [], unsafeAssumptions: [], missingCoverage: [], rationale: 'small non-UI harness test' } });
+  for (const role of ['ux', 'dev', 'qa', 'pm', 'architect'] as const) {
+    const identity = { kind: 'task' as const, task: role, epoch: 1, binding: { mode: 'scrum' as const, role, runId: run.runId, configRevision: run.configRevision, policyRevision: run.policyRevision, artifactRefs: [] } };
+    const roleHome = provisionScrumHarness({ state, slug: project.slug, authority: 'agent', identity, generation: 'g', userHome: home, workspace: repo });
+    const settings = JSON.parse(readFileSync(join(roleHome, 'settings.json'), 'utf8'));
+    const ui = ['ux', 'dev', 'qa'].includes(role);
+    assert.equal(existsSync(join(roleHome, 'skills/impeccable/reference/audit.md')), ui);
+    assert.equal(existsSync(join(roleHome, 'skills/impeccable-polish/SKILL.md')), ui);
+    assert.equal(settings.extensions.some((s: string) => s.includes('impeccable')), ui);
+    const scoped = scopeScrumCapabilities({ provider: 'opencode', providerOptions: {} }, 'agent', identity);
+    const permission = (scoped.providerOptions as { permission: { bash: Record<string, string> } }).permission;
+    assert.equal(permission.bash?.['impeccable *'], ui ? 'allow' : 'deny');
+  }
+  const { judgeShellCommand } = await import('../src/choke.ts');
+  const roots = { workspace: repo, stateDir: state, homeDir: home, tmp: ['/tmp'] };
+  for (const role of ['ux', 'dev', 'qa', 'pm', 'architect'] as const) {
+    const decision = judgeShellCommand('impeccable detect --json --no-advisory', roots, { workspace: repo, scrumRole: role });
+    assert.equal(decision.behavior, ['ux', 'dev', 'qa'].includes(role) ? 'allow' : 'deny');
+  }
+  const identity = { kind: 'seat' as const, selectionRevision: 1, config: run.config };
+  for (const authority of ['supervisor', 'lead'] as const) {
+    const roleHome = provisionScrumHarness({ state, slug: project.slug, authority, identity, generation: 'g', userHome: home, workspace: repo });
+    assert.doesNotMatch(readFileSync(join(roleHome, 'settings.json'), 'utf8'), /impeccable/);
+  }
 });

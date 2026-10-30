@@ -589,7 +589,7 @@ export function createChoke(options: ChokeOptions): Choke {
   // agent's absolute writes name the worktree's copy of the memory file).
   const fenceOf = (contract: ContractSet): MemoryFence => {
     const worktree = factory.worktreeFor(contract.task);
-    return { ...(contract.execution && contract.execution.role !== "dev" ? { artifactOnly: true } : {}), workspace: contract.workspace, scope: contract.scope, ...(worktree === undefined ? {} : { worktree }) };
+    return { ...(contract.execution ? { scrumRole: contract.execution.role } : {}), ...(contract.execution && contract.execution.role !== "dev" ? { artifactOnly: true } : {}), workspace: contract.workspace, scope: contract.scope, ...(worktree === undefined ? {} : { worktree }) };
   };
   /**
    * The writable root for an ask: the task's worktree when its spawn recorded

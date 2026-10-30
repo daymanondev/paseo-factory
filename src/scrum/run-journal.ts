@@ -1,3 +1,5 @@
+import { DESIGN_STATES, screenIdValid } from "./design-contract.ts";
+import type { ScrumDesignFinding, ScreenStatuses } from "./design-contract.ts";
 import type { ScrumTelemetry } from "./telemetry.ts";
 /** Append-only workflow evidence. Invoked by the live Factory writer, never Agents. */
 import {
@@ -70,7 +72,8 @@ export interface DesignReview {
   decidedBy?: string;
   actorRole?: string;
   designArtifact?: string;
-  findings?: string[];
+  findings?: (ScrumDesignFinding | string)[];
+  screenStatuses?: ScreenStatuses;
   rationale?: string;
 }
 export interface RunTask {
@@ -179,7 +182,8 @@ export type RunCommand = BaseCommand &
         decidedBy?: string;
         actorRole?: string;
         designArtifact?: string;
-        findings?: string[];
+        findings?: (ScrumDesignFinding | string)[];
+  screenStatuses?: ScreenStatuses;
         actor: string;
         rationale: string;
       }
@@ -554,6 +558,10 @@ function apply(run: ScrumRun, cmd: RunCommand, now: number): void {
           "invalid-design-decision",
           "actor, decision and rationale required",
         );
+      if (cmd.findings !== undefined && (!Array.isArray(cmd.findings) || cmd.findings.length > 500 || cmd.findings.some(f => typeof f === 'string' ? !f.trim() : !f || !screenIdValid(f.screen) || typeof f.note !== 'string' || !f.note.trim() || (f.state !== undefined && !DESIGN_STATES.includes(f.state)) || (f.viewport !== undefined && !['desktop', 'tablet', 'mobile'].includes(f.viewport)) || (f.selector !== undefined && typeof f.selector !== 'string') || (f.status !== undefined && !['approved', 'revise'].includes(f.status)))))
+        throw new FactoryError('invalid-design-decision', 'invalid structured findings');
+      if (cmd.screenStatuses !== undefined && (!cmd.screenStatuses || typeof cmd.screenStatuses !== 'object' || Array.isArray(cmd.screenStatuses) || Object.entries(cmd.screenStatuses).some(([id, status]) => !screenIdValid(id) || !['approved', 'revise'].includes(status))))
+        throw new FactoryError('invalid-design-decision', 'invalid screen statuses');
       const waitStart = (run as { awaitingApprovalSince?: number }).awaitingApprovalSince;
       if (typeof waitStart === "number" && Number.isFinite(waitStart) && now > waitStart) {
         run.budgets.maxElapsedMs += now - waitStart;
@@ -567,6 +575,7 @@ function apply(run: ScrumRun, cmd: RunCommand, now: number): void {
         actorRole: cmd.actorRole,
         ...(cmd.designArtifact === undefined ? {} : { designArtifact: cmd.designArtifact }),
         ...(cmd.findings === undefined ? {} : { findings: cmd.findings }),
+        ...(cmd.screenStatuses === undefined ? {} : { screenStatuses: cmd.screenStatuses }),
         rationale: cmd.rationale,
       };
       run.decisions++;

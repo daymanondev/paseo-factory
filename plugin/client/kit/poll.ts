@@ -62,11 +62,13 @@ export function usePoll<T>(
     setState({ value: null, error: null, at: null });
     void tick();
     page?.addEventListener?.("visibilitychange", shown);
+    if (typeof window !== "undefined") window.addEventListener("focus", shown);
     return () => {
       live = false;
       order.invalidate();
       clearTimeout(timer);
       page?.removeEventListener?.("visibilitychange", shown);
+      if (typeof window !== "undefined") window.removeEventListener("focus", shown);
     };
   }, [reloadKey]);
   return state;

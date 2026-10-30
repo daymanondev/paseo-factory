@@ -1,6 +1,7 @@
 /** Deterministic structural checks; semantic readiness and browser QA are separate. */
+import { designScreens, screenIdValid, DESIGN_STATES, browserCoverageIssues } from "./design-contract.ts";
 import { validateQaReport } from "./qa-bundle.ts";
-export type ScrumDocKind = "prd" | "ux" | "architecture" | "backlog" | "qa";
+export type ScrumDocKind = "prd" | "ux" | "architecture" | "backlog" | "qa" | "ui";
 export interface Diagnostic {
   path: string;
   line: number;
@@ -8,6 +9,7 @@ export interface Diagnostic {
   message: string;
 }
 export const DOC_FILES: Record<ScrumDocKind, string[]> = {
+  ui: ["browser.json", "EXPERIENCE.md"],
   prd: ["prd.md"],
   ux: ["DESIGN.md", "EXPERIENCE.md", "mockups/index.html"],
   architecture: ["architecture.md"],
@@ -125,62 +127,24 @@ export function lintScrumDoc(
     const design = prose(files["DESIGN.md"] ?? ""),
       experience = prose(files["EXPERIENCE.md"] ?? ""),
       html = files["mockups/index.html"] ?? "";
-    for (const token of ["color", "typography", "spacing", "component"])
-      if (!new RegExp(token, "i").test(design))
-        add("DESIGN.md", 1, "design-token", `missing ${token}`);
-    const states = [
-      "empty",
-      "loading",
-      "populated",
-      "error",
-      "offline",
-      "permission-denied",
-    ];
-    const rows = experience.split("\n").filter((l) => /^\s*\|/.test(l));
-    const header = rows.find((r) => states.every((s) => r.includes(s)));
-    if (!header)
-      add(
-        "EXPERIENCE.md",
-        1,
-        "state-matrix",
-        "screen × state matrix with all six states required",
-      );
-    else {
-      const cells = header
-        .split("|")
-        .slice(1, -1)
-        .map((s) => s.trim());
-      const data = rows
-        .slice(rows.indexOf(header) + 1)
-        .filter((r) => !/^\s*\|[\s:|—-]+\|\s*$/.test(r));
-      if (!data.length)
-        add(
-          "EXPERIENCE.md",
-          1,
-          "state-matrix",
-          "at least one justified screen required",
-        );
-      for (const row of data) {
-        const values = row
-          .split("|")
-          .slice(1, -1)
-          .map((s) => s.trim());
-        for (const state of states) {
-          const v = values[cells.indexOf(state)];
-          if (
-            !v ||
-            /^N\/A$/i.test(v) ||
-            (/N\/A/i.test(v) && !/N\/A\s*[:—-]\s*\S.{3,}/i.test(v))
-          )
-            add(
-              "EXPERIENCE.md",
-              experience.split("\n").indexOf(row) + 1,
-              "state-cell",
-              `${state} needs obligation or justified N/A`,
-            );
-        }
-      }
+    for (const token of ["color", "typography", "spacing", "component"]) {
+      const value = design.match(new RegExp(`\\b${token}\\s*[:|—-]\\s*([^\\n]+)`, 'i'))?.[1];
+      if (!value || /^(?:none|TODO|TBD|placeholder)\b/i.test(value))
+        add("DESIGN.md", 1, "design-token", `define non-placeholder ${token} tokens`);
     }
+    const screens = designScreens(experience, files['mockups/manifest.json']);
+    if (!screens.length) add('EXPERIENCE.md', 1, 'screen', 'declare at least one ## Screen: kebab-case-id');
+    const seen = new Set<string>();
+    for (const screen of screens) {
+      if (!screenIdValid(screen.id) || seen.has(screen.id)) add('EXPERIENCE.md', screen.line, 'screen', `invalid or duplicate screen ${screen.id}`);
+      seen.add(screen.id);
+      for (const state of DESIGN_STATES) {
+        if (!new RegExp(`\\b${state}\\b`, 'i').test(screen.body)) add('EXPERIENCE.md', screen.line, 'state-cell', `${screen.id}/${state} needs a documented obligation`);
+      }
+      if (!html.includes(screen.id)) add('mockups/index.html', 1, 'screen', `mockup does not cover ${screen.id}`);
+    }
+    if (!/URLSearchParams/.test(html) || !/(?:dataset\.screen|data-screen)/.test(html) || !/(?:dataset\.state|data-state)/.test(html) || !/scrum:set-state/.test(html) || !/addEventListener\s*\(\s*['"]message['"]/.test(html))
+      add('mockups/index.html', 1, 'routing', 'read screen/state query parameters, reflect root data attributes and handle scrum:set-state messages');
     if (
       !/<html\b/i.test(html) ||
       !/<\/html>/i.test(html) ||
@@ -281,6 +245,13 @@ export function lintScrumDoc(
     for (const d of sources)
       if (!mappedSources.has(d.id))
         add("sprint-backlog.md", 1, "coverage", `${d.id} has no R mapping`);
+  }
+  if (kind === 'ui' && files['browser.json']) {
+    try {
+      const required = designScreens(files['EXPERIENCE.md'] ?? '').map(s => s.id);
+      if (!required.length) add('EXPERIENCE.md', 1, 'screen', 'UI verification requires declared screens');
+      for (const message of browserCoverageIssues(JSON.parse(files['browser.json']), required)) add('browser.json', 1, 'browser-evidence', message);
+    } catch { add('browser.json', 1, 'json', 'invalid browser JSON'); }
   }
   if (kind === "qa" && files["qa-report.json"]) {
     try {

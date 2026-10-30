@@ -245,16 +245,21 @@ export function prepareScrumContract(
     (role === "qa" && /\/qa\/|\/qa-report\.(json|md)$/.test(path)));
   const roleDefaults = {
     pm: [`${prefix}sprint-backlog.md`],
-    ux: [`${prefix}DESIGN.md`, `${prefix}EXPERIENCE.md`, `${prefix}mockups/index.html`],
-    architect: [], dev: [], qa: [`${prefix}qa/qa-report.json`],
+    ux: [`${prefix}impeccable.local.md`, `${prefix}DESIGN.md`, `${prefix}EXPERIENCE.md`, `${prefix}mockups/index.html`],
+    architect: [], dev: run.design ? [`${prefix}qa/${request.task}`] : [], qa: [`${prefix}qa/qa-report.json`],
   }[role];
-  const scope = [...new Set([...(request.scope ?? [...inherited, ...roleDefaults]), decision, ...(artifact ? [artifact] : [])])];
+  const scope = [...new Set([...(request.scope ?? [...inherited, ...roleDefaults]), decision, ...(role === "dev" && run.design ? roleDefaults : []), ...(artifact ? [artifact] : [])])];
   if (scope.some(path => !safePath(path) || path.startsWith("/") || /[*?\[\]{}]/.test(path) ||
       (role !== "dev" && !path.startsWith(prefix)) || (path.startsWith(".scratch/") && !path.startsWith(prefix))))
     throw new FactoryError("artifact-not-owned", "specialists must stay within their initiative; Dev implementation paths must be explicit");
   run = registerOwnedPaths(factory.stateDir, project.slug, run, scope, `${operationId}:paths`);
   request = { ...request, artifact };
   let gate: string | undefined;
+  if (role === 'dev' && run.design && request.gate) {
+    ensureFactoryBinScripts(factory.stateDir);
+    const quote = (v: string) => "'" + v.replace(/'/g, "'\\''") + "'";
+    gate = `(${request.gate}) && ${quote(process.execPath)} ${quote(join(factory.stateDir, 'runtime-bin/factory.mjs'))} lint-scrum-doc --kind ui --dir ${quote(`${prefix}qa/${request.task}`)}`;
+  }
   if (role !== "dev" && request.gate) {
     ensureFactoryBinScripts(factory.stateDir);
     const kind =
