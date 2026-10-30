@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.70] - 2026-10-30
+
+### Fixed
+
+- Read the Impeccable skill pack version (`version: 4.8.0`) from `~/.agents/skills/impeccable/SKILL.md` frontmatter and treat `scripts/VERSION` (`0.1.18`) as the internal binary engine revision so the `Plugins` tab reports `v4.8.0 · 0.1.18` (`Running` / `Up to date`) instead of a false `0.1.18 < 4.8.0` outdated warning.
+- Deduplicate version badges in `formatVersionBadge` when `currentRevision` equals `version`.
+
 ## [0.0.69] - 2026-10-30
 
 ### Fixed

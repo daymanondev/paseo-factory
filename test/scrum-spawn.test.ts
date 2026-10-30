@@ -992,15 +992,18 @@ test('ADR 0036: inspectImpeccableTool, ensureProviderSkillSymlinks, and pre-spaw
     /Impeccable UI detector.*registry offline/,
   );
 
-  // 4. When autoInstall is true and runner installs impeccable v4.8.0 into ~/.agents/skills/impeccable, provisionImpeccable self-heals and links skills
+  // 4. When autoInstall is true and runner installs impeccable v4.8.0 (SKILL.md version: 4.8.0, scripts/VERSION: 0.1.18 engine) into ~/.agents/skills/impeccable, provisionImpeccable self-heals and links skills
   const provisioned = provisionImpeccable(roleHome, home, join(home, '.codex'), {
     autoInstall: true,
     requireInstalled: true,
     runner: () => {
       const impDir = join(home, '.agents/skills/impeccable');
       mkdirSync(join(impDir, 'scripts'), { recursive: true });
-      writeFileSync(join(impDir, 'SKILL.md'), '# Impeccable\n');
-      writeFileSync(join(impDir, 'scripts/VERSION'), '4.8.0\n');
+      writeFileSync(
+        join(impDir, 'SKILL.md'),
+        '---\nname: impeccable\nmetadata:\n  version: 4.8.0\n---\n# Impeccable\n',
+      );
+      writeFileSync(join(impDir, 'scripts/VERSION'), '0.1.18\n');
       writeFileSync(join(impDir, 'scripts/impeccable'), '#!/bin/sh\necho ok\n');
       chmodSync(join(impDir, 'scripts/impeccable'), 0o755);
       return { status: 0, stdout: 'installed 4.8.0', stderr: '' };
@@ -1009,6 +1012,7 @@ test('ADR 0036: inspectImpeccableTool, ensureProviderSkillSymlinks, and pre-spaw
   assert.ok(provisioned.includes('impeccable'));
   assert.equal(inspectImpeccableTool(home).status, 'installed');
   assert.equal(inspectImpeccableTool(home).version, '4.8.0');
+  assert.equal(inspectImpeccableTool(home).engineVersion, '0.1.18');
   assert.equal(existsSync(join(roleHome, 'skills/impeccable/SKILL.md')), true);
   assert.ok(lstatSync(join(home, '.pi/agent/skills/impeccable')).isSymbolicLink());
 });

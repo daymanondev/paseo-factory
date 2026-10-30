@@ -48,6 +48,7 @@ export function compareSemver(a: string, b: string): number {
 export interface ImpeccableInspection {
   status: 'installed' | 'outdated' | 'not_installed';
   version: string | null;
+  engineVersion?: string | null;
   minVersion: string;
   path: string | null;
   binaryPath: string | null;
@@ -57,7 +58,8 @@ export interface ImpeccableInspection {
 /**
  * Inspects whether upstream `pbakaus/impeccable` (`>= 4.8.0`) is installed under
  * `<userHome>/.agents/skills/impeccable` (or fallback provider skill directories),
- * verifying `SKILL.md`, executable `scripts/impeccable`, and `scripts/VERSION`.
+ * verifying `SKILL.md` frontmatter `version:` (package version, e.g. `4.8.0`),
+ * executable `scripts/impeccable`, and `scripts/VERSION` (native engine version, e.g. `0.1.18`).
  */
 export function inspectImpeccableTool(userHome = homedir()): ImpeccableInspection {
   const providers = ['.agents', '.claude', '.gemini', '.pi', '.codex', '.opencode'];
@@ -83,6 +85,7 @@ export function inspectImpeccableTool(userHome = homedir()): ImpeccableInspectio
     return {
       status: 'not_installed',
       version: null,
+      engineVersion: null,
       minVersion: IMPECCABLE_MIN_VERSION,
       path: null,
       binaryPath: null,
@@ -91,16 +94,31 @@ export function inspectImpeccableTool(userHome = homedir()): ImpeccableInspectio
   }
   const binaryCandidate = join(mainDir, 'scripts', 'impeccable');
   const hasBinary = existsSync(binaryCandidate);
+  let skillVersion: string | null = null;
+  const skillMdPath = join(mainDir, 'SKILL.md');
+  if (existsSync(skillMdPath)) {
+    try {
+      const md = readFileSync(skillMdPath, 'utf8');
+      const fm = md.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+      const verMatch = fm?.[1]?.match(/^\s*version:\s*["']?([0-9]+\.[0-9]+\.[0-9]+[^\s"']*)["']?\s*$/m);
+      if (verMatch?.[1]) {
+        skillVersion = verMatch[1].trim();
+      }
+    } catch {
+      skillVersion = null;
+    }
+  }
   const versionPath = join(mainDir, 'scripts', 'VERSION');
-  let version: string | null = null;
+  let engineVersion: string | null = null;
   if (existsSync(versionPath)) {
     try {
       const raw = readFileSync(versionPath, 'utf8').trim();
-      if (raw !== '') version = raw;
+      if (raw !== '') engineVersion = raw;
     } catch {
-      version = null;
+      engineVersion = null;
     }
   }
+  let version = skillVersion ?? engineVersion;
   if (version === null && hasBinary) {
     version = IMPECCABLE_MIN_VERSION;
   }
@@ -108,6 +126,7 @@ export function inspectImpeccableTool(userHome = homedir()): ImpeccableInspectio
     return {
       status: 'not_installed',
       version,
+      engineVersion,
       minVersion: IMPECCABLE_MIN_VERSION,
       path: mainDir,
       binaryPath: hasBinary ? binaryCandidate : null,
@@ -118,6 +137,7 @@ export function inspectImpeccableTool(userHome = homedir()): ImpeccableInspectio
   return {
     status: upToDate ? 'installed' : 'outdated',
     version,
+    engineVersion,
     minVersion: IMPECCABLE_MIN_VERSION,
     path: mainDir,
     binaryPath: binaryCandidate,

@@ -75,7 +75,13 @@ function formatVersionBadge(companion: CompanionPluginView, shortRevision: strin
   if (companion.installKind === "directory") {
     return ver !== null ? `${ver} · local` : "local";
   }
-  if (ver !== null && shortRevision !== null) return `${ver} · ${shortRevision}`;
+  if (
+    ver !== null &&
+    shortRevision !== null &&
+    shortRevision.replace(/^v/, "") !== companion.version?.replace(/^v/, "")
+  ) {
+    return `${ver} · ${shortRevision}`;
+  }
   if (ver !== null) return ver;
   if (shortRevision !== null) return shortRevision;
   return null;

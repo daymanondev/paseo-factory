@@ -1682,6 +1682,12 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       if (entry.id === "impeccable") {
         const info = inspectImpeccableTool(userHome);
         const installed = info.status === "installed" || info.status === "outdated";
+        const currentRevision =
+          info.status === "outdated"
+            ? info.version
+            : info.engineVersion && info.engineVersion !== info.version
+              ? info.engineVersion
+              : null;
         return {
           ...entry,
           capabilities: [...entry.capabilities],
@@ -1689,7 +1695,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           enabled: info.status === "installed",
           installKind: installed ? "npm" : null,
           installedSource: info.path,
-          currentRevision: info.version,
+          currentRevision,
           version: info.version,
           latestRevision: info.status === "outdated" ? IMPECCABLE_MIN_VERSION : info.version,
           commitsBehind: null,

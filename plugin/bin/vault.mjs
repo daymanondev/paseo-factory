@@ -2542,6 +2542,7 @@ function inspectImpeccableTool(userHome = homedir2()) {
     return {
       status: "not_installed",
       version: null,
+      engineVersion: null,
       minVersion: IMPECCABLE_MIN_VERSION,
       path: null,
       binaryPath: null,
@@ -2550,16 +2551,31 @@ function inspectImpeccableTool(userHome = homedir2()) {
   }
   const binaryCandidate = join11(mainDir, "scripts", "impeccable");
   const hasBinary = existsSync7(binaryCandidate);
+  let skillVersion = null;
+  const skillMdPath = join11(mainDir, "SKILL.md");
+  if (existsSync7(skillMdPath)) {
+    try {
+      const md = readFileSync11(skillMdPath, "utf8");
+      const fm = md.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+      const verMatch = fm?.[1]?.match(/^\s*version:\s*["']?([0-9]+\.[0-9]+\.[0-9]+[^\s"']*)["']?\s*$/m);
+      if (verMatch?.[1]) {
+        skillVersion = verMatch[1].trim();
+      }
+    } catch {
+      skillVersion = null;
+    }
+  }
   const versionPath = join11(mainDir, "scripts", "VERSION");
-  let version = null;
+  let engineVersion = null;
   if (existsSync7(versionPath)) {
     try {
       const raw = readFileSync11(versionPath, "utf8").trim();
-      if (raw !== "") version = raw;
+      if (raw !== "") engineVersion = raw;
     } catch {
-      version = null;
+      engineVersion = null;
     }
   }
+  let version = skillVersion ?? engineVersion;
   if (version === null && hasBinary) {
     version = IMPECCABLE_MIN_VERSION;
   }
@@ -2567,6 +2583,7 @@ function inspectImpeccableTool(userHome = homedir2()) {
     return {
       status: "not_installed",
       version,
+      engineVersion,
       minVersion: IMPECCABLE_MIN_VERSION,
       path: mainDir,
       binaryPath: hasBinary ? binaryCandidate : null,
@@ -2577,6 +2594,7 @@ function inspectImpeccableTool(userHome = homedir2()) {
   return {
     status: upToDate ? "installed" : "outdated",
     version,
+    engineVersion,
     minVersion: IMPECCABLE_MIN_VERSION,
     path: mainDir,
     binaryPath: binaryCandidate,
