@@ -39,16 +39,16 @@ export interface BrowserEvidenceReport {
 }
 export const desktopViewport = (v: { width: number; height: number }): boolean => v.width >= 1280 && v.height >= 800;
 export const mobileViewport = (v: { width: number; height: number }): boolean => v.width > 0 && v.width <= 430 && v.height >= 640 && v.height <= 844;
-export function detectorIssues(detector: DesignDetectorSummary | undefined): string[] {
-  if (!detector || detector.tool !== 'impeccable' || detector.passed !== true || detector.nonAdvisoryCount !== 0 ||
+export function detectorIssues(detector: DesignDetectorSummary | undefined, requireClean = true): string[] {
+  if (!detector || detector.tool !== 'impeccable' || typeof detector.passed !== 'boolean' || !Number.isSafeInteger(detector.nonAdvisoryCount) || detector.nonAdvisoryCount < 0 || (requireClean && (detector.passed !== true || detector.nonAdvisoryCount !== 0)) ||
     !Array.isArray(detector.viewportsChecked) || !detector.viewportsChecked.some(desktopViewport) || !detector.viewportsChecked.some(mobileViewport) ||
-    detector.viewportsChecked.some(v => !Number.isFinite(v.width) || !Number.isFinite(v.height) || v.nonAdvisoryCount !== 0) ||
-    (detector.findings !== undefined && (!Array.isArray(detector.findings) || detector.findings.some(f => f.severity !== 'advisory'))))
+    detector.viewportsChecked.some(v => !Number.isFinite(v.width) || !Number.isFinite(v.height) || !Number.isSafeInteger(v.nonAdvisoryCount) || v.nonAdvisoryCount < 0 || (requireClean && v.nonAdvisoryCount !== 0)) ||
+    (detector.findings !== undefined && (!Array.isArray(detector.findings) || detector.findings.some(f => !f || !['error', 'warning', 'advisory'].includes(f.severity) || (requireClean && f.severity !== 'advisory')))))
     return ['impeccable detector needs zero non-advisory findings across Desktop and Mobile'];
   return [];
 }
 /** Same coverage floor for mockups, Dev story checks and QA browser audits. */
-export function browserCoverageIssues(report: BrowserEvidenceReport, required: string[], strict = true): string[] {
+export function browserCoverageIssues(report: BrowserEvidenceReport, required: string[], strict = true, options: { requireCleanDetector?: boolean } = {}): string[] {
   const issues: string[] = [];
   if (report?.network !== 'disabled' || !Array.isArray(report.consoleErrors) || report.consoleErrors.length ||
     (report.pageErrors !== undefined && (!Array.isArray(report.pageErrors) || report.pageErrors.length)) ||
@@ -67,7 +67,7 @@ export function browserCoverageIssues(report: BrowserEvidenceReport, required: s
       if (!captures.some(desktopViewport) || !captures.some(mobileViewport)) issues.push(`${screen} needs Desktop (1280x800) and Mobile (390x844) screenshots`);
     }
   }
-  if (strict || report.detector !== undefined) issues.push(...detectorIssues(report.detector));
+  if (strict || report.detector !== undefined) issues.push(...detectorIssues(report.detector, options.requireCleanDetector ?? true));
   return issues;
 }
 export interface DesignTokens { colors: string[]; typography: string[]; spacing: string[]; radius: string[]; components: string[] }

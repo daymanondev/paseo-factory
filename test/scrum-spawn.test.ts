@@ -835,7 +835,7 @@ test("reusing a provisioned request in another Project resolves that Project's m
 });
 
 test('Scrum harness links the full upstream UI skill pack and edit scanner only into UI roles', async t => {
-  const { mkdirSync, readFileSync, existsSync } = await import('node:fs');
+  const { mkdirSync, readFileSync, existsSync, chmodSync } = await import('node:fs');
   const { provisionScrumHarness, scopeScrumCapabilities } = await import('../src/scrum/harness.ts');
   const { ensureScrumConfig } = await import('../src/scrum/config.ts');
   const { createScrumRun } = await import('../src/scrum/run-journal.ts');
@@ -850,6 +850,9 @@ test('Scrum harness links the full upstream UI skill pack and edit scanner only 
     writeFileSync(join(home, '.claude/skills', skill, 'SKILL.md'), '# Full upstream pack');
     writeFileSync(join(home, '.claude/skills', skill, 'reference/audit.md'), 'Audit instructions');
   }
+  const launcher = join(home, '.claude/skills/impeccable/scripts/impeccable');
+  mkdirSync(join(launcher, '..'), { recursive: true });
+  writeFileSync(launcher, '#!/bin/sh\nprintf \"scanner-finding\"\n'); chmodSync(launcher, 0o755);
   const run = createScrumRun({ state, slug: project.slug, runId: 'hooks', initiativeId: 'hooks', config: ensureScrumConfig(state), configRevision: 1, track: 'small', rationale: 'harness', requestId: 'create', ownedPaths: [] });
   const { commandRun } = await import('../src/scrum/run-journal.ts');
   commandRun(state, project.slug, run.runId, { type: 'readiness_recorded', requestId: 'ready', expectedRevision: run.revision, readiness: { refs: [], contradictions: [], unsafeAssumptions: [], missingCoverage: [], rationale: 'small non-UI harness test' } });
@@ -861,6 +864,48 @@ test('Scrum harness links the full upstream UI skill pack and edit scanner only 
     assert.equal(existsSync(join(roleHome, 'skills/impeccable/reference/audit.md')), ui);
     assert.equal(existsSync(join(roleHome, 'skills/impeccable-polish/SKILL.md')), ui);
     assert.equal(settings.extensions.some((s: string) => s.includes('impeccable')), ui);
+    if (ui) {
+      const { pathToFileURL } = await import('node:url');
+      const { default: plugin } = await import(pathToFileURL(join(roleHome, 'impeccable-opencode.mjs')).href);
+      const hooks = await plugin({directory: repo});
+      const output = {output:'written'};
+      await hooks['tool.execute.after']({tool:'write',args:{filePath:'app.tsx'}}, output);
+      assert.match(output.output, /scanner-finding/);
+      const untouched = {output:'written'};
+      await hooks['tool.execute.after']({tool:'write',args:{filePath:'domain.ts'}}, untouched);
+      assert.equal(untouched.output,'written');
+      const native = scopeScrumCapabilities({provider:'claude',providerOptions:{}}, 'agent', identity, roleHome);
+      assert.equal((native.providerOptions as {extraArgs:Record<string,string>}).extraArgs['plugin-dir'], roleHome);
+      const restrictive = scopeScrumCapabilities({provider:'opencode',providerOptions:{permission:{bash:'deny'}}}, 'agent', identity);
+      assert.equal((restrictive.providerOptions.permission.bash as unknown as Record<string,string>)['*'], 'deny');
+      const { factoryEnvFor } = await import('../plugin/server/roles.ts');
+      const env = factoryEnvFor('agent', {stateDir:state,project:{root:repo,slug:project.slug},execution:identity,userHome:home,environment:{OPENCODE_CONFIG_CONTENT:JSON.stringify({plugin:['operator-plugin'],permission:{bash:'deny'}})}});
+      assert.equal(env.CODEX_HOME, env.PASEO_FACTORY_UI_HOME);
+      const oc = JSON.parse(env.OPENCODE_CONFIG_CONTENT);
+      assert.equal(oc.plugin[0],'operator-plugin'); assert.equal(oc.permission.bash,'deny');
+      assert.ok(oc.plugin.some((p:string)=>p.endsWith('impeccable-opencode.mjs')));
+      const piPlugin = (await import(pathToFileURL(join(roleHome,'impeccable-hook.mjs')).href)).default;
+      let handler: ((event: unknown, ctx: unknown) => Promise<{content:Array<{text:string}>} | undefined>) | undefined;
+      piPlugin({on: (_name:string, fn:typeof handler)=>{handler=fn}});
+      const scan = await handler!({toolName:'write',input:{path:'page.html'},content:[]},{cwd:repo});
+      assert.match(scan!.content[0].text,/scanner-finding/);
+      if(role==='ux') {
+        const { ensureGitShim } = await import('../plugin/server/shell.ts');
+        const { repoRoot } = await import('./helpers.ts');
+        const { spawnSync } = await import('node:child_process');
+        ensureGitShim(state,join(repoRoot,'plugin'),process.execPath);
+        const bin=join(home,'native-bin');mkdirSync(bin,{recursive:true});
+        for(const tool of ['agy','copilot']) {
+          writeFileSync(join(bin,tool),'#!/bin/sh\nprintf \"%s\\n\" \"$@\"\n');chmodSync(join(bin,tool),0o755);
+          const result=spawnSync(join(state,'bin',tool),['--help'],{encoding:'utf8',env:{...process.env,...env,PATH:bin+':'+process.env.PATH}});
+          assert.equal(result.status,0,result.stderr);
+          assert.match(result.stdout,tool==='agy'?/--settings/:/--plugin-dir/);
+          assert.ok(result.stdout.includes(env.PASEO_FACTORY_UI_HOME));
+        }
+      }
+
+    }
+
     const scoped = scopeScrumCapabilities({ provider: 'opencode', providerOptions: {} }, 'agent', identity);
     const permission = (scoped.providerOptions as { permission: { bash: Record<string, string> } }).permission;
     assert.equal(permission.bash?.['impeccable *'], ui ? 'allow' : 'deny');
@@ -871,9 +916,12 @@ test('Scrum harness links the full upstream UI skill pack and edit scanner only 
     const decision = judgeShellCommand('impeccable detect --json --no-advisory', roots, { workspace: repo, scrumRole: role });
     assert.equal(decision.behavior, ['ux', 'dev', 'qa'].includes(role) ? 'allow' : 'deny');
   }
+  mkdirSync(join(home,'.pi/agent/skills/impeccable'), {recursive:true});
+  writeFileSync(join(home,'.pi/agent/skills/impeccable/SKILL.md'),'Operator UI skill must not leak into standing seats');
   const identity = { kind: 'seat' as const, selectionRevision: 1, config: run.config };
   for (const authority of ['supervisor', 'lead'] as const) {
     const roleHome = provisionScrumHarness({ state, slug: project.slug, authority, identity, generation: 'g', userHome: home, workspace: repo });
     assert.doesNotMatch(readFileSync(join(roleHome, 'settings.json'), 'utf8'), /impeccable/);
+    assert.equal(existsSync(join(roleHome,'skills/impeccable')), false);
   }
 });

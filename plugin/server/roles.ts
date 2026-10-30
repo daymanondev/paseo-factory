@@ -1,3 +1,4 @@
+import { impeccableEnvironment } from "./core/scrum/impeccable.ts";
 import { readExecution } from "./core/scrum/config.ts";
 import { resolveRoleLane, laneProviderConfig } from "./provider-lanes.ts";
 import type { ProviderCatalogEntry } from "./provider-lanes.ts";
@@ -127,7 +128,7 @@ export function formatPeerWorkspaceTitle(task: string, description?: string): st
  */
 export function factoryEnvFor(
   role: RoleName,
-  input: { stateDir: string; project: ProjectIdentity; task?: string; correlationId?: string; userHome?: string; execution?: ScrumHarnessIdentity | null },
+  input: { stateDir: string; project: ProjectIdentity; task?: string; correlationId?: string; userHome?: string; execution?: ScrumHarnessIdentity | null; environment?: Record<string, string> },
 ): Record<string, string> {
   ensureFactoryBinScripts(input.stateDir);
   const execution = input.execution === null ? undefined : input.execution ?? resolveScrumIdentity(input.stateDir, input.project.slug, input.task);
@@ -141,7 +142,7 @@ export function factoryEnvFor(
     PASEO_FACTORY_PROJECT: input.project.slug,
     PASEO_FACTORY_STATE_DIR: input.stateDir,
     PI_CODING_AGENT_DIR: roleHome,
-    ...(execution?.kind === 'task' && ['ux', 'dev', 'qa'].includes(execution.binding.role) ? { PASEO_FACTORY_IMPECCABLE: join(roleHome, 'skills/impeccable/scripts/impeccable') } : {}),
+    ...(execution?.kind === 'task' && ['ux', 'dev', 'qa'].includes(execution.binding.role) ? impeccableEnvironment(roleHome, { ...process.env, ...input.environment }) : {}),
     ...(execution === undefined ? {} : { PASEO_FACTORY_EXECUTION: JSON.stringify(execution) }),
   };
   if (input.project.root !== "") env.PASEO_FACTORY_PROJECT_ROOT = input.project.root;
@@ -544,17 +545,12 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
           providerFamily: execution === undefined ? resolveEffectiveProviderFamily(request.config.provider, "agent", stateDir, worktree.slug) : providerFamilyOf(scrumIdentityLane(stateDir, worktree.slug, "agent", execution)),
         },
       );
+      const taskEnv = factoryEnvFor("agent", { stateDir, project: { root: projectRoot, slug: worktree.slug }, task: worktree.task, correlationId: issued.correlationId, userHome, environment: request.env });
       return sanitizeAgentCreateHookResult({
-        config: execution === undefined ? fencedConfig : scopeScrumCapabilities(fencedConfig, "agent", execution),
+        config: execution === undefined ? fencedConfig : scopeScrumCapabilities(fencedConfig, "agent", execution, taskEnv.PI_CODING_AGENT_DIR),
         env: {
           ...(request.env ?? {}),
-          ...factoryEnvFor("agent", {
-            stateDir,
-            project: { root: projectRoot, slug: worktree.slug },
-            task: worktree.task,
-            correlationId: issued.correlationId,
-            userHome,
-          }),
+          ...taskEnv,
         },
       }) as R;
     }

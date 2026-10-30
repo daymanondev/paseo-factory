@@ -1,7 +1,7 @@
 import { provisionImpeccable } from "./impeccable.ts";
 import { readProjectRegistration } from "../project.ts";
 import { assertDevReady } from "./approval.ts";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { FactoryError } from "../errors.ts";
@@ -147,6 +147,7 @@ export function provisionScrumHarness(input: {
   const settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
   const skills = identity.kind === 'task' ? SCRUM_ROLE_SKILLS[identity.binding.role] : authority === 'supervisor' ? ['grilling', 'domain-modeling'] : ['codebase-design', 'domain-modeling', 'tdd'];
   const ui = identity.kind === 'task' && ['ux', 'dev', 'qa'].includes(identity.binding.role);
+  if (!ui) rmSync(join(roleHome, 'skills'), { recursive: true, force: true });
   const impeccableSkills = ui ? provisionImpeccable(roleHome, input.userHome ?? homedir()) : [];
   settings.skills = ['!*', ...skills.filter(s => s !== 'impeccable').map(s => `+${join(input.userHome ?? homedir(), '.agents/skills', s)}`), ...impeccableSkills.map(s => `+${join(roleHome, 'skills', s)}`)];
   if (ui) settings.extensions.push(join(roleHome, 'impeccable-hook.mjs'));
@@ -175,6 +176,7 @@ export function scopeScrumCapabilities<
   config: T,
   authority: "supervisor" | "lead" | "agent",
   identity: ScrumHarnessIdentity,
+  roleHome?: string,
 ): T {
   const helpers =
     identity.kind === "task" &&
@@ -210,15 +212,17 @@ export function scopeScrumCapabilities<
             ...options,
             permission: {
               ...permission,
-              bash: { ...(typeof (permission as Record<string, unknown>).bash === 'object' ? (permission as { bash: Record<string, string> }).bash : { '*': 'ask' }), 'impeccable *': identity.kind === 'task' && ['ux', 'dev', 'qa'].includes(identity.binding.role) ? 'allow' : 'deny' },
+              bash: { ...(typeof (permission as Record<string, unknown>).bash === 'object' ? (permission as { bash: Record<string, string> }).bash : { '*': typeof (permission as Record<string, unknown>).bash === 'string' ? (permission as { bash: string }).bash : 'ask' }), 'impeccable *': identity.kind === 'task' && ['ux', 'dev', 'qa'].includes(identity.binding.role) ? 'allow' : 'deny' },
               skill: {
                 "*": "deny",
                 ...Object.fromEntries(skills.map((skill) => [skill, "allow"])),
+                ...(identity.kind === 'task' && ['ux', 'dev', 'qa'].includes(identity.binding.role) ? { 'impeccable*': 'allow' } : {}),
               },
             },
           },
         }
       : {}),
+    ...(roleHome && identity.kind === 'task' && ['ux', 'dev', 'qa'].includes(identity.binding.role) && (config.provider === 'claude' || config.provider?.startsWith('claude/')) ? { providerOptions: { ...options, extraArgs: { ...(typeof options.extraArgs === 'object' ? options.extraArgs : {}), 'plugin-dir': roleHome } } } : {}),
     systemPrompt: `${config.systemPrompt ?? ""}\nRequired role skills to open first: ${skills.join(", ")}.\n`,
   };
 }

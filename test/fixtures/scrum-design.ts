@@ -15,12 +15,12 @@ export const designFiles = {
   'EXPERIENCE.md': ['catalog', 'checkout'].map(id => `## Screen: ${id}\n${states.map(s => `${s}: keyboard accessible ${s} content`).join('\n')}`).join('\n'),
   'mockups/index.html': `<!doctype html><html><head><title>Shop</title></head><body><main data-screen="catalog"><button id="buy">Buy</button></main><main data-screen="checkout"><button class="pay-cta">Pay</button></main><script>function route(screen,state){document.documentElement.dataset.screen=screen;document.documentElement.dataset.state=state;document.querySelectorAll('main').forEach(e=>e.hidden=e.dataset.screen!==screen)}const q=new URLSearchParams(location.search);route(q.get('screen')||'catalog',q.get('state')||'populated');window.addEventListener('message',e=>{if(e.data.type==='scrum:set-state')route(e.data.screen,e.data.state)});</script></body></html>`,
 };
-export async function designFixture(t: TestContext, mutate?: (report: import("../../src/scrum/design-contract.ts").BrowserEvidenceReport) => void) {
+export async function designFixture(t: TestContext, mutate?: (report: import("../../src/scrum/design-contract.ts").BrowserEvidenceReport) => void, files: Partial<typeof designFiles> = {}) {
   const root = makeTempDir(), state = makeTempDir();
   disposeDir(t, root); disposeDir(t, state);
   const prefix = '.scratch/studio/';
   mkdirSync(join(root, prefix, 'mockups'), { recursive: true });
-  for (const [path, content] of Object.entries(designFiles)) writeFileSync(join(root, prefix, path), content);
+  for (const [path, content] of Object.entries({ ...designFiles, ...files })) writeFileSync(join(root, prefix, path), content);
   const report = {
     network: 'disabled' as const, consoleErrors: [], screens: [{ id: 'catalog' }, { id: 'checkout' }],
     viewports: ['catalog', 'checkout'].flatMap(screen => [{ name: 'desktop', width: 1280, height: 800 }, { name: 'mobile', width: 390, height: 844 }].map(v => ({ ...v, screen, screenshot: { path: `${prefix}mockups/${screen}-${v.name}.png`, sha256: sha256(png) } }))),

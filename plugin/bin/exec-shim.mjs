@@ -26,6 +26,10 @@ import { inheritChildOutcome } from "./process-policy.mjs";
 
 const tool = process.argv[2] ?? "";
 const argv = process.argv.slice(3);
+if (process.env.PASEO_FACTORY_UI_HOME) {
+  if (tool === 'agy') argv.unshift('--settings', join(process.env.PASEO_FACTORY_UI_HOME, 'agy-settings.json'));
+  if (tool === 'copilot') argv.unshift('--plugin-dir', join(process.env.PASEO_FACTORY_UI_HOME, 'copilot'));
+}
 const stateDir = process.env.FACTORY_STATE_DIR ?? process.env.PASEO_FACTORY_STATE_DIR ?? "";
 const REFUSAL_EXIT = 126;
 

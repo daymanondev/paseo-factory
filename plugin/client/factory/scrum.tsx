@@ -225,6 +225,7 @@ function MockupApproval({
   const [viewport, setViewport] = useState('desktop');
   const [screen, setScreen] = useState('');
   const [designState, setDesignState] = useState('populated');
+  const [captureUrl, setCaptureUrl] = useState<string | null>(null);
   const [stageWidth, setStageWidth] = useState(420);
   const frame = useRef<HTMLIFrameElement | null>(null);
   const sizes: Record<string, [number, number]> = { desktop: [1280, 800], tablet: [820, 1180], mobile: [390, 844] };
@@ -392,9 +393,11 @@ function MockupApproval({
             <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: SPACING[2] }}>
               {preview?.screenshots.map((capture, i) => <View key={i} style={{ gap: SPACING[1] }}>
                 <Text style={text(theme, 'meta')}>{capture.screen ?? screen} · {capture.width}×{capture.height}</Text>
-                {capture.dataUrl ? createElement('a', { href: capture.dataUrl, target: '_blank', rel: 'noopener noreferrer' }, createElement('img', { src: capture.dataUrl, alt: `${capture.screen ?? screen} verified screenshot`, style: { width: 120, height: 90, objectFit: 'contain', border: `1px solid ${theme.colors.border}` } })) : null}
+                {capture.dataUrl ? createElement('img', { src: capture.dataUrl, alt: `${capture.screen ?? screen} verified screenshot`, style: { width: 120, height: 90, objectFit: 'contain', border: `1px solid ${theme.colors.border}` } }) : null}
+                <Btn theme={theme} small label="View capture" onPress={() => setCaptureUrl(capture.dataUrl ?? null)} />
               </View>)}
             </View>
+            {captureUrl ? <View style={{ gap: SPACING[1] }}><Btn theme={theme} small label="Close capture" onPress={() => setCaptureUrl(null)} />{createElement('img', { src: captureUrl, alt: 'Full verified capture', style: { width: '100%', height: 'auto' } })}</View> : null}
           </View>
         </Modal.Content>
       </Modal>

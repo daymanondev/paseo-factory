@@ -49,6 +49,15 @@ test("QA report distinguishes confirmed product defects, harness failure and two
     activeSuite: true,
   };
   assert.deepEqual(validateQaReport(report), []);
+  const browserEvidence = {
+    network: 'disabled', consoleErrors: [], screens: [{id:'checkout'}],
+    viewports: [{screen:'checkout',width:1280,height:800},{screen:'checkout',width:390,height:844}],
+    states: ['empty','loading','populated','error','offline','permission-denied'].map(state=>({screen:'checkout',state,keyboard:true,passed:true})),
+    detector: {tool:'impeccable',passed:false,nonAdvisoryCount:1,viewportsChecked:[{width:1280,height:800,nonAdvisoryCount:0},{width:390,height:844,nonAdvisoryCount:1}],findings:[{ruleId:'contrast',severity:'error',message:'Low contrast'}]},
+  };
+  const defect = { ...report, status:'defects_found', browserEvidence, runs:[{...run,exit:2,passed:2}], findings:[{id:'contrast',confirmed:true,required:true,resolved:false,severity:'high',requirement:'DESIGN.md contrast',reproduction:'Mobile checkout CTA',evidence:run.evidence,kind:'product'}] };
+  assert.deepEqual(validateQaReport(defect), [], 'failing detector evidence must survive into a structured fix loop');
+  assert.ok(validateQaReport({...defect,status:'clean'}).some(message=>message.includes('detector')), 'clean QA sign-off still requires zero detector findings');
   assert.match(
     validateQaReport({ ...report, runs: [run, { ...run, skipped: 1 }] }).join(),
     /skipped|first-attempt/,

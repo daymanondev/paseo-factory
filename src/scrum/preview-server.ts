@@ -5,7 +5,7 @@ import { randomBytes } from 'node:crypto';
 import { FactoryError } from '../errors.ts';
 import { renderPreview } from './preview.ts';
 import { previewModel } from './preview-model.ts';
-import { previewBridge } from './preview-bridge.ts';
+import { previewBridge, injectPreviewBridge } from './preview-bridge.ts';
 import { designStudioHtml } from './design-studio.ts';
 import { gitBytes, sha256 } from './artifacts.ts';
 import { DESIGN_STATES } from './design-contract.ts';
@@ -62,7 +62,7 @@ export async function servePreview(root: string, run: ScrumRun, options: { subpa
         const screen = url.searchParams.get('screen') ?? model.screens[0]?.id, state = url.searchParams.get('state') ?? 'populated';
         if (!screen || !model.screens.some(s => s.id === screen) || !DESIGN_STATES.includes(state as typeof DESIGN_STATES[number])) { json(400, { error: 'Unknown screen/state' }); return; }
         const bridge = previewBridge(screen, state, url.searchParams.get('viewport') ?? 'desktop');
-        send(200, 'text/html; charset=utf-8', preview.html.replace(/<\/body>/i, bridge + '</body>'), mockupCsp); return;
+        send(200, 'text/html; charset=utf-8', injectPreviewBridge(preview.html, bridge), mockupCsp); return;
       }
       if (url.pathname === '/asset') {
         const path = url.searchParams.get('path'), ref = [...run.design!.refs, ...run.design!.browserEvidence].find(r => r.path === path);

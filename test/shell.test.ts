@@ -179,7 +179,7 @@ test("the agent PATH surface contains factory-claim and policy shims — the fac
   ensureGitShim(stateDir, pluginDir, "/daemon/node");
   assert.deepEqual(
     readdirSync(claimCliBinDir(stateDir)).sort(),
-    ["bun", "factory-claim", "gh", "git", "kill", "killall", "npm", "npx", "paseo", "pkill", "pnpm", "yarn"],
+    ["agy", "bun", "copilot", "factory-claim", "gh", "git", "impeccable", "kill", "killall", "npm", "npx", "paseo", "pkill", "pnpm", "yarn"],
     "the one dir injectClaimCliPath puts on every agent's PATH holds the claim CLI and the OS PATH shims — never the Owner CLI (factory.mjs), whose every wrapper would be an orchestration door",
   );
   // And the wrapper that IS there points at factory-claim.mjs, not factory.mjs.
@@ -446,10 +446,10 @@ test("ensureClaimCli and ensureGitShim stage self-contained runtime-bin scripts 
   rmSync(volatilePluginDir, { recursive: true, force: true });
   assert.equal(existsSync(volatilePluginDir), false, "old plugin checkout directory was deleted");
 
-  // <stateDir>/bin/ must still hold only the 12 wrapper executables
+  // <stateDir>/bin/ must still hold only the 15 wrapper executables
   assert.deepEqual(
     readdirSync(claimCliBinDir(stateDir)).sort(),
-    ["bun", "factory-claim", "gh", "git", "kill", "killall", "npm", "npx", "paseo", "pkill", "pnpm", "yarn"],
+    ["agy", "bun", "copilot", "factory-claim", "gh", "git", "impeccable", "kill", "killall", "npm", "npx", "paseo", "pkill", "pnpm", "yarn"],
   );
 
   // And <stateDir>/bin/git must still execute cleanly without MODULE_NOT_FOUND!

@@ -550,3 +550,24 @@ test('controller blocks incomplete multi-screen evidence before Owner review', a
     assert.equal(readRun(f.state, 'p', f.run.runId).design, undefined);
   }
 });
+
+
+test('legacy multi-screen reports cannot use the single-screen compatibility exception', async t => {
+  const { designFixture } = await import('./fixtures/scrum-design.ts');
+  const f = await designFixture(t, report => {
+    delete report.screens; delete report.detector;
+    report.viewports = [{ ...report.viewports[0], width: 800, height: 600 }];
+  }, { 'EXPERIENCE.md': 'Legacy screen prose without explicit headings.' });
+  assert.throws(f.submit, { code: 'browser-evidence-invalid' });
+});
+
+test('studio injects its DOM picker into valid mockups with optional body tags omitted', async t => {
+  const { designFixture, designFiles } = await import('./fixtures/scrum-design.ts');
+  const { scrumOperation } = await import('../src/scrum/controller.ts');
+  const f = await designFixture(t, undefined, { 'mockups/index.html': designFiles['mockups/index.html'].replace(/<\/?body>/g, '') });
+  f.submit();
+  const preview = await scrumOperation({ operation: 'preview.url', runId: f.run.runId, requestId: 'bodyless' }, f.ctx) as { url: string };
+  const url = new URL(preview.url); url.pathname = '/mockup';
+  const response = await fetch(url);
+  assert.match(await response.text(), /scrum:element-picked/);
+});

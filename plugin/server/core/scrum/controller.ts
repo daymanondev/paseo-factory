@@ -48,7 +48,7 @@ import { completionBlockers } from "./completion.ts";
 import { verifyQaFiles } from "./qa-bundle.ts";
 import { gitBytes } from "./artifacts.ts";
 import { previewModel } from "./preview-model.ts";
-import { previewBridge } from "./preview-bridge.ts";
+import { previewBridge, injectPreviewBridge } from "./preview-bridge.ts";
 import { renderPreview } from "./preview.ts";
 import { servePreview } from "./preview-server.ts";
 export interface ScrumOperation {
@@ -191,7 +191,7 @@ export function scrumOperation(input: ScrumOperation, ctx: ScrumOperationContext
   }
   if (input.operation === "preview") {
     const preview = renderPreview(root, run), model = previewModel(root, run);
-    return { ...preview, html: preview.html.replace(/<\/body>/i, previewBridge(model.screens[0]?.id ?? '', 'populated') + '</body>'), model, screenshots: model.evidence.viewports.map(v => {
+    return { ...preview, html: injectPreviewBridge(preview.html, previewBridge(model.screens[0]?.id ?? '', 'populated')), model, screenshots: model.evidence.viewports.map(v => {
       const ref = run.design!.refs.find(r => r.path === v.screenshot.path && r.sha256 === v.screenshot.sha256);
       return { ...v, dataUrl: ref ? `data:image/png;base64,${gitBytes(root, 'show', `${ref.commit}:${ref.path}`).toString('base64')}` : undefined };
     }) };
@@ -383,7 +383,7 @@ export function scrumOperation(input: ScrumOperation, ctx: ScrumOperationContext
       const issues = verifyQaFiles(root, report);
       if (run.design) {
         const model = previewModel(root, run);
-        if (model.screens.length && (model.evidence.detector || model.screens.length > 1)) issues.push(...verifyBrowserFiles(root, report.browserEvidence, model.screens.map(s => s.id)));
+        if (model.screens.length && (model.evidence.detector || model.screens.length > 1)) issues.push(...verifyBrowserFiles(root, report.browserEvidence, model.screens.map(s => s.id), { requireCleanDetector: report.status === 'clean' }));
       }
       if (issues.length) fail("invalid-qa-evidence", issues.join("; "));
       cmd.result = {

@@ -147,7 +147,7 @@ export function verifyBrowserEvidence(root: string, design: import("./run-journa
     let report: BrowserEvidenceReport;
     try { report = JSON.parse(gitBytes(root, 'show', `${ref.commit}:${ref.path}`).toString()); }
     catch { throw new FactoryError('browser-evidence-invalid', 'invalid browser JSON'); }
-    const strict = declared.length > 0 || report?.screens !== undefined || report?.detector !== undefined || (report?.viewports?.length ?? 0) > 1;
+    const strict = declared.length > 0 || report?.screens !== undefined || report?.detector !== undefined || (report?.viewports?.length ?? 0) > 1 || new Set((report?.states ?? []).map(s => s.screen)).size > 1;
     const issues = browserCoverageIssues(report, declared, strict);
     if (issues.length) throw new FactoryError('browser-evidence-invalid', issues.join('; '));
     for (const viewport of report.viewports) {

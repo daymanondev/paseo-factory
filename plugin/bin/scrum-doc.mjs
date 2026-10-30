@@ -22,12 +22,12 @@ function designScreens(experience, manifest) {
 }
 var desktopViewport = (v) => v.width >= 1280 && v.height >= 800;
 var mobileViewport = (v) => v.width > 0 && v.width <= 430 && v.height >= 640 && v.height <= 844;
-function detectorIssues(detector) {
-  if (!detector || detector.tool !== "impeccable" || detector.passed !== true || detector.nonAdvisoryCount !== 0 || !Array.isArray(detector.viewportsChecked) || !detector.viewportsChecked.some(desktopViewport) || !detector.viewportsChecked.some(mobileViewport) || detector.viewportsChecked.some((v) => !Number.isFinite(v.width) || !Number.isFinite(v.height) || v.nonAdvisoryCount !== 0) || detector.findings !== void 0 && (!Array.isArray(detector.findings) || detector.findings.some((f) => f.severity !== "advisory")))
+function detectorIssues(detector, requireClean = true) {
+  if (!detector || detector.tool !== "impeccable" || typeof detector.passed !== "boolean" || !Number.isSafeInteger(detector.nonAdvisoryCount) || detector.nonAdvisoryCount < 0 || requireClean && (detector.passed !== true || detector.nonAdvisoryCount !== 0) || !Array.isArray(detector.viewportsChecked) || !detector.viewportsChecked.some(desktopViewport) || !detector.viewportsChecked.some(mobileViewport) || detector.viewportsChecked.some((v) => !Number.isFinite(v.width) || !Number.isFinite(v.height) || !Number.isSafeInteger(v.nonAdvisoryCount) || v.nonAdvisoryCount < 0 || requireClean && v.nonAdvisoryCount !== 0) || detector.findings !== void 0 && (!Array.isArray(detector.findings) || detector.findings.some((f) => !f || !["error", "warning", "advisory"].includes(f.severity) || requireClean && f.severity !== "advisory")))
     return ["impeccable detector needs zero non-advisory findings across Desktop and Mobile"];
   return [];
 }
-function browserCoverageIssues(report, required, strict = true) {
+function browserCoverageIssues(report, required, strict = true, options = {}) {
   const issues = [];
   if (report?.network !== "disabled" || !Array.isArray(report.consoleErrors) || report.consoleErrors.length || report.pageErrors !== void 0 && (!Array.isArray(report.pageErrors) || report.pageErrors.length) || !Array.isArray(report.viewports) || !report.viewports.length || !Array.isArray(report.states) || !report.states.length)
     return ["offline network, clean console/page errors, viewport screenshots and state checks required"];
@@ -44,7 +44,7 @@ function browserCoverageIssues(report, required, strict = true) {
       if (!captures.some(desktopViewport) || !captures.some(mobileViewport)) issues.push(`${screen} needs Desktop (1280x800) and Mobile (390x844) screenshots`);
     }
   }
-  if (strict || report.detector !== void 0) issues.push(...detectorIssues(report.detector));
+  if (strict || report.detector !== void 0) issues.push(...detectorIssues(report.detector, options.requireCleanDetector ?? true));
   return issues;
 }
 
@@ -67,8 +67,8 @@ function safePath(value) {
 var sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
 // src/scrum/browser-files.ts
-function verifyBrowserFiles(root, report, screens) {
-  const issues = browserCoverageIssues(report, screens);
+function verifyBrowserFiles(root, report, screens, options = {}) {
+  const issues = browserCoverageIssues(report, screens, true, options);
   if (issues.length) return issues;
   for (const viewport of report.viewports) {
     const ref = viewport.screenshot;
@@ -103,7 +103,7 @@ function validateQaReport(value) {
   if (!r || r.schemaVersion !== 1 || !safeId(r.auditId) || !/^[a-f0-9]{40}$/.test(r.productSha) || !["clean", "defects_found", "blocked", "inconclusive"].includes(r.status))
     return ["invalid QA report identity/status"];
   const issues = [];
-  if (r.browserEvidence !== void 0) issues.push(...browserCoverageIssues(r.browserEvidence, []));
+  if (r.browserEvidence !== void 0) issues.push(...browserCoverageIssues(r.browserEvidence, [], true, { requireCleanDetector: r.status === "clean" }));
   if (typeof r.activeSuite !== "boolean")
     issues.push("activeSuite must explicitly be a boolean");
   if (!executionValid(r.baseline) || r.baseline.exit !== 0 || r.baseline.passed !== r.baseline.tests || !r.baseline.firstAttempt || r.baseline.skipped || r.baseline.expectedFailures)
@@ -149,7 +149,7 @@ function validateQaReport(value) {
 function verifyQaFiles(root, report) {
   const issues = validateQaReport(report);
   if (issues.length) return issues;
-  if (report.browserEvidence) issues.push(...verifyBrowserFiles(root, report.browserEvidence, []));
+  if (report.browserEvidence) issues.push(...verifyBrowserFiles(root, report.browserEvidence, [], { requireCleanDetector: report.status === "clean" }));
   const files = [report.baseline, ...report.runs].flatMap((e) => e.evidence).concat(
     report.findings.flatMap((f) => f.evidence),
     report.bundles.flatMap((b) => [...b.files, b.discoveryEvidence])
