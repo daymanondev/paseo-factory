@@ -181,6 +181,26 @@ export function resolveOrBootstrapProject(cwd: string, options?: BootstrapProjec
 
   if (!hasHead) {
     try {
+      try {
+        const existingEmail = execFileSync("git", ["config", "--get", "user.email"], {
+          cwd: resolved.root,
+          encoding: "utf8",
+          timeout: GIT_TIMEOUT_MS,
+          stdio: ["ignore", "pipe", "pipe"],
+        }).trim();
+        if (!existingEmail) throw new Error("empty user.email");
+      } catch {
+        execFileSync("git", ["config", "user.name", "Factory"], {
+          cwd: resolved.root,
+          timeout: GIT_TIMEOUT_MS,
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        execFileSync("git", ["config", "user.email", "factory@local"], {
+          cwd: resolved.root,
+          timeout: GIT_TIMEOUT_MS,
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+      }
       execFileSync(
         "git",
         ["-c", "user.name=Factory", "-c", "user.email=factory@local", "commit", "--allow-empty", "-m", "chore: initialize repository"],

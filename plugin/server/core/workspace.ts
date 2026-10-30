@@ -397,7 +397,13 @@ async function landCleanly(
     base !== undefined && headSha === base
       ? ["merge", "--ff-only", claimedCommit]
       : ["merge", "--no-ff", claimedCommit, "-m", `factory: land ${branch} (${shortSha(claimedCommit)})`];
-  const merged = await gitExit(projectRoot, mergeArgs);
+  let merged = await gitExit(projectRoot, mergeArgs);
+  if (
+    merged.status !== 0 &&
+    /identity unknown|unable to auto-detect email|please tell me who you are/i.test(merged.stderr)
+  ) {
+    merged = await gitExit(projectRoot, ["-c", "user.name=Factory", "-c", "user.email=factory@local", ...mergeArgs]);
+  }
   if (merged.status !== 0) {
     await gitExit(projectRoot, ["merge", "--abort"]); // best-effort: the root returns to its own commit, never mid-conflict
     return conflict(

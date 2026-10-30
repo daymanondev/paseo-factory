@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.66] - 2026-10-30
+
+### Fixed
+
+- Fall back to `-c user.name=Factory -c user.email=factory@local` when `landTaskWorktree` (`git merge --no-ff`) or greenfield repository bootstrap (`ensureGitRepository`) runs on a machine without global git user identity configured.
+
 ## [0.0.65] - 2026-10-30
 
 ### Fixed
