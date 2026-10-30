@@ -548,16 +548,164 @@ function extractShellCommand(request: AgentPermissionRequest): string | undefine
   return undefined;
 }
 
-function extractWriteFilePath(request: AgentPermissionRequest): string | undefined {
+const WRITE_TOOL_NAME_PLACEHOLDERS = new Set([
+  "apply_patch",
+  "edit",
+  "write",
+  "delete",
+  "patch",
+  "multi_edit",
+  "multiedit",
+  "str_replace_editor",
+  "create_file",
+  "edit_file",
+  "write_file",
+  "replace_in_file",
+  "insert_edit_into_file",
+]);
+
+function isRecordValue(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function extractPatchFilePaths(text: string): string[] {
+  const paths: string[] = [];
+  const pushUnique = (raw: string | undefined): void => {
+    const trimmed = raw?.trim();
+    if (!trimmed || trimmed === "/dev/null") return;
+    if (!paths.includes(trimmed)) paths.push(trimmed);
+  };
+  for (const line of text.split(/\r?\n/)) {
+    const patchMatch = line.match(/^\*\*\* (?:Add|Update|Delete) File:\s*(.+?)\s*$/);
+    if (patchMatch?.[1]) {
+      pushUnique(patchMatch[1]);
+      continue;
+    }
+    const moveMatch = line.match(/^\*\*\* Move to:\s*(.+?)\s*$/);
+    if (moveMatch?.[1]) {
+      pushUnique(moveMatch[1]);
+      continue;
+    }
+    const gitDiffMatch = line.match(/^diff --git a\/(.+?) b\/(.+?)\s*$/);
+    if (gitDiffMatch) {
+      pushUnique(gitDiffMatch[2]);
+      continue;
+    }
+    const plusMatch = line.match(/^\+\+\+ b\/(.+?)\s*$/);
+    if (plusMatch?.[1]) {
+      pushUnique(plusMatch[1]);
+    }
+  }
+  return paths;
+}
+
+function collectWritePathsFromRecord(record: Record<string, unknown>, pushPath: (candidate: string) => void): void {
+  for (const key of ["path", "filePath", "file", "fileName", "target_file", "targetFile"]) {
+    const val = record[key];
+    if (typeof val === "string" && val.trim() !== "") {
+      pushPath(val.trim());
+    }
+  }
+  for (const key of ["patch", "input", "diff", "arguments", "content"]) {
+    const val = record[key];
+    if (typeof val === "string" && val.trim() !== "") {
+      for (const p of extractPatchFilePaths(val)) pushPath(p);
+    }
+  }
+  if (Array.isArray(record.fileEdits)) {
+    for (const edit of record.fileEdits) {
+      if (!isRecordValue(edit)) continue;
+      if (isRecordValue(edit.after) && typeof edit.after.path === "string") pushPath(edit.after.path.trim());
+      if (isRecordValue(edit.before) && typeof edit.before.path === "string") pushPath(edit.before.path.trim());
+    }
+  }
+}
+
+function isToolNamePlaceholder(candidate: string, request: AgentPermissionRequest, hasStructuredPaths: boolean): boolean {
+  const normalized = candidate.trim().toLowerCase();
+  if (WRITE_TOOL_NAME_PLACEHOLDERS.has(normalized)) return true;
+  if (hasStructuredPaths && (candidate.trim() === request.title?.trim() || candidate.trim() === request.name.trim())) {
+    return true;
+  }
+  return false;
+}
+
+export function extractWriteFilePaths(request: AgentPermissionRequest): string[] {
+  const paths: string[] = [];
+  const pushUnique = (raw: string | undefined): void => {
+    const trimmed = raw?.trim();
+    if (!trimmed) return;
+    if (!paths.includes(trimmed)) paths.push(trimmed);
+  };
+
+  if (isRecordValue(request.metadata) && isRecordValue(request.metadata.rawRequest)) {
+    const rawRequest = request.metadata.rawRequest;
+    if (isRecordValue(rawRequest.toolCall)) {
+      const toolCall = rawRequest.toolCall;
+      if (Array.isArray(toolCall.locations)) {
+        for (const loc of toolCall.locations) {
+          if (isRecordValue(loc) && typeof loc.path === "string") pushUnique(loc.path);
+        }
+      }
+      if (Array.isArray(toolCall.content)) {
+        for (const item of toolCall.content) {
+          if (!isRecordValue(item)) continue;
+          if (item.type === "diff" && typeof item.path === "string") pushUnique(item.path);
+          if (item.type === "content" && isRecordValue(item.content) && typeof item.content.text === "string") {
+            for (const p of extractPatchFilePaths(item.content.text)) pushUnique(p);
+          }
+        }
+      }
+      if (typeof toolCall.rawInput === "string") {
+        for (const p of extractPatchFilePaths(toolCall.rawInput)) pushUnique(p);
+      } else if (isRecordValue(toolCall.rawInput)) {
+        collectWritePathsFromRecord(toolCall.rawInput, pushUnique);
+      }
+    }
+    if (isRecordValue(rawRequest.permissionRequest)) {
+      collectWritePathsFromRecord(rawRequest.permissionRequest, pushUnique);
+    }
+  }
+
+  if (isRecordValue(request.input)) {
+    collectWritePathsFromRecord(request.input, pushUnique);
+  }
+
   const detail = request.detail;
-  if (detail !== undefined && (detail.type === "write" || detail.type === "edit") && typeof detail.filePath === "string") {
-    return detail.filePath;
+  if (detail !== undefined && (detail.type === "write" || detail.type === "edit")) {
+    if (detail.type === "edit" && typeof detail.unifiedDiff === "string" && detail.unifiedDiff.trim() !== "") {
+      for (const p of extractPatchFilePaths(detail.unifiedDiff)) pushUnique(p);
+    }
+    if (typeof detail.filePath === "string" && detail.filePath.trim() !== "") {
+      const patchFromFp = extractPatchFilePaths(detail.filePath);
+      if (patchFromFp.length > 0) {
+        for (const p of patchFromFp) pushUnique(p);
+      } else if (!isToolNamePlaceholder(detail.filePath, request, paths.length > 0)) {
+        pushUnique(detail.filePath);
+      }
+    }
   }
-  const lower = request.name.toLowerCase();
-  if ((lower === "write" || lower === "edit") && typeof request.description === "string" && request.description.trim() !== "") {
-    return request.description.split("\n")[0]!.trim();
+
+  if (paths.length === 0) {
+    const lower = request.name.toLowerCase();
+    if (
+      (lower === "write" || lower === "edit" || lower === "apply_patch" || lower === "patch") &&
+      typeof request.description === "string" &&
+      request.description.trim() !== ""
+    ) {
+      const patchFromDesc = extractPatchFilePaths(request.description);
+      if (patchFromDesc.length > 0) {
+        for (const p of patchFromDesc) pushUnique(p);
+      } else {
+        const firstLine = request.description.split("\n")[0]!.trim();
+        if (!isToolNamePlaceholder(firstLine, request, false)) {
+          pushUnique(firstLine);
+        }
+      }
+    }
   }
-  return undefined;
+
+  return paths;
 }
 
 /** Explicit git paths bypass the exec-time shim, so OpenCode seats fence writes here. */
@@ -619,12 +767,18 @@ export function createChoke(options: ChokeOptions): Choke {
     if (shellCmd !== undefined) {
       return { decision: judgeShellCommand(shellCmd, roots, memory), command: shellCmd };
     }
-    const filePath = extractWriteFilePath(request);
-    if (filePath !== undefined) {
+    const filePaths = extractWriteFilePaths(request);
+    if (filePaths.length > 0) {
       // The write/edit rider (ticket 01's non-shell twin of S2), fenced over
       // the workspace-root memory files. The file path rides on the line so
       // the ledger names what was aimed at.
-      return { decision: judgeFilePath(filePath, roots, memory), command: filePath };
+      for (const filePath of filePaths) {
+        const decision = judgeFilePath(filePath, roots, memory);
+        if (decision.behavior === "deny") {
+          return { decision, command: filePath };
+        }
+      }
+      return { decision: { behavior: "allow" }, command: filePaths.join(", ") };
     }
     // No shell line and no file target (plan/question/mode asks, reads): the
     // deny-list has nothing to match — default-allow.
@@ -655,11 +809,17 @@ export function createChoke(options: ChokeOptions): Choke {
         command: shellCmd,
       };
     }
-    const filePath = extractWriteFilePath(request);
-    if (filePath !== undefined) {
+    const filePaths = extractWriteFilePaths(request);
+    if (filePaths.length > 0) {
+      for (const filePath of filePaths) {
+        const decision = judgeSeatFilePath(filePath, projectRoot, factory.stateDir);
+        if (decision.behavior === "deny") {
+          return { decision, command: filePath };
+        }
+      }
       return {
-        decision: judgeSeatFilePath(filePath, projectRoot, factory.stateDir),
-        command: filePath,
+        decision: { behavior: "allow" },
+        command: filePaths.join(", "),
       };
     }
     return { decision: { behavior: "allow" } };

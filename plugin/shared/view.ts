@@ -431,6 +431,8 @@ export const FactoryViewSchema = z.object({
   corePlugin: CompanionPluginViewSchema,
   /** The companion catalog joined with the daemon's plugin list (v0.0.17, ADR 0012 §2). */
   companions: z.array(CompanionPluginViewSchema),
+  /** Host-level companion tools & skill packs (`impeccable`, `factory-skills-pack`) inspected per snapshot (ADR 0036 §5). */
+  companionTools: z.array(CompanionPluginViewSchema).optional(),
   /** ISO timestamp of the last on-demand plugin update check for this daemon home — null when not yet checked (v0.0.25, ADR 0012 §4). */
   pluginsCheckedAt: z.string().nullable(),
   /**

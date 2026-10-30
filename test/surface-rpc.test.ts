@@ -6251,4 +6251,86 @@ test("Scrum supervisorEnsure preserves a UI-created Supervisor session without s
   assert.equal(existsSync(wt.path), false, "worktree directory is removed after landing");
 });
 
+test("ADR 0036: snapshot surfaces companionTools (impeccable + factory-skills-pack) and pluginsInstall / pluginsManage install, update, reload, and remove them", async (t) => {
+  const userHome = makeTempDir("companion-tools-home-");
+  disposeDir(t, userHome);
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const home = join(dir, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const retroRunner = fakeCopilotRunner(() => ({ code: 0, stdout: '{"proposals":[]}' }));
+  const factory = createFactory({ stateDir, retroCopilotRunner: retroRunner.runner, retroCopilotProbe: () => true, eyeCliProbe: () => false });
+  const fake = fakeDaemon([]);
+
+  const toolCalls: Array<{ command: string; args: string[] }> = [];
+  const handlers = createSurfaceHandlers({
+    factory,
+    stateDir,
+    home,
+    userHome,
+    daemon: fake.daemon,
+    listPlugins: async () => ({
+      ok: true,
+      plugins: [{ id: "paseo-factory", path: "/plugins/paseo-factory", enabled: true, status: "running" }],
+    }),
+    companionToolRunner: (command, args) => {
+      toolCalls.push({ command, args });
+      const impDir = join(userHome, ".agents/skills/impeccable");
+      mkdirSync(join(impDir, "scripts"), { recursive: true });
+      writeFileSync(join(impDir, "SKILL.md"), "# Impeccable\n");
+      writeFileSync(join(impDir, "scripts/VERSION"), "4.8.0\n");
+      writeFileSync(join(impDir, "scripts/impeccable"), "#!/bin/sh\n");
+      return { status: 0, stdout: "Installed impeccable 4.8.0", stderr: "" };
+    },
+  });
+
+  // 1. Initial snapshot reports both companionTools as not_installed
+  const snap1 = await handlers.snapshot({});
+  assert.ok(snap1.ok, snap1.ok ? "" : snap1.error);
+  assert.deepEqual(
+    snap1.view.companionTools?.map((tool) => [tool.id, tool.status]),
+    [
+      ["impeccable", "not_installed"],
+      ["factory-skills-pack", "not_installed"],
+    ],
+  );
+
+  // 2. Install impeccable via pluginsInstall({ target: "impeccable" })
+  const instImp = await handlers.pluginsInstall({ target: "impeccable" });
+  assert.ok(instImp.ok, instImp.ok ? "" : instImp.error);
+  assert.deepEqual(instImp.installed, ["impeccable"]);
+  assert.equal(toolCalls.length, 1);
+  assert.equal(toolCalls[0]!.command, "npx");
+
+  // 3. Stage a skill in vault-runtime and install factory-skills-pack
+  mkdirSync(join(home, "vault-runtime/config/skills/tdd"), { recursive: true });
+  writeFileSync(join(home, "vault-runtime/config/skills/tdd/SKILL.md"), "# TDD\n");
+  const instPack = await handlers.pluginsInstall({ target: "factory-skills-pack" });
+  assert.ok(instPack.ok, instPack.ok ? "" : instPack.error);
+  assert.deepEqual(instPack.installed, ["factory-skills-pack"]);
+  assert.equal(existsSync(join(userHome, ".agents/skills/tdd/SKILL.md")), true);
+  assert.equal(existsSync(join(userHome, ".pi/agent/skills/tdd/SKILL.md")), true);
+
+  // 4. Snapshot now reports both companionTools as running
+  const snap2 = await handlers.snapshot({});
+  assert.ok(snap2.ok, snap2.ok ? "" : snap2.error);
+  assert.deepEqual(
+    snap2.view.companionTools?.map((tool) => [tool.id, tool.status, tool.version]),
+    [
+      ["impeccable", "running", "4.8.0"],
+      ["factory-skills-pack", "running", "1.0.0"],
+    ],
+  );
+
+  // 5. Manage reload and remove on impeccable
+  const reloadImp = await handlers.pluginsManage({ pluginId: "impeccable", action: "reload" });
+  assert.ok(reloadImp.ok, reloadImp.ok ? "" : reloadImp.error);
+  const removeImp = await handlers.pluginsManage({ pluginId: "impeccable", action: "remove" });
+  assert.ok(removeImp.ok, removeImp.ok ? "" : removeImp.error);
+  const snap3 = await handlers.snapshot({});
+  assert.ok(snap3.ok, snap3.ok ? "" : snap3.error);
+  assert.equal(snap3.view.companionTools?.find((t) => t.id === "impeccable")?.status, "not_installed");
+});
+
+
 

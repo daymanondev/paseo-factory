@@ -61,15 +61,74 @@ export const CORE_PLUGIN_ENTRY: CorePluginCatalogEntry = {
   capabilities: ["Contracts & Gates", "Append-Only Ledger", "Supervisor & Lead Seats", "Fresh-Eyes & Watch", "Private Vault Sync"],
 };
 
-/** Every plugin id the Plugins tab can manage (Core + Companions). */
-export type ManageablePluginId = CorePluginCatalogEntry["id"] | CompanionCatalogEntry["id"];
+export interface CompanionToolCatalogEntry {
+  id: "impeccable" | "factory-skills-pack";
+  title: string;
+  tagline: string;
+  description: string;
+  canonicalSource: string;
+  access: PluginAccessTier;
+  sidebarLabel: string;
+  sidebarIcon: string;
+  capabilities: readonly string[];
+}
 
-/** Set of every plugin id managed by the Factory surface (Core + Companions). */
+/** Every plugin or companion tool id the Plugins tab can manage (Core + Companions + Companion Tools). */
+export type ManageablePluginId =
+  | CorePluginCatalogEntry["id"]
+  | CompanionCatalogEntry["id"]
+  | CompanionToolCatalogEntry["id"];
+
+/** Set of every daemon plugin id managed by the Factory surface (Core + Companions). */
 export const MANAGEABLE_PLUGIN_IDS: ReadonlySet<string> = new Set<string>([
   "paseo-factory",
   "factory-burn-lab",
   "factory-release-lab",
 ]);
+
+/** Set of every host companion tool / skill pack id managed by the Factory surface (ADR 0036). */
+export const MANAGEABLE_TOOL_IDS: ReadonlySet<string> = new Set<string>([
+  "impeccable",
+  "factory-skills-pack",
+]);
+
+/** The official Factory companion tool & skill pack catalog (ADR 0036 §1). */
+export const COMPANION_TOOLS_CATALOG: readonly CompanionToolCatalogEntry[] = [
+  {
+    id: "impeccable",
+    title: "Impeccable UI Detector & Skill Pack",
+    tagline: "Upstream pbakaus/impeccable 62-rule anti-slop detector CLI & UI design skills for UX, Dev, and QA.",
+    description:
+      "Self-contained Rust/Wasm visual anti-slop detector engine (`impeccable detect --json --no-advisory`), PostToolUse UI scanner hook, and design playbooks (`~/.agents/skills/impeccable*`) auto-provisioned into Scrum UX, Senior Dev, and QA specialist homes.",
+    canonicalSource: "npx:impeccable@latest",
+    access: "public",
+    sidebarLabel: "Impeccable",
+    sidebarIcon: "Sparkles",
+    capabilities: [
+      "62-Rule Visual Detector",
+      "DESIGN.md Token Drift Gate",
+      "PostToolUse UI Hook",
+      "Auto-Provisioned for UX / Dev / QA",
+    ],
+  },
+  {
+    id: "factory-skills-pack",
+    title: "Factory Core Skill Pack",
+    tagline: "Shared ~/.agents/skills library synchronized via Private Vault and symlinked across Pi, Claude, and Gemini.",
+    description:
+      "Host-level Markdown skill library (`tdd`, `diagnosing-bugs`, `codebase-design`, `frontend-design`, `web-design-guidelines`, `code-review`, `grilling`, `domain-modeling`, `grill-with-docs`, `factory`) synchronized across machines via `config/skills/` in `factory-vault` and linked into all provider skill directories.",
+    canonicalSource: "vault:config/skills",
+    access: "public",
+    sidebarLabel: "Skill Pack",
+    sidebarIcon: "BookOpen",
+    capabilities: [
+      "~/.agents/skills Source of Truth",
+      "Private Vault Sync",
+      "Pi / Claude / Gemini Symlinks",
+      "Role-Scoped Specialist Allowlist",
+    ],
+  },
+];
 
 /** The official Factory companion family — catalog order is the card order. */
 export const COMPANION_CATALOG: readonly CompanionCatalogEntry[] = [

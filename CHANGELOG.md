@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.67] - 2026-10-30
+
+### Added
+
+- Add `Companion Tools & Skill Packs` catalog (`impeccable` and `factory-skills-pack`) to the `Plugins` tab with 1-click `Install`, `Update`, `Reload`, and `Remove` actions, plus pre-spawn self-healing for `impeccable >= 4.8.0` on Scrum UI roles (`ux`, `dev`, `qa`) and multi-provider skill symlinking (`~/.pi/agent/skills`, `~/.claude/skills`, `~/.gemini/config/skills`) (ADR 0036).
+- Sync pure-Markdown `~/.agents/skills/` packs (excluding `impeccable*`) through `Private vault` `config/skills/` and `config/companion-tools.json` across machines while keeping `impeccable`'s native binary host-provisioned (ADR 0036).
+
+### Fixed
+
+- Extract target file paths from ACP/Copilot `apply_patch` permission requests (`rawRequest.toolCall`, `permissionRequest`, `unifiedDiff`) in `plugin/server/choke.ts` instead of judging the literal `"apply_patch"` tool title against `policy:scrum-artifact-only`.
+
 ## [0.0.66] - 2026-10-30
 
 ### Fixed

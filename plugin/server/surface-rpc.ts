@@ -47,6 +47,9 @@ import { listProjectRegistrations, projectStateDir, readProjectRegistration, res
 import type { ProjectResolution } from "./core/project.ts";
 import { hydrateVaultDirect, importVaultSecrets, isLocalCompanionGitSource, loadVaultConfig, probeCompanionGitAccess, probeGhAuth, pullVault, pushVault, readVaultStatus, saveVaultConfig, syncVault } from "./core/vault.ts";
 import type { ImportVaultSecretsInput, SyncVaultOptions, VaultConfig, VaultRunner } from "./core/vault.ts";
+import { materializeVaultSkillsFromRuntime, resolveVaultUserHome } from "./core/vault-materialization.ts";
+import { ensureProviderSkillSymlinks, IMPECCABLE_MIN_VERSION, inspectFactorySkillPack, inspectImpeccableTool, installOrUpdateImpeccableTool } from "./core/scrum/impeccable.ts";
+import type { CompanionToolRunner } from "./core/scrum/impeccable.ts";
 import { basename, join, resolve } from "node:path";
 import { FACTORY_VIEW_VERSION } from "../shared/view.ts";
 import { foldRetro, foldTasks, foldView, readTailed } from "./view.ts";
@@ -58,8 +61,8 @@ import { SEAT_TITLES, inferRoleFromProviderId, resolveEffectiveProviderFamily } 
 import type { SeatName } from "./roles.ts";
 import { ensureProjectRegistered, discoverProjects, writeProjectRegistration } from "./projects.ts";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { COMPANION_CATALOG, CORE_PLUGIN_ENTRY, MANAGEABLE_PLUGIN_IDS } from "../shared/companions.ts";
-import type { CompanionCatalogEntry, ManageablePluginId } from "../shared/companions.ts";
+import { COMPANION_CATALOG, COMPANION_TOOLS_CATALOG, CORE_PLUGIN_ENTRY, MANAGEABLE_PLUGIN_IDS, MANAGEABLE_TOOL_IDS } from "../shared/companions.ts";
+import type { CompanionCatalogEntry, CompanionToolCatalogEntry, ManageablePluginId } from "../shared/companions.ts";
 import type { SpoolLeadDispatchRequest, SpoolReply } from "./spool.ts";
 import {
   accept,
@@ -97,7 +100,7 @@ import {
   vaultPush,
   vaultSync,
 } from "../shared/rpc.ts";
-import type { ExecutionView, AgentView, LaneName, LaneProfileView, Lanes, ProjectView, TaskView, VaultStatusView } from "../shared/view.ts";
+import type { CompanionPluginView, ExecutionView, AgentView, LaneName, LaneProfileView, Lanes, ProjectView, TaskView, VaultStatusView } from "../shared/view.ts";
 
 // ---- the daemon slice ---------------------------------------------------------------------
 
@@ -278,6 +281,9 @@ export interface SurfaceDeps {
   installPlugin?: typeof installDaemonPlugin;
   managePlugin?: typeof manageDaemonPlugin;
   checkPluginUpdates?: typeof checkDaemonPluginUpdates;
+  /** Optional host home override and runner override for companion tools (`impeccable`, `factory-skills-pack`; ADR 0036). */
+  userHome?: string;
+  companionToolRunner?: CompanionToolRunner;
   /**
    * The daemon worktree-record sweep override (v0.0.27, ADR 0017 §4; tests) —
    * the WebSocket bridge by default, the same law the plugin lifecycle
@@ -1668,6 +1674,103 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     if (readExecution(deps.stateDir, project.slug).mode === "scrum") for (const run of listRuns(deps.stateDir, project.slug)) { if (!terminalRun(run)) blockers.push(`Scrum ${run.runId}: ${run.phase}`); else if (run.phase === "completed" && run.completionRequest && !run.completionReported) blockers.push(`Scrum ${run.runId}: completion report pending`); }
     return { blockers: [...new Set(blockers)], activeAgents: agents.filter(a => a.labels.seat === "agent").map(a => a.id), pendingDirectives };
   };
+  const resolveSurfaceUserHome = (): string => resolveVaultUserHome(deps.home, deps.userHome);
+
+  const buildCompanionToolsView = (): CompanionPluginView[] => {
+    const userHome = resolveSurfaceUserHome();
+    return COMPANION_TOOLS_CATALOG.map((entry: CompanionToolCatalogEntry): CompanionPluginView => {
+      if (entry.id === "impeccable") {
+        const info = inspectImpeccableTool(userHome);
+        const installed = info.status === "installed" || info.status === "outdated";
+        return {
+          ...entry,
+          capabilities: [...entry.capabilities],
+          status: info.status === "installed" ? "running" : info.status === "outdated" ? "failed" : "not_installed",
+          enabled: info.status === "installed",
+          installKind: installed ? "npm" : null,
+          installedSource: info.path,
+          currentRevision: info.version,
+          version: info.version,
+          latestRevision: info.status === "outdated" ? IMPECCABLE_MIN_VERSION : info.version,
+          commitsBehind: null,
+          updateAvailable: info.status === "outdated" ? true : info.status === "installed" ? false : null,
+          error:
+            info.status === "outdated"
+              ? `Installed Impeccable v${info.version} is older than required v${IMPECCABLE_MIN_VERSION}`
+              : null,
+        };
+      }
+      const pack = inspectFactorySkillPack(userHome);
+      const installed = pack.totalSkills > 0;
+      return {
+        ...entry,
+        capabilities: [...entry.capabilities],
+        status: installed ? "running" : "not_installed",
+        enabled: installed,
+        installKind: installed ? "directory" : null,
+        installedSource: installed ? pack.path : null,
+        currentRevision: installed ? `${pack.totalSkills} skills` : null,
+        version: installed ? `${pack.totalSkills}.0.0` : null,
+        latestRevision: null,
+        commitsBehind: null,
+        updateAvailable: false,
+        error:
+          pack.status === "partial" && pack.missingCoreSkills.length > 0
+            ? `Missing core skills: ${pack.missingCoreSkills.join(", ")}`
+            : null,
+      };
+    });
+  };
+
+  const executeCompanionToolAction = (
+    toolId: "impeccable" | "factory-skills-pack",
+    action: "install" | "update" | "reload" | "enable" | "disable" | "remove",
+  ): { ok: true; summary: string } | { ok: false; reason: string } => {
+    const userHome = resolveSurfaceUserHome();
+    if (toolId === "impeccable") {
+      if (action === "install" || action === "update" || action === "enable") {
+        const res = installOrUpdateImpeccableTool({
+          userHome,
+          action: action === "update" ? "update" : "install",
+          runner: deps.companionToolRunner,
+        });
+        if (!res.ok) return { ok: false, reason: res.reason };
+        return { ok: true, summary: res.summary };
+      }
+      if (action === "reload") {
+        ensureProviderSkillSymlinks(userHome);
+        const info = inspectImpeccableTool(userHome);
+        return {
+          ok: true,
+          summary: `Re-linked Impeccable (${info.skillCount} skill(s)) across provider skill directories.`,
+        };
+      }
+      // remove / disable
+      for (const provider of [".agents", ".pi/agent", ".claude", ".gemini/config", ".gemini", ".codex", ".opencode"]) {
+        const dir = join(userHome, provider, "skills");
+        if (!existsSync(dir)) continue;
+        try {
+          for (const name of readdirSync(dir)) {
+            if (/^impeccable(?:$|[-_])/.test(name)) {
+              rmSync(join(dir, name), { recursive: true, force: true });
+            }
+          }
+        } catch {
+          // best-effort
+        }
+      }
+      return { ok: true, summary: "Removed Impeccable skill pack from host skill directories." };
+    }
+    // factory-skills-pack
+    materializeVaultSkillsFromRuntime(deps.home, action === "update", deps.userHome);
+    const linked = ensureProviderSkillSymlinks(userHome);
+    const pack = inspectFactorySkillPack(userHome);
+    return {
+      ok: true,
+      summary: `Synchronized Factory Core Skill Pack (${pack.totalSkills} skill(s) in ~/.agents/skills, ${linked.linked.length} new symlink(s)).`,
+    };
+  };
+
   const handlers = {
     async executionSetMode(input: { mode: "slp" | "scrum"; projectRoot?: string }, context?: SurfaceCallContext) {
       try {
@@ -2026,6 +2129,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           execution,
           tasks: enrichTaskPeerAgents(view.tasks, rawAgents),
           machineLanes: machineLanes.lanes,
+          companionTools: buildCompanionToolsView(),
           ...laneProfilesGather(enrichedProject?.slug, view.lanes),
         },
       };
@@ -2903,12 +3007,18 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     // ---- the companion plugin lifecycle (v0.0.17, ADR 0012 §3) -----------------------------
 
     async pluginsInstall(
-      input: { target: ManageablePluginId | "all"; source?: string; ref?: string },
+      input: { target: ManageablePluginId | "all"; source?: string; ref?: string; includeTools?: boolean },
       _context?: SurfaceCallContext,
     ): Promise<{ ok: true; installed: string[]; summary: string } | { ok: false; code: string; error: string }> {
       // A custom source or ref names ONE plugin — it cannot ride a batch.
       if (input.target === "all" && (input.source !== undefined || input.ref !== undefined)) {
         return failure("invalid-target", 'a custom source or ref targets one companion — pass a named target, not "all"');
+      }
+      if (MANAGEABLE_TOOL_IDS.has(input.target)) {
+        const res = executeCompanionToolAction(input.target as "impeccable" | "factory-skills-pack", "install");
+        if (!res.ok) return failure("daemon_failed", res.reason);
+        log(`plugins: ${res.summary}`);
+        return { ok: true as const, installed: [input.target], summary: res.summary };
       }
       let targets: readonly (CompanionCatalogEntry | typeof CORE_PLUGIN_ENTRY)[];
       if (input.target === "all") {
@@ -2961,6 +3071,16 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         installed.push(entry.id);
         log(`plugins: installed ${entry.id} from ${source}${input.ref === undefined ? "" : ` at ref ${input.ref}`}`);
       }
+      if (input.target === "all" && input.includeTools === true) {
+        for (const tool of buildCompanionToolsView()) {
+          if (tool.access === "public" && (tool.status === "not_installed" || tool.status === "failed")) {
+            const res = executeCompanionToolAction(tool.id as "impeccable" | "factory-skills-pack", "install");
+            if (!res.ok) return failure("daemon_failed", res.reason);
+            installed.push(tool.id);
+            log(`plugins: ${res.summary}`);
+          }
+        }
+      }
       return {
         ok: true as const,
         installed,
@@ -2969,9 +3089,15 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     },
 
     async pluginsManage(
-      input: { pluginId: ManageablePluginId | "all"; action: DaemonPluginAction },
+      input: { pluginId: ManageablePluginId | "all"; action: DaemonPluginAction; includeTools?: boolean },
       _context?: SurfaceCallContext,
     ): Promise<{ ok: true; pluginId: string; action: string; summary: string } | { ok: false; code: string; error: string }> {
+      if (MANAGEABLE_TOOL_IDS.has(input.pluginId)) {
+        const res = executeCompanionToolAction(input.pluginId as "impeccable" | "factory-skills-pack", input.action);
+        if (!res.ok) return failure("daemon_failed", res.reason);
+        log(`plugins: ${res.summary}`);
+        return { ok: true as const, pluginId: input.pluginId, action: input.action, summary: res.summary };
+      }
       const manager = deps.managePlugin ?? manageDaemonPlugin;
       if (input.pluginId === "all") {
         if (input.action !== "update") {
@@ -2992,14 +3118,23 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
             : remoteInstalled.filter((p) => updateSnap.statuses.get(p.id)?.updateAvailable === true)
         ).sort((a, b) => (a.id === CORE_PLUGIN_ENTRY.id ? 1 : b.id === CORE_PLUGIN_ENTRY.id ? -1 : 0));
         localUpdateSnapshot = null;
-        if (targets.length === 0) {
-          return { ok: true as const, pluginId: "all", action: "update", summary: "All installed Factory plugins are already up to date." };
-        }
         const summaries: string[] = [];
         for (const target of targets) {
           const reply = await manager(deps.home, target.id, "update");
           if (!reply.ok) return failure("daemon_failed", reply.reason);
           summaries.push(pluginsManageSummary(target.id, "update", reply.update));
+        }
+        if (input.includeTools === true) {
+          for (const tool of buildCompanionToolsView()) {
+            if (tool.updateAvailable === true) {
+              const res = executeCompanionToolAction(tool.id as "impeccable" | "factory-skills-pack", "update");
+              if (!res.ok) return failure("daemon_failed", res.reason);
+              summaries.push(res.summary);
+            }
+          }
+        }
+        if (summaries.length === 0) {
+          return { ok: true as const, pluginId: "all", action: "update", summary: "All installed Factory plugins are already up to date." };
         }
         const summary = summaries.join(" · ");
         log(`plugins: ${summary}`);

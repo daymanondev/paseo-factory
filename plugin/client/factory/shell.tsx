@@ -709,7 +709,12 @@ export function FactoryShell({
                     });
                   };
                   try {
-                    const reply = await pluginsInstallCall({ target, source, ref });
+                    const reply = await pluginsInstallCall({
+                      target,
+                      source,
+                      ref,
+                      ...(target === "all" ? { includeTools: true } : {}),
+                    });
                     if (reply.ok) {
                       setPluginsNote({ text: reply.summary, tone: "statusSuccess", pluginId: target });
                     } else {
@@ -787,7 +792,11 @@ export function FactoryShell({
                   };
 
                   try {
-                    const reply = await pluginsManageCall({ pluginId, action });
+                    const reply = await pluginsManageCall({
+                      pluginId,
+                      action,
+                      ...(pluginId === "all" ? { includeTools: true } : {}),
+                    });
                     if (!reply.ok) {
                       if (isCoreSelfRestartError({ target: pluginId, action, errorMessage: reply.error, coreTargeted })) {
                         enterCoreRestart();

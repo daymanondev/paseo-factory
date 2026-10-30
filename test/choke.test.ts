@@ -1178,3 +1178,121 @@ test("v0.0.58 reset scrubs refusal sources permanently while preserving other Pr
   startGitBlockIngestion(restarted).stop();
   assert.deepEqual(restarted.ledger.events.filter(event => event.event === "git_blocked").map(event => event.blockId), ["neighbor"]);
 });
+
+test("Copilot/ACP apply_patch edit asks extract target file paths instead of judging the literal 'apply_patch' tool title", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const workspace = join(dir, "ws");
+  const worktree = join(dir, "state", "projects", "goal-planner", "worktrees", "arch-spec");
+  mkdirSync(workspace, { recursive: true });
+  mkdirSync(worktree, { recursive: true });
+  writeFileSync(join(workspace, "README.md"), "init\n");
+  gitCommitAll(workspace);
+
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  factory.setContract({
+    task: "arch-spec",
+    workspace,
+    gate: "true",
+    artifact: ".scratch/init/architecture.md",
+    scope: [".scratch/init/architecture.md", ".scratch/init/decisions/arch-spec.jsonl"],
+    execution: {
+      mode: "scrum",
+      contractRequestId: "req-arch-1",
+      runId: "run-1",
+      role: "architect",
+      policyRevision: "0032-r2",
+      configRevision: 1,
+      artifactRefs: [],
+    },
+  });
+  factory.requestSpawn({ task: "arch-spec", provider: "copilot/gpt-6-sol:high", arity: 1, worktree });
+
+  const choke = createChoke({ factory, homeDir: dir });
+
+  // 1) In-scope architecture.md via apply_patch (where detail.filePath fell back to "apply_patch")
+  let allowedBehavior: string | undefined;
+  await choke.onPermissionAsked(
+    {
+      agent: { id: "agent-arch", cwd: worktree, provider: "copilot" },
+      request: {
+        id: "req-allow",
+        provider: "copilot",
+        name: "edit",
+        title: "apply_patch",
+        kind: "tool",
+        detail: {
+          type: "edit",
+          filePath: "apply_patch",
+        },
+        metadata: {
+          toolCallId: "custom_call_1",
+          rawRequest: {
+            toolCall: {
+              toolCallId: "custom_call_1",
+              title: "apply_patch",
+              kind: "edit",
+              rawInput: "*** Begin Patch\n*** Add File: .scratch/init/architecture.md\n+# Architecture\n",
+            },
+          },
+        },
+      },
+    },
+    {
+      agents: {
+        ref: () => ({
+          respondToPermission: async ({ response }) => {
+            allowedBehavior = response.behavior;
+          },
+        }),
+      },
+    },
+  );
+  assert.equal(allowedBehavior, "allow");
+
+  // 2) Out-of-scope product source edit via apply_patch denies with policy:scrum-artifact-only
+  let deniedBehavior: string | undefined;
+  await choke.onPermissionAsked(
+    {
+      agent: { id: "agent-arch", cwd: worktree, provider: "copilot" },
+      request: {
+        id: "req-deny",
+        provider: "copilot",
+        name: "edit",
+        title: "apply_patch",
+        kind: "tool",
+        detail: {
+          type: "edit",
+          filePath: "apply_patch",
+        },
+        metadata: {
+          toolCallId: "custom_call_2",
+          rawRequest: {
+            toolCall: {
+              toolCallId: "custom_call_2",
+              title: "apply_patch",
+              kind: "edit",
+              rawInput: "*** Begin Patch\n*** Add File: .scratch/init/architecture.md\n+# Architecture\n*** Add File: src/index.ts\n+export const x = 1;\n",
+            },
+          },
+        },
+      },
+    },
+    {
+      agents: {
+        ref: () => ({
+          respondToPermission: async ({ response }) => {
+            deniedBehavior = response.behavior;
+          },
+        }),
+      },
+    },
+  );
+  assert.equal(deniedBehavior, "deny");
+  const lastEvent = factory.ledger.events.at(-1);
+  assert.equal(lastEvent?.event, "permit_denied");
+  if (lastEvent?.event === "permit_denied") {
+    assert.equal(lastEvent.rule, "policy:scrum-artifact-only");
+    assert.equal(lastEvent.command, "src/index.ts");
+  }
+});

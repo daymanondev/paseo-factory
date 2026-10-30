@@ -1,8 +1,377 @@
-import { existsSync, mkdirSync, readdirSync, symlinkSync, rmSync, writeFileSync, lstatSync, readFileSync, copyFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, readdirSync, symlinkSync, rmSync, writeFileSync, lstatSync, readFileSync, copyFileSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { FactoryError } from '../errors.ts';
+
+export const IMPECCABLE_MIN_VERSION = '4.8.0';
+
+export const CORE_FACTORY_SKILLS = [
+  'tdd',
+  'diagnosing-bugs',
+  'codebase-design',
+  'frontend-design',
+  'web-design-guidelines',
+  'code-review',
+  'grilling',
+  'domain-modeling',
+  'grill-with-docs',
+  'factory',
+] as const;
+
+export type CompanionToolRunner = (
+  command: string,
+  args: string[],
+  options: { cwd: string; env: NodeJS.ProcessEnv },
+) => { status: number; stdout: string; stderr: string };
+
+/** Compares two `major.minor.patch` semantic version strings (`-1`, `0`, `1`). */
+export function compareSemver(a: string, b: string): number {
+  const parse = (v: string): [number, number, number] => {
+    const clean = v.trim().replace(/^v/i, '').split('-')[0] ?? '';
+    const parts = clean.split('.').map((p) => Number.parseInt(p, 10));
+    return [
+      Number.isFinite(parts[0]) ? parts[0]! : 0,
+      Number.isFinite(parts[1]) ? parts[1]! : 0,
+      Number.isFinite(parts[2]) ? parts[2]! : 0,
+    ];
+  };
+  const [aMaj, aMin, aPat] = parse(a);
+  const [bMaj, bMin, bPat] = parse(b);
+  if (aMaj !== bMaj) return aMaj > bMaj ? 1 : -1;
+  if (aMin !== bMin) return aMin > bMin ? 1 : -1;
+  if (aPat !== bPat) return aPat > bPat ? 1 : -1;
+  return 0;
+}
+
+export interface ImpeccableInspection {
+  status: 'installed' | 'outdated' | 'not_installed';
+  version: string | null;
+  minVersion: string;
+  path: string | null;
+  binaryPath: string | null;
+  skillCount: number;
+}
+
+/**
+ * Inspects whether upstream `pbakaus/impeccable` (`>= 4.8.0`) is installed under
+ * `<userHome>/.agents/skills/impeccable` (or fallback provider skill directories),
+ * verifying `SKILL.md`, executable `scripts/impeccable`, and `scripts/VERSION`.
+ */
+export function inspectImpeccableTool(userHome = homedir()): ImpeccableInspection {
+  const providers = ['.agents', '.claude', '.gemini', '.pi', '.codex', '.opencode'];
+  let mainDir: string | null = null;
+  const skillNames = new Set<string>();
+  for (const provider of providers) {
+    const dir = join(userHome, provider, 'skills');
+    if (!existsSync(dir)) continue;
+    try {
+      for (const name of readdirSync(dir)) {
+        if (/^impeccable(?:$|[-_])/.test(name) && existsSync(join(dir, name, 'SKILL.md'))) {
+          skillNames.add(name);
+          if (name === 'impeccable' && mainDir === null) {
+            mainDir = join(dir, name);
+          }
+        }
+      }
+    } catch {
+      // ignore unreadable provider dir
+    }
+  }
+  if (mainDir === null) {
+    return {
+      status: 'not_installed',
+      version: null,
+      minVersion: IMPECCABLE_MIN_VERSION,
+      path: null,
+      binaryPath: null,
+      skillCount: skillNames.size,
+    };
+  }
+  const binaryCandidate = join(mainDir, 'scripts', 'impeccable');
+  const hasBinary = existsSync(binaryCandidate);
+  const versionPath = join(mainDir, 'scripts', 'VERSION');
+  let version: string | null = null;
+  if (existsSync(versionPath)) {
+    try {
+      const raw = readFileSync(versionPath, 'utf8').trim();
+      if (raw !== '') version = raw;
+    } catch {
+      version = null;
+    }
+  }
+  if (version === null && hasBinary) {
+    version = IMPECCABLE_MIN_VERSION;
+  }
+  if (!hasBinary || version === null) {
+    return {
+      status: 'not_installed',
+      version,
+      minVersion: IMPECCABLE_MIN_VERSION,
+      path: mainDir,
+      binaryPath: hasBinary ? binaryCandidate : null,
+      skillCount: skillNames.size,
+    };
+  }
+  const upToDate = compareSemver(version, IMPECCABLE_MIN_VERSION) >= 0;
+  return {
+    status: upToDate ? 'installed' : 'outdated',
+    version,
+    minVersion: IMPECCABLE_MIN_VERSION,
+    path: mainDir,
+    binaryPath: binaryCandidate,
+    skillCount: skillNames.size,
+  };
+}
+
+export interface FactorySkillPackInspection {
+  status: 'installed' | 'partial' | 'not_installed';
+  installedSkills: string[];
+  missingCoreSkills: string[];
+  totalSkills: number;
+  path: string;
+}
+
+/**
+ * Inspects `<userHome>/.agents/skills` for the core Factory skill pack
+ * (`tdd`, `diagnosing-bugs`, `codebase-design`, `frontend-design`, etc.).
+ */
+export function inspectFactorySkillPack(userHome = homedir()): FactorySkillPackInspection {
+  const skillsDir = join(userHome, '.agents', 'skills');
+  if (!existsSync(skillsDir)) {
+    return {
+      status: 'not_installed',
+      installedSkills: [],
+      missingCoreSkills: [...CORE_FACTORY_SKILLS],
+      totalSkills: 0,
+      path: skillsDir,
+    };
+  }
+  const installedSkills: string[] = [];
+  try {
+    for (const name of readdirSync(skillsDir)) {
+      if (name.startsWith('.') || /^impeccable(?:$|[-_])/.test(name)) continue;
+      if (existsSync(join(skillsDir, name, 'SKILL.md'))) {
+        installedSkills.push(name);
+      }
+    }
+  } catch {
+    // ignore unreadable directory
+  }
+  installedSkills.sort();
+  const presentSet = new Set(installedSkills);
+  const missingCoreSkills = CORE_FACTORY_SKILLS.filter((s) => !presentSet.has(s));
+  const status =
+    installedSkills.length === 0
+      ? 'not_installed'
+      : missingCoreSkills.length === 0
+        ? 'installed'
+        : 'partial';
+  return {
+    status,
+    installedSkills,
+    missingCoreSkills,
+    totalSkills: installedSkills.length,
+    path: skillsDir,
+  };
+}
+
+/**
+ * Ensures every skill directory in `<userHome>/.agents/skills/*` is symlinked
+ * into `<userHome>/.pi/agent/skills/<name>`, `<userHome>/.claude/skills/<name>`,
+ * and `<userHome>/.gemini/config/skills/<name>` (unless `~/.gemini/config/skills`
+ * is already a directory symlink to `~/.agents/skills`).
+ */
+export function ensureProviderSkillSymlinks(userHome = homedir()): { linked: string[] } {
+  const agentsSkillsDir = join(userHome, '.agents', 'skills');
+  if (!existsSync(agentsSkillsDir)) return { linked: [] };
+  let skillNames: string[] = [];
+  try {
+    skillNames = readdirSync(agentsSkillsDir).filter((name) => {
+      if (name.startsWith('.')) return false;
+      const skillPath = join(agentsSkillsDir, name);
+      try {
+        return statSync(skillPath).isDirectory() && existsSync(join(skillPath, 'SKILL.md'));
+      } catch {
+        return false;
+      }
+    });
+  } catch {
+    return { linked: [] };
+  }
+  if (skillNames.length === 0) return { linked: [] };
+
+  const providerTargets = [
+    join(userHome, '.pi', 'agent', 'skills'),
+    join(userHome, '.claude', 'skills'),
+    join(userHome, '.gemini', 'config', 'skills'),
+  ];
+  const resolvedAgentsSkills = (() => {
+    try {
+      return resolve(agentsSkillsDir);
+    } catch {
+      return agentsSkillsDir;
+    }
+  })();
+
+  const linked: string[] = [];
+  for (const targetDir of providerTargets) {
+    try {
+      if (existsSync(targetDir)) {
+        const st = lstatSync(targetDir);
+        if (st.isSymbolicLink()) {
+          // If the whole provider skills dir already points to ~/.agents/skills, skip per-skill links.
+          try {
+            if (resolve(targetDir) === resolvedAgentsSkills) continue;
+          } catch {
+            // broken symlink — replace below
+          }
+        }
+      }
+      mkdirSync(targetDir, { recursive: true });
+      for (const name of skillNames) {
+        const dest = join(targetDir, name);
+        const src = join(agentsSkillsDir, name);
+        let existsValid = false;
+        try {
+          const lst = lstatSync(dest);
+          if (lst.isSymbolicLink()) {
+            existsValid = existsSync(dest);
+            if (!existsValid) rmSync(dest, { force: true });
+          } else {
+            existsValid = true;
+          }
+        } catch {
+          existsValid = false;
+        }
+        if (!existsValid) {
+          mkdirSync(dirname(dest), { recursive: true });
+          symlinkSync(src, dest, 'dir');
+          linked.push(dest);
+        }
+      }
+    } catch {
+      // best-effort per provider dir
+    }
+  }
+  return { linked };
+}
+
+function buildToolInstallEnv(userHome: string): NodeJS.ProcessEnv {
+  const pathParts = [
+    process.env.PATH ?? '',
+    join(userHome, '.local', 'bin'),
+    '/opt/homebrew/bin',
+    '/usr/local/bin',
+    '/usr/bin',
+    '/bin',
+  ].filter(Boolean);
+  return {
+    ...process.env,
+    HOME: userHome,
+    PATH: [...new Set(pathParts.join(':').split(':').filter(Boolean))].join(':'),
+  };
+}
+
+function defaultCompanionToolRunner(
+  command: string,
+  args: string[],
+  options: { cwd: string; env: NodeJS.ProcessEnv },
+): { status: number; stdout: string; stderr: string } {
+  const res = spawnSync(command, args, {
+    cwd: options.cwd,
+    env: options.env,
+    encoding: 'utf8',
+    timeout: 120_000,
+    maxBuffer: 8 * 1024 * 1024,
+  });
+  return {
+    status: res.status ?? (res.error ? 1 : 0),
+    stdout: res.stdout ?? '',
+    stderr: [res.stderr ?? '', res.error?.message ?? ''].filter(Boolean).join('\n'),
+  };
+}
+
+/**
+ * Installs or updates upstream `pbakaus/impeccable` (`>= 4.8.0`) into `<userHome>/.agents/skills/impeccable`
+ * via `npx --yes impeccable@latest install --scope=global` and reconciles provider skill symlinks.
+ */
+export function installOrUpdateImpeccableTool(options?: {
+  userHome?: string;
+  action?: 'install' | 'update';
+  runner?: CompanionToolRunner;
+}): { ok: true; version: string; path: string; summary: string } | { ok: false; reason: string } {
+  const userHome = options?.userHome ?? homedir();
+  const action = options?.action ?? 'install';
+  const runner = options?.runner ?? defaultCompanionToolRunner;
+  mkdirSync(userHome, { recursive: true });
+  const env = buildToolInstallEnv(userHome);
+  const args = [
+    '--yes',
+    'impeccable@latest',
+    'install',
+    '--yes',
+    '--global',
+    '--no-hooks',
+    '--force',
+    '--providers=codex,claude,gemini,opencode,pi',
+  ];
+  const result = runner('npx', args, { cwd: userHome, env });
+  ensureProviderSkillSymlinks(userHome);
+  const after = inspectImpeccableTool(userHome);
+  if (result.status !== 0 || after.status !== 'installed' || after.path === null) {
+    const detail = [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join(' — ') || `exit ${result.status}`;
+    return {
+      ok: false,
+      reason: `impeccable ${action} failed (${detail})`,
+    };
+  }
+  const verb = action === 'update' ? 'Updated' : 'Installed';
+  return {
+    ok: true,
+    version: after.version ?? IMPECCABLE_MIN_VERSION,
+    path: after.path,
+    summary: `${verb} Impeccable v${after.version ?? IMPECCABLE_MIN_VERSION} (${after.skillCount} skill${after.skillCount === 1 ? '' : 's'}) and linked provider skills.`,
+  };
+}
+
 /** Discover whole upstream directories; keep references, scripts and engine together. */
-export function provisionImpeccable(roleHome: string, userHome: string, sourceCodexHome = join(userHome, '.codex')): string[] {
+export function provisionImpeccable(
+  roleHome: string,
+  userHome: string,
+  sourceCodexHome = join(userHome, '.codex'),
+  options?: { autoInstall?: boolean; requireInstalled?: boolean; runner?: CompanionToolRunner },
+): string[] {
+  const shouldAutoInstall =
+    options?.autoInstall === true ||
+    (options?.autoInstall !== false && userHome === homedir() && !process.env.NODE_TEST_CONTEXT);
+  if (shouldAutoInstall) {
+    ensureProviderSkillSymlinks(userHome);
+    const inspected = inspectImpeccableTool(userHome);
+    if (inspected.status !== 'installed') {
+      const installed = installOrUpdateImpeccableTool({
+        userHome,
+        action: inspected.status === 'outdated' ? 'update' : 'install',
+        runner: options?.runner,
+      });
+      if (!installed.ok && options?.requireInstalled !== false) {
+        throw new FactoryError(
+          'tool-missing',
+          `Impeccable UI detector (>= ${IMPECCABLE_MIN_VERSION}) is required for Scrum UI roles and automatic provisioning failed: ${installed.reason}`,
+        );
+      }
+    }
+  } else if (options?.requireInstalled === true) {
+    const inspected = inspectImpeccableTool(userHome);
+    if (inspected.status !== 'installed') {
+      throw new FactoryError(
+        'tool-missing',
+        `Impeccable UI detector (>= ${IMPECCABLE_MIN_VERSION}) is missing under ${userHome}/.agents/skills/impeccable`,
+      );
+    }
+  }
+
   const skills = new Map<string, string>();
   for (const provider of ['.agents', '.claude', '.gemini', '.pi', '.codex', '.opencode']) {
     const dir = join(userHome, provider, 'skills');

@@ -1939,3 +1939,55 @@ test("v0.0.38 (ADR 0026 §4): Lane profiles and per-Project lanes.json round-tri
     "overwriteConfigs materializes the vault copy over the local override",
   );
 });
+
+test("ADR 0036: collectLocalStateIntoRuntime collects ~/.agents/skills (excluding impeccable*) into config/skills/ and applyVaultHydration materializes and symlinks them across machines", (t) => {
+  const machineA = makeTempDir("vault-skills-a-");
+  const machineB = makeTempDir("vault-skills-b-");
+  disposeDir(t, machineA);
+  disposeDir(t, machineB);
+
+  const homeA = join(machineA, ".paseo");
+  const homeB = join(machineB, ".paseo");
+  mkdirSync(homeA, { recursive: true });
+  mkdirSync(homeB, { recursive: true });
+
+  // Machine A has pure-Markdown skills + binary impeccable in ~/.agents/skills
+  mkdirSync(join(machineA, ".agents/skills/tdd/references"), { recursive: true });
+  writeFileSync(join(machineA, ".agents/skills/tdd/SKILL.md"), "# TDD Skill\n");
+  writeFileSync(join(machineA, ".agents/skills/tdd/references/guide.md"), "Red-Green-Refactor\n");
+
+  mkdirSync(join(machineA, ".agents/skills/impeccable/scripts"), { recursive: true });
+  writeFileSync(join(machineA, ".agents/skills/impeccable/SKILL.md"), "# Impeccable\n");
+  writeFileSync(join(machineA, ".agents/skills/impeccable/scripts/VERSION"), "4.8.0\n");
+  writeFileSync(join(machineA, ".agents/skills/impeccable/scripts/impeccable"), "binary");
+
+  collectLocalStateIntoRuntime(homeA);
+
+  // Verify tdd was collected into config/skills/tdd/, impeccable was excluded from config/skills/, and companion-tools.json recorded version 4.8.0
+  assert.equal(
+    readFileSync(join(homeA, "vault-runtime/config/skills/tdd/SKILL.md"), "utf8"),
+    "# TDD Skill\n",
+  );
+  assert.equal(
+    readFileSync(join(homeA, "vault-runtime/config/skills/tdd/references/guide.md"), "utf8"),
+    "Red-Green-Refactor\n",
+  );
+  assert.equal(existsSync(join(homeA, "vault-runtime/config/skills/impeccable")), false, "OS-specific impeccable binary directory is never staged into vault config/skills");
+  const companionManifest = JSON.parse(readFileSync(join(homeA, "vault-runtime/config/companion-tools.json"), "utf8"));
+  assert.equal(companionManifest.impeccable.minVersion, "4.8.0");
+  assert.equal(companionManifest.impeccable.installedVersion, "4.8.0");
+  assert.deepEqual(companionManifest.skills, ["tdd"]);
+
+  // Simulate copying vault-runtime/config/skills from Machine A to Machine B and hydrating
+  mkdirSync(join(homeB, "vault-runtime/config/skills/tdd/references"), { recursive: true });
+  writeFileSync(join(homeB, "vault-runtime/config/skills/tdd/SKILL.md"), "# TDD Skill\n");
+  writeFileSync(join(homeB, "vault-runtime/config/skills/tdd/references/guide.md"), "Red-Green-Refactor\n");
+
+  applyVaultHydration(homeB);
+
+  // Machine B now has ~/.agents/skills/tdd and symlinks in .pi/agent/skills, .claude/skills, .gemini/config/skills
+  assert.equal(readFileSync(join(machineB, ".agents/skills/tdd/SKILL.md"), "utf8"), "# TDD Skill\n");
+  assert.equal(readFileSync(join(machineB, ".pi/agent/skills/tdd/SKILL.md"), "utf8"), "# TDD Skill\n");
+  assert.equal(readFileSync(join(machineB, ".claude/skills/tdd/SKILL.md"), "utf8"), "# TDD Skill\n");
+  assert.equal(readFileSync(join(machineB, ".gemini/config/skills/tdd/SKILL.md"), "utf8"), "# TDD Skill\n");
+});

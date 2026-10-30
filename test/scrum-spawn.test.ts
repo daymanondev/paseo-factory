@@ -946,3 +946,69 @@ test('Scrum harness links the full upstream UI skill pack and edit scanner only 
     assert.equal(existsSync(join(roleHome,'skills/impeccable')), false);
   }
 });
+
+test('ADR 0036: inspectImpeccableTool, ensureProviderSkillSymlinks, and pre-spawn self-healing in provisionImpeccable', async (t) => {
+  const { mkdirSync, existsSync, lstatSync, chmodSync } = await import('node:fs');
+  const {
+    inspectImpeccableTool,
+    inspectFactorySkillPack,
+    ensureProviderSkillSymlinks,
+    provisionImpeccable,
+    CORE_FACTORY_SKILLS,
+  } = await import('../src/scrum/impeccable.ts');
+
+  const home = makeTempDir();
+  const roleHome = makeTempDir();
+  for (const d of [home, roleHome]) disposeDir(t, d);
+
+  // 1. Initially not_installed
+  assert.equal(inspectImpeccableTool(home).status, 'not_installed');
+  assert.equal(inspectFactorySkillPack(home).status, 'not_installed');
+
+  // 2. Seed core skills in ~/.agents/skills and verify ensureProviderSkillSymlinks links them to .pi/agent/skills, .claude/skills, .gemini/config/skills
+  for (const s of CORE_FACTORY_SKILLS) {
+    mkdirSync(join(home, '.agents/skills', s), { recursive: true });
+    writeFileSync(join(home, '.agents/skills', s, 'SKILL.md'), `# ${s}\n`);
+  }
+  const pack = inspectFactorySkillPack(home);
+  assert.equal(pack.status, 'installed');
+  assert.equal(pack.totalSkills, CORE_FACTORY_SKILLS.length);
+  const linked = ensureProviderSkillSymlinks(home);
+  assert.ok(linked.linked.length >= CORE_FACTORY_SKILLS.length * 3);
+  for (const s of CORE_FACTORY_SKILLS) {
+    assert.ok(lstatSync(join(home, '.pi/agent/skills', s)).isSymbolicLink());
+    assert.ok(lstatSync(join(home, '.claude/skills', s)).isSymbolicLink());
+    assert.ok(lstatSync(join(home, '.gemini/config/skills', s)).isSymbolicLink());
+  }
+
+  // 3. When autoInstall is true and runner fails, provisionImpeccable throws tool-missing
+  assert.throws(
+    () =>
+      provisionImpeccable(roleHome, home, join(home, '.codex'), {
+        autoInstall: true,
+        requireInstalled: true,
+        runner: () => ({ status: 1, stdout: '', stderr: 'registry offline' }),
+      }),
+    /Impeccable UI detector.*registry offline/,
+  );
+
+  // 4. When autoInstall is true and runner installs impeccable v4.8.0 into ~/.agents/skills/impeccable, provisionImpeccable self-heals and links skills
+  const provisioned = provisionImpeccable(roleHome, home, join(home, '.codex'), {
+    autoInstall: true,
+    requireInstalled: true,
+    runner: () => {
+      const impDir = join(home, '.agents/skills/impeccable');
+      mkdirSync(join(impDir, 'scripts'), { recursive: true });
+      writeFileSync(join(impDir, 'SKILL.md'), '# Impeccable\n');
+      writeFileSync(join(impDir, 'scripts/VERSION'), '4.8.0\n');
+      writeFileSync(join(impDir, 'scripts/impeccable'), '#!/bin/sh\necho ok\n');
+      chmodSync(join(impDir, 'scripts/impeccable'), 0o755);
+      return { status: 0, stdout: 'installed 4.8.0', stderr: '' };
+    },
+  });
+  assert.ok(provisioned.includes('impeccable'));
+  assert.equal(inspectImpeccableTool(home).status, 'installed');
+  assert.equal(inspectImpeccableTool(home).version, '4.8.0');
+  assert.equal(existsSync(join(roleHome, 'skills/impeccable/SKILL.md')), true);
+  assert.ok(lstatSync(join(home, '.pi/agent/skills/impeccable')).isSymbolicLink());
+});

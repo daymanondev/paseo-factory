@@ -543,10 +543,14 @@ export function PluginsPane({
   dismissCardError?: (pluginId: string) => void;
 }) {
   const running = view.companions.filter((c) => c.status === "running").length;
-  // Public companions only — a private invite-only companion (factory-release-lab) that stays
-  // not_installed must never keep the Install All button lit (v0.0.30, ADR 0012 §2).
-  const anyUninstalled = view.companions.some((c) => c.access === "public" && c.status === "not_installed");
-  const allPlugins = [view.corePlugin, ...view.companions];
+  const companionTools = view.companionTools ?? [];
+  const toolsRunning = companionTools.filter((t) => t.status === "running").length;
+  // Public companions & companion tools — a private invite-only companion (factory-release-lab) that stays
+  // not_installed must never keep the Install All button lit (v0.0.30, ADR 0012 §2; ADR 0036 §5).
+  const anyUninstalled =
+    view.companions.some((c) => c.access === "public" && c.status === "not_installed") ||
+    companionTools.some((t) => t.access === "public" && (t.status === "not_installed" || t.status === "failed"));
+  const allPlugins = [view.corePlugin, ...view.companions, ...companionTools];
   const updatableCount = allPlugins.filter(
     (p) => p.status !== "not_installed" && (p.installKind === "git" || p.installKind === "npm") && p.updateAvailable === true,
   ).length;
@@ -648,6 +652,31 @@ export function PluginsPane({
           onDismissError={dismissCardError ? () => dismissCardError(companion.id) : undefined}
         />
       ))}
+      {companionTools.length > 0 ? (
+        <View style={{ gap: SPACING[2], marginTop: SPACING[1] }}>
+          <Card theme={theme} gap={SPACING[1]}>
+            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: SPACING[1.5] }}>
+              <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5] }}>
+                <Text style={text(theme, "section")}>Companion Tools & Skill Packs</Text>
+                <Pill theme={theme} label={`${toolsRunning} of ${companionTools.length} active on host`} tone={toolsRunning === companionTools.length ? "statusSuccess" : "statusWarning"} />
+                <Pill theme={theme} label="Auto-provisioned & Vault-synced" tone="foregroundMuted" />
+              </View>
+            </View>
+          </Card>
+          {companionTools.map((tool) => (
+            <CompanionCard
+              key={tool.id}
+              theme={theme}
+              companion={tool}
+              actions={actions}
+              activeAct={activeAct}
+              elapsedSeconds={elapsedSeconds}
+              cardError={cardErrors[tool.id]}
+              onDismissError={dismissCardError ? () => dismissCardError(tool.id) : undefined}
+            />
+          ))}
+        </View>
+      ) : null}
     </View>
   );
 }

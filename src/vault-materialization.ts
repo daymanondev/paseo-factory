@@ -1,4 +1,5 @@
 import { collectScrumVault, collectProjectScrumVault, materializeScrumVault, materializeProjectScrumVault } from "./scrum/vault.ts";
+import { ensureProviderSkillSymlinks, IMPECCABLE_MIN_VERSION, inspectImpeccableTool } from "./scrum/impeccable.ts";
 import { FactoryError } from "./errors.ts";
 import { mergeLaneProfilesFiles, projectLanesPath, readLaneProfilesFile } from "./lanes.ts";
 import type { LaneProfile, LaneProfilesFile } from "./lanes.ts";
@@ -9,7 +10,7 @@ import { unsealVaultBuffer, resolveVaultPassphrase } from "./vault-envelope.ts";
 import { expandImportPath } from "./vault-secrets.ts";
 import { buildVaultPath } from "./vault-transport.ts";
 import { execFileSync } from "node:child_process";
-import { readFileSync, mkdirSync, chmodSync, writeFileSync, readdirSync, existsSync, copyFileSync } from "node:fs";
+import { readFileSync, mkdirSync, chmodSync, writeFileSync, readdirSync, existsSync, copyFileSync, statSync } from "node:fs";
 import { join, basename, isAbsolute, resolve as resolvePath, dirname } from "node:path";
 
 /** Hydrates `<paseoHome>/vault-runtime/` from a vault tree on disk (the sync-mode checkout). */
@@ -423,9 +424,143 @@ export function renderKeystoreProperties(signing: Record<string, unknown> | null
  *   manifest's routing legs (v0.0.38, ADR 0026 §4) — the canonical key routes the override
  *   back to the same repository on another machine, whose local slug differs.
  */
-export function collectLocalStateIntoRuntime(paseoHome: string): void {
+export function resolveVaultUserHome(paseoHome: string, explicitUserHome?: string): string {
+  if (explicitUserHome !== undefined && explicitUserHome.trim() !== "") {
+    return resolvePath(explicitUserHome);
+  }
+  const resolved = resolvePath(paseoHome);
+  if (basename(resolved).startsWith(".paseo")) {
+    return dirname(resolved);
+  }
+  return resolved;
+}
+
+/**
+ * Collects pure-Markdown host skills from `<userHome>/.agents/skills/<skillName>/...`
+ * (skipping `impeccable*` which carries OS/CPU binaries, `.git`, `node_modules`, and files > 512 KB)
+ * into `<paseoHome>/vault-runtime/config/skills/<skillName>/...` and records
+ * `config/companion-tools.json` (ADR 0036 §3).
+ */
+export function collectVaultSkillsIntoRuntime(paseoHome: string, explicitUserHome?: string): string[] {
+  const userHome = resolveVaultUserHome(paseoHome, explicitUserHome);
+  const agentsSkillsDir = join(userHome, ".agents", "skills");
+  if (!existsSync(agentsSkillsDir)) return [];
+
+  const collectedSkills: string[] = [];
+  const visitSkillTree = (skillDir: string, skillName: string, relDir: string): void => {
+    let entries;
+    try {
+      entries = readdirSync(skillDir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.name === ".git" || entry.name === "node_modules" || entry.name === ".DS_Store" || entry.name === "__pycache__" || entry.name === ".venv") {
+        continue;
+      }
+      const fullPath = join(skillDir, entry.name);
+      const childRel = relDir === "" ? entry.name : `${relDir}/${entry.name}`;
+      let st;
+      try {
+        st = statSync(fullPath);
+      } catch {
+        continue;
+      }
+      if (st.isDirectory()) {
+        visitSkillTree(fullPath, skillName, childRel);
+      } else if (st.isFile() && st.size <= 512 * 1024) {
+        writeRuntimeFile(paseoHome, `config/skills/${skillName}/${childRel}`, readFileSync(fullPath));
+      }
+    }
+  };
+
+  let skillEntries: string[] = [];
+  try {
+    skillEntries = readdirSync(agentsSkillsDir).sort();
+  } catch {
+    return [];
+  }
+  for (const name of skillEntries) {
+    if (name.startsWith(".") || /^impeccable(?:$|[-_])/i.test(name)) continue;
+    const skillDir = join(agentsSkillsDir, name);
+    try {
+      if (!statSync(skillDir).isDirectory()) continue;
+      if (!existsSync(join(skillDir, "SKILL.md"))) continue;
+    } catch {
+      continue;
+    }
+    visitSkillTree(skillDir, name, "");
+    collectedSkills.push(name);
+  }
+
+  if (collectedSkills.length > 0) {
+    const impeccable = inspectImpeccableTool(userHome);
+    const companionManifest = {
+      schemaVersion: 1,
+      impeccable: {
+        minVersion: IMPECCABLE_MIN_VERSION,
+        installedVersion: impeccable.version,
+      },
+      skills: collectedSkills,
+    };
+    writeRuntimeFile(
+      paseoHome,
+      "config/companion-tools.json",
+      Buffer.from(`${JSON.stringify(companionManifest, null, 2)}\n`, "utf8"),
+    );
+  }
+  return collectedSkills;
+}
+
+/**
+ * Materializes `<paseoHome>/vault-runtime/config/skills/<skillName>/...` into
+ * `<userHome>/.agents/skills/<skillName>/...` and reconciles provider skill
+ * symlinks (`~/.pi/agent/skills`, `~/.claude/skills`, `~/.gemini/config/skills`) (ADR 0036 §2–§3).
+ */
+export function materializeVaultSkillsFromRuntime(
+  paseoHome: string,
+  overwriteConfigs = false,
+  explicitUserHome?: string,
+): string[] {
+  const userHome = resolveVaultUserHome(paseoHome, explicitUserHome);
+  const runtimeSkillsDir = join(paseoHome, "vault-runtime", "config", "skills");
+  if (!existsSync(runtimeSkillsDir)) return [];
+
+  const agentsSkillsDir = join(userHome, ".agents", "skills");
+  const materializedSkills: string[] = [];
+  let skillNames: string[] = [];
+  try {
+    skillNames = readdirSync(runtimeSkillsDir).sort();
+  } catch {
+    return [];
+  }
+  for (const skillName of skillNames) {
+    if (skillName.startsWith(".") || /^impeccable(?:$|[-_])/i.test(skillName)) continue;
+    const srcSkillDir = join(runtimeSkillsDir, skillName);
+    try {
+      if (!statSync(srcSkillDir).isDirectory()) continue;
+    } catch {
+      continue;
+    }
+    for (const rel of walkFiles(srcSkillDir, () => false)) {
+      const src = join(srcSkillDir, rel);
+      const dest = join(agentsSkillsDir, skillName, rel);
+      if (!overwriteConfigs && existsSync(dest)) continue;
+      mkdirSync(dirname(dest), { recursive: true });
+      copyFileSync(src, dest);
+    }
+    materializedSkills.push(skillName);
+  }
+  if (materializedSkills.length > 0) {
+    ensureProviderSkillSymlinks(userHome);
+  }
+  return materializedSkills;
+}
+
+export function collectLocalStateIntoRuntime(paseoHome: string, options?: { userHome?: string }): void {
   const stateDir = vaultStateDir(paseoHome);
   collectScrumVault(stateDir, join(paseoHome, "vault-runtime/config"));
+  collectVaultSkillsIntoRuntime(paseoHome, options?.userHome);
   const configSources: ReadonlyArray<{ src: string; vaultRel: string }> = [
     { src: join(stateDir, "lanes.json"), vaultRel: "config/lanes.json" },
     { src: join(paseoHome, "burn-lab", "free-pool.json"), vaultRel: "config/free-pool.json" },
@@ -564,9 +699,14 @@ function readLaneProfilesCacheOrNull(path: string): LaneProfilesFile | null {
  * materializes into its resolved Project's `<projectStateDir>/lanes.json`
  * when absent locally (or when `overwriteConfigs === true`).
  */
-export function materializeConfigsFromRuntime(paseoHome: string, overwriteConfigs = false): void {
+export function materializeConfigsFromRuntime(
+  paseoHome: string,
+  overwriteConfigs = false,
+  options?: { userHome?: string },
+): void {
   const runtimeConfigDir = join(paseoHome, "vault-runtime", "config");
   materializeScrumVault(vaultStateDir(paseoHome), runtimeConfigDir, overwriteConfigs);
+  materializeVaultSkillsFromRuntime(paseoHome, overwriteConfigs, options?.userHome);
   const targets: ReadonlyArray<{ src: string; dest: string }> = [
     { src: join(runtimeConfigDir, "lanes.json"), dest: join(vaultStateDir(paseoHome), "lanes.json") },
     { src: join(runtimeConfigDir, "free-pool.json"), dest: join(paseoHome, "burn-lab", "free-pool.json") },
@@ -618,14 +758,18 @@ export function materializeConfigsFromRuntime(paseoHome: string, overwriteConfig
  * write the `<paseoHome>/vault-runtime/env.json` pointer index (`0o600`) —
  * the zero-shell-config hand-off `factory-release-lab` reads (ADR 0014 Decision 5).
  */
-export function applyVaultHydration(paseoHome: string, overwriteConfigs = false): void {
+export function applyVaultHydration(
+  paseoHome: string,
+  overwriteConfigs = false,
+  options?: { userHome?: string },
+): void {
   const manifest = readVaultManifestAt(join(paseoHome, "vault-runtime"));
   for (const app of resolveVaultApps(paseoHome, manifest)) {
     if (app.projectRoot === null) continue; // no local checkout behind this canonical key on this machine
     const written = materializeVaultAppFiles(paseoHome, app.canonicalAppKey, app.projectRoot);
     if (written.length > 0) ensureLocalGitExcludeAndWorktreeInclude(app.projectRoot, written);
   }
-  materializeConfigsFromRuntime(paseoHome, overwriteConfigs);
+  materializeConfigsFromRuntime(paseoHome, overwriteConfigs, options);
   writeVaultRuntimeEnv(paseoHome);
 }
 
