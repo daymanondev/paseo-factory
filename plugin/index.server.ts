@@ -32,7 +32,7 @@ import { createSurfaceHandlers, registerSurfaceRpc } from "./server/surface-rpc.
 import { createLeadMailRuntime } from "./server/lead-mailbox.ts";
 import { injectRoleOnCreate, injectSessionEnv, sanitizeAgentCreateHookResult } from "./server/roles.ts";
 
-const SHELL_VERSION = "0.0.60";
+const SHELL_VERSION = "0.0.61";
 
 const log = (message: string) => console.log(`[${PLUGIN_ID}] ${message}`);
 
@@ -420,6 +420,25 @@ export default function contribute(server: PluginServerContext) {
         projectRoot: next.cwd,
         ...(openingWorkspaceId !== undefined ? { keepWorkspaceIds: [openingWorkspaceId] } : {}),
       });
+    }
+    if (
+      withEnv !== undefined &&
+      request.reason === "resume" &&
+      request.purpose === "interactive" &&
+      typeof withEnv.env?.PASEO_FACTORY_PROJECT === "string" &&
+      withEnv.env.PASEO_FACTORY_PROJECT.trim() !== ""
+    ) {
+      const resumedSlug = withEnv.env.PASEO_FACTORY_PROJECT.trim();
+      const resumedSeat = withEnv.env.PASEO_FACTORY_SEAT;
+      if (resumedSeat === "lead" || resumedSeat === "supervisor") {
+        const resumePumpTimer = setTimeout(() => {
+          void (resumedSeat === "lead"
+            ? leadMail.pumpProjectLead(resumedSlug)
+            : leadMail.pumpProjectSupervisor(resumedSlug)
+          ).catch(() => {});
+        }, 150);
+        resumePumpTimer.unref?.();
+      }
     }
     return withEnv === undefined ? (next === request ? undefined : next) : withEnv;
   }));

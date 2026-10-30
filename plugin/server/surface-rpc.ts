@@ -133,6 +133,11 @@ export interface SurfaceAgentSnapshot {
    * reports none.
    */
   workspaceId?: string | null;
+  /**
+   * Timestamp of the last user message delivered to this session (`null` when
+   * no turn has ever been sent to this seat yet, ADR 0031).
+   */
+  lastUserMessageAt?: string | null;
 }
 
 /** One provider entry resolved from the daemon's provider & model catalog. */

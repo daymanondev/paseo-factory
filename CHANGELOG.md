@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.61] - 2026-10-30
+
+Wake idle-unloaded (`closed`) Lead and Supervisor seats on mail delivery, durably recover successor Lead handoff across restarts, isolate project Driver waves on `notify_peer`, and prevent `spawn pi ENOENT` on archived Peer worktrees.
+
+### Fixed
+
+- Deliver queued Lead and Supervisor mail to seats in both `idle` and `closed` (`archivedAt === null`) status so Paseo's 1-hour idle-runtime collector never leaves a standing seat permanently deaf to `verdict` or `peer_question` mail; also pump the project mailbox on interactive `agent.session_open` (`reason: "resume"`).
+- Persist resolved handoff text (including `INTERRUPTED_HANDOFF_EXTRACTION_NOTE`) to `<projectStateDir>/lead-handoff.md` on `completeHandoff`, and reconstruct `pendingHandoff` from disk when an unstarted successor Lead (`lastUserMessageAt == null`) receives its first turn after a daemon/plugin restart; suppress duplicate Turn-1 kickoff banners for seats with a non-empty `lastUserMessageAt`.
+- Filter `driverWaveInFlight` by `projectEventsOf(resolved.root)` inside `notifyPeer` so an in-flight Driver wave in another project never misroutes a Peer's `notify_peer` message to the Driver sink.
+- Materialize an empty directory stub in `injectSessionEnv` when resuming or loading history for a Task worktree path (`<stateDir>/projects/<slug>/worktrees/<taskId>`) whose directory was removed after `Accept`, preventing Paseo's `PiRpcAgentClient.resumeSession` from failing with `Error: spawn pi ENOENT`.
+
 ## [0.0.60] - 2026-10-29
 
 Auto-dispatch Scrum Lead wakeup on UI design approval (`design.decide` / `supervisor.decision`) and exclude human UI review wait time (`awaiting-ui-approval`) from `maxElapsedMs`.

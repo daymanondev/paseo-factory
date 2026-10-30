@@ -1048,3 +1048,37 @@ test("role surfaces teach bounded serial waves, closure, and structured challeng
       /DEPENDENCY_REQUEST/, /BLOCKED/, /agent_escalate_blocker/, /current commit SHA/]) assert.match(surface, law);
   }
 });
+
+test("injectSessionEnv materializes an empty directory stub when resuming an archived Peer whose Task worktree was removed after Accept so PiRpcAgentClient does not fail with spawn pi ENOENT (ADR 0031)", (t) => {
+  const dir = makeTempDir("roles-archived-worktree-resume-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const userHome = join(dir, "user-home");
+  const repoDir = makeGitRepo(dir);
+  const resolved = resolveProject(repoDir);
+  assert.ok(resolved.ok);
+  const slug = resolved.ok ? resolved.slug : "";
+
+  const deletedWorktree = join(stateDir, "projects", slug, "worktrees", "T-01");
+  assert.equal(existsSync(deletedWorktree), false);
+
+  const resumed = injectSessionEnv(
+    {
+      agentId: "archived-peer-t01",
+      cwd: deletedWorktree,
+      provider: "pi",
+      reason: "resume",
+      purpose: "history",
+      env: {} as Record<string, string>,
+    },
+    stateDir,
+    userHome,
+  );
+  assert.ok(resumed !== undefined);
+  assert.equal(resumed.env.PASEO_FACTORY_SEAT, "agent");
+  assert.equal(
+    existsSync(deletedWorktree),
+    true,
+    "injectSessionEnv creates an empty directory stub at the removed Task worktree path on resume/history so spawn('pi', ..., { cwd }) succeeds",
+  );
+});

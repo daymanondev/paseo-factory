@@ -53,7 +53,7 @@ import { renderScrumPrompt } from "./core/scrum/prompts.ts";
  *     racing a live delivery returns the batch to `queued` instead of
  *     stranding it `inFlight` until the next plugin restart.
  */
-import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Factory } from "./core/factory.ts";
 import { readCorrelations } from "./core/correlations.ts";
@@ -111,6 +111,17 @@ const INTERRUPTED_HANDOFF_EXTRACTION_NOTE =
  */
 export function isBlockedByAttention(agent: SurfaceAgentSnapshot): boolean {
   return agent.requiresAttention === true && agent.attentionReason === "permission";
+}
+
+/**
+ * Whether a non-archived seat (`Lead` or `Supervisor`) is ready to receive a
+ * mailbox batch (ADR 0031): both `"idle"` and Paseo's idle-runtime-collected
+ * `"closed"` state (`archivedAt === null`) are ready when not blocked by a
+ * mid-turn permission prompt (`isBlockedByAttention`). Calling `.send(prompt)`
+ * on a `"closed"` seat automatically resumes its runtime from persistence.
+ */
+export function isSeatReadyForMail(agent: SurfaceAgentSnapshot): boolean {
+  return (agent.status === "idle" || agent.status === "closed") && !isBlockedByAttention(agent);
 }
 
 // ---- the deterministic context sensor (ADR 0013 §5, "Reading Lead Context Tokens") ----------
@@ -396,12 +407,36 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
    * `mail_delivered` after: a failed send leaves the batch queued, never a
    * phantom delivery.
    */
+  const hasSeatReceivedFirstTurn = (agent: { id: string; lastUserMessageAt?: string | null }): boolean => {
+    if (kickoffSentAgentIds.has(agent.id)) return true;
+    if (typeof agent.lastUserMessageAt === "string" && agent.lastUserMessageAt.trim() !== "") {
+      kickoffSentAgentIds.add(agent.id);
+      return true;
+    }
+    return false;
+  };
+
+  const readDiskHandoffText = (slug: string): string | undefined => {
+    try {
+      const handoffPath = join(projectStateDir(deps.stateDir, slug), "lead-handoff.md");
+      if (!existsSync(handoffPath)) return undefined;
+      const text = readFileSync(handoffPath, "utf8");
+      return text.trim() === "" ? undefined : text;
+    } catch {
+      return undefined;
+    }
+  };
+
   const drainLeadMailbox = async (slug: string): Promise<void> => {
     const path = mailboxPath(slug);
     const state = readLeadMailbox(path);
     if (state.inFlight !== null) return; // a live delivery awaits its turn-end settle
     const registeredLead = readProjectRegistration(deps.stateDir, slug)?.lead;
-    if (state.queued.length === 0 && (registeredLead === undefined || !pendingHandoffByAgentId.has(registeredLead))) return;
+    const diskHandoffText = readDiskHandoffText(slug);
+    const hasPotentialHandoff =
+      registeredLead !== undefined &&
+      (pendingHandoffByAgentId.has(registeredLead) || (!kickoffSentAgentIds.has(registeredLead) && diskHandoffText !== undefined));
+    if (state.queued.length === 0 && !hasPotentialHandoff) return;
     if ((readRotationState(slug) ?? "normal") !== "normal") return; // rotation_pending / handing_over hold the mailbox (ticket 07's machine)
     const daemon = resolveDaemon();
     let lead: SurfaceAgentSnapshot | undefined;
@@ -428,11 +463,26 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       }
     }
     if (lead === undefined) return; // no live Lead — the next dispatch ensures one and pumps again
-    if (lead.status !== "idle" || isBlockedByAttention(lead)) return; // a running or permission-waiting Lead is never interrupted (§User Story 12)
-    const pendingHandoff = pendingHandoffByAgentId.get(lead.id);
+    if (!isSeatReadyForMail(lead)) return; // a running or permission-waiting Lead is never interrupted (§User Story 12)
+    let pendingHandoff = pendingHandoffByAgentId.get(lead.id);
+    if (pendingHandoff === undefined && !hasSeatReceivedFirstTurn(lead) && diskHandoffText !== undefined) {
+      const root = readProjectRegistration(deps.stateDir, slug)?.root ?? lead.cwd ?? "";
+      const events = root !== "" ? projectEventsOf(root) : [];
+      const tasks = foldTasks(events);
+      const live = await liveAgentsById();
+      const roster = renderPeerRoster({
+        stateDir: deps.stateDir,
+        slug,
+        tasks,
+        agents: agentOfTask(events, { stateDir: deps.stateDir, slug, tasks, live }),
+        live,
+      });
+      const digest = renderLedgerDigest(events);
+      pendingHandoff = renderSuccessorKickoff({ slug, roster, digest, handoffText: diskHandoffText });
+    }
     if (state.queued.length === 0 && (pendingHandoff === undefined || await projectPeerInFlight(slug))) return;
     const mailPrompt = state.queued.length === 0 ? "" : renderMailPrompt(state.queued);
-    const body = pendingHandoff !== undefined ? `${pendingHandoff}\n\n${mailPrompt}` : mailPrompt;
+    const body = pendingHandoff !== undefined ? (mailPrompt === "" ? pendingHandoff : `${pendingHandoff}\n\n${mailPrompt}`) : mailPrompt;
     const prompt = prependKickoffPacketIfFirstTurn("lead", slug, lead, body);
     await daemon.agents.ref(lead.id).send(prompt);
     if (pendingHandoff !== undefined) pendingHandoffByAgentId.delete(lead.id);
@@ -443,10 +493,10 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   const prependKickoffPacketIfFirstTurn = (
     role: "supervisor" | "lead",
     slug: string,
-    agent: { id: string; cwd?: string | null },
+    agent: { id: string; cwd?: string | null; lastUserMessageAt?: string | null },
     prompt: string,
   ): string => {
-    if (kickoffSentAgentIds.has(agent.id)) return prompt;
+    if (hasSeatReceivedFirstTurn(agent)) return prompt;
     const reg = readProjectRegistration(deps.stateDir, slug);
     const loadedLanes = loadLanes(deps.stateDir, slug);
     const selection = readExecution(deps.stateDir, slug);
@@ -499,7 +549,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       }
     }
     if (supervisor === undefined) return;
-    if (supervisor.status !== "idle" || isBlockedByAttention(supervisor)) return;
+    if (!isSeatReadyForMail(supervisor)) return;
     const prompt = prependKickoffPacketIfFirstTurn("supervisor", slug, supervisor, renderSupervisorMailBatch(state.supervisorQueued));
     await daemon.agents.ref(supervisor.id).send(prompt);
     appendMailDelivered(path, {
@@ -870,6 +920,14 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     if ((handoffText === null || handoffText.trim() === "") && (input.fuseReason !== undefined || input.outcome.kind !== "completed")) {
       handoffText = INTERRUPTED_HANDOFF_EXTRACTION_NOTE;
     }
+    if (handoffText !== null) {
+      try {
+        mkdirSync(statePath, { recursive: true });
+        writeFileSync(handoffPath, handoffText);
+      } catch {
+        // best-effort persistence of resolved handoff text
+      }
+    }
     const events = projectEventsOf(root);
     const tasks = foldTasks(events);
     const live = await liveAgentsById();
@@ -1180,7 +1238,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       } catch {
         // best-effort live agent inspection for dead/orphaned worktree spawn rounds
       }
-      if (driverWaveInFlight(deps.factory.ledger.events, liveAgents)) return; // held in mailbox.jsonl — the wave's last outcome pumps it
+      if (driverWaveInFlight(projectEventsOf(resolved.root), liveAgents)) return; // held in mailbox.jsonl — the wave's last outcome pumps it
       await pumpProjectLead(resolved.slug);
     } catch (err) {
       log(`lead-mailbox: peer notification for ${input.task} failed — the outcome stays in the ledger (${messageOf(err)})`);

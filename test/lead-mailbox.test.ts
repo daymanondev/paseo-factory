@@ -27,6 +27,7 @@ interface FakeAgent {
   attentionReason?: string | null;
   cwd?: string;
   lastUsage?: { contextWindowUsedTokens?: number; contextWindowMaxTokens?: number } | null;
+  lastUserMessageAt?: string | null;
 }
 
 function fakeDaemon(agents: FakeAgent[]) {
@@ -59,6 +60,7 @@ function fakeDaemon(agents: FakeAgent[]) {
               updatedAt: "2026-10-20T00:00:00.000Z",
               cwd: agent.cwd ?? "/tmp",
               lastUsage: agent.lastUsage ?? null,
+              ...(agent.lastUserMessageAt === undefined ? {} : { lastUserMessageAt: agent.lastUserMessageAt }),
             },
           })),
         };
@@ -1497,6 +1499,145 @@ test("pumping an empty project without a held handoff does not create a Lead", a
   await leadMail.pumpProjectLead(slug);
   assert.equal(fake.created.length, 0);
   assert.equal(fake.sent.length, 0);
+});
+
+test("idle-collected ('closed') Lead and Supervisor seats wake automatically on mailbox drain and held handoff delivery, notifyPeer scopes driverWaveInFlight per Project, and pendingHandoff recovers durably from lead-handoff.md across restarts (ADR 0031)", async (t) => {
+  const lead: FakeAgent = { id: "agent-lead-1", status: "idle", lastUsage: { contextWindowUsedTokens: 135_000 } };
+  const supervisor: FakeAgent = { id: "agent-sup-1", status: "idle" };
+  const { stateDir, slug, projectRoot, factory, surface, leadMail, fake } = makeSpooledRuntime(t, [lead, supervisor]);
+  lead.labels = { seat: "lead", project: slug };
+  lead.cwd = projectRoot;
+  supervisor.labels = { seat: "supervisor", project: slug };
+  supervisor.cwd = projectRoot;
+  await surface.leadEnsure({ projectRoot });
+  await surface.supervisorEnsure({ projectRoot });
+
+  // 1. Contract T-03 in this project and start a running Peer
+  const root = readProjectRegistration(stateDir, slug)!.root!;
+  factory.setContract({ task: "T-03", workspace: root, gate: "true" });
+  const t03Worktree = taskWorktreePath(stateDir, slug, "T-03");
+  factory.requestSpawn({ task: "T-03", provider: "pi/model", arity: 1, worktree: t03Worktree });
+  const t03Peer: FakeAgent = { id: "peer-t03", status: "running", cwd: t03Worktree, labels: { seat: "agent", project: slug, task: "T-03" } };
+  fake.agents.unshift(t03Peer);
+
+  // Also register a second Project with an active running Peer in an open spawn_dispatched round
+  const neighborRoot = makeTempDir();
+  disposeDir(t, neighborRoot);
+  writeFileSync(join(neighborRoot, "README.md"), "neighbor\n");
+  gitCommitAll(neighborRoot);
+  const neighborResolved = ensureProjectRegistered(stateDir, neighborRoot);
+  assert.ok(neighborResolved.ok);
+  const neighborWorktree = taskWorktreePath(stateDir, neighborResolved.slug, "T-NEIGHBOR");
+  factory.setContract({ task: "T-NEIGHBOR", workspace: neighborResolved.root, gate: "true" });
+  factory.requestSpawn({ task: "T-NEIGHBOR", provider: "pi/model", arity: 1, worktree: neighborWorktree });
+  const neighborPeer: FakeAgent = {
+    id: "peer-neighbor",
+    status: "running",
+    cwd: neighborWorktree,
+    labels: { seat: "agent", project: neighborResolved.slug, task: "T-NEIGHBOR" },
+  };
+  fake.agents.unshift(neighborPeer);
+
+  // 2. Rotate Lead while T-03 Peer is running -> successor Lead is created and kickoff is held
+  await leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [] });
+  await leadMail.onLeadTurnEnded({
+    agentId: lead.id,
+    outcome: { kind: "completed" },
+    timeline: [{ type: "assistant_message", text: "# Handoff for T-03\nReview T-03 when Peer finishes." }],
+  });
+  const successorId = "agent-created-1";
+  const successor = fake.agents.find((a) => a.id === successorId);
+  assert.ok(successor);
+  assert.equal(fake.sent.filter((s) => s.agentId === successorId).length, 0, "handoff held while T-03 Peer runs");
+
+  // 3. Simulate Paseo's 1-hour idle-runtime collector unloading both successor Lead and Supervisor ('status: closed', archivedAt: null)
+  successor.status = "closed";
+  supervisor.status = "closed";
+
+  // 4. T-03 finishes GREEN while neighborPeer is STILL running in neighborProject.
+  //    notifyPeer must scope driverWaveInFlight to `slug` (ignoring neighborProject) and wake the 'closed' successor Lead!
+  t03Peer.status = "closed";
+  factory.ledger.append({ event: "gate_finished", task: "T-03", attempt: 1, verdict: "green", exit: 0, note: "" });
+  await leadMail.notifyPeer({ task: "T-03", kind: "verdict", text: "T-03 attempt 1 ended GREEN" });
+
+  const successorSends = fake.sent.filter((s) => s.agentId === successorId);
+  assert.equal(successorSends.length, 1, "closed successor Lead woke and received held handoff + T-03 verdict despite neighbor project running");
+  assert.match(successorSends[0]!.text, /\[paseo-factory seat kickoff packet · role=lead/);
+  assert.match(successorSends[0]!.text, /# Lead handoff — project/);
+  assert.match(successorSends[0]!.text, /# Handoff for T-03\nReview T-03 when Peer finishes\./);
+  assert.match(successorSends[0]!.text, /T-03 attempt 1 ended GREEN/);
+
+  // 5. Reporting to a 'closed' Supervisor also wakes Supervisor and delivers the report batch
+  const supReport = await leadMail.reportSupervisor({
+    id: "rep-closed-sup",
+    kind: "supervisor_report",
+    project: slug,
+    message: "All waves verified.",
+  });
+  assert.equal(supReport.ok, true);
+  const supSends = fake.sent.filter((s) => s.agentId === supervisor.id);
+  assert.equal(supSends.length, 1, "closed Supervisor woke and received the report batch");
+  assert.match(supSends[0]!.text, /All waves verified\./);
+
+  // 6. Simulate a daemon/plugin restart by creating a fresh LeadMailRuntime against the same stateDir:
+  //    - Case A: If a seat already has a non-empty `lastUserMessageAt`, subsequent turns do NOT re-inject the Turn-1 kickoff packet.
+  await leadMail.onLeadTurnEnded({ agentId: successorId, outcome: { kind: "completed" }, timeline: [] });
+  (successor as FakeAgent & { lastUserMessageAt?: string | null }).lastUserMessageAt = "2026-10-29T22:05:00.000Z";
+  successor.status = "idle";
+
+  const restartedRuntime = createLeadMailRuntime({
+    factory,
+    stateDir,
+    daemon: fake.daemon,
+    ensureLead: (input) => surface.leadEnsure(input),
+    ensureSupervisor: (input) => surface.supervisorEnsure(input),
+    retireLead: (input) => surface.leadRotate(input),
+  });
+  t.after(() => restartedRuntime.stop());
+
+  await restartedRuntime.dispatchLead({
+    id: "ld-after-restart",
+    kind: "lead_dispatch",
+    project: slug,
+    message: "Follow-up after daemon restart",
+  });
+  const successorSendsAfterRestart = fake.sent.filter((s) => s.agentId === successorId);
+  assert.equal(successorSendsAfterRestart.length, 2);
+  assert.doesNotMatch(
+    successorSendsAfterRestart[1]!.text,
+    /\[paseo-factory seat kickoff packet/,
+    "seat with non-empty lastUserMessageAt does not receive duplicate Turn-1 kickoff after daemon restart",
+  );
+  assert.doesNotMatch(
+    successorSendsAfterRestart[1]!.text,
+    /# Lead handoff — project/,
+    "seat with non-empty lastUserMessageAt does not receive duplicate handoff after daemon restart",
+  );
+  assert.match(successorSendsAfterRestart[1]!.text, /Follow-up after daemon restart/);
+
+  //    - Case B: If a rotated successor Lead has `lastUserMessageAt: null` (never received Turn 1 before daemon restart)
+  //      and `<projectStateDir>/lead-handoff.md` exists on disk, the restarted runtime reconstructs the handoff bundle from disk!
+  await restartedRuntime.onLeadTurnEnded({ agentId: successorId, outcome: { kind: "completed" }, timeline: [] });
+  const unstartedLead: FakeAgent & { lastUserMessageAt?: string | null } = {
+    id: "agent-lead-unstarted-after-restart",
+    status: "closed",
+    cwd: projectRoot,
+    labels: { seat: "lead", project: slug },
+    lastUserMessageAt: null,
+  };
+  const idx = fake.agents.findIndex((a) => a.id === successorId);
+  if (idx !== -1) fake.agents.splice(idx, 1, unstartedLead);
+  writeProjectRegistration(stateDir, slug, { root: projectRoot, lead: unstartedLead.id, rotationState: "normal" });
+
+  await restartedRuntime.enqueueLeadMail(slug, { from: "peer", kind: "verdict", task: "T-03", text: "Recovered verdict after restart" });
+  await restartedRuntime.pumpProjectLead(slug);
+
+  const unstartedSends = fake.sent.filter((s) => s.agentId === unstartedLead.id);
+  assert.equal(unstartedSends.length, 1, "unstarted closed successor Lead received reconstructed handoff + mail after restart");
+  assert.match(unstartedSends[0]!.text, /\[paseo-factory seat kickoff packet · role=lead/);
+  assert.match(unstartedSends[0]!.text, /# Lead handoff — project/);
+  assert.match(unstartedSends[0]!.text, /# Handoff for T-03\nReview T-03 when Peer finishes\./);
+  assert.match(unstartedSends[0]!.text, /Recovered verdict after restart/);
 });
 
 test("Scrum-only recovery skips steady Projects and reconciles pending cancellation", async t => {

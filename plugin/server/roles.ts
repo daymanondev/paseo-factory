@@ -13,6 +13,7 @@ import { SCRUM_PROMPT_MARK, SCRUM_ROLE_TITLES, renderScrumPrompt } from "./core/
  * `antigravity`), and deterministic seat recognition by native role provider
  * id (`factory-supervisor`, `factory-lead`, `factory-peer`).
  */
+import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { provisionAgyPlugin, ensureFactoryBinScripts } from "./core/agy-home.ts";
@@ -681,6 +682,8 @@ export function injectSessionEnv<
     cwd: string;
     env: Record<string, string>;
     provider?: string | null;
+    reason?: string | null;
+    purpose?: string | null;
     config?: { env?: Record<string, string> };
     /** The Paseo Workspace the session opened in (v0.0.31, ADR 0017 §5) — persisted for seat sessions. */
     workspaceId?: string | null;
@@ -690,6 +693,19 @@ export function injectSessionEnv<
   stateDir: string,
   userHome?: string,
 ): R | undefined {
+  if (
+    typeof request.cwd === "string" &&
+    request.cwd.trim() !== "" &&
+    parseTaskWorktreePath(stateDir, request.cwd) !== null &&
+    (request.reason === "resume" || request.purpose === "history") &&
+    !existsSync(request.cwd)
+  ) {
+    try {
+      mkdirSync(request.cwd, { recursive: true });
+    } catch {
+      // best-effort directory stub so PiRpcAgentClient.resumeSession does not fail with spawn pi ENOENT
+    }
+  }
   const correlations = new CorrelationRegistry(stateDir);
   const existingCorrId =
     request.env?.PASEO_FACTORY_CORRELATION ?? request.config?.env?.PASEO_FACTORY_CORRELATION;
