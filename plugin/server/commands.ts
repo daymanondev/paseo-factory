@@ -2,11 +2,13 @@
  * separately from the attribution carried by their transport codec.
  */
 import type { AcceptInput, Factory } from "./core/factory.ts";
-import type { AcceptanceRole } from "./core/task-state.ts";
+import { projectTask, type AcceptanceRole } from "./core/task-state.ts";
 import type { SurfaceDaemonApi } from "./surface-rpc.ts";
 import { cleanupDaemonWorkspacesAndProjectsViaWs } from "./daemon-cli.ts";
 import { projectStateDir, readProjectRegistration, resolveProject, writeProjectRegistration } from "./core/project.ts";
-import type { LandingResult } from "./core/workspace.ts";
+import { changedFiles, commitSeatMemoryOnRoot, type LandingResult } from "./core/workspace.ts";
+import { boundTaskPeers } from "./task-peers.ts";
+import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
 export async function executeAcceptance(
@@ -20,8 +22,21 @@ export async function executeAcceptance(
   },
 ) {
   return factory.history.runOperation(async () => {
+    const contract = factory.contractFor(input.task);
+    if (contract !== undefined) {
+      let excludePaths: Set<string> | undefined;
+      const attempt = projectTask(factory.ledger.events, input.task).attempts.find((a) => a.attempt === input.attempt);
+      const claimedSha = attempt?.events.findLast((e) => e.event === "claim_reported")?.sha;
+      if (contract.base !== undefined && claimedSha !== undefined) {
+        const diff = await changedFiles(contract.workspace, contract.base, claimedSha);
+        if (diff.ok) excludePaths = new Set(diff.files);
+      }
+      commitSeatMemoryOnRoot(contract.workspace, excludePaths);
+    }
     const event = await factory.accept({ ...input, authority: deps.authority });
-    await archiveAcceptedTaskWorkspace(factory, deps.daemon, input.task, deps.home, deps.cleanup);
+    if (event.landing !== "pending-conflict") {
+      await archiveAcceptedTaskWorkspace(factory, deps.daemon, input.task, deps.home, deps.cleanup);
+    }
     return event;
   }, { newWork: true });
 }
@@ -66,30 +81,61 @@ export async function archiveAcceptedTaskWorkspace(
   if (contract === undefined) return;
   const project = resolveProject(contract.workspace);
   if (!project.ok) return;
-  const reg = readProjectRegistration(factory.stateDir, project.slug);
-  const workspaceId = reg?.taskWorkspaces?.[task];
-  if (workspaceId === undefined) return;
-  if (daemon?.workspaces?.archive !== undefined) {
+  if (daemon?.agents?.ref !== undefined && typeof daemon.agents.list === "function") {
     try {
-      await daemon.workspaces.archive(workspaceId);
+      const page = await daemon.agents.list({ filter: { includeArchived: false, includeBackground: true } });
+      const live = page.entries.map((entry) => entry.agent).filter((agent) => agent.archivedAt === null);
+      const peers = boundTaskPeers({
+        stateDir: factory.stateDir,
+        slug: project.slug,
+        task,
+        events: factory.ledger.events,
+        live,
+      });
+      for (const peer of peers) {
+        try {
+          await daemon.agents.ref(peer.id).archive();
+        } catch {
+          // best-effort archive
+        }
+      }
     } catch {
-      // best-effort archive
+      // best-effort peer archive
     }
   }
-  writeProjectRegistration(factory.stateDir, project.slug, {
-    root: project.root,
-    taskWorkspaces: { [task]: null },
-  });
-  // The daemon-record sweep (v0.0.27; v0.0.31's safe rules, ADR 0017 §4):
-  // best-effort, never blocks the accept. The accepted task's worktree is the
-  // ONE explicitly retired target — sibling worktree workspaces whose
-  // directories still exist on disk (parallel Tasks with live Peers) are
-  // never archived.
+  const worktreesDir = join(projectStateDir(factory.stateDir, project.slug), "worktrees");
+  const targetWorktreePath = join(worktreesDir, task);
+  const reg = readProjectRegistration(factory.stateDir, project.slug);
+  const workspaceId = reg?.taskWorkspaces?.[task];
+  if (workspaceId !== undefined) {
+    if (daemon?.workspaces?.archive !== undefined) {
+      try {
+        await daemon.workspaces.archive(workspaceId);
+      } catch {
+        // best-effort archive
+      }
+    }
+    writeProjectRegistration(factory.stateDir, project.slug, {
+      root: project.root,
+      taskWorkspaces: { [task]: null },
+    });
+    // The daemon-record sweep (v0.0.27; v0.0.31's safe rules, ADR 0017 §4):
+    // best-effort, never blocks the accept. The accepted task's worktree is the
+    // ONE explicitly retired target — sibling worktree workspaces whose
+    // directories still exist on disk (parallel Tasks with live Peers) are
+    // never archived.
+    try {
+      await cleanup(home ?? process.env.PASEO_HOME, { worktreesDir, targetWorktreePath });
+    } catch {
+      // best-effort sweep
+    }
+  }
   try {
-    const worktreesDir = join(projectStateDir(factory.stateDir, project.slug), "worktrees");
-    await cleanup(home ?? process.env.PASEO_HOME, { worktreesDir, targetWorktreePath: join(worktreesDir, task) });
+    if (existsSync(targetWorktreePath) && !existsSync(join(targetWorktreePath, ".git"))) {
+      rmSync(targetWorktreePath, { recursive: true, force: true });
+    }
   } catch {
-    // best-effort sweep
+    // best-effort empty stub cleanup
   }
 }
 

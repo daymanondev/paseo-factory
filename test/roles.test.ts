@@ -392,6 +392,58 @@ test("agy-pre-tool-hook.mjs fast-allows unbound sessions and enforces seat-write
   );
   assert.equal(denyPkill.decision, "deny");
   assertValidAgyProtoOutput(denyPkill, "denyPkill");
+
+  // 3. Lead vs Supervisor git fence in agy-pre-tool-hook.mjs: Supervisor cannot commit/merge, Lead can commit whitelisted docs/memory and merge, but cannot commit product source
+  const supDenyCommit = JSON.parse(
+    execFileSync(process.execPath, [hookBin], {
+      input: JSON.stringify({
+        toolCall: { name: "run_command", args: { CommandLine: 'git add GLOSSARY.md && git commit -m "docs"' } },
+        workspacePaths: [repoDir],
+      }),
+      env: supEnv,
+      encoding: "utf8",
+    }),
+  );
+  assert.equal(supDenyCommit.decision, "deny", "Supervisor denied git commit in agy-pre-tool-hook.mjs");
+
+  const leadEnv = {
+    PATH: process.env.PATH,
+    PASEO_FACTORY_SEAT: "lead",
+    PASEO_FACTORY_STATE_DIR: stateDir,
+    PASEO_FACTORY_PROJECT_ROOT: repoDir,
+  };
+  const leadAllowDocsCommitAndMerge = JSON.parse(
+    execFileSync(process.execPath, [hookBin], {
+      input: JSON.stringify({
+        toolCall: {
+          name: "run_command",
+          args: {
+            CommandLine: 'git add GLOSSARY.md docs/ && git commit -m "docs: commit glossary and ADRs" && git merge --ff-only factory/pm-prd',
+          },
+        },
+        workspacePaths: [repoDir],
+      }),
+      env: leadEnv,
+      encoding: "utf8",
+    }),
+  );
+  assert.equal(leadAllowDocsCommitAndMerge.decision, "allow", "Lead allowed to commit whitelisted docs/memory and merge task branch");
+
+  const leadDenyProductCommit = JSON.parse(
+    execFileSync(process.execPath, [hookBin], {
+      input: JSON.stringify({
+        toolCall: {
+          name: "run_command",
+          args: { CommandLine: 'git add src/index.ts && git commit -m "feat: rogue lead edit"' },
+        },
+        workspacePaths: [repoDir],
+      }),
+      env: leadEnv,
+      encoding: "utf8",
+    }),
+  );
+  assert.equal(leadDenyProductCommit.decision, "deny", "Lead denied staging/committing product source in agy-pre-tool-hook.mjs");
+  assert.match(String(leadDenyProductCommit.reason), /lead-git-fence/);
 });
 
 test("inferRoleFromProviderId maps the native role providers deterministically and applyProviderExecutionFence always carries ELECTRON_RUN_AS_NODE (v0.0.27, ADR 0017 §2)", (t) => {

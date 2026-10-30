@@ -278,11 +278,89 @@ function isProcessKillAgainstFactory(command) {
   return /\b(?:plugin-process|paseo)\b/i.test(command);
 }
 
-function isForbiddenSeatGit(command) {
+function isForbiddenSupervisorGit(command) {
   if (!/\bgit\b/.test(command)) return false;
   return /\bgit\s+(?:commit|merge|cherry-pick|rebase|am|apply|stash|reset|clean)\b/.test(command) ||
     /\bgit\s+checkout\s+(?:-[bB]|--)\b/.test(command) ||
     /\bgit\s+push\s+.*(?:--force|-f|--delete|-d)\b/.test(command);
+}
+
+function isForbiddenLeadGit(command) {
+  if (!/\bgit\b/.test(command)) return false;
+  return /\bgit\s+reset\s+.*--hard\b/.test(command) ||
+    /\bgit\s+clean\s+.*(?:-f|--force)\b/.test(command) ||
+    /\bgit\s+checkout\s+(?:-[fF]|--)\b/.test(command) ||
+    /\bgit\s+branch\s+.*-D\b/.test(command) ||
+    /\bgit\s+push\s+.*(?:--force|-f|--delete|-d)\b/.test(command);
+}
+
+function quoteAwareTokens(segment) {
+  const words = [];
+  let current = "";
+  let quote = null;
+  for (let i = 0; i < segment.length; i++) {
+    const ch = segment[i];
+    if (quote !== null) {
+      if (ch === "\\" && quote === '"' && i + 1 < segment.length) {
+        current += segment[i + 1];
+        i += 1;
+        continue;
+      }
+      if (ch === quote) {
+        quote = null;
+        continue;
+      }
+      current += ch;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      if (current !== "") {
+        words.push(current);
+        current = "";
+      }
+      continue;
+    }
+    current += ch;
+  }
+  if (current !== "") words.push(current);
+  return words;
+}
+
+function extractLeadGitStageTargets(command) {
+  const targets = [];
+  for (const segment of command.split(/(?:&&|\|\||;|\n)/)) {
+    const tokens = quoteAwareTokens(segment);
+    const gitIdx = tokens.findIndex((t) => t === "git" || t.endsWith("/git"));
+    if (gitIdx === -1) continue;
+    let subIdx = gitIdx + 1;
+    while (subIdx < tokens.length && tokens[subIdx].startsWith("-")) {
+      if (["-C", "-c", "--git-dir", "--work-tree"].includes(tokens[subIdx])) subIdx += 2;
+      else subIdx += 1;
+    }
+    const sub = tokens[subIdx];
+    if (sub !== "add" && sub !== "commit") continue;
+    const args = tokens.slice(subIdx + 1);
+    for (let i = 0; i < args.length; i++) {
+      const arg = args[i];
+      if (arg === "--") {
+        for (const rest of args.slice(i + 1)) {
+          if (rest && rest !== ".") targets.push(rest);
+        }
+        break;
+      }
+      if (["-m", "--message", "-F", "--file", "--author", "--date", "-c", "-C"].includes(arg)) {
+        i += 1;
+        continue;
+      }
+      if (arg.startsWith("-")) continue;
+      if (arg !== ".") targets.push(arg);
+    }
+  }
+  return targets;
 }
 
 function resolveContext(payload) {
@@ -416,8 +494,20 @@ process.stdin.on("end", () => {
       if (isProcessKillAgainstFactory(cmd)) {
         deny("Seat write fence: killing Paseo or plugin-process is forbidden.");
       }
-      if (isForbiddenSeatGit(cmd)) {
-        deny("Seat git fence: Supervisor and Lead may not run destructive or committing git commands on <project-root>.");
+      if (ctx.seat === "supervisor" && isForbiddenSupervisorGit(cmd)) {
+        deny("Seat git fence: Supervisor may not run destructive or committing git commands on <project-root>.");
+      }
+      if (ctx.seat === "lead" && isForbiddenLeadGit(cmd)) {
+        deny("Seat git fence: Lead may not run destructive git commands on <project-root>.");
+      }
+      if (ctx.seat === "lead") {
+        for (const target of extractLeadGitStageTargets(cmd)) {
+          if (!isSeatWriteAllowed(ctx.projectRoot, target, ctx.stateDir)) {
+            deny(
+              "Seat git fence (lead-git-fence): Lead may only stage/commit project memory/docs (AGENTS.md, CONTEXT.md, GLOSSARY.md, docs/**, .scratch/**); dispatch implementation work to Task Agents",
+            );
+          }
+        }
       }
       for (const target of extractShellWriteTargets(cmd)) {
         if (!isSeatWriteAllowed(ctx.projectRoot, target, ctx.stateDir)) {

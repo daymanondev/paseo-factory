@@ -5,6 +5,7 @@ import { withExecutionLane } from "./core/scrum/execution.ts";
 import { readExecution } from "./core/scrum/config.ts";
 import { readRun, listRuns, commandRun, terminalRun } from "./core/scrum/run-journal.ts";
 import { renderScrumPrompt } from "./core/scrum/prompts.ts";
+import { commitSeatMemoryOnRoot } from "./core/workspace.ts";
 /**
  * The Lead mailbox runtime (v0.0.20, ADR 0013 Decisions 3–5): the plugin-side
  * single writer around one `<projectStateDir>/mailbox.jsonl` per Project. The
@@ -1100,6 +1101,9 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     const laneOutcome = await projectLane(
       slug,
       async (): Promise<{ ok: true; agentId: string; mailId: string } | { ok: false; code: string; error: string }> => {
+        if (request.from === "supervisor") {
+          commitSeatMemoryOnRoot(root);
+        }
         const bound = request.from === "peer" ? bindScrumBlocker(deps.factory, slug, request) : bindProjectDirective(deps.factory, root, slug, request);
         const ensured = await deps.ensureLead({ projectRoot: root });
         if (!ensured.ok) return ensured;

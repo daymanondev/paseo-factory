@@ -868,7 +868,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         agent.cwd === "" ||
         agent.cwd === "/tmp" ||
         realpathSafe(agent.cwd) === realpathSafe(project.root);
-      if (agent.status === "error" || !sameProviderFamily || !sameCwd || selected.mode === "scrum" && agent.labels.scrumConfigRevision !== String(scrumRoster?.configRevision ?? 1)) {
+      if (agent.status === "error" || !sameProviderFamily || !sameCwd || selected.mode === "scrum" && agent.labels?.scrumConfigRevision !== undefined && agent.labels.scrumConfigRevision !== String(scrumRoster?.configRevision ?? 1)) {
         const retired = await retireSeatUnlocked(seat, project.slug, project.root, context);
         if (!retired.ok) {
           return retired;

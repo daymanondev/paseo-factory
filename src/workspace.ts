@@ -72,6 +72,104 @@ function isUntrackedInstallArtifact(porcelainLine: string): boolean {
   return PACKAGE_LOCKFILES.has(baseName);
 }
 
+const COMMITTABLE_SEAT_ROOT_FILES = new Set([
+  "AGENTS.md",
+  "CLAUDE.md",
+  "CONTEXT.md",
+  "GLOSSARY.md",
+  ".gitignore",
+  ".worktreeinclude",
+]);
+
+function isCommittableSeatDocPath(relativePath: string): boolean {
+  let normalized = relativePath.trim().replace(/^"(.*)"$/, "$1");
+  while (normalized.startsWith("./")) normalized = normalized.slice(2);
+  if (normalized.endsWith("/")) normalized = normalized.slice(0, -1);
+  if (normalized === "" || normalized.startsWith("/") || normalized.split("/").includes("..")) return false;
+  if (COMMITTABLE_SEAT_ROOT_FILES.has(normalized)) return true;
+  if (normalized === "docs" || normalized.startsWith("docs/")) return true;
+  return false;
+}
+
+/**
+ * Auto-commits dirty or untracked whitelisted Seat memory/docs (`AGENTS.md`,
+ * `CLAUDE.md`, `CONTEXT.md`, `GLOSSARY.md`, `.gitignore`, `.worktreeinclude`,
+ * `docs/**`) on `<project-root>` when Supervisor dispatches Lead or before
+ * accepting a Task worktree, so Supervisor's `grilling` / `domain-modeling`
+ * artifacts (`GLOSSARY.md`, `docs/adr/**`) never leave `<project-root>` dirty
+ * under `supervisor-git-fence` and never block `landTaskWorktree` with
+ * `pending-conflict`. Never commits `.scratch/**` (local tracker state stays
+ * untracked) or any path in `excludePaths`, and refuses if `<project-root>`
+ * has any non-seat-doc dirty file.
+ */
+export function commitSeatMemoryOnRoot(
+  projectRoot: string,
+  excludePaths?: ReadonlySet<string>,
+): boolean {
+  try {
+    const tracked = gitIn(projectRoot, ["status", "--porcelain", "--untracked-files=no"]);
+    if (tracked.error !== undefined || tracked.status !== 0) return false;
+    const expanded = gitIn(projectRoot, [
+      "status",
+      "--porcelain",
+      "--untracked-files=all",
+      "--",
+      ":(top,glob)**",
+      ...["node_modules", "playwright-report", "test-results", "coverage", ".nyc_output", "*-snapshots"].map(
+        (directory) => `:(top,exclude,glob)**/${directory}/**`,
+      ),
+    ]);
+    if (expanded.error !== undefined || expanded.status !== 0) return false;
+    const untracked = expanded.stdout.split("\n").filter((line) => line.startsWith("?? "));
+    const lines = [tracked.stdout.trimEnd(), ...untracked]
+      .filter(Boolean)
+      .join("\n")
+      .split("\n")
+      .filter((line) => line.trim() !== "" && !isUntrackedInstallArtifact(line));
+    if (lines.length === 0) return false;
+
+    const pathsToStage: string[] = [];
+    for (const line of lines) {
+      const raw = line.slice(3).trim();
+      const parts = raw.includes(" -> ") ? raw.split(" -> ").map((p) => p.trim()) : [raw];
+      for (const part of parts) {
+        const clean = part.replace(/^"(.*)"$/, "$1");
+        if (!isCommittableSeatDocPath(clean)) return false;
+        if (excludePaths !== undefined && excludePaths.has(clean)) return false;
+        pathsToStage.push(clean);
+      }
+    }
+    if (pathsToStage.length === 0) return false;
+
+    const uniquePaths = [...new Set(pathsToStage)];
+    const added = gitIn(projectRoot, ["add", "--", ...uniquePaths]);
+    if (added.error !== undefined || added.status !== 0) return false;
+    let committed = gitIn(projectRoot, [
+      "commit",
+      "-m",
+      "chore(factory): commit seat memory and docs on project root",
+      "--",
+      ...uniquePaths,
+    ]);
+    if (committed.status !== 0) {
+      committed = gitIn(projectRoot, [
+        "-c",
+        "user.name=Paseo Factory",
+        "-c",
+        "user.email=factory@paseo.local",
+        "commit",
+        "-m",
+        "chore(factory): commit seat memory and docs on project root",
+        "--",
+        ...uniquePaths,
+      ]);
+    }
+    return committed.error === undefined && committed.status === 0;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Expand untracked paths so collapsed parent directories cannot hide transient
  * outputs. Exclude install and test-output trees from expansion to keep them

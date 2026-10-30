@@ -6169,3 +6169,86 @@ test("snapshot and executionWork omit unaccepted zombie tasks from cancelled Scr
   assert.equal(snapScoped.view.execution?.busyReason ?? null, null);
 });
 
+test("Scrum supervisorEnsure preserves a UI-created Supervisor session without scrumConfigRevision label and accept auto-commits dirty seat memory/docs while archiving bound Peer agents", async (t) => {
+  const project = makeProject(t, "goal-planner-regression");
+  const agents: FakeAgent[] = [
+    {
+      id: "ui-sup-live",
+      provider: "antigravity",
+      model: "gemini-4-argon",
+      thinkingOptionId: "high",
+      status: "idle",
+      cwd: project.root,
+      title: "Supervisor",
+      labels: {},
+    },
+  ];
+  const { handlers, factory, stateDir, fake } = makeSurface(t, agents);
+  await handlers.executionSetMode({ projectRoot: project.root, mode: "scrum" });
+  const snap = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(snap.ok);
+  const config = snap.view.execution!.config!;
+  await handlers.scrumCommand({
+    projectRoot: project.root,
+    operation: "config.set",
+    requestId: "set-ag",
+    payload: {
+      config: {
+        ...config,
+        lanes: {
+          ...config.lanes,
+          supervisor: "antigravity/gemini-4-argon-high",
+          lead: "antigravity/gemini-4-argon-high",
+        },
+      },
+    },
+  });
+  // Bind ui-sup-live in project.json as injectSessionEnv does for a UI-started Supervisor chat
+  writeProjectRegistration(stateDir, project.slug, { root: project.root, supervisor: "ui-sup-live" });
+  fake.archived.splice(0);
+
+  const ensuredSup = await handlers.supervisorEnsure({ projectRoot: project.root });
+  assert.ok(ensuredSup.ok, ensuredSup.ok ? "" : ensuredSup.error);
+  assert.equal(ensuredSup.agentId, "ui-sup-live", "UI-created Supervisor without scrumConfigRevision label is reused");
+  assert.deepEqual(fake.archived, [], "UI-created Supervisor is not retired when Lead reports back");
+
+  // Author untracked GLOSSARY.md and docs/adr/0001.md on <project-root> (as Supervisor domain-modeling does)
+  writeFileSync(join(project.root, "GLOSSARY.md"), "# Glossary\n");
+  mkdirSync(join(project.root, "docs", "adr"), { recursive: true });
+  writeFileSync(join(project.root, "docs", "adr", "0001-arch.md"), "# ADR 0001\n");
+
+  // Contract, prepare worktree, spawn Peer, and claim pm-prd
+  factory.setContract({
+    task: "pm-prd",
+    workspace: project.root,
+    gate: "test -f docs/prd/goal-planner-prd.md",
+    artifact: "docs/prd/goal-planner-prd.md",
+    by: "lead",
+  });
+  const wt = prepareTaskWorktree({ stateDir, workspace: project.root, task: "pm-prd" });
+  assert.ok(wt.ok, wt.ok ? "" : wt.reason);
+  mkdirSync(join(wt.path, "docs", "prd"), { recursive: true });
+  writeFileSync(join(wt.path, "docs", "prd", "goal-planner-prd.md"), "# PRD\n");
+  const headSha = gitCommitAll(wt.path, "docs(prd): add goal-planner PRD");
+  factory.requestSpawn({ task: "pm-prd", provider: "antigravity/gemini-4-argon-high", arity: 1, worktree: wt.path });
+  agents.push({
+    id: "peer-pm-prd",
+    provider: "antigravity",
+    status: "idle",
+    cwd: wt.path,
+    title: "PM · pm-prd",
+    labels: { seat: "agent", project: project.slug, task: "pm-prd" },
+  });
+  const claim = await factory.claim({ task: "pm-prd", sha: headSha, agent: "peer-pm-prd" });
+  assert.equal(claim.verdict, "green");
+
+  const accepted = await handlers.accept({ task: "pm-prd", attempt: 1 });
+  assert.ok(accepted.ok, accepted.ok ? "" : accepted.error);
+  assert.match(accepted.summary, /landed into <project-root>/, "auto-committed GLOSSARY.md + docs/adr/0001-arch.md on root so pm-prd lands cleanly");
+  assert.equal(existsSync(join(project.root, "docs", "prd", "goal-planner-prd.md")), true);
+  assert.equal(existsSync(join(project.root, "GLOSSARY.md")), true);
+  assert.ok((fake.archived as string[]).includes("peer-pm-prd"), "bound Peer agent is archived when Task is accepted and landed");
+  assert.equal(existsSync(wt.path), false, "worktree directory is removed after landing");
+});
+
+

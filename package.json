@@ -1,6 +1,6 @@
 {
   "name": "paseo-factory",
-  "version": "0.0.64",
+  "version": "0.0.65",
   "description": "Verification core for Paseo agents: done-criteria contracts, an append-only JSONL ledger, a gate runner, and traceable reports. Pure Node — zero Paseo imports. The Paseo plugin shell loads this core as a plain module.",
   "type": "module",
   "private": true,

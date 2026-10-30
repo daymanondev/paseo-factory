@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.65] - 2026-10-30
+
+### Fixed
+
+- Auto-commit dirty/untracked whitelisted Seat memory and docs (`AGENTS.md`, `CLAUDE.md`, `CONTEXT.md`, `GLOSSARY.md`, `.gitignore`, `.worktreeinclude`, `docs/**`) on `<project-root>` when `Supervisor` dispatches `Lead` and before accepting/landing a Task worktree, preventing `grilling` / `domain-modeling` artifacts from blocking `landTaskWorktree` with `pending-conflict`.
+- Align `plugin/bin/agy-pre-tool-hook.mjs` with `git-shim.mjs` so `Lead` on Antigravity can stage and commit whitelisted project memory/docs and merge Task branches on `<project-root>` while `Supervisor` remains git-fenced.
+- Preserve active UI-created `Supervisor` and `Lead` sessions in Scrum mode when `agent.labels.scrumConfigRevision` is absent instead of retiring the Owner's live chat on `ensureSeat`.
+- Archive bound live `Peer` agents when a Task is accepted and landed (`landing !== "pending-conflict"`), preserve the Task workspace when landing hits `pending-conflict`, and clean up empty worktree directory stubs after Peer retirement.
+
 ## [0.0.64] - 2026-10-30
 
 ### Added
