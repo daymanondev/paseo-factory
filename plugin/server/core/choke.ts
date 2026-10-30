@@ -891,14 +891,28 @@ function memoryFileOf(rawPath: string, fence: MemoryFence): MemoryFileName | und
  * documentation maintenance is legal work when contracted for). Undefined
  * when the destination is not a fenced file.
  */
+function normalizeMaybeStrippedLeadingSlash(rawPath: string, candidateRoots: readonly (string | undefined)[]): string {
+  if (isAbsolute(rawPath) || rawPath.startsWith("~")) return rawPath;
+  const withSlash = `/${rawPath}`;
+  for (const root of candidateRoots) {
+    if (!root) continue;
+    const cleanRoot = stripTrailingSlash(root);
+    if (withSlash === cleanRoot || withSlash.startsWith(`${cleanRoot}/`)) {
+      return withSlash;
+    }
+  }
+  return rawPath;
+}
+
 function judgeMemoryDestination(rawPath: string, fence: MemoryFence): ChokeDecision | undefined {
+  const normalizedPath = normalizeMaybeStrippedLeadingSlash(rawPath, [fence.worktree, fence.workspace]);
   if (fence.artifactOnly) {
     const root = fence.worktree ?? fence.workspace;
-    const destination = resolve(root, rawPath);
+    const destination = resolve(root, normalizedPath);
     const relative = destination.startsWith(root + "/") ? destination.slice(root.length + 1) : undefined;
     if (relative !== undefined && !scopeCoversFile(fence.scope ?? [], relative)) return { behavior: "deny", rule: "policy:scrum-artifact-only", reason: "planning/QA product source is read-only; write only the owned Contract artifacts" };
   }
-  const name = memoryFileOf(rawPath, fence);
+  const name = memoryFileOf(normalizedPath, fence);
   if (name === undefined) return undefined;
   if (fence.scope !== undefined && fence.scope.length > 0 && scopeCoversFile(fence.scope, name)) return undefined;
   return {
@@ -963,7 +977,8 @@ export function judgeShellCommand(command: string, roots: WritableRoots, memory?
  * anywhere are legitimate agent behavior and never judge.
  */
 export function judgeFilePath(rawPath: string, roots: WritableRoots, memory?: MemoryFence): ChokeDecision {
-  const expanded = expandUser(rawPath, roots);
+  const normalizedRaw = normalizeMaybeStrippedLeadingSlash(rawPath, [roots.workspace, roots.stateDir, memory?.worktree, memory?.workspace]);
+  const expanded = expandUser(normalizedRaw, roots);
   const resolvedDest = isAbsolute(expanded) ? resolve(expanded) : resolve(roots.workspace, expanded);
   if (roots.stateDir !== "" && isProtectedFactoryStatePath(resolvedDest, roots.stateDir)) {
     return {
@@ -980,7 +995,7 @@ export function judgeFilePath(rawPath: string, roots: WritableRoots, memory?: Me
     };
   }
   if (memory !== undefined) {
-    const fenced = judgeMemoryDestination(rawPath, memory);
+    const fenced = judgeMemoryDestination(normalizedRaw, memory);
     if (fenced !== undefined) return fenced;
   }
   return { behavior: "allow" };

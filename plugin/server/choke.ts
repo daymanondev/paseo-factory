@@ -570,6 +570,14 @@ function isRecordValue(value: unknown): value is Record<string, unknown> {
 
 export function extractPatchFilePaths(text: string): string[] {
   const paths: string[] = [];
+  const normalizeDiffPath = (raw: string | undefined): string | undefined => {
+    const trimmed = raw?.trim();
+    if (!trimmed || trimmed === "/dev/null") return undefined;
+    if (/^(?:Users|home|private|var|tmp|opt|Volumes)\//.test(trimmed)) {
+      return `/${trimmed}`;
+    }
+    return trimmed;
+  };
   const pushUnique = (raw: string | undefined): void => {
     const trimmed = raw?.trim();
     if (!trimmed || trimmed === "/dev/null") return;
@@ -588,12 +596,12 @@ export function extractPatchFilePaths(text: string): string[] {
     }
     const gitDiffMatch = line.match(/^diff --git a\/(.+?) b\/(.+?)\s*$/);
     if (gitDiffMatch) {
-      pushUnique(gitDiffMatch[2]);
+      pushUnique(normalizeDiffPath(gitDiffMatch[2]));
       continue;
     }
     const plusMatch = line.match(/^\+\+\+ b\/(.+?)\s*$/);
     if (plusMatch?.[1]) {
-      pushUnique(plusMatch[1]);
+      pushUnique(normalizeDiffPath(plusMatch[1]));
     }
   }
   return paths;

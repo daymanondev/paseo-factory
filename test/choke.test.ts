@@ -1234,6 +1234,11 @@ test("Copilot/ACP apply_patch edit asks extract target file paths instead of jud
               kind: "edit",
               rawInput: "*** Begin Patch\n*** Add File: .scratch/init/architecture.md\n+# Architecture\n",
             },
+            permissionRequest: {
+              kind: "write",
+              fileName: join(worktree, ".scratch/init/architecture.md"),
+              diff: `\ndiff --git a/${join(worktree, ".scratch/init/architecture.md").slice(1)} b/${join(worktree, ".scratch/init/architecture.md").slice(1)}\n--- a/dev/null\n+++ b/${join(worktree, ".scratch/init/architecture.md").slice(1)}\n@@ -1,0 +1,1 @@\n+# Architecture\n`,
+            },
           },
         },
       },
