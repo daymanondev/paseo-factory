@@ -376,7 +376,7 @@ function shellWriteDestinations(tokens: readonly string[]): string[] {
     const redirect = token.match(/^(?:\d*|&)>>?(.*)$/);
     if (redirect) {
       const dest = redirect[1] !== "" ? redirect[1] : tokens[i + 1];
-      if (dest !== undefined) destinations.push(dest);
+      if (dest !== undefined && !/^&(?:\d+|-)$/.test(dest) && dest !== "/dev/null") destinations.push(dest);
       continue;
     }
     if (token === "tee") {
@@ -750,7 +750,7 @@ function isFactoryCliSegment(
     const redirect = w.match(/^(?:\d*|&)>>?(.*)$/);
     if (redirect) {
       const dest = redirect[1] !== "" ? redirect[1]! : words[i + 1];
-      if (dest !== undefined && !isSeatMemoryPathAllowed(projectRoot, dest, stateDir, tmpDirs)) {
+      if (dest !== undefined && !/^&(?:\d+|-)$/.test(dest) && !isSeatMemoryPathAllowed(projectRoot, dest, stateDir, tmpDirs)) {
         return false;
       }
     }

@@ -7,7 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.69] - 2026-10-30
+
+### Fixed
+
+- Ignore shell file-descriptor redirections (`2>&1`, `1>&2`, `>&-`) and `/dev/null` in `shellWriteDestinations` so `policy:scrum-artifact-only` does not treat `&1` as an out-of-scope file write.
+- Clarify Scrum specialist prompt instructions to name both the `agent_claim` MCP tool and `factory-claim --task <task> --sha <sha>` CLI on `PATH`.
+
 ## [0.0.68] - 2026-10-30
+
+### Fixed
+
+- Normalize stripped leading slashes on absolute paths inside git unified diffs (`diff --git a/Users/... b/Users/...`) when judging Copilot/ACP `apply_patch` permission requests.
 
 ## [0.0.67] - 2026-10-30
 

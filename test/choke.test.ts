@@ -1300,4 +1300,15 @@ test("Copilot/ACP apply_patch edit asks extract target file paths instead of jud
     assert.equal(lastEvent.rule, "policy:scrum-artifact-only");
     assert.equal(lastEvent.command, "src/index.ts");
   }
+
+  // 3) Shell command with 2>&1 fd redirection under artifactOnly: true is allowed (not treated as writing to file "&1")
+  const roots = writableRootsFor(worktree, factory.stateDir, dir);
+  const fdDecision = judgeShellCommand("node script.js 2>&1 | head -20", roots, {
+    workspace,
+    worktree,
+    scope: [".scratch/init/architecture.md"],
+    artifactOnly: true,
+    scrumRole: "architect",
+  });
+  assert.equal(fdDecision.behavior, "allow");
 });
