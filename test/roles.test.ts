@@ -1015,6 +1015,39 @@ test("injectRoleOnCreate and injectSessionEnv: starting Supervisor (Factory) or 
 
 
 
+test("role surfaces enforce rolling waves, modular isolated tests, bounded checks, and context-ceiling recovery", t => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const root = makeGitRepo(dir);
+  for (const seat of ["lead", "supervisor"] as const) {
+    const surfaces = [renderRoleContract(seat), renderSeatContract(seat, { root, slug: "repo" }), ROLE_PROMPTS[seat],
+      renderSeatBootstrapPrompt({ seat, home: "/trial", stateDir: "/trial/state", nodePath: process.execPath, path: "/usr/bin", lane: "pi/model", project: { root, slug: "repo" } }),
+      renderSeatBootstrap({ seat, home: "/trial", stateDir: "/trial/state", nodePath: process.execPath, path: "/usr/bin", lane: "pi/model", project: { root, slug: "repo" } }),
+      buildSeatKickoffPacket({ role: seat, projectSlug: "repo", projectRoot: root, ledgerEvents: [] })];
+    for (const surface of surfaces) {
+      assert.match(surface, /monolithic test file/);
+      assert.match(surface, /per.slice test files/);
+      assert.doesNotMatch(surface, /Godot|Unity|Phaser|playable Hero|Rain of Fire/);
+      if (seat === "lead") {
+        assert.match(surface, /rolling-wave outline/);
+        assert.match(surface, /Stable Checkpoint.*repository growth.*split/);
+        assert.match(surface, /T-04a.*T-04b/);
+        assert.match(surface, /isolated fixture/);
+        assert.match(surface, /timeout/);
+        assert.match(surface, /BLOCKED \(context-ceiling\)/);
+        assert.match(surface, /peer-handoff-<task>.md/);
+      }
+    }
+  }
+  for (const surface of [renderRoleContract("agent"), renderAgentContract("T-04", "repo"), ROLE_PROMPTS.agent]) {
+    assert.match(surface, /per.slice test files/);
+    assert.match(surface, /isolated fixture/);
+    assert.match(surface, /explicit timeout/);
+    assert.match(surface, /full cumulative Gate.*before.*factory-claim/);
+    assert.doesNotMatch(surface, /Godot|Unity|Phaser/);
+  }
+});
+
 test("role surfaces teach bounded serial waves, closure, and structured challenges (ADR 0029)", (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);

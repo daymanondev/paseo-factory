@@ -859,7 +859,7 @@ async function archiveTaskAgentBestEffort(daemon: SurfaceDaemonApi | undefined, 
   }
 }
 
-async function resolveSpawnWorkspaceAndParent(
+export async function resolveSpawnWorkspaceAndParent(
   factory: Factory,
   daemon: SurfaceDaemonApi | undefined,
   task: string,
@@ -949,7 +949,7 @@ async function resolveSpawnWorkspaceAndParent(
  * die at spawn. An explicit provider/model override naming a different lane
  * keeps the requested value verbatim (full backward compatibility).
  */
-async function resolvePeerSpawnProvider(
+export async function resolvePeerSpawnProvider(
   factory: Factory,
   requestedProvider: string,
   projectSlug: string | undefined,
@@ -975,6 +975,160 @@ async function resolvePeerSpawnProvider(
   return thinking !== undefined
     ? `${parsedWorker.provider}/${parsedWorker.model}:${thinking}`
     : `${parsedWorker.provider}/${parsedWorker.model}`;
+}
+
+export function associateTaskPeer(factory: Factory, task: string, agentId: string): void {
+  const contract = factory.contractFor(task);
+  const proj = contract === undefined ? undefined : resolveProject(contract.workspace);
+  if (!proj?.ok) return;
+  const request = { task };
+  const correlations = new CorrelationRegistry(factory.stateDir);
+  if (correlations.findByAgentId(agentId) === undefined) {
+    const unassociated = correlations
+      .list()
+      .findLast((r) => r.role === "agent" && r.projectSlug === proj.slug && r.task === request.task && r.agentId === undefined);
+    if (unassociated !== undefined) {
+      correlations.associate(unassociated.correlationId, agentId);
+    } else {
+      correlations.issue({
+        role: "agent",
+        projectSlug: proj.slug,
+        projectRoot: proj.root,
+        task: request.task,
+        agentId: agentId,
+      });
+    }
+  }
+}
+
+/** Shared Peer creation, workspace recovery, and correlation binding. Caller owns the Project lifecycle lane. */
+export async function createTaskPeer(input: {
+  factory: Factory;
+  daemon: SurfaceDaemonApi;
+  task: string;
+  worktree?: string;
+  provider: string;
+  prompt: string;
+  home?: string;
+  spawnMeta: { leadAgentId?: string; workspaceId?: string; projectSlug?: string };
+  extraLabels?: Record<string, string>;
+}): Promise<string | undefined> {
+  const { factory, daemon: resolvedDaemon, home, spawnMeta, prompt: effectivePrompt, provider: peerProvider, extraLabels } = input;
+  const request = { task: input.task, worktree: input.worktree };
+  const contract = factory.contractFor(request.task);
+  let spawnedAgentId: string | undefined;
+  const parsedPeer = parseLane(peerProvider);
+  const peerConfig =
+    parsedPeer?.thinking !== undefined
+      ? { provider: `${parsedPeer.provider}/${parsedPeer.model}`, thinkingOptionId: parsedPeer.thinking }
+      : { provider: peerProvider };
+  const targetCwd = request.worktree ?? contract?.workspace ?? "";
+  const proj = contract !== undefined ? resolveProject(contract.workspace) : undefined;
+  const peerTitle = contract?.execution ? `${SCRUM_ROLE_TITLES[contract.execution.role]} · ${request.task}` : formatPeerAgentTitle(request.task);
+  const labels: Record<string, string> = {
+    ...extraLabels,
+    ...(contract?.execution ? { execution: "scrum", run: contract.execution.runId, specialization: contract.execution.role, epoch: String(contract.seq) } : {}),
+    seat: "agent",
+    task: request.task,
+    ...(proj?.ok ? { project: proj.slug } : {}),
+  };
+  const createOrRecover = async (create: () => Promise<{ id: string }>): Promise<{ id: string }> => {
+    try { return await create(); }
+    catch (error) {
+      if (!extraLabels?.peerHandoff) throw error;
+      // A failed acknowledgement may follow a successful remote create.
+      // Never retry that identity without an authoritative daemon census.
+      let page;
+      try { page = await resolvedDaemon.agents.list({ filter: { includeArchived: true, includeBackground: true } }); }
+      catch { throw new FactoryError("peer-create-uncertain", "cannot confirm whether the handoff successor was created; defer recovery"); }
+      const existing = page.entries.find(({ agent }) => agent.labels.peerHandoff === extraLabels.peerHandoff && agent.labels.project === labels.project && agent.labels.task === labels.task);
+      if (existing) return { id: existing.agent.id };
+      throw error;
+    }
+  };
+  const createPeerInWorkspace = async (targetWorkspaceId: string): Promise<{ id: string }> =>
+    createOrRecover(() => resolvedDaemon.workspaces!.ref(targetWorkspaceId).agents.create({
+      config: peerConfig,
+      // The Agent tab inside the Task worktree Workspace reads
+      // `Peer · <Task>` (v0.0.31, ADR 0017 §2) — never the bare task id.
+      title: peerTitle,
+      labels,
+      prompt: effectivePrompt,
+      ...(spawnMeta.leadAgentId !== undefined ? { parent: spawnMeta.leadAgentId } : {}),
+    }));
+  if (spawnMeta.workspaceId !== undefined && resolvedDaemon.workspaces !== undefined) {
+    try {
+      const created = await createPeerInWorkspace(spawnMeta.workspaceId);
+      spawnedAgentId = created.id;
+    } catch (error) {
+      if (error instanceof FactoryError && error.code === "peer-create-uncertain") throw error;
+      const restored = await restoreDaemonWorkspaceViaWs(home, spawnMeta.workspaceId);
+      if (restored.ok) {
+        try {
+          const created = await createPeerInWorkspace(spawnMeta.workspaceId);
+          spawnedAgentId = created.id;
+        } catch (error) {
+          if (error instanceof FactoryError && error.code === "peer-create-uncertain") throw error;
+          // fall through to workspace recreate / daemon.agents.create
+        }
+      }
+      if (
+        spawnedAgentId === undefined &&
+        targetCwd !== "" &&
+        typeof resolvedDaemon.workspaces.create === "function"
+      ) {
+        try {
+          const reg = proj?.ok ? readProjectRegistration(factory.stateDir, proj.slug) : undefined;
+          const recreated = await resolvedDaemon.workspaces.create({
+            title: formatPeerWorkspaceTitle(request.task, contract?.description),
+            source: {
+              kind: "directory",
+              path: targetCwd,
+              ...(reg?.paseoProjectId !== undefined ? { projectId: reg.paseoProjectId } : {}),
+            },
+          });
+          if (typeof recreated?.id === "string" && recreated.id !== "") {
+            spawnMeta.workspaceId = recreated.id;
+            if (proj?.ok) {
+              writeProjectRegistration(factory.stateDir, proj.slug, {
+                root: proj.root,
+                taskWorkspaces: { [request.task]: recreated.id },
+              });
+            }
+            const created = await createPeerInWorkspace(recreated.id);
+            spawnedAgentId = created.id;
+          }
+        } catch (error) {
+          if (error instanceof FactoryError && error.code === "peer-create-uncertain") throw error;
+          // fall through to daemon.agents.create
+        }
+      }
+      if (spawnedAgentId === undefined && typeof resolvedDaemon.agents?.create === "function") {
+        const created = await createOrRecover(() => resolvedDaemon.agents.create({
+          config: peerConfig,
+          cwd: targetCwd,
+          title: peerTitle,
+          labels,
+          prompt: effectivePrompt,
+        }));
+        spawnedAgentId = created.id;
+      }
+    }
+  } else if (typeof resolvedDaemon.agents?.create === "function") {
+    const created = await createOrRecover(() => resolvedDaemon.agents.create({
+      config: peerConfig,
+      cwd: targetCwd,
+      // The Agent tab reads `Peer · <Task>` on the legacy shared-checkout
+      // path too (v0.0.31, ADR 0017 §2).
+      title: peerTitle,
+      labels,
+      prompt: effectivePrompt,
+      ...(spawnMeta.leadAgentId !== undefined ? { parent: spawnMeta.leadAgentId } : {}),
+    }));
+    spawnedAgentId = created.id;
+  }
+  if (spawnedAgentId !== undefined) associateTaskPeer(factory, request.task, spawnedAgentId);
+  return spawnedAgentId;
 }
 
 /**
@@ -1170,11 +1324,18 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
       };
     }
     if (request.kind === "claim") {
-      const outcome = await factory.claim({
+      const admit = async () => ({ completion: factory.claim({
         task: request.task,
         sha: request.sha,
         ...(request.agent === undefined ? {} : { agent: request.agent }),
-      });
+      }) });
+      const contract = factory.contractFor(request.task);
+      const project = contract === undefined ? undefined : resolveProject(contract.workspace);
+      // Claim admission synchronously records gate_started under the same
+      // lifecycle lane as handoff. Release the lane before awaiting the Gate:
+      // permits, mailbox delivery, and context observation remain available.
+      const admitted = project?.ok ? await withExecutionLane(factory.stateDir, project.slug, admit) : await admit();
+      const outcome = await admitted.completion;
       // The peer hook (v0.0.20, ADR 0013 §4): a verdict is a terminal Task
       // outcome the Project's Lead must hear — the hook appends `mail_queued`
       // (`from: "peer"`) on the owning Project's lane, held while a Driver
@@ -1379,11 +1540,6 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         // (v0.0.27, ADR 0017 §2) — `paseoTools` off, seat env on — falling back
         // to the requested lane verbatim.
         const peerProvider = frozenLane === undefined ? await resolvePeerSpawnProvider(factory, sanitizedProvider, spawnMeta.projectSlug) : sanitizedProvider;
-        const parsedPeer = parseLane(peerProvider);
-        const peerConfig =
-          parsedPeer?.thinking !== undefined
-            ? { provider: `${parsedPeer.provider}/${parsedPeer.model}`, thinkingOptionId: parsedPeer.thinking }
-            : { provider: peerProvider };
         const contract = factory.contractFor(request.task);
         let effectivePrompt = request.prompt;
         if (contract !== undefined && effectivePrompt.startsWith(`Execute task ${request.task}:`)) {
@@ -1402,112 +1558,8 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
           enriched.push(effectivePrompt);
           effectivePrompt = enriched.join("\n\n");
         }
-        const targetCwd = request.worktree ?? contract?.workspace ?? "";
-        const proj = contract !== undefined ? resolveProject(contract.workspace) : undefined;
-        const peerTitle = contract?.execution ? `${SCRUM_ROLE_TITLES[contract.execution.role]} · ${request.task}` : formatPeerAgentTitle(request.task);
-        const labels: Record<string, string> = {
-          ...(contract?.execution ? { execution: "scrum", run: contract.execution.runId, specialization: contract.execution.role, epoch: String(contract.seq) } : {}),
-          seat: "agent",
-          task: request.task,
-          ...(proj?.ok ? { project: proj.slug } : {}),
-        };
-        const createPeerInWorkspace = async (targetWorkspaceId: string): Promise<{ id: string }> =>
-          resolvedDaemon.workspaces!.ref(targetWorkspaceId).agents.create({
-            config: peerConfig,
-            // The Agent tab inside the Task worktree Workspace reads
-            // `Peer · <Task>` (v0.0.31, ADR 0017 §2) — never the bare task id.
-            title: peerTitle,
-            labels,
-            prompt: effectivePrompt,
-            ...(spawnMeta.leadAgentId !== undefined ? { parent: spawnMeta.leadAgentId } : {}),
-          });
-        if (spawnMeta.workspaceId !== undefined && resolvedDaemon.workspaces !== undefined) {
-          try {
-            const created = await createPeerInWorkspace(spawnMeta.workspaceId);
-            spawnedAgentId = created.id;
-          } catch {
-            const restored = await restoreDaemonWorkspaceViaWs(home, spawnMeta.workspaceId);
-            if (restored.ok) {
-              try {
-                const created = await createPeerInWorkspace(spawnMeta.workspaceId);
-                spawnedAgentId = created.id;
-              } catch {
-                // fall through to workspace recreate / daemon.agents.create
-              }
-            }
-            if (
-              spawnedAgentId === undefined &&
-              targetCwd !== "" &&
-              typeof resolvedDaemon.workspaces.create === "function"
-            ) {
-              try {
-                const reg = proj?.ok ? readProjectRegistration(factory.stateDir, proj.slug) : undefined;
-                const recreated = await resolvedDaemon.workspaces.create({
-                  title: formatPeerWorkspaceTitle(request.task, contract?.description),
-                  source: {
-                    kind: "directory",
-                    path: targetCwd,
-                    ...(reg?.paseoProjectId !== undefined ? { projectId: reg.paseoProjectId } : {}),
-                  },
-                });
-                if (typeof recreated?.id === "string" && recreated.id !== "") {
-                  spawnMeta.workspaceId = recreated.id;
-                  if (proj?.ok) {
-                    writeProjectRegistration(factory.stateDir, proj.slug, {
-                      root: proj.root,
-                      taskWorkspaces: { [request.task]: recreated.id },
-                    });
-                  }
-                  const created = await createPeerInWorkspace(recreated.id);
-                  spawnedAgentId = created.id;
-                }
-              } catch {
-                // fall through to daemon.agents.create
-              }
-            }
-            if (spawnedAgentId === undefined && typeof resolvedDaemon.agents?.create === "function") {
-              const created = await resolvedDaemon.agents.create({
-                config: peerConfig,
-                cwd: targetCwd,
-                title: peerTitle,
-                labels,
-                prompt: effectivePrompt,
-              });
-              spawnedAgentId = created.id;
-            }
-          }
-        } else if (typeof resolvedDaemon.agents?.create === "function") {
-          const created = await resolvedDaemon.agents.create({
-            config: peerConfig,
-            cwd: targetCwd,
-            // The Agent tab reads `Peer · <Task>` on the legacy shared-checkout
-            // path too (v0.0.31, ADR 0017 §2).
-            title: peerTitle,
-            labels,
-            prompt: effectivePrompt,
-            ...(spawnMeta.leadAgentId !== undefined ? { parent: spawnMeta.leadAgentId } : {}),
-          });
-          spawnedAgentId = created.id;
-        }
-        if (spawnedAgentId !== undefined && proj?.ok) {
-          const correlations = new CorrelationRegistry(factory.stateDir);
-          if (correlations.findByAgentId(spawnedAgentId) === undefined) {
-            const unassociated = correlations
-              .list()
-              .findLast((r) => r.role === "agent" && r.projectSlug === proj.slug && r.task === request.task && r.agentId === undefined);
-            if (unassociated !== undefined) {
-              correlations.associate(unassociated.correlationId, spawnedAgentId);
-            } else {
-              correlations.issue({
-                role: "agent",
-                projectSlug: proj.slug,
-                projectRoot: proj.root,
-                task: request.task,
-                agentId: spawnedAgentId,
-              });
-            }
-          }
-        }
+        spawnedAgentId = await createTaskPeer({ factory, daemon: resolvedDaemon, task: request.task,
+          worktree: request.worktree, provider: peerProvider, prompt: effectivePrompt, home, spawnMeta });
       }
       return {
         id: request.id,

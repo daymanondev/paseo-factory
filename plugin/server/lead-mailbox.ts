@@ -83,6 +83,9 @@ import type {
   SpoolSupervisorReportRequest,
 } from "./spool.ts";
 import type { SurfaceAgentSnapshot, SurfaceDaemonApi } from "./surface-rpc.ts";
+import { createPeerHandoffRuntime } from "./peer-handoff.ts";
+import type { DaemonReply } from "./daemon-cli.ts";
+export { PEER_HANDOFF_TOKENS } from "./peer-handoff.ts";
 
 /**
  * The fixed `Lead handoff` threshold (ADR 0013 §5): 128,000 tokens, a
@@ -144,7 +147,7 @@ export interface LeadContextTokens {
  */
 export function readLeadContextTokens(lead: SurfaceAgentSnapshot): LeadContextTokens {
   const used = finiteNumber(lead.lastUsage?.contextWindowUsedTokens);
-  if (used !== null) {
+  if (used !== null && used > 0) {
     return { usedTokens: used, maxTokens: finiteNumber(lead.lastUsage?.contextWindowMaxTokens), source: "daemon" };
   }
   const native = lead.persistence?.nativeHandle;
@@ -223,6 +226,8 @@ export type LeadSeatEnsureResult = EnsureLeadResult;
 export interface LeadMailRuntimeDeps {
   factory: Factory;
   stateDir: string;
+  home?: string;
+  stopAgent?: (agentId: string, home?: string) => Promise<DaemonReply>;
   /** The daemon to deliver through — the live PaseoApi or the tests' fake. */
   daemon: SurfaceDaemonApi | (() => SurfaceDaemonApi);
   /**
@@ -284,6 +289,8 @@ export interface LeadMailRuntime {
    * instead of waiting for the next dispatch.
    */
   pumpAll(options?: { reconcileScrumOnly?: boolean }): Promise<void>;
+  /** Periodic Peer context observation without retrying unrelated seat mail. */
+  sweepPeers(): Promise<void>;
   /**
    * The rotation settle (ADR 0013 Decision 3's last arm): requeue any
    * un-acked in-flight delivery of one Project's mailbox as `mail_requeued`
@@ -339,6 +346,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     }
   };
   const stop = (): void => {
+    peerHandoff.stop();
     for (const timer of handoffTimers.values()) clearTimeout(timer);
     handoffTimers.clear();
   };
@@ -349,6 +357,21 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   };
   const resolveDaemon = (): SurfaceDaemonApi => (typeof deps.daemon === "function" ? deps.daemon() : deps.daemon);
   const mailboxPath = (slug: string): string => join(projectStateDir(deps.stateDir, slug), "mailbox.jsonl");
+  const peerBlockersQueued = new Set<string>();
+  const peerHandoff = createPeerHandoffRuntime({
+    factory: deps.factory, stateDir: deps.stateDir, home: deps.home, stopAgent: deps.stopAgent,
+    daemon: resolveDaemon, timeoutMs: handoffTimeoutMs, readTokens: readLeadContextTokens, log,
+    queueBlocked: (slug, task, epoch, text) => {
+      for (const to of ["lead", "supervisor"] as const) {
+        appendMailQueued(mailboxPath(slug), { requestId: `peer-context-ceiling:${task}:${epoch}:${to}`, to, from: "peer", kind: "needs_human", task, text });
+      }
+      peerBlockersQueued.add(slug);
+    },
+    wake: async slug => {
+      const project = readProjectRegistration(deps.stateDir, slug);
+      if (project) await observePeers(project);
+    },
+  });
 
   const projectLane = <T>(slug: string, run: () => Promise<T>): Promise<T> => {
     const prior = lanes.get(slug) ?? Promise.resolve();
@@ -584,6 +607,11 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   /** Runs the lane — the one door delivery and rotation observation go through. */
   const pumpProjectLead = async (slug: string): Promise<void> => {
     await projectLane(slug, async () => {
+      const project = readProjectRegistration(deps.stateDir, slug);
+      if (project) {
+        try { await peerHandoff.observeProject(slug, project.root); }
+        catch (error) { log(`Peer handoff observation deferred: ${messageOf(error)}`); }
+      }
       try {
         await observeRotation(slug);
       } catch (err) {
@@ -658,7 +686,24 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
    * Never rejects: a failed step logs and holds (holding is the safe state,
    * losing is the bug).
    */
+  const observePeers = async (project: { slug: string; root: string }, input?: LeadTurnEndedInput): Promise<void> => {
+    await projectLane(project.slug, async () => {
+      try {
+        await peerHandoff.observeProject(project.slug, project.root, input);
+        if (peerBlockersQueued.delete(project.slug)) {
+          await drainLeadMailbox(project.slug);
+          await drainSupervisorMailbox(project.slug);
+        }
+      } catch (error) { log(`Peer handoff observation deferred: ${messageOf(error)}`); }
+    });
+  };
+  const sweepPeers = async (): Promise<void> => {
+    for (const project of listProjectRegistrations(deps.stateDir)) await observePeers(project);
+  };
   const onLeadTurnEnded = async (input: LeadTurnEndedInput): Promise<void> => {
+    for (const project of listProjectRegistrations(deps.stateDir)) {
+      if (project.lead !== input.agentId && project.supervisor !== input.agentId) await observePeers(project, input);
+    }
     // Which Project's Lead or Supervisor ended a turn: the registry's durable binding names it.
     let ownedLead: { slug: string; root: string } | undefined;
     let ownedSupervisor: { slug: string; root: string } | undefined;
@@ -1313,6 +1358,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   };
 
   const resetProjectMailbox = (slug: string): void => {
+    peerHandoff.reset(slug);
     clearHandoffTimer(slug);
     handingOverBySlug.delete(slug);
     const prefix = `${slug}:`;
@@ -1348,6 +1394,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     onLeadTurnEnded,
     startupRecovery,
     pumpAll,
+    sweepPeers,
     settleLeadRotation,
     resetProjectMailbox,
     markKickoffSent,

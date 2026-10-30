@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.64] - 2026-10-30
+
+### Added
+
+- Automatically hand off working Peers at 160,000 context tokens, including during a running provider turn. One successor per Contract epoch continues in the existing Task worktree with its Contract, verified git digest, and bounded handoff summary; a second ceiling crossing archives the Peer and sends `BLOCKED (context-ceiling)` to Lead and Supervisor.
+- Persist handoff allowance and recovery phases across restarts, with immediate extraction-error fallback and a 90-second extraction timeout.
+- Teach rolling-wave re-decomposition at Stable Checkpoints, modular per-slice tests with isolated fixtures, and bounded inner-loop and Gate verification across role contracts and kickoff prompts.
+
 ## [0.0.63] - 2026-10-30
 
 ### Added

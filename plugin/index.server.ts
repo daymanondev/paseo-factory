@@ -32,7 +32,7 @@ import { createSurfaceHandlers, registerSurfaceRpc } from "./server/surface-rpc.
 import { createLeadMailRuntime } from "./server/lead-mailbox.ts";
 import { injectRoleOnCreate, injectSessionEnv, sanitizeAgentCreateHookResult } from "./server/roles.ts";
 
-const SHELL_VERSION = "0.0.63";
+const SHELL_VERSION = "0.0.64";
 
 const log = (message: string) => console.log(`[${PLUGIN_ID}] ${message}`);
 
@@ -226,6 +226,7 @@ export default function contribute(server: PluginServerContext) {
   const leadMail = createLeadMailRuntime({
     factory,
     stateDir,
+    home,
     daemon: () => paseoApi as never,
     reconcileScrum: async project => {
       if (readExecution(stateDir, project.slug).mode !== "scrum") return;
@@ -275,6 +276,13 @@ export default function contribute(server: PluginServerContext) {
     void leadMail.pumpAll({ reconcileScrumOnly: true }).catch(error => log(`scrum recovery deferred: ${String(error)}`)).finally(() => { scrumRecoveryInFlight = false; });
   }, 1000);
   scrumRecoveryTimer.unref?.();
+  let peerSweepInFlight = false;
+  const peerSweepTimer = setInterval(() => {
+    if (!booted || !mailRecovered || !paseoApi || peerSweepInFlight || pendingUpgradeFor(stateDir) !== undefined) return;
+    peerSweepInFlight = true;
+    void leadMail.sweepPeers().catch(error => log(`Peer context sweep deferred: ${String(error)}`)).finally(() => { peerSweepInFlight = false; });
+  }, 5_000);
+  peerSweepTimer.unref?.();
   // The turn boundary (v0.0.20, ADR 0013 §5; v0.0.23, ADR 0015 §3): every
   // `agent.turn_ended` hands the Lead-mailbox runtime the event — it settles
   // the in-flight batch (`mail_acked` on completed, `mail_requeued` otherwise)
@@ -448,6 +456,7 @@ export default function contribute(server: PluginServerContext) {
     clearTimeout(postReadySyncTimer);
     clearInterval(recoveryTimer);
     clearInterval(scrumRecoveryTimer);
+    clearInterval(peerSweepTimer);
     offPermissionAsked();
     offAgentCreate();
     offSessionOpen();

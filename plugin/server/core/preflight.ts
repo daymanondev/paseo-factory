@@ -11,7 +11,7 @@ import { projectMemoryPresence } from "./project-memory.ts";
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { LEAD_WAVE_LAWS } from "./roles-contract.ts";
+import { LEAD_WAVE_LAWS, SUPERVISOR_OUTCOME_BOUNDARY } from "./roles-contract.ts";
 import type { LedgerEvent } from "./events.ts";
 
 export interface SeatKickoffPacketInput {
@@ -170,7 +170,7 @@ export function buildSeatKickoffPacket(input: SeatKickoffPacketInput): string {
     `- Ledger tasks: ${tasksSummary}`,
     `- Role MCP tools (paseo_factory): ${roleTools}`,
     `- Law: ${fireAndEndTurn}`,
-    ...(input.role === "lead" ? LEAD_WAVE_LAWS.map((law) => `- Law: ${law}`) : []),
+    ...(input.role === "lead" ? LEAD_WAVE_LAWS.map((law) => `- Law: ${law}`) : [`- Law: ${SUPERVISOR_OUTCOME_BOUNDARY}`]),
     `--- [end seat kickoff packet] ---`,
     "",
   ].join("\n");
