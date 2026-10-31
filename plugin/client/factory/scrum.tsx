@@ -1,5 +1,6 @@
 import { ScrumOwnerWork, useOwnerCommand, CommandStatus } from "./owner-work.tsx";
 import type { PluginTheme } from "@getpaseo/plugin";
+import { openExternalUrl } from "@getpaseo/plugin/client";
 import {
   Icon,
   Modal,
@@ -228,6 +229,9 @@ function MockupApproval({
   const [viewport, setViewport] = useState('desktop');
   const [screen, setScreen] = useState('');
   const [designState, setDesignState] = useState('populated');
+  const [studioOpening, setStudioOpening] = useState(false);
+  const [studioError, setStudioError] = useState("");
+  const studioRequest = useRef(false);
   const [captureUrl, setCaptureUrl] = useState<string | null>(null);
   const [stageWidth, setStageWidth] = useState(420);
   const frame = useRef<HTMLIFrameElement | null>(null);
@@ -236,18 +240,6 @@ function MockupApproval({
   const scale = Math.min(1, stageWidth / designWidth);
   const switchPreview = () => frame.current?.contentWindow?.postMessage({ type: 'scrum:set-state', screen, state: designState }, '*');
   useEffect(switchPreview, [screen, designState, preview]);
-  const openExternalBrowser = async (targetUrl: string): Promise<void> => {
-    const desktopOpenUrl = (
-      globalThis as {
-        paseoDesktop?: { opener?: { openUrl?: (url: string) => Promise<unknown> } };
-      }
-    ).paseoDesktop?.opener?.openUrl;
-    if (typeof desktopOpenUrl === 'function') {
-      await desktopOpenUrl(targetUrl);
-      return;
-    }
-    window.open(targetUrl, '_blank', 'noopener,noreferrer');
-  };
   const resolveReachableStudioUrl = async (candidates: readonly string[], expectedDigest?: string): Promise<string | null> => {
     if (candidates.length === 0) return null;
     if (candidates.length === 1) return candidates[0]!;
@@ -278,16 +270,25 @@ function MockupApproval({
     const firstRemote = remoteResults.find((r): r is string => r !== null);
     return firstRemote ?? candidates[1] ?? candidates[0]!;
   };
-  const openStudio = () => {
-    void action?.('preview.url', {}, run?.runId).then(async (reply) => {
+  const openStudio = async () => {
+    if (!action || studioRequest.current) return;
+    studioRequest.current = true;
+    setStudioOpening(true);
+    setStudioError("");
+    try {
+      const reply = await action('preview.url', {}, run?.runId);
+      if (!reply.ok) throw new Error(reply.error ?? 'Could not prepare Design Studio. Try again.');
       const data = reply.data as { url?: string; urls?: string[] } | undefined;
-      if (!reply.ok || (!data?.url && (!Array.isArray(data?.urls) || data.urls.length === 0))) return;
-      const candidates = Array.isArray(data.urls) && data.urls.length > 0 ? data.urls : data.url ? [data.url] : [];
+      const candidates = Array.isArray(data?.urls) && data.urls.length > 0 ? data.urls : data?.url ? [data.url] : [];
       const targetUrl = await resolveReachableStudioUrl(candidates, run?.design?.digest);
-      if (targetUrl) {
-        await openExternalBrowser(targetUrl);
-      }
-    });
+      if (!targetUrl) throw new Error('Design Studio did not return a preview URL. Refresh Factory and try again.');
+      await openExternalUrl(targetUrl);
+    } catch (error) {
+      setStudioError(error instanceof Error ? error.message : String(error));
+    } finally {
+      studioRequest.current = false;
+      setStudioOpening(false);
+    }
   };
   if (!run?.design)
     return <Text style={text(theme, "meta")}>Awaiting design evidence.</Text>;
@@ -334,12 +335,13 @@ function MockupApproval({
           small
           solid
           icon="ExternalLink"
-          label="Open Design Studio in Browser ↗"
+          label={studioOpening ? "Opening Design Studio…" : "Open Design Studio in Browser ↗"}
           tone="accent"
-          disabled={busy}
+          disabled={busy || studioOpening || !action}
           onPress={openStudio}
         />
       </View>
+      {studioError ? <Text accessibilityRole="alert" style={text(theme, "meta", "statusDanger")}>{studioError}</Text> : null}
       <Text style={text(theme, "meta")}>
         Stage 4 (Senior Dev) is paused until you preview the UI mockup in your default browser and record an Owner decision.
       </Text>
@@ -415,7 +417,7 @@ function MockupApproval({
       >
         <Modal.Content>
           <View style={{ gap: SPACING[2] }}>
-            <Btn theme={theme} label="Open Full Design Studio ↗" solid tone="accent" disabled={busy} onPress={openStudio} />
+            <Btn theme={theme} label={studioOpening ? "Opening Design Studio…" : "Open Full Design Studio ↗"} solid tone="accent" disabled={busy || studioOpening || !action} onPress={openStudio} />
             <SegmentedControl theme={theme} value={viewport} onChange={setViewport} options={[{ value: 'desktop', label: 'Desktop' }, { value: 'tablet', label: 'Tablet' }, { value: 'mobile', label: 'Mobile' }]} />
             <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: SPACING[1] }}>
               {preview?.model.screens.map(s => <Btn key={s.id} theme={theme} small label={s.title ?? s.id} solid={screen === s.id} onPress={() => setScreen(s.id)} />)}

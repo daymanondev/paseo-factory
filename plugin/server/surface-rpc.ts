@@ -1917,6 +1917,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         };
         const result = project?.ok ? await withExecutionLane(deps.stateDir, project.slug, execute) : await execute();
         const decidedRun = result.data as {
+          mode?: string;
           runId?: string;
           phase?: string;
           design?: { revision?: number; digest?: string; decision?: string; rationale?: string; findings?: unknown[]; screenStatuses?: Record<string, string> };
@@ -1952,7 +1953,9 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
             log(`scrum: lead wakeup after ${input.operation} failed — ${messageOf(err)}`);
           }
         }
-        if (project?.ok && decidedRun?.runId) {
+        // Preview results also carry runId; only full run projections may be
+        // refreshed after notification delivery. Preserve each operation's payload.
+        if (project?.ok && decidedRun?.mode === "scrum" && decidedRun.runId) {
           const data = await deliverScrumNotifications(project, decidedRun.runId);
           return { ok: true as const, data };
         }

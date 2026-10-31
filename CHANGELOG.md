@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.75] - 2026-10-31
+
+### Fixed
+
+- Preserve Design Studio URLs, candidate addresses, preview HTML and model in Surface RPC replies. v0.0.74 incorrectly replaced preview results carrying a run ID with run snapshots while delivering durable notifications, so Open Design Studio silently did nothing.
+- Open Design Studio through the public plugin SDK platform opener, disable duplicate clicks while opening, and display preparation/opening errors instead of silently returning.
+
 ## [0.0.74] - 2026-10-31
 
 ### Added
