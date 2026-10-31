@@ -1,3 +1,4 @@
+import { ScrumOwnerWork, useOwnerCommand, CommandStatus } from "./owner-work.tsx";
 import type { PluginTheme } from "@getpaseo/plugin";
 import {
   Icon,
@@ -27,6 +28,7 @@ export type ScrumAction = (
   payload?: Record<string, unknown>,
   runId?: string,
   expectedRevision?: number,
+  requestId?: string,
 ) => Promise<{ ok: boolean; data?: unknown; error?: string }>;
 type ScrumConfig = NonNullable<NonNullable<FactoryView["execution"]>["config"]>;
 type ScrumSeatActions = {
@@ -215,6 +217,7 @@ function MockupApproval({
   busy: boolean;
 }) {
   const run = view.execution?.run;
+  const command = useOwnerCommand(run!, action);
   const [preview, setPreview] = useState<{
     html: string;
     digest: string;
@@ -386,9 +389,9 @@ function MockupApproval({
                     ? "Request Changes"
                     : "Waive"
               }
-              disabled={busy || !rationale.trim()}
+              disabled={busy || command.pending || !rationale.trim()}
               onPress={() =>
-                void action?.(
+                void command.submit(
                   "design.decide",
                   {
                     decision,
@@ -396,14 +399,13 @@ function MockupApproval({
                     revision: run.design!.revision,
                     digest: run.design!.digest,
                   },
-                  run.runId,
-                  run.revision,
                 )
               }
             />
           ),
         )}
       </View>
+      <CommandStatus theme={theme} command={command} />
       <Modal
         open={preview !== null && preview.digest === run.design.digest}
         onOpenChange={(open) => {
@@ -499,15 +501,8 @@ export function ScrumWorkflowPipeline({
             "Run cancelled"}
         </Text>
       ) : null}
-      {needsUiDecision ? (
-        <MockupApproval
-          key={`${run.runId}:${run.design?.digest}`}
-          theme={theme}
-          view={view}
-          action={action}
-          busy={actions.busy}
-        />
-      ) : null}
+      {run ? <ScrumOwnerWork key={run.runId} theme={theme} run={run} action={action} busy={actions.busy}
+        designReview={needsUiDecision ? <MockupApproval key={`${run.runId}:${run.design?.digest}`} theme={theme} view={view} action={action} busy={actions.busy} /> : undefined} /> : null}
       <View
         style={{
           flexDirection: "row",

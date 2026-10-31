@@ -19,7 +19,7 @@ export function scrumSeatOperation(input: ScrumOperation, ctx: ScrumOperationCon
     throw new FactoryError("scrum-seat-unauthorized", "tool belongs to another seat");
   if (!ctx.slug || !ctx.root) throw new FactoryError("project-required", "Project scope required");
   const original = input.payload ?? {};
-  if (!supervisor && !["get", "track.select", "readiness", "design.submit", "qa.audit", "fix.reserve", "bundle.promote", "run.complete", "preview"].includes(String(original.action))) throw new FactoryError("invalid-scrum-operation", String(original.action));
+  if (!supervisor && !["get", "wait.request", "track.select", "readiness", "design.submit", "qa.audit", "fix.reserve", "bundle.promote", "run.complete", "preview"].includes(String(original.action))) throw new FactoryError("invalid-scrum-operation", String(original.action));
   if (["get", "preview", "track.select"].includes(String(original.action)) && original.roleResults !== undefined) throw new FactoryError("invalid-role-results", "record results through readiness or QA");
   const fingerprint = sha256(JSON.stringify({ operation: input.operation, payload: original, runId: input.runId, actor: ctx.actor, authority: ctx.authority }));
   const bound = listRuns(ctx.factory.stateDir, ctx.slug).find(run => run.operationIntents?.some(intent => intent.operationId === input.requestId));
@@ -61,6 +61,7 @@ export function scrumSeatOperation(input: ScrumOperation, ctx: ScrumOperationCon
   };
   switch (p.action) {
     case "get": return run;
+    case "wait.request": return call("wait.request");
     case "track.select": return call("track.select");
     case "readiness":
       if (p.artifactRefs === undefined) return { run, readiness: run.readiness ?? null, blockers: run.blockers };

@@ -628,11 +628,11 @@ export function FactoryShell({
               pickProject: (root) => {
                 setPickedScope(root, true);
               },
-              scrum: async (operation, payload, runId, expectedRevision) => {
+              scrum: async (operation, payload, runId, expectedRevision, requestId) => {
                 if (projectRoot === undefined) {
                   return { ok: false, error: "All projects is view-only — select a project first" };
                 }
-                const reply = await scrumCommandCall({ operation, payload, runId, expectedRevision, projectRoot, requestId: `ui-${Date.now()}-${Math.random().toString(36).slice(2)}` });
+                const reply = await scrumCommandCall({ operation, payload, runId, expectedRevision, projectRoot, requestId: requestId ?? `ui-${Date.now()}-${Math.random().toString(36).slice(2)}` });
                 await act(`Scrum ${operation}`, async () => reply);
                 return reply;
               },
@@ -649,11 +649,11 @@ export function FactoryShell({
             modelSyncNote={laneNote}
             actions={{
               setMode: projectRoot ? requestMode : undefined,
-              scrum: async (operation, payload, runId, expectedRevision) => {
+              scrum: async (operation, payload, runId, expectedRevision, requestId) => {
                 if (projectRoot === undefined) {
                   return { ok: false, error: "All projects is view-only — select a project first" };
                 }
-                const reply = await scrumCommandCall({ operation, payload, runId, expectedRevision, projectRoot, requestId: `ui-${Date.now()}-${Math.random().toString(36).slice(2)}` });
+                const reply = await scrumCommandCall({ operation, payload, runId, expectedRevision, projectRoot, requestId: requestId ?? `ui-${Date.now()}-${Math.random().toString(36).slice(2)}` });
                 await act(`Scrum ${operation}`, async () => reply);
                 return reply;
               },

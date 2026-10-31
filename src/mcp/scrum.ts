@@ -10,7 +10,8 @@ const decision: ToolDefinition = {
 const operation: ToolDefinition = {
   name: "lead_scrum_operation", description: "Orchestrate the Scrum lifecycle. Evidence operations accept exact landed path/commit/sha256 artifactRefs; readiness also accepts contradictions, unsafeAssumptions and missingCoverage. Design submission requires browserEvidence. All evidence is verified by the existing controller.",
   inputSchema: { type: "object", properties: {
-    action: { type: "string", enum: ["get", "track.select", "readiness", "design.submit", "qa.audit", "fix.reserve", "bundle.promote", "run.complete", "preview"] }, runId,
+    action: { type: "string", enum: ["get", "wait.request", "track.select", "readiness", "design.submit", "qa.audit", "fix.reserve", "bundle.promote", "run.complete", "preview"] }, runId,
+    pendingId: string, question: string, affected: { type: "array", minItems: 1, items: { type: "object", properties: { kind: { type: "string", enum: ["task", "stage"] }, id: string }, required: ["kind", "id"] } },
     track: { type: "string", enum: ["quick", "standard", "enterprise"] }, rationale: string,
     designArtifact: string, digest: string, revision: { type: "integer" }, waiverReason: string, auditArtifact: string,
     verdict: string, findings: { type: "array", items: string }, parentTaskId: string, task: string, summary: string,

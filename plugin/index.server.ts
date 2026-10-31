@@ -32,7 +32,7 @@ import { createSurfaceHandlers, registerSurfaceRpc } from "./server/surface-rpc.
 import { createLeadMailRuntime } from "./server/lead-mailbox.ts";
 import { injectRoleOnCreate, injectSessionEnv, sanitizeAgentCreateHookResult } from "./server/roles.ts";
 
-const SHELL_VERSION = "0.0.73";
+const SHELL_VERSION = "0.0.74";
 
 const log = (message: string) => console.log(`[${PLUGIN_ID}] ${message}`);
 
@@ -216,6 +216,7 @@ export default function contribute(server: PluginServerContext) {
     onSeatKickoffSent: (input) => leadMail.markKickoffSent(input.agentId),
     resetProjectMailbox: (slug) => leadMail.resetProjectMailbox(slug),
     leadDispatch: (request) => leadMail.dispatchLead(request),
+    supervisorReport: (request) => leadMail.reportSupervisor(request),
   });
   // The Lead mailbox runtime (v0.0.20, ADR 0013 §4–§5): the single writer
   // around each Project's mailbox.jsonl. Its seat doors are the surface's
@@ -231,6 +232,7 @@ export default function contribute(server: PluginServerContext) {
     reconcileScrum: async project => {
       if (readExecution(stateDir, project.slug).mode !== "scrum") return;
       for (let run of listRuns(stateDir, project.slug)) {
+        if (run.wakeups?.some(w => !w.delivered)) run = await surface.scrumRecoverNotifications(project, run.runId);
         if (run.cancellation && !terminalRun(run)) {
           await surface.scrumCommand({ operation: "run.cancel", projectRoot: project.root, runId: run.runId, requestId: run.cancellation.requestId, expectedRevision: run.revision, payload: { reason: run.cancellation.reason } }, undefined, { authority: "owner", actor: run.cancellation.actor });
         } else if (run.completionRequest && !terminalRun(run)) {

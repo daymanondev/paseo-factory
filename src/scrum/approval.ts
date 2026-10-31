@@ -1,3 +1,4 @@
+import { assertOwnerDependencies } from "./owner-work.ts";
 import { lintScrumDoc } from "./linter.ts";
 import { trackKind } from "./tracks.ts";
 import { designScreens, browserCoverageIssues } from "./design-contract.ts";
@@ -43,14 +44,10 @@ export function verifyCompleteDesign(
       `complete design digest required: ${missing.join(", ")}`,
     );
 }
-export function assertDevReady(root: string, run: ScrumRun): void {
+export function assertDevReady(root: string, run: ScrumRun, task?: string): void {
+  assertOwnerDependencies(run, { task, stage: "implementation" });
   if (terminalRun(run) || run.phase === "blocked" || run.blockers.length > 0)
     throw new FactoryError("scrum-run-blocked", run.phase);
-  if (Date.now() - Date.parse(run.createdAt) >= run.budgets.maxElapsedMs)
-    throw new FactoryError(
-      "scrum-budget-exhausted",
-      "elapsed budget exhausted",
-    );
   const ready = run.readiness;
   if (
     !ready ||

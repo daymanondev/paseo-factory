@@ -72,7 +72,7 @@ import { ensureProjectRegistered, discoverProjects, writeProjectRegistration } f
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { COMPANION_CATALOG, COMPANION_TOOLS_CATALOG, CORE_PLUGIN_ENTRY, MANAGEABLE_PLUGIN_IDS, MANAGEABLE_TOOL_IDS } from "../shared/companions.ts";
 import type { CompanionCatalogEntry, CompanionToolCatalogEntry, ManageablePluginId } from "../shared/companions.ts";
-import type { SpoolLeadDispatchRequest, SpoolReply } from "./spool.ts";
+import type { SpoolLeadDispatchRequest, SpoolSupervisorReportRequest, SpoolReply } from "./spool.ts";
 import {
   accept,
   executionSetMode,
@@ -323,6 +323,7 @@ export interface SurfaceDeps {
    * `lead-dispatch-unavailable` precedent).
    */
   leadDispatch?: (request: SpoolLeadDispatchRequest) => Promise<SpoolReply>;
+  supervisorReport?: (request: SpoolSupervisorReportRequest) => Promise<SpoolReply>;
   /**
    * The vault transport seam (v0.0.21, ADR 0014 §2; tests): every external
    * CLI call the four `factory.vault.*` handlers make — `gh api`,
@@ -1812,7 +1813,31 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     return { ok: true, summary: res.summary };
   };
 
+  // The command journals notification intent before crossing the mailbox boundary.
+  // Mailbox request IDs dedupe the crash window between queueing and this receipt.
+  const deliverScrumNotifications = async (project: { root: string; slug: string }, runId: string) => {
+    let run = readRun(deps.stateDir, project.slug, runId);
+    for (const wakeup of run.wakeups ?? []) {
+      if (wakeup.delivered || terminalRun(run) || run.cancellation) continue;
+      const send = wakeup.target === "supervisor" ? deps.supervisorReport : deps.leadDispatch;
+      if (!send) continue;
+      try {
+        const reply = wakeup.target === "supervisor"
+          ? await deps.supervisorReport!({ id: `scrum:${runId}:${wakeup.id}`, kind: "supervisor_report", workspace: project.root, seat: "lead", scrum: { runId }, message: wakeup.message })
+          : await deps.leadDispatch!({ id: `scrum:${runId}:${wakeup.id}`, kind: "lead_dispatch", workspace: project.root, runId, from: "owner", message: wakeup.message });
+        if (!reply.ok) throw new Error(reply.message);
+        run = await withExecutionLane(deps.stateDir, project.slug, async () => {
+          const current = readRun(deps.stateDir, project.slug, runId);
+          return commandRun(deps.stateDir, project.slug, runId, { type: "wakeup_delivered", id: wakeup.id, requestId: `${wakeup.id}:delivered`, expectedRevision: current.revision });
+        });
+      } catch (error) { log(`scrum: durable notification ${wakeup.id} pending — ${messageOf(error)}`); }
+    }
+    return run;
+  };
   const handlers = {
+    // Runtime recovery only delivers already-recorded explicit acts; it never
+    // invents continuation for a blocked run during installation/startup.
+    scrumRecoverNotifications: deliverScrumNotifications,
     async executionSetMode(input: { mode: "slp" | "scrum"; projectRoot?: string }, context?: SurfaceCallContext) {
       try {
         if (!input.projectRoot || input.projectRoot.trim() === "") {
@@ -1923,6 +1948,10 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           } catch (err) {
             log(`scrum: lead wakeup after ${input.operation} failed — ${messageOf(err)}`);
           }
+        }
+        if (project?.ok && decidedRun?.runId) {
+          const data = await deliverScrumNotifications(project, decidedRun.runId);
+          return { ok: true as const, data };
         }
         return result;
       } catch (error) { return failure(codeOf(error), messageOf(error)); }

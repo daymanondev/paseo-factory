@@ -1231,6 +1231,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
           from: "lead",
           kind: "report",
           ...(request.reportType === undefined ? {} : { reportType: request.reportType, scrum: request.scrum, requestId: request.id }),
+          ...(typeof request.scrum?.runId === "string" ? { requestId: request.id, scrum: request.scrum } : {}),
           text: request.message,
         });
         if (request.reportType === "completed" && typeof request.scrum?.runId === "string") {

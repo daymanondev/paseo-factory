@@ -104,7 +104,7 @@ export function provisionScrumHarness(input: {
     if (identity.binding.role === "dev") {
       const project = readProjectRegistration(state, slug);
       if (!project) throw new FactoryError("unknown-project", slug);
-      assertDevReady(project.root, run);
+      assertDevReady(project.root, run, identity.task);
     }
   }
   const role =
@@ -137,6 +137,7 @@ export function provisionScrumHarness(input: {
       workspace: input.workspace ?? (identity.kind === "task" ? join(scopeDir(state, slug), "worktrees", identity.task) : readProjectRegistration(state, slug)?.root),
       ...(identity.kind === "task"
         ? {
+            run: readRun(state, slug, identity.binding.runId),
             task: identity.task,
             runId: identity.binding.runId,
             epoch: identity.epoch,

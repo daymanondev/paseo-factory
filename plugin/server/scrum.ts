@@ -1,3 +1,4 @@
+import { assertOwnerDependencies } from "./core/scrum/owner-work.ts";
 import { readCorrelations } from "./core/correlations.ts";
 /** Mode-local adapter at dispatch/Contract/spawn ingress. Common Gate/accept stays unchanged. */
 import { join } from "node:path";
@@ -89,13 +90,9 @@ export async function scrumSpawnLane(
       "scrum-run-blocked",
       "run/binding unavailable or mismatched",
     );
-  if (Date.now() - Date.parse(run.createdAt) >= run.budgets.maxElapsedMs)
-    throw new FactoryError(
-      "scrum-budget-exhausted",
-      "elapsed budget exhausted",
-    );
+  assertOwnerDependencies(run, { task, role: execution.role });
   verifyRefs(project.root, execution.artifactRefs, run.ownedPaths);
-  if (execution.role === "dev") assertDevReady(project.root, run);
+  if (execution.role === "dev") assertDevReady(project.root, run, task);
   const own = run.tasks.find(
     (t) => t.task === task && t.epoch === contract!.seq,
   );

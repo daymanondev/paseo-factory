@@ -1,3 +1,5 @@
+import { applyOwnerGrant, recordRunBlocker, continueLegacyElapsed, ensureDesignRequest, validateOwnerRequest, assertOwnerDependencies } from "./owner-work.ts";
+import type { OwnerRequest, OwnerGrant, RunBlocker, AllowanceDimension } from "./owner-work.ts";
 import { DESIGN_STATES, screenIdValid } from "./design-contract.ts";
 import type { ScrumDesignFinding, ScreenStatuses } from "./design-contract.ts";
 import type { ScrumTelemetry } from "./telemetry.ts";
@@ -20,7 +22,7 @@ import { scopeDir, scrumConfigIsValid, scrumMutation } from "./config.ts";
 import type { ScrumConfig } from "./config.ts";
 import { artifactRefIsValid, safeId, safePath } from "./types.ts";
 import type { ArtifactRef, ScrumRoleName } from "./types.ts";
-export const SCRUM_POLICY_REVISION = "0032-r2";
+export const SCRUM_POLICY_REVISION = "0038-r1";
 export const PHASES = [
   "planning",
   "design",
@@ -39,7 +41,8 @@ import type { RunTrack } from "./tracks.ts";
 export type { RunTrack } from "./tracks.ts";
 export interface RunBudgets {
   maxTasks: number;
-  maxElapsedMs: number;
+  /** Historical only: absent on new count-policy runs. */
+  maxElapsedMs?: number;
   maxQaFixRounds: number;
 }
 export interface RoleResult {
@@ -124,6 +127,11 @@ export interface ScrumRun {
   qaAudits: ArtifactRef[];
   promotions: ArtifactRef[];
   decisions: number;
+  ownerRequests?: OwnerRequest[];
+  allowanceGrants?: OwnerGrant[];
+  blockerDetails?: RunBlocker[];
+  continuations?: { requestId: string; actor: string; rationale: string }[];
+  wakeups?: { id: string; message: string; target?: "lead" | "supervisor"; delivered?: boolean }[];
   operationIntents?: { operationId: string; fingerprint: string; payload: Record<string, unknown> }[];
 }
 interface BaseCommand {
@@ -202,13 +210,19 @@ export type RunCommand = BaseCommand &
       }
     | { type: "bundle_promoted"; ref: ArtifactRef }
     | { type: "blockers_resolved"; resolution: string }
-    | { type: "blocked"; reason: string }
+    | { type: "allowance_granted"; grant: OwnerGrant; wakeup: string }
+    | { type: "owner_requested"; request: OwnerRequest }
+    | { type: "owner_resolved"; pendingId: string; outcome: "answered" | "cancelled"; rationale: string; actor: string; wakeup: string }
+    | { type: "legacy_elapsed_continued"; actor: string; rationale: string; wakeup: string }
+    | { type: "wakeup_delivered"; id: string }
+    | { type: "blocked"; reason: string; cause?: AllowanceDimension }
   );
 interface RunEvent {
   revision: number;
   requestId: string;
   fingerprint: string;
   event?: string;
+  countPolicy?: true;
   ts: string;
   payload: { type: "created"; run: ScrumRun } | RunCommand;
 }
@@ -254,7 +268,7 @@ function append(path: string, event: RunEvent): void {
 }
 const fingerprint = (v: unknown): string =>
   createHash("sha256").update(JSON.stringify(v)).digest("hex");
-function apply(run: ScrumRun, cmd: RunCommand, now: number): void {
+function apply(run: ScrumRun, cmd: RunCommand, now: number, legacy = false): void {
   if (terminalRun(run) && cmd.type !== "completion_reported")
     throw new FactoryError("scrum-run-terminal", run.phase);
   if (
@@ -273,6 +287,37 @@ function apply(run: ScrumRun, cmd: RunCommand, now: number): void {
   const task =
     "task" in cmd ? run.tasks.find((t) => t.task === cmd.task) : undefined;
   switch (cmd.type) {
+    case "allowance_granted":
+      applyOwnerGrant(run, cmd.grant);
+      if (run.phase !== "blocked") (run.wakeups ??= []).push({ id: cmd.requestId, message: cmd.wakeup });
+      break;
+    case "owner_requested":
+      validateOwnerRequest(cmd.request);
+      if ((run.ownerRequests ?? []).some(r => r.id === cmd.request.id)) throw new FactoryError("owner-request-conflict", cmd.request.id);
+      (run.ownerRequests ??= []).push({ ...cmd.request, createdAt: new Date(now).toISOString() });
+      (run.wakeups ??= []).push({ id: cmd.requestId, target: "supervisor", message: `Waiting for Owner — request ${cmd.request.id}: ${cmd.request.question}. Affected work: ${JSON.stringify(cmd.request.affected)}. Relay this exact durable identity; do not infer an answer or repeat unchanged reminders.` });
+      break;
+    case "owner_resolved": {
+      const request = run.ownerRequests?.find(r => r.id === cmd.pendingId);
+      if (!request || request.kind !== "question" || request.status !== "pending") throw new FactoryError("owner-request-conflict", "Exact pending generic question required; use design controls for UI review");
+      if (!["answered", "cancelled"].includes(cmd.outcome) || !cmd.rationale?.trim() || !cmd.actor?.trim()) throw new FactoryError("invalid-owner-resolution", "Outcome, answer/cancellation rationale and actor required");
+      request.status = cmd.outcome;
+      request.resolution = { actor: cmd.actor, outcome: cmd.outcome, rationale: cmd.rationale, requestId: cmd.requestId };
+      if (cmd.outcome === "answered" && run.phase !== "blocked") (run.wakeups ??= []).push({ id: cmd.requestId, message: cmd.wakeup });
+      break;
+    }
+    case "legacy_elapsed_continued":
+      if (!cmd.actor?.trim() || !cmd.rationale?.trim()) throw new FactoryError("invalid-continuation", "Actor and rationale required");
+      continueLegacyElapsed(run);
+      (run.continuations ??= []).push({ requestId: cmd.requestId, actor: cmd.actor, rationale: cmd.rationale });
+      if (run.phase !== "blocked") (run.wakeups ??= []).push({ id: cmd.requestId, message: cmd.wakeup });
+      break;
+    case "wakeup_delivered": {
+      const wakeup = run.wakeups?.find(w => w.id === cmd.id);
+      if (!wakeup) throw new FactoryError("unknown-wakeup", cmd.id);
+      wakeup.delivered = true;
+      break;
+    }
     case "operation_intended": {
       if (!cmd.operationId || !cmd.fingerprint || !cmd.payload || typeof cmd.payload !== "object")
         throw new FactoryError("invalid-operation-intent", "operation identity and payload required");
@@ -344,6 +389,7 @@ function apply(run: ScrumRun, cmd: RunCommand, now: number): void {
       run.completionRequest = { requestId: cmd.requestId, actor: cmd.actor };
       break;
     case "task_reserved":
+      assertOwnerDependencies(run, { task: cmd.task, role: cmd.role });
       if (task !== undefined) {
         if (task.role !== cmd.role)
           throw new FactoryError("task-execution-mismatch", cmd.task);
@@ -355,12 +401,11 @@ function apply(run: ScrumRun, cmd: RunCommand, now: number): void {
       )
         throw new FactoryError("invalid-task", cmd.task);
       if (
-        run.tasks.length >= run.budgets.maxTasks ||
-        now - Date.parse(run.createdAt) >= run.budgets.maxElapsedMs
+        run.tasks.length >= run.budgets.maxTasks
       )
         throw new FactoryError(
-          "scrum-budget-exhausted",
-          "Task/time budget exhausted",
+          "scrum-task-capacity-exhausted",
+          `Task capacity exhausted: ${run.tasks.length}/${run.budgets.maxTasks} Tasks used. Ask Owner to add Task capacity.`,
         );
       run.tasks.push({
         task: cmd.task,
@@ -535,7 +580,12 @@ function apply(run: ScrumRun, cmd: RunCommand, now: number): void {
           "stale-design-revision",
           String(cmd.design.revision),
         );
+      for (const pending of run.ownerRequests ?? []) if (pending.kind === "design" && pending.status === "pending") {
+        pending.status = "cancelled";
+        pending.resolution = { actor: "controller", outcome: "superseded", rationale: "A new design revision requires its own decision", requestId: cmd.requestId };
+      }
       run.design = cmd.design;
+      ensureDesignRequest(run, now);
       run.phase = "awaiting-ui-approval";
       (run as { awaitingApprovalSince?: number }).awaitingApprovalSince ??= now;
       break;
@@ -563,10 +613,15 @@ function apply(run: ScrumRun, cmd: RunCommand, now: number): void {
       if (cmd.screenStatuses !== undefined && (!cmd.screenStatuses || typeof cmd.screenStatuses !== 'object' || Array.isArray(cmd.screenStatuses) || Object.entries(cmd.screenStatuses).some(([id, status]) => !screenIdValid(id) || !['approved', 'revise'].includes(status))))
         throw new FactoryError('invalid-design-decision', 'invalid screen statuses');
       const waitStart = (run as { awaitingApprovalSince?: number }).awaitingApprovalSince;
-      if (typeof waitStart === "number" && Number.isFinite(waitStart) && now > waitStart) {
+      if (legacy && typeof run.budgets.maxElapsedMs === "number" && typeof waitStart === "number" && Number.isFinite(waitStart) && now > waitStart) {
         run.budgets.maxElapsedMs += now - waitStart;
       }
       delete (run as { awaitingApprovalSince?: number }).awaitingApprovalSince;
+      const review = ensureDesignRequest(run, now);
+      if (review) {
+        review.status = "answered";
+        review.resolution = { actor: cmd.actor, outcome: cmd.decision, rationale: cmd.rationale, requestId: cmd.requestId };
+      }
       run.design = {
         ...run.design,
         decision: cmd.decision,
@@ -595,12 +650,13 @@ function apply(run: ScrumRun, cmd: RunCommand, now: number): void {
       break;
     }
     case "fix_reserved":
+      assertOwnerDependencies(run, { task: cmd.task, stage: "fixing" });
       if (!safeId(cmd.task)) throw new FactoryError("invalid-task", cmd.task);
       if (run.fixReservations.some((r) => r.task === cmd.task)) break;
       if (run.fixRounds >= run.budgets.maxQaFixRounds)
         throw new FactoryError(
           "qa-fix-budget-exhausted",
-          "qa-fix-budget-exhausted: escalate to Supervisor",
+          `Automatic QA fix rounds exhausted: ${run.fixRounds}/${run.budgets.maxQaFixRounds} used. Ask Owner for +1 QA round.`,
         );
       run.fixRounds++;
       run.fixReservations.push({ task: cmd.task, requestId: cmd.requestId, ...(cmd.parentTaskId === undefined ? {} : { parentTaskId: cmd.parentTaskId }), ...(cmd.summary === undefined ? {} : { summary: cmd.summary }), ...(cmd.ownedPaths === undefined ? {} : { ownedPaths: cmd.ownedPaths }) });
@@ -626,6 +682,7 @@ function apply(run: ScrumRun, cmd: RunCommand, now: number): void {
           "resolution evidence/rationale required",
         );
       run.blockers = [];
+      run.blockerDetails = [];
       break;
     case "bundle_promoted":
       if (!artifactRefIsValid(cmd.ref))
@@ -635,8 +692,7 @@ function apply(run: ScrumRun, cmd: RunCommand, now: number): void {
     case "blocked":
       if (!cmd.reason?.trim())
         throw new FactoryError("invalid-blocker", "reason required");
-      run.blockers.push(cmd.reason);
-      run.phase = "blocked";
+      recordRunBlocker(run, cmd, now, legacy);
       break;
     default:
       throw new FactoryError("invalid-run-command", "unsupported command");
@@ -644,6 +700,7 @@ function apply(run: ScrumRun, cmd: RunCommand, now: number): void {
 }
 function decorateRun(run: ScrumRun): ScrumRun {
   delete (run as { awaitingApprovalSince?: number }).awaitingApprovalSince;
+  ensureDesignRequest(run, Date.parse(run.createdAt));
   run.requiredRoles = requiredRoles(run.track);
   run.uiApprovalGate = { status: run.design?.decision ?? (trackKind(run.track) === "ui" ? "pending" : "not-required"), revision: run.design?.revision ?? 0, ...(run.design ? { digest: run.design.digest } : {}) };
   return run;
@@ -660,7 +717,7 @@ function project(events: RunEvent[]): ScrumRun {
   for (const event of events.slice(1)) {
     if (event.payload.type === "created")
       throw new FactoryError("scrum-run-unreadable", "duplicate creation");
-    apply(run, event.payload, Date.parse(event.ts));
+    apply(run, event.payload, Date.parse(event.ts), !event.countPolicy);
     run.revision = event.revision;
   }
   return decorateRun(run);
@@ -713,10 +770,8 @@ export function createScrumRun(input: {
     if (listRuns(input.state, input.slug).some((r) => !terminalRun(r)))
       throw new FactoryError("scrum-run-busy", "one active run per Project");
     const budgets = {
-      maxTasks: 24,
-      maxElapsedMs: 7_200_000,
-      maxQaFixRounds: 2,
-      ...input.budgets,
+      maxTasks: input.budgets?.maxTasks ?? 24,
+      maxQaFixRounds: input.budgets?.maxQaFixRounds ?? 2,
     };
     if (
       !safeId(input.initiativeId) ||
@@ -724,12 +779,11 @@ export function createScrumRun(input: {
       !input.rationale?.trim() ||
       !scrumConfigIsValid(input.config) ||
       Object.values(budgets).some((v) => !Number.isSafeInteger(v) || v < 0) ||
-      budgets.maxTasks === 0 ||
-      budgets.maxElapsedMs === 0
+      budgets.maxTasks === 0
     )
       throw new FactoryError(
         "invalid-scrum-run",
-        "finite positive budgets, initiative, track and rationale required",
+        "finite Task/QA counts, initiative, track and rationale required",
       );
     const ownedPaths = input.ownedPaths ?? [];
     if (
@@ -829,7 +883,7 @@ export function commandRun(
     } catch (error) {
       if (
         error instanceof FactoryError &&
-        ["scrum-budget-exhausted", "qa-fix-budget-exhausted"].includes(
+        ["scrum-task-capacity-exhausted", "qa-fix-budget-exhausted"].includes(
           error.code,
         ) &&
         !events.some((e) => e.requestId === `${cmd.requestId}:exhausted`)
@@ -837,6 +891,7 @@ export function commandRun(
         const blocked: RunCommand = {
           type: "blocked",
           reason: error.message,
+          cause: error.code === "scrum-task-capacity-exhausted" ? "tasks" : "qaFixRounds",
           requestId: `${cmd.requestId}:exhausted`,
           expectedRevision: run.revision,
         };
@@ -846,6 +901,7 @@ export function commandRun(
           fingerprint: fingerprint(blocked),
           ts,
           payload: blocked,
+          countPolicy: true,
         });
       }
       throw error;
@@ -857,6 +913,7 @@ export function commandRun(
       fingerprint: commandFingerprint(cmd),
       ts,
       payload: cmd,
+      countPolicy: true,
       ...(cmd.type === "track_selected" ? { event: "scrum.track.selected" } : {}),
     });
     return decorateRun(run);

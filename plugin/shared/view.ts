@@ -349,7 +349,18 @@ export const ScrumRunViewSchema = z.object({
     })
     .optional(),
   fixRounds: z.number(),
-  budgets: z.object({ maxQaFixRounds: z.number() }).optional(),
+  budgets: z.object({ maxTasks: z.number().optional(), maxQaFixRounds: z.number() }).optional(),
+  createdAt: z.string().optional(),
+  tasks: z.array(z.object({ task: z.string(), role: z.string() })).optional(),
+  blockerDetails: z.array(z.object({ id: z.string(), reason: z.string(), causes: z.array(z.string()) })).optional(),
+  ownerRequests: z.array(z.object({
+    id: z.string(), kind: z.enum(["question", "design"]), question: z.string(),
+    affected: z.array(z.object({ kind: z.enum(["task", "stage"]), id: z.string() })),
+    origin: z.object({ actor: z.string(), role: z.string() }), status: z.enum(["pending", "answered", "cancelled"]), createdAt: z.string(),
+    design: z.object({ revision: z.number(), digest: z.string() }).optional(),
+    resolution: z.object({ actor: z.string(), outcome: z.string(), rationale: z.string(), requestId: z.string() }).optional(),
+  })).optional(),
+  allowanceGrants: z.array(z.object({ requestId: z.string(), actor: z.string(), dimension: z.enum(["tasks", "qaFixRounds"]), amount: z.number(), rationale: z.string() })).optional(),
   skippedPhases: z
     .array(z.object({ phase: z.string(), reason: z.string() }))
     .optional(),

@@ -1,3 +1,4 @@
+import { readRun as readScrumRun } from "./core/scrum/run-journal.ts";
 import { impeccableEnvironment, restoreImpeccableEnvironment } from "./core/scrum/impeccable.ts";
 import { readExecution } from "./core/scrum/config.ts";
 import { resolveRoleLane, laneProviderConfig } from "./provider-lanes.ts";
@@ -539,7 +540,7 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
           // The Agent tab inside the Task worktree Workspace reads `Peer · <Task>`
           // (ADR 0017 §2) — never the bare task id or the raw spawn prompt.
           title: execution?.kind === "task" ? `${SCRUM_ROLE_TITLES[execution.binding.role]} · ${worktree.task}` : formatPeerAgentTitle(worktree.task),
-          systemPrompt: appendContract(request.config.systemPrompt, execution?.kind === "task" ? renderScrumPrompt(execution.binding.role, { project: worktree.slug, runId: execution.binding.runId, task: worktree.task, epoch: execution.epoch, workspace: request.config.cwd }) : renderAgentContract(worktree.task, worktree.slug)),
+          systemPrompt: appendContract(request.config.systemPrompt, execution?.kind === "task" ? renderScrumPrompt(execution.binding.role, { project: worktree.slug, run: readScrumRun(stateDir, worktree.slug, execution.binding.runId), runId: execution.binding.runId, task: worktree.task, epoch: execution.epoch, workspace: request.config.cwd }) : renderAgentContract(worktree.task, worktree.slug)),
         },
         {
           role: "agent",

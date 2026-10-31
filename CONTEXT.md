@@ -34,6 +34,18 @@ _Avoid_: manager, foreman, orchestrator, "the loop" (that names the mechanism), 
 The Project's selected `slp | scrum` workflow in its independent `execution.json` with schema version and monotonic revision. Existing Projects without metadata always use SLP. Machine selection affects future registrations only. Mode switching is an idle Owner operation with durable seat-transition recovery; pending Tasks, Agents, Gates, directives, handoff or nonterminal Scrum runs block switching. A Scrum run freezes policy, roster, approval settings, track and finite budgets. Task identity comes from its Contract binding, never mutable selection.
 _Avoid_: mode inside SLP lanes, implicit migration
 
+**Owner wait**:
+A recorded wait for an explicit decision or answer from the Owner, including UI design review, that remains pending until the Owner responds or explicitly cancels the work and prevents only work dependent on that answer. Owner absence does not expire the wait; a provider failure or unexplained Agent silence is not an Owner wait.
+_Avoid_: approval timeout, Agent stall, provider outage
+
+**Task allowance**:
+The cumulative number of Tasks authorized for a Scrum run, including UX revision Tasks, which the Owner may explicitly increase without replacing the run or erasing its consumed allowance. Distinct from a Task's Attempt ceiling and the run's automatic QA fix-round limit.
+_Avoid_: time budget, retry allowance, automatic reset
+
+**Owner allowance grant**:
+An explicit Owner authorization to add a finite amount to a Scrum run's Task allowance or, separately, its automatic QA fix-round allowance, retaining the work already consumed. It grants capacity, not acceptance, design approval or permission to bypass other unresolved decisions.
+_Avoid_: budget reset, automatic replenishment, approval waiver
+
 **UI Design Approval Checkpoint**:
 A Scrum-only durable decision on exact accepted design revision, artifact commit and SHA-256 digest. Supervisor relays the Owner's explicit approved, changes_requested or waived decision; Lead and Agents cannot self-approve. Readiness and browser evidence remain required. Changes requested create a new UX revision Task, preserving accepted history. The existing `supervisor_report` / `report` envelope carries optional `reportType: "ui-review"` and a structured preview identity. Approval does not itself establish readiness or product completion.
 _Avoid_: chat-keyword approval, reopening accepted UX Tasks

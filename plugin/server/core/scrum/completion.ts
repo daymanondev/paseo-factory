@@ -21,6 +21,9 @@ export function completionBlockers(input: {
 }): string[] {
   const { root, run, events } = input,
     blockers: string[] = [];
+  for (const request of run.ownerRequests ?? []) {
+    if (request.kind === "question" && request.status !== "answered") blockers.push(`Owner request ${request.id} (${request.status}) holds ${request.affected.map(d => `${d.kind} ${d.id}`).join(", ")}`);
+  }
   try {
     assertDevReady(root, run);
   } catch (error) {

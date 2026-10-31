@@ -56,8 +56,9 @@ factory scrum run.create --project /absolute/project --run checkout-01 \
 ```
 
 Admission freezes the policy/config revisions, roster, approval setting, track,
-finite budgets and exact owned files. Default limits are 24 Tasks, two hours and
-two defect-fix rounds. Only one nonterminal run is permitted per Project.
+finite count allowances and exact owned files. Default limits are 24 Tasks and
+two automatic QA fix rounds. Elapsed duration is informational; it never expires
+a run or an Owner review. Only one nonterminal run is permitted per Project.
 Existing `.scratch/<initiativeId>` namespaces are refused. Declare individual
 artifact files under the initiative: PRD, DESIGN, EXPERIENCE, architecture,
 backlog, mockups/assets, per-Task decisions, and QA artifacts. Never force-add an
@@ -150,7 +151,7 @@ lands. `quick` uses the existing small-track evidence policy; `standard` and
 `enterprise` require the complete planning/design evidence policy. Historical
 `small`, `backend`, and `ui` journals retain their original interpretation.
 
-`lead_scrum_operation` supports `get`, `track.select`, `readiness`, `design.submit`,
+`lead_scrum_operation` supports `get`, `wait.request`, `track.select`, `readiness`, `design.submit`,
 `qa.audit`, `fix.reserve`, `bundle.promote`, `run.complete`, and `preview`. Omit
 `runId` to use the single active run. Evidence mutations use exact landed
 `artifactRefs` (`path`, full `commit`, `sha256`). Record landed specialist results
@@ -170,3 +171,48 @@ explicit Dev implementation paths are preserved and journaled as run ownership.
 Add explicit mockup/browser/QA evidence paths to `scope` when contracting them.
 Kickoff and Scrum prompts probe project memory and instruct seats to read only
 present `AGENTS.md`, `CLAUDE.md`, and `CONTEXT.md` files.
+
+
+## Owner waits and active-run allowances (v0.0.74)
+
+The Factory surface lists **Waiting for you** requests with stable identities and
+explicit Task/stage dependencies. Lead records a question through
+`lead_scrum_operation({ action: "wait.request", pendingId, question, affected:
+[{ kind: "task", id: "story-02" }] })`; stage dependencies use `kind: "stage"`
+and `planning`, `design`, `readiness`, `implementation`, `qa` or `fixing`.
+The Supervisor relays the same request. No unanswered wait expires or creates
+periodic reminders. Provider failures still use bounded machinery recovery.
+
+Owner commands require Project, run, current revision and a stable request ID:
+
+```sh
+factory scrum allowance.tasks --project /absolute/project --run <run-id> \
+  --revision <revision> --request-id <stable-id> \
+  --payload '{"amount":8,"rationale":"Another bounded UX revision cycle"}'
+factory scrum allowance.qa --project /absolute/project --run <run-id> \
+  --revision <revision> --request-id <different-stable-id> \
+  --payload '{"amount":1,"rationale":"One additional automatic QA repair"}'
+factory scrum wait.answer --project /absolute/project --run <run-id> \
+  --revision <revision> --request-id <reply-id> \
+  --payload '{"pendingId":"question-id","rationale":"The exact product decision"}'
+```
+
+`wait.cancel` takes the same payload with an explicit cancellation rationale.
+It supplies no answer; dependent work remains held. Generic answers/cancellations
+cannot approve or waive a design. Use the existing bound design controls.
+Task grants default to +8 in the UI and accept positive safe integers. QA grants
+add exactly +1 separately. Counts, Attempts, accepted Tasks, unresolved blockers
+and all verification gates are retained. Machine/Project roster edits still apply
+to future runs only. Retrying an identical request applies once; a changed-content
+retry or stale new request fails. Refresh the run after a confirmed conflict;
+retain the original request ID after an unknown transport outcome.
+
+Updating the plugin leaves legacy blocked runs asleep. To explicitly retire a
+proven elapsed-time cause in the same run, use `factory scrum run.continue` with
+the Project/run/revision/request-ID options above and a nonempty `rationale`.
+The journal diagnoses old `Task/time budget exhausted` receipts from historical
+consumption and timestamps. Combined Task exhaustion remains held for its own
+grant; ambiguous or unrelated causes stay held. Continuation records a durable
+mailbox intent before waking Lead. It neither tops up elapsed time nor approves a
+design. For goal-planner, retain the original run and changes-requested findings,
+then dispatch/reuse `ux-r02` under the v0.0.73 UX contract and return for review.

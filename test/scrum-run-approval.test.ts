@@ -52,7 +52,7 @@ test("durable requests preserve frozen roster and consumed fix rounds across rep
         type: "fix_reserved",
         task: "fix-3",
       }),
-    /qa-fix-budget-exhausted/,
+    (error: unknown) => error instanceof Error && "code" in error && error.code === "qa-fix-budget-exhausted" && error.message.includes("2/2"),
   );
   assert.throws(
     () =>

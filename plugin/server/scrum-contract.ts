@@ -1,3 +1,4 @@
+import { assertOwnerDependencies } from "./core/scrum/owner-work.ts";
 import { registerOwnedPaths } from "./core/scrum/ownership.ts";
 /** Scrum specialist contract defaults and dynamic ownership. */
 import { dirname, join } from "node:path";
@@ -140,9 +141,11 @@ export function prepareScrumContract(
   const role = request.role ?? previousContract?.execution?.role ?? "dev";
   if (!SPECIALIST_ROLES.includes(role))
     throw new FactoryError("invalid-specialist-role", String(role));
+  assertOwnerDependencies(run, { task: request.task, role });
+  if (run.phase === "blocked" || run.blockers.length) throw new FactoryError("scrum-run-blocked", run.blockers.join("; ") || run.phase);
   verifyRefs(project.root, request.artifactRefs ?? [], run.ownedPaths);
   if (role === "dev") {
-    assertDevReady(project.root, run);
+    assertDevReady(project.root, run, request.task);
     const audit = run.qaAudits.at(-1);
     if (audit) {
       const report = JSON.parse(

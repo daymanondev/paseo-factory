@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.74] - 2026-10-31
+
+### Added
+
+- Durable Owner questions with explicit Task/stage dependencies, exact answer/cancellation targeting, revision checks and replay-safe resolutions. Factory's Waiting for you list includes bound design reviews; cancelling a question does not authorize its work.
+- Separate Owner grants for cumulative Task capacity (editable, default +8) and automatic QA fix rounds (+1), with actor/rationale receipts, overflow checks, conflict recovery and durable mailbox notifications.
+- Explicit legacy continuation that diagnoses historical exhaustion and removes only a proven elapsed-time cause, retaining count and unrelated blockers, accepted Tasks and design findings.
+
+### Changed
+
+- Scrum admission now uses count allowances only. Run age is informational; useful work and Owner review have no elapsed deadline. Preserve historical elapsed accounting and existing per-Task recovery, readiness, design approval and QA gates. New runs retain defaults of 24 Tasks and 2 automatic QA fix rounds.
+
 ## [0.0.73] - 2026-10-31
 
 ### Added

@@ -1,3 +1,4 @@
+import { assertOwnerDependencies } from "./owner-work.ts";
 import { scrumSeatOperation } from "./seat-operations.ts";
 import { trackKind } from "./tracks.ts";
 import { lintScrumDoc } from "./linter.ts";
@@ -180,6 +181,42 @@ export function scrumOperation(input: ScrumOperation, ctx: ScrumOperationContext
   }
   if (!input.runId) fail("scrum-run-required", "explicit runId required");
   const run = readRun(state, slug, input.runId!);
+  if (["allowance.tasks", "allowance.qa", "wait.request", "wait.answer", "wait.cancel", "run.continue"].includes(input.operation)) {
+    if (input.operation !== "wait.request" && !owner)
+      fail("owner-action-required", "Authenticated Owner required for grants, answers, cancellation and continuation");
+    const base = { requestId: input.requestId, expectedRevision: input.expectedRevision! };
+    let command: RunCommand;
+    if (input.operation.startsWith("allowance.")) {
+      const dimension = input.operation === "allowance.tasks" ? "tasks" : "qaFixRounds";
+      command = {
+        ...base, type: "allowance_granted",
+        grant: { requestId: input.requestId, actor: ctx.actor, dimension, amount: p.amount as number, rationale: p.rationale as string },
+        wakeup: `Owner added ${p.amount} ${dimension}: ${p.rationale}. Re-read run and preserve all readiness/approval and dependency holds.`,
+      };
+    } else if (input.operation === "wait.request") {
+      command = {
+        ...base, type: "owner_requested",
+        request: {
+          id: p.pendingId as string, kind: "question", question: p.question as string,
+          affected: p.affected as import("./owner-work.ts").OwnerDependency[],
+          origin: { actor: ctx.actor, role: ctx.authority }, status: "pending", createdAt: "",
+        },
+      };
+    } else if (input.operation === "run.continue") {
+      command = {
+        ...base, type: "legacy_elapsed_continued", actor: ctx.actor, rationale: p.rationale as string,
+        wakeup: `Owner explicitly continued legacy elapsed-time hold: ${p.rationale}. Re-read the same run; preserve accepted Tasks and recorded design findings. If changes_requested, reserve a new UX revision Task (goal-planner: ux-r02, reuse if already reserved). Apply the v0.0.73 screen-surface, product-chrome, contextual-state, browser-evidence and detector contract. Return revised UX for Owner review; Dev remains gated.`,
+      };
+    } else {
+      command = {
+        ...base, type: "owner_resolved", pendingId: p.pendingId as string,
+        outcome: input.operation === "wait.answer" ? "answered" : "cancelled",
+        rationale: p.rationale as string, actor: ctx.actor,
+        wakeup: `Owner answered request ${p.pendingId}: ${p.rationale}. Re-read exact dependencies and other pending requests. An answer is not design approval or semantic readiness.`,
+      };
+    }
+    return commandRun(state, slug, run.runId, command);
+  }
   if (input.operation === "track.select") {
     if (ctx.authority !== "lead") fail("scrum-track-authority", "Scrum Lead selects the track");
     const command: RunCommand = { type: "track_selected", track: p.track as RunTrack, rationale: p.rationale as string, requestId: input.requestId, expectedRevision: input.expectedRevision! };
@@ -260,6 +297,7 @@ export function scrumOperation(input: ScrumOperation, ctx: ScrumOperationContext
       expectedRevision: input.expectedRevision,
     } as RunCommand;
     if (
+      ["allowance_granted", "owner_requested", "owner_resolved", "legacy_elapsed_continued", "wakeup_delivered"].includes(cmd.type) ||
       cmd.type === "operation_intended" ||
       cmd.type === "track_selected" ||
       cmd.type === "paths_registered" ||
@@ -277,6 +315,7 @@ export function scrumOperation(input: ScrumOperation, ctx: ScrumOperationContext
         ["completed", "cancelled"].includes(cmd.phase))
     )
       fail("scrum-command-authority", "use the dedicated verified operation");
+    if (cmd.type === "blocked" && cmd.cause !== undefined) fail("scrum-command-authority", "Blocker causes are assigned by verified admission");
     const replayed = replayRunCommand(state, slug, run.runId, cmd);
     if (
       replayed &&
@@ -297,6 +336,7 @@ export function scrumOperation(input: ScrumOperation, ctx: ScrumOperationContext
       acceptedRefs(ctx.factory, run, cmd.result.artifactRefs);
     }
     if (cmd.type === "readiness_recorded") {
+      assertOwnerDependencies(run, { stage: "readiness" });
       verifyRefs(root, cmd.readiness.refs, run.ownedPaths);
       acceptedRefs(ctx.factory, run, cmd.readiness.refs);
       if (
@@ -358,6 +398,7 @@ export function scrumOperation(input: ScrumOperation, ctx: ScrumOperationContext
         );
     }
     if (cmd.type === "design_review_requested") {
+      assertOwnerDependencies(run, { stage: "design" });
       verifyCompleteDesign(root, run, cmd.design);
       verifyRefs(root, cmd.design.refs, run.ownedPaths);
       verifyRefs(root, cmd.design.browserEvidence, run.ownedPaths);
