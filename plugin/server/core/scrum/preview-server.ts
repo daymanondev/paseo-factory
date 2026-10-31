@@ -1,6 +1,5 @@
 /** Token-bound studio server (loopback + Tailscale/LAN host IPs for remote Paseo Desktop clients). */
 import { posix } from 'node:path';
-import { offlineAssetPath } from './open-design-lint.ts';
 import { createServer } from 'node:http';
 import type { Server } from 'node:http';
 import { randomBytes } from 'node:crypto';
@@ -51,7 +50,7 @@ function listReachableHostIps(): string[] {
 }
 
 export async function servePreview(root: string, run: ScrumRun, options: { subpath?: string; port?: number; decide?: (input: PreviewDecision) => ScrumRun | Promise<ScrumRun>; current?: () => ScrumRun } = {}) {
-  const preview = renderPreview(root, run, options.subpath);
+  const preview = renderPreview(root, run, options.subpath, { inlineAssets: false });
   const model = previewModel(root, run);
   const port = options.port ?? 0;
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new FactoryError('invalid-preview-port', 'port must be 0..65535');
@@ -72,18 +71,7 @@ export async function servePreview(root: string, run: ScrumRun, options: { subpa
     if (sha256(bytes) !== ref.sha256) throw new FactoryError('stale-artifact-ref', ref.path);
     return bytes;
   };
-  const assetUrl = (path: string, reference: string) => {
-    const target = offlineAssetPath(path, reference);
-    if (!target) return reference;
-    const suffix = reference.includes('?') ? reference.slice(reference.indexOf('?')) : reference.includes('#') ? reference.slice(reference.indexOf('#')) : '';
-    const url = new URL('/' + target + suffix, 'http://localhost'); url.searchParams.set('token', token);
-    return url.pathname + url.search + url.hash;
-  };
-  const rewrite = (path: string, source: string) => {
-    let result = path.endsWith('.html') ? source.replace(/\b(src|href|poster)\s*=\s*(["'])([^"']+)\2/gi, (_, attr, quote, ref) => `${attr}=${quote}${assetUrl(path, ref)}${quote}`) : source;
-    if (/\.(?:html|css)$/.test(path)) result = result.replace(/url\(\s*(["']?)([^\s"'\)]+)\1\s*\)/gi, (_, quote, ref) => `url(${quote}${assetUrl(path, ref)}${quote})`);
-    return result;
-  };
+  const sessionPath = `/preview/${token}/`;
   const allowedHosts = new Set<string>();
   const server = createServer(async (request, response) => {
     refresh();
@@ -97,7 +85,9 @@ export async function servePreview(root: string, run: ScrumRun, options: { subpa
       const reqOrigin = allowedHosts.has(hostHeader) ? `http://${hostHeader}` : origin;
       const url = new URL(request.url ?? '/', reqOrigin || 'http://127.0.0.1');
       if (url.pathname === '/favicon.ico') { send(204, 'image/x-icon'); return; }
-      if (!allowedHosts.has(hostHeader) || url.searchParams.get('token') !== token) { json(403, { error: 'Invalid preview session token or host' }); return; }
+      const pathSession = url.pathname.startsWith(sessionPath + 'mockups/');
+      if (pathSession) url.pathname = '/' + url.pathname.slice(sessionPath.length);
+      if (!allowedHosts.has(hostHeader) || (!pathSession && url.searchParams.get('token') !== token)) { json(403, { error: 'Invalid preview session token or host' }); return; }
       if (request.method === 'POST' && url.pathname === '/api/decision') {
         const sameOrigin = request.headers.origin === reqOrigin || (!request.headers.origin && request.headers['sec-fetch-site'] === 'same-origin' && request.headers['x-scrum-preview-token'] === token);
         if (!sameOrigin) { json(403, { error: 'Same-origin Owner decision required' }); return; }
@@ -122,15 +112,17 @@ export async function servePreview(root: string, run: ScrumRun, options: { subpa
       if (url.pathname === '/mockup') {
         const screen = url.searchParams.get('screen') ?? model.screens[0]?.id, state = url.searchParams.get('state') ?? 'populated';
         if (!screen || !model.screens.some(s => s.id === screen) || !DESIGN_STATES.includes(state as typeof DESIGN_STATES[number])) { json(400, { error: 'Unknown screen/state' }); return; }
-        const bridge = previewBridge(screen, state, url.searchParams.get('viewport') ?? 'desktop');
-        send(200, 'text/html; charset=utf-8', injectPreviewBridge(rewrite('mockups/index.html', readAsset('mockups/index.html').toString()), bridge), mockupCsp); return;
+        const target = new URL(sessionPath + 'mockups/index.html', reqOrigin);
+        for (const [key, value] of Object.entries({ screen, state, viewport: url.searchParams.get('viewport') ?? 'desktop' })) target.searchParams.set(key, value);
+        send(302, 'text/plain', '', undefined, { Location: target.pathname + target.search }); return;
       }
       if (url.pathname.startsWith('/mockups/')) {
         const path = decodeURIComponent(url.pathname.slice(1));
         if (!path.startsWith('mockups/') || path.split('/').some(part => !part || part === '.' || part === '..') || /[\\\0]/.test(path) || !mockupRef(path)) { json(404, { error: 'Artifact is not in this design' }); return; }
+        if (!pathSession) { url.searchParams.delete('token'); send(302, 'text/plain', '', undefined, { Location: sessionPath + path + url.search }); return; }
         const bytes = readAsset(path), ext = posix.extname(path);
         const types: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.woff2': 'font/woff2', '.woff': 'font/woff', '.ttf': 'font/ttf' };
-        let body: string | Buffer = ['.html', '.css'].includes(ext) ? rewrite(path, bytes.toString()) : bytes;
+        let body: string | Buffer = ext === '.html' ? bytes.toString() : bytes;
         if (path === 'mockups/index.html') body = injectPreviewBridge(String(body), previewBridge(url.searchParams.get('screen') ?? model.screens[0]?.id ?? '', url.searchParams.get('state') ?? 'populated', url.searchParams.get('viewport') ?? 'mobile'));
         if (path === 'mockups/screens.html') body = injectPreviewBridge(String(body), `<script>(()=>{function measure(){let right=640,bottom=480;const walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);while(walker.nextNode()){const n=walker.currentNode;if(!n.textContent.trim()||n.parentElement.closest('script,style,[hidden]'))continue;const range=document.createRange();range.selectNodeContents(n);for(const r of range.getClientRects()){right=Math.max(right,r.right+scrollX+40);bottom=Math.max(bottom,r.bottom+scrollY+40)}}for(const el of document.querySelectorAll('iframe,img,svg,canvas,video')){const r=el.getBoundingClientRect();right=Math.max(right,r.right+scrollX+40);bottom=Math.max(bottom,r.bottom+scrollY+40)}parent.postMessage({type:'scrum:flow-size',width:Math.ceil(right),height:Math.ceil(bottom)},'*')}addEventListener('load',measure);new ResizeObserver(measure).observe(document.body)})();</script>`);
         send(200, types[ext] ?? 'application/octet-stream', body, mockupCsp); return;

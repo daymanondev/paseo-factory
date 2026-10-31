@@ -22,6 +22,21 @@ function cssBalanced(css: string) {
 }
 const visible = (s: string) => s.replace(/<[^>]*>/g, ' ').replace(/&(?:nbsp|amp|lt|gt|quot|apos);/gi, ' ').replace(/&#(?:x[\da-f]+|\d+);/gi, 'x').replace(/\s+/g, ' ').trim();
 
+/** Inspect supported HTML string/template literals without evaluating submitted code. Preserve line offsets. */
+export function artifactMarkup(source: string, javascript = false): string {
+  const blank = (s: string) => s.replace(/[^\n]/g, ' ');
+  const templates = (script: string) => {
+    let cursor = 0, result = '';
+    for (const match of script.matchAll(/(["'`])(?:\\[\s\S]|(?!\1)[^\\])*?\1/g)) {
+      result += blank(script.slice(cursor, match.index));
+      result += /<[a-z][^>]*>/i.test(match[0]) ? ' ' + match[0].slice(1, -1) + ' ' : blank(match[0]);
+      cursor = match.index! + match[0].length;
+    }
+    return result + blank(script.slice(cursor));
+  };
+  return javascript ? templates(source) : source.replace(/<!--[\s\S]*?-->|<(script|style)\b[^>]*>([\s\S]*?)<\/\1>/gi, (match, tag: string, body: string) => tag?.toLowerCase() === 'script' ? blank(match.slice(0, match.indexOf('>') + 1)) + templates(body) + blank(match.slice(match.lastIndexOf('</'))) : blank(match));
+}
+
 /** Deterministic artifact lint, adapted from Open Design lintArtifact P0/P1 + Factory mobile craft. */
 export function runOpenDesignLint(files: Record<string, string>): Diagnostic[] {
   const issues: Diagnostic[] = [];
@@ -61,13 +76,13 @@ export function runOpenDesignLint(files: Record<string, string>): Diagnostic[] {
     for (const rule of cssText.matchAll(/[^{}]+\{([^{}]+)\}/g)) if (/border-left\s*:\s*[^;]*(?:solid|var\()/i.test(rule[1]) && /border-radius\s*:\s*[1-9]/i.test(rule[1])) add('left-accent-card', 'Use soft tonal surfaces or structural rules instead of rounded left-accent cards');
     if (/\.scrollIntoView\s*\(/.test(html)) add('scroll-into-view', 'Scroll the product scroller with scrollTo rather than moving the host page');
     if (/<img\b[^>]*src\s*=\s*['"](?:https?:|\/\/)/i.test(html)) add('external-image', 'Bundle images locally for offline rendering');
-    const markup = html.replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, '');
+    const markup = artifactMarkup(source, path.endsWith('.js'));
     if (/<(?:h[1-6]|button|li|span)\b[^>]*>[^<]*[\u{1f300}-\u{1faff}\u2600-\u27bf]/u.test(markup)) add('emoji-icon', 'Use inline SVG product icons');
     const copy = path.endsWith('.js') ? source : visible(markup);
     if (/\b(?:10|100)[×x]\s+(?:faster|better|easier)|\b99\.\d+%\s+uptime|\bzero[- ]downtime|\b3[×x]\s+more\s+(?:productive|efficient)/i.test(copy)) add('invented-metric', 'Replace unsupported metrics with brief-derived product copy');
     if (/\b(?:lorem ipsum|dolor sit amet|placeholder text|sample content|feature (?:one|two|three|1|2|3))\b/i.test(copy)) add('filler-copy', 'Replace filler with real domain copy');
-    if (!/ui-copy-allow:\s*technical-identifiers/i.test(design) && /\b(?:FR|NFR|UJ|AD|ADR)-\d+\b/.test(path.endsWith('.js') ? '' : visible(markup))) add('ui-copy', 'Keep spec identifiers in documentation');
-    if (!path.endsWith('.html')) continue;
+    if (!/ui-copy-allow:\s*technical-identifiers/i.test(design) && /\b(?:FR|NFR|UJ|AD|ADR)-\d+\b/.test(visible(markup))) add('ui-copy', 'Keep spec identifiers in documentation');
+    if (!/\.(?:html|js)$/.test(path)) continue;
     // A small tag stack scopes mobile rules and paragraph budgets without touching private renderer state.
     const stack: Array<{ tag: string; mobile: boolean; card: boolean }> = [];
     for (const m of markup.matchAll(/<\/?([a-z][\w-]*)\b[^>]*>/gi)) {

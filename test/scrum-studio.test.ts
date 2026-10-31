@@ -52,6 +52,9 @@ test('Surface Studio serves the committed Open Design flow board, scripts and fr
   const files = openDesignFiles();
   const temp = makeTempDir(); disposeDir(t, temp); stageOpenDesignFrames(temp);
   for (const name of ['iphone.html', 'android.html', 'neutral.html']) files['mockups/.od-frames/' + name] = readFileSync(join(temp, '.od-frames', name), 'utf8');
+  files['mockups/index.html'] = files['mockups/index.html'].replace('</body>', '<a href="index.html?screen=checkout">Checkout</a></body>');
+  files['mockups/styles.css'] += '\n@import "theme.css";';
+  files['mockups/theme.css'] = 'body { margin: 0 }';
   const report = JSON.parse(files['mockups/browser.json']);
   report.viewports.forEach((v: {screenshot:{path:string}}) => v.screenshot.path = '.scratch/studio/' + v.screenshot.path);
   const f = await designFixture(t, r => Object.assign(r, report), files);
@@ -76,6 +79,12 @@ test('Surface Studio serves the committed Open Design flow board, scripts and fr
     }
     url.search = ''; assert.equal((await fetch(url)).status, 403, name + ' unauthorized');
   }
+  const cssUrl = new URL(studio.url); cssUrl.pathname = '/mockups/styles.css';
+  const css = await fetch(cssUrl);
+  const inherited = new URL('theme.css', css.url);
+  assert.equal(inherited.searchParams.get('token'), null, 'relative assets inherit the session from the URL path');
+  assert.equal((await fetch(inherited)).status, 200, 'quoted CSS imports and JS-created assets retain authorization');
+  assert.equal((await fetch(new URL('index.html?screen=checkout', css.url))).status, 200, 'prototype query navigation remains usable');
   t.mock.timers.tick(23 * 60 * 60_000);
   assert.equal((await fetch(studio.url)).status, 200, 'preview survives the former fifteen-minute expiry');
   t.mock.timers.tick(2 * 60 * 60_000);

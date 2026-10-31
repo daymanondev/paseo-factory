@@ -251,3 +251,14 @@ test('Open Design CLI discovers optional host catalogs and syncs a scratch folde
   const sync=await cli('sync');assert.equal(sync.code,0,sync.output);
   assert.deepEqual(body,{baseDir:root,orchestratorWorkspace:{kind:'scratch',writeback:'external',sourceLabel:'Paseo Factory',sourceRef:root}});
 });
+
+test('Open Design gates inspect runtime templates and accept externally rendered screens and controls', async () => {
+  const { openDesignFiles } = await import('./fixtures/open-design.ts');
+  const files = openDesignFiles();
+  files['mockups/index.html'] = '<html><head><title>Shop</title><link rel="stylesheet" href="styles.css"></head><body><script src="app.js"></script></body></html>';
+  files['mockups/app.js'] += '\ndocument.body.innerHTML = `<main data-screen="catalog"><nav>Shop</nav><button>Buy</button></main><main data-screen="checkout"><button>Pay</button></main>`;';
+  assert.deepEqual(lintScrumDoc('ux', files, {requireOpenDesignOnly:true}), []);
+  files['mockups/app.js'] += '\ndocument.body.insertAdjacentHTML("beforeend", `<main data-screen="catalog"><select><option>Choose</option></select><article class="card"><p>FR-100 ' + 'Long product explanation. '.repeat(24) + '</p></article></main>`);';
+  const issues = lintScrumDoc('ux', files, {requireOpenDesignOnly:true});
+  for (const category of ['mobile-native-select','ui-copy','copy-budget']) assert.ok(issues.some(d=>d.category===category), category);
+});

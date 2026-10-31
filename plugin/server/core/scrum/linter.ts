@@ -1,7 +1,7 @@
 /** Deterministic structural checks; semantic readiness and browser QA are separate. */
 import { designScreens, screenIdValid, DESIGN_STATES, browserCoverageIssues } from "./design-contract.ts";
 import { OPEN_DESIGN_DIRECTIONS } from "./open-design.ts";
-import { runOpenDesignLint } from "./open-design-lint.ts";
+import { artifactMarkup, runOpenDesignLint } from "./open-design-lint.ts";
 import { productChromeIssues } from "./product-chrome.ts";
 import { designTokens } from "./design-contract.ts";
 import { validateQaReport } from "./qa-bundle.ts";
@@ -130,12 +130,13 @@ export function lintScrumDoc(
   }
   const dualSurface = !!files['mockups/screens.html'];
   const openDesign = options.requireOpenDesignOnly || dualSurface;
-  if (kind === 'ux' || kind === 'ui') issues.push(...runOpenDesignLint(files));
+  if ((kind === 'ux' || kind === 'ui') && options.requireOpenDesignOnly !== false) issues.push(...runOpenDesignLint(files));
   if (kind === "ux") {
     const design = prose(files["DESIGN.md"] ?? ""),
       experience = prose(files["EXPERIENCE.md"] ?? ""),
       html = files["mockups/index.html"] ?? "";
     const routing = html + '\n' + Object.entries(files).filter(([p]) => p.startsWith('mockups/') && p.endsWith('.js')).map(([,s]) => s).join('\n');
+    const markup = artifactMarkup(html) + Object.entries(files).filter(([p]) => p.startsWith('mockups/') && p.endsWith('.js')).map(([,s]) => artifactMarkup(s, true)).join('\n');
     const tokens = designTokens(design);
     for (const [label, values] of Object.entries(tokens).filter(([key]) => ['colors', 'typography', 'spacing', 'components'].includes(key))) {
       const legacyColor = label === 'colors' ? design.match(/\bcolor\s*[:|—-]\s*([^\n]+)/i)?.[1] : undefined;
@@ -143,7 +144,7 @@ export function lintScrumDoc(
     }
     const screens = designScreens(experience, files['mockups/manifest.json']);
     if (!screens.length) add('EXPERIENCE.md', 1, 'screen', 'declare at least one ## Screen: kebab-case-id');
-    issues.push(...productChromeIssues(html, design, screens));
+    issues.push(...productChromeIssues(openDesign ? markup : html, design, screens));
     const seen = new Set<string>();
     for (const screen of screens) {
       if (!screenIdValid(screen.id) || seen.has(screen.id)) add('EXPERIENCE.md', screen.line, 'screen', `invalid or duplicate screen ${screen.id}`);
@@ -151,7 +152,7 @@ export function lintScrumDoc(
       for (const state of dualSurface ? [] : DESIGN_STATES) {
         if (!new RegExp(`\\b${state}\\b`, 'i').test(screen.body)) add('EXPERIENCE.md', screen.line, 'state-cell', `${screen.id}/${state} needs a documented obligation`);
       }
-      if (!html.includes(screen.id)) add('mockups/index.html', 1, 'screen', `mockup does not cover ${screen.id}`);
+      if (!routing.includes(screen.id)) add('mockups/index.html', 1, 'screen', `mockup does not cover ${screen.id}`);
     }
     if (!/URLSearchParams/.test(routing) || !/(?:dataset\.screen|data-screen)/.test(routing) || !/(?:dataset\.state|data-state)/.test(routing) || !/scrum:set-state/.test(routing) || !/addEventListener\s*\(\s*['"]message['"]/.test(routing))
       add('mockups/index.html', 1, 'routing', 'read screen/state query parameters, reflect root data attributes and handle scrum:set-state messages');
@@ -159,7 +160,7 @@ export function lintScrumDoc(
       !/<html\b/i.test(html) ||
       !/<\/html>/i.test(html) ||
       !/<title>[^<]+<\/title>/i.test(html) ||
-      !/<(?:button|select|input)\b/i.test(html)
+      !/<(?:button|select|input)\b/i.test(markup)
     )
       add(
         "mockups/index.html",

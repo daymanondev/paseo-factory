@@ -7,6 +7,7 @@ export function renderPreview(
   root: string,
   run: ScrumRun,
   subpath = "mockups/index.html",
+  options: { inlineAssets?: boolean } = {},
 ): { html: string; runId: string; revision: number; digest: string } {
   const design = run.design;
   if (!design || designDigest(design.refs) !== design.digest)
@@ -23,24 +24,26 @@ export function renderPreview(
     "show",
     `${htmlRef.commit}:${htmlRef.path}`,
   ).toString();
+  if (options.inlineAssets === false) return { html, runId: run.runId, revision: design.revision, digest: design.digest };
   html = html.replace(
     /(?:src|href)\s*=\s*(["'])([^"']+)\1/gi,
     (match, quote: string, asset: string) => {
       if (asset.startsWith("#") || asset.startsWith("data:")) return match;
       const ref = design.refs.find(
-        (r) => r.path === htmlRef.path.replace(/[^/]+$/, "") + asset,
+        (r) => r.path === htmlRef.path.replace(/[^/]+$/, "") + asset.split(/[?#]/)[0],
       );
       if (!ref) throw new FactoryError("preview-missing-asset", asset);
       const bytes = gitBytes(root, "show", `${ref.commit}:${ref.path}`);
-      const mime = asset.endsWith(".css")
+      const filename = asset.split(/[?#]/)[0];
+      const mime = filename.endsWith(".css")
         ? "text/css"
-        : asset.endsWith(".js")
+        : filename.endsWith(".js")
           ? "text/javascript"
-          : asset.endsWith(".svg")
+          : filename.endsWith(".svg")
             ? "image/svg+xml"
-            : asset.endsWith(".png")
+            : filename.endsWith(".png")
               ? "image/png"
-              : asset.endsWith(".woff2")
+              : filename.endsWith(".woff2")
                 ? "font/woff2"
                 : "application/octet-stream";
       return match.replace(
