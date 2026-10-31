@@ -255,7 +255,7 @@ function writeSettingsJson(sourceAgentDir: string, roleHome: string, role: PiAge
 function syncMcpJson(sourceAgentDir: string, roleHome: string, role: PiAgentRole, stateDir: string, input: ProvisionPiHomeOptions): void {
   const target = join(roleHome, "mcp.json");
   if (role === "headless") return;
-  const options: HelperMcpOptions = { stateDir, piAgentDir: sourceAgentDir, piOnly: input.sourceAgentDir !== undefined && input.helperMcpSources === undefined, ...input.helperMcpSources };
+  const options: HelperMcpOptions = { stateDir, piAgentDir: sourceAgentDir, piOnly: input.sourceAgentDir !== undefined && input.helperMcpSources === undefined, ...input.helperMcpSources, roleHome };
   if (role === "agent") materializeHelperOAuth(options, readHelperOAuth(options, discoverHelperMcps(options).servers.filter(s => s.enabled)));
   const mcpServers = resolveRoleScopedMcpServers({ ...options, role, pi: true });
   mcpServers.paseo_factory = {

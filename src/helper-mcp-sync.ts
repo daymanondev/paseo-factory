@@ -22,7 +22,7 @@ export interface HelperMcpServerEntry {
   auth?: Record<string, unknown>;
   oauthRequired?: boolean;
 }
-export interface HelperMcpOptions { stateDir: string; userHome?: string; piAgentDir?: string; piOnly?: boolean }
+export interface HelperMcpOptions { stateDir: string; userHome?: string; piAgentDir?: string; piOnly?: boolean; roleHome?: string }
 export interface HelperMcpCatalogSnapshot { servers: HelperMcpServerEntry[] }
 export interface HelperOAuthBundle {
   serverUrl: string; clientInfo?: { clientId?: string; clientSecret?: string; redirectUris?: string[] };
@@ -31,7 +31,7 @@ export interface HelperOAuthBundle {
 type ObjectMap = Record<string, any>;
 function paths(options: HelperMcpOptions) {
   const userHome = options.userHome ?? homedir();
-  return { userHome, pi: options.piAgentDir ?? join(userHome, ".pi/agent"), ag: join(userHome, ".gemini/antigravity/mcp_oauth_tokens.json") };
+  return { userHome, peerHome: options.roleHome ?? join(options.stateDir, "pi-agent/agent"), pi: options.piAgentDir ?? join(userHome, ".pi/agent"), ag: join(userHome, ".gemini/antigravity/mcp_oauth_tokens.json") };
 }
 export function helperOAuthPath(agentDir: string, name: string): string {
   return join(agentDir, "mcp-oauth", `sha256-${createHash("sha256").update(name).digest("hex")}`, "tokens.json");
@@ -62,7 +62,7 @@ export function discoverHelperMcps(options: HelperMcpOptions): HelperMcpCatalogS
   if (!options.piOnly) sources.push(["claude", read(join(p.userHome, ".claude.json")).mcpServers ?? {}]);
   const stored = Array.isArray(persisted.servers) ? Object.fromEntries(persisted.servers.map((s: ObjectMap) => [s.name, s])) : persisted.mcpServers ?? {};
   sources.push(["factory", stored]);
-  const merged = new Map<string, HelperMcpServerEntry>(), disabled = new Set<string>();
+  const merged = new Map<string, HelperMcpServerEntry>(), disabled = new Set<string>(), currentPiNames = new Set<string>();
   for (const [source, servers] of sources) for (const [alias, raw] of Object.entries(servers)) {
     if (!raw || typeof raw !== "object" || Array.isArray(raw) || alias === "paseo_factory" || alias === "paseo-factory") continue;
     const value = raw as ObjectMap;
@@ -77,26 +77,32 @@ export function discoverHelperMcps(options: HelperMcpOptions): HelperMcpCatalogS
       ...((value.auth === "oauth" || value.oauthRequired === true) ? { oauthRequired: true } : {}),
       ...(typeof value.auth === "object" && value.auth !== null ? { auth: value.auth } : {}),
       ...(typeof value.timeout === "number" ? { timeout: value.timeout } : {}), ...(name === "zai-vision" ? { timeout: 300 } : {}) };
+    if (source === "pi") currentPiNames.add(name);
     const previous = merged.get(name);
     const cachedDiscovery = source === "factory" && Array.isArray(value.sources) && !value.sources.some((s: string) => s === "factory" || s === "vault");
-    if (previous && cachedDiscovery) { previous.sources = [...new Set([...previous.sources, ...entry.sources])]; continue; }
+    if (previous && cachedDiscovery) continue;
     if (!entry.enabled && source !== "factory") disabled.add(name);
     merged.set(name, previous ? { ...(credentialScore(entry, options) > credentialScore(previous, options) ? entry : previous), sources: [...new Set([...previous.sources, ...entry.sources])] } : entry);
   }
   // Existing Factory provider-key conveniences remain available across harnesses.
   const zaiKey = read(join(p.pi, "auth.json")).zai?.key;
   if (typeof zaiKey === "string" && zaiKey.trim()) {
+    currentPiNames.add("zai-vision");
     const prev = merged.get("zai-vision");
     merged.set("zai-vision", { targetProviders: [...ALL_HELPER_TARGET_PROVIDERS], vaultSync: false, name: "zai-vision", transport: "stdio", command: "npx", args: ["-y", "@z_ai/mcp-server"], enabled: true, status: "unreachable", ...prev, env: { ...prev?.env, Z_AI_API_KEY: zaiKey.trim(), Z_AI_MODE: prev?.env?.Z_AI_MODE ?? "ZAI" }, sources: [...new Set([...(prev?.sources ?? []), "pi" as const])], timeout: 300 });
   }
-  if (!merged.has("exa")) {
+  if (!currentPiNames.has("exa")) {
     const key = read(join(p.pi, "web-search.json")).exaApiKey ?? read(join(dirname(p.pi), "web-search.json")).exaApiKey;
-    if (typeof key === "string" && key.trim()) merged.set("exa", { targetProviders: [...ALL_HELPER_TARGET_PROVIDERS], vaultSync: false, name: "exa", transport: "http", url: `https://mcp.exa.ai/mcp?exaApiKey=${encodeURIComponent(key.trim())}`, enabled: true, sources: ["pi"], status: "unreachable" });
+    if (typeof key === "string" && key.trim()) {
+      currentPiNames.add("exa");
+      merged.set("exa", { targetProviders: [...ALL_HELPER_TARGET_PROVIDERS], vaultSync: false, name: "exa", transport: "http", url: `https://mcp.exa.ai/mcp?exaApiKey=${encodeURIComponent(key.trim())}`, enabled: true,
+      sources: [...new Set([...(merged.get("exa")?.sources ?? []), "pi" as const])], status: "unreachable" });
+    }
   }
   const servers = [...merged.values()].sort((a, b) => a.name.localeCompare(b.name));
   for (const entry of servers) {
     entry.enabled = typeof persisted.overrides?.[entry.name] === "boolean" ? persisted.overrides[entry.name]
-      : !disabled.has(entry.name) && entry.sources.some(source => source === "pi" || source === "vault");
+      : !disabled.has(entry.name) && (currentPiNames.has(entry.name) || entry.sources.includes("vault"));
     const targets = persisted.targets?.[entry.name];
     entry.targetProviders = Array.isArray(targets) && targets.every(p => ALL_HELPER_TARGET_PROVIDERS.includes(p))
       ? [...new Set<HelperMcpTargetProvider>(targets)] : [...ALL_HELPER_TARGET_PROVIDERS];
@@ -111,7 +117,7 @@ export function discoverHelperMcps(options: HelperMcpOptions): HelperMcpCatalogS
 }
 export function readHelperOAuth(options: HelperMcpOptions, servers: HelperMcpServerEntry[]): Record<string, HelperOAuthBundle> {
   const p = paths(options), ag = options.piOnly ? {} : read(p.ag), saved = read(join(options.stateDir, "helper-mcp-oauth.json"));
-  const otherPiTokens = [p.pi, join(options.stateDir, "pi-agent/agent")].flatMap(agentDir => {
+  const otherPiTokens = [p.pi, p.peerHome].flatMap(agentDir => {
     try { return readdirSync(join(agentDir, "mcp-oauth")).filter(n => /^sha256-[a-f0-9]+$/.test(n)).map(n => read(join(agentDir, "mcp-oauth", n, "tokens.json"))); } catch { return []; }
   });
   const result: Record<string, HelperOAuthBundle> = {};
@@ -123,7 +129,7 @@ export function readHelperOAuth(options: HelperMcpOptions, servers: HelperMcpSer
       candidates.push({ serverUrl: server.url!, clientInfo: { ...(typeof raw.client_id === "string" ? { clientId: raw.client_id } : {}), ...(typeof raw.client_secret === "string" ? { clientSecret: raw.client_secret } : {}) }, tokenUrl: raw.token_url,
         tokens: { accessToken: typeof token.access_token === "string" ? token.access_token : "", refreshToken: token.refresh_token, ...(token.expiry ? { expiresAt: Date.parse(token.expiry) / 1000 } : {}) } });
     }
-    for (const raw of [...otherPiTokens, saved[server.name], ...Object.values(saved).filter((v: any) => v?.serverUrl && endpoint(v.serverUrl) === endpoint(server.url!)), read(helperOAuthPath(p.pi, server.name)), read(helperOAuthPath(join(options.stateDir, "pi-agent/agent"), server.name))]) {
+    for (const raw of [...otherPiTokens, saved[server.name], ...Object.values(saved).filter((v: any) => v?.serverUrl && endpoint(v.serverUrl) === endpoint(server.url!)), read(helperOAuthPath(p.pi, server.name)), read(helperOAuthPath(p.peerHome, server.name))]) {
       if (raw?.tokens && raw.serverUrl && endpoint(raw.serverUrl) === endpoint(server.url!)) candidates.push({ ...raw, tokens: { ...raw.tokens, accessToken: typeof raw.tokens.accessToken === "string" ? raw.tokens.accessToken : "" } } as HelperOAuthBundle);
     }
     candidates.sort((a, b) => {
@@ -185,7 +191,7 @@ function classify(entry: HelperMcpServerEntry, bundle?: HelperOAuthBundle, userH
 }
 /** Break legacy whole-store links before any managed token can be written. */
 export function isolateHelperOAuthDirectory(options: HelperMcpOptions, managedNames: string[] = []): void {
-  const target = join(options.stateDir, "pi-agent/agent/mcp-oauth");
+  const target = join(paths(options).peerHome, "mcp-oauth");
   const unlink = (path: string) => {
     try { if (lstatSync(path).isSymbolicLink()) rmSync(path); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
@@ -212,7 +218,7 @@ export function materializeHelperOAuth(options: HelperMcpOptions, bundles: Recor
   isolateHelperOAuthDirectory(options, Object.keys(bundles));
   save(join(options.stateDir, "helper-mcp-oauth.json"), { ...stored, ...bundles });
   for (const [name, bundle] of Object.entries(bundles)) {
-    save(helperOAuthPath(join(options.stateDir, "pi-agent/agent"), name), bundle);
+    save(helperOAuthPath(paths(options).peerHome, name), bundle);
   }
 }
 async function refresh(bundle: HelperOAuthBundle): Promise<HelperOAuthBundle> {
@@ -285,7 +291,7 @@ export function setHelperMcpEnabled(options: HelperMcpOptions, name: string, upd
 }
 /** Keep the existing bridge while replacing the managed helper set. */
 function provisionHelperMcpConfig(options: HelperMcpOptions): void {
-  const path = join(options.stateDir, "pi-agent/agent/mcp.json"), config = read(path, true);
+  const path = join(paths(options).peerHome, "mcp.json"), config = read(path, true);
   const mcpServers = resolveRoleScopedMcpServers({ ...options, role: "agent", pi: true });
   if (config.mcpServers?.paseo_factory) mcpServers.paseo_factory = config.mcpServers.paseo_factory;
   save(path, { ...config, mcpServers });

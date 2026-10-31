@@ -839,7 +839,7 @@ test("Helper discovery opts in Pi starters while external-only hosts remain loca
   writeFileSync(join(pi, "auth.json"), JSON.stringify({ zai: { key: "test-key" } }));
   writeFileSync(join(pi, "web-search.json"), JSON.stringify({ exaApiKey: "test-exa" }));
   writeFileSync(join(userHome, ".gemini/config/mcp_config.json"), JSON.stringify({ mcpServers: {
-    personal: { command: process.execPath }, "zai-mcp-server": { command: "npx", args: ["@z_ai/mcp-server"] },
+    personal: { command: process.execPath }, exa: { url: "https://mcp.exa.ai/mcp" }, "zai-mcp-server": { command: "npx", args: ["@z_ai/mcp-server"] },
   } }));
   writeFileSync(join(userHome, ".claude.json"), JSON.stringify({ mcpServers: { notion: { command: process.execPath } } }));
   const options = { stateDir, userHome };
@@ -922,4 +922,45 @@ test("Connectivity never refreshes or probes local-only MCPs and leaves host fil
   assert.deepEqual(requests, ["/token", "/mcp"]);
   assert.deepEqual([hostConfig, hostTokens].map(path => readFileSync(path, "utf8")), before);
   assert.equal(existsSync(helperOAuthPath(pi, "personal")), false);
+});
+
+test("Custom Scrum Peer homes isolate managed OAuth while preserving other host token links", async (t) => {
+  const { helperOAuthPath } = await import("../src/helper-mcp-sync.ts");
+  const dir = makeTempDir(); disposeDir(t, dir);
+  const userHome = join(dir, "user"), source = join(userHome, ".pi/agent"), stateDir = join(dir, "state"), roleHome = join(dir, "scrum-peer");
+  mkdirSync(source, { recursive: true }); mkdirSync(roleHome, { recursive: true }); mkdirSync(stateDir, { recursive: true });
+  writeFileSync(join(source, "mcp.json"), JSON.stringify({ mcpServers: { docs: { url: "https://docs.invalid/mcp" } } }));
+  const managed = helperOAuthPath(source, "docs"), unmanaged = helperOAuthPath(source, "personal");
+  for (const path of [managed, unmanaged]) { mkdirSync(join(path, ".."), { recursive: true }); writeFileSync(path, '{"host":"unchanged"}'); }
+  const bundle = { clientInfo: {}, serverUrl: "https://docs.invalid/mcp", tokens: { accessToken: "factory-token" } };
+  writeFileSync(join(stateDir, "helper-mcp-oauth.json"), JSON.stringify({ docs: bundle }));
+  symlinkSync(join(source, "mcp-oauth"), join(roleHome, "mcp-oauth"));
+  const provision = () => provisionPiAgentHome({ stateDir, role: "agent", roleHome, sourceAgentDir: source, helperMcpSources: { userHome } });
+  provision();
+  assert.equal(lstatSync(join(roleHome, "mcp-oauth")).isSymbolicLink(), false);
+  assert.equal(lstatSync(join(helperOAuthPath(roleHome, "docs"), "..")).isSymbolicLink(), false);
+  assert.deepEqual(JSON.parse(readFileSync(helperOAuthPath(roleHome, "docs"), "utf8")), bundle);
+  assert.equal(realpathSync(helperOAuthPath(roleHome, "personal")), realpathSync(unmanaged));
+  provision();
+  assert.equal(readFileSync(managed, "utf8"), '{"host":"unchanged"}');
+  assert.deepEqual(JSON.parse(readFileSync(helperOAuthPath(roleHome, "docs"), "utf8")), bundle);
+});
+
+test("Cached Pi provenance never opts in servers after their Pi configuration is removed", async (t) => {
+  const { syncHelperMcps, discoverHelperMcps, setHelperMcpEnabled } = await import("../src/helper-mcp-sync.ts");
+  const dir = makeTempDir(); disposeDir(t, dir);
+  const userHome = join(dir, "user"), stateDir = join(dir, "state"), pi = join(userHome, ".pi/agent");
+  mkdirSync(pi, { recursive: true });
+  const server = { command: process.execPath };
+  writeFileSync(join(pi, "mcp.json"), JSON.stringify({ mcpServers: { personal: server, removed: server } }));
+  writeFileSync(join(userHome, ".claude.json"), JSON.stringify({ mcpServers: { personal: server } }));
+  const options = { stateDir, userHome };
+  await syncHelperMcps(options);
+  writeFileSync(join(pi, "mcp.json"), JSON.stringify({ mcpServers: {} }));
+  const catalog = discoverHelperMcps(options);
+  assert.equal(catalog.servers.find(s => s.name === "personal")?.enabled, false);
+  assert.deepEqual(catalog.servers.find(s => s.name === "personal")?.sources, ["claude"]);
+  assert.equal(catalog.servers.find(s => s.name === "removed")?.enabled, false);
+  setHelperMcpEnabled(options, "removed", true);
+  assert.equal(discoverHelperMcps(options).servers.find(s => s.name === "removed")?.enabled, true);
 });

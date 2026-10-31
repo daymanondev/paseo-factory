@@ -2146,7 +2146,7 @@ import { basename as basename7, delimiter, dirname as dirname8, isAbsolute as is
 var ALL_HELPER_TARGET_PROVIDERS = ["pi", "claude", "codex", "opencode"];
 function paths(options) {
   const userHome = options.userHome ?? homedir2();
-  return { userHome, pi: options.piAgentDir ?? join6(userHome, ".pi/agent"), ag: join6(userHome, ".gemini/antigravity/mcp_oauth_tokens.json") };
+  return { userHome, peerHome: options.roleHome ?? join6(options.stateDir, "pi-agent/agent"), pi: options.piAgentDir ?? join6(userHome, ".pi/agent"), ag: join6(userHome, ".gemini/antigravity/mcp_oauth_tokens.json") };
 }
 function helperOAuthPath(agentDir, name) {
   return join6(agentDir, "mcp-oauth", `sha256-${createHash4("sha256").update(name).digest("hex")}`, "tokens.json");
@@ -2186,7 +2186,7 @@ function discoverHelperMcps(options) {
   if (!options.piOnly) sources.push(["claude", readHelperJson(join6(p.userHome, ".claude.json")).mcpServers ?? {}]);
   const stored = Array.isArray(persisted.servers) ? Object.fromEntries(persisted.servers.map((s) => [s.name, s])) : persisted.mcpServers ?? {};
   sources.push(["factory", stored]);
-  const merged = /* @__PURE__ */ new Map(), disabled = /* @__PURE__ */ new Set();
+  const merged = /* @__PURE__ */ new Map(), disabled = /* @__PURE__ */ new Set(), currentPiNames = /* @__PURE__ */ new Set();
   for (const [source, servers2] of sources) for (const [alias, raw] of Object.entries(servers2)) {
     if (!raw || typeof raw !== "object" || Array.isArray(raw) || alias === "paseo_factory" || alias === "paseo-factory") continue;
     const value = raw;
@@ -2210,27 +2210,38 @@ function discoverHelperMcps(options) {
       ...typeof value.timeout === "number" ? { timeout: value.timeout } : {},
       ...name === "zai-vision" ? { timeout: 300 } : {}
     };
+    if (source === "pi") currentPiNames.add(name);
     const previous = merged.get(name);
     const cachedDiscovery = source === "factory" && Array.isArray(value.sources) && !value.sources.some((s) => s === "factory" || s === "vault");
-    if (previous && cachedDiscovery) {
-      previous.sources = [.../* @__PURE__ */ new Set([...previous.sources, ...entry.sources])];
-      continue;
-    }
+    if (previous && cachedDiscovery) continue;
     if (!entry.enabled && source !== "factory") disabled.add(name);
     merged.set(name, previous ? { ...credentialScore(entry, options) > credentialScore(previous, options) ? entry : previous, sources: [.../* @__PURE__ */ new Set([...previous.sources, ...entry.sources])] } : entry);
   }
   const zaiKey = readHelperJson(join6(p.pi, "auth.json")).zai?.key;
   if (typeof zaiKey === "string" && zaiKey.trim()) {
+    currentPiNames.add("zai-vision");
     const prev = merged.get("zai-vision");
     merged.set("zai-vision", { targetProviders: [...ALL_HELPER_TARGET_PROVIDERS], vaultSync: false, name: "zai-vision", transport: "stdio", command: "npx", args: ["-y", "@z_ai/mcp-server"], enabled: true, status: "unreachable", ...prev, env: { ...prev?.env, Z_AI_API_KEY: zaiKey.trim(), Z_AI_MODE: prev?.env?.Z_AI_MODE ?? "ZAI" }, sources: [.../* @__PURE__ */ new Set([...prev?.sources ?? [], "pi"])], timeout: 300 });
   }
-  if (!merged.has("exa")) {
+  if (!currentPiNames.has("exa")) {
     const key = readHelperJson(join6(p.pi, "web-search.json")).exaApiKey ?? readHelperJson(join6(dirname8(p.pi), "web-search.json")).exaApiKey;
-    if (typeof key === "string" && key.trim()) merged.set("exa", { targetProviders: [...ALL_HELPER_TARGET_PROVIDERS], vaultSync: false, name: "exa", transport: "http", url: `https://mcp.exa.ai/mcp?exaApiKey=${encodeURIComponent(key.trim())}`, enabled: true, sources: ["pi"], status: "unreachable" });
+    if (typeof key === "string" && key.trim()) {
+      currentPiNames.add("exa");
+      merged.set("exa", {
+        targetProviders: [...ALL_HELPER_TARGET_PROVIDERS],
+        vaultSync: false,
+        name: "exa",
+        transport: "http",
+        url: `https://mcp.exa.ai/mcp?exaApiKey=${encodeURIComponent(key.trim())}`,
+        enabled: true,
+        sources: [.../* @__PURE__ */ new Set([...merged.get("exa")?.sources ?? [], "pi"])],
+        status: "unreachable"
+      });
+    }
   }
   const servers = [...merged.values()].sort((a, b) => a.name.localeCompare(b.name));
   for (const entry of servers) {
-    entry.enabled = typeof persisted.overrides?.[entry.name] === "boolean" ? persisted.overrides[entry.name] : !disabled.has(entry.name) && entry.sources.some((source) => source === "pi" || source === "vault");
+    entry.enabled = typeof persisted.overrides?.[entry.name] === "boolean" ? persisted.overrides[entry.name] : !disabled.has(entry.name) && (currentPiNames.has(entry.name) || entry.sources.includes("vault"));
     const targets = persisted.targets?.[entry.name];
     entry.targetProviders = Array.isArray(targets) && targets.every((p2) => ALL_HELPER_TARGET_PROVIDERS.includes(p2)) ? [...new Set(targets)] : [...ALL_HELPER_TARGET_PROVIDERS];
     entry.vaultSync = typeof persisted.vaultSync?.[entry.name] === "boolean" ? persisted.vaultSync[entry.name] : entry.sources.includes("vault");
@@ -2243,7 +2254,7 @@ function discoverHelperMcps(options) {
 }
 function readHelperOAuth(options, servers) {
   const p = paths(options), ag = options.piOnly ? {} : readHelperJson(p.ag), saved = readHelperJson(join6(options.stateDir, "helper-mcp-oauth.json"));
-  const otherPiTokens = [p.pi, join6(options.stateDir, "pi-agent/agent")].flatMap((agentDir) => {
+  const otherPiTokens = [p.pi, p.peerHome].flatMap((agentDir) => {
     try {
       return readdirSync5(join6(agentDir, "mcp-oauth")).filter((n) => /^sha256-[a-f0-9]+$/.test(n)).map((n) => readHelperJson(join6(agentDir, "mcp-oauth", n, "tokens.json")));
     } catch {
@@ -2263,7 +2274,7 @@ function readHelperOAuth(options, servers) {
         tokens: { accessToken: typeof token.access_token === "string" ? token.access_token : "", refreshToken: token.refresh_token, ...token.expiry ? { expiresAt: Date.parse(token.expiry) / 1e3 } : {} }
       });
     }
-    for (const raw of [...otherPiTokens, saved[server.name], ...Object.values(saved).filter((v) => v?.serverUrl && endpoint(v.serverUrl) === endpoint(server.url)), readHelperJson(helperOAuthPath(p.pi, server.name)), readHelperJson(helperOAuthPath(join6(options.stateDir, "pi-agent/agent"), server.name))]) {
+    for (const raw of [...otherPiTokens, saved[server.name], ...Object.values(saved).filter((v) => v?.serverUrl && endpoint(v.serverUrl) === endpoint(server.url)), readHelperJson(helperOAuthPath(p.pi, server.name)), readHelperJson(helperOAuthPath(p.peerHome, server.name))]) {
       if (raw?.tokens && raw.serverUrl && endpoint(raw.serverUrl) === endpoint(server.url)) candidates.push({ ...raw, tokens: { ...raw.tokens, accessToken: typeof raw.tokens.accessToken === "string" ? raw.tokens.accessToken : "" } });
     }
     candidates.sort((a, b) => {
@@ -2348,7 +2359,7 @@ function classify(entry, bundle, userHome = homedir2()) {
   return { ...entry, status, statusDetail, ...bundle?.tokens.expiresAt ? { oauthExpiresAt: bundle.tokens.expiresAt } : {} };
 }
 function isolateHelperOAuthDirectory(options, managedNames = []) {
-  const target = join6(options.stateDir, "pi-agent/agent/mcp-oauth");
+  const target = join6(paths(options).peerHome, "mcp-oauth");
   const unlink = (path) => {
     try {
       if (lstatSync(path).isSymbolicLink()) rmSync4(path);
@@ -2381,7 +2392,7 @@ function materializeHelperOAuth(options, bundles) {
   isolateHelperOAuthDirectory(options, Object.keys(bundles));
   writeHelperJson(join6(options.stateDir, "helper-mcp-oauth.json"), { ...stored, ...bundles });
   for (const [name, bundle] of Object.entries(bundles)) {
-    writeHelperJson(helperOAuthPath(join6(options.stateDir, "pi-agent/agent"), name), bundle);
+    writeHelperJson(helperOAuthPath(paths(options).peerHome, name), bundle);
   }
 }
 function fingerprint(server, bundle) {

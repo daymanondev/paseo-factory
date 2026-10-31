@@ -2004,7 +2004,7 @@ test("Private vault replicates Helper MCP definitions separately from keys and O
     { name: "private", transport: "stdio", command: "npx", env: { PRIVATE_KEY: "private-only" }, sources: ["pi"] },
     { name: "disabled", transport: "stdio", command: "npx", env: { DISABLED_KEY: "disabled-only" }, sources: ["pi"] },
     { name: "local", transport: "stdio", command: "npx", env: { LOCAL_KEY: "local-only" }, sources: ["claude"] },
-  ], overrides: { supabase: true, disabled: false }, targets: { supabase: ["pi", "claude"] }, vaultSync: { exa: true, supabase: true, disabled: true, local: true } }));
+  ], overrides: { exa: true, private: true, supabase: true, disabled: false }, targets: { supabase: ["pi", "claude"] }, vaultSync: { exa: true, supabase: true, disabled: true, local: true } }));
   writeFileSync(join(state, "helper-mcp-oauth.json"), JSON.stringify({ supabase: { serverUrl: "https://mcp.supabase.com/mcp", tokens: { accessToken: "secret-access", refreshToken: "secret-refresh", expiresAt } } }));
   collectLocalStateIntoRuntime(source, { userHome: source });
   const definition = readFileSync(join(source, "vault-runtime/config/helper-mcps.json"), "utf8");
@@ -2046,7 +2046,7 @@ test("Helper vault hydration preserves explicit local choices and recollection r
   mkdirSync(stateDir, { recursive: true });
   writeFileSync(join(stateDir, "helper-mcps.json"), JSON.stringify({ servers: [
     { name: "docs", command: process.execPath, sources: ["pi"] },
-  ], vaultSync: { docs: true }, targets: { docs: ["claude"] } }));
+  ], overrides: { docs: true }, vaultSync: { docs: true }, targets: { docs: ["claude"] } }));
   collectHelperMcpVault({ stateDir, userHome }, runtime);
   const target = { stateDir: join(dir, "target"), userHome };
   mkdirSync(target.stateDir, { recursive: true });
