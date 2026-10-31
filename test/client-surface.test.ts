@@ -1257,6 +1257,20 @@ test("KanbanCard renders a dedicated horizontal wrapping badges row and TasksPan
   );
 });
 
+test("ADR 0036: FactoryShell renders the Prerequisite Setup Gate banner when companionTools are missing/incomplete and PluginsPane protects mandatory companionTools against Disable/Remove", () => {
+  const shell = read("plugin/client/factory/shell.tsx");
+  const plugins = read("plugin/client/factory/plugins.tsx");
+  const companions = read("plugin/shared/companions.ts");
+
+  assert.match(shell, /PREREQUISITE SETUP GATE/, "FactoryShell renders PREREQUISITE SETUP GATE badge when tools are missing/incomplete");
+  assert.match(shell, /Required Factory Skills & Tools Setup/, "FactoryShell renders the Prerequisite Setup Gate title");
+  assert.match(shell, /Install Required Skills & Tools/, "FactoryShell exposes 1-click Install Required Skills & Tools CTA");
+  assert.match(plugins, /REQUIRED TOOL/, "CompanionCard renders REQUIRED TOOL badge for companion tools");
+  assert.match(plugins, /Required by Factory \(Disable\/Remove locked\)/, "CompanionCard locks Disable/Remove on mandatory companion tools");
+  assert.match(companions, /git:mattpocock\/skills \+ anthropics\/skills \+ vercel-labs\/agent-skills/, "COMPANION_TOOLS_CATALOG declares canonical GitHub skill sources");
+});
+
+
 
 
 

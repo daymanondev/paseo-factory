@@ -6251,7 +6251,7 @@ test("Scrum supervisorEnsure preserves a UI-created Supervisor session without s
   assert.equal(existsSync(wt.path), false, "worktree directory is removed after landing");
 });
 
-test("ADR 0036: snapshot surfaces companionTools (impeccable + factory-skills-pack) and pluginsInstall / pluginsManage install, update, reload, and remove them", async (t) => {
+test("ADR 0036: snapshot surfaces companionTools (impeccable + factory-skills-pack), pluginsCheckUpdates checks remote versions, and pluginsInstall / pluginsManage install, update, reload, and protect mandatory tools against disable/remove", async (t) => {
   const userHome = makeTempDir("companion-tools-home-");
   disposeDir(t, userHome);
   const dir = makeTempDir();
@@ -6273,14 +6273,28 @@ test("ADR 0036: snapshot surfaces companionTools (impeccable + factory-skills-pa
       ok: true,
       plugins: [{ id: "paseo-factory", path: "/plugins/paseo-factory", enabled: true, status: "running" }],
     }),
+    checkPluginUpdates: async () => ({
+      ok: true,
+      checkedAt: "2026-10-31T12:00:00.000Z",
+      statuses: [],
+    }),
     companionToolRunner: (command, args) => {
       toolCalls.push({ command, args });
-      const impDir = join(userHome, ".agents/skills/impeccable");
-      mkdirSync(join(impDir, "scripts"), { recursive: true });
-      writeFileSync(join(impDir, "SKILL.md"), "# Impeccable\n");
-      writeFileSync(join(impDir, "scripts/VERSION"), "4.8.0\n");
-      writeFileSync(join(impDir, "scripts/impeccable"), "#!/bin/sh\n");
-      return { status: 0, stdout: "Installed impeccable 4.8.0", stderr: "" };
+      if (command === "npx") {
+        const impDir = join(userHome, ".agents/skills/impeccable");
+        mkdirSync(join(impDir, "scripts"), { recursive: true });
+        writeFileSync(join(impDir, "SKILL.md"), "---\nname: impeccable\nmetadata:\n  version: 4.8.0\n---\n# Impeccable\n");
+        writeFileSync(join(impDir, "scripts/VERSION"), "0.1.18\n");
+        writeFileSync(join(impDir, "scripts/impeccable"), "#!/bin/sh\n");
+        return { status: 0, stdout: "Installed impeccable 4.8.0", stderr: "" };
+      }
+      if (command === "npm" && args[0] === "view") {
+        return { status: 0, stdout: "4.9.0\n", stderr: "" };
+      }
+      if (command === "git" && args[0] === "ls-remote") {
+        return { status: 0, stdout: "9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f0e\tHEAD\n", stderr: "" };
+      }
+      return { status: 0, stdout: "d0ef4f344dc60fb53df2fa1bcceb8dc3efdb1fb5", stderr: "" };
     },
   });
 
@@ -6299,7 +6313,6 @@ test("ADR 0036: snapshot surfaces companionTools (impeccable + factory-skills-pa
   const instImp = await handlers.pluginsInstall({ target: "impeccable" });
   assert.ok(instImp.ok, instImp.ok ? "" : instImp.error);
   assert.deepEqual(instImp.installed, ["impeccable"]);
-  assert.equal(toolCalls.length, 1);
   assert.equal(toolCalls[0]!.command, "npx");
 
   // 3. Stage a skill in vault-runtime and install factory-skills-pack
@@ -6322,14 +6335,24 @@ test("ADR 0036: snapshot surfaces companionTools (impeccable + factory-skills-pa
     ],
   );
 
-  // 5. Manage reload and remove on impeccable
+  // 5. pluginsCheckUpdates checks remote updates for companionTools too
+  const checkRes = await handlers.pluginsCheckUpdates({});
+  assert.ok(checkRes.ok, checkRes.ok ? "" : checkRes.error);
+  assert.ok(checkRes.updatesAvailable.includes("impeccable"));
+  assert.ok(checkRes.updatesAvailable.includes("factory-skills-pack"));
+
+  // 6. Manage reload succeeds, while disable and remove are refused with companion-tool-protected
   const reloadImp = await handlers.pluginsManage({ pluginId: "impeccable", action: "reload" });
   assert.ok(reloadImp.ok, reloadImp.ok ? "" : reloadImp.error);
+  const disableImp = await handlers.pluginsManage({ pluginId: "impeccable", action: "disable" });
+  assert.equal(disableImp.ok, false);
+  if (!disableImp.ok) assert.equal(disableImp.code, "companion-tool-protected");
   const removeImp = await handlers.pluginsManage({ pluginId: "impeccable", action: "remove" });
-  assert.ok(removeImp.ok, removeImp.ok ? "" : removeImp.error);
-  const snap3 = await handlers.snapshot({});
-  assert.ok(snap3.ok, snap3.ok ? "" : snap3.error);
-  assert.equal(snap3.view.companionTools?.find((t) => t.id === "impeccable")?.status, "not_installed");
+  assert.equal(removeImp.ok, false);
+  if (!removeImp.ok) assert.equal(removeImp.code, "companion-tool-protected");
+  const removePack = await handlers.pluginsManage({ pluginId: "factory-skills-pack", action: "remove" });
+  assert.equal(removePack.ok, false);
+  if (!removePack.ok) assert.equal(removePack.code, "companion-tool-protected");
 });
 
 

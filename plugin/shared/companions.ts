@@ -114,18 +114,18 @@ export const COMPANION_TOOLS_CATALOG: readonly CompanionToolCatalogEntry[] = [
   {
     id: "factory-skills-pack",
     title: "Factory Core Skill Pack",
-    tagline: "Shared ~/.agents/skills library synchronized via Private Vault and symlinked across Pi, Claude, and Gemini.",
+    tagline: "11 core skills from mattpocock/skills, anthropics/skills & vercel-labs/agent-skills linked across Pi, Claude & Gemini.",
     description:
-      "Host-level Markdown skill library (`tdd`, `diagnosing-bugs`, `codebase-design`, `frontend-design`, `web-design-guidelines`, `code-review`, `grilling`, `domain-modeling`, `grill-with-docs`, `factory`) synchronized across machines via `config/skills/` in `factory-vault` and linked into all provider skill directories.",
-    canonicalSource: "vault:config/skills",
+      "Declarative open-source skill pack (`tdd`, `diagnosing-bugs`, `codebase-design`, `code-review`, `domain-modeling`, `grill-with-docs`, `grilling`, `research` from `mattpocock/skills`; `frontend-design` from `anthropics/skills`; `web-design-guidelines` from `vercel-labs/agent-skills`; plus built-in `factory`) installed into `~/.agents/skills`, tracked in `.skill-lock.json`, and symlinked across provider skill directories.",
+    canonicalSource: "git:mattpocock/skills + anthropics/skills + vercel-labs/agent-skills",
     access: "public",
     sidebarLabel: "Skill Pack",
     sidebarIcon: "BookOpen",
     capabilities: [
-      "~/.agents/skills Source of Truth",
-      "Private Vault Sync",
+      "mattpocock/skills (8)",
+      "anthropics/skills (1)",
+      "vercel-labs/agent-skills (1)",
       "Pi / Claude / Gemini Symlinks",
-      "Role-Scoped Specialist Allowlist",
     ],
   },
 ];

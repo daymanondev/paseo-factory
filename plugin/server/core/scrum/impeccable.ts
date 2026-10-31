@@ -1,9 +1,11 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, symlinkSync, rmSync, writeFileSync, lstatSync, readFileSync, copyFileSync, statSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, symlinkSync, rmSync, writeFileSync, lstatSync, readFileSync, copyFileSync, statSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { FactoryError } from '../errors.ts';
+import { ensureFactorySkillSafe } from '../skill.ts';
 
 export const IMPECCABLE_MIN_VERSION = '4.8.0';
 
@@ -17,8 +19,131 @@ export const CORE_FACTORY_SKILLS = [
   'grilling',
   'domain-modeling',
   'grill-with-docs',
+  'research',
   'factory',
 ] as const;
+
+export interface CoreSkillSource {
+  readonly name: Exclude<(typeof CORE_FACTORY_SKILLS)[number], 'factory'>;
+  readonly source: string;
+  readonly sourceUrl: string;
+  readonly skillPath: string;
+}
+
+/**
+ * Declarative registry of the 10 open-source skills required by `paseo-factory`
+ * (`ADR 0036 §1`). `paseo-factory` never vendors third-party skill Markdown inside
+ * its own repository; instead it remembers each skill's canonical GitHub origin
+ * and installs/updates directly from GitHub into `<userHome>/.agents/skills/<name>`.
+ */
+export const CORE_SKILL_SOURCES: readonly CoreSkillSource[] = [
+  {
+    name: 'tdd',
+    source: 'mattpocock/skills',
+    sourceUrl: 'https://github.com/mattpocock/skills.git',
+    skillPath: 'skills/engineering/tdd',
+  },
+  {
+    name: 'diagnosing-bugs',
+    source: 'mattpocock/skills',
+    sourceUrl: 'https://github.com/mattpocock/skills.git',
+    skillPath: 'skills/engineering/diagnosing-bugs',
+  },
+  {
+    name: 'codebase-design',
+    source: 'mattpocock/skills',
+    sourceUrl: 'https://github.com/mattpocock/skills.git',
+    skillPath: 'skills/engineering/codebase-design',
+  },
+  {
+    name: 'code-review',
+    source: 'mattpocock/skills',
+    sourceUrl: 'https://github.com/mattpocock/skills.git',
+    skillPath: 'skills/engineering/code-review',
+  },
+  {
+    name: 'domain-modeling',
+    source: 'mattpocock/skills',
+    sourceUrl: 'https://github.com/mattpocock/skills.git',
+    skillPath: 'skills/engineering/domain-modeling',
+  },
+  {
+    name: 'grill-with-docs',
+    source: 'mattpocock/skills',
+    sourceUrl: 'https://github.com/mattpocock/skills.git',
+    skillPath: 'skills/engineering/grill-with-docs',
+  },
+  {
+    name: 'grilling',
+    source: 'mattpocock/skills',
+    sourceUrl: 'https://github.com/mattpocock/skills.git',
+    skillPath: 'skills/productivity/grilling',
+  },
+  {
+    name: 'research',
+    source: 'mattpocock/skills',
+    sourceUrl: 'https://github.com/mattpocock/skills.git',
+    skillPath: 'skills/engineering/research',
+  },
+  {
+    name: 'frontend-design',
+    source: 'anthropics/skills',
+    sourceUrl: 'https://github.com/anthropics/skills.git',
+    skillPath: 'skills/frontend-design',
+  },
+  {
+    name: 'web-design-guidelines',
+    source: 'vercel-labs/agent-skills',
+    sourceUrl: 'https://github.com/vercel-labs/agent-skills.git',
+    skillPath: 'skills/web-design-guidelines',
+  },
+] as const;
+
+export interface SkillLockEntry {
+  source: string;
+  sourceType: string;
+  sourceUrl: string;
+  skillPath?: string;
+  skillFolderHash: string;
+  repoCommitSha?: string;
+  installedAt: string;
+  updatedAt: string;
+}
+
+export interface SkillLockFile {
+  version: number;
+  skills: Record<string, SkillLockEntry>;
+  dismissed?: Record<string, unknown>;
+  lastSelectedAgents?: string[];
+}
+
+export function readSkillLockFile(userHome = homedir()): SkillLockFile {
+  const lockPath = join(userHome, '.agents', '.skill-lock.json');
+  if (!existsSync(lockPath)) {
+    return { version: 3, skills: {} };
+  }
+  try {
+    const parsed = JSON.parse(readFileSync(lockPath, 'utf8')) as Partial<SkillLockFile>;
+    const skills =
+      parsed && typeof parsed.skills === 'object' && parsed.skills !== null && !Array.isArray(parsed.skills)
+        ? (parsed.skills as Record<string, SkillLockEntry>)
+        : {};
+    return {
+      version: typeof parsed?.version === 'number' ? parsed.version : 3,
+      skills: { ...skills },
+      ...(parsed?.dismissed !== undefined ? { dismissed: parsed.dismissed } : {}),
+      ...(Array.isArray(parsed?.lastSelectedAgents) ? { lastSelectedAgents: parsed.lastSelectedAgents } : {}),
+    };
+  } catch {
+    return { version: 3, skills: {} };
+  }
+}
+
+export function writeSkillLockFile(userHome: string, lock: SkillLockFile): void {
+  const lockPath = join(userHome, '.agents', '.skill-lock.json');
+  mkdirSync(dirname(lockPath), { recursive: true });
+  writeFileSync(lockPath, `${JSON.stringify(lock, null, 2)}\n`, 'utf8');
+}
 
 export type CompanionToolRunner = (
   command: string,
@@ -149,13 +274,16 @@ export interface FactorySkillPackInspection {
   status: 'installed' | 'partial' | 'not_installed';
   installedSkills: string[];
   missingCoreSkills: string[];
+  installedCoreCount: number;
   totalSkills: number;
+  revision: string | null;
   path: string;
 }
 
 /**
  * Inspects `<userHome>/.agents/skills` for the core Factory skill pack
- * (`tdd`, `diagnosing-bugs`, `codebase-design`, `frontend-design`, etc.).
+ * (`tdd`, `diagnosing-bugs`, `codebase-design`, `frontend-design`, `research`, etc.)
+ * and reads `<userHome>/.agents/.skill-lock.json` for the tracked revision SHA.
  */
 export function inspectFactorySkillPack(userHome = homedir()): FactorySkillPackInspection {
   const skillsDir = join(userHome, '.agents', 'skills');
@@ -164,7 +292,9 @@ export function inspectFactorySkillPack(userHome = homedir()): FactorySkillPackI
       status: 'not_installed',
       installedSkills: [],
       missingCoreSkills: [...CORE_FACTORY_SKILLS],
+      installedCoreCount: 0,
       totalSkills: 0,
+      revision: null,
       path: skillsDir,
     };
   }
@@ -182,17 +312,30 @@ export function inspectFactorySkillPack(userHome = homedir()): FactorySkillPackI
   installedSkills.sort();
   const presentSet = new Set(installedSkills);
   const missingCoreSkills = CORE_FACTORY_SKILLS.filter((s) => !presentSet.has(s));
+  const installedCoreCount = CORE_FACTORY_SKILLS.length - missingCoreSkills.length;
   const status =
     installedSkills.length === 0
       ? 'not_installed'
       : missingCoreSkills.length === 0
         ? 'installed'
         : 'partial';
+  const lock = readSkillLockFile(userHome);
+  let revision: string | null = null;
+  for (const source of CORE_SKILL_SOURCES) {
+    const entry = lock.skills[source.name];
+    const sha = entry?.repoCommitSha?.trim() || entry?.skillFolderHash?.trim();
+    if (sha) {
+      revision = sha.slice(0, 7);
+      break;
+    }
+  }
   return {
     status,
     installedSkills,
     missingCoreSkills,
+    installedCoreCount,
     totalSkills: installedSkills.length,
+    revision,
     path: skillsDir,
   };
 }
@@ -353,6 +496,256 @@ export function installOrUpdateImpeccableTool(options?: {
     version: after.version ?? IMPECCABLE_MIN_VERSION,
     path: after.path,
     summary: `${verb} Impeccable v${after.version ?? IMPECCABLE_MIN_VERSION} (${after.skillCount} skill${after.skillCount === 1 ? '' : 's'}) and linked provider skills.`,
+  };
+}
+
+function copyDirectoryTreeSync(srcDir: string, destDir: string): void {
+  mkdirSync(destDir, { recursive: true });
+  for (const entry of readdirSync(srcDir, { withFileTypes: true })) {
+    if (entry.name === '.git' || entry.name === 'node_modules' || entry.name === '.DS_Store') continue;
+    const srcPath = join(srcDir, entry.name);
+    const destPath = join(destDir, entry.name);
+    if (entry.isDirectory()) {
+      copyDirectoryTreeSync(srcPath, destPath);
+    } else if (entry.isFile()) {
+      mkdirSync(dirname(destPath), { recursive: true });
+      copyFileSync(srcPath, destPath);
+    }
+  }
+}
+
+function computeSkillFolderHash(skillDir: string): string {
+  const hash = createHash('sha1');
+  const walk = (dir: string, relPrefix: string): void => {
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.name === '.git' || entry.name === '.DS_Store') continue;
+      const fullPath = join(dir, entry.name);
+      const rel = relPrefix === '' ? entry.name : `${relPrefix}/${entry.name}`;
+      if (entry.isDirectory()) {
+        walk(fullPath, rel);
+      } else if (entry.isFile()) {
+        hash.update(`${rel}\0`);
+        hash.update(readFileSync(fullPath));
+      }
+    }
+  };
+  walk(skillDir, '');
+  return hash.digest('hex');
+}
+
+/**
+ * Installs or updates the 10 open-source skills in `CORE_SKILL_SOURCES` directly from
+ * their canonical GitHub repositories (`mattpocock/skills`, `anthropics/skills`,
+ * `vercel-labs/agent-skills`) into `<userHome>/.agents/skills/<skillName>`, reconciles
+ * `/factory` (`ensureFactorySkillSafe`) when requested, updates `<userHome>/.agents/.skill-lock.json`,
+ * and links provider skill directories (`~/.pi/agent/skills`, `~/.claude/skills`, `~/.gemini/config/skills`).
+ */
+export function installOrUpdateFactorySkillPack(options?: {
+  userHome?: string;
+  action?: 'install' | 'update';
+  factoryCmd?: string;
+  reconcileFactorySkill?: boolean;
+  runner?: CompanionToolRunner;
+}):
+  | {
+      ok: true;
+      totalSkills: number;
+      installedCoreCount: number;
+      missingCoreSkills: string[];
+      revision: string | null;
+      summary: string;
+    }
+  | { ok: false; reason: string } {
+  const userHome = options?.userHome ?? homedir();
+  const action = options?.action ?? 'install';
+  const runner = options?.runner ?? defaultCompanionToolRunner;
+  const agentsSkillsDir = join(userHome, '.agents', 'skills');
+  mkdirSync(agentsSkillsDir, { recursive: true });
+
+  if (options?.reconcileFactorySkill === true) {
+    ensureFactorySkillSafe(agentsSkillsDir, { factoryCmd: options.factoryCmd ?? 'factory' }, () => {});
+  }
+
+  const targetEntries =
+    action === 'update'
+      ? [...CORE_SKILL_SOURCES]
+      : CORE_SKILL_SOURCES.filter((entry) => !existsSync(join(agentsSkillsDir, entry.name, 'SKILL.md')));
+
+  const byRepo = new Map<string, CoreSkillSource[]>();
+  for (const entry of targetEntries) {
+    const group = byRepo.get(entry.sourceUrl) ?? [];
+    group.push(entry);
+    byRepo.set(entry.sourceUrl, group);
+  }
+
+  const env = buildToolInstallEnv(userHome);
+  const lock = readSkillLockFile(userHome);
+  let lockUpdated = false;
+  const cloneErrors: string[] = [];
+
+  for (const [sourceUrl, entries] of byRepo) {
+    const tmpDir = mkdtempSync(join(tmpdir(), 'factory-skills-'));
+    try {
+      const cloneRes = runner('git', ['clone', '--depth', '1', sourceUrl, tmpDir], { cwd: userHome, env });
+      if (cloneRes.status !== 0) {
+        const detail = [cloneRes.stderr.trim(), cloneRes.stdout.trim()].filter(Boolean).join(' — ') || `exit ${cloneRes.status}`;
+        cloneErrors.push(`${entries[0]?.source ?? sourceUrl}: ${detail}`);
+        continue;
+      }
+      let repoCommitSha: string | undefined;
+      if (existsSync(join(tmpDir, '.git'))) {
+        const revRes = runner('git', ['rev-parse', 'HEAD'], { cwd: tmpDir, env });
+        const parsedSha = revRes.stdout.trim().split(/\s+/)[0]?.trim() ?? '';
+        if (/^[0-9a-f]{7,40}$/i.test(parsedSha)) {
+          repoCommitSha = parsedSha;
+        }
+      } else {
+        const stdoutSha = cloneRes.stdout.trim().match(/\b([0-9a-f]{7,40})\b/i)?.[1];
+        if (stdoutSha) repoCommitSha = stdoutSha;
+      }
+
+      const nowIso = new Date().toISOString();
+      for (const entry of entries) {
+        const srcSkillDir = join(tmpDir, entry.skillPath);
+        if (!existsSync(join(srcSkillDir, 'SKILL.md'))) continue;
+        const destSkillDir = join(agentsSkillsDir, entry.name);
+        if (action === 'update') {
+          rmSync(destSkillDir, { recursive: true, force: true });
+        }
+        copyDirectoryTreeSync(srcSkillDir, destSkillDir);
+        const folderHash = computeSkillFolderHash(destSkillDir);
+        const existingLock = lock.skills[entry.name];
+        lock.skills[entry.name] = {
+          source: entry.source,
+          sourceType: 'github',
+          sourceUrl: entry.sourceUrl,
+          skillPath: `${entry.skillPath}/SKILL.md`,
+          skillFolderHash: folderHash,
+          ...(repoCommitSha ? { repoCommitSha } : existingLock?.repoCommitSha ? { repoCommitSha: existingLock.repoCommitSha } : {}),
+          installedAt: existingLock?.installedAt ?? nowIso,
+          updatedAt: nowIso,
+        };
+        lockUpdated = true;
+      }
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  }
+
+  if (lockUpdated) {
+    writeSkillLockFile(userHome, lock);
+  }
+  const linked = ensureProviderSkillSymlinks(userHome);
+  const after = inspectFactorySkillPack(userHome);
+  if (after.totalSkills === 0) {
+    return {
+      ok: false,
+      reason:
+        cloneErrors.length > 0
+          ? `factory-skills-pack ${action} failed (${cloneErrors.join('; ')})`
+          : `factory-skills-pack ${action} produced no skills in ${agentsSkillsDir}`,
+    };
+  }
+  const verb = action === 'update' ? 'Updated' : 'Synchronized';
+  return {
+    ok: true,
+    totalSkills: after.totalSkills,
+    installedCoreCount: after.installedCoreCount,
+    missingCoreSkills: after.missingCoreSkills,
+    revision: after.revision,
+    summary: `${verb} Factory Core Skill Pack (${after.totalSkills} skill(s) in ~/.agents/skills, ${linked.linked.length} new symlink(s)).`,
+  };
+}
+
+export interface CompanionToolUpdateStatus {
+  id: 'impeccable' | 'factory-skills-pack';
+  currentRevision: string | null;
+  latestRevision: string | null;
+  updateAvailable: boolean;
+}
+
+/**
+ * Checks remote updates for `impeccable` (`npm view impeccable version`) and
+ * `factory-skills-pack` (`git ls-remote <sourceUrl> HEAD` across `CORE_SKILL_SOURCES`
+ * compared against `<userHome>/.agents/.skill-lock.json` and missing core skills).
+ */
+export function checkCompanionToolsUpdates(options?: {
+  userHome?: string;
+  runner?: CompanionToolRunner;
+}): Record<'impeccable' | 'factory-skills-pack', CompanionToolUpdateStatus> {
+  const userHome = options?.userHome ?? homedir();
+  const runner = options?.runner ?? defaultCompanionToolRunner;
+  const env = buildToolInstallEnv(userHome);
+
+  // 1. Impeccable remote npm check
+  const imp = inspectImpeccableTool(userHome);
+  let impLatest: string | null = imp.status === 'outdated' ? IMPECCABLE_MIN_VERSION : imp.version;
+  let impUpdateAvailable = imp.status === 'outdated';
+  if (imp.status !== 'not_installed') {
+    const npmRes = runner('npm', ['view', 'impeccable', 'version'], { cwd: userHome, env });
+    if (npmRes.status === 0) {
+      const candidate = npmRes.stdout.trim().split(/\r?\n/)[0]?.trim() ?? '';
+      if (/^[0-9]+\.[0-9]+\.[0-9]+/.test(candidate)) {
+        impLatest = candidate;
+        if (compareSemver(candidate, imp.version ?? '0.0.0') > 0) {
+          impUpdateAvailable = true;
+        }
+      }
+    }
+  }
+
+  // 2. Factory Core Skill Pack remote git ls-remote check
+  const pack = inspectFactorySkillPack(userHome);
+  const lock = readSkillLockFile(userHome);
+  let packLatest: string | null = pack.revision;
+  let packUpdateAvailable = pack.status === 'partial';
+  if (pack.status !== 'not_installed') {
+    const seenUrls = new Set<string>();
+    for (const source of CORE_SKILL_SOURCES) {
+      if (seenUrls.has(source.sourceUrl)) continue;
+      seenUrls.add(source.sourceUrl);
+      const lsRes = runner('git', ['ls-remote', source.sourceUrl, 'HEAD'], { cwd: userHome, env });
+      if (lsRes.status !== 0) continue;
+      const remoteSha = lsRes.stdout.trim().split(/\s+/)[0]?.trim() ?? '';
+      if (!/^[0-9a-f]{7,40}$/i.test(remoteSha)) continue;
+      const shortRemote = remoteSha.slice(0, 7);
+      if (packLatest === null) packLatest = shortRemote;
+      const repoSkills = CORE_SKILL_SOURCES.filter((s) => s.sourceUrl === source.sourceUrl);
+      for (const skill of repoSkills) {
+        if (!pack.installedSkills.includes(skill.name)) {
+          packUpdateAvailable = true;
+          packLatest = shortRemote;
+          continue;
+        }
+        const entry = lock.skills[skill.name];
+        const recordedCommit = entry?.repoCommitSha?.trim();
+        if (recordedCommit && !remoteSha.startsWith(recordedCommit) && !recordedCommit.startsWith(shortRemote)) {
+          packUpdateAvailable = true;
+          packLatest = shortRemote;
+        }
+      }
+    }
+  }
+
+  return {
+    impeccable: {
+      id: 'impeccable',
+      currentRevision: imp.version,
+      latestRevision: impLatest,
+      updateAvailable: impUpdateAvailable,
+    },
+    'factory-skills-pack': {
+      id: 'factory-skills-pack',
+      currentRevision: pack.revision,
+      latestRevision: packLatest,
+      updateAvailable: packUpdateAvailable,
+    },
   };
 }
 

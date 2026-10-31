@@ -494,6 +494,10 @@ export function collectVaultSkillsIntoRuntime(paseoHome: string, explicitUserHom
   }
 
   if (collectedSkills.length > 0) {
+    const lockPath = join(userHome, ".agents", ".skill-lock.json");
+    if (existsSync(lockPath)) {
+      writeRuntimeFile(paseoHome, "config/skill-lock.json", readFileSync(lockPath));
+    }
     const impeccable = inspectImpeccableTool(userHome);
     const companionManifest = {
       schemaVersion: 1,
@@ -524,6 +528,14 @@ export function materializeVaultSkillsFromRuntime(
 ): string[] {
   const userHome = resolveVaultUserHome(paseoHome, explicitUserHome);
   const runtimeSkillsDir = join(paseoHome, "vault-runtime", "config", "skills");
+  const runtimeLockPath = join(paseoHome, "vault-runtime", "config", "skill-lock.json");
+  if (existsSync(runtimeLockPath)) {
+    const destLockPath = join(userHome, ".agents", ".skill-lock.json");
+    if (overwriteConfigs || !existsSync(destLockPath)) {
+      mkdirSync(dirname(destLockPath), { recursive: true });
+      copyFileSync(runtimeLockPath, destLockPath);
+    }
+  }
   if (!existsSync(runtimeSkillsDir)) return [];
 
   const agentsSkillsDir = join(userHome, ".agents", "skills");

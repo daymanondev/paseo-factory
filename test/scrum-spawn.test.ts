@@ -947,34 +947,67 @@ test('Scrum harness links the full upstream UI skill pack and edit scanner only 
   }
 });
 
-test('ADR 0036: inspectImpeccableTool, ensureProviderSkillSymlinks, and pre-spawn self-healing in provisionImpeccable', async (t) => {
-  const { mkdirSync, existsSync, lstatSync, chmodSync } = await import('node:fs');
+test('ADR 0036: inspectImpeccableTool, installOrUpdateFactorySkillPack from CORE_SKILL_SOURCES, checkCompanionToolsUpdates, ensureProviderSkillSymlinks, and pre-spawn self-healing in provisionImpeccable', async (t) => {
+  const { mkdirSync, existsSync, lstatSync, chmodSync, readFileSync } = await import('node:fs');
   const {
     inspectImpeccableTool,
     inspectFactorySkillPack,
+    installOrUpdateFactorySkillPack,
+    checkCompanionToolsUpdates,
     ensureProviderSkillSymlinks,
     provisionImpeccable,
     CORE_FACTORY_SKILLS,
+    CORE_SKILL_SOURCES,
   } = await import('../src/scrum/impeccable.ts');
 
   const home = makeTempDir();
   const roleHome = makeTempDir();
   for (const d of [home, roleHome]) disposeDir(t, d);
 
-  // 1. Initially not_installed
+  // 1. Initially not_installed; CORE_FACTORY_SKILLS has 11 skills (10 GitHub + 1 built-in factory)
+  assert.equal(CORE_FACTORY_SKILLS.length, 11);
+  assert.equal(CORE_SKILL_SOURCES.length, 10);
   assert.equal(inspectImpeccableTool(home).status, 'not_installed');
   assert.equal(inspectFactorySkillPack(home).status, 'not_installed');
 
-  // 2. Seed core skills in ~/.agents/skills and verify ensureProviderSkillSymlinks links them to .pi/agent/skills, .claude/skills, .gemini/config/skills
-  for (const s of CORE_FACTORY_SKILLS) {
-    mkdirSync(join(home, '.agents/skills', s), { recursive: true });
-    writeFileSync(join(home, '.agents/skills', s, 'SKILL.md'), `# ${s}\n`);
-  }
+  // 2. Install Factory Core Skill Pack via installOrUpdateFactorySkillPack (cloning the 3 canonical GitHub repos + reconciling /factory)
+  const clonedUrls: string[] = [];
+  const installedPack = installOrUpdateFactorySkillPack({
+    userHome: home,
+    action: 'install',
+    reconcileFactorySkill: true,
+    runner: (cmd, args) => {
+      if (cmd === 'git' && args[0] === 'clone') {
+        const sourceUrl = args[3]!;
+        const tmpDir = args[4]!;
+        clonedUrls.push(sourceUrl);
+        for (const entry of CORE_SKILL_SOURCES.filter((s) => s.sourceUrl === sourceUrl)) {
+          mkdirSync(join(tmpDir, entry.skillPath), { recursive: true });
+          writeFileSync(join(tmpDir, entry.skillPath, 'SKILL.md'), `---\nname: ${entry.name}\n---\n# ${entry.name}\n`);
+        }
+        return { status: 0, stdout: 'd0ef4f344dc60fb53df2fa1bcceb8dc3efdb1fb5', stderr: '' };
+      }
+      return { status: 0, stdout: '', stderr: '' };
+    },
+  });
+  assert.equal(installedPack.ok, true);
+  assert.deepEqual(clonedUrls.sort(), [
+    'https://github.com/anthropics/skills.git',
+    'https://github.com/mattpocock/skills.git',
+    'https://github.com/vercel-labs/agent-skills.git',
+  ]);
   const pack = inspectFactorySkillPack(home);
   assert.equal(pack.status, 'installed');
   assert.equal(pack.totalSkills, CORE_FACTORY_SKILLS.length);
-  const linked = ensureProviderSkillSymlinks(home);
-  assert.ok(linked.linked.length >= CORE_FACTORY_SKILLS.length * 3);
+  assert.equal(pack.installedCoreCount, CORE_FACTORY_SKILLS.length);
+  assert.equal(pack.revision, 'd0ef4f3');
+  const lockRaw = JSON.parse(readFileSync(join(home, '.agents/.skill-lock.json'), 'utf8'));
+  assert.equal(lockRaw.version, 3);
+  assert.equal(lockRaw.skills.tdd.source, 'mattpocock/skills');
+  assert.equal(lockRaw.skills.research.source, 'mattpocock/skills');
+  assert.equal(lockRaw.skills['frontend-design'].source, 'anthropics/skills');
+  assert.equal(lockRaw.skills['web-design-guidelines'].source, 'vercel-labs/agent-skills');
+  ensureProviderSkillSymlinks(home);
   for (const s of CORE_FACTORY_SKILLS) {
     assert.ok(lstatSync(join(home, '.pi/agent/skills', s)).isSymbolicLink());
     assert.ok(lstatSync(join(home, '.claude/skills', s)).isSymbolicLink());
@@ -1015,4 +1048,22 @@ test('ADR 0036: inspectImpeccableTool, ensureProviderSkillSymlinks, and pre-spaw
   assert.equal(inspectImpeccableTool(home).engineVersion, '0.1.18');
   assert.equal(existsSync(join(roleHome, 'skills/impeccable/SKILL.md')), true);
   assert.ok(lstatSync(join(home, '.pi/agent/skills/impeccable')).isSymbolicLink());
+
+  // 5. checkCompanionToolsUpdates detects remote npm/git updates
+  const updates = checkCompanionToolsUpdates({
+    userHome: home,
+    runner: (cmd, args) => {
+      if (cmd === 'npm' && args[0] === 'view') {
+        return { status: 0, stdout: '4.9.0\n', stderr: '' };
+      }
+      if (cmd === 'git' && args[0] === 'ls-remote') {
+        return { status: 0, stdout: '9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f0e\tHEAD\n', stderr: '' };
+      }
+      return { status: 0, stdout: '', stderr: '' };
+    },
+  });
+  assert.equal(updates.impeccable.updateAvailable, true);
+  assert.equal(updates.impeccable.latestRevision, '4.9.0');
+  assert.equal(updates['factory-skills-pack'].updateAvailable, true);
+  assert.equal(updates['factory-skills-pack'].latestRevision, '9f8e7d6');
 });

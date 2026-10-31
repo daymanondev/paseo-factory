@@ -2498,8 +2498,8 @@ function materializeProjectScrumVault(state, slug, runtimeApp, overwrite) {
 }
 
 // src/scrum/impeccable.ts
-import { existsSync as existsSync7, mkdirSync as mkdirSync6, readdirSync as readdirSync5, symlinkSync, rmSync as rmSync5, writeFileSync as writeFileSync5, lstatSync, readFileSync as readFileSync11, copyFileSync as copyFileSync2, statSync as statSync4 } from "node:fs";
-import { homedir as homedir2 } from "node:os";
+import { existsSync as existsSync7, mkdirSync as mkdirSync6, mkdtempSync, readdirSync as readdirSync5, symlinkSync, rmSync as rmSync5, writeFileSync as writeFileSync5, lstatSync, readFileSync as readFileSync11, copyFileSync as copyFileSync2, statSync as statSync4 } from "node:fs";
+import { homedir as homedir2, tmpdir } from "node:os";
 import { dirname as dirname9, join as join11, resolve as resolve5 } from "node:path";
 var IMPECCABLE_MIN_VERSION = "4.8.0";
 function compareSemver(a, b) {
@@ -3488,6 +3488,10 @@ function collectVaultSkillsIntoRuntime(paseoHome, explicitUserHome) {
     collectedSkills.push(name);
   }
   if (collectedSkills.length > 0) {
+    const lockPath = join14(userHome, ".agents", ".skill-lock.json");
+    if (existsSync10(lockPath)) {
+      writeRuntimeFile(paseoHome, "config/skill-lock.json", readFileSync14(lockPath));
+    }
     const impeccable = inspectImpeccableTool(userHome);
     const companionManifest = {
       schemaVersion: 1,
@@ -3509,6 +3513,14 @@ function collectVaultSkillsIntoRuntime(paseoHome, explicitUserHome) {
 function materializeVaultSkillsFromRuntime(paseoHome, overwriteConfigs = false, explicitUserHome) {
   const userHome = resolveVaultUserHome(paseoHome, explicitUserHome);
   const runtimeSkillsDir = join14(paseoHome, "vault-runtime", "config", "skills");
+  const runtimeLockPath = join14(paseoHome, "vault-runtime", "config", "skill-lock.json");
+  if (existsSync10(runtimeLockPath)) {
+    const destLockPath = join14(userHome, ".agents", ".skill-lock.json");
+    if (overwriteConfigs || !existsSync10(destLockPath)) {
+      mkdirSync7(dirname10(destLockPath), { recursive: true });
+      copyFileSync3(runtimeLockPath, destLockPath);
+    }
+  }
   if (!existsSync10(runtimeSkillsDir)) return [];
   const agentsSkillsDir = join14(userHome, ".agents", "skills");
   const materializedSkills = [];

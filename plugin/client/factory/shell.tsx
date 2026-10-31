@@ -23,9 +23,9 @@ import { z } from "zod";
 import { accept, executionSetMode, scrumCommand, lanesReset, lanesSet, lanesSetBatch, leadRotate, pluginsInstall, pluginsManage, pluginsCheckUpdates, profilesApply, profilesDelete, profilesSave, projectAdd, projectDelete, projectPickFolder, projectReset, ratifyProposal, retro, snapshot, supervisorRevoke, taskDetail, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
 import type { ManageablePluginId } from "../../shared/companions.ts";
 import type { FactoryView, LaneName } from "../../shared/view.ts";
-import { Btn, Card, TabBar } from "../kit/pill.tsx";
+import { Btn, Card, Pill, TabBar } from "../kit/pill.tsx";
 import type { TabId } from "../kit/pill.tsx";
-import { SPACING, text } from "../kit/theme.ts";
+import { RADIUS, SPACING, text, tint } from "../kit/theme.ts";
 import { useNow, usePoll, pollEvery } from "../kit/poll.ts";
 import { Header } from "./header.tsx";
 import { VaultPane, isVaultActName } from "./vault.tsx";
@@ -486,6 +486,108 @@ export function FactoryShell({
             busy,
           }}
         />
+        {(() => {
+          const incompleteTools = (view.companionTools ?? []).filter(
+            (t) => t.status !== "running" || t.error !== null,
+          );
+          if (incompleteTools.length === 0) return null;
+          const isInstallingPrereqs =
+            activePluginAct !== null && activePluginAct.kind === "install" && activePluginAct.target === "all";
+          return (
+            <Card
+              theme={theme}
+              gap={SPACING[2]}
+              style={{
+                borderColor: tint(theme.colors.statusWarning, "88"),
+                backgroundColor: tint(theme.colors.statusWarning, "10"),
+              }}
+            >
+              <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: SPACING[2] }}>
+                <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5], flexShrink: 1 }}>
+                  <Pill theme={theme} label="PREREQUISITE SETUP GATE" tone="statusWarning" lit />
+                  <Text style={text(theme, "rowTitle")}>Required Factory Skills & Tools Setup</Text>
+                  <Pill
+                    theme={theme}
+                    label={`${incompleteTools.length} required component${incompleteTools.length === 1 ? "" : "s"} missing or incomplete`}
+                    tone="statusWarning"
+                  />
+                </View>
+                <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5] }}>
+                  <Btn
+                    theme={theme}
+                    small
+                    solid
+                    label={
+                      isInstallingPrereqs
+                        ? `Installing Prerequisites… (${elapsedSeconds}s)`
+                        : "Install Required Skills & Tools"
+                    }
+                    disabled={busy || activePluginAct !== null}
+                    onPress={() => {
+                      clearPluginCardError("all");
+                      setActivePluginAct({ kind: "install", target: "all", action: "install", startedAt: Date.now() });
+                      void act("Install Required Skills & Tools", async () => {
+                        try {
+                          const reply = await pluginsInstallCall({ target: "all", includeTools: true });
+                          if (reply.ok) {
+                            setPluginsNote({ text: reply.summary, tone: "statusSuccess", pluginId: "all" });
+                          } else {
+                            recordPluginActFailure("Install Required Skills & Tools", "all", reply.error);
+                          }
+                          return reply;
+                        } finally {
+                          setActivePluginAct(null);
+                        }
+                      });
+                    }}
+                  />
+                  {tab !== "plugins" ? (
+                    <Btn
+                      theme={theme}
+                      small
+                      label="Open Plugins & Version Manager"
+                      tone="foregroundMuted"
+                      onPress={() => setTab("plugins")}
+                    />
+                  ) : null}
+                </View>
+              </View>
+              <Text style={text(theme, "meta")}>
+                Factory requires these open-source skills and verification tools on this host before running SLP or Agile Scrum workflows. Click &quot;Install Required Skills &amp; Tools&quot; to install them directly from GitHub and npm, or manage versions in the Plugins tab:
+              </Text>
+              <View style={{ gap: SPACING[1] }}>
+                {incompleteTools.map((tool) => (
+                  <View
+                    key={tool.id}
+                    style={{
+                      flexDirection: "row",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      flexWrap: "wrap",
+                      gap: SPACING[1.5],
+                      borderWidth: 1,
+                      borderColor: theme.colors.border,
+                      borderRadius: RADIUS.md,
+                      backgroundColor: theme.colors.surface0,
+                      paddingHorizontal: SPACING[2.5],
+                      paddingVertical: SPACING[1.5],
+                    }}
+                  >
+                    <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5], flexShrink: 1 }}>
+                      <Text style={text(theme, "label")}>{tool.title}</Text>
+                      <Pill theme={theme} label={tool.canonicalSource} mono />
+                      {tool.error !== null ? (
+                        <Text style={{ ...text(theme, "meta", "statusDanger"), flexShrink: 1 }}>{tool.error}</Text>
+                      ) : (
+                        <Pill theme={theme} label="Not Installed" tone="statusWarning" />
+                      )}
+                    </View>
+                  </View>
+                ))}
+              </View>
+            </Card>
+          );
+        })()}
         {showDiagnostics ? (
           <>
             <Card theme={theme} gap={SPACING[1]}>
@@ -743,7 +845,7 @@ export function FactoryShell({
               manage: (pluginId, action) => {
                 // The toast names the act — "Update: …", "Remove: …" (the act() law).
                 const actName = `${action[0]!.toUpperCase()}${action.slice(1)}`;
-                const allPlugins = [view.corePlugin, ...view.companions];
+                const allPlugins = [view.corePlugin, ...view.companions, ...(view.companionTools ?? [])];
                 const targetPlugin = pluginId === "all" ? null : (allPlugins.find((p) => p.id === pluginId) ?? null);
                 const coreTargeted =
                   pluginId === "paseo-factory" ||

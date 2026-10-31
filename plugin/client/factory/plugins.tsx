@@ -87,12 +87,13 @@ function formatVersionBadge(companion: CompanionPluginView, shortRevision: strin
   return null;
 }
 
-/** One plugin's compact 2-row card — serves both the Core plugin (`isCore`) and each Companion plugin. */
+/** One plugin's compact 2-row card — serves the Core plugin (`isCore`), each Companion plugin, and each Companion tool (`isCompanionTool`). */
 function CompanionCard({
   theme,
   companion,
   actions,
   isCore = false,
+  isCompanionTool = false,
   activeAct = null,
   elapsedSeconds = 0,
   cardError,
@@ -102,6 +103,7 @@ function CompanionCard({
   companion: CompanionPluginView;
   actions: PluginsActions;
   isCore?: boolean;
+  isCompanionTool?: boolean;
   activeAct?: ActivePluginAct | null;
   elapsedSeconds?: number;
   cardError?: string;
@@ -141,6 +143,7 @@ function CompanionCard({
           <Icon name={companion.sidebarIcon} size={15} color={theme.colors.accent} />
           <Text style={text(theme, "rowTitle")}>{companion.title}</Text>
           {isCore ? <Pill theme={theme} label="CORE" tone="accent" lit /> : null}
+          {isCompanionTool ? <Pill theme={theme} label="REQUIRED TOOL" tone="accent" lit /> : null}
           {!isCore && companion.access === "private" ? (
             <Pill theme={theme} label="Private · Invite-only" tone="statusWarning" />
           ) : null}
@@ -148,7 +151,11 @@ function CompanionCard({
           {versionBadge !== null ? <Pill theme={theme} label={versionBadge} mono /> : null}
           <Pill theme={theme} label={status.label} tone={status.tone} lit={status.lit} />
           {companion.status === "running" ? (
-            <Pill theme={theme} label={`Active in Sidebar · ${companion.sidebarLabel}`} tone="accent" lit />
+            isCompanionTool ? (
+              <Pill theme={theme} label="Active in ~/.agents/skills" tone="accent" lit />
+            ) : (
+              <Pill theme={theme} label={`Active in Sidebar · ${companion.sidebarLabel}`} tone="accent" lit />
+            )
           ) : null}
           {installed && companion.installKind === "directory" ? (
             <Pill theme={theme} label="Local checkout" tone="foregroundMuted" />
@@ -179,17 +186,35 @@ function CompanionCard({
               ) : (
                 <Btn theme={theme} small label="Install" solid disabled={actions.busy} onPress={() => actions.install(id)} />
               )}
-              <Btn
-                theme={theme}
-                small
-                label={drawerOpen ? "Hide" : "Custom source…"}
-                tone="foregroundMuted"
-                disabled={actions.busy}
-                onPress={() => setDrawerOpen(!drawerOpen)}
-              />
+              {!isCompanionTool ? (
+                <Btn
+                  theme={theme}
+                  small
+                  label={drawerOpen ? "Hide" : "Custom source…"}
+                  tone="foregroundMuted"
+                  disabled={actions.busy}
+                  onPress={() => setDrawerOpen(!drawerOpen)}
+                />
+              ) : (
+                <Btn
+                  theme={theme}
+                  small
+                  label={drawerOpen ? "Hide" : "⋯ Manage"}
+                  tone="foregroundMuted"
+                  disabled={actions.busy}
+                  onPress={() => setDrawerOpen(!drawerOpen)}
+                />
+              )}
             </>
           ) : (
             <>
+              {isCompanionTool && companion.error !== null ? (
+                isInstallingThis ? (
+                  <Btn theme={theme} small label={`Installing… (${elapsedSeconds}s)`} solid disabled={actions.busy} onPress={() => actions.install(id)} />
+                ) : (
+                  <Btn theme={theme} small label="Install Missing" solid disabled={actions.busy} onPress={() => actions.install(id)} />
+                )
+              ) : null}
               {companion.installKind === "directory" ? (
                 <Btn
                   theme={theme}
@@ -304,7 +329,7 @@ function CompanionCard({
             )}
           </View>
 
-          {!installed ? (
+          {!installed && !isCompanionTool ? (
             <View style={{ gap: SPACING[1.5] }}>
               <View style={{ gap: SPACING[1] }}>
                 <Text style={text(theme, "label")}>Source</Text>
@@ -356,10 +381,14 @@ function CompanionCard({
                 onPress={() => actions.install(id, trimmedSource, trimmedRef === "" ? undefined : trimmedRef)}
               />
             </View>
+          ) : !installed && isCompanionTool ? (
+            <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5] }}>
+              <Pill theme={theme} label="Required by Factory (Disable/Remove locked)" tone="foregroundMuted" />
+            </View>
           ) : (
             <View style={{ gap: SPACING[2] }}>
               <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5] }}>
-                {!isCore ? (
+                {!isCore && !isCompanionTool ? (
                   companion.enabled ? (
                     isDisablingThis ? (
                       <Btn theme={theme} small label="Disabling…" disabled={actions.busy} onPress={() => actions.manage(id, "disable")} />
@@ -430,20 +459,24 @@ function CompanionCard({
                     onPress={() => actions.install(manageId)}
                   />
                 ) : null}
-                <Btn
-                  theme={theme}
-                  small
-                  label={switchSourceOpen ? "Cancel source…" : "Switch source…"}
-                  tone="foregroundMuted"
-                  disabled={actions.busy}
-                  onPress={() => setSwitchSourceOpen(!switchSourceOpen)}
-                />
-                {!isCore ? (
+                {!isCompanionTool ? (
+                  <Btn
+                    theme={theme}
+                    small
+                    label={switchSourceOpen ? "Cancel source…" : "Switch source…"}
+                    tone="foregroundMuted"
+                    disabled={actions.busy}
+                    onPress={() => setSwitchSourceOpen(!switchSourceOpen)}
+                  />
+                ) : null}
+                {!isCore && !isCompanionTool ? (
                   isRemovingThis ? (
                     <Btn theme={theme} small label="Removing…" tone="statusDanger" disabled={actions.busy} onPress={() => actions.manage(id, "remove")} />
                   ) : (
                     <Btn theme={theme} small label="Remove" tone="statusDanger" disabled={actions.busy} onPress={() => actions.manage(id, "remove")} />
                   )
+                ) : isCompanionTool ? (
+                  <Pill theme={theme} label="Required by Factory (Disable/Remove locked)" tone="foregroundMuted" />
                 ) : (
                   <Pill theme={theme} label="Core plugin protected (Disable/Remove locked)" tone="foregroundMuted" />
                 )}
@@ -555,7 +588,7 @@ export function PluginsPane({
   // not_installed must never keep the Install All button lit (v0.0.30, ADR 0012 §2; ADR 0036 §5).
   const anyUninstalled =
     view.companions.some((c) => c.access === "public" && c.status === "not_installed") ||
-    companionTools.some((t) => t.access === "public" && (t.status === "not_installed" || t.status === "failed"));
+    companionTools.some((t) => t.access === "public" && (t.status === "not_installed" || t.status === "failed" || t.error !== null));
   const allPlugins = [view.corePlugin, ...view.companions, ...companionTools];
   const updatableCount = allPlugins.filter(
     (p) => p.status !== "not_installed" && (p.installKind === "git" || p.installKind === "npm") && p.updateAvailable === true,
@@ -665,7 +698,7 @@ export function PluginsPane({
               <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5] }}>
                 <Text style={text(theme, "section")}>Companion Tools & Skill Packs</Text>
                 <Pill theme={theme} label={`${toolsRunning} of ${companionTools.length} active on host`} tone={toolsRunning === companionTools.length ? "statusSuccess" : "statusWarning"} />
-                <Pill theme={theme} label="Auto-provisioned & Vault-synced" tone="foregroundMuted" />
+                <Pill theme={theme} label="GitHub-sourced & Protected" tone="foregroundMuted" />
               </View>
             </View>
           </Card>
@@ -675,6 +708,7 @@ export function PluginsPane({
               theme={theme}
               companion={tool}
               actions={actions}
+              isCompanionTool
               activeAct={activeAct}
               elapsedSeconds={elapsedSeconds}
               cardError={cardErrors[tool.id]}

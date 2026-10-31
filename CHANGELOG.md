@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.72] - 2026-10-31
+
+### Added
+
+- Add declarative GitHub origin registry (`CORE_SKILL_SOURCES` in `src/scrum/impeccable.ts`) for the 10 open-source skills required by Factory (`mattpocock/skills`, `anthropics/skills`, `vercel-labs/agent-skills`) alongside the built-in `factory` skill (`CORE_FACTORY_SKILLS`, 11 total including `research`), cloning/updating directly from GitHub into `~/.agents/skills/` and recording `repoCommitSha` and `skillFolderHash` in `~/.agents/.skill-lock.json` without vendoring third-party skill Markdown inside `paseo-factory` (ADR 0036).
+- Add a guided **Prerequisite Setup Gate** banner (`Required Factory Skills & Tools Setup`) on the `Factory surface` (`plugin/client/factory/shell.tsx`) whenever `impeccable` or `factory-skills-pack` is missing or incomplete, with a 1-click `Install Required Skills & Tools` CTA (ADR 0036).
+- Extend `factory.plugins.check.updates` (`pluginsCheckUpdates`) to inspect remote updates for `impeccable` (`npm view impeccable version`) and `factory-skills-pack` (`git ls-remote <sourceUrl> HEAD` against `.skill-lock.json`), and protect mandatory companion tools (`impeccable`, `factory-skills-pack`) against `Disable` and `Remove` (`companion-tool-protected`) (ADR 0036).
+
 ## [0.0.71] - 2026-10-31
 
 ### Fixed
