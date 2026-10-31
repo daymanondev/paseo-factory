@@ -1270,6 +1270,23 @@ test("ADR 0036: FactoryShell renders the Prerequisite Setup Gate banner when com
   assert.match(companions, /git:mattpocock\/skills \+ anthropics\/skills \+ vercel-labs\/agent-skills/, "COMPANION_TOOLS_CATALOG declares canonical GitHub skill sources");
 });
 
+test("ADR 0039: HelperMcpsCard renders a compact 2-row summary card with a collapsible ⋯ Manage drawer and sits below Companion Tools in PluginsPane", () => {
+  const plugins = read("plugin/client/factory/plugins.tsx");
+  const helperMcps = read("plugin/client/factory/helper-mcps.tsx");
+
+  const coreIdx = plugins.indexOf("key={view.corePlugin.id}");
+  const toolsIdx = plugins.indexOf("Companion Tools & Skill Packs");
+  const helperIdx = plugins.indexOf("<HelperMcpsCard");
+  assert.ok(coreIdx !== -1 && toolsIdx !== -1 && helperIdx !== -1, "PluginsPane renders Core, Companion Tools, and HelperMcpsCard");
+  assert.ok(coreIdx < toolsIdx && toolsIdx < helperIdx, "HelperMcpsCard is placed below Core and Companion Tools so it never pushes Core off-screen");
+
+  assert.match(helperMcps, /const \[drawerOpen, setDrawerOpen\] = useState\(false\)/, "HelperMcpsCard is collapsed by default");
+  assert.match(helperMcps, /⋯ Manage \(\$\{servers\.length\}\)/, "HelperMcpsCard uses the collapsible ⋯ Manage (N) drawer toggle");
+  assert.match(helperMcps, /label="PEER ONLY"/, "HelperMcpsCard displays PEER ONLY badge");
+  assert.match(helperMcps, /flexBasis: 280/, "HelperMcpsCard drawer uses a compact 2-column responsive grid");
+});
+
+
 
 
 

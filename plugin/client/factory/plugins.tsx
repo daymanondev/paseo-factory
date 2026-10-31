@@ -670,8 +670,6 @@ export function PluginsPane({
         ) : null}
       </Card>
 
-      <HelperMcpsCard theme={theme} servers={view.helperMcps ?? []} actions={actions} />
-
       {/* Core plugin card at top, followed by the 3 Companion plugin cards */}
       <CompanionCard
         key={view.corePlugin.id}
@@ -722,6 +720,8 @@ export function PluginsPane({
           ))}
         </View>
       ) : null}
+
+      <HelperMcpsCard theme={theme} servers={view.helperMcps ?? []} actions={actions} />
     </View>
   );
 }

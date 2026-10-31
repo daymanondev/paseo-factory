@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.77] - 2026-10-31
+
+### Fixed
+
+- Redesign `HelperMcpsCard` in the `Plugins` tab into a compact 2-row summary card with a collapsible `⋯ Manage (N)` drawer, status filter chips (`All`, `Connected`, `Attention`, `Disabled`), a 2-column responsive server grid, and compact inline status pills when collapsed, positioned below `Companion Tools & Skill Packs` so Core and Companion plugins remain at the top of the `Plugins` tab.
+- Normalize stale absolute Node/nvm binary paths (such as `/Users/.../.nvm/versions/node/v22.*/bin/npx` after upgrading Node) and include active nvm/Homebrew binary directories when checking stdio Helper MCP commands, plus decouple SSE body cancellation from HTTP probe timeouts so OAuth-refreshed HTTP MCPs (`supabase`) and `framelink-figma` report `Connected` accurately.
+
 ## [0.0.76] - 2026-10-31
 
 ### Added

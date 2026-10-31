@@ -2142,7 +2142,7 @@ function writeHelperJson(path, value) {
 import { createHash as createHash4 } from "node:crypto";
 import { existsSync as existsSync4, accessSync, constants, readdirSync as readdirSync5 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
-import { delimiter, dirname as dirname8, isAbsolute as isAbsolute4, join as join6 } from "node:path";
+import { basename as basename7, delimiter, dirname as dirname8, isAbsolute as isAbsolute4, join as join6 } from "node:path";
 function paths(options) {
   const userHome = options.userHome ?? homedir2();
   return { userHome, pi: options.piAgentDir ?? join6(userHome, ".pi/agent"), ag: join6(userHome, ".gemini/antigravity/mcp_oauth_tokens.json") };
@@ -2199,7 +2199,7 @@ function discoverHelperMcps(options) {
       enabled: value.enabled !== false && value.disabled !== true,
       sources: source === "factory" && Array.isArray(value.sources) ? value.sources.filter((s) => ["antigravity", "pi", "claude", "vault", "factory"].includes(s)) : [source],
       status: "unreachable",
-      ...url ? { url } : { command: value.command, args: Array.isArray(value.args) ? value.args.filter((s) => typeof s === "string") : [] },
+      ...url ? { url } : { command: normalizeCommand(value.command, p.userHome), args: Array.isArray(value.args) ? value.args.filter((s) => typeof s === "string") : [] },
       ...strings(value.env) ? { env: strings(value.env) } : {},
       ...strings(value.headers) ? { headers: strings(value.headers) } : {},
       ...value.auth === "oauth" || value.oauthRequired === true ? { oauthRequired: true } : {},
@@ -2229,7 +2229,7 @@ function discoverHelperMcps(options) {
   for (const entry of servers) entry.enabled = typeof persisted.overrides?.[entry.name] === "boolean" ? persisted.overrides[entry.name] : !disabled.has(entry.name);
   const bundles = readHelperOAuth(options, servers);
   return { servers: servers.map((entry) => {
-    const checked = classify(entry, bundles[entry.name]), cached = persisted.health?.[entry.name];
+    const checked = classify(entry, bundles[entry.name], p.userHome), cached = persisted.health?.[entry.name];
     return checked.status === "connected" && cached && cached.fingerprint === fingerprint(entry, bundles[entry.name]) && Date.now() - cached.at < 3e5 ? { ...checked, status: cached.status, statusDetail: cached.statusDetail } : checked;
   }) };
 }
@@ -2283,9 +2283,30 @@ function readHelperOAuth(options, servers) {
 function valid(bundle) {
   return !!bundle?.tokens.accessToken && (bundle.tokens.expiresAt === void 0 || Number.isFinite(bundle.tokens.expiresAt) && bundle.tokens.expiresAt > Date.now() / 1e3);
 }
-function commandExists(command) {
+function candidateBinDirs(userHome = homedir2()) {
+  const nvmRoot = join6(userHome, ".nvm/versions/node");
+  let nvmDirs = [];
+  try {
+    nvmDirs = readdirSync5(nvmRoot).sort().reverse().map((v) => join6(nvmRoot, v, "bin"));
+  } catch {
+    nvmDirs = [];
+  }
+  return [.../* @__PURE__ */ new Set([...(process.env.PATH ?? "").split(delimiter).filter(Boolean), dirname8(process.execPath), ...nvmDirs, "/opt/homebrew/bin", "/usr/local/bin", join6(userHome, ".local/bin")])];
+}
+function normalizeCommand(command, userHome = homedir2()) {
+  if (!command || !isAbsolute4(command) && !command.includes("/")) return command;
+  try {
+    accessSync(command, constants.X_OK);
+    return command;
+  } catch {
+    const base = basename7(command);
+    if (["npx", "node", "npm", "uvx", "uv", "bunx", "bun"].includes(base) && commandExists(base, userHome)) return base;
+    return command;
+  }
+}
+function commandExists(command, userHome = homedir2()) {
   if (!command) return false;
-  return (isAbsolute4(command) || command.includes("/") ? [command] : (process.env.PATH ?? "").split(delimiter).map((p) => join6(p, command))).some((p) => {
+  return (isAbsolute4(command) || command.includes("/") ? [command] : candidateBinDirs(userHome).map((p) => join6(p, command))).some((p) => {
     try {
       accessSync(p, constants.X_OK);
       return true;
@@ -2294,7 +2315,7 @@ function commandExists(command) {
     }
   });
 }
-function classify(entry, bundle) {
+function classify(entry, bundle, userHome = homedir2()) {
   let status = "connected", statusDetail;
   if (!entry.enabled) status = "disabled";
   else if (entry.transport === "stdio") {
@@ -2310,7 +2331,7 @@ function classify(entry, bundle) {
     if (missing.length) {
       status = "missing_env";
       statusDetail = `Missing credentials: ${missing.join(", ")}`;
-    } else if (!commandExists(entry.command)) {
+    } else if (!commandExists(entry.command, userHome)) {
       status = "unreachable";
       statusDetail = "Command unavailable on this host";
     } else statusDetail = "Command and credentials present; server starts on first use";
@@ -3462,7 +3483,7 @@ function sealVaultFile(paseoHome, sourcePath, vaultPath, passphrase) {
 // src/vault-materialization.ts
 import { execFileSync as execFileSync3 } from "node:child_process";
 import { readFileSync as readFileSync15, mkdirSync as mkdirSync8, chmodSync as chmodSync2, writeFileSync as writeFileSync8, readdirSync as readdirSync7, existsSync as existsSync12, copyFileSync as copyFileSync3, statSync as statSync5 } from "node:fs";
-import { join as join16, basename as basename7, isAbsolute as isAbsolute6, resolve as resolvePath, dirname as dirname12 } from "node:path";
+import { join as join16, basename as basename8, isAbsolute as isAbsolute6, resolve as resolvePath, dirname as dirname12 } from "node:path";
 function writeRuntimeFile(paseoHome, vaultPath, data) {
   assertSafeVaultPath(vaultPath);
   const runtimeRoot = join16(paseoHome, "vault-runtime");
@@ -3556,7 +3577,7 @@ function inspectProjectRootFacts(root) {
   return {
     root: resolved.root,
     slug: resolved.slug,
-    basename: basename7(resolved.root),
+    basename: basename8(resolved.root),
     originUrl: gitProbe(resolved.root, ["config", "--get", "remote.origin.url"]),
     bundleId: jsonStringField(storeManifest, "bundleId") ?? nestedJsonStringField(storeManifest, ["ios", "bundleId"]),
     packageName: jsonStringField(storeManifest, "packageName") ?? nestedJsonStringField(storeManifest, ["android", "packageName"])
@@ -3727,7 +3748,7 @@ function resolveVaultUserHome(paseoHome, explicitUserHome) {
     return resolvePath(explicitUserHome);
   }
   const resolved = resolvePath(paseoHome);
-  if (basename7(resolved).startsWith(".paseo")) {
+  if (basename8(resolved).startsWith(".paseo")) {
     return dirname12(resolved);
   }
   return resolved;

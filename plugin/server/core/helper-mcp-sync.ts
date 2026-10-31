@@ -2,7 +2,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, accessSync, constants, readdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, dirname, isAbsolute, join } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join } from "node:path";
 import { readHelperJson as read, writeHelperJson as save } from "./helper-mcp-store.ts";
 
 export type HelperMcpTransport = "stdio" | "http";
@@ -65,7 +65,7 @@ export function discoverHelperMcps(options: HelperMcpOptions): HelperMcpCatalogS
     if (url) name = [...merged.values()].find(s => s.url && endpoint(s.url) === endpoint(url))?.name ?? name;
     const entry: HelperMcpServerEntry = { name, transport: url ? "http" : "stdio", enabled: value.enabled !== false && value.disabled !== true,
       sources: source === "factory" && Array.isArray(value.sources) ? value.sources.filter((s: string) => ["antigravity", "pi", "claude", "vault", "factory"].includes(s)) : [source], status: "unreachable",
-      ...(url ? { url } : { command: value.command, args: Array.isArray(value.args) ? value.args.filter((s: unknown) => typeof s === "string") : [] }),
+      ...(url ? { url } : { command: normalizeCommand(value.command as string, p.userHome), args: Array.isArray(value.args) ? value.args.filter((s: unknown) => typeof s === "string") : [] }),
       ...(strings(value.env) ? { env: strings(value.env) } : {}), ...(strings(value.headers) ? { headers: strings(value.headers) } : {}),
       ...((value.auth === "oauth" || value.oauthRequired === true) ? { oauthRequired: true } : {}),
       ...(typeof value.auth === "object" && value.auth !== null ? { auth: value.auth } : {}),
@@ -90,7 +90,7 @@ export function discoverHelperMcps(options: HelperMcpOptions): HelperMcpCatalogS
   for (const entry of servers) entry.enabled = typeof persisted.overrides?.[entry.name] === "boolean" ? persisted.overrides[entry.name] : !disabled.has(entry.name);
   const bundles = readHelperOAuth(options, servers);
   return { servers: servers.map(entry => {
-    const checked = classify(entry, bundles[entry.name]), cached = persisted.health?.[entry.name];
+    const checked = classify(entry, bundles[entry.name], p.userHome), cached = persisted.health?.[entry.name];
     return checked.status === "connected" && cached && cached.fingerprint === fingerprint(entry, bundles[entry.name]) && Date.now() - cached.at < 300_000
       ? { ...checked, status: cached.status, statusDetail: cached.statusDetail } : checked;
   }) };
@@ -131,11 +131,25 @@ export function readHelperOAuth(options: HelperMcpOptions, servers: HelperMcpSer
   return result;
 }
 function valid(bundle?: HelperOAuthBundle): boolean { return !!bundle?.tokens.accessToken && (bundle.tokens.expiresAt === undefined || (Number.isFinite(bundle.tokens.expiresAt) && bundle.tokens.expiresAt > Date.now() / 1000)); }
-function commandExists(command?: string): boolean {
-  if (!command) return false;
-  return (isAbsolute(command) || command.includes("/") ? [command] : (process.env.PATH ?? "").split(delimiter).map(p => join(p, command))).some(p => { try { accessSync(p, constants.X_OK); return true; } catch { return false; } });
+function candidateBinDirs(userHome = homedir()): string[] {
+  const nvmRoot = join(userHome, ".nvm/versions/node");
+  let nvmDirs: string[] = [];
+  try { nvmDirs = readdirSync(nvmRoot).sort().reverse().map(v => join(nvmRoot, v, "bin")); } catch { nvmDirs = []; }
+  return [...new Set([...(process.env.PATH ?? "").split(delimiter).filter(Boolean), dirname(process.execPath), ...nvmDirs, "/opt/homebrew/bin", "/usr/local/bin", join(userHome, ".local/bin")])];
 }
-function classify(entry: HelperMcpServerEntry, bundle?: HelperOAuthBundle): HelperMcpServerEntry {
+function normalizeCommand(command: string, userHome = homedir()): string {
+  if (!command || (!isAbsolute(command) && !command.includes("/"))) return command;
+  try { accessSync(command, constants.X_OK); return command; } catch {
+    const base = basename(command);
+    if (["npx", "node", "npm", "uvx", "uv", "bunx", "bun"].includes(base) && commandExists(base, userHome)) return base;
+    return command;
+  }
+}
+function commandExists(command?: string, userHome = homedir()): boolean {
+  if (!command) return false;
+  return (isAbsolute(command) || command.includes("/") ? [command] : candidateBinDirs(userHome).map(p => join(p, command))).some(p => { try { accessSync(p, constants.X_OK); return true; } catch { return false; } });
+}
+function classify(entry: HelperMcpServerEntry, bundle?: HelperOAuthBundle, userHome = homedir()): HelperMcpServerEntry {
   let status: HelperMcpHealthStatus = "connected", statusDetail: string | undefined;
   if (!entry.enabled) status = "disabled";
   else if (entry.transport === "stdio") {
@@ -149,7 +163,7 @@ function classify(entry: HelperMcpServerEntry, bundle?: HelperOAuthBundle): Help
       if (!key || key.startsWith("--")) missing.push("--figma-api-key");
     }
     if (missing.length) { status = "missing_env"; statusDetail = `Missing credentials: ${missing.join(", ")}`; }
-    else if (!commandExists(entry.command)) { status = "unreachable"; statusDetail = "Command unavailable on this host"; }
+    else if (!commandExists(entry.command, userHome)) { status = "unreachable"; statusDetail = "Command unavailable on this host"; }
     else statusDetail = "Command and credentials present; server starts on first use";
   } else if ((bundle && !valid(bundle)) || ((entry.oauthRequired || /mcp\.supabase\.com/.test(entry.url ?? "") || entry.auth) && !valid(bundle) && !Object.entries(entry.headers ?? {}).some(([key, value]) => key.toLowerCase() === "authorization" && expand(value).trim()))) status = "auth_expired";
   else statusDetail = "Credentials checked; use Test & Sync MCPs to verify connectivity";
@@ -198,10 +212,10 @@ export async function probeHelperMcps(servers: HelperMcpServerEntry[], bundles: 
     if (entry.transport !== "http" || ["disabled", "auth_expired", "missing_env"].includes(entry.status)) return entry;
     try {
       const response = await fetch(expand(entry.url!), { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", ...helperHeaders(entry, bundles[entry.name]) },
-        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "paseo-factory", version: "1" } } }), signal: AbortSignal.timeout(3000) });
-      await response.body?.cancel();
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "paseo-factory", version: "1" } } }), signal: AbortSignal.timeout(6000) });
+      void response.body?.cancel().catch(() => {});
       return { ...entry, status: response.status === 401 || response.status === 403 ? "auth_expired" as const : response.ok ? "connected" as const : "unreachable" as const, statusDetail: `HTTP ${response.status}` };
-    } catch { return { ...entry, status: "unreachable" as const, statusDetail: "Endpoint did not respond within 3 seconds" }; }
+    } catch { return { ...entry, status: "unreachable" as const, statusDetail: "Endpoint did not respond within 6 seconds" }; }
   }));
 }
 async function syncUnlocked(options: HelperMcpOptions & { probe?: boolean }): Promise<HelperMcpCatalogSnapshot> {
