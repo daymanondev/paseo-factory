@@ -242,12 +242,13 @@ test('Open Design CLI discovers optional host catalogs and syncs a scratch folde
   const root = makeTempDir(); disposeDir(t, root);
   const resources = join(root, 'open-design'), system = join(resources, 'design-systems/test-brand');
   mkdirSync(system, {recursive:true});writeFileSync(join(system, 'tokens.css'), ':root{}');writeFileSync(join(system, 'DESIGN.md'), '# Test brand');
+  for (let i=0;i<150;i++) { const dir=join(resources,'design-systems','brand-'+String(i).padStart(3,'0'));mkdirSync(dir,{recursive:true});writeFileSync(join(dir,'tokens.css'),':root{}');writeFileSync(join(dir,'DESIGN.md'),'# Brand'); }
   let body: unknown;
   const server = createServer(async (req,res) => {const chunks:Buffer[]=[];for await(const chunk of req)chunks.push(Buffer.from(chunk));body=JSON.parse(Buffer.concat(chunks).toString());assert.equal(req.url,'/api/import/folder');res.setHeader('Content-Type','application/json');res.end('{"ok":true}');});
   await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));t.after(()=>server.close());
   const address = server.address();assert.ok(address&&typeof address!=='string');
   const cli = (action:string) => new Promise<{code:number|null;output:string}>((resolve,reject)=>{const p=spawn(process.execPath,[join(repoRoot,'plugin/bin/factory.mjs'),'open-design',action,'--dir',root],{env:{...process.env,OPEN_DESIGN_RESOURCE_ROOT:resources,OPEN_DESIGN_DAEMON_URL:`http://127.0.0.1:${address.port}`}});let output='';p.stdout.on('data',c=>output+=c);p.stderr.on('data',c=>output+=c);p.on('error',reject);p.on('exit',code=>resolve({code,output}));});
-  const inspect=await cli('inspect');assert.equal(inspect.code,0,inspect.output);assert.equal(JSON.parse(inspect.output).designSystems[0].id,'test-brand');
+  const inspect=await cli('inspect');assert.equal(inspect.code,0,inspect.output);assert.equal(JSON.parse(inspect.output).designSystems.length,151);assert.ok(JSON.parse(inspect.output).designSystems.some((s:{id:string})=>s.id==='test-brand'));
   const sync=await cli('sync');assert.equal(sync.code,0,sync.output);
   assert.deepEqual(body,{baseDir:root,orchestratorWorkspace:{kind:'scratch',writeback:'external',sourceLabel:'Paseo Factory',sourceRef:root}});
 });
@@ -258,7 +259,9 @@ test('Open Design gates inspect runtime templates and accept externally rendered
   files['mockups/index.html'] = '<html><head><title>Shop</title><link rel="stylesheet" href="styles.css"></head><body><script src="app.js"></script></body></html>';
   files['mockups/app.js'] += '\ndocument.body.innerHTML = `<main data-screen="catalog"><nav>Shop</nav><button>Buy</button></main><main data-screen="checkout"><button>Pay</button></main>`;';
   assert.deepEqual(lintScrumDoc('ux', files, {requireOpenDesignOnly:true}), []);
-  files['mockups/app.js'] += '\ndocument.body.insertAdjacentHTML("beforeend", `<main data-screen="catalog"><select><option>Choose</option></select><article class="card"><p>FR-100 ' + 'Long product explanation. '.repeat(24) + '</p></article></main>`);';
+  const desktop = { ...files, 'mockups/app.js': files['mockups/app.js'] + `\ndocument.querySelector('[data-screen="checkout"]').insertAdjacentHTML('beforeend', '<select><option>Sort</option></select>');` };
+  assert.ok(!lintScrumDoc('ux', desktop, {requireOpenDesignOnly:true}).some(d=>d.category==='mobile-native-select'));
+  files['mockups/app.js'] += `\ndocument.querySelector('[data-screen="catalog"]').insertAdjacentHTML('beforeend', '<select><option>Choose</option></select><article class="card"><p>FR-100 ` + 'Long product explanation. '.repeat(24) + `</p></article>');`;
   const issues = lintScrumDoc('ux', files, {requireOpenDesignOnly:true});
   for (const category of ['mobile-native-select','ui-copy','copy-budget']) assert.ok(issues.some(d=>d.category===category), category);
 });

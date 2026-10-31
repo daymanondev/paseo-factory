@@ -490,7 +490,7 @@ if (command === "open-design") {
   try {
     const parsed = rest[0] === "od" ? null : parseCommandOptions({ dir: { type: "string" } });
     const result = await openDesignCommand(rest[0], parsed?.values.dir ?? "", rest.slice(1));
-    if (result.data !== null) console.log(JSON.stringify(result.data, null, 2));
+    if (result.data !== null) await writeJsonAndExit(result.data, result.code);
     process.exit(result.code);
   } catch (error) { console.error(String(error)); process.exit(2); }
 }

@@ -90,7 +90,10 @@ export function runOpenDesignLint(files: Record<string, string>): Diagnostic[] {
       if (m[0].startsWith('</')) { const i = stack.findLastIndex(e => e.tag === tag); if (i >= 0) stack.splice(i); continue; }
       const id = m[0].match(/data-screen\s*=\s*['"]([^'"]+)['"]/)?.[1];
       const surface = m[0].match(/data-surface\s*=\s*['"]([^'"]+)['"]/)?.[1] ?? screens.find(s => s.id === id)?.surface;
-      const mobile = surface ? surface !== 'desktop' : stack.at(-1)?.mobile ?? (screens.length > 0 && screens.every(s => s.surface !== 'desktop'));
+      const insertionContext = source.slice(source.lastIndexOf(';', m.index) + 1, m.index);
+      const target = [...insertionContext.matchAll(/\bdata-(screen|surface)\s*=\s*['"]([^'"]+)['"]/g)].at(-1);
+      const targetSurface = target?.[1] === 'surface' ? target[2] : screens.find(s => s.id === target?.[2])?.surface;
+      const mobile = surface ? surface !== 'desktop' : stack.at(-1)?.mobile ?? (targetSurface ? targetSurface !== 'desktop' : screens.some(s => s.surface !== 'desktop'));
       const card = /class\s*=\s*['"][^'"]*\b(?:card|tile|od-tile)\b/i.test(m[0]) || stack.some(e => e.card);
       if (mobile && tag === 'select' && !/ui-copy-allow:\s*native-select/i.test(design)) add('mobile-native-select', 'Use focused wizard steps, choice chips or radio cards on mobile', m.index);
       if (mobile && tag === 'table' && /<tr\b[^>]*>[\s\S]*?<t[dh]\b[^>]*>[\s\S]*?<t[dh]\b/i.test(markup.slice(m.index, markup.indexOf('</table>', m.index) + 8))) add('mobile-table', 'Replace multi-column mobile tables with cards or list rows', m.index);
