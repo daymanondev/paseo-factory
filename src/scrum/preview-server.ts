@@ -1,7 +1,8 @@
-/** Token-bound loopback studio. The mockup is isolated from all decision authority. */
+/** Token-bound studio server (loopback + Tailscale/LAN host IPs for remote Paseo Desktop clients). */
 import { createServer } from 'node:http';
 import type { Server } from 'node:http';
 import { randomBytes } from 'node:crypto';
+import { networkInterfaces } from 'node:os';
 import { FactoryError } from '../errors.ts';
 import { renderPreview } from './preview.ts';
 import { previewModel } from './preview-model.ts';
@@ -15,8 +16,37 @@ export interface PreviewDecision {
   revision: number; digest: string; decision: 'approved' | 'changes_requested' | 'waived'; rationale: string;
   findings?: ScrumDesignFinding[]; screenStatuses?: ScreenStatuses;
 }
-const previews = new Map<string, { server: Server; url: string; fingerprint: string }>();
+const previews = new Map<string, { server: Server; url: string; urls: string[]; fingerprint: string }>();
 const mockupCsp = "default-src 'none'; style-src 'unsafe-inline' data:; img-src data: blob: 'self'; font-src data: 'self'; script-src 'unsafe-inline' data:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'; sandbox allow-scripts";
+
+function listReachableHostIps(): string[] {
+  const tailscale: string[] = [];
+  const lan: string[] = [];
+  const other: string[] = [];
+  try {
+    const nets = networkInterfaces();
+    for (const entries of Object.values(nets)) {
+      for (const net of entries ?? []) {
+        if (net.internal || net.family !== 'IPv4' || !net.address) continue;
+        if (/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(net.address)) {
+          tailscale.push(net.address);
+        } else if (
+          /^192\.168\./.test(net.address) ||
+          /^10\./.test(net.address) ||
+          /^172\.(1[6-9]|2\d|3[01])\./.test(net.address)
+        ) {
+          lan.push(net.address);
+        } else {
+          other.push(net.address);
+        }
+      }
+    }
+  } catch {
+    // ignore interface enumeration errors
+  }
+  return [...new Set([...tailscale, ...lan, ...other])];
+}
+
 export async function servePreview(root: string, run: ScrumRun, options: { subpath?: string; port?: number; decide?: (input: PreviewDecision) => ScrumRun | Promise<ScrumRun>; current?: () => ScrumRun } = {}) {
   const preview = renderPreview(root, run, options.subpath);
   const model = previewModel(root, run);
@@ -24,21 +54,24 @@ export async function servePreview(root: string, run: ScrumRun, options: { subpa
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new FactoryError('invalid-preview-port', 'port must be 0..65535');
   const key = `${root}:${run.runId}`, fingerprint = `${preview.digest}:${run.revision}:${options.subpath ?? ''}:${port}`;
   const existing = previews.get(key);
-  if (existing?.fingerprint === fingerprint) return { ...preview, url: existing.url };
+  if (existing?.fingerprint === fingerprint) return { ...preview, url: existing.url, urls: existing.urls };
   if (existing) { existing.server.close(); previews.delete(key); }
   const token = randomBytes(32).toString('hex');
   let origin = '', decided = false, deciding = false;
+  const allowedHosts = new Set<string>();
   const server = createServer(async (request, response) => {
-    const send = (status: number, type: string, body: string | Buffer = '', csp?: string) => {
-      response.writeHead(status, { 'Content-Type': type, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'Connection': 'close', ...(csp ? { 'Content-Security-Policy': csp } : {}) });
+    const send = (status: number, type: string, body: string | Buffer = '', csp?: string, extraHeaders?: Record<string, string>) => {
+      response.writeHead(status, { 'Content-Type': type, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'Connection': 'close', ...(csp ? { 'Content-Security-Policy': csp } : {}), ...(extraHeaders ?? {}) });
       response.end(request.method === 'HEAD' ? undefined : body);
     };
-    const json = (status: number, data: unknown) => send(status, 'application/json', JSON.stringify(data));
+    const json = (status: number, data: unknown, extraHeaders?: Record<string, string>) => send(status, 'application/json', JSON.stringify(data), undefined, extraHeaders);
     try {
-      const url = new URL(request.url ?? '/', origin);
-      if (request.headers.host !== new URL(origin).host || url.searchParams.get('token') !== token) { json(403, { error: 'Invalid preview session token or host' }); return; }
+      const hostHeader = request.headers.host ?? '';
+      const reqOrigin = allowedHosts.has(hostHeader) ? `http://${hostHeader}` : origin;
+      const url = new URL(request.url ?? '/', reqOrigin || 'http://127.0.0.1');
+      if (!allowedHosts.has(hostHeader) || url.searchParams.get('token') !== token) { json(403, { error: 'Invalid preview session token or host' }); return; }
       if (request.method === 'POST' && url.pathname === '/api/decision') {
-        const sameOrigin = request.headers.origin === origin || (!request.headers.origin && request.headers['sec-fetch-site'] === 'same-origin' && request.headers['x-scrum-preview-token'] === token);
+        const sameOrigin = request.headers.origin === reqOrigin || (!request.headers.origin && request.headers['sec-fetch-site'] === 'same-origin' && request.headers['x-scrum-preview-token'] === token);
         if (!sameOrigin) { json(403, { error: 'Same-origin Owner decision required' }); return; }
         if (!request.headers['content-type']?.startsWith('application/json')) { json(415, { error: 'JSON required' }); return; }
         let size = 0; const chunks: Buffer[] = [];
@@ -56,7 +89,7 @@ export async function servePreview(root: string, run: ScrumRun, options: { subpa
       if (url.pathname === '/') { send(200, 'text/html; charset=utf-8', designStudioHtml(), "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; frame-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"); return; }
       if (url.pathname === '/api/state') {
         const current = options.current?.() ?? run;
-        json(200, { ...model, currentRevision: current.revision, design: current.design?.digest === preview.digest ? current.design : model.design }); return;
+        json(200, { ...model, currentRevision: current.revision, design: current.design?.digest === preview.digest ? current.design : model.design }, { 'Access-Control-Allow-Origin': '*' }); return;
       }
       if (url.pathname === '/mockup') {
         const screen = url.searchParams.get('screen') ?? model.screens[0]?.id, state = url.searchParams.get('state') ?? 'populated';
@@ -79,13 +112,24 @@ export async function servePreview(root: string, run: ScrumRun, options: { subpa
   });
   server.requestTimeout = 10_000;
   server.on('connection', socket => socket.unref());
-  await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', () => { server.off('error', reject); resolve(); }); });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', () => {
+      server.once('error', reject);
+      server.listen(port, '127.0.0.1', () => { server.off('error', reject); resolve(); });
+    });
+    server.listen(port, '0.0.0.0', () => { server.removeAllListeners('error'); resolve(); });
+  });
   const address = server.address();
   if (!address || typeof address === 'string') throw new FactoryError('preview-unavailable', 'loopback listener unavailable');
+  const hostIps = listReachableHostIps();
+  for (const h of ['127.0.0.1', 'localhost', ...hostIps]) {
+    allowedHosts.add(`${h}:${address.port}`);
+  }
   origin = `http://127.0.0.1:${address.port}`;
   const url = `${origin}/?token=${token}`;
-  previews.set(key, { server, url, fingerprint }); server.unref();
+  const urls = [url, ...hostIps.map(ip => `http://${ip}:${address.port}/?token=${token}`)];
+  previews.set(key, { server, url, urls, fingerprint }); server.unref();
   const expiry = setTimeout(() => { if (previews.get(key)?.server === server) previews.delete(key); server.close(); }, 15 * 60_000);
   expiry.unref(); server.once('close', () => clearTimeout(expiry));
-  return { ...preview, url };
+  return { ...preview, url, urls };
 }

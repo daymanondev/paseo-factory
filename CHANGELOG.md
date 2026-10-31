@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.71] - 2026-10-31
+
+### Fixed
+
+- Open Scrum Design Studio directly in the OS default web browser via `window.paseoDesktop.opener.openUrl` (`electron.shell.openExternal`) instead of `window.open('about:blank')` (which spawned a blank Electron popup window) or the in-app `<Modal>` popup.
+- Bind `servePreview` (`preview.url`) to `0.0.0.0` and advertise Tailscale/LAN host URLs alongside `127.0.0.1` so reviewing a remote daemon's mockup (e.g. `andrews-mac-mini` from a MacBook) automatically opens the reachable Tailscale/LAN Design Studio URL in the local default browser.
+
 ## [0.0.70] - 2026-10-30
 
 ### Fixed

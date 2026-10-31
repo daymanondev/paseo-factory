@@ -233,14 +233,58 @@ function MockupApproval({
   const scale = Math.min(1, stageWidth / designWidth);
   const switchPreview = () => frame.current?.contentWindow?.postMessage({ type: 'scrum:set-state', screen, state: designState }, '*');
   useEffect(switchPreview, [screen, designState, preview]);
+  const openExternalBrowser = async (targetUrl: string): Promise<void> => {
+    const desktopOpenUrl = (
+      globalThis as {
+        paseoDesktop?: { opener?: { openUrl?: (url: string) => Promise<unknown> } };
+      }
+    ).paseoDesktop?.opener?.openUrl;
+    if (typeof desktopOpenUrl === 'function') {
+      await desktopOpenUrl(targetUrl);
+      return;
+    }
+    window.open(targetUrl, '_blank', 'noopener,noreferrer');
+  };
+  const resolveReachableStudioUrl = async (candidates: readonly string[], expectedDigest?: string): Promise<string | null> => {
+    if (candidates.length === 0) return null;
+    if (candidates.length === 1) return candidates[0]!;
+    const checkCandidate = async (candidate: string, timeoutMs: number): Promise<string | null> => {
+      try {
+        const parsed = new URL(candidate);
+        const stateUrl = `${parsed.origin}/api/state${parsed.search}`;
+        const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        const timer = setTimeout(() => controller?.abort(), timeoutMs);
+        try {
+          const res = await fetch(stateUrl, controller ? { signal: controller.signal } : undefined);
+          if (!res.ok) return null;
+          if (expectedDigest) {
+            const payload = (await res.json()) as { design?: { digest?: string } };
+            if (payload?.design?.digest && payload.design.digest !== expectedDigest) return null;
+          }
+          return candidate;
+        } finally {
+          clearTimeout(timer);
+        }
+      } catch {
+        return null;
+      }
+    };
+    const localMatch = await checkCandidate(candidates[0]!, 1000);
+    if (localMatch) return localMatch;
+    const remoteResults = await Promise.all(candidates.slice(1).map((c) => checkCandidate(c, 3500)));
+    const firstRemote = remoteResults.find((r): r is string => r !== null);
+    return firstRemote ?? candidates[1] ?? candidates[0]!;
+  };
   const openStudio = () => {
-    const tab = window.open('about:blank', '_blank');
-    if (tab) tab.opener = null;
-    void action?.('preview.url', {}, run?.runId).then(reply => {
-      const data = reply.data as { url?: string } | undefined;
-      if (reply.ok && data?.url) { if (tab) tab.location.href = data.url; else window.open(data.url, '_blank', 'noopener,noreferrer'); }
-      else tab?.close();
-    }).catch(() => tab?.close());
+    void action?.('preview.url', {}, run?.runId).then(async (reply) => {
+      const data = reply.data as { url?: string; urls?: string[] } | undefined;
+      if (!reply.ok || (!data?.url && (!Array.isArray(data?.urls) || data.urls.length === 0))) return;
+      const candidates = Array.isArray(data.urls) && data.urls.length > 0 ? data.urls : data.url ? [data.url] : [];
+      const targetUrl = await resolveReachableStudioUrl(candidates, run?.design?.digest);
+      if (targetUrl) {
+        await openExternalBrowser(targetUrl);
+      }
+    });
   };
   if (!run?.design)
     return <Text style={text(theme, "meta")}>Awaiting design evidence.</Text>;
@@ -287,23 +331,14 @@ function MockupApproval({
           small
           solid
           icon="ExternalLink"
-          label="Open Mockup Preview"
+          label="Open Design Studio in Browser ↗"
           tone="accent"
           disabled={busy}
-          onPress={() =>
-            void action?.("preview", {}, run.runId).then((reply) => {
-              const data = reply.data as
-                | NonNullable<typeof preview>
-                | undefined;
-              if (reply.ok && data?.html && data.digest)
-                { setPreview(data); setScreen(data.model.screens[0]?.id ?? ''); }
-            })
-          }
+          onPress={openStudio}
         />
       </View>
-      <Btn theme={theme} label="Open Full Design Studio ↗" icon="ExternalLink" disabled={busy} onPress={openStudio} />
       <Text style={text(theme, "meta")}>
-        Stage 4 (Senior Dev) is paused until you preview the UI mockup and record an Owner decision below.
+        Stage 4 (Senior Dev) is paused until you preview the UI mockup in your default browser and record an Owner decision.
       </Text>
       <View
         style={{

@@ -512,11 +512,15 @@ test('loopback studio serves pinned artboards and records origin-protected struc
   const { scrumOperation } = await import('../src/scrum/controller.ts');
   const f = await designFixture(t);
   f.submit();
-  const preview = await scrumOperation({ operation: 'preview.url', runId: f.run.runId, requestId: 'preview' }, f.ctx) as { url: string };
+  const preview = await scrumOperation({ operation: 'preview.url', runId: f.run.runId, requestId: 'preview' }, f.ctx) as { url: string; urls?: string[] };
+  assert.ok(Array.isArray(preview.urls) && preview.urls.includes(preview.url));
   const url = new URL(preview.url), token = url.searchParams.get('token');
   assert.match(token ?? '', /^[a-f0-9]{64}$/);
   const route = (path: string) => new URL(path + (path.includes('?') ? '&' : '?') + `token=${token}`, url);
   assert.equal((await fetch(url.origin)).status, 403);
+  const stateRes = await fetch(route('/api/state'));
+  assert.equal(stateRes.status, 200);
+  assert.equal(stateRes.headers.get('access-control-allow-origin'), '*');
   const html = await (await fetch(url)).text();
   for (const title of ['Artboard Canvas', 'Design System Kit', 'Interactive Inspect &amp; Pin Feedback']) assert.ok(html.includes(title));
   const mockup = await fetch(route('/mockup?screen=checkout&state=error'));
