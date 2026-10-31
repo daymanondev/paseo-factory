@@ -1,6 +1,6 @@
 import { collectHelperMcpVault, hydrateHelperMcpVault } from "./helper-mcp-vault.ts";
 import { collectScrumVault, collectProjectScrumVault, materializeScrumVault, materializeProjectScrumVault } from "./scrum/vault.ts";
-import { ensureProviderSkillSymlinks, IMPECCABLE_MIN_VERSION, inspectImpeccableTool } from "./scrum/impeccable.ts";
+import { ensureProviderSkillSymlinks } from "./scrum/companion-tools.ts";
 import { FactoryError } from "./errors.ts";
 import { mergeLaneProfilesFiles, projectLanesPath, readLaneProfilesFile } from "./lanes.ts";
 import type { LaneProfile, LaneProfilesFile } from "./lanes.ts";
@@ -482,7 +482,7 @@ export function collectVaultSkillsIntoRuntime(paseoHome: string, explicitUserHom
     return [];
   }
   for (const name of skillEntries) {
-    if (name.startsWith(".") || /^impeccable(?:$|[-_])/i.test(name)) continue;
+    if (name.startsWith(".") || /^impeccable/i.test(name)) continue;
     const skillDir = join(agentsSkillsDir, name);
     try {
       if (!statSync(skillDir).isDirectory()) continue;
@@ -499,13 +499,8 @@ export function collectVaultSkillsIntoRuntime(paseoHome: string, explicitUserHom
     if (existsSync(lockPath)) {
       writeRuntimeFile(paseoHome, "config/skill-lock.json", readFileSync(lockPath));
     }
-    const impeccable = inspectImpeccableTool(userHome);
     const companionManifest = {
       schemaVersion: 1,
-      impeccable: {
-        minVersion: IMPECCABLE_MIN_VERSION,
-        installedVersion: impeccable.version,
-      },
       skills: collectedSkills,
     };
     writeRuntimeFile(
@@ -548,7 +543,7 @@ export function materializeVaultSkillsFromRuntime(
     return [];
   }
   for (const skillName of skillNames) {
-    if (skillName.startsWith(".") || /^impeccable(?:$|[-_])/i.test(skillName)) continue;
+    if (skillName.startsWith(".") || /^impeccable/i.test(skillName)) continue;
     const srcSkillDir = join(runtimeSkillsDir, skillName);
     try {
       if (!statSync(srcSkillDir).isDirectory()) continue;

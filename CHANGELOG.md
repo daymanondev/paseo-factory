@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.79] - 2026-11-01
+
+### Added
+
+- Standalone Open Design UX engine with staged iPhone, Android and neutral hardware shells, layout primitives, five curated directions, optional native host/catalog discovery, an `od` wrapper and orchestrator scratch-folder sync.
+- Dual-surface interactive prototypes and story-grouped flow boards with a structured design manifest for Dev/QA handoff. New run gates validate craft, syntax, offline assets and hash-verified browser captures, with shared system-state coverage.
+- Design Studio Flow Board and Interactive Handset views, manifest token inspection and a renewable 24-hour preview lifetime.
+
+### Removed
+
+- Impeccable companion prerequisite, installation/update checks, role skills, scanner hooks, environment overlays and executable guards. Skill reconciliation prunes retired host/provider skill entries; historical detector reports remain readable.
+
 ## [0.0.78] - 2026-11-01
 
 ### Added

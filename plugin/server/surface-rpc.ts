@@ -55,13 +55,10 @@ import {
   checkCompanionToolsUpdates,
   CORE_FACTORY_SKILLS,
   ensureProviderSkillSymlinks,
-  IMPECCABLE_MIN_VERSION,
   inspectFactorySkillPack,
-  inspectImpeccableTool,
   installOrUpdateFactorySkillPack,
-  installOrUpdateImpeccableTool,
-} from "./core/scrum/impeccable.ts";
-import type { CompanionToolRunner, CompanionToolUpdateStatus } from "./core/scrum/impeccable.ts";
+} from "./core/scrum/companion-tools.ts";
+import type { CompanionToolRunner, CompanionToolUpdateStatus } from "./core/scrum/companion-tools.ts";
 import { basename, join, resolve } from "node:path";
 import { FACTORY_VIEW_VERSION } from "../shared/view.ts";
 import { foldRetro, foldTasks, foldView, readTailed } from "./view.ts";
@@ -295,7 +292,7 @@ export interface SurfaceDeps {
   installPlugin?: typeof installDaemonPlugin;
   managePlugin?: typeof manageDaemonPlugin;
   checkPluginUpdates?: typeof checkDaemonPluginUpdates;
-  /** Optional host home override and runner override for companion tools (`impeccable`, `factory-skills-pack`; ADR 0036). */
+  /** Optional host home override and runner override for companion tools (`factory-skills-pack`; ADR 0040). */
   userHome?: string;
   companionToolRunner?: CompanionToolRunner;
   /**
@@ -437,7 +434,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   const log = deps.onLog ?? (() => {});
   const failure = <C extends string>(code: C, error: string) => ({ ok: false as const, code, error });
   let localUpdateSnapshot: { statuses: ReadonlyMap<string, DaemonPluginSourceStatus>; checkedAt: string } | null = null;
-  let localToolUpdateSnapshot: Record<"impeccable" | "factory-skills-pack", CompanionToolUpdateStatus> | null = null;
+  let localToolUpdateSnapshot: Record<"factory-skills-pack", CompanionToolUpdateStatus> | null = null;
 
   /**
    * The vault half's gather (v0.0.21, ADR 0014 §4; v0.0.22 guided `gh` probe):
@@ -1695,46 +1692,6 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   const buildCompanionToolsView = (): CompanionPluginView[] => {
     const userHome = resolveSurfaceUserHome();
     return COMPANION_TOOLS_CATALOG.map((entry: CompanionToolCatalogEntry): CompanionPluginView => {
-      if (entry.id === "impeccable") {
-        const info = inspectImpeccableTool(userHome);
-        const installed = info.status === "installed" || info.status === "outdated";
-        const toolSnap = localToolUpdateSnapshot?.impeccable;
-        const updateAvailable =
-          info.status === "outdated"
-            ? true
-            : toolSnap !== undefined
-              ? toolSnap.updateAvailable
-              : info.status === "installed"
-                ? false
-                : null;
-        const latestRevision =
-          info.status === "outdated"
-            ? (toolSnap?.latestRevision ?? IMPECCABLE_MIN_VERSION)
-            : (toolSnap?.latestRevision ?? info.version);
-        const currentRevision =
-          updateAvailable === true
-            ? info.version
-            : info.engineVersion && info.engineVersion !== info.version
-              ? info.engineVersion
-              : null;
-        return {
-          ...entry,
-          capabilities: [...entry.capabilities],
-          status: info.status === "installed" ? "running" : info.status === "outdated" ? "failed" : "not_installed",
-          enabled: info.status === "installed",
-          installKind: installed ? "npm" : null,
-          installedSource: info.path,
-          currentRevision,
-          version: info.version,
-          latestRevision,
-          commitsBehind: null,
-          updateAvailable,
-          error:
-            info.status === "outdated"
-              ? `Installed Impeccable v${info.version} is older than required v${IMPECCABLE_MIN_VERSION}`
-              : null,
-        };
-      }
       const pack = inspectFactorySkillPack(userHome);
       const installed = pack.totalSkills > 0;
       const toolSnap = localToolUpdateSnapshot?.["factory-skills-pack"];
@@ -1764,34 +1721,10 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   };
 
   const executeCompanionToolAction = (
-    toolId: "impeccable" | "factory-skills-pack",
+    toolId: "factory-skills-pack",
     action: "install" | "update" | "reload" | "enable" | "disable" | "remove",
   ): { ok: true; summary: string } | { ok: false; reason: string } => {
     const userHome = resolveSurfaceUserHome();
-    if (toolId === "impeccable") {
-      if (action === "install" || action === "update" || action === "enable") {
-        localToolUpdateSnapshot = null;
-        const res = installOrUpdateImpeccableTool({
-          userHome,
-          action: action === "update" ? "update" : "install",
-          runner: deps.companionToolRunner,
-        });
-        if (!res.ok) return { ok: false, reason: res.reason };
-        return { ok: true, summary: res.summary };
-      }
-      if (action === "reload") {
-        ensureProviderSkillSymlinks(userHome);
-        const info = inspectImpeccableTool(userHome);
-        return {
-          ok: true,
-          summary: `Re-linked Impeccable (${info.skillCount} skill(s)) across provider skill directories.`,
-        };
-      }
-      return {
-        ok: false,
-        reason: "impeccable is a required Factory companion tool and cannot be disabled or removed",
-      };
-    }
     // factory-skills-pack
     if (action === "reload") {
       const linked = ensureProviderSkillSymlinks(userHome);
@@ -3097,7 +3030,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         return failure("invalid-target", 'a custom source or ref targets one companion — pass a named target, not "all"');
       }
       if (MANAGEABLE_TOOL_IDS.has(input.target)) {
-        const res = executeCompanionToolAction(input.target as "impeccable" | "factory-skills-pack", "install");
+        const res = executeCompanionToolAction(input.target as "factory-skills-pack", "install");
         if (!res.ok) return failure("daemon_failed", res.reason);
         log(`plugins: ${res.summary}`);
         return { ok: true as const, installed: [input.target], summary: res.summary };
@@ -3156,7 +3089,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       if (input.target === "all" && input.includeTools === true) {
         for (const tool of buildCompanionToolsView()) {
           if (tool.access === "public" && (tool.status === "not_installed" || tool.status === "failed" || tool.error !== null)) {
-            const res = executeCompanionToolAction(tool.id as "impeccable" | "factory-skills-pack", "install");
+            const res = executeCompanionToolAction(tool.id as "factory-skills-pack", "install");
             if (!res.ok) return failure("daemon_failed", res.reason);
             installed.push(tool.id);
             log(`plugins: ${res.summary}`);
@@ -3181,7 +3114,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
             `${input.pluginId} is a required Factory companion tool and cannot be disabled or removed from the Factory surface`,
           );
         }
-        const res = executeCompanionToolAction(input.pluginId as "impeccable" | "factory-skills-pack", input.action);
+        const res = executeCompanionToolAction(input.pluginId as "factory-skills-pack", input.action);
         if (!res.ok) return failure("daemon_failed", res.reason);
         log(`plugins: ${res.summary}`);
         return { ok: true as const, pluginId: input.pluginId, action: input.action, summary: res.summary };
@@ -3215,7 +3148,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         if (input.includeTools === true) {
           for (const tool of buildCompanionToolsView()) {
             if (tool.updateAvailable === true) {
-              const res = executeCompanionToolAction(tool.id as "impeccable" | "factory-skills-pack", "update");
+              const res = executeCompanionToolAction(tool.id as "factory-skills-pack", "update");
               if (!res.ok) return failure("daemon_failed", res.reason);
               summaries.push(res.summary);
             }
@@ -3290,7 +3223,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           userHome: resolveSurfaceUserHome(),
           runner: deps.companionToolRunner,
         });
-        for (const toolId of ["impeccable", "factory-skills-pack"] as const) {
+        for (const toolId of ["factory-skills-pack"] as const) {
           if (localToolUpdateSnapshot[toolId]?.updateAvailable === true && !updatesAvailable.includes(toolId)) {
             updatesAvailable.push(toolId);
           }

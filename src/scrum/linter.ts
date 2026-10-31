@@ -1,5 +1,7 @@
 /** Deterministic structural checks; semantic readiness and browser QA are separate. */
 import { designScreens, screenIdValid, DESIGN_STATES, browserCoverageIssues } from "./design-contract.ts";
+import { OPEN_DESIGN_DIRECTIONS } from "./open-design.ts";
+import { runOpenDesignLint } from "./open-design-lint.ts";
 import { productChromeIssues } from "./product-chrome.ts";
 import { designTokens } from "./design-contract.ts";
 import { validateQaReport } from "./qa-bundle.ts";
@@ -61,6 +63,7 @@ function definitions(
 export function lintScrumDoc(
   kind: ScrumDocKind,
   files: Record<string, string>,
+  options: { requireOpenDesignOnly?: boolean } = {},
 ): Diagnostic[] {
   const issues: Diagnostic[] = [];
   const add = (path: string, line: number, category: string, message: string) =>
@@ -125,10 +128,14 @@ export function lintScrumDoc(
             `${d.id} missing ${field}`,
           );
   }
+  const dualSurface = !!files['mockups/screens.html'];
+  const openDesign = options.requireOpenDesignOnly || dualSurface;
+  if (kind === 'ux' || kind === 'ui') issues.push(...runOpenDesignLint(files));
   if (kind === "ux") {
     const design = prose(files["DESIGN.md"] ?? ""),
       experience = prose(files["EXPERIENCE.md"] ?? ""),
       html = files["mockups/index.html"] ?? "";
+    const routing = html + '\n' + Object.entries(files).filter(([p]) => p.startsWith('mockups/') && p.endsWith('.js')).map(([,s]) => s).join('\n');
     const tokens = designTokens(design);
     for (const [label, values] of Object.entries(tokens).filter(([key]) => ['colors', 'typography', 'spacing', 'components'].includes(key))) {
       const legacyColor = label === 'colors' ? design.match(/\bcolor\s*[:|—-]\s*([^\n]+)/i)?.[1] : undefined;
@@ -141,12 +148,12 @@ export function lintScrumDoc(
     for (const screen of screens) {
       if (!screenIdValid(screen.id) || seen.has(screen.id)) add('EXPERIENCE.md', screen.line, 'screen', `invalid or duplicate screen ${screen.id}`);
       seen.add(screen.id);
-      for (const state of DESIGN_STATES) {
+      for (const state of dualSurface ? [] : DESIGN_STATES) {
         if (!new RegExp(`\\b${state}\\b`, 'i').test(screen.body)) add('EXPERIENCE.md', screen.line, 'state-cell', `${screen.id}/${state} needs a documented obligation`);
       }
       if (!html.includes(screen.id)) add('mockups/index.html', 1, 'screen', `mockup does not cover ${screen.id}`);
     }
-    if (!/URLSearchParams/.test(html) || !/(?:dataset\.screen|data-screen)/.test(html) || !/(?:dataset\.state|data-state)/.test(html) || !/scrum:set-state/.test(html) || !/addEventListener\s*\(\s*['"]message['"]/.test(html))
+    if (!/URLSearchParams/.test(routing) || !/(?:dataset\.screen|data-screen)/.test(routing) || !/(?:dataset\.state|data-state)/.test(routing) || !/scrum:set-state/.test(routing) || !/addEventListener\s*\(\s*['"]message['"]/.test(routing))
       add('mockups/index.html', 1, 'routing', 'read screen/state query parameters, reflect root data attributes and handle scrum:set-state messages');
     if (
       !/<html\b/i.test(html) ||
@@ -171,22 +178,27 @@ export function lintScrumDoc(
         "offline",
         "mockup must use declared offline assets",
       );
-    for (const match of html.matchAll(
-      /(?:src|href)\s*=\s*["']([^"']+)["']/gi,
-    )) {
-      const asset = match[1];
-      if (asset.startsWith("#") || asset.startsWith("data:")) continue;
-      if (
-        asset.startsWith("/") ||
-        asset.includes("..") ||
-        files[`mockups/${asset}`] === undefined
-      )
-        add(
-          "mockups/index.html",
-          1,
-          "asset",
-          `missing or unsafe declared asset ${asset}`,
-        );
+
+  }
+  if ((kind === 'ux' || kind === 'ui') && openDesign) {
+    for (const path of ['mockups/index.html', 'mockups/screens.html', 'mockups/design-manifest.json', ...(kind === 'ux' ? ['mockups/browser.json'] : [])]) if (!files[path]?.trim()) add(path, 1, 'missing', 'Open Design deliverable required');
+    try {
+      const manifest = JSON.parse(files['mockups/design-manifest.json'] ?? 'null');
+      if (!manifest || !(manifest.directionId || manifest.designSystemId) || !manifest.tokens || !Object.keys(manifest.tokens).length || !Array.isArray(manifest.journeyGroups) || !manifest.journeyGroups.length || !Array.isArray(manifest.screens) || !manifest.screens.length || !Array.isArray(manifest.componentPatterns) || !manifest.componentPatterns.length)
+        add('mockups/design-manifest.json', 1, 'design-manifest', 'Declare directionId/designSystemId, tokens, journeyGroups, screens and componentPatterns');
+      else {
+        if (!manifest.designSystemId && !OPEN_DESIGN_DIRECTIONS.some(d => d.id === manifest.directionId)) add('mockups/design-manifest.json', 1, 'design-manifest', 'Choose a curated direction or a bound Brand Design System');
+        const declared = designScreens(files['EXPERIENCE.md'] ?? '');
+        for (const screen of declared) if (!manifest.screens.some((s: {id?: string; surface?: string}) => s.id === screen.id && s.surface === screen.surface)) add('mockups/design-manifest.json', 1, 'design-manifest', `Missing Core Screen / surface ${screen.id}`);
+        if (!manifest.journeyGroups.some((g: {title?: string}) => /System.*Edge States/i.test(g.title ?? ''))) add('mockups/design-manifest.json', 1, 'design-manifest', 'Declare a System & Edge States journey group');
+      }
+    } catch { add('mockups/design-manifest.json', 1, 'json', 'invalid design manifest JSON'); }
+    for (const screen of designScreens(files['EXPERIENCE.md'] ?? '')) {
+      if (!/(?:^|\n)\s*(?:[-*]\s*)?\*{0,2}Surface\*{0,2}\s*:/i.test(screen.body)) add('EXPERIENCE.md', screen.line, 'surface', `${screen.id} needs an explicit Surface declaration`);
+    }
+    if (kind === 'ux' && files['mockups/browser.json']) {
+      try { for (const message of browserCoverageIssues(JSON.parse(files['mockups/browser.json']), designScreens(files['EXPERIENCE.md'] ?? ''), true, { requireOpenDesignOnly: true, sharedEdgeStates: dualSurface, requireBoard: true })) add('mockups/browser.json', 1, 'browser-evidence', message); }
+      catch { add('mockups/browser.json', 1, 'json', 'invalid browser JSON'); }
     }
   }
   if (kind === "backlog") {
@@ -253,7 +265,7 @@ export function lintScrumDoc(
     try {
       const required = designScreens(files['EXPERIENCE.md'] ?? '', files['mockups/manifest.json']);
       if (!required.length) add('EXPERIENCE.md', 1, 'screen', 'UI verification requires declared screens');
-      for (const message of browserCoverageIssues(JSON.parse(files['browser.json']), required)) add('browser.json', 1, 'browser-evidence', message);
+      for (const message of browserCoverageIssues(JSON.parse(files['browser.json']), required, true, { requireOpenDesignOnly: openDesign, sharedEdgeStates: dualSurface })) add('browser.json', 1, 'browser-evidence', message);
     } catch { add('browser.json', 1, 'json', 'invalid browser JSON'); }
   }
   if (kind === "qa" && files["qa-report.json"]) {

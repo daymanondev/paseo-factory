@@ -178,3 +178,76 @@ test('UX and evidence lint return diagnostics for malformed submitted values', a
   assert.ok(diagnostics.some(d => d.category === 'browser-evidence' && /detector/.test(d.message)));
   assert.ok(!diagnostics.some(d => d.category === 'json'));
 });
+
+test('Open Design UX gate accepts dual surfaces and shared edge states with external offline assets', async () => {
+  const { openDesignFiles } = await import('./fixtures/open-design.ts');
+  const files = openDesignFiles();
+  assert.deepEqual(lintScrumDoc('ux', files), []);
+  assert.deepEqual(lintScrumDoc('ui', { ...files, 'browser.json': files['mockups/browser.json'] }), []);
+});
+
+test('Open Design gates reject craft defects, invalid code and unresolved offline assets', async () => {
+  const { openDesignFiles } = await import('./fixtures/open-design.ts');
+  const files = openDesignFiles();
+  for (const [path, text, category] of [
+    ['mockups/styles.css', '.hero { background: linear-gradient(90deg, #a855f7, white) }', 'purple-gradient'],
+    ['mockups/styles.css', '.cta { color: #6366f1 }', 'ai-default-indigo'],
+    ['mockups/styles.css', '.card { border-left: 4px solid red; border-radius: 8px }', 'left-accent-card'],
+    ['mockups/styles.css', 'body { color: red;', 'css-syntax'],
+    ['mockups/app.js', 'const broken = ;', 'js-syntax'],
+    ['mockups/screens.css', 'body { background: url(missing.png) }', 'offline-asset'],
+    ['mockups/index.html', '<button>🚀 Launch</button>', 'emoji-icon'],
+    ['mockups/index.html', '<main data-screen="catalog"><select><option>Choose</option></select></main>', 'mobile-native-select'],
+    ['mockups/index.html', '<article class="card"><p>' + 'Helpful product copy. '.repeat(20) + '</p></article>', 'copy-budget'],
+  ]) {
+    const diagnostics = lintScrumDoc('ux', { ...files, [path]: files[path] + text });
+    assert.ok(diagnostics.some(d => d.category === category), `${category}: ${JSON.stringify(diagnostics)}`);
+  }
+  const report = JSON.parse(files['mockups/browser.json']);
+  report.viewports[0].scrollWidth = 450;
+  assert.ok(lintScrumDoc('ux', { ...files, 'mockups/browser.json': JSON.stringify(report) }).some(d => /overflow/.test(d.message)));
+  report.viewports = report.viewports.filter((v: {screen: string}) => v.screen !== 'screens-board');
+  assert.ok(lintScrumDoc('ux', { ...files, 'mockups/browser.json': JSON.stringify(report) }).some(d => /screens-board/.test(d.message)));
+});
+
+test('installed Open Design CLI stages hardware shells and validates offline dual-surface evidence', async t => {
+  const { makeTempDir, disposeDir, repoRoot } = await import('./helpers.ts');
+  const { join } = await import('node:path');
+  const { mkdirSync, writeFileSync, readFileSync } = await import('node:fs');
+  const { spawnSync } = await import('node:child_process');
+  const { openDesignFiles } = await import('./fixtures/open-design.ts');
+  const { png } = await import('./fixtures/scrum-design.ts');
+  const root = makeTempDir(); disposeDir(t, root);
+  const cli = (...args: string[]) => spawnSync(process.execPath, [join(repoRoot, 'plugin/bin/factory.mjs'), ...args], { cwd: root, encoding: 'utf8' });
+  const files = openDesignFiles();
+  for (const [path, content] of Object.entries(files)) { mkdirSync(join(root, path, '..'), { recursive: true }); writeFileSync(join(root, path), content); }
+  for (const v of JSON.parse(files['mockups/browser.json']).viewports) writeFileSync(join(root, v.screenshot.path), png);
+  const stage = cli('open-design', 'stage', '--dir', join(root, 'mockups'));
+  assert.equal(stage.status, 0, stage.stderr);
+  assert.match(readFileSync(join(root, 'mockups/.od-frames/iphone.html'), 'utf8'), /phone-content/);
+  const lint = cli('lint-scrum-doc', '--kind', 'ux', '--dir', root);
+  assert.equal(lint.status, 0, lint.stdout + lint.stderr);
+  writeFileSync(join(root, 'mockups/catalog.png'), 'corrupt');
+  const invalid = cli('lint-scrum-doc', '--kind', 'ux', '--dir', root);
+  assert.equal(invalid.status, 1, invalid.stdout);
+  assert.match(invalid.stdout, /screenshot/);
+});
+
+test('Open Design CLI discovers optional host catalogs and syncs a scratch folder through orchestratorWorkspace', async t => {
+  const { createServer } = await import('node:http');
+  const { spawn } = await import('node:child_process');
+  const { makeTempDir, disposeDir, repoRoot } = await import('./helpers.ts');
+  const { join } = await import('node:path');
+  const { mkdirSync, writeFileSync } = await import('node:fs');
+  const root = makeTempDir(); disposeDir(t, root);
+  const resources = join(root, 'open-design'), system = join(resources, 'design-systems/test-brand');
+  mkdirSync(system, {recursive:true});writeFileSync(join(system, 'tokens.css'), ':root{}');writeFileSync(join(system, 'DESIGN.md'), '# Test brand');
+  let body: unknown;
+  const server = createServer(async (req,res) => {const chunks:Buffer[]=[];for await(const chunk of req)chunks.push(Buffer.from(chunk));body=JSON.parse(Buffer.concat(chunks).toString());assert.equal(req.url,'/api/import/folder');res.setHeader('Content-Type','application/json');res.end('{"ok":true}');});
+  await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));t.after(()=>server.close());
+  const address = server.address();assert.ok(address&&typeof address!=='string');
+  const cli = (action:string) => new Promise<{code:number|null;output:string}>((resolve,reject)=>{const p=spawn(process.execPath,[join(repoRoot,'plugin/bin/factory.mjs'),'open-design',action,'--dir',root],{env:{...process.env,OPEN_DESIGN_RESOURCE_ROOT:resources,OPEN_DESIGN_DAEMON_URL:`http://127.0.0.1:${address.port}`}});let output='';p.stdout.on('data',c=>output+=c);p.stderr.on('data',c=>output+=c);p.on('error',reject);p.on('exit',code=>resolve({code,output}));});
+  const inspect=await cli('inspect');assert.equal(inspect.code,0,inspect.output);assert.equal(JSON.parse(inspect.output).designSystems[0].id,'test-brand');
+  const sync=await cli('sync');assert.equal(sync.code,0,sync.output);
+  assert.deepEqual(body,{baseDir:root,orchestratorWorkspace:{kind:'scratch',writeback:'external',sourceLabel:'Paseo Factory',sourceRef:root}});
+});

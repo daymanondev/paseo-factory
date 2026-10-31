@@ -26,10 +26,6 @@ import { inheritChildOutcome } from "./process-policy.mjs";
 
 const tool = process.argv[2] ?? "";
 const argv = process.argv.slice(3);
-if (process.env.PASEO_FACTORY_UI_HOME) {
-  if (tool === 'agy') argv.unshift('--settings', join(process.env.PASEO_FACTORY_UI_HOME, 'agy-settings.json'));
-  if (tool === 'copilot') argv.unshift('--plugin-dir', join(process.env.PASEO_FACTORY_UI_HOME, 'copilot'));
-}
 const stateDir = process.env.FACTORY_STATE_DIR ?? process.env.PASEO_FACTORY_STATE_DIR ?? "";
 const REFUSAL_EXIT = 126;
 
@@ -48,7 +44,6 @@ function isExecutable(p) {
 }
 
 function resolveRealBinary(binName) {
-  if (binName === 'impeccable' && process.env.PASEO_FACTORY_IMPECCABLE && isExecutable(process.env.PASEO_FACTORY_IMPECCABLE)) return process.env.PASEO_FACTORY_IMPECCABLE;
   const skip = new Set([
     ...(stateDir ? [join(stateDir, "bin")] : []),
     dirname(process.argv[1] ?? ""),
@@ -100,13 +95,6 @@ function recordAndRefuse(rule, reason) {
 const seat = (process.env.PASEO_FACTORY_SEAT ?? "").trim();
 const corr = (process.env.PASEO_FACTORY_CORRELATION ?? "").trim();
 const inFactorySeat = seat !== "" || corr !== "";
-
-// The Scrum specialization comes from the frozen Contract identity, never the CLI.
-if (inFactorySeat && tool === 'impeccable' && process.env.PASEO_FACTORY_EXECUTION) {
-  let identity;
-  try { identity = JSON.parse(process.env.PASEO_FACTORY_EXECUTION); } catch { recordAndRefuse('policy:scrum-ui-capability', 'invalid Scrum identity'); }
-  if (identity.kind !== 'task' || !['ux', 'dev', 'qa'].includes(identity.binding?.role)) recordAndRefuse('policy:scrum-ui-capability', 'impeccable is scoped to UX, Dev and QA');
-}
 
 // Package installs belong in isolated Task worktrees, never orchestration seats.
 const packageTools = new Set(["npm", "npx", "pnpm", "yarn", "bun"]);

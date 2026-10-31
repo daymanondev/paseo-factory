@@ -1,5 +1,6 @@
+import { stageOpenDesignFrames, inspectOpenDesignHost, openDesignWorkspace } from "./open-design.ts";
 import { assertOwnerDependencies } from "./owner-work.ts";
-import { provisionImpeccable } from "./impeccable.ts";
+
 import { readProjectRegistration } from "../project.ts";
 import { assertDevReady } from "./approval.ts";
 import { readFileSync, writeFileSync, rmSync } from "node:fs";
@@ -147,14 +148,27 @@ export function provisionScrumHarness(input: {
         : {}),
     }),
   });
+  if (identity.kind === 'task' && identity.binding.role === 'ux') {
+    const workspace = input.workspace ?? join(root, 'worktrees', identity.task);
+    const run = readRun(state, slug, identity.binding.runId);
+    const mockupsDir = join(workspace, '.scratch', run.initiativeId, 'mockups');
+    stageOpenDesignFrames(mockupsDir);
+    const host = inspectOpenDesignHost(input.environment);
+    writeFileSync(join(roleHome, 'open-design.json'), JSON.stringify({ ...host, workspace: openDesignWorkspace(mockupsDir, run.runId) }, null, 2));
+    if (host.cli) {
+      const quote = (s: string) => "'" + s.replace(/'/g, "'\\''") + "'";
+      writeFileSync(join(roleHome, 'od'), '#!/bin/sh\nELECTRON_RUN_AS_NODE=1 OD_DAEMON_URL="${OPEN_DESIGN_DAEMON_URL:-${OD_DAEMON_URL:-http://127.0.0.1:7456}}" exec ' + quote(process.execPath) + ' ' + quote(host.cli) + ' "$@"\n', { mode: 0o755 });
+    }
+    if (host.available) {
+      writeFileSync(join(roleHome, 'APPEND_SYSTEM.md'), readFileSync(join(roleHome, 'APPEND_SYSTEM.md'), 'utf8') + '\nOptional native Open Design host and Brand Design Systems: ' + JSON.stringify(host) + '\nFolder-backed orchestratorWorkspace import: ' + JSON.stringify(openDesignWorkspace(mockupsDir, run.runId)) + '\nNative od CLI wrapper (when available): ' + join(roleHome, 'od') + '\nUse factory open-design sync --dir <mockupsDir> only for an explicitly requested native sync.\n');
+    }
+  }
+  for (const file of ['impeccable-hook.mjs', 'impeccable-opencode.mjs', 'hooks.json', 'hooks', '.claude-plugin', 'agy-settings.json', 'copilot']) rmSync(join(roleHome, file), { recursive: true, force: true });
   const settingsPath = join(roleHome, 'settings.json');
   const settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
   const skills = identity.kind === 'task' ? SCRUM_ROLE_SKILLS[identity.binding.role] : authority === 'supervisor' ? ['grilling', 'domain-modeling'] : ['codebase-design', 'domain-modeling', 'tdd'];
-  const ui = identity.kind === 'task' && ['ux', 'dev', 'qa'].includes(identity.binding.role);
-  if (!ui) rmSync(join(roleHome, 'skills'), { recursive: true, force: true });
-  const impeccableSkills = ui ? provisionImpeccable(roleHome, input.userHome ?? homedir(), input.environment?.CODEX_HOME ?? process.env.CODEX_HOME ?? join(input.userHome ?? homedir(), '.codex')) : [];
-  settings.skills = ['!*', ...skills.filter(s => s !== 'impeccable').map(s => `+${join(input.userHome ?? homedir(), '.agents/skills', s)}`), ...impeccableSkills.map(s => `+${join(roleHome, 'skills', s)}`)];
-  if (ui) settings.extensions.push(join(roleHome, 'impeccable-hook.mjs'));
+  rmSync(join(roleHome, 'skills'), { recursive: true, force: true });
+  settings.skills = ['!*', ...skills.map(s => `+${join(input.userHome ?? homedir(), '.agents/skills', s)}`)];
   writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
   if (identity.kind === "task") {
     // Planning roles get research helpers, UX/Dev/QA may additionally use vision.
@@ -216,17 +230,14 @@ export function scopeScrumCapabilities<
             ...options,
             permission: {
               ...permission,
-              bash: { ...(typeof (permission as Record<string, unknown>).bash === 'object' ? (permission as { bash: Record<string, string> }).bash : { '*': typeof (permission as Record<string, unknown>).bash === 'string' ? (permission as { bash: string }).bash : 'ask' }), 'impeccable *': identity.kind === 'task' && ['ux', 'dev', 'qa'].includes(identity.binding.role) ? 'allow' : 'deny' },
               skill: {
                 "*": "deny",
                 ...Object.fromEntries(skills.map((skill) => [skill, "allow"])),
-                ...(identity.kind === 'task' && ['ux', 'dev', 'qa'].includes(identity.binding.role) ? { 'impeccable*': 'allow' } : {}),
               },
             },
           },
         }
       : {}),
-    ...(roleHome && identity.kind === 'task' && ['ux', 'dev', 'qa'].includes(identity.binding.role) && (config.provider === 'claude' || config.provider?.startsWith('claude/')) ? { providerOptions: { ...options, extraArgs: { ...(typeof options.extraArgs === 'object' ? options.extraArgs : {}), 'plugin-dir': roleHome } } } : {}),
     systemPrompt: `${config.systemPrompt ?? ""}\nRequired role skills to open first: ${skills.join(", ")}.\n`,
   };
 }

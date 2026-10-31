@@ -64,7 +64,8 @@ const usage = `usage: factory [--home <paseoHome>] <command> [options]
 commands:
   execution  get | set-mode <slp|scrum> [--project <dir>] (Owner only)
   scrum      <operation> [--project <dir>] [--run <id>] [--revision <n>] [--payload <json> | --file <json-file>] [--request-id <id>]
-  lint-scrum-doc --kind <prd|ux|architecture|backlog|qa> --dir <initiative>
+  open-design stage|lint|inspect|sync|od [--dir <mockupsDir>]
+  lint-scrum-doc --kind <prd|ux|architecture|backlog|qa|ui> --dir <initiative>
 
   contract   Set a task's done-criteria (the Owner's act — fixed before the
              agent starts; one contract per task id, the ledger is append-only)
@@ -482,6 +483,16 @@ if (command === "upgrade") {
   const reply = await roundTrip({ id: randomId(), kind: "upgrade", ...input }, waitSeconds(parsed, 120));
   if (!reply.ok) { console.error(`factory: ${reply.code}: ${reply.message}`); process.exit(2); }
   await writeJsonAndExit(reply.upgrade);
+}
+
+if (command === "open-design") {
+  const { openDesignCommand } = await import("./open-design.mjs");
+  try {
+    const parsed = rest[0] === "od" ? null : parseCommandOptions({ dir: { type: "string" } });
+    const result = await openDesignCommand(rest[0], parsed?.values.dir ?? "", rest.slice(1));
+    if (result.data !== null) console.log(JSON.stringify(result.data, null, 2));
+    process.exit(result.code);
+  } catch (error) { console.error(String(error)); process.exit(2); }
 }
 
 if (command === "lint-scrum-doc") {

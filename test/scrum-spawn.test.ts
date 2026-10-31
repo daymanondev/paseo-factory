@@ -555,15 +555,20 @@ test("parallel UX and Architect land disjoint artifacts from one accepted PRD in
       "decisions/pm.jsonl": '{"id":"P1","rationale":"read only"}\n',
     },
     ux: {
+      ...(await import("./fixtures/open-design.ts")).openDesignFiles(),
       "ux-spec.md": "# UX spec\nSee DESIGN.md, EXPERIENCE.md and mockups/index.html for the complete accepted design.\n",
       "DESIGN.md":
         "# Direction\nColor: navy.\nTypography: system-ui.\nSpacing: 8px.\nComponent: record card.\n",
       "EXPERIENCE.md":
-        "# Information architecture and flow\n## Screen: viewer\nOne screen justified for the bounded record viewer. Offline writes permitted.\n| Screen | empty | loading | populated | error | offline | permission-denied |\n| viewer | no record | wait | record | retry | editable | denied |\n",
+        "# Information architecture and flow\n## Screen: viewer\nSurface: desktop\nOne screen justified for the bounded record viewer. Offline writes permitted.\n| Screen | empty | loading | populated | error | offline | permission-denied |\n| viewer | no record | wait | record | retry | editable | denied |\n",
       "mockups/index.html":
         "<!doctype html><html><head><title>Record viewer</title></head><body><main>" +
         '<button>Open record</button>' +
         "</main><script>const q=new URLSearchParams(location.search);document.documentElement.dataset.screen=q.get('screen')||'viewer';document.documentElement.dataset.state=q.get('state')||'populated';window.addEventListener('message',e=>{if(e.data.type==='scrum:set-state'){document.documentElement.dataset.screen=e.data.screen;document.documentElement.dataset.state=e.data.state}})</script></body></html>",
+      "mockups/design-manifest.json": JSON.stringify({ directionId: 'modern-minimal', tokens: { '--ink': '#183153' }, screens: [{id:'viewer',surface:'desktop'}], journeyGroups: [{id:'system',title:'System & Edge States',screens:['viewer']}], componentPatterns:['record card'] }),
+      "mockups/browser.json": JSON.stringify({ network:'disabled',consoleErrors:[],pageErrors:[],screens:[{id:'viewer',surface:'desktop'}],viewports:[{screen:'viewer',width:1280,height:800,scrollWidth:1280,clientWidth:1280,screenshot:{path:'.scratch/parallel/mockups/viewer.png',sha256:(await import('../src/scrum/artifacts.ts')).sha256((await import('./fixtures/scrum-design.ts')).png)}},{screen:'screens-board',width:1280,height:800,scrollWidth:1280,clientWidth:1280,screenshot:{path:'.scratch/parallel/mockups/screens-board.png',sha256:(await import('../src/scrum/artifacts.ts')).sha256((await import('./fixtures/scrum-design.ts')).png)}}],states:(await import('./fixtures/scrum-design.ts')).states.map(state=>({screen:'viewer',state,keyboard:true,passed:true})),detector:{tool:'open-design',passed:true,nonAdvisoryCount:0,viewportsChecked:[{screen:'viewer',width:1280,height:800,nonAdvisoryCount:0}]}}),
+      "mockups/viewer.png": (await import('./fixtures/scrum-design.ts')).png,
+      "mockups/screens-board.png": (await import('./fixtures/scrum-design.ts')).png,
       "decisions/ux.jsonl":
         '{"id":"U1","rationale":"offline writes permitted pending reconciliation"}\n',
     },
@@ -825,131 +830,38 @@ test("reusing a provisioned request in another Project resolves that Project's m
   assert.doesNotMatch(moved.config.systemPrompt!, /You are the Lead seat of the paseo-factory verification loop/);
 });
 
-test('Scrum harness links the full upstream UI skill pack and edit scanner only into UI roles', async t => {
-  const { mkdirSync, readFileSync, existsSync, chmodSync } = await import('node:fs');
-  const { provisionScrumHarness, scopeScrumCapabilities } = await import('../src/scrum/harness.ts');
+test('Scrum UX harness stages standalone Open Design shells and carries no retired scanners', async t => {
+  const { mkdirSync, readFileSync, existsSync } = await import('node:fs');
+  const { provisionScrumHarness } = await import('../src/scrum/harness.ts');
   const { ensureScrumConfig } = await import('../src/scrum/config.ts');
   const { createScrumRun } = await import('../src/scrum/run-journal.ts');
-  const { ensureProjectRegistered } = await import('../src/project.ts');
   const state = makeTempDir(), repo = makeTempDir(), home = makeTempDir();
   for (const dir of [state, repo, home]) disposeDir(t, dir);
-  writeFileSync(join(repo, 'README.md'), 'fixture'); gitCommitAll(repo);
-  const project = ensureProjectRegistered(state, repo);
-  assert.ok(project.ok); if (!project.ok) return;
-  for (const skill of ['impeccable', 'impeccable-polish']) {
-    mkdirSync(join(home, '.claude/skills', skill, 'reference'), { recursive: true });
-    writeFileSync(join(home, '.claude/skills', skill, 'SKILL.md'), '# Full upstream pack');
-    writeFileSync(join(home, '.claude/skills', skill, 'reference/audit.md'), 'Audit instructions');
+  const run = createScrumRun({ state, slug: 'p', runId: 'od', initiativeId: 'od', config: ensureScrumConfig(state), configRevision: 1, track: 'ui', rationale: 'harness', requestId: 'create', ownedPaths: [] });
+  const identity = { kind: 'task' as const, task: 'ux', epoch: 1, binding: { mode: 'scrum' as const, role: 'ux' as const, runId: run.runId, configRevision: run.configRevision, policyRevision: run.policyRevision, artifactRefs: [] } };
+  const roleHome = provisionScrumHarness({ state, slug: 'p', authority: 'agent', identity, generation: 'g', userHome: home, workspace: repo });
+  for (const file of ['iphone.html', 'android.html', 'neutral.html', 'layout.css']) {
+    assert.ok(existsSync(join(repo, '.scratch/od/mockups/.od-frames', file)), file);
   }
-  const { switchExecution } = await import('../src/scrum/execution.ts');
-  await switchExecution({state,slug:project.slug,mode:'scrum',blockers:[],rotate:async()=>{}});
-  const customCodex = join(home,'custom-codex'); mkdirSync(customCodex,{recursive:true});
-  writeFileSync(join(customCodex,'auth.json'),'custom-auth');
-  writeFileSync(join(customCodex,'config.toml'),'model_provider = "custom"');
-  const launcher = join(home, '.claude/skills/impeccable/scripts/impeccable');
-  mkdirSync(join(launcher, '..'), { recursive: true });
-  writeFileSync(launcher, '#!/bin/sh\nprintf \"scanner-finding\"\n'); chmodSync(launcher, 0o755);
-  const run = createScrumRun({ state, slug: project.slug, runId: 'hooks', initiativeId: 'hooks', config: ensureScrumConfig(state), configRevision: 1, track: 'small', rationale: 'harness', requestId: 'create', ownedPaths: [] });
-  const { commandRun } = await import('../src/scrum/run-journal.ts');
-  commandRun(state, project.slug, run.runId, { type: 'readiness_recorded', requestId: 'ready', expectedRevision: run.revision, readiness: { refs: [], contradictions: [], unsafeAssumptions: [], missingCoverage: [], rationale: 'small non-UI harness test' } });
-  for (const role of ['ux', 'dev', 'qa', 'pm', 'architect'] as const) {
-    const identity = { kind: 'task' as const, task: role, epoch: 1, binding: { mode: 'scrum' as const, role, runId: run.runId, configRevision: run.configRevision, policyRevision: run.policyRevision, artifactRefs: [] } };
-    const roleHome = provisionScrumHarness({ state, slug: project.slug, authority: 'agent', identity, generation: 'g', userHome: home, workspace: repo });
-    const settings = JSON.parse(readFileSync(join(roleHome, 'settings.json'), 'utf8'));
-    const ui = ['ux', 'dev', 'qa'].includes(role);
-    assert.equal(existsSync(join(roleHome, 'skills/impeccable/reference/audit.md')), ui);
-    assert.equal(existsSync(join(roleHome, 'skills/impeccable-polish/SKILL.md')), ui);
-    assert.equal(settings.extensions.some((s: string) => s.includes('impeccable')), ui);
-    if (ui) {
-      const { pathToFileURL } = await import('node:url');
-      const { default: plugin } = await import(pathToFileURL(join(roleHome, 'impeccable-opencode.mjs')).href);
-      const hooks = await plugin({directory: repo});
-      const output = {output:'written'};
-      await hooks['tool.execute.after']({tool:'write',args:{filePath:'app.tsx'}}, output);
-      assert.match(output.output, /scanner-finding/);
-      const untouched = {output:'written'};
-      await hooks['tool.execute.after']({tool:'write',args:{filePath:'domain.ts'}}, untouched);
-      assert.equal(untouched.output,'written');
-      const native = scopeScrumCapabilities({provider:'claude',providerOptions:{}}, 'agent', identity, roleHome);
-      assert.equal((native.providerOptions as {extraArgs:Record<string,string>}).extraArgs['plugin-dir'], roleHome);
-      const restrictive = scopeScrumCapabilities({provider:'opencode',providerOptions:{permission:{bash:'deny'}}}, 'agent', identity);
-      assert.equal((restrictive.providerOptions.permission.bash as unknown as Record<string,string>)['*'], 'deny');
-      const { factoryEnvFor } = await import('../plugin/server/roles.ts');
-      const env = factoryEnvFor('agent', {stateDir:state,project:{root:repo,slug:project.slug},execution:identity,userHome:home,environment:{CODEX_HOME:customCodex,OPENCODE_CONFIG_CONTENT:JSON.stringify({plugin:['operator-plugin'],permission:{bash:'deny'}})}});
-      assert.equal(env.CODEX_HOME, env.PASEO_FACTORY_UI_HOME);
-      assert.equal(readFileSync(join(env.CODEX_HOME,'auth.json'),'utf8'),'custom-auth');
-      assert.equal(readFileSync(join(env.CODEX_HOME,'config.toml'),'utf8'),'model_provider = "custom"');
-      const oc = JSON.parse(env.OPENCODE_CONFIG_CONTENT);
-      assert.equal(oc.plugin[0],'operator-plugin'); assert.equal(oc.permission.bash,'deny');
-      assert.ok(oc.plugin.some((p:string)=>p.endsWith('impeccable-opencode.mjs')));
-      const piPlugin = (await import(pathToFileURL(join(roleHome,'impeccable-hook.mjs')).href)).default;
-      let handler: ((event: unknown, ctx: unknown) => Promise<{content:Array<{text:string}>} | undefined>) | undefined;
-      piPlugin({on: (_name:string, fn:typeof handler)=>{handler=fn}});
-      const scan = await handler!({toolName:'write',input:{path:'page.html'},content:[]},{cwd:repo});
-      assert.match(scan!.content[0].text,/scanner-finding/);
-      if(role==='ux') {
-        const { CorrelationRegistry } = await import('../src/correlations.ts');
-        const registry = new CorrelationRegistry(state);
-        const correlation = registry.issue({role:'agent',projectSlug:project.slug,projectRoot:repo,task:role,execution:identity});
-        registry.associate(correlation.correlationId,'native-ux');
-        const { injectSessionEnv, injectRoleOnCreate } = await import('../plugin/server/roles.ts');
-        const correlationEnv: Record<string,string> = {...env,PASEO_FACTORY_CORRELATION:correlation.correlationId};
-        const resumed = injectSessionEnv({agentId:'native-ux',cwd:repo,provider:'opencode',env:correlationEnv},state,home)!;
-        const resumedConfig = JSON.parse(resumed.env.OPENCODE_CONFIG_CONTENT);
-        assert.equal(resumedConfig.plugin[0],'operator-plugin'); assert.equal(resumedConfig.permission.bash,'deny');
-        const lead = injectRoleOnCreate({config:{cwd:repo,provider:'factory-lead',title:'Scrum Lead',providerOptions:native.providerOptions},env:correlationEnv},state,home)!;
-        assert.equal(lead.env?.PASEO_FACTORY_UI_HOME,undefined);
-        assert.equal(lead.env?.CODEX_HOME,customCodex);
-        assert.deepEqual(JSON.parse(lead.env!.OPENCODE_CONFIG_CONTENT),{plugin:['operator-plugin'],permission:{bash:'deny'}});
-        assert.equal((lead.config.providerOptions as {extraArgs?:Record<string,string>}).extraArgs?.['plugin-dir'],undefined);
-        const { ensureGitShim } = await import('../plugin/server/shell.ts');
-        const { repoRoot } = await import('./helpers.ts');
-        const { spawnSync } = await import('node:child_process');
-        ensureGitShim(state,join(repoRoot,'plugin'),process.execPath);
-        const bin=join(home,'native-bin');mkdirSync(bin,{recursive:true});
-        for(const tool of ['agy','copilot']) {
-          writeFileSync(join(bin,tool),'#!/bin/sh\nprintf \"%s\\n\" \"$@\"\n');chmodSync(join(bin,tool),0o755);
-          const result=spawnSync(join(state,'bin',tool),['--help'],{encoding:'utf8',env:{...process.env,...env,PATH:bin+':'+process.env.PATH}});
-          assert.equal(result.status,0,result.stderr);
-          assert.match(result.stdout,tool==='agy'?/--settings/:/--plugin-dir/);
-          assert.ok(result.stdout.includes(env.PASEO_FACTORY_UI_HOME));
-        }
-      }
-
-    }
-
-    const scoped = scopeScrumCapabilities({ provider: 'opencode', providerOptions: {} }, 'agent', identity);
-    const permission = (scoped.providerOptions as { permission: { bash: Record<string, string> } }).permission;
-    assert.equal(permission.bash?.['impeccable *'], ui ? 'allow' : 'deny');
-  }
-  const { judgeShellCommand } = await import('../src/choke.ts');
-  const roots = { workspace: repo, stateDir: state, homeDir: home, tmp: ['/tmp'] };
-  for (const role of ['ux', 'dev', 'qa', 'pm', 'architect'] as const) {
-    const decision = judgeShellCommand('impeccable detect --json --no-advisory', roots, { workspace: repo, scrumRole: role });
-    assert.equal(decision.behavior, ['ux', 'dev', 'qa'].includes(role) ? 'allow' : 'deny');
-  }
-  mkdirSync(join(home,'.pi/agent/skills/impeccable'), {recursive:true});
-  writeFileSync(join(home,'.pi/agent/skills/impeccable/SKILL.md'),'Operator UI skill must not leak into standing seats');
-  const identity = { kind: 'seat' as const, selectionRevision: 1, config: run.config };
-  for (const authority of ['supervisor', 'lead'] as const) {
-    const roleHome = provisionScrumHarness({ state, slug: project.slug, authority, identity, generation: 'g', userHome: home, workspace: repo });
-    assert.doesNotMatch(readFileSync(join(roleHome, 'settings.json'), 'utf8'), /impeccable/);
-    assert.equal(existsSync(join(roleHome,'skills/impeccable')), false);
-  }
+  for (const file of ['impeccable-hook.mjs', 'impeccable-opencode.mjs', 'hooks.json']) assert.equal(existsSync(join(roleHome, file)), false);
+  assert.doesNotMatch(readFileSync(join(roleHome, 'settings.json'), 'utf8'), /impeccable/);
+  assert.match(readFileSync(join(roleHome, 'APPEND_SYSTEM.md'), 'utf8'), /Open Design/);
+  const layout = join(repo, '.scratch/od/mockups/.od-frames/layout.css');
+  writeFileSync(layout, 'owner edit');
+  provisionScrumHarness({ state, slug: 'p', authority: 'agent', identity, generation: 'g', userHome: home, workspace: repo });
+  assert.equal(readFileSync(layout, 'utf8'), 'owner edit');
 });
 
-test('ADR 0036: inspectImpeccableTool, installOrUpdateFactorySkillPack from CORE_SKILL_SOURCES, checkCompanionToolsUpdates, ensureProviderSkillSymlinks, and pre-spawn self-healing in provisionImpeccable', async (t) => {
+test('ADR 0036: Factory Core Skill Pack installs from canonical sources, reconciles providers and checks Git updates', async (t) => {
   const { mkdirSync, existsSync, lstatSync, chmodSync, readFileSync } = await import('node:fs');
   const {
-    inspectImpeccableTool,
     inspectFactorySkillPack,
     installOrUpdateFactorySkillPack,
     checkCompanionToolsUpdates,
     ensureProviderSkillSymlinks,
-    provisionImpeccable,
     CORE_FACTORY_SKILLS,
     CORE_SKILL_SOURCES,
-  } = await import('../src/scrum/impeccable.ts');
+  } = await import('../src/scrum/companion-tools.ts');
 
   const home = makeTempDir();
   const roleHome = makeTempDir();
@@ -958,7 +870,6 @@ test('ADR 0036: inspectImpeccableTool, installOrUpdateFactorySkillPack from CORE
   // 1. Initially not_installed; CORE_FACTORY_SKILLS has 11 skills (10 GitHub + 1 built-in factory)
   assert.equal(CORE_FACTORY_SKILLS.length, 11);
   assert.equal(CORE_SKILL_SOURCES.length, 10);
-  assert.equal(inspectImpeccableTool(home).status, 'not_installed');
   assert.equal(inspectFactorySkillPack(home).status, 'not_installed');
 
   // 2. Install Factory Core Skill Pack via installOrUpdateFactorySkillPack (cloning the 3 canonical GitHub repos + reconciling /factory)
@@ -1005,42 +916,6 @@ test('ADR 0036: inspectImpeccableTool, installOrUpdateFactorySkillPack from CORE
     assert.ok(lstatSync(join(home, '.gemini/config/skills', s)).isSymbolicLink());
   }
 
-  // 3. When autoInstall is true and runner fails, provisionImpeccable throws tool-missing
-  assert.throws(
-    () =>
-      provisionImpeccable(roleHome, home, join(home, '.codex'), {
-        autoInstall: true,
-        requireInstalled: true,
-        runner: () => ({ status: 1, stdout: '', stderr: 'registry offline' }),
-      }),
-    /Impeccable UI detector.*registry offline/,
-  );
-
-  // 4. When autoInstall is true and runner installs impeccable v4.8.0 (SKILL.md version: 4.8.0, scripts/VERSION: 0.1.18 engine) into ~/.agents/skills/impeccable, provisionImpeccable self-heals and links skills
-  const provisioned = provisionImpeccable(roleHome, home, join(home, '.codex'), {
-    autoInstall: true,
-    requireInstalled: true,
-    runner: () => {
-      const impDir = join(home, '.agents/skills/impeccable');
-      mkdirSync(join(impDir, 'scripts'), { recursive: true });
-      writeFileSync(
-        join(impDir, 'SKILL.md'),
-        '---\nname: impeccable\nmetadata:\n  version: 4.8.0\n---\n# Impeccable\n',
-      );
-      writeFileSync(join(impDir, 'scripts/VERSION'), '0.1.18\n');
-      writeFileSync(join(impDir, 'scripts/impeccable'), '#!/bin/sh\necho ok\n');
-      chmodSync(join(impDir, 'scripts/impeccable'), 0o755);
-      return { status: 0, stdout: 'installed 4.8.0', stderr: '' };
-    },
-  });
-  assert.ok(provisioned.includes('impeccable'));
-  assert.equal(inspectImpeccableTool(home).status, 'installed');
-  assert.equal(inspectImpeccableTool(home).version, '4.8.0');
-  assert.equal(inspectImpeccableTool(home).engineVersion, '0.1.18');
-  assert.equal(existsSync(join(roleHome, 'skills/impeccable/SKILL.md')), true);
-  assert.ok(lstatSync(join(home, '.pi/agent/skills/impeccable')).isSymbolicLink());
-
-  // 5. checkCompanionToolsUpdates detects remote npm/git updates
   const updates = checkCompanionToolsUpdates({
     userHome: home,
     runner: (cmd, args) => {
@@ -1053,8 +928,7 @@ test('ADR 0036: inspectImpeccableTool, installOrUpdateFactorySkillPack from CORE
       return { status: 0, stdout: '', stderr: '' };
     },
   });
-  assert.equal(updates.impeccable.updateAvailable, true);
-  assert.equal(updates.impeccable.latestRevision, '4.9.0');
+  assert.deepEqual(Object.keys(updates), ['factory-skills-pack']);
   assert.equal(updates['factory-skills-pack'].updateAvailable, true);
   assert.equal(updates['factory-skills-pack'].latestRevision, '9f8e7d6');
 });

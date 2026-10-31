@@ -145,17 +145,18 @@ test("design.submit resolves a named accepted UX artifact and replays frozen def
   const { artifactAt, sha256 } = await import("../plugin/server/core/scrum/artifacts.ts");
   const { scrumOperation } = await import("../plugin/server/core/scrum/controller.ts");
   let run = listRuns(state, project.slug)[0];
-  const prefix = ".scratch/design/", paths = ["ux-spec.md", "DESIGN.md", "EXPERIENCE.md", "mockups/index.html", "mockups/browser.json", "mockups/screen.png"].map(path => prefix + path);
+  const prefix = '.scratch/design/';
+  const { openDesignBundle } = await import('./fixtures/open-design.ts');
+  const bundle = { 'ux-spec.md': '# UX summary\nFarm checkout flows', ...openDesignBundle(prefix) };
+  const paths = Object.keys(bundle).map(path => prefix + path);
   run = commandRun(state, project.slug, run.runId, { type: "paths_registered", paths, requestId: "paths", expectedRevision: run.revision });
   const contract = factory.setContract({ task: "ux", workspace: repo, gate: "true", scope: paths, execution: { mode: "scrum", runId: run.runId, role: "ux", policyRevision: run.policyRevision, configRevision: 1, artifactRefs: [] } });
   run = commandRun(state, project.slug, run.runId, { type: "task_reserved", task: "ux", role: "ux", required: true, requestId: "reserve", expectedRevision: run.revision });
   run = commandRun(state, project.slug, run.runId, { type: "task_bound", task: "ux", epoch: contract.seq, requestId: "bind", expectedRevision: run.revision });
-  mkdirSync(join(repo, prefix, "mockups"), { recursive: true });
-  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII=", "base64");
-  for (const path of paths.slice(0, 3)) writeFileSync(join(repo, path), "fixture design\n");
-  writeFileSync(join(repo, paths[3]), "<html><head><title>Farm</title></head><body>Farm</body></html>");
-  writeFileSync(join(repo, paths[5]), png);
-  writeFileSync(join(repo, paths[4]), JSON.stringify({ network: "disabled", consoleErrors: [], viewports: [{ width: 800, height: 600, screenshot: { path: paths[5], sha256: sha256(png) } }], states: ["empty", "loading", "populated", "error", "offline", "permission-denied"].map(state => ({ screen: "farm", state, keyboard: true, passed: true })) }));
+  for (const [path, bytes] of Object.entries(bundle)) {
+    mkdirSync(join(repo, prefix, path, '..'), {recursive:true});
+    writeFileSync(join(repo, prefix, path), bytes);
+  }
   const sha = gitCommitChanges(repo, "UX evidence fixture");
   const claim = await factory.claim({ task: "ux", sha }); assert.equal(claim.verdict, "green", claim.gate.note);
   await factory.accept({ task: "ux", attempt: claim.attempt, authority: "owner", accepted_by: "owner" });
@@ -164,7 +165,7 @@ test("design.submit resolves a named accepted UX artifact and replays frozen def
   const request = { id: "submit", requestId: "submit", kind: "scrum_command" as const, operation: "lead.operation", submitter: lead.correlationId, projectRoot: repo, payload: { action: "design.submit", designArtifact: paths[0], waiverReason: "Owner may review a bounded fixture", roleResults: [{ task: "ux", result: { status: "complete", artifactRefs: paths.map(path => artifactAt(repo, sha, path)), assumptions: [], openQuestions: [], conflicts: [] } }] } };
   const deps = { scrumCommand: async (request: import("../plugin/server/spool.ts").ScrumSpoolRequest, caller: { authority: "owner" | "supervisor" | "lead" | "agent"; actor: string }) => ({ id: request.id, ok: true as const, summary: "Scrum", data: await scrumOperation(request, { factory, slug: project.slug, root: repo, ...caller, activeAgents: [], pendingDirectives: false }) }) };
   const submitted = await handleSpoolRequest(factory, request, deps); assert.ok(submitted.ok, JSON.stringify(submitted));
-  run = listRuns(state, project.slug)[0]; assert.equal(run.design?.revision, 1); assert.equal(run.design?.browserEvidence[0].path, paths[4]);
+  run = listRuns(state, project.slug)[0]; assert.equal(run.design?.revision, 1); assert.equal(run.design?.browserEvidence[0].path, prefix + "mockups/browser.json");
   const revision = run.revision;
   const replay = await handleSpoolRequest(factory, request, deps); assert.ok(replay.ok, JSON.stringify(replay));
   assert.equal(listRuns(state, project.slug)[0].revision, revision);

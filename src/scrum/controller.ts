@@ -1,3 +1,4 @@
+import { browserCoverageIssues } from './design-contract.ts';
 import { assertOwnerDependencies } from "./owner-work.ts";
 import { scrumSeatOperation } from "./seat-operations.ts";
 import { trackKind } from "./tracks.ts";
@@ -394,7 +395,7 @@ export function scrumOperation(input: ScrumOperation, ctx: ScrumOperationContext
           : trackKind(run.track) === "backend"
             ? ["prd", "architecture", "backlog"]
             : ["prd", "ux", "architecture", "backlog"];
-      const diagnostics = kinds.flatMap((kind) => lintScrumDoc(kind, files));
+      const diagnostics = kinds.flatMap((kind) => lintScrumDoc(kind, files, { requireOpenDesignOnly: run.policyRevision === '0040-r1' && kind === 'ux' }));
       if (diagnostics.length)
         fail(
           "scrum-readiness-lint",
@@ -410,7 +411,7 @@ export function scrumOperation(input: ScrumOperation, ctx: ScrumOperationContext
         ...cmd.design.refs,
         ...cmd.design.browserEvidence,
       ]);
-      verifyBrowserEvidence(root, cmd.design);
+      verifyBrowserEvidence(root, cmd.design, run.policyRevision === '0040-r1');
       if (designDigest(cmd.design.refs) !== cmd.design.digest)
         fail("invalid-design-digest", "digest differs from accepted artifacts");
     }
@@ -428,6 +429,7 @@ export function scrumOperation(input: ScrumOperation, ctx: ScrumOperationContext
       );
       const model = run.design ? previewModel(root, run) : undefined;
       const issues = verifyQaFiles(root, report, model?.screens ?? []);
+      if (report.browserEvidence && run.policyRevision === '0040-r1') issues.push(...browserCoverageIssues(report.browserEvidence, model?.screens ?? [], true, { requireOpenDesignOnly: true, requireCleanDetector: report.status === 'clean' }));
       if (model?.screens.length && (model.evidence.detector || model.screens.length > 1) && !report.browserEvidence)
         issues.push('browser evidence required for approved design screens');
       if (issues.length) fail("invalid-qa-evidence", issues.join("; "));

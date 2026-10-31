@@ -62,7 +62,7 @@ export const CORE_PLUGIN_ENTRY: CorePluginCatalogEntry = {
 };
 
 export interface CompanionToolCatalogEntry {
-  id: "impeccable" | "factory-skills-pack";
+  id: "factory-skills-pack";
   title: string;
   tagline: string;
   description: string;
@@ -88,29 +88,11 @@ export const MANAGEABLE_PLUGIN_IDS: ReadonlySet<string> = new Set<string>([
 
 /** Set of every host companion tool / skill pack id managed by the Factory surface (ADR 0036). */
 export const MANAGEABLE_TOOL_IDS: ReadonlySet<string> = new Set<string>([
-  "impeccable",
   "factory-skills-pack",
 ]);
 
 /** The official Factory companion tool & skill pack catalog (ADR 0036 §1). */
 export const COMPANION_TOOLS_CATALOG: readonly CompanionToolCatalogEntry[] = [
-  {
-    id: "impeccable",
-    title: "Impeccable UI Detector & Skill Pack",
-    tagline: "Upstream pbakaus/impeccable 62-rule anti-slop detector CLI & UI design skills for UX, Dev, and QA.",
-    description:
-      "Self-contained Rust/Wasm visual anti-slop detector engine (`impeccable detect --json --no-advisory`), PostToolUse UI scanner hook, and design playbooks (`~/.agents/skills/impeccable*`) auto-provisioned into Scrum UX, Senior Dev, and QA specialist homes.",
-    canonicalSource: "npx:impeccable@latest",
-    access: "public",
-    sidebarLabel: "Impeccable",
-    sidebarIcon: "Sparkles",
-    capabilities: [
-      "62-Rule Visual Detector",
-      "DESIGN.md Token Drift Gate",
-      "PostToolUse UI Hook",
-      "Auto-Provisioned for UX / Dev / QA",
-    ],
-  },
   {
     id: "factory-skills-pack",
     title: "Factory Core Skill Pack",

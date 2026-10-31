@@ -377,13 +377,13 @@ export const ratifyProposal = defineRpc({
 export const pluginsInstall = defineRpc({
   name: "factory.plugins.install",
   input: z.object({
-    /** Target plugin or companion tool id ("paseo-factory" | "factory-burn-lab" | "factory-release-lab" | "impeccable" | "factory-skills-pack") or "all" for batch install of uninstalled companions. */
-    target: z.enum(["paseo-factory", "factory-burn-lab", "factory-release-lab", "impeccable", "factory-skills-pack", "all"]),
+    /** Target plugin or companion tool id ("paseo-factory" | "factory-burn-lab" | "factory-release-lab" | "factory-skills-pack") or "all" for batch install of uninstalled companions. */
+    target: z.enum(["paseo-factory", "factory-burn-lab", "factory-release-lab", "factory-skills-pack", "all"]),
     /** Optional custom source override (Git source, npm spec, or explicit local directory path). Omitted uses canonicalSource. */
     source: z.string().optional(),
     /** Optional Git branch, tag, or commit ref when installing from a Git source. */
     ref: z.string().optional(),
-    /** When true with target: "all", also installs any uninstalled public companion tools (`impeccable`, `factory-skills-pack`). */
+    /** When true with target: "all", also installs any uninstalled public companion tools (`factory-skills-pack`). */
     includeTools: z.boolean().optional(),
     mergeLedgers: z.boolean().optional(),
     overwriteConfigs: z.boolean().optional(),
@@ -394,7 +394,7 @@ export const pluginsInstall = defineRpc({
 export const pluginsManage = defineRpc({
   name: "factory.plugins.manage",
   input: z.object({
-    pluginId: z.enum(["paseo-factory", "factory-burn-lab", "factory-release-lab", "impeccable", "factory-skills-pack", "all"]),
+    pluginId: z.enum(["paseo-factory", "factory-burn-lab", "factory-release-lab", "factory-skills-pack", "all"]),
     action: z.enum(["enable", "disable", "reload", "update", "remove"]),
     includeTools: z.boolean().optional(),
   }),

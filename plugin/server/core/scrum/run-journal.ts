@@ -22,7 +22,7 @@ import { scopeDir, scrumConfigIsValid, scrumMutation } from "./config.ts";
 import type { ScrumConfig } from "./config.ts";
 import { artifactRefIsValid, safeId, safePath } from "./types.ts";
 import type { ArtifactRef, ScrumRoleName } from "./types.ts";
-export const SCRUM_POLICY_REVISION = "0038-r1";
+export const SCRUM_POLICY_REVISION = "0040-r1";
 export const PHASES = [
   "planning",
   "design",

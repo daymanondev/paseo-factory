@@ -32,8 +32,9 @@ export function verifyCompleteDesign(
     `${prefix}DESIGN.md`,
     `${prefix}EXPERIENCE.md`,
     `${prefix}mockups/index.html`,
+    ...(run.policyRevision === '0040-r1' ? [`${prefix}mockups/screens.html`, `${prefix}mockups/design-manifest.json`] : []),
     ...tracked.filter(
-      (path) => run.ownedPaths.includes(path) && !evidence.has(path),
+      (path) => (run.policyRevision === '0040-r1' || run.ownedPaths.includes(path)) && !evidence.has(path),
     ),
   ];
   const supplied = new Set(design.refs.map((ref) => ref.path));
@@ -74,7 +75,7 @@ export function assertDevReady(root: string, run: ScrumRun, task?: string): void
     verifyCompleteDesign(root, run, design);
     verifyRefs(root, design.refs, run.ownedPaths);
     verifyRefs(root, design.browserEvidence, run.ownedPaths);
-    verifyBrowserEvidence(root, design);
+    verifyBrowserEvidence(root, design, run.policyRevision === '0040-r1');
   }
 }
 export function decideDesign(input: {
@@ -133,17 +134,17 @@ export function decideDesign(input: {
 }
 
 /** Browser evidence is pinned to exactly the submitted screenshot blobs. */
-export function verifyBrowserEvidence(root: string, design: import("./run-journal.ts").DesignReview): void {
+export function verifyBrowserEvidence(root: string, design: import("./run-journal.ts").DesignReview, requireOpenDesignOnly = false): void {
   const read = (suffix: string) => {
-    const ref = design.refs.find(r => r.path.endsWith('/' + suffix));
+    const ref = [...design.refs, ...design.browserEvidence].find(r => r.path.endsWith('/' + suffix));
     return ref ? gitBytes(root, 'show', `${ref.commit}:${ref.path}`).toString() : '';
   };
   const declared = designScreens(read('EXPERIENCE.md'), read('mockups/manifest.json'));
   if (/^#{2,3}\s+Screen:/m.test(read('EXPERIENCE.md'))) {
-    const files = Object.fromEntries(design.refs.map(ref => [ref.path.slice(ref.path.indexOf('/', ref.path.indexOf('/') + 1) + 1), gitBytes(root, 'show', `${ref.commit}:${ref.path}`).toString()]));
+    const files = Object.fromEntries([...design.refs, ...design.browserEvidence].map(ref => [ref.path.slice(ref.path.indexOf('/', ref.path.indexOf('/') + 1) + 1), gitBytes(root, 'show', `${ref.commit}:${ref.path}`).toString()]));
     // Canonical suffixes also support initiative paths nested below .scratch.
     for (const name of ['DESIGN.md', 'EXPERIENCE.md', 'mockups/index.html', 'mockups/manifest.json']) if (read(name)) files[name] = read(name);
-    const diagnostics = lintScrumDoc('ux', files);
+    const diagnostics = lintScrumDoc('ux', files, { requireOpenDesignOnly });
     if (diagnostics.length) throw new FactoryError('browser-evidence-invalid', diagnostics.map(d => `${d.path}:${d.line} [${d.category}] ${d.message}`).join('; '));
   }
   const reports = design.browserEvidence.filter(r => r.path.endsWith('.json'));
@@ -153,7 +154,7 @@ export function verifyBrowserEvidence(root: string, design: import("./run-journa
     try { report = JSON.parse(gitBytes(root, 'show', `${ref.commit}:${ref.path}`).toString()); }
     catch { throw new FactoryError('browser-evidence-invalid', 'invalid browser JSON'); }
     const strict = declared.length > 0 || report?.screens !== undefined || report?.detector !== undefined || (report?.viewports?.length ?? 0) > 1 || new Set((report?.states ?? []).map(s => s.screen)).size > 1;
-    const issues = browserCoverageIssues(report, declared, strict);
+    const issues = browserCoverageIssues(report, declared, strict, { requireOpenDesignOnly, sharedEdgeStates: !!read('mockups/screens.html') || undefined, requireBoard: requireOpenDesignOnly || !!read('mockups/screens.html') });
     if (issues.length) throw new FactoryError('browser-evidence-invalid', issues.join('; '));
     for (const viewport of report.viewports) {
       const screenshot = viewport.screenshot;

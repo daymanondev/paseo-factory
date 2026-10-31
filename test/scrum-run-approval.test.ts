@@ -1,9 +1,9 @@
+import { createHistoricalScrumRun as createScrumRun } from './fixtures/historical-scrum.ts';
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { makeTempDir, disposeDir } from "./helpers.ts";
 import { ensureScrumConfig } from "../src/scrum/config.ts";
 import {
-  createScrumRun,
   commandRun,
   readRun,
 } from "../src/scrum/run-journal.ts";

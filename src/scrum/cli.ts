@@ -4,6 +4,7 @@ import { DOC_FILES, lintScrumDoc } from "./linter.ts";
 import type { ScrumDocKind } from "./linter.ts";
 import { verifyBrowserFiles } from "./browser-files.ts";
 import { designScreens } from "./design-contract.ts";
+import { readMockupFiles } from "./open-design-cli.ts";
 import { verifyQaFiles } from "./qa-bundle.ts";
 export function lintScrumDirectory(
   kind: string,
@@ -37,20 +38,16 @@ export function lintScrumDirectory(
     if (kind === 'ui') {
       try { files['EXPERIENCE.md'] = readFileSync(join(dir, '../../EXPERIENCE.md'), 'utf8'); } catch { /* Missing artifact is a diagnostic. */ }
     }
-    if (kind === "ux") read("mockups/manifest.json");
-    if (kind === "ux")
-      for (const match of (files["mockups/index.html"] ?? "").matchAll(
-        /(?:src|href)\s*=\s*["']([^"']+)["']/gi,
-      ))
-        if (
-          !match[1].includes(":") &&
-          !match[1].includes("..") &&
-          !match[1].startsWith("/")
-        )
-          read(`mockups/${match[1]}`);
-    const diagnostics = lintScrumDoc(kind as ScrumDocKind, files);
+    if (kind === 'ux' || kind === 'ui') {
+      const mockups = kind === 'ux' ? join(dir, 'mockups') : join(dir, '../../mockups');
+      Object.assign(files, readMockupFiles(mockups));
+    }
+    const diagnostics = lintScrumDoc(kind as ScrumDocKind, files, { requireOpenDesignOnly: kind === 'ux' || kind === 'ui' });
+    if (kind === 'ux' && files['mockups/browser.json'] && !diagnostics.length) {
+      for (const message of verifyBrowserFiles(process.cwd(), JSON.parse(files['mockups/browser.json']), designScreens(files['EXPERIENCE.md']), { requireOpenDesignOnly: true, sharedEdgeStates: true, requireBoard: true })) diagnostics.push({ path: 'mockups/browser.json', line: 1, category: 'browser-evidence', message });
+    }
     if (kind === 'ui' && files['browser.json'] && !diagnostics.length) {
-      for (const message of verifyBrowserFiles(process.cwd(), JSON.parse(files['browser.json']), designScreens(files['EXPERIENCE.md']))) diagnostics.push({ path: 'browser.json', line: 1, category: 'browser-evidence', message });
+      for (const message of verifyBrowserFiles(process.cwd(), JSON.parse(files['browser.json']), designScreens(files['EXPERIENCE.md']), { requireOpenDesignOnly: true, sharedEdgeStates: true })) diagnostics.push({ path: 'browser.json', line: 1, category: 'browser-evidence', message });
     }
     if (kind === "qa" && files["qa-report.json"] && !diagnostics.length) {
       const report = JSON.parse(files["qa-report.json"]);

@@ -1,7 +1,7 @@
 import { discoverHelperMcps, resolveRoleScopedMcpServers, syncHelperMcps } from "./core/helper-mcp-sync.ts";
 import { buildRoleKickoffPrompt } from "./core/roles-contract.ts";
 import { readRun as readScrumRun } from "./core/scrum/run-journal.ts";
-import { impeccableEnvironment, restoreImpeccableEnvironment } from "./core/scrum/impeccable.ts";
+import { restoreLegacyUiEnvironment } from "./core/scrum/companion-tools.ts";
 import { readExecution } from "./core/scrum/config.ts";
 import { resolveRoleLane, laneProviderConfig } from "./provider-lanes.ts";
 import type { ProviderCatalogEntry } from "./provider-lanes.ts";
@@ -134,7 +134,7 @@ export function factoryEnvFor(
   input: { stateDir: string; project: ProjectIdentity; task?: string; correlationId?: string; userHome?: string; execution?: ScrumHarnessIdentity | null; environment?: Record<string, string> },
 ): Record<string, string> {
   ensureFactoryBinScripts(input.stateDir);
-  const environment = restoreImpeccableEnvironment({ ...process.env, ...input.environment });
+  const environment = restoreLegacyUiEnvironment({ ...process.env, ...input.environment });
   const execution = input.execution === null ? undefined : input.execution ?? resolveScrumIdentity(input.stateDir, input.project.slug, input.task);
   const roleHome = execution !== undefined ? provisionScrumHarness({ state: input.stateDir, slug: input.project.slug, authority: role, identity: execution, generation: input.correlationId ?? "initial", userHome: input.userHome, environment, workspace: input.task ? join(input.stateDir, "projects", input.project.slug, "worktrees", input.task) : input.project.root }) : provisionPiAgentHome({
     stateDir: input.stateDir,
@@ -147,7 +147,6 @@ export function factoryEnvFor(
     PASEO_FACTORY_PROJECT: input.project.slug,
     PASEO_FACTORY_STATE_DIR: input.stateDir,
     PI_CODING_AGENT_DIR: roleHome,
-    ...(execution?.kind === 'task' && ['ux', 'dev', 'qa'].includes(execution.binding.role) ? impeccableEnvironment(roleHome, environment) : {}),
     ...(execution === undefined ? {} : { PASEO_FACTORY_EXECUTION: JSON.stringify(execution) }),
   };
   if (input.project.root !== "") env.PASEO_FACTORY_PROJECT_ROOT = input.project.root;
@@ -495,7 +494,7 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
     (request.config as { labels?: Record<string, string> }).labels;
   const correlations = new CorrelationRegistry(stateDir);
   const oldUiHome = request.env?.PASEO_FACTORY_UI_HOME;
-  request = { ...request, env: restoreImpeccableEnvironment(request.env ?? {}), config: { ...request.config } };
+  request = { ...request, env: restoreLegacyUiEnvironment(request.env ?? {}), config: { ...request.config } };
   if (oldUiHome && request.config.providerOptions) {
     const options = request.config.providerOptions, extra = options.extraArgs;
     if (isRecord(extra) && extra['plugin-dir'] === oldUiHome) {
@@ -739,7 +738,7 @@ export function injectSessionEnv<
       return {
         ...request,
         env: {
-          ...restoreImpeccableEnvironment(request.env ?? {}),
+          ...restoreLegacyUiEnvironment(request.env ?? {}),
           ...factoryEnvFor(associated.role, {
             stateDir,
             project: { root: associated.projectRoot, slug: associated.projectSlug },
@@ -790,7 +789,7 @@ export function injectSessionEnv<
     return {
       ...request,
       env: {
-        ...restoreImpeccableEnvironment(request.env ?? {}),
+        ...restoreLegacyUiEnvironment(request.env ?? {}),
         ...factoryEnvFor("agent", {
           stateDir,
           project: { root: "", slug: worktree.slug },
@@ -823,7 +822,7 @@ export function injectSessionEnv<
     return {
       ...request,
       env: {
-        ...restoreImpeccableEnvironment(request.env ?? {}),
+        ...restoreLegacyUiEnvironment(request.env ?? {}),
         ...factoryEnvFor(seat, {
           stateDir,
           project: registration,
@@ -859,7 +858,7 @@ export function injectSessionEnv<
       return {
         ...request,
         env: {
-          ...restoreImpeccableEnvironment(request.env ?? {}),
+          ...restoreLegacyUiEnvironment(request.env ?? {}),
           ...factoryEnvFor(identitySeat, {
             stateDir,
             project,

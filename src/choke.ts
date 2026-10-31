@@ -938,8 +938,6 @@ export function judgeShellCommand(command: string, roots: WritableRoots, memory?
     };
   }
   const tokens = shellTokens(command);
-  if (memory?.scrumRole && !['ux', 'dev', 'qa'].includes(memory.scrumRole) && quoteAwareWords(command).some(word => /(?:^|\/)impeccable$/.test(word)))
-    return { behavior: 'deny', rule: 'policy:scrum-ui-capability', reason: 'impeccable is scoped to UX, Dev and QA' };
   const inIsolatedWorktree =
     (memory?.worktree !== undefined && memory.worktree.trim() !== "") ||
     /\/projects\/[^/]+\/worktrees\/[^/]+(?:\/|$)/.test(roots.workspace);

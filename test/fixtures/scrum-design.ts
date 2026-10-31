@@ -1,3 +1,4 @@
+import { createHistoricalScrumRun } from './historical-scrum.ts';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { gitCommitAll, makeTempDir, disposeDir } from '../helpers.ts';
@@ -15,12 +16,12 @@ export const designFiles = {
   'EXPERIENCE.md': ['catalog', 'checkout'].map(id => `## Screen: ${id}\n${states.map(s => `${s}: keyboard accessible ${s} content`).join('\n')}`).join('\n'),
   'mockups/index.html': `<!doctype html><html><head><title>Shop</title></head><body><main data-screen="catalog"><button id="buy">Buy</button></main><main data-screen="checkout"><button class="pay-cta">Pay</button></main><script>function route(screen,state){document.documentElement.dataset.screen=screen;document.documentElement.dataset.state=state;document.querySelectorAll('main').forEach(e=>e.hidden=e.dataset.screen!==screen)}const q=new URLSearchParams(location.search);route(q.get('screen')||'catalog',q.get('state')||'populated');window.addEventListener('message',e=>{if(e.data.type==='scrum:set-state')route(e.data.screen,e.data.state)});</script></body></html>`,
 };
-export async function designFixture(t: TestContext, mutate?: (report: import("../../src/scrum/design-contract.ts").BrowserEvidenceReport) => void, files: Partial<typeof designFiles> = {}) {
+export async function designFixture(t: TestContext, mutate?: (report: import("../../src/scrum/design-contract.ts").BrowserEvidenceReport) => void, files: Record<string, string> = {}) {
   const root = makeTempDir(), state = makeTempDir();
   disposeDir(t, root); disposeDir(t, state);
   const prefix = '.scratch/studio/';
   mkdirSync(join(root, prefix, 'mockups'), { recursive: true });
-  for (const [path, content] of Object.entries({ ...designFiles, ...files })) writeFileSync(join(root, prefix, path), content);
+  for (const [path, content] of Object.entries({ ...designFiles, ...files })) { mkdirSync(join(root, prefix, path, '..'), { recursive: true }); writeFileSync(join(root, prefix, path), content); }
   const report = {
     network: 'disabled' as const, consoleErrors: [], screens: [{ id: 'catalog' }, { id: 'checkout' }],
     viewports: ['catalog', 'checkout'].flatMap(screen => [{ name: 'desktop', width: 1280, height: 800 }, { name: 'mobile', width: 390, height: 844 }].map(v => ({ ...v, screen, screenshot: { path: `${prefix}mockups/${screen}-${v.name}.png`, sha256: sha256(png) } }))),
@@ -33,10 +34,10 @@ export async function designFixture(t: TestContext, mutate?: (report: import("..
   const sha = gitCommitAll(root);
   const factory = createFactory({ stateDir: state });
   await switchExecution({ state, slug: 'p', mode: 'scrum', blockers: [], rotate: async () => {} });
-  const paths = [...Object.keys(designFiles).map(p => prefix + p), ...report.viewports.map(v => v.screenshot.path)];
+  const paths = [...Object.keys({ ...designFiles, ...files }).filter(p => p !== 'mockups/browser.json').map(p => prefix + p), ...report.viewports.map(v => v.screenshot.path)];
   const browserEvidence = [artifactAt(root, sha, prefix + 'mockups/browser.json')];
   const refs = paths.map(path => artifactAt(root, sha, path));
-  let run = createScrumRun({ state, slug: 'p', runId: 'studio', initiativeId: 'studio', config: ensureScrumConfig(state), configRevision: 1, track: 'ui', rationale: 'checkout UI', requestId: 'create', ownedPaths: [...paths, browserEvidence[0].path] });
+  let run = (files['mockups/screens.html'] ? createScrumRun : createHistoricalScrumRun)({ state, slug: 'p', runId: 'studio', initiativeId: 'studio', config: ensureScrumConfig(state), configRevision: 1, track: 'ui', rationale: 'checkout UI', requestId: 'create', ownedPaths: [...paths, browserEvidence[0].path] });
   run = commandRun(state, 'p', run.runId, { type: 'task_reserved', task: 'ux-studio', role: 'ux', required: true, requestId: 'reserve', expectedRevision: run.revision });
   const contract = factory.setContract({ task: 'ux-studio', workspace: root, gate: 'true', execution: { mode: 'scrum', role: 'ux', runId: run.runId, configRevision: run.configRevision, policyRevision: run.policyRevision, artifactRefs: [] } });
   run = commandRun(state, 'p', run.runId, { type: 'task_bound', task: contract.task, epoch: contract.seq, requestId: 'bind', expectedRevision: run.revision });

@@ -1963,7 +1963,7 @@ test("ADR 0036: collectLocalStateIntoRuntime collects ~/.agents/skills (excludin
 
   collectLocalStateIntoRuntime(homeA);
 
-  // Verify tdd was collected into config/skills/tdd/, impeccable was excluded from config/skills/, and companion-tools.json recorded version 4.8.0
+  // Verify tdd was collected into config/skills/tdd/, impeccable was excluded from config/skills/, and companion-tools.json contains only the managed skills
   assert.equal(
     readFileSync(join(homeA, "vault-runtime/config/skills/tdd/SKILL.md"), "utf8"),
     "# TDD Skill\n",
@@ -1974,8 +1974,7 @@ test("ADR 0036: collectLocalStateIntoRuntime collects ~/.agents/skills (excludin
   );
   assert.equal(existsSync(join(homeA, "vault-runtime/config/skills/impeccable")), false, "OS-specific impeccable binary directory is never staged into vault config/skills");
   const companionManifest = JSON.parse(readFileSync(join(homeA, "vault-runtime/config/companion-tools.json"), "utf8"));
-  assert.equal(companionManifest.impeccable.minVersion, "4.8.0");
-  assert.equal(companionManifest.impeccable.installedVersion, "4.8.0");
+  assert.equal(companionManifest.impeccable, undefined);
   assert.deepEqual(companionManifest.skills, ["tdd"]);
 
   // Simulate copying vault-runtime/config/skills from Machine A to Machine B and hydrating

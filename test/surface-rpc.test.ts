@@ -6251,7 +6251,7 @@ test("Scrum supervisorEnsure preserves a UI-created Supervisor session without s
   assert.equal(existsSync(wt.path), false, "worktree directory is removed after landing");
 });
 
-test("ADR 0036: snapshot surfaces companionTools (impeccable + factory-skills-pack), pluginsCheckUpdates checks remote versions, and pluginsInstall / pluginsManage install, update, reload, and protect mandatory tools against disable/remove", async (t) => {
+test("ADR 0036: snapshot surfaces only the Factory Core Skill Pack, pluginsCheckUpdates checks remote versions, and pluginsInstall / pluginsManage install, update, reload, and protect mandatory tools against disable/remove", async (t) => {
   const userHome = makeTempDir("companion-tools-home-");
   disposeDir(t, userHome);
   const dir = makeTempDir();
@@ -6280,17 +6280,6 @@ test("ADR 0036: snapshot surfaces companionTools (impeccable + factory-skills-pa
     }),
     companionToolRunner: (command, args) => {
       toolCalls.push({ command, args });
-      if (command === "npx") {
-        const impDir = join(userHome, ".agents/skills/impeccable");
-        mkdirSync(join(impDir, "scripts"), { recursive: true });
-        writeFileSync(join(impDir, "SKILL.md"), "---\nname: impeccable\nmetadata:\n  version: 4.8.0\n---\n# Impeccable\n");
-        writeFileSync(join(impDir, "scripts/VERSION"), "0.1.18\n");
-        writeFileSync(join(impDir, "scripts/impeccable"), "#!/bin/sh\n");
-        return { status: 0, stdout: "Installed impeccable 4.8.0", stderr: "" };
-      }
-      if (command === "npm" && args[0] === "view") {
-        return { status: 0, stdout: "4.9.0\n", stderr: "" };
-      }
       if (command === "git" && args[0] === "ls-remote") {
         return { status: 0, stdout: "9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f0e\tHEAD\n", stderr: "" };
       }
@@ -6304,16 +6293,9 @@ test("ADR 0036: snapshot surfaces companionTools (impeccable + factory-skills-pa
   assert.deepEqual(
     snap1.view.companionTools?.map((tool) => [tool.id, tool.status]),
     [
-      ["impeccable", "not_installed"],
       ["factory-skills-pack", "not_installed"],
     ],
   );
-
-  // 2. Install impeccable via pluginsInstall({ target: "impeccable" })
-  const instImp = await handlers.pluginsInstall({ target: "impeccable" });
-  assert.ok(instImp.ok, instImp.ok ? "" : instImp.error);
-  assert.deepEqual(instImp.installed, ["impeccable"]);
-  assert.equal(toolCalls[0]!.command, "npx");
 
   // 3. Stage a skill in vault-runtime and install factory-skills-pack
   mkdirSync(join(home, "vault-runtime/config/skills/tdd"), { recursive: true });
@@ -6330,7 +6312,6 @@ test("ADR 0036: snapshot surfaces companionTools (impeccable + factory-skills-pa
   assert.deepEqual(
     snap2.view.companionTools?.map((tool) => [tool.id, tool.status, tool.version]),
     [
-      ["impeccable", "running", "4.8.0"],
       ["factory-skills-pack", "running", "1.0.0"],
     ],
   );
@@ -6338,18 +6319,13 @@ test("ADR 0036: snapshot surfaces companionTools (impeccable + factory-skills-pa
   // 5. pluginsCheckUpdates checks remote updates for companionTools too
   const checkRes = await handlers.pluginsCheckUpdates({});
   assert.ok(checkRes.ok, checkRes.ok ? "" : checkRes.error);
-  assert.ok(checkRes.updatesAvailable.includes("impeccable"));
+  assert.ok(!checkRes.updatesAvailable.includes("impeccable"));
+  assert.ok(toolCalls.every(c => c.command !== "npm" && c.command !== "npx"));
   assert.ok(checkRes.updatesAvailable.includes("factory-skills-pack"));
 
   // 6. Manage reload succeeds, while disable and remove are refused with companion-tool-protected
-  const reloadImp = await handlers.pluginsManage({ pluginId: "impeccable", action: "reload" });
-  assert.ok(reloadImp.ok, reloadImp.ok ? "" : reloadImp.error);
-  const disableImp = await handlers.pluginsManage({ pluginId: "impeccable", action: "disable" });
-  assert.equal(disableImp.ok, false);
-  if (!disableImp.ok) assert.equal(disableImp.code, "companion-tool-protected");
-  const removeImp = await handlers.pluginsManage({ pluginId: "impeccable", action: "remove" });
-  assert.equal(removeImp.ok, false);
-  if (!removeImp.ok) assert.equal(removeImp.code, "companion-tool-protected");
+  const reloadPack = await handlers.pluginsManage({ pluginId: "factory-skills-pack", action: "reload" });
+  assert.ok(reloadPack.ok);
   const removePack = await handlers.pluginsManage({ pluginId: "factory-skills-pack", action: "remove" });
   assert.equal(removePack.ok, false);
   if (!removePack.ok) assert.equal(removePack.code, "companion-tool-protected");

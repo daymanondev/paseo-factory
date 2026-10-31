@@ -964,3 +964,23 @@ test("Cached Pi provenance never opts in servers after their Pi configuration is
   setHelperMcpEnabled(options, "removed", true);
   assert.equal(discoverHelperMcps(options).servers.find(s => s.name === "removed")?.enabled, true);
 });
+
+test('skill reconciliation retires stale impeccable directories and broken provider links while preserving other skills', async t => {
+  const { ensureProviderSkillSymlinks } = await import('../src/scrum/companion-tools.ts');
+  const { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, lstatSync, existsSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const home = mkdtempSync(join(tmpdir(), 'retire-skills-')); t.after(() => rmSync(home, { recursive: true, force: true }));
+  for (const dir of ['.agents/skills', '.pi/agent/skills', '.claude/skills', '.gemini/config/skills']) {
+    mkdirSync(join(home, dir, 'impeccable-polish'), { recursive: true });
+    writeFileSync(join(home, dir, 'impeccable-polish/SKILL.md'), 'retired');
+    symlinkSync(join(home, 'missing'), join(home, dir, 'impeccable'));
+  }
+  mkdirSync(join(home, '.agents/skills/frontend-design'), { recursive: true });
+  writeFileSync(join(home, '.agents/skills/frontend-design/SKILL.md'), 'keep');
+  ensureProviderSkillSymlinks(home);
+  for (const dir of ['.agents/skills', '.pi/agent/skills', '.claude/skills', '.gemini/config/skills']) {
+    assert.equal(existsSync(join(home, dir, 'impeccable-polish')), false);
+    assert.throws(() => lstatSync(join(home, dir, 'impeccable')), /ENOENT/);
+    assert.equal(existsSync(join(home, dir, 'frontend-design/SKILL.md')), true);
+  }
+});

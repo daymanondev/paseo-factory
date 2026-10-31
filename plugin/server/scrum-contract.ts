@@ -248,7 +248,7 @@ export function prepareScrumContract(
     (role === "qa" && /\/qa\/|\/qa-report\.(json|md)$/.test(path)));
   const roleDefaults = {
     pm: [`${prefix}sprint-backlog.md`],
-    ux: [`${prefix}impeccable.local.md`, `${prefix}DESIGN.md`, `${prefix}EXPERIENCE.md`, `${prefix}mockups/index.html`],
+    ux: [`${prefix}DESIGN.md`, `${prefix}EXPERIENCE.md`, `${prefix}mockups/index.html`, `${prefix}mockups/screens.html`, `${prefix}mockups/design-manifest.json`, ...["styles.css", "app.js", "app-data.js", "screens.css", "screens-data.js", "screens.js", "browser.json", "screens-board.png", ".od-frames/iphone.html", ".od-frames/android.html", ".od-frames/neutral.html", ".od-frames/layout.css"].map(name => `${prefix}mockups/${name}`)],
     architect: [], dev: run.design ? [`${prefix}qa/${request.task}`] : [], qa: [`${prefix}qa/qa-report.json`],
   }[role];
   const scope = [...new Set([...(request.scope ?? [...inherited, ...roleDefaults]), decision, ...(role === "dev" && run.design ? roleDefaults : []), ...(artifact ? [artifact] : [])])];

@@ -2856,112 +2856,18 @@ function materializeProjectScrumVault(state, slug, runtimeApp, overwrite) {
   atomicJson(join12(scopeDir(state, slug), "scrum-lanes.json"), config);
 }
 
-// src/scrum/impeccable.ts
+// src/scrum/companion-tools.ts
 import { existsSync as existsSync9, mkdirSync as mkdirSync8, mkdtempSync, readdirSync as readdirSync6, symlinkSync as symlinkSync2, rmSync as rmSync7, writeFileSync as writeFileSync6, lstatSync as lstatSync2, readFileSync as readFileSync12, copyFileSync as copyFileSync2, statSync as statSync4 } from "node:fs";
 import { homedir as homedir3, tmpdir } from "node:os";
 import { dirname as dirname11, join as join13, resolve as resolve5 } from "node:path";
-var IMPECCABLE_MIN_VERSION = "4.8.0";
-function compareSemver(a, b) {
-  const parse2 = (v) => {
-    const clean = v.trim().replace(/^v/i, "").split("-")[0] ?? "";
-    const parts = clean.split(".").map((p) => Number.parseInt(p, 10));
-    return [
-      Number.isFinite(parts[0]) ? parts[0] : 0,
-      Number.isFinite(parts[1]) ? parts[1] : 0,
-      Number.isFinite(parts[2]) ? parts[2] : 0
-    ];
-  };
-  const [aMaj, aMin, aPat] = parse2(a);
-  const [bMaj, bMin, bPat] = parse2(b);
-  if (aMaj !== bMaj) return aMaj > bMaj ? 1 : -1;
-  if (aMin !== bMin) return aMin > bMin ? 1 : -1;
-  if (aPat !== bPat) return aPat > bPat ? 1 : -1;
-  return 0;
-}
-function inspectImpeccableTool(userHome = homedir3()) {
-  const providers = [".agents", ".claude", ".gemini", ".pi", ".codex", ".opencode"];
-  let mainDir = null;
-  const skillNames = /* @__PURE__ */ new Set();
-  for (const provider of providers) {
-    const dir = join13(userHome, provider, "skills");
-    if (!existsSync9(dir)) continue;
-    try {
-      for (const name of readdirSync6(dir)) {
-        if (/^impeccable(?:$|[-_])/.test(name) && existsSync9(join13(dir, name, "SKILL.md"))) {
-          skillNames.add(name);
-          if (name === "impeccable" && mainDir === null) {
-            mainDir = join13(dir, name);
-          }
-        }
-      }
-    } catch {
-    }
-  }
-  if (mainDir === null) {
-    return {
-      status: "not_installed",
-      version: null,
-      engineVersion: null,
-      minVersion: IMPECCABLE_MIN_VERSION,
-      path: null,
-      binaryPath: null,
-      skillCount: skillNames.size
-    };
-  }
-  const binaryCandidate = join13(mainDir, "scripts", "impeccable");
-  const hasBinary = existsSync9(binaryCandidate);
-  let skillVersion = null;
-  const skillMdPath = join13(mainDir, "SKILL.md");
-  if (existsSync9(skillMdPath)) {
-    try {
-      const md = readFileSync12(skillMdPath, "utf8");
-      const fm = md.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-      const verMatch = fm?.[1]?.match(/^\s*version:\s*["']?([0-9]+\.[0-9]+\.[0-9]+[^\s"']*)["']?\s*$/m);
-      if (verMatch?.[1]) {
-        skillVersion = verMatch[1].trim();
-      }
-    } catch {
-      skillVersion = null;
-    }
-  }
-  const versionPath = join13(mainDir, "scripts", "VERSION");
-  let engineVersion = null;
-  if (existsSync9(versionPath)) {
-    try {
-      const raw = readFileSync12(versionPath, "utf8").trim();
-      if (raw !== "") engineVersion = raw;
-    } catch {
-      engineVersion = null;
-    }
-  }
-  let version = skillVersion ?? engineVersion;
-  if (version === null && hasBinary) {
-    version = IMPECCABLE_MIN_VERSION;
-  }
-  if (!hasBinary || version === null) {
-    return {
-      status: "not_installed",
-      version,
-      engineVersion,
-      minVersion: IMPECCABLE_MIN_VERSION,
-      path: mainDir,
-      binaryPath: hasBinary ? binaryCandidate : null,
-      skillCount: skillNames.size
-    };
-  }
-  const upToDate = compareSemver(version, IMPECCABLE_MIN_VERSION) >= 0;
-  return {
-    status: upToDate ? "installed" : "outdated",
-    version,
-    engineVersion,
-    minVersion: IMPECCABLE_MIN_VERSION,
-    path: mainDir,
-    binaryPath: binaryCandidate,
-    skillCount: skillNames.size
-  };
-}
 function ensureProviderSkillSymlinks(userHome = homedir3()) {
   const agentsSkillsDir = join13(userHome, ".agents", "skills");
+  for (const dir of [agentsSkillsDir, join13(userHome, ".pi/agent/skills"), join13(userHome, ".claude/skills"), join13(userHome, ".gemini/config/skills")]) {
+    if (!existsSync9(dir)) continue;
+    for (const name of readdirSync6(dir)) {
+      if (/^impeccable/i.test(name)) rmSync7(join13(dir, name), { recursive: true, force: true });
+    }
+  }
   if (!existsSync9(agentsSkillsDir)) return { linked: [] };
   let skillNames = [];
   try {
@@ -3835,7 +3741,7 @@ function collectVaultSkillsIntoRuntime(paseoHome, explicitUserHome) {
     return [];
   }
   for (const name of skillEntries) {
-    if (name.startsWith(".") || /^impeccable(?:$|[-_])/i.test(name)) continue;
+    if (name.startsWith(".") || /^impeccable/i.test(name)) continue;
     const skillDir = join16(agentsSkillsDir, name);
     try {
       if (!statSync5(skillDir).isDirectory()) continue;
@@ -3851,13 +3757,8 @@ function collectVaultSkillsIntoRuntime(paseoHome, explicitUserHome) {
     if (existsSync12(lockPath)) {
       writeRuntimeFile(paseoHome, "config/skill-lock.json", readFileSync15(lockPath));
     }
-    const impeccable = inspectImpeccableTool(userHome);
     const companionManifest = {
       schemaVersion: 1,
-      impeccable: {
-        minVersion: IMPECCABLE_MIN_VERSION,
-        installedVersion: impeccable.version
-      },
       skills: collectedSkills
     };
     writeRuntimeFile(
@@ -3890,7 +3791,7 @@ function materializeVaultSkillsFromRuntime(paseoHome, overwriteConfigs = false, 
     return [];
   }
   for (const skillName of skillNames) {
-    if (skillName.startsWith(".") || /^impeccable(?:$|[-_])/i.test(skillName)) continue;
+    if (skillName.startsWith(".") || /^impeccable/i.test(skillName)) continue;
     const srcSkillDir = join16(runtimeSkillsDir, skillName);
     try {
       if (!statSync5(srcSkillDir).isDirectory()) continue;

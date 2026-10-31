@@ -1,4 +1,6 @@
 /** Token-bound studio server (loopback + Tailscale/LAN host IPs for remote Paseo Desktop clients). */
+import { posix } from 'node:path';
+import { offlineAssetPath } from './open-design-lint.ts';
 import { createServer } from 'node:http';
 import type { Server } from 'node:http';
 import { randomBytes } from 'node:crypto';
@@ -17,7 +19,8 @@ export interface PreviewDecision {
   findings?: ScrumDesignFinding[]; screenStatuses?: ScreenStatuses;
 }
 const previews = new Map<string, { server: Server; url: string; urls: string[]; fingerprint: string }>();
-const mockupCsp = "default-src 'none'; style-src 'unsafe-inline' data:; img-src data: blob: 'self'; font-src data: 'self'; script-src 'unsafe-inline' data:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'; sandbox allow-scripts";
+export const PREVIEW_IDLE_TIMEOUT_MS = 24 * 60 * 60_000;
+const mockupCsp = "default-src 'none'; script-src 'unsafe-inline' 'self'; style-src 'unsafe-inline' 'self'; img-src 'self' data: blob:; font-src 'self' data:; frame-src 'self'; connect-src 'none'; form-action 'none'; base-uri 'none'; sandbox allow-scripts";
 
 function listReachableHostIps(): string[] {
   const tailscale: string[] = [];
@@ -58,8 +61,32 @@ export async function servePreview(root: string, run: ScrumRun, options: { subpa
   if (existing) { existing.server.close(); previews.delete(key); }
   const token = randomBytes(32).toString('hex');
   let origin = '', decided = false, deciding = false;
+  let expiry: ReturnType<typeof setTimeout> | undefined;
+  const refresh = () => { clearTimeout(expiry); expiry = setTimeout(() => { if (previews.get(key)?.server === server) previews.delete(key); server.close(); }, PREVIEW_IDLE_TIMEOUT_MS); expiry.unref(); };
+  const prefix = `.scratch/${run.initiativeId}/`;
+  const mockupRef = (path: string) => run.design!.refs.find(r => r.path === prefix + path);
+  const readAsset = (path: string) => {
+    const ref = mockupRef(path);
+    if (!ref) throw new FactoryError('preview-missing-asset', path);
+    const bytes = gitBytes(root, 'show', `${ref.commit}:${ref.path}`);
+    if (sha256(bytes) !== ref.sha256) throw new FactoryError('stale-artifact-ref', ref.path);
+    return bytes;
+  };
+  const assetUrl = (path: string, reference: string) => {
+    const target = offlineAssetPath(path, reference);
+    if (!target) return reference;
+    const suffix = reference.includes('?') ? reference.slice(reference.indexOf('?')) : reference.includes('#') ? reference.slice(reference.indexOf('#')) : '';
+    const url = new URL('/' + target + suffix, 'http://localhost'); url.searchParams.set('token', token);
+    return url.pathname + url.search + url.hash;
+  };
+  const rewrite = (path: string, source: string) => {
+    let result = path.endsWith('.html') ? source.replace(/\b(src|href|poster)\s*=\s*(["'])([^"']+)\2/gi, (_, attr, quote, ref) => `${attr}=${quote}${assetUrl(path, ref)}${quote}`) : source;
+    if (/\.(?:html|css)$/.test(path)) result = result.replace(/url\(\s*(["']?)([^\s"'\)]+)\1\s*\)/gi, (_, quote, ref) => `url(${quote}${assetUrl(path, ref)}${quote})`);
+    return result;
+  };
   const allowedHosts = new Set<string>();
   const server = createServer(async (request, response) => {
+    refresh();
     const send = (status: number, type: string, body: string | Buffer = '', csp?: string, extraHeaders?: Record<string, string>) => {
       response.writeHead(status, { 'Content-Type': type, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'Connection': 'close', ...(csp ? { 'Content-Security-Policy': csp } : {}), ...(extraHeaders ?? {}) });
       response.end(request.method === 'HEAD' ? undefined : body);
@@ -69,6 +96,7 @@ export async function servePreview(root: string, run: ScrumRun, options: { subpa
       const hostHeader = request.headers.host ?? '';
       const reqOrigin = allowedHosts.has(hostHeader) ? `http://${hostHeader}` : origin;
       const url = new URL(request.url ?? '/', reqOrigin || 'http://127.0.0.1');
+      if (url.pathname === '/favicon.ico') { send(204, 'image/x-icon'); return; }
       if (!allowedHosts.has(hostHeader) || url.searchParams.get('token') !== token) { json(403, { error: 'Invalid preview session token or host' }); return; }
       if (request.method === 'POST' && url.pathname === '/api/decision') {
         const sameOrigin = request.headers.origin === reqOrigin || (!request.headers.origin && request.headers['sec-fetch-site'] === 'same-origin' && request.headers['x-scrum-preview-token'] === token);
@@ -95,7 +123,17 @@ export async function servePreview(root: string, run: ScrumRun, options: { subpa
         const screen = url.searchParams.get('screen') ?? model.screens[0]?.id, state = url.searchParams.get('state') ?? 'populated';
         if (!screen || !model.screens.some(s => s.id === screen) || !DESIGN_STATES.includes(state as typeof DESIGN_STATES[number])) { json(400, { error: 'Unknown screen/state' }); return; }
         const bridge = previewBridge(screen, state, url.searchParams.get('viewport') ?? 'desktop');
-        send(200, 'text/html; charset=utf-8', injectPreviewBridge(preview.html, bridge), mockupCsp); return;
+        send(200, 'text/html; charset=utf-8', injectPreviewBridge(rewrite('mockups/index.html', readAsset('mockups/index.html').toString()), bridge), mockupCsp); return;
+      }
+      if (url.pathname.startsWith('/mockups/')) {
+        const path = decodeURIComponent(url.pathname.slice(1));
+        if (!path.startsWith('mockups/') || path.split('/').some(part => !part || part === '.' || part === '..') || /[\\\0]/.test(path) || !mockupRef(path)) { json(404, { error: 'Artifact is not in this design' }); return; }
+        const bytes = readAsset(path), ext = posix.extname(path);
+        const types: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.woff2': 'font/woff2', '.woff': 'font/woff', '.ttf': 'font/ttf' };
+        let body: string | Buffer = ['.html', '.css'].includes(ext) ? rewrite(path, bytes.toString()) : bytes;
+        if (path === 'mockups/index.html') body = injectPreviewBridge(String(body), previewBridge(url.searchParams.get('screen') ?? model.screens[0]?.id ?? '', url.searchParams.get('state') ?? 'populated', url.searchParams.get('viewport') ?? 'mobile'));
+        if (path === 'mockups/screens.html') body = injectPreviewBridge(String(body), `<script>(()=>{function measure(){let right=640,bottom=480;const walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);while(walker.nextNode()){const n=walker.currentNode;if(!n.textContent.trim()||n.parentElement.closest('script,style,[hidden]'))continue;const range=document.createRange();range.selectNodeContents(n);for(const r of range.getClientRects()){right=Math.max(right,r.right+scrollX+40);bottom=Math.max(bottom,r.bottom+scrollY+40)}}for(const el of document.querySelectorAll('iframe,img,svg,canvas,video')){const r=el.getBoundingClientRect();right=Math.max(right,r.right+scrollX+40);bottom=Math.max(bottom,r.bottom+scrollY+40)}parent.postMessage({type:'scrum:flow-size',width:Math.ceil(right),height:Math.ceil(bottom)},'*')}addEventListener('load',measure);new ResizeObserver(measure).observe(document.body)})();</script>`);
+        send(200, types[ext] ?? 'application/octet-stream', body, mockupCsp); return;
       }
       if (url.pathname === '/asset') {
         const path = url.searchParams.get('path'), ref = [...run.design!.refs, ...run.design!.browserEvidence].find(r => r.path === path);
@@ -129,7 +167,6 @@ export async function servePreview(root: string, run: ScrumRun, options: { subpa
   const url = `${origin}/?token=${token}`;
   const urls = [url, ...hostIps.map(ip => `http://${ip}:${address.port}/?token=${token}`)];
   previews.set(key, { server, url, urls, fingerprint }); server.unref();
-  const expiry = setTimeout(() => { if (previews.get(key)?.server === server) previews.delete(key); server.close(); }, 15 * 60_000);
-  expiry.unref(); server.once('close', () => clearTimeout(expiry));
+  refresh(); server.once('close', () => clearTimeout(expiry));
   return { ...preview, url, urls };
 }

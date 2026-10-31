@@ -832,19 +832,19 @@ test("Scrum MCP decisions default the active design identity and keep Lead unabl
   const { scrumOperation } = await import("../plugin/server/core/scrum/controller.ts");
   const project = ensureProjectRegistered(stateDir, repo); assert.ok(project.ok);
   await switchExecution({ state: stateDir, slug: project.slug, mode: "scrum", blockers: [], rotate: async () => {} });
-  const paths = ["DESIGN.md", "EXPERIENCE.md", "mockups/index.html", "mockups/browser.json", "mockups/screen.png"].map(p => `.scratch/review/${p}`);
-  const { png, states } = await import('./fixtures/scrum-design.ts');
-  const { sha256 } = await import('../src/scrum/artifacts.ts');
-  for (const path of paths) {
-    mkdirSync(join(repo, path, '..'), {recursive:true});
-    const browser = {network:'disabled',consoleErrors:[],viewports:[{width:800,height:600,screenshot:{path:paths[4],sha256:sha256(png)}}],states:states.map(state=>({screen:'farm',state,keyboard:true,passed:true}))};
-    writeFileSync(join(repo,path), path.endsWith('html') ? '<html><head></head><body>Farm</body></html>' : path.endsWith('json') ? JSON.stringify(browser) : path.endsWith('png') ? png : 'accepted design');
+  const { openDesignBundle } = await import('./fixtures/open-design.ts');
+  const bundle = openDesignBundle('.scratch/review/');
+  bundle['mockups/index.html'] = String(bundle['mockups/index.html']).replace('Shop', 'Farm');
+  const paths = Object.keys(bundle).map(path => '.scratch/review/' + path);
+  for (const [path, bytes] of Object.entries(bundle)) {
+    mkdirSync(join(repo, '.scratch/review', path, '..'), {recursive:true});
+    writeFileSync(join(repo, '.scratch/review', path), bytes);
   }
   execFileSync("git", ["add", "."], { cwd: repo }); execFileSync("git", ["commit", "-m", "design fixture"], { cwd: repo });
   const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
   const refs = paths.filter(path=>!path.endsWith("browser.json")).map(path => artifactAt(repo, sha, path));
   let run = createScrumRun({ state: stateDir, slug: project.slug, runId: "review", initiativeId: "review", config: ensureScrumConfig(stateDir, project.slug), configRevision: 1, track: "ui", rationale: "fixture", ownedPaths: paths, requestId: "create" });
-  run = commandRun(stateDir, project.slug, run.runId, { type: "design_review_requested", requestId: "design", expectedRevision: run.revision, design: { revision: 1, digest: designDigest(refs), refs, browserEvidence: [artifactAt(repo, sha, paths[3])] } });
+  run = commandRun(stateDir, project.slug, run.runId, { type: "design_review_requested", requestId: "design", expectedRevision: run.revision, design: { revision: 1, digest: designDigest(refs), refs, browserEvidence: [artifactAt(repo, sha, ".scratch/review/mockups/browser.json")] } });
   const factory = createFactory({ stateDir });
   const registry = new CorrelationRegistry(stateDir);
   const supervisor = registry.issue({ role: "supervisor", projectSlug: project.slug, projectRoot: repo });
