@@ -327,11 +327,15 @@ export function scrumOperation(input: ScrumOperation, ctx: ScrumOperationContext
       )
     )
       return replayed;
+    if (cmd.type === "blockers_resolved" && run.blockerDetails?.some(b => b.causes.some(c => c !== "other")))
+      fail("owner-action-required", "Use explicit Owner continuation or dimension-specific grants; broad clearing cannot remove protected allowance/legacy causes");
     if (cmd.type === "artifacts_recorded") {
       verifyRefs(root, cmd.refs, run.ownedPaths);
       acceptedRefs(ctx.factory, run, cmd.refs);
     }
     if (cmd.type === "role_result") {
+      const task = run.tasks.find(t => t.task === cmd.task);
+      assertOwnerDependencies(run, { task: cmd.task, role: task?.role });
       verifyRefs(root, cmd.result.artifactRefs, run.ownedPaths);
       acceptedRefs(ctx.factory, run, cmd.result.artifactRefs);
     }
@@ -411,10 +415,12 @@ export function scrumOperation(input: ScrumOperation, ctx: ScrumOperationContext
         fail("invalid-design-digest", "digest differs from accepted artifacts");
     }
     if (cmd.type === "bundle_promoted") {
+      assertOwnerDependencies(run, { stage: "qa" });
       verifyRefs(root, [cmd.ref], run.ownedPaths);
       acceptedRefs(ctx.factory, run, [cmd.ref]);
     }
     if (cmd.type === "qa_recorded") {
+      assertOwnerDependencies(run, { stage: "qa" });
       verifyRefs(root, [cmd.ref], run.ownedPaths);
       acceptedRefs(ctx.factory, run, [cmd.ref]);
       const report = JSON.parse(

@@ -1822,10 +1822,13 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       const send = wakeup.target === "supervisor" ? deps.supervisorReport : deps.leadDispatch;
       if (!send) continue;
       try {
-        const reply = wakeup.target === "supervisor"
-          ? await deps.supervisorReport!({ id: `scrum:${runId}:${wakeup.id}`, kind: "supervisor_report", workspace: project.root, seat: "lead", scrum: { runId }, message: wakeup.message })
-          : await deps.leadDispatch!({ id: `scrum:${runId}:${wakeup.id}`, kind: "lead_dispatch", workspace: project.root, runId, from: "owner", message: wakeup.message });
-        if (!reply.ok) throw new Error(reply.message);
+        const obsolete = wakeup.pendingId !== undefined && run.ownerRequests?.find(r => r.id === wakeup.pendingId)?.status !== "pending";
+        if (!obsolete) {
+          const reply = wakeup.target === "supervisor"
+            ? await deps.supervisorReport!({ id: `scrum:${runId}:${wakeup.id}`, kind: "supervisor_report", workspace: project.root, seat: "lead", scrum: { runId }, message: wakeup.message })
+            : await deps.leadDispatch!({ id: `scrum:${runId}:${wakeup.id}`, kind: "lead_dispatch", workspace: project.root, runId, from: "owner", message: wakeup.message });
+          if (!reply.ok) throw new Error(reply.message);
+        }
         run = await withExecutionLane(deps.stateDir, project.slug, async () => {
           const current = readRun(deps.stateDir, project.slug, runId);
           return commandRun(deps.stateDir, project.slug, runId, { type: "wakeup_delivered", id: wakeup.id, requestId: `${wakeup.id}:delivered`, expectedRevision: current.revision });

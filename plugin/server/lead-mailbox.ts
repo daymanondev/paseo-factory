@@ -1325,7 +1325,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
         try {
           if (readExecution(deps.stateDir, registration.slug).mode !== "scrum") continue;
           const pending = listRuns(deps.stateDir, registration.slug).some(run =>
-            (!terminalRun(run) && (run.cancellation !== undefined || run.completionRequest !== undefined)) ||
+            (!terminalRun(run) && (run.cancellation !== undefined || run.completionRequest !== undefined || run.wakeups?.some(w => !w.delivered))) ||
             (run.phase === "completed" && run.completionRequest !== undefined && !run.completionReported));
           if (!pending) continue;
         }

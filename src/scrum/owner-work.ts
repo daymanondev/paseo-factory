@@ -40,8 +40,10 @@ export function validateOwnerRequest(request: OwnerRequest): void {
 }
 const roleStage: Record<ScrumRoleName, string> = { pm: 'planning', ux: 'design', architect: 'design', dev: 'implementation', qa: 'qa' };
 export function ownerDependencyHolds(run: ScrumRun, work: { task?: string; role?: ScrumRoleName; stage?: string }): OwnerRequest[] {
+  const stages = [work.stage ?? (work.role ? roleStage[work.role] : undefined)];
+  if (work.task && run.fixReservations.some(r => r.task === work.task)) stages.push('fixing');
   return (run.ownerRequests ?? []).filter(request => request.status !== 'answered' && (request.kind === 'question' || request.status === 'pending') && request.affected.some(d =>
-    d.kind === 'task' ? d.id === work.task : d.id === (work.stage ?? (work.role ? roleStage[work.role] : undefined))));
+    d.kind === 'task' ? d.id === work.task : stages.includes(d.id)));
 }
 export function assertOwnerDependencies(run: ScrumRun, work: { task?: string; role?: ScrumRoleName; stage?: string }): void {
   const holds = ownerDependencyHolds(run, work);

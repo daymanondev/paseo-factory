@@ -501,7 +501,7 @@ export function ScrumWorkflowPipeline({
             "Run cancelled"}
         </Text>
       ) : null}
-      {run ? <ScrumOwnerWork key={run.runId} theme={theme} run={run} action={action} busy={actions.busy}
+      {run ? <ScrumOwnerWork key={`${view.project?.slug}:${run.runId}`} theme={theme} run={run} action={action} busy={actions.busy}
         designReview={needsUiDecision ? <MockupApproval key={`${run.runId}:${run.design?.digest}`} theme={theme} view={view} action={action} busy={actions.busy} /> : undefined} /> : null}
       <View
         style={{

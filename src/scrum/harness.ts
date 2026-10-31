@@ -1,3 +1,4 @@
+import { assertOwnerDependencies } from "./owner-work.ts";
 import { provisionImpeccable } from "./impeccable.ts";
 import { readProjectRegistration } from "../project.ts";
 import { assertDevReady } from "./approval.ts";
@@ -101,6 +102,7 @@ export function provisionScrumHarness(input: {
         "task-execution-mismatch",
         "frozen run identity differs",
       );
+    assertOwnerDependencies(run, { task: identity.task, role: identity.binding.role });
     if (identity.binding.role === "dev") {
       const project = readProjectRegistration(state, slug);
       if (!project) throw new FactoryError("unknown-project", slug);

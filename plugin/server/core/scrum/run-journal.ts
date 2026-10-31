@@ -131,7 +131,7 @@ export interface ScrumRun {
   allowanceGrants?: OwnerGrant[];
   blockerDetails?: RunBlocker[];
   continuations?: { requestId: string; actor: string; rationale: string }[];
-  wakeups?: { id: string; message: string; target?: "lead" | "supervisor"; delivered?: boolean }[];
+  wakeups?: { id: string; message: string; target?: "lead" | "supervisor"; pendingId?: string; delivered?: boolean }[];
   operationIntents?: { operationId: string; fingerprint: string; payload: Record<string, unknown> }[];
 }
 interface BaseCommand {
@@ -295,7 +295,7 @@ function apply(run: ScrumRun, cmd: RunCommand, now: number, legacy = false): voi
       validateOwnerRequest(cmd.request);
       if ((run.ownerRequests ?? []).some(r => r.id === cmd.request.id)) throw new FactoryError("owner-request-conflict", cmd.request.id);
       (run.ownerRequests ??= []).push({ ...cmd.request, createdAt: new Date(now).toISOString() });
-      (run.wakeups ??= []).push({ id: cmd.requestId, target: "supervisor", message: `Waiting for Owner — request ${cmd.request.id}: ${cmd.request.question}. Affected work: ${JSON.stringify(cmd.request.affected)}. Relay this exact durable identity; do not infer an answer or repeat unchanged reminders.` });
+      (run.wakeups ??= []).push({ id: cmd.requestId, target: "supervisor", pendingId: cmd.request.id, message: `Waiting for Owner — request ${cmd.request.id}: ${cmd.request.question}. Affected work: ${JSON.stringify(cmd.request.affected)}. Relay this exact durable identity; do not infer an answer or repeat unchanged reminders.` });
       break;
     case "owner_resolved": {
       const request = run.ownerRequests?.find(r => r.id === cmd.pendingId);

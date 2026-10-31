@@ -22,12 +22,16 @@ async function ownerWorkFixture(t: TestContext, budgets = { maxTasks: 24, maxQaF
   const project = resolveProject(root); assert.ok(project.ok);
   const daemon = { agents: { list: async () => ({ entries: [], pageInfo: {} }) } } as unknown as SurfaceDaemonApi;
   let factory = createFactory({ stateDir });
-  const wakeups = new Map<string, string>();
+  const wakeups = new Map<string, string>(), reports = new Map<string, string>();
   let notificationFails = false;
   const build = () => createSurfaceHandlers({ factory, stateDir, home, daemon, leadDispatch: async request => {
     if (notificationFails) throw new Error('daemon offline');
     wakeups.set(request.id, request.message);
     return { id: request.id, ok: true, summary: 'durably queued' };
+  }, supervisorReport: async request => {
+    if (notificationFails) throw new Error('daemon offline');
+    reports.set(request.id, request.message);
+    return { id: request.id, ok: true, summary: 'question queued' };
   } });
   let handlers = build();
   assert.equal((await handlers.executionSetMode({ projectRoot: root, mode: 'scrum' })).ok, true);
@@ -47,7 +51,7 @@ async function ownerWorkFixture(t: TestContext, budgets = { maxTasks: 24, maxQaF
   };
   const command = async (operation: string, requestId: string, payload: Record<string, unknown>, submitter = 'owner') => call({ operation, runId: 'run', requestId, expectedRevision: (await get()).revision, payload }, submitter);
   const contract = (task: string, role: 'pm' | 'ux' | 'architect' | 'dev' | 'qa' = 'pm') => handleSpoolRequest(factory, { id: `contract-${task}`, kind: 'contract', task, role, runId: 'run', workspace: root, gate: 'true', scope: [`.scratch/owner-work/qa/${task}.md`], artifact: `.scratch/owner-work/qa/${task}.md`, submitter: lead.correlationId, seat: 'lead' });
-  return { root, stateDir, project, get, call, command, contract, lead: lead.correlationId, agent: agent.correlationId, wakeups,
+  return { root, stateDir, project, get, call, command, contract, lead: lead.correlationId, agent: agent.correlationId, wakeups, reports,
     handlers: () => handlers,
     restart: () => { factory = createFactory({ stateDir }); handlers = build(); },
     failNotification: (fail: boolean) => { notificationFails = fail; },
@@ -197,6 +201,8 @@ for (const fixture of [
   if (fixture.unrelated) events.push({ revision: 4, requestId: 'qa-problem', fingerprint: 'qa', ts: new Date(now).toISOString(), payload: { type: 'blocked', requestId: 'qa-problem', expectedRevision: 3, reason: 'QA inconclusive' } });
   writeFileSync(join(f.stateDir, 'projects', f.project.slug, 'scrum/runs/run/events.jsonl'), events.map(e => JSON.stringify(e)).join('\n') + '\n');
   f.restart(); const before = await f.get(); assert.equal(f.wakeups.size, 0);
+  const bypass = await f.command('run.command', 'clear-all', { type: 'blockers_resolved', resolution: 'Lead attempts blanket resume' }, f.lead);
+  assert.equal(bypass.ok, false); assert.deepEqual(await f.get(), before);
   const reply = await f.command('run.continue', 'continue', { rationale: 'Retire the proven elapsed cause only' });
   assert.equal(reply.ok, fixture.recoverable, JSON.stringify(reply));
   const after = await f.get();
@@ -282,4 +288,46 @@ test('terminal and cancellation-pending runs reject Owner grants and question re
     }
     assert.deepEqual(await f.get(), before);
   }
+});
+
+test('a fixing-stage Owner wait also holds a repair reserved before the question', async t => {
+  const f = await ownerWorkFixture(t);
+  const { commandRun } = await import('../plugin/server/core/scrum/run-journal.ts');
+  // The existing readiness fixture output isolates the repair admission seam.
+  commandRun(f.stateDir, f.project.slug, 'run', { type: 'readiness_recorded', requestId: 'ready-fixture', expectedRevision: (await f.get()).revision, readiness: { refs: [], contradictions: [], unsafeAssumptions: [], missingCoverage: [], rationale: 'Existing quick-track product readiness fixture' } });
+  assert.ok((await f.command('run.command', 'reserve-fix', { type: 'fix_reserved', task: 'repair' }, f.lead)).ok);
+  assert.ok((await f.command('wait.request', 'ask-fix', { pendingId: 'q-fix', question: 'Choose repair semantics', affected: [{ kind: 'stage', id: 'fixing' }] })).ok);
+  const held = await f.contract('repair', 'dev'); assert.equal(held.ok, false);
+  if (!held.ok) { assert.equal(held.code, 'scrum-owner-answer-required'); assert.match(held.message, /q-fix/); }
+  assert.ok((await f.contract('independent', 'qa')).ok);
+  assert.ok((await f.command('wait.answer', 'answer-fix', { pendingId: 'q-fix', rationale: 'Keep the original invariant' })).ok);
+  assert.ok((await f.contract('repair', 'dev')).ok);
+});
+
+test('notification recovery suppresses a question answered before its delayed Supervisor report', async t => {
+  const f = await ownerWorkFixture(t);
+  f.failNotification(true);
+  assert.ok((await f.command('wait.request', 'ask', { pendingId: 'q-delay', question: 'Choose semantics', affected: [{ kind: 'task', id: 'dependent' }] })).ok);
+  assert.equal(f.reports.size, 0);
+  assert.ok((await f.command('wait.answer', 'answer', { pendingId: 'q-delay', rationale: 'Use the documented choice' })).ok);
+  f.restart(); f.failNotification(false);
+  await f.handlers().scrumRecoverNotifications({ root: f.root, slug: f.project.slug }, 'run');
+  assert.equal(f.reports.size, 0, 'answered question must not be relayed as waiting');
+  assert.equal(f.wakeups.size, 1, 'the answer still reaches Lead once');
+  const run = await f.get(); assert.ok(run.wakeups?.every(w => w.delivered));
+  await f.handlers().scrumRecoverNotifications({ root: f.root, slug: f.project.slug }, 'run');
+  assert.equal(f.wakeups.size, 1);
+});
+
+test('retrying an earlier blocker resolution cannot clear a newer protected count blocker', async t => {
+  const f = await ownerWorkFixture(t, { maxTasks: 1, maxQaFixRounds: 2 });
+  assert.ok((await f.command('run.command', 'other-blocker', { type: 'blocked', reason: 'Temporary fixture permission question' }, f.lead)).ok);
+  const request = { operation: 'run.command', runId: 'run', requestId: 'resolved-earlier', expectedRevision: (await f.get()).revision, payload: { type: 'blockers_resolved', resolution: 'Permission resolved' } };
+  assert.ok((await f.call(request, f.lead)).ok);
+  assert.ok((await f.command('run.command', 'planning', { type: 'phase_changed', phase: 'planning', reason: 'Resume planning' }, f.lead)).ok);
+  assert.ok((await f.contract('first')).ok); assert.equal((await f.contract('second')).ok, false);
+  const blocked = await f.get();
+  const replay = await f.call(request, f.lead); assert.ok(replay.ok, JSON.stringify(replay));
+  assert.deepEqual(await f.get(), blocked);
+  assert.equal((await f.command('run.command', 'new-blanket-clear', request.payload, f.lead)).ok, false);
 });

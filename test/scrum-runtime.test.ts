@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { makeTempDir, disposeDir } from "./helpers.ts";
 
 test(
-  "actual plugin reports a late Scrum completion once without restarting",
+  "actual plugin recovers late Scrum completion and Owner-question notifications once without restarting",
   { timeout: 12000 },
   (t) => {
     const home = makeTempDir();

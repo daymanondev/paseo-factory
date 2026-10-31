@@ -182,6 +182,20 @@ try {
     1,
     "receipt prevents a second periodic completion report",
   );
+  // Persisted command output simulates a crash before mailbox delivery. A
+  // late intent on an ordinary active run must be selected by the live pump.
+  const waiting = createScrumRun({ state, slug: project.slug, runId: "late-question", initiativeId: "late-question", config, configRevision: 1, track: "quick", rationale: "late Owner question", requestId: "create-question" });
+  commandRun(state, project.slug, waiting.runId, { type: "owner_requested", requestId: "ask", expectedRevision: waiting.revision, request: { id: "q-late", kind: "question", question: "Choose semantics", affected: [{ kind: "task", id: "held" }], origin: { actor: "lead", role: "lead" }, status: "pending", createdAt: "" } });
+  const questionDeadline = Date.now() + 3500;
+  while (!readRun(state, project.slug, waiting.runId).wakeups?.every(w => w.delivered)) {
+    assert.ok(Date.now() < questionDeadline, "late Owner question notification must recover without another command or restart");
+    await new Promise(done => setTimeout(done, 25));
+  }
+  const pendingQuestions = () => readLeadMailbox(join(state, "projects", project.slug, "mailbox.jsonl")).supervisorQueued.filter(mail => mail.text.includes("q-late"));
+  assert.equal(pendingQuestions().length, 1, "question reaches the existing Supervisor mailbox despite its unacknowledged completion turn");
+  await new Promise(done => setTimeout(done, 1100));
+  assert.equal(pendingQuestions().length, 1, "unchanged pending questions stay quiet");
+  assert.equal(sent.length, 1, "queued question does not interrupt an unacknowledged Supervisor turn");
   console.log("SCRUM_LIVE_RECOVERY_OK");
 } finally {
   stop();

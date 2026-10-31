@@ -83,6 +83,7 @@ export async function scrumSpawnLane(
       .find((t) => t.task === task)
       ?.contractIntents?.some((i) => !i.rejection && !i.peersRetired) ||
     run.phase === "blocked" ||
+    run.blockers.length > 0 ||
     run.configRevision !== execution.configRevision ||
     run.policyRevision !== execution.policyRevision
   )
