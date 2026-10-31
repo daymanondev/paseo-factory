@@ -83,7 +83,7 @@ function executionValid(e: QaExecution): boolean {
     e.evidence.every(evidenceValid)
   );
 }
-export function validateQaReport(value: unknown): string[] {
+export function validateQaReport(value: unknown, screens: import('./design-contract.ts').DesignScreen[] = []): string[] {
   const r = value as QaReport;
   if (
     !r ||
@@ -94,7 +94,7 @@ export function validateQaReport(value: unknown): string[] {
   )
     return ["invalid QA report identity/status"];
   const issues: string[] = [];
-  if (r.browserEvidence !== undefined) issues.push(...browserCoverageIssues(r.browserEvidence, [], true, { requireCleanDetector: r.status === 'clean' }));
+  if (r.browserEvidence !== undefined) issues.push(...browserCoverageIssues(r.browserEvidence, screens, true, { requireCleanDetector: r.status === 'clean' }));
   if (typeof r.activeSuite !== "boolean")
     issues.push("activeSuite must explicitly be a boolean");
   if (
@@ -197,10 +197,10 @@ export function validateQaReport(value: unknown): string[] {
   }
   return issues;
 }
-export function verifyQaFiles(root: string, report: QaReport): string[] {
-  const issues = validateQaReport(report);
+export function verifyQaFiles(root: string, report: QaReport, screens: import('./design-contract.ts').DesignScreen[] = []): string[] {
+  const issues = validateQaReport(report, screens);
   if (issues.length) return issues;
-  if (report.browserEvidence) issues.push(...verifyBrowserFiles(root, report.browserEvidence, [], { requireCleanDetector: report.status === 'clean' }));
+  if (report.browserEvidence) issues.push(...verifyBrowserFiles(root, report.browserEvidence, screens, { requireCleanDetector: report.status === 'clean' }));
   const files = [report.baseline, ...report.runs]
     .flatMap((e) => e.evidence)
     .concat(

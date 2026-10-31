@@ -562,16 +562,7 @@ test("parallel UX and Architect land disjoint artifacts from one accepted PRD in
         "# Information architecture and flow\n## Screen: viewer\nOne screen justified for the bounded record viewer. Offline writes permitted.\n| Screen | empty | loading | populated | error | offline | permission-denied |\n| viewer | no record | wait | record | retry | editable | denied |\n",
       "mockups/index.html":
         "<!doctype html><html><head><title>Record viewer</title></head><body><main>" +
-        [
-          "empty",
-          "loading",
-          "populated",
-          "error",
-          "offline",
-          "permission-denied",
-        ]
-          .map((s) => `<button data-state="${s}">${s}</button>`)
-          .join("") +
+        '<button>Open record</button>' +
         "</main><script>const q=new URLSearchParams(location.search);document.documentElement.dataset.screen=q.get('screen')||'viewer';document.documentElement.dataset.state=q.get('state')||'populated';window.addEventListener('message',e=>{if(e.data.type==='scrum:set-state'){document.documentElement.dataset.screen=e.data.screen;document.documentElement.dataset.state=e.data.state}})</script></body></html>",
       "decisions/ux.jsonl":
         '{"id":"U1","rationale":"offline writes permitted pending reconciliation"}\n',

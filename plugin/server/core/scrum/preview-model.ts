@@ -10,6 +10,6 @@ export function previewModel(root: string, run: ScrumRun) {
   const evidence = JSON.parse(read('mockups/browser.json') || gitBytes(root, 'show', `${design.browserEvidence[0].commit}:${design.browserEvidence[0].path}`).toString()) as BrowserEvidenceReport;
   const documents = { design: read('DESIGN.md'), experience: read('EXPERIENCE.md'), context: read('impeccable.local.md') || read('.impeccable.md') };
   const declared = designScreens(documents.experience, read('mockups/manifest.json'));
-  const screens: import('./design-contract.ts').DesignScreen[] = declared.length ? declared : [...new Set(evidence.states.map(s => s.screen))].map(id => ({ id, body: '', line: 1 }));
+  const screens: import('./design-contract.ts').DesignScreen[] = declared.length ? declared : [...new Set(evidence.states.map(s => s.screen))].map(id => ({ id, surface: 'responsive', body: '', line: 1 }));
   return { runId: run.runId, initiativeId: run.initiativeId, revision: run.revision, design, screens, states: DESIGN_STATES, documents, tokens: designTokens(documents.design + '\n' + documents.context), evidence };
 }

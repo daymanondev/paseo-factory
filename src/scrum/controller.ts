@@ -1,4 +1,3 @@
-import { verifyBrowserFiles } from "./browser-files.ts";
 import { scrumSeatOperation } from "./seat-operations.ts";
 import { trackKind } from "./tracks.ts";
 import { lintScrumDoc } from "./linter.ts";
@@ -380,11 +379,10 @@ export function scrumOperation(input: ScrumOperation, ctx: ScrumOperationContext
       const report = JSON.parse(
         gitBytes(root, "show", `${cmd.ref.commit}:${cmd.ref.path}`).toString(),
       );
-      const issues = verifyQaFiles(root, report);
-      if (run.design) {
-        const model = previewModel(root, run);
-        if (model.screens.length && (model.evidence.detector || model.screens.length > 1)) issues.push(...verifyBrowserFiles(root, report.browserEvidence, model.screens.map(s => s.id), { requireCleanDetector: report.status === 'clean' }));
-      }
+      const model = run.design ? previewModel(root, run) : undefined;
+      const issues = verifyQaFiles(root, report, model?.screens ?? []);
+      if (model?.screens.length && (model.evidence.detector || model.screens.length > 1) && !report.browserEvidence)
+        issues.push('browser evidence required for approved design screens');
       if (issues.length) fail("invalid-qa-evidence", issues.join("; "));
       cmd.result = {
         status: report.status,

@@ -9,12 +9,16 @@ var DESIGN_STATES = ["empty", "loading", "populated", "error", "offline", "permi
 var screenIdValid = (id) => typeof id === "string" && /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(id);
 function designScreens(experience, manifest) {
   const text = experience.replace(/^\s*(```|~~~)[\s\S]*?^\s*\1.*$/gm, "");
-  const headings = [...text.matchAll(/^#{2,3}\s+Screen:\s*(\S+)(?:\s+[—–-]\s+([^\n]+))?[^\n]*$/gm)];
-  if (headings.length) return headings.map((m, i) => ({ id: m[1], title: m[2], line: text.slice(0, m.index).split("\n").length, body: text.slice(m.index + m[0].length, headings[i + 1]?.index ?? text.length) }));
+  const headings = [...text.matchAll(/^#{2,3}\s+Screen:\s*(\S+)(?:[ \t]+[—–-][ \t]+([^\n]+))?[^\n]*$/gm)];
+  if (headings.length) return headings.map((m, i) => {
+    const body = text.slice(m.index + m[0].length, headings[i + 1]?.index ?? text.length);
+    const surface = body.match(/(?:^|\n)\s*(?:[-*]\s*)?\*{0,2}Surface\*{0,2}\s*:\s*\*{0,2}\s*(mobile|desktop|responsive)\b/i)?.[1].toLowerCase();
+    return { id: m[1], title: m[2], surface: surface ?? "responsive", line: text.slice(0, m.index).split("\n").length, body };
+  });
   if (manifest) {
     try {
       const data = JSON.parse(manifest);
-      return (Array.isArray(data.screens) ? data.screens : []).map((s) => ({ id: s.id, title: s.title, body: text, line: 1 }));
+      return (Array.isArray(data.screens) ? data.screens : []).map((s) => ({ id: s.id, title: s.title, surface: s.surface ?? "responsive", body: text, line: 1 }));
     } catch {
     }
   }
@@ -22,8 +26,8 @@ function designScreens(experience, manifest) {
 }
 var desktopViewport = (v) => v.width >= 1280 && v.height >= 800;
 var mobileViewport = (v) => v.width > 0 && v.width <= 430 && v.height >= 640 && v.height <= 844;
-function detectorIssues(detector, requireClean = true) {
-  if (!detector || detector.tool !== "impeccable" || typeof detector.passed !== "boolean" || !Number.isSafeInteger(detector.nonAdvisoryCount) || detector.nonAdvisoryCount < 0 || requireClean && (detector.passed !== true || detector.nonAdvisoryCount !== 0) || !Array.isArray(detector.viewportsChecked) || !detector.viewportsChecked.some(desktopViewport) || !detector.viewportsChecked.some(mobileViewport) || detector.viewportsChecked.some((v) => !Number.isFinite(v.width) || !Number.isFinite(v.height) || !Number.isSafeInteger(v.nonAdvisoryCount) || v.nonAdvisoryCount < 0 || requireClean && v.nonAdvisoryCount !== 0) || detector.findings !== void 0 && (!Array.isArray(detector.findings) || detector.findings.some((f) => !f || !["error", "warning", "advisory"].includes(f.severity) || requireClean && f.severity !== "advisory")))
+function detectorIssues(detector, requireClean = true, surfaces = ["responsive"]) {
+  if (!detector || detector.tool !== "impeccable" || typeof detector.passed !== "boolean" || !Number.isSafeInteger(detector.nonAdvisoryCount) || detector.nonAdvisoryCount < 0 || requireClean && (detector.passed !== true || detector.nonAdvisoryCount !== 0) || !Array.isArray(detector.viewportsChecked) || surfaces.some((s) => s !== "mobile") && !detector.viewportsChecked.some(desktopViewport) || surfaces.some((s) => s !== "desktop") && !detector.viewportsChecked.some(mobileViewport) || detector.viewportsChecked.some((v) => !Number.isFinite(v.width) || !Number.isFinite(v.height) || !Number.isSafeInteger(v.nonAdvisoryCount) || v.nonAdvisoryCount < 0 || requireClean && v.nonAdvisoryCount !== 0) || detector.findings !== void 0 && (!Array.isArray(detector.findings) || detector.findings.some((f) => !f || !["error", "warning", "advisory"].includes(f.severity) || requireClean && f.severity !== "advisory")))
     return ["impeccable detector needs zero non-advisory findings across Desktop and Mobile"];
   return [];
 }
@@ -32,7 +36,8 @@ function browserCoverageIssues(report, required, strict = true, options = {}) {
   if (report?.network !== "disabled" || !Array.isArray(report.consoleErrors) || report.consoleErrors.length || report.pageErrors !== void 0 && (!Array.isArray(report.pageErrors) || report.pageErrors.length) || !Array.isArray(report.viewports) || !report.viewports.length || !Array.isArray(report.states) || !report.states.length)
     return ["offline network, clean console/page errors, viewport screenshots and state checks required"];
   if (report.screens !== void 0 && (!Array.isArray(report.screens) || report.screens.some((s) => !s || !screenIdValid(s.id))) || report.states.some((s) => !s || !screenIdValid(s.screen)) || report.viewports.some((v) => !v || !Number.isFinite(v.width) || v.width < 1 || !Number.isFinite(v.height) || v.height < 1)) return ["invalid screen/viewport evidence"];
-  const screens = /* @__PURE__ */ new Set([...required, ...(report.screens ?? []).map((s) => s.id), ...report.states.map((s) => s.screen), ...report.viewports.flatMap((v) => v.screen ? [v.screen] : [])]);
+  const declarations = required.map((s) => typeof s === "string" ? { id: s, surface: "responsive" } : s);
+  const screens = /* @__PURE__ */ new Set([...declarations.map((s) => s.id), ...(report.screens ?? []).map((s) => s.id), ...report.states.map((s) => s.screen), ...report.viewports.flatMap((v) => v.screen ? [v.screen] : [])]);
   for (const screen of screens) {
     if (!screenIdValid(screen)) issues.push("screen IDs must be stable kebab-case");
     for (const state of DESIGN_STATES) {
@@ -41,10 +46,143 @@ function browserCoverageIssues(report, required, strict = true, options = {}) {
     }
     if (strict) {
       const captures = report.viewports.filter((v) => v.screen === screen || !v.screen && screens.size === 1);
-      if (!captures.some(desktopViewport) || !captures.some(mobileViewport)) issues.push(`${screen} needs Desktop (1280x800) and Mobile (390x844) screenshots`);
+      const surface = declarations.find((s) => s.id === screen)?.surface ?? report.screens?.find((s) => s.id === screen)?.surface ?? "responsive";
+      const needed = surface === "mobile" ? [["Mobile (390x844)", mobileViewport]] : surface === "desktop" ? [["Desktop (1280x800)", desktopViewport]] : [["Desktop (1280x800)", desktopViewport], ["Mobile (390x844)", mobileViewport]];
+      for (const [label, matches] of needed) {
+        if (!captures.some(matches)) issues.push(`${screen} needs ${label} screenshots`);
+        const checks = Array.isArray(report.detector?.viewportsChecked) ? report.detector.viewportsChecked : [];
+        if (!checks.some((v) => (!v.screen || v.screen === screen) && matches(v))) issues.push(`${screen} needs impeccable detector ${label} coverage`);
+      }
     }
   }
-  if (strict || report.detector !== void 0) issues.push(...detectorIssues(report.detector, options.requireCleanDetector ?? true));
+  if (strict || report.detector !== void 0) issues.push(...detectorIssues(report.detector, options.requireCleanDetector ?? true, [...screens].map((id) => declarations.find((s) => s.id === id)?.surface ?? report.screens?.find((s) => s.id === id)?.surface ?? "responsive")));
+  return issues;
+}
+function designTokens(text) {
+  const tokens = { colors: [], colorNames: {}, typography: [], spacing: [], radius: [], components: [] };
+  const category = (name) => ({ color: "colors", colors: "colors", typography: "typography", spacing: "spacing", radius: "radius", radii: "radius", rounded: "radius", component: "components", components: "components" })[name.toLowerCase()];
+  const clean = (s) => s.trim().replace(/^['"`]|['"`,]$/g, "");
+  const add = (kind, value) => {
+    value = clean(value);
+    if (!value || value.length > 160 || /^(?:none|TODO|TBD|placeholder)\b/i.test(value)) return;
+    if (kind === "colors") {
+      for (const m of value.matchAll(/#[\da-f]{8}\b|#[\da-f]{6}\b|#[\da-f]{3}\b/gi)) {
+        if (!tokens.colors.includes(m[0])) tokens.colors.push(m[0]);
+        const name = value.slice(0, m.index).match(/([\w-]+)\s*:?\s*['"]?$/)?.[1];
+        if (name) tokens.colorNames[m[0]] = name;
+      }
+    } else if (kind !== "spacing" && kind !== "radius" || /\b\d+(?:\.\d+)?(?:px|rem)\b/.test(value)) {
+      if (!/letterSpacing/i.test(value) && !tokens[kind].includes(value)) tokens[kind].push(value);
+    }
+  };
+  const front = text.match(/^---\s*\n([^]*?)\n---(?:\s*\n|$)/);
+  if (front) {
+    let kind, role = "", fields = [], childIndent = 0;
+    const flush = () => {
+      if (kind && role && fields.length) add(kind, role + ": " + fields.join(", "));
+      fields = [];
+      role = "";
+    };
+    for (const line of front[1].split("\n")) {
+      if (!line.trim() || /^\s*#/.test(line)) continue;
+      const entry = line.match(/^(\s*)([\w-]+):\s*(.*)$/);
+      if (!entry) continue;
+      const [, indent, key, raw] = entry;
+      if (!indent) {
+        flush();
+        childIndent = 0;
+        kind = category(key);
+        if (kind && raw) add(kind, raw);
+      } else if (kind) {
+        if (!childIndent || indent.length <= childIndent) {
+          childIndent = indent.length;
+          flush();
+          if (raw) add(kind, key + ": " + clean(raw));
+          else role = key;
+        } else if (role) fields.push(key + ": " + clean(raw));
+      }
+    }
+    flush();
+    text = text.slice(front[0].length);
+  }
+  let section;
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    const heading = line.match(/^#{1,4}\s+(.+)$/);
+    if (heading) {
+      const next = category(heading[1].replace(/\s+tokens?$/i, ""));
+      if (next) section = next;
+      else if (section === "components" && /^###\s/.test(line)) add("components", heading[1]);
+      else section = void 0;
+      continue;
+    }
+    const definition = line.replace(/^[-*]\s+/, "").replace(/\*\*/g, "");
+    const explicit = definition.match(/^([a-z]+)\s*[:|—-]\s*(.+)$/i);
+    const kind = explicit && category(explicit[1]);
+    if (kind) add(kind, explicit[2]);
+    else if (section && /^(?:[-*]\s+|\|)/.test(line) && /[:|]/.test(definition)) add(section, definition);
+  }
+  return tokens;
+}
+
+// src/scrum/product-chrome.ts
+function productChromeIssues(html, design, screens) {
+  const issues = [];
+  const add = (offset, category, message) => issues.push({ path: "mockups/index.html", line: html.slice(0, offset).split("\n").length, category, message });
+  const markup = html.replace(/<!--[^]*?-->|<(script|style)\b[^>]*>[^]*?<\/\1\s*>/gi, (m) => m.replace(/[^\n]/g, " "));
+  const decodeEntity = (n) => {
+    const value = n[0].toLowerCase() === "x" ? parseInt(n.slice(1), 16) : Number(n);
+    return String.fromCodePoint(value > 0 && value <= 1114111 && !(value >= 55296 && value <= 57343) ? value : 65533);
+  };
+  const visible = markup.replace(/<[^>]+>/g, (m) => " ".repeat(m.length)).replace(/&#(x[\da-f]+|\d+);/gi, (_, n) => decodeEntity(n)).replace(/&(?:nbsp|amp|lt|gt|quot|apos);/gi, (m) => ({ "&nbsp;": " ", "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&apos;": "'" })[m.toLowerCase()]);
+  const controls = [...markup.matchAll(/<(button|option)\b[^>]*>([^]*?)<\/\1\s*>/gi)];
+  const rawStates = controls.filter((m) => /^(?:empty|loading|populated|error|offline|permission-denied)$/i.test(m[2].replace(/<[^>]*>/g, "").trim()));
+  const switcher = markup.match(/\bdata-target-(?:state|screen)\s*=|\bid\s*=\s*["']state-(?:select|switcher)["']/i);
+  if (switcher || rawStates.length >= 2) add(switcher?.index ?? rawStates[0].index, "debug-chrome", "Pure product chrome: move screen/state switchers to the outer studio");
+  if (!/ui-copy-allow:\s*technical-identifiers/i.test(design)) {
+    const jargon = /\b(?:ADR|FR|NFR|UJ|AD)-\d+\b|\b(?:GET|POST|PUT|PATCH|DELETE)\s+\/[a-zA-Z0-9/_:.-]+|@[a-z0-9-]+\/[a-z0-9-]+|\b[a-z]+[A-Z][a-zA-Z0-9]*\s*\(|\b[a-z]+[A-Z][a-zA-Z0-9]*\s*=\s*(?:true|false|null|\d+)|\([a-z]+[A-Z][a-zA-Z0-9]*(?:\s+[^)]+)?\)/g;
+    for (const match of visible.matchAll(jargon)) add(match.index, "ui-copy", `Replace internal technical copy: ${match[0]}`);
+    for (const match of markup.matchAll(/\b(?:aria-label|title|placeholder|value)\s*=\s*["']([^"']*)["']/gi)) {
+      if (jargon.test(match[1])) add(match.index, "ui-copy", "Replace internal technical copy in control label");
+      jargon.lastIndex = 0;
+    }
+  }
+  const stack = [];
+  const populatedRegions = [];
+  const regions = /* @__PURE__ */ new Map();
+  for (const match of markup.matchAll(/<\/?([a-z][\w-]*)\b[^>]*>/gi)) {
+    const tag = match[1].toLowerCase();
+    if (match[0].startsWith("</")) {
+      const index = stack.findLastIndex((e) => e.tag === tag);
+      if (index >= 0) for (const el of stack.splice(index)) {
+        const region = markup.slice(el.start, match.index + match[0].length);
+        if (el.screen) regions.set(el.screen, region);
+        if (el.populated) populatedRegions.push({ html: region, screen: el.screen ?? stack.findLast((e) => e.screen)?.screen });
+      }
+    } else if (!/\/$/.test(match[0].slice(0, -1)) && !/^(?:input|img|br|hr|meta|link|source|wbr|area|base|embed|param|track|col)$/.test(tag)) {
+      const screen = match[0].match(/\bdata-screen\s*=\s*["']([^"']+)["']/)?.[1];
+      stack.push({ tag, screen, start: match.index, populated: /data-populated-for|(?:id|class)\s*=\s*['"][^'"]*populated/i.test(match[0]) });
+    }
+  }
+  let shared = markup;
+  for (const region of regions.values()) shared = shared.replace(region, "");
+  for (const screen of screens.filter((s) => s.surface === "mobile")) {
+    const region = regions.get(screen.id) ?? (screens.length === 1 ? markup : "");
+    const table = region.match(/<table\b/i);
+    if (table) add(markup.indexOf(region) + table.index, "mobile-shell", `${screen.id}: replace mobile tables with cards or list rows`);
+    if (!/<nav\b|\brole\s*=\s*["'](?:tablist|navigation)["']/i.test(region + shared)) add(0, "mobile-shell", `${screen.id}: Mobile app shell needs navigation inside its screen`);
+  }
+  const replacement = html.match(/(?:populated\w*|\w*populated\w*)\.hidden\s*=\s*(?:true|[^;\n]*[!=]==?\s*['"]populated['"])|data-populated-for|class\s*=\s*['"][^'"]*populated-content/i);
+  if (replacement && /state-panel-|\.hidden\s*=\s*true/.test(html)) {
+    for (const screen of screens) {
+      const candidates = populatedRegions.filter((r) => !r.screen || r.screen === screen.id);
+      if (!candidates.length && populatedRegions.length) continue;
+      let persistent = (regions.get(screen.id) ?? "") + shared;
+      for (const region of candidates) persistent = persistent.replace(region.html, "");
+      if (!/<nav\b|\brole\s*=\s*['"](?:tablist|navigation)['"]/i.test(persistent))
+        add(replacement.index, "state-shell", `${screen.id}: preserve the app shell and navigation; render contextual states inside the content region`);
+    }
+  }
   return issues;
 }
 
@@ -98,12 +236,12 @@ function executionValid(e) {
     (n) => Number.isSafeInteger(n) && n >= 0
   ) && Array.isArray(e.evidence) && e.evidence.length > 0 && e.evidence.every(evidenceValid);
 }
-function validateQaReport(value) {
+function validateQaReport(value, screens = []) {
   const r = value;
   if (!r || r.schemaVersion !== 1 || !safeId(r.auditId) || !/^[a-f0-9]{40}$/.test(r.productSha) || !["clean", "defects_found", "blocked", "inconclusive"].includes(r.status))
     return ["invalid QA report identity/status"];
   const issues = [];
-  if (r.browserEvidence !== void 0) issues.push(...browserCoverageIssues(r.browserEvidence, [], true, { requireCleanDetector: r.status === "clean" }));
+  if (r.browserEvidence !== void 0) issues.push(...browserCoverageIssues(r.browserEvidence, screens, true, { requireCleanDetector: r.status === "clean" }));
   if (typeof r.activeSuite !== "boolean")
     issues.push("activeSuite must explicitly be a boolean");
   if (!executionValid(r.baseline) || r.baseline.exit !== 0 || r.baseline.passed !== r.baseline.tests || !r.baseline.firstAttempt || r.baseline.skipped || r.baseline.expectedFailures)
@@ -146,10 +284,10 @@ function validateQaReport(value) {
   }
   return issues;
 }
-function verifyQaFiles(root, report) {
-  const issues = validateQaReport(report);
+function verifyQaFiles(root, report, screens = []) {
+  const issues = validateQaReport(report, screens);
   if (issues.length) return issues;
-  if (report.browserEvidence) issues.push(...verifyBrowserFiles(root, report.browserEvidence, [], { requireCleanDetector: report.status === "clean" }));
+  if (report.browserEvidence) issues.push(...verifyBrowserFiles(root, report.browserEvidence, screens, { requireCleanDetector: report.status === "clean" }));
   const files = [report.baseline, ...report.runs].flatMap((e) => e.evidence).concat(
     report.findings.flatMap((f) => f.evidence),
     report.bundles.flatMap((b) => [...b.files, b.discoveryEvidence])
@@ -264,13 +402,14 @@ function lintScrumDoc(kind, files) {
   }
   if (kind === "ux") {
     const design = prose(files["DESIGN.md"] ?? ""), experience = prose(files["EXPERIENCE.md"] ?? ""), html = files["mockups/index.html"] ?? "";
-    for (const token of ["color", "typography", "spacing", "component"]) {
-      const value = design.match(new RegExp(`\\b${token}\\s*[:|\u2014-]\\s*([^\\n]+)`, "i"))?.[1];
-      if (!value || /^(?:none|TODO|TBD|placeholder)\b/i.test(value))
-        add("DESIGN.md", 1, "design-token", `define non-placeholder ${token} tokens`);
+    const tokens = designTokens(design);
+    for (const [label, values] of Object.entries(tokens).filter(([key]) => ["colors", "typography", "spacing", "components"].includes(key))) {
+      const legacyColor = label === "colors" ? design.match(/\bcolor\s*[:|—-]\s*([^\n]+)/i)?.[1] : void 0;
+      if ((!Array.isArray(values) || !values.length) && !(legacyColor && !/^(?:none|TODO|TBD|placeholder)\b/i.test(legacyColor))) add("DESIGN.md", 1, "design-token", `define non-placeholder ${label} tokens`);
     }
     const screens = designScreens(experience, files["mockups/manifest.json"]);
     if (!screens.length) add("EXPERIENCE.md", 1, "screen", "declare at least one ## Screen: kebab-case-id");
+    issues.push(...productChromeIssues(html, design, screens));
     const seen = /* @__PURE__ */ new Set();
     for (const screen of screens) {
       if (!screenIdValid(screen.id) || seen.has(screen.id)) add("EXPERIENCE.md", screen.line, "screen", `invalid or duplicate screen ${screen.id}`);
@@ -287,7 +426,7 @@ function lintScrumDoc(kind, files) {
         "mockups/index.html",
         1,
         "html",
-        "complete HTML document and keyboard state controls required"
+        "complete HTML document and keyboard-accessible product controls required"
       );
     if (/(?:src|href)\s*=\s*["'](?:https?:|\/\/)|@import|url\(\s*["']?https?:|fetch\s*\(|XMLHttpRequest|WebSocket/i.test(
       html
@@ -366,7 +505,7 @@ function lintScrumDoc(kind, files) {
   }
   if (kind === "ui" && files["browser.json"]) {
     try {
-      const required = designScreens(files["EXPERIENCE.md"] ?? "").map((s) => s.id);
+      const required = designScreens(files["EXPERIENCE.md"] ?? "", files["mockups/manifest.json"]);
       if (!required.length) add("EXPERIENCE.md", 1, "screen", "UI verification requires declared screens");
       for (const message of browserCoverageIssues(JSON.parse(files["browser.json"]), required)) add("browser.json", 1, "browser-evidence", message);
     } catch {
@@ -435,7 +574,7 @@ function lintScrumDirectory(kind, dir) {
     }
     const diagnostics = lintScrumDoc(kind, files);
     if (kind === "ui" && files["browser.json"] && !diagnostics.length) {
-      for (const message of verifyBrowserFiles(process.cwd(), JSON.parse(files["browser.json"]), designScreens(files["EXPERIENCE.md"]).map((s) => s.id))) diagnostics.push({ path: "browser.json", line: 1, category: "browser-evidence", message });
+      for (const message of verifyBrowserFiles(process.cwd(), JSON.parse(files["browser.json"]), designScreens(files["EXPERIENCE.md"]))) diagnostics.push({ path: "browser.json", line: 1, category: "browser-evidence", message });
     }
     if (kind === "qa" && files["qa-report.json"] && !diagnostics.length) {
       const report = JSON.parse(files["qa-report.json"]);

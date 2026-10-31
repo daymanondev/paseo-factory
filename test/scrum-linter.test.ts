@@ -133,3 +133,48 @@ test('Dev UI evidence gate rejects missing detector, states and viewports', asyn
   assert.ok(lint({ ...report, states: report.states.slice(1) }).some(d => /empty/.test(d.message)));
   assert.ok(lint({ ...report, viewports: report.viewports.filter(v => v.width === 1280) }).some(d => /Mobile/.test(d.message)));
 });
+
+test('UI evidence follows each declared screen surface', async () => {
+  const { designFiles, states } = await import('./fixtures/scrum-design.ts');
+  const experience = designFiles['EXPERIENCE.md'].replace('## Screen: catalog', '## Screen: catalog\n- **Surface:** mobile').replace('## Screen: checkout', '## Screen: checkout\nSurface: desktop');
+  const report = { network: 'disabled', consoleErrors: [], viewports: [{ screen: 'catalog', width: 390, height: 844 }, { screen: 'checkout', width: 1280, height: 800 }], states: ['catalog', 'checkout'].flatMap(screen => states.map(state => ({ screen, state, keyboard: true, passed: true }))), detector: { tool: 'impeccable', passed: true, nonAdvisoryCount: 0, viewportsChecked: [{ width: 390, height: 844, nonAdvisoryCount: 0 }, { width: 1280, height: 800, nonAdvisoryCount: 0 }] } };
+  const lint = () => lintScrumDoc('ui', { 'EXPERIENCE.md': experience, 'browser.json': JSON.stringify(report) });
+  assert.deepEqual(lint(), []);
+  report.viewports.pop();
+  assert.ok(lint().some(d => /checkout.*Desktop/.test(d.message)));
+});
+
+test('UX lint protects product chrome, copy, mobile anatomy and contextual states', async () => {
+  const { designFiles } = await import('./fixtures/scrum-design.ts');
+  const files = { ...designFiles, 'EXPERIENCE.md': designFiles['EXPERIENCE.md'].replace('## Screen: catalog', '## Screen: catalog\nSurface: mobile'), 'mockups/index.html': designFiles['mockups/index.html'].replace('<button id="buy">', '<nav aria-label="Tabs">Home</nav><button id="buy">') };
+  assert.deepEqual(lintScrumDoc('ux', files), []);
+  for (const [markup, category] of [
+    ['<select id="state-select"><option>empty</option><option>loading</option></select>', 'debug-chrome'],
+    ['<p>ADR-0003 PUT /api/rubric @goal-planner/shared candidateOptedIn = true evaluateIntakeAssessment() (tasksPerWeek)</p>', 'ui-copy'],
+    ['<table><tr><td>One</td><td>Two</td></tr></table>', 'mobile-shell'],
+
+  ]) {
+    const html = files['mockups/index.html'].replace('<button id="buy">', markup + '\n<button id="buy">');
+    const issues = lintScrumDoc('ux', { ...files, 'mockups/index.html': html });
+    assert.ok(issues.some(d => d.category === category && d.path === 'mockups/index.html' && d.line > 0), category);
+  }
+  const fullReplacement = files['mockups/index.html'].replace('<nav aria-label="Tabs">Home</nav>', '<div data-populated-for="catalog"><nav>Home</nav></div><div id="state-panel-catalog"></div><script>populatedWrap.hidden = true</script>');
+  assert.ok(lintScrumDoc('ux', { ...files, 'mockups/index.html': fullReplacement }).some(d => d.category === 'state-shell'));
+  assert.ok(lintScrumDoc('ux', { ...files, 'mockups/index.html': fullReplacement.replace('<button class="pay-cta">', '<nav>Checkout</nav><button class="pay-cta">') }).some(d => d.category === 'state-shell'));
+  const contextual = files['mockups/index.html'].replace('<button id="buy">', '<div data-populated-for="catalog">Products</div><div id="state-panel-catalog">Loading products</div><button id="buy">');
+  assert.deepEqual(lintScrumDoc('ux', { ...files, 'mockups/index.html': contextual }), []);
+  const sharedNav = files['mockups/index.html'].replace('<nav aria-label="Tabs">Home</nav>', '').replace('<body>', '<body><nav>Home</nav>');
+  assert.deepEqual(lintScrumDoc('ux', { ...files, 'mockups/index.html': sharedNav }), []);
+  const technical = files['mockups/index.html'].replace('Buy</button>', 'ADR-0003 PUT /api/rubric</button>');
+  assert.ok(!lintScrumDoc('ux', { ...files, 'DESIGN.md': files['DESIGN.md'] + '\nui-copy-allow: technical-identifiers', 'mockups/index.html': technical }).some(d => d.category === 'ui-copy'));
+  assert.ok(!lintScrumDoc('ux', { ...files, 'mockups/index.html': files['mockups/index.html'].replace('</body>', '<!-- ADR-0003 --><script>const internal="FR-14";</script></body>') }).some(d => d.category === 'ui-copy'));
+});
+
+test('UX and evidence lint return diagnostics for malformed submitted values', async () => {
+  const { designFiles, states } = await import('./fixtures/scrum-design.ts');
+  assert.doesNotThrow(() => lintScrumDoc('ux', { ...designFiles, 'mockups/index.html': designFiles['mockups/index.html'].replace('Buy</button>', 'Buy &#99999999999;</button>') }));
+  const report = { network: 'disabled', consoleErrors: [], viewports: [{ screen: 'catalog', width: 390, height: 844 }], states: states.map(state => ({ screen: 'catalog', state, keyboard: true, passed: true })), detector: { tool: 'impeccable', passed: true, nonAdvisoryCount: 0, viewportsChecked: {} } };
+  const diagnostics = lintScrumDoc('ui', { 'EXPERIENCE.md': '## Screen: catalog\nSurface: mobile', 'browser.json': JSON.stringify(report) });
+  assert.ok(diagnostics.some(d => d.category === 'browser-evidence' && /detector/.test(d.message)));
+  assert.ok(!diagnostics.some(d => d.category === 'json'));
+});

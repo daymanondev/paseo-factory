@@ -1,5 +1,7 @@
 /** Deterministic structural checks; semantic readiness and browser QA are separate. */
 import { designScreens, screenIdValid, DESIGN_STATES, browserCoverageIssues } from "./design-contract.ts";
+import { productChromeIssues } from "./product-chrome.ts";
+import { designTokens } from "./design-contract.ts";
 import { validateQaReport } from "./qa-bundle.ts";
 export type ScrumDocKind = "prd" | "ux" | "architecture" | "backlog" | "qa" | "ui";
 export interface Diagnostic {
@@ -127,13 +129,14 @@ export function lintScrumDoc(
     const design = prose(files["DESIGN.md"] ?? ""),
       experience = prose(files["EXPERIENCE.md"] ?? ""),
       html = files["mockups/index.html"] ?? "";
-    for (const token of ["color", "typography", "spacing", "component"]) {
-      const value = design.match(new RegExp(`\\b${token}\\s*[:|—-]\\s*([^\\n]+)`, 'i'))?.[1];
-      if (!value || /^(?:none|TODO|TBD|placeholder)\b/i.test(value))
-        add("DESIGN.md", 1, "design-token", `define non-placeholder ${token} tokens`);
+    const tokens = designTokens(design);
+    for (const [label, values] of Object.entries(tokens).filter(([key]) => ['colors', 'typography', 'spacing', 'components'].includes(key))) {
+      const legacyColor = label === 'colors' ? design.match(/\bcolor\s*[:|—-]\s*([^\n]+)/i)?.[1] : undefined;
+      if ((!Array.isArray(values) || !values.length) && !(legacyColor && !/^(?:none|TODO|TBD|placeholder)\b/i.test(legacyColor))) add('DESIGN.md', 1, 'design-token', `define non-placeholder ${label} tokens`);
     }
     const screens = designScreens(experience, files['mockups/manifest.json']);
     if (!screens.length) add('EXPERIENCE.md', 1, 'screen', 'declare at least one ## Screen: kebab-case-id');
+    issues.push(...productChromeIssues(html, design, screens));
     const seen = new Set<string>();
     for (const screen of screens) {
       if (!screenIdValid(screen.id) || seen.has(screen.id)) add('EXPERIENCE.md', screen.line, 'screen', `invalid or duplicate screen ${screen.id}`);
@@ -155,7 +158,7 @@ export function lintScrumDoc(
         "mockups/index.html",
         1,
         "html",
-        "complete HTML document and keyboard state controls required",
+        "complete HTML document and keyboard-accessible product controls required",
       );
     if (
       /(?:src|href)\s*=\s*["'](?:https?:|\/\/)|@import|url\(\s*["']?https?:|fetch\s*\(|XMLHttpRequest|WebSocket/i.test(
@@ -248,7 +251,7 @@ export function lintScrumDoc(
   }
   if (kind === 'ui' && files['browser.json']) {
     try {
-      const required = designScreens(files['EXPERIENCE.md'] ?? '').map(s => s.id);
+      const required = designScreens(files['EXPERIENCE.md'] ?? '', files['mockups/manifest.json']);
       if (!required.length) add('EXPERIENCE.md', 1, 'screen', 'UI verification requires declared screens');
       for (const message of browserCoverageIssues(JSON.parse(files['browser.json']), required)) add('browser.json', 1, 'browser-evidence', message);
     } catch { add('browser.json', 1, 'json', 'invalid browser JSON'); }

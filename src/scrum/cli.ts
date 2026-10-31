@@ -50,7 +50,7 @@ export function lintScrumDirectory(
           read(`mockups/${match[1]}`);
     const diagnostics = lintScrumDoc(kind as ScrumDocKind, files);
     if (kind === 'ui' && files['browser.json'] && !diagnostics.length) {
-      for (const message of verifyBrowserFiles(process.cwd(), JSON.parse(files['browser.json']), designScreens(files['EXPERIENCE.md']).map(s => s.id))) diagnostics.push({ path: 'browser.json', line: 1, category: 'browser-evidence', message });
+      for (const message of verifyBrowserFiles(process.cwd(), JSON.parse(files['browser.json']), designScreens(files['EXPERIENCE.md']))) diagnostics.push({ path: 'browser.json', line: 1, category: 'browser-evidence', message });
     }
     if (kind === "qa" && files["qa-report.json"] && !diagnostics.length) {
       const report = JSON.parse(files["qa-report.json"]);

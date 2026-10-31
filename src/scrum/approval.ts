@@ -1,3 +1,4 @@
+import { lintScrumDoc } from "./linter.ts";
 import { trackKind } from "./tracks.ts";
 import { designScreens, browserCoverageIssues } from "./design-contract.ts";
 import type { BrowserEvidenceReport, ScrumDesignFinding, ScreenStatuses } from "./design-contract.ts";
@@ -140,7 +141,14 @@ export function verifyBrowserEvidence(root: string, design: import("./run-journa
     const ref = design.refs.find(r => r.path.endsWith('/' + suffix));
     return ref ? gitBytes(root, 'show', `${ref.commit}:${ref.path}`).toString() : '';
   };
-  const declared = designScreens(read('EXPERIENCE.md'), read('mockups/manifest.json')).map(s => s.id);
+  const declared = designScreens(read('EXPERIENCE.md'), read('mockups/manifest.json'));
+  if (/^#{2,3}\s+Screen:/m.test(read('EXPERIENCE.md'))) {
+    const files = Object.fromEntries(design.refs.map(ref => [ref.path.slice(ref.path.indexOf('/', ref.path.indexOf('/') + 1) + 1), gitBytes(root, 'show', `${ref.commit}:${ref.path}`).toString()]));
+    // Canonical suffixes also support initiative paths nested below .scratch.
+    for (const name of ['DESIGN.md', 'EXPERIENCE.md', 'mockups/index.html', 'mockups/manifest.json']) if (read(name)) files[name] = read(name);
+    const diagnostics = lintScrumDoc('ux', files);
+    if (diagnostics.length) throw new FactoryError('browser-evidence-invalid', diagnostics.map(d => `${d.path}:${d.line} [${d.category}] ${d.message}`).join('; '));
+  }
   const reports = design.browserEvidence.filter(r => r.path.endsWith('.json'));
   if (!reports.length) throw new FactoryError('browser-evidence-required', 'structured offline browser evidence required');
   for (const ref of reports) {

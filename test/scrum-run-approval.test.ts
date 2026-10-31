@@ -522,10 +522,22 @@ test('loopback studio serves pinned artboards and records origin-protected struc
   assert.equal(stateRes.status, 200);
   assert.equal(stateRes.headers.get('access-control-allow-origin'), '*');
   const html = await (await fetch(url)).text();
-  for (const title of ['Artboard Canvas', 'Design System Kit', 'Interactive Inspect &amp; Pin Feedback']) assert.ok(html.includes(title));
+  for (const title of ['Artboard Canvas', 'Design System Kit', 'Interactive Inspect &amp; Pin Feedback', 'Auto (By Surface)', 'Review &amp; Decision', 'Interact', 'Inspect & Pin', '9:41', 'pointer-events:none']) assert.ok(html.includes(title));
   const mockup = await fetch(route('/mockup?screen=checkout&state=error'));
   assert.match(mockup.headers.get('content-security-policy') ?? '', /connect-src 'none'/);
-  assert.match(await mockup.text(), /scrum:element-picked/);
+  const mockupHtml = await mockup.text();
+  assert.match(mockupHtml, /scrum:element-picked/);
+  const { runInNewContext } = await import('node:vm');
+  const listeners: Record<string, Array<(event?: { data: unknown; source: unknown }) => void>> = {};
+  const root = { dataset: {} as Record<string, string>, style: {} };
+  const parent = {};
+  const window = { parent, addEventListener: (type: string, fn: () => void) => (listeners[type] ??= []).push(fn), dispatchEvent: (event: { data: unknown; source: unknown }) => { for (const fn of listeners.message ?? []) fn(event); } };
+  runInNewContext([...mockupHtml.matchAll(/<script>([^]*?)<\/script>/g)].at(-1)![1], { window, parent, document: { documentElement: root, addEventListener: window.addEventListener }, MessageEvent: class { constructor(_type: string, data: object) { Object.assign(this, data); } } });
+  const routes: unknown[] = [];
+  listeners.message.push(e => routes.push(e!.data));
+  for (const type of ['DOMContentLoaded', 'load']) for (const fn of listeners[type]) fn();
+  assert.deepEqual(root.dataset, { screen: 'checkout', state: 'error', viewport: 'desktop' });
+  assert.deepEqual(JSON.parse(JSON.stringify(routes)), Array(2).fill({ type: 'scrum:set-state', screen: 'checkout', state: 'error', viewport: 'desktop' }));
   const asset = await fetch(route('/asset?path=.scratch%2Fstudio%2Fmockups%2Fcheckout-mobile.png'));
   assert.match(asset.headers.get('content-type') ?? '', /image\/png/);
   assert.deepEqual(Buffer.from(await asset.arrayBuffer()), png);
@@ -574,4 +586,27 @@ test('studio injects its DOM picker into valid mockups with optional body tags o
   const url = new URL(preview.url); url.pathname = '/mockup';
   const response = await fetch(url);
   assert.match(await response.text(), /scrum:element-picked/);
+});
+
+test('surface-scoped design submission exposes structured tokens and rejects debug chrome', async t => {
+  const { designFixture, designFiles } = await import('./fixtures/scrum-design.ts');
+  const { scrumOperation } = await import('../src/scrum/controller.ts');
+  const files = {
+    'EXPERIENCE.md': designFiles['EXPERIENCE.md'].replace('## Screen: catalog', '## Screen: catalog\n- **Surface:** mobile').replace('## Screen: checkout', '## Screen: checkout\nSurface: desktop'),
+    'DESIGN.md': '---\ncolors:\n    ink: "#183153"\n    paper: "#ffffff"\ntypography:\n    body:\n      fontFamily: Georgia\n      fontSize: 16px\n      lineHeight: 1.5\nspacing:\n    xs: "4px"\n    sm: "8px"\nrounded:\n    card: "12px"\ncomponents:\n    button: "Ink background, paper text"\n---\nAn expectation gap inside a workspace is not a spacing token.\n',
+    'mockups/index.html': designFiles['mockups/index.html'].replace('<button id="buy">', '<nav>Home</nav><button id="buy">'),
+  };
+  const f = await designFixture(t, r => { r.viewports = r.viewports.filter(v => v.screen === 'catalog' ? v.width === 390 : v.width === 1280); }, files);
+  assert.equal((f.submit() as ReturnType<typeof readRun>).phase, 'awaiting-ui-approval');
+  const preview = await scrumOperation({ operation: 'preview.url', runId: f.run.runId, requestId: 'surface-preview' }, f.ctx) as { url: string };
+  const url = new URL(preview.url); url.pathname = '/api/state';
+  const model = await (await fetch(url)).json() as { screens: Array<{ surface: string }>; tokens: { colors: string[]; spacing: string[]; radius: string[]; typography: string[]; components: string[] } };
+  assert.deepEqual(model.screens.map(s => s.surface), ['mobile', 'desktop']);
+  assert.deepEqual(model.tokens.colors, ['#183153', '#ffffff']);
+  assert.deepEqual(model.tokens.spacing, ['xs: 4px', 'sm: 8px']);
+  assert.deepEqual(model.tokens.radius, ['card: 12px']);
+  assert.match(model.tokens.typography.join(), /body.*Georgia.*16px/);
+  assert.deepEqual(model.tokens.components, ['button: Ink background, paper text']);
+  const bad = await designFixture(t, undefined, { ...files, 'mockups/index.html': files['mockups/index.html'].replace('<nav>', '<button data-target-state="empty">empty</button><nav>') });
+  assert.throws(bad.submit, /debug-chrome/);
 });

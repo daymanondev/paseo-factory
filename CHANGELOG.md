@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.73] - 2026-10-31
+
+### Added
+
+- Declare mobile, desktop or responsive screen surfaces in experience artifacts and manifests; verify screenshots and Impeccable coverage at each screen's required viewports through UX, Dev and QA gates.
+- Enforce pure product chrome, consumer-facing UI copy, mobile navigation without data tables, and contextual states that preserve the app shell. Run UX lint before design review reaches the Owner.
+- Add phone and browser frames, surface-aware canvas filters, scroll-safe panning, per-artboard interaction and inspection, and a persistent Review & Decision drawer to the Design overview canvas.
+
+### Fixed
+
+- Dispatch assigned screen/state/viewport routes through the preview bridge during initialization and load to prevent artboard routing races.
+- Parse structured YAML and Markdown design tokens without collecting incidental prose as spacing, typography or component definitions.
+
 ## [0.0.72] - 2026-10-31
 
 ### Added

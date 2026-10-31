@@ -5,7 +5,7 @@ import { safePath } from './types.ts';
 import { browserCoverageIssues } from './design-contract.ts';
 import type { BrowserEvidenceReport } from './design-contract.ts';
 /** Verification used by Dev's injected Gate and QA's authoritative audit. */
-export function verifyBrowserFiles(root: string, report: BrowserEvidenceReport, screens: string[], options: { requireCleanDetector?: boolean } = {}): string[] {
+export function verifyBrowserFiles(root: string, report: BrowserEvidenceReport, screens: Array<string | Pick<import('./design-contract.ts').DesignScreen, 'id' | 'surface'>>, options: { requireCleanDetector?: boolean } = {}): string[] {
   const issues = browserCoverageIssues(report, screens, true, options);
   if (issues.length) return issues;
   for (const viewport of report.viewports) {
