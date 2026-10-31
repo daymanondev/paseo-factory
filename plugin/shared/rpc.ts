@@ -11,7 +11,7 @@
  */
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
-import { ImportMaterializationSchema, ImportStatusSchema, FactoryViewSchema, LaneNameSchema, LaneProfileViewSchema, LanesSchema, LanesUpdateSchema, ProjectViewSchema, TaskDetailViewSchema, VaultStatusViewSchema } from "./view.ts";
+import { HelperMcpViewSchema, ImportMaterializationSchema, ImportStatusSchema, FactoryViewSchema, LaneNameSchema, LaneProfileViewSchema, LanesSchema, LanesUpdateSchema, ProjectViewSchema, TaskDetailViewSchema, VaultStatusViewSchema } from "./view.ts";
 
 /** Every handler's refusal shape: a stable machine code plus the human sentence. */
 export const Failure = z.object({ ok: z.literal(false), code: z.string(), error: z.string() });
@@ -547,4 +547,15 @@ export const scrumCommand = defineRpc({
   name: "factory.scrum.command",
   input: z.object({ projectRoot: z.string().optional(), operation: z.string(), runId: z.string().optional(), requestId: z.string(), expectedRevision: z.number().int().optional(), payload: z.record(z.string(), z.unknown()).optional() }),
   output: z.union([z.object({ ok: z.literal(true), data: z.unknown() }), Failure]),
+});
+
+export const helperMcpsSyncAndProbe = defineRpc({
+  name: "factory.helper_mcps.sync_and_probe",
+  input: z.object({}),
+  output: z.union([z.object({ ok: z.literal(true), helperMcps: z.array(HelperMcpViewSchema) }), Failure]),
+});
+export const helperMcpsSetEnabled = defineRpc({
+  name: "factory.helper_mcps.set_enabled",
+  input: z.object({ name: z.string().min(1), enabled: z.boolean() }),
+  output: z.union([z.object({ ok: z.literal(true), helperMcps: z.array(HelperMcpViewSchema) }), Failure]),
 });

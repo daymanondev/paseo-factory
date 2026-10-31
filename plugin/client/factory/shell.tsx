@@ -20,7 +20,7 @@ import { Modal, ScrollView, useToast } from "@getpaseo/plugin/client/ui";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Text, View } from "react-native";
 import { z } from "zod";
-import { accept, executionSetMode, scrumCommand, lanesReset, lanesSet, lanesSetBatch, leadRotate, pluginsInstall, pluginsManage, pluginsCheckUpdates, profilesApply, profilesDelete, profilesSave, projectAdd, projectDelete, projectPickFolder, projectReset, ratifyProposal, retro, snapshot, supervisorRevoke, taskDetail, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
+import { accept, executionSetMode, scrumCommand, lanesReset, lanesSet, lanesSetBatch, leadRotate, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, profilesApply, profilesDelete, profilesSave, projectAdd, projectDelete, projectPickFolder, projectReset, ratifyProposal, retro, snapshot, supervisorRevoke, taskDetail, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
 import type { ManageablePluginId } from "../../shared/companions.ts";
 import type { FactoryView, LaneName } from "../../shared/view.ts";
 import { Btn, Card, Pill, TabBar } from "../kit/pill.tsx";
@@ -98,6 +98,8 @@ export function FactoryShell({
   const ratifyCall = useRpc(ratifyProposal);
 
   const detailCall = useRpc(taskDetail);
+  const helperMcpsSyncCall = useRpc(helperMcpsSyncAndProbe);
+  const helperMcpsEnableCall = useRpc(helperMcpsSetEnabled);
   const pluginsInstallCall = useRpc(pluginsInstall);
   const pluginsManageCall = useRpc(pluginsManage);
   const pluginsCheckUpdatesCall = useRpc(pluginsCheckUpdates);
@@ -763,6 +765,12 @@ export function FactoryShell({
             actions={{
               busy: busy || activePluginAct !== null,
               checkingUpdates,
+              syncHelpers: () => { void act("Test & Sync MCPs", async () => {
+                const reply = await helperMcpsSyncCall({});
+                if (reply.ok) setPluginsNote({ text: "Helper MCP sync and connectivity checks completed.", tone: "statusSuccess", pluginId: "all" });
+                return reply;
+              }); },
+              setHelperEnabled: (name, enabled) => { void act(enabled ? "Enable Helper MCP" : "Disable Helper MCP", () => helperMcpsEnableCall({ name, enabled })); },
               checkUpdates: () => {
                 setActivePluginAct({ kind: "check", target: "all", startedAt: Date.now() });
                 void act("Check Updates", async () => {

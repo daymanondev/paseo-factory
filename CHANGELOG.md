@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.76] - 2026-10-31
+
+### Added
+
+- Unified Peer Helper MCP catalog across Antigravity, Pi, Claude and Factory overrides, with package/endpoint deduplication, lazy Pi startup and strict coordination-seat isolation.
+- Bidirectional OAuth reconciliation, bounded refresh before Peer creation, connectivity checks and credential-free helper rosters in Lead/Peer kickoff prompts.
+- Plugins-tab Helper MCP health, enable/disable controls and Test & Sync MCPs; Private vault replication separates definitions from protected credentials.
+
+### Fixed
+
+- Give SLP Pi Peers the full installed skill catalog except `factory`, allow Supervisor domain modeling on OpenCode, and align role tool manuals with bridge capabilities.
+
 ## [0.0.75] - 2026-10-31
 
 ### Fixed

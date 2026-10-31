@@ -22,6 +22,7 @@ import { useState } from "react";
 import { Text, View } from "react-native";
 import type { CompanionCatalogEntry, ManageablePluginId } from "../../shared/companions.ts";
 import type { CompanionPluginView, CompanionStatus, FactoryView } from "../../shared/view.ts";
+import { HelperMcpsCard } from "./helper-mcps.tsx";
 import { Btn, Card, Pill } from "../kit/pill.tsx";
 import { CONTROL_H, RADIUS, SPACING, text, tint } from "../kit/theme.ts";
 import type { Colour } from "../kit/theme.ts";
@@ -56,6 +57,8 @@ export interface PluginsActions {
   manage(pluginId: ManageablePluginId | "all", action: "enable" | "disable" | "reload" | "update" | "remove"): void;
   /** Trigger an on-demand remote update check across installed plugins (v0.0.25, ADR 0012 §4). */
   checkUpdates(): void;
+  syncHelpers?(): void;
+  setHelperEnabled?(name: string, enabled: boolean): void;
   /** True while an on-demand update check is in flight. */
   checkingUpdates?: boolean;
   busy: boolean;
@@ -666,6 +669,8 @@ export function PluginsPane({
           </View>
         ) : null}
       </Card>
+
+      <HelperMcpsCard theme={theme} servers={view.helperMcps ?? []} actions={actions} />
 
       {/* Core plugin card at top, followed by the 3 Companion plugin cards */}
       <CompanionCard

@@ -1,3 +1,5 @@
+import { discoverHelperMcps } from "./core/helper-mcp-sync.ts";
+import { resolveVaultUserHome } from "./core/vault-materialization.ts";
 import { liveSeatCandidates } from "./seats.ts";
 import { bindProjectDirective } from "./execution-adapters.ts";
 import { bindScrumBlocker } from "./scrum.ts";
@@ -530,6 +532,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       projectSlug: slug,
       projectRoot: reg?.root ?? agent.cwd ?? "",
       ledgerEvents: deps.factory.ledger.events,
+      helperMcps: discoverHelperMcps({ stateDir: deps.stateDir, ...(deps.home ? { userHome: resolveVaultUserHome(deps.home) } : {}) }).servers,
       ...(loadedLanes.ok ? { lanes: loadedLanes.lanes } : {}),
     });
     kickoffSentAgentIds.add(agent.id);

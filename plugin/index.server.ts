@@ -30,9 +30,9 @@ import type { TimelineSourceApi } from "./server/timeline.ts";
 import { spoolRootFor, startSpool } from "./server/spool.ts";
 import { createSurfaceHandlers, registerSurfaceRpc } from "./server/surface-rpc.ts";
 import { createLeadMailRuntime } from "./server/lead-mailbox.ts";
-import { injectRoleOnCreate, injectSessionEnv, sanitizeAgentCreateHookResult } from "./server/roles.ts";
+import { syncPeerHelpersBeforeCreate, injectRoleOnCreate, injectSessionEnv, sanitizeAgentCreateHookResult } from "./server/roles.ts";
 
-const SHELL_VERSION = "0.0.75";
+const SHELL_VERSION = "0.0.76";
 
 const log = (message: string) => console.log(`[${PLUGIN_ID}] ${message}`);
 
@@ -158,7 +158,7 @@ export default function contribute(server: PluginServerContext) {
     capturePaseo(context);
     void choke.onPermissionAsked(event, context.paseo).catch((error) => log(`choke: permission recording deferred — ${String(error)}`));
   });
-  const offAgentCreate = server.before("agent.create", ({ request }, context) => factory.history.runOperation(() => {
+  const offAgentCreate = server.before("agent.create", ({ request }, context) => factory.history.runOperation(async () => {
     capturePaseo(context);
     refreshPluginInstallation();
     let next = request;
@@ -179,6 +179,8 @@ export default function contribute(server: PluginServerContext) {
     // creates and managed-worktree creates carry their role contract in
     // config.systemPrompt (mapped per provider by the daemon) plus their
     // PASEO_FACTORY_* env — nothing under any project root is written.
+    try { await syncPeerHelpersBeforeCreate(next, stateDir); }
+    catch { log("helpers: pre-spawn MCP sync failed; cached configuration remains available"); }
     const injected = injectRoleOnCreate(next, stateDir, undefined, surface.cachedProviders());
     if (injected !== undefined) {
       log(`roles: injected the ${injected.env?.PASEO_FACTORY_SEAT ?? "agent"} contract into the agent created in ${next.config.cwd}`);

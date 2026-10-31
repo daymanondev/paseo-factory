@@ -245,9 +245,8 @@ test("each role gets its skills policy: lead and agent filtered to role skills, 
   const agentSettings = JSON.parse(readFileSync(join(agentHome, "settings.json"), "utf8"));
   assert.deepEqual(agentSettings.skills, [
     "!*",
-    `+${join(catalogRoot, "tdd")}`,
-    `+${join(catalogRoot, "diagnosing-bugs")}`,
-    `+${join(catalogRoot, "codebase-design")}`,
+    `+${join(catalogRoot, "*")}`,
+    `-${join(catalogRoot, "factory")}`,
   ]);
   assert.deepEqual(agentSettings.extensions, ["-builtin:llama.cpp"]);
   assert.ok(existsSync(join(agentHome, "mcp.json")), "the agent still gets the sanitized mcp.json");
@@ -469,9 +468,8 @@ test("defaults resolve against the runtime home: <home>/.pi/agent and <home>/.ag
     const settings = JSON.parse(readFileSync(join(roleHome, "settings.json"), "utf8"));
     assert.deepEqual(settings.skills, [
       "!*",
-      "+~/.agents/skills/tdd",
-      "+~/.agents/skills/diagnosing-bugs",
-      "+~/.agents/skills/codebase-design",
+      "+~/.agents/skills/*",
+      "-~/.agents/skills/factory",
     ]);
   } finally {
     process.env.HOME = previousHome;
@@ -606,11 +604,13 @@ test("syncMcpJson injects zai-vision from auth.json zai.key (overriding stale ke
     args: ["-y", "@z_ai/mcp-server"],
     env: { Z_AI_API_KEY: "zai-fresh-key-999", Z_AI_MODE: "ZAI" },
     exposure: "direct",
+    lifecycle: "lazy",
     timeout: 300,
   });
   assert.deepEqual(mcp.mcpServers.exa, {
     url: "https://mcp.exa.ai/mcp?exaApiKey=exa-key-123",
     exposure: "direct",
+    lifecycle: "lazy",
   });
 });
 
@@ -643,4 +643,169 @@ test("coordination homes isolate MCP servers and every role sets the bridge time
       assert.deepEqual(Object.keys(mcpServers), ["paseo_factory"]);
     }
   }
+});
+
+test("Peer merges harness MCP aliases, honors disabled sources and starts helpers lazily", (t) => {
+  const dir = makeTempDir(); disposeDir(t, dir);
+  const userHome = join(dir, "user"), stateDir = join(dir, "state"), source = join(userHome, ".pi/agent");
+  mkdirSync(source, { recursive: true }); mkdirSync(join(userHome, ".gemini/config"), { recursive: true });
+  writeFileSync(join(source, "mcp.json"), JSON.stringify({ mcpServers: {
+    "chrome-devtools": { command: "npx", args: ["-y", "chrome-devtools-mcp"] },
+    "zai-vision": { command: "npx", args: ["-y", "@z_ai/mcp-server"], env: { Z_AI_API_KEY: "valid" } },
+  } }));
+  writeFileSync(join(userHome, ".gemini/config/mcp_config.json"), JSON.stringify({ mcpServers: {
+    "chrome-devtools-mcp": { command: "npx", args: ["chrome-devtools-mcp"] },
+    "zai-mcp-server": { command: "npx", args: ["@z_ai/mcp-server"], env: { Z_AI_API_KEY: "" } },
+    StitchMCP: { serverUrl: "https://example.invalid/mcp", disabled: true },
+  } }));
+  const home = provisionPiAgentHome({ stateDir, role: "agent", sourceAgentDir: source, helperMcpSources: { userHome } });
+  const servers = JSON.parse(readFileSync(join(home, "mcp.json"), "utf8")).mcpServers;
+  assert.deepEqual(Object.keys(servers).sort(), ["chrome-devtools-mcp", "paseo_factory", "zai-vision"]);
+  assert.equal(servers["zai-vision"].env.Z_AI_API_KEY, "valid");
+  assert.equal(servers["zai-vision"].timeout, 300);
+  assert.equal(servers["chrome-devtools-mcp"].lifecycle, "lazy");
+  assert.equal(servers.paseo_factory.lifecycle, undefined);
+  assert.deepEqual(JSON.parse(readFileSync(join(home, "settings.json"), "utf8")).skills,
+    ["!*", "+~/.agents/skills/*", "-~/.agents/skills/factory"]);
+  for (const role of ["supervisor", "lead"] as const) {
+    const seatHome = provisionPiAgentHome({ stateDir, role, sourceAgentDir: source, helperMcpSources: { userHome } });
+    assert.deepEqual(Object.keys(JSON.parse(readFileSync(join(seatHome, "mcp.json"), "utf8")).mcpServers), ["paseo_factory"]);
+  }
+});
+
+test("OAuth sync selects the newest harness token, refreshes it and authenticates every Peer provider", async (t) => {
+  const { createServer } = await import("node:http");
+  const { syncHelperMcps, helperOAuthPath, resolveRoleScopedMcpServers } = await import("../src/helper-mcp-sync.ts");
+  const { statSync } = await import("node:fs");
+  const dir = makeTempDir(); disposeDir(t, dir);
+  let refreshBody = "";
+  const server = createServer(async (req, res) => {
+    for await (const chunk of req) refreshBody += chunk;
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ access_token: "refreshed-token", refresh_token: "rotated-refresh", expires_in: 3600 }));
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  const address = server.address(); assert.ok(address && typeof address !== "string");
+  const origin = `http://127.0.0.1:${address.port}`, url = `${origin}/mcp`;
+  const userHome = join(dir, "user"), stateDir = join(dir, "state"), pi = join(userHome, ".pi/agent");
+  mkdirSync(pi, { recursive: true }); mkdirSync(join(userHome, ".gemini/antigravity"), { recursive: true });
+  writeFileSync(join(pi, "mcp.json"), JSON.stringify({ mcpServers: { supabase: { url } } }));
+  const agPath = join(userHome, ".gemini/antigravity/mcp_oauth_tokens.json");
+  writeFileSync(agPath, JSON.stringify({ [url]: { client_id: "client", token_url: `${origin}/token`, token: { access_token: "ag-token", refresh_token: "ag-refresh", expiry: new Date(Date.now() + 60000).toISOString() } } }));
+  const piToken = helperOAuthPath(pi, "supabase"); mkdirSync(join(piToken, ".."), { recursive: true });
+  writeFileSync(piToken, JSON.stringify({ serverUrl: url, tokens: { accessToken: "old-pi", expiresAt: 1 } }));
+  const options = { stateDir, userHome };
+  const result = await syncHelperMcps(options);
+  assert.equal(result.servers[0].status, "connected");
+  assert.match(refreshBody, /refresh_token=ag-refresh/);
+  for (const path of [piToken, helperOAuthPath(join(stateDir, "pi-agent/agent"), "supabase")]) {
+    const token = JSON.parse(readFileSync(path, "utf8"));
+    assert.equal(token.tokens.accessToken, "refreshed-token");
+    assert.equal(token.tokens.refreshToken, "rotated-refresh");
+    assert.equal(statSync(path).mode & 0o777, 0o600);
+  }
+  assert.equal(JSON.parse(readFileSync(agPath, "utf8"))[url].token.access_token, "refreshed-token");
+  const sourceConfig = JSON.parse(readFileSync(join(pi, "mcp.json"), "utf8"));
+  sourceConfig.mcpServers.supabase.headers = { authorization: "Bearer stale" };
+  writeFileSync(join(pi, "mcp.json"), JSON.stringify(sourceConfig));
+  const config = resolveRoleScopedMcpServers({ ...options, role: "agent" }) as any;
+  assert.deepEqual(config.supabase.headers, { Authorization: "Bearer refreshed-token" });
+  assert.deepEqual(resolveRoleScopedMcpServers({ ...options, role: "lead" }), {});
+  const newer = { serverUrl: url, tokens: { accessToken: "new-pi", expiresAt: Math.floor(Date.now() / 1000) + 7200 } };
+  writeFileSync(piToken, JSON.stringify(newer));
+  await syncHelperMcps(options);
+  assert.equal(JSON.parse(readFileSync(agPath, "utf8"))[url].token.access_token, "new-pi");
+});
+
+test("Catalog prefers authenticated endpoints and detects expired OAuth despite a stale header", async (t) => {
+  const { discoverHelperMcps } = await import("../src/helper-mcp-sync.ts");
+  const dir = makeTempDir(); disposeDir(t, dir);
+  const userHome = join(dir, "user"), stateDir = join(dir, "state");
+  mkdirSync(join(userHome, ".gemini/config"), { recursive: true }); mkdirSync(join(userHome, ".gemini/antigravity"), { recursive: true });
+  mkdirSync(join(userHome, ".pi/agent"), { recursive: true });
+  writeFileSync(join(userHome, ".gemini/config/mcp_config.json"), JSON.stringify({ mcpServers: {
+    docs: { serverUrl: "https://docs.invalid/authenticated" },
+    duplicate: { serverUrl: "https://same.invalid/mcp" },
+  } }));
+  writeFileSync(join(userHome, ".pi/agent/mcp.json"), JSON.stringify({ mcpServers: {
+    docs: { url: "https://docs.invalid/unauthenticated" },
+    same: { url: "https://same.invalid/mcp/" },
+    expired: { url: "https://expired.invalid/mcp", headers: { Authorization: "Bearer old" } },
+    figma: { command: "npx", args: ["framelink-figma", "--figma-api-key", "--stdio"] },
+  } }));
+  writeFileSync(join(userHome, ".gemini/antigravity/mcp_oauth_tokens.json"), JSON.stringify({
+    "https://docs.invalid/authenticated": { token: { access_token: "valid", expiry: new Date(Date.now() + 3600000).toISOString() } },
+    "https://expired.invalid/mcp": { token: { access_token: "expired", expiry: "2020-01-01T00:00:00Z" } },
+  }));
+  const { servers } = discoverHelperMcps({ stateDir, userHome });
+  assert.equal(servers.find(s => s.name === "docs")?.url, "https://docs.invalid/authenticated");
+  assert.equal(servers.filter(s => s.url?.startsWith("https://same.invalid")).length, 1);
+  assert.equal(servers.find(s => s.name === "expired")?.status, "auth_expired");
+  assert.equal(servers.find(s => s.name === "figma")?.status, "missing_env");
+});
+
+test("OAuth sync retains registered client metadata and refuses to overwrite a damaged store", async (t) => {
+  const { syncHelperMcps, helperOAuthPath } = await import("../src/helper-mcp-sync.ts");
+  const dir = makeTempDir(); disposeDir(t, dir);
+  const userHome = join(dir, "user"), stateDir = join(dir, "state"), pi = join(userHome, ".pi/agent");
+  mkdirSync(pi, { recursive: true }); mkdirSync(join(userHome, ".gemini/antigravity"), { recursive: true });
+  const url = "https://mcp.supabase.com/mcp";
+  writeFileSync(join(pi, "mcp.json"), JSON.stringify({ mcpServers: { supabase: { url } } }));
+  const ag = join(userHome, ".gemini/antigravity/mcp_oauth_tokens.json");
+  writeFileSync(ag, JSON.stringify({ [url]: { token: { access_token: "newest", expiry: new Date(Date.now() + 7200000).toISOString() } } }));
+  const tokenFile = helperOAuthPath(pi, "supabase"); mkdirSync(join(tokenFile, ".."), { recursive: true });
+  writeFileSync(tokenFile, JSON.stringify({ serverUrl: url, clientInfo: { clientId: "registered-client", clientSecret: "registered-secret" }, tokens: { accessToken: "older", expiresAt: Math.floor(Date.now() / 1000) + 3600 } }));
+  await syncHelperMcps({ stateDir, userHome });
+  assert.equal(JSON.parse(readFileSync(tokenFile, "utf8")).clientInfo.clientId, "registered-client");
+  assert.equal(JSON.parse(readFileSync(tokenFile, "utf8")).clientInfo.clientSecret, "registered-secret");
+  writeFileSync(ag, '{"unrelated":');
+  await assert.rejects(syncHelperMcps({ stateDir, userHome }));
+  assert.equal(readFileSync(ag, "utf8"), '{"unrelated":');
+});
+
+test("Fresh host keys replace cached catalog credentials and prior OAuth without access is expired", async (t) => {
+  const { syncHelperMcps, discoverHelperMcps, resolveRoleScopedMcpServers } = await import("../src/helper-mcp-sync.ts");
+  const dir = makeTempDir(); disposeDir(t, dir);
+  const userHome = join(dir, "user"), stateDir = join(dir, "state"), pi = join(userHome, ".pi/agent");
+  mkdirSync(pi, { recursive: true }); mkdirSync(join(userHome, ".gemini/antigravity"), { recursive: true });
+  const write = (key: string) => writeFileSync(join(pi, "mcp.json"), JSON.stringify({ mcpServers: { exa: { command: "npx", env: { EXA_API_KEY: key } }, notion: { url: "https://notion.invalid/mcp" } } }));
+  write("old-key");
+  writeFileSync(join(userHome, ".gemini/antigravity/mcp_oauth_tokens.json"), JSON.stringify({ "https://notion.invalid/mcp": { client_id: "client", token: {} } }));
+  await syncHelperMcps({ stateDir, userHome });
+  write("new-key");
+  assert.equal((resolveRoleScopedMcpServers({ stateDir, userHome, role: "agent" }) as any).exa.env.EXA_API_KEY, "new-key");
+  assert.equal(discoverHelperMcps({ stateDir, userHome }).servers.find(s => s.name === "notion")?.status, "auth_expired");
+});
+
+test("OAuth metadata never erases a working token or combines different client registrations", async (t) => {
+  const { syncHelperMcps, helperOAuthPath } = await import("../src/helper-mcp-sync.ts");
+  const { createServer } = await import("node:http");
+  const dir = makeTempDir(); disposeDir(t, dir);
+  const userHome = join(dir, "user"), stateDir = join(dir, "state"), pi = join(userHome, ".pi/agent");
+  mkdirSync(pi, { recursive: true }); mkdirSync(join(userHome, ".gemini/antigravity"), { recursive: true });
+  let refreshRequests = 0;
+  const server = createServer((_req, res) => { refreshRequests++; res.end('{}'); });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve)); t.after(() => server.close());
+  const address = server.address(); assert.ok(address && typeof address !== "string");
+  const url = `http://127.0.0.1:${address.port}/mcp`;
+  const ag = join(userHome, ".gemini/antigravity/mcp_oauth_tokens.json"), tokenFile = helperOAuthPath(pi, "helper");
+  writeFileSync(join(pi, "mcp.json"), JSON.stringify({ mcpServers: { helper: { url } } }));
+  mkdirSync(join(tokenFile, ".."), { recursive: true });
+  writeFileSync(tokenFile, JSON.stringify({ serverUrl: url, tokens: { accessToken: "working-no-expiry" } }));
+  writeFileSync(ag, JSON.stringify({ [url]: { token: {} } }));
+  const first = await syncHelperMcps({ stateDir, userHome });
+  assert.equal(first.servers[0].status, "connected");
+  assert.equal(JSON.parse(readFileSync(tokenFile, "utf8")).tokens.accessToken, "working-no-expiry");
+  // Separate state avoids retaining the non-expiring token in the aggregate.
+  const otherState = join(dir, "other-state");
+  writeFileSync(tokenFile, JSON.stringify({ serverUrl: url, clientInfo: { clientId: "client-B", clientSecret: "secret-B" }, tokenUrl: `http://127.0.0.1:${address.port}/token`, tokens: { accessToken: "old-B", refreshToken: "refresh-B", expiresAt: 1 } }));
+  writeFileSync(ag, JSON.stringify({ [url]: { client_id: "client-A", token: { access_token: "newer-A", expiry: "2020-01-01T00:00:00Z" } } }));
+  const result = await syncHelperMcps({ stateDir: otherState, userHome });
+  assert.equal(result.servers[0].status, "auth_expired");
+  assert.equal(refreshRequests, 0);
+  const saved = JSON.parse(readFileSync(tokenFile, "utf8"));
+  assert.equal(saved.clientInfo.clientId, "client-A");
+  assert.equal(saved.clientInfo.clientSecret, undefined);
+  assert.equal(saved.tokens.refreshToken, undefined);
 });

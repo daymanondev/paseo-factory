@@ -1,3 +1,5 @@
+import { renderHelperMcpRoster } from "./helper-mcp-sync.ts";
+import type { HelperMcpServerEntry } from "./helper-mcp-sync.ts";
 /**
  * Unified role contracts and seat bootstrap prompts (v0.0.23, ADR 0015 §1–§4):
  * the single pure-Node source of truth shared by `plugin/server/roles.ts`
@@ -255,4 +257,9 @@ export function renderRoleAppendSystem(role: RoleName, options?: RoleContractOpt
     renderRoleContract(role, effectiveOptions),
     "",
   ].join("\n");
+}
+
+/** Dynamic, credential-free capabilities accompany the immutable role contract. */
+export function buildRoleKickoffPrompt(role: RoleName, options: RoleContractOptions & { helperMcps?: Array<Pick<HelperMcpServerEntry, "name" | "transport" | "enabled" | "status">> } = {}): string {
+  return [renderRoleContract(role, options), ...(role === "lead" || role === "agent" ? [renderHelperMcpRoster(options.helperMcps ?? [])] : [])].join("\n\n");
 }

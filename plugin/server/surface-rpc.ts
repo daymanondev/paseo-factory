@@ -1,3 +1,5 @@
+import { discoverHelperMcps, helperMcpRoster, setHelperMcpEnabled, syncHelperMcps } from "./core/helper-mcp-sync.ts";
+import { provisionPiAgentHome } from "./core/pi-home.ts";
 import { pluginDirFor } from "./paths.ts";
 import { liveSeatCandidates, seatCandidates } from "./seats.ts";
 import { checkProjectResetRepository, resetProjectRepository } from "./project-reset.ts";
@@ -83,6 +85,8 @@ import {
   leadDispatch,
   leadEnsure,
   leadRotate,
+  helperMcpsSyncAndProbe,
+  helperMcpsSetEnabled,
   pluginsCheckUpdates,
   pluginsInstall,
   pluginsManage,
@@ -2206,6 +2210,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           tasks: enrichTaskPeerAgents(view.tasks, rawAgents),
           machineLanes: machineLanes.lanes,
           companionTools: buildCompanionToolsView(),
+          helperMcps: helperMcpRoster(discoverHelperMcps({ stateDir: deps.stateDir, userHome: resolveSurfaceUserHome() }).servers),
           ...laneProfilesGather(enrichedProject?.slug, view.lanes),
         },
       };
@@ -3242,6 +3247,27 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       return { ok: true as const, pluginId: input.pluginId, action: input.action, summary };
     },
 
+    async helperMcpsSyncAndProbe(_input: Record<string, never>) {
+      return serializeSeat("helper-mcps", async () => {
+        try {
+          const options = { stateDir: deps.stateDir, userHome: resolveSurfaceUserHome() };
+          const result = await syncHelperMcps({ ...options, probe: true });
+          provisionPiAgentHome({ stateDir: deps.stateDir, role: "agent", sourceAgentDir: join(options.userHome, ".pi/agent"), helperMcpSources: options });
+          return { ok: true as const, helperMcps: helperMcpRoster(result.servers) };
+        } catch { return failure("helper-mcp-sync-failed", "Helper MCP sync could not complete; check host configuration permissions"); }
+      });
+    },
+    async helperMcpsSetEnabled(input: { name: string; enabled: boolean }) {
+      return serializeSeat("helper-mcps", async () => {
+        try {
+          const options = { stateDir: deps.stateDir, userHome: resolveSurfaceUserHome() };
+          const result = setHelperMcpEnabled(options, input.name, input.enabled);
+          provisionPiAgentHome({ stateDir: deps.stateDir, role: "agent", sourceAgentDir: join(options.userHome, ".pi/agent"), helperMcpSources: options });
+          return { ok: true as const, helperMcps: helperMcpRoster(result.servers) };
+        } catch { return failure("helper-mcp-toggle-failed", "Helper MCP toggle failed; server may no longer exist or configuration is not writable"); }
+      });
+    },
+
     async pluginsCheckUpdates(
       _input: Record<string, never>,
       _context?: SurfaceCallContext,
@@ -3495,6 +3521,8 @@ export function registerSurfaceRpc(
   server.handle(ratifyProposal, (input, context) => handlers.ratifyProposal(input, pass(context)));
   server.handle(pluginsInstall, (input, context) => handlers.pluginsInstall(input, pass(context)));
   server.handle(pluginsManage, (input, context) => handlers.pluginsManage(input, pass(context)));
+  server.handle(helperMcpsSyncAndProbe, (input, context) => { pass(context); return handlers.helperMcpsSyncAndProbe(input); });
+  server.handle(helperMcpsSetEnabled, (input, context) => { pass(context); return handlers.helperMcpsSetEnabled(input); });
   server.handle(pluginsCheckUpdates, (input, context) => handlers.pluginsCheckUpdates(input, pass(context)));
   server.handle(vaultConfigure, (input, context) => handlers.vaultConfigure(input, pass(context)));
   server.handle(vaultHydrate, (input, context) => handlers.vaultHydrate(input, pass(context)));

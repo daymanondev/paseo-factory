@@ -407,6 +407,14 @@ export const ExecutionViewSchema = z.object({
 });
 export type ExecutionView = z.infer<typeof ExecutionViewSchema>;
 
+/** Credential-free Helper MCP status displayed to the Owner and coordination seats. */
+export const HelperMcpViewSchema = z.object({
+  name: z.string(), transport: z.enum(["stdio", "http"]), enabled: z.boolean(),
+  sources: z.array(z.enum(["antigravity", "pi", "claude", "vault", "factory"])),
+  status: z.enum(["connected", "auth_expired", "missing_env", "unreachable", "disabled"]),
+  statusDetail: z.string().optional(), oauthExpiresAt: z.number().optional(),
+});
+
 export const FactoryViewSchema = z.object({
   execution: ExecutionViewSchema.optional(),
   version: z.literal(FACTORY_VIEW_VERSION),
@@ -444,6 +452,7 @@ export const FactoryViewSchema = z.object({
   companions: z.array(CompanionPluginViewSchema),
   /** Host-level companion tools & skill packs (`impeccable`, `factory-skills-pack`) inspected per snapshot (ADR 0036 §5). */
   companionTools: z.array(CompanionPluginViewSchema).optional(),
+  helperMcps: z.array(HelperMcpViewSchema).optional(),
   /** ISO timestamp of the last on-demand plugin update check for this daemon home — null when not yet checked (v0.0.25, ADR 0012 §4). */
   pluginsCheckedAt: z.string().nullable(),
   /**

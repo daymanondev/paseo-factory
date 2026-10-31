@@ -187,7 +187,7 @@ test("bridge.mjs exposes strictly role-scoped tools in tools/list and enforces r
       ],
     });
     const supTools = ((supResponses[1].result as { tools: Array<{ name: string }> }).tools).map((t) => t.name).sort();
-    assert.deepEqual(supTools, ["supervisor_dispatch_lead", "supervisor_end_cycle", "supervisor_read_ledger"]);
+    assert.deepEqual(supTools, ["supervisor_accept_task", "supervisor_dispatch_lead", "supervisor_end_cycle", "supervisor_read_ledger"]);
     const supIllegalCall = supResponses[2].result as { isError?: boolean; content: Array<{ text: string }> };
     assert.equal(supIllegalCall.isError, true);
     assert.match(supIllegalCall.content[0].text, /not permitted|unauthorized|role/i);
@@ -203,7 +203,7 @@ test("bridge.mjs exposes strictly role-scoped tools in tools/list and enforces r
       ],
     });
     const leadTools = ((leadResponses[1].result as { tools: Array<{ name: string }> }).tools).map((t) => t.name).sort();
-    assert.deepEqual(leadTools, ["lead_create_worktree", "lead_dispatch_agent", "lead_merge", "lead_remove_worktree", "lead_report_to_supervisor", "lead_set_contract", "lead_verify"]);
+    assert.deepEqual(leadTools, ["lead_create_worktree", "lead_dispatch_agent", "lead_merge", "lead_needs_human", "lead_remove_worktree", "lead_repoke_agent", "lead_report_to_supervisor", "lead_set_contract", "lead_verify"]);
 
     // 3. Working Agent session
     const agentResponses = await runMcpSession({
@@ -678,8 +678,9 @@ test("MCP Lead acceptance binds its authenticated role despite forged attributio
     requests: [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "supervisor_accept_task", arguments: { task: "mcp-bound", attempt: 1 } } }],
   });
   const accepted = allowed[0]!.result as { isError?: boolean; content: Array<{ text: string }> };
-  assert.equal(accepted.isError, true);
-  assert.match(accepted.content[0]!.text, /not permitted/);
+  assert.notEqual(accepted.isError, true);
+  const acceptance = factory.ledger.eventsFor("mcp-bound").find(event => event.event === "attempt_accepted");
+  assert.equal(acceptance?.accepted_by, "supervisor");
 });
 
 test("bridge lead_dispatch_agent resolves real system git and ignores a broken <stateDir>/bin/git shim on PATH", async (t) => {

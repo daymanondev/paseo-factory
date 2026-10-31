@@ -1,3 +1,4 @@
+import { collectHelperMcpVault, hydrateHelperMcpVault } from "./helper-mcp-vault.ts";
 import { collectScrumVault, collectProjectScrumVault, materializeScrumVault, materializeProjectScrumVault } from "./scrum/vault.ts";
 import { ensureProviderSkillSymlinks, IMPECCABLE_MIN_VERSION, inspectImpeccableTool } from "./scrum/impeccable.ts";
 import { FactoryError } from "./errors.ts";
@@ -571,6 +572,7 @@ export function materializeVaultSkillsFromRuntime(
 
 export function collectLocalStateIntoRuntime(paseoHome: string, options?: { userHome?: string }): void {
   const stateDir = vaultStateDir(paseoHome);
+  collectHelperMcpVault({ stateDir, userHome: resolveVaultUserHome(paseoHome, options?.userHome) }, join(paseoHome, "vault-runtime"));
   collectScrumVault(stateDir, join(paseoHome, "vault-runtime/config"));
   collectVaultSkillsIntoRuntime(paseoHome, options?.userHome);
   const configSources: ReadonlyArray<{ src: string; vaultRel: string }> = [
@@ -717,6 +719,7 @@ export function materializeConfigsFromRuntime(
   options?: { userHome?: string },
 ): void {
   const runtimeConfigDir = join(paseoHome, "vault-runtime", "config");
+  hydrateHelperMcpVault({ stateDir: vaultStateDir(paseoHome), userHome: resolveVaultUserHome(paseoHome, options?.userHome) }, join(paseoHome, "vault-runtime"), overwriteConfigs);
   materializeScrumVault(vaultStateDir(paseoHome), runtimeConfigDir, overwriteConfigs);
   materializeVaultSkillsFromRuntime(paseoHome, overwriteConfigs, options?.userHome);
   const targets: ReadonlyArray<{ src: string; dest: string }> = [

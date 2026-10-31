@@ -2,8 +2,8 @@ import { test } from "node:test";
 import type { TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { cpSync, chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { gzipSync } from "node:zlib";
 import {
@@ -1990,4 +1990,41 @@ test("ADR 0036: collectLocalStateIntoRuntime collects ~/.agents/skills (excludin
   assert.equal(readFileSync(join(machineB, ".pi/agent/skills/tdd/SKILL.md"), "utf8"), "# TDD Skill\n");
   assert.equal(readFileSync(join(machineB, ".claude/skills/tdd/SKILL.md"), "utf8"), "# TDD Skill\n");
   assert.equal(readFileSync(join(machineB, ".gemini/config/skills/tdd/SKILL.md"), "utf8"), "# TDD Skill\n");
+});
+
+test("Private vault replicates Helper MCP definitions separately from keys and OAuth", async (t) => {
+  const dir = makeTempDir(); disposeDir(t, dir);
+  const source = join(dir, "source"), target = join(dir, "target");
+  const state = join(source, "plugin-state/paseo-factory"), targetState = join(target, "plugin-state/paseo-factory");
+  mkdirSync(state, { recursive: true });
+  const expiresAt = Math.floor(Date.now() / 1000) + 3600;
+  writeFileSync(join(state, "helper-mcps.json"), JSON.stringify({ servers: [
+    { name: "exa", transport: "stdio", command: "npx", args: ["exa-mcp-server"], env: { EXA_API_KEY: "secret-exa" }, enabled: true, sources: ["pi"] },
+    { name: "supabase", transport: "http", url: "https://mcp.supabase.com/mcp", enabled: true, sources: ["antigravity"] },
+  ], overrides: { exa: false } }));
+  writeFileSync(join(state, "helper-mcp-oauth.json"), JSON.stringify({ supabase: { serverUrl: "https://mcp.supabase.com/mcp", tokens: { accessToken: "secret-access", refreshToken: "secret-refresh", expiresAt } } }));
+  collectLocalStateIntoRuntime(source, { userHome: source });
+  const definition = readFileSync(join(source, "vault-runtime/config/helper-mcps.json"), "utf8");
+  assert.doesNotMatch(definition, /secret-exa|secret-access|secret-refresh/);
+  const secrets = readFileSync(join(source, "vault-runtime/secrets/shared/mcp-oauth.json"), "utf8");
+  assert.match(secrets, /secret-exa/); assert.match(secrets, /secret-access/);
+  cpSync(join(source, "vault-runtime"), join(target, "vault-runtime"), { recursive: true });
+  mkdirSync(join(target, ".pi/agent"), { recursive: true });
+  writeFileSync(join(target, ".pi/agent/mcp.json"), JSON.stringify({ mcpServers: { exa: { command: "npx", args: ["exa-mcp-server"], env: { EXA_API_KEY: "" } } } }));
+  applyVaultHydration(target, false, { userHome: target });
+  const restored = JSON.parse(readFileSync(join(targetState, "helper-mcps.json"), "utf8"));
+  assert.equal(restored.servers.find((s: any) => s.name === "exa").env.EXA_API_KEY, "secret-exa");
+  assert.equal(restored.overrides.exa, false);
+  assert.ok(restored.servers.find((s: any) => s.name === "supabase").sources.includes("vault"));
+  assert.equal(JSON.parse(readFileSync(join(targetState, "helper-mcp-oauth.json"), "utf8")).supabase.tokens.accessToken, "secret-access");
+  assert.equal(statSync(join(target, "vault-runtime/secrets/shared/mcp-oauth.json")).mode & 0o777, 0o600);
+  const piToken = join(target, ".pi/agent/mcp-oauth", `sha256-${createHash("sha256").update("supabase").digest("hex")}`, "tokens.json");
+  assert.equal(JSON.parse(readFileSync(piToken, "utf8")).tokens.accessToken, "secret-access");
+  assert.equal(statSync(piToken).mode & 0o777, 0o600);
+  saveVaultConfig(source, { repo: makeBareRemote(t), nodeId: "mcp-source" });
+  await pushVault(source);
+  const staged = readFileSync(join(source, "vault/secrets/shared/mcp-oauth.json"));
+  assert.doesNotMatch(staged.toString(), /secret-exa|secret-access|secret-refresh/);
+  assert.match(unsealVaultBuffer(staged, undefined).toString(), /secret-access/);
+
 });

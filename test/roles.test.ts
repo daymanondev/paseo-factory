@@ -233,7 +233,7 @@ test("injectRoleOnCreate wires Layer-1 provider fence, paseo_factory MCP, and co
         edit: "deny",
         task: "deny",
         bash: "ask",
-        skill: { "*": "deny", grilling: "allow" },
+        skill: { "*": "deny", grilling: "allow", "domain-modeling": "allow" },
       });
       const hyphenMcp = (res.config.mcpServers as Record<string, { command: string; args: string[] }>)?.["paseo-factory"];
       assert.ok(hyphenMcp !== undefined, "opencode also receives config.mcpServers['paseo-factory'] to survive bridge-plugin.mjs");
@@ -501,7 +501,7 @@ test("injectRoleOnCreate recognizes factory-supervisor by provider id alone — 
     edit: "deny",
     task: "deny",
     bash: "ask",
-    skill: { "*": "deny", grilling: "allow" },
+    skill: { "*": "deny", grilling: "allow", "domain-modeling": "allow" },
   });
   // paseo_factory MCP (plus paseo-factory alias for OpenCode v2 bridge-plugin.mjs) with Node mode and the correlation token.
   const mcp = (res.config.mcpServers as Record<string, { env: Record<string, string>; args: string[] }>).paseo_factory;
@@ -1166,4 +1166,29 @@ test("injectSessionEnv materializes an empty directory stub when resuming an arc
     true,
     "injectSessionEnv creates an empty directory stub at the removed Task worktree path on resume/history so spawn('pi', ..., { cwd }) succeeds",
   );
+});
+
+test("Peer create refreshes shared OAuth before provider fencing; coordination seats keep only Factory", async (t) => {
+  const { syncPeerHelpersBeforeCreate } = await import("../plugin/server/roles.ts");
+  const { selectCatalog } = await import("../src/mcp/catalog.ts");
+  const dir = makeTempDir(); disposeDir(t, dir);
+  const userHome = join(dir, "user"), stateDir = join(dir, "state");
+  mkdirSync(join(userHome, ".gemini/config"), { recursive: true });
+  mkdirSync(join(userHome, ".gemini/antigravity"), { recursive: true });
+  const url = "https://mcp.supabase.com/mcp";
+  writeFileSync(join(userHome, ".gemini/config/mcp_config.json"), JSON.stringify({ mcpServers: { supabase: { serverUrl: url } } }));
+  writeFileSync(join(userHome, ".gemini/antigravity/mcp_oauth_tokens.json"), JSON.stringify({ [url]: { token: { access_token: "valid-test-token", expiry: new Date(Date.now() + 3600000).toISOString() } } }));
+  await syncPeerHelpersBeforeCreate({ config: { provider: "factory-peer", cwd: dir } }, stateDir, userHome);
+  for (const provider of ["claude", "codex", "opencode", "pi"]) for (const role of ["agent", "lead", "supervisor"] as const) {
+    const result = applyProviderExecutionFence({ provider, cwd: dir, mcpServers: { stray: { command: "unused" } } }, { stateDir, userHome, role, projectSlug: "repo", correlationId: "test" });
+    const servers = result.mcpServers as any;
+    assert.equal(servers.stray, undefined);
+    if (role === "agent") assert.equal(servers.supabase.headers.Authorization, "Bearer valid-test-token");
+    else assert.equal(servers.supabase, undefined);
+    if (role === "supervisor" && provider === "opencode") assert.equal((result as any).providerOptions.permission.skill["domain-modeling"], "allow");
+  }
+  const catalog = selectCatalog("slp");
+  assert.ok(catalog.roles.supervisor.includes("supervisor_accept_task"));
+  assert.ok(catalog.roles.lead.includes("lead_repoke_agent"));
+  assert.ok(catalog.roles.lead.includes("lead_needs_human"));
 });

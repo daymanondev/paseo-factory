@@ -193,8 +193,8 @@ export const sharedTools: Record<string, ToolDefinition> = {
 
 
 export const sharedRoles = {
-  supervisor: ["supervisor_dispatch_lead", "supervisor_read_ledger", "supervisor_end_cycle"],
-  lead: ["lead_create_worktree", "lead_set_contract", "lead_dispatch_agent", "lead_verify", "lead_merge", "lead_remove_worktree", "lead_report_to_supervisor"],
+  supervisor: ["supervisor_accept_task", "supervisor_dispatch_lead", "supervisor_read_ledger", "supervisor_end_cycle"],
+  lead: ["lead_repoke_agent", "lead_needs_human", "lead_create_worktree", "lead_set_contract", "lead_dispatch_agent", "lead_verify", "lead_merge", "lead_remove_worktree", "lead_report_to_supervisor"],
   agent: ["agent_claim", "agent_escalate_blocker"],
   unbound: ["factory_dispatch_supervisor", "factory_status"],
 };

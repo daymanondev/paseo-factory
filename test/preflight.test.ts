@@ -23,3 +23,14 @@ test("kickoff and Scrum prompts report present and absent project memory", t => 
     if (role === "supervisor") assert.match(prompt, /supervisor_scrum_decision/);
   }
 });
+
+test("Lead kickoff describes Peer helpers and warns before dispatch with missing credentials", async (t) => {
+  const { buildRoleKickoffPrompt } = await import("../src/roles-contract.ts");
+  const dir = makeTempDir(); disposeDir(t, dir);
+  const helperMcps = [{ name: "supabase", transport: "http" as const, status: "auth_expired" as const, enabled: true }];
+  const packet = buildSeatKickoffPacket({ role: "lead", projectSlug: "repo", projectRoot: dir, ledgerEvents: [], helperMcps });
+  assert.match(packet, /Available Peer Helper MCPs/);
+  assert.match(packet, /supabase \[http · auth_expired\]/);
+  assert.match(packet, /WARNING/);
+  for (const role of ["lead", "agent"] as const) assert.match(buildRoleKickoffPrompt(role, { helperMcps }), /supabase \[http · auth_expired\]/);
+});

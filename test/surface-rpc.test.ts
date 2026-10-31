@@ -1401,7 +1401,7 @@ test("roles: agent.create injection launches every seat and working agent in its
   assert.ok(!("skills" in JSON.parse(readFileSync(join(stateDir, "pi-agent", "supervisor", "settings.json"), "utf8"))), "supervisor skills unfiltered");
   assert.deepEqual(
     JSON.parse(readFileSync(join(stateDir, "pi-agent", "agent", "settings.json"), "utf8")),
-    cleanRoomSettings({ skills: ["!*", "+~/.agents/skills/tdd", "+~/.agents/skills/diagnosing-bugs", "+~/.agents/skills/codebase-design"] }),
+    cleanRoomSettings({ skills: ["!*", "+~/.agents/skills/*", "-~/.agents/skills/factory"] }),
   );
 });
 
@@ -6357,3 +6357,32 @@ test("ADR 0036: snapshot surfaces companionTools (impeccable + factory-skills-pa
 
 
 
+
+test("Helper MCP surface sync probes health, toggles provisioning and never exposes secrets", async (t) => {
+  const dir = makeTempDir(); disposeDir(t, dir);
+  const stateDir = join(dir, "state"), userHome = join(dir, "user");
+  mkdirSync(join(userHome, ".pi/agent"), { recursive: true });
+  const http = createServer((req, res) => { res.statusCode = req.url === "/denied" ? 401 : req.url === "/broken" ? 503 : 200; res.end("{}"); });
+  await new Promise<void>(resolve => http.listen(0, "127.0.0.1", resolve)); t.after(() => http.close());
+  const address = http.address(); assert.ok(address && typeof address !== "string");
+  const base = `http://127.0.0.1:${address.port}`;
+  writeFileSync(join(userHome, ".pi/agent/mcp.json"), JSON.stringify({ mcpServers: {
+    good: { url: `${base}/good`, headers: { Authorization: "Bearer secret-token" } },
+    denied: { url: `${base}/denied` }, broken: { url: `${base}/broken` },
+    exa: { command: "npx", args: ["exa-mcp-server"], env: { EXA_API_KEY: "" } },
+    off: { command: "npx", args: ["disabled-server"], disabled: true },
+  } }));
+  const factory = createFactory({ stateDir });
+  const handlers = createSurfaceHandlers({ factory, stateDir, home: dir, userHome, daemon: fakeDaemon([]).daemon });
+  const result = await handlers.helperMcpsSyncAndProbe({}); assert.ok(result.ok);
+  assert.deepEqual(Object.fromEntries(result.helperMcps.map(s => [s.name, s.status])), { broken: "unreachable", denied: "auth_expired", exa: "missing_env", good: "connected", off: "disabled" });
+  assert.doesNotMatch(JSON.stringify(result), /secret-token|Authorization|127\.0\.0\.1/);
+  const disabled = await handlers.helperMcpsSetEnabled({ name: "good", enabled: false }); assert.ok(disabled.ok);
+  assert.equal(disabled.helperMcps.find(s => s.name === "good")?.status, "disabled");
+  assert.equal(JSON.parse(readFileSync(join(stateDir, "pi-agent/agent/mcp.json"), "utf8")).mcpServers.good, undefined);
+  const enabled = await handlers.helperMcpsSetEnabled({ name: "off", enabled: true }); assert.ok(enabled.ok);
+  assert.ok(JSON.parse(readFileSync(join(stateDir, "pi-agent/agent/mcp.json"), "utf8")).mcpServers.off);
+  const snap = await handlers.snapshot({}); assert.ok(snap.ok);
+  assert.equal(snap.view.helperMcps?.find(s => s.name === "denied")?.status, "auth_expired");
+  assert.doesNotMatch(JSON.stringify(snap.view.helperMcps), /secret-token/);
+});

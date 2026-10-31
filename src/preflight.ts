@@ -1,3 +1,5 @@
+import { renderHelperMcpRoster } from "./helper-mcp-sync.ts";
+import type { HelperMcpServerEntry } from "./helper-mcp-sync.ts";
 import { projectMemoryPresence } from "./project-memory.ts";
 /**
  * Seat kickoff packet builder (v0.0.26, ADR 0016 §4) — deterministic, <50ms
@@ -20,6 +22,7 @@ export interface SeatKickoffPacketInput {
   projectRoot: string;
   ledgerEvents: readonly LedgerEvent[];
   lanes?: Record<string, string>;
+  helperMcps?: Array<Pick<HelperMcpServerEntry, "name" | "transport" | "enabled" | "status">>;
 }
 
 function runGitFast(cwd: string, args: readonly string[]): string {
@@ -168,6 +171,7 @@ export function buildSeatKickoffPacket(input: SeatKickoffPacketInput): string {
     `- Build/Test commands: ${scriptsSummary}`,
     `- Active lanes: ${lanesSummary}`,
     `- Ledger tasks: ${tasksSummary}`,
+    ...(input.role === "lead" ? [renderHelperMcpRoster(input.helperMcps ?? [])] : []),
     `- Role MCP tools (paseo_factory): ${roleTools}`,
     `- Law: ${fireAndEndTurn}`,
     ...(input.role === "lead" ? LEAD_WAVE_LAWS.map((law) => `- Law: ${law}`) : [`- Law: ${SUPERVISOR_OUTCOME_BOUNDARY}`]),

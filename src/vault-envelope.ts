@@ -204,7 +204,7 @@ export function stageRuntimeFileIntoCheckout(runtimePath: string, target: string
     }
   }
   if (
-    (relPath === "secrets/shared/gplay-service-account.json" || relPath === "secrets/shared/eye.json") &&
+    (relPath === "secrets/shared/gplay-service-account.json" || relPath === "secrets/shared/eye.json" || relPath === "secrets/shared/mcp-oauth.json") &&
     parseEnvelope(runtimeBytes) === null
   ) {
     const sealed = Buffer.from(`${JSON.stringify(sealVaultBuffer(runtimeBytes, passphrase))}\n`, "utf8");

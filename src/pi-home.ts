@@ -38,9 +38,11 @@
  * the verbatim copy `scripts/sync-plugin-core.mjs` vendors into
  * `plugin/server/core/` (the `./core/project.ts` precedent).
  */
-import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { discoverHelperMcps, materializeHelperOAuth, readHelperOAuth, resolveRoleScopedMcpServers } from "./helper-mcp-sync.ts";
+import type { HelperMcpOptions } from "./helper-mcp-sync.ts";
 import { renderRoleAppendSystem } from "./roles-contract.ts";
 
 export { renderRoleAppendSystem } from "./roles-contract.ts";
@@ -70,6 +72,7 @@ export interface ProvisionPiHomeOptions {
    * explicit directory and the filters derive from it verbatim.
    */
   agentsSkillsDir?: string;
+  helperMcpSources?: Omit<HelperMcpOptions, "stateDir">;
   /**
    * Overrides the role's canonical `ROLE_PROMPTS[role]` as the managed
    * `APPEND_SYSTEM.md` content (v0.0.20, ADR 0013). Interactive roles only —
@@ -117,8 +120,6 @@ const OPERATOR_DEFAULT_KEYS = ["defaultProvider", "defaultModel", "defaultThinki
 /** The three core Lead skills (ADR 0010 §6) — the `lead` role's whole `<available_skills>`. */
 const CORE_LEAD_SKILLS = ["codebase-design", "domain-modeling", "tdd"] as const;
 
-/** The three core working-Agent skills (ADR 0010 §6) — the `agent` role's whole `<available_skills>`. */
-const CORE_AGENT_SKILLS = ["tdd", "diagnosing-bugs", "codebase-design"] as const;
 
 /**
  * Whether `execPath` is an Electron / `Paseo Helper` binary (v0.0.27, ADR
@@ -154,7 +155,7 @@ export function provisionPiAgentHome(input: ProvisionPiHomeOptions): string {
   // be deleted as contamination (the sweep's ordering is load-bearing).
   writeAppendSystemMd(roleHome, input.role, input.appendSystemPrompt);
   writeSettingsJson(sourceAgentDir, roleHome, input.role, input.agentsSkillsDir ?? "~/.agents/skills");
-  syncMcpJson(sourceAgentDir, roleHome, input.role, input.stateDir);
+  syncMcpJson(sourceAgentDir, roleHome, input.role, input.stateDir, input);
   for (const name of SHARED_STATE_NAMES) {
     const source = join(sourceAgentDir, name);
     if (existsSync(source)) ensureSymlink(source, join(roleHome, name));
@@ -202,8 +203,8 @@ function writeAppendSystemMd(roleHome: string, role: PiAgentRole, appendSystemPr
  * `extensions: ["-builtin:llama.cpp"]` (keeping `builtin:mcp`,
  * `builtin:codemode`, and `builtin:tool-search` enabled), `quietStartup`,
  * and `defaultProjectTrust: "always"` so `<project-root>/.pi/mcp.json`
- * overrides work. Per role: `lead` and `agent` filter skills down to their
- * three core role skills under `agentsSkillsDir` (Pi's `~` form by default);
+ * overrides work. Lead receives its three core skills; Peer receives all installed
+ * skills except `factory` under `agentsSkillsDir` (ADR 0039);
  * `supervisor` leaves `"skills"` out so pi auto-discovers all of
  * `~/.agents/skills`; `headless` denies every skill and every interactive
  * builtin extension on top of the CLI's own `--no-*` flags.
@@ -230,7 +231,7 @@ function writeSettingsJson(sourceAgentDir: string, roleHome: string, role: PiAge
   if (role === "lead") {
     settings.skills = ["!*", ...CORE_LEAD_SKILLS.map((skill) => `+${join(agentsSkillsDir, skill)}`)];
   } else if (role === "agent") {
-    settings.skills = ["!*", ...CORE_AGENT_SKILLS.map((skill) => `+${join(agentsSkillsDir, skill)}`)];
+    settings.skills = ["!*", `+${join(agentsSkillsDir, "*")}`, `-${join(agentsSkillsDir, "factory")}`];
   } else if (role === "headless") {
     settings.skills = ["!*"];
     settings.defaultThinkingLevel = "off";
@@ -250,42 +251,12 @@ function writeSettingsJson(sourceAgentDir: string, roleHome: string, role: PiAge
  * session-bearing roles get an `mcp.json` — the tool-less `headless` pass runs
  * `--no-tools` and never sees an MCP server.
  */
-function syncMcpJson(sourceAgentDir: string, roleHome: string, role: PiAgentRole, stateDir: string): void {
+function syncMcpJson(sourceAgentDir: string, roleHome: string, role: PiAgentRole, stateDir: string, input: ProvisionPiHomeOptions): void {
   const target = join(roleHome, "mcp.json");
   if (role === "headless") return;
-  const source = readJsonObject(join(sourceAgentDir, "mcp.json"));
-  const servers = source !== undefined && isJsonObject(source.mcpServers) ? source.mcpServers : undefined;
-  const mcpServers: Record<string, unknown> = {};
-  if (role === "agent" && servers !== undefined) {
-    for (const [name, entry] of Object.entries(servers)) {
-      mcpServers[name] = isJsonObject(entry) && entry.auth === "oauth" ? withoutAuth(entry) : entry;
-    }
-  }
-  const zaiKey = readZaiApiKey(sourceAgentDir);
-  if (role === "agent" && zaiKey !== undefined) {
-    const existing = isJsonObject(mcpServers["zai-vision"]) ? mcpServers["zai-vision"] : {};
-    const existingEnv = isJsonObject(existing.env) ? existing.env : {};
-    mcpServers["zai-vision"] = {
-      ...existing,
-      command: typeof existing.command === "string" ? existing.command : "npx",
-      args: Array.isArray(existing.args) ? existing.args : ["-y", "@z_ai/mcp-server"],
-      env: {
-        ...existingEnv,
-        Z_AI_API_KEY: zaiKey,
-        Z_AI_MODE: typeof existingEnv.Z_AI_MODE === "string" ? existingEnv.Z_AI_MODE : "ZAI",
-      },
-      exposure: "direct",
-      timeout: 300,
-    };
-  }
-  if (isJsonObject(mcpServers["zai-vision"])) mcpServers["zai-vision"].timeout = 300;
-  const exaKey = readExaApiKey(sourceAgentDir);
-  if (role === "agent" && exaKey !== undefined && mcpServers.exa === undefined) {
-    mcpServers.exa = {
-      url: `https://mcp.exa.ai/mcp?exaApiKey=${encodeURIComponent(exaKey)}`,
-      exposure: "direct",
-    };
-  }
+  const options: HelperMcpOptions = { stateDir, piAgentDir: sourceAgentDir, piOnly: input.sourceAgentDir !== undefined && input.helperMcpSources === undefined, ...input.helperMcpSources };
+  if (role === "agent") materializeHelperOAuth(options, readHelperOAuth(options, discoverHelperMcps(options).servers));
+  const mcpServers = resolveRoleScopedMcpServers({ ...options, role, pi: true });
   mcpServers.paseo_factory = {
     command: process.execPath,
     args: [join(stateDir, "bin", "bridge.mjs"), "--role", role, "--state-dir", stateDir],
@@ -295,34 +266,8 @@ function syncMcpJson(sourceAgentDir: string, roleHome: string, role: PiAgentRole
     // Node mode (v0.0.27, ADR 0017 §2).
     ...(isElectronNodeBinary(process.execPath) ? { env: { ELECTRON_RUN_AS_NODE: "1" } } : {}),
   };
-  const restSource = source !== undefined && servers !== undefined ? source : {};
-  writeFileSync(target, `${JSON.stringify({ ...restSource, mcpServers }, null, 2)}\n`);
-}
-
-function readZaiApiKey(sourceAgentDir: string): string | undefined {
-  const auth = readJsonObject(join(sourceAgentDir, "auth.json"));
-  if (auth === undefined || !isJsonObject(auth.zai)) return undefined;
-  const key = auth.zai.key;
-  return typeof key === "string" && key.trim() !== "" ? key.trim() : undefined;
-}
-
-function readExaApiKey(sourceAgentDir: string): string | undefined {
-  for (const candidate of [join(sourceAgentDir, "web-search.json"), join(dirname(sourceAgentDir), "web-search.json")]) {
-    const config = readJsonObject(candidate);
-    if (config !== undefined && typeof config.exaApiKey === "string" && config.exaApiKey.trim() !== "") {
-      return config.exaApiKey.trim();
-    }
-  }
-  return undefined;
-}
-
-/** A copy of `entry` without its `auth` field, key order otherwise preserved. */
-function withoutAuth(entry: Record<string, unknown>): Record<string, unknown> {
-  const copy: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(entry)) {
-    if (key !== "auth") copy[key] = value;
-  }
-  return copy;
+  writeFileSync(target, `${JSON.stringify({ mcpServers }, null, 2)}\n`, { mode: 0o600 });
+  chmodSync(target, 0o600);
 }
 
 /**

@@ -1,3 +1,5 @@
+import { discoverHelperMcps, resolveRoleScopedMcpServers, syncHelperMcps } from "./core/helper-mcp-sync.ts";
+import { buildRoleKickoffPrompt } from "./core/roles-contract.ts";
 import { readRun as readScrumRun } from "./core/scrum/run-journal.ts";
 import { impeccableEnvironment, restoreImpeccableEnvironment } from "./core/scrum/impeccable.ts";
 import { readExecution } from "./core/scrum/config.ts";
@@ -138,6 +140,7 @@ export function factoryEnvFor(
     stateDir: input.stateDir,
     role,
     sourceAgentDir: join(input.userHome ?? homedir(), ".pi", "agent"),
+    helperMcpSources: { userHome: input.userHome ?? homedir() },
   });
   const env: Record<string, string> = {
     PASEO_FACTORY_SEAT: role,
@@ -313,7 +316,7 @@ export function applyProviderExecutionFence<T extends AgentCreateRequest["config
     delete nextConfig.mcpServers;
     provisionAgyPlugin({ stateDir, userHome, agyPluginsDir });
   } else {
-    const existingMcp = isRecord(config.mcpServers) ? config.mcpServers : {};
+    const existingMcp = resolveRoleScopedMcpServers({ stateDir, userHome, role });
     const bridgeServer = {
       type: "stdio" as const,
       command: process.execPath,
@@ -373,7 +376,7 @@ export function applyProviderExecutionFence<T extends AgentCreateRequest["config
       nextConfig.modeId = "build";
       const skillPerm =
         role === "supervisor"
-          ? { "*": "deny", grilling: "allow" }
+          ? { "*": "deny", grilling: "allow", "domain-modeling": "allow" }
           : { "*": "deny", "codebase-design": "allow", "domain-modeling": "allow", tdd: "allow" };
       nextConfig.providerOptions = {
         ...existingProviderOpts,
@@ -540,7 +543,7 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
           // The Agent tab inside the Task worktree Workspace reads `Peer · <Task>`
           // (ADR 0017 §2) — never the bare task id or the raw spawn prompt.
           title: execution?.kind === "task" ? `${SCRUM_ROLE_TITLES[execution.binding.role]} · ${worktree.task}` : formatPeerAgentTitle(worktree.task),
-          systemPrompt: appendContract(request.config.systemPrompt, execution?.kind === "task" ? renderScrumPrompt(execution.binding.role, { project: worktree.slug, run: readScrumRun(stateDir, worktree.slug, execution.binding.runId), runId: execution.binding.runId, task: worktree.task, epoch: execution.epoch, workspace: request.config.cwd }) : renderAgentContract(worktree.task, worktree.slug)),
+          systemPrompt: appendContract(request.config.systemPrompt, execution?.kind === "task" ? renderScrumPrompt(execution.binding.role, { project: worktree.slug, run: readScrumRun(stateDir, worktree.slug, execution.binding.runId), runId: execution.binding.runId, task: worktree.task, epoch: execution.epoch, workspace: request.config.cwd }) : buildRoleKickoffPrompt("agent", { task: worktree.task, project: { root: request.config.cwd, slug: worktree.slug }, helperMcps: discoverHelperMcps({ stateDir, userHome }).servers })),
         },
         {
           role: "agent",
@@ -601,8 +604,8 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
       systemPrompt: appendContract(
         request.config.systemPrompt,
         execution !== undefined && role !== "agent" ? renderScrumPrompt(role, { project: projectIdentity.slug, workspace: request.config.cwd }) : role === "agent"
-          ? renderRoleContract("agent", { factoryCmd: "factory", project: projectIdentity })
-          : renderSeatContract(role, projectIdentity),
+          ? buildRoleKickoffPrompt("agent", { factoryCmd: "factory", project: projectIdentity, helperMcps: discoverHelperMcps({ stateDir, userHome }).servers })
+          : buildRoleKickoffPrompt(role, { factoryCmd: "factory", project: projectIdentity, helperMcps: discoverHelperMcps({ stateDir, userHome }).servers }),
       ),
     },
     {
@@ -875,4 +878,13 @@ function scrumProviderConfig(state: string, slug: string, role: RoleName, identi
   const lane = resolveRoleLane(state, slug, role, identity.kind === "task" ? identity.task : undefined);
   if (!lane) throw new Error("invalid frozen Scrum lane");
   return laneProviderConfig(lane, providers);
+}
+
+/** Async pre-create sync keeps filesystem provisioning synchronous and never starts stdio helpers. */
+export async function syncPeerHelpersBeforeCreate(request: AgentCreateRequest, stateDir: string, userHome?: string): Promise<void> {
+  const labels = (request as { labels?: Record<string, string> }).labels ?? (request.config as { labels?: Record<string, string> }).labels;
+  const role = inferRoleFromProviderId(request.config.provider) ?? parseRoleName(request.env?.PASEO_FACTORY_SEAT) ?? inferRoleSeatFromTitleOrLabels(request.config.title, labels);
+  if (role === "agent" || (role === undefined && parseTaskWorktreePath(stateDir, request.config.cwd))) {
+    await syncHelperMcps({ stateDir, userHome });
+  }
 }
