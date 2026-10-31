@@ -2140,9 +2140,10 @@ function writeHelperJson(path, value) {
 
 // src/helper-mcp-sync.ts
 import { createHash as createHash4 } from "node:crypto";
-import { existsSync as existsSync4, accessSync, constants, readdirSync as readdirSync5 } from "node:fs";
+import { existsSync as existsSync4, accessSync, constants, readdirSync as readdirSync5, lstatSync, mkdirSync as mkdirSync6, rmSync as rmSync4, symlinkSync } from "node:fs";
 import { homedir as homedir2 } from "node:os";
 import { basename as basename7, delimiter, dirname as dirname8, isAbsolute as isAbsolute4, join as join6 } from "node:path";
+var ALL_HELPER_TARGET_PROVIDERS = ["pi", "claude", "codex", "opencode"];
 function paths(options) {
   const userHome = options.userHome ?? homedir2();
   return { userHome, pi: options.piAgentDir ?? join6(userHome, ".pi/agent"), ag: join6(userHome, ".gemini/antigravity/mcp_oauth_tokens.json") };
@@ -2194,6 +2195,8 @@ function discoverHelperMcps(options) {
     if (!url && typeof value.command !== "string") continue;
     if (url) name = [...merged.values()].find((s) => s.url && endpoint(s.url) === endpoint(url))?.name ?? name;
     const entry = {
+      targetProviders: [...ALL_HELPER_TARGET_PROVIDERS],
+      vaultSync: false,
       name,
       transport: url ? "http" : "stdio",
       enabled: value.enabled !== false && value.disabled !== true,
@@ -2213,20 +2216,25 @@ function discoverHelperMcps(options) {
       previous.sources = [.../* @__PURE__ */ new Set([...previous.sources, ...entry.sources])];
       continue;
     }
-    if (!entry.enabled) disabled.add(name);
+    if (!entry.enabled && source !== "factory") disabled.add(name);
     merged.set(name, previous ? { ...credentialScore(entry, options) > credentialScore(previous, options) ? entry : previous, sources: [.../* @__PURE__ */ new Set([...previous.sources, ...entry.sources])] } : entry);
   }
   const zaiKey = readHelperJson(join6(p.pi, "auth.json")).zai?.key;
   if (typeof zaiKey === "string" && zaiKey.trim()) {
     const prev = merged.get("zai-vision");
-    merged.set("zai-vision", { name: "zai-vision", transport: "stdio", command: "npx", args: ["-y", "@z_ai/mcp-server"], enabled: true, sources: ["pi"], status: "unreachable", ...prev, env: { ...prev?.env, Z_AI_API_KEY: zaiKey.trim(), Z_AI_MODE: prev?.env?.Z_AI_MODE ?? "ZAI" }, timeout: 300 });
+    merged.set("zai-vision", { targetProviders: [...ALL_HELPER_TARGET_PROVIDERS], vaultSync: false, name: "zai-vision", transport: "stdio", command: "npx", args: ["-y", "@z_ai/mcp-server"], enabled: true, status: "unreachable", ...prev, env: { ...prev?.env, Z_AI_API_KEY: zaiKey.trim(), Z_AI_MODE: prev?.env?.Z_AI_MODE ?? "ZAI" }, sources: [.../* @__PURE__ */ new Set([...prev?.sources ?? [], "pi"])], timeout: 300 });
   }
   if (!merged.has("exa")) {
     const key = readHelperJson(join6(p.pi, "web-search.json")).exaApiKey ?? readHelperJson(join6(dirname8(p.pi), "web-search.json")).exaApiKey;
-    if (typeof key === "string" && key.trim()) merged.set("exa", { name: "exa", transport: "http", url: `https://mcp.exa.ai/mcp?exaApiKey=${encodeURIComponent(key.trim())}`, enabled: true, sources: ["pi"], status: "unreachable" });
+    if (typeof key === "string" && key.trim()) merged.set("exa", { targetProviders: [...ALL_HELPER_TARGET_PROVIDERS], vaultSync: false, name: "exa", transport: "http", url: `https://mcp.exa.ai/mcp?exaApiKey=${encodeURIComponent(key.trim())}`, enabled: true, sources: ["pi"], status: "unreachable" });
   }
   const servers = [...merged.values()].sort((a, b) => a.name.localeCompare(b.name));
-  for (const entry of servers) entry.enabled = typeof persisted.overrides?.[entry.name] === "boolean" ? persisted.overrides[entry.name] : !disabled.has(entry.name);
+  for (const entry of servers) {
+    entry.enabled = typeof persisted.overrides?.[entry.name] === "boolean" ? persisted.overrides[entry.name] : !disabled.has(entry.name) && entry.sources.some((source) => source === "pi" || source === "vault");
+    const targets = persisted.targets?.[entry.name];
+    entry.targetProviders = Array.isArray(targets) && targets.every((p2) => ALL_HELPER_TARGET_PROVIDERS.includes(p2)) ? [...new Set(targets)] : [...ALL_HELPER_TARGET_PROVIDERS];
+    entry.vaultSync = typeof persisted.vaultSync?.[entry.name] === "boolean" ? persisted.vaultSync[entry.name] : entry.sources.includes("vault");
+  }
   const bundles = readHelperOAuth(options, servers);
   return { servers: servers.map((entry) => {
     const checked = classify(entry, bundles[entry.name], p.userHome), cached = persisted.health?.[entry.name];
@@ -2336,24 +2344,45 @@ function classify(entry, bundle, userHome = homedir2()) {
       statusDetail = "Command unavailable on this host";
     } else statusDetail = "Command and credentials present; server starts on first use";
   } else if (bundle && !valid(bundle) || (entry.oauthRequired || /mcp\.supabase\.com/.test(entry.url ?? "") || entry.auth) && !valid(bundle) && !Object.entries(entry.headers ?? {}).some(([key, value]) => key.toLowerCase() === "authorization" && expand(value).trim())) status = "auth_expired";
-  else statusDetail = "Credentials checked; use Test & Sync MCPs to verify connectivity";
+  else statusDetail = "Credentials checked; use Check Connectivity to verify connectivity";
   return { ...entry, status, statusDetail, ...bundle?.tokens.expiresAt ? { oauthExpiresAt: bundle.tokens.expiresAt } : {} };
 }
-function materializeHelperOAuth(options, bundles) {
-  const p = paths(options), ag = options.piOnly ? {} : readHelperJson(p.ag, true);
-  writeHelperJson(join6(options.stateDir, "helper-mcp-oauth.json"), { ...readHelperJson(join6(options.stateDir, "helper-mcp-oauth.json"), true), ...bundles });
-  for (const [name, bundle] of Object.entries(bundles)) {
-    writeHelperJson(helperOAuthPath(p.pi, name), bundle);
-    writeHelperJson(helperOAuthPath(join6(options.stateDir, "pi-agent/agent"), name), bundle);
-    if (!options.piOnly) for (const url of [.../* @__PURE__ */ new Set([bundle.serverUrl, ...Object.keys(ag).filter((url2) => endpoint(url2) === endpoint(bundle.serverUrl))])]) ag[url] = {
-      ...ag[url],
-      client_id: bundle.clientInfo?.clientId,
-      client_secret: bundle.clientInfo?.clientSecret,
-      token_url: bundle.tokenUrl,
-      token: { access_token: bundle.tokens.accessToken, refresh_token: bundle.tokens.refreshToken, token_type: "Bearer", ...Number.isFinite(bundle.tokens.expiresAt) ? { expiry: new Date(bundle.tokens.expiresAt * 1e3).toISOString() } : {} }
-    };
+function isolateHelperOAuthDirectory(options, managedNames = []) {
+  const target = join6(options.stateDir, "pi-agent/agent/mcp-oauth");
+  const unlink = (path) => {
+    try {
+      if (lstatSync(path).isSymbolicLink()) rmSync4(path);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+  };
+  unlink(target);
+  mkdirSync6(target, { recursive: true, mode: 448 });
+  const managed = new Set([...Object.keys(readHelperJson(join6(options.stateDir, "helper-mcp-oauth.json"), true)), ...managedNames].map((name) => basename7(dirname8(helperOAuthPath("", name)))));
+  for (const name of managed) unlink(join6(target, name));
+  const source = join6(paths(options).pi, "mcp-oauth");
+  let entries = [];
+  try {
+    entries = readdirSync5(source);
+  } catch {
   }
-  if (!options.piOnly && Object.keys(bundles).length) writeHelperJson(p.ag, ag);
+  for (const name of entries.filter((name2) => /^sha256-[a-f0-9]+$/.test(name2) && !managed.has(name2))) {
+    const destination = join6(target, name);
+    try {
+      lstatSync(destination);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      symlinkSync(join6(source, name), destination);
+    }
+  }
+}
+function materializeHelperOAuth(options, bundles) {
+  const stored = readHelperJson(join6(options.stateDir, "helper-mcp-oauth.json"), true);
+  isolateHelperOAuthDirectory(options, Object.keys(bundles));
+  writeHelperJson(join6(options.stateDir, "helper-mcp-oauth.json"), { ...stored, ...bundles });
+  for (const [name, bundle] of Object.entries(bundles)) {
+    writeHelperJson(helperOAuthPath(join6(options.stateDir, "pi-agent/agent"), name), bundle);
+  }
 }
 function fingerprint(server, bundle) {
   return createHash4("sha256").update(JSON.stringify([server.command, server.args, server.env, server.url, server.headers, bundle?.tokens])).digest("hex");
@@ -2361,8 +2390,8 @@ function fingerprint(server, bundle) {
 
 // src/helper-mcp-vault.ts
 function collectHelperMcpVault(options, runtime) {
-  const { servers } = discoverHelperMcps(options);
-  if (servers.length === 0) return;
+  const servers = discoverHelperMcps(options).servers.filter((server) => server.enabled && server.vaultSync);
+  if (servers.length === 0 && !existsSync5(join7(runtime, "config/helper-mcps.json")) && !existsSync5(join7(runtime, "secrets/shared/mcp-oauth.json"))) return;
   const fields = {};
   const sanitized = servers.map((server) => {
     const copy = { ...server }, secret = {};
@@ -2391,18 +2420,22 @@ function collectHelperMcpVault(options, runtime) {
     fields[server.name] = secret;
     return copy;
   });
-  const stored = readHelperJson(join7(options.stateDir, "helper-mcps.json"), true);
-  writeHelperJson(join7(runtime, "config/helper-mcps.json"), { servers: sanitized, overrides: stored.overrides ?? {} });
+  writeHelperJson(join7(runtime, "config/helper-mcps.json"), { servers: sanitized });
   writeHelperJson(join7(runtime, "secrets/shared/mcp-oauth.json"), { oauth: readHelperOAuth(options, servers), fields });
 }
 function hydrateHelperMcpVault(options, runtime, overwrite) {
   const configPath = join7(runtime, "config/helper-mcps.json");
   if (!existsSync5(configPath)) return;
   const config = readHelperJson(configPath, true), secrets = readHelperJson(join7(runtime, "secrets/shared/mcp-oauth.json"), true);
+  const stored = readHelperJson(join7(options.stateDir, "helper-mcps.json"), true);
+  const overrides = { ...stored.overrides }, targets = { ...stored.targets }, vaultSync = { ...stored.vaultSync };
   const local = discoverHelperMcps(options).servers;
   const byName = new Map(local.map((s) => [s.name, s]));
   for (const server of config.servers ?? []) {
-    const remote = { ...server, ...secrets.fields?.[server.name], sources: [.../* @__PURE__ */ new Set([...server.sources ?? [], "vault"])] };
+    if (overwrite || typeof overrides[server.name] !== "boolean") overrides[server.name] = true;
+    if (overwrite || typeof vaultSync[server.name] !== "boolean") vaultSync[server.name] = true;
+    if (Array.isArray(server.targetProviders) && (overwrite || !Array.isArray(targets[server.name]))) targets[server.name] = server.targetProviders;
+    const remote = { ...server, ...secrets.fields?.[server.name], enabled: overrides[server.name], vaultSync: vaultSync[server.name], sources: [.../* @__PURE__ */ new Set([...server.sources ?? [], "vault"])] };
     const existing = byName.get(server.name);
     if (!overwrite && existing) {
       const merged = { ...existing, sources: [.../* @__PURE__ */ new Set([...existing.sources, ...remote.sources])] };
@@ -2414,10 +2447,10 @@ function hydrateHelperMcpVault(options, runtime, overwrite) {
       byName.set(server.name, merged);
     } else byName.set(server.name, remote);
   }
-  const stored = readHelperJson(join7(options.stateDir, "helper-mcps.json"), true);
-  writeHelperJson(join7(options.stateDir, "helper-mcps.json"), { servers: [...byName.values()], overrides: overwrite ? { ...stored.overrides, ...config.overrides } : { ...config.overrides, ...stored.overrides } });
-  const bundles = readHelperOAuth(options, [...byName.values()]);
+  writeHelperJson(join7(options.stateDir, "helper-mcps.json"), { ...stored, servers: [...byName.values()], overrides, targets, vaultSync });
+  const bundles = readHelperOAuth(options, discoverHelperMcps(options).servers.filter((s) => s.enabled));
   for (const [name, remote] of Object.entries(secrets.oauth ?? {})) {
+    if (overrides[name] !== true) continue;
     if (!bundles[name] || (remote.tokens.expiresAt ?? 0) > (bundles[name].tokens.expiresAt ?? 0)) bundles[name] = remote;
   }
   materializeHelperOAuth(options, bundles);
@@ -2429,7 +2462,7 @@ import { join as join12 } from "node:path";
 
 // src/scrum/config.ts
 import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
-import { readFileSync as readFileSync10, rmSync as rmSync5 } from "node:fs";
+import { readFileSync as readFileSync10, rmSync as rmSync6 } from "node:fs";
 import { join as join10 } from "node:path";
 
 // src/lanes.ts
@@ -2573,7 +2606,7 @@ var ROLE_PROMPTS = {
 };
 
 // src/lane-profiles.ts
-import { existsSync as existsSync6, mkdirSync as mkdirSync6, readFileSync as readFileSync9, rmSync as rmSync4, writeFileSync as writeFileSync5 } from "node:fs";
+import { existsSync as existsSync6, mkdirSync as mkdirSync7, readFileSync as readFileSync9, rmSync as rmSync5, writeFileSync as writeFileSync5 } from "node:fs";
 import { dirname as dirname9, join as join8 } from "node:path";
 function laneProfilesPath(stateDir) {
   return join8(stateDir, "profiles.json");
@@ -2813,7 +2846,7 @@ function materializeProjectScrumVault(state, slug, runtimeApp, overwrite) {
 }
 
 // src/scrum/impeccable.ts
-import { existsSync as existsSync9, mkdirSync as mkdirSync7, mkdtempSync, readdirSync as readdirSync6, symlinkSync, rmSync as rmSync6, writeFileSync as writeFileSync6, lstatSync, readFileSync as readFileSync12, copyFileSync as copyFileSync2, statSync as statSync4 } from "node:fs";
+import { existsSync as existsSync9, mkdirSync as mkdirSync8, mkdtempSync, readdirSync as readdirSync6, symlinkSync as symlinkSync2, rmSync as rmSync7, writeFileSync as writeFileSync6, lstatSync as lstatSync2, readFileSync as readFileSync12, copyFileSync as copyFileSync2, statSync as statSync4 } from "node:fs";
 import { homedir as homedir3, tmpdir } from "node:os";
 import { dirname as dirname11, join as join13, resolve as resolve5 } from "node:path";
 var IMPECCABLE_MIN_VERSION = "4.8.0";
@@ -2950,7 +2983,7 @@ function ensureProviderSkillSymlinks(userHome = homedir3()) {
   for (const targetDir of providerTargets) {
     try {
       if (existsSync9(targetDir)) {
-        const st = lstatSync(targetDir);
+        const st = lstatSync2(targetDir);
         if (st.isSymbolicLink()) {
           try {
             if (resolve5(targetDir) === resolvedAgentsSkills) continue;
@@ -2958,16 +2991,16 @@ function ensureProviderSkillSymlinks(userHome = homedir3()) {
           }
         }
       }
-      mkdirSync7(targetDir, { recursive: true });
+      mkdirSync8(targetDir, { recursive: true });
       for (const name of skillNames) {
         const dest = join13(targetDir, name);
         const src = join13(agentsSkillsDir, name);
         let existsValid = false;
         try {
-          const lst = lstatSync(dest);
+          const lst = lstatSync2(dest);
           if (lst.isSymbolicLink()) {
             existsValid = existsSync9(dest);
-            if (!existsValid) rmSync6(dest, { force: true });
+            if (!existsValid) rmSync7(dest, { force: true });
           } else {
             existsValid = true;
           }
@@ -2975,8 +3008,8 @@ function ensureProviderSkillSymlinks(userHome = homedir3()) {
           existsValid = false;
         }
         if (!existsValid) {
-          mkdirSync7(dirname11(dest), { recursive: true });
-          symlinkSync(src, dest, "dir");
+          mkdirSync8(dirname11(dest), { recursive: true });
+          symlinkSync2(src, dest, "dir");
           linked.push(dest);
         }
       }
@@ -2988,7 +3021,7 @@ function ensureProviderSkillSymlinks(userHome = homedir3()) {
 
 // src/vault-transport.ts
 import { execFile } from "node:child_process";
-import { existsSync as existsSync10, rmSync as rmSync7, readFileSync as readFileSync13, writeFileSync as writeFileSync7 } from "node:fs";
+import { existsSync as existsSync10, rmSync as rmSync8, readFileSync as readFileSync13, writeFileSync as writeFileSync7 } from "node:fs";
 import { isAbsolute as isAbsolute5, join as join14 } from "node:path";
 var VAULT_FALLBACK_PATH_DIRS = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
 function buildVaultPath(basePath = process.env.PATH ?? "") {
@@ -3212,13 +3245,13 @@ async function probeCompanionGitAccess(source, options) {
 var VAULT_RUNNER_MAX_BUFFER_BYTES = 256 * 1024 * 1024;
 async function ensureVaultCheckout(runner, config, vaultDir) {
   if (existsSync10(join14(vaultDir, ".git"))) return;
-  if (existsSync10(vaultDir)) rmSync7(vaultDir, { recursive: true, force: true });
+  if (existsSync10(vaultDir)) rmSync8(vaultDir, { recursive: true, force: true });
   const remoteUrl = vaultRemoteUrl(config.repo);
   try {
     await runner({ command: "git", args: ["clone", "--branch", config.branch, remoteUrl, vaultDir] });
   } catch (err) {
     if (!isMissingRemoteBranchCloneError(err)) throw err;
-    if (existsSync10(vaultDir)) rmSync7(vaultDir, { recursive: true, force: true });
+    if (existsSync10(vaultDir)) rmSync8(vaultDir, { recursive: true, force: true });
     await runner({ command: "git", args: ["clone", remoteUrl, vaultDir] });
     await runner({ command: "git", args: ["checkout", "-B", config.branch], cwd: vaultDir });
     const gitConfigPath = join14(vaultDir, ".git", "config");
@@ -3482,19 +3515,19 @@ function sealVaultFile(paseoHome, sourcePath, vaultPath, passphrase) {
 
 // src/vault-materialization.ts
 import { execFileSync as execFileSync3 } from "node:child_process";
-import { readFileSync as readFileSync15, mkdirSync as mkdirSync8, chmodSync as chmodSync2, writeFileSync as writeFileSync8, readdirSync as readdirSync7, existsSync as existsSync12, copyFileSync as copyFileSync3, statSync as statSync5 } from "node:fs";
+import { readFileSync as readFileSync15, mkdirSync as mkdirSync9, chmodSync as chmodSync2, writeFileSync as writeFileSync8, readdirSync as readdirSync7, existsSync as existsSync12, copyFileSync as copyFileSync3, statSync as statSync5 } from "node:fs";
 import { join as join16, basename as basename8, isAbsolute as isAbsolute6, resolve as resolvePath, dirname as dirname12 } from "node:path";
 function writeRuntimeFile(paseoHome, vaultPath, data) {
   assertSafeVaultPath(vaultPath);
   const runtimeRoot = join16(paseoHome, "vault-runtime");
-  mkdirSync8(runtimeRoot, { recursive: true });
+  mkdirSync9(runtimeRoot, { recursive: true });
   const segments = vaultPath.split("/");
   let acc = runtimeRoot;
   let insideSecrets = false;
   for (const segment of segments.slice(0, -1)) {
     acc = join16(acc, segment);
     insideSecrets = insideSecrets || segment === "secrets";
-    mkdirSync8(acc, { recursive: true });
+    mkdirSync9(acc, { recursive: true });
     if (insideSecrets) chmodSync2(acc, 448);
   }
   const target = join16(runtimeRoot, vaultPath);
@@ -3705,7 +3738,7 @@ function appendUniqueLines(path, lines) {
   if (missing.length === 0) return;
   const base = existing === "" ? "" : existing.endsWith("\n") ? existing : `${existing}
 `;
-  mkdirSync8(dirname12(path), { recursive: true });
+  mkdirSync9(dirname12(path), { recursive: true });
   writeFileSync8(path, `${base}${missing.join("\n")}
 `);
 }
@@ -3730,7 +3763,7 @@ function materializeVaultAppFiles(paseoHome, canonicalAppKey, projectRoot) {
       data = readFileSync15(source);
     }
     const dest = join16(projectRoot, target.projectRel);
-    mkdirSync8(dirname12(dest), { recursive: true });
+    mkdirSync9(dirname12(dest), { recursive: true });
     writeFileSync8(dest, data, { mode: 384 });
     chmodSync2(dest, 384);
     written.push(target.projectRel);
@@ -3832,7 +3865,7 @@ function materializeVaultSkillsFromRuntime(paseoHome, overwriteConfigs = false, 
   if (existsSync12(runtimeLockPath)) {
     const destLockPath = join16(userHome, ".agents", ".skill-lock.json");
     if (overwriteConfigs || !existsSync12(destLockPath)) {
-      mkdirSync8(dirname12(destLockPath), { recursive: true });
+      mkdirSync9(dirname12(destLockPath), { recursive: true });
       copyFileSync3(runtimeLockPath, destLockPath);
     }
   }
@@ -3857,7 +3890,7 @@ function materializeVaultSkillsFromRuntime(paseoHome, overwriteConfigs = false, 
       const src = join16(srcSkillDir, rel);
       const dest = join16(agentsSkillsDir, skillName, rel);
       if (!overwriteConfigs && existsSync12(dest)) continue;
-      mkdirSync8(dirname12(dest), { recursive: true });
+      mkdirSync9(dirname12(dest), { recursive: true });
       copyFileSync3(src, dest);
     }
     materializedSkills.push(skillName);
@@ -3983,7 +4016,7 @@ function materializeConfigsFromRuntime(paseoHome, overwriteConfigs = false, opti
   for (const { src, dest } of targets) {
     if (!existsSync12(src)) continue;
     if (!overwriteConfigs && existsSync12(dest)) continue;
-    mkdirSync8(dirname12(dest), { recursive: true });
+    mkdirSync9(dirname12(dest), { recursive: true });
     copyFileSync3(src, dest);
   }
   const stateDir = vaultStateDir(paseoHome);
@@ -3993,7 +4026,7 @@ function materializeConfigsFromRuntime(paseoHome, overwriteConfigs = false, opti
     const remote = readLaneProfilesCacheOrNull(runtimeProfiles);
     if (remote !== null) {
       const merged = mergeLaneProfilesFiles(local, remote, { preferRemote: overwriteConfigs });
-      mkdirSync8(dirname12(join16(stateDir, "profiles.json")), { recursive: true });
+      mkdirSync9(dirname12(join16(stateDir, "profiles.json")), { recursive: true });
       writeFileSync8(join16(stateDir, "profiles.json"), `${JSON.stringify(merged, null, 2)}
 `);
     }
@@ -4007,7 +4040,7 @@ function materializeConfigsFromRuntime(paseoHome, overwriteConfigs = false, opti
       if (!existsSync12(src)) continue;
       const dest = projectLanesPath(stateDir, app.projectSlug);
       if (!overwriteConfigs && existsSync12(dest)) continue;
-      mkdirSync8(dirname12(dest), { recursive: true });
+      mkdirSync9(dirname12(dest), { recursive: true });
       copyFileSync3(src, dest);
     }
   }
@@ -4024,7 +4057,7 @@ function applyVaultHydration(paseoHome, overwriteConfigs = false, options) {
 }
 function writeVaultRuntimeEnv(paseoHome) {
   const runtimeRoot = join16(paseoHome, "vault-runtime");
-  mkdirSync8(runtimeRoot, { recursive: true });
+  mkdirSync9(runtimeRoot, { recursive: true });
   const path = join16(runtimeRoot, "env.json");
   writeFileSync8(path, `${JSON.stringify(buildVaultRuntimeEnv(paseoHome), null, 2)}
 `, { mode: 384 });
@@ -4066,7 +4099,7 @@ function hydratedAppKeys(paseoHome) {
 }
 
 // src/vault-history.ts
-import { mkdirSync as mkdirSync9, writeFileSync as writeFileSync9, existsSync as existsSync13, readFileSync as readFileSync16, readdirSync as readdirSync8 } from "node:fs";
+import { mkdirSync as mkdirSync10, writeFileSync as writeFileSync9, existsSync as existsSync13, readFileSync as readFileSync16, readdirSync as readdirSync8 } from "node:fs";
 import { dirname as dirname13, join as join17 } from "node:path";
 function reconcileVaultLedgers(existingLines, sources, options = {}) {
   return reconcileHistory(existingLines, sources, options);
@@ -4096,7 +4129,7 @@ function snapshotVaultLedger(source, target) {
   }
   const parsed = parseLedgerJsonl(text);
   if (parsed.corrupt !== void 0) throw new FactoryError("vault-ledger-corrupt", `Cannot publish Ledger ${source}: ${parsed.corrupt}`);
-  mkdirSync9(dirname13(target), { recursive: true });
+  mkdirSync10(dirname13(target), { recursive: true });
   writeFileSync9(target, prefix);
 }
 function stageFetchedVaultHistory(paseoHome, files) {
@@ -4120,7 +4153,7 @@ function stageFetchedVaultHistory(paseoHome, files) {
 }
 
 // src/vault-config.ts
-import { readFileSync as readFileSync17, mkdirSync as mkdirSync10, writeFileSync as writeFileSync10, chmodSync as chmodSync3, existsSync as existsSync14 } from "node:fs";
+import { readFileSync as readFileSync17, mkdirSync as mkdirSync11, writeFileSync as writeFileSync10, chmodSync as chmodSync3, existsSync as existsSync14 } from "node:fs";
 import { hostname } from "node:os";
 import { dirname as dirname14, join as join18 } from "node:path";
 var STATE_PLUGIN_DIR = "paseo-factory";
@@ -4153,7 +4186,7 @@ function saveVaultConfig(paseoHome, config) {
   return LedgerAdmission.stateMutation(vaultStateDir(paseoHome), () => {
     const full = withConfigDefaults(config);
     const path = vaultConfigPath(paseoHome);
-    mkdirSync10(dirname14(path), { recursive: true });
+    mkdirSync11(dirname14(path), { recursive: true });
     writeFileSync10(path, `${JSON.stringify(full, null, 2)}
 `, { mode: 384 });
     chmodSync3(path, 384);
@@ -4250,7 +4283,7 @@ function vaultStateDir(paseoHome) {
 }
 
 // src/vault.ts
-import { existsSync as existsSync15, mkdirSync as mkdirSync11, readFileSync as readFileSync18 } from "node:fs";
+import { existsSync as existsSync15, mkdirSync as mkdirSync12, readFileSync as readFileSync18 } from "node:fs";
 import { join as join19, dirname as dirname15 } from "node:path";
 import { gunzipSync } from "node:zlib";
 async function hydrateVaultDirect(paseoHome, options = {}) {
@@ -4326,7 +4359,7 @@ async function pushVault(paseoHome, options = {}) {
       const globalLedger = join19(stateDir, "ledger.jsonl");
       if (existsSync15(globalLedger)) {
         const target = join19(vaultDir, "state", "nodes", config.nodeId, "global-ledger.jsonl");
-        mkdirSync11(dirname15(target), { recursive: true });
+        mkdirSync12(dirname15(target), { recursive: true });
         snapshotVaultLedger(globalLedger, target);
         pushedFiles2.add(`state/nodes/${config.nodeId}/global-ledger.jsonl`);
       }
@@ -4339,7 +4372,7 @@ async function pushVault(paseoHome, options = {}) {
         if (!existsSync15(projectLedger)) continue;
         const key = slugToKey.get(slug) ?? slug;
         const target = join19(vaultDir, "state", "nodes", config.nodeId, "projects", key, "ledger.jsonl");
-        mkdirSync11(dirname15(target), { recursive: true });
+        mkdirSync12(dirname15(target), { recursive: true });
         snapshotVaultLedger(projectLedger, target);
         pushedFiles2.add(`state/nodes/${config.nodeId}/projects/${key}/ledger.jsonl`);
       }

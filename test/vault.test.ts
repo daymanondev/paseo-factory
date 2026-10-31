@@ -2001,30 +2001,64 @@ test("Private vault replicates Helper MCP definitions separately from keys and O
   writeFileSync(join(state, "helper-mcps.json"), JSON.stringify({ servers: [
     { name: "exa", transport: "stdio", command: "npx", args: ["exa-mcp-server"], env: { EXA_API_KEY: "secret-exa" }, enabled: true, sources: ["pi"] },
     { name: "supabase", transport: "http", url: "https://mcp.supabase.com/mcp", enabled: true, sources: ["antigravity"] },
-  ], overrides: { exa: false } }));
+    { name: "private", transport: "stdio", command: "npx", env: { PRIVATE_KEY: "private-only" }, sources: ["pi"] },
+    { name: "disabled", transport: "stdio", command: "npx", env: { DISABLED_KEY: "disabled-only" }, sources: ["pi"] },
+    { name: "local", transport: "stdio", command: "npx", env: { LOCAL_KEY: "local-only" }, sources: ["claude"] },
+  ], overrides: { supabase: true, disabled: false }, targets: { supabase: ["pi", "claude"] }, vaultSync: { exa: true, supabase: true, disabled: true, local: true } }));
   writeFileSync(join(state, "helper-mcp-oauth.json"), JSON.stringify({ supabase: { serverUrl: "https://mcp.supabase.com/mcp", tokens: { accessToken: "secret-access", refreshToken: "secret-refresh", expiresAt } } }));
   collectLocalStateIntoRuntime(source, { userHome: source });
   const definition = readFileSync(join(source, "vault-runtime/config/helper-mcps.json"), "utf8");
-  assert.doesNotMatch(definition, /secret-exa|secret-access|secret-refresh/);
+  assert.doesNotMatch(definition, /secret-exa|secret-access|secret-refresh|private|disabled|local/);
+  assert.deepEqual(JSON.parse(definition).servers.map((s: any) => s.name), ["exa", "supabase"]);
   const secrets = readFileSync(join(source, "vault-runtime/secrets/shared/mcp-oauth.json"), "utf8");
   assert.match(secrets, /secret-exa/); assert.match(secrets, /secret-access/);
+  assert.doesNotMatch(secrets, /private-only|disabled-only|local-only/);
   cpSync(join(source, "vault-runtime"), join(target, "vault-runtime"), { recursive: true });
   mkdirSync(join(target, ".pi/agent"), { recursive: true });
   writeFileSync(join(target, ".pi/agent/mcp.json"), JSON.stringify({ mcpServers: { exa: { command: "npx", args: ["exa-mcp-server"], env: { EXA_API_KEY: "" } } } }));
   applyVaultHydration(target, false, { userHome: target });
   const restored = JSON.parse(readFileSync(join(targetState, "helper-mcps.json"), "utf8"));
   assert.equal(restored.servers.find((s: any) => s.name === "exa").env.EXA_API_KEY, "secret-exa");
-  assert.equal(restored.overrides.exa, false);
+  assert.equal(restored.overrides.exa, true);
+  assert.equal(restored.overrides.supabase, true);
+  assert.equal(restored.vaultSync.supabase, true);
+  assert.deepEqual(restored.targets.supabase, ["pi", "claude"]);
   assert.ok(restored.servers.find((s: any) => s.name === "supabase").sources.includes("vault"));
   assert.equal(JSON.parse(readFileSync(join(targetState, "helper-mcp-oauth.json"), "utf8")).supabase.tokens.accessToken, "secret-access");
   assert.equal(statSync(join(target, "vault-runtime/secrets/shared/mcp-oauth.json")).mode & 0o777, 0o600);
-  const piToken = join(target, ".pi/agent/mcp-oauth", `sha256-${createHash("sha256").update("supabase").digest("hex")}`, "tokens.json");
+  const piToken = join(targetState, "pi-agent/agent/mcp-oauth", `sha256-${createHash("sha256").update("supabase").digest("hex")}`, "tokens.json");
   assert.equal(JSON.parse(readFileSync(piToken, "utf8")).tokens.accessToken, "secret-access");
   assert.equal(statSync(piToken).mode & 0o777, 0o600);
+  assert.equal(existsSync(join(target, ".pi/agent/mcp-oauth")), false);
   saveVaultConfig(source, { repo: makeBareRemote(t), nodeId: "mcp-source" });
   await pushVault(source);
   const staged = readFileSync(join(source, "vault/secrets/shared/mcp-oauth.json"));
   assert.doesNotMatch(staged.toString(), /secret-exa|secret-access|secret-refresh/);
   assert.match(unsealVaultBuffer(staged, undefined).toString(), /secret-access/);
 
+});
+
+test("Helper vault hydration preserves explicit local choices and recollection removes withdrawn shares", async (t) => {
+  const { collectHelperMcpVault, hydrateHelperMcpVault } = await import("../src/helper-mcp-vault.ts");
+  const { discoverHelperMcps, setHelperMcpEnabled } = await import("../src/helper-mcp-sync.ts");
+  const dir = makeTempDir(); disposeDir(t, dir);
+  const runtime = join(dir, "runtime"), stateDir = join(dir, "source"), userHome = join(dir, "user");
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(join(stateDir, "helper-mcps.json"), JSON.stringify({ servers: [
+    { name: "docs", command: process.execPath, sources: ["pi"] },
+  ], vaultSync: { docs: true }, targets: { docs: ["claude"] } }));
+  collectHelperMcpVault({ stateDir, userHome }, runtime);
+  const target = { stateDir: join(dir, "target"), userHome };
+  mkdirSync(target.stateDir, { recursive: true });
+  writeFileSync(join(target.stateDir, "helper-mcps.json"), JSON.stringify({ overrides: { docs: false }, vaultSync: { docs: false }, targets: { docs: [] } }));
+  hydrateHelperMcpVault(target, runtime, false);
+  let server = discoverHelperMcps(target).servers[0];
+  assert.equal(server.enabled, false); assert.equal(server.vaultSync, false); assert.deepEqual(server.targetProviders, []);
+  hydrateHelperMcpVault(target, runtime, true);
+  server = discoverHelperMcps(target).servers[0];
+  assert.equal(server.enabled, true); assert.equal(server.vaultSync, true); assert.deepEqual(server.targetProviders, ["claude"]);
+  setHelperMcpEnabled({ stateDir, userHome }, "docs", { vaultSync: false });
+  collectHelperMcpVault({ stateDir, userHome }, runtime);
+  assert.deepEqual(JSON.parse(readFileSync(join(runtime, "config/helper-mcps.json"), "utf8")).servers, []);
+  assert.deepEqual(JSON.parse(readFileSync(join(runtime, "secrets/shared/mcp-oauth.json"), "utf8")), { oauth: {}, fields: {} });
 });

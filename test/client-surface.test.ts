@@ -1284,6 +1284,16 @@ test("ADR 0039: HelperMcpsCard renders a compact 2-row summary card with a colla
   assert.match(helperMcps, /⋯ Manage \(\$\{servers\.length\}\)/, "HelperMcpsCard uses the collapsible ⋯ Manage (N) drawer toggle");
   assert.match(helperMcps, /label="PEER ONLY"/, "HelperMcpsCard displays PEER ONLY badge");
   assert.match(helperMcps, /flexBasis: 280/, "HelperMcpsCard drawer uses a compact 2-column responsive grid");
+  assert.match(helperMcps, /label="Check Connectivity"/);
+  assert.doesNotMatch(helperMcps, /Test &amp; Sync|label="(?:Enable|Disable)"/);
+  assert.match(helperMcps, /syncedServers\.map/);
+  assert.match(helperMcps, /No MCPs synced to Peer yet/);
+  for (const label of ["Synced to Peer", "Available on Host", "Attention", "Unsync", "+ Sync to Peer", "OpenCode", "Vault: Off"]) {
+    assert.ok(helperMcps.includes(label), `Helper drawer exposes ${label}`);
+  }
+  assert.match(helperMcps, /server\.targetProviders\.includes/);
+  assert.match(helperMcps, /vaultSync: !server\.vaultSync/);
+  assert.match(read("plugin/client/factory/shell.tsx"), /setHelperConfig:.*helperMcpsEnableCall\(\{ name, \.\.\.config \}\)/);
 });
 
 

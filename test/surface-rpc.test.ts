@@ -6382,7 +6382,13 @@ test("Helper MCP surface sync probes health, toggles provisioning and never expo
   assert.equal(JSON.parse(readFileSync(join(stateDir, "pi-agent/agent/mcp.json"), "utf8")).mcpServers.good, undefined);
   const enabled = await handlers.helperMcpsSetEnabled({ name: "off", enabled: true }); assert.ok(enabled.ok);
   assert.ok(JSON.parse(readFileSync(join(stateDir, "pi-agent/agent/mcp.json"), "utf8")).mcpServers.off);
+  const scoped = await handlers.helperMcpsSetEnabled({ name: "off", targetProviders: ["claude"], vaultSync: true }); assert.ok(scoped.ok);
+  assert.deepEqual(scoped.helperMcps.find(s => s.name === "off")?.targetProviders, ["claude"]);
+  assert.equal(scoped.helperMcps.find(s => s.name === "off")?.vaultSync, true);
+  assert.equal(JSON.parse(readFileSync(join(stateDir, "pi-agent/agent/mcp.json"), "utf8")).mcpServers.off, undefined);
   const snap = await handlers.snapshot({}); assert.ok(snap.ok);
+  assert.deepEqual(snap.view.helperMcps?.find(s => s.name === "off")?.targetProviders, ["claude"]);
+  assert.equal(snap.view.helperMcps?.find(s => s.name === "off")?.vaultSync, true);
   assert.equal(snap.view.helperMcps?.find(s => s.name === "denied")?.status, "auth_expired");
   assert.doesNotMatch(JSON.stringify(snap.view.helperMcps), /secret-token/);
 });

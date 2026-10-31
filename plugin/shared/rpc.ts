@@ -556,6 +556,10 @@ export const helperMcpsSyncAndProbe = defineRpc({
 });
 export const helperMcpsSetEnabled = defineRpc({
   name: "factory.helper_mcps.set_enabled",
-  input: z.object({ name: z.string().min(1), enabled: z.boolean() }),
+  input: z.object({
+    name: z.string().min(1), enabled: z.boolean().optional(),
+    targetProviders: z.array(z.enum(["pi", "claude", "codex", "opencode"])).optional(),
+    vaultSync: z.boolean().optional(),
+  }),
   output: z.union([z.object({ ok: z.literal(true), helperMcps: z.array(HelperMcpViewSchema) }), Failure]),
 });

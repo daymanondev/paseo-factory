@@ -5,8 +5,8 @@ import { readHelperJson as read, writeHelperJson as write } from "./helper-mcp-s
 import { discoverHelperMcps, materializeHelperOAuth, readHelperOAuth } from "./helper-mcp-sync.ts";
 import type { HelperMcpOptions, HelperMcpServerEntry, HelperOAuthBundle } from "./helper-mcp-sync.ts";
 export function collectHelperMcpVault(options: HelperMcpOptions, runtime: string): void {
-  const { servers } = discoverHelperMcps(options);
-  if (servers.length === 0) return;
+  const servers = discoverHelperMcps(options).servers.filter(server => server.enabled && server.vaultSync);
+  if (servers.length === 0 && !existsSync(join(runtime, "config/helper-mcps.json")) && !existsSync(join(runtime, "secrets/shared/mcp-oauth.json"))) return;
   const fields: Record<string, Partial<HelperMcpServerEntry>> = {};
   const sanitized = servers.map(server => {
     const copy = { ...server }, secret: Partial<HelperMcpServerEntry> = {};
@@ -22,18 +22,22 @@ export function collectHelperMcpVault(options: HelperMcpOptions, runtime: string
     fields[server.name] = secret;
     return copy;
   });
-  const stored = read(join(options.stateDir, "helper-mcps.json"), true);
-  write(join(runtime, "config/helper-mcps.json"), { servers: sanitized, overrides: stored.overrides ?? {} });
+  write(join(runtime, "config/helper-mcps.json"), { servers: sanitized });
   write(join(runtime, "secrets/shared/mcp-oauth.json"), { oauth: readHelperOAuth(options, servers), fields });
 }
 export function hydrateHelperMcpVault(options: HelperMcpOptions, runtime: string, overwrite: boolean): void {
   const configPath = join(runtime, "config/helper-mcps.json");
   if (!existsSync(configPath)) return;
   const config = read(configPath, true), secrets = read(join(runtime, "secrets/shared/mcp-oauth.json"), true);
+  const stored = read(join(options.stateDir, "helper-mcps.json"), true);
+  const overrides = { ...stored.overrides }, targets = { ...stored.targets }, vaultSync = { ...stored.vaultSync };
   const local = discoverHelperMcps(options).servers;
   const byName = new Map(local.map(s => [s.name, s]));
   for (const server of config.servers ?? []) {
-    const remote = { ...server, ...secrets.fields?.[server.name], sources: [...new Set([...(server.sources ?? []), "vault"])] };
+    if (overwrite || typeof overrides[server.name] !== "boolean") overrides[server.name] = true;
+    if (overwrite || typeof vaultSync[server.name] !== "boolean") vaultSync[server.name] = true;
+    if (Array.isArray(server.targetProviders) && (overwrite || !Array.isArray(targets[server.name]))) targets[server.name] = server.targetProviders;
+    const remote = { ...server, ...secrets.fields?.[server.name], enabled: overrides[server.name], vaultSync: vaultSync[server.name], sources: [...new Set([...(server.sources ?? []), "vault"])] };
     const existing = byName.get(server.name);
     if (!overwrite && existing) {
       const merged = { ...existing, sources: [...new Set([...existing.sources, ...remote.sources])] };
@@ -45,10 +49,10 @@ export function hydrateHelperMcpVault(options: HelperMcpOptions, runtime: string
       byName.set(server.name, merged);
     } else byName.set(server.name, remote);
   }
-  const stored = read(join(options.stateDir, "helper-mcps.json"), true);
-  write(join(options.stateDir, "helper-mcps.json"), { servers: [...byName.values()], overrides: overwrite ? { ...stored.overrides, ...config.overrides } : { ...config.overrides, ...stored.overrides } });
-  const bundles = readHelperOAuth(options, [...byName.values()]);
+  write(join(options.stateDir, "helper-mcps.json"), { ...stored, servers: [...byName.values()], overrides, targets, vaultSync });
+  const bundles = readHelperOAuth(options, discoverHelperMcps(options).servers.filter(s => s.enabled));
   for (const [name, remote] of Object.entries(secrets.oauth ?? {}) as Array<[string, HelperOAuthBundle]>) {
+    if (overrides[name] !== true) continue;
     if (!bundles[name] || (remote.tokens.expiresAt ?? 0) > (bundles[name].tokens.expiresAt ?? 0)) bundles[name] = remote;
   }
   materializeHelperOAuth(options, bundles);

@@ -765,12 +765,12 @@ export function FactoryShell({
             actions={{
               busy: busy || activePluginAct !== null,
               checkingUpdates,
-              syncHelpers: () => { void act("Test & Sync MCPs", async () => {
+              syncHelpers: () => { void act("Check Connectivity", async () => {
                 const reply = await helperMcpsSyncCall({});
-                if (reply.ok) setPluginsNote({ text: "Helper MCP sync and connectivity checks completed.", tone: "statusSuccess", pluginId: "all" });
+                if (reply.ok) setPluginsNote({ text: "Connectivity checks completed for synced Peer MCPs.", tone: "statusSuccess", pluginId: "all" });
                 return reply;
               }); },
-              setHelperEnabled: (name, enabled) => { void act(enabled ? "Enable Helper MCP" : "Disable Helper MCP", () => helperMcpsEnableCall({ name, enabled })); },
+              setHelperConfig: (name, config) => { void act("Update Peer MCP", () => helperMcpsEnableCall({ name, ...config })); },
               checkUpdates: () => {
                 setActivePluginAct({ kind: "check", target: "all", startedAt: Date.now() });
                 void act("Check Updates", async () => {

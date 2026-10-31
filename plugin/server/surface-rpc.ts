@@ -1,3 +1,4 @@
+import type { HelperMcpConfigUpdate } from "./core/helper-mcp-sync.ts";
 import { discoverHelperMcps, helperMcpRoster, setHelperMcpEnabled, syncHelperMcps } from "./core/helper-mcp-sync.ts";
 import { provisionPiAgentHome } from "./core/pi-home.ts";
 import { pluginDirFor } from "./paths.ts";
@@ -3257,11 +3258,11 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         } catch { return failure("helper-mcp-sync-failed", "Helper MCP sync could not complete; check host configuration permissions"); }
       });
     },
-    async helperMcpsSetEnabled(input: { name: string; enabled: boolean }) {
+    async helperMcpsSetEnabled(input: { name: string } & HelperMcpConfigUpdate) {
       return serializeSeat("helper-mcps", async () => {
         try {
           const options = { stateDir: deps.stateDir, userHome: resolveSurfaceUserHome() };
-          const result = setHelperMcpEnabled(options, input.name, input.enabled);
+          const result = setHelperMcpEnabled(options, input.name, input);
           provisionPiAgentHome({ stateDir: deps.stateDir, role: "agent", sourceAgentDir: join(options.userHome, ".pi/agent"), helperMcpSources: options });
           return { ok: true as const, helperMcps: helperMcpRoster(result.servers) };
         } catch { return failure("helper-mcp-toggle-failed", "Helper MCP toggle failed; server may no longer exist or configuration is not writable"); }

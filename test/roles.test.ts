@@ -1168,7 +1168,7 @@ test("injectSessionEnv materializes an empty directory stub when resuming an arc
   );
 });
 
-test("Peer create refreshes shared OAuth before provider fencing; coordination seats keep only Factory", async (t) => {
+test("Peer create refreshes selected OAuth before provider fencing; coordination seats keep only Factory", async (t) => {
   const { syncPeerHelpersBeforeCreate } = await import("../plugin/server/roles.ts");
   const { selectCatalog } = await import("../src/mcp/catalog.ts");
   const dir = makeTempDir(); disposeDir(t, dir);
@@ -1178,12 +1178,14 @@ test("Peer create refreshes shared OAuth before provider fencing; coordination s
   const url = "https://mcp.supabase.com/mcp";
   writeFileSync(join(userHome, ".gemini/config/mcp_config.json"), JSON.stringify({ mcpServers: { supabase: { serverUrl: url } } }));
   writeFileSync(join(userHome, ".gemini/antigravity/mcp_oauth_tokens.json"), JSON.stringify({ [url]: { token: { access_token: "valid-test-token", expiry: new Date(Date.now() + 3600000).toISOString() } } }));
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(join(stateDir, "helper-mcps.json"), JSON.stringify({ overrides: { supabase: true }, targets: { supabase: ["pi", "claude"] } }));
   await syncPeerHelpersBeforeCreate({ config: { provider: "factory-peer", cwd: dir } }, stateDir, userHome);
   for (const provider of ["claude", "codex", "opencode", "pi"]) for (const role of ["agent", "lead", "supervisor"] as const) {
     const result = applyProviderExecutionFence({ provider, cwd: dir, mcpServers: { stray: { command: "unused" } } }, { stateDir, userHome, role, projectSlug: "repo", correlationId: "test" });
     const servers = result.mcpServers as any;
     assert.equal(servers.stray, undefined);
-    if (role === "agent") assert.equal(servers.supabase.headers.Authorization, "Bearer valid-test-token");
+    if (role === "agent" && ["pi", "claude"].includes(provider)) assert.equal(servers.supabase.headers.Authorization, "Bearer valid-test-token");
     else assert.equal(servers.supabase, undefined);
     if (role === "supervisor" && provider === "opencode") assert.equal((result as any).providerOptions.permission.skill["domain-modeling"], "allow");
   }

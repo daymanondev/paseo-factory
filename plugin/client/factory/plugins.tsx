@@ -1,3 +1,4 @@
+import type { HelperMcpConfigUpdate } from "../../shared/view.ts";
 /**
  * Tab 4 — Plugins, the Core + `Companion plugin` catalog (v0.0.17, ADR 0012;
  * redesigned in v0.0.25, ADR 0012 §1–§4; amended in v0.0.30 for the private
@@ -58,7 +59,7 @@ export interface PluginsActions {
   /** Trigger an on-demand remote update check across installed plugins (v0.0.25, ADR 0012 §4). */
   checkUpdates(): void;
   syncHelpers?(): void;
-  setHelperEnabled?(name: string, enabled: boolean): void;
+  setHelperConfig?(name: string, config: HelperMcpConfigUpdate): void;
   /** True while an on-demand update check is in flight. */
   checkingUpdates?: boolean;
   busy: boolean;

@@ -316,7 +316,7 @@ export function applyProviderExecutionFence<T extends AgentCreateRequest["config
     delete nextConfig.mcpServers;
     provisionAgyPlugin({ stateDir, userHome, agyPluginsDir });
   } else {
-    const existingMcp = resolveRoleScopedMcpServers({ stateDir, userHome, role });
+    const existingMcp = resolveRoleScopedMcpServers({ stateDir, userHome, role, provider: providerFamily });
     const bridgeServer = {
       type: "stdio" as const,
       command: process.execPath,

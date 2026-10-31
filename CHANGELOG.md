@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.78] - 2026-11-01
+
+### Added
+
+- Selective Peer Helper MCP sync: Pi starters remain selected by default; external-only Antigravity and Claude servers stay local until the Owner selects them. Each synced server has Pi, Claude, Codex and OpenCode targets plus an explicit Private vault opt-in.
+- Two-tab Helper MCP management (`Synced to Peer` / `Available on Host`), provider and Vault controls, one-click Sync/Unsync, and a `Check Connectivity` action limited to selected servers.
+
+### Fixed
+
+- Treat host MCP configuration and OAuth stores as read-only. Materialize refreshed credentials only in Factory state and replace the Peer’s legacy shared OAuth directory symlink with an isolated directory.
+- Export only enabled, Vault-opted-in helper definitions and secrets; preserve local selections during hydration and remove withdrawn shares from subsequent snapshots.
+
 ## [0.0.77] - 2026-10-31
 
 ### Fixed

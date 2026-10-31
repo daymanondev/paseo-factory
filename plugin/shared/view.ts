@@ -410,10 +410,14 @@ export type ExecutionView = z.infer<typeof ExecutionViewSchema>;
 /** Credential-free Helper MCP status displayed to the Owner and coordination seats. */
 export const HelperMcpViewSchema = z.object({
   name: z.string(), transport: z.enum(["stdio", "http"]), enabled: z.boolean(),
+  targetProviders: z.array(z.enum(["pi", "claude", "codex", "opencode"])),
+  vaultSync: z.boolean(),
   sources: z.array(z.enum(["antigravity", "pi", "claude", "vault", "factory"])),
   status: z.enum(["connected", "auth_expired", "missing_env", "unreachable", "disabled"]),
   statusDetail: z.string().optional(), oauthExpiresAt: z.number().optional(),
 });
+
+export type HelperMcpConfigUpdate = Partial<Pick<z.infer<typeof HelperMcpViewSchema>, "enabled" | "targetProviders" | "vaultSync">>;
 
 export const FactoryViewSchema = z.object({
   execution: ExecutionViewSchema.optional(),

@@ -158,6 +158,7 @@ export function provisionPiAgentHome(input: ProvisionPiHomeOptions): string {
   syncMcpJson(sourceAgentDir, roleHome, input.role, input.stateDir, input);
   for (const name of SHARED_STATE_NAMES) {
     const source = join(sourceAgentDir, name);
+    if (input.role === "agent" && name === "mcp-oauth") continue;
     if (existsSync(source)) ensureSymlink(source, join(roleHome, name));
   }
   // Supervisor alone keeps the Owner's personal slash commands and skills:
@@ -255,7 +256,7 @@ function syncMcpJson(sourceAgentDir: string, roleHome: string, role: PiAgentRole
   const target = join(roleHome, "mcp.json");
   if (role === "headless") return;
   const options: HelperMcpOptions = { stateDir, piAgentDir: sourceAgentDir, piOnly: input.sourceAgentDir !== undefined && input.helperMcpSources === undefined, ...input.helperMcpSources };
-  if (role === "agent") materializeHelperOAuth(options, readHelperOAuth(options, discoverHelperMcps(options).servers));
+  if (role === "agent") materializeHelperOAuth(options, readHelperOAuth(options, discoverHelperMcps(options).servers.filter(s => s.enabled)));
   const mcpServers = resolveRoleScopedMcpServers({ ...options, role, pi: true });
   mcpServers.paseo_factory = {
     command: process.execPath,
