@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.83] - 2026-11-01
+
+- Redesign `SkillHubCard` in Operate Mode parity with `HelperMcpsCard`: compact header, 2×2 `Project Skill Packs` grid on the card face, quick-jump `<Chip>` bar, and a collapsible `⋯ Manage` drawer housing live search, category counters, 2-column skill cards (`5/5 linked` status dot instead of repetitive per-harness/role pill walls), deduplicated `Host Ecosystems` cards (including ZCode CLI plugin cache), and expandable `Role ↔ Skill Matrix` cards.
+- Consolidate the redundant `Companion Tools & Skill Packs` block in `PluginsPane` into the unified `SkillHubCard` when `skillHub` is present.
+
 ## [0.0.82] - 2026-11-01
 
 - Add Skill Hub to Plugins: per-skill inventory, cached Git freshness, five-harness link health, host skill and MCP discovery, portable skill imports, Project pack toggles, and the SLP/Scrum role matrix.

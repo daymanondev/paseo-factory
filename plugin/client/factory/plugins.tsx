@@ -698,7 +698,7 @@ export function PluginsPane({
           onDismissError={dismissCardError ? () => dismissCardError(companion.id) : undefined}
         />
       ))}
-      {companionTools.length > 0 ? (
+      {companionTools.length > 0 && !view.skillHub ? (
         <View style={{ gap: SPACING[2], marginTop: SPACING[1] }}>
           <Card theme={theme} gap={SPACING[1]}>
             <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: SPACING[1.5] }}>

@@ -225,6 +225,13 @@ export function discoverHostEcosystems(
   userHome = homedir(),
 ): HostCatalogEntry[] {
   const installed = new Set(inspectFactorySkillPack(userHome).installedSkills);
+  const lock = readSkillLockFile(userHome);
+  const mirrorSkillRoots = new Set([
+    ".zcode/skills",
+    ".claude/skills",
+    ".codex/skills",
+    ".pi/agent/skills",
+  ]);
   const result: HostCatalogEntry[] = [
     {
       id: "expo:official-pack",
@@ -258,6 +265,7 @@ export function discoverHostEcosystems(
   }
   const roots = [
     ["zcode", ".zcode/skills"],
+    ["zcode", ".zcode/cli/plugins/cache/zcode-plugins-official"],
     ["zcode", ".zcode/plugins/cache/zcode-official-plugin"],
     ["antigravity", ".gemini/config/plugins"],
     ["antigravity", ".gemini/antigravity/builtin/skills"],
@@ -282,12 +290,19 @@ export function discoverHostEcosystems(
     } catch {
       continue;
     }
-    for (const name of names.filter((n) => !n.startsWith("."))) {
+    for (const name of names.filter((n) => !n.startsWith(".") && !/^impeccable/i.test(n))) {
+      if (
+        mirrorSkillRoots.has(relative!) &&
+        installed.has(name) &&
+        lock.skills[name]?.source !== `${ecosystem}/${name}`
+      ) {
+        continue;
+      }
       const path = join(root, name),
         paths = walkSkills(path);
       const mcpServers = discoverHostMcpNames(path);
       if (!paths.length && !mcpServers.length) continue;
-      const skills = paths.map((p) => basename(p));
+      const skills = [...new Set(paths.map((p) => basename(p)))];
       const baseId = `${ecosystem}:${name}`;
       const id = result.some((e) => e.id === baseId)
         ? `${baseId}:${relative}`
@@ -373,7 +388,7 @@ export function importHostSkillOrPack(options: {
     return { ok: false as const, reason: String(error) };
   }
   const now = new Date().toISOString();
-  for (const path of paths) {
+  for (const path of [...paths].sort().reverse()) {
     const name = basename(path);
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)) continue;
     const dest = join(home, ".agents/skills", name);
