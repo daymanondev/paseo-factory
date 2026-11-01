@@ -1215,7 +1215,7 @@ function selectionPath(state, slug) {
 }
 function executionIsValid(value) {
   const v = value;
-  return v !== null && typeof v === "object" && v.schemaVersion === 1 && ["slp", "scrum"].includes(v.mode) && Number.isSafeInteger(v.revision) && v.revision >= 0;
+  return v !== null && typeof v === "object" && v.schemaVersion === 1 && ["slp", "scrum"].includes(v.mode) && Number.isSafeInteger(v.revision) && v.revision >= 0 && (v.skillPacks === void 0 || Array.isArray(v.skillPacks) && v.skillPacks.every((p) => typeof p === "string"));
 }
 function readExecution(state, slug) {
   const path = selectionPath(state, slug);

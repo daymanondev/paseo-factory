@@ -1301,3 +1301,30 @@ test("ADR 0039: HelperMcpsCard renders a compact 2-row summary card with a colla
 
 
 
+
+test('PluginsPane SSR renders Skill Hub inventory and Project pack controls', async () => {
+  const { build } = await import('esbuild');
+  const { createRequire } = await import('node:module');
+  const { createElement } = await import('react');
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const { inspectSkillHub } = await import('../src/scrum/companion-tools.ts');
+  const { makeTempDir } = await import('./helpers.ts');
+  const { rmSync } = await import('node:fs');
+  const home = makeTempDir();
+  try {
+    const bundle = await build({ entryPoints: [join(repoRoot, 'plugin/client/factory/plugins.tsx')], bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic', external: ['react', 'react/jsx-runtime'], plugins: [{ name: 'native-ssr-adapter', setup(b) {
+      b.onResolve({ filter: /^(react-native|@getpaseo\/plugin\/client\/ui)$/ }, args => ({ path: args.path, namespace: 'native-ssr' }));
+      b.onLoad({ filter: /.*/, namespace: 'native-ssr' }, () => ({ contents: `const React = require('react'); const component = tag => ({children, disabled, onPress}) => React.createElement(tag, {disabled, onClick:onPress}, children); exports.View=component('div'); exports.Text=component('span'); exports.Pressable=component('button'); exports.Icon=()=>null; exports.TextInput=component('input');`, loader: 'js' }));
+    } }] });
+    const compiled = { exports: {} as Record<string, any> };
+    new Function('require', 'module', 'exports', bundle.outputFiles[0]!.text)(createRequire(import.meta.url), compiled, compiled.exports);
+    const theme = { colors: { surface0: '#ffffff', surface1: '#f5f5f5', surface2: '#eeeeee', foreground: '#111111', foregroundMuted: '#555555', accent: '#3355aa', border: '#cccccc', statusSuccess: '#217342', statusWarning: '#8a6010', statusDanger: '#ae3131' } };
+    const view = { ...makeViewWithCore(), corePlugin: makeCorePluginFixture(), companions: [], companionTools: [], pluginsCheckedAt: null, skillHub: inspectSkillHub({ userHome: home }), project: { root: '/project' } };
+    const html = renderToStaticMarkup(createElement(compiled.exports.PluginsPane, { theme, view, actions: { busy: false, install() {}, manage() {}, checkUpdates() {}, togglePack() {}, importSkill() {} } }));
+    assert.match(html, /Skill Hub — Inventory, Host Ecosystems &amp; Role Matrix/);
+    assert.match(html, /Installed in Factory \(0\)/);
+    assert.match(html, /Host Ecosystems \(1\)/);
+    assert.match(html, /Expo &amp; React Native/);
+    assert.match(html, /Enable for Project/);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});

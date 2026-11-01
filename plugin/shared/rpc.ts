@@ -573,3 +573,12 @@ export const openDesignStatus = defineRpc({ name: 'factory.open_design.status', 
 export const openDesignSync = defineRpc({ name: 'factory.open_design.sync', input: z.object({ projectRoot: z.string(), projectId: z.string().optional(), bundle: OpenDesignBundleSchema.optional(), syncRequestId: z.string().optional(), expectedDigest: z.string().optional() }), output: z.union([z.object({ ok: z.literal(true), link: OpenDesignProjectLinkSchema }), Failure]) });
 export const openDesignUnlink = defineRpc({ name: 'factory.open_design.unlink', input: z.object({ projectRoot: z.string() }), output: z.union([z.object({ ok: z.literal(true) }), Failure]) });
 export const openDesignPreview = defineRpc({ name: 'factory.open_design.preview', input: z.object({ projectRoot: z.string(), operation: z.enum(['preview.url', 'preview.bundle']).optional() }), output: z.union([z.object({ ok: z.literal(true), bundle: z.unknown().optional(), url: z.string().optional(), urls: z.array(z.string()).optional() }), Failure]) });
+
+export const skillsImport = defineRpc({
+  name: 'factory.skills.import', input: z.object({ id: z.string().min(1) }),
+  output: z.union([z.object({ ok: z.literal(true), summary: z.string() }), Failure]),
+});
+export const skillsTogglePack = defineRpc({
+  name: 'factory.skills.toggle_pack', input: z.object({ projectRoot: z.string(), pack: z.enum(['expo', 'firebase', 'zcode-3d', 'science']), enabled: z.boolean() }),
+  output: z.union([z.object({ ok: z.literal(true), summary: z.string() }), Failure]),
+});

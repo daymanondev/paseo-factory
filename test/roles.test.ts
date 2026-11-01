@@ -233,7 +233,7 @@ test("injectRoleOnCreate wires Layer-1 provider fence, paseo_factory MCP, and co
         edit: "deny",
         task: "deny",
         bash: "ask",
-        skill: { "*": "deny", grilling: "allow", "domain-modeling": "allow" },
+        skill: { "*": "deny", grilling: "allow", "domain-modeling": "allow", "grill-with-docs": "allow", research: "allow", factory: "allow" },
       });
       const hyphenMcp = (res.config.mcpServers as Record<string, { command: string; args: string[] }>)?.["paseo-factory"];
       assert.ok(hyphenMcp !== undefined, "opencode also receives config.mcpServers['paseo-factory'] to survive bridge-plugin.mjs");
@@ -501,7 +501,7 @@ test("injectRoleOnCreate recognizes factory-supervisor by provider id alone — 
     edit: "deny",
     task: "deny",
     bash: "ask",
-    skill: { "*": "deny", grilling: "allow", "domain-modeling": "allow" },
+    skill: { "*": "deny", grilling: "allow", "domain-modeling": "allow", "grill-with-docs": "allow", research: "allow", factory: "allow" },
   });
   // paseo_factory MCP (plus paseo-factory alias for OpenCode v2 bridge-plugin.mjs) with Node mode and the correlation token.
   const mcp = (res.config.mcpServers as Record<string, { env: Record<string, string>; args: string[] }>).paseo_factory;

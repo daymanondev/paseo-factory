@@ -1032,7 +1032,7 @@ import { randomUUID as randomUUID3 } from "node:crypto";
 // src/scrum/selection.ts
 function executionIsValid(value) {
   const v = value;
-  return v !== null && typeof v === "object" && v.schemaVersion === 1 && ["slp", "scrum"].includes(v.mode) && Number.isSafeInteger(v.revision) && v.revision >= 0;
+  return v !== null && typeof v === "object" && v.schemaVersion === 1 && ["slp", "scrum"].includes(v.mode) && Number.isSafeInteger(v.revision) && v.revision >= 0 && (v.skillPacks === void 0 || Array.isArray(v.skillPacks) && v.skillPacks.every((p) => typeof p === "string"));
 }
 
 // src/project.ts
@@ -2191,6 +2191,7 @@ function endpoint(url) {
   }
 }
 function canonical(name, entry) {
+  if (/^expo[-_]mcp$/i.test(name) || typeof entry.url === "string" && endpoint(entry.url) === "https://mcp.expo.dev/mcp") return "expo-mcp";
   if (/^open[-_]design$/i.test(name)) return "open-design";
   const invocation = [entry.command, ...Array.isArray(entry.args) ? entry.args : []].join(" ");
   if (/\bchrome-devtools-mcp(?:@|\b)/.test(invocation)) return "chrome-devtools-mcp";
@@ -2219,6 +2220,7 @@ function discoverHelperMcps(options) {
   const stored = Array.isArray(persisted.servers) ? Object.fromEntries(persisted.servers.map((s) => [s.name, s])) : persisted.mcpServers ?? {};
   const host = inspectOpenDesignHost();
   if (host.cli) sources.push(["factory", { "open-design": { command: host.binary, args: [host.cli, "mcp"], env: { ELECTRON_RUN_AS_NODE: "1" }, enabled: false } }]);
+  if (existsSync5(join7(p.userHome, ".agents/skills/expo-overview/SKILL.md"))) sources.push(["factory", { "expo-mcp": { url: "https://mcp.expo.dev/mcp", oauthRequired: true, enabled: false } }]);
   sources.push(["factory", stored]);
   const merged = /* @__PURE__ */ new Map(), disabled = /* @__PURE__ */ new Set(), currentPiNames = /* @__PURE__ */ new Set();
   for (const [source, servers2] of sources) for (const [alias, raw] of Object.entries(servers2)) {
@@ -2239,7 +2241,7 @@ function discoverHelperMcps(options) {
       ...url ? { url } : { command: normalizeCommand(value.command, p.userHome), args: Array.isArray(value.args) ? value.args.filter((s) => typeof s === "string") : [] },
       ...strings(value.env) ? { env: strings(value.env) } : {},
       ...strings(value.headers) ? { headers: strings(value.headers) } : {},
-      ...value.auth === "oauth" || value.oauthRequired === true ? { oauthRequired: true } : {},
+      ...name === "expo-mcp" || value.auth === "oauth" || value.oauthRequired === true ? { oauthRequired: true } : {},
       ...typeof value.auth === "object" && value.auth !== null ? { auth: value.auth } : {},
       ...typeof value.timeout === "number" ? { timeout: value.timeout } : {},
       ...name === "zai-vision" ? { timeout: 300 } : {}
@@ -2908,84 +2910,49 @@ function materializeProjectScrumVault(state, slug, runtimeApp, overwrite) {
 }
 
 // src/scrum/companion-tools.ts
-import { existsSync as existsSync10, mkdirSync as mkdirSync9, mkdtempSync, readdirSync as readdirSync7, symlinkSync as symlinkSync2, rmSync as rmSync7, writeFileSync as writeFileSync7, lstatSync as lstatSync2, readFileSync as readFileSync13, copyFileSync as copyFileSync2, statSync as statSync4 } from "node:fs";
+import { existsSync as existsSync10, mkdirSync as mkdirSync9, mkdtempSync, readdirSync as readdirSync7, symlinkSync as symlinkSync2, rmSync as rmSync7, writeFileSync as writeFileSync7, readFileSync as readFileSync13, copyFileSync as copyFileSync2, realpathSync as realpathSync5 } from "node:fs";
 import { homedir as homedir3, tmpdir } from "node:os";
-import { delimiter as delimiter2, dirname as dirname12, join as join15, resolve as resolve6 } from "node:path";
+import { delimiter as delimiter2, dirname as dirname12, join as join15 } from "node:path";
+function providerSkillDirectories(userHome) {
+  return Object.fromEntries([
+    ["Pi", ".pi/agent/skills"],
+    ["Claude", ".claude/skills"],
+    ["Antigravity", ".gemini/config/skills"],
+    ...["Codex", "ZCode"].filter((name) => existsSync10(join15(userHome, "." + name.toLowerCase()))).map((name) => [name, "." + name.toLowerCase() + "/skills"])
+  ].map(([name, path]) => [name, join15(userHome, path)]));
+}
 function ensureProviderSkillSymlinks(userHome = homedir3()) {
-  const agentsSkillsDir = join15(userHome, ".agents", "skills");
-  for (const dir of [agentsSkillsDir, join15(userHome, ".pi/agent/skills"), join15(userHome, ".claude/skills"), join15(userHome, ".gemini/config/skills")]) {
+  const canonical2 = join15(userHome, ".agents/skills");
+  const targets = Object.values(providerSkillDirectories(userHome));
+  for (const dir of [canonical2, ...targets]) {
     if (!existsSync10(dir)) continue;
     for (const name of readdirSync7(dir)) {
-      if (/^impeccable/i.test(name)) rmSync7(join15(dir, name), { recursive: true, force: true });
+      if (/^(impeccable|critique$|audit$|polish$|normalize$|harden$|clarify$)/i.test(name)) rmSync7(join15(dir, name), { recursive: true, force: true });
     }
   }
-  if (!existsSync10(agentsSkillsDir)) return { linked: [] };
-  let skillNames = [];
-  try {
-    skillNames = readdirSync7(agentsSkillsDir).filter((name) => {
-      if (name.startsWith(".")) return false;
-      const skillPath = join15(agentsSkillsDir, name);
-      try {
-        return statSync4(skillPath).isDirectory() && existsSync10(join15(skillPath, "SKILL.md"));
-      } catch {
-        return false;
-      }
-    });
-  } catch {
-    return { linked: [] };
-  }
-  if (skillNames.length === 0) return { linked: [] };
-  const providerTargets = [
-    join15(userHome, ".pi", "agent", "skills"),
-    join15(userHome, ".claude", "skills"),
-    join15(userHome, ".gemini", "config", "skills")
-  ];
-  const resolvedAgentsSkills = (() => {
-    try {
-      return resolve6(agentsSkillsDir);
-    } catch {
-      return agentsSkillsDir;
-    }
-  })();
   const linked = [];
-  for (const targetDir of providerTargets) {
-    try {
-      if (existsSync10(targetDir)) {
-        const st = lstatSync2(targetDir);
-        if (st.isSymbolicLink()) {
-          try {
-            if (resolve6(targetDir) === resolvedAgentsSkills) continue;
-          } catch {
-          }
-        }
+  if (!existsSync10(canonical2)) return { linked };
+  for (const target of targets) {
+    if (existsSync10(target) && realpathSync5(target) === realpathSync5(canonical2)) continue;
+    mkdirSync9(target, { recursive: true });
+    for (const name of readdirSync7(canonical2)) {
+      const src = join15(canonical2, name), dest = join15(target, name);
+      if (!existsSync10(join15(src, "SKILL.md"))) continue;
+      try {
+        if (realpathSync5(src) === realpathSync5(dest)) continue;
+      } catch {
       }
-      mkdirSync9(targetDir, { recursive: true });
-      for (const name of skillNames) {
-        const dest = join15(targetDir, name);
-        const src = join15(agentsSkillsDir, name);
-        let existsValid = false;
-        try {
-          const lst = lstatSync2(dest);
-          if (lst.isSymbolicLink()) {
-            existsValid = existsSync10(dest);
-            if (!existsValid) rmSync7(dest, { force: true });
-          } else {
-            existsValid = true;
-          }
-        } catch {
-          existsValid = false;
-        }
-        if (!existsValid) {
-          mkdirSync9(dirname12(dest), { recursive: true });
-          symlinkSync2(src, dest, "dir");
-          linked.push(dest);
-        }
-      }
-    } catch {
+      rmSync7(dest, { recursive: true, force: true });
+      symlinkSync2(src, dest, "dir");
+      linked.push(dest);
     }
   }
   return { linked };
 }
+var EXPO_STABLE_SKILLS = ["eas-app-stores", "eas-hosting", "eas-observe", "eas-simulator", "eas-update", "eas-update-insights", "eas-workflows", "expo-animation", "expo-app-clip", "expo-brownfield", "expo-data-fetching", "expo-design-system", "expo-dev-client", "expo-dom", "expo-examples", "expo-module", "expo-native-ui", "expo-overview", "expo-project-structure", "expo-router", "expo-ui", "expo-upgrade", "expo-web-to-native"];
+var EXPO_EXPERIMENTAL_SKILLS = ["expo-migrate-module"];
+var EXPO_SKILLS = [...EXPO_STABLE_SKILLS, ...EXPO_EXPERIMENTAL_SKILLS];
+var EXPO_SKILL_SOURCES = EXPO_SKILLS.map((name) => ({ name, source: "expo/skills", sourceUrl: "https://github.com/expo/skills.git", skillPath: `plugins/${name === "expo-migrate-module" ? "expo-experiments" : "expo"}/skills/${name}` }));
 
 // src/vault-transport.ts
 import { execFile } from "node:child_process";

@@ -39,6 +39,7 @@ export function helperOAuthPath(agentDir: string, name: string): string {
 }
 function endpoint(url: string): string { try { const u = new URL(url); return u.origin + u.pathname.replace(/\/$/, ""); } catch { return url; } }
 function canonical(name: string, entry: ObjectMap): string {
+  if (/^expo[-_]mcp$/i.test(name) || (typeof entry.url === "string" && endpoint(entry.url) === "https://mcp.expo.dev/mcp")) return "expo-mcp";
   if (/^open[-_]design$/i.test(name)) return "open-design";
   const invocation = [entry.command, ...(Array.isArray(entry.args) ? entry.args : [])].join(" ");
   if (/\bchrome-devtools-mcp(?:@|\b)/.test(invocation)) return "chrome-devtools-mcp";
@@ -65,6 +66,7 @@ export function discoverHelperMcps(options: HelperMcpOptions): HelperMcpCatalogS
   const stored = Array.isArray(persisted.servers) ? Object.fromEntries(persisted.servers.map((s: ObjectMap) => [s.name, s])) : persisted.mcpServers ?? {};
   const host = inspectOpenDesignHost();
   if (host.cli) sources.push(["factory", { 'open-design': { command: host.binary, args: [host.cli, 'mcp'], env: { ELECTRON_RUN_AS_NODE: '1' }, enabled: false } }]);
+  if (existsSync(join(p.userHome, '.agents/skills/expo-overview/SKILL.md'))) sources.push(['factory', { 'expo-mcp': { url: 'https://mcp.expo.dev/mcp', oauthRequired: true, enabled: false } }]);
   sources.push(["factory", stored]);
   const merged = new Map<string, HelperMcpServerEntry>(), disabled = new Set<string>(), currentPiNames = new Set<string>();
   for (const [source, servers] of sources) for (const [alias, raw] of Object.entries(servers)) {
@@ -78,7 +80,7 @@ export function discoverHelperMcps(options: HelperMcpOptions): HelperMcpCatalogS
       sources: source === "factory" && Array.isArray(value.sources) ? value.sources.filter((s: string) => ["antigravity", "pi", "claude", "vault", "factory"].includes(s)) : [source], status: "unreachable",
       ...(url ? { url } : { command: normalizeCommand(value.command as string, p.userHome), args: Array.isArray(value.args) ? value.args.filter((s: unknown) => typeof s === "string") : [] }),
       ...(strings(value.env) ? { env: strings(value.env) } : {}), ...(strings(value.headers) ? { headers: strings(value.headers) } : {}),
-      ...((value.auth === "oauth" || value.oauthRequired === true) ? { oauthRequired: true } : {}),
+      ...((name === "expo-mcp" || value.auth === "oauth" || value.oauthRequired === true) ? { oauthRequired: true } : {}),
       ...(typeof value.auth === "object" && value.auth !== null ? { auth: value.auth } : {}),
       ...(typeof value.timeout === "number" ? { timeout: value.timeout } : {}), ...(name === "zai-vision" ? { timeout: 300 } : {}) };
     if (source === "pi") currentPiNames.add(name);

@@ -20,7 +20,7 @@ import { Modal, ScrollView, useToast } from "@getpaseo/plugin/client/ui";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Text, View } from "react-native";
 import { z } from "zod";
-import { accept, executionSetMode, scrumCommand, lanesReset, lanesSet, lanesSetBatch, leadRotate, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, profilesApply, profilesDelete, profilesSave, projectAdd, projectDelete, projectPickFolder, projectReset, ratifyProposal, retro, snapshot, supervisorRevoke, taskDetail, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
+import { skillsImport, skillsTogglePack, accept, executionSetMode, scrumCommand, lanesReset, lanesSet, lanesSetBatch, leadRotate, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, profilesApply, profilesDelete, profilesSave, projectAdd, projectDelete, projectPickFolder, projectReset, ratifyProposal, retro, snapshot, supervisorRevoke, taskDetail, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
 import type { ManageablePluginId } from "../../shared/companions.ts";
 import type { FactoryView, LaneName } from "../../shared/view.ts";
 import { Btn, Card, Pill, TabBar } from "../kit/pill.tsx";
@@ -101,6 +101,8 @@ export function FactoryShell({
   const helperMcpsSyncCall = useRpc(helperMcpsSyncAndProbe);
   const helperMcpsEnableCall = useRpc(helperMcpsSetEnabled);
   const pluginsInstallCall = useRpc(pluginsInstall);
+  const skillsImportCall = useRpc(skillsImport);
+  const skillsTogglePackCall = useRpc(skillsTogglePack);
   const pluginsManageCall = useRpc(pluginsManage);
   const pluginsCheckUpdatesCall = useRpc(pluginsCheckUpdates);
   // The Private vault RPCs (v0.0.21–v0.0.22, ADR 0014 §4): one useRpc per
@@ -767,6 +769,8 @@ export function FactoryShell({
             actions={{
               busy: busy || activePluginAct !== null,
               checkingUpdates,
+              importSkill: id => { void act('Import Skill', () => skillsImportCall({ id })); },
+              togglePack: (pack, enabled) => { if (view.project) void act('Project Skill Pack', () => skillsTogglePackCall({ projectRoot: view.project!.root, pack: pack as 'expo' | 'firebase' | 'zcode-3d' | 'science', enabled })); },
               syncHelpers: () => { void act("Check Connectivity", async () => {
                 const reply = await helperMcpsSyncCall({});
                 if (reply.ok) setPluginsNote({ text: "Connectivity checks completed for synced Peer MCPs.", tone: "statusSuccess", pluginId: "all" });

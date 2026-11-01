@@ -1,3 +1,4 @@
+import { resolveRoleSkillsForProject } from "./skill-hub.ts";
 import { seedLinkedOpenDesign } from "./open-design-link.ts";
 import { stageOpenDesignFrames, inspectOpenDesignHost, openDesignWorkspace } from "./open-design.ts";
 import { assertOwnerDependencies } from "./owner-work.ts";
@@ -14,13 +15,13 @@ import { readLedgerEvents } from "../ledger-read.ts";
 import { readRun, listRuns, terminalRun } from "./run-journal.ts";
 import { SCRUM_ROLE_SKILLS, renderScrumPrompt } from "./prompts.ts";
 import type { ScrumTaskBinding } from "./types.ts";
-export type ScrumHarnessIdentity =
+export type ScrumHarnessIdentity = ({ projectRoot?: string; configuredPacks?: string[]; contractSkills?: string[] } & (
   | {
       kind: "seat";
       selectionRevision: number;
       config: import("./config.ts").ScrumConfig;
     }
-  | { kind: "task"; binding: ScrumTaskBinding; task: string; epoch: number };
+  | { kind: "task"; binding: ScrumTaskBinding; task: string; epoch: number }));
 export function resolveScrumIdentity(
   state: string,
   slug: string,
@@ -48,6 +49,9 @@ export function resolveScrumIdentity(
     readRun(state, slug, contract.execution.runId);
     return {
       kind: "task",
+      projectRoot: readProjectRegistration(state, slug)?.root,
+      configuredPacks: readExecution(state, slug).skillPacks,
+      contractSkills: contract.skills,
       binding: contract.execution,
       task,
       epoch: contract.seq,
@@ -59,7 +63,7 @@ export function resolveScrumIdentity(
     listRuns(state, slug).find((r) => !terminalRun(r))?.config ??
     readScrumConfig(state, slug);
   if (!config) throw new FactoryError("scrum-config-missing", slug);
-  return { kind: "seat", selectionRevision: selected.revision, config };
+  return { kind: "seat", selectionRevision: selected.revision, config, projectRoot: readProjectRegistration(state, slug)?.root, configuredPacks: selected.skillPacks };
 }
 export function scrumIdentityLane(
   state: string,
@@ -90,6 +94,9 @@ export function provisionScrumHarness(input: {
   generation: string;
   userHome?: string;
   workspace?: string;
+  projectRoot?: string;
+  configuredPacks?: string[];
+  contractSkills?: string[];
   environment?: Record<string, string | undefined>;
 }): string {
   const { state, slug, identity, authority } = input;
@@ -171,7 +178,7 @@ export function provisionScrumHarness(input: {
   for (const file of ['impeccable-hook.mjs', 'impeccable-opencode.mjs', 'hooks.json', 'hooks', '.claude-plugin', 'agy-settings.json', 'copilot']) rmSync(join(roleHome, file), { recursive: true, force: true });
   const settingsPath = join(roleHome, 'settings.json');
   const settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
-  const skills = identity.kind === 'task' ? SCRUM_ROLE_SKILLS[identity.binding.role] : authority === 'supervisor' ? ['grilling', 'domain-modeling'] : ['codebase-design', 'domain-modeling', 'tdd'];
+  const skills = resolveRoleSkillsForProject({ role, projectRoot: input.projectRoot ?? identity.projectRoot ?? readProjectRegistration(state, slug)?.root, configuredPacks: input.configuredPacks ?? identity.configuredPacks ?? readExecution(state, slug).skillPacks, contractSkills: input.contractSkills ?? identity.contractSkills, userHome: input.userHome });
   rmSync(join(roleHome, 'skills'), { recursive: true, force: true });
   settings.skills = ['!*', ...skills.map(s => `+${join(input.userHome ?? homedir(), '.agents/skills', s)}`)];
   writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
@@ -200,12 +207,13 @@ export function scopeScrumCapabilities<
   authority: "supervisor" | "lead" | "agent",
   identity: ScrumHarnessIdentity,
   roleHome?: string,
+  skillOptions: { projectRoot?: string; configuredPacks?: string[]; contractSkills?: string[]; userHome?: string } = {},
 ): T {
   const helpers =
     identity.kind === "task" &&
     ["ux", "dev", "qa"].includes(identity.binding.role)
-      ? /context7|exa|search|research|vision|chrome|playwright|browser|open-design|open_design/i
-      : /context7|exa|search|research|notion|open-design|open_design/i;
+      ? /context7|exa|search|research|vision|chrome|playwright|browser|open-design|open_design|expo|supabase|firebase/i
+      : /context7|exa|search|research|notion|open-design|open_design|expo|supabase|firebase/i;
   const mcpServers = Object.fromEntries(
     Object.entries(config.mcpServers ?? {}).filter(
       ([name]) =>
@@ -214,12 +222,7 @@ export function scopeScrumCapabilities<
         (authority === "agent" && helpers.test(name)),
     ),
   );
-  const skills =
-    identity.kind === "task"
-      ? SCRUM_ROLE_SKILLS[identity.binding.role]
-      : authority === "supervisor"
-        ? ["grilling", "domain-modeling"]
-        : ["codebase-design", "domain-modeling", "tdd"];
+  const skills = resolveRoleSkillsForProject({ ...identity, ...skillOptions, role: identity.kind === 'task' ? identity.binding.role : authority === 'supervisor' ? 'supervisor' : 'lead' });
   const options = config.providerOptions ?? {},
     permission =
       typeof options.permission === "object" && options.permission !== null

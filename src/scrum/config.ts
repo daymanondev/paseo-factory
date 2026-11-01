@@ -173,3 +173,13 @@ export function ensureScrumConfig(
     return next;
   });
 }
+
+export function setProjectSkillPacks(state: string, slug: string, skillPacks: string[]): ExecutionSelection {
+  return scrumMutation(state, () => {
+    const current = readExecution(state, slug);
+    if (skillPacks.some(p => !['expo', 'firebase', 'zcode-3d', 'science'].includes(p))) throw new FactoryError('invalid-skill-pack', 'Unknown Project skill pack');
+    const next = { ...current, revision: current.revision + 1, skillPacks: [...new Set(skillPacks)] };
+    atomicJson(join(scopeDir(state, slug), 'execution.json'), next);
+    return next;
+  });
+}

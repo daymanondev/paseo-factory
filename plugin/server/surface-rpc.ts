@@ -1,3 +1,4 @@
+import { setProjectSkillPacks } from "./core/scrum/config.ts";
 import { linkedPreviewBundle } from "./core/scrum/preview-bundle.ts";
 import { serveLinkedPreview } from "./core/scrum/preview-server.ts";
 import { seedLinkedOpenDesign } from "./core/scrum/open-design-link.ts";
@@ -61,6 +62,7 @@ import {
   ensureProviderSkillSymlinks,
   inspectFactorySkillPack,
   installOrUpdateFactorySkillPack,
+  installOrUpdateExpoSkillPack, inspectSkillHub, importHostSkillOrPack, detectProjectSkillPacks,
 } from "./core/scrum/companion-tools.ts";
 import type { CompanionToolRunner, CompanionToolUpdateStatus } from "./core/scrum/companion-tools.ts";
 import { basename, join, resolve } from "node:path";
@@ -91,6 +93,7 @@ import {
   helperMcpsSyncAndProbe,
   helperMcpsSetEnabled,
   pluginsCheckUpdates,
+  skillsImport, skillsTogglePack,
   pluginsInstall,
   pluginsManage,
   profilesApply,
@@ -1757,6 +1760,12 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     return { ok: true, summary: res.summary };
   };
 
+  const updateInstalledExpo = (): { ok: true } | { ok: false; reason: string } => {
+    const userHome = resolveSurfaceUserHome();
+    if (!existsSync(join(userHome, '.agents/skills/expo-overview/SKILL.md'))) return { ok: true };
+    return installOrUpdateExpoSkillPack({ userHome, action: 'update', runner: deps.companionToolRunner });
+  };
+
   // The command journals notification intent before crossing the mailbox boundary.
   // Mailbox request IDs dedupe the crash window between queueing and this receipt.
   const deliverScrumNotifications = async (project: { root: string; slug: string }, runId: string) => {
@@ -2183,6 +2192,13 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         try { execution.busyReason = (await executionWork(enrichedProject, context, rawAgents)).blockers.join("; ") || null; }
         catch (error) { execution.error ??= messageOf(error); execution.busyReason = "Execution state needs recovery: " + messageOf(error); }
       }
+      const latestContracts = new Map(allEvents.filter(e => e.event === 'contract_set').map(e => [e.task, e]));
+      const contractGrants = enrichedProject ? [...latestContracts.values()]
+        .filter(e => e.execution && taskInProject(e.task, enrichedProject.root, enrichedProject.slug) && !projectTask(allEvents, e.task).settled)
+        .map(e => ({ task: e.task, role: e.execution!.role, skills: e.skills ?? [] })) : [];
+      let configuredPacks: string[] | undefined;
+      try { configuredPacks = enrichedProject ? readExecution(deps.stateDir, enrichedProject.slug).skillPacks : undefined; }
+      catch { configuredPacks = []; } // executionView already exposes the damaged selection; do not widen skills.
       return {
         ok: true as const,
         view: {
@@ -2190,6 +2206,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           execution,
           tasks: enrichTaskPeerAgents(view.tasks, rawAgents),
           machineLanes: machineLanes.lanes,
+          skillHub: inspectSkillHub({ contractGrants, slpLanes: lanes.lanes, userHome: resolveSurfaceUserHome(), projectRoot: enrichedProject?.root, configuredPacks }),
           companionTools: buildCompanionToolsView(),
           helperMcps: helperMcpRoster(discoverHelperMcps({ stateDir: deps.stateDir, userHome: resolveSurfaceUserHome() }).servers),
           ...laneProfilesGather(enrichedProject?.slug, view.lanes),
@@ -3072,6 +3089,20 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
 
     // ---- the companion plugin lifecycle (v0.0.17, ADR 0012 §3) -----------------------------
 
+    async skillsImport(input: { id: string }) {
+      try {
+        const reply = importHostSkillOrPack({ ...input, userHome: resolveSurfaceUserHome(), runner: deps.companionToolRunner });
+        return reply.ok ? { ok: true as const, summary: reply.summary } : failure('skill-import-failed', reply.reason);
+      } catch (error) { return failure(codeOf(error), messageOf(error)); }
+    },
+    async skillsTogglePack(input: { projectRoot: string; pack: string; enabled: boolean }) {
+      try {
+        const project = projectOrRefusal(input.projectRoot); if (!project.ok) return project;
+        const current = readExecution(deps.stateDir, project.slug).skillPacks ?? detectProjectSkillPacks(project.root);
+        setProjectSkillPacks(deps.stateDir, project.slug, input.enabled ? [...new Set([...current, input.pack])] : current.filter(p => p !== input.pack));
+        return { ok: true as const, summary: `${input.pack} ${input.enabled ? 'enabled' : 'disabled'} for Project; applies to new seats` };
+      } catch (error) { return failure(codeOf(error), messageOf(error)); }
+    },
     async pluginsInstall(
       input: { target: ManageablePluginId | "all"; source?: string; ref?: string; includeTools?: boolean },
       _context?: SurfaceCallContext,
@@ -3131,6 +3162,9 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         if (entry.access === "private" && !isLocalCompanionGitSource(source) && (deps.installPlugin === undefined || deps.vaultRunner !== undefined)) {
           const probe = await probeCompanionGitAccess(source, vaultRunnerOptions());
           if (!probe.ok) return failure("private-companion-access-denied", probe.reason);
+        }
+        if (entry.id === CORE_PLUGIN_ENTRY.id) {
+          const expo = updateInstalledExpo(); if (!expo.ok) return failure('skill-update-failed', expo.reason);
         }
         const reply = await installer(deps.home, { id: entry.id, source, ...(input.ref !== undefined ? { ref: input.ref } : {}) });
         if (!reply.ok) return failure("daemon_failed", reply.reason);
@@ -3192,6 +3226,9 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         localUpdateSnapshot = null;
         const summaries: string[] = [];
         for (const target of targets) {
+          if (target.id === CORE_PLUGIN_ENTRY.id) {
+            const expo = updateInstalledExpo(); if (!expo.ok) return failure('skill-update-failed', expo.reason);
+          }
           const reply = await manager(deps.home, target.id, "update");
           if (!reply.ok) return failure("daemon_failed", reply.reason);
           summaries.push(pluginsManageSummary(target.id, "update", reply.update));
@@ -3225,6 +3262,9 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         );
       }
       localUpdateSnapshot = null;
+      if (isCore && input.action === 'update') {
+        const expo = updateInstalledExpo(); if (!expo.ok) return failure('skill-update-failed', expo.reason);
+      }
       const reply = await manager(deps.home, input.pluginId, input.action);
       if (!reply.ok) return failure("daemon_failed", reply.reason);
       const summary = pluginsManageSummary(input.pluginId, input.action, reply.update);
@@ -3510,6 +3550,8 @@ export function registerSurfaceRpc(
   server.handle(projectReset, (input, context) => handlers.projectReset(input, pass(context)));
   server.handle(leadDispatch, (input, context) => handlers.leadDispatch(input, pass(context)));
   server.handle(ratifyProposal, (input, context) => handlers.ratifyProposal(input, pass(context)));
+  server.handle(skillsImport, input => handlers.skillsImport(input));
+  server.handle(skillsTogglePack, input => handlers.skillsTogglePack(input));
   server.handle(pluginsInstall, (input, context) => handlers.pluginsInstall(input, pass(context)));
   server.handle(pluginsManage, (input, context) => handlers.pluginsManage(input, pass(context)));
   server.handle(helperMcpsSyncAndProbe, (input, context) => { pass(context); return handlers.helperMcpsSyncAndProbe(input); });

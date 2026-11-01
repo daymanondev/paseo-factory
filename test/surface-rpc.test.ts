@@ -6262,6 +6262,7 @@ test("ADR 0036: snapshot surfaces only the Factory Core Skill Pack, pluginsCheck
   const factory = createFactory({ stateDir, retroCopilotRunner: retroRunner.runner, retroCopilotProbe: () => true, eyeCliProbe: () => false });
   const fake = fakeDaemon([]);
 
+  const { CORE_SKILL_SOURCES } = await import('../src/scrum/companion-tools.ts');
   const toolCalls: Array<{ command: string; args: string[] }> = [];
   const handlers = createSurfaceHandlers({
     factory,
@@ -6280,6 +6281,11 @@ test("ADR 0036: snapshot surfaces only the Factory Core Skill Pack, pluginsCheck
     }),
     companionToolRunner: (command, args) => {
       toolCalls.push({ command, args });
+      if (args[0] === 'clone') for (const entry of CORE_SKILL_SOURCES.filter(e => e.sourceUrl === args[3])) {
+        mkdirSync(join(args[4]!, entry.skillPath), { recursive: true });
+        writeFileSync(join(args[4]!, entry.skillPath, 'SKILL.md'), `# ${entry.name}`);
+      }
+
       if (command === "git" && args[0] === "ls-remote") {
         return { status: 0, stdout: "9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f0e\tHEAD\n", stderr: "" };
       }
@@ -6312,7 +6318,7 @@ test("ADR 0036: snapshot surfaces only the Factory Core Skill Pack, pluginsCheck
   assert.deepEqual(
     snap2.view.companionTools?.map((tool) => [tool.id, tool.status, tool.version]),
     [
-      ["factory-skills-pack", "running", "1.0.0"],
+      ["factory-skills-pack", "running", "10.0.0"],
     ],
   );
 
@@ -6495,4 +6501,35 @@ test('design checkpoint retries retain managed deletions after a repository hook
   const retry = await f.handlers.openDesignSync({ projectRoot: project.root }); assert.ok(retry.ok, JSON.stringify(retry));
   assert.equal(execFileSync('git', ['-C', project.root, 'ls-tree', 'HEAD', 'design/old.js'], { encoding: 'utf8' }).trim(), '');
   assert.equal(execFileSync('git', ['-C', project.root, 'diff', '--cached', '--name-only'], { encoding: 'utf8' }).trim(), '');
+});
+
+test('Skill Hub RPC imports host skills and persists explicit Project pack overrides', async (t) => {
+  const userHome = makeTempDir(); disposeDir(t, userHome);
+  const stateDir = makeTempDir(); disposeDir(t, stateDir);
+  const repo = makeTempDir(); disposeDir(t, repo);
+  writeFileSync(join(repo, 'package.json'), JSON.stringify({ dependencies: { expo: '*' } })); gitCommitAll(repo);
+  const project = resolveProject(repo); assert.ok(project.ok); if (!project.ok) return;
+  const { ensureProjectRegistered } = await import('../plugin/server/core/project.ts');
+  const { readExecution } = await import('../plugin/server/core/scrum/config.ts');
+  ensureProjectRegistered(stateDir, project);
+  mkdirSync(join(userHome, '.zcode/skills/asc-iap'), { recursive: true });
+  writeFileSync(join(userHome, '.zcode/skills/asc-iap/SKILL.md'), '# ASC IAP');
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
+  const handlers = createSurfaceHandlers({ factory, stateDir, home: join(userHome, '.paseo'), userHome, daemon: fakeDaemon([]).daemon, listPlugins: async () => ({ ok: true, plugins: [] }) });
+  const before = await handlers.snapshot({ projectRoot: repo }); assert.ok(before.ok); if (!before.ok) return;
+  assert.ok(before.view.skillHub?.hostCatalog.some(e => e.id === 'zcode:asc-iap'));
+  assert.equal(before.view.skillHub?.projectPacks.find(p => p.id === 'expo')?.enabled, true);
+  assert.ok((await handlers.skillsImport({ id: 'zcode:asc-iap' })).ok);
+  assert.equal(readFileSync(join(userHome, '.agents/skills/asc-iap/SKILL.md'), 'utf8'), '# ASC IAP');
+  assert.ok((await handlers.skillsTogglePack({ projectRoot: repo, pack: 'expo', enabled: false })).ok);
+  assert.deepEqual(readExecution(stateDir, project.slug).skillPacks, []);
+  factory.setContract({ task: 'qa-iap', workspace: repo, gate: 'true', skills: ['asc-iap'], execution: { mode: 'scrum', runId: 'test-run', role: 'qa', policyRevision: '1', configRevision: 1, artifactRefs: [] } });
+  const after = await handlers.snapshot({ projectRoot: repo }); assert.ok(after.ok); if (!after.ok) return;
+  assert.equal(after.view.skillHub?.totalInstalled, 1);
+  assert.equal(after.view.skillHub?.hostCatalog.find(e => e.id === 'zcode:asc-iap')?.status, 'linked');
+  assert.equal(after.view.skillHub?.projectPacks.find(p => p.id === 'expo')?.enabled, false);
+  assert.equal(after.view.skillHub?.roleMatrix.length, 8);
+  assert.ok(after.view.skillHub?.roleMatrix.find(r => r.role === 'qa')?.skills.includes('asc-iap'));
+  assert.ok(after.view.skillHub?.installedSkills.find(s => s.name === 'asc-iap')?.roles.includes('qa'));
+  assert.equal(after.view.skillHub?.roleMatrix.find(r => r.role === 'qa')?.taskGrants[0]?.task, 'qa-iap');
 });

@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, symlinkSync, rmSync, writeFileSync, lstatSync, readFileSync, copyFileSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, symlinkSync, rmSync, writeFileSync, lstatSync, readFileSync, copyFileSync, statSync, realpathSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { ensureFactorySkillSafe } from '../skill.ts';
@@ -21,7 +21,7 @@ export const CORE_FACTORY_SKILLS = [
 ] as const;
 
 export interface CoreSkillSource {
-  readonly name: Exclude<(typeof CORE_FACTORY_SKILLS)[number], 'factory'>;
+  readonly name: string;
   readonly source: string;
   readonly sourceUrl: string;
   readonly skillPath: string;
@@ -243,83 +243,32 @@ export function inspectFactorySkillPack(userHome = homedir()): FactorySkillPackI
  * and `<userHome>/.gemini/config/skills/<name>` (unless `~/.gemini/config/skills`
  * is already a directory symlink to `~/.agents/skills`).
  */
+export function providerSkillDirectories(userHome: string): Record<string, string> {
+  return Object.fromEntries([
+    ['Pi', '.pi/agent/skills'], ['Claude', '.claude/skills'], ['Antigravity', '.gemini/config/skills'],
+    ...['Codex', 'ZCode'].filter(name => existsSync(join(userHome, '.' + name.toLowerCase()))).map(name => [name, '.' + name.toLowerCase() + '/skills']),
+  ].map(([name, path]) => [name!, join(userHome, path!)]));
+}
 export function ensureProviderSkillSymlinks(userHome = homedir()): { linked: string[] } {
-  const agentsSkillsDir = join(userHome, '.agents', 'skills');
-  // Prune retired skills before early returns, including broken symlinks.
-  for (const dir of [agentsSkillsDir, join(userHome, '.pi/agent/skills'), join(userHome, '.claude/skills'), join(userHome, '.gemini/config/skills')]) {
+  const canonical = join(userHome, '.agents/skills');
+  const targets = Object.values(providerSkillDirectories(userHome));
+  for (const dir of [canonical, ...targets]) {
     if (!existsSync(dir)) continue;
     for (const name of readdirSync(dir)) {
-      if (/^impeccable/i.test(name)) rmSync(join(dir, name), { recursive: true, force: true });
+      if (/^(impeccable|critique$|audit$|polish$|normalize$|harden$|clarify$)/i.test(name)) rmSync(join(dir, name), { recursive: true, force: true });
     }
   }
-  if (!existsSync(agentsSkillsDir)) return { linked: [] };
-  let skillNames: string[] = [];
-  try {
-    skillNames = readdirSync(agentsSkillsDir).filter((name) => {
-      if (name.startsWith('.')) return false;
-      const skillPath = join(agentsSkillsDir, name);
-      try {
-        return statSync(skillPath).isDirectory() && existsSync(join(skillPath, 'SKILL.md'));
-      } catch {
-        return false;
-      }
-    });
-  } catch {
-    return { linked: [] };
-  }
-  if (skillNames.length === 0) return { linked: [] };
-
-  const providerTargets = [
-    join(userHome, '.pi', 'agent', 'skills'),
-    join(userHome, '.claude', 'skills'),
-    join(userHome, '.gemini', 'config', 'skills'),
-  ];
-  const resolvedAgentsSkills = (() => {
-    try {
-      return resolve(agentsSkillsDir);
-    } catch {
-      return agentsSkillsDir;
-    }
-  })();
-
   const linked: string[] = [];
-  for (const targetDir of providerTargets) {
-    try {
-      if (existsSync(targetDir)) {
-        const st = lstatSync(targetDir);
-        if (st.isSymbolicLink()) {
-          // If the whole provider skills dir already points to ~/.agents/skills, skip per-skill links.
-          try {
-            if (resolve(targetDir) === resolvedAgentsSkills) continue;
-          } catch {
-            // broken symlink — replace below
-          }
-        }
-      }
-      mkdirSync(targetDir, { recursive: true });
-      for (const name of skillNames) {
-        const dest = join(targetDir, name);
-        const src = join(agentsSkillsDir, name);
-        let existsValid = false;
-        try {
-          const lst = lstatSync(dest);
-          if (lst.isSymbolicLink()) {
-            existsValid = existsSync(dest);
-            if (!existsValid) rmSync(dest, { force: true });
-          } else {
-            existsValid = true;
-          }
-        } catch {
-          existsValid = false;
-        }
-        if (!existsValid) {
-          mkdirSync(dirname(dest), { recursive: true });
-          symlinkSync(src, dest, 'dir');
-          linked.push(dest);
-        }
-      }
-    } catch {
-      // best-effort per provider dir
+  if (!existsSync(canonical)) return { linked };
+  for (const target of targets) {
+    if (existsSync(target) && realpathSync(target) === realpathSync(canonical)) continue;
+    mkdirSync(target, { recursive: true });
+    for (const name of readdirSync(canonical)) {
+      const src = join(canonical, name), dest = join(target, name);
+      if (!existsSync(join(src, 'SKILL.md'))) continue;
+      try { if (realpathSync(src) === realpathSync(dest)) continue; } catch { /* missing or broken link */ }
+      rmSync(dest, { recursive: true, force: true });
+      symlinkSync(src, dest, 'dir'); linked.push(dest);
     }
   }
   return { linked };
@@ -376,28 +325,7 @@ function copyDirectoryTreeSync(srcDir: string, destDir: string): void {
 }
 
 function computeSkillFolderHash(skillDir: string): string {
-  const hash = createHash('sha1');
-  const walk = (dir: string, relPrefix: string): void => {
-    let entries;
-    try {
-      entries = readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      if (entry.name === '.git' || entry.name === '.DS_Store') continue;
-      const fullPath = join(dir, entry.name);
-      const rel = relPrefix === '' ? entry.name : `${relPrefix}/${entry.name}`;
-      if (entry.isDirectory()) {
-        walk(fullPath, rel);
-      } else if (entry.isFile()) {
-        hash.update(`${rel}\0`);
-        hash.update(readFileSync(fullPath));
-      }
-    }
-  };
-  walk(skillDir, '');
-  return hash.digest('hex');
+  return createHash('sha256').update(readFileSync(join(skillDir, 'SKILL.md'))).digest('hex');
 }
 
 /**
@@ -407,7 +335,7 @@ function computeSkillFolderHash(skillDir: string): string {
  * `/factory` (`ensureFactorySkillSafe`) when requested, updates `<userHome>/.agents/.skill-lock.json`,
  * and links provider skill directories (`~/.pi/agent/skills`, `~/.claude/skills`, `~/.gemini/config/skills`).
  */
-export function installOrUpdateFactorySkillPack(options?: {
+export function installOrUpdateSourcesFromGit(sources: readonly CoreSkillSource[], options?: {
   userHome?: string;
   action?: 'install' | 'update';
   factoryCmd?: string;
@@ -435,8 +363,8 @@ export function installOrUpdateFactorySkillPack(options?: {
 
   const targetEntries =
     action === 'update'
-      ? [...CORE_SKILL_SOURCES]
-      : CORE_SKILL_SOURCES.filter((entry) => !existsSync(join(agentsSkillsDir, entry.name, 'SKILL.md')));
+      ? [...sources]
+      : sources.filter((entry) => !existsSync(join(agentsSkillsDir, entry.name, 'SKILL.md')));
 
   const byRepo = new Map<string, CoreSkillSource[]>();
   for (const entry of targetEntries) {
@@ -460,25 +388,25 @@ export function installOrUpdateFactorySkillPack(options?: {
         continue;
       }
       let repoCommitSha: string | undefined;
-      if (existsSync(join(tmpDir, '.git'))) {
+      {
         const revRes = runner('git', ['rev-parse', 'HEAD'], { cwd: tmpDir, env });
         const parsedSha = revRes.stdout.trim().split(/\s+/)[0]?.trim() ?? '';
         if (/^[0-9a-f]{7,40}$/i.test(parsedSha)) {
           repoCommitSha = parsedSha;
         }
-      } else {
+      }
+      if (!repoCommitSha) {
         const stdoutSha = cloneRes.stdout.trim().match(/\b([0-9a-f]{7,40})\b/i)?.[1];
         if (stdoutSha) repoCommitSha = stdoutSha;
       }
 
+      if (!repoCommitSha) { cloneErrors.push(`Cannot resolve repository commit: ${sourceUrl}`); continue; }
       const nowIso = new Date().toISOString();
       for (const entry of entries) {
         const srcSkillDir = join(tmpDir, entry.skillPath);
-        if (!existsSync(join(srcSkillDir, 'SKILL.md'))) continue;
+        if (!existsSync(join(srcSkillDir, 'SKILL.md'))) { cloneErrors.push(`Missing upstream skill: ${entry.skillPath}`); continue; }
         const destSkillDir = join(agentsSkillsDir, entry.name);
-        if (action === 'update') {
-          rmSync(destSkillDir, { recursive: true, force: true });
-        }
+        rmSync(destSkillDir, { recursive: true, force: true });
         copyDirectoryTreeSync(srcSkillDir, destSkillDir);
         const folderHash = computeSkillFolderHash(destSkillDir);
         const existingLock = lock.skills[entry.name];
@@ -488,7 +416,7 @@ export function installOrUpdateFactorySkillPack(options?: {
           sourceUrl: entry.sourceUrl,
           skillPath: `${entry.skillPath}/SKILL.md`,
           skillFolderHash: folderHash,
-          ...(repoCommitSha ? { repoCommitSha } : existingLock?.repoCommitSha ? { repoCommitSha: existingLock.repoCommitSha } : {}),
+          ...(repoCommitSha ? { repoCommitSha } : {}),
           installedAt: existingLock?.installedAt ?? nowIso,
           updatedAt: nowIso,
         };
@@ -504,7 +432,7 @@ export function installOrUpdateFactorySkillPack(options?: {
   }
   const linked = ensureProviderSkillSymlinks(userHome);
   const after = inspectFactorySkillPack(userHome);
-  if (after.totalSkills === 0) {
+  if (cloneErrors.length > 0 || sources.some(entry => !existsSync(join(agentsSkillsDir, entry.name, 'SKILL.md')))) {
     return {
       ok: false,
       reason:
@@ -547,19 +475,25 @@ export function checkCompanionToolsUpdates(options?: {
   const pack = inspectFactorySkillPack(userHome);
   const lock = readSkillLockFile(userHome);
   let packLatest: string | null = pack.revision;
-  let packUpdateAvailable = pack.status === 'partial';
+  let remoteCommits: Record<string, string> = {};
+  try {
+    const cache = JSON.parse(readFileSync(join(userHome, '.agents/.skill-updates-cache.json'), 'utf8'));
+    remoteCommits = Object.fromEntries(Object.entries(cache.remoteCommits ?? {}).filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
+  } catch { /* first check or damaged cache */ }
+  let packUpdateAvailable = pack.status === 'partial' || Object.values(lock.skills).some(e => /^https?:/.test(e.sourceUrl) && (!e.repoCommitSha?.trim() || (remoteCommits[e.sourceUrl] !== undefined && remoteCommits[e.sourceUrl] !== e.repoCommitSha)));
   if (pack.status !== 'not_installed') {
     const seenUrls = new Set<string>();
-    for (const source of CORE_SKILL_SOURCES) {
+    for (const source of [...CORE_SKILL_SOURCES, ...Object.values(lock.skills).filter(e => /^https?:/.test(e.sourceUrl))]) {
       if (seenUrls.has(source.sourceUrl)) continue;
       seenUrls.add(source.sourceUrl);
       const lsRes = runner('git', ['ls-remote', source.sourceUrl, 'HEAD'], { cwd: userHome, env });
       if (lsRes.status !== 0) continue;
       const remoteSha = lsRes.stdout.trim().split(/\s+/)[0]?.trim() ?? '';
       if (!/^[0-9a-f]{7,40}$/i.test(remoteSha)) continue;
+      remoteCommits[source.sourceUrl] = remoteSha;
       const shortRemote = remoteSha.slice(0, 7);
       if (packLatest === null) packLatest = shortRemote;
-      const repoSkills = CORE_SKILL_SOURCES.filter((s) => s.sourceUrl === source.sourceUrl);
+      const repoSkills = [...new Set([...CORE_SKILL_SOURCES.filter(s => s.sourceUrl === source.sourceUrl).map(s => s.name), ...Object.entries(lock.skills).filter(([, e]) => e.sourceUrl === source.sourceUrl).map(([name]) => name)])].map(name => ({ name }));
       for (const skill of repoSkills) {
         if (!pack.installedSkills.includes(skill.name)) {
           packUpdateAvailable = true;
@@ -568,7 +502,7 @@ export function checkCompanionToolsUpdates(options?: {
         }
         const entry = lock.skills[skill.name];
         const recordedCommit = entry?.repoCommitSha?.trim();
-        if (recordedCommit && !remoteSha.startsWith(recordedCommit) && !recordedCommit.startsWith(shortRemote)) {
+        if (!recordedCommit || recordedCommit !== remoteSha) {
           packUpdateAvailable = true;
           packLatest = shortRemote;
         }
@@ -576,6 +510,8 @@ export function checkCompanionToolsUpdates(options?: {
     }
   }
 
+  mkdirSync(join(userHome, '.agents'), { recursive: true });
+  writeFileSync(join(userHome, '.agents/.skill-updates-cache.json'), JSON.stringify({ checkedAt: new Date().toISOString(), remoteCommits }));
   return {
     'factory-skills-pack': {
       id: 'factory-skills-pack',
@@ -601,3 +537,25 @@ export function restoreLegacyUiEnvironment<T extends Record<string, string | und
   for (const key of ['PASEO_FACTORY_UI_HOME','PASEO_FACTORY_IMPECCABLE','PASEO_FACTORY_UI_BASE_ENV']) delete restored[key];
   return restored;
 }
+
+export function installOrUpdateFactorySkillPack(options?: Parameters<typeof installOrUpdateSourcesFromGit>[1]) {
+  const userHome = options?.userHome ?? homedir();
+  const sources = [...CORE_SKILL_SOURCES, ...(existsSync(join(userHome, '.agents/skills/expo-overview/SKILL.md')) ? EXPO_SKILL_SOURCES : [])];
+  if (options?.action === 'update') {
+    for (const [name, entry] of Object.entries(readSkillLockFile(options.userHome).skills)) {
+      if (sources.some(s => s.name === name) || !/^https:\/\//.test(entry.sourceUrl) || !entry.skillPath || entry.sourceType !== 'github') continue;
+      const skillPath = entry.skillPath.replace(/\/SKILL\.md$/, '');
+      if (skillPath.split(/[\\/]/).includes('..') || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)) continue;
+      sources.push({ name, source: entry.source, sourceUrl: entry.sourceUrl, skillPath });
+    }
+  }
+  return installOrUpdateSourcesFromGit(sources, options);
+}
+export const EXPO_STABLE_SKILLS = ['eas-app-stores', 'eas-hosting', 'eas-observe', 'eas-simulator', 'eas-update', 'eas-update-insights', 'eas-workflows', 'expo-animation', 'expo-app-clip', 'expo-brownfield', 'expo-data-fetching', 'expo-design-system', 'expo-dev-client', 'expo-dom', 'expo-examples', 'expo-module', 'expo-native-ui', 'expo-overview', 'expo-project-structure', 'expo-router', 'expo-ui', 'expo-upgrade', 'expo-web-to-native'] as const;
+export const EXPO_EXPERIMENTAL_SKILLS = ['expo-migrate-module'] as const;
+export const EXPO_SKILLS = [...EXPO_STABLE_SKILLS, ...EXPO_EXPERIMENTAL_SKILLS];
+export const EXPO_SKILL_SOURCES: readonly CoreSkillSource[] = EXPO_SKILLS.map(name => ({ name, source: 'expo/skills', sourceUrl: 'https://github.com/expo/skills.git', skillPath: `plugins/${name === 'expo-migrate-module' ? 'expo-experiments' : 'expo'}/skills/${name}` }));
+export function installOrUpdateExpoSkillPack(options?: Parameters<typeof installOrUpdateSourcesFromGit>[1]) {
+  return installOrUpdateSourcesFromGit(EXPO_SKILL_SOURCES, options);
+}
+export { buildRoleSkillMatrix, resolveProjectSkillPacks, detectProjectSkillPacks, resolveRoleSkillsForProject, discoverHostEcosystems, importHostSkillOrPack, inspectSkillHub } from './skill-hub.ts';

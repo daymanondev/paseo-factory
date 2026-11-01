@@ -1007,3 +1007,28 @@ test('Open Design host MCP discovery is offline, canonical and opt-in', async t 
   assert.equal(catalog.servers.filter(s => /open.design/.test(s.name)).length, 1);
   assert.equal(catalog.servers.find(s => s.name === 'open-design')?.enabled, true);
 });
+
+test('Expo skills discover an OAuth helper disabled until Owner opt-in', async (t) => {
+  const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { discoverHelperMcps } = await import('../src/helper-mcp-sync.ts');
+  const home = mkdtempSync(join(tmpdir(), 'expo-helper-')); t.after(() => rmSync(home, { recursive: true, force: true }));
+  mkdirSync(join(home, '.agents/skills/expo-overview'), { recursive: true });
+  writeFileSync(join(home, '.agents/skills/expo-overview/SKILL.md'), '# Expo');
+  const expo = discoverHelperMcps({ stateDir: join(home, 'state'), userHome: home }).servers.find(s => s.name === 'expo-mcp');
+  assert.equal(expo?.url, 'https://mcp.expo.dev/mcp');
+  assert.equal(expo?.enabled, false); assert.equal(expo?.oauthRequired, true);
+});
+
+test('configured Expo endpoint always carries its OAuth requirement', async (t) => {
+  const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { discoverHelperMcps } = await import('../src/helper-mcp-sync.ts');
+  const home = mkdtempSync(join(tmpdir(), 'expo-configured-')); t.after(() => rmSync(home, { recursive: true, force: true }));
+  mkdirSync(join(home, '.pi/agent'), { recursive: true });
+  writeFileSync(join(home, '.pi/agent/mcp.json'), JSON.stringify({ mcpServers: { expo: { url: 'https://mcp.expo.dev/mcp' } } }));
+  const expo = discoverHelperMcps({ userHome: home, stateDir: join(home, 'state') }).servers.find(s => s.name === 'expo-mcp');
+  assert.equal(expo?.oauthRequired, true);
+});

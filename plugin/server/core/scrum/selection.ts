@@ -19,6 +19,7 @@ export interface ExecutionSelection {
   schemaVersion: 1;
   mode: FactoryExecutionMode;
   revision: number;
+  skillPacks?: string[];
   openDesignCheckpointPaths?: string[];
   openDesignSource?: { kind: 'host' | 'client'; requestId?: string; acknowledgedRequestId?: string };
   openDesignLink?: import("./open-design-link.ts").OpenDesignProjectLink;
@@ -38,7 +39,8 @@ export function executionIsValid(value: unknown): value is ExecutionSelection {
     v.schemaVersion === 1 &&
     ["slp", "scrum"].includes(v.mode) &&
     Number.isSafeInteger(v.revision) &&
-    v.revision >= 0
+    v.revision >= 0 &&
+    (v.skillPacks === undefined || (Array.isArray(v.skillPacks) && v.skillPacks.every(p => typeof p === "string")))
   );
 }
 export function readExecution(

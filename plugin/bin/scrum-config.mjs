@@ -867,7 +867,7 @@ function selectionPath(state, slug) {
 }
 function executionIsValid(value) {
   const v = value;
-  return v !== null && typeof v === "object" && v.schemaVersion === 1 && ["slp", "scrum"].includes(v.mode) && Number.isSafeInteger(v.revision) && v.revision >= 0;
+  return v !== null && typeof v === "object" && v.schemaVersion === 1 && ["slp", "scrum"].includes(v.mode) && Number.isSafeInteger(v.revision) && v.revision >= 0 && (v.skillPacks === void 0 || Array.isArray(v.skillPacks) && v.skillPacks.every((p) => typeof p === "string"));
 }
 function readExecution(state, slug) {
   const path = selectionPath(state, slug);
@@ -2169,6 +2169,15 @@ function ensureScrumConfig(state, slug, reset = false) {
     return next;
   });
 }
+function setProjectSkillPacks(state, slug, skillPacks) {
+  return scrumMutation(state, () => {
+    const current = readExecution(state, slug);
+    if (skillPacks.some((p) => !["expo", "firebase", "zcode-3d", "science"].includes(p))) throw new FactoryError("invalid-skill-pack", "Unknown Project skill pack");
+    const next = { ...current, revision: current.revision + 1, skillPacks: [...new Set(skillPacks)] };
+    atomicJson(join9(scopeDir(state, slug), "execution.json"), next);
+    return next;
+  });
+}
 export {
   SCRUM_LANES,
   SCRUM_ROLES,
@@ -2183,5 +2192,6 @@ export {
   saveScrumConfig,
   scopeDir,
   scrumConfigIsValid,
-  scrumMutation
+  scrumMutation,
+  setProjectSkillPacks
 };

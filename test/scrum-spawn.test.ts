@@ -1009,3 +1009,134 @@ test('UX provisioning emits od.cmd and executable cross-platform Antigravity hoo
   // A real spawned hook receives stdin; no POSIX env assignment is needed.
   execFileSync(hook, { shell: true, input: '{}', stdio: ['pipe', 'pipe', 'pipe'], timeout: 5000 });
 });
+
+test('skill healer replaces stale copies across five harnesses and removes retired skills', async (t) => {
+  const { mkdirSync, readFileSync, realpathSync, existsSync } = await import('node:fs');
+  const { ensureProviderSkillSymlinks } = await import('../src/scrum/companion-tools.ts');
+  const home = makeTempDir(); disposeDir(t, home);
+  for (const path of ['.agents/skills/tdd', '.agents/skills/critique', '.codex', '.zcode/skills/tdd']) mkdirSync(join(home, path), { recursive: true });
+  writeFileSync(join(home, '.agents/skills/tdd/SKILL.md'), 'canonical');
+  writeFileSync(join(home, '.zcode/skills/tdd/SKILL.md'), 'stale');
+  ensureProviderSkillSymlinks(home);
+  for (const path of ['.pi/agent', '.claude', '.gemini/config', '.codex', '.zcode']) {
+    assert.equal(realpathSync(join(home, path, 'skills/tdd')), realpathSync(join(home, '.agents/skills/tdd')));
+    assert.equal(readFileSync(join(home, path, 'skills/tdd/SKILL.md'), 'utf8'), 'canonical');
+  }
+  assert.equal(existsSync(join(home, '.agents/skills/critique')), false);
+});
+
+test('Expo pack installs upstream skills with commit provenance and flags legacy locks', async (t) => {
+  const { mkdirSync, readFileSync } = await import('node:fs');
+  const { EXPO_SKILL_SOURCES, installOrUpdateExpoSkillPack, checkCompanionToolsUpdates, readSkillLockFile, writeSkillLockFile } = await import('../src/scrum/companion-tools.ts');
+  const home = makeTempDir(); disposeDir(t, home);
+  const sha = 'a'.repeat(40);
+  const runner = (_command: string, args: string[]) => {
+    if (args[0] === 'clone') for (const entry of EXPO_SKILL_SOURCES) {
+      const dir = join(args.at(-1)!, entry.skillPath); mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'SKILL.md'), `# ${entry.name}`);
+    }
+    return { status: 0, stdout: sha, stderr: '' };
+  };
+  assert.equal(installOrUpdateExpoSkillPack({ userHome: home, runner }).ok, true);
+  assert.equal(EXPO_SKILL_SOURCES.length, 24);
+  const lock = readSkillLockFile(home);
+  assert.equal(Object.keys(lock.skills).length, 24);
+  assert.equal(lock.skills['expo-migrate-module']?.repoCommitSha, sha);
+  assert.equal(lock.skills['expo-overview']?.skillFolderHash.length, 64);
+  delete lock.skills['expo-overview']!.repoCommitSha; writeSkillLockFile(home, lock);
+  assert.equal(checkCompanionToolsUpdates({ userHome: home, runner })['factory-skills-pack'].updateAvailable, true);
+  assert.equal(JSON.parse(readFileSync(join(home, '.agents/.skill-updates-cache.json'), 'utf8')).remoteCommits['https://github.com/expo/skills.git'], sha);
+});
+
+test('Project packs and Contract skills unlock the same Scrum provider capability set', async (t) => {
+  const { mkdirSync } = await import('node:fs');
+  const { scopeScrumCapabilities } = await import('../src/scrum/harness.ts');
+  const { detectProjectSkillPacks } = await import('../src/scrum/companion-tools.ts');
+  const home = makeTempDir(); disposeDir(t, home);
+  writeFileSync(join(home, 'package.json'), JSON.stringify({ dependencies: { expo: '*' } }));
+  for (const name of ['expo-overview', 'expo-native-ui', 'eas-workflows']) { const dir = join(home, '.agents/skills', name); mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'SKILL.md'), '# skill'); }
+  assert.deepEqual(detectProjectSkillPacks(home), ['expo']);
+  const identity = { kind: 'task' as const, task: 'design', epoch: 1, binding: { mode: 'scrum' as const, runId: 'r1', role: 'ux' as const, policyRevision: '1', configRevision: 1, artifactRefs: [] }, contractSkills: ['custom-skill'] };
+  const config = scopeScrumCapabilities({ provider: 'opencode', providerOptions: {}, mcpServers: { 'expo-mcp': {} } }, 'agent', identity, undefined, { projectRoot: home, userHome: home });
+  const permission = (config.providerOptions as any).permission.skill;
+  assert.equal(permission['expo-native-ui'], 'allow');
+  assert.equal(permission['custom-skill'], 'allow');
+  assert.ok(config.mcpServers['expo-mcp']);
+  const lean = scopeScrumCapabilities({ provider: 'opencode', providerOptions: {} }, 'agent', identity, undefined, { configuredPacks: [], userHome: home });
+  assert.equal((lean.providerOptions as any).permission.skill['expo-native-ui'], undefined);
+});
+
+test('Scrum Pi homes provision Project packs and explicit Contract skills through the public harness', async (t) => {
+  const { mkdirSync, readFileSync } = await import('node:fs');
+  const { provisionScrumHarness, scopeScrumCapabilities } = await import('../src/scrum/harness.ts');
+  const { ensureScrumConfig } = await import('../src/scrum/config.ts');
+  const { createScrumRun } = await import('../src/scrum/run-journal.ts');
+  const state = makeTempDir(), repo = makeTempDir(), userHome = makeTempDir();
+  for (const dir of [state, repo, userHome]) disposeDir(t, dir);
+  writeFileSync(join(repo, 'app.json'), '{"expo":{}}');
+  for (const name of ['expo-overview', 'expo-debugging', 'eas-workflows', 'contract-skill']) { mkdirSync(join(userHome, '.agents/skills', name), { recursive: true }); writeFileSync(join(userHome, '.agents/skills', name, 'SKILL.md'), '# Skill'); }
+  const run = createScrumRun({ state, slug: 'p', runId: 'packs', initiativeId: 'packs', config: ensureScrumConfig(state), configRevision: 1, track: 'ui', rationale: 'packs', requestId: 'create', ownedPaths: [] });
+  const identity = { kind: 'task' as const, task: 'qa', epoch: 1, projectRoot: repo, contractSkills: ['contract-skill'], binding: { mode: 'scrum' as const, role: 'qa' as const, runId: run.runId, configRevision: run.configRevision, policyRevision: run.policyRevision, artifactRefs: [] } };
+  const roleHome = provisionScrumHarness({ state, slug: 'p', authority: 'agent', identity, generation: 'g', userHome, workspace: repo });
+  const settings = JSON.parse(readFileSync(join(roleHome, 'settings.json'), 'utf8'));
+  assert.ok(settings.skills.includes(`+${join(userHome, '.agents/skills/expo-debugging')}`));
+  assert.ok(settings.skills.includes(`+${join(userHome, '.agents/skills/contract-skill')}`));
+  for (const role of ['ux', 'architect', 'dev', 'qa'] as const) {
+    const scoped = scopeScrumCapabilities({ provider: 'opencode', providerOptions: {} }, 'agent', { ...identity, binding: { ...identity.binding, role } }, undefined, { userHome });
+    assert.equal((scoped.providerOptions as any).permission.skill['expo-overview'], 'allow');
+    assert.equal((scoped.providerOptions as any).permission.skill['contract-skill'], 'allow');
+  }
+});
+
+test('host catalogs expose portable packs read-only and imported skills gain five healthy links', async (t) => {
+  const { mkdirSync, readFileSync } = await import('node:fs');
+  const { discoverHostEcosystems, importHostSkillOrPack, inspectSkillHub, detectProjectSkillPacks } = await import('../src/scrum/companion-tools.ts');
+  const home = makeTempDir(); disposeDir(t, home);
+  for (const path of ['.zcode/skills/asc-iap', '.gemini/config/plugins/firebase/skills/firebase-basics', '.gemini/config/plugins/science/skills/protein', '.codex']) {
+    mkdirSync(join(home, path), { recursive: true }); if (path !== '.codex') writeFileSync(join(home, path, 'SKILL.md'), '# Portable');
+  }
+  writeFileSync(join(home, 'firebase.json'), '{}');
+  assert.deepEqual(detectProjectSkillPacks(home), ['firebase']);
+  const catalog = discoverHostEcosystems(home);
+  for (const id of ['expo:official-pack', 'zcode:asc-iap', 'antigravity:firebase', 'antigravity:science']) assert.ok(catalog.some(e => e.id === id), id);
+  assert.ok(importHostSkillOrPack({ id: 'zcode:asc-iap', userHome: home }).ok);
+  assert.equal(readFileSync(join(home, '.zcode/skills/asc-iap/SKILL.md'), 'utf8'), '# Portable');
+  const hub = inspectSkillHub({ userHome: home });
+  assert.equal(hub.totalInstalled, 1); assert.equal(hub.localCustomCount, 1);
+  assert.equal(hub.installedSkills[0]?.harnesses.filter(h => h.healthy).length, 5);
+  assert.equal(hub.hostCatalog.find(e => e.id === 'zcode:asc-iap')?.status, 'linked');
+});
+
+test('failed update checks preserve known outdated skill freshness', async (t) => {
+  const { mkdirSync } = await import('node:fs');
+  const { checkCompanionToolsUpdates, inspectSkillHub, writeSkillLockFile } = await import('../src/scrum/companion-tools.ts');
+  const home = makeTempDir(); disposeDir(t, home);
+  mkdirSync(join(home, '.agents/skills/tdd'), { recursive: true }); writeFileSync(join(home, '.agents/skills/tdd/SKILL.md'), '# TDD');
+  writeSkillLockFile(home, { version: 3, skills: { tdd: { source: 'mattpocock/skills', sourceType: 'github', sourceUrl: 'https://github.com/mattpocock/skills.git', repoCommitSha: 'a'.repeat(40), skillFolderHash: '', installedAt: '', updatedAt: '' } } });
+  checkCompanionToolsUpdates({ userHome: home, runner: () => ({ status: 0, stdout: 'b'.repeat(40), stderr: '' }) });
+  assert.equal(inspectSkillHub({ userHome: home }).installedSkills[0]?.freshness, 'update_available');
+  checkCompanionToolsUpdates({ userHome: home, runner: () => ({ status: 1, stdout: '', stderr: 'offline' }) });
+  assert.equal(inspectSkillHub({ userHome: home }).installedSkills[0]?.freshness, 'update_available');
+});
+
+test('host imports refuse support-file symlinks outside the selected skill', async (t) => {
+  const { mkdirSync, symlinkSync, existsSync } = await import('node:fs');
+  const { importHostSkillOrPack } = await import('../src/scrum/companion-tools.ts');
+  const home = makeTempDir(); disposeDir(t, home);
+  mkdirSync(join(home, '.zcode/skills/local'), { recursive: true }); writeFileSync(join(home, '.zcode/skills/local/SKILL.md'), '# Local');
+  mkdirSync(join(home, 'private')); writeFileSync(join(home, 'private/tokens.json'), 'private');
+  symlinkSync(join(home, 'private'), join(home, '.zcode/skills/local/assets'), 'dir');
+  const result = importHostSkillOrPack({ id: 'zcode:local', userHome: home });
+  assert.equal(result.ok, false);
+  assert.equal(existsSync(join(home, '.agents/skills/local')), false);
+});
+
+test('host imports exclude metadata symlinks from validation and copying consistently', async (t) => {
+  const { mkdirSync, symlinkSync, existsSync } = await import('node:fs');
+  const { importHostSkillOrPack } = await import('../src/scrum/companion-tools.ts');
+  const home = makeTempDir(); disposeDir(t, home);
+  mkdirSync(join(home, '.zcode/skills/local'), { recursive: true }); writeFileSync(join(home, '.zcode/skills/local/SKILL.md'), '# Local');
+  mkdirSync(join(home, 'private')); writeFileSync(join(home, 'private/tokens.json'), 'private');
+  symlinkSync(join(home, 'private'), join(home, '.zcode/skills/local/.DS_Store'), 'dir');
+  assert.equal(importHostSkillOrPack({ id: 'zcode:local', userHome: home }).ok, true);
+  assert.equal(existsSync(join(home, '.agents/skills/local/.DS_Store')), false);
+});

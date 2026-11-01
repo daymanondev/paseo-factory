@@ -1,6 +1,6 @@
 {
   "name": "paseo-factory",
-  "version": "0.0.81",
+  "version": "0.0.82",
   "description": "Verification core for Paseo agents: done-criteria contracts, an append-only JSONL ledger, a gate runner, and traceable reports. Pure Node — zero Paseo imports. The Paseo plugin shell loads this core as a plain module.",
   "type": "module",
   "private": true,
@@ -30,8 +30,10 @@
     "@getpaseo/protocol": "0.13.0",
     "@types/node": "^22.10.0",
     "@types/react": "19.2.18",
+    "@types/react-dom": "^19.1.0",
     "esbuild": "0.25.12",
     "react": "19.1.0",
+    "react-dom": "^19.1.0",
     "react-native": "0.81.5",
     "typescript": "^5.8.0",
     "zod": "4.6.5"

@@ -1,3 +1,4 @@
+import { SLP_ROLE_SKILLS } from "./core/scrum/skill-hub.ts";
 import { discoverHelperMcps, resolveRoleScopedMcpServers, syncHelperMcps } from "./core/helper-mcp-sync.ts";
 import { buildRoleKickoffPrompt } from "./core/roles-contract.ts";
 import { readRun as readScrumRun } from "./core/scrum/run-journal.ts";
@@ -374,10 +375,7 @@ export function applyProviderExecutionFence<T extends AgentCreateRequest["config
       };
       nextConfig.toolPolicy = { preapproved: [] };
       nextConfig.modeId = "build";
-      const skillPerm =
-        role === "supervisor"
-          ? { "*": "deny", grilling: "allow", "domain-modeling": "allow" }
-          : { "*": "deny", "codebase-design": "allow", "domain-modeling": "allow", tdd: "allow" };
+      const skillPerm = { '*': 'deny', ...Object.fromEntries(SLP_ROLE_SKILLS[role].map(skill => [skill, 'allow'])) };
       nextConfig.providerOptions = {
         ...existingProviderOpts,
         permission: {
@@ -560,7 +558,7 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
       );
       const taskEnv = factoryEnvFor("agent", { stateDir, project: { root: projectRoot, slug: worktree.slug }, task: worktree.task, correlationId: issued.correlationId, userHome, environment: request.env });
       return sanitizeAgentCreateHookResult({
-        config: execution === undefined ? fencedConfig : scopeScrumCapabilities(fencedConfig, "agent", execution, taskEnv.PI_CODING_AGENT_DIR),
+        config: execution === undefined ? fencedConfig : scopeScrumCapabilities(fencedConfig, "agent", execution, taskEnv.PI_CODING_AGENT_DIR, { projectRoot, configuredPacks: readExecution(stateDir, worktree.slug).skillPacks, userHome }),
         env: {
           ...(request.env ?? {}),
           ...taskEnv,
@@ -618,7 +616,7 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
     },
   );
   return sanitizeAgentCreateHookResult({
-    config: execution === undefined ? fencedConfig : scopeScrumCapabilities(fencedConfig, role, execution),
+    config: execution === undefined ? fencedConfig : scopeScrumCapabilities(fencedConfig, role, execution, undefined, { projectRoot: projectIdentity.root, configuredPacks: readExecution(stateDir, projectIdentity.slug).skillPacks, userHome }),
     env: {
       ...(request.env ?? {}),
       ...factoryEnvFor(role, { stateDir, project: projectIdentity, correlationId: issued.correlationId, userHome, environment: request.env }),

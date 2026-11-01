@@ -424,7 +424,35 @@ export const HelperMcpViewSchema = z.object({
 
 export type HelperMcpConfigUpdate = Partial<Pick<z.infer<typeof HelperMcpViewSchema>, "enabled" | "targetProviders" | "vaultSync">>;
 
+export const InstalledSkillViewSchema = z.object({
+  name: z.string(), pack: z.string(), source: z.string(), revision: z.string().nullable(),
+  freshness: z.enum(['up_to_date', 'update_available', 'local']),
+  harnesses: z.array(z.object({ name: z.string(), healthy: z.boolean(), available: z.boolean() })),
+  roles: z.array(z.string()),
+});
+export const ProjectSkillPackViewSchema = z.object({
+  id: z.string(), label: z.string(), enabled: z.boolean(), autoDetected: z.boolean(),
+});
+export const HostEcosystemItemViewSchema = z.object({
+  id: z.string(), name: z.string(), ecosystem: z.string(), path: z.string().nullable(),
+  skills: z.array(z.string()), status: z.enum(['linked', 'available']),
+  kind: z.enum(['skill', 'pack', 'plugin']), mcpServers: z.array(z.string()),
+});
+export const SkillHubViewSchema = z.object({
+  totalInstalled: z.number(), upToDateCount: z.number(), updateAvailableCount: z.number(),
+  localCustomCount: z.number(), symlinkDriftCount: z.number(),
+  installedSkills: z.array(InstalledSkillViewSchema),
+  projectPacks: z.array(ProjectSkillPackViewSchema),
+  hostCatalog: z.array(HostEcosystemItemViewSchema),
+  roleMatrix: z.array(z.object({
+    role: z.string(), mode: z.string(), skills: z.array(z.string()),
+    taskGrants: z.array(z.object({ task: z.string(), role: z.string(), skills: z.array(z.string()) })),
+  })),
+});
+export type SkillHubView = z.infer<typeof SkillHubViewSchema>;
+
 export const FactoryViewSchema = z.object({
+  skillHub: SkillHubViewSchema.optional(),
   execution: ExecutionViewSchema.optional(),
   version: z.literal(FACTORY_VIEW_VERSION),
   stateDir: z.string(),

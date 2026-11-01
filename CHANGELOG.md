@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.82] - 2026-11-01
+
+- Add Skill Hub to Plugins: per-skill inventory, cached Git freshness, five-harness link health, host skill and MCP discovery, portable skill imports, Project pack toggles, and the SLP/Scrum role matrix.
+- Resolve Scrum skills from role baselines, detected or explicitly configured Expo/Firebase/3D/Science packs, and Contract skills. Restore OpenCode Supervisor access to research, grill-with-docs, and factory.
+- Install the official Expo pack from upstream Git, discover its OAuth MCP disabled by default, track repository commits and SHA-256 content hashes, and heal canonical skill links across Pi, Claude, Antigravity, Codex, and ZCode.
+- Upstream adjustment: Expo HEAD `05754e71d02abe0d2d7a2fb5259ccac41f5ea59c` was verified on 2026-11-01 with 23 stable skills under `plugins/expo/skills` and experimental `expo-migrate-module` under `plugins/expo-experiments/skills`. Use these current names and role mappings in place of the spec's older skill names and paths.
+
 ## [0.0.81] - 2026-11-01
 
 ## [0.0.80] - 2026-11-01

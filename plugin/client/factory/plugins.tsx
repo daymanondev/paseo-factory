@@ -1,3 +1,4 @@
+import { SkillHubCard } from "./skill-hub.tsx";
 import type { HelperMcpConfigUpdate } from "../../shared/view.ts";
 /**
  * Tab 4 — Plugins, the Core + `Companion plugin` catalog (v0.0.17, ADR 0012;
@@ -58,6 +59,8 @@ export interface PluginsActions {
   manage(pluginId: ManageablePluginId | "all", action: "enable" | "disable" | "reload" | "update" | "remove"): void;
   /** Trigger an on-demand remote update check across installed plugins (v0.0.25, ADR 0012 §4). */
   checkUpdates(): void;
+  importSkill?(id: string): void;
+  togglePack?(pack: string, enabled: boolean): void;
   syncHelpers?(): void;
   setHelperConfig?(name: string, config: HelperMcpConfigUpdate): void;
   /** True while an on-demand update check is in flight. */
@@ -722,6 +725,7 @@ export function PluginsPane({
         </View>
       ) : null}
 
+      <SkillHubCard theme={theme} hub={view.skillHub} busy={actions.busy} projectRoot={view.project?.root} importSkill={actions.importSkill} togglePack={actions.togglePack} healSkills={() => actions.manage("factory-skills-pack", "reload")} updateSkills={() => actions.manage("factory-skills-pack", "update")} />
       <HelperMcpsCard theme={theme} servers={view.helperMcps ?? []} actions={actions} />
     </View>
   );
