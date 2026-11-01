@@ -941,7 +941,10 @@ function linkedDesignSpecification(root, recorded) {
   }
   if (!link) return "";
   return `Open Design Linked Specification (design/)
-${link.projectName} \xB7 ${link.screenCount} screens. The Owner's linked design is the authoritative UI/UX specification: design/screens.html (Flow Board), design/index.html (interactive prototype), design/styles.css (:root tokens), design/design-manifest.json. Lead must bind design/ in Peer contracts; Peers implement those screens and tokens. In Scrum, preserve and refine the Owner's linked Open Design screens seeded in .scratch/<initiativeId>/mockups/; generate EXPERIENCE.md, DESIGN.md and browser.json around them. Do not overwrite them with a generic layout.
+${link.projectName} \xB7 ${link.screenCount} screens. The Owner's linked design is the authoritative UI/UX specification, read in two halves.
+Design catalog (the ONLY design/ files a Lead reads): design/design-manifest.json (tokens), design/screens-data.js (the full screen inventory \u2014 ids, titles, descriptions, per-group flows), design/app-data.js (seed/configuration data), design/screens.html (Flow Board). The catalog is a decomposition input, not a build spec: contracts name screens by id and flow from design/screens-data.js.
+Design source (a Lead NEVER reads; bind it by reference in Peer contracts): design/index.html (interactive prototype), design/app.js (interaction logic), design/styles.css, design/screens.css. Peers read the full design/ bundle inside their Task worktree, so implementation fidelity is unchanged.
+In Scrum, preserve and refine the Owner's linked Open Design screens seeded in .scratch/<initiativeId>/mockups/; generate EXPERIENCE.md, DESIGN.md and browser.json around them. Do not overwrite them with a generic layout.
 `;
 }
 

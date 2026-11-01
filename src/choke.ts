@@ -438,6 +438,14 @@ export const SEAT_WRITE_FENCE_MESSAGE =
   "Seat write fence: Supervisor and Lead may only write project memory/docs (AGENTS.md, CONTEXT.md, docs/**, .scratch/**); dispatch implementation work to Lead / Task Agents";
 
 /**
+ * The `process-kill` rule's own reason (v0.0.84): names the kill word class
+ * and the Layer-3 exec-time backstop — never the seat-write-fence message
+ * that misdiagnosed the goal-partner Lead (ledger seq 447).
+ */
+export const PROCESS_KILL_FENCE_MESSAGE =
+  "process-kill fence: a pkill/kill/killall command aimed at Paseo or plugin-process is denied at ask time; the Layer-3 pkill/kill/killall shims (ADR 0016) still refuse it at exec time";
+
+/**
  * Whether a project-root-relative path (POSIX slashes, no `..`) sits inside
  * `SEAT_MEMORY_WHITELIST` (`AGENTS.md`, `CLAUDE.md`, `CONTEXT.md`,
  * `GLOSSARY.md`, `.gitignore`, `.worktreeinclude`, `docs/**`, `.scratch/**`).
@@ -539,9 +547,108 @@ export function isPaseoFactoryToolName(toolName: string | undefined): boolean {
   );
 }
 
+/** The kill word class the process-kill rule names (v0.0.84). */
+const PROCESS_KILL_WORDS = new Set(["pkill", "killall", "kill"]);
+
+/**
+ * Wrapper prefixes legally standing before the real command word: skipped
+ * while locating a segment's first command word. `timeout`/`nice`
+ * additionally swallow their duration/adjustment operands.
+ */
+const PROCESS_KILL_WRAPPER_PREFIXES = new Set([
+  "env",
+  "command",
+  "nohup",
+  "sudo",
+  "xargs",
+  "exec",
+  "timeout",
+  "nice",
+]);
+
+/** A short-flag cluster carrying `c` (`-c`, `-lc`, `-ic`) — a shell's payload flag. */
+const SHELL_DASH_C_FLAG = /^-[A-Za-z]*c[A-Za-z]*$/;
+
+/** The duration/adjustment operand `timeout`/`nice` carry before the command. */
+function isTimeoutOrNiceOperand(token: string): boolean {
+  return /^[-+]?\d[\d.]*[a-z]?$/i.test(token) || token === "-n" || token === "--adjustment";
+}
+
+/**
+ * Index of the segment's first command word: leading `X=Y` env assignments,
+ * `export`, and wrapper prefixes are skipped (`timeout`/`nice` additionally
+ * swallow their duration/adjustment operands).
+ */
+function commandWordIndex(words: readonly string[]): number {
+  let i = 0;
+  while (i < words.length) {
+    const w = words[i]!;
+    if (w === "export" || PROCESS_KILL_WRAPPER_PREFIXES.has(w) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(w)) {
+      i += 1;
+      if (w === "timeout" || w === "nice") {
+        while (i < words.length && isTimeoutOrNiceOperand(words[i]!)) i += 1;
+      }
+      continue;
+    }
+    break;
+  }
+  return i;
+}
+
+/**
+ * Whether the kill word stands in command position in `segment`: the first
+ * command word after leading `X=Y` env assignments, `export`, and wrapper
+ * prefixes (`env`, `command`, `nohup`, `timeout`+operand, `nice`+operand,
+ * `sudo`, `xargs`, `exec`). A leading absolute path is compared by basename
+ * (`/usr/bin/pkill` fires). Prose mentions mid-sentence never fire.
+ */
+function killWordInCommandPosition(segment: string): boolean {
+  const words = quoteAwareWords(segment);
+  const cmd = words[commandWordIndex(words)];
+  if (cmd === undefined) return false;
+  return PROCESS_KILL_WORDS.has(cmd.split("/").at(-1) ?? cmd);
+}
+
+/**
+ * Whether the kill word is the FIRST word of a shell `-c` payload
+ * (`bash -lc 'pkill -f paseo'` fires): the shell itself must stand in
+ * command position, then its `-c`-carrying flag, then a payload whose first
+ * inner word is the kill word — so `echo 'bash -c pkill'` (the triplet lives
+ * in prose) never fires. A kill hidden after a semicolon INSIDE a quoted
+ * `-c` payload is a documented miss — the Layer-3 shims still refuse it at
+ * exec time (ADR 0016 Layer 3).
+ */
+function killWordLeadsShellDashCPayload(segment: string): boolean {
+  const words = quoteAwareWords(segment);
+  const i = commandWordIndex(words);
+  const shell = words[i];
+  if (shell === undefined || !/sh$/.test(shell.split("/").at(-1) ?? shell)) return false;
+  let j = i + 1;
+  while (j < words.length && words[j]!.startsWith("-") && !SHELL_DASH_C_FLAG.test(words[j]!)) j += 1;
+  if (j >= words.length || !SHELL_DASH_C_FLAG.test(words[j]!)) return false;
+  const payload = words[j + 1];
+  if (payload === undefined) return false;
+  return PROCESS_KILL_WORDS.has(payload.split(/\s+/)[0] ?? payload);
+}
+
+/**
+ * Whether the command kills the factory runtime (Paseo or plugin-process) at
+ * ask time (v0.0.26, ADR 0016; command-position gate v0.0.84): the raw-string
+ * co-occurrence prefilter (a kill word + a `paseo`/`plugin-process` word
+ * anywhere) stays, but the deny additionally requires the kill word in
+ * command position — the 2026-11-01 goal-partner Lead died because its one
+ * `factory contract` call carried "killall/pkill" inside `--description`
+ * prose while `factory.mjs`'s path carried "paseo" (ledger seq 447). A kill
+ * outside command position falls through to the Layer-3 `pkill`/`kill`/
+ * `killall` shims in `<stateDir>/bin`, the exec-time guarantee.
+ */
 export function isProcessKillAgainstFactory(command: string): boolean {
   if (!/\b(?:pkill|killall|kill)\b/.test(command)) return false;
-  return /\b(?:plugin-process|paseo)\b/i.test(command);
+  if (!/\b(?:plugin-process|paseo)\b/i.test(command)) return false;
+  for (const segment of splitShellSegments(command)) {
+    if (killWordInCommandPosition(segment) || killWordLeadsShellDashCPayload(segment)) return true;
+  }
+  return false;
 }
 
 /**
@@ -793,6 +900,7 @@ function isPackageMutationSegment(tokens: readonly string[]): boolean {
 /**
  * Judges a shell ask from a Supervisor or Lead seat on `<project-root>`
  * (v0.0.23, ADR 0015 §2):
+ * - Process-kill commands aimed at Paseo/plugin-process are denied (`rule: "process-kill"`, v0.0.84).
  * - Dangerous git commands on any spelling are denied (`rule: "dangerous-git"`).
  * - Package-mutation commands (`npm install`, `pnpm add`, `yarn add`, `bun install`, `npx`)
  *   are denied (`rule: "seat-write-fence"`).
@@ -805,10 +913,13 @@ export function judgeSeatShellCommand(
   stateDir: string,
   tmpDirs: readonly string[] = defaultSeatTmpDirs(),
 ): ChokeDecision {
+  // Judged on the WHOLE line (v0.0.84): the co-occurrence prefilter spans
+  // segments, so a kill in one segment aimed via a `paseo` word in another
+  // denies identically to the contracted-agent judge.
+  if (isProcessKillAgainstFactory(command)) {
+    return { behavior: "deny", rule: "process-kill", reason: PROCESS_KILL_FENCE_MESSAGE };
+  }
   for (const segment of splitShellSegments(command)) {
-    if (isProcessKillAgainstFactory(segment)) {
-      return { behavior: "deny", rule: "seat-write-fence", reason: SEAT_WRITE_FENCE_MESSAGE };
-    }
     if (isFactoryCliSegment(segment, projectRoot, stateDir, tmpDirs)) continue;
     const segTokens = shellTokens(segment);
     const s1 = judgeS1(segTokens);
@@ -931,11 +1042,7 @@ function judgeMemoryDestination(rawPath: string, fence: MemoryFence): ChokeDecis
  */
 export function judgeShellCommand(command: string, roots: WritableRoots, memory?: MemoryFence): ChokeDecision {
   if (isProcessKillAgainstFactory(command)) {
-    return {
-      behavior: "deny",
-      rule: "seat-write-fence",
-      reason: SEAT_WRITE_FENCE_MESSAGE,
-    };
+    return { behavior: "deny", rule: "process-kill", reason: PROCESS_KILL_FENCE_MESSAGE };
   }
   const tokens = shellTokens(command);
   const inIsolatedWorktree =

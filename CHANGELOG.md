@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.84] - 2026-11-01
+
+- Fix the ask-time process-kill heuristic (2026-11-01 goal-partner live-run death, ledger seq 447): the deny now fires only when a kill word (`pkill`/`killall`/`kill`) stands in command position — the first command word of a segment after env-assignments and wrapper prefixes (`env`, `command`, `nohup`, `timeout`, `nice`, `sudo`, `xargs`, `exec`), compared by basename for absolute paths, or the first word of a shell `-c` payload — so prose mentions in a `factory contract --description` never deny. Both judges (`judgeSeatShellCommand`, `judgeShellCommand`) deny with a dedicated `rule: "process-kill"` naming the Layer-3 exec-time backstop instead of the misdiagnosing seat-write-fence message; the vendored `agy-pre-tool-hook.mjs` mirror follows. The exact seq-447 command ships as a regression fixture (`test/fixtures/goal-partner-lead-contract-command.txt`).
+- Split the linked-design clause: the Lead reads only the **Design catalog** (`design-manifest.json`, `screens-data.js`, `app-data.js`, `screens.html` — a decomposition input, not a build spec) and binds **Design source** (`index.html`, `app.js`, `styles.css`, `screens.css`) by reference in Peer contracts; Peers read the full `design/` bundle inside the Task worktree, cutting the Lead's pre-dispatch baseline burn (~82K on goal-partner) without moving `LEAD_ROTATE_TOKENS` (ADR 0013 §5). `CONTEXT.md` gains both terms.
+
 ## [0.0.83] - 2026-11-01
 
 - Redesign `SkillHubCard` in Operate Mode parity with `HelperMcpsCard`: compact header, 2×2 `Project Skill Packs` grid on the card face, quick-jump `<Chip>` bar, and a collapsible `⋯ Manage` drawer housing live search, category counters, 2-column skill cards (`5/5 linked` status dot instead of repetitive per-harness/role pill walls), deduplicated `Host Ecosystems` cards (including ZCode CLI plugin cache), and expandable `Role ↔ Skill Matrix` cards.

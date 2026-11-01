@@ -393,6 +393,40 @@ test("agy-pre-tool-hook.mjs fast-allows unbound sessions and enforces seat-write
   assert.equal(denyPkill.decision, "deny");
   assertValidAgyProtoOutput(denyPkill, "denyPkill");
 
+  // v0.0.84: the mirrored process-kill gate fires only in command position,
+  // with its own reason naming the Layer-3 backstop — never the write-fence message.
+  for (const killCmd of ["/usr/bin/pkill -f paseo", "bash -c 'pkill -f paseo'", "timeout 5 killall Paseo Helper"]) {
+    const denyKill = JSON.parse(
+      execFileSync(process.execPath, [hookBin], {
+        input: JSON.stringify({
+          toolCall: { name: "run_command", args: { CommandLine: killCmd } },
+          workspacePaths: [repoDir],
+        }),
+        env: supEnv,
+        encoding: "utf8",
+      }),
+    );
+    assert.equal(denyKill.decision, "deny", `${killCmd} must be denied`);
+    assert.match(String(denyKill.reason), /process-kill/);
+    assert.doesNotMatch(String(denyKill.reason), /Seat write fence/);
+  }
+  for (const proseCmd of [
+    "echo 'Do not use killall/pkill' && ls /Users/andrewpham/.paseo/plugins/paseo-factory",
+    "echo 'bash -c pkill' && ls /Users/andrewpham/.paseo/plugins/paseo-factory",
+  ]) {
+    const allowProseKill = JSON.parse(
+      execFileSync(process.execPath, [hookBin], {
+        input: JSON.stringify({
+          toolCall: { name: "run_command", args: { CommandLine: proseCmd } },
+          workspacePaths: [repoDir],
+        }),
+        env: supEnv,
+        encoding: "utf8",
+      }),
+    );
+    assert.equal(allowProseKill.decision, "allow", `kill words in prose must not fire the process-kill gate: ${proseCmd}`);
+  }
+
   // 3. Lead vs Supervisor git fence in agy-pre-tool-hook.mjs: Supervisor cannot commit/merge, Lead can commit whitelisted docs/memory and merge, but cannot commit product source
   const supDenyCommit = JSON.parse(
     execFileSync(process.execPath, [hookBin], {

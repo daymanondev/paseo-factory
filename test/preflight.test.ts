@@ -43,6 +43,11 @@ test('linked Owner designs are authoritative in seat kickoff and Scrum UX prompt
     const packet = buildSeatKickoffPacket({ role, projectSlug: 'repo', projectRoot: root, ledgerEvents: [] });
     assert.match(packet, /Open Design Linked Specification/); assert.match(packet, /Checkout flow/);
     assert.match(packet, /design\/screens.html/); assert.match(packet, /4 screens/); assert.match(packet, /authoritative/);
+    // v0.0.84: the clause splits the bundle — catalog is the only design/ read.
+    assert.match(packet, /Design catalog \(the ONLY design\/ files a Lead reads\)/);
+    assert.match(packet, /design\/design-manifest\.json/); assert.match(packet, /design\/screens-data\.js/); assert.match(packet, /design\/app-data\.js/);
+    assert.match(packet, /Design source \(a Lead NEVER reads/);
+    assert.match(packet, /decomposition input, not a build spec/);
   }
   assert.match(renderScrumPrompt('ux', { project: 'repo', workspace: root }), /preserve and refine the Owner's linked Open Design screens/);
 });

@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import type { AgentPermissionRequest, AgentPermissionResponse } from "@getpaseo/protocol/agent-types";
@@ -17,7 +17,17 @@ import {
 } from "../plugin/server/choke.ts";
 import { ensureGitShim, injectClaimCliPath } from "../plugin/server/shell.ts";
 import type { PaseoResponderApi } from "../plugin/server/choke.ts";
-import { isSeatMemoryPathAllowed, judgeFilePath, judgeShellCommand, refuseGitArgv, shellTokens, writableRootsFor } from "../src/choke.ts";
+import {
+  PROCESS_KILL_FENCE_MESSAGE,
+  isProcessKillAgainstFactory,
+  isSeatMemoryPathAllowed,
+  judgeFilePath,
+  judgeSeatShellCommand,
+  judgeShellCommand,
+  refuseGitArgv,
+  shellTokens,
+  writableRootsFor,
+} from "../src/choke.ts";
 import { saveLanes } from "../src/lanes.ts";
 import { GIT_ARGV_CASES, SHELL_CASES, shellRoots } from "./choke-cases.ts";
 import { disposeDir, gitCommitAll, makeTempDir, repoRoot } from "./helpers.ts";
@@ -723,9 +733,27 @@ test("choke.onPermissionAsked enforces seat-paseo-tool-fence and denies factory 
   );
   assert.equal(sent.at(-1)?.response.behavior, "allow", "paseo_factory MCP tool must be allowed");
 
-  // 3. pkill plugin-process.js and writes to <stateDir>/ledger.jsonl or mailbox.jsonl denied with seat-write-fence
+  // 3. pkill plugin-process.js denied with process-kill (v0.0.84: its own rule,
+  //    not the seat-write-fence message that misdiagnosed the goal-partner Lead)
+  await choke.onPermissionAsked(
+    {
+      agent: { id: "lead-1", cwd: workspace, title: "Lead — repo" },
+      request: {
+        id: "ask-bad-pkill",
+        provider: "claude",
+        name: "Bash",
+        kind: "tool",
+        detail: { type: "shell", command: "pkill -f plugin-process.js", cwd: workspace },
+      },
+    },
+    paseo,
+  );
+  assert.equal(sent.at(-1)?.response.behavior, "deny", "pkill plugin-process.js must be denied");
+  const pkillDenied = factory.ledger.events.filter((e) => e.event === "permit_denied" && e.rule === "process-kill");
+  assert.equal(pkillDenied.length, 1);
+
+  // 4. writes to <stateDir>/ledger.jsonl or mailbox.jsonl denied with seat-write-fence
   for (const badCmd of [
-    "pkill -f plugin-process.js",
     `echo '{}' >> ${join(stateDir, "ledger.jsonl")}`,
     `rm -f ${join(stateDir, "projects", "repo-123456", "mailbox.jsonl")}`,
   ]) {
@@ -749,6 +777,58 @@ test("choke.onPermissionAsked enforces seat-paseo-tool-fence and denies factory 
     (e) => e.event === "permit_denied" && e.rule === "seat-paseo-tool-fence",
   );
   assert.equal(toolFenceEvents.length, 5);
+});
+
+test("process-kill fires only in command position and carries its own rule (v0.0.84, goal-partner ledger seq 447)", () => {
+  // The exact goal-partner seq-447 command: kill words live in --description
+  // prose ("Do not use killall/pkill") while the factory.mjs path carries
+  // "paseo" — the co-occurrence prefilter hits, the gate must not fire.
+  const fixture = readFileSync(join(repoRoot, "test/fixtures/goal-partner-lead-contract-command.txt"), "utf8");
+
+  // Deny vectors: kill word in command position (bare, absolute path, after
+  // wrappers/env-assignments, or leading a shell -c payload) — every one
+  // carries rule "process-kill" through the seat judge.
+  for (const deny of [
+    'pkill -9 -f "/Users/andrewpham/.paseo/plugin-process.js"', // the ADR 0016 vector
+    "/usr/bin/pkill -f paseo",
+    "bash -c 'pkill -f paseo'",
+    "bash -lc 'pkill -f paseo'",
+    "env bash -c 'pkill -f paseo'",
+    "timeout 5 killall Paseo Helper",
+    "env A=1 pkill paseo",
+    "env FOO=bar nice -n 5 pkill -f plugin-process.js",
+    "nohup kill -9 4242 ; tail -n 5 ~/.paseo/daemon.log",
+    "pgrep -f paseo | xargs kill",
+  ]) {
+    assert.equal(isProcessKillAgainstFactory(deny), true, `"${deny}" must fire`);
+    const viaJudge = judgeSeatShellCommand(deny, "/tmp/repo", "/tmp/state");
+    assert.ok(viaJudge.behavior === "deny" && viaJudge.rule === "process-kill", `"${deny}" must deny with process-kill`);
+  }
+
+  // Prose mentions never fire — including the -c triplet quoted inside prose.
+  for (const allow of [
+    fixture,
+    "echo 'Do not use killall/pkill' && ls /Users/andrewpham/.paseo/plugins/paseo-factory",
+    "echo 'bash -c pkill' >> /Users/andrewpham/.paseo/notes.txt",
+    "git log --oneline | grep kill",
+  ]) {
+    assert.equal(isProcessKillAgainstFactory(allow), false, "kill words outside command position must not fire");
+  }
+
+  // Both judges allow the fixture (the regression that killed the run).
+  assert.deepEqual(judgeSeatShellCommand(fixture, "/tmp/repo", "/tmp/state"), { behavior: "allow" });
+  const roots = { workspace: "/tmp/repo", stateDir: "/tmp/state", tmp: ["/tmp"], homeDir: "/tmp/home" };
+  assert.deepEqual(judgeShellCommand(fixture, roots), { behavior: "allow" });
+
+  // Both judges deny a real kill with the dedicated rule and the Layer-3
+  // backstop reason — never SEAT_WRITE_FENCE_MESSAGE.
+  const seatDeny = judgeSeatShellCommand('pkill -9 -f "/Users/andrewpham/.paseo/plugin-process.js"', "/tmp/repo", "/tmp/state");
+  assert.equal(seatDeny.behavior, "deny");
+  assert.ok(seatDeny.behavior === "deny" && seatDeny.rule === "process-kill");
+  const agentDeny = judgeShellCommand("pkill -f plugin-process.js", roots);
+  assert.ok(agentDeny.behavior === "deny" && agentDeny.rule === "process-kill");
+  assert.equal(agentDeny.reason, PROCESS_KILL_FENCE_MESSAGE);
+  assert.match(PROCESS_KILL_FENCE_MESSAGE, /Layer-3/);
 });
 
 test("choke.onPermissionAsked enforces seat-write-fence and seat-paseo-tool-fence on factory-supervisor / factory-lead provider sessions regardless of title or labels (v0.0.27, ADR 0017 §2)", async (t) => {

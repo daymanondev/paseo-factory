@@ -10,7 +10,8 @@
  *
  * When `PASEO_FACTORY_SEAT` (or `PASEO_FACTORY_CORRELATION`) is set, enforces:
  * - `seat-paseo-tool-fence` across all roles
- * - `seat-write-fence` and git/process fences for `supervisor` and `lead`
+ * - `seat-write-fence` and git fences for `supervisor` and `lead`
+ * - `process-kill` (command-position gate, v0.0.84) across all roles
  * - Contract `--scope`, memory write fence, and `<stateDir>` protection for `agent`
  */
 import { existsSync, readFileSync } from "node:fs";
@@ -245,10 +246,7 @@ return module.exports;
 
 function extractShellWriteTargets(command) {
   const targets = [];
-  const tokens = command
-    .split(/\s+/)
-    .map((t) => t.replace(/^['"]|['"]$/g, "").replace(/^[;|&()$`]+|[;|&()$`]+$/g, ""))
-    .filter(Boolean);
+  const tokens = shellTokens(command);
   for (let i = 0; i < tokens.length; i++) {
     const t = tokens[i];
     const redir = /^(?:\d*|&)>>?(.*)$/.exec(t);
@@ -273,10 +271,129 @@ function extractShellWriteTargets(command) {
   return targets;
 }
 
+// ---- process-kill rule (v0.0.84: command-position gate; mirrors src/choke.ts) -----------------
+
+const PROCESS_KILL_WORDS = new Set(["pkill", "killall", "kill"]);
+const PROCESS_KILL_WRAPPER_PREFIXES = new Set([
+  "env",
+  "command",
+  "nohup",
+  "sudo",
+  "xargs",
+  "exec",
+  "timeout",
+  "nice",
+]);
+const SHELL_DASH_C_FLAG = /^-[A-Za-z]*c[A-Za-z]*$/;
+
+function isTimeoutOrNiceOperand(token) {
+  return /^[-+]?\d[\d.]*[a-z]?$/i.test(token) || token === "-n" || token === "--adjustment";
+}
+
+/** The quote-blind judgment tokenizer (mirrors src/choke.ts `shellTokens`). */
+function shellTokens(command) {
+  return command
+    .split(/\s+/)
+    .map((t) => t.replace(/^['"]|['"]$/g, "").replace(/^[;|&()$`]+|[;|&()$`]+$/g, ""))
+    .filter(Boolean);
+}
+
+/** Splits on unquoted `;`, `|`, `||`, `&&`, `\n` (mirrors src/choke.ts `splitShellSegments`). */
+function splitShellSegments(command) {
+  const segments = [];
+  let current = "";
+  let quote = null;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
+    if (quote !== null) {
+      if (ch === "\\" && quote === '"' && i + 1 < command.length) {
+        current += ch + command[i + 1];
+        i += 1;
+        continue;
+      }
+      if (ch === quote) quote = null;
+      current += ch;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      current += ch;
+      continue;
+    }
+    if (ch === "\\" && i + 1 < command.length) {
+      current += ch + command[i + 1];
+      i += 1;
+      continue;
+    }
+    if (ch === ";" || ch === "\n") {
+      if (current.trim() !== "") segments.push(current.trim());
+      current = "";
+      continue;
+    }
+    if ((ch === "&" && command[i + 1] === "&") || (ch === "|" && command[i + 1] === "|")) {
+      if (current.trim() !== "") segments.push(current.trim());
+      current = "";
+      i += 1;
+      continue;
+    }
+    if (ch === "|") {
+      if (current.trim() !== "") segments.push(current.trim());
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+  if (current.trim() !== "") segments.push(current.trim());
+  return segments;
+}
+
+function commandWordIndex(words) {
+  let i = 0;
+  while (i < words.length) {
+    const w = words[i];
+    if (w === "export" || PROCESS_KILL_WRAPPER_PREFIXES.has(w) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(w)) {
+      i += 1;
+      if (w === "timeout" || w === "nice") {
+        while (i < words.length && isTimeoutOrNiceOperand(words[i])) i += 1;
+      }
+      continue;
+    }
+    break;
+  }
+  return i;
+}
+
+function killWordInCommandPosition(segment) {
+  const words = quoteAwareTokens(segment);
+  const cmd = words[commandWordIndex(words)];
+  if (cmd === undefined) return false;
+  return PROCESS_KILL_WORDS.has(cmd.split("/").at(-1) ?? cmd);
+}
+
+function killWordLeadsShellDashCPayload(segment) {
+  const words = quoteAwareTokens(segment);
+  const i = commandWordIndex(words);
+  const shell = words[i];
+  if (shell === undefined || !/sh$/.test(shell.split("/").at(-1) ?? shell)) return false;
+  let j = i + 1;
+  while (j < words.length && words[j].startsWith("-") && !SHELL_DASH_C_FLAG.test(words[j])) j += 1;
+  if (j >= words.length || !SHELL_DASH_C_FLAG.test(words[j])) return false;
+  const payload = words[j + 1];
+  if (payload === undefined) return false;
+  return PROCESS_KILL_WORDS.has(payload.split(/\s+/)[0] ?? payload);
+}
+
 function isProcessKillAgainstFactory(command) {
   if (!/\b(?:pkill|killall|kill)\b/.test(command)) return false;
-  return /\b(?:plugin-process|paseo)\b/i.test(command);
+  if (!/\b(?:plugin-process|paseo)\b/i.test(command)) return false;
+  for (const segment of splitShellSegments(command)) {
+    if (killWordInCommandPosition(segment) || killWordLeadsShellDashCPayload(segment)) return true;
+  }
+  return false;
 }
+
+const PROCESS_KILL_FENCE_MESSAGE =
+  "process-kill fence: a pkill/kill/killall command aimed at Paseo or plugin-process is denied at ask time; the Layer-3 pkill/kill/killall shims (ADR 0016) still refuse it at exec time";
 
 function isForbiddenSupervisorGit(command) {
   if (!/\bgit\b/.test(command)) return false;
@@ -492,7 +609,7 @@ process.stdin.on("end", () => {
     if (SHELL_TOOL_NAMES.has(toolName)) {
       const cmd = String(toolInput.CommandLine ?? toolInput.command ?? toolInput.cmd ?? "").trim();
       if (isProcessKillAgainstFactory(cmd)) {
-        deny("Seat write fence: killing Paseo or plugin-process is forbidden.");
+        deny(PROCESS_KILL_FENCE_MESSAGE);
       }
       if (ctx.seat === "supervisor" && isForbiddenSupervisorGit(cmd)) {
         deny("Seat git fence: Supervisor may not run destructive or committing git commands on <project-root>.");
@@ -556,7 +673,7 @@ process.stdin.on("end", () => {
     if (SHELL_TOOL_NAMES.has(toolName)) {
       const cmd = String(toolInput.CommandLine ?? toolInput.command ?? toolInput.cmd ?? "").trim();
       if (isProcessKillAgainstFactory(cmd)) {
-        deny("Seat write fence: killing Paseo or plugin-process is forbidden.");
+        deny(PROCESS_KILL_FENCE_MESSAGE);
       }
       for (const target of extractShellWriteTargets(cmd)) {
         const err = checkAgentPath(target);
