@@ -5599,7 +5599,7 @@ test("daemon plugin bridge: self-heals a v0.0.40 poisoned factory-supervisor ext
   assert.deepEqual(check.updatesAvailable, ["paseo-factory"]);
 
   const healed = readHomeConfig(daemon.home);
-  assert.equal(healed.providers["factory-supervisor"]?.extends, "pi", "healed 'antigravity' extends to 'pi' before opening the WebSocket");
+  assert.equal(healed.providers["factory-supervisor"]?.extends, "opencode", "healed 'antigravity' extends to 'opencode' before opening the WebSocket");
   assert.deepEqual(healed.providers["factory-supervisor"]?.models, [
     { id: "gemini-4-argon-high", label: "gemini-4-argon-high", isDefault: true },
   ]);

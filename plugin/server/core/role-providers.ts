@@ -152,14 +152,18 @@ function isSweptProfile(profile: PaseoAgentProfile): boolean {
  * runtime provider (ADR 0026 §1).
  */
 const PASEO_BUILTIN_EXTENDS = new Set(["claude", "codex", "copilot", "opencode", "pi", "omp"]);
-const FALLBACK_BUILTIN_ORDER = ["pi", "opencode", "claude", "codex", "copilot", "omp"] as const;
+const FALLBACK_BUILTIN_ORDER = ["opencode", "copilot", "claude", "codex", "omp", "pi"] as const;
 
 function fallbackBuiltinExtends(providers: Record<string, PaseoProviderEntry>): string {
   for (const candidate of FALLBACK_BUILTIN_ORDER) {
     const entry = providers[candidate];
+    if (isRecord(entry) && entry.enabled === true) return candidate;
+  }
+  for (const candidate of FALLBACK_BUILTIN_ORDER) {
+    const entry = providers[candidate];
     if (!isRecord(entry) || entry.enabled !== false) return candidate;
   }
-  return "pi";
+  return "opencode";
 }
 
 /**
@@ -237,7 +241,11 @@ const ROLE_DESCRIPTIONS: Record<FactoryRole, string> = {
  * Returns the next config plus `changed` — the caller writes only on a real
  * change.
  */
-export function reconcilePaseoConfigObject(config: PaseoConfigObject, lanes: Lanes): { changed: boolean; config: PaseoConfigObject } {
+export function reconcilePaseoConfigObject(
+  config: PaseoConfigObject,
+  lanes: Lanes,
+  options?: { paseoHome?: string },
+): { changed: boolean; config: PaseoConfigObject } {
   const original = config;
   const agents = isRecord(original.agents) ? original.agents : {};
   const daemon = isRecord(original.daemon) ? original.daemon : {};
@@ -255,6 +263,10 @@ export function reconcilePaseoConfigObject(config: PaseoConfigObject, lanes: Lan
     if (parsed === undefined) continue; // an unparseable lane writes nothing, never a guessed provider
     const base = baseProviderFor(parsed.provider, providers);
     const env: Record<string, string> = { ...(base.inheritedEnv ?? {}), PASEO_FACTORY_SEAT: role };
+    if (base.extends === "pi" && typeof options?.paseoHome === "string" && options.paseoHome.trim() !== "") {
+      env.PI_CODING_AGENT_DIR =
+        base.inheritedEnv?.PI_CODING_AGENT_DIR ?? join(options.paseoHome, "plugin-state", "paseo-factory", "pi-agent", role);
+    }
     const modelEntry: PaseoProviderModelEntry = {
       id: parsed.model,
       label: parsed.model,
@@ -336,7 +348,7 @@ export function reconcilePaseoRoleProviders(
       return { ok: false, reason: `${path} is not valid JSON — leaving it untouched` };
     }
   }
-  const { changed, config: next } = reconcilePaseoConfigObject(config, lanes);
+  const { changed, config: next } = reconcilePaseoConfigObject(config, lanes, { paseoHome });
   if (!changed) return { ok: true, changed: false };
   try {
     mkdirSync(paseoHome, { recursive: true });
@@ -365,11 +377,14 @@ export function reconcilePaseoRoleProviders(
  * `factory-supervisor` / `factory-lead` / `factory-peer` entry whose `extends`
  * would be rejected by Paseo 0.13.0's `ProviderOverridesSchema` (such as
  * `"extends": "antigravity"` left by v0.0.40 or `"extends": "acp"` without a
- * non-empty `command` array) onto a valid built-in `extends` (`"pi"` or custom
+ * non-empty `command` array) onto a valid built-in `extends` (`"opencode"` or custom
  * `acp` command), promoting `additionalModels` to `models` when `models` is
  * absent.
  */
-export function healFactoryRoleProvidersObject(config: PaseoConfigObject): { changed: boolean; config: PaseoConfigObject } {
+export function healFactoryRoleProvidersObject(
+  config: PaseoConfigObject,
+  options?: { paseoHome?: string },
+): { changed: boolean; config: PaseoConfigObject } {
   const original = config;
   if (!isRecord(original.agents) || !isRecord(original.agents.providers)) {
     return { changed: false, config: original };
@@ -398,6 +413,15 @@ export function healFactoryRoleProvidersObject(config: PaseoConfigObject): { cha
       } else if (!hasValidCommand) {
         delete entry.command;
       }
+    }
+    if (entry.extends === "pi" && typeof options?.paseoHome === "string" && options.paseoHome.trim() !== "") {
+      const existingEnv = isRecord(entry.env) ? (entry.env as Record<string, string>) : {};
+      entry.env = {
+        ...existingEnv,
+        PASEO_FACTORY_SEAT: existingEnv.PASEO_FACTORY_SEAT ?? role,
+        PI_CODING_AGENT_DIR:
+          existingEnv.PI_CODING_AGENT_DIR ?? join(options.paseoHome, "plugin-state", "paseo-factory", "pi-agent", role),
+      };
     }
     if (entry.models === undefined && Array.isArray(entry.additionalModels)) {
       entry.models = entry.additionalModels;
@@ -450,7 +474,7 @@ export function healFactoryRoleProvidersInConfig(paseoHome: string): boolean {
   } catch {
     return false;
   }
-  const { changed, config: next } = healFactoryRoleProvidersObject(config);
+  const { changed, config: next } = healFactoryRoleProvidersObject(config, { paseoHome });
   if (!changed) return false;
   try {
     let mode = 0o600;

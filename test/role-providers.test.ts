@@ -162,7 +162,10 @@ test("v0.0.27 (ADR 0017 §1): reconcilePaseoRoleProviders sweeps the 29 sw2-* or
   assert.deepEqual(lead.models, [{ id: "claude-opus-5", label: "claude-opus-5", isDefault: true }]);
   const peer = providers[FACTORY_ROLE_PROVIDERS.agent]!;
   assert.equal(peer.extends, "pi", "a pi lane maps onto the pi builtin verbatim");
-  assert.deepEqual(peer.env, { PASEO_FACTORY_SEAT: "agent" });
+  assert.deepEqual(peer.env, {
+    PASEO_FACTORY_SEAT: "agent",
+    PI_CODING_AGENT_DIR: join(home, "plugin-state", "paseo-factory", "pi-agent", "agent"),
+  });
   assert.deepEqual(peer.models, [{ id: "zai/glm-5.3", label: "zai/glm-5.3", isDefault: true }]);
 
   // The picker: all 29 sw2-* rows swept, exactly one Supervisor (Factory) profile prepended.
@@ -234,16 +237,17 @@ test("v0.0.27 (ADR 0017 §1): an agy lane inherits the user's custom agy provide
   assert.equal(profiles[0]!.modeId, "https://agentclientprotocol.com/protocol/session-modes#plan", "the copilot harness pins its ACP plan session-mode");
 
   // Without a custom agy entry (or with an antigravity plugin lane), extends falls back
-  // to a valid built-in provider ("pi") so @getpaseo/protocol's ProviderOverridesSchema
-  // (validExtendsValues) never rejects <home>/config.json on daemon reload.
+  // to a valid static-mode built-in provider ("opencode") so @getpaseo/protocol's ProviderOverridesSchema
+  // (validExtendsValues) never rejects <home>/config.json on daemon reload and Paseo's
+  // ProviderSnapshotManager resolves the replacement catalog in-memory without spawning `pi --mode rpc`.
   delete (after.agents as { providers: Record<string, unknown> }).providers.agy;
   writeConfig(home, after);
   const fallback = reconcilePaseoRoleProviders(home, { ...LANES, supervisor: "antigravity/gemini-3.1-pro-high", worker: "agy/gemini-3-pro" });
   assert.ok(fallback.ok && fallback.changed === true);
   const fallbackConfig = readConfig(home);
   const fallbackProviders = (fallbackConfig.agents as { providers: Record<string, { extends?: string; models?: { id: string }[] }> }).providers;
-  assert.equal(fallbackProviders[FACTORY_ROLE_PROVIDERS.agent]!.extends, "pi");
-  assert.equal(fallbackProviders[FACTORY_ROLE_PROVIDERS.supervisor]!.extends, "pi");
+  assert.equal(fallbackProviders[FACTORY_ROLE_PROVIDERS.agent]!.extends, "opencode");
+  assert.equal(fallbackProviders[FACTORY_ROLE_PROVIDERS.supervisor]!.extends, "opencode");
   assert.deepEqual(fallbackProviders[FACTORY_ROLE_PROVIDERS.supervisor]!.models, [
     { id: "gemini-3.1-pro-high", label: "gemini-3.1-pro-high", isDefault: true },
   ]);
@@ -484,12 +488,55 @@ test("ADR 0026 §1: healFactoryRoleProvidersInConfig repairs v0.0.40 poisoned ex
   const healed = readConfig(home);
   const healedProviders = (healed.agents as { providers: Record<string, Record<string, unknown>> }).providers;
   assert.equal("sw2-supervisor-claude" in healedProviders, false, "sweeps orphaned sw2-* provider keys");
-  assert.equal(healedProviders["factory-supervisor"]?.extends, "pi", "heals 'antigravity' extends onto a valid built-in provider");
+  assert.equal(healedProviders["factory-supervisor"]?.extends, "opencode", "heals 'antigravity' extends onto a valid static-mode built-in provider");
   assert.deepEqual(healedProviders["factory-supervisor"]?.models, [
     { id: "gemini-4-argon-high", label: "gemini-4-argon-high", isDefault: true },
   ]);
   assert.equal("additionalModels" in (healedProviders["factory-supervisor"] ?? {}), false, "promotes additionalModels to models");
-  assert.equal(healedProviders["factory-lead"]?.extends, "pi", "heals commandless 'acp' extends onto a valid built-in provider");
+  assert.equal(healedProviders["factory-lead"]?.extends, "opencode", "heals commandless 'acp' extends onto a valid static-mode built-in provider");
   assert.equal(healedProviders["factory-peer"]?.extends, "acp", "inherits custom agy acp command when present");
   assert.deepEqual(healedProviders["factory-peer"]?.command, ["npx", "-y", "paseo-agy-acp@2.4.0"]);
+});
+
+test("reconcilePaseoRoleProviders and healFactoryRoleProvidersInConfig pin per-role PI_CODING_AGENT_DIR on pi-extending role providers so Paseo's catalog probe never loads global ~/.pi/agent extensions", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const home = join(dir, "pi-home");
+  const config = liveLikeConfig();
+  const providers = (config.agents as { providers: Record<string, Record<string, unknown>> }).providers;
+  for (const key of ["opencode", "copilot", "claude", "codex", "omp"]) {
+    providers[key] = { enabled: false };
+  }
+  providers.pi = { enabled: true };
+  writeConfig(home, config);
+
+  const reconciled = reconcilePaseoRoleProviders(home, {
+    ...LANES,
+    supervisor: "antigravity/gemini-4-argon-high",
+    lead: "pi/zai/glm-5.3:high",
+    worker: "pi/zai/glm-5.3:high",
+  });
+  assert.ok(reconciled.ok && reconciled.changed === true);
+  const after = readConfig(home);
+  const afterProviders = (after.agents as { providers: Record<string, { extends?: string; env?: Record<string, string> }> }).providers;
+  for (const role of ["supervisor", "lead", "agent"] as const) {
+    const providerKey = FACTORY_ROLE_PROVIDERS[role];
+    assert.equal(afterProviders[providerKey]?.extends, "pi");
+    assert.equal(
+      afterProviders[providerKey]?.env?.PI_CODING_AGENT_DIR,
+      join(home, "plugin-state", "paseo-factory", "pi-agent", role),
+      `${providerKey} pins isolated PI_CODING_AGENT_DIR for ${role}`,
+    );
+  }
+
+  // Also verify healFactoryRoleProvidersInConfig adds PI_CODING_AGENT_DIR when an existing pi-extending entry lacks it.
+  delete afterProviders["factory-peer"]!.env!.PI_CODING_AGENT_DIR;
+  writeConfig(home, after);
+  assert.equal(healFactoryRoleProvidersInConfig(home), true);
+  const healed = readConfig(home);
+  const healedPeer = (healed.agents as { providers: Record<string, { env?: Record<string, string> }> }).providers["factory-peer"];
+  assert.equal(
+    healedPeer?.env?.PI_CODING_AGENT_DIR,
+    join(home, "plugin-state", "paseo-factory", "pi-agent", "agent"),
+  );
 });

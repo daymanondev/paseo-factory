@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.81] - 2026-11-01
+
 ## [0.0.80] - 2026-11-01
 
 - Link existing Open Design projects from the Factory Header in SLP or Scrum, using offline host catalogs or a granted client folder for remote machines. Sync versioned design bundles before dispatch, and seed Scrum worktrees with conflict-aware updates.

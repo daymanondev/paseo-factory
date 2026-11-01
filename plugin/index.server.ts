@@ -21,6 +21,7 @@ import { createFactory } from "./server/core/factory.ts";
 import { ensureFactoryBinScripts } from "./server/core/agy-home.ts";
 import { PLUGIN_ID, pluginDirFor, resolvePaseoHome, stateDirFor } from "./server/paths.ts";
 import { ensureFactorySkillSafe } from "./server/core/skill.ts";
+import { provisionPiAgentHome } from "./server/core/pi-home.ts";
 import { effectiveLanesForReconcile, healFactoryRoleProvidersInConfig, reconcilePaseoRoleProviders } from "./server/core/role-providers.ts";
 import { reloadDaemonConfigViaWs, warmPluginDaemonApiViaWs } from "./server/daemon-cli.ts";
 import { claimCliBinDir, ensureClaimCli, ensureGitShim, injectClaimCliPath } from "./server/shell.ts";
@@ -32,7 +33,7 @@ import { createSurfaceHandlers, registerSurfaceRpc } from "./server/surface-rpc.
 import { createLeadMailRuntime } from "./server/lead-mailbox.ts";
 import { syncPeerHelpersBeforeCreate, injectRoleOnCreate, injectSessionEnv, sanitizeAgentCreateHookResult } from "./server/roles.ts";
 
-const SHELL_VERSION = "0.0.80";
+const SHELL_VERSION = "0.0.81";
 
 const log = (message: string) => console.log(`[${PLUGIN_ID}] ${message}`);
 
@@ -118,6 +119,14 @@ export default function contribute(server: PluginServerContext) {
       // unwritable skills root warns and the boot continues (choke, spool,
       // mailbox runtime) — a skill never kills a boot.
       reconcileGlobalFactorySkills(pluginDir, true);
+
+      for (const role of ["supervisor", "lead", "agent"] as const) {
+        try {
+          provisionPiAgentHome({ stateDir, role });
+        } catch (err) {
+          log(`pi-home: could not pre-provision ${role} home — ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
 
       // The native role providers (v0.0.27, ADR 0017 §1): reconcile
       // `factory-supervisor`, `factory-lead`, and `factory-peer` plus the single
