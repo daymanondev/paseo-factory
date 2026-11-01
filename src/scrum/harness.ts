@@ -1,9 +1,10 @@
+import { seedLinkedOpenDesign } from "./open-design-link.ts";
 import { stageOpenDesignFrames, inspectOpenDesignHost, openDesignWorkspace } from "./open-design.ts";
 import { assertOwnerDependencies } from "./owner-work.ts";
 
 import { readProjectRegistration } from "../project.ts";
 import { assertDevReady } from "./approval.ts";
-import { readFileSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { FactoryError } from "../errors.ts";
@@ -152,15 +153,19 @@ export function provisionScrumHarness(input: {
     const workspace = input.workspace ?? join(root, 'worktrees', identity.task);
     const run = readRun(state, slug, identity.binding.runId);
     const mockupsDir = join(workspace, '.scratch', run.initiativeId, 'mockups');
+    const projectRoot = readProjectRegistration(state, slug)?.root;
+    if (projectRoot) seedLinkedOpenDesign(projectRoot, workspace, run.initiativeId);
     stageOpenDesignFrames(mockupsDir);
     const host = inspectOpenDesignHost(input.environment);
     writeFileSync(join(roleHome, 'open-design.json'), JSON.stringify({ ...host, workspace: openDesignWorkspace(mockupsDir, run.runId) }, null, 2));
     if (host.cli) {
+      const bin = join(roleHome, 'bin'); mkdirSync(bin, { recursive: true });
       const quote = (s: string) => "'" + s.replace(/'/g, "'\\''") + "'";
-      writeFileSync(join(roleHome, 'od'), '#!/bin/sh\nELECTRON_RUN_AS_NODE=1 OD_DAEMON_URL="${OPEN_DESIGN_DAEMON_URL:-${OD_DAEMON_URL:-http://127.0.0.1:7456}}" exec ' + quote(process.execPath) + ' ' + quote(host.cli) + ' "$@"\n', { mode: 0o755 });
+      writeFileSync(join(bin, 'od.cmd'), '@echo off\r\nsetlocal\r\nset ELECTRON_RUN_AS_NODE=1\r\nif not defined OD_DAEMON_URL set OD_DAEMON_URL=http://127.0.0.1:7456\r\nif defined OPEN_DESIGN_DAEMON_URL set OD_DAEMON_URL=%OPEN_DESIGN_DAEMON_URL%\r\n"' + host.binary.replace(/"/g, '') + '" "' + host.cli.replace(/"/g, '') + '" %*\r\n');
+      writeFileSync(join(bin, 'od'), '#!/bin/sh\nELECTRON_RUN_AS_NODE=1 OD_DAEMON_URL="${OPEN_DESIGN_DAEMON_URL:-${OD_DAEMON_URL:-http://127.0.0.1:7456}}" exec ' + quote(host.binary) + ' ' + quote(host.cli) + ' "$@"\n', { mode: 0o755 });
     }
     if (host.available) {
-      writeFileSync(join(roleHome, 'APPEND_SYSTEM.md'), readFileSync(join(roleHome, 'APPEND_SYSTEM.md'), 'utf8') + '\nOptional native Open Design host and Brand Design Systems: ' + JSON.stringify(host) + '\nFolder-backed orchestratorWorkspace import: ' + JSON.stringify(openDesignWorkspace(mockupsDir, run.runId)) + '\nNative od CLI wrapper (when available): ' + join(roleHome, 'od') + '\nUse factory open-design sync --dir <mockupsDir> only for an explicitly requested native sync.\n');
+      writeFileSync(join(roleHome, 'APPEND_SYSTEM.md'), readFileSync(join(roleHome, 'APPEND_SYSTEM.md'), 'utf8') + '\nOptional native Open Design host and Brand Design Systems: ' + JSON.stringify(host) + '\nFolder-backed orchestratorWorkspace import: ' + JSON.stringify(openDesignWorkspace(mockupsDir, run.runId)) + '\nNative od CLI wrapper (when available): ' + join(roleHome, 'bin', process.platform === 'win32' ? 'od.cmd' : 'od') + '\nUse factory open-design sync --dir <mockupsDir> only for an explicitly requested native sync.\n');
     }
   }
   for (const file of ['impeccable-hook.mjs', 'impeccable-opencode.mjs', 'hooks.json', 'hooks', '.claude-plugin', 'agy-settings.json', 'copilot']) rmSync(join(roleHome, file), { recursive: true, force: true });
@@ -199,8 +204,8 @@ export function scopeScrumCapabilities<
   const helpers =
     identity.kind === "task" &&
     ["ux", "dev", "qa"].includes(identity.binding.role)
-      ? /context7|exa|search|research|vision|chrome|playwright|browser/i
-      : /context7|exa|search|research|notion/i;
+      ? /context7|exa|search|research|vision|chrome|playwright|browser|open-design|open_design/i
+      : /context7|exa|search|research|notion|open-design|open_design/i;
   const mcpServers = Object.fromEntries(
     Object.entries(config.mcpServers ?? {}).filter(
       ([name]) =>

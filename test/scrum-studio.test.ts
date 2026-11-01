@@ -92,3 +92,25 @@ test('Surface Studio serves the committed Open Design flow board, scripts and fr
   t.mock.timers.tick(24 * 60 * 60_000 + 1);
   await assert.rejects(fetch(studio.url), /fetch failed/);
 });
+
+test('Studio reachability never returns an unverified URL, including a lone candidate', async () => {
+  const { resolveReachableStudioUrl } = await import('../plugin/client/factory/studio-url.ts');
+  assert.equal(await resolveReachableStudioUrl(['http://127.0.0.1:1/?token=x']), null);
+  assert.equal(await resolveReachableStudioUrl(['http://127.0.0.1:1', 'http://127.0.0.1:2']), null);
+});
+
+test('RPC Studio bundles render committed Scrum artifacts and retain digest-bound Owner decisions', async t => {
+  const f = await designFixture(t); const run = f.submit() as ScrumRun;
+  const project = resolveProject(f.root); assert.ok(project.ok);
+  cpSync(join(f.state, 'projects/p'), join(f.state, 'projects', project.slug), { recursive: true });
+  const factory = createFactory({ stateDir: f.state });
+  const handlers = createSurfaceHandlers({ factory, stateDir: f.state, home: f.state, daemon: { agents: { list: async () => ({ entries: [], pageInfo: {} }) } } as unknown as SurfaceDaemonApi });
+  const response = await handlers.scrumCommand({ projectRoot: f.root, operation: 'preview.bundle', runId: run.runId, requestId: 'relay' });
+  assert.ok(response.ok, JSON.stringify(response));
+  const bundle = response.data as { studioHtml: string; files: Record<string, string>; model: { design: { digest: string; revision: number } }; activeGateId: string };
+  assert.match(bundle.studioHtml, /Design overview canvas/); assert.match(bundle.studioHtml, /factory:studio-decision/);
+  assert.equal(bundle.model.design.digest, run.design!.digest); assert.ok(bundle.activeGateId);
+  assert.ok(bundle.files['mockups/index.html']);
+  const decision = await handlers.scrumCommand({ projectRoot: f.root, operation: 'design.decide', runId: run.runId, requestId: 'relay-decision', expectedRevision: run.revision, payload: { ...bundle.model.design, decision: 'changes_requested', rationale: 'Adjust spacing', explicitOwnerInstruction: true, findings: [{ screen: 'catalog', state: 'populated', viewport: 'mobile', selector: '#buy', note: 'Adjust spacing', status: 'revise' }] } });
+  assert.ok(decision.ok, JSON.stringify(decision));
+});

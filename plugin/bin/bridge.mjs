@@ -1190,10 +1190,6 @@ __export(catalog_exports, {
 });
 module.exports = __toCommonJS(catalog_exports);
 
-// src/scrum/selection.ts
-var import_node_fs = require("node:fs");
-var import_node_path = require("node:path");
-
 // src/errors.ts
 var FactoryError = class extends Error {
   code;
@@ -1210,6 +1206,8 @@ function safeId(value) {
 }
 
 // src/scrum/selection.ts
+var import_node_fs = require("node:fs");
+var import_node_path = require("node:path");
 function selectionPath(state, slug) {
   if (slug !== void 0 && !safeId(slug))
     throw new FactoryError("invalid-project-slug", slug);

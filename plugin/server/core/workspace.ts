@@ -565,10 +565,13 @@ export function prepareTaskWorktree(options: PrepareTaskWorktreeOptions): Prepar
     gitIn(root, ["worktree", "prune"]);
   }
   const branch = branchName ?? taskWorktreeBranch(task);
-  const added = gitIn(root, ["worktree", "add", "-B", branch, path, commit]);
+  const added = gitIn(root, ["-c", "core.autocrlf=false", "worktree", "add", "-B", branch, path, commit]);
   if (added.error !== undefined || added.status !== 0) {
     return { ok: false, reason: cap(`could not create the task worktree at ${path} on ${branch}: ${firstLine(added.stderr ?? added.error?.message ?? "")}`) };
   }
+  const extension = gitIn(root, ["config", "extensions.worktreeConfig", "true"]);
+  const lineEndings = extension.status === 0 ? gitIn(path, ["config", "--worktree", "core.autocrlf", "false"]) : extension;
+  if (lineEndings.status !== 0) return { ok: false, reason: "could not disable autocrlf in Task worktree" };
   hydrateTaskWorktree(root, path, { inheritNodeModules: symlinkNodeModules !== false });
   return { ok: true, path, branch, reset };
 }

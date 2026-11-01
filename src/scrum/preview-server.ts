@@ -1,3 +1,4 @@
+import { linkedPreviewBundle } from "./preview-bundle.ts";
 /** Token-bound studio server (loopback + Tailscale/LAN host IPs for remote Paseo Desktop clients). */
 import { posix } from 'node:path';
 import { createServer } from 'node:http';
@@ -52,7 +53,7 @@ function listReachableHostIps(): string[] {
 export async function servePreview(root: string, run: ScrumRun, options: { subpath?: string; port?: number; decide?: (input: PreviewDecision) => ScrumRun | Promise<ScrumRun>; current?: () => ScrumRun } = {}) {
   const preview = renderPreview(root, run, options.subpath, { inlineAssets: false });
   const model = previewModel(root, run);
-  const port = options.port ?? 0;
+  const port = options.port ?? (process.env.PASEO_FACTORY_PREVIEW_PORT ? Number(process.env.PASEO_FACTORY_PREVIEW_PORT) : 0);
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new FactoryError('invalid-preview-port', 'port must be 0..65535');
   const key = `${root}:${run.runId}`, fingerprint = `${preview.digest}:${run.revision}:${options.subpath ?? ''}:${port}`;
   const existing = previews.get(key);
@@ -105,7 +106,7 @@ export async function servePreview(root: string, run: ScrumRun, options: { subpa
       }
       if (!['GET', 'HEAD'].includes(request.method ?? '')) { json(405, { error: 'Method not allowed' }); return; }
       if (url.pathname === '/') { send(200, 'text/html; charset=utf-8', designStudioHtml(), "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; frame-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"); return; }
-      if (url.pathname === '/api/state') {
+      if (url.pathname === '/api/state' || url.pathname === '/healthz') {
         const current = options.current?.() ?? run;
         json(200, { ...model, currentRevision: current.revision, design: current.design?.digest === preview.digest ? current.design : model.design }, { 'Access-Control-Allow-Origin': '*' }); return;
       }
@@ -161,4 +162,33 @@ export async function servePreview(root: string, run: ScrumRun, options: { subpa
   previews.set(key, { server, url, urls, fingerprint }); server.unref();
   refresh(); server.once('close', () => clearTimeout(expiry));
   return { ...preview, url, urls };
+}
+
+/** Linked pre-run/SLP designs use the same Studio, with approval controls disabled. */
+export async function serveLinkedPreview(root: string) {
+  const bundle = linkedPreviewBundle(root), key = `${root}:linked`;
+  const existing = previews.get(key);
+  if (existing?.fingerprint === bundle.model.design.digest) return { url: existing.url, urls: existing.urls };
+  existing?.server.close(); previews.delete(key);
+  const token = randomBytes(32).toString('hex');
+  const port = process.env.PASEO_FACTORY_PREVIEW_PORT ? Number(process.env.PASEO_FACTORY_PREVIEW_PORT) : 0;
+  if (!Number.isInteger(port) || port < 0 || port > 65535) throw new FactoryError('invalid-preview-port', 'port must be 0..65535');
+  const hosts = new Set<string>();
+  let expiry: ReturnType<typeof setTimeout>;
+  const refresh = () => { clearTimeout(expiry); expiry = setTimeout(() => { server.close(); previews.delete(key); }, PREVIEW_IDLE_TIMEOUT_MS); expiry.unref(); };
+  const server = createServer((request, response) => {
+    const url = new URL(request.url ?? '/', 'http://127.0.0.1');
+    if (!hosts.has(request.headers.host ?? '') || url.searchParams.get('token') !== token) { response.writeHead(403); response.end(); return; }
+    refresh();
+    if (!['GET', 'HEAD'].includes(request.method ?? '')) { response.writeHead(405); response.end(); return; }
+    const health = ['/healthz', '/api/state'].includes(url.pathname);
+    response.writeHead(health || url.pathname === '/' ? 200 : 404, { 'Content-Type': health ? 'application/json' : 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' });
+    response.end(request.method === 'HEAD' ? undefined : health ? JSON.stringify(bundle.model) : url.pathname === '/' ? bundle.studioHtml : 'Not found');
+  });
+  await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(port, '0.0.0.0', () => { server.off('error', reject); resolve(); }); });
+  const address = server.address(); if (!address || typeof address === 'string') throw new Error('Preview listener unavailable');
+  const urls = ['127.0.0.1', ...listReachableHostIps()].map(ip => { hosts.add(`${ip}:${address.port}`); return `http://${ip}:${address.port}/?token=${token}`; });
+  previews.set(key, { server, url: urls[0], urls, fingerprint: bundle.model.design.digest });
+  server.unref(); refresh(); server.once('close', () => clearTimeout(expiry));
+  return { url: urls[0], urls };
 }

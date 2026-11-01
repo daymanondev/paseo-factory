@@ -34,3 +34,15 @@ test("Lead kickoff describes Peer helpers and warns before dispatch with missing
   assert.match(packet, /WARNING/);
   for (const role of ["lead", "agent"] as const) assert.match(buildRoleKickoffPrompt(role, { helperMcps }), /supabase \[http · auth_expired\]/);
 });
+
+test('linked Owner designs are authoritative in seat kickoff and Scrum UX prompts', async t => {
+  const { mkdirSync } = await import('node:fs');
+  const root = makeTempDir(); disposeDir(t, root); mkdirSync(join(root, 'design'));
+  writeFileSync(join(root, 'design/open-design-link.json'), JSON.stringify({ projectId: 'owner', projectName: 'Checkout flow', screenCount: 4, files: [], digest: 'abc' }));
+  for (const role of ['lead', 'supervisor'] as const) {
+    const packet = buildSeatKickoffPacket({ role, projectSlug: 'repo', projectRoot: root, ledgerEvents: [] });
+    assert.match(packet, /Open Design Linked Specification/); assert.match(packet, /Checkout flow/);
+    assert.match(packet, /design\/screens.html/); assert.match(packet, /4 screens/); assert.match(packet, /authoritative/);
+  }
+  assert.match(renderScrumPrompt('ux', { project: 'repo', workspace: root }), /preserve and refine the Owner's linked Open Design screens/);
+});

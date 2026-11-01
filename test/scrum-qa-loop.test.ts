@@ -478,3 +478,18 @@ test("a GREEN QA artifact reproduces a real defect, Dev promotes unchanged tests
   ) as typeof run;
   assert.equal(completed.phase, "completed");
 });
+
+test('QA accepts CRLF checkouts for LF evidence hashes and still rejects changed evidence', async t => {
+  const { verifyQaFiles } = await import('../src/scrum/qa-bundle.ts');
+  const { sha256 } = await import('../src/scrum/artifacts.ts');
+  const { mkdirSync } = await import('node:fs');
+  const root = makeTempDir(); disposeDir(t, root); mkdirSync(join(root, 'qa'));
+  const evidence = [{ path: 'qa/log.txt', sha256: sha256('passed\nthree tests\n') }];
+  const run = { command: 'node --test', exit: 0, firstAttempt: true, fixtureId: 'a', environment: 'node', seed: '1', tests: 3, passed: 3, skipped: 0, expectedFailures: 0, evidence };
+  const raw = { schemaVersion: 1, auditId: 'crlf', productSha: 'a'.repeat(40), status: 'clean', baseline: run, runs: [run, { ...run, fixtureId: 'b' }], testIds: ['R1'], requirementRefs: ['R1'], designRefs: [], lenses: ['intent-alignment', 'blind-hunter', 'edge-case-hunter', 'verification-gap'], findings: [], bundles: [], activeSuite: true };
+  assert.deepEqual(validateQaReport(raw), []);
+  writeFileSync(join(root, 'qa/log.txt'), 'passed\r\nthree tests\r\n');
+  assert.deepEqual(verifyQaFiles(root, raw as Parameters<typeof verifyQaFiles>[1]), []);
+  writeFileSync(join(root, 'qa/log.txt'), 'failed\r\nthree tests\r\n');
+  assert.match(verifyQaFiles(root, raw as Parameters<typeof verifyQaFiles>[1]).join(), /hash mismatch/);
+});

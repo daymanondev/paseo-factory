@@ -1,3 +1,4 @@
+import { OpenDesignControl } from "./open-design.tsx";
 import { ExecutionSelector } from "./scrum.tsx";
 /**
  * The persistent Project-centered header (v0.0.35, ADR 0025, amending ADR 0009 §2
@@ -25,6 +26,8 @@ export type { VaultActName, VaultImportInput, VaultNote, VaultSyncInput };
 
 /** The header's whole action surface — the Shell owns the RPC calls. */
 export interface HeaderActions {
+  refresh?(): void;
+  designSourceKey?: string;
   setMode?(mode: "slp" | "scrum"): void;
   /** Jump to the live Supervisor's conversation (v0.0.27, ADR 0017 §3) — the seat itself starts from Paseo's native New Chat picker, never here. */
   openSupervisor(): void;
@@ -359,6 +362,7 @@ export function Header({
             </Text>
           </View>
         )}
+        {project && !project.missingRoot ? <OpenDesignControl key={project.root} theme={theme} root={project.root} sourceKey={actions.designSourceKey} onChanged={() => actions.refresh?.()} /> : null}
         {pickingPath ? (
           <View style={{ gap: SPACING[1.5], borderTopWidth: 1, borderTopColor: theme.colors.border, paddingTop: SPACING[2] }}>
             <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[2] }}>

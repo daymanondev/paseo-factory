@@ -568,11 +568,15 @@ function importDirectory(target, id) {
   return id === void 0 ? join(dirname(historyTargetPath(target)), "history-imports") : join(dirname(historyTargetPath(target)), "history-imports", id);
 }
 function fsyncDirectory(path) {
-  const fd = openSync(path, "r");
+  if (process.platform === "win32") return;
+  let fd;
   try {
+    fd = openSync(path, "r");
     fsyncSync(fd);
+  } catch (error) {
+    if (!["EISDIR", "EPERM", "EBADF", "EINVAL"].includes(error.code ?? "")) throw error;
   } finally {
-    closeSync(fd);
+    if (fd !== void 0) closeSync(fd);
   }
 }
 function makeDurableDirectory(path) {

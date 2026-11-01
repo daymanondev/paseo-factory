@@ -69,8 +69,11 @@ export function importDirectory(target: string, id?: string): string {
   return id === undefined ? join(dirname(historyTargetPath(target)), "history-imports") : join(dirname(historyTargetPath(target)), "history-imports", id);
 }
 export function fsyncDirectory(path: string): void {
-  const fd = openSync(path, "r");
-  try { fsyncSync(fd); } finally { closeSync(fd); }
+  if (process.platform === "win32") return;
+  let fd: number | undefined;
+  try { fd = openSync(path, "r"); fsyncSync(fd); }
+  catch (error) { if (!["EISDIR", "EPERM", "EBADF", "EINVAL"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error; }
+  finally { if (fd !== undefined) closeSync(fd); }
 }
 export function makeDurableDirectory(path: string): void {
   const created = mkdirSync(path, { recursive: true });

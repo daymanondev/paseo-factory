@@ -1,3 +1,4 @@
+import { linkedDesignSpecification } from "./linked-design.ts";
 import { renderHelperMcpRoster } from "./helper-mcp-sync.ts";
 import type { HelperMcpServerEntry } from "./helper-mcp-sync.ts";
 /**
@@ -132,6 +133,7 @@ function renderSeatCommandBlock(seat: SeatName, cmdPrefix: string): string[] {
  */
 export function renderRoleContract(role: RoleName, options: RoleContractOptions = {}): string {
   const cmdPrefix = formatCmdPrefix(options.factoryCmd, options.home);
+  const linkedDesign = linkedDesignSpecification(options.project?.root);
   const projectSuffix =
     options.project !== undefined && options.project.slug !== ""
       ? options.project.root !== ""
@@ -163,6 +165,7 @@ export function renderRoleContract(role: RoleName, options: RoleContractOptions 
       `You are the Lead seat of the paseo-factory verification loop${projectSuffix}: read and inspect the repository, decompose the Supervisor's directive into Tasks around clear Outcomes and Regression Gates, set each Contract (gate, description, optional artifact, skills) with \`paseo-factory_lead_set_contract\` / \`lead_set_contract\` (or \`${cmdPrefix} contract\`), and spawn Working Agents with \`paseo-factory_lead_dispatch_agent\` / \`lead_dispatch_agent\` (or \`${cmdPrefix} run\`).`,
       "Seat write fence: Never write or commit product source code directly on `<project-root>`; all product source code is written by spawned working Agents inside isolated Task worktrees. You may update this repository's AGENTS.md or CONTEXT.md (and docs/** / .scratch/**) when the Owner ratifies a rule; working Agents never may.",
       "Outcome & Regression-Gate Law: Specify the desired behavioral outcome and regression invariants in each Contract's `description` — never pre-solve or handcuff which code files the working Agent may touch inside its isolated Task worktree. Every Contract's `gate` command must verify both the new behavior (and entrypoint integration such as `index.html` / `src/main.ts` when applicable) AND the repository's existing test/typecheck/build suite so legacy features are never broken.",
+      linkedDesign,
       ...LEAD_WAVE_LAWS,
       `Accept every wave's green Attempt after your direct diff review via \`paseo-factory_lead_merge\` / \`lead_merge\` (or \`${cmdPrefix} accept --by lead\`); re-contract defects and escalate a needs-human task before accepting. Calling \`paseo-factory_lead_set_contract\` / \`lead_set_contract\` again on any unaccepted Task updates its Contract (\`gate\`, \`base\`, \`description\`, \`artifact\`) and opens a fresh 3-attempt epoch.`,
       `Fire-and-End-Turn Law: Inspect the Verdict / Watch / Report evidence, and after the final wave is accepted and landed, or when an unresolved defect / Needs-human / Owner-owned blocker requires escalation, call \`paseo-factory_lead_report_to_supervisor\` / \`lead_report_to_supervisor\` (or \`${cmdPrefix} supervisor report --workspace "<project-root>" --message "<summary>"\`) and immediately end your turn (never run \`sleep\` or poll files). If \`lead_set_contract\` or \`lead_dispatch_agent\` ever fails with an unrecoverable infrastructure blocker, you must report it to Supervisor via \`lead_report_to_supervisor\` (\`kind: "blocker"\`) before ending your turn so Supervisor is never left waiting silently.`,
@@ -216,6 +219,7 @@ export function renderSeatBootstrapPrompt(input: SeatBootstrapInput): string {
         ]
       : [
           "You are this project's standing Lead: read the repository and progress through bounded waves, reviewing the diff and accepting every clean green wave before reporting completion to Supervisor.",
+          linkedDesignSpecification(input.project.root),
           ...LEAD_WAVE_LAWS,
           "",
           "Seat write fence: Never write or commit product source code directly on `<project-root>`; all product source code is written by spawned working Agents inside isolated Task worktrees.",
@@ -261,5 +265,5 @@ export function renderRoleAppendSystem(role: RoleName, options?: RoleContractOpt
 
 /** Dynamic, credential-free capabilities accompany the immutable role contract. */
 export function buildRoleKickoffPrompt(role: RoleName, options: RoleContractOptions & { helperMcps?: Array<Pick<HelperMcpServerEntry, "name" | "transport" | "enabled" | "status">> } = {}): string {
-  return [renderRoleContract(role, options), ...(role === "lead" || role === "agent" ? [renderHelperMcpRoster(options.helperMcps ?? [])] : [])].join("\n\n");
+  return [linkedDesignSpecification(options.project?.root),renderRoleContract(role, options), ...(role === "lead" || role === "agent" ? [renderHelperMcpRoster(options.helperMcps ?? [])] : [])].join("\n\n");
 }

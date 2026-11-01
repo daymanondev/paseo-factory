@@ -1,3 +1,4 @@
+import { readOpenDesignFiles, readOpenDesignLink } from "./core/scrum/open-design-link.ts";
 import { assertOwnerDependencies } from "./core/scrum/owner-work.ts";
 import { registerOwnedPaths } from "./core/scrum/ownership.ts";
 /** Scrum specialist contract defaults and dynamic ownership. */
@@ -246,9 +247,10 @@ export function prepareScrumContract(
     (role === "ux" && /\/(ux-spec|DESIGN|EXPERIENCE)\.md$|\/mockups\//.test(path)) ||
     (role === "architect" && path.endsWith("/architecture.md")) ||
     (role === "qa" && /\/qa\/|\/qa-report\.(json|md)$/.test(path)));
+  const linkedFiles = role === 'ux' && readOpenDesignLink(project.root) ? readOpenDesignFiles(join(project.root, 'design')).map(f => `${prefix}mockups/${f.path}`) : [];
   const roleDefaults = {
     pm: [`${prefix}sprint-backlog.md`],
-    ux: [`${prefix}DESIGN.md`, `${prefix}EXPERIENCE.md`, `${prefix}mockups/index.html`, `${prefix}mockups/screens.html`, `${prefix}mockups/design-manifest.json`, ...["styles.css", "app.js", "app-data.js", "screens.css", "screens-data.js", "screens.js", "browser.json", "screens-board.png", ".od-frames/iphone.html", ".od-frames/android.html", ".od-frames/neutral.html", ".od-frames/layout.css"].map(name => `${prefix}mockups/${name}`)],
+    ux: [...linkedFiles, `${prefix}DESIGN.md`, `${prefix}EXPERIENCE.md`, `${prefix}mockups/index.html`, `${prefix}mockups/screens.html`, `${prefix}mockups/design-manifest.json`, ...["styles.css", "app.js", "app-data.js", "screens.css", "screens-data.js", "screens.js", "browser.json", "open-design-seed.json", "screens-board.png", ".od-frames/iphone.html", ".od-frames/android.html", ".od-frames/neutral.html", ".od-frames/layout.css"].map(name => `${prefix}mockups/${name}`)],
     architect: [], dev: run.design ? [`${prefix}qa/${request.task}`] : [], qa: [`${prefix}qa/qa-report.json`],
   }[role];
   const scope = [...new Set([...(request.scope ?? [...inherited, ...roleDefaults]), decision, ...(role === "dev" && run.design ? roleDefaults : []), ...(artifact ? [artifact] : [])])];
@@ -260,7 +262,7 @@ export function prepareScrumContract(
   let gate: string | undefined;
   if (role === 'dev' && run.design && request.gate) {
     ensureFactoryBinScripts(factory.stateDir);
-    const quote = (v: string) => "'" + v.replace(/'/g, "'\\''") + "'";
+    const quote = quoteCommandPath;
     gate = `(${request.gate}) && ${quote(process.execPath)} ${quote(join(factory.stateDir, 'runtime-bin/factory.mjs'))} lint-scrum-doc --kind ui --dir ${quote(`${prefix}qa/${request.task}`)}`;
   }
   if (role !== "dev" && request.gate) {
@@ -279,7 +281,7 @@ export function prepareScrumContract(
         : `.scratch/${run.initiativeId}`;
     if (request.artifact && !scope?.includes(request.artifact))
       throw new FactoryError("artifact-not-owned", request.artifact);
-    const quote = (v: string) => "'" + v.replace(/'/g, "'\\''") + "'";
+    const quote = quoteCommandPath;
     gate = `(${request.gate}) && ${quote(process.execPath)} ${quote(join(factory.stateDir, "runtime-bin/factory.mjs"))} lint-scrum-doc --kind ${kind} --dir ${quote(dir)}`;
   }
   run = readRun(factory.stateDir, project.slug, run.runId);
@@ -301,4 +303,10 @@ export function prepareScrumContract(
     ...(scope === undefined ? {} : { scope }),
     ...(gate === undefined ? {} : { gate }),
   };
+}
+
+/** Gate paths are quoted for sh and cmd.exe; reject characters requiring different shell escapes. */
+function quoteCommandPath(value: string): string {
+  if (/["\r\n]/.test(value) || (process.platform === 'win32' && /[%!]/.test(value))) throw new FactoryError('unsafe-gate-path', value);
+  return '"' + (process.platform === 'win32' ? value : value.replace(/[\\$`]/g, '\\$&')) + '"';
 }

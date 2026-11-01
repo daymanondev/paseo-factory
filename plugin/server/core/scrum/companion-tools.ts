@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, symlinkSync, rmSync, writeFileSync, lstatSync, readFileSync, copyFileSync, statSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { delimiter, dirname, join, resolve } from 'node:path';
 import { ensureFactorySkillSafe } from '../skill.ts';
 
 
@@ -337,7 +337,7 @@ function buildToolInstallEnv(userHome: string): NodeJS.ProcessEnv {
   return {
     ...process.env,
     HOME: userHome,
-    PATH: [...new Set(pathParts.join(':').split(':').filter(Boolean))].join(':'),
+    PATH: [...new Set(pathParts.join(delimiter).split(delimiter).filter(Boolean))].join(delimiter),
   };
 }
 

@@ -1,3 +1,4 @@
+import { linkedDesignSpecification } from "./linked-design.ts";
 import { renderHelperMcpRoster } from "./helper-mcp-sync.ts";
 import type { HelperMcpServerEntry } from "./helper-mcp-sync.ts";
 import { projectMemoryPresence } from "./project-memory.ts";
@@ -171,6 +172,7 @@ export function buildSeatKickoffPacket(input: SeatKickoffPacketInput): string {
     `- Build/Test commands: ${scriptsSummary}`,
     `- Active lanes: ${lanesSummary}`,
     `- Ledger tasks: ${tasksSummary}`,
+    linkedDesignSpecification(input.projectRoot),
     ...(input.role === "lead" ? [renderHelperMcpRoster(input.helperMcps ?? [])] : []),
     `- Role MCP tools (paseo_factory): ${roleTools}`,
     `- Law: ${fireAndEndTurn}`,

@@ -932,3 +932,80 @@ test('ADR 0036: Factory Core Skill Pack installs from canonical sources, reconci
   assert.equal(updates['factory-skills-pack'].updateAvailable, true);
   assert.equal(updates['factory-skills-pack'].latestRevision, '9f8e7d6');
 });
+
+test('Windows-safe task allocation disables autocrlf before checkout without changing root config', async t => {
+  const { prepareTaskWorktree } = await import('../src/workspace.ts');
+  const { readFileSync } = await import('node:fs');
+  const { execFileSync } = await import('node:child_process');
+  const repo = makeTempDir(), state = makeTempDir(); for (const dir of [repo, state]) disposeDir(t, dir);
+  writeFileSync(join(repo, 'source.txt'), 'one\ntwo\n'); gitCommitAll(repo);
+  execFileSync('git', ['-C', repo, 'config', 'core.autocrlf', 'true']);
+  const allocated = prepareTaskWorktree({ stateDir: state, workspace: repo, task: 'crlf' }); assert.ok(allocated.ok, JSON.stringify(allocated));
+  assert.equal(execFileSync('git', ['-C', allocated.path, 'config', 'core.autocrlf'], { encoding: 'utf8' }).trim(), 'false');
+  assert.equal(readFileSync(join(allocated.path, 'source.txt'), 'utf8'), 'one\ntwo\n');
+  assert.equal(execFileSync('git', ['-C', repo, 'config', 'core.autocrlf'], { encoding: 'utf8' }).trim(), 'true');
+});
+
+test('Scrum specialists retain enabled Open Design helper tools', async () => {
+  const { scopeScrumCapabilities } = await import('../src/scrum/harness.ts');
+  for (const role of ['pm', 'ux', 'architect', 'dev', 'qa'] as const) {
+    const identity = { kind: 'task' as const, task: role, epoch: 1, binding: { mode: 'scrum' as const, role, runId: 'r', policyRevision: 'p', configRevision: 1, artifactRefs: [] } };
+    const scoped = scopeScrumCapabilities({ mcpServers: { 'open-design': { command: 'od' }, open_design: { command: 'od' }, unsafe: {} } }, 'agent', identity);
+    assert.ok(scoped.mcpServers?.['open-design']); assert.ok(scoped.mcpServers?.open_design); assert.equal(scoped.mcpServers?.unsafe, undefined);
+  }
+});
+
+test('directory durability tolerates Windows and unsupported filesystem directory sync', async t => {
+  const { fsyncDirectory } = await import('../src/history-stage.ts');
+  const fs = (await import('node:fs')).default;
+  const { syncBuiltinESMExports } = await import('node:module');
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  Object.defineProperty(process, 'platform', { value: 'win32' });
+  try { assert.doesNotThrow(() => fsyncDirectory('not-a-real-directory')); }
+  finally { Object.defineProperty(process, 'platform', platform); }
+  const open = t.mock.method(fs, 'openSync', () => { throw Object.assign(new Error('unsupported'), { code: 'EPERM' }); });
+  syncBuiltinESMExports();
+  try { assert.doesNotThrow(() => fsyncDirectory('directory')); }
+  finally { open.mock.restore(); syncBuiltinESMExports(); }
+});
+
+test('Scrum contracts quote runtime paths for sh and Windows cmd', async t => {
+  const { prepareScrumContract } = await import('../plugin/server/scrum-contract.ts');
+  const { createFactory } = await import('../plugin/server/core/factory.ts');
+  const { resolveProject } = await import('../plugin/server/core/project.ts');
+  const { switchExecution } = await import('../plugin/server/core/scrum/execution.ts');
+  const { createScrumRun } = await import('../plugin/server/core/scrum/run-journal.ts');
+  const { ensureScrumConfig } = await import('../plugin/server/core/scrum/config.ts');
+  const root = makeTempDir(), state = join(makeTempDir(), 'state with spaces'); disposeDir(t, root); disposeDir(t, state);
+  writeFileSync(join(root, 'README.md'), 'product'); gitCommitAll(root);
+  const p = resolveProject(root); assert.ok(p.ok);
+  const factory = createFactory({ stateDir: state });
+  await switchExecution({ state, slug: p.slug, mode: 'scrum', blockers: [], rotate: async () => {} });
+  const run = createScrumRun({ state, slug: p.slug, runId: 'r', initiativeId: 'i', config: ensureScrumConfig(state, p.slug), configRevision: 1, track: 'quick', rationale: 'backlog', requestId: 'create', ownedPaths: [] });
+  const contract = prepareScrumContract(factory, { id: 'pm-contract', task: 'pm', workspace: root, runId: run.runId, role: 'pm', gate: 'node --version' });
+  assert.ok(contract.gate?.includes(`"${process.execPath}"`));
+  assert.ok(contract.gate?.includes(`"${join(state, 'runtime-bin/factory.mjs')}"`));
+  assert.match(contract.gate!, /--dir "\.scratch\/i"/);
+});
+
+test('UX provisioning emits od.cmd and executable cross-platform Antigravity hook launchers', async t => {
+  const { mkdirSync, readFileSync } = await import('node:fs');
+  const { provisionScrumHarness } = await import('../src/scrum/harness.ts');
+  const { provisionAgyPlugin } = await import('../src/agy-home.ts');
+  const { ensureScrumConfig } = await import('../src/scrum/config.ts');
+  const { createScrumRun } = await import('../src/scrum/run-journal.ts');
+  const { execFileSync } = await import('node:child_process');
+  const dir = makeTempDir(); disposeDir(t, dir); const state = join(dir, 'state'), home = join(dir, 'user');
+  const resources = join(dir, 'Open Design/Resources'); mkdirSync(join(resources, 'app/prebundled/daemon'), { recursive: true }); mkdirSync(join(resources, 'open-design'));
+  writeFileSync(join(resources, 'app/prebundled/daemon/daemon-cli.mjs'), 'console.log(process.env.ELECTRON_RUN_AS_NODE)');
+  const run = createScrumRun({ state, slug: 'p', runId: 'r', initiativeId: 'i', config: ensureScrumConfig(state), configRevision: 1, track: 'standard', rationale: 'wrappers', requestId: 'create', ownedPaths: [] });
+  const roleHome = provisionScrumHarness({ state, slug: 'p', authority: 'agent', generation: 'g', userHome: home, workspace: join(dir, 'workspace'), environment: { OPEN_DESIGN_RESOURCE_ROOT: join(resources, 'open-design') }, identity: { kind: 'task', task: 'ux', epoch: 1, binding: { mode: 'scrum', role: 'ux', runId: run.runId, configRevision: 1, policyRevision: run.policyRevision, artifactRefs: [] } } });
+  assert.match(readFileSync(join(roleHome, 'bin/od.cmd'), 'utf8'), /@echo off\r\nsetlocal\r\nset ELECTRON_RUN_AS_NODE=1/);
+  assert.match(readFileSync(join(roleHome, 'bin/od.cmd'), 'utf8'), /daemon-cli.mjs" %\*/);
+  assert.equal(execFileSync(join(roleHome, 'bin/od'), [], { encoding: 'utf8' }).trim(), '1');
+  const pluginDir = provisionAgyPlugin({ stateDir: state, userHome: home, agyPluginsDir: join(dir, 'plugins with spaces'), nodePath: process.execPath });
+  const hook = JSON.parse(readFileSync(join(pluginDir, 'hooks.json'), 'utf8')).hooks.PreToolUse[0].hooks[0].command;
+  assert.match(hook, /^node ".*hook-launcher.cjs"$/); assert.doesNotMatch(hook, /ELECTRON_RUN_AS_NODE=/);
+  // A real spawned hook receives stdin; no POSIX env assignment is needed.
+  execFileSync(hook, { shell: true, input: '{}', stdio: ['pipe', 'pipe', 'pipe'], timeout: 5000 });
+});

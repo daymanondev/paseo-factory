@@ -6,7 +6,7 @@ import type { VaultConfig } from "./vault-config.ts";
 import { loadVaultConfig, stampVaultConfig, nowIso, requiredVaultConfig, vaultStateDir, saveVaultConfig, withConfigDefaults } from "./vault-config.ts";
 import { resolveVaultPassphrase, unsealVaultBuffer, stageRuntimeFileIntoCheckout } from "./vault-envelope.ts";
 import { snapshotVaultLedger, refreshVaultImports, stageFetchedVaultHistory, listDirNames } from "./vault-history.ts";
-import { writeRuntimeFile, applyVaultHydration, assertSafeVaultPath, collectLocalStateIntoRuntime, walkFiles, resolveVaultApps, readVaultManifestAt } from "./vault-materialization.ts";
+import { isProjectDesignVaultPath, writeRuntimeFile, applyVaultHydration, assertSafeVaultPath, collectLocalStateIntoRuntime, walkFiles, resolveVaultApps, readVaultManifestAt } from "./vault-materialization.ts";
 import { githubRepoSlug, builtinVaultRunner, parseTarEntries, vaultPathFromArchivePath, isEmptyOrUnbornPullError, ensureVaultCheckout, probeGhAuth, ensureRemoteVaultRepo } from "./vault-transport.ts";
 import type { VaultRunner } from "./vault-transport.ts";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
@@ -175,7 +175,7 @@ export async function hydrateVaultDirect(paseoHome: string, options: HydrateVaul
   const files = new Map<string, Buffer>();
   for (const entry of parseTarEntries(archive)) {
     const path = vaultPathFromArchivePath(entry.path);
-    if (path === null) continue;
+    if (path === null || isProjectDesignVaultPath(path)) continue;
     assertSafeVaultPath(path);
     files.set(path, unsealVaultBuffer(entry.data, resolveVaultPassphrase(config?.passphrase)));
   }
@@ -214,7 +214,7 @@ async function pullConfiguredVault(paseoHome: string, config: VaultConfig, optio
   }
 
   const files = new Map<string, Buffer>();
-  for (const path of walkFiles(vaultDir, () => false)) {
+  for (const path of walkFiles(vaultDir, isProjectDesignVaultPath)) {
     assertSafeVaultPath(path);
     files.set(path, unsealVaultBuffer(readFileSync(join(vaultDir, path)), resolveVaultPassphrase(config.passphrase)));
   }
@@ -244,7 +244,7 @@ export async function pushVault(paseoHome: string, options: PushVaultOptions = {
     collectLocalStateIntoRuntime(paseoHome);
 
     const runtimeRoot = join(paseoHome, "vault-runtime");
-    const staged = existsSync(runtimeRoot) ? walkFiles(runtimeRoot, (rel) => rel === "env.json") : [];
+    const staged = existsSync(runtimeRoot) ? walkFiles(runtimeRoot, (rel) => rel === "env.json" || isProjectDesignVaultPath(rel)) : [];
     const passphrase = resolveVaultPassphrase(config.passphrase);
     for (const rel of staged) {
       stageRuntimeFileIntoCheckout(join(runtimeRoot, rel), join(vaultDir, rel), passphrase, rel);

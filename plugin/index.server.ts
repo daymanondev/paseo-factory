@@ -32,7 +32,7 @@ import { createSurfaceHandlers, registerSurfaceRpc } from "./server/surface-rpc.
 import { createLeadMailRuntime } from "./server/lead-mailbox.ts";
 import { syncPeerHelpersBeforeCreate, injectRoleOnCreate, injectSessionEnv, sanitizeAgentCreateHookResult } from "./server/roles.ts";
 
-const SHELL_VERSION = "0.0.79";
+const SHELL_VERSION = "0.0.80";
 
 const log = (message: string) => console.log(`[${PLUGIN_ID}] ${message}`);
 
@@ -217,7 +217,7 @@ export default function contribute(server: PluginServerContext) {
     onLeadRetired: (input) => leadMail.settleLeadRotation(input.slug),
     onSeatKickoffSent: (input) => leadMail.markKickoffSent(input.agentId),
     resetProjectMailbox: (slug) => leadMail.resetProjectMailbox(slug),
-    leadDispatch: (request) => leadMail.dispatchLead(request),
+    leadDispatch: (request, options) => leadMail.dispatchLead(request, options),
     supervisorReport: (request) => leadMail.reportSupervisor(request),
   });
   // The Lead mailbox runtime (v0.0.20, ADR 0013 §4–§5): the single writer

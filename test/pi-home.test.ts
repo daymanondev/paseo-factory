@@ -701,7 +701,7 @@ test("OAuth sync selects the newest harness token, refreshes it and authenticate
   mkdirSync(join(stateDir, "pi-agent/agent"), { recursive: true });
   symlinkSync(join(pi, "mcp-oauth"), join(stateDir, "pi-agent/agent/mcp-oauth"));
   const result = await syncHelperMcps(options);
-  assert.equal(result.servers[0].status, "connected");
+  assert.equal(result.servers.find(s => s.name === "supabase")?.status, "connected");
   assert.match(refreshBody, /refresh_token=ag-refresh/);
   for (const path of [helperOAuthPath(join(stateDir, "pi-agent/agent"), "supabase")]) {
     const token = JSON.parse(readFileSync(path, "utf8"));
@@ -983,4 +983,27 @@ test('skill reconciliation retires stale impeccable directories and broken provi
     assert.throws(() => lstatSync(join(home, dir, 'impeccable')), /ENOENT/);
     assert.equal(existsSync(join(home, dir, 'frontend-design/SKILL.md')), true);
   }
+});
+
+test('Open Design host MCP discovery is offline, canonical and opt-in', async t => {
+  const { discoverHelperMcps, setHelperMcpEnabled } = await import('../src/helper-mcp-sync.ts');
+  const dir = makeTempDir(); disposeDir(t, dir);
+  const resources = join(dir, 'Open Design/Resources');
+  mkdirSync(join(resources, 'app/prebundled/daemon'), { recursive: true });
+  mkdirSync(join(resources, 'open-design'));
+  writeFileSync(join(resources, 'app/prebundled/daemon/daemon-cli.mjs'), '');
+  const before = process.env.OPEN_DESIGN_RESOURCE_ROOT; process.env.OPEN_DESIGN_RESOURCE_ROOT = join(resources, 'open-design');
+  t.after(() => { if (before === undefined) delete process.env.OPEN_DESIGN_RESOURCE_ROOT; else process.env.OPEN_DESIGN_RESOURCE_ROOT = before; });
+  const options = { stateDir: join(dir, 'state'), userHome: join(dir, 'user') };
+  let catalog = discoverHelperMcps(options);
+  const server = catalog.servers.find(s => s.name === 'open-design'); assert.ok(server);
+  assert.equal(server.enabled, false); assert.equal(server.transport, 'stdio');
+  assert.deepEqual(server.args, [join(resources, 'app/prebundled/daemon/daemon-cli.mjs'), 'mcp']);
+  assert.equal(server.env?.ELECTRON_RUN_AS_NODE, '1');
+  await setHelperMcpEnabled(options, 'open-design', true);
+  mkdirSync(join(options.userHome, '.gemini/config'), { recursive: true });
+  writeFileSync(join(options.userHome, '.gemini/config/mcp_config.json'), JSON.stringify({ mcpServers: { open_design: { command: server.command, args: server.args } } }));
+  catalog = discoverHelperMcps(options);
+  assert.equal(catalog.servers.filter(s => /open.design/.test(s.name)).length, 1);
+  assert.equal(catalog.servers.find(s => s.name === 'open-design')?.enabled, true);
 });

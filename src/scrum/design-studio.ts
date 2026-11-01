@@ -11,7 +11,7 @@ export function designStudioHtml(): string {
 (async()=>{
 'use strict';
 const $=id=>document.getElementById(id), token=new URLSearchParams(location.search).get('token');
-const endpoint=(path,params={})=>{const u=new URL(path,location.href);u.searchParams.set('token',token);Object.entries(params).forEach(([k,v])=>u.searchParams.set(k,v));return u.href};
+const endpoint=(path,params={})=>{if(window.__factoryBundle)return window.__factoryBundle.endpoint(path,params);const u=new URL(path,location.href);u.searchParams.set('token',token);Object.entries(params).forEach(([k,v])=>u.searchParams.set(k,v));return u.href};
 let model, zoom=.85, x=0,y=0, space=false, drag=null, picked=null, pin=false, focusFrame=null, focusedScreen='', focusedViewport='mobile', decided=false;
 let findings=[], statuses={}, activeTab='canvas';
 const sizes={desktop:[1280,800],tablet:[820,1180],mobile:[390,844]};

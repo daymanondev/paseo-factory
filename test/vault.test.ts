@@ -2061,3 +2061,17 @@ test("Helper vault hydration preserves explicit local choices and recollection r
   assert.deepEqual(JSON.parse(readFileSync(join(runtime, "config/helper-mcps.json"), "utf8")).servers, []);
   assert.deepEqual(JSON.parse(readFileSync(join(runtime, "secrets/shared/mcp-oauth.json"), "utf8")), { oauth: {}, fields: {} });
 });
+
+test('Private vault excludes repository design bundles on push and hydration', async t => {
+  const bare = makeBareRemote(t); seedBareRemote(t, bare, { 'README.md': 'vault\n' });
+  const home = makeTempDir(); disposeDir(t, home); saveVaultConfig(home, { repo: bare, nodeId: 'design-isolation' });
+  const runtime = join(home, 'vault-runtime'); mkdirSync(join(runtime, 'projects/p/design/assets'), { recursive: true });
+  writeFileSync(join(runtime, 'projects/p/design/index.html'), 'Owner design');
+  writeFileSync(join(runtime, 'projects/p/design/assets/picture.svg'), '<svg/>');
+  const pushed = await pushVault(home);
+  assert.ok(!pushed.pushedFiles.some(p => p.includes('/design/')));
+  assert.equal(existsSync(join(home, 'vault/projects/p/design/index.html')), false);
+  const archive = gzipSync(buildTarball([{ path: 'top/projects/p/design/index.html', data: Buffer.from('design') }, { path: 'top/secrets/shared/eye.json', data: Buffer.from('{}') }]));
+  const hydrated = await hydrateVaultDirect(home, { repo: 'owner/factory-vault', runner: fakeTarballRunner(archive).runner });
+  assert.ok(!hydrated.hydratedFiles.some(p => p.includes('/design/')));
+});

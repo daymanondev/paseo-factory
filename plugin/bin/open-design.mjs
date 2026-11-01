@@ -178,12 +178,13 @@ function stageOpenDesignFrames(mockupsDir) {
   return Object.keys(OPEN_DESIGN_FRAMES).map((name) => join(dir, name));
 }
 function inspectOpenDesignHost(environment = process.env) {
-  const resourceRoot = environment.OPEN_DESIGN_RESOURCE_ROOT ?? "/Applications/Open Design.app/Contents/Resources/open-design";
+  const resourceRoot = environment.OPEN_DESIGN_RESOURCE_ROOT ?? (process.platform === "win32" ? join(environment.LOCALAPPDATA ?? "", "Programs/Open Design/resources/open-design") : "/Applications/Open Design.app/Contents/Resources/open-design");
   const available = existsSync(resourceRoot);
   const cli = join(dirname(resourceRoot), "app/prebundled/daemon/daemon-cli.mjs");
   const catalog = join(resourceRoot, "design-systems");
   const designSystems = existsSync(catalog) ? readdirSync(catalog).filter((id) => existsSync(join(catalog, id, "tokens.css")) && existsSync(join(catalog, id, "DESIGN.md"))).sort().map((id) => ({ id, directory: join(catalog, id), tokens: join(catalog, id, "tokens.css"), design: join(catalog, id, "DESIGN.md"), usage: join(catalog, id, "USAGE.md"), components: join(catalog, id, "components.manifest.json") })) : [];
-  return { available: available || !!environment.OPEN_DESIGN_DAEMON_URL, resourceRoot: available ? resourceRoot : null, daemonUrl: environment.OPEN_DESIGN_DAEMON_URL ?? null, cli: existsSync(cli) ? cli : null, designSystems };
+  const binary = process.platform === "darwin" ? resolve(resourceRoot, "../../MacOS/Open Design") : process.platform === "win32" ? resolve(resourceRoot, "../../Open Design.exe") : process.execPath;
+  return { binary: existsSync(binary) ? binary : process.execPath, available: available || !!environment.OPEN_DESIGN_DAEMON_URL, resourceRoot: available ? resourceRoot : null, daemonUrl: environment.OPEN_DESIGN_DAEMON_URL ?? null, cli: existsSync(cli) ? cli : null, designSystems };
 }
 function openDesignWorkspace(mockupsDir, sourceRef) {
   return { baseDir: resolve(mockupsDir), orchestratorWorkspace: { kind: "scratch", writeback: "external", sourceLabel: "Paseo Factory", sourceRef } };

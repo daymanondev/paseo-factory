@@ -374,8 +374,13 @@ export const ScrumRunViewSchema = z.object({
     })
     .optional(),
 });
+export const OpenDesignProjectLinkSchema = z.object({
+  projectId: z.string(), projectName: z.string(), designSystemId: z.string().nullable().optional(), directionId: z.string().nullable().optional(),
+  sourceUpdatedAt: z.number(), syncedAt: z.string(), digest: z.string(), screenCount: z.number(), files: z.array(z.string()),
+});
 export const ExecutionViewSchema = z.object({
   selectedMode: z.enum(["slp", "scrum"]),
+  openDesignLink: OpenDesignProjectLinkSchema.optional(),
   revision: z.number(),
   scope: z.enum(["global", "project"]).optional(),
   project: z.string().nullable().optional(),

@@ -1664,3 +1664,20 @@ test("Scrum-only recovery skips steady Projects and reconciles pending cancellat
   await runtime.pumpAll({ reconcileScrumOnly: true });
   assert.deepEqual(reconciled, [slug]);
 });
+
+test('remote linked designs do not require the client source for reports or Peer blockers', { timeout: 3000 }, async t => {
+  const f = makeSpooledRuntime(t);
+  const path = join(projectStateDir(f.stateDir, f.slug), 'execution.json');
+  writeFileSync(path, JSON.stringify({ schemaVersion: 1, mode: 'slp', revision: 1, openDesignSource: { kind: 'client' }, openDesignLink: { projectId: 'owner', projectName: 'Owner', sourceUpdatedAt: 1, syncedAt: new Date().toISOString(), digest: 'a'.repeat(64), screenCount: 1, files: ['index.html'] } }));
+  const report = await f.leadMail.reportSupervisor({ id: 'offline-report', kind: 'supervisor_report', project: f.slug, message: 'Work verified while the design computer is disconnected.' });
+  assert.ok(report.ok, JSON.stringify(report));
+  const blocker = await f.leadMail.dispatchLead({ id: 'offline-blocker', kind: 'lead_dispatch', project: f.slug, from: 'peer', message: 'Peer needs help with a build failure.' });
+  assert.ok(blocker.ok, JSON.stringify(blocker));
+  assert.ok(f.fake.sent.some(s => s.text.includes('Work verified')));
+  const followup = f.leadMail.dispatchLead({ id: 'new-owner-followup', kind: 'lead_dispatch', project: f.slug, runId: 'existing-run', from: 'owner', message: 'New Owner directive for this run' });
+  const refusedAfterAdmission = assert.rejects(followup, /SLP directive cannot carry a Scrum run/);
+  await new Promise(resolve => setTimeout(resolve, 20));
+  const status = await f.surface.openDesignStatus({ projectRoot: f.projectRoot }); assert.ok(status.ok); assert.equal(status.syncRequestId, 'new-owner-followup', 'an explicit runId must still request source freshness');
+  assert.ok((await f.surface.openDesignUnlink({ projectRoot: f.projectRoot })).ok);
+  await refusedAfterAdmission;
+});

@@ -1,3 +1,4 @@
+import { OpenDesignProjectLinkSchema } from "./view.ts";
 /**
  * The Factory surface's RPC contracts (v0.0.13, ADR 0009 §2/§4) — the one
  * vocabulary both halves import. Every method name is `factory.*` (the
@@ -563,3 +564,12 @@ export const helperMcpsSetEnabled = defineRpc({
   }),
   output: z.union([z.object({ ok: z.literal(true), helperMcps: z.array(HelperMcpViewSchema) }), Failure]),
 });
+
+const OpenDesignProjectSchema = OpenDesignProjectLinkSchema.omit({ syncedAt: true, files: true });
+const OpenDesignBundleSchema = z.object({ project: OpenDesignProjectSchema, files: z.array(z.object({ path: z.string(), contentBase64: z.string() })) });
+export const openDesignCatalog = defineRpc({ name: 'factory.open_design.catalog', input: z.object({}), output: z.union([z.object({ ok: z.literal(true), projects: z.array(OpenDesignProjectSchema.extend({ files: z.array(z.string()), hasIndexHtml: z.boolean(), hasScreensHtml: z.boolean() })) }), Failure]) });
+export const openDesignExport = defineRpc({ name: 'factory.open_design.export', input: z.object({ projectId: z.string() }), output: z.union([z.object({ ok: z.literal(true), bundle: OpenDesignBundleSchema }), Failure]) });
+export const openDesignStatus = defineRpc({ name: 'factory.open_design.status', input: z.object({ projectRoot: z.string() }), output: z.union([z.object({ ok: z.literal(true), link: OpenDesignProjectLinkSchema.nullable(), updateAvailable: z.boolean(), sourceAvailable: z.boolean(), syncRequestId: z.string().optional() }), Failure]) });
+export const openDesignSync = defineRpc({ name: 'factory.open_design.sync', input: z.object({ projectRoot: z.string(), projectId: z.string().optional(), bundle: OpenDesignBundleSchema.optional(), syncRequestId: z.string().optional(), expectedDigest: z.string().optional() }), output: z.union([z.object({ ok: z.literal(true), link: OpenDesignProjectLinkSchema }), Failure]) });
+export const openDesignUnlink = defineRpc({ name: 'factory.open_design.unlink', input: z.object({ projectRoot: z.string() }), output: z.union([z.object({ ok: z.literal(true) }), Failure]) });
+export const openDesignPreview = defineRpc({ name: 'factory.open_design.preview', input: z.object({ projectRoot: z.string(), operation: z.enum(['preview.url', 'preview.bundle']).optional() }), output: z.union([z.object({ ok: z.literal(true), bundle: z.unknown().optional(), url: z.string().optional(), urls: z.array(z.string()).optional() }), Failure]) });

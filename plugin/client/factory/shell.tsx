@@ -475,6 +475,8 @@ export function FactoryShell({
           now={now}
           compact={isCompact}
           actions={{
+            refresh,
+            designSourceKey: `${serverId ?? 'local'}:${view.project?.root ?? ''}`,
             setMode: requestMode,
             openSupervisor,
             openLead,

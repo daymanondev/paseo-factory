@@ -1,3 +1,4 @@
+import { inspectOpenDesignHost } from "./scrum/open-design.ts";
 /** Peer-only Helper MCP discovery, credential reconciliation and bounded health checks (ADR 0039). */
 import { createHash } from "node:crypto";
 import { existsSync, accessSync, constants, readdirSync, lstatSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
@@ -38,6 +39,7 @@ export function helperOAuthPath(agentDir: string, name: string): string {
 }
 function endpoint(url: string): string { try { const u = new URL(url); return u.origin + u.pathname.replace(/\/$/, ""); } catch { return url; } }
 function canonical(name: string, entry: ObjectMap): string {
+  if (/^open[-_]design$/i.test(name)) return "open-design";
   const invocation = [entry.command, ...(Array.isArray(entry.args) ? entry.args : [])].join(" ");
   if (/\bchrome-devtools-mcp(?:@|\b)/.test(invocation)) return "chrome-devtools-mcp";
   if (invocation.includes("@z_ai/mcp-server")) return "zai-vision";
@@ -61,6 +63,8 @@ export function discoverHelperMcps(options: HelperMcpOptions): HelperMcpCatalogS
   sources.push(["pi", read(join(p.pi, "mcp.json")).mcpServers ?? {}]);
   if (!options.piOnly) sources.push(["claude", read(join(p.userHome, ".claude.json")).mcpServers ?? {}]);
   const stored = Array.isArray(persisted.servers) ? Object.fromEntries(persisted.servers.map((s: ObjectMap) => [s.name, s])) : persisted.mcpServers ?? {};
+  const host = inspectOpenDesignHost();
+  if (host.cli) sources.push(["factory", { 'open-design': { command: host.binary, args: [host.cli, 'mcp'], env: { ELECTRON_RUN_AS_NODE: '1' }, enabled: false } }]);
   sources.push(["factory", stored]);
   const merged = new Map<string, HelperMcpServerEntry>(), disabled = new Set<string>(), currentPiNames = new Set<string>();
   for (const [source, servers] of sources) for (const [alias, raw] of Object.entries(servers)) {

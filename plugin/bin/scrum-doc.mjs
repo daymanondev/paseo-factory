@@ -444,7 +444,10 @@ function verifyQaFiles(root, report, screens = []) {
   );
   for (const ref of files) {
     try {
-      if (sha256(readFileSync2(join2(root, ref.path))) !== ref.sha256)
+      const bytes = readFileSync2(join2(root, ref.path));
+      const text = bytes.toString("utf8");
+      const lineEndingMatch = !bytes.includes(0) && Buffer.from(text, "utf8").equals(bytes) && sha256(text.replace(/\r\n/g, "\n")) === ref.sha256;
+      if (sha256(bytes) !== ref.sha256 && !lineEndingMatch)
         issues.push(`evidence hash mismatch: ${ref.path}`);
     } catch {
       issues.push(`missing evidence: ${ref.path}`);

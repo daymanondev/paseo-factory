@@ -17,7 +17,7 @@ import { join, basename, isAbsolute, resolve as resolvePath, dirname } from "nod
 /** Hydrates `<paseoHome>/vault-runtime/` from a vault tree on disk (the sync-mode checkout). */
 export function hydrateRuntimeFromTree(paseoHome: string, treeRoot: string, passphrase: string | undefined): string[] {
   const written: string[] = [];
-  for (const rel of walkFiles(treeRoot, () => false)) {
+  for (const rel of walkFiles(treeRoot, isProjectDesignVaultPath)) {
     writeRuntimeFile(paseoHome, rel, unsealVaultBuffer(readFileSync(join(treeRoot, rel)), passphrase));
     written.push(rel);
   }
@@ -27,6 +27,7 @@ export function hydrateRuntimeFromTree(paseoHome: string, treeRoot: string, pass
 /** Writes one unsealed vault file under `<paseoHome>/vault-runtime/` — `0o600` (+ `0o700` dirs) under `secrets/`. */
 export function writeRuntimeFile(paseoHome: string, vaultPath: string, data: Buffer): void {
   assertSafeVaultPath(vaultPath);
+  if (isProjectDesignVaultPath(vaultPath)) throw new FactoryError('vault-project-design-excluded', 'Project designs belong in the Project repository');
   const runtimeRoot = join(paseoHome, "vault-runtime");
   mkdirSync(runtimeRoot, { recursive: true });
   const segments = vaultPath.split("/");
@@ -44,6 +45,9 @@ export function writeRuntimeFile(paseoHome: string, vaultPath: string, data: Buf
 }
 
 /** A vault path is `/`-separated relative segments, none of them `.`/`..`/empty — archive traversal is refused, not written. */
+export function isProjectDesignVaultPath(path: string): boolean {
+  return path.split('/').some(segment => ['design', 'mockups', '.od-frames'].includes(segment)) || /(?:^|\/)(?:design-manifest|open-design-link)\.json$/.test(path);
+}
 export function assertSafeVaultPath(vaultPath: string): void {
   const segments = vaultPath.split("/");
   if (segments.some((segment) => segment === "" || segment === "." || segment === "..")) {

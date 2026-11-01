@@ -1,3 +1,4 @@
+import { fsyncDirectory } from "../history-stage.ts";
 /** Registration must read execution defaults without loading any roster, harness or journal. */
 import {
   readFileSync,
@@ -18,6 +19,9 @@ export interface ExecutionSelection {
   schemaVersion: 1;
   mode: FactoryExecutionMode;
   revision: number;
+  openDesignCheckpointPaths?: string[];
+  openDesignSource?: { kind: 'host' | 'client'; requestId?: string; acknowledgedRequestId?: string };
+  openDesignLink?: import("./open-design-link.ts").OpenDesignProjectLink;
 }
 export function selectionPath(state: string, slug?: string): string {
   if (slug !== undefined && !safeId(slug))
@@ -75,11 +79,6 @@ export function registerExecutionSelection(
     closeSync(fd);
   }
   renameSync(temp, path);
-  const directory = openSync(dirname(path), "r");
-  try {
-    fsyncSync(directory);
-  } finally {
-    closeSync(directory);
-  }
+  fsyncDirectory(dirname(path));
   return next;
 }

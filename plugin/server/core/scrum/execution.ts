@@ -63,7 +63,7 @@ export async function switchExecution(input: {
       if (mode === "scrum") ensureScrumConfig(state, slug);
       const intent: SwitchIntent = {
         previous,
-        target: { schemaVersion: 1, mode, revision: previous.revision + 1 },
+        target: { ...previous, schemaVersion: 1, mode, revision: previous.revision + 1 },
         status: "pending",
       };
       atomicJson(join(scopeDir(state, slug), "execution-switch.json"), intent);

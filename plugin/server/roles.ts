@@ -19,7 +19,7 @@ import { SCRUM_PROMPT_MARK, SCRUM_ROLE_TITLES, renderScrumPrompt } from "./core/
  */
 import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { provisionAgyPlugin, ensureFactoryBinScripts } from "./core/agy-home.ts";
 import { CorrelationRegistry } from "./core/correlations.ts";
 import { parseLane } from "./core/lanes.ts";
@@ -147,6 +147,7 @@ export function factoryEnvFor(
     PASEO_FACTORY_PROJECT: input.project.slug,
     PASEO_FACTORY_STATE_DIR: input.stateDir,
     PI_CODING_AGENT_DIR: roleHome,
+    ...(execution === undefined ? {} : { PATH: [join(roleHome, 'bin'), environment.PATH ?? ''].filter(Boolean).join(delimiter) }),
     ...(execution === undefined ? {} : { PASEO_FACTORY_EXECUTION: JSON.stringify(execution) }),
   };
   if (input.project.root !== "") env.PASEO_FACTORY_PROJECT_ROOT = input.project.root;

@@ -209,7 +209,10 @@ export function verifyQaFiles(root: string, report: QaReport, screens: import('.
     );
   for (const ref of files) {
     try {
-      if (sha256(readFileSync(join(root, ref.path))) !== ref.sha256)
+      const bytes = readFileSync(join(root, ref.path));
+      const text = bytes.toString('utf8');
+      const lineEndingMatch = !bytes.includes(0) && Buffer.from(text, 'utf8').equals(bytes) && sha256(text.replace(/\r\n/g, '\n')) === ref.sha256;
+      if (sha256(bytes) !== ref.sha256 && !lineEndingMatch)
         issues.push(`evidence hash mismatch: ${ref.path}`);
     } catch {
       issues.push(`missing evidence: ${ref.path}`);

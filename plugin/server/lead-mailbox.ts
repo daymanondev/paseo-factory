@@ -1,3 +1,4 @@
+import { prepareOpenDesignDispatch } from "./core/scrum/open-design-link.ts";
 import { discoverHelperMcps } from "./core/helper-mcp-sync.ts";
 import { resolveVaultUserHome } from "./core/vault-materialization.ts";
 import { liveSeatCandidates } from "./seats.ts";
@@ -266,7 +267,7 @@ export interface LeadMailRuntimeDeps {
 /** One runtime's public face — see the module doc for each member's law. */
 export interface LeadMailRuntime {
   hasPendingHandoff(slug: string): boolean;
-  dispatchLead(request: SpoolLeadDispatchRequest): Promise<SpoolReply>;
+  dispatchLead(request: SpoolLeadDispatchRequest, options?: { existingDesignSnapshot: true }): Promise<SpoolReply>;
   dispatchSupervisor(request: SpoolSupervisorDispatchRequest): Promise<SpoolReply>;
   reportSupervisor(request: SpoolSupervisorReportRequest): Promise<SpoolReply>;
   notifyPeer(input: { task: string; kind: "verdict" | "needs_human"; text: string }): Promise<void>;
@@ -1092,10 +1093,11 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   };
 
   /** The spool's `lead_dispatch` handler (ADR 0013 Decision 4, bullet 3). */
-  const dispatchLead = async (request: SpoolLeadDispatchRequest): Promise<SpoolReply> => {
+  const dispatchLead = async (request: SpoolLeadDispatchRequest, options?: { existingDesignSnapshot: true }): Promise<SpoolReply> => {
     const target = resolveTargetProject(request, "lead dispatch");
     if (!target.ok) return target;
     const { root, slug } = target;
+    if (request.from !== "peer" && !options?.existingDesignSnapshot) await prepareOpenDesignDispatch({ state: deps.stateDir, slug, root, requestId: request.id, userHome: deps.home ? resolveVaultUserHome(deps.home) : undefined });
     // The auto-ensure and the queue land as ONE lane job — the single-writer
     // law this module's header claims: two concurrent dispatches serialize,
     // so the second sees the first's Lead and never double-creates the seat,
@@ -1164,6 +1166,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     const target = resolveTargetProject(request, "supervisor dispatch");
     if (!target.ok) return target;
     const { root, slug } = target;
+    await prepareOpenDesignDispatch({ state: deps.stateDir, slug, root, requestId: request.id, userHome: deps.home ? resolveVaultUserHome(deps.home) : undefined });
     const laneOutcome = await projectLane(
       slug,
       async (): Promise<{ ok: true; agentId: string; mailId: string } | { ok: false; code: string; error: string }> => {

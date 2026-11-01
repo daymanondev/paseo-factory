@@ -1,3 +1,5 @@
+import { previewBundle } from "./preview-bundle.ts";
+import { seedLinkedOpenDesign } from "./open-design-link.ts";
 import { browserCoverageIssues } from './design-contract.ts';
 import { assertOwnerDependencies } from "./owner-work.ts";
 import { scrumSeatOperation } from "./seat-operations.ts";
@@ -166,7 +168,7 @@ export function scrumOperation(input: ScrumOperation, ctx: ScrumOperationContext
       fail("invalid-run", "runId/initiativeId required");
     if (!listRuns(state, slug).some((r) => r.runId === input.runId))
       assertInitiativeAvailable(root, p.initiativeId as string);
-    return createScrumRun({
+    const created = createScrumRun({
       state,
       slug,
       runId: input.runId!,
@@ -179,6 +181,8 @@ export function scrumOperation(input: ScrumOperation, ctx: ScrumOperationContext
       budgets: p.budgets as Partial<RunBudgets> | undefined,
       ownedPaths: p.ownedPaths as string[] | undefined,
     });
+    seedLinkedOpenDesign(root, root, created.initiativeId);
+    return created;
   }
   if (!input.runId) fail("scrum-run-required", "explicit runId required");
   const run = readRun(state, slug, input.runId!);
@@ -226,6 +230,7 @@ export function scrumOperation(input: ScrumOperation, ctx: ScrumOperationContext
     if (run.tasks.some(t => t.role === "dev" && projectTask(ctx.factory.ledger.events, t.task).settled)) fail("scrum-track-frozen", "Dev work already landed");
     return commandRun(state, slug, run.runId, command);
   }
+  if (input.operation === "preview.bundle") return previewBundle(root, run);
   if (input.operation === "preview") {
     const preview = renderPreview(root, run), model = previewModel(root, run);
     return { ...preview, html: injectPreviewBridge(preview.html, previewBridge(model.screens[0]?.id ?? '', 'populated')), model, screenshots: model.evidence.viewports.map(v => {

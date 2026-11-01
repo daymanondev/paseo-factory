@@ -203,6 +203,9 @@ export function provisionAgyPlugin(options: ProvisionAgyPluginOptions): string {
     },
   };
   const quoted = (s: string) => (/\s/.test(s) ? `"${s}"` : s);
+  // Plain Node starts the hook; it can launch an Electron binary in Node mode on every OS.
+  const hookLauncher = join(pluginDir, "hook-launcher.cjs");
+  writeFileSync(hookLauncher, `const { spawnSync } = require('node:child_process');\nconst r = spawnSync(${JSON.stringify(nodePath)}, [${JSON.stringify(agyHookBinPath)}], { stdio: 'inherit', env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } });\nif (r.error) { console.error(r.error.message); process.exit(1); }\nprocess.exit(r.status ?? 1);\n`);
   const hooksJson = {
     hooks: {
       PreToolUse: [
@@ -213,7 +216,7 @@ export function provisionAgyPlugin(options: ProvisionAgyPluginOptions): string {
               type: "command",
               // The hook is a Node script too — under Paseo Desktop it runs the
               // same Electron binary in Node mode.
-              command: `${isElectronNodeBinary(nodePath) ? "ELECTRON_RUN_AS_NODE=1 " : ""}${quoted(nodePath)} ${quoted(agyHookBinPath)}`,
+              command: `node ${quoted(hookLauncher)}`,
             },
           ],
         },

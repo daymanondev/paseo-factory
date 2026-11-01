@@ -750,11 +750,15 @@ function importDirectory(target, id) {
   return id === void 0 ? join(dirname(historyTargetPath(target)), "history-imports") : join(dirname(historyTargetPath(target)), "history-imports", id);
 }
 function fsyncDirectory(path) {
-  const fd = openSync(path, "r");
+  if (process.platform === "win32") return;
+  let fd;
   try {
+    fd = openSync(path, "r");
     fsyncSync(fd);
+  } catch (error) {
+    if (!["EISDIR", "EPERM", "EBADF", "EINVAL"].includes(error.code ?? "")) throw error;
   } finally {
-    closeSync(fd);
+    if (fd !== void 0) closeSync(fd);
   }
 }
 function makeDurableDirectory(path) {
@@ -2109,8 +2113,8 @@ function tryUnseal(raw, passphrase, then) {
 }
 
 // src/helper-mcp-vault.ts
-import { existsSync as existsSync5 } from "node:fs";
-import { join as join7 } from "node:path";
+import { existsSync as existsSync6 } from "node:fs";
+import { join as join8 } from "node:path";
 
 // src/helper-mcp-store.ts
 import { randomUUID as randomUUID4 } from "node:crypto";
@@ -2138,18 +2142,45 @@ function writeHelperJson(path, value) {
   }
 }
 
+// src/scrum/open-design.ts
+import { existsSync as existsSync4, mkdirSync as mkdirSync6, readdirSync as readdirSync5, writeFileSync as writeFileSync5 } from "node:fs";
+import { dirname as dirname8, join as join6, resolve as resolve5 } from "node:path";
+var OPEN_DESIGN_DIRECTIONS = [
+  { id: "editorial-monocle", colors: ["#f7f8f4", "#214f3d", "#162019", "#e9f0e5"], typography: "Georgia display; system UI sans", craft: "Generous breathing room, warm paper and sage tonal surfaces" },
+  { id: "modern-minimal", colors: ["#fafafa", "#09090b", "#e4e4e7"], typography: "System sans; tabular numerals", craft: "Crisp monochrome, hairline borders and precision grids" },
+  { id: "human-approachable", colors: ["#fbf9f5", "#a34e35", "#214f3d"], typography: "Georgia display; system UI sans", craft: "Warm cream, soft pills and friendly progressive wizards" },
+  { id: "tech-utility", colors: ["#f8fafc", "#0f172a", "#475569"], typography: "System sans; monospace telemetry", craft: "Dense slate utility, keyboard-first controls" },
+  { id: "brutalist-experimental", colors: ["#ffffff", "#000000", "#dedede"], typography: "Bold editorial display; system sans", craft: "High contrast editorial grids and bold structural rules" }
+];
+var OPEN_DESIGN_CONTRACT = `Open Design UX contract:
+Bind one direction or installed Brand Design System in DESIGN.md, styles.css :root tokens and mockups/design-manifest.json. Embedded directions: ${OPEN_DESIGN_DIRECTIONS.map((d) => `${d.id}: ${d.colors.join(", ")}; ${d.typography}; ${d.craft}`).join("\n")}.
+One primary action per screen in thumb zone. Decompose journeys into focused steps with choice chips, radio cards, bottom sheets and SVG charts. Use drenched hero surfaces, borderless soft tonal surfaces, consistent system/editorial font pairings, 44px touch targets, visible focus and reduced motion. Card paragraphs stay within 280 visible characters.
+For mobile, start from the complete staged .od-frames/iphone.html, android.html or neutral.html shell and place product content in .phone-content. Preserve hardware chrome, safe areas and separate --phone-* tokens. Use .od-frames/layout.css (@layer od-layout). Desktop/responsive web pages are their own product surface. Reserve space for fixed navigation and scroll content internally.
+Deliver mockups/index.html (interactive), screens.html (story-grouped Flow Board with .frame-connection arrows and a System & Edge States group), styles.css, app.js, screens.css, screens-data.js and design-manifest.json {directionId or designSystemId, tokens, journeyGroups, screens, componentPatterns}. Expand journeys into as many focused screens as needed. EXPERIENCE.md declares Core Screens with ## Screen: kebab-case-id, Surface: mobile | desktop | responsive, primary journey and state behaviors.
+Prototype routing reads ?screen=<id>&state=<state>, reflects root dataset.screen/state and handles scrum:set-state messages. Preserve app navigation for contextual empty/loading/error/offline/permission-denied states. Keep screen/state controls in the outer Studio. Use product language and SVG icons; keep internal spec identifiers in documentation.
+Record actual offline Chromium evidence in browser.json: network: disabled, consoleErrors: [], pageErrors: [], viewports with screen, width/height, scrollWidth/clientWidth and SHA-256 PNG screenshot path/hash. Capture screens-board (screens-board.png) and every Core Screen at its declared surface (Mobile 390x844, Desktop 1280x800, responsive both). Record passing keyboard populated checks for each Core Screen and all five system states through edge screens/state handlers, or the legacy six-state matrix. Record detector {tool: open-design, passed: true, nonAdvisoryCount: 0, viewportsChecked, findings}. Derive it from factory open-design lint --dir <mockupsDir> and actual viewport checks; never invent results. Run lint-scrum-doc --kind ux before Claim. Dev consumes the approved manifest, DESIGN.md, styles.css and screens.html; UI Dev and QA supply the same offline evidence before sign-off.`;
+function inspectOpenDesignHost(environment = process.env) {
+  const resourceRoot = environment.OPEN_DESIGN_RESOURCE_ROOT ?? (process.platform === "win32" ? join6(environment.LOCALAPPDATA ?? "", "Programs/Open Design/resources/open-design") : "/Applications/Open Design.app/Contents/Resources/open-design");
+  const available = existsSync4(resourceRoot);
+  const cli = join6(dirname8(resourceRoot), "app/prebundled/daemon/daemon-cli.mjs");
+  const catalog = join6(resourceRoot, "design-systems");
+  const designSystems = existsSync4(catalog) ? readdirSync5(catalog).filter((id) => existsSync4(join6(catalog, id, "tokens.css")) && existsSync4(join6(catalog, id, "DESIGN.md"))).sort().map((id) => ({ id, directory: join6(catalog, id), tokens: join6(catalog, id, "tokens.css"), design: join6(catalog, id, "DESIGN.md"), usage: join6(catalog, id, "USAGE.md"), components: join6(catalog, id, "components.manifest.json") })) : [];
+  const binary = process.platform === "darwin" ? resolve5(resourceRoot, "../../MacOS/Open Design") : process.platform === "win32" ? resolve5(resourceRoot, "../../Open Design.exe") : process.execPath;
+  return { binary: existsSync4(binary) ? binary : process.execPath, available: available || !!environment.OPEN_DESIGN_DAEMON_URL, resourceRoot: available ? resourceRoot : null, daemonUrl: environment.OPEN_DESIGN_DAEMON_URL ?? null, cli: existsSync4(cli) ? cli : null, designSystems };
+}
+
 // src/helper-mcp-sync.ts
 import { createHash as createHash4 } from "node:crypto";
-import { existsSync as existsSync4, accessSync, constants, readdirSync as readdirSync5, lstatSync, mkdirSync as mkdirSync6, rmSync as rmSync4, symlinkSync } from "node:fs";
+import { existsSync as existsSync5, accessSync, constants, readdirSync as readdirSync6, lstatSync, mkdirSync as mkdirSync7, rmSync as rmSync4, symlinkSync } from "node:fs";
 import { homedir as homedir2 } from "node:os";
-import { basename as basename7, delimiter, dirname as dirname8, isAbsolute as isAbsolute4, join as join6 } from "node:path";
+import { basename as basename7, delimiter, dirname as dirname9, isAbsolute as isAbsolute4, join as join7 } from "node:path";
 var ALL_HELPER_TARGET_PROVIDERS = ["pi", "claude", "codex", "opencode"];
 function paths(options) {
   const userHome = options.userHome ?? homedir2();
-  return { userHome, peerHome: options.roleHome ?? join6(options.stateDir, "pi-agent/agent"), pi: options.piAgentDir ?? join6(userHome, ".pi/agent"), ag: join6(userHome, ".gemini/antigravity/mcp_oauth_tokens.json") };
+  return { userHome, peerHome: options.roleHome ?? join7(options.stateDir, "pi-agent/agent"), pi: options.piAgentDir ?? join7(userHome, ".pi/agent"), ag: join7(userHome, ".gemini/antigravity/mcp_oauth_tokens.json") };
 }
 function helperOAuthPath(agentDir, name) {
-  return join6(agentDir, "mcp-oauth", `sha256-${createHash4("sha256").update(name).digest("hex")}`, "tokens.json");
+  return join7(agentDir, "mcp-oauth", `sha256-${createHash4("sha256").update(name).digest("hex")}`, "tokens.json");
 }
 function endpoint(url) {
   try {
@@ -2160,6 +2191,7 @@ function endpoint(url) {
   }
 }
 function canonical(name, entry) {
+  if (/^open[-_]design$/i.test(name)) return "open-design";
   const invocation = [entry.command, ...Array.isArray(entry.args) ? entry.args : []].join(" ");
   if (/\bchrome-devtools-mcp(?:@|\b)/.test(invocation)) return "chrome-devtools-mcp";
   if (invocation.includes("@z_ai/mcp-server")) return "zai-vision";
@@ -2176,15 +2208,17 @@ function credentialScore(entry, options) {
   return Object.entries(entry.env ?? {}).filter(([k, v]) => /KEY|TOKEN|SECRET|PASSWORD|OPENAPI_MCP_HEADERS/.test(k) && expand(v).trim()).length + Object.values(entry.headers ?? {}).filter((v) => expand(v).trim()).length + (entry.url?.includes("ApiKey=") ? 1 : 0) + (valid(readHelperOAuth(options, [entry])[entry.name]) ? 10 : 0);
 }
 function discoverHelperMcps(options) {
-  const p = paths(options), persisted = readHelperJson(join6(options.stateDir, "helper-mcps.json"));
+  const p = paths(options), persisted = readHelperJson(join7(options.stateDir, "helper-mcps.json"));
   const sources = [];
   if (!options.piOnly) {
-    const primary = join6(p.userHome, ".gemini/config/mcp_config.json");
-    sources.push(["antigravity", readHelperJson(existsSync4(primary) ? primary : join6(p.userHome, ".gemini/antigravity/mcp_config.json")).mcpServers ?? {}]);
+    const primary = join7(p.userHome, ".gemini/config/mcp_config.json");
+    sources.push(["antigravity", readHelperJson(existsSync5(primary) ? primary : join7(p.userHome, ".gemini/antigravity/mcp_config.json")).mcpServers ?? {}]);
   }
-  sources.push(["pi", readHelperJson(join6(p.pi, "mcp.json")).mcpServers ?? {}]);
-  if (!options.piOnly) sources.push(["claude", readHelperJson(join6(p.userHome, ".claude.json")).mcpServers ?? {}]);
+  sources.push(["pi", readHelperJson(join7(p.pi, "mcp.json")).mcpServers ?? {}]);
+  if (!options.piOnly) sources.push(["claude", readHelperJson(join7(p.userHome, ".claude.json")).mcpServers ?? {}]);
   const stored = Array.isArray(persisted.servers) ? Object.fromEntries(persisted.servers.map((s) => [s.name, s])) : persisted.mcpServers ?? {};
+  const host = inspectOpenDesignHost();
+  if (host.cli) sources.push(["factory", { "open-design": { command: host.binary, args: [host.cli, "mcp"], env: { ELECTRON_RUN_AS_NODE: "1" }, enabled: false } }]);
   sources.push(["factory", stored]);
   const merged = /* @__PURE__ */ new Map(), disabled = /* @__PURE__ */ new Set(), currentPiNames = /* @__PURE__ */ new Set();
   for (const [source, servers2] of sources) for (const [alias, raw] of Object.entries(servers2)) {
@@ -2217,14 +2251,14 @@ function discoverHelperMcps(options) {
     if (!entry.enabled && source !== "factory") disabled.add(name);
     merged.set(name, previous ? { ...credentialScore(entry, options) > credentialScore(previous, options) ? entry : previous, sources: [.../* @__PURE__ */ new Set([...previous.sources, ...entry.sources])] } : entry);
   }
-  const zaiKey = readHelperJson(join6(p.pi, "auth.json")).zai?.key;
+  const zaiKey = readHelperJson(join7(p.pi, "auth.json")).zai?.key;
   if (typeof zaiKey === "string" && zaiKey.trim()) {
     currentPiNames.add("zai-vision");
     const prev = merged.get("zai-vision");
     merged.set("zai-vision", { targetProviders: [...ALL_HELPER_TARGET_PROVIDERS], vaultSync: false, name: "zai-vision", transport: "stdio", command: "npx", args: ["-y", "@z_ai/mcp-server"], enabled: true, status: "unreachable", ...prev, env: { ...prev?.env, Z_AI_API_KEY: zaiKey.trim(), Z_AI_MODE: prev?.env?.Z_AI_MODE ?? "ZAI" }, sources: [.../* @__PURE__ */ new Set([...prev?.sources ?? [], "pi"])], timeout: 300 });
   }
   if (!currentPiNames.has("exa")) {
-    const key = readHelperJson(join6(p.pi, "web-search.json")).exaApiKey ?? readHelperJson(join6(dirname8(p.pi), "web-search.json")).exaApiKey;
+    const key = readHelperJson(join7(p.pi, "web-search.json")).exaApiKey ?? readHelperJson(join7(dirname9(p.pi), "web-search.json")).exaApiKey;
     if (typeof key === "string" && key.trim()) {
       currentPiNames.add("exa");
       merged.set("exa", {
@@ -2253,10 +2287,10 @@ function discoverHelperMcps(options) {
   }) };
 }
 function readHelperOAuth(options, servers) {
-  const p = paths(options), ag = options.piOnly ? {} : readHelperJson(p.ag), saved = readHelperJson(join6(options.stateDir, "helper-mcp-oauth.json"));
+  const p = paths(options), ag = options.piOnly ? {} : readHelperJson(p.ag), saved = readHelperJson(join7(options.stateDir, "helper-mcp-oauth.json"));
   const otherPiTokens = [p.pi, p.peerHome].flatMap((agentDir) => {
     try {
-      return readdirSync5(join6(agentDir, "mcp-oauth")).filter((n) => /^sha256-[a-f0-9]+$/.test(n)).map((n) => readHelperJson(join6(agentDir, "mcp-oauth", n, "tokens.json")));
+      return readdirSync6(join7(agentDir, "mcp-oauth")).filter((n) => /^sha256-[a-f0-9]+$/.test(n)).map((n) => readHelperJson(join7(agentDir, "mcp-oauth", n, "tokens.json")));
     } catch {
       return [];
     }
@@ -2303,14 +2337,14 @@ function valid(bundle) {
   return !!bundle?.tokens.accessToken && (bundle.tokens.expiresAt === void 0 || Number.isFinite(bundle.tokens.expiresAt) && bundle.tokens.expiresAt > Date.now() / 1e3);
 }
 function candidateBinDirs(userHome = homedir2()) {
-  const nvmRoot = join6(userHome, ".nvm/versions/node");
+  const nvmRoot = join7(userHome, ".nvm/versions/node");
   let nvmDirs = [];
   try {
-    nvmDirs = readdirSync5(nvmRoot).sort().reverse().map((v) => join6(nvmRoot, v, "bin"));
+    nvmDirs = readdirSync6(nvmRoot).sort().reverse().map((v) => join7(nvmRoot, v, "bin"));
   } catch {
     nvmDirs = [];
   }
-  return [.../* @__PURE__ */ new Set([...(process.env.PATH ?? "").split(delimiter).filter(Boolean), dirname8(process.execPath), ...nvmDirs, "/opt/homebrew/bin", "/usr/local/bin", join6(userHome, ".local/bin")])];
+  return [.../* @__PURE__ */ new Set([...(process.env.PATH ?? "").split(delimiter).filter(Boolean), dirname9(process.execPath), ...nvmDirs, "/opt/homebrew/bin", "/usr/local/bin", join7(userHome, ".local/bin")])];
 }
 function normalizeCommand(command, userHome = homedir2()) {
   if (!command || !isAbsolute4(command) && !command.includes("/")) return command;
@@ -2325,7 +2359,7 @@ function normalizeCommand(command, userHome = homedir2()) {
 }
 function commandExists(command, userHome = homedir2()) {
   if (!command) return false;
-  return (isAbsolute4(command) || command.includes("/") ? [command] : candidateBinDirs(userHome).map((p) => join6(p, command))).some((p) => {
+  return (isAbsolute4(command) || command.includes("/") ? [command] : candidateBinDirs(userHome).map((p) => join7(p, command))).some((p) => {
     try {
       accessSync(p, constants.X_OK);
       return true;
@@ -2359,7 +2393,7 @@ function classify(entry, bundle, userHome = homedir2()) {
   return { ...entry, status, statusDetail, ...bundle?.tokens.expiresAt ? { oauthExpiresAt: bundle.tokens.expiresAt } : {} };
 }
 function isolateHelperOAuthDirectory(options, managedNames = []) {
-  const target = join6(paths(options).peerHome, "mcp-oauth");
+  const target = join7(paths(options).peerHome, "mcp-oauth");
   const unlink = (path) => {
     try {
       if (lstatSync(path).isSymbolicLink()) rmSync4(path);
@@ -2368,29 +2402,29 @@ function isolateHelperOAuthDirectory(options, managedNames = []) {
     }
   };
   unlink(target);
-  mkdirSync6(target, { recursive: true, mode: 448 });
-  const managed = new Set([...Object.keys(readHelperJson(join6(options.stateDir, "helper-mcp-oauth.json"), true)), ...managedNames].map((name) => basename7(dirname8(helperOAuthPath("", name)))));
-  for (const name of managed) unlink(join6(target, name));
-  const source = join6(paths(options).pi, "mcp-oauth");
+  mkdirSync7(target, { recursive: true, mode: 448 });
+  const managed = new Set([...Object.keys(readHelperJson(join7(options.stateDir, "helper-mcp-oauth.json"), true)), ...managedNames].map((name) => basename7(dirname9(helperOAuthPath("", name)))));
+  for (const name of managed) unlink(join7(target, name));
+  const source = join7(paths(options).pi, "mcp-oauth");
   let entries = [];
   try {
-    entries = readdirSync5(source);
+    entries = readdirSync6(source);
   } catch {
   }
   for (const name of entries.filter((name2) => /^sha256-[a-f0-9]+$/.test(name2) && !managed.has(name2))) {
-    const destination = join6(target, name);
+    const destination = join7(target, name);
     try {
       lstatSync(destination);
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
-      symlinkSync(join6(source, name), destination);
+      symlinkSync(join7(source, name), destination);
     }
   }
 }
 function materializeHelperOAuth(options, bundles) {
-  const stored = readHelperJson(join6(options.stateDir, "helper-mcp-oauth.json"), true);
+  const stored = readHelperJson(join7(options.stateDir, "helper-mcp-oauth.json"), true);
   isolateHelperOAuthDirectory(options, Object.keys(bundles));
-  writeHelperJson(join6(options.stateDir, "helper-mcp-oauth.json"), { ...stored, ...bundles });
+  writeHelperJson(join7(options.stateDir, "helper-mcp-oauth.json"), { ...stored, ...bundles });
   for (const [name, bundle] of Object.entries(bundles)) {
     writeHelperJson(helperOAuthPath(paths(options).peerHome, name), bundle);
   }
@@ -2402,7 +2436,7 @@ function fingerprint(server, bundle) {
 // src/helper-mcp-vault.ts
 function collectHelperMcpVault(options, runtime) {
   const servers = discoverHelperMcps(options).servers.filter((server) => server.enabled && server.vaultSync);
-  if (servers.length === 0 && !existsSync5(join7(runtime, "config/helper-mcps.json")) && !existsSync5(join7(runtime, "secrets/shared/mcp-oauth.json"))) return;
+  if (servers.length === 0 && !existsSync6(join8(runtime, "config/helper-mcps.json")) && !existsSync6(join8(runtime, "secrets/shared/mcp-oauth.json"))) return;
   const fields = {};
   const sanitized = servers.map((server) => {
     const copy = { ...server }, secret = {};
@@ -2431,14 +2465,14 @@ function collectHelperMcpVault(options, runtime) {
     fields[server.name] = secret;
     return copy;
   });
-  writeHelperJson(join7(runtime, "config/helper-mcps.json"), { servers: sanitized });
-  writeHelperJson(join7(runtime, "secrets/shared/mcp-oauth.json"), { oauth: readHelperOAuth(options, servers), fields });
+  writeHelperJson(join8(runtime, "config/helper-mcps.json"), { servers: sanitized });
+  writeHelperJson(join8(runtime, "secrets/shared/mcp-oauth.json"), { oauth: readHelperOAuth(options, servers), fields });
 }
 function hydrateHelperMcpVault(options, runtime, overwrite) {
-  const configPath = join7(runtime, "config/helper-mcps.json");
-  if (!existsSync5(configPath)) return;
-  const config = readHelperJson(configPath, true), secrets = readHelperJson(join7(runtime, "secrets/shared/mcp-oauth.json"), true);
-  const stored = readHelperJson(join7(options.stateDir, "helper-mcps.json"), true);
+  const configPath = join8(runtime, "config/helper-mcps.json");
+  if (!existsSync6(configPath)) return;
+  const config = readHelperJson(configPath, true), secrets = readHelperJson(join8(runtime, "secrets/shared/mcp-oauth.json"), true);
+  const stored = readHelperJson(join8(options.stateDir, "helper-mcps.json"), true);
   const overrides = { ...stored.overrides }, targets = { ...stored.targets }, vaultSync = { ...stored.vaultSync };
   const local = discoverHelperMcps(options).servers;
   const byName = new Map(local.map((s) => [s.name, s]));
@@ -2458,7 +2492,7 @@ function hydrateHelperMcpVault(options, runtime, overwrite) {
       byName.set(server.name, merged);
     } else byName.set(server.name, remote);
   }
-  writeHelperJson(join7(options.stateDir, "helper-mcps.json"), { ...stored, servers: [...byName.values()], overrides, targets, vaultSync });
+  writeHelperJson(join8(options.stateDir, "helper-mcps.json"), { ...stored, servers: [...byName.values()], overrides, targets, vaultSync });
   const bundles = readHelperOAuth(options, discoverHelperMcps(options).servers.filter((s) => s.enabled));
   for (const [name, remote] of Object.entries(secrets.oauth ?? {})) {
     if (overrides[name] !== true) continue;
@@ -2468,16 +2502,31 @@ function hydrateHelperMcpVault(options, runtime, overwrite) {
 }
 
 // src/scrum/vault.ts
-import { existsSync as existsSync8 } from "node:fs";
-import { join as join12 } from "node:path";
+import { existsSync as existsSync9 } from "node:fs";
+import { join as join14 } from "node:path";
 
 // src/scrum/config.ts
 import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
-import { readFileSync as readFileSync10, rmSync as rmSync6 } from "node:fs";
-import { join as join10 } from "node:path";
+import { readFileSync as readFileSync11, rmSync as rmSync6 } from "node:fs";
+import { join as join12 } from "node:path";
 
 // src/lanes.ts
-import { dirname as dirname10, join as join9 } from "node:path";
+import { dirname as dirname11, join as join11 } from "node:path";
+
+// src/linked-design.ts
+import { readFileSync as readFileSync9 } from "node:fs";
+import { join as join9 } from "node:path";
+function linkedDesignSpecification(root, recorded) {
+  let link = recorded;
+  if (root) try {
+    link = JSON.parse(readFileSync9(join9(root, "design/open-design-link.json"), "utf8"));
+  } catch {
+  }
+  if (!link) return "";
+  return `Open Design Linked Specification (design/)
+${link.projectName} \xB7 ${link.screenCount} screens. The Owner's linked design is the authoritative UI/UX specification: design/screens.html (Flow Board), design/index.html (interactive prototype), design/styles.css (:root tokens), design/design-manifest.json. Lead must bind design/ in Peer contracts; Peers implement those screens and tokens. In Scrum, preserve and refine the Owner's linked Open Design screens seeded in .scratch/<initiativeId>/mockups/; generate EXPERIENCE.md, DESIGN.md and browser.json around them. Do not overwrite them with a generic layout.
+`;
+}
 
 // src/roles-contract.ts
 var ROLE_SKILL_INDEX = {
@@ -2547,6 +2596,7 @@ function renderSeatCommandBlock(seat, cmdPrefix) {
 }
 function renderRoleContract(role, options = {}) {
   const cmdPrefix = formatCmdPrefix(options.factoryCmd, options.home);
+  const linkedDesign = linkedDesignSpecification(options.project?.root);
   const projectSuffix = options.project !== void 0 && options.project.slug !== "" ? options.project.root !== "" ? ` for this project (${options.project.slug}, rooted at ${options.project.root})` : ` (project ${options.project.slug})` : "";
   if (role === "supervisor") {
     return [
@@ -2571,6 +2621,7 @@ function renderRoleContract(role, options = {}) {
       `You are the Lead seat of the paseo-factory verification loop${projectSuffix}: read and inspect the repository, decompose the Supervisor's directive into Tasks around clear Outcomes and Regression Gates, set each Contract (gate, description, optional artifact, skills) with \`paseo-factory_lead_set_contract\` / \`lead_set_contract\` (or \`${cmdPrefix} contract\`), and spawn Working Agents with \`paseo-factory_lead_dispatch_agent\` / \`lead_dispatch_agent\` (or \`${cmdPrefix} run\`).`,
       "Seat write fence: Never write or commit product source code directly on `<project-root>`; all product source code is written by spawned working Agents inside isolated Task worktrees. You may update this repository's AGENTS.md or CONTEXT.md (and docs/** / .scratch/**) when the Owner ratifies a rule; working Agents never may.",
       "Outcome & Regression-Gate Law: Specify the desired behavioral outcome and regression invariants in each Contract's `description` \u2014 never pre-solve or handcuff which code files the working Agent may touch inside its isolated Task worktree. Every Contract's `gate` command must verify both the new behavior (and entrypoint integration such as `index.html` / `src/main.ts` when applicable) AND the repository's existing test/typecheck/build suite so legacy features are never broken.",
+      linkedDesign,
       ...LEAD_WAVE_LAWS,
       `Accept every wave's green Attempt after your direct diff review via \`paseo-factory_lead_merge\` / \`lead_merge\` (or \`${cmdPrefix} accept --by lead\`); re-contract defects and escalate a needs-human task before accepting. Calling \`paseo-factory_lead_set_contract\` / \`lead_set_contract\` again on any unaccepted Task updates its Contract (\`gate\`, \`base\`, \`description\`, \`artifact\`) and opens a fresh 3-attempt epoch.`,
       `Fire-and-End-Turn Law: Inspect the Verdict / Watch / Report evidence, and after the final wave is accepted and landed, or when an unresolved defect / Needs-human / Owner-owned blocker requires escalation, call \`paseo-factory_lead_report_to_supervisor\` / \`lead_report_to_supervisor\` (or \`${cmdPrefix} supervisor report --workspace "<project-root>" --message "<summary>"\`) and immediately end your turn (never run \`sleep\` or poll files). If \`lead_set_contract\` or \`lead_dispatch_agent\` ever fails with an unrecoverable infrastructure blocker, you must report it to Supervisor via \`lead_report_to_supervisor\` (\`kind: "blocker"\`) before ending your turn so Supervisor is never left waiting silently.`,
@@ -2617,17 +2668,17 @@ var ROLE_PROMPTS = {
 };
 
 // src/lane-profiles.ts
-import { existsSync as existsSync6, mkdirSync as mkdirSync7, readFileSync as readFileSync9, rmSync as rmSync5, writeFileSync as writeFileSync5 } from "node:fs";
-import { dirname as dirname9, join as join8 } from "node:path";
+import { existsSync as existsSync7, mkdirSync as mkdirSync8, readFileSync as readFileSync10, rmSync as rmSync5, writeFileSync as writeFileSync6 } from "node:fs";
+import { dirname as dirname10, join as join10 } from "node:path";
 function laneProfilesPath(stateDir) {
-  return join8(stateDir, "profiles.json");
+  return join10(stateDir, "profiles.json");
 }
 function readLaneProfilesFile(stateDir) {
   const path = laneProfilesPath(stateDir);
-  if (!existsSync6(path)) return { profiles: {} };
+  if (!existsSync7(path)) return { profiles: {} };
   let parsed;
   try {
-    parsed = JSON.parse(readFileSync9(path, "utf8"));
+    parsed = JSON.parse(readFileSync10(path, "utf8"));
   } catch {
     throw new FactoryError("profiles-unreadable", `${path} is not valid JSON`);
   }
@@ -2687,7 +2738,7 @@ function mergeLaneProfilesFiles(local, remote, options) {
 // src/lanes.ts
 var EYE_JSON_LANE = "eye.json";
 function projectLanesPath(stateDir, projectSlug) {
-  return join9(projectStateDir(stateDir, projectSlug), "lanes.json");
+  return join11(projectStateDir(stateDir, projectSlug), "lanes.json");
 }
 function parseLane(value) {
   if (value === EYE_JSON_LANE || /\s/.test(value)) return void 0;
@@ -2729,7 +2780,7 @@ var SCRUM_LANES = [
 var scopeDir = (state, slug) => slug === void 0 ? state : projectStateDir(state, slug);
 function readOptionalJson(path) {
   try {
-    return JSON.parse(readFileSync10(path, "utf8"));
+    return JSON.parse(readFileSync11(path, "utf8"));
   } catch (error) {
     if (error.code === "ENOENT") return void 0;
     throw new FactoryError(
@@ -2748,7 +2799,7 @@ function scrumConfigIsValid(value) {
   );
 }
 function readScrumConfig(state, slug) {
-  const path = join10(scopeDir(state, slug), "scrum-lanes.json");
+  const path = join12(scopeDir(state, slug), "scrum-lanes.json");
   const value = readOptionalJson(path);
   if (value === void 0) return void 0;
   if (!scrumConfigIsValid(value))
@@ -2760,7 +2811,7 @@ function readScrumConfig(state, slug) {
 }
 
 // src/scrum/profiles.ts
-import { join as join11 } from "node:path";
+import { join as join13 } from "node:path";
 var profileId = (id) => {
   if (id.startsWith("slp:"))
     throw new FactoryError("execution-mode-mismatch", id);
@@ -2770,7 +2821,7 @@ var profileId = (id) => {
   return `scrum:${bare}`;
 };
 function readScrumProfiles(state) {
-  const value = readOptionalJson(join11(state, "scrum-profiles.json"));
+  const value = readOptionalJson(join13(state, "scrum-profiles.json"));
   if (value === void 0)
     return { schemaVersion: 1, profiles: [], tombstones: [] };
   return parseScrumProfiles(value);
@@ -2812,14 +2863,14 @@ function mergeScrumProfiles(a, b) {
 // src/scrum/vault.ts
 function collectScrumVault(state, runtimeConfig) {
   for (const name of ["execution.json", "scrum-lanes.json"]) {
-    const path = join12(state, name);
-    if (existsSync8(path))
-      atomicJson(join12(runtimeConfig, name), readOptionalJson(path));
+    const path = join14(state, name);
+    if (existsSync9(path))
+      atomicJson(join14(runtimeConfig, name), readOptionalJson(path));
   }
-  if (existsSync8(join12(state, "scrum-profiles.json"))) {
-    const remote = readOptionalJson(join12(runtimeConfig, "scrum-profiles.json"));
+  if (existsSync9(join14(state, "scrum-profiles.json"))) {
+    const remote = readOptionalJson(join14(runtimeConfig, "scrum-profiles.json"));
     atomicJson(
-      join12(runtimeConfig, "scrum-profiles.json"),
+      join14(runtimeConfig, "scrum-profiles.json"),
       mergeScrumProfiles(
         remote === void 0 ? { schemaVersion: 1, profiles: [], tombstones: [] } : parseScrumProfiles(remote),
         readScrumProfiles(state)
@@ -2829,53 +2880,53 @@ function collectScrumVault(state, runtimeConfig) {
 }
 function materializeScrumVault(state, runtimeConfig, overwrite) {
   for (const name of ["execution.json", "scrum-lanes.json"]) {
-    const remote2 = readOptionalJson(join12(runtimeConfig, name));
-    if (remote2 === void 0 || !overwrite && existsSync8(join12(state, name)))
+    const remote2 = readOptionalJson(join14(runtimeConfig, name));
+    if (remote2 === void 0 || !overwrite && existsSync9(join14(state, name)))
       continue;
     if (!(name === "execution.json" ? executionIsValid(remote2) : scrumConfigIsValid(remote2)))
       throw new FactoryError("scrum-vault-invalid", name);
-    atomicJson(join12(state, name), remote2);
+    atomicJson(join14(state, name), remote2);
   }
-  const remote = readOptionalJson(join12(runtimeConfig, "scrum-profiles.json"));
+  const remote = readOptionalJson(join14(runtimeConfig, "scrum-profiles.json"));
   if (remote !== void 0)
     atomicJson(
-      join12(state, "scrum-profiles.json"),
+      join14(state, "scrum-profiles.json"),
       mergeScrumProfiles(readScrumProfiles(state), parseScrumProfiles(remote))
     );
 }
 function collectProjectScrumVault(state, slug, runtimeApp) {
   const config = readScrumConfig(state, slug);
-  if (config) atomicJson(join12(runtimeApp, "scrum-lanes.json"), config);
+  if (config) atomicJson(join14(runtimeApp, "scrum-lanes.json"), config);
 }
 function materializeProjectScrumVault(state, slug, runtimeApp, overwrite) {
-  const config = readOptionalJson(join12(runtimeApp, "scrum-lanes.json"));
-  if (config === void 0 || !overwrite && existsSync8(join12(scopeDir(state, slug), "scrum-lanes.json")))
+  const config = readOptionalJson(join14(runtimeApp, "scrum-lanes.json"));
+  if (config === void 0 || !overwrite && existsSync9(join14(scopeDir(state, slug), "scrum-lanes.json")))
     return;
   if (!scrumConfigIsValid(config))
     throw new FactoryError("scrum-vault-invalid", slug);
-  atomicJson(join12(scopeDir(state, slug), "scrum-lanes.json"), config);
+  atomicJson(join14(scopeDir(state, slug), "scrum-lanes.json"), config);
 }
 
 // src/scrum/companion-tools.ts
-import { existsSync as existsSync9, mkdirSync as mkdirSync8, mkdtempSync, readdirSync as readdirSync6, symlinkSync as symlinkSync2, rmSync as rmSync7, writeFileSync as writeFileSync6, lstatSync as lstatSync2, readFileSync as readFileSync12, copyFileSync as copyFileSync2, statSync as statSync4 } from "node:fs";
+import { existsSync as existsSync10, mkdirSync as mkdirSync9, mkdtempSync, readdirSync as readdirSync7, symlinkSync as symlinkSync2, rmSync as rmSync7, writeFileSync as writeFileSync7, lstatSync as lstatSync2, readFileSync as readFileSync13, copyFileSync as copyFileSync2, statSync as statSync4 } from "node:fs";
 import { homedir as homedir3, tmpdir } from "node:os";
-import { dirname as dirname11, join as join13, resolve as resolve5 } from "node:path";
+import { delimiter as delimiter2, dirname as dirname12, join as join15, resolve as resolve6 } from "node:path";
 function ensureProviderSkillSymlinks(userHome = homedir3()) {
-  const agentsSkillsDir = join13(userHome, ".agents", "skills");
-  for (const dir of [agentsSkillsDir, join13(userHome, ".pi/agent/skills"), join13(userHome, ".claude/skills"), join13(userHome, ".gemini/config/skills")]) {
-    if (!existsSync9(dir)) continue;
-    for (const name of readdirSync6(dir)) {
-      if (/^impeccable/i.test(name)) rmSync7(join13(dir, name), { recursive: true, force: true });
+  const agentsSkillsDir = join15(userHome, ".agents", "skills");
+  for (const dir of [agentsSkillsDir, join15(userHome, ".pi/agent/skills"), join15(userHome, ".claude/skills"), join15(userHome, ".gemini/config/skills")]) {
+    if (!existsSync10(dir)) continue;
+    for (const name of readdirSync7(dir)) {
+      if (/^impeccable/i.test(name)) rmSync7(join15(dir, name), { recursive: true, force: true });
     }
   }
-  if (!existsSync9(agentsSkillsDir)) return { linked: [] };
+  if (!existsSync10(agentsSkillsDir)) return { linked: [] };
   let skillNames = [];
   try {
-    skillNames = readdirSync6(agentsSkillsDir).filter((name) => {
+    skillNames = readdirSync7(agentsSkillsDir).filter((name) => {
       if (name.startsWith(".")) return false;
-      const skillPath = join13(agentsSkillsDir, name);
+      const skillPath = join15(agentsSkillsDir, name);
       try {
-        return statSync4(skillPath).isDirectory() && existsSync9(join13(skillPath, "SKILL.md"));
+        return statSync4(skillPath).isDirectory() && existsSync10(join15(skillPath, "SKILL.md"));
       } catch {
         return false;
       }
@@ -2885,13 +2936,13 @@ function ensureProviderSkillSymlinks(userHome = homedir3()) {
   }
   if (skillNames.length === 0) return { linked: [] };
   const providerTargets = [
-    join13(userHome, ".pi", "agent", "skills"),
-    join13(userHome, ".claude", "skills"),
-    join13(userHome, ".gemini", "config", "skills")
+    join15(userHome, ".pi", "agent", "skills"),
+    join15(userHome, ".claude", "skills"),
+    join15(userHome, ".gemini", "config", "skills")
   ];
   const resolvedAgentsSkills = (() => {
     try {
-      return resolve5(agentsSkillsDir);
+      return resolve6(agentsSkillsDir);
     } catch {
       return agentsSkillsDir;
     }
@@ -2899,24 +2950,24 @@ function ensureProviderSkillSymlinks(userHome = homedir3()) {
   const linked = [];
   for (const targetDir of providerTargets) {
     try {
-      if (existsSync9(targetDir)) {
+      if (existsSync10(targetDir)) {
         const st = lstatSync2(targetDir);
         if (st.isSymbolicLink()) {
           try {
-            if (resolve5(targetDir) === resolvedAgentsSkills) continue;
+            if (resolve6(targetDir) === resolvedAgentsSkills) continue;
           } catch {
           }
         }
       }
-      mkdirSync8(targetDir, { recursive: true });
+      mkdirSync9(targetDir, { recursive: true });
       for (const name of skillNames) {
-        const dest = join13(targetDir, name);
-        const src = join13(agentsSkillsDir, name);
+        const dest = join15(targetDir, name);
+        const src = join15(agentsSkillsDir, name);
         let existsValid = false;
         try {
           const lst = lstatSync2(dest);
           if (lst.isSymbolicLink()) {
-            existsValid = existsSync9(dest);
+            existsValid = existsSync10(dest);
             if (!existsValid) rmSync7(dest, { force: true });
           } else {
             existsValid = true;
@@ -2925,7 +2976,7 @@ function ensureProviderSkillSymlinks(userHome = homedir3()) {
           existsValid = false;
         }
         if (!existsValid) {
-          mkdirSync8(dirname11(dest), { recursive: true });
+          mkdirSync9(dirname12(dest), { recursive: true });
           symlinkSync2(src, dest, "dir");
           linked.push(dest);
         }
@@ -2938,8 +2989,8 @@ function ensureProviderSkillSymlinks(userHome = homedir3()) {
 
 // src/vault-transport.ts
 import { execFile } from "node:child_process";
-import { existsSync as existsSync10, rmSync as rmSync8, readFileSync as readFileSync13, writeFileSync as writeFileSync7 } from "node:fs";
-import { isAbsolute as isAbsolute5, join as join14 } from "node:path";
+import { existsSync as existsSync11, rmSync as rmSync8, readFileSync as readFileSync14, writeFileSync as writeFileSync8 } from "node:fs";
+import { isAbsolute as isAbsolute5, join as join16 } from "node:path";
 var VAULT_FALLBACK_PATH_DIRS = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
 function buildVaultPath(basePath = process.env.PATH ?? "") {
   const segments = basePath.split(":").filter((segment) => segment !== "");
@@ -2949,7 +3000,7 @@ function buildVaultPath(basePath = process.env.PATH ?? "") {
   return segments.join(":");
 }
 function createDefaultVaultRunner() {
-  return (call) => new Promise((resolve6, reject) => {
+  return (call) => new Promise((resolve7, reject) => {
     const childEnv = { ...process.env, ...call.env, GIT_TERMINAL_PROMPT: "0" };
     childEnv.PATH = buildVaultPath(childEnv.PATH);
     execFile(
@@ -2967,7 +3018,7 @@ function createDefaultVaultRunner() {
           reject(new FactoryError("vault-runner-failed", `${call.command} ${call.args.join(" ")}: ${detail}`));
           return;
         }
-        resolve6(stdout);
+        resolve7(stdout);
       }
     );
   });
@@ -3161,21 +3212,21 @@ async function probeCompanionGitAccess(source, options) {
 }
 var VAULT_RUNNER_MAX_BUFFER_BYTES = 256 * 1024 * 1024;
 async function ensureVaultCheckout(runner, config, vaultDir) {
-  if (existsSync10(join14(vaultDir, ".git"))) return;
-  if (existsSync10(vaultDir)) rmSync8(vaultDir, { recursive: true, force: true });
+  if (existsSync11(join16(vaultDir, ".git"))) return;
+  if (existsSync11(vaultDir)) rmSync8(vaultDir, { recursive: true, force: true });
   const remoteUrl = vaultRemoteUrl(config.repo);
   try {
     await runner({ command: "git", args: ["clone", "--branch", config.branch, remoteUrl, vaultDir] });
   } catch (err) {
     if (!isMissingRemoteBranchCloneError(err)) throw err;
-    if (existsSync10(vaultDir)) rmSync8(vaultDir, { recursive: true, force: true });
+    if (existsSync11(vaultDir)) rmSync8(vaultDir, { recursive: true, force: true });
     await runner({ command: "git", args: ["clone", remoteUrl, vaultDir] });
     await runner({ command: "git", args: ["checkout", "-B", config.branch], cwd: vaultDir });
-    const gitConfigPath = join14(vaultDir, ".git", "config");
-    if (existsSync10(gitConfigPath)) {
-      const gitConfig = readFileSync13(gitConfigPath, "utf8");
+    const gitConfigPath = join16(vaultDir, ".git", "config");
+    if (existsSync11(gitConfigPath)) {
+      const gitConfig = readFileSync14(gitConfigPath, "utf8");
       if (!gitConfig.includes(`[branch "${config.branch}"]`)) {
-        writeFileSync7(
+        writeFileSync8(
           gitConfigPath,
           `${gitConfig.endsWith("\n") ? gitConfig : `${gitConfig}
 `}[branch "${config.branch}"]
@@ -3279,21 +3330,21 @@ function stripTrailingNul(text) {
 }
 
 // src/vault-secrets.ts
-import { existsSync as existsSync11, readFileSync as readFileSync14 } from "node:fs";
+import { existsSync as existsSync12, readFileSync as readFileSync15 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
-import { join as join15 } from "node:path";
+import { join as join17 } from "node:path";
 function expandImportPath(rawPath) {
   const trimmed = rawPath.trim();
   if (trimmed === "~") return homedir4();
-  if (trimmed.startsWith("~/")) return join15(homedir4(), trimmed.slice(2));
+  if (trimmed.startsWith("~/")) return join17(homedir4(), trimmed.slice(2));
   return trimmed;
 }
 function readImportFile(rawPath, label) {
   const path = expandImportPath(rawPath);
-  if (!existsSync11(path)) {
+  if (!existsSync12(path)) {
     throw new FactoryError("vault-import-file-not-found", `${label} file not found at "${path}"`);
   }
-  return readFileSync14(path);
+  return readFileSync15(path);
 }
 async function importVaultSecrets(paseoHome, input = {}) {
   const explicitFields = [
@@ -3310,16 +3361,16 @@ async function importVaultSecrets(paseoHome, input = {}) {
     input.googleServiceInfoPlistPath
   ];
   const hasExplicit = explicitFields.some((val) => val !== void 0 && val.trim() !== "");
-  const ascKeyPath = hasExplicit ? input.ascKeyPath?.trim() || void 0 : process.env.ASC_KEY_PATH?.trim() && existsSync11(expandImportPath(process.env.ASC_KEY_PATH)) ? process.env.ASC_KEY_PATH.trim() : void 0;
+  const ascKeyPath = hasExplicit ? input.ascKeyPath?.trim() || void 0 : process.env.ASC_KEY_PATH?.trim() && existsSync12(expandImportPath(process.env.ASC_KEY_PATH)) ? process.env.ASC_KEY_PATH.trim() : void 0;
   const ascKeyId = hasExplicit ? input.ascKeyId?.trim() || void 0 : process.env.ASC_KEY_ID?.trim() || void 0;
   const ascIssuer = hasExplicit ? input.ascIssuer?.trim() || void 0 : process.env.ASC_ISSUER?.trim() || void 0;
-  const gplayKeyPath = hasExplicit ? input.gplayKeyPath?.trim() || void 0 : process.env.GPLAY_KEY_PATH?.trim() && existsSync11(expandImportPath(process.env.GPLAY_KEY_PATH)) ? process.env.GPLAY_KEY_PATH.trim() : void 0;
+  const gplayKeyPath = hasExplicit ? input.gplayKeyPath?.trim() || void 0 : process.env.GPLAY_KEY_PATH?.trim() && existsSync12(expandImportPath(process.env.GPLAY_KEY_PATH)) ? process.env.GPLAY_KEY_PATH.trim() : void 0;
   const eyeConfigPath = input.eyeConfigPath?.trim() || void 0;
   const config = loadVaultConfig(paseoHome);
   const passphrase = resolveVaultPassphrase(config?.passphrase);
   const sortedImported = await LedgerAdmission.withStateMaintenance(vaultStateDir(paseoHome), () => {
     const importedFiles = /* @__PURE__ */ new Set();
-    const runtimeRoot = join15(paseoHome, "vault-runtime");
+    const runtimeRoot = join17(paseoHome, "vault-runtime");
     const importFile = (rawPath, label, rel) => {
       if (rawPath === void 0) return;
       const bytes = unsealVaultBuffer(readImportFile(rawPath, label), passphrase);
@@ -3329,7 +3380,7 @@ async function importVaultSecrets(paseoHome, input = {}) {
     importFile(ascKeyPath, "ASC .p8 key", `secrets/shared/${SHARED_SECRET_FILES.ascKey}`);
     if (ascKeyId !== void 0 || ascIssuer !== void 0) {
       const rel = `secrets/shared/${SHARED_SECRET_FILES.ascCredentials}`;
-      const prior = readJsonFile(join15(runtimeRoot, rel)) ?? {};
+      const prior = readJsonFile(join17(runtimeRoot, rel)) ?? {};
       const merged = {
         ...prior,
         ...ascKeyId !== void 0 ? { keyId: ascKeyId } : {},
@@ -3359,7 +3410,7 @@ async function importVaultSecrets(paseoHome, input = {}) {
       importFile(keystorePath, "Android release keystore", `secrets/apps/${appKey}/release.keystore`);
       if (storePass !== void 0 || keyAlias !== void 0) {
         const rel = `secrets/apps/${appKey}/signing.json`;
-        const prior = readJsonFile(join15(runtimeRoot, rel)) ?? {};
+        const prior = readJsonFile(join17(runtimeRoot, rel)) ?? {};
         const merged = {
           ...prior,
           ...storePass !== void 0 ? {
@@ -3376,7 +3427,7 @@ async function importVaultSecrets(paseoHome, input = {}) {
         importFile(googleServicesJsonPath, "google-services.json", `secrets/apps/${appKey}/google-services.json`);
       } else if (firebaseProjectId !== void 0) {
         const rel = `secrets/apps/${appKey}/google-services.json`;
-        const prior = readJsonFile(join15(runtimeRoot, rel)) ?? {};
+        const prior = readJsonFile(join17(runtimeRoot, rel)) ?? {};
         const priorInfo = typeof prior.project_info === "object" && prior.project_info !== null && !Array.isArray(prior.project_info) ? prior.project_info : {};
         const merged = {
           ...prior,
@@ -3387,7 +3438,7 @@ async function importVaultSecrets(paseoHome, input = {}) {
         importedFiles.add(rel);
       }
       importFile(googleServiceInfoPlistPath, "GoogleService-Info.plist", `secrets/apps/${appKey}/GoogleService-Info.plist`);
-      const manifest = existsSync11(join15(runtimeRoot, "vault.manifest.json")) ? readVaultManifestAt(runtimeRoot) : readVaultManifestAt(join15(paseoHome, "vault"));
+      const manifest = existsSync12(join17(runtimeRoot, "vault.manifest.json")) ? readVaultManifestAt(runtimeRoot) : readVaultManifestAt(join17(paseoHome, "vault"));
       if (manifest[appKey] === void 0) {
         manifest[appKey] = { repoBasename: appKey };
         writeRuntimeFile(paseoHome, "vault.manifest.json", Buffer.from(`${JSON.stringify(manifest, null, 2)}
@@ -3418,7 +3469,7 @@ function sealVaultFile(paseoHome, sourcePath, vaultPath, passphrase) {
   return LedgerAdmission.stateMutation(vaultStateDir(paseoHome), () => {
     let plain;
     try {
-      plain = readFileSync14(sourcePath);
+      plain = readFileSync15(sourcePath);
     } catch {
       throw new FactoryError("vault-seal-source-missing", `vault seal: cannot read ${sourcePath}`);
     }
@@ -3432,24 +3483,28 @@ function sealVaultFile(paseoHome, sourcePath, vaultPath, passphrase) {
 
 // src/vault-materialization.ts
 import { execFileSync as execFileSync3 } from "node:child_process";
-import { readFileSync as readFileSync15, mkdirSync as mkdirSync9, chmodSync as chmodSync2, writeFileSync as writeFileSync8, readdirSync as readdirSync7, existsSync as existsSync12, copyFileSync as copyFileSync3, statSync as statSync5 } from "node:fs";
-import { join as join16, basename as basename8, isAbsolute as isAbsolute6, resolve as resolvePath, dirname as dirname12 } from "node:path";
+import { readFileSync as readFileSync16, mkdirSync as mkdirSync10, chmodSync as chmodSync2, writeFileSync as writeFileSync9, readdirSync as readdirSync8, existsSync as existsSync13, copyFileSync as copyFileSync3, statSync as statSync5 } from "node:fs";
+import { join as join18, basename as basename8, isAbsolute as isAbsolute6, resolve as resolvePath, dirname as dirname13 } from "node:path";
 function writeRuntimeFile(paseoHome, vaultPath, data) {
   assertSafeVaultPath(vaultPath);
-  const runtimeRoot = join16(paseoHome, "vault-runtime");
-  mkdirSync9(runtimeRoot, { recursive: true });
+  if (isProjectDesignVaultPath(vaultPath)) throw new FactoryError("vault-project-design-excluded", "Project designs belong in the Project repository");
+  const runtimeRoot = join18(paseoHome, "vault-runtime");
+  mkdirSync10(runtimeRoot, { recursive: true });
   const segments = vaultPath.split("/");
   let acc = runtimeRoot;
   let insideSecrets = false;
   for (const segment of segments.slice(0, -1)) {
-    acc = join16(acc, segment);
+    acc = join18(acc, segment);
     insideSecrets = insideSecrets || segment === "secrets";
-    mkdirSync9(acc, { recursive: true });
+    mkdirSync10(acc, { recursive: true });
     if (insideSecrets) chmodSync2(acc, 448);
   }
-  const target = join16(runtimeRoot, vaultPath);
-  writeFileSync8(target, data);
+  const target = join18(runtimeRoot, vaultPath);
+  writeFileSync9(target, data);
   chmodSync2(target, segments[0] === "secrets" ? 384 : 420);
+}
+function isProjectDesignVaultPath(path) {
+  return path.split("/").some((segment) => ["design", "mockups", ".od-frames"].includes(segment)) || /(?:^|\/)(?:design-manifest|open-design-link)\.json$/.test(path);
 }
 function assertSafeVaultPath(vaultPath) {
   const segments = vaultPath.split("/");
@@ -3460,11 +3515,11 @@ function assertSafeVaultPath(vaultPath) {
 function walkFiles(root, skip) {
   const found = [];
   const visit = (dir, rel) => {
-    for (const entry of readdirSync7(dir, { withFileTypes: true })) {
+    for (const entry of readdirSync8(dir, { withFileTypes: true })) {
       const childRel = rel === "" ? entry.name : `${rel}/${entry.name}`;
       if (entry.isDirectory()) {
         if (entry.name === ".git") continue;
-        visit(join16(dir, entry.name), childRel);
+        visit(join18(dir, entry.name), childRel);
       } else if (entry.isFile()) {
         if (skip(childRel)) continue;
         found.push(childRel);
@@ -3504,7 +3559,7 @@ function parseVaultManifest(raw) {
 }
 function readVaultManifestAt(root) {
   try {
-    return parseVaultManifest(readFileSync15(join16(root, "vault.manifest.json"), "utf8"));
+    return parseVaultManifest(readFileSync16(join18(root, "vault.manifest.json"), "utf8"));
   } catch (err) {
     if (err instanceof FactoryError && err.code === "corrupted-vault-manifest") throw err;
     return {};
@@ -3523,7 +3578,7 @@ function collectCandidateProjectRoots(paseoHome) {
 function inspectProjectRootFacts(root) {
   const resolved = resolveProject(root);
   if (!resolved.ok) return null;
-  const storeManifest = readJsonFile(join16(resolved.root, ".store-release", "manifest.json"));
+  const storeManifest = readJsonFile(join18(resolved.root, ".store-release", "manifest.json"));
   return {
     root: resolved.root,
     slug: resolved.slug,
@@ -3589,7 +3644,7 @@ function normalizeGitRemote(url) {
   return u.toLowerCase();
 }
 function readReleaseLabProjectRoots(paseoHome) {
-  const parsed = readJsonFile(join16(paseoHome, "release-lab", "projects.json"));
+  const parsed = readJsonFile(join18(paseoHome, "release-lab", "projects.json"));
   const roots = [];
   for (const entry of arrayField(parsed, "projects")) {
     const root = jsonStringField(entry, "root");
@@ -3612,7 +3667,7 @@ function gitProbe(cwd, args) {
 }
 function readJsonFile(path) {
   try {
-    const parsed = JSON.parse(readFileSync15(path, "utf8"));
+    const parsed = JSON.parse(readFileSync16(path, "utf8"));
     return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? parsed : null;
   } catch {
     return null;
@@ -3640,13 +3695,13 @@ function ensureLocalGitExcludeAndWorktreeInclude(projectRoot, relPaths) {
     throw new FactoryError("vault-project-not-git", `${projectRoot} does not resolve to a git checkout \u2014 vault hygiene has nothing to register against`);
   }
   const gitCommonDir = isAbsolute6(commonDirRaw) ? commonDirRaw : resolvePath(projectRoot, commonDirRaw);
-  appendUniqueLines(join16(gitCommonDir, "info", "exclude"), [...relPaths, ".worktreeinclude"]);
-  appendUniqueLines(join16(projectRoot, ".worktreeinclude"), relPaths);
+  appendUniqueLines(join18(gitCommonDir, "info", "exclude"), [...relPaths, ".worktreeinclude"]);
+  appendUniqueLines(join18(projectRoot, ".worktreeinclude"), relPaths);
 }
 function appendUniqueLines(path, lines) {
   let existing;
   try {
-    existing = readFileSync15(path, "utf8");
+    existing = readFileSync16(path, "utf8");
   } catch {
     existing = "";
   }
@@ -3655,8 +3710,8 @@ function appendUniqueLines(path, lines) {
   if (missing.length === 0) return;
   const base = existing === "" ? "" : existing.endsWith("\n") ? existing : `${existing}
 `;
-  mkdirSync9(dirname12(path), { recursive: true });
-  writeFileSync8(path, `${base}${missing.join("\n")}
+  mkdirSync10(dirname13(path), { recursive: true });
+  writeFileSync9(path, `${base}${missing.join("\n")}
 `);
 }
 var APP_FILE_TARGETS = [
@@ -3666,22 +3721,22 @@ var APP_FILE_TARGETS = [
   { vaultFile: "GoogleService-Info.plist", projectRel: "ios/GoogleService-Info.plist" }
 ];
 function materializeVaultAppFiles(paseoHome, canonicalAppKey, projectRoot) {
-  const appSecrets = join16(paseoHome, "vault-runtime", "secrets", "apps", canonicalAppKey);
+  const appSecrets = join18(paseoHome, "vault-runtime", "secrets", "apps", canonicalAppKey);
   const written = [];
   for (const target of APP_FILE_TARGETS) {
-    const source = join16(appSecrets, target.vaultFile);
-    if (!existsSync12(source)) continue;
+    const source = join18(appSecrets, target.vaultFile);
+    if (!existsSync13(source)) continue;
     let data;
     if (target.vaultFile === "signing.json") {
       const rendered = renderKeystoreProperties(readJsonFile(source));
       if (rendered === null) continue;
       data = Buffer.from(rendered, "utf8");
     } else {
-      data = readFileSync15(source);
+      data = readFileSync16(source);
     }
-    const dest = join16(projectRoot, target.projectRel);
-    mkdirSync9(dirname12(dest), { recursive: true });
-    writeFileSync8(dest, data, { mode: 384 });
+    const dest = join18(projectRoot, target.projectRel);
+    mkdirSync10(dirname13(dest), { recursive: true });
+    writeFileSync9(dest, data, { mode: 384 });
     chmodSync2(dest, 384);
     written.push(target.projectRel);
   }
@@ -3699,19 +3754,19 @@ function resolveVaultUserHome(paseoHome, explicitUserHome) {
   }
   const resolved = resolvePath(paseoHome);
   if (basename8(resolved).startsWith(".paseo")) {
-    return dirname12(resolved);
+    return dirname13(resolved);
   }
   return resolved;
 }
 function collectVaultSkillsIntoRuntime(paseoHome, explicitUserHome) {
   const userHome = resolveVaultUserHome(paseoHome, explicitUserHome);
-  const agentsSkillsDir = join16(userHome, ".agents", "skills");
-  if (!existsSync12(agentsSkillsDir)) return [];
+  const agentsSkillsDir = join18(userHome, ".agents", "skills");
+  if (!existsSync13(agentsSkillsDir)) return [];
   const collectedSkills = [];
   const visitSkillTree = (skillDir, skillName, relDir) => {
     let entries;
     try {
-      entries = readdirSync7(skillDir, { withFileTypes: true });
+      entries = readdirSync8(skillDir, { withFileTypes: true });
     } catch {
       return;
     }
@@ -3719,7 +3774,7 @@ function collectVaultSkillsIntoRuntime(paseoHome, explicitUserHome) {
       if (entry.name === ".git" || entry.name === "node_modules" || entry.name === ".DS_Store" || entry.name === "__pycache__" || entry.name === ".venv") {
         continue;
       }
-      const fullPath = join16(skillDir, entry.name);
+      const fullPath = join18(skillDir, entry.name);
       const childRel = relDir === "" ? entry.name : `${relDir}/${entry.name}`;
       let st;
       try {
@@ -3730,22 +3785,22 @@ function collectVaultSkillsIntoRuntime(paseoHome, explicitUserHome) {
       if (st.isDirectory()) {
         visitSkillTree(fullPath, skillName, childRel);
       } else if (st.isFile() && st.size <= 512 * 1024) {
-        writeRuntimeFile(paseoHome, `config/skills/${skillName}/${childRel}`, readFileSync15(fullPath));
+        writeRuntimeFile(paseoHome, `config/skills/${skillName}/${childRel}`, readFileSync16(fullPath));
       }
     }
   };
   let skillEntries = [];
   try {
-    skillEntries = readdirSync7(agentsSkillsDir).sort();
+    skillEntries = readdirSync8(agentsSkillsDir).sort();
   } catch {
     return [];
   }
   for (const name of skillEntries) {
     if (name.startsWith(".") || /^impeccable/i.test(name)) continue;
-    const skillDir = join16(agentsSkillsDir, name);
+    const skillDir = join18(agentsSkillsDir, name);
     try {
       if (!statSync5(skillDir).isDirectory()) continue;
-      if (!existsSync12(join16(skillDir, "SKILL.md"))) continue;
+      if (!existsSync13(join18(skillDir, "SKILL.md"))) continue;
     } catch {
       continue;
     }
@@ -3753,9 +3808,9 @@ function collectVaultSkillsIntoRuntime(paseoHome, explicitUserHome) {
     collectedSkills.push(name);
   }
   if (collectedSkills.length > 0) {
-    const lockPath = join16(userHome, ".agents", ".skill-lock.json");
-    if (existsSync12(lockPath)) {
-      writeRuntimeFile(paseoHome, "config/skill-lock.json", readFileSync15(lockPath));
+    const lockPath = join18(userHome, ".agents", ".skill-lock.json");
+    if (existsSync13(lockPath)) {
+      writeRuntimeFile(paseoHome, "config/skill-lock.json", readFileSync16(lockPath));
     }
     const companionManifest = {
       schemaVersion: 1,
@@ -3772,37 +3827,37 @@ function collectVaultSkillsIntoRuntime(paseoHome, explicitUserHome) {
 }
 function materializeVaultSkillsFromRuntime(paseoHome, overwriteConfigs = false, explicitUserHome) {
   const userHome = resolveVaultUserHome(paseoHome, explicitUserHome);
-  const runtimeSkillsDir = join16(paseoHome, "vault-runtime", "config", "skills");
-  const runtimeLockPath = join16(paseoHome, "vault-runtime", "config", "skill-lock.json");
-  if (existsSync12(runtimeLockPath)) {
-    const destLockPath = join16(userHome, ".agents", ".skill-lock.json");
-    if (overwriteConfigs || !existsSync12(destLockPath)) {
-      mkdirSync9(dirname12(destLockPath), { recursive: true });
+  const runtimeSkillsDir = join18(paseoHome, "vault-runtime", "config", "skills");
+  const runtimeLockPath = join18(paseoHome, "vault-runtime", "config", "skill-lock.json");
+  if (existsSync13(runtimeLockPath)) {
+    const destLockPath = join18(userHome, ".agents", ".skill-lock.json");
+    if (overwriteConfigs || !existsSync13(destLockPath)) {
+      mkdirSync10(dirname13(destLockPath), { recursive: true });
       copyFileSync3(runtimeLockPath, destLockPath);
     }
   }
-  if (!existsSync12(runtimeSkillsDir)) return [];
-  const agentsSkillsDir = join16(userHome, ".agents", "skills");
+  if (!existsSync13(runtimeSkillsDir)) return [];
+  const agentsSkillsDir = join18(userHome, ".agents", "skills");
   const materializedSkills = [];
   let skillNames = [];
   try {
-    skillNames = readdirSync7(runtimeSkillsDir).sort();
+    skillNames = readdirSync8(runtimeSkillsDir).sort();
   } catch {
     return [];
   }
   for (const skillName of skillNames) {
     if (skillName.startsWith(".") || /^impeccable/i.test(skillName)) continue;
-    const srcSkillDir = join16(runtimeSkillsDir, skillName);
+    const srcSkillDir = join18(runtimeSkillsDir, skillName);
     try {
       if (!statSync5(srcSkillDir).isDirectory()) continue;
     } catch {
       continue;
     }
     for (const rel of walkFiles(srcSkillDir, () => false)) {
-      const src = join16(srcSkillDir, rel);
-      const dest = join16(agentsSkillsDir, skillName, rel);
-      if (!overwriteConfigs && existsSync12(dest)) continue;
-      mkdirSync9(dirname12(dest), { recursive: true });
+      const src = join18(srcSkillDir, rel);
+      const dest = join18(agentsSkillsDir, skillName, rel);
+      if (!overwriteConfigs && existsSync13(dest)) continue;
+      mkdirSync10(dirname13(dest), { recursive: true });
       copyFileSync3(src, dest);
     }
     materializedSkills.push(skillName);
@@ -3814,61 +3869,61 @@ function materializeVaultSkillsFromRuntime(paseoHome, overwriteConfigs = false, 
 }
 function collectLocalStateIntoRuntime(paseoHome, options) {
   const stateDir = vaultStateDir(paseoHome);
-  collectHelperMcpVault({ stateDir, userHome: resolveVaultUserHome(paseoHome, options?.userHome) }, join16(paseoHome, "vault-runtime"));
-  collectScrumVault(stateDir, join16(paseoHome, "vault-runtime/config"));
+  collectHelperMcpVault({ stateDir, userHome: resolveVaultUserHome(paseoHome, options?.userHome) }, join18(paseoHome, "vault-runtime"));
+  collectScrumVault(stateDir, join18(paseoHome, "vault-runtime/config"));
   collectVaultSkillsIntoRuntime(paseoHome, options?.userHome);
   const configSources = [
-    { src: join16(stateDir, "lanes.json"), vaultRel: "config/lanes.json" },
-    { src: join16(paseoHome, "burn-lab", "free-pool.json"), vaultRel: "config/free-pool.json" }
+    { src: join18(stateDir, "lanes.json"), vaultRel: "config/lanes.json" },
+    { src: join18(paseoHome, "burn-lab", "free-pool.json"), vaultRel: "config/free-pool.json" }
   ];
   for (const { src, vaultRel } of configSources) {
-    if (existsSync12(src)) {
-      writeRuntimeFile(paseoHome, vaultRel, readFileSync15(src));
+    if (existsSync13(src)) {
+      writeRuntimeFile(paseoHome, vaultRel, readFileSync16(src));
     }
   }
-  const localProfilesPath = join16(stateDir, "profiles.json");
-  if (existsSync12(localProfilesPath)) {
+  const localProfilesPath = join18(stateDir, "profiles.json");
+  if (existsSync13(localProfilesPath)) {
     const local = readLaneProfilesFile(stateDir);
-    const runtimeProfilesPath = join16(paseoHome, "vault-runtime", "config", "profiles.json");
+    const runtimeProfilesPath = join18(paseoHome, "vault-runtime", "config", "profiles.json");
     const existing = readLaneProfilesCacheOrNull(runtimeProfilesPath) ?? { profiles: {} };
     const merged = mergeLaneProfilesFiles(existing, local, { preferRemote: true });
     writeRuntimeFile(paseoHome, "config/profiles.json", Buffer.from(`${JSON.stringify(merged, null, 2)}
 `, "utf8"));
   }
-  const localEye = join16(stateDir, "eye.json");
-  if (existsSync12(localEye) && !sharedSecretExists(paseoHome, SHARED_SECRET_FILES.eyeConfig)) {
-    writeRuntimeFile(paseoHome, `secrets/shared/${SHARED_SECRET_FILES.eyeConfig}`, readFileSync15(localEye));
+  const localEye = join18(stateDir, "eye.json");
+  if (existsSync13(localEye) && !sharedSecretExists(paseoHome, SHARED_SECRET_FILES.eyeConfig)) {
+    writeRuntimeFile(paseoHome, `secrets/shared/${SHARED_SECRET_FILES.eyeConfig}`, readFileSync16(localEye));
   }
   const config = loadVaultConfig(paseoHome);
   const passphrase = resolveVaultPassphrase(config?.passphrase);
   const envAscPath = process.env.ASC_KEY_PATH?.trim();
   if (envAscPath && !sharedSecretExists(paseoHome, SHARED_SECRET_FILES.ascKey)) {
     const expanded = expandImportPath(envAscPath);
-    if (existsSync12(expanded)) {
-      writeRuntimeFile(paseoHome, `secrets/shared/${SHARED_SECRET_FILES.ascKey}`, unsealVaultBuffer(readFileSync15(expanded), passphrase));
+    if (existsSync13(expanded)) {
+      writeRuntimeFile(paseoHome, `secrets/shared/${SHARED_SECRET_FILES.ascKey}`, unsealVaultBuffer(readFileSync16(expanded), passphrase));
     }
   }
   const envGplayPath = process.env.GPLAY_KEY_PATH?.trim();
   if (envGplayPath && !sharedSecretExists(paseoHome, SHARED_SECRET_FILES.gplayServiceAccount)) {
     const expanded = expandImportPath(envGplayPath);
-    if (existsSync12(expanded)) {
-      writeRuntimeFile(paseoHome, `secrets/shared/${SHARED_SECRET_FILES.gplayServiceAccount}`, unsealVaultBuffer(readFileSync15(expanded), passphrase));
+    if (existsSync13(expanded)) {
+      writeRuntimeFile(paseoHome, `secrets/shared/${SHARED_SECRET_FILES.gplayServiceAccount}`, unsealVaultBuffer(readFileSync16(expanded), passphrase));
     }
   }
-  const runtimeRoot = join16(paseoHome, "vault-runtime");
-  const vaultDir = join16(paseoHome, "vault");
-  const manifest = existsSync12(join16(runtimeRoot, "vault.manifest.json")) ? readVaultManifestAt(runtimeRoot) : readVaultManifestAt(vaultDir);
+  const runtimeRoot = join18(paseoHome, "vault-runtime");
+  const vaultDir = join18(paseoHome, "vault");
+  const manifest = existsSync13(join18(runtimeRoot, "vault.manifest.json")) ? readVaultManifestAt(runtimeRoot) : readVaultManifestAt(vaultDir);
   let manifestUpdated = false;
   const seenRoots = /* @__PURE__ */ new Set();
   for (const candidateRoot of collectCandidateProjectRoots(paseoHome)) {
     const facts = inspectProjectRootFacts(candidateRoot);
     if (facts === null || seenRoots.has(facts.root)) continue;
     seenRoots.add(facts.root);
-    const storeManifestPath = join16(facts.root, ".store-release", "manifest.json");
-    const hasStoreManifest = existsSync12(storeManifestPath);
+    const storeManifestPath = join18(facts.root, ".store-release", "manifest.json");
+    const hasStoreManifest = existsSync13(storeManifestPath);
     const projectLanes = projectLanesPath(stateDir, facts.slug);
-    const hasProjectLanes = existsSync12(projectLanes);
-    if (!hasStoreManifest && !hasProjectLanes && !existsSync12(join16(stateDir, "projects", facts.slug, "scrum-lanes.json"))) continue;
+    const hasProjectLanes = existsSync13(projectLanes);
+    if (!hasStoreManifest && !hasProjectLanes && !existsSync13(join18(stateDir, "projects", facts.slug, "scrum-lanes.json"))) continue;
     let canonicalAppKey = matchManifestAppKey(manifest, facts);
     if (canonicalAppKey === null && hasStoreManifest) {
       const storeManifestObj = readJsonFile(storeManifestPath);
@@ -3876,12 +3931,12 @@ function collectLocalStateIntoRuntime(paseoHome, options) {
     }
     if (canonicalAppKey === null) canonicalAppKey = facts.basename;
     if (hasStoreManifest) {
-      writeRuntimeFile(paseoHome, `config/apps/${canonicalAppKey}/store-manifest.json`, readFileSync15(storeManifestPath));
+      writeRuntimeFile(paseoHome, `config/apps/${canonicalAppKey}/store-manifest.json`, readFileSync16(storeManifestPath));
     }
     if (hasProjectLanes) {
-      writeRuntimeFile(paseoHome, `config/apps/${canonicalAppKey}/lanes.json`, readFileSync15(projectLanes));
+      writeRuntimeFile(paseoHome, `config/apps/${canonicalAppKey}/lanes.json`, readFileSync16(projectLanes));
     }
-    collectProjectScrumVault(stateDir, facts.slug, join16(paseoHome, "vault-runtime/config/apps", canonicalAppKey));
+    collectProjectScrumVault(stateDir, facts.slug, join18(paseoHome, "vault-runtime/config/apps", canonicalAppKey));
     const priorEntry = manifest[canonicalAppKey] ?? {};
     manifest[canonicalAppKey] = {
       ...priorEntry,
@@ -3898,9 +3953,9 @@ function collectLocalStateIntoRuntime(paseoHome, options) {
   }
 }
 function readLaneProfilesCacheOrNull(path) {
-  if (!existsSync12(path)) return { profiles: {} };
+  if (!existsSync13(path)) return { profiles: {} };
   try {
-    const parsed = JSON.parse(readFileSync15(path, "utf8"));
+    const parsed = JSON.parse(readFileSync16(path, "utf8"));
     if (parsed.profiles === void 0 || parsed.profiles === null || typeof parsed.profiles !== "object" || Array.isArray(parsed.profiles)) {
       return null;
     }
@@ -3917,48 +3972,48 @@ function readLaneProfilesCacheOrNull(path) {
   }
 }
 function materializeConfigsFromRuntime(paseoHome, overwriteConfigs = false, options) {
-  const runtimeConfigDir = join16(paseoHome, "vault-runtime", "config");
-  hydrateHelperMcpVault({ stateDir: vaultStateDir(paseoHome), userHome: resolveVaultUserHome(paseoHome, options?.userHome) }, join16(paseoHome, "vault-runtime"), overwriteConfigs);
+  const runtimeConfigDir = join18(paseoHome, "vault-runtime", "config");
+  hydrateHelperMcpVault({ stateDir: vaultStateDir(paseoHome), userHome: resolveVaultUserHome(paseoHome, options?.userHome) }, join18(paseoHome, "vault-runtime"), overwriteConfigs);
   materializeScrumVault(vaultStateDir(paseoHome), runtimeConfigDir, overwriteConfigs);
   materializeVaultSkillsFromRuntime(paseoHome, overwriteConfigs, options?.userHome);
   const targets = [
-    { src: join16(runtimeConfigDir, "lanes.json"), dest: join16(vaultStateDir(paseoHome), "lanes.json") },
-    { src: join16(runtimeConfigDir, "free-pool.json"), dest: join16(paseoHome, "burn-lab", "free-pool.json") }
+    { src: join18(runtimeConfigDir, "lanes.json"), dest: join18(vaultStateDir(paseoHome), "lanes.json") },
+    { src: join18(runtimeConfigDir, "free-pool.json"), dest: join18(paseoHome, "burn-lab", "free-pool.json") }
   ];
   for (const { src, dest } of targets) {
-    if (!existsSync12(src)) continue;
-    if (!overwriteConfigs && existsSync12(dest)) continue;
-    mkdirSync9(dirname12(dest), { recursive: true });
+    if (!existsSync13(src)) continue;
+    if (!overwriteConfigs && existsSync13(dest)) continue;
+    mkdirSync10(dirname13(dest), { recursive: true });
     copyFileSync3(src, dest);
   }
   const stateDir = vaultStateDir(paseoHome);
-  const runtimeProfiles = join16(runtimeConfigDir, "profiles.json");
-  if (existsSync12(runtimeProfiles)) {
+  const runtimeProfiles = join18(runtimeConfigDir, "profiles.json");
+  if (existsSync13(runtimeProfiles)) {
     const local = readLaneProfilesFile(stateDir);
     const remote = readLaneProfilesCacheOrNull(runtimeProfiles);
     if (remote !== null) {
       const merged = mergeLaneProfilesFiles(local, remote, { preferRemote: overwriteConfigs });
-      mkdirSync9(dirname12(join16(stateDir, "profiles.json")), { recursive: true });
-      writeFileSync8(join16(stateDir, "profiles.json"), `${JSON.stringify(merged, null, 2)}
+      mkdirSync10(dirname13(join18(stateDir, "profiles.json")), { recursive: true });
+      writeFileSync9(join18(stateDir, "profiles.json"), `${JSON.stringify(merged, null, 2)}
 `);
     }
   }
-  if (existsSync12(join16(runtimeConfigDir, "apps"))) {
-    const manifest = readVaultManifestAt(join16(paseoHome, "vault-runtime"));
+  if (existsSync13(join18(runtimeConfigDir, "apps"))) {
+    const manifest = readVaultManifestAt(join18(paseoHome, "vault-runtime"));
     for (const app of resolveVaultApps(paseoHome, manifest)) {
       if (app.projectSlug === null) continue;
-      materializeProjectScrumVault(stateDir, app.projectSlug, join16(runtimeConfigDir, "apps", app.canonicalAppKey), overwriteConfigs);
-      const src = join16(runtimeConfigDir, "apps", app.canonicalAppKey, "lanes.json");
-      if (!existsSync12(src)) continue;
+      materializeProjectScrumVault(stateDir, app.projectSlug, join18(runtimeConfigDir, "apps", app.canonicalAppKey), overwriteConfigs);
+      const src = join18(runtimeConfigDir, "apps", app.canonicalAppKey, "lanes.json");
+      if (!existsSync13(src)) continue;
       const dest = projectLanesPath(stateDir, app.projectSlug);
-      if (!overwriteConfigs && existsSync12(dest)) continue;
-      mkdirSync9(dirname12(dest), { recursive: true });
+      if (!overwriteConfigs && existsSync13(dest)) continue;
+      mkdirSync10(dirname13(dest), { recursive: true });
       copyFileSync3(src, dest);
     }
   }
 }
 function applyVaultHydration(paseoHome, overwriteConfigs = false, options) {
-  const manifest = readVaultManifestAt(join16(paseoHome, "vault-runtime"));
+  const manifest = readVaultManifestAt(join18(paseoHome, "vault-runtime"));
   for (const app of resolveVaultApps(paseoHome, manifest)) {
     if (app.projectRoot === null) continue;
     const written = materializeVaultAppFiles(paseoHome, app.canonicalAppKey, app.projectRoot);
@@ -3968,34 +4023,34 @@ function applyVaultHydration(paseoHome, overwriteConfigs = false, options) {
   writeVaultRuntimeEnv(paseoHome);
 }
 function writeVaultRuntimeEnv(paseoHome) {
-  const runtimeRoot = join16(paseoHome, "vault-runtime");
-  mkdirSync9(runtimeRoot, { recursive: true });
-  const path = join16(runtimeRoot, "env.json");
-  writeFileSync8(path, `${JSON.stringify(buildVaultRuntimeEnv(paseoHome), null, 2)}
+  const runtimeRoot = join18(paseoHome, "vault-runtime");
+  mkdirSync10(runtimeRoot, { recursive: true });
+  const path = join18(runtimeRoot, "env.json");
+  writeFileSync9(path, `${JSON.stringify(buildVaultRuntimeEnv(paseoHome), null, 2)}
 `, { mode: 384 });
   chmodSync2(path, 384);
 }
 function buildVaultRuntimeEnv(paseoHome) {
-  const shared = join16(paseoHome, "vault-runtime", "secrets", "shared");
+  const shared = join18(paseoHome, "vault-runtime", "secrets", "shared");
   const env = {};
-  const ascKey = join16(shared, SHARED_SECRET_FILES.ascKey);
-  if (existsSync12(ascKey)) env.ASC_KEY_PATH = ascKey;
-  const ascCredentials = readJsonFile(join16(shared, SHARED_SECRET_FILES.ascCredentials));
+  const ascKey = join18(shared, SHARED_SECRET_FILES.ascKey);
+  if (existsSync13(ascKey)) env.ASC_KEY_PATH = ascKey;
+  const ascCredentials = readJsonFile(join18(shared, SHARED_SECRET_FILES.ascCredentials));
   const keyId = jsonStringField(ascCredentials, "keyId") ?? jsonStringField(ascCredentials, "key_id");
   const issuerId = jsonStringField(ascCredentials, "issuerId") ?? jsonStringField(ascCredentials, "issuer_id");
   if (keyId !== null) env.ASC_KEY_ID = keyId;
   if (issuerId !== null) env.ASC_ISSUER = issuerId;
-  const gplay = join16(shared, SHARED_SECRET_FILES.gplayServiceAccount);
-  if (existsSync12(gplay)) env.GPLAY_KEY_PATH = gplay;
+  const gplay = join18(shared, SHARED_SECRET_FILES.gplayServiceAccount);
+  if (existsSync13(gplay)) env.GPLAY_KEY_PATH = gplay;
   for (const canonicalAppKey of hydratedAppKeys(paseoHome)) {
-    const appSecrets = join16(paseoHome, "vault-runtime", "secrets", "apps", canonicalAppKey);
+    const appSecrets = join18(paseoHome, "vault-runtime", "secrets", "apps", canonicalAppKey);
     if (env.RELEASE_LAB_KEYSTORE_STOREPASS === void 0) {
-      const signing = readJsonFile(join16(appSecrets, "signing.json"));
+      const signing = readJsonFile(join18(appSecrets, "signing.json"));
       const storePass = jsonStringField(signing, "storePassword") ?? jsonStringField(signing, "storePass");
       if (storePass !== null) env.RELEASE_LAB_KEYSTORE_STOREPASS = storePass;
     }
     if (env.FIREBASE_PROJECT_ID === void 0) {
-      const googleServices = readJsonFile(join16(appSecrets, "google-services.json"));
+      const googleServices = readJsonFile(join18(appSecrets, "google-services.json"));
       const projectId = nestedJsonStringField(googleServices, ["project_info", "project_id"]) ?? jsonStringField(googleServices, "project_id");
       if (projectId !== null) env.FIREBASE_PROJECT_ID = projectId;
     }
@@ -4004,34 +4059,34 @@ function buildVaultRuntimeEnv(paseoHome) {
 }
 function hydratedAppKeys(paseoHome) {
   try {
-    return readdirSync7(join16(paseoHome, "vault-runtime", "secrets", "apps"), { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort();
+    return readdirSync8(join18(paseoHome, "vault-runtime", "secrets", "apps"), { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort();
   } catch {
     return [];
   }
 }
 
 // src/vault-history.ts
-import { mkdirSync as mkdirSync10, writeFileSync as writeFileSync9, existsSync as existsSync13, readFileSync as readFileSync16, readdirSync as readdirSync8 } from "node:fs";
-import { dirname as dirname13, join as join17 } from "node:path";
+import { mkdirSync as mkdirSync11, writeFileSync as writeFileSync10, existsSync as existsSync14, readFileSync as readFileSync17, readdirSync as readdirSync9 } from "node:fs";
+import { dirname as dirname14, join as join19 } from "node:path";
 function reconcileVaultLedgers(existingLines, sources, options = {}) {
   return reconcileHistory(existingLines, sources, options);
 }
 function listDirNames(dir) {
   try {
-    return readdirSync8(dir).sort();
+    return readdirSync9(dir).sort();
   } catch {
     return [];
   }
 }
 function readVaultHistoryStatus(paseoHome) {
   const state = vaultStateDir(paseoHome);
-  return [join17(state, "ledger.jsonl"), ...listProjectRegistrations(state).map((project) => join17(state, "projects", project.slug, "ledger.jsonl"))].flatMap(readLedgerImports);
+  return [join19(state, "ledger.jsonl"), ...listProjectRegistrations(state).map((project) => join19(state, "projects", project.slug, "ledger.jsonl"))].flatMap(readLedgerImports);
 }
 function refreshVaultImports(imports) {
   return imports.map((item) => readLedgerImports(item.target).find((current) => current.id === item.id) ?? item);
 }
 function snapshotVaultLedger(source, target) {
-  const raw = readFileSync16(source);
+  const raw = readFileSync17(source);
   const prefix = raw.subarray(0, raw.lastIndexOf(10) + 1);
   let text;
   try {
@@ -4041,22 +4096,22 @@ function snapshotVaultLedger(source, target) {
   }
   const parsed = parseLedgerJsonl(text);
   if (parsed.corrupt !== void 0) throw new FactoryError("vault-ledger-corrupt", `Cannot publish Ledger ${source}: ${parsed.corrupt}`);
-  mkdirSync10(dirname13(target), { recursive: true });
-  writeFileSync9(target, prefix);
+  mkdirSync11(dirname14(target), { recursive: true });
+  writeFileSync10(target, prefix);
 }
 function stageFetchedVaultHistory(paseoHome, files) {
   const stateDir = vaultStateDir(paseoHome);
   const upgrade = pendingUpgradeFor(stateDir);
   if (upgrade !== void 0) throw new FactoryError("upgrade-recovery-required", `Upgrade ${upgrade} is incomplete; resume or restore before staging new Vault history`);
   const manifestBytes = files.get("vault.manifest.json");
-  const manifest = manifestBytes === void 0 ? readVaultManifestAt(join17(paseoHome, "vault-runtime")) : parseVaultManifest(manifestBytes.toString("utf8"));
+  const manifest = manifestBytes === void 0 ? readVaultManifestAt(join19(paseoHome, "vault-runtime")) : parseVaultManifest(manifestBytes.toString("utf8"));
   const snapshots = (relative2) => [...files].flatMap(([path, bytes]) => {
     const match = /^state\/nodes\/([^/]+)\/(.+)$/.exec(path);
     return match?.[2] === relative2 ? [{ nodeId: match[1], lines: bytes.toString("utf8"), bytes }] : [];
   });
   const hold = { status: "pending", diagnostics: ["downloaded history retained; associated Vault files await owner materialization before admission"] };
   const stage = (target, sources) => sources.length === 0 ? [] : [stageLedgerImport(target, sources, { materialization: hold })];
-  const imports = stage(join17(stateDir, "ledger.jsonl"), snapshots("global-ledger.jsonl"));
+  const imports = stage(join19(stateDir, "ledger.jsonl"), snapshots("global-ledger.jsonl"));
   for (const app of resolveVaultApps(paseoHome, manifest)) {
     if (app.projectSlug === null) continue;
     imports.push(...stage(projectHistoryTarget(stateDir, app.projectSlug), snapshots(`projects/${app.canonicalAppKey}/ledger.jsonl`)));
@@ -4065,9 +4120,9 @@ function stageFetchedVaultHistory(paseoHome, files) {
 }
 
 // src/vault-config.ts
-import { readFileSync as readFileSync17, mkdirSync as mkdirSync11, writeFileSync as writeFileSync10, chmodSync as chmodSync3, existsSync as existsSync14 } from "node:fs";
+import { readFileSync as readFileSync18, mkdirSync as mkdirSync12, writeFileSync as writeFileSync11, chmodSync as chmodSync3, existsSync as existsSync15 } from "node:fs";
 import { hostname } from "node:os";
-import { dirname as dirname14, join as join18 } from "node:path";
+import { dirname as dirname15, join as join20 } from "node:path";
 var STATE_PLUGIN_DIR = "paseo-factory";
 var SHARED_SECRET_FILES = {
   ascKey: "asc-api-key.p8",
@@ -4078,7 +4133,7 @@ var SHARED_SECRET_FILES = {
 function loadVaultConfig(paseoHome) {
   let raw;
   try {
-    raw = readFileSync17(vaultConfigPath(paseoHome), "utf8");
+    raw = readFileSync18(vaultConfigPath(paseoHome), "utf8");
   } catch (err) {
     if (err.code === "ENOENT") return null;
     throw err;
@@ -4098,8 +4153,8 @@ function saveVaultConfig(paseoHome, config) {
   return LedgerAdmission.stateMutation(vaultStateDir(paseoHome), () => {
     const full = withConfigDefaults(config);
     const path = vaultConfigPath(paseoHome);
-    mkdirSync11(dirname14(path), { recursive: true });
-    writeFileSync10(path, `${JSON.stringify(full, null, 2)}
+    mkdirSync12(dirname15(path), { recursive: true });
+    writeFileSync11(path, `${JSON.stringify(full, null, 2)}
 `, { mode: 384 });
     chmodSync3(path, 384);
     return full;
@@ -4121,7 +4176,7 @@ function readVaultStatus(paseoHome, passphrase, ghAuth) {
     branch: config?.branch ?? "main",
     nodeId: config?.nodeId ?? normalizeNodeId(hostname()),
     hasPassphrase: resolveVaultPassphrase(config?.passphrase, passphrase) !== void 0,
-    cloneExists: existsSync14(join18(paseoHome, "vault", ".git")),
+    cloneExists: existsSync15(join20(paseoHome, "vault", ".git")),
     lastHydratedAt: config?.lastHydratedAt ?? null,
     lastHydrateMode: config?.lastHydrateMode ?? null,
     lastPushedAt: config?.lastPushedAt ?? null,
@@ -4140,7 +4195,7 @@ function readVaultStatus(paseoHome, passphrase, ghAuth) {
   };
 }
 function vaultConfigPath(paseoHome) {
-  return join18(paseoHome, "plugin-state", STATE_PLUGIN_DIR, "vault-config.json");
+  return join20(paseoHome, "plugin-state", STATE_PLUGIN_DIR, "vault-config.json");
 }
 function normalizeNodeId(raw) {
   const normalized2 = raw.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
@@ -4158,8 +4213,8 @@ function withConfigDefaults(config) {
   };
 }
 function sharedSecretExists(paseoHome, name) {
-  const secrets = join18(paseoHome, "vault-runtime", "secrets");
-  return existsSync14(join18(secrets, name)) || existsSync14(join18(secrets, "shared", name));
+  const secrets = join20(paseoHome, "vault-runtime", "secrets");
+  return existsSync15(join20(secrets, name)) || existsSync15(join20(secrets, "shared", name));
 }
 function requiredVaultConfig(paseoHome) {
   const config = loadVaultConfig(paseoHome);
@@ -4191,12 +4246,12 @@ function nowIso() {
   return (/* @__PURE__ */ new Date()).toISOString();
 }
 function vaultStateDir(paseoHome) {
-  return join18(paseoHome, "plugin-state", STATE_PLUGIN_DIR);
+  return join20(paseoHome, "plugin-state", STATE_PLUGIN_DIR);
 }
 
 // src/vault.ts
-import { existsSync as existsSync15, mkdirSync as mkdirSync12, readFileSync as readFileSync18 } from "node:fs";
-import { join as join19, dirname as dirname15 } from "node:path";
+import { existsSync as existsSync16, mkdirSync as mkdirSync13, readFileSync as readFileSync19 } from "node:fs";
+import { join as join21, dirname as dirname16 } from "node:path";
 import { gunzipSync } from "node:zlib";
 async function hydrateVaultDirect(paseoHome, options = {}) {
   const config = loadVaultConfig(paseoHome);
@@ -4216,7 +4271,7 @@ async function hydrateVaultDirect(paseoHome, options = {}) {
   const files = /* @__PURE__ */ new Map();
   for (const entry of parseTarEntries(archive)) {
     const path = vaultPathFromArchivePath(entry.path);
-    if (path === null) continue;
+    if (path === null || isProjectDesignVaultPath(path)) continue;
     assertSafeVaultPath(path);
     files.set(path, unsealVaultBuffer(entry.data, resolveVaultPassphrase(config?.passphrase)));
   }
@@ -4227,8 +4282,8 @@ async function pullVault(paseoHome, options = {}) {
 }
 async function pullConfiguredVault(paseoHome, config, options, configure = false) {
   const runner = options.runner ?? builtinVaultRunner;
-  const vaultDir = join19(paseoHome, "vault");
-  if (existsSync15(join19(vaultDir, ".git"))) {
+  const vaultDir = join21(paseoHome, "vault");
+  if (existsSync16(join21(vaultDir, ".git"))) {
     try {
       await runner({ command: "git", args: ["pull", "--rebase", "--autostash"], cwd: vaultDir });
     } catch (err) {
@@ -4243,9 +4298,9 @@ async function pullConfiguredVault(paseoHome, config, options, configure = false
     await ensureVaultCheckout(runner, config, vaultDir);
   }
   const files = /* @__PURE__ */ new Map();
-  for (const path of walkFiles(vaultDir, () => false)) {
+  for (const path of walkFiles(vaultDir, isProjectDesignVaultPath)) {
     assertSafeVaultPath(path);
-    files.set(path, unsealVaultBuffer(readFileSync18(join19(vaultDir, path)), resolveVaultPassphrase(config.passphrase)));
+    files.set(path, unsealVaultBuffer(readFileSync19(join21(vaultDir, path)), resolveVaultPassphrase(config.passphrase)));
   }
   return materializeFetchedVault(paseoHome, files, options, () => {
     if (configure) saveVaultConfig(paseoHome, config);
@@ -4255,23 +4310,23 @@ async function pullConfiguredVault(paseoHome, config, options, configure = false
 async function pushVault(paseoHome, options = {}) {
   const config = requiredVaultConfig(paseoHome);
   const runner = options.runner ?? builtinVaultRunner;
-  const vaultDir = join19(paseoHome, "vault");
+  const vaultDir = join21(paseoHome, "vault");
   await ensureVaultCheckout(runner, config, vaultDir);
   const pushedFiles = await LedgerAdmission.withStateMaintenance(vaultStateDir(paseoHome), () => {
     collectLocalStateIntoRuntime(paseoHome);
-    const runtimeRoot = join19(paseoHome, "vault-runtime");
-    const staged = existsSync15(runtimeRoot) ? walkFiles(runtimeRoot, (rel) => rel === "env.json") : [];
+    const runtimeRoot = join21(paseoHome, "vault-runtime");
+    const staged = existsSync16(runtimeRoot) ? walkFiles(runtimeRoot, (rel) => rel === "env.json" || isProjectDesignVaultPath(rel)) : [];
     const passphrase = resolveVaultPassphrase(config.passphrase);
     for (const rel of staged) {
-      stageRuntimeFileIntoCheckout(join19(runtimeRoot, rel), join19(vaultDir, rel), passphrase, rel);
+      stageRuntimeFileIntoCheckout(join21(runtimeRoot, rel), join21(vaultDir, rel), passphrase, rel);
     }
     const pushedFiles2 = new Set(staged);
     if (options.includeLedger) {
       const stateDir = vaultStateDir(paseoHome);
-      const globalLedger = join19(stateDir, "ledger.jsonl");
-      if (existsSync15(globalLedger)) {
-        const target = join19(vaultDir, "state", "nodes", config.nodeId, "global-ledger.jsonl");
-        mkdirSync12(dirname15(target), { recursive: true });
+      const globalLedger = join21(stateDir, "ledger.jsonl");
+      if (existsSync16(globalLedger)) {
+        const target = join21(vaultDir, "state", "nodes", config.nodeId, "global-ledger.jsonl");
+        mkdirSync13(dirname16(target), { recursive: true });
         snapshotVaultLedger(globalLedger, target);
         pushedFiles2.add(`state/nodes/${config.nodeId}/global-ledger.jsonl`);
       }
@@ -4279,12 +4334,12 @@ async function pushVault(paseoHome, options = {}) {
       for (const app of resolveVaultApps(paseoHome, readVaultManifestAt(vaultDir))) {
         if (app.projectSlug !== null) slugToKey.set(app.projectSlug, app.canonicalAppKey);
       }
-      for (const slug of listDirNames(join19(stateDir, "projects"))) {
-        const projectLedger = join19(stateDir, "projects", slug, "ledger.jsonl");
-        if (!existsSync15(projectLedger)) continue;
+      for (const slug of listDirNames(join21(stateDir, "projects"))) {
+        const projectLedger = join21(stateDir, "projects", slug, "ledger.jsonl");
+        if (!existsSync16(projectLedger)) continue;
         const key = slugToKey.get(slug) ?? slug;
-        const target = join19(vaultDir, "state", "nodes", config.nodeId, "projects", key, "ledger.jsonl");
-        mkdirSync12(dirname15(target), { recursive: true });
+        const target = join21(vaultDir, "state", "nodes", config.nodeId, "projects", key, "ledger.jsonl");
+        mkdirSync13(dirname16(target), { recursive: true });
         snapshotVaultLedger(projectLedger, target);
         pushedFiles2.add(`state/nodes/${config.nodeId}/projects/${key}/ledger.jsonl`);
       }

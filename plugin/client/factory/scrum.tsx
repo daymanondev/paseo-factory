@@ -1,3 +1,6 @@
+import { resolveReachableStudioUrl } from "./studio-url.ts";
+import { StudioRelay } from "./studio-relay.tsx";
+import type { StudioPayload } from "./studio-relay.tsx";
 import { ScrumOwnerWork, useOwnerCommand, CommandStatus } from "./owner-work.tsx";
 import type { PluginTheme } from "@getpaseo/plugin";
 import { openExternalUrl } from "@getpaseo/plugin/client";
@@ -229,6 +232,7 @@ function MockupApproval({
   const [viewport, setViewport] = useState('desktop');
   const [screen, setScreen] = useState('');
   const [designState, setDesignState] = useState('populated');
+  const [studioBundle, setStudioBundle] = useState<StudioPayload | null>(null);
   const [studioOpening, setStudioOpening] = useState(false);
   const [studioError, setStudioError] = useState("");
   const studioRequest = useRef(false);
@@ -240,49 +244,26 @@ function MockupApproval({
   const scale = Math.min(1, stageWidth / designWidth);
   const switchPreview = () => frame.current?.contentWindow?.postMessage({ type: 'scrum:set-state', screen, state: designState }, '*');
   useEffect(switchPreview, [screen, designState, preview]);
-  const resolveReachableStudioUrl = async (candidates: readonly string[], expectedDigest?: string): Promise<string | null> => {
-    if (candidates.length === 0) return null;
-    if (candidates.length === 1) return candidates[0]!;
-    const checkCandidate = async (candidate: string, timeoutMs: number): Promise<string | null> => {
-      try {
-        const parsed = new URL(candidate);
-        const stateUrl = `${parsed.origin}/api/state${parsed.search}`;
-        const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-        const timer = setTimeout(() => controller?.abort(), timeoutMs);
-        try {
-          const res = await fetch(stateUrl, controller ? { signal: controller.signal } : undefined);
-          if (!res.ok) return null;
-          if (expectedDigest) {
-            const payload = (await res.json()) as { design?: { digest?: string } };
-            if (payload?.design?.digest && payload.design.digest !== expectedDigest) return null;
-          }
-          return candidate;
-        } finally {
-          clearTimeout(timer);
-        }
-      } catch {
-        return null;
-      }
-    };
-    const localMatch = await checkCandidate(candidates[0]!, 1000);
-    if (localMatch) return localMatch;
-    const remoteResults = await Promise.all(candidates.slice(1).map((c) => checkCandidate(c, 3500)));
-    const firstRemote = remoteResults.find((r): r is string => r !== null);
-    return firstRemote ?? candidates[1] ?? candidates[0]!;
-  };
   const openStudio = async () => {
     if (!action || studioRequest.current) return;
     studioRequest.current = true;
     setStudioOpening(true);
     setStudioError("");
     try {
-      const reply = await action('preview.url', {}, run?.runId);
-      if (!reply.ok) throw new Error(reply.error ?? 'Could not prepare Design Studio. Try again.');
-      const data = reply.data as { url?: string; urls?: string[] } | undefined;
-      const candidates = Array.isArray(data?.urls) && data.urls.length > 0 ? data.urls : data?.url ? [data.url] : [];
-      const targetUrl = await resolveReachableStudioUrl(candidates, run?.design?.digest);
-      if (!targetUrl) throw new Error('Design Studio did not return a preview URL. Refresh Factory and try again.');
-      await openExternalUrl(targetUrl);
+      let targetUrl: string | null = null;
+      try {
+        const reply = await action('preview.url', {}, run?.runId);
+        if (reply.ok) {
+          const data = reply.data as { url?: string; urls?: string[] } | undefined;
+          targetUrl = await resolveReachableStudioUrl(data?.urls ?? (data?.url ? [data.url] : []), run?.design?.digest);
+        }
+      } catch { /* RPC bundle works even when HTTP listener creation fails. */ }
+      if (targetUrl) await openExternalUrl(targetUrl);
+      else {
+        const relayed = await action('preview.bundle', {}, run?.runId);
+        if (!relayed.ok) throw new Error(relayed.error ?? 'Could not load Studio over Paseo. Reopen to retry.');
+        setStudioBundle(relayed.data as StudioPayload);
+      }
     } catch (error) {
       setStudioError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -293,6 +274,8 @@ function MockupApproval({
   if (!run?.design)
     return <Text style={text(theme, "meta")}>Awaiting design evidence.</Text>;
   return (
+    <>
+    {studioBundle ? <StudioRelay theme={theme} bundle={studioBundle} close={() => setStudioBundle(null)} decide={payload => action!('design.decide', { ...payload, explicitOwnerInstruction: true }, run.runId)} /> : null}
     <Card
       theme={theme}
       gap={SPACING[2]}
@@ -441,6 +424,7 @@ function MockupApproval({
         </Modal.Content>
       </Modal>
     </Card>
+    </>
   );
 }
 

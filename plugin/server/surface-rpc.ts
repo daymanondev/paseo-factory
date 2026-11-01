@@ -1,3 +1,7 @@
+import { linkedPreviewBundle } from "./core/scrum/preview-bundle.ts";
+import { serveLinkedPreview } from "./core/scrum/preview-server.ts";
+import { seedLinkedOpenDesign } from "./core/scrum/open-design-link.ts";
+import { discoverOpenDesignProjects, exportOpenDesignProject, syncOpenDesignLink, readOpenDesignLink, unlinkOpenDesign, prepareOpenDesignDispatch } from "./core/scrum/open-design-link.ts";
 import type { HelperMcpConfigUpdate } from "./core/helper-mcp-sync.ts";
 import { discoverHelperMcps, helperMcpRoster, setHelperMcpEnabled, syncHelperMcps } from "./core/helper-mcp-sync.ts";
 import { provisionPiAgentHome } from "./core/pi-home.ts";
@@ -74,6 +78,7 @@ import { COMPANION_CATALOG, COMPANION_TOOLS_CATALOG, CORE_PLUGIN_ENTRY, MANAGEAB
 import type { CompanionCatalogEntry, CompanionToolCatalogEntry, ManageablePluginId } from "../shared/companions.ts";
 import type { SpoolLeadDispatchRequest, SpoolSupervisorReportRequest, SpoolReply } from "./spool.ts";
 import {
+  openDesignCatalog, openDesignExport, openDesignStatus, openDesignSync, openDesignUnlink, openDesignPreview,
   accept,
   executionSetMode,
   scrumCommand,
@@ -324,7 +329,7 @@ export interface SurfaceDeps {
    * `lead_dispatch` rides. Without it the RPC refuses by name (the spool's
    * `lead-dispatch-unavailable` precedent).
    */
-  leadDispatch?: (request: SpoolLeadDispatchRequest) => Promise<SpoolReply>;
+  leadDispatch?: (request: SpoolLeadDispatchRequest, options?: { existingDesignSnapshot: true }) => Promise<SpoolReply>;
   supervisorReport?: (request: SpoolSupervisorReportRequest) => Promise<SpoolReply>;
   /**
    * The vault transport seam (v0.0.21, ADR 0014 §2; tests): every external
@@ -1597,6 +1602,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       const base = {
         selectedMode: selection.mode,
         revision: selection.revision,
+        openDesignLink: selection.openDesignLink,
         pendingSwitch:
           pending?.status === "pending"
             ? { from: pending.previous.mode, to: pending.target.mode }
@@ -1764,7 +1770,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         if (!obsolete) {
           const reply = wakeup.target === "supervisor"
             ? await deps.supervisorReport!({ id: `scrum:${runId}:${wakeup.id}`, kind: "supervisor_report", workspace: project.root, seat: "lead", scrum: { runId }, message: wakeup.message })
-            : await deps.leadDispatch!({ id: `scrum:${runId}:${wakeup.id}`, kind: "lead_dispatch", workspace: project.root, runId, from: "owner", message: wakeup.message });
+            : await deps.leadDispatch!({ id: `scrum:${runId}:${wakeup.id}`, kind: "lead_dispatch", workspace: project.root, runId, from: "owner", message: wakeup.message }, { existingDesignSnapshot: true });
           if (!reply.ok) throw new Error(reply.message);
         }
         run = await withExecutionLane(deps.stateDir, project.slug, async () => {
@@ -1779,6 +1785,47 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     // Runtime recovery only delivers already-recorded explicit acts; it never
     // invents continuation for a blocked run during installation/startup.
     scrumRecoverNotifications: deliverScrumNotifications,
+    async openDesignCatalog(_input: {}) {
+      try { return { ok: true as const, projects: discoverOpenDesignProjects(resolveSurfaceUserHome()) }; }
+      catch (error) { return failure(codeOf(error), messageOf(error)); }
+    },
+    async openDesignExport(input: { projectId: string }) {
+      try { return { ok: true as const, bundle: exportOpenDesignProject(input.projectId, resolveSurfaceUserHome()) }; }
+      catch (error) { return failure(codeOf(error), messageOf(error)); }
+    },
+    async openDesignStatus(input: { projectRoot: string }) {
+      try {
+        const project = projectOrRefusal(input.projectRoot); if (!project.ok) return project;
+        const link = readOpenDesignLink(project.root) ?? readExecution(deps.stateDir, project.slug).openDesignLink;
+        const source = link && discoverOpenDesignProjects(resolveSurfaceUserHome()).find(p => p.projectId === link.projectId);
+        return { ok: true as const, link: link ?? null, updateAvailable: !!(source && link && (source.digest !== link.digest || source.sourceUpdatedAt > link.sourceUpdatedAt)), sourceAvailable: !!source, syncRequestId: (() => { const source = readExecution(deps.stateDir, project.slug).openDesignSource; return source?.requestId !== source?.acknowledgedRequestId ? source?.requestId : undefined; })() };
+      } catch (error) { return failure(codeOf(error), messageOf(error)); }
+    },
+    async openDesignSync(input: { projectRoot: string; projectId?: string; bundle?: import('./core/scrum/open-design-link.ts').OpenDesignBundle; syncRequestId?: string; expectedDigest?: string }) {
+      try {
+        const project = projectOrRefusal(input.projectRoot); if (!project.ok) return project;
+        return await withExecutionLane(deps.stateDir, project.slug, async () => {
+          ensureProjectRegistered(deps.stateDir, { root: project.root, slug: project.slug });
+          const link = syncOpenDesignLink({ ...input, root: project.root, slug: project.slug, state: deps.stateDir, userHome: resolveSurfaceUserHome() });
+          if (readExecution(deps.stateDir, project.slug).mode === 'scrum') for (const run of listRuns(deps.stateDir, project.slug).filter(r => !terminalRun(r))) seedLinkedOpenDesign(project.root, project.root, run.initiativeId);
+          return { ok: true as const, link };
+        });
+      } catch (error) { return failure(codeOf(error), messageOf(error)); }
+    },
+    async openDesignPreview(input: { projectRoot: string; operation?: 'preview.url' | 'preview.bundle' }) {
+      try {
+        const project = projectOrRefusal(input.projectRoot); if (!project.ok) return project;
+        if (input.operation === 'preview.url') return { ok: true as const, ...await serveLinkedPreview(project.root) };
+        return { ok: true as const, bundle: linkedPreviewBundle(project.root) };
+      } catch (error) { return failure(codeOf(error), messageOf(error)); }
+    },
+    async openDesignUnlink(input: { projectRoot: string }) {
+      try {
+        const project = projectOrRefusal(input.projectRoot); if (!project.ok) return project;
+        await withExecutionLane(deps.stateDir, project.slug, async () => unlinkOpenDesign(deps.stateDir, project.slug, project.root));
+        return { ok: true as const };
+      } catch (error) { return failure(codeOf(error), messageOf(error)); }
+    },
     async executionSetMode(input: { mode: "slp" | "scrum"; projectRoot?: string }, context?: SurfaceCallContext) {
       try {
         if (!input.projectRoot || input.projectRoot.trim() === "") {
@@ -1886,7 +1933,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
               from: authority === "supervisor" ? "supervisor" : "owner",
               ...(authority === "supervisor" ? { seat: "supervisor" as const } : {}),
               message: `UI DESIGN DECISION RECORDED — run ${decidedRun.runId}, design revision ${decidedRun.design.revision ?? 1} (digest ${decidedRun.design.digest ?? ""}): ${decision.toUpperCase()}.\nRationale: ${decidedRun.design.rationale ?? ""}${findingsLine}\nScreen statuses: ${JSON.stringify(decidedRun.design.screenStatuses ?? {})}\n${nextStep}`,
-            });
+            }, { existingDesignSnapshot: true });
           } catch (err) {
             log(`scrum: lead wakeup after ${input.operation} failed — ${messageOf(err)}`);
           }
@@ -2980,6 +3027,10 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         ...(input.from === undefined ? {} : { from: input.from }),
         message: input.message,
       };
+      try {
+        const project = projectOrRefusal(input.projectRoot ?? (input.project ? readProjectRegistration(deps.stateDir, input.project)?.root : undefined) ?? "");
+        if (project.ok) await prepareOpenDesignDispatch({ state: deps.stateDir, slug: project.slug, root: project.root, requestId: request.id, userHome: resolveSurfaceUserHome() });
+      } catch (error) { return failure(codeOf(error), messageOf(error)); }
       const reply = await deps.leadDispatch(request);
       if (!reply.ok) return { ok: false as const, code: reply.code ?? "lead-dispatch-failed", error: reply.message ?? "the dispatch failed" };
       return {
@@ -3435,6 +3486,12 @@ export function registerSurfaceRpc(
   server.handle(scrumCommand, (input, context) => handlers.scrumCommand(input, pass(context)));
   server.handle(snapshot, (input, context) => handlers.snapshot(input, pass(context)));
   server.handle(taskDetail, (input, context) => handlers.taskDetail(input, pass(context)));
+  server.handle(openDesignCatalog, input => handlers.openDesignCatalog(input));
+  server.handle(openDesignExport, input => handlers.openDesignExport(input));
+  server.handle(openDesignStatus, input => handlers.openDesignStatus(input));
+  server.handle(openDesignSync, input => handlers.openDesignSync(input));
+  server.handle(openDesignUnlink, input => handlers.openDesignUnlink(input));
+  server.handle(openDesignPreview, input => handlers.openDesignPreview(input));
   server.handle(accept, (input, context) => handlers.accept(input, pass(context)));
   server.handle(retro, (input, context) => handlers.retro(input, pass(context)));
   server.handle(lanesSet, (input, context) => handlers.lanesSet(input, pass(context)));
