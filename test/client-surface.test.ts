@@ -1328,3 +1328,21 @@ test('PluginsPane SSR renders Skill Hub inventory and Project pack controls', as
     assert.match(html, /Enable for Project/);
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
+
+test("v0.0.87 (ADR 0043 §4): SeatsPane renders the Project Token & Model Usage card and TasksPane renders per-task token pills and model badges", () => {
+  const seats = readFileSync(join(repoRoot, "plugin/client/factory/seats.tsx"), "utf8");
+  assert.match(seats, /export function ProjectUsageCard/, "the card is its own component");
+  assert.match(seats, /Project Token Usage/, "the card's section title");
+  assert.match(seats, /BY SEAT \/ ROLE/, "the seat breakdown rows render");
+  assert.match(seats, /BY MODEL \/ PROVIDER/, "the model breakdown rows render");
+  assert.match(seats, /cache-hit/, "the cache-hit ratio renders");
+  assert.match(seats, /<ProjectUsageCard theme=\{theme\} usage=\{view\.projectUsage \?\? null\} \/>/, "the pane mounts the card from the view's usage half");
+
+  const tasks = readFileSync(join(repoRoot, "plugin/client/factory/tasks.tsx"), "utf8");
+  assert.match(tasks, /formatTokenCount\(task\.totalTokens!\)} tok/, "the Kanban card's token pill renders the rollup aggregate");
+  assert.match(tasks, /task\.usageModel != null \? <Pill theme=\{theme\} label=\{task\.usageModel\} mono \/> : null/, "the detail modal's model badge renders");
+
+  const status = readFileSync(join(repoRoot, "plugin/bin/factory.mjs"), "utf8");
+  assert.match(status, /usage-status\.mjs/, "factory status reads the generated usage-status mirror");
+  assert.match(status, /Token Usage/, "the CLI section header prints");
+});

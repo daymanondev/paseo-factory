@@ -51,7 +51,7 @@ import { boundTaskPeers, peerIsRunning } from "./task-peers.ts";
 import { stopAgentViaCli } from "./daemon-cli.ts";
 import type { DaemonReply } from "./daemon-cli.ts";
 import { isPaseoWorkspaceArchivedOnDisk, restoreDaemonWorkspaceViaWs } from "./daemon-cli.ts";
-import type { SurfaceDaemonApi } from "./surface-rpc.ts";
+import type { SurfaceAgentSnapshot, SurfaceDaemonApi } from "./surface-rpc.ts";
 import type { HistoryImportSource } from "./core/history-import.ts";
 import type { ImportStatus } from "./core/history-stage.ts";
 
@@ -1166,7 +1166,7 @@ export async function handleSpoolRequest(
 }
 
 async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolRequest, deps: SpoolDeps): Promise<SpoolReply> {
-  const { ask: askHandler, leadRotate: leadRotateHandler, leadDispatch: leadDispatchHandler, peerMail: peerMailHook, supervisorDispatch: supervisorDispatchHandler, supervisorReport: supervisorReportHandler, daemon, projectReset: projectResetHandler, projectDelete: projectDeleteHandler, sanitizeLane, home } = deps;
+  const { ask: askHandler, leadRotate: leadRotateHandler, leadDispatch: leadDispatchHandler, peerMail: peerMailHook, supervisorDispatch: supervisorDispatchHandler, supervisorReport: supervisorReportHandler, daemon, projectReset: projectResetHandler, projectDelete: projectDeleteHandler, sanitizeLane, home, usageMeter, recordUsage } = deps;
   const resolvedDaemon = resolveDaemonArg(daemon);
   try {
     const effectiveSeat = await resolveEffectiveSeat(factory, resolvedDaemon, request);
@@ -1265,6 +1265,11 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
     };
     const retirePeers = async (peers: Awaited<ReturnType<typeof taskPeers>>) => {
       for (const peer of peers) {
+        // The retirement flush (v0.0.87, ADR 0043 §3): final usage first, then
+        // the stop/archive — a re-contract never loses the predecessor's tokens.
+        if (recordUsage !== undefined && peer.labels.project !== undefined) {
+          await recordUsage({ slug: peer.labels.project, ...(peer.labels.task !== undefined ? { task: peer.labels.task } : {}), agent: peer });
+        }
         const stopped = await (deps.stopAgent ?? stopAgentViaCli)(peer.id, home);
         if (!stopped.ok) throw new FactoryError("peer-stop-failed", `cannot stop Peer ${peer.id}: ${stopped.reason}`);
         await resolvedDaemon!.agents.ref(peer.id).archive();
@@ -1336,6 +1341,17 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
       // permits, mailbox delivery, and context observation remain available.
       const admitted = project?.ok ? await withExecutionLane(factory.stateDir, project.slug, admit) : await admit();
       const outcome = await admitted.completion;
+      // The plugin-owned Tier-1 meter (v0.0.87, ADR 0043 §3): every Gate
+      // boundary flushes the Peer's session into the Project rollup and
+      // lands at most one `meter_written` line — the Desktop MCP spawn path
+      // (no `endpoint.sock`, no `driver.mjs`) is metered exactly like the
+      // CLI Driver wave always was. Best-effort by contract: a metering
+      // failure never taints the verdict's own reply.
+      await usageMeter?.({
+        task: request.task,
+        ...(request.agent === undefined ? {} : { agentId: request.agent }),
+        attempt: outcome.attempt,
+      });
       // The peer hook (v0.0.20, ADR 0013 §4): a verdict is a terminal Task
       // outcome the Project's Lead must hear — the hook appends `mail_queued`
       // (`from: "peer"`) on the owning Project's lane, held while a Driver
@@ -1717,6 +1733,10 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
     if (request.kind !== "accept") return { id: request.id, ok: false, code: "bad-request", message: "unsupported Factory command" };
     const acceptedBy = request.by ?? request.submitter;
     const accepted = await executeAcceptance(factory, { task: request.task, attempt: request.attempt, accepted_by: acceptedBy }, { authority: effectiveSeat ?? (request.by === "lead" ? "lead" : "owner"), daemon: resolvedDaemon, home });
+    // The acceptance is a terminal Task boundary too (v0.0.87, ADR 0043 §3):
+    // the accepted attempt's Peer gets its final flush and — when tokens
+    // grew past its Gate-boundary line — the one closing `meter_written`.
+    await usageMeter?.({ task: request.task, attempt: request.attempt });
     return {
       id: request.id,
       ok: true,
@@ -1772,6 +1792,18 @@ export interface SpoolOptions {
   home?: string;
   /** Lifecycle cancellation override; defaults to the daemon bridge. */
   stopAgent?: (agentId: string, home?: string) => Promise<DaemonReply>;
+  /**
+   * The plugin-owned Tier-1 meter (v0.0.87, ADR 0043 §3): called at a Claim's
+   * terminal Gate boundary with the attempt's own numbers — the usage rollup
+   * flushes the Peer's session AND at most one `meter_written` line lands,
+   * with or without `driver.mjs` in the loop.
+   */
+  usageMeter?: (input: { task: string; agentId?: string; attempt?: number }) => Promise<void>;
+  /**
+   * The Peer-retirement usage flush (v0.0.87, ADR 0043 §3): called before a
+   * task Peer is stopped and archived on re-contracting or replacement.
+   */
+  recordUsage?: (input: { slug: string; task?: string; agent: SurfaceAgentSnapshot }) => Promise<void>;
 }
 
 export type SpoolDeps = Omit<SpoolOptions, "onLog" | "pollMs">;

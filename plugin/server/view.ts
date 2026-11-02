@@ -11,7 +11,9 @@ import type { AttemptState } from "./core/task-state.ts";
 import { readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { FACTORY_VIEW_VERSION } from "../shared/view.ts";
-import type { AgentView, AttemptView, CompanionPluginView, CompanionStatus, FactoryView, LedgerLineView, Lanes, ProjectView, RetroView, TaskView, VaultStatusView } from "../shared/view.ts";
+import type { AgentView, AttemptView, CompanionPluginView, CompanionStatus, FactoryView, LedgerLineView, Lanes, ProjectUsageView, ProjectView, RetroView, TaskView, VaultStatusView } from "../shared/view.ts";
+import { foldProjectUsageSummary } from "./core/usage-status.ts";
+import type { ProjectUsageFile } from "./core/usage-status.ts";
 import { COMPANION_CATALOG, CORE_PLUGIN_DEFAULT_VERSION, CORE_PLUGIN_ENTRY } from "../shared/companions.ts";
 import type { CompanionCatalogEntry, CorePluginCatalogEntry } from "../shared/companions.ts";
 import { readPluginVersionFromDisk } from "./daemon-cli.ts";
@@ -236,6 +238,51 @@ export function foldKpis(tasks: readonly TaskView[]): { needsHuman: number; runn
     if (typeof task.totalTokens === "number") totalTokens += task.totalTokens;
   }
   return { needsHuman, running, readyToAccept, accepted, totalCostUsd, totalTokens };
+}
+
+// ---- the project usage fold (v0.0.87, ADR 0043 §4) --------------------------------------------
+
+/**
+ * The Project Usage half of the view — a pure fold of the gathered
+ * `<projectStateDir>/usage.json` (the vault-status precedent: the file probe
+ * belongs to the gatherer, the fold stays pure over its inputs). Null when
+ * the rollup is absent or recorded no session.
+ */
+export function foldProjectUsage(file: ProjectUsageFile | undefined): ProjectUsageView | null {
+  const summary = foldProjectUsageSummary(file);
+  if (summary === null) return null;
+  return {
+    updatedAt: file!.updatedAt,
+    ...(file!.backfilledAt !== undefined ? { backfilledAt: file!.backfilledAt } : {}),
+    totals: summary.totals,
+    byModel: summary.byModel,
+    bySeat: summary.bySeat,
+    byTask: summary.byTask,
+  };
+}
+
+/**
+ * Enriches the task cards with the rollup's truth (ADR 0043 §4): a task's
+ * `totalTokens` prefers the rollup's aggregate across ALL its Attempts and
+ * Peer-handoff sessions — authoritative even when historical runs landed no
+ * `meter_written` line — and `usageModel` names the badge model. Tasks the
+ * rollup knows nothing about pass through untouched.
+ */
+export function enrichTaskUsage(tasks: readonly TaskView[], file: ProjectUsageFile | undefined): TaskView[] {
+  if (file === undefined) return [...tasks];
+  // The same fold the byTask rows render — one aggregation, one recency law
+  // (the latest `updatedAt` session names the badge model).
+  const byTask = new Map(foldProjectUsageSummary(file)?.byTask.map(row => [row.task, row]) ?? []);
+  if (byTask.size === 0) return [...tasks];
+  return tasks.map(task => {
+    const usage = byTask.get(task.task);
+    if (usage === undefined) return task;
+    return {
+      ...task,
+      totalTokens: usage.totalTokens > 0 ? usage.totalTokens : task.totalTokens,
+      ...(usage.model !== null ? { usageModel: usage.model } : {}),
+    };
+  });
 }
 
 // ---- the retro fold -----------------------------------------------------------------------
@@ -526,6 +573,12 @@ export function foldView(input: {
   generatedAt: string;
   lanes: Lanes;
   events: readonly AnyEvent[];
+  /**
+   * The scoped Project's usage rollup (v0.0.87, ADR 0043 §4) — the gathered
+   * `<projectStateDir>/usage.json`, undefined when none exists. Pure input:
+   * the fold never reads provider stores (the zero-provider-I/O law).
+   */
+  usage?: ProjectUsageFile | undefined;
   daemon: DaemonAgentsInput;
   /** The daemon plugin half (v0.0.17, ADR 0012 §2) — null plugins folds every catalog entry to not_installed. */
   companions: DaemonPluginsInput;
@@ -541,7 +594,7 @@ export function foldView(input: {
    */
   vault: VaultStatusView;
 }): FactoryViewFold {
-  const tasks = foldTasks(input.events);
+  const tasks = enrichTaskUsage(foldTasks(input.events), input.usage);
   return {
     version: FACTORY_VIEW_VERSION,
     stateDir: input.stateDir,
@@ -549,6 +602,7 @@ export function foldView(input: {
     lanes: input.lanes,
     kpis: foldKpis(tasks),
     tasks,
+    projectUsage: foldProjectUsage(input.usage),
     agents: [...input.daemon.agents],
     providers: input.daemon.providers.map((provider) => ({
       provider: provider.provider,

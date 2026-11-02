@@ -144,6 +144,12 @@ export const TaskViewSchema = z.object({
   costState: z.enum(["none", "metered", "subscription", "absent"]),
   costUsd: z.number().nullable(),
   totalTokens: z.number().int().optional(),
+  /**
+   * The usage rollup's model name for this task (v0.0.87, ADR 0043 §4) — the
+   * most recently updated session's model, set even when historical runs
+   * landed no `meter_written` line. Unset when the rollup knows nothing.
+   */
+  usageModel: z.string().nullable().optional(),
   needsHumanReason: z.string().nullable(),
   /** Choke counts for the Evidence Pills: allowed / denied / git blocks. */
   choke: z.object({ allowed: z.number().int(), denied: z.number().int(), blocked: z.number().int() }),
@@ -331,6 +337,58 @@ export const VaultStatusViewSchema = z.object({
 });
 export type VaultStatusView = z.infer<typeof VaultStatusViewSchema>;
 
+/**
+ * One aggregated usage row (v0.0.87, ADR 0043 §4) — the four disjoint
+ * additive buckets plus turns/sessions/cost, the shape the Project Token &
+ * Model Usage card, the per-task pills, and the CLI table all render.
+ */
+export const UsageBucketsSchema = z.object({
+  turns: z.number().int(),
+  sessionCount: z.number().int(),
+  inputUncachedTokens: z.number().int(),
+  cacheReadTokens: z.number().int(),
+  cacheWriteTokens: z.number().int(),
+  outputTokens: z.number().int(),
+  reasoningTokens: z.number().int(),
+  totalTokens: z.number().int(),
+  /** Summed session cost — null when no session reported dollars (never a fabricated zero). */
+  totalCostUsd: z.number().nullable(),
+});
+export type UsageBucketsView = z.infer<typeof UsageBucketsSchema>;
+
+/** One `(provider, model)` row of the By Model / Provider breakdown. */
+export const ModelUsageRowSchema = z.object({
+  provider: z.string(),
+  harness: z.string(),
+  model: z.string(),
+}).extend(UsageBucketsSchema.shape);
+export type ModelUsageRowView = z.infer<typeof ModelUsageRowSchema>;
+
+/** One seat row of the By Seat / Role breakdown — `Peer · dev` carries the Scrum specialization. */
+export const SeatUsageRowSchema = z.object({
+  seat: z.enum(["supervisor", "lead", "agent", "watch", "retro"]),
+  label: z.string(),
+}).extend(UsageBucketsSchema.shape);
+export type SeatUsageRowView = z.infer<typeof SeatUsageRowSchema>;
+
+/** One task's aggregated usage across all its Attempts and Peer handoffs — `model` is the card badge. */
+export const TaskUsageRowSchema = z.object({
+  task: z.string(),
+  model: z.string().nullable(),
+}).extend(UsageBucketsSchema.shape);
+export type TaskUsageRowView = z.infer<typeof TaskUsageRowSchema>;
+
+/** The Project Usage half (v0.0.87, ADR 0043 §4) — the rollup fold of `<projectStateDir>/usage.json`. */
+export const ProjectUsageViewSchema = z.object({
+  updatedAt: z.string(),
+  backfilledAt: z.string().nullable().optional(),
+  totals: UsageBucketsSchema,
+  byModel: z.array(ModelUsageRowSchema),
+  bySeat: z.array(SeatUsageRowSchema),
+  byTask: z.array(TaskUsageRowSchema),
+});
+export type ProjectUsageView = z.infer<typeof ProjectUsageViewSchema>;
+
 /** The whole Factory surface snapshot — one RPC answer, one render. */
 export const ScrumConfigSchema = z.object({ configRevision: z.number().int().optional(), schemaVersion: z.literal(1), requireUiApproval: z.boolean(), lanes: z.object({ supervisor: z.string(), lead: z.string(), pm: z.string(), ux: z.string(), architect: z.string(), dev: z.string(), qa: z.string(), watch: z.string(), retro: z.string() }) });
 export const ScrumRunViewSchema = z.object({
@@ -516,6 +574,14 @@ export const FactoryViewSchema = z.object({
   activeProfileModified: z.boolean(),
   /** True when the scoped Project's own `<projectStateDir>/lanes.json` names at least one lane (v0.0.38, ADR 0026 §2). */
   hasProjectLaneOverride: z.boolean(),
+  /**
+   * The Project Token Usage half (v0.0.87, ADR 0043 §4) — the scoped
+   * Project's rollup fold, null on the unscoped global view or when no
+   * session was recorded. Additive optional field on a v3 view: an older
+   * client ignores the extra JSON key, so the version stays (the vault
+   * field's own precedent).
+   */
+  projectUsage: ProjectUsageViewSchema.nullable().optional(),
 });
 export type FactoryView = z.infer<typeof FactoryViewSchema>;
 
