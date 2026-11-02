@@ -56,4 +56,17 @@ test('transcript CLI exports SQLite steps by agent prefix, direct conversation, 
   const ambiguous = spawnSync(process.execPath, [resolve('plugin/bin/factory.mjs'), '--home', home, 'transcript', 'f1234567', '--conversations-dir', conversations], { encoding: 'utf8' });
   assert.equal(ambiguous.status, 2); assert.match(ambiguous.stderr, /ambiguous/i);
   assert.deepEqual(readFileSync(dbPath), before);
+  rmSync(join(home, 'agents/nested/f1234567-other.json'));
+  const logsDir = join(dir, 'brain', conversationId, '.system_generated/logs');
+  mkdirSync(logsDir, { recursive: true });
+  writeFileSync(join(logsDir, 'transcript_full.jsonl'), [
+    JSON.stringify({ step_index: 0, type: 'USER_INPUT', status: 'DONE', content: 'Build Goal Partner from JSONL' }),
+    JSON.stringify({ step_index: 1, type: 'PLANNER_RESPONSE', status: 'DONE', thinking: 'Checking Open Design link', tool_calls: [{ name: 'run_command', args: { cmd: 'npm test' } }], content: 'Dispatched GP-T01a' }),
+    JSON.stringify({ step_index: 2, type: 'GENERIC', status: 'DONE', content: 'PASS test/design-provenance.test.ts' }),
+  ].join('\n'));
+  const fromJsonl = cli('supervisor', '--project', project);
+  assert.match(fromJsonl, /Build Goal Partner from JSONL/);
+  assert.match(fromJsonl, /Thinking:\nChecking Open Design link/);
+  assert.match(fromJsonl, /Tool call: run_command\(\{"cmd":"npm test"\}\)/);
+  assert.match(fromJsonl, /PASS test\/design-provenance\.test\.ts/);
 });

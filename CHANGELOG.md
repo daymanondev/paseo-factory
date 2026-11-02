@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.86] - 2026-11-02
+
 ## [0.0.85] - 2026-11-02
 
 - Validate plugin-owned Open Design project links before RPC/prompt use, fall back to recorded links, and restore missing design bundles after Project reset while preserving unchanged provenance bundles. Reserve the link filename in role contracts and domain documentation.

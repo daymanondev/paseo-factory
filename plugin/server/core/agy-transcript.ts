@@ -1,7 +1,7 @@
 /** Read-only Antigravity CLI history recovery, independent of a live daemon. */
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
 import { execFileSync } from 'node:child_process';
 import type { DatabaseSync } from 'node:sqlite';
@@ -28,6 +28,13 @@ function conversationFrom(record: Record<string, any>): string | undefined {
   }
   return undefined;
 }
+function jsonlPath(conversations: string, id: string): string | undefined {
+  for (const file of ['transcript_full.jsonl', 'transcript.jsonl']) {
+    const candidate = join(dirname(conversations), 'brain', id, '.system_generated/logs', file);
+    if (existsSync(candidate)) return candidate;
+  }
+  return undefined;
+}
 function resolveConversation(input: TranscriptInput, conversations: string): string {
   let target = input.target;
   if (target === 'supervisor' || target === 'lead') {
@@ -48,7 +55,7 @@ function resolveConversation(input: TranscriptInput, conversations: string): str
     if (!id) throw new Error(`Agent ${target} has no Antigravity conversation id`);
     return id;
   }
-  if (existsSync(join(conversations, target + '.db'))) return target;
+  if (jsonlPath(conversations, target) || existsSync(join(conversations, target + '.db'))) return target;
   throw new Error(`No agent or conversation found for ${target}`);
 }
 
@@ -109,12 +116,29 @@ export function decodeAntigravityPayload(payload: Uint8Array | string): string {
   // TEXT payloads contain the protobuf wire string itself, not base64 or JSON.
   return (wireStrings(typeof payload === 'string' ? Buffer.from(payload, 'utf8') : payload) ?? []).join('\n\n');
 }
+function readJsonlTurns(path: string): Array<{ role: string; text: string; idx: number; status: string | number }> {
+  const roles: Record<string, string> = { USER_INPUT: 'User', PLANNER_RESPONSE: 'Assistant', GENERIC: 'Tool', ERROR_MESSAGE: 'Error' };
+  return readFileSync(path, 'utf8').split('\n').filter(Boolean).flatMap(line => {
+    try {
+      const step = JSON.parse(line);
+      const role = roles[step.type]; if (!role) return [];
+      const parts = [
+        typeof step.thinking === 'string' && step.thinking.trim() ? `Thinking:\n${step.thinking.trim()}` : '',
+        Array.isArray(step.tool_calls) ? step.tool_calls.map((c: any) => `Tool call: ${c.name}(${JSON.stringify(c.args ?? {})})`).join('\n') : '',
+        typeof step.content === 'string' ? step.content.trim() : '',
+        typeof step.error === 'string' ? step.error.trim() : '',
+      ].filter(Boolean);
+      return parts.length ? [{ role, text: parts.join('\n\n'), idx: step.step_index ?? 0, status: step.status ?? 'DONE' }] : [];
+    } catch { return []; }
+  });
+}
 const escapeHtml = (value: string): string => value.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 export function antigravityTranscript(input: TranscriptInput): string {
   const conversations = input.conversationsDir ?? join(homedir(), '.gemini/antigravity-cli/conversations');
   const id = resolveConversation(input, conversations);
+  const jsonl = jsonlPath(conversations, id);
   const roles: Record<number, string> = { 14: 'User', 15: 'Assistant', 101: 'Tool', 132: 'Tool' };
-  const turns = readSteps(join(conversations, id + '.db')).flatMap(step => {
+  const turns = jsonl ? readJsonlTurns(jsonl) : readSteps(join(conversations, id + '.db')).flatMap(step => {
     const role = roles[step.step_type]; if (!role) return [];
     const text = decodeAntigravityPayload(step.step_payload);
     return text ? [{ role, text, idx: step.idx, status: step.status }] : [];
