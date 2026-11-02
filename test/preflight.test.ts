@@ -38,7 +38,7 @@ test("Lead kickoff describes Peer helpers and warns before dispatch with missing
 test('linked Owner designs are authoritative in seat kickoff and Scrum UX prompts', async t => {
   const { mkdirSync } = await import('node:fs');
   const root = makeTempDir(); disposeDir(t, root); mkdirSync(join(root, 'design'));
-  writeFileSync(join(root, 'design/open-design-link.json'), JSON.stringify({ projectId: 'owner', projectName: 'Checkout flow', screenCount: 4, files: [], digest: 'abc' }));
+  writeFileSync(join(root, 'design/open-design-link.json'), JSON.stringify({ projectId: 'owner', projectName: 'Checkout flow', sourceUpdatedAt: 1, syncedAt: '2026-11-02', screenCount: 4, files: [], digest: 'abc' }));
   for (const role of ['lead', 'supervisor'] as const) {
     const packet = buildSeatKickoffPacket({ role, projectSlug: 'repo', projectRoot: root, ledgerEvents: [] });
     assert.match(packet, /Open Design Linked Specification/); assert.match(packet, /Checkout flow/);

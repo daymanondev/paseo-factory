@@ -6431,7 +6431,7 @@ test('SLP linked design RPC Studio renders repository artifacts without a Scrum 
   writeFileSync(join(project.root, 'design/index.html'), '<html><head></head><body>Linked</body></html>');
   writeFileSync(join(project.root, 'design/screens.html'), '<html><head></head><body>Flow</body></html>');
   writeFileSync(join(project.root, 'design/design-manifest.json'), JSON.stringify({ screens: [{ id: 'home', title: 'Home', surface: 'mobile' }], tokens: { '--accent': '#123456' } }));
-  writeFileSync(join(project.root, 'design/open-design-link.json'), JSON.stringify({ projectId: 'owner', projectName: 'Owner flow', screenCount: 1, digest: 'owner-digest', files: [] }));
+  writeFileSync(join(project.root, 'design/open-design-link.json'), JSON.stringify({ projectId: 'owner', projectName: 'Owner flow', sourceUpdatedAt: 1, syncedAt: '2026-11-02', screenCount: 1, digest: 'owner-digest', files: [] }));
   const result = await f.handlers.openDesignPreview({ projectRoot: project.root }); assert.ok(result.ok, JSON.stringify(result));
   assert.ok(result.bundle);
   assert.equal(result.bundle.model.screens[0].id, 'home'); assert.equal(result.bundle.activeGateId, null);

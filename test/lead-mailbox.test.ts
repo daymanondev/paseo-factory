@@ -1681,3 +1681,44 @@ test('remote linked designs do not require the client source for reports or Peer
   assert.ok((await f.surface.openDesignUnlink({ projectRoot: f.projectRoot })).ok);
   await refusedAfterAdmission;
 });
+
+test('active work tracks both standing-seat deliveries', async t => {
+  const { leadMail, projectRoot, stateDir, slug } = makeSpooledRuntime(t);
+  assert.equal(await leadMail.hasActiveWork(), false);
+  for (const seat of ['supervisor', 'lead'] as const) {
+    const reply = seat === 'supervisor'
+      ? await leadMail.dispatchSupervisor({ id: `sleep-${seat}`, kind: 'supervisor_dispatch', workspace: projectRoot, message: 'Inspect the project' })
+      : await leadMail.dispatchLead({ id: `sleep-${seat}`, kind: 'lead_dispatch', workspace: projectRoot, message: 'Inspect the project' });
+    assert.ok(reply.ok);
+    assert.equal(await leadMail.hasActiveWork(), true);
+    const agentId = readProjectRegistration(stateDir, slug)?.[seat];
+    assert.ok(agentId);
+    await leadMail.onLeadTurnEnded({ agentId, outcome: { kind: 'completed' }, timeline: [] });
+    assert.equal(await leadMail.hasActiveWork(), false);
+  }
+});
+
+test('active work holds sleep inhibition for Gates and dispatched Task waves', async t => {
+  const { leadMail, projectRoot, factory } = makeSpooledRuntime(t);
+  factory.setContract({ task: 'SLEEP-T01', workspace: projectRoot, gate: 'true', artifact: 'README.md' });
+  factory.ledger.append({ event: 'gate_started', task: 'SLEEP-T01', attempt: 1, cmd: 'true' });
+  assert.equal(await leadMail.hasActiveWork(), true);
+  factory.ledger.append({ event: 'gate_finished', task: 'SLEEP-T01', attempt: 1, verdict: 'green', exit: 0, note: 'done' });
+  assert.equal(await leadMail.hasActiveWork(), false);
+  factory.ledger.append({ event: 'spawn_dispatched', task: 'SLEEP-T01', provider: 'pi/test', arity: 1 });
+  assert.equal(await leadMail.hasActiveWork(), true);
+  factory.ledger.append({ event: 'needs_human', task: 'SLEEP-T01', reason: 'silent-after-repoke', evidence: { denial: 1, repoke: 2 } });
+  assert.equal(await leadMail.hasActiveWork(), false);
+});
+
+test('a stopped worktree Peer no longer holds the active-work sleep assertion', async t => {
+  const { leadMail, projectRoot, factory, fake } = makeSpooledRuntime(t);
+  const worktree = join(projectRoot, 'task-worktree');
+  factory.setContract({ task: 'SLEEP-T02', workspace: projectRoot, gate: 'true', artifact: 'README.md' });
+  factory.ledger.append({ event: 'spawn_dispatched', task: 'SLEEP-T02', provider: 'pi/test', arity: 1, worktree });
+  const peer: FakeAgent = { id: 'sleep-peer', status: 'running', cwd: worktree, labels: { task: 'SLEEP-T02' } };
+  fake.agents.push(peer);
+  assert.equal(await leadMail.hasActiveWork(), true);
+  peer.status = 'idle';
+  assert.equal(await leadMail.hasActiveWork(), false);
+});

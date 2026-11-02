@@ -14,6 +14,8 @@ import { listRuns, readRun, terminalRun } from "./server/core/scrum/run-journal.
  * `accept`), which is never on an agent PATH.
  */
 import { homedir } from "node:os";
+import { watch, type FSWatcher } from "node:fs";
+import { SleepInhibitor } from "./server/core/sleep-inhibitor.ts";
 import { join } from "node:path";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { pendingUpgradeFor } from "./server/core/upgrade-state.ts";
@@ -33,7 +35,7 @@ import { createSurfaceHandlers, registerSurfaceRpc } from "./server/surface-rpc.
 import { createLeadMailRuntime } from "./server/lead-mailbox.ts";
 import { syncPeerHelpersBeforeCreate, injectRoleOnCreate, injectSessionEnv, sanitizeAgentCreateHookResult } from "./server/roles.ts";
 
-const SHELL_VERSION = "0.0.84";
+const SHELL_VERSION = "0.0.85";
 
 const log = (message: string) => console.log(`[${PLUGIN_ID}] ${message}`);
 
@@ -258,6 +260,35 @@ export default function contribute(server: PluginServerContext) {
     retireLead: (input) => surface.leadRotate(input),
     onLog: log,
   });
+  const sleepInhibitor = new SleepInhibitor({ onError: error => log(`sleep inhibition unavailable: ${String(error)}`) });
+  let sleepCheckInFlight = false;
+  let sleepCheckPending = false;
+  let sleepStopped = false;
+  const refreshSleepInhibition = async (): Promise<void> => {
+    if (process.platform !== "darwin" || sleepStopped) return;
+    if (sleepCheckInFlight) { sleepCheckPending = true; return; }
+    sleepCheckInFlight = true;
+    try { sleepInhibitor.poke(await leadMail.hasActiveWork()); }
+    catch (error) { log(`sleep activity check deferred: ${String(error)}`); }
+    finally {
+      sleepCheckInFlight = false;
+      if (sleepCheckPending && !sleepStopped) { sleepCheckPending = false; void refreshSleepInhibition(); }
+    }
+  };
+  // Ledger, mailbox and spool writes cover Gate/Peer/seat transitions from
+  // both RPC and CLI doors; the sweep also observes daemon-only state changes.
+  let activityWatcher: FSWatcher | undefined;
+  if (process.platform === "darwin") {
+    try {
+      activityWatcher = watch(stateDir, { recursive: true, persistent: false }, (_event, file) => {
+        if (file && /(?:ledger\.jsonl|mailbox\.jsonl|project\.json|spool[/\\])/.test(String(file))) void refreshSleepInhibition();
+      });
+      activityWatcher.on("error", error => log(`sleep activity watch unavailable: ${String(error)}`));
+    } catch (error) { log(`sleep activity watch unavailable: ${String(error)}`); }
+  }
+  const sleepSweepTimer = setInterval(() => { void refreshSleepInhibition(); }, 5_000);
+  sleepSweepTimer.unref?.();
+  void refreshSleepInhibition();
   let mailRecovered = false;
   const resumeOrdinaryRuntime = (): void => {
     if (pendingUpgradeFor(stateDir) !== undefined) return;
@@ -465,6 +496,10 @@ export default function contribute(server: PluginServerContext) {
   }));
 
   return () => {
+    sleepStopped = true;
+    activityWatcher?.close();
+    clearInterval(sleepSweepTimer);
+    sleepInhibitor.stop();
     clearTimeout(warmupTimer);
     clearTimeout(postReadySyncTimer);
     clearInterval(recoveryTimer);

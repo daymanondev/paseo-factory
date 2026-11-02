@@ -23,6 +23,7 @@ async function compile(source, globalName) {
 }
 
 const targets = [
+  ["src/agy-transcript.ts", "plugin/bin/agy-transcript.mjs"],
   ["src/scrum/open-design-cli.ts", "plugin/bin/open-design.mjs"],
   ["src/scrum/cli.ts", "plugin/bin/scrum-doc.mjs"],
   ["src/scrum/config.ts", "plugin/bin/scrum-config.mjs"],

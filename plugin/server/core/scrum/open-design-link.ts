@@ -12,11 +12,9 @@ import { readExecution, selectionPath } from './selection.ts';
 import { stageOpenDesignFrames } from './open-design.ts';
 import { listRuns, terminalRun } from './run-journal.ts';
 import { safeId } from './types.ts';
+import { readOpenDesignLink, type OpenDesignProjectLink } from './open-design-link-state.ts';
+export { readOpenDesignLink, type OpenDesignProjectLink } from './open-design-link-state.ts';
 
-export interface OpenDesignProjectLink {
-  projectId: string; projectName: string; designSystemId?: string | null; directionId?: string | null;
-  sourceUpdatedAt: number; syncedAt: string; digest: string; screenCount: number; files: string[];
-}
 export interface OpenDesignFile { path: string; contentBase64: string }
 export interface OpenDesignBundle { project: Omit<OpenDesignProjectLink, 'syncedAt' | 'files'>; files: OpenDesignFile[] }
 export interface OpenDesignCatalogProject extends Omit<OpenDesignProjectLink, 'syncedAt'> { hasIndexHtml: boolean; hasScreensHtml: boolean }
@@ -82,10 +80,6 @@ export function exportOpenDesignProject(projectId: string, userHome?: string): O
   const files = inventory(join(openDesignDataDir(userHome), 'projects', projectId));
   return { project: { ...project, digest: digest(files) }, files };
 }
-export function readOpenDesignLink(root: string): OpenDesignProjectLink | undefined {
-  try { return JSON.parse(readFileSync(join(root, 'design/open-design-link.json'), 'utf8')); }
-  catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw e; }
-}
 function safeDestination(root: string, path: string, boundary = dirname(root)): string {
   if (!validPath(path)) fail(`Unsafe path: ${path}`);
   const base = resolve(root);
@@ -117,7 +111,7 @@ export function syncOpenDesignLink(input: { state: string; slug: string; root: s
   for (const path of stale) rmSync(join(dir, path), { force: true });
   for (const f of bundle.files) { const target = safeDestination(dir, f.path); mkdirSync(dirname(target), { recursive: true }); writeFileSync(target, Buffer.from(f.contentBase64, 'base64')); }
   const framePaths = ['iphone.html', 'android.html', 'neutral.html', 'layout.css'].map(p => '.od-frames/' + p);
-  const generatedFrames = framePaths.filter(p => !existsSync(join(dir, p)) || previous?.files.includes(p));
+  const generatedFrames = framePaths.filter(p => !existsSync(join(dir, p)) || (Array.isArray(previous?.files) && previous.files.includes(p)));
   stageOpenDesignFrames(dir);
   if (!names.has('design-manifest.json')) {
     const css = bundle.files.find(f => f.path === 'styles.css'); const text = css ? Buffer.from(css.contentBase64, 'base64').toString() : '';
@@ -137,9 +131,10 @@ export function syncOpenDesignLink(input: { state: string; slug: string; root: s
   return link;
 }
 export function autoSyncOpenDesignLink(input: { state: string; slug: string; root: string; userHome?: string }): void {
-  const link = readOpenDesignLink(input.root); if (!link) return;
+  const link = readOpenDesignLink(input.root) ?? readExecution(input.state, input.slug).openDesignLink; if (!link) return;
   const source = discoverOpenDesignProjects(input.userHome).find(p => p.projectId === link.projectId);
-  if (source && (source.digest !== link.digest || source.sourceUpdatedAt > link.sourceUpdatedAt)) syncOpenDesignLink({ ...input, projectId: link.projectId });
+  const hasBundle = existsSync(join(input.root, 'design/index.html')) || existsSync(join(input.root, 'design/screens.html'));
+  if (source && (!hasBundle || source.digest !== link.digest || source.sourceUpdatedAt > link.sourceUpdatedAt)) syncOpenDesignLink({ ...input, projectId: link.projectId });
 }
 /** Refresh unchanged seeds; a specialist's refinements require explicit reconciliation. */
 export function seedLinkedOpenDesign(root: string, workspace: string, initiativeId: string): void {

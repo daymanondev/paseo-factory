@@ -18,8 +18,11 @@ agent it remains the only path.
 
 ## Standing rules
 
-- Every `paseo` / `factory` command targets the trial home `~/.paseo-factory`.
-  The default `~/.paseo` is PROD — never touch it from a run.
+- Live runs use Paseo Desktop (`~/.paseo` locally, or the Owner-visible remote
+  Mac Mini at `ssh andrews-mac-mini`, home `~/.paseo-factory`). Do not run tasks
+  on the local headless trial daemon unless the Owner explicitly asks. The trial
+  commands retained below are historical examples; select the authorized Desktop
+  home for a current run.
 - Non-interactive shells start without `~/.local/bin` (paseo) and without nvm
   (node) on PATH. Export first (adjust when the nvm default moves — it is
   v24.21.0 as of 2026-10-08):
@@ -31,6 +34,22 @@ agent it remains the only path.
 - Accept and landing are Owner acts (ADR 0002; delegation per ADR 0006, which
   supersedes 0005) — accept is delegable to the Supervisor seat, landing never
   is. Step 9 records the delegation convention.
+
+## macOS sleep protection and DarkWake recovery
+
+During active Factory work on macOS, the plugin holds one `caffeinate -i -w <daemon-pid>` process. Running Gates, dispatched/running Task Peers, and delivered Supervisor/Lead turns keep it active. After ten continuous idle minutes the plugin releases it; resumed work cancels that countdown. Plugin shutdown releases it immediately, and `-w` ties the assertion to the daemon's lifetime. This prevents idle system sleep, including on battery, but closing a MacBook lid on battery still forces clamshell sleep. Keep the lid open and power/network available for overnight runs.
+
+If a DarkWake or sleep/wake cycle leaves provider sessions stuck on startup/network/auth timeouts, quit Paseo Desktop completely with **⌘Q**, then reopen it after networking is ready. Coordinate this restart with the Owner because it interrupts all sessions. A client refresh alone does not restart a wedged daemon. Never hot-patch plugin files or reload the daemon during an active run.
+
+To inspect Antigravity history even when the Paseo timeline is blank, use the read-only exporter (no live daemon required):
+
+```sh
+factory transcript supervisor --project /path/to/project
+factory transcript lead --project /path/to/project --format html --out /path/to/transcript.html
+factory --home /path/to/paseo-home transcript <agent-id-or-prefix>
+```
+
+The exporter reads persisted agent records and `~/.gemini/antigravity-cli/conversations/<conversationId>.db` (`steps` table). It also accepts a direct conversation id and `--conversations-dir <dir>`. Markdown is the default; HTML is self-contained and escapes transcript content. Exporting never resumes an agent or writes to its conversation database.
 
 ## 1. Preflight
 

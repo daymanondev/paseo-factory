@@ -930,15 +930,26 @@ Deliver mockups/index.html (interactive), screens.html (story-grouped Flow Board
 Prototype routing reads ?screen=<id>&state=<state>, reflects root dataset.screen/state and handles scrum:set-state messages. Preserve app navigation for contextual empty/loading/error/offline/permission-denied states. Keep screen/state controls in the outer Studio. Use product language and SVG icons; keep internal spec identifiers in documentation.
 Record actual offline Chromium evidence in browser.json: network: disabled, consoleErrors: [], pageErrors: [], viewports with screen, width/height, scrollWidth/clientWidth and SHA-256 PNG screenshot path/hash. Capture screens-board (screens-board.png) and every Core Screen at its declared surface (Mobile 390x844, Desktop 1280x800, responsive both). Record passing keyboard populated checks for each Core Screen and all five system states through edge screens/state handlers, or the legacy six-state matrix. Record detector {tool: open-design, passed: true, nonAdvisoryCount: 0, viewportsChecked, findings}. Derive it from factory open-design lint --dir <mockupsDir> and actual viewport checks; never invent results. Run lint-scrum-doc --kind ux before Claim. Dev consumes the approved manifest, DESIGN.md, styles.css and screens.html; UI Dev and QA supply the same offline evidence before sign-off.`;
 
-// src/linked-design.ts
+// src/scrum/open-design-link-state.ts
 import { readFileSync as readFileSync3 } from "node:fs";
 import { join as join3 } from "node:path";
-function linkedDesignSpecification(root, recorded) {
-  let link = recorded;
-  if (root) try {
-    link = JSON.parse(readFileSync3(join3(root, "design/open-design-link.json"), "utf8"));
-  } catch {
+function readOpenDesignLink(root) {
+  let value;
+  try {
+    value = JSON.parse(readFileSync3(join3(root, "design/open-design-link.json"), "utf8"));
+  } catch (e) {
+    if (e instanceof SyntaxError || e.code === "ENOENT") return void 0;
+    throw e;
   }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return void 0;
+  const link = value;
+  if (typeof link.projectId !== "string" || !safeId(link.projectId) || typeof link.projectName !== "string" || !["designSystemId", "directionId"].every((key) => link[key] == null || typeof link[key] === "string") || typeof link.sourceUpdatedAt !== "number" || !Number.isFinite(link.sourceUpdatedAt) || typeof link.syncedAt !== "string" || !link.syncedAt.trim() || typeof link.digest !== "string" || !link.digest.trim() || typeof link.screenCount !== "number" || !Number.isFinite(link.screenCount) || !Array.isArray(link.files) || !link.files.every((file) => typeof file === "string")) return void 0;
+  return value;
+}
+
+// src/linked-design.ts
+function linkedDesignSpecification(root, recorded) {
+  const link = (root ? readOpenDesignLink(root) : void 0) ?? recorded;
   if (!link) return "";
   return `Open Design Linked Specification (design/)
 ${link.projectName} \xB7 ${link.screenCount} screens. The Owner's linked design is the authoritative UI/UX specification, read in two halves.
@@ -1015,6 +1026,7 @@ var ROLE_SKILL_INDEX = {
   lead: "codebase-design, domain-modeling, tdd",
   agent: "tdd, diagnosing-bugs, codebase-design"
 };
+var DESIGN_LINK_OWNERSHIP = "design/open-design-link.json is plugin-owned Open Design project link state. Never overwrite it with a Design provenance note; record provenance in design/design-manifest.json or a separate file instead.";
 var FOOTER_MARK = "paseo-factory role skills:";
 function skillFooter(role) {
   return `${FOOTER_MARK} ${ROLE_SKILL_INDEX[role]}`;
@@ -1094,6 +1106,7 @@ function renderRoleContract(role, options = {}) {
       "",
       "Your role-scoped MCP server is paseo_factory; external helper MCP tools belong to the working Agent. This instruction is additive: the repository's own AGENTS.md / CLAUDE.md and skills catalog load natively alongside this instruction \u2014 never overwrite them.",
       "",
+      DESIGN_LINK_OWNERSHIP,
       skillFooter("supervisor")
     ].join("\n");
   }
@@ -1111,6 +1124,7 @@ function renderRoleContract(role, options = {}) {
       "",
       "Your role-scoped MCP server is paseo_factory; external helper MCP tools belong to the working Agent. This instruction is additive: the repository's own AGENTS.md / CLAUDE.md and skills catalog load natively alongside this instruction \u2014 never overwrite them.",
       "",
+      DESIGN_LINK_OWNERSHIP,
       skillFooter("lead")
     ].join("\n");
   }
@@ -1127,6 +1141,7 @@ function renderRoleContract(role, options = {}) {
     `Your \`paseo-factory\` / \`paseo_factory\` MCP tools: \`paseo-factory_agent_claim\` / \`agent_claim\` (submits your Claim, defaulting commit to HEAD) and \`paseo-factory_agent_escalate_blocker\` / \`agent_escalate_blocker\` (escalates an unresolvable blocker to Lead). Your factory CLI vocabulary (complete): \`factory-claim --task ${taskLabel} --sha <sha>\` \u2014 claim your Task when the Gate's done-criteria hold, then end your turn.`,
     "This instruction is additive: the repository's own AGENTS.md / CLAUDE.md, MCP servers, and skills catalog load natively alongside it.",
     "",
+    DESIGN_LINK_OWNERSHIP,
     skillFooter("agent")
   ].join("\n");
 }

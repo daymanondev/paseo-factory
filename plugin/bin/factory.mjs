@@ -36,7 +36,7 @@
  * the factory, no reply from the plugin, or an unreadable ledger).
  */
 import { parseArgs } from "node:util";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve as resolvePath } from "node:path";
 import { readLedgerEvents } from "./ledger-read.mjs";
 import { taskStatusLines } from "./task-status.mjs";
@@ -62,6 +62,8 @@ import { resolveProject } from "./project.mjs";
 const usage = `usage: factory [--home <paseoHome>] <command> [options]
 
 commands:
+  transcript <agent-id | supervisor | lead> [--project <dir>] [--format md|html]
+             [--out <path>] [--conversations-dir <dir>] (read-only, no daemon needed)
   execution  get | set-mode <slp|scrum> [--project <dir>] (Owner only)
   scrum      <operation> [--project <dir>] [--run <id>] [--revision <n>] [--payload <json> | --file <json-file>] [--request-id <id>]
   open-design stage|lint|inspect|sync|od [--dir <mockupsDir>]
@@ -431,6 +433,20 @@ function parseCommandOptions(spec) {
   } catch (err) {
     fail(err instanceof Error ? err.message : String(err));
   }
+}
+
+if (command === "transcript") {
+  const parsed = parseCommandOptions({ project: { type: "string" }, format: { type: "string" }, out: { type: "string" }, "conversations-dir": { type: "string" } });
+  if (parsed.positionals.length !== 1) die("transcript requires one agent id, conversation id, supervisor, or lead");
+  const format = parsed.values.format ?? "md";
+  if (format !== "md" && format !== "html") die("transcript --format must be md or html");
+  try {
+    const { antigravityTranscript } = await import("./agy-transcript.mjs");
+    const output = antigravityTranscript({ home, target: parsed.positionals[0], project: parsed.values.project, conversationsDir: parsed.values["conversations-dir"], format });
+    if (parsed.values.out) writeFileSync(resolvePath(parsed.values.out), output, { mode: 0o600 });
+    else await new Promise((resolve, reject) => process.stdout.write(output, error => error ? reject(error) : resolve()));
+    process.exit(0);
+  } catch (error) { die(`transcript: ${error instanceof Error ? error.message : String(error)}`); }
 }
 
 function waitSeconds(parsed, defaultSecs = DEFAULT_WAIT_SECS) {

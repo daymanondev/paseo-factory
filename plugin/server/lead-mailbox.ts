@@ -267,6 +267,8 @@ export interface LeadMailRuntimeDeps {
 /** One runtime's public face — see the module doc for each member's law. */
 export interface LeadMailRuntime {
   hasPendingHandoff(slug: string): boolean;
+  /** Gates, spawned/running Task Peers, and delivered standing-seat turns. */
+  hasActiveWork(): Promise<boolean>;
   dispatchLead(request: SpoolLeadDispatchRequest, options?: { existingDesignSnapshot: true }): Promise<SpoolReply>;
   dispatchSupervisor(request: SpoolSupervisorDispatchRequest): Promise<SpoolReply>;
   reportSupervisor(request: SpoolSupervisorReportRequest): Promise<SpoolReply>;
@@ -1031,13 +1033,16 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     return live;
   };
 
+  const projectHasPeerWork = (slug: string, events: readonly LedgerEvent[], live: readonly SurfaceAgentSnapshot[]): boolean =>
+    driverWaveInFlight(events, live) || foldTasks(events).some(task => !task.accepted &&
+      boundTaskPeers({ stateDir: deps.stateDir, slug, task: task.task, events, live }).some(peerIsRunning));
+
   const projectPeerInFlight = async (slug: string): Promise<boolean> => {
     const reg = readProjectRegistration(deps.stateDir, slug);
     if (reg?.root === undefined) return false;
     const events = projectEventsOf(reg.root);
     const live = [...(await liveAgentsById()).values()];
-    return driverWaveInFlight(events, live) || foldTasks(events).some(task => !task.accepted &&
-      boundTaskPeers({ stateDir: deps.stateDir, slug, task: task.task, events, live }).some(peerIsRunning));
+    return projectHasPeerWork(slug, events, live);
   };
 
   /** Resolves `--workspace` or `--project` to `{ root, slug }` or a structured `unknown-project` refusal. */
@@ -1393,7 +1398,25 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     }
   };
 
+  const hasActiveWork = async (): Promise<boolean> => {
+    // Gate work remains active even after its Peer has finished its turn.
+    const gates = new Set<string>();
+    for (const event of deps.factory.ledger.events) {
+      if (event.event === "gate_started") gates.add(`${event.task}:${event.attempt}`);
+      else if (event.event === "gate_finished") gates.delete(`${event.task}:${event.attempt}`);
+    }
+    if (gates.size > 0 || handingOverBySlug.size > 0) return true;
+    const projects = listProjectRegistrations(deps.stateDir);
+    if (projects.some(project => { const mailbox = readLeadMailbox(mailboxPath(project.slug)); return mailbox.inFlight !== null || mailbox.supervisorInFlight !== null; })) return true;
+    const live = [...(await liveAgentsById()).values()];
+    return projects.some(project => {
+      const events = projectEventsOf(project.root);
+      return projectHasPeerWork(project.slug, events, live);
+    });
+  };
+
   const runtime: LeadMailRuntime = {
+    hasActiveWork,
     hasPendingHandoff: slug => { const id = readProjectRegistration(deps.stateDir, slug)?.lead; return id !== undefined && pendingHandoffByAgentId.has(id); },
     dispatchLead,
     dispatchSupervisor,

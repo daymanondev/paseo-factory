@@ -37,6 +37,8 @@ export const ROLE_SKILL_INDEX: Record<RoleName, string> = {
 };
 
 /** The footer's marker — the idempotency sentinel for every injection. */
+const DESIGN_LINK_OWNERSHIP = "design/open-design-link.json is plugin-owned Open Design project link state. Never overwrite it with a Design provenance note; record provenance in design/design-manifest.json or a separate file instead.";
+
 export const FOOTER_MARK = "paseo-factory role skills:";
 
 export function skillFooter(role: RoleName): string {
@@ -156,6 +158,7 @@ export function renderRoleContract(role: RoleName, options: RoleContractOptions 
       "",
       "Your role-scoped MCP server is paseo_factory; external helper MCP tools belong to the working Agent. This instruction is additive: the repository's own AGENTS.md / CLAUDE.md and skills catalog load natively alongside this instruction — never overwrite them.",
       "",
+      DESIGN_LINK_OWNERSHIP,
       skillFooter("supervisor"),
     ].join("\n");
   }
@@ -174,6 +177,7 @@ export function renderRoleContract(role: RoleName, options: RoleContractOptions 
       "",
       "Your role-scoped MCP server is paseo_factory; external helper MCP tools belong to the working Agent. This instruction is additive: the repository's own AGENTS.md / CLAUDE.md and skills catalog load natively alongside this instruction — never overwrite them.",
       "",
+      DESIGN_LINK_OWNERSHIP,
       skillFooter("lead"),
     ].join("\n");
   }
@@ -194,6 +198,7 @@ export function renderRoleContract(role: RoleName, options: RoleContractOptions 
     `Your \`paseo-factory\` / \`paseo_factory\` MCP tools: \`paseo-factory_agent_claim\` / \`agent_claim\` (submits your Claim, defaulting commit to HEAD) and \`paseo-factory_agent_escalate_blocker\` / \`agent_escalate_blocker\` (escalates an unresolvable blocker to Lead). Your factory CLI vocabulary (complete): \`factory-claim --task ${taskLabel} --sha <sha>\` — claim your Task when the Gate's done-criteria hold, then end your turn.`,
     "This instruction is additive: the repository's own AGENTS.md / CLAUDE.md, MCP servers, and skills catalog load natively alongside it.",
     "",
+    DESIGN_LINK_OWNERSHIP,
     skillFooter("agent"),
   ].join("\n");
 }

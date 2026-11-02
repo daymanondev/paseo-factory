@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.85] - 2026-11-02
+
+- Validate plugin-owned Open Design project links before RPC/prompt use, fall back to recorded links, and restore missing design bundles after Project reset while preserving unchanged provenance bundles. Reserve the link filename in role contracts and domain documentation.
+- Add read-only `factory transcript` recovery for Antigravity SQLite conversations by agent id/prefix, Supervisor/Lead seat, or conversation id, with Markdown and self-contained HTML exports and a `sqlite3` fallback.
+- Hold one process-bound macOS `caffeinate -i` assertion during active Gates, Task Peer waves and standing-seat deliveries; release after ten continuous idle minutes or plugin shutdown. Document DarkWake recovery and clamshell sleep limits.
+
 ## [0.0.84] - 2026-11-01
 
 - Fix the ask-time process-kill heuristic (2026-11-01 goal-partner live-run death, ledger seq 447): the deny now fires only when a kill word (`pkill`/`killall`/`kill`) stands in command position — the first command word of a segment after env-assignments and wrapper prefixes (`env`, `command`, `nohup`, `timeout`, `nice`, `sudo`, `xargs`, `exec`), compared by basename for absolute paths, or the first word of a shell `-c` payload — so prose mentions in a `factory contract --description` never deny. Both judges (`judgeSeatShellCommand`, `judgeShellCommand`) deny with a dedicated `rule: "process-kill"` naming the Layer-3 exec-time backstop instead of the misdiagnosing seat-write-fence message; the vendored `agy-pre-tool-hook.mjs` mirror follows. The exact seq-447 command ships as a regression fixture (`test/fixtures/goal-partner-lead-contract-command.txt`).
