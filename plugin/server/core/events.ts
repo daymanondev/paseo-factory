@@ -321,6 +321,12 @@ export interface AttemptAccepted extends EventIdentityMetadata {
  * The choke allowed a contracted agent's permit ask (v0.0.4). One line per
  * judged ask — allowed asks are the permit parade made countable; paseo
  * persists permission decisions nowhere, so this line is the only record.
+ * v0.0.89 (ADR 0045 §3) makes the line LEAN: `{ task, agent, name, kind }`
+ * without the command body, which stays strictly `permit_denied` /
+ * `git_blocked` evidence — and `Supervisor`/`Lead` allowed asks record no
+ * line at all (seats are deny-only in the Ledger). `command` remains an
+ * optional field so historical Ledger lines carrying it stay valid on read;
+ * no migration of existing lines.
  */
 export interface PermitAllowed extends EventIdentityMetadata {
   seq: number;
@@ -334,7 +340,7 @@ export interface PermitAllowed extends EventIdentityMetadata {
   name: string;
   /** The ask kind: "tool" | "plan" | "question" | "mode" | "other". */
   kind: string;
-  /** What the ask aimed at: the exact shell line (`detail.command`), or the write/edit ask's target file path. */
+  /** What the ask aimed at: the exact shell line (`detail.command`), or the write/edit ask's target file path. Historical lines carry it; v0.0.89 lean recording omits it on Peer `permit_allowed` and always on seat allows. */
   command?: string;
 }
 

@@ -6533,3 +6533,200 @@ test('Skill Hub RPC imports host skills and persists explicit Project pack overr
   assert.ok(after.view.skillHub?.installedSkills.find(s => s.name === 'asc-iap')?.roles.includes('qa'));
   assert.equal(after.view.skillHub?.roleMatrix.find(r => r.role === 'qa')?.taskGrants[0]?.task, 'qa-iap');
 });
+
+// ---- Seam 1 (v0.0.89, ADR 0045 §1): the Per-Project Factory registry behind the surface RPCs ----
+
+import { createFactoryRegistry } from "../plugin/server/projects.ts";
+import type { FactoryRegistry } from "../plugin/server/projects.ts";
+import { readdirSync, statSync } from "node:fs";
+
+/**
+ * Two registered Projects behind one surface (spec §Testing Decisions
+ * Seam 1): the registry-wired production shape — `createSurfaceHandlers`
+ * receives the Per-Project Factory registry alongside the root fallback
+ * Factory, and both Projects contract the SAME Task id (`T-01`).
+ */
+function makeTwinSurface(t: TestContext): {
+  dir: string;
+  home: string;
+  stateDir: string;
+  rootA: string;
+  rootB: string;
+  slugA: string;
+  slugB: string;
+  registry: FactoryRegistry;
+  handlers: ReturnType<typeof createSurfaceHandlers>;
+  fake: ReturnType<typeof fakeDaemon>;
+} {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const rootA = join(dir, "project-a");
+  const rootB = join(dir, "project-b");
+  for (const root of [rootA, rootB]) {
+    mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, "README.md"), "x\n");
+    gitCommitAll(root);
+  }
+  const home = join(dir, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const resolvedA = resolveProject(rootA);
+  const resolvedB = resolveProject(rootB);
+  assert.ok(resolvedA.ok && resolvedB.ok);
+  writeProjectRegistration(stateDir, resolvedA.slug, { root: resolvedA.root });
+  writeProjectRegistration(stateDir, resolvedB.slug, { root: resolvedB.root });
+  const registry = createFactoryRegistry({ stateDir });
+  t.after(() => registry.stop());
+  const fake = fakeDaemon([]);
+  const handlers = createSurfaceHandlers({
+    factory: registry.root,
+    registry,
+    stateDir,
+    home,
+    daemon: fake.daemon,
+    stopAgent: async () => ({ ok: true }),
+    cleanupDaemonWorkspaces: async () => ({ ok: true, removedWorkspaceIds: [], removedProjectIds: [] }),
+  });
+  return { dir, home, stateDir, rootA, rootB, slugA: resolvedA.slug, slugB: resolvedB.slug, registry, handlers, fake };
+}
+
+/** Both Projects' green T-01 loops, driven through the routed spool entrance. */
+async function contractGreenT01(setup: ReturnType<typeof makeTwinSurface>, root: string, slug: string): Promise<void> {
+  const reply = await handleSpoolRequest(setup.registry.root, { id: `c-${slug}`, kind: "contract", task: "T-01", workspace: root, gate: "true", artifact: "README.md", submitter: "owner" }, {}, setup.registry);
+  assert.ok(reply.ok, `contract in ${slug} must land: ${reply.ok ? "" : reply.message}`);
+  // The Peer's Correlation binding (issued at spawn time in production) routes
+  // the claim — the shared Task id alone would be ambiguous across Projects.
+  new CorrelationRegistry(setup.stateDir).issue({ role: "agent", projectSlug: slug, projectRoot: root, task: "T-01", agentId: `peer-${slug}` });
+  writeFileSync(join(root, "work.txt"), `${slug}\n`);
+  const sha = gitCommitAll(root, `work-${slug}`);
+  const claim = await handleSpoolRequest(setup.registry.root, { id: `cl-${slug}`, kind: "claim", task: "T-01", sha, agent: `peer-${slug}` }, {}, setup.registry);
+  assert.ok(claim.ok && claim.verdict === "green", `the claim in ${slug} ends green: ${claim.ok ? "" : claim.message}`);
+}
+
+/** A recursive content fingerprint — the untouched-Project proof's observable. */
+function treeFingerprint(root: string): Map<string, string> {
+  const out = new Map<string, string>();
+  const walk = (path: string, prefix: string): void => {
+    for (const entry of readdirSync(path).sort()) {
+      const child = join(path, entry);
+      const rel = prefix === "" ? entry : `${prefix}/${entry}`;
+      if (statSync(child).isDirectory()) walk(child, rel);
+      else out.set(rel, createHash("sha256").update(readFileSync(child)).digest("hex"));
+    }
+  };
+  walk(root, "");
+  return out;
+}
+
+test("Seam 1: a scoped snapshot reads tasks, timeline, and retro strictly from factoryForProject; All-projects aggregates with projectSlug attribution", async (t) => {
+  const setup = makeTwinSurface(t);
+  const { stateDir, rootA, rootB, slugA, slugB, registry, handlers } = setup;
+  await contractGreenT01(setup, rootA, slugA);
+  await contractGreenT01(setup, rootB, slugB);
+
+  // The scoped snapshot (projectRoot → the selected Project): every task row
+  // and ledger line comes from THAT Project's Factory — attributed with its slug.
+  const scoped = await handlers.snapshot({ projectRoot: rootA });
+  assert.ok(scoped.ok, scoped.ok ? "" : scoped.error);
+  const scopedTasks = scoped.view.tasks as (typeof scoped.view.tasks[number] & { projectSlug?: string })[];
+  assert.equal(scopedTasks.length, 1, "only the selected Project's T-01 folds");
+  assert.equal(scopedTasks[0]!.task, "T-01");
+  assert.equal(scopedTasks[0]!.projectSlug, slugA, "the task row carries its Project's slug");
+  assert.ok(scoped.view.ledger.length > 0);
+  for (const line of scoped.view.ledger as (typeof scoped.view.ledger[number] & { projectSlug?: string })[]) {
+    assert.equal(line.projectSlug, slugA, "every timeline line is attributed to the selected Project");
+  }
+  assert.equal(scoped.view.project?.slug, slugA);
+
+  // The All-projects aggregate: both Projects' T-01 rows fold separately
+  // (one per Project — never merged under the colliding id), each attributed.
+  const aggregate = await handlers.snapshot({});
+  assert.ok(aggregate.ok, aggregate.ok ? "" : aggregate.error);
+  const aggregateTasks = aggregate.view.tasks as (typeof aggregate.view.tasks[number] & { projectSlug?: string })[];
+  assert.equal(aggregateTasks.length, 2, "both Projects' T-01 rows render");
+  assert.deepEqual(
+    aggregateTasks.map((task) => [task.task, task.projectSlug]).sort((a, b) => String(a[1]).localeCompare(String(b[1]))),
+    [["T-01", slugA], ["T-01", slugB]],
+    "each task row is attributed with its own projectSlug",
+  );
+  assert.equal(aggregate.view.kpis.running + aggregate.view.kpis.readyToAccept + aggregate.view.kpis.accepted, 2, "the KPI tiles count across Projects");
+  const lineSlugs = new Set((aggregate.view.ledger as (typeof aggregate.view.ledger[number] & { projectSlug?: string })[]).map((line) => line.projectSlug));
+  assert.deepEqual([...lineSlugs].sort(), [slugA, slugB], "the aggregate timeline interleaves both Projects, each line attributed");
+
+  // The strict source law: nothing was read from or written to the root ledger.
+  assert.ok(!existsSync(join(stateDir, "ledger.jsonl")), "the root fallback Factory never wrote a ledger");
+  assert.equal(registry.root.ledger.events.length, 0);
+});
+
+test("Seam 1: the surface retro refuses with retro-project-required unscoped on multiple Projects — and resolves the named Project through the registry", async (t) => {
+  const setup = makeTwinSurface(t);
+  const { rootA, rootB, slugA, slugB, handlers } = setup;
+  await contractGreenT01(setup, rootA, slugA);
+  await contractGreenT01(setup, rootB, slugB);
+  // A lane with no headless tool-less CLI form makes the routed pass's own
+  // pre-flight refuse deterministically — proving the scope resolved onto the
+  // per-Project Factory without depending on any CLI installed on PATH.
+  assert.ok(saveLanes(setup.stateDir, { retro: "boguslane/model" }, undefined).ok);
+
+  const unscoped = await handlers.retro({});
+  assert.ok(!unscoped.ok);
+  assert.equal(unscoped.code, "retro-project-required", "the All-projects view refuses the retro by name");
+  assert.match(unscoped.error, /exactly one Project/);
+
+  const scoped = await handlers.retro({ projectRoot: rootA });
+  assert.ok(!scoped.ok);
+  assert.equal(scoped.code, "retro-copilot-unusable", "the named Project's own lane pre-flight answered — the routing reached its Factory");
+});
+
+test("Seam 1: project reset on project-a leaves project-b's ledger and artifacts completely untouched", async (t) => {
+  const setup = makeTwinSurface(t);
+  const { stateDir, rootA, rootB, slugA, slugB, handlers } = setup;
+  await contractGreenT01(setup, rootA, slugA);
+  await contractGreenT01(setup, rootB, slugB);
+  const projectBDir = join(stateDir, "projects", slugB);
+  const before = treeFingerprint(projectBDir);
+  assert.ok(before.size > 0, "project-b holds its ledger and artifacts before the reset");
+  assert.ok([...before.keys()].includes("ledger.jsonl"));
+  assert.ok([...before.keys()].some((name) => name.startsWith("report-T-01-")));
+
+  // keepSeats: true keeps the act inside Factory state — no git reset of the
+  // checkout, no seat retirement; exactly the blast-radius seam under test.
+  const reset = await handlers.projectReset({ project: slugA, keepSeats: true });
+  assert.ok(reset.ok, reset.ok ? "" : reset.error);
+
+  assert.deepEqual(
+    treeFingerprint(projectBDir),
+    before,
+    "project-b's whole state directory is byte-for-byte untouched by project-a's reset",
+  );
+  // project-a's own state is gone: its ledger and artifacts purged.
+  const projectADir = join(stateDir, "projects", slugA);
+  assert.ok(!existsSync(join(projectADir, "ledger.jsonl")) || readFileSync(join(projectADir, "ledger.jsonl"), "utf8").trim() === "", "project-a's ledger is purged");
+  assert.ok(!existsSync(join(projectADir, "report-T-01-1.md")), "project-a's report is purged");
+  // project-b keeps serving: a fresh contract lands in its own ledger.
+  const again = await handleSpoolRequest(setup.registry.root, { id: "c-b2", kind: "contract", task: "T-02", workspace: rootB, gate: "true", artifact: "README.md", submitter: "owner" }, {}, setup.registry);
+  assert.ok(again.ok);
+});
+
+test("Seam 1: project delete on a missingRoot Project evicts its Factory and leaves project-b untouched", async (t) => {
+  const setup = makeTwinSurface(t);
+  const { stateDir, rootA, rootB, slugA, slugB, registry, handlers } = setup;
+  await contractGreenT01(setup, rootA, slugA);
+  await contractGreenT01(setup, rootB, slugB);
+  const evicted = registry.factoryForProject(slugA);
+  const projectBDir = join(stateDir, "projects", slugB);
+  const before = treeFingerprint(projectBDir);
+
+  // The missingRoot shape (v0.0.35, ADR 0024): project-a's checkout is gone
+  // from disk, but its registration — and its isolated state directory — remain.
+  rmSync(rootA, { recursive: true, force: true });
+
+  const deleted = await handlers.projectDelete({ project: slugA });
+  assert.ok(deleted.ok, deleted.ok ? "" : deleted.error);
+  assert.ok(!existsSync(join(stateDir, "projects", slugA)), "the deleted Project's state directory is removed");
+  assert.deepEqual(treeFingerprint(projectBDir), before, "project-b's state directory is byte-for-byte untouched by project-a's delete");
+  // The cached Factory instance was evicted with the directory: the next
+  // factoryForProject for that slug opens fresh state, never the stale ledger.
+  assert.ok(registry.factoryForProject(slugA) !== evicted, "the evicted Factory is not reused");
+  // project-b keeps serving through its own untouched Factory.
+  assert.ok(registry.factoryForProject(slugB).contractFor("T-01") !== undefined, "project-b's contract survives the neighbor's delete");
+});

@@ -16,7 +16,11 @@ import type { ProviderCatalogEntry } from "./provider-lanes.ts";
  * inside a live Contract's workspace. Asks from anywhere else are not the
  * factory's business and get no answer from us — the daemon's own operator
  * flow handles them. Paseo persists permission decisions nowhere, so every
- * judged ask becomes one ledger line here first, then the response.
+ * judged ask becomes one ledger line here first, then the response — except
+ * an ALLOWED seat ask (v0.0.89, ADR 0045 §3): seats are deny-only in the
+ * Ledger, allowed without a line; a Peer's allowed ask records lean metadata
+ * (`task`, `agent`, `name`, `kind` — no command body); every `permit_denied`
+ * and `git_blocked` records in full, in the owning Project's Factory.
  *
  * The same judge serves the bypass battery through the spool's synthetic `ask`
  * request (the smoke-harness channel: the choke does not care who attempts the
@@ -31,7 +35,7 @@ type AgentPermissionRequest = PluginLifecycleEvents["agent.permission_requested"
 type AgentPermissionResponse = PluginLifecycleEvents["agent.permission_resolved"]["resolution"];
 type AgentSessionConfig = PluginBeforeRequests["agent.create"]["config"];
 import type { Factory } from "./core/factory.ts";
-import type { ContractSet } from "./core/events.ts";
+import type { ContractSet, PendingEvent } from "./core/events.ts";
 import { FactoryError } from "./core/errors.ts";
 import {
   SEAT_MEMORY_WHITELIST,
@@ -52,7 +56,8 @@ import {
   writableRootsFor,
 } from "./core/choke.ts";
 import type { ChokeDecision, MemoryFence } from "./core/choke.ts";
-import { listProjectRegistrations } from "./projects.ts";
+import { factoryRegistryFor, listProjectRegistrations, resolveTargetProject } from "./projects.ts";
+import type { FactoryRegistry, TargetProjectContext } from "./projects.ts";
 import { readCorrelations } from "./correlations.ts";
 import { loadLanes, parseLane } from "./core/lanes.ts";
 import { resolveOrBootstrapProject } from "./core/project.ts";
@@ -511,6 +516,87 @@ export function resolveSeatAtProjectRoot(
   return undefined;
 }
 
+// ---- the per-Project permit routing (v0.0.89, ADR 0045 §1/§3) -----------------------------------
+
+/**
+ * Resolves the OWNING Project's `Factory` for a permit event (v0.0.89, ADR
+ * 0045): every `permit_denied` / `permit_allowed` / `git_blocked` append lands
+ * in the owning Project's isolated `Ledger`, never silently in the shared
+ * root one. Routing goes through the registry track's context-first
+ * `resolveTargetProject`; when no Project can be attributed (a zero- or
+ * multi-Project machine with no binding context), the choke's own single
+ * `Factory` stands in — the pre-0.0.89 behavior, never a guess.
+ *
+ * `factoryRegistryFor` is the process-wide door every registry consumer
+ * resolves: the shell's wiring (which passes the real root Factory and the
+ * timeline feed) wins when it ran first, and otherwise the registry adopts
+ * the choke's own Factory as its root — never a second Ledger writer over the
+ * root ledger.
+ */
+function permitRegistryFor(fallback: Factory): FactoryRegistry {
+  return factoryRegistryFor(fallback.stateDir, { root: fallback });
+}
+
+function resolvePermitTargetFactory(
+  fallback: Factory,
+  context: TargetProjectContext,
+  log: (message: string) => void,
+): Factory {
+  const registry = permitRegistryFor(fallback);
+  const resolution = resolveTargetProject(registry, context);
+  if (!resolution.ok) return fallback;
+  try {
+    return registry.factoryForProject(resolution.slug);
+  } catch (err) {
+    log(`choke: permit routing fell back to the root factory (${err instanceof Error ? err.message : String(err)})`);
+    return fallback;
+  }
+}
+
+/**
+ * The Factory that JUDGES a cwd's ask (v0.0.89, ADR 0045 §1.2): the owning
+ * Project's Factory when the context-first resolution binds one and that
+ * Factory actually carries the live Contract covering the cwd — otherwise the
+ * choke's own `Factory` stands in. After the split the root Ledger holds no
+ * Contracts, so judging against it alone would silently ignore every
+ * contracted Peer's ask; this is `resolvePermitTargetFactory`'s judging twin
+ * (the append side routes through the same registry).
+ */
+function resolveJudgingFactory(
+  fallback: Factory,
+  context: TargetProjectContext,
+  log: (message: string) => void,
+): Factory {
+  const routed = resolvePermitTargetFactory(fallback, context, log);
+  if (routed === fallback) return fallback;
+  const cwd = context.cwd ?? context.workspace;
+  return cwd !== undefined && cwd !== "" && isContractedAgentCwd(routed, cwd) ? routed : fallback;
+}
+
+/**
+ * A routed target is only trustworthy for a task-bound permit event when it
+ * knows the very Contract the ask was judged under — otherwise the line would
+ * strand from its Contract epoch (`invalid-event-epoch` at best, a split
+ * audit trail at worst), so the choke's own `Factory` stands in.
+ */
+function targetKnowsContract(target: Factory, judged: Factory, contract: ContractSet): boolean {
+  if (target === judged) return true;
+  const known = target.contractFor(contract.task);
+  return known !== undefined && known.workspace === contract.workspace;
+}
+
+/**
+ * Appends one permit event into `target`'s `Ledger` through its own
+ * serialized writer lane: the choke's outer `history` wrap already covers its
+ * own `Factory` (a nested `runSync` is a passthrough), and a routed
+ * per-Project `Factory` gets the same single-writer guarantee.
+ */
+function appendPermitEvent(target: Factory, evt: PendingEvent): void {
+  target.history.runSync(() => {
+    target.ledger.append(evt);
+  });
+}
+
 export interface ChokeOptions {
   factory: Factory;
   /** For `~` expansion inside the writable set — injected, tests never touch the real home. */
@@ -743,8 +829,8 @@ export function createChoke(options: ChokeOptions): Choke {
   // ride into the core judges — write/edit asks and shell destinations both —
   // plus the task's worktree root when its spawn recorded one (a worktree
   // agent's absolute writes name the worktree's copy of the memory file).
-  const fenceOf = (contract: ContractSet): MemoryFence => {
-    const worktree = factory.worktreeFor(contract.task);
+  const fenceOf = (contract: ContractSet, judge: Factory = factory): MemoryFence => {
+    const worktree = judge.worktreeFor(contract.task);
     return { ...(contract.execution ? { scrumRole: contract.execution.role } : {}), ...(contract.execution && contract.execution.role !== "dev" ? { artifactOnly: true } : {}), workspace: contract.workspace, scope: contract.scope, ...(worktree === undefined ? {} : { worktree }) };
   };
   /**
@@ -754,7 +840,7 @@ export function createChoke(options: ChokeOptions): Choke {
    * agent's writable set, which is the isolation working), the Contract's
    * workspace otherwise.
    */
-  const executionRootOf = (task: string, workspace: string): string => factory.worktreeFor(task) ?? workspace;
+  const executionRootOf = (task: string, workspace: string, judge: Factory = factory): string => judge.worktreeFor(task) ?? workspace;
 
   const decide = (request: AgentPermissionRequest, workspace: string, memory?: MemoryFence): { decision: ChokeDecision; command?: string } => {
     if (isForbiddenPaseoToolName(request.name)) {
@@ -874,10 +960,28 @@ export function createChoke(options: ChokeOptions): Choke {
         const judged = decideSeat(request, seatCtx.projectRoot);
         const command = judged.command;
         const decision = delegateToShim(agent, request, judged.decision, seatCtx.seat);
-        const exactMessage =
-          decision.behavior === "deny" && decision.rule === "seat-write-fence" ? decision.reason : undefined;
-        const response = recordAsk(
+        // v0.0.89 (ADR 0045 §3.1): seats are deny-only in the Ledger — an
+        // allowed ask answers immediately with NO permit_allowed line; only
+        // permit_denied (and Layer-3 git_blocked) evidence is ever recorded.
+        if (decision.behavior === "allow") {
+          log(`choke: allowed seat ${seatCtx.seat} agent ${agent.id} (no ledger line): ${command ?? request.name}`);
+          try {
+            await paseo.agents.ref(agent.id).respondToPermission({ requestId: request.id, response: { behavior: "allow" } });
+          } catch (err) {
+            log(
+              `choke: allowed the seat ask from agent ${agent.id} but could not answer it ` +
+                `(${err instanceof Error ? err.message : String(err)}) — the ask stays pending`,
+            );
+          }
+          return;
+        }
+        const target = resolvePermitTargetFactory(
           factory,
+          { projectSlug: agent.labels?.project, agentId: agent.id, cwd: agent.cwd },
+          log,
+        );
+        const response = recordDenial(
+          target,
           log,
           {
             task: seatCtx.seat,
@@ -887,7 +991,7 @@ export function createChoke(options: ChokeOptions): Choke {
             ...(command === undefined ? {} : { command }),
           },
           decision,
-          exactMessage,
+          decision.rule === "seat-write-fence" ? decision.reason : undefined,
         );
         if (response === undefined) return;
         try {
@@ -901,25 +1005,43 @@ export function createChoke(options: ChokeOptions): Choke {
         return;
       }
 
-      if (!isContractedAgentCwd(factory, agent.cwd)) return;
+      // v0.0.89 (ADR 0045 §1.2): the OWNING Project's Factory judges the ask —
+      // after the split the root Ledger carries no Contracts, so judging against
+      // the choke's own Factory alone would silently ignore every contracted
+      // Peer's ask on the wired server.
+      const judge = resolveJudgingFactory(factory, { projectSlug: agent.labels?.project, agentId: agent.id, cwd: agent.cwd }, log);
+      if (!isContractedAgentCwd(judge, agent.cwd)) return;
       let contract;
       try {
-        contract = factory.liveContractFor(agent.cwd);
+        contract = judge.liveContractFor(agent.cwd);
       } catch (err) {
         log(`choke: contract lookup failed for agent ${agent.id}: ${err instanceof Error ? err.message : String(err)}`);
         return;
       }
       if (contract === undefined) return; // not a contracted agent — not our ask to answer
-      const judged = decide(request, executionRootOf(contract.task, contract.workspace), fenceOf(contract));
+      const judged = decide(request, executionRootOf(contract.task, contract.workspace, judge), fenceOf(contract, judge));
       const command = judged.command;
       const decision = delegateToShim(agent, request, judged.decision, "agent");
-      const response = recordAsk(factory, log, {
+      const routed = resolvePermitTargetFactory(
+        factory,
+        { projectSlug: agent.labels?.project, agentId: agent.id, cwd: agent.cwd, task: contract.task },
+        log,
+      );
+      const target = targetKnowsContract(routed, judge, contract) ? routed : judge;
+      const base = {
         task: contract.task,
         agent: agent.id,
         name: request.name,
         kind: request.kind,
         ...(command === undefined ? {} : { command }),
-      }, decision);
+      };
+      // v0.0.89 (ADR 0045 §3.2): a Peer's allowed ask records lean metadata
+      // only; the command body stays strictly permit_denied / git_blocked
+      // evidence. Denials record in full — Denial-stall detection reads them.
+      const response =
+        decision.behavior === "deny"
+          ? recordDenial(target, log, base, decision)
+          : recordPeerAllowance(target, log, base);
       if (response === undefined) return; // the line never landed — do not answer what is not recorded
       try {
         await paseo.agents.ref(agent.id).respondToPermission({ requestId: request.id, response });
@@ -934,14 +1056,25 @@ export function createChoke(options: ChokeOptions): Choke {
     },
 
     spoolAskHandler(request) {
-      const contract = factory.contractFor(request.task);
+      // v0.0.89 (ADR 0045 §1.2): the task-owning Project's Factory judges the
+      // synthetic ask — the spool router resolves the same context-first order
+      // upstream, and this door also serves direct callers. The root Factory
+      // stands in only while it still owns the task itself (the legacy root
+      // bridge, the spool router's precedent).
+      const routed = resolvePermitTargetFactory(
+        factory,
+        { project: request.projectSlug, task: request.task, workspace: request.cwd, agentId: request.agent, submitter: request.submitter },
+        log,
+      );
+      const judge = routed.contractFor(request.task) !== undefined || factory.contractFor(request.task) === undefined ? routed : factory;
+      const contract = judge.contractFor(request.task);
       if (contract === undefined) {
         throw new FactoryError("unknown-task", `no contract set for task ${request.task} — register one first`);
       }
       // The default cwd is the task's execution tree (the worktree on the
       // v0.0.14 path) — where the asking agent actually sits.
-      const cwd = request.cwd ?? factory.worktreeFor(request.task) ?? contract.workspace;
-      const live = factory.liveContractFor(cwd);
+      const cwd = request.cwd ?? judge.worktreeFor(request.task) ?? contract.workspace;
+      const live = judge.liveContractFor(cwd);
       if (live === undefined || live.task !== request.task) {
         throw new FactoryError(
           "not-contracted",
@@ -950,8 +1083,8 @@ export function createChoke(options: ChokeOptions): Choke {
       }
       const decision = judgeShellCommand(
         request.command,
-        writableRootsFor(executionRootOf(live.task, live.workspace), factory.stateDir, homeDir),
-        fenceOf(live),
+        writableRootsFor(executionRootOf(live.task, live.workspace, judge), judge.stateDir, homeDir),
+        fenceOf(live, judge),
       );
       const base = {
         task: request.task,
@@ -960,8 +1093,9 @@ export function createChoke(options: ChokeOptions): Choke {
         kind: "tool",
         command: request.command,
       };
+      const target = targetKnowsContract(routed, judge, live) ? routed : judge;
       if (decision.behavior === "deny") {
-        factory.ledger.append({ ...base, event: "permit_denied", rule: decision.rule, reason: decision.reason });
+        appendPermitEvent(target, { ...base, event: "permit_denied", rule: decision.rule, reason: decision.reason });
         log(`choke: DENIED ${request.task} via spool ask (${decision.rule}): ${request.command}`);
         return {
           id: request.id,
@@ -972,7 +1106,15 @@ export function createChoke(options: ChokeOptions): Choke {
           reason: decision.reason,
         };
       }
-      factory.ledger.append({ ...base, event: "permit_allowed" });
+      // v0.0.89 lean recording: the bypass battery's allowed ask keeps the
+      // permit parade countable without the command body.
+      appendPermitEvent(target, {
+        task: base.task,
+        agent: base.agent,
+        name: base.name,
+        kind: base.kind,
+        event: "permit_allowed",
+      });
       log(`choke: allowed ${request.task} via spool ask: ${request.command}`);
       return {
         id: request.id,
@@ -987,7 +1129,9 @@ export function createChoke(options: ChokeOptions): Choke {
       if (inferReservedSeatFromTitle(config.title) !== undefined) return undefined;
       const providerId = config.provider.split("/")[0]?.trim().toLowerCase() ?? "";
       if (providerId !== "claude" && providerId !== "claude-code") return undefined;
-      if (!isContractedAgentCwd(factory, config.cwd) || config.modeId === PINNED_MODE_ID) return undefined;
+      // The judging Factory (v0.0.89): the owning Project's Factory carries the
+      // live Contract the cwd sits inside, not the post-split root Factory.
+      if (!isContractedAgentCwd(resolveJudgingFactory(factory, { projectSlug: labels?.project, cwd: config.cwd }, log), config.cwd) || config.modeId === PINNED_MODE_ID) return undefined;
       return { ...config, modeId: PINNED_MODE_ID };
     },
   };
@@ -999,32 +1143,50 @@ export function createChoke(options: ChokeOptions): Choke {
 }
 
 /**
- * One judged ask becomes one ledger line first, then the answer to hand back.
+ * One DENIED ask becomes one ledger line first, then the deny answer to hand
+ * back (v0.0.89, ADR 0045 §3): denial evidence is the one permit record every
+ * seat and Peer keeps in full — task, agent, permission, command, and rule.
  * Returns undefined when the line could not be recorded — the caller must not
  * answer what the ledger does not carry.
  */
-function recordAsk(
-  factory: Factory,
+function recordDenial(
+  target: Factory,
   log: (message: string) => void,
   base: { task: string; agent: string; name: string; kind: string; command?: string },
-  decision: ChokeDecision,
+  decision: ChokeDecision & { behavior: "deny"; rule: string; reason: string },
   exactMessage?: string,
 ): AgentPermissionResponse | undefined {
   try {
-    if (decision.behavior === "deny") {
-      factory.ledger.append({ ...base, event: "permit_denied", rule: decision.rule, reason: decision.reason });
-      log(`choke: DENIED ${base.task} agent ${base.agent} (${decision.rule}): ${base.command ?? base.name}`);
-    } else {
-      factory.ledger.append({ ...base, event: "permit_allowed" });
-      log(`choke: allowed ${base.task} agent ${base.agent}: ${base.command ?? base.name}`);
-    }
+    appendPermitEvent(target, { ...base, event: "permit_denied", rule: decision.rule, reason: decision.reason });
+    log(`choke: DENIED ${base.task} agent ${base.agent} (${decision.rule}): ${base.command ?? base.name}`);
   } catch (err) {
     log(`choke: could not record the ask from agent ${base.agent}: ${err instanceof Error ? err.message : String(err)}`);
     return undefined;
   }
-  return decision.behavior === "deny"
-    ? { behavior: "deny", message: exactMessage ?? `paseo-factory choke: ${decision.reason} (${decision.rule})`, interrupt: false }
-    : { behavior: "allow" };
+  return { behavior: "deny", message: exactMessage ?? `paseo-factory choke: ${decision.reason} (${decision.rule})`, interrupt: false };
+}
+
+/**
+ * One ALLOWED Peer ask becomes one LEAN ledger line (v0.0.89, ADR 0045 §3.2):
+ * `{ task, agent, name, kind }` — the permit parade stays countable without
+ * the multi-kilobyte command body, which remains strictly `permit_denied` /
+ * `git_blocked` evidence. Seats never reach this recorder (their allowed asks
+ * record no line at all). Returns undefined when the line could not be
+ * recorded — the caller must not answer what the ledger does not carry.
+ */
+function recordPeerAllowance(
+  target: Factory,
+  log: (message: string) => void,
+  base: { task: string; agent: string; name: string; kind: string; command?: string },
+): AgentPermissionResponse | undefined {
+  try {
+    appendPermitEvent(target, { task: base.task, agent: base.agent, name: base.name, kind: base.kind, event: "permit_allowed" });
+    log(`choke: allowed ${base.task} agent ${base.agent}: ${base.command ?? base.name}`);
+  } catch (err) {
+    log(`choke: could not record the ask from agent ${base.agent}: ${err instanceof Error ? err.message : String(err)}`);
+    return undefined;
+  }
+  return { behavior: "allow" };
 }
 
 // ---- the git shim's ledger ingestion -----------------------------------------------------------
@@ -1100,10 +1262,25 @@ export function startGitBlockIngestion(factory: Factory, options: GitBlockOption
         continue;
       }
       if (seen.has(record.id)) continue;
-      const contract = factory.liveContractFor(record.cwd);
-      factory.ledger.append({
+      // v0.0.89 (ADR 0045 §1.2): the refusal's Contract binding reads the
+      // OWNING Project's Factory — the post-split root Ledger carries none.
+      const judge = resolveJudgingFactory(factory, { cwd: record.cwd, agentId: record.agent }, log);
+      const contract = judge.liveContractFor(record.cwd);
+      // v0.0.89 (ADR 0045 §1/§3): the Layer-3 refusal lands in the OWNING
+      // Project's Factory — routed context-first from the refusal's cwd, with
+      // the full command and rule retained verbatim on every seat.
+      const routed = resolvePermitTargetFactory(factory, { cwd: record.cwd, agentId: record.agent }, log);
+      const target = contract === undefined || targetKnowsContract(routed, judge, contract) ? routed : judge;
+      if (target !== factory && target.ledger.events.some((e) => e.event === "git_blocked" && e.blockId === record.id)) {
+        // The seen-set seeds from the root Factory only — a line this plugin
+        // lifetime already landed in the owning Project's Ledger is not
+        // re-recorded there.
+        seen.add(record.id);
+        continue;
+      }
+      appendPermitEvent(target, {
         event: "git_blocked",
-        ...(contract !== undefined && isContractedAgentCwd(factory, record.cwd) && !["seat-write-fence", "supervisor-git-fence", "lead-git-fence"].includes(record.rule) ? { task: contract.task } : {}),
+        ...(contract !== undefined && isContractedAgentCwd(judge, record.cwd) && !["seat-write-fence", "supervisor-git-fence", "lead-git-fence"].includes(record.rule) ? { task: contract.task } : {}),
         ...(record.agent === undefined || record.agent === "" ? {} : { agent: record.agent }),
         command: record.command,
         rule: record.rule,

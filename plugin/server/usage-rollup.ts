@@ -35,6 +35,7 @@ import { projectTask } from "./core/task-state.ts";
 import { atomicJson } from "./core/scrum/config.ts";
 import { createUsageExtractor, type NormalizedUsage, type UsageAgentSource } from "./core/usage-extractor.ts";
 import { readProjectUsage, usageFilePath, type ProjectUsageFile, type SessionUsageRecord } from "./core/usage-status.ts";
+import { factoryRegistryFor, resolveTargetProject } from "./projects.ts";
 
 export type { ProjectUsageFile, SessionUsageRecord } from "./core/usage-status.ts";
 
@@ -244,6 +245,26 @@ export function createUsageRuntime(deps: UsageRuntimeDeps): UsageRuntime {
   };
 
   /**
+   * The task-owning Project's Factory (v0.0.89, ADR 0045 §1.2): the Tier-1
+   * guard and the `meter_written` append ride the OWNING Project's Ledger —
+   * after the split the wired root Factory holds no Contracts, so guarding and
+   * metering against it alone would no-op every boundary. The root Factory
+   * stands in while it still owns the task (the legacy root bridge).
+   */
+  const taskFactory = (task: string, slug?: string): Factory => {
+    const registry = factoryRegistryFor(deps.factory.stateDir, { root: deps.factory });
+    const resolution = resolveTargetProject(registry, slug === undefined ? { task } : { project: slug, task });
+    if (!resolution.ok) return deps.factory;
+    try {
+      const factory = registry.factoryForProject(resolution.slug);
+      if (factory.contractFor(task) !== undefined || deps.factory.contractFor(task) === undefined) return factory;
+    } catch {
+      // an unopenable Project Ledger falls back to the wired Factory
+    }
+    return deps.factory;
+  };
+
+  /**
    * The one Tier-1/Tier-2 boundary body: extract, flush the session into the
    * rollup, and land ONE `meter_written` line — only when the recorded total
    * actually grew past the last line this agent landed for the task (the
@@ -255,9 +276,12 @@ export function createUsageRuntime(deps: UsageRuntimeDeps): UsageRuntime {
     const record = buildRecord(agent, usage, { ...(slug === undefined ? {} : { slug }), task, ...(attempt === undefined ? {} : { attempt }) });
     if (record === undefined) return;
     upsertSession(deps.stateDir, record.projectSlug, record);
-    const implied = lastMeterImpliedTotal(deps.factory, task, agent.id);
+    const owner = taskFactory(task, slug);
+    const implied = lastMeterImpliedTotal(owner, task, agent.id);
     if (record.totalTokens > implied) {
-      deps.factory.meter({ task, provider: meterProviderOf(usage), usage: meterUsageOf(record), agent: agent.id });
+      owner.history.runSync(() => {
+        owner.meter({ task, provider: meterProviderOf(usage), usage: meterUsageOf(record), agent: agent.id });
+      });
     }
   };
 
@@ -293,8 +317,9 @@ export function createUsageRuntime(deps: UsageRuntimeDeps): UsageRuntime {
 
     async meterTaskBoundary(input) {
       try {
-        if (deps.factory.contractFor(input.task) === undefined) return;
-        const agentId = input.agentId ?? lastTaskAgent(deps.factory, input.task);
+        const owner = taskFactory(input.task);
+        if (owner.contractFor(input.task) === undefined) return;
+        const agentId = input.agentId ?? lastTaskAgent(owner, input.task);
         if (agentId === undefined) return;
         const agent = await censusAgent(agentId);
         if (agent === undefined) return;
@@ -306,7 +331,8 @@ export function createUsageRuntime(deps: UsageRuntimeDeps): UsageRuntime {
 
     async meterAgentBoundary(input) {
       try {
-        if (deps.factory.contractFor(input.task) === undefined) return;
+        const owner = taskFactory(input.task, input.slug);
+        if (owner.contractFor(input.task) === undefined) return;
         await meterBoundary(input.task, input.agent, input.attempt, input.slug);
       } catch (error) {
         log(`usage: peer meter of ${input.task} deferred — ${String(error)}`);

@@ -1346,3 +1346,23 @@ test("v0.0.87 (ADR 0043 §4): SeatsPane renders the Project Token & Model Usage 
   assert.match(status, /usage-status\.mjs/, "factory status reads the generated usage-status mirror");
   assert.match(status, /Token Usage/, "the CLI section header prints");
 });
+
+// ---- Project-scoped, deduplicated Retro (v0.0.89 Seam 4, ADR 0045 §4) ----
+
+test("v0.0.89 Seam 4 (ADR 0045 §4): TimelinePane disables Run Retro in the \"All projects\" view and instructs the Owner to select a Project first", () => {
+  const timeline = read("plugin/client/factory/timeline.tsx");
+  assert.match(timeline, /label="Run Retro"/, "the Run Retro action stays");
+  assert.match(
+    timeline,
+    /disabled=\{actions\.busy \|\| view\.project === null\}/,
+    "Run Retro is disabled exactly when the \"All projects\" aggregate view is selected (view.project === null) — the Ratify-via-Supervisor disabled-when-unscoped precedent",
+  );
+  assert.match(
+    timeline,
+    /view\.project === null \? \(\s*<Card theme=\{theme\}>[\s\S]*?Run Retro needs a single Project/,
+    "the \"All projects\" view renders helper text instructing the Owner to select a specific Project before running a retrospective (User Story 17)",
+  );
+  // The helper renders ONLY in the unscoped view — a selected Project never carries it.
+  const helperCount = (timeline.match(/Run Retro needs a single Project/g) ?? []).length;
+  assert.equal(helperCount, 1, "the helper text appears exactly once, inside the view.project === null guard");
+});

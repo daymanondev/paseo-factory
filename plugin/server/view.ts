@@ -392,6 +392,59 @@ function ledgerLines(events: readonly AnyEvent[]): LedgerLineView[] {
   return lines;
 }
 
+// ---- the "All projects" aggregate (v0.0.89, ADR 0045 §1.3) ----------------------------------
+
+/**
+ * One Project's ledger events with their owning Project's slug — the
+ * per-Project Factory registry's stream shape. Task ids are scoped strictly
+ * per Project (two Projects may both use `T-01`), so the aggregate folds
+ * each stream separately and attributes every row and line with its
+ * `projectSlug` — an additive field an older client renders by ignoring.
+ */
+export interface ProjectEventStream {
+  slug: string;
+  events: readonly AnyEvent[];
+}
+
+/** A task row attributed with its owning Project's slug (the aggregate's TaskView extension). */
+export type ProjectTaskView = TaskView & { projectSlug: string };
+
+/** One ledger line attributed with its owning Project's slug (the aggregate's LedgerLineView extension). */
+export type ProjectLedgerLineView = LedgerLineView & { projectSlug: string };
+
+/** Folds every stream's tasks separately, attributing each row with its Project's slug. */
+export function foldTasksAcross(streams: readonly ProjectEventStream[]): ProjectTaskView[] {
+  return streams.flatMap((stream) => foldTasks(stream.events).map((task) => ({ ...task, projectSlug: stream.slug })));
+}
+
+/**
+ * The aggregate ledger stream: each Project's newest lines first (its own
+ * seq order), merged across Projects by timestamp (newest first) and capped
+ * at `LEDGER_STREAM_CAP` — every line tagged with its Project's slug so the
+ * "All projects" timeline never interleaves two `seq` namespaces unlabeled.
+ */
+export function ledgerLinesAcross(streams: readonly ProjectEventStream[]): ProjectLedgerLineView[] {
+  const tagged: ProjectLedgerLineView[] = [];
+  for (const stream of streams) {
+    const events = stream.events;
+    let taken = 0;
+    for (let i = events.length - 1; i >= 0 && taken < LEDGER_STREAM_CAP; i -= 1) {
+      const evt = events[i]!;
+      tagged.push({
+        seq: evt.seq,
+        ts: evt.ts,
+        event: evt.event,
+        task: "task" in evt && typeof evt.task === "string" ? evt.task : null,
+        line: renderLedgerLine(evt),
+        projectSlug: stream.slug,
+      });
+      taken += 1;
+    }
+  }
+  tagged.sort((a, b) => (a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0));
+  return tagged.slice(0, LEDGER_STREAM_CAP);
+}
+
 // ---- the whole view -----------------------------------------------------------------------
 
 /** The daemon half's raw input — surface-rpc.ts gathers it, this module never calls the daemon. */
@@ -574,6 +627,14 @@ export function foldView(input: {
   lanes: Lanes;
   events: readonly AnyEvent[];
   /**
+   * The per-Project event streams (v0.0.89, ADR 0045 §1.3): when present,
+   * tasks and the ledger stream fold per Project (each row and line
+   * attributed with its `projectSlug` — never one merged slice under a
+   * colliding Task id) and `events` is only the retro fold's concatenated
+   * input. Absent, the single `events` stream folds everything, as before.
+   */
+  projectStreams?: readonly ProjectEventStream[];
+  /**
    * The scoped Project's usage rollup (v0.0.87, ADR 0043 §4) — the gathered
    * `<projectStateDir>/usage.json`, undefined when none exists. Pure input:
    * the fold never reads provider stores (the zero-provider-I/O law).
@@ -594,7 +655,10 @@ export function foldView(input: {
    */
   vault: VaultStatusView;
 }): FactoryViewFold {
-  const tasks = enrichTaskUsage(foldTasks(input.events), input.usage);
+  const tasks = enrichTaskUsage(
+    input.projectStreams === undefined ? foldTasks(input.events) : foldTasksAcross(input.projectStreams),
+    input.usage,
+  );
   return {
     version: FACTORY_VIEW_VERSION,
     stateDir: input.stateDir,
@@ -611,8 +675,8 @@ export function foldView(input: {
     })),
     supervisor: input.daemon.supervisor,
     lead: input.daemon.lead,
-    retro: foldRetro(input.events),
-    ledger: ledgerLines(input.events),
+    retro: foldRetro(input.projectStreams === undefined ? input.events : input.projectStreams.flatMap((stream) => stream.events)),
+    ledger: input.projectStreams === undefined ? ledgerLines(input.events) : ledgerLinesAcross(input.projectStreams),
     daemonError: input.daemon.daemonError,
     project: input.project,
     projects: [...input.projects],

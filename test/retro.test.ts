@@ -23,6 +23,10 @@ import { disposeDir, fakeCopilotRunner, gitCommitAll, gitCommitChanges, makeTemp
  * the one `retro_written` line (file first, then the line), the refusals
  * that write no line (copilot unusable, same-day duplicate), the spool's
  * `retro` kind, and the Owner CLI's `factory retro` against the real halves.
+ * Since v0.0.89 (ADR 0045 §4): the deduplicated digest (each Task's LATEST
+ * contract whole, superseded drafts as 1-line seq headers, one read per
+ * Report path across duplicate report_written events) and the fence-tolerant
+ * parse (```json-wrapped answers parse on the first call).
  */
 
 const ownerCli = join(repoRoot, "plugin", "bin", "factory.mjs");
@@ -245,6 +249,72 @@ test("the digest: per-task blocks, parade roll-up, denials verbatim, red gate lo
   assert.ok(digest.includes(firstReport.trimEnd()), "the report's content rides whole");
 });
 
+test("v0.0.89 (ADR 0045 §4): the digest renders only the LATEST contract_set whole — earlier superseded drafts are 1-line seq headers", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact } = makeWorkspaceAtBase(dir);
+  const stateDir = join(dir, "factory");
+  const factory = createFactory({ stateDir });
+
+  // A re-contracted Task: two Contract epochs, the first draft overwritten.
+  factory.setContract({
+    task: "DUP",
+    workspace,
+    gate: "node --test src/format.test.ts",
+    artifact,
+    scope: ["src"],
+    description: "First draft: implement the pad helper the obvious way.",
+  });
+  factory.setContract({
+    task: "DUP",
+    workspace,
+    gate: "node --test src/format.test.ts --reporter tap",
+    artifact,
+    scope: ["src"],
+    description: "Second draft: implement the pad helper with width handling.",
+  });
+
+  const corpus = buildRetroDigest(factory.ledger.events, stateDir);
+  const lines = corpus.digest.split("\n");
+
+  // The LATEST contract renders whole — its gate and description verbatim.
+  const latestAt = lines.findIndex((l) => l.includes("`contract` gate=`node --test src/format.test.ts --reporter tap`"));
+  assert.ok(latestAt > -1, "the latest contract_set renders its contract line");
+  assert.equal(lines[latestAt! + 1], "     description: Second draft: implement the pad helper with width handling.");
+
+  // The superseded draft renders as exactly the compact 1-line header.
+  const superseded = lines.find((l) => l.startsWith("seq=") && l.includes("contract_set (superseded draft)"));
+  assert.ok(superseded !== undefined, "the earlier draft renders as a compact header");
+  const first = factory.ledger.events.find((e) => e.event === "contract_set")!;
+  assert.equal(superseded, `seq=${first.seq} contract_set (superseded draft) gate=node --test src/format.test.ts`);
+  assert.ok(
+    !corpus.digest.includes("First draft: implement the pad helper the obvious way."),
+    "the superseded draft's description never rides the digest",
+  );
+});
+
+test("v0.0.89 (ADR 0045 §4): duplicate report_written paths are deduplicated before any file is read — one Report rides once", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact } = makeWorkspaceAtBase(dir);
+  const stateDir = join(dir, "factory");
+  const factory = createFactory({ stateDir });
+  factory.setContract({ task: "REP", workspace, gate: "true", artifact, description: "Dedup the reports." });
+  writeFileSync(join(stateDir, "report-REP-1.md"), "THE-ONCE-REPORT-BODY\n");
+  // A respawned Attempt rewrote the same file: two report_written events, one path.
+  factory.ledger.append({ event: "report_written", task: "REP", attempt: 1, path: join(stateDir, "report-REP-1.md") });
+  factory.ledger.append({ event: "report_written", task: "REP", attempt: 1, path: join(stateDir, "report-REP-1.md") });
+
+  const corpus = buildRetroDigest(factory.ledger.events, stateDir);
+  assert.equal(corpus.reports, 1, "one report counted, not two");
+  assert.ok(corpus.digest.startsWith(`# retro corpus — ${corpus.eventsRead} ledger events, 1 task blocks, 1 reports, 0 red gate logs`), corpus.digest.split("\n")[0]);
+  assert.equal(corpus.digest.split("### report-REP-1.md").length - 1, 1, "the reports section embeds the file once");
+  assert.equal(corpus.digest.split("THE-ONCE-REPORT-BODY").length - 1, 1, "the report body rides exactly once");
+  // The dedup is on the file read, never on the ledger record: both evidence
+  // lines stay in the task block, both seqs stay citable.
+  assert.equal(corpus.digest.split("] report attempt=1 file=report-REP-1.md").length - 1, 2, "both report_written evidence lines stay");
+});
+
 // ---- the prompt --------------------------------------------------------------------
 
 test("buildRetroPrompt: the EXISTING-LAW section, the strict JSON contract, the corpus as the tail", () => {
@@ -304,6 +374,29 @@ test("parseRetroProposals: whole-parse — one bad proposal fails the output, ne
     assert.equal(parsed.ok, false, `${name}: fails`);
     if (!parsed.ok) assert.match(parsed.error, pattern, `${name}: the error names it`);
   }
+});
+
+test("v0.0.89 (ADR 0045 §4): parseRetroProposals strips an enclosing Markdown code fence before validating — fenced answers parse clean", () => {
+  const payload = '{"proposals":[{"class":"observation","evidence":[2],"pattern":"p","text":"t"}]}';
+  for (const [name, output] of [
+    ["```json fence", "```json\n" + payload + "\n```"],
+    ["bare ``` fence", "```\n" + payload + "\n```"],
+    ["fence with a language tag and trailing blank line", "```json\n" + payload + "\n```\n"],
+    ["whitespace around the fence", "\n```json\n" + payload + "\n```\n"],
+  ] as const) {
+    const parsed = parseRetroProposals(output, SEQS);
+    assert.equal(parsed.ok, true, `${name}: parses clean`);
+    if (parsed.ok) assert.equal(parsed.proposals.length, 1, `${name}: the proposal reads whole`);
+  }
+  // The tolerance strips wrappers, never repairs content: a fence around
+  // malformed JSON still fails the whole parse.
+  const broken = parseRetroProposals("```json\n{\"proposals\": I tried}\n```", SEQS);
+  assert.ok(!broken.ok, "fenced malformed JSON fails");
+  if (!broken.ok) assert.match(broken.error, /not valid JSON/);
+  // An unclosed fence is not enclosing — the parse stays honest rather than
+  // guessing where the JSON starts.
+  const unclosed = parseRetroProposals("```json\n" + payload, SEQS);
+  assert.ok(!unclosed.ok, "an unclosed fence still fails");
 });
 
 // ---- the pass through the factory ----------------------------------------------------
@@ -373,8 +466,10 @@ test("a parse failure retries once inside the same clock and succeeds (divergenc
   disposeDir(t, dir);
   const { workspace, artifact } = makeWorkspaceAtBase(dir);
   const stateDir = join(dir, "factory");
+  // The first answer is malformed prose — genuinely unparseable (a fenced
+  // answer no longer fails the parse since v0.0.89, ADR 0045 §4).
   const fake = fakeCopilotRunner((_call, index) =>
-    index === 0 ? { code: 0, stdout: "```json\n{\"proposals\":[]}\n```" } : { code: 0, stdout: HAPPY_JSON },
+    index === 0 ? { code: 0, stdout: "I tried, honestly" } : { code: 0, stdout: HAPPY_JSON },
   );
   const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: fake.runner });
   factory.setContract({ task: "R2", workspace, gate: "true", artifact });
@@ -382,8 +477,23 @@ test("a parse failure retries once inside the same clock and succeeds (divergenc
   await factory.claim({ task: "R2", sha: claimed, agent: "agent-r2" });
 
   const outcome = await factory.retro();
-  assert.equal(outcome.outcome, "written", "a fenced answer failed the parse, the retry landed clean");
+  assert.equal(outcome.outcome, "written", "a malformed answer failed the parse, the retry landed clean");
   assert.equal(fake.calls.length, 2, "exactly one retry");
+});
+
+test("v0.0.89 (ADR 0045 §4): a fenced (```json) lane answer parses on the first call — no retry spent", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact } = makeWorkspaceAtBase(dir);
+  const stateDir = join(dir, "factory");
+  const fake = fakeCopilotRunner(() => ({ code: 0, stdout: "```json\n{\"proposals\":[]}\n```" }));
+  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: fake.runner });
+  factory.setContract({ task: "R-FENCED", workspace, gate: "true", artifact });
+
+  const outcome = await factory.retro();
+  assert.equal(outcome.outcome, "written", "the fenced answer parsed clean — no retro-malformed-output failure");
+  assert.equal(outcome.proposalCount, 0, "an honest empty list inside the fence");
+  assert.equal(fake.calls.length, 1, "the whole budget's first try sufficed — no retry");
 });
 
 test("a parse failure twice is a failed line naming it — no file, and a same-day retry stays legal", async (t) => {

@@ -1,4 +1,5 @@
 import { test } from "node:test";
+import type { TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -1238,4 +1239,264 @@ test("concurrent distinct Spawn requests cannot create two Peers in one worktree
   assert.equal(created, 1);
   const refusal = factory.ledger.events.find(event => event.event === "spawn_refused");
   assert.equal(refusal?.reason, "peer-already-running");
+});
+
+// ---- Seam 1 (v0.0.89, ADR 0045 §1): the Per-Project Factory registry and context-first routing ----
+
+import { createFactoryRegistry, resolveTargetProject, writeProjectRegistration } from "../plugin/server/projects.ts";
+import type { FactoryRegistry } from "../plugin/server/projects.ts";
+import { readdirSync } from "node:fs";
+
+/**
+ * Two concurrent Projects on one spool (spec §Testing Decisions Seam 1): two
+ * independent git repositories, each registered the way a seated Project is,
+ * one Per-Project Factory registry over a shared plugin stateDir. Both
+ * Projects use the SAME standard Task id (`T-01`) — the collision the shared
+ * root Ledger could never allow.
+ */
+function makeTwinProjects(t: TestContext): {
+  dir: string;
+  stateDir: string;
+  rootA: string;
+  rootB: string;
+  slugA: string;
+  slugB: string;
+  registry: FactoryRegistry;
+} {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const rootA = join(dir, "project-a");
+  const rootB = join(dir, "project-b");
+  for (const root of [rootA, rootB]) {
+    mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, "README.md"), "x\n");
+    gitCommitAll(root);
+  }
+  const stateDir = join(dir, "state");
+  const resolvedA = resolveProject(rootA);
+  const resolvedB = resolveProject(rootB);
+  assert.ok(resolvedA.ok && resolvedB.ok, "both test Projects must resolve");
+  writeProjectRegistration(stateDir, resolvedA.slug, { root: resolvedA.root });
+  writeProjectRegistration(stateDir, resolvedB.slug, { root: resolvedB.root });
+  const registry = createFactoryRegistry({ stateDir });
+  t.after(() => registry.stop());
+  return { dir, stateDir, rootA, rootB, slugA: resolvedA.slug, slugB: resolvedB.slug, registry };
+}
+
+/** One Project's ledger lines, parsed — the file is the observable, never an internal fold. */
+function readProjectLedger(stateDir: string, slug: string): Record<string, unknown>[] {
+  const path = join(stateDir, "projects", slug, "ledger.jsonl");
+  if (!existsSync(path)) return [];
+  return readFileSync(path, "utf8")
+    .split("\n")
+    .filter((line) => line !== "")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
+test("Seam 1: two concurrent Projects contract, spawn, claim, and accept Task T-01 simultaneously — every artifact strictly under the owning Project's directory", async (t) => {
+  const { stateDir, rootA, rootB, slugA, slugB, registry } = makeTwinProjects(t);
+  const root = registry.root;
+
+  // Both Contracts land concurrently — different Factories, different writer
+  // lanes, no shared queue between them.
+  const contracts = await Promise.all([
+    handleSpoolRequest(root, { id: "c-a", kind: "contract", task: "T-01", workspace: rootA, gate: "true", artifact: "README.md", submitter: "owner" }, {}, registry),
+    handleSpoolRequest(root, { id: "c-b", kind: "contract", task: "T-01", workspace: rootB, gate: "true", artifact: "README.md", submitter: "owner" }, {}, registry),
+  ]);
+  assert.deepEqual(contracts.map((reply) => reply.ok), [true, true], "both Projects contract the same Task id");
+
+  // Each spawn names its managed Task worktree (the driver's own context) —
+  // the workspace arm routes each onto its Project. Real git worktrees, the
+  // driver's own allocation shape.
+  const worktreeA = join(stateDir, "projects", slugA, "worktrees", "T-01");
+  const worktreeB = join(stateDir, "projects", slugB, "worktrees", "T-01");
+  const { execFileSync } = await import("node:child_process");
+  execFileSync("git", ["-C", rootA, "worktree", "add", "-q", "-b", "factory/T-01", worktreeA, "HEAD"]);
+  execFileSync("git", ["-C", rootB, "worktree", "add", "-q", "-b", "factory/T-01", worktreeB, "HEAD"]);
+  const spawns = await Promise.all([
+    handleSpoolRequest(root, { id: "s-a", kind: "spawn", task: "T-01", provider: "pi/zai/glm-5.3", arity: 1, worktree: worktreeA }, {}, registry),
+    handleSpoolRequest(root, { id: "s-b", kind: "spawn", task: "T-01", provider: "pi/zai/glm-5.3", arity: 1, worktree: worktreeB }, {}, registry),
+  ]);
+  assert.deepEqual(spawns.map((reply) => reply.ok), [true, true], "both Projects dispatch their own Peer for T-01");
+
+  // The Peers' Correlation bindings (issued at spawn time in production) name
+  // each Project — the authenticated-token arm routes the concurrent claims.
+  const correlations = new CorrelationRegistry(stateDir);
+  correlations.issue({ role: "agent", projectSlug: slugA, projectRoot: rootA, task: "T-01", agentId: "peer-a" });
+  correlations.issue({ role: "agent", projectSlug: slugB, projectRoot: rootB, task: "T-01", agentId: "peer-b" });
+
+  // The Peers commit inside their own worktrees — both Claims run Gates
+  // concurrently and land green.
+  writeFileSync(join(worktreeA, "work.txt"), "a\n");
+  writeFileSync(join(worktreeB, "work.txt"), "b\n");
+  const shaA = gitCommitAll(worktreeA, "work-in-project-a");
+  const shaB = gitCommitAll(worktreeB, "work-in-project-b");
+  const claims = await Promise.all([
+    handleSpoolRequest(root, { id: "cl-a", kind: "claim", task: "T-01", sha: shaA, agent: "peer-a" }, {}, registry),
+    handleSpoolRequest(root, { id: "cl-b", kind: "claim", task: "T-01", sha: shaB, agent: "peer-b" }, {}, registry),
+  ]);
+  assert.deepEqual(claims.map((reply) => reply.ok), [true, true]);
+  const greenClaims = claims.filter((reply): reply is Extract<typeof reply, { ok: true }> => reply.ok);
+  assert.deepEqual(greenClaims.map((reply) => reply.verdict), ["green", "green"], "both T-01 claims end green in their own Project");
+  assert.equal(greenClaims[0]!.attempt, 1, "attempt numbering is per Project — both Projects start at 1");
+  assert.equal(greenClaims[1]!.attempt, 1);
+
+  // The Owner accepts each Project explicitly (--project) — the shared Task id
+  // never crosses Projects.
+  const accepts = await Promise.all([
+    handleSpoolRequest(root, { id: "ac-a", kind: "accept", task: "T-01", attempt: 1, submitter: "owner", projectSlug: slugA }, {}, registry),
+    handleSpoolRequest(root, { id: "ac-b", kind: "accept", task: "T-01", attempt: 1, submitter: "owner", projectSlug: slugB }, {}, registry),
+  ]);
+  assert.deepEqual(accepts.map((reply) => reply.ok), [true, true], "both Projects accept their own T-01");
+
+  // The strict isolation law: every Ledger event, Report, and Gate log lives
+  // under the owning Project's directory — and nothing at the shared root.
+  for (const [slug, sha] of [[slugA, shaA], [slugB, shaB]] as const) {
+    const projectDir = join(stateDir, "projects", slug);
+    const events = readProjectLedger(stateDir, slug);
+    const kinds = events.map((event) => event.event);
+    for (const expected of ["contract_set", "spawn_dispatched", "claim_reported", "gate_started", "gate_finished", "report_written", "attempt_accepted"]) {
+      assert.ok(kinds.includes(expected), `${slug}: ${expected} must be recorded in the Project's own ledger`);
+    }
+    // Sequence numbering is per Project: 1..N with no gaps and no interleaving.
+    assert.deepEqual(events.map((event) => event.seq), events.map((_, i) => i + 1), `${slug}: seq counts 1..N for that Project alone`);
+    const files = readdirSync(projectDir);
+    assert.ok(files.includes("report-T-01-1.md"), `${slug}: the Report lives in the Project directory`);
+    assert.ok(files.includes("gate-T-01-1.log"), `${slug}: the Gate log lives in the Project directory`);
+    assert.equal((events.find((e) => e.event === "gate_finished") as { sha?: string } | undefined)?.sha, sha, `${slug}: the green verdict attests its own Project's commit`);
+  }
+  assert.ok(!existsSync(join(stateDir, "ledger.jsonl")), "no root Ledger is written — per-Project isolation is total");
+  assert.equal(registry.root.ledger.events.length, 0, "the root fallback Factory stays empty");
+});
+
+test("Seam 1: context-first routing — explicit projectSlug, Correlation token, workspace path, and Task worktree path each land the command on the owning Project's Factory", async (t) => {
+  const { stateDir, rootA, rootB, slugA, slugB, registry } = makeTwinProjects(t);
+  const root = registry.root;
+  // T-01 is contracted in BOTH Projects — only context can disambiguate.
+  for (const [root_, slug] of [[rootA, slugA], [rootB, slugB]] as const) {
+    const reply = await handleSpoolRequest(root, { id: `c-${slug}`, kind: "contract", task: "T-01", workspace: root_, gate: "true", artifact: "README.md", submitter: "owner" }, {}, registry);
+    assert.ok(reply.ok);
+  }
+
+  // (1) Explicit projectSlug — the top-priority context (the CLI --project flag).
+  const explicit = await handleSpoolRequest(root, { id: "sp-a", kind: "spawn", task: "T-01", provider: "pi/zai/glm-5.3", arity: 1, projectSlug: slugA }, {}, registry);
+  assert.ok(explicit.ok);
+  assert.ok(
+    readProjectLedger(stateDir, slugA).some((event) => event.event === "spawn_dispatched"),
+    "the explicit slug routed the spawn onto project-a's ledger",
+  );
+  assert.ok(
+    !readProjectLedger(stateDir, slugB).some((event) => event.event === "spawn_dispatched"),
+    "project-b's ledger is untouched",
+  );
+
+  // (2) Authenticated Correlation token binding — the submitting agent's record
+  // names its Project (priority 2), even though T-01 exists in both.
+  new CorrelationRegistry(stateDir).issue({
+    role: "agent",
+    projectSlug: slugB,
+    projectRoot: rootB,
+    task: "T-01",
+    agentId: "peer-b-1",
+  });
+  writeFileSync(join(rootB, "work.txt"), "b\n");
+  const shaB = gitCommitAll(rootB, "correlation-routed-work");
+  const correlated = await handleSpoolRequest(root, { id: "cl-b", kind: "claim", task: "T-01", sha: shaB, agent: "peer-b-1" }, {}, registry);
+  assert.ok(correlated.ok && correlated.verdict === "green");
+  assert.ok(
+    readProjectLedger(stateDir, slugB).some((event) => event.event === "claim_reported"),
+    "the Correlation token routed the claim onto project-b's ledger",
+  );
+  assert.ok(
+    !readProjectLedger(stateDir, slugA).some((event) => event.event === "claim_reported"),
+    "project-a's ledger never saw project-b's claim",
+  );
+
+  // (3) Workspace path — canonical git-root resolution (priority 3): the two
+  // setup Contracts above already routed by workspace (each named its own
+  // repository root); a SUBDIRECTORY of project-a's repository resolves the
+  // same canonical Project — the git root, never the leaf directory.
+  assert.ok(
+    readProjectLedger(stateDir, slugA).some((event) => event.event === "contract_set" && event.task === "T-01"),
+    "the workspace-named contract landed on project-a's ledger",
+  );
+  mkdirSync(join(rootA, "sub"), { recursive: true });
+  assert.deepEqual(resolveTargetProject(registry, { workspace: join(rootA, "sub") }), { ok: true, slug: slugA, via: "workspace" }, "a path inside the repository resolves the repository's Project");
+
+  // (4) Task worktree path under <stateDir>/projects/<slug>/worktrees/<task> —
+  // the workspace arm resolves the managing Project from the path itself,
+  // before the (ambiguous) task lookup could refuse.
+  const worktreeB = join(stateDir, "projects", slugB, "worktrees", "T-01");
+  mkdirSync(worktreeB, { recursive: true });
+  const viaWorktree = await handleSpoolRequest(root, { id: "sp-b-wt", kind: "spawn", task: "T-01", provider: "pi/zai/glm-5.3", arity: 1, worktree: worktreeB }, {}, registry);
+  assert.ok(viaWorktree.ok, "the worktree path routed the spawn even though T-01 exists in both Projects");
+  const bSpawns = readProjectLedger(stateDir, slugB).filter((event) => event.event === "spawn_dispatched");
+  assert.ok(bSpawns.length >= 1);
+  assert.equal((bSpawns.at(-1) as { worktree?: string }).worktree, worktreeB, "the dispatch recorded the worktree on project-b's ledger");
+});
+
+test("Seam 1: an unscoped Task id resolves when exactly one Project owns it — and refuses with ambiguous-task-project when both do", async (t) => {
+  const { stateDir, rootA, rootB, slugA, slugB, registry } = makeTwinProjects(t);
+  const root = registry.root;
+
+  // Only project-a owns T-02: the unique-Task-lookup arm routes by Task id alone.
+  const contractA = await handleSpoolRequest(root, { id: "c-a2", kind: "contract", task: "T-02", workspace: rootA, gate: "true", artifact: "README.md", submitter: "owner" }, {}, registry);
+  assert.ok(contractA.ok);
+  const unique = await handleSpoolRequest(root, { id: "sp-unique", kind: "spawn", task: "T-02", provider: "pi/zai/glm-5.3", arity: 1 }, {}, registry);
+  assert.ok(unique.ok, "a Task id owned by exactly one Project routes with no --project and no workspace");
+  assert.ok(readProjectLedger(stateDir, slugA).some((event) => event.event === "spawn_dispatched"));
+
+  // Both Projects own T-03: unscoped, the router refuses by name — never a guess.
+  for (const root_ of [rootA, rootB]) {
+    const reply = await handleSpoolRequest(root, { id: `c-3-${root_.length}`, kind: "contract", task: "T-03", workspace: root_, gate: "true", artifact: "README.md", submitter: "owner" }, {}, registry);
+    assert.ok(reply.ok);
+  }
+  const ambiguous = await handleSpoolRequest(root, { id: "sp-amb", kind: "spawn", task: "T-03", provider: "pi/zai/glm-5.3", arity: 1 }, {}, registry);
+  assert.ok(!ambiguous.ok);
+  assert.equal(ambiguous.code, "ambiguous-task-project");
+  assert.match(ambiguous.message, /T-03 exists in 2 Projects/);
+  assert.ok(
+    !readProjectLedger(stateDir, slugA).some((event) => event.event === "spawn_dispatched" && event.task === "T-03") &&
+      !readProjectLedger(stateDir, slugB).some((event) => event.event === "spawn_dispatched" && event.task === "T-03"),
+    "the ambiguous spawn mutated nothing",
+  );
+
+  // The resolver's own arms, asserted directly (the choke's permit routing
+  // imports this same function).
+  assert.deepEqual(resolveTargetProject(registry, { task: "T-02" }), { ok: true, slug: slugA, via: "task" });
+  assert.deepEqual(resolveTargetProject(registry, { task: "T-03" }).ok, false);
+  assert.equal((resolveTargetProject(registry, { task: "T-03" }) as { code: string }).code, "ambiguous-task-project");
+  assert.deepEqual(resolveTargetProject(registry, { project: slugB }), { ok: true, slug: slugB, via: "explicit" });
+  assert.deepEqual(resolveTargetProject(registry, { workspace: rootA }), { ok: true, slug: slugA, via: "workspace" });
+  const unknown = resolveTargetProject(registry, { project: "never-registered" });
+  assert.ok(!unknown.ok && unknown.code === "unknown-project");
+});
+
+test("Seam 1: an unscoped retro on multiple Projects refuses with retro-project-required; a scoped one runs against that Project's Factory", async (t) => {
+  const { stateDir, rootA, rootB, slugA, slugB, registry } = makeTwinProjects(t);
+  const root = registry.root;
+  for (const root_ of [rootA, rootB]) {
+    const reply = await handleSpoolRequest(root, { id: `c-${root_.length}`, kind: "contract", task: "T-01", workspace: root_, gate: "true", artifact: "README.md", submitter: "owner" }, {}, registry);
+    assert.ok(reply.ok);
+  }
+  // A lane with no headless tool-less CLI form makes the scoped pass's own
+  // pre-flight refuse deterministically — proving the routing reached the
+  // per-Project Factory without depending on any CLI installed on PATH.
+  const saved = saveLanes(stateDir, { retro: "boguslane/model" }, undefined);
+  assert.ok(saved.ok, `the unusable retro lane must save (got: ${saved.ok ? "" : saved.reason})`);
+
+  const unscoped = await handleSpoolRequest(root, { id: "retro-unscoped", kind: "retro" }, {}, registry);
+  assert.ok(!unscoped.ok);
+  assert.equal(unscoped.code, "retro-project-required", "unscoped retro with two registered Projects refuses by name");
+  assert.match(unscoped.message, /exactly one Project/);
+
+  const scoped = await handleSpoolRequest(root, { id: "retro-scoped", kind: "retro", projectSlug: slugA }, {}, registry);
+  assert.ok(!scoped.ok);
+  assert.equal(scoped.code, "retro-copilot-unusable", "the scoped retro routed onto project-a's Factory and reached its own lane pre-flight");
+  assert.equal(
+    readProjectLedger(stateDir, slugA).filter((event) => event.event === "retro_written").length,
+    0,
+    "a refused retro records no line",
+  );
+  assert.ok(!existsSync(join(stateDir, "projects", slugB, "ledger.jsonl")) || readProjectLedger(stateDir, slugB).every((event) => event.event !== "retro_written"));
 });

@@ -200,8 +200,25 @@ export function TimelinePane({
             <Text style={text(theme, "section")}>Daily Retro & Proposals</Text>
             <Text style={text(theme, "label")}>One retrospective pass per UTC day — proposals remain advisory until ratified.</Text>
           </View>
-          <Btn theme={theme} small icon="Sparkles" label="Run Retro" disabled={actions.busy} onPress={actions.runRetro} />
+          {/* v0.0.89 (ADR 0045 §4): the Retro runs strictly against one Project's
+              ledger — never the "All projects" aggregate (the Ratify-via-Supervisor
+              and Reset-Project disabled-when-unscoped precedent). */}
+          <Btn
+            theme={theme}
+            small
+            icon="Sparkles"
+            label="Run Retro"
+            disabled={actions.busy || view.project === null}
+            onPress={actions.runRetro}
+          />
         </View>
+        {view.project === null ? (
+          <Card theme={theme}>
+            <Text style={text(theme, "meta")}>
+              Run Retro needs a single Project — select a specific project in the Project Switcher above before running a retrospective.
+            </Text>
+          </Card>
+        ) : null}
         {retroNote !== null ? <Pill theme={theme} label={retroNote} tone="accent" lit /> : null}
         {view.retro.length === 0 ? (
           <Card theme={theme}>

@@ -7,7 +7,11 @@
  * and tool-less — since v0.0.13 (ADR 0009 §3) that lane lives in
  * `<stateDir>/lanes.json` (default `pi/zai/glm-5.3`), any CLI family, the
  * shared lane runner — and strict-parses one JSON object of proposals out of
- * the response. Every Proposal cites ledger seq evidence; the factory
+ * the response. Since v0.0.89 (ADR 0045 §4) the digest is deduplicated —
+ * each Task's LATEST contract whole, superseded drafts as 1-line `seq`
+ * headers, one read per Report path — and the parse strips an optional
+ * enclosing Markdown code fence before validating. Every Proposal cites
+ * ledger seq evidence; the factory
  * assigns R1…Rn ids; the pass writes `retro-<date>.md` in the stateDir
  * first, then exactly one `retro_written` ledger line (the first
  * factory-level event) lands — file before line, so a death between leaves
@@ -206,6 +210,13 @@ function basename(path: string): string {
  * No caps, no `[truncated]` markers in v1; `tailWithMarker` is the named
  * precedent if a future corpus grows. `seq` stays on every line — proposals
  * cite it.
+ *
+ * Deduplication (v0.0.89, ADR 0045 §4): only each Task's LATEST
+ * `contract_set` renders whole — every earlier superseded draft on that Task
+ * renders as a 1-line `seq` header (re-contracted Tasks otherwise carry every
+ * overwritten 8–13 KB brief verbatim) — and `report_written` paths are
+ * deduplicated by resolved path before any file is read, so a respawned
+ * Attempt's overwritten `report-<task>-<n>.md` rides the prompt at most once.
  */
 export function buildRetroDigest(events: readonly LedgerEvent[], stateDir: string): RetroCorpus {
   const knownSeqs = new Set(events.map((e) => e.seq));
@@ -213,6 +224,7 @@ export function buildRetroDigest(events: readonly LedgerEvent[], stateDir: strin
   const byTask = new Map<string, LedgerEvent[]>();
   const factoryLines: string[] = [];
   const reportEvents: Extract<LedgerEvent, { event: "report_written" }>[] = [];
+  const seenReportPaths = new Set<string>();
   const attached = { logs: 0 };
 
   for (const evt of events) {
@@ -244,7 +256,13 @@ export function buildRetroDigest(events: readonly LedgerEvent[], stateDir: strin
       taskOrder.push(evt.task);
     }
     block.push(evt);
-    if (evt.event === "report_written") reportEvents.push(evt);
+    // One Report per resolved path — a respawned Attempt rewrites the same
+    // `report-<task>-<n>.md` and appends another `report_written` for it; the
+    // dedup lands here, BEFORE any file is read from disk.
+    if (evt.event === "report_written" && !seenReportPaths.has(evt.path)) {
+      seenReportPaths.add(evt.path);
+      reportEvents.push(evt);
+    }
   }
 
   const sections: string[] = [];
@@ -252,7 +270,16 @@ export function buildRetroDigest(events: readonly LedgerEvent[], stateDir: strin
     const block = byTask.get(task)!;
     const lines: string[] = [`## ${task}`];
     const allows = block.filter((e): e is Extract<LedgerEvent, { event: "permit_allowed" }> => e.event === "permit_allowed");
-    for (const evt of block) lines.push(...renderTaskEvent(evt, stateDir, attached));
+    // Only the Task's LATEST contract renders whole; earlier drafts on the
+    // same Task are 1-line epoch markers (their `seq` stays citable).
+    const latestContractSeq = block.findLast((e) => e.event === "contract_set")?.seq;
+    for (const evt of block) {
+      if (evt.event === "contract_set" && evt.seq !== latestContractSeq) {
+        lines.push(`seq=${evt.seq} contract_set (superseded draft) gate=${evt.gate}`);
+        continue;
+      }
+      lines.push(...renderTaskEvent(evt, stateDir, attached));
+    }
     const parade = paradeLine(allows);
     if (parade !== undefined) lines.push(parade);
     sections.push(lines.join("\n"));
@@ -345,17 +372,31 @@ export type ParsedRetro = { ok: true; proposals: RetroProposal[] } | { ok: false
 const PROPOSAL_CLASSES = ["gate-check", "contract-draft", "observation"] as const;
 
 /**
+ * Strips an enclosing Markdown code fence (` ```json … ``` ` or ` ``` … ``` `)
+ * when the WHOLE output is fenced (v0.0.89, ADR 0045 §4) — LLM lanes wrap
+ * their JSON despite the prompt's no-fence law, and a fenced-but-valid answer
+ * must parse. The opening fence line (` ```json `, ` ``` `) and the closing
+ * fence both go; anything not enclosed passes through untouched.
+ */
+function stripMarkdownFence(output: string): string {
+  const fenced = output.match(/^```[^\n]*\n([\s\S]*?)\n?```\s*$/);
+  return fenced === null ? output : fenced[1]!;
+}
+
+/**
  * The strict output contract (ticket 03 item 4): `JSON.parse` plus a shape
  * check — the root object carries exactly `proposals`, each proposal exactly
  * class/evidence/pattern/text, every cited seq exists in the ledger.
  * Whole-parse, watch-grade: one bad proposal fails the whole output, never a
- * partial read. An empty list is legal — an honest nothing-proposed.
+ * partial read. An empty list is legal — an honest nothing-proposed. The
+ * parse tolerates an enclosing Markdown code fence around the JSON (v0.0.89,
+ * ADR 0045 §4); everything else stays strict.
  */
 export function parseRetroProposals(output: string, knownSeqs: ReadonlySet<number>): ParsedRetro {
   const bad = (error: string): ParsedRetro => ({ ok: false, error });
   let parsed: unknown;
   try {
-    parsed = JSON.parse(output.trim());
+    parsed = JSON.parse(stripMarkdownFence(output.trim()));
   } catch (err) {
     return bad(`output is not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
   }

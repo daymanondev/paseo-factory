@@ -1,12 +1,14 @@
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
+import { handleSpoolRequest } from "../plugin/server/spool.ts";
 import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import type { AgentPermissionRequest, AgentPermissionResponse } from "@getpaseo/protocol/agent-types";
 import { createFactory } from "../plugin/server/core/factory.ts";
-import { writeProjectRegistration } from "../plugin/server/core/project.ts";
+import { writeProjectRegistration, resolveProject } from "../plugin/server/core/project.ts";
+import { factoryRegistryFor } from "../plugin/server/projects.ts";
 import {
   createChoke,
   startGitBlockIngestion,
@@ -515,12 +517,246 @@ test("choke.onPermissionAsked and resolveSeatAtProjectRoot enforce seat-write-fe
   );
   assert.equal(sent.at(-1)?.response.behavior, "deny", "dispatcher session denied running rm -rf ai-game");
 
-  const deniedEvents = factory.ledger.events
+  const deniedEvents = factoryRegistryFor(stateDir, { root: factory })
+    .factoryForProject("ws-123456")
+    .ledger.events // v0.0.89: the denial lands in the OWNING Project's Factory, not the root one
     .filter((e) => e.event === "permit_denied")
     .filter((e) => e.agent === "chat-session-7c5ac02");
   assert.equal(deniedEvents.length, 2);
   assert.equal(deniedEvents[0]?.rule, "seat-write-fence");
   assert.equal(deniedEvents[1]?.rule, "seat-write-fence");
+});
+
+test("Seam 3 (v0.0.89, ADR 0045 §3): allowed Supervisor, Lead, and dispatcher seat asks answer allow() with ZERO permit_allowed lines — seats are deny-only in the Ledger", async (t) => {
+  const dir = makeTempDir("choke-seat-deny-only-");
+  disposeDir(t, dir);
+  const workspace = join(dir, "ws");
+  const stateDir = join(dir, "state");
+  mkdirSync(workspace, { recursive: true });
+  writeFileSync(join(workspace, "probe.txt"), "x\n");
+  gitCommitAll(workspace, "base");
+
+  writeProjectRegistration(stateDir, "ws-123456", {
+    root: workspace,
+    supervisor: "sup-9",
+    lead: "lead-9",
+    dispatchers: ["chat-session-9d1"],
+  });
+
+  const factory = createFactory({ stateDir });
+  const choke = createChoke({ factory, homeDir: "/fake-home" });
+
+  const sent: { agentId: string; requestId: string; response: AgentPermissionResponse }[] = [];
+  const paseo: PaseoResponderApi = {
+    agents: {
+      ref(agentId: string) {
+        return {
+          async respondToPermission({ requestId, response }) {
+            sent.push({ agentId, requestId, response });
+          },
+        };
+      },
+    },
+  };
+
+  const ask = async (
+    agent: { id: string; cwd: string; labels?: Record<string, string>; title?: string | null },
+    id: string,
+    request: Omit<AgentPermissionRequest, "id" | "provider">,
+  ): Promise<void> => {
+    await choke.onPermissionAsked({ agent, request: { id, provider: "opencode", ...request } }, paseo);
+  };
+
+  // Routine orchestration turns: a read/status shell call, a whitelisted
+  // memory write, and a paseo_factory MCP tool call — on all three seat kinds.
+  const shell = (command: string): Omit<AgentPermissionRequest, "id" | "provider"> => ({
+    name: "Bash",
+    kind: "tool",
+    detail: { type: "shell", command, cwd: workspace },
+  });
+  await ask({ id: "sup-9", cwd: workspace, labels: { seat: "supervisor", project: "ws-123456" } }, "sup-read-1", shell("git status --short"));
+  await ask(
+    { id: "sup-9", cwd: workspace, labels: { seat: "supervisor", project: "ws-123456" } },
+    "sup-mcp-1",
+    { name: "mcp__paseo_factory__factory_status", kind: "tool" },
+  );
+  await ask({ id: "lead-9", cwd: workspace, labels: { seat: "lead", project: "ws-123456" } }, "lead-read-1", shell("ls -la docs/"));
+  await ask(
+    { id: "lead-9", cwd: workspace, labels: { seat: "lead", project: "ws-123456" } },
+    "lead-write-1",
+    { name: "Write", kind: "tool", detail: { type: "write", filePath: "AGENTS.md", content: "# rule\n" } },
+  );
+  await ask({ id: "chat-session-9d1", cwd: workspace, title: "New Chat", labels: {} }, "disp-read-1", shell("cat package.json"));
+
+  assert.equal(sent.length, 5, "every allowed seat ask is answered");
+  assert.ok(sent.every((x) => x.response.behavior === "allow"), "allowed seat asks call allow() immediately");
+  const projectFactory = factoryRegistryFor(stateDir, { root: factory }).factoryForProject("ws-123456");
+  for (const ledger of [factory.ledger, projectFactory.ledger]) {
+    assert.equal(
+      ledger.events.filter((e) => e.event === "permit_allowed").length,
+      0,
+      "an allowed seat ask appends ZERO permit_allowed lines — root and owning Project alike",
+    );
+  }
+  assert.equal(factory.ledger.events.length, 0, "no ledger line of any kind lands in the root Factory for allowed seat asks");
+
+  // The deny side is unchanged: a seat violation records permit_denied in
+  // full — task (the seat name), agent, permission, command, and rule — in
+  // the OWNING Project's Factory (v0.0.89 routing).
+  await ask({ id: "sup-9", cwd: workspace, labels: { seat: "supervisor", project: "ws-123456" } }, "sup-deny-1", shell("npm install"));
+  assert.equal(sent.at(-1)?.response.behavior, "deny");
+  await ask({ id: "lead-9", cwd: workspace, labels: { seat: "lead", project: "ws-123456" } }, "lead-deny-1", shell("git push --force origin main"));
+  assert.equal(sent.at(-1)?.response.behavior, "deny");
+  const denied = projectFactory.ledger.events.filter((e) => e.event === "permit_denied");
+  assert.equal(denied.length, 2, "only the violations are recorded");
+  const supDenied = denied.find((e) => e.agent === "sup-9")!;
+  assert.equal(supDenied.task, "supervisor");
+  assert.equal(supDenied.name, "Bash");
+  assert.equal(supDenied.kind, "tool");
+  assert.equal(supDenied.command, "npm install", "seat denials keep the full command");
+  assert.equal(supDenied.rule, "seat-write-fence");
+  const leadDenied = denied.find((e) => e.agent === "lead-9")!;
+  assert.equal(leadDenied.task, "lead");
+  assert.equal(leadDenied.command, "git push --force origin main", "Lead denials keep the full command too");
+  assert.equal(leadDenied.rule, "dangerous-git");
+});
+
+test("Seam 3 (v0.0.89): permit_denied lands in the OWNING Project's Factory — two registered Projects route by their git roots", async (t) => {
+  const dir = makeTempDir("choke-permit-routing-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const rootA = join(dir, "project-a");
+  const rootB = join(dir, "project-b");
+  for (const root of [rootA, rootB]) {
+    mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, "probe.txt"), "x\n");
+    gitCommitAll(root, "base");
+  }
+  // Register under the CANONICAL slugs so the workspace arm of the
+  // context-first resolution binds each root to its own Project.
+  const resolvedA = resolveProject(rootA);
+  const resolvedB = resolveProject(rootB);
+  const slugA = resolvedA.ok ? resolvedA.slug : "";
+  const slugB = resolvedB.ok ? resolvedB.slug : "";
+  assert.ok(slugA !== "" && slugB !== "" && slugA !== slugB, `two distinct canonical slugs: ${slugA} / ${slugB}`);
+  writeProjectRegistration(stateDir, slugA, { root: rootA, supervisor: "sup-a", lead: "lead-a" });
+  writeProjectRegistration(stateDir, slugB, { root: rootB, supervisor: "sup-b", lead: "lead-b" });
+
+  const factory = createFactory({ stateDir });
+  const choke = createChoke({ factory, homeDir: "/fake-home" });
+  const sent: { agentId: string; requestId: string; response: AgentPermissionResponse }[] = [];
+  const paseo: PaseoResponderApi = {
+    agents: {
+      ref(agentId: string) {
+        return {
+          async respondToPermission({ requestId, response }) {
+            sent.push({ agentId, requestId, response });
+          },
+        };
+      },
+    },
+  };
+
+  const denyAt = async (agentId: string, cwd: string, id: string): Promise<void> => {
+    await choke.onPermissionAsked(
+      {
+        agent: { id: agentId, cwd, labels: { seat: "supervisor" } },
+        request: { id, provider: "opencode", name: "Bash", kind: "tool", detail: { type: "shell", command: "npm install", cwd } },
+      },
+      paseo,
+    );
+  };
+  await denyAt("sup-a", rootA, "route-a-1");
+  await denyAt("sup-b", rootB, "route-b-1");
+  assert.ok(sent.every((x) => x.response.behavior === "deny"));
+
+  const registry = factoryRegistryFor(stateDir, { root: factory });
+  const denialsOf = (slug: string) => registry.factoryForProject(slug).ledger.events.filter((e) => e.event === "permit_denied");
+  assert.equal(denialsOf(slugA).length, 1, "Project A's Factory carries its own denial");
+  assert.equal(denialsOf(slugA)[0]?.agent, "sup-a");
+  assert.equal(denialsOf(slugA)[0]?.command, "npm install", "the routed line keeps the full command");
+  assert.equal(denialsOf(slugB).length, 1, "Project B's Factory carries its own denial");
+  assert.equal(denialsOf(slugB)[0]?.agent, "sup-b");
+  assert.equal(factory.ledger.events.length, 0, "the shared root Factory records nothing itself");
+});
+
+test("Seam 3 (v0.0.89): the WIRED choke — registry.root bound at the shell — judges Peer asks and synthetic asks through the owning Project's Factory", async (t) => {
+  const dir = makeTempDir("choke-wired-root-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const root = join(dir, "wired-ws");
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, "probe.txt"), "x\n");
+  gitCommitAll(root, "base");
+  const resolved = resolveProject(root);
+  assert.ok(resolved.ok, "the workspace resolves to a canonical slug");
+  const slug = resolved.slug;
+
+  // The plugin shell's exact wiring (plugin/index.server.ts): one process-wide
+  // registry; the choke's Factory is registry.root while every Contract lands
+  // in the owning Project's Factory through the routed spool.
+  const registry = factoryRegistryFor(stateDir, { root: createFactory({ stateDir }) });
+  const wiredRoot = registry.root;
+  const choke = createChoke({ factory: wiredRoot, homeDir: "/fake-home" });
+  const sent: { agentId: string; requestId: string; response: AgentPermissionResponse }[] = [];
+  const paseo: PaseoResponderApi = {
+    agents: {
+      ref(agentId: string) {
+        return {
+          async respondToPermission({ requestId, response }) {
+            sent.push({ agentId, requestId, response });
+          },
+        };
+      },
+    },
+  };
+
+  const contractReply = await handleSpoolRequest(
+    wiredRoot,
+    { id: "w-c1", kind: "contract", task: "T-01", workspace: root, gate: "true", artifact: "probe.txt", submitter: "owner" },
+    {},
+    registry,
+  );
+  assert.equal(contractReply.ok, true, "the wired spool routes the Contract");
+  const worktree = join(stateDir, "projects", slug, "worktrees", "T-01");
+  mkdirSync(worktree, { recursive: true });
+  const project = registry.factoryForProject(slug);
+  project.requestSpawn({ task: "T-01", provider: "opencode/minimax-m2.5-free", arity: 1, worktree });
+  assert.notEqual(project.contractFor("T-01"), undefined, "the OWNING Project's Factory carries the Contract");
+  assert.equal(wiredRoot.contractFor("T-01"), undefined, "the wired root Factory holds no Contract after isolation");
+
+  // A contracted Peer's live ask is judged, answered, and recorded in the
+  // owning Project's Ledger — never silently ignored for want of a root Contract.
+  await choke.onPermissionAsked(
+    {
+      agent: { id: "peer-w1", cwd: worktree, labels: { seat: "agent", project: slug, task: "T-01" } },
+      request: { id: "w-ask-1", provider: "opencode", name: "Bash", kind: "tool", detail: { type: "shell", command: "git status", cwd: worktree } },
+    },
+    paseo,
+  );
+  assert.equal(sent.length, 1, "the contracted Peer's ask is answered exactly once");
+  assert.equal(sent[0]?.response.behavior, "allow");
+  const leanAllows = project.ledger.events.filter((e) => e.event === "permit_allowed");
+  assert.equal(leanAllows.length, 1, "the allowed ask lands in the OWNING Project's Ledger");
+  assert.equal("command" in leanAllows[0]!, false, "the Peer allow stays lean (no command body)");
+  assert.equal(wiredRoot.ledger.events.length, 0, "the root Factory records nothing itself");
+
+  // The spool's synthetic ask rides the same routing — no unknown-task refusal.
+  const askReply = await handleSpoolRequest(
+    wiredRoot,
+    { id: "w-ask-s", kind: "ask", task: "T-01", command: "git status", cwd: worktree, agent: "peer-w1" },
+    { ask: choke.spoolAskHandler },
+    registry,
+  );
+  assert.equal(askReply.ok, true, `the synthetic ask judges through the owning Project (${JSON.stringify(askReply)})`);
+  assert.equal(project.ledger.events.filter((e) => e.event === "permit_allowed").length, 2, "the synthetic allow lands beside the live one");
+
+  // The create-mode pin resolves its judging Factory the same way.
+  assert.equal(
+    choke.pinCreateMode({ provider: "claude/claude-sonnet-4-6", cwd: worktree, modeId: "bypassPermissions" }, { seat: "agent" })?.modeId,
+    "default",
+    "a contracted Claude worker in a Project worktree still pins to Always Ask",
+  );
 });
 
 test("normalizeAgentCreateRequest prefixes bare model IDs without '/' and labels untagged 'Supervisor — ...' / 'Lead — ...' creations at registered <project-root> (v0.0.24, T-03)", (t) => {
@@ -749,7 +985,8 @@ test("choke.onPermissionAsked enforces seat-paseo-tool-fence and denies factory 
     paseo,
   );
   assert.equal(sent.at(-1)?.response.behavior, "deny", "pkill plugin-process.js must be denied");
-  const pkillDenied = factory.ledger.events.filter((e) => e.event === "permit_denied" && e.rule === "process-kill");
+  const projectLedger = factoryRegistryFor(stateDir, { root: factory }).factoryForProject("repo-123456").ledger; // v0.0.89: denials land in the owning Project
+  const pkillDenied = projectLedger.events.filter((e) => e.event === "permit_denied" && e.rule === "process-kill");
   assert.equal(pkillDenied.length, 1);
 
   // 4. writes to <stateDir>/ledger.jsonl or mailbox.jsonl denied with seat-write-fence
@@ -773,7 +1010,7 @@ test("choke.onPermissionAsked enforces seat-paseo-tool-fence and denies factory 
     assert.equal(sent.at(-1)?.response.behavior, "deny", `command '${badCmd}' must be denied`);
   }
 
-  const toolFenceEvents = factory.ledger.events.filter(
+  const toolFenceEvents = projectLedger.events.filter(
     (e) => e.event === "permit_denied" && e.rule === "seat-paseo-tool-fence",
   );
   assert.equal(toolFenceEvents.length, 5);

@@ -881,3 +881,129 @@ function steerText(sent: { agentId: string; text: string } | undefined): string 
   assert.ok(sent !== undefined, "a prompt was sent");
   return sent.text;
 }
+
+// ---- Seam 1 (v0.0.89, ADR 0045 §1): the file-based spool over the Per-Project Factory registry ----
+
+import { createFactoryRegistry } from "../plugin/server/projects.ts";
+import { resolveProject as resolveCoreProject, writeProjectRegistration as writeCoreRegistration } from "../plugin/server/core/project.ts";
+import { CorrelationRegistry } from "../plugin/server/core/correlations.ts";
+
+/**
+ * The production wiring in miniature, twice over: two registered Projects,
+ * one Per-Project Factory registry, the surface handlers, and the file-based
+ * spool watcher — `startSpool(stateDir, registry.root, { registry, ... })`,
+ * exactly the shape `plugin/index.server.ts` wires since v0.0.89. Both
+ * Projects contract and claim the SAME Task id (`T-01`) through their own
+ * dropped request files, concurrently.
+ */
+function makeTwinSpool(t: TestContext) {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const home = join(dir, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const projects: { root: string; slug: string }[] = [];
+  for (const name of ["project-a", "project-b"]) {
+    const root = join(dir, name);
+    mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, "README.md"), "x\n");
+    gitCommitAll(root);
+    const resolved = resolveCoreProject(root);
+    assert.ok(resolved.ok, `${name} must resolve`);
+    writeCoreRegistration(stateDir, resolved.slug, { root: resolved.root });
+    projects.push({ root: resolved.root, slug: resolved.slug });
+  }
+  const registry = createFactoryRegistry({ stateDir });
+  t.after(() => registry.stop());
+  const fake = fakeDaemon([]);
+  const surface = createSurfaceHandlers({
+    factory: registry.root,
+    registry,
+    stateDir,
+    home,
+    daemon: fake.daemon,
+    stopAgent: async () => ({ ok: true }),
+    cleanupDaemonWorkspaces: async () => ({ ok: true, removedWorkspaceIds: [], removedProjectIds: [] }),
+  });
+  const spool = startSpool(stateDir, registry.root, {
+    pollMs: POLL_MS,
+    registry,
+    projectReset: async (request) => {
+      const reply = await surface.projectReset({
+        ...(request.workspace !== undefined ? { projectRoot: request.workspace } : {}),
+        ...(request.project !== undefined ? { project: request.project } : {}),
+        ...(request.keepSeats !== undefined ? { keepSeats: request.keepSeats } : {}),
+      });
+      return reply.ok
+        ? { id: request.id, ok: true as const, summary: reply.summary, project: reply.project, purgedEvents: reply.purgedEvents, tasks: reply.tasks }
+        : { id: request.id, ok: false as const, code: reply.code, message: reply.error };
+    },
+  });
+  t.after(() => spool.stop());
+  return { dir, home, stateDir, registry, surface, spool, projects, fake };
+}
+
+test("Seam 1: two Projects contract and claim the same Task id through dropped spool files — and the reset of one leaves the other untouched", async (t) => {
+  const { stateDir, registry, projects } = makeTwinSpool(t);
+  const [a, b] = projects;
+
+  // Both Projects' Contracts drop concurrently — one request file each.
+  dropRequest(spoolRootFor(stateDir), { id: "c-a", kind: "contract", task: "T-01", workspace: a.root, gate: "true", artifact: "README.md", submitter: "owner" });
+  dropRequest(spoolRootFor(stateDir), { id: "c-b", kind: "contract", task: "T-01", workspace: b.root, gate: "true", artifact: "README.md", submitter: "owner" });
+  await until(() => {
+    assert.equal(readReply(spoolRootFor(stateDir), "c-a").ok, true, "project-a's contract replies ok");
+    assert.equal(readReply(spoolRootFor(stateDir), "c-b").ok, true, "project-b's contract replies ok");
+  });
+
+  // The Peers' Correlation bindings route their concurrent claims.
+  const correlations = new CorrelationRegistry(stateDir);
+  correlations.issue({ role: "agent", projectSlug: a.slug, projectRoot: a.root, task: "T-01", agentId: "peer-a" });
+  correlations.issue({ role: "agent", projectSlug: b.slug, projectRoot: b.root, task: "T-01", agentId: "peer-b" });
+  writeFileSync(join(a.root, "work.txt"), "a\n");
+  writeFileSync(join(b.root, "work.txt"), "b\n");
+  const shaA = gitCommitAll(a.root, "work-a");
+  const shaB = gitCommitAll(b.root, "work-b");
+  dropRequest(spoolRootFor(stateDir), { id: "cl-a", kind: "claim", task: "T-01", sha: shaA, agent: "peer-a" });
+  dropRequest(spoolRootFor(stateDir), { id: "cl-b", kind: "claim", task: "T-01", sha: shaB, agent: "peer-b" });
+  await until(() => {
+    assert.equal(readReply(spoolRootFor(stateDir), "cl-a").verdict, "green", "project-a's claim ends green");
+    assert.equal(readReply(spoolRootFor(stateDir), "cl-b").verdict, "green", "project-b's claim ends green");
+  });
+
+  // Every event and artifact lives strictly under the owning Project's directory.
+  for (const project of [a, b]) {
+    const projectDir = projectStateDir(stateDir, project.slug);
+    const ledger = readFileSync(join(projectDir, "ledger.jsonl"), "utf8").trim().split("\n");
+    assert.ok(ledger.some((line) => JSON.parse(line).event === "contract_set"), `${project.slug}: contract in its own ledger`);
+    assert.ok(ledger.some((line) => JSON.parse(line).event === "gate_finished"), `${project.slug}: verdict in its own ledger`);
+    assert.ok(existsSync(join(projectDir, "report-T-01-1.md")), `${project.slug}: report in its own directory`);
+    assert.ok(existsSync(join(projectDir, "gate-T-01-1.log")), `${project.slug}: gate log in its own directory`);
+  }
+  assert.ok(!existsSync(join(stateDir, "ledger.jsonl")), "no root ledger exists");
+
+  // An unscoped request naming the shared Task id refuses by name through the
+  // file protocol too — never a guess onto the wrong Project.
+  dropRequest(spoolRootFor(stateDir), { id: "sp-amb", kind: "spawn", task: "T-01", provider: "pi/zai/glm-5.3", arity: 1 });
+  await until(() => {
+    const reply = readReply(spoolRootFor(stateDir), "sp-amb");
+    assert.equal(reply.ok, false);
+    assert.equal(reply.code, "ambiguous-task-project");
+  });
+
+  // The reset of project-a (via the spool's reset kind, keepSeats) leaves
+  // project-b's ledger byte-for-byte untouched.
+  const ledgerBBefore = readFileSync(join(projectStateDir(stateDir, b.slug), "ledger.jsonl"), "utf8");
+  dropRequest(spoolRootFor(stateDir), { id: "rst-a", kind: "reset", project: a.slug, keepSeats: true });
+  await until(() => {
+    assert.equal(readReply(spoolRootFor(stateDir), "rst-a").ok, true, "project-a resets ok");
+  });
+  assert.equal(
+    readFileSync(join(projectStateDir(stateDir, b.slug), "ledger.jsonl"), "utf8"),
+    ledgerBBefore,
+    "project-b's ledger bytes are untouched by project-a's reset",
+  );
+  assert.ok(existsSync(join(projectStateDir(stateDir, b.slug), "report-T-01-1.md")), "project-b's report survives");
+  assert.ok(
+    !existsSync(join(projectStateDir(stateDir, a.slug), "report-T-01-1.md")),
+    "project-a's own report is purged",
+  );
+});

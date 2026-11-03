@@ -530,3 +530,69 @@ test("status prints the Token Usage section per Project with recorded sessions (
   assert.equal(quiet.status, 0, quiet.stderr);
   assert.ok(!quiet.stdout.includes("Token Usage"), "no recorded sessions — no section");
 });
+
+// ---- Seam 1 (v0.0.89, ADR 0045 §1): status reads the per-Project ledgers ------------------
+
+import { writeProjectRegistration } from "../plugin/server/projects.ts";
+import { resolveProject } from "../plugin/server/core/project.ts";
+
+test("Seam 1: status --project reads exactly that Project's ledger; unscoped aggregates every registered Project with [slug] attribution", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const home = join(dir, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const ownerEnv = { PASEO_HOME: home };
+
+  // Two registered Projects, each with its own hand-written per-Project
+  // ledger — both use the SAME Task id (the per-Project namespace).
+  const slugs: string[] = [];
+  for (const name of ["project-a", "project-b"]) {
+    const root = join(dir, name);
+    mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, "README.md"), "x\n");
+    gitCommitAll(root);
+    const resolved = resolveProject(root);
+    assert.ok(resolved.ok);
+    writeProjectRegistration(stateDir, resolved.slug, { root: resolved.root });
+    slugs.push(resolved.slug);
+  }
+  const [slugA, slugB] = slugs;
+  const full = "b1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0";
+  const writeProjectLedger = (slug: string, task: string): void => {
+    const projectDir = join(stateDir, "projects", slug);
+    mkdirSync(projectDir, { recursive: true });
+    writeFileSync(
+      join(projectDir, "ledger.jsonl"),
+      [
+        { seq: 1, ts, event: "contract_set", task, workspace: "/tmp/ws", gate: "true", artifact: "a" },
+        { seq: 2, ts, event: "claim_reported", task, attempt: 1, sha: full, agent: "agent-1" },
+        { seq: 3, ts, event: "gate_finished", task, attempt: 1, exit: 0, verdict: "green", note: "", sha: full },
+      ].map((event) => JSON.stringify(event)).join("\n") + "\n",
+    );
+  };
+  writeProjectLedger(slugA, "T-01");
+  writeProjectLedger(slugB, "T-01");
+
+  // --project reads exactly that Project's ledger — one row, no prefix.
+  const scoped = await run(ownerCli, ["status", "--project", slugA], ownerEnv);
+  assert.equal(scoped.status, 0, scoped.stderr);
+  assert.equal(
+    establishedFields(scoped.stdout),
+    `T-01 attempts=1 verdict=green sha=${full.slice(0, 7)} accepted=no eye=- choke=0/0/0\n`,
+    "the scoped status renders only the named Project's tasks",
+  );
+
+  // An unregistered slug is a named refusal, never a guess.
+  const unknown = await run(ownerCli, ["status", "--project", "never-registered"], ownerEnv);
+  assert.equal(unknown.status, 2);
+  assert.match(unknown.stderr, /never-registered.*not registered/);
+
+  // Unscoped, every registered Project's rows render — each attributed with
+  // its slug, so the two T-01 rows never merge.
+  const aggregate = await run(ownerCli, ["status"], ownerEnv);
+  assert.equal(aggregate.status, 0, aggregate.stderr);
+  const lines = establishedFields(aggregate.stdout).trim().split("\n");
+  assert.equal(lines.length, 2, "both Projects' T-01 rows render");
+  assert.match(lines[0]!, new RegExp(`^\\[${slugA}\\] T-01 `));
+  assert.match(lines[1]!, new RegExp(`^\\[${slugB}\\] T-01 `));
+});

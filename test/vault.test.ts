@@ -24,7 +24,10 @@ import {
   readVaultStatus,
   readLedgerImports,
   reconcileVaultLedgers,
+  planHistoryImport,
   planLegacyIdentity,
+  migrateLegacyRootState,
+  parseLedgerJsonl,
   resolveProject,
   resolveVaultApps,
   saveVaultConfig,
@@ -1071,6 +1074,63 @@ test("reconcileVaultLedgers refuses damaged history and retains original source 
     assert.equal(value.plan.sources[0]!.lines, damaged);
     return true;
   });
+});
+
+test("root-to-Project migration preserves event identity so Vault history import stays a duplicate-safe no-op", (t) => {
+  const dir = makeTempDir(); disposeDir(t, dir);
+  const stateDir = join(dir, "state"); mkdirSync(stateDir, { recursive: true });
+  const alphaRoot = join(dir, "alpha-root");
+  const writer = "root-writer";
+  const contractId = "event:019a0000-0000-7000-8000-000000000001";
+  const claimId = "event:019a0000-0000-7000-8000-000000000002";
+  const gateId = "event:019a0000-0000-7000-8000-000000000003";
+  const reportId = "event:019a0000-0000-7000-8000-000000000004";
+  const acceptedId = "event:019a0000-0000-7000-8000-000000000005";
+  const identified = (seq: number, event: Record<string, unknown>): string =>
+    JSON.stringify({ seq, ts: `2026-11-01T00:0${seq}:00.000Z`, schema_version: 2, provenance: { writer_id: writer }, ...event }) + "\n";
+  const raw =
+    JSON.stringify({ seq: 1, ts: "2026-11-01T00:00:00.000Z", event: "ledger_schema", schema_version: 2, version: 2, ledger_id: "root-namespace", writer_id: writer, event_id: "schema:root-namespace", provenance: { writer_id: writer } }) + "\n" +
+    identified(2, { event: "contract_set", event_id: contractId, epoch_id: contractId, task: "T-01", workspace: alphaRoot, gate: "true", artifact: "out.txt", description: "the accepted brief" }) +
+    identified(3, { event: "claim_reported", event_id: claimId, epoch_id: contractId, task: "T-01", attempt: 1, sha: "def456", agent: "agent-peer-1" }) +
+    identified(4, { event: "gate_started", event_id: `event:019a0000-0000-7000-8000-000000000006`, epoch_id: contractId, task: "T-01", attempt: 1, cmd: "true" }) +
+    identified(5, { event: "gate_finished", event_id: gateId, epoch_id: contractId, task: "T-01", attempt: 1, verdict: "green", exit: 0, note: "passed", sha: "def456abc", outputPath: join(stateDir, "gate-T-01-1.log") }) +
+    identified(6, { event: "report_written", event_id: reportId, epoch_id: contractId, task: "T-01", attempt: 1, path: join(stateDir, "report-T-01-1.md") }) +
+    identified(7, { event: "attempt_accepted", event_id: acceptedId, epoch_id: contractId, task: "T-01", attempt: 1, accepted_by: "owner" });
+  writeFileSync(join(stateDir, "ledger.jsonl"), raw);
+  writeFileSync(join(stateDir, "gate-T-01-1.log"), "gate evidence\n");
+  writeFileSync(join(stateDir, "report-T-01-1.md"), "report evidence\n");
+
+  const result = migrateLegacyRootState(stateDir, { projects: [{ slug: "alpha", gitRoot: alphaRoot }] });
+  assert.equal(result.migrated, true);
+  assert.deepEqual(result.projects, ["alpha"]);
+  assert.match(result.archiveDir!, /legacy-root-/);
+
+  const alphaPath = join(stateDir, "projects", "alpha", "ledger.jsonl");
+  const alphaRaw = readFileSync(alphaPath, "utf8");
+  const parsed = parseLedgerJsonl(alphaRaw);
+  assert.equal(parsed.corrupt, undefined);
+  const fence = parsed.events.find((event) => event.event === "ledger_schema");
+  assert.equal(fence?.ledger_id, "root-namespace:alpha", "each destination Ledger fences its own namespace");
+  const facts = parsed.events.filter((event) => event.event !== "ledger_schema");
+  assert.deepEqual(facts.map((event) => event.seq), [1, 2, 3, 4, 5, 6], "facts renumber contiguously; the fence closes the file");
+  assert.deepEqual(facts.map((event) => event.event_id), [contractId, claimId, `event:019a0000-0000-7000-8000-000000000006`, gateId, reportId, acceptedId], "every surviving eventId is preserved unchanged");
+  assert.ok(facts.every((event) => event.epoch_id === contractId), "every contractEpochId is preserved unchanged");
+  assert.equal((facts.find((event) => event.event === "report_written") as unknown as Record<string, unknown>).path, join(stateDir, "projects", "alpha", "report-T-01-1.md"));
+  assert.equal(readFileSync(join(stateDir, "projects", "alpha", "report-T-01-1.md"), "utf8"), "report evidence\n");
+  assert.equal(readFileSync(join(result.archiveDir!, "ledger.jsonl"), "utf8"), raw, "the archived root keeps the original bytes verbatim");
+
+  // ADR 0023 duplicate safety: a Vault node's copy of the migrated Ledger
+  // re-imports as a pure no-op — same stable identities, zero additions.
+  const plan = planHistoryImport({ existingLines: alphaRaw, sources: [{ nodeId: "node-b", lines: alphaRaw }] });
+  assert.equal(plan.status, "duplicate");
+  assert.deepEqual(plan.additions, []);
+  assert.ok(plan.duplicates.includes(contractId) && plan.duplicates.includes(acceptedId));
+  assert.equal(reconcileVaultLedgers(alphaRaw, [{ nodeId: "holder", lines: alphaRaw }]), alphaRaw);
+
+  // The migrated Ledger is a live v2 Ledger for its Project's Factory: a
+  // writer opens it and the next fact continues the sequence.
+  const ledger = Ledger.open(alphaPath, { writerId: "post-migration-writer" });
+  assert.equal(ledger.append({ event: "retro_written", model: "copilot/gpt", outcome: "failed", durationMs: 1, error: "lane unavailable" }).seq, 8);
 });
 
 test("pullVault retains ambiguous legacy snapshots and leaves existing Ledger bytes unchanged", async (t) => {
