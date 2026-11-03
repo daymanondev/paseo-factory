@@ -1134,6 +1134,49 @@ test("role surfaces enforce rolling waves, modular isolated tests, bounded check
   }
 });
 
+test("Lead role surfaces require vertical user journeys after at most two setup waves (ADR 0044)", () => {
+  const project = { root: "/workspace/repo", slug: "repo" };
+  const input = { seat: "lead" as const, home: "/trial", stateDir: "/trial/state", nodePath: process.execPath,
+    path: "/usr/bin", lane: "codex", project };
+  for (const surface of [renderRoleContract("lead"), renderSeatContract("lead", project), ROLE_PROMPTS.lead,
+    renderSeatBootstrapPrompt(input), renderSeatBootstrap(input),
+    buildSeatKickoffPacket({ role: "lead", projectSlug: project.slug, projectRoot: project.root, ledgerEvents: [] })]) {
+    assert.match(surface, /at most 1–2 foundational setup waves/);
+    assert.match(surface, /T-01.*app shell.*harness.*design tokens.*T-02.*core schema.*repository seam/);
+    assert.match(surface, /T-03\+.*vertical user-facing journey slice.*interactive screen\/UI.*state\/data wiring.*journey test/);
+    assert.match(surface, /Never.*horizontal chains of backend-only micro-waves.*screens.*placeholders/);
+    assert.match(surface, /split.*distinct user journeys or screens.*rather than horizontal data-plumbing layers/);
+  }
+});
+
+test("Lead briefs preserve implementation freedom with focused journey verification (ADR 0044)", () => {
+  for (const surface of [renderRoleContract("lead"), renderSeatContract("lead", { root: "/workspace/repo", slug: "repo" }),
+    ROLE_PROMPTS.lead, buildSeatKickoffPacket({ role: "lead", projectSlug: "repo", projectRoot: "/workspace/repo", ledgerEvents: [] })]) {
+    assert.match(surface, /4-Part Brief.*concise/);
+    assert.match(surface, /Bounded Outcome.*Contract Boundary & Regression Invariants.*Excluded \/ Deferred to Later Waves.*Verification.*exact Gate command/);
+    assert.match(surface, /Do not pre-solve internal helper function signatures/);
+    assert.match(surface, /do not mandate 4–6 separate unit-test files per task/);
+    assert.match(surface, /1–2 focused slice\/journey test files suffice unless the repository's existing layout requires otherwise/);
+  }
+});
+
+test("Lead review accepts genuine contracted GREEN proof without inventing post-Gate probes (ADR 0044)", () => {
+  const project = { root: "/workspace/repo", slug: "repo" };
+  const input = { seat: "lead" as const, home: "/trial", stateDir: "/trial/state", nodePath: process.execPath,
+    path: "/usr/bin", lane: "codex", project };
+  for (const surface of [renderRoleContract("lead"), renderSeatContract("lead", project), ROLE_PROMPTS.lead,
+    renderSeatBootstrapPrompt(input), renderSeatBootstrap(input),
+    buildSeatKickoffPacket({ role: "lead", projectSlug: project.slug, projectRoot: project.root, ledgerEvents: [] })]) {
+    assert.match(surface, /Gate.*GREEN.*exit 0.*Watch.*no concern.*< 0\.5/);
+    assert.match(surface, /git show --stat "<sha>".*git diff "<sha>\^" "<sha>".*strictly against the 4-Part Brief/);
+    assert.match(surface, /If the claimed behavior disappeared, would the Peer's test fail\?/);
+    assert.match(surface, /contracted outcome.*no out-of-scope regressions or fake tests.*proof is genuine.*must accept and land immediately/);
+    assert.match(surface, /Never write or execute ad-hoc out-of-band shell\/node\/python scripts.*uncontracted edge cases after a GREEN Gate/);
+    for (const example of ["node -e", "node <<'JS'", "npx tsx -e", "python3 -c"]) assert.ok(surface.includes(example));
+    assert.match(surface, /polish.*newly discovered edge case outside.*Contract.*downstream.*after landing.*Stable Checkpoint/);
+  }
+});
+
 test("role surfaces teach bounded serial waves, closure, and structured challenges (ADR 0029)", (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);
