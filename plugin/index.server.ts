@@ -571,7 +571,9 @@ export default function contribute(server: PluginServerContext) {
       // `ensureSeat("supervisor")` and `projectReset` run. Fire-and-forget:
       // the session never waits on the sweep, and its rules never touch the
       // active Supervisor/Lead workspace or any workspace hosting a live agent.
-      if (withEnv !== undefined && withEnv.env?.PASEO_FACTORY_SEAT === "supervisor") {
+      // A history open (v0.0.91) reads an old conversation — it never binds the
+      // seat, so it must not sweep either.
+      if (withEnv !== undefined && withEnv.env?.PASEO_FACTORY_SEAT === "supervisor" && request.purpose !== "history") {
         const openingWorkspaceId =
           typeof next.workspaceId === "string" && next.workspaceId.trim() !== "" ? next.workspaceId.trim() : undefined;
         void surface.sweepProjectWorkspaces({
