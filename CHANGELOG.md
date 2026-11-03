@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.89] - 2026-11-03
+
+- Isolate every registered Project's verification state (ADR 0045): the plugin server replaces its single root Factory with a lazy per-Project registry (`factoryForProject`), so each Project owns its own `ledger.jsonl`, Reports, Gate logs, and Retro files under `<stateDir>/projects/<slug>/` with an independent Task ID namespace and serialized writer lane. Every Spool command, permission hook, Layer-3 `git_blocked` entry, status poll, and surface RPC resolves the target Project context-first (explicit `--project` flag → Correlation token → workspace git-root/worktree extraction → unique Task lookup with an ambiguity refusal → single-Project fallback), and Project reset/delete touch only the target Project's directory and cached Factory with zero cross-Project blast radius.
+- Migrate legacy shared-root state automatically at startup: a one-time idempotent migration partitions the root `ledger.jsonl` into per-Project ledgers before the server serves traffic, compacting superseded `contract_set` drafts to stub summaries (latest draft kept in full), pruning Supervisor/Lead `permit_allowed` noise, trimming Peer `permit_allowed` commands, preserving `eventId`/`contractEpochId` for duplicate-safe Private vault admission, renumbering each Project's sequence `1..N` with remapped internal `seq` references, moving Reports/Gate logs/Retro files into their owning Project directory, and archiving the original root bytes under `archive/legacy-root-<timestamp>/`.
+- Record permits leanly: allowed asks on Supervisor, Lead, and dispatcher seats are approved silently with no Ledger line (deny-only recording with full `command` and `rule`), while contracted Peers append `permit_allowed` with metadata only (`task`, `agent`, `permission`); full command strings remain strictly on `permit_denied` and `git_blocked`, and Denial-stall detection is unchanged.
+- Scope Retro strictly per Project: `Run Retro` requires a selected Project (disabled with helper text in the "All projects" view, `retro-project-required` refusal for unscoped CLI/RPC calls), the digest renders only each Task's latest `contract_set` in full with earlier drafts as one-line `seq` headers, `report_written` paths are deduplicated before any Report is read, and the proposal parser strips Markdown code fences around the JSON array.
+
 ## [0.0.88] - 2026-11-03
 
 - Require vertical user-facing journey waves after initial setup, concise 4-Part Briefs, and contract-bounded Lead diff review with proof falsification and immediate acceptance of verified GREEN waves.
