@@ -6,7 +6,7 @@ import { join } from "node:path";
 import contribute from "../../plugin/index.server.ts";
 import { createFactory } from "../../plugin/server/core/factory.ts";
 import { upgradeFactory } from "../../plugin/server/core/history-upgrade.ts";
-import { writeProjectRegistration } from "../../plugin/server/core/project.ts";
+import { listProjectRegistrations, writeProjectRegistration } from "../../plugin/server/core/project.ts";
 import { enqueueLeadMail, deliverLeadMail, readLeadMailbox } from "../../plugin/server/core/mailbox.ts";
 import { planLegacyIdentity } from "../../plugin/server/core/history-identity.ts";
 
@@ -112,6 +112,28 @@ try {
   await until(() => (noSpool || existsSync(join(stateDir, "spool/replies/ordinary.json"))) && sent.length === 1 && readFileSync(join(stateDir, "ledger.jsonl"), "utf8").includes("blocked-before-upgrade"));
   if (!noSpool) assert.equal(JSON.parse(readFileSync(join(stateDir, "spool/replies/ordinary.json"), "utf8")).ok, true);
   assert.ok(readLeadMailbox(mailbox).inFlight);
+  // The sweep history gate (v0.0.91, ticket 02 / spec.md:88): a supervisor
+  // session open that BINDS the seat (purpose !== "history") fires the
+  // orphaned-workspace sweep — observed through the "session-open sweep" log
+  // the trigger emits — while the same session opened to READ an old
+  // conversation (purpose: "history") is recognized just the same (seat env
+  // re-carried) but never sweeps. The markers bracket the two drives so the
+  // test can attribute the (single) sweep line to the interactive arm alone.
+  console.log("SWEEP_ARM_INTERACTIVE");
+  const supervisorOpen = (purpose: string) => ({
+    request: {
+      agentId: "sup-open", cwd: workspace, env: {}, provider: "factory-supervisor",
+      purpose, workspaceId: "ws-open",
+    },
+  });
+  const interactiveEnv = await sessionOpenHook(supervisorOpen("interactive"), { paseo: daemon });
+  await new Promise((done) => setTimeout(done, 150)); // let the fire-and-forget sweep settle
+  assert.equal(interactiveEnv?.env?.PASEO_FACTORY_SEAT, "supervisor", "the interactive supervisor open is recognized");
+  assert.ok(listProjectRegistrations(stateDir).some((r) => r.supervisor === "sup-open"), "the interactive open binds the supervisor seat");
+  console.log("SWEEP_ARM_HISTORY");
+  const historyEnv = await sessionOpenHook(supervisorOpen("history"), { paseo: daemon });
+  await new Promise((done) => setTimeout(done, 150));
+  assert.equal(historyEnv?.env?.PASEO_FACTORY_SEAT, "supervisor", "the history open still re-carries the seat env");
   if (action === "resume") {
     const source = planLegacyIdentity(JSON.stringify({ seq: 1, ts: "2026-10-23T00:00:00Z", event: "contract_set", task: "REMOTE", workspace, gate: "true", artifact: "out", scope: ["remote"] }) + "\n", { writerId: "remote" });
     const imported = await handlers.get("factory.history.import")!({ project: projectSlug, sources: [{ nodeId: "holder", lines: source.events.map((event) => JSON.stringify(event) + "\n").join("") }] }, {});

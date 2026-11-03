@@ -576,6 +576,7 @@ export default function contribute(server: PluginServerContext) {
       if (withEnv !== undefined && withEnv.env?.PASEO_FACTORY_SEAT === "supervisor" && request.purpose !== "history") {
         const openingWorkspaceId =
           typeof next.workspaceId === "string" && next.workspaceId.trim() !== "" ? next.workspaceId.trim() : undefined;
+        log(`session-open sweep: supervisor ${request.agentId} opened at ${next.cwd} (${request.purpose ?? "no purpose"})`);
         void surface.sweepProjectWorkspaces({
           projectRoot: next.cwd,
           ...(openingWorkspaceId !== undefined ? { keepWorkspaceIds: [openingWorkspaceId] } : {}),
