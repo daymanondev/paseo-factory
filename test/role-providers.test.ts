@@ -140,10 +140,15 @@ test("v0.0.27 (ADR 0017 §1): reconcilePaseoRoleProviders sweeps the 29 sw2-* or
     ["factory-lead", "factory-peer", "factory-supervisor"],
     "exactly the three canonical factory providers are written",
   );
-  // Unrelated user providers are preserved verbatim.
-  for (const key of ["opencode", "claude", "codex", "omp", "agy", "glm-acp-agent", "muse"]) {
+  // Unrelated user providers are preserved verbatim — except `opencode`, which the
+  // spec v0.0.91 §3 XDG isolation arm augments (asserted below the loop).
+  for (const key of ["claude", "codex", "omp", "agy", "glm-acp-agent", "muse"]) {
     assert.deepEqual(providers[key], (before.agents as { providers: Record<string, unknown> }).providers[key], `user provider ${key} is untouched`);
   }
+  assert.equal(providers.opencode!.enabled, true, "the user's opencode entry keeps its own keys");
+  assert.deepEqual(providers.opencode!.env, {
+    XDG_STATE_HOME: join(home, "plugin-state", "paseo-factory", "opencode-state"),
+  }, "agents.providers.opencode.env gains only the isolated XDG_STATE_HOME");
   // The three role providers carry the ADR 0017 / ADR 0026 replacement `models` shape.
   assert.deepEqual(providers[FACTORY_ROLE_PROVIDERS.supervisor], {
     extends: "opencode",
@@ -151,7 +156,10 @@ test("v0.0.27 (ADR 0017 §1): reconcilePaseoRoleProviders sweeps the 29 sw2-* or
     description: providers[FACTORY_ROLE_PROVIDERS.supervisor]!.description,
     enabled: true,
     paseoTools: { enabled: false },
-    env: { PASEO_FACTORY_SEAT: "supervisor" },
+    env: {
+      PASEO_FACTORY_SEAT: "supervisor",
+      XDG_STATE_HOME: join(home, "plugin-state", "paseo-factory", "opencode-state"),
+    },
     models: [{ id: "glm-5.1", label: "glm-5.1", isDefault: true }],
   });
   const lead = providers[FACTORY_ROLE_PROVIDERS.lead]!;
@@ -539,4 +547,204 @@ test("reconcilePaseoRoleProviders and healFactoryRoleProvidersInConfig pin per-r
     healedPeer?.env?.PI_CODING_AGENT_DIR,
     join(home, "plugin-state", "paseo-factory", "pi-agent", "agent"),
   );
+});
+
+// ---- spec v0.0.91 §3: OpenCode v2 XDG_STATE_HOME isolation + agents.resumeOnStartup: false ----
+
+test("spec v0.0.91 §3 (User Story 12): reconcilePaseoConfigObject pins agents.resumeOnStartup: false — overwriting the 0.15.0-beta.1 legacy true — with or without paseoHome, idempotently", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+
+  // The 0.15.0-beta.1 legacy: agents.resumeOnStartup defaulted to true and was persisted
+  // in <paseoHome>/config.json — Paseo would re-prompt interrupted agents ahead of
+  // ADR 0003 (recoveredAttempts) and ADR 0013/0015 (startupRecovery) on every restart.
+  const legacy = liveLikeConfig();
+  (legacy.agents as Record<string, unknown>).resumeOnStartup = true;
+  const first = reconcilePaseoConfigObject(legacy, LANES, { paseoHome: join(dir, "paseo-home") });
+  assert.equal(first.changed, true, "the legacy resumeOnStartup: true is a real change");
+  assert.equal((first.config.agents as Record<string, unknown>).resumeOnStartup, false, "resumeOnStartup is pinned false");
+
+  // A second pass over the converged config is a no-op — boots and lane saves never churn the daemon.
+  const second = reconcilePaseoConfigObject(first.config, LANES, { paseoHome: join(dir, "paseo-home") });
+  assert.equal(second.changed, false, "the converged config reconciles to changed: false");
+  assert.equal((second.config.agents as Record<string, unknown>).resumeOnStartup, false);
+
+  // The pin is not gated on paseoHome — the resume guard stands even without plugin state.
+  const noHome = reconcilePaseoConfigObject(liveLikeConfig(), LANES);
+  assert.equal((noHome.config.agents as Record<string, unknown>).resumeOnStartup, false, "the pin does not depend on paseoHome");
+  assert.equal(reconcilePaseoConfigObject(noHome.config, LANES).changed, false, "no-paseoHome reconcile is idempotent too");
+});
+
+test("spec v0.0.91 §3 (User Story 9): with paseoHome, reconcile defaults XDG_STATE_HOME onto extends-opencode role providers and agents.providers.opencode.env so Paseo 0.15.0's V2Runtime never discovers a host-wide OpenCode v2 shared service", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const home = join(dir, "paseo-home");
+  writeConfig(home, liveLikeConfig());
+  const opencodeStateDir = join(home, "plugin-state", "paseo-factory", "opencode-state");
+
+  // Supervisor and Peer on opencode, Lead on claude-code — only the opencode-backed seats isolate.
+  const lanes: Lanes = { ...LANES, supervisor: "opencode/glm-5.1", worker: "opencode/glm-5.1" };
+  const result = reconcilePaseoRoleProviders(home, lanes);
+  assert.ok(result.ok && result.changed === true);
+  const after = readConfig(home);
+  const providers = (after.agents as { providers: Record<string, { extends?: string; env?: Record<string, string>; enabled?: boolean }> })
+    .providers;
+
+  // The opencode-backed role providers carry the plugin-owned state home — the dir whose
+  // `<XDG_STATE_HOME>/opencode/service.json` probe must never find the host-wide service.
+  assert.equal(providers[FACTORY_ROLE_PROVIDERS.supervisor]?.env?.XDG_STATE_HOME, opencodeStateDir, "factory-supervisor isolates XDG_STATE_HOME");
+  assert.equal(providers[FACTORY_ROLE_PROVIDERS.agent]?.env?.XDG_STATE_HOME, opencodeStateDir, "factory-peer isolates XDG_STATE_HOME");
+  assert.equal(providers[FACTORY_ROLE_PROVIDERS.lead]?.env?.XDG_STATE_HOME, undefined, "a claude-backed role provider never gains the OpenCode state dir");
+
+  // The base providers.opencode entry keeps its user keys and gains only env.XDG_STATE_HOME.
+  assert.equal(providers.opencode?.enabled, true, "the user's opencode entry keeps its own keys");
+  assert.equal(providers.opencode?.env?.XDG_STATE_HOME, opencodeStateDir, "agents.providers.opencode.env isolates XDG_STATE_HOME");
+
+  // Idempotent (User Story 13): a second reconcile over the converged config changes nothing.
+  const second = reconcilePaseoRoleProviders(home, lanes);
+  assert.ok(second.ok && second.changed === false, "the converged config reconciles to changed: false");
+
+  // Without a paseoHome the transform never pins XDG_STATE_HOME anywhere.
+  const noHome = reconcilePaseoConfigObject(liveLikeConfig(), lanes);
+  const noHomeProviders = (noHome.config.agents as { providers: Record<string, { env?: Record<string, string> }> }).providers;
+  assert.equal(noHomeProviders[FACTORY_ROLE_PROVIDERS.supervisor]?.env?.XDG_STATE_HOME, undefined, "no paseoHome — no role-provider XDG pin");
+  assert.equal(noHomeProviders.opencode?.env, undefined, "no paseoHome — the base opencode entry stays untouched");
+});
+
+test("spec v0.0.91 §3 (User Story 10): an explicit PASEO_OPENCODE_SERVER_URL or custom XDG_STATE_HOME survives reconciliation untouched — the isolation is a default, never an override", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const home = join(dir, "paseo-home");
+
+  // 1. An explicit PASEO_OPENCODE_SERVER_URL on agents.providers.opencode.env — the Owner
+  //    runs their own OpenCode server and points Paseo at it.
+  const serverUrlConfig = liveLikeConfig();
+  (serverUrlConfig.agents as { providers: Record<string, { enabled?: boolean; env?: Record<string, string> }> }).providers.opencode = {
+    enabled: true,
+    env: { PASEO_OPENCODE_SERVER_URL: "http://127.0.0.1:4096/openapi.json" },
+  };
+  writeConfig(home, serverUrlConfig);
+  const serverUrlResult = reconcilePaseoRoleProviders(home, { ...LANES, worker: "opencode/glm-5.1" });
+  assert.ok(serverUrlResult.ok && serverUrlResult.changed === true);
+  const serverUrlAfter = (readConfig(home).agents as { providers: Record<string, { env?: Record<string, string> }> }).providers;
+  assert.deepEqual(
+    serverUrlAfter.opencode?.env,
+    { PASEO_OPENCODE_SERVER_URL: "http://127.0.0.1:4096/openapi.json" },
+    "an explicit server URL is preserved and gains no XDG default",
+  );
+  assert.equal(
+    serverUrlAfter[FACTORY_ROLE_PROVIDERS.agent]?.env?.XDG_STATE_HOME,
+    join(home, "plugin-state", "paseo-factory", "opencode-state"),
+    "a builtin opencode lane has no inherited env, so the role provider still takes the XDG default — the owner's server URL on the base entry governs acquisition",
+  );
+
+  // 2. A custom XDG_STATE_HOME on agents.providers.opencode.env — the Owner isolated
+  //    OpenCode state themselves.
+  const customXdgConfig = liveLikeConfig();
+  (customXdgConfig.agents as { providers: Record<string, { enabled?: boolean; env?: Record<string, string> }> }).providers.opencode = {
+    enabled: true,
+    env: { XDG_STATE_HOME: "/Users/owner/opencode-paseo-state" },
+  };
+  writeConfig(home, customXdgConfig);
+  const customXdgResult = reconcilePaseoRoleProviders(home, { ...LANES, worker: "opencode/glm-5.1" });
+  assert.ok(customXdgResult.ok && customXdgResult.changed === true);
+  const customXdgAfter = (readConfig(home).agents as { providers: Record<string, { env?: Record<string, string> }> }).providers;
+  assert.deepEqual(
+    customXdgAfter.opencode?.env,
+    { XDG_STATE_HOME: "/Users/owner/opencode-paseo-state" },
+    "a custom XDG_STATE_HOME is preserved untouched",
+  );
+
+  // 3. The same precedence on the role-provider side: a custom opencode-extending provider
+  //    entry whose inherited env names a server URL or its own state home is respected.
+  const inheritedConfig = liveLikeConfig();
+  (inheritedConfig.agents as { providers: Record<string, unknown> }).providers["my-oc"] = {
+    extends: "opencode",
+    label: "My OpenCode",
+    env: { PASEO_OPENCODE_SERVER_URL: "http://127.0.0.1:5057/openapi.json" },
+  };
+  const pure = reconcilePaseoConfigObject(inheritedConfig, { ...LANES, worker: "my-oc/glm-5.1" }, { paseoHome: home });
+  const pureProviders = (pure.config.agents as { providers: Record<string, { env?: Record<string, string> }> }).providers;
+  assert.equal(
+    pureProviders[FACTORY_ROLE_PROVIDERS.agent]?.env?.PASEO_OPENCODE_SERVER_URL,
+    "http://127.0.0.1:5057/openapi.json",
+    "the inherited server URL reaches the role provider env",
+  );
+  assert.equal(pureProviders[FACTORY_ROLE_PROVIDERS.agent]?.env?.XDG_STATE_HOME, undefined, "an inherited server URL beats the XDG default");
+
+  const inheritedXdg = liveLikeConfig();
+  (inheritedXdg.agents as { providers: Record<string, unknown> }).providers["my-oc"] = {
+    extends: "opencode",
+    label: "My OpenCode",
+    env: { XDG_STATE_HOME: "/Users/owner/my-oc-state" },
+  };
+  const pureXdg = reconcilePaseoConfigObject(inheritedXdg, { ...LANES, worker: "my-oc/glm-5.1" }, { paseoHome: home });
+  const pureXdgProviders = (pureXdg.config.agents as { providers: Record<string, { env?: Record<string, string> }> }).providers;
+  assert.equal(
+    pureXdgProviders[FACTORY_ROLE_PROVIDERS.agent]?.env?.XDG_STATE_HOME,
+    "/Users/owner/my-oc-state",
+    "an inherited custom XDG_STATE_HOME beats the plugin-owned default",
+  );
+});
+
+test("spec v0.0.91 §3: healFactoryRoleProvidersInConfig repairs a 0.15.0-beta.1 resumeOnStartup: true and missing XDG_STATE_HOME under the reconcile path's precedence rules, idempotently", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const home = join(dir, "heal-home");
+  const opencodeStateDir = join(home, "plugin-state", "paseo-factory", "opencode-state");
+
+  const poisoned = liveLikeConfig();
+  const agentsPoisoned = poisoned.agents as { resumeOnStartup?: unknown; providers: Record<string, Record<string, unknown>> };
+  agentsPoisoned.resumeOnStartup = true; // the 0.15.0-beta.1 legacy default, persisted
+  agentsPoisoned.providers["factory-supervisor"] = {
+    extends: "opencode",
+    label: "Supervisor (Factory)",
+    enabled: true,
+    paseoTools: { enabled: false },
+    env: { PASEO_FACTORY_SEAT: "supervisor" }, // missing XDG_STATE_HOME
+    models: [{ id: "glm-5.1", label: "glm-5.1", isDefault: true }],
+  };
+  agentsPoisoned.providers["factory-lead"] = {
+    extends: "opencode",
+    label: "Lead (Factory)",
+    enabled: true,
+    paseoTools: { enabled: false },
+    env: { PASEO_FACTORY_SEAT: "lead", PASEO_OPENCODE_SERVER_URL: "http://127.0.0.1:4096/openapi.json" },
+    models: [{ id: "glm-5.1", label: "glm-5.1", isDefault: true }],
+  };
+  agentsPoisoned.providers["factory-peer"] = {
+    extends: "claude",
+    label: "Peer (Factory)",
+    enabled: true,
+    paseoTools: { enabled: false },
+    env: { PASEO_FACTORY_SEAT: "agent" },
+    models: [{ id: "claude-opus-5", label: "claude-opus-5", isDefault: true }],
+  };
+  writeConfig(home, poisoned);
+
+  assert.equal(healFactoryRoleProvidersInConfig(home), true, "the first heal repairs the config");
+  assert.equal(healFactoryRoleProvidersInConfig(home), false, "the second heal is a no-op");
+
+  const healed = readConfig(home);
+  const healedAgents = healed.agents as { resumeOnStartup?: unknown; providers: Record<string, { env?: Record<string, string>; enabled?: boolean }> };
+  assert.equal(healedAgents.resumeOnStartup, false, "resumeOnStartup: true is healed back to false");
+  assert.equal(healedAgents.providers["factory-supervisor"]?.env?.XDG_STATE_HOME, opencodeStateDir, "a missing XDG_STATE_HOME is healed onto the opencode-extending role provider");
+  assert.deepEqual(
+    healedAgents.providers["factory-lead"]?.env,
+    { PASEO_FACTORY_SEAT: "lead", PASEO_OPENCODE_SERVER_URL: "http://127.0.0.1:4096/openapi.json" },
+    "an explicit server URL is preserved and gains no XDG default on heal",
+  );
+  assert.equal(healedAgents.providers["factory-peer"]?.env?.XDG_STATE_HOME, undefined, "a claude-extending role provider never gains the OpenCode state dir");
+  assert.equal(healedAgents.providers.opencode?.enabled, true, "the base opencode entry keeps its user keys through the heal");
+  assert.equal(healedAgents.providers.opencode?.env?.XDG_STATE_HOME, opencodeStateDir, "the base opencode entry's missing XDG_STATE_HOME is healed");
+
+  // The agents-without-providers shape still heals agents.resumeOnStartup — the resume
+  // guard lives on `agents`, not under `agents.providers`.
+  const bareHome = join(dir, "bare-home");
+  writeConfig(bareHome, { agents: { resumeOnStartup: true }, app: { desktop: true } });
+  assert.equal(healFactoryRoleProvidersInConfig(bareHome), true, "heals resumeOnStartup even when agents.providers is absent");
+  const bareHealed = readConfig(bareHome);
+  assert.equal((bareHealed.agents as { resumeOnStartup?: unknown }).resumeOnStartup, false);
+  assert.equal("providers" in (bareHealed.agents as object), false, "the heal never invents an agents.providers table");
+  assert.deepEqual(bareHealed.app, { desktop: true }, "unrelated user config survives the heal untouched");
 });
