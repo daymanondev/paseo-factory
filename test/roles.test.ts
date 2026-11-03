@@ -699,6 +699,162 @@ test("injectSessionEnv binds provider-recognized supervisor and lead sessions in
   assert.equal(stranger, undefined, "an unrecognized session passes through untouched");
 });
 
+test("injectSessionEnv recognizes a rewritten supervisor/lead session on interactive reopen via request.labels or request.title (v0.0.91, ADR 0026)", (t) => {
+  const dir = makeTempDir("roles-session-title-labels-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const userHome = join(dir, "home");
+  const repoDir = makeGitRepo(dir);
+  const resolved = resolveProject(repoDir);
+  assert.ok(resolved.ok);
+  const slug = resolved.ok ? resolved.slug : "";
+
+  // ADR 0026 rewrote the seat's config.provider onto the base runtime provider
+  // at create time; on a cold interactive reopen the env arrives empty. The
+  // Paseo 0.15.0 `labels` field is the deterministic seat identity.
+  const labeled = injectSessionEnv(
+    {
+      agentId: "rewritten-sup-1",
+      cwd: repoDir,
+      provider: "claude",
+      reason: "resume",
+      purpose: "interactive",
+      title: "Supervisor",
+      labels: { seat: "supervisor", project: slug },
+      env: {} as Record<string, string>,
+      workspaceId: "ws-sup-1",
+    },
+    stateDir,
+    userHome,
+  );
+  assert.ok(labeled !== undefined, "a labels-recognized supervisor session receives its factory env");
+  assert.equal(labeled.env.PASEO_FACTORY_SEAT, "supervisor");
+  assert.equal(labeled.env.PASEO_FACTORY_PROJECT, slug);
+  assert.equal(labeled.env.PASEO_FACTORY_PROJECT_ROOT, resolved.ok ? resolved.root : undefined);
+  const labeledRegistration = readProjectRegistration(stateDir, slug);
+  assert.equal(labeledRegistration?.supervisor, "rewritten-sup-1", "the interactive reopen binds the supervisor agentId into project.json");
+  assert.equal(labeledRegistration?.workspaceId, "ws-sup-1", "the interactive reopen persists the supervisor workspaceId");
+
+  // A Lead recognized only by its stamped seat title on a rewritten provider.
+  const titledLead = injectSessionEnv(
+    {
+      agentId: "rewritten-lead-1",
+      cwd: repoDir,
+      provider: "opencode",
+      reason: "resume",
+      purpose: "interactive",
+      title: "Lead",
+      env: {} as Record<string, string>,
+      workspaceId: "ws-lead-1",
+    },
+    stateDir,
+    userHome,
+  );
+  assert.ok(titledLead !== undefined, "a title-recognized lead session receives its factory env");
+  assert.equal(titledLead.env.PASEO_FACTORY_SEAT, "lead");
+  assert.equal(titledLead.env.PASEO_FACTORY_PROJECT, slug);
+  const leadRegistration = readProjectRegistration(stateDir, slug);
+  assert.equal(leadRegistration?.lead, "rewritten-lead-1", "the title-recognized reopen binds the lead agentId into project.json");
+  assert.equal(leadRegistration?.workspaceId, "ws-lead-1", "the lead reopen persists the workspaceId");
+
+  // A second supervisor recognized by title never displaces the bound seat.
+  const secondSupervisor = injectSessionEnv(
+    {
+      agentId: "rewritten-sup-2",
+      cwd: repoDir,
+      provider: "opencode",
+      reason: "refresh",
+      purpose: "interactive",
+      title: "Supervisor",
+      env: {} as Record<string, string>,
+    },
+    stateDir,
+    userHome,
+  );
+  assert.ok(secondSupervisor !== undefined, "the second supervisor still carries its env");
+  assert.equal(secondSupervisor.env.PASEO_FACTORY_SEAT, "supervisor");
+  assert.equal(readProjectRegistration(stateDir, slug)?.supervisor, "rewritten-sup-1", "an occupied supervisor seat is never displaced by a title-recognized reopen");
+});
+
+test("injectSessionEnv never writes supervisor, lead, or workspaceId into project.json on a purpose:history open (v0.0.91)", (t) => {
+  const dir = makeTempDir("roles-session-history-fence-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const userHome = join(dir, "home");
+  const repoDir = makeGitRepo(dir);
+  const resolved = resolveProject(repoDir);
+  assert.ok(resolved.ok);
+  const slug = resolved.ok ? resolved.slug : "";
+
+  // Reading an archived supervisor conversation — even one that still carries
+  // its seat labels and title — re-carries the seat env but never creates or
+  // hijacks the Project's project.json registration.
+  const labeledHistory = injectSessionEnv(
+    {
+      agentId: "archived-sup-1",
+      cwd: repoDir,
+      provider: "claude",
+      reason: "import",
+      purpose: "history",
+      title: "Supervisor",
+      labels: { seat: "supervisor", project: slug },
+      env: {} as Record<string, string>,
+      workspaceId: "ws-archived-1",
+    },
+    stateDir,
+    userHome,
+  );
+  assert.ok(labeledHistory !== undefined, "a history open still re-carries the seat's factory env");
+  assert.equal(labeledHistory.env.PASEO_FACTORY_SEAT, "supervisor");
+  assert.equal(readProjectRegistration(stateDir, slug), undefined, "a history open with seat labels never creates project.json");
+
+  // Same fence for a title-only history open.
+  const titledHistory = injectSessionEnv(
+    {
+      agentId: "archived-lead-1",
+      cwd: repoDir,
+      provider: "opencode",
+      reason: "import",
+      purpose: "history",
+      title: "Lead",
+      env: {} as Record<string, string>,
+      workspaceId: "ws-archived-2",
+    },
+    stateDir,
+    userHome,
+  );
+  assert.ok(titledHistory !== undefined, "a title-recognized history open still re-carries the seat env");
+  assert.equal(titledHistory.env.PASEO_FACTORY_SEAT, "lead");
+  assert.equal(readProjectRegistration(stateDir, slug), undefined, "a history open with a seat title never creates project.json");
+
+  // A history open carrying a valid Correlation token still associates the
+  // token with the reading agentId (the env must carry it), but never binds
+  // the seat into an unoccupied project registration.
+  const issued = new CorrelationRegistry(stateDir).issue({ role: "supervisor", projectSlug: slug, projectRoot: repoDir });
+  writeProjectRegistration(stateDir, slug, { root: repoDir });
+  const correlatedHistory = injectSessionEnv(
+    {
+      agentId: "archived-sup-2",
+      cwd: repoDir,
+      provider: "claude",
+      reason: "refresh",
+      purpose: "history",
+      env: { PASEO_FACTORY_CORRELATION: issued.correlationId } as Record<string, string>,
+      workspaceId: "ws-archived-3",
+    },
+    stateDir,
+    userHome,
+  );
+  assert.ok(correlatedHistory !== undefined, "a correlated history open still re-carries the seat env");
+  assert.equal(correlatedHistory.env.PASEO_FACTORY_SEAT, "supervisor");
+  assert.equal(correlatedHistory.env.PASEO_FACTORY_CORRELATION, issued.correlationId);
+  assert.equal(new CorrelationRegistry(stateDir).resolve("archived-sup-2")?.correlationId, issued.correlationId, "the history open still associates the Correlation token with the reading agentId");
+  const fenced = readProjectRegistration(stateDir, slug);
+  assert.equal(fenced?.supervisor, undefined, "a history open never binds supervisor into project.json");
+  assert.equal(fenced?.lead, undefined, "a history open never binds lead into project.json");
+  assert.equal(fenced?.workspaceId, undefined, "a history open never persists a workspaceId into project.json");
+});
+
 test("injectRoleOnCreate stamps clean role titles — Supervisor / Lead on the seat path, Peer · <Task> on the Task worktree path (v0.0.31, ADR 0017 §2)", (t) => {
   const dir = makeTempDir("roles-seat-titles-");
   disposeDir(t, dir);
