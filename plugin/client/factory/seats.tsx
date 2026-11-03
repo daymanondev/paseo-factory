@@ -21,7 +21,7 @@ import type { PluginTheme } from "@getpaseo/plugin";
 import { Icon, Modal, ScrollView, TextInput } from "@getpaseo/plugin/client/ui";
 import { useEffect, useState } from "react";
 import { Pressable, Text, View } from "react-native";
-import type { AgentView, FactoryView, LaneName, LaneProfileView, Lanes, ProviderModelView } from "../../shared/view.ts";
+import type { AgentView, FactoryView, LaneName, LaneProfileView, Lanes, ProjectUsageView, ProviderModelView } from "../../shared/view.ts";
 import { Btn, Card, Chip, Pill, SegmentedControl } from "../kit/pill.tsx";
 import { CONTROL_H, CONTROL_SM, RADIUS, SPACING, hoveredOf, text, tint } from "../kit/theme.ts";
 import type { Colour } from "../kit/theme.ts";
@@ -733,6 +733,78 @@ function LiveSeatConfirmModal({ theme, pending, busy, onConfirm, onCancel }: { t
   );
 }
 
+/** `166,621,161` → `166.6M` — the one token format the usage surfaces print. */
+export function formatTokenCount(value: number): string {
+  if (value >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(1)}B`;
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000) return `${Math.round(value / 1_000)}K`;
+  return String(value);
+}
+
+/** `cacheRead / gross-input` as a whole-percent string — `–` when nothing was read. */
+function cacheHitPercent(buckets: { inputUncachedTokens: number; cacheReadTokens: number; cacheWriteTokens: number }): string {
+  const gross = buckets.inputUncachedTokens + buckets.cacheReadTokens + buckets.cacheWriteTokens;
+  if (gross <= 0) return "–";
+  return `${Math.round((buckets.cacheReadTokens / gross) * 100)}%`;
+}
+
+/**
+ * The Project Token & Model Usage card (v0.0.87, ADR 0043 §4): the scoped
+ * Project's grand totals, cache-hit ratio, By Seat / Role rows, and By
+ * Model / Provider rows — the rollup's whole world, rendered from
+ * `view.projectUsage` alone (zero provider reads at render time). Renders
+ * nothing when no session was recorded.
+ */
+export function ProjectUsageCard({ theme, usage }: { theme: PluginTheme; usage: ProjectUsageView | null }) {
+  if (usage === null) return null;
+  return (
+    <Card theme={theme} gap={SPACING[2.5]}>
+      <View style={{ gap: 2 }}>
+        <Text style={text(theme, "section")}>Project Token Usage</Text>
+        <Text style={text(theme, "label")}>
+          {`${formatTokenCount(usage.totals.totalTokens)} tokens · ${usage.totals.sessionCount} session(s) · ${usage.totals.turns.toLocaleString("en-US")} turn(s) · cache-hit ${cacheHitPercent(usage.totals)}`}${usage.totals.totalCostUsd === null ? "" : ` · $${usage.totals.totalCostUsd.toFixed(2)}`}
+        </Text>
+      </View>
+      <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1] }}>
+        <Pill theme={theme} icon="Coins" label={`${formatTokenCount(usage.totals.totalTokens)} tok`} tone="accent" lit mono />
+        <Pill theme={theme} label={`in ${formatTokenCount(usage.totals.inputUncachedTokens)}`} mono />
+        <Pill theme={theme} label={`cache-read ${formatTokenCount(usage.totals.cacheReadTokens)}`} mono />
+        <Pill theme={theme} label={`out ${formatTokenCount(usage.totals.outputTokens)}`} mono />
+        <Pill theme={theme} label={`reasoning ${formatTokenCount(usage.totals.reasoningTokens)}`} mono />
+      </View>
+      <View style={{ gap: SPACING[1.5] }}>
+        <Text style={{ ...text(theme, "badge") }}>BY SEAT / ROLE</Text>
+        {usage.bySeat.map((row) => (
+          <View key={row.label} style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: SPACING[2] }}>
+            <Text style={text(theme, "code")} numberOfLines={1}>
+              {row.label}
+            </Text>
+            <Text style={{ ...text(theme, "code"), color: theme.colors.foregroundMuted }} numberOfLines={1}>
+              {`${formatTokenCount(row.totalTokens)} tok · ${row.sessionCount} session(s)${row.totalCostUsd === null ? "" : ` · $${row.totalCostUsd.toFixed(2)}`}`}
+            </Text>
+          </View>
+        ))}
+      </View>
+      <View style={{ gap: SPACING[1.5] }}>
+        <Text style={{ ...text(theme, "badge") }}>BY MODEL / PROVIDER</Text>
+        {usage.byModel.map((row) => (
+          <View key={`${row.provider}/${row.model}`} style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: SPACING[2] }}>
+            <Text style={text(theme, "code")} numberOfLines={1}>
+              {`${row.provider}/${row.model}`}
+            </Text>
+            <Text style={{ ...text(theme, "code"), color: theme.colors.foregroundMuted }} numberOfLines={1}>
+              {`${formatTokenCount(row.totalTokens)} tok · ${row.turns.toLocaleString("en-US")} turn(s)`}
+            </Text>
+          </View>
+        ))}
+      </View>
+      <Text style={text(theme, "label")}>
+        {`Per-task totals ride each task card. Updated ${usage.updatedAt.slice(0, 19).replace("T", " ")}Z${usage.backfilledAt === undefined ? "" : " · history backfilled"}.`}
+      </Text>
+    </Card>
+  );
+}
+
 export function SeatsPane({
   theme,
   view,
@@ -1123,6 +1195,9 @@ export function SeatsPane({
         }}
         onCancel={() => setPending(null)}
       />
+
+      {/* Section 3: Project Token & Model Usage (v0.0.87, ADR 0043 §4) */}
+      <ProjectUsageCard theme={theme} usage={view.projectUsage ?? null} />
     </View>
   );
 }

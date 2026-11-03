@@ -31,11 +31,12 @@ import { createChoke, normalizeAgentCreateRequest, startGitBlockIngestion } from
 import { createTimelineFetcher } from "./server/timeline.ts";
 import type { TimelineSourceApi } from "./server/timeline.ts";
 import { spoolRootFor, startSpool } from "./server/spool.ts";
+import { createUsageRuntime } from "./server/usage-rollup.ts";
 import { createSurfaceHandlers, registerSurfaceRpc } from "./server/surface-rpc.ts";
 import { createLeadMailRuntime } from "./server/lead-mailbox.ts";
 import { syncPeerHelpersBeforeCreate, injectRoleOnCreate, injectSessionEnv, sanitizeAgentCreateHookResult } from "./server/roles.ts";
 
-const SHELL_VERSION = "0.0.86";
+const SHELL_VERSION = "0.0.87";
 
 const log = (message: string) => console.log(`[${PLUGIN_ID}] ${message}`);
 
@@ -200,6 +201,19 @@ export default function contribute(server: PluginServerContext) {
     return candidate === undefined ? undefined : sanitizeAgentCreateHookResult(candidate);
   }));
 
+  // The per-Project usage rollup runtime (v0.0.87, ADR 0043): the single
+  // writer around each Project's `<projectStateDir>/usage.json` — the
+  // debounced turn-ended capture, the terminal-boundary flushes, the Tier-1
+  // `meter_written` meter at Gate boundaries, and the one-time lazy backfill
+  // the snapshot gather rides. Its daemon is the same captured PaseoApi
+  // every other runtime falls back to.
+  const usage = createUsageRuntime({
+    factory,
+    stateDir,
+    paseoHome: home,
+    daemon: () => paseoApi as never,
+    onLog: log,
+  });
   // The Factory surface's RPC handlers (v0.0.13, ADR 0009 §4): every
   // `factory.*` call runs in-process against this same single Factory
   // instance — the UI's Owner acts never round-trip through the spool. Each
@@ -212,6 +226,7 @@ export default function contribute(server: PluginServerContext) {
     home,
     ...(pluginDir === undefined ? {} : { pluginDir }),
     daemon: () => paseoApi as never,
+    usage,
     onLog: log,
   };
   // The Lead-mailbox doors the surface defers to (the runtime is created
@@ -242,6 +257,7 @@ export default function contribute(server: PluginServerContext) {
     stateDir,
     home,
     daemon: () => paseoApi as never,
+    usage,
     reconcileScrum: async project => {
       if (readExecution(stateDir, project.slug).mode !== "scrum") return;
       for (let run of listRuns(stateDir, project.slug)) {
@@ -335,6 +351,10 @@ export default function contribute(server: PluginServerContext) {
   // the turn.
   const offTurnEnded = server.on("agent.turn_ended", (event, context) => {
     capturePaseo(context);
+    // The debounced usage capture (v0.0.87, ADR 0043 §3): every Supervisor,
+    // Lead, and Peer turn incrementally extracts its session usage and
+    // schedules the atomic rollup flush — zero Ledger lines per turn.
+    usage.recordTurnEnd(event.agent.id).catch((error) => log(`usage: turn capture deferred — ${String(error)}`));
     void leadMail.onLeadTurnEnded({ agentId: event.agent.id, outcome: event.outcome, timeline: event.timeline }).catch((error) => log(`lead-mailbox: turn settle deferred — ${String(error)}`));
   });
   const spool = startSpool(stateDir, factory, {
@@ -421,6 +441,14 @@ export default function contribute(server: PluginServerContext) {
       return reply.ok ? { id: request.id, ok: true, summary: `Scrum ${request.operation}`, data: reply.data } : { id: request.id, ok: false, code: reply.code, message: reply.error };
     },
     peerMail: leadMail.notifyPeer,
+    usageMeter: (input) => usage.meterTaskBoundary(input),
+    recordUsage: async (input) => {
+      // Retired Peers get the FULL boundary act — the rollup flush AND the
+      // conditional Tier-1 line (spec §3); a Peer with no task label (never
+      // true for bound peers) still gets its rollup flush.
+      if (input.task !== undefined) await usage.meterAgentBoundary({ task: input.task, agent: input.agent, slug: input.slug });
+      else await usage.flushAgent(input.agent, { slug: input.slug });
+    },
     daemon: () => paseoApi as never,
     sanitizeLane: (lane) => surface.sanitizeLane(lane),
     // The accept path's worktree-record sweep targets the real daemon home —
@@ -512,6 +540,7 @@ export default function contribute(server: PluginServerContext) {
     gitBlocks.stop();
     spool.stop();
     leadMail.stop();
+    usage.stop();
     factory.history.stop();
     log(`down v${SHELL_VERSION}`);
   };

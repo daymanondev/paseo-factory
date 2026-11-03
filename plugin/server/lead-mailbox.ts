@@ -89,6 +89,8 @@ import type {
 import type { SurfaceAgentSnapshot, SurfaceDaemonApi } from "./surface-rpc.ts";
 import { createPeerHandoffRuntime } from "./peer-handoff.ts";
 import type { DaemonReply } from "./daemon-cli.ts";
+import { readNativeContextWindowTokens, type UsagePaths } from "./core/usage-extractor.ts";
+import type { UsageRuntime } from "./usage-rollup.ts";
 export { PEER_HANDOFF_TOKENS } from "./peer-handoff.ts";
 
 /**
@@ -137,7 +139,7 @@ export function isSeatReadyForMail(agent: SurfaceAgentSnapshot): boolean {
 export interface LeadContextTokens {
   usedTokens: number | null;
   maxTokens: number | null;
-  source: "daemon" | "session-file";
+  source: "daemon" | "session-file" | "native-store";
 }
 
 /**
@@ -149,7 +151,7 @@ export interface LeadContextTokens {
  * assistant message carrying `usage` answers, computed as
  * `totalTokens || (input + output + cacheRead + cacheWrite)`.
  */
-export function readLeadContextTokens(lead: SurfaceAgentSnapshot): LeadContextTokens {
+export function readLeadContextTokens(lead: SurfaceAgentSnapshot, usagePaths?: UsagePaths): LeadContextTokens {
   const used = finiteNumber(lead.lastUsage?.contextWindowUsedTokens);
   if (used !== null && used > 0) {
     return { usedTokens: used, maxTokens: finiteNumber(lead.lastUsage?.contextWindowMaxTokens), source: "daemon" };
@@ -159,6 +161,11 @@ export function readLeadContextTokens(lead: SurfaceAgentSnapshot): LeadContextTo
     const fromFile = readLastAssistantUsageTokens(native);
     if (fromFile !== null) return { usedTokens: fromFile, maxTokens: null, source: "session-file" };
   }
+  // The multi-provider fallback (v0.0.87, ADR 0043 §3): every harness's own
+  // native store answers when the daemon gauge is gone — codex's rollout
+  // tail, antigravity's steps table, and so on, not just Pi's `.jsonl`.
+  const fromStore = readNativeContextWindowTokens(lead, usagePaths);
+  if (fromStore !== null) return { usedTokens: fromStore, maxTokens: null, source: "native-store" };
   return { usedTokens: null, maxTokens: null, source: "daemon" };
 }
 
@@ -254,6 +261,18 @@ export interface LeadMailRuntimeDeps {
    * handoff's archive step rides it.
    */
   retireLead: (input: { projectRoot: string }) => Promise<{ ok: true; agentId: string } | { ok: false; code: string; error: string }>;
+  /**
+   * The per-Project usage rollup runtime (v0.0.87, ADR 0043 §3): the outgoing
+   * Lead's final session usage is flushed into `<projectStateDir>/usage.json`
+   * the moment the 128k handoff archives it — rotated sessions are never
+   * lost from the Project's totals.
+   */
+  usage?: UsageRuntime;
+  /**
+   * Store-root overrides for the multi-provider context sensor (tests pass
+   * temp homes; the default resolves the operator's real provider stores).
+   */
+  usagePaths?: UsagePaths;
   /**
    * Optional override for the `handing_over` extraction fuse timeout in ms
    * (v0.0.28, ADR 0018 §3; defaults to `HANDOFF_EXTRACTION_TIMEOUT_MS = 90_000`).
@@ -366,7 +385,8 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   const peerBlockersQueued = new Set<string>();
   const peerHandoff = createPeerHandoffRuntime({
     factory: deps.factory, stateDir: deps.stateDir, home: deps.home, stopAgent: deps.stopAgent,
-    daemon: resolveDaemon, timeoutMs: handoffTimeoutMs, readTokens: readLeadContextTokens, log,
+    daemon: resolveDaemon, timeoutMs: handoffTimeoutMs, readTokens: (agent) => readLeadContextTokens(agent, deps.usagePaths), log,
+    ...(deps.usage === undefined ? {} : { recordUsage: async (input: { slug: string; task: string; agent: SurfaceAgentSnapshot }) => { await deps.usage!.meterAgentBoundary({ task: input.task, agent: input.agent, slug: input.slug }); } }),
     queueBlocked: (slug, task, epoch, text) => {
       for (const to of ["lead", "supervisor"] as const) {
         appendMailQueued(mailboxPath(slug), { requestId: `peer-context-ceiling:${task}:${epoch}:${to}`, to, from: "peer", kind: "needs_human", task, text });
@@ -605,7 +625,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     const daemon = resolveDaemon();
     const lead = await liveLeadAgent(daemon, slug);
     if (lead === undefined || lead.status !== "running") return;
-    const tokens = readLeadContextTokens(lead);
+    const tokens = readLeadContextTokens(lead, deps.usagePaths);
     if (tokens.usedTokens === null || tokens.usedTokens < LEAD_ROTATE_TOKENS) return;
     writeRotationState(slug, registration.root, { rotationState: "rotation_pending" });
     log(`lead-mailbox: ${slug}'s lead crossed ${LEAD_ROTATE_TOKENS} tokens (${tokens.usedTokens}, ${tokens.source}) — rotation pending, the turn runs on`);
@@ -820,7 +840,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     let usedTokens: number | null = null;
     try {
       const lead = await liveLeadAgent(resolveDaemon(), slug);
-      if (lead !== undefined) usedTokens = readLeadContextTokens(lead).usedTokens;
+      if (lead !== undefined) usedTokens = readLeadContextTokens(lead, deps.usagePaths).usedTokens;
     } catch {
       // a sensor miss never blocks the machine
     }
@@ -991,6 +1011,14 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       live,
     });
     const digest = renderLedgerDigest(events);
+    // The outgoing Lead's final cumulative usage is flushed BEFORE the seat
+    // archives (ADR 0043 §3) — the rotated session's tokens land in the
+    // Project's rollup, never lost to the archive boundary.
+    if (deps.usage !== undefined) {
+      const outgoingId = readProjectRegistration(deps.stateDir, slug)?.lead ?? input.agentId;
+      const outgoingLead = live.get(outgoingId) ?? (await liveLeadAgent(resolveDaemon(), slug).catch(() => undefined));
+      if (outgoingLead !== undefined) await deps.usage.flushAgent(outgoingLead, { slug });
+    }
     const retired = await deps.retireLead({ projectRoot: root });
     if (!retired.ok && retired.code !== "no-lead") {
       log(`lead-mailbox: handoff of ${slug} could not archive the outgoing lead (${retired.code}: ${retired.error}) — the mailbox stays locked, mail holds queued`);

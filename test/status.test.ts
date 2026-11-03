@@ -481,3 +481,52 @@ test("status scopes attempts, verdict, sha, eye, and needs-human to the task's c
   );
 });
 
+test("status prints the Token Usage section per Project with recorded sessions (v0.0.87, ADR 0043 §5)", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const stateDir = join(dir, "plugin-state", "paseo-factory");
+  const full = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0";
+  writeLedger(stateDir, [
+    contractEvent(1, "T-USAGE"),
+    { seq: 2, ts, event: "claim_reported", task: "T-USAGE", attempt: 1, sha: full, agent: "ag-1" },
+    { seq: 3, ts, event: "gate_finished", task: "T-USAGE", attempt: 1, exit: 0, verdict: "green", note: "ok", sha: full },
+  ]);
+  const now = "2026-11-03T09:00:00.000Z";
+  const session = (agentId: string, seat: string, task: string | undefined, harness: string, provider: string, model: string, input: number, cacheRead: number, output: number) => ({
+    agentId, projectSlug: "goal-partner-f17f4d", seat, ...(task !== undefined ? { task } : {}), harness, provider, model,
+    turns: 1, inputUncachedTokens: input, cacheReadTokens: cacheRead, cacheWriteTokens: 0, outputTokens: output, reasoningTokens: 0,
+    totalTokens: input + cacheRead + output, updatedAt: now,
+  });
+  mkdirSync(join(stateDir, "projects", "goal-partner-f17f4d"), { recursive: true });
+  writeFileSync(
+    join(stateDir, "projects", "goal-partner-f17f4d", "usage.json"),
+    `${JSON.stringify({
+      version: 1,
+      projectSlug: "goal-partner-f17f4d",
+      backfilledAt: now,
+      updatedAt: now,
+      sessions: {
+        "lead-1": session("lead-1", "lead", undefined, "codex", "openai", "gpt-6.1-sol", 1_647_431, 24_718_592, 123_619),
+        "peer-1": session("peer-1", "agent", "T-USAGE", "pi", "zai", "glm-5.3", 2_077_529, 136_075_392, 983_447),
+      },
+    }, null, 2)}\n`,
+  );
+
+  const result = await run(ownerCli, ["status"], { PASEO_HOME: dir });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /T-USAGE attempts=1 verdict=green/, "the task lines still lead");
+  assert.match(result.stdout, /Token Usage/, "the section header prints");
+  assert.match(result.stdout, /usage goal-partner-f17f4d: 165,626,010 tokens · 2 session\(s\) · 2 turn\(s\) · cache-hit 98%/);
+  assert.match(result.stdout, /  seat Lead: 26,489,642 tokens · 1 session\(s\)/);
+  assert.match(result.stdout, /  model zai\/glm-5\.3 \(pi\): 139,136,368 tokens · in 2,077,529 · cache-read 136,075,392 · out 983,447 · 1 turn\(s\)/);
+  assert.match(result.stdout, /  model openai\/gpt-6\.1-sol \(codex\)/);
+
+  // A ledger with no recorded usage prints no section — absent stays absent.
+  const bare = makeTempDir();
+  disposeDir(t, bare);
+  const bareState = join(bare, "plugin-state", "paseo-factory");
+  writeLedger(bareState, [contractEvent(1, "T-QUIET")]);
+  const quiet = await run(ownerCli, ["status"], { PASEO_HOME: bare });
+  assert.equal(quiet.status, 0, quiet.stderr);
+  assert.ok(!quiet.stdout.includes("Token Usage"), "no recorded sessions — no section");
+});

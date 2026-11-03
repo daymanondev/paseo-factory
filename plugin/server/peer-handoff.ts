@@ -38,6 +38,12 @@ interface PeerHandoffDeps {
   stopAgent?: (id: string, home?: string) => Promise<DaemonReply>;
   timeoutMs: number;
   readTokens: (agent: SurfaceAgentSnapshot) => { usedTokens: number | null };
+  /**
+   * The usage-rollup flush (v0.0.87, ADR 0043 §3): the outgoing Peer's final
+   * cumulative usage lands in `<projectStateDir>/usage.json` BEFORE the seat
+   * stops and archives — a handoff never loses the predecessor's tokens.
+   */
+  recordUsage?: (input: { slug: string; task: string; agent: SurfaceAgentSnapshot }) => Promise<void>;
   queueBlocked: (slug: string, task: string, epoch: number, text: string) => void;
   wake: (slug: string) => Promise<void>;
   log: (text: string) => void;
@@ -100,6 +106,7 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
     if (state.phase === "retiring") {
       const outgoing = live.find(agent => agent.id === state.outgoingId);
       if (outgoing) {
+        if (deps.recordUsage !== undefined) await deps.recordUsage({ slug, task, agent: outgoing });
         await stopPeer(outgoing.id);
         if (!eligible(contract)) return;
         await bounded(daemon.agents.ref(outgoing.id).archive());

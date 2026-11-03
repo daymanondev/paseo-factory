@@ -120,6 +120,9 @@ import {
   vaultSync,
 } from "../shared/rpc.ts";
 import type { CompanionPluginView, ExecutionView, AgentView, LaneName, LaneProfileView, Lanes, ProjectView, TaskView, VaultStatusView } from "../shared/view.ts";
+import type { UsageRuntime } from "./usage-rollup.ts";
+import { enrichTaskUsage } from "./view.ts";
+import { readProjectUsage } from "./core/usage-status.ts";
 
 // ---- the daemon slice ---------------------------------------------------------------------
 
@@ -141,13 +144,28 @@ export interface SurfaceAgentSnapshot {
   /**
    * The live usage slice the 128k Lead sensor reads (v0.0.20, ADR 0013 §5) —
    * the SDK's `AgentUsage` subset, present when the daemon reports usage.
+   * The token/cost fields are the usage extractor's last-resort fallback
+   * (v0.0.87, ADR 0043 §2) when no native session store exists on disk yet.
    */
-  lastUsage?: { contextWindowUsedTokens?: number; contextWindowMaxTokens?: number } | null;
+  lastUsage?: {
+    contextWindowUsedTokens?: number;
+    contextWindowMaxTokens?: number;
+    inputTokens?: number;
+    cachedInputTokens?: number;
+    outputTokens?: number;
+    totalCostUsd?: number;
+  } | null;
   /**
    * The persistence slice naming the provider-native session handle — the Pi
-   * `.jsonl` fallback's path across daemon restarts (v0.0.20, ADR 0013 §5).
+   * `.jsonl` fallback's path across daemon restarts (v0.0.20, ADR 0013 §5),
+   * and since v0.0.87 (ADR 0043 §2) the multi-provider extractor's session
+   * ids (`sessionId`, `metadata`) for every harness's own store.
    */
-  persistence?: { nativeHandle?: string } | null;
+  persistence?: { nativeHandle?: string; sessionId?: string; provider?: string; metadata?: unknown } | null;
+  /** The runtime session pointer (v0.0.87, ADR 0043 §2) — the extractor's last session-id source. */
+  runtimeInfo?: { provider?: unknown; sessionId?: unknown; model?: unknown } | null;
+  /** The agent's create-time config slice — the model fallback when no store names one. */
+  config?: { model?: unknown } | null;
   /**
    * The Paseo Workspace the agent's session lives in (v0.0.31, ADR 0017 §5)
    * — carried on the daemon's own agent row, so `ensureSeat` can co-locate
@@ -344,6 +362,13 @@ export interface SurfaceDeps {
    * fixtures, zero network.
    */
   vaultRunner?: VaultRunner;
+  /**
+   * The per-Project usage rollup runtime (v0.0.87, ADR 0043 §4–§5): the
+   * snapshot's `projectUsage` gather, the retiring seat flushes, and the
+   * reset/delete hygiene all ride it. Optional so unwired tests degrade to a
+   * null usage half, never a failed snapshot.
+   */
+  usage?: UsageRuntime;
   /** Native OS folder picker override (v0.0.35, ADR 0024; tests) — `osascript` on macOS by default. */
   pickFolder?: (prompt?: string) => Promise<string | null> | string | null;
   /** Alias for pickFolder. */
@@ -1125,6 +1150,10 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     const agentIds: string[] = [];
     const errors: string[] = [];
     for (const agent of agents) {
+      // The retiring seat's final usage is flushed BEFORE the archive
+      // (v0.0.87, ADR 0043 §3) — rotate/revoke never loses the session's
+      // tokens. Best-effort by contract: accounting never blocks the act.
+      if (deps.usage !== undefined) await deps.usage.flushAgent(agent, projectSlug === undefined ? undefined : { slug: projectSlug });
       try {
         await archiveSeatAgent(daemon, seat, agent, projectSlug);
         agentIds.push(agent.id);
@@ -2163,11 +2192,24 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       const enrichedProject = scopedProject === null ? null : enrichProjectView(scopedProject);
 
       const updateSnap = localUpdateSnapshot ?? getCachedPluginUpdateStatus(deps.home);
+      // The Project Usage half (v0.0.87, ADR 0043 §4): the gatherer-owned
+      // rollup read — lazily backfilled ONCE from `<paseoHome>/agents/` —
+      // layered into the pure fold (the vault-status precedent). Unscoped or
+      // unwired, it degrades to null, never a failed snapshot.
+      let usageFile: Awaited<ReturnType<UsageRuntime["loadOrBackfillProjectUsage"]>> = undefined;
+      if (enrichedProject !== null && deps.usage !== undefined) {
+        try {
+          usageFile = await deps.usage.loadOrBackfillProjectUsage(enrichedProject.slug);
+        } catch (error) {
+          log(`usage: rollup read of ${enrichedProject.slug} deferred — ${messageOf(error)}`);
+        }
+      }
       const view = foldView({
         stateDir: deps.stateDir,
         generatedAt: new Date().toISOString(),
         lanes: lanes.lanes,
         events,
+        usage: usageFile,
         daemon: { agents, supervisor, lead, providers, daemonError },
         // v0.0.17 (ADR 0012 §2) & v0.0.25 (ADR 0012 §3–§4): the daemon plugin
         // list joined against Core + companion catalog and cached update check.
@@ -2222,7 +2264,13 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       if (!loadLanes(deps.stateDir).ok) return failure("lanes-unreadable", `the lane table under ${deps.stateDir} is unreadable`);
       const folded = foldTasks(deps.factory.ledger.events).find((entry) => entry.task === input.task);
       if (folded === undefined) return failure("unknown-task", `no foldable history for task ${input.task}`);
-      const task = enrichTaskPeerAgents([folded])[0]!;
+      // v0.0.87 (ADR 0043 §4): the modal's token pill and model badge read the
+      // Project rollup too — the aggregate stands even when no `meter_written`
+      // line ever landed for the task.
+      const contractProject = resolveProject(contract.workspace);
+      const task = enrichTaskPeerAgents(
+        enrichTaskUsage([folded], contractProject.ok ? readProjectUsage(deps.stateDir, contractProject.slug) : undefined),
+      )[0]!;
       return {
         ok: true as const,
         detail: {
@@ -2839,6 +2887,9 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       } catch {
         // best-effort mailbox reset
       }
+      // v0.0.87 (ADR 0043 §3): the delete drops `<projectStateDir>/usage.json`
+      // with the whole project dir below — the in-memory half forgets too.
+      deps.usage?.forget(project.slug);
       const { purgedEvents, tasks: purgedTasks, removedFiles } = deps.factory.resetProject(project.root, project.slug);
       rmSync(join(projectDir, "scrum"), { recursive: true, force: true });
       const tasks = [...new Set([...purgedTasks, ...projectTaskSet])];
@@ -2986,6 +3037,25 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         taskWorkspaces: null,
         dispatchers: null,
       });
+      // The usage rollup's reset law (v0.0.87, ADR 0043 §3): a full reset
+      // drops `<projectStateDir>/usage.json` with the rest of the Project's
+      // history; `--keep-seats` keeps ONLY the surviving Supervisor and Lead
+      // session counters, pruning every task/peer and retired-seat entry.
+      if (deps.usage !== undefined) {
+        if (input.keepSeats === true) {
+          const surviving = readProjectRegistration(deps.stateDir, project.slug);
+          deps.usage.pruneForReset(project.slug, [surviving?.supervisor, surviving?.lead].filter((id): id is string => typeof id === "string" && id !== ""));
+        } else {
+          deps.usage.forget(project.slug);
+        }
+      }
+      if (input.keepSeats !== true) {
+        try {
+          rmSync(join(projectDir, "usage.json"), { force: true });
+        } catch {
+          // best-effort — the project dir sweep below is the backstop
+        }
+      }
 
       // 7. Purge ledger events, contracts, reports, and gate logs in-memory and on disk.
       const { purgedEvents, tasks: purgedTasks, removedFiles } = deps.factory.resetProject(project.root, project.slug);

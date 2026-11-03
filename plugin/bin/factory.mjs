@@ -1144,6 +1144,16 @@ if (command === "status") {
     process.exit(0);
   }
   for (const line of taskStatusLines(events)) console.log(line);
+  // The Token Usage section (v0.0.87, ADR 0043 §5): one block per Project
+  // with recorded sessions, read straight off the usage rollups — the same
+  // local-read lineage as the task lines above, no spool round trip.
+  const { statusUsageLines } = await import("./usage-status.mjs");
+  const usageLines = statusUsageLines(stateDir);
+  if (usageLines.length > 0) {
+    console.log("");
+    console.log("Token Usage");
+    for (const line of usageLines) console.log(line);
+  }
   process.exit(0);
 }
 

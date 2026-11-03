@@ -24,6 +24,7 @@ import { Btn, Card, Chip, Pill, SegmentedControl } from "../kit/pill.tsx";
 import { DOT, PILL_H, RADIUS, SPACING, hoveredOf, text, tint } from "../kit/theme.ts";
 import { ScrumWorkflowPipeline } from "./scrum.tsx";
 import type { ScrumAction } from "./scrum.tsx";
+import { formatTokenCount } from "./seats.tsx";
 import {
   KANBAN_COLUMNS,
   computeCardGridColumns,
@@ -306,6 +307,9 @@ function KanbanCard({
         />
         {task.attempts.length > 0 && task.lane !== null && !isAccepted ? (
           <Pill theme={theme} label={shortLaneLabel(task.lane)} mono />
+        ) : null}
+        {(task.totalTokens ?? 0) > 0 ? (
+          <Pill theme={theme} icon="Coins" label={`${formatTokenCount(task.totalTokens!)} tok`} tone="accent" mono />
         ) : null}
       </View>
 
@@ -819,6 +823,10 @@ export function TaskDetailBody({
             mono
           />
         ) : null}
+        {(task.totalTokens ?? 0) > 0 ? (
+          <Pill theme={theme} icon="Coins" label={`${formatTokenCount(task.totalTokens!)} tok`} tone="accent" lit mono />
+        ) : null}
+        {task.usageModel != null ? <Pill theme={theme} label={task.usageModel} mono /> : null}
         {task.costState === "metered" ? <Pill theme={theme} label={`Cost ${costLabel(task)}`} mono /> : null}
         {taskAgentId !== null ? (
           openAgent !== undefined ? (
