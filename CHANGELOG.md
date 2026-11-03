@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.90] - 2026-11-03
+
+- Fix Paseo Desktop plugin load and self-update (`updateSource`) failure caused by top-level `createRequire(import.meta.url)` in `src/usage-extractor.ts` (`plugin/server/core/usage-extractor.ts`) and `src/agy-transcript.ts`: Paseo compiles `plugin/index.server.ts` into a CommonJS bundle (`format: "cjs"`) where `import.meta` is `{}` (`import.meta.url === undefined`), causing `createRequire(undefined)` to throw `ERR_INVALID_ARG_VALUE` during module evaluation and roll back updates to `v0.0.85`. `loadSqliteSync()` now resolves `node:sqlite` lazily via a CJS-safe synthetic path (`join(process.cwd(), "factory-sqlite.cjs")`), and `scripts/check-bundle.mjs` + `test/installed-artifacts.test.ts` evaluate the compiled server CJS bundle in a CommonJS VM context without `import.meta` or `__dirname`.
+- Archive `<stateDir>/git-blocked.log` alongside the legacy root `ledger.jsonl` during `migrateLegacyRootState` so historical Layer-3 block lines from prior/deleted projects are not re-ingested into the freshly migrated per-Project ledgers on first boot.
+
 ## [0.0.89] - 2026-11-03
 
 - Isolate every registered Project's verification state (ADR 0045): the plugin server replaces its single root Factory with a lazy per-Project registry (`factoryForProject`), so each Project owns its own `ledger.jsonl`, Reports, Gate logs, and Retro files under `<stateDir>/projects/<slug>/` with an independent Task ID namespace and serialized writer lane. Every Spool command, permission hook, Layer-3 `git_blocked` entry, status poll, and surface RPC resolves the target Project context-first (explicit `--project` flag → Correlation token → workspace git-root/worktree extraction → unique Task lookup with an ambiguity refusal → single-Project fallback), and Project reset/delete touch only the target Project's directory and cached Factory with zero cross-Project blast radius.

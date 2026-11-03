@@ -251,6 +251,10 @@ export function migrateLegacyRootState(
     if (existsSync(source)) moveDurable(source, join(projectStateDir(stateDir, slug), name));
   }
   moveDurable(rootLedgerPath, join(archiveDir, "ledger.jsonl"));
+  const rootGitBlockedLog = join(stateDir, "git-blocked.log");
+  if (existsSync(rootGitBlockedLog)) {
+    moveDurable(rootGitBlockedLog, join(archiveDir, "git-blocked.log"));
+  }
   for (const name of archivedArtifacts) {
     const source = join(stateDir, name);
     if (existsSync(source)) moveDurable(source, join(archiveDir, name));

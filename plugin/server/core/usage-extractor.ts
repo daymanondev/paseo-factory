@@ -409,17 +409,22 @@ type SqliteDatabase = {
   close: () => void;
 };
 
-const requireNodeBuiltin = createRequire(import.meta.url);
 let sqliteDatabaseSync: (new (path: string) => unknown) | null | undefined;
 
 /**
  * Resolves `node:sqlite`'s `DatabaseSync` once, synchronously (a builtin
  * `require` — the 128k/160k sensors are sync contracts) — `null` when this
  * runtime lacks it (degrade, never crash).
+ *
+ * Uses a synthetic CJS path (`join(process.cwd(), "factory-sqlite.cjs")`)
+ * rather than `import.meta.url` because Paseo compiles `plugin/index.server.ts`
+ * into a CommonJS bundle (`format: "cjs"`) where `import.meta` is `{}` and
+ * top-level `createRequire(import.meta.url)` throws `ERR_INVALID_ARG_VALUE`.
  */
 function loadSqliteSync(): (new (path: string) => unknown) | null {
   if (sqliteDatabaseSync === undefined) {
     try {
+      const requireNodeBuiltin = createRequire(join(process.cwd(), "factory-sqlite.cjs"));
       sqliteDatabaseSync = requireNodeBuiltin("node:sqlite").DatabaseSync;
     } catch {
       sqliteDatabaseSync = null;

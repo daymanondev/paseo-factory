@@ -28,6 +28,7 @@ import { createRequire, isBuiltin } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import vm from "node:vm";
 import ts from "typescript";
 
 const CLIENT_SDK = ["@getpaseo/plugin/client", "@getpaseo/plugin/client/ui", "@getpaseo/plugin/client/react-native"];
@@ -166,10 +167,40 @@ function classSyntaxErrors(code) {
   return errors;
 }
 
+/** Paseo's server loader evaluates the compiled CJS bundle without `import.meta` or `__dirname`. */
+function serverEvalErrors(code) {
+  const mod = { exports: {} };
+  const hostRequire = createRequire(import.meta.url);
+  const cjsRequire = (specifier) => hostRequire(specifier);
+  try {
+    vm.runInNewContext(code, {
+      require: cjsRequire,
+      module: mod,
+      exports: mod.exports,
+      process,
+      Buffer,
+      URL,
+      URLSearchParams,
+      TextEncoder,
+      TextDecoder,
+      console,
+      setTimeout,
+      clearTimeout,
+      setInterval,
+      clearInterval,
+      queueMicrotask,
+    });
+    return [];
+  } catch (error) {
+    return [`server bundle failed CJS evaluation (as Paseo's plugin loader evaluates it): ${error instanceof Error ? error.message : String(error)}`];
+  }
+}
+
 const results = await Promise.allSettled([bundle("index.client.tsx", "client"), bundle("index.server.ts", "server")]);
 rmSync(root, { recursive: true, force: true });
 const failures = results.flatMap((result) => (result.status === "rejected" ? (result.reason.errors?.map((error) => `${error.location ? `${error.location.file}:${error.location.line}: ` : ""}${error.text}`) ?? [String(result.reason)]) : []));
 if (results[0].status === "fulfilled") failures.push(...classSyntaxErrors(results[0].value.outputFiles[0].text));
+if (results[1].status === "fulfilled") failures.push(...serverEvalErrors(results[1].value.outputFiles[0].text));
 if (failures.length > 0) {
   console.error(failures.join("\n"));
   process.exit(1);

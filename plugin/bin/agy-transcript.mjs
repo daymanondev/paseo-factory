@@ -140,7 +140,7 @@ function readSteps(path) {
   if (!existsSync2(path)) throw new Error(`Antigravity conversation database is missing: ${path}`);
   let sqlite;
   try {
-    sqlite = createRequire(import.meta.url)("node:sqlite");
+    sqlite = createRequire(join2(process.cwd(), "factory-sqlite.cjs"))("node:sqlite");
   } catch {
   }
   if (sqlite) {

@@ -84,6 +84,7 @@ for (const boundary of [
   { name: "server client-only SDK", file: "plugin/index.server.ts", body: 'export {useRpc as server} from "@getpaseo/plugin/client";\n', error: /client-only module cannot be imported into the plugin server/ },
   { name: "client server-only module", file: "plugin/index.client.tsx", body: 'export {server as client} from "./server/only.ts";\n', error: /server-only module cannot be imported into the plugin client/ },
   { name: "Hermes class", file: "plugin/index.client.tsx", body: 'export class Client { value = 1; }\n', error: /class Client reaches the client bundle/ },
+  { name: "server top-level createRequire(import.meta.url) in CJS bundle", file: "plugin/index.server.ts", body: 'import {createRequire} from "node:module"; const req = createRequire(import.meta.url); export const server = Boolean(req);\n', error: /server bundle failed CJS evaluation.*filename.*Received undefined/ },
 ]) {
   test(`installed compiler rejects ${boundary.name}`, (t) => {
     const fixture = installedFixture(t);

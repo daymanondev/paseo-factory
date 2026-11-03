@@ -62,7 +62,7 @@ function resolveConversation(input: TranscriptInput, conversations: string): str
 function readSteps(path: string): TranscriptStep[] {
   if (!existsSync(path)) throw new Error(`Antigravity conversation database is missing: ${path}`);
   let sqlite: typeof import('node:sqlite') | undefined;
-  try { sqlite = createRequire(import.meta.url)('node:sqlite'); } catch { /* Older Node / Electron: use sqlite3. */ }
+  try { sqlite = createRequire(join(process.cwd(), 'factory-sqlite.cjs'))('node:sqlite'); } catch { /* Older Node / Electron: use sqlite3. */ }
   if (sqlite) {
     const db: DatabaseSync = new sqlite.DatabaseSync(path, { readOnly: true });
     // TEXT columns can hold wire bytes too. Prevent SQLite's JS adapter from
