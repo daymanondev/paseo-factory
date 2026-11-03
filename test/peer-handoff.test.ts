@@ -1,6 +1,6 @@
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createFactory } from "../plugin/server/core/factory.ts";
 import { CorrelationRegistry } from "../plugin/server/core/correlations.ts";
@@ -12,7 +12,7 @@ import { handleSpoolRequest, startSpool } from "../plugin/server/spool.ts";
 import { readLeadMailbox } from "../plugin/server/core/mailbox.ts";
 import { disposeDir, gitCommitAll, gitCommitChanges, makeTempDir } from "./helpers.ts";
 
-function fixture(t: TestContext, handoffTimeoutMs = 90_000) {
+function fixture(t: TestContext, handoffTimeoutMs?: number) {
   const dir = makeTempDir();
   disposeDir(t, dir);
   const root = join(dir, "repo");
@@ -387,4 +387,80 @@ test("a lost workspace-create acknowledgement adopts its successor before any fa
   await f.runtime.sweepPeers();
   assert.equal(f.created.length, 1, f.logs.join("\n"));
   assert.equal(f.agents.filter(agent => agent.archivedAt === null && agent.labels.seat === "agent").length, 1);
+});
+
+
+test("Peer handoff persists the final reply without file writes and caps Unicode at 12 KB", async t => {
+  const f = fixture(t);
+  await f.runtime.onLeadTurnEnded(ended(f.peer.id));
+  assert.match(f.sent[0]!.text, /entire Markdown handoff directly in your final assistant message, in one piece/);
+  assert.match(f.sent[0]!.text, /without running shell commands or writing files to disk/);
+  writeFileSync(f.handoff, "# Disk fallback\nUse only without a reply.");
+  await f.runtime.onLeadTurnEnded(ended(f.peer.id, "# Peer reply\n" + "Verified 🧪\n".repeat(2000)));
+  const saved = readFileSync(f.handoff, "utf8");
+  assert.match(saved, /^# Peer reply/);
+  assert.ok(Buffer.byteLength(saved) <= 12 * 1024);
+  assert.match(saved, /\n\.\.\.\[truncated\]$/);
+  assert.doesNotMatch(saved, /�/);
+  assert.ok(f.created[0]!.prompt!.includes(saved));
+});
+
+
+for (const mode of ["fresh", "stale", "refusal"] as const) {
+  test(`Peer handoff uses only a fresh valid worktree fallback (${mode})`, async t => {
+    const f = fixture(t);
+    const localPath = join(f.cwd, ".paseo-peer-handoff.md");
+    if (mode === "stale") {
+      writeFileSync(localPath, "# Stale local handoff\nDo not reuse.");
+      utimesSync(localPath, new Date(1000), new Date(1000));
+    }
+    await f.runtime.onLeadTurnEnded(ended(f.peer.id));
+    if (mode === "fresh") writeFileSync(localPath, "# Fresh local handoff\nContinue the journey.");
+    if (mode === "refusal") {
+      writeFileSync(localPath, "Permission denied: cannot write the handoff.");
+      writeFileSync(f.handoff, "The handoff was not written: permission denied.");
+    }
+    await f.runtime.onLeadTurnEnded(ended(f.peer.id, "Permission denied: cannot write outside the workspace."));
+    const saved = readFileSync(f.handoff, "utf8");
+    if (mode === "fresh") assert.equal(saved, "# Fresh local handoff\nContinue the journey.");
+    else {
+      assert.match(saved, /outgoing Peer was interrupted during handoff extraction/);
+      assert.doesNotMatch(saved, /Permission denied|not written|Stale local handoff/);
+    }
+  });
+}
+
+
+test("Peer extraction waits the full 180-second default fuse", async t => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
+  const f = fixture(t);
+  await f.runtime.onLeadTurnEnded(ended(f.peer.id));
+  t.mock.timers.tick(179_999);
+  await f.runtime.sweepPeers();
+  assert.equal(f.created.length, 0);
+  t.mock.timers.tick(1);
+  await f.runtime.sweepPeers();
+  assert.equal(f.created.length, 1);
+  assert.match(readFileSync(f.handoff, "utf8"), /outgoing Peer was interrupted/);
+});
+
+test("Peer refetches the final handoff when the turn event contains no assistant message", async t => {
+  const f = fixture(t);
+  const ref = f.daemon.agents.ref;
+  f.daemon.agents.ref = id => ({ ...ref(id), timeline: { refetch: async () => ({ entries: [{ item: { type: "assistant_message", text: "# Refetched handoff\nContinue verified work." } }] }) } });
+  await f.runtime.onLeadTurnEnded(ended(f.peer.id));
+  await f.runtime.onLeadTurnEnded({ ...ended(f.peer.id), timeline: [{ type: "tool_call" }] });
+  assert.equal(readFileSync(f.handoff, "utf8"), "# Refetched handoff\nContinue verified work.");
+  assert.match(f.created[0]!.prompt!, /Continue verified work/);
+});
+
+
+test("Peer rejects a pre-existing local handoff even if its file timestamp is ahead of the extraction", async t => {
+  const f = fixture(t);
+  const local = join(f.cwd, ".paseo-peer-handoff.md");
+  writeFileSync(local, "# Prior local handoff\nBelongs to a previous extraction.");
+  utimesSync(local, new Date(Date.now() + 60_000), new Date(Date.now() + 60_000));
+  await f.runtime.onLeadTurnEnded(ended(f.peer.id));
+  await f.runtime.onLeadTurnEnded(ended(f.peer.id));
+  assert.match(readFileSync(f.handoff, "utf8"), /outgoing Peer was interrupted/);
 });
