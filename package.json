@@ -26,8 +26,8 @@
     "prepare": "git config core.hooksPath .githooks || true"
   },
   "devDependencies": {
-    "@getpaseo/plugin": "0.13.0",
-    "@getpaseo/protocol": "0.13.0",
+    "@getpaseo/plugin": "0.15.0",
+    "@getpaseo/protocol": "0.15.0",
     "@types/node": "^22.10.0",
     "@types/react": "19.2.18",
     "@types/react-dom": "^19.1.0",

@@ -22,3 +22,11 @@ for (const action of ["resume", "restore"]) for (const project of [false, true])
   });
   assert.match(output, /RECOVERY_OK/);
 });
+
+test("actual plugin boot registers through legacy server.on/server.before when the host has no addHook", { timeout: 15_000 }, (t) => {
+  const dir = makeTempDir(); disposeDir(t, dir);
+  const output = execFileSync(process.execPath, [fileURLToPath(new URL("./fixtures/plugin-recovery-boot.ts", import.meta.url))], {
+    env: { ...process.env, HOME: dir, PASEO_HOME: join(dir, "trial"), RECOVERY_ACTION: "resume", RECOVERY_PROJECT: "no", RECOVERY_LEGACY_SERVER: "yes" }, encoding: "utf8", timeout: 12_000,
+  });
+  assert.match(output, /RECOVERY_OK/);
+});

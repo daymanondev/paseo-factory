@@ -16,6 +16,10 @@ const sessionOpenRequest = (reason: PluginSessionOpenRequest["reason"], env: Rec
   cwd: "/repo",
   reason,
   purpose: "interactive",
+  title: null,
+  labels: {},
+  tools: [],
+  mcpServers: {},
   env,
 });
 

@@ -1318,7 +1318,7 @@ test("OpenCode delegates installed bare package shims while other providers and 
   const factoryBin = join(factory.stateDir, "bin");
   const launch = injectClaimCliPath({
     agentId: "seat", workspaceId: null, provider: "opencode", cwd: workspace,
-    reason: "create", purpose: "interactive",
+    reason: "create", purpose: "interactive", title: null, labels: {}, tools: [], mcpServers: {},
     env: { PATH: [earlierBin, factoryBin, "/usr/bin", factoryBin].join(delimiter) },
   }, factoryBin);
   const refused = spawnSync("/bin/sh", ["-c", "npm install"], {

@@ -17,7 +17,7 @@ import { homedir } from "node:os";
 import { watch, type FSWatcher } from "node:fs";
 import { SleepInhibitor } from "./server/core/sleep-inhibitor.ts";
 import { join } from "node:path";
-import type { PluginServerContext } from "@getpaseo/plugin/server";
+import type { PluginHookContext, PluginHookEvents, PluginHookRequests, PluginServerContext } from "@getpaseo/plugin/server";
 import { pendingUpgradeFor } from "./server/core/upgrade-state.ts";
 import { ensureFactoryBinScripts } from "./server/core/agy-home.ts";
 import { PLUGIN_ID, pluginDirFor, resolvePaseoHome, stateDirFor } from "./server/paths.ts";
@@ -205,40 +205,68 @@ export default function contribute(server: PluginServerContext) {
   // is pinned at create so asks always surface (a blinded choke is the shim
   // alone).
   const choke = createChoke({ factory, homeDir: homedir(), onLog: log });
-  const offPermissionAsked = server.on("agent.permission_requested", (event, context) => {
-    capturePaseo(context);
-    void choke.onPermissionAsked(event, context.paseo).catch((error) => log(`choke: permission recording deferred — ${String(error)}`));
-  });
-  const offAgentCreate = server.before("agent.create", ({ request }, context) => factory.history.runOperation(async () => {
-    capturePaseo(context);
-    refreshPluginInstallation();
-    let next = request;
-    const normalized = normalizeAgentCreateRequest(next, { stateDir, providers: surface.cachedProviders() });
-    if (normalized !== next) {
-      log(`choke: normalized agent.create in ${next.config.cwd} (provider=${normalized.config.provider})`);
-      next = normalized;
-    }
-    const nextLabels =
-      (next as { labels?: Record<string, string> }).labels ??
-      (next.config as { labels?: Record<string, string> }).labels;
-    const pinned = choke.pinCreateMode(next.config, nextLabels);
-    if (pinned !== undefined) {
-      log(`choke: pinned permission mode to Always Ask for the new agent in ${next.config.cwd}`);
-      next = { ...next, config: pinned };
-    }
-    // The additive role injection (v0.0.14, ADR 0010 §1–§2/§6): seat-titled
-    // creates and managed-worktree creates carry their role contract in
-    // config.systemPrompt (mapped per provider by the daemon) plus their
-    // PASEO_FACTORY_* env — nothing under any project root is written.
-    try { await syncPeerHelpersBeforeCreate(next, stateDir); }
-    catch { log("helpers: pre-spawn MCP sync failed; cached configuration remains available"); }
-    const injected = injectRoleOnCreate(next, stateDir, undefined, surface.cachedProviders());
-    if (injected !== undefined) {
-      log(`roles: injected the ${injected.env?.PASEO_FACTORY_SEAT ?? "agent"} contract into the agent created in ${next.config.cwd}`);
-    }
-    const candidate = injected === undefined ? (next === request ? undefined : next) : injected;
-    return candidate === undefined ? undefined : sanitizeAgentCreateHookResult(candidate);
-  }));
+  // The dual lifecycle registration adapter (v0.0.91, ticket 01): Paseo
+  // 0.14.0/0.15.0 unify every plugin lifecycle hook under
+  // `server.addHook("<subject>.<operation>.<before|after>")` and deprecate
+  // `server.on` / `server.before` (removal scheduled after 2027-04-30);
+  // 0.13.x daemons and minimal test doubles expose only the legacy pair.
+  // The two APIs agree on payload shapes — event hooks receive the event
+  // itself, request hooks the same `{ request }` wrapper — so each handler
+  // body below is written once and only the registration channel differs:
+  // `addHook` handlers must return a Promise, which the adapter's
+  // `Promise.resolve` wrap supplies. Both channels return the unsubscriber
+  // the cleanup block at the bottom calls.
+  const supportsAddHook = typeof server.addHook === "function";
+  const registerLifecycleHook = <Payload, Result>(
+    modern: (handler: (payload: Payload, context: PluginHookContext) => Promise<Result | void>) => () => void,
+    legacy: (handler: (payload: Payload, context: PluginHookContext) => Result | void | Promise<Result | void>) => () => void,
+    body: (payload: Payload, context: PluginHookContext) => Result | void | Promise<Result | void>,
+  ): (() => void) =>
+    supportsAddHook
+      ? modern((payload, context) => Promise.resolve(body(payload, context)))
+      : legacy(body);
+  const offPermissionAsked = registerLifecycleHook<PluginHookEvents["agent.permission.before"], void>(
+    (handler) => server.addHook("agent.permission.before", handler),
+    (handler) => server.on("agent.permission_requested", handler),
+    (event, context) => {
+      capturePaseo(context);
+      void choke.onPermissionAsked(event, context.paseo).catch((error) => log(`choke: permission recording deferred — ${String(error)}`));
+    },
+  );
+  const offAgentCreate = registerLifecycleHook<{ request: PluginHookRequests["agent.create.before"] }, PluginHookRequests["agent.create.before"]>(
+    (handler) => server.addHook("agent.create.before", handler),
+    (handler) => server.before("agent.create", handler),
+    ({ request }, context) => factory.history.runOperation(async () => {
+      capturePaseo(context);
+      refreshPluginInstallation();
+      let next = request;
+      const normalized = normalizeAgentCreateRequest(next, { stateDir, providers: surface.cachedProviders() });
+      if (normalized !== next) {
+        log(`choke: normalized agent.create in ${next.config.cwd} (provider=${normalized.config.provider})`);
+        next = normalized;
+      }
+      const nextLabels =
+        (next as { labels?: Record<string, string> }).labels ??
+        (next.config as { labels?: Record<string, string> }).labels;
+      const pinned = choke.pinCreateMode(next.config, nextLabels);
+      if (pinned !== undefined) {
+        log(`choke: pinned permission mode to Always Ask for the new agent in ${next.config.cwd}`);
+        next = { ...next, config: pinned };
+      }
+      // The additive role injection (v0.0.14, ADR 0010 §1–§2/§6): seat-titled
+      // creates and managed-worktree creates carry their role contract in
+      // config.systemPrompt (mapped per provider by the daemon) plus their
+      // PASEO_FACTORY_* env — nothing under any project root is written.
+      try { await syncPeerHelpersBeforeCreate(next, stateDir); }
+      catch { log("helpers: pre-spawn MCP sync failed; cached configuration remains available"); }
+      const injected = injectRoleOnCreate(next, stateDir, undefined, surface.cachedProviders());
+      if (injected !== undefined) {
+        log(`roles: injected the ${injected.env?.PASEO_FACTORY_SEAT ?? "agent"} contract into the agent created in ${next.config.cwd}`);
+      }
+      const candidate = injected === undefined ? (next === request ? undefined : next) : injected;
+      return candidate === undefined ? undefined : sanitizeAgentCreateHookResult(candidate);
+    }),
+  );
 
   // The per-Project usage rollup runtime (v0.0.87, ADR 0043): the single
   // writer around each Project's `<projectStateDir>/usage.json` — the
@@ -389,14 +417,18 @@ export default function contribute(server: PluginServerContext) {
   // for both registered Lead and registered Supervisor seats and drives the
   // 128k rotation state machine for the Project whose registered Lead ended
   // the turn.
-  const offTurnEnded = server.on("agent.turn_ended", (event, context) => {
-    capturePaseo(context);
-    // The debounced usage capture (v0.0.87, ADR 0043 §3): every Supervisor,
-    // Lead, and Peer turn incrementally extracts its session usage and
-    // schedules the atomic rollup flush — zero Ledger lines per turn.
-    usage.recordTurnEnd(event.agent.id).catch((error) => log(`usage: turn capture deferred — ${String(error)}`));
-    void leadMail.onLeadTurnEnded({ agentId: event.agent.id, outcome: event.outcome, timeline: event.timeline }).catch((error) => log(`lead-mailbox: turn settle deferred — ${String(error)}`));
-  });
+  const offTurnEnded = registerLifecycleHook<PluginHookEvents["agent.turn.after"], void>(
+    (handler) => server.addHook("agent.turn.after", handler),
+    (handler) => server.on("agent.turn_ended", handler),
+    (event, context) => {
+      capturePaseo(context);
+      // The debounced usage capture (v0.0.87, ADR 0043 §3): every Supervisor,
+      // Lead, and Peer turn incrementally extracts its session usage and
+      // schedules the atomic rollup flush — zero Ledger lines per turn.
+      usage.recordTurnEnd(event.agent.id).catch((error) => log(`usage: turn capture deferred — ${String(error)}`));
+      void leadMail.onLeadTurnEnded({ agentId: event.agent.id, outcome: event.outcome, timeline: event.timeline }).catch((error) => log(`lead-mailbox: turn settle deferred — ${String(error)}`));
+    },
+  );
   const spool = startSpool(stateDir, factory, {
     ordinaryReady: () => booted && mailRecovered,
     onLog: log,
@@ -516,55 +548,59 @@ export default function contribute(server: PluginServerContext) {
 
   const gitBlocks = startGitBlockIngestion(factory, { onLog: log });
 
-  const offSessionOpen = server.before("agent.session_open", ({ request }, context) => factory.history.runOperation(() => {
-    capturePaseo(context);
-    refreshPluginInstallation();
-    let next = request;
-    if (pluginDir !== undefined) {
-      const withCli = injectClaimCliPath(next, claimCliBinDir(stateDir));
-      if (withCli !== next) {
-        log(`factory-claim on PATH for agent ${request.agentId} (${request.reason})`);
-        next = withCli;
+  const offSessionOpen = registerLifecycleHook<{ request: PluginHookRequests["agent.open.before"] }, PluginHookRequests["agent.open.before"]>(
+    (handler) => server.addHook("agent.open.before", handler),
+    (handler) => server.before("agent.session_open", handler),
+    ({ request }, context) => factory.history.runOperation(() => {
+      capturePaseo(context);
+      refreshPluginInstallation();
+      let next = request;
+      if (pluginDir !== undefined) {
+        const withCli = injectClaimCliPath(next, claimCliBinDir(stateDir));
+        if (withCli !== next) {
+          log(`factory-claim on PATH for agent ${request.agentId} (${request.reason})`);
+          next = withCli;
+        }
       }
-    }
-    // The role identity re-applies on every provider launch (v0.0.14): a
-    // seat's or worker's shell can always ask which seat it is.
-    const withEnv = injectSessionEnv(next, stateDir);
-    // The new-Supervisor session sweep (v0.0.31, ADR 0017 §5): a Supervisor
-    // session opening/binding for a Project archives that Project's orphaned
-    // `local_checkout` workspaces over the daemon records — the same sweep
-    // `ensureSeat("supervisor")` and `projectReset` run. Fire-and-forget:
-    // the session never waits on the sweep, and its rules never touch the
-    // active Supervisor/Lead workspace or any workspace hosting a live agent.
-    if (withEnv !== undefined && withEnv.env?.PASEO_FACTORY_SEAT === "supervisor") {
-      const openingWorkspaceId =
-        typeof next.workspaceId === "string" && next.workspaceId.trim() !== "" ? next.workspaceId.trim() : undefined;
-      void surface.sweepProjectWorkspaces({
-        projectRoot: next.cwd,
-        ...(openingWorkspaceId !== undefined ? { keepWorkspaceIds: [openingWorkspaceId] } : {}),
-      });
-    }
-    if (
-      withEnv !== undefined &&
-      request.reason === "resume" &&
-      request.purpose === "interactive" &&
-      typeof withEnv.env?.PASEO_FACTORY_PROJECT === "string" &&
-      withEnv.env.PASEO_FACTORY_PROJECT.trim() !== ""
-    ) {
-      const resumedSlug = withEnv.env.PASEO_FACTORY_PROJECT.trim();
-      const resumedSeat = withEnv.env.PASEO_FACTORY_SEAT;
-      if (resumedSeat === "lead" || resumedSeat === "supervisor") {
-        const resumePumpTimer = setTimeout(() => {
-          void (resumedSeat === "lead"
-            ? leadMail.pumpProjectLead(resumedSlug)
-            : leadMail.pumpProjectSupervisor(resumedSlug)
-          ).catch(() => {});
-        }, 150);
-        resumePumpTimer.unref?.();
+      // The role identity re-applies on every provider launch (v0.0.14): a
+      // seat's or worker's shell can always ask which seat it is.
+      const withEnv = injectSessionEnv(next, stateDir);
+      // The new-Supervisor session sweep (v0.0.31, ADR 0017 §5): a Supervisor
+      // session opening/binding for a Project archives that Project's orphaned
+      // `local_checkout` workspaces over the daemon records — the same sweep
+      // `ensureSeat("supervisor")` and `projectReset` run. Fire-and-forget:
+      // the session never waits on the sweep, and its rules never touch the
+      // active Supervisor/Lead workspace or any workspace hosting a live agent.
+      if (withEnv !== undefined && withEnv.env?.PASEO_FACTORY_SEAT === "supervisor") {
+        const openingWorkspaceId =
+          typeof next.workspaceId === "string" && next.workspaceId.trim() !== "" ? next.workspaceId.trim() : undefined;
+        void surface.sweepProjectWorkspaces({
+          projectRoot: next.cwd,
+          ...(openingWorkspaceId !== undefined ? { keepWorkspaceIds: [openingWorkspaceId] } : {}),
+        });
       }
-    }
-    return withEnv === undefined ? (next === request ? undefined : next) : withEnv;
-  }));
+      if (
+        withEnv !== undefined &&
+        request.reason === "resume" &&
+        request.purpose === "interactive" &&
+        typeof withEnv.env?.PASEO_FACTORY_PROJECT === "string" &&
+        withEnv.env.PASEO_FACTORY_PROJECT.trim() !== ""
+      ) {
+        const resumedSlug = withEnv.env.PASEO_FACTORY_PROJECT.trim();
+        const resumedSeat = withEnv.env.PASEO_FACTORY_SEAT;
+        if (resumedSeat === "lead" || resumedSeat === "supervisor") {
+          const resumePumpTimer = setTimeout(() => {
+            void (resumedSeat === "lead"
+              ? leadMail.pumpProjectLead(resumedSlug)
+              : leadMail.pumpProjectSupervisor(resumedSlug)
+            ).catch(() => {});
+          }, 150);
+          resumePumpTimer.unref?.();
+        }
+      }
+      return withEnv === undefined ? (next === request ? undefined : next) : withEnv;
+    }),
+  );
 
   return () => {
     sleepStopped = true;
