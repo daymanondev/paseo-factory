@@ -69,7 +69,7 @@ test("policy generation is byte-stable, checks stale output without rewriting, a
   assert.equal(run().status, 0);
   assert.equal(run(true).status, 0);
   assert.deepEqual(files.map((file) => readFileSync(join(dir, "plugin/bin", file), "utf8")), before);
-  for (const [file, marker] of [["bridge.mjs", "// BEGIN GENERATED TASK STATUS POLICY"], ["agy-pre-tool-hook.mjs", "// BEGIN GENERATED SCOPE POLICY"]]) {
+  for (const [file, marker] of [["bridge.mjs", "// BEGIN GENERATED TASK STATUS POLICY"], ["agy-pre-tool-hook.mjs", "// BEGIN GENERATED SCOPE POLICY"], ["agy-pre-tool-hook.mjs", "// BEGIN GENERATED SHELL HEREDOC POLICY"]]) {
     const path = join(dir, "plugin/bin", file!);
     const original = readFileSync(path, "utf8");
     const damaged = original.replace(marker!, `${marker}\n// simulated inline policy drift`);

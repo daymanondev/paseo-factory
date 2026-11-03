@@ -40,6 +40,7 @@ const targets = [
   ["src/process-policy.ts", "plugin/bin/process-policy.mjs"],
 ];
 const sections = [
+  ["src/shell-heredoc-policy.ts", "plugin/bin/agy-pre-tool-hook.mjs", "GENERATED SHELL HEREDOC POLICY", "shellHeredocPolicy"],
   ["src/mcp/primitives.ts", "plugin/bin/bridge.mjs", "GENERATED BRIDGE PRIMITIVES", "bridgePrimitives"],
   ["src/mcp/transport.ts", "plugin/bin/spool-client.mjs", "GENERATED SPOOL TRANSPORT", "spoolTransport"],
   ["src/mcp/catalog.ts", "plugin/bin/bridge.mjs", "GENERATED MCP CATALOG", "mcpCatalog"],
