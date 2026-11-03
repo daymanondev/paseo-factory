@@ -708,7 +708,7 @@ const TOUCH_OR_MKDIR = new Set(["touch", "mkdir"]);
  * `dd of=`, `touch`, and `mkdir`).
  */
 export function extractWriteTargets(command: string): string[] {
-  const tokens = shellTokens(command);
+  const tokens = shellTokens(stripNonInterpreterHeredocs(command));
   const targets = [...shellWriteDestinations(tokens)];
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
@@ -726,6 +726,11 @@ export function extractWriteTargets(command: string): string[] {
  * chained segments can be inspected independently.
  */
 function splitShellSegments(command: string): string[] {
+  return rawShellSegments(stripNonInterpreterHeredocs(command));
+}
+
+/** Split without heredoc handling, also used to inspect the header itself. */
+function rawShellSegments(command: string): string[] {
   const segments: string[] = [];
   let current = "";
   let quote: "'" | '"' | null = null;
@@ -771,6 +776,69 @@ function splitShellSegments(command: string): string[] {
   }
   if (current.trim() !== "") segments.push(current.trim());
   return segments;
+}
+
+const HEREDOC_INTERPRETERS = new Set(["sh", "bash", "zsh", "dash", "ksh", "node", "python", "python3", "ruby", "perl", "php"]);
+
+/** Only operators outside quoted prose are heredoc headers; `<<<` is a here-string. */
+function heredocDelimiters(line: string): { delimiter: string; tabs: boolean }[] {
+  const delimiters: { delimiter: string; tabs: boolean }[] = [];
+  let quote: "'" | '"' | null = null;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]!;
+    if (ch === "\\" && quote !== "'") { i += 1; continue; }
+    if (quote !== null) { if (ch === quote) quote = null; continue; }
+    if (ch === "'" || ch === '"') { quote = ch; continue; }
+    if (ch === "#" && (i === 0 || /[\s;|&()]/.test(line[i - 1]!))) break;
+    if (line.startsWith("<<<", i)) { i += 2; continue; }
+    if (!line.startsWith("<<", i)) continue;
+    const match = /^<<(-)?\s*(?:'([^']+)'|"([^"]+)"|([A-Za-z0-9_]+))/.exec(line.slice(i));
+    if (match === null) continue;
+    delimiters.push({ delimiter: (match[2] ?? match[3] ?? match[4])!, tabs: match[1] !== undefined });
+    i += match[0].length - 1;
+  }
+  return delimiters;
+}
+
+function heredocHeaderInvokesInterpreter(header: string): boolean {
+  return rawShellSegments(header).some((segment) => {
+    const words = quoteAwareWords(segment);
+    let i = 0;
+    while (i < words.length) {
+      const word = words[i]!;
+      const bin = word.split("/").at(-1)!;
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word) || bin === "export") { i++; continue; }
+      if (!PROCESS_KILL_WRAPPER_PREFIXES.has(bin)) return HEREDOC_INTERPRETERS.has(bin);
+      i++;
+      // Wrapper options precede the actual executable (`env -i X=y /usr/bin/node`).
+      while (i < words.length && words[i]!.startsWith("-")) {
+        const option = words[i++]!;
+        if (["-u", "--unset", "-C", "--chdir", "-n", "--adjustment"].includes(option)) i++;
+      }
+      if (bin === "timeout" && i < words.length && isTimeoutOrNiceOperand(words[i]!)) i++;
+    }
+    return false;
+  });
+}
+
+/** Ignore literal documentation payloads, retaining every executable header and interpreter body. */
+export function stripNonInterpreterHeredocs(command: string): string {
+  const lines = command.split("\n");
+  const result: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const header = lines[i]!;
+    result.push(header);
+    const delimiters = heredocDelimiters(header);
+    const preserve = delimiters.length > 0 && heredocHeaderInvokesInterpreter(header);
+    for (const { delimiter, tabs } of delimiters) {
+      while (++i < lines.length) {
+        const line = lines[i]!;
+        if (preserve) result.push(line);
+        if ((tabs ? line.replace(/^\t+/, "") : line).replace(/\r$/, "") === delimiter) break;
+      }
+    }
+  }
+  return result.join("\n");
 }
 
 /**
@@ -919,6 +987,10 @@ export function judgeSeatShellCommand(
   if (isProcessKillAgainstFactory(command)) {
     return { behavior: "deny", rule: "process-kill", reason: PROCESS_KILL_FENCE_MESSAGE };
   }
+  // Arbitrary executable stdin can write source without shell redirections.
+  if (stripNonInterpreterHeredocs(command).split("\n").some((line) => heredocDelimiters(line).length > 0 && heredocHeaderInvokesInterpreter(line))) {
+    return { behavior: "deny", rule: "seat-write-fence", reason: SEAT_WRITE_FENCE_MESSAGE };
+  }
   for (const segment of splitShellSegments(command)) {
     if (isFactoryCliSegment(segment, projectRoot, stateDir, tmpDirs)) continue;
     const segTokens = shellTokens(segment);
@@ -1044,7 +1116,7 @@ export function judgeShellCommand(command: string, roots: WritableRoots, memory?
   if (isProcessKillAgainstFactory(command)) {
     return { behavior: "deny", rule: "process-kill", reason: PROCESS_KILL_FENCE_MESSAGE };
   }
-  const tokens = shellTokens(command);
+  const tokens = shellTokens(stripNonInterpreterHeredocs(command));
   const inIsolatedWorktree =
     (memory?.worktree !== undefined && memory.worktree.trim() !== "") ||
     /\/projects\/[^/]+\/worktrees\/[^/]+(?:\/|$)/.test(roots.workspace);
