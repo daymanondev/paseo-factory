@@ -96,3 +96,56 @@ test("contracted shell permissions inspect interpreter bodies while ignoring lit
     assert.equal(hookDecision("agent", command).decision, behavior, command);
   }
 });
+
+
+test("expanding documentation heredocs cannot hide executable command substitutions", () => {
+  for (const expansion of ["$(touch src/app.ts)", "`touch src/app.ts`", "'$(touch src/app.ts)'", "$(python3 -c \"open('src/app.ts', 'w').write('changed')\")"]) {
+    const command = `cat <<EOF > docs/notes.md\n${expansion}\nEOF`;
+    assert.equal(judgeSeatShellCommand(command, projectRoot, stateDir).behavior, "deny", command);
+    for (const seat of ["supervisor", "lead"] as const) {
+      assert.equal(hookDecision(seat, command).decision, "deny", `${seat}: ${command}`);
+    }
+  }
+});
+
+test("redirect prefixes cannot disguise executable interpreter heredocs", () => {
+  for (const header of [
+    "<<EOF bash",
+    "<<EOF env -i MODE=test /bin/bash",
+    "<<EOF /usr/bin/env -i MODE=test /usr/bin/node",
+    ">docs/trace.md <<EOF /usr/bin/env MODE=test /bin/bash",
+    "2>/dev/null <<EOF MODE=test /bin/bash",
+  ]) {
+    const command = `${header}\necho changed > src/app.ts\nEOF`;
+    assert.deepEqual([
+      judgeSeatShellCommand(command, projectRoot, stateDir).behavior,
+      hookDecision("supervisor", command).decision,
+      hookDecision("lead", command).decision,
+    ], ["deny", "deny", "deny"], command);
+  }
+});
+
+test("quoted delimiters and escaped substitutions remain literal documentation", () => {
+  for (const command of [
+    "cat <<'EOF' > docs/notes.md\n$(touch src/app.ts)\n`touch src/app.ts`\nEOF",
+    'cat <<"EOF" > docs/notes.md\n$(touch src/app.ts)\n`touch src/app.ts`\nEOF',
+    "cat <<EOF > docs/notes.md\n\\$(touch src/app.ts)\n\\`touch src/app.ts\\`\nEOF",
+  ]) {
+    assert.deepEqual([
+      judgeSeatShellCommand(command, projectRoot, stateDir).behavior,
+      hookDecision("supervisor", command).decision,
+      hookDecision("lead", command).decision,
+    ], ["allow", "allow", "allow"], command);
+  }
+});
+
+test("contracted shell permissions also fence discarded heredoc substitutions", () => {
+  const roots = writableRootsFor(projectRoot, stateDir, "/home/peer", {});
+  for (const expansion of [`$(touch ${stateDir}/ledger.jsonl)`, `\`touch ${stateDir}/ledger.jsonl\``]) {
+    const command = `cat <<EOF > docs/notes.md\n${expansion}\nEOF`;
+    assert.deepEqual([
+      judgeShellCommand(command, roots).behavior,
+      hookDecision("agent", command).decision,
+    ], ["deny", "deny"], command);
+  }
+});

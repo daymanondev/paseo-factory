@@ -17,6 +17,8 @@
  * `--force-with-lease`, `fetch -f`, `checkout -b` and `clean -n` stay clear.
  */
 import { isFactoryInfrastructureProcess, isTaskWorktreeScopedProcess } from "./process-policy.ts";
+import { inspectShellHeredocs, stripNonInterpreterHeredocs, rawShellSegments, quoteAwareWords, PROCESS_KILL_WRAPPER_PREFIXES, isTimeoutOrNiceOperand } from "./shell-heredoc-policy.ts";
+export { stripNonInterpreterHeredocs } from "./shell-heredoc-policy.ts";
 import { isMcpStdioLaunch } from "./mcp-launch-policy.ts";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
@@ -551,29 +553,8 @@ export function isPaseoFactoryToolName(toolName: string | undefined): boolean {
 /** The kill word class the process-kill rule names (v0.0.84). */
 const PROCESS_KILL_WORDS = new Set(["pkill", "killall", "kill"]);
 
-/**
- * Wrapper prefixes legally standing before the real command word: skipped
- * while locating a segment's first command word. `timeout`/`nice`
- * additionally swallow their duration/adjustment operands.
- */
-const PROCESS_KILL_WRAPPER_PREFIXES = new Set([
-  "env",
-  "command",
-  "nohup",
-  "sudo",
-  "xargs",
-  "exec",
-  "timeout",
-  "nice",
-]);
-
 /** A short-flag cluster carrying `c` (`-c`, `-lc`, `-ic`) — a shell's payload flag. */
 const SHELL_DASH_C_FLAG = /^-[A-Za-z]*c[A-Za-z]*$/;
-
-/** The duration/adjustment operand `timeout`/`nice` carry before the command. */
-function isTimeoutOrNiceOperand(token: string): boolean {
-  return /^[-+]?\d[\d.]*[a-z]?$/i.test(token) || token === "-n" || token === "--adjustment";
-}
 
 /**
  * Index of the segment's first command word: leading `X=Y` env assignments,
@@ -732,158 +713,6 @@ function splitShellSegments(command: string): string[] {
   return rawShellSegments(stripNonInterpreterHeredocs(command));
 }
 
-/** Split without heredoc handling, also used to inspect the header itself. */
-function rawShellSegments(command: string): string[] {
-  const segments: string[] = [];
-  let current = "";
-  let quote: "'" | '"' | null = null;
-  for (let i = 0; i < command.length; i++) {
-    const ch = command[i]!;
-    if (quote !== null) {
-      if (ch === "\\" && quote === '"' && i + 1 < command.length) {
-        current += ch + command[i + 1]!;
-        i += 1;
-        continue;
-      }
-      if (ch === quote) quote = null;
-      current += ch;
-      continue;
-    }
-    if (ch === "'" || ch === '"') {
-      quote = ch;
-      current += ch;
-      continue;
-    }
-    if (ch === "\\" && i + 1 < command.length) {
-      current += ch + command[i + 1]!;
-      i += 1;
-      continue;
-    }
-    if (ch === ";" || ch === "\n") {
-      if (current.trim() !== "") segments.push(current.trim());
-      current = "";
-      continue;
-    }
-    if ((ch === "&" && command[i + 1] === "&") || (ch === "|" && command[i + 1] === "|")) {
-      if (current.trim() !== "") segments.push(current.trim());
-      current = "";
-      i += 1;
-      continue;
-    }
-    if (ch === "|") {
-      if (current.trim() !== "") segments.push(current.trim());
-      current = "";
-      continue;
-    }
-    current += ch;
-  }
-  if (current.trim() !== "") segments.push(current.trim());
-  return segments;
-}
-
-const HEREDOC_INTERPRETERS = new Set(["sh", "bash", "zsh", "dash", "ksh", "node", "python", "python3", "ruby", "perl", "php"]);
-
-/** Only operators outside quoted prose are heredoc headers; `<<<` is a here-string. */
-function heredocDelimiters(line: string): { delimiter: string; tabs: boolean }[] {
-  const delimiters: { delimiter: string; tabs: boolean }[] = [];
-  let quote: "'" | '"' | null = null;
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i]!;
-    if (ch === "\\" && quote !== "'") { i += 1; continue; }
-    if (quote !== null) { if (ch === quote) quote = null; continue; }
-    if (ch === "'" || ch === '"') { quote = ch; continue; }
-    if (ch === "#" && (i === 0 || /[\s;|&()]/.test(line[i - 1]!))) break;
-    if (line.startsWith("<<<", i)) { i += 2; continue; }
-    if (!line.startsWith("<<", i)) continue;
-    const match = /^<<(-)?\s*(?:'([^']+)'|"([^"]+)"|([A-Za-z0-9_]+))/.exec(line.slice(i));
-    if (match === null) continue;
-    delimiters.push({ delimiter: (match[2] ?? match[3] ?? match[4])!, tabs: match[1] !== undefined });
-    i += match[0].length - 1;
-  }
-  return delimiters;
-}
-
-function heredocHeaderInvokesInterpreter(header: string): boolean {
-  return rawShellSegments(header).some((segment) => {
-    const words = quoteAwareWords(segment);
-    let i = 0;
-    while (i < words.length) {
-      const word = words[i]!;
-      const bin = word.split("/").at(-1)!;
-      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word) || bin === "export") { i++; continue; }
-      if (!PROCESS_KILL_WRAPPER_PREFIXES.has(bin)) return HEREDOC_INTERPRETERS.has(bin);
-      i++;
-      // Wrapper options precede the actual executable (`env -i X=y /usr/bin/node`).
-      while (i < words.length && words[i]!.startsWith("-")) {
-        const option = words[i++]!;
-        if (["-u", "--unset", "-C", "--chdir", "-n", "--adjustment"].includes(option)) i++;
-      }
-      if (bin === "timeout" && i < words.length && isTimeoutOrNiceOperand(words[i]!)) i++;
-    }
-    return false;
-  });
-}
-
-/** Ignore literal documentation payloads, retaining every executable header and interpreter body. */
-export function stripNonInterpreterHeredocs(command: string): string {
-  const lines = command.split("\n");
-  const result: string[] = [];
-  for (let i = 0; i < lines.length; i++) {
-    const header = lines[i]!;
-    result.push(header);
-    const delimiters = heredocDelimiters(header);
-    const preserve = delimiters.length > 0 && heredocHeaderInvokesInterpreter(header);
-    for (const { delimiter, tabs } of delimiters) {
-      while (++i < lines.length) {
-        const line = lines[i]!;
-        if (preserve) result.push(line);
-        if ((tabs ? line.replace(/^\t+/, "") : line).replace(/\r$/, "") === delimiter) break;
-      }
-    }
-  }
-  return result.join("\n");
-}
-
-/**
- * Tokenizes a single shell segment preserving quoted strings as single tokens
- * so `--message "npm install src/foo.ts"` is not mistaken for a subcommand.
- */
-function quoteAwareWords(segment: string): string[] {
-  const words: string[] = [];
-  let current = "";
-  let quote: "'" | '"' | null = null;
-  for (let i = 0; i < segment.length; i++) {
-    const ch = segment[i]!;
-    if (quote !== null) {
-      if (ch === "\\" && quote === '"' && i + 1 < segment.length) {
-        current += segment[i + 1]!;
-        i += 1;
-        continue;
-      }
-      if (ch === quote) {
-        quote = null;
-        continue;
-      }
-      current += ch;
-      continue;
-    }
-    if (ch === "'" || ch === '"') {
-      quote = ch;
-      continue;
-    }
-    if (/\s/.test(ch)) {
-      if (current !== "") {
-        words.push(current);
-        current = "";
-      }
-      continue;
-    }
-    current += ch;
-  }
-  if (current !== "") words.push(current);
-  return words;
-}
-
 /**
  * A deliberately conservative delegation boundary: every command segment must
  * resolve a bare installed shim. Unknown commands, shell expansion, redirects,
@@ -991,7 +820,8 @@ export function judgeSeatShellCommand(
     return { behavior: "deny", rule: "process-kill", reason: PROCESS_KILL_FENCE_MESSAGE };
   }
   // Arbitrary executable stdin can write source without shell redirections.
-  if (stripNonInterpreterHeredocs(command).split("\n").some((line) => heredocDelimiters(line).length > 0 && heredocHeaderInvokesInterpreter(line))) {
+  const heredocs = inspectShellHeredocs(command);
+  if (heredocs.interpreter || heredocs.commandSubstitution) {
     return { behavior: "deny", rule: "seat-write-fence", reason: SEAT_WRITE_FENCE_MESSAGE };
   }
   for (const segment of splitShellSegments(command)) {
@@ -1118,6 +948,9 @@ function judgeMemoryDestination(rawPath: string, fence: MemoryFence): ChokeDecis
 export function judgeShellCommand(command: string, roots: WritableRoots, memory?: MemoryFence): ChokeDecision {
   if (isProcessKillAgainstFactory(command)) {
     return { behavior: "deny", rule: "process-kill", reason: PROCESS_KILL_FENCE_MESSAGE };
+  }
+  if (inspectShellHeredocs(command).commandSubstitution) {
+    return { behavior: "deny", rule: "seat-write-fence", reason: "Executable command substitution in an expanding heredoc cannot be treated as literal text." };
   }
   const tokens = shellTokens(stripNonInterpreterHeredocs(command));
   const inIsolatedWorktree =
