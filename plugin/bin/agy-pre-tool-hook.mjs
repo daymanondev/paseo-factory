@@ -347,6 +347,79 @@ function splitShellSegments(command) {
   return segments;
 }
 
+// Heredoc handling mirrors src/choke.ts; interpreter stdin stays executable.
+const HEREDOC_INTERPRETERS = /* @__PURE__ */ new Set(["sh", "bash", "zsh", "dash", "ksh", "node", "python", "python3", "ruby", "perl", "php"]);
+function heredocDelimiters(line) {
+  const delimiters = [];
+  let quote = null;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === "\\" && quote !== "'") {
+      i += 1;
+      continue;
+    }
+    if (quote !== null) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+    if (ch === "#" && (i === 0 || /[\s;|&()]/.test(line[i - 1]))) break;
+    if (line.startsWith("<<<", i)) {
+      i += 2;
+      continue;
+    }
+    if (!line.startsWith("<<", i)) continue;
+    const match = /^<<(-)?\s*(?:'([^']+)'|"([^"]+)"|([A-Za-z0-9_]+))/.exec(line.slice(i));
+    if (match === null) continue;
+    delimiters.push({ delimiter: match[2] ?? match[3] ?? match[4], tabs: match[1] !== void 0 });
+    i += match[0].length - 1;
+  }
+  return delimiters;
+}
+function heredocHeaderInvokesInterpreter(header) {
+  return splitShellSegments(header).some((segment) => {
+    const words = quoteAwareTokens(segment);
+    let i = 0;
+    while (i < words.length) {
+      const word = words[i];
+      const bin = word.split("/").at(-1);
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word) || bin === "export") {
+        i++;
+        continue;
+      }
+      if (!PROCESS_KILL_WRAPPER_PREFIXES.has(bin)) return HEREDOC_INTERPRETERS.has(bin);
+      i++;
+      while (i < words.length && words[i].startsWith("-")) {
+        const option = words[i++];
+        if (["-u", "--unset", "-C", "--chdir", "-n", "--adjustment"].includes(option)) i++;
+      }
+      if (bin === "timeout" && i < words.length && isTimeoutOrNiceOperand(words[i])) i++;
+    }
+    return false;
+  });
+}
+function stripNonInterpreterHeredocs(command) {
+  const lines = command.split("\n");
+  const result = [];
+  for (let i = 0; i < lines.length; i++) {
+    const header = lines[i];
+    result.push(header);
+    const delimiters = heredocDelimiters(header);
+    const preserve = delimiters.length > 0 && heredocHeaderInvokesInterpreter(header);
+    for (const { delimiter, tabs } of delimiters) {
+      while (++i < lines.length) {
+        const line = lines[i];
+        if (preserve) result.push(line);
+        if ((tabs ? line.replace(/^\t+/, "") : line).replace(/\r$/, "") === delimiter) break;
+      }
+    }
+  }
+  return result.join("\n");
+}
+
 function commandWordIndex(words) {
   let i = 0;
   while (i < words.length) {
@@ -607,9 +680,12 @@ process.stdin.on("end", () => {
       allow();
     }
     if (SHELL_TOOL_NAMES.has(toolName)) {
-      const cmd = String(toolInput.CommandLine ?? toolInput.command ?? toolInput.cmd ?? "").trim();
+      const cmd = stripNonInterpreterHeredocs(String(toolInput.CommandLine ?? toolInput.command ?? toolInput.cmd ?? "").trim());
       if (isProcessKillAgainstFactory(cmd)) {
         deny(PROCESS_KILL_FENCE_MESSAGE);
+      }
+      if (cmd.split("\n").some((line) => heredocDelimiters(line).length > 0 && heredocHeaderInvokesInterpreter(line))) {
+        deny("Seat write fence: Supervisor and Lead may only write project memory/docs (AGENTS.md, CONTEXT.md, docs/**, .scratch/**); dispatch implementation work to Lead / Task Agents");
       }
       if (ctx.seat === "supervisor" && isForbiddenSupervisorGit(cmd)) {
         deny("Seat git fence: Supervisor may not run destructive or committing git commands on <project-root>.");
@@ -671,7 +747,7 @@ process.stdin.on("end", () => {
     }
 
     if (SHELL_TOOL_NAMES.has(toolName)) {
-      const cmd = String(toolInput.CommandLine ?? toolInput.command ?? toolInput.cmd ?? "").trim();
+      const cmd = stripNonInterpreterHeredocs(String(toolInput.CommandLine ?? toolInput.command ?? toolInput.cmd ?? "").trim());
       if (isProcessKillAgainstFactory(cmd)) {
         deny(PROCESS_KILL_FENCE_MESSAGE);
       }
