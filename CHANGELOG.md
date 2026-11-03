@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.88] - 2026-11-03
+
+- Require vertical user-facing journey waves after initial setup, concise 4-Part Briefs, and contract-bounded Lead diff review with proof falsification and immediate acceptance of verified GREEN waves.
+- Extract Lead and Peer handoffs from assistant replies with 180-second fuses and clean 24/12 KiB UTF-8 limits. Preserve the last-known-good Lead handoff after failed extraction and show a staleness notice beside the live roster and Ledger digest.
+- Ignore literal non-interpreter heredoc prose in core and Antigravity permission checks while retaining source redirect and interpreter protections.
+- Allow signals to worktree-scoped test processes while protecting factory infrastructure, and reap lingering worktree processes before landing or reset removes their directory.
+
 ## [0.0.87] - 2026-11-03
 
 - Ship the plugin-owned multi-provider token Meter (ADR 0043): a stat-gated `O(delta)` native session extractor (`src/usage-extractor.ts`, vendored to the plugin core) reads every harness's own store — `pi` `.jsonl` byte cursors, `codex` `state_5.sqlite` thread rows + 64 KB rollout tails with `cached_input_tokens` subtracted from `input_tokens`, `opencode` `session_v2` rows, `antigravity` `steps` `step_type = 15` Protobuf field 9 decoding with a Brain transcript fallback, `claude` sanitized project-dir `.jsonl`, and `copilot` `events.jsonl` with cache-inclusive `inputTokens` corrected and `session.shutdown` `accountingSnapshot` authoritative — normalizing all six into four disjoint additive buckets (`inputUncachedTokens + cacheReadTokens + cacheWriteTokens + outputTokens = totalTokens`, `reasoningTokens ⊆ outputTokens`) plus `totalCostUsd`, with the volatile daemon `lastUsage` as the last-resort fallback and SQLite loaded through a synchronous builtin `require` so a runtime without `node:sqlite` degrades instead of crashing.

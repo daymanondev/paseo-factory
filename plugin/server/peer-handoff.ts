@@ -13,6 +13,7 @@ import type { SurfaceAgentSnapshot, SurfaceDaemonApi } from "./surface-rpc.ts";
 import { stopAgentViaCli, type DaemonReply } from "./daemon-cli.ts";
 import { boundTaskPeers, peerIsRunning } from "./task-peers.ts";
 import { associateTaskPeer, createTaskPeer, resolvePeerSpawnProvider, resolveSpawnWorkspaceAndParent } from "./spool.ts";
+import { capHandoffText, validHandoffText } from "./handoff-text.ts";
 import { scrumSpawnLane } from "./scrum.ts";
 
 export const PEER_HANDOFF_TOKENS = 160_000;
@@ -26,6 +27,7 @@ interface PeerHandoffState {
   phase: "idle" | "extracting" | "retiring" | "spawning" | "blocked";
   outgoingId?: string;
   requestedAt?: number;
+  localHandoffStamp?: string | null;
   worktree?: string;
   provider?: string;
 }
@@ -84,21 +86,30 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
     if (!eligible(contract)) return;
     const task = contract.task, path = summaryPath(slug, task), daemon = deps.daemon();
     if (state.phase === "extracting") {
-      let summary = "";
-      try {
-        if (statSync(path).size <= SUMMARY_BYTES) summary = readFileSync(path, "utf8");
-      } catch { /* extraction file absent or unreadable */ }
-      if (!summary.trim() && input?.outcome.kind === "completed") {
-        summary = input.timeline.filter(item => item.type === "assistant_message").at(-1)?.text ?? "";
-        if (!summary.trim()) {
+      let summary: string | undefined;
+      if (input?.outcome.kind === "completed") {
+        const reply = input.timeline.filter(item => item.type === "assistant_message").at(-1)?.text;
+        if (validHandoffText(reply)) summary = reply;
+        if (summary === undefined) {
           try {
             const timeline = await bounded(daemon.agents.ref(state.outgoingId!).timeline.refetch({ direction: "tail", limit: 20 }));
-            summary = timeline.entries?.filter(entry => entry.item?.type === "assistant_message").at(-1)?.item?.text ?? "";
+            const reply = timeline.entries?.filter(entry => entry.item?.type === "assistant_message").at(-1)?.item?.text;
+            if (validHandoffText(reply)) summary = reply;
           } catch { /* Fuse fallback also covers unreadable native timelines. */ }
         }
       }
+      for (const candidate of [path, join(state.worktree!, ".paseo-peer-handoff.md")]) {
+        if (summary !== undefined) break;
+        try {
+          const unchangedLocal = candidate !== path && state.localHandoffStamp !== undefined && fileStamp(candidate) === state.localHandoffStamp;
+          if (!unchangedLocal && statSync(candidate).mtimeMs + 1 >= state.requestedAt!) {
+            const disk = readFileSync(candidate, "utf8");
+            if (validHandoffText(disk)) summary = disk;
+          }
+        } catch { /* Extraction file absent or unreadable. */ }
+      }
       if (!eligible(contract)) return;
-      writeFileSync(path, capSummary(summary.trim() ? summary : INTERRUPTED));
+      writeFileSync(path, capHandoffText(summary ?? INTERRUPTED, SUMMARY_BYTES));
       state.phase = "retiring";
       save(slug, task, state);
       clear(`${slug}:${task}`);
@@ -193,7 +204,7 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
         const modelLane = peer.model && !baseProvider.includes("/") ? `${baseProvider}/${peer.model}` : baseProvider;
         const thinking = peer.thinkingOptionId ?? peer.provider.match(/:([^/]+)$/)?.[1];
         const provider = thinking ? `${modelLane}:${thinking}` : modelLane;
-        state = { ...state, phase: "extracting", outgoingId: peer.id, requestedAt: Date.now(), worktree, provider };
+        state = { ...state, phase: "extracting", outgoingId: peer.id, requestedAt: Date.now(), worktree, provider, localHandoffStamp: fileStamp(join(worktree, ".paseo-peer-handoff.md")) };
         save(slug, task, state);
         rmSync(summaryPath(slug, task), { force: true }); // An earlier epoch/extraction is never continuity evidence.
         arm(slug, task, state.requestedAt!);
@@ -203,9 +214,9 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
           if (!eligible(contract)) continue;
           await bounded(deps.daemon().agents.ref(peer.id).send([
             `# Peer handoff extraction — Task ${task}`, "Your context crossed 160,000 tokens. Start no new work and submit no Claim during extraction.",
-            `Commit coherent work-in-progress on factory/${task}; preserve remaining edits. Write ${summaryPath(slug, task)} as plain Markdown, at most 12 KB, with these four sections:`,
+            "Preserve the existing committed work and uncommitted edits. Put the entire Markdown handoff directly in your final assistant message, in one piece, without running shell commands or writing files to disk. The plugin server reads your reply and persists it automatically, capping it at 12 KB. Use these four sections:",
             "1. Completed & Verified Slice", "2. Worktree Git Status & Uncommitted Edits", "3. Remaining Requirements & Failing Checks", "4. Read-First Files for Successor",
-            "Record completed checks and exact remaining failures. This bounded handoff is this turn's only deliverable; end your turn when written.",
+            "Record completed checks and exact remaining failures. This bounded handoff is this turn's only deliverable; end your turn after the complete Markdown document.",
           ].join("\n\n")));
         } catch (error) {
           deps.log(`Peer handoff extraction bypassed: ${String(error)}`);
@@ -221,8 +232,11 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
   };
 }
 
-function capSummary(text: string): string {
-  return Buffer.from(text).subarray(0, SUMMARY_BYTES).toString("utf8").replace(/\uFFFD$/, "");
+function fileStamp(path: string): string | null {
+  try {
+    const stat = statSync(path);
+    return `${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+  } catch { return null; }
 }
 
 function worktreeDigest(cwd: string, contract: ContractSet): string {

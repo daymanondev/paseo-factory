@@ -1106,7 +1106,7 @@ test("completeHandoff delivers Seat kickoff packet + Lead handoff bundle in a si
 });
 
 test("Fuse 1: beginHandoff immediately completes handoff when extraction prompt send throws, outgoing Lead is in status='error', or outgoing Lead is absent (v0.0.28, ADR 0018 §3)", async (t) => {
-  assert.equal(HANDOFF_EXTRACTION_TIMEOUT_MS, 90_000);
+  assert.equal(HANDOFF_EXTRACTION_TIMEOUT_MS, 180_000);
 
   // Case A: send(extractionPrompt) throws during beginHandoff
   {
@@ -1265,7 +1265,7 @@ test("Fuse 2: handing_over timeout (via scheduled timer and via pumpProjectLead)
     assert.ok(resolvedRoot.ok);
     factory.setContract({ task: "T-FUSE2-TIMER", workspace: resolvedRoot.root, gate: "true", artifact: "README.md" });
 
-    // Seed an older stale lead-handoff.md before beginHandoff so we verify stale handoffs are ignored on timeout
+    // A prior valid handoff is preserved on timeout, with a staleness notice.
     const handoffPath = join(projectStateDir(stateDir, slug), "lead-handoff.md");
     mkdirSync(projectStateDir(stateDir, slug), { recursive: true });
     writeFileSync(handoffPath, "# Stale Handoff From Yesterday\nDo not use.");
@@ -1291,11 +1291,9 @@ test("Fuse 2: handing_over timeout (via scheduled timer and via pumpProjectLead)
 
     const successorSends = fake.sent.filter((s) => s.agentId === successorId);
     assert.equal(successorSends.length, 1);
-    assert.match(
-      successorSends[0]!.text,
-      /\(the outgoing Lead was interrupted during handoff extraction — rely on the Machine-Verified Active Peer Roster and Ledger State Digest above\)/,
-    );
-    assert.doesNotMatch(successorSends[0]!.text, /Stale Handoff From Yesterday/);
+    assert.match(successorSends[0]!.text, /latest extraction did not complete.*last-known-good handoff/);
+    assert.match(successorSends[0]!.text, /Stale Handoff From Yesterday/);
+    assert.equal(readFileSync(handoffPath, "utf8"), "# Stale Handoff From Yesterday\nDo not use.");
     assert.match(successorSends[0]!.text, /task T-FUSE2-TIMER/);
     assert.match(successorSends[0]!.text, /Held mail drained by timer fuse/);
     assert.equal(fake.sent.filter((s) => s.agentId === "agent-sup-1").length, 0, "Supervisor was not paged");
@@ -1721,4 +1719,100 @@ test('a stopped worktree Peer no longer holds the active-work sleep assertion', 
   assert.equal(await leadMail.hasActiveWork(), true);
   peer.status = 'idle';
   assert.equal(await leadMail.hasActiveWork(), false);
+});
+
+
+test("Lead handoff persists the final Markdown reply, caps UTF-8 at 24 KB, and prefers it over a disk fallback", async t => {
+  const lead: FakeAgent = { id: "reply-lead", status: "idle", lastUsage: { contextWindowUsedTokens: 128_000 } };
+  const f = makeSpooledRuntime(t, [lead]);
+  lead.labels = { seat: "lead", project: f.slug };
+  lead.cwd = f.projectRoot;
+  await f.surface.leadEnsure({ projectRoot: f.projectRoot });
+  await f.leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [] });
+  const prompt = f.fake.sent.find(item => item.agentId === lead.id)!.text;
+  assert.match(prompt, /entire Markdown handoff directly in your final assistant message, in one piece/);
+  assert.match(prompt, /without running shell commands or writing files to disk/);
+  const path = join(projectStateDir(f.stateDir, f.slug), "lead-handoff.md");
+  writeFileSync(path, "# Disk fallback\nOlder than the reply.");
+  const reply = "# Reply handoff\n" + "Roadmap 🧭\n".repeat(4000);
+  await f.leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [{ type: "assistant_message", text: reply }] });
+  const persisted = readFileSync(path, "utf8");
+  assert.match(persisted, /^# Reply handoff/);
+  assert.ok(Buffer.byteLength(persisted) <= 24 * 1024);
+  assert.match(persisted, /\n\.\.\.\[truncated\]$/);
+  assert.doesNotMatch(persisted, /�/);
+  const successor = f.fake.sent.find(item => item.agentId !== lead.id)!.text;
+  assert.ok(successor.includes(persisted));
+});
+
+
+for (const failure of ["refusal", "failed", "send", "timeout"] as const) {
+  test(`Lead preserves the prior handoff after ${failure} and warns its successor`, async t => {
+    const lead: FakeAgent = { id: "prior-lead", status: "idle", lastUsage: { contextWindowUsedTokens: 128_000 } };
+    const f = makeSpooledRuntime(t, [lead], { handoffTimeoutMs: failure === "timeout" ? 40 : 180_000 });
+    lead.labels = { seat: "lead", project: f.slug };
+    lead.cwd = f.projectRoot;
+    await f.surface.leadEnsure({ projectRoot: f.projectRoot });
+    const path = join(projectStateDir(f.stateDir, f.slug), "lead-handoff.md");
+    const prior = "# Prior handoff\nPreserve the architecture and next journey.";
+    writeFileSync(path, prior);
+    if (failure === "send") {
+      const ref = f.fake.daemon.agents.ref;
+      f.fake.daemon.agents.ref = id => ({ ...ref(id), send: async text => {
+        if (id === lead.id) throw new Error("send failed");
+        await ref(id).send(text);
+      } });
+    }
+    await f.leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [] });
+    if (failure === "refusal" || failure === "failed") {
+      // Even an agent that overwrites the file with a permission error must not destroy continuity.
+      writeFileSync(path, "Permission denied: cannot write outside the workspace.");
+      await f.leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: failure === "failed" ? "failed" : "completed" }, timeline: [{ type: "assistant_message", text: "The handoff was not written: permission denied." }] });
+    }
+    await until(() => assert.equal(readProjectRegistration(f.stateDir, f.slug)?.rotationState, "normal"));
+    assert.equal(readFileSync(path, "utf8"), prior);
+    const kickoff = f.fake.sent.find(item => item.agentId !== lead.id)!.text;
+    assert.match(kickoff, /latest extraction did not complete.*last-known-good handoff/i);
+    assert.ok(kickoff.includes(prior));
+    assert.ok(kickoff.indexOf("Machine-Verified Active Peer Roster") < kickoff.indexOf(prior));
+    assert.ok(kickoff.indexOf("Ledger State Digest") < kickoff.indexOf(prior));
+  });
+}
+
+
+test("Lead extraction waits the full 180-second fuse before retiring a stuck seat", async t => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
+  const lead: FakeAgent = { id: "slow-lead", status: "idle", lastUsage: { contextWindowUsedTokens: 128_000 } };
+  const f = makeSpooledRuntime(t, [lead]);
+  lead.labels = { seat: "lead", project: f.slug };
+  lead.cwd = f.projectRoot;
+  await f.surface.leadEnsure({ projectRoot: f.projectRoot });
+  await f.leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [] });
+  t.mock.timers.tick(179_999);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(readProjectRegistration(f.stateDir, f.slug)?.rotationState, "handing_over");
+  assert.equal(f.fake.created.length, 0);
+  t.mock.timers.tick(1);
+  for (let i = 0; i < 10; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(readProjectRegistration(f.stateDir, f.slug)?.rotationState, "normal");
+  assert.equal(f.fake.created.length, 1);
+});
+
+
+test("Lead restores its last-known-good snapshot after a plugin restart during extraction", async t => {
+  const lead: FakeAgent = { id: "restarting-lead", status: "idle", lastUsage: { contextWindowUsedTokens: 128_000 } };
+  const f = makeSpooledRuntime(t, [lead]);
+  lead.labels = { seat: "lead", project: f.slug };
+  lead.cwd = f.projectRoot;
+  await f.surface.leadEnsure({ projectRoot: f.projectRoot });
+  const path = join(projectStateDir(f.stateDir, f.slug), "lead-handoff.md");
+  writeFileSync(path, "# Durable prior handoff\nArchitecture survives restart.");
+  await f.leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [] });
+  f.leadMail.stop();
+  writeFileSync(path, "Permission denied: outside workspace.");
+  const restarted = createLeadMailRuntime({ factory: f.factory, stateDir: f.stateDir, daemon: f.fake.daemon, ensureLead: input => f.surface.leadEnsure(input), retireLead: input => f.surface.leadRotate(input) });
+  t.after(() => restarted.stop());
+  await restarted.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "failed" }, timeline: [] });
+  assert.equal(readFileSync(path, "utf8"), "# Durable prior handoff\nArchitecture survives restart.");
+  assert.match(f.fake.sent.find(item => item.agentId !== lead.id)!.text, /latest extraction did not complete.*last-known-good handoff/);
 });

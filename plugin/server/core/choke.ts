@@ -16,6 +16,9 @@
  * Judging is mechanical: exact tokens, never substrings, so
  * `--force-with-lease`, `fetch -f`, `checkout -b` and `clean -n` stay clear.
  */
+import { isFactoryInfrastructureProcess, isTaskWorktreeScopedProcess } from "./process-policy.ts";
+import { inspectShellHeredocs, stripNonInterpreterHeredocs, rawShellSegments, quoteAwareWords, PROCESS_KILL_WRAPPER_PREFIXES, isTimeoutOrNiceOperand } from "./shell-heredoc-policy.ts";
+export { stripNonInterpreterHeredocs } from "./shell-heredoc-policy.ts";
 import { isMcpStdioLaunch } from "./mcp-launch-policy.ts";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
@@ -550,29 +553,8 @@ export function isPaseoFactoryToolName(toolName: string | undefined): boolean {
 /** The kill word class the process-kill rule names (v0.0.84). */
 const PROCESS_KILL_WORDS = new Set(["pkill", "killall", "kill"]);
 
-/**
- * Wrapper prefixes legally standing before the real command word: skipped
- * while locating a segment's first command word. `timeout`/`nice`
- * additionally swallow their duration/adjustment operands.
- */
-const PROCESS_KILL_WRAPPER_PREFIXES = new Set([
-  "env",
-  "command",
-  "nohup",
-  "sudo",
-  "xargs",
-  "exec",
-  "timeout",
-  "nice",
-]);
-
 /** A short-flag cluster carrying `c` (`-c`, `-lc`, `-ic`) — a shell's payload flag. */
 const SHELL_DASH_C_FLAG = /^-[A-Za-z]*c[A-Za-z]*$/;
-
-/** The duration/adjustment operand `timeout`/`nice` carry before the command. */
-function isTimeoutOrNiceOperand(token: string): boolean {
-  return /^[-+]?\d[\d.]*[a-z]?$/i.test(token) || token === "-n" || token === "--adjustment";
-}
 
 /**
  * Index of the segment's first command word: leading `X=Y` env assignments,
@@ -635,7 +617,7 @@ function killWordLeadsShellDashCPayload(segment: string): boolean {
  * Whether the command kills the factory runtime (Paseo or plugin-process) at
  * ask time (v0.0.26, ADR 0016; command-position gate v0.0.84): the raw-string
  * co-occurrence prefilter (a kill word + a `paseo`/`plugin-process` word
- * anywhere) stays, but the deny additionally requires the kill word in
+ * anywhere) excludes worktree test targets; the deny requires the kill word in
  * command position — the 2026-11-01 goal-partner Lead died because its one
  * `factory contract` call carried "killall/pkill" inside `--description`
  * prose while `factory.mjs`'s path carried "paseo" (ledger seq 447). A kill
@@ -644,9 +626,11 @@ function killWordLeadsShellDashCPayload(segment: string): boolean {
  */
 export function isProcessKillAgainstFactory(command: string): boolean {
   if (!/\b(?:pkill|killall|kill)\b/.test(command)) return false;
-  if (!/\b(?:plugin-process|paseo)\b/i.test(command)) return false;
+  if (!/\b(?:plugin-process|paseo)\b/i.test(command) && !isFactoryInfrastructureProcess(command)) return false;
   for (const segment of splitShellSegments(command)) {
-    if (killWordInCommandPosition(segment) || killWordLeadsShellDashCPayload(segment)) return true;
+    if (killWordInCommandPosition(segment) || killWordLeadsShellDashCPayload(segment)) {
+      if (!isTaskWorktreeScopedProcess(segment)) return true;
+    }
   }
   return false;
 }
@@ -708,7 +692,7 @@ const TOUCH_OR_MKDIR = new Set(["touch", "mkdir"]);
  * `dd of=`, `touch`, and `mkdir`).
  */
 export function extractWriteTargets(command: string): string[] {
-  const tokens = shellTokens(command);
+  const tokens = shellTokens(stripNonInterpreterHeredocs(command));
   const targets = [...shellWriteDestinations(tokens)];
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
@@ -726,91 +710,7 @@ export function extractWriteTargets(command: string): string[] {
  * chained segments can be inspected independently.
  */
 function splitShellSegments(command: string): string[] {
-  const segments: string[] = [];
-  let current = "";
-  let quote: "'" | '"' | null = null;
-  for (let i = 0; i < command.length; i++) {
-    const ch = command[i]!;
-    if (quote !== null) {
-      if (ch === "\\" && quote === '"' && i + 1 < command.length) {
-        current += ch + command[i + 1]!;
-        i += 1;
-        continue;
-      }
-      if (ch === quote) quote = null;
-      current += ch;
-      continue;
-    }
-    if (ch === "'" || ch === '"') {
-      quote = ch;
-      current += ch;
-      continue;
-    }
-    if (ch === "\\" && i + 1 < command.length) {
-      current += ch + command[i + 1]!;
-      i += 1;
-      continue;
-    }
-    if (ch === ";" || ch === "\n") {
-      if (current.trim() !== "") segments.push(current.trim());
-      current = "";
-      continue;
-    }
-    if ((ch === "&" && command[i + 1] === "&") || (ch === "|" && command[i + 1] === "|")) {
-      if (current.trim() !== "") segments.push(current.trim());
-      current = "";
-      i += 1;
-      continue;
-    }
-    if (ch === "|") {
-      if (current.trim() !== "") segments.push(current.trim());
-      current = "";
-      continue;
-    }
-    current += ch;
-  }
-  if (current.trim() !== "") segments.push(current.trim());
-  return segments;
-}
-
-/**
- * Tokenizes a single shell segment preserving quoted strings as single tokens
- * so `--message "npm install src/foo.ts"` is not mistaken for a subcommand.
- */
-function quoteAwareWords(segment: string): string[] {
-  const words: string[] = [];
-  let current = "";
-  let quote: "'" | '"' | null = null;
-  for (let i = 0; i < segment.length; i++) {
-    const ch = segment[i]!;
-    if (quote !== null) {
-      if (ch === "\\" && quote === '"' && i + 1 < segment.length) {
-        current += segment[i + 1]!;
-        i += 1;
-        continue;
-      }
-      if (ch === quote) {
-        quote = null;
-        continue;
-      }
-      current += ch;
-      continue;
-    }
-    if (ch === "'" || ch === '"') {
-      quote = ch;
-      continue;
-    }
-    if (/\s/.test(ch)) {
-      if (current !== "") {
-        words.push(current);
-        current = "";
-      }
-      continue;
-    }
-    current += ch;
-  }
-  if (current !== "") words.push(current);
-  return words;
+  return rawShellSegments(stripNonInterpreterHeredocs(command));
 }
 
 /**
@@ -918,6 +818,11 @@ export function judgeSeatShellCommand(
   // denies identically to the contracted-agent judge.
   if (isProcessKillAgainstFactory(command)) {
     return { behavior: "deny", rule: "process-kill", reason: PROCESS_KILL_FENCE_MESSAGE };
+  }
+  // Arbitrary executable stdin can write source without shell redirections.
+  const heredocs = inspectShellHeredocs(command);
+  if (heredocs.interpreter || heredocs.commandSubstitution) {
+    return { behavior: "deny", rule: "seat-write-fence", reason: SEAT_WRITE_FENCE_MESSAGE };
   }
   for (const segment of splitShellSegments(command)) {
     if (isFactoryCliSegment(segment, projectRoot, stateDir, tmpDirs)) continue;
@@ -1044,7 +949,10 @@ export function judgeShellCommand(command: string, roots: WritableRoots, memory?
   if (isProcessKillAgainstFactory(command)) {
     return { behavior: "deny", rule: "process-kill", reason: PROCESS_KILL_FENCE_MESSAGE };
   }
-  const tokens = shellTokens(command);
+  if (inspectShellHeredocs(command).commandSubstitution) {
+    return { behavior: "deny", rule: "seat-write-fence", reason: "Executable command substitution in an expanding heredoc cannot be treated as literal text." };
+  }
+  const tokens = shellTokens(stripNonInterpreterHeredocs(command));
   const inIsolatedWorktree =
     (memory?.worktree !== undefined && memory.worktree.trim() !== "") ||
     /\/projects\/[^/]+\/worktrees\/[^/]+(?:\/|$)/.test(roots.workspace);

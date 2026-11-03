@@ -5,7 +5,7 @@ import { liveSeatCandidates } from "./seats.ts";
 import { bindProjectDirective } from "./execution-adapters.ts";
 import { bindScrumBlocker } from "./scrum.ts";
 import { withExecutionLane } from "./core/scrum/execution.ts";
-import { readExecution } from "./core/scrum/config.ts";
+import { atomicJson, readOptionalJson, readExecution } from "./core/scrum/config.ts";
 import { readRun, listRuns, commandRun, terminalRun } from "./core/scrum/run-journal.ts";
 import { renderScrumPrompt } from "./core/scrum/prompts.ts";
 import { commitSeatMemoryOnRoot } from "./core/workspace.ts";
@@ -87,6 +87,7 @@ import type {
   SpoolSupervisorReportRequest,
 } from "./spool.ts";
 import type { SurfaceAgentSnapshot, SurfaceDaemonApi } from "./surface-rpc.ts";
+import { capHandoffText, validHandoffText } from "./handoff-text.ts";
 import { createPeerHandoffRuntime } from "./peer-handoff.ts";
 import type { DaemonReply } from "./daemon-cli.ts";
 import { readNativeContextWindowTokens, type UsagePaths } from "./core/usage-extractor.ts";
@@ -103,11 +104,11 @@ export const LEAD_ROTATE_TOKENS = 128_000;
 
 /**
  * The Dual-Fuse `Lead handoff` extraction timeout (v0.0.28, ADR 0018 §3):
- * 90,000 ms (90 seconds) — if `rotationState === "handing_over"` remains
+ * 180,000 ms (180 seconds) — if `rotationState === "handing_over"` remains
  * unresolved past this ceiling, the runtime trips Fuse 2 and completes
  * succession using the machine-verified roster and ledger digest.
  */
-export const HANDOFF_EXTRACTION_TIMEOUT_MS = 90_000;
+export const HANDOFF_EXTRACTION_TIMEOUT_MS = 180_000;
 
 const INTERRUPTED_HANDOFF_EXTRACTION_NOTE =
   "(the outgoing Lead was interrupted during handoff extraction — rely on the Machine-Verified Active Peer Roster and Ledger State Digest above)";
@@ -275,7 +276,7 @@ export interface LeadMailRuntimeDeps {
   usagePaths?: UsagePaths;
   /**
    * Optional override for the `handing_over` extraction fuse timeout in ms
-   * (v0.0.28, ADR 0018 §3; defaults to `HANDOFF_EXTRACTION_TIMEOUT_MS = 90_000`).
+   * (v0.0.28, ADR 0018 §3; defaults to `HANDOFF_EXTRACTION_TIMEOUT_MS = 180_000`).
    */
   reconcileScrum?: (project: { slug: string; root: string }) => Promise<void>;
   handoffTimeoutMs?: number;
@@ -465,12 +466,14 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     return false;
   };
 
+  const extractionPath = (slug: string) => join(projectStateDir(deps.stateDir, slug), "lead-handoff-extraction.json");
+  const readExtraction = (slug: string) => readOptionalJson(extractionPath(slug)) as { requestedAt?: string; prior?: string; stale?: boolean } | undefined;
   const readDiskHandoffText = (slug: string): string | undefined => {
     try {
       const handoffPath = join(projectStateDir(deps.stateDir, slug), "lead-handoff.md");
       if (!existsSync(handoffPath)) return undefined;
       const text = readFileSync(handoffPath, "utf8");
-      return text.trim() === "" ? undefined : text;
+      return validHandoffText(text) || text === INTERRUPTED_HANDOFF_EXTRACTION_NOTE ? text : undefined;
     } catch {
       return undefined;
     }
@@ -527,7 +530,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
         live,
       });
       const digest = renderLedgerDigest(events);
-      pendingHandoff = renderSuccessorKickoff({ slug, roster, digest, handoffText: diskHandoffText });
+      pendingHandoff = renderSuccessorKickoff({ slug, roster, digest, handoffText: diskHandoffText, stale: readExtraction(slug)?.stale });
     }
     if (state.queued.length === 0 && (pendingHandoff === undefined || await projectPeerInFlight(slug))) return;
     const mailPrompt = state.queued.length === 0 ? "" : renderMailPrompt(state.queued);
@@ -860,6 +863,9 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   /** Arm 3 — lock the mailbox (holding all mail), then steer the one bounded Handoff Extraction prompt (with Fuse 1 immediate bypass). */
   const beginHandoff = async (slug: string, root: string): Promise<void> => {
     const handoffRequestedAt = new Date().toISOString();
+    // Persist the snapshot before the outgoing seat can overwrite its previous handoff.
+    const prior = readDiskHandoffText(slug);
+    atomicJson(extractionPath(slug), { requestedAt: handoffRequestedAt, prior: validHandoffText(prior) ? prior : undefined, stale: false });
     handingOverBySlug.add(slug);
     writeRotationState(slug, root, { rotationState: "handing_over", handoffRequestedAt });
     let lead: SurfaceAgentSnapshot | undefined;
@@ -882,7 +888,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       return;
     }
     try {
-      await resolveDaemon().agents.ref(lead.id).send(renderHandoffExtractionPrompt(deps.stateDir, slug));
+      await resolveDaemon().agents.ref(lead.id).send(renderHandoffExtractionPrompt(slug));
     } catch (err) {
       log(`lead-mailbox: ${slug} handoff extraction send failed (${messageOf(err)}) — completing handoff immediately`);
       await completeHandoff(slug, root, {
@@ -940,66 +946,45 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     const handoffPath = join(statePath, "lead-handoff.md");
     const requestedAt = input.handoffRequestedAt ?? readProjectRegistration(deps.stateDir, slug)?.handoffRequestedAt;
     const requestedMs = requestedAt !== undefined ? Date.parse(requestedAt) : Number.NaN;
+    const snapshot = readExtraction(slug);
     let handoffText: string | null = null;
-    if (input.fuseReason !== "extraction-send-failed") {
+    if (input.outcome.kind === "completed" && input.fuseReason === undefined) {
+      handoffText = lastAssistantText(input.timeline);
+      if (handoffText === null && input.agentId !== "") {
+        try {
+          const page = await resolveDaemon().agents.ref(input.agentId).timeline.refetch({ direction: "tail", limit: 20 });
+          const timeline = (page.entries ?? []).flatMap(entry => {
+            const item = entry.item ?? entry as { type?: string; text?: string };
+            return typeof item.type === "string" ? [{ type: item.type, text: item.text }] : [];
+          });
+          handoffText = lastAssistantText(timeline);
+        } catch { /* Native timelines are best effort. */ }
+      }
+    }
+    if (!validHandoffText(handoffText) && input.fuseReason !== "extraction-send-failed") {
       try {
         const stat = statSync(handoffPath);
-        const isFresh =
-          input.fuseReason === "extraction-timeout"
-            ? Number.isFinite(requestedMs) && stat.mtimeMs >= requestedMs
-            : !Number.isFinite(requestedMs) || stat.mtimeMs + 1 >= requestedMs;
-        if (isFresh) {
-          handoffText = readFileSync(handoffPath, "utf8");
-        }
-      } catch {
-        handoffText = null;
-      }
+        const disk = readFileSync(handoffPath, "utf8");
+        if ((!Number.isFinite(requestedMs) || stat.mtimeMs + 1 >= requestedMs) &&
+            !(snapshot !== undefined && snapshot.requestedAt === requestedAt && disk === snapshot.prior)) handoffText = disk;
+      } catch { /* A fresh file remains a secondary fallback. */ }
     }
-    if ((handoffText === null || handoffText.trim() === "") && input.outcome.kind === "completed" && input.fuseReason === undefined) {
-      let turnTimeline = input.timeline;
-      if (turnTimeline.length === 0 && input.agentId !== "") {
-        try {
-          const ref = resolveDaemon().agents.ref(input.agentId);
-          if (ref.timeline !== undefined && typeof ref.timeline.refetch === "function") {
-            const page = await ref.timeline.refetch({ direction: "tail", limit: 20 });
-            if (Array.isArray(page?.entries)) {
-              turnTimeline = page.entries.flatMap((entry) => {
-                const rawItem =
-                  typeof entry === "object" &&
-                  entry !== null &&
-                  "item" in entry &&
-                  typeof (entry as { item?: unknown }).item === "object" &&
-                  (entry as { item?: unknown }).item !== null
-                    ? (entry as { item: { type?: unknown; text?: unknown } }).item
-                    : (entry as { type?: unknown; text?: unknown });
-                return typeof rawItem?.type === "string"
-                  ? [{ type: rawItem.type, ...(typeof rawItem.text === "string" ? { text: rawItem.text } : {}) }]
-                  : [];
-              });
-            }
-          }
-        } catch {
-          // best-effort fallback when Paseo 0.13+ emits empty event.timeline on agent.turn_ended
-        }
-      }
-      const fromTurn = lastAssistantText(turnTimeline);
-      if (fromTurn !== null) {
-        mkdirSync(statePath, { recursive: true });
-        writeFileSync(handoffPath, fromTurn);
-        handoffText = fromTurn;
-      }
-    }
-    if ((handoffText === null || handoffText.trim() === "") && (input.fuseReason !== undefined || input.outcome.kind !== "completed")) {
-      handoffText = INTERRUPTED_HANDOFF_EXTRACTION_NOTE;
-    }
-    if (handoffText !== null) {
+    let prior = snapshot !== undefined && snapshot.requestedAt === requestedAt && validHandoffText(snapshot.prior) ? snapshot.prior : undefined;
+    if (prior === undefined) {
       try {
-        mkdirSync(statePath, { recursive: true });
-        writeFileSync(handoffPath, handoffText);
-      } catch {
-        // best-effort persistence of resolved handoff text
-      }
+        if (Number.isFinite(requestedMs) && statSync(handoffPath).mtimeMs < requestedMs) {
+          const disk = readDiskHandoffText(slug);
+          if (validHandoffText(disk)) prior = disk;
+        }
+      } catch { /* No earlier disk handoff. */ }
     }
+    const stale = !validHandoffText(handoffText) && prior !== undefined;
+    handoffText = validHandoffText(handoffText) ? capHandoffText(handoffText, 24 * 1024) : prior ?? INTERRUPTED_HANDOFF_EXTRACTION_NOTE;
+    atomicJson(extractionPath(slug), { requestedAt, prior, stale });
+    try {
+      mkdirSync(statePath, { recursive: true });
+      writeFileSync(handoffPath, handoffText);
+    } catch { /* Best-effort persistence of resolved handoff text. */ }
     const events = projectEventsOf(root);
     const tasks = foldTasks(events);
     const live = await liveAgentsById();
@@ -1032,7 +1017,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       log(`lead-mailbox: handoff of ${slug} could not spawn the successor (${ensured.code}: ${ensured.error}) — the mailbox stays locked, mail holds queued`);
       return;
     }
-    const handoffBundle = renderSuccessorKickoff({ slug, roster, digest, handoffText });
+    const handoffBundle = renderSuccessorKickoff({ slug, roster, digest, handoffText, stale });
     pendingHandoffByAgentId.set(ensured.agentId, handoffBundle);
     handingOverBySlug.delete(slug);
     writeRotationState(slug, root, { rotationState: "normal", handoffRequestedAt: null });
@@ -1473,13 +1458,13 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
 // ---- the handoff renderers (ADR 0013 §5 — fixed prose, machine-verified payload) ------------
 
 /** The one bounded Handoff Extraction prompt — fixed sections, fixed ceiling, no new work. */
-function renderHandoffExtractionPrompt(stateDir: string, slug: string): string {
+function renderHandoffExtractionPrompt(slug: string): string {
   return [
     `# Lead handoff extraction — project ${slug}`,
     "",
     "Your context window has crossed the 128,000-token rotation threshold, so this standing Lead seat is rotating: you are being retired, and a fresh successor Lead continues the project from your handoff.",
     "",
-    `Write your handoff to ${join(projectStateDir(stateDir, slug), "lead-handoff.md")} now — at most 16 KB, plain Markdown, with exactly these five sections:`,
+    "Put the entire Markdown handoff directly in your final assistant message, in one piece, without running shell commands or writing files to disk. The plugin server reads your reply and persists it automatically, capping it at 24 KB. Use exactly these five sections:",
     "",
     "1. Goal & Remaining Roadmap",
     "2. Uncontracted Next Tasks",
@@ -1487,14 +1472,15 @@ function renderHandoffExtractionPrompt(stateDir: string, slug: string): string {
     "4. Open Questions",
     "5. Read-First Files",
     "",
-    "Start no new tasks, spawn no agents, set no contracts, and accept nothing — the handoff file is this turn's only deliverable. Reply with one line confirming the file is written.",
+    "Start no new tasks, spawn no agents, set no contracts, and accept nothing — the handoff reply is this turn's only deliverable. End your turn after the complete Markdown document.",
   ].join("\n");
 }
 
 /** The successor's three-layer kickoff — roster, digest, and the outgoing Lead's handoff text. */
-function renderSuccessorKickoff(input: { slug: string; roster: string; digest: string; handoffText: string | null }): string {
+function renderSuccessorKickoff(input: { slug: string; roster: string; digest: string; handoffText: string | null; stale?: boolean }): string {
   return [
     `# Lead handoff — project ${input.slug}`,
+    ...(input.stale ? ["Staleness notice: the latest extraction did not complete; the last-known-good handoff is shown below the authoritative live Machine-Verified Active Peer Roster and Ledger State Digest."] : []),
     "",
     "You are the fresh successor Lead of this project, spawned at 0% context after the outgoing Lead crossed the 128,000-token rotation threshold. Three layers of continuity follow — the first two are machine-verified, built by the plugin from the live daemon and the ledger, never from prose:",
     "",
@@ -1645,7 +1631,7 @@ function agentOfTask(
 function lastAssistantText(timeline: readonly { type: string; text?: string }[]): string | null {
   for (let i = timeline.length - 1; i >= 0; i -= 1) {
     const item = timeline[i]!;
-    if (item.type === "assistant_message" && typeof item.text === "string" && item.text.trim() !== "") return item.text;
+    if (item.type === "assistant_message") return validHandoffText(item.text) ? item.text : null;
   }
   return null;
 }

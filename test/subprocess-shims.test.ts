@@ -1,7 +1,7 @@
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { cpSync, mkdirSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { disposeDir, makeTempDir, repoRoot } from "./helpers.ts";
 
@@ -103,4 +103,37 @@ test("npx shim permits MCP stdio servers for coordination seats and blocks gener
       assert.match(result.stderr, /seat-write-fence/);
     }
   }
+});
+
+
+test("process shims allow Task worktree targets while refusing factory infrastructure", { skip: process.platform === "win32" }, (t) => {
+  const { env, wrappedArgs } = stage(t, { name: "exec", tool: "kill", script: "exec-shim.mjs" });
+  const bin = env.PATH;
+  for (const tool of ["kill", "pkill", "killall"]) {
+    writeFileSync(join(bin, tool), `#!${process.execPath}\nconsole.log("forwarded");\n`, { mode: 0o755 });
+  }
+  const worktree = `${env.FACTORY_STATE_DIR}/projects/demo/worktrees/T-04`;
+  writeFileSync(join(bin, "ps"), `#!${process.execPath}\nconsole.log(process.env.TEST_PROCESS_TABLE);\n`, { mode: 0o755 });
+  const run = (tool: string, args: string[], cmdline = `node ${worktree}/test/server.mjs`) =>
+    spawnSync(process.execPath, [wrappedArgs[0]!, tool, ...args], {
+      env: { ...env, PASEO_FACTORY_SEAT: "peer", TEST_PROCESS_TABLE: `41001 ${cmdline}` }, encoding: "utf8",
+    });
+  for (const [tool, args] of [["kill", ["41001"]], ["pkill", ["-f", worktree]], ["killall", [worktree]]] as const) {
+    const result = run(tool, [...args]);
+    assert.equal(result.status, 0, `${tool}: ${result.stderr}`);
+    assert.match(result.stdout, /forwarded/);
+  }
+  for (const binary of ["paseo", "Paseo.app/Contents/MacOS/Paseo", "Paseo Helper", "paseo-factory/bin/run", "runtime-bin/run", "bridge.mjs", "driver.mjs", "factory.mjs", "claim.mjs", "plugin-process.js", "opencode"]) {
+    for (const tool of ["kill", "pkill", "killall"]) {
+      const target = `${worktree}/${binary}`;
+      const result = run(tool, tool === "kill" ? ["41001"] : ["-f", target], `node ${target}`);
+      assert.equal(result.status, 126, `${tool}: ${binary}: ${result.stdout}`);
+      assert.match(result.stderr, /process-kill/);
+    }
+  }
+  for (const target of [env.FACTORY_STATE_DIR, `${env.FACTORY_STATE_DIR}/projects/demo`, "paseo", "plugin-process"]) {
+    assert.equal(run("pkill", ["-f", target]).status, 126, target);
+  }
+  const blocks = readFileSync(join(env.FACTORY_STATE_DIR, "git-blocked.log"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.ok(blocks.every((entry) => entry.rule === "process-kill"));
 });

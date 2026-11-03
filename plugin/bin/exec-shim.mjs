@@ -9,7 +9,8 @@
  *
  * Behavior when `PASEO_FACTORY_SEAT` or `PASEO_FACTORY_CORRELATION` is set:
  * - `pkill` / `killall` / `kill`: refuses killing `paseo`, `plugin-process`,
- *   `opencode`, or processes running from `<stateDir>` (exit 126 + log line in
+ *   `opencode`, or processes running from `<stateDir>`, except worktree test
+ *   processes (exit 126 + log line in
  *   `<stateDir>/git-blocked.log`).
  * - `paseo`: refuses `paseo agent ...` and `paseo plugin ...` subcommands
  *   (`seat-paseo-tool-fence`), directing the seat to `paseo_factory` MCP tools.
@@ -22,7 +23,7 @@ import { accessSync, appendFileSync, constants as fsConstants, existsSync, mkdir
 import { homedir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
-import { inheritChildOutcome } from "./process-policy.mjs";
+import { inheritChildOutcome, isFactoryInfrastructureProcess, isTaskWorktreeScopedProcess } from "./process-policy.mjs";
 
 const tool = process.argv[2] ?? "";
 const argv = process.argv.slice(3);
@@ -145,10 +146,9 @@ if ((seat === "supervisor" || seat === "lead") && packageTools.has(tool)) {
 if (inFactorySeat) {
   const protectedPattern = /plugin-process|paseo|opencode/i;
   if (tool === "pkill" || tool === "killall") {
-    const joined = argv.join(" ");
-    if (protectedPattern.test(joined) || (stateDir !== "" && joined.includes(stateDir))) {
+    if (argv.some((arg) => isFactoryInfrastructureProcess(arg) || (!isTaskWorktreeScopedProcess(arg) && (protectedPattern.test(arg) || (stateDir !== "" && arg.includes(stateDir)))))) {
       recordAndRefuse(
-        "seat-write-fence",
+        "process-kill",
         `${tool} targeting Paseo/plugin-process or factory state is forbidden inside a factory seat`,
       );
     }
@@ -156,7 +156,7 @@ if (inFactorySeat) {
     const joined = argv.join(" ");
     if (protectedPattern.test(joined)) {
       recordAndRefuse(
-        "seat-write-fence",
+        "process-kill",
         `kill targeting Paseo/plugin-process is forbidden inside a factory seat`,
       );
     }
@@ -176,11 +176,12 @@ if (inFactorySeat) {
     }
     for (const pid of pids) {
       try {
-        const ps = spawnSync("ps", ["-p", pid, "-o", "command="], { encoding: "utf8", timeout: 1_500 });
-        const cmdline = (ps.stdout ?? "").trim();
-        if (protectedPattern.test(cmdline) || (stateDir !== "" && cmdline.includes(stateDir))) {
+        const ps = spawnSync("ps", ["-ax", "-o", "pid=,command="], { encoding: "utf8", timeout: 1_500 });
+        const row = (ps.stdout ?? "").split("\n").map((line) => line.trim().match(/^(\d+)\s+(.+)$/)).find((entry) => entry?.[1] === pid);
+        const cmdline = row?.[2] ?? "";
+        if (isFactoryInfrastructureProcess(cmdline) || (!isTaskWorktreeScopedProcess(cmdline) && (protectedPattern.test(cmdline) || (stateDir !== "" && cmdline.includes(stateDir))))) {
           recordAndRefuse(
-            "seat-write-fence",
+            "process-kill",
             `kill targeting PID ${pid} (${cmdline.slice(0, 80)}) is forbidden inside a factory seat`,
           );
         }
