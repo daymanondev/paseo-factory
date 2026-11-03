@@ -678,7 +678,9 @@ test("a turn ending at >= 128k acks its batch, locks handing_over, holds arrivin
   assert.equal(locked?.rotationState, "handing_over");
   assert.ok(typeof locked?.handoffRequestedAt === "string" && locked.handoffRequestedAt !== "", "the lock stamps handoffRequestedAt");
   const steer = fake.sent.at(-1);
-  assert.ok(steerText(steer).includes(join(projectStateDir(stateDir, slug), "lead-handoff.md")), "the extraction prompt names lead-handoff.md");
+  assert.match(steerText(steer), /entire Markdown handoff directly in your final assistant message, in one piece/);
+  assert.match(steerText(steer), /without running shell commands or writing files to disk/);
+  assert.match(steerText(steer), /plugin server reads your reply and persists it automatically/);
   for (const section of ["Goal & Remaining Roadmap", "Uncontracted Next Tasks", "Key Technical Findings", "Open Questions", "Read-First Files"]) {
     assert.ok(steerText(steer).includes(section), `the extraction prompt names the section "${section}"`);
   }
