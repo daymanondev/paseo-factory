@@ -36,7 +36,7 @@
  * the factory, no reply from the plugin, or an unreadable ledger).
  */
 import { parseArgs } from "node:util";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join, resolve as resolvePath } from "node:path";
 import { readLedgerEvents } from "./ledger-read.mjs";
 import { taskStatusLines } from "./task-status.mjs";
@@ -85,6 +85,10 @@ commands:
              not echo, commit, or summarize secret values (R5).
 
              --task <id> --workspace <dir> --gate <command> --artifact <path>
+             [--project <slug>]      the target Project (v0.0.89) — usually
+                                     redundant (the workspace resolves it);
+                                     pins the target when two Projects share
+                                     a Task id
              [--scope <p1,p2,...>]   workspace-relative prefixes the task may touch
              [--fresh-eyes]          mark the fresh-eyes pass ON for this task
                                      (dispatches through lanes.freshEyes in
@@ -108,9 +112,11 @@ commands:
                                      driver's brief renders them at the top
 
   accept     Accept one green attempt of a task (the Owner's act)
-             accept <task> --attempt <n> [--by owner|supervisor|lead]
+             accept <task> --attempt <n> [--by owner|supervisor|lead] [--project <slug>]
              --by names the accepting seat (v0.0.14): owner/supervisor are
-             the unconditional override, lead accepts green + CONCERN-free
+             the unconditional override, lead accepts green + CONCERN-free;
+             --project (v0.0.89) pins the target Project when two Projects
+             share a Task id
 
   run        Run contracted tasks' agents to verdict (the driver, v0.0.5):
              one agent per task on the daemon, watched to its verdict.
@@ -233,15 +239,20 @@ commands:
              reset [--workspace <dir>] [--project <slug>] [--keep-seats]
 
 
-  retro      Run the Retro over the whole ledger, on demand (v0.0.7): the
-             plugin builds the corpus digest, prompts the configured retro
-             lane from <stateDir>/lanes.json (default pi/zai/glm-5.3),
-             writes retro-<date>.md in the state dir, and appends one
-             retro_written line. Whole-ledger always — no --since, no task
-             filter (v1). One successful retro per UTC day; a same-day second
-             run is refused (exit 2, no ledger line). Proposals are advice:
+  retro      Run the Retro over the whole ledger of exactly ONE Project, on
+             demand (v0.0.7; strictly per-Project since v0.0.89, ADR 0045
+             §4): the plugin builds the corpus digest from the target
+             Project's isolated ledger under <stateDir>/projects/<slug>/,
+             prompts the Project's retro lane (its lanes.json override, else
+             <stateDir>/lanes.json), writes retro-<date>.md in the Project's
+             state dir, and appends one retro_written line. --project <slug>
+             names the target; a machine with exactly one registered Project
+             defaults to it, and unscoped on multiple Projects is refused
+             with retro-project-required (exit 2, no ledger line). One
+             successful retro per UTC day per Project; a same-day second run
+             is refused (exit 2, no ledger line). Proposals are advice:
              nothing becomes law until the Owner ratifies it.
-             retro [--wait-secs <n>]   (default 660 — the pass is minutes-long)
+             retro [--project <slug>] [--wait-secs <n>]   (default 660 — the pass is minutes-long)
 
   status     Print one line per task from the ledger — attempts, last verdict,
              attested sha (short), accepted, last fresh-eyes outcome, and the
@@ -249,7 +260,14 @@ commands:
              bound to the task) — plus a needs-human key when the Lead ever
              wrote one (v0.0.10: the glance's needs-human marker), and one
              trailing retro line when a retro ever ran. A local read; the
-             plugin need not be running.
+             plugin need not be running. Since v0.0.89 each Project's ledger
+             lives under <stateDir>/projects/<slug>/ledger.jsonl:
+             --project <slug> reads that one Project, and unscoped every
+             registered Project's rows render, each prefixed with its
+             [<slug>] (Task ids are scoped per Project — two Projects may
+             both run T-01); with no registered Project the legacy root
+             ledger reads as before.
+             status [--project <slug>]
 
   cost       Print the Cost read over the whole ledger (v0.0.8): one row per
              task — lane, attempts, wall (first spawn → last verdict,
@@ -551,6 +569,7 @@ if (command === "contract") {
     "no-fresh-eyes": { type: "boolean", default: false },
     watch: { type: "boolean", default: false },
     description: { type: "string" },
+    project: { type: "string" },
     "wait-secs": { type: "string" },
   });
   const v = parsed.values;
@@ -582,6 +601,10 @@ if (command === "contract") {
     ...(v["fresh-eyes"] ? { freshEyes: true } : v["no-fresh-eyes"] ? { freshEyes: false } : {}),
     ...(v.watch ? { watch: true } : {}),
     ...(v.description === undefined ? {} : { description: v.description }),
+    // v0.0.89 (ADR 0045 §1): the explicit target Project — the router's
+    // top-priority context. Usually redundant (the workspace resolves it);
+    // it pins the target when two Projects share a Task id.
+    ...(typeof v.project === "string" && v.project.trim() !== "" ? { projectSlug: v.project.trim() } : {}),
     submitter,
   };
   const reply = await roundTrip(request, waitSeconds(parsed));
@@ -593,6 +616,7 @@ if (command === "accept") {
   const parsed = parseCommandOptions({
     attempt: { type: "string" },
     by: { type: "string" },
+    project: { type: "string" },
     "wait-secs": { type: "string" },
   });
   const task = parsed.positionals[0];
@@ -610,9 +634,15 @@ if (command === "accept") {
     }
     by = parsed.values.by;
   }
+  // v0.0.89: the explicit target Project (ADR 0045 §1) — the router's
+  // top-priority context when two Projects share a Task id.
+  const projectSlug =
+    typeof parsed.values.project === "string" && parsed.values.project.trim() !== ""
+      ? parsed.values.project.trim()
+      : undefined;
 
   const reply = await roundTrip(
-    { id: randomId(), kind: "accept", task, attempt, submitter, ...(by === undefined ? {} : { by }) },
+    { id: randomId(), kind: "accept", task, attempt, submitter, ...(by === undefined ? {} : { by }), ...(projectSlug === undefined ? {} : { projectSlug }) },
     waitSeconds(parsed),
   );
   console.log(`factory: ${reply.summary}`);
@@ -694,6 +724,32 @@ function resolveProjectSlug(commandName, projectDir) {
     fail(`${commandName}: --project ${projectDir} does not resolve to a git repository — ${project.reason}`);
   }
   return { slug: project.slug, root: project.root };
+}
+
+/**
+ * Every registered Project's slug (v0.0.89, ADR 0045 §1) — the durable
+ * `<stateDir>/projects/<slug>/project.json` registry, read locally the way
+ * the core's listProjectRegistrations reads it (the CLIs import no src/
+ * code, ADR 0004). Slug order; an unreadable entry names no Project.
+ */
+function registeredProjectSlugs(stateDir) {
+  const projectsDir = join(stateDir, "projects");
+  let entries;
+  try {
+    entries = readdirSync(projectsDir);
+  } catch {
+    return [];
+  }
+  const slugs = [];
+  for (const entry of entries.sort()) {
+    try {
+      const registration = JSON.parse(readFileSync(join(projectsDir, entry, "project.json"), "utf8"));
+      if (registration && typeof registration.root === "string" && registration.root !== "") slugs.push(entry);
+    } catch {
+      // not a registration — never a guess
+    }
+  }
+  return slugs;
 }
 
 if (command === "profile") {
@@ -1112,38 +1168,77 @@ if (command === "run") {
 }
 
 if (command === "retro") {
-  const parsed = parseCommandOptions({ "wait-secs": { type: "string" } });
-  if (parsed.positionals.length > 0) fail(`retro: unexpected positional "${parsed.positionals[0]}" — the retro reads the whole ledger, there is nothing to name`);
+  const parsed = parseCommandOptions({ project: { type: "string" }, "wait-secs": { type: "string" } });
+  if (parsed.positionals.length > 0) fail(`retro: unexpected positional "${parsed.positionals[0]}" — the retro reads ONE Project's ledger, pass --project <slug> instead`);
 
-  // No arguments ride the request: whole-ledger always (v1; no --since, no
-  // task filter). The plugin builds the digest, runs the pass, writes the
-  // proposals file and the one retro_written line; the reply's summary is
-  // the proposal count and the file path (ticket 03 item 2).
-  const reply = await roundTrip({ id: randomId(), kind: "retro" }, waitSeconds(parsed, RETRO_WAIT_SECS));
+  // v0.0.89 (ADR 0045 §4): the retro runs strictly against ONE Project's own
+  // ledger — `--project <slug>` (or a single registered Project, or the
+  // submitting seat's correlation). Unscoped on a machine with multiple
+  // Projects the plugin refuses with `retro-project-required`, never a
+  // multi-Project digest; the reply's summary is the proposal count and the
+  // file path (ticket 03 item 2).
+  const projectSlug =
+    typeof parsed.values.project === "string" && parsed.values.project.trim() !== ""
+      ? parsed.values.project.trim()
+      : undefined;
+  const reply = await roundTrip(
+    { id: randomId(), kind: "retro", ...(projectSlug === undefined ? {} : { projectSlug }) },
+    waitSeconds(parsed, RETRO_WAIT_SECS),
+  );
   console.log(`factory: ${reply.summary}`);
   process.exit(0);
 }
 
 if (command === "status") {
-  const parsed = parseCommandOptions({});
+  const parsed = parseCommandOptions({ project: { type: "string" } });
   if (parsed.positionals.length > 0) fail(`status: unexpected positional "${parsed.positionals[0]}"`);
 
   // The Owner's own data, read back directly — no spool round trip, no plugin
   // needed (ADR 0004 makes the plugin the only writer, not the only reader).
-  // The read is the shared one (ledger-read.mjs) under status's strict
-  // policy; anything unreadable is reported (exit 2), never guessed around.
-  const ledgerPath = join(stateDir, "ledger.jsonl");
-  const read = readLedgerEvents(ledgerPath);
-  if (read.failed !== undefined) {
-    die(`cannot read ${ledgerPath}: ${read.failed instanceof Error ? read.failed.message : String(read.failed)}`);
+  // v0.0.89 (ADR 0045 §1): every registered Project's ledger lives under
+  // `<stateDir>/projects/<slug>/ledger.jsonl` — `--project <slug>` reads that
+  // one Project; unscoped, every registered Project's tasks render, each row
+  // prefixed with its Project slug, and a machine with no registered Project
+  // falls back to the legacy root ledger (the pre-0.0.89 layout).
+  const registered = registeredProjectSlugs(stateDir);
+  const readOne = (ledgerPath) => {
+    const read = readLedgerEvents(ledgerPath);
+    if (read.failed !== undefined) {
+      die(`cannot read ${ledgerPath}: ${read.failed instanceof Error ? read.failed.message : String(read.failed)}`);
+    }
+    if (read.corrupt !== undefined) corruptLedger(ledgerPath, read.corrupt);
+    return read.missing ? [] : read.events;
+  };
+  if (typeof parsed.values.project === "string" && parsed.values.project.trim() !== "") {
+    const slug = parsed.values.project.trim();
+    if (!registered.includes(slug)) fail(`status: project "${slug}" is not registered — the registered Projects are ${registered.join(", ") || "(none)"}`);
+    const events = readOne(join(stateDir, "projects", slug, "ledger.jsonl"));
+    if (events.length === 0) {
+      console.log(`factory: no tasks yet (ledger: ${join(stateDir, "projects", slug, "ledger.jsonl")})`);
+      process.exit(0);
+    }
+    for (const line of taskStatusLines(events)) console.log(line);
+  } else {
+    const streams = registered
+      .map((slug) => ({ slug, events: readOne(join(stateDir, "projects", slug, "ledger.jsonl")) }))
+      .filter((stream) => stream.events.length > 0);
+    if (streams.length === 0) {
+      const ledgerPath = join(stateDir, "ledger.jsonl");
+      const events = readOne(ledgerPath);
+      if (events.length === 0) {
+        console.log(`factory: no tasks yet (ledger: ${ledgerPath})`);
+        process.exit(0);
+      }
+      for (const line of taskStatusLines(events)) console.log(line);
+    } else {
+      // The "All projects" aggregate: each row attributed with its Project's
+      // slug — two Projects may share a Task id (`T-01` in each).
+      const withTasks = streams.filter((stream) => stream.events.some((event) => event.event === "contract_set"));
+      for (const stream of withTasks) {
+        for (const line of taskStatusLines(stream.events)) console.log(`[${stream.slug}] ${line}`);
+      }
+    }
   }
-  if (read.corrupt !== undefined) corruptLedger(ledgerPath, read.corrupt);
-  const events = read.missing ? null : read.events;
-  if (events === null || events.length === 0) {
-    console.log(`factory: no tasks yet (ledger: ${ledgerPath})`);
-    process.exit(0);
-  }
-  for (const line of taskStatusLines(events)) console.log(line);
   // The Token Usage section (v0.0.87, ADR 0043 §5): one block per Project
   // with recorded sessions, read straight off the usage rollups — the same
   // local-read lineage as the task lines above, no spool round trip.

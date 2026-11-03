@@ -19,7 +19,6 @@ import { SleepInhibitor } from "./server/core/sleep-inhibitor.ts";
 import { join } from "node:path";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { pendingUpgradeFor } from "./server/core/upgrade-state.ts";
-import { createFactory } from "./server/core/factory.ts";
 import { ensureFactoryBinScripts } from "./server/core/agy-home.ts";
 import { PLUGIN_ID, pluginDirFor, resolvePaseoHome, stateDirFor } from "./server/paths.ts";
 import { ensureFactorySkillSafe } from "./server/core/skill.ts";
@@ -35,8 +34,15 @@ import { createUsageRuntime } from "./server/usage-rollup.ts";
 import { createSurfaceHandlers, registerSurfaceRpc } from "./server/surface-rpc.ts";
 import { createLeadMailRuntime } from "./server/lead-mailbox.ts";
 import { syncPeerHelpersBeforeCreate, injectRoleOnCreate, injectSessionEnv, sanitizeAgentCreateHookResult } from "./server/roles.ts";
+import { factoryRegistryFor } from "./server/projects.ts";
+import { listProjectRegistrations } from "./server/core/project.ts";
+// The one-time root-to-Project split & compact migration (v0.0.89, ADR 0045
+// §2): lands from src/ledger-migration.ts through the vendored core copy —
+// the binding signature is
+// migrateLegacyRootState(stateDir, { projects: Array<{ slug, gitRoot? }> }).
+import { migrateLegacyRootState } from "./server/core/ledger-migration.ts";
 
-const SHELL_VERSION = "0.0.88";
+const SHELL_VERSION = "0.0.89";
 
 const log = (message: string) => console.log(`[${PLUGIN_ID}] ${message}`);
 
@@ -84,10 +90,43 @@ export default function contribute(server: PluginServerContext) {
   };
   const fetchTimeline = createTimelineFetcher(() => paseoApi);
 
+  // The one-time legacy root split (v0.0.89, ADR 0045 §2), BEFORE any Factory
+  // opens, the Spool watcher starts, or an RPC is served: a legacy root
+  // ledger is partitioned into the registered Projects' own
+  // `<stateDir>/projects/<slug>/ledger.jsonl` files (compacted, identity-
+  // preserving, archived), so every per-Project Factory that opens below —
+  // and every routed command after it — reads and writes isolated state from
+  // the very first act of this lifetime.
+  try {
+    const migration = migrateLegacyRootState(stateDir, {
+      projects: listProjectRegistrations(stateDir).map((registration) => ({
+        slug: registration.slug,
+        gitRoot: registration.root,
+      })),
+    });
+    if (migration.migrated) {
+      log(
+        `migration: legacy root state split into ${migration.projects.length} Project ledger(s)` +
+          `${migration.archiveDir === undefined ? "" : ` — original archived at ${migration.archiveDir}`}`,
+      );
+    }
+  } catch (error) {
+    log(`migration: legacy root split deferred — ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  // The Per-Project Factory Registry (v0.0.89, ADR 0045 §1): each registered
+  // Project owns its own lazy Factory instance — its own serialized writer
+  // lane, its own ledger.jsonl, reports, gate logs, and retro files under
+  // `<stateDir>/projects/<slug>/`. Independent Projects never block one
+  // another; the single-writer invariant holds within each Project. The root
+  // Factory stays as the lightweight fallback for unbound machine-level
+  // operations (upgrade, machine lanes).
+  //
   // Opening validates any existing ledger (fail closed — a corrupt ledger
   // fails the plugin loudly) and closes attempts interrupted by a previous
   // lifetime: red, reported, and logged, never silently dropped (ADR 0003).
-  const factory = createFactory({ stateDir, fetchTimeline });
+  const registry = factoryRegistryFor(stateDir, { fetchTimeline, onLog: log });
+  const factory = registry.root;
   factory.history.start();
   for (const { task, attempt } of factory.recoveredAttempts) {
     log(`recovered on open: attempt ${attempt} of task ${task} closed red — interrupted by a restart`);
@@ -222,6 +261,7 @@ export default function contribute(server: PluginServerContext) {
   // lead_rotate kind (v0.0.14) reuses the same handlers — one daemon actor.
   const surfaceDeps = {
     factory,
+    registry,
     stateDir,
     home,
     ...(pluginDir === undefined ? {} : { pluginDir }),
@@ -454,6 +494,9 @@ export default function contribute(server: PluginServerContext) {
     // The accept path's worktree-record sweep targets the real daemon home —
     // never the PASEO_HOME-env fallback (v0.0.27, ADR 0017 §4).
     home,
+    // The Per-Project Factory registry (v0.0.89, ADR 0045 §1): every
+    // Project-scoped command routes onto the target Project's own Factory.
+    registry,
   });
 
   log(`spool listening on ${spoolRootFor(stateDir)}/{requests,replies,processed}`);
@@ -541,7 +584,9 @@ export default function contribute(server: PluginServerContext) {
     spool.stop();
     leadMail.stop();
     usage.stop();
-    factory.history.stop();
+    // The registry stops every per-Project Factory it created plus the root
+    // fallback (v0.0.89) — each Project's writer lane closes its own ledger.
+    registry.stop();
     log(`down v${SHELL_VERSION}`);
   };
 }

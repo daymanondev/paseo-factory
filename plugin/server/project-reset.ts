@@ -3,6 +3,24 @@ import { existsSync, readdirSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { realpathSync } from "node:fs";
 
+/**
+ * The one directory a Project reset/delete may touch (v0.0.89, ADR 0045 §1.3):
+ * `<stateDir>/projects/<slug>/` — that Project's isolated ledger, reports,
+ * gate logs, retro files, mailbox, worktrees, and registration. A sibling
+ * Project's directory — and the root state directory — are never named, so
+ * the blast radius of a reset or delete is exactly one Project, including a
+ * Project marked `missingRoot` (its registration still points here).
+ */
+export function removeProjectStateDirectory(stateDir: string, slug: string): boolean {
+  // A slug names one directory — never a path separator, a dot segment, or a
+  // traversal. Project basenames may carry spaces and unicode; those stay.
+  if (typeof slug !== "string" || slug === "" || slug === "." || slug === ".." || slug.includes("/")) return false;
+  const projectDir = join(stateDir, "projects", slug);
+  if (!existsSync(projectDir)) return false;
+  rmSync(projectDir, { recursive: true, force: true });
+  return true;
+}
+
 /** Validate before retiring seats or purging metadata. */
 export function checkProjectResetRepository(root: string, pluginDir?: string): void {
   if (!existsSync(root)) return;

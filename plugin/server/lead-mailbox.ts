@@ -92,6 +92,7 @@ import { createPeerHandoffRuntime } from "./peer-handoff.ts";
 import type { DaemonReply } from "./daemon-cli.ts";
 import { readNativeContextWindowTokens, type UsagePaths } from "./core/usage-extractor.ts";
 import type { UsageRuntime } from "./usage-rollup.ts";
+import { factoryRegistryFor } from "./projects.ts";
 export { PEER_HANDOFF_TOKENS } from "./peer-handoff.ts";
 
 /**
@@ -381,11 +382,55 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     log(message);
     deps.logger?.warn?.(message);
   };
+  // The Per-Project Factory registry (v0.0.89, ADR 0045 §1): every Ledger read
+  // below scopes to the OWNING Project's Factory — the post-split root Ledger
+  // the runtime was wired with carries no Contracts, so kickoff rosters,
+  // in-flight Peer detection, and contract workspace lookups would all read an
+  // empty stream. A slug the registry cannot open falls back to the wired
+  // Factory, and a task the Project's Factory does not own but the wired
+  // Factory still does reads from the wired one (the legacy root bridge, the
+  // spool router's own law) — never a wrong-Project stream.
+  const registry = factoryRegistryFor(deps.stateDir, { root: deps.factory });
+  const projectFactory = (slug: string): Factory => {
+    try {
+      return registry.factoryForProject(slug);
+    } catch {
+      return deps.factory;
+    }
+  };
+  /** The Factory owning `task` for this Project — the Project's own first, the wired root-bridge second. */
+  const taskFactoryOf = (slug: string, task: string | undefined): Factory => {
+    const project = projectFactory(slug);
+    if (project === deps.factory || task === undefined || task === "") return project;
+    if (project.contractFor(task) !== undefined) return project;
+    return deps.factory.contractFor(task) !== undefined ? deps.factory : project;
+  };
+  /** The Project's Ledger stream: its OWN Factory's events plus any task the wired Factory still owns (the legacy root bridge). */
+  const projectStreamOf = (slug: string): readonly LedgerEvent[] => {
+    const project = projectFactory(slug);
+    if (project === deps.factory) return deps.factory.ledger.events;
+    const wiredOnly = deps.factory.ledger.events.filter((evt) => {
+      if (!("task" in evt) || typeof evt.task !== "string") return true; // machine-level facts stay visible
+      return project.contractFor(evt.task) === undefined;
+    });
+    return [...project.ledger.events, ...wiredOnly];
+  };
+  /** Every available Ledger stream — the root fallback's plus each ALREADY-OPEN
+   * Project's (a pure peek: the polling paths must never open, validate, or
+   * recover a Ledger mid-maintenance, and a read never mints state). */
+  const eventStreamsOf = (): readonly (readonly LedgerEvent[])[] => {
+    const streams: (readonly LedgerEvent[])[] = [deps.factory.ledger.events];
+    for (const slug of registry.slugs()) {
+      const factory = registry.cachedFactoryFor(slug);
+      if (factory !== undefined && factory !== deps.factory) streams.push(factory.ledger.events);
+    }
+    return streams;
+  };
   const resolveDaemon = (): SurfaceDaemonApi => (typeof deps.daemon === "function" ? deps.daemon() : deps.daemon);
   const mailboxPath = (slug: string): string => join(projectStateDir(deps.stateDir, slug), "mailbox.jsonl");
   const peerBlockersQueued = new Set<string>();
   const peerHandoff = createPeerHandoffRuntime({
-    factory: deps.factory, stateDir: deps.stateDir, home: deps.home, stopAgent: deps.stopAgent,
+    factory: deps.factory, factoryFor: (slug, task) => taskFactoryOf(slug, task), eventsFor: projectStreamOf, stateDir: deps.stateDir, home: deps.home, stopAgent: deps.stopAgent,
     daemon: resolveDaemon, timeoutMs: handoffTimeoutMs, readTokens: (agent) => readLeadContextTokens(agent, deps.usagePaths), log,
     ...(deps.usage === undefined ? {} : { recordUsage: async (input: { slug: string; task: string; agent: SurfaceAgentSnapshot }) => { await deps.usage!.meterAgentBoundary({ task: input.task, agent: input.agent, slug: input.slug }); } }),
     queueBlocked: (slug, task, epoch, text) => {
@@ -519,7 +564,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     let pendingHandoff = pendingHandoffByAgentId.get(lead.id);
     if (pendingHandoff === undefined && !hasSeatReceivedFirstTurn(lead) && diskHandoffText !== undefined) {
       const root = readProjectRegistration(deps.stateDir, slug)?.root ?? lead.cwd ?? "";
-      const events = root !== "" ? projectEventsOf(root) : [];
+      const events = root !== "" ? projectEventsOf(slug, root) : [];
       const tasks = foldTasks(events);
       const live = await liveAgentsById();
       const roster = renderPeerRoster({
@@ -557,7 +602,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       role,
       projectSlug: slug,
       projectRoot: reg?.root ?? agent.cwd ?? "",
-      ledgerEvents: deps.factory.ledger.events,
+      ledgerEvents: projectStreamOf(slug),
       helperMcps: discoverHelperMcps({ stateDir: deps.stateDir, ...(deps.home ? { userHome: resolveVaultUserHome(deps.home) } : {}) }).servers,
       ...(loadedLanes.ok ? { lanes: loadedLanes.lanes } : {}),
     });
@@ -985,7 +1030,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       mkdirSync(statePath, { recursive: true });
       writeFileSync(handoffPath, handoffText);
     } catch { /* Best-effort persistence of resolved handoff text. */ }
-    const events = projectEventsOf(root);
+    const events = projectEventsOf(slug, root);
     const tasks = foldTasks(events);
     const live = await liveAgentsById();
     const roster = renderPeerRoster({
@@ -1026,11 +1071,11 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     log(`lead-mailbox: handoff of ${slug} complete — ${retiredLabel} archived, successor ${ensured.agentId} kickoff ${pendingHandoffByAgentId.has(ensured.agentId) ? "held for Peer completion" : "delivered"}, rotation reset to normal`);
   };
 
-  /** The Project's ledger slice — every event whose task's contract workspace sits inside the root (the snapshot's own scoping law). */
-  const projectEventsOf = (root: string): readonly LedgerEvent[] =>
-    deps.factory.ledger.events.filter((evt) => {
+  /** The Project's ledger slice — every event whose task's contract workspace sits inside the root (the snapshot's own scoping law; v0.0.89 per-Project isolation over the bridged stream). */
+  const projectEventsOf = (slug: string, root: string): readonly LedgerEvent[] =>
+    projectStreamOf(slug).filter((evt) => {
       if (!("task" in evt) || typeof evt.task !== "string") return false;
-      const contract = deps.factory.contractFor(evt.task);
+      const contract = taskFactoryOf(slug, evt.task).contractFor(evt.task);
       return contract !== undefined && (contract.workspace === root || contract.workspace.startsWith(`${root}/`));
     });
 
@@ -1053,7 +1098,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   const projectPeerInFlight = async (slug: string): Promise<boolean> => {
     const reg = readProjectRegistration(deps.stateDir, slug);
     if (reg?.root === undefined) return false;
-    const events = projectEventsOf(reg.root);
+    const events = projectEventsOf(slug, reg.root);
     const live = [...(await liveAgentsById()).values()];
     return projectHasPeerWork(slug, events, live);
   };
@@ -1127,7 +1172,15 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
         if (request.from === "supervisor") {
           commitSeatMemoryOnRoot(root);
         }
-        const bound = request.from === "peer" ? bindScrumBlocker(deps.factory, slug, request) : bindProjectDirective(deps.factory, root, slug, request);
+        // The blocker's Factory follows its task (v0.0.89): the Project's own
+        // first, the wired root bridge second — bindScrumBlocker resolves the
+        // caller's task the same way (correlation first, the field second).
+        const blockerTask =
+          request.task ??
+          readCorrelations(deps.stateDir).find((r) => r.correlationId === request.submitter || r.agentId === request.submitter)?.task;
+        const bound = request.from === "peer"
+          ? bindScrumBlocker(taskFactoryOf(slug, blockerTask), slug, request)
+          : bindProjectDirective(deps.factory, root, slug, request);
         const ensured = await deps.ensureLead({ projectRoot: root });
         if (!ensured.ok) return ensured;
         const from = request.from ?? "owner";
@@ -1290,7 +1343,25 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
    */
   const notifyPeer = async (input: { task: string; kind: "verdict" | "needs_human"; text: string }): Promise<void> => {
     try {
-      const workspace = contractWorkspaceOf(deps.factory.ledger.events, input.task);
+      // The task-owning stream (v0.0.89): the Contract lives in the OWNING
+      // Project's Factory — the wired Factory first (it may still own the task
+      // itself, the legacy root bridge), then the registry's Projects. The
+      // first owner wins (a colliding Task id notifies one Project, never both).
+      let owning = deps.factory.contractFor(input.task) !== undefined ? deps.factory.ledger.events : undefined;
+      if (owning === undefined) {
+        for (const slug of registry.slugs()) {
+          try {
+            const factory = registry.factoryForProject(slug);
+            if (factory.contractFor(input.task) !== undefined) {
+              owning = factory.ledger.events;
+              break;
+            }
+          } catch {
+            // an unopenable Project Ledger is skipped — the search continues
+          }
+        }
+      }
+      const workspace = contractWorkspaceOf(owning ?? deps.factory.ledger.events, input.task);
       if (workspace === undefined) return; // no contract on record — no owning Project to notify
       const resolved = ensureProjectRegistered(deps.stateDir, workspace);
       if (!resolved.ok) return;
@@ -1312,7 +1383,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       } catch {
         // best-effort live agent inspection for dead/orphaned worktree spawn rounds
       }
-      if (driverWaveInFlight(projectEventsOf(resolved.root), liveAgents)) return; // held in mailbox.jsonl — the wave's last outcome pumps it
+      if (driverWaveInFlight(projectEventsOf(resolved.slug, resolved.root), liveAgents)) return; // held in mailbox.jsonl — the wave's last outcome pumps it
       await pumpProjectLead(resolved.slug);
     } catch (err) {
       log(`lead-mailbox: peer notification for ${input.task} failed — the outcome stays in the ledger (${messageOf(err)})`);
@@ -1412,18 +1483,21 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   };
 
   const hasActiveWork = async (): Promise<boolean> => {
-    // Gate work remains active even after its Peer has finished its turn.
+    // Gate work remains active even after its Peer has finished its turn —
+    // across EVERY Project's Ledger (v0.0.89), never the root stream alone.
     const gates = new Set<string>();
-    for (const event of deps.factory.ledger.events) {
-      if (event.event === "gate_started") gates.add(`${event.task}:${event.attempt}`);
-      else if (event.event === "gate_finished") gates.delete(`${event.task}:${event.attempt}`);
+    for (const events of eventStreamsOf()) {
+      for (const event of events) {
+        if (event.event === "gate_started") gates.add(`${event.task}:${event.attempt}`);
+        else if (event.event === "gate_finished") gates.delete(`${event.task}:${event.attempt}`);
+      }
     }
     if (gates.size > 0 || handingOverBySlug.size > 0) return true;
     const projects = listProjectRegistrations(deps.stateDir);
     if (projects.some(project => { const mailbox = readLeadMailbox(mailboxPath(project.slug)); return mailbox.inFlight !== null || mailbox.supervisorInFlight !== null; })) return true;
     const live = [...(await liveAgentsById()).values()];
     return projects.some(project => {
-      const events = projectEventsOf(project.root);
+      const events = projectEventsOf(project.slug, project.root);
       return projectHasPeerWork(project.slug, events, live);
     });
   };

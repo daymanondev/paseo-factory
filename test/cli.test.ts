@@ -1282,3 +1282,68 @@ test("the Lane profile store's two implementations cannot drift: plugin/bin/lane
 });
 
 
+
+// ---- Seam 1 (v0.0.89, ADR 0045 §1): the CLI's --project plumbing over the Per-Project registry ----
+
+import { createFactoryRegistry, writeProjectRegistration } from "../plugin/server/projects.ts";
+import { resolveProject as resolveCoreProject } from "../plugin/server/core/project.ts";
+
+test("Seam 1: the CLI plumbs --project through the spool router — and factory retro refuses unscoped with retro-project-required", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const home = join(dir, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const projects: { root: string; slug: string }[] = [];
+  for (const name of ["project-a", "project-b"]) {
+    const root = join(dir, name);
+    mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, "README.md"), "x\n");
+    gitCommitAll(root);
+    const resolved = resolveCoreProject(root);
+    assert.ok(resolved.ok);
+    writeProjectRegistration(stateDir, resolved.slug, { root: resolved.root });
+    projects.push({ root: resolved.root, slug: resolved.slug });
+  }
+  const [a, b] = projects;
+  const registry = createFactoryRegistry({ stateDir });
+  t.after(() => registry.stop());
+  const spool = startSpool(stateDir, registry.root, { registry });
+  t.after(() => spool.stop());
+  const ownerEnv = { PASEO_HOME: home };
+
+  // Both Projects contract the SAME Task id, each naming its Project explicitly
+  // (the --project flag is the router's top-priority context).
+  const contractA = await run(ownerCli, ["contract", "--task", "T-09", "--workspace", a.root, "--gate", "true", "--artifact", "README.md", "--project", a.slug], ownerEnv);
+  assert.equal(contractA.status, 0, contractA.stderr);
+  const contractB = await run(ownerCli, ["contract", "--task", "T-09", "--workspace", b.root, "--gate", "true", "--artifact", "README.md", "--project", b.slug], ownerEnv);
+  assert.equal(contractB.status, 0, contractB.stderr);
+
+  // The Peers claim through their Correlation bindings (the claim CLI's own
+  // agent stamp) — both T-09 loops end green in their own Projects.
+  const correlations = new CorrelationRegistry(stateDir);
+  correlations.issue({ role: "agent", projectSlug: a.slug, projectRoot: a.root, task: "T-09", agentId: "peer-a" });
+  correlations.issue({ role: "agent", projectSlug: b.slug, projectRoot: b.root, task: "T-09", agentId: "peer-b" });
+  writeFileSync(join(a.root, "work.txt"), "a\n");
+  writeFileSync(join(b.root, "work.txt"), "b\n");
+  const shaA = gitCommitAll(a.root, "work-a");
+  const shaB = gitCommitAll(b.root, "work-b");
+  const claimA = await run(claimCli, ["--task", "T-09", "--sha", shaA, "--wait-secs", "60"], { FACTORY_STATE_DIR: stateDir, PASEO_AGENT_ID: "peer-a" });
+  assert.equal(claimA.status, 0, `project-a's claim ends green\nstdout: ${claimA.stdout}\nstderr: ${claimA.stderr}`);
+  const claimB = await run(claimCli, ["--task", "T-09", "--sha", shaB, "--wait-secs", "60"], { FACTORY_STATE_DIR: stateDir, PASEO_AGENT_ID: "peer-b" });
+  assert.equal(claimB.status, 0, `project-b's claim ends green\nstdout: ${claimB.stdout}\nstderr: ${claimB.stderr}`);
+
+  // The explicit --project routes the shared Task id's acceptance onto exactly
+  // the named Project's ledger — project-a never sees project-b's acceptance.
+  const acceptB = await run(ownerCli, ["accept", "T-09", "--attempt", "1", "--by", "owner", "--project", b.slug], ownerEnv);
+  assert.equal(acceptB.status, 0, acceptB.stderr);
+  const ledgerOf = (slug: string): Record<string, unknown>[] =>
+    readFileSync(join(stateDir, "projects", slug, "ledger.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.ok(ledgerOf(b.slug).some((event) => event.event === "attempt_accepted"), "the acceptance landed in project-b's ledger");
+  assert.ok(!ledgerOf(a.slug).some((event) => event.event === "attempt_accepted"), "project-a's ledger never saw project-b's acceptance");
+
+  // The unscoped retro on a two-Project machine refuses by name — the CLI
+  // relays the plugin's exact code at the terminal.
+  const retro = await run(ownerCli, ["retro", "--wait-secs", "30"], ownerEnv);
+  assert.equal(retro.status, 2, `the unscoped retro must refuse (stdout: ${retro.stdout})`);
+  assert.match(retro.stderr, /retro-project-required/);
+});

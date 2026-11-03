@@ -185,6 +185,8 @@ export type { HistoryImportInput, HistoryImportSource, HistoryImportPlan, Import
 
 export { preflightUpgrade, upgradeFactory, upgradeDirectory } from "./history-upgrade.ts";
 export type { UpgradeAction, UpgradeInput, UpgradeResult, UpgradePreflight } from "./history-upgrade.ts";
+export { migrateLegacyRootState, compactedContractStub } from "./ledger-migration.ts";
+export type { LegacyRootMigrationOptions, LegacyRootMigrationProject, LegacyRootMigrationResult, LegacyRootMigrationExtras } from "./ledger-migration.ts";
 export { readLocalWriterIdentity, localWriterPath } from "./writer-identity.ts";
 
 /** Opt-in orchestration; existing SLP exports and configuration stay unchanged. */

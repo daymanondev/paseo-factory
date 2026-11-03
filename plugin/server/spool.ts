@@ -45,6 +45,8 @@ import type { LedgerEvent, MeterUsage, NeedsHumanEvidence, NeedsHumanReason, Ver
 import { CorrelationRegistry, readCorrelations } from "./core/correlations.ts";
 import { loadLanes, parseLane } from "./core/lanes.ts";
 import { listProjectRegistrations, readProjectRegistration, resolveProject, writeProjectRegistration } from "./core/project.ts";
+import { ensureProjectRegistered, resolveTargetProject } from "./projects.ts";
+import type { FactoryRegistry, TargetProjectContext } from "./projects.ts";
 import { FACTORY_SEAT_PROVIDER_IDS, formatPeerAgentTitle, formatPeerWorkspaceTitle } from "./roles.ts";
 import { acceptanceSummary, executeAcceptance } from "./commands.ts";
 import { boundTaskPeers, peerIsRunning } from "./task-peers.ts";
@@ -91,6 +93,12 @@ export interface ContractRequest {
   submitter: string;
   /** Caller seat stamped from `PASEO_FACTORY_SEAT` when present (v0.0.23, ADR 0015 §1). */
   seat?: SpoolSeat;
+  /**
+   * Explicit target Project slug (v0.0.89, ADR 0045 §1) — the CLI's
+   * `--project <slug>` flag. The router's top-priority context; the Contract
+   * still records its own workspace verbatim.
+   */
+  projectSlug?: string;
 }
 
 export interface ClaimRequest {
@@ -101,6 +109,8 @@ export interface ClaimRequest {
   /** Who submitted, when the daemon stamps it on the agent's env — for the spool log, not the ledger. */
   agent?: string;
   seat?: SpoolSeat;
+  /** Explicit target Project slug (v0.0.89) — the CLI's `--project <slug>` flag. */
+  projectSlug?: string;
 }
 
 export interface AcceptRequest {
@@ -124,6 +134,8 @@ export interface AcceptRequest {
   submitter: string;
   /** Caller seat stamped from `PASEO_FACTORY_SEAT` when present (v0.0.23, ADR 0015 §1). */
   seat?: SpoolSeat;
+  /** Explicit target Project slug (v0.0.89) — the CLI's `--project <slug>` flag. */
+  projectSlug?: string;
 }
 
 /**
@@ -156,6 +168,8 @@ export interface SpawnRequest {
   submitter?: string;
   /** Caller seat stamped from `PASEO_FACTORY_SEAT` when present (v0.0.23, ADR 0015 §1). */
   seat?: SpoolSeat;
+  /** Explicit target Project slug (v0.0.89) — the CLI's `--project <slug>` flag. */
+  projectSlug?: string;
 }
 
 /**
@@ -286,6 +300,8 @@ export interface RespawnRequest {
   submitter?: string;
   /** Caller seat stamped from `PASEO_FACTORY_SEAT` when present (v0.0.23, ADR 0015 §1). */
   seat?: SpoolSeat;
+  /** Explicit target Project slug (v0.0.89) — the CLI's `--project <slug>` flag. */
+  projectSlug?: string;
 }
 
 /**
@@ -331,6 +347,8 @@ export interface MeterRequest {
   agent?: string;
   submitter?: string;
   seat?: SpoolSeat;
+  /** Explicit target Project slug (v0.0.89) — the CLI's `--project <slug>` flag. */
+  projectSlug?: string;
 }
 
 /**
@@ -350,6 +368,8 @@ export interface RepokeRequest {
   agent: string;
   submitter?: string;
   seat?: SpoolSeat;
+  /** Explicit target Project slug (v0.0.89) — the CLI's `--project <slug>` flag. */
+  projectSlug?: string;
 }
 
 /**
@@ -367,6 +387,8 @@ export interface NeedsHumanRequest {
   evidence: NeedsHumanEvidence;
   submitter?: string;
   seat?: SpoolSeat;
+  /** Explicit target Project slug (v0.0.89) — the CLI's `--project <slug>` flag. */
+  projectSlug?: string;
 }
 
 /**
@@ -386,6 +408,8 @@ export interface AskRequest {
   name?: string;
   submitter?: string;
   seat?: SpoolSeat;
+  /** Explicit target Project slug (v0.0.89) — the CLI's `--project <slug>` flag. */
+  projectSlug?: string;
 }
 
 export type ScrumSpoolRequest = ScrumOperation & { id: string; kind: "scrum_command"; projectRoot?: string; submitter: string; seat?: SpoolSeat };
@@ -522,6 +546,16 @@ function parseOptionalSubmitter(value: unknown): { ok: true; submitter?: string 
 }
 
 /**
+ * The explicit target Project slug (v0.0.89, ADR 0045 §1): a non-empty
+ * string when present, never blank — the router's top-priority context.
+ */
+function parseOptionalProjectSlug(value: unknown): { ok: true; projectSlug?: string } | { ok: false } {
+  if (value === undefined) return { ok: true };
+  if (typeof value === "string" && value.trim() !== "") return { ok: true, projectSlug: value.trim() };
+  return { ok: false };
+}
+
+/**
  * Validates one decoded request body. Anything that does not match a kind's
  * exact shape is rejected — the spool never guesses what a CLI meant.
  */
@@ -535,6 +569,9 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
   const submitterParsed = parseOptionalSubmitter(req.submitter);
   if (!submitterParsed.ok) return undefined;
   const submitterField = submitterParsed.submitter === undefined ? {} : { submitter: submitterParsed.submitter };
+  const projectSlugParsed = parseOptionalProjectSlug(req.projectSlug);
+  if (!projectSlugParsed.ok) return undefined;
+  const projectSlugField = projectSlugParsed.projectSlug === undefined ? {} : { projectSlug: projectSlugParsed.projectSlug };
   if (req.runId !== undefined && !safeId(req.runId)) return undefined;
   if (req.role !== undefined && !SPECIALIST_ROLES.includes(req.role as ScrumRoleName)) return undefined;
   if (req.artifactRefs !== undefined && (!Array.isArray(req.artifactRefs) || !req.artifactRefs.every(artifactRefIsValid))) return undefined;
@@ -595,12 +632,13 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       ...(req.description === undefined ? {} : { description: req.description }),
       submitter: req.submitter,
       ...seatField,
+      ...projectSlugField,
     };
   }
   if (req.kind === "claim") {
     if (typeof req.task !== "string" || typeof req.sha !== "string") return undefined;
     if (req.agent !== undefined && typeof req.agent !== "string") return undefined;
-    return { id: req.id, kind: "claim", task: req.task, sha: req.sha, ...(req.agent === undefined ? {} : { agent: req.agent }) };
+    return { id: req.id, kind: "claim", task: req.task, sha: req.sha, ...(req.agent === undefined ? {} : { agent: req.agent }), ...projectSlugField };
   }
   if (req.kind === "accept") {
     if (typeof req.task !== "string" || typeof req.attempt !== "number" || !Number.isInteger(req.attempt)) return undefined;
@@ -616,6 +654,7 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       ...(req.by === undefined ? {} : { by: req.by }),
       submitter: req.submitter,
       ...seatField,
+      ...projectSlugField,
     };
   }
   if (req.kind === "spawn") {
@@ -637,6 +676,7 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       ...(req.prompt === undefined ? {} : { prompt: req.prompt }),
       ...submitterField,
       ...seatField,
+      ...projectSlugField,
     };
   }
   if (req.kind === "respawn") {
@@ -649,7 +689,7 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     ) {
       return undefined;
     }
-    return { id: req.id, kind: "respawn", task: req.task, provider: req.provider, died_agent: req.died_agent, ...submitterField, ...seatField };
+    return { id: req.id, kind: "respawn", task: req.task, provider: req.provider, died_agent: req.died_agent, ...submitterField, ...seatField, ...projectSlugField };
   }
   if (req.kind === "lead_rotate") {
     if (typeof req.projectRoot !== "string" || req.projectRoot.trim() === "") return undefined;
@@ -761,18 +801,19 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       ...(req.agent === undefined ? {} : { agent: req.agent }),
       ...submitterField,
       ...seatField,
+      ...projectSlugField,
     };
   }
   if (req.kind === "repoke") {
     if (typeof req.task !== "string" || typeof req.agent !== "string" || req.agent.trim() === "") return undefined;
-    return { id: req.id, kind: "repoke", task: req.task, agent: req.agent, ...submitterField, ...seatField };
+    return { id: req.id, kind: "repoke", task: req.task, agent: req.agent, ...submitterField, ...seatField, ...projectSlugField };
   }
   if (req.kind === "needs_human") {
     if (typeof req.task !== "string") return undefined;
     if (typeof req.reason !== "string" || !(NEEDS_HUMAN_REASONS as readonly string[]).includes(req.reason)) return undefined;
     const reason = req.reason as NeedsHumanReason;
     if (!needsHumanEvidenceIsValid(req.evidence, reason)) return undefined;
-    return { id: req.id, kind: "needs_human", task: req.task, reason, evidence: req.evidence, ...submitterField, ...seatField };
+    return { id: req.id, kind: "needs_human", task: req.task, reason, evidence: req.evidence, ...submitterField, ...seatField, ...projectSlugField };
   }
   if (req.kind === "ask") {
     if (typeof req.task !== "string" || typeof req.command !== "string" || req.command.trim() === "") return undefined;
@@ -789,6 +830,7 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       ...(req.name === undefined ? {} : { name: req.name as string }),
       ...submitterField,
       ...seatField,
+      ...projectSlugField,
     };
   }
   return undefined;
@@ -1137,27 +1179,136 @@ export async function createTaskPeer(input: {
  * red-flagged reply, so the waiting CLI always hears something. `ask` requests
  * need the choke's handler (the shell passes `createChoke(...).spoolAskHandler`);
  * without one they are refused loudly, never silently allowed.
+ *
+ * v0.0.89 (ADR 0045 §1): when a Per-Project Factory registry is wired, every
+ * Project-scoped command first routes through the context-first resolver
+ * (`routeSpoolRequest`) onto the target Project's own Factory — its own
+ * serialized writer lane and isolated `<stateDir>/projects/<slug>/` state —
+ * so independent Projects never collide on Task ids nor block one another.
+ * Without a registry (the legacy single-Factory entrances), the passed
+ * Factory stands exactly as before.
  */
 const peerLifecycleByFactory = new WeakMap<Factory, Map<string, Promise<unknown>>>();
+
+/** One routed request: the Factory that owns it, or the routing's own refusal. */
+export type SpoolRouting = { factory: Factory; slug?: string } | { reply: SpoolReply };
+
+/** The Project-scoped kinds the registry routes; machine-level kinds stay on the root Factory. */
+const PROJECT_SCOPED_SPOOL_KINDS = new Set([
+  "contract",
+  "claim",
+  "accept",
+  "spawn",
+  "respawn",
+  "meter",
+  "repoke",
+  "needs_human",
+  "ask",
+  "reset",
+  "delete",
+]);
+
+/** The context-first resolver's input, lifted off one spool request's own fields. */
+function contextOfSpoolRequest(request: SpoolRequest): TargetProjectContext {
+  switch (request.kind) {
+    case "contract":
+      return { project: request.projectSlug, workspace: request.workspace, submitter: request.submitter };
+    case "claim":
+      return { project: request.projectSlug, task: request.task, agentId: request.agent };
+    case "accept":
+    case "respawn":
+    case "repoke":
+    case "needs_human":
+      return { project: request.projectSlug, task: request.task, submitter: request.submitter };
+    case "spawn":
+      return { project: request.projectSlug, task: request.task, workspace: request.worktree, submitter: request.submitter };
+    case "meter":
+      return { project: request.projectSlug, task: request.task, agentId: request.agent, submitter: request.submitter };
+    case "ask":
+      return { project: request.projectSlug, task: request.task, workspace: request.cwd, agentId: request.agent, submitter: request.submitter };
+    case "reset":
+      return { project: request.project, workspace: request.workspace, submitter: request.submitter };
+    case "delete":
+      return {
+        project: request.project !== undefined && request.project.trim() !== "" ? request.project : request.projectSlug,
+        workspace: request.projectRoot !== undefined && request.projectRoot.trim() !== "" ? request.projectRoot : request.workspace,
+        submitter: request.submitter,
+      };
+    default:
+      return {};
+  }
+}
+
+/**
+ * Resolves the Factory one spool request runs on (v0.0.89, ADR 0045 §1):
+ * explicit `projectSlug` → Correlation token → workspace/worktree path →
+ * unique Task lookup → single-Project fallback. A request whose explicit
+ * slug is unregistered, or whose bare Task id exists in more than one
+ * Project, is refused here by name — never routed onto a guessed Project.
+ * The reset/delete handlers keep resolving and refusing on their own, so for
+ * those kinds routing only picks the maintenance lane; `retro` resolves
+ * wholly inside its own handler (its refusal is `retro-project-required`).
+ */
+export function routeSpoolRequest(root: Factory, request: SpoolRequest, registry: FactoryRegistry | undefined): SpoolRouting {
+  if (registry === undefined || !PROJECT_SCOPED_SPOOL_KINDS.has(request.kind)) return { factory: root };
+  // The Contract is the registering act: its workspace names the Project whose
+  // isolated state directory the loop is about to write into, so the durable
+  // slug → root binding exists before the router looks for it.
+  if (request.kind === "contract") {
+    const resolved = resolveProject(request.workspace);
+    if (resolved.ok) ensureProjectRegistered(registry.stateDir, resolved);
+  }
+  const context = contextOfSpoolRequest(request);
+  const target = resolveTargetProject(registry, context);
+  if (target.ok) {
+    const factory = registry.factoryForProject(target.slug);
+    // The legacy root bridge: a task the resolved Project's Factory does not
+    // own but the root Factory still does (a root-ledger upgrade flow, or
+    // bytes a startup migration has not partitioned yet) routes to the root —
+    // the Project Factories never owned it, and a wrong-Project unknown-task
+    // would strand the loop's own recovery entrances.
+    if (
+      context.task !== undefined &&
+      context.task.trim() !== "" &&
+      factory.contractFor(context.task) === undefined &&
+      root.contractFor(context.task) !== undefined
+    ) {
+      return { factory: root };
+    }
+    return { factory, slug: target.slug };
+  }
+  if (request.kind === "reset" || request.kind === "delete") return { factory: root };
+  if (target.code === "unknown-project" || target.code === "ambiguous-task-project") {
+    return { reply: { id: request.id, ok: false, code: target.code, message: target.message } };
+  }
+  // No project context and zero or multiple Projects: the root Factory answers
+  // with its own named refusal (`unknown-task` and kin), exactly as the
+  // single-Factory entrances always did.
+  return { factory: root };
+}
 
 export async function handleSpoolRequest(
   factory: Factory,
   request: SpoolRequest,
   deps: SpoolDeps = {},
+  registry?: FactoryRegistry,
 ): Promise<SpoolReply> {
-  if (request.kind === "upgrade" || request.kind === "history_import" || request.kind === "history_import_status") return handleAdmittedSpoolRequest(factory, request, deps);
-  if ((request.kind === "reset" || request.kind === "delete") && !factory.history.maintenanceActive) return factory.history.withExclusiveMaintenance(() => handleAdmittedSpoolRequest(factory, request, deps));
-  const admitted = () => factory.history.runOperation(() => handleAdmittedSpoolRequest(factory, request, deps), { newWork: !["ask", "meter", "repoke", "respawn", "needs_human"].includes(request.kind) });
+  const routing = routeSpoolRequest(factory, request, registry);
+  if ("reply" in routing) return routing.reply;
+  const effective = routing.factory;
+  if (request.kind === "upgrade" || request.kind === "history_import" || request.kind === "history_import_status") return handleAdmittedSpoolRequest(effective, request, deps);
+  if ((request.kind === "reset" || request.kind === "delete") && !effective.history.maintenanceActive) return effective.history.withExclusiveMaintenance(() => handleAdmittedSpoolRequest(effective, request, deps, registry));
+  const admitted = () => effective.history.runOperation(() => handleAdmittedSpoolRequest(effective, request, deps, registry), { newWork: !["ask", "meter", "repoke", "respawn", "needs_human"].includes(request.kind) });
   const run = () => {
-    const workspace = request.kind === "contract" ? request.workspace : (request.kind === "spawn" || request.kind === "respawn") ? factory.contractFor(request.task)?.workspace : undefined;
+    const workspace = request.kind === "contract" ? request.workspace : (request.kind === "spawn" || request.kind === "respawn") ? effective.contractFor(request.task)?.workspace : undefined;
     const project = workspace === undefined ? undefined : resolveProject(workspace);
-    return project?.ok ? withExecutionLane(factory.stateDir, project.slug, admitted) : admitted();
+    return project?.ok ? withExecutionLane(effective.stateDir, project.slug, admitted) : admitted();
   };
   if (request.kind !== "spawn" && request.kind !== "contract") return run();
   // Spool requests run concurrently. Serialize only Peer lifecycle operations
   // for this Task, so two different spawn prompts cannot pass the same census.
-  let lanes = peerLifecycleByFactory.get(factory);
-  if (lanes === undefined) { lanes = new Map(); peerLifecycleByFactory.set(factory, lanes); }
+  let lanes = peerLifecycleByFactory.get(effective);
+  if (lanes === undefined) { lanes = new Map(); peerLifecycleByFactory.set(effective, lanes); }
   const previous = lanes.get(request.task) ?? Promise.resolve();
   const pending = previous.catch(() => {}).then(run);
   lanes.set(request.task, pending);
@@ -1165,7 +1316,7 @@ export async function handleSpoolRequest(
   finally { if (lanes.get(request.task) === pending) lanes.delete(request.task); }
 }
 
-async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolRequest, deps: SpoolDeps): Promise<SpoolReply> {
+async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolRequest, deps: SpoolDeps, registry?: FactoryRegistry): Promise<SpoolReply> {
   const { ask: askHandler, leadRotate: leadRotateHandler, leadDispatch: leadDispatchHandler, peerMail: peerMailHook, supervisorDispatch: supervisorDispatchHandler, supervisorReport: supervisorReportHandler, daemon, projectReset: projectResetHandler, projectDelete: projectDeleteHandler, sanitizeLane, home, usageMeter, recordUsage } = deps;
   const resolvedDaemon = resolveDaemonArg(daemon);
   try {
@@ -1711,9 +1862,42 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
       // The Owner's on-demand pass (v0.0.7): the plugin runs it whole. A
       // `failed` outcome already ledgered its visible line — the reply still
       // refuses (exit 2), so the Owner sees the error at the terminal too.
-      // The optional Project scope (v0.0.38, ADR 0026 §1) forwards as-is: the
-      // core normalizes a slug or resolves a root, and the pass honors that
-      // Project's own `retro` lane before the machine table.
+      // v0.0.89 (ADR 0045 §4): the pass runs strictly against ONE Project's
+      // own Factory — its isolated Ledger, Reports, and retro files under
+      // `<stateDir>/projects/<slug>/`. With the registry wired, the scope
+      // resolves through the context-first order (explicit `projectSlug` /
+      // `projectRoot` → Correlation token → workspace); unscoped on a machine
+      // with zero or multiple registered Projects it refuses by name — never
+      // a multi-Project digest. The legacy single-Factory entrance (no
+      // registry) forwards the optional scope as-is (v0.0.38, ADR 0026 §1).
+      if (registry !== undefined) {
+        const target = resolveTargetProject(registry, {
+          project: request.projectSlug,
+          workspace: request.projectRoot,
+          submitter: request.submitter,
+        });
+        if (!target.ok) {
+          return target.code === "unknown-project"
+            ? { id: request.id, ok: false, code: "unknown-project", message: target.message }
+            : {
+                id: request.id,
+                ok: false,
+                code: "retro-project-required",
+                message: `the retro runs against exactly one Project's ledger — ${target.message}`,
+              };
+        }
+        const outcome = await registry.factoryForProject(target.slug).retro(target.slug);
+        if (outcome.outcome === "failed") {
+          return { id: request.id, ok: false, code: "retro-failed", message: outcome.error ?? "(no reason recorded)" };
+        }
+        return {
+          id: request.id,
+          ok: true,
+          summary: `retro written: ${outcome.proposalCount} proposals → ${outcome.proposalsPath}`,
+          proposalsPath: outcome.proposalsPath,
+          proposalCount: outcome.proposalCount,
+        };
+      }
       const outcome = await factory.retro(request.projectSlug ?? request.projectRoot);
       if (outcome.outcome === "failed") {
         return { id: request.id, ok: false, code: "retro-failed", message: outcome.error ?? "(no reason recorded)" };
@@ -1804,6 +1988,14 @@ export interface SpoolOptions {
    * task Peer is stopped and archived on re-contracting or replacement.
    */
   recordUsage?: (input: { slug: string; task?: string; agent: SurfaceAgentSnapshot }) => Promise<void>;
+  /**
+   * The Per-Project Factory registry (v0.0.89, ADR 0045 §1): when wired,
+   * every Project-scoped request routes onto the target Project's own
+   * Factory — one serialized writer lane and one isolated state directory
+   * per Project. Without one, the passed root Factory handles everything
+   * exactly as before.
+   */
+  registry?: FactoryRegistry;
 }
 
 export type SpoolDeps = Omit<SpoolOptions, "onLog" | "pollMs">;
@@ -1944,6 +2136,7 @@ export function startSpool(stateDir: string, factory: Factory, options: SpoolOpt
         factory,
         log,
         options,
+        options.registry,
       )
         .catch(() => {})
         .finally(async () => {
@@ -1975,6 +2168,7 @@ async function handleAdmittedRequestFile(
   factory: Factory,
   log: (message: string) => void,
   deps: SpoolDeps,
+  registry?: FactoryRegistry,
 ): Promise<void> {
   let reply: SpoolReply;
   let request: SpoolRequest | undefined;
@@ -1997,7 +2191,7 @@ async function handleAdmittedRequestFile(
     reply = { id, ok: false, code: "bad-request", message: `request file ${requestPath} is not a valid spool request` };
     log(`request ${id}: REJECTED — malformed`);
   } else {
-    reply = await handleSpoolRequest(factory, request, deps);
+    reply = await handleSpoolRequest(factory, request, deps, registry);
 
     // The v0.0.9 stamps make the two Owner acts attributable in the log too —
     // the same visibility the claim line always had.
@@ -2027,11 +2221,27 @@ function writeJsonAtomic(path: string, value: unknown): void {
   renameSync(tmp, path);
 }
 
-async function handleRequestFile(id: string, requestPath: string, replyPath: string, processedPath: string, factory: Factory, log: (message: string) => void, deps: SpoolDeps): Promise<void> {
+async function handleRequestFile(id: string, requestPath: string, replyPath: string, processedPath: string, factory: Factory, log: (message: string) => void, deps: SpoolDeps, registry?: FactoryRegistry): Promise<void> {
   let kind = "";
-  try { kind = String(JSON.parse(readFileSync(requestPath, "utf8")).kind); } catch { /* malformed requests still receive a reply */ }
-  const work = () => handleAdmittedRequestFile(id, requestPath, replyPath, processedPath, factory, log, deps);
+  // The admission lane follows the ROUTED Factory (v0.0.89): a reset/delete on
+  // one Project takes that Project's own maintenance lane, and ordinary work
+  // admits on the Project that owns it — independent Projects never queue
+  // behind one another. A routing refusal still reaches
+  // handleAdmittedRequestFile, which mirrors it as the reply.
+  let admitted = factory;
+  try {
+    const body = JSON.parse(readFileSync(requestPath, "utf8"));
+    kind = String(body.kind);
+    if (registry !== undefined) {
+      const request = parseSpoolRequest(body);
+      if (request !== undefined) {
+        const routing = routeSpoolRequest(factory, request, registry);
+        if (!("reply" in routing)) admitted = routing.factory;
+      }
+    }
+  } catch { /* malformed requests still receive a reply */ }
+  const work = () => handleAdmittedRequestFile(id, requestPath, replyPath, processedPath, admitted, log, deps, registry);
   if (kind === "upgrade") await work();
-  else if (kind === "reset" || kind === "delete" || kind === "project_delete") await factory.history.withExclusiveMaintenance(work);
-  else await factory.history.runOperation(work, { newWork: !["ask", "meter", "repoke", "respawn", "needs_human", "history_import", "history_import_status", ""].includes(kind) });
+  else if (kind === "reset" || kind === "delete" || kind === "project_delete") await admitted.history.withExclusiveMaintenance(work);
+  else await admitted.history.runOperation(work, { newWork: !["ask", "meter", "repoke", "respawn", "needs_human", "history_import", "history_import_status", ""].includes(kind) });
 }

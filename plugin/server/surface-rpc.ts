@@ -8,7 +8,7 @@ import { discoverHelperMcps, helperMcpRoster, setHelperMcpEnabled, syncHelperMcp
 import { provisionPiAgentHome } from "./core/pi-home.ts";
 import { pluginDirFor } from "./paths.ts";
 import { liveSeatCandidates, seatCandidates } from "./seats.ts";
-import { checkProjectResetRepository, resetProjectRepository } from "./project-reset.ts";
+import { checkProjectResetRepository, removeProjectStateDirectory, resetProjectRepository } from "./project-reset.ts";
 import { boundTaskPeers } from "./task-peers.ts";
 import { scrumTelemetry } from "./core/scrum/telemetry.ts";
 import { scrumOperation } from "./core/scrum/controller.ts";
@@ -68,13 +68,16 @@ import type { CompanionToolRunner, CompanionToolUpdateStatus } from "./core/scru
 import { basename, join, resolve } from "node:path";
 import { FACTORY_VIEW_VERSION } from "../shared/view.ts";
 import { foldRetro, foldTasks, foldView, readTailed } from "./view.ts";
+import type { ProjectEventStream } from "./view.ts";
+import type { LedgerEvent } from "./core/events.ts";
 import { setAgentModelViaCli, setAgentThinkingViaCli, stopAgentViaCli } from "./daemon-cli.ts";
 import { checkDaemonPluginUpdates, cleanupDaemonWorkspacesAndProjectsViaWs, getCachedPluginUpdateStatus, installDaemonPlugin, isPaseoWorkspaceArchivedOnDisk, listDaemonPlugins, manageDaemonPlugin, prunePaseoProjectRegistry, reloadDaemonConfigViaWs, restoreDaemonWorkspaceViaWs } from "./daemon-cli.ts";
 import type { DaemonPluginAction, DaemonPluginItem, DaemonPluginSourceStatus, DaemonPluginUpdateRow, DaemonReply } from "./daemon-cli.ts";
 import { effectiveLanesForReconcile, reconcilePaseoRoleProviders } from "./core/role-providers.ts";
 import { SEAT_TITLES, inferRoleFromProviderId, resolveEffectiveProviderFamily } from "./roles.ts";
 import type { SeatName } from "./roles.ts";
-import { ensureProjectRegistered, discoverProjects, writeProjectRegistration } from "./projects.ts";
+import { ensureProjectRegistered, discoverProjects, writeProjectRegistration, resolveTargetProject } from "./projects.ts";
+import type { FactoryRegistry } from "./projects.ts";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { COMPANION_CATALOG, COMPANION_TOOLS_CATALOG, CORE_PLUGIN_ENTRY, MANAGEABLE_PLUGIN_IDS, MANAGEABLE_TOOL_IDS } from "../shared/companions.ts";
 import type { CompanionCatalogEntry, CompanionToolCatalogEntry, ManageablePluginId } from "../shared/companions.ts";
@@ -296,6 +299,16 @@ export interface SurfaceCallContext {
 
 export interface SurfaceDeps {
   factory: Factory;
+  /**
+   * The Per-Project Factory registry (v0.0.89, ADR 0045 §1): when wired,
+   * every Project-scoped RPC — snapshot, taskDetail, accept, retro, project
+   * reset/delete — resolves its target Project through the context-first
+   * order and runs on that Project's own Factory (its isolated ledger,
+   * reports, gate logs, and retro files under `<stateDir>/projects/<slug>/`).
+   * The `factory` above remains the root fallback for unbound machine-level
+   * acts (upgrade, machine lanes); unwired, it handles everything as before.
+   */
+  registry?: FactoryRegistry;
   stateDir: string;
   /** The paseo home — the daemon the seat bridges and CLI fallbacks target. */
   home: string;
@@ -466,6 +479,72 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   };
   const log = deps.onLog ?? (() => {});
   const failure = <C extends string>(code: C, error: string) => ({ ok: false as const, code, error });
+
+  // ---- the Per-Project routing half (v0.0.89, ADR 0045 §1) -------------------------------
+  //
+  // With a registry wired, Project-scoped acts resolve their target Project
+  // through the context-first order and run on that Project's own Factory —
+  // its isolated ledger, reports, gate logs, and retro files under
+  // `<stateDir>/projects/<slug>/`. Unwired, the single root Factory stands
+  // exactly as before.
+
+  /** The Factory owning a Project slug — the registry's cached instance, else the root Factory. */
+  const factoryForSlug = (slug: string): Factory => (deps.registry === undefined ? deps.factory : deps.registry.factoryForProject(slug));
+
+  /**
+   * The Contract for `task` as THIS Project's own stream sees it (v0.0.89):
+   * the stream's Factory first, the legacy root bridge second. Unlike the
+   * task-only `resolveTaskFactory` lookup, this never refuses on a Task id two
+   * Projects share — the stream already names the Project, so each side of the
+   * collision resolves its own Contract.
+   */
+  const contractInProject = (task: string, slug: string) => {
+    let factory: Factory;
+    try {
+      factory = factoryForSlug(slug);
+    } catch {
+      return undefined; // an unopenable Project Ledger answers "no contract", never a failed snapshot
+    }
+    const contract = factory.contractFor(task);
+    if (contract !== undefined) return contract;
+    return factory === deps.factory ? undefined : deps.factory.contractFor(task);
+  };
+
+  /**
+   * Resolves the Factory holding a task's Contract by task id (the unique-
+   * Task-lookup arm). `ambiguous` names the by-name refusal a task id shared
+   * by several Projects carries; `root` keeps the legacy single-Factory path
+   * (and the root Factory's own `unknown-task` refusal names the miss).
+   */
+  const resolveTaskFactory = (task: string): { ok: true; factory: Factory; slug?: string } | { ok: false; code: string; error: string } => {
+    if (deps.registry === undefined) return { ok: true, factory: deps.factory };
+    const target = resolveTargetProject(deps.registry, { task });
+    if (target.ok) {
+      const factory = deps.registry.factoryForProject(target.slug);
+      // The legacy root bridge (the spool router's precedent): a task the
+      // Project's Factory does not own but the root Factory still does — a
+      // root-ledger upgrade flow, or un-migrated bytes — reads and mutates on
+      // the root, never a wrong-Project unknown-task.
+      if (factory.contractFor(task) === undefined && deps.factory.contractFor(task) !== undefined) {
+        return { ok: true, factory: deps.factory };
+      }
+      return { ok: true, factory, slug: target.slug };
+    }
+    if (target.code === "ambiguous-task-project") return { ok: false, code: target.code, error: target.message };
+    return { ok: true, factory: deps.factory };
+  };
+
+  /** The maintenance lane a project reset/delete runs on — the target Project's own Factory. */
+  const factoryForResetTarget = (
+    input: { projectRoot?: string; project?: string; projectSlug?: string; workspace?: string } | undefined,
+  ): Factory => {
+    if (deps.registry === undefined || input === undefined) return deps.factory;
+    const target = resolveTargetProject(deps.registry, {
+      project: input.project !== undefined && input.project.trim() !== "" ? input.project : input.projectSlug,
+      workspace: input.projectRoot !== undefined && input.projectRoot.trim() !== "" ? input.projectRoot : input.workspace,
+    });
+    return target.ok ? deps.registry.factoryForProject(target.slug) : deps.factory;
+  };
   let localUpdateSnapshot: { statuses: ReadonlyMap<string, DaemonPluginSourceStatus>; checkedAt: string } | null = null;
   let localToolUpdateSnapshot: Record<"factory-skills-pack", CompanionToolUpdateStatus> | null = null;
 
@@ -629,9 +708,9 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   };
 
   /** The agent → task binding: which live agent works which task, from the ledger's own names. */
-  const agentTaskIndex = (): Map<string, string> => {
+  const agentTaskIndex = (events: readonly LedgerEvent[] = deps.factory.ledger.events): Map<string, string> => {
     const index = new Map<string, string>();
-    for (const evt of deps.factory.ledger.events) {
+    for (const evt of events) {
       const agent = evt.event === "claim_reported" || evt.event === "meter_written" ? evt.agent : evt.event === "repoke_dispatched" ? evt.agent : undefined;
       if ("task" in evt && typeof evt.task === "string" && typeof agent === "string" && agent !== "") index.set(agent, evt.task);
     }
@@ -642,12 +721,21 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
    * Enriches folded `TaskView` rows with Peer `agentId` bindings from
    * `<stateDir>/correlations.json` (and live daemon agents when present) so a
    * spawned Peer conversation is reachable even before its first Claim or when
-   * a claim arrived without an agent stamp.
+   * a claim arrived without an agent stamp. The Contract lookup rides the
+   * row's OWN Project stream when it carries one (v0.0.89 — a Task id two
+   * Projects share resolves each side's Contract, never the ambiguity
+   * refusal); the task-only lookup stands in for unattributed rows.
    */
-  const enrichTaskPeerAgents = (tasks: readonly TaskView[], liveAgents: readonly SurfaceAgentSnapshot[] = []): TaskView[] => {
+  const enrichTaskPeerAgents = (tasks: readonly (TaskView & { projectSlug?: string })[], liveAgents: readonly SurfaceAgentSnapshot[] = []): TaskView[] => {
     const correlations = new CorrelationRegistry(deps.stateDir).list();
     return tasks.map((taskView) => {
-      const contract = deps.factory.contractFor(taskView.task);
+      const contract =
+        taskView.projectSlug !== undefined
+          ? contractInProject(taskView.task, taskView.projectSlug)
+          : (() => {
+              const routed = resolveTaskFactory(taskView.task);
+              return routed.ok ? routed.factory.contractFor(taskView.task) : undefined;
+            })();
       const livePeer = liveAgents.find(
         (a) => a.labels.seat === "agent" && a.labels.task === taskView.task && typeof a.id === "string" && a.id !== "",
       );
@@ -674,9 +762,21 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     });
   };
 
-  /** One task's contract workspace sits inside the Project root (equal or nested). */
+  /**
+   * One task's contract workspace sits inside the Project root (equal or
+   * nested). The Contract resolves through the Project's OWN stream when the
+   * caller names its slug (v0.0.89 — a Task id two Projects share answers per
+   * side, never the task-only lookup's ambiguity refusal); the task-only
+   * lookup stands in for slug-less callers.
+   */
   const taskInProject = (task: string, root: string, slug?: string): boolean => {
-    const contract = deps.factory.contractFor(task);
+    const contract =
+      slug !== undefined
+        ? contractInProject(task, slug)
+        : (() => {
+            const routed = resolveTaskFactory(task);
+            return routed.ok ? routed.factory.contractFor(task) : undefined;
+          })();
     if (contract === undefined) return false;
     const normRoot = realpathSafe(resolve(root));
     const normWs = realpathSafe(resolve(contract.workspace));
@@ -1184,8 +1284,11 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     const reg = readProjectRegistration(deps.stateDir, project.slug);
 
     // 1. Collect all tasks belonging to this Project (from ledger contracts/spawns, taskWorkspaces, and worktrees/*).
+    // v0.0.89: the Project's OWN Factory holds its Contracts — never another
+    // Project's events, never the root ledger.
+    const projectEvents = deps.registry === undefined ? deps.factory.ledger.events : deps.registry.factoryForProject(project.slug).ledger.events;
     const projectTaskSet = new Set<string>();
-    for (const evt of deps.factory.ledger.events) {
+    for (const evt of projectEvents) {
       if (
         evt.event === "contract_set" &&
         (evt.workspace === project.root ||
@@ -1216,7 +1319,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     // 2. Find and stop + archive all non-archived agents bound to this Project.
     const archivedSeats: string[] = [];
     const archivedAgents: string[] = [];
-    const bound = agentTaskIndex();
+    const bound = agentTaskIndex(projectEvents);
     let rawAgents: SurfaceAgentSnapshot[] = [];
     try {
       const page = await daemon.agents.list({ filter: { includeArchived: false, includeBackground: true } });
@@ -1251,9 +1354,9 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           agent.id === reg?.lead ||
           inProjectRoot ||
           inWorktree ||
-          (typeof boundTask === "string" && (projectTaskSet.has(boundTask) || taskInProject(boundTask, project.root)))
+          (typeof boundTask === "string" && (projectTaskSet.has(boundTask) || taskInProject(boundTask, project.root, project.slug)))
         : (seatLabel === "agent" && agent.labels.project === project.slug) ||
-          (typeof boundTask === "string" && (projectTaskSet.has(boundTask) || taskInProject(boundTask, project.root))) ||
+          (typeof boundTask === "string" && (projectTaskSet.has(boundTask) || taskInProject(boundTask, project.root, project.slug))) ||
           inWorktree;
       if (!matchesProject) continue;
 
@@ -1687,9 +1790,11 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     }
   };
   const isCancelledScrumTask = (task: string, fallbackSlug?: string): boolean => {
-    const contract = deps.factory.contractFor(task);
+    const taskRouted = resolveTaskFactory(task);
+    const taskFactory = taskRouted.ok ? taskRouted.factory : deps.factory;
+    const contract = taskFactory.contractFor(task);
     if (contract?.execution?.mode !== "scrum" || !contract.execution.runId) return false;
-    const projected = projectTask(deps.factory.ledger.events, task);
+    const projected = projectTask(taskFactory.ledger.events, task);
     if (projected.settled || projected.inFlightAttempt !== undefined) return false;
     const slug =
       fallbackSlug ??
@@ -1708,9 +1813,11 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   };
   const executionWork = async (project: { slug: string; root: string }, context?: SurfaceCallContext, cachedAgents?: readonly SurfaceAgentSnapshot[]) => {
     const blockers: string[] = [];
-    for (const event of deps.factory.ledger.events) if (event.event === "contract_set" && taskInProject(event.task, project.root, project.slug)) {
+    // v0.0.89: the busy check reads the Project's OWN Factory ledger.
+    const workEvents = deps.registry === undefined ? deps.factory.ledger.events : deps.registry.factoryForProject(project.slug).ledger.events;
+    for (const event of workEvents) if (event.event === "contract_set" && taskInProject(event.task, project.root, project.slug)) {
       if (isCancelledScrumTask(event.task, project.slug)) continue;
-      const task = projectTask(deps.factory.ledger.events, event.task);
+      const task = projectTask(workEvents, event.task);
       if (!task.settled || task.pendingLanding || task.inFlightAttempt !== undefined) blockers.push(`Task ${event.task}: ${task.status}${task.pendingLanding ? " pending-conflict" : ""}`);
     }
     const mailbox = readLeadMailbox(join(scopeDir(deps.stateDir, project.slug), "mailbox.jsonl"));
@@ -1896,7 +2003,8 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
             const requested = commandRun(deps.stateDir, project.slug, input.runId!, { type: "cancellation_requested", requestId: input.requestId, expectedRevision: input.expectedRevision!, reason: String(input.payload?.reason ?? "Owner cancellation; unresolved Tasks retained"), actor: caller?.actor ?? "owner" });
             if (requested.phase === "cancelled") return { ok: true as const, data: requested };
             const page = await resolveDaemon(context).agents.list({ filter: { includeArchived: false, includeBackground: true } });
-            const peers = new Map(requested.tasks.flatMap(task => boundTaskPeers({ stateDir: deps.stateDir, slug: project.slug, task: task.task, events: deps.factory.ledger.events, live: page.entries.map(e => e.agent) })).map(agent => [agent.id, agent]));
+            const cancelEvents = factoryForSlug(project.slug).ledger.events;
+            const peers = new Map(requested.tasks.flatMap(task => boundTaskPeers({ stateDir: deps.stateDir, slug: project.slug, task: task.task, events: cancelEvents, live: page.entries.map(e => e.agent) })).map(agent => [agent.id, agent]));
             for (const { agent } of page.entries) if (agent.archivedAt === null && agent.labels.project === project.slug && agent.labels.run === input.runId && agent.labels.seat === "agent") peers.set(agent.id, agent);
             for (const agent of peers.values()) {
               const stopped = await (deps.stopAgent ?? stopAgentViaCli)(agent.id, deps.home);
@@ -1904,7 +2012,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
               await resolveDaemon(context).agents.ref(agent.id).archive();
             }
             const current = readRun(deps.stateDir, project.slug, input.runId!);
-            return { ok: true as const, data: commandRun(deps.stateDir, project.slug, input.runId!, { requestId: `${input.requestId}:cancelled`, expectedRevision: current.revision, type: "phase_changed", phase: "cancelled", reason: requested.cancellation!.reason, telemetry: scrumTelemetry(current, deps.factory.ledger.events) }) };
+            return { ok: true as const, data: commandRun(deps.stateDir, project.slug, input.runId!, { requestId: `${input.requestId}:cancelled`, expectedRevision: current.revision, type: "phase_changed", phase: "cancelled", reason: requested.cancellation!.reason, telemetry: scrumTelemetry(current, cancelEvents) }) };
           });
         }
         const targetRunBefore =
@@ -1925,7 +2033,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           const currentWork = project?.ok ? await executionWork(project, context) : work;
           const updatesRoster = ["config.set", "config.reset", "profile.apply"].includes(input.operation);
           const before = project?.ok && updatesRoster ? readScrumConfig(deps.stateDir, project.slug) : undefined;
-          const data = await scrumOperation(input, { factory: deps.factory, ...(project?.ok ? { slug: project.slug, root: project.root } : {}), authority, actor: caller?.actor ?? "owner", activeAgents: currentWork.activeAgents, pendingDirectives: currentWork.pendingDirectives,
+          const data = await scrumOperation(input, { factory: project?.ok ? factoryForSlug(project.slug) : deps.factory, ...(project?.ok ? { slug: project.slug, root: project.root } : {}), authority, actor: caller?.actor ?? "owner", activeAgents: currentWork.activeAgents, pendingDirectives: currentWork.pendingDirectives,
             previewDecision: async (decision, previewRun): Promise<import('./core/scrum/run-journal.ts').ScrumRun> => {
               const reply = await handlers.scrumCommand({ operation: 'design.decide', projectRoot: project?.ok ? project.root : undefined, runId: previewRun.runId, requestId: `studio:${previewRun.runId}:${previewRun.revision}:${input.requestId}`, expectedRevision: previewRun.revision, payload: { ...decision, explicitOwnerInstruction: true } }, context);
               if (!reply.ok) throw new FactoryError(reply.code, reply.error);
@@ -2065,10 +2173,42 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       const machineLanes = loadLanes(deps.stateDir);
       if (!machineLanes.ok) return failure("lanes-unreadable", machineLanes.reason);
       const daemon = resolveDaemon(context);
-      const bound = agentTaskIndex();
-      const allEvents = deps.factory.ledger.events.filter(
-        (evt) => !("task" in evt) || typeof evt.task !== "string" || !isCancelledScrumTask(evt.task),
-      );
+      // v0.0.89 (ADR 0045 §1.3): a selected Project reads its events strictly
+      // from `factoryForProject(slug)`; the "All projects" view aggregates
+      // every registered Factory's events, each stream tagged with its
+      // Project's slug so the fold can attribute every task row and ledger
+      // line. Unwired registry (the legacy single-Factory entrances) keeps
+      // the root Factory's ledger as the one event stream.
+      const scrubCancelled = (events: readonly LedgerEvent[]): LedgerEvent[] =>
+        events.filter((evt) => !("task" in evt) || typeof evt.task !== "string" || !isCancelledScrumTask(evt.task));
+      // A selected Project that is REGISTERED reads its own Factory's ledger; a
+      // repo no Project Factory owns yet (an unregistered directory in the
+      // Project Selector's scope) falls back to the root Factory's events — a
+      // read never mints a Project state directory. One damaged per-Project
+      // Ledger degrades to ITS OWN empty stream (v0.0.89, the daemon-half
+      // law: never a failed snapshot) — the error rides the Project row.
+      const streamErrors = new Map<string, string>();
+      const streamForSlug = (slug: string): ProjectEventStream => {
+        try {
+          return { slug, events: scrubCancelled(factoryForSlug(slug).ledger.events) };
+        } catch (error) {
+          const message = messageOf(error);
+          streamErrors.set(slug, message);
+          log(`snapshot: project ${slug} ledger unreadable — ${message}`);
+          return { slug, events: [] };
+        }
+      };
+      const scopedStream = (slug: string): ProjectEventStream =>
+        readProjectRegistration(deps.stateDir, slug) !== undefined ? streamForSlug(slug) : { slug, events: scrubCancelled(deps.factory.ledger.events) };
+      const projectStreams: ProjectEventStream[] | undefined =
+        deps.registry === undefined
+          ? undefined
+          : project !== null
+            ? [scopedStream(project.slug)]
+            : deps.registry.slugs().map((slug) => streamForSlug(slug));
+      const allEvents: readonly LedgerEvent[] =
+        projectStreams !== undefined ? projectStreams.flatMap((stream) => stream.events) : scrubCancelled(deps.factory.ledger.events);
+      const bound = agentTaskIndex(allEvents);
 
       let rawAgents: SurfaceAgentSnapshot[] = [];
       let providers: ProviderEntry[] = [];
@@ -2132,7 +2272,14 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       const supervisor = supervisorRaw === undefined ? null : (agents.find((agent) => agent.id === supervisorRaw!.id) ?? null);
       const lead = leadRaw === undefined ? null : (agents.find((agent) => agent.id === leadRaw!.id) ?? null);
 
-      const allTasks = foldTasks(allEvents);
+      // The task fold stays per Project (v0.0.89): two Projects may share a
+      // Task id (`T-01` in each), so the aggregate folds each stream separately
+      // and attributes every row with its `projectSlug` — never one merged
+      // slice under a colliding id.
+      const allTasks: TaskView[] =
+        projectStreams === undefined
+          ? foldTasks(allEvents)
+          : projectStreams.flatMap((stream) => foldTasks(stream.events).map((task) => ({ ...task, projectSlug: stream.slug })));
       const scopedProject = project;
       const events =
         scopedProject === null
@@ -2164,12 +2311,14 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
               })()
             : join(entry.root, ".git"));
         const execution = executionView(entry.slug);
+        const ledgerError = streamErrors.get(entry.slug);
         return {
           slug: entry.slug,
           root: entry.root,
           name: entry.name ?? reg?.name ?? (basename(entry.root) || entry.slug),
           ...(resolvedCommonDir !== undefined ? { commonDir: resolvedCommonDir } : {}),
           ...(entry.missingRoot ? { missingRoot: true } : {}),
+          ...(ledgerError !== undefined ? { ledgerError } : {}),
           supervisorId: liveSup?.id ?? reg?.supervisor ?? entry.supervisorId ?? null,
           leadId: liveLead?.id ?? reg?.lead ?? entry.leadId ?? null,
           executionMode: execution.selectedMode,
@@ -2209,6 +2358,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         generatedAt: new Date().toISOString(),
         lanes: lanes.lanes,
         events,
+        ...(projectStreams === undefined ? {} : { projectStreams }),
         usage: usageFile,
         daemon: { agents, supervisor, lead, providers, daemonError },
         // v0.0.17 (ADR 0012 §2) & v0.0.25 (ADR 0012 §3–§4): the daemon plugin
@@ -2257,13 +2407,21 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     },
 
     async taskDetail(input: { task: string }, _context?: SurfaceCallContext) {
-      const contract = deps.factory.contractFor(input.task);
+      // v0.0.89: the detail reads the task-owning Project's Factory — its own
+      // ledger fold and its own per-attempt files under
+      // `<stateDir>/projects/<slug>/`. A task id shared by several Projects
+      // refuses by name; an unknown task falls to the root Factory's refusal.
+      const routed = resolveTaskFactory(input.task);
+      if (!routed.ok) return failure(routed.code, routed.error);
+      const taskFactory = routed.factory;
+      const contract = taskFactory.contractFor(input.task);
       if (contract === undefined) {
         return failure("unknown-task", `no contract set for task ${input.task}`);
       }
       if (!loadLanes(deps.stateDir).ok) return failure("lanes-unreadable", `the lane table under ${deps.stateDir} is unreadable`);
-      const folded = foldTasks(deps.factory.ledger.events).find((entry) => entry.task === input.task);
+      const folded = foldTasks(taskFactory.ledger.events).find((entry) => entry.task === input.task);
       if (folded === undefined) return failure("unknown-task", `no foldable history for task ${input.task}`);
+      const detailStateDir = routed.slug === undefined ? deps.stateDir : projectStateDir(deps.stateDir, routed.slug);
       // v0.0.87 (ADR 0043 §4): the modal's token pill and model badge read the
       // Project rollup too — the aggregate stands even when no `meter_written`
       // line ever landed for the task.
@@ -2293,8 +2451,8 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
             n: attempt.n,
             verdict: attempt.verdict,
             agentId: attempt.agentId ?? null,
-            report: attempt.report === null ? null : readTailed(deps.stateDir, attempt.report),
-            gateLog: attempt.gateLog === null ? null : readTailed(deps.stateDir, attempt.gateLog),
+            report: attempt.report === null ? null : readTailed(detailStateDir, attempt.report),
+            gateLog: attempt.gateLog === null ? null : readTailed(detailStateDir, attempt.gateLog),
           })),
         },
       };
@@ -2302,9 +2460,13 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
 
     async accept(input: { task: string; attempt: number }, context?: SurfaceCallContext) {
       try {
+        // v0.0.89: the acceptance lands on the task-owning Project's Factory —
+        // its own ledger line, its own worktree landing lane.
+        const routed = resolveTaskFactory(input.task);
+        if (!routed.ok) return failure(routed.code, routed.error);
         // Awaited since v0.0.14: a worktree task's local landing runs before
         // the line records, and the summary carries the outcome.
-        const event = await executeAcceptance(deps.factory, { task: input.task, attempt: input.attempt, accepted_by: "owner" }, { authority: "owner", daemon: resolveDaemon(context), home: deps.home, cleanup: deps.cleanupDaemonWorkspaces });
+        const event = await executeAcceptance(routed.factory, { task: input.task, attempt: input.attempt, accepted_by: "owner" }, { authority: "owner", daemon: resolveDaemon(context), home: deps.home, cleanup: deps.cleanupDaemonWorkspaces });
         return {
           ok: true as const,
           seq: event.seq,
@@ -2318,8 +2480,28 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     async retro(input: { projectRoot?: string }, _context?: SurfaceCallContext) {
       try {
         // v0.0.38 (ADR 0026 §1): the pass honors the active Project's own
-        // `retro` lane — a root or slug forwards into the core, which resolves
-        // the scope and falls back to the machine lane when omitted.
+        // `retro` lane. v0.0.89 (ADR 0045 §4): the pass runs strictly against
+        // ONE Project's own Factory — its isolated Ledger, Reports, and retro
+        // files. With the registry wired, the scope resolves through the
+        // context-first order; unscoped on a machine with zero or multiple
+        // registered Projects (the "All projects" view) it refuses by name —
+        // `retro-project-required` — never a multi-Project digest.
+        if (deps.registry !== undefined) {
+          const target = resolveTargetProject(deps.registry, { workspace: input?.projectRoot });
+          if (!target.ok) {
+            return target.code === "unknown-project"
+              ? failure(target.code, target.message)
+              : failure("retro-project-required", `the retro runs against exactly one Project's ledger — ${target.message}`);
+          }
+          const outcome = await deps.registry.factoryForProject(target.slug).retro(target.slug);
+          return {
+            ok: true as const,
+            outcome: outcome.outcome,
+            proposalCount: outcome.proposalCount ?? null,
+            proposalsPath: outcome.proposalsPath ?? null,
+            error: outcome.error ?? null,
+          };
+        }
         const outcome = await deps.factory.retro(input?.projectRoot);
         return {
           ok: true as const,
@@ -2890,7 +3072,17 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       // v0.0.87 (ADR 0043 §3): the delete drops `<projectStateDir>/usage.json`
       // with the whole project dir below — the in-memory half forgets too.
       deps.usage?.forget(project.slug);
-      const { purgedEvents, tasks: purgedTasks, removedFiles } = deps.factory.resetProject(project.root, project.slug);
+      // v0.0.89 (ADR 0045 §1.3): the purge runs on the target Project's OWN
+      // Factory — a per-Project ledger holds only that Project's events, so
+      // reset/delete has zero cross-Project blast radius — and the cached
+      // Factory instance is evicted with the directory it owned. A root no
+      // registered Project owns falls back to the root Factory's purge (the
+      // pre-registry shape), never a minted Project directory.
+      const deleteFactory =
+        deps.registry !== undefined && readProjectRegistration(deps.stateDir, project.slug) !== undefined
+          ? deps.registry.factoryForProject(project.slug)
+          : deps.factory;
+      const { purgedEvents, tasks: purgedTasks, removedFiles } = deleteFactory.resetProject(project.root, project.slug);
       rmSync(join(projectDir, "scrum"), { recursive: true, force: true });
       const tasks = [...new Set([...purgedTasks, ...projectTaskSet])];
       try {
@@ -2898,8 +3090,12 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       } catch {
         // best-effort correlation purge
       }
+      deps.registry?.evict(project.slug);
       try {
-        rmSync(projectDir, { recursive: true, force: true });
+        // The scoped sweep (v0.0.89, ADR 0045 §1.3): exactly this Project's
+        // `<stateDir>/projects/<slug>/` directory — never a sibling Project's
+        // state, never the root.
+        removeProjectStateDirectory(deps.stateDir, project.slug);
       } catch {
         // best-effort project state directory deletion
       }
@@ -3058,7 +3254,17 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       }
 
       // 7. Purge ledger events, contracts, reports, and gate logs in-memory and on disk.
-      const { purgedEvents, tasks: purgedTasks, removedFiles } = deps.factory.resetProject(project.root, project.slug);
+      // v0.0.89 (ADR 0045 §1.3): the purge runs on the target Project's OWN
+      // Factory — the per-Project ledger holds only this Project's events and
+      // artifacts, so the reset's blast radius is exactly one Project. The
+      // cached Factory stays (its purged, now-empty ledger is valid) — a
+      // delete evicts its Factory with the directory instead. An unregistered
+      // root keeps the root Factory's purge (the pre-registry shape).
+      const resetFactory =
+        deps.registry !== undefined && readProjectRegistration(deps.stateDir, project.slug) !== undefined
+          ? deps.registry.factoryForProject(project.slug)
+          : deps.factory;
+      const { purgedEvents, tasks: purgedTasks, removedFiles } = resetFactory.resetProject(project.root, project.slug);
       rmSync(join(projectDir, "scrum"), { recursive: true, force: true });
       const tasks = [...new Set([...purgedTasks, ...projectTaskSet])];
       new CorrelationRegistry(deps.stateDir).purgeProject(project.slug, project.root, tasks, input.keepSeats === true);
@@ -3133,7 +3339,9 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     async ratifyProposal(input: { projectRoot: string; day: string; proposalId: number }, context?: SurfaceCallContext) {
       const project = projectOrRefusal(input.projectRoot);
       if (!project.ok) return project;
-      const retro = foldRetro(deps.factory.ledger.events).findLast((entry) => entry.day === input.day);
+      // v0.0.89: the proposals fold reads the Project's OWN Factory ledger —
+      // its retro_written lines and per-Project retro files.
+      const retro = foldRetro(factoryForSlug(project.slug).ledger.events).findLast((entry) => entry.day === input.day);
       if (retro === undefined) {
         return failure("unknown-retro", `no retro was written on ${input.day} — nothing to ratify`);
       }
@@ -3562,7 +3770,15 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     get(target, key, receiver) {
       const value = Reflect.get(target, key, receiver);
       if (typeof key !== "string" || typeof value !== "function" || reads.has(key)) return value;
-      if (!wrappers.has(key)) wrappers.set(key, (...args: unknown[]) => (key === "projectReset" || key === "projectDelete") && !deps.factory.history.maintenanceActive ? deps.factory.history.withExclusiveMaintenance(() => value.apply(receiver, args)) : deps.factory.history.runOperation(() => value.apply(receiver, args), { newWork: true }));
+      // v0.0.89 (ADR 0045 §1.3): a project reset/delete takes its target
+      // Project's OWN maintenance lane — independent Projects keep admitting
+      // ordinary work while one Project's history is exclusively held.
+      if (!wrappers.has(key)) wrappers.set(key, (...args: unknown[]) => {
+        const lane = key === "projectReset" || key === "projectDelete" ? factoryForResetTarget(args[0] as { projectRoot?: string; project?: string; projectSlug?: string; workspace?: string } | undefined) : deps.factory;
+        return !lane.history.maintenanceActive && (key === "projectReset" || key === "projectDelete")
+          ? lane.history.withExclusiveMaintenance(() => value.apply(receiver, args))
+          : lane.history.runOperation(() => value.apply(receiver, args), { newWork: true });
+      });
       return wrappers.get(key);
     },
   });

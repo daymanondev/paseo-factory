@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Factory } from "./core/factory.ts";
-import type { ContractSet } from "./core/events.ts";
+import type { ContractSet, LedgerEvent } from "./core/events.ts";
 import { projectStateDir } from "./core/project.ts";
 import { projectTask } from "./core/task-state.ts";
 import { atomicJson, readOptionalJson } from "./core/scrum/config.ts";
@@ -34,6 +34,15 @@ interface PeerHandoffState {
 
 interface PeerHandoffDeps {
   factory: Factory;
+  /**
+   * The slug → owning Project's Factory resolver (v0.0.89, ADR 0045 §1): the
+   * post-split root Factory carries no Contracts, so every Contract, worktree,
+   * and spawn read goes through the OWNING Project's Factory. Absent (the
+   * unwired entrances), the one `factory` stands exactly as before.
+   */
+  factoryFor?: (slug: string, task: string) => Factory;
+  /** The Project's merged Ledger stream — its own Factory's events plus the wired Factory's bridged tasks. */
+  eventsFor?: (slug: string) => readonly LedgerEvent[];
   stateDir: string;
   home?: string;
   daemon: () => SurfaceDaemonApi;
@@ -52,6 +61,8 @@ interface PeerHandoffDeps {
 }
 
 export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
+  const factoryOf = (slug: string, task: string): Factory => deps.factoryFor?.(slug, task) ?? deps.factory;
+  const eventsOf = (slug: string): readonly LedgerEvent[] => deps.eventsFor?.(slug) ?? deps.factory.ledger.events;
   const timers = new Map<string, ReturnType<typeof setTimeout>>();
   const clear = (key: string) => { const timer = timers.get(key); if (timer) clearTimeout(timer); timers.delete(key); };
   const statePath = (slug: string, task: string) => join(projectStateDir(deps.stateDir, slug), `peer-handoff-${task}.json`);
@@ -77,13 +88,13 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
     const result = await bounded((deps.stopAgent ?? stopAgentViaCli)(id, deps.home));
     if (!result.ok) throw new Error(`cannot stop Peer ${id}: ${result.reason}`);
   };
-  const eligible = (contract: ContractSet) => {
-    const current = projectTask(deps.factory.ledger.events, contract.task);
+  const eligible = (slug: string, contract: ContractSet) => {
+    const current = projectTask(eventsOf(slug), contract.task);
     return current.contract?.seq === contract.seq && !current.acceptance && current.verdict !== "green" && !current.attempts.some(attempt => attempt.gateOpen);
   };
 
-  const finish = async (slug: string, contract: ContractSet, state: PeerHandoffState, live: SurfaceAgentSnapshot[], input?: LeadTurnEndedInput) => {
-    if (!eligible(contract)) return;
+  const finish = async (slug: string, contract: ContractSet, state: PeerHandoffState, live: SurfaceAgentSnapshot[], input?: LeadTurnEndedInput): Promise<void> => {
+    if (!eligible(slug, contract)) return;
     const task = contract.task, path = summaryPath(slug, task), daemon = deps.daemon();
     if (state.phase === "extracting") {
       let summary: string | undefined;
@@ -108,7 +119,7 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
           }
         } catch { /* Extraction file absent or unreadable. */ }
       }
-      if (!eligible(contract)) return;
+      if (!eligible(slug, contract)) return;
       writeFileSync(path, capHandoffText(summary ?? INTERRUPTED, SUMMARY_BYTES));
       state.phase = "retiring";
       save(slug, task, state);
@@ -119,10 +130,10 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
       if (outgoing) {
         if (deps.recordUsage !== undefined) await deps.recordUsage({ slug, task, agent: outgoing });
         await stopPeer(outgoing.id);
-        if (!eligible(contract)) return;
+        if (!eligible(slug, contract)) return;
         await bounded(daemon.agents.ref(outgoing.id).archive());
       }
-      if (!eligible(contract)) return;
+      if (!eligible(slug, contract)) return;
       state.phase = state.peerHandoffCount >= MAX_PEER_HANDOFFS ? "blocked" : "spawning";
       // Reserve the sole successor before creating it. Restart recovery adopts
       // a matching labelled session instead of creating a second successor.
@@ -141,15 +152,15 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
     const handoffKey = `${contract.seq}:${state.outgoingId}`;
     const census = await daemon.agents.list({ filter: { includeArchived: true, includeBackground: true } });
     const all = census.entries.map(entry => entry.agent);
-    if (!eligible(contract)) return;
+    if (!eligible(slug, contract)) return;
     let successorId = all.find(agent => agent.labels.peerHandoff === handoffKey && agent.labels.project === slug && agent.labels.task === task)?.id;
     // Another caller may have supplied a replacement after a failed create.
     // Adopt it, and count even an already archived automatic successor.
-    successorId ??= boundTaskPeers({ stateDir: deps.stateDir, slug, task, events: deps.factory.ledger.events, live: all }).find(agent => agent.id !== state.outgoingId)?.id;
+    successorId ??= boundTaskPeers({ stateDir: deps.stateDir, slug, task, events: eventsOf(slug), live: all }).find(agent => agent.id !== state.outgoingId)?.id;
     if (!successorId) {
-      const frozen = await scrumSpawnLane(deps.factory, task, {}, undefined, `peer-handoff:${handoffKey}`);
-      const provider = frozen ?? await resolvePeerSpawnProvider(deps.factory, state.provider ?? "", slug);
-      const meta = await resolveSpawnWorkspaceAndParent(deps.factory, daemon, task, state.worktree, deps.home);
+      const frozen = await scrumSpawnLane(factoryOf(slug, task), task, {}, undefined, `peer-handoff:${handoffKey}`);
+      const provider = frozen ?? await resolvePeerSpawnProvider(factoryOf(slug, task), state.provider ?? "", slug);
+      const meta = await resolveSpawnWorkspaceAndParent(factoryOf(slug, task), daemon, task, state.worktree, deps.home);
       const labels = { seat: "agent", project: slug, task, epoch: String(contract.seq), peerHandoff: handoffKey, ...(contract.execution ? { execution: "scrum", run: contract.execution.runId, specialization: contract.execution.role } : {}) };
       const prompt = [
           `# Peer handoff — Task ${task}`, "You are the fresh successor Peer at 0% context. Continue from the existing Task worktree state; preserve completed work and uncommitted edits.",
@@ -159,25 +170,25 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
           `## Outgoing Peer Handoff (${path})`, readFileSync(path, "utf8"),
           "Run targeted modular slice tests with isolated fixtures and explicit timeouts while iterating. Run the full cumulative Gate before calling factory-claim for the committed HEAD, then end your turn.",
         ].join("\n\n");
-      if (!eligible(contract)) return;
+      if (!eligible(slug, contract)) return;
       // Never reallocate/reset the worktree: this is continuation, including dirty files.
-      successorId = await createTaskPeer({ factory: deps.factory, daemon, task, worktree: state.worktree, provider, prompt, home: deps.home, spawnMeta: meta, extraLabels: labels });
+      successorId = await createTaskPeer({ factory: factoryOf(slug, task), daemon, task, worktree: state.worktree, provider, prompt, home: deps.home, spawnMeta: meta, extraLabels: labels });
       if (!successorId) throw new Error("daemon did not create a successor Peer");
     }
-    associateTaskPeer(deps.factory, task, successorId);
+    associateTaskPeer(factoryOf(slug, task), task, successorId);
     state.phase = "idle";
     save(slug, task, state);
   };
 
   const observeProject = async (slug: string, root: string, input?: LeadTurnEndedInput): Promise<void> => {
-    const events = deps.factory.ledger.events;
+    const events = eventsOf(slug);
     const tasks = [...new Set(events.flatMap(event => event.event === "contract_set" && (event.workspace === root || event.workspace.startsWith(`${root}/`)) ? [event.task] : []))];
     if (tasks.length === 0) return;
     const page = await deps.daemon().agents.list({ filter: { includeArchived: false, includeBackground: true } });
     const live = page.entries.map(entry => entry.agent).filter(agent => agent.archivedAt === null);
     for (const task of tasks) {
       try {
-        const projected = projectTask(deps.factory.ledger.events, task), contract = projected.contract!;
+        const projected = projectTask(eventsOf(slug), task), contract = projected.contract!;
         if (contract.workspace !== root && !contract.workspace.startsWith(`${root}/`)) continue;
         const key = `${slug}:${task}`;
         let state = readOptionalJson(statePath(slug, task)) as PeerHandoffState | undefined;
@@ -197,7 +208,7 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
         const peers = boundTaskPeers({ stateDir: deps.stateDir, slug, task, events, live });
         const peer = peers[0];
         if (!peer || (input && input.agentId !== peer.id) || (deps.readTokens(peer).usedTokens ?? 0) < PEER_HANDOFF_TOKENS) continue;
-        const worktree = deps.factory.worktreeFor(task);
+        const worktree = factoryOf(slug, task).worktreeFor(task);
         if (!worktree) continue; // A standing seat/shared checkout is never a Task worktree.
         worktreeDigest(worktree, contract); // Refuse missing/wrong-branch worktrees before interrupting.
         const baseProvider = peer.provider.replace(/:[^/]+$/, "");
@@ -211,7 +222,7 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
         try {
           if (peer.status === "error") throw new Error("outgoing Peer in error state");
           if (peerIsRunning(peer)) await stopPeer(peer.id);
-          if (!eligible(contract)) continue;
+          if (!eligible(slug, contract)) continue;
           await bounded(deps.daemon().agents.ref(peer.id).send([
             `# Peer handoff extraction — Task ${task}`, "Your context crossed 160,000 tokens. Start no new work and submit no Claim during extraction.",
             "Preserve the existing committed work and uncommitted edits. Put the entire Markdown handoff directly in your final assistant message, in one piece, without running shell commands or writing files to disk. The plugin server reads your reply and persists it automatically, capping it at 12 KB. Use these four sections:",

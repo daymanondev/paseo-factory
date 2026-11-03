@@ -2,7 +2,7 @@ import { test } from "node:test";
 import type { TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { join } from "node:path";
 import type { AgentPermissionRequest, AgentPermissionResponse } from "@getpaseo/protocol/agent-types";
@@ -121,6 +121,50 @@ test("a benign ask from the same agent: allowed, answered, and counted", async (
   assert.ok(s.paseo.sent.every((x) => x.response.behavior === "allow"));
 });
 
+// ---- Seam 3 (v0.0.89, ADR 0045 §3): lean permit recording on the Permission Loop seam ----
+
+/** The raw JSONL lines of the stage's ledger — assertions on the bytes, not just the parsed view. */
+function rawLedgerLines(s: Stage): Record<string, unknown>[] {
+  return readFileSync(join(s.dir, "state", "ledger.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
+test("Seam 3: a Peer's allowed ask records permit_allowed with { task, agent, permission } only — no command body", async (t) => {
+  const s = stage(t);
+  await s.ask({ request: shellRequest("lean-1", "npm test > /tmp/out.txt 2>&1") });
+
+  const allowed = s.factory.ledger.eventsFor("T1").find((e) => e.event === "permit_allowed")!;
+  assert.equal(allowed.task, "T1");
+  assert.equal(allowed.agent, "agent-1");
+  assert.equal(allowed.name, "Bash");
+  assert.equal(allowed.kind, "tool");
+  assert.equal(allowed.command, undefined, "the lean law omits the command on allowed Peer asks");
+
+  const rawLine = rawLedgerLines(s).find((e) => e.event === "permit_allowed")!;
+  assert.ok(!("command" in rawLine), "the recorded JSONL line itself carries no command key");
+  assert.equal(s.paseo.sent.at(-1)?.response.behavior, "allow", "the lean line still answers the ask");
+});
+
+test("Seam 3: a denied Peer ask keeps the full command and rule, and Denial-stall detection still anchors on it", async (t) => {
+  const s = stage(t);
+  await s.ask({ request: shellRequest("deny-1", "git push --force origin main") });
+
+  const denied = s.factory.ledger.eventsFor("T1").find((e) => e.event === "permit_denied")!;
+  assert.equal(denied.command, "git push --force origin main", "denials keep the full command for forensic inspection");
+  assert.equal(denied.rule, "policy:S1-git-vocabulary");
+
+  // The stall detector's own read path (driver.mjs keys `denied-again` evidence
+  // on the denial's seq; Factory.needsHuman validates that seq exists): the
+  // lean-allow change leaves it untouched.
+  const repoke = s.factory.repoke("T1", "agent-1");
+  assert.equal(repoke.outcome, "dispatched");
+  const stall = s.factory.needsHuman({ task: "T1", reason: "denied-again", evidence: { denial: denied.seq, repoke: repoke.event.seq } });
+  assert.equal(stall.event, "needs_human", "a denial after the re-poke still ends in needs_human");
+  assert.equal(stall.reason, "denied-again");
+});
+
 test("the write/edit rider: a Write ask aimed at ~/.ssh denies on the file rule", async (t) => {
   const s = stage(t);
   await s.ask({
@@ -222,7 +266,8 @@ test("the spool's synthetic ask judges through the same policy and ledger", (t) 
 
   const allowed = s.choke.spoolAskHandler({ id: "q2", kind: "ask", task: "T1", command: "git status", cwd: s.workspace });
   assert.equal(allowed.ok && allowed.decision, "allowed");
-  assert.equal(s.factory.ledger.eventsFor("T1").filter((e) => e.event === "permit_allowed").length, 1);
+  const allowedLine = s.factory.ledger.eventsFor("T1").find((e) => e.event === "permit_allowed")!;
+  assert.equal(allowedLine.command, undefined, "Seam 3: the bypass battery's allowed ask records lean metadata only");
 
   assert.throws(() => s.choke.spoolAskHandler({ id: "q3", kind: "ask", task: "nope", command: "x" }), withCode("unknown-task"));
   assert.throws(

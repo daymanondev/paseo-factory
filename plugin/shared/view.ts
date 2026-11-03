@@ -207,6 +207,8 @@ export const ProjectViewSchema = z.object({
   activeTaskCount: z.number().int().optional(),
   executionMode: z.enum(["slp", "scrum"]).optional(),
   activeScrumPhase: z.string().nullable().optional(),
+  /** The Project's Ledger could not be opened for the snapshot (v0.0.89) — its stream renders empty; additive, older clients ignore it. */
+  ledgerError: z.string().optional(),
 });
 export type ProjectView = z.infer<typeof ProjectViewSchema>;
 export type ProjectInfo = ProjectView;
