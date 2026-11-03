@@ -226,6 +226,44 @@ const ROLE_DESCRIPTIONS: Record<FactoryRole, string> = {
 };
 
 /**
+ * The plugin-owned OpenCode state home (spec v0.0.91 §3) — the XDG root whose
+ * `opencode/service.json` Paseo 0.15.0's V2Runtime probes when acquiring an
+ * opencode v2 runtime. One computation shared by the reconcile and heal paths
+ * so the two can never drift; undefined when no usable `paseoHome` is given.
+ */
+function opencodeStateDirFor(paseoHome: string | undefined): string | undefined {
+  return typeof paseoHome === "string" && paseoHome.trim() !== ""
+    ? join(paseoHome, "plugin-state", "paseo-factory", "opencode-state")
+    : undefined;
+}
+
+/**
+ * The base `agents.providers.opencode` arm (spec v0.0.91 §3), shared by the
+ * reconcile and heal paths: `agent.create.before` rewrites factory-* seats
+ * onto the runtime `opencode` provider, so its env must carry the same
+ * isolated state home — the user's own keys on the entry are preserved by the
+ * spread, and an explicit `PASEO_OPENCODE_SERVER_URL` or custom
+ * `XDG_STATE_HOME` is left exactly as the owner wrote it. Mutates `providers`
+ * in place (both callers build a fresh post-sweep table first).
+ */
+function ensureBaseOpencodeStateDir(
+  providers: Record<string, PaseoProviderEntry>,
+  opencodeStateDir: string,
+): void {
+  const baseEntry = providers.opencode;
+  const baseEnv = isRecord(baseEntry?.env) ? (baseEntry.env as Record<string, string>) : undefined;
+  if (baseEnv?.PASEO_OPENCODE_SERVER_URL === undefined && baseEnv?.XDG_STATE_HOME === undefined) {
+    providers.opencode = {
+      ...(isRecord(baseEntry) ? (baseEntry as PaseoProviderEntry) : {}),
+      env: {
+        ...(baseEnv ?? {}),
+        XDG_STATE_HOME: opencodeStateDir,
+      },
+    };
+  }
+}
+
+/**
  * The pure config transform (spec v0.0.27 §Implementation Decisions 1, ADR
  * 0017 §1, ADR 0026 §1): sweeps `sw2-*` and unknown `factory-*` provider keys,
  * writes `factory-supervisor` / `factory-lead` / `factory-peer` mapped from
@@ -265,10 +303,7 @@ export function reconcilePaseoConfigObject(
   // The plugin-owned OpenCode state home (spec v0.0.91 §3) — the XDG root whose
   // `opencode/service.json` Paseo 0.15.0's V2Runtime probes when acquiring an
   // opencode v2 runtime; undefined when no paseoHome is given.
-  const opencodeStateDir =
-    typeof options?.paseoHome === "string" && options.paseoHome.trim() !== ""
-      ? join(options.paseoHome, "plugin-state", "paseo-factory", "opencode-state")
-      : undefined;
+  const opencodeStateDir = opencodeStateDirFor(options?.paseoHome);
   // The three managed providers, in canonical order — the mapping is computed
   // against the post-sweep table so an `agy` lane inherits the user's custom
   // entry exactly as it stands after the sweep (agy itself is never swept).
@@ -316,17 +351,7 @@ export function reconcilePaseoConfigObject(
   // are preserved by the spread, and an explicit `PASEO_OPENCODE_SERVER_URL`
   // or custom `XDG_STATE_HOME` is left exactly as the owner wrote it.
   if (opencodeStateDir !== undefined) {
-    const baseEntry = providers.opencode;
-    const baseEnv = isRecord(baseEntry?.env) ? (baseEntry.env as Record<string, string>) : undefined;
-    if (baseEnv?.PASEO_OPENCODE_SERVER_URL === undefined && baseEnv?.XDG_STATE_HOME === undefined) {
-      providers.opencode = {
-        ...(isRecord(baseEntry) ? (baseEntry as PaseoProviderEntry) : {}),
-        env: {
-          ...(baseEnv ?? {}),
-          XDG_STATE_HOME: opencodeStateDir,
-        },
-      };
-    }
+    ensureBaseOpencodeStateDir(providers, opencodeStateDir);
   }
   // The picker: every sw2-* / factory-* row goes, and exactly one
   // `Supervisor (Factory)` profile is prepended — model, the harness's
@@ -452,10 +477,7 @@ export function healFactoryRoleProvidersObject(
   }
   // The plugin-owned OpenCode state home (spec v0.0.91 §3) — same dir and same
   // explicit-user-setting precedence as the reconcile path.
-  const opencodeStateDir =
-    typeof options?.paseoHome === "string" && options.paseoHome.trim() !== ""
-      ? join(options.paseoHome, "plugin-state", "paseo-factory", "opencode-state")
-      : undefined;
+  const opencodeStateDir = opencodeStateDirFor(options?.paseoHome);
   const rawProviders = agents.providers as Record<string, unknown>;
   const providers: Record<string, PaseoProviderEntry> = {};
   for (const [key, value] of Object.entries(rawProviders)) {
@@ -507,17 +529,7 @@ export function healFactoryRoleProvidersObject(
   // The base `opencode` entry arm (spec v0.0.91 §3) — same merge and same
   // explicit-user-setting precedence as the reconcile path.
   if (opencodeStateDir !== undefined) {
-    const baseEntry = providers.opencode;
-    const baseEnv = isRecord(baseEntry?.env) ? (baseEntry.env as Record<string, string>) : undefined;
-    if (baseEnv?.PASEO_OPENCODE_SERVER_URL === undefined && baseEnv?.XDG_STATE_HOME === undefined) {
-      providers.opencode = {
-        ...(isRecord(baseEntry) ? (baseEntry as PaseoProviderEntry) : {}),
-        env: {
-          ...(baseEnv ?? {}),
-          XDG_STATE_HOME: opencodeStateDir,
-        },
-      };
-    }
+    ensureBaseOpencodeStateDir(providers, opencodeStateDir);
   }
   let nextDaemon = original.daemon;
   if (isRecord(original.daemon) && Array.isArray(original.daemon.agentProfiles)) {
