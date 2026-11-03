@@ -395,7 +395,7 @@ test("agy-pre-tool-hook.mjs fast-allows unbound sessions and enforces seat-write
 
   // v0.0.84: the mirrored process-kill gate fires only in command position,
   // with its own reason naming the Layer-3 backstop — never the write-fence message.
-  for (const killCmd of ["/usr/bin/pkill -f paseo", "bash -c 'pkill -f paseo'", "timeout 5 killall Paseo Helper"]) {
+  for (const killCmd of ["pkill -f /Users/owner/.paseo/plugin-state/paseo-factory/projects/demo/worktrees/T-04/bridge.mjs", "bash -c 'pkill -f /Users/owner/.paseo/plugin-state/paseo-factory/projects/demo/worktrees/T-04; pkill paseo'", "/usr/bin/pkill -f paseo", "bash -c 'pkill -f paseo'", "timeout 5 killall Paseo Helper"]) {
     const denyKill = JSON.parse(
       execFileSync(process.execPath, [hookBin], {
         input: JSON.stringify({
@@ -411,6 +411,8 @@ test("agy-pre-tool-hook.mjs fast-allows unbound sessions and enforces seat-write
     assert.doesNotMatch(String(denyKill.reason), /Seat write fence/);
   }
   for (const proseCmd of [
+    "pkill -f /Users/owner/.paseo/plugin-state/paseo-factory/projects/demo/worktrees/T-04",
+    "killall /Users/owner/.paseo/plugin-state/paseo-factory/projects/demo/worktrees/T-04/test-server",
     "echo 'Do not use killall/pkill' && ls /Users/andrewpham/.paseo/plugins/paseo-factory",
     "echo 'bash -c pkill' && ls /Users/andrewpham/.paseo/plugins/paseo-factory",
   ]) {

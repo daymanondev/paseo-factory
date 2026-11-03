@@ -26,3 +26,19 @@ export function inheritChildOutcome(child: ChildProcess, onError: (error: Error)
     } else process.exit(code ?? 1);
   });
 }
+
+/** Infrastructure stays protected even when its arguments mention a Task worktree. */
+export function isFactoryInfrastructureProcess(text: string): boolean {
+  return /(?:^|[\s/])paseo(?:\s|$)|Paseo\.app|Paseo Helper|paseo-factory\/bin\/|runtime-bin\/|(?:bridge|driver|factory|claim)\.mjs|plugin-process|opencode/i.test(text.replace(/\\/g, "/"));
+}
+
+/** A managed Task path overrides the broad factory-state protection for test processes. */
+export function isTaskWorktreeScopedProcess(text: string): boolean {
+  const normalized = text.replace(/\\/g, "/");
+  const paths = /[^\s"'`;|&]*\/projects\/[^/\s"'`;|&]+\/worktrees\/[^/\s"'`;|&]+(?:\/[^\s"'`;|&]*)?/g;
+  return paths.test(normalized)
+    && !/(?:^|\/)\.\.(?:\/|$)/.test(normalized)
+    && !isFactoryInfrastructureProcess(normalized)
+    // A scoped path must never mask another daemon target or command.
+    && !/plugin-process|paseo|opencode/i.test(normalized.replace(paths, ""));
+}

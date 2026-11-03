@@ -29,7 +29,17 @@ function inheritChildOutcome(child, onError) {
     } else process.exit(code ?? 1);
   });
 }
+function isFactoryInfrastructureProcess(text) {
+  return /(?:^|[\s/])paseo(?:\s|$)|Paseo\.app|Paseo Helper|paseo-factory\/bin\/|runtime-bin\/|(?:bridge|driver|factory|claim)\.mjs|plugin-process|opencode/i.test(text.replace(/\\/g, "/"));
+}
+function isTaskWorktreeScopedProcess(text) {
+  const normalized = text.replace(/\\/g, "/");
+  const paths = /[^\s"'`;|&]*\/projects\/[^/\s"'`;|&]+\/worktrees\/[^/\s"'`;|&]+(?:\/[^\s"'`;|&]*)?/g;
+  return paths.test(normalized) && !/(?:^|\/)\.\.(?:\/|$)/.test(normalized) && !isFactoryInfrastructureProcess(normalized) && !/plugin-process|paseo|opencode/i.test(normalized.replace(paths, ""));
+}
 export {
   inheritChildOutcome,
+  isFactoryInfrastructureProcess,
+  isTaskWorktreeScopedProcess,
   killProcessGroup
 };

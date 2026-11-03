@@ -2,8 +2,9 @@ import { execFile } from "node:child_process";
 import { execFileSync } from "node:child_process";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { cpSync, existsSync, lstatSync, mkdtempSync, realpathSync, renameSync, rmSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { promisify } from "node:util";
+import { isFactoryInfrastructureProcess } from "./process-policy.ts";
 import { resolveProject } from "./project.ts";
 import { hydrateTaskWorktree } from "./worktree-policy.ts";
 import { PACKAGE_LOCKFILES, scopeCoversFile } from "./scope-policy.ts";
@@ -449,6 +450,49 @@ function hydrateDependencies(projectRoot: string, worktree: string): void {
   }
 }
 
+/** OS boundaries are injectable so process cleanup also has deterministic cross-platform coverage. */
+export interface WorktreeProcessDependencies {
+  inspect(): string;
+  signal(pid: number, signal: NodeJS.Signals | 0): void;
+  wait(ms: number): void;
+}
+
+/** Stop leaked test services before deleting the directory named in their command line. */
+export function reapWorktreeProcesses(worktreePath: string, dependencies?: WorktreeProcessDependencies): number {
+  if (process.platform === "win32" && dependencies === undefined) return 0;
+  const os = dependencies ?? {
+    inspect: () => execFileSync("ps", ["-ax", "-o", "pid=,command="], { encoding: "utf8", timeout: 1_500 }),
+    signal: (pid: number, signal: NodeJS.Signals | 0) => { process.kill(pid, signal); },
+    wait: (ms: number) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); },
+  };
+  const paths = new Set([resolve(worktreePath)]);
+  try { paths.add(realpathSync(worktreePath)); } catch { /* stale path still needs cleanup */ }
+  const matchers = [...paths].map((path) => {
+    const escaped = path.replace(/\\/g, "/").replace(/\/$/, "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`(?:^|[\\s"'=])${escaped}(?=$|[\\s"'/])`);
+  });
+  let table: string;
+  try { table = os.inspect(); } catch { return 0; }
+  const targets = new Set<number>();
+  for (const row of table.split("\n")) {
+    const parsed = row.trim().match(/^(\d+)\s+(.+)$/);
+    if (!parsed) continue;
+    const pid = Number(parsed[1]);
+    const command = parsed[2]!.replace(/\\/g, "/");
+    if (pid <= 1 || pid === process.pid || pid === process.ppid || isFactoryInfrastructureProcess(command)) continue;
+    if (!matchers.some((matcher) => matcher.test(command))) continue;
+    try { os.signal(pid, "SIGTERM"); targets.add(pid); } catch { /* already exited or not ours */ }
+  }
+  const alive = (pid: number) => { try { os.signal(pid, 0); return true; } catch { return false; } };
+  if ([...targets].some(alive)) {
+    os.wait(150);
+    for (const pid of targets) {
+      if (alive(pid)) { try { os.signal(pid, "SIGKILL"); } catch { /* exited during grace */ } }
+    }
+  }
+  return targets.size;
+}
+
 /** Hydrates dependencies before either worktree cleanup path can delete them. */
 async function finishLanding(projectRoot: string, worktree: string): Promise<LandingResult> {
   try {
@@ -456,6 +500,7 @@ async function finishLanding(projectRoot: string, worktree: string): Promise<Lan
   } catch (err) {
     return { landing: "pending-conflict", note: cap(`dependency hydration failed; worktree retained: ${err instanceof Error ? err.message : String(err)}`) };
   }
+  reapWorktreeProcesses(worktree);
   const removed = await gitExit(projectRoot, ["worktree", "remove", "--force", worktree]);
   if (removed.status === 0) return { landing: "landed" };
   // A stale or unregistered directory: best-effort remove, then prune.
@@ -554,6 +599,7 @@ export function prepareTaskWorktree(options: PrepareTaskWorktreeOptions): Prepar
   const path = worktreePath ?? taskWorktreePath(stateDir, project.slug, task);
   const reset = existsSync(path);
   if (reset) {
+    reapWorktreeProcesses(path);
     const removed = gitIn(root, ["worktree", "remove", "--force", path]);
     if (removed.error !== undefined || removed.status !== 0) {
       // A stale directory git does not own (a wiped registration) still has to
