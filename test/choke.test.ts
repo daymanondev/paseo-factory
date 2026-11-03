@@ -1392,3 +1392,16 @@ test("Copilot/ACP apply_patch edit asks extract target file paths instead of jud
   });
   assert.equal(fdDecision.behavior, "allow");
 });
+
+
+test("worktree test-process signals pass ask-time policy while daemon targets remain denied", () => {
+  const worktree = "/Users/owner/.paseo/plugin-state/paseo-factory/projects/demo/worktrees/T-04";
+  const roots = { workspace: "/tmp/repo", stateDir: "/Users/owner/.paseo/plugin-state/paseo-factory", tmp: ["/tmp"], homeDir: "/Users/owner" };
+  for (const command of [`pkill -f ${worktree}`, `killall ${worktree}/test-server`, `bash -c 'pkill -f ${worktree}'`]) {
+    assert.deepEqual(judgeShellCommand(command, roots), { behavior: "allow" }, command);
+    assert.deepEqual(judgeSeatShellCommand(command, roots.workspace, roots.stateDir), { behavior: "allow" }, command);
+  }
+  for (const command of [`pkill -f ${worktree}/bridge.mjs`, `pkill -f ${worktree}; pkill paseo`, `bash -c 'pkill -f ${worktree}; pkill paseo'`, `pkill -f ${worktree} paseo`]) {
+    assert.equal(judgeShellCommand(command, roots).behavior, "deny", command);
+  }
+});

@@ -16,6 +16,7 @@
  * Judging is mechanical: exact tokens, never substrings, so
  * `--force-with-lease`, `fetch -f`, `checkout -b` and `clean -n` stay clear.
  */
+import { isFactoryInfrastructureProcess, isTaskWorktreeScopedProcess } from "./process-policy.ts";
 import { isMcpStdioLaunch } from "./mcp-launch-policy.ts";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
@@ -635,7 +636,7 @@ function killWordLeadsShellDashCPayload(segment: string): boolean {
  * Whether the command kills the factory runtime (Paseo or plugin-process) at
  * ask time (v0.0.26, ADR 0016; command-position gate v0.0.84): the raw-string
  * co-occurrence prefilter (a kill word + a `paseo`/`plugin-process` word
- * anywhere) stays, but the deny additionally requires the kill word in
+ * anywhere) excludes worktree test targets; the deny requires the kill word in
  * command position — the 2026-11-01 goal-partner Lead died because its one
  * `factory contract` call carried "killall/pkill" inside `--description`
  * prose while `factory.mjs`'s path carried "paseo" (ledger seq 447). A kill
@@ -644,9 +645,11 @@ function killWordLeadsShellDashCPayload(segment: string): boolean {
  */
 export function isProcessKillAgainstFactory(command: string): boolean {
   if (!/\b(?:pkill|killall|kill)\b/.test(command)) return false;
-  if (!/\b(?:plugin-process|paseo)\b/i.test(command)) return false;
+  if (!/\b(?:plugin-process|paseo)\b/i.test(command) && !isFactoryInfrastructureProcess(command)) return false;
   for (const segment of splitShellSegments(command)) {
-    if (killWordInCommandPosition(segment) || killWordLeadsShellDashCPayload(segment)) return true;
+    if (killWordInCommandPosition(segment) || killWordLeadsShellDashCPayload(segment)) {
+      if (!isTaskWorktreeScopedProcess(segment)) return true;
+    }
   }
   return false;
 }
