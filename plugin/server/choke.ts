@@ -29,11 +29,11 @@ import type { ProviderCatalogEntry } from "./provider-lanes.ts";
  */
 import { accessSync, constants as fsConstants, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { PluginBeforeRequests, PluginLifecycleEvents } from "@getpaseo/plugin/server";
+import type { PluginHookEvents, PluginHookRequests } from "@getpaseo/plugin/server";
 
-type AgentPermissionRequest = PluginLifecycleEvents["agent.permission_requested"]["request"];
-type AgentPermissionResponse = PluginLifecycleEvents["agent.permission_resolved"]["resolution"];
-type AgentSessionConfig = PluginBeforeRequests["agent.create"]["config"];
+type AgentPermissionRequest = PluginHookEvents["agent.permission.before"]["request"];
+type AgentPermissionResponse = PluginHookEvents["agent.permission.after"]["resolution"];
+type AgentSessionConfig = PluginHookRequests["agent.create.before"]["config"];
 import type { Factory } from "./core/factory.ts";
 import type { ContractSet, PendingEvent } from "./core/events.ts";
 import { FactoryError } from "./core/errors.ts";

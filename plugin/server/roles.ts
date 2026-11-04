@@ -692,6 +692,10 @@ export function injectSessionEnv<
     provider?: string | null;
     reason?: string | null;
     purpose?: string | null;
+    /** The Paseo 0.14.0/0.15.0 `PluginSessionOpenRequest` seat-title field — the fallback identity when the provider was rewritten (v0.0.91, ADR 0026). */
+    title?: string | null;
+    /** The Paseo 0.14.0/0.15.0 `PluginSessionOpenRequest` seat labels (`{ seat, project }`) — the fallback identity when the provider was rewritten (v0.0.91, ADR 0026). */
+    labels?: Readonly<Record<string, string>>;
     config?: { env?: Record<string, string> };
     /** The Paseo Workspace the session opened in (v0.0.31, ADR 0017 §5) — persisted for seat sessions. */
     workspaceId?: string | null;
@@ -717,11 +721,19 @@ export function injectSessionEnv<
   const correlations = new CorrelationRegistry(stateDir);
   const existingCorrId =
     request.env?.PASEO_FACTORY_CORRELATION ?? request.config?.env?.PASEO_FACTORY_CORRELATION;
+  // The history-open fence (v0.0.91): Paseo fires `agent.open.before` with
+  // `purpose: "history"` to read an old or archived conversation's transcript.
+  // Reading history never mutates the Project's active seat routing — every
+  // `project.json` write below runs only on a non-history open.
+  const isHistoryOpen = request.purpose === "history";
 
   if (typeof existingCorrId === "string" && existingCorrId.trim() !== "") {
     const associated = correlations.associate(existingCorrId.trim(), request.agentId);
     if (associated !== undefined) {
-      if (associated.role === "supervisor" || associated.role === "lead") {
+      if (
+        !isHistoryOpen &&
+        (associated.role === "supervisor" || associated.role === "lead")
+      ) {
         const project = resolveOrBootstrapProject(request.cwd, { stateDir, userHome });
         if (project.ok && project.slug === associated.projectSlug) {
           ensureProjectRegistered(stateDir, project);
@@ -839,17 +851,30 @@ export function injectSessionEnv<
   // the Project's seat in `project.json` — never displacing another bound
   // session — and re-carries its factory env, so a native `Supervisor
   // (Factory)` chat needs no custom bootstrap to own the Project's mailbox.
-  const identitySeat = inferRoleFromProviderId(request.provider) ?? parseRoleName(request.env?.PASEO_FACTORY_SEAT);
+  // The third arm (v0.0.91, ADR 0026): the provider was rewritten onto the
+  // base runtime provider at create time and the env arrives empty on a cold
+  // reopen — the Paseo 0.14.0/0.15.0 `title`/`labels` request fields carry
+  // the deterministic seat identity instead.
+  const identitySeat =
+    inferRoleFromProviderId(request.provider) ??
+    parseRoleName(request.env?.PASEO_FACTORY_SEAT) ??
+    inferRoleSeatFromTitleOrLabels(request.title, request.labels ? { ...request.labels } : undefined);
   if (identitySeat === "supervisor" || identitySeat === "lead") {
     const project = resolveOrBootstrapProject(request.cwd, { stateDir, userHome });
     if (project.ok) {
-      ensureProjectRegistered(stateDir, project);
-      // Same law as the correlation arm above: only a session that actually
-      // holds the seat persists its workspaceId (Implementation Decision 1).
-      if (bindSeatAgentId(stateDir, project.slug, project.root, identitySeat, request.agentId)) {
-        persistSeatWorkspaceId(stateDir, project.slug, project.root, request.workspaceId);
+      // The history-open fence (v0.0.91): reading an old conversation with a
+      // recognized seat identity re-carries the seat env but never registers
+      // the Project, binds the seat, persists a workspaceId, or issues a new
+      // Correlation token.
+      if (!isHistoryOpen) {
+        ensureProjectRegistered(stateDir, project);
+        // Same law as the correlation arm above: only a session that actually
+        // holds the seat persists its workspaceId (Implementation Decision 1).
+        if (bindSeatAgentId(stateDir, project.slug, project.root, identitySeat, request.agentId)) {
+          persistSeatWorkspaceId(stateDir, project.slug, project.root, request.workspaceId);
+        }
       }
-      const record = resolveOrAssociate({
+      const record = isHistoryOpen ? undefined : resolveOrAssociate({
         role: identitySeat,
         projectSlug: project.slug,
         projectRoot: project.root,

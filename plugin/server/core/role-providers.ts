@@ -226,6 +226,44 @@ const ROLE_DESCRIPTIONS: Record<FactoryRole, string> = {
 };
 
 /**
+ * The plugin-owned OpenCode state home (spec v0.0.91 §3) — the XDG root whose
+ * `opencode/service.json` Paseo 0.15.0's V2Runtime probes when acquiring an
+ * opencode v2 runtime. One computation shared by the reconcile and heal paths
+ * so the two can never drift; undefined when no usable `paseoHome` is given.
+ */
+function opencodeStateDirFor(paseoHome: string | undefined): string | undefined {
+  return typeof paseoHome === "string" && paseoHome.trim() !== ""
+    ? join(paseoHome, "plugin-state", "paseo-factory", "opencode-state")
+    : undefined;
+}
+
+/**
+ * The base `agents.providers.opencode` arm (spec v0.0.91 §3), shared by the
+ * reconcile and heal paths: `agent.create.before` rewrites factory-* seats
+ * onto the runtime `opencode` provider, so its env must carry the same
+ * isolated state home — the user's own keys on the entry are preserved by the
+ * spread, and an explicit `PASEO_OPENCODE_SERVER_URL` or custom
+ * `XDG_STATE_HOME` is left exactly as the owner wrote it. Mutates `providers`
+ * in place (both callers build a fresh post-sweep table first).
+ */
+function ensureBaseOpencodeStateDir(
+  providers: Record<string, PaseoProviderEntry>,
+  opencodeStateDir: string,
+): void {
+  const baseEntry = providers.opencode;
+  const baseEnv = isRecord(baseEntry?.env) ? (baseEntry.env as Record<string, string>) : undefined;
+  if (baseEnv?.PASEO_OPENCODE_SERVER_URL === undefined && baseEnv?.XDG_STATE_HOME === undefined) {
+    providers.opencode = {
+      ...(isRecord(baseEntry) ? (baseEntry as PaseoProviderEntry) : {}),
+      env: {
+        ...(baseEnv ?? {}),
+        XDG_STATE_HOME: opencodeStateDir,
+      },
+    };
+  }
+}
+
+/**
  * The pure config transform (spec v0.0.27 §Implementation Decisions 1, ADR
  * 0017 §1, ADR 0026 §1): sweeps `sw2-*` and unknown `factory-*` provider keys,
  * writes `factory-supervisor` / `factory-lead` / `factory-peer` mapped from
@@ -238,6 +276,13 @@ const ROLE_DESCRIPTIONS: Record<FactoryRole, string> = {
  * (model, plan-mode `modeId` when the harness needs one, `thinkingOptionId`
  * when the supervisor lane names a thinking level). A lane that does not parse
  * leaves its provider unwritten (its stale entry is swept, never guessed).
+ * It also pins Paseo 0.15.0's `agents.resumeOnStartup: false` (spec v0.0.91
+ * §3) and, when a `paseoHome` is given, defaults `XDG_STATE_HOME` onto the
+ * `opencode`-extending role providers and the base `agents.providers.opencode`
+ * entry — never over an explicit `PASEO_OPENCODE_SERVER_URL` or custom
+ * `XDG_STATE_HOME` — so `V2Runtime` never discovers a host-wide OpenCode v2
+ * shared service that would reject the factory's `mcpServers` and
+ * `PASEO_FACTORY_*` env.
  * Returns the next config plus `changed` — the caller writes only on a real
  * change.
  */
@@ -255,6 +300,10 @@ export function reconcilePaseoConfigObject(
     if (isSweptProviderKey(key)) continue; // the sw2-* / stale factory-* sweep
     providers[key] = value as PaseoProviderEntry;
   }
+  // The plugin-owned OpenCode state home (spec v0.0.91 §3) — the XDG root whose
+  // `opencode/service.json` Paseo 0.15.0's V2Runtime probes when acquiring an
+  // opencode v2 runtime; undefined when no paseoHome is given.
+  const opencodeStateDir = opencodeStateDirFor(options?.paseoHome);
   // The three managed providers, in canonical order — the mapping is computed
   // against the post-sweep table so an `agy` lane inherits the user's custom
   // entry exactly as it stands after the sweep (agy itself is never swept).
@@ -266,6 +315,13 @@ export function reconcilePaseoConfigObject(
     if (base.extends === "pi" && typeof options?.paseoHome === "string" && options.paseoHome.trim() !== "") {
       env.PI_CODING_AGENT_DIR =
         base.inheritedEnv?.PI_CODING_AGENT_DIR ?? join(options.paseoHome, "plugin-state", "paseo-factory", "pi-agent", role);
+    }
+    // OpenCode v2 shared-service isolation (spec v0.0.91 §3): a discovered shared
+    // service rejects custom `mcpServers` and per-agent env, so an opencode-backed
+    // seat defaults its state home onto plugin-owned state — unless the owner
+    // already pointed the seat at their own server or state home.
+    if (base.extends === "opencode" && opencodeStateDir !== undefined && env.PASEO_OPENCODE_SERVER_URL === undefined) {
+      env.XDG_STATE_HOME = base.inheritedEnv?.XDG_STATE_HOME ?? opencodeStateDir;
     }
     const modelEntry: PaseoProviderModelEntry = {
       id: parsed.model,
@@ -288,6 +344,14 @@ export function reconcilePaseoConfigObject(
       models: [modelEntry],
     };
     providers[FACTORY_ROLE_PROVIDERS[role]] = entry;
+  }
+  // The base `opencode` entry too (spec v0.0.91 §3): `agent.create.before`
+  // rewrites factory-* seats onto the runtime `opencode` provider, so its env
+  // must carry the same isolated state home — the user's own keys on the entry
+  // are preserved by the spread, and an explicit `PASEO_OPENCODE_SERVER_URL`
+  // or custom `XDG_STATE_HOME` is left exactly as the owner wrote it.
+  if (opencodeStateDir !== undefined) {
+    ensureBaseOpencodeStateDir(providers, opencodeStateDir);
   }
   // The picker: every sw2-* / factory-* row goes, and exactly one
   // `Supervisor (Factory)` profile is prepended — model, the harness's
@@ -314,7 +378,16 @@ export function reconcilePaseoConfigObject(
       ...(supervisorLane.thinking === undefined ? {} : { thinkingOptionId: supervisorLane.thinking }),
     });
   }
-  const next: PaseoConfigObject = { ...original, agents: { ...agents, providers }, daemon: { ...daemon, agentProfiles: profiles } };
+  // Paseo 0.15.0's agents.resumeOnStartup (defaulting true on 0.15.0-beta.1 hosts)
+  // would re-prompt interrupted agents with "Resume working." after a daemon
+  // restart — ahead of ADR 0003 (recoveredAttempts) and ADR 0013/0015
+  // (startupRecovery) — so the reconcile pins it false unconditionally (spec
+  // v0.0.91 §3): the factory's own recovery stays the sole authority.
+  const next: PaseoConfigObject = {
+    ...original,
+    agents: { ...agents, resumeOnStartup: false, providers },
+    daemon: { ...daemon, agentProfiles: profiles },
+  };
   const changed = JSON.stringify(next) !== JSON.stringify(original);
   return { changed, config: next };
 }
@@ -379,17 +452,32 @@ export function reconcilePaseoRoleProviders(
  * `"extends": "antigravity"` left by v0.0.40 or `"extends": "acp"` without a
  * non-empty `command` array) onto a valid built-in `extends` (`"opencode"` or custom
  * `acp` command), promoting `additionalModels` to `models` when `models` is
- * absent.
+ * absent. It also heals the 0.15.0-beta.1 legacy `agents.resumeOnStartup: true`
+ * back to `false` and, when a `paseoHome` is given, a missing `XDG_STATE_HOME`
+ * onto `opencode`-extending role providers and the base
+ * `agents.providers.opencode` entry (spec v0.0.91 §3) — under the reconcile
+ * path's explicit-user-setting precedence.
  */
 export function healFactoryRoleProvidersObject(
   config: PaseoConfigObject,
   options?: { paseoHome?: string },
 ): { changed: boolean; config: PaseoConfigObject } {
   const original = config;
-  if (!isRecord(original.agents) || !isRecord(original.agents.providers)) {
+  if (!isRecord(original.agents)) {
     return { changed: false, config: original };
   }
   const agents = original.agents;
+  // The startup auto-resume guard (spec v0.0.91 §3): heal the 0.15.0-beta.1
+  // legacy `resumeOnStartup: true` back to false — the factory's own recovery
+  // (ADR 0003 / ADR 0013 / ADR 0015) stays the sole authority after a restart.
+  const resumeHealed = agents.resumeOnStartup === true;
+  if (!isRecord(agents.providers)) {
+    if (!resumeHealed) return { changed: false, config: original };
+    return { changed: true, config: { ...original, agents: { ...agents, resumeOnStartup: false } } };
+  }
+  // The plugin-owned OpenCode state home (spec v0.0.91 §3) — same dir and same
+  // explicit-user-setting precedence as the reconcile path.
+  const opencodeStateDir = opencodeStateDirFor(options?.paseoHome);
   const rawProviders = agents.providers as Record<string, unknown>;
   const providers: Record<string, PaseoProviderEntry> = {};
   for (const [key, value] of Object.entries(rawProviders)) {
@@ -423,11 +511,25 @@ export function healFactoryRoleProvidersObject(
           existingEnv.PI_CODING_AGENT_DIR ?? join(options.paseoHome, "plugin-state", "paseo-factory", "pi-agent", role),
       };
     }
+    // OpenCode v2 shared-service isolation (spec v0.0.91 §3): heal a missing
+    // XDG_STATE_HOME onto opencode-extending role providers — never over an
+    // explicit PASEO_OPENCODE_SERVER_URL or custom state home.
+    if (entry.extends === "opencode" && opencodeStateDir !== undefined) {
+      const existingEnv = isRecord(entry.env) ? (entry.env as Record<string, string>) : {};
+      if (existingEnv.PASEO_OPENCODE_SERVER_URL === undefined && existingEnv.XDG_STATE_HOME === undefined) {
+        entry.env = { ...existingEnv, XDG_STATE_HOME: opencodeStateDir };
+      }
+    }
     if (entry.models === undefined && Array.isArray(entry.additionalModels)) {
       entry.models = entry.additionalModels;
       delete entry.additionalModels;
     }
     providers[key] = entry;
+  }
+  // The base `opencode` entry arm (spec v0.0.91 §3) — same merge and same
+  // explicit-user-setting precedence as the reconcile path.
+  if (opencodeStateDir !== undefined) {
+    ensureBaseOpencodeStateDir(providers, opencodeStateDir);
   }
   let nextDaemon = original.daemon;
   if (isRecord(original.daemon) && Array.isArray(original.daemon.agentProfiles)) {
@@ -443,7 +545,7 @@ export function healFactoryRoleProvidersObject(
   }
   const next: PaseoConfigObject = {
     ...original,
-    agents: { ...agents, providers },
+    agents: resumeHealed ? { ...agents, providers, resumeOnStartup: false } : { ...agents, providers },
     ...(nextDaemon === original.daemon ? {} : { daemon: nextDaemon }),
   };
   const changed = JSON.stringify(next) !== JSON.stringify(original);
