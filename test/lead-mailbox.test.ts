@@ -878,7 +878,7 @@ test("completeHandoff resolves Attempt-1 working Agents via live daemon worktree
   factory.setContract({ task: "T-WT", workspace: canonicalRoot, gate: "true", artifact: "README.md", scope: ["wt/**"] });
   fake.agents.push({
     id: "agent-wt-1",
-    status: "running",
+    status: "idle",
     cwd: join(taskWorktreePath(stateDir, slug, "T-WT"), "src"),
   });
 
@@ -886,7 +886,7 @@ test("completeHandoff resolves Attempt-1 working Agents via live daemon worktree
   factory.setContract({ task: "T-LABEL", workspace: canonicalRoot, gate: "true", artifact: "README.md", scope: ["label/**"] });
   fake.agents.push({
     id: "agent-label-1",
-    status: "running",
+    status: "idle",
     labels: { project: slug, task: "T-LABEL" },
     cwd: "/tmp",
   });
@@ -904,7 +904,7 @@ test("completeHandoff resolves Attempt-1 working Agents via live daemon worktree
   });
   fake.agents.push({
     id: "agent-corr-1",
-    status: "running",
+    status: "idle",
     cwd: "/tmp",
   });
 
@@ -948,13 +948,14 @@ test("completeHandoff resolves Attempt-1 working Agents via live daemon worktree
   });
   fake.agents.push({
     id: "agent-new-epoch2",
-    status: "running",
+    status: "idle",
     cwd: "/tmp",
   });
 
   await leadMail.enqueueLeadMail(slug, { from: "owner", kind: "directive", text: "Review the current Peer roster" });
 
-  // Trigger handoff: turn 1 ends at 135k -> locks handing_over -> turn 2 ends -> completes handoff
+  // Trigger handoff at a quiet point (v0.0.93): the seeded workers are stopped,
+  // so no Peer is in flight — turn 1 ends at 135k -> locks handing_over -> turn 2 ends -> completes handoff
   await leadMail.onLeadTurnEnded({ agentId: "agent-lead-1", outcome: { kind: "completed" }, timeline: [] });
   assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "handing_over");
 
@@ -969,12 +970,12 @@ test("completeHandoff resolves Attempt-1 working Agents via live daemon worktree
   const kickoff = fake.sent.find((s) => s.agentId === successorId && s.text.includes("Machine-Verified Active Peer Roster"));
   assert.ok(kickoff, "successor Lead received Machine-Verified Active Peer Roster");
 
-  assert.match(kickoff.text, /task T-WT: .*agent agent-wt-1 \(live: running\)/);
-  assert.match(kickoff.text, /task T-LABEL: .*agent agent-label-1 \(live: running\)/);
-  assert.match(kickoff.text, /task T-CORR: .*agent agent-corr-1 \(live: running\)/);
+  assert.match(kickoff.text, /task T-WT: .*agent agent-wt-1 \(live: idle\)/);
+  assert.match(kickoff.text, /task T-LABEL: .*agent agent-label-1 \(live: idle\)/);
+  assert.match(kickoff.text, /task T-CORR: .*agent agent-corr-1 \(live: idle\)/);
   assert.match(kickoff.text, /task T-RESET-UNBOUND: .*agent \(none bound\)/);
   assert.doesNotMatch(kickoff.text, /agent-stale-epoch1/);
-  assert.match(kickoff.text, /task T-RESET-REBOUND: .*agent agent-new-epoch2 \(live: running\)/);
+  assert.match(kickoff.text, /task T-RESET-REBOUND: .*agent agent-new-epoch2 \(live: idle\)/);
   assert.doesNotMatch(kickoff.text, /agent-old-epoch1/);
 });
 
@@ -1444,7 +1445,7 @@ test("Paseo 0.13.0 compatibility: completeHandoff refetches tail timeline via da
 
 
 
-test("handoff holds an empty mailbox for the current running Peer and combines its verdict with kickoff", async (t) => {
+test("quiet-point handoff binds the roster to the current Peer and combines its verdict with the successor kickoff (v0.0.93)", async (t) => {
   const lead: FakeAgent = { id: "agent-lead-1", status: "idle", lastUsage: { contextWindowUsedTokens: 135_000 } };
   const { stateDir, slug, projectRoot, factory, surface, leadMail, fake } = makeSpooledRuntime(t, [lead]);
   lead.labels = { seat: "lead", project: slug };
@@ -1457,23 +1458,25 @@ test("handoff holds an empty mailbox for the current running Peer and combines i
   const stale: FakeAgent = { id: "stale", status: "idle", cwd, labels: { seat: "agent", project: slug, task: "wave" } };
   fake.agents.unshift(current, stale); // daemon order is newest first
   await leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [] });
-  await leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [{ type: "assistant_message", text: "# Handoff\nWait for wave." }] });
-  const successorId = "agent-created-1";
-  assert.equal(fake.sent.filter(s => s.agentId === successorId).length, 0, "successor stays at zero context while Peer runs");
+  assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "rotation_pending", "the rotation holds while the Peer runs");
   await leadMail.pumpProjectLead(slug);
-  assert.equal(fake.sent.filter(s => s.agentId === successorId).length, 0);
+  assert.equal(fake.sent.length, 0, "a pump wakes nobody while the rotation is pending");
   current.status = "idle";
   factory.ledger.append({ event: "gate_finished", task: "wave", attempt: 1, verdict: "green", exit: 0, note: "" });
   await leadMail.notifyPeer({ task: "wave", kind: "verdict", text: "wave GREEN" });
+  assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "handing_over");
+  assert.equal(fake.sent.filter(s => s.agentId === lead.id).length, 1, "the extraction prompt reached the outgoing Lead");
+  await leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [{ type: "assistant_message", text: "# Handoff\nWait for wave." }] });
+  const successorId = "agent-created-1";
   const sent = fake.sent.filter(s => s.agentId === successorId);
   assert.equal(sent.length, 1);
-  assert.match(sent[0]!.text, /agent current \(live: running\)/);
+  assert.match(sent[0]!.text, /agent current \(live: idle\)/, "the roster binds the newest current-epoch Peer, rendered at the completed quiet point");
   assert.doesNotMatch(sent[0]!.text, /agent stale/);
   assert.match(sent[0]!.text, /# Lead handoff/);
   assert.match(sent[0]!.text, /wave GREEN/);
 });
 
-test("a held handoff pumps after its Peer stops even without verdict mail", async (t) => {
+test("a pending rotation pumps into a handoff after its Peer stops even without verdict mail, and never double-delivers the kickoff", async (t) => {
   const lead: FakeAgent = { id: "lead", status: "idle", lastUsage: { contextWindowUsedTokens: 135_000 } };
   const { stateDir, slug, projectRoot, factory, surface, leadMail, fake } = makeSpooledRuntime(t, [lead]);
   lead.labels = { seat: "lead", project: slug };
@@ -1484,12 +1487,16 @@ test("a held handoff pumps after its Peer stops even without verdict mail", asyn
   fake.agents.push(peer);
   await leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [] });
   await leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [] });
-  assert.equal(fake.sent.filter(s => s.agentId === "agent-created-1").length, 0);
+  assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "rotation_pending", "both turn boundaries hold while the Peer initializes");
+  assert.equal(fake.sent.length, 0);
   peer.status = "error";
   await leadMail.pumpProjectLead(slug);
-  assert.equal(fake.sent.filter(s => s.agentId === "agent-created-1").length, 1);
+  assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "handing_over", "the pump began the handoff with no verdict mail at all");
+  assert.equal(fake.sent.filter(s => s.agentId === lead.id).length, 1);
+  await leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [{ type: "assistant_message", text: "# Handoff\nPeer died before any verdict." }] });
+  assert.equal(fake.sent.filter(s => s.agentId === "agent-created-1").length, 1, "the successor's Turn-1 kickoff delivered once");
   await leadMail.pumpProjectLead(slug);
-  assert.equal(fake.sent.filter(s => s.agentId === "agent-created-1").length, 1);
+  assert.equal(fake.sent.filter(s => s.agentId === "agent-created-1").length, 1, "a second pump re-delivers nothing");
 });
 
 test("pumping an empty project without a held handoff does not create a Lead", async (t) => {
@@ -1499,7 +1506,7 @@ test("pumping an empty project without a held handoff does not create a Lead", a
   assert.equal(fake.sent.length, 0);
 });
 
-test("idle-collected ('closed') Lead and Supervisor seats wake automatically on mailbox drain and held handoff delivery, notifyPeer scopes driverWaveInFlight per Project, and pendingHandoff recovers durably from lead-handoff.md across restarts (ADR 0031)", async (t) => {
+test("quiet-point Lead rotation (ADR 0031, v0.0.93): rotation_pending holds the outgoing Lead live while a Peer runs, notifyPeer's pump begins the handoff once the wave settles, a closed Supervisor wakes on report, and pendingHandoff recovers durably from lead-handoff.md across restarts", async (t) => {
   const lead: FakeAgent = { id: "agent-lead-1", status: "idle", lastUsage: { contextWindowUsedTokens: 135_000 } };
   const supervisor: FakeAgent = { id: "agent-sup-1", status: "idle" };
   const { stateDir, slug, projectRoot, factory, surface, leadMail, fake } = makeSpooledRuntime(t, [lead, supervisor]);
@@ -1536,36 +1543,62 @@ test("idle-collected ('closed') Lead and Supervisor seats wake automatically on 
   };
   fake.agents.unshift(neighborPeer);
 
-  // 2. Rotate Lead while T-03 Peer is running -> successor Lead is created and kickoff is held
+  // 2. The Lead ends a turn at 135k while T-03's Peer runs (v0.0.93 quiet
+  //    point): the rotation is durably held in rotation_pending — the
+  //    outgoing Lead stays the live, visible seat, no extraction prompt is
+  //    sent, and no successor is created while the Peer works.
   await leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [] });
+  assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "rotation_pending");
+  assert.ok(fake.agents.some((a) => a.id === lead.id), "the outgoing Lead stays live and visible in rotation_pending");
+  assert.equal(fake.sent.filter((s) => s.agentId === lead.id).length, 0, "no handoff extraction prompt while the Peer runs");
+  assert.equal(fake.created.length, 0, "no Successor Lead is created while the Peer runs");
+
+  // 3. Mail enqueued during rotation_pending stays mail_queued — a pump never
+  //    wakes the over-threshold outgoing Lead for normal work.
+  await leadMail.enqueueLeadMail(slug, { from: "supervisor", kind: "directive", text: "Directive held through rotation_pending" });
+  await leadMail.pumpProjectLead(slug);
+  const events = readMailboxLines(stateDir, slug);
+  assert.equal(events.filter((e) => e.type === "mail_queued").length, 1);
+  assert.equal(events.filter((e) => e.type === "mail_delivered").length, 0);
+  assert.equal(fake.sent.length, 0, "held mail is never delivered in rotation_pending");
+
+  // 4. T-03 finishes GREEN while neighborPeer is STILL running in the
+  //    neighbor Project. notifyPeer scopes the quiet-point check to `slug`
+  //    (ignoring the neighbor Project's Peer), so this Project's rotation
+  //    begins — the extraction prompt reaches the still-live outgoing Lead.
+  t03Peer.status = "closed";
+  factory.ledger.append({ event: "gate_finished", task: "T-03", attempt: 1, verdict: "green", exit: 0, note: "" });
+  await leadMail.notifyPeer({ task: "T-03", kind: "verdict", text: "T-03 attempt 1 ended GREEN" });
+  assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "handing_over");
+  const extractionSends = fake.sent.filter((s) => s.agentId === lead.id);
+  assert.equal(extractionSends.length, 1, "the handoff extraction prompt reached the outgoing Lead the moment the Peer settled");
+  assert.match(extractionSends[0]!.text, /Lead handoff extraction/);
+
+  // 5. The extraction turn completes: the outgoing Lead archives, the
+  //    successor spawns at 0%, rotation resets to normal, and Turn 1
+  //    delivers the kickoff packet + handoff + the Peer's verdict + the
+  //    held directive together in one immediate atomic turn.
   await leadMail.onLeadTurnEnded({
     agentId: lead.id,
     outcome: { kind: "completed" },
     timeline: [{ type: "assistant_message", text: "# Handoff for T-03\nReview T-03 when Peer finishes." }],
   });
+  assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "normal");
+  assert.equal(fake.agents.some((a) => a.id === lead.id), false, "the outgoing Lead was archived at completion");
   const successorId = "agent-created-1";
   const successor = fake.agents.find((a) => a.id === successorId);
   assert.ok(successor);
-  assert.equal(fake.sent.filter((s) => s.agentId === successorId).length, 0, "handoff held while T-03 Peer runs");
-
-  // 3. Simulate Paseo's 1-hour idle-runtime collector unloading both successor Lead and Supervisor ('status: closed', archivedAt: null)
-  successor.status = "closed";
-  supervisor.status = "closed";
-
-  // 4. T-03 finishes GREEN while neighborPeer is STILL running in neighborProject.
-  //    notifyPeer must scope driverWaveInFlight to `slug` (ignoring neighborProject) and wake the 'closed' successor Lead!
-  t03Peer.status = "closed";
-  factory.ledger.append({ event: "gate_finished", task: "T-03", attempt: 1, verdict: "green", exit: 0, note: "" });
-  await leadMail.notifyPeer({ task: "T-03", kind: "verdict", text: "T-03 attempt 1 ended GREEN" });
-
   const successorSends = fake.sent.filter((s) => s.agentId === successorId);
-  assert.equal(successorSends.length, 1, "closed successor Lead woke and received held handoff + T-03 verdict despite neighbor project running");
+  assert.equal(successorSends.length, 1, "the Successor Lead receives its Turn-1 kickoff immediately upon creation, despite the neighbor Project's Peer still running");
   assert.match(successorSends[0]!.text, /\[paseo-factory seat kickoff packet · role=lead/);
   assert.match(successorSends[0]!.text, /# Lead handoff — project/);
   assert.match(successorSends[0]!.text, /# Handoff for T-03\nReview T-03 when Peer finishes\./);
   assert.match(successorSends[0]!.text, /T-03 attempt 1 ended GREEN/);
+  assert.match(successorSends[0]!.text, /Directive held through rotation_pending/);
+  assert.ok(fake.agents.some((a) => a.id === neighborPeer.id), "the neighbor Project's Peer was untouched");
 
-  // 5. Reporting to a 'closed' Supervisor also wakes Supervisor and delivers the report batch
+  // 6. Reporting to a 'closed' Supervisor also wakes Supervisor and delivers the report batch
+  supervisor.status = "closed";
   const supReport = await leadMail.reportSupervisor({
     id: "rep-closed-sup",
     kind: "supervisor_report",
@@ -1636,6 +1669,62 @@ test("idle-collected ('closed') Lead and Supervisor seats wake automatically on 
   assert.match(unstartedSends[0]!.text, /# Lead handoff — project/);
   assert.match(unstartedSends[0]!.text, /# Handoff for T-03\nReview T-03 when Peer finishes\./);
   assert.match(unstartedSends[0]!.text, /Recovered verdict after restart/);
+});
+
+test("settleTurnAndRotate begins the handoff immediately at the turn boundary when no Peer is running (v0.0.93, ADR 0031)", async (t) => {
+  const lead: FakeAgent = { id: "agent-lead-quiet", status: "idle", lastUsage: { contextWindowUsedTokens: 128_001 } };
+  const { stateDir, slug, projectRoot, surface, leadMail, fake } = makeSpooledRuntime(t, [lead]);
+  lead.labels = { seat: "lead", project: slug };
+  lead.cwd = projectRoot;
+  await surface.leadEnsure({ projectRoot });
+
+  await leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [] });
+  assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "handing_over", "a Project already at a quiet point rotates without delay");
+  const extractionSends = fake.sent.filter((s) => s.agentId === lead.id);
+  assert.equal(extractionSends.length, 1, "the extraction prompt was steered on the same turn boundary");
+  assert.match(extractionSends[0]!.text, /Lead handoff extraction/);
+  assert.equal(fake.created.length, 0, "no successor exists until the extraction turn completes");
+});
+
+test("pumpProjectLead recovers a rotation_pending Project once its Peer stops — even a dead (error) Peer — completing the rotation cleanly (v0.0.93, ADR 0031)", async (t) => {
+  const lead: FakeAgent = { id: "agent-lead-pump-rec", status: "idle", lastUsage: { contextWindowUsedTokens: 130_000 } };
+  const { stateDir, slug, projectRoot, factory, surface, leadMail, fake } = makeSpooledRuntime(t, [lead]);
+  lead.labels = { seat: "lead", project: slug };
+  lead.cwd = projectRoot;
+  await surface.leadEnsure({ projectRoot });
+
+  const root = readProjectRegistration(stateDir, slug)!.root!;
+  factory.setContract({ task: "T-REC", workspace: root, gate: "true" });
+  const worktree = taskWorktreePath(stateDir, slug, "T-REC");
+  factory.requestSpawn({ task: "T-REC", provider: "pi/model", arity: 1, worktree });
+  const peer: FakeAgent = { id: "peer-rec", status: "running", cwd: worktree, labels: { seat: "agent", project: slug, task: "T-REC" } };
+  fake.agents.unshift(peer);
+
+  // Over threshold with the Peer running: the rotation holds in rotation_pending.
+  await leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [] });
+  assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "rotation_pending");
+  assert.equal(fake.sent.length, 0, "no extraction prompt while the Peer runs");
+
+  // The Peer dies mid-run (status 'error'): a bare pump — the startup
+  // `pumpAll` path — begins the handoff without waiting for a notifyPeer
+  // that may never come.
+  peer.status = "error";
+  await leadMail.pumpProjectLead(slug);
+  assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "handing_over", "the pump transitioned rotation_pending to handing_over");
+  assert.equal(fake.sent.filter((s) => s.agentId === lead.id).length, 1, "the pump began the extraction turn");
+
+  // The extraction turn completes: rotation resets to normal and the successor is kicked off immediately.
+  await leadMail.onLeadTurnEnded({
+    agentId: lead.id,
+    outcome: { kind: "completed" },
+    timeline: [{ type: "assistant_message", text: "# Pumped rotation handoff\nT-REC died mid-run." }],
+  });
+  assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "normal");
+  const successorId = readProjectRegistration(stateDir, slug)?.lead;
+  assert.ok(successorId && successorId !== lead.id, "the successor Lead was spawned");
+  const successorSends = fake.sent.filter((s) => s.agentId === successorId);
+  assert.equal(successorSends.length, 1, "the successor received its Turn-1 kickoff immediately");
+  assert.match(successorSends[0]!.text, /# Pumped rotation handoff/);
 });
 
 test("Scrum-only recovery skips steady Projects and reconciles pending cancellation", async t => {

@@ -30,13 +30,17 @@ import { commitSeatMemoryOnRoot } from "./core/workspace.ts";
  *     daemon restarts;
  *   - `pumpProjectLead` — run the lane; while the Lead is `running` over
  *     `LEAD_ROTATE_TOKENS` the pump persists `rotation_pending` and never
- *     interrupts the turn;
+ *     interrupts the turn; once no Task Peer remains in flight it
+ *     transitions a held `rotation_pending` into `beginHandoff` (ADR 0031
+ *     Quiet-Point Succession);
  *   - `onLeadTurnEnded` — the turn-boundary state machine (ticket 07): settle
  *     the in-flight batch (`mail_acked` on completed, `mail_requeued` on
  *     failed/canceled), then either complete a handoff (archive the outgoing
  *     Lead, spawn the successor with the roster + digest + handoff kickoff,
  *     reset `normal`, drain the held mail), begin one (lock `handing_over`,
- *     steer the bounded extraction prompt), or drain per ticket 06;
+ *     steer the bounded extraction prompt) at a quiet point only — while any
+ *     Task Peer runs the rotation holds in `rotation_pending` with the
+ *     outgoing Lead live and all mail `mail_queued` — or drain per ticket 06;
  *   - `dispatchLead` — the spool's `lead_dispatch` handler: resolve the target
  *     Project (`workspace` via resolveProject, `project` slug via the
  *     registry), auto-ensure the Lead seat (the `leadEnsure` path — the
@@ -589,7 +593,12 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       const digest = renderLedgerDigest(events);
       pendingHandoff = renderSuccessorKickoff({ slug, roster, digest, handoffText: diskHandoffText, stale: readExtraction(slug)?.stale });
     }
-    if (state.queued.length === 0 && (pendingHandoff === undefined || await projectPeerInFlight(slug))) return;
+    // v0.0.93 (ADR 0031 Quiet-Point Succession): a Successor Lead's Turn-1
+    // kickoff delivers immediately — never held on `projectPeerInFlight`, the
+    // v0.0.92 hold. The handoff only completes at a quiet point now (the Peer's
+    // verdict is in the queued batch or already acked), so waking the successor
+    // here can no longer race a running Peer into a double spawn.
+    if (state.queued.length === 0 && pendingHandoff === undefined) return;
     const mailPrompt = state.queued.length === 0 ? "" : renderMailPrompt(state.queued);
     const body = pendingHandoff !== undefined ? (mailPrompt === "" ? pendingHandoff : `${pendingHandoff}\n\n${mailPrompt}`) : mailPrompt;
     const prompt = prependKickoffPacketIfFirstTurn("lead", slug, lead, body);
@@ -703,6 +712,25 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
         await observeRotation(slug);
       } catch (err) {
         log(`lead-mailbox: rotation observation of ${slug} failed — the state stands (${messageOf(err)})`);
+      }
+      // v0.0.93 (ADR 0031 Quiet-Point Succession): a rotation held pending
+      // while a Peer ran begins the moment the wave settles — `notifyPeer`'s
+      // own pump lands here with the Peer's terminal verdict already queued
+      // and no Peer left in flight, and `pumpAll` reaches the same arm after
+      // a restart, so a pending rotation never stalls on a missing trigger.
+      if (readRotationState(slug) === "rotation_pending" && !(await projectPeerInFlight(slug))) {
+        const reg = readProjectRegistration(deps.stateDir, slug);
+        if (reg?.root !== undefined) {
+          const lead = await liveLeadAgent(resolveDaemon(), slug).catch(() => undefined);
+          if (lead === undefined || lead.status === "error" || isSeatReadyForMail(lead)) {
+            try {
+              await beginHandoff(slug, reg.root);
+              return;
+            } catch (err) {
+              log(`lead-mailbox: pending rotation of ${slug} could not begin its handoff — the state stands (${messageOf(err)})`);
+            }
+          }
+        }
       }
       if (readRotationState(slug) === "handing_over") {
         const reg = readProjectRegistration(deps.stateDir, slug);
@@ -905,8 +933,18 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       // a sensor miss never blocks the machine
     }
     if ((usedTokens ?? 0) >= LEAD_ROTATE_TOKENS || rotation === "rotation_pending") {
-      // (3) Over threshold at the boundary: lock, then steer the one
-      // bounded extraction turn. Held mail stays `mail_queued`.
+      // (3) Over threshold at the boundary (v0.0.93, ADR 0031 Quiet-Point
+      // Succession): durably mark `rotation_pending` first, then begin the
+      // handoff only at a quiet point. While any unaccepted Task's Peer is
+      // running (`projectPeerInFlight`), the outgoing Lead stays the live,
+      // visible seat and every incoming mail item stays `mail_queued` — the
+      // Peer's own terminal `notifyPeer` pump starts the handoff the moment
+      // the wave settles.
+      writeRotationState(slug, root, { rotationState: "rotation_pending" });
+      if (await projectPeerInFlight(slug)) {
+        log(`lead-mailbox: ${slug}'s lead rotation held in rotation_pending — a Task Peer is still running, the outgoing Lead stays live`);
+        return;
+      }
       await beginHandoff(slug, root);
       return;
     }
@@ -1080,7 +1118,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     writeRotationState(slug, root, { rotationState: "normal", handoffRequestedAt: null });
     await drainLeadMailbox(slug);
     const retiredLabel = retired.ok ? retired.agentId : (input.agentId || "absent-lead");
-    log(`lead-mailbox: handoff of ${slug} complete — ${retiredLabel} archived, successor ${ensured.agentId} kickoff ${pendingHandoffByAgentId.has(ensured.agentId) ? "held for Peer completion" : "delivered"}, rotation reset to normal`);
+    log(`lead-mailbox: handoff of ${slug} complete — ${retiredLabel} archived, successor ${ensured.agentId} kickoff ${pendingHandoffByAgentId.has(ensured.agentId) ? "held for the next pump" : "delivered"}, rotation reset to normal`);
   };
 
   /** The Project's ledger slice — every event whose task's contract workspace sits inside the root (the snapshot's own scoping law; v0.0.89 per-Project isolation over the bridged stream). */

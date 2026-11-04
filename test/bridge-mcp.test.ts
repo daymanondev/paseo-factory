@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { CorrelationRegistry } from "../src/correlations.ts";
 import { createFactory } from "../plugin/server/core/factory.ts";
-import { ensureProjectRegistered, writeProjectRegistration } from "../src/project.ts";
+import { ensureProjectRegistered, readProjectRegistration, writeProjectRegistration } from "../src/project.ts";
 import { readLeadMailbox } from "../src/mailbox.ts";
 import { createLeadMailRuntime } from "../plugin/server/lead-mailbox.ts";
 import { startSpool } from "../plugin/server/spool.ts";
@@ -921,7 +921,7 @@ test("Scrum MCP decisions default the active design identity and keep Lead unabl
   assert.equal(readRun(stateDir, project.slug, run.runId).fixRounds, 1);
 });
 
-test("v0.0.92 regression: Lead dispatches a Peer then immediately hands off at 128k — the Peer keeps running in its isolated Task worktree and the Successor Lead's kickoff is held until the Peer stops, then delivered", async () => {
+test("v0.0.93 quiet-point regression: Lead dispatches a Peer then crosses 128k — the rotation holds in rotation_pending (outgoing Lead live, Peer untouched, no successor) until the Peer's verdict pump begins the handoff and the Successor Lead receives Turn 1 immediately", async () => {
   const homeDir = mkdtempSync(join(tmpdir(), "factory-bridge-handoff-"));
   const stateDir = join(homeDir, "plugin-state", "paseo-factory");
   const repoDir = makeGitRepo();
@@ -1071,32 +1071,47 @@ test("v0.0.92 regression: Lead dispatches a Peer then immediately hands off at 1
     assert.equal(peer.cwd, worktree, "the Peer's cwd is the isolated Task worktree, never <project-root>");
     peer.status = "running";
 
-    // 2. The Lead finishes its dispatch turn already past LEAD_ROTATE_TOKENS —
-    //    the bounded extraction turn, then the retirement + successor creation.
+    // 2. The Lead finishes its dispatch turn already past LEAD_ROTATE_TOKENS
+    //    while the Peer runs: the rotation is held in rotation_pending — the
+    //    outgoing Lead stays the live seat, no extraction prompt is sent, and
+    //    no successor exists (the blank 0-message window never happens).
     await mailRuntime.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [] });
+    assert.equal(readProjectRegistration(stateDir, reg.slug)?.rotationState, "rotation_pending");
+    assert.equal(lead.archivedAt, null, "the outgoing Lead was NOT archived while the Peer runs");
+    assert.equal(peer.archivedAt, null, "the running Peer was NOT cascade-archived");
+    assert.equal(peer.status, "running", "the Peer keeps running in its Task worktree");
+    assert.equal(readProjectRegistration(stateDir, reg.slug)?.lead, lead.id, "the outgoing Lead remains the registered seat");
+    assert.equal([...agents.values()].some((a) => a.labels.seat === "lead" && a.id !== lead.id), false, "no Successor Lead exists yet");
+    assert.equal(sent.length, 0, "no prompt of any kind was sent while the Peer runs");
+
+    // 3. The Peer stops and delivers its terminal verdict: notifyPeer's pump
+    //    transitions rotation_pending -> handing_over and steers the bounded
+    //    extraction turn to the STILL-LIVE outgoing Lead.
+    peer.status = "idle";
+    await mailRuntime.notifyPeer({ task: "T-KICK", kind: "verdict", text: "T-KICK attempt 1 ended GREEN" });
+    assert.equal(readProjectRegistration(stateDir, reg.slug)?.rotationState, "handing_over");
+    const extractionSends = sent.filter((s) => s.agentId === lead.id);
+    assert.equal(extractionSends.length, 1, "the extraction prompt reached the outgoing Lead once the wave settled");
+    assert.match(extractionSends[0].text, /Lead handoff extraction/);
+    assert.equal(lead.archivedAt, null, "the outgoing Lead is archived only at completion, not at extraction");
+
+    // 4. The extraction turn completes: retirement, successor creation, and
+    //    the immediate unified Turn-1 kickoff with the Peer's verdict.
     await mailRuntime.onLeadTurnEnded({
       agentId: lead.id,
       outcome: { kind: "completed" },
       timeline: [{ type: "assistant_message", text: "# Handoff during T-KICK\nWatch T-KICK to its verdict." }],
     });
+    assert.equal(readProjectRegistration(stateDir, reg.slug)?.rotationState, "normal");
     assert.equal(lead.archivedAt !== null, true, "the outgoing Lead was retired");
-    assert.equal(peer.archivedAt, null, "the running Peer was NOT cascade-archived by the Lead handoff");
-    assert.equal(peer.status, "running", "the Peer keeps running in its Task worktree");
-
+    assert.equal(peer.archivedAt, null, "the finished Peer was not archived by the handoff");
     const successor = [...agents.values()].find((a) => a.labels.seat === "lead" && a.id !== lead.id);
     assert.ok(successor, "a fresh Successor Lead was created");
-    assert.equal(sent.filter((s) => s.agentId === successor.id).length, 0, "the Successor's Turn-1 kickoff is held while the Peer runs");
-
-    // 3. The Peer stops (its round stays open — no terminal verdict yet). The
-    //    held kickoff must be delivered immediately: a stopped Peer never
-    //    deadlocks drainLeadMailbox, on a worktree round or a legacy
-    //    worktree-less one alike.
-    peer.status = "idle";
-    await mailRuntime.notifyPeer({ task: "T-KICK", kind: "verdict", text: "T-KICK attempt 1 ended GREEN" });
     const successorSends = sent.filter((s) => s.agentId === successor.id);
-    assert.equal(successorSends.length, 1, "the Successor Lead receives its Turn-1 kickoff the moment the Peer is no longer live");
+    assert.equal(successorSends.length, 1, "the Successor Lead receives its Turn-1 kickoff immediately upon creation");
     assert.match(successorSends[0].text, /T-KICK attempt 1 ended GREEN/);
     assert.match(successorSends[0].text, /# Handoff during T-KICK/);
+    assert.match(successorSends[0].text, /# Lead handoff — project/);
   } finally {
     spool.stop();
     rmSync(homeDir, { recursive: true, force: true });
