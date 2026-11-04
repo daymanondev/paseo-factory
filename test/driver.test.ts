@@ -122,6 +122,25 @@ test("readDriverLedger: missing ledger is empty, an unterminated tail is ignored
   assert.throws(() => readDriverLedger(stateDir), /not valid JSON/);
 });
 
+test("readDriverLedger resolves the target Project's isolated ledger when the root ledger is absent (v0.0.92, ADR 0045 §1)", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const slug = "driver-proj-abc123";
+  const projectLedger = join(stateDir, "projects", slug, "ledger.jsonl");
+  mkdirSync(join(stateDir, "projects", slug), { recursive: true });
+  writeFileSync(join(stateDir, "projects", slug, "project.json"), `${JSON.stringify({ root: "/tmp/driver-proj", slug })}\n`);
+  const contract = JSON.stringify({ seq: 1, ts: "2026-11-04T09:00:00.000Z", event: "contract_set", task: "T-01", workspace: "/tmp/driver-proj", gate: "true", artifact: "a" });
+  writeFileSync(projectLedger, `${contract}\n`);
+
+  // No root ledger exists anywhere — the pre-resolution read stays empty,
+  // every resolution arm finds the Project's isolated stream.
+  assert.equal(readDriverLedger(stateDir).length, 0, "the context-less read finds no root ledger");
+  assert.equal(readDriverLedger(stateDir, { task: "T-01" }).length, 1, "the unique-Task lookup finds the Project's contract");
+  assert.equal(readDriverLedger(stateDir, { project: slug }).length, 1, "the explicit slug reads the Project's ledger");
+  assert.equal(readDriverLedger(stateDir, { tasks: ["T-01"] }).length, 1, "the wave's Task ids resolve too");
+});
+
 test("the driver's ledger views: the contract for pre-spawn, the outcome for the verdict line", (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);

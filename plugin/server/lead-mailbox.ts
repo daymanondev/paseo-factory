@@ -93,6 +93,7 @@ import type { DaemonReply } from "./daemon-cli.ts";
 import { readNativeContextWindowTokens, type UsagePaths } from "./core/usage-extractor.ts";
 import type { UsageRuntime } from "./usage-rollup.ts";
 import { factoryRegistryFor } from "./projects.ts";
+import type { FactoryRegistry } from "./projects.ts";
 export { PEER_HANDOFF_TOKENS } from "./peer-handoff.ts";
 
 /**
@@ -240,6 +241,14 @@ export interface LeadMailRuntimeDeps {
   factory: Factory;
   stateDir: string;
   home?: string;
+  /**
+   * An already-constructed Per-Project Factory registry (v0.0.92): when
+   * present, the runtime uses THIS instance instead of resolving the
+   * process-wide one — so a test's runtime, Spool, and assertions share one
+   * registry per stateDir. Production omits it (the shell's
+   * `factoryRegistryFor` returns the one registry the whole process uses).
+   */
+  registry?: FactoryRegistry;
   stopAgent?: (agentId: string, home?: string) => Promise<DaemonReply>;
   /** The daemon to deliver through — the live PaseoApi or the tests' fake. */
   daemon: SurfaceDaemonApi | (() => SurfaceDaemonApi);
@@ -389,8 +398,11 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   // empty stream. A slug the registry cannot open falls back to the wired
   // Factory, and a task the Project's Factory does not own but the wired
   // Factory still does reads from the wired one (the legacy root bridge, the
-  // spool router's own law) — never a wrong-Project stream.
-  const registry = factoryRegistryFor(deps.stateDir, { root: deps.factory });
+  // spool router's own law) — never a wrong-Project stream. Production wires
+  // nothing here (the process-wide `factoryRegistryFor` resolves the shell's
+  // one registry); tests pass their own `registry` so the runtime, the Spool,
+  // and the assertions share ONE instance per stateDir.
+  const registry = deps.registry ?? factoryRegistryFor(deps.stateDir, { root: deps.factory });
   const projectFactory = (slug: string): Factory => {
     try {
       return registry.factoryForProject(slug);
@@ -1092,7 +1104,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   };
 
   const projectHasPeerWork = (slug: string, events: readonly LedgerEvent[], live: readonly SurfaceAgentSnapshot[]): boolean =>
-    driverWaveInFlight(events, live) || foldTasks(events).some(task => !task.accepted &&
+    driverWaveInFlight(events, live, slug) || foldTasks(events).some(task => !task.accepted &&
       boundTaskPeers({ stateDir: deps.stateDir, slug, task: task.task, events, live }).some(peerIsRunning));
 
   const projectPeerInFlight = async (slug: string): Promise<boolean> => {
@@ -1383,7 +1395,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       } catch {
         // best-effort live agent inspection for dead/orphaned worktree spawn rounds
       }
-      if (driverWaveInFlight(projectEventsOf(resolved.slug, resolved.root), liveAgents)) return; // held in mailbox.jsonl — the wave's last outcome pumps it
+      if (driverWaveInFlight(projectEventsOf(resolved.slug, resolved.root), liveAgents, resolved.slug)) return; // held in mailbox.jsonl — the wave's last outcome pumps it
       await pumpProjectLead(resolved.slug);
     } catch (err) {
       log(`lead-mailbox: peer notification for ${input.task} failed — the outcome stays in the ledger (${messageOf(err)})`);
@@ -1726,10 +1738,24 @@ function contractWorkspaceOf(events: readonly LedgerEvent[], task: string): stri
  * neither a terminal verdict (`gate_finished`) nor a `needs_human` close
  * after it. The wave's last terminal outcome clears the predicate, and that
  * outcome's own peer hook pumps the held batch.
+ *
+ * v0.0.92 (spec §Implementation Decision 4): the live-agents liveness check
+ * runs for EVERY open round — a legacy `spawn_dispatched` with no `worktree`
+ * field is checked by `labels.task` and the spawned agent id, never skipped.
+ * A `Peer` that has terminated, errored, or been archived (the cascade kill
+ * during `Lead handoff`) removes its round immediately, so a dead `Peer` can
+ * never deadlock `drainLeadMailbox` from delivering the successor Lead's
+ * Turn-1 kickoff. The `labels.task` arm stays Project-scoped: two Projects
+ * may share a Task id, and a neighbor's live `Peer` is not this Project's
+ * wave. `agent` is absent on today's `spawn_dispatched` lines (recorded
+ * before any agent exists) — the id arm is the defensive read for any future
+ * writer that stamps it, with the CLI Driver's own `"driver"` marker treated
+ * as absent.
  */
 function driverWaveInFlight(
   events: readonly LedgerEvent[],
   liveAgents?: readonly SurfaceAgentSnapshot[],
+  projectSlug?: string,
 ): boolean {
   const openRounds = new Map<string, Extract<LedgerEvent, { event: "spawn_dispatched" }>>();
   for (const evt of events) {
@@ -1741,14 +1767,18 @@ function driverWaveInFlight(
   }
   if (openRounds.size > 0 && liveAgents !== undefined) {
     for (const [task, spawnEvt] of [...openRounds.entries()]) {
-      const wt = spawnEvt.worktree;
-      if (typeof wt !== "string" || wt === "") continue;
+      const wt = typeof spawnEvt.worktree === "string" && spawnEvt.worktree !== "" ? spawnEvt.worktree : undefined;
+      const stampedAgent = (spawnEvt as { agent?: unknown }).agent;
+      const spawnedAgentId =
+        typeof stampedAgent === "string" && stampedAgent !== "" && stampedAgent !== "driver" ? stampedAgent : undefined;
       const hasRunningPeer = liveAgents.some(
         (agent) =>
           agent.archivedAt === null &&
           (agent.status === "running" || agent.status === "initializing") &&
-          ((typeof agent.cwd === "string" && (agent.cwd === wt || agent.cwd.startsWith(`${wt}/`))) ||
-            agent.labels?.task === task),
+          ((wt !== undefined && typeof agent.cwd === "string" && (agent.cwd === wt || agent.cwd.startsWith(`${wt}/`))) ||
+            (agent.labels?.task === task &&
+              (projectSlug === undefined || agent.labels?.project === undefined || agent.labels?.project === projectSlug)) ||
+            (spawnedAgentId !== undefined && agent.id === spawnedAgentId)),
       );
       if (!hasRunningPeer) openRounds.delete(task);
     }

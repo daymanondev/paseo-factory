@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { copyFileSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { diffBetween, scopeCoversFile, scopeRecoveryCommands } from "../src/workspace.ts";
 import { disposeDir, gitCommitAll, gitCommitChanges, makeTempDir, repoRoot } from "./helpers.ts";
 
@@ -13,6 +13,7 @@ test("scope patterns agree across core, installed shims and Antigravity", (t) =>
   disposeDir(t, dir);
   const hookPath = join(dir, "agy-pre-tool-hook.mjs");
   copyFileSync(join(repoRoot, "plugin/bin/agy-pre-tool-hook.mjs"), hookPath);
+  copyFileSync(join(repoRoot, "plugin/bin/ledger-project.mjs"), join(dirname(hookPath), "ledger-project.mjs"));
   const cases: [string[], string, boolean][] = [
     [["tests/e2e/**", "src/*.ts"], "tests/e2e/board.spec.ts", true],
     [["tests/e2e/**"], "tests/e2e/nested/smoke.spec.ts", true],
@@ -52,6 +53,54 @@ test("scope patterns agree across core, installed shims and Antigravity", (t) =>
     env: { ...process.env, PASEO_FACTORY_SEAT: "agent", PASEO_FACTORY_STATE_DIR: dir, PASEO_FACTORY_TASK: "SCOPE", PASEO_FACTORY_PROJECT_ROOT: dir },
   });
   assert.equal(JSON.parse(allowedMemory.stdout).decision, "allow");
+});
+
+test("the Antigravity hook loads the Task's Contract from the owning Project's isolated ledger when no root ledger exists (v0.0.92, ADR 0045 §1)", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const hookPath = join(dir, "agy-pre-tool-hook.mjs");
+  copyFileSync(join(repoRoot, "plugin/bin/agy-pre-tool-hook.mjs"), hookPath);
+  copyFileSync(join(repoRoot, "plugin/bin/ledger-project.mjs"), join(dirname(hookPath), "ledger-project.mjs"));
+  const slug = "scope-proj-abc123";
+  const projectLedgerDir = join(dir, "projects", slug);
+  mkdirSync(projectLedgerDir, { recursive: true });
+  // The Contract and its Task worktree live ONLY in the Project's isolated
+  // ledger — the legacy root <stateDir>/ledger.jsonl does not exist.
+  writeFileSync(
+    join(projectLedgerDir, "ledger.jsonl"),
+    [
+      JSON.stringify({ seq: 1, ts: "2026-11-04T00:00:00Z", event: "contract_set", task: "P-01", workspace: dir, gate: "true", artifact: "src/main.ts", scope: ["src"] }),
+      JSON.stringify({ seq: 2, ts: "2026-11-04T00:01:00Z", event: "spawn_dispatched", task: "P-01", provider: "pi/zai/glm-5.3", arity: 1, worktree: join(projectLedgerDir, "worktrees", "P-01") }),
+    ].join("\n") + "\n",
+  );
+  const env = {
+    ...process.env,
+    PASEO_FACTORY_SEAT: "agent",
+    PASEO_FACTORY_STATE_DIR: dir,
+    PASEO_FACTORY_TASK: "P-01",
+    PASEO_FACTORY_PROJECT: slug,
+    PASEO_FACTORY_PROJECT_ROOT: dir,
+  };
+  // Scope enforcement works off the Project ledger's Contract (src is in scope).
+  const inScope = spawnSync(process.execPath, [hookPath], {
+    encoding: "utf8", input: JSON.stringify({ tool_name: "write_file", tool_input: { path: "src/main.ts" } }), env,
+  });
+  assert.equal(inScope.status, 0, inScope.stderr);
+  assert.equal(JSON.parse(inScope.stdout).decision, "allow", "the Project ledger's scope governs");
+  // And the fence denies what the Contract's scope does not cover.
+  const outOfScope = spawnSync(process.execPath, [hookPath], {
+    encoding: "utf8", input: JSON.stringify({ tool_name: "write_file", tool_input: { path: "AGENTS.md" } }), env,
+  });
+  assert.equal(JSON.parse(outOfScope.stdout).decision, "deny", "memory writes stay fenced by the Project ledger's Contract");
+
+  // Without PASEO_FACTORY_PROJECT, the per-Project scan still finds the Task's
+  // Contract — the correlation binding is best-effort, the scan is the net.
+  const scanned = spawnSync(process.execPath, [hookPath], {
+    encoding: "utf8",
+    input: JSON.stringify({ tool_name: "write_file", tool_input: { path: "src/main.ts" } }),
+    env: { ...env, PASEO_FACTORY_PROJECT: "" },
+  });
+  assert.equal(JSON.parse(scanned.stdout).decision, "allow", "the per-Project ledger scan resolves the Task without an explicit slug");
 });
 
 test("scope recovery commands quote branch bases and file names for both core and installed shim", () => {

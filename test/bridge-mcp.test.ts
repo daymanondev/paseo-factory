@@ -6,10 +6,11 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { CorrelationRegistry } from "../src/correlations.ts";
 import { createFactory } from "../plugin/server/core/factory.ts";
-import { ensureProjectRegistered } from "../src/project.ts";
+import { ensureProjectRegistered, writeProjectRegistration } from "../src/project.ts";
 import { readLeadMailbox } from "../src/mailbox.ts";
 import { createLeadMailRuntime } from "../plugin/server/lead-mailbox.ts";
 import { startSpool } from "../plugin/server/spool.ts";
+import { createFactoryRegistry } from "../plugin/server/projects.ts";
 
 const BRIDGE_BIN = resolve(import.meta.dirname, "../plugin/bin/bridge.mjs");
 
@@ -243,6 +244,12 @@ test("bridge.mjs executes Supervisor, Lead, and Agent tools end-to-end over the 
   const factory = createFactory({ stateDir, eyeCliProbe: () => false });
   const reg = ensureProjectRegistered(stateDir, repoDir);
   assert.equal(reg.ok, true);
+  // v0.0.92 (ADR 0045 §1): production-parity wiring — the Per-Project Factory
+  // Registry rides BOTH the Spool and the Lead mailbox runtime (one instance
+  // per stateDir), so contracts and spawns land in
+  // <stateDir>/projects/<slug>/ledger.jsonl with NO root <stateDir>/ledger.jsonl
+  // anywhere — exactly the machine the live plugin server runs on.
+  const registry = createFactoryRegistry({ stateDir, root: factory });
 
   const sentPrompts: Array<{ id: string; text: string }> = [];
   const fakeAgents = new Map<string, { id: string; status: string; archivedAt: string | null; cwd: string; labels: Record<string, string> }>([
@@ -273,6 +280,7 @@ test("bridge.mjs executes Supervisor, Lead, and Agent tools end-to-end over the 
   const mailRuntime = createLeadMailRuntime({
     stateDir,
     factory,
+    registry,
     daemon: fakeDaemon as never,
     ensureLead: async () => ({ ok: true, agentId: "lead-1", created: false, projectRoot: repoDir, slug: reg.slug }),
     ensureSupervisor: async () => ({ ok: true, agentId: "sup-1", created: false, projectRoot: repoDir, slug: reg.slug }),
@@ -280,6 +288,7 @@ test("bridge.mjs executes Supervisor, Lead, and Agent tools end-to-end over the 
   });
 
   const spool = startSpool(stateDir, factory, {
+    registry,
     pollMs: 25,
     leadDispatch: mailRuntime.dispatchLead,
     supervisorDispatch: mailRuntime.dispatchSupervisor,
@@ -352,8 +361,21 @@ test("bridge.mjs executes Supervisor, Lead, and Agent tools end-to-end over the 
     const spawnRes = (leadCall[1].result as { isError?: boolean; content: Array<{ text: string }> });
     assert.notEqual(spawnRes.isError, true, spawnRes.content[0].text);
 
-    const worktreePath = factory.worktreeFor("feat-x");
+    // v0.0.92 (ADR 0045 §1): the Contract and the spawn round live in the
+    // Project's ISOLATED ledger — no root ledger ever exists on this machine.
+    const projectLedgerPath = join(stateDir, "projects", reg.slug, "ledger.jsonl");
+    assert.ok(existsSync(projectLedgerPath), `the Project's ledger exists at ${projectLedgerPath}`);
+    assert.equal(existsSync(join(stateDir, "ledger.jsonl")), false, "no legacy root ledger exists");
+    const projectLedgerText = readFileSync(projectLedgerPath, "utf8");
+    assert.match(projectLedgerText, /"contract_set"/);
+    const spawnLine = projectLedgerText.split("\n").filter(Boolean).map((line) => JSON.parse(line)).find((e) => e.event === "spawn_dispatched");
+    assert.ok(spawnLine, "the spawn round is recorded");
+    assert.equal(typeof spawnLine.worktree, "string", "spawn_dispatched carries the resolved Task worktree");
+
+    const projectFactory = registry.factoryForProject(reg.slug);
+    const worktreePath = projectFactory.worktreeFor("feat-x");
     assert.ok(worktreePath, "lead_dispatch_agent must allocate and register the Task worktree");
+    assert.equal(worktreePath, join(stateDir, "projects", reg.slug, "worktrees", "feat-x"));
 
     // 3. Working Agent commits in Task worktree and calls agent_claim (defaulting task & commit to HEAD)
     writeFileSync(join(worktreePath, "feature.txt"), "done\n");
@@ -512,8 +534,13 @@ test("Lead MCP contracts expose no Fresh-eyes option and never forward legacy op
   const stateDir = mkdtempSync(join(tmpdir(), "factory-bridge-retired-eye-"));
   t.after(() => { rmSync(repoDir, { recursive: true, force: true }); rmSync(stateDir, { recursive: true, force: true }); });
   const factory = createFactory({ stateDir, eyeCliProbe: () => true });
-  const lead = new CorrelationRegistry(stateDir).issue({ role: "lead", projectSlug: "demo", projectRoot: repoDir, agentId: "lead-1" });
-  const spool = startSpool(stateDir, factory, { pollMs: 10 });
+  const registration = ensureProjectRegistered(stateDir, repoDir);
+  assert.ok(registration.ok);
+  // v0.0.92 production parity: the registry routes the contracts onto the
+  // Project's isolated ledger; assertions read the Project's Factory.
+  const registry = createFactoryRegistry({ stateDir, root: factory });
+  const lead = new CorrelationRegistry(stateDir).issue({ role: "lead", projectSlug: registration.ok ? registration.slug : "demo", projectRoot: repoDir, agentId: "lead-1" });
+  const spool = startSpool(stateDir, factory, { registry, pollMs: 10 });
   t.after(() => spool.stop());
   const responses = await runMcpSession({
     args: ["--correlation", lead.correlationId, "--state-dir", stateDir], cwd: repoDir,
@@ -523,7 +550,7 @@ test("Lead MCP contracts expose no Fresh-eyes option and never forward legacy op
       { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "LEGACY", gate: "true", artifact: "README.md", freshEyes: true, fresh_eyes: true } } },
     ],
   });
-  const tools = (responses[0]!.result as { tools: Array<{ name: string; inputSchema: { properties: Record<string, unknown> } }> }).tools;
+  const tools = (responses[0]!.result as { tools: Array<{ name: string, inputSchema: { properties: Record<string, unknown> } }> }).tools;
   const contract = tools.find((tool) => tool.name === "lead_set_contract")!;
   assert.equal(contract.inputSchema.properties.freshEyes, undefined);
   assert.equal(contract.inputSchema.properties.fresh_eyes, undefined);
@@ -532,8 +559,10 @@ test("Lead MCP contracts expose no Fresh-eyes option and never forward legacy op
     assert.notEqual(result.isError, true, result.content[0]!.text);
     assert.doesNotMatch(result.content[0]!.text, /fresh eyes ON/);
   }
-  assert.equal(factory.contractFor("DEFAULT")?.freshEyes, undefined);
-  assert.equal(factory.contractFor("LEGACY")?.freshEyes, undefined);
+  const projectFactory = registry.factoryForProject(registration.ok ? registration.slug : "demo");
+  assert.equal(projectFactory.contractFor("DEFAULT")?.freshEyes, undefined);
+  assert.equal(projectFactory.contractFor("LEGACY")?.freshEyes, undefined);
+  assert.equal(existsSync(join(stateDir, "ledger.jsonl")), false, "no root ledger exists");
 });
 
 test("bridge default Spool wait is 600 seconds, including an invalid override", async (t) => {
@@ -575,13 +604,17 @@ test("bridge Task allocation inherits root dependencies and keeps them clean", a
   writeFileSync(join(repoDir, "runtime/private.txt"), "unselected nested private content\n");
   const copiedBridge = join(homeDir, "bridge.mjs");
   copyFileSync(BRIDGE_BIN, copiedBridge);
+  copyFileSync(resolve(import.meta.dirname, "../plugin/bin/ledger-project.mjs"), join(homeDir, "ledger-project.mjs"));
   const commonExclude = readFileSync(join(repoDir, ".git", "info", "exclude"), "utf8");
   const factory = createFactory({ stateDir, eyeCliProbe: () => false });
   const reg = ensureProjectRegistered(stateDir, repoDir);
   assert.equal(reg.ok, true);
-  factory.setContract({ task: "deps", workspace: repoDir, gate: "true", artifact: "README.md", scope: ["README.md"] });
+  // v0.0.92 production parity: the Contract lives in the Project's isolated
+  // ledger (ADR 0045 §1), and the Spool routes through the registry.
+  const registry = createFactoryRegistry({ stateDir, root: factory });
+  registry.factoryForProject(reg.slug).setContract({ task: "deps", workspace: repoDir, gate: "true", artifact: "README.md", scope: ["README.md"] });
   const correlation = new CorrelationRegistry(stateDir).issue({ role: "lead", projectSlug: reg.slug, projectRoot: repoDir });
-  const spool = startSpool(stateDir, factory, { pollMs: 25 });
+  const spool = startSpool(stateDir, factory, { registry, pollMs: 25 });
   const spawnTask = async () => {
     const responses = await runMcpSession({
       script: copiedBridge,
@@ -591,7 +624,7 @@ test("bridge Task allocation inherits root dependencies and keeps them clean", a
     });
     const result = responses[0].result as { isError?: boolean; content: Array<{ text: string }> };
     assert.notEqual(result.isError, true, result.content[0].text);
-    const worktree = factory.worktreeFor("deps");
+    const worktree = registry.factoryForProject(reg.slug).worktreeFor("deps");
     assert.ok(worktree);
     return worktree;
   };
@@ -653,17 +686,21 @@ test("MCP Lead acceptance binds its authenticated role despite forged attributio
   const reg = ensureProjectRegistered(stateDir, repoDir);
   assert.ok(reg.ok);
   const factory = createFactory({ stateDir });
-  factory.setContract({ task: "mcp-bound", workspace: repoDir, gate: "true", artifact: "README.md" });
+  // v0.0.92 production parity: the seeded history and the acceptance land in
+  // the Project's isolated ledger through the registry-routed Spool.
+  const factoryRegistry = createFactoryRegistry({ stateDir, root: factory });
+  const projectFactory = factoryRegistry.factoryForProject(reg.slug);
+  projectFactory.setContract({ task: "mcp-bound", workspace: repoDir, gate: "true", artifact: "README.md" });
   const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoDir, encoding: "utf8" }).trim();
-  await factory.claim({ task: "mcp-bound", sha });
-  factory.ledger.append({ event: "fresh_eyes_written", task: "mcp-bound", attempt: 1, model: "eye", outcome: "concern", finding: "Owner decision needed", durationMs: 1 });
-  const denial = factory.ledger.append({ event: "permit_denied", task: "mcp-bound", agent: "peer", name: "Bash", kind: "tool", rule: "scope", reason: "denied" });
-  const poke = factory.ledger.append({ event: "repoke_dispatched", task: "mcp-bound", agent: "peer" });
-  factory.ledger.append({ event: "needs_human", task: "mcp-bound", reason: "denied-again", evidence: { denial: denial.seq, repoke: poke.seq } });
+  await projectFactory.claim({ task: "mcp-bound", sha });
+  projectFactory.ledger.append({ event: "fresh_eyes_written", task: "mcp-bound", attempt: 1, model: "eye", outcome: "concern", finding: "Owner decision needed", durationMs: 1 });
+  const denial = projectFactory.ledger.append({ event: "permit_denied", task: "mcp-bound", agent: "peer", name: "Bash", kind: "tool", rule: "scope", reason: "denied" });
+  const poke = projectFactory.ledger.append({ event: "repoke_dispatched", task: "mcp-bound", agent: "peer" });
+  projectFactory.ledger.append({ event: "needs_human", task: "mcp-bound", reason: "denied-again", evidence: { denial: denial.seq, repoke: poke.seq } });
   const registry = new CorrelationRegistry(stateDir);
   const lead = registry.issue({ role: "lead", projectSlug: reg.slug, projectRoot: repoDir, agentId: "mcp-lead" });
   const supervisor = registry.issue({ role: "supervisor", projectSlug: reg.slug, projectRoot: repoDir, agentId: "mcp-supervisor" });
-  const spool = startSpool(stateDir, factory, { pollMs: 10 });
+  const spool = startSpool(stateDir, factory, { registry: factoryRegistry, pollMs: 10 });
   t.after(() => spool.stop());
   const refused = await runMcpSession({
     args: ["--correlation", lead.correlationId, "--state-dir", stateDir], cwd: repoDir,
@@ -672,15 +709,16 @@ test("MCP Lead acceptance binds its authenticated role despite forged attributio
   const denied = refused[0]!.result as { isError?: boolean; content: Array<{ text: string }> };
   assert.equal(denied.isError, true);
   assert.match(denied.content[0]!.text, /lead-accept-refused/);
-  assert.equal(factory.ledger.eventsFor("mcp-bound").some((event) => event.event === "attempt_accepted"), false);
+  assert.equal(projectFactory.ledger.eventsFor("mcp-bound").some((event) => event.event === "attempt_accepted"), false);
   const allowed = await runMcpSession({
     args: ["--correlation", supervisor.correlationId, "--state-dir", stateDir], cwd: repoDir,
     requests: [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "supervisor_accept_task", arguments: { task: "mcp-bound", attempt: 1 } } }],
   });
   const accepted = allowed[0]!.result as { isError?: boolean; content: Array<{ text: string }> };
   assert.notEqual(accepted.isError, true);
-  const acceptance = factory.ledger.eventsFor("mcp-bound").find(event => event.event === "attempt_accepted");
+  const acceptance = projectFactory.ledger.eventsFor("mcp-bound").find(event => event.event === "attempt_accepted");
   assert.equal(acceptance?.accepted_by, "supervisor");
+  assert.equal(existsSync(join(stateDir, "ledger.jsonl")), false, "no root ledger exists");
 });
 
 test("bridge lead_dispatch_agent resolves real system git and ignores a broken <stateDir>/bin/git shim on PATH", async (t) => {
@@ -704,7 +742,11 @@ test("bridge lead_dispatch_agent resolves real system git and ignores a broken <
   const factory = createFactory({ stateDir, eyeCliProbe: () => false });
   const reg = ensureProjectRegistered(stateDir, repoDir);
   assert.equal(reg.ok, true);
-  factory.setContract({
+  // v0.0.92 production parity: the Contract lives in the Project's isolated
+  // ledger, the Spool routes through the registry, and the worktree registers
+  // on the Project's Factory (ADR 0045 §1).
+  const registry = createFactoryRegistry({ stateDir, root: factory });
+  registry.factoryForProject(reg.slug).setContract({
     task: "T-01",
     workspace: repoDir,
     gate: "/usr/bin/true",
@@ -716,7 +758,7 @@ test("bridge lead_dispatch_agent resolves real system git and ignores a broken <
     projectRoot: repoDir,
     agentId: "lead-realgit-1",
   });
-  const spool = startSpool(stateDir, factory, { pollMs: 20 });
+  const spool = startSpool(stateDir, factory, { registry, pollMs: 20 });
   t.after(() => spool.stop());
 
   const responses = await runMcpSession({
@@ -742,7 +784,7 @@ test("bridge lead_dispatch_agent resolves real system git and ignores a broken <
 
   const spawnRes = responses[0]!.result as { isError?: boolean; content: Array<{ text: string }> };
   assert.notEqual(spawnRes.isError, true, `Expected lead_dispatch_agent to succeed even with broken <stateDir>/bin/git, got: ${spawnRes.content[0]?.text}`);
-  const worktree = factory.worktreeFor("T-01");
+  const worktree = registry.factoryForProject(reg.slug).worktreeFor("T-01");
   assert.ok(worktree && existsSync(worktree), "Task worktree was allocated using real system git");
 });
 
@@ -753,13 +795,18 @@ test("background MCP spawn reports the dispatched specialist lane", async t => {
   const factory = createFactory({ stateDir, eyeCliProbe: () => false });
   const project = ensureProjectRegistered(stateDir, repo);
   assert.ok(project.ok); if (!project.ok) return;
-  factory.setContract({ task: "specialist", workspace: repo, gate: "true" });
+  // v0.0.92 production parity: the Contract lives in the Project's isolated
+  // ledger and the fake external Driver publishes its dispatch THERE (ADR 0045 §1).
+  const registry = createFactoryRegistry({ stateDir, root: factory });
+  registry.factoryForProject(project.slug).setContract({ task: "specialist", workspace: repo, gate: "true" });
   const correlation = new CorrelationRegistry(stateDir).issue({ role: "lead", projectSlug: project.slug, projectRoot: repo, agentId: "lead-fixture" });
   const bin = join(home, "fixture-bin"); mkdirSync(bin);
   copyFileSync(BRIDGE_BIN, join(bin, "bridge.mjs"));
+  copyFileSync(resolve(import.meta.dirname, "../plugin/bin/ledger-project.mjs"), join(bin, "ledger-project.mjs"));
   writeFileSync(join(home, "endpoint.sock"), "fixture presence marker");
   // The external Driver boundary publishes its actual dispatch, which differs from the configured SLP worker.
-  writeFileSync(join(bin, "factory.mjs"), `import { appendFileSync } from 'node:fs';\nappendFileSync(${JSON.stringify(join(stateDir, "ledger.jsonl"))}, JSON.stringify({ seq: 2, ts: new Date().toISOString(), event: 'spawn_dispatched', task: 'specialist', provider: 'claude/pm-frozen', arity: 1 }) + '\\n');\n`);
+  const projectLedger = join(stateDir, "projects", project.slug, "ledger.jsonl");
+  writeFileSync(join(bin, "factory.mjs"), `import { appendFileSync, mkdirSync } from 'node:fs';\nmkdirSync(${JSON.stringify(join(stateDir, "projects", project.slug))}, { recursive: true });\nappendFileSync(${JSON.stringify(projectLedger)}, JSON.stringify({ seq: 2, ts: new Date().toISOString(), event: 'spawn_dispatched', task: 'specialist', provider: 'claude/pm-frozen', arity: 1 }) + '\\n');\n`);
   const responses = await runMcpSession({ script: join(bin, "bridge.mjs"), cwd: repo, args: ["--home", home, "--state-dir", stateDir, "--correlation", correlation.correlationId], requests: [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_dispatch_agent", arguments: { tasks: ["specialist"] } } }] });
   assert.ok(responses[0].result, JSON.stringify(responses));
   const result = responses[0].result as { isError?: boolean; content: { text: string }[] };
@@ -781,16 +828,20 @@ test("Scrum MCP spawn defaults to the task's frozen specialist roster", async t 
   const seed = ensureScrumConfig(stateDir, project.slug);
   const config = saveScrumConfig(stateDir, { ...seed, lanes: { ...seed.lanes, pm: "claude/pm-frozen" } }, project.slug);
   createScrumRun({ state: stateDir, slug: project.slug, runId: "r", initiativeId: "mcp", config, configRevision: config.configRevision!, track: "backend", rationale: "API", requestId: "create", ownedPaths: [".scratch/mcp/prd.md", ".scratch/mcp/decisions/plan.jsonl"] });
-  const contract = await handleSpoolRequest(factory, { id: "contract", kind: "contract", task: "plan", workspace: repo, gate: "true", role: "pm", runId: "r", submitter: "owner" });
+  // v0.0.92 production parity: the registry routes the contract and the spawn
+  // onto the Project's isolated ledger; the assertion reads the Project's Factory.
+  const factoryRegistry = createFactoryRegistry({ stateDir, root: factory });
+  const contract = await handleSpoolRequest(factory, { id: "contract", kind: "contract", task: "plan", workspace: repo, gate: "true", role: "pm", runId: "r", submitter: "owner" }, {}, factoryRegistry);
   assert.ok(contract.ok, JSON.stringify(contract));
   const correlation = new CorrelationRegistry(stateDir).issue({ role: "lead", projectSlug: project.slug, projectRoot: repo, agentId: "scrum-lead" });
-  const spool = startSpool(stateDir, factory, { pollMs: 20 }); t.after(() => spool.stop());
+  const spool = startSpool(stateDir, factory, { registry: factoryRegistry, pollMs: 20 }); t.after(() => spool.stop());
   const responses = await runMcpSession({ cwd: repo, args: ["--home", home, "--state-dir", stateDir, "--correlation", correlation.correlationId], requests: [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_dispatch_agent", arguments: { tasks: ["plan"] } } }] });
   assert.ok(responses[0].result, JSON.stringify(responses));
   const result = responses[0].result as { isError?: boolean; content: { text: string }[] };
   assert.notEqual(result.isError, true, result.content[0].text);
   assert.match(result.content[0].text, /claude\/pm-frozen/);
-  assert.equal(factory.ledger.events.findLast(e => e.event === "spawn_dispatched")?.provider, "claude/pm-frozen");
+  assert.equal(factoryRegistry.factoryForProject(project.slug).ledger.events.findLast(e => e.event === "spawn_dispatched")?.provider, "claude/pm-frozen");
+  assert.equal(existsSync(join(stateDir, "ledger.jsonl")), false, "no root ledger exists");
 });
 
 test("mode-scoped MCP catalogs isolate schemas and reject cross-mode calls", async () => {
@@ -846,10 +897,13 @@ test("Scrum MCP decisions default the active design identity and keep Lead unabl
   let run = createScrumRun({ state: stateDir, slug: project.slug, runId: "review", initiativeId: "review", config: ensureScrumConfig(stateDir, project.slug), configRevision: 1, track: "ui", rationale: "fixture", ownedPaths: paths, requestId: "create" });
   run = commandRun(stateDir, project.slug, run.runId, { type: "design_review_requested", requestId: "design", expectedRevision: run.revision, design: { revision: 1, digest: designDigest(refs), refs, browserEvidence: [artifactAt(repo, sha, ".scratch/review/mockups/browser.json")] } });
   const factory = createFactory({ stateDir });
+  // v0.0.92 production parity: the registry routes every Scrum command onto the
+  // Project's isolated ledger — the scrumCommand handler receives the Project's Factory.
+  const factoryRegistry = createFactoryRegistry({ stateDir, root: factory });
   const registry = new CorrelationRegistry(stateDir);
   const supervisor = registry.issue({ role: "supervisor", projectSlug: project.slug, projectRoot: repo });
   const lead = registry.issue({ role: "lead", projectSlug: project.slug, projectRoot: repo });
-  const spool = startSpool(stateDir, factory, { pollMs: 10, scrumCommand: async (request, caller) => ({ id: request.id, ok: true, summary: "Scrum", data: await scrumOperation(request, { factory, root: repo, slug: project.slug, ...caller, activeAgents: [], pendingDirectives: false }) }) });
+  const spool = startSpool(stateDir, factory, { registry: factoryRegistry, pollMs: 10, scrumCommand: async (request, caller) => ({ id: request.id, ok: true, summary: "Scrum", data: await scrumOperation(request, { factory: factoryRegistry.factoryForProject(project.slug), root: repo, slug: project.slug, ...caller, activeAgents: [], pendingDirectives: false }) }) });
   t.after(() => spool.stop());
   const call = async (correlation: string, name: string, args: Record<string, unknown>) => (await runMcpSession({ args: ["--state-dir", stateDir, "--correlation", correlation], cwd: repo, requests: [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }] }))[0].result as { isError?: boolean; content: { text: string }[] };
   assert.equal((await call(lead.correlationId, "supervisor_scrum_decision", { decision: "approved", rationale: "spoof" })).isError, true);
@@ -865,4 +919,187 @@ test("Scrum MCP decisions default the active design identity and keep Lead unabl
   assert.match(await (await fetch(mockupUrl)).text(), /Farm/);
   const reserve = await call(lead.correlationId, "lead_scrum_operation", { action: "fix.reserve", task: "farm-fix" }); assert.notEqual(reserve.isError, true, JSON.stringify(reserve));
   assert.equal(readRun(stateDir, project.slug, run.runId).fixRounds, 1);
+});
+
+test("v0.0.92 regression: Lead dispatches a Peer then immediately hands off at 128k — the Peer keeps running in its isolated Task worktree and the Successor Lead's kickoff is held until the Peer stops, then delivered", async () => {
+  const homeDir = mkdtempSync(join(tmpdir(), "factory-bridge-handoff-"));
+  const stateDir = join(homeDir, "plugin-state", "paseo-factory");
+  const repoDir = makeGitRepo();
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
+  const reg = ensureProjectRegistered(stateDir, repoDir);
+  assert.equal(reg.ok, true);
+  const registry = createFactoryRegistry({ stateDir, root: factory });
+
+  interface FakeAgentShape {
+    id: string;
+    status: string;
+    archivedAt: string | null;
+    cwd: string;
+    labels: Record<string, string>;
+    lastUsage?: { contextWindowUsedTokens: number };
+    lastUserMessageAt?: string | null;
+  }
+  const agents = new Map<string, FakeAgentShape>();
+  const sent: Array<{ agentId: string; text: string }> = [];
+  const workspaceDirs = new Map<string, string>();
+  let createdSeq = 0;
+  const registerAgent = (agent: FakeAgentShape) => agents.set(agent.id, agent) && agent;
+
+  const lead: FakeAgentShape = {
+    id: "lead-kick-1",
+    status: "idle",
+    archivedAt: null,
+    cwd: repoDir,
+    labels: { seat: "lead", project: reg.slug },
+    lastUsage: { contextWindowUsedTokens: 128_500 },
+  };
+  registerAgent(lead);
+  const supervisor: FakeAgentShape = { id: "sup-kick-1", status: "idle", archivedAt: null, cwd: repoDir, labels: { seat: "supervisor", project: reg.slug } };
+  registerAgent(supervisor);
+
+  const createAgentIn = (workspaceId: string | undefined, input: { labels?: Record<string, string>; cwd?: string; parent?: string }): string => {
+    createdSeq += 1;
+    const id = `agent-created-${createdSeq}`;
+    const wsCwd = workspaceId !== undefined ? workspaceDirs.get(workspaceId) : undefined;
+    registerAgent({
+      id,
+      status: "idle",
+      archivedAt: null,
+      cwd: wsCwd ?? input.cwd ?? repoDir,
+      labels: { ...(input.labels ?? {}) },
+      ...(input.parent !== undefined && agents.has(input.parent) ? {} : {}),
+      lastUserMessageAt: null,
+    });
+    return id;
+  };
+
+  const fakeDaemon = {
+    agents: {
+      list: async (opts?: { filter?: { labels?: Record<string, string>; includeArchived?: boolean; includeBackground?: boolean } }) => {
+        const wanted = opts?.filter?.labels ?? {};
+        const entries = [...agents.values()]
+          .filter((a) => Object.entries(wanted).every(([k, v]) => a.labels[k] === v))
+          .map((agent) => ({ agent }));
+        return { entries };
+      },
+      ref: (id: string) => ({
+        send: async (text: string) => {
+          sent.push({ agentId: id, text });
+          return { messageId: `msg-${sent.length}` };
+        },
+        cancel: async () => {},
+        archive: async () => {
+          const agent = agents.get(id);
+          if (agent !== undefined) agent.archivedAt = new Date().toISOString();
+        },
+      }),
+    },
+    workspaces: {
+      open: async () => ({ id: "project-workspace-main", projectId: "paseo-project-1" }),
+      create: async (input: { source: { path: string } }) => {
+        const id = `task-workspace-${workspaceDirs.size + 1}`;
+        workspaceDirs.set(id, input.source.path);
+        return { id };
+      },
+      ref: (id: string) => ({ agents: { create: async (input: { labels?: Record<string, string>; parent?: string }) => ({ id: createAgentIn(id, input) }) } }),
+    },
+  };
+
+  let leadRetired = false;
+  const mailRuntime = createLeadMailRuntime({
+    stateDir,
+    factory,
+    registry,
+    daemon: fakeDaemon as never,
+    ensureLead: async () =>
+      leadRetired
+        ? { ok: true, agentId: createAgentIn(undefined, { cwd: repoDir, labels: { seat: "lead", project: reg.slug } }), created: true, projectRoot: repoDir, slug: reg.slug }
+        : { ok: true, agentId: lead.id, created: false, projectRoot: repoDir, slug: reg.slug },
+    ensureSupervisor: async () => ({ ok: true, agentId: supervisor.id, created: false, projectRoot: repoDir, slug: reg.slug }),
+    retireLead: async () => {
+      leadRetired = true;
+      lead.archivedAt = new Date().toISOString();
+      return { ok: true, agentId: lead.id };
+    },
+  });
+
+  const spool = startSpool(stateDir, factory, {
+    registry,
+    pollMs: 25,
+    leadDispatch: mailRuntime.dispatchLead,
+    supervisorDispatch: mailRuntime.dispatchSupervisor,
+    supervisorReport: mailRuntime.reportSupervisor,
+    peerMail: mailRuntime.notifyPeer,
+    daemon: fakeDaemon as never,
+  });
+
+  try {
+    // The rotation state machine keys on the REGISTERED Lead seat — the
+    // seating act surface.leadEnsure performs in production. The root must be
+    // the CANONICAL git root (`resolveProject`'s realpath), the same value the
+    // registration and every workspace comparison key on.
+    const canonicalRoot = reg.ok ? reg.root : repoDir;
+    writeProjectRegistration(stateDir, reg.slug, { root: canonicalRoot, lead: lead.id, supervisor: supervisor.id });
+    const correlations = new CorrelationRegistry(stateDir);
+    const leadCorr = correlations.issue({ role: "lead", projectSlug: reg.slug, projectRoot: canonicalRoot });
+    correlations.associate(leadCorr.correlationId, lead.id);
+
+    // 1. Lead contracts and dispatches the Peer through the bridge — the
+    //    direct Spool path (no daemon socket), production registry wiring.
+    const leadCall = await runMcpSession({
+      args: ["--correlation", leadCorr.correlationId, "--state-dir", stateDir, "--home", homeDir],
+      cwd: repoDir,
+      requests: [
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "T-KICK", gate: "/usr/bin/true", artifact: "README.md", scope: ["README.md"] } } },
+        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_dispatch_agent", arguments: { tasks: ["T-KICK"] } } },
+      ],
+    });
+    const contractRes = leadCall[0].result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.notEqual(contractRes.isError, true, contractRes.content[0].text);
+    const spawnRes = leadCall[1].result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.notEqual(spawnRes.isError, true, spawnRes.content[0].text);
+    assert.match(spawnRes.content[0].text, /worktree: /);
+
+    const worktree = join(stateDir, "projects", reg.slug, "worktrees", "T-KICK");
+    assert.ok(existsSync(worktree), "the Task worktree exists");
+    assert.equal(existsSync(join(stateDir, "ledger.jsonl")), false, "no root ledger exists anywhere");
+    const projectFactory = registry.factoryForProject(reg.slug);
+    const peerAgentId = projectFactory.ledger.eventsFor("T-KICK").findLast((e) => e.event === "spawn_dispatched");
+    assert.ok(peerAgentId, "the spawn round is recorded");
+    const peer = [...agents.values()].find((a) => a.labels.task === "T-KICK");
+    assert.ok(peer, "the Peer agent was created in the Task workspace");
+    assert.equal(peer.cwd, worktree, "the Peer's cwd is the isolated Task worktree, never <project-root>");
+    peer.status = "running";
+
+    // 2. The Lead finishes its dispatch turn already past LEAD_ROTATE_TOKENS —
+    //    the bounded extraction turn, then the retirement + successor creation.
+    await mailRuntime.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [] });
+    await mailRuntime.onLeadTurnEnded({
+      agentId: lead.id,
+      outcome: { kind: "completed" },
+      timeline: [{ type: "assistant_message", text: "# Handoff during T-KICK\nWatch T-KICK to its verdict." }],
+    });
+    assert.equal(lead.archivedAt !== null, true, "the outgoing Lead was retired");
+    assert.equal(peer.archivedAt, null, "the running Peer was NOT cascade-archived by the Lead handoff");
+    assert.equal(peer.status, "running", "the Peer keeps running in its Task worktree");
+
+    const successor = [...agents.values()].find((a) => a.labels.seat === "lead" && a.id !== lead.id);
+    assert.ok(successor, "a fresh Successor Lead was created");
+    assert.equal(sent.filter((s) => s.agentId === successor.id).length, 0, "the Successor's Turn-1 kickoff is held while the Peer runs");
+
+    // 3. The Peer stops (its round stays open — no terminal verdict yet). The
+    //    held kickoff must be delivered immediately: a stopped Peer never
+    //    deadlocks drainLeadMailbox, on a worktree round or a legacy
+    //    worktree-less one alike.
+    peer.status = "idle";
+    await mailRuntime.notifyPeer({ task: "T-KICK", kind: "verdict", text: "T-KICK attempt 1 ended GREEN" });
+    const successorSends = sent.filter((s) => s.agentId === successor.id);
+    assert.equal(successorSends.length, 1, "the Successor Lead receives its Turn-1 kickoff the moment the Peer is no longer live");
+    assert.match(successorSends[0].text, /T-KICK attempt 1 ended GREEN/);
+    assert.match(successorSends[0].text, /# Handoff during T-KICK/);
+  } finally {
+    spool.stop();
+    rmSync(homeDir, { recursive: true, force: true });
+    rmSync(repoDir, { recursive: true, force: true });
+  }
 });

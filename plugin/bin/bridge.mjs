@@ -14,6 +14,10 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+// Per-Project ledger resolution (v0.0.92, ADR 0045 §1): the bridge reads the
+// caller's Project's isolated <stateDir>/projects/<slug>/ledger.jsonl — the
+// legacy root ledger answers only when no per-Project ledger exists.
+import * as ledgerProject from "./ledger-project.mjs";
 
 const DEFAULT_WAIT_MS = 600_000;
 const GIT_TIMEOUT_MS = 15_000;
@@ -1006,17 +1010,16 @@ return module.exports;
 })();
 // END GENERATED LEDGER POLICY
 
-function readLedgerEventsList(stateDir) {
-  const ledgerPath = join(stateDir, "ledger.jsonl");
-  let raw;
-  try { raw = readFileSync(ledgerPath, "utf8"); }
-  catch (error) {
-    if (error.code === "ENOENT") return [];
-    throw new Error(`cannot read ${ledgerPath}: ${error.message}`);
-  }
-  const read = ledgerValidationPolicy.parseLedgerJsonl(raw);
-  if (read.corrupt !== undefined) throw new Error(`${ledgerPath} is not a readable ledger: ${read.corrupt}`);
-  return read.events;
+/**
+ * The bridge's scoped ledger read (v0.0.92, ADR 0045 §1): resolves the caller's
+ * Project's isolated `<stateDir>/projects/<slug>/ledger.jsonl` — explicit slug,
+ * then the correlation/workspace binding, then the Task's unique owner — so a
+ * `contract_set` the plugin just wrote under `projects/<slug>/` is found even
+ * though the legacy root ledger never exists on a migrated machine. The root
+ * ledger remains the fallback for pre-0.0.89 layouts only.
+ */
+function readLedgerEventsList(stateDir, options = {}) {
+  return ledgerProject.readProjectLedgerEvents(stateDir, options).events;
 }
 
 // BEGIN GENERATED TASK STATUS POLICY
@@ -1115,10 +1118,30 @@ return module.exports;
 })();
 // END GENERATED TASK STATUS POLICY
 
-function formatFactoryStatus(stateDir, workspaceFilter) {
-  const events = readLedgerEventsList(stateDir);
-  if (events.length === 0) return `factory: no tasks yet (ledger: ${join(stateDir, "ledger.jsonl")})`;
-  const lines = taskStatusPolicy.taskStatusLines(events, workspaceFilter);
+/**
+ * `factory_status` / `supervisor_read_ledger` (v0.0.92, ADR 0045 §1): a
+ * Project-bound seat reads its own Project's isolated ledger unprefixed; an
+ * unbound seat sees every registered Project's rows, each prefixed with its
+ * Project slug — `factory status`'s aggregate law — falling back to the legacy
+ * root ledger only when no per-Project ledger holds events.
+ */
+function formatFactoryStatus(stateDir, workspaceFilter, options = {}) {
+  const bound = options.projectSlug !== undefined || options.workspace !== undefined;
+  const scoped = readLedgerEventsList(stateDir, options);
+  if (bound) {
+    if (scoped.length === 0) return `factory: no tasks yet (ledger: ${ledgerProject.resolveProjectLedger(stateDir, options).path})`;
+    const lines = taskStatusPolicy.taskStatusLines(scoped, workspaceFilter);
+    return lines.length > 0 ? lines.join("\n") : "factory: no matching tasks";
+  }
+  // Unbound: aggregate every registered Project (each row prefixed with its
+  // Project slug — `factory status`'s law), falling back to the single
+  // resolved stream only when no per-Project ledger holds rows.
+  const streams = ledgerProject.projectLedgerStreams(stateDir)
+    .map((stream) => ({ slug: stream.slug, lines: taskStatusPolicy.taskStatusLines(readLedgerEventsList(stateDir, { project: stream.slug }), workspaceFilter) }))
+    .filter((stream) => stream.lines.length > 0);
+  if (streams.length > 0) return streams.flatMap((stream) => stream.lines.map((line) => `[${stream.slug}] ${line}`)).join("\n");
+  if (scoped.length === 0) return `factory: no tasks yet (ledger: ${ledgerProject.resolveProjectLedger(stateDir, options).path})`;
+  const lines = taskStatusPolicy.taskStatusLines(scoped, workspaceFilter);
   return lines.length > 0 ? lines.join("\n") : "factory: no matching tasks";
 }
 
@@ -1126,7 +1149,7 @@ function formatFactoryStatus(stateDir, workspaceFilter) {
 
 function resolveDefaultWorkerLane(stateDir, projectSlug, task) {
   if (projectSlug && task) {
-    const contract = readLedgerEventsList(stateDir).findLast(e => e.event === "contract_set" && e.task === task);
+    const contract = readLedgerEventsList(stateDir, { projectSlug, task }).findLast(e => e.event === "contract_set" && e.task === task);
     if (contract?.execution?.mode === "scrum") {
       const binding = contract.execution;
       const journal = join(stateDir, "projects", projectSlug, "scrum/runs", binding.runId, "events.jsonl");
@@ -1542,7 +1565,7 @@ async function handleToolCall(name, rawArgs) {
   name = ({ supervisor_read_ledger: "factory_status", lead_dispatch_agent: "lead_spawn_agent", lead_merge: "lead_accept_task" })[name] ?? name;
   if (["lead_create_worktree", "lead_verify", "lead_remove_worktree"].includes(name)) {
     const task = typeof args.task === "string" ? args.task.trim() : "";
-    const events = readLedgerEventsList(ctx.stateDir);
+    const events = readLedgerEventsList(ctx.stateDir, { projectSlug: ctx.projectSlug, workspace: ctx.workspace, task });
     const contract = events.findLast(event => event.event === "contract_set" && event.task === task);
     if (!contract) return toolResult(`unknown-task: ${task}`, true);
     const project = resolveProjectFromDir(contract.workspace, ctx.stateDir);
@@ -1569,7 +1592,17 @@ async function handleToolCall(name, rawArgs) {
   }
   if (name === "factory_status") {
     const ws = typeof args.workspace === "string" && args.workspace.trim() !== "" ? resolve(args.workspace.trim()) : undefined;
-    return toolResult(formatFactoryStatus(ctx.stateDir, ws));
+    // A correlation-bound seat reads its own Project unprefixed (the `--project`
+    // law); an explicit `workspace` argument binds the same way when it names a
+    // registered Project (spec §Implementation Decision 2, arm 1); an unbound
+    // seat aggregates every registered Project, each row prefixed with its slug
+    // (`factory status`'s aggregate law).
+    return toolResult(
+      formatFactoryStatus(ctx.stateDir, ws, {
+        ...(ctx.projectSlug !== undefined ? { projectSlug: ctx.projectSlug } : {}),
+        ...(ctx.projectSlug === undefined && ws !== undefined ? { workspace: ws } : {}),
+      }),
+    );
   }
 
   if (name === "factory_dispatch_supervisor") {
@@ -1753,7 +1786,8 @@ async function handleToolCall(name, rawArgs) {
       }
     }
     if (daemonSockExists && existsSync(factoryBinCandidate)) {
-      const eventsBefore = readLedgerEventsList(ctx.stateDir).length;
+      const ledgerContext = { projectSlug: ctx.projectSlug, workspace: ctx.projectRoot ?? ctx.workspace, tasks };
+      const eventsBefore = readLedgerEventsList(ctx.stateDir, ledgerContext).length;
       const child = spawn(
         process.execPath,
         [
@@ -1785,7 +1819,7 @@ async function handleToolCall(name, rawArgs) {
       let dispatchedLanes = provider;
       const deadline = Date.now() + 4_000;
       while (Date.now() < deadline) {
-        const eventsNow = readLedgerEventsList(ctx.stateDir).slice(eventsBefore);
+        const eventsNow = readLedgerEventsList(ctx.stateDir, ledgerContext).slice(eventsBefore);
         const spawnEvents = eventsNow.filter(
           (e) => (e.event === "spawn_dispatched" || e.event === "spawn_refused") && tasks.includes(e.task),
         );
@@ -1805,7 +1839,7 @@ async function handleToolCall(name, rawArgs) {
     }
 
     // Direct Spool + Task worktree path
-    const events = readLedgerEventsList(ctx.stateDir);
+    const events = readLedgerEventsList(ctx.stateDir, { projectSlug: ctx.projectSlug, workspace: ctx.projectRoot ?? ctx.workspace, tasks });
     const summaries = [];
     for (const task of tasks) {
       let contract;
@@ -1901,7 +1935,7 @@ async function handleToolCall(name, rawArgs) {
       }
     }
     if (!targetAgent) {
-      const events = readLedgerEventsList(ctx.stateDir);
+      const events = readLedgerEventsList(ctx.stateDir, { projectSlug: ctx.projectSlug, workspace: ctx.workspace, task });
       for (let i = events.length - 1; i >= 0; i -= 1) {
         const evt = events[i];
         if (evt.task === task && typeof evt.agent === "string" && evt.agent.trim() !== "") {
@@ -1932,7 +1966,7 @@ async function handleToolCall(name, rawArgs) {
         true,
       );
     }
-    const events = readLedgerEventsList(ctx.stateDir).filter((e) => e.task === task);
+    const events = readLedgerEventsList(ctx.stateDir, { projectSlug: ctx.projectSlug, workspace: ctx.workspace, task }).filter((e) => e.task === task);
     const lastContract = events.findLast((e) => e.event === "contract_set");
     const epochEvents = lastContract ? events.filter((e) => e.seq >= lastContract.seq) : events;
     const hasValidSeqs = seqs.length >= 2 && Number.isInteger(seqs[0]) && seqs[0] > 0 && Number.isInteger(seqs[1]) && seqs[1] > 0;

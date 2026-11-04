@@ -35,8 +35,8 @@ import type { UpgradeInput, UpgradeResult, UpgradePreflight } from "./core/histo
  * request is processed again on boot, opening the next Attempt honestly.
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { FactoryError } from "./core/errors.ts";
 import { usageIsValid } from "./core/ledger.ts";
 import { needsHumanEvidenceIsValid, NEEDS_HUMAN_REASONS } from "./core/events.ts";
@@ -45,6 +45,7 @@ import type { LedgerEvent, MeterUsage, NeedsHumanEvidence, NeedsHumanReason, Ver
 import { CorrelationRegistry, readCorrelations } from "./core/correlations.ts";
 import { loadLanes, parseLane } from "./core/lanes.ts";
 import { listProjectRegistrations, readProjectRegistration, resolveProject, writeProjectRegistration } from "./core/project.ts";
+import { allocateTaskWorktree } from "./core/mcp/worktrees.ts";
 import { ensureProjectRegistered, resolveTargetProject } from "./projects.ts";
 import type { FactoryRegistry, TargetProjectContext } from "./projects.ts";
 import { FACTORY_SEAT_PROVIDER_IDS, formatPeerAgentTitle, formatPeerWorkspaceTitle } from "./roles.ts";
@@ -901,6 +902,48 @@ async function archiveTaskAgentBestEffort(daemon: SurfaceDaemonApi | undefined, 
   }
 }
 
+/**
+ * The Server-Side Task worktree Allocation Invariant (v0.0.92, spec
+ * §Implementation Decision 3): a spawn whose Contract's workspace IS the
+ * Project's git root must never fall back onto `<project-root>` — a Peer
+ * there shares the Lead's own Paseo `workspaceId`, and archiving the outgoing
+ * Lead during `Lead handoff` makes Paseo's `cascadeArchiveChildren` SIGTERM
+ * the running Peer mid-flight. When neither the request nor an existing
+ * unaccepted `factory.worktreeFor(task)` names a worktree, the SERVER
+ * allocates (or reuses) `<projectStateDir>/worktrees/<task>` on
+ * `factory/<task>` itself; a subdirectory workspace keeps the legacy
+ * single-checkout law (no worktree, the branch switches in place). An
+ * allocation git cannot make is a named refusal — `spawn_refused` with the
+ * `spawn:worktree-allocation-failed` rule — never a root-workspace Peer.
+ */
+function resolveSpawnWorktree(
+  factory: Factory,
+  task: string,
+  requested: string | undefined,
+): { worktree?: string; refusal?: { code: string; rule: string; reason: string } } {
+  if (requested !== undefined && requested.trim() !== "") return { worktree: requested };
+  const existing = factory.worktreeFor(task);
+  if (existing !== undefined) return { worktree: existing };
+  const contract = factory.contractFor(task);
+  if (contract === undefined) return {};
+  const project = resolveProject(contract.workspace);
+  if (!project.ok) return {};
+  let isRoot = false;
+  try {
+    isRoot = realpathSync(contract.workspace) === realpathSync(project.root);
+  } catch {
+    isRoot = resolve(contract.workspace) === resolve(project.root);
+  }
+  if (!isRoot) return {};
+  const prepared = allocateTaskWorktree(factory.stateDir, contract, task, factory.ledger.events);
+  if (!prepared.ok) {
+    return { refusal: { code: "worktree-allocation-failed", rule: "spawn:worktree-allocation-failed", reason: prepared.reason ?? "git worktree allocation failed" } };
+  }
+  const allocated = prepared.worktree;
+  if (allocated === undefined) return {}; // the legacy subdirectory arm — unreachable past the isRoot gate
+  return { worktree: allocated };
+}
+
 export async function resolveSpawnWorkspaceAndParent(
   factory: Factory,
   daemon: SurfaceDaemonApi | undefined,
@@ -1691,16 +1734,33 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         frozenLane ?? (sanitizeLane !== undefined && request.provider !== ""
           ? await sanitizeLane(request.provider)
           : request.provider);
+      // The Server-Side Task worktree Allocation Invariant (v0.0.92): resolve
+      // the effective worktree BEFORE the decision — `spawn_dispatched` always
+      // records the resolved path, the Peer is always created inside it, and a
+      // git allocation failure is a named refusal instead of a root-workspace
+      // Peer sharing the Lead's Paseo workspaceId.
+      const spawnWorktree = resolveSpawnWorktree(factory, request.task, request.worktree);
+      if (spawnWorktree.refusal !== undefined) {
+        const event = factory.ledger.append({
+          event: "spawn_refused",
+          task: request.task,
+          provider: request.provider,
+          arity: request.arity,
+          rule: spawnWorktree.refusal.rule,
+          reason: spawnWorktree.refusal.reason,
+        });
+        return { id: request.id, ok: false, code: spawnWorktree.refusal.code, message: spawnWorktree.refusal.reason, event };
+      }
       const decision = factory.requestSpawn({
         task: request.task,
         provider: sanitizedProvider,
         arity: request.arity,
-        ...(request.worktree === undefined ? {} : { worktree: request.worktree }),
+        ...(spawnWorktree.worktree === undefined ? {} : { worktree: spawnWorktree.worktree }),
       });
       if (decision.outcome === "refused") {
         return { id: request.id, ok: false, code: decision.code, message: decision.event.reason, event: decision.event };
       }
-      const spawnMeta = await resolveSpawnWorkspaceAndParent(factory, resolvedDaemon, request.task, request.worktree, home);
+      const spawnMeta = await resolveSpawnWorkspaceAndParent(factory, resolvedDaemon, request.task, spawnWorktree.worktree, home);
       let spawnedAgentId: string | undefined;
       if (request.prompt !== undefined && request.prompt !== "" && resolvedDaemon !== undefined) {
         // The Peer spawns under the `factory-peer` role provider when it can
@@ -1726,7 +1786,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
           effectivePrompt = enriched.join("\n\n");
         }
         spawnedAgentId = await createTaskPeer({ factory, daemon: resolvedDaemon, task: request.task,
-          worktree: request.worktree, provider: peerProvider, prompt: effectivePrompt, home, spawnMeta });
+          worktree: spawnWorktree.worktree, provider: peerProvider, prompt: effectivePrompt, home, spawnMeta });
       }
       return {
         id: request.id,
@@ -1746,6 +1806,23 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         frozenLane ?? (sanitizeLane !== undefined && request.provider !== ""
           ? await sanitizeLane(request.provider)
           : request.provider);
+      // The same allocation invariant rides Respawn BEFORE the decision line:
+      // the recorded spawn round's worktree resolves first, a missing one is
+      // allocated, and a git allocation failure is a named `respawn_refused` —
+      // never a dispatched replacement Peer on `<project-root>` sharing the
+      // Lead's Paseo workspaceId.
+      const respawnWorktreeResolution = resolveSpawnWorktree(factory, request.task, undefined);
+      if (respawnWorktreeResolution.refusal !== undefined) {
+        const event = factory.ledger.append({
+          event: "respawn_refused",
+          task: request.task,
+          provider: request.provider,
+          died_agent: request.died_agent,
+          rule: "spawn:worktree-allocation-failed",
+          reason: respawnWorktreeResolution.refusal.reason,
+        });
+        return { id: request.id, ok: false, code: respawnWorktreeResolution.refusal.code, message: respawnWorktreeResolution.refusal.reason, event };
+      }
       const decision = factory.respawn({
         task: request.task,
         provider: sanitizedProvider,
@@ -1755,7 +1832,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         return { id: request.id, ok: false, code: decision.code, message: decision.event.reason, event: decision.event };
       }
       await archiveTaskAgentBestEffort(resolvedDaemon, request.died_agent);
-      const spawnMeta = await resolveSpawnWorkspaceAndParent(factory, resolvedDaemon, request.task, undefined, home);
+      const spawnMeta = await resolveSpawnWorkspaceAndParent(factory, resolvedDaemon, request.task, respawnWorktreeResolution.worktree, home);
       return {
         id: request.id,
         ok: true,

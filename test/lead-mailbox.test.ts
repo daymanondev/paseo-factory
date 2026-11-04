@@ -1697,14 +1697,23 @@ test('active work tracks both standing-seat deliveries', async t => {
 });
 
 test('active work holds sleep inhibition for Gates and dispatched Task waves', async t => {
-  const { leadMail, projectRoot, factory } = makeSpooledRuntime(t);
+  const { leadMail, projectRoot, factory, fake } = makeSpooledRuntime(t);
   factory.setContract({ task: 'SLEEP-T01', workspace: projectRoot, gate: 'true', artifact: 'README.md' });
   factory.ledger.append({ event: 'gate_started', task: 'SLEEP-T01', attempt: 1, cmd: 'true' });
   assert.equal(await leadMail.hasActiveWork(), true);
   factory.ledger.append({ event: 'gate_finished', task: 'SLEEP-T01', attempt: 1, verdict: 'green', exit: 0, note: 'done' });
   assert.equal(await leadMail.hasActiveWork(), false);
+  // v0.0.92 (spec §Implementation Decision 4): an open spawn round — even one
+  // recorded without a worktree field — holds only while its Peer is LIVE
+  // (matched by labels.task, the stamped agent id, or the worktree cwd); a
+  // dead or absent Peer releases the hold instead of deadlocking it forever.
+  const peer: FakeAgent = { id: 'sleep-wave-peer', status: 'running', cwd: projectRoot, labels: { task: 'SLEEP-T01' } };
+  fake.agents.push(peer);
   factory.ledger.append({ event: 'spawn_dispatched', task: 'SLEEP-T01', provider: 'pi/test', arity: 1 });
   assert.equal(await leadMail.hasActiveWork(), true);
+  peer.status = 'idle';
+  assert.equal(await leadMail.hasActiveWork(), false, 'a stopped Peer releases the wave hold even on a worktree-less spawn round');
+  peer.status = 'running';
   factory.ledger.append({ event: 'needs_human', task: 'SLEEP-T01', reason: 'silent-after-repoke', evidence: { denial: 1, repoke: 2 } });
   assert.equal(await leadMail.hasActiveWork(), false);
 });

@@ -1100,10 +1100,17 @@ if (command === "run") {
   const parsed = parseCommandOptions({
     run: { type: "string" }, role: { type: "string" },
     provider: { type: "string" },
+    project: { type: "string" },
     "wait-secs": { type: "string" },
   });
   const tasks = parsed.positionals;
   if (tasks.length === 0) fail("run: at least one task id is required (factory run <task> [<task>…] [--provider <provider[/model]>])");
+  // v0.0.92 (ADR 0045 §1): `--project <slug>` names the target Project's
+  // isolated ledger explicitly; without it the Driver resolves by cwd or the
+  // unique Task lookup, falling back to the legacy root ledger only on a
+  // machine no per-Project ledger exists on.
+  const projectFlag = typeof parsed.values.project === "string" && parsed.values.project.trim() !== "" ? parsed.values.project.trim() : undefined;
+  const driverLedgerOptions = { ...(projectFlag === undefined ? {} : { project: projectFlag }), workspace: process.cwd(), tasks };
   if (stampedSeat === "supervisor") {
     console.error(
       "factory: supervisor-cannot-contract-or-run: Supervisor cannot call factory run; dispatch the directive to Lead via 'factory lead dispatch --workspace <dir> --message <directive>' and end your turn.",
@@ -1130,7 +1137,7 @@ if (command === "run") {
     const { readDriverLedger, contractFromLedger } = await import("./driver.mjs");
     let anchor;
     try {
-      const events = readDriverLedger(stateDir);
+      const events = readDriverLedger(stateDir, driverLedgerOptions);
       anchor = contractFromLedger(events, tasks[0])?.workspace;
     } catch {
       anchor = undefined; // the driver's own ledger read names the failure
@@ -1148,7 +1155,7 @@ if (command === "run") {
 
   if (parsed.values.run !== undefined || parsed.values.role !== undefined) {
     const { readDriverLedger, contractFromLedger } = await import("./driver.mjs");
-    const events = readDriverLedger(stateDir);
+    const events = readDriverLedger(stateDir, driverLedgerOptions);
     for (const task of tasks) {
       const bound = contractFromLedger(events, task)?.execution;
       if (parsed.values.run !== undefined && parsed.values.run !== bound?.runId || parsed.values.role !== undefined && parsed.values.role !== bound?.role) fail(`task-execution-mismatch: ${task}`);
@@ -1162,6 +1169,7 @@ if (command === "run") {
     spoolRoot,
     tasks,
     provider: resolved.provider,
+    ...(projectFlag === undefined ? {} : { project: projectFlag }),
     waitSecs: waitSeconds(parsed),
   });
   process.exit(code);
@@ -1253,24 +1261,53 @@ if (command === "status") {
 }
 
 if (command === "cost") {
-  const parsed = parseCommandOptions({});
-  if (parsed.positionals.length > 0) fail(`cost: unexpected positional "${parsed.positionals[0]}" — the cost read is whole-ledger always, no filters in v1`);
+  const parsed = parseCommandOptions({ project: { type: "string" } });
+  if (parsed.positionals.length > 0) fail(`cost: unexpected positional "${parsed.positionals[0]}" — scope with --project <slug>, never positionals`);
 
   // The Cost read (v0.0.8, ticket 03 item 4): the same local read as status,
   // shaped for the ladder's cost row. Every duration is ts-derived; every
   // dollar is metered or absent — zero price constants live here (the law).
-  const ledgerPath = join(stateDir, "ledger.jsonl");
-  const read = readLedgerEvents(ledgerPath);
-  if (read.failed !== undefined) {
-    die(`cannot read ${ledgerPath}: ${read.failed instanceof Error ? read.failed.message : String(read.failed)}`);
+  // v0.0.92 (ADR 0045 §1): `--project <slug>` reads that Project's isolated
+  // `<stateDir>/projects/<slug>/ledger.jsonl`; unscoped, every registered
+  // Project's costs render (each row prefixed with its Project slug, matching
+  // `factory status`), falling back to the legacy root ledger only when no
+  // per-Project ledger holds events.
+  const registered = registeredProjectSlugs(stateDir);
+  const readOne = (ledgerPath) => {
+    const read = readLedgerEvents(ledgerPath);
+    if (read.failed !== undefined) {
+      die(`cannot read ${ledgerPath}: ${read.failed instanceof Error ? read.failed.message : String(read.failed)}`);
+    }
+    if (read.corrupt !== undefined) corruptLedger(ledgerPath, read.corrupt);
+    return read.missing ? [] : read.events;
+  };
+  if (typeof parsed.values.project === "string" && parsed.values.project.trim() !== "") {
+    const slug = parsed.values.project.trim();
+    if (!registered.includes(slug)) fail(`cost: project "${slug}" is not registered — the registered Projects are ${registered.join(", ") || "(none)"}`);
+    const events = readOne(join(stateDir, "projects", slug, "ledger.jsonl"));
+    if (events.length === 0) {
+      console.log(`factory: no tasks yet (ledger: ${join(stateDir, "projects", slug, "ledger.jsonl")})`);
+      process.exit(0);
+    }
+    for (const line of costLines(events)) console.log(line);
+  } else {
+    const streams = registered
+      .map((slug) => ({ slug, events: readOne(join(stateDir, "projects", slug, "ledger.jsonl")) }))
+      .filter((stream) => stream.events.length > 0);
+    if (streams.length === 0) {
+      const ledgerPath = join(stateDir, "ledger.jsonl");
+      const events = readOne(ledgerPath);
+      if (events.length === 0) {
+        console.log(`factory: no tasks yet (ledger: ${ledgerPath})`);
+        process.exit(0);
+      }
+      for (const line of costLines(events)) console.log(line);
+    } else {
+      for (const stream of streams) {
+        for (const line of costLines(stream.events)) console.log(`[${stream.slug}] ${line}`);
+      }
+    }
   }
-  if (read.corrupt !== undefined) corruptLedger(ledgerPath, read.corrupt);
-  const events = read.missing ? null : read.events;
-  if (events === null || events.length === 0) {
-    console.log(`factory: no tasks yet (ledger: ${ledgerPath})`);
-    process.exit(0);
-  }
-  for (const line of costLines(events)) console.log(line);
   process.exit(0);
 }
 

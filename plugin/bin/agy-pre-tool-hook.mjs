@@ -17,6 +17,10 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
+// Per-Project ledger candidates under the shared registration law (v0.0.92,
+// ADR 0045 §1) — the durable projects/<slug>/project.json binding decides,
+// never a directory-name guess.
+import { projectLedgerStreams } from "./ledger-project.mjs";
 
 const rawSeatEnv = typeof process.env.PASEO_FACTORY_SEAT === "string" ? process.env.PASEO_FACTORY_SEAT.trim() : "";
 const rawCorrEnv =
@@ -767,26 +771,44 @@ function resolveContext(payload) {
   return { stateDir, seat, projectRoot, projectSlug, task };
 }
 
-function loadContractForTask(stateDir, task) {
+/**
+ * The Task's Contract, read from the OWNING Project's isolated ledger
+ * (v0.0.92, ADR 0045 §1): the correlation-bound `projectSlug` first, then a
+ * scan of every per-Project ledger under `<stateDir>/projects/` for the Task's
+ * `contract_set`, and only then the legacy root `<stateDir>/ledger.jsonl`.
+ * The loose per-line parse stays (a PreToolUse gate must tolerate a mid-write
+ * tail) — resolution picks the FILE, never the parse policy.
+ */
+function loadContractForTask(stateDir, task, projectSlug) {
   if (!stateDir || !task) return null;
-  try {
-    const ledgerPath = join(stateDir, "ledger.jsonl");
-    if (!existsSync(ledgerPath)) return null;
-    const lines = readFileSync(ledgerPath, "utf8").split("\n");
-    let contract = null;
-    let worktree = null;
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      const evt = JSON.parse(line);
-      if (evt.task === task) {
-        if (evt.event === "contract_set") contract = evt;
-        if (evt.event === "spawn_dispatched" && evt.worktree) worktree = evt.worktree;
-      }
-    }
-    return contract ? { ...contract, worktree } : null;
-  } catch {
-    return null;
+  const candidates = [];
+  if (typeof projectSlug === "string" && projectSlug.trim() !== "") {
+    candidates.push(join(stateDir, "projects", projectSlug.trim(), "ledger.jsonl"));
   }
+  for (const stream of projectLedgerStreams(stateDir)) {
+    if (!candidates.includes(stream.path) && existsSync(stream.path)) candidates.push(stream.path);
+  }
+  candidates.push(join(stateDir, "ledger.jsonl"));
+  for (const ledgerPath of candidates) {
+    try {
+      if (!existsSync(ledgerPath)) continue;
+      const lines = readFileSync(ledgerPath, "utf8").split("\n");
+      let contract = null;
+      let worktree = null;
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const evt = JSON.parse(line);
+        if (evt.task === task) {
+          if (evt.event === "contract_set") contract = evt;
+          if (evt.event === "spawn_dispatched" && evt.worktree) worktree = evt.worktree;
+        }
+      }
+      if (contract) return { ...contract, worktree };
+    } catch {
+      // an unreadable candidate is skipped, never trusted
+    }
+  }
+  return null;
 }
 
 function allow() {
@@ -894,7 +916,7 @@ process.stdin.on("end", () => {
   }
 
   if (ctx.seat === "agent") {
-    const contract = loadContractForTask(ctx.stateDir, ctx.task);
+    const contract = loadContractForTask(ctx.stateDir, ctx.task, ctx.projectSlug);
     const baseRoot = stripTrailingSlash(resolve(contract?.worktree ?? contract?.workspace ?? ctx.projectRoot ?? process.cwd()));
     const resolvedState = ctx.stateDir ? stripTrailingSlash(resolve(ctx.stateDir)) : "";
 

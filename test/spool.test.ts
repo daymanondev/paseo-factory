@@ -1500,3 +1500,73 @@ test("Seam 1: an unscoped retro on multiple Projects refuses with retro-project-
   );
   assert.ok(!existsSync(join(stateDir, "projects", slugB, "ledger.jsonl")) || readProjectLedger(stateDir, slugB).every((event) => event.event !== "retro_written"));
 });
+
+test("Seam 2 (v0.0.92): a spawn without worktree on a root-workspace Contract allocates the Task worktree server-side — spawn_dispatched records it, the Peer runs inside it, and its Paseo workspace is never the Lead's", async (t) => {
+  const { stateDir, rootA, slugA, registry } = makeTwinProjects(t);
+  const root = registry.root;
+
+  const contractReply = await handleSpoolRequest(root, { id: "c-alloc", kind: "contract", task: "T-01", workspace: rootA, gate: "true", artifact: "README.md", submitter: "owner" }, {}, registry);
+  assert.ok(contractReply.ok);
+
+  // The daemon census: a live Lead at the Project root, and recorders for every
+  // workspace/agent create the spawn pipeline performs.
+  const workspaceCreates: Array<{ title: string; path: string; projectId?: string }> = [];
+  const agentCreates: Array<{ cwd?: string; workspaceId?: string; parent?: string }> = [];
+  const fakeDaemon = {
+    agents: {
+      list: async (opts?: { filter?: { labels?: Record<string, string>; includeArchived?: boolean } }) => {
+        const wanted = opts?.filter?.labels ?? {};
+        const entries = [
+          { agent: { id: "lead-live", archivedAt: null, status: "idle", cwd: rootA, labels: { seat: "lead", project: slugA } as Record<string, string> } },
+        ].filter(({ agent }) => Object.entries(wanted).every(([k, v]) => agent.labels[k] === v));
+        return { entries };
+      },
+      ref: (id: string) => ({ send: async () => ({}), cancel: async () => {}, archive: async () => {}, id }),
+      create: async (input: { cwd?: string }) => { agentCreates.push({ cwd: input.cwd }); return { id: `agent-${agentCreates.length}` }; },
+    },
+    workspaces: {
+      open: async () => ({ id: "project-workspace-1", projectId: "paseo-proj-1" }),
+      create: async (input: { title: string; source: { path: string; projectId?: string } }) => {
+        workspaceCreates.push({ title: input.title, path: input.source.path, projectId: input.source.projectId });
+        return { id: `task-workspace-${workspaceCreates.length}` };
+      },
+      ref: (id: string) => ({ agents: { create: async (input: { cwd?: string; parent?: string }) => { agentCreates.push({ cwd: input.cwd, parent: input.parent, workspaceId: id }); return { id: `agent-ws-${agentCreates.length}` }; } } }),
+    },
+  };
+
+  // The spawn request carries NO worktree — the v0.0.89 regression shape: the
+  // server must allocate the Task worktree itself, never fall back to
+  // <project-root> sharing the Lead's Paseo workspaceId.
+  const worktree = join(stateDir, "projects", slugA, "worktrees", "T-01");
+  const spawnReply = await handleSpoolRequest(
+    root,
+    { id: "s-alloc", kind: "spawn", task: "T-01", provider: "pi/zai/glm-5.3", arity: 1, prompt: "Execute task T-01: pass gate `true`.", submitter: "owner" },
+    { daemon: fakeDaemon as never },
+    registry,
+  );
+  assert.ok(spawnReply.ok, spawnReply.ok ? "" : spawnReply.message);
+  assert.equal((spawnReply.event as { worktree?: string }).worktree, worktree, "spawn_dispatched records the server-allocated worktree");
+
+  // The Task worktree exists on disk, on its factory/<task> branch.
+  assert.ok(existsSync(worktree), "the server allocated <projectStateDir>/worktrees/<task>");
+  const { execFileSync } = await import("node:child_process");
+  assert.equal(execFileSync("git", ["-C", worktree, "rev-parse", "--abbrev-ref", "HEAD"], { encoding: "utf8" }).trim(), "factory/T-01");
+
+  // The ledger line carries the resolved worktree path.
+  const spawnLine = readProjectLedger(stateDir, slugA).findLast((event) => event.event === "spawn_dispatched");
+  assert.equal(spawnLine?.worktree, worktree, "the Project's ledger records the resolved worktree");
+
+  // A dedicated Paseo workspace was created for the worktree directory —
+  // never the Lead's <project-root> workspace — and the Peer was created
+  // inside that workspace at the worktree cwd.
+  assert.equal(workspaceCreates.length, 1, "exactly one Task worktree workspace is created");
+  assert.equal(workspaceCreates[0]!.path, worktree, "the workspace's directory source is the Task worktree, not <project-root>");
+  assert.equal(workspaceCreates[0]!.projectId, "paseo-proj-1", "the Task workspace still binds to the Project's paseo projectId");
+  // The workspace-scoped create carries no cwd of its own — the workspace's
+  // directory source (the Task worktree, asserted above) IS the Peer's cwd.
+  assert.equal(spawnReply.workspaceId, "task-workspace-1", "the reply names the dedicated Task workspace");
+  assert.equal(spawnReply.leadAgentId, "lead-live");
+  assert.equal(agentCreates.length, 1, "exactly one Peer agent was created");
+  assert.equal(agentCreates[0]!.workspaceId, "task-workspace-1", "the Peer lives in its dedicated Task workspace");
+  assert.equal(agentCreates[0]!.parent, "lead-live", "the Peer is parented on the Lead");
+});

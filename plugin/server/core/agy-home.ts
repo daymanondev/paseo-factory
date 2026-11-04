@@ -141,6 +141,14 @@ export function ensureFactoryBinScripts(stateDir: string, pluginDir?: string): {
       copyFileSync(srcHook, agyHookBinPath);
       chmodSync(agyHookBinPath, 0o755);
     }
+    // v0.0.92: the per-Project ledger resolver both staged binaries import —
+    // without it beside them, `<stateDir>/bin/` runs a broken bridge and hook.
+    const srcLedgerProject = join(sourceBinDir, "ledger-project.mjs");
+    if (existsSync(srcLedgerProject)) {
+      const destLedgerProject = join(binDir, "ledger-project.mjs");
+      copyFileSync(srcLedgerProject, destLedgerProject);
+      chmodSync(destLedgerProject, 0o755);
+    }
     const stagedRuntimeBin = join(stateDir, "runtime-bin");
     if (resolve(sourceBinDir) !== resolve(stagedRuntimeBin)) {
       try {

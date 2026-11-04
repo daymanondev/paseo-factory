@@ -21,7 +21,16 @@ export declare function renderBrief(task: string, pathValue: string, description
 export declare function splitProvider(value: string): { provider: string; model: string | undefined };
 export declare function renderRunBanner(tasks: readonly string[], provider: string): string;
 
-export declare function readDriverLedger(stateDir: string): Record<string, unknown>[];
+/** v0.0.92 (ADR 0045 §1): with resolution options the read lands on the target Project's isolated `<stateDir>/projects/<slug>/ledger.jsonl` (explicit `project`, the invocation `workspace`/cwd, or the unique Task lookup across `tasks`); omitted options keep the legacy root ledger. */
+export interface DriverLedgerOptions {
+  project?: string;
+  projectSlug?: string;
+  workspace?: string;
+  cwd?: string;
+  task?: string;
+  tasks?: readonly string[];
+}
+export declare function readDriverLedger(stateDir: string, options?: DriverLedgerOptions): Record<string, unknown>[];
 export declare function contractFromLedger(events: readonly Record<string, unknown>[], task: string): Record<string, unknown> | undefined;
 export interface DriverOutcome {
   attempt: number;
@@ -156,6 +165,8 @@ export declare function observeTasks(
     spoolRoot: string;
     /** The `provider[/model]` string for ADR 0008 Respawn + dead-agent metering. */
     provider?: string;
+    /** v0.0.92: the run's resolved per-Project ledger context — every watch-loop read lands on the same Project's ledger. */
+    ledgerOptions?: DriverLedgerOptions;
     /** Test knobs (defaults are the fixed laws: ZERO_GROWTH_DEAD_MS, GRACE_MS, RE_STALL_MS). */
     missingDeadMs?: number;
     graceMs?: number;
@@ -172,6 +183,8 @@ export interface RunDriverInput {
   spoolRoot: string;
   tasks: string[];
   provider: string;
+  /** v0.0.92 (ADR 0045 §1): explicit `--project <slug>` — names the target Project's isolated ledger and rides the spawn request. */
+  project?: string;
   waitSecs?: number;
   pollMs?: number;
   staggerMs?: number;

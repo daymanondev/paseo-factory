@@ -50,6 +50,7 @@ import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { readLedgerEvents } from "./ledger-read.mjs";
+import { resolveProjectLedger } from "./ledger-project.mjs";
 import { awaitReply, randomId, submit } from "./spool-client.mjs";
 import { prepareTaskWorkspace } from "./task-worktree.mjs";
 
@@ -166,9 +167,15 @@ export function renderRunBanner(tasks, provider) {
  * records must validate and have strictly increasing safe sequences. A missing ledger is
  * an empty one (the plugin has never run); anything else unreadable throws —
  * the driver refuses to guess.
+ *
+ * v0.0.92 (ADR 0045 §1): with resolution options the read lands on the target
+ * Project's isolated `<stateDir>/projects/<slug>/ledger.jsonl` — explicit
+ * `--project <slug>`, the invocation's cwd, or the unique Task lookup — and
+ * only a context-less read keeps the legacy root ledger (the pre-0.0.89
+ * layout, where the root file is still the truth).
  */
-export function readDriverLedger(stateDir) {
-  const ledgerPath = join(stateDir, "ledger.jsonl");
+export function readDriverLedger(stateDir, options) {
+  const ledgerPath = options === undefined ? join(stateDir, "ledger.jsonl") : resolveProjectLedger(stateDir, options).path;
   const read = readLedgerEvents(ledgerPath);
   if (read.missing) return [];
   if (read.failed !== undefined) throw read.failed;
@@ -845,7 +852,7 @@ export function agentFate(agent) {
 export async function observeTasks(
   rpc,
   entries,
-  { pollMs = POLL_MS, log = () => {}, onTerminal = () => {}, stateDir, spoolRoot, provider, missingDeadMs = ZERO_GROWTH_DEAD_MS, graceMs = GRACE_MS, reStallMs = RE_STALL_MS } = {},
+  { pollMs = POLL_MS, log = () => {}, onTerminal = () => {}, stateDir, spoolRoot, provider, ledgerOptions, missingDeadMs = ZERO_GROWTH_DEAD_MS, graceMs = GRACE_MS, reStallMs = RE_STALL_MS } = {},
 ) {
   const commitTerminal = async (entry, fate, snapshot) => {
     entry.terminal = fate;
@@ -908,7 +915,7 @@ export async function observeTasks(
       }
       return;
     }
-    const events = readDriverLedger(stateDir);
+    const events = readDriverLedger(stateDir, ledgerOptions);
     let lastSpawn;
     let lastGate;
     let lastRespawn;
@@ -1033,7 +1040,7 @@ export async function observeTasks(
           // arithmetic the lane reads the timeline: the death oracle. The
           // agents-list RPC that would disambiguate is not answered on the
           // session socket (verified live: silently dropped).
-          const events = readDriverLedger(stateDir);
+          const events = readDriverLedger(stateDir, ledgerOptions);
           let timeline;
           try {
             timeline = await fetchTimeline(rpc, entry);
@@ -1113,7 +1120,7 @@ export async function observeTasks(
           // The Lead's second insertion (v0.0.10 §1): idle-without-Claim is
           // only a finish when the ledger agrees — a denial-stall matching
           // this classifier's own shape must not end in its silent swallow.
-          const outcome = await runLead(entry, readDriverLedger(stateDir), snapshot);
+          const outcome = await runLead(entry, readDriverLedger(stateDir, ledgerOptions), snapshot);
           if (outcome !== "clear") continue; // the poke's outcome is pending, or the named end already committed
         }
         await commitTerminal(entry, fate, snapshot);
@@ -1302,11 +1309,22 @@ async function submitMeter(spoolRoot, entry, provider, log) {
  * meter is a recorder and never re-judges a green run. Exit 0 iff every task
  * ended green and nothing was refused or failed along the way; else exit 2.
  */
-export async function runDriver({ runId, role, providerExplicit, home, stateDir, spoolRoot, tasks, provider, waitSecs = 60, pollMs = POLL_MS, staggerMs = STAGGER_MS, log = (m) => console.log(m) }) {
+export async function runDriver({ runId, role, providerExplicit, home, stateDir, spoolRoot, tasks, provider, project, waitSecs = 60, pollMs = POLL_MS, staggerMs = STAGGER_MS, log = (m) => console.log(m) }) {
   // These change spawn routing when the driver itself runs under an agent —
   // the driver spawns as itself, never as somebody's child (scout §a caveat).
   delete process.env.PASEO_AGENT_ID;
   delete process.env.PASEO_WORKSPACE_ID;
+
+  // v0.0.92 (ADR 0045 §1): every ledger read this run makes — startup,
+  // watch loop, respawn rider, verdicts — lands on the SAME resolved ledger:
+  // explicit `--project <slug>`, the invocation's cwd, or the unique Task
+  // lookup across the registered per-Project ledgers; the legacy root answers
+  // only when no per-Project ledger exists. The resolved slug also rides the
+  // spawn request so the plugin's spool router needs no Task-lookup guess.
+  const ledgerOptions = { ...(project === undefined ? {} : { project }), workspace: process.cwd(), tasks };
+  const ledgerResolution = resolveProjectLedger(stateDir, ledgerOptions);
+  const driverProjectSlug = ledgerResolution.mode === "project" ? ledgerResolution.slug : undefined;
+  const readLedger = () => readDriverLedger(stateDir, ledgerOptions);
 
   const say = log;
   // Per-task failures (local refusals, spawn refusals, no reply, create
@@ -1329,7 +1347,7 @@ export async function runDriver({ runId, role, providerExplicit, home, stateDir,
     return 2;
   }
 
-  const ledgerAtStart = readDriverLedger(stateDir);
+  const ledgerAtStart = readLedger();
   const entries = [];
   let created = 0;
   for (const task of tasks) {
@@ -1377,6 +1395,7 @@ export async function runDriver({ runId, role, providerExplicit, home, stateDir,
       ...(runId === undefined ? {} : { runId }),
       ...(role === undefined ? {} : { role }),
       ...(providerExplicit === undefined ? {} : { providerExplicit }),
+      ...(driverProjectSlug === undefined ? {} : { projectSlug: driverProjectSlug }),
       task,
       provider,
       arity: tasks.length,
@@ -1452,11 +1471,12 @@ export async function runDriver({ runId, role, providerExplicit, home, stateDir,
     stateDir,
     spoolRoot,
     provider,
+    ledgerOptions,
     onTerminal: async (entry) => {
       if (entry.terminal.fate !== "finished") {
         say(`factory: ${entry.task} agent ${entry.terminal.fate} — ${entry.terminal.reason ?? "no reason given"}`);
       }
-      const outcome = taskOutcome(readDriverLedger(stateDir), entry.task);
+      const outcome = taskOutcome(readLedger(), entry.task);
       say(
         [
           `factory: ${entry.task} — attempt ${outcome.attempt === 0 ? "-" : outcome.attempt}`,
@@ -1473,7 +1493,7 @@ export async function runDriver({ runId, role, providerExplicit, home, stateDir,
 
   // Exit judgement from the ledger as it stands NOW — a task the driver
   // refused, failed to create, or whose agent died is already reported above.
-  const ledgerAtEnd = readDriverLedger(stateDir);
+  const ledgerAtEnd = readLedger();
   let allGreen = entries.every((entry) => {
     if (entry.terminal?.fate !== "finished") return false;
     return taskOutcome(ledgerAtEnd, entry.task).verdict === "green";

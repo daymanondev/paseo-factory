@@ -206,11 +206,66 @@ test("cost treats a missing or empty ledger as no tasks, and refuses positionals
   const positional = await run(["cost", "M-CLAUDE"], { PASEO_HOME: dir });
   assert.equal(positional.status, 2);
   assert.match(positional.stderr, /cost: unexpected positional "M-CLAUDE"/);
-  assert.match(positional.stderr, /whole-ledger always/);
+  assert.match(positional.stderr, /scope with --project/);
 
   writeFileSync(join(stateDir, "ledger.jsonl"), "not json\n");
   const unreadable = await run(["cost"], { PASEO_HOME: dir });
   assert.equal(unreadable.status, 2);
   assert.equal(unreadable.stdout, "");
   assert.match(unreadable.stderr, /not a readable ledger/);
+});
+
+test("v0.0.92 (ADR 0045 §1): cost reads each registered Project's isolated ledger — --project scopes, unscoped aggregates with the [slug] prefix, and never reads an absent root ledger", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const stateDir = join(dir, "plugin-state", "paseo-factory");
+
+  // Two registered Projects, each with its own isolated ledger — and NO root
+  // ledger anywhere (the post-0.0.89 machine shape).
+  const slugA = "alpha-111111";
+  const slugB = "beta-222222";
+  const metered = (task: string, dollars: number, ts: string): Record<string, unknown>[] => [
+    contract(1, task, ts),
+    { seq: 2, ts, event: "spawn_dispatched", task, provider: "claude/claude-sonnet-5", arity: 1 },
+    { seq: 3, ts, event: "claim_reported", task, attempt: 1, sha: full },
+    { seq: 4, ts, event: "gate_started", task, attempt: 1, cmd: "true" },
+    { seq: 5, ts, event: "gate_finished", task, attempt: 1, exit: 0, verdict: "green", note: "", sha: full },
+    { seq: 6, ts, event: "meter_written", task, provider: "claude/claude-sonnet-5", usage: { totalCostUsd: dollars } },
+  ];
+  mkdirSync(join(stateDir, "projects", slugA), { recursive: true });
+  mkdirSync(join(stateDir, "projects", slugB), { recursive: true });
+  writeFileSync(join(stateDir, "projects", slugA, "project.json"), `${JSON.stringify({ root: "/tmp/alpha", slug: slugA }, null, 2)}\n`);
+  writeFileSync(join(stateDir, "projects", slugB, "project.json"), `${JSON.stringify({ root: "/tmp/beta", slug: slugB }, null, 2)}\n`);
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(join(stateDir, "projects", slugA, "ledger.jsonl"), `${metered("A-01", 1.25, "2026-10-10T10:00:00.000Z").map((e) => JSON.stringify(e)).join("\n")}\n`);
+  writeFileSync(join(stateDir, "projects", slugB, "ledger.jsonl"), `${metered("B-01", 2.5, "2026-10-10T11:00:00.000Z").map((e) => JSON.stringify(e)).join("\n")}\n`);
+
+  // Unscoped: every registered Project's rows, each prefixed with its slug —
+  // `factory status`'s aggregate law — never an empty root-ledger read.
+  const aggregate = await run(["cost"], { PASEO_HOME: dir });
+  assert.equal(aggregate.status, 0, aggregate.stderr);
+  assert.match(aggregate.stdout, /^\[alpha-111111\] A-01 .* cost=\$1\.25$/m);
+  assert.match(aggregate.stdout, /^\[beta-222222\] B-01 .* cost=\$2\.50$/m);
+  assert.doesNotMatch(aggregate.stdout, /no tasks yet/);
+
+  // Scoped: one Project's rows, unprefixed.
+  const scoped = await run(["cost", "--project", slugA], { PASEO_HOME: dir });
+  assert.equal(scoped.status, 0, scoped.stderr);
+  assert.match(scoped.stdout, /^A-01 .* cost=\$1\.25$/m);
+  assert.doesNotMatch(scoped.stdout, /B-01/);
+  assert.doesNotMatch(scoped.stdout, /\[/);
+
+  // An unregistered slug is a named refusal, never a guess.
+  const unknown = await run(["cost", "--project", "ghost"], { PASEO_HOME: dir });
+  assert.equal(unknown.status, 2);
+  assert.match(unknown.stderr, /project "ghost" is not registered/);
+
+  // A registered Project with no events yet names ITS ledger, not the root.
+  const slugC = "gamma-333333";
+  mkdirSync(join(stateDir, "projects", slugC), { recursive: true });
+  writeFileSync(join(stateDir, "projects", slugC, "project.json"), `${JSON.stringify({ root: "/tmp/gamma", slug: slugC }, null, 2)}\n`);
+  const emptyProject = await run(["cost", "--project", slugC], { PASEO_HOME: dir });
+  assert.equal(emptyProject.status, 0, emptyProject.stderr);
+  assert.match(emptyProject.stdout, /no tasks yet/);
+  assert.match(emptyProject.stdout, new RegExp(`projects/${slugC}/ledger\\.jsonl`));
 });
