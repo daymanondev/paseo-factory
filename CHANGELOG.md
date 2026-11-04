@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.91] - 2026-11-04
+
 ## [0.0.90] - 2026-11-03
 
 - Fix Paseo Desktop plugin load and self-update (`updateSource`) failure caused by top-level `createRequire(import.meta.url)` in `src/usage-extractor.ts` (`plugin/server/core/usage-extractor.ts`) and `src/agy-transcript.ts`: Paseo compiles `plugin/index.server.ts` into a CommonJS bundle (`format: "cjs"`) where `import.meta` is `{}` (`import.meta.url === undefined`), causing `createRequire(undefined)` to throw `ERR_INVALID_ARG_VALUE` during module evaluation and roll back updates to `v0.0.85`. `loadSqliteSync()` now resolves `node:sqlite` lazily via a CJS-safe synthetic path (`join(process.cwd(), "factory-sqlite.cjs")`), and `scripts/check-bundle.mjs` + `test/installed-artifacts.test.ts` evaluate the compiled server CJS bundle in a CommonJS VM context without `import.meta` or `__dirname`.
