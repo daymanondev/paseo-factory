@@ -759,6 +759,7 @@ test("spec v0.0.94 §3 (ADR 0046 Decision 1): a zcode lane auto-registers agents
   // real /Applications/ZCode.app exists on the Owner's host but never enters a test.
   const absentApp = join(dir, "missing", "ZCode.app", "Contents", "Resources", "glm", "zcode.cjs");
   const registeredZcodeEntry = {
+    label: "ZCode (GLM Coding Plan)",
     extends: "acp",
     command: ["npx", "-y", "zcode-acp-server@0.82.1"],
     env: {
@@ -834,8 +835,9 @@ test("spec v0.0.94 §3 (ADR 0046 Decision 1): a zcode lane auto-registers agents
     env: { ZCODE_ACP_QUOTA_AUTO_RESUME: "1" },
   };
   writeConfig(healHome, healConfig);
-  assert.equal(healFactoryRoleProvidersInConfig(healHome, { zcodeAppPath: absentApp }), true, "the heal fills the missing factory-safe env keys");
+  assert.equal(healFactoryRoleProvidersInConfig(healHome, { zcodeAppPath: absentApp }), true, "the heal fills the missing factory-safe env keys and required label");
   assert.equal(healFactoryRoleProvidersInConfig(healHome, { zcodeAppPath: absentApp }), false, "the second heal is a no-op");
+  assert.equal(providersOf(healHome).zcode?.label, "ZCode (GLM Coding Plan)", "the heal defaults the required Paseo custom-provider label when absent");
   assert.deepEqual(providersOf(healHome).zcode?.env, {
     ZCODE_DYNAMIC_WORKFLOW_MODE: "disabled",
     ZCODE_ACP_QUOTA_AUTO_RESUME: "1",

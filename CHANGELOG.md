@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.95] - 2026-11-05
+
+- Fix Paseo `ProviderOverridesSchema` validation failure (`agents.providers.zcode.label: Custom provider "zcode" must declare label.`) during `PluginService.updateSource`: `ensureBaseZcodeProvider` in `src/role-providers.ts` (`plugin/server/core/role-providers.ts`) now sets `label: "ZCode (GLM Coding Plan)"` when registering or healing `agents.providers.zcode` (preserving any non-empty user-provided `label`), so Paseo's `DaemonConfigStore` persists `<paseoHome>/config.json` and completes `daemon.config.reload` cleanly without timing out on plugin update.
+
 ## [0.0.94] - 2026-11-05
 
 - First-class `zcode` harness integration via `zcode-acp-server@0.82.1` (ADR 0046): `paseo-factory` can now run every SLP and Agile Scrum seat on `zcode/GLM-5.3:<effort>` lanes for the full +150% ZCode Coding Plan quota bonus. `src/role-providers.ts` auto-registers and self-heals the `"zcode"` base provider (`extends: "acp"`, `command: ["npx", "-y", "zcode-acp-server@0.82.1"]`, factory-safe env: `ZCODE_DYNAMIC_WORKFLOW_MODE=disabled`, `ZCODE_ACP_QUOTA_AUTO_RESUME=0`, `ZCODE_ACP_QUOTA_BOOT_NOTICE=0`) whenever any lane uses `zcode/...` or ZCode Desktop's `zcode.cjs` is installed, preserving user-set entries and only defaulting absent env keys.

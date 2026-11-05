@@ -172,6 +172,7 @@ const FALLBACK_BUILTIN_ORDER = ["opencode", "copilot", "claude", "codex", "omp",
  * version the ADR validated against ZCode `v0.17.1` / App `v3.17.2`.
  */
 const ZCODE_ACP_COMMAND = ["npx", "-y", "zcode-acp-server@0.82.1"] as const;
+const ZCODE_BASE_LABEL = "ZCode (GLM Coding Plan)";
 
 /**
  * The factory-safe defaults on the base `agents.providers.zcode` env (ADR 0046
@@ -344,6 +345,7 @@ function ensureBaseZcodeProvider(providers: Record<string, PaseoProviderEntry>, 
   if (!wanted) return;
   const entry = providers.zcode;
   const userRecord = isRecord(entry) ? (entry as PaseoProviderEntry) : {};
+  const userLabel = typeof userRecord.label === "string" && userRecord.label.trim() !== "" ? userRecord.label : undefined;
   const userEnv = isRecord(userRecord.env) ? (userRecord.env as Record<string, string>) : undefined;
   const userExtends = typeof userRecord.extends === "string" && userRecord.extends !== "" ? userRecord.extends : undefined;
   const userCommand =
@@ -352,6 +354,7 @@ function ensureBaseZcodeProvider(providers: Record<string, PaseoProviderEntry>, 
       : undefined;
   providers.zcode = {
     ...userRecord,
+    label: userLabel ?? ZCODE_BASE_LABEL,
     extends: userExtends ?? "acp",
     command: userCommand ?? [...ZCODE_ACP_COMMAND],
     env: {
