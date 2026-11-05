@@ -1,4 +1,4 @@
-import { SLP_ROLE_SKILLS } from "./core/scrum/skill-hub.ts";
+import { SLP_ROLE_SKILLS, resolveRoleSkillsForProject } from "./core/scrum/skill-hub.ts";
 import { discoverHelperMcps, resolveRoleScopedMcpServers, syncHelperMcps } from "./core/helper-mcp-sync.ts";
 import { buildRoleKickoffPrompt } from "./core/roles-contract.ts";
 import { readRun as readScrumRun } from "./core/scrum/run-journal.ts";
@@ -149,7 +149,10 @@ export function factoryEnvFor(
   ensureFactoryBinScripts(input.stateDir);
   const environment = restoreLegacyUiEnvironment({ ...process.env, ...input.environment });
   const execution = input.execution === null ? undefined : input.execution ?? resolveScrumIdentity(input.stateDir, input.project.slug, input.task);
-  const roleHome = execution !== undefined ? provisionScrumHarness({ state: input.stateDir, slug: input.project.slug, authority: role, identity: execution, generation: input.correlationId ?? "initial", userHome: input.userHome, environment, workspace: input.task ? join(input.stateDir, "projects", input.project.slug, "worktrees", input.task) : input.project.root }) : provisionPiAgentHome({
+  const workspace = input.task !== undefined
+    ? join(input.stateDir, "projects", input.project.slug, "worktrees", input.task)
+    : input.project.root;
+  const roleHome = execution !== undefined ? provisionScrumHarness({ state: input.stateDir, slug: input.project.slug, authority: role, identity: execution, generation: input.correlationId ?? "initial", userHome: input.userHome, environment, workspace }) : provisionPiAgentHome({
     stateDir: input.stateDir,
     role,
     sourceAgentDir: join(input.userHome ?? homedir(), ".pi", "agent"),
@@ -173,6 +176,13 @@ export function factoryEnvFor(
   // seat's `ZCODE_*` storage env rides — a factory provider resolves through
   // the role's Lane config, a raw provider through its own family — so the
   // config fence and the child env can never disagree on the harness.
+  // Since v0.2.0 (ADR 0049 §1) a Scrum execution reroutes the clean room under
+  // `<projectStateDir>/scrum/zcode-home/...` (the twin of the Pi
+  // `scrum/harness` hierarchy provisioned above, same `generation`) and pairs
+  // it with the rendered Scrum contract plus the Scrum role-scoped skill
+  // allowlist — the file channel `zcode.cjs` reloads every turn, since
+  // `config.systemPrompt` never rides ACP. SLP calls (no execution) stay
+  // byte-identical to the pre-Scrum shape.
   if (resolveEffectiveProviderFamily(input.provider, role, input.stateDir, input.project.slug, input.task) === "zcode") {
     Object.assign(env, provisionZcodeHome({
       stateDir: input.stateDir,
@@ -180,6 +190,35 @@ export function factoryEnvFor(
       projectSlug: input.project.slug,
       ...(input.task !== undefined ? { task: input.task } : {}),
       ...(input.userHome !== undefined ? { userHome: input.userHome } : {}),
+      ...(execution === undefined ? {} : {
+        scrum: execution.kind === "seat"
+          ? { kind: "seat", selectionRevision: execution.selectionRevision, generation: input.correlationId ?? "initial", authority: role }
+          : { kind: "task", runId: execution.binding.runId, task: execution.task, epoch: execution.epoch },
+        systemPrompt: renderScrumPrompt(execution.kind === "task" ? execution.binding.role : role as "supervisor" | "lead", {
+          project: input.project.slug,
+          workspace,
+          ...(execution.kind === "task"
+            ? {
+                run: readScrumRun(input.stateDir, input.project.slug, execution.binding.runId),
+                task: execution.task,
+                runId: execution.binding.runId,
+                epoch: execution.epoch,
+              }
+            : {}),
+        }),
+        // The Scrum supervisor keeps full host skills minus the Owner-only
+        // `factory` skill (the provisioner's Scrum-supervisor policy); the
+        // Scrum lead and every specialist get exactly their role-scoped set.
+        ...(role === "supervisor" ? {} : {
+          allowedSkills: resolveRoleSkillsForProject({
+            role: execution.kind === "task" ? execution.binding.role : role as "lead",
+            projectRoot: execution.projectRoot ?? readProjectRegistration(input.stateDir, input.project.slug)?.root,
+            configuredPacks: execution.configuredPacks ?? readExecution(input.stateDir, input.project.slug).skillPacks,
+            contractSkills: execution.contractSkills,
+            userHome: input.userHome,
+          }),
+        }),
+      }),
     }));
   }
   return env;
