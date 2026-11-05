@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Build infra (outside the four v0.2.0 spec pillars): `scripts/check-bundle.mjs` strips the git pre-commit hook's exported `GIT_DIR`/`GIT_WORK_TREE`/`GIT_INDEX_FILE`/`GIT_OBJECT_DIRECTORY`/`GIT_ALTERNATE_OBJECT_DIRECTORIES` from the inner `git ls-files --cached` environment, so the Hermes bundle check builds its tracked plugin copy from the correct root inside linked worktrees — previously every commit in a linked worktree failed the pre-commit hook with vanishing bundle entries even with no content change. Pinned by `test/shell.test.ts` ("check-bundle stays green under the git hook environment").
+
 ## [0.1.0] - 2026-11-05
 
 - Per-Project Lead notebook and seat-only write fence (ADR 0048 §1): `projectNotebookPath` / `readProjectNotebook` (`src/project.ts`) with `PROJECT_NOTEBOOK_MAX_LINES = 80` and `PROJECT_NOTEBOOK_MAX_BYTES = 4096` deterministic truncation (line cap first, then UTF-8 byte cap with character-boundary back-off), stored at `<stateDir>/projects/<slug>/notebook.md` outside `<project-root>` so contracted working `Peer`s never load it into context; the `Choke` seat write fence (`isProtectedFactoryStatePath`, `src/choke.ts`) allows `Lead`/`Supervisor` seat writes to `/projects/<slug>/notebook.md` alongside `lead-handoff.md` while the `Peer` worktree fence keeps denying it, and `$FACTORY_STATE_DIR` / `$PASEO_FACTORY_STATE_DIR` shell spellings are expanded before judging seat and peer file/shell writes so the documented heredoc redirect shape actually reaches the fence.
