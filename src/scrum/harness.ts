@@ -14,7 +14,7 @@ import { readExecution, readScrumConfig, scopeDir } from "./config.ts";
 import { readLedgerEvents } from "../ledger-read.ts";
 import { readRun, listRuns, terminalRun } from "./run-journal.ts";
 import { SCRUM_ROLE_SKILLS, renderScrumPrompt } from "./prompts.ts";
-import type { ScrumTaskBinding } from "./types.ts";
+import type { ScrumRoleName, ScrumTaskBinding } from "./types.ts";
 export type ScrumHarnessIdentity = ({ projectRoot?: string; configuredPacks?: string[]; contractSkills?: string[] } & (
   | {
       kind: "seat";
@@ -143,6 +143,7 @@ export function provisionScrumHarness(input: {
     role: authority,
     roleHome,
     sourceAgentDir: join(input.userHome ?? homedir(), ".pi/agent"),
+    helperMcpSources: { userHome: input.userHome ?? homedir() },
     appendSystemPrompt: renderScrumPrompt(role, {
       project: slug,
       workspace: input.workspace ?? (identity.kind === "task" ? join(scopeDir(state, slug), "worktrees", identity.task) : readProjectRegistration(state, slug)?.root),
@@ -182,16 +183,36 @@ export function provisionScrumHarness(input: {
   rmSync(join(roleHome, 'skills'), { recursive: true, force: true });
   settings.skills = ['!*', ...skills.map(s => `+${join(input.userHome ?? homedir(), '.agents/skills', s)}`)];
   writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
-  if (identity.kind === "task") {
-    // Planning roles get research helpers, UX/Dev/QA may additionally use vision.
-    if (["pm", "architect"].includes(identity.binding.role)) {
-      const path = join(roleHome, "mcp.json"),
-        mcp = JSON.parse(readFileSync(path, "utf8"));
-      if (mcp.mcpServers) delete mcp.mcpServers["zai-vision"];
+  {
+    // The same denylist both enforcement points consult (v0.2.0, ADR 0049 §3):
+    // the synced Owner catalog now reaches every Scrum Pi home, so each role's
+    // mcp.json drops exactly the servers isScrumRoleBlockedHelperMcp withholds —
+    // planning roles lose the visual/browser set, seats keep the bridge alone.
+    const path = join(roleHome, "mcp.json"),
+      mcp = JSON.parse(readFileSync(path, "utf8"));
+    if (mcp.mcpServers) {
+      for (const name of Object.keys(mcp.mcpServers))
+        if (isScrumRoleBlockedHelperMcp(role, name)) delete mcp.mcpServers[name];
       writeFileSync(path, JSON.stringify(mcp, null, 2) + "\n");
     }
   }
   return roleHome;
+}
+
+/**
+ * The single Helper MCP denylist predicate every Scrum filter consults
+ * (v0.2.0, ADR 0049 §3): standing seats keep only the factory bridge, while
+ * specialists pass the whole Owner-synced catalog through untouched except
+ * `pm`/`architect`, from which the visual/browser/UI-canvas inspection
+ * servers below are withheld. The regex is anchored and exact-match — it
+ * withholds only the named servers, never substring cousins, deliberately
+ * unlike the unanchored allowlists it replaced.
+ */
+const SCRUM_VISUAL_BROWSER_MCP_DENYLIST = /^(?:zai-vision|zai-mcp-server|chrome-devtools(?:-mcp)?|playwright(?:-mcp)?|open-design|open_design)$/i;
+export function isScrumRoleBlockedHelperMcp(role: ScrumRoleName | "supervisor" | "lead", serverName: string): boolean {
+  if (serverName === "paseo_factory" || serverName === "paseo-factory") return false;
+  if (role === "supervisor" || role === "lead") return true;
+  return (role === "pm" || role === "architect") && SCRUM_VISUAL_BROWSER_MCP_DENYLIST.test(serverName);
 }
 
 /** The same authority/tool policy is applied to every supported provider's create request. */
@@ -209,17 +230,18 @@ export function scopeScrumCapabilities<
   roleHome?: string,
   skillOptions: { projectRoot?: string; configuredPacks?: string[]; contractSkills?: string[]; userHome?: string } = {},
 ): T {
-  const helpers =
-    identity.kind === "task" &&
-    ["ux", "dev", "qa"].includes(identity.binding.role)
-      ? /context7|exa|search|research|vision|chrome|playwright|browser|open-design|open_design|expo|supabase|firebase/i
-      : /context7|exa|search|research|notion|open-design|open_design|expo|supabase|firebase/i;
+  const scrumRole =
+    identity.kind === "task"
+      ? identity.binding.role
+      : authority === "supervisor"
+        ? "supervisor"
+        : "lead";
   const mcpServers = Object.fromEntries(
     Object.entries(config.mcpServers ?? {}).filter(
       ([name]) =>
         name === "paseo_factory" ||
         name === "paseo-factory" ||
-        (authority === "agent" && helpers.test(name)),
+        (authority === "agent" && !isScrumRoleBlockedHelperMcp(scrumRole, name)),
     ),
   );
   const skills = resolveRoleSkillsForProject({ ...identity, ...skillOptions, role: identity.kind === 'task' ? identity.binding.role : authority === 'supervisor' ? 'supervisor' : 'lead' });
