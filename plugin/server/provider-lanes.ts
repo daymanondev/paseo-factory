@@ -1,5 +1,5 @@
 /** The mode-aware lane and provider configuration shared by create and permission hooks. */
-import { loadLanes, normalizeZcodeRuntimeModelId, parseLane } from "./core/lanes.ts";
+import { loadLanes, normalizeZcodeRuntimeModelId, parseLane, stripZcodeProviderPrefix } from "./core/lanes.ts";
 import {
   resolveScrumIdentity,
   scrumIdentityLane,
@@ -26,13 +26,15 @@ export function findCatalogModelMeta(
   const models = entry?.models;
   if (models === undefined || models === null) return undefined;
   const strippedModel = model.replace(/^[^/]+\//, "");
+  const strippedZcodeModel = stripZcodeProviderPrefix(strippedModel);
   return models.find(
     (m) =>
       m.id === model ||
       `${provider}/${m.id}` === model ||
       m.id === `${provider}/${model}` ||
       m.id === strippedModel ||
-      m.id.replace(/^[^/]+\//, "") === strippedModel,
+      m.id.replace(/^[^/]+\//, "") === strippedModel ||
+      (provider === "zcode" && stripZcodeProviderPrefix(m.id.replace(/^[^/]+\//, "")) === strippedZcodeModel),
   );
 }
 

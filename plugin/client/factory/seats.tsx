@@ -132,7 +132,8 @@ function splitLaneParts(raw: string): { provider: string; model: string; thinkin
   const provider = first.slice(0, slash);
   const rest = first.slice(slash + 1);
   const colon = rest.lastIndexOf(":");
-  if (colon === -1) return { provider, model: rest, thinking: "" };
+  const lastSep = Math.max(rest.lastIndexOf("\\"), rest.lastIndexOf("/"));
+  if (colon === -1 || colon < lastSep) return { provider, model: rest, thinking: "" };
   return { provider, model: rest.slice(0, colon), thinking: rest.slice(colon + 1) };
 }
 
@@ -234,7 +235,10 @@ function LaneModalBody({
     const nextModels = available.find((entry) => entry.provider === nextProvider)?.models ?? null;
     if (nextModels !== null && nextModels.length > 0) {
       const existing = nextModels.find((m) => m.id === model);
-      const targetModel = existing ?? nextModels.find((m) => m.id === "zai/glm-5.3") ?? nextModels[0]!;
+      const targetModel =
+        existing ??
+        nextModels.find((m) => m.id === "GLM-5.3" || m.id === "zai/glm-5.3" || m.id === "builtin:zai-coding-plan\\GLM-5.3") ??
+        nextModels[0]!;
       if (!existing) {
         setModel(targetModel.id);
       }

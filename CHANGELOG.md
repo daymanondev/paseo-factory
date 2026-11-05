@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.96] - 2026-11-05
+
+- Normalize `zcode` model catalog entries in `refreshProviders` (`plugin/server/surface-rpc.ts`): sort `builtin:zai-coding-plan\` models (`GLM-5.3`, `GLM-5.3-Flash`) to the top of `zcode`'s model list ahead of any legacy custom entries and strip `"builtin:zai-coding-plan\\"` from their catalog `id` so the Seats & Scrum UI pickers display, default-select, and save clean `zcode/GLM-5.3` / `zcode/GLM-5.3:high` lanes, while in-place live-seat `setAgentModel` calls normalize `zcode` models via `normalizeZcodeRuntimeModelId`.
+- Fix `parseLane` (`src/lanes.ts`), `splitLaneParts` (`plugin/client/factory/seats.tsx`), and Scrum role cards (`plugin/client/factory/scrum.tsx`) so colons inside runtime provider prefixes (`builtin:zai-coding-plan\...`, `custom:cliproxyapi\...`) are never mistaken for `:thinking` suffixes when no `:thinking` suffix is present.
+
 ## [0.0.95] - 2026-11-05
 
 - Fix Paseo `ProviderOverridesSchema` validation failure (`agents.providers.zcode.label: Custom provider "zcode" must declare label.`) during `PluginService.updateSource`: `ensureBaseZcodeProvider` in `src/role-providers.ts` (`plugin/server/core/role-providers.ts`) now sets `label: "ZCode (GLM Coding Plan)"` when registering or healing `agents.providers.zcode` (preserving any non-empty user-provided `label`), so Paseo's `DaemonConfigStore` persists `<paseoHome>/config.json` and completes `daemon.config.reload` cleanly without timing out on plugin update.

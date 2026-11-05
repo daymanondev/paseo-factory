@@ -2775,7 +2775,8 @@ function parseLane(value) {
   const rest = value.slice(slash + 1);
   if (provider.trim() === "" || rest.trim() === "") return void 0;
   const colon = rest.lastIndexOf(":");
-  if (colon === -1) return { provider, model: rest };
+  const lastSep = Math.max(rest.lastIndexOf("\\"), rest.lastIndexOf("/"));
+  if (colon === -1 || colon < lastSep) return { provider, model: rest };
   const model = rest.slice(0, colon);
   const thinking = rest.slice(colon + 1);
   if (model.trim() === "" || thinking.trim() === "") return void 0;

@@ -1009,7 +1009,11 @@ export function ScrumSeatsPane({
           const lane = config.lanes[card.lanes[0]!],
             slash = lane.indexOf("/"),
             provider = lane.slice(0, slash),
-            model = lane.slice(slash + 1).split(":")[0]!;
+            rest = lane.slice(slash + 1),
+            colon = rest.lastIndexOf(":"),
+            lastSep = Math.max(rest.lastIndexOf("\\"), rest.lastIndexOf("/")),
+            model = colon === -1 || colon < lastSep ? rest : rest.slice(0, colon),
+            thinking = colon === -1 || colon < lastSep ? "default" : rest.slice(colon + 1);
           const meta = view.providers
             .find((p) => p.provider === provider)
             ?.models?.find((m) => m.id === model);
@@ -1052,7 +1056,7 @@ export function ScrumSeatsPane({
                 <Text style={text(theme, "code")}>{model}</Text>
                 <Pill
                   theme={theme}
-                  label={`thinking: ${lane.includes(":") ? lane.slice(lane.lastIndexOf(":") + 1) : "default"}`}
+                  label={`thinking: ${thinking}`}
                 />
               </View>
               <Text style={text(theme, "meta")}>{card.hint}</Text>

@@ -1107,3 +1107,19 @@ test("mergeLaneProfilesFiles: newer edit wins, deletion tombstones win, disjoint
   assert.equal(revived.profiles.gone!.name, "Gone revived");
   assert.equal(revived.deleted?.gone, undefined, "the stale tombstone retires when the re-save is newer");
 });
+
+test("parseLane preserves a colon inside a zcode runtime model prefix when no :thinking suffix is present", () => {
+  assert.deepEqual(core.parseLane("zcode/builtin:zai-coding-plan\\GLM-5.3"), {
+    provider: "zcode",
+    model: "builtin:zai-coding-plan\\GLM-5.3",
+  });
+  assert.deepEqual(core.parseLane("zcode/builtin:zai-coding-plan\\GLM-5.3:high"), {
+    provider: "zcode",
+    model: "builtin:zai-coding-plan\\GLM-5.3",
+    thinking: "high",
+  });
+  assert.deepEqual(core.parseLane("zcode/custom:cliproxyapi\\claude-sonnet-4-6"), {
+    provider: "zcode",
+    model: "custom:cliproxyapi\\claude-sonnet-4-6",
+  });
+});
