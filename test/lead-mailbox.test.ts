@@ -12,7 +12,7 @@ import { ensureProjectRegistered, readProjectRegistration, writeProjectRegistrat
 import { createSurfaceHandlers } from "../plugin/server/surface-rpc.ts";
 import type { SurfaceDaemonApi } from "../plugin/server/surface-rpc.ts";
 import { handleSpoolRequest, parseSpoolRequest, spoolRootFor, startSpool } from "../plugin/server/spool.ts";
-import { createLeadMailRuntime, HANDOFF_EXTRACTION_TIMEOUT_MS, isBlockedByAttention } from "../plugin/server/lead-mailbox.ts";
+import { createLeadMailRuntime, HANDOFF_EXTRACTION_TIMEOUT_MS, isBlockedByAttention, LEAD_HANDOFF_MAX_BYTES } from "../plugin/server/lead-mailbox.ts";
 import { disposeDir, gitCommitAll, makeTempDir } from "./helpers.ts";
 
 const POLL_MS = 20;
@@ -1820,7 +1820,8 @@ test('a stopped worktree Peer no longer holds the active-work sleep assertion', 
 });
 
 
-test("Lead handoff persists the final Markdown reply, caps UTF-8 at 24 KB, and prefers it over a disk fallback", async t => {
+test("Lead handoff persists the final Markdown reply, caps UTF-8 at 8 KB (LEAD_HANDOFF_MAX_BYTES), and prefers it over a disk fallback", async t => {
+  assert.equal(LEAD_HANDOFF_MAX_BYTES, 8 * 1024, "v0.0.97 (ADR 0047 §3.3) lowers the lead-handoff.md cap from 24 KB to 8 KB");
   const lead: FakeAgent = { id: "reply-lead", status: "idle", lastUsage: { contextWindowUsedTokens: 128_000 } };
   const f = makeSpooledRuntime(t, [lead]);
   lead.labels = { seat: "lead", project: f.slug };
@@ -1830,17 +1831,116 @@ test("Lead handoff persists the final Markdown reply, caps UTF-8 at 24 KB, and p
   const prompt = f.fake.sent.find(item => item.agentId === lead.id)!.text;
   assert.match(prompt, /entire Markdown handoff directly in your final assistant message, in one piece/);
   assert.match(prompt, /without running shell commands or writing files to disk/);
+  // v0.0.97 (ADR 0047 §3.3): the extraction prompt states the 8 KB cap and both
+  // prohibitions — no verbatim Contract.description copy-pasting, no detailed
+  // post-mortems or test inventories of already-accepted waves.
+  assert.match(prompt, /capping it at 8 KB/);
+  assert.match(prompt, /never copy-paste active Contract\.description blocks verbatim/i);
+  assert.match(prompt, /ledger\.jsonl/);
+  assert.match(prompt, /never write detailed post-mortems or test inventories of already-accepted waves/i);
   const path = join(projectStateDir(f.stateDir, f.slug), "lead-handoff.md");
   writeFileSync(path, "# Disk fallback\nOlder than the reply.");
   const reply = "# Reply handoff\n" + "Roadmap 🧭\n".repeat(4000);
   await f.leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [{ type: "assistant_message", text: reply }] });
   const persisted = readFileSync(path, "utf8");
   assert.match(persisted, /^# Reply handoff/);
-  assert.ok(Buffer.byteLength(persisted) <= 24 * 1024);
+  assert.ok(Buffer.byteLength(persisted) <= LEAD_HANDOFF_MAX_BYTES);
   assert.match(persisted, /\n\.\.\.\[truncated\]$/);
   assert.doesNotMatch(persisted, /�/);
   const successor = f.fake.sent.find(item => item.agentId !== lead.id)!.text;
   assert.ok(successor.includes(persisted));
+});
+
+test("Machine-Verified Active Peer Roster summarizes accepted Tasks into one count line and renders full rows strictly for unaccepted Tasks (v0.0.97, ADR 0047 §1.3)", async t => {
+  const lead: FakeAgent = { id: "agent-lead-1", status: "idle", lastUsage: { contextWindowUsedTokens: 135_000 } };
+  const { stateDir, slug, projectRoot, factory, surface, leadMail, fake } = makeSpooledRuntime(t, [lead]);
+  lead.labels = { seat: "lead", project: slug };
+  lead.cwd = projectRoot;
+  await surface.leadEnsure({ projectRoot });
+  const canonicalRoot = readProjectRegistration(stateDir, slug)!.root!;
+
+  // 6 already-accepted Tasks — closed history that must collapse into one summary line
+  for (let i = 1; i <= 6; i += 1) {
+    factory.setContract({ task: `T-ACC-${i}`, workspace: canonicalRoot, gate: "true", artifact: "README.md" });
+    factory.ledger.append({ event: "attempt_accepted", task: `T-ACC-${i}`, attempt: 1, accepted_by: "owner" });
+  }
+  // 2 active unaccepted Tasks — these alone get full per-task rows
+  factory.setContract({ task: "T-ACTIVE-BOUND", workspace: canonicalRoot, gate: "true", artifact: "README.md" });
+  fake.agents.push({ id: "agent-active-bound", status: "idle", cwd: join(taskWorktreePath(stateDir, slug, "T-ACTIVE-BOUND"), "src") });
+  factory.setContract({ task: "T-ACTIVE-FRESH", workspace: canonicalRoot, gate: "true", artifact: "README.md" });
+
+  // Quiet-point rotation (the seeded agents are idle): turn 1 ends at 135k -> handing_over -> turn 2 completes
+  await leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [] });
+  await leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [{ type: "assistant_message", text: "# Handoff\nWave 2 mid-flight." }] });
+
+  const successorId = readProjectRegistration(stateDir, slug)?.lead;
+  assert.ok(successorId && successorId !== lead.id);
+  const kickoff = fake.sent.find(s => s.agentId === successorId && s.text.includes("Machine-Verified Active Peer Roster"));
+  assert.ok(kickoff, "successor Lead received the Machine-Verified Active Peer Roster");
+
+  // One compact accepted summary line: total count + the latest 5 accepted task IDs
+  assert.match(kickoff.text, /- accepted tasks \(6\): T-ACC-2, T-ACC-3, T-ACC-4, T-ACC-5, T-ACC-6 \(latest 5 of 6\)/);
+  // Full status/agent/worktree/attempt/report rows strictly for the active unaccepted Tasks
+  assert.match(kickoff.text, /- task T-ACTIVE-BOUND: status waiting · agent agent-active-bound \(live: idle\)/);
+  assert.match(kickoff.text, /- task T-ACTIVE-FRESH: status waiting · agent \(none bound\)/);
+  assert.match(kickoff.text, /- task T-ACTIVE-FRESH: .*no attempt yet/);
+  // No O(N) closed-history rows for accepted Tasks
+  for (let i = 1; i <= 6; i += 1) {
+    assert.doesNotMatch(kickoff.text, new RegExp(`- task T-ACC-${i}: `), `accepted task T-ACC-${i} must not render a full roster row`);
+  }
+});
+
+test("Machine-Verified Active Peer Roster reports '- active unaccepted tasks: none' once every Task is accepted (v0.0.97, ADR 0047 §1.3)", async t => {
+  const lead: FakeAgent = { id: "agent-lead-1", status: "idle", lastUsage: { contextWindowUsedTokens: 135_000 } };
+  const { stateDir, slug, projectRoot, factory, surface, leadMail, fake } = makeSpooledRuntime(t, [lead]);
+  lead.labels = { seat: "lead", project: slug };
+  lead.cwd = projectRoot;
+  await surface.leadEnsure({ projectRoot });
+  const canonicalRoot = readProjectRegistration(stateDir, slug)!.root!;
+  for (const task of ["T-DONE-1", "T-DONE-2"]) {
+    factory.setContract({ task, workspace: canonicalRoot, gate: "true", artifact: "README.md" });
+    factory.ledger.append({ event: "attempt_accepted", task, attempt: 1, accepted_by: "owner" });
+  }
+
+  await leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [] });
+  await leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [{ type: "assistant_message", text: "# Handoff\nAll waves accepted." }] });
+
+  const successorId = readProjectRegistration(stateDir, slug)?.lead;
+  assert.ok(successorId && successorId !== lead.id);
+  const kickoff = fake.sent.find(s => s.agentId === successorId && s.text.includes("Machine-Verified Active Peer Roster"));
+  assert.ok(kickoff, "successor Lead received the Machine-Verified Active Peer Roster");
+  assert.match(kickoff.text, /- accepted tasks \(2\): T-DONE-1, T-DONE-2/);
+  assert.match(kickoff.text, /- active unaccepted tasks: none/);
+  assert.doesNotMatch(kickoff.text, /- task T-DONE-1: /);
+  assert.doesNotMatch(kickoff.text, /- task T-DONE-2: /);
+});
+
+test("Turn-1 kickoff delivery deduplicates the packet against config.systemPrompt: no linked design spec, helper-MCP roster, or wave-law repetition (v0.0.97, ADR 0047 §1.2)", async t => {
+  const { projectRoot, leadMail, fake } = makeSpooledRuntime(t);
+
+  // Supervisor Turn 1 — prependKickoffPacketIfFirstTurn serves both seat call sites
+  await leadMail.dispatchSupervisor({ id: "sd-dedup-1", kind: "supervisor_dispatch", workspace: projectRoot, message: "First Supervisor directive" });
+  const supTurn1 = fake.sent[0]!.text;
+  assert.match(supTurn1, /\[paseo-factory seat kickoff packet · role=supervisor/);
+  assert.match(supTurn1, /- Workspace: /, "dynamic repository preflight facts stay in the Turn-1 packet");
+  assert.match(supTurn1, /- Ledger tasks: /);
+  assert.match(supTurn1, /- Role MCP tools \(paseo_factory\): /);
+  assert.match(supTurn1, /- Law: Fire-and-End-Turn:/, "the Fire-and-End-Turn law stays in the Turn-1 packet");
+  assert.doesNotMatch(supTurn1, /Open Design Linked Specification/, "the linked design specification stays in config.systemPrompt only");
+  assert.doesNotMatch(supTurn1, /- Law: Outcome & Architecture Boundary:/, "SUPERVISOR_OUTCOME_BOUNDARY stays in config.systemPrompt only");
+
+  // Lead Turn 1 — same shared helper, lead-scoped blocks
+  await leadMail.dispatchLead({ id: "ld-dedup-1", kind: "lead_dispatch", workspace: projectRoot, message: "First Lead directive" });
+  const leadTurn1 = fake.sent[1]!.text;
+  assert.match(leadTurn1, /\[paseo-factory seat kickoff packet · role=lead/);
+  assert.match(leadTurn1, /- Workspace: /);
+  assert.match(leadTurn1, /- Ledger tasks: /);
+  assert.match(leadTurn1, /- Role MCP tools \(paseo_factory\): /);
+  assert.match(leadTurn1, /- Law: Fire-and-End-Turn:/);
+  assert.doesNotMatch(leadTurn1, /Available Peer Helper MCPs:/, "the helper MCP roster stays in config.systemPrompt only");
+  assert.doesNotMatch(leadTurn1, /Open Design Linked Specification/);
+  assert.doesNotMatch(leadTurn1, /- Law: One Bounded Outcome per Task:/, "LEAD_WAVE_LAWS stay in config.systemPrompt only");
+  assert.doesNotMatch(leadTurn1, /- Law: 4-Part Brief:/);
 });
 
 

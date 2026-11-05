@@ -109,6 +109,14 @@ export { PEER_HANDOFF_TOKENS } from "./peer-handoff.ts";
 export const LEAD_ROTATE_TOKENS = 128_000;
 
 /**
+ * The `lead-handoff.md` byte ceiling (v0.0.97, ADR 0047 §3.3, amending ADR 0044):
+ * 8,192 bytes (8 KB). The handoff is a lean ~2k-token tactical baton — the
+ * machine-verified roster and ledger digest carry the authoritative state, so
+ * an outgoing Lead's prose never re-bloats the successor's Turn 0.
+ */
+export const LEAD_HANDOFF_MAX_BYTES = 8 * 1024;
+
+/**
  * The Dual-Fuse `Lead handoff` extraction timeout (v0.0.28, ADR 0018 §3):
  * 180,000 ms (180 seconds) — if `rotationState === "handing_over"` remains
  * unresolved past this ceiling, the runtime trips Fuse 2 and completes
@@ -626,6 +634,11 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       ledgerEvents: projectStreamOf(slug),
       helperMcps: discoverHelperMcps({ stateDir: deps.stateDir, ...(deps.home ? { userHome: resolveVaultUserHome(deps.home) } : {}) }).servers,
       ...(loadedLanes.ok ? { lanes: loadedLanes.lanes } : {}),
+      // v0.0.97 (ADR 0047 §1.2): the seat's config.systemPrompt already carries
+      // buildRoleKickoffPrompt(role) — the Turn-1 user message keeps only the
+      // dynamic repository preflight facts, never a second copy of the linked
+      // design specification, helper MCP roster, or wave laws.
+      omitSystemPromptDuplicates: true,
     });
     kickoffSentAgentIds.add(agent.id);
     return `${kickoff}\n${prompt}`;
@@ -1074,7 +1087,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       } catch { /* No earlier disk handoff. */ }
     }
     const stale = !validHandoffText(handoffText) && prior !== undefined;
-    handoffText = validHandoffText(handoffText) ? capHandoffText(handoffText, 24 * 1024) : prior ?? INTERRUPTED_HANDOFF_EXTRACTION_NOTE;
+    handoffText = validHandoffText(handoffText) ? capHandoffText(handoffText, LEAD_HANDOFF_MAX_BYTES) : prior ?? INTERRUPTED_HANDOFF_EXTRACTION_NOTE;
     atomicJson(extractionPath(slug), { requestedAt, prior, stale });
     try {
       mkdirSync(statePath, { recursive: true });
@@ -1588,7 +1601,7 @@ function renderHandoffExtractionPrompt(slug: string): string {
     "",
     "Your context window has crossed the 128,000-token rotation threshold, so this standing Lead seat is rotating: you are being retired, and a fresh successor Lead continues the project from your handoff.",
     "",
-    "Put the entire Markdown handoff directly in your final assistant message, in one piece, without running shell commands or writing files to disk. The plugin server reads your reply and persists it automatically, capping it at 24 KB. Use exactly these five sections:",
+    "Put the entire Markdown handoff directly in your final assistant message, in one piece, without running shell commands or writing files to disk. The plugin server reads your reply and persists it automatically, capping it at 8 KB. Keep it a lean tactical baton, not an archive: never copy-paste active Contract.description blocks verbatim (they are already recorded in ledger.jsonl), and never write detailed post-mortems or test inventories of already-accepted waves. Use exactly these five sections:",
     "",
     "1. Goal & Remaining Roadmap",
     "2. Uncontracted Next Tasks",
@@ -1625,10 +1638,13 @@ function renderSuccessorKickoff(input: { slug: string; roster: string; digest: s
 }
 
 /**
- * The Machine-Verified Active Peer Roster: every Task in the Project with its
- * fold status, its bound agent and live daemon status, the Task worktree path
- * and branch, and the latest Attempt / Verdict / Report — the `taskWorktree*`
- * and `agentTaskIndex` precedents rendered as the successor's ground truth.
+ * The Machine-Verified Active Peer Roster (v0.0.97, ADR 0047 §1.3): active-only
+ * detail for the successor's ground truth. Already-accepted Tasks are closed
+ * history — one compact count + latest-tail summary line (at most the 5 most
+ * recent accepted task IDs), never O(N) per-task rows. Full per-task lines
+ * (fold status, bound agent + live daemon status, the Task worktree path and
+ * branch, and the latest Attempt / Verdict / Report — the `taskWorktree*` and
+ * `agentTaskIndex` precedents) are rendered strictly for unaccepted Tasks.
  */
 function renderPeerRoster(input: {
   stateDir: string;
@@ -1638,8 +1654,19 @@ function renderPeerRoster(input: {
   live: ReadonlyMap<string, SurfaceAgentSnapshot>;
 }): string {
   if (input.tasks.length === 0) return "(no tasks in the project's ledger — a clean slate)";
+  const acceptedTasks = input.tasks.filter((task) => task.accepted || task.status === "accepted");
+  const activeTasks = input.tasks.filter((task) => !(task.accepted || task.status === "accepted"));
   const lines: string[] = [];
-  for (const task of input.tasks) {
+  if (acceptedTasks.length > 0) {
+    lines.push(
+      `- accepted tasks (${acceptedTasks.length}): ${acceptedTasks.slice(-5).map((t) => t.task).join(", ")}${acceptedTasks.length > 5 ? ` (latest 5 of ${acceptedTasks.length})` : ""}`,
+    );
+  }
+  if (activeTasks.length === 0) {
+    lines.push("- active unaccepted tasks: none");
+    return lines.join("\n");
+  }
+  for (const task of activeTasks) {
     const agentId = input.agents.get(task.task);
     const liveStatus = agentId === undefined ? null : (input.live.get(agentId)?.status ?? "(not live on the daemon)");
     const latest = task.attempts.at(-1);

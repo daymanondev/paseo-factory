@@ -24,6 +24,16 @@ export interface SeatKickoffPacketInput {
   ledgerEvents: readonly LedgerEvent[];
   lanes?: Record<string, string>;
   helperMcps?: Array<Pick<HelperMcpServerEntry, "name" | "transport" | "enabled" | "status">>;
+  /**
+   * Omits the static blocks the seat's `config.systemPrompt` already carries
+   * (the `linkedDesignSpecification` block, the helper-MCP roster, and the
+   * `LEAD_WAVE_LAWS` / `SUPERVISOR_OUTCOME_BOUNDARY` law lines) when the
+   * packet is prepended to a system-prompted seat on Turn 1 (v0.0.97, ADR
+   * 0047 §1). The `Fire-and-End-Turn` law and every dynamic repository
+   * preflight line stay. Default `false`: standalone callers keep the
+   * complete self-contained packet.
+   */
+  omitSystemPromptDuplicates?: boolean;
 }
 
 function runGitFast(cwd: string, args: readonly string[]): string {
@@ -129,12 +139,24 @@ function summarizeLedgerTasks(projectRoot: string, events: readonly LedgerEvent[
     }
   }
   if (tasks.size === 0) return "none (clean slate)";
-  return [...tasks.values()]
-    .map((t) => `${t.task} [${t.status}, attempts=${t.attempts}, verdict=${t.latestVerdict}]`)
-    .join("; ");
+  const rows = [...tasks.values()];
+  const acceptedRows = rows.filter((row) => row.status.startsWith("accepted"));
+  const activeRows = rows.filter((row) => !row.status.startsWith("accepted"));
+  const renderRow = (t: { task: string; status: string; attempts: number; latestVerdict: string }): string =>
+    `${t.task} [${t.status}, attempts=${t.attempts}, verdict=${t.latestVerdict}]`;
+  // ADR 0047 §1.3: once accepted history grows past 3 tasks, closed tasks
+  // collapse into one count + latest-tail prefix so the preflight summary
+  // stays bounded regardless of total Project history length; unaccepted
+  // tasks always keep their full [status, attempts, verdict] entry.
+  if (acceptedRows.length > 3) {
+    const acceptedSummary = `${acceptedRows.length} accepted (latest: ${acceptedRows.slice(-3).map((r) => r.task).join(", ")})`;
+    return activeRows.length > 0 ? `${acceptedSummary}; ${activeRows.map(renderRow).join("; ")}` : acceptedSummary;
+  }
+  return rows.map(renderRow).join("; ");
 }
 
 export function buildSeatKickoffPacket(input: SeatKickoffPacketInput): string {
+  const omitDuplicates = input.omitSystemPromptDuplicates === true;
   const branch = runGitFast(input.projectRoot, ["rev-parse", "--abbrev-ref", "HEAD"]) || "(detached/unborn)";
   const head = runGitFast(input.projectRoot, ["rev-parse", "--short", "HEAD"]) || "(no commits)";
   const statusRaw = runGitFast(input.projectRoot, ["status", "--porcelain"]);
@@ -172,11 +194,20 @@ export function buildSeatKickoffPacket(input: SeatKickoffPacketInput): string {
     `- Build/Test commands: ${scriptsSummary}`,
     `- Active lanes: ${lanesSummary}`,
     `- Ledger tasks: ${tasksSummary}`,
-    linkedDesignSpecification(input.projectRoot),
-    ...(input.role === "lead" ? [renderHelperMcpRoster(input.helperMcps ?? [])] : []),
+    // ADR 0047 §1.2: a Turn-1 packet prepended to a seat whose
+    // `config.systemPrompt` already carries `buildRoleKickoffPrompt(role)`
+    // drops the duplicated static blocks — design spec, helper-MCP roster,
+    // and wave laws — keeping only the Fire-and-End-Turn law and the
+    // dynamic repository preflight lines above.
+    ...(omitDuplicates ? [] : [linkedDesignSpecification(input.projectRoot)]),
+    ...(input.role === "lead" && !omitDuplicates ? [renderHelperMcpRoster(input.helperMcps ?? [])] : []),
     `- Role MCP tools (paseo_factory): ${roleTools}`,
     `- Law: ${fireAndEndTurn}`,
-    ...(input.role === "lead" ? LEAD_WAVE_LAWS.map((law) => `- Law: ${law}`) : [`- Law: ${SUPERVISOR_OUTCOME_BOUNDARY}`]),
+    ...(omitDuplicates
+      ? []
+      : input.role === "lead"
+        ? LEAD_WAVE_LAWS.map((law) => `- Law: ${law}`)
+        : [`- Law: ${SUPERVISOR_OUTCOME_BOUNDARY}`]),
     `--- [end seat kickoff packet] ---`,
     "",
   ].join("\n");

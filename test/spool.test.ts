@@ -1570,3 +1570,89 @@ test("Seam 2 (v0.0.92): a spawn without worktree on a root-workspace Contract al
   assert.equal(agentCreates[0]!.workspaceId, "task-workspace-1", "the Peer lives in its dedicated Task workspace");
   assert.equal(agentCreates[0]!.parent, "lead-live", "the Peer is parented on the Lead");
 });
+
+// ---- the Peer spawn skill-discipline hint (v0.0.97, ADR 0047 §2 — spec §Testing Decisions Seam 3) ----
+
+/**
+ * A Contract without `skills` no longer leaves the Peer's skill use to chance:
+ * the spawn prepends a 1-line discipline hint naming the packs
+ * `detectProjectSkillPacks` finds on the Contract's workspace (User Story 8),
+ * while an explicit `skills: [...]` keeps the unchanged Required-skills line
+ * and adds no hint (User Story 9). Three tasks, one fake daemon recording the
+ * prompt each created Peer actually received.
+ */
+test("spawn prepends the Skill discipline hint on a skills-less Contract (expo pack named when package.json depends on expo) and keeps Required-skills verbatim on explicit skills", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const factory = createFactory({ stateDir });
+
+  // Two workspaces, both real git repos (the spawn path allocates each Task's
+  // worktree from HEAD): one whose package.json depends on expo — the pack the
+  // hint names — and one bare of any pack marker.
+  const expoWs = join(dir, "ws-expo");
+  mkdirSync(expoWs, { recursive: true });
+  writeFileSync(join(expoWs, "package.json"), `${JSON.stringify({ name: "expo-app", dependencies: { expo: "~54.0.0" } })}\n`);
+  writeFileSync(join(expoWs, "README.md"), "x\n");
+  gitCommitAll(expoWs);
+  const bareWs = join(dir, "ws-bare");
+  mkdirSync(bareWs, { recursive: true });
+  writeFileSync(join(bareWs, "README.md"), "x\n");
+  gitCommitAll(bareWs);
+
+  factory.setContract({ task: "T-HINT-EXPO", workspace: expoWs, gate: "true", artifact: "README.md" });
+  factory.setContract({ task: "T-HINT-BARE", workspace: bareWs, gate: "true", artifact: "README.md" });
+  factory.setContract({ task: "T-HINT-EXPLICIT", workspace: bareWs, gate: "true", artifact: "README.md", skills: ["tdd"] });
+
+  const prompts: string[] = [];
+  const fakeDaemon = {
+    providers: {
+      async listAvailable() {
+        return { providers: [{ provider: "pi", available: true }] };
+      },
+    },
+    agents: {
+      async list() {
+        return { entries: [] };
+      },
+      async create(opts: { prompt?: string }) {
+        prompts.push(opts.prompt ?? "");
+        return { id: `agent-peer-${prompts.length}` };
+      },
+      ref() {
+        return { async archive() {} };
+      },
+    },
+  };
+  const deps = { daemon: fakeDaemon as unknown as NonNullable<import("../plugin/server/spool.ts").SpoolDeps["daemon"]> };
+
+  for (const task of ["T-HINT-EXPO", "T-HINT-BARE", "T-HINT-EXPLICIT"]) {
+    const reply = await handleSpoolRequest(
+      factory,
+      { id: `sp-hint-${task}`, kind: "spawn", task, provider: "pi/zai/glm-5.3", arity: 1, prompt: `Execute task ${task}: make it green.`, submitter: "agent-lead-1", seat: "lead" },
+      deps,
+    );
+    assert.ok(reply.ok, reply.ok ? "" : reply.message);
+  }
+  assert.equal(prompts.length, 3, "each spawn created its Peer");
+
+  // (1) expo workspace, no skills: the hint is the prompt's very first line,
+  // naming the detected expo pack — the Lead never curates skills by hand.
+  const expoHint = "Skill discipline (expo pack active): apply tdd and open only the specific skill(s) in <available_skills> relevant to this task's slice — never bulk-read unrelated SKILL.md files.";
+  assert.equal(prompts[0], `${expoHint}\n\nExecute task T-HINT-EXPO: make it green.`, "the expo pack hint is prepended and the original prompt rides after it");
+  assert.ok(!prompts[0]!.includes("Required skills to open first"), "no Required-skills line on a skills-less Contract");
+
+  // (2) bare workspace, no skills: the same hint without the pack clause.
+  const bareHint = "Skill discipline: apply tdd and open only the specific skill(s) in <available_skills> relevant to this task's slice — never bulk-read unrelated SKILL.md files.";
+  assert.equal(prompts[1], `${bareHint}\n\nExecute task T-HINT-BARE: make it green.`, "the pack-less hint is prepended verbatim");
+  assert.ok(!prompts[1]!.includes("pack active"), "no pack clause when detectProjectSkillPacks finds none");
+
+  // (3) explicit skills (User Story 9): the unchanged Required-skills line,
+  // and no Skill-discipline hint.
+  assert.equal(
+    prompts[2],
+    "Required skills to open first: tdd (read ~/.agents/skills/<skill>/SKILL.md or .agents/skills/<skill>/SKILL.md before starting)\n\nExecute task T-HINT-EXPLICIT: make it green.",
+    "explicit contract.skills preserves the Required-skills line unchanged",
+  );
+  assert.ok(!prompts[2]!.includes("Skill discipline"), "no hint alongside explicit skills");
+});

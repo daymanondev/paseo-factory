@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { renderRoleAppendSystem, renderRoleContract, renderSeatBootstrapPrompt } from "../src/roles-contract.ts";
+import { buildRoleKickoffPrompt, LEAD_WAVE_LAWS, renderRoleAppendSystem, renderRoleContract, renderSeatBootstrapPrompt } from "../src/roles-contract.ts";
 import { buildSeatKickoffPacket } from "../src/preflight.ts";
 import { ROLE_PROMPTS } from "../src/pi-home.ts";
 import { CorrelationRegistry } from "../src/correlations.ts";
@@ -1377,6 +1377,87 @@ test("Lead briefs preserve implementation freedom with focused journey verificat
     assert.match(surface, /Do not pre-solve internal helper function signatures/);
     assert.match(surface, /do not mandate 4–6 separate unit-test files per task/);
     assert.match(surface, /1–2 focused slice\/journey test files suffice unless the repository's existing layout requires otherwise/);
+  }
+});
+
+test("buildRoleKickoffPrompt embeds the Open Design Linked Specification exactly once per role (v0.0.97, ADR 0047 Decision 1)", (t) => {
+  const dir = makeTempDir("roles-kickoff-dedup-");
+  disposeDir(t, dir);
+  const root = join(dir, "repo");
+  mkdirSync(join(root, "design"), { recursive: true });
+  writeFileSync(join(root, "design/open-design-link.json"), JSON.stringify({ projectId: "owner", projectName: "Checkout flow", sourceUpdatedAt: 1, syncedAt: "2026-11-02", screenCount: 4, files: [], digest: "abc" }));
+  const project = { root, slug: "repo" };
+  const occurrences = (surface: string) => surface.split("Open Design Linked Specification").length - 1;
+
+  // The regression: renderRoleContract("lead") already embeds the spec, so the
+  // Lead kickoff must not prepend a second copy into config.systemPrompt.
+  const leadKickoff = buildRoleKickoffPrompt("lead", { project });
+  assert.equal(occurrences(leadKickoff), 1, "the Lead kickoff embeds the Open Design Linked Specification exactly once");
+  assert.match(leadKickoff, /Checkout flow/, "the single copy is the project's linked design catalog");
+
+  // Every other role keeps today's behavior: the outer prepend is their only copy.
+  for (const role of ["supervisor", "agent"] as const) {
+    assert.equal(occurrences(buildRoleKickoffPrompt(role, { project })), 1, `the ${role} kickoff still embeds the spec exactly once`);
+  }
+});
+
+test("Lead wave laws cap 4-Part Briefs at 2,500 chars and make domain skills Peer-owned (v0.0.97, ADR 0047 Decisions 3–4)", () => {
+  const briefLaw = LEAD_WAVE_LAWS.find((law) => law.startsWith("4-Part Brief"))!;
+  assert.ok(briefLaw !== undefined, "the 4-Part Brief law exists");
+  assert.match(briefLaw, /Keep every Contract\.description concise — capped at <= 2,500 chars —/);
+  assert.match(briefLaw, /Do not read deep implementation files before contracting to pre-solve internal helper function or prop names/);
+  assert.match(briefLaw, /Peer-Owned Domain Skills: never read \(`cat`\) implementation or framework SKILL\.md files \(expo-\*, eas-\*, firebase-\*, etc\.\) into your own context window/);
+  assert.match(briefLaw, /domain and implementation skills belong to the working Agent \(Peer\), which discovers them natively via <available_skills>/);
+
+  // The contract states the Peer-Owned rule as its own law line, and every Lead
+  // surface carries the cap and the SKILL.md prohibition.
+  const project = { root: "/workspace/repo", slug: "repo" };
+  const input = { seat: "lead" as const, home: "/trial", stateDir: "/trial/state", nodePath: process.execPath,
+    path: "/usr/bin", lane: "codex", project };
+  for (const surface of [renderRoleContract("lead"), renderSeatContract("lead", project), ROLE_PROMPTS.lead,
+    renderSeatBootstrapPrompt(input), renderSeatBootstrap(input),
+    buildSeatKickoffPacket({ role: "lead", projectSlug: project.slug, projectRoot: project.root, ledgerEvents: [] })]) {
+    assert.match(surface, /Peer-Owned Domain Skills: [Nn]ever read \(`cat`\) implementation or framework SKILL\.md files/);
+    assert.match(surface, /capped at <= 2,500 chars/);
+    assert.match(surface, /discovers them natively via <available_skills>/);
+  }
+});
+
+test("Lead closure review reads bounded per-file diffs without REPL middle-truncation batches (v0.0.97, ADR 0047 Decision 4)", () => {
+  const closureLaw = LEAD_WAVE_LAWS.find((law) => law.startsWith("Closure & Integration Loop"))!;
+  assert.ok(closureLaw !== undefined, "the Closure & Integration Loop law exists");
+  // Report and stat come first, then targeted per-file diffs in bounded chunks.
+  assert.match(closureLaw, /read `<projectStateDir>\/report-<task>-<n>\.md` and `git show --stat "<sha>"` first/);
+  assert.match(closureLaw, /`git diff "<sha>\^" "<sha>" -- <file>`/);
+  assert.match(closureLaw, /bounded chunks \(<= 6,000 tokens per call\)/);
+  assert.match(closureLaw, /never wrapping multi-file `git diff` or `cat` outputs inside `JSON\.stringify` \(`text\(\{i,\.\.\.r\}\)`\) in a single REPL `exec` call/);
+
+  const project = { root: "/workspace/repo", slug: "repo" };
+  const input = { seat: "lead" as const, home: "/trial", stateDir: "/trial/state", nodePath: process.execPath,
+    path: "/usr/bin", lane: "codex", project };
+  for (const surface of [renderRoleContract("lead"), renderSeatContract("lead", project), ROLE_PROMPTS.lead,
+    renderSeatBootstrapPrompt(input), renderSeatBootstrap(input),
+    buildSeatKickoffPacket({ role: "lead", projectSlug: project.slug, projectRoot: project.root, ledgerEvents: [] })]) {
+    assert.match(surface, /<= 6,000 tokens per call/);
+    assert.match(surface, /JSON\.stringify/);
+    assert.match(surface, /report-<task>-<n>\.md/);
+  }
+});
+
+test("the primary lead_set_contract example drops skills curation while the skills field stays optional (v0.0.97, ADR 0047 Decision 3)", () => {
+  const project = { root: "/workspace/repo", slug: "repo" };
+  const input = { seat: "lead" as const, home: "/trial", stateDir: "/trial/state", nodePath: process.execPath,
+    path: "/usr/bin", lane: "codex", project };
+  for (const surface of [renderRoleContract("lead"), renderSeatContract("lead", project), ROLE_PROMPTS.lead,
+    renderSeatBootstrapPrompt(input), renderSeatBootstrap(input)]) {
+    const example = surface.match(/paseo-factory_lead_set_contract\(\{[^\n]+/)![0];
+    assert.ok(!example.includes("skills"), `the primary example carries no skills parameter: ${example}`);
+    assert.doesNotMatch(surface, /skills: \["tdd"\]/, "no surface teaches Lead to curate Contract.skills via the example");
+    // Backward compatibility is binding: the optional --skills CLI flag remains.
+    assert.match(surface, /\[--skills <s1,s2>\]/);
+  }
+  for (const surface of [renderRoleContract("lead"), renderSeatContract("lead", project), ROLE_PROMPTS.lead]) {
+    assert.match(surface, /set each Contract \(gate, description, optional artifact, skills\)/, "the Contract schema still names skills as an optional field");
   }
 });
 
