@@ -184,6 +184,17 @@ export function factoryEnvFor(
   // `config.systemPrompt` never rides ACP. SLP calls (no execution) stay
   // byte-identical to the pre-Scrum shape.
   if (resolveEffectiveProviderFamily(input.provider, role, input.stateDir, input.project.slug, input.task) === "zcode") {
+    // The Scrum role the clean room renders the contract and scopes skills
+    // for — the same narrowing provisionScrumHarness applies
+    // (src/scrum/harness.ts): a task execution carries its bound specialist
+    // role, while a seat identity only ever attaches to a supervisor/lead
+    // seat — the `agent` role reaches this seam only alongside a task
+    // worktree, which resolves a task-kind execution (or none), so the cast
+    // below is the documented invariant, never a silent trust of `agent`.
+    const scrumRole =
+      execution?.kind === "task"
+        ? execution.binding.role
+        : (role as "supervisor" | "lead");
     Object.assign(env, provisionZcodeHome({
       stateDir: input.stateDir,
       role,
@@ -194,7 +205,7 @@ export function factoryEnvFor(
         scrum: execution.kind === "seat"
           ? { kind: "seat", selectionRevision: execution.selectionRevision, generation: input.correlationId ?? "initial", authority: role }
           : { kind: "task", runId: execution.binding.runId, task: execution.task, epoch: execution.epoch },
-        systemPrompt: renderScrumPrompt(execution.kind === "task" ? execution.binding.role : role as "supervisor" | "lead", {
+        systemPrompt: renderScrumPrompt(scrumRole, {
           project: input.project.slug,
           workspace,
           ...(execution.kind === "task"
@@ -211,7 +222,7 @@ export function factoryEnvFor(
         // Scrum lead and every specialist get exactly their role-scoped set.
         ...(role === "supervisor" ? {} : {
           allowedSkills: resolveRoleSkillsForProject({
-            role: execution.kind === "task" ? execution.binding.role : role as "lead",
+            role: scrumRole,
             projectRoot: execution.projectRoot ?? readProjectRegistration(input.stateDir, input.project.slug)?.root,
             configuredPacks: execution.configuredPacks ?? readExecution(input.stateDir, input.project.slug).skillPacks,
             contractSkills: execution.contractSkills,
