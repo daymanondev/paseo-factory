@@ -998,30 +998,95 @@ function zcodeCandidateDbPaths(stateDir: string, userHome: string): string[] {
   return candidates;
 }
 
-/** One `message.metadata` value — its `usage` record, when the JSON parses and carries one. */
-function zcodeRowUsageOf(metadata: unknown): Record<string, unknown> | undefined {
-  let parsed: unknown = metadata;
+interface ZcodeDecodedRow {
+  role: "assistant" | "other";
+  completed: boolean;
+  model?: string;
+  usage?: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadInputTokens: number;
+    cacheCreationInputTokens: number;
+    reasoningTokens: number;
+  };
+}
+
+/**
+ * Decodes one `message` row from either ZCode 0.17+'s real `data` JSON column
+ * (`{ role, time: { created, completed }, modelId, tokens: { input, output, reasoning, cache: { read, write } } }`)
+ * or the legacy `metadata` JSON column (`{ usage: { inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens, reasoningTokens } }`).
+ */
+function decodeZcodeRow(row: { metadata?: unknown; data?: unknown }): ZcodeDecodedRow {
+  const raw = row.data !== undefined ? row.data : row.metadata;
+  let parsed: unknown = raw;
   if (typeof parsed === "string" && parsed.trim() !== "") {
     try {
       parsed = JSON.parse(parsed);
     } catch {
-      return undefined;
+      return { role: "other", completed: true };
     }
   }
-  if (typeof parsed !== "object" || parsed === null) return undefined;
-  const usage = (parsed as { usage?: unknown }).usage;
-  return typeof usage === "object" && usage !== null ? (usage as Record<string, unknown>) : undefined;
+  if (typeof parsed !== "object" || parsed === null) return { role: "other", completed: true };
+  const record = parsed as Record<string, unknown>;
+  if (row.data !== undefined && record.role !== "assistant") {
+    return { role: "other", completed: true };
+  }
+  const time = typeof record.time === "object" && record.time !== null ? (record.time as Record<string, unknown>) : undefined;
+  const completed = time === undefined || time.completed !== undefined;
+  const model = asString(record.modelId) ?? asString(record.model);
+  if (typeof record.tokens === "object" && record.tokens !== null) {
+    const t = record.tokens as Record<string, unknown>;
+    const cache = typeof t.cache === "object" && t.cache !== null ? (t.cache as Record<string, unknown>) : undefined;
+    const inputTokens = finiteOr(t.input, 0);
+    const outputTokens = finiteOr(t.output, 0);
+    const cacheReadInputTokens = finiteOr(cache?.read, 0);
+    const cacheCreationInputTokens = finiteOr(cache?.write, 0);
+    const reasoningTokens = finiteOr(t.reasoning, 0);
+    if (
+      inputTokens === 0 &&
+      outputTokens === 0 &&
+      cacheReadInputTokens === 0 &&
+      cacheCreationInputTokens === 0 &&
+      reasoningTokens === 0
+    ) {
+      return { role: "assistant", completed, model };
+    }
+    return {
+      role: "assistant",
+      completed: true,
+      model,
+      usage: { inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens, reasoningTokens },
+    };
+  }
+  const usage = record.usage;
+  if (typeof usage === "object" && usage !== null) {
+    const u = usage as Record<string, unknown>;
+    return {
+      role: "assistant",
+      completed: true,
+      model,
+      usage: {
+        inputTokens: finiteOr(u.inputTokens, 0),
+        outputTokens: finiteOr(u.outputTokens, 0),
+        cacheReadInputTokens: finiteOr(u.cacheReadInputTokens, 0),
+        cacheCreationInputTokens: finiteOr(u.cacheCreationInputTokens, 0),
+        reasoningTokens: finiteOr(u.reasoningTokens, 0),
+      },
+    };
+  }
+  return { role: "assistant", completed, model };
 }
 
 /**
  * The zcode fold: every assistant `message` row carries its own per-turn
- * `metadata.usage`, so the session totals are sums over rows beyond
- * `cursor.lastStepIdx` — the row-sequence cursor keeps the sweep O(delta)
- * (the antigravity law). Per-turn `inputTokens` already CONTAINS the cache
- * sums, so the reader subtracts `cacheRead + cacheCreation` clamped at zero
- * (the copilot arithmetic), and the context occupancy is the turn's own
- * `input + output`. The store that answered is memoized as the snapshot's
- * `nativeSessionRef`, so every later sweep stat-gates its owner directly.
+ * `data.tokens` (ZCode 0.17+ SQLite schema) or `metadata.usage`, so the
+ * session totals are sums over rows beyond `cursor.lastStepIdx` — the
+ * row-sequence cursor keeps the sweep O(delta) (the antigravity law). Per-turn
+ * `input` already CONTAINS the cache sums, so the reader subtracts
+ * `cacheRead + cacheCreation` clamped at zero (the copilot arithmetic), and
+ * the context occupancy is the turn's own `input + output`. The store that
+ * answered is memoized as the snapshot's `nativeSessionRef`, so every later
+ * sweep stat-gates its owner directly.
  */
 function extractZcode(
   agent: UsageAgentSource,
@@ -1038,9 +1103,19 @@ function extractZcode(
     const gate = statGate(cursor, dbPath);
     if (gate === undefined) continue; // this candidate holds no store — next
     if ("hit" in gate) return gate.hit; // the owner's (mtimeMs, size) is unchanged — zero opens
-    const rows = querySqlite<{ sequence?: unknown; metadata?: unknown }[]>(
+    const rows = querySqlite<{ sequence?: unknown; metadata?: unknown; data?: unknown }[]>(
       dbPath,
-      db => db.prepare("SELECT sequence, metadata FROM message WHERE session_id = ? AND role = 'assistant' AND sequence > ? ORDER BY sequence ASC").all(zcodeSid, cursor?.lastStepIdx ?? -1) as never,
+      db => {
+        const cols = new Set((db.prepare("PRAGMA table_info(message)").all() as { name?: unknown }[]).map(c => c.name));
+        if (cols.has("data")) {
+          return db
+            .prepare("SELECT sequence, data FROM message WHERE session_id = ? AND sequence > ? ORDER BY sequence ASC")
+            .all(zcodeSid, cursor?.lastStepIdx ?? -1) as never;
+        }
+        return db
+          .prepare("SELECT sequence, metadata FROM message WHERE session_id = ? AND role = 'assistant' AND sequence > ? ORDER BY sequence ASC")
+          .all(zcodeSid, cursor?.lastStepIdx ?? -1) as never;
+      },
       metrics,
       { readOnly: true },
     );
@@ -1051,19 +1126,27 @@ function extractZcode(
     let latestContext = usage.latestContextWindowTokens;
     for (const row of rows) {
       const sequence = finite(row.sequence);
+      const decoded = decodeZcodeRow(row);
+      if (decoded.role === "assistant" && decoded.usage === undefined && !decoded.completed) {
+        // An in-flight streaming assistant turn at the tail (`time.completed`
+        // absent and tokens still 0): stop before advancing `lastStepIdx` so
+        // the next sweep re-reads this sequence once its final tokens land.
+        break;
+      }
       if (sequence !== null) lastStepIdx = Math.max(lastStepIdx, sequence);
-      const u = zcodeRowUsageOf(row.metadata);
+      if (decoded.model !== undefined) usage.model = decoded.model;
+      const u = decoded.usage;
       if (u === undefined) continue;
-      const input = finiteOr(u.inputTokens, 0);
-      const output = finiteOr(u.outputTokens, 0);
-      const cacheRead = finiteOr(u.cacheReadInputTokens, 0);
-      const cacheWrite = finiteOr(u.cacheCreationInputTokens, 0);
+      const input = u.inputTokens;
+      const output = u.outputTokens;
+      const cacheRead = u.cacheReadInputTokens;
+      const cacheWrite = u.cacheCreationInputTokens;
       usage.turns += 1;
       usage.inputUncachedTokens += Math.max(0, input - cacheRead - cacheWrite);
       usage.cacheReadTokens += cacheRead;
       usage.cacheWriteTokens += cacheWrite;
       usage.outputTokens += output;
-      usage.reasoningTokens += finiteOr(u.reasoningTokens, 0);
+      usage.reasoningTokens += u.reasoningTokens;
       latestContext = input + output;
     }
     if (latestContext !== undefined) usage.latestContextWindowTokens = latestContext;

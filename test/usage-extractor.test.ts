@@ -477,6 +477,75 @@ test("zcode: the operator's ~/.zcode/cli/db/db.sqlite is the fallback store, and
   assert.equal(readNativeContextWindowTokens({ id: "sup-4", provider: "zcode/GLM-5.3", persistence: { sessionId: "acp-not-mapped" } }, { userHome, stateDir }), null, "an unresolvable session answers null, never a guess");
 });
 
+test("zcode: ZCode 0.17+ real message(id, session_id, time_created, time_updated, data, sequence) schema folds data.tokens and holds the cursor before an in-flight streaming row", async t => {
+  if (!(await nodeSqliteAvailable())) return t.skip("node:sqlite unavailable on this runtime");
+  const { userHome, stateDir } = tempHomes(t);
+  const taskDb = join(stateDir, "zcode-home", "tasks", "proj-slug", "task-live", "db", "db.sqlite");
+  const db = await openSqlite(t, taskDb);
+  db.exec(`CREATE TABLE message (
+    id text primary key,
+    session_id text not null,
+    time_created integer not null,
+    time_updated integer not null,
+    data text not null,
+    sequence integer
+  )`);
+  const insert = db.prepare("INSERT INTO message (id, session_id, time_created, time_updated, data, sequence) VALUES (?, ?, ?, ?, ?, ?)");
+  insert.run("m0", "sess_live_1", 1000, 1000, JSON.stringify({ role: "user", time: { created: 1000 } }), 0);
+  insert.run("m1", "sess_live_1", 1001, 1002, JSON.stringify({
+    role: "assistant",
+    time: { created: 1001, completed: 1002 },
+    modelId: "GLM-5.3",
+    providerId: "account:zai-individual-coding-plan",
+    tokens: { total: 40437, input: 40050, output: 387, reasoning: 0, cache: { read: 8000, write: 0 } },
+  }), 1);
+  // A cancelled zero-token assistant row with `time.completed` set advances the cursor without inflating turns or zeroing latestContext.
+  insert.run("m2", "sess_live_1", 1003, 1004, JSON.stringify({
+    role: "assistant",
+    time: { created: 1003, completed: 1004 },
+    modelId: "GLM-5.3",
+    tokens: { total: 0, input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+  }), 2);
+  // An in-flight streaming assistant row at the tail (`time.completed` absent, tokens still 0) must NOT advance the cursor past seq 3.
+  insert.run("m3", "sess_live_1", 1005, 1005, JSON.stringify({
+    role: "assistant",
+    time: { created: 1005 },
+    modelId: "GLM-5.3",
+    tokens: { total: 0, input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+  }), 3);
+
+  const extractor = createUsageExtractor({ userHome, stateDir });
+  const agent: UsageAgentSource = { id: "peer-live", provider: "zcode/builtin:zai-coding-plan\\GLM-5.3", persistence: { sessionId: "sess_live_1" } };
+  const first = extractor.extract(agent);
+  assert.ok(first);
+  assert.equal(first.turns, 1);
+  assert.equal(first.model, "GLM-5.3");
+  assert.equal(first.inputUncachedTokens, 40050 - 8000);
+  assert.equal(first.cacheReadTokens, 8000);
+  assert.equal(first.outputTokens, 387);
+  assert.equal(first.latestContextWindowTokens, 40050 + 387);
+
+  // Now the streaming row m3 completes with its final token counts.
+  db.prepare("UPDATE message SET time_updated = ?, data = ? WHERE id = ?").run(
+    1006,
+    JSON.stringify({
+      role: "assistant",
+      time: { created: 1005, completed: 1006 },
+      modelId: "GLM-5.3",
+      tokens: { total: 41250, input: 41097, output: 153, reasoning: 12, cache: { read: 40000, write: 0 } },
+    }),
+    "m3",
+  );
+  const second = extractor.extract(agent);
+  assert.ok(second);
+  assert.equal(second.turns, 2, "the settled streaming row folds on the next delta sweep");
+  assert.equal(second.inputUncachedTokens, (40050 - 8000) + (41097 - 40000));
+  assert.equal(second.cacheReadTokens, 8000 + 40000);
+  assert.equal(second.outputTokens, 387 + 153);
+  assert.equal(second.reasoningTokens, 12);
+  assert.equal(second.latestContextWindowTokens, 41097 + 153);
+});
+
 // ---- the fallback & honest absence -------------------------------------------------------------
 
 test("with no native store on disk, the volatile lastUsage is the fallback; with neither, the honest absence", async t => {

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.98] - 2026-11-05
+
+- Fix `zcode` SQLite usage extraction against ZCode 0.17+'s live `message` table schema (`src/usage-extractor.ts`): `extractZcode` now detects ZCode 0.17+'s `data` JSON column (`PRAGMA table_info(message)`) alongside the legacy `role, metadata` layout, folds completed assistant turns from `data.tokens` (`{ input, output, reasoning, cache: { read, write } }`) and `data.modelId`, skips cancelled zero-token turns without clobbering `latestContextWindowTokens`, and holds `lastStepIdx` before an in-flight streaming row (`time.completed` absent and tokens still zero) so its settled token counts fold on the next delta sweep.
+
 ## [0.0.97] - 2026-11-05
 
 - Lead Context-Budget Hygiene (ADR 0047): deduplicated Turn-0 prompts and compacted `O(N)` accepted-task history so a `Lead` session orchestrates 5–8 waves before the unchanged `LEAD_ROTATE_TOKENS = 128,000` rotation instead of rotating after every task. `buildRoleKickoffPrompt("lead")` (`src/roles-contract.ts`) embeds the Open Design Linked Specification exactly once (other roles keep the prefix), and `SeatKickoffPacketInput.omitSystemPromptDuplicates?: boolean` (`src/preflight.ts`, default `false` — standalone callers keep the complete self-contained packet) makes `buildSeatKickoffPacket` drop exactly the linked-design spec, helper-MCP roster, and wave-law blocks on Turn 1 while keeping every dynamic preflight line and Fire-and-End-Turn; `prependKickoffPacketIfFirstTurn` (`plugin/server/lead-mailbox.ts`) passes the flag for both `Lead` and `Supervisor` seats.
