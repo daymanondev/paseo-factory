@@ -1,4 +1,4 @@
-import { sharedTools, sharedRoles, extendTool } from "./shared.ts";
+import { MCP_TOOL_TIMEOUT_MS, sharedTools, sharedRoles, extendTool } from "./shared.ts";
 import type { Catalog, ToolDefinition } from "./shared.ts";
 const runId = { type: "string", description: "Omit to resolve the active Project run." };
 const specialist = { type: "string", enum: ["pm", "ux", "architect", "dev", "qa"] };
@@ -6,6 +6,7 @@ const string = { type: "string" };
 const decision: ToolDefinition = {
   name: "supervisor_scrum_decision", description: "Record an explicit Owner design decision. Omitted run/revision/digest resolve from the active run. Never infer Owner approval.",
   inputSchema: { type: "object", properties: { runId, decision: { type: "string", enum: ["approved", "changes_requested", "waived"] }, rationale: { type: "string", minLength: 1 }, revision: { type: "integer" }, digest: string, decidedBy: string, actorRole: { type: "string", enum: ["supervisor"] }, designArtifact: string, findings: { type: "array", items: { type: "object", properties: { screen: string, state: { type: "string", enum: ["empty", "loading", "populated", "error", "offline", "permission-denied"] }, viewport: { type: "string", enum: ["desktop", "tablet", "mobile"] }, selector: string, note: string, status: { type: "string", enum: ["approved", "revise"] } }, required: ["screen", "note"] } }, screenStatuses: { type: "object", additionalProperties: { type: "string", enum: ["approved", "revise"] } } }, required: ["decision", "rationale"] },
+  _meta: { timeoutMs: MCP_TOOL_TIMEOUT_MS },
 };
 const operation: ToolDefinition = {
   name: "lead_scrum_operation", description: "Orchestrate the Scrum lifecycle. Evidence operations accept exact landed path/commit/sha256 artifactRefs; readiness also accepts contradictions, unsafeAssumptions and missingCoverage. Design submission requires browserEvidence. All evidence is verified by the existing controller.",
@@ -20,6 +21,7 @@ const operation: ToolDefinition = {
     artifactRefs: { type: "array", items: { type: "object" } }, browserEvidence: { type: "array", items: { type: "object" } },
     contradictions: { type: "array", items: string }, unsafeAssumptions: { type: "array", items: string }, missingCoverage: { type: "array", items: string },
   }, required: ["action"] },
+  _meta: { timeoutMs: MCP_TOOL_TIMEOUT_MS },
 };
 export const scrumCatalog: Catalog = {
   tools: {

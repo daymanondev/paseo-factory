@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.99] - 2026-11-05
+
+- Ledger-first quiet-point succession for `rotation_pending` (`plugin/server/lead-mailbox.ts`, ADR 0031 §3): decouple `projectPeerInFlight` from raw process-level `projectHasPeerWork` via `taskHasSettledPeerOutcome` (`task.accepted || task.status === "accepted" || task.status === "ready-to-accept" || task.status === "needs-human" || (task.status === "red" && task.attempts.length >= MAX_ATTEMPTS) || queuedPeerBlockerTasks.has(task.task)`). Once a `Task` reaches a `Peer`-terminal outcome in the `Ledger` (or queues a `from: "peer", kind: "needs_human"` blocker in `mailbox.jsonl`), `notifyPeer` / `dispatchLead` immediately transitions `rotation_pending` → `handing_over` (`beginHandoff`) without self-blocking on the calling `Peer`'s still-`running` turn or lingering post-claim processes; additionally, `observePeers` (on `Peer` `agent.turn_ended` and `sweepPeers`) shares `tryBeginPendingHandoff` so a `Peer` stopping after a `RED` attempt or without claiming never strands `rotation_pending`.
+- Deduplicate `usageMeter` and `peerMailHook` (`notifyPeer`) on idempotent same-SHA `Claim` replays (`plugin/server/spool.ts`, ADR 0031 §2): when `factory.claim` returns an already-completed `GREEN` `Attempt` in the current `Contract epoch` (`outcome.gate.seq <= admitted.priorSeq`), skip re-running `usageMeter` and `peerMailHook` so client-timeout retries do not append duplicate `mail_queued` verdict messages to `mailbox.jsonl`.
+- Advertise `_meta: { timeoutMs: 600_000 }` (`MCP_TOOL_TIMEOUT_MS = 600_000`) on all tool descriptors in `src/mcp/shared.ts` and `src/mcp/scrum.ts` (`plugin/bin/bridge.mjs`, ADR 0031 §1) so ZCode's `readToolMetaTimeoutMs(tool._meta)` grants `agent_claim` and all Spool-backed MCP tools the full 10-minute timeout budget instead of ZCode's `30,000ms` default.
+
 ## [0.0.98] - 2026-11-05
 
 - Fix `zcode` SQLite usage extraction against ZCode 0.17+'s live `message` table schema (`src/usage-extractor.ts`): `extractZcode` now detects ZCode 0.17+'s `data` JSON column (`PRAGMA table_info(message)`) alongside the legacy `role, metadata` layout, folds completed assistant turns from `data.tokens` (`{ input, output, reasoning, cache: { read, write } }`) and `data.modelId`, skips cancelled zero-token turns without clobbering `latestContextWindowTokens`, and holds `lastStepIdx` before an in-flight streaming row (`time.completed` absent and tokens still zero) so its settled token counts fold on the next delta sweep.

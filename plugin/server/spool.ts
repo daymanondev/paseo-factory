@@ -1524,11 +1524,14 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
       };
     }
     if (request.kind === "claim") {
-      const admit = async () => ({ completion: factory.claim({
-        task: request.task,
-        sha: request.sha,
-        ...(request.agent === undefined ? {} : { agent: request.agent }),
-      }) });
+      const admit = async () => ({
+        priorSeq: factory.ledger.events.at(-1)?.seq ?? 0,
+        completion: factory.claim({
+          task: request.task,
+          sha: request.sha,
+          ...(request.agent === undefined ? {} : { agent: request.agent }),
+        }),
+      });
       const contract = factory.contractFor(request.task);
       const project = contract === undefined ? undefined : resolveProject(contract.workspace);
       // Claim admission synchronously records gate_started under the same
@@ -1536,27 +1539,30 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
       // permits, mailbox delivery, and context observation remain available.
       const admitted = project?.ok ? await withExecutionLane(factory.stateDir, project.slug, admit) : await admit();
       const outcome = await admitted.completion;
-      // The plugin-owned Tier-1 meter (v0.0.87, ADR 0043 §3): every Gate
-      // boundary flushes the Peer's session into the Project rollup and
-      // lands at most one `meter_written` line — the Desktop MCP spawn path
-      // (no `endpoint.sock`, no `driver.mjs`) is metered exactly like the
-      // CLI Driver wave always was. Best-effort by contract: a metering
-      // failure never taints the verdict's own reply.
-      await usageMeter?.({
-        task: request.task,
-        ...(request.agent === undefined ? {} : { agentId: request.agent }),
-        attempt: outcome.attempt,
-      });
-      // The peer hook (v0.0.20, ADR 0013 §4): a verdict is a terminal Task
-      // outcome the Project's Lead must hear — the hook appends `mail_queued`
-      // (`from: "peer"`) on the owning Project's lane, held while a Driver
-      // wave is in flight. It never rejects; a notification failure must not
-      // break the verdict's own reply.
-      await peerMailHook?.({
-        task: request.task,
-        kind: "verdict",
-        text: `Task ${request.task} attempt ${outcome.attempt} ended ${outcome.verdict.toUpperCase()}${outcome.gate.note === "" ? "" : ` — note: ${outcome.gate.note}`}`,
-      });
+      const replayed = outcome.gate.seq <= admitted.priorSeq;
+      if (!replayed) {
+        // The plugin-owned Tier-1 meter (v0.0.87, ADR 0043 §3): every Gate
+        // boundary flushes the Peer's session into the Project rollup and
+        // lands at most one `meter_written` line — the Desktop MCP spawn path
+        // (no `endpoint.sock`, no `driver.mjs`) is metered exactly like the
+        // CLI Driver wave always was. Best-effort by contract: a metering
+        // failure never taints the verdict's own reply.
+        await usageMeter?.({
+          task: request.task,
+          ...(request.agent === undefined ? {} : { agentId: request.agent }),
+          attempt: outcome.attempt,
+        });
+        // The peer hook (v0.0.20, ADR 0013 §4): a verdict is a terminal Task
+        // outcome the Project's Lead must hear — the hook appends `mail_queued`
+        // (`from: "peer"`) on the owning Project's lane, held while a Driver
+        // wave is in flight. It never rejects; a notification failure must not
+        // break the verdict's own reply.
+        await peerMailHook?.({
+          task: request.task,
+          kind: "verdict",
+          text: `Task ${request.task} attempt ${outcome.attempt} ended ${outcome.verdict.toUpperCase()}${outcome.gate.note === "" ? "" : ` — note: ${outcome.gate.note}`}`,
+        });
+      }
       return {
         id: request.id,
         ok: true,

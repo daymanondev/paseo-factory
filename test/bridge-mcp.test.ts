@@ -1084,19 +1084,48 @@ test("v0.0.93 quiet-point regression: Lead dispatches a Peer then crosses 128k �
     assert.equal([...agents.values()].some((a) => a.labels.seat === "lead" && a.id !== lead.id), false, "no Successor Lead exists yet");
     assert.equal(sent.length, 0, "no prompt of any kind was sent while the Peer runs");
 
-    // 3. The Peer stops and delivers its terminal verdict: notifyPeer's pump
-    //    transitions rotation_pending -> handing_over and steers the bounded
-    //    extraction turn to the STILL-LIVE outgoing Lead.
-    peer.status = "idle";
-    await mailRuntime.notifyPeer({ task: "T-KICK", kind: "verdict", text: "T-KICK attempt 1 ended GREEN" });
+    // 3. v0.0.99 (ADR 0031 §1-§3): while the Peer is STILL RUNNING inside its
+    //    active turn (`peer.status === "running"`), it calls `agent_claim` over
+    //    MCP. Verify that:
+    //    (a) `tools/list` advertises `_meta: { timeoutMs: 600000 }` on `agent_claim`
+    //        so ZCode does not abort long Gates at 30s;
+    //    (b) `notifyPeer` sees `task.status === "ready-to-accept"` in the Ledger
+    //        and transitions `rotation_pending -> handing_over` IMMEDIATELY while
+    //        `peer.status === "running"` (without waiting for `peer.status = "idle"`);
+    //    (c) an idempotent second `agent_claim` on the same SHA returns GREEN
+    //        without queuing a duplicate verdict mail item in `mailbox.jsonl`.
+    const peerCorr = correlations.issue({ role: "agent", projectSlug: reg.slug, projectRoot: canonicalRoot, task: "T-KICK", agentId: peer.id });
+    const peerMcpCall = await runMcpSession({
+      args: ["--correlation", peerCorr.correlationId, "--state-dir", stateDir, "--home", homeDir],
+      cwd: worktree,
+      requests: [
+        { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} },
+        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "agent_claim", arguments: { task: "T-KICK" } } },
+        { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "agent_claim", arguments: { task: "T-KICK" } } },
+      ],
+    });
+    const peerTools = (peerMcpCall[0].result as { tools: Array<{ name: string; _meta?: { timeoutMs?: number } }> }).tools;
+    const claimTool = peerTools.find((t) => t.name === "agent_claim");
+    assert.deepEqual(claimTool?._meta, { timeoutMs: 600_000 }, "agent_claim must advertise _meta.timeoutMs = 600000 for ZCode");
+    const firstClaim = peerMcpCall[1].result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.notEqual(firstClaim.isError, true, firstClaim.content[0].text);
+    assert.match(firstClaim.content[0].text, /Verdict: GREEN/);
+    const replayClaim = peerMcpCall[2].result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.notEqual(replayClaim.isError, true, replayClaim.content[0].text);
+    assert.match(replayClaim.content[0].text, /Verdict: GREEN/);
+
+    const queuedBeforeHandoffComplete = readLeadMailbox(join(stateDir, "projects", reg.slug, "mailbox.jsonl")).queued;
+    assert.equal(queuedBeforeHandoffComplete.filter((m) => m.kind === "verdict" && m.task === "T-KICK").length, 1, "idempotent claim replay must not enqueue duplicate verdict mail");
+    assert.equal(peer.status, "running", "the Peer turn is still active when rotation_pending transitions to handing_over");
     assert.equal(readProjectRegistration(stateDir, reg.slug)?.rotationState, "handing_over");
     const extractionSends = sent.filter((s) => s.agentId === lead.id);
-    assert.equal(extractionSends.length, 1, "the extraction prompt reached the outgoing Lead once the wave settled");
+    assert.equal(extractionSends.length, 1, "the extraction prompt reached the outgoing Lead as soon as the Ledger recorded GREEN, even while Peer is running");
     assert.match(extractionSends[0].text, /Lead handoff extraction/);
     assert.equal(lead.archivedAt, null, "the outgoing Lead is archived only at completion, not at extraction");
 
     // 4. The extraction turn completes: retirement, successor creation, and
     //    the immediate unified Turn-1 kickoff with the Peer's verdict.
+    peer.status = "idle";
     await mailRuntime.onLeadTurnEnded({
       agentId: lead.id,
       outcome: { kind: "completed" },
@@ -1109,9 +1138,35 @@ test("v0.0.93 quiet-point regression: Lead dispatches a Peer then crosses 128k �
     assert.ok(successor, "a fresh Successor Lead was created");
     const successorSends = sent.filter((s) => s.agentId === successor.id);
     assert.equal(successorSends.length, 1, "the Successor Lead receives its Turn-1 kickoff immediately upon creation");
-    assert.match(successorSends[0].text, /T-KICK attempt 1 ended GREEN/);
+    assert.match(successorSends[0].text, /Task T-KICK attempt 1 ended GREEN/);
     assert.match(successorSends[0].text, /# Handoff during T-KICK/);
     assert.match(successorSends[0].text, /# Lead handoff — project/);
+
+    // 5. v0.0.99 (ADR 0031 §3): if a Peer ends its turn (`onLeadTurnEnded`)
+    //    WITHOUT reaching a GREEN Verdict while the Lead is in `rotation_pending`,
+    //    `observePeers` detects that no Peer remains running and triggers
+    //    `beginHandoff` so `rotation_pending` never deadlocks.
+    successor.lastUsage = { contextWindowUsedTokens: 130_000 };
+    const sucessorCorr = correlations.issue({ role: "lead", projectSlug: reg.slug, projectRoot: canonicalRoot, agentId: successor.id });
+    const wave2Call = await runMcpSession({
+      args: ["--correlation", sucessorCorr.correlationId, "--state-dir", stateDir, "--home", homeDir],
+      cwd: repoDir,
+      requests: [
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "T-IDLE", gate: "/usr/bin/false" } } },
+        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_dispatch_agent", arguments: { tasks: ["T-IDLE"] } } },
+      ],
+    });
+    assert.notEqual((wave2Call[1].result as { isError?: boolean }).isError, true);
+    const peer2 = [...agents.values()].find((a) => a.labels.task === "T-IDLE");
+    assert.ok(peer2, "second wave Peer created");
+    peer2.status = "running";
+    writeProjectRegistration(stateDir, reg.slug, { root: canonicalRoot, lead: successor.id, supervisor: supervisor.id });
+    await mailRuntime.onLeadTurnEnded({ agentId: successor.id, outcome: { kind: "completed" }, timeline: [] });
+    assert.equal(readProjectRegistration(stateDir, reg.slug)?.rotationState, "rotation_pending");
+
+    peer2.status = "idle";
+    await mailRuntime.onLeadTurnEnded({ agentId: peer2.id, outcome: { kind: "completed" }, timeline: [] });
+    assert.equal(readProjectRegistration(stateDir, reg.slug)?.rotationState, "handing_over", "Peer turn end must wake rotation_pending into handing_over");
   } finally {
     spool.stop();
     rmSync(homeDir, { recursive: true, force: true });

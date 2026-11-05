@@ -1,8 +1,10 @@
 /** Shared schema fragments; transport and invocation stay in the standalone bridge. */
+export const MCP_TOOL_TIMEOUT_MS = 600_000;
 export interface ToolDefinition {
   name: string;
   description: string;
   inputSchema: { type: string; properties: Record<string, unknown>; required?: string[] };
+  _meta?: { timeoutMs?: number };
 }
 export function extendTool(tool: ToolDefinition, properties: Record<string, unknown>): ToolDefinition {
   return { ...tool, inputSchema: { ...tool.inputSchema, properties: { ...tool.inputSchema.properties, ...properties } } };
@@ -205,5 +207,8 @@ for (const [name, source] of Object.entries({ lead_dispatch_agent: "lead_spawn_a
 }
 for (const [name, description] of Object.entries({ lead_create_worktree: "Create an isolated worktree for a contracted Task.", lead_verify: "Verify a committed Task SHA through its Contract Gate.", lead_remove_worktree: "Remove a clean worktree after its Task has been accepted." })) {
   sharedTools[name] = { name, description, inputSchema: { type: "object", properties: { task: { type: "string" }, commit: { type: "string" } }, required: ["task"] } };
+}
+for (const tool of Object.values(sharedTools)) {
+  tool._meta ??= { timeoutMs: MCP_TOOL_TIMEOUT_MS };
 }
 export interface Catalog { tools: Record<string, ToolDefinition>; roles: Record<string, string[]> }

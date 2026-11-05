@@ -65,6 +65,7 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "no
 import { join } from "node:path";
 import type { Factory } from "./core/factory.ts";
 import { readCorrelations } from "./core/correlations.ts";
+import { MAX_ATTEMPTS } from "./core/events.ts";
 import type { LedgerEvent } from "./core/events.ts";
 import { ensureProjectRegistered, listProjectRegistrations, projectStateDir, readProjectRegistration, resolveProject, writeProjectRegistration } from "./core/project.ts";
 import type { LeadRotationState, ProjectRegistration } from "./core/project.ts";
@@ -713,6 +714,29 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     log(`lead-mailbox: ${slug}'s lead crossed ${LEAD_ROTATE_TOKENS} tokens (${tokens.usedTokens}, ${tokens.source}) — rotation pending, the turn runs on`);
   };
 
+  /**
+   * v0.0.93 / v0.0.99 (ADR 0031 Quiet-Point Succession): transition a held
+   * `rotation_pending` into `beginHandoff` the moment no Task Peer remains in
+   * flight (`projectPeerInFlight(slug) === false`) and the outgoing Lead seat
+   * is ready for mail (or absent/errored). Shared by `pumpProjectLead` (the
+   * `notifyPeer`, `dispatchLead`, and `pumpAll` doors) and `observePeers` (the
+   * non-Lead/non-Supervisor `agent.turn_ended` and `sweepPeers` doors).
+   */
+  const tryBeginPendingHandoff = async (slug: string): Promise<boolean> => {
+    if (readRotationState(slug) !== "rotation_pending" || (await projectPeerInFlight(slug))) return false;
+    const reg = readProjectRegistration(deps.stateDir, slug);
+    if (reg?.root === undefined) return false;
+    const lead = await liveLeadAgent(resolveDaemon(), slug).catch(() => undefined);
+    if (lead !== undefined && lead.status !== "error" && !isSeatReadyForMail(lead)) return false;
+    try {
+      await beginHandoff(slug, reg.root);
+      return true;
+    } catch (err) {
+      log(`lead-mailbox: pending rotation of ${slug} could not begin its handoff — the state stands (${messageOf(err)})`);
+      return false;
+    }
+  };
+
   /** Runs the lane — the one door delivery and rotation observation go through. */
   const pumpProjectLead = async (slug: string): Promise<void> => {
     await projectLane(slug, async () => {
@@ -726,25 +750,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       } catch (err) {
         log(`lead-mailbox: rotation observation of ${slug} failed — the state stands (${messageOf(err)})`);
       }
-      // v0.0.93 (ADR 0031 Quiet-Point Succession): a rotation held pending
-      // while a Peer ran begins the moment the wave settles — `notifyPeer`'s
-      // own pump lands here with the Peer's terminal verdict already queued
-      // and no Peer left in flight, and `pumpAll` reaches the same arm after
-      // a restart, so a pending rotation never stalls on a missing trigger.
-      if (readRotationState(slug) === "rotation_pending" && !(await projectPeerInFlight(slug))) {
-        const reg = readProjectRegistration(deps.stateDir, slug);
-        if (reg?.root !== undefined) {
-          const lead = await liveLeadAgent(resolveDaemon(), slug).catch(() => undefined);
-          if (lead === undefined || lead.status === "error" || isSeatReadyForMail(lead)) {
-            try {
-              await beginHandoff(slug, reg.root);
-              return;
-            } catch (err) {
-              log(`lead-mailbox: pending rotation of ${slug} could not begin its handoff — the state stands (${messageOf(err)})`);
-            }
-          }
-        }
-      }
+      if (await tryBeginPendingHandoff(slug)) return;
       if (readRotationState(slug) === "handing_over") {
         const reg = readProjectRegistration(deps.stateDir, slug);
         const requestedAt = reg?.handoffRequestedAt;
@@ -818,6 +824,12 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     await projectLane(project.slug, async () => {
       try {
         await peerHandoff.observeProject(project.slug, project.root, input);
+        if (await tryBeginPendingHandoff(project.slug)) {
+          if (peerBlockersQueued.delete(project.slug)) {
+            await drainSupervisorMailbox(project.slug);
+          }
+          return;
+        }
         if (peerBlockersQueued.delete(project.slug)) {
           await drainLeadMailbox(project.slug);
           await drainSupervisorMailbox(project.slug);
@@ -1158,12 +1170,53 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     driverWaveInFlight(events, live, slug) || foldTasks(events).some(task => !task.accepted &&
       boundTaskPeers({ stateDir: deps.stateDir, slug, task: task.task, events, live }).some(peerIsRunning));
 
+  /**
+   * Ledger-first quiet-point check for `rotation_pending` (v0.0.99, ADR 0031
+   * §3): once a Task's folded Ledger status in the current Contract epoch has
+   * reached a Peer-terminal state (`ready-to-accept` / GREEN, `needs-human`,
+   * `red` at `MAX_ATTEMPTS`, or a queued `from: "peer", kind: "needs_human"`
+   * blocker in `mailbox.jsonl`), the Task is in Lead's court and no longer
+   * counts as having Peer work in flight — even while the Peer's `agent_claim`
+   * or `agent_escalate_blocker` tool call is still returning inside an active
+   * turn (`peer.status === "running"`).
+   */
+  const taskHasSettledPeerOutcome = (task: TaskView, queuedPeerBlockerTasks?: ReadonlySet<string>): boolean =>
+    task.accepted ||
+    task.status === "accepted" ||
+    task.status === "ready-to-accept" ||
+    task.status === "needs-human" ||
+    (task.status === "red" && task.attempts.length >= MAX_ATTEMPTS) ||
+    (queuedPeerBlockerTasks?.has(task.task) ?? false);
+
   const projectPeerInFlight = async (slug: string): Promise<boolean> => {
     const reg = readProjectRegistration(deps.stateDir, slug);
     if (reg?.root === undefined) return false;
     const events = projectEventsOf(slug, reg.root);
+    const tasks = foldTasks(events);
+    let queuedPeerBlockerTasks: Set<string> | undefined;
+    try {
+      const mailbox = readLeadMailbox(mailboxPath(slug));
+      queuedPeerBlockerTasks = new Set(
+        mailbox.queued
+          .filter((item) => item.from === "peer" && item.kind === "needs_human" && typeof item.task === "string")
+          .map((item) => item.task!),
+      );
+    } catch {
+      queuedPeerBlockerTasks = undefined;
+    }
+    const settledTasks = new Set(
+      tasks.filter((task) => taskHasSettledPeerOutcome(task, queuedPeerBlockerTasks)).map((task) => task.task),
+    );
     const live = [...(await liveAgentsById()).values()];
-    return projectHasPeerWork(slug, events, live);
+    const activeWaveEvents = settledTasks.size > 0
+      ? events.filter((evt) => !("task" in evt) || typeof evt.task !== "string" || !settledTasks.has(evt.task))
+      : events;
+    if (driverWaveInFlight(activeWaveEvents, live, slug)) return true;
+    return tasks.some(
+      (task) =>
+        !settledTasks.has(task.task) &&
+        boundTaskPeers({ stateDir: deps.stateDir, slug, task: task.task, events, live }).some(peerIsRunning),
+    );
   };
 
   /** Resolves `--workspace` or `--project` to `{ root, slug }` or a structured `unknown-project` refusal. */
@@ -1248,7 +1301,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
         if (!ensured.ok) return ensured;
         const from = request.from ?? "owner";
         const kind = from === "peer" ? "needs_human" : "directive";
-        const queued = appendMailQueued(mailboxPath(slug), { ...(bound.execution === undefined ? {} : { requestId: request.id }), from, kind, text: bound.packet ? `${bound.packet}\n${request.message}` : request.message, ...(bound.execution === undefined ? {} : { execution: bound.execution }) });
+        const queued = appendMailQueued(mailboxPath(slug), { ...(bound.execution === undefined ? {} : { requestId: request.id }), from, kind, ...(from === "peer" && blockerTask !== undefined ? { task: blockerTask } : {}), text: bound.packet ? `${bound.packet}\n${request.message}` : request.message, ...(bound.execution === undefined ? {} : { execution: bound.execution }) });
         return { ok: true, agentId: ensured.agentId, mailId: queued.mailId };
       },
     );
