@@ -642,6 +642,10 @@ const WRITE_TOOL_NAME_PLACEHOLDERS = new Set([
   "patch",
   "multi_edit",
   "multiedit",
+  // ZCode's tool names (v0.0.94, ADR 0046 Decision 5.1 Layer 2): DeleteFile
+  // and NotebookEdit fence identically to Write/Edit/MultiEdit.
+  "deletefile",
+  "notebookedit",
   "str_replace_editor",
   "create_file",
   "edit_file",
