@@ -40,8 +40,11 @@ export type {
 } from "./watch.ts";
 export { renderReport } from "./report.ts";
 export {
+  MAX_RETRO_PROPOSALS,
+  MIN_RETRO_EVIDENCE_SEQS,
   buildRetroDigest,
   buildRetroPrompt,
+  buildSeqToTaskMap,
   orderForRatification,
   parseRetroProposals,
   renderRetroFile,

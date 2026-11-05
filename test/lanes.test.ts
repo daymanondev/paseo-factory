@@ -562,7 +562,7 @@ test("an opencode lane completes the Watch, the Retro, and the Fresh-eyes CLI pa
   // The Retro: strict JSON proposals citing known seqs.
   writeLanes(stateDir, { retro: lane });
   const retroJson = JSON.stringify({
-    proposals: [{ class: "observation", evidence: [1], pattern: "reports bury the gate note", text: "Surface the note." }],
+    proposals: [{ class: "observation", evidence: [1, 2], pattern: "reports bury the gate note", text: "Surface the note." }],
   });
   const retroFake = fakeLaneRunner(() => ({ code: 0, stdout: retroJson }));
   const retro = await core.runRetroPass({

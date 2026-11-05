@@ -4,8 +4,19 @@ import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createFactory } from "../plugin/server/core/factory.ts";
-import { buildRetroDigest, buildRetroPrompt, parseRetroProposals, retroDay, retroFilePath, retroLaneAvailable } from "../src/retro.ts";
-import { resolveProject } from "../src/project.ts";
+import {
+  MAX_RETRO_PROPOSALS,
+  MIN_RETRO_EVIDENCE_SEQS,
+  buildRetroDigest,
+  buildRetroPrompt,
+  buildSeqToTaskMap,
+  parseRetroProposals,
+  renderRetroFile,
+  retroDay,
+  retroFilePath,
+  retroLaneAvailable,
+} from "../src/retro.ts";
+import { projectNotebookPath, resolveProject } from "../src/project.ts";
 import { handleSpoolRequest, parseSpoolRequest, startSpool } from "../plugin/server/spool.ts";
 import type { Factory } from "../plugin/server/core/factory.ts";
 import type { RetroWritten } from "../src/events.ts";
@@ -27,6 +38,12 @@ import { disposeDir, fakeCopilotRunner, gitCommitAll, gitCommitChanges, makeTemp
  * contract whole, superseded drafts as 1-line seq headers, one read per
  * Report path across duplicate report_written events) and the fence-tolerant
  * parse (```json-wrapped answers parse on the first call).
+ * Since v0.1.0 (ADR 0048 §4): the Recurrence Guard (>= 2 DISTINCT seqs per
+ * proposal — [12, 12] fails like [12] — and the 2-proposal cap), the optional
+ * rootCause/effect companions, the notebook-embedding digest option, the
+ * seq → Task map with `T-xx (seq N)` citations, the 4-line Owner
+ * Ratification card render, and the project-scoped factory wiring that
+ * feeds both through the pass.
  */
 
 const ownerCli = join(repoRoot, "plugin", "bin", "factory.mjs");
@@ -52,12 +69,18 @@ function commitWork(workspace: string, artifact: string): string {
   return gitCommitChanges(workspace, "the work");
 }
 
-/** The fake CLI's happy answer: two proposals in scrambled class order — the file must regroup them. Evidence cites seq 1 (every ledger here has at least the contract). */
+/**
+ * The fake CLI's happy answer: three proposals in scrambled class order, each
+ * citing >= 2 distinct seqs (the v0.1.0 Recurrence Guard) — the parse keeps
+ * only the first MAX_RETRO_PROPOSALS in the model's order, regrouped by the
+ * file. Every ledger here has at least seqs 1 and 2 (ledger_schema +
+ * contract_set), the minimum any HAPPY_JSON consumer's ledger holds.
+ */
 const HAPPY_JSON = JSON.stringify({
   proposals: [
-    { class: "observation", evidence: [1], pattern: "reports bury the gate note", text: "Surface the note above the choke section." },
+    { class: "observation", evidence: [2, 1], pattern: "reports bury the gate note", text: "Surface the note above the choke section." },
     { class: "gate-check", evidence: [1, 2], pattern: "the same missing export reaches the gate three times", text: "Add a smoke import of the artifact to the gate command." },
-    { class: "contract-draft", evidence: [1], pattern: "agents guess their assignment from the tree", text: "Contracts should carry a description slot by default." },
+    { class: "contract-draft", evidence: [1, 2], pattern: "agents guess their assignment from the tree", text: "Contracts should carry a description slot by default." },
   ],
 });
 
@@ -315,6 +338,34 @@ test("v0.0.89 (ADR 0045 §4): duplicate report_written paths are deduplicated be
   assert.equal(corpus.digest.split("] report attempt=1 file=report-REP-1.md").length - 1, 2, "both report_written evidence lines stay");
 });
 
+test("v0.1.0 (ADR 0048 §4): buildRetroDigest embeds the Project notebook when given — two-arg callers stay byte-identical", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact } = makeWorkspaceAtBase(dir);
+  const stateDir = join(dir, "factory");
+  const factory = createFactory({ stateDir });
+  factory.setContract({ task: "NB", workspace, gate: "true", artifact, description: "Notebook digest." });
+  writeFileSync(join(stateDir, "report-NB-1.md"), "THE-NB-REPORT\n");
+  factory.ledger.append({ event: "report_written", task: "NB", attempt: 1, path: join(stateDir, "report-NB-1.md") });
+
+  // The two-arg call and an options bag without a notebook are byte-identical
+  // to today's digest — every existing caller keeps its exact prompt.
+  const plain = buildRetroDigest(factory.ledger.events, stateDir);
+  const noNotebook = buildRetroDigest(factory.ledger.events, stateDir, {});
+  const undefinedNotebook = buildRetroDigest(factory.ledger.events, stateDir, { notebook: undefined });
+  assert.equal(noNotebook.digest, plain.digest);
+  assert.equal(undefinedNotebook.digest, plain.digest);
+  assert.ok(!plain.digest.includes("Project notebook"), "no notebook option, no notebook section");
+
+  const notebook = ["## 1. Verification & Run Recipe", "", "- Fast Slice Check: node --test test/retro.test.ts", "", "## 2. Recurrence Guard", "", "| ID | Cause → Effect Mechanism | Evidence (Task / seq) | State | Enforcement |", "| N1 | missing .env.test copy → red gate twice | T-01 (seq 3), T-02 (seq 9) | hardened (Tier-1) | .worktreeinclude |"].join("\n");
+  const embedded = buildRetroDigest(factory.ledger.events, stateDir, { notebook });
+  const sectionAt = embedded.digest.indexOf("## Project notebook (<projectStateDir>/notebook.md)");
+  assert.ok(sectionAt > -1, "the notebook section header rides the digest");
+  const reportsAt = embedded.digest.indexOf("## reports");
+  assert.ok(sectionAt > reportsAt, "the notebook section rides after the reports — appended last");
+  assert.ok(embedded.digest.includes(notebook), "the bounded notebook content rides whole");
+});
+
 // ---- the prompt --------------------------------------------------------------------
 
 test("buildRetroPrompt: the EXISTING-LAW section, the strict JSON contract, the corpus as the tail", () => {
@@ -332,6 +383,16 @@ test("buildRetroPrompt: the EXISTING-LAW section, the strict JSON contract, the 
   assert.ok(prompt.includes('"class":"gate-check|contract-draft|observation"'), "the schema is spelled");
   assert.ok(prompt.includes("A seq that does not exist in the corpus fails your whole output"));
   assert.ok(prompt.endsWith("# retro corpus — 3 ledger events"), "the corpus is the prompt's tail");
+});
+
+test("v0.1.0 (ADR 0048 §4): buildRetroPrompt enforces the Recurrence Guard and the 3-Tier hardening preference", () => {
+  const prompt = buildRetroPrompt("# retro corpus — 3 ledger events");
+  assert.ok(prompt.includes("at least 2 distinct seq"), "the min-2 distinct law is instructed");
+  assert.ok(prompt.includes("at most 2 proposals"), "the count cap is instructed");
+  assert.ok(prompt.includes("Tier-1"), "the 3-Tier hierarchy rides the instructions");
+  assert.ok(prompt.includes("Tier-3"), "no-op rule deprecation is preferred over prose additions");
+  assert.ok(!prompt.includes("no count cap"), "the old no-cap law is gone");
+  assert.ok(prompt.endsWith("# retro corpus — 3 ledger events"), "the corpus stays the prompt's tail");
 });
 
 // ---- the strict parse ----------------------------------------------------------------
@@ -366,8 +427,8 @@ test("parseRetroProposals: whole-parse — one bad proposal fails the output, ne
     ["empty evidence", '{"proposals":[{"class":"observation","evidence":[],"pattern":"p","text":"t"}]}', /non-empty array/],
     ["non-integer seq", '{"proposals":[{"class":"observation","evidence":[1.5],"pattern":"p","text":"t"}]}', /non-integer seq/],
     ["nonexistent seq", '{"proposals":[{"class":"observation","evidence":[4],"pattern":"p","text":"t"}]}', /seq 4, which does not exist/],
-    ["blank pattern", '{"proposals":[{"class":"observation","evidence":[1],"pattern":"  ","text":"t"}]}', /pattern must be a non-empty/],
-    ["blank text", '{"proposals":[{"class":"observation","evidence":[1],"pattern":"p","text":""}]}', /text must be a non-empty/],
+    ["blank pattern", '{"proposals":[{"class":"observation","evidence":[1,2],"pattern":"  ","text":"t"}]}', /pattern must be a non-empty/],
+    ["blank text", '{"proposals":[{"class":"observation","evidence":[1,2],"pattern":"p","text":""}]}', /text must be a non-empty/],
   ];
   for (const [name, output, pattern] of cases) {
     const parsed = parseRetroProposals(output, SEQS);
@@ -377,7 +438,7 @@ test("parseRetroProposals: whole-parse — one bad proposal fails the output, ne
 });
 
 test("v0.0.89 (ADR 0045 §4): parseRetroProposals strips an enclosing Markdown code fence before validating — fenced answers parse clean", () => {
-  const payload = '{"proposals":[{"class":"observation","evidence":[2],"pattern":"p","text":"t"}]}';
+  const payload = '{"proposals":[{"class":"observation","evidence":[2,3],"pattern":"p","text":"t"}]}';
   for (const [name, output] of [
     ["```json fence", "```json\n" + payload + "\n```"],
     ["bare ``` fence", "```\n" + payload + "\n```"],
@@ -399,6 +460,180 @@ test("v0.0.89 (ADR 0045 §4): parseRetroProposals strips an enclosing Markdown c
   assert.ok(!unclosed.ok, "an unclosed fence still fails");
 });
 
+// ---- the v0.1.0 Recurrence Guard (ADR 0048 §4) ----------------------------------------
+
+const GUARD_SEQS = new Set([12, 13, 14]);
+
+test("v0.1.0 (ADR 0048 §4): the Recurrence Guard — a proposal must cite >= 2 DISTINCT seqs; [12, 12] fails exactly like [12]", () => {
+  for (const [name, evidence] of [
+    ["a single seq", "[12]"],
+    ["one seq duplicated", "[12, 12]"],
+    ["one seq duplicated thrice", "[12, 12, 12]"],
+  ] as const) {
+    const parsed = parseRetroProposals(
+      `{"proposals":[{"class":"gate-check","evidence":${evidence},"pattern":"p","text":"t"}]}`,
+      GUARD_SEQS,
+    );
+    assert.equal(parsed.ok, false, `${name}: rejected — duplicates never pad the distinct count`);
+    if (!parsed.ok) assert.match(parsed.error, /at least 2 distinct/, `${name}: the error names the guard`);
+  }
+  // >= 2 distinct passes; duplicates collapse preserving first-seen order.
+  const ok = parseRetroProposals(
+    '{"proposals":[{"class":"gate-check","evidence":[13,12,13,12],"pattern":"p","text":"t"}]}',
+    GUARD_SEQS,
+  );
+  assert.ok(ok.ok, "two distinct seqs pass the guard");
+  if (ok.ok) assert.deepEqual(ok.proposals[0]!.evidence, [13, 12], "evidence deduplicates, first-seen order kept");
+});
+
+test("v0.1.0 (ADR 0048 §4): parseRetroProposals caps output at MAX_RETRO_PROPOSALS (2) — whole-parse strictness holds beyond the cap", () => {
+  assert.equal(MIN_RETRO_EVIDENCE_SEQS, 2);
+  assert.equal(MAX_RETRO_PROPOSALS, 2);
+  const three = parseRetroProposals(
+    JSON.stringify({
+      proposals: [
+        { class: "observation", evidence: [12, 13], pattern: "p1", text: "t1" },
+        { class: "gate-check", evidence: [12, 14], pattern: "p2", text: "t2" },
+        { class: "contract-draft", evidence: [13, 14], pattern: "p3", text: "t3" },
+      ],
+    }),
+    GUARD_SEQS,
+  );
+  assert.ok(three.ok);
+  if (three.ok) {
+    assert.equal(three.proposals.length, 2, "capped at MAX_RETRO_PROPOSALS");
+    // The cap keeps the model's order — ratification reading order is the renderer's act.
+    assert.equal(three.proposals[0]!.pattern, "p1");
+    assert.equal(three.proposals[1]!.pattern, "p2");
+  }
+  // A proposal beyond the cap is still VALIDATED whole: one bad proposal fails
+  // the entire output — the cap never silently hides an invalid one.
+  const badThird = parseRetroProposals(
+    JSON.stringify({
+      proposals: [
+        { class: "observation", evidence: [12, 13], pattern: "p1", text: "t1" },
+        { class: "observation", evidence: [12, 13], pattern: "p2", text: "t2" },
+        { class: "observation", evidence: [99, 100], pattern: "p3", text: "t3" },
+      ],
+    }),
+    GUARD_SEQS,
+  );
+  assert.ok(!badThird.ok, "the cap never hides an invalid proposal");
+  if (!badThird.ok) assert.match(badThird.error, /seq 99, which does not exist/);
+});
+
+test("v0.1.0 (ADR 0048 §4): rootCause/effect are optional companions — accepted when non-empty, blank fails, unknown keys still fail", () => {
+  const withBoth = parseRetroProposals(
+    '{"proposals":[{"class":"gate-check","evidence":[12,13],"pattern":"p","text":"t","rootCause":"the gate never imports the artifact","effect":"three red attempts on one missing export"}]}',
+    GUARD_SEQS,
+  );
+  assert.ok(withBoth.ok, "both optional fields ride clean");
+  if (withBoth.ok) {
+    assert.equal(withBoth.proposals[0]!.rootCause, "the gate never imports the artifact");
+    assert.equal(withBoth.proposals[0]!.effect, "three red attempts on one missing export");
+  }
+  const effectOnly = parseRetroProposals(
+    '{"proposals":[{"class":"gate-check","evidence":[12,13],"pattern":"p","text":"t","effect":"recurred twice"}]}',
+    GUARD_SEQS,
+  );
+  assert.ok(effectOnly.ok);
+  if (effectOnly.ok) assert.equal(effectOnly.proposals[0]!.rootCause, undefined, "rootCause stays absent when omitted");
+  for (const [name, extra] of [
+    ["blank rootCause", '"rootCause":"   "'],
+    ["blank effect", '"effect":""'],
+  ] as const) {
+    const parsed = parseRetroProposals(
+      `{"proposals":[{"class":"gate-check","evidence":[12,13],"pattern":"p","text":"t",${extra}}]}`,
+      GUARD_SEQS,
+    );
+    assert.equal(parsed.ok, false, `${name}: fails the strict parse`);
+    if (!parsed.ok) assert.match(parsed.error, /non-empty string when present/, `${name}: the error names the field law`);
+  }
+  const unknown = parseRetroProposals(
+    '{"proposals":[{"class":"gate-check","evidence":[12,13],"pattern":"p","text":"t","impact":"x"}]}',
+    GUARD_SEQS,
+  );
+  assert.ok(!unknown.ok, "an unknown key still fails the whole output");
+  if (!unknown.ok) assert.match(unknown.error, /exactly class\/evidence\/pattern\/text/);
+});
+
+// ---- the v0.1.0 seq → Task mapping and the 4-line Owner Ratification card (ADR 0048 §4) ----
+
+test("v0.1.0 (ADR 0048 §4): buildSeqToTaskMap maps every task-carrying seq; renderRetroFile cites `T-xx (seq N)` and renders the 4-line card", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact } = makeWorkspaceAtBase(dir);
+  const stateDir = join(dir, "factory");
+  const factory = createFactory({ stateDir });
+  factory.setContract({ task: "T-01", workspace, gate: "true", artifact, description: "One contract epoch." });
+  factory.ledger.append({ event: "permit_allowed", task: "T-02", agent: "agent-t2", name: "Bash", kind: "tool", command: "node --test" });
+  // An untasked factory-level line — mapped to no Task.
+  factory.ledger.append({
+    event: "git_blocked",
+    rule: "git:branch-D",
+    reason: "branch delete",
+    command: "git branch -D wip",
+    cwd: "/tmp/elsewhere",
+    blockId: "b-nomap",
+  });
+  const contractSeq = factory.ledger.events.find((e) => e.event === "contract_set")!.seq;
+  const permitSeq = factory.ledger.events.find((e) => e.event === "permit_allowed")!.seq;
+  const gitSeq = factory.ledger.events.find((e) => e.event === "git_blocked")!.seq;
+
+  const map = buildSeqToTaskMap(factory.ledger.events);
+  assert.equal(map.get(contractSeq), "T-01", "a task-carrying seq maps to its Task id");
+  assert.equal(map.get(permitSeq), "T-02");
+  assert.equal(map.has(gitSeq), false, "an untasked seq maps to nothing");
+
+  const corpus = buildRetroDigest(factory.ledger.events, stateDir);
+  const citations = `T-01 (seq ${contractSeq}), T-02 (seq ${permitSeq}), seq ${gitSeq}`;
+  const file = renderRetroFile({
+    day: "2026-11-05",
+    model: "copilot/gpt-5.4",
+    durationMs: 1000,
+    corpus,
+    proposals: [
+      {
+        cls: "gate-check",
+        evidence: [contractSeq, permitSeq, gitSeq],
+        pattern: "the same missing export reaches the gate three times",
+        text: "Add a smoke import of the artifact to the gate command.",
+        rootCause: "the gate never imports the artifact",
+        effect: "three red attempts on one missing export",
+      },
+    ],
+    seqToTask: map,
+  });
+  // The citation format and the structure the ratification path parses both hold.
+  assert.ok(file.includes(`- Evidence (ledger seq): ${citations}`), "mapped seqs cite `T-xx (seq N)`, unmapped fall back to `seq N`");
+  assert.ok(file.includes("## R1 — gate-check"), "the R1..Rn header shape stays");
+  const l1 = file.indexOf("1. Chuyện gì đã lặp lại");
+  const l2 = file.indexOf("2. Nguyên nhân gốc");
+  const l3 = file.indexOf("3. Nếu duyệt sẽ sửa gì (Preview diff)");
+  const l4 = file.indexOf("4. Tác dụng");
+  assert.ok(l1 > -1 && l2 > l1 && l3 > l2 && l4 > l3, "the 4 lines render in the ADR 0048 §4 order");
+  assert.ok(file.includes(`1. Chuyện gì đã lặp lại: three red attempts on one missing export (evidence: ${citations})`), "line 1 carries the effect and the citations");
+  assert.ok(file.includes("2. Nguyên nhân gốc: the gate never imports the artifact"), "line 2 carries the root cause");
+  assert.ok(file.includes("3. Nếu duyệt sẽ sửa gì (Preview diff): Add a smoke import of the artifact to the gate command."), "line 3 carries the proposal text");
+  assert.ok(file.includes("- Pattern: the same missing export reaches the gate three times"), "the pattern line stays");
+  assert.ok(file.includes("- Proposal: Add a smoke import of the artifact to the gate command."), "the proposal line stays — `parseProposals` keys on it");
+
+  // No map and no optional fields: plain `seq N` citations, pattern/text carry the card.
+  const plain = renderRetroFile({
+    day: "2026-11-05",
+    model: "copilot/gpt-5.4",
+    durationMs: 1000,
+    corpus,
+    proposals: [{ cls: "observation", evidence: [contractSeq, permitSeq], pattern: "pat", text: "txt" }],
+  });
+  const plainCitations = `seq ${contractSeq}, seq ${permitSeq}`;
+  assert.ok(plain.includes(`- Evidence (ledger seq): ${plainCitations}`), "without a map, evidence stays `seq N`");
+  assert.ok(plain.includes(`1. Chuyện gì đã lặp lại: pat (evidence: ${plainCitations})`), "line 1 falls back to the pattern");
+  assert.ok(plain.includes("2. Nguyên nhân gốc: pat"), "line 2 falls back to the pattern");
+  assert.ok(plain.includes("3. Nếu duyệt sẽ sửa gì (Preview diff): txt"), "line 3 falls back to the text");
+  assert.ok(plain.includes("4. Tác dụng: txt"), "line 4 falls back to the text");
+});
+
 // ---- the pass through the factory ----------------------------------------------------
 
 test("a happy retro: file first, one written line, R-ids assigned in ratification order", async (t) => {
@@ -417,7 +652,7 @@ test("a happy retro: file first, one written line, R-ids assigned in ratificatio
   const outcome = await factory.retro();
   assert.equal(outcome.outcome, "written");
   assert.equal(outcome.model, "copilot/gpt-5.4");
-  assert.equal(outcome.proposalCount, 3);
+  assert.equal(outcome.proposalCount, 2, "the 3-proposal answer caps at MAX_RETRO_PROPOSALS (v0.1.0)");
 
   // The one CLI call: silent, model pinned, reasoning pinned, no --context flag.
   assert.equal(fake.calls.length, 1);
@@ -429,17 +664,19 @@ test("a happy retro: file first, one written line, R-ids assigned in ratificatio
   assert.equal(outcome.proposalsPath, expectedPath);
   assert.ok(existsSync(expectedPath), "the proposals file landed");
   const file = readFileSync(expectedPath, "utf8");
-  assert.match(file, /^# Retro \d{4}-\d{2}-\d{2} — 3 proposals$/m);
+  assert.match(file, /^# Retro \d{4}-\d{2}-\d{2} — 2 proposals$/m);
   assert.ok(file.includes("- Model: copilot/gpt-5.4"));
   assert.match(file, /- Corpus: \d+ ledger events · 1 task blocks · 1 reports · 0 red gate logs/);
   assert.ok(file.includes("- Duration: "), "the header carries the duration");
   assert.ok(file.includes("Nothing here is law until ratified"), "the header states the ratification boundary");
   // Ratification reading order: gate-check → contract-draft → observation, R-ids follow it.
+  // The cap (v0.1.0) kept the model's first two — observation + gate-check — so
+  // the contract-draft (the model's third) is the one that never rides.
   const r1 = file.indexOf("## R1 — gate-check");
-  const r2 = file.indexOf("## R2 — contract-draft");
-  const r3 = file.indexOf("## R3 — observation");
-  assert.ok(r1 > -1 && r2 > r1 && r3 > r2, "ids follow the ratification reading order, not the model's order");
-  assert.ok(file.includes("- Evidence (ledger seq): 1, 2"), "evidence renders as the cited seqs");
+  const r2 = file.indexOf("## R2 — observation");
+  assert.ok(r1 > -1 && r2 > r1, "ids follow the ratification reading order, not the model's order");
+  assert.ok(!file.includes("## R3") && !file.includes("contract-draft"), "the third proposal never rides the file — the cap dropped it");
+  assert.ok(file.includes("- Evidence (ledger seq): R1 (seq 1), R1 (seq 2)"), "evidence renders as Task-resolved citations (v0.1.0)");
   assert.ok(file.includes("- Pattern: the same missing export reaches the gate three times"));
   assert.ok(file.includes("- Proposal: Add a smoke import of the artifact to the gate command."));
 
@@ -447,7 +684,7 @@ test("a happy retro: file first, one written line, R-ids assigned in ratificatio
   const retro = retroEvent(factory);
   assert.equal(retro.model, "copilot/gpt-5.4");
   assert.equal(retro.outcome, "written");
-  assert.equal(retro.proposalCount, 3);
+  assert.equal(retro.proposalCount, 2);
   assert.equal(retro.proposalsPath, expectedPath);
   assert.ok(!("task" in retro) && !("attempt" in retro), "the first factory-level event carries neither");
   assert.ok(typeof retro.durationMs === "number" && retro.durationMs >= 0);
@@ -624,9 +861,9 @@ test("handleSpoolRequest: retro replies with the count and path, or refuses on t
   const written = await handleSpoolRequest(factory, { id: "q1", kind: "retro" });
   assert.ok(written.ok, "the retro round-trips");
   if (written.ok) {
-    assert.match(written.summary, /^retro written: 3 proposals → .+retro-\d{4}-\d{2}-\d{2}\.md$/);
+    assert.match(written.summary, /^retro written: 2 proposals → .+retro-\d{4}-\d{2}-\d{2}\.md$/);
     assert.ok(written.proposalsPath!.endsWith(".md"));
-    assert.equal(written.proposalCount, 3);
+    assert.equal(written.proposalCount, 2, "capped at MAX_RETRO_PROPOSALS (v0.1.0)");
   }
 
   // A same-day second request: the refusal rides the reply, no ledger line.
@@ -686,7 +923,7 @@ test("factory retro through the real CLI and spool: exit 0, count + path on stdo
 
   const first = await run(ownerCli, ["retro"], ownerEnv);
   assert.equal(first.status, 0, `stdout:\n${first.stdout}\nstderr:\n${first.stderr}`);
-  assert.match(first.stdout, /retro written: 3 proposals → .+retro-\d{4}-\d{2}-\d{2}\.md/);
+  assert.match(first.stdout, /retro written: 2 proposals → .+retro-\d{4}-\d{2}-\d{2}\.md/);
 
   const second = await run(ownerCli, ["retro"], ownerEnv);
   assert.equal(second.status, 2, "a same-day second run is refused, exit 2");
@@ -818,4 +1055,55 @@ test("v0.0.38: retroLaneAvailable and Factory.retro honor the Project's retro la
   const ownScope = await factoryD.retro();
   assert.equal(ownScope.outcome, "written");
   assert.equal(ownScope.model, "claude/claude-sonnet-4-6", "a project-scoped factory needs no argument to honor its Project lane");
+});
+
+// ---- the v0.1.0 Project notebook wiring into the retro pass (ADR 0048 §4) ---------------
+
+test("v0.1.0 (ADR 0048 §4): a project-scoped retro feeds the Project notebook into the prompt and Task citations into the file", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact } = makeWorkspaceAtBase(dir);
+  const project = resolveProject(workspace);
+  assert.ok(project.ok, project.ok ? "" : project.reason);
+  const stateDir = join(dir, "factory");
+  writeLanes(stateDir, { retro: "copilot/gpt-5.4" });
+  mkdirSync(join(stateDir, "projects", project.slug), { recursive: true });
+  writeFileSync(projectNotebookPath(stateDir, project.slug), "## 1. Verification & Run Recipe\n\n- Fast Slice Check: node --test test/retro.test.ts\n\n## 2. Recurrence Guard\n\n| N1 | missing .env.test copy → red gate twice | T-01 (seq 3), T-02 (seq 9) | hardened (Tier-1) | .worktreeinclude |\n");
+  // The lane's answer cites the contract seq and the first task line — both
+  // map to Task T-01 through buildSeqToTaskMap in the factory's wiring.
+  const answer = JSON.stringify({
+    proposals: [{ class: "gate-check", evidence: [1, 2], pattern: "p", text: "t" }],
+  });
+  const fake = fakeCopilotRunner(() => ({ code: 0, stdout: answer }));
+  const factory = createFactory({ stateDir, projectSlug: project.slug, retroCopilotProbe: () => true, retroCopilotRunner: fake.runner });
+  factory.setContract({ task: "T-01", workspace, gate: "true", artifact });
+  // A second task-carrying event — the guard needs >= 2 distinct citable seqs.
+  factory.ledger.append({ event: "permit_allowed", task: "T-01", agent: "agent-t01", name: "Bash", kind: "tool", command: "node --test" });
+
+  const scoped = await factory.retro();
+  assert.equal(scoped.outcome, "written", `error: ${scoped.error ?? ""}`);
+  // The notebook rode the prompt — the digest's last section, bounded.
+  assert.ok(fake.calls[0]!.stdin.includes("## Project notebook (<projectStateDir>/notebook.md)"), "the notebook section rode the prompt");
+  assert.ok(fake.calls[0]!.stdin.includes("- Fast Slice Check: node --test test/retro.test.ts"), "the notebook's recipe rode whole");
+  // The file cites Tasks, not bare seqs — buildSeqToTaskMap flowed through the pass.
+  const file = readFileSync(scoped.proposalsPath!, "utf8");
+  assert.ok(file.includes(`- Evidence (ledger seq): T-01 (seq 1), T-01 (seq 2)`), "the rendered file cites `T-xx (seq N)`");
+  assert.ok(file.includes("1. Chuyện gì đã lặp lại: p (evidence: T-01 (seq 1), T-01 (seq 2))"), "the 4-line card carries the citations");
+
+  // A root factory reads no notebook — no Project to scope to.
+  const rootDir = makeTempDir();
+  disposeDir(t, rootDir);
+  const { workspace: rootWorkspace, artifact: rootArtifact } = makeWorkspaceAtBase(rootDir);
+  const rootState = join(rootDir, "factory");
+  writeLanes(rootState, { retro: "copilot/gpt-5.4" });
+  const rootFake = fakeCopilotRunner(() => ({ code: 0, stdout: answer }));
+  const rootFactory = createFactory({ stateDir: rootState, retroCopilotProbe: () => true, retroCopilotRunner: rootFake.runner });
+  rootFactory.setContract({ task: "T-01", workspace: rootWorkspace, gate: "true", artifact: rootArtifact });
+  rootFactory.ledger.append({ event: "permit_allowed", task: "T-01", agent: "agent-t01", name: "Bash", kind: "tool", command: "node --test" });
+  const root = await rootFactory.retro();
+  assert.equal(root.outcome, "written", `error: ${root.error ?? ""}`);
+  assert.ok(!rootFake.calls[0]!.stdin.includes("Project notebook"), "a root-scoped retro carries no notebook section");
+  // The Task citations still render — seqToTask is scope-independent.
+  const rootFile = readFileSync(root.proposalsPath!, "utf8");
+  assert.ok(rootFile.includes(`- Evidence (ledger seq): T-01 (seq 1), T-01 (seq 2)`), "citations ride regardless of scope");
 });

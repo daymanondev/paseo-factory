@@ -19,11 +19,11 @@ import type { LaneCliRunner } from "./lanes.ts";
 import { loadEyeConfig, projectSlugOfWorkspace, resolveEyeLane, runFreshEyesPass } from "./fresh-eyes.ts";
 import { runWatchPass, watchLaneAvailable } from "./watch.ts";
 import type { CopilotRunner, TimelineFetcher } from "./watch.ts";
-import { buildRetroDigest, retroDay, retroLaneAvailable, runRetroPass, writtenRetroForDay } from "./retro.ts";
+import { buildRetroDigest, buildSeqToTaskMap, retroDay, retroLaneAvailable, runRetroPass, writtenRetroForDay } from "./retro.ts";
 import type { RetroOutcome } from "./retro.ts";
 import { changedFiles, checkCleanAt, headCommitSync, landTaskWorktree, resolveClaimedCommit, scopeCoversFile } from "./workspace.ts";
 import { MEMORY_FILES } from "./choke.ts";
-import { projectStateDir, resolveProject } from "./project.ts";
+import { projectStateDir, readProjectNotebook, resolveProject } from "./project.ts";
 import { FactoryError } from "./errors.ts";
 import type { AttemptAccepted, ContractSet, GateFinished, GitBlocked, LedgerEvent, MeterWritten, MeterUsage, NeedsHuman, NeedsHumanEvidence, NeedsHumanReason, RepokeDispatched, RepokeRefused, RespawnDispatched, RespawnRefused, SpawnDispatched, SpawnRefused, Verdict } from "./events.ts";
 import type { GateResult } from "./gate.ts";
@@ -1359,12 +1359,19 @@ export function createFactory(options: FactoryOptions): Factory {
       // (v0.0.14: project factories keep them under projects/<slug>/); the
       // pass writes its proposals file there too, while the lane reads the
       // scoped table (root lanes.json, or the Project's own override).
-      const corpus = buildRetroDigest(ledger.events, dataDir);
+      // Since v0.1.0 (ADR 0048 §4) a project-scoped pass also feeds the
+      // bounded Project notebook into the digest (already-hardened patterns
+      // are not re-proposed), and every pass carries the seq → Task map so
+      // the rendered file cites `T-xx (seq N)` evidence.
+      const notebook = scope === undefined ? undefined : readProjectNotebook(stateDir, scope);
+      const corpus = buildRetroDigest(ledger.events, dataDir, notebook === undefined ? undefined : { notebook });
+      const seqToTask = buildSeqToTaskMap(ledger.events);
       const outcome = await runRetroPass(
         {
           stateDir,
           ...(options.projectSlug === undefined ? {} : { dataDir }),
           corpus,
+          seqToTask,
           ...(options.retroBudgetMs === undefined ? {} : { budgetMs: options.retroBudgetMs }),
           ...(options.retroCopilotRunner === undefined ? {} : { copilotRunner: options.retroCopilotRunner }),
         },

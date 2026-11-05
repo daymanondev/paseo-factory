@@ -19,6 +19,15 @@
  * occur. Nothing downstream branches on the proposals: the factory proposes,
  * only the Owner ratifies.
  *
+ * Since v0.1.0 (ADR 0048 §4) the pass carries the Recurrence Guard and the
+ * 4-Line Owner Ratification layout: the parse demands >= 2 DISTINCT seqs per
+ * proposal (duplicates collapse, first-seen order) and caps the output at
+ * the 2 highest-impact proposals; the digest optionally embeds the bounded
+ * Project notebook; the rendered file cites `T-xx (seq N)` Task-resolved
+ * evidence and lays each proposal out as the Owner's 4-line ratification
+ * card (`Chuyện gì đã lặp lại` → `Nguyên nhân gốc` → `Nếu duyệt sẽ sửa gì
+ * (Preview diff)` → `Tác dụng`).
+ *
  * Refusals write no ledger line (nothing changed, so nothing is recorded —
  * the workspace-conflict precedent): the retro lane's CLI unusable, or a
  * same-day successful Retro already on the ledger. Technical failures
@@ -217,8 +226,18 @@ function basename(path: string): string {
  * overwritten 8–13 KB brief verbatim) — and `report_written` paths are
  * deduplicated by resolved path before any file is read, so a respawned
  * Attempt's overwritten `report-<task>-<n>.md` rides the prompt at most once.
+ *
+ * Since v0.1.0 (ADR 0048 §4) an optional third parameter carries the bounded
+ * Project notebook (`<projectStateDir>/notebook.md`, read via
+ * `readProjectNotebook`); when non-empty it rides as the digest's last
+ * section so already-hardened patterns are not re-proposed. Two-arg callers
+ * get a byte-identical digest.
  */
-export function buildRetroDigest(events: readonly LedgerEvent[], stateDir: string): RetroCorpus {
+export function buildRetroDigest(
+  events: readonly LedgerEvent[],
+  stateDir: string,
+  options?: { notebook?: string },
+): RetroCorpus {
   const knownSeqs = new Set(events.map((e) => e.seq));
   const taskOrder: string[] = [];
   const byTask = new Map<string, LedgerEvent[]>();
@@ -298,6 +317,11 @@ export function buildRetroDigest(events: readonly LedgerEvent[], stateDir: strin
     }
     sections.push(reports.join("\n"));
   }
+  // The Project notebook rides LAST (v0.1.0, ADR 0048 §4) — after the bulk,
+  // as context: what the Lead already hardened must not be re-proposed.
+  if (options?.notebook !== undefined && options.notebook !== "") {
+    sections.push(["## Project notebook (<projectStateDir>/notebook.md)", options.notebook].join("\n"));
+  }
 
   const digest = [
     `# retro corpus — ${events.length} ledger events, ${taskOrder.length} task blocks, ${reportEvents.length} reports, ${attached.logs} red gate logs`,
@@ -311,6 +335,24 @@ export function buildRetroDigest(events: readonly LedgerEvent[], stateDir: strin
     redGateLogs: attached.logs,
     knownSeqs,
   };
+}
+
+/**
+ * Every ledger seq that carries a non-empty `task` field, mapped to that Task
+ * id (v0.1.0, ADR 0048 §4) — the retro's evidence cites `T-xx (seq N)`
+ * citations, not bare numbers, so the Owner reads which Task recurred without
+ * cross-referencing the digest.
+ */
+export function buildSeqToTaskMap(events: readonly LedgerEvent[]): ReadonlyMap<number, string> {
+  const map = new Map<number, string>();
+  for (const evt of events) {
+    // Factory-level kinds (ledger_schema, retro_written, …) carry no `task`;
+    // the `in` check narrows to the members that can.
+    if (!("task" in evt)) continue;
+    const task = evt.task;
+    if (typeof task === "string" && task !== "") map.set(evt.seq, task);
+  }
+  return map;
 }
 
 // ---- the prompt -------------------------------------------------------------------
@@ -337,7 +379,8 @@ export function buildRetroPrompt(digest: string): string {
     "",
     "Use ONLY the CORPUS material at the end of this prompt. Do not run commands; do not read or write files; everything you need is here.",
     "Cite ledger seq evidence for every proposal: the evidence array carries the seq numbers of the lines that ground it. A seq that does not exist in the corpus fails your whole output.",
-    "Propose only what the corpus supports — strongest only, quality over quantity, no count cap. An empty proposals list is an honest answer when nothing is supported.",
+    "Propose only what the corpus supports — the Recurrence Guard applies (ADR 0048): every proposal must cite at least 2 distinct seq numbers of a mechanism that RECURRED (one incident is never a rule), and you propose at most 2 proposals total — the 2 highest-impact. An empty proposals list is an honest answer when nothing recurred.",
+    "Prefer Tier-1 mechanical fixes (a gate check, a .worktreeinclude entry, a script) and Tier-3 no-op rule deprecation (an already-violated prose rule upgraded to a mechanical check) over Tier-2 prose additions — encode lessons in structure, not paragraphs.",
     "The factory assigns proposal ids — never number them yourself.",
     "",
     "EXISTING LAW (already by design — do NOT propose these as problems or changes):",
@@ -347,7 +390,7 @@ export function buildRetroPrompt(digest: string): string {
     'Answer with EXACTLY one JSON object, no other text before, between, or after (no markdown fences, no prose):',
     '{"proposals":[{"class":"gate-check|contract-draft|observation","evidence":[seq, …],"pattern":"the repeated pattern, named","text":"the proposal, concrete"}]}',
     "- class is exactly one of: gate-check, contract-draft, observation.",
-    "- evidence is a non-empty array of integer seq numbers that exist in the corpus.",
+    "- evidence is an array of at least 2 distinct integer seq numbers that exist in the corpus (the Recurrence Guard).",
     "- pattern and text are non-empty strings.",
     "Anything malformed fails the whole output.",
     "",
@@ -364,12 +407,42 @@ export interface RetroProposal {
   evidence: number[];
   pattern: string;
   text: string;
+  /**
+   * The causal mechanism (v0.1.0, ADR 0048 §4) — 4-line ratification card
+   * line 2 (`Nguyên nhân gốc`). Optional on the wire; falls back to `pattern`.
+   */
+  rootCause?: string;
+  /**
+   * The recurring effect (v0.1.0, ADR 0048 §4) — 4-line ratification card
+   * line 1 (`Chuyện gì đã lặp lại`). Optional on the wire; falls back to `pattern`.
+   */
+  effect?: string;
 }
 
 /** The parse's verdict: every proposal read whole, or the named reason the output failed the contract. */
 export type ParsedRetro = { ok: true; proposals: RetroProposal[] } | { ok: false; error: string };
 
 const PROPOSAL_CLASSES = ["gate-check", "contract-draft", "observation"] as const;
+
+/**
+ * The Recurrence Guard's threshold (v0.1.0, ADR 0048 §4): a parsed proposal
+ * must cite at least this many DISTINCT ledger seqs — one incident is never a
+ * rule, so a single-seq (or single-seq-duplicated) proposal fails the parse.
+ */
+export const MIN_RETRO_EVIDENCE_SEQS = 2;
+
+/**
+ * The per-pass cap (v0.1.0, ADR 0048 §4): at most this many highest-impact
+ * proposals ride out of the parse — the Owner ratifies in seconds, not
+ * paragraphs. Every proposal is still validated whole before the cap.
+ */
+export const MAX_RETRO_PROPOSALS = 2;
+
+/** The proposal's mandatory wire fields, in the strict parse's vocabulary. */
+const REQUIRED_PROPOSAL_KEYS = ["class", "evidence", "pattern", "text"] as const;
+
+/** The v0.1.0 optional companions (ADR 0048 §4) — accepted when present and non-empty. */
+const OPTIONAL_PROPOSAL_KEYS = ["rootCause", "effect"] as const;
 
 /**
  * Strips an enclosing Markdown code fence (` ```json … ``` ` or ` ``` … ``` `)
@@ -391,6 +464,14 @@ function stripMarkdownFence(output: string): string {
  * partial read. An empty list is legal — an honest nothing-proposed. The
  * parse tolerates an enclosing Markdown code fence around the JSON (v0.0.89,
  * ADR 0045 §4); everything else stays strict.
+ *
+ * The Recurrence Guard (v0.1.0, ADR 0048 §4): evidence deduplicates
+ * (first-seen order) and a proposal must cite at least
+ * `MIN_RETRO_EVIDENCE_SEQS` DISTINCT seqs — a single-incident proposal can
+ * never pass — and the surviving proposals cap at `MAX_RETRO_PROPOSALS`
+ * after every one was validated whole. The optional companions `rootCause` /
+ * `effect` (the 4-line ratification card's fields) are accepted when present
+ * and non-empty.
  */
 export function parseRetroProposals(output: string, knownSeqs: ReadonlySet<number>): ParsedRetro {
   const bad = (error: string): ParsedRetro => ({ ok: false, error });
@@ -416,9 +497,13 @@ export function parseRetroProposals(output: string, knownSeqs: ReadonlySet<numbe
       return bad(`proposal ${i + 1} is not an object`);
     }
     const record = item as Record<string, unknown>;
-    const keys = Object.keys(record).sort().join(",");
-    if (keys !== "class,evidence,pattern,text") {
-      return bad(`proposal ${i + 1} must carry exactly class/evidence/pattern/text, got: ${keys || "(none)"}`);
+    const keys = Object.keys(record);
+    const rendered = [...keys].sort().join(",");
+    if (
+      keys.some((key) => !REQUIRED_PROPOSAL_KEYS.includes(key as (typeof REQUIRED_PROPOSAL_KEYS)[number]) && !OPTIONAL_PROPOSAL_KEYS.includes(key as (typeof OPTIONAL_PROPOSAL_KEYS)[number])) ||
+      REQUIRED_PROPOSAL_KEYS.some((key) => !keys.includes(key))
+    ) {
+      return bad(`proposal ${i + 1} must carry exactly class/evidence/pattern/text (optional: rootCause, effect), got: ${rendered || "(none)"}`);
     }
     const cls = record.class;
     if (typeof cls !== "string" || !(PROPOSAL_CLASSES as readonly string[]).includes(cls)) {
@@ -436,7 +521,14 @@ export function parseRetroProposals(output: string, knownSeqs: ReadonlySet<numbe
       if (!knownSeqs.has(seq)) {
         return bad(`proposal ${i + 1} cites seq ${seq}, which does not exist in the ledger`);
       }
-      seqs.push(seq);
+      // The Recurrence Guard counts DISTINCT seqs (v0.1.0, ADR 0048 §4):
+      // duplicates collapse, first-seen order kept — [12, 12] counts once.
+      if (!seqs.includes(seq)) seqs.push(seq);
+    }
+    if (seqs.length < MIN_RETRO_EVIDENCE_SEQS) {
+      return bad(
+        `proposal ${i + 1} evidence must cite at least ${MIN_RETRO_EVIDENCE_SEQS} distinct seq numbers (the Recurrence Guard — one incident is never a rule)`,
+      );
     }
     if (typeof record.pattern !== "string" || record.pattern.trim() === "") {
       return bad(`proposal ${i + 1} pattern must be a non-empty string`);
@@ -444,9 +536,28 @@ export function parseRetroProposals(output: string, knownSeqs: ReadonlySet<numbe
     if (typeof record.text !== "string" || record.text.trim() === "") {
       return bad(`proposal ${i + 1} text must be a non-empty string`);
     }
-    proposals.push({ cls: cls as RetroProposal["cls"], evidence: seqs, pattern: record.pattern, text: record.text });
+    for (const field of OPTIONAL_PROPOSAL_KEYS) {
+      const value = record[field];
+      if (value === undefined) continue;
+      if (typeof value !== "string" || value.trim() === "") {
+        return bad(`proposal ${i + 1} ${field} must be a non-empty string when present`);
+      }
+    }
+    const rootCause = typeof record.rootCause === "string" ? record.rootCause : undefined;
+    const effect = typeof record.effect === "string" ? record.effect : undefined;
+    proposals.push({
+      cls: cls as RetroProposal["cls"],
+      evidence: seqs,
+      pattern: record.pattern,
+      text: record.text,
+      ...(rootCause === undefined ? {} : { rootCause }),
+      ...(effect === undefined ? {} : { effect }),
+    });
   }
-  return { ok: true, proposals };
+  // Whole-parse first, cap last (v0.1.0, ADR 0048 §4): every proposal was
+  // validated above — one bad one already failed the output — so the cap only
+  // trims how many ride out, never what was checked.
+  return { ok: true, proposals: proposals.slice(0, MAX_RETRO_PROPOSALS) };
 }
 
 // ---- the proposals file ------------------------------------------------------------
@@ -476,9 +587,30 @@ export function orderForRatification(proposals: readonly RetroProposal[]): { id:
 }
 
 /**
+ * One seq's citation (v0.1.0, ADR 0048 §4): `T-xx (seq N)` when the map
+ * resolves the seq to its Task, else the bare `seq N`.
+ */
+function citation(seq: number, seqToTask?: ReadonlyMap<number, string>): string {
+  const task = seqToTask?.get(seq);
+  return task === undefined ? `seq ${seq}` : `${task} (seq ${seq})`;
+}
+
+/** The proposal's evidence as a citation list — `T-01 (seq 3), T-02 (seq 5), seq 7`. */
+function citations(evidence: readonly number[], seqToTask?: ReadonlyMap<number, string>): string {
+  return evidence.map((seq) => citation(seq, seqToTask)).join(", ");
+}
+
+/**
  * Renders `retro-<date>.md` (ticket 03 item 6): header with date, model and
  * the corpus facts, then the body grouped by class in ratification reading
  * order, each proposal `## R1 — gate-check` with Evidence, Pattern, Proposal.
+ * Since v0.1.0 (ADR 0048 §4) each proposal also carries the 4-Line Owner
+ * Ratification card — `1. Chuyện gì đã lặp lại` (the recurring effect, with
+ * the Task-resolved citations) → `2. Nguyên nhân gốc` (the causal mechanism)
+ * → `3. Nếu duyệt sẽ sửa gì (Preview diff)` (the proposal) → `4. Tác dụng` —
+ * so the Owner can ratify or reject in 10 seconds. The Evidence line cites
+ * `T-xx (seq N)` via `seqToTask`, falling back to `seq N` for unmapped seqs;
+ * the header/`- Proposal:` shapes the ratification path parses are unchanged.
  */
 export function renderRetroFile(input: {
   day: string;
@@ -486,6 +618,8 @@ export function renderRetroFile(input: {
   durationMs: number;
   corpus: RetroCorpus;
   proposals: readonly RetroProposal[];
+  /** seq → Task id (v0.1.0, ADR 0048 §4) — built by `buildSeqToTaskMap`; omitted, evidence cites bare `seq N`. */
+  seqToTask?: ReadonlyMap<number, string>;
 }): string {
   const ordered = orderForRatification(input.proposals);
   const header = [
@@ -499,14 +633,19 @@ export function renderRetroFile(input: {
   if (ordered.length === 0) {
     return `${[...header, "", "(the model proposed nothing — an honest empty read of the corpus)"].join("\n")}\n`;
   }
-  const body = ordered.map(({ id, proposal }) =>
-    [
+  const body = ordered.map(({ id, proposal }) => {
+    const cited = citations(proposal.evidence, input.seqToTask);
+    return [
       `## R${id} — ${proposal.cls}`,
-      `- Evidence (ledger seq): ${proposal.evidence.join(", ")}`,
+      `- Evidence (ledger seq): ${cited}`,
       `- Pattern: ${proposal.pattern}`,
       `- Proposal: ${proposal.text}`,
-    ].join("\n"),
-  );
+      `1. Chuyện gì đã lặp lại: ${proposal.effect ?? proposal.pattern} (evidence: ${cited})`,
+      `2. Nguyên nhân gốc: ${proposal.rootCause ?? proposal.pattern}`,
+      `3. Nếu duyệt sẽ sửa gì (Preview diff): ${proposal.text}`,
+      `4. Tác dụng: ${proposal.text}`,
+    ].join("\n");
+  });
   return `${[...header, "", ...body].join("\n\n")}\n`;
 }
 
@@ -532,6 +671,12 @@ export interface RetroPassInput {
    */
   dataDir?: string;
   corpus: RetroCorpus;
+  /**
+   * seq → Task id map (v0.1.0, ADR 0048 §4) — built by `buildSeqToTaskMap`;
+   * the rendered file cites evidence as `T-xx (seq N)` when given, bare
+   * `seq N` otherwise.
+   */
+  seqToTask?: ReadonlyMap<number, string>;
   /** Total budget override covering both tries (tests); default RETRO_TOTAL_BUDGET_MS. */
   budgetMs?: number;
   /** Lane CLI runner override (tests) — the lane and its tool-less flags stay fixed regardless. */
@@ -593,7 +738,7 @@ export async function runRetroPass(input: RetroPassInput, projectSlug?: string):
         // happened; a line without a file cannot occur.
         const day = retroDay(new Date());
         const path = retroFilePath(input.dataDir ?? input.stateDir, day);
-        writeFileSync(path, renderRetroFile({ day, model: lane!, durationMs: Date.now() - started, corpus: input.corpus, proposals: parsed.proposals }));
+        writeFileSync(path, renderRetroFile({ day, model: lane!, durationMs: Date.now() - started, corpus: input.corpus, proposals: parsed.proposals, seqToTask: input.seqToTask }));
         return {
           model: lane!,
           outcome: "written",
