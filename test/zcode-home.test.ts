@@ -272,6 +272,164 @@ test("systemPrompt overrides the role default; an empty override writes nothing;
   assert.ok(!existsSync(join(headlessHome, "config.json")), "headless never carries the instructions wiring");
 });
 
+test("a Scrum identity reroutes the clean room under <projectStateDir>/scrum/zcode-home — seats and task epochs mirror the Pi harness hierarchy (v0.2.0, ADR 0049 §1)", (t) => {
+  const dir = makeTempDir("zcode-home-test-");
+  disposeDir(t, dir);
+  const userHome = join(dir, "user");
+  seedZcodeHome(userHome);
+  const stateDir = join(dir, "factory-state");
+
+  // Standing seat: <projectStateDir>/scrum/zcode-home/seats/<selectionRevision>/<generation>/<authority>/
+  const seatHome = join(stateDir, "projects", "demo-app", "scrum", "zcode-home", "seats", "3", "cor-seat-1", "supervisor");
+  const seatEnv = provisionZcodeHome({
+    stateDir,
+    role: "supervisor",
+    projectSlug: "demo-app",
+    userHome,
+    scrum: { kind: "seat", selectionRevision: 3, generation: "cor-seat-1", authority: "supervisor" },
+    systemPrompt: "<!-- scrum supervisor contract -->\n",
+  });
+  assert.equal(seatEnv.ZCODE_STORAGE_DIR, seatHome, "the Scrum seat's storage dir sits under the Project state dir");
+  assert.equal(seatEnv.ZCODE_SESSION_DB_PATH, join(seatHome, "db", "db.sqlite"), "the Scrum seat owns its own sqlite path");
+  assert.equal(seatEnv.ZCODE_DISALLOWED_TOOLS, "Write,Edit,MultiEdit,NotebookEdit,DeleteFile", "the Scrum seat keeps the Layer-1 write-tool lock");
+  assert.equal(readFileSync(join(seatHome, "ROLE_SYSTEM.md"), "utf8"), "<!-- scrum supervisor contract -->\n", "the Scrum seat's contract is the passed Scrum prompt, never the SLP fallback");
+
+  // Specialist task: <projectStateDir>/scrum/zcode-home/runs/<runId>/<task>/<epoch>/
+  const runHome = join(stateDir, "projects", "demo-app", "scrum", "zcode-home", "runs", "run-a", "T-01", "7");
+  const runEnv = provisionZcodeHome({
+    stateDir,
+    role: "agent",
+    projectSlug: "demo-app",
+    task: "T-01",
+    userHome,
+    scrum: { kind: "task", runId: "run-a", task: "T-01", epoch: 7 },
+    systemPrompt: "<!-- scrum dev contract -->\n",
+  });
+  assert.equal(runEnv.ZCODE_STORAGE_DIR, runHome, "the Scrum specialist's storage dir sits under the run epoch");
+  assert.equal(runEnv.ZCODE_SESSION_DB_PATH, join(runHome, "db", "db.sqlite"));
+  assert.ok(!("ZCODE_DISALLOWED_TOOLS" in runEnv), "the Scrum specialist is not write-tool-locked at Layer 1");
+  assert.equal(readFileSync(join(runHome, "ROLE_SYSTEM.md"), "utf8"), "<!-- scrum dev contract -->\n", "the specialist's contract is the passed Scrum prompt");
+  const runConfig = JSON.parse(readFileSync(join(runHome, "config.json"), "utf8"));
+  assert.deepEqual(runConfig, { instructions: { userFile: join(runHome, "ROLE_SYSTEM.md"), projectFile: "AGENTS.md" } }, "config.json wires instructions.userFile at the Scrum contract");
+
+  // The Scrum homes never touch the shared SLP roots — the collision source the reroute exists to fix.
+  assert.ok(!existsSync(join(stateDir, "zcode-home", "supervisor")), "the Scrum seat never writes the SLP supervisor home");
+  assert.ok(!existsSync(join(stateDir, "zcode-home", "tasks", "demo-app", "T-01")), "the Scrum task never writes the SLP per-Task home");
+});
+
+test("allowedSkills reconciles skills/ against exactly the caller's list; a Scrum supervisor gets every installed skill except factory as per-skill links (v0.2.0, ADR 0049 §1)", (t) => {
+  const dir = makeTempDir("zcode-home-test-");
+  disposeDir(t, dir);
+  const userHome = join(dir, "user");
+  const source = join(seedZcodeHome(userHome), "skills");
+  const stateDir = join(dir, "factory-state");
+
+  // The Scrum supervisor: full host skills except the Owner-only factory —
+  // expressed as an allowed-list of per-skill links, NOT the whole-dir
+  // symlink the SLP supervisor keeps.
+  const seatHome = join(stateDir, "projects", "demo-app", "scrum", "zcode-home", "seats", "1", "initial", "supervisor");
+  provisionZcodeHome({
+    stateDir,
+    role: "supervisor",
+    projectSlug: "demo-app",
+    userHome,
+    scrum: { kind: "seat", selectionRevision: 1, generation: "initial", authority: "supervisor" },
+  });
+  const seatSkills = join(seatHome, "skills");
+  assert.ok(!lstatSync(seatSkills).isSymbolicLink(), "the Scrum supervisor's skills is a scoped directory, never the operator's whole tree");
+  assert.deepEqual(readdirSync(seatSkills).sort(), ["codebase-design", "domain-modeling", "grilling", "tdd"], "every installed skill except factory");
+  assert.ok(!existsSync(join(seatSkills, "factory")), "the Owner-only factory skill never reaches the Scrum supervisor");
+  assert.equal(realpathSync(join(seatSkills, "grilling")), realpathSync(join(source, "grilling")), "each entry links at the operator skill");
+
+  // The Scrum lead / specialist: exactly the caller's allowedSkills list —
+  // no more, no less, never a broken link for an uninstalled name.
+  const runHome = join(stateDir, "projects", "demo-app", "scrum", "zcode-home", "seats", "1", "initial", "lead");
+  provisionZcodeHome({
+    stateDir,
+    role: "lead",
+    projectSlug: "demo-app",
+    userHome,
+    scrum: { kind: "seat", selectionRevision: 1, generation: "initial", authority: "lead" },
+    allowedSkills: ["grilling", "tdd", "not-installed"],
+  });
+  const leadSkills = join(runHome, "skills");
+  assert.deepEqual(readdirSync(leadSkills).sort(), ["grilling", "tdd"], "the scoped set is exactly the installed slice of allowedSkills");
+  assert.ok(!existsSync(join(leadSkills, "not-installed")), "an allowed but uninstalled skill never becomes a broken symlink");
+
+  // Reconcile: a link outside the allowed list retires on re-provision, and
+  // an already-correct link is never churned.
+  symlinkSync(join(source, "factory"), join(leadSkills, "stale-owner-link"));
+  const survivors = ["grilling", "tdd"] as const;
+  const inosBefore = survivors.map((name) => lstatSync(join(leadSkills, name)).ino);
+  provisionZcodeHome({
+    stateDir,
+    role: "lead",
+    projectSlug: "demo-app",
+    userHome,
+    scrum: { kind: "seat", selectionRevision: 1, generation: "initial", authority: "lead" },
+    allowedSkills: ["grilling", "tdd"],
+  });
+  assert.ok(!existsSync(join(leadSkills, "stale-owner-link")), "a link outside the allowed set is retired");
+  assert.deepEqual(readdirSync(leadSkills).sort(), ["grilling", "tdd"]);
+  assert.deepEqual(survivors.map((name) => lstatSync(join(leadSkills, name)).ino), inosBefore, "scoped skill links are not churned");
+});
+
+test("concurrent SLP and Scrum zcode homes never overwrite each other's ROLE_SYSTEM.md or skills/ (v0.2.0, ADR 0049 §1)", (t) => {
+  const dir = makeTempDir("zcode-home-test-");
+  disposeDir(t, dir);
+  const userHome = join(dir, "user");
+  const source = join(seedZcodeHome(userHome), "skills");
+  const stateDir = join(dir, "factory-state");
+
+  // One machine, two modes, one shared supervisor role name: the SLP seat
+  // keeps `<stateDir>/zcode-home/supervisor`, the Scrum seat lives under the
+  // Project state dir — the collision the reroute exists to fix.
+  const slpSupervisor = join(stateDir, "zcode-home", "supervisor");
+  const scrumSupervisor = join(stateDir, "projects", "scrum-app", "scrum", "zcode-home", "seats", "1", "cor-scrum", "supervisor");
+  provisionZcodeHome({ stateDir, role: "supervisor", userHome });
+  provisionZcodeHome({
+    stateDir,
+    role: "supervisor",
+    projectSlug: "scrum-app",
+    userHome,
+    scrum: { kind: "seat", selectionRevision: 1, generation: "cor-scrum", authority: "supervisor" },
+    systemPrompt: "<!-- scrum supervisor contract -->\n",
+  });
+  assert.equal(readFileSync(join(slpSupervisor, "ROLE_SYSTEM.md"), "utf8"), ROLE_PROMPTS.supervisor, "the SLP supervisor keeps its SLP contract");
+  assert.equal(readFileSync(join(scrumSupervisor, "ROLE_SYSTEM.md"), "utf8"), "<!-- scrum supervisor contract -->\n", "the Scrum supervisor keeps its Scrum contract");
+  assert.ok(lstatSync(join(slpSupervisor, "skills")).isSymbolicLink(), "the SLP supervisor keeps its whole-tree skills symlink");
+  assert.deepEqual(readdirSync(join(scrumSupervisor, "skills")).sort(), ["codebase-design", "domain-modeling", "grilling", "tdd"], "the Scrum supervisor keeps its per-skill allowlist");
+
+  // The per-Task channel collides the same way: the SLP Peer's
+  // `zcode-home/tasks/<slug>/<task>` home and the Scrum specialist's
+  // run-epoch home stay disjoint, each with its own contract and sqlite path.
+  const slpTask = join(stateDir, "zcode-home", "tasks", "scrum-app", "T-01");
+  const scrumTask = join(stateDir, "projects", "scrum-app", "scrum", "zcode-home", "runs", "run-a", "T-01", "3");
+  provisionZcodeHome({ stateDir, role: "agent", projectSlug: "scrum-app", task: "T-01", userHome });
+  provisionZcodeHome({
+    stateDir,
+    role: "agent",
+    projectSlug: "scrum-app",
+    task: "T-01",
+    userHome,
+    scrum: { kind: "task", runId: "run-a", task: "T-01", epoch: 3 },
+    systemPrompt: "<!-- scrum dev contract -->\n",
+  });
+  assert.equal(readFileSync(join(slpTask, "ROLE_SYSTEM.md"), "utf8"), ROLE_PROMPTS.agent, "the SLP per-Task home keeps the agent contract");
+  assert.equal(readFileSync(join(scrumTask, "ROLE_SYSTEM.md"), "utf8"), "<!-- scrum dev contract -->\n", "the Scrum run-epoch home keeps the Scrum contract");
+
+  // Re-provisioning both modes back-to-back leaves both intact — neither
+  // path ever observes the other's bytes.
+  provisionZcodeHome({ stateDir, role: "supervisor", userHome });
+  provisionZcodeHome({ stateDir, role: "agent", projectSlug: "scrum-app", task: "T-01", userHome });
+  assert.equal(readFileSync(join(slpSupervisor, "ROLE_SYSTEM.md"), "utf8"), ROLE_PROMPTS.supervisor);
+  assert.equal(readFileSync(join(scrumSupervisor, "ROLE_SYSTEM.md"), "utf8"), "<!-- scrum supervisor contract -->\n");
+  assert.equal(readFileSync(join(slpTask, "ROLE_SYSTEM.md"), "utf8"), ROLE_PROMPTS.agent);
+  assert.equal(readFileSync(join(scrumTask, "ROLE_SYSTEM.md"), "utf8"), "<!-- scrum dev contract -->\n");
+  assert.ok(lstatSync(join(slpSupervisor, "skills")).isSymbolicLink(), "the SLP supervisor's whole-tree symlink survives the Scrum re-provision");
+  assert.equal(realpathSync(join(scrumSupervisor, "skills", "tdd")), realpathSync(join(source, "tdd")), "the Scrum supervisor's per-skill links survive the SLP re-provision");
+});
+
 test("the default userHome resolves against the runtime home (hermetic via process.env.HOME)", (t) => {
   const dir = makeTempDir("zcode-home-test-");
   disposeDir(t, dir);

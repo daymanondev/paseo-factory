@@ -470,3 +470,19 @@ test("ensureClaimCli and ensureGitShim stage self-contained runtime-bin scripts 
   });
   assert.equal(statusOut.status, 0, `git wrapper failed after plugin checkout deletion: ${statusOut.stderr}`);
 });
+
+test("check-bundle stays green under the git hook environment (GIT_DIR/GIT_INDEX_FILE exported)", { timeout: 120_000 }, () => {
+  // `git commit` exports GIT_DIR/GIT_INDEX_FILE to the pre-commit hook (a
+  // linked worktree's gitdir and index); an inner `git ls-files --cached`
+  // that inherits them treats plugin/ as the worktree top and returns every
+  // repo-root-relative path, nesting the tracked copy one level too deep so
+  // the bundle entries vanish — every commit in a linked worktree failed the
+  // hook even with no content change.
+  const gitdir = spawnSync("git", ["rev-parse", "--git-dir"], { cwd: repoRoot, encoding: "utf8" }).stdout.trim();
+  const run = spawnSync(process.execPath, [join(repoRoot, "scripts", "check-bundle.mjs")], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    env: { ...process.env, GIT_DIR: gitdir, GIT_INDEX_FILE: join(gitdir, "index") },
+  });
+  assert.equal(run.status, 0, `check-bundle must pass with the hook env exported:\n${run.stdout}${run.stderr}`);
+});

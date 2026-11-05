@@ -44,7 +44,15 @@ const pluginRoot = path.join(repoRoot, "plugin");
 /** A temp copy of the plugin directory's tracked files — the loader's view, no untracked strays. */
 function trackedCopy(source) {
   const copy = realpathSync.native(mkdtempSync(path.join(tmpdir(), "factory-bundle-")));
-  const files = execFileSync("git", ["ls-files", "-z", "--cached"], { cwd: source }).toString("utf8").split("\0").filter(Boolean);
+  // The inner git must resolve the worktree from its cwd exactly as an
+  // interactive call does: `git commit` exports GIT_DIR/GIT_INDEX_FILE to the
+  // pre-commit hook (a linked worktree's gitdir and index), and inheriting
+  // them here makes `ls-files --cached` treat plugin/ as the worktree top and
+  // return every repo-root-relative path — nesting the copy one level too
+  // deep so the bundle entries vanish. Strip the hook's exported GIT_* vars.
+  const env = { ...process.env };
+  for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES"]) delete env[key];
+  const files = execFileSync("git", ["ls-files", "-z", "--cached"], { cwd: source, env }).toString("utf8").split("\0").filter(Boolean);
   for (const file of files) {
     if (!existsSync(path.join(source, file))) continue;
     mkdirSync(path.dirname(path.join(copy, file)), { recursive: true });
