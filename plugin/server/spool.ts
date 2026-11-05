@@ -3,6 +3,7 @@ export { spoolRequestSemanticKey } from "./core/mcp/transport.ts";
 import { prepareProjectContract } from "./execution-adapters.ts";
 import { commandRun as commandScrumRun, readRun as readScrumRun } from "./core/scrum/run-journal.ts";
 import { withExecutionLane } from "./core/scrum/execution.ts";
+import { detectProjectSkillPacks } from "./core/scrum/skill-hub.ts";
 import type { ScrumDirective } from "./scrum.ts";
 import type { ScrumOperation } from "./core/scrum/controller.ts";
 import { bindScrumEpoch, scrumSpawnLane } from "./scrum.ts";
@@ -1774,6 +1775,18 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
           if (contract.skills !== undefined && contract.skills.length > 0) {
             enriched.push(
               `Required skills to open first: ${contract.skills.join(", ")} (read ~/.agents/skills/<skill>/SKILL.md or .agents/skills/<skill>/SKILL.md before starting)`,
+            );
+          } else {
+            // The automatic lightweight Project skill pack hint (v0.0.97, ADR
+            // 0047 §2): with no explicit skills on the Contract, the Peer still
+            // gets a 1-line discipline reminder naming the detected pack(s) —
+            // the Lead never curates skills by hand, and never bulk-reads
+            // SKILL.md files meant for the working Agent.
+            const packs = detectProjectSkillPacks(contract.workspace);
+            enriched.push(
+              packs.length > 0
+                ? `Skill discipline (${packs.join(", ")} pack active): apply tdd and open only the specific skill(s) in <available_skills> relevant to this task's slice — never bulk-read unrelated SKILL.md files.`
+                : `Skill discipline: apply tdd and open only the specific skill(s) in <available_skills> relevant to this task's slice — never bulk-read unrelated SKILL.md files.`,
             );
           }
           if (contract.description !== undefined && contract.description.trim() !== "") {
