@@ -2,6 +2,7 @@ export * from "./config.ts";
 export * from "./profiles.ts";
 export * from "./execution.ts";
 export * from "./run-journal.ts";
+export * from "./run-digest.ts";
 export * from "./approval.ts";
 export * from "./artifacts.ts";
 export * from "./linter.ts";

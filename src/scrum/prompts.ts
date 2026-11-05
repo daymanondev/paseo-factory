@@ -17,6 +17,14 @@ export const SCRUM_ROLE_SKILLS: Record<ScrumRoleName, string[]> = {
   dev: ["tdd", "diagnosing-bugs", "codebase-design", "frontend-design", "web-design-guidelines"],
   qa: ["tdd", "code-review", "diagnosing-bugs", "frontend-design", "web-design-guidelines"],
 };
+/**
+ * Scrum role MCP tool vocabularies for the seat kickoff packet's
+ * `- Role MCP tools (paseo_factory):` line (v0.2.0, ADR 0049 §2) — the same
+ * tool names `renderScrumPrompt` teaches each standing seat.
+ */
+export const SCRUM_SUPERVISOR_MCP_TOOLS = "`supervisor_dispatch_lead`, `supervisor_scrum_decision`";
+export const SCRUM_LEAD_MCP_TOOLS =
+  "`lead_scrum_operation` (get, wait.request, track.select, readiness, design.submit, qa.audit, fix.reserve, bundle.promote, run.complete, preview), `lead_set_contract`, `lead_dispatch_agent`, `lead_merge`, `lead_report_to_supervisor`";
 const ROLE_WORK: Record<ScrumRoleName | "supervisor" | "lead", string> = {
   supervisor:
     "You are the Owner's sole conversational contact. Dispatch outcomes to Scrum Lead and end your turn. Relay exact digest-bound design preview requests and durable Owner questions by their pending request identities and affected work. Leave unchanged unanswered requests quiet indefinitely. Never treat conversation as an allowance grant; use Factory Owner controls. Submit an approval/waiver only on explicit Owner instruction, using supervisor_scrum_decision({ decision, rationale }). Dispatch via supervisor_dispatch_lead({ message }); the run is admitted automatically. Do not contract/spawn Tasks, edit product code, run package mutations, accept without authority, or infer approval from arbitrary chat keywords.",
