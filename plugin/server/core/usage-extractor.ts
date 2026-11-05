@@ -6,7 +6,7 @@
  *   inputUncachedTokens + cacheReadTokens + cacheWriteTokens + outputTokens
  *     = totalTokens          (reasoningTokens ⊆ outputTokens)
  *
- * Six harness stores are read, each at its own source of truth:
+ * Seven harness stores are read, each at its own source of truth:
  *
  *   - `pi`          `<stateDir>/pi-agent/<role>/sessions/<cwd-dir>/<session>.jsonl`
  *                    (or the operator's `~/.pi/agent/sessions/`), pointed at by
@@ -35,6 +35,13 @@
  *                    subtracts `cacheRead + cacheWrite`), with the
  *                    `session.shutdown` `accountingSnapshot` as the
  *                    authoritative final totals when present.
+ *   - `zcode`       `<stateDir>/zcode-home/.../db/db.sqlite` (the per-seat and
+ *                    per-Task homes the provisioner materializes) with the
+ *                    operator's `~/.zcode/cli/db/db.sqlite` as fallback —
+ *                    assistant `message` rows' per-turn `metadata.usage`
+ *                    (`inputTokens` already contains the cache sums), the
+ *                    Paseo-recorded acpSid resolved to the native `sess_...`
+ *                    id through `~/.zcode/v2/acp-lazy-sessions.json`.
  *
  * Every reader is stat-gated and O(delta): a `(mtimeMs, size)` cursor short-
  * circuits unchanged files with zero disk reads, and JSONL readers seek to
@@ -55,10 +62,10 @@
  * never crashes the plugin. Every reader is synchronous on purpose: the
  * 128k/160k context sensors are sync contracts.
  */
-import { closeSync, existsSync, openSync, readdirSync, readSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
 import type { Dirent } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { createRequire } from "node:module";
 
 /**
@@ -69,7 +76,7 @@ import { createRequire } from "node:module";
  */
 export interface UsageAgentSource {
   id: string;
-  /** The harness id: `pi`, `codex`, `opencode`, `antigravity`, `claude`, `copilot`. */
+  /** The harness id: `pi`, `codex`, `opencode`, `antigravity`, `claude`, `copilot`, `zcode`. */
   provider: string;
   cwd?: string;
   labels?: Record<string, string>;
@@ -140,7 +147,7 @@ interface UsageCursor {
   mtimeMs: number;
   size: number;
   byteOffset: number;
-  /** antigravity: the last `steps.idx` folded (the SQLite row cursor). */
+  /** antigravity/zcode: the last folded row id (`steps.idx` / `message.sequence`) — the SQLite row cursor. */
   lastStepIdx: number;
   snapshot: NormalizedUsage;
 }
@@ -197,6 +204,7 @@ const HARNESS_PROVIDERS: Readonly<Record<string, string>> = {
   antigravity: "antigravity",
   claude: "anthropic",
   copilot: "copilot",
+  zcode: "zcode",
 };
 
 /**
@@ -409,7 +417,7 @@ type SqliteDatabase = {
   close: () => void;
 };
 
-let sqliteDatabaseSync: (new (path: string) => unknown) | null | undefined;
+let sqliteDatabaseSync: (new (path: string, options?: { readOnly?: boolean }) => unknown) | null | undefined;
 
 /**
  * Resolves `node:sqlite`'s `DatabaseSync` once, synchronously (a builtin
@@ -421,7 +429,7 @@ let sqliteDatabaseSync: (new (path: string) => unknown) | null | undefined;
  * into a CommonJS bundle (`format: "cjs"`) where `import.meta` is `{}` and
  * top-level `createRequire(import.meta.url)` throws `ERR_INVALID_ARG_VALUE`.
  */
-function loadSqliteSync(): (new (path: string) => unknown) | null {
+function loadSqliteSync(): (new (path: string, options?: { readOnly?: boolean }) => unknown) | null {
   if (sqliteDatabaseSync === undefined) {
     try {
       const requireNodeBuiltin = createRequire(join(process.cwd(), "factory-sqlite.cjs"));
@@ -436,15 +444,18 @@ function loadSqliteSync(): (new (path: string) => unknown) | null {
 /**
  * Opens an EXISTING SQLite database (the existence gate first, so a missing
  * store never creates one), runs one worker, and always closes. Any failure
- * answers `undefined`.
+ * answers `undefined`. `readOnly: true` opens the store for reads only — the
+ * zcode reader's contract against the operator's live db; every pre-existing
+ * caller passes no options and keeps its read-write open.
  */
-function querySqlite<T>(path: string, worker: (db: SqliteDatabase) => T, metrics: UsageExtractorMetrics): T | undefined {
+function querySqlite<T>(path: string, worker: (db: SqliteDatabase) => T, metrics: UsageExtractorMetrics, options?: { readOnly?: boolean }): T | undefined {
   if (!existsSync(path)) return undefined;
   const DatabaseSync = loadSqliteSync();
   if (DatabaseSync === null) return undefined;
   let db: SqliteDatabase;
   try {
-    db = new DatabaseSync(path) as unknown as SqliteDatabase;
+    // `undefined` as an explicit second argument REJECTS in node's DatabaseSync — options ride only when asked for.
+    db = (options?.readOnly === true ? new DatabaseSync(path, { readOnly: true }) : new DatabaseSync(path)) as unknown as SqliteDatabase;
   } catch {
     return undefined;
   }
@@ -935,6 +946,134 @@ function extractCopilot(agent: UsageAgentSource, sessionId: string, userHome: st
   return { mtimeMs: gate.stat.mtimeMs, size: gate.stat.size, byteOffset: delta.offset, lastStepIdx: 0, snapshot: usage };
 }
 
+// ---- the zcode reader -----------------------------------------------------------------------
+
+/**
+ * Resolves the native zcode session id (`sess_...`) behind a Paseo-recorded
+ * id: `zcode-acp-server` mints a synthetic acpSid UUID on `session/new` and
+ * persists `acpSid -> { cwd, zcodeSid }` in
+ * `<userHome>/.zcode/v2/acp-lazy-sessions.json` (ADR 0046, Gap 1), while
+ * ZCode's SQLite keys `message` rows by the native id. A bare `sess_...` id
+ * IS native — the file is never read; an absent or damaged file answers
+ * `undefined`, never a throw (the lazy JSON-read law).
+ */
+export function resolveZcodeNativeSessionId(sessionId: string, userHome: string): string | undefined {
+  if (sessionId.startsWith("sess_")) return sessionId;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(join(userHome, ".zcode", "v2", "acp-lazy-sessions.json"), "utf8"));
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
+  const entry = (parsed as Record<string, unknown>)[sessionId];
+  if (typeof entry !== "object" || entry === null) return undefined;
+  return asString((entry as { zcodeSid?: unknown }).zcodeSid);
+}
+
+/** Every `db/db.sqlite` under the factory's zcode homes — the per-seat and per-Task stores `provisionZcodeHome` materializes. */
+function zcodeHomeDbPaths(stateDir: string): string[] {
+  const found: string[] = [];
+  const walk = (dir: string): void => {
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) walk(path);
+      else if (entry.isFile() && entry.name === "db.sqlite" && basename(dir) === "db") found.push(path);
+    }
+  };
+  walk(join(stateDir, "zcode-home"));
+  return found.sort();
+}
+
+/** The candidate zcode stores in precedence order: the factory's isolated homes first, the operator's own db last. */
+function zcodeCandidateDbPaths(stateDir: string, userHome: string): string[] {
+  const candidates = stateDir !== "" ? zcodeHomeDbPaths(stateDir) : [];
+  candidates.push(join(userHome, ".zcode", "cli", "db", "db.sqlite"));
+  return candidates;
+}
+
+/** One `message.metadata` value — its `usage` record, when the JSON parses and carries one. */
+function zcodeRowUsageOf(metadata: unknown): Record<string, unknown> | undefined {
+  let parsed: unknown = metadata;
+  if (typeof parsed === "string" && parsed.trim() !== "") {
+    try {
+      parsed = JSON.parse(parsed);
+    } catch {
+      return undefined;
+    }
+  }
+  if (typeof parsed !== "object" || parsed === null) return undefined;
+  const usage = (parsed as { usage?: unknown }).usage;
+  return typeof usage === "object" && usage !== null ? (usage as Record<string, unknown>) : undefined;
+}
+
+/**
+ * The zcode fold: every assistant `message` row carries its own per-turn
+ * `metadata.usage`, so the session totals are sums over rows beyond
+ * `cursor.lastStepIdx` — the row-sequence cursor keeps the sweep O(delta)
+ * (the antigravity law). Per-turn `inputTokens` already CONTAINS the cache
+ * sums, so the reader subtracts `cacheRead + cacheCreation` clamped at zero
+ * (the copilot arithmetic), and the context occupancy is the turn's own
+ * `input + output`. The store that answered is memoized as the snapshot's
+ * `nativeSessionRef`, so every later sweep stat-gates its owner directly.
+ */
+function extractZcode(
+  agent: UsageAgentSource,
+  sessionId: string,
+  paths: Required<UsagePaths>,
+  cursor: UsageCursor | undefined,
+  metrics: UsageExtractorMetrics,
+): UsageCursor | undefined {
+  const zcodeSid = resolveZcodeNativeSessionId(sessionId, paths.userHome);
+  if (zcodeSid === undefined) return undefined;
+  const ownerPath = cursor?.snapshot.nativeSessionRef;
+  for (const dbPath of zcodeCandidateDbPaths(paths.stateDir, paths.userHome)) {
+    if (ownerPath !== undefined && dbPath !== ownerPath) continue; // ownership is memoized in the snapshot
+    const gate = statGate(cursor, dbPath);
+    if (gate === undefined) continue; // this candidate holds no store — next
+    if ("hit" in gate) return gate.hit; // the owner's (mtimeMs, size) is unchanged — zero opens
+    const rows = querySqlite<{ sequence?: unknown; metadata?: unknown }[]>(
+      dbPath,
+      db => db.prepare("SELECT sequence, metadata FROM message WHERE session_id = ? AND role = 'assistant' AND sequence > ? ORDER BY sequence ASC").all(zcodeSid, cursor?.lastStepIdx ?? -1) as never,
+      metrics,
+      { readOnly: true },
+    );
+    if (rows === undefined) continue; // unopenable — the next candidate may hold the session
+    const usage = continued(cursor, agent, "zcode");
+    usage.nativeSessionRef = dbPath;
+    let lastStepIdx = cursor?.lastStepIdx ?? -1;
+    let latestContext = usage.latestContextWindowTokens;
+    for (const row of rows) {
+      const sequence = finite(row.sequence);
+      if (sequence !== null) lastStepIdx = Math.max(lastStepIdx, sequence);
+      const u = zcodeRowUsageOf(row.metadata);
+      if (u === undefined) continue;
+      const input = finiteOr(u.inputTokens, 0);
+      const output = finiteOr(u.outputTokens, 0);
+      const cacheRead = finiteOr(u.cacheReadInputTokens, 0);
+      const cacheWrite = finiteOr(u.cacheCreationInputTokens, 0);
+      usage.turns += 1;
+      usage.inputUncachedTokens += Math.max(0, input - cacheRead - cacheWrite);
+      usage.cacheReadTokens += cacheRead;
+      usage.cacheWriteTokens += cacheWrite;
+      usage.outputTokens += output;
+      usage.reasoningTokens += finiteOr(u.reasoningTokens, 0);
+      latestContext = input + output;
+    }
+    if (latestContext !== undefined) usage.latestContextWindowTokens = latestContext;
+    retotal(usage);
+    if (usage.turns === 0 && cursor === undefined) continue; // this store does not hold the session yet — try the next candidate
+    return { mtimeMs: gate.stat.mtimeMs, size: gate.stat.size, byteOffset: 0, lastStepIdx, snapshot: usage };
+  }
+  return undefined;
+}
+
 // ---- the fallback ---------------------------------------------------------------------------
 
 /** The volatile `lastUsage` fallback — single-turn numbers beat no numbers. */
@@ -1022,6 +1161,12 @@ export function createUsageExtractor(pathsInput?: UsagePaths): UsageExtractor {
       if (sessionId !== undefined) {
         key = `copilot:${sessionId}`;
         advanced = extractCopilot(agent, sessionId, paths.userHome, cursors.get(key), metrics);
+      }
+    } else if (harness === "zcode") {
+      const sessionId = asString(agent.persistence?.sessionId) ?? asString(agent.runtimeInfo?.sessionId);
+      if (sessionId !== undefined) {
+        key = `zcode:${sessionId}`;
+        advanced = extractZcode(agent, sessionId, paths, cursors.get(key), metrics);
       }
     }
     if (key !== undefined && advanced !== undefined) cursors.set(key, advanced);
