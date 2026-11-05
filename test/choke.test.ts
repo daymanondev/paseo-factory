@@ -217,13 +217,54 @@ test("isSeatMemoryPathAllowed admits stateDir, tmpDirs, and SEAT_MEMORY_WHITELIS
 
 // ---- Per-Project Lead notebook fence (v0.1.0, ADR 0048 §3) -------------------------------------
 
+test("the notebook fence expands the seat's state-dir env spellings ($FACTORY_STATE_DIR / $PASEO_FACTORY_STATE_DIR) the way the seat's shell does", () => {
+  const projectRoot = "/ws/proj";
+  const stateDir = "/state/factory";
+
+  // The seat's shell resolves $FACTORY_STATE_DIR / $PASEO_FACTORY_STATE_DIR to the
+  // state dir (both are baked into the seat env, plugin/server/roles.ts), so the judge
+  // must judge the expanded destination — the spec's named heredoc spelling included.
+  // (Every command below judges exactly as its literal-path twin; the attached-quoted
+  // redirect `>"$FACTORY_STATE_DIR/…"` keeps the tokenizer's pre-existing quote-
+  // blindness and denies like its literal twin `>"/state/…"` does.)
+  for (const command of [
+    `cat <<'EOF' > "$FACTORY_STATE_DIR/projects/demo-abc123/notebook.md"\n## 1. Verification & Run Recipe\nnpm run check\nEOF`,
+    `echo "recipe" > $PASEO_FACTORY_STATE_DIR/projects/demo-abc123/notebook.md`,
+    `echo "recipe" >$PASEO_FACTORY_STATE_DIR/projects/demo-abc123/notebook.md`,
+    `echo "recipe" > \${FACTORY_STATE_DIR}/projects/demo-abc123/notebook.md`,
+    `tee "$FACTORY_STATE_DIR/projects/demo-abc123/notebook.md" < draft.md`,
+  ]) {
+    assert.deepEqual(judgeSeatShellCommand(command, projectRoot, stateDir), { behavior: "allow" }, command);
+  }
+
+  // Expansion maps ONLY onto the seat's own state dir: the registry, ledger, mailbox,
+  // and usage stay denied through the env spelling exactly as through the literal one.
+  for (const protectedPath of [
+    `$FACTORY_STATE_DIR/projects/demo-abc123/project.json`,
+    `$PASEO_FACTORY_STATE_DIR/projects/demo-abc123/ledger.jsonl`,
+    `"$FACTORY_STATE_DIR/projects/demo-abc123/mailbox.jsonl"`,
+  ]) {
+    const denied = judgeSeatShellCommand(`echo x > ${protectedPath}`, projectRoot, stateDir);
+    assert.equal(denied.behavior, "deny", protectedPath);
+    if (denied.behavior === "deny") assert.equal(denied.rule, "seat-write-fence", protectedPath);
+  }
+
+  // A longer env name that merely CONTAINS the state-dir name is a different variable —
+  // never expanded.
+  assert.equal(
+    judgeSeatShellCommand(`echo x > $FACTORY_STATE_DIR_BACKUP/projects/demo-abc123/notebook.md`, projectRoot, stateDir).behavior,
+    "deny",
+  );
+});
+
 test("the Per-Project Lead notebook fence: seats may write only <stateDir>/projects/<slug>/notebook.md; the registry, ledger, mailbox, and usage stay protected", () => {
   const projectRoot = "/ws/proj";
   const stateDir = "/state/factory";
   const notebook = `${stateDir}/projects/demo-abc123/notebook.md`;
 
   // The seat judges allow the notebook — the path itself, direct Write/Edit asks, and
-  // shell writes (the runtime `$FACTORY_STATE_DIR` spelling resolves to this literal path).
+  // shell writes (the `$FACTORY_STATE_DIR` env spellings the seat's shell expands are
+  // pinned by the env-spelling test below).
   assert.equal(isSeatMemoryPathAllowed(projectRoot, notebook, stateDir), true, "the memory-path predicate");
   assert.deepEqual(judgeSeatFilePath(notebook, projectRoot, stateDir), { behavior: "allow" }, "a direct file edit");
   for (const command of [
@@ -266,12 +307,17 @@ test("the Per-Project Lead notebook fence: a contracted working Peer is denied e
     if (denied.behavior === "deny") assert.equal(denied.rule, "seat-write-fence");
   }
 
-  // Shell writes deny in every shape — heredoc, overwrite, append, tee.
+  // Shell writes deny in every shape — heredoc, overwrite, append, tee — including the
+  // `$FACTORY_STATE_DIR` env spelling the seat's shell would expand to the notebook
+  // (without the expansion this spelling resolves relative to the workspace and slips
+  // past the fence).
   for (const command of [
     `cat <<'EOF' > ${notebook}\nx\nEOF`,
     `echo tamper > ${notebook}`,
     `echo tamper >> ${notebook}`,
     `tee ${notebook} < draft.md`,
+    `echo tamper > "$FACTORY_STATE_DIR/projects/demo-abc123/notebook.md"`,
+    `echo tamper > $FACTORY_STATE_DIR/projects/demo-abc123/notebook.md`,
   ]) {
     const denied = judgeShellCommand(command, roots, worktreeFence);
     assert.equal(denied.behavior, "deny", command);
