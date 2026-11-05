@@ -2687,6 +2687,13 @@ var ROLE_PROMPTS = {
   agent: renderRoleAppendSystem("agent")
 };
 
+// src/zcode-home.ts
+var ROLE_PROMPTS2 = {
+  supervisor: renderRoleAppendSystem("supervisor"),
+  lead: renderRoleAppendSystem("lead"),
+  agent: renderRoleAppendSystem("agent")
+};
+
 // src/lane-profiles.ts
 import { existsSync as existsSync7, mkdirSync as mkdirSync8, readFileSync as readFileSync10, rmSync as rmSync5, writeFileSync as writeFileSync6 } from "node:fs";
 import { dirname as dirname10, join as join10 } from "node:path";

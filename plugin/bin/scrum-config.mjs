@@ -1163,6 +1163,13 @@ var ROLE_PROMPTS = {
   agent: renderRoleAppendSystem("agent")
 };
 
+// src/zcode-home.ts
+var ROLE_PROMPTS2 = {
+  supervisor: renderRoleAppendSystem("supervisor"),
+  lead: renderRoleAppendSystem("lead"),
+  agent: renderRoleAppendSystem("agent")
+};
+
 // src/lanes.ts
 var LANE_NAMES = ["supervisor", "lead", "worker", "watch", "retro", "freshEyes"];
 var DEFAULT_LANE = "pi/zai/glm-5.3";

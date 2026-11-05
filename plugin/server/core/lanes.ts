@@ -20,7 +20,17 @@
  *   opencode/<model> → `opencode run --standalone -m opencode/<model>`
  *                     (the runner injects TOOLLESS_OPENCODE_CONFIG; read
  *                     asks are rejected by non-interactive standalone mode)
- * The prompt rides stdin (the watch's discipline since amendment 2); the
+ *   zcode/<model>  → `/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs
+ *                     --json -p <prompt>` (v0.0.94, ADR 0046 §2) — alone
+ *                     among the families the prompt rides `-p` argv (the
+ *                     installed CLI's documented `<text>` form), there is no
+ *                     thinking flag at CLI level (effort is ACP-only, via
+ *                     `thinkingOptionId`), and the tool/workflow hardening
+ *                     rides the child env instead: the clean-room `ZCODE_*`
+ *                     record plus NODE_OPTIONS IPv4 prioritization
+ *                     (`runLaneCli` below)
+ * The prompt rides stdin (the watch's discipline since amendment 2) — the
+ * zcode family's `-p` argv above is the one exception; the
  * runner owns a scratch cwd and a SIGKILL deadline. `eye.json` is not a CLI
  * lane — it is the fresh-eyes pass's legacy direct-HTTP configuration, legal
  * for `freshEyes` alone (src/fresh-eyes.ts reads it).
@@ -31,6 +41,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { provisionPiAgentHome } from "./pi-home.ts";
 import { projectStateDir } from "./project.ts";
+import { provisionZcodeHome } from "./zcode-home.ts";
 
 // ---- Owner-authored Lane profiles (v0.0.38, ADR 0026 §2) -----------------------------------
 // The Lane profile store and its pure operations live in ./lane-profiles.ts
@@ -127,6 +138,42 @@ export function laneError(name: LaneName, value: string): string | undefined {
     return `lane ${name}="${value}" must be provider/model with both halves non-empty and no whitespace`;
   }
   return undefined;
+}
+
+// ---- zcode runtime model normalization (v0.0.94, ADR 0046 §2) ------------------------------
+
+/**
+ * The zcode runtime's built-in GLM Coding Plan provider id — the prefix every
+ * `zcode-acp-server` model option value carries before its backslash
+ * (`builtin:zai-coding-plan\GLM-5.3`; the backslash is one literal character,
+ * ADR 0046 Gap 2). Paseo's `ACPAgentSession.setModelWithSelection` validates
+ * `option.options.some(c => c.value === modelId)` client-side, so a bare
+ * `GLM-5.3` never reaches the RPC — it must be normalized first.
+ */
+const ZCODE_RUNTIME_PROVIDER_PREFIX = "builtin:zai-coding-plan";
+
+/**
+ * Maps a lane's zcode model to its runtime id: a bare model name (`GLM-5.3`,
+ * `glm-5.3`, `GLM-5.3-Flash` — any casing, no backslash) gains the
+ * `builtin:zai-coding-plan\` prefix; an explicit `"<providerId>\<modelId>"`
+ * string (builtin or `custom:*`) passes through verbatim, never rewritten.
+ * Pure string work — no fs, no env — so both sides of the plugin boundary
+ * (role-provider catalogs, the `agent.create.before` model rewrite) can call
+ * it freely.
+ */
+export function normalizeZcodeRuntimeModelId(model: string): string {
+  return model.includes("\\") ? model : `${ZCODE_RUNTIME_PROVIDER_PREFIX}\\${model}`;
+}
+
+/**
+ * The display-direction twin: strips the `"<providerId>\"` prefix from a
+ * runtime id (`builtin:zai-coding-plan\GLM-5.3` → `GLM-5.3`) so UI labels show
+ * the model alone; a bare name strips to itself. Round-trips with
+ * `normalizeZcodeRuntimeModelId` in both directions.
+ */
+export function stripZcodeProviderPrefix(model: string): string {
+  const backslash = model.indexOf("\\");
+  return backslash === -1 ? model : model.slice(backslash + 1);
 }
 
 /**
@@ -273,10 +320,20 @@ export const TOOLLESS_OPENCODE_CONFIG = JSON.stringify({
 });
 
 /**
+ * The ZCode Desktop runtime CLI (ADR 0046 Context §1) — the headless `zcode`
+ * lane's command. The absolute path is load-bearing: `laneCliAvailable`
+ * probes `<command> --version`, and a spawn of a missing absolute path fails
+ * with a non-zero status, which is exactly the intended "unavailable" for
+ * hosts without ZCode Desktop installed.
+ */
+export const ZCODE_CJS_PATH = "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs";
+
+/**
  * Maps a lane string to its headless tool-less CLI invocation. `pi`,
- * `copilot`, `claude` and `opencode` are the four families with a verified
- * tool-less form; anything else (including `eye.json` and bare providers)
- * has none — undefined, never an improvised command with tools on.
+ * `copilot`, `claude`, `opencode` and `zcode` are the families with a
+ * verified tool-less form; anything else (including `eye.json` and bare
+ * providers) has none — undefined, never an improvised command with tools
+ * on.
  */
 export function laneCliInvocation(lane: string): LaneCliInvocation | undefined {
   const parsed = parseLane(lane);
@@ -316,6 +373,18 @@ export function laneCliInvocation(lane: string): LaneCliInvocation | undefined {
           ...(thinking === undefined ? [] : ["--variant", thinking]),
         ],
       };
+    case "zcode":
+      // `-p <prompt>` (runLaneCli appends the prompt after the dangling `-p`)
+      // and `--json` — the installed CLI's real flags: 0.17.1 has no
+      // `--output-format` and no `--thinking` (both are unknown options that
+      // fail the parse, verified against the binary), so machine-readable
+      // output rides `--json` and NO thinking flag is passed, deliberately —
+      // the lane's effort suffix rides the ACP path alone, as
+      // `thinkingOptionId` (ADR 0046 §2; the spec's `--output-format json
+      // --thinking <effort>` is recorded as an errata). The model rides the
+      // operator's configured default (no CLI `--model` flag exists); the
+      // IPv4 node flags and the clean-room `ZCODE_*` env ride the child env.
+      return { command: ZCODE_CJS_PATH, args: ["--json", "-p"] };
     default:
       return undefined;
   }
@@ -355,9 +424,10 @@ export function laneCliAvailable(lane: string): boolean {
 /**
  * One headless tool-less lane invocation, shared by the Watch, the Retro and
  * the Fresh-eyes CLI path (the runCopilot discipline, generalized): scratch
- * cwd, prompt on stdin, SIGKILL at the deadline, stderr squashed into the
- * error. A nonzero exit names the command; a blown deadline flags
- * `budgetExceeded` so the caller spends no second try.
+ * cwd, prompt on stdin (the zcode family's `-p` argv excepted), SIGKILL at
+ * the deadline, stderr squashed into the error. A nonzero exit names the
+ * command; a blown deadline flags `budgetExceeded` so the caller spends no
+ * second try.
  *
  * A `pi/<model>` lane additionally runs inside the clean headless Pi harness
  * home (v0.0.16, ADR 0011): `PI_CODING_AGENT_DIR` is provisioned —
@@ -368,7 +438,11 @@ export function laneCliAvailable(lane: string): boolean {
  * with tools fenced by permissions and headless rejection (ADR 0019 §2):
  * `OPENCODE_CONFIG_CONTENT` carries TOOLLESS_OPENCODE_CONFIG, `--auto` is
  * omitted, and `CI=1` keeps permission asks non-interactive,
- * independent of any `stateDir`. Every other lane, and a pi caller without a
+ * independent of any `stateDir`. A `zcode/<model>` lane with a `stateDir`
+ * runs inside the clean-room headless zcode home (v0.0.94, ADR 0046 §2/§4):
+ * `provisionZcodeHome` materializes `<stateDir>/zcode-home/headless` and its
+ * `ZCODE_*` env record rides the child verbatim, joined by the NODE_OPTIONS
+ * IPv4 pair. Every other lane, and a pi or zcode caller without a
  * `stateDir`, inherits the parent environment, exactly as before.
  */
 export async function runLaneCli(input: {
@@ -380,14 +454,18 @@ export async function runLaneCli(input: {
   stateDir?: string | undefined;
   /** Hermetic override (tests): the operator Pi agent home shared state symlinks back to — default `<homedir>/.pi/agent`. */
   sourceAgentDir?: string | undefined;
-  /** Hermetic override (tests): the home `sourceAgentDir` lives under — `<userHome>/.pi/agent`; ignored when `sourceAgentDir` is set. */
+  /**
+   * Hermetic override (tests): the home `sourceAgentDir` lives under — `<userHome>/.pi/agent`; ignored
+   * when `sourceAgentDir` is set. A `zcode` lane's provisioner takes it as its
+   * `userHome` too (the headless seat never reads it today, but the seam stays hermetic).
+   */
   userHome?: string | undefined;
 }): Promise<{ ok: true; stdout: string } | { ok: false; error: string; budgetExceeded: boolean }> {
   const invocation = laneCliInvocation(input.lane);
   if (invocation === undefined) {
     return {
       ok: false,
-      error: `lane "${input.lane}" has no headless tool-less CLI form — use pi/<model>, copilot/<model>, claude/<model>, opencode/<model>, or "eye.json" for freshEyes`,
+      error: `lane "${input.lane}" has no headless tool-less CLI form — use pi/<model>, copilot/<model>, claude/<model>, opencode/<model>, zcode/<model>, or "eye.json" for freshEyes`,
       budgetExceeded: false,
     };
   }
@@ -399,11 +477,20 @@ export async function runLaneCli(input: {
       ? { PI_CODING_AGENT_DIR: provisionPiAgentHome({ stateDir: input.stateDir, role: "headless", sourceAgentDir }) }
       : provider === "opencode"
         ? { OPENCODE_CONFIG_CONTENT: TOOLLESS_OPENCODE_CONFIG, CI: "1" }
-        : undefined;
+        : provider === "zcode" && input.stateDir !== undefined
+          ? {
+              ...provisionZcodeHome({ stateDir: input.stateDir, role: "headless", userHome: input.userHome }),
+              NODE_OPTIONS: zcodeNodeOptions(),
+            }
+          : undefined;
   const cwd = mkdtempSync(join(tmpdir(), "factory-lane-"));
   try {
     const run = input.runner ?? spawnLaneCli;
-    const result = await run({ command: invocation.command, args: invocation.args, cwd, stdin: input.stdin, timeoutMs: input.timeoutMs, env });
+    // The zcode family's prompt rides `-p` argv (its CLI's documented `<text>`
+    // form) — appended after the invocation's dangling `-p` — while every
+    // other family keeps the prompt on stdin alone.
+    const args = provider === "zcode" ? [...invocation.args, input.stdin] : invocation.args;
+    const result = await run({ command: invocation.command, args, cwd, stdin: input.stdin, timeoutMs: input.timeoutMs, env });
     if (result.timedOut) {
       return { ok: false, error: `the ${invocation.command} CLI outlasted its deadline`, budgetExceeded: true };
     }
@@ -430,6 +517,20 @@ export async function runLaneCli(input: {
  */
 function stripAnsiEscapes(text: string): string {
   return text.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "");
+}
+
+/**
+ * The zcode child's NODE_OPTIONS: the IPv4 prioritization pair ADR 0046
+ * Context §2 requires — `--no-network-family-autoselection
+ * --dns-result-order=ipv4first`. They are node runtime flags, so they cannot
+ * ride the CLI argv after the script path (the CLI would reject them as
+ * unknown options); NODE_OPTIONS delivers them to the shebang-spawned node
+ * instead. An inherited NODE_OPTIONS is appended to, never clobbered.
+ */
+function zcodeNodeOptions(): string {
+  const ipv4 = "--no-network-family-autoselection --dns-result-order=ipv4first";
+  const inherited = process.env.NODE_OPTIONS?.trim();
+  return inherited === undefined || inherited === "" ? ipv4 : `${inherited} ${ipv4}`;
 }
 
 /** The real runner: the lane's command with its argv, prompt on stdin, killed at the deadline. */
