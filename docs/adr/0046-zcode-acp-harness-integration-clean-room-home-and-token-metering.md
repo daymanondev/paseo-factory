@@ -58,10 +58,9 @@ An empirical investigation of ZCode Desktop (`v3.17.2`, CLI `v0.17.1`), Paseo De
   - Instead, isolation is enforced via `zcode.cjs`'s native storage environment variables:
     - `ZCODE_STORAGE_DIR: "<roleHome>"`
     - `ZCODE_SESSION_DB_PATH: "<roleHome>/db/db.sqlite"`
-    - `ZCODE_PROJECT_INSTRUCTION_FILES: "AGENTS.md,CLAUDE.md,CONTEXT.md"`
 - **Skill Scoping:**
   - `Supervisor` symlinks `<userHome>/.zcode/skills` (preserving 100% of Owner skills).
-  - `Lead` and `Peer` provision scoped skill directories excluding the Owner-only `factory` skill (and merging active `Project skill pack`s and `Contract.skills` on `Peer` / Scrum roles, ADR 0039, ADR 0042).
+  - `Lead` and `Peer` provision scoped skill directories excluding the Owner-only `factory` skill (merging active `Project skill pack`s and `Contract.skills` on `Peer` / Scrum roles, ADR 0039, ADR 0042 — **deferred past v0.0.94, see Errata 2**).
 
 ### 5. Three-Layer `Seat write fence` & `extractZcode` Incremental SQLite Token Metering (Q5)
 
@@ -82,6 +81,11 @@ An empirical investigation of ZCode Desktop (`v3.17.2`, CLI `v0.17.1`), Paseo De
      ORDER BY sequence ASC
      ```
    - Extracts `metadata.usage` (`inputTokens`, `outputTokens`, `cacheReadInputTokens`, `cacheCreationInputTokens`, `reasoningTokens`) into `paseo-factory`'s four disjoint additive buckets (`inputUncachedTokens = Math.max(0, inputTokens - cacheReadInputTokens - cacheCreationInputTokens)`, `cacheReadTokens = cacheReadInputTokens`, `cacheWriteTokens = cacheCreationInputTokens`, `outputTokens`, `totalTokens`), advancing `cursor.lastStepIdx = row.sequence` for `O(delta)` reads and feeding `contextWindowUsedTokens` into `Lead handoff` (`128k`) and `Peer handoff` (`160k`).
+
+## Errata (recorded 2026-11-05, post-implementation review)
+
+1. **`ZCODE_PROJECT_INSTRUCTION_FILES` does not exist in the runtime.** Decision 4 originally listed `ZCODE_PROJECT_INSTRUCTION_FILES: "AGENTS.md,CLAUDE.md,CONTEXT.md"` among `zcode.cjs`'s native storage env vars. Verified against the installed `zcode.cjs` (CLI 0.17.1, the same binary this ADR's other claims were verified against): the bundle reads 73 distinct `ZCODE_*` env vars and none is instruction-file related; instruction discovery uses a config-supplied `priorityFiles` list defaulting to exactly `["AGENTS.md"]` (workspace walk-up plus the user-scope `~/.zcode/AGENTS.md`), with no env override. Setting the key would be a dead env var on every seat, so `provisionZcodeHome` correctly never sets it; the line is struck from Decision 4. The `<roleHome>/config.json` `instructions.projectFile: "AGENTS.md"` wiring (Decision 3) matches the runtime's own project-file default; `CLAUDE.md`/`CONTEXT.md` discovery is not a runtime behavior and is not provided.
+2. **Project skill pack / `Contract.skills` merging on `zcode` `Peer` / Scrum roles is deferred.** Decision 4's skill-scoping parenthetical promised Pi-parity pack merging (the `scopeScrumCapabilities` channel, ADR 0039 / ADR 0042). The v0.0.94 implementation contract (`.scratch/factory-v0.0.94/spec.md` §1, last bullet) deliberately scoped zcode seats to the operator `~/.zcode/skills` tree — `supervisor` whole, `lead` / `agent` scoped minus the Owner-only `factory` — and that is what shipped; no zcode-side pack channel exists yet. ADR 0047 ("Lead Context-Budget Hygiene … Peer-Owned Domain Skills", accepted 2026-11-05) independently re-grounds skill delivery harness-agnostically (`Peer` discovers `<available_skills>` natively; the pack hint rides the spawn prompt; `Lead` reads no `SKILL.md` at all), which lowers the value of a provisioner-side merge. Tracked as `.scratch/factory-v0.0.94/issues/06-zcode-scrum-skill-pack-channel.md`.
 
 ## Consequences
 

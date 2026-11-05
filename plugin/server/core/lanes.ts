@@ -153,23 +153,71 @@ export function laneError(name: LaneName, value: string): string | undefined {
 const ZCODE_RUNTIME_PROVIDER_PREFIX = "builtin:zai-coding-plan";
 
 /**
+ * The official GLM model ids the zcode runtime's own registry spells
+ * canonically — mirrored verbatim from zcode.cjs 0.17.1's
+ * `normalizeOfficialGlmModelId` table (`ZCODE_BUILTIN_PROVIDER_CONFIG_FILE`'s
+ * `builtinModelIds` carry the same spellings, and the catalog mixes casings
+ * deliberately — `GLM-5.3` beside `glm-5.3-flashx` — so ids are
+ * case-meaningful keys, never case-folded). The runtime's
+ * `session/setModel` looks a model up with a plain case-sensitive
+ * `Map.get(modelId)` against these keys, so a lane's casing variant must be
+ * canonicalized BEFORE the id crosses the RPC.
+ */
+const ZCODE_OFFICIAL_GLM_MODEL_IDS = [
+  "GLM-5.3",
+  "GLM-5.3-Flash",
+  "GLM-5V-Turbo",
+  "GLM-5.2",
+  "GLM-5.1",
+  "GLM-5.1-Highspeed",
+  "GLM-5",
+  "GLM-5-Turbo",
+  "GLM-4.7",
+  "GLM-4.7-FlashX",
+  "GLM-4.7-Flash",
+  "GLM-4.6",
+  "GLM-4.5-Air",
+  "GLM-4.5",
+  "GLM-4.6V",
+  "GLM-4.6V-Flash",
+  "GLM-4.6V-FlashX",
+  "GLM-4.1V-Thinking-FlashX",
+  "GLM-4.1V-Thinking-Flash",
+  "GLM-4-FlashX-250414",
+  "GLM-4-Flash-250414",
+  "GLM-4V-Flash",
+] as const;
+
+/** Lowercase spelling → the registry's canonical spelling (the runtime's own lookup direction). */
+const CANONICAL_ZCODE_MODEL_ID: ReadonlyMap<string, string> = new Map(
+  ZCODE_OFFICIAL_GLM_MODEL_IDS.map((id) => [id.toLowerCase(), id]),
+);
+
+/**
  * Maps a lane's zcode model to its runtime id: a bare model name (`GLM-5.3`,
- * `glm-5.3`, `GLM-5.3-Flash` — any casing, no backslash) gains the
- * `builtin:zai-coding-plan\` prefix; an explicit `"<providerId>\<modelId>"`
- * string (builtin or `custom:*`) passes through verbatim, never rewritten.
- * Pure string work — no fs, no env — so both sides of the plugin boundary
- * (role-provider catalogs, the `agent.create.before` model rewrite) can call
- * it freely.
+ * `glm-5.3`, `GLM-5.3-Flash` — any casing, no backslash) is canonicalized to
+ * the registry's spelling — `glm-5.3` and `GLM-5.3` both normalize to
+ * `builtin:zai-coding-plan\GLM-5.3` (spec §2; the registry's model lookup is a
+ * case-sensitive map keyed by the canonical spellings above) — with an
+ * unrecognized name passing through verbatim, exactly the runtime's own
+ * `?? id` fallback, so a future model written canonically still works. An
+ * explicit `"<providerId>\<modelId>"` string (builtin or `custom:*`) passes
+ * through verbatim, never rewritten. Pure string work — no fs, no env — so
+ * both sides of the plugin boundary (role-provider catalogs, the
+ * `agent.create.before` model rewrite) can call it freely.
  */
 export function normalizeZcodeRuntimeModelId(model: string): string {
-  return model.includes("\\") ? model : `${ZCODE_RUNTIME_PROVIDER_PREFIX}\\${model}`;
+  if (model.includes("\\")) return model;
+  const canonical = CANONICAL_ZCODE_MODEL_ID.get(model.toLowerCase()) ?? model;
+  return `${ZCODE_RUNTIME_PROVIDER_PREFIX}\\${canonical}`;
 }
 
 /**
  * The display-direction twin: strips the `"<providerId>\"` prefix from a
  * runtime id (`builtin:zai-coding-plan\GLM-5.3` → `GLM-5.3`) so UI labels show
- * the model alone; a bare name strips to itself. Round-trips with
- * `normalizeZcodeRuntimeModelId` in both directions.
+ * the model alone; a bare name strips to itself. `normalize → strip` lands on
+ * the canonical spelling (a case-variant bare name canonicalizes on the way
+ * in, deliberately); `strip → normalize` round-trips a runtime id exactly.
  */
 export function stripZcodeProviderPrefix(model: string): string {
   const backslash = model.indexOf("\\");

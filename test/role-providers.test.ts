@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import type { TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createFactory } from "../plugin/server/core/factory.ts";
 import { createSurfaceHandlers } from "../plugin/server/surface-rpc.ts";
@@ -771,14 +771,16 @@ test("spec v0.0.94 §3 (ADR 0046 Decision 1): a zcode lane auto-registers agents
     (readConfig(home).agents as { providers: Record<string, Record<string, unknown>> }).providers;
 
   // Arm 1 — the lane trigger: a worker zcode lane registers the base entry even
-  // when ZCode Desktop is absent from the host.
+  // when ZCode Desktop is absent from the host. The hermetic userHome keeps the
+  // per-seat provisioner (which the lane arm fires) off the operator's real
+  // ~/.zcode/skills.
   const laneHome = join(dir, "lane-home");
   writeConfig(laneHome, liveLikeConfig());
   const zcodeLanes: Lanes = { ...LANES, worker: "zcode/GLM-5.3:high" };
-  const laneRun = reconcilePaseoRoleProviders(laneHome, zcodeLanes, { zcodeAppPath: absentApp });
+  const laneRun = reconcilePaseoRoleProviders(laneHome, zcodeLanes, { zcodeAppPath: absentApp, userHome: join(dir, "lane-user") });
   assert.ok(laneRun.ok && laneRun.changed === true, "the zcode lane reconcile changes the config");
   assert.deepEqual(providersOf(laneHome).zcode, registeredZcodeEntry, "the base zcode entry carries extends, the npx command, and exactly the factory-safe env defaults");
-  const laneAgain = reconcilePaseoRoleProviders(laneHome, zcodeLanes, { zcodeAppPath: absentApp });
+  const laneAgain = reconcilePaseoRoleProviders(laneHome, zcodeLanes, { zcodeAppPath: absentApp, userHome: join(dir, "lane-user") });
   assert.ok(laneAgain.ok && laneAgain.changed === false, "the registration is idempotent");
 
   // The negative arm — no zcode lane and no app: nothing is registered.
@@ -859,10 +861,11 @@ test("spec v0.0.94 §3 (ADR 0046 Decision 2): a zcode/GLM-5.3:high lane writes t
   const dir = makeTempDir();
   disposeDir(t, dir);
   const home = join(dir, "paseo-home");
+  const userHome = join(dir, "user-home"); // the hermetic skills source — the operator's real ~/.zcode is never read
   const absentApp = join(dir, "missing", "zcode.cjs");
   writeConfig(home, liveLikeConfig());
   const lanes: Lanes = { ...LANES, supervisor: "zcode/GLM-5.3:high", worker: "zcode/GLM-5.3:high" };
-  const result = reconcilePaseoRoleProviders(home, lanes, { zcodeAppPath: absentApp });
+  const result = reconcilePaseoRoleProviders(home, lanes, { zcodeAppPath: absentApp, userHome });
   assert.ok(result.ok && result.changed === true);
   const after = readConfig(home);
   const providers = (after.agents as { providers: Record<string, Record<string, unknown>> }).providers;
@@ -917,15 +920,67 @@ test("spec v0.0.94 §3 (ADR 0046 Decision 2): a zcode/GLM-5.3:high lane writes t
   const explicit = reconcilePaseoConfigObject(
     liveLikeConfig(),
     { ...lanes, worker: "zcode/custom:mine\\GLM-5.3-Flash:medium" },
-    { paseoHome: home, zcodeAppPath: absentApp },
+    { paseoHome: home, zcodeAppPath: absentApp, userHome },
   );
   const explicitModels = ((explicit.config.agents as { providers: Record<string, { models?: { id: string; label: string }[] }> }).providers[FACTORY_ROLE_PROVIDERS.agent])!.models!;
   assert.equal(explicitModels[0]!.id, "custom:mine\\GLM-5.3-Flash");
   assert.equal(explicitModels[0]!.label, "GLM-5.3-Flash (Factory)");
 
+  // A case-variant bare lane canonicalizes onto the registry's spelling (the
+  // runtime's model lookup is a case-sensitive map — spec §2 maps both GLM-5.3
+  // and glm-5.3 onto builtin:zai-coding-plan\GLM-5.3), while the label keeps
+  // the lane's own spelling.
+  const lowercased = reconcilePaseoConfigObject(
+    liveLikeConfig(),
+    { ...lanes, worker: "zcode/glm-5.3:high" },
+    { paseoHome: home, zcodeAppPath: absentApp, userHome },
+  );
+  const lowerModels = ((lowercased.config.agents as { providers: Record<string, { models?: { id: string; label: string }[] }> }).providers[FACTORY_ROLE_PROVIDERS.agent])!.models!;
+  assert.equal(lowerModels[0]!.id, "builtin:zai-coding-plan\\GLM-5.3", "a lowercase lane normalizes onto the canonical runtime id");
+  assert.equal(lowerModels[0]!.label, "glm-5.3 (Factory)", "the display label keeps the lane's spelling");
+
   // Idempotence: the converged config reconciles to changed: false.
-  const again = reconcilePaseoRoleProviders(home, lanes, { zcodeAppPath: absentApp });
+  const again = reconcilePaseoRoleProviders(home, lanes, { zcodeAppPath: absentApp, userHome });
   assert.ok(again.ok && again.changed === false, "the zcode role record reconciles idempotently");
+});
+
+test("spec v0.0.94 §3/§4: the reconcile path's per-seat zcode provisioning reads skills from the GIVEN userHome — hermetic, never the operator's real ~/.zcode/skills", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const home = join(dir, "paseo-home");
+  const userHome = join(dir, "operator");
+  const absentApp = join(dir, "missing", "zcode.cjs");
+  writeConfig(home, liveLikeConfig());
+  // The fake operator skill tree — the exact SEEDED_SKILLS discipline of
+  // test/zcode-home.test.ts: `factory` is the Owner-only exclusion case.
+  const skills = ["codebase-design", "domain-modeling", "factory", "grilling", "tdd"];
+  for (const name of skills) {
+    mkdirSync(join(userHome, ".zcode", "skills", name), { recursive: true });
+    writeFileSync(join(userHome, ".zcode", "skills", name, "SKILL.md"), `# ${name}\n`);
+  }
+  const lanes: Lanes = { ...LANES, supervisor: "zcode/GLM-5.3", lead: "zcode/GLM-5.3", worker: "zcode/GLM-5.3" };
+  const result = reconcilePaseoRoleProviders(home, lanes, { zcodeAppPath: absentApp, userHome });
+  assert.ok(result.ok && result.changed === true);
+  const factoryState = join(home, "plugin-state", "paseo-factory");
+
+  // The whole-dir Owner-parity link: supervisor's skills IS the given userHome's tree.
+  assert.equal(
+    readlinkSync(join(factoryState, "zcode-home", "supervisor", "skills")),
+    join(userHome, ".zcode", "skills"),
+    "supervisor symlinks the given userHome's skills directory — the seam flows through the reconcile path",
+  );
+  // The scoped seats: lead exactly its three core skills, the agent everything
+  // except the Owner-only `factory` — deterministic regardless of the host.
+  assert.deepEqual(
+    readdirSync(join(factoryState, "zcode-home", "lead", "skills")).sort(),
+    ["codebase-design", "domain-modeling", "tdd"],
+    "lead carries exactly the three core skills (ADR 0010 §6)",
+  );
+  assert.deepEqual(
+    readdirSync(join(factoryState, "zcode-home", "agent", "skills")).sort(),
+    ["codebase-design", "domain-modeling", "grilling", "tdd"],
+    "the agent carries every seeded skill except the Owner-only factory",
+  );
 });
 
 test("spec v0.0.94 §3: laneProviderConfig resolves a zcode lane onto the runtime model id with its thinking option intact — the feed for agent.create.before's model rewrite", () => {

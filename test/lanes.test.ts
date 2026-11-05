@@ -601,10 +601,12 @@ test("zcode lanes parse provider/model[:effort] with no parser change — the cl
   assert.equal(laneError("worker", "zcode/GLM-5.3:max"), undefined, "the zcode lane validates like every other family");
 });
 
-test("normalizeZcodeRuntimeModelId prefixes bare GLM names and preserves explicit provider\\model verbatim", () => {
+test("normalizeZcodeRuntimeModelId prefixes bare GLM names with canonical registry casing and preserves explicit provider\\model verbatim", () => {
   assert.equal(normalizeZcodeRuntimeModelId("GLM-5.3"), "builtin:zai-coding-plan\\GLM-5.3", "the spec's canonical example (ADR 0046 Gap 2)");
   assert.equal(normalizeZcodeRuntimeModelId("GLM-5.3-Flash"), "builtin:zai-coding-plan\\GLM-5.3-Flash");
-  assert.equal(normalizeZcodeRuntimeModelId("glm-5.3"), "builtin:zai-coding-plan\\glm-5.3", "a bare name in any casing is bare — the prefix rides, the given casing stands");
+  assert.equal(normalizeZcodeRuntimeModelId("glm-5.3"), "builtin:zai-coding-plan\\GLM-5.3", "a case-variant bare name canonicalizes — spec §2 maps both GLM-5.3 and glm-5.3 onto builtin:zai-coding-plan\\GLM-5.3, and the runtime's registry lookup (a case-sensitive Map keyed by the canonical spellings) would reject the lowercase id");
+  assert.equal(normalizeZcodeRuntimeModelId("glm-5.3-flash"), "builtin:zai-coding-plan\\GLM-5.3-Flash", "suffix casing canonicalizes too");
+  assert.equal(normalizeZcodeRuntimeModelId("glm-6-pro"), "builtin:zai-coding-plan\\glm-6-pro", "an unrecognized name passes through verbatim — the runtime's own ?? fallback; only the official table's lowercase keys map");
   assert.equal(normalizeZcodeRuntimeModelId("builtin:zai-coding-plan\\GLM-5.3"), "builtin:zai-coding-plan\\GLM-5.3", "an explicit builtin runtime id passes through verbatim");
   assert.equal(normalizeZcodeRuntimeModelId("custom:cliproxyapi\\GLM-5.3"), "custom:cliproxyapi\\GLM-5.3", "a custom provider prefix is preserved too — never rewritten");
 });
@@ -613,9 +615,10 @@ test("stripZcodeProviderPrefix is the display-direction twin and round-trips wit
   assert.equal(stripZcodeProviderPrefix("builtin:zai-coding-plan\\GLM-5.3"), "GLM-5.3");
   assert.equal(stripZcodeProviderPrefix("custom:cliproxyapi\\GLM-5.3"), "GLM-5.3", "any provider prefix strips — the label shows the model alone");
   assert.equal(stripZcodeProviderPrefix("GLM-5.3"), "GLM-5.3", "a bare name strips to itself");
-  for (const bare of ["GLM-5.3", "glm-5.3", "GLM-5.3-Flash"]) {
+  for (const bare of ["GLM-5.3", "GLM-5.3-Flash"]) {
     assert.equal(stripZcodeProviderPrefix(normalizeZcodeRuntimeModelId(bare)), bare, `normalize → strip round-trips ${bare}`);
   }
+  assert.equal(stripZcodeProviderPrefix(normalizeZcodeRuntimeModelId("glm-5.3")), "GLM-5.3", "normalize → strip lands on the canonical spelling — the case variant canonicalizes on the way in, deliberately");
   assert.equal(
     normalizeZcodeRuntimeModelId(stripZcodeProviderPrefix("builtin:zai-coding-plan\\GLM-5.3")),
     "builtin:zai-coding-plan\\GLM-5.3",

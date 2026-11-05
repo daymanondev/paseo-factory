@@ -401,7 +401,7 @@ function zcodeAppInstalled(zcodeAppPath?: string): boolean {
 export function reconcilePaseoConfigObject(
   config: PaseoConfigObject,
   lanes: Lanes,
-  options?: { paseoHome?: string; zcodeAppPath?: string },
+  options?: { paseoHome?: string; zcodeAppPath?: string; userHome?: string },
 ): { changed: boolean; config: PaseoConfigObject } {
   const original = config;
   const agents = isRecord(original.agents) ? original.agents : {};
@@ -447,9 +447,13 @@ export function reconcilePaseoConfigObject(
     // env is what the daemon feeds the spawned `zcode-acp-server` child, so the
     // provisioner's record (ticket 01) rides the entry — filling only keys the
     // seat does not already carry, so the user's own inherited values keep
-    // winning (the PI_CODING_AGENT_DIR law).
+    // winning (the PI_CODING_AGENT_DIR law). `userHome` is the hermetic seam
+    // (tests pass a temp dir; production leaves it undefined for the operator's
+    // real home — reads only, the provisioner never writes outside the state dir).
     if (parsed.provider === "zcode" && factoryStateDir !== undefined) {
-      for (const [key, value] of Object.entries(provisionZcodeHome({ stateDir: factoryStateDir, role }))) {
+      for (const [key, value] of Object.entries(
+        provisionZcodeHome({ stateDir: factoryStateDir, role, userHome: options?.userHome }),
+      )) {
         if (env[key] === undefined) env[key] = value;
       }
     }
@@ -557,7 +561,7 @@ export type ReconcileRoleProvidersResult = { ok: true; changed: boolean } | { ok
 export function reconcilePaseoRoleProviders(
   paseoHome: string,
   lanes: Lanes,
-  deps?: { reloadDaemon?: (paseoHome: string) => void; zcodeAppPath?: string },
+  deps?: { reloadDaemon?: (paseoHome: string) => void; zcodeAppPath?: string; userHome?: string },
 ): ReconcileRoleProvidersResult {
   const path = join(paseoHome, "config.json");
   let config: PaseoConfigObject = {};
@@ -573,6 +577,7 @@ export function reconcilePaseoRoleProviders(
   const { changed, config: next } = reconcilePaseoConfigObject(config, lanes, {
     paseoHome,
     ...(deps?.zcodeAppPath === undefined ? {} : { zcodeAppPath: deps.zcodeAppPath }),
+    ...(deps?.userHome === undefined ? {} : { userHome: deps.userHome }),
   });
   if (!changed) return { ok: true, changed: false };
   try {
