@@ -285,6 +285,46 @@ export function projectStateDir(stateDir: string, projectSlug: string): string {
   return join(stateDir, "projects", projectSlug);
 }
 
+// ---- the Per-Project Lead notebook (v0.1.0, ADR 0048 §3) ---------------------------------------
+
+/** The Lead notebook's filename — always `<projectStateDir>/notebook.md`, never inside `<project-root>`. */
+export const PROJECT_NOTEBOOK_FILENAME = "notebook.md";
+
+/** The notebook's line cap: bounded so it can never overflow a Seat kickoff packet or Retro digest. */
+export const PROJECT_NOTEBOOK_MAX_LINES = 80;
+
+/** The notebook's UTF-8 byte cap (`<= 4 KB`). */
+export const PROJECT_NOTEBOOK_MAX_BYTES = 4096;
+
+/** Where one Project's Lead notebook lives — `<stateDir>/projects/<slug>/notebook.md`. */
+export function projectNotebookPath(stateDir: string, projectSlug: string): string {
+  return join(projectStateDir(stateDir, projectSlug), PROJECT_NOTEBOOK_FILENAME);
+}
+
+/**
+ * Reads the Per-Project Lead notebook: `undefined` when the file is missing,
+ * empty, or unreadable (never throws); otherwise the content truncated
+ * deterministically to at most `PROJECT_NOTEBOOK_MAX_LINES` lines and
+ * `PROJECT_NOTEBOOK_MAX_BYTES` UTF-8 bytes, with byte truncation backing off
+ * to the last complete character boundary so a multi-byte character is never
+ * split mid-sequence.
+ */
+export function readProjectNotebook(stateDir: string, projectSlug: string): string | undefined {
+  let raw: string;
+  try {
+    raw = readFileSync(projectNotebookPath(stateDir, projectSlug), "utf8");
+  } catch {
+    return undefined;
+  }
+  if (raw.trim() === "") return undefined;
+  const byLines = raw.split("\n").slice(0, PROJECT_NOTEBOOK_MAX_LINES).join("\n");
+  const bytes = Buffer.from(byLines, "utf8");
+  if (bytes.length <= PROJECT_NOTEBOOK_MAX_BYTES) return byLines;
+  let cut = PROJECT_NOTEBOOK_MAX_BYTES;
+  while (cut > 0 && (bytes[cut]! & 0b1100_0000) === 0b1000_0000) cut -= 1; // back off partial sequences
+  return bytes.subarray(0, cut).toString("utf8");
+}
+
 /**
  * The project registry (v0.0.14, ADR 0010 §1/§5, promoted into the core in
  * v0.0.18): every project the factory has seated records its identity in

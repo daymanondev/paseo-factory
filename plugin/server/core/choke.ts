@@ -487,12 +487,20 @@ export function isProtectedFactoryStatePath(
   const projectsPrefix = `${resolvedState}/projects`;
   if (resolvedCandidate === projectsPrefix || resolvedCandidate.startsWith(`${resolvedState}/projects/`)) {
     if (resolvedCandidate.endsWith("/lead-handoff.md")) return false;
+    // The Per-Project Lead notebook (v0.1.0, ADR 0048 §3) is a Seat-write-fence-only
+    // allowance: `allowedWorktree === undefined` uniquely marks the seat judges, while
+    // both contracted-Peer judges pass their worktree, so the notebook stays protected
+    // for peers. Exactly `<slug>/notebook.md` — deeper paths stay protected.
+    if (allowedWorktree === undefined && /^[^/]+\/notebook\.md$/.test(resolvedCandidate.slice(projectsPrefix.length + 1))) {
+      return false;
+    }
     if (allowedWorktree !== undefined && allowedWorktree.trim() !== "") {
       const resolvedWt = stripTrailingSlash(resolve(allowedWorktree));
       if (resolvedCandidate === resolvedWt || resolvedCandidate.startsWith(`${resolvedWt}/`)) {
         return false;
       }
-    } else if (/\/projects\/[^/]+\/worktrees\/[^/]+(\/|$)/.test(resolvedCandidate)) {
+    }
+    if (/\/projects\/[^/]+\/worktrees\/[^/]+(\/|$)/.test(resolvedCandidate)) {
       return false;
     }
     return true;
@@ -640,7 +648,8 @@ export function isProcessKillAgainstFactory(command: string): boolean {
  * seat rooted at `projectRoot` (v0.0.23, ADR 0015 §2; v0.0.26, ADR 0016 §3):
  * - Allows `/dev/null`, non-protected `stateDir` paths, and `tmpDirs` (`/tmp`, `os.tmpdir()`, `$TMPDIR`).
  * - Denies protected factory state files (`<stateDir>/ledger.jsonl`, `<stateDir>/correlations.json`,
- *   `<stateDir>/projects/**` outside `<projectStateDir>/worktrees/<task>` and `<projectStateDir>/lead-handoff.md`).
+ *   `<stateDir>/projects/**` outside `<projectStateDir>/worktrees/<task>`, `<projectStateDir>/lead-handoff.md`,
+ *   and `<projectStateDir>/notebook.md`).
  * - Inside `projectRoot`, allows ONLY `AGENTS.md`, `CLAUDE.md`, `CONTEXT.md`,
  *   `GLOSSARY.md`, `.gitignore`, `.worktreeinclude`, `docs/**`, and `.scratch/**`.
  * - Rejects all other paths inside or outside `projectRoot`.
@@ -964,7 +973,10 @@ export function judgeShellCommand(command: string, roots: WritableRoots, memory?
     for (const dest of extractWriteTargets(command)) {
       const expanded = expandUser(dest, roots);
       const resolvedDest = isAbsolute(expanded) ? resolve(expanded) : resolve(roots.workspace, expanded);
-      if (isProtectedFactoryStatePath(resolvedDest, roots.stateDir)) {
+      // The peer judges always name their worktree (the task's managed worktree,
+      // else the workspace) so `allowedWorktree === undefined` stays the seat
+      // fence's unique marker — the Lead notebook allowance never reaches a peer.
+      if (isProtectedFactoryStatePath(resolvedDest, roots.stateDir, memory?.worktree ?? roots.workspace)) {
         return {
           behavior: "deny",
           rule: "seat-write-fence",
@@ -993,7 +1005,10 @@ export function judgeFilePath(rawPath: string, roots: WritableRoots, memory?: Me
   const normalizedRaw = normalizeMaybeStrippedLeadingSlash(rawPath, [roots.workspace, roots.stateDir, memory?.worktree, memory?.workspace]);
   const expanded = expandUser(normalizedRaw, roots);
   const resolvedDest = isAbsolute(expanded) ? resolve(expanded) : resolve(roots.workspace, expanded);
-  if (roots.stateDir !== "" && isProtectedFactoryStatePath(resolvedDest, roots.stateDir)) {
+  if (
+    roots.stateDir !== "" &&
+    isProtectedFactoryStatePath(resolvedDest, roots.stateDir, memory?.worktree ?? roots.workspace)
+  ) {
     return {
       behavior: "deny",
       rule: "seat-write-fence",
