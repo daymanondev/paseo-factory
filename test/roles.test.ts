@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { buildRoleKickoffPrompt, LEAD_WAVE_LAWS, renderRoleAppendSystem, renderRoleContract, renderSeatBootstrapPrompt } from "../src/roles-contract.ts";
+import { buildRoleKickoffPrompt, LEAD_WAVE_LAWS, renderRoleAppendSystem, renderRoleContract, renderSeatBootstrapPrompt, SUPERVISOR_OUTCOME_BOUNDARY } from "../src/roles-contract.ts";
 import { buildSeatKickoffPacket } from "../src/preflight.ts";
 import { ROLE_PROMPTS } from "../src/pi-home.ts";
 import { CorrelationRegistry } from "../src/correlations.ts";
@@ -1475,6 +1475,101 @@ test("Lead review accepts genuine contracted GREEN proof without inventing post-
     assert.match(surface, /Never write or execute ad-hoc out-of-band shell\/node\/python scripts.*uncontracted edge cases after a GREEN Gate/);
     for (const example of ["node -e", "node <<'JS'", "npx tsx -e", "python3 -c"]) assert.ok(surface.includes(example));
     assert.match(surface, /polish.*newly discovered edge case outside.*Contract.*downstream.*after landing.*Stable Checkpoint/);
+  }
+});
+
+test("Lead wave laws require a bounded Project notebook at <projectStateDir>/notebook.md outside <project-root> (v0.1.0, ADR 0048 Decision 1)", () => {
+  const notebookLaw = LEAD_WAVE_LAWS.find((law) => law.includes("<projectStateDir>/notebook.md"))!;
+  assert.ok(notebookLaw !== undefined, "the Project notebook law exists");
+
+  // The law itself carries the cap, both fixed section headers with their
+  // subsections and table columns, and the audience-separation prohibition.
+  assert.match(notebookLaw, /<= 80 lines \/ <= 4 KB/);
+  assert.match(notebookLaw, /outside `<project-root>`/);
+  assert.match(notebookLaw, /## 1\. Verification & Run Recipe/);
+  assert.match(notebookLaw, /Worktree & Env Setup.*Fast Slice Check.*Full Cumulative Gate.*Process & Port Cleanup/);
+  assert.match(notebookLaw, /## 2\. Recurrence Guard/);
+  assert.match(notebookLaw, /\| ID \| Cause → Effect Mechanism \| Evidence \(Task \/ seq\) \| State \| Enforcement \|/);
+  assert.match(notebookLaw, /never write.*Lead-only operational or orchestration recipes into `<project-root>\/AGENTS\.md` or `<project-root>\/CONTEXT\.md`/);
+
+  // Every Lead surface (contract, seat contract, ROLE_PROMPTS, bootstraps,
+  // Turn-1 kickoff packet) carries the notebook upkeep obligations.
+  const project = { root: "/workspace/repo", slug: "repo" };
+  const input = { seat: "lead" as const, home: "/trial", stateDir: "/trial/state", nodePath: process.execPath,
+    path: "/usr/bin", lane: "codex", project };
+  for (const surface of [renderRoleContract("lead"), renderSeatContract("lead", project), ROLE_PROMPTS.lead,
+    renderSeatBootstrapPrompt(input), renderSeatBootstrap(input),
+    buildSeatKickoffPacket({ role: "lead", projectSlug: project.slug, projectRoot: project.root, ledgerEvents: [] })]) {
+    assert.match(surface, /<projectStateDir>\/notebook\.md/);
+    assert.match(surface, /<= 80 lines \/ <= 4 KB/);
+    assert.match(surface, /## 1\. Verification & Run Recipe/);
+    assert.match(surface, /## 2\. Recurrence Guard/);
+    assert.match(surface, /never write.*Lead-only operational or orchestration recipes into `<project-root>\/AGENTS\.md` or `<project-root>\/CONTEXT\.md`/);
+  }
+});
+
+test("Lead wave laws enforce the Recurrence Guard state machine and 3-Tier Wave Hardening hierarchy capped at at most 1 change per Stable Checkpoint (v0.1.0, ADR 0048 Decisions 1–2)", () => {
+  const guardLaw = LEAD_WAVE_LAWS.find((law) => law.startsWith("Recurrence Guard & Wave Hardening"))!;
+  assert.ok(guardLaw !== undefined, "the Recurrence Guard & Wave Hardening law exists");
+
+  // The full state progression and both occurrence thresholds with their states.
+  assert.match(guardLaw, /observed → recurred → hardened → verified/);
+  assert.match(guardLaw, /State: observed \(1x\)/);
+  assert.match(guardLaw, /Task \(seq N\)/);
+  assert.match(guardLaw, /no permanent rule for a one-off anomaly/);
+  assert.match(guardLaw, /observed → recurred, >= 2 distinct seqs/);
+  assert.match(guardLaw, /execute Wave Hardening before contracting Wave N\+1/);
+
+  // The at most 1 cap and all three tiers of the hardening hierarchy.
+  assert.match(guardLaw, /at most 1 highest-leverage change per Stable Checkpoint/);
+  assert.match(guardLaw, /Tier 1 \(Mechanical Structure\).*tighten the Gate command, `\.worktreeinclude`, or verification script immediately on Wave N\+1 without waiting for Owner approval.*State: hardened \(Tier-1\)/);
+  assert.match(guardLaw, /Tier 2 \(1-Line Repo Convention\).*quote the 1-line convention into downstream Contract descriptions.*State: hardened \(Tier-2 quote\).*4-Line Owner Ratification Proposal in `lead_report_to_supervisor` at directive completion/);
+  assert.match(guardLaw, /Tier 3 \(No-Op Rule Deprecation\).*violates an existing AGENTS\.md prose rule, enforce it mechanically via Tier 1 and propose deleting the ignored prose line upon Owner Ratification/);
+  assert.match(guardLaw, /cumulative Gate GREEN on the first attempt without repeating the failure.*State: verified/);
+
+  // Every Lead surface carries the state machine, tier names, and the cap.
+  const project = { root: "/workspace/repo", slug: "repo" };
+  const input = { seat: "lead" as const, home: "/trial", stateDir: "/trial/state", nodePath: process.execPath,
+    path: "/usr/bin", lane: "codex", project };
+  for (const surface of [renderRoleContract("lead"), renderSeatContract("lead", project), ROLE_PROMPTS.lead,
+    renderSeatBootstrapPrompt(input), renderSeatBootstrap(input),
+    buildSeatKickoffPacket({ role: "lead", projectSlug: project.slug, projectRoot: project.root, ledgerEvents: [] })]) {
+    assert.match(surface, /observed → recurred → hardened → verified/);
+    assert.match(surface, /State: observed \(1x\)/);
+    assert.match(surface, /State: hardened \(Tier-1\)/);
+    assert.match(surface, /State: hardened \(Tier-2 quote\)/);
+    assert.match(surface, /State: verified/);
+    assert.match(surface, /Tier 1 \(Mechanical Structure\)/);
+    assert.match(surface, /Tier 2 \(1-Line Repo Convention\)/);
+    assert.match(surface, /Tier 3 \(No-Op Rule Deprecation\)/);
+    assert.match(surface, /at most 1 highest-leverage change per Stable Checkpoint/);
+  }
+});
+
+test("Supervisor outcome boundary presents Tier-2/Tier-3 proposals as the 4-Line Owner Ratification Card and edits AGENTS.md/CONTEXT.md only after explicit Owner Ratification (v0.1.0, ADR 0048 Decisions 2, 4)", () => {
+  // The boundary constant itself codifies the card and the ratification gate.
+  assert.match(SUPERVISOR_OUTCOME_BOUNDARY, /Tier-2 or Tier-3.*Proposal.*>= 2 `Task \(seq N\)` citations from the Recurrence Guard/);
+  assert.match(SUPERVISOR_OUTCOME_BOUNDARY, /1\. Chuyện gì đã lặp lại/);
+  assert.match(SUPERVISOR_OUTCOME_BOUNDARY, /2\. Nguyên nhân gốc/);
+  assert.match(SUPERVISOR_OUTCOME_BOUNDARY, /3\. Nếu duyệt sẽ sửa gì \(Preview diff\)/);
+  assert.match(SUPERVISOR_OUTCOME_BOUNDARY, /4\. Tác dụng/);
+  assert.match(SUPERVISOR_OUTCOME_BOUNDARY, /edit `<project-root>\/AGENTS\.md` or `<project-root>\/CONTEXT\.md` only after explicit Owner Ratification/);
+  assert.match(SUPERVISOR_OUTCOME_BOUNDARY, /never edit them on an unratified proposal/);
+
+  // Every Supervisor surface (contract, seat contract, ROLE_PROMPTS,
+  // bootstraps, Turn-1 kickoff packet law line) carries the card and the gate.
+  const project = { root: "/workspace/repo", slug: "repo" };
+  const input = { seat: "supervisor" as const, home: "/trial", stateDir: "/trial/state", nodePath: process.execPath,
+    path: "/usr/bin", lane: "codex", project };
+  for (const surface of [renderRoleContract("supervisor"), renderSeatContract("supervisor", project), ROLE_PROMPTS.supervisor,
+    renderSeatBootstrapPrompt(input), renderSeatBootstrap(input),
+    buildSeatKickoffPacket({ role: "supervisor", projectSlug: project.slug, projectRoot: project.root, ledgerEvents: [] })]) {
+    assert.match(surface, /4-Line Owner Ratification Card/);
+    assert.match(surface, /1\. Chuyện gì đã lặp lại/);
+    assert.match(surface, /2\. Nguyên nhân gốc/);
+    assert.match(surface, /3\. Nếu duyệt sẽ sửa gì \(Preview diff\)/);
+    assert.match(surface, /4\. Tác dụng/);
+    assert.match(surface, /`<project-root>\/AGENTS\.md` or `<project-root>\/CONTEXT\.md` only after explicit Owner Ratification/);
   }
 });
 

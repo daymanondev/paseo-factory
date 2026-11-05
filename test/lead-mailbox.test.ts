@@ -795,7 +795,13 @@ test("resetProjectMailbox clears in-memory retry and handoff state for the targe
 });
 
 test("drainSupervisorMailbox and drainLeadMailbox prepend the Seat kickoff packet on Turn 1 of each seat agentId and omit it on subsequent turns (v0.0.26, ADR 0016)", async (t) => {
-  const { slug, projectRoot, leadMail, surface, fake } = makeSpooledRuntime(t);
+  const { stateDir, slug, projectRoot, leadMail, surface, fake } = makeSpooledRuntime(t);
+
+  // v0.1.0 (ADR 0048 §3): seed the Per-Project Lead notebook so every Turn-1
+  // packet built from the runtime (not just standalone buildSeatKickoffPacket
+  // callers) carries the slug-dependent path and bounded content.
+  mkdirSync(projectStateDir(stateDir, slug), { recursive: true });
+  writeFileSync(join(projectStateDir(stateDir, slug), "notebook.md"), "## 1. Verification & Run Recipe\n- Gate: npm test\n");
 
   // 1. First Supervisor delivery includes the Seat kickoff packet
   await leadMail.dispatchSupervisor({
@@ -808,6 +814,8 @@ test("drainSupervisorMailbox and drainLeadMailbox prepend the Seat kickoff packe
   const supId = fake.sent[0]!.agentId;
   assert.match(fake.sent[0]!.text, /\[paseo-factory seat kickoff packet · role=supervisor/);
   assert.match(fake.sent[0]!.text, /First Supervisor directive/);
+  assert.match(fake.sent[0]!.text, new RegExp(`- Project notebook path: .*${slug}/notebook\\.md`));
+  assert.match(fake.sent[0]!.text, /## 1\. Verification & Run Recipe/);
 
   // Complete Turn 1 and send Turn 2 to the SAME Supervisor agentId -> kickoff packet is omitted
   await leadMail.onLeadTurnEnded({ agentId: supId, outcome: { kind: "completed" }, timeline: [] });
@@ -832,6 +840,8 @@ test("drainSupervisorMailbox and drainLeadMailbox prepend the Seat kickoff packe
   const leadId = fake.sent[2]!.agentId;
   assert.match(fake.sent[2]!.text, /\[paseo-factory seat kickoff packet · role=lead/);
   assert.match(fake.sent[2]!.text, /First Lead directive/);
+  assert.match(fake.sent[2]!.text, new RegExp(`- Project notebook path: .*${slug}/notebook\\.md`));
+  assert.match(fake.sent[2]!.text, /- Gate: npm test/);
 
   // Complete Turn 1 and send Turn 2 to the SAME Lead agentId -> kickoff packet is omitted
   await leadMail.onLeadTurnEnded({ agentId: leadId, outcome: { kind: "completed" }, timeline: [] });

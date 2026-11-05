@@ -4,6 +4,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { makeTempDir, disposeDir } from "./helpers.ts";
 import { buildSeatKickoffPacket } from "../src/preflight.ts";
+import { projectNotebookPath } from "../src/project.ts";
 import { renderScrumPrompt } from "../src/scrum/prompts.ts";
 import { LEAD_WAVE_LAWS, SUPERVISOR_OUTCOME_BOUNDARY } from "../src/roles-contract.ts";
 import type { LedgerEvent } from "../src/events.ts";
@@ -103,6 +104,59 @@ test('kickoff packet drops only the system-prompt duplicates when omitSystemProm
     for (const line of lean.split('\n')) {
       assert.ok(fullLines.has(line), `line only in the omit packet: ${JSON.stringify(line)}`);
     }
+  }
+});
+
+test('kickoff packet injects the Project notebook path and content for Lead and Supervisor seats, with the clean empty-state placeholder when the notebook is absent (v0.1.0, ADR 0048 §3)', t => {
+  const root = makeTempDir(); disposeDir(t, root);
+  const stateDir = makeTempDir(); disposeDir(t, stateDir);
+  const notebookDir = join(stateDir, "projects", "repo");
+  mkdirSync(notebookDir, { recursive: true });
+  const notebookPath = projectNotebookPath(stateDir, "repo");
+  const packetLines = (packet: string): Set<string> => new Set(packet.split("\n"));
+
+  // stateDir omitted (standalone callers): no notebook lines at all — the
+  // packet stays byte-for-byte backward-compatible.
+  for (const role of ["supervisor", "lead"] as const) {
+    const bare = buildSeatKickoffPacket({ role, projectSlug: "repo", projectRoot: root, ledgerEvents: [] });
+    assert.ok(!bare.includes("Project notebook"), `${role} packet must carry no notebook lines without stateDir`);
+  }
+
+  // stateDir provided, notebook absent: the exact path plus the clean
+  // empty-state placeholder telling the seat when to initialize it.
+  for (const role of ["supervisor", "lead"] as const) {
+    const empty = buildSeatKickoffPacket({ role, projectSlug: "repo", projectRoot: root, ledgerEvents: [], stateDir });
+    const lines = packetLines(empty);
+    assert.ok(lines.has(`- Project notebook path: ${notebookPath}`), `${role} packet carries the slug-dependent notebook path`);
+    assert.ok(
+      lines.has(`- Project notebook (${notebookPath}): (none yet — initialize on first verified Gate or observed failure mechanism)`),
+      `${role} packet carries the empty-state placeholder`,
+    );
+  }
+
+  // stateDir provided, notebook present: the bounded content rides the packet,
+  // and the block survives omitSystemPromptDuplicates (dynamic state, not a
+  // static law) so Turn-1 seats see it even when the packet is deduplicated.
+  const content = [
+    "## 1. Verification & Run Recipe",
+    "- Gate: npm test (cold cache first)",
+    "",
+    "## 2. Recurrence Guard",
+    "- [observed 1x] flaky gate on cold cache — Task (seq 3)",
+  ].join("\n");
+  writeFileSync(join(notebookDir, "notebook.md"), content);
+  for (const role of ["supervisor", "lead"] as const) {
+    const packet = buildSeatKickoffPacket({ role, projectSlug: "repo", projectRoot: root, ledgerEvents: [], stateDir });
+    const lines = packetLines(packet);
+    assert.ok(lines.has(`- Project notebook path: ${notebookPath}`));
+    assert.ok(lines.has(`- Project notebook (${notebookPath}):`), `${role} packet carries the notebook header`);
+    for (const line of content.split("\n")) {
+      assert.ok(lines.has(line), `${role} packet missing notebook line: ${JSON.stringify(line)}`);
+    }
+    const lean = buildSeatKickoffPacket({ role, projectSlug: "repo", projectRoot: root, ledgerEvents: [], stateDir, omitSystemPromptDuplicates: true });
+    const leanLines = packetLines(lean);
+    assert.ok(leanLines.has(`- Project notebook path: ${notebookPath}`), "notebook path survives omitSystemPromptDuplicates");
+    assert.ok(leanLines.has("## 1. Verification & Run Recipe"), "notebook content survives omitSystemPromptDuplicates");
   }
 });
 

@@ -338,6 +338,28 @@ function expandUser(rawPath: string, roots: WritableRoots): string {
   return rawPath;
 }
 
+/**
+ * The state-dir env spellings a seat's shell expands (`$FACTORY_STATE_DIR`,
+ * `${FACTORY_STATE_DIR}`, `$PASEO_FACTORY_STATE_DIR`, `${PASEO_FACTORY_STATE_DIR}`,
+ * each optionally directly behind a `"` — the attached quoted redirection shape)
+ * rewritten onto the literal state dir before judging (v0.1.0, ADR 0048 §3).
+ * Both names are baked into the seat env (`plugin/server/roles.ts`) and the CLI
+ * wrapper (`plugin/server/shell.ts`), so the shell that runs the ask resolves
+ * them while the judge sees the raw spelling — without this rewrite the fenced
+ * write targets hide behind the variable name. Only the seat's own state dir is
+ * ever substituted (no other env name), a longer name that merely contains
+ * these (`$FACTORY_STATE_DIR_BACKUP`) is a different shell variable and stays
+ * untouched, and the file-path judges stay raw: filesystem APIs do not expand
+ * env vars, so a Write/Edit ask naming the spelling is a literal relative path.
+ */
+const STATE_DIR_ENV_PATTERN = /("?)\$(?:\{(FACTORY_STATE_DIR|PASEO_FACTORY_STATE_DIR)\}|(FACTORY_STATE_DIR|PASEO_FACTORY_STATE_DIR)(?![A-Za-z0-9_]))/g;
+
+export function expandStateDirEnv(command: string, stateDir: string): string {
+  const target = stripTrailingSlash(stateDir.trim());
+  if (target === "") return command;
+  return command.replace(STATE_DIR_ENV_PATTERN, (_match, quote: string) => (quote === '"' ? `"${target}` : target));
+}
+
 function withinWritable(rawPath: string, roots: WritableRoots): boolean {
   const expanded = expandUser(rawPath, roots);
   if (!isAbsolute(expanded)) return true; // relative → resolves against the workspace cwd → allowed
@@ -487,12 +509,20 @@ export function isProtectedFactoryStatePath(
   const projectsPrefix = `${resolvedState}/projects`;
   if (resolvedCandidate === projectsPrefix || resolvedCandidate.startsWith(`${resolvedState}/projects/`)) {
     if (resolvedCandidate.endsWith("/lead-handoff.md")) return false;
+    // The Per-Project Lead notebook (v0.1.0, ADR 0048 §3) is a Seat-write-fence-only
+    // allowance: `allowedWorktree === undefined` uniquely marks the seat judges, while
+    // both contracted-Peer judges pass their worktree, so the notebook stays protected
+    // for peers. Exactly `<slug>/notebook.md` — deeper paths stay protected.
+    if (allowedWorktree === undefined && /^[^/]+\/notebook\.md$/.test(resolvedCandidate.slice(projectsPrefix.length + 1))) {
+      return false;
+    }
     if (allowedWorktree !== undefined && allowedWorktree.trim() !== "") {
       const resolvedWt = stripTrailingSlash(resolve(allowedWorktree));
       if (resolvedCandidate === resolvedWt || resolvedCandidate.startsWith(`${resolvedWt}/`)) {
         return false;
       }
-    } else if (/\/projects\/[^/]+\/worktrees\/[^/]+(\/|$)/.test(resolvedCandidate)) {
+    }
+    if (/\/projects\/[^/]+\/worktrees\/[^/]+(\/|$)/.test(resolvedCandidate)) {
       return false;
     }
     return true;
@@ -640,7 +670,8 @@ export function isProcessKillAgainstFactory(command: string): boolean {
  * seat rooted at `projectRoot` (v0.0.23, ADR 0015 §2; v0.0.26, ADR 0016 §3):
  * - Allows `/dev/null`, non-protected `stateDir` paths, and `tmpDirs` (`/tmp`, `os.tmpdir()`, `$TMPDIR`).
  * - Denies protected factory state files (`<stateDir>/ledger.jsonl`, `<stateDir>/correlations.json`,
- *   `<stateDir>/projects/**` outside `<projectStateDir>/worktrees/<task>` and `<projectStateDir>/lead-handoff.md`).
+ *   `<stateDir>/projects/**` outside `<projectStateDir>/worktrees/<task>`, `<projectStateDir>/lead-handoff.md`,
+ *   and `<projectStateDir>/notebook.md`).
  * - Inside `projectRoot`, allows ONLY `AGENTS.md`, `CLAUDE.md`, `CONTEXT.md`,
  *   `GLOSSARY.md`, `.gitignore`, `.worktreeinclude`, `docs/**`, and `.scratch/**`.
  * - Rejects all other paths inside or outside `projectRoot`.
@@ -813,18 +844,21 @@ export function judgeSeatShellCommand(
   stateDir: string,
   tmpDirs: readonly string[] = defaultSeatTmpDirs(),
 ): ChokeDecision {
+  // The seat's shell expands the state-dir env spellings before running — judge
+  // the expanded line so fenced write targets cannot hide behind the variable.
+  const expandedCommand = expandStateDirEnv(command, stateDir);
   // Judged on the WHOLE line (v0.0.84): the co-occurrence prefilter spans
   // segments, so a kill in one segment aimed via a `paseo` word in another
   // denies identically to the contracted-agent judge.
-  if (isProcessKillAgainstFactory(command)) {
+  if (isProcessKillAgainstFactory(expandedCommand)) {
     return { behavior: "deny", rule: "process-kill", reason: PROCESS_KILL_FENCE_MESSAGE };
   }
   // Arbitrary executable stdin can write source without shell redirections.
-  const heredocs = inspectShellHeredocs(command);
+  const heredocs = inspectShellHeredocs(expandedCommand);
   if (heredocs.interpreter || heredocs.commandSubstitution) {
     return { behavior: "deny", rule: "seat-write-fence", reason: SEAT_WRITE_FENCE_MESSAGE };
   }
-  for (const segment of splitShellSegments(command)) {
+  for (const segment of splitShellSegments(expandedCommand)) {
     if (isFactoryCliSegment(segment, projectRoot, stateDir, tmpDirs)) continue;
     const segTokens = shellTokens(segment);
     const s1 = judgeS1(segTokens);
@@ -946,13 +980,18 @@ function judgeMemoryDestination(rawPath: string, fence: MemoryFence): ChokeDecis
  * the memory write fence over the same write destinations (v0.0.14).
  */
 export function judgeShellCommand(command: string, roots: WritableRoots, memory?: MemoryFence): ChokeDecision {
-  if (isProcessKillAgainstFactory(command)) {
+  // Same expansion as the seat judge: the running shell resolves the state-dir
+  // env spellings, so the protected-state fence must judge the expanded line —
+  // otherwise a peer writes `<stateDir>/projects/<slug>/notebook.md` through
+  // the spelling while the literal path denies.
+  const expandedCommand = expandStateDirEnv(command, roots.stateDir);
+  if (isProcessKillAgainstFactory(expandedCommand)) {
     return { behavior: "deny", rule: "process-kill", reason: PROCESS_KILL_FENCE_MESSAGE };
   }
-  if (inspectShellHeredocs(command).commandSubstitution) {
+  if (inspectShellHeredocs(expandedCommand).commandSubstitution) {
     return { behavior: "deny", rule: "seat-write-fence", reason: "Executable command substitution in an expanding heredoc cannot be treated as literal text." };
   }
-  const tokens = shellTokens(stripNonInterpreterHeredocs(command));
+  const tokens = shellTokens(stripNonInterpreterHeredocs(expandedCommand));
   const inIsolatedWorktree =
     (memory?.worktree !== undefined && memory.worktree.trim() !== "") ||
     /\/projects\/[^/]+\/worktrees\/[^/]+(?:\/|$)/.test(roots.workspace);
@@ -961,10 +1000,13 @@ export function judgeShellCommand(command: string, roots: WritableRoots, memory?
   const s2 = judgeS2(tokens, roots);
   if (s2.behavior === "deny") return s2;
   if (roots.stateDir !== "") {
-    for (const dest of extractWriteTargets(command)) {
+    for (const dest of extractWriteTargets(expandedCommand)) {
       const expanded = expandUser(dest, roots);
       const resolvedDest = isAbsolute(expanded) ? resolve(expanded) : resolve(roots.workspace, expanded);
-      if (isProtectedFactoryStatePath(resolvedDest, roots.stateDir)) {
+      // The peer judges always name their worktree (the task's managed worktree,
+      // else the workspace) so `allowedWorktree === undefined` stays the seat
+      // fence's unique marker — the Lead notebook allowance never reaches a peer.
+      if (isProtectedFactoryStatePath(resolvedDest, roots.stateDir, memory?.worktree ?? roots.workspace)) {
         return {
           behavior: "deny",
           rule: "seat-write-fence",
@@ -993,7 +1035,10 @@ export function judgeFilePath(rawPath: string, roots: WritableRoots, memory?: Me
   const normalizedRaw = normalizeMaybeStrippedLeadingSlash(rawPath, [roots.workspace, roots.stateDir, memory?.worktree, memory?.workspace]);
   const expanded = expandUser(normalizedRaw, roots);
   const resolvedDest = isAbsolute(expanded) ? resolve(expanded) : resolve(roots.workspace, expanded);
-  if (roots.stateDir !== "" && isProtectedFactoryStatePath(resolvedDest, roots.stateDir)) {
+  if (
+    roots.stateDir !== "" &&
+    isProtectedFactoryStatePath(resolvedDest, roots.stateDir, memory?.worktree ?? roots.workspace)
+  ) {
     return {
       behavior: "deny",
       rule: "seat-write-fence",

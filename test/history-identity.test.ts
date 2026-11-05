@@ -214,7 +214,12 @@ test("v2 re-contract preserves both epochs' Report and Gate evidence at Attempt 
   assert.equal(firstLog, "first");
   assert.equal(readFileSync(second.gate.outputPath!, "utf8"), "second");
   const corpus = buildRetroDigest(factory.ledger.events, stateDir);
-  const cited = parseRetroProposals(JSON.stringify({ proposals: [{ class: "observation", evidence: [first.gate.seq], pattern: "first epoch", text: "preserved evidence" }] }), corpus.knownSeqs);
+  // Both epochs' gate seqs cited together (the v0.1.0 Recurrence Guard needs
+  // >= 2 distinct seqs — which this test's whole point makes natural).
+  const cited = parseRetroProposals(
+    JSON.stringify({ proposals: [{ class: "observation", evidence: [first.gate.seq, second.gate.seq], pattern: "both epochs", text: "preserved evidence" }] }),
+    corpus.knownSeqs,
+  );
   assert.equal(cited.ok, true, "existing numeric citations still resolve after a new epoch");
 });
 

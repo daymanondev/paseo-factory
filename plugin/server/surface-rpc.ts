@@ -51,7 +51,7 @@ import type { Factory } from "./core/factory.ts";
 import { readLeadMailbox } from "./core/mailbox.ts";
 import { LANE_NAMES, loadLanes, normalizeZcodeRuntimeModelId, parseLane, saveLanes, stripZcodeProviderPrefix, projectLanesPath, listLaneProfiles, getLaneProfile, readLaneProfilesFile, saveLaneProfile, deleteLaneProfile, applyLaneProfile, saveLanesBatch, resetProjectLanes } from "./core/lanes.ts";
 import type { LaneProfile } from "./core/lanes.ts";
-import { listProjectRegistrations, projectStateDir, readProjectRegistration, resolveOrBootstrapProject, resolveProject } from "./core/project.ts";
+import { listProjectRegistrations, projectNotebookPath, projectStateDir, readProjectRegistration, resolveOrBootstrapProject, resolveProject } from "./core/project.ts";
 import type { ProjectResolution } from "./core/project.ts";
 import { hydrateVaultDirect, importVaultSecrets, isLocalCompanionGitSource, loadVaultConfig, probeCompanionGitAccess, probeGhAuth, pullVault, pushVault, readVaultStatus, saveVaultConfig, syncVault } from "./core/vault.ts";
 import type { ImportVaultSecretsInput, SyncVaultOptions, VaultConfig, VaultRunner } from "./core/vault.ts";
@@ -3227,7 +3227,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         }
       }
 
-      // 6. Reset in-memory mailbox state and delete mailbox.jsonl, lead-handoff.md, and stale registration fields while preserving lanes.json.
+      // 6. Reset in-memory mailbox state and delete mailbox.jsonl, lead-handoff.md, notebook.md, and stale registration fields while preserving lanes.json.
       try {
         deps.resetProjectMailbox?.(project.slug);
       } catch {
@@ -3240,6 +3240,13 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       }
       try {
         rmSync(join(projectDir, "lead-handoff.md"), { force: true });
+      } catch {
+        // best-effort
+      }
+      // v0.1.0 (ADR 0048 §3): a full reset wipes the Per-Project Lead notebook
+      // alongside lead-handoff.md so the next wave starts from a clean slate.
+      try {
+        rmSync(projectNotebookPath(deps.stateDir, project.slug), { force: true });
       } catch {
         // best-effort
       }

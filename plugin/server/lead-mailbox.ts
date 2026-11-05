@@ -635,6 +635,10 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       ledgerEvents: projectStreamOf(slug),
       helperMcps: discoverHelperMcps({ stateDir: deps.stateDir, ...(deps.home ? { userHome: resolveVaultUserHome(deps.home) } : {}) }).servers,
       ...(loadedLanes.ok ? { lanes: loadedLanes.lanes } : {}),
+      // v0.1.0 (ADR 0048 §3): every newly created or rotated Supervisor/Lead
+      // Turn-1 packet carries the Project notebook's slug-dependent path and
+      // bounded content so the seat never guesses <projectStateDir>/notebook.md.
+      stateDir: deps.stateDir,
       // v0.0.97 (ADR 0047 §1.2): the seat's config.systemPrompt already carries
       // buildRoleKickoffPrompt(role) — the Turn-1 user message keeps only the
       // dynamic repository preflight facts, never a second copy of the linked

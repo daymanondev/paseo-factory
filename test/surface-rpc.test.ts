@@ -3916,10 +3916,11 @@ test("v0.0.24 (ADR 0015 §5): projectReset wipes a project's ledger events, task
     status: "running",
   });
 
-  // Seed mailbox.jsonl, lead-handoff.md, and extra fields in project.json for projectA.
+  // Seed mailbox.jsonl, lead-handoff.md, notebook.md, and extra fields in project.json for projectA.
   const projectADir = join(stateDir, "projects", projectA.slug);
   enqueueLeadMail(join(projectADir, "mailbox.jsonl"), { from: "owner", kind: "directive", text: "build it" });
   writeFileSync(join(projectADir, "lead-handoff.md"), "# handoff\n");
+  writeFileSync(join(projectADir, "notebook.md"), "## 1. Verification & Run Recipe\n");
   writeProjectRegistration(stateDir, projectA.slug, {
     root: projectA.root,
     rotationState: "handing_over",
@@ -3944,12 +3945,13 @@ test("v0.0.24 (ADR 0015 §5): projectReset wipes a project's ledger events, task
   assert.deepEqual(archivedWorkspaces, ["ws-wt-1"]);
   assert.deepEqual(mailboxResets, [projectA.slug]);
 
-  // Worktree directory, factory/T-RESET-1 branch, report file, mailbox.jsonl, and lead-handoff.md are gone.
+  // Worktree directory, factory/T-RESET-1 branch, report file, mailbox.jsonl, lead-handoff.md, and notebook.md are gone.
   assert.equal(existsSync(wt.path), false, "task worktree directory was removed");
   assert.equal(existsSync(join(projectADir, "worktrees")), false, "worktrees directory was removed");
   assert.equal(existsSync(claimOut.reportPath), false, "report file was removed");
   assert.equal(existsSync(join(projectADir, "mailbox.jsonl")), false, "mailbox.jsonl was removed");
   assert.equal(existsSync(join(projectADir, "lead-handoff.md")), false, "lead-handoff.md was removed");
+  assert.equal(existsSync(join(projectADir, "notebook.md")), false, "notebook.md was removed (v0.1.0, ADR 0048: Project reset wipes the notebook alongside lead-handoff.md)");
 
   // lanes.json is preserved!
   assert.equal(existsSync(projectALanesFile), true, "project lanes.json must be preserved across reset");

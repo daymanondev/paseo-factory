@@ -15,6 +15,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { LEAD_WAVE_LAWS, SUPERVISOR_OUTCOME_BOUNDARY } from "./roles-contract.ts";
+import { projectNotebookPath, readProjectNotebook } from "./project.ts";
 import type { LedgerEvent } from "./events.ts";
 
 export interface SeatKickoffPacketInput {
@@ -24,6 +25,15 @@ export interface SeatKickoffPacketInput {
   ledgerEvents: readonly LedgerEvent[];
   lanes?: Record<string, string>;
   helperMcps?: Array<Pick<HelperMcpServerEntry, "name" | "transport" | "enabled" | "status">>;
+  /**
+   * The factory `stateDir` (v0.1.0, ADR 0048 §3). When present, the packet
+   * carries the Project notebook's slug-dependent path (`- Project notebook
+   * path: …`) plus its bounded content — or the clean empty-state placeholder
+   * when the notebook has not been initialized yet — so `Lead` and
+   * `Supervisor` never guess `<projectStateDir>/notebook.md`. Omitted: no
+   * notebook lines (backward-compatible standalone callers).
+   */
+  stateDir?: string;
   /**
    * Omits the static blocks the seat's `config.systemPrompt` already carries
    * (the `linkedDesignSpecification` block, the helper-MCP roster, and the
@@ -184,6 +194,22 @@ export function buildSeatKickoffPacket(input: SeatKickoffPacketInput): string {
       ? "Fire-and-End-Turn: call `supervisor_dispatch_lead` (or run `factory lead dispatch`) and IMMEDIATELY end your turn — never poll, never sleep, and never edit product source code."
       : "Fire-and-End-Turn: outline the serial-wave roadmap, call `lead_set_contract` then `lead_dispatch_agent` (or `factory contract` + `factory run`) for the current wave only, and IMMEDIATELY end your turn — never poll, never sleep, and never edit product source code on `<project-root>`.";
 
+  // v0.1.0 (ADR 0048 §3): the Project notebook rides the packet as dynamic
+  // state — its slug-dependent path plus the bounded content (or the clean
+  // empty-state placeholder) — placed with the dynamic preflight lines so
+  // `omitSystemPromptDuplicates` keeps it.
+  const notebookLines: string[] = [];
+  if (input.stateDir !== undefined) {
+    const notebookPath = projectNotebookPath(input.stateDir, input.projectSlug);
+    const notebook = readProjectNotebook(input.stateDir, input.projectSlug);
+    notebookLines.push(`- Project notebook path: ${notebookPath}`);
+    notebookLines.push(
+      notebook !== undefined
+        ? `- Project notebook (${notebookPath}):\n${notebook}`
+        : `- Project notebook (${notebookPath}): (none yet — initialize on first verified Gate or observed failure mechanism)`,
+    );
+  }
+
   return [
     `--- [paseo-factory seat kickoff packet · role=${input.role} · project=${input.projectSlug}] ---`,
     `- Workspace: ${input.projectRoot}`,
@@ -194,6 +220,7 @@ export function buildSeatKickoffPacket(input: SeatKickoffPacketInput): string {
     `- Build/Test commands: ${scriptsSummary}`,
     `- Active lanes: ${lanesSummary}`,
     `- Ledger tasks: ${tasksSummary}`,
+    ...notebookLines,
     // ADR 0047 §1.2: a Turn-1 packet prepended to a seat whose
     // `config.systemPrompt` already carries `buildRoleKickoffPrompt(role)`
     // drops the duplicated static blocks — design spec, helper-MCP roster,

@@ -7,7 +7,7 @@
  */
 export { createFactory } from "./factory.ts";
 export type { Factory, FactoryOptions, ContractInput, ClaimInput, ClaimOutcome, AcceptInput, SpawnInput, SpawnDecision, RespawnInput, RespawnDecision, MeterInput } from "./factory.ts";
-export { resolveProject, resolveOrBootstrapProject, ensureGitRepository, projectStateDir, readProjectRegistration, writeProjectRegistration, ensureProjectRegistered, listProjectRegistrations, discoverProjects } from "./project.ts";
+export { resolveProject, resolveOrBootstrapProject, ensureGitRepository, projectStateDir, projectNotebookPath, readProjectNotebook, PROJECT_NOTEBOOK_FILENAME, PROJECT_NOTEBOOK_MAX_LINES, PROJECT_NOTEBOOK_MAX_BYTES, readProjectRegistration, writeProjectRegistration, ensureProjectRegistered, listProjectRegistrations, discoverProjects } from "./project.ts";
 export type { ProjectResolution, BootstrapProjectOptions, BootstrapProjectResolution, DiscoveredProject, ProjectRegistration } from "./project.ts";
 export { resolveClaimedCommit, checkCleanAt, diffBetween, changedFiles, scopeCoversFile, headCommitSync, changesOutsideScope, landTaskWorktree, commitSeatMemoryOnRoot, reapWorktreeProcesses, taskWorktreePath, parseTaskWorktreePath, taskWorktreeBranch, prepareTaskWorktree } from "./workspace.ts";
 export type { CommitResolution, TreeCheck, LandingResult, PrepareTaskWorktreeOptions, PrepareTaskWorktreeResult, WorktreeProcessDependencies } from "./workspace.ts";
@@ -40,8 +40,11 @@ export type {
 } from "./watch.ts";
 export { renderReport } from "./report.ts";
 export {
+  MAX_RETRO_PROPOSALS,
+  MIN_RETRO_EVIDENCE_SEQS,
   buildRetroDigest,
   buildRetroPrompt,
+  buildSeqToTaskMap,
   orderForRatification,
   parseRetroProposals,
   renderRetroFile,
@@ -132,6 +135,7 @@ export {
   SEAT_WRITE_FENCE_MESSAGE,
   isSeatMemoryPathAllowed,
   isSeatMemoryRelativePathAllowed,
+  isProtectedFactoryStatePath,
 } from "./choke.ts";
 export type { ChokeDecision, GitRefusal, WritableRoots, MemoryFence, MemoryFileName } from "./choke.ts";
 export {
