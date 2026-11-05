@@ -66,13 +66,37 @@ test("readProjectNotebook truncates at <= 4096 UTF-8 bytes without splitting a m
   const stateDir = makeTempDir("notebook-bytes-");
   disposeDir(t, stateDir);
   mkdirSync(join(stateDir, "projects", "demo-abc123"), { recursive: true });
-  // "đ" is 2 UTF-8 bytes: 100 lines x 25 chars = 2500 chars = 5000 bytes > 4096.
+  // "đ" is 2 UTF-8 bytes: 100 lines x 25 chars = 2500 chars = 5000 raw bytes — but the
+  // 80-line cap runs FIRST (80 lines = 4079 bytes <= 4096), so this fixture pins the
+  // within-cap early return after the line cap, not the byte-cut branch itself.
   const oversized = Array.from({ length: 100 }, () => "đ".repeat(25)).join("\n");
   writeFileSync(projectNotebookPath(stateDir, "demo-abc123"), oversized);
 
   const read = readProjectNotebook(stateDir, "demo-abc123");
   assert.ok(read !== undefined, "an oversized notebook still reads");
   assert.ok(Buffer.byteLength(read!, "utf8") <= PROJECT_NOTEBOOK_MAX_BYTES, `at most ${PROJECT_NOTEBOOK_MAX_BYTES} bytes, got ${Buffer.byteLength(read!, "utf8")}`);
+  assert.ok(!read!.includes("\uFFFD"), "byte truncation never splits a multi-byte character");
+  assert.ok(read!.endsWith("đ"), "the cut lands on a complete character boundary");
+});
+
+test("readProjectNotebook cuts an <= 80-line notebook that still exceeds 4096 UTF-8 bytes on a character boundary", (t) => {
+  const stateDir = makeTempDir("notebook-bytes-only-");
+  disposeDir(t, stateDir);
+  mkdirSync(join(stateDir, "projects", "demo-abc123"), { recursive: true });
+  // 70 lines x 70 "đ" (2 bytes each) = 9869 UTF-8 bytes — within the 80-line cap, so
+  // ONLY the byte-cut branch can bound it (deleting that branch would return all
+  // 9869 bytes and fail the byte-cap assertion).
+  const withinLines = Array.from({ length: 70 }, () => "đ".repeat(70)).join("\n");
+  assert.ok(withinLines.split("\n").length <= PROJECT_NOTEBOOK_MAX_LINES, "fixture stays within the line cap");
+  assert.ok(Buffer.byteLength(withinLines, "utf8") > PROJECT_NOTEBOOK_MAX_BYTES, "fixture exceeds the byte cap");
+  writeFileSync(projectNotebookPath(stateDir, "demo-abc123"), withinLines);
+
+  const read = readProjectNotebook(stateDir, "demo-abc123");
+  assert.ok(read !== undefined, "an oversized notebook still reads");
+  const readBytes = Buffer.byteLength(read!, "utf8");
+  assert.ok(readBytes <= PROJECT_NOTEBOOK_MAX_BYTES, `at most ${PROJECT_NOTEBOOK_MAX_BYTES} bytes, got ${readBytes}`);
+  assert.ok(readBytes > PROJECT_NOTEBOOK_MAX_BYTES - 8, "the cut sits at the cap, not far below it");
+  assert.ok(withinLines.startsWith(read!), "the byte cut keeps a prefix of the notebook");
   assert.ok(!read!.includes("\uFFFD"), "byte truncation never splits a multi-byte character");
   assert.ok(read!.endsWith("đ"), "the cut lands on a complete character boundary");
 });
