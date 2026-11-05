@@ -615,6 +615,7 @@ test("v0.1.0 (ADR 0048 §4): buildSeqToTaskMap maps every task-carrying seq; ren
   assert.ok(file.includes(`1. Chuyện gì đã lặp lại: three red attempts on one missing export (evidence: ${citations})`), "line 1 carries the effect and the citations");
   assert.ok(file.includes("2. Nguyên nhân gốc: the gate never imports the artifact"), "line 2 carries the root cause");
   assert.ok(file.includes("3. Nếu duyệt sẽ sửa gì (Preview diff): Add a smoke import of the artifact to the gate command."), "line 3 carries the proposal text");
+  assert.ok(file.includes("4. Tác dụng: ends the recurrence — three red attempts on one missing export"), "line 4 states what ratifying prevents (ADR 0048 section 4: the class of failure it ends), never a verbatim repeat of line 3");
   assert.ok(file.includes("- Pattern: the same missing export reaches the gate three times"), "the pattern line stays");
   assert.ok(file.includes("- Proposal: Add a smoke import of the artifact to the gate command."), "the proposal line stays — `parseProposals` keys on it");
 
@@ -631,7 +632,7 @@ test("v0.1.0 (ADR 0048 §4): buildSeqToTaskMap maps every task-carrying seq; ren
   assert.ok(plain.includes(`1. Chuyện gì đã lặp lại: pat (evidence: ${plainCitations})`), "line 1 falls back to the pattern");
   assert.ok(plain.includes("2. Nguyên nhân gốc: pat"), "line 2 falls back to the pattern");
   assert.ok(plain.includes("3. Nếu duyệt sẽ sửa gì (Preview diff): txt"), "line 3 falls back to the text");
-  assert.ok(plain.includes("4. Tác dụng: txt"), "line 4 falls back to the text");
+  assert.ok(plain.includes("4. Tác dụng: ends the recurrence — pat"), "line 4 falls back to the recurrence it ends, so it never duplicates line 3 verbatim");
 });
 
 // ---- the pass through the factory ----------------------------------------------------

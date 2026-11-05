@@ -607,7 +607,9 @@ function citations(evidence: readonly number[], seqToTask?: ReadonlyMap<number, 
  * Since v0.1.0 (ADR 0048 §4) each proposal also carries the 4-Line Owner
  * Ratification card — `1. Chuyện gì đã lặp lại` (the recurring effect, with
  * the Task-resolved citations) → `2. Nguyên nhân gốc` (the causal mechanism)
- * → `3. Nếu duyệt sẽ sửa gì (Preview diff)` (the proposal) → `4. Tác dụng` —
+ * → `3. Nếu duyệt sẽ sửa gì (Preview diff)` (the proposal) → `4. Tác dụng`
+ * (the recurrence ratifying ends — the ADR's "class of failure prevented in
+ * future waves", so line 4 never repeats line 3 verbatim) —
  * so the Owner can ratify or reject in 10 seconds. The Evidence line cites
  * `T-xx (seq N)` via `seqToTask`, falling back to `seq N` for unmapped seqs;
  * the header/`- Proposal:` shapes the ratification path parses are unchanged.
@@ -643,7 +645,7 @@ export function renderRetroFile(input: {
       `1. Chuyện gì đã lặp lại: ${proposal.effect ?? proposal.pattern} (evidence: ${cited})`,
       `2. Nguyên nhân gốc: ${proposal.rootCause ?? proposal.pattern}`,
       `3. Nếu duyệt sẽ sửa gì (Preview diff): ${proposal.text}`,
-      `4. Tác dụng: ${proposal.text}`,
+      `4. Tác dụng: ends the recurrence — ${proposal.effect ?? proposal.pattern}`,
     ].join("\n");
   });
   return `${[...header, "", ...body].join("\n\n")}\n`;
