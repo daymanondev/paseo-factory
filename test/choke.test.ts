@@ -527,6 +527,98 @@ test("choke.onPermissionAsked and resolveSeatAtProjectRoot enforce seat-write-fe
   assert.equal(deniedEvents[1]?.rule, "seat-write-fence");
 });
 
+test("the Layer-2 write-tool vocabulary covers ZCode's DeleteFile and NotebookEdit — judged by the seat-write-fence exactly like Edit (v0.0.94, ADR 0046 Decision 5.1 Layer 2)", async (t) => {
+  const dir = makeTempDir("choke-zcode-vocab-");
+  disposeDir(t, dir);
+  const workspace = join(dir, "ws");
+  const stateDir = join(dir, "state");
+  mkdirSync(workspace, { recursive: true });
+  writeFileSync(join(workspace, "probe.txt"), "x\n");
+  gitCommitAll(workspace, "base");
+
+  const factory = createFactory({ stateDir });
+  const choke = createChoke({ factory, homeDir: "/fake-home" });
+  const sent: { agentId: string; requestId: string; response: AgentPermissionResponse }[] = [];
+  const paseo: PaseoResponderApi = {
+    agents: {
+      ref(agentId: string) {
+        return {
+          async respondToPermission({ requestId, response }) {
+            sent.push({ agentId, requestId, response });
+          },
+        };
+      },
+    },
+  };
+  const askSeat = async (id: string, request: Omit<AgentPermissionRequest, "id" | "provider">) => {
+    await choke.onPermissionAsked(
+      {
+        agent: { id: "supervisor-1", cwd: workspace, labels: { seat: "supervisor", project: "ws" } },
+        request: { id, provider: "zcode", ...request },
+      },
+      paseo,
+    );
+    return sent.at(-1)!;
+  };
+
+  // 1. A path-carrying DeleteFile/NotebookEdit ask hits the seat-write-fence
+  //    decision path exactly like Edit: product-source writes denied with the
+  //    seat-write-fence rule, memory-whitelist writes allowed.
+  const delDenied = await askSeat("z-del-1", {
+    name: "DeleteFile",
+    kind: "tool",
+    detail: { type: "write", filePath: "src/GameStore.ts" },
+  });
+  assert.equal(delDenied.response.behavior, "deny", "DeleteFile on product source is denied");
+  if (delDenied.response.behavior === "deny") {
+    assert.match(delDenied.response.message ?? "", /Seat write fence/);
+  }
+  const nbDenied = await askSeat("z-nb-1", {
+    name: "NotebookEdit",
+    kind: "tool",
+    input: { path: "package.json" },
+  });
+  assert.equal(nbDenied.response.behavior, "deny", "NotebookEdit on package.json is denied");
+  if (nbDenied.response.behavior === "deny") {
+    assert.match(nbDenied.response.message ?? "", /Seat write fence/);
+  }
+  const delAllowed = await askSeat("z-del-2", {
+    name: "DeleteFile",
+    kind: "tool",
+    detail: { type: "write", filePath: "CONTEXT.md" },
+  });
+  assert.equal(delAllowed.response.behavior, "allow", "DeleteFile inside the memory whitelist is allowed like any seat write");
+
+  // 2. The vocabulary itself: an ask whose only "path" is the tool NAME (an
+  //    echo of the ask shape with no structured paths) is treated exactly like
+  //    the Edit twin — the tool name is a write-tool placeholder, never a file
+  //    target, so the judge never records a phantom seat-write-fence denial.
+  const behaviors = new Map<string, string>();
+  for (const [name, type] of [["Edit", "edit"], ["DeleteFile", "write"], ["NotebookEdit", "edit"]] as const) {
+    const res = await askSeat(`z-echo-${name}`, {
+      name,
+      kind: "tool",
+      detail: { type, filePath: name },
+    });
+    behaviors.set(name, res.response.behavior);
+  }
+  assert.deepEqual(
+    behaviors.get("DeleteFile"),
+    behaviors.get("Edit"),
+    "DeleteFile's name-echo ask is judged exactly like Edit's — a write-tool name is never a file path",
+  );
+  assert.deepEqual(
+    behaviors.get("NotebookEdit"),
+    behaviors.get("Edit"),
+    "NotebookEdit's name-echo ask is judged exactly like Edit's — a write-tool name is never a file path",
+  );
+  assert.equal(behaviors.get("Edit"), "allow", "the Edit twin carries no file target and no shell line — the pre-existing default");
+  const phantom = factory.ledger.events.filter(
+    (e) => e.event === "permit_denied" && (e.command === "DeleteFile" || e.command === "NotebookEdit"),
+  );
+  assert.equal(phantom.length, 0, "no phantom seat-write-fence denial records the tool name as a file target");
+});
+
 test("Seam 3 (v0.0.89, ADR 0045 §3): allowed Supervisor, Lead, and dispatcher seat asks answer allow() with ZERO permit_allowed lines — seats are deny-only in the Ledger", async (t) => {
   const dir = makeTempDir("choke-seat-deny-only-");
   disposeDir(t, dir);
@@ -1285,6 +1377,42 @@ test("Seam 2: a factory-supervisor create rewrites onto Project A's supervisor p
   );
   assert.equal(agyInA.config.provider, "antigravity");
   assert.equal((agyInA.config as { model?: string }).model, "gemini-3.1-pro-high");
+});
+
+test("a zcode lane's seat rewrite carries the runtime model id — bare GLM-5.3 never reaches the daemon (v0.0.94, ADR 0046 Gap 2)", (t) => {
+  const dir = makeTempDir("choke-zcode-model-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const project = join(dir, "project-z");
+  mkdirSync(project, { recursive: true });
+  writeProjectRegistration(stateDir, "project-z-333333", { root: project });
+  // The user-facing lane syntax stays clean (`zcode/GLM-5.3:high`); the daemon
+  // must receive the id zcode-acp-server advertises, because Paseo's
+  // `setModelWithSelection` validates `option.options.some(c => c.value === modelId)`
+  // client-side before the RPC.
+  saveLanes(stateDir, { supervisor: "zcode/GLM-5.3:high", lead: "zcode/GLM-5.3-Flash:medium", worker: "zcode/GLM-5.3:high" }, "project-z-333333");
+
+  const sup = normalizeAgentCreateRequest(
+    { config: { provider: "factory-supervisor", cwd: project, title: "Ship the game" } },
+    stateDir,
+  );
+  assert.equal(sup.config.provider, "zcode", "the zcode base provider id rides the rewrite");
+  assert.equal((sup.config as { model?: string }).model, "builtin:zai-coding-plan\\GLM-5.3", "the bare lane model is normalized to the runtime id");
+  assert.equal(sup.config.thinkingOptionId, "high", "the lane's effort suffix maps onto thinkingOptionId");
+
+  const lead = normalizeAgentCreateRequest({ config: { provider: "factory-lead", cwd: project } }, stateDir);
+  assert.equal(lead.config.provider, "zcode");
+  assert.equal((lead.config as { model?: string }).model, "builtin:zai-coding-plan\\GLM-5.3-Flash");
+  assert.equal(lead.config.thinkingOptionId, "medium");
+
+  // An explicit "<providerId>\<modelId>" lane passes through verbatim — never
+  // double-prefixed (the `:high` suffix keeps parseLane's last-colon split on
+  // the model side).
+  saveLanes(stateDir, { supervisor: "zcode/builtin:zai-coding-plan\\GLM-5.3:high" }, "project-z-333333");
+  const explicit = normalizeAgentCreateRequest({ config: { provider: "factory-supervisor", cwd: project } }, stateDir);
+  assert.equal(explicit.config.provider, "zcode");
+  assert.equal((explicit.config as { model?: string }).model, "builtin:zai-coding-plan\\GLM-5.3", "an explicit runtime id is never rewritten");
+  assert.equal(explicit.config.thinkingOptionId, "high");
 });
 
 

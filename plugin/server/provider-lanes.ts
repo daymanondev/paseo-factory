@@ -1,5 +1,5 @@
 /** The mode-aware lane and provider configuration shared by create and permission hooks. */
-import { loadLanes, parseLane } from "./core/lanes.ts";
+import { loadLanes, normalizeZcodeRuntimeModelId, parseLane } from "./core/lanes.ts";
 import {
   resolveScrumIdentity,
   scrumIdentityLane,
@@ -67,8 +67,15 @@ export function laneProviderConfig(
           !providers?.some((p) => (p.provider ?? p.id) === "agy")
         ? "antigravity"
         : lane.provider;
+  // A zcode lane's clean model name (`GLM-5.3`) resolves onto the runtime id
+  // `zcode-acp-server` advertises (`builtin:zai-coding-plan\GLM-5.3`) — the id
+  // Paseo's `setModelWithSelection` validates client-side (v0.0.94, ADR 0046
+  // Gap 2); an explicit `"<providerId>\<modelId>"` passes through verbatim.
+  // The provider itself needs no alias — the registered base entry is `zcode`.
+  const model =
+    lane.provider === "zcode" ? normalizeZcodeRuntimeModelId(lane.model) : lane.model;
   const options = (
-    findCatalogModelMeta(provider, lane.model, providers) ??
+    findCatalogModelMeta(provider, model, providers) ??
     findCatalogModelMeta(lane.provider, lane.model, providers)
   )?.thinkingOptions;
   const supportsThinking =
@@ -76,7 +83,7 @@ export function laneProviderConfig(
     (options == null || options.some((o) => o.id === lane.thinking));
   return {
     provider,
-    model: lane.model,
+    model,
     ...(supportsThinking ? { thinkingOptionId: lane.thinking } : {}),
   };
 }

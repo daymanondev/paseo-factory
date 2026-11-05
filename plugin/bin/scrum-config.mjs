@@ -1163,6 +1163,13 @@ var ROLE_PROMPTS = {
   agent: renderRoleAppendSystem("agent")
 };
 
+// src/zcode-home.ts
+var ROLE_PROMPTS2 = {
+  supervisor: renderRoleAppendSystem("supervisor"),
+  lead: renderRoleAppendSystem("lead"),
+  agent: renderRoleAppendSystem("agent")
+};
+
 // src/lanes.ts
 var LANE_NAMES = ["supervisor", "lead", "worker", "watch", "retro", "freshEyes"];
 var DEFAULT_LANE = "pi/zai/glm-5.3";
@@ -1201,6 +1208,33 @@ function laneError(name, value) {
   }
   return void 0;
 }
+var ZCODE_OFFICIAL_GLM_MODEL_IDS = [
+  "GLM-5.3",
+  "GLM-5.3-Flash",
+  "GLM-5V-Turbo",
+  "GLM-5.2",
+  "GLM-5.1",
+  "GLM-5.1-Highspeed",
+  "GLM-5",
+  "GLM-5-Turbo",
+  "GLM-4.7",
+  "GLM-4.7-FlashX",
+  "GLM-4.7-Flash",
+  "GLM-4.6",
+  "GLM-4.5-Air",
+  "GLM-4.5",
+  "GLM-4.6V",
+  "GLM-4.6V-Flash",
+  "GLM-4.6V-FlashX",
+  "GLM-4.1V-Thinking-FlashX",
+  "GLM-4.1V-Thinking-Flash",
+  "GLM-4-FlashX-250414",
+  "GLM-4-Flash-250414",
+  "GLM-4V-Flash"
+];
+var CANONICAL_ZCODE_MODEL_ID = new Map(
+  ZCODE_OFFICIAL_GLM_MODEL_IDS.map((id) => [id.toLowerCase(), id])
+);
 function lanesEntries(path) {
   let raw;
   try {

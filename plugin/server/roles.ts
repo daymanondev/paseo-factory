@@ -14,8 +14,8 @@ import { SCRUM_PROMPT_MARK, SCRUM_ROLE_TITLES, renderScrumPrompt } from "./core/
  * v0.0.27, ADR 0017 §2): additive injection of the `Supervisor`, `Lead`, and
  * working-`Agent` role contracts, `Correlation token` issuance/association,
  * `paseo_factory` MCP bridge wiring, Layer-1 provider execution fences across
- * all 7 providers (`opencode`, `claude`, `codex`, `pi`, `copilot`, `omp`,
- * `antigravity`), and deterministic seat recognition by native role provider
+ * all 8 providers (`opencode`, `claude`, `codex`, `pi`, `copilot`, `omp`,
+ * `antigravity`, `zcode`), and deterministic seat recognition by native role provider
  * id (`factory-supervisor`, `factory-lead`, `factory-peer`).
  */
 import { existsSync, mkdirSync } from "node:fs";
@@ -26,6 +26,7 @@ import { CorrelationRegistry } from "./core/correlations.ts";
 import { parseLane } from "./core/lanes.ts";
 import { resolveOrBootstrapProject, resolveProject } from "./core/project.ts";
 import { provisionPiAgentHome } from "./core/pi-home.ts";
+import { provisionZcodeHome } from "./core/zcode-home.ts";
 import {
   FOOTER_MARK,
   ROLE_SKILL_INDEX,
@@ -129,10 +130,21 @@ export function formatPeerWorkspaceTitle(task: string, description?: string): st
  * working agent runs inside the clean room instead of the operator's global
  * `~/.pi/agent`. `userHome` overrides the operator home the shared-state
  * symlinks point back at (default `<homedir()>`; hermetic tests pass a fake).
+ *
+ * Since v0.0.94 (ADR 0046 Decision 4/5.1) this is also the channel a zcode
+ * seat's clean-room env rides: when the seat's effective family resolves to
+ * `zcode` (same resolution the Layer-1 fence keys on, `provider` carrying the
+ * request's provider id), `provisionZcodeHome`'s `ZCODE_*` record —
+ * `ZCODE_STORAGE_DIR`, `ZCODE_SESSION_DB_PATH`, the guarded mode, and the
+ * supervisor/lead `ZCODE_DISALLOWED_TOOLS` tool lock — merges here. The env
+ * rides this top-level env channel, never `config.providerOptions`, because
+ * it is what Paseo forwards to the `zcode-acp-server` child process, and
+ * because this seam re-applies on every session open — the clean room
+ * survives relaunches, not just the create.
  */
 export function factoryEnvFor(
   role: RoleName,
-  input: { stateDir: string; project: ProjectIdentity; task?: string; correlationId?: string; userHome?: string; execution?: ScrumHarnessIdentity | null; environment?: Record<string, string> },
+  input: { stateDir: string; project: ProjectIdentity; task?: string; correlationId?: string; userHome?: string; execution?: ScrumHarnessIdentity | null; environment?: Record<string, string>; provider?: string },
 ): Record<string, string> {
   ensureFactoryBinScripts(input.stateDir);
   const environment = restoreLegacyUiEnvironment({ ...process.env, ...input.environment });
@@ -155,6 +167,20 @@ export function factoryEnvFor(
   if (input.task !== undefined) env.PASEO_FACTORY_TASK = input.task;
   if (input.correlationId !== undefined && input.correlationId !== "") {
     env.PASEO_FACTORY_CORRELATION = input.correlationId;
+  }
+  // The zcode clean-room twin (v0.0.94, ADR 0046 Decision 4): the same
+  // effective-family resolution the Layer-1 fence keys on decides whether the
+  // seat's `ZCODE_*` storage env rides — a factory provider resolves through
+  // the role's Lane config, a raw provider through its own family — so the
+  // config fence and the child env can never disagree on the harness.
+  if (resolveEffectiveProviderFamily(input.provider, role, input.stateDir, input.project.slug, input.task) === "zcode") {
+    Object.assign(env, provisionZcodeHome({
+      stateDir: input.stateDir,
+      role,
+      projectSlug: input.project.slug,
+      ...(input.task !== undefined ? { task: input.task } : {}),
+      ...(input.userHome !== undefined ? { userHome: input.userHome } : {}),
+    }));
   }
   return env;
 }
@@ -283,8 +309,8 @@ export function resolveEffectiveProviderFamily(
 
 /**
  * Applies the Layer-1 provider execution fence and `paseo_factory` MCP server
- * config on `agent.create` across all 7 provider families (`opencode`,
- * `claude`, `codex`, `pi`, `copilot`, `omp`, `antigravity`).
+ * config on `agent.create` across all 8 provider families (`opencode`,
+ * `claude`, `codex`, `pi`, `copilot`, `omp`, `antigravity`, `zcode`).
  */
 export function applyProviderExecutionFence<T extends AgentCreateRequest["config"]>(
   config: T,
@@ -442,6 +468,22 @@ export function applyProviderExecutionFence<T extends AgentCreateRequest["config
           ? "https://agentclientprotocol.com/protocol/session-modes#plan"
           : "https://agentclientprotocol.com/protocol/session-modes#agent";
     }
+  } else if (providerFamily === "zcode") {
+    // Layer 1 (v0.0.94, ADR 0046 Decision 5.1): guarded mode + auto_accept
+    // off routes every Write/Edit/MultiEdit/NotebookEdit/DeleteFile and Bash
+    // ask through `interaction/requestPermission` into the choke (Layer 2).
+    // The supervisor/lead write-tool lock itself rides ZCODE_DISALLOWED_TOOLS
+    // in the clean-room env (`factoryEnvFor` → `provisionZcodeHome`) — the
+    // channel zcode-acp-server forwards into `session/create`'s toolDenylist;
+    // the config carries no equivalent field.
+    if (role === "supervisor" || role === "lead") {
+      nextConfig.featureValues = { ...existingFeatures, auto_accept: false };
+      nextConfig.modeId = "guarded";
+    } else if (role === "agent") {
+      // A contracted Peer keeps its write tools — its asks route into the
+      // choke, which auto-allows safe worktree edits and blocks the rest.
+      nextConfig.featureValues = { ...existingFeatures, auto_accept: false };
+    }
   } else if (providerFamily === "omp") {
     if (role === "supervisor" || role === "lead") {
       nextConfig.modeId = "write";
@@ -556,7 +598,7 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
           providerFamily: execution === undefined ? resolveEffectiveProviderFamily(request.config.provider, "agent", stateDir, worktree.slug) : providerFamilyOf(scrumIdentityLane(stateDir, worktree.slug, "agent", execution)),
         },
       );
-      const taskEnv = factoryEnvFor("agent", { stateDir, project: { root: projectRoot, slug: worktree.slug }, task: worktree.task, correlationId: issued.correlationId, userHome, environment: request.env });
+      const taskEnv = factoryEnvFor("agent", { stateDir, project: { root: projectRoot, slug: worktree.slug }, task: worktree.task, correlationId: issued.correlationId, userHome, provider: request.config.provider, environment: request.env });
       return sanitizeAgentCreateHookResult({
         config: execution === undefined ? fencedConfig : scopeScrumCapabilities(fencedConfig, "agent", execution, taskEnv.PI_CODING_AGENT_DIR, { projectRoot, configuredPacks: readExecution(stateDir, worktree.slug).skillPacks, userHome }),
         env: {
@@ -619,7 +661,7 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
     config: execution === undefined ? fencedConfig : scopeScrumCapabilities(fencedConfig, role, execution, undefined, { projectRoot: projectIdentity.root, configuredPacks: readExecution(stateDir, projectIdentity.slug).skillPacks, userHome }),
     env: {
       ...(request.env ?? {}),
-      ...factoryEnvFor(role, { stateDir, project: projectIdentity, correlationId: issued.correlationId, userHome, environment: request.env }),
+      ...factoryEnvFor(role, { stateDir, project: projectIdentity, correlationId: issued.correlationId, userHome, provider: request.config.provider, environment: request.env }),
     },
   }) as R;
 }
@@ -757,6 +799,7 @@ export function injectSessionEnv<
             execution: associated.execution ?? null,
             correlationId: associated.correlationId,
             userHome,
+            provider: request.provider ?? undefined,
             environment: request.env,
           }),
         },
@@ -807,6 +850,7 @@ export function injectSessionEnv<
           task: worktree.task,
           correlationId: record?.correlationId,
           userHome,
+          provider: request.provider ?? undefined,
           environment: request.env,
         }),
       },
@@ -839,6 +883,7 @@ export function injectSessionEnv<
           project: registration,
           correlationId: record?.correlationId,
           userHome,
+          provider: request.provider ?? undefined,
           environment: request.env,
         }),
       },
@@ -888,6 +933,7 @@ export function injectSessionEnv<
             project,
             correlationId: record?.correlationId,
             userHome,
+            provider: request.provider ?? undefined,
             environment: request.env,
           }),
         },

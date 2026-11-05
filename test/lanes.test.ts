@@ -13,6 +13,7 @@ import {
   laneCliInvocation,
   laneError,
   laneProfilesPath,
+  normalizeZcodeRuntimeModelId,
   lanesPath,
   listLaneProfiles,
   loadLanes,
@@ -23,6 +24,7 @@ import {
   saveLaneProfile,
   saveLanes,
   saveLanesBatch,
+  stripZcodeProviderPrefix,
 } from "../src/lanes.ts";
 import type { LaneCliRunner, LaneProfile, LaneProfilesFile } from "../src/lanes.ts";
 import { resolveEyeLane } from "../src/fresh-eyes.ts";
@@ -588,6 +590,132 @@ test("an opencode lane completes the Watch, the Retro, and the Fresh-eyes CLI pa
   assert.deepEqual(eyeFake.calls[0]!.args, expectedArgs);
   assert.equal(eyeFake.calls[0]!.env?.OPENCODE_CONFIG_CONTENT, core.TOOLLESS_OPENCODE_CONFIG);
   assert.equal(eyeFake.calls[0]!.env?.CI, "1");
+});
+
+// ---- the zcode family (v0.0.94, ADR 0046 §2) — clean lanes, runtime ids -------------------
+
+test("zcode lanes parse provider/model[:effort] with no parser change — the clean user-facing form", () => {
+  assert.deepEqual(parseLane("zcode/GLM-5.3:high"), { provider: "zcode", model: "GLM-5.3", thinking: "high" });
+  assert.deepEqual(parseLane("zcode/GLM-5.3-Flash:medium"), { provider: "zcode", model: "GLM-5.3-Flash", thinking: "medium" });
+  assert.deepEqual(parseLane("zcode/GLM-5.3"), { provider: "zcode", model: "GLM-5.3" });
+  assert.equal(laneError("worker", "zcode/GLM-5.3:max"), undefined, "the zcode lane validates like every other family");
+});
+
+test("normalizeZcodeRuntimeModelId prefixes bare GLM names with canonical registry casing and preserves explicit provider\\model verbatim", () => {
+  assert.equal(normalizeZcodeRuntimeModelId("GLM-5.3"), "builtin:zai-coding-plan\\GLM-5.3", "the spec's canonical example (ADR 0046 Gap 2)");
+  assert.equal(normalizeZcodeRuntimeModelId("GLM-5.3-Flash"), "builtin:zai-coding-plan\\GLM-5.3-Flash");
+  assert.equal(normalizeZcodeRuntimeModelId("glm-5.3"), "builtin:zai-coding-plan\\GLM-5.3", "a case-variant bare name canonicalizes — spec §2 maps both GLM-5.3 and glm-5.3 onto builtin:zai-coding-plan\\GLM-5.3, and the runtime's registry lookup (a case-sensitive Map keyed by the canonical spellings) would reject the lowercase id");
+  assert.equal(normalizeZcodeRuntimeModelId("glm-5.3-flash"), "builtin:zai-coding-plan\\GLM-5.3-Flash", "suffix casing canonicalizes too");
+  assert.equal(normalizeZcodeRuntimeModelId("glm-6-pro"), "builtin:zai-coding-plan\\glm-6-pro", "an unrecognized name passes through verbatim — the runtime's own ?? fallback; only the official table's lowercase keys map");
+  assert.equal(normalizeZcodeRuntimeModelId("builtin:zai-coding-plan\\GLM-5.3"), "builtin:zai-coding-plan\\GLM-5.3", "an explicit builtin runtime id passes through verbatim");
+  assert.equal(normalizeZcodeRuntimeModelId("custom:cliproxyapi\\GLM-5.3"), "custom:cliproxyapi\\GLM-5.3", "a custom provider prefix is preserved too — never rewritten");
+});
+
+test("stripZcodeProviderPrefix is the display-direction twin and round-trips with normalize", () => {
+  assert.equal(stripZcodeProviderPrefix("builtin:zai-coding-plan\\GLM-5.3"), "GLM-5.3");
+  assert.equal(stripZcodeProviderPrefix("custom:cliproxyapi\\GLM-5.3"), "GLM-5.3", "any provider prefix strips — the label shows the model alone");
+  assert.equal(stripZcodeProviderPrefix("GLM-5.3"), "GLM-5.3", "a bare name strips to itself");
+  for (const bare of ["GLM-5.3", "GLM-5.3-Flash"]) {
+    assert.equal(stripZcodeProviderPrefix(normalizeZcodeRuntimeModelId(bare)), bare, `normalize → strip round-trips ${bare}`);
+  }
+  assert.equal(stripZcodeProviderPrefix(normalizeZcodeRuntimeModelId("glm-5.3")), "GLM-5.3", "normalize → strip lands on the canonical spelling — the case variant canonicalizes on the way in, deliberately");
+  assert.equal(
+    normalizeZcodeRuntimeModelId(stripZcodeProviderPrefix("builtin:zai-coding-plan\\GLM-5.3")),
+    "builtin:zai-coding-plan\\GLM-5.3",
+    "strip → normalize round-trips a runtime id",
+  );
+});
+
+test("zcode/<model> maps to the installed zcode.cjs headless argv — JSON output, prompt on -p, one argv for every effort", () => {
+  assert.deepEqual(laneCliInvocation("zcode/GLM-5.3"), {
+    command: "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
+    args: ["--json", "-p"],
+  });
+  // One argv for every effort suffix, deliberately: the installed CLI
+  // (0.17.1, verified against the binary) has no thinking flag — `--thinking`
+  // is an unknown option — so the headless pass runs at the model's default
+  // effort and the lane's effort rides the ACP path (`thinkingOptionId`)
+  // alone (owner decision on the spec §2 errata).
+  assert.deepEqual(laneCliInvocation("zcode/GLM-5.3:high")?.args, ["--json", "-p"]);
+  assert.deepEqual(laneCliInvocation("zcode/GLM-5.3-Flash:medium")?.args, ["--json", "-p"]);
+  // The absolute path is what keeps laneCliAvailable's `<command> --version`
+  // probe honest: a missing install fails to spawn → probe non-zero →
+  // unavailable, the intended fail-fast.
+  assert.equal(laneCliInvocation("zcode/GLM-5.3")?.command.startsWith("/Applications/"), true);
+});
+
+test("runLaneCli on a zcode lane rides -p argv, NODE_OPTIONS IPv4, and the clean-room headless ZCODE_* env", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const stateDir = join(dir, "factory");
+  const fake = fakeLaneRunner(() => ({ code: 0, stdout: "answer" }));
+
+  const result = await runLaneCli({
+    lane: "zcode/GLM-5.3:high",
+    stdin: "the prompt",
+    timeoutMs: 5_000,
+    runner: fake.runner,
+    stateDir,
+    userHome: join(dir, "user-home"),
+  });
+  assert.ok(result.ok);
+  assert.equal(result.stdout, "answer");
+  const call = fake.calls[0]!;
+  assert.equal(call.command, "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs");
+  assert.deepEqual(call.args, ["--json", "-p", "the prompt"], "the prompt rides -p argv — the CLI's documented <text> form");
+  assert.equal(call.stdin, "the prompt", "the runner contract still delivers the prompt on stdin");
+  const headless = join(stateDir, "zcode-home", "headless");
+  assert.equal(call.env?.ZCODE_STORAGE_DIR, headless, "the clean-room headless seat (ticket 01's provisioner)");
+  assert.equal(call.env?.ZCODE_SESSION_DB_PATH, join(headless, "db", "db.sqlite"), "per-seat SQLite isolation");
+  assert.equal(call.env?.ZCODE_DYNAMIC_WORKFLOW_MODE, "disabled");
+  assert.equal(call.env?.ZCODE_ACP_QUOTA_AUTO_RESUME, "0");
+  assert.equal(call.env?.ZCODE_ACP_QUOTA_BOOT_NOTICE, "0");
+  assert.equal(call.env?.ZCODE_ACP_MODE, "guarded");
+  assert.equal(call.env?.ZCODE_DISALLOWED_TOOLS, undefined, "the write-tool lock is a supervisor/lead concern — headless carries none");
+  assert.equal(call.env?.HOME, undefined, "the real HOME is never replaced (ADR 0046 Gap 4 — credential decryption)");
+  assert.equal(call.env?.ZCODE_HOME, undefined, "ZCODE_HOME is never replaced either");
+  assert.match(call.env?.NODE_OPTIONS ?? "", /--no-network-family-autoselection/, "IPv4 prioritization rides NODE_OPTIONS");
+  assert.match(call.env?.NODE_OPTIONS ?? "", /--dns-result-order=ipv4first/);
+  assert.equal(fake.calls.length, 1);
+
+  // An inherited NODE_OPTIONS is appended to, never clobbered — and a second
+  // pass finds the same clean room in the same state (idempotent provision).
+  const inherited = process.env.NODE_OPTIONS;
+  process.env.NODE_OPTIONS = "--max-old-space-size=4096";
+  try {
+    const merged = await runLaneCli({
+      lane: "zcode/GLM-5.3",
+      stdin: "p",
+      timeoutMs: 5_000,
+      runner: fake.runner,
+      stateDir,
+      userHome: join(dir, "user-home"),
+    });
+    assert.ok(merged.ok);
+    assert.equal(fake.calls[1]!.env?.NODE_OPTIONS, "--max-old-space-size=4096 --no-network-family-autoselection --dns-result-order=ipv4first");
+    assert.equal(fake.calls[1]!.env?.ZCODE_STORAGE_DIR, headless, "re-provision lands on the same headless home");
+  } finally {
+    if (inherited === undefined) delete process.env.NODE_OPTIONS;
+    else process.env.NODE_OPTIONS = inherited;
+  }
+
+  // A zcode caller without a stateDir inherits the parent env, exactly like pi.
+  const noState = fakeLaneRunner(() => ({ code: 0, stdout: "a" }));
+  const bare = await runLaneCli({ lane: "zcode/GLM-5.3", stdin: "p", timeoutMs: 5_000, runner: noState.runner });
+  assert.ok(bare.ok);
+  assert.equal(noState.calls[0]!.env, undefined, "no stateDir → the parent env stands, exactly like a pi caller without one");
+
+  // Non-zcode lanes never carry the ZCODE_* env or the NODE_OPTIONS override.
+  const other = fakeLaneRunner(() => ({ code: 0, stdout: "a" }));
+  const copilot = await runLaneCli({ lane: "copilot/gpt-5.4", stdin: "p", timeoutMs: 5_000, runner: other.runner, stateDir });
+  assert.ok(copilot.ok);
+  assert.equal(other.calls[0]!.env?.ZCODE_STORAGE_DIR, undefined);
+  assert.equal(other.calls[0]!.env?.NODE_OPTIONS, undefined);
+
+  // The unknown-lane refusal now names zcode among the usable forms.
+  const unknown = await runLaneCli({ lane: "codex/gpt-6", stdin: "p", timeoutMs: 5_000 });
+  assert.ok(!unknown.ok);
+  assert.match(unknown.error, /zcode\/<model>/);
 });
 
 // ---- the CLI-side mirror (ADR 0004: CLIs import no src/ code) ----------------------------
