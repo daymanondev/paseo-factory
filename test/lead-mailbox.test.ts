@@ -13,7 +13,7 @@ import type { FactoryRegistry } from "../plugin/server/projects.ts";
 import { createSurfaceHandlers } from "../plugin/server/surface-rpc.ts";
 import type { SurfaceDaemonApi } from "../plugin/server/surface-rpc.ts";
 import { handleSpoolRequest, parseSpoolRequest, spoolRootFor, startSpool } from "../plugin/server/spool.ts";
-import { createLeadMailRuntime, HANDOFF_EXTRACTION_TIMEOUT_MS, isBlockedByAttention, LEAD_HANDOFF_MAX_BYTES } from "../plugin/server/lead-mailbox.ts";
+import { createLeadMailRuntime, HANDOFF_EXTRACTION_MAX_SENDS, HANDOFF_EXTRACTION_TIMEOUT_MS, isBlockedByAttention, LEAD_HANDOFF_MAX_BYTES } from "../plugin/server/lead-mailbox.ts";
 import { disposeDir, gitCommitAll, makeTempDir } from "./helpers.ts";
 
 const POLL_MS = 20;
@@ -1287,6 +1287,9 @@ test("Fuse 2: handing_over timeout (via scheduled timer and via pumpProjectLead)
     await leadMail.onLeadTurnEnded({ agentId: "agent-lead-stuck", outcome: { kind: "completed" }, timeline: [] });
     assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "handing_over");
     assert.equal(fake.sent.filter((s) => s.agentId === "agent-lead-stuck").length, 1, "extraction prompt was sent");
+    // v0.2.2 (ADR 0050 Decision 3): the elapsed fuse trips only over a Lead
+    // still `running` (a genuinely hung extraction stream) — the stuck shape.
+    lead.status = "running";
 
     // Enqueue mail while stuck in handing_over (without pumping after timeout — the scheduled timer alone must trip)
     await leadMail.enqueueLeadMail(slug, { from: "supervisor", kind: "directive", text: "Held mail drained by timer fuse" });
@@ -1390,6 +1393,334 @@ test("Fuse 2: handing_over timeout (via scheduled timer and via pumpProjectLead)
     assert.equal(successorSends.length, 1);
     assert.match(successorSends[0]!.text, /# Fresh Handoff Written Before Timeout\nRoadmap intact\./);
   }
+});
+
+test("a canceled extraction turn keeps handing_over — no archive, no successor, mail stays queued — and the next pump re-sends the fixed extraction prompt (v0.2.2, ADR 0050 Decision 2)", async (t) => {
+  const lead: FakeAgent = {
+    id: "agent-lead-stopped",
+    title: "Lead (paseo-factory)",
+    status: "idle",
+    labels: {},
+    lastUsage: { contextWindowUsedTokens: 135_000, contextWindowMaxTokens: 200_000 },
+  };
+  const supervisor: FakeAgent = { id: "agent-sup-stopped", title: "Supervisor (paseo-factory)", status: "idle", labels: {} };
+  const { stateDir, slug, projectRoot, surface, leadMail, fake } = makeSpooledRuntime(t, [lead, supervisor]);
+  lead.labels = { seat: "lead", project: slug };
+  lead.cwd = projectRoot;
+  supervisor.labels = { seat: "supervisor", project: slug };
+  supervisor.cwd = projectRoot;
+  await surface.leadEnsure({ projectRoot });
+  await surface.supervisorEnsure({ projectRoot });
+
+  const extractionSends = () => fake.sent.filter((s) => s.agentId === "agent-lead-stopped");
+
+  // Quiet point at 135k -> beginHandoff sends extraction prompt #1 and locks handing_over.
+  await leadMail.onLeadTurnEnded({ agentId: "agent-lead-stopped", outcome: { kind: "completed" }, timeline: [] });
+  assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "handing_over");
+  assert.equal(extractionSends().length, 1, "the original extraction prompt was sent");
+  const requestedAt1 = readProjectRegistration(stateDir, slug)?.handoffRequestedAt;
+  assert.ok(requestedAt1);
+
+  // Mail queued while held stays queued through the whole episode.
+  await leadMail.enqueueLeadMail(slug, { from: "supervisor", kind: "directive", text: "Held while the extraction is stopped" });
+
+  // The Owner stops the extraction turn (Pause (user) mid-extraction): a canceled
+  // turn must NOT complete the handoff — no archive, no successor, mail held.
+  await leadMail.onLeadTurnEnded({ agentId: "agent-lead-stopped", outcome: { kind: "canceled" }, timeline: [] });
+  assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "handing_over", "handing_over holds across a canceled extraction turn");
+  assert.equal(fake.created.length, 0, "no successor Lead was spawned");
+  assert.ok(fake.agents.some((a) => a.id === "agent-lead-stopped"), "the outgoing Lead was not archived");
+  assert.equal(extractionSends().length, 1, "the turn-boundary settle itself re-sends nothing");
+  assert.equal(readMailboxLines(stateDir, slug).filter((line) => line.event === "mail_delivered").length, 0, "held mail stays queued");
+
+  // The next pump with the outgoing Lead seat-ready re-sends the FIXED extraction prompt.
+  await leadMail.pumpProjectLead(slug);
+  assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "handing_over", "still handing_over after the re-send");
+  assert.equal(extractionSends().length, 2, "the pump re-sent the extraction prompt");
+  assert.equal(extractionSends()[1]!.text, extractionSends()[0]!.text, "the re-send is the same fixed extraction prompt");
+  assert.equal(fake.created.length, 0, "still no successor after one re-send");
+  const requestedAt2 = readProjectRegistration(stateDir, slug)?.handoffRequestedAt;
+  assert.ok(requestedAt2 && requestedAt2 !== requestedAt1, "the fuse timer anchor reset with the re-send");
+
+  // A second stop holds again — the episode only leaves handing_over via a completed
+  // extraction turn, and every queued item is still waiting.
+  await leadMail.onLeadTurnEnded({ agentId: "agent-lead-stopped", outcome: { kind: "canceled" }, timeline: [] });
+  assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "handing_over");
+  assert.equal(fake.created.length, 0);
+  await leadMail.pumpProjectLead(slug);
+  assert.equal(extractionSends().length, 3, "second re-send delivered (send 3 of the episode cap)");
+  assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "handing_over");
+
+  // The completed extraction turn still completes the handoff cleanly and drains the held mail.
+  await leadMail.onLeadTurnEnded({
+    agentId: "agent-lead-stopped",
+    outcome: { kind: "completed" },
+    timeline: [{ type: "assistant_message", text: "# Handoff after the pause\nThe roadmap survived the stop." }],
+  });
+  const reg = readProjectRegistration(stateDir, slug);
+  assert.equal(reg?.rotationState, "normal");
+  const successorId = reg?.lead;
+  assert.ok(successorId && successorId !== "agent-lead-stopped");
+  const successorSends = fake.sent.filter((s) => s.agentId === successorId);
+  assert.equal(successorSends.length, 1);
+  assert.match(successorSends[0]!.text, /# Handoff after the pause\nThe roadmap survived the stop\./);
+  assert.match(successorSends[0]!.text, /Held while the extraction is stopped/);
+});
+
+test("a handing_over episode sends at most 3 extraction prompts — at the ceiling the runtime completes via the degraded path with the preserved prior and the staleness notice (v0.2.2, ADR 0050 Decision 2)", async (t) => {
+  assert.equal(HANDOFF_EXTRACTION_MAX_SENDS, 3);
+  const lead: FakeAgent = {
+    id: "agent-lead-thrice-stopped",
+    title: "Lead (paseo-factory)",
+    status: "idle",
+    labels: {},
+    lastUsage: { contextWindowUsedTokens: 135_000, contextWindowMaxTokens: 200_000 },
+  };
+  const { stateDir, slug, projectRoot, surface, leadMail, fake } = makeSpooledRuntime(t, [lead]);
+  lead.labels = { seat: "lead", project: slug };
+  lead.cwd = projectRoot;
+  await surface.leadEnsure({ projectRoot });
+
+  // A last-known-good prior exists before the episode starts.
+  const handoffPath = join(projectStateDir(stateDir, slug), "lead-handoff.md");
+  mkdirSync(projectStateDir(stateDir, slug), { recursive: true });
+  writeFileSync(handoffPath, "# Prior Handoff\nThe last-known-good baton.");
+  await new Promise((resolve) => setTimeout(resolve, 15));
+
+  const extractionSends = () => fake.sent.filter((s) => s.agentId === "agent-lead-thrice-stopped");
+
+  // Original send, then three failed extraction turns — each holds and re-sends
+  // until the ceiling, where the episode completes via the degraded path.
+  await leadMail.onLeadTurnEnded({ agentId: "agent-lead-thrice-stopped", outcome: { kind: "completed" }, timeline: [] });
+  assert.equal(extractionSends().length, 1);
+  for (let stop = 1; stop <= 3; stop += 1) {
+    await leadMail.onLeadTurnEnded({ agentId: "agent-lead-thrice-stopped", outcome: { kind: "failed" }, timeline: [] });
+    assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "handing_over", `stop ${stop}: handing_over holds`);
+    await leadMail.pumpProjectLead(slug);
+    if (stop < 3) {
+      assert.equal(extractionSends().length, stop + 1, `stop ${stop}: re-send ${stop} of 2 delivered`);
+      assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "handing_over");
+    } else {
+      assert.equal(extractionSends().length, 3, "stop 3: no fourth send — the ceiling completes the episode");
+      assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "normal", "stop 3: the ceiling completes via the degraded path");
+    }
+  }
+
+  // The degraded completion preserved the prior with the staleness notice and drained nothing early.
+  const reg = readProjectRegistration(stateDir, slug);
+  const successorId = reg?.lead;
+  assert.ok(successorId && successorId !== "agent-lead-thrice-stopped");
+  const successorSends = fake.sent.filter((s) => s.agentId === successorId);
+  assert.equal(successorSends.length, 1);
+  assert.match(successorSends[0]!.text, /latest extraction did not complete.*last-known-good handoff/);
+  assert.ok(successorSends[0]!.text.includes("# Prior Handoff\nThe last-known-good baton."));
+  const snapshot = JSON.parse(readFileSync(join(projectStateDir(stateDir, slug), "lead-handoff-extraction.json"), "utf8")) as { sends?: number };
+  assert.equal(snapshot.sends, 3, "the durable episode record counted exactly 3 sends");
+});
+
+test("pause-aware fuse (timer path): the elapsed window over an alive idle or closed Lead re-sends and resets the timer; only a still-running Lead trips (v0.2.2, ADR 0050 Decision 3)", async (t) => {
+  // Block 1: paused-mid-extraction — the Lead sits idle through every window.
+  {
+    const lead: FakeAgent = {
+      id: "agent-lead-paused-fuse",
+      title: "Lead (paseo-factory)",
+      status: "idle",
+      labels: {},
+      lastUsage: { contextWindowUsedTokens: 135_000, contextWindowMaxTokens: 200_000 },
+    };
+    const { stateDir, slug, projectRoot, surface, leadMail, fake } = makeSpooledRuntime(t, [lead], { handoffTimeoutMs: 40 });
+    lead.labels = { seat: "lead", project: slug };
+    lead.cwd = projectRoot;
+    await surface.leadEnsure({ projectRoot });
+
+    const handoffPath = join(projectStateDir(stateDir, slug), "lead-handoff.md");
+    mkdirSync(projectStateDir(stateDir, slug), { recursive: true });
+    writeFileSync(handoffPath, "# Prior Paused Fuse\nContinuity through the pause.");
+    await new Promise((resolve) => setTimeout(resolve, 15));
+
+    const extractionSends = () => fake.sent.filter((s) => s.agentId === "agent-lead-paused-fuse");
+    await leadMail.onLeadTurnEnded({ agentId: "agent-lead-paused-fuse", outcome: { kind: "completed" }, timeline: [] });
+    assert.equal(extractionSends().length, 1);
+    const anchor1 = readProjectRegistration(stateDir, slug)?.handoffRequestedAt;
+
+    // Window 1 elapses over the alive idle Lead: re-send, do not trip.
+    await until(() => assert.equal(extractionSends().length, 2), 2000);
+    assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "handing_over", "an idle Lead never trips the elapsed fuse");
+    const anchor2 = readProjectRegistration(stateDir, slug)?.handoffRequestedAt;
+    assert.ok(anchor2 && anchor2 !== anchor1, "the fuse timer reset with the re-send");
+
+    // Window 2 (the re-armed timer fires again): second and final re-send.
+    await until(() => assert.equal(extractionSends().length, 3), 2000);
+    assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "handing_over");
+
+    // Window 3: the ceiling — the episode completes via the degraded path, never a 4th send.
+    await until(() => assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "normal"), 2000);
+    assert.equal(extractionSends().length, 3, "no fourth extraction send past the cap");
+    const successorId = readProjectRegistration(stateDir, slug)?.lead;
+    assert.ok(successorId && successorId !== "agent-lead-paused-fuse");
+    const successorSends = fake.sent.filter((s) => s.agentId === successorId);
+    assert.equal(successorSends.length, 1);
+    assert.match(successorSends[0]!.text, /latest extraction did not complete.*last-known-good handoff/);
+    assert.ok(successorSends[0]!.text.includes("# Prior Paused Fuse\nContinuity through the pause."));
+  }
+
+  // Block 2: Paseo's idle-runtime-collected "closed" is the same alive-paused shape.
+  {
+    const lead: FakeAgent = {
+      id: "agent-lead-closed-fuse",
+      title: "Lead (paseo-factory)",
+      status: "idle",
+      labels: {},
+      lastUsage: { contextWindowUsedTokens: 135_000, contextWindowMaxTokens: 200_000 },
+    };
+    const { stateDir, slug, projectRoot, surface, leadMail, fake } = makeSpooledRuntime(t, [lead], { handoffTimeoutMs: 40 });
+    lead.labels = { seat: "lead", project: slug };
+    lead.cwd = projectRoot;
+    await surface.leadEnsure({ projectRoot });
+    const extractionSends = () => fake.sent.filter((s) => s.agentId === "agent-lead-closed-fuse");
+    await leadMail.onLeadTurnEnded({ agentId: "agent-lead-closed-fuse", outcome: { kind: "completed" }, timeline: [] });
+    assert.equal(extractionSends().length, 1);
+    lead.status = "closed";
+    await until(() => assert.equal(extractionSends().length, 2), 2000);
+    assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "handing_over", "a closed Lead is re-sent, not fused over");
+  }
+});
+
+test("pause-aware fuse (pump path): an absent or error Lead trips immediately even before the window elapses, and a throwing re-send trips with the send-failed reason (v0.2.2, ADR 0050 Decision 3)", async (t) => {
+  // Block A: the outgoing Lead vanished mid-episode — the pump trips without waiting out the window.
+  {
+    const lead: FakeAgent = {
+      id: "agent-lead-vanished",
+      title: "Lead (paseo-factory)",
+      status: "idle",
+      labels: {},
+      lastUsage: { contextWindowUsedTokens: 135_000, contextWindowMaxTokens: 200_000 },
+    };
+    const { stateDir, slug, projectRoot, surface, leadMail, fake } = makeSpooledRuntime(t, [lead]);
+    lead.labels = { seat: "lead", project: slug };
+    lead.cwd = projectRoot;
+    await surface.leadEnsure({ projectRoot });
+    const handoffPath = join(projectStateDir(stateDir, slug), "lead-handoff.md");
+    mkdirSync(projectStateDir(stateDir, slug), { recursive: true });
+    writeFileSync(handoffPath, "# Prior Vanished\nThe absent Lead keeps continuity.");
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    await leadMail.onLeadTurnEnded({ agentId: "agent-lead-vanished", outcome: { kind: "completed" }, timeline: [] });
+    const sendsBefore = fake.sent.filter((s) => s.agentId === "agent-lead-vanished").length;
+    assert.equal(sendsBefore, 1);
+
+    fake.agents.splice(fake.agents.findIndex((a) => a.id === "agent-lead-vanished"), 1);
+    await leadMail.pumpProjectLead(slug); // elapsed is milliseconds — far under the 180s window
+
+    assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "normal", "an absent Lead trips the fuse immediately");
+    assert.equal(fake.sent.filter((s) => s.agentId === "agent-lead-vanished").length, 1, "no re-send was attempted");
+    const successorId = readProjectRegistration(stateDir, slug)?.lead;
+    assert.ok(successorId && successorId !== "agent-lead-vanished");
+    const successorSends = fake.sent.filter((s) => s.agentId === successorId);
+    assert.equal(successorSends.length, 1);
+    assert.match(successorSends[0]!.text, /latest extraction did not complete.*last-known-good handoff/);
+    assert.ok(successorSends[0]!.text.includes("# Prior Vanished\nThe absent Lead keeps continuity."));
+  }
+
+  // Block B: the outgoing Lead fell into error mid-episode.
+  {
+    const lead: FakeAgent = {
+      id: "agent-lead-errored-mid",
+      title: "Lead (paseo-factory)",
+      status: "idle",
+      labels: {},
+      lastUsage: { contextWindowUsedTokens: 135_000, contextWindowMaxTokens: 200_000 },
+    };
+    const { stateDir, slug, projectRoot, surface, leadMail, fake } = makeSpooledRuntime(t, [lead]);
+    lead.labels = { seat: "lead", project: slug };
+    lead.cwd = projectRoot;
+    await surface.leadEnsure({ projectRoot });
+    await leadMail.onLeadTurnEnded({ agentId: "agent-lead-errored-mid", outcome: { kind: "completed" }, timeline: [] });
+    lead.status = "error";
+    await leadMail.pumpProjectLead(slug);
+    assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "normal", "an error Lead trips the fuse immediately");
+    assert.equal(fake.sent.filter((s) => s.agentId === "agent-lead-errored-mid").length, 1, "no re-send to an error Lead");
+  }
+
+  // Block C: the re-send itself throws — the fuse trips with the send-failed reason.
+  {
+    const lead: FakeAgent = {
+      id: "agent-lead-resend-throw",
+      title: "Lead (paseo-factory)",
+      status: "idle",
+      labels: {},
+      lastUsage: { contextWindowUsedTokens: 135_000, contextWindowMaxTokens: 200_000 },
+    };
+    const { stateDir, slug, projectRoot, surface, leadMail, fake } = makeSpooledRuntime(t, [lead]);
+    lead.labels = { seat: "lead", project: slug };
+    lead.cwd = projectRoot;
+    await surface.leadEnsure({ projectRoot });
+    const handoffPath = join(projectStateDir(stateDir, slug), "lead-handoff.md");
+    mkdirSync(projectStateDir(stateDir, slug), { recursive: true });
+    writeFileSync(handoffPath, "# Prior Resend Throw\nContinuity despite the dead socket.");
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    const extractionSends = () => fake.sent.filter((s) => s.agentId === "agent-lead-resend-throw");
+    await leadMail.onLeadTurnEnded({ agentId: "agent-lead-resend-throw", outcome: { kind: "completed" }, timeline: [] });
+    assert.equal(extractionSends().length, 1);
+    await leadMail.onLeadTurnEnded({ agentId: "agent-lead-resend-throw", outcome: { kind: "canceled" }, timeline: [] });
+    const origRef = fake.daemon.agents.ref.bind(fake.daemon.agents);
+    fake.daemon.agents.ref = (id: string) => {
+      const base = origRef(id);
+      if (id === "agent-lead-resend-throw") {
+        return { ...base, send: async () => { throw new Error("daemon send socket closed"); } };
+      }
+      return base;
+    };
+    await leadMail.pumpProjectLead(slug);
+    fake.daemon.agents.ref = origRef;
+    assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "normal", "a throwing re-send trips the fuse immediately");
+    assert.equal(extractionSends().length, 1, "the failed re-send delivered nothing");
+    const successorId = readProjectRegistration(stateDir, slug)?.lead;
+    assert.ok(successorId && successorId !== "agent-lead-resend-throw");
+    const successorSends = fake.sent.filter((s) => s.agentId === successorId);
+    assert.equal(successorSends.length, 1);
+    assert.match(successorSends[0]!.text, /latest extraction did not complete.*last-known-good handoff/);
+    assert.ok(successorSends[0]!.text.includes("# Prior Resend Throw\nContinuity despite the dead socket."));
+  }
+});
+
+test("boot after a restart re-sends the extraction to the alive Lead instead of completing from a stale prior (v0.2.2, ADR 0050 Decision 3)", async (t) => {
+  const lead: FakeAgent = { id: "agent-lead-boot-alive", status: "idle", lastUsage: { contextWindowUsedTokens: 128_000 } };
+  const f = makeSpooledRuntime(t, [lead]);
+  lead.labels = { seat: "lead", project: f.slug };
+  lead.cwd = f.projectRoot;
+  await f.surface.leadEnsure({ projectRoot: f.projectRoot });
+  const path = join(projectStateDir(f.stateDir, f.slug), "lead-handoff.md");
+  writeFileSync(path, "# Durable prior handoff\nOnly the dead Lead restores this.");
+  const bootSends = () => f.fake.sent.filter((s) => s.agentId === "agent-lead-boot-alive");
+  await f.leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [] });
+  assert.equal(bootSends().length, 1);
+  f.leadMail.stop();
+  writeFileSync(path, "Permission denied: outside workspace.");
+
+  // A second runtime over the same stateDir — empty in-process marker sets, the
+  // simulated-restart boot seam: the alive idle Lead gets a fresh extraction.
+  const restarted = createLeadMailRuntime({ factory: f.factory, stateDir: f.stateDir, daemon: f.fake.daemon, ensureLead: input => f.surface.leadEnsure(input), retireLead: input => f.surface.leadRotate(input) });
+  t.after(() => restarted.stop());
+  await restarted.pumpProjectLead(f.slug);
+  assert.equal(bootSends().length, 2, "the boot re-sent the extraction prompt");
+  assert.equal(readProjectRegistration(f.stateDir, f.slug)?.rotationState, "handing_over", "no stale-prior completion at boot");
+  assert.equal(f.fake.created.length, 0, "no successor was spawned at boot");
+  assert.equal(readFileSync(path, "utf8"), "Permission denied: outside workspace.", "nothing restored or completed behind the re-send");
+
+  // Recovery produces a fresh handoff whenever possible: the re-sent extraction
+  // completing with valid text yields the successor a fresh (non-stale) kickoff.
+  await restarted.onLeadTurnEnded({
+    agentId: lead.id,
+    outcome: { kind: "completed" },
+    timeline: [{ type: "assistant_message", text: "# Fresh Handoff After Boot\nWritten by the re-sent extraction." }],
+  });
+  assert.equal(readProjectRegistration(f.stateDir, f.slug)?.rotationState, "normal");
+  const successorId = readProjectRegistration(f.stateDir, f.slug)?.lead;
+  assert.ok(successorId && successorId !== lead.id);
+  const successorSends = f.fake.sent.filter((s) => s.agentId === successorId);
+  assert.equal(successorSends.length, 1);
+  assert.ok(successorSends[0]!.text.includes("# Fresh Handoff After Boot\nWritten by the re-sent extraction."));
+  assert.doesNotMatch(successorSends[0]!.text, /latest extraction did not complete/, "the fresh extraction is not flagged stale");
 });
 
 test("Paseo 0.13.0 compatibility: completeHandoff refetches tail timeline via daemon.agents.ref(id).timeline.refetch when agent.turn_ended timeline is empty, and paseo-plugin.json uses open-ended >=0.13.0 requirement (v0.0.39, ADR 0027)", async (t) => {
@@ -2087,7 +2418,11 @@ test("a Scrum directive dispatched through the supervisor path binds against the
 });
 
 
-for (const failure of ["refusal", "failed", "send", "timeout"] as const) {
+// v0.2.2 (ADR 0050 Decision 2): a `failed`/`canceled` extraction turn no longer
+// completes the handoff — it holds `handing_over` and re-sends within the
+// 3-send cap (pinned by the hold and ceiling tests above), so the failed-turn
+// shape left this family; `refusal` keeps the completed-but-invalid-text arm.
+for (const failure of ["refusal", "send", "timeout"] as const) {
   test(`Lead preserves the prior handoff after ${failure} and warns its successor`, async t => {
     const lead: FakeAgent = { id: "prior-lead", status: "idle", lastUsage: { contextWindowUsedTokens: 128_000 } };
     const f = makeSpooledRuntime(t, [lead], { handoffTimeoutMs: failure === "timeout" ? 40 : 180_000 });
@@ -2105,10 +2440,15 @@ for (const failure of ["refusal", "failed", "send", "timeout"] as const) {
       } });
     }
     await f.leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [] });
-    if (failure === "refusal" || failure === "failed") {
+    if (failure === "refusal") {
       // Even an agent that overwrites the file with a permission error must not destroy continuity.
       writeFileSync(path, "Permission denied: cannot write outside the workspace.");
-      await f.leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: failure === "failed" ? "failed" : "completed" }, timeline: [{ type: "assistant_message", text: "The handoff was not written: permission denied." }] });
+      await f.leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [{ type: "assistant_message", text: "The handoff was not written: permission denied." }] });
+    }
+    if (failure === "timeout") {
+      // v0.2.2 (ADR 0050 Decision 3): the elapsed fuse trips only over a Lead
+      // still `running` (a genuinely hung stream) — an idle Lead is re-sent.
+      lead.status = "running";
     }
     await until(() => assert.equal(readProjectRegistration(f.stateDir, f.slug)?.rotationState, "normal"));
     assert.equal(readFileSync(path, "utf8"), prior);
@@ -2129,6 +2469,9 @@ test("Lead extraction waits the full 180-second fuse before retiring a stuck sea
   lead.cwd = f.projectRoot;
   await f.surface.leadEnsure({ projectRoot: f.projectRoot });
   await f.leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [] });
+  // The hung-stream shape (v0.2.2, ADR 0050 Decision 3): only a Lead still
+  // `running` at the elapsed window trips — an alive idle Lead would re-send.
+  lead.status = "running";
   t.mock.timers.tick(179_999);
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(readProjectRegistration(f.stateDir, f.slug)?.rotationState, "handing_over");
@@ -2153,7 +2496,11 @@ test("Lead restores its last-known-good snapshot after a plugin restart during e
   writeFileSync(path, "Permission denied: outside workspace.");
   const restarted = createLeadMailRuntime({ factory: f.factory, stateDir: f.stateDir, daemon: f.fake.daemon, ensureLead: input => f.surface.leadEnsure(input), retireLead: input => f.surface.leadRotate(input) });
   t.after(() => restarted.stop());
-  await restarted.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "failed" }, timeline: [] });
+  // v0.2.2 (ADR 0050 Decision 3): the boot fuse applies the pause-aware rule —
+  // an alive Lead is re-sent (see the boot test below), while a Lead that died
+  // over the shutdown trips immediately and restores the snapshot prior.
+  lead.status = "error";
+  await restarted.pumpProjectLead(f.slug);
   assert.equal(readFileSync(path, "utf8"), "# Durable prior handoff\nArchitecture survives restart.");
   assert.match(f.fake.sent.find(item => item.agentId !== lead.id)!.text, /latest extraction did not complete.*last-known-good handoff/);
 });
