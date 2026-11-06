@@ -146,6 +146,18 @@ const INTERRUPTED_HANDOFF_EXTRACTION_NOTE =
   "(the outgoing Lead was interrupted during handoff extraction — rely on the Machine-Verified Active Peer Roster and Ledger State Digest above)";
 
 /**
+ * The human gloss of each degraded-completion reason (v0.2.2, ADR 0050
+ * Decision 4), quoted in the one `needs_human` mail the runtime appends to
+ * the Supervisor slice whenever a handoff completes without a `completed`
+ * extraction turn behind it.
+ */
+const DEGRADED_HANDOFF_COMPLETION_REASONS: Record<"extraction-send-failed" | "extraction-timeout" | "extraction-send-cap", string> = {
+  "extraction-send-failed": "the extraction prompt could not be delivered to the outgoing Lead (absent, errored, or the send threw)",
+  "extraction-timeout": "the extraction window elapsed with the outgoing Lead still running",
+  "extraction-send-cap": "the episode's extraction re-send cap was exhausted",
+};
+
+/**
  * Whether an agent's attention state blocks mailbox delivery (v0.0.24, ADR 0015 §2):
  * only a mid-turn permission prompt (`attentionReason === "permission"`) holds
  * mail; a stale `attentionReason === "error"` from an earlier failed turn never
@@ -1157,7 +1169,10 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
    * `lead-handoff.md`, build the machine-verified roster + digest, archive the
    * outgoing Lead, spawn the successor with the three-layer kickoff, reset
    * `normal`, and drain every held mail into it. Any failure holds the lock —
-   * mail waits, never drops.
+   * mail waits, never drops. A completion that did not come from a `completed`
+   * extraction turn (v0.2.2, ADR 0050 Decision 4) additionally appends one
+   * `needs_human` mail to the Supervisor slice after the rotation finished —
+   * loud about the degradation, yet blocking nothing.
    */
   const completeHandoff = async (
     slug: string,
@@ -1248,6 +1263,34 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     writeRotationState(slug, root, { rotationState: "normal", handoffRequestedAt: null });
     await drainLeadMailbox(slug);
     const retiredLabel = retired.ok ? retired.agentId : (input.agentId || "absent-lead");
+    // Loud degraded completion (v0.2.2, ADR 0050 Decision 4, amending ADR 0018
+    // §3's "without paging Supervisor"): a completion that did not come from a
+    // `completed` extraction turn appends exactly one `needs_human` item to the
+    // Supervisor slice AFTER the rotation finished — the mail blocks nothing
+    // (the successor is already kicked off and the mailbox already drained),
+    // and its `requestId` keeps re-pumps from ever minting a second one.
+    if (input.fuseReason !== undefined) {
+      try {
+        appendMailQueued(mailboxPath(slug), {
+          requestId: `lead-handoff-degraded:${slug}:${ensured.agentId}`,
+          to: "supervisor",
+          from: "system",
+          kind: "needs_human",
+          text: [
+            `Degraded Lead handoff of ${slug} completed — reason: ${input.fuseReason} (${DEGRADED_HANDOFF_COMPLETION_REASONS[input.fuseReason]}).`,
+            stale
+              ? "The successor's handoff layer is the preserved prior with the staleness notice (the latest extraction did not complete) — brief the successor on fresh state before it relies on the handoff layer."
+              : handoffText === INTERRUPTED_HANDOFF_EXTRACTION_NOTE
+                ? "No completed extraction backs the successor's handoff layer and no prior was preserved — it carries only the interrupted-extraction fallback note over the machine-verified roster and digest."
+                : "No completed extraction backs the successor's handoff layer — it carries the machine-recovered handoff text, never a fresh extraction.",
+            `The rotation itself completed autonomously: ${retiredLabel} archived, successor ${ensured.agentId} spawned, held mail drained.`,
+          ].join(" "),
+        });
+        await drainSupervisorMailbox(slug);
+      } catch (err) {
+        log(`lead-mailbox: degraded-completion notice of ${slug}'s handoff could not be queued (${messageOf(err)}) — the completed rotation stands`);
+      }
+    }
     log(`lead-mailbox: handoff of ${slug} complete — ${retiredLabel} archived, successor ${ensured.agentId} kickoff ${pendingHandoffByAgentId.has(ensured.agentId) ? "held for the next pump" : "delivered"}, rotation reset to normal`);
   };
 
