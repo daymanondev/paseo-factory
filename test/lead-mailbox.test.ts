@@ -2157,3 +2157,65 @@ test("Lead restores its last-known-good snapshot after a plugin restart during e
   assert.equal(readFileSync(path, "utf8"), "# Durable prior handoff\nArchitecture survives restart.");
   assert.match(f.fake.sent.find(item => item.agentId !== lead.id)!.text, /latest extraction did not complete.*last-known-good handoff/);
 });
+
+test("rotation_pending holds when a Peer turn fails to idle on an unsettled Task, and a failed Turn-1 handoff kickoff rests quietly until the next mail pump self-heals the errored Lead", async (t) => {
+  const lead: FakeAgent = { id: "lead-outage", status: "idle", lastUsage: { contextWindowUsedTokens: 132_000 } };
+  const { stateDir, slug, projectRoot, factory, surface, leadMail, fake } = makeSpooledRuntime(t, [lead]);
+  lead.labels = { seat: "lead", project: slug };
+  lead.cwd = projectRoot;
+  await surface.leadEnsure({ projectRoot });
+
+  const root = readProjectRegistration(stateDir, slug)!.root!;
+  factory.setContract({ task: "T-OUTAGE", workspace: root, gate: "true" });
+  const worktree = taskWorktreePath(stateDir, slug, "T-OUTAGE");
+  factory.requestSpawn({ task: "T-OUTAGE", provider: "zcode/glm-5.1", arity: 1, worktree });
+  const peer: FakeAgent = { id: "peer-outage", status: "running", cwd: worktree, labels: { seat: "agent", project: slug, task: "T-OUTAGE" } };
+  fake.agents.unshift(peer);
+
+  // 1. Lead reaches 132k while Peer runs -> rotation_pending
+  await leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [] });
+  assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "rotation_pending");
+
+  // 2. Peer turn fails mid-outage (e.g. ZCode EPIPE) and drops to status="idle" without claiming:
+  //    rotation_pending must NOT prematurely trigger beginHandoff.
+  peer.status = "idle";
+  await leadMail.onLeadTurnEnded({ agentId: peer.id, outcome: { kind: "failed" }, timeline: [] });
+  assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "rotation_pending", "rotation_pending stays held while interrupted Peer is idle on unsettled Task");
+  assert.equal(fake.sent.filter((s) => s.agentId === lead.id).length, 0);
+
+  // 3. Peer later resumes and completes its turn -> rotation_pending transitions to handing_over.
+  await leadMail.onLeadTurnEnded({ agentId: peer.id, outcome: { kind: "completed" }, timeline: [] });
+  assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "handing_over");
+  assert.equal(fake.sent.filter((s) => s.agentId === lead.id).length, 1);
+
+  // 4. Outgoing Lead completes extraction -> successor Lead 1 receives Turn-1 kickoff.
+  await leadMail.onLeadTurnEnded({
+    agentId: lead.id,
+    outcome: { kind: "completed" },
+    timeline: [{ type: "assistant_message", text: "# Handoff after outage\nWait for T-OUTAGE verdict." }],
+  });
+  const successor1Id = readProjectRegistration(stateDir, slug)?.lead!;
+  assert.ok(successor1Id && successor1Id !== lead.id);
+  const successor1 = fake.agents.find((a) => a.id === successor1Id)!;
+  assert.equal(fake.sent.filter((s) => s.agentId === successor1Id).length, 1);
+
+  // 5. Successor Lead 1's Turn-1 kickoff fails into status="error" (e.g. workspace routing discovery timed out):
+  //    With no queued mail batch to retry, it preserves pendingHandoff and rests quietly without looping into the outage.
+  successor1.status = "error";
+  await leadMail.onLeadTurnEnded({ agentId: successor1Id, outcome: { kind: "failed" }, timeline: [] });
+  assert.equal(readProjectRegistration(stateDir, slug)?.lead, successor1Id, "does not immediately replace and re-pump into an active outage");
+  assert.equal(fake.sent.filter((s) => s.agentId === successor1Id).length, 1);
+
+  // 6. Once the Peer later claims GREEN (new mail event), drainLeadMailbox self-heals the errored Lead
+  //    and delivers the full Seat kickoff packet + preserved handoff + GREEN verdict to Successor Lead 2.
+  factory.ledger.append({ event: "gate_finished", task: "T-OUTAGE", attempt: 1, verdict: "green", exit: 0, note: "" });
+  await leadMail.notifyPeer({ task: "T-OUTAGE", kind: "verdict", text: "T-OUTAGE attempt 1 ended GREEN" });
+
+  const successor2Id = readProjectRegistration(stateDir, slug)?.lead!;
+  assert.ok(successor2Id && successor2Id !== successor1Id, "errored Lead was replaced on the next mail pump");
+  const successor2Sends = fake.sent.filter((s) => s.agentId === successor2Id);
+  assert.equal(successor2Sends.length, 1);
+  assert.match(successor2Sends[0]!.text, /\[paseo-factory seat kickoff packet · role=lead/);
+  assert.match(successor2Sends[0]!.text, /# Handoff after outage\nWait for T-OUTAGE verdict\./);
+  assert.match(successor2Sends[0]!.text, /T-OUTAGE attempt 1 ended GREEN/);
+});

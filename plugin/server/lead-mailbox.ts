@@ -386,7 +386,11 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   const handoffTimeoutMs = deps.handoffTimeoutMs ?? HANDOFF_EXTRACTION_TIMEOUT_MS;
   const retriedFailedMailIds = new Set<string>();
   const kickoffSentAgentIds = new Set<string>();
+  const inFlightKickoffAgentIds = new Set<string>();
+  const failedFirstTurnAgentIds = new Set<string>();
   const pendingHandoffByAgentId = new Map<string, string>();
+  const inFlightHandoffByAgentId = new Map<string, string>();
+  const interruptedPeerIds = new Set<string>();
   const clearHandoffTimer = (slug: string): void => {
     const timer = handoffTimers.get(slug);
     if (timer !== undefined) {
@@ -528,6 +532,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
    * phantom delivery.
    */
   const hasSeatReceivedFirstTurn = (agent: { id: string; lastUserMessageAt?: string | null }): boolean => {
+    if (failedFirstTurnAgentIds.has(agent.id)) return false;
     if (kickoffSentAgentIds.has(agent.id)) return true;
     if (typeof agent.lastUserMessageAt === "string" && agent.lastUserMessageAt.trim() !== "") {
       kickoffSentAgentIds.add(agent.id);
@@ -568,13 +573,18 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       log(`lead-mailbox: cannot read the daemon's agents for ${slug} — holding ${state.queued.length} item(s) queued (${messageOf(err)})`);
       return;
     }
-    if (lead === undefined) {
+    if (lead === undefined || lead.status === "error") {
       const registration = readProjectRegistration(deps.stateDir, slug);
       if (deps.ensureLead !== undefined && registration?.root !== undefined) {
+        const carriedHandoff =
+          lead !== undefined ? (pendingHandoffByAgentId.get(lead.id) ?? inFlightHandoffByAgentId.get(lead.id)) : undefined;
         const ensured = await deps.ensureLead({ projectRoot: registration.root });
         if (!ensured.ok) {
           log(`lead-mailbox: cannot ensure lead for ${slug} (${ensured.code}: ${ensured.error}) — holding ${state.queued.length} item(s)`);
           return;
+        }
+        if (carriedHandoff !== undefined) {
+          pendingHandoffByAgentId.set(ensured.agentId, carriedHandoff);
         }
         try {
           lead = await liveLeadAgent(daemon, slug);
@@ -611,9 +621,18 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     if (state.queued.length === 0 && pendingHandoff === undefined) return;
     const mailPrompt = state.queued.length === 0 ? "" : renderMailPrompt(state.queued);
     const body = pendingHandoff !== undefined ? (mailPrompt === "" ? pendingHandoff : `${pendingHandoff}\n\n${mailPrompt}`) : mailPrompt;
+    const isFirstTurn = !hasSeatReceivedFirstTurn(lead);
     const prompt = prependKickoffPacketIfFirstTurn("lead", slug, lead, body);
     await daemon.agents.ref(lead.id).send(prompt);
-    if (pendingHandoff !== undefined) pendingHandoffByAgentId.delete(lead.id);
+    if (isFirstTurn) {
+      failedFirstTurnAgentIds.delete(lead.id);
+      kickoffSentAgentIds.add(lead.id);
+      inFlightKickoffAgentIds.add(lead.id);
+    }
+    if (pendingHandoff !== undefined) {
+      inFlightHandoffByAgentId.set(lead.id, pendingHandoff);
+      pendingHandoffByAgentId.delete(lead.id);
+    }
     if (state.queued.length > 0) appendMailDelivered(path, { mailIds: state.queued.map((item) => item.mailId), toAgentId: lead.id });
     log(`lead-mailbox: delivered ${state.queued.length} item(s) to the lead of ${slug} (${lead.id})`);
   };
@@ -654,7 +673,6 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       mode: selection.mode,
       ...(activeRun === undefined ? {} : { scrumRunDigest: formatScrumRunDigest(activeRun) }),
     });
-    kickoffSentAgentIds.add(agent.id);
     return `${kickoff}\n${prompt}`;
   };
 
@@ -691,7 +709,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       log(`lead-mailbox: cannot read the daemon's supervisor for ${slug} — holding ${state.supervisorQueued.length} item(s) queued (${messageOf(err)})`);
       return;
     }
-    if (supervisor === undefined) {
+    if (supervisor === undefined || supervisor.status === "error") {
       const registration = readProjectRegistration(deps.stateDir, slug);
       if (deps.ensureSupervisor !== undefined && registration?.root !== undefined) {
         const ensured = await deps.ensureSupervisor({ projectRoot: registration.root });
@@ -709,8 +727,14 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     }
     if (supervisor === undefined) return;
     if (!isSeatReadyForMail(supervisor)) return;
+    const isFirstTurn = !hasSeatReceivedFirstTurn(supervisor);
     const prompt = prependKickoffPacketIfFirstTurn("supervisor", slug, supervisor, renderSupervisorMailBatch(state.supervisorQueued));
     await daemon.agents.ref(supervisor.id).send(prompt);
+    if (isFirstTurn) {
+      failedFirstTurnAgentIds.delete(supervisor.id);
+      kickoffSentAgentIds.add(supervisor.id);
+      inFlightKickoffAgentIds.add(supervisor.id);
+    }
     appendMailDelivered(path, {
       to: "supervisor",
       mailIds: state.supervisorQueued.map((item) => item.mailId),
@@ -849,6 +873,10 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   const observePeers = async (project: { slug: string; root: string }, input?: LeadTurnEndedInput): Promise<void> => {
     await projectLane(project.slug, async () => {
       try {
+        if (input !== undefined) {
+          if (input.outcome.kind === "completed") interruptedPeerIds.delete(input.agentId);
+          else interruptedPeerIds.add(input.agentId);
+        }
         await peerHandoff.observeProject(project.slug, project.root, input);
         if (await tryBeginPendingHandoff(project.slug)) {
           if (peerBlockersQueued.delete(project.slug)) {
@@ -906,6 +934,13 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
           const path = mailboxPath(slug);
           const state = readLeadMailbox(path);
           let retryingFailedSupervisorBatch = false;
+          if (input.outcome.kind === "completed") {
+            inFlightKickoffAgentIds.delete(input.agentId);
+            failedFirstTurnAgentIds.delete(input.agentId);
+          } else if (inFlightKickoffAgentIds.delete(input.agentId)) {
+            kickoffSentAgentIds.delete(input.agentId);
+            failedFirstTurnAgentIds.add(input.agentId);
+          }
           if (state.supervisorInFlight !== null && state.supervisorInFlight.toAgentId === input.agentId) {
             const mailIds = state.supervisorInFlight.items.map((item) => item.mailId);
             if (input.outcome.kind === "completed") {
@@ -928,6 +963,9 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
               }
               retryingFailedSupervisorBatch = true;
             }
+          }
+          if (input.outcome.kind !== "completed" && !retryingFailedSupervisorBatch) {
+            return;
           }
           if (retryingFailedSupervisorBatch && root) {
             await ensureSupervisorInLane(slug, root);
@@ -964,6 +1002,15 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       } else {
         appendMailRequeued(path, { deliveryId: state.inFlight.deliveryId, mailIds, reason: input.outcome.kind });
         if (!claimFailedBatchRetry(slug, "lead", mailIds, input.outcome.kind)) {
+          const failedHandoff = inFlightHandoffByAgentId.get(input.agentId);
+          if (failedHandoff !== undefined) {
+            inFlightHandoffByAgentId.delete(input.agentId);
+            pendingHandoffByAgentId.set(input.agentId, failedHandoff);
+          }
+          if (inFlightKickoffAgentIds.delete(input.agentId)) {
+            kickoffSentAgentIds.delete(input.agentId);
+            failedFirstTurnAgentIds.add(input.agentId);
+          }
           return;
         }
         retryingFailedLeadBatch = true;
@@ -974,6 +1021,21 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       // (2) The outgoing Lead just finished its Handoff Extraction turn.
       await completeHandoff(slug, root, input);
       return;
+    }
+    if (input.outcome.kind === "completed") {
+      inFlightHandoffByAgentId.delete(input.agentId);
+      inFlightKickoffAgentIds.delete(input.agentId);
+      failedFirstTurnAgentIds.delete(input.agentId);
+    } else {
+      const failedHandoff = inFlightHandoffByAgentId.get(input.agentId);
+      if (failedHandoff !== undefined) {
+        inFlightHandoffByAgentId.delete(input.agentId);
+        pendingHandoffByAgentId.set(input.agentId, failedHandoff);
+      }
+      if (inFlightKickoffAgentIds.delete(input.agentId)) {
+        kickoffSentAgentIds.delete(input.agentId);
+        failedFirstTurnAgentIds.add(input.agentId);
+      }
     }
     // The boundary sensor reading — best effort; the pending state alone also arms.
     let usedTokens: number | null = null;
@@ -999,9 +1061,17 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       await beginHandoff(slug, root);
       return;
     }
+    if (input.outcome.kind !== "completed" && !retryingFailedLeadBatch) {
+      return;
+    }
     // (4) Normal and under threshold: self-heal on 1-shot retry, then drain.
     if (retryingFailedLeadBatch && root) {
-      await deps.ensureLead({ projectRoot: root });
+      const carriedHandoff = pendingHandoffByAgentId.get(input.agentId);
+      const ensured = await deps.ensureLead({ projectRoot: root });
+      if (ensured.ok && carriedHandoff !== undefined && ensured.agentId !== input.agentId) {
+        pendingHandoffByAgentId.delete(input.agentId);
+        pendingHandoffByAgentId.set(ensured.agentId, carriedHandoff);
+      }
     }
     await drainLeadMailbox(slug);
   };
@@ -1242,7 +1312,9 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     return tasks.some(
       (task) =>
         !settledTasks.has(task.task) &&
-        boundTaskPeers({ stateDir: deps.stateDir, slug, task: task.task, events, live }).some(peerIsRunning),
+        boundTaskPeers({ stateDir: deps.stateDir, slug, task: task.task, events, live }).some(
+          (peer) => peerIsRunning(peer) || (peer.status === "idle" && interruptedPeerIds.has(peer.id)),
+        ),
     );
   };
 
@@ -1596,7 +1668,10 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     const reg = readProjectRegistration(deps.stateDir, slug);
     if (reg?.lead !== undefined) {
       kickoffSentAgentIds.delete(reg.lead);
+      inFlightKickoffAgentIds.delete(reg.lead);
+      failedFirstTurnAgentIds.delete(reg.lead);
       pendingHandoffByAgentId.delete(reg.lead);
+      inFlightHandoffByAgentId.delete(reg.lead);
     }
     const settled = recoverLeadMailbox(mailboxPath(slug), "lead-rotated", "lead");
     for (const event of settled) {
@@ -1615,9 +1690,16 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     const reg = readProjectRegistration(deps.stateDir, slug);
     if (reg?.lead !== undefined) {
       kickoffSentAgentIds.delete(reg.lead);
+      inFlightKickoffAgentIds.delete(reg.lead);
+      failedFirstTurnAgentIds.delete(reg.lead);
       pendingHandoffByAgentId.delete(reg.lead);
+      inFlightHandoffByAgentId.delete(reg.lead);
     }
-    if (reg?.supervisor !== undefined) kickoffSentAgentIds.delete(reg.supervisor);
+    if (reg?.supervisor !== undefined) {
+      kickoffSentAgentIds.delete(reg.supervisor);
+      inFlightKickoffAgentIds.delete(reg.supervisor);
+      failedFirstTurnAgentIds.delete(reg.supervisor);
+    }
     if (reg !== undefined && (reg.rotationState !== undefined || reg.handoffRequestedAt !== undefined)) {
       writeRotationState(slug, reg.root, { rotationState: null, handoffRequestedAt: null });
     }
