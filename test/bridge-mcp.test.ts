@@ -1142,10 +1142,14 @@ test("v0.0.93 quiet-point regression: Lead dispatches a Peer then crosses 128k �
     assert.match(successorSends[0].text, /# Handoff during T-KICK/);
     assert.match(successorSends[0].text, /# Lead handoff — project/);
 
-    // 5. v0.0.99 (ADR 0031 §3): if a Peer ends its turn (`onLeadTurnEnded`)
-    //    WITHOUT reaching a GREEN Verdict while the Lead is in `rotation_pending`,
-    //    `observePeers` detects that no Peer remains running and triggers
-    //    `beginHandoff` so `rotation_pending` never deadlocks.
+    // 5. v0.2.2 (ADR 0050 §1): a Peer that ends its turn (`onLeadTurnEnded`)
+    //    WITHOUT reaching a verdict no longer wakes the rotation by itself —
+    //    `idle`-because-paused and `idle`-between-turns are indistinguishable
+    //    at the only layer that survives restarts, so a live-not-error Peer on
+    //    an open spawn round holds `rotation_pending` durably (the v0.0.99
+    //    `interruptedPeerIds` wake is an accelerator only). The hold releases
+    //    through the Task's own outcome, queued `from: "peer"` mail, or the
+    //    Peer's death — so `rotation_pending` still never deadlocks.
     successor.lastUsage = { contextWindowUsedTokens: 130_000 };
     const sucessorCorr = correlations.issue({ role: "lead", projectSlug: reg.slug, projectRoot: canonicalRoot, agentId: successor.id });
     const wave2Call = await runMcpSession({
@@ -1166,7 +1170,15 @@ test("v0.0.93 quiet-point regression: Lead dispatches a Peer then crosses 128k �
 
     peer2.status = "idle";
     await mailRuntime.onLeadTurnEnded({ agentId: peer2.id, outcome: { kind: "completed" }, timeline: [] });
-    assert.equal(readProjectRegistration(stateDir, reg.slug)?.rotationState, "handing_over", "Peer turn end must wake rotation_pending into handing_over");
+    assert.equal(readProjectRegistration(stateDir, reg.slug)?.rotationState, "rotation_pending", "a live-idle Peer on an open round holds rotation_pending even after a verdict-less turn end (v0.2.2, ADR 0050 §1)");
+    assert.equal(sent.filter((s) => s.agentId === successor.id).length, 1, "no extraction prompt reached the outgoing Lead while the hold stands");
+
+    // The Owner kills the paused-looking Peer: the open round's liveness arm
+    // drops it and `sweepPeers` (the periodic door) begins the handoff —
+    // `rotation_pending` never deadlocks on a Peer that will never return.
+    peer2.archivedAt = new Date().toISOString();
+    await mailRuntime.sweepPeers();
+    assert.equal(readProjectRegistration(stateDir, reg.slug)?.rotationState, "handing_over", "a dead Peer releases the hold and the sweep begins the handoff");
   } finally {
     spool.stop();
     rmSync(homeDir, { recursive: true, force: true });
