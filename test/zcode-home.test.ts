@@ -102,8 +102,11 @@ test("ROLE_SYSTEM.md carries the managed role contract and config.json points in
 
   // Every interactive role gets its own managed role contract — the file
   // zcode.cjs reloads on every turn, every compaction, and every resume —
-  // plus the config.json that wires instructions.userFile at it.
+  // plus the config.json that wires instructions.userFile at it. Since
+  // v0.2.2 the non-supervisor configs also carry the factory skill deny
+  // (ADR 0050 Decision 6); the SLP supervisor keeps the bare parity shape.
   const seen = new Set<string>();
+  const factoryDenyKey = join(userHome, ".agents", "skills", "factory");
   for (const role of ["supervisor", "lead", "agent"] as const) {
     const roleHome = join(stateDir, "zcode-home", role);
     provisionZcodeHome({ stateDir, role, userHome });
@@ -112,7 +115,11 @@ test("ROLE_SYSTEM.md carries the managed role contract and config.json points in
     assert.ok(!seen.has(content), "each role's contract is distinct");
     seen.add(content);
     const config = JSON.parse(readFileSync(join(roleHome, "config.json"), "utf8"));
-    assert.deepEqual(config, { instructions: { userFile: join(roleHome, "ROLE_SYSTEM.md"), projectFile: "AGENTS.md" } });
+    const expected: Record<string, unknown> = { instructions: { userFile: join(roleHome, "ROLE_SYSTEM.md"), projectFile: "AGENTS.md" } };
+    if (role !== "supervisor") {
+      expected.skill = { [factoryDenyKey]: { enable: false } };
+    }
+    assert.deepEqual(config, expected);
   }
 
   // The tool-less headless pass never carries a role contract or its wiring.
@@ -310,7 +317,14 @@ test("a Scrum identity reroutes the clean room under <projectStateDir>/scrum/zco
   assert.ok(!("ZCODE_DISALLOWED_TOOLS" in runEnv), "the Scrum specialist is not write-tool-locked at Layer 1");
   assert.equal(readFileSync(join(runHome, "ROLE_SYSTEM.md"), "utf8"), "<!-- scrum dev contract -->\n", "the specialist's contract is the passed Scrum prompt");
   const runConfig = JSON.parse(readFileSync(join(runHome, "config.json"), "utf8"));
-  assert.deepEqual(runConfig, { instructions: { userFile: join(runHome, "ROLE_SYSTEM.md"), projectFile: "AGENTS.md" } }, "config.json wires instructions.userFile at the Scrum contract");
+  assert.deepEqual(
+    runConfig,
+    {
+      instructions: { userFile: join(runHome, "ROLE_SYSTEM.md"), projectFile: "AGENTS.md" },
+      skill: { [join(userHome, ".agents", "skills", "factory")]: { enable: false } },
+    },
+    "config.json wires instructions.userFile at the Scrum contract and carries the factory skill deny (v0.2.2, ADR 0050 Decision 6)",
+  );
 
   // The Scrum homes never touch the shared SLP roots — the collision source the reroute exists to fix.
   assert.ok(!existsSync(join(stateDir, "zcode-home", "supervisor")), "the Scrum seat never writes the SLP supervisor home");
@@ -372,6 +386,73 @@ test("allowedSkills reconciles skills/ against exactly the caller's list; a Scru
   assert.ok(!existsSync(join(leadSkills, "stale-owner-link")), "a link outside the allowed set is retired");
   assert.deepEqual(readdirSync(leadSkills).sort(), ["grilling", "tdd"]);
   assert.deepEqual(survivors.map((name) => lstatSync(join(leadSkills, name)).ino), inosBefore, "scoped skill links are not churned");
+});
+
+test("the Owner-only factory skill is denied via config.json's native per-path skill override for every non-supervisor roleHome; the SLP supervisor keeps Owner parity (v0.2.2, ADR 0050 Decision 6)", (t) => {
+  const dir = makeTempDir("zcode-home-test-");
+  disposeDir(t, dir);
+  const userHome = join(dir, "user");
+  seedZcodeHome(userHome);
+  const stateDir = join(dir, "factory-state");
+
+  // The deny key is the userHome-expanded `.agents` original — zcode matches
+  // the override by realpath, so one key disables the `~/.zcode/skills/factory`
+  // symlink copy too, and a disabled skill is un-invocable, not merely
+  // unlisted. The scoped `<roleHome>/skills` links never reach the hardcoded
+  // user-scope roots, so this override is the enforcement layer.
+  const denyKey = join(userHome, ".agents", "skills", "factory");
+  const denied = [
+    { label: "lead", home: join(stateDir, "zcode-home", "lead"), input: { stateDir, role: "lead" as const, userHome } },
+    { label: "agent fallback", home: join(stateDir, "zcode-home", "agent"), input: { stateDir, role: "agent" as const, userHome } },
+    { label: "agent per-Task", home: join(stateDir, "zcode-home", "tasks", "demo-app", "T-01"), input: { stateDir, role: "agent" as const, projectSlug: "demo-app", task: "T-01", userHome } },
+  ];
+  for (const { label, home, input } of denied) {
+    provisionZcodeHome(input);
+    const config = JSON.parse(readFileSync(join(home, "config.json"), "utf8"));
+    assert.deepEqual(config.skill, { [denyKey]: { enable: false } }, `${label}'s config.json carries the factory skill deny at the .agents real-root path`);
+  }
+
+  // The SLP supervisor's whole-dir symlink keeps 100% Owner skill parity —
+  // its config carries no override at all.
+  provisionZcodeHome({ stateDir, role: "supervisor", userHome });
+  const supervisorConfig = JSON.parse(readFileSync(join(stateDir, "zcode-home", "supervisor", "config.json"), "utf8"));
+  assert.ok(!("skill" in supervisorConfig), "the SLP supervisor's config.json carries no skill override");
+});
+
+test("Scrum roleHomes — seats (supervisor authority included) and task epochs — carry the factory skill deny (v0.2.2, ADR 0050 Decision 6)", (t) => {
+  const dir = makeTempDir("zcode-home-test-");
+  disposeDir(t, dir);
+  const userHome = join(dir, "user");
+  seedZcodeHome(userHome);
+  const stateDir = join(dir, "factory-state");
+  const denyKey = join(userHome, ".agents", "skills", "factory");
+
+  // Every Scrum identity's symlink policy already excludes the Owner-only
+  // factory — the Scrum supervisor seat takes per-skill links, never the SLP
+  // supervisor's whole-dir parity — so every Scrum config.json carries the
+  // deny.
+  const shapes = [
+    {
+      label: "Scrum supervisor seat",
+      home: join(stateDir, "projects", "demo-app", "scrum", "zcode-home", "seats", "1", "initial", "supervisor"),
+      input: { stateDir, role: "supervisor" as const, projectSlug: "demo-app", userHome, scrum: { kind: "seat" as const, selectionRevision: 1, generation: "initial", authority: "supervisor" as const }, systemPrompt: "<!-- scrum supervisor contract -->\n" },
+    },
+    {
+      label: "Scrum lead seat",
+      home: join(stateDir, "projects", "demo-app", "scrum", "zcode-home", "seats", "1", "initial", "lead"),
+      input: { stateDir, role: "lead" as const, projectSlug: "demo-app", userHome, scrum: { kind: "seat" as const, selectionRevision: 1, generation: "initial", authority: "lead" as const }, systemPrompt: "<!-- scrum lead contract -->\n", allowedSkills: ["grilling", "tdd"] },
+    },
+    {
+      label: "Scrum task epoch",
+      home: join(stateDir, "projects", "demo-app", "scrum", "zcode-home", "runs", "run-a", "T-01", "7"),
+      input: { stateDir, role: "agent" as const, projectSlug: "demo-app", task: "T-01", userHome, scrum: { kind: "task" as const, runId: "run-a", task: "T-01", epoch: 7 }, systemPrompt: "<!-- scrum dev contract -->\n" },
+    },
+  ];
+  for (const { label, home, input } of shapes) {
+    provisionZcodeHome(input);
+    const config = JSON.parse(readFileSync(join(home, "config.json"), "utf8"));
+    assert.deepEqual(config.skill, { [denyKey]: { enable: false } }, `${label}'s config.json carries the factory skill deny`);
+  }
 });
 
 test("concurrent SLP and Scrum zcode homes never overwrite each other's ROLE_SYSTEM.md or skills/ (v0.2.0, ADR 0049 §1)", (t) => {
