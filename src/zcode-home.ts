@@ -36,6 +36,20 @@
  * `systemPrompt` carrying `renderScrumPrompt`'s output and, for `lead` and
  * the specialists, an `allowedSkills` allowlist reconciled exactly.
  *
+ * Since v0.2.2 (ADR 0050 Decision 6) every roleHome whose symlink policy
+ * excludes the Owner-only `factory` skill also carries the native per-path
+ * `skill` override deny — `skill: {"<userHome>/.agents/skills/factory":
+ * {"enable": false}}` — in its generated `config.json`: `zcode.cjs`
+ * hardcodes its user-scope skill roots at `<homedir()>/.zcode/skills` and
+ * `<homedir()>/.agents/skills` (never redirected by `ZCODE_STORAGE_DIR`), so
+ * the scoped `<roleHome>/skills` links never reach the roots a session
+ * actually reads. The override is matched by realpath — one `.agents` key
+ * disables the `.zcode` symlink copy too — and a disabled skill is
+ * un-invocable, not merely unlisted. The SLP `supervisor` (whole-dir Owner
+ * parity) is the single exemption; the Scrum supervisor seat's scoped policy
+ * already excludes `factory`, so it carries the deny like every other
+ * non-parity home, and the symlinks stay provisioned as belt-and-suspenders.
+ *
  * Provisioning is idempotent and synchronous (the role-env seam that calls it
  * returns a plain env record, never a Promise): a second call finds the same
  * home in the same state and never duplicates or breaks a symlink it already
@@ -161,7 +175,7 @@ export function provisionZcodeHome(input: ProvisionZcodeHomeOptions): Record<str
   // The per-seat SQLite file's parent — zcode creates db.sqlite itself, but the
   // directory existing up front keeps the first session's open race-free.
   mkdirSync(join(roleHome, "db"), { recursive: true });
-  writeRoleContract(roleHome, input.role, input.systemPrompt);
+  writeRoleContract(roleHome, input.role, input.systemPrompt, factorySkillDenyPath(userHome, input));
   provisionSkills(join(userHome, ".zcode", "skills"), roleHome, input.role, input);
   const env: Record<string, string> = {
     ZCODE_STORAGE_DIR: roleHome,
@@ -213,9 +227,13 @@ function resolveRoleHome(input: ProvisionZcodeHomeOptions): string {
  * empty override writes nothing. `config.json` wires
  * `instructions: { userFile: <roleHome>/ROLE_SYSTEM.md, projectFile: "AGENTS.md" }`
  * — the channel `zcode.cjs` reloads on every turn, compaction, and resume —
- * and exists exactly when the contract file does.
+ * and exists exactly when the contract file does. Since v0.2.2 (ADR 0050
+ * Decision 6) a non-empty `factorySkillDenyPath` also writes the native
+ * per-path `skill` override `{"<path>": {"enable": false}}` into the same
+ * `config.json` — the real-root enforcement layer for the Owner-only
+ * `factory` skill.
  */
-function writeRoleContract(roleHome: string, role: ZcodeAgentRole, systemPrompt: string | undefined): void {
+function writeRoleContract(roleHome: string, role: ZcodeAgentRole, systemPrompt: string | undefined, factorySkillDenyPath: string | undefined): void {
   const contractPath = join(roleHome, "ROLE_SYSTEM.md");
   const configPath = join(roleHome, "config.json");
   const content = role === "headless" ? "" : systemPrompt ?? ROLE_PROMPTS[role];
@@ -225,7 +243,32 @@ function writeRoleContract(roleHome: string, role: ZcodeAgentRole, systemPrompt:
     return;
   }
   writeFileSync(contractPath, content.endsWith("\n") ? content : `${content}\n`);
-  writeFileSync(configPath, `${JSON.stringify({ instructions: { userFile: contractPath, projectFile: "AGENTS.md" } }, null, 2)}\n`);
+  const config: { instructions: { userFile: string; projectFile: string }; skill?: Record<string, { enable: boolean }> } = {
+    instructions: { userFile: contractPath, projectFile: "AGENTS.md" },
+  };
+  if (factorySkillDenyPath !== undefined) {
+    config.skill = { [factorySkillDenyPath]: { enable: false } };
+  }
+  writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+}
+
+/**
+ * The native per-path `skill` override key that denies the Owner-only
+ * `factory` skill (v0.2.2, ADR 0050 Decision 6): the userHome-expanded
+ * absolute path of the `.agents` original — `<userHome>/.agents/skills/factory`
+ * — returned for every roleHome whose symlink policy already excludes
+ * `factory` (`lead`, `agent`, and every Scrum identity, the Scrum supervisor
+ * seat included: its scoped per-skill links never carry the Owner-only skill
+ * either). `zcode.cjs` matches the override by realpath, so the single
+ * `.agents` key also disables the `~/.zcode/skills/factory` symlink copy, and
+ * a disabled skill is un-invocable, not merely unlisted. The single exemption
+ * is the SLP supervisor — `role === "supervisor"` with no Scrum identity —
+ * whose whole-dir symlink keeps 100% Owner skill parity; `headless` never
+ * reaches the question at all (it writes no `config.json`).
+ */
+function factorySkillDenyPath(userHome: string, input: Pick<ProvisionZcodeHomeOptions, "role" | "scrum">): string | undefined {
+  if (input.role === "supervisor" && input.scrum === undefined) return undefined;
+  return join(userHome, ".agents", "skills", OWNER_ONLY_SKILL);
 }
 
 /**

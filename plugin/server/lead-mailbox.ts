@@ -32,7 +32,9 @@ import { commitSeatMemoryOnRoot } from "./core/workspace.ts";
  *     `LEAD_ROTATE_TOKENS` the pump persists `rotation_pending` and never
  *     interrupts the turn; once no Task Peer remains in flight it
  *     transitions a held `rotation_pending` into `beginHandoff` (ADR 0031
- *     Quiet-Point Succession);
+ *     Quiet-Point Succession), and while `handing_over` it resolves the
+ *     pause-aware fuse (v0.2.2, ADR 0050: trip over a dead or hung Lead,
+ *     re-send an alive paused one within the episode send cap);
  *   - `onLeadTurnEnded` — the turn-boundary state machine (ticket 07): settle
  *     the in-flight batch (`mail_acked` on completed, `mail_requeued` on
  *     failed/canceled), then either complete a handoff (archive the outgoing
@@ -41,6 +43,9 @@ import { commitSeatMemoryOnRoot } from "./core/workspace.ts";
  *     steer the bounded extraction prompt) at a quiet point only — while any
  *     Task Peer runs the rotation holds in `rotation_pending` with the
  *     outgoing Lead live and all mail `mail_queued` — or drain per ticket 06;
+ *     since v0.2.2 (ADR 0050 Decision 2) only a `completed` extraction turn
+ *     completes the handoff — a `failed`/`canceled` one holds `handing_over`
+ *     for a bounded re-send instead of fabricating a finished handoff;
  *   - `dispatchLead` — the spool's `lead_dispatch` handler: resolve the target
  *     Project (`workspace` via resolveProject, `project` slug via the
  *     registry), auto-ensure the Lead seat (the `leadEnsure` path — the
@@ -118,15 +123,39 @@ export const LEAD_ROTATE_TOKENS = 128_000;
 export const LEAD_HANDOFF_MAX_BYTES = 8 * 1024;
 
 /**
- * The Dual-Fuse `Lead handoff` extraction timeout (v0.0.28, ADR 0018 §3):
- * 180,000 ms (180 seconds) — if `rotationState === "handing_over"` remains
- * unresolved past this ceiling, the runtime trips Fuse 2 and completes
- * succession using the machine-verified roster and ledger digest.
+ * The Dual-Fuse `Lead handoff` extraction window (v0.0.28, ADR 0018 §3;
+ * pause-aware since v0.2.2, ADR 0050 Decision 3): 180,000 ms (180 seconds)
+ * per extraction send. When the window elapses, the runtime trips Fuse 2 only
+ * over a genuinely dead or hung Lead (absent, `error`, or still `running`) —
+ * an alive `idle`/`closed` Lead (the paused-mid-extraction shape) is re-sent
+ * the fixed prompt within `HANDOFF_EXTRACTION_MAX_SENDS` instead, and the
+ * window resets with each send.
  */
 export const HANDOFF_EXTRACTION_TIMEOUT_MS = 180_000;
 
+/**
+ * The per-`handing_over`-episode extraction send ceiling (v0.2.2, ADR 0050
+ * Decision 2): the original prompt plus at most 2 re-sends. A repeatedly
+ * stopped extraction can never ping-pong forever — at the ceiling the
+ * runtime completes the handoff via the degraded path instead of sending
+ * again.
+ */
+export const HANDOFF_EXTRACTION_MAX_SENDS = 3;
+
 const INTERRUPTED_HANDOFF_EXTRACTION_NOTE =
   "(the outgoing Lead was interrupted during handoff extraction — rely on the Machine-Verified Active Peer Roster and Ledger State Digest above)";
+
+/**
+ * The human gloss of each degraded-completion reason (v0.2.2, ADR 0050
+ * Decision 4), quoted in the one `needs_human` mail the runtime appends to
+ * the Supervisor slice whenever a handoff completes without a `completed`
+ * extraction turn behind it.
+ */
+const DEGRADED_HANDOFF_COMPLETION_REASONS: Record<"extraction-send-failed" | "extraction-timeout" | "extraction-send-cap", string> = {
+  "extraction-send-failed": "the extraction prompt could not be delivered to the outgoing Lead (absent, errored, or the send threw)",
+  "extraction-timeout": "the extraction window elapsed with the outgoing Lead still running",
+  "extraction-send-cap": "the episode's extraction re-send cap was exhausted",
+};
 
 /**
  * Whether an agent's attention state blocks mailbox delivery (v0.0.24, ADR 0015 §2):
@@ -383,6 +412,15 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   const lanes = new Map<string, Promise<unknown>>();
   const handingOverBySlug = new Set<string>();
   const handoffTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /**
+   * Slugs with an extraction send whose turn has not ended yet (v0.2.2, ADR
+   * 0050 Decision 2) — suppresses a pre-timeout re-send in the window between
+   * the send and the daemon flipping the Lead to `running`. Cleared when the
+   * extraction turn ends (any outcome) or the episode completes; after a
+   * restart the durable `rotationState` plus the same pause-aware fuse rule
+   * carry the decision without it.
+   */
+  const extractionOutstandingBySlug = new Set<string>();
   const handoffTimeoutMs = deps.handoffTimeoutMs ?? HANDOFF_EXTRACTION_TIMEOUT_MS;
   const retriedFailedMailIds = new Set<string>();
   const kickoffSentAgentIds = new Set<string>();
@@ -390,6 +428,9 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   const failedFirstTurnAgentIds = new Set<string>();
   const pendingHandoffByAgentId = new Map<string, string>();
   const inFlightHandoffByAgentId = new Map<string, string>();
+  // v0.2.1 hold marker, v0.2.2 (ADR 0050 §1): accelerator only — the durable
+  // in-flight arm of `projectPeerInFlight` carries quiet-point correctness
+  // across daemon restarts and plugin updates; this Set dissolves with them.
   const interruptedPeerIds = new Set<string>();
   const clearHandoffTimer = (slug: string): void => {
     const timer = handoffTimers.get(slug);
@@ -542,7 +583,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   };
 
   const extractionPath = (slug: string) => join(projectStateDir(deps.stateDir, slug), "lead-handoff-extraction.json");
-  const readExtraction = (slug: string) => readOptionalJson(extractionPath(slug)) as { requestedAt?: string; prior?: string; stale?: boolean } | undefined;
+  const readExtraction = (slug: string) => readOptionalJson(extractionPath(slug)) as { requestedAt?: string; prior?: string; stale?: boolean; sends?: number } | undefined;
   const readDiskHandoffText = (slug: string): string | undefined => {
     try {
       const handoffPath = join(projectStateDir(deps.stateDir, slug), "lead-handoff.md");
@@ -803,20 +844,11 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       if (await tryBeginPendingHandoff(slug)) return;
       if (readRotationState(slug) === "handing_over") {
         const reg = readProjectRegistration(deps.stateDir, slug);
-        const requestedAt = reg?.handoffRequestedAt;
-        const requestedMs = requestedAt !== undefined ? Date.parse(requestedAt) : Number.NaN;
-        if (reg?.root !== undefined && Number.isFinite(requestedMs) && Date.now() - requestedMs >= handoffTimeoutMs) {
+        if (reg?.root !== undefined) {
           try {
-            log(`lead-mailbox: ${slug} handoff extraction timed out (${Date.now() - requestedMs}ms >= ${handoffTimeoutMs}ms) during pump — tripping fuse`);
-            await completeHandoff(slug, reg.root, {
-              agentId: reg.lead ?? "",
-              outcome: { kind: "failed" },
-              timeline: [],
-              fuseReason: "extraction-timeout",
-              handoffRequestedAt: requestedAt,
-            });
+            await resolveHandingOverEpisode(slug, reg.root);
           } catch (err) {
-            log(`lead-mailbox: handoff timeout fuse of ${slug} failed — the state stands (${messageOf(err)})`);
+            log(`lead-mailbox: handoff fuse of ${slug} failed — the state stands (${messageOf(err)})`);
           }
         }
       }
@@ -1018,7 +1050,17 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     }
     const rotation = readRotationState(slug);
     if (rotation === "handing_over") {
-      // (2) The outgoing Lead just finished its Handoff Extraction turn.
+      // (2) The outgoing Lead just finished its Handoff Extraction turn. Only
+      // a `completed` turn completes the handoff (v0.2.2, ADR 0050 Decision 2):
+      // a `failed`/`canceled` extraction (user stop, provider drop) keeps the
+      // lock, keeps every mail item queued, and clears the outstanding-send
+      // marker so the next pump re-sends the fixed extraction prompt to the
+      // seat-ready Lead within the episode's send cap.
+      if (input.outcome.kind !== "completed") {
+        extractionOutstandingBySlug.delete(slug);
+        log(`lead-mailbox: ${slug}'s handoff extraction turn ${input.outcome.kind} — handing_over holds and the extraction prompt re-sends on the next pump`);
+        return;
+      }
       await completeHandoff(slug, root, input);
       return;
     }
@@ -1081,7 +1123,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     const handoffRequestedAt = new Date().toISOString();
     // Persist the snapshot before the outgoing seat can overwrite its previous handoff.
     const prior = readDiskHandoffText(slug);
-    atomicJson(extractionPath(slug), { requestedAt: handoffRequestedAt, prior: validHandoffText(prior) ? prior : undefined, stale: false });
+    atomicJson(extractionPath(slug), { requestedAt: handoffRequestedAt, prior: validHandoffText(prior) ? prior : undefined, stale: false, sends: 1 });
     handingOverBySlug.add(slug);
     writeRotationState(slug, root, { rotationState: "handing_over", handoffRequestedAt });
     let lead: SurfaceAgentSnapshot | undefined;
@@ -1117,31 +1159,8 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       return;
     }
     log(`lead-mailbox: ${slug} locked for handoff — extraction prompt sent to ${lead.id}`);
-    clearHandoffTimer(slug);
-    const timer = setTimeout(() => {
-      handoffTimers.delete(slug);
-      void projectLane(slug, async () => {
-        try {
-          if (readRotationState(slug) !== "handing_over") return;
-          const reg = readProjectRegistration(deps.stateDir, slug);
-          const effectiveRoot = reg?.root ?? root;
-          const effectiveLeadId = reg?.lead ?? lead.id;
-          const effectiveRequestedAt = reg?.handoffRequestedAt ?? handoffRequestedAt;
-          log(`lead-mailbox: ${slug} handoff extraction timed out after ${handoffTimeoutMs}ms — tripping fuse`);
-          await completeHandoff(slug, effectiveRoot, {
-            agentId: effectiveLeadId,
-            outcome: { kind: "failed" },
-            timeline: [],
-            fuseReason: "extraction-timeout",
-            handoffRequestedAt: effectiveRequestedAt,
-          });
-        } catch (err) {
-          log(`lead-mailbox: handoff timeout fuse of ${slug} failed — the state stands (${messageOf(err)})`);
-        }
-      });
-    }, handoffTimeoutMs);
-    timer.unref?.();
-    handoffTimers.set(slug, timer);
+    extractionOutstandingBySlug.add(slug);
+    armHandoffTimer(slug, root);
   };
 
   /**
@@ -1150,14 +1169,18 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
    * `lead-handoff.md`, build the machine-verified roster + digest, archive the
    * outgoing Lead, spawn the successor with the three-layer kickoff, reset
    * `normal`, and drain every held mail into it. Any failure holds the lock —
-   * mail waits, never drops.
+   * mail waits, never drops. A completion that did not come from a `completed`
+   * extraction turn (v0.2.2, ADR 0050 Decision 4) additionally appends one
+   * `needs_human` mail to the Supervisor slice after the rotation finished —
+   * loud about the degradation, yet blocking nothing.
    */
   const completeHandoff = async (
     slug: string,
     root: string,
-    input: LeadTurnEndedInput & { fuseReason?: "extraction-send-failed" | "extraction-timeout"; handoffRequestedAt?: string },
+    input: LeadTurnEndedInput & { fuseReason?: "extraction-send-failed" | "extraction-timeout" | "extraction-send-cap"; handoffRequestedAt?: string },
   ): Promise<void> => {
     clearHandoffTimer(slug);
+    extractionOutstandingBySlug.delete(slug);
     const statePath = projectStateDir(deps.stateDir, slug);
     const handoffPath = join(statePath, "lead-handoff.md");
     const requestedAt = input.handoffRequestedAt ?? readProjectRegistration(deps.stateDir, slug)?.handoffRequestedAt;
@@ -1196,7 +1219,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     }
     const stale = !validHandoffText(handoffText) && prior !== undefined;
     handoffText = validHandoffText(handoffText) ? capHandoffText(handoffText, LEAD_HANDOFF_MAX_BYTES) : prior ?? INTERRUPTED_HANDOFF_EXTRACTION_NOTE;
-    atomicJson(extractionPath(slug), { requestedAt, prior, stale });
+    atomicJson(extractionPath(slug), { requestedAt, prior, stale, ...(snapshot?.sends === undefined ? {} : { sends: snapshot.sends }) });
     try {
       mkdirSync(statePath, { recursive: true });
       writeFileSync(handoffPath, handoffText);
@@ -1240,7 +1263,131 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     writeRotationState(slug, root, { rotationState: "normal", handoffRequestedAt: null });
     await drainLeadMailbox(slug);
     const retiredLabel = retired.ok ? retired.agentId : (input.agentId || "absent-lead");
+    // Loud degraded completion (v0.2.2, ADR 0050 Decision 4, amending ADR 0018
+    // §3's "without paging Supervisor"): a completion that did not come from a
+    // `completed` extraction turn appends exactly one `needs_human` item to the
+    // Supervisor slice AFTER the rotation finished — the mail blocks nothing
+    // (the successor is already kicked off and the mailbox already drained),
+    // and its `requestId` keeps re-pumps from ever minting a second one.
+    if (input.fuseReason !== undefined) {
+      try {
+        appendMailQueued(mailboxPath(slug), {
+          requestId: `lead-handoff-degraded:${slug}:${ensured.agentId}`,
+          to: "supervisor",
+          from: "system",
+          kind: "needs_human",
+          text: [
+            `Degraded Lead handoff of ${slug} completed — reason: ${input.fuseReason} (${DEGRADED_HANDOFF_COMPLETION_REASONS[input.fuseReason]}).`,
+            stale
+              ? "The successor's handoff layer is the preserved prior with the staleness notice (the latest extraction did not complete) — brief the successor on fresh state before it relies on the handoff layer."
+              : handoffText === INTERRUPTED_HANDOFF_EXTRACTION_NOTE
+                ? "No completed extraction backs the successor's handoff layer and no prior was preserved — it carries only the interrupted-extraction fallback note over the machine-verified roster and digest."
+                : "No completed extraction backs the successor's handoff layer — it carries the machine-recovered handoff text, never a fresh extraction.",
+            `The rotation itself completed autonomously: ${retiredLabel} archived, successor ${ensured.agentId} spawned, held mail drained.`,
+          ].join(" "),
+        });
+        await drainSupervisorMailbox(slug);
+      } catch (err) {
+        log(`lead-mailbox: degraded-completion notice of ${slug}'s handoff could not be queued (${messageOf(err)}) — the completed rotation stands`);
+      }
+    }
     log(`lead-mailbox: handoff of ${slug} complete — ${retiredLabel} archived, successor ${ensured.agentId} kickoff ${pendingHandoffByAgentId.has(ensured.agentId) ? "held for the next pump" : "delivered"}, rotation reset to normal`);
+  };
+
+  /**
+   * Arms (or re-arms) the one `handing_over` fuse timer for `slug` (ADR 0018
+   * §3, pause-aware since v0.2.2 / ADR 0050 Decision 3): when the window
+   * elapses, the resolver — not a blind completion — decides between tripping
+   * (a dead or still-`running` Lead) and re-sending (an alive `idle`/`closed`
+   * Lead) within the episode's send cap.
+   */
+  const armHandoffTimer = (slug: string, root: string): void => {
+    clearHandoffTimer(slug);
+    const timer = setTimeout(() => {
+      handoffTimers.delete(slug);
+      void projectLane(slug, async () => {
+        try {
+          if (readRotationState(slug) !== "handing_over") return;
+          const effectiveRoot = readProjectRegistration(deps.stateDir, slug)?.root ?? root;
+          log(`lead-mailbox: ${slug} handoff extraction window elapsed after ${handoffTimeoutMs}ms — resolving the fuse`);
+          await resolveHandingOverEpisode(slug, effectiveRoot);
+        } catch (err) {
+          log(`lead-mailbox: handoff timeout fuse of ${slug} failed — the state stands (${messageOf(err)})`);
+        }
+      });
+    }, handoffTimeoutMs);
+    timer.unref?.();
+    handoffTimers.set(slug, timer);
+  };
+
+  /**
+   * The pause-aware `handing_over` resolver (v0.2.2, ADR 0050 Decisions 2–3) —
+   * the shared logic behind the pump's fuse arm and the scheduled timer. A
+   * dead Lead (absent or `error`) or a throwing extraction send trips the
+   * fuse immediately; an elapsed window that finds the Lead still `running`
+   * (a genuinely hung stream) trips too — but an alive `idle`/`closed` Lead
+   * (the paused-mid-extraction shape) is re-sent the fixed extraction prompt
+   * within the episode's `HANDOFF_EXTRACTION_MAX_SENDS` cap, the fuse timer
+   * resetting so each attempt gets its full window. At the ceiling the
+   * episode completes via the degraded path — never an unbounded re-send
+   * loop. A daemon read that throws holds the state (never guess a trip).
+   */
+  const resolveHandingOverEpisode = async (slug: string, root: string): Promise<void> => {
+    const reg = readProjectRegistration(deps.stateDir, slug);
+    if (reg === undefined || readRotationState(slug) !== "handing_over") return;
+    const requestedAt = reg.handoffRequestedAt;
+    const requestedMs = requestedAt !== undefined ? Date.parse(requestedAt) : Number.NaN;
+    const elapsed = Number.isFinite(requestedMs) ? Date.now() - requestedMs : Number.POSITIVE_INFINITY;
+    let lead: SurfaceAgentSnapshot | undefined;
+    try {
+      lead = await liveLeadAgent(resolveDaemon(), slug);
+    } catch (err) {
+      log(`lead-mailbox: cannot read the daemon's agents for ${slug}'s handoff fuse — the state stands (${messageOf(err)})`);
+      return;
+    }
+    const complete = (fuseReason: "extraction-send-failed" | "extraction-timeout" | "extraction-send-cap"): Promise<void> =>
+      completeHandoff(slug, reg.root ?? root, {
+        agentId: reg.lead ?? lead?.id ?? "",
+        outcome: { kind: "failed" },
+        timeline: [],
+        fuseReason,
+        ...(requestedAt === undefined ? {} : { handoffRequestedAt: requestedAt }),
+      });
+    if (lead === undefined || lead.status === "error") {
+      log(`lead-mailbox: ${slug} handoff extraction fuse tripped (${lead === undefined ? "no live lead" : "lead in error state"}) — completing the handoff`);
+      await complete("extraction-send-failed");
+      return;
+    }
+    if (isSeatReadyForMail(lead)) {
+      // An outstanding send still inside its window is left alone — the Lead
+      // may simply not have flipped to `running` on the daemon yet.
+      if (extractionOutstandingBySlug.has(slug) && elapsed < handoffTimeoutMs) return;
+      const snapshot = readExtraction(slug);
+      const sends = snapshot?.sends ?? 1; // a pre-v0.2.2 snapshot implies the original send
+      if (sends >= HANDOFF_EXTRACTION_MAX_SENDS) {
+        log(`lead-mailbox: ${slug} handoff extraction re-send cap reached (${sends} sends) — completing via the degraded path`);
+        await complete("extraction-send-cap");
+        return;
+      }
+      try {
+        await resolveDaemon().agents.ref(lead.id).send(renderHandoffExtractionPrompt(slug, readExecution(deps.stateDir, slug).mode));
+      } catch (err) {
+        log(`lead-mailbox: ${slug} handoff extraction re-send failed (${messageOf(err)}) — completing handoff immediately`);
+        await complete("extraction-send-failed");
+        return;
+      }
+      const sentAt = new Date().toISOString();
+      atomicJson(extractionPath(slug), { ...(snapshot ?? {}), requestedAt: sentAt, stale: false, sends: sends + 1 });
+      writeRotationState(slug, reg.root ?? root, { rotationState: "handing_over", handoffRequestedAt: sentAt });
+      extractionOutstandingBySlug.add(slug);
+      armHandoffTimer(slug, reg.root ?? root);
+      log(`lead-mailbox: ${slug} handoff extraction re-sent to ${lead.id} (send ${sends + 1} of ${HANDOFF_EXTRACTION_MAX_SENDS}) — fuse timer reset`);
+      return;
+    }
+    if (elapsed >= handoffTimeoutMs) {
+      log(`lead-mailbox: ${slug} handoff extraction timed out (${elapsed}ms >= ${handoffTimeoutMs}ms) with the Lead still ${lead.status} — tripping fuse`);
+      await complete("extraction-timeout");
+    }
   };
 
   /** The Project's ledger slice — every event whose task's contract workspace sits inside the root (the snapshot's own scoping law; v0.0.89 per-Project isolation over the bridged stream). */
@@ -1285,30 +1432,47 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     (task.status === "red" && task.attempts.length >= MAX_ATTEMPTS) ||
     (queuedPeerBlockerTasks?.has(task.task) ?? false);
 
+  /**
+   * The quiet-point predicate for `rotation_pending` (v0.0.99/v0.0.93, ADR
+   * 0031 §3). v0.2.2 (ADR 0050 §1) adds the durable in-flight arm: a Task
+   * whose spawn round is still open and whose bound Peer is live on the
+   * daemon and not `error` (`running`, `initializing`, `idle`, `closed`
+   * alike) holds the rotation — the judgment reads only the ledger,
+   * `mailbox.jsonl`, and the live daemon snapshot, so daemon restarts,
+   * plugin updates, and reboots cannot dissolve the hold. Tasks whose
+   * folded status is Peer-terminal or that carry queued `from: "peer"` mail
+   * (verdict or blocker — the work is back in the Lead's court) never hold.
+   * The `interruptedPeerIds` turn-event marker remains an accelerator only.
+   */
   const projectPeerInFlight = async (slug: string): Promise<boolean> => {
     const reg = readProjectRegistration(deps.stateDir, slug);
     if (reg?.root === undefined) return false;
     const events = projectEventsOf(slug, reg.root);
     const tasks = foldTasks(events);
     let queuedPeerBlockerTasks: Set<string> | undefined;
+    let queuedPeerMailTasks: Set<string> | undefined;
     try {
       const mailbox = readLeadMailbox(mailboxPath(slug));
-      queuedPeerBlockerTasks = new Set(
-        mailbox.queued
-          .filter((item) => item.from === "peer" && item.kind === "needs_human" && typeof item.task === "string")
-          .map((item) => item.task!),
-      );
+      const queuedPeerMail = mailbox.queued.filter((item) => item.from === "peer" && typeof item.task === "string");
+      queuedPeerBlockerTasks = new Set(queuedPeerMail.filter((item) => item.kind === "needs_human").map((item) => item.task!));
+      queuedPeerMailTasks = new Set(queuedPeerMail.map((item) => item.task!));
     } catch {
       queuedPeerBlockerTasks = undefined;
+      queuedPeerMailTasks = undefined;
     }
     const settledTasks = new Set(
       tasks.filter((task) => taskHasSettledPeerOutcome(task, queuedPeerBlockerTasks)).map((task) => task.task),
     );
     const live = [...(await liveAgentsById()).values()];
-    const activeWaveEvents = settledTasks.size > 0
-      ? events.filter((evt) => !("task" in evt) || typeof evt.task !== "string" || !settledTasks.has(evt.task))
+    const activeWaveEvents = settledTasks.size > 0 || (queuedPeerMailTasks?.size ?? 0) > 0
+      ? events.filter(
+          (evt) =>
+            !("task" in evt) ||
+            typeof evt.task !== "string" ||
+            (!settledTasks.has(evt.task) && !(queuedPeerMailTasks?.has(evt.task) ?? false)),
+        )
       : events;
-    if (driverWaveInFlight(activeWaveEvents, live, slug)) return true;
+    if (driverWaveInFlight(activeWaveEvents, live, slug, "live")) return true;
     return tasks.some(
       (task) =>
         !settledTasks.has(task.task) &&
@@ -1683,6 +1847,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     peerHandoff.reset(slug);
     clearHandoffTimer(slug);
     handingOverBySlug.delete(slug);
+    extractionOutstandingBySlug.delete(slug);
     const prefix = `${slug}:`;
     for (const key of [...retriedFailedMailIds]) {
       if (key.startsWith(prefix)) retriedFailedMailIds.delete(key);
@@ -2012,11 +2177,22 @@ function contractWorkspaceOf(events: readonly LedgerEvent[], task: string): stri
  * before any agent exists) — the id arm is the defensive read for any future
  * writer that stamps it, with the CLI Driver's own `"driver"` marker treated
  * as absent.
+ *
+ * v0.2.2 (ADR 0050 §1, the durable in-flight arm): `liveness: "live"` keeps
+ * an open round while its bound `Peer` is merely live and not `error` —
+ * `idle`/`closed` included, because `idle`-because-paused and
+ * `idle`-between-turns are indistinguishable at the only layer that survives
+ * restarts (the ledger plus the live daemon snapshot). Only the quiet-point
+ * check (`projectPeerInFlight`) passes `"live"`; the default `"running"`
+ * arm (running/initializing only) keeps governing `notifyPeer`'s pump gate
+ * and `projectHasPeerWork`; a `Peer` that has already queued its verdict
+ * must never hold the Lead's mail delivery.
  */
 function driverWaveInFlight(
   events: readonly LedgerEvent[],
   liveAgents?: readonly SurfaceAgentSnapshot[],
   projectSlug?: string,
+  liveness?: "running" | "live",
 ): boolean {
   const openRounds = new Map<string, Extract<LedgerEvent, { event: "spawn_dispatched" }>>();
   for (const evt of events) {
@@ -2032,16 +2208,18 @@ function driverWaveInFlight(
       const stampedAgent = (spawnEvt as { agent?: unknown }).agent;
       const spawnedAgentId =
         typeof stampedAgent === "string" && stampedAgent !== "" && stampedAgent !== "driver" ? stampedAgent : undefined;
-      const hasRunningPeer = liveAgents.some(
+      const peerIsLively = (agent: SurfaceAgentSnapshot): boolean =>
+        liveness === "live" ? agent.status !== "error" : agent.status === "running" || agent.status === "initializing";
+      const hasLivePeer = liveAgents.some(
         (agent) =>
           agent.archivedAt === null &&
-          (agent.status === "running" || agent.status === "initializing") &&
+          peerIsLively(agent) &&
           ((wt !== undefined && typeof agent.cwd === "string" && (agent.cwd === wt || agent.cwd.startsWith(`${wt}/`))) ||
             (agent.labels?.task === task &&
               (projectSlug === undefined || agent.labels?.project === undefined || agent.labels?.project === projectSlug)) ||
             (spawnedAgentId !== undefined && agent.id === spawnedAgentId)),
       );
-      if (!hasRunningPeer) openRounds.delete(task);
+      if (!hasLivePeer) openRounds.delete(task);
     }
   }
   return openRounds.size > 0;
