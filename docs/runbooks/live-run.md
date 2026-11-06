@@ -313,3 +313,37 @@ because both runs wrote their findings down.
   convention.
 - **Landing**: PR into main, CI green before merge, branch deleted after
   (ADR 0001).
+
+## 10. Release live-verify gate — the roleHome `factory` skill deny (v0.2.2, ADR 0050 Decision 6)
+
+Release-blocking, runbook not CI (spec `factory-v0.2.2` Decision 9): the deny
+depends on `zcode.cjs` continuing to honor the per-path `skill` config
+override, which unit tests over a temp userHome can only assume. Run this once
+on the authorized live home **after** the release is built and loaded the
+normal way (`npm run version:bump -- <x.y.z>`, `npm run check`, commit + tag +
+push, `gh release create`, then load into Paseo) — never by hot-patching a
+live daemon.
+
+1. **Spawn one real zcode-lane Peer on a scratch Task** — contract and spawn a
+   throwaway task (steps 3–4) with `--scope` held tight, or let the Lead spawn
+   a Peer on any scratch contract. Let it reach its first turn; the session
+   database is materialized at
+   `<paseo-home>/plugin-state/paseo-factory/zcode-home/tasks/<slug>/<task>/db/db.sqlite`
+   (the roleHome `ZCODE_SESSION_DB_PATH`).
+2. **Assert the Peer's Turn-0 skill list contains no `factory`** — dump the
+   session database and grep for the real-root skill paths (schema-agnostic):
+
+       sqlite3 "<paseo-home>/plugin-state/paseo-factory/zcode-home/tasks/<slug>/<task>/db/db.sqlite" .dump \
+         | grep -c "skills/factory"
+
+   The count must be `0`. Any hit — via `~/.zcode/skills/factory` or
+   `~/.agents/skills/factory` — is a red gate: the deny is not being honored
+   and the release does not ship.
+3. **Assert the Owner still sees `/factory`** — open a fresh ZCode session as
+   the Owner in a normal terminal (no roleHome env) and confirm the skill
+   list still offers `factory` (type `/factory` and watch it resolve; keep
+   the session transcript path as evidence).
+4. **Record the evidence** — the grep output and counts, the Peer session
+   database path, and the Owner transcript path — under `## Comments` in the
+   ticket that shipped the deny (`.scratch/factory-v0.2.2/issues/04-...md`).
+   Archive the scratch task afterwards (step 9).
