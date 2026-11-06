@@ -15,6 +15,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { LEAD_WAVE_LAWS, SUPERVISOR_OUTCOME_BOUNDARY } from "./roles-contract.ts";
+import { SCRUM_LEAD_MCP_TOOLS, SCRUM_SUPERVISOR_MCP_TOOLS } from "./scrum/prompts.ts";
 import { projectNotebookPath, readProjectNotebook } from "./project.ts";
 import type { LedgerEvent } from "./events.ts";
 
@@ -44,6 +45,20 @@ export interface SeatKickoffPacketInput {
    * complete self-contained packet.
    */
   omitSystemPromptDuplicates?: boolean;
+  /**
+   * Execution mode for the packet's role-scoped vocabulary (v0.2.0, ADR
+   * 0049 §2). `"scrum"` renders the Scrum MCP tool table
+   * (`SCRUM_SUPERVISOR_MCP_TOOLS` / `SCRUM_LEAD_MCP_TOOLS`) and appends the
+   * `- Active Scrum run digest:` block from `scrumRunDigest`. Omitted or
+   * `"slp"`: today's SLP packet, byte-for-byte.
+   */
+  mode?: "slp" | "scrum";
+  /**
+   * Pre-rendered `formatScrumRunDigest(run)` block appended under
+   * `- Active Scrum run digest:` when `mode === "scrum"` (v0.2.0, ADR 0049
+   * §2). Ignored in SLP mode.
+   */
+  scrumRunDigest?: string;
 }
 
 function runGitFast(cwd: string, args: readonly string[]): string {
@@ -184,8 +199,14 @@ export function buildSeatKickoffPacket(input: SeatKickoffPacketInput): string {
           .join(", ")
       : "default";
 
-  const roleTools =
-    input.role === "supervisor"
+  // v0.2.0 (ADR 0049 §2): Scrum seats get their own MCP tool vocabulary;
+  // SLP seats keep today's table byte-for-byte.
+  const isScrum = input.mode === "scrum";
+  const roleTools = isScrum
+    ? input.role === "supervisor"
+      ? SCRUM_SUPERVISOR_MCP_TOOLS
+      : SCRUM_LEAD_MCP_TOOLS
+    : input.role === "supervisor"
       ? "`supervisor_dispatch_lead`, `supervisor_read_ledger`, `supervisor_end_cycle`"
       : "`lead_set_contract`, `lead_dispatch_agent`, `lead_verify`, `lead_merge`, `lead_report_to_supervisor`";
 
@@ -235,6 +256,12 @@ export function buildSeatKickoffPacket(input: SeatKickoffPacketInput): string {
       : input.role === "lead"
         ? LEAD_WAVE_LAWS.map((law) => `- Law: ${law}`)
         : [`- Law: ${SUPERVISOR_OUTCOME_BOUNDARY}`]),
+    // v0.2.0 (ADR 0049 §2): the bounded Scrum run digest rides the packet as
+    // dynamic run state (like the Project notebook), so it survives
+    // `omitSystemPromptDuplicates`.
+    ...(isScrum && input.scrumRunDigest !== undefined
+      ? [`- Active Scrum run digest:\n${input.scrumRunDigest}`]
+      : []),
     `--- [end seat kickoff packet] ---`,
     "",
   ].join("\n");

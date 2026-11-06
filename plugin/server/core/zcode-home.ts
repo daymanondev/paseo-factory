@@ -26,6 +26,16 @@
  * parity), while `lead` and `agent` get scoped per-skill links that exclude
  * the Owner-only `factory` skill, and `headless` stays strictly stripped.
  *
+ * Since v0.2.0 (ADR 0049 §1) a Scrum identity (`scrum`) reroutes the clean
+ * room under the Project state dir —
+ * `<projectStateDir>/scrum/zcode-home/seats/<selectionRevision>/<generation>/<authority>/`
+ * for standing seats and `<projectStateDir>/scrum/zcode-home/runs/<runId>/<task>/<epoch>/`
+ * for specialist tasks, the twin of the Pi `scrum/harness` hierarchy — so
+ * concurrent SLP and Scrum projects on `zcode/*` never overwrite each other's
+ * `ROLE_SYSTEM.md` or `db.sqlite`; the Scrum caller pairs it with a
+ * `systemPrompt` carrying `renderScrumPrompt`'s output and, for `lead` and
+ * the specialists, an `allowedSkills` allowlist reconciled exactly.
+ *
  * Provisioning is idempotent and synchronous (the role-env seam that calls it
  * returns a plain env record, never a Promise): a second call finds the same
  * home in the same state and never duplicates or breaks a symlink it already
@@ -43,12 +53,27 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, readlinkSync, realpathSy
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { renderRoleAppendSystem } from "./roles-contract.ts";
+import { projectStateDir } from "./project.ts";
 
 /** The factory roles that get an isolated zcode harness home (spec §Implementation Decisions 1). */
 export type ZcodeAgentRole = "supervisor" | "lead" | "agent" | "headless";
 
 /** The interactive roles — every factory role except the tool-less `headless` pass. */
 export type InteractiveZcodeAgentRole = Exclude<ZcodeAgentRole, "headless">;
+
+/**
+ * The Scrum execution identity that reroutes the clean room under the Project
+ * state dir (v0.2.0, ADR 0049 §1): standing seats land at
+ * `<projectStateDir>/scrum/zcode-home/seats/<selectionRevision>/<generation>/<authority>/`
+ * and specialist tasks at
+ * `<projectStateDir>/scrum/zcode-home/runs/<runId>/<task>/<epoch>/` — mirroring
+ * the Pi `scrum/harness` hierarchy (`src/scrum/harness.ts`) — so concurrent
+ * SLP and Scrum projects on `zcode/*` never share one `ROLE_SYSTEM.md` or
+ * `db.sqlite`.
+ */
+export type ScrumZcodeHomeIdentity =
+  | { kind: "seat"; selectionRevision: number; generation: string; authority: "supervisor" | "lead" | "agent" }
+  | { kind: "task"; runId: string; task: string; epoch: number };
 
 export interface ProvisionZcodeHomeOptions {
   /** The factory state directory — the harness home is materialized at `<stateDir>/zcode-home/<role>`. */
@@ -74,6 +99,25 @@ export interface ProvisionZcodeHomeOptions {
    * one; an empty string writes nothing (and no `config.json` wiring).
    */
   systemPrompt?: string;
+  /**
+   * The Scrum execution identity (v0.2.0, ADR 0049 §1): when present, the
+   * clean room reroutes under `<projectStateDir>/scrum/zcode-home/...`
+   * instead of the mode-shared `<stateDir>/zcode-home/...` roots — the Scrum
+   * caller pairs it with a `systemPrompt` carrying `renderScrumPrompt`'s
+   * output so `ROLE_SYSTEM.md` never falls back to the SLP
+   * `ROLE_PROMPTS[role]` contract. Absent (SLP), paths stay byte-identical.
+   * Requires a non-empty `projectSlug` — the Project state dir anchors the
+   * reroute.
+   */
+  scrum?: ScrumZcodeHomeIdentity;
+  /**
+   * The explicit per-skill allowlist for `<roleHome>/skills/` (v0.2.0, ADR
+   * 0049 §1): when present, `skills/` reconciles against exactly this list
+   * (installed entries only — an allowed but uninstalled skill never becomes
+   * a broken symlink) instead of the per-role default. Ignored for the
+   * tool-less `headless` pass (stays stripped).
+   */
+  allowedSkills?: readonly string[];
 }
 
 /**
@@ -118,7 +162,7 @@ export function provisionZcodeHome(input: ProvisionZcodeHomeOptions): Record<str
   // directory existing up front keeps the first session's open race-free.
   mkdirSync(join(roleHome, "db"), { recursive: true });
   writeRoleContract(roleHome, input.role, input.systemPrompt);
-  provisionSkills(join(userHome, ".zcode", "skills"), roleHome, input.role);
+  provisionSkills(join(userHome, ".zcode", "skills"), roleHome, input.role, input);
   const env: Record<string, string> = {
     ZCODE_STORAGE_DIR: roleHome,
     ZCODE_SESSION_DB_PATH: join(roleHome, "db", "db.sqlite"),
@@ -134,12 +178,23 @@ export function provisionZcodeHome(input: ProvisionZcodeHomeOptions): Record<str
 }
 
 /**
- * The home for this provisioning call: an explicit standing-role home at
- * `<stateDir>/zcode-home/<role>`, the per-Task isolation directory for a
- * working Agent with both halves of its Task identity, or the
- * `<stateDir>/zcode-home/agent` fallback.
+ * The home for this provisioning call: a Scrum identity reroutes under the
+ * Project state dir (v0.2.0, ADR 0049 §1 — the `scrum/zcode-home` twin of the
+ * Pi `scrum/harness` hierarchy, so SLP and Scrum never collide); otherwise an
+ * explicit standing-role home at `<stateDir>/zcode-home/<role>`, the per-Task
+ * isolation directory for a working Agent with both halves of its Task
+ * identity, or the `<stateDir>/zcode-home/agent` fallback.
  */
 function resolveRoleHome(input: ProvisionZcodeHomeOptions): string {
+  if (input.scrum !== undefined) {
+    if (typeof input.projectSlug !== "string" || input.projectSlug === "") {
+      throw new Error("scrum zcode-home provisioning requires a projectSlug");
+    }
+    const root = join(projectStateDir(input.stateDir, input.projectSlug), "scrum", "zcode-home");
+    return input.scrum.kind === "seat"
+      ? join(root, "seats", String(input.scrum.selectionRevision), input.scrum.generation, input.scrum.authority)
+      : join(root, "runs", input.scrum.runId, input.scrum.task, String(input.scrum.epoch));
+  }
   if (
     input.role === "agent" &&
     typeof input.projectSlug === "string" && input.projectSlug !== "" &&
@@ -180,10 +235,17 @@ function writeRoleContract(roleHome: string, role: ZcodeAgentRole, systemPrompt:
  * per-skill symlinks — Lead its three core skills, the working Agent every
  * installed skill except the Owner-only `factory` — reconciled so stale links
  * retire; `headless` stays strictly stripped.
+ *
+ * Since v0.2.0 (ADR 0049 §1) the Scrum seats ride the same scoped directory:
+ * an explicit `allowedSkills` list (the Scrum role's
+ * `resolveRoleSkillsForProject` set) reconciles `skills/` against exactly
+ * that list, and a Scrum `supervisor` — `scrum` identity present — takes
+ * every installed skill except `factory` as per-skill links instead of the
+ * whole-dir symlink the SLP supervisor keeps.
  */
-function provisionSkills(userSkillsDir: string, roleHome: string, role: ZcodeAgentRole): void {
+function provisionSkills(userSkillsDir: string, roleHome: string, role: ZcodeAgentRole, policy: Pick<ProvisionZcodeHomeOptions, "scrum" | "allowedSkills">): void {
   const skillsPath = join(roleHome, "skills");
-  if (role === "supervisor") {
+  if (role === "supervisor" && policy.scrum === undefined) {
     if (existsSync(userSkillsDir)) {
       ensureSymlink(userSkillsDir, skillsPath);
     } else {
@@ -196,9 +258,11 @@ function provisionSkills(userSkillsDir: string, roleHome: string, role: ZcodeAge
     return;
   }
   const allowed =
-    role === "lead"
-      ? CORE_LEAD_SKILLS.filter((name) => isSkillDir(join(userSkillsDir, name)))
-      : listInstalledSkills(userSkillsDir).filter((name) => name !== OWNER_ONLY_SKILL);
+    policy.allowedSkills !== undefined
+      ? policy.allowedSkills.filter((name) => isSkillDir(join(userSkillsDir, name)))
+      : role === "lead"
+        ? CORE_LEAD_SKILLS.filter((name) => isSkillDir(join(userSkillsDir, name)))
+        : listInstalledSkills(userSkillsDir).filter((name) => name !== OWNER_ONLY_SKILL);
   mkdirSync(skillsPath, { recursive: true });
   // Reconcile: anything outside the scoped set (a retired skill, a planted
   // link) is swept before the expected links are ensured.

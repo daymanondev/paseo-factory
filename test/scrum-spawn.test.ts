@@ -1,7 +1,7 @@
 import type { AgentCreateRequest } from "../plugin/server/roles.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createFactory } from "../src/factory.ts";
 import { makeTempDir, disposeDir, gitCommitAll } from "./helpers.ts";
@@ -226,6 +226,162 @@ test("mixed Projects preserve SLP homes and freeze Scrum role/model through crea
   assert.equal(mismatch.ok, false);
   if (!mismatch.ok) assert.equal(mismatch.code, "task-execution-mismatch");
   assert.equal(existsSync(join(state, "pi-agent/pm")), false);
+});
+
+test("Scrum seats and specialists on zcode/* lanes provision isolated Scrum zcode homes with the Scrum contract and role-scoped skills (v0.2.0, ADR 0049 §1)", async (t) => {
+  const { createFactory: createPluginFactory } = await import(
+    "../plugin/server/core/factory.ts"
+  );
+  const { resolveProject, ensureProjectRegistered } = await import(
+    "../plugin/server/core/project.ts"
+  );
+  const { ensureScrumConfig, saveScrumConfig, readExecution } = await import(
+    "../plugin/server/core/scrum/config.ts"
+  );
+  const { switchExecution } = await import(
+    "../plugin/server/core/scrum/execution.ts"
+  );
+  const { createScrumRun } = await import(
+    "../plugin/server/core/scrum/run-journal.ts"
+  );
+  const { SCRUM_ROLE_SKILLS } = await import(
+    "../plugin/server/core/scrum/prompts.ts"
+  );
+  const { ROLE_PROMPTS } = await import("../plugin/server/core/zcode-home.ts");
+  const { handleSpoolRequest } = await import("../plugin/server/spool.ts");
+  const { injectRoleOnCreate } = await import("../plugin/server/roles.ts");
+  const { prepareTaskWorktree } = await import(
+    "../plugin/server/core/workspace.ts"
+  );
+  const { readFileSync, readdirSync } = await import("node:fs");
+  const state = makeTempDir();
+  disposeDir(t, state);
+  const userHome = makeTempDir();
+  disposeDir(t, userHome);
+  // The seeded operator zcode skills — `factory` is the Owner-only exclusion.
+  for (const name of ["research", "domain-modeling", "tdd", "factory"]) {
+    mkdirSync(join(userHome, ".zcode", "skills", name), { recursive: true });
+    writeFileSync(join(userHome, ".zcode", "skills", name, "SKILL.md"), `# ${name}\n`);
+  }
+  const repo = makeTempDir();
+  disposeDir(t, repo);
+  writeFileSync(join(repo, "README.md"), "fixture");
+  gitCommitAll(repo);
+  const project = resolveProject(repo);
+  assert.equal(project.ok, true);
+  if (!project.ok) return;
+  ensureProjectRegistered(state, project);
+  const factory = createPluginFactory({ stateDir: state });
+  await switchExecution({
+    state,
+    slug: project.slug,
+    mode: "scrum",
+    blockers: [],
+    rotate: async () => {},
+  });
+  let config = ensureScrumConfig(state, project.slug);
+  config = saveScrumConfig(
+    state,
+    {
+      ...config,
+      lanes: { ...config.lanes, pm: "zcode/glm-5.3", supervisor: "zcode/glm-5.3" },
+    },
+    project.slug,
+  );
+  createScrumRun({
+    state,
+    slug: project.slug,
+    runId: "run-z",
+    initiativeId: "delivery",
+    config,
+    configRevision: config.configRevision!,
+    track: "backend",
+    rationale: "planning",
+    requestId: "create",
+    ownedPaths: [".scratch/delivery/prd.md"],
+  });
+  const contracted = await handleSpoolRequest(factory, {
+    id: "z1",
+    kind: "contract",
+    task: "plan",
+    workspace: repo,
+    gate: "true",
+    role: "pm",
+    runId: "run-z",
+    submitter: "owner",
+  });
+  assert.equal(contracted.ok, true, JSON.stringify(contracted));
+  const contract = factory.contractFor("plan")!;
+  const wt = prepareTaskWorktree({
+    stateDir: state,
+    workspace: repo,
+    task: "plan",
+    base: contract.base,
+  });
+  assert.equal(wt.ok, true);
+  if (!wt.ok) return;
+
+  // The specialist: a pm Task contracted on a zcode lane — its clean room is
+  // the Scrum run-epoch home, never the shared SLP zcode-home roots.
+  const injected = injectRoleOnCreate(
+    {
+      config: { cwd: wt.path, provider: "factory-peer" },
+    } as AgentCreateRequest,
+    state,
+    userHome,
+  )!;
+  const specialistHome = join(
+    state,
+    "projects",
+    project.slug,
+    "scrum/zcode-home/runs/run-z/plan",
+    String(contract.seq),
+  );
+  assert.equal(injected.env!.ZCODE_STORAGE_DIR, specialistHome, "the Scrum specialist's ZCODE_STORAGE_DIR sits under the Project state dir");
+  assert.equal(injected.env!.ZCODE_SESSION_DB_PATH, join(specialistHome, "db", "db.sqlite"), "the Scrum specialist owns its own sqlite path");
+  assert.equal(injected.config.provider, "zcode", "the frozen Scrum lane rewrites the provider onto zcode");
+  const specialistContract = readFileSync(join(specialistHome, "ROLE_SYSTEM.md"), "utf8");
+  assert.ok(specialistContract.startsWith("<!-- paseo-factory scrum"), "ROLE_SYSTEM.md carries the Scrum prompt mark");
+  assert.match(specialistContract, /Specialization: pm/, "ROLE_SYSTEM.md carries the Scrum specialization");
+  assert.match(specialistContract, new RegExp(`Project: ${project.slug}; run: run-z; Task: plan; epoch: ${contract.seq}`), "ROLE_SYSTEM.md carries the task identity payload");
+  assert.notEqual(specialistContract, ROLE_PROMPTS.agent, "ROLE_SYSTEM.md is never the SLP agent fallback");
+  assert.deepEqual(
+    readdirSync(join(specialistHome, "skills")).sort(),
+    [...SCRUM_ROLE_SKILLS.pm].sort(),
+    "skills/ symlinks exactly the Scrum pm role-skill list",
+  );
+  assert.ok(!readdirSync(join(specialistHome, "skills")).includes("factory"), "the Owner-only factory skill never reaches the specialist");
+
+  // The standing seat: the Supervisor on a zcode lane — seats/<selectionRevision>/<generation>/<authority>.
+  const seat = injectRoleOnCreate(
+    {
+      config: { cwd: repo, provider: "factory-supervisor", title: "Ship it" },
+    } as AgentCreateRequest,
+    state,
+    userHome,
+  )!;
+  const revision = readExecution(state, project.slug).revision;
+  const seatHome = join(
+    state,
+    "projects",
+    project.slug,
+    "scrum/zcode-home/seats",
+    String(revision),
+    seat.env!.PASEO_FACTORY_CORRELATION!,
+    "supervisor",
+  );
+  assert.equal(seat.env!.ZCODE_STORAGE_DIR, seatHome, "the Scrum seat's ZCODE_STORAGE_DIR sits under the Project state dir");
+  assert.equal(seat.env!.ZCODE_SESSION_DB_PATH, join(seatHome, "db", "db.sqlite"));
+  assert.equal(seat.env!.ZCODE_DISALLOWED_TOOLS, "Write,Edit,MultiEdit,NotebookEdit,DeleteFile", "the Scrum seat keeps the Layer-1 write-tool lock");
+  const seatContract = readFileSync(join(seatHome, "ROLE_SYSTEM.md"), "utf8");
+  assert.ok(seatContract.startsWith("<!-- paseo-factory scrum"), "the seat's ROLE_SYSTEM.md carries the Scrum prompt mark");
+  assert.match(seatContract, /Authority: supervisor/, "the seat's ROLE_SYSTEM.md carries the Scrum authority");
+  assert.notEqual(seatContract, ROLE_PROMPTS.supervisor, "the seat's ROLE_SYSTEM.md is never the SLP supervisor fallback");
+  assert.deepEqual(
+    readdirSync(join(seatHome, "skills")).sort(),
+    ["domain-modeling", "research", "tdd"],
+    "the Scrum supervisor gets every installed host skill except factory",
+  );
 });
 
 test("Scrum create hooks preserve authority and provider-specific fences across all supported families", async (t) => {
@@ -946,12 +1102,54 @@ test('Windows-safe task allocation disables autocrlf before checkout without cha
   assert.equal(execFileSync('git', ['-C', repo, 'config', 'core.autocrlf'], { encoding: 'utf8' }).trim(), 'true');
 });
 
-test('Scrum specialists retain enabled Open Design helper tools', async () => {
+test('isScrumRoleBlockedHelperMcp keeps seats on the bridge and withholds only the anchored denylist from planning roles', async () => {
+  const { isScrumRoleBlockedHelperMcp } = await import('../src/scrum/harness.ts');
+  for (const seat of ['supervisor', 'lead'] as const) {
+    assert.equal(isScrumRoleBlockedHelperMcp(seat, 'sequential-thinking'), true, `${seat} blocks helper servers`);
+    assert.equal(isScrumRoleBlockedHelperMcp(seat, 'zai-vision'), true);
+    assert.equal(isScrumRoleBlockedHelperMcp(seat, 'paseo_factory'), false, `${seat} keeps the bridge`);
+    assert.equal(isScrumRoleBlockedHelperMcp(seat, 'paseo-factory'), false, `${seat} keeps the hyphenated bridge`);
+  }
+  for (const role of ['pm', 'architect'] as const) {
+    for (const name of ['zai-vision', 'zai-mcp-server', 'chrome-devtools-mcp', 'chrome-devtools', 'playwright-mcp', 'playwright', 'open-design', 'open_design', 'ZAI-VISION'])
+      assert.equal(isScrumRoleBlockedHelperMcp(role, name), true, `${role} blocks ${name}`);
+    for (const name of ['sequential-thinking', 'notion-mcp-server', 'science_biomolecular_structure_viewer_mcp', 'github', 'linear', 'zai-vision-relay', 'chrome-devtools-proxy'])
+      assert.equal(isScrumRoleBlockedHelperMcp(role, name), false, `${role} keeps ${name}`);
+  }
+  for (const role of ['ux', 'dev', 'qa'] as const)
+    for (const name of ['zai-vision', 'chrome-devtools-mcp', 'playwright', 'open-design', 'linear'])
+      assert.equal(isScrumRoleBlockedHelperMcp(role, name), false, `${role} keeps ${name}`);
+});
+
+test('scopeScrumCapabilities passes the Owner catalog through specialists and strands seats on the bridge alone', async (t) => {
   const { scopeScrumCapabilities } = await import('../src/scrum/harness.ts');
+  const home = makeTempDir(); disposeDir(t, home);
+  const ownerCatalog: Record<string, unknown> = {
+    'sequential-thinking': {}, 'notion-mcp-server': {}, 'science_biomolecular_structure_viewer_mcp': {},
+    github: {}, linear: {}, 'zai-vision': {}, 'chrome-devtools-mcp': {}, playwright: {}, 'open-design': {},
+    paseo_factory: {},
+  };
+  const passThrough = ['sequential-thinking', 'notion-mcp-server', 'science_biomolecular_structure_viewer_mcp', 'github', 'linear'];
+  const visual = ['zai-vision', 'chrome-devtools-mcp', 'playwright', 'open-design'];
   for (const role of ['pm', 'ux', 'architect', 'dev', 'qa'] as const) {
     const identity = { kind: 'task' as const, task: role, epoch: 1, binding: { mode: 'scrum' as const, role, runId: 'r', policyRevision: 'p', configRevision: 1, artifactRefs: [] } };
-    const scoped = scopeScrumCapabilities({ mcpServers: { 'open-design': { command: 'od' }, open_design: { command: 'od' }, unsafe: {} } }, 'agent', identity);
-    assert.ok(scoped.mcpServers?.['open-design']); assert.ok(scoped.mcpServers?.open_design); assert.equal(scoped.mcpServers?.unsafe, undefined);
+    for (const provider of ['claude', 'codex', 'opencode']) {
+      const scoped = scopeScrumCapabilities({ provider, providerOptions: {}, mcpServers: { ...ownerCatalog } }, 'agent', identity, undefined, { userHome: home });
+      const servers = Object.keys(scoped.mcpServers ?? {});
+      assert.ok(servers.includes('paseo_factory'), `${role}/${provider} keeps the bridge`);
+      for (const name of passThrough)
+        assert.equal(servers.includes(name), true, `${role}/${provider} keeps Owner-enabled ${name}`);
+      for (const name of visual)
+        assert.equal(servers.includes(name), role === 'ux' || role === 'dev' || role === 'qa', `${role}/${provider} denylist parity on ${name}`);
+    }
+  }
+  const seatConfig = {
+    schemaVersion: 1 as const, requireUiApproval: true,
+    lanes: Object.fromEntries(['supervisor', 'lead', 'pm', 'ux', 'architect', 'dev', 'qa', 'watch', 'retro'].map(k => [k, 'pi/model'])) as import('../src/scrum/config.ts').ScrumConfig['lanes'],
+  };
+  for (const seat of ['supervisor', 'lead'] as const) {
+    const scoped = scopeScrumCapabilities({ provider: 'claude', mcpServers: { ...ownerCatalog } }, seat, { kind: 'seat', selectionRevision: 1, config: seatConfig });
+    assert.deepEqual(Object.keys(scoped.mcpServers ?? {}), ['paseo_factory']);
   }
 });
 
@@ -1084,6 +1282,42 @@ test('Scrum Pi homes provision Project packs and explicit Contract skills throug
     const scoped = scopeScrumCapabilities({ provider: 'opencode', providerOptions: {} }, 'agent', { ...identity, binding: { ...identity.binding, role } }, undefined, { userHome });
     assert.equal((scoped.providerOptions as any).permission.skill['expo-overview'], 'allow');
     assert.equal((scoped.providerOptions as any).permission.skill['contract-skill'], 'allow');
+  }
+});
+
+test('Scrum Pi homes sync the Owner Helper catalog and sweep the unified denylist per role', async (t) => {
+  const { readFileSync } = await import('node:fs');
+  const { provisionScrumHarness } = await import('../src/scrum/harness.ts');
+  const { ensureScrumConfig } = await import('../src/scrum/config.ts');
+  const { createScrumRun, commandRun, readRun } = await import('../src/scrum/run-journal.ts');
+  const { resolveProject, ensureProjectRegistered } = await import('../src/project.ts');
+  const state = makeTempDir(), repo = makeTempDir(), userHome = makeTempDir();
+  for (const dir of [state, repo, userHome]) disposeDir(t, dir);
+  writeFileSync(join(repo, 'README.md'), 'fixture'); gitCommitAll(repo);
+  const project = resolveProject(repo); assert.ok(project.ok);
+  if (!project.ok) return;
+  ensureProjectRegistered(state, project);
+  const ownerNames = ['sequential-thinking', 'notion-mcp-server', 'science_biomolecular_structure_viewer_mcp', 'github', 'zai-vision', 'chrome-devtools-mcp', 'playwright', 'open-design'];
+  // The Owner flow `setHelperMcpEnabled` records: host-source server definitions
+  // plus enable overrides in the persisted catalog at <stateDir>/helper-mcps.json.
+  writeFileSync(join(userHome, '.claude.json'), JSON.stringify({ mcpServers: Object.fromEntries(ownerNames.map(name => [name, { command: process.execPath }])) }));
+  writeFileSync(join(state, 'helper-mcps.json'), JSON.stringify({ overrides: Object.fromEntries(ownerNames.map(name => [name, true])) }));
+  const run = createScrumRun({ state, slug: project.slug, runId: 'catalog', initiativeId: 'catalog', config: ensureScrumConfig(state, project.slug), configRevision: 1, track: 'backend', rationale: 'catalog', requestId: 'create', ownedPaths: [] });
+  commandRun(state, project.slug, run.runId, { type: 'readiness_recorded', requestId: 'ready', expectedRevision: readRun(state, project.slug, run.runId).revision, readiness: { refs: [], contradictions: [], unsafeAssumptions: [], missingCoverage: [], rationale: 'backend track readiness' } });
+  const keep = ['sequential-thinking', 'notion-mcp-server', 'science_biomolecular_structure_viewer_mcp', 'github'];
+  const visual = ['zai-vision', 'chrome-devtools-mcp', 'playwright', 'open-design'];
+  const mcpServersOf = (roleHome: string) => Object.keys(JSON.parse(readFileSync(join(roleHome, 'mcp.json'), 'utf8')).mcpServers);
+  for (const role of ['pm', 'ux', 'architect', 'dev', 'qa'] as const) {
+    const identity = { kind: 'task' as const, task: role, epoch: 1, binding: { mode: 'scrum' as const, role, runId: run.runId, configRevision: run.configRevision, policyRevision: run.policyRevision, artifactRefs: [] } };
+    const servers = mcpServersOf(provisionScrumHarness({ state, slug: project.slug, authority: 'agent', identity, generation: 'g', userHome, workspace: repo }));
+    assert.ok(servers.includes('paseo_factory'), `${role} keeps the bridge`);
+    for (const name of keep) assert.equal(servers.includes(name), true, `${role} syncs Owner-enabled ${name}`);
+    for (const name of visual) assert.equal(servers.includes(name), role === 'ux' || role === 'dev' || role === 'qa', `${role} mcp.json denylist parity on ${name}`);
+  }
+  const seatConfig = ensureScrumConfig(state, project.slug);
+  for (const seat of ['supervisor', 'lead'] as const) {
+    const roleHome = provisionScrumHarness({ state, slug: project.slug, authority: seat, identity: { kind: 'seat', selectionRevision: 1, config: seatConfig }, generation: 'g', userHome });
+    assert.deepEqual(mcpServersOf(roleHome), ['paseo_factory']);
   }
 });
 
