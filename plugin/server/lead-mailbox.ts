@@ -390,6 +390,9 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   const failedFirstTurnAgentIds = new Set<string>();
   const pendingHandoffByAgentId = new Map<string, string>();
   const inFlightHandoffByAgentId = new Map<string, string>();
+  // v0.2.1 hold marker, v0.2.2 (ADR 0050 §1): accelerator only — the durable
+  // in-flight arm of `projectPeerInFlight` carries quiet-point correctness
+  // across daemon restarts and plugin updates; this Set dissolves with them.
   const interruptedPeerIds = new Set<string>();
   const clearHandoffTimer = (slug: string): void => {
     const timer = handoffTimers.get(slug);
@@ -1285,30 +1288,47 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     (task.status === "red" && task.attempts.length >= MAX_ATTEMPTS) ||
     (queuedPeerBlockerTasks?.has(task.task) ?? false);
 
+  /**
+   * The quiet-point predicate for `rotation_pending` (v0.0.99/v0.0.93, ADR
+   * 0031 §3). v0.2.2 (ADR 0050 §1) adds the durable in-flight arm: a Task
+   * whose spawn round is still open and whose bound Peer is live on the
+   * daemon and not `error` (`running`, `initializing`, `idle`, `closed`
+   * alike) holds the rotation — the judgment reads only the ledger,
+   * `mailbox.jsonl`, and the live daemon snapshot, so daemon restarts,
+   * plugin updates, and reboots cannot dissolve the hold. Tasks whose
+   * folded status is Peer-terminal or that carry queued `from: "peer"` mail
+   * (verdict or blocker — the work is back in the Lead's court) never hold.
+   * The `interruptedPeerIds` turn-event marker remains an accelerator only.
+   */
   const projectPeerInFlight = async (slug: string): Promise<boolean> => {
     const reg = readProjectRegistration(deps.stateDir, slug);
     if (reg?.root === undefined) return false;
     const events = projectEventsOf(slug, reg.root);
     const tasks = foldTasks(events);
     let queuedPeerBlockerTasks: Set<string> | undefined;
+    let queuedPeerMailTasks: Set<string> | undefined;
     try {
       const mailbox = readLeadMailbox(mailboxPath(slug));
-      queuedPeerBlockerTasks = new Set(
-        mailbox.queued
-          .filter((item) => item.from === "peer" && item.kind === "needs_human" && typeof item.task === "string")
-          .map((item) => item.task!),
-      );
+      const queuedPeerMail = mailbox.queued.filter((item) => item.from === "peer" && typeof item.task === "string");
+      queuedPeerBlockerTasks = new Set(queuedPeerMail.filter((item) => item.kind === "needs_human").map((item) => item.task!));
+      queuedPeerMailTasks = new Set(queuedPeerMail.map((item) => item.task!));
     } catch {
       queuedPeerBlockerTasks = undefined;
+      queuedPeerMailTasks = undefined;
     }
     const settledTasks = new Set(
       tasks.filter((task) => taskHasSettledPeerOutcome(task, queuedPeerBlockerTasks)).map((task) => task.task),
     );
     const live = [...(await liveAgentsById()).values()];
-    const activeWaveEvents = settledTasks.size > 0
-      ? events.filter((evt) => !("task" in evt) || typeof evt.task !== "string" || !settledTasks.has(evt.task))
+    const activeWaveEvents = settledTasks.size > 0 || (queuedPeerMailTasks?.size ?? 0) > 0
+      ? events.filter(
+          (evt) =>
+            !("task" in evt) ||
+            typeof evt.task !== "string" ||
+            (!settledTasks.has(evt.task) && !(queuedPeerMailTasks?.has(evt.task) ?? false)),
+        )
       : events;
-    if (driverWaveInFlight(activeWaveEvents, live, slug)) return true;
+    if (driverWaveInFlight(activeWaveEvents, live, slug, "live")) return true;
     return tasks.some(
       (task) =>
         !settledTasks.has(task.task) &&
@@ -2012,11 +2032,22 @@ function contractWorkspaceOf(events: readonly LedgerEvent[], task: string): stri
  * before any agent exists) — the id arm is the defensive read for any future
  * writer that stamps it, with the CLI Driver's own `"driver"` marker treated
  * as absent.
+ *
+ * v0.2.2 (ADR 0050 §1, the durable in-flight arm): `liveness: "live"` keeps
+ * an open round while its bound `Peer` is merely live and not `error` —
+ * `idle`/`closed` included, because `idle`-because-paused and
+ * `idle`-between-turns are indistinguishable at the only layer that survives
+ * restarts (the ledger plus the live daemon snapshot). Only the quiet-point
+ * check (`projectPeerInFlight`) passes `"live"`; the default `"running"`
+ * arm (running/initializing only) keeps governing `notifyPeer`'s pump gate
+ * and `projectHasPeerWork`; a `Peer` that has already queued its verdict
+ * must never hold the Lead's mail delivery.
  */
 function driverWaveInFlight(
   events: readonly LedgerEvent[],
   liveAgents?: readonly SurfaceAgentSnapshot[],
   projectSlug?: string,
+  liveness?: "running" | "live",
 ): boolean {
   const openRounds = new Map<string, Extract<LedgerEvent, { event: "spawn_dispatched" }>>();
   for (const evt of events) {
@@ -2032,16 +2063,18 @@ function driverWaveInFlight(
       const stampedAgent = (spawnEvt as { agent?: unknown }).agent;
       const spawnedAgentId =
         typeof stampedAgent === "string" && stampedAgent !== "" && stampedAgent !== "driver" ? stampedAgent : undefined;
-      const hasRunningPeer = liveAgents.some(
+      const peerIsLively = (agent: SurfaceAgentSnapshot): boolean =>
+        liveness === "live" ? agent.status !== "error" : agent.status === "running" || agent.status === "initializing";
+      const hasLivePeer = liveAgents.some(
         (agent) =>
           agent.archivedAt === null &&
-          (agent.status === "running" || agent.status === "initializing") &&
+          peerIsLively(agent) &&
           ((wt !== undefined && typeof agent.cwd === "string" && (agent.cwd === wt || agent.cwd.startsWith(`${wt}/`))) ||
             (agent.labels?.task === task &&
               (projectSlug === undefined || agent.labels?.project === undefined || agent.labels?.project === projectSlug)) ||
             (spawnedAgentId !== undefined && agent.id === spawnedAgentId)),
       );
-      if (!hasRunningPeer) openRounds.delete(task);
+      if (!hasLivePeer) openRounds.delete(task);
     }
   }
   return openRounds.size > 0;

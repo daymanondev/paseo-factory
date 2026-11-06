@@ -1510,6 +1510,144 @@ test("a pending rotation pumps into a handoff after its Peer stops even without 
   assert.equal(fake.sent.filter(s => s.agentId === "agent-created-1").length, 1, "a second pump re-delivers nothing");
 });
 
+test("a paused-then-idle Peer on an open spawn round holds rotation_pending across a bare pump — a live-not-error Peer is not a quiet point (v0.2.2, ADR 0050 §1)", async (t) => {
+  const lead: FakeAgent = { id: "lead-paused-peer", status: "idle", lastUsage: { contextWindowUsedTokens: 132_000 } };
+  const { stateDir, slug, projectRoot, factory, surface, leadMail, fake } = makeSpooledRuntime(t, [lead]);
+  lead.labels = { seat: "lead", project: slug };
+  lead.cwd = projectRoot;
+  await surface.leadEnsure({ projectRoot });
+
+  const root = readProjectRegistration(stateDir, slug)!.root!;
+  factory.setContract({ task: "T-PAUSE", workspace: root, gate: "true" });
+  const worktree = taskWorktreePath(stateDir, slug, "T-PAUSE");
+  factory.requestSpawn({ task: "T-PAUSE", provider: "pi/model", arity: 1, worktree });
+  const peer: FakeAgent = { id: "peer-paused", status: "running", cwd: worktree, labels: { seat: "agent", project: slug, task: "T-PAUSE" } };
+  fake.agents.unshift(peer);
+
+  // 1. The Lead crosses the threshold while the Peer runs: rotation_pending holds.
+  await leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [] });
+  assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "rotation_pending");
+  assert.equal(fake.sent.length, 0, "no extraction prompt while the Peer runs");
+
+  // 2. The Owner pauses the Peer mid-Task: the daemon collects the seat to
+  //    idle with no Task outcome on record (no turn event reaches this
+  //    runtime — the in-process marker is empty). The Task's round is still
+  //    open and its bound Peer is live and not `error`, so pausing must
+  //    freeze the succession: a bare pump — the startup `pumpAll` path —
+  //    never begins the handoff.
+  peer.status = "idle";
+  await leadMail.pumpProjectLead(slug);
+  assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "rotation_pending", "a paused-but-alive idle Peer is not a quiet point");
+  assert.equal(fake.sent.filter((s) => s.agentId === lead.id).length, 0, "no extraction prompt reached the outgoing Lead");
+  assert.equal(fake.created.length, 0, "no successor Lead was spawned");
+});
+
+test("the paused-Peer hold survives a runtime restart — a fresh runtime over the same stateDir with empty in-process markers still holds (v0.2.2, ADR 0050 §1)", async (t) => {
+  const lead: FakeAgent = { id: "lead-paused-restart", status: "idle", lastUsage: { contextWindowUsedTokens: 132_000 } };
+  const { stateDir, slug, projectRoot, factory, surface, leadMail, fake } = makeSpooledRuntime(t, [lead]);
+  lead.labels = { seat: "lead", project: slug };
+  lead.cwd = projectRoot;
+  await surface.leadEnsure({ projectRoot });
+
+  const root = readProjectRegistration(stateDir, slug)!.root!;
+  factory.setContract({ task: "T-PAUSE-RESTART", workspace: root, gate: "true" });
+  const worktree = taskWorktreePath(stateDir, slug, "T-PAUSE-RESTART");
+  factory.requestSpawn({ task: "T-PAUSE-RESTART", provider: "pi/model", arity: 1, worktree });
+  const peer: FakeAgent = { id: "peer-paused-restart", status: "running", cwd: worktree, labels: { seat: "agent", project: slug, task: "T-PAUSE-RESTART" } };
+  fake.agents.unshift(peer);
+
+  await leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [] });
+  assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "rotation_pending");
+  peer.status = "idle";
+  await leadMail.pumpProjectLead(slug);
+  assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "rotation_pending", "the hold is armed before the restart");
+
+  // A daemon restart / plugin update dissolves every in-process marker. The
+  // fresh runtime's judgment must read only the ledger, `mailbox.jsonl`, and
+  // the live daemon snapshot — the hold stands.
+  leadMail.stop();
+  const restarted = createLeadMailRuntime({
+    factory,
+    stateDir,
+    daemon: fake.daemon,
+    ensureLead: (input) => surface.leadEnsure(input),
+    retireLead: (input) => surface.leadRotate(input),
+  });
+  t.after(() => restarted.stop());
+  await restarted.pumpProjectLead(slug);
+  assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "rotation_pending", "the fresh runtime still holds — the hold is durable");
+  assert.equal(fake.sent.filter((s) => s.agentId === lead.id).length, 0, "no extraction prompt after the restart");
+  assert.equal(fake.created.length, 0, "no successor Lead was spawned after the restart");
+});
+
+test("a queued from-peer verdict mail releases the paused-Peer hold — the wave is back in the Lead's court (v0.2.2, ADR 0050 §1)", async (t) => {
+  const lead: FakeAgent = { id: "lead-verdict-release", status: "idle", lastUsage: { contextWindowUsedTokens: 132_000 } };
+  const { stateDir, slug, projectRoot, factory, surface, leadMail, fake } = makeSpooledRuntime(t, [lead]);
+  lead.labels = { seat: "lead", project: slug };
+  lead.cwd = projectRoot;
+  await surface.leadEnsure({ projectRoot });
+
+  const root = readProjectRegistration(stateDir, slug)!.root!;
+  factory.setContract({ task: "T-VERDICT", workspace: root, gate: "true" });
+  const worktree = taskWorktreePath(stateDir, slug, "T-VERDICT");
+  factory.requestSpawn({ task: "T-VERDICT", provider: "pi/model", arity: 1, worktree });
+  const peer: FakeAgent = { id: "peer-verdict", status: "running", cwd: worktree, labels: { seat: "agent", project: slug, task: "T-VERDICT" } };
+  fake.agents.unshift(peer);
+
+  await leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [] });
+  assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "rotation_pending");
+
+  // The paused-looking idle Peer would hold under the durable arm — but the
+  // Peer has queued its verdict, so the Task is back in the Lead's court and
+  // notifyPeer's pump must begin the handoff (the round itself may still be
+  // open in the ledger until the gate lands).
+  peer.status = "idle";
+  await leadMail.notifyPeer({ task: "T-VERDICT", kind: "verdict", text: "T-VERDICT attempt 1 ended GREEN" });
+  assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "handing_over", "queued peer mail releases the hold");
+  assert.equal(fake.sent.filter((s) => s.agentId === lead.id).length, 1, "the extraction prompt reached the outgoing Lead");
+});
+
+for (const death of ["error", "absent", "archived"] as const) {
+  test(`an ${death} Peer on an open round never holds rotation_pending — the anti-deadlock law stands (v0.2.2, ADR 0050 §1)`, async (t) => {
+    const lead: FakeAgent = { id: `lead-dead-${death}`, status: "idle", lastUsage: { contextWindowUsedTokens: 132_000 } };
+    const { stateDir, slug, projectRoot, factory, surface, leadMail, fake } = makeSpooledRuntime(t, [lead]);
+    lead.labels = { seat: "lead", project: slug };
+    lead.cwd = projectRoot;
+    await surface.leadEnsure({ projectRoot });
+
+    const root = readProjectRegistration(stateDir, slug)!.root!;
+    factory.setContract({ task: "T-DEAD", workspace: root, gate: "true" });
+    const worktree = taskWorktreePath(stateDir, slug, "T-DEAD");
+    factory.requestSpawn({ task: "T-DEAD", provider: "pi/model", arity: 1, worktree });
+    const peer: FakeAgent = { id: "peer-dead", status: "running", cwd: worktree, labels: { seat: "agent", project: slug, task: "T-DEAD" } };
+    fake.agents.unshift(peer);
+
+    await leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [] });
+    assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "rotation_pending");
+
+    // The paused shape (idle, no turn event seen) holds under the durable
+    // arm; a Peer that is in `error`, archived, or absent from the daemon
+    // never does — the Lead owns re-dispatch, and a dead Peer can never
+    // deadlock the mailbox.
+    peer.status = "idle";
+    if (death === "error") peer.status = "error";
+    else if (death === "absent") fake.agents.splice(fake.agents.indexOf(peer), 1);
+    else {
+      const list = fake.daemon.agents.list;
+      fake.daemon.agents.list = async (options) => {
+        const page = await list(options);
+        for (const entry of page.entries) {
+          if (entry.agent.id === peer.id) entry.agent.archivedAt = "2026-11-06T00:00:00.000Z";
+        }
+        return page;
+      };
+    }
+    await leadMail.pumpProjectLead(slug);
+    assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "handing_over", `a ${death} Peer releases the hold`);
+    assert.equal(fake.sent.filter((s) => s.agentId === lead.id).length, 1, "the pump began the extraction turn");
+  });
+}
+
 test("pumping an empty project without a held handoff does not create a Lead", async (t) => {
   const { slug, leadMail, fake } = makeSpooledRuntime(t);
   await leadMail.pumpProjectLead(slug);
@@ -2183,7 +2321,11 @@ test("rotation_pending holds when a Peer turn fails to idle on an unsettled Task
   assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "rotation_pending", "rotation_pending stays held while interrupted Peer is idle on unsettled Task");
   assert.equal(fake.sent.filter((s) => s.agentId === lead.id).length, 0);
 
-  // 3. Peer later resumes and completes its turn -> rotation_pending transitions to handing_over.
+  // 3. Peer later resumes and completes its turn WITH its outcome (the gate
+  //    lands GREEN) -> the Task settles and rotation_pending transitions to
+  //    handing_over. (v0.2.2, ADR 0050 §1: a live-but-idle Peer on an open
+  //    round holds by itself — only the Task's own outcome releases.)
+  factory.ledger.append({ event: "gate_finished", task: "T-OUTAGE", attempt: 1, verdict: "green", exit: 0, note: "" });
   await leadMail.onLeadTurnEnded({ agentId: peer.id, outcome: { kind: "completed" }, timeline: [] });
   assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "handing_over");
   assert.equal(fake.sent.filter((s) => s.agentId === lead.id).length, 1);
@@ -2206,9 +2348,8 @@ test("rotation_pending holds when a Peer turn fails to idle on an unsettled Task
   assert.equal(readProjectRegistration(stateDir, slug)?.lead, successor1Id, "does not immediately replace and re-pump into an active outage");
   assert.equal(fake.sent.filter((s) => s.agentId === successor1Id).length, 1);
 
-  // 6. Once the Peer later claims GREEN (new mail event), drainLeadMailbox self-heals the errored Lead
+  // 6. Once the Peer's GREEN verdict mail arrives (new mail event), drainLeadMailbox self-heals the errored Lead
   //    and delivers the full Seat kickoff packet + preserved handoff + GREEN verdict to Successor Lead 2.
-  factory.ledger.append({ event: "gate_finished", task: "T-OUTAGE", attempt: 1, verdict: "green", exit: 0, note: "" });
   await leadMail.notifyPeer({ task: "T-OUTAGE", kind: "verdict", text: "T-OUTAGE attempt 1 ended GREEN" });
 
   const successor2Id = readProjectRegistration(stateDir, slug)?.lead!;
