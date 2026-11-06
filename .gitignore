@@ -21,3 +21,6 @@ __pycache__/
 
 # Local issue tracker (engineering skills) — not published
 .scratch/
+
+# Open Design local export (agent machinery — never committed or pushed)
+design/
