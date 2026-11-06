@@ -1183,8 +1183,11 @@ test("Fuse 1: beginHandoff immediately completes handoff when extraction prompt 
     assert.match(successorSends[0]!.text, /task T-FUSE1/);
     assert.match(successorSends[0]!.text, /Continue after send throw/);
 
-    // Supervisor was never paged
-    assert.equal(fake.sent.filter((s) => s.agentId === "agent-sup-1").length, 0);
+    // v0.2.2 (ADR 0050 Decision 4): the degraded completion is loud — exactly one
+    // Supervisor send, carrying the extraction-send-failed reason.
+    const supSends = fake.sent.filter((s) => s.agentId === "agent-sup-1");
+    assert.equal(supSends.length, 1, "the Supervisor was paged exactly once");
+    assert.match(supSends[0]!.text, /extraction-send-failed/);
   }
 
   // Case B: outgoing Lead is in status === "error" at >= 128k turn end
@@ -1247,7 +1250,7 @@ test("Fuse 1: beginHandoff immediately completes handoff when extraction prompt 
   }
 });
 
-test("Fuse 2: handing_over timeout (via scheduled timer and via pumpProjectLead) retires stuck Lead, spawns successor Lead with interrupted-extraction fallback note, resets rotationState, and drains held mail without paging Supervisor (v0.0.28, ADR 0018 §3)", async (t) => {
+test("Fuse 2: handing_over timeout (via scheduled timer and via pumpProjectLead) retires stuck Lead, spawns successor Lead with interrupted-extraction fallback note, resets rotationState, drains held mail, and pages Supervisor with exactly one degraded-completion notice (v0.0.28 ADR 0018 §3; v0.2.2 ADR 0050 Decision 4)", async (t) => {
   // Case A: Scheduled timer fires after handoffTimeoutMs (40ms) when outgoing Lead hangs during extraction
   {
     const lead: FakeAgent = {
@@ -1311,7 +1314,11 @@ test("Fuse 2: handing_over timeout (via scheduled timer and via pumpProjectLead)
     assert.equal(readFileSync(handoffPath, "utf8"), "# Stale Handoff From Yesterday\nDo not use.");
     assert.match(successorSends[0]!.text, /task T-FUSE2-TIMER/);
     assert.match(successorSends[0]!.text, /Held mail drained by timer fuse/);
-    assert.equal(fake.sent.filter((s) => s.agentId === "agent-sup-1").length, 0, "Supervisor was not paged");
+    // v0.2.2 (ADR 0050 Decision 4): the degraded completion is loud — exactly one
+    // Supervisor send, carrying the extraction-timeout reason.
+    const supSends = fake.sent.filter((s) => s.agentId === "agent-sup-1");
+    assert.equal(supSends.length, 1, "the Supervisor was paged exactly once");
+    assert.match(supSends[0]!.text, /extraction-timeout/);
   }
 
   // Case B: pumpProjectLead immediately trips Fuse 2 when handing_over has exceeded handoffTimeoutMs
@@ -1516,6 +1523,163 @@ test("a handing_over episode sends at most 3 extraction prompts — at the ceili
   assert.ok(successorSends[0]!.text.includes("# Prior Handoff\nThe last-known-good baton."));
   const snapshot = JSON.parse(readFileSync(join(projectStateDir(stateDir, slug), "lead-handoff-extraction.json"), "utf8")) as { sends?: number };
   assert.equal(snapshot.sends, 3, "the durable episode record counted exactly 3 sends");
+});
+
+test("loud degraded completion: every degraded handoff completion appends exactly one Supervisor needs_human mail (reason-distinguished, staleness-stated) while the rotation still completes autonomously — healthy rotations append nothing (v0.2.2, ADR 0050 Decision 4)", async (t) => {
+  const supervisorNeedsHuman = (stateDir: string, slug: string) =>
+    readMailboxLines(stateDir, slug).filter((line) => line.type === "mail_queued" && line.to === "supervisor" && line.kind === "needs_human");
+
+  // Case A: extraction-send-failed — the extraction send throws during beginHandoff (Fuse 1 bypass). No prior exists,
+  // so the successor's handoff layer is the interrupted-extraction fallback note.
+  {
+    const lead: FakeAgent = {
+      id: "agent-lead-loud-sendfail",
+      title: "Lead (paseo-factory)",
+      status: "idle",
+      labels: {},
+      lastUsage: { contextWindowUsedTokens: 135_000, contextWindowMaxTokens: 200_000 },
+    };
+    const supervisor: FakeAgent = { id: "agent-sup-loud-sendfail", title: "Supervisor (paseo-factory)", status: "idle", labels: {} };
+    const { stateDir, slug, projectRoot, surface, leadMail, fake } = makeSpooledRuntime(t, [lead, supervisor]);
+    lead.labels = { seat: "lead", project: slug };
+    lead.cwd = projectRoot;
+    supervisor.labels = { seat: "supervisor", project: slug };
+    supervisor.cwd = projectRoot;
+    await surface.leadEnsure({ projectRoot });
+    await surface.supervisorEnsure({ projectRoot });
+
+    const origRef = fake.daemon.agents.ref.bind(fake.daemon.agents);
+    fake.daemon.agents.ref = (id: string) => {
+      const base = origRef(id);
+      if (id === lead.id) {
+        return { ...base, send: async () => { throw new Error("daemon send socket closed"); } };
+      }
+      return base;
+    };
+
+    await leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [] });
+
+    const reg = readProjectRegistration(stateDir, slug);
+    assert.equal(reg?.rotationState, "normal", "the rotation completed despite the degraded extraction");
+    assert.ok(reg?.lead && reg.lead !== lead.id, "the successor was still spawned — the mail blocks nothing");
+    const mails = supervisorNeedsHuman(stateDir, slug);
+    assert.equal(mails.length, 1, "exactly one Supervisor needs_human mail per degraded completion");
+    assert.equal(mails[0]!.from, "system");
+    assert.match(mails[0]!.text as string, /extraction-send-failed/);
+    assert.match(mails[0]!.text as string, /no completed extraction/i, "the mail states the successor's handoff layer is not a fresh extraction");
+
+    // The Supervisor seat received the notice through the existing needs-human delivery path…
+    const supSends = fake.sent.filter((s) => s.agentId === supervisor.id);
+    assert.equal(supSends.length, 1);
+    assert.match(supSends[0]!.text, /extraction-send-failed/);
+    // …and re-pumping never mints a second mail (never one per pump).
+    await leadMail.pumpProjectLead(slug);
+    await leadMail.pumpProjectSupervisor(slug);
+    assert.equal(supervisorNeedsHuman(stateDir, slug).length, 1, "never one mail per pump");
+  }
+
+  // Case B: extraction-timeout — the elapsed window finds the Lead still `running` (Fuse 2). A prior exists,
+  // so the mail states the preserved-prior-with-staleness-notice shape.
+  {
+    const lead: FakeAgent = {
+      id: "agent-lead-loud-timeout",
+      title: "Lead (paseo-factory)",
+      status: "idle",
+      labels: {},
+      lastUsage: { contextWindowUsedTokens: 135_000, contextWindowMaxTokens: 200_000 },
+    };
+    const supervisor: FakeAgent = { id: "agent-sup-loud-timeout", title: "Supervisor (paseo-factory)", status: "idle", labels: {} };
+    const { stateDir, slug, projectRoot, surface, leadMail, fake } = makeSpooledRuntime(t, [lead, supervisor], { handoffTimeoutMs: 40 });
+    lead.labels = { seat: "lead", project: slug };
+    lead.cwd = projectRoot;
+    supervisor.labels = { seat: "supervisor", project: slug };
+    supervisor.cwd = projectRoot;
+    await surface.leadEnsure({ projectRoot });
+    await surface.supervisorEnsure({ projectRoot });
+
+    const handoffPath = join(projectStateDir(stateDir, slug), "lead-handoff.md");
+    mkdirSync(projectStateDir(stateDir, slug), { recursive: true });
+    writeFileSync(handoffPath, "# Loud Timeout Prior\nThe baton from yesterday.");
+    await new Promise((resolve) => setTimeout(resolve, 15));
+
+    await leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [] });
+    lead.status = "running"; // a genuinely hung extraction stream trips the elapsed fuse
+    await until(() => {
+      assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "normal");
+    }, 2000);
+
+    const reg = readProjectRegistration(stateDir, slug);
+    assert.ok(reg?.lead && reg.lead !== lead.id, "the rotation still completed");
+    const mails = supervisorNeedsHuman(stateDir, slug);
+    assert.equal(mails.length, 1, "exactly one Supervisor needs_human mail");
+    assert.match(mails[0]!.text as string, /extraction-timeout/);
+    assert.match(mails[0]!.text as string, /preserved prior with the staleness notice/);
+    assert.ok(fake.sent.some((s) => s.agentId === supervisor.id && s.text.includes("extraction-timeout")), "the Supervisor seat received the notice");
+  }
+
+  // Case C: extraction-send-cap — the 3-send ceiling ends the episode via the degraded path. The episode survived
+  // four pumps (the original turn boundary plus three re-send pumps) and still appends exactly one mail.
+  {
+    const lead: FakeAgent = {
+      id: "agent-lead-loud-cap",
+      title: "Lead (paseo-factory)",
+      status: "idle",
+      labels: {},
+      lastUsage: { contextWindowUsedTokens: 135_000, contextWindowMaxTokens: 200_000 },
+    };
+    const supervisor: FakeAgent = { id: "agent-sup-loud-cap", title: "Supervisor (paseo-factory)", status: "idle", labels: {} };
+    const { stateDir, slug, projectRoot, surface, leadMail } = makeSpooledRuntime(t, [lead, supervisor]);
+    lead.labels = { seat: "lead", project: slug };
+    lead.cwd = projectRoot;
+    supervisor.labels = { seat: "supervisor", project: slug };
+    supervisor.cwd = projectRoot;
+    await surface.leadEnsure({ projectRoot });
+    await surface.supervisorEnsure({ projectRoot });
+
+    mkdirSync(projectStateDir(stateDir, slug), { recursive: true });
+    writeFileSync(join(projectStateDir(stateDir, slug), "lead-handoff.md"), "# Loud Cap Prior\nThe last-known-good baton.");
+    await new Promise((resolve) => setTimeout(resolve, 15));
+
+    await leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [] });
+    for (let stop = 1; stop <= 3; stop += 1) {
+      await leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "failed" }, timeline: [] });
+      await leadMail.pumpProjectLead(slug);
+    }
+    assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "normal", "the ceiling completed via the degraded path");
+
+    const reg = readProjectRegistration(stateDir, slug);
+    assert.ok(reg?.lead && reg.lead !== lead.id, "the rotation still completed");
+    const mails = supervisorNeedsHuman(stateDir, slug);
+    assert.equal(mails.length, 1, "exactly one mail across the whole pumped episode — never one per pump");
+    assert.match(mails[0]!.text as string, /extraction-send-cap/);
+    assert.match(mails[0]!.text as string, /preserved prior with the staleness notice/);
+  }
+
+  // Case D: a healthy rotation (completed extraction turn with valid text) appends nothing — and so does a
+  // completed-but-invalid extraction turn, which still "came from a completed extraction turn".
+  {
+    const lead: FakeAgent = {
+      id: "agent-lead-loud-healthy",
+      title: "Lead (paseo-factory)",
+      status: "idle",
+      labels: {},
+      lastUsage: { contextWindowUsedTokens: 135_000, contextWindowMaxTokens: 200_000 },
+    };
+    const { stateDir, slug, projectRoot, surface, leadMail } = makeSpooledRuntime(t, [lead]);
+    lead.labels = { seat: "lead", project: slug };
+    lead.cwd = projectRoot;
+    await surface.leadEnsure({ projectRoot });
+
+    await leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [] });
+    assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "handing_over");
+    await leadMail.onLeadTurnEnded({
+      agentId: lead.id,
+      outcome: { kind: "completed" },
+      timeline: [{ type: "assistant_message", text: "# Clean Handoff\nThe roadmap continues untouched." }],
+    });
+    assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "normal");
+    assert.equal(supervisorNeedsHuman(stateDir, slug).length, 0, "a healthy rotation appends no Supervisor mail");
+  }
 });
 
 test("pause-aware fuse (timer path): the elapsed window over an alive idle or closed Lead re-sends and resets the timer; only a still-running Lead trips (v0.2.2, ADR 0050 Decision 3)", async (t) => {
@@ -2617,7 +2781,11 @@ test("Lead extraction waits the full 180-second fuse before retiring a stuck sea
   t.mock.timers.tick(1);
   for (let i = 0; i < 10; i++) await new Promise(resolve => setImmediate(resolve));
   assert.equal(readProjectRegistration(f.stateDir, f.slug)?.rotationState, "normal");
-  assert.equal(f.fake.created.length, 1);
+  // v0.2.2 (ADR 0050 Decision 4): the degraded completion is loud — the fixture's
+  // two created seats are the successor Lead and the ensured Supervisor that
+  // received the one needs_human notice with the extraction-timeout reason.
+  assert.equal(f.fake.created.length, 2);
+  assert.ok(f.fake.sent.some(s => s.text.includes("extraction-timeout")), "the Supervisor was paged with the timeout reason");
 });
 
 
