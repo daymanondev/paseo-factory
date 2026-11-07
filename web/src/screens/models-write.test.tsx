@@ -5,7 +5,11 @@
  * the destructive Reset confirm (`factory.lanes.reset`), and the Apply chips
  * (`factory.profiles.apply`). A lane with a LIVE bound seat (the T-08a fold)
  * confirms FIRST — the step says the live seat's model will change, and its
- * Cancel sends nothing (nor does the form's). Every reply arm renders
+ * Cancel sends nothing (nor does the form's). The Apply chips confirm the
+ * same way: the fold carries no profile lane table, so the screen cannot
+ * tell which lanes an apply changes — whenever ANY lane holds a live bound
+ * seat the apply asks first (naming them), and only a vacant roster applies
+ * immediately. Every reply arm renders
  * verbatim as data: the success banner carries the handler's own `modelSync`
  * sentence (and the reset's removed fact), a refusal carries its code and
  * sentence with the form kept for another try. Success fires the shell's
@@ -42,6 +46,14 @@ const seatedView = (): FactoryView => {
 
 const MACHINE = "pi/zai/glm-5.3";
 const ROOT = "/Users/owner/code/research-slp";
+
+/** The same scoped Project with every seat gone — no live bound seat anywhere, so an apply needs no confirm. */
+const vacantView = (): FactoryView => {
+  const view = seatedView();
+  view.supervisor = null;
+  view.agents = [];
+  return view;
+};
 
 /** A green `factory.lanes.set` reply — the handler's own sentence, verbatim. */
 const setOk = (modelSync = `applied — agent agent-su now runs ${MACHINE}`): LanesSetReply => ({
@@ -119,11 +131,40 @@ describe("the Configure journey (factory.lanes.set)", () => {
 });
 
 describe("the profile chips (factory.profiles.apply)", () => {
-  it("apply a saved profile to the selected Project — the exact profileId and root", async () => {
+  it("apply immediately while no lane holds a live bound seat — the exact profileId and root", async () => {
+    const profilesApply = vi.fn(async (): Promise<ProfilesApplyReply> => setOk("applied — profile copied"));
+    const onChanged = vi.fn();
+    render(<ModelsScreen view={vacantView()} profilesApply={profilesApply} onChanged={onChanged} />);
+    fireEvent.click(screen.getByRole("button", { name: "Apply profile Fast Watch" }));
+    // A vacant roster applies NOW — no confirm dialog ever opens.
+    await waitFor(() => expect(profilesApply).toHaveBeenCalledTimes(1));
+    expect(profilesApply).toHaveBeenCalledWith({ profileId: "fast", projectRoot: ROOT });
+    expect(await screen.findByRole("status")).toBeTruthy();
+    expect(screen.getByText(/applied — profile copied/)).toBeTruthy();
+    expect(onChanged).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("confirm FIRST while a lane holds a live bound seat — the seat is named, Cancel sends nothing", async () => {
+    const profilesApply = vi.fn(async (): Promise<ProfilesApplyReply> => setOk("applied — profile copied"));
+    render(<ModelsScreen view={seatedView()} profilesApply={profilesApply} />);
+    fireEvent.click(screen.getByRole("button", { name: "Apply profile Fast Watch" }));
+    // The confirm step: the live seat is named, the model change is spelled.
+    const dialog = screen.getByRole("dialog", { name: "Apply profile Fast Watch?" });
+    expect(within(dialog).getByText(/model will change/)).toBeTruthy();
+    expect(within(dialog).getByText(/agent-sup-1 · Live/)).toBeTruthy();
+    // Cancel closes — nothing was sent.
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(profilesApply).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("Confirm & Apply sends exactly the profileId and Project root — success refreshes", async () => {
     const profilesApply = vi.fn(async (): Promise<ProfilesApplyReply> => setOk("applied — profile copied"));
     const onChanged = vi.fn();
     render(<ModelsScreen view={seatedView()} profilesApply={profilesApply} onChanged={onChanged} />);
     fireEvent.click(screen.getByRole("button", { name: "Apply profile Fast Watch" }));
+    fireEvent.click(within(screen.getByRole("dialog", { name: "Apply profile Fast Watch?" })).getByRole("button", { name: "Confirm & Apply" }));
     await waitFor(() => expect(profilesApply).toHaveBeenCalledTimes(1));
     expect(profilesApply).toHaveBeenCalledWith({ profileId: "fast", projectRoot: ROOT });
     expect(await screen.findByRole("status")).toBeTruthy();
@@ -135,6 +176,7 @@ describe("the profile chips (factory.profiles.apply)", () => {
     const profilesApply = vi.fn(async (): Promise<ProfilesApplyReply> => ({ ok: false, code: "unknown-profile", error: "No Lane profile fast exists." }));
     render(<ModelsScreen view={seatedView()} profilesApply={profilesApply} />);
     fireEvent.click(screen.getByRole("button", { name: "Apply profile Fast Watch" }));
+    fireEvent.click(within(screen.getByRole("dialog", { name: "Apply profile Fast Watch?" })).getByRole("button", { name: "Confirm & Apply" }));
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain("refused (unknown-profile)");
     expect(alert.textContent).toContain("No Lane profile fast exists.");

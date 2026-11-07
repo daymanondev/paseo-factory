@@ -10,7 +10,10 @@
  * confirm that drops the Project override), and `factory.profiles.apply`
  * (the chips, Copy-on-Apply). When the lane being changed has a LIVE bound
  * seat (the T-08a fold), the Configure journey first shows a confirm step
- * saying the live seat's model will change — Cancel sends nothing. Every
+ * saying the live seat's model will change — Cancel sends nothing; the
+ * profile chips confirm the same way — the fold carries no profile lane
+ * table, so the screen cannot tell which lanes an apply changes and asks
+ * first whenever ANY lane holds a live bound seat, naming them. Every
  * reply arm, including refusals, renders verbatim as data; success refreshes
  * the roster. The interaction design is the prototype's own
  * (`design/management.css` toolbar + `design/styles.css` dialog/field
@@ -25,7 +28,7 @@
 import { useState } from "react";
 import type { FactoryView } from "../../../plugin/shared/view.ts";
 import "../../../design/management.css";
-import { modelsScreenModel, type ModelsLaneRow, type ModelsSeatChip } from "../models-view.ts";
+import { modelsScreenModel, type ModelsLaneRow, type ModelsProfileChip, type ModelsSeatChip } from "../models-view.ts";
 import {
   lanesResetViaSidecar,
   lanesSetViaSidecar,
@@ -328,6 +331,81 @@ function LaneResetDialog({
   );
 }
 
+// ---- the Apply confirm (T-08b fix-up) ----------------------------------------------------------------
+
+/**
+ * The Apply confirm — the profile chips' live-seat step. The fold carries no
+ * profile lane table, so the screen cannot tell which lanes an apply changes:
+ * whenever ANY lane holds a live bound seat, the apply asks first. The step
+ * names every seated lane's live seats, says their model will change, and
+ * carries each lane kind's own transition law (in-place update or retire for
+ * the seat lanes, next-spawn for the rest). Cancel sends nothing; Confirm &
+ * Apply sends exactly `{profileId, projectRoot}`.
+ */
+function ProfileApplyDialog({
+  profile,
+  seatedRows,
+  submit,
+  close,
+}: {
+  profile: ModelsProfileChip;
+  /** Every roster row carrying a live bound seat — the apply's honest blast radius under the fold. */
+  seatedRows: readonly ModelsLaneRow[];
+  submit: () => Promise<ProfilesApplyReply>;
+  close: () => void;
+}) {
+  const [phase, setPhase] = useState<"confirm" | "saving">("confirm");
+  const apply = async () => {
+    setPhase("saving");
+    const reply = await submit();
+    if (reply.ok) close();
+    else setPhase("confirm");
+  };
+  return (
+    <div className="console-dialog-overlay" role="presentation" onClick={phase === "saving" ? undefined : close}>
+      <div className="dialog console-dialog" role="dialog" aria-modal="true" aria-label={`Apply profile ${profile.name}?`} onClick={(event) => event.stopPropagation()}>
+        <div className="dialog-head">
+          <strong>Apply profile {profile.name}?</strong>
+          <span className="spacer" />
+          <button type="button" className="btn ghost" onClick={close} disabled={phase === "saving"}>
+            Close
+          </button>
+        </div>
+        <div className="dialog-body">
+          <p>Apply the saved profile to this Project — its lane table is copied over the Project's lanes (Copy-on-Apply).</p>
+          <div className="notice" role="status">
+            <p>
+              <strong>Live bound seats — their model will change:</strong>
+            </p>
+            {seatedRows.map((row) => (
+              <p key={row.lane}>
+                <strong>{row.label}</strong> — {row.seats.map((seat) => `${seat.agentId} · ${seat.state.label}`).join(", ")}.{" "}
+                {row.lane === "supervisor" || row.lane === "lead"
+                  ? "The same provider family updates the seat in place, preserving its session; a different family retires it — the next dispatch spawns a fresh seat."
+                  : "The live agents keep their current session — the new model applies to the next spawned agent."}
+              </p>
+            ))}
+          </div>
+          {phase === "confirm" ? (
+            <div className="dialog-actions">
+              <button type="button" className="btn ghost" onClick={close}>
+                Cancel
+              </button>
+              <button type="button" className="btn primary" onClick={() => void apply()}>
+                Confirm &amp; Apply
+              </button>
+            </div>
+          ) : (
+            <p className="small muted" role="status">
+              Applying…
+            </p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ---- the screen ------------------------------------------------------------------------------------
 
 export function ModelsScreen({
@@ -340,6 +418,7 @@ export function ModelsScreen({
   const model = modelsScreenModel(view);
   const [editing, setEditing] = useState<ModelsLaneRow | null>(null);
   const [resetting, setResetting] = useState(false);
+  const [applying, setApplying] = useState<ModelsProfileChip | null>(null);
   const [pending, setPending] = useState(false);
   /** The last write's reply — both arms render verbatim; the dialog acts close on success. */
   const [status, setStatus] = useState<{ act: string; reply: LaneWriteReply } | null>(null);
@@ -372,6 +451,12 @@ export function ModelsScreen({
     seatedSeatLanes.length === 0
       ? null
       : `${seatedSeatLanes.map((row) => row.label).join(" and ")} ${seatedSeatLanes.length === 1 ? "has a" : "have a"} live bound seat — the same provider family updates it in place; a different family retires it for a fresh seat.`;
+
+  // The apply confirm's own facts: the fold carries no profile lane table, so
+  // the screen cannot tell which lanes a profile changes — every roster row
+  // with a live bound seat is the apply's honest blast radius, and ANY of
+  // them makes the apply ask first.
+  const seatedRows = model.rows.filter((row) => row.seats.length > 0);
 
   return (
     <section aria-label="Agents & Models" className="console-models">
@@ -411,9 +496,12 @@ export function ModelsScreen({
               className={`filter${profile.active ? " active" : ""}`}
               aria-label={`Apply profile ${profile.name}`}
               disabled={!writable || pending}
-              onClick={() =>
-                void run(`Applying profile ${profile.name}`, () => profilesApply({ profileId: profile.id, projectRoot: model.projectRoot }))
-              }
+              onClick={() => {
+                // The fold cannot tell which lanes this profile changes — a
+                // roster with ANY live bound seat asks first; a vacant one applies now.
+                if (seatedRows.length > 0) setApplying(profile);
+                else void run(`Applying profile ${profile.name}`, () => profilesApply({ profileId: profile.id, projectRoot: model.projectRoot }));
+              }}
             >
               {profile.name}
               {profile.active ? " · active" : ""}
@@ -473,6 +561,14 @@ export function ModelsScreen({
           seatNote={seatNote}
           close={() => setResetting(false)}
           submit={() => run("Resetting lanes", () => lanesReset({ projectRoot: model.projectRoot }))}
+        />
+      ) : null}
+      {applying !== null && writable ? (
+        <ProfileApplyDialog
+          profile={applying}
+          seatedRows={seatedRows}
+          close={() => setApplying(null)}
+          submit={() => run(`Applying profile ${applying.name}`, () => profilesApply({ profileId: applying.id, projectRoot: model.projectRoot }))}
         />
       ) : null}
     </section>
