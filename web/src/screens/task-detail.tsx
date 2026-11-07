@@ -98,8 +98,8 @@ type TranscriptState =
   | { phase: "unavailable"; reason: string }
   | { phase: "loaded"; entries: AgentTranscriptEntry[] };
 
-/** One reduced timeline entry as native React elements — never innerHTML. */
-function TranscriptRow({ entry }: { entry: AgentTranscriptEntry }) {
+/** One reduced timeline entry as native React elements — never innerHTML. The Agent Drawer's Transcript tab renders the same rows (T-07b). */
+export function TranscriptRow({ entry }: { entry: AgentTranscriptEntry }) {
   if (entry.role === "tool") {
     return (
       <li className="console-tr-entry console-tr-tool">

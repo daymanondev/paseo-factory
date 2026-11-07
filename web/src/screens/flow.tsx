@@ -10,18 +10,29 @@
  * wires are plain CSS, the data all folds in `view-model.ts`'s `flowScreenModel`.
  * No Project selected answers an honest empty state; a Project with no seats
  * renders "Not started" nodes. No Start Supervisor/Lead controls anywhere
- * (ADR 0017); a node click selects (aria-pressed + `.selected`) and never
- * opens a drawer — the Agent Drawer is T-07b.
+ * (ADR 0017). T-07b: clicking a seat or Peer node with a live agent opens the
+ * read-only Agent Drawer (`flow-drawer.tsx`); a vacant "Not started" node
+ * still only selects (aria-pressed + `.selected`) — it never opens one.
  */
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import type { FactoryView } from "../../../plugin/shared/view.ts";
 import "../../../design/slp-workflow.css";
 import "../../../design/scrum-workflow.css";
 import { navigate } from "../router.ts";
 import { flowScreenModel, type FlowMailNode, type FlowSeatNode, type ScrumPipelineModel, type ScrumStageModel, type ScrumStageTask } from "../view-model.ts";
+import { AgentDrawer } from "./flow-drawer.tsx";
+import type { LoadAgentTranscript } from "./task-detail.tsx";
 
 export interface FlowScreenProps {
   view: FactoryView;
+  /** The Agent Drawer's transcript transport — the sidecar's door by default, a fixture in tests (T-07b). */
+  loadTranscript?: LoadAgentTranscript;
+}
+
+/** What a live node's click opens — the node the fold attributes plus the trigger focus returns to. */
+interface DrawerState {
+  node: FlowSeatNode;
+  trigger: HTMLButtonElement | null;
 }
 
 // ---- the shared pieces ---------------------------------------------------------------------------
@@ -31,8 +42,18 @@ function Wire({ active = false }: { active?: boolean }) {
   return <span className={`console-flow-wire${active ? " active" : ""}`} aria-hidden="true" />;
 }
 
-/** One seat/agent node — the prototype's `.flow-node`/`.slp-node` card, selected state local. */
-function SeatNode({ node, selected, onSelect }: { node: FlowSeatNode; selected: boolean; onSelect: (key: string) => void }) {
+/** One seat/agent node — the prototype's `.flow-node`/`.slp-node` card. A live agent's click opens the Agent Drawer; a vacant seat's only selects. */
+function SeatNode({
+  node,
+  selected,
+  onSelect,
+  onOpen,
+}: {
+  node: FlowSeatNode;
+  selected: boolean;
+  onSelect: (key: string) => void;
+  onOpen: (node: FlowSeatNode, trigger: HTMLButtonElement) => void;
+}) {
   const classes = [
     "flow-node",
     "slp-node",
@@ -48,8 +69,10 @@ function SeatNode({ node, selected, onSelect }: { node: FlowSeatNode; selected: 
       type="button"
       className={classes}
       aria-pressed={selected}
+      aria-haspopup={node.agentId !== null ? "dialog" : undefined}
+      aria-expanded={node.agentId !== null && selected ? true : undefined}
       aria-label={`${node.title}: ${node.state.label}${node.laneLabel === "" ? "" : `, ${node.laneLabel}`}${taskWords === "" ? "" : ` — owns ${taskWords}`}`}
-      onClick={() => onSelect(node.key)}
+      onClick={(event) => (node.agentId !== null ? onOpen(node, event.currentTarget) : onSelect(node.key))}
     >
       <span className="node-top">
         <span className={node.state.vacant ? "slp-empty-avatar" : "role-avatar"} aria-hidden="true">
@@ -103,7 +126,17 @@ function MailPoint({ mail, selected, onSelect }: { mail: FlowMailNode; selected:
 // ---- the SLP canvas -------------------------------------------------------------------------------
 
 /** The SLP authority graph — the centered chain plus the working Peers grid. */
-function SlpCanvas({ model, selected, onSelect }: { model: NonNullable<ReturnType<typeof flowScreenModel>>; selected: string | null; onSelect: (key: string) => void }) {
+function SlpCanvas({
+  model,
+  selected,
+  onSelect,
+  onOpen,
+}: {
+  model: NonNullable<ReturnType<typeof flowScreenModel>>;
+  selected: string | null;
+  onSelect: (key: string) => void;
+  onOpen: (node: FlowSeatNode, trigger: HTMLButtonElement) => void;
+}) {
   return (
     <div className="workflow-viewport console-flow-viewport">
       <div className="slp-canvas" data-flow-mode="slp">
@@ -123,11 +156,11 @@ function SlpCanvas({ model, selected, onSelect }: { model: NonNullable<ReturnTyp
           <Wire />
           <MailPoint mail={model.mail.supervisor} selected={selected === "mail:supervisor"} onSelect={onSelect} />
           <Wire />
-          <SeatNode node={model.supervisor} selected={selected === model.supervisor.key} onSelect={onSelect} />
+          <SeatNode node={model.supervisor} selected={selected === model.supervisor.key} onSelect={onSelect} onOpen={onOpen} />
           <Wire active />
           <MailPoint mail={model.mail.lead} selected={selected === "mail:lead"} onSelect={onSelect} />
           <Wire active />
-          <SeatNode node={model.lead} selected={selected === model.lead.key} onSelect={onSelect} />
+          <SeatNode node={model.lead} selected={selected === model.lead.key} onSelect={onSelect} onOpen={onOpen} />
           <Wire active />
           <span className="slp-dispatch-point" aria-hidden="true" />
           <div
@@ -136,7 +169,7 @@ function SlpCanvas({ model, selected, onSelect }: { model: NonNullable<ReturnTyp
             style={{ "--slp-peer-count": Math.max(1, model.peers.length) } as React.CSSProperties}
           >
             {model.peers.length > 0 ? (
-              model.peers.map((peer) => <SeatNode key={peer.key} node={peer} selected={selected === peer.key} onSelect={onSelect} />)
+              model.peers.map((peer) => <SeatNode key={peer.key} node={peer} selected={selected === peer.key} onSelect={onSelect} onOpen={onOpen} />)
             ) : (
               <button type="button" className="flow-node slp-node queued slp-node-vacant" aria-label="Peer: Not started">
                 <span className="node-top">
@@ -243,7 +276,17 @@ function ScrumStage({ stage, fixSummary, selected, onSelect }: { stage: ScrumSta
 }
 
 /** The Scrum authority tier plus the run's pipeline strip. */
-function ScrumCanvas({ model, selected, onSelect }: { model: NonNullable<ReturnType<typeof flowScreenModel>>; selected: string | null; onSelect: (key: string) => void }) {
+function ScrumCanvas({
+  model,
+  selected,
+  onSelect,
+  onOpen,
+}: {
+  model: NonNullable<ReturnType<typeof flowScreenModel>>;
+  selected: string | null;
+  onSelect: (key: string) => void;
+  onOpen: (node: FlowSeatNode, trigger: HTMLButtonElement) => void;
+}) {
   const scrum = model.scrum;
   return (
     <div className="workflow-viewport console-flow-viewport">
@@ -283,14 +326,14 @@ function ScrumCanvas({ model, selected, onSelect }: { model: NonNullable<ReturnT
                 <span>Supervisor Mailbox</span>
               </div>
               <span className="console-flow-wire" aria-hidden="true" />
-              <ScrumSeat node={model.supervisor} selected={selected === model.supervisor.key} onSelect={onSelect} />
+              <ScrumSeat node={model.supervisor} selected={selected === model.supervisor.key} onSelect={onSelect} onOpen={onOpen} />
               <span className="console-flow-wire active" aria-hidden="true" />
               <div className="sc-mail">
                 <span>Lead Mailbox</span>
                 {model.mail.lead.queued !== null ? <small>{model.mail.lead.locked ? "Locked" : `${model.mail.lead.queued} queued`}</small> : null}
               </div>
               <span className="console-flow-wire active" aria-hidden="true" />
-              <ScrumSeat node={model.lead} selected={selected === model.lead.key} onSelect={onSelect} />
+              <ScrumSeat node={model.lead} selected={selected === model.lead.key} onSelect={onSelect} onOpen={onOpen} />
             </div>
             {scrum.blockers.length > 0 ? (
               <div className="sc-run-blocker" role="status">
@@ -313,15 +356,27 @@ function ScrumCanvas({ model, selected, onSelect }: { model: NonNullable<ReturnT
   );
 }
 
-/** One authority-tier seat card in scrum mode — the prototype's `.sc-seat`. */
-function ScrumSeat({ node, selected, onSelect }: { node: FlowSeatNode; selected: boolean; onSelect: (key: string) => void }) {
+/** One authority-tier seat card in scrum mode — the prototype's `.sc-seat`; a live agent's click opens the Agent Drawer. */
+function ScrumSeat({
+  node,
+  selected,
+  onSelect,
+  onOpen,
+}: {
+  node: FlowSeatNode;
+  selected: boolean;
+  onSelect: (key: string) => void;
+  onOpen: (node: FlowSeatNode, trigger: HTMLButtonElement) => void;
+}) {
   return (
     <button
       type="button"
       className={`sc-seat${node.state.vacant ? " vacant" : ""} ${node.state.tone}${selected ? " selected" : ""}`}
       aria-pressed={selected}
+      aria-haspopup={node.agentId !== null ? "dialog" : undefined}
+      aria-expanded={node.agentId !== null && selected ? true : undefined}
       aria-label={`${node.title}: ${node.state.label}${node.tasks.length > 0 ? ` — owns ${node.tasks.map((chip) => `${chip.task} ${chip.statusLabel}`).join(", ")}` : ""}`}
-      onClick={() => onSelect(node.key)}
+      onClick={(event) => (node.agentId !== null ? onOpen(node, event.currentTarget) : onSelect(node.key))}
     >
       <span className="sc-seat-top">
         <span className={node.state.vacant ? "sc-human" : "role-avatar"} aria-hidden="true">
@@ -343,11 +398,24 @@ function ScrumSeat({ node, selected, onSelect }: { node: FlowSeatNode; selected:
 
 // ---- the screen ------------------------------------------------------------------------------------
 
-export function FlowScreen({ view }: FlowScreenProps) {
+export function FlowScreen({ view, loadTranscript }: FlowScreenProps) {
   const model = flowScreenModel(view);
   const [selected, setSelected] = useState<string | null>(null);
-  /** A click selects — aria-pressed + `.selected` — and never opens a drawer (T-07b owns that). */
+  const [drawer, setDrawer] = useState<DrawerState | null>(null);
+  /** A vacant node's click selects — aria-pressed + `.selected` — and never opens a drawer; the graph's other points keep the same toggle. */
   const onSelect = (key: string) => setSelected((previous) => (previous === key ? null : key));
+  /** A live node's click opens the Agent Drawer — the prototype's own law: the drawer's node carries the selection. */
+  const openDrawer = (node: FlowSeatNode, trigger: HTMLButtonElement) => {
+    setDrawer({ node, trigger });
+    setSelected(node.key);
+  };
+  const closeDrawer = useCallback(() => {
+    const trigger = drawer?.trigger ?? null;
+    setDrawer(null);
+    setSelected(null);
+    // The prototype's close law: focus returns to the node that opened it.
+    trigger?.focus({ preventScroll: true });
+  }, [drawer]);
   if (model === null) {
     return (
       <section aria-label="Workspace">
@@ -374,7 +442,12 @@ export function FlowScreen({ view }: FlowScreenProps) {
           Live agent states are degraded ({view.daemonError}) — the graph renders the last known snapshot.
         </div>
       ) : null}
-      {model.mode === "slp" ? <SlpCanvas model={model} selected={selected} onSelect={onSelect} /> : <ScrumCanvas model={model} selected={selected} onSelect={onSelect} />}
+      {model.mode === "slp" ? (
+        <SlpCanvas model={model} selected={selected} onSelect={onSelect} onOpen={openDrawer} />
+      ) : (
+        <ScrumCanvas model={model} selected={selected} onSelect={onSelect} onOpen={openDrawer} />
+      )}
+      {drawer !== null ? <AgentDrawer node={drawer.node} onClose={closeDrawer} load={loadTranscript} /> : null}
     </section>
   );
 }

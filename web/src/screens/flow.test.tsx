@@ -6,8 +6,10 @@
  * plus the run's five-stage pipeline strip with the current phase highlighted
  * and blockers carried as a banner. Vacant seats render "Not started", never
  * a fabricated agent; no Project selected answers an honest empty state; a
- * node click selects (aria-pressed + `.selected`) and never opens a drawer;
- * and NO Start Supervisor/Lead control exists anywhere (ADR 0017).
+ * VACANT node click selects (aria-pressed + `.selected`) and never opens a
+ * drawer — a live node's click opens the Agent Drawer (T-07b, covered in
+ * flow-drawer.test.tsx); and NO Start Supervisor/Lead control exists
+ * anywhere (ADR 0017).
  */
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
@@ -254,9 +256,14 @@ describe("the Workspace screen", () => {
     expect(screen.getByRole("button", { name: "Supervisor: Live, pi · glm-5.3" })).toBeTruthy();
   });
 
-  it("selects a node on click — aria-pressed and .selected — and never opens a drawer", () => {
-    render(<FlowScreen view={slpView()} />);
-    const supervisor = screen.getByRole("button", { name: "Supervisor: Live, pi · glm-5.3" });
+  it("selects a vacant node on click — aria-pressed and .selected — and never opens a drawer", () => {
+    // T-07b: a LIVE seat's click opens the Agent Drawer (covered in
+    // flow-drawer.test.tsx) — the toggle-select law now belongs to the
+    // vacant "Not started" nodes, the only ones that never open one.
+    const view = slpView();
+    view.supervisor = null;
+    render(<FlowScreen view={view} />);
+    const supervisor = screen.getByRole("button", { name: /^Supervisor: Not started/ });
     fireEvent.click(supervisor);
     expect(supervisor.getAttribute("aria-pressed")).toBe("true");
     expect(supervisor.className).toContain("selected");

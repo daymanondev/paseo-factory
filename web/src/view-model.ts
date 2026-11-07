@@ -11,6 +11,8 @@
  * cannot name its four buckets refuses to invent them.
  */
 import type { AgentView, AttemptView, FactoryView, OwnerRequestView, ProjectView, ScrumRunView, TaskDetailView, TaskStatus, TaskView, UsageBucketsView } from "../../plugin/shared/view.ts";
+import type { AgentTranscriptEntry } from "../../plugin/shared/rpc.ts";
+import type { AgentTranscriptReply } from "./transcript.ts";
 
 // ---- the Meter law --------------------------------------------------------------------------
 
@@ -703,6 +705,8 @@ export interface FlowTaskChip {
   status: TaskStatus;
   statusLabel: string;
   tone: TaskRowViewModel["tone"];
+  /** The ledger's own Attempt count — the Agent Drawer's Work tab reads it (T-07b). */
+  attemptCount: number;
 }
 
 /** One seat/agent node of the authority graph — Owner renders as its own static card. */
@@ -731,6 +735,24 @@ export interface FlowMailNode {
   queued: number | null;
   /** The Lead mailbox locks during handoff — the amber locked pill. */
   locked: boolean;
+}
+
+/** The Agent Drawer's transcript model (T-07b) — the reply's three envelope arms, verbatim. */
+export type DrawerTranscriptModel =
+  | { phase: "entries"; entries: AgentTranscriptEntry[] }
+  | { phase: "unavailable"; reason: string }
+  | { phase: "failure"; code: string; error: string };
+
+/**
+ * The envelope law as one pure fold (T-07b): the ok arm carries either the
+ * reduced tail or the honest unavailable reason, a refusal carries its code
+ * and sentence — every arm is data the drawer's Transcript tab renders,
+ * never a throw.
+ */
+export function drawerTranscriptModel(reply: AgentTranscriptReply): DrawerTranscriptModel {
+  if (!reply.ok) return { phase: "failure", code: reply.code, error: reply.error };
+  if ("entries" in reply) return { phase: "entries", entries: reply.entries };
+  return { phase: "unavailable", reason: reply.reason };
 }
 
 /** The specialist role vocabulary — the prototype's own `scrumRoleLabels`. */
@@ -915,7 +937,7 @@ export function flowScreenModel(view: FactoryView): FlowScreenModel | null {
     for (const id of owned) {
       const task = tasksById.get(id);
       if (task === undefined) continue; // a binding the fold cannot status renders no invented chip
-      chips.push({ task: id, status: task.status, statusLabel: statusLabel(task), tone: STATUS_TONES[task.status] });
+      chips.push({ task: id, status: task.status, statusLabel: statusLabel(task), tone: STATUS_TONES[task.status], attemptCount: task.attempts.length });
     }
     return chips;
   };
