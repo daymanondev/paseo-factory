@@ -17,9 +17,11 @@
  * the live seats, the profile chips — and carries the three lane writes
  * (`factory.lanes.set` per-row Configure, `factory.lanes.reset`,
  * `factory.profiles.apply`) through the sidecar's allowlisted door, with a
- * live-seat confirm before a seated lane changes; the other screens are
- * titled placeholders landing in their own waves. No Start Supervisor /
- * Start Lead controls anywhere (ADR 0017 preserved).
+ * live-seat confirm before a seated lane changes; the Integrations screen
+ * (T-09a) renders the read-only plugin/skill/MCP roster, the Open Design
+ * link, and the plugins-checked-at stamp from the same snapshot; the other
+ * screens are titled placeholders landing in their own waves. No Start
+ * Supervisor / Start Lead controls anywhere (ADR 0017 preserved).
  */
 import { useEffect, useState } from "react";
 import type { FactoryView } from "../../plugin/shared/view.ts";
@@ -34,6 +36,7 @@ import { OverviewScreen } from "./screens/overview.tsx";
 import { PlaceholderScreen } from "./screens/placeholder.tsx";
 import { FlowScreen } from "./screens/flow.tsx";
 import { ModelsScreen } from "./screens/models.tsx";
+import { IntegrationsScreen } from "./screens/integrations.tsx";
 import { TasksScreen } from "./screens/tasks.tsx";
 import { InboxScreen } from "./screens/inbox.tsx";
 import { inboxModel, type InboxGather } from "./view-model.ts";
@@ -140,6 +143,7 @@ export function App({
           {view !== null && screen.id === "overview" && <OverviewScreen view={view} onOpenProject={setProjectRoot} />}
           {view !== null && screen.id === "flow" && <FlowScreen view={view} />}
           {view !== null && screen.id === "models" && <ModelsScreen view={view} onChanged={() => snapshot.refresh()} />}
+          {view !== null && screen.id === "integrations" && <IntegrationsScreen view={view} />}
           {view !== null && screen.id === "tasks" && (
             <TasksScreen view={view} acceptTask={acceptTask} onAccepted={() => snapshot.refresh()} loadTaskDetail={loadTaskDetail} />
           )}
@@ -149,7 +153,7 @@ export function App({
           {/* The route names the screen even while the first snapshot is in
               flight or unreachable — a reload of /tasks lands on Tasks, not a
               blank page (the placeholder screens' own T-01 law, kept). */}
-          {view === null && (screen.id === "tasks" || screen.id === "inbox" || screen.id === "flow" || screen.id === "models") && (
+          {view === null && (screen.id === "tasks" || screen.id === "inbox" || screen.id === "flow" || screen.id === "models" || screen.id === "integrations") && (
             <section aria-label={screen.heading}>
               <h1>{screen.heading}</h1>
               {snapshot.error === null ? (
@@ -164,10 +168,10 @@ export function App({
           {view === null && snapshot.error === null && screen.id === "overview" && (
             <div className="notice">Loading the Factory snapshot…</div>
           )}
-          {view === null && snapshot.error !== null && screen.id !== "tasks" && screen.id !== "inbox" && screen.id !== "flow" && screen.id !== "models" && (
+          {view === null && snapshot.error !== null && screen.id !== "tasks" && screen.id !== "inbox" && screen.id !== "flow" && screen.id !== "models" && screen.id !== "integrations" && (
             <div className="notice">The Factory snapshot is unreachable — is the daemon's factory plugin running? ({snapshot.error.message})</div>
           )}
-          {screen.id !== "overview" && screen.id !== "flow" && screen.id !== "models" && screen.id !== "tasks" && screen.id !== "inbox" && <PlaceholderScreen screen={screen} view={view} />}
+          {screen.id !== "overview" && screen.id !== "flow" && screen.id !== "models" && screen.id !== "tasks" && screen.id !== "inbox" && screen.id !== "integrations" && <PlaceholderScreen screen={screen} view={view} />}
         </main>
       </div>
     </div>
