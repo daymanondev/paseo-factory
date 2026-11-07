@@ -246,3 +246,12 @@
 .console-flow-drawer-usage-meter { font-size: 11px; line-height: 1.6; color: var(--drawer-compact-muted, var(--muted)); overflow-wrap: anywhere; }
 .console-flow-drawer-usage-row small { font-size: 10px; color: var(--drawer-compact-muted, var(--muted)); }
 .console-flow-drawer-resources .notice { margin-top: 0; }
+
+/* The Agents & Models screen (T-08a) — the reused design bundle carries the
+   roster table and profile strip (design/management.css imported by the
+   screen, team-space.css global); the console adds the seat-cell stack and
+   the read-only profile chip row's wrap, both in its own vocabulary. */
+.console-models-seats { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+.console-models-seats .badge { max-width: 100%; overflow-wrap: anywhere; white-space: normal; }
+.console-models-profiles .filter { cursor: default; }
+.console-models-profiles .small.muted { line-height: 1.7; }

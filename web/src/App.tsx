@@ -12,9 +12,11 @@
  * unscoped snapshot, never the screen's scoped one — the T-05 carry-over
  * fix); the Workspace (T-07a) renders the selected Project's read-only
  * authority graph — the SLP chain or the Scrum pipeline strip — from the
- * same scoped snapshot; the other screens are titled placeholders landing
- * in their own waves. No Start Supervisor / Start Lead controls anywhere
- * (ADR 0017 preserved).
+ * same scoped snapshot; the Agents & Models screen (T-08a) renders the
+ * selected Project's read-only roster — one row per lane, default vs
+ * override, the live seats, the profile chips; the other screens are titled
+ * placeholders landing in their own waves. No Start Supervisor / Start Lead
+ * controls anywhere (ADR 0017 preserved).
  */
 import { useEffect, useState } from "react";
 import type { FactoryView } from "../../plugin/shared/view.ts";
@@ -28,6 +30,7 @@ import { scrumCommandViaSidecar, type ScrumCommandInput, type ScrumCommandReply 
 import { OverviewScreen } from "./screens/overview.tsx";
 import { PlaceholderScreen } from "./screens/placeholder.tsx";
 import { FlowScreen } from "./screens/flow.tsx";
+import { ModelsScreen } from "./screens/models.tsx";
 import { TasksScreen } from "./screens/tasks.tsx";
 import { InboxScreen } from "./screens/inbox.tsx";
 import { inboxModel, type InboxGather } from "./view-model.ts";
@@ -133,6 +136,7 @@ export function App({
         <main id="main" className="page" tabIndex={-1}>
           {view !== null && screen.id === "overview" && <OverviewScreen view={view} onOpenProject={setProjectRoot} />}
           {view !== null && screen.id === "flow" && <FlowScreen view={view} />}
+          {view !== null && screen.id === "models" && <ModelsScreen view={view} />}
           {view !== null && screen.id === "tasks" && (
             <TasksScreen view={view} acceptTask={acceptTask} onAccepted={() => snapshot.refresh()} loadTaskDetail={loadTaskDetail} />
           )}
@@ -142,7 +146,7 @@ export function App({
           {/* The route names the screen even while the first snapshot is in
               flight or unreachable — a reload of /tasks lands on Tasks, not a
               blank page (the placeholder screens' own T-01 law, kept). */}
-          {view === null && (screen.id === "tasks" || screen.id === "inbox" || screen.id === "flow") && (
+          {view === null && (screen.id === "tasks" || screen.id === "inbox" || screen.id === "flow" || screen.id === "models") && (
             <section aria-label={screen.heading}>
               <h1>{screen.heading}</h1>
               {snapshot.error === null ? (
@@ -157,10 +161,10 @@ export function App({
           {view === null && snapshot.error === null && screen.id === "overview" && (
             <div className="notice">Loading the Factory snapshot…</div>
           )}
-          {view === null && snapshot.error !== null && screen.id !== "tasks" && screen.id !== "inbox" && screen.id !== "flow" && (
+          {view === null && snapshot.error !== null && screen.id !== "tasks" && screen.id !== "inbox" && screen.id !== "flow" && screen.id !== "models" && (
             <div className="notice">The Factory snapshot is unreachable — is the daemon's factory plugin running? ({snapshot.error.message})</div>
           )}
-          {screen.id !== "overview" && screen.id !== "flow" && screen.id !== "tasks" && screen.id !== "inbox" && <PlaceholderScreen screen={screen} view={view} />}
+          {screen.id !== "overview" && screen.id !== "flow" && screen.id !== "models" && screen.id !== "tasks" && screen.id !== "inbox" && <PlaceholderScreen screen={screen} view={view} />}
         </main>
       </div>
     </div>

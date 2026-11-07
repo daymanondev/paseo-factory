@@ -1,5 +1,5 @@
 /**
- * The seven not-yet-built screens (T-03+): titled placeholders, honest about
+ * The six not-yet-built screens (T-03+): titled placeholders, honest about
  * their wave — no mock content, no fabricated telemetry, no seat-start
  * controls (ADR 0017). The title renders from the route alone so a reload
  * keeps the screen even while the first snapshot is still in flight; the
