@@ -4,17 +4,24 @@
  *
  * It serves the committed `Web Console` bundle (the generated artifact under
  * `<pluginDir>/web/`, shipped through the normal release pipeline) and
- * dispatches `factory.snapshot` **in-process** through the same
- * `SurfaceHandlers` the RN client's registered RPCs call — every read still
- * lands in the plugin server's single writer (ADR 0004). The daemon session
- * credential is never exposed to the browser and the daemon WebSocket
- * protocol is never proxied raw: the sidecar is the one transport boundary.
+ * dispatches an allowlisted set of `factory.*` RPCs **in-process** through
+ * the same `SurfaceHandlers` the RN client's registered RPCs call — every
+ * read and write still lands in the plugin server's single writer (ADR
+ * 0004). The daemon session credential is never exposed to the browser and
+ * the daemon WebSocket protocol is never proxied raw: the sidecar is the one
+ * transport boundary.
  *
  * Laws this module keeps:
  * - `127.0.0.1` only — never binds a non-loopback interface.
- * - Read surface only (T-01): `factory.snapshot` dispatches; every other
- *   method name refuses as data. Write RPCs arrive with T-02's boundary
- *   hardening (Host/Origin checks), never here unguarded.
+ * - The localhost boundary (T-02): every request's `Host` must be the
+ *   sidecar's own loopback host:port (DNS-rebinding guard); every `/rpc`
+ *   whose `Origin` is present must be the sidecar's own origin; every `/rpc`
+ *   must carry `content-type: application/json` (form-CSRF guard). Each
+ *   refusal is data — a 4xx `Failure` body, never a 5xx.
+ * - The allowlisted RPC door (T-02): only the named `factory.*` methods in
+ *   `CONSOLE_RPC_ALLOWLIST` dispatch, each input validated by the shared RPC
+ *   input schema (`plugin/shared/rpc.ts`); every other method name refuses
+ *   as data. The browser never needs a token.
  * - A start failure is logged, never thrown — the sidecar must never break
  *   plugin boot (the shell wraps the call, and `start()` itself resolves to
  *   `{ ok: false, reason }` rather than rejecting while ports fall back).
@@ -22,6 +29,8 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { extname, join, normalize, resolve, sep } from "node:path";
+import type { z, ZodType } from "zod";
+import { accept, snapshot, taskDetail } from "../shared/rpc.ts";
 import type { SurfaceHandlers } from "./surface-rpc.ts";
 import type { SurfaceCallContext } from "./surface-rpc.ts";
 
@@ -35,6 +44,77 @@ export const CONSOLE_STATE_FILE = "console.json";
 export interface ConsoleRpcRequest {
   method: string;
   params?: unknown;
+}
+
+// ---- the allowlisted RPC door (T-02) -------------------------------------------------------
+//
+// One named entry per method the console may call. The method name, the input
+// schema, and the handler key all come from the shared contract
+// (`plugin/shared/rpc.ts`) — the sidecar never invents a method, never
+// validates with a private schema, and never reaches around the
+// `SurfaceHandlers` (the same in-process door the RN client's registrations
+// call, so every write lands in the single writer, ADR 0004).
+
+interface ConsoleRpcEntry {
+  method: string;
+  /** Validates with the shared schema, then dispatches — a schema refusal never reaches the handler. */
+  run: (
+    handlers: SurfaceHandlers,
+    params: unknown,
+    context: SurfaceCallContext,
+  ) => Promise<{ ok: false; code: "bad_input"; error: string } | { ok: true; reply: unknown }>;
+}
+
+/** The typed constructor — each closure's input is the shared schema's own inference. */
+function consoleRpcEntry<S extends ZodType>(
+  method: string,
+  schema: S,
+  dispatch: (handlers: SurfaceHandlers, input: z.output<S>, context: SurfaceCallContext) => Promise<unknown>,
+): ConsoleRpcEntry {
+  return {
+    method,
+    run: async (handlers, params, context) => {
+      const parsed = schema.safeParse(params);
+      if (!parsed.success) {
+        return { ok: false, code: "bad_input", error: `${method} refused the input — ${parsed.error.message}` };
+      }
+      return { ok: true, reply: await dispatch(handlers, parsed.data, context) };
+    },
+  };
+}
+
+export const CONSOLE_RPC_ALLOWLIST: readonly ConsoleRpcEntry[] = [
+  consoleRpcEntry(snapshot.name, snapshot.input, (handlers, input, context) => handlers.snapshot(input, context)),
+  consoleRpcEntry(taskDetail.name, taskDetail.input, (handlers, input, context) => handlers.taskDetail(input, context)),
+  consoleRpcEntry(accept.name, accept.input, (handlers, input, context) => handlers.accept(input, context)),
+];
+
+/** The named allowlist as the refusal sentence spells it. */
+const allowlistSentence = () => CONSOLE_RPC_ALLOWLIST.map((entry) => entry.method).join(", ");
+
+// ---- the localhost boundary (T-02) ---------------------------------------------------------
+
+/**
+ * The boundary a bound sidecar checks every request against: the loopback
+ * `host:port` spellings the browser may legitimately send, and the sidecar's
+ * own origins for the RPC door's CSRF check. Built only after `listen()` —
+ * the port of an ephemeral bind is unknowable before it.
+ */
+interface LoopbackBoundary {
+  /** `Host` headers (lowercased) the sidecar answers — anything else is a rebinding probe. */
+  allowedHosts: readonly string[];
+  /** Exact-match `Origin` values `/rpc` accepts — a foreign origin is a cross-site probe. */
+  ownOrigins: readonly string[];
+}
+
+function loopbackBoundary(host: string, port: number): LoopbackBoundary {
+  // `localhost:<port>` is as loopback as the bound spelling — the Owner may
+  // type either; a non-loopback name can never appear here because the
+  // listener never leaves 127.0.0.1.
+  return {
+    allowedHosts: [`${host}:${port}`, `localhost:${port}`].map((value) => value.toLowerCase()),
+    ownOrigins: [`http://${host}:${port}`, `http://localhost:${port}`].map((value) => value.toLowerCase()),
+  };
 }
 
 export interface ConsoleSidecarOptions {
@@ -89,8 +169,6 @@ const MIME_TYPES: Record<string, string> = {
 };
 
 const MAX_RPC_BODY_BYTES = 256 * 1024;
-
-type SnapshotReply = Awaited<ReturnType<SurfaceHandlers["snapshot"]>>;
 
 function text(response: ServerResponse, status: number, body: string, contentType: "text/plain; charset=utf-8" | "application/json; charset=utf-8" = "text/plain; charset=utf-8"): void {
   response.writeHead(status, { "content-type": contentType, "content-length": String(Buffer.byteLength(body)) });
@@ -153,8 +231,11 @@ export async function startConsoleSidecar(options: ConsoleSidecarOptions): Promi
   const ports = options.ports ?? [...CONSOLE_SIDECAR_DEFAULT_PORTS, 0];
   const log = options.onLog ?? (() => {});
   const statePath = join(options.stateDir, CONSOLE_STATE_FILE);
+  // Set the moment `listen()` names the port — no request can arrive before
+  // the listener exists, so the boundary is always present when checked.
+  let boundary: LoopbackBoundary | undefined;
   const server = createServer((request, response) => {
-    void handle(options, request, response).catch((error) => {
+    void handle(options, boundary, request, response).catch((error) => {
       log(`console sidecar: request deferred — ${error instanceof Error ? error.message : String(error)}`);
       if (!response.headersSent) text(response, 500, "console sidecar error");
       else response.end();
@@ -181,6 +262,7 @@ export async function startConsoleSidecar(options: ConsoleSidecarOptions): Promi
     return { ok: false, reason: lastReason || "no port could be bound" };
   }
   const port = bound.port;
+  boundary = loopbackBoundary(host, port);
   const url = `http://${host}:${port}`;
 
   // The discovery record (ADR 0051 §1): the bound URL is durably discoverable
@@ -211,15 +293,39 @@ export async function startConsoleSidecar(options: ConsoleSidecarOptions): Promi
   return { ok: true, sidecar };
 }
 
-async function handle(options: ConsoleSidecarOptions, request: IncomingMessage, response: ServerResponse): Promise<void> {
+async function handle(options: ConsoleSidecarOptions, boundary: LoopbackBoundary | undefined, request: IncomingMessage, response: ServerResponse): Promise<void> {
+  // The DNS-rebinding guard (T-02) — first gate on EVERY request, static
+  // routes included: a Host that is not this listener's own loopback
+  // host:port is a rebinding probe (evil.example → 127.0.0.1), refused as
+  // data before any path is even looked at.
+  if (boundary !== undefined) {
+    const host = (request.headers.host ?? "").toLowerCase();
+    if (!boundary.allowedHosts.includes(host)) {
+      return json(response, 403, { ok: false, code: "bad_host", error: `the console sidecar answers its own loopback host only — Host ${host || "(absent)"} is refused` });
+    }
+  }
   const path = request.url ?? "/";
-  if (path === "/rpc") return rpc(options, request, response);
+  if (path === "/rpc") return rpc(options, boundary, request, response);
   if (request.method !== "GET" && request.method !== "HEAD") return text(response, 405, "method not allowed");
   await serveBundle(options, path, request.method === "HEAD", response);
 }
 
-async function rpc(options: ConsoleSidecarOptions, request: IncomingMessage, response: ServerResponse): Promise<void> {
+async function rpc(options: ConsoleSidecarOptions, boundary: LoopbackBoundary | undefined, request: IncomingMessage, response: ServerResponse): Promise<void> {
   if (request.method !== "POST") return json(response, 405, { ok: false, code: "method_not_allowed", error: "the console RPC door answers POST only" });
+  // The form-CSRF guard (T-02): a browser form can only post its own body
+  // types — `application/json` is exactly the type fetch's `invokeRpc` sends
+  // and a plain `<form>` cannot. Parameters (`; charset=utf-8`) stay legal.
+  const contentType = (request.headers["content-type"] ?? "").split(";", 2)[0]?.trim().toLowerCase() ?? "";
+  if (contentType !== "application/json") {
+    return json(response, 415, { ok: false, code: "bad_content_type", error: `the console RPC door answers application/json only — content-type ${contentType || "(absent)"} is refused` });
+  }
+  // The cross-site guard (T-02): same-origin fetch sends the sidecar's own
+  // origin; an absent Origin (curl, tests) is legal; anything else —
+  // including the literal `null` a sandboxed frame sends — refuses as data.
+  const origin = request.headers.origin;
+  if (origin !== undefined && !boundary?.ownOrigins.includes(origin.toLowerCase())) {
+    return json(response, 403, { ok: false, code: "bad_origin", error: `the console RPC door answers its own origin only — Origin ${origin} is refused` });
+  }
   let payload: ConsoleRpcRequest;
   try {
     payload = JSON.parse((await readBody(request)).toString("utf8")) as ConsoleRpcRequest;
@@ -230,20 +336,22 @@ async function rpc(options: ConsoleSidecarOptions, request: IncomingMessage, res
     return json(response, 400, { ok: false, code: "bad_request", error: "the RPC body must name a method" });
   }
   const params = payload.params ?? {};
-  if (typeof params !== "object" || params === null) {
+  if (typeof params !== "object" || params === null || Array.isArray(params)) {
     return json(response, 400, { ok: false, code: "bad_request", error: "params must be an object" });
   }
-  // The read surface's one method (T-01): dispatch in-process through the
-  // same handler the RN client's `factory.snapshot` registration calls. The
-  // empty context makes the handler fall back to the deps' daemon capture —
-  // the identical in-process single-writer path. Writes (T-02) refuse here
-  // until their boundary hardening lands.
-  if (payload.method === "factory.snapshot") {
-    const context = options.context?.() ?? {};
-    const reply: SnapshotReply = await options.handlers.snapshot(params as { projectRoot?: string }, context);
-    return json(response, 200, reply);
+  // The allowlisted door (T-02): dispatch in-process through the same
+  // handler the RN client's registration calls. The context makes the
+  // handler fall back to the deps' daemon capture when the shell wires none
+  // — the identical in-process single-writer path. Every allowlisted input
+  // is validated by the SHARED schema before the handler ever sees it.
+  const entry = CONSOLE_RPC_ALLOWLIST.find((allowed) => allowed.method === payload.method);
+  if (entry === undefined) {
+    return json(response, 404, { ok: false, code: "unknown_method", error: `${payload.method} is not served by the console sidecar (allowlist: ${allowlistSentence()})` });
   }
-  return json(response, 404, { ok: false, code: "unknown_method", error: `${payload.method} is not served by the console sidecar (read surface only — factory.snapshot)` });
+  const context = options.context?.() ?? {};
+  const outcome = await entry.run(options.handlers, params, context);
+  if (!outcome.ok) return json(response, 400, { ok: false, code: outcome.code, error: outcome.error });
+  return json(response, 200, outcome.reply);
 }
 
 async function serveBundle(options: ConsoleSidecarOptions, requestPath: string, headOnly: boolean, response: ServerResponse): Promise<void> {

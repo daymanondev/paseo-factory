@@ -1,83 +1,30 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { request } from "node:http";
-import { createFactory } from "../plugin/server/core/factory.ts";
-import { createSurfaceHandlers } from "../plugin/server/surface-rpc.ts";
-import type { SurfaceDaemonApi } from "../plugin/server/surface-rpc.ts";
 import {
   CONSOLE_SIDECAR_DEFAULT_PORTS,
   CONSOLE_STATE_FILE,
-  startConsoleSidecar,
-  type ConsoleSidecarStart,
 } from "../plugin/server/console-sidecar.ts";
-import { fakeCopilotRunner, makeTempDir } from "./helpers.ts";
 import { invokeRpc } from "../web/src/rpc.ts";
 import { loadSnapshotViaSidecar } from "../web/src/useSnapshot.ts";
+import { makeConsoleFixture } from "./console-fixture.ts";
+import { makeTempDir } from "./helpers.ts";
 
 /**
- * The Console sidecar (ADR 0051 §1) against a real Factory on a temp home —
- * never `~/.paseo` — on an ephemeral port: it serves the committed Web
- * Console bundle (SPA fallback included) and dispatches `factory.snapshot`
- * in-process through the same handlers the RN client's registrations call.
- * Every listener the tests open closes in teardown.
+ * The Console sidecar's T-01 contract (ADR 0051 §1) against a real Factory on
+ * a temp home — never `~/.paseo` — on an ephemeral port: it serves the
+ * committed Web Console bundle (SPA fallback included) and dispatches the
+ * allowlisted RPCs in-process through the same handlers the RN client's
+ * registrations call. Every listener the tests open closes in teardown. The
+ * T-02 slices live beside this one: `console-boundary.test.ts` (the
+ * localhost boundary), `console-rpc-door.test.ts` (the allowlist door), and
+ * `console-accept-e2e.test.ts` (RG-1, the real-transport write journey).
  */
 
-interface Fixture {
-  stateDir: string;
-  webRoot: string;
-  handlers: ReturnType<typeof createSurfaceHandlers>;
-  start: (overrides?: Partial<Parameters<typeof startConsoleSidecar>[0]>) => Promise<ConsoleSidecarStart>;
-}
-
-function makeFixture(homeRoot: string): Fixture {
-  const home = join(homeRoot, "paseo-home");
-  const stateDir = join(home, "plugin-state", "paseo-factory");
-  const webRoot = join(homeRoot, "console-bundle");
-  mkdirSync(join(webRoot, "assets"), { recursive: true });
-  writeFileSync(
-    join(webRoot, "index.html"),
-    "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"><title>Factory Console (fixture)</title></head><body><div id=\"root\"></div></body></html>\n",
-  );
-  writeFileSync(join(webRoot, "assets", "app.js"), "console.log('fixture bundle');\n");
-  const retroRunner = fakeCopilotRunner(() => ({ code: 0, stdout: '{"proposals":[]}' }));
-  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner, eyeCliProbe: () => false });
-  // The transport test's daemon: an empty, fully-typed slice — the snapshot
-  // needs no live seats to answer the view, and SurfaceDeps.daemon is required.
-  const daemon: SurfaceDaemonApi = {
-    agents: {
-      list: async () => ({ entries: [] }),
-      create: async () => ({ id: "unused" }),
-      ref: (id: string) => ({
-        send: async () => {},
-        archive: async () => ({ archivedAt: new Date().toISOString() }),
-        timeline: { refetch: async () => ({ entries: [], error: null }) },
-      }),
-    },
-    providers: {
-      listAvailable: async () => ({ providers: [] }),
-      listModels: async () => ({ models: [] }),
-    },
-  };
-  const handlers = createSurfaceHandlers({ factory, stateDir, home, daemon });
-  return {
-    stateDir,
-    webRoot,
-    handlers,
-    start: async (overrides) =>
-      startConsoleSidecar({
-        handlers,
-        stateDir,
-        webRoot: () => webRoot,
-        // The ephemeral port — never the Owner's stable default during tests.
-        ports: [0],
-        onLog: () => {},
-        ...overrides,
-      }),
-  };
-}
+const makeFixture = makeConsoleFixture;
 
 async function get(url: string): Promise<Response> {
   return fetch(url, { redirect: "manual" });
@@ -162,12 +109,12 @@ test("console sidecar: dispatches factory.snapshot in-process through the surfac
   assert.equal(payload.view?.version, 3, "FactoryView v3 rides the sidecar");
   assert.ok(Array.isArray(payload.view?.projects), "the project list rides the snapshot");
 
-  // The read surface's one method: anything else refuses as data.
-  const unknown = await post(`${started.sidecar.url}/rpc`, { method: "factory.accept", params: { task: "T1", attempt: 1 } });
+  // The door is an allowlist: a method outside it refuses as data.
+  const unknown = await post(`${started.sidecar.url}/rpc`, { method: "factory.retro", params: {} });
   assert.equal(unknown.status, 404);
   const refusal = (await unknown.json()) as { ok: boolean; code?: string };
   assert.equal(refusal.ok, false);
-  assert.equal(refusal.code, "unknown_method", "write RPCs arrive with T-02's boundary — never unguarded here");
+  assert.equal(refusal.code, "unknown_method", "only the named factory.* methods dispatch (the allowlist slice proves the rest)");
 
   const badBody = await post(`${started.sidecar.url}/rpc`, "not-json");
   assert.equal(badBody.status, 400);
@@ -205,9 +152,9 @@ test("console sidecar ↔ console transport: the real loadSnapshotViaSidecar loa
     "the registered Project lands in the loaded view's list",
   );
 
-  // Transport-level refusals stay data through the same seam: the read
-  // surface's refusal to a write RPC arrives as the sidecar's own Failure body.
-  const refusal = await invokeRpc("factory.accept", { task: "T1", attempt: 1 }, atSidecar);
+  // Transport-level refusals stay data through the same seam: the door's
+  // refusal to an unlisted write RPC arrives as the sidecar's own Failure body.
+  const refusal = await invokeRpc("factory.retro", {}, atSidecar);
   assert.ok(refusal.ok === false, "an unknown method resolves as Failure-shaped data, never a throw");
   assert.ok(refusal.ok === false && refusal.code === "unknown_method", "the sidecar's refusal code rides verbatim");
 });

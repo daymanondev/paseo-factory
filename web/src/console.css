@@ -34,6 +34,34 @@
   color: var(--red);
 }
 
+.console-banner-ok {
+  border: 1px solid var(--green);
+  background: var(--green-bg);
+  color: var(--green);
+}
+
+/* The Tasks screen's list (T-02): the prototype's task cards, stacked as a
+   single scannable list — the Kanban board is a later wave, not a squeezed
+   five-column squeeze. */
+.console-task-list {
+  display: grid;
+  gap: 10px;
+  max-width: 900px;
+}
+
+.console-task-list .task-card {
+  margin-bottom: 0;
+}
+
+.console-task-list .task-card h3 {
+  margin: 8px 0;
+}
+
+.console-task-actions {
+  margin-top: 12px;
+  justify-content: flex-end;
+}
+
 .console-seat-summary {
   color: var(--muted);
   font-size: var(--small);

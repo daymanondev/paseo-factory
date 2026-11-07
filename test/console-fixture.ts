@@ -1,0 +1,95 @@
+/**
+ * The console tests' shared fixture (T-02): a real Factory on a temp home —
+ * never `~/.paseo` — its `SurfaceHandlers`, a committed-looking console
+ * bundle, and a started sidecar on an ephemeral port. Every listener the
+ * fixture opens closes in the caller's teardown.
+ */
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { createFactory, type Factory } from "../plugin/server/core/factory.ts";
+import { createSurfaceHandlers } from "../plugin/server/surface-rpc.ts";
+import type { SurfaceDaemonApi } from "../plugin/server/surface-rpc.ts";
+import { startConsoleSidecar, type ConsoleSidecarStart } from "../plugin/server/console-sidecar.ts";
+import { fakeCopilotRunner, gitCommitAll } from "./helpers.ts";
+
+export interface ConsoleFixture {
+  homeRoot: string;
+  home: string;
+  stateDir: string;
+  webRoot: string;
+  factory: Factory;
+  handlers: ReturnType<typeof createSurfaceHandlers>;
+  start: (overrides?: Partial<Parameters<typeof startConsoleSidecar>[0]>) => Promise<ConsoleSidecarStart>;
+  /** A FetchLike bound to the STARTED sidecar — the console transport's real seam. Build it after `start()`. */
+  atSidecar: (sidecar: Extract<ConsoleSidecarStart, { ok: true }>["sidecar"]) => (input: string, init: RequestInit) => Promise<Response>;
+}
+
+/** The transport test's daemon: an empty, fully-typed slice — no live seats needed to answer a snapshot. */
+export function emptyDaemon(): SurfaceDaemonApi {
+  return {
+    agents: {
+      list: async () => ({ entries: [] }),
+      create: async () => ({ id: "unused" }),
+      ref: (id: string) => ({
+        send: async () => {},
+        archive: async () => ({ archivedAt: new Date().toISOString() }),
+        timeline: { refetch: async () => ({ entries: [], error: null }) },
+      }),
+    },
+    providers: {
+      listAvailable: async () => ({ providers: [] }),
+      listModels: async () => ({ models: [] }),
+    },
+  };
+}
+
+export function makeConsoleFixture(homeRoot: string): ConsoleFixture {
+  const home = join(homeRoot, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const webRoot = join(homeRoot, "console-bundle");
+  mkdirSync(join(webRoot, "assets"), { recursive: true });
+  writeFileSync(
+    join(webRoot, "index.html"),
+    "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"><title>Factory Console (fixture)</title></head><body><div id=\"root\"></div></body></html>\n",
+  );
+  writeFileSync(join(webRoot, "assets", "app.js"), "console.log('fixture bundle');\n");
+  const retroRunner = fakeCopilotRunner(() => ({ code: 0, stdout: '{"proposals":[]}' }));
+  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner, eyeCliProbe: () => false });
+  const handlers = createSurfaceHandlers({ factory, stateDir, home, daemon: emptyDaemon() });
+  return {
+    homeRoot,
+    home,
+    stateDir,
+    webRoot,
+    factory,
+    handlers,
+    start: async (overrides) =>
+      startConsoleSidecar({
+        handlers,
+        stateDir,
+        webRoot: () => webRoot,
+        // The ephemeral port — never the Owner's stable default during tests.
+        ports: [0],
+        onLog: () => {},
+        ...overrides,
+      }),
+    atSidecar: (sidecar) => (input, init) => fetch(`${sidecar.url}${input}`, init),
+  };
+}
+
+/**
+ * Contracts a task on a real git workspace and drives its one attempt to a
+ * closed green verdict — the fold then reads `ready-to-accept`, exactly the
+ * state the Owner's Accept act needs.
+ */
+export function makeReadyToAcceptTask(factory: Factory, dir: string, task: string): { workspace: string; sha: string } {
+  const workspace = join(dir, `${task}-ws`);
+  mkdirSync(join(workspace, "src"), { recursive: true });
+  writeFileSync(join(workspace, "src", "format.ts"), "export function pad() {}\n");
+  const sha = gitCommitAll(workspace);
+  factory.setContract({ task, workspace, gate: "npm test", artifact: "src/format.ts" });
+  factory.ledger.append({ event: "claim_reported", task, attempt: 1, sha });
+  factory.ledger.append({ event: "gate_finished", task, attempt: 1, exit: 0, verdict: "green", note: "passed" });
+  factory.ledger.append({ event: "report_written", task, attempt: 1, path: `report-${task}-1.md` });
+  return { workspace, sha };
+}

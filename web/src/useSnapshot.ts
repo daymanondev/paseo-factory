@@ -33,10 +33,14 @@ export function loadSnapshotViaSidecar(input: { projectRoot?: string }, fetchImp
 
 export type LoadedSnapshot = { value: FactoryView | null; error: { code: string; message: string } | null; at: number | null };
 
-export function useSnapshot(load: () => Promise<SnapshotReply>, reloadKey: string): LoadedSnapshot {
+/** The loaded snapshot plus the Owner-act trigger: writes call `refresh()` so the next verification read is immediate, not at the poll's cadence. */
+export type SnapshotClock = LoadedSnapshot & { refresh: () => void };
+
+export function useSnapshot(load: () => Promise<SnapshotReply>, reloadKey: string): SnapshotClock {
   const [state, setState] = useState<LoadedSnapshot>({ value: null, error: null, at: null });
   const latest = useRef(load);
   latest.current = load;
+  const refresh = useRef<() => void>(() => {});
   useEffect(() => {
     let live = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -66,6 +70,7 @@ export function useSnapshot(load: () => Promise<SnapshotReply>, reloadKey: strin
       clearTimeout(timer);
       void tick();
     };
+    refresh.current = shown;
     setState({ value: null, error: null, at: null });
     void tick();
     document.addEventListener("visibilitychange", shown);
@@ -77,5 +82,5 @@ export function useSnapshot(load: () => Promise<SnapshotReply>, reloadKey: strin
       window.removeEventListener("focus", shown);
     };
   }, [reloadKey]);
-  return state;
+  return { ...state, refresh: () => refresh.current() };
 }

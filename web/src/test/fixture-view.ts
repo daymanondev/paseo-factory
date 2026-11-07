@@ -1,9 +1,10 @@
 /**
  * A fixture `FactoryView` v3 — the console tests' snapshot. Every required
  * field is honest FactoryView data (empty streams, a vacant vault), with the
- * two Projects the shell assertions read.
+ * two Projects the shell assertions read and the Task/usage builders the
+ * Tasks-screen tests fold.
  */
-import type { FactoryView } from "../../../plugin/shared/view.ts";
+import type { AttemptView, FactoryView, TaskStatus, TaskView } from "../../../plugin/shared/view.ts";
 
 const LANES = {
   supervisor: "pi/zai/glm-5.3",
@@ -13,6 +14,51 @@ const LANES = {
   retro: "pi/zai/glm-5.3",
   freshEyes: "pi/zai/glm-5.3",
 };
+
+/** One closed attempt — the verdict pill the fold's statuses read. */
+export function fixtureAttempt(n: number, verdict: "green" | "red" | null): AttemptView {
+  return {
+    n,
+    verdict,
+    open: false,
+    exit: verdict === null ? null : verdict === "green" ? 0 : 1,
+    note: verdict === null ? "interrupted" : null,
+    sha: verdict === null ? null : `${n}a2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d`,
+    respawned: false,
+    gateLog: null,
+    report: null,
+    claimedAt: "2026-11-07T09:30:00.000Z",
+    verdictAt: "2026-11-07T09:40:00.000Z",
+    watch: null,
+    eye: null,
+  };
+}
+
+/** A Task row in the fold's own status vocabulary — every optional field honest. */
+export function fixtureTask(task: string, status: TaskStatus, attempts: readonly AttemptView[] = []): TaskView {
+  const accepted = status === "accepted";
+  const green = [...attempts].findLast((attempt) => attempt.verdict === "green");
+  return {
+    task,
+    workspace: `/Users/owner/code/research-slp/.paseo/worktrees/${task}`,
+    description: `The ${task} contract`,
+    status,
+    accepted,
+    acceptedBy: accepted ? "owner" : null,
+    currentAttempt: attempts.length > 0 ? attempts[attempts.length - 1]!.n : undefined,
+    verdict: green !== undefined ? "green" : attempts.length > 0 && attempts[attempts.length - 1]!.verdict === "red" ? "red" : undefined,
+    lane: "pi/zai/glm-5.3",
+    agentId: "agent-worker-1",
+    costState: "metered",
+    costUsd: 0.42,
+    totalTokens: undefined,
+    usageModel: attempts.length > 0 ? "glm-5.3" : undefined,
+    needsHumanReason: status === "needs-human" ? "gate asked a question" : null,
+    choke: { allowed: 3, denied: 0, blocked: 0 },
+    attempts: [...attempts],
+    lastSeq: 12,
+  };
+}
 
 export function fixtureView(): FactoryView {
   return {
