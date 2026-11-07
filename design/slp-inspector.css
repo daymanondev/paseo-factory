@@ -1,0 +1,82 @@
+/* Graph summaries and a single, role-specific detail surface. */
+.slp-seat-shell{position:relative;width:100%;max-width:240px;margin-inline:auto}
+.slp-seat-shell .slp-node{max-width:none}
+.slp-canvas .slp-node .node-top{padding-right:16px}
+.slp-node-context{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:space-between;font-size:11px;line-height:1.5;color:#c6d0df;padding-top:4px;border-top:1px solid #ffffff12}
+.slp-node-context>span{display:inline-flex;align-items:center;gap:4px}.slp-node-context .od-icon{--od-icon-size:12px}
+.slp-seat-fence{position:absolute;right:8px;top:8px;z-index:2;display:flex;align-items:center;justify-content:center;width:28px;height:28px;padding:4px;border:0;border-radius:4px;color:#b7d0dd;background:none;cursor:pointer}
+.slp-seat-fence .od-icon{--od-icon-size:14px}
+.slp-verification-slot{grid-area:5/3/7/4}
+.slp-wave-heading{grid-area:7/1/8/4;display:flex;align-items:center;justify-content:space-between;gap:16px;justify-self:stretch;background:var(--slp-ground);font-size:12px;color:#dfe7f2;padding:4px 0}
+.slp-wave-heading small{font-size:11px;color:var(--slp-muted)}
+.slp-compact-peers{grid-area:8/1/9/4;padding-top:0}
+.slp-canvas .workflow-wires path.edge.slp-edge-muted{opacity:.2}
+.slp-canvas .workflow-wires path.edge{transition:opacity 180ms}
+/* Reserve four explicit rows; only the content panel consumes spare height.
+   A missing tab bar leaves its auto-sized row empty. */
+.agent-drawer.slp-tabbed-drawer{grid-template-rows:auto auto minmax(0,1fr) auto;overflow:hidden}
+.slp-tabbed-drawer>.agent-drawer-header{grid-row:1}
+.slp-tabbed-drawer>.slp-inspector-tabs{grid-row:2;align-self:start;min-height:0}
+.slp-tabbed-drawer>.agent-drawer-body{grid-row:3;min-height:0;overflow-y:auto}
+.slp-tabbed-drawer>.agent-drawer-footer{grid-row:4}
+/* Text tabs share the header surface and keep their natural width. */
+.slp-inspector-tabs{--tab-height:32px;--tab-gap:4px;--tab-radius:6px;--tab-active:#3c434e;--tab-border:#626d7e;display:flex;align-items:center;flex:0 0 auto;gap:var(--tab-gap);padding:0 var(--drawer-compact-pad,20px) 8px;border-bottom:1px solid var(--drawer-compact-line,#44444b);background:var(--drawer-compact-header,#252528)}
+.slp-inspector-tabs>button{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;min-height:var(--tab-height);padding:4px 12px;border:1px solid transparent;border-radius:var(--tab-radius);background:transparent;color:#c7cbd5;font-size:13px;font-weight:550;line-height:1.5;font-family:var(--font);white-space:nowrap;cursor:pointer;transition:background 150ms,color 150ms,border-color 150ms}
+.slp-inspector-tabs>button[aria-selected="true"]{border-color:var(--tab-border);background:var(--tab-active);color:#f7faff}
+.slp-tabbed-drawer .agent-drawer-header{border-bottom:0}
+.slp-tabbed-drawer button:focus-visible,.slp-tabbed-drawer summary:focus-visible{outline:2px solid #7ce9fc;outline-offset:2px}
+.slp-tabbed-drawer .agent-drawer-body{padding-top:16px}
+.slp-tabbed-drawer .agent-drawer-body:focus-visible{outline:0;box-shadow:inset 0 0 0 2px #7ce9fc}
+.slp-tabbed-drawer .agent-drawer-header{align-items:center}
+.slp-tabbed-drawer .drawer-work{padding-top:0}
+.slp-tabbed-drawer .drawer-copy{font-size:13px;line-height:1.65;margin:0 0 16px}
+.slp-empty-detail{font-size:13px;line-height:1.65;color:var(--muted);padding:16px 0;margin:0}
+.slp-work-hold{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px;margin-bottom:16px;background:#3b3222;border-radius:6px;font-size:12px}
+.slp-work-hold>span,.slp-work-hold>button{display:flex;align-items:center;gap:6px}.slp-work-hold button{padding:4px 0;border:0;background:none;color:#e9f6ff;font-family:var(--font);font-size:12px;cursor:pointer}.slp-work-hold .od-icon{--od-icon-size:14px}
+.slp-artifact{border-top:1px solid var(--drawer-compact-line,#4d4b55);margin-top:12px}
+.slp-artifact>summary{display:flex;align-items:center;gap:8px;min-height:44px;padding:8px 0;list-style:none;font-size:12px;cursor:pointer;overflow-wrap:anywhere}
+.slp-artifact>summary::-webkit-details-marker{display:none}.slp-artifact>summary>.od-icon{--od-icon-size:14px;color:#85def0;flex:0 0 auto}.slp-artifact>summary>.od-icon:last-child{margin-left:auto;--od-icon-size:12px;color:var(--muted)}.slp-artifact[open]>summary>.od-icon:last-child{transform:rotate(90deg)}
+.slp-artifact pre{max-width:100%;max-height:320px;overflow:auto;font-size:12px;line-height:1.65;white-space:pre-wrap;overflow-wrap:anywhere;padding:12px;border-radius:6px;background:#181a22;color:#e6edf5}
+.slp-artifact-actions{display:flex;justify-content:flex-end}.slp-artifact-actions .btn{font-size:11px;min-height:28px}
+.slp-contract-fields{display:grid;gap:16px;margin-top:16px}.slp-contract-fields h3{margin:0 0 6px;font-size:12px;font-weight:600;color:#e6edf5}.slp-contract-fields p{white-space:pre-wrap;overflow-wrap:anywhere;margin:0;font-size:13px;line-height:1.65;color:var(--muted)}
+.slp-token-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px}.slp-token-grid>div{border-bottom:1px solid #ffffff12;padding-bottom:12px}.slp-token-grid span{display:block;font-size:11px;color:var(--muted)}.slp-token-grid strong{display:block;font-size:17px;font-weight:550;color:#e9f2fb;margin-top:4px;font-variant-numeric:tabular-nums}
+.slp-usage-total{padding:0 0 20px}.slp-usage-total>span{display:block;font-size:12px;color:var(--muted)}.slp-usage-total>strong{display:block;font-family:var(--display);font-size:26px;font-weight:600;line-height:1.5;color:#e8f9fe}.slp-usage-total small{font-size:12px;color:var(--muted);font-family:var(--font);font-weight:400}
+.slp-usage-group{display:flex;gap:16px;border-bottom:1px solid var(--drawer-compact-line,#4d4b55);margin-top:20px}.slp-usage-group button{padding:8px 0;min-height:36px;border:0;border-bottom:2px solid transparent;background:none;color:var(--muted);font-size:12px;font-family:var(--font);cursor:pointer}.slp-usage-group button[aria-pressed="true"]{color:#99e5f6;border-bottom-color:#99e5f6}
+.slp-usage-rows>div{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 0;border-bottom:1px solid #ffffff12}.slp-usage-rows strong{display:block;font-size:12px;font-weight:550;line-height:1.5}.slp-usage-rows small{display:block;font-size:11px;color:var(--muted);line-height:1.5}.slp-usage-rows>div>span:last-child{text-align:right;flex:0 0 auto;font-variant-numeric:tabular-nums}
+.slp-detail-footnote{font-size:11px;line-height:1.65;color:var(--muted);margin:16px 0}
+.slp-attempt-picker{display:flex;align-items:center;gap:8px;margin-bottom:16px}.slp-attempt-picker>button{display:flex;align-items:center;gap:4px;padding:8px 12px;border:1px solid var(--drawer-compact-line,#4d4b55);border-radius:6px;background:none;font-size:12px;cursor:pointer}.slp-attempt-picker>button[aria-pressed="true"]{background:#ffffff0a;border-color:currentColor}.slp-attempt-picker>small{margin-left:auto;font-size:11px;color:var(--muted)}.slp-attempt-picker .od-icon{--od-icon-size:14px}
+.slp-section-intro{display:flex;align-items:center;gap:12px;margin-bottom:4px}.slp-section-intro h3{font-size:13px;margin:0}.slp-section-intro>span{font-size:11px;color:var(--muted)}
+.slp-decision-row{display:grid;gap:8px;padding:16px 0;border-bottom:1px solid var(--drawer-compact-line,#4d4b55)}.slp-decision-row>span{display:flex;align-items:center;gap:6px;font-size:11px}.slp-decision-row>span .od-icon{--od-icon-size:14px}.slp-decision-row>strong{font-size:13px;font-weight:550;line-height:1.6}.slp-decision-row>p{margin:0;font-size:12px;color:var(--muted);line-height:1.6}.slp-decision-row>div{display:flex;align-items:center;justify-content:flex-end;gap:8px}.slp-decision-row .btn{font-size:11px;min-height:32px}
+.slp-seat-empty{display:grid;justify-items:center;gap:12px;text-align:center;padding:24px 8px;color:var(--muted)}.slp-seat-empty>.od-icon{--od-icon-size:32px}.slp-seat-empty strong{font-size:14px;color:var(--text)}.slp-seat-empty p{margin:0;font-size:13px;line-height:1.65}
+.slp-seat-actions{position:relative;flex:0 0 auto}.slp-seat-actions>summary{list-style:none;display:flex;align-items:center;justify-content:center;min-height:36px;width:36px;border:1px solid #616576;border-radius:6px;cursor:pointer;color:#d9dfed}.slp-seat-actions>summary::-webkit-details-marker{display:none}.slp-seat-actions>summary .od-icon{--od-icon-size:16px}.slp-seat-actions>div{position:absolute;bottom:44px;left:0;z-index:4;width:200px;padding:8px;border:1px solid #616576;border-radius:8px;background:#2b2d38;box-shadow:0 8px 32px #0005}.slp-seat-actions>div>.btn{width:100%;justify-content:flex-start;color:#ffcd92}
+.slp-design-file{display:flex;align-items:center;gap:8px}.slp-design-file .od-icon{--od-icon-size:14px;color:#85def0}
+.slp-ledger-row{padding:12px 0;border-bottom:1px solid #ffffff12}.slp-ledger-row>span{font-size:11px;color:#91deee}.slp-ledger-row>p{margin:4px 0;font-size:13px;line-height:1.65}.slp-ledger-row small{font-size:11px;color:var(--muted)}
+.slp-resource-server{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:8px 0;font-size:12px}.slp-resource-server small{font-size:11px;color:var(--muted)}
+@media(hover:hover){.slp-seat-fence:hover,.slp-usage-group button:hover{background:#ffffff08;color:#ecf9ff}.slp-tabbed-drawer .slp-artifact>summary:hover{background:#ffffff08}.slp-attempt-picker>button:hover{background:#ffffff0c}}
+@media(max-width:767px){.slp-canvas .slp-node .node-title{font-size:13px}.slp-compact-layout{column-gap:8px}.slp-node-context{font-size:10px}.slp-inspector-tabs>button{min-height:44px}.slp-seat-fence{min-width:32px;min-height:32px}.slp-attempt-picker>button{min-height:44px}.slp-wave-heading{font-size:11px;padding-inline:4px}.slp-point-label{font-size:11px}}
+@media(prefers-reduced-motion:reduce){.slp-canvas .workflow-wires path.edge{transition:none}}
+
+@media(hover:hover){.slp-inspector-tabs>button:not([aria-selected="true"]):hover{background:#333840;color:#f7faff}.slp-inspector-tabs>button[aria-selected="true"]:hover{background:#464f5c;color:#fff}}
+@media(prefers-reduced-motion:reduce){.slp-inspector-tabs>button{transition:none}}
+
+/* Board cards show the model; usage and execution counters stay in the inspector. */
+.slp-canvas .slp-node-model{display:block;min-width:0;font-size:12px;line-height:1.5;color:#c6d0df;overflow-wrap:anywhere}
+
+.slp-canvas .slp-node-model{display:flex;align-items:baseline;flex-wrap:wrap;gap:4px 6px}
+.slp-node-provider,.slp-model-separator{color:#aebace}
+.slp-model-name{color:#dce6f3;min-width:0;overflow-wrap:anywhere}
+.slp-node-thinking{font-size:11px;line-height:1.5;color:#a7e3ef;white-space:nowrap}
+
+.slp-peer-session-model{display:block;font-size:12px;line-height:1.5;color:var(--drawer-compact-muted,#c4bdcd);overflow-wrap:anywhere}
+.slp-peer-lifecycle-note{font-size:12px;line-height:1.6;color:var(--muted);margin:0 0 12px}
+
+/* Keep the branch channel clear; return paths collect below the Peer row. */
+.slp-canvas{padding-bottom:64px!important}
+.slp-wave-heading{grid-area:7/1/8/2;justify-self:start;align-self:center;background:transparent;padding:0;min-width:0}
+.slp-wave-heading>span{display:block;line-height:1.5;overflow-wrap:anywhere}
+.slp-wave-heading>small{display:none}
+.slp-dispatch-point{background:transparent}
+.slp-compact-peers{padding-top:16px}
+.slp-canvas .workflow-wires path.slp-motion-route{visibility:hidden}
+.slp-canvas .workflow-wires path.edge{stroke-linecap:round;stroke-linejoin:round}
+@media(max-width:767px){.slp-wave-heading{display:none}.slp-canvas{padding-bottom:32px!important}}

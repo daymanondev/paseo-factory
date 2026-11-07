@@ -1,0 +1,32 @@
+[
+  {
+    "file": "vscode.png",
+    "source": "/Applications/Visual Studio Code.app/Contents/Resources/Code.icns",
+    "author": "Microsoft",
+    "license": "Proprietary application artwork. Rights remain with Microsoft. Used to identify the installed application in this local prototype."
+  },
+  {
+    "file": "antigravity.png",
+    "source": "/Applications/Antigravity.app/Contents/Resources/icon.icns",
+    "author": "Google",
+    "license": "Proprietary application artwork. Rights remain with Google. Used to identify the installed application in this local prototype."
+  },
+  {
+    "file": "xcode.png",
+    "source": "/Applications/Xcode.app/Contents/Resources/Xcode.icns",
+    "author": "Apple",
+    "license": "Proprietary application artwork. Rights remain with Apple. Used to identify the installed application in this local prototype."
+  },
+  {
+    "file": "finder.png",
+    "source": "/System/Library/CoreServices/Finder.app/Contents/Resources/Finder.icns",
+    "author": "Apple",
+    "license": "Proprietary application artwork. Rights remain with Apple. Used to identify the installed application in this local prototype."
+  },
+  {
+    "file": "terminal.png",
+    "source": "/System/Applications/Utilities/Terminal.app/Contents/Resources/Terminal.icns",
+    "author": "Apple",
+    "license": "Proprietary application artwork. Rights remain with Apple. Used to identify the installed application in this local prototype."
+  }
+]
