@@ -218,3 +218,31 @@
 .console-flow-drawer-agent-id { display: inline-block; max-width: 100%; overflow-wrap: anywhere; font-family: var(--mono); }
 .console-flow-drawer-transcript .console-tr-list { margin-top: 10px; }
 .console-flow-drawer-transcript .notice { margin: 10px 0 0; }
+
+/* The Agent Drawer's role-aware tabs (T-07c) — the reused design bundle
+   carries the drawer and its data-list rows; the console adds the Session
+   tab's rhythm, the Attempts ladder rungs, the Handoff spacing, and the
+   Resources usage rows — all read-only data, honest absences included. */
+.console-flow-drawer-session .data-list { margin-top: 4px; }
+.console-flow-drawer-session .drawer-muted { margin-top: 10px; }
+.console-flow-drawer-attempts .drawer-section-heading,
+.console-flow-drawer-resources .drawer-section-heading { margin-bottom: 8px; }
+.console-flow-drawer-ladder { margin: 0 0 14px; }
+.console-flow-drawer-ladder .drawer-task-link { padding: 0; gap: 8px; background: none; border: 0; border-radius: 0; }
+.console-flow-drawer-rungs { list-style: none; margin: 6px 0 0; padding: 0; }
+.console-flow-drawer-rung { display: flex; align-items: baseline; gap: 10px; padding: 7px 0; border-top: 1px solid #343439; font-size: 11px; line-height: 1.6; }
+.console-flow-drawer-rung-n { font-family: var(--mono); color: var(--drawer-compact-muted, var(--muted)); flex: none; }
+.console-flow-drawer-rung-verdict { flex: none; }
+.console-flow-drawer-rung.green .console-flow-drawer-rung-verdict { color: var(--green); }
+.console-flow-drawer-rung.red .console-flow-drawer-rung-verdict { color: var(--red); }
+.console-flow-drawer-rung.cyan .console-flow-drawer-rung-verdict { color: var(--cyan); }
+.console-flow-drawer-rung.muted .console-flow-drawer-rung-verdict { color: var(--drawer-compact-muted, var(--muted)); }
+.console-flow-drawer-rung-sha { margin-left: auto; color: var(--drawer-compact-muted, var(--muted)); overflow-wrap: anywhere; text-align: right; }
+.console-flow-drawer-handoff .data-list { margin-top: 4px; }
+.console-flow-drawer-handoff .drawer-muted { margin-top: 10px; }
+.console-flow-drawer-usage-row { display: grid; gap: 3px; padding: 10px 0; border-top: 1px solid #343439; }
+.console-flow-drawer-usage-row:first-of-type { border-top: 0; }
+.console-flow-drawer-usage-row strong { font-size: 12px; font-weight: 500; color: var(--drawer-compact-text, var(--text)); }
+.console-flow-drawer-usage-meter { font-size: 11px; line-height: 1.6; color: var(--drawer-compact-muted, var(--muted)); overflow-wrap: anywhere; }
+.console-flow-drawer-usage-row small { font-size: 10px; color: var(--drawer-compact-muted, var(--muted)); }
+.console-flow-drawer-resources .notice { margin-top: 0; }

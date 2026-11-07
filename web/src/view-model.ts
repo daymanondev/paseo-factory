@@ -699,6 +699,20 @@ export function flowSeatState(agent: AgentView | null, seat: "supervisor" | "lea
   }
 }
 
+/** One rung of the Agent Drawer's Attempt ladder (T-07c) — the Task Detail's own verdict spelling over the ledger's attempts. */
+export interface FlowAttemptRung {
+  n: number;
+  /** The attempt's latest gate verdict — null while open or never gated. */
+  verdict: "green" | "red" | null;
+  /** `Gate green` / `Gate red` / `Running` / `Pending` — the ladder's own summary spelling. */
+  verdictLabel: string;
+  verdictTone: "green" | "red" | "cyan" | "muted";
+  /** The sha the claim stamped — null when the ledger records none. */
+  sha: string | null;
+  /** The Peer agent id that produced the attempt, when the ledger names one. */
+  agentId: string | null;
+}
+
 /** One Task the seat owns — a chip with its verification-line status. */
 export interface FlowTaskChip {
   task: string;
@@ -707,6 +721,60 @@ export interface FlowTaskChip {
   tone: TaskRowViewModel["tone"];
   /** The ledger's own Attempt count — the Agent Drawer's Work tab reads it (T-07b). */
   attemptCount: number;
+  /** The Task's Attempt ladder — the Agent Drawer's Attempts tab reads it (T-07c). */
+  attempts: readonly FlowAttemptRung[];
+}
+
+/**
+ * The Agent Drawer's Session model (T-07c) — the daemon's own fields with
+ * honest absences: the snapshot carries no per-agent attention reason and no
+ * per-agent timestamp, so the fold carries the snapshot's own `generatedAt`
+ * as the read's time and the oracle's `seqEnd` as the timeline's last seq.
+ */
+export interface FlowSessionModel {
+  provider: string;
+  model: string | null;
+  /** The thinking option the agent runs — null when the daemon reports none. */
+  thinking: string | null;
+  /** The configured lane for supervisor/lead; the owned Task's run-named lane for a Peer — null when neither names one. */
+  lane: string | null;
+  /** The daemon's raw status word, verbatim. */
+  status: string;
+  requiresAttention: boolean | null;
+  cwd: string | null;
+  /** The Timeline Oracle's last seqEnd — null when the daemon never answered. */
+  seqEnd: number | null;
+  /** The snapshot's own generation time — the honest "last read" stamp. */
+  snapshotAt: string;
+  contextUsedTokens: number | null;
+  contextMaxTokens: number | null;
+}
+
+/**
+ * The Agent Drawer's Handoff model (T-07c) — the Lead rotation state machine
+ * as `project.json` records it (ADR 0013 §5), Lead nodes only. `null`
+ * rotationState is the honest "unrecorded" (absent reads as normal).
+ */
+export interface FlowHandoffModel {
+  rotationState: "normal" | "rotation_pending" | "handing_over" | null;
+  /** `Handing over` / `Rotation pending` / `Normal` / `Not recorded`. */
+  rotationLabel: string;
+  rotationTone: "green" | "amber" | "cyan" | "muted";
+  queuedMailCount: number | null;
+  /** The Lead mailbox locks while the rotation hands over. */
+  mailboxLocked: boolean;
+  contextUsedTokens: number | null;
+  /** The context ceiling the rotation watches. */
+  contextMaxTokens: number | null;
+}
+
+/** One Resources row (T-07c) — a usage rollup row the snapshot attributes to this agent, meter lawful by construction. */
+export interface FlowUsageRowModel {
+  /** The honest attribution — `Supervisor seat` / `Lead seat` / `Task T-07`. */
+  label: string;
+  meter: MeterViewModel;
+  turns: number;
+  sessionCount: number;
 }
 
 /** One seat/agent node of the authority graph — Owner renders as its own static card. */
@@ -727,6 +795,38 @@ export interface FlowSeatNode {
   contextLabel: string | null;
   /** The Lead's queued mail count — null when unreported. */
   queuedMailCount: number | null;
+  /** The Session tab's facts — null on a vacant seat (it never opens the drawer). */
+  session: FlowSessionModel | null;
+  /** The Handoff tab's facts — the Lead only; every other seat answers null and shows no tab. */
+  handoff: FlowHandoffModel | null;
+  /** The Resources tab's rows — empty renders the honest "No usage recorded" notice. */
+  usage: readonly FlowUsageRowModel[];
+}
+
+/** The Agent Drawer's tab vocabulary (T-07c) — Work and Transcript (T-07b) plus the four role-aware read-only tabs. */
+export type DrawerTabId = "work" | "transcript" | "session" | "attempts" | "handoff" | "resources";
+
+export const DRAWER_TAB_LABELS: Readonly<Record<DrawerTabId, string>> = {
+  work: "Work",
+  transcript: "Transcript",
+  session: "Session",
+  attempts: "Attempts",
+  handoff: "Handoff",
+  resources: "Resources",
+};
+
+/**
+ * The tabs one node's drawer offers — role-aware by the fold's own facts:
+ * Work, Transcript, and Session for every live seat; Attempts only where the
+ * ledger binds Tasks to it; Handoff only on the Lead; Resources for every
+ * seat (its honest absence is the "No usage recorded" notice, not a missing tab).
+ */
+export function drawerTabsFor(node: FlowSeatNode): readonly DrawerTabId[] {
+  const tabs: DrawerTabId[] = ["work", "transcript", "session"];
+  if (node.tasks.length > 0) tabs.push("attempts");
+  if (node.handoff !== null) tabs.push("handoff");
+  tabs.push("resources");
+  return tabs;
 }
 
 /** One mailbox point between authority tiers — queued counts when the fold knows one. */
@@ -863,7 +963,7 @@ function scrumTaskLabel(status: TaskStatus): { label: string; tone: ScrumStageTa
 }
 
 /** The Lead's context telemetry formatting — "40k / 128k", the trailing `.0` dropped. */
-function flowContextTokens(count: number): string {
+export function flowContextTokens(count: number): string {
   return formatTokens(count).replace(/\.0([kM])$/, "$1");
 }
 
@@ -926,6 +1026,8 @@ export function flowScreenModel(view: FactoryView): FlowScreenModel | null {
   if (view.project === null) return null;
   const mode: FlowMode = view.project.executionMode ?? view.execution?.selectedMode ?? "slp";
   const tasksById = new Map(view.tasks.map((task) => [task.task, task]));
+  const usageBySeat = new Map((view.projectUsage?.bySeat ?? []).map((row) => [row.seat, row]));
+  const usageByTask = new Map((view.projectUsage?.byTask ?? []).map((row) => [row.task, row]));
 
   /** The Tasks one agent owns — the ledger's own binding (`agent.task` / `task.agentId`), never a guess. */
   const tasksForAgent = (agent: AgentView | null): FlowTaskChip[] => {
@@ -937,15 +1039,104 @@ export function flowScreenModel(view: FactoryView): FlowScreenModel | null {
     for (const id of owned) {
       const task = tasksById.get(id);
       if (task === undefined) continue; // a binding the fold cannot status renders no invented chip
-      chips.push({ task: id, status: task.status, statusLabel: statusLabel(task), tone: STATUS_TONES[task.status], attemptCount: task.attempts.length });
+      chips.push({
+        task: id,
+        status: task.status,
+        statusLabel: statusLabel(task),
+        tone: STATUS_TONES[task.status],
+        attemptCount: task.attempts.length,
+        attempts: task.attempts.map((attempt) => {
+          const verdict = rungVerdict(attempt);
+          return {
+            n: attempt.n,
+            verdict: attempt.verdict,
+            verdictLabel: verdict.label,
+            verdictTone: verdict.tone,
+            sha: attempt.sha,
+            agentId: attempt.agentId ?? null,
+          };
+        }),
+      });
     }
     return chips;
+  };
+
+  /**
+   * The Session tab's facts from the daemon's own row — the lane is the
+   * configured one for the standing seats, the owned Task's run-named lane
+   * for a Peer, and the snapshot's own stamp is the honest time.
+   */
+  const sessionOf = (agent: AgentView, seat: "supervisor" | "lead" | "peer", chips: readonly FlowTaskChip[]): FlowSessionModel => ({
+    provider: agent.provider,
+    model: agent.model,
+    thinking: agent.thinking ?? null,
+    lane:
+      seat === "supervisor"
+        ? view.lanes.supervisor
+        : seat === "lead"
+          ? view.lanes.lead
+          : (chips.map((chip) => tasksById.get(chip.task)?.lane ?? null).find((lane) => lane !== null && lane !== "") ?? null),
+    status: agent.status,
+    requiresAttention: agent.requiresAttention,
+    cwd: agent.cwd,
+    seqEnd: agent.seqEnd,
+    snapshotAt: view.generatedAt,
+    contextUsedTokens: agent.contextUsedTokens ?? null,
+    contextMaxTokens: agent.contextMaxTokens ?? null,
+  });
+
+  /** The Handoff tab's facts — the Lead's rotation state machine as the snapshot records it. */
+  const handoffOf = (agent: AgentView): FlowHandoffModel => {
+    const rotationState = agent.rotationState ?? null;
+    const spelling =
+      rotationState === "handing_over"
+        ? { label: "Handing over", tone: "cyan" as const }
+        : rotationState === "rotation_pending"
+          ? { label: "Rotation pending", tone: "amber" as const }
+          : rotationState === "normal"
+            ? { label: "Normal", tone: "green" as const }
+            : { label: "Not recorded", tone: "muted" as const };
+    return {
+      rotationState,
+      rotationLabel: spelling.label,
+      rotationTone: spelling.tone,
+      queuedMailCount: agent.queuedMailCount ?? null,
+      mailboxLocked: agent.rotationState === "handing_over",
+      contextUsedTokens: agent.contextUsedTokens ?? null,
+      contextMaxTokens: agent.contextMaxTokens ?? null,
+    };
+  };
+
+  /**
+   * The Resources tab's rows — the usage rollup's own attribution, never a
+   * guess: the standing seats read their `bySeat` row (the seat IS one
+   * agent); a Peer reads the `byTask` rows of the Tasks the ledger binds to
+   * it (the rollup never breaks a session down by agent id). No row answers
+   * no row — the screen's honest "No usage recorded", never a zero.
+   */
+  const usageRowsFor = (seat: "supervisor" | "lead" | "peer", chips: readonly FlowTaskChip[]): FlowUsageRowModel[] => {
+    if (seat === "peer") {
+      const rows: FlowUsageRowModel[] = [];
+      for (const chip of chips) {
+        const row = usageByTask.get(chip.task);
+        if (row === undefined) continue;
+        const meter = meterFromBuckets(row);
+        if (meter !== null) rows.push({ label: `Task ${chip.task}`, meter, turns: row.turns, sessionCount: row.sessionCount });
+      }
+      return rows;
+    }
+    const row = usageBySeat.get(seat);
+    if (row === undefined) return [];
+    const meter = meterFromBuckets(row);
+    if (meter === null) return [];
+    return [{ label: seat === "supervisor" ? "Supervisor seat" : "Lead seat", meter, turns: row.turns, sessionCount: row.sessionCount }];
   };
 
   const seatNode = (seat: "supervisor" | "lead", agent: AgentView | null): FlowSeatNode => {
     const state = flowSeatState(agent, seat);
     const configuredLane = seat === "supervisor" ? view.lanes.supervisor : view.lanes.lead;
     const title = seat === "supervisor" ? "Supervisor" : "Lead";
+    const tasks = tasksForAgent(agent);
     return {
       key: agent?.id ?? `seat:${seat}`,
       seat,
@@ -954,7 +1145,7 @@ export function flowScreenModel(view: FactoryView): FlowScreenModel | null {
       state,
       initial: seat === "supervisor" ? "S" : "L",
       laneLabel: agent === null ? configuredLane : agent.model === null ? agent.provider : `${agent.provider} · ${agent.model}`,
-      tasks: tasksForAgent(agent),
+      tasks,
       contextLabel:
         seat === "lead" && agent !== null && agent.contextUsedTokens !== null && agent.contextUsedTokens !== undefined
           ? `${flowContextTokens(agent.contextUsedTokens)} / ${
@@ -962,6 +1153,9 @@ export function flowScreenModel(view: FactoryView): FlowScreenModel | null {
             }${agent.rotationState === "handing_over" ? " · handoff" : ""}`
           : null,
       queuedMailCount: seat === "lead" && agent !== null ? (agent.queuedMailCount ?? null) : null,
+      session: agent === null ? null : sessionOf(agent, seat, tasks),
+      handoff: seat === "lead" && agent !== null ? handoffOf(agent) : null,
+      usage: agent === null ? [] : usageRowsFor(seat, tasks),
     };
   };
 
@@ -969,6 +1163,7 @@ export function flowScreenModel(view: FactoryView): FlowScreenModel | null {
     .filter((agent) => agent.seat !== "supervisor" && agent.seat !== "lead")
     .map((agent) => {
       const state = flowSeatState(agent, "peer");
+      const tasks = tasksForAgent(agent);
       return {
         key: agent.id,
         seat: "peer" as const,
@@ -977,9 +1172,12 @@ export function flowScreenModel(view: FactoryView): FlowScreenModel | null {
         state,
         initial: (agent.title ?? "P").slice(0, 1).toUpperCase(),
         laneLabel: agent.model === null ? agent.provider : `${agent.provider} · ${agent.model}`,
-        tasks: tasksForAgent(agent),
+        tasks,
         contextLabel: null,
         queuedMailCount: null,
+        session: sessionOf(agent, "peer", tasks),
+        handoff: null,
+        usage: usageRowsFor("peer", tasks),
       };
     });
 

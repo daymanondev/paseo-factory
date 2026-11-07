@@ -10,6 +10,7 @@ import { createFactory, type Factory } from "../plugin/server/core/factory.ts";
 import { createSurfaceHandlers } from "../plugin/server/surface-rpc.ts";
 import type { SurfaceDaemonApi } from "../plugin/server/surface-rpc.ts";
 import { createFactoryRegistry, type FactoryRegistry } from "../plugin/server/projects.ts";
+import { createUsageRuntime } from "../plugin/server/usage-rollup.ts";
 import { startConsoleSidecar, type ConsoleSidecarStart } from "../plugin/server/console-sidecar.ts";
 import { fakeCopilotRunner, gitCommitAll } from "./helpers.ts";
 
@@ -46,7 +47,15 @@ export function emptyDaemon(): SurfaceDaemonApi {
   };
 }
 
-export function makeConsoleFixture(homeRoot: string, options?: { daemon?: SurfaceDaemonApi | (() => SurfaceDaemonApi); registry?: boolean }): ConsoleFixture {
+export function makeConsoleFixture(
+  homeRoot: string,
+  options?: {
+    daemon?: SurfaceDaemonApi | (() => SurfaceDaemonApi);
+    registry?: boolean;
+    /** T-07c: wire the per-Project usage rollup runtime the live server runs with. */
+    usage?: boolean;
+  },
+): ConsoleFixture {
   const home = join(homeRoot, "paseo-home");
   const stateDir = join(home, "plugin-state", "paseo-factory");
   const webRoot = join(homeRoot, "console-bundle");
@@ -68,7 +77,16 @@ export function makeConsoleFixture(homeRoot: string, options?: { daemon?: Surfac
   // against a fake daemon shaped like the SDK's timeline API; an unset
   // `daemon` option can also spell "no PaseoApi captured" via a function
   // returning undefined.
-  const handlers = createSurfaceHandlers({ factory, stateDir, home, daemon: options?.daemon ?? emptyDaemon(), registry });
+  const daemon = options?.daemon ?? emptyDaemon();
+  // T-07c: the per-Project usage rollup runtime (v0.0.87, ADR 0043) the live
+  // plugin server always wires (plugin/index.server.ts) — opted in by the
+  // tests whose Projects carry a usage.json, so their snapshots read the
+  // rollup through the REAL `loadOrBackfillProjectUsage`, never a hand stub.
+  // Its daemon is the same injectable seam the handlers read.
+  const usage = options?.usage === true
+    ? createUsageRuntime({ factory, stateDir, daemon: () => (typeof daemon === "function" ? daemon() : daemon), onLog: () => {} })
+    : undefined;
+  const handlers = createSurfaceHandlers({ factory, stateDir, home, daemon, registry, ...(usage === undefined ? {} : { usage }) });
   return {
     homeRoot,
     home,
