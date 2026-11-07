@@ -1,0 +1,28 @@
+# 0051 — Standalone Factory Web Console: Plugin Sidecar Transport, In-Console Owner ↔ Supervisor Chat, and Native Read-Only Transcripts
+
+- **Date:** 2026-11-07
+- **Status:** Accepted — the Owner ratified every recommended option in `.scratch/factory-web-app/00-design-outcome-and-gap-analysis.md` (§3.2, §3.3, §3.4, §4, §5, §6), relayed by `Supervisor` directive to `Lead`.
+- **Amends:** the `Factory surface` glossary entry in `CONTEXT.md` (surface set and the "never replaces the Paseo chat pane" clause) · `AGENTS.md` runtime note · **preserves** [ADR 0017](0017-native-paseo-role-providers-and-slp-seat-recognition.md) unchanged · governed by [ADR 0004](0004-single-writer-plugin-cli-submits.md) (single writer) and [ADR 0044](0044-vertical-wave-slicing-contract-bounded-review-reply-first-handoff-heredoc-choke-and-worktree-process-reaping.md) (vertical serial waves).
+- **Design source:** Open Design project "Redesign Paseo Factory" (`d6bf74c0-1476-4625-8d97-aa361f37a4d4`, linked via `design/open-design-link.json`, which is plugin-owned and never overwritten).
+
+## Context
+
+The Open Design project specifies Factory as a standalone web console (8 top-level screens, ⌘K palette, role-aware Agent Drawer, integration dialogs, 5-step Add-Project wizard, Supervisor Live Chat). It is 100 % mock: no transport, global-mutable-state JS with 20 monkey-patched script files. The engine it needs already exists and is transport-agnostic: 44 `factory.*` RPCs (`plugin/shared/rpc.ts`, `plugin/server/surface-rpc.ts`), `FactoryView` v3 (`plugin/shared/view.ts`), in-process timeline reads (`plugin/server/timeline.ts`), and the adaptive poll (`plugin/client/kit/poll.ts`). Three Paseo-app dependencies had to be decided: transport, where the Owner ↔ Supervisor conversation lives, and how transcripts are observed.
+
+## Decision
+
+1. **Transport — Path B, plugin sidecar.** The plugin server starts a localhost-only HTTP listener (bound to `127.0.0.1`, Host/Origin-checked) inside its own process at plugin boot. It serves the static console bundle and dispatches `factory.*` RPC calls and `FactoryView` snapshot reads **in-process** against the same handlers the RN client uses, so every write still lands in the plugin server's single writer (ADR 0004). The daemon session token (`<home>/local-credential`) is never exposed to the browser and the daemon WS protocol is never proxied raw. Path A (direct daemon WS) is a later optimization directive.
+2. **Bundle shipping — build-free install preserved.** Console source lives outside `plugin/` (Vite + React + TypeScript, sharing `plugin/shared/` contracts). Its production build is a committed, generated artifact inside the plugin directory, exactly like `generate:policies`: `npm run check` fails when the committed bundle is stale, and plugin installation never runs a build. It ships through the normal `version:bump → check → tag → gh release` pipeline; no hot-patching.
+3. **Owner ↔ Supervisor chat in-console (amends `Factory surface`).** The Web Console may host the Owner ↔ Supervisor command/chat channel over existing machinery only (`factory.supervisor.ensure` as mailbox self-heal, `factory.lead.dispatch`, timeline read). `Lead` and `Peer`s remain observation-only: no surface ever addresses them directly.
+4. **ADR 0017 preserved.** No `Start Supervisor` / `Start Lead` buttons anywhere in the console. Vacant seat hints point to the native picker (`newSupervisorUrl` / Paseo New Chat → "Supervisor (Factory)"); `factory.supervisor.ensure` is never a UI door.
+5. **Transcripts render natively, read-only.** A sidecar timeline read/stream endpoint backed by `plugin/server/timeline.ts` feeds transcript views in the Agent Drawer and Task Detail / Attempt inspection. This replaces `navigation.openAgent` deep links in the console. Transcripts are observation, never input.
+6. **Frontend law.** Reuse the prototype's CSS (`design/*.css`) and interaction design; discard its JS wiring and fix the §4 defects. Use `CONTEXT.md` vocabulary. Normalize the Meter at the view-model seam to the four disjoint buckets (`inputUncachedTokens`, `cacheRead`, `cacheWrite`, `outputTokens`; `reasoningTokens ⊂ outputTokens`) — the prototype's `inputTokens/cachedInputTokens` shape is never adopted. Data refresh uses the adaptive poll (5 s busy / 30 s idle, visibility-aware).
+7. **Scope cutline for the build run.** In scope: single-host console against the local daemon — all 8 screens, ⌘K, Agent Drawer (Work/Session/Handoff/Attempts/Resources/Transcripts), 4 integration dialogs, 5-step wizard (`showDirectoryPicker` / paste-path), Supervisor Live Chat, plus plugin capabilities the mock omitted (`factory.history.*`, Fresh-eyes findings in the attempt ladder, companion-plugin cards and update-all). Deferred to later directives with their own ADRs: multi-host fleet, Open-in-app, daemon update lifecycle, WebSocket push.
+8. **RN client maintenance mode.** `plugin/client/` keeps compiling and `npm run check` stays green; retirement is decided at a later Stable Checkpoint, not upfront.
+9. **Runtime home.** Live runs and the console target the production daemon home `~/.paseo`; the trial home `~/.paseo-factory` remains test-only unless the Owner asks.
+
+## Consequences
+
+- A second Factory surface exists; both submit through `factory.*` RPC and render `FactoryView`, so neither can fork the domain model.
+- The build run proceeds as ADR 0044 vertical serial waves: T-01 shell + sidecar, T-02 core seam (localhost boundary, view-model normalization, one end-to-end write), then one user journey per wave.
+- The repo gains a frontend toolchain as dev dependencies only; installed plugin runtime dependencies are unchanged.
