@@ -9,10 +9,12 @@
  * with the active one marked and the "Modified from" suffix where the data
  * says; no profiles says so. A lane with no live seat renders "Vacant" — the
  * passenger lanes (watch, retro, freshEyes) say why, never a fabricated
- * agent. No Project selected answers an honest empty state. The screen
- * carries NO control at all: no Configure, no Rotate/Revoke, no Apply/Save
- * profile, no Reset, no Start Supervisor/Lead (ADR 0017) — this wave is
- * read-only by construction, so the roster renders zero buttons.
+ * agent. No Project selected answers an honest empty state. T-08b adds the
+ * three lane writes — per-row Configure, Reset to Machine Default, the
+ * Apply chips (models-write.test.tsx carries their journey); this file keeps
+ * the read contract plus the boundary: no Rotate/Revoke, no profile
+ * save/delete, no batch, no Start Supervisor/Lead (ADR 0017), and the frozen
+ * Scrum roster stays read-only.
  */
 import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
@@ -235,11 +237,23 @@ describe("the Agents & Models screen", () => {
     expect(within(table).getByText("External config")).toBeTruthy();
   });
 
-  it("carries NO control — read-only by construction, no Configure/Rotate/Revoke/Apply/Start (ADR 0017)", () => {
+  it("carries exactly the T-08b writes — no Rotate/Revoke, no profile save/delete, no Start (ADR 0017)", () => {
     render(<ModelsScreen view={slpView()} />);
-    expect(screen.queryAllByRole("button")).toEqual([]);
-    for (const word of ["Configure", "Rotate", "Revoke", "Apply", "Save", "Reset", "Start Supervisor", "Start Lead"]) {
+    // The three writes: a Configure per row, the strip's Reset, the Apply chips.
+    expect(screen.getAllByRole("button", { name: /^Configure / }).length).toBe(6);
+    expect(screen.getByRole("button", { name: "Reset to Machine Default" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Apply profile Fast Watch" })).toBeTruthy();
+    // The later-wave and forbidden lifecycle acts render nowhere.
+    for (const word of ["Rotate", "Revoke", "Save Profile", "Start Supervisor", "Start Lead", "batch"]) {
       expect(screen.queryByText(new RegExp(word, "i")), word).toBeNull();
     }
+  });
+
+  it("keeps the frozen Scrum roster read-only — no Configure, no Reset, the chips disabled", () => {
+    render(<ModelsScreen view={scrumView()} />);
+    expect(screen.queryAllByRole("button", { name: /^Configure / })).toEqual([]);
+    expect(screen.queryByRole("button", { name: "Reset to Machine Default" })).toBeNull();
+    expect(screen.getByText("Run roster frozen — read-only")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Apply profile Sprint" }) as HTMLButtonElement).disabled).toBe(true);
   });
 });

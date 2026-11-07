@@ -27,6 +27,14 @@
  *   Inbox resolves (`wait.answer`, `wait.cancel`, `design.decide`,
  *   `allowance.tasks`, `allowance.qa`); every other operation refuses as
  *   data (`forbidden_operation`) before any handler runs.
+ * - The lane writes (T-08b): `factory.lanes.set`, `factory.lanes.reset`,
+ *   and `factory.profiles.apply` join the allowlist as plain entries — the
+ *   three Agents & Models acts, each validated by its existing shared
+ *   schema and dispatched to the same single-writer `SurfaceHandlers`. The
+ *   sibling writes stay outside the door: `factory.lanes.set.batch`,
+ *   `factory.profiles.save`/`delete` (T-08c), `factory.lead.*`,
+ *   `factory.supervisor.*`, and every `factory.project.*` keep refusing
+ *   `unknown_method` as data.
  * - A start failure is logged, never thrown — the sidecar must never break
  *   plugin boot (the shell wraps the call, and `start()` itself resolves to
  *   `{ ok: false, reason }` rather than rejecting while ports fall back).
@@ -35,7 +43,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import type { z, ZodType } from "zod";
-import { accept, agentTranscript, inbox, scrumCommand, snapshot, taskDetail } from "../shared/rpc.ts";
+import { accept, agentTranscript, inbox, lanesReset, lanesSet, profilesApply, scrumCommand, snapshot, taskDetail } from "../shared/rpc.ts";
 import type { SurfaceHandlers } from "./surface-rpc.ts";
 import type { SurfaceCallContext } from "./surface-rpc.ts";
 
@@ -126,6 +134,14 @@ export const CONSOLE_RPC_ALLOWLIST: readonly ConsoleRpcEntry[] = [
   consoleRpcEntry(scrumCommand.name, scrumCommand.input, (handlers, input, context) => handlers.scrumCommand(input, context), {
     operations: CONSOLE_SCRUM_OPERATIONS,
   }),
+  // The lane writes (T-08b) — the Agents & Models screen's three Owner acts,
+  // plain allowlisted entries (no operation narrowing): the shared schemas
+  // already bound them (`lane` is a `LaneName`, `value` a non-empty string,
+  // `projectRoot` the scope). The batch save and the profile CRUD stay
+  // OUTSIDE the door (T-08c), as do every seat-lifecycle and project act.
+  consoleRpcEntry(lanesSet.name, lanesSet.input, (handlers, input, context) => handlers.lanesSet(input, context)),
+  consoleRpcEntry(lanesReset.name, lanesReset.input, (handlers, input, context) => handlers.lanesReset(input, context)),
+  consoleRpcEntry(profilesApply.name, profilesApply.input, (handlers, input, context) => handlers.profilesApply(input, context)),
 ];
 
 /** The named allowlist as the refusal sentence spells it. */

@@ -8,12 +8,16 @@ import { makeTempDir } from "./helpers.ts";
  * The sidecar's allowlisted RPC door (T-02): the named `factory.*` methods —
  * `factory.snapshot`, `factory.task.detail`, `factory.agent.transcript`,
  * `factory.accept`, `factory.inbox` (T-05's one cross-Project Scrum read),
- * and T-06's NARROWED `factory.scrum.command` — dispatch in-process through
- * the same `SurfaceHandlers` the RN client's registrations call, every input
- * validated by the shared RPC input schema (`plugin/shared/rpc.ts`); every
- * other method name keeps refusing as data. The Scrum entry allowlists
- * exactly the five Owner operations the Inbox resolves — every other
- * operation refuses `forbidden_operation` as data BEFORE any handler runs.
+ * T-06's NARROWED `factory.scrum.command`, and T-08b's three lane writes
+ * (`factory.lanes.set`, `factory.lanes.reset`, `factory.profiles.apply`) —
+ * dispatch in-process through the same `SurfaceHandlers` the RN client's
+ * registrations call, every input validated by the shared RPC input schema
+ * (`plugin/shared/rpc.ts`); every other method name keeps refusing as data.
+ * The Scrum entry allowlists exactly the five Owner operations the Inbox
+ * resolves — every other operation refuses `forbidden_operation` as data
+ * BEFORE any handler runs. The lane writes' siblings stay OUTSIDE the door:
+ * the batch save, the profile CRUD (T-08c), the seat lifecycle
+ * (`lead.*`/`supervisor.*`), and every `project.*`.
  */
 
 async function post(url: string, body: unknown): Promise<{ status: number; payload: unknown }> {
@@ -60,15 +64,33 @@ test("console RPC door: unlisted methods keep refusing as data, whatever their n
     rmSync(homeRoot, { recursive: true, force: true });
   });
 
-  // A write RPC outside the allowlist, a read RPC outside it, and an invented
-  // name all refuse identically — the door is a list, not a prefix.
-  for (const method of ["factory.retro", "factory.lanes.set", "factory.lead.dispatch", "factory.sinister", "snapshot"]) {
+  // A write RPC outside the allowlist, a read RPC outside it, an invented
+  // name, and every lane-write sibling T-08b left outside the door — the
+  // batch save, the profile CRUD, the seat lifecycle, the project acts — all
+  // refuse identically: the door is a list, not a prefix.
+  for (const method of [
+    "factory.retro",
+    "factory.lead.dispatch",
+    "factory.sinister",
+    "snapshot",
+    "factory.lanes.set.batch",
+    "factory.profiles.save",
+    "factory.profiles.delete",
+    "factory.lead.rotate",
+    "factory.lead.ensure",
+    "factory.supervisor.revoke",
+    "factory.supervisor.ensure",
+    "factory.project.reset",
+    "factory.project.add",
+    "factory.project.delete",
+    "factory.project.pick.folder",
+  ]) {
     const refusal = await post(started.sidecar.url + "/rpc", { method, params: {} });
     assert.equal(refusal.status, 404, `${method} is not allowlisted`);
     const payload = refusal.payload as { ok: boolean; code?: string; error?: string };
     assert.equal(payload.ok, false);
     assert.equal(payload.code, "unknown_method");
-    assert.match(payload.error ?? "", /factory\.snapshot, factory\.task\.detail, factory\.agent\.transcript, factory\.accept, factory\.inbox, factory\.scrum\.command/, "the sentence names the allowlist");
+    assert.match(payload.error ?? "", /factory\.snapshot, factory\.task\.detail, factory\.agent\.transcript, factory\.accept, factory\.inbox, factory\.scrum\.command, factory\.lanes\.set, factory\.lanes\.reset, factory\.profiles\.apply/, "the sentence names the allowlist");
   }
 });
 
@@ -131,6 +153,10 @@ test("console RPC door: inputs are validated by the SHARED schema before any han
     { method: "factory.task.detail", params: {} }, // task missing
     { method: "factory.agent.transcript", params: {} }, // agent missing
     { method: "factory.snapshot", params: { projectRoot: 42 } }, // projectRoot not a string
+    { method: "factory.lanes.set", params: { lane: "sinister", value: "pi/zai/glm-5.3", projectRoot: "/tmp/fixture-project" } }, // lane not one of the six
+    { method: "factory.lanes.set", params: { lane: "lead", value: "", projectRoot: "/tmp/fixture-project" } }, // value empty
+    { method: "factory.lanes.reset", params: { projectRoot: "" } }, // projectRoot empty
+    { method: "factory.profiles.apply", params: { projectRoot: "/tmp/fixture-project" } }, // profileId missing
   ];
   for (const call of cases) {
     const refusal = await post(started.sidecar.url + "/rpc", call);

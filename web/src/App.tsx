@@ -12,11 +12,14 @@
  * unscoped snapshot, never the screen's scoped one — the T-05 carry-over
  * fix); the Workspace (T-07a) renders the selected Project's read-only
  * authority graph — the SLP chain or the Scrum pipeline strip — from the
- * same scoped snapshot; the Agents & Models screen (T-08a) renders the
- * selected Project's read-only roster — one row per lane, default vs
- * override, the live seats, the profile chips; the other screens are titled
- * placeholders landing in their own waves. No Start Supervisor / Start Lead
- * controls anywhere (ADR 0017 preserved).
+ * same scoped snapshot; the Agents & Models screen (T-08a + T-08b) renders
+ * the selected Project's roster — one row per lane, default vs override,
+ * the live seats, the profile chips — and carries the three lane writes
+ * (`factory.lanes.set` per-row Configure, `factory.lanes.reset`,
+ * `factory.profiles.apply`) through the sidecar's allowlisted door, with a
+ * live-seat confirm before a seated lane changes; the other screens are
+ * titled placeholders landing in their own waves. No Start Supervisor /
+ * Start Lead controls anywhere (ADR 0017 preserved).
  */
 import { useEffect, useState } from "react";
 import type { FactoryView } from "../../plugin/shared/view.ts";
@@ -136,7 +139,7 @@ export function App({
         <main id="main" className="page" tabIndex={-1}>
           {view !== null && screen.id === "overview" && <OverviewScreen view={view} onOpenProject={setProjectRoot} />}
           {view !== null && screen.id === "flow" && <FlowScreen view={view} />}
-          {view !== null && screen.id === "models" && <ModelsScreen view={view} />}
+          {view !== null && screen.id === "models" && <ModelsScreen view={view} onChanged={() => snapshot.refresh()} />}
           {view !== null && screen.id === "tasks" && (
             <TasksScreen view={view} acceptTask={acceptTask} onAccepted={() => snapshot.refresh()} loadTaskDetail={loadTaskDetail} />
           )}

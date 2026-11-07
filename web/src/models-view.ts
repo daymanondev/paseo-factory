@@ -68,6 +68,16 @@ export interface ModelsScreenModel {
   /** The active profile's name, when one is known — the "Modified from X" state. */
   activeProfileName: string | null;
   activeProfileModified: boolean;
+  /**
+   * Whether the roster's table is the Project's own `lanes.json` — the ONE
+   * table the T-08b writes (`lanes.set`, `lanes.reset`, `profiles.apply`)
+   * target. True for the SLP roster and a Scrum Project's degraded SLP
+   * table; false for the frozen Scrum run roster, which only the Scrum
+   * config door can mutate — this wave renders it read-only, honestly.
+   */
+  writable: boolean;
+  /** The Project's root — the scope every write carries. */
+  projectRoot: string;
 }
 
 /** The SLP six — `view.lanes`' own vocabulary, the RN roster's own order and tiers. */
@@ -244,6 +254,11 @@ export function modelsScreenModel(view: FactoryView): ModelsScreenModel | null {
     profiles,
     activeProfileName: profiles.find((profile) => profile.active)?.name ?? null,
     activeProfileModified,
+    // The frozen Scrum roster reads `execution.config.lanes` — a table the
+    // lane writes cannot reach (they target `lanes.json`), so it stays
+    // read-only this wave; every other roster reads `view.lanes`.
+    writable: scrumLanes === undefined,
+    projectRoot: view.project.root,
   };
 }
 
