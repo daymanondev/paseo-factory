@@ -237,8 +237,19 @@ type ScopedTaskView = TaskView & { projectSlug?: string };
 
 /** The `factory.inbox` gather's ok arm — the Scrum half the snapshot cannot carry. */
 export interface InboxGather {
-  /** One row per Project whose active run holds at least one Owner request. */
-  projects: readonly { projectSlug: string; runId: string; phase: string; requests: readonly OwnerRequestView[] }[];
+  /** One row per Project whose active run holds an Owner request or a grant-remediable budget blocker. */
+  projects: readonly {
+    projectSlug: string;
+    runId: string;
+    phase: string;
+    requests: readonly OwnerRequestView[];
+    /** T-06 (additive): the run journal's revision — the command's `expectedRevision`. */
+    revision?: number;
+    /** T-06 (additive): the run's count-based allowance state — the Grant item's used/allowed data. */
+    allowance?: { tasksUsed: number; tasksAllowed: number; qaFixRoundsUsed: number; qaFixRoundsAllowed: number };
+    /** T-06 (additive): the run's blocker details verbatim — the fold filters the grant-remediable causes. */
+    blockers?: readonly { id: string; reason: string; causes: readonly string[] }[];
+  }[];
   /** Per-Project read refusals — a damaged run journal renders as data. */
   refusals: readonly { projectSlug: string; error: string }[];
   /** The transport's own refusal (`Failure` arm) — rendered as data, never thrown. */
@@ -246,20 +257,21 @@ export interface InboxGather {
 }
 
 /** The urgency ladder — the Owner's blocked work first, the bookkeeping last (an Owner wait has no expiry; rank, not age, orders). */
-export type InboxItemKind = "needs-human" | "red" | "owner-request" | "ready-to-accept";
+export type InboxItemKind = "needs-human" | "red" | "owner-request" | "budget-blocked" | "ready-to-accept";
 
 const INBOX_RANK: Record<InboxItemKind, number> = {
   "needs-human": 0,
   red: 1,
   "owner-request": 2,
-  "ready-to-accept": 3,
+  "budget-blocked": 3,
+  "ready-to-accept": 4,
 };
 
 export interface InboxItemViewModel {
   kind: InboxItemKind;
   /** The urgency rank — the list sorts by it, stably within a kind. */
   rank: number;
-  /** The badge word — BLOCKER / RED GATE / QUESTION / UI APPROVAL / READY TO ACCEPT. */
+  /** The badge word — BLOCKER / RED GATE / QUESTION / UI APPROVAL / ALLOWANCE / READY TO ACCEPT. */
   badge: string;
   tone: "green" | "amber" | "red" | "cyan";
   /** The item's title — the Task's description, or the question itself. */
@@ -274,10 +286,22 @@ export interface InboxItemViewModel {
   task: string | null;
   /** The green `Attempt` an inline Accept submits — ready-to-accept items only. */
   acceptAttempt: number | null;
-  /** The Scrum run an Owner request waits on — owner-request items only. */
+  /** The Scrum run an Owner request waits on — owner-request and budget-blocked items. */
   runId: string | null;
   /** `${actor} · ${role}` — who asked. */
   origin: string | null;
+  /** The pending request's own id — `wait.answer` / `wait.cancel`'s `pendingId` (owner-request items). */
+  pendingId: string | null;
+  /** Which of the two Owner-request shapes the item is — the form's own law (owner-request items). */
+  requestKind: "question" | "design" | null;
+  /** The design under review, revision and digest — `design.decide`'s payload binds to it exactly (design items). */
+  design: { revision: number; digest: string } | null;
+  /** The run journal's revision as the gather carried it — every command's `expectedRevision`. */
+  expectedRevision: number | null;
+  /** The blocker causes a grant can remedy — the Grant form offers exactly these (budget-blocked items). */
+  grantCauses: readonly ("tasks" | "qaFixRounds")[];
+  /** The run's used/allowance counts, verbatim (budget-blocked items). */
+  allowance: { tasksUsed: number; tasksAllowed: number; qaFixRoundsUsed: number; qaFixRoundsAllowed: number } | null;
 }
 
 export interface InboxViewModel {
@@ -336,6 +360,12 @@ export function inboxModel(view: FactoryView, gather: InboxGather | null): Inbox
         acceptAttempt: null,
         runId: null,
         origin: null,
+        pendingId: null,
+        requestKind: null,
+        design: null,
+        expectedRevision: null,
+        grantCauses: [],
+        allowance: null,
       });
     } else if (task.status === "red") {
       items.push({
@@ -351,6 +381,12 @@ export function inboxModel(view: FactoryView, gather: InboxGather | null): Inbox
         acceptAttempt: null,
         runId: null,
         origin: null,
+        pendingId: null,
+        requestKind: null,
+        design: null,
+        expectedRevision: null,
+        grantCauses: [],
+        allowance: null,
       });
     } else if (task.status === "ready-to-accept") {
       const acceptAttempt = acceptAttemptFor(task);
@@ -368,14 +404,20 @@ export function inboxModel(view: FactoryView, gather: InboxGather | null): Inbox
         acceptAttempt,
         runId: null,
         origin: null,
+        pendingId: null,
+        requestKind: null,
+        design: null,
+        expectedRevision: null,
+        grantCauses: [],
+        allowance: null,
       });
     }
   }
   if (gather !== null) {
     for (const project of gather.projects) {
+      const attributed = projectNameForSlug(project.projectSlug, view.projects);
       for (const request of project.requests) {
         if (request.status !== "pending") continue; // the fold filters pending; the read answers every status
-        const attributed = projectNameForSlug(project.projectSlug, view.projects);
         items.push({
           kind: "owner-request",
           rank: INBOX_RANK["owner-request"],
@@ -389,6 +431,44 @@ export function inboxModel(view: FactoryView, gather: InboxGather | null): Inbox
           acceptAttempt: null,
           runId: project.runId,
           origin: `${request.origin.actor} · ${request.origin.role}`,
+          pendingId: request.id,
+          requestKind: request.kind,
+          design: request.design ?? null,
+          expectedRevision: project.revision ?? null,
+          grantCauses: [],
+          allowance: null,
+        });
+      }
+      // The Grant item (T-06, ADR 0038): a run whose blockers name a count
+      // dimension an Owner grant remedies — one item per run, offering a
+      // grant for exactly the held causes. The row's own data (blockers
+      // verbatim, the allowance counts) is the item's facts; without the
+      // additive fields an older gather cannot offer the act, so no item.
+      const grantCauses = (project.blockers ?? []).flatMap((blocker) =>
+        blocker.causes.filter((cause): cause is "tasks" | "qaFixRounds" => cause === "tasks" || cause === "qaFixRounds"),
+      );
+      if (grantCauses.length > 0 && project.allowance !== undefined && project.revision !== undefined) {
+        const uniqueCauses = ["tasks", "qaFixRounds"].filter((cause) => grantCauses.includes(cause as "tasks" | "qaFixRounds")) as ("tasks" | "qaFixRounds")[];
+        const allowance = project.allowance;
+        items.push({
+          kind: "budget-blocked",
+          rank: INBOX_RANK["budget-blocked"],
+          badge: "ALLOWANCE",
+          tone: "amber",
+          title: `Run ${project.runId} is blocked on budget`,
+          detail: `Tasks ${allowance.tasksUsed}/${allowance.tasksAllowed} used · automatic QA fix rounds ${allowance.qaFixRoundsUsed}/${allowance.qaFixRoundsAllowed} used — a grant adds capacity without resetting the count.`,
+          projectName: attributed.name,
+          projectRoot: attributed.root,
+          task: null,
+          acceptAttempt: null,
+          runId: project.runId,
+          origin: null,
+          pendingId: null,
+          requestKind: null,
+          design: null,
+          expectedRevision: project.revision,
+          grantCauses: uniqueCauses,
+          allowance,
         });
       }
     }

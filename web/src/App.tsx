@@ -5,8 +5,12 @@
  * The Overview renders the real Project list; the Tasks screen renders the
  * scoped Task list with the first real write journey (T-02); the Inbox
  * (T-05) renders the cross-Project fold — needs-human, red, pending Scrum
- * Owner requests, ready-to-accept — with the count badge beside its nav
- * item; the other screens are titled placeholders landing in their own
+ * Owner requests, ready-to-accept — and T-06 makes its Scrum half
+ * resolvable inline (answer, decide, grant) through the sidecar's narrowed
+ * `factory.scrum.command` door; the count badge beside its nav item is the
+ * CROSS-Project count on every screen (its fold rides the badge's own
+ * unscoped snapshot, never the screen's scoped one — the T-05 carry-over
+ * fix); the other screens are titled placeholders landing in their own
  * waves. No Start Supervisor / Start Lead controls anywhere (ADR 0017
  * preserved).
  */
@@ -18,6 +22,7 @@ import { ProjectSwitcher } from "./chrome/project-switcher.tsx";
 import { acceptViaSidecar, type AcceptReply } from "./accept.ts";
 import { taskDetailViaSidecar, type TaskDetailReply } from "./detail.ts";
 import { inboxViaSidecar, type InboxReply } from "./inbox.ts";
+import { scrumCommandViaSidecar, type ScrumCommandInput, type ScrumCommandReply } from "./scrum.ts";
 import { OverviewScreen } from "./screens/overview.tsx";
 import { PlaceholderScreen } from "./screens/placeholder.tsx";
 import { TasksScreen } from "./screens/tasks.tsx";
@@ -30,6 +35,8 @@ export interface AppProps {
   loadSnapshot?: (input: { projectRoot?: string }) => Promise<SnapshotReply>;
   /** The accept transport — the sidecar RPC door by default, a fixture in tests. */
   acceptTask?: (input: { task: string; attempt: number }) => Promise<AcceptReply>;
+  /** The Scrum Owner command transport (T-06) — the sidecar's narrowed door by default, a fixture in tests. */
+  scrumCommand?: (input: ScrumCommandInput) => Promise<ScrumCommandReply>;
   /** The Task Detail transport — the sidecar RPC door by default, a fixture in tests. */
   loadTaskDetail?: (input: { task: string }) => Promise<TaskDetailReply>;
   /** The inbox gather transport — the sidecar RPC door by default, a fixture in tests. */
@@ -39,6 +46,7 @@ export interface AppProps {
 export function App({
   loadSnapshot = loadSnapshotViaSidecar,
   acceptTask = acceptViaSidecar,
+  scrumCommand = scrumCommandViaSidecar,
   loadTaskDetail = taskDetailViaSidecar,
   loadInbox = inboxViaSidecar,
 }: AppProps) {
@@ -47,15 +55,21 @@ export function App({
   const [projectRoot, setProjectRoot] = useState<string | undefined>(undefined);
   // The Inbox is the cross-Project fold ("across ALL Projects", T-05) — while
   // it is the open screen the shell loads the UNSCOPED snapshot, whatever the
-  // switcher holds; leaving the screen re-applies the selection. The badge and
-  // the list fold the SAME view, so they can never disagree.
+  // switcher holds; leaving the screen re-applies the selection.
   const scopeRoot = screen.id === "inbox" ? undefined : projectRoot;
   const snapshot = useSnapshot(() => loadSnapshot(scopeRoot === undefined ? {} : { projectRoot: scopeRoot }), scopeRoot ?? "");
   const view = snapshot.value;
+  // The badge's own unscoped snapshot (the T-05 carry-over fix): the nav badge
+  // counts the CROSS-Project inbox on EVERY screen, never the scoped
+  // selection's. While the screen itself is unscoped the fold rides the SAME
+  // view — the badge and the list can never disagree — so this poll earns its
+  // keep only on a scoped screen.
+  const badgeSnapshot = useSnapshot(() => loadSnapshot({}), "inbox-badge");
+  const badgeView = scopeRoot === undefined ? view : (badgeSnapshot.value ?? view);
   const busy = view !== null && snapshotIsBusy(view);
   // The Scrum half of the inbox — re-read whenever a fresh snapshot lands (its
-  // `generatedAt` is minted per read), so an Accept's immediate refresh drops
-  // the count on the very next render.
+  // `generatedAt` is minted per read), so an Accept's or an Owner act's
+  // immediate refresh drops the count on the very next render.
   const generatedAt = view?.generatedAt ?? "";
   const [gather, setGather] = useState<InboxGather | null>(null);
   useEffect(() => {
@@ -69,7 +83,7 @@ export function App({
       live = false;
     };
   }, [generatedAt, loadInbox]);
-  const inbox = view !== null ? inboxModel(view, gather) : null;
+  const inbox = badgeView !== null ? inboxModel(badgeView, gather) : null;
   return (
     <div className="app" id="app">
       <aside className="sidebar" aria-label="Main navigation">
@@ -119,7 +133,7 @@ export function App({
             <TasksScreen view={view} acceptTask={acceptTask} onAccepted={() => snapshot.refresh()} loadTaskDetail={loadTaskDetail} />
           )}
           {view !== null && screen.id === "inbox" && inbox !== null && (
-            <InboxScreen model={inbox} acceptTask={acceptTask} onAccepted={() => snapshot.refresh()} onOpenProject={setProjectRoot} />
+            <InboxScreen model={inbox} acceptTask={acceptTask} scrumCommand={scrumCommand} onResolved={() => snapshot.refresh()} onAccepted={() => snapshot.refresh()} onOpenProject={setProjectRoot} />
           )}
           {/* The route names the screen even while the first snapshot is in
               flight or unreachable — a reload of /tasks lands on Tasks, not a

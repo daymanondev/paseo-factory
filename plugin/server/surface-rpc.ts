@@ -2568,6 +2568,13 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       // row — never a failed whole read. No registry (the legacy
       // single-Factory entrances) mirrors the global scope's law: no runs,
       // an empty `projects`.
+      //
+      // T-06: each row additively carries the run journal's `revision` (the
+      // `expectedRevision` the Owner's console commands submit), its
+      // count-based `allowance` used/allowed state, and its `blockers`
+      // verbatim — and a run blocked on budget (causes `tasks` /
+      // `qaFixRounds`, ADR 0038) lists even with no Owner request, so the
+      // Inbox's Grant +N act rides the run's own facts, never a guess.
       const projects: InboxProjectRequests[] = [];
       const refusals: { projectSlug: string; error: string }[] = [];
       if (deps.registry !== undefined) {
@@ -2575,9 +2582,25 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           try {
             const runs = listRuns(deps.stateDir, slug);
             const run = runs.find((r) => !terminalRun(r)) ?? runs.at(-1);
-            const requests = run?.ownerRequests ?? [];
-            if (run !== undefined && requests.length > 0) {
-              projects.push({ projectSlug: slug, runId: run.runId, phase: run.phase, requests });
+            if (run === undefined) continue;
+            const requests = run.ownerRequests ?? [];
+            const blockers = run.blockerDetails ?? [];
+            const budgetBlocked = blockers.some((blocker) => blocker.causes.some((cause) => cause === "tasks" || cause === "qaFixRounds"));
+            if (requests.length > 0 || budgetBlocked) {
+              projects.push({
+                projectSlug: slug,
+                runId: run.runId,
+                phase: run.phase,
+                requests,
+                revision: run.revision,
+                allowance: {
+                  tasksUsed: run.tasks.length,
+                  tasksAllowed: run.budgets.maxTasks,
+                  qaFixRoundsUsed: run.fixRounds,
+                  qaFixRoundsAllowed: run.budgets.maxQaFixRounds,
+                },
+                blockers,
+              });
             }
           } catch (error) {
             refusals.push({ projectSlug: slug, error: messageOf(error) });

@@ -22,6 +22,11 @@
  *   `CONSOLE_RPC_ALLOWLIST` dispatch, each input validated by the shared RPC
  *   input schema (`plugin/shared/rpc.ts`); every other method name refuses
  *   as data. The browser never needs a token.
+ * - The narrowed Scrum write (T-06): the console's `factory.scrum.command`
+ *   entry additionally allowlists exactly the five Owner operations the
+ *   Inbox resolves (`wait.answer`, `wait.cancel`, `design.decide`,
+ *   `allowance.tasks`, `allowance.qa`); every other operation refuses as
+ *   data (`forbidden_operation`) before any handler runs.
  * - A start failure is logged, never thrown — the sidecar must never break
  *   plugin boot (the shell wraps the call, and `start()` itself resolves to
  *   `{ ok: false, reason }` rather than rejecting while ports fall back).
@@ -30,7 +35,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import type { z, ZodType } from "zod";
-import { accept, agentTranscript, inbox, snapshot, taskDetail } from "../shared/rpc.ts";
+import { accept, agentTranscript, inbox, scrumCommand, snapshot, taskDetail } from "../shared/rpc.ts";
 import type { SurfaceHandlers } from "./surface-rpc.ts";
 import type { SurfaceCallContext } from "./surface-rpc.ts";
 
@@ -54,6 +59,17 @@ export interface ConsoleRpcRequest {
 // validates with a private schema, and never reaches around the
 // `SurfaceHandlers` (the same in-process door the RN client's registrations
 // call, so every write lands in the single writer, ADR 0004).
+//
+// T-06 adds the one NARROWED write: `factory.scrum.command` dispatches with
+// the shared input schema PLUS an operation allowlist of exactly the five
+// Owner acts the Inbox needs (`wait.answer`, `wait.cancel`, `design.decide`,
+// `allowance.tasks`, `allowance.qa`). Every other operation — `run.cancel`,
+// `config.set`, `lead.operation`, `supervisor.decision`, … — refuses as data
+// BEFORE any handler runs. The dispatch carries Owner authority the same way
+// Accept does: the sidecar hands the handler the exact call the Owner's local
+// UI makes, and no credential ever crosses to the browser (the localhost
+// boundary is the boundary; `scrumCommand`'s own `caller` stays unset, its
+// documented default `authority: "owner"`).
 
 interface ConsoleRpcEntry {
   method: string;
@@ -62,14 +78,18 @@ interface ConsoleRpcEntry {
     handlers: SurfaceHandlers,
     params: unknown,
     context: SurfaceCallContext,
-  ) => Promise<{ ok: false; code: "bad_input"; error: string } | { ok: true; reply: unknown }>;
+  ) => Promise<{ ok: false; code: "bad_input" | "forbidden_operation"; error: string } | { ok: true; reply: unknown }>;
 }
+
+/** The console's five Scrum Owner acts — every other `factory.scrum.command` operation refuses before any handler runs. */
+export const CONSOLE_SCRUM_OPERATIONS: readonly string[] = ["wait.answer", "wait.cancel", "design.decide", "allowance.tasks", "allowance.qa"];
 
 /** The typed constructor — each closure's input is the shared schema's own inference. */
 function consoleRpcEntry<S extends ZodType>(
   method: string,
   schema: S,
   dispatch: (handlers: SurfaceHandlers, input: z.output<S>, context: SurfaceCallContext) => Promise<unknown>,
+  narrowing?: { operations: readonly string[] },
 ): ConsoleRpcEntry {
   return {
     method,
@@ -77,6 +97,19 @@ function consoleRpcEntry<S extends ZodType>(
       const parsed = schema.safeParse(params);
       if (!parsed.success) {
         return { ok: false, code: "bad_input", error: `${method} refused the input — ${parsed.error.message}` };
+      }
+      if (narrowing !== undefined) {
+        // The narrowed-entry law: the operation allowlist refuses BEFORE any
+        // handler runs — a forbidden act is data (`forbidden_operation`), never
+        // a dispatch the handler itself must police.
+        const operation = (parsed.data as { operation?: unknown }).operation;
+        if (typeof operation !== "string" || !narrowing.operations.includes(operation)) {
+          return {
+            ok: false,
+            code: "forbidden_operation",
+            error: `${method} refuses operation ${typeof operation === "string" ? operation : JSON.stringify(operation) ?? String(operation)} from the console (operations: ${narrowing.operations.join(", ")})`,
+          };
+        }
       }
       return { ok: true, reply: await dispatch(handlers, parsed.data, context) };
     },
@@ -89,6 +122,10 @@ export const CONSOLE_RPC_ALLOWLIST: readonly ConsoleRpcEntry[] = [
   consoleRpcEntry(agentTranscript.name, agentTranscript.input, (handlers, input, context) => handlers.agentTranscript(input, context)),
   consoleRpcEntry(accept.name, accept.input, (handlers, input, context) => handlers.accept(input, context)),
   consoleRpcEntry(inbox.name, inbox.input, (handlers, input) => handlers.inbox(input)),
+  // The narrowed Scrum door (T-06): the shared schema, the five Owner acts, no `caller` — Owner authority the way Accept carries it.
+  consoleRpcEntry(scrumCommand.name, scrumCommand.input, (handlers, input, context) => handlers.scrumCommand(input, context), {
+    operations: CONSOLE_SCRUM_OPERATIONS,
+  }),
 ];
 
 /** The named allowlist as the refusal sentence spells it. */

@@ -7,10 +7,13 @@ import { makeTempDir } from "./helpers.ts";
 /**
  * The sidecar's allowlisted RPC door (T-02): the named `factory.*` methods —
  * `factory.snapshot`, `factory.task.detail`, `factory.agent.transcript`,
- * `factory.accept`, `factory.inbox` (T-05's one cross-Project Scrum read) —
- * dispatch in-process through the same `SurfaceHandlers` the RN client's
- * registrations call, every input validated by the shared RPC input schema
- * (`plugin/shared/rpc.ts`); every other method name keeps refusing as data.
+ * `factory.accept`, `factory.inbox` (T-05's one cross-Project Scrum read),
+ * and T-06's NARROWED `factory.scrum.command` — dispatch in-process through
+ * the same `SurfaceHandlers` the RN client's registrations call, every input
+ * validated by the shared RPC input schema (`plugin/shared/rpc.ts`); every
+ * other method name keeps refusing as data. The Scrum entry allowlists
+ * exactly the five Owner operations the Inbox resolves — every other
+ * operation refuses `forbidden_operation` as data BEFORE any handler runs.
  */
 
 async function post(url: string, body: unknown): Promise<{ status: number; payload: unknown }> {
@@ -57,17 +60,59 @@ test("console RPC door: unlisted methods keep refusing as data, whatever their n
     rmSync(homeRoot, { recursive: true, force: true });
   });
 
-  // A write RPC outside the allowlist, a read RPC outside it, T-06's not-yet-
-  // exposed Scrum write door, and an invented name all refuse identically —
-  // the door is a list, not a prefix.
-  for (const method of ["factory.retro", "factory.lanes.set", "factory.lead.dispatch", "factory.scrum.command", "factory.sinister", "snapshot"]) {
+  // A write RPC outside the allowlist, a read RPC outside it, and an invented
+  // name all refuse identically — the door is a list, not a prefix.
+  for (const method of ["factory.retro", "factory.lanes.set", "factory.lead.dispatch", "factory.sinister", "snapshot"]) {
     const refusal = await post(started.sidecar.url + "/rpc", { method, params: {} });
     assert.equal(refusal.status, 404, `${method} is not allowlisted`);
     const payload = refusal.payload as { ok: boolean; code?: string; error?: string };
     assert.equal(payload.ok, false);
     assert.equal(payload.code, "unknown_method");
-    assert.match(payload.error ?? "", /factory\.snapshot, factory\.task\.detail, factory\.agent\.transcript, factory\.accept, factory\.inbox/, "the sentence names the allowlist");
+    assert.match(payload.error ?? "", /factory\.snapshot, factory\.task\.detail, factory\.agent\.transcript, factory\.accept, factory\.inbox, factory\.scrum\.command/, "the sentence names the allowlist");
   }
+});
+
+test("console RPC door: factory.scrum.command serves ONLY the five Owner operations — every other operation refuses before any handler runs", async (t) => {
+  const homeRoot = makeTempDir();
+  const fixture = makeConsoleFixture(homeRoot);
+  const started = await fixture.start();
+  assert.ok(started.ok, started.ok ? "" : started.reason);
+  t.after(async () => {
+    await started.sidecar.close();
+    rmSync(homeRoot, { recursive: true, force: true });
+  });
+
+  const scrum = (operation: string, extra: Record<string, unknown> = {}) =>
+    post(started.sidecar.url + "/rpc", {
+      method: "factory.scrum.command",
+      params: { projectRoot: "/tmp/fixture-project", operation, runId: "run-x", requestId: `door-${operation}`, expectedRevision: 1, ...extra },
+    });
+
+  // The console's five Owner acts pass the narrowing and reach the handler —
+  // which then refuses for its own honest reasons (no such project), proving
+  // dispatch happened rather than the door refusing.
+  for (const operation of ["wait.answer", "wait.cancel", "design.decide", "allowance.tasks", "allowance.qa"]) {
+    const reply = await scrum(operation, { payload: { pendingId: "q1", rationale: "why" } });
+    assert.equal(reply.status, 200, `${operation} dispatches to the handler`);
+    const payload = reply.payload as { ok: boolean; code?: string };
+    assert.equal(payload.ok, false);
+    assert.notEqual(payload.code, "forbidden_operation", `${operation} is one of the console's five acts`);
+  }
+
+  // Every other operation — the dangerous writes the Inbox must never reach —
+  // refuses as data BEFORE any handler runs.
+  for (const operation of ["run.cancel", "run.continue", "config.set", "config.reset", "lead.operation", "supervisor.decision", "run.create", "wait.request", "preview", "sinister.act"]) {
+    const refusal = await scrum(operation);
+    assert.equal(refusal.status, 400, `${operation} is forbidden from the console`);
+    const payload = refusal.payload as { ok: boolean; code?: string; error?: string };
+    assert.equal(payload.ok, false);
+    assert.equal(payload.code, "forbidden_operation");
+    assert.match(payload.error ?? "", /factory\.scrum\.command refuses operation/, "the refusal names the refused operation");
+    assert.match(payload.error ?? "", new RegExp(operation.replaceAll(".", "\\.")), "the sentence spells the operation it refused");
+  }
+
+  // The narrowing refuses before dispatch: the root Factory's ledger records no line.
+  assert.equal(fixture.factory.ledger.events.length, 0);
 });
 
 test("console RPC door: inputs are validated by the SHARED schema before any handler runs", async (t) => {

@@ -97,6 +97,13 @@ export const agentTranscript = defineRpc({
 // arbitrary path), answers every request status verbatim (the console's own
 // fold filters pending), and a Project whose run journal cannot be read
 // refuses as a per-Project row — never a failed whole read.
+//
+// T-06 extended the row additively: each row also carries the run journal's
+// `revision` (the `expectedRevision` the Owner's console commands submit),
+// the run's count-based `allowance` used/allowed state, and its `blockers`
+// verbatim — a run blocked on budget (blocker causes `tasks` /
+// `qaFixRounds`, ADR 0038) now lists even when it holds no Owner request,
+// so the Inbox can offer the Grant +N act from the run's own facts.
 export const InboxProjectRequestsSchema = z.object({
   /** The owning Project — the same slug the snapshot's task rows carry. */
   projectSlug: z.string(),
@@ -104,6 +111,39 @@ export const InboxProjectRequestsSchema = z.object({
   runId: z.string(),
   phase: z.string(),
   requests: z.array(OwnerRequestViewSchema),
+  /**
+   * T-06 (additive): the run journal's revision — the `expectedRevision`
+   * every Owner command (`wait.answer`, `wait.cancel`, `design.decide`,
+   * `allowance.*`) must carry. Absent only on an older schema's reply.
+   */
+  revision: z.number().int().optional(),
+  /**
+   * T-06 (additive): the run's count-based allowance state — the Grant
+   * item's own used/allowed data (ADR 0038: a grant adds capacity without
+   * resetting the used count).
+   */
+  allowance: z
+    .object({
+      tasksUsed: z.number().int(),
+      tasksAllowed: z.number().int(),
+      qaFixRoundsUsed: z.number().int(),
+      qaFixRoundsAllowed: z.number().int(),
+    })
+    .optional(),
+  /**
+   * T-06 (additive): the run's blocker details verbatim — the fold filters
+   * the causes an Owner grant can remedy (`tasks` / `qaFixRounds`); the
+   * read answers every cause, never a pre-filtered subset.
+   */
+  blockers: z
+    .array(
+      z.object({
+        id: z.string(),
+        reason: z.string(),
+        causes: z.array(z.enum(["tasks", "qaFixRounds", "elapsed", "other", "ambiguous"])),
+      }),
+    )
+    .optional(),
 });
 export type InboxProjectRequests = z.infer<typeof InboxProjectRequestsSchema>;
 

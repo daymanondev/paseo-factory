@@ -169,4 +169,14 @@
 .inbox-item h2 { margin-top: 12px; }
 .inbox-item p { margin-top: 8px; }
 
+/* The Inbox's Owner acts (T-06) — the inline Answer / Approve / Grant forms.
+   The Open Design bundle's own inputs carry the field chrome; the console
+   adds the form's rhythm, the amount field's narrow width, and the refusal
+   line's honest red — data, never a throw. */
+.console-owner-form { margin-top: 12px; display: grid; gap: 8px; }
+.console-owner-field { display: grid; gap: 4px; }
+.console-owner-field textarea { resize: vertical; min-height: 44px; }
+.console-owner-amount { max-width: 220px; }
+.console-owner-refusal { color: var(--red); margin: 0; }
+
 
