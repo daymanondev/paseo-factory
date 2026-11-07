@@ -7,7 +7,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 import type { FactoryView } from "../../plugin/shared/view.ts";
-import { invokeRpc } from "./rpc.ts";
+import { invokeRpc, type FetchLike } from "./rpc.ts";
 
 export const BUSY_MS = 5000;
 export const QUIET_MS = 30000;
@@ -22,11 +22,13 @@ export function snapshotIsBusy(view: FactoryView): boolean {
 
 export type SnapshotReply = { ok: true; view: FactoryView } | { ok: false; code: string; error: string };
 
-/** The default transport: `factory.snapshot` over the sidecar's RPC door. */
-export function loadSnapshotViaSidecar(input: { projectRoot?: string }): Promise<SnapshotReply> {
-  return invokeRpc<FactoryView>("factory.snapshot", input).then((reply) =>
-    reply.ok ? { ok: true as const, view: reply.result } : { ok: false as const, code: reply.code, error: reply.error },
-  );
+/**
+ * The default transport: `factory.snapshot` over the sidecar's RPC door. The
+ * reply IS the shared output union (`plugin/shared/rpc.ts` — `{ ok: true,
+ * view } | Failure`), consumed verbatim per the envelope law in `rpc.ts`.
+ */
+export function loadSnapshotViaSidecar(input: { projectRoot?: string }, fetchImpl: FetchLike = (input, init) => fetch(input, init)): Promise<SnapshotReply> {
+  return invokeRpc<{ view: FactoryView }>("factory.snapshot", input, fetchImpl);
 }
 
 export type LoadedSnapshot = { value: FactoryView | null; error: { code: string; message: string } | null; at: number | null };

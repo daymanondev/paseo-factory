@@ -14,6 +14,8 @@ import {
   type ConsoleSidecarStart,
 } from "../plugin/server/console-sidecar.ts";
 import { fakeCopilotRunner, makeTempDir } from "./helpers.ts";
+import { invokeRpc } from "../web/src/rpc.ts";
+import { loadSnapshotViaSidecar } from "../web/src/useSnapshot.ts";
 
 /**
  * The Console sidecar (ADR 0051 §1) against a real Factory on a temp home —
@@ -172,6 +174,42 @@ test("console sidecar: dispatches factory.snapshot in-process through the surfac
 
   const wrongVerb = await get(`${started.sidecar.url}/rpc`);
   assert.equal(wrongVerb.status, 405);
+});
+
+test("console sidecar ↔ console transport: the real loadSnapshotViaSidecar loads the view over the sidecar's real bytes", async (t) => {
+  const homeRoot = makeTempDir();
+  t.after(() => rmSync(homeRoot, { recursive: true, force: true }));
+  const fixture = makeFixture(homeRoot);
+  // A registered Project, so the loaded view's project list is populated —
+  // the same registration door the RN surface offers (`factory.project.add`).
+  const projectRoot = join(homeRoot, "console-seam-project");
+  mkdirSync(projectRoot, { recursive: true });
+  const added = await fixture.handlers.projectAdd({ projectRoot });
+  assert.ok(added.ok, added.ok ? "" : `${added.code}: ${added.error}`);
+
+  const started = await fixture.start();
+  assert.ok(started.ok, started.ok ? "" : started.reason);
+  t.after(() => started.sidecar.close());
+
+  // The console's real transport (web/src/useSnapshot.ts) against the real
+  // sidecar over real HTTP — the seam the fixture-loader web tests never
+  // cross. The sidecar returns the `factory.snapshot` handler's output
+  // verbatim; if the transport ever re-wraps it behind a `result` key, the
+  // view arrives `undefined` and this fails (the attempt-1 defect).
+  const atSidecar = (input: string, init: RequestInit) => fetch(`${started.sidecar.url}${input}`, init);
+  const reply = await loadSnapshotViaSidecar({}, atSidecar);
+  assert.ok(reply.ok, reply.ok ? "" : `${reply.code}: ${reply.error}`);
+  assert.equal(reply.view.version, 3, "FactoryView v3 rides the sidecar verbatim");
+  assert.ok(
+    reply.view.projects.some((project) => project.slug === added.slug),
+    "the registered Project lands in the loaded view's list",
+  );
+
+  // Transport-level refusals stay data through the same seam: the read
+  // surface's refusal to a write RPC arrives as the sidecar's own Failure body.
+  const refusal = await invokeRpc("factory.accept", { task: "T1", attempt: 1 }, atSidecar);
+  assert.ok(refusal.ok === false, "an unknown method resolves as Failure-shaped data, never a throw");
+  assert.ok(refusal.ok === false && refusal.code === "unknown_method", "the sidecar's refusal code rides verbatim");
 });
 
 test("console sidecar: a busy preferred port falls back, and close clears the state file", async (t) => {

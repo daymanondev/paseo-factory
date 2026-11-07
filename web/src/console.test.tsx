@@ -8,8 +8,9 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { App } from "./App.tsx";
 import { navigate } from "./router.ts";
+import type { FetchLike } from "./rpc.ts";
 import { fixtureView } from "./test/fixture-view.ts";
-import { pollEvery, snapshotIsBusy } from "./useSnapshot.ts";
+import { loadSnapshotViaSidecar, pollEvery, snapshotIsBusy } from "./useSnapshot.ts";
 
 const fixtureSnapshot = async () => ({ ok: true as const, view: fixtureView() });
 
@@ -34,6 +35,22 @@ describe("the console shell", () => {
     expect(screen.getByText("Agile Scrum")).toBeTruthy();
     expect(screen.getByText("Supervisor live · Lead live")).toBeTruthy();
     expect(screen.getByText("Supervisor vacant · Lead vacant")).toBeTruthy();
+  });
+
+  it("loads the Overview through the console's real transport against the sidecar's exact snapshot bytes", async () => {
+    // The exact bytes the sidecar writes for `factory.snapshot` — the handler
+    // reply serialized by the sidecar's `json(response, 200, reply)` — so this
+    // crosses the real transport seam (`invokeRpc` → `loadSnapshotViaSidecar`)
+    // instead of a fixture loader: an envelope re-wrapped behind a `result`
+    // key leaves the Overview's list empty and fails here.
+    const bytes = JSON.stringify({ ok: true, view: fixtureView() });
+    const sidecarFetch: FetchLike = (_input, _init) =>
+      Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(JSON.parse(bytes)) } as unknown as Response);
+    render(<App loadSnapshot={(input) => loadSnapshotViaSidecar(input, sidecarFetch)} />);
+    expect(await screen.findByText("research-slp")).toBeTruthy();
+    expect(screen.getByText("web-console-fixture")).toBeTruthy();
+    expect(screen.getByText("Agile Scrum")).toBeTruthy();
+    expect(screen.getByText("Supervisor live · Lead live")).toBeTruthy();
   });
 
   it("feeds the Project switcher from the snapshot", async () => {
