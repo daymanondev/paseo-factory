@@ -1,9 +1,11 @@
 import { test } from "node:test";
+import type { TestContext } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { provisionZcodeHome, ROLE_PROMPTS } from "../src/zcode-home.ts";
-import { disposeDir, makeTempDir } from "./helpers.ts";
+import { denyFactorySkillInWorktree, provisionZcodeHome, ROLE_PROMPTS } from "../src/zcode-home.ts";
+import { disposeDir, gitCommitAll, makeTempDir } from "./helpers.ts";
 
 /**
  * The zcode harness home provisioner (v0.0.94, ADR 0046): every factory role —
@@ -106,7 +108,7 @@ test("ROLE_SYSTEM.md carries the managed role contract and config.json points in
   // v0.2.2 the non-supervisor configs also carry the factory skill deny
   // (ADR 0050 Decision 6); the SLP supervisor keeps the bare parity shape.
   const seen = new Set<string>();
-  const factoryDenyKey = join(userHome, ".agents", "skills", "factory");
+  const factoryDenyKeys = factorySkillDenyKeysFor(userHome);
   for (const role of ["supervisor", "lead", "agent"] as const) {
     const roleHome = join(stateDir, "zcode-home", role);
     provisionZcodeHome({ stateDir, role, userHome });
@@ -117,7 +119,7 @@ test("ROLE_SYSTEM.md carries the managed role contract and config.json points in
     const config = JSON.parse(readFileSync(join(roleHome, "config.json"), "utf8"));
     const expected: Record<string, unknown> = { instructions: { userFile: join(roleHome, "ROLE_SYSTEM.md"), projectFile: "AGENTS.md" } };
     if (role !== "supervisor") {
-      expected.skill = { [factoryDenyKey]: { enable: false } };
+      expected.skill = Object.fromEntries(factoryDenyKeys.map((key) => [key, { enable: false }]));
     }
     assert.deepEqual(config, expected);
   }
@@ -321,7 +323,7 @@ test("a Scrum identity reroutes the clean room under <projectStateDir>/scrum/zco
     runConfig,
     {
       instructions: { userFile: join(runHome, "ROLE_SYSTEM.md"), projectFile: "AGENTS.md" },
-      skill: { [join(userHome, ".agents", "skills", "factory")]: { enable: false } },
+      skill: expectedSkillDeny(userHome),
     },
     "config.json wires instructions.userFile at the Scrum contract and carries the factory skill deny (v0.2.2, ADR 0050 Decision 6)",
   );
@@ -388,19 +390,20 @@ test("allowedSkills reconciles skills/ against exactly the caller's list; a Scru
   assert.deepEqual(survivors.map((name) => lstatSync(join(leadSkills, name)).ino), inosBefore, "scoped skill links are not churned");
 });
 
-test("the Owner-only factory skill is denied via config.json's native per-path skill override for every non-supervisor roleHome; the SLP supervisor keeps Owner parity (v0.2.2, ADR 0050 Decision 6)", (t) => {
+test("the Owner-only factory skill is denied via config.json's native per-path skill override for every non-supervisor roleHome; the SLP supervisor keeps Owner parity (v0.2.2, ADR 0050 Decision 6; keys re-pathed v0.2.3)", (t) => {
   const dir = makeTempDir("zcode-home-test-");
   disposeDir(t, dir);
   const userHome = join(dir, "user");
   seedZcodeHome(userHome);
   const stateDir = join(dir, "factory-state");
 
-  // The deny key is the userHome-expanded `.agents` original — zcode matches
-  // the override by realpath, so one key disables the `~/.zcode/skills/factory`
-  // symlink copy too, and a disabled skill is un-invocable, not merely
-  // unlisted. The scoped `<roleHome>/skills` links never reach the hardcoded
-  // user-scope roots, so this override is the enforcement layer.
-  const denyKey = join(userHome, ".agents", "skills", "factory");
+  // The deny keys are the userHome-expanded `SKILL.md` FILE paths of both
+  // real roots (`.agents` and `.zcode`) — zcode keys a discovered skill by
+  // its SKILL.md path (`parseSkill`), never the skill directory, so the
+  // v0.2.2 directory key matched nothing. A disabled skill is un-invocable,
+  // not merely unlisted. The roleHome config.json itself is no longer the
+  // binding seam (zcode never reads it — the worktree write is), so these
+  // keys are belt-and-suspenders for a future harness that might.
   const denied = [
     { label: "lead", home: join(stateDir, "zcode-home", "lead"), input: { stateDir, role: "lead" as const, userHome } },
     { label: "agent fallback", home: join(stateDir, "zcode-home", "agent"), input: { stateDir, role: "agent" as const, userHome } },
@@ -409,7 +412,7 @@ test("the Owner-only factory skill is denied via config.json's native per-path s
   for (const { label, home, input } of denied) {
     provisionZcodeHome(input);
     const config = JSON.parse(readFileSync(join(home, "config.json"), "utf8"));
-    assert.deepEqual(config.skill, { [denyKey]: { enable: false } }, `${label}'s config.json carries the factory skill deny at the .agents real-root path`);
+    assert.deepEqual(config.skill, expectedSkillDeny(userHome), `${label}'s config.json carries the factory skill deny at both SKILL.md paths`);
   }
 
   // The SLP supervisor's whole-dir symlink keeps 100% Owner skill parity —
@@ -425,7 +428,6 @@ test("Scrum roleHomes — seats (supervisor authority included) and task epochs 
   const userHome = join(dir, "user");
   seedZcodeHome(userHome);
   const stateDir = join(dir, "factory-state");
-  const denyKey = join(userHome, ".agents", "skills", "factory");
 
   // Every Scrum identity's symlink policy already excludes the Owner-only
   // factory — the Scrum supervisor seat takes per-skill links, never the SLP
@@ -451,7 +453,7 @@ test("Scrum roleHomes — seats (supervisor authority included) and task epochs 
   for (const { label, home, input } of shapes) {
     provisionZcodeHome(input);
     const config = JSON.parse(readFileSync(join(home, "config.json"), "utf8"));
-    assert.deepEqual(config.skill, { [denyKey]: { enable: false } }, `${label}'s config.json carries the factory skill deny`);
+    assert.deepEqual(config.skill, expectedSkillDeny(userHome), `${label}'s config.json carries the factory skill deny`);
   }
 });
 
@@ -529,4 +531,92 @@ test("the default userHome resolves against the runtime home (hermetic via proce
   } finally {
     process.env.HOME = previousHome;
   }
+});
+
+// ---- the project-scope worktree deny (v0.2.3 — the ADR 0050 Decision 6 replacement) -----------
+
+/** The `skill` deny document both real roots' `SKILL.md` paths must produce. */
+function expectedSkillDeny(userHome: string): Record<string, { enable: boolean }> {
+  return Object.fromEntries(factorySkillDenyKeysFor(userHome).map((key) => [key, { enable: false }]));
+}
+
+/** Both real-root `SKILL.md` file paths the deny keys must carry. */
+function factorySkillDenyKeysFor(userHome: string): string[] {
+  return [
+    join(userHome, ".agents", "skills", "factory", "SKILL.md"),
+    join(userHome, ".zcode", "skills", "factory", "SKILL.md"),
+  ];
+}
+
+/** One temp project repository with a commit, plus a linked Task worktree at `worktrees/<task>`. */
+function makeWorktreeFixture(t: TestContext, task: string): { projectRoot: string; worktree: string } {
+  const dir = makeTempDir("zcode-worktree-deny-");
+  disposeDir(t, dir);
+  const projectRoot = join(dir, "project");
+  mkdirSync(projectRoot, { recursive: true });
+  writeFileSync(join(projectRoot, "README.md"), "# project\n");
+  gitCommitAll(projectRoot, "seed project");
+  const worktree = join(dir, "factory-state", "projects", "demo-app", "worktrees", task);
+  execFileSync("git", ["worktree", "add", "-q", worktree, "-b", `factory/${task}`], { cwd: projectRoot });
+  return { projectRoot, worktree };
+}
+
+test("denyFactorySkillInWorktree writes the SKILL.md-path deny into <worktree>/.zcode/config.json and keeps the tree clean (v0.2.3)", (t) => {
+  const { projectRoot, worktree } = makeWorktreeFixture(t, "T-01");
+  const userHome = makeTempDir("zcode-worktree-deny-user-");
+  disposeDir(t, userHome);
+  seedZcodeHome(userHome);
+
+  denyFactorySkillInWorktree(worktree, userHome);
+
+  // The project-scope config — the only one a zcode session reads beside the
+  // user config — carries the deny keyed on the SKILL.md FILE paths.
+  const config = JSON.parse(readFileSync(join(worktree, ".zcode", "config.json"), "utf8"));
+  assert.deepEqual(config.skill, expectedSkillDeny(userHome), "the deny keys are both real roots' SKILL.md paths");
+
+  // The runtime dir is hidden from git through the repository's info/exclude
+  // — resolved from the worktree, whose .git is a gitdir: pointer file.
+  const status = execFileSync("git", ["status", "--porcelain"], { cwd: worktree, encoding: "utf8" });
+  assert.equal(status.trim(), "", "<worktree>/.zcode never appears in git status --porcelain");
+  const excludePath = execFileSync("git", ["rev-parse", "--git-path", "info/exclude"], { cwd: worktree, encoding: "utf8" }).trim();
+  assert.equal(
+    readFileSync(excludePath, "utf8").split("\n").filter((line) => line.trim() === ".zcode/").length,
+    1,
+    "the exclude lists .zcode/ exactly once, at the repository's info/exclude",
+  );
+
+  // Idempotent: a session_open re-apply rewrites the same deny and never
+  // duplicates the exclude line.
+  denyFactorySkillInWorktree(worktree, userHome);
+  const again = JSON.parse(readFileSync(join(worktree, ".zcode", "config.json"), "utf8"));
+  assert.deepEqual(again.skill, expectedSkillDeny(userHome));
+  assert.equal(readFileSync(excludePath, "utf8").split("\n").filter((line) => line.trim() === ".zcode/").length, 1);
+
+  // The project root shares the common exclude — the repo-wide hiding the
+  // ticket prescribes — and its own status stays clean of worktree noise.
+  const rootStatus = execFileSync("git", ["status", "--porcelain"], { cwd: projectRoot, encoding: "utf8" });
+  assert.equal(rootStatus.trim(), "", "the exclude at the common git dir keeps the project root clean too");
+});
+
+test("denyFactorySkillInWorktree merges into an existing <worktree>/.zcode/config.json without dropping keys", (t) => {
+  const { worktree } = makeWorktreeFixture(t, "T-02");
+  const userHome = makeTempDir("zcode-worktree-deny-user-");
+  disposeDir(t, userHome);
+  seedZcodeHome(userHome);
+
+  // A pre-existing project config (the Owner's own MCP wiring, say) must
+  // survive the deny write — the seam merges, never replaces.
+  mkdirSync(join(worktree, ".zcode"), { recursive: true });
+  writeFileSync(
+    join(worktree, ".zcode", "config.json"),
+    `${JSON.stringify({ mcpServers: { docs: { command: "node" } }, skill: { "/already/disabled/SKILL.md": { enable: false } } }, null, 2)}\n`,
+  );
+  denyFactorySkillInWorktree(worktree, userHome);
+  const config = JSON.parse(readFileSync(join(worktree, ".zcode", "config.json"), "utf8"));
+  assert.deepEqual(config.mcpServers, { docs: { command: "node" } }, "unrelated top-level keys survive");
+  assert.deepEqual(
+    config.skill,
+    { "/already/disabled/SKILL.md": { enable: false }, ...expectedSkillDeny(userHome) },
+    "existing skill overrides survive beside the factory deny keys",
+  );
 });

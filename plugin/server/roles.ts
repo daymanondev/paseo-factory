@@ -26,7 +26,7 @@ import { CorrelationRegistry } from "./core/correlations.ts";
 import { parseLane } from "./core/lanes.ts";
 import { resolveOrBootstrapProject, resolveProject } from "./core/project.ts";
 import { provisionPiAgentHome } from "./core/pi-home.ts";
-import { provisionZcodeHome } from "./core/zcode-home.ts";
+import { denyFactorySkillInWorktree, provisionZcodeHome } from "./core/zcode-home.ts";
 import {
   FOOTER_MARK,
   ROLE_SKILL_INDEX,
@@ -184,6 +184,15 @@ export function factoryEnvFor(
   // `config.systemPrompt` never rides ACP. SLP calls (no execution) stay
   // byte-identical to the pre-Scrum shape.
   if (resolveEffectiveProviderFamily(input.provider, role, input.stateDir, input.project.slug, input.task) === "zcode") {
+    // The project-scope factory-skill deny (v0.2.3, the ADR 0050 Decision 6
+    // replacement): a Task worktree workspace — never the project root, which
+    // the Owner and the SLP Supervisor share — gains `<worktree>/.zcode/config.json`
+    // carrying the `SKILL.md`-path `skill` overrides, the only config seam a
+    // zcode session actually reads beside the user config. Idempotent, so the
+    // session_open re-apply never duplicates anything.
+    if (input.task !== undefined) {
+      denyFactorySkillInWorktree(workspace, input.userHome ?? homedir());
+    }
     // The Scrum role the clean room renders the contract and scopes skills
     // for — the same narrowing provisionScrumHarness applies
     // (src/scrum/harness.ts): a task execution carries its bound specialist

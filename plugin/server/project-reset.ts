@@ -37,6 +37,72 @@ export function checkProjectResetRepository(root: string, pluginDir?: string): v
   if (realRoot !== realpathSync(top) || ownCheckout === realRoot || ownCheckout?.startsWith(`${realRoot}/`) || sharesPluginRepository) {
     throw new Error("Project reset requires a checkout outside the factory plugin repository");
   }
+  // The 2026-11-07 incident guard (v0.2.3): the directory checks above compare
+  // the target only against the RUNNING plugin's install directory, so the
+  // plugin's own source repository — a different checkout on disk — passed and
+  // was wiped. Identity closes that hole: any clone of the same remote as the
+  // running plugin checkout is the plugin's own source, wherever it lives. An
+  // install with no Git metadata (a release/tarball directory install) falls
+  // back to the canonical source identity compiled in below.
+  if (ownCheckout !== undefined) {
+    const ownIdentity = remoteIdentityAt(ownCheckout) ?? PLUGIN_SOURCE_IDENTITY;
+    if (ownIdentity === remoteIdentityAt(realRoot)) {
+      throw new Error("Project reset requires a checkout outside the factory plugin repository — this root is the plugin's own source repository");
+    }
+  }
+}
+
+/**
+ * The plugin's own canonical source repository — the identity fallback for a
+ * running install that carries no Git metadata (a release/tarball directory
+ * install has no `origin` to read). The source repo is a fact of the
+ * codebase, so its identity is compiled in rather than derived from the
+ * install layout.
+ */
+const PLUGIN_SOURCE_IDENTITY = "github.com/daymanondev/paseo-factory";
+
+/**
+ * Normalizes one git remote URL for identity comparison: scheme, userinfo,
+ * port, and a trailing `.git` suffix are stripped and the host is lowercased,
+ * so `https://GitHub.com/o/repo.git`, `git@github.com:o/repo`, and
+ * `ssh://git@github.com/o/repo` all normalize to `github.com/o/repo`. A URL
+ * with no host (a local path or `file://` remote) normalizes to undefined —
+ * never a match: same-path relationships are the directory checks' job, and a
+ * local-file "identity" would refuse unrelated projects that cloned from the
+ * same local bundle.
+ */
+function normalizeRemoteIdentity(url: string): string | undefined {
+  let rest = url.trim();
+  if (rest === "") return undefined;
+  const schemed = /^([a-zA-Z][a-zA-Z0-9+.-]*):\/\/(.*)$/.exec(rest);
+  if (schemed !== null) {
+    if (schemed[1]!.toLowerCase() === "file") return undefined;
+    rest = schemed[2]!;
+  } else {
+    const scp = /^([^/@:\s]+)@([^/:@\s]+):(.+)$/.exec(rest);
+    if (scp === null) return undefined; // a bare local path — no remote identity
+    rest = `${scp[2]}/${scp[3]}`;
+  }
+  const at = rest.indexOf("@");
+  if (at !== -1) rest = rest.slice(at + 1); // identity is host+path, not credentials
+  const slash = rest.indexOf("/");
+  const host = (slash === -1 ? rest : rest.slice(0, slash)).replace(/:\d+$/, "").toLowerCase();
+  if (host === "") return undefined;
+  const path = slash === -1 ? "" : rest.slice(slash + 1).replace(/\/+$/, "");
+  const cleanPath = path.endsWith(".git") ? path.slice(0, -4) : path;
+  return cleanPath === "" ? host : `${host}/${cleanPath}`;
+}
+
+/** The first remote identity of the checkout at `cwd` — `origin`'s push URL, then its fetch URL. */
+function remoteIdentityAt(cwd: string): string | undefined {
+  for (const args of [["remote", "get-url", "--push", "origin"], ["remote", "get-url", "origin"]]) {
+    try {
+      const url = execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+      const identity = normalizeRemoteIdentity(url);
+      if (identity !== undefined) return identity;
+    } catch { /* no such remote — try the next probe */ }
+  }
+  return undefined;
 }
 
 /** Reset only an independent Project checkout, never the running plugin's repository. */

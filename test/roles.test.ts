@@ -713,6 +713,25 @@ test("zcode seats fence into guarded mode with auto_accept off and carry the cle
   assert.equal(peer.env?.ZCODE_STORAGE_DIR, join(stateDir, "zcode-home", "tasks", slug, "T-08"), "the Peer's clean room is per-Task");
   assert.equal(peer.env?.ZCODE_SESSION_DB_PATH, join(stateDir, "zcode-home", "tasks", slug, "T-08", "db", "db.sqlite"));
   assert.equal("ZCODE_DISALLOWED_TOOLS" in (peer.env ?? {}), false, "the working Agent keeps its write tools — the choke judges each ask");
+
+  // The project-scope factory-skill deny (v0.2.3, the ADR 0050 Decision 6
+  // replacement): the Peer's Task worktree gains `<worktree>/.zcode/config.json`
+  // keyed on both real roots' SKILL.md paths — the only config seam a zcode
+  // session reads beside the user config — while the PROJECT ROOT the seats
+  // and the Owner share never gets one (a deny there would disable /factory
+  // for the Owner and the SLP Supervisor too).
+  const worktreeDeny = join(worktreeDir, ".zcode", "config.json");
+  assert.ok(existsSync(worktreeDeny), "the zcode Peer's worktree carries a project-scope .zcode/config.json");
+  const denyConfig = JSON.parse(readFileSync(worktreeDeny, "utf8"));
+  assert.deepEqual(
+    denyConfig.skill,
+    {
+      [join(userHome, ".agents", "skills", "factory", "SKILL.md")]: { enable: false },
+      [join(userHome, ".zcode", "skills", "factory", "SKILL.md")]: { enable: false },
+    },
+    "the worktree deny keys are the SKILL.md file paths of both real roots",
+  );
+  assert.equal(existsSync(join(repoDir, ".zcode", "config.json")), false, "the project root NEVER carries a factory-denying .zcode/config.json");
 });
 
 test("injectSessionEnv binds provider-recognized supervisor and lead sessions into project.json without displacing another bound session (v0.0.27, ADR 0017 §2)", (t) => {
