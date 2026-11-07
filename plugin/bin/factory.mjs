@@ -64,6 +64,10 @@ const usage = `usage: factory [--home <paseoHome>] <command> [options]
 commands:
   transcript <agent-id | supervisor | lead> [--project <dir>] [--format md|html]
              [--out <path>] [--conversations-dir <dir>] (read-only, no daemon needed)
+  console    Print the Web Console's bound URL (ADR 0051 §1) — the running
+             plugin's Console sidecar records it in <stateDir>/console.json at
+             boot; a missing record means the plugin (or its sidecar) is not
+             running (read-only, no daemon needed)
   execution  get | set-mode <slp|scrum> [--project <dir>] (Owner only)
   scrum      <operation> [--project <dir>] [--run <id>] [--revision <n>] [--payload <json> | --file <json-file>] [--request-id <id>]
   open-design stage|lint|inspect|sync|od [--dir <mockupsDir>]
@@ -465,6 +469,23 @@ if (command === "transcript") {
     else await new Promise((resolve, reject) => process.stdout.write(output, error => error ? reject(error) : resolve()));
     process.exit(0);
   } catch (error) { die(`transcript: ${error instanceof Error ? error.message : String(error)}`); }
+}
+
+if (command === "console") {
+  // The Console sidecar's discovery door (ADR 0051 §1): the running plugin
+  // records its bound URL in <stateDir>/console.json at boot — this reads it,
+  // never writing state (the same local-read law as status/cost).
+  const statePath = join(stateDir, "console.json");
+  let recorded;
+  try {
+    recorded = JSON.parse(readFileSync(statePath, "utf8"));
+  } catch {
+    die(`console: no Console sidecar is recorded at ${statePath} — the factory plugin writes the record at boot; is it running?`);
+  }
+  const url = typeof recorded?.url === "string" ? recorded.url : undefined;
+  if (url === undefined) die(`console: the record at ${statePath} carries no url`);
+  console.log(url);
+  process.exit(0);
 }
 
 function waitSeconds(parsed, defaultSecs = DEFAULT_WAIT_SECS) {

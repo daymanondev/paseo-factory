@@ -1,0 +1,64 @@
+/* The console's own additions on top of the Open Design styles — chrome the
+   prototype carried implicitly (the switcher, the poll clock, placeholders)
+   and small aligners so the reused classes sit correctly in the new shell. */
+
+.console-project-switcher select {
+  min-height: 36px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font-size: var(--small);
+}
+
+.console-clock {
+  padding: 8px 12px;
+  font-size: var(--tiny);
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.console-clock[data-busy="busy"] { color: var(--cyan); }
+
+.console-banner {
+  margin: 12px 20px 0;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  font-size: var(--small);
+}
+
+.console-banner-error {
+  border: 1px solid var(--red);
+  background: var(--red-bg);
+  color: var(--red);
+}
+
+.console-seat-summary {
+  color: var(--muted);
+  font-size: var(--small);
+}
+
+.console-placeholder {
+  padding: 32px 4px;
+}
+
+.console-placeholder h1 {
+  margin: 0 0 12px;
+  font-size: 24px;
+  font-family: var(--display);
+}
+
+.console-placeholder p {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--small);
+  line-height: 1.7;
+  max-width: 70ch;
+}
+
+/* The prototype's sidebar rows are buttons with icons; the console's nav is
+   the same rhythm without the icon glyphs. */
+.sidebar .nav-group .nav-item { width: 100%; }
+.sidebar .brand { display: flex; align-items: center; gap: 8px; padding: 16px; font-family: var(--display); font-size: 15px; }
+.sidebar .brand-name { color: var(--text); }

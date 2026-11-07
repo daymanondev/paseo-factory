@@ -36,6 +36,7 @@ import { createLeadMailRuntime } from "./server/lead-mailbox.ts";
 import { syncPeerHelpersBeforeCreate, injectRoleOnCreate, injectSessionEnv, sanitizeAgentCreateHookResult } from "./server/roles.ts";
 import { factoryRegistryFor } from "./server/projects.ts";
 import { listProjectRegistrations } from "./server/core/project.ts";
+import { startConsoleSidecar, type ConsoleSidecarHandle } from "./server/console-sidecar.ts";
 // The one-time root-to-Project split & compact migration (v0.0.89, ADR 0045
 // §2): lands from src/ledger-migration.ts through the vendored core copy —
 // the binding signature is
@@ -50,6 +51,17 @@ export default function contribute(server: PluginServerContext) {
   const home = resolvePaseoHome(process.env, homedir());
   const stateDir = stateDirFor(home);
   let pluginDir = pluginDirFor(home);
+
+  // The Console sidecar's lifetime state (ADR 0051 §1). The start hook is
+  // assigned once the surface handlers exist below; `initializeOrdinaryRuntime`
+  // fires it, so the sidecar — listener and console.json discovery record —
+  // is ordinary startup work: an incomplete maintenance window never gains
+  // either (the recovery-boot fence), and the recovery timer re-drives the
+  // hook the moment the pending transaction completes.
+  let consoleSidecar: ConsoleSidecarHandle | undefined;
+  let consoleSidecarStarted = false;
+  let consoleSidecarStopped = false;
+  let startConsoleSidecarWhenOrdinary: () => void = () => {};
 
   const reconcileGlobalFactorySkills = (activePluginDir: string | undefined, logReconciled = false): void => {
     const quoted = (value: string) => (/\s/.test(value) ? `"${value}"` : value);
@@ -195,6 +207,9 @@ export default function contribute(server: PluginServerContext) {
         log(`role providers: lanes unreadable — ${bootLanes.reason}`);
       }
     });
+    // Ordinary runtime owns the Console sidecar (see its declaration above):
+    // started here — never during a pending upgrade — exactly once.
+    startConsoleSidecarWhenOrdinary();
     booted = true;
   };
   initializeOrdinaryRuntime();
@@ -548,6 +563,41 @@ export default function contribute(server: PluginServerContext) {
 
   const gitBlocks = startGitBlockIngestion(factory, { onLog: log });
 
+  // The Console sidecar (ADR 0051 §1): a localhost-only HTTP listener in this
+  // same process, serving the committed Web Console bundle from the plugin
+  // directory and dispatching `factory.snapshot` in-process through the same
+  // handlers the RN client's RPC registrations call — the single writer's
+  // other door. The webRoot getter re-resolves on every request so a plugin
+  // update re-sync mid-lifetime keeps serving the new checkout's bundle; an
+  // unrecorded plugin directory degrades to a 503 sentence on static routes
+  // while the RPC door keeps answering. A start failure is a named warning,
+  // never a failed boot (the sidecar resolves `{ ok: false }` rather than
+  // throwing, and the shell still guards the promise). The hook itself fires
+  // from `initializeOrdinaryRuntime` — the sidecar is ordinary startup work.
+  startConsoleSidecarWhenOrdinary = () => {
+    if (consoleSidecarStarted) return;
+    consoleSidecarStarted = true;
+    void startConsoleSidecar({
+      handlers: surface,
+      stateDir,
+      webRoot: () => (pluginDir === undefined ? undefined : join(pluginDir, "web")),
+      onLog: log,
+    }).then(
+      (start) => {
+        if (start.ok) {
+          consoleSidecar = start.sidecar;
+          // A stop() that raced the bind still closes the late listener and
+          // clears its discovery record.
+          if (consoleSidecarStopped) void consoleSidecar.close();
+        } else {
+          log(`console sidecar: not started — ${start.reason}`);
+        }
+      },
+      (error) => log(`console sidecar: start deferred — ${error instanceof Error ? error.message : String(error)}`),
+    );
+  };
+
+
   const offSessionOpen = registerLifecycleHook<{ request: PluginHookRequests["agent.open.before"] }, PluginHookRequests["agent.open.before"]>(
     (handler) => server.addHook("agent.open.before", handler),
     (handler) => server.before("agent.session_open", handler),
@@ -623,6 +673,8 @@ export default function contribute(server: PluginServerContext) {
     spool.stop();
     leadMail.stop();
     usage.stop();
+    consoleSidecarStopped = true;
+    void consoleSidecar?.close();
     // The registry stops every per-Project Factory it created plus the root
     // fallback (v0.0.89) — each Project's writer lane closes its own ledger.
     registry.stop();
