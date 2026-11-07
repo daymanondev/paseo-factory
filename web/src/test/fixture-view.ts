@@ -4,7 +4,7 @@
  * two Projects the shell assertions read and the Task/usage builders the
  * Tasks-screen tests fold.
  */
-import type { AttemptView, FactoryView, TaskStatus, TaskView } from "../../../plugin/shared/view.ts";
+import type { AgentView, AttemptView, FactoryView, TaskStatus, TaskView } from "../../../plugin/shared/view.ts";
 
 const LANES = {
   supervisor: "pi/zai/glm-5.3",
@@ -57,6 +57,23 @@ export function fixtureTask(task: string, status: TaskStatus, attempts: readonly
     choke: { allowed: 3, denied: 0, blocked: 0 },
     attempts: [...attempts],
     lastSeq: 12,
+  };
+}
+
+/** A live daemon agent row — every optional field honest (T-07a's Workspace fold reads it). */
+export function fixtureAgent(id: string, over: Partial<AgentView> = {}): AgentView {
+  return {
+    id,
+    title: `Agent ${id}`,
+    status: "idle",
+    provider: "pi",
+    model: "glm-5.3",
+    seat: null,
+    task: null,
+    seqEnd: null,
+    requiresAttention: false,
+    cwd: "/Users/owner/code/research-slp",
+    ...over,
   };
 }
 

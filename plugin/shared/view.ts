@@ -448,6 +448,7 @@ export const ScrumRunViewSchema = z.object({
     })
     .optional(),
 });
+export type ScrumRunView = z.infer<typeof ScrumRunViewSchema>;
 export const OpenDesignProjectLinkSchema = z.object({
   projectId: z.string(), projectName: z.string(), designSystemId: z.string().nullable().optional(), directionId: z.string().nullable().optional(),
   sourceUpdatedAt: z.number(), syncedAt: z.string(), digest: z.string(), screenCount: z.number(), files: z.array(z.string()),

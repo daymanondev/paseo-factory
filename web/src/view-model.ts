@@ -10,7 +10,7 @@
  * `inputTokens`/`cachedInputTokens` shape is never adopted — a meter that
  * cannot name its four buckets refuses to invent them.
  */
-import type { AttemptView, FactoryView, OwnerRequestView, ProjectView, TaskDetailView, TaskStatus, TaskView, UsageBucketsView } from "../../plugin/shared/view.ts";
+import type { AgentView, AttemptView, FactoryView, OwnerRequestView, ProjectView, ScrumRunView, TaskDetailView, TaskStatus, TaskView, UsageBucketsView } from "../../plugin/shared/view.ts";
 
 // ---- the Meter law --------------------------------------------------------------------------
 
@@ -643,5 +643,398 @@ export function taskDetailModel(detail: TaskDetailView): TaskDetailViewModel {
       workspace: detail.contract.workspace,
     },
     rungs,
+  };
+}
+
+// ---- the Workspace screen (T-07a) -------------------------------------------------------------
+
+/** The screen's two shapes — the scoped Project's execution mode. */
+export type FlowMode = "slp" | "scrum";
+
+/** One node's live state — the bounded outcome's own presence vocabulary. */
+export interface FlowSeatState {
+  /** The status word the node shows — "Not started" is the vacant seat's own vocabulary. */
+  label: string;
+  tone: "green" | "amber" | "red" | "cyan" | "muted";
+  /** The prototype's `.flow-node`/`.slp-node` state class — "" is the plain resting node. */
+  nodeClass: "running" | "attention" | "completed" | "queued" | "error" | "";
+  /** True when no agent holds the seat — the dashed vacant node, never a fabricated agent. */
+  vacant: boolean;
+}
+
+const FLOW_NOT_STARTED: FlowSeatState = { label: "Not started", tone: "muted", nodeClass: "queued", vacant: true };
+const FLOW_LIVE: FlowSeatState = { label: "Live", tone: "cyan", nodeClass: "running", vacant: false };
+const FLOW_IDLE: FlowSeatState = { label: "Idle", tone: "muted", nodeClass: "", vacant: false };
+const FLOW_ERROR: FlowSeatState = { label: "Error", tone: "red", nodeClass: "error", vacant: false };
+const FLOW_DORMANT: FlowSeatState = { label: "Dormant", tone: "muted", nodeClass: "", vacant: false };
+const FLOW_NEEDS_YOU: FlowSeatState = { label: "Needs you", tone: "amber", nodeClass: "attention", vacant: false };
+const FLOW_HANDOFF: FlowSeatState = { label: "Handoff", tone: "cyan", nodeClass: "running", vacant: false };
+const FLOW_ROTATION_PENDING: FlowSeatState = { label: "Rotation pending", tone: "amber", nodeClass: "attention", vacant: false };
+
+/**
+ * The presence fold — the daemon's own fields, never a guess: a null agent is
+ * the vacant "Not started" seat; the Lead's rotation state outranks the raw
+ * status (a handing-over Lead is Live-with-handoff, not idle); a
+ * `requiresAttention` flag outranks both; an unrecognized daemon status
+ * renders verbatim, muted.
+ */
+export function flowSeatState(agent: AgentView | null, seat: "supervisor" | "lead" | "peer"): FlowSeatState {
+  if (agent === null) return FLOW_NOT_STARTED;
+  if (seat === "lead" && agent.rotationState === "handing_over") return FLOW_HANDOFF;
+  if (seat === "lead" && agent.rotationState === "rotation_pending") return FLOW_ROTATION_PENDING;
+  if (agent.requiresAttention === true) return FLOW_NEEDS_YOU;
+  switch (agent.status) {
+    case "running":
+      return FLOW_LIVE;
+    case "idle":
+      return FLOW_IDLE;
+    case "error":
+      return FLOW_ERROR;
+    case "closed":
+      return FLOW_DORMANT;
+    default:
+      return { label: agent.status, tone: "muted", nodeClass: "", vacant: false };
+  }
+}
+
+/** One Task the seat owns — a chip with its verification-line status. */
+export interface FlowTaskChip {
+  task: string;
+  status: TaskStatus;
+  statusLabel: string;
+  tone: TaskRowViewModel["tone"];
+}
+
+/** One seat/agent node of the authority graph — Owner renders as its own static card. */
+export interface FlowSeatNode {
+  /** The selection key a click sets — the agent id when live, the seat name when vacant. */
+  key: string;
+  seat: "supervisor" | "lead" | "peer";
+  title: string;
+  agentId: string | null;
+  state: FlowSeatState;
+  /** The avatar chip's letter. */
+  initial: string;
+  /** Vacant → the configured lane; live → `provider · model`. */
+  laneLabel: string;
+  /** The Tasks this seat owns, ledger-bound. */
+  tasks: readonly FlowTaskChip[];
+  /** The Lead's context telemetry — "40k / 128k" (+ " · handoff" mid-handoff); null off the Lead. */
+  contextLabel: string | null;
+  /** The Lead's queued mail count — null when unreported. */
+  queuedMailCount: number | null;
+}
+
+/** One mailbox point between authority tiers — queued counts when the fold knows one. */
+export interface FlowMailNode {
+  seat: "supervisor" | "lead";
+  queued: number | null;
+  /** The Lead mailbox locks during handoff — the amber locked pill. */
+  locked: boolean;
+}
+
+/** The specialist role vocabulary — the prototype's own `scrumRoleLabels`. */
+export const SCRUM_ROLE_LABELS: Readonly<Record<string, string>> = { pm: "PM", ux: "UX", architect: "ARCH", dev: "DEV", qa: "QA" };
+
+/** One run Task card — the run's own role binding joined with the fold's status. */
+export interface ScrumStageTask {
+  task: string;
+  role: string;
+  roleLabel: string;
+  /** The card's status word — the prototype's spelling (`Done`, `GREEN`, `Running`, `Blocked`, `Red`, `Waiting`). */
+  statusLabel: string;
+  tone: "green" | "amber" | "red" | "cyan" | "muted";
+  /** `provider · model` when a live agent or the usage rollup names one — null, never a guess. */
+  modelLabel: string | null;
+}
+
+/** The readiness & UI gate cell — the readiness stage's own two-half answer. */
+export interface ScrumGateModel {
+  /** The readiness half — "Pass" only once the run moved past the gate. */
+  readiness: { label: "Pass" | "Pending"; tone: "green" | "muted" };
+  /** The UI-approval half — the Owner's design decision or its honest absence. */
+  ui: { label: string; tone: "green" | "amber" };
+  /** The design revision under review — null when no design was recorded. */
+  revision: number | null;
+}
+
+/** One pipeline stage — the strip's five fixed stages, real phases mapped onto them. */
+export interface ScrumStageModel {
+  id: "planning" | "design" | "readiness" | "implementation" | "qa";
+  number: number;
+  title: string;
+  /** The stage's state word — Completed / Running / Designing / Auditing / Fixing / Blocked / Red gate / Review ready / Changes requested / Needs you / Skipped / Waiting. */
+  state: string;
+  stateTone: "green" | "amber" | "red" | "cyan" | "muted";
+  /** True when the run's current phase maps onto this stage — the strip's highlight. */
+  current: boolean;
+  skipped: boolean;
+  /** The stage's role columns — design holds ux ∥ architect side by side; others one. */
+  columns: readonly { role: string; roleLabel: string; tasks: readonly ScrumStageTask[] }[];
+  /** The readiness & UI gate cell — the readiness stage only. */
+  gate: ScrumGateModel | null;
+}
+
+/** The Scrum pipeline strip — the run summary, five stages, blockers, fix loop. */
+export interface ScrumPipelineModel {
+  runId: string;
+  phase: string;
+  track: string | null;
+  /** `Roster r<n>` — the frozen roster's config revision, null when unrecorded. */
+  configRevision: number | null;
+  stages: readonly ScrumStageModel[];
+  /** The run's blockers verbatim — `blockerDetails` reasons first, ids only as the fallback. */
+  blockers: readonly string[];
+  /** The cancellation sentence — the banner's first line when the run was cancelled. */
+  cancellation: string | null;
+  /** `Fix n/max · d defects` — the QA loop's own counts; null without a budget. */
+  fixSummary: string | null;
+}
+
+/** The Workspace screen's whole world — null without a selected Project. */
+export interface FlowScreenModel {
+  mode: FlowMode;
+  /** The selected Project's display name. */
+  scope: string;
+  supervisor: FlowSeatNode;
+  lead: FlowSeatNode;
+  peers: readonly FlowSeatNode[];
+  mail: { supervisor: FlowMailNode; lead: FlowMailNode };
+  /** The Scrum pipeline strip — scrum mode only, null until a run exists. */
+  scrum: ScrumPipelineModel | null;
+}
+
+/** The prototype's five stages (`scrumStageDefs`) — the strip's fixed vocabulary. */
+const FLOW_STAGES: readonly { id: ScrumStageModel["id"]; number: number; title: string; roles: readonly string[] }[] = [
+  { id: "planning", number: 1, title: "PM / Analyst", roles: ["pm"] },
+  { id: "design", number: 2, title: "UX ∥ Architect", roles: ["ux", "architect"] },
+  { id: "readiness", number: 3, title: "Readiness & UI", roles: [] },
+  { id: "implementation", number: 4, title: "Senior Dev", roles: ["dev"] },
+  { id: "qa", number: 5, title: "QA & Fix", roles: ["qa"] },
+];
+
+/** The real phase vocabulary → the stage that carries its highlight (the run-journal's own PHASES). */
+const STAGE_PHASES: Readonly<Record<ScrumStageModel["id"], readonly string[]>> = {
+  planning: ["planning"],
+  design: ["design"],
+  readiness: ["readiness", "awaiting-ui-approval"],
+  implementation: ["implementation"],
+  qa: ["qa", "fixing"],
+};
+
+/** The card's status spelling — the prototype's `scrumTaskCard` law over the fold's statuses. */
+function scrumTaskLabel(status: TaskStatus): { label: string; tone: ScrumStageTask["tone"] } {
+  switch (status) {
+    case "accepted":
+      return { label: "Done", tone: "green" };
+    case "ready-to-accept":
+      return { label: "GREEN", tone: "green" };
+    case "running":
+      return { label: "Running", tone: "cyan" };
+    case "needs-human":
+      return { label: "Blocked", tone: "amber" };
+    case "red":
+      return { label: "Red", tone: "red" };
+    case "waiting":
+      return { label: "Waiting", tone: "muted" };
+  }
+}
+
+/** The Lead's context telemetry formatting — "40k / 128k", the trailing `.0` dropped. */
+function flowContextTokens(count: number): string {
+  return formatTokens(count).replace(/\.0([kM])$/, "$1");
+}
+
+/** The UI-approval half's answer — the prototype's `scrumDecisionLabel` over the run's own fields. */
+function scrumUiDecision(run: ScrumRunView): { label: string; tone: "green" | "amber" } {
+  if (run.config.requireUiApproval === false) return { label: "Not required", tone: "green" };
+  const decision = run.design?.decision;
+  if (decision === "approved") return { label: "Approved", tone: "green" };
+  if (decision === "waived") return { label: "Waived", tone: "green" };
+  if (decision === "changes_requested") return { label: "Changes requested", tone: "amber" };
+  return { label: "Awaiting Owner", tone: "amber" };
+}
+
+/** One stage's state word — statuses joined per the bounded outcome's own ladder. */
+function scrumStageState(
+  stage: (typeof FLOW_STAGES)[number],
+  phase: string,
+  stageTasks: readonly TaskView[],
+  run: ScrumRunView,
+): { label: string; tone: ScrumStageModel["stateTone"] } {
+  const skipped = (run.skippedPhases ?? []).some((entry) => entry.phase === stage.id);
+  if (skipped) return { label: "Skipped", tone: "muted" };
+  if (stage.id === "readiness") {
+    // Phase-derived, never task-derived — the gate owns this stage, not a role.
+    if (run.config.requireUiApproval === false) return { label: "Completed", tone: "green" };
+    const decision = run.design?.decision;
+    if (decision === "approved" || decision === "waived") return { label: "Completed", tone: "green" };
+    if (decision === "changes_requested") return { label: "Changes requested", tone: "amber" };
+    if (phase === "awaiting-ui-approval") return { label: "Needs you", tone: "amber" };
+    return { label: "Waiting", tone: "muted" };
+  }
+  if (stageTasks.length > 0 && stageTasks.every((task) => task.status === "accepted")) return { label: "Completed", tone: "green" };
+  if (stageTasks.some((task) => task.status === "running")) {
+    if (stage.id === "design") return { label: "Designing", tone: "cyan" };
+    if (stage.id === "qa") return phase === "fixing" ? { label: "Fixing", tone: "cyan" } : { label: "Auditing", tone: "cyan" };
+    return { label: "Running", tone: "cyan" };
+  }
+  if (stageTasks.some((task) => task.status === "needs-human")) return { label: "Blocked", tone: "amber" };
+  if (stageTasks.some((task) => task.status === "red")) return { label: "Red gate", tone: "red" };
+  if (stageTasks.some((task) => task.status === "ready-to-accept")) return { label: "Review ready", tone: "green" };
+  return { label: "Waiting", tone: "muted" };
+}
+
+/** The stage's readiness half — "Pass" only once the run moved past the gate (a phase fact, never a guess). */
+function scrumReadinessGate(phase: string, run: ScrumRunView): ScrumGateModel["readiness"] {
+  return ["awaiting-ui-approval", "implementation", "qa", "fixing", "completed"].includes(phase)
+    ? { label: "Pass", tone: "green" }
+    : { label: "Pending", tone: "muted" };
+}
+
+/**
+ * The Workspace fold (T-07a) — the scoped snapshot's SLP authority graph
+ * (Owner → Supervisor → Lead → working Peers, each node's live state, lane,
+ * and owned Tasks) or, for a scrum-mode Project, the authority tier plus the
+ * run's five-stage pipeline strip. Everything folds here from the snapshot
+ * alone — no new door, no mock telemetry; a null Project answers null (the
+ * screen's own empty state, never a fabricated graph).
+ */
+export function flowScreenModel(view: FactoryView): FlowScreenModel | null {
+  if (view.project === null) return null;
+  const mode: FlowMode = view.project.executionMode ?? view.execution?.selectedMode ?? "slp";
+  const tasksById = new Map(view.tasks.map((task) => [task.task, task]));
+
+  /** The Tasks one agent owns — the ledger's own binding (`agent.task` / `task.agentId`), never a guess. */
+  const tasksForAgent = (agent: AgentView | null): FlowTaskChip[] => {
+    if (agent === null) return [];
+    const owned = new Set<string>();
+    if (agent.task !== null) owned.add(agent.task);
+    for (const task of view.tasks) if (task.agentId === agent.id) owned.add(task.task);
+    const chips: FlowTaskChip[] = [];
+    for (const id of owned) {
+      const task = tasksById.get(id);
+      if (task === undefined) continue; // a binding the fold cannot status renders no invented chip
+      chips.push({ task: id, status: task.status, statusLabel: statusLabel(task), tone: STATUS_TONES[task.status] });
+    }
+    return chips;
+  };
+
+  const seatNode = (seat: "supervisor" | "lead", agent: AgentView | null): FlowSeatNode => {
+    const state = flowSeatState(agent, seat);
+    const configuredLane = seat === "supervisor" ? view.lanes.supervisor : view.lanes.lead;
+    const title = seat === "supervisor" ? "Supervisor" : "Lead";
+    return {
+      key: agent?.id ?? `seat:${seat}`,
+      seat,
+      title,
+      agentId: agent?.id ?? null,
+      state,
+      initial: seat === "supervisor" ? "S" : "L",
+      laneLabel: agent === null ? configuredLane : agent.model === null ? agent.provider : `${agent.provider} · ${agent.model}`,
+      tasks: tasksForAgent(agent),
+      contextLabel:
+        seat === "lead" && agent !== null && agent.contextUsedTokens !== null && agent.contextUsedTokens !== undefined
+          ? `${flowContextTokens(agent.contextUsedTokens)} / ${
+              agent.contextMaxTokens !== null && agent.contextMaxTokens !== undefined ? flowContextTokens(agent.contextMaxTokens) : "—"
+            }${agent.rotationState === "handing_over" ? " · handoff" : ""}`
+          : null,
+      queuedMailCount: seat === "lead" && agent !== null ? (agent.queuedMailCount ?? null) : null,
+    };
+  };
+
+  const peers: FlowSeatNode[] = view.agents
+    .filter((agent) => agent.seat !== "supervisor" && agent.seat !== "lead")
+    .map((agent) => {
+      const state = flowSeatState(agent, "peer");
+      return {
+        key: agent.id,
+        seat: "peer" as const,
+        title: agent.title ?? "Peer",
+        agentId: agent.id,
+        state,
+        initial: (agent.title ?? "P").slice(0, 1).toUpperCase(),
+        laneLabel: agent.model === null ? agent.provider : `${agent.provider} · ${agent.model}`,
+        tasks: tasksForAgent(agent),
+        contextLabel: null,
+        queuedMailCount: null,
+      };
+    });
+
+  const leadAgent = view.lead;
+  const mail = {
+    supervisor: { seat: "supervisor" as const, queued: null, locked: false },
+    lead: {
+      seat: "lead" as const,
+      queued: leadAgent?.queuedMailCount ?? null,
+      locked: leadAgent?.rotationState === "handing_over",
+    },
+  };
+
+  let scrum: ScrumPipelineModel | null = null;
+  const run = view.execution?.activeRun ?? view.execution?.run ?? null;
+  if (mode === "scrum" && run !== null && run !== undefined) {
+    const runTasks = run.tasks ?? [];
+    const stageTask = (entry: { task: string; role: string }): ScrumStageTask | null => {
+      const task = tasksById.get(entry.task);
+      if (task === undefined) return null; // a reserved Task with no foldable history yet renders no invented card
+      const card = scrumTaskLabel(task.status);
+      const live = view.agents.find((agent) => agent.task === entry.task || task.agentId === agent.id);
+      return {
+        task: entry.task,
+        role: entry.role,
+        roleLabel: SCRUM_ROLE_LABELS[entry.role] ?? entry.role,
+        statusLabel: card.label,
+        tone: card.tone,
+        modelLabel: live !== undefined ? (live.model === null ? live.provider : `${live.provider} · ${live.model}`) : (task.usageModel ?? null),
+      };
+    };
+    const stages: ScrumStageModel[] = FLOW_STAGES.map((stage) => {
+      const entries = runTasks.filter((entry) => stage.roles.includes(entry.role));
+      const stageTasks = entries.map((entry) => tasksById.get(entry.task)).filter((task): task is TaskView => task !== undefined);
+      const state = scrumStageState(stage, run.phase, stageTasks, run);
+      return {
+        id: stage.id,
+        number: stage.number,
+        title: stage.title,
+        state: state.label,
+        stateTone: state.tone,
+        current: STAGE_PHASES[stage.id].includes(run.phase),
+        skipped: (run.skippedPhases ?? []).some((entry) => entry.phase === stage.id),
+        columns: stage.roles.map((role) => ({
+          role,
+          roleLabel: SCRUM_ROLE_LABELS[role] ?? role,
+          tasks: entries.filter((entry) => entry.role === role).map(stageTask).filter((task): task is ScrumStageTask => task !== null),
+        })),
+        gate: stage.id === "readiness" ? { readiness: scrumReadinessGate(run.phase, run), ui: scrumUiDecision(run), revision: run.design?.revision ?? null } : null,
+      };
+    });
+    const blockers: string[] = [];
+    if (run.cancellation !== undefined) blockers.push(`Cancelled — ${run.cancellation.reason}`);
+    for (const detail of run.blockerDetails ?? []) blockers.push(detail.reason);
+    for (const blocker of run.blockers ?? []) if (!blockers.includes(blocker)) blockers.push(blocker);
+    const maxFix = run.budgets?.maxQaFixRounds;
+    const defects = run.qaResult?.confirmedDefects;
+    scrum = {
+      runId: run.runId,
+      phase: run.phase,
+      track: run.track ?? null,
+      configRevision: run.configRevision,
+      stages,
+      blockers,
+      cancellation: run.cancellation?.reason ?? null,
+      fixSummary:
+        maxFix === undefined ? null : `Fix ${run.fixRounds}/${maxFix}${defects === undefined ? "" : ` · ${defects} defects`}`,
+    };
+  }
+
+  return {
+    mode,
+    scope: view.project.name ?? view.project.slug,
+    supervisor: seatNode("supervisor", view.supervisor),
+    lead: seatNode("lead", view.lead),
+    peers,
+    mail,
+    scrum,
   };
 }

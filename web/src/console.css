@@ -179,4 +179,30 @@
 .console-owner-amount { max-width: 220px; }
 .console-owner-refusal { color: var(--red); margin: 0; }
 
+/* The Workspace screen (T-07a) — the Open Design bundle's `.slp-canvas` /
+   `.sc-canvas` and their node classes carry the visuals; the console adds
+   the centered chain, the plain-CSS connector wires (the prototype's SVG
+   wires are mock JS, never ported), the node's task-chip and telemetry
+   rows, and the pipeline's current-phase highlight. */
+.console-flow-viewport { width: 100%; }
+.console-flow-chain { display: flex; flex-direction: column; align-items: center; gap: 6px; position: relative; z-index: 1; width: 100%; }
+.console-flow-chain .flow-node { max-width: 260px; }
+.console-flow-wire { width: 2px; height: 16px; flex: 0 0 auto; border-radius: 1px; background: #565b6b; }
+.console-flow-wire.active { background: var(--slp-cyan, #7ce9fc); }
+.console-flow-peers { padding-top: 10px; }
+.console-flow-node-tasks { display: flex; flex-wrap: wrap; gap: 4px; }
+.console-flow-context { min-height: 0; }
+.console-flow-mail-count { font-size: 11px; color: #ecc77f; }
+.console-flow-owner { min-height: 64px; }
+/* The pipeline's current phase — the numbered heading's own highlight,
+   stronger than the click-selected state so the two never read as one. */
+.sc-canvas .sc-stage-heading.console-flow-current { border-color: #5c8494; background: #20343f; }
+.sc-canvas .sc-stage-heading.console-flow-current .sc-stage-number { border-color: #7ce9fc; color: #7ce9fc; }
+.sc-canvas .sc-stage-heading.console-flow-current.selected { background: #25343e; }
+/* The tones the prototype's task/seat cards never spelled — read-only data. */
+.sc-task.amber { border-color: #a98a49; background: #332e23; }
+.sc-seat.red { border-color: #a56976; }
+.flow-node.slp-node.error { border-color: #e38e9e; background: #3a2630; }
+.console-flow-blocker-line { overflow-wrap: anywhere; }
+
 
