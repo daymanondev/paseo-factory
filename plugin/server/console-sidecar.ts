@@ -30,11 +30,17 @@
  * - The lane writes (T-08b): `factory.lanes.set`, `factory.lanes.reset`,
  *   and `factory.profiles.apply` join the allowlist as plain entries — the
  *   three Agents & Models acts, each validated by its existing shared
- *   schema and dispatched to the same single-writer `SurfaceHandlers`. The
- *   sibling writes stay outside the door: `factory.lanes.set.batch`,
- *   `factory.profiles.save`/`delete` (T-08c), `factory.lead.*`,
- *   `factory.supervisor.*`, and every `factory.project.*` keep refusing
- *   `unknown_method` as data.
+ *   schema and dispatched to the same single-writer `SurfaceHandlers`.
+ * - The lifecycle writes (T-08c): `factory.profiles.save`,
+ *   `factory.profiles.delete`, `factory.lead.rotate`, and
+ *   `factory.supervisor.revoke` join as plain entries the same way — the
+ *   profile CRUD and the two seat-retire acts, each on its existing shared
+ *   schema. Rotate and revoke only ever retire a LIVE seat; they are not
+ *   Start controls. The sibling writes stay outside the door:
+ *   `factory.lanes.set.batch`, `factory.lead.ensure`, `factory.lead.dispatch`,
+ *   `factory.supervisor.ensure`, and every `factory.project.*` keep refusing
+ *   `unknown_method` as data (ADR 0017 — no Start/Ensure seat controls
+ *   anywhere in the console).
  * - A start failure is logged, never thrown — the sidecar must never break
  *   plugin boot (the shell wraps the call, and `start()` itself resolves to
  *   `{ ok: false, reason }` rather than rejecting while ports fall back).
@@ -43,7 +49,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import type { z, ZodType } from "zod";
-import { accept, agentTranscript, inbox, lanesReset, lanesSet, profilesApply, scrumCommand, snapshot, taskDetail } from "../shared/rpc.ts";
+import { accept, agentTranscript, inbox, lanesReset, lanesSet, leadRotate, profilesApply, profilesDelete, profilesSave, scrumCommand, snapshot, supervisorRevoke, taskDetail } from "../shared/rpc.ts";
 import type { SurfaceHandlers } from "./surface-rpc.ts";
 import type { SurfaceCallContext } from "./surface-rpc.ts";
 
@@ -137,11 +143,22 @@ export const CONSOLE_RPC_ALLOWLIST: readonly ConsoleRpcEntry[] = [
   // The lane writes (T-08b) — the Agents & Models screen's three Owner acts,
   // plain allowlisted entries (no operation narrowing): the shared schemas
   // already bound them (`lane` is a `LaneName`, `value` a non-empty string,
-  // `projectRoot` the scope). The batch save and the profile CRUD stay
-  // OUTSIDE the door (T-08c), as do every seat-lifecycle and project act.
+  // `projectRoot` the scope). The batch save stays OUTSIDE the door, as do
+  // every ensure/dispatch seat act and every project act.
   consoleRpcEntry(lanesSet.name, lanesSet.input, (handlers, input, context) => handlers.lanesSet(input, context)),
   consoleRpcEntry(lanesReset.name, lanesReset.input, (handlers, input, context) => handlers.lanesReset(input, context)),
   consoleRpcEntry(profilesApply.name, profilesApply.input, (handlers, input, context) => handlers.profilesApply(input, context)),
+  // The lifecycle writes (T-08c) — the same plain-entry law: the profile
+  // CRUD (`profilesSave` snapshots the scope's CURRENT table when `lanes` is
+  // omitted; `profilesDelete` tombstones the id) and the two seat-retire
+  // acts (`leadRotate`, `supervisorRevoke`), each on its existing shared
+  // schema. Rotate and revoke only retire a LIVE seat — the handler refuses
+  // `no-lead`/`no-supervisor` when none exists; nothing here can START one
+  // (ADR 0017 — `supervisor.ensure` and `lead.ensure` stay outside the door).
+  consoleRpcEntry(profilesSave.name, profilesSave.input, (handlers, input, context) => handlers.profilesSave(input, context)),
+  consoleRpcEntry(profilesDelete.name, profilesDelete.input, (handlers, input) => handlers.profilesDelete(input)),
+  consoleRpcEntry(leadRotate.name, leadRotate.input, (handlers, input, context) => handlers.leadRotate(input, context)),
+  consoleRpcEntry(supervisorRevoke.name, supervisorRevoke.input, (handlers, input, context) => handlers.supervisorRevoke(input, context)),
 ];
 
 /** The named allowlist as the refusal sentence spells it. */

@@ -8,16 +8,19 @@ import { makeTempDir } from "./helpers.ts";
  * The sidecar's allowlisted RPC door (T-02): the named `factory.*` methods —
  * `factory.snapshot`, `factory.task.detail`, `factory.agent.transcript`,
  * `factory.accept`, `factory.inbox` (T-05's one cross-Project Scrum read),
- * T-06's NARROWED `factory.scrum.command`, and T-08b's three lane writes
- * (`factory.lanes.set`, `factory.lanes.reset`, `factory.profiles.apply`) —
- * dispatch in-process through the same `SurfaceHandlers` the RN client's
- * registrations call, every input validated by the shared RPC input schema
- * (`plugin/shared/rpc.ts`); every other method name keeps refusing as data.
- * The Scrum entry allowlists exactly the five Owner operations the Inbox
- * resolves — every other operation refuses `forbidden_operation` as data
- * BEFORE any handler runs. The lane writes' siblings stay OUTSIDE the door:
- * the batch save, the profile CRUD (T-08c), the seat lifecycle
- * (`lead.*`/`supervisor.*`), and every `project.*`.
+ * T-06's NARROWED `factory.scrum.command`, T-08b's three lane writes
+ * (`factory.lanes.set`, `factory.lanes.reset`, `factory.profiles.apply`),
+ * and T-08c's four lifecycle writes (`factory.profiles.save`,
+ * `factory.profiles.delete`, `factory.lead.rotate`,
+ * `factory.supervisor.revoke`) — dispatch in-process through the same
+ * `SurfaceHandlers` the RN client's registrations call, every input
+ * validated by the shared RPC input schema (`plugin/shared/rpc.ts`); every
+ * other method name keeps refusing as data. The Scrum entry allowlists
+ * exactly the five Owner operations the Inbox resolves — every other
+ * operation refuses `forbidden_operation` as data BEFORE any handler runs.
+ * The siblings stay OUTSIDE the door (ADR 0017 — no Start/Ensure seat
+ * control anywhere): the batch save, `lead.ensure`, `lead.dispatch`,
+ * `supervisor.ensure`, and every `project.*`.
  */
 
 async function post(url: string, body: unknown): Promise<{ status: number; payload: unknown }> {
@@ -65,8 +68,9 @@ test("console RPC door: unlisted methods keep refusing as data, whatever their n
   });
 
   // A write RPC outside the allowlist, a read RPC outside it, an invented
-  // name, and every lane-write sibling T-08b left outside the door — the
-  // batch save, the profile CRUD, the seat lifecycle, the project acts — all
+  // name, and every sibling the lifecycle waves left outside the door — the
+  // batch save, the ensure/dispatch seat acts (ADR 0017: the console can
+  // retire a LIVE seat but never start one), and every project act — all
   // refuse identically: the door is a list, not a prefix.
   for (const method of [
     "factory.retro",
@@ -74,11 +78,7 @@ test("console RPC door: unlisted methods keep refusing as data, whatever their n
     "factory.sinister",
     "snapshot",
     "factory.lanes.set.batch",
-    "factory.profiles.save",
-    "factory.profiles.delete",
-    "factory.lead.rotate",
     "factory.lead.ensure",
-    "factory.supervisor.revoke",
     "factory.supervisor.ensure",
     "factory.project.reset",
     "factory.project.add",
@@ -90,7 +90,7 @@ test("console RPC door: unlisted methods keep refusing as data, whatever their n
     const payload = refusal.payload as { ok: boolean; code?: string; error?: string };
     assert.equal(payload.ok, false);
     assert.equal(payload.code, "unknown_method");
-    assert.match(payload.error ?? "", /factory\.snapshot, factory\.task\.detail, factory\.agent\.transcript, factory\.accept, factory\.inbox, factory\.scrum\.command, factory\.lanes\.set, factory\.lanes\.reset, factory\.profiles\.apply/, "the sentence names the allowlist");
+    assert.match(payload.error ?? "", /factory\.snapshot, factory\.task\.detail, factory\.agent\.transcript, factory\.accept, factory\.inbox, factory\.scrum\.command, factory\.lanes\.set, factory\.lanes\.reset, factory\.profiles\.apply, factory\.profiles\.save, factory\.profiles\.delete, factory\.lead\.rotate, factory\.supervisor\.revoke/, "the sentence names the allowlist");
   }
 });
 
@@ -157,6 +157,11 @@ test("console RPC door: inputs are validated by the SHARED schema before any han
     { method: "factory.lanes.set", params: { lane: "lead", value: "", projectRoot: "/tmp/fixture-project" } }, // value empty
     { method: "factory.lanes.reset", params: { projectRoot: "" } }, // projectRoot empty
     { method: "factory.profiles.apply", params: { projectRoot: "/tmp/fixture-project" } }, // profileId missing
+    { method: "factory.profiles.save", params: { projectRoot: "/tmp/fixture-project" } }, // name missing
+    { method: "factory.profiles.save", params: { name: "", projectRoot: "/tmp/fixture-project" } }, // name empty
+    { method: "factory.profiles.delete", params: {} }, // profileId missing
+    { method: "factory.lead.rotate", params: {} }, // projectRoot missing
+    { method: "factory.supervisor.revoke", params: { projectRoot: 42 } }, // projectRoot not a string
   ];
   for (const call of cases) {
     const refusal = await post(started.sidecar.url + "/rpc", call);

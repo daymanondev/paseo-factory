@@ -237,14 +237,20 @@ describe("the Agents & Models screen", () => {
     expect(within(table).getByText("External config")).toBeTruthy();
   });
 
-  it("carries exactly the T-08b writes — no Rotate/Revoke, no profile save/delete, no Start (ADR 0017)", () => {
+  it("carries exactly the landed writes — T-08c's seat acts and Save Profile included, no Start/Ensure/Dispatch/batch (ADR 0017)", () => {
     render(<ModelsScreen view={slpView()} />);
-    // The three writes: a Configure per row, the strip's Reset, the Apply chips.
+    // The three T-08b writes: a Configure per row, the strip's Reset, the Apply chips.
     expect(screen.getAllByRole("button", { name: /^Configure / }).length).toBe(6);
     expect(screen.getByRole("button", { name: "Reset to Machine Default" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Apply profile Fast Watch" })).toBeTruthy();
-    // The later-wave and forbidden lifecycle acts render nowhere.
-    for (const word of ["Rotate", "Revoke", "Save Profile", "Start Supervisor", "Start Lead", "batch"]) {
+    // The four T-08c acts: the strip's Save Profile… and — the roster carries
+    // a live supervisor and Lead — the two seat-retire buttons on their rows.
+    expect(screen.getByRole("button", { name: "Save Profile…" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Rotate Lead" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Revoke Supervisor" })).toBeTruthy();
+    // The forbidden acts still render nowhere: no Start/Ensure/Dispatch seat
+    // control (ADR 0017), no batch save, no delete outside the save dialog.
+    for (const word of ["Start Supervisor", "Start Lead", "Ensure", "Dispatch", "batch", "Delete profile"]) {
       expect(screen.queryByText(new RegExp(word, "i")), word).toBeNull();
     }
   });

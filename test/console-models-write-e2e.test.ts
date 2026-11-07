@@ -114,9 +114,11 @@ test("RG-1: the console's real transport writes the lanes — set lands on disk 
   assert.equal(rowOf(afterReset, "lead").source, "default");
   assert.equal(rowOf(afterReset, "watch").source, "default");
 
-  // The door stays a list: the batch sibling — and the profile CRUD — refuse
-  // `unknown_method` as data, never a dispatch.
-  for (const method of ["factory.lanes.set.batch", "factory.profiles.save", "factory.profiles.delete", "factory.lead.rotate", "factory.supervisor.ensure", "factory.project.reset"]) {
+  // The door stays a list: the batch sibling and the ensure act refuse
+  // `unknown_method` as data, never a dispatch (the profile CRUD and the
+  // rotate/revoke retire acts joined the door in T-08c — their own e2e
+  // drives them; `supervisor.ensure` never does, ADR 0017).
+  for (const method of ["factory.lanes.set.batch", "factory.lead.ensure", "factory.supervisor.ensure", "factory.project.reset"]) {
     const response = await fetchAt("/rpc", {
       method: "POST",
       headers: { "content-type": "application/json" },

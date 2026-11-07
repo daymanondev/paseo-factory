@@ -54,6 +54,12 @@ export function makeConsoleFixture(
     registry?: boolean;
     /** T-07c: wire the per-Project usage rollup runtime the live server runs with. */
     usage?: boolean;
+    /**
+     * T-08c: the retire path's cancel half rides the CLI in production —
+     * injectable so the seat-lifecycle tests never spawn a real paseo
+     * process (the same seam `plugin-spool.test.ts` records through).
+     */
+    stopAgent?: (agentId: string, home?: string) => Promise<{ ok: true } | { ok: false; reason: string }>;
   },
 ): ConsoleFixture {
   const home = join(homeRoot, "paseo-home");
@@ -86,7 +92,15 @@ export function makeConsoleFixture(
   const usage = options?.usage === true
     ? createUsageRuntime({ factory, stateDir, daemon: () => (typeof daemon === "function" ? daemon() : daemon), onLog: () => {} })
     : undefined;
-  const handlers = createSurfaceHandlers({ factory, stateDir, home, daemon, registry, ...(usage === undefined ? {} : { usage }) });
+  const handlers = createSurfaceHandlers({
+    factory,
+    stateDir,
+    home,
+    daemon,
+    registry,
+    ...(usage === undefined ? {} : { usage }),
+    ...(options?.stopAgent === undefined ? {} : { stopAgent: options.stopAgent }),
+  });
   return {
     homeRoot,
     home,
