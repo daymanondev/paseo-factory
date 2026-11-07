@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { createFactory, type Factory } from "../plugin/server/core/factory.ts";
 import { createSurfaceHandlers } from "../plugin/server/surface-rpc.ts";
 import type { SurfaceDaemonApi } from "../plugin/server/surface-rpc.ts";
+import { createFactoryRegistry, type FactoryRegistry } from "../plugin/server/projects.ts";
 import { startConsoleSidecar, type ConsoleSidecarStart } from "../plugin/server/console-sidecar.ts";
 import { fakeCopilotRunner, gitCommitAll } from "./helpers.ts";
 
@@ -18,6 +19,8 @@ export interface ConsoleFixture {
   stateDir: string;
   webRoot: string;
   factory: Factory;
+  /** The per-Project Factory Registry, wired into the handlers — set only when the fixture was built with `registry: true`. */
+  registry: FactoryRegistry | undefined;
   handlers: ReturnType<typeof createSurfaceHandlers>;
   start: (overrides?: Partial<Parameters<typeof startConsoleSidecar>[0]>) => Promise<ConsoleSidecarStart>;
   /** A FetchLike bound to the STARTED sidecar — the console transport's real seam. Build it after `start()`. */
@@ -43,7 +46,7 @@ export function emptyDaemon(): SurfaceDaemonApi {
   };
 }
 
-export function makeConsoleFixture(homeRoot: string, options?: { daemon?: SurfaceDaemonApi | (() => SurfaceDaemonApi) }): ConsoleFixture {
+export function makeConsoleFixture(homeRoot: string, options?: { daemon?: SurfaceDaemonApi | (() => SurfaceDaemonApi); registry?: boolean }): ConsoleFixture {
   const home = join(homeRoot, "paseo-home");
   const stateDir = join(home, "plugin-state", "paseo-factory");
   const webRoot = join(homeRoot, "console-bundle");
@@ -57,17 +60,22 @@ export function makeConsoleFixture(homeRoot: string, options?: { daemon?: Surfac
   // The eye probe admits fresh-eyes Contracts (T-03's detail fixture sets one);
   // no eye CLI ever runs — the pass's ledger line is appended by the test.
   const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner, eyeCliProbe: () => true });
+  // T-05: `registry: true` wires the per-Project Factory Registry the live
+  // plugin server runs with — the cross-Project inbox e2e registers ≥2
+  // Projects and reads through their OWN Factories, never the root's.
+  const registry = options?.registry === true ? createFactoryRegistry({ stateDir, root: factory }) : undefined;
   // T-04: the daemon seam is injectable — the transcript e2e drives handlers
   // against a fake daemon shaped like the SDK's timeline API; an unset
   // `daemon` option can also spell "no PaseoApi captured" via a function
   // returning undefined.
-  const handlers = createSurfaceHandlers({ factory, stateDir, home, daemon: options?.daemon ?? emptyDaemon() });
+  const handlers = createSurfaceHandlers({ factory, stateDir, home, daemon: options?.daemon ?? emptyDaemon(), registry });
   return {
     homeRoot,
     home,
     stateDir,
     webRoot,
     factory,
+    registry,
     handlers,
     start: async (overrides) =>
       startConsoleSidecar({

@@ -10,7 +10,7 @@
  * `inputTokens`/`cachedInputTokens` shape is never adopted — a meter that
  * cannot name its four buckets refuses to invent them.
  */
-import type { AttemptView, FactoryView, ProjectView, TaskDetailView, TaskStatus, TaskView, UsageBucketsView } from "../../plugin/shared/view.ts";
+import type { AttemptView, FactoryView, OwnerRequestView, ProjectView, TaskDetailView, TaskStatus, TaskView, UsageBucketsView } from "../../plugin/shared/view.ts";
 
 // ---- the Meter law --------------------------------------------------------------------------
 
@@ -228,6 +228,188 @@ export const TASK_FILTERS: readonly { id: TaskFilter; label: string }[] = [
 /** The chip's own law: `all` keeps every row; a column chip keeps that column's rows. */
 export function filterTaskRows(rows: readonly TaskRowViewModel[], filter: TaskFilter): readonly TaskRowViewModel[] {
   return filter === "all" ? rows : rows.filter((row) => row.column === filter);
+}
+
+// ---- the Inbox screen (T-05) --------------------------------------------------------------------
+
+/** A Task row as the aggregate snapshot carries it — the additive `projectSlug` an older schema never declared. */
+type ScopedTaskView = TaskView & { projectSlug?: string };
+
+/** The `factory.inbox` gather's ok arm — the Scrum half the snapshot cannot carry. */
+export interface InboxGather {
+  /** One row per Project whose active run holds at least one Owner request. */
+  projects: readonly { projectSlug: string; runId: string; phase: string; requests: readonly OwnerRequestView[] }[];
+  /** Per-Project read refusals — a damaged run journal renders as data. */
+  refusals: readonly { projectSlug: string; error: string }[];
+  /** The transport's own refusal (`Failure` arm) — rendered as data, never thrown. */
+  error: string | null;
+}
+
+/** The urgency ladder — the Owner's blocked work first, the bookkeeping last (an Owner wait has no expiry; rank, not age, orders). */
+export type InboxItemKind = "needs-human" | "red" | "owner-request" | "ready-to-accept";
+
+const INBOX_RANK: Record<InboxItemKind, number> = {
+  "needs-human": 0,
+  red: 1,
+  "owner-request": 2,
+  "ready-to-accept": 3,
+};
+
+export interface InboxItemViewModel {
+  kind: InboxItemKind;
+  /** The urgency rank — the list sorts by it, stably within a kind. */
+  rank: number;
+  /** The badge word — BLOCKER / RED GATE / QUESTION / UI APPROVAL / READY TO ACCEPT. */
+  badge: string;
+  tone: "green" | "amber" | "red" | "cyan";
+  /** The item's title — the Task's description, or the question itself. */
+  title: string;
+  /** The one-line reason this waits on the Owner. */
+  detail: string;
+  /** The owning Project's display name — every item names its Project. */
+  projectName: string;
+  /** The owning Project's root — the deep link's scope (`null` when the snapshot names no Project for it). */
+  projectRoot: string | null;
+  /** The Task the item names — null on a Scrum request (its `affected` carries the held ids). */
+  task: string | null;
+  /** The green `Attempt` an inline Accept submits — ready-to-accept items only. */
+  acceptAttempt: number | null;
+  /** The Scrum run an Owner request waits on — owner-request items only. */
+  runId: string | null;
+  /** `${actor} · ${role}` — who asked. */
+  origin: string | null;
+}
+
+export interface InboxViewModel {
+  items: readonly InboxItemViewModel[];
+  /** The gather's per-Project refusals plus its transport refusal — data, never a failed screen. */
+  refusals: readonly { projectSlug: string; error: string }[];
+  /** The transport-level gather refusal, rendered above the list. */
+  gatherError: string | null;
+  /** The nav badge's count — always `items.length`. */
+  count: number;
+}
+
+/** The Project display name for a slug — the snapshot's own `projects` rows, the slug itself the honest fallback. */
+function projectNameForSlug(slug: string, projects: readonly ProjectView[]): { name: string; root: string | null } {
+  const matched = projects.find((project) => project.slug === slug);
+  if (matched === undefined) return { name: slug, root: null };
+  if (typeof matched.name === "string" && matched.name.trim() !== "") return { name: matched.name.trim(), root: matched.root };
+  return { name: lastPathSegment(matched.root) || matched.slug, root: matched.root };
+}
+
+/** `Holds task T-03, stage implementation` — the request's own affected list, verbatim. */
+function holdsLabel(request: OwnerRequestView): string {
+  const held = request.affected.map((dependency) => `${dependency.kind} ${dependency.id}`);
+  return held.length > 0 ? `Holds ${held.join(", ")}` : "Holds the run";
+}
+
+/**
+ * The Inbox fold — a PURE fold of the two halves the console already holds:
+ * the snapshot's Task rows (needs-human, red, ready-to-accept — statuses stay
+ * the CONTEXT.md vocabulary) joined with the `factory.inbox` gather's pending
+ * Owner requests (the console filters `pending`; the read answers every
+ * status verbatim). One item per thing needing the Owner, sorted by urgency,
+ * every item naming its Project. The snapshot carries `projectSlug`
+ * additively on each row; without it (a scoped view) the workspace→Project
+ * law (`projectNameForTask`) attributes the row instead.
+ */
+export function inboxModel(view: FactoryView, gather: InboxGather | null): InboxViewModel {
+  const items: InboxItemViewModel[] = [];
+  for (const task of view.tasks as readonly ScopedTaskView[]) {
+    const attributed =
+      task.projectSlug !== undefined
+        ? projectNameForSlug(task.projectSlug, view.projects)
+        : { name: projectNameForTask(task, view.projects), root: null };
+    const byWorkspace = attributed.root === null ? projectRootForTask(task, view.projects) : attributed.root;
+    if (task.status === "needs-human") {
+      items.push({
+        kind: "needs-human",
+        rank: INBOX_RANK["needs-human"],
+        badge: "BLOCKER",
+        tone: "amber",
+        title: task.description ?? task.task,
+        detail: task.needsHumanReason ?? "The Task stopped and waits on you",
+        projectName: attributed.name,
+        projectRoot: byWorkspace,
+        task: task.task,
+        acceptAttempt: null,
+        runId: null,
+        origin: null,
+      });
+    } else if (task.status === "red") {
+      items.push({
+        kind: "red",
+        rank: INBOX_RANK.red,
+        badge: "RED GATE",
+        tone: "red",
+        title: task.description ?? task.task,
+        detail: "The latest attempt is red — awaiting a Respawn or you",
+        projectName: attributed.name,
+        projectRoot: byWorkspace,
+        task: task.task,
+        acceptAttempt: null,
+        runId: null,
+        origin: null,
+      });
+    } else if (task.status === "ready-to-accept") {
+      const acceptAttempt = acceptAttemptFor(task);
+      if (acceptAttempt === null) continue; // no green attempt to submit — no button rather than a guess
+      items.push({
+        kind: "ready-to-accept",
+        rank: INBOX_RANK["ready-to-accept"],
+        badge: "READY TO ACCEPT",
+        tone: "green",
+        title: task.description ?? task.task,
+        detail: "The latest attempt is green and ready for Owner acceptance.",
+        projectName: attributed.name,
+        projectRoot: byWorkspace,
+        task: task.task,
+        acceptAttempt,
+        runId: null,
+        origin: null,
+      });
+    }
+  }
+  if (gather !== null) {
+    for (const project of gather.projects) {
+      for (const request of project.requests) {
+        if (request.status !== "pending") continue; // the fold filters pending; the read answers every status
+        const attributed = projectNameForSlug(project.projectSlug, view.projects);
+        items.push({
+          kind: "owner-request",
+          rank: INBOX_RANK["owner-request"],
+          badge: request.kind === "design" ? "UI APPROVAL" : "QUESTION",
+          tone: request.kind === "design" ? "amber" : "cyan",
+          title: request.question,
+          detail: `${holdsLabel(request)} — independent authorized work may continue.`,
+          projectName: attributed.name,
+          projectRoot: attributed.root,
+          task: request.affected.find((dependency) => dependency.kind === "task")?.id ?? null,
+          acceptAttempt: null,
+          runId: project.runId,
+          origin: `${request.origin.actor} · ${request.origin.role}`,
+        });
+      }
+    }
+  }
+  items.sort((a, b) => a.rank - b.rank);
+  return {
+    items,
+    refusals: gather?.refusals ?? [],
+    gatherError: gather?.error ?? null,
+    count: items.length,
+  };
+}
+
+/** The owning Project's root by workspace attribution — the `projectNameForTask` law, root arm. */
+function projectRootForTask(task: Pick<TaskView, "workspace">, projects: readonly ProjectView[]): string | null {
+  const workspace = task.workspace.replace(/\/+$/, "");
+  const matched = projects.find((project) => {
+    const root = project.root.replace(/\/+$/, "");
+    return workspace === root || workspace.startsWith(`${root}/`) || workspace.includes(`/projects/${project.slug}/worktrees/`);
+  });
+  return matched?.root ?? null;
 }
 
 function lastPathSegment(path: string): string {

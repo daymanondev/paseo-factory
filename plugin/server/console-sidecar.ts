@@ -30,7 +30,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import type { z, ZodType } from "zod";
-import { accept, agentTranscript, snapshot, taskDetail } from "../shared/rpc.ts";
+import { accept, agentTranscript, inbox, snapshot, taskDetail } from "../shared/rpc.ts";
 import type { SurfaceHandlers } from "./surface-rpc.ts";
 import type { SurfaceCallContext } from "./surface-rpc.ts";
 
@@ -88,6 +88,7 @@ export const CONSOLE_RPC_ALLOWLIST: readonly ConsoleRpcEntry[] = [
   consoleRpcEntry(taskDetail.name, taskDetail.input, (handlers, input, context) => handlers.taskDetail(input, context)),
   consoleRpcEntry(agentTranscript.name, agentTranscript.input, (handlers, input, context) => handlers.agentTranscript(input, context)),
   consoleRpcEntry(accept.name, accept.input, (handlers, input, context) => handlers.accept(input, context)),
+  consoleRpcEntry(inbox.name, inbox.input, (handlers, input) => handlers.inbox(input)),
 ];
 
 /** The named allowlist as the refusal sentence spells it. */

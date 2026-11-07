@@ -7,10 +7,10 @@ import { makeTempDir } from "./helpers.ts";
 /**
  * The sidecar's allowlisted RPC door (T-02): the named `factory.*` methods —
  * `factory.snapshot`, `factory.task.detail`, `factory.agent.transcript`,
- * `factory.accept` — dispatch in-process through the same `SurfaceHandlers`
- * the RN client's registrations call, every input validated by the shared
- * RPC input schema (`plugin/shared/rpc.ts`); every other method name keeps
- * refusing as data.
+ * `factory.accept`, `factory.inbox` (T-05's one cross-Project Scrum read) —
+ * dispatch in-process through the same `SurfaceHandlers` the RN client's
+ * registrations call, every input validated by the shared RPC input schema
+ * (`plugin/shared/rpc.ts`); every other method name keeps refusing as data.
  */
 
 async function post(url: string, body: unknown): Promise<{ status: number; payload: unknown }> {
@@ -57,15 +57,16 @@ test("console RPC door: unlisted methods keep refusing as data, whatever their n
     rmSync(homeRoot, { recursive: true, force: true });
   });
 
-  // A write RPC outside the allowlist, a read RPC outside it, and an
-  // invented name all refuse identically — the door is a list, not a prefix.
-  for (const method of ["factory.retro", "factory.lanes.set", "factory.lead.dispatch", "factory.sinister", "snapshot"]) {
+  // A write RPC outside the allowlist, a read RPC outside it, T-06's not-yet-
+  // exposed Scrum write door, and an invented name all refuse identically —
+  // the door is a list, not a prefix.
+  for (const method of ["factory.retro", "factory.lanes.set", "factory.lead.dispatch", "factory.scrum.command", "factory.sinister", "snapshot"]) {
     const refusal = await post(started.sidecar.url + "/rpc", { method, params: {} });
     assert.equal(refusal.status, 404, `${method} is not allowlisted`);
     const payload = refusal.payload as { ok: boolean; code?: string; error?: string };
     assert.equal(payload.ok, false);
     assert.equal(payload.code, "unknown_method");
-    assert.match(payload.error ?? "", /factory\.snapshot, factory\.task\.detail, factory\.agent\.transcript, factory\.accept/, "the sentence names the allowlist");
+    assert.match(payload.error ?? "", /factory\.snapshot, factory\.task\.detail, factory\.agent\.transcript, factory\.accept, factory\.inbox/, "the sentence names the allowlist");
   }
 });
 

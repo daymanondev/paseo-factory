@@ -6,10 +6,10 @@
  * the filter chips' per-scope counts, the List ⇄ Board choice, the filter,
  * and the open Task Detail all live in the URL (`/tasks?view=board&filter=
  * ready_to_accept&task=T-03`) so a reload keeps exactly what the Owner was
- * looking at. Accept keeps working from list, board, and detail through one
- * shared journey: `factory.accept` via the sidecar, pending and refusal
- * feedback as data, an immediate snapshot refresh. No seat-start controls
- * (ADR 0017); no data outside the view-model module.
+ * looking at. Accept keeps working from list, board, detail, and the Inbox
+ * (T-05) through one shared journey: `factory.accept` via the sidecar,
+ * pending and refusal feedback as data, an immediate snapshot refresh. No
+ * seat-start controls (ADR 0017); no data outside the view-model module.
  */
 import { useEffect, useState } from "react";
 import type { FactoryView, TaskDetailView } from "../../../plugin/shared/view.ts";
@@ -65,9 +65,10 @@ export function boardParamsFromQuery(query: URLSearchParams): { view: "list" | "
   };
 }
 
-// ---- the Accept journey (one journey, three doors: list, board, detail) ------------------------
+// ---- the Accept journey (one journey, four doors: list, board, detail, inbox) -------------------
 
-function AcceptButton({ task, attempt, pending, accept }: { task: string; attempt: number; pending: boolean; accept: (task: string, attempt: number) => Promise<void> }) {
+/** The Accept button itself — exported so the Inbox (T-05) reuses the one journey, not a copy. */
+export function AcceptButton({ task, attempt, pending, accept }: { task: string; attempt: number; pending: boolean; accept: (task: string, attempt: number) => Promise<void> }) {
   if (pending) {
     return (
       <button type="button" className="btn primary" disabled>

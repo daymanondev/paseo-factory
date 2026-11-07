@@ -161,3 +161,12 @@
 
 .console-copy { min-height: 28px; padding: 3px 10px; font-size: 11px; }
 
+/* The Inbox screen (T-05) — the Open Design bundle's `.inbox-grid` /
+   `.panel.inbox-item` cards carry the layout; the console adds the action
+   row's spacing and the item's title/detail rhythm. */
+.console-inbox-actions { margin-top: 12px; }
+.console-inbox-actions .btn { min-height: 30px; }
+.inbox-item h2 { margin-top: 12px; }
+.inbox-item p { margin-top: 8px; }
+
+

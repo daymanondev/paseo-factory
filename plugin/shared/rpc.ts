@@ -12,7 +12,7 @@ import { OpenDesignProjectLinkSchema } from "./view.ts";
  */
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
-import { HelperMcpViewSchema, ImportMaterializationSchema, ImportStatusSchema, FactoryViewSchema, LaneNameSchema, LaneProfileViewSchema, LanesSchema, LanesUpdateSchema, ProjectViewSchema, TaskDetailViewSchema, VaultStatusViewSchema } from "./view.ts";
+import { HelperMcpViewSchema, ImportMaterializationSchema, ImportStatusSchema, FactoryViewSchema, LaneNameSchema, LaneProfileViewSchema, LanesSchema, LanesUpdateSchema, OwnerRequestViewSchema, ProjectViewSchema, TaskDetailViewSchema, VaultStatusViewSchema } from "./view.ts";
 
 /** Every handler's refusal shape: a stable machine code plus the human sentence. */
 export const Failure = z.object({ ok: z.literal(false), code: z.string(), error: z.string() });
@@ -83,6 +83,41 @@ export const agentTranscript = defineRpc({
     z.object({ ok: z.literal(true), agent: z.string(), entries: z.array(AgentTranscriptEntrySchema) }),
     /** The agent is Factory-known but its timeline cannot be read right now — the honest reason rides as data. */
     z.object({ ok: z.literal(true), agent: z.string(), unavailable: z.literal(true), reason: z.string() }),
+    Failure,
+  ]),
+});
+
+// The console's cross-Project inbox read (ADR 0051, T-05). The unscoped
+// `factory.snapshot` already carries every Project's Tasks (each row
+// attributed with its additive `projectSlug`, v0.0.89), but its `execution`
+// half is the global scope's — it names no per-Project Scrum run, so the
+// pending `Owner wait`s are invisible there. This ONE read-only door fills
+// exactly that half: every Project's active run's Owner requests, each
+// attributed with its Project's slug. It takes no input (no write, no
+// arbitrary path), answers every request status verbatim (the console's own
+// fold filters pending), and a Project whose run journal cannot be read
+// refuses as a per-Project row — never a failed whole read.
+export const InboxProjectRequestsSchema = z.object({
+  /** The owning Project — the same slug the snapshot's task rows carry. */
+  projectSlug: z.string(),
+  /** The run the requests wait on — its durable identity, never inferred. */
+  runId: z.string(),
+  phase: z.string(),
+  requests: z.array(OwnerRequestViewSchema),
+});
+export type InboxProjectRequests = z.infer<typeof InboxProjectRequestsSchema>;
+
+export const inbox = defineRpc({
+  name: "factory.inbox",
+  input: z.object({}),
+  output: z.union([
+    z.object({
+      ok: z.literal(true),
+      /** One row per Project whose active run carries at least one Owner request — registry slug order. */
+      projects: z.array(InboxProjectRequestsSchema),
+      /** Per-Project read refusals — a damaged run journal renders as data, never a failed inbox. */
+      refusals: z.array(z.object({ projectSlug: z.string(), error: z.string() })),
+    }),
     Failure,
   ]),
 });

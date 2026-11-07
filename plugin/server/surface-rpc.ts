@@ -88,6 +88,7 @@ import {
   accept,
   agentTranscript,
   executionSetMode,
+  inbox,
   scrumCommand,
   lanesSet,
   lanesReset,
@@ -124,7 +125,7 @@ import {
   vaultPush,
   vaultSync,
 } from "../shared/rpc.ts";
-import type { AgentTranscriptEntry } from "../shared/rpc.ts";
+import type { AgentTranscriptEntry, InboxProjectRequests } from "../shared/rpc.ts";
 import type { CompanionPluginView, ExecutionView, AgentView, LaneName, LaneProfileView, Lanes, ProjectView, TaskView, VaultStatusView } from "../shared/view.ts";
 import type { UsageRuntime } from "./usage-rollup.ts";
 import { enrichTaskUsage } from "./view.ts";
@@ -2555,6 +2556,37 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       return { ok: true as const, agent: input.agent, entries };
     },
 
+    async inbox(_input: object, _context?: SurfaceCallContext) {
+      // The console's cross-Project inbox read (ADR 0051, T-05) — read-only,
+      // stateDir-only (the `historyImports` precedent): no daemon call, no
+      // write, no arbitrary path. The snapshot already carries every
+      // Project's Tasks; this door fills only the Scrum half — every
+      // registered Project's active run (the same `executionView` law: the
+      // first non-terminal run, else the newest) with its Owner requests,
+      // EVERY status verbatim (the console's own fold filters pending). A
+      // Project whose run journal cannot be read refuses as a per-Project
+      // row — never a failed whole read. No registry (the legacy
+      // single-Factory entrances) mirrors the global scope's law: no runs,
+      // an empty `projects`.
+      const projects: InboxProjectRequests[] = [];
+      const refusals: { projectSlug: string; error: string }[] = [];
+      if (deps.registry !== undefined) {
+        for (const slug of deps.registry.slugs()) {
+          try {
+            const runs = listRuns(deps.stateDir, slug);
+            const run = runs.find((r) => !terminalRun(r)) ?? runs.at(-1);
+            const requests = run?.ownerRequests ?? [];
+            if (run !== undefined && requests.length > 0) {
+              projects.push({ projectSlug: slug, runId: run.runId, phase: run.phase, requests });
+            }
+          } catch (error) {
+            refusals.push({ projectSlug: slug, error: messageOf(error) });
+          }
+        }
+      }
+      return { ok: true as const, projects, refusals };
+    },
+
     async retro(input: { projectRoot?: string }, _context?: SurfaceCallContext) {
       try {
         // v0.0.38 (ADR 0026 §1): the pass honors the active Project's own
@@ -3850,7 +3882,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       }
     },
   };
-  const reads = new Set(["cachedProviders", "sanitizeLane", "snapshot", "taskDetail", "agentTranscript", "pluginsCheckUpdates", "projectPickFolder", "historyImport", "historyImports", "historyUpgrade", "vaultHydrate", "vaultPull", "vaultPush", "vaultSync", "vaultImport"]);
+  const reads = new Set(["cachedProviders", "sanitizeLane", "snapshot", "taskDetail", "agentTranscript", "inbox", "pluginsCheckUpdates", "projectPickFolder", "historyImport", "historyImports", "historyUpgrade", "vaultHydrate", "vaultPull", "vaultPush", "vaultSync", "vaultImport"]);
   const wrappers = new Map<PropertyKey, unknown>();
   return new Proxy(handlers, {
     get(target, key, receiver) {
@@ -3906,6 +3938,7 @@ export function registerSurfaceRpc(
   server.handle(openDesignPreview, input => handlers.openDesignPreview(input));
   server.handle(accept, (input, context) => handlers.accept(input, pass(context)));
   server.handle(agentTranscript, (input, context) => handlers.agentTranscript(input, pass(context)));
+  server.handle(inbox, (input) => handlers.inbox(input));
   server.handle(retro, (input, context) => handlers.retro(input, pass(context)));
   server.handle(lanesSet, (input, context) => handlers.lanesSet(input, pass(context)));
   server.handle(lanesSetBatch, (input, context) => handlers.lanesSetBatch(input, pass(context)));

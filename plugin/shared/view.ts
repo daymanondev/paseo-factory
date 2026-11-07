@@ -393,6 +393,26 @@ export type ProjectUsageView = z.infer<typeof ProjectUsageViewSchema>;
 
 /** The whole Factory surface snapshot — one RPC answer, one render. */
 export const ScrumConfigSchema = z.object({ configRevision: z.number().int().optional(), schemaVersion: z.literal(1), requireUiApproval: z.boolean(), lanes: z.object({ supervisor: z.string(), lead: z.string(), pm: z.string(), ux: z.string(), architect: z.string(), dev: z.string(), qa: z.string(), watch: z.string(), retro: z.string() }) });
+
+/**
+ * One Scrum `Owner wait` as the run journal records it (ADR 0038) — a
+ * question or design review that stays pending until the Owner responds.
+ * Named (T-05) so the cross-Project inbox read and `ScrumRunViewSchema`
+ * share the one shape; the wire form is unchanged.
+ */
+export const OwnerRequestViewSchema = z.object({
+  id: z.string(),
+  kind: z.enum(["question", "design"]),
+  question: z.string(),
+  affected: z.array(z.object({ kind: z.enum(["task", "stage"]), id: z.string() })),
+  origin: z.object({ actor: z.string(), role: z.string() }),
+  status: z.enum(["pending", "answered", "cancelled"]),
+  createdAt: z.string(),
+  design: z.object({ revision: z.number(), digest: z.string() }).optional(),
+  resolution: z.object({ actor: z.string(), outcome: z.string(), rationale: z.string(), requestId: z.string() }).optional(),
+});
+export type OwnerRequestView = z.infer<typeof OwnerRequestViewSchema>;
+
 export const ScrumRunViewSchema = z.object({
   runId: z.string(),
   phase: z.string(),
@@ -413,13 +433,7 @@ export const ScrumRunViewSchema = z.object({
   createdAt: z.string().optional(),
   tasks: z.array(z.object({ task: z.string(), role: z.string() })).optional(),
   blockerDetails: z.array(z.object({ id: z.string(), reason: z.string(), causes: z.array(z.string()) })).optional(),
-  ownerRequests: z.array(z.object({
-    id: z.string(), kind: z.enum(["question", "design"]), question: z.string(),
-    affected: z.array(z.object({ kind: z.enum(["task", "stage"]), id: z.string() })),
-    origin: z.object({ actor: z.string(), role: z.string() }), status: z.enum(["pending", "answered", "cancelled"]), createdAt: z.string(),
-    design: z.object({ revision: z.number(), digest: z.string() }).optional(),
-    resolution: z.object({ actor: z.string(), outcome: z.string(), rationale: z.string(), requestId: z.string() }).optional(),
-  })).optional(),
+  ownerRequests: z.array(OwnerRequestViewSchema).optional(),
   allowanceGrants: z.array(z.object({ requestId: z.string(), actor: z.string(), dimension: z.enum(["tasks", "qaFixRounds"]), amount: z.number(), rationale: z.string() })).optional(),
   skippedPhases: z
     .array(z.object({ phase: z.string(), reason: z.string() }))
