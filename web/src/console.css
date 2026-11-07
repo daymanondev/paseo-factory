@@ -90,3 +90,59 @@
 .sidebar .nav-group .nav-item { width: 100%; }
 .sidebar .brand { display: flex; align-items: center; gap: 8px; padding: 16px; font-family: var(--display); font-size: 15px; }
 .sidebar .brand-name { color: var(--text); }
+
+/* The Task Detail dialog (T-03): the prototype's modal rides the native
+   <dialog> top layer; the console's div overlay paints the same scrim and
+   centers the reused `.dialog` card (jsdom-safe — no showModal). */
+.console-dialog-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 4dvh 16px;
+  background: rgb(0 0 0 / 0.55);
+  overflow-y: auto;
+}
+
+.console-dialog { margin: 0; }
+
+.console-detail-badges { flex-wrap: wrap; margin-bottom: 12px; }
+
+/* The card's clickable title — the prototype's heading, spelled as the
+   console's quiet link-button. */
+.console-task-title {
+  padding: 0;
+  text-align: left;
+  font: inherit;
+  color: var(--cyan);
+}
+
+.console-task-title:hover { text-decoration: underline; }
+
+.console-task-blocker { margin: 4px 0 0; }
+
+/* The Markdown fold's rhythm — the report/contract vocabulary (headings,
+   bullets, code spans) inside the dialog's width. */
+.console-markdown { font-size: var(--small); line-height: 1.7; }
+.console-markdown h3, .console-markdown h4, .console-markdown h5 { margin: 18px 0 6px; }
+.console-markdown h3:first-child, .console-markdown h4:first-child, .console-markdown h5:first-child { margin-top: 0; }
+.console-markdown p { margin: 6px 0; }
+.console-markdown ul { margin: 6px 0; padding-left: 22px; }
+.console-markdown code { font-family: var(--mono); font-size: 12px; }
+
+.console-pre { margin: 8px 0 0; max-height: 320px; overflow-y: auto; }
+
+/* The Attempt ladder's rungs — one <details> per attempt. */
+.console-attempt { border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; margin: 10px 0; background: var(--surface); }
+.console-attempt > summary { cursor: pointer; }
+.console-attempt-body { margin-top: 10px; }
+.console-attempt-pass { margin: 8px 0; }
+.console-watch-answers { margin: 6px 0 0; padding-left: 18px; color: var(--muted); }
+
+/* The tailed evidence blocks — Report and gate log, read-only inline. */
+.console-evidence { margin: 12px 0; padding: 12px 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface2); }
+
+.console-copy { min-height: 28px; padding: 3px 10px; font-size: 11px; }
+

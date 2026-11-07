@@ -4,6 +4,13 @@
  * prototype's boot-redirect defect, fixed by construction: the sidecar's SPA
  * fallback serves the app on every path and the path names the screen).
  * Hand-rolled history routing: eight static routes carry no dependency.
+ *
+ * T-03: the query string is part of the route — `/tasks?view=board&filter=
+ * ready_to_accept&task=T-03` keeps the board's view choice, filter chip, and
+ * open Task Detail across a reload (the bounded outcome's own persistence
+ * law: the URL is the memory, never a local pref that a second machine never
+ * sees). `navigate` accepts any path that may carry `?query`; the same
+ * NAVIGATE_EVENT notifies the hook.
  */
 import { useEffect, useState } from "react";
 
@@ -34,19 +41,32 @@ export function screenForPath(pathname: string): Screen {
   return match ?? SCREENS[0];
 }
 
+/** The screen plus the query it was opened with — both survive the reload. */
+export interface Route {
+  screen: Screen;
+  query: URLSearchParams;
+}
+
+export function routeForLocation(location: { pathname: string; search: string }): Route {
+  return { screen: screenForPath(location.pathname), query: new URLSearchParams(location.search) };
+}
+
 /** pushState plus a notification event — jsdom fires no popstate on programmatic navigation. */
 const NAVIGATE_EVENT = "factory-console:navigate";
 
 export function navigate(path: string): void {
-  if (window.location.pathname === path) return;
+  // Same-path navigation still counts when the query changed — the URL is the
+  // board's memory (view, filter, open detail), so every change must notify.
+  const current = `${window.location.pathname}${window.location.search}`;
+  if (current === path) return;
   window.history.pushState({}, "", path);
   window.dispatchEvent(new Event(NAVIGATE_EVENT));
 }
 
-export function useRoute(): Screen {
-  const [screen, setScreen] = useState<Screen>(() => screenForPath(window.location.pathname));
+export function useRoute(): Route {
+  const [route, setRoute] = useState<Route>(() => routeForLocation(window.location));
   useEffect(() => {
-    const sync = () => setScreen(screenForPath(window.location.pathname));
+    const sync = () => setRoute(routeForLocation(window.location));
     window.addEventListener("popstate", sync);
     window.addEventListener(NAVIGATE_EVENT, sync);
     return () => {
@@ -54,5 +74,5 @@ export function useRoute(): Screen {
       window.removeEventListener(NAVIGATE_EVENT, sync);
     };
   }, []);
-  return screen;
+  return route;
 }

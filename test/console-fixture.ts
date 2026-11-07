@@ -54,7 +54,9 @@ export function makeConsoleFixture(homeRoot: string): ConsoleFixture {
   );
   writeFileSync(join(webRoot, "assets", "app.js"), "console.log('fixture bundle');\n");
   const retroRunner = fakeCopilotRunner(() => ({ code: 0, stdout: '{"proposals":[]}' }));
-  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner, eyeCliProbe: () => false });
+  // The eye probe admits fresh-eyes Contracts (T-03's detail fixture sets one);
+  // no eye CLI ever runs — the pass's ledger line is appended by the test.
+  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner, eyeCliProbe: () => true });
   const handlers = createSurfaceHandlers({ factory, stateDir, home, daemon: emptyDaemon() });
   return {
     homeRoot,

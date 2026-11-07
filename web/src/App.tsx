@@ -13,6 +13,7 @@ import { NAV_ITEMS } from "./chrome/nav.ts";
 import { useRoute } from "./router.ts";
 import { ProjectSwitcher } from "./chrome/project-switcher.tsx";
 import { acceptViaSidecar, type AcceptReply } from "./accept.ts";
+import { taskDetailViaSidecar, type TaskDetailReply } from "./detail.ts";
 import { OverviewScreen } from "./screens/overview.tsx";
 import { PlaceholderScreen } from "./screens/placeholder.tsx";
 import { TasksScreen } from "./screens/tasks.tsx";
@@ -23,10 +24,12 @@ export interface AppProps {
   loadSnapshot?: (input: { projectRoot?: string }) => Promise<SnapshotReply>;
   /** The accept transport — the sidecar RPC door by default, a fixture in tests. */
   acceptTask?: (input: { task: string; attempt: number }) => Promise<AcceptReply>;
+  /** The Task Detail transport — the sidecar RPC door by default, a fixture in tests. */
+  loadTaskDetail?: (input: { task: string }) => Promise<TaskDetailReply>;
 }
 
-export function App({ loadSnapshot = loadSnapshotViaSidecar, acceptTask = acceptViaSidecar }: AppProps) {
-  const screen = useRoute();
+export function App({ loadSnapshot = loadSnapshotViaSidecar, acceptTask = acceptViaSidecar, loadTaskDetail = taskDetailViaSidecar }: AppProps) {
+  const { screen } = useRoute();
   /** The selected Project's root — `undefined` is the unscoped "All projects" view. */
   const [projectRoot, setProjectRoot] = useState<string | undefined>(undefined);
   const snapshot = useSnapshot(() => loadSnapshot(projectRoot === undefined ? {} : { projectRoot }), projectRoot ?? "");
@@ -73,7 +76,7 @@ export function App({ loadSnapshot = loadSnapshotViaSidecar, acceptTask = accept
         <main id="main" className="page" tabIndex={-1}>
           {view !== null && screen.id === "overview" && <OverviewScreen view={view} onOpenProject={setProjectRoot} />}
           {view !== null && screen.id === "tasks" && (
-            <TasksScreen view={view} acceptTask={acceptTask} onAccepted={() => snapshot.refresh()} />
+            <TasksScreen view={view} acceptTask={acceptTask} onAccepted={() => snapshot.refresh()} loadTaskDetail={loadTaskDetail} />
           )}
           {/* The route names the screen even while the first snapshot is in
               flight or unreachable — a reload of /tasks lands on Tasks, not a
