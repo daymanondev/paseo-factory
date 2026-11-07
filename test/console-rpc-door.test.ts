@@ -6,10 +6,11 @@ import { makeTempDir } from "./helpers.ts";
 
 /**
  * The sidecar's allowlisted RPC door (T-02): the named `factory.*` methods —
- * `factory.snapshot`, `factory.task.detail`, `factory.accept` — dispatch
- * in-process through the same `SurfaceHandlers` the RN client's
- * registrations call, every input validated by the shared RPC input schema
- * (`plugin/shared/rpc.ts`); every other method name keeps refusing as data.
+ * `factory.snapshot`, `factory.task.detail`, `factory.agent.transcript`,
+ * `factory.accept` — dispatch in-process through the same `SurfaceHandlers`
+ * the RN client's registrations call, every input validated by the shared
+ * RPC input schema (`plugin/shared/rpc.ts`); every other method name keeps
+ * refusing as data.
  */
 
 async function post(url: string, body: unknown): Promise<{ status: number; payload: unknown }> {
@@ -64,7 +65,7 @@ test("console RPC door: unlisted methods keep refusing as data, whatever their n
     const payload = refusal.payload as { ok: boolean; code?: string; error?: string };
     assert.equal(payload.ok, false);
     assert.equal(payload.code, "unknown_method");
-    assert.match(payload.error ?? "", /factory\.snapshot, factory\.task\.detail, factory\.accept/, "the sentence names the allowlist");
+    assert.match(payload.error ?? "", /factory\.snapshot, factory\.task\.detail, factory\.agent\.transcript, factory\.accept/, "the sentence names the allowlist");
   }
 });
 
@@ -82,6 +83,7 @@ test("console RPC door: inputs are validated by the SHARED schema before any han
     { method: "factory.accept", params: { task: "T1" } }, // attempt missing
     { method: "factory.accept", params: { task: "T1", attempt: "1" } }, // attempt not a number
     { method: "factory.task.detail", params: {} }, // task missing
+    { method: "factory.agent.transcript", params: {} }, // agent missing
     { method: "factory.snapshot", params: { projectRoot: 42 } }, // projectRoot not a string
   ];
   for (const call of cases) {

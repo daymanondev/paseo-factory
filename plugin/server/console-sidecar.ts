@@ -30,7 +30,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import type { z, ZodType } from "zod";
-import { accept, snapshot, taskDetail } from "../shared/rpc.ts";
+import { accept, agentTranscript, snapshot, taskDetail } from "../shared/rpc.ts";
 import type { SurfaceHandlers } from "./surface-rpc.ts";
 import type { SurfaceCallContext } from "./surface-rpc.ts";
 
@@ -86,6 +86,7 @@ function consoleRpcEntry<S extends ZodType>(
 export const CONSOLE_RPC_ALLOWLIST: readonly ConsoleRpcEntry[] = [
   consoleRpcEntry(snapshot.name, snapshot.input, (handlers, input, context) => handlers.snapshot(input, context)),
   consoleRpcEntry(taskDetail.name, taskDetail.input, (handlers, input, context) => handlers.taskDetail(input, context)),
+  consoleRpcEntry(agentTranscript.name, agentTranscript.input, (handlers, input, context) => handlers.agentTranscript(input, context)),
   consoleRpcEntry(accept.name, accept.input, (handlers, input, context) => handlers.accept(input, context)),
 ];
 

@@ -8,16 +8,22 @@
  * injected clipboard. The dialog's own refusal-as-data law rides its
  * transport slot: a refused detail is a sentence the Owner reads, never a
  * throw.
+ *
+ * T-04: the rung's Transcript disclosure rides its own transport slot the
+ * same way — lazy on open, the tail as React elements, Refresh re-reads,
+ * refusal and unavailable as data.
  */
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { AgentTranscriptEntry } from "../../../plugin/shared/rpc.ts";
 import type { TaskDetailView } from "../../../plugin/shared/view.ts";
 import type { TaskDetailReply } from "../detail.ts";
+import type { AgentTranscriptReply } from "../transcript.ts";
 import { fixtureAttempt, fixtureTask } from "../test/fixture-view.ts";
 import { taskDetailModel } from "../view-model.ts";
 import { Markdown } from "../markdown.tsx";
 import { TaskDetailDialog } from "./tasks.tsx";
-import { TaskDetailPanel } from "./task-detail.tsx";
+import { TaskDetailPanel, TranscriptDisclosure } from "./task-detail.tsx";
 
 afterEach(cleanup);
 
@@ -149,6 +155,90 @@ describe("the Task Detail panel", () => {
     expect(screen.getByText(/No Attempts yet/)).toBeTruthy();
     expect(screen.getByText("Watch off")).toBeTruthy();
     expect(screen.getByText("Fresh eyes off")).toBeTruthy();
+  });
+});
+
+describe("the Attempt rung's Agent transcript disclosure (T-04)", () => {
+  const tail: AgentTranscriptEntry[] = [
+    { seq: 1, role: "user", kind: "user_message", text: "Claim T-03 and run the gate.", tool: null, summary: null },
+    { seq: 2, role: "tool", kind: "tool_call", text: null, tool: "shell", summary: "tool_call/shell: npm test [exit 0] out: ok 2 tests" },
+    { seq: 3, role: "assistant", kind: "assistant_message", text: "The gate is green — committing.", tool: null, summary: null },
+  ];
+
+  it("loads lazily — nothing before open, exactly one read on first open", async () => {
+    const load = vi.fn(async (): Promise<AgentTranscriptReply> => ({ ok: true, agent: "agent-peer-9", entries: tail }));
+    render(<TranscriptDisclosure agentId="agent-peer-9" load={load} />);
+    expect(load).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Transcript" }));
+    expect(load).toHaveBeenCalledWith({ agent: "agent-peer-9" });
+    await waitFor(() => expect(screen.getByText("The gate is green — committing.")).toBeTruthy());
+    expect(load).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders the tail as readable messages and compact collapsible tool calls — React elements, never innerHTML", async () => {
+    const load = vi.fn(async (): Promise<AgentTranscriptReply> => ({
+      ok: true,
+      agent: "agent-peer-9",
+      entries: [...tail, { seq: 4, role: "user", kind: "user_message", text: "<img src=x onerror=alert(1)>", tool: null, summary: null }],
+    }));
+    const { container } = render(<TranscriptDisclosure agentId="agent-peer-9" load={load} />);
+    fireEvent.click(screen.getByRole("button", { name: "Transcript" }));
+    await waitFor(() => expect(screen.getByText("The gate is green — committing.")).toBeTruthy());
+    // The user and assistant messages read as text blocks.
+    expect(screen.getByText("Claim T-03 and run the gate.")).toBeTruthy();
+    // The tool call stays compact: the tool name is the collapsed summary,
+    // the flattened line rides its body.
+    const tool = container.querySelector(".console-tr-tool details")!;
+    expect(tool.querySelector("summary")!.textContent).toBe("shell");
+    expect(tool.querySelector("pre")!.textContent).toContain("npm test [exit 0]");
+    // Markup-shaped text renders as TEXT — no element is ever created from it.
+    expect(container.querySelectorAll("img").length).toBe(0);
+    expect(container.innerHTML).not.toContain("<img");
+  });
+
+  it("re-reads the tail on Refresh", async () => {
+    const load = vi.fn(async (): Promise<AgentTranscriptReply> => ({ ok: true, agent: "agent-peer-9", entries: tail }));
+    render(<TranscriptDisclosure agentId="agent-peer-9" load={load} />);
+    fireEvent.click(screen.getByRole("button", { name: "Transcript" }));
+    await waitFor(() => expect(screen.getByText("Claim T-03 and run the gate.")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+  });
+
+  it("shows a refusal as data — the code and the sentence, never a throw", async () => {
+    const load = vi.fn(async (): Promise<AgentTranscriptReply> => ({
+      ok: false,
+      code: "unknown-agent",
+      error: "agent stranger is not attributed to any Task Attempt or Project seat the Factory knows",
+    }));
+    render(<TranscriptDisclosure agentId="stranger" load={load} />);
+    fireEvent.click(screen.getByRole("button", { name: "Transcript" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("unknown-agent");
+    expect(alert.textContent).toContain("not attributed to any Task Attempt");
+  });
+
+  it("shows an unreadable timeline as data — the honest unavailable reason", async () => {
+    const load = vi.fn(async (): Promise<AgentTranscriptReply> => ({
+      ok: true,
+      agent: "agent-peer-9",
+      unavailable: true,
+      reason: "the daemon holds no timeline for agent agent-peer-9 — unknown agent, or a restart wiped the in-memory store",
+    }));
+    render(<TranscriptDisclosure agentId="agent-peer-9" load={load} />);
+    fireEvent.click(screen.getByRole("button", { name: "Transcript" }));
+    await screen.findByText(/a restart wiped the in-memory store/);
+  });
+
+  it("rides only the rungs that carry an agentId — the panel threads its transport", () => {
+    const load = vi.fn(async (): Promise<AgentTranscriptReply> => ({ ok: true, agent: "agent-peer-9", entries: tail }));
+    render(<TaskDetailPanel detail={taskDetailModel(detailFixture())} loadTranscript={load} />);
+    // Only rung #2 carries an agentId in the fixture; rung #1 never mounts one.
+    const withPeer = screen.getAllByRole("group").find((rung) => rung.dataset.attempt === "2")!;
+    const without = screen.getAllByRole("group").find((rung) => rung.dataset.attempt === "1")!;
+    expect(within(withPeer).getAllByRole("button", { name: "Transcript" })).toHaveLength(1);
+    expect(within(without).queryByRole("button", { name: "Transcript" })).toBeNull();
+    expect(load).not.toHaveBeenCalled();
   });
 });
 

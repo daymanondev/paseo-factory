@@ -144,5 +144,20 @@
 /* The tailed evidence blocks — Report and gate log, read-only inline. */
 .console-evidence { margin: 12px 0; padding: 12px 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface2); }
 
+/* The Attempt's Agent transcript disclosure (T-04) — lazily loaded tail, read-only. */
+.console-transcript { margin: 12px 0; }
+.console-transcript-toggle { min-height: 28px; padding: 3px 10px; font-size: 11px; }
+.console-transcript-refresh { min-height: 28px; padding: 3px 10px; font-size: 11px; }
+.console-transcript-body { margin-top: 8px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface2); }
+.console-tr-list { list-style: none; margin: 0; padding: 0; }
+.console-tr-entry { margin: 6px 0; padding: 6px 10px; border-radius: 6px; }
+.console-tr-role { display: inline-block; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-right: 8px; }
+.console-tr-text { white-space: pre-wrap; font-size: var(--small); line-height: 1.6; }
+.console-tr-user { background: var(--surface); }
+.console-tr-assistant { background: var(--surface); border-left: 2px solid var(--border); padding-left: 10px; }
+.console-tr-tool > details > summary { cursor: pointer; color: var(--muted); }
+.console-tr-tool .console-pre { margin: 4px 0 0; }
+.console-tr-system { color: var(--muted); }
+
 .console-copy { min-height: 28px; padding: 3px 10px; font-size: 11px; }
 

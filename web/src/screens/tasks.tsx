@@ -16,9 +16,10 @@ import type { FactoryView, TaskDetailView } from "../../../plugin/shared/view.ts
 import type { AcceptReply } from "../accept.ts";
 import type { TaskDetailReply } from "../detail.ts";
 import { taskDetailViaSidecar } from "../detail.ts";
+import { agentTranscriptViaSidecar, type AgentTranscriptReply } from "../transcript.ts";
 import { navigate, useRoute } from "../router.ts";
 import { meterLabel, tasksScreenModel, taskDetailModel, TASK_FILTERS, filterTaskRows, type TaskFilter, type TaskRowViewModel } from "../view-model.ts";
-import { TaskDetailPanel } from "./task-detail.tsx";
+import { TaskDetailPanel, type LoadAgentTranscript } from "./task-detail.tsx";
 
 export interface TasksScreenProps {
   view: FactoryView;
@@ -28,6 +29,8 @@ export interface TasksScreenProps {
   onAccepted: () => void;
   /** The Task Detail transport — the sidecar RPC door by default, a fixture in tests. */
   loadTaskDetail?: (input: { task: string }) => Promise<TaskDetailReply>;
+  /** The Agent transcript transport — the sidecar RPC door by default, a fixture in tests. */
+  loadTranscript?: (input: { agent: string }) => Promise<AgentTranscriptReply>;
 }
 
 interface AcceptState {
@@ -169,6 +172,7 @@ export function TaskDetailDialog({
   accept,
   onAcceptLanded,
   loadTaskDetail,
+  loadTranscript,
   close,
 }: {
   task: string;
@@ -177,6 +181,7 @@ export function TaskDetailDialog({
   /** Fired after an Accept lands from inside the dialog — re-reads the ladder it just changed. */
   onAcceptLanded: () => void;
   loadTaskDetail: (input: { task: string }) => Promise<TaskDetailReply>;
+  loadTranscript?: LoadAgentTranscript;
   close: () => void;
 }) {
   const [detail, setDetail] = useState<DetailState>({ phase: "loading", task });
@@ -223,7 +228,7 @@ export function TaskDetailDialog({
                   Accepted {acceptState.landed.task} — ledger seq {acceptState.landed.seq}. Refreshing the snapshot…
                 </div>
               ) : null}
-              <TaskDetailPanel detail={model} />
+              <TaskDetailPanel detail={model} loadTranscript={loadTranscript} />
               <div className="dialog-actions">
                 <button type="button" className="btn ghost" onClick={close}>
                   Back to Tasks
@@ -251,7 +256,7 @@ export function TaskDetailDialog({
 
 // ---- the screen -----------------------------------------------------------------------------------
 
-export function TasksScreen({ view, acceptTask, onAccepted, loadTaskDetail = taskDetailViaSidecar }: TasksScreenProps) {
+export function TasksScreen({ view, acceptTask, onAccepted, loadTaskDetail = taskDetailViaSidecar, loadTranscript = agentTranscriptViaSidecar }: TasksScreenProps) {
   const model = tasksScreenModel(view);
   const route = useRoute();
   const { view: viewMode, filter, task: openTask } = boardParamsFromQuery(route.query);
@@ -363,6 +368,7 @@ export function TasksScreen({ view, acceptTask, onAccepted, loadTaskDetail = tas
             // ladder it just changed — one refresh per journey, never two.
           }}
           loadTaskDetail={loadTaskDetail}
+          loadTranscript={loadTranscript}
           close={() => setBoardParams({ task: null })}
         />
       ) : null}

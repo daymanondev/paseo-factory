@@ -49,6 +49,44 @@ export const accept = defineRpc({
   output: z.union([z.object({ ok: z.literal(true), seq: z.number().int(), summary: z.string() }), Failure]),
 });
 
+// The console's native read-only transcript read (ADR 0051 §5, T-04): the
+// projected timeline tail of ONE Factory-known agent, reduced to plain data
+// the Task Detail disclosure renders. It answers only for agents the Factory
+// attributes to a Task's Attempt (the ledger's own agent stamps) or to a
+// Project seat (`project.json` + the correlation registry's session
+// bindings) — any other id refuses as data (`unknown-agent`). A missing
+// PaseoApi, a daemon error, or a wiped in-memory store is honest unavailable
+// data on the ok arm, never a throw. It accepts no write and reads no
+// arbitrary path — the daemon's own `agents.ref(id).timeline.refetch` seam
+// (`plugin/server/timeline.ts`) is the only source.
+export const AgentTranscriptEntrySchema = z.object({
+  /** The entry's `seqEnd` — the seq position the line keys on. */
+  seq: z.number().int(),
+  /** The render role: user/assistant messages read; tool calls stay compact; the rest is system chrome. */
+  role: z.enum(["user", "assistant", "tool", "system"]),
+  /** The daemon's own item type, verbatim — `user_message`, `tool_call`, `compaction`, … */
+  kind: z.string(),
+  /** The message text — null for entries that carry none (tool calls, todos). */
+  text: z.string().nullable(),
+  /** The tool call's name — `detail.type` first, the item's own `name` second; null otherwise. */
+  tool: z.string().nullable(),
+  /** One-line flat summary — the same compact line the Watch pass reads (`renderTimelineTranscript`). */
+  summary: z.string().nullable(),
+});
+
+export type AgentTranscriptEntry = z.infer<typeof AgentTranscriptEntrySchema>;
+
+export const agentTranscript = defineRpc({
+  name: "factory.agent.transcript",
+  input: z.object({ agent: z.string().min(1) }),
+  output: z.union([
+    z.object({ ok: z.literal(true), agent: z.string(), entries: z.array(AgentTranscriptEntrySchema) }),
+    /** The agent is Factory-known but its timeline cannot be read right now — the honest reason rides as data. */
+    z.object({ ok: z.literal(true), agent: z.string(), unavailable: z.literal(true), reason: z.string() }),
+    Failure,
+  ]),
+});
+
 export const retro = defineRpc({
   name: "factory.retro",
   input: z.object({

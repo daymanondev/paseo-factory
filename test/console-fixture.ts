@@ -43,7 +43,7 @@ export function emptyDaemon(): SurfaceDaemonApi {
   };
 }
 
-export function makeConsoleFixture(homeRoot: string): ConsoleFixture {
+export function makeConsoleFixture(homeRoot: string, options?: { daemon?: SurfaceDaemonApi | (() => SurfaceDaemonApi) }): ConsoleFixture {
   const home = join(homeRoot, "paseo-home");
   const stateDir = join(home, "plugin-state", "paseo-factory");
   const webRoot = join(homeRoot, "console-bundle");
@@ -57,7 +57,11 @@ export function makeConsoleFixture(homeRoot: string): ConsoleFixture {
   // The eye probe admits fresh-eyes Contracts (T-03's detail fixture sets one);
   // no eye CLI ever runs — the pass's ledger line is appended by the test.
   const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner, eyeCliProbe: () => true });
-  const handlers = createSurfaceHandlers({ factory, stateDir, home, daemon: emptyDaemon() });
+  // T-04: the daemon seam is injectable — the transcript e2e drives handlers
+  // against a fake daemon shaped like the SDK's timeline API; an unset
+  // `daemon` option can also spell "no PaseoApi captured" via a function
+  // returning undefined.
+  const handlers = createSurfaceHandlers({ factory, stateDir, home, daemon: options?.daemon ?? emptyDaemon() });
   return {
     homeRoot,
     home,
