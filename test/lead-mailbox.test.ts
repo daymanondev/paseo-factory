@@ -2495,7 +2495,7 @@ test("Lead handoff persists the final Markdown reply, caps UTF-8 at 8 KB (LEAD_H
   assert.ok(successor.includes(persisted));
 });
 
-test("Machine-Verified Active Peer Roster summarizes accepted Tasks into one count line and renders full rows strictly for unaccepted Tasks (v0.0.97, ADR 0047 §1.3)", async t => {
+test("Machine-Verified Active Peer Roster summarizes accepted Tasks into one count line and renders full rows strictly for unaccepted Tasks, each active row carrying the epoch disposition (v0.0.97, ADR 0047 §1.3; ADR 0053 §3)", async t => {
   const lead: FakeAgent = { id: "agent-lead-1", status: "idle", lastUsage: { contextWindowUsedTokens: 135_000 } };
   const { stateDir, slug, projectRoot, factory, surface, leadMail, fake } = makeSpooledRuntime(t, [lead]);
   lead.labels = { seat: "lead", project: slug };
@@ -2524,9 +2524,11 @@ test("Machine-Verified Active Peer Roster summarizes accepted Tasks into one cou
 
   // One compact accepted summary line: total count + the latest 5 accepted task IDs
   assert.match(kickoff.text, /- accepted tasks \(6\): T-ACC-2, T-ACC-3, T-ACC-4, T-ACC-5, T-ACC-6 \(latest 5 of 6\)/);
-  // Full status/agent/worktree/attempt/report rows strictly for the active unaccepted Tasks
-  assert.match(kickoff.text, /- task T-ACTIVE-BOUND: status waiting · agent agent-active-bound \(live: idle\)/);
-  assert.match(kickoff.text, /- task T-ACTIVE-FRESH: status waiting · agent \(none bound\)/);
+  // Full status/disposition/agent/worktree/attempt/report rows strictly for the active
+  // unaccepted Tasks — since ADR 0053 §3 each active row carries the epoch's effective
+  // Peer disposition, `engineer` when the Contract predates or omits the field.
+  assert.match(kickoff.text, /- task T-ACTIVE-BOUND: status waiting · disposition engineer · agent agent-active-bound \(live: idle\)/);
+  assert.match(kickoff.text, /- task T-ACTIVE-FRESH: status waiting · disposition engineer · agent \(none bound\)/);
   assert.match(kickoff.text, /- task T-ACTIVE-FRESH: .*no attempt yet/);
   // No O(N) closed-history rows for accepted Tasks
   for (let i = 1; i <= 6; i += 1) {
