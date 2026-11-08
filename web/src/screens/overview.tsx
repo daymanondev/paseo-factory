@@ -3,13 +3,17 @@
  * snapshot (`view.projects`), the prototype's fleet list layout reused
  * (`design/fleet.css`). Every field shown is FactoryView data — no mock
  * rows, no fabricated costs. Selecting a Project scopes the console to it
- * (the switcher's own law).
+ * (the switcher's own law). The empty state offers the Owner's Add-Project
+ * wizard (T-12) — one of its two entry points (the topbar beside the
+ * switcher is the other).
  */
 import type { FactoryView, ProjectView } from "../../../plugin/shared/view.ts";
 
 export interface OverviewScreenProps {
   view: FactoryView;
   onOpenProject: (projectRoot: string) => void;
+  /** Opens the Add-Project wizard (T-12) — offered on the empty state. */
+  onAddProject?: () => void;
 }
 
 const MODE_LABELS = { slp: "SLP", scrum: "Agile Scrum" } as const;
@@ -20,7 +24,7 @@ function seatSummary(project: ProjectView): string {
   return `${supervisor} · ${lead}`;
 }
 
-export function OverviewScreen({ view, onOpenProject }: OverviewScreenProps) {
+export function OverviewScreen({ view, onOpenProject, onAddProject }: OverviewScreenProps) {
   const projects = view.projects;
   return (
     <section aria-label="All projects">
@@ -43,8 +47,16 @@ export function OverviewScreen({ view, onOpenProject }: OverviewScreenProps) {
       </div>
       {projects.length === 0 ? (
         <div className="notice">
-          No Projects registered yet. A Project registers the first time a Supervisor or Lead seat opens on it from Paseo's
-          native New Chat picker — the console never starts seats (ADR 0017).
+          No Projects registered yet. Add one below, or wait — a Project also registers the first time a Supervisor or Lead seat opens
+          on it from Paseo's native New Chat picker. The console never starts seats (ADR 0017).
+          {onAddProject !== undefined ? (
+            <>
+              {" "}
+              <button type="button" className="btn ghost" onClick={onAddProject}>
+                Add project
+              </button>
+            </>
+          ) : null}
         </div>
       ) : (
         <div className="fleet-project-list">

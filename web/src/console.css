@@ -452,3 +452,10 @@
     grid-row: 3;
   }
 }
+
+/* T-12: the Add-Project entry point beside the switcher — the same quiet
+   height as the switcher's select, never wrapping mid-label. */
+.console-add-project {
+  min-height: 36px;
+  white-space: nowrap;
+}

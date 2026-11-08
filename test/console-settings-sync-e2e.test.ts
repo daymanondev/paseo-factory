@@ -254,17 +254,18 @@ test("RG-1: the console's real transport hydrates the vault direct — the tarba
   assert.equal(dangerPayload.code, "forbidden_operation", "the Danger Zone's scoped-only law refuses as data");
   assert.match(dangerPayload.error ?? "", /refuses the unscoped delete/, "the refusal names the narrowed act it refused");
   // The allowlist sentence — which now carries the round-trip writes, the
-  // key import, and the two project writes — answers only on the door's
-  // OUTSIDE, read here off a still-unlisted sibling (the Add-Project wizard
-  // door, T-12).
+  // key import, the two project writes, the retro write, and T-12's
+  // Add-Project wizard writes — answers only on the door's OUTSIDE, read
+  // here off a still-unlisted sibling (`factory.lead.dispatch`, outside by
+  // ADR 0017).
   const outsideResponse = await fetchAt("/rpc", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ method: "factory.project.add", params: {} }),
+    body: JSON.stringify({ method: "factory.lead.dispatch", params: {} }),
   });
-  assert.equal(outsideResponse.status, 404, "the Add-Project wizard door stays outside");
+  assert.equal(outsideResponse.status, 404, "factory.lead.dispatch stays outside (ADR 0017)");
   const outsidePayload = (await outsideResponse.json()) as { ok: boolean; code?: string; error?: string };
   assert.equal(outsidePayload.ok, false);
   assert.equal(outsidePayload.code, "unknown_method");
-  assert.match(outsidePayload.error ?? "", /factory\.vault\.sync, factory\.vault\.hydrate, factory\.vault\.import, factory\.project\.reset, factory\.project\.delete/, "the allowlist sentence carries the round-trip writes, the key import, and the two project writes");
+  assert.match(outsidePayload.error ?? "", /factory\.vault\.sync, factory\.vault\.hydrate, factory\.vault\.import, factory\.project\.reset, factory\.project\.delete, factory\.retro, factory\.project\.add, factory\.project\.pick\.folder/, "the allowlist sentence carries the round-trip writes, the key import, the two project writes, the retro write, and the Add-Project wizard writes");
 });

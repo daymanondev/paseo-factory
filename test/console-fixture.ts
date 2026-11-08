@@ -84,6 +84,13 @@ export function makeConsoleFixture(
      * real lane CLI, so the Activity retro e2e's proposals are deterministic.
      */
     retroCopilotStdout?: string;
+    /**
+     * T-12: the native folder picker seam (`SurfaceDeps`'s own override) —
+     * injectable so the Add-Project e2e drives both `factory.project.pick.
+     * folder` arms (cancelled and picked) without ever opening a real
+     * osascript dialog on the test host.
+     */
+    pickFolder?: (prompt?: string) => Promise<string | null> | string | null;
   },
 ): ConsoleFixture {
   const home = join(homeRoot, "paseo-home");
@@ -136,6 +143,7 @@ export function makeConsoleFixture(
     ...(options?.managePlugin === undefined ? {} : { managePlugin: options.managePlugin }),
     ...(options?.checkPluginUpdates === undefined ? {} : { checkPluginUpdates: options.checkPluginUpdates }),
     ...(options?.vaultRunner === undefined ? {} : { vaultRunner: options.vaultRunner }),
+    ...(options?.pickFolder === undefined ? {} : { pickFolder: options.pickFolder }),
   });
   return {
     homeRoot,

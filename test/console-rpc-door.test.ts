@@ -21,29 +21,31 @@ import { makeTempDir } from "./helpers.ts";
  * (`factory.vault.sync`, `factory.vault.hydrate`), T-10d's key import
  * (`factory.vault.import`, a plain entry on its all-optional schema),
  * T-10e's two NARROWED Danger Zone writes (`factory.project.reset`,
- * `factory.project.delete`), and T-11b's NARROWED retro write
- * (`factory.retro`) —
+ * `factory.project.delete`), T-11b's NARROWED retro write
+ * (`factory.retro`), and T-12's Add-Project wizard writes
+ * (`factory.project.add`, NARROWED to refuse the empty add, and
+ * `factory.project.pick.folder`, a plain entry) —
  * dispatch in-process through the same `SurfaceHandlers` the RN client's
  * registrations call, every input validated by the shared RPC input schema
  * (`plugin/shared/rpc.ts`); every other method name keeps refusing as data.
  * The Scrum entry allowlists exactly the five Owner operations the Inbox
- * resolves, and the plugin, round-trip vault, Danger Zone, and retro writes
- * are narrowed per input — manage serves exactly enable/disable/update
+ * resolves, and the plugin, round-trip vault, Danger Zone, retro, and add
+ * writes are narrowed per input — manage serves exactly enable/disable/update
  * (never remove/reload, never disabling the console's own host), install
  * carries no developer field (never the core target, never a source/ref or
  * ledger/config override), sync refuses the three fields configure owns
  * (repo, branch, passphrase), hydrate refuses its repo/ref overrides, BOTH
  * project writes require a non-empty `projectRoot` (an unscoped
  * reset/delete of the root Factory refuses) while delete also refuses the
- * `seat` field, and the retro write requires the same non-empty
+ * `seat` field, the retro write requires the same non-empty
  * `projectRoot` (an unscoped pass over the root Factory refuses — the pass
- * runs against exactly the scoped Project's ledger) — every narrowing
- * refusal is `forbidden_operation` as data BEFORE any handler runs. The
- * siblings stay OUTSIDE the door (ADR 0017 — no Start/Ensure seat control
- * anywhere): the batch save, `lead.ensure`, `lead.dispatch`,
- * `supervisor.ensure`, the retro ratification (`retro.ratify` — its
- * handler ensures a Supervisor seat; the Owner's decision is pending), and
- * the Add-Project wizard doors (`project.add`, `project.pick.folder` — T-12).
+ * runs against exactly the scoped Project's ledger), and the add write
+ * requires a path (BOTH `projectRoot` and `path` empty refuses) — every
+ * narrowing refusal is `forbidden_operation` as data BEFORE any handler
+ * runs. The siblings stay OUTSIDE the door (ADR 0017 — no Start/Ensure
+ * seat control anywhere): the batch save, `lead.ensure`, `lead.dispatch`,
+ * `supervisor.ensure`, and the retro ratification (`retro.ratify` — its
+ * handler ensures a Supervisor seat; the Owner's decision is pending).
  */
 
 async function post(url: string, body: unknown): Promise<{ status: number; payload: unknown }> {
@@ -92,10 +94,10 @@ test("console RPC door: unlisted methods keep refusing as data, whatever their n
 
   // A write RPC outside the allowlist, a read RPC outside it, an invented
   // name, and every sibling the lifecycle waves left outside the door — the
-  // batch save, the ensure/dispatch seat acts (ADR 0017: the console can
-  // retire a LIVE seat but never start one), the retro ratification
-  // (`retro.ratify` ensures a Supervisor seat), and the Add-Project wizard
-  // doors (T-12) — all refuse identically: the door is a list, not a prefix.
+  // batch save and the ensure/dispatch seat acts (ADR 0017: the console can
+  // retire a LIVE seat but never start one), and the retro ratification
+  // (`retro.ratify` ensures a Supervisor seat) — all refuse identically:
+  // the door is a list, not a prefix.
   for (const method of [
     "factory.retro.ratify",
     "factory.lead.dispatch",
@@ -104,15 +106,13 @@ test("console RPC door: unlisted methods keep refusing as data, whatever their n
     "factory.lanes.set.batch",
     "factory.lead.ensure",
     "factory.supervisor.ensure",
-    "factory.project.add",
-    "factory.project.pick.folder",
   ]) {
     const refusal = await post(started.sidecar.url + "/rpc", { method, params: {} });
     assert.equal(refusal.status, 404, `${method} is not allowlisted`);
     const payload = refusal.payload as { ok: boolean; code?: string; error?: string };
     assert.equal(payload.ok, false);
     assert.equal(payload.code, "unknown_method");
-    assert.match(payload.error ?? "", /factory\.snapshot, factory\.task\.detail, factory\.agent\.transcript, factory\.accept, factory\.inbox, factory\.scrum\.command, factory\.lanes\.set, factory\.lanes\.reset, factory\.profiles\.apply, factory\.profiles\.save, factory\.profiles\.delete, factory\.lead\.rotate, factory\.supervisor\.revoke, factory\.plugins\.check\.updates, factory\.plugins\.install, factory\.plugins\.manage, factory\.vault\.configure, factory\.vault\.pull, factory\.vault\.push, factory\.vault\.sync, factory\.vault\.hydrate, factory\.vault\.import, factory\.project\.reset, factory\.project\.delete, factory\.retro\)/, "the sentence names the allowlist through its last entry");
+    assert.match(payload.error ?? "", /factory\.snapshot, factory\.task\.detail, factory\.agent\.transcript, factory\.accept, factory\.inbox, factory\.scrum\.command, factory\.lanes\.set, factory\.lanes\.reset, factory\.profiles\.apply, factory\.profiles\.save, factory\.profiles\.delete, factory\.lead\.rotate, factory\.supervisor\.revoke, factory\.plugins\.check\.updates, factory\.plugins\.install, factory\.plugins\.manage, factory\.vault\.configure, factory\.vault\.pull, factory\.vault\.push, factory\.vault\.sync, factory\.vault\.hydrate, factory\.vault\.import, factory\.project\.reset, factory\.project\.delete, factory\.retro, factory\.project\.add, factory\.project\.pick\.folder\)/, "the sentence names the allowlist through its last entry");
   }
 });
 
@@ -406,6 +406,72 @@ test("console RPC door: the retro write is NARROWED — the unscoped retro refus
   assert.equal(scopedPayload.ok, false);
   assert.equal(scopedPayload.code, "unknown-project", "the handler's own refusal rides as data — the call dispatched");
   assert.match(scopedPayload.error ?? "", /could not resolve/, "the handler's own sentence names why it refused");
+
+  // The narrowing refuses before dispatch: the root Factory's ledger records no line.
+  assert.equal(fixture.factory.ledger.events.length, 0);
+});
+
+test("console RPC door: the Add-Project wizard writes — the empty add refuses before any handler runs, the scoped add and the picker dispatch", async (t) => {
+  const homeRoot = makeTempDir();
+  // The picker seam (T-12): the fake answers the cancelled arm — a REAL
+  // osascript dialog must never open on the test host, and the cancelled
+  // reply proves the plain entry dispatches to the handler.
+  const prompts: string[] = [];
+  const fixture = makeConsoleFixture(homeRoot, {
+    pickFolder: (prompt) => {
+      prompts.push(prompt ?? "(none)");
+      return null;
+    },
+  });
+  const started = await fixture.start();
+  assert.ok(started.ok, started.ok ? "" : started.reason);
+  t.after(async () => {
+    await started.sidecar.close();
+    rmSync(homeRoot, { recursive: true, force: true });
+  });
+
+  const call = (method: string, params: unknown) => post(started.sidecar.url + "/rpc", { method, params });
+
+  // The narrowed refusal — a 400 `forbidden_operation` BEFORE any handler
+  // runs: the wizard always carries the chosen folder, so an add with BOTH
+  // directory doors empty never dispatches (a whitespace-only spelling the
+  // schema's own min(1) cannot see refuses here too; an empty STRING is the
+  // schema's own bad_input, never the narrowing's).
+  const refusals: { params: Record<string, unknown>; sentence: RegExp }[] = [
+    { params: {}, sentence: /refuses the empty add/ },
+    { params: { projectRoot: "  " }, sentence: /refuses the empty add/ },
+  ];
+  for (const refused of refusals) {
+    const reply = await call("factory.project.add", refused.params);
+    assert.equal(reply.status, 400, `factory.project.add ${JSON.stringify(refused.params)} is narrowed off the console`);
+    const payload = reply.payload as { ok: boolean; code?: string; error?: string };
+    assert.equal(payload.ok, false);
+    assert.equal(payload.code, "forbidden_operation");
+    assert.match(payload.error ?? "", refused.sentence, "the refusal spells the narrowed act it refused");
+    assert.match(payload.error ?? "", /from the console/, "the sentence names whose door refused");
+  }
+
+  // The allowed shape — a non-empty path — passes the narrowing and reaches
+  // the handler, which then refuses for its own honest reason on this
+  // nonexistent path (`missing-directory` as data with HTTP 200): the door
+  // could never have written that sentence itself.
+  const scoped = await call("factory.project.add", { path: "/tmp/door-unregistered-project" });
+  assert.equal(scoped.status, 200, "factory.project.add with a path dispatches to the handler");
+  const scopedPayload = scoped.payload as { ok: boolean; code?: string; error?: string };
+  assert.equal(scopedPayload.ok, false);
+  assert.equal(scopedPayload.code, "missing-directory", "the handler's own refusal rides as data — the call dispatched");
+  assert.match(scopedPayload.error ?? "", /does not exist/, "the handler's own sentence names why it refused");
+
+  // The picker is a plain entry: the fake seam's cancelled arm answers the
+  // handler's own `{ok, cancelled, path: null}` with HTTP 200 — dispatch
+  // proof with no dialog, and the prompt rode the call.
+  const picked = await call("factory.project.pick.folder", { prompt: "Choose the project folder" });
+  assert.equal(picked.status, 200, "factory.project.pick.folder dispatches to the handler");
+  const pickedPayload = picked.payload as { ok: boolean; cancelled?: boolean; path?: string | null };
+  assert.equal(pickedPayload.ok, true);
+  assert.equal(pickedPayload.cancelled, true, "the cancelled arm rides as data");
+  assert.equal(pickedPayload.path, null);
+  assert.deepEqual(prompts, ["Choose the project folder"], "the picker seam saw the one dispatch");
 
   // The narrowing refuses before dispatch: the root Factory's ledger records no line.
   assert.equal(fixture.factory.ledger.events.length, 0);

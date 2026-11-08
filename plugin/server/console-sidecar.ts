@@ -79,6 +79,20 @@
  *   `factory.retro.ratify` stays OUTSIDE the door — the handler ensures a
  *   Supervisor seat (ADR 0017; the Owner's ratification decision is
  *   pending), and the console renders no Ratify control.
+ * - The Add-Project wizard writes (T-12, ADR 0051): `factory.project.add`
+ *   and `factory.project.pick.folder` join the door on their existing shared
+ *   schemas — the Owner's two wizard acts. `pick.folder` is a plain entry
+ *   (the daemon host's native picker; a cancelled pick is the handler's own
+ *   `{ok, cancelled, path: null}` arm, a picked one registers the folder
+ *   itself and answers with the full add payload), and `project.add` is
+ *   NARROWED per input before any handler runs: an add with BOTH directory
+ *   doors empty (`projectRoot` and `path` absent or whitespace) refuses as
+ *   data (`forbidden_operation`). The handler's own refusals
+ *   (`missing-directory`, `unsafe-directory`) and its summary/slug/
+ *   bootstrapped facts ride as data with HTTP 200 — a plain non-Git folder
+ *   bootstraps rather than refusing (ADR 0024). The design's later wizard
+ *   steps (mode, models, seat start) need writes not in the door and stay
+ *   omitted — nothing here can start a seat (ADR 0017).
  * - A start failure is logged, never thrown — the sidecar must never break
  *   plugin boot (the shell wraps the call, and `start()` itself resolves to
  *   `{ ok: false, reason }` rather than rejecting while ports fall back).
@@ -87,7 +101,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import type { z, ZodType } from "zod";
-import { accept, agentTranscript, inbox, lanesReset, lanesSet, leadRotate, pluginsCheckUpdates, pluginsInstall, pluginsManage, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, retro, scrumCommand, snapshot, supervisorRevoke, taskDetail, vaultConfigure, vaultHydrate, vaultImport, vaultPull, vaultPush, vaultSync } from "../shared/rpc.ts";
+import { accept, agentTranscript, inbox, lanesReset, lanesSet, leadRotate, pluginsCheckUpdates, pluginsInstall, pluginsManage, profilesApply, profilesDelete, profilesSave, projectAdd, projectDelete, projectPickFolder, projectReset, retro, scrumCommand, snapshot, supervisorRevoke, taskDetail, vaultConfigure, vaultHydrate, vaultImport, vaultPull, vaultPush, vaultSync } from "../shared/rpc.ts";
 import type { SurfaceHandlers } from "./surface-rpc.ts";
 import type { SurfaceCallContext } from "./surface-rpc.ts";
 
@@ -281,6 +295,21 @@ function retroRefusal(input: Record<string, unknown>): string | null {
   return null;
 }
 
+/** True when the input names no directory — both the projectRoot and path doors empty. */
+function missingProjectPath(input: Record<string, unknown>): boolean {
+  const projectRootEmpty = typeof input.projectRoot !== "string" || input.projectRoot.trim() === "";
+  const pathEmpty = typeof input.path !== "string" || input.path.trim() === "";
+  return projectRootEmpty && pathEmpty;
+}
+
+/** The add narrowing (T-12): the empty add refuses — the wizard always carries the chosen folder. */
+function projectAddRefusal(input: Record<string, unknown>): string | null {
+  if (missingProjectPath(input)) {
+    return "factory.project.add refuses the empty add from the console — projectRoot or path is required (the wizard always carries the chosen folder)";
+  }
+  return null;
+}
+
 export const CONSOLE_RPC_ALLOWLIST: readonly ConsoleRpcEntry[] = [
   consoleRpcEntry(snapshot.name, snapshot.input, (handlers, input, context) => handlers.snapshot(input, context)),
   consoleRpcEntry(taskDetail.name, taskDetail.input, (handlers, input, context) => handlers.taskDetail(input, context)),
@@ -384,6 +413,23 @@ export const CONSOLE_RPC_ALLOWLIST: readonly ConsoleRpcEntry[] = [
   consoleRpcEntry(retro.name, retro.input, (handlers, input, context) => handlers.retro(input, context), {
     refuse: retroRefusal,
   }),
+  // The Add-Project wizard writes (T-12) — the Owner's two wizard acts on
+  // their existing shared schemas: `factory.project.add` is NARROWED per
+  // input before any handler runs (an add with BOTH directory doors empty
+  // refuses as data — the wizard always carries a path), and
+  // `factory.project.pick.folder` is a plain entry (the daemon host's native
+  // picker; the handler's own cancelled arm is `{ok, cancelled, path: null}`
+  // and a picked arm registers the folder itself, answering with the full add
+  // payload). The handler's own refusals (`missing-directory`,
+  // `unsafe-directory`) ride as data with HTTP 200 — a plain non-Git folder
+  // BOOTSTRAPS rather than refusing (ADR 0024), which the wizard's review
+  // step states honestly. The design's later wizard steps (mode, models,
+  // seat start) need writes not in the door and stay omitted — nothing here
+  // can start a seat (ADR 0017).
+  consoleRpcEntry(projectAdd.name, projectAdd.input, (handlers, input, context) => handlers.projectAdd(input, context), {
+    refuse: projectAddRefusal,
+  }),
+  consoleRpcEntry(projectPickFolder.name, projectPickFolder.input, (handlers, input, context) => handlers.projectPickFolder(input ?? {}, context)),
 ];
 
 /** The named allowlist as the refusal sentence spells it. */

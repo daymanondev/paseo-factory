@@ -29,7 +29,12 @@
  * rollup, and the retro timeline (newest first, each retro's R1..Rn
  * proposals) from the same snapshot — and carries the scoped Run retro write
  * through the sidecar's narrowed `factory.retro` door (its ratification
- * stays outside: no Ratify control anywhere) — every screen of the eight is
+ * stays outside: no Ratify control anywhere); and the Owner's Add-Project
+ * wizard (T-12) opens from the topbar beside the switcher and from the
+ * Overview's empty state — a stepped dialog (folder → review → added)
+ * carrying `factory.project.add` and `factory.project.pick.folder` through
+ * the door, whose success scopes the console to the new Project and lands
+ * on its Overview — every screen of the eight is
  * real now; the placeholder remains only as a future screen's titled
  * fallback. No Start Supervisor / Start Lead controls anywhere (ADR 0017
  * preserved).
@@ -38,7 +43,9 @@ import { useEffect, useState } from "react";
 import type { FactoryView } from "../../plugin/shared/view.ts";
 import { NAV_ITEMS } from "./chrome/nav.ts";
 import { useRoute, navigate } from "./router.ts";
+import { AddProjectDialog } from "./chrome/add-project.tsx";
 import { ProjectSwitcher } from "./chrome/project-switcher.tsx";
+import { projectAddViaSidecar, projectPickFolderViaSidecar, type ProjectAddInput, type ProjectAddReply, type ProjectPickReply } from "./project.ts";
 import { acceptViaSidecar, type AcceptReply } from "./accept.ts";
 import { taskDetailViaSidecar, type TaskDetailReply } from "./detail.ts";
 import { inboxViaSidecar, type InboxReply } from "./inbox.ts";
@@ -66,6 +73,10 @@ export interface AppProps {
   loadTaskDetail?: (input: { task: string }) => Promise<TaskDetailReply>;
   /** The inbox gather transport — the sidecar RPC door by default, a fixture in tests. */
   loadInbox?: () => Promise<InboxReply>;
+  /** The Add-Project add transport (T-12) — the sidecar RPC door by default, a fixture in tests. */
+  projectAdd?: (input: ProjectAddInput) => Promise<ProjectAddReply>;
+  /** The Add-Project native-picker transport (T-12) — the sidecar RPC door by default, a fixture in tests. */
+  pickFolder?: (prompt?: string) => Promise<ProjectPickReply>;
 }
 
 export function App({
@@ -74,6 +85,8 @@ export function App({
   scrumCommand = scrumCommandViaSidecar,
   loadTaskDetail = taskDetailViaSidecar,
   loadInbox = inboxViaSidecar,
+  projectAdd = projectAddViaSidecar,
+  pickFolder = projectPickFolderViaSidecar,
 }: AppProps) {
   const { screen } = useRoute();
   /** The selected Project's root — `undefined` is the unscoped "All projects" view. */
@@ -109,6 +122,9 @@ export function App({
     };
   }, [generatedAt, loadInbox]);
   const inbox = badgeView !== null ? inboxModel(badgeView, gather) : null;
+  // The Owner's Add-Project wizard (T-12) — one open flag shared by its two
+  // entry points (the topbar beside the switcher, the Overview empty state).
+  const [addProjectOpen, setAddProjectOpen] = useState(false);
   return (
     <div className="app" id="app">
       <aside className="sidebar" aria-label="Main navigation">
@@ -145,6 +161,10 @@ export function App({
             <strong id="breadcrumb">{screen.heading}</strong>
           </div>
           <span className="spacer" />
+          {/* T-12: the wizard's always-offered entry point, beside the switcher. */}
+          <button type="button" className="btn ghost console-add-project" onClick={() => setAddProjectOpen(true)}>
+            Add project
+          </button>
           <ProjectSwitcher view={view} selectedRoot={projectRoot} onSelect={setProjectRoot} />
         </header>
         {snapshot.error !== null && (
@@ -153,7 +173,7 @@ export function App({
           </div>
         )}
         <main id="main" className="page" tabIndex={-1}>
-          {view !== null && screen.id === "overview" && <OverviewScreen view={view} onOpenProject={setProjectRoot} />}
+          {view !== null && screen.id === "overview" && <OverviewScreen view={view} onOpenProject={setProjectRoot} onAddProject={() => setAddProjectOpen(true)} />}
           {view !== null && screen.id === "activity" && <ActivityScreen view={view} onChanged={() => snapshot.refresh()} />}
           {view !== null && screen.id === "flow" && <FlowScreen view={view} />}
           {view !== null && screen.id === "models" && <ModelsScreen view={view} onChanged={() => snapshot.refresh()} />}
@@ -200,6 +220,20 @@ export function App({
           {screen.id !== "overview" && screen.id !== "flow" && screen.id !== "models" && screen.id !== "tasks" && screen.id !== "inbox" && screen.id !== "integrations" && screen.id !== "settings" && screen.id !== "activity" && <PlaceholderScreen screen={screen} view={view} />}
         </main>
       </div>
+      {/* T-12: the Add-Project wizard — success scopes the console to the new
+          Project (the snapshot re-keys on the new scope) and lands on its
+          Overview, the same hand-back law a successful delete inverts. */}
+      {addProjectOpen ? (
+        <AddProjectDialog
+          add={projectAdd}
+          pick={pickFolder}
+          close={() => setAddProjectOpen(false)}
+          onAdded={(projectRoot) => {
+            setProjectRoot(projectRoot);
+            navigate("/");
+          }}
+        />
+      ) : null}
     </div>
   );
 }

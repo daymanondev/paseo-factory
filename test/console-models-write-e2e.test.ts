@@ -114,13 +114,13 @@ test("RG-1: the console's real transport writes the lanes — set lands on disk 
   assert.equal(rowOf(afterReset, "lead").source, "default");
   assert.equal(rowOf(afterReset, "watch").source, "default");
 
-  // The door stays a list: the batch sibling, the ensure acts, and the
-  // Add-Project wizard door (T-12) refuse `unknown_method` as data, never a
-  // dispatch (the profile CRUD and the rotate/revoke retire acts joined the
-  // door in T-08c — their own e2e drives them; `supervisor.ensure` never
-  // does, ADR 0017; the T-10e project writes' narrowing is proven by the
-  // door test and their own RG-1 e2e).
-  for (const method of ["factory.lanes.set.batch", "factory.lead.ensure", "factory.supervisor.ensure", "factory.project.add"]) {
+  // The door stays a list: the batch sibling and the ensure/dispatch acts
+  // refuse `unknown_method` as data, never a dispatch (the profile CRUD and
+  // the rotate/revoke retire acts joined the door in T-08c and the
+  // Add-Project wizard writes in T-12 — their own e2es drive them;
+  // `supervisor.ensure` never does, ADR 0017; the T-10e project writes'
+  // narrowing is proven by the door test and their own RG-1 e2e).
+  for (const method of ["factory.lanes.set.batch", "factory.lead.ensure", "factory.lead.dispatch", "factory.supervisor.ensure"]) {
     const response = await fetchAt("/rpc", {
       method: "POST",
       headers: { "content-type": "application/json" },

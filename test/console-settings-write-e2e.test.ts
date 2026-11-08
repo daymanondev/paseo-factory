@@ -144,10 +144,10 @@ test("RG-1: the console's real transport writes the vault — configure, pull, a
   // project writes are allowlisted but scoped-only: an input with no
   // projectRoot refuses `forbidden_operation` as data BEFORE any handler
   // runs (their happy paths have their own RG-1 e2e). The allowlist
-  // sentence itself — which now carries the six landed vault writes plus
-  // the two project writes — answers only on the door's OUTSIDE, so it is
-  // read here off a still-unlisted sibling (the Add-Project wizard door,
-  // T-12).
+  // sentence itself — which now carries the six landed vault writes, the
+  // two project writes, the retro write, and T-12's Add-Project wizard
+  // writes — answers only on the door's OUTSIDE, so it is read here off a
+  // still-unlisted sibling (`factory.lead.dispatch`, outside by ADR 0017).
   const response = await fetchAt("/rpc", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -161,11 +161,11 @@ test("RG-1: the console's real transport writes the vault — configure, pull, a
   const outside = await fetchAt("/rpc", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ method: "factory.project.add", params: {} }),
+    body: JSON.stringify({ method: "factory.lead.dispatch", params: {} }),
   });
-  assert.equal(outside.status, 404, "the Add-Project wizard door stays outside");
+  assert.equal(outside.status, 404, "factory.lead.dispatch stays outside (ADR 0017)");
   const outsidePayload = (await outside.json()) as { ok: boolean; code?: string; error?: string };
   assert.equal(outsidePayload.ok, false);
   assert.equal(outsidePayload.code, "unknown_method");
-  assert.match(outsidePayload.error ?? "", /factory\.vault\.configure, factory\.vault\.pull, factory\.vault\.push, factory\.vault\.sync, factory\.vault\.hydrate, factory\.vault\.import, factory\.project\.reset, factory\.project\.delete/, "the allowlist sentence carries the six vault writes and the two project writes");
+  assert.match(outsidePayload.error ?? "", /factory\.vault\.configure, factory\.vault\.pull, factory\.vault\.push, factory\.vault\.sync, factory\.vault\.hydrate, factory\.vault\.import, factory\.project\.reset, factory\.project\.delete, factory\.retro, factory\.project\.add, factory\.project\.pick\.folder/, "the allowlist sentence carries the six vault writes, the two project writes, the retro write, and the Add-Project wizard writes");
 });
