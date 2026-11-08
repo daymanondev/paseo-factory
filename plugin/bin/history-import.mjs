@@ -215,6 +215,10 @@ function handoffIsValid(handoff) {
   const fields = handoff;
   return typeof fields.outcome === "string" && PEER_HANDOFF_OUTCOMES.includes(fields.outcome) && ["scope", "verification", "unknowns", "ownership"].every((key) => fields[key] === void 0 || typeof fields[key] === "string");
 }
+function mechanicalClaimIsValid(event) {
+  if (event.mechanical === void 0) return true;
+  return event.mechanical === "lead_verify" && event.handoff === void 0;
+}
 function v2PayloadIsValid(event) {
   const string = (key) => typeof event[key] === "string";
   const optionalString = (key) => event[key] === void 0 || string(key);
@@ -234,7 +238,7 @@ function v2PayloadIsValid(event) {
     case "contract_set":
       return (event.execution === void 0 || scrumBindingIsValid(event.execution)) && string("workspace") && string("gate") && string("artifact") && strings("scope") && strings("skills") && optionalString("base") && optionalString("description") && optionalString("by") && (event.freshEyes === void 0 || event.freshEyes === true) && (event.watch === void 0 || event.watch === true) && (event.disposition === void 0 || PEER_DISPOSITIONS.includes(event.disposition));
     case "claim_reported":
-      return string("sha") && optionalString("agent") && handoffIsValid(event.handoff);
+      return string("sha") && optionalString("agent") && handoffIsValid(event.handoff) && mechanicalClaimIsValid(event);
     case "gate_started":
       return string("cmd");
     case "gate_finished":

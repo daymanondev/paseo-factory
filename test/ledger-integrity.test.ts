@@ -212,6 +212,7 @@ test("identified readers enforce each event's typed payload while legacy records
   const cases: Array<{ row: Record<string, unknown>; required: string[]; invalid?: Record<string, unknown>[] }> = [
     { row: { ...base, scope: ["src"], freshEyes: true, watch: true, skills: ["tdd"] }, required: ["workspace", "gate", "artifact"], invalid: [{ scope: "src" }, { freshEyes: "true" }, { watch: 1 }, { skills: [5] }, { base: 5 }, { description: null }, { by: [] }, { attempt: 1 }] },
     { row: { event: "claim_reported", attempt: 1, sha: "abc" }, required: ["sha"], invalid: [{ agent: 5 }, { attempt: Number.MAX_SAFE_INTEGER + 1 }] },
+    { row: { event: "claim_reported", attempt: 1, sha: "abc", mechanical: "lead_verify" }, required: ["sha"], invalid: [{ mechanical: "reset" }, { mechanical: "lead_verify", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } }] },
     { row: { event: "gate_started", attempt: 1, cmd: "true" }, required: ["cmd"] },
     { row: { event: "gate_finished", attempt: 1, exit: 0, verdict: "green", note: "passed", sha: "abc" }, required: ["exit", "verdict", "note"], invalid: [{ exit: "0" }, { exit: 0.5 }, { verdict: "yellow" }, { sha: 4 }, { outputPath: null }] },
     { row: { event: "fresh_eyes_written", attempt: 1, model: "eye", outcome: "clear", finding: "clear", durationMs: 1 }, required: ["model", "outcome", "finding", "durationMs"], invalid: [{ outcome: "green" }, { outcome: ["clear"] }, { durationMs: -1 }] },

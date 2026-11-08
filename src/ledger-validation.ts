@@ -223,6 +223,16 @@ function handoffIsValid(handoff: unknown): boolean {
     ["scope", "verification", "unknowns", "ownership"].every((key) => fields[key] === undefined || typeof fields[key] === "string");
 }
 
+/**
+ * ADR 0053 §4 scopes the handoff law to Peer claims: the Lead's `lead_verify`
+ * mechanical re-run rides `mechanical: "lead_verify"` instead of a handoff —
+ * never both on one line, so no Peer outcome is forged on the re-verification.
+ */
+function mechanicalClaimIsValid(event: Record<string, unknown>): boolean {
+  if (event.mechanical === undefined) return true;
+  return event.mechanical === "lead_verify" && event.handoff === undefined;
+}
+
 /** Identified history promises typed evidence; legacy readers retain their historical shape contract. */
 function v2PayloadIsValid(event: Record<string, unknown>): boolean {
   const string = (key: string) => typeof event[key] === "string";
@@ -243,7 +253,7 @@ function v2PayloadIsValid(event: Record<string, unknown>): boolean {
       strings("scope") && strings("skills") && optionalString("base") && optionalString("description") && optionalString("by") &&
       (event.freshEyes === undefined || event.freshEyes === true) && (event.watch === undefined || event.watch === true) &&
       (event.disposition === undefined || (PEER_DISPOSITIONS as readonly string[]).includes(event.disposition as string));
-    case "claim_reported": return string("sha") && optionalString("agent") && handoffIsValid(event.handoff);
+    case "claim_reported": return string("sha") && optionalString("agent") && handoffIsValid(event.handoff) && mechanicalClaimIsValid(event);
     case "gate_started": return string("cmd");
     case "gate_finished": return (event.exit === null || Number.isSafeInteger(event.exit)) &&
       (event.verdict === "red" || event.verdict === "green") &&

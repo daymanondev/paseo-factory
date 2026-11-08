@@ -194,9 +194,17 @@ export interface ClaimInput {
   /**
    * The Peer-authored six-field handoff (ADR 0053 §4): required at admission
    * — `outcome`, `scope`, `verification`, and `unknowns` non-empty,
-   * `ownership` optional (defaulted to `"lease returned"` on the ledger line).
+   * `ownership` optional (defaulted to `"lease returned"` on the ledger
+   * line). Exactly one of `handoff` or `mechanical` rides a claim.
    */
-  handoff: PeerHandoffFields;
+  handoff?: PeerHandoffFields;
+  /**
+   * The Lead's `lead_verify` mechanical re-run (ADR 0053 §4 scopes the
+   * handoff law to Peer claims): the one non-Peer claim, carried INSTEAD of
+   * a handoff — never both — so the Lead's re-verification forges no Peer
+   * outcome on the ledger line.
+   */
+  mechanical?: "lead_verify";
   /** Who claimed, when the caller knows it — recorded on `claim_reported` (ticket 02b). */
   agent?: string;
 }
@@ -213,6 +221,8 @@ export interface ClaimOutcome {
    * Absent on replayed legacy outcomes whose claims predate the field.
    */
   handoff?: PeerHandoffFields;
+  /** Replayed alongside the handoff when the recorded claim was a `lead_verify` mechanical re-run. */
+  mechanical?: "lead_verify";
 }
 
 export interface AcceptInput {
@@ -650,7 +660,7 @@ export function createFactory(options: FactoryOptions): Factory {
       });
     },
 
-    async claim({ task, sha, agent, handoff }) {
+    async claim({ task, sha, agent, handoff, mechanical }) {
       assertTaskId(task);
       const contract = this.contractFor(task);
       if (!contract) throw new FactoryError("unknown-task", `no contract set for task ${task} — register one first`);
@@ -659,8 +669,17 @@ export function createFactory(options: FactoryOptions): Factory {
 
       // Admission (ADR 0053 §4) — the six-field handoff law and the
       // disposition's commit rule, both judged BEFORE any event is appended
-      // and before Station 1 runs: a malformed claim opens no Attempt.
-      const admittedHandoff = admitHandoff(handoff);
+      // and before Station 1 runs: a malformed claim opens no Attempt. The
+      // law's one scoped exception is the Lead's `lead_verify` mechanical
+      // re-run — a non-Peer claim that carries the marker instead of a
+      // handoff, never both, so no Peer outcome is forged on it.
+      if (mechanical !== undefined && mechanical !== "lead_verify") {
+        throw new FactoryError("invalid-claim", `\`mechanical\` must be exactly "lead_verify" when present — got ${JSON.stringify(mechanical)}`);
+      }
+      if (mechanical === "lead_verify" && handoff !== undefined) {
+        throw new FactoryError("invalid-claim", "a `lead_verify` mechanical re-run carries no six-field handoff — pass the mechanical marker or the Peer handoff, never both (ADR 0053 §4)");
+      }
+      const admittedHandoff = mechanical === "lead_verify" ? undefined : admitHandoff(handoff);
       const disposition = contract.disposition ?? "engineer";
       const executionDir = this.worktreeFor(task) ?? contract.workspace;
       let claimedSha = sha.trim();
@@ -725,6 +744,7 @@ export function createFactory(options: FactoryOptions): Factory {
             gate: completed.gate,
             reportPath: report.path,
             ...(replayedClaim?.handoff === undefined ? {} : { handoff: replayedClaim.handoff }),
+            ...(replayedClaim?.mechanical === undefined ? {} : { mechanical: replayedClaim.mechanical }),
           };
         }
       }
@@ -756,6 +776,7 @@ export function createFactory(options: FactoryOptions): Factory {
         attempt,
         sha: claimedSha,
         handoff: admittedHandoff,
+        ...(mechanical === undefined ? {} : { mechanical }),
         ...(agent === undefined || agent.trim() === "" ? {} : { agent }),
       });
       ledger.append({ event: "gate_started", task, attempt, cmd: contract.gate });
@@ -1623,8 +1644,8 @@ async function finish(
   contract: ContractSet;
   eyeBudgetMs: number | undefined;
   eyeRunner: LaneCliRunner | undefined;
-  /** The admitted handoff (ADR 0053 §4) — rides the outcome for the notification pipeline. */
-  handoff: PeerHandoffFields;
+  /** The admitted handoff (ADR 0053 §4) — rides the outcome for the notification pipeline; absent on a `lead_verify` mechanical re-run. */
+  handoff: PeerHandoffFields | undefined;
   },
   attempt: number,
   result: GateResult,

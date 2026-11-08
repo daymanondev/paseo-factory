@@ -1321,6 +1321,90 @@ test("agent_claim on an engineer Task over MCP never forges the mandatory commit
   assert.equal(engEvents.find((e) => e.event === "claim_reported").sha, engSha, "the claim attests the explicit commit");
 });
 
+test("lead_verify claims through the bridge with the mechanical marker and no forged handoff (ADR 0053 §4 scope): the report names the Lead's re-run and renders no Peer Outcome", async (t) => {
+  const homeDir = mkdtempSync(join(tmpdir(), "factory-bridge-lead-verify-"));
+  const stateDir = join(homeDir, "plugin-state", "paseo-factory");
+  const repoDir = makeGitRepo();
+  t.after(() => {
+    rmSync(homeDir, { recursive: true, force: true });
+    rmSync(repoDir, { recursive: true, force: true });
+  });
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
+  const reg = ensureProjectRegistered(stateDir, repoDir);
+  assert.equal(reg.ok, true);
+  const registry = createFactoryRegistry({ stateDir, root: factory });
+
+  const liveAgents = new Map<string, { id: string; status: string; archivedAt: string | null; cwd: string; labels: Record<string, string> }>();
+  const fakeDaemon = {
+    agents: {
+      list: async (opts?: { filter?: { labels?: Record<string, string> } }) => {
+        const wanted = opts?.filter?.labels ?? {};
+        const entries = [...liveAgents.values()]
+          .filter((a) => Object.entries(wanted).every(([k, v]) => a.labels[k] === v))
+          .map((agent) => ({ agent }));
+        return { entries };
+      },
+      create: async (options: { config: { provider: string }; cwd: string; title: string; labels: Record<string, string>; prompt?: string }) => {
+        const id = `peer-created-${liveAgents.size + 1}`;
+        liveAgents.set(id, { id, status: "idle", archivedAt: null, cwd: options.cwd, labels: options.labels });
+        return { id };
+      },
+      ref: (id: string) => ({
+        send: async () => ({ messageId: `msg-${id}` }),
+        cancel: async () => {},
+        archive: async () => {},
+      }),
+    },
+  };
+  const spool = startSpool(stateDir, factory, { registry, pollMs: 25, daemon: fakeDaemon as never });
+  t.after(() => spool.stop());
+
+  const correlations = new CorrelationRegistry(stateDir);
+  const leadCorr = correlations.issue({ role: "lead", projectSlug: reg.slug, projectRoot: repoDir });
+  correlations.associate(leadCorr.correlationId, "lead-1");
+  const leadCall = await runMcpSession({
+    args: ["--correlation", leadCorr.correlationId, "--state-dir", stateDir],
+    cwd: repoDir,
+    requests: [
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "ENG-LV", gate: "/usr/bin/true", artifact: "README.md" } } },
+      { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_dispatch_agent", arguments: { tasks: ["ENG-LV"] } } },
+    ],
+  });
+  for (const res of leadCall) {
+    const result = res.result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.notEqual(result.isError, true, result.content[0].text);
+  }
+  const worktreePath = registry.factoryForProject(reg.slug).worktreeFor("ENG-LV");
+  assert.ok(worktreePath, "the dispatch allocated the Task worktree");
+
+  // The Lead's mechanical re-verification at the worktree HEAD — no commit
+  // argument, no handoff: the bridge sends the `lead_verify` marker alone.
+  const verifyCall = await runMcpSession({
+    args: ["--correlation", leadCorr.correlationId, "--state-dir", stateDir],
+    cwd: repoDir,
+    requests: [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_verify", arguments: { task: "ENG-LV" } } }],
+  });
+  const verifyRes = verifyCall[0].result as { isError?: boolean; content: Array<{ text: string }> };
+  assert.notEqual(verifyRes.isError, true, verifyRes.content[0].text);
+  const reply = JSON.parse(verifyRes.content[0].text) as { ok: boolean; verdict?: string; reportPath?: string };
+  assert.equal(reply.ok, true);
+  assert.equal(reply.verdict, "green");
+
+  const ledgerLines = readFileSync(join(stateDir, "projects", reg.slug, "ledger.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  const claimLine = ledgerLines.find((e) => e.event === "claim_reported" && e.task === "ENG-LV");
+  assert.ok(claimLine, "the mechanical claim opened its Attempt");
+  assert.equal(claimLine.mechanical, "lead_verify", "the claim line carries the mechanical marker");
+  assert.equal(claimLine.handoff, undefined, "no synthetic handoff is forged onto the Lead's re-run");
+
+  const report = readFileSync(String(reply.reportPath), "utf8");
+  assert.match(report, /- Lead verification \(`lead_verify`\): mechanical re-run of the Contract Gate by the Lead — no Peer handoff on this claim/);
+  assert.doesNotMatch(report, /- Outcome:/, "the report renders no Peer outcome for the mechanical re-run");
+  assert.match(report, /- Verdict: GREEN/);
+});
+
 test("lead_accept_task on a GREEN read-only Task closes merge-free (ADR 0053 §3): attempt_accepted with no landing, the Peer archived, the Task worktree removed, and <project-root>'s HEAD untouched", async (t) => {
   const homeDir = mkdtempSync(join(tmpdir(), "factory-bridge-readonly-accept-"));
   const stateDir = join(homeDir, "plugin-state", "paseo-factory");

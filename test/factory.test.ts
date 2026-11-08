@@ -259,6 +259,50 @@ test("claim with an empty sha is refused at admission for engineer dispositions,
   assert.equal(factory.ledger.eventsFor("U2-RO").find((e) => e.event === "claim_reported")?.sha, sha, "the omitted commit resolved to HEAD");
 });
 
+test("a lead_verify mechanical re-run claims with no Peer handoff (ADR 0053 §4 scope): the marker rides claim_reported, the report names the re-run, and no Outcome is forged", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact, sha } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir: join(dir, "factory") });
+
+  factory.setContract({ task: "LV1", workspace, gate: "true", artifact });
+
+  // Never both: the marker plus a handoff is refused at admission — no Attempt.
+  await assert.rejects(
+    factory.claim({
+      task: "LV1", sha, mechanical: "lead_verify",
+      handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" },
+    }),
+    factoryErrorCode("invalid-claim"),
+  );
+  await assert.rejects(
+    factory.claim({ task: "LV1", sha, mechanical: "reset" as never }),
+    factoryErrorCode("invalid-claim"),
+  );
+  assert.deepEqual(
+    factory.ledger.eventsFor("LV1").map((e) => e.event),
+    ["contract_set"],
+    "the malformed mechanical claims opened no Attempt",
+  );
+
+  // The mechanical re-run carries the marker instead of any handoff.
+  const outcome = await factory.claim({ task: "LV1", sha, mechanical: "lead_verify", agent: "lead-1" });
+  assert.equal(outcome.verdict, "green");
+  assert.equal(outcome.handoff, undefined, "no Peer handoff rides the mechanical re-run");
+  const claimLine = factory.ledger.eventsFor("LV1").find((e) => e.event === "claim_reported");
+  assert.equal(claimLine?.mechanical, "lead_verify", "the claim line carries the mechanical marker");
+  assert.equal(claimLine?.handoff, undefined, "the claim line carries no handoff");
+  const report = readFileSync(outcome.reportPath, "utf8");
+  assert.match(report, /- Lead verification \(`lead_verify`\): mechanical re-run of the Contract Gate by the Lead — no Peer handoff on this claim/);
+  assert.doesNotMatch(report, /- Outcome:/, "the mechanical re-run renders no forged Peer outcome");
+
+  // The replay at the same sha carries the marker through the outcome.
+  const replay = await factory.claim({ task: "LV1", sha, mechanical: "lead_verify", agent: "lead-1" });
+  assert.equal(replay.verdict, "green");
+  assert.equal(replay.mechanical, "lead_verify", "the replayed outcome keeps the mechanical marker");
+  assert.equal(replay.handoff, undefined);
+});
+
 test("claim on a dirty tree is red even though the commit exists", async (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);

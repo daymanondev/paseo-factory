@@ -88,8 +88,13 @@ export function renderReport(task: string, attempt: number, events: readonly Led
     ...(gate.sha === undefined ? [] : [`- Attested commit: \`${gate.sha}\``]),
     // The six-field handoff (ADR 0053 §4) between the claim line and the
     // Verdict evidence; pre-0053 claims carry no handoff and render unchanged.
+    // A `lead_verify` mechanical re-run carries the marker instead — the Lead's
+    // re-verification claims no Peer outcome, and the report says so in place
+    // of the handoff block rather than forging one.
     ...(claim.handoff === undefined
-      ? []
+      ? claim.mechanical === "lead_verify"
+        ? ["- Lead verification (`lead_verify`): mechanical re-run of the Contract Gate by the Lead — no Peer handoff on this claim"]
+        : []
       : handoffLines(claim.handoff, {
           sha: gate.sha ?? claim.sha,
           branch: `factory/${task}`,

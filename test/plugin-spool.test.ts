@@ -1491,6 +1491,8 @@ test("Seam 1 (ADR 0053 §4): an incomplete six-field handoff never opens an Atte
     ["empty verification", { task: "ENG-6F", sha: head, handoff: { ...handoff, verification: "" } }],
     ["missing unknowns", { task: "ENG-6F", sha: head, handoff: { outcome: "complete", scope: "s", verification: "v" } }],
     ["present-but-empty ownership", { task: "ENG-6F", sha: head, handoff: { ...handoff, ownership: "  " } }],
+    ["mechanical marker off its one-value vocabulary", { task: "ENG-6F", sha: head, mechanical: "driver" }],
+    ["mechanical marker alongside a handoff", { task: "ENG-6F", sha: head, mechanical: "lead_verify", handoff }],
   ];
   for (const [id, body] of malformed) {
     dropRequest(spoolRoot, { id, kind: "claim", ...body });
@@ -1543,6 +1545,21 @@ test("Seam 1 (ADR 0053 §4): an incomplete six-field handoff never opens an Atte
     ["contract_set"],
     "still no Attempt opened",
   );
+
+  // The law's one scoped exception (ADR 0053 §4): the Lead's `lead_verify`
+  // mechanical re-run rides the marker INSTEAD of a handoff through the spool
+  // — the claim line forges no Peer outcome and the report names the re-run.
+  dropRequest(spoolRoot, { id: "lead-verify", kind: "claim", task: "ENG-6F", sha: head, mechanical: "lead_verify", agent: "lead-1" });
+  await until(() => assert.ok(existsSync(join(spoolRoot, "replies", "lead-verify.json")), "the mechanical claim replied"));
+  const mechanicalReply = readReply(spoolRoot, "lead-verify");
+  assert.equal(mechanicalReply.ok, true, JSON.stringify(mechanicalReply));
+  assert.match(String(mechanicalReply.summary), /GREEN/i);
+  const mechanicalLine = factory.ledger.eventsFor("ENG-6F").find((e) => e.event === "claim_reported");
+  assert.equal(mechanicalLine?.mechanical, "lead_verify", "the claim line carries the mechanical marker");
+  assert.equal(mechanicalLine?.handoff, undefined, "the mechanical claim forges no handoff");
+  const mechanicalReport = readFileSync(String(mechanicalReply.reportPath), "utf8");
+  assert.match(mechanicalReport, /- Lead verification \(`lead_verify`\): mechanical re-run of the Contract Gate by the Lead — no Peer handoff on this claim/);
+  assert.doesNotMatch(mechanicalReport, /- Outcome:/, "the mechanical re-run renders no Peer outcome");
 });
 
 test("Seam 1 (ADR 0053): the spawn-path re-contract onto a moved HEAD preserves the prior epoch's disposition", async (t) => {

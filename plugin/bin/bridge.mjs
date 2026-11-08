@@ -955,6 +955,10 @@ function handoffIsValid(handoff) {
   const fields = handoff;
   return typeof fields.outcome === "string" && PEER_HANDOFF_OUTCOMES.includes(fields.outcome) && ["scope", "verification", "unknowns", "ownership"].every((key) => fields[key] === void 0 || typeof fields[key] === "string");
 }
+function mechanicalClaimIsValid(event) {
+  if (event.mechanical === void 0) return true;
+  return event.mechanical === "lead_verify" && event.handoff === void 0;
+}
 function v2PayloadIsValid(event) {
   const string = (key) => typeof event[key] === "string";
   const optionalString = (key) => event[key] === void 0 || string(key);
@@ -974,7 +978,7 @@ function v2PayloadIsValid(event) {
     case "contract_set":
       return (event.execution === void 0 || scrumBindingIsValid(event.execution)) && string("workspace") && string("gate") && string("artifact") && strings("scope") && strings("skills") && optionalString("base") && optionalString("description") && optionalString("by") && (event.freshEyes === void 0 || event.freshEyes === true) && (event.watch === void 0 || event.watch === true) && (event.disposition === void 0 || PEER_DISPOSITIONS.includes(event.disposition));
     case "claim_reported":
-      return string("sha") && optionalString("agent") && handoffIsValid(event.handoff);
+      return string("sha") && optionalString("agent") && handoffIsValid(event.handoff) && mechanicalClaimIsValid(event);
     case "gate_started":
       return string("cmd");
     case "gate_finished":
@@ -1604,21 +1608,16 @@ async function handleToolCall(name, rawArgs) {
     const git = bridgePrimitives.resolveRealGitBinary(ctx.stateDir);
     if (name === "lead_verify") {
       const commit = args.commit ?? execFileSync(git, ["rev-parse", "HEAD"], { cwd: existsSync(worktree) ? worktree : contract.workspace, encoding: "utf8", timeout: GIT_TIMEOUT_MS }).trim();
-      // ADR 0053 §4: every claim carries the six-field handoff — the Lead's
-      // mechanical re-verification is no Peer handoff, and says so honestly
-      // instead of forging one.
+      // ADR 0053 §4 scopes the six-field handoff law to Peer claims — the
+      // Lead's mechanical re-verification is no Peer handoff and forges none:
+      // the claim carries the `lead_verify` mechanical marker instead, and the
+      // report renders the re-run for what it is (no "Outcome" line at all).
       const reply = await roundTripSpool(ctx, {
         id: randomId(),
         kind: "claim",
         task,
         sha: commit,
-        handoff: {
-          outcome: "complete",
-          scope: "lead_verify re-run of the Contract Gate at the requested commit",
-          verification: "mechanical re-verification by the Lead — no Peer handoff on this claim",
-          unknowns: "none",
-          ownership: "lead verification (lead_verify)",
-        },
+        mechanical: "lead_verify",
         agent: ctx.agentId ?? ctx.correlationId ?? "lead",
       });
       return toolResult(JSON.stringify(reply), !reply.ok || reply.verdict === "red");

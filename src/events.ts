@@ -250,6 +250,14 @@ export interface ClaimReported extends EventIdentityMetadata {
    * synthesized from the attempt's own ledger facts at render time.
    */
   handoff?: PeerHandoffFields;
+  /**
+   * The Lead's `lead_verify` mechanical re-run — the one non-Peer claim
+   * (ADR 0053 §4 scopes the handoff law to Peer claims): carried instead of
+   * a handoff, never alongside one, so no Peer outcome is forged on the
+   * Lead's own re-verification and any reader of the line can tell the two
+   * apart.
+   */
+  mechanical?: "lead_verify";
 }
 
 export interface GateStarted extends EventIdentityMetadata {

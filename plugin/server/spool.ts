@@ -130,9 +130,17 @@ export interface ClaimRequest {
   /**
    * The mandatory six-field handoff (ADR 0053 §4): the four required
    * Peer-authored fields, validated at parse so malformed JSON never reaches
-   * the factory; `ownership` optional.
+   * the factory; `ownership` optional. Exactly one of `handoff` or
+   * `mechanical` rides a claim.
    */
-  handoff: PeerHandoffFields;
+  handoff?: PeerHandoffFields;
+  /**
+   * The Lead's `lead_verify` mechanical re-run — the one non-Peer claim
+   * (ADR 0053 §4 scopes the handoff law to Peer claims): it carries this
+   * marker instead of a handoff, so no Peer outcome is forged on the Lead's
+   * re-verification. Never together with `handoff`.
+   */
+  mechanical?: "lead_verify";
   /** Who submitted, when the daemon stamps it on the agent's env — for the spool log, not the ledger. */
   agent?: string;
   seat?: SpoolSeat;
@@ -680,23 +688,40 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     // at the worktree's HEAD), but a present one must be a string.
     if (req.sha !== undefined && typeof req.sha !== "string") return undefined;
     if (req.agent !== undefined && typeof req.agent !== "string") return undefined;
-    // The six-field handoff is part of the request's shape (ADR 0053 §4): the
-    // four required fields non-empty strings, `outcome` exactly one of the
-    // four SLP values, `ownership` an optional non-empty string — malformed
-    // JSON never reaches the factory.
-    const handoff = req.handoff as Record<string, unknown> | undefined;
-    if (handoff === undefined || handoff === null || typeof handoff !== "object" || Array.isArray(handoff)) return undefined;
-    if (typeof handoff.outcome !== "string" || !(PEER_HANDOFF_OUTCOMES as readonly string[]).includes(handoff.outcome)) return undefined;
-    for (const field of ["scope", "verification", "unknowns"] as const) {
-      if (typeof handoff[field] !== "string" || (handoff[field] as string).trim() === "") return undefined;
+    // ADR 0053 §4 scopes the handoff law to Peer claims. The Lead's
+    // `lead_verify` mechanical re-run is the one non-Peer claim: the marker
+    // exactly `lead_verify` with NO handoff, never both — anything else is
+    // malformed and never reaches the factory.
+    if (req.mechanical !== undefined && req.mechanical !== "lead_verify") return undefined;
+    if (req.mechanical !== undefined && req.handoff !== undefined) return undefined;
+    if (req.mechanical === undefined) {
+      // The six-field handoff is part of the request's shape (ADR 0053 §4): the
+      // four required fields non-empty strings, `outcome` exactly one of the
+      // four SLP values, `ownership` an optional non-empty string — malformed
+      // JSON never reaches the factory.
+      const handoff = req.handoff as Record<string, unknown> | undefined;
+      if (handoff === undefined || handoff === null || typeof handoff !== "object" || Array.isArray(handoff)) return undefined;
+      if (typeof handoff.outcome !== "string" || !(PEER_HANDOFF_OUTCOMES as readonly string[]).includes(handoff.outcome)) return undefined;
+      for (const field of ["scope", "verification", "unknowns"] as const) {
+        if (typeof handoff[field] !== "string" || (handoff[field] as string).trim() === "") return undefined;
+      }
+      if (handoff.ownership !== undefined && (typeof handoff.ownership !== "string" || (handoff.ownership as string).trim() === "")) return undefined;
+      return {
+        id: req.id,
+        kind: "claim",
+        task: req.task,
+        ...(req.sha === undefined ? {} : { sha: req.sha }),
+        handoff: handoff as unknown as PeerHandoffFields,
+        ...(req.agent === undefined ? {} : { agent: req.agent }),
+        ...projectSlugField,
+      };
     }
-    if (handoff.ownership !== undefined && (typeof handoff.ownership !== "string" || (handoff.ownership as string).trim() === "")) return undefined;
     return {
       id: req.id,
       kind: "claim",
       task: req.task,
       ...(req.sha === undefined ? {} : { sha: req.sha }),
-      handoff: handoff as unknown as PeerHandoffFields,
+      mechanical: "lead_verify",
       ...(req.agent === undefined ? {} : { agent: req.agent }),
       ...projectSlugField,
     };
@@ -1619,7 +1644,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         completion: factory.claim({
           task: request.task,
           sha: request.sha ?? "",
-          handoff: request.handoff,
+          ...(request.mechanical === undefined ? { handoff: request.handoff } : { mechanical: request.mechanical }),
           ...(request.agent === undefined ? {} : { agent: request.agent }),
         }),
       });
