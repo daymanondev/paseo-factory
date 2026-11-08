@@ -256,3 +256,43 @@
 .console-models-profiles .filter { min-height: 30px; padding: 4px 11px; }
 .console-models-profiles .small.muted { line-height: 1.7; }
 .console-models-actions .btn { min-height: 28px; padding: 4px 10px; font-size: 11px; }
+
+/* The Settings screen (T-10a): the reused design bundle carries the vault
+   summary, presence chips, project rows, and the daemon-settings disclosure
+   (design/daemon-settings.css + management.css imported by the screen); the
+   console adds the disclosure's chevron aligner — the prototype's `.od-icon`
+   rotation without its JS-only icon font — and the vault card's notice
+   spacing so the degraded line sits inside the card's own rhythm. */
+.console-settings .daemon-settings-diagnostics > summary .settings-disclosure-chevron {
+  margin-left: auto;
+  color: var(--muted);
+  transition: transform 160ms ease-out;
+}
+
+.console-settings .daemon-settings-diagnostics[open] > summary .settings-disclosure-chevron {
+  transform: rotate(90deg);
+}
+
+.console-settings .daemon-settings-diagnostics {
+  margin-top: 4px;
+}
+
+.console-settings .daemon-settings-facts {
+  padding: 0 0 4px;
+}
+
+.console-settings-vault .notice {
+  margin: 0 0 14px;
+}
+
+.console-settings-vault .vault-items {
+  margin-top: 4px;
+}
+
+.console-settings-project .project-settings-list {
+  margin-top: -6px;
+}
+
+.console-settings-project .small.muted {
+  margin-top: 14px;
+}

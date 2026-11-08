@@ -71,6 +71,13 @@ export function makeConsoleFixture(
     installPlugin?: typeof installDaemonPlugin;
     managePlugin?: typeof manageDaemonPlugin;
     checkPluginUpdates?: typeof checkDaemonPluginUpdates;
+    /**
+     * T-10a: the vault transport seam (`SurfaceDeps`'s own override) —
+     * injectable so the Settings e2e's gh probe is deterministic: the default
+     * runner would run the HOST's real `gh`, so an authenticated developer
+     * machine would flip the fold's gh facts per machine.
+     */
+    vaultRunner?: import("../plugin/server/core/vault.ts").VaultRunner;
   },
 ): ConsoleFixture {
   const home = join(homeRoot, "paseo-home");
@@ -115,6 +122,7 @@ export function makeConsoleFixture(
     ...(options?.installPlugin === undefined ? {} : { installPlugin: options.installPlugin }),
     ...(options?.managePlugin === undefined ? {} : { managePlugin: options.managePlugin }),
     ...(options?.checkPluginUpdates === undefined ? {} : { checkPluginUpdates: options.checkPluginUpdates }),
+    ...(options?.vaultRunner === undefined ? {} : { vaultRunner: options.vaultRunner }),
   });
   return {
     homeRoot,
