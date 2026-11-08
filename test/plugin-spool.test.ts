@@ -1623,7 +1623,21 @@ test("Seam 1 (ADR 0053): lead accept on a GREEN read-only Task records attempt_a
   assert.ok(existsSync(scoutWorktree), "the scout Task worktree exists on disk");
   const headBefore = headAt();
   const scoutHead = execSync("git rev-parse HEAD", { cwd: scoutWorktree!, encoding: "utf8" }).trim();
-  dropRequest(spoolRootFor(stateDir), { id: "cl-scout", kind: "claim", task: "RO-1", sha: scoutHead, projectSlug: resolved.slug });
+  // The claim carries the mandatory 6-Field Handoff (ADR 0053 §4, ticket 04);
+  // the attested commit stays the worktree HEAD — a read-only Peer's exact word.
+  dropRequest(spoolRootFor(stateDir), {
+    id: "cl-scout",
+    kind: "claim",
+    task: "RO-1",
+    sha: scoutHead,
+    handoff: {
+      outcome: "complete",
+      scope: "read README.md; reconnoitered the worktree at HEAD",
+      verification: "gate ran green at the worktree HEAD; no new commit — read-only disposition",
+      unknowns: "none",
+    },
+    projectSlug: resolved.slug,
+  });
   await until(() => assert.equal(readReply(spoolRootFor(stateDir), "cl-scout").verdict, "green", "the scout claim ends green"));
 
   // 2. Accept: merge-free. No landing fields, root HEAD unchanged, worktree gone.
@@ -1647,7 +1661,19 @@ test("Seam 1 (ADR 0053): lead accept on a GREEN read-only Task records attempt_a
   assert.ok(typeof engWorktree === "string", "the engineer spawn allocated a managed Task worktree");
   writeFileSync(join(engWorktree!, "feature.txt"), "delivered\n");
   const engSha = gitCommitAll(engWorktree!, "feat: engineer delivery");
-  dropRequest(spoolRootFor(stateDir), { id: "cl-eng", kind: "claim", task: "ENG-1", sha: engSha, projectSlug: resolved.slug });
+  dropRequest(spoolRootFor(stateDir), {
+    id: "cl-eng",
+    kind: "claim",
+    task: "ENG-1",
+    sha: engSha,
+    handoff: {
+      outcome: "complete",
+      scope: "worktrees/ENG-1/feature.txt — delivered feature",
+      verification: "gate ran green on the claimed commit",
+      unknowns: "none",
+    },
+    projectSlug: resolved.slug,
+  });
   await until(() => assert.equal(readReply(spoolRootFor(stateDir), "cl-eng").verdict, "green", "the engineer claim ends green"));
   dropRequest(spoolRootFor(stateDir), { id: "ac-eng", kind: "accept", task: "ENG-1", attempt: 1, submitter: "owner", projectSlug: resolved.slug });
   await until(() => assert.equal(readReply(spoolRootFor(stateDir), "ac-eng").ok, true, "the engineer accept replies ok"));
