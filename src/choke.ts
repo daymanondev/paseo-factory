@@ -20,6 +20,7 @@ import { isFactoryInfrastructureProcess, isTaskWorktreeScopedProcess } from "./p
 import { inspectShellHeredocs, stripNonInterpreterHeredocs, rawShellSegments, quoteAwareWords, PROCESS_KILL_WRAPPER_PREFIXES, isTimeoutOrNiceOperand } from "./shell-heredoc-policy.ts";
 export { stripNonInterpreterHeredocs } from "./shell-heredoc-policy.ts";
 import { isMcpStdioLaunch } from "./mcp-launch-policy.ts";
+import { isReadOnlyPeerDisposition, type PeerDisposition } from "./events.ts";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { scopeCoversFile } from "./workspace.ts";
@@ -904,6 +905,14 @@ export interface MemoryFence {
   /** Scrum planning/QA deliver only owned artifacts. SLP callers omit it. */
   artifactOnly?: boolean;
   scrumRole?: "pm" | "ux" | "architect" | "dev" | "qa";
+  /**
+   * The live Contract's SLP disposition (ADR 0053 §3, ticket 05): the
+   * read-only three (`scout` | `architect` | `reviewer`) fence EVERY write
+   * destination under the task's root — findings travel in the 6-Field
+   * Handoff at `agent_claim`, never as worktree writes. Omitted (and
+   * `engineer`) fence nothing beyond the standing rules.
+   */
+  disposition?: PeerDisposition;
   workspace: string;
   scope?: readonly string[];
   /** The task's managed Task worktree (v0.0.14), when its spawn recorded one. */
@@ -961,6 +970,24 @@ function judgeMemoryDestination(rawPath: string, fence: MemoryFence): ChokeDecis
     const destination = resolve(root, normalizedPath);
     const relative = destination.startsWith(root + "/") ? destination.slice(root.length + 1) : undefined;
     if (relative !== undefined && !scopeCoversFile(fence.scope ?? [], relative)) return { behavior: "deny", rule: "policy:scrum-artifact-only", reason: "planning/QA product source is read-only; write only the owned Contract artifacts" };
+  }
+  // The read-only disposition fence (ADR 0053 §3, ticket 05): unlike the
+  // artifact-only arm there is NO scope opt-in — the read-only three are
+  // strictly read-only, and their findings travel in the 6-Field Handoff at
+  // `agent_claim`, never as worktree writes. Destinations outside the task's
+  // root (e.g. /tmp scratch) stay clear: the fence guards repository trees.
+  if (isReadOnlyPeerDisposition(fence.disposition)) {
+    const root = stripTrailingSlash(fence.worktree ?? fence.workspace);
+    const destination = resolve(root, normalizedPath);
+    const relative = destination === root || destination.startsWith(root + "/") ? destination.slice(root.length) : undefined;
+    if (relative !== undefined) {
+      const target = relative === "" ? root.slice(root.lastIndexOf("/") + 1) : relative;
+      return {
+        behavior: "deny",
+        rule: "read-only-disposition-fence",
+        reason: `write to ${target} is fenced — the ${fence.disposition} disposition is read-only: findings travel in the 6-Field Handoff at agent_claim, and code changes are an engineer Peer's Contract`,
+      };
+    }
   }
   const name = memoryFileOf(normalizedPath, fence);
   if (name === undefined) return undefined;

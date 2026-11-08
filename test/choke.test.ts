@@ -171,6 +171,82 @@ test("the memory write fence catches shell writes to the memory files — redire
   assert.equal(judgeShellCommand("echo x > AGENTS.md", roots).behavior, "allow", "without the memory context the v0.0.4 behavior stands");
 });
 
+// ---- the read-only disposition fence (ADR 0053 §3, ticket 05) ----------------------------------
+
+/** The task worktree a read-only Peer executes in (under the state dir). */
+const RO_WORKTREE = "/state/factory/projects/proj/worktrees/T-05";
+
+/** A Peer's fence: the live Contract's disposition over its Task worktree. */
+function readOnlyFence(disposition: "engineer" | "scout" | "architect" | "reviewer") {
+  return { workspace: "/ws/proj", worktree: RO_WORKTREE, disposition };
+}
+
+/** The same roots the plugin choke judges a worktree Peer with: the worktree is the writable workspace. */
+function worktreeRoots() {
+  return writableRootsFor(RO_WORKTREE, "/state/factory", "/home", {});
+}
+
+test("the read-only disposition fence: scout/architect/reviewer write/edit asks under the Task worktree deny with read-only-disposition-fence; engineer and omitted dispositions stay allowed", () => {
+  const roots = worktreeRoots();
+  for (const disposition of ["scout", "architect", "reviewer"] as const) {
+    for (const target of ["src/x.ts", "./src/x.ts", `${RO_WORKTREE}/src/x.ts`, "AGENTS.md", "docs/findings.md"]) {
+      const decision = judgeFilePath(target, roots, readOnlyFence(disposition));
+      assert.equal(decision.behavior, "deny", `${disposition} — write/edit ask "${target}" must deny`);
+      if (decision.behavior === "deny") {
+        assert.equal(decision.rule, "read-only-disposition-fence", `${disposition} — "${target}" deny rule`);
+        assert.match(decision.reason, new RegExp(disposition), "the deny line names the disposition law");
+      }
+    }
+    // A Contract scope never reopens the fence: the read-only three stay read-only.
+    const scoped = { ...readOnlyFence(disposition), scope: ["docs/**"] };
+    assert.equal(judgeFilePath("docs/findings.md", roots, scoped).behavior, "deny", `${disposition} — a scoped path is still fenced`);
+  }
+  // The writers are untouched: engineer and an omitted disposition deny nothing here.
+  for (const fence of [{ ...readOnlyFence("engineer") }, { workspace: "/ws/proj", worktree: RO_WORKTREE }]) {
+    assert.equal(judgeFilePath("src/x.ts", roots, fence).behavior, "allow", "engineer (and omitted) write asks stay allowed");
+    assert.equal(judgeFilePath("AGENTS.md", roots, fence).behavior, "deny", "the v0.0.14 memory fence still stands for writers");
+  }
+});
+
+test("the read-only disposition fence catches file-mutating shell commands targeting the Task worktree — and passes every read", () => {
+  const roots = worktreeRoots();
+  for (const disposition of ["scout", "architect", "reviewer"] as const) {
+    const memory = readOnlyFence(disposition);
+    for (const command of [
+      "echo findings > src/notes.txt",
+      "printf x >> README.md",
+      "tee src/notes.txt < /tmp/draft",
+      "cp /tmp/draft.md docs/report.md",
+      "mv /tmp/draft.md docs/report.md",
+      "sed -i s/old/new/ src/x.ts",
+      "rm src/x.ts",
+      "dd if=/tmp/backup.img of=src/x.ts",
+    ]) {
+      const decision = judgeShellCommand(command, roots, memory);
+      assert.equal(decision.behavior, "deny", `${disposition} — "${command}" must deny`);
+      if (decision.behavior === "deny") assert.equal(decision.rule, "read-only-disposition-fence", `${disposition} — "${command}" deny rule`);
+    }
+    // Reads stay allowed (default-allow, src/choke.ts §doctrine): a Scout's
+    // recon vocabulary never denies — and a scratch write outside the roots
+    // (e.g. /tmp) is not a repository mutation.
+    for (const command of [
+      "cat src/x.ts",
+      "ls -la",
+      "grep -rn pattern src/",
+      "git diff",
+      "git log --oneline -5",
+      "git status --short",
+      "diff a.md b.md > /tmp/d",
+    ]) {
+      assert.equal(judgeShellCommand(command, roots, memory).behavior, "allow", `${disposition} — the read "${command}" must pass`);
+    }
+  }
+  // The writers keep the same shell lines: engineer (and omitted) fence nothing new.
+  for (const memory of [{ ...readOnlyFence("engineer") }, { workspace: "/ws/proj", worktree: RO_WORKTREE }]) {
+    assert.equal(judgeShellCommand("echo findings > src/notes.txt", roots, memory).behavior, "allow", "engineer shell writes stay allowed");
+  }
+});
+
 // ---- Seat write fence: isSeatMemoryPathAllowed (v0.0.23, ADR 0015 §2) -------------------------
 
 test("isSeatMemoryPathAllowed admits stateDir, tmpDirs, and SEAT_MEMORY_WHITELIST under projectRoot, rejecting all other paths", () => {

@@ -102,6 +102,19 @@ export type EventName = (typeof EVENT_NAMES)[number];
 export const PEER_DISPOSITIONS = ["engineer", "architect", "reviewer", "scout"] as const;
 export type PeerDisposition = (typeof PEER_DISPOSITIONS)[number];
 
+/**
+ * The read-only three (ADR 0053 §3, ticket 05): fenced from writing in the
+ * Task worktree on every layer (the Layer-2 choke judges, the Layer-1
+ * pre-tool hook, the Layer-3 git shim) and closed on accept without a branch
+ * merge. `plugin/bin/git-shim.mjs` and `plugin/bin/agy-pre-tool-hook.mjs`
+ * carry the same three names as plain-JS mirrors — neither can import this
+ * module at exec time.
+ */
+export const READ_ONLY_PEER_DISPOSITIONS = ["architect", "reviewer", "scout"] as const;
+export function isReadOnlyPeerDisposition(disposition: PeerDisposition | undefined): boolean {
+  return (READ_ONLY_PEER_DISPOSITIONS as readonly string[]).includes(disposition ?? "");
+}
+
 /** Assigned by the ledger at append time — ISO 8601 UTC (ADR 0003). */
 export type Timestamp = string;
 

@@ -482,6 +482,71 @@ test("agy-pre-tool-hook.mjs fast-allows unbound sessions and enforces seat-write
   assert.match(String(leadDenyProductCommit.reason), /lead-git-fence/);
 });
 
+test("agy-pre-tool-hook.mjs fences read-only dispositions at Layer 1 (ADR 0053 §3, ticket 05): a scout Peer's write tools and shell file-writes deny; engineer and omitted stay allowed; reads always pass", (t) => {
+  const dir = makeTempDir("agy-hook-readonly-");
+  disposeDir(t, dir);
+  const hookBin = resolve(import.meta.dirname, "../plugin/bin/agy-pre-tool-hook.mjs");
+  const stateDir = join(dir, "state");
+  const repoDir = join(dir, "repo");
+  const worktree = join(stateDir, "projects", "repo-slug", "worktrees", "RO-1");
+  mkdirSync(worktree, { recursive: true });
+
+  // The Project's ledger carrying the Task's live Contract (disposition and
+  // spawn-bound worktree) — the shape loadContractForTask resolves.
+  const ledgerLine = (disposition: string | undefined) =>
+    [
+      { event: "contract_set", task: "RO-1", workspace: repoDir, gate: "true", artifact: "README.md", ...(disposition === undefined ? {} : { disposition }) },
+      { event: "spawn_dispatched", task: "RO-1", provider: "pi", arity: 1, worktree },
+    ]
+      .map((event) => JSON.stringify(event))
+      .join("\n");
+  const projectLedger = join(stateDir, "projects", "repo-slug", "ledger.jsonl");
+  const runAgentHook = (payload: object, disposition: string | undefined) => {
+    writeFileSync(projectLedger, `${ledgerLine(disposition)}\n`);
+    return JSON.parse(
+      execFileSync(process.execPath, [hookBin], {
+        input: JSON.stringify(payload),
+        env: {
+          PATH: process.env.PATH,
+          PASEO_FACTORY_SEAT: "agent",
+          PASEO_FACTORY_STATE_DIR: stateDir,
+          PASEO_FACTORY_PROJECT: "repo-slug",
+          PASEO_FACTORY_TASK: "RO-1",
+        },
+        encoding: "utf8",
+      }),
+    );
+  };
+
+  // A read-only Peer: write tools deny under the Task worktree — relative and
+  // absolute — and shell file-writes deny too, all naming the law.
+  for (const disposition of ["scout", "architect", "reviewer"] as const) {
+    const writeTool = runAgentHook({ tool_name: "write_file", tool_input: { Path: join(worktree, "src", "index.ts") }, cwd: worktree }, disposition);
+    assert.equal(writeTool.decision, "deny", `${disposition} — write_file into the Task worktree denies at Layer 1`);
+    assert.match(String(writeTool.reason), /read-only-disposition-fence/);
+    assert.match(String(writeTool.reason), new RegExp(disposition));
+
+    const shellWrite = runAgentHook({ toolCall: { name: "run_command", args: { CommandLine: "echo findings > src/notes.txt" } }, workspacePaths: [worktree] }, disposition);
+    assert.equal(shellWrite.decision, "deny", `${disposition} — a shell file-write into the Task worktree denies at Layer 1`);
+    assert.match(String(shellWrite.reason), /read-only-disposition-fence/);
+
+    const read = runAgentHook({ tool_name: "read_file", tool_input: { Path: join(worktree, "src", "index.ts") }, cwd: worktree }, disposition);
+    assert.equal(read.decision, "allow", `${disposition} — read_file passes`);
+    const shellRead = runAgentHook({ toolCall: { name: "run_command", args: { CommandLine: "git diff" } }, workspacePaths: [worktree] }, disposition);
+    assert.equal(shellRead.decision, "allow", `${disposition} — a read-only shell command passes`);
+  }
+
+  // The writers: engineer (and an omitted disposition) keep their Layer-1
+  // allowances — source writes pass; only the standing memory fence remains.
+  for (const disposition of ["engineer" as const, undefined]) {
+    const sourceWrite = runAgentHook({ tool_name: "write_file", tool_input: { Path: join(worktree, "src", "index.ts") }, cwd: worktree }, disposition);
+    assert.equal(sourceWrite.decision, "allow", `${disposition ?? "omitted"} — an engineer's source write passes at Layer 1`);
+    const memoryWrite = runAgentHook({ tool_name: "write_file", tool_input: { Path: join(worktree, "AGENTS.md") }, cwd: worktree }, disposition);
+    assert.equal(memoryWrite.decision, "deny", `${disposition ?? "omitted"} — the standing memory fence still denies`);
+    assert.match(String(memoryWrite.reason), /memory-write-fenced/);
+  }
+});
+
 test("inferRoleFromProviderId maps the native role providers deterministically and applyProviderExecutionFence always carries ELECTRON_RUN_AS_NODE (v0.0.27, ADR 0017 §2)", (t) => {
   const dir = makeTempDir("roles-electron-env-");
   disposeDir(t, dir);
