@@ -500,17 +500,31 @@ async function finishLanding(projectRoot: string, worktree: string): Promise<Lan
   } catch (err) {
     return { landing: "pending-conflict", note: cap(`dependency hydration failed; worktree retained: ${err instanceof Error ? err.message : String(err)}`) };
   }
+  await removeTaskWorktree(projectRoot, worktree);
+  return { landing: "landed" };
+}
+
+/**
+ * The landing's cleanup half alone (ADR 0053 §3, ticket 05): reaps the
+ * worktree's processes and removes the directory — `git worktree remove
+ * --force`, then the stale-directory fallback plus `prune`. The read-only
+ * disposition's merge-free acceptance calls this WITHOUT the merge: nothing
+ * of the task ever lands on `<project-root>`, but the Task worktree still
+ * closes cleanly. Best-effort, never throws — a cleanup failure must not
+ * fail an acceptance whose work is already verified.
+ */
+export async function removeTaskWorktree(projectRoot: string, worktree: string): Promise<void> {
   reapWorktreeProcesses(worktree);
   const removed = await gitExit(projectRoot, ["worktree", "remove", "--force", worktree]);
-  if (removed.status === 0) return { landing: "landed" };
+  if (removed.status === 0) return;
   // A stale or unregistered directory: best-effort remove, then prune.
   try {
     rmSync(worktree, { recursive: true, force: true });
   } catch {
-    // nothing more to try — the landed commit is already in history
+    // nothing more to try — on the landed path the commit is already in
+    // history; on the read-only path there is nothing to land.
   }
   await gitExit(projectRoot, ["worktree", "prune"]);
-  return { landing: "landed" };
 }
 
 // ---- the Task worktree allocation (v0.0.14 ADR 0010 §4, promoted from plugin/bin/task-worktree.mjs in v0.0.18) ----

@@ -9,7 +9,7 @@ import type { AcceptanceRole } from "./task-state.ts";
 import { existsSync, readFileSync, renameSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { Ledger, usageIsValid } from "./ledger.ts";
-import { MAX_ATTEMPTS, NEEDS_HUMAN_REASONS, needsHumanEvidenceIsValid, PEER_DISPOSITIONS } from "./events.ts";
+import { MAX_ATTEMPTS, NEEDS_HUMAN_REASONS, isReadOnlyPeerDisposition, needsHumanEvidenceIsValid, PEER_DISPOSITIONS } from "./events.ts";
 import { runGate } from "./gate.ts";
 import { artifactPathProblem } from "./artifact.ts";
 import { renderReport } from "./report.ts";
@@ -21,7 +21,7 @@ import { runWatchPass, watchLaneAvailable } from "./watch.ts";
 import type { CopilotRunner, TimelineFetcher } from "./watch.ts";
 import { buildRetroDigest, buildSeqToTaskMap, retroDay, retroLaneAvailable, runRetroPass, writtenRetroForDay } from "./retro.ts";
 import type { RetroOutcome } from "./retro.ts";
-import { changedFiles, checkCleanAt, headCommitSync, landTaskWorktree, resolveClaimedCommit, scopeCoversFile } from "./workspace.ts";
+import { changedFiles, checkCleanAt, headCommitSync, landTaskWorktree, removeTaskWorktree, resolveClaimedCommit, scopeCoversFile } from "./workspace.ts";
 import { MEMORY_FILES } from "./choke.ts";
 import { projectStateDir, readProjectNotebook, resolveProject } from "./project.ts";
 import { FactoryError } from "./errors.ts";
@@ -853,13 +853,22 @@ export function createFactory(options: FactoryOptions): Factory {
       // the outcome (`landed`, or `pending-conflict` with the reason and the
       // preserved factory/<task> branch). Legacy shared-checkout tasks skip
       // the step and record exactly as before. Never a git push.
+      //
+      // The read-only exception (ADR 0053 §3, ticket 05): a scout /
+      // architect / reviewer Task never merges — its findings travel in the
+      // 6-Field Handoff, not in commits — so acceptance records NO landing
+      // fields and still removes the Task worktree (the landing's cleanup
+      // half alone). A pending-conflict retry keeps the ordinary landing
+      // machinery: that conflict is repair work from an engineer-era accept.
       const historicalWorktree = priorAccept?.landing === "pending-conflict"
         ? fullHistory.findLast((event): event is SpawnDispatched => event.event === "spawn_dispatched" && typeof event.worktree === "string" && event.worktree !== "")?.worktree
         : undefined;
       const worktree = this.worktreeFor(task) ?? historicalWorktree;
       let landing: "landed" | "pending-conflict" | undefined;
       let landingNote: string | undefined;
-      if (worktree !== undefined && gate.sha !== undefined) {
+      if (worktree !== undefined && priorAccept?.landing !== "pending-conflict" && isReadOnlyPeerDisposition(contract.disposition)) {
+        await removeTaskWorktree(contract.workspace, worktree);
+      } else if (worktree !== undefined && gate.sha !== undefined) {
         const result = await landTaskWorktree({
           projectRoot: contract.workspace,
           worktree,
