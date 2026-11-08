@@ -41,6 +41,15 @@
  *   `factory.supervisor.ensure`, and every `factory.project.*` keep refusing
  *   `unknown_method` as data (ADR 0017 — no Start/Ensure seat controls
  *   anywhere in the console).
+ * - The plugin writes (T-09b, ADR 0051 §7): `factory.plugins.check.updates`,
+ *   `factory.plugins.install`, and `factory.plugins.manage` join the door on
+ *   their existing shared schemas, `check.updates` as a plain entry and the
+ *   two writes NARROWED per input before any handler runs: manage refuses
+ *   `remove` and `reload` (and `disable` of `paseo-factory`, the console's
+ *   own host), install refuses the `paseo-factory` target and every developer
+ *   field (`source`, `ref`, `mergeLedgers`, `overwriteConfigs`) — each
+ *   refusal is data (`forbidden_operation`), the daemon's own answers
+ *   (`daemon_failed` included) ride as data too.
  * - A start failure is logged, never thrown — the sidecar must never break
  *   plugin boot (the shell wraps the call, and `start()` itself resolves to
  *   `{ ok: false, reason }` rather than rejecting while ports fall back).
@@ -49,7 +58,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import type { z, ZodType } from "zod";
-import { accept, agentTranscript, inbox, lanesReset, lanesSet, leadRotate, profilesApply, profilesDelete, profilesSave, scrumCommand, snapshot, supervisorRevoke, taskDetail } from "../shared/rpc.ts";
+import { accept, agentTranscript, inbox, lanesReset, lanesSet, leadRotate, pluginsCheckUpdates, pluginsInstall, pluginsManage, profilesApply, profilesDelete, profilesSave, scrumCommand, snapshot, supervisorRevoke, taskDetail } from "../shared/rpc.ts";
 import type { SurfaceHandlers } from "./surface-rpc.ts";
 import type { SurfaceCallContext } from "./surface-rpc.ts";
 
@@ -98,12 +107,33 @@ interface ConsoleRpcEntry {
 /** The console's five Scrum Owner acts — every other `factory.scrum.command` operation refuses before any handler runs. */
 export const CONSOLE_SCRUM_OPERATIONS: readonly string[] = ["wait.answer", "wait.cancel", "design.decide", "allowance.tasks", "allowance.qa"];
 
+/**
+ * The console's narrowed plugin manage acts (T-09b): `enable`, `disable`, and
+ * `update` only — `remove` and `reload` stay developer acts, and the console
+ * never disables its own host plugin.
+ */
+export const CONSOLE_PLUGIN_MANAGE_ACTIONS: readonly string[] = ["enable", "disable", "update"];
+
+/**
+ * The install fields the console never carries (T-09b): a custom `source` or
+ * `ref`, and the ledger/config overrides — developer acts stay off the console.
+ */
+export const CONSOLE_PLUGIN_INSTALL_FORBIDDEN_FIELDS: readonly string[] = ["source", "ref", "mergeLedgers", "overwriteConfigs"];
+
+/** A per-entry input narrowing — refuses BEFORE any handler runs, data never a dispatch. */
+interface ConsoleRpcNarrowing {
+  /** The operation allowlist (the Scrum door, T-06) — any other `operation` value refuses. */
+  operations?: readonly string[];
+  /** A method-specific refusal sentence for this exact input, or null to dispatch (the plugin writes, T-09b). */
+  refuse?: (input: Record<string, unknown>) => string | null;
+}
+
 /** The typed constructor — each closure's input is the shared schema's own inference. */
 function consoleRpcEntry<S extends ZodType>(
   method: string,
   schema: S,
   dispatch: (handlers: SurfaceHandlers, input: z.output<S>, context: SurfaceCallContext) => Promise<unknown>,
-  narrowing?: { operations: readonly string[] },
+  narrowing?: ConsoleRpcNarrowing,
 ): ConsoleRpcEntry {
   return {
     method,
@@ -117,17 +147,45 @@ function consoleRpcEntry<S extends ZodType>(
         // handler runs — a forbidden act is data (`forbidden_operation`), never
         // a dispatch the handler itself must police.
         const operation = (parsed.data as { operation?: unknown }).operation;
-        if (typeof operation !== "string" || !narrowing.operations.includes(operation)) {
+        if (narrowing.operations !== undefined && (typeof operation !== "string" || !narrowing.operations.includes(operation))) {
           return {
             ok: false,
             code: "forbidden_operation",
             error: `${method} refuses operation ${typeof operation === "string" ? operation : JSON.stringify(operation) ?? String(operation)} from the console (operations: ${narrowing.operations.join(", ")})`,
           };
         }
+        if (narrowing.refuse !== undefined) {
+          const sentence = narrowing.refuse(parsed.data as Record<string, unknown>);
+          if (sentence !== null) return { ok: false, code: "forbidden_operation", error: sentence };
+        }
       }
       return { ok: true, reply: await dispatch(handlers, parsed.data, context) };
     },
   };
+}
+
+/** The manage narrowing (T-09b): remove/reload refuse for every plugin, disable refuses for the console's own host. */
+function pluginManageRefusal(input: { pluginId?: unknown; action?: unknown }): string | null {
+  const action = input.action;
+  if (action === "remove" || action === "reload") {
+    return `factory.plugins.manage refuses action ${action} from the console (actions: ${CONSOLE_PLUGIN_MANAGE_ACTIONS.join(", ")}) — remove and reload stay developer acts`;
+  }
+  if (input.pluginId === "paseo-factory" && action === "disable") {
+    return "factory.plugins.manage refuses action disable for paseo-factory from the console — the console's own host plugin cannot be disabled here";
+  }
+  return null;
+}
+
+/** The install narrowing (T-09b): the core target and every developer field refuse — canonical-source installs only. */
+function pluginInstallRefusal(input: Record<string, unknown>): string | null {
+  if (input.target === "paseo-factory") {
+    return "factory.plugins.install refuses target paseo-factory from the console — the core plugin rides the daemon's own release pipeline";
+  }
+  const forbidden = CONSOLE_PLUGIN_INSTALL_FORBIDDEN_FIELDS.filter((field) => input[field] !== undefined);
+  if (forbidden.length > 0) {
+    return `factory.plugins.install refuses ${forbidden.join(", ")} from the console — custom sources, refs, and ledger/config overrides stay developer acts`;
+  }
+  return null;
 }
 
 export const CONSOLE_RPC_ALLOWLIST: readonly ConsoleRpcEntry[] = [
@@ -159,6 +217,21 @@ export const CONSOLE_RPC_ALLOWLIST: readonly ConsoleRpcEntry[] = [
   consoleRpcEntry(profilesDelete.name, profilesDelete.input, (handlers, input) => handlers.profilesDelete(input)),
   consoleRpcEntry(leadRotate.name, leadRotate.input, (handlers, input, context) => handlers.leadRotate(input, context)),
   consoleRpcEntry(supervisorRevoke.name, supervisorRevoke.input, (handlers, input, context) => handlers.supervisorRevoke(input, context)),
+  // The plugin writes (T-09b) — the Integrations screen's Owner acts.
+  // `check.updates` is a plain entry (the on-demand probe the stamp renders);
+  // the two writes are NARROWED per input before any handler runs: manage
+  // serves exactly enable/disable/update (never remove/reload, never disabling
+  // the console's own host), install serves canonical-source companion
+  // installs only (never the core target, never a source/ref/ledger/config
+  // override — developer acts). A daemon-side failure still rides as data
+  // (`daemon_failed`) from the handler itself.
+  consoleRpcEntry(pluginsCheckUpdates.name, pluginsCheckUpdates.input, (handlers, input, context) => handlers.pluginsCheckUpdates(input, context)),
+  consoleRpcEntry(pluginsInstall.name, pluginsInstall.input, (handlers, input, context) => handlers.pluginsInstall(input, context), {
+    refuse: pluginInstallRefusal,
+  }),
+  consoleRpcEntry(pluginsManage.name, pluginsManage.input, (handlers, input, context) => handlers.pluginsManage(input, context), {
+    refuse: pluginManageRefusal,
+  }),
 ];
 
 /** The named allowlist as the refusal sentence spells it. */

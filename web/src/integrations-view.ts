@@ -6,11 +6,12 @@
  * each provider carries, linked vs available in its own vocabulary), the
  * Helper MCP roster (name, transport, connection health), the scoped
  * Project's Open Design link (project name, screen count, synced-at,
- * digest — or the honest null), and the plugins-checked-at stamp. No new
- * door, no writes — the screen this feeds is read-only by construction
- * (install/manage/check-updates land in T-09b). Status vocabularies reuse
- * the RN client's own words (`plugin/client/factory/plugins.tsx`,
- * `helper-mcps.tsx`) so the console and the client can never disagree.
+ * digest — or the honest null), and the plugins-checked-at stamp. The fold
+ * stays pure over the snapshot; the T-09b writes (check-updates, install,
+ * manage) are transport slots on the screen, never folded facts. Status
+ * vocabularies reuse the RN client's own words
+ * (`plugin/client/factory/plugins.tsx`, `helper-mcps.tsx`) so the console
+ * and the client can never disagree.
  */
 import type { CompanionPluginView, CompanionStatus, FactoryView } from "../../plugin/shared/view.ts";
 
@@ -42,11 +43,15 @@ export interface IntegrationsPluginRow {
   description: string;
   /** The design's own icon tone — coral for the Core plugin, lime for the tools, cyan for the companions. */
   tone: "cyan" | "coral" | "lime";
+  /** The roster slot the row came from — decides which Owner acts its card offers (T-09b). */
+  kind: "core" | "tool" | "companion";
   /** True for the Core plugin card — the catalog's own "CORE" mark. */
   core: boolean;
   status: CompanionStatus;
   statusLabel: string;
   statusTone: "green" | "amber" | "red" | "muted";
+  /** The daemon's own enabled flag — decides whether an installed companion's act is Disable or Enable (T-09b). */
+  enabled: boolean;
   /** `v0.2.3` — null when uninstalled or unknown, never a fabricated version. */
   versionLabel: string | null;
   /** The on-demand update check's own answer — null is unchecked or a local install. */
@@ -115,18 +120,20 @@ export function utcStamp(iso: string): string {
   return match === null ? iso : `${match[1]} ${match[2]} UTC`;
 }
 
-/** One `CompanionPluginView` → one card row, the tone decided by the caller's roster slot. */
-function pluginRow(plugin: CompanionPluginView, tone: "cyan" | "coral" | "lime", core: boolean): IntegrationsPluginRow {
+/** One `CompanionPluginView` → one card row, the tone and kind decided by the caller's roster slot. */
+function pluginRow(plugin: CompanionPluginView, tone: "cyan" | "coral" | "lime", kind: "core" | "tool" | "companion"): IntegrationsPluginRow {
   const status = PLUGIN_STATUS[plugin.status];
   return {
     id: plugin.id,
     title: plugin.title,
     description: plugin.description,
     tone,
-    core,
+    kind,
+    core: kind === "core",
     status: plugin.status,
     statusLabel: status.label,
     statusTone: status.tone,
+    enabled: plugin.enabled,
     versionLabel: plugin.version === null ? null : `v${plugin.version.replace(/^v/, "")}`,
     updateAvailable: plugin.updateAvailable,
     commitsBehind: plugin.commitsBehind,
@@ -144,9 +151,9 @@ function pluginRow(plugin: CompanionPluginView, tone: "cyan" | "coral" | "lime",
  */
 export function integrationsScreenModel(view: FactoryView): IntegrationsScreenModel {
   const plugins: IntegrationsPluginRow[] = [
-    pluginRow(view.corePlugin, "coral", true),
-    ...(view.companionTools ?? []).map((tool) => pluginRow(tool, "lime", false)),
-    ...view.companions.map((companion) => pluginRow(companion, "cyan", false)),
+    pluginRow(view.corePlugin, "coral", "core"),
+    ...(view.companionTools ?? []).map((tool) => pluginRow(tool, "lime", "tool")),
+    ...view.companions.map((companion) => pluginRow(companion, "cyan", "companion")),
   ];
   const link = view.execution?.openDesignLink;
   const openDesign: IntegrationsOpenDesign | null =

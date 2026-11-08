@@ -7,6 +7,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createFactory, type Factory } from "../plugin/server/core/factory.ts";
+import { checkDaemonPluginUpdates, installDaemonPlugin, listDaemonPlugins, manageDaemonPlugin } from "../plugin/server/daemon-cli.ts";
 import { createSurfaceHandlers } from "../plugin/server/surface-rpc.ts";
 import type { SurfaceDaemonApi } from "../plugin/server/surface-rpc.ts";
 import { createFactoryRegistry, type FactoryRegistry } from "../plugin/server/projects.ts";
@@ -60,6 +61,16 @@ export function makeConsoleFixture(
      * process (the same seam `plugin-spool.test.ts` records through).
      */
     stopAgent?: (agentId: string, home?: string) => Promise<{ ok: true } | { ok: false; reason: string }>;
+    /**
+     * T-09b: the daemon plugin lifecycle seams (the same overrides
+     * `SurfaceDeps` accepts) — injectable so the Integrations write e2e and
+     * the door's dispatch assertions never spawn a real daemon bridge; the
+     * fakes record every call so refusals can prove no dispatch happened.
+     */
+    listPlugins?: typeof listDaemonPlugins;
+    installPlugin?: typeof installDaemonPlugin;
+    managePlugin?: typeof manageDaemonPlugin;
+    checkPluginUpdates?: typeof checkDaemonPluginUpdates;
   },
 ): ConsoleFixture {
   const home = join(homeRoot, "paseo-home");
@@ -100,6 +111,10 @@ export function makeConsoleFixture(
     registry,
     ...(usage === undefined ? {} : { usage }),
     ...(options?.stopAgent === undefined ? {} : { stopAgent: options.stopAgent }),
+    ...(options?.listPlugins === undefined ? {} : { listPlugins: options.listPlugins }),
+    ...(options?.installPlugin === undefined ? {} : { installPlugin: options.installPlugin }),
+    ...(options?.managePlugin === undefined ? {} : { managePlugin: options.managePlugin }),
+    ...(options?.checkPluginUpdates === undefined ? {} : { checkPluginUpdates: options.checkPluginUpdates }),
   });
   return {
     homeRoot,

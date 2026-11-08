@@ -1,15 +1,17 @@
 /**
- * The Integrations screen's contract (T-09a): the `/integrations` route
- * renders the READ-ONLY integrations roster from the snapshot alone — the
+ * The Integrations screen's contract (T-09a + T-09b): the `/integrations`
+ * route renders the integrations roster from the snapshot alone — the
  * plugin cards (Core first, then companion tools, then the catalog
  * companions, each with its status word, version, and on-demand update
  * state), the host skill ecosystem's linked-vs-available rows, the Helper
  * MCP roster's name/transport/health, the scoped Project's Open Design
  * link (or the honest "Not linked"), and the plugins-checked-at stamp (or
- * "Never checked"). The boundary is the wave's own law: NO writes render —
- * no Install/Manage, no update buttons, no Check-updates, no dialogs
- * (T-09b) — and no Start Supervisor/Lead anywhere (ADR 0017). The three
- * tabs are a client-side view switch, never an RPC door.
+ * "Never checked"). T-09b adds the Owner's plugin writes — the
+ * Check-for-updates probe and the per-card Install/Update/Enable/Disable
+ * acts — while the boundary stays the wave's own law: no Remove or Reload
+ * anywhere, no Install/Enable/Disable on the Core card, and no Start
+ * Supervisor/Lead anywhere (ADR 0017). The three tabs are a client-side
+ * view switch, never an RPC door.
  */
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
@@ -229,13 +231,14 @@ describe("the Integrations screen", () => {
 
   it("switches its three read-only tabs client-side — plugins, skills, MCP servers", () => {
     render(<IntegrationsScreen view={richView()} />);
-    fireEvent.click(screen.getByRole("button", { name: /Skills/ }));
+    // Anchored names: the tool card's own act buttons carry "Factory Skills Pack" too.
+    fireEvent.click(screen.getByRole("button", { name: /^Skills/ }));
     expect(screen.getByText("Official Expo & EAS")).toBeTruthy();
     expect(screen.getByText("2 skills · eas-app-stores, eas-hosting")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: /MCP servers/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^MCP servers/ }));
     expect(screen.getByRole("heading", { name: "my-helper" })).toBeTruthy();
     expect(screen.getByText("Local on Host")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: /Plugins & tools/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^Plugins & tools/ }));
     expect(screen.getByText("Factory Skills Pack")).toBeTruthy();
   });
 
@@ -278,15 +281,34 @@ describe("the Integrations screen", () => {
     expect(screen.getByText(/Live integration states are degraded \(paseo daemon unreachable\)/)).toBeTruthy();
   });
 
-  it("carries no writes — no Install/Manage/Update buttons, no Check-updates, no dialogs, no Start seats (ADR 0017)", () => {
+  it("carries the T-09b Owner writes only — never Remove/Reload, never an act on the Core card, never a seat control (ADR 0017)", () => {
     render(<IntegrationsScreen view={richView()} />);
-    // The only buttons on the screen are the three tabs — a client-side view switch, never an RPC door.
-    const buttons = screen.queryAllByRole("button");
-    expect(buttons.map((button) => button.textContent)).toEqual(["Plugins & tools4", "Skills3", "MCP servers3"]);
-    // "Update" is absent from the scan on purpose: the Plugins tab's own update
-    // dot announces "1 update available" — honest read-only state, not a control.
-    for (const word of ["Install", "Manage", "Check for updates", "Check updates", "Sync", "Verify", "Start Supervisor", "Start Lead"]) {
+    // The plugins tab's own controls: the Check-for-updates probe (no confirm)
+    // and the per-card acts the fold's facts earn — an Update on the stale
+    // tool, a Disable on the running companion, an Install on the missing one.
+    expect(screen.getByRole("button", { name: "Check for updates" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Update Factory Skills Pack" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Disable Burn Lab" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Install Release Lab" })).toBeTruthy();
+    // The Core card carries NO act in this roster (no update marked): the
+    // console never installs, enables, or disables its own host plugin.
+    const core = screen.getByRole("article", { name: "Paseo Factory plugin" });
+    expect(within(core).queryAllByRole("button"), "the Core card carries no act buttons").toEqual([]);
+    // The boundary the door and the screen share: remove and reload stay
+    // developer acts, and no Start/Ensure seat control exists anywhere.
+    for (const word of ["Remove", "Reload", "Uninstall", "Start Supervisor", "Start Lead", "Ensure"]) {
       expect(screen.queryByRole("button", { name: new RegExp(word, "i") }), word).toBeNull();
     }
+    // The probe is the Plugins tab's own control — the Skills and MCP tabs carry no writes at all.
+    fireEvent.click(screen.getByRole("button", { name: /^Skills/ }));
+    expect(screen.queryByRole("button", { name: "Check for updates" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /^MCP servers/ }));
+    // The MCP cards are read-only data — no card carries any control (the
+    // probe/sync acts land in T-09c+). The plugins tab's own update dot keeps
+    // announcing "1 update available" from the header, an honest read not a control.
+    for (const mcpCard of screen.getAllByRole("article", { name: /MCP server/ })) {
+      expect(within(mcpCard).queryAllByRole("button"), "the MCP card carries no control").toEqual([]);
+    }
+    expect(screen.queryByRole("button", { name: /^(Probe|Sync|Verify|Install|Enable|Disable)/ })).toBeNull();
   });
 });
