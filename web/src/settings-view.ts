@@ -8,9 +8,9 @@
  * text is ever carried, so none can ever reach the DOM — the hydrate/push
  * stamps render as deterministic UTC labels or "Never" (the integrations
  * fold's own `utcStamp` string law), and every shared secret renders as a
- * presence chip, never a value. The T-10b vault writes (configure/hydrate/
- * pull/push/sync/import) and the T-10c danger zone are later waves: nothing
- * here is a transport or a write.
+ * presence chip, never a value. The T-10b/T-10c vault writes and the T-10e
+ * danger zone belong to the screen's dialogs, not the fold: nothing here is
+ * a transport or a write.
  */
 import type { FactoryView, VaultStatusView } from "../../plugin/shared/view.ts";
 import { utcStamp } from "./integrations-view.ts";

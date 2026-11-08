@@ -27,9 +27,9 @@ import { makeTempDir } from "./helpers.ts";
  * includeLedgers — the confirm checkbox's checked arm) commits this node's
  * global ledger snapshot into the checkout and MOVES the bare remote's
  * branch, and the NEXT snapshot folds `Last pushed` and the clone presence;
- * and the deferred vault methods (`factory.vault.hydrate`, `.sync`,
- * `.import` — T-10c) keep refusing `unknown_method` as data through the same
- * door.
+ * and the still-deferred key import (`factory.vault.import` — T-10d) keeps
+ * refusing `unknown_method` as data through the same door (the T-10c
+ * round-trip writes have their own RG-1 e2e).
  */
 
 /** One git invocation against the fixture — output captured, never inherited. */
@@ -138,18 +138,19 @@ test("RG-1: the console's real transport writes the vault — configure, pull, a
   assert.equal(pushedModel.vault.cloneLabel, "Present");
   assert.notEqual(pushedModel.vault.lastHydratedLabel, "Never");
 
-  // (g) The deferred vault methods through the SAME door — hydrate, sync,
-  // and the key import stay T-10c: every one refuses unknown_method as data.
-  for (const method of ["factory.vault.hydrate", "factory.vault.sync", "factory.vault.import"]) {
-    const response = await fetchAt("/rpc", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ method, params: {} }),
-    });
-    assert.equal(response.status, 404, `${method} stays outside the door`);
-    const payload = (await response.json()) as { ok: boolean; code?: string; error?: string };
-    assert.equal(payload.ok, false);
-    assert.equal(payload.code, "unknown_method", `${method} refuses as data`);
-    assert.match(payload.error ?? "", /factory\.vault\.configure, factory\.vault\.pull, factory\.vault\.push/, "the allowlist sentence carries exactly the three T-10b vault writes");
-  }
+  // (g) The still-deferred vault method through the SAME door — the key
+  // import stays T-10d: it refuses unknown_method as data, and the allowlist
+  // sentence now carries the five landed vault writes (the T-10c round-trips
+  // `factory.vault.sync` and `factory.vault.hydrate` are proven by their own
+  // RG-1 e2e).
+  const response = await fetchAt("/rpc", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ method: "factory.vault.import", params: {} }),
+  });
+  assert.equal(response.status, 404, "factory.vault.import stays outside the door");
+  const payload = (await response.json()) as { ok: boolean; code?: string; error?: string };
+  assert.equal(payload.ok, false);
+  assert.equal(payload.code, "unknown_method", "factory.vault.import refuses as data");
+  assert.match(payload.error ?? "", /factory\.vault\.configure, factory\.vault\.pull, factory\.vault\.push, factory\.vault\.sync, factory\.vault\.hydrate/, "the allowlist sentence carries the five landed vault writes");
 });

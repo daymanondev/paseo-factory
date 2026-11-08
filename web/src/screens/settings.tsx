@@ -1,23 +1,32 @@
 /**
- * The Settings screen (T-10a + T-10b, ADR 0051) — the `/settings` route: the
- * read-only fold of T-10a (both panels from the existing snapshot, the design's
- * own settings look — `design/daemon-settings.css` facts/disclosure,
- * `design/management.css` vault summary + presence chips, `design/styles.css`
- * card/badge/dialog vocabulary; the design's JS is mock-only and never ported)
- * plus the Owner's first vault writes through the sidecar's allowlisted door
- * (T-10b): the stepped Vault setup dialog (`factory.vault.configure` —
- * repo prefilled from suggestedRepo, branch, and an optional passphrase whose
- * "Leave unchanged" choice OMITS the field so the persisted value survives)
- * and the Pull / Push buttons (`factory.vault.pull` / `factory.vault.push`,
- * enabled only when configured), each behind a confirm naming the act with
- * its mergeLedgers / includeLedgers checkbox, default off. The passphrase is
- * an `<input type="password">` that never echoes back into the DOM after
- * submit, never reaches localStorage/sessionStorage/URL, and clears from
- * component state on every close. Cancel sends nothing; a success refreshes
- * the snapshot so the panel's stamps update; refusals (vault-* codes) render
- * inline as data. Still NO seat start (ADR 0017), NO hydrate/sync/import
- * (T-10c), NO project reset/delete danger zone (T-10d) — and no credential
- * or passphrase text ever reaches the DOM.
+ * The Settings screen (T-10a + T-10b + T-10c, ADR 0051) — the `/settings`
+ * route: the read-only fold of T-10a (both panels from the existing snapshot,
+ * the design's own settings look — `design/daemon-settings.css`
+ * facts/disclosure, `design/management.css` vault summary + presence chips,
+ * `design/styles.css` card/badge/dialog vocabulary; the design's JS is
+ * mock-only and never ported) plus the Owner's vault writes through the
+ * sidecar's allowlisted door: the stepped Vault setup dialog of T-10b
+ * (`factory.vault.configure` — repo prefilled from suggestedRepo, branch, and
+ * an optional passphrase whose "Leave unchanged" choice OMITS the field so
+ * the persisted value survives) and the Pull / Push buttons
+ * (`factory.vault.pull` / `factory.vault.push`, enabled only when configured),
+ * each behind a confirm naming the act with its mergeLedgers / includeLedgers
+ * checkbox, default off; and the two round-trip writes of T-10c — the Sync
+ * button (`factory.vault.sync`, confirm with mergeLedgers / includeLedger /
+ * overwriteConfigs checkboxes, default off) and the Hydrate button
+ * (`factory.vault.hydrate`, confirm with mergeLedgers / overwriteConfigs
+ * checkboxes, default off, overwriteConfigs visibly marked destructive). The
+ * console's sync sends NO repo/branch/passphrase (configure owns those) and
+ * its hydrate sends NO repo/ref (the configured vault is the one that
+ * hydrates) — the door refuses both shapes and the dialogs never build them.
+ * A sync success also folds the handler's createdRepo/pushed facts. The
+ * passphrase is an `<input type="password">` that never echoes back into the
+ * DOM after submit, never reaches localStorage/sessionStorage/URL, and
+ * clears from component state on every close. Cancel sends nothing; a
+ * success refreshes the snapshot so the panel's stamps update; refusals
+ * (vault-* codes) render inline as data. Still NO seat start (ADR 0017), NO
+ * key import (T-10d), NO project reset/delete danger zone (T-10e) — and no
+ * credential or passphrase text ever reaches the DOM.
  */
 import { useState } from "react";
 import type { FactoryView } from "../../../plugin/shared/view.ts";
@@ -26,18 +35,24 @@ import "../../../design/management.css";
 import { settingsScreenModel, type SettingsSecretChip } from "../settings-view.ts";
 import {
   vaultConfigureViaSidecar,
+  vaultHydrateViaSidecar,
   vaultPullViaSidecar,
   vaultPushViaSidecar,
+  vaultSyncViaSidecar,
   type VaultConfigureInput,
   type VaultConfigureReply,
+  type VaultHydrateInput,
+  type VaultHydrateReply,
   type VaultPullInput,
   type VaultPullReply,
   type VaultPushInput,
   type VaultPushReply,
+  type VaultSyncInput,
+  type VaultSyncReply,
 } from "../vault.ts";
 
 /** Any of the screen's write replies — the banner renders whichever landed, verbatim. */
-type VaultWriteReply = VaultConfigureReply | VaultPullReply | VaultPushReply;
+type VaultWriteReply = VaultConfigureReply | VaultPullReply | VaultPushReply | VaultSyncReply | VaultHydrateReply;
 
 /** One shared-secret presence chip — the design's badge, lit green only when the secret exists. */
 function SecretChip({ chip }: { chip: SettingsSecretChip }) {
@@ -304,21 +319,164 @@ function VaultActDialog({
   );
 }
 
+// ---- the sync / hydrate confirm (T-10c) --------------------------------------------------------------
+
+/** The one checkbox input shape both round-trip writes build — only checked fields ride, as `true`. */
+type RoundtripChecks = { mergeLedgers: boolean; includeLedger: boolean; overwriteConfigs: boolean };
+
+/** One confirm checkbox — the field it carries, its honest sentence, and its destructive marking. */
+interface RoundtripOption {
+  field: keyof RoundtripChecks;
+  label: string;
+  hint: string;
+  /** overwriteConfigs — the design's red vocabulary, the only visibly destructive checkbox. */
+  destructive?: boolean;
+}
+
+/** The sync confirm's three checkboxes (T-10c) — the ledger merge, the ledger snapshot, and the destructive config overwrite. */
+const SYNC_OPTIONS: readonly RoundtripOption[] = [
+  {
+    field: "mergeLedgers",
+    label: "Merge the vault's node ledger snapshots into this machine's ledgers after hydrating",
+    hint: "mergeLedgers — off by default; on reconciles the vault's ledger history into this home.",
+  },
+  {
+    field: "includeLedger",
+    label: "Snapshot this machine's ledgers under this node's namespace before pushing",
+    hint: "includeLedger — off by default; on shares this node's ledger history with the vault.",
+  },
+  {
+    field: "overwriteConfigs",
+    label: "Overwrite this machine's vault-backed configs with the remote's copies",
+    hint: "overwriteConfigs — DESTRUCTIVE: on replaces this machine's configs with the vault's copies; off keeps local edits.",
+    destructive: true,
+  },
+];
+
+/** The hydrate confirm's two checkboxes (T-10c) — the ledger merge and the destructive config overwrite. */
+const HYDRATE_OPTIONS: readonly RoundtripOption[] = [SYNC_OPTIONS[0]!, SYNC_OPTIONS[2]!];
+
+/**
+ * The one confirm BOTH round-trip acts pass through (the T-10b dialog law): it
+ * names the act (Sync or Hydrate), carries the configured repo/branch facts —
+ * the only vault either act can touch, because the console's sync never sends
+ * repo/branch/passphrase and its hydrate never sends repo/ref — states the
+ * honest outcome, and holds the act's own checkboxes, every one default OFF.
+ * Every checkbox rides EXPLICITLY (true or false): the core's own sync
+ * defaults turn an omitted mergeLedgers/includeLedger ON, so the confirm
+ * spells each leg's truth and the wire's answer is the checkbox's promise.
+ * Cancel sends nothing; a refusal keeps the dialog for another try, a
+ * success closes it (the snapshot refreshes behind it).
+ */
+function VaultRoundtripDialog({
+  act,
+  repo,
+  branch,
+  submit,
+  close,
+}: {
+  act: "sync" | "hydrate";
+  repo: string | null;
+  branch: string;
+  submit: (checks: RoundtripChecks) => Promise<VaultWriteReply>;
+  close: () => void;
+}) {
+  const options = act === "sync" ? SYNC_OPTIONS : HYDRATE_OPTIONS;
+  const [checks, setChecks] = useState<RoundtripChecks>({ mergeLedgers: false, includeLedger: false, overwriteConfigs: false });
+  const [phase, setPhase] = useState<"confirm" | "saving">("confirm");
+  const run = async () => {
+    setPhase("saving");
+    const reply = await submit(checks);
+    if (reply.ok) close();
+    else setPhase("confirm");
+  };
+  const isSync = act === "sync";
+  return (
+    <div className="console-dialog-overlay" role="presentation" onClick={phase === "saving" ? undefined : close}>
+      <div
+        className="dialog console-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label={isSync ? "Sync vault now?" : "Hydrate vault now?"}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="dialog-head">
+          <strong>{isSync ? "Sync vault now?" : "Hydrate vault now?"}</strong>
+          <span className="spacer" />
+          <button type="button" className="btn ghost" onClick={close} disabled={phase === "saving"}>
+            Close
+          </button>
+        </div>
+        <div className="dialog-body">
+          <div className="compact-vault">
+            <p>
+              {isSync
+                ? `The daemon runs the unified bidirectional sync against ${repo ?? "the vault"} — hydrating this machine's vault-runtime from the remote and pushing a commit when this machine has new files. The configured repository and branch ride the persisted config; this dialog never sends them. The panel's Last hydrated and Last pushed stamps refresh when it lands.`
+                : `The daemon streams ${repo ?? "the vault"}'s tarball directly and unpacks it into this machine's vault-runtime — no clone is left behind. The configured repository and branch ride the persisted config; this dialog never sends them. The panel's Last hydrated stamp refreshes when it lands.`}
+            </p>
+            <dl className="data-list">
+              <div>
+                <dt>Repository</dt>
+                <dd className="mono">{repo ?? "—"}</dd>
+              </div>
+              <div>
+                <dt>Branch</dt>
+                <dd className="mono">{branch}</dd>
+              </div>
+            </dl>
+            {options.map((option) => (
+              <div className="field" key={option.field}>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={checks[option.field]}
+                    onChange={(event) => setChecks({ ...checks, [option.field]: event.target.checked })}
+                  />{" "}
+                  {option.label}
+                </label>
+                <small className={option.destructive === true ? "red" : undefined}>{option.hint}</small>
+              </div>
+            ))}
+            {phase === "confirm" ? (
+              <div className="dialog-actions">
+                <button type="button" className="btn ghost" onClick={close}>
+                  Cancel
+                </button>
+                <button type="button" className="btn primary" onClick={() => void run()}>
+                  {isSync ? "Sync vault now" : "Hydrate vault now"}
+                </button>
+              </div>
+            ) : (
+              <p className="small muted" role="status">
+                {isSync ? "Syncing vault…" : "Hydrating vault…"}
+              </p>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ---- the panels --------------------------------------------------------------------------------------
 
-/** The Private Vault card — the design's own card-top + `.vault-summary` facts + `.vault-items` chips + the T-10b Owner acts. */
+/** The Private Vault card — the design's own card-top + `.vault-summary` facts + `.vault-items` chips + the T-10b/T-10c Owner acts. */
 function VaultPanel({
   model,
   pending,
   onConfigure,
   onPull,
   onPush,
+  onSync,
+  onHydrate,
 }: {
   model: ReturnType<typeof settingsScreenModel>;
   pending: boolean;
   onConfigure: () => void;
   onPull: () => void;
   onPush: () => void;
+  onSync: () => void;
+  onHydrate: () => void;
 }) {
   const vault = model.vault;
   return (
@@ -369,7 +527,7 @@ function VaultPanel({
           <SecretChip key={chip.id} chip={chip} />
         ))}
       </div>
-      {/* The Owner's three vault acts (T-10b) — Configure always offered; Pull and Push need a configured vault. */}
+      {/* The Owner's five vault acts (T-10b + T-10c) — Configure always offered; the four transports need a configured vault. */}
       <div className="vault-secondary" aria-label="Vault actions">
         <button type="button" className="btn ghost" aria-label="Configure vault" disabled={pending} onClick={onConfigure}>
           Configure
@@ -379,6 +537,12 @@ function VaultPanel({
         </button>
         <button type="button" className="btn ghost" aria-label="Push vault" disabled={pending || !vault.configured} onClick={onPush}>
           Push
+        </button>
+        <button type="button" className="btn ghost" aria-label="Sync vault" disabled={pending || !vault.configured} onClick={onSync}>
+          Sync
+        </button>
+        <button type="button" className="btn ghost" aria-label="Hydrate vault" disabled={pending || !vault.configured} onClick={onHydrate}>
+          Hydrate
         </button>
       </div>
       <details className="daemon-settings-diagnostics">
@@ -471,8 +635,18 @@ export interface SettingsScreenProps {
   vaultPull?: (input: VaultPullInput) => Promise<VaultPullReply>;
   /** The push transport (T-10b) — the two-way sync's publishing leg. */
   vaultPush?: (input: VaultPushInput) => Promise<VaultPushReply>;
+  /** The sync transport (T-10c) — the unified bidirectional round-trip (checkboxes only, never repo/branch/passphrase). */
+  vaultSync?: (input: VaultSyncInput) => Promise<VaultSyncReply>;
+  /** The hydrate transport (T-10c) — the zero-clone direct hydrate (checkboxes only, never repo/ref). */
+  vaultHydrate?: (input: VaultHydrateInput) => Promise<VaultHydrateReply>;
   /** Fired after a successful write — the shell refreshes the snapshot (and so the panel's stamps). */
   onChanged?: () => void;
+}
+
+/** The sync reply's own two facts the banner appends — the core's createdRepo and whether a commit moved. */
+function syncOutcomeNote(reply: VaultWriteReply): string {
+  if (!reply.ok || !("createdRepo" in reply)) return "";
+  return ` (${reply.createdRepo ? "repo created; " : ""}${reply.pushed ? "pushed" : "nothing to push"})`;
 }
 
 export function SettingsScreen({
@@ -480,12 +654,14 @@ export function SettingsScreen({
   vaultConfigure = vaultConfigureViaSidecar,
   vaultPull = vaultPullViaSidecar,
   vaultPush = vaultPushViaSidecar,
+  vaultSync = vaultSyncViaSidecar,
+  vaultHydrate = vaultHydrateViaSidecar,
   onChanged = () => {},
 }: SettingsScreenProps) {
   const model = settingsScreenModel(view);
   const [pending, setPending] = useState(false);
-  /** The open dialog — "setup" (configure), "pull", "push", or null. */
-  const [dialog, setDialog] = useState<"setup" | "pull" | "push" | null>(null);
+  /** The open dialog — "setup" (configure), "pull", "push", "sync", "hydrate", or null. */
+  const [dialog, setDialog] = useState<"setup" | "pull" | "push" | "sync" | "hydrate" | null>(null);
   /** The last write's reply — both arms render verbatim; the dialog act closes on success. */
   const [status, setStatus] = useState<{ act: string; reply: VaultWriteReply } | null>(null);
 
@@ -514,7 +690,8 @@ export function SettingsScreen({
       {status !== null ? (
         status.reply.ok ? (
           <div className="console-banner console-banner-ok" role="status">
-            {status.act} — {status.reply.summary}. Refreshing…
+            {status.act} — {status.reply.summary}
+            {syncOutcomeNote(status.reply)}. Refreshing…
           </div>
         ) : (
           <div className="console-banner console-banner-error" role="alert">
@@ -529,6 +706,8 @@ export function SettingsScreen({
           onConfigure={() => setDialog("setup")}
           onPull={() => setDialog("pull")}
           onPush={() => setDialog("push")}
+          onSync={() => setDialog("sync")}
+          onHydrate={() => setDialog("hydrate")}
         />
         <ProjectPanel model={model} />
       </div>
@@ -555,6 +734,28 @@ export function SettingsScreen({
           branch={model.vault.branch}
           close={() => setDialog(null)}
           submit={(withLedgers) => run("Pushing the vault", () => vaultPush(withLedgers ? { includeLedgers: true } : {}))}
+        />
+      ) : null}
+      {dialog === "sync" ? (
+        <VaultRoundtripDialog
+          act="sync"
+          repo={model.vault.repo}
+          branch={model.vault.branch}
+          close={() => setDialog(null)}
+          submit={(checks) =>
+            run("Syncing the vault", () =>
+              vaultSync({ mergeLedgers: checks.mergeLedgers, includeLedger: checks.includeLedger, overwriteConfigs: checks.overwriteConfigs }),
+            )
+          }
+        />
+      ) : null}
+      {dialog === "hydrate" ? (
+        <VaultRoundtripDialog
+          act="hydrate"
+          repo={model.vault.repo}
+          branch={model.vault.branch}
+          close={() => setDialog(null)}
+          submit={(checks) => run("Hydrating the vault", () => vaultHydrate({ mergeLedgers: checks.mergeLedgers, overwriteConfigs: checks.overwriteConfigs }))}
         />
       ) : null}
     </section>

@@ -50,11 +50,16 @@
  *   field (`source`, `ref`, `mergeLedgers`, `overwriteConfigs`) — each
  *   refusal is data (`forbidden_operation`), the daemon's own answers
  *   (`daemon_failed` included) ride as data too.
- * - The vault writes (T-10b): `factory.vault.configure`, `factory.vault.pull`,
- *   and `factory.vault.push` join the door as plain entries on their existing
- *   shared schemas — the Settings screen's three Owner acts. The sibling
- *   vault methods (`hydrate`, `sync`, `import`) stay outside the door (T-10c),
- *   and the vendored core's own `vault-*` refusals ride as data.
+ * - The vault writes (T-10b + T-10c): `factory.vault.configure`,
+ *   `factory.vault.pull`, and `factory.vault.push` join the door as plain
+ *   entries on their existing shared schemas — the Settings screen's first
+ *   three Owner acts — and the two round-trip writes join NARROWED per input
+ *   before any handler runs: `factory.vault.sync` refuses the three fields
+ *   configure owns (`repo`, `branch`, `passphrase`), `factory.vault.hydrate`
+ *   refuses its repo/ref overrides — each refusal is data
+ *   (`forbidden_operation`), and the vendored core's own `vault-*` refusals
+ *   ride as data. The key import (`factory.vault.import`) stays outside the
+ *   door (T-10d).
  * - A start failure is logged, never thrown — the sidecar must never break
  *   plugin boot (the shell wraps the call, and `start()` itself resolves to
  *   `{ ok: false, reason }` rather than rejecting while ports fall back).
@@ -63,7 +68,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import type { z, ZodType } from "zod";
-import { accept, agentTranscript, inbox, lanesReset, lanesSet, leadRotate, pluginsCheckUpdates, pluginsInstall, pluginsManage, profilesApply, profilesDelete, profilesSave, scrumCommand, snapshot, supervisorRevoke, taskDetail, vaultConfigure, vaultPull, vaultPush } from "../shared/rpc.ts";
+import { accept, agentTranscript, inbox, lanesReset, lanesSet, leadRotate, pluginsCheckUpdates, pluginsInstall, pluginsManage, profilesApply, profilesDelete, profilesSave, scrumCommand, snapshot, supervisorRevoke, taskDetail, vaultConfigure, vaultHydrate, vaultPull, vaultPush, vaultSync } from "../shared/rpc.ts";
 import type { SurfaceHandlers } from "./surface-rpc.ts";
 import type { SurfaceCallContext } from "./surface-rpc.ts";
 
@@ -124,6 +129,20 @@ export const CONSOLE_PLUGIN_MANAGE_ACTIONS: readonly string[] = ["enable", "disa
  * `ref`, and the ledger/config overrides — developer acts stay off the console.
  */
 export const CONSOLE_PLUGIN_INSTALL_FORBIDDEN_FIELDS: readonly string[] = ["source", "ref", "mergeLedgers", "overwriteConfigs"];
+
+/**
+ * The sync fields the console never carries (T-10c): `repo`, `branch`, and
+ * `passphrase` — configure owns all three, so the console's sync runs the
+ * persisted vault of record and can never move it through a one-shot write.
+ */
+export const CONSOLE_VAULT_SYNC_FORBIDDEN_FIELDS: readonly string[] = ["repo", "branch", "passphrase"];
+
+/**
+ * The hydrate fields the console never carries (T-10c): the `repo` and `ref`
+ * overrides — the direct hydrate always reads the configured repo/branch, so
+ * the console's hydrate can never point a different vault at this home.
+ */
+export const CONSOLE_VAULT_HYDRATE_FORBIDDEN_FIELDS: readonly string[] = ["repo", "ref"];
 
 /** A per-entry input narrowing — refuses BEFORE any handler runs, data never a dispatch. */
 interface ConsoleRpcNarrowing {
@@ -193,6 +212,24 @@ function pluginInstallRefusal(input: Record<string, unknown>): string | null {
   return null;
 }
 
+/** The sync narrowing (T-10c): the three configure-owned fields refuse — the console's sync carries only its checkboxes. */
+function vaultSyncRefusal(input: Record<string, unknown>): string | null {
+  const forbidden = CONSOLE_VAULT_SYNC_FORBIDDEN_FIELDS.filter((field) => input[field] !== undefined);
+  if (forbidden.length > 0) {
+    return `factory.vault.sync refuses ${forbidden.join(", ")} from the console — configure owns the repo, branch, and passphrase; sync runs the configured vault`;
+  }
+  return null;
+}
+
+/** The hydrate narrowing (T-10c): the repo/ref overrides refuse — the direct hydrate reads the configured repo and branch. */
+function vaultHydrateRefusal(input: Record<string, unknown>): string | null {
+  const forbidden = CONSOLE_VAULT_HYDRATE_FORBIDDEN_FIELDS.filter((field) => input[field] !== undefined);
+  if (forbidden.length > 0) {
+    return `factory.vault.hydrate refuses ${forbidden.join(", ")} from the console — the direct hydrate reads the configured repo and branch`;
+  }
+  return null;
+}
+
 export const CONSOLE_RPC_ALLOWLIST: readonly ConsoleRpcEntry[] = [
   consoleRpcEntry(snapshot.name, snapshot.input, (handlers, input, context) => handlers.snapshot(input, context)),
   consoleRpcEntry(taskDetail.name, taskDetail.input, (handlers, input, context) => handlers.taskDetail(input, context)),
@@ -237,17 +274,29 @@ export const CONSOLE_RPC_ALLOWLIST: readonly ConsoleRpcEntry[] = [
   consoleRpcEntry(pluginsManage.name, pluginsManage.input, (handlers, input, context) => handlers.pluginsManage(input, context), {
     refuse: pluginManageRefusal,
   }),
-  // The vault writes (T-10b) — the Settings screen's three Owner acts, plain
-  // entries on their existing shared schemas (the passphrase tri-state is the
-  // schema's own law: absent preserves, an empty string clears, text sets —
-  // the console's dialog simply omits the field on "Leave unchanged"). The
-  // siblings stay OUTSIDE the door: `factory.vault.hydrate`,
-  // `factory.vault.sync`, and `factory.vault.import` (key import) are T-10c,
-  // and a handler's own refusal (`vault-not-configured`, `vault-*`) rides as
-  // data with HTTP 200 — never a 5xx.
+  // The vault writes (T-10b) — the Settings screen's first three Owner acts,
+  // plain entries on their existing shared schemas (the passphrase tri-state
+  // is the schema's own law: absent preserves, an empty string clears, text
+  // sets — the console's dialog simply omits the field on "Leave unchanged").
+  // A handler's own refusal (`vault-not-configured`, `vault-*`) rides as data
+  // with HTTP 200 — never a 5xx.
   consoleRpcEntry(vaultConfigure.name, vaultConfigure.input, (handlers, input, context) => handlers.vaultConfigure(input, context)),
   consoleRpcEntry(vaultPull.name, vaultPull.input, (handlers, input, context) => handlers.vaultPull(input, context)),
   consoleRpcEntry(vaultPush.name, vaultPush.input, (handlers, input, context) => handlers.vaultPush(input, context)),
+  // The vault round-trip writes (T-10c) — the two remaining Settings acts,
+  // NARROWED per input before any handler runs on their existing shared
+  // schemas: the console's sync carries ONLY its three checkboxes (mergeLedgers,
+  // includeLedger, overwriteConfigs) because configure owns repo/branch/
+  // passphrase, and the console's hydrate carries ONLY its two checkboxes
+  // (mergeLedgers, overwriteConfigs) because the direct hydrate always reads
+  // the configured repo/branch — a forbidden field refuses as data
+  // (`forbidden_operation`), never a dispatch.
+  consoleRpcEntry(vaultSync.name, vaultSync.input, (handlers, input, context) => handlers.vaultSync(input, context), {
+    refuse: vaultSyncRefusal,
+  }),
+  consoleRpcEntry(vaultHydrate.name, vaultHydrate.input, (handlers, input, context) => handlers.vaultHydrate(input, context), {
+    refuse: vaultHydrateRefusal,
+  }),
 ];
 
 /** The named allowlist as the refusal sentence spells it. */

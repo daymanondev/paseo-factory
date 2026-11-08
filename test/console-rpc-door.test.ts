@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
+import { createDefaultVaultRunner } from "../plugin/server/core/vault-transport.ts";
 import { makeConsoleFixture, makeReadyToAcceptTask } from "./console-fixture.ts";
 import { makeTempDir } from "./helpers.ts";
 
@@ -14,22 +15,25 @@ import { makeTempDir } from "./helpers.ts";
  * `factory.profiles.delete`, `factory.lead.rotate`,
  * `factory.supervisor.revoke`), T-09b's three plugin writes
  * (`factory.plugins.check.updates`, `factory.plugins.install`,
- * `factory.plugins.manage`), and T-10b's three vault writes
+ * `factory.plugins.manage`), T-10b's three vault writes
  * (`factory.vault.configure`, `factory.vault.pull`,
- * `factory.vault.push`) — dispatch in-process through the same
- * `SurfaceHandlers` the RN client's registrations call, every input
- * validated by the shared RPC input schema (`plugin/shared/rpc.ts`); every
- * other method name keeps refusing as data. The Scrum entry allowlists
- * exactly the five Owner operations the Inbox resolves, and the plugin
- * writes are narrowed per input — manage serves exactly enable/disable/
- * update (never remove/reload, never disabling the console's own host) and
- * install carries no developer field (never the core target, never a
- * source/ref or ledger/config override) — every narrowing refusal is
- * `forbidden_operation` as data BEFORE any handler runs. The siblings stay
- * OUTSIDE the door (ADR 0017 — no Start/Ensure seat control anywhere): the
- * batch save, `lead.ensure`, `lead.dispatch`, `supervisor.ensure`, every
- * `project.*`, and the deferred vault methods (`factory.vault.hydrate`,
- * `factory.vault.sync`, `factory.vault.import` — T-10c).
+ * `factory.vault.push`), and T-10c's two NARROWED vault round-trip writes
+ * (`factory.vault.sync`, `factory.vault.hydrate`) — dispatch in-process
+ * through the same `SurfaceHandlers` the RN client's registrations call,
+ * every input validated by the shared RPC input schema
+ * (`plugin/shared/rpc.ts`); every other method name keeps refusing as data.
+ * The Scrum entry allowlists exactly the five Owner operations the Inbox
+ * resolves, and the plugin and round-trip vault writes are narrowed per
+ * input — manage serves exactly enable/disable/update (never remove/reload,
+ * never disabling the console's own host), install carries no developer
+ * field (never the core target, never a source/ref or ledger/config
+ * override), sync refuses the three fields configure owns (repo, branch,
+ * passphrase), and hydrate refuses its repo/ref overrides — every narrowing
+ * refusal is `forbidden_operation` as data BEFORE any handler runs. The
+ * siblings stay OUTSIDE the door (ADR 0017 — no Start/Ensure seat control
+ * anywhere): the batch save, `lead.ensure`, `lead.dispatch`,
+ * `supervisor.ensure`, every `project.*`, and the deferred key import
+ * (`factory.vault.import` — T-10d).
  */
 
 async function post(url: string, body: unknown): Promise<{ status: number; payload: unknown }> {
@@ -80,7 +84,7 @@ test("console RPC door: unlisted methods keep refusing as data, whatever their n
   // name, and every sibling the lifecycle waves left outside the door — the
   // batch save, the ensure/dispatch seat acts (ADR 0017: the console can
   // retire a LIVE seat but never start one), every project act, and the
-  // deferred vault methods (T-10c) — all refuse identically: the door is a
+  // deferred key import (T-10d) — all refuse identically: the door is a
   // list, not a prefix.
   for (const method of [
     "factory.retro",
@@ -94,8 +98,6 @@ test("console RPC door: unlisted methods keep refusing as data, whatever their n
     "factory.project.add",
     "factory.project.delete",
     "factory.project.pick.folder",
-    "factory.vault.hydrate",
-    "factory.vault.sync",
     "factory.vault.import",
   ]) {
     const refusal = await post(started.sidecar.url + "/rpc", { method, params: {} });
@@ -103,7 +105,7 @@ test("console RPC door: unlisted methods keep refusing as data, whatever their n
     const payload = refusal.payload as { ok: boolean; code?: string; error?: string };
     assert.equal(payload.ok, false);
     assert.equal(payload.code, "unknown_method");
-    assert.match(payload.error ?? "", /factory\.snapshot, factory\.task\.detail, factory\.agent\.transcript, factory\.accept, factory\.inbox, factory\.scrum\.command, factory\.lanes\.set, factory\.lanes\.reset, factory\.profiles\.apply, factory\.profiles\.save, factory\.profiles\.delete, factory\.lead\.rotate, factory\.supervisor\.revoke, factory\.plugins\.check\.updates, factory\.plugins\.install, factory\.plugins\.manage, factory\.vault\.configure, factory\.vault\.pull, factory\.vault\.push/, "the sentence names the allowlist");
+    assert.match(payload.error ?? "", /factory\.snapshot, factory\.task\.detail, factory\.agent\.transcript, factory\.accept, factory\.inbox, factory\.scrum\.command, factory\.lanes\.set, factory\.lanes\.reset, factory\.profiles\.apply, factory\.profiles\.save, factory\.profiles\.delete, factory\.lead\.rotate, factory\.supervisor\.revoke, factory\.plugins\.check\.updates, factory\.plugins\.install, factory\.plugins\.manage, factory\.vault\.configure, factory\.vault\.pull, factory\.vault\.push, factory\.vault\.sync, factory\.vault\.hydrate/, "the sentence names the allowlist");
   }
 });
 
@@ -246,6 +248,63 @@ test("console RPC door: the plugin writes are NARROWED — remove/reload, disabl
   assert.deepEqual(checks, [fixture.home], "the check seam recorded its one dispatch against the fixture home");
 });
 
+test("console RPC door: the vault round-trip writes are NARROWED — sync's repo/branch/passphrase and hydrate's repo/ref refuse before any handler runs", async (t) => {
+  const homeRoot = makeTempDir();
+  // The hybrid runner the vault dispatch leg needs: `gh` answers the
+  // deterministic missing-binary ENOENT (no host `gh` flips the fold or the
+  // unconfigured sync's probe), while `git` stays real.
+  const gitRunner = createDefaultVaultRunner();
+  const runner: import("../plugin/server/core/vault.ts").VaultRunner = async (call) => {
+    if (call.command === "gh") {
+      throw Object.assign(new Error("spawn gh ENOENT"), { code: "ENOENT" });
+    }
+    return gitRunner(call);
+  };
+  const fixture = makeConsoleFixture(homeRoot, { vaultRunner: runner });
+  const started = await fixture.start();
+  assert.ok(started.ok, started.ok ? "" : started.reason);
+  t.after(async () => {
+    await started.sidecar.close();
+    rmSync(homeRoot, { recursive: true, force: true });
+  });
+
+  const call = (method: string, params: unknown) => post(started.sidecar.url + "/rpc", { method, params });
+
+  // The narrowed refusals — every one a 400 `forbidden_operation` BEFORE any
+  // handler runs: the console's sync carries ONLY its checkboxes because
+  // configure owns repo/branch/passphrase, and its hydrate carries ONLY its
+  // checkboxes because the direct hydrate reads the configured repo/branch —
+  // a one-shot write can never move the home's vault of record.
+  const refusals: { method: string; params: Record<string, unknown>; sentence: RegExp }[] = [
+    { method: "factory.vault.sync", params: { repo: "octocat/other-vault" }, sentence: /refuses repo/ },
+    { method: "factory.vault.sync", params: { branch: "release" }, sentence: /refuses branch/ },
+    { method: "factory.vault.sync", params: { passphrase: "correct-horse-battery-staple" }, sentence: /refuses passphrase/ },
+    { method: "factory.vault.hydrate", params: { repo: "octocat/other-vault" }, sentence: /refuses repo/ },
+    { method: "factory.vault.hydrate", params: { ref: "release" }, sentence: /refuses ref/ },
+  ];
+  for (const refused of refusals) {
+    const reply = await call(refused.method, refused.params);
+    assert.equal(reply.status, 400, `${refused.method} ${JSON.stringify(refused.params)} is narrowed off the console`);
+    const payload = reply.payload as { ok: boolean; code?: string; error?: string };
+    assert.equal(payload.ok, false);
+    assert.equal(payload.code, "forbidden_operation");
+    assert.match(payload.error ?? "", refused.sentence, "the refusal spells the narrowed field it refused");
+    assert.match(payload.error ?? "", /from the console/, "the sentence names whose door refused");
+  }
+
+  // The allowed shapes — the checkbox-only inputs — pass the narrowing and
+  // reach the handler, which then refuses for its own honest reason on this
+  // unconfigured home (`vault-not-configured` as data with HTTP 200): the
+  // door could never have written that sentence itself.
+  for (const method of ["factory.vault.sync", "factory.vault.hydrate"]) {
+    const reply = await call(method, {});
+    assert.equal(reply.status, 200, `${method} with its checkbox-only input dispatches to the handler`);
+    const payload = reply.payload as { ok: boolean; code?: string };
+    assert.equal(payload.ok, false);
+    assert.equal(payload.code, "vault-not-configured", `${method}'s handler refusal rides as data — the call dispatched`);
+  }
+});
+
 test("console RPC door: inputs are validated by the SHARED schema before any handler runs", async (t) => {
   const homeRoot = makeTempDir();
   const fixture = makeConsoleFixture(homeRoot);
@@ -277,6 +336,8 @@ test("console RPC door: inputs are validated by the SHARED schema before any han
     { method: "factory.plugins.manage", params: { pluginId: "factory-burn-lab", action: "sinister" } }, // action not one of the five
     { method: "factory.vault.configure", params: { branch: "main" } }, // repo missing
     { method: "factory.vault.configure", params: { repo: "octocat/factory-vault", branch: "" } }, // branch empty
+    { method: "factory.vault.sync", params: { mergeLedgers: "yes" } }, // mergeLedgers not a boolean
+    { method: "factory.vault.hydrate", params: { overwriteConfigs: 1 } }, // overwriteConfigs not a boolean
   ];
   for (const call of cases) {
     const refusal = await post(started.sidecar.url + "/rpc", call);

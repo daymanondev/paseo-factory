@@ -6,12 +6,13 @@
  * stamps in deterministic UTC or "Never", the four shared-secret presence
  * chips (never values), the hydrated apps list, and the gh probe's
  * installed/login/user/suggested line inside the diagnostics disclosure.
- * T-10b adds exactly the three vault acts (Configure, Pull, Push) behind
- * their dialogs (the write journeys live in settings-write.test.tsx); the
- * rest of the wave's boundary law holds: no vault hydrate/sync/import
- * (T-10c), no project reset/delete (T-10d), no seat start (ADR 0017), and
- * no credential or passphrase text ever reaches the DOM (the fold carries
- * booleans only, so there is nothing to leak).
+ * T-10b adds the first three vault acts (Configure, Pull, Push) and T-10c the
+ * two round-trips (Sync, Hydrate) behind their dialogs (the write journeys
+ * live in settings-write.test.tsx and settings-sync.test.tsx); the rest of
+ * the wave's boundary law holds: no key import (T-10d), no project
+ * reset/delete (T-10e), no seat start (ADR 0017), and no credential or
+ * passphrase text ever reaches the DOM (the fold carries booleans only, so
+ * there is nothing to leak).
  */
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
@@ -229,28 +230,30 @@ describe("the Settings screen", () => {
     expect(screen.getByText(/Live settings are degraded \(paseo daemon unreachable\)/)).toBeTruthy();
   });
 
-  it("carries exactly the three vault acts — never the deferred writes or a seat start (T-10b, ADR 0017)", () => {
-    // The configured card offers Configure, Pull, and Push; the deferred
-    // vault writes (hydrate/sync/import — T-10c), the project danger zone
-    // (reset/delete — T-10d), and every seat Start/Ensure control stay
-    // absent; no dialog is open, so no textbox or input exists either.
+  it("carries exactly the five vault acts — never the deferred writes or a seat start (T-10b + T-10c, ADR 0017)", () => {
+    // The configured card offers Configure, Pull, Push, Sync, and Hydrate; the
+    // deferred key import (T-10d), the project danger zone (reset/delete —
+    // T-10e), and every seat Start/Ensure control stay absent; no dialog is
+    // open, so no textbox or input exists either.
     const configured = render(<SettingsScreen view={richView()} />);
-    for (const name of ["Configure vault", "Pull vault", "Push vault"]) {
+    for (const name of ["Configure vault", "Pull vault", "Push vault", "Sync vault", "Hydrate vault"]) {
       const button = screen.getByRole("button", { name });
       expect(button.hasAttribute("disabled"), name).toBe(false);
     }
-    for (const word of ["Hydrate", "Sync", "Import", "Reset", "Delete", "Start Supervisor", "Start Lead", "Ensure"]) {
+    for (const word of ["Import", "Reset", "Delete", "Start Supervisor", "Start Lead", "Ensure"]) {
       expect(screen.queryByRole("button", { name: new RegExp(word, "i") }), word).toBeNull();
     }
     expect(screen.queryAllByRole("textbox")).toEqual([]);
     expect(document.querySelector("input")).toBeNull();
     configured.unmount();
-    // The unconfigured card keeps Configure (the setup path) and disables
-    // Pull and Push — the acts that need a configured vault.
+    // The unconfigured card keeps Configure (the setup path) and disables the
+    // four transports — the acts that need a configured vault.
     render(<SettingsScreen view={fixtureView()} />);
     expect(screen.getByRole("button", { name: "Configure vault" }).hasAttribute("disabled")).toBe(false);
     expect(screen.getByRole("button", { name: "Pull vault" }).hasAttribute("disabled")).toBe(true);
     expect(screen.getByRole("button", { name: "Push vault" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: "Sync vault" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: "Hydrate vault" }).hasAttribute("disabled")).toBe(true);
   });
 
   it("never renders credential or passphrase text — the fold carries booleans only", () => {
