@@ -1593,12 +1593,16 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
       // accumulated context window stays in the Task worktree) unless the
       // Lead explicitly reset it or the Peer is dead (`error` status) — only
       // then does the pre-0053 retirement (usage flush, stop, archive) run.
+      // In a MIXED roster the law is per-Peer: the dead one is cancelled and
+      // archived even without resetPeer, never dragging the live Peer with it.
       // The Scrum reconciliation arm above keeps its own always-retire law.
+      const deadPeers = previousPeers.filter((peer) => peer.status === "error");
       const preserveLivePeers =
         scrum.execution === undefined &&
         request.resetPeer !== true &&
         previousPeers.some((peer) => peer.status !== "error");
       if (!preserveLivePeers) await finishRetirement();
+      else if (deadPeers.length > 0) await retirePeers(deadPeers);
       return {
         id: request.id,
         ok: true,

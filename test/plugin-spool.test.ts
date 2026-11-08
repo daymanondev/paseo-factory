@@ -1356,6 +1356,20 @@ test("Seam 1 (ADR 0053): a re-contract preserves the live bound Peer by default,
   await until(() => assert.deepEqual(stopped, ["peer-1", "peer-2"], "the error-state Peer was stopped"));
   assert.ok(!(await listedPeerIds()).includes("peer-2"), "the error-state Peer is archived");
   assert.equal(contractLines().length, 4, "the fourth contract_set epoch landed");
+
+  // 5. A MIXED roster (one live + one error bound Peer): the preservation is
+  //    per-Peer — the dead one is cancelled and archived, the live one keeps
+  //    its session; the whole roster is never preserved nor reset together.
+  agents.push(
+    { id: "peer-3", status: "idle", provider: "pi/zai/glm-5.3", cwd: peerCwd, labels: { task: "T-01", project: slug } },
+    { id: "peer-4", status: "error", provider: "pi/zai/glm-5.3", cwd: peerCwd, labels: { task: "T-01", project: slug } },
+  );
+  dropRequest(spoolRootFor(stateDir), { id: "c-5", kind: "contract", task: "T-01", workspace: resolved.root, gate: "true", artifact: "README.md", submitter: "owner" });
+  await until(() => assert.equal(readReply(spoolRootFor(stateDir), "c-5").ok, true, "the mixed-roster re-contract replies ok"));
+  await until(() => assert.deepEqual(stopped, ["peer-1", "peer-2", "peer-4"], "only the error-state Peer of the mixed roster was stopped"));
+  assert.ok(!(await listedPeerIds()).includes("peer-4"), "the mixed roster's error-state Peer is archived");
+  assert.ok((await listedPeerIds()).includes("peer-3"), "the mixed roster's live Peer is preserved");
+  assert.equal(contractLines().length, 5, "the fifth contract_set epoch landed");
 });
 
 test("Seam 1 (ADR 0053): setContract admits exactly the four SLP dispositions — anything else is invalid-contract, and a valid one rides the line", async (t) => {
