@@ -202,11 +202,11 @@ test("v2 re-contract preserves both epochs' Report and Gate evidence at Attempt 
   writeFileSync(join(stateDir, "ledger.jsonl"), plan.events.map((event) => JSON.stringify(event) + "\n").join(""));
   const factory = createFactory({ stateDir, writerId: "writer" });
   factory.setContract({ ...contract, workspace, gate: "printf first" });
-  const first = await factory.claim({ task: "T", sha });
+  const first = await factory.claim({ task: "T", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   const firstReport = readFileSync(first.reportPath, "utf8");
   const firstLog = readFileSync(first.gate.outputPath!, "utf8");
   factory.setContract({ ...contract, workspace, gate: "printf second" });
-  const second = await factory.claim({ task: "T", sha });
+  const second = await factory.claim({ task: "T", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   assert.notEqual(first.reportPath, second.reportPath, "a new epoch must not overwrite earlier Report bytes");
   assert.notEqual(first.gate.outputPath, second.gate.outputPath);
   assert.equal(readFileSync(first.reportPath, "utf8"), firstReport);

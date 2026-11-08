@@ -151,7 +151,7 @@ try {
 
     run(
       process.execPath,
-      [claimCli, "--task", task, "--sha", flawSha],
+      [claimCli, "--task", task, "--sha", flawSha, "--outcome", "complete", "--scope", "battery arm", "--verification", "battery gate", "--unknowns", "none"],
       agentEnv,
       0,
       "factory-claim (the planted flaw must stay gate-green)",

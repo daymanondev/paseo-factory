@@ -199,7 +199,7 @@ test("a GREEN QA artifact reproduces a real defect, Dev promotes unchanged tests
     sha: string,
     refs: ReturnType<typeof artifactAt>[],
   ) => {
-    const result = await factory.claim({ task, sha });
+    const result = await factory.claim({ task, sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
     assert.equal(result.verdict, "green", result.gate.note);
     await factory.accept({
       task,

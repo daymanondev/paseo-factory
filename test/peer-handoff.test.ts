@@ -330,7 +330,7 @@ test("Claim admission waits for the handoff lifecycle lane without holding it th
   await f.runtime.onLeadTurnEnded(ended(f.peer.id));
   const completion = f.runtime.onLeadTurnEnded(ended(f.peer.id));
   await started;
-  const claim = handleSpoolRequest(f.factory, { id: "claim-racing-handoff", kind: "claim", task: "T-04", sha: f.sha });
+  const claim = handleSpoolRequest(f.factory, { id: "claim-racing-handoff", kind: "claim", task: "T-04", sha: f.sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(f.factory.ledger.events.some(event => event.event === "gate_started"), false);
   release();

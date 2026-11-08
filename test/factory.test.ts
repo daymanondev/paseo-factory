@@ -97,7 +97,7 @@ test("a project-scoped factory keeps its ledger, reports, and gate logs under pr
 
   const factory = createFactory({ stateDir, projectSlug: project.slug });
   factory.setContract({ task: "P1", workspace, gate: "true", artifact });
-  const outcome = await factory.claim({ task: "P1", sha });
+  const outcome = await factory.claim({ task: "P1", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   assert.equal(outcome.verdict, "green");
 
   const projectDir = join(stateDir, "projects", project.slug);
@@ -110,7 +110,7 @@ test("a project-scoped factory keeps its ledger, reports, and gate logs under pr
   // The legacy path: no projectSlug → exactly today's layout (every pre-0.0.14 test's law).
   const legacy = createFactory({ stateDir: join(dir, "legacy") });
   legacy.setContract({ task: "L1", workspace, gate: "true", artifact });
-  await legacy.claim({ task: "L1", sha });
+  await legacy.claim({ task: "L1", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   assert.ok(existsSync(join(dir, "legacy", "ledger.jsonl")));
   assert.ok(!existsSync(join(dir, "legacy", "projects")));
 });
@@ -155,7 +155,7 @@ test("setContract records the workspace with the criteria, allows re-contracting
   assert.equal(evt3.event, "contract_set");
 
   // Once a task is accepted, setContract refuses with already-accepted.
-  const claimed = await factory.claim({ task: "T1", sha });
+  const claimed = await factory.claim({ task: "T1", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   assert.equal(claimed.attempt, 1);
   assert.equal(claimed.verdict, "green");
   await factory.accept({ task: "T1", attempt: 1 });
@@ -209,7 +209,7 @@ test("claim without a contract fails before anything is appended", async (t) => 
   disposeDir(t, dir);
   const factory = createFactory({ stateDir: join(dir, "factory") });
 
-  await assert.rejects(factory.claim({ task: "T404", sha: "a1b2c3d" }), factoryErrorCode("unknown-task"));
+  await assert.rejects(factory.claim({ task: "T404", sha: "a1b2c3d", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } }), factoryErrorCode("unknown-task"));
   assert.deepEqual([...factory.ledger.events], []);
 });
 
@@ -220,7 +220,7 @@ test("claim with an unknown sha is a red verdict, never a HEAD fallback", async 
   const factory = createFactory({ stateDir: join(dir, "factory") });
 
   factory.setContract({ task: "U1", workspace, gate: "true", artifact });
-  const outcome = await factory.claim({ task: "U1", sha: "1234567890123456789012345678901234567890" });
+  const outcome = await factory.claim({ task: "U1", sha: "1234567890123456789012345678901234567890", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   assert.equal(outcome.verdict, "red");
   assert.equal(outcome.attempt, 1);
@@ -233,17 +233,30 @@ test("claim with an unknown sha is a red verdict, never a HEAD fallback", async 
   );
 });
 
-test("claim with an empty sha is a red verdict, not a thrown error", async (t) => {
+test("claim with an empty sha is refused at admission for engineer dispositions, while a read-only disposition resolves HEAD (ADR 0053 §4)", async (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);
-  const { workspace, artifact } = makeWorkspace(dir);
+  const { workspace, artifact, sha } = makeWorkspace(dir);
   const factory = createFactory({ stateDir: join(dir, "factory") });
 
+  // The pre-0053 law let an empty sha fall to a red Verdict; ADR 0053 §4
+  // makes the commit mandatory for engineers AT ADMISSION — no Attempt opens.
   factory.setContract({ task: "U2", workspace, gate: "true", artifact });
-  const outcome = await factory.claim({ task: "U2", sha: "   " });
+  await assert.rejects(
+    factory.claim({ task: "U2", sha: "   ", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } }),
+    factoryErrorCode("invalid-claim"),
+  );
+  assert.deepEqual(
+    factory.ledger.eventsFor("U2").map((e) => e.event),
+    ["contract_set"],
+    "the refused claim opened no Attempt",
+  );
 
-  assert.equal(outcome.verdict, "red");
-  assert.match(outcome.gate.note, /claimed sha is empty/);
+  // The read-only disposition claims at the execution tree's HEAD instead.
+  factory.setContract({ task: "U2-RO", workspace, gate: "true", artifact, disposition: "reviewer" });
+  const outcome = await factory.claim({ task: "U2-RO", sha: "", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
+  assert.equal(outcome.verdict, "green");
+  assert.equal(factory.ledger.eventsFor("U2-RO").find((e) => e.event === "claim_reported")?.sha, sha, "the omitted commit resolved to HEAD");
 });
 
 test("claim on a dirty tree is red even though the commit exists", async (t) => {
@@ -254,7 +267,7 @@ test("claim on a dirty tree is red even though the commit exists", async (t) => 
 
   writeFileSync(join(workspace, artifact), "export function pad() { return 1; }\n"); // uncommitted change
   factory.setContract({ task: "D1", workspace, gate: "true", artifact });
-  const outcome = await factory.claim({ task: "D1", sha });
+  const outcome = await factory.claim({ task: "D1", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   assert.equal(outcome.verdict, "red");
   assert.equal(outcome.gate.exit, null);
@@ -269,7 +282,7 @@ test("a gate that moves HEAD during the run is red even when it exits 0", async 
   const factory = createFactory({ stateDir: join(dir, "factory") });
 
   factory.setContract({ task: "M1", workspace, gate: "git commit -q --allow-empty -m moved", artifact });
-  const outcome = await factory.claim({ task: "M1", sha });
+  const outcome = await factory.claim({ task: "M1", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   assert.equal(outcome.verdict, "red");
   assert.equal(outcome.gate.exit, 0, "the command itself succeeded — that is exactly the trap");
@@ -283,7 +296,7 @@ test("a claim by short sha attests the full resolved commit", async (t) => {
   const factory = createFactory({ stateDir: join(dir, "factory") });
 
   factory.setContract({ task: "S1", workspace, gate: "true", artifact });
-  const outcome = await factory.claim({ task: "S1", sha: sha.slice(0, 7) });
+  const outcome = await factory.claim({ task: "S1", sha: sha.slice(0, 7), handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   assert.equal(outcome.verdict, "green");
   assert.equal(outcome.gate.sha, sha);
@@ -300,7 +313,7 @@ test("claim red path appends the full event sequence and writes the report", asy
   const factory = createFactory({ stateDir });
 
   factory.setContract({ task: "T9", workspace, gate: "exit 3", artifact });
-  const outcome = await factory.claim({ task: "T9", sha });
+  const outcome = await factory.claim({ task: "T9", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   assert.equal(outcome.verdict, "red");
   assert.equal(outcome.gate.exit, 3);
@@ -321,7 +334,7 @@ test("claim green path when gate passes and artifact exists at the claimed commi
   const factory = createFactory({ stateDir: join(dir, "factory") });
 
   factory.setContract({ task: "T10", workspace, gate: "true", artifact });
-  const outcome = await factory.claim({ task: "T10", sha });
+  const outcome = await factory.claim({ task: "T10", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   assert.equal(outcome.verdict, "green");
   const report = readFileSync(outcome.reportPath, "utf8");
@@ -337,7 +350,7 @@ test("claim timeout flows through as red with exit null", async (t) => {
   const factory = createFactory({ stateDir: join(dir, "factory"), timeoutMs: 250 });
 
   factory.setContract({ task: "T11", workspace, gate: "sleep 30", artifact });
-  const outcome = await factory.claim({ task: "T11", sha });
+  const outcome = await factory.claim({ task: "T11", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   assert.equal(outcome.verdict, "red");
   assert.equal(outcome.gate.exit, null);
@@ -351,7 +364,7 @@ test("a gate command that does not exist is red with the shell's exit code", asy
   const factory = createFactory({ stateDir: join(dir, "factory") });
 
   factory.setContract({ task: "T12", workspace, gate: "definitely-not-a-command-xyz", artifact });
-  const outcome = await factory.claim({ task: "T12", sha });
+  const outcome = await factory.claim({ task: "T12", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   // /bin/sh resolves command-not-found itself and exits 127 — the factory
   // records that fact instead of special-casing it.
@@ -391,7 +404,7 @@ test("scoped contract: an in-scope-only diff behaves exactly as today", async (t
   factory.setContract({ task: "SC1", workspace, gate: "true", artifact, scope: ["src"] });
   writeFileSync(join(workspace, "src", "extra.ts"), "export const extra = 1;\n");
   const sha2 = gitCommitChanges(workspace, "add extra module in scope");
-  const outcome = await factory.claim({ task: "SC1", sha: sha2 });
+  const outcome = await factory.claim({ task: "SC1", sha: sha2, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   assert.equal(outcome.verdict, "green");
   assert.equal(outcome.gate.sha, sha2);
@@ -409,7 +422,7 @@ test("ADR 0028: general code files outside declared scope do not red a green Gat
   writeFileSync(join(workspace, "src", "extra.ts"), "export const extra = 1;\n");
   writeFileSync(join(workspace, "README.md"), "# touched helper/doc file outside scope\n");
   const sha2 = gitCommitChanges(workspace, "add extra module and touch README");
-  const outcome = await factory.claim({ task: "SC2", sha: sha2 });
+  const outcome = await factory.claim({ task: "SC2", sha: sha2, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   assert.equal(outcome.verdict, "green", "general code/doc files never handcuff or red a green Gate (ADR 0028 §1)");
   assert.equal(outcome.gate.exit, 0);
@@ -421,7 +434,7 @@ test("ADR 0028: general code files outside declared scope do not red a green Gat
   const shaNoArt = gitCommitAll(wsNoArt);
   const contractNoArt = factory.setContract({ task: "NO-ART", workspace: wsNoArt, gate: "true" });
   assert.equal(contractNoArt.artifact, "");
-  const claimNoArt = await factory.claim({ task: "NO-ART", sha: shaNoArt });
+  const claimNoArt = await factory.claim({ task: "NO-ART", sha: shaNoArt, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   assert.equal(claimNoArt.verdict, "green");
 });
 
@@ -434,7 +447,7 @@ test("omitted scope keeps the unrestricted v0.0.1 behavior", async (t) => {
   factory.setContract({ task: "SC3", workspace, gate: "true", artifact });
   writeFileSync(join(workspace, "README.md"), "# anywhere is fine without a scope\n");
   const sha2 = gitCommitChanges(workspace, "touch README with no scope declared");
-  const outcome = await factory.claim({ task: "SC3", sha: sha2 });
+  const outcome = await factory.claim({ task: "SC3", sha: sha2, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   assert.equal(outcome.verdict, "green");
 });
@@ -451,7 +464,7 @@ test("the memory write fence on claims: AGENTS.md/CLAUDE.md/CONTEXT.md edits red
   factory.setContract({ task: "F1", workspace, gate: "true", artifact });
   writeFileSync(join(workspace, "AGENTS.md"), "# poisoned rules\n");
   const poisoned = gitCommitChanges(workspace, "edit AGENTS.md");
-  const unscoped = await factory.claim({ task: "F1", sha: poisoned });
+  const unscoped = await factory.claim({ task: "F1", sha: poisoned, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   assert.equal(unscoped.verdict, "red");
   assert.equal(unscoped.gate.exit, 0, "the gate passed — the memory edit is what is red");
   assert.match(unscoped.gate.note, /AGENTS\.md/, "the offending file is named");
@@ -466,7 +479,7 @@ test("the memory write fence on claims: AGENTS.md/CLAUDE.md/CONTEXT.md edits red
   factory.setContract({ task: "F2", workspace: ws2, gate: "true", artifact, scope: ["src"] });
   writeFileSync(join(ws2, "CLAUDE.md"), "# poisoned too\n");
   const fencedScoped = gitCommitChanges(ws2, "edit CLAUDE.md");
-  const scoped = await factory.claim({ task: "F2", sha: fencedScoped });
+  const scoped = await factory.claim({ task: "F2", sha: fencedScoped, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   assert.equal(scoped.verdict, "red");
   assert.match(scoped.gate.note, /changes to fenced memory files/);
   assert.match(scoped.gate.note, /CLAUDE\.md/);
@@ -480,7 +493,7 @@ test("the memory write fence on claims: AGENTS.md/CLAUDE.md/CONTEXT.md edits red
   factory.setContract({ task: "F3", workspace: ws3, gate: "true", artifact, scope: ["AGENTS.md"] });
   writeFileSync(join(ws3, "AGENTS.md"), "# a ratified rule, deliberately contracted\n");
   const ratified = gitCommitChanges(ws3, "edit AGENTS.md under an explicit scope");
-  const allowed = await factory.claim({ task: "F3", sha: ratified });
+  const allowed = await factory.claim({ task: "F3", sha: ratified, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   assert.equal(allowed.verdict, "green", "an explicitly scoped memory edit is contracted work");
 });
 
@@ -558,8 +571,8 @@ test("two tasks share one ledger with independent seq and reports", async (t) =>
 
   factory.setContract({ task: "A1", workspace, gate: "true", artifact });
   factory.setContract({ task: "A2", workspace: ws2, gate: "exit 1", artifact });
-  const first = await factory.claim({ task: "A1", sha });
-  const second = await factory.claim({ task: "A2", sha: sha2 });
+  const first = await factory.claim({ task: "A1", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
+  const second = await factory.claim({ task: "A2", sha: sha2, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   assert.equal(first.verdict, "green");
   assert.equal(second.verdict, "red");
@@ -575,8 +588,8 @@ test("a second claim after a red attempt opens attempt 2 with its own report (AD
   const factory = createFactory({ stateDir });
 
   factory.setContract({ task: "R1", workspace, gate: "exit 1", artifact });
-  const first = await factory.claim({ task: "R1", sha });
-  const second = await factory.claim({ task: "R1", sha });
+  const first = await factory.claim({ task: "R1", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
+  const second = await factory.claim({ task: "R1", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   assert.equal(first.attempt, 1);
   assert.equal(second.attempt, 2);
@@ -597,8 +610,8 @@ test("a claim while the previous attempt's gate is still running is rejected (AD
   const factory = createFactory({ stateDir: join(dir, "factory") });
 
   factory.setContract({ task: "R2", workspace, gate: "sleep 1", artifact });
-  const inFlight = factory.claim({ task: "R2", sha });
-  await assert.rejects(factory.claim({ task: "R2", sha }), factoryErrorCode("gate-running"));
+  const inFlight = factory.claim({ task: "R2", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
+  await assert.rejects(factory.claim({ task: "R2", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } }), factoryErrorCode("gate-running"));
   const outcome = await inFlight;
   assert.equal(outcome.attempt, 1, "the original claim completes untouched");
   assert.deepEqual(
@@ -616,7 +629,7 @@ test("accept: the Owner accepts a green attempt, once, and only green attempts (
   const factory = createFactory({ stateDir });
 
   factory.setContract({ task: "AC1", workspace, gate: "grep -q padEnd src/format.ts", artifact });
-  const red = await factory.claim({ task: "AC1", sha });
+  const red = await factory.claim({ task: "AC1", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   assert.equal(red.verdict, "red");
   await assert.rejects(factory.accept({ task: "AC1", attempt: 1 }), factoryErrorCode("not-green"));
   assert.deepEqual(
@@ -628,7 +641,7 @@ test("accept: the Owner accepts a green attempt, once, and only green attempts (
   // The agent fixes the work; the next attempt is green and acceptable.
   writeFileSync(join(workspace, artifact), "export function pad(input: string, width: number): string {\n  return input.padEnd(width).slice(0, width);\n}\n");
   const sha2 = gitCommitChanges(workspace, "fix pad");
-  const green = await factory.claim({ task: "AC1", sha: sha2 });
+  const green = await factory.claim({ task: "AC1", sha: sha2, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   assert.equal(green.verdict, "green");
 
   const accepted = await factory.accept({ task: "AC1", attempt: green.attempt });
@@ -665,7 +678,7 @@ test("opening the ledger closes an attempt interrupted mid-gate: red, reported, 
   assert.match(readFileSync(reportPath, "utf8"), /- Verdict: RED — interrupted/);
 
   // The task is claimable again — the recovered attempt is closed.
-  const next = await reopened.claim({ task: "REC1", sha });
+  const next = await reopened.claim({ task: "REC1", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   assert.equal(next.attempt, 2, "the next claim opens attempt 2, never reuses the interrupted one");
 });
 
@@ -774,11 +787,11 @@ test("claim refuses on an accepted task — the H6 rider closes the loop's far e
   const { workspace, artifact, sha } = makeWorkspace(dir);
   const factory = createFactory({ stateDir: join(dir, "state") });
   factory.setContract({ task: "CLOSED", workspace, gate: "true", artifact });
-  await factory.claim({ task: "CLOSED", sha });
+  await factory.claim({ task: "CLOSED", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   await factory.accept({ task: "CLOSED", attempt: 1 });
   const eventsBefore = factory.ledger.events.length;
 
-  await assert.rejects(factory.claim({ task: "CLOSED", sha }), factoryErrorCode("already-accepted"));
+  await assert.rejects(factory.claim({ task: "CLOSED", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } }), factoryErrorCode("already-accepted"));
   assert.equal(factory.ledger.events.length, eventsBefore, "the refused claim appends nothing");
 });
 
@@ -830,7 +843,7 @@ test("requestSpawn refuses and records one spawn_refused line per rule", async (
   assert.equal(bare2.outcome, "dispatched");
 
   // Accepted task — closed to spawns.
-  await factory.claim({ task: "KNOWN", sha });
+  await factory.claim({ task: "KNOWN", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   await factory.accept({ task: "KNOWN", attempt: 1 });
   const accepted = factory.requestSpawn({ task: "KNOWN", provider: "claude", arity: 1 });
   assert.equal(accepted.outcome, "refused");
@@ -913,7 +926,7 @@ test("repoke dispatches once per task and refuses the second ask with one repoke
   writeFileSync(join(wsDone, "src", "x.ts"), "x\n");
   const shaDone = gitCommitAll(wsDone);
   factory.setContract({ task: "DONE", workspace: wsDone, gate: "true", artifact: "src/x.ts" });
-  await factory.claim({ task: "DONE", sha: shaDone });
+  await factory.claim({ task: "DONE", sha: shaDone, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   await factory.accept({ task: "DONE", attempt: 1 });
   const accepted = factory.repoke("DONE", "ag-done");
   assert.equal(accepted.outcome === "refused" && accepted.event.rule, "repoke:accepted-task");
@@ -993,14 +1006,14 @@ test("claim enforces the Attempt ceiling (MAX_ATTEMPTS = 3): Attempts 1–3 open
   assert.equal(MAX_ATTEMPTS, 3, "the ceiling is fixed in code at 3 (ADR 0008 §1)");
 
   for (let i = 1; i <= MAX_ATTEMPTS; i++) {
-    const out = await factory.claim({ task: "CEIL1", sha });
+    const out = await factory.claim({ task: "CEIL1", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
     assert.equal(out.attempt, i);
     assert.equal(out.verdict, "red");
   }
   const countAfterThree = factory.ledger.eventsFor("CEIL1").length;
 
   await assert.rejects(
-    () => factory.claim({ task: "CEIL1", sha }),
+    () => factory.claim({ task: "CEIL1", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } }),
     factoryErrorCode("attempt-ceiling"),
     "no fourth Attempt may open",
   );
@@ -1019,12 +1032,12 @@ test("requestSpawn refuses at the Attempt ceiling (spawn:attempt-ceiling) when t
   factory.setContract({ task: "CEIL-SP", workspace, gate: "false", artifact });
 
   for (let i = 1; i <= 2; i++) {
-    await factory.claim({ task: "CEIL-SP", sha });
+    await factory.claim({ task: "CEIL-SP", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   }
   const beforeCeiling = factory.requestSpawn({ task: "CEIL-SP", provider: "pi/zai/glm-5.3", arity: 1 });
   assert.equal(beforeCeiling.outcome, "dispatched", "below the ceiling, dispatching a fresh spawn to finish the remaining Attempt is legal");
 
-  await factory.claim({ task: "CEIL-SP", sha });
+  await factory.claim({ task: "CEIL-SP", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   const atCeiling = factory.requestSpawn({ task: "CEIL-SP", provider: "pi/zai/glm-5.3", arity: 1 });
   assert.equal(atCeiling.outcome, "refused");
   if (atCeiling.outcome === "refused") {
@@ -1077,7 +1090,7 @@ test("respawn enforces one automatic Respawn per progress marker (spawn_dispatch
   }
 
   // A new Attempt (gate_finished) is a new progress marker — resets the one-respawn allowance.
-  const a1 = await factory.claim({ task: "RESP1", sha });
+  const a1 = await factory.claim({ task: "RESP1", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   assert.equal(a1.attempt, 1);
   assert.equal(a1.verdict, "red");
 
@@ -1092,8 +1105,8 @@ test("respawn enforces one automatic Respawn per progress marker (spawn_dispatch
   }
 
   // Exhaust Attempts 2 and 3 → respawn refuses at attempt-ceiling.
-  await factory.claim({ task: "RESP1", sha });
-  await factory.claim({ task: "RESP1", sha });
+  await factory.claim({ task: "RESP1", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
+  await factory.claim({ task: "RESP1", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   const atCeiling = factory.respawn({ task: "RESP1", provider: "pi/zai/glm-5.3", died_agent: "ag-4" });
   assert.equal(atCeiling.outcome, "refused");
   if (atCeiling.outcome === "refused") {
@@ -1152,7 +1165,7 @@ test("needsHuman corroborates attempt-ceiling and died-after-respawn against the
   assert.deepEqual(diedLine.evidence, { spawn: spawnSeq, respawn: respawnSeq });
 
   // Once a gate_finished lands after respawnSeq, that respawn is no longer an unprogressed death.
-  const a1 = await factory.claim({ task: "NH-V12", sha });
+  const a1 = await factory.claim({ task: "NH-V12", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   assert.throws(
     () => factory.needsHuman({ task: "NH-V12", reason: "died-after-respawn", evidence: { spawn: spawnSeq, respawn: respawnSeq } }),
     factoryErrorCode("invalid-needs-human"),
@@ -1170,8 +1183,8 @@ test("needsHuman corroborates attempt-ceiling and died-after-respawn against the
     "a1's gate_finished is attempt 1, not 3",
   );
 
-  await factory.claim({ task: "NH-V12", sha });
-  const a3 = await factory.claim({ task: "NH-V12", sha });
+  await factory.claim({ task: "NH-V12", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
+  const a3 = await factory.claim({ task: "NH-V12", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   assert.equal(a3.attempt, 3);
   assert.equal(a3.verdict, "red");
 
@@ -1229,7 +1242,7 @@ test("spawn records the driver's worktree; worktreeFor reads it back, claim and 
   // the diff all read the worktree, and <project-root> never moves.
   writeFileSync(join(worktree, artifact), "export function pad(input: string, width: number): string {\n  return input.padEnd(width).slice(0, width);\n}\n");
   const claimed = gitCommitChanges(worktree, "work in the worktree");
-  const outcome = await factory.claim({ task: "WTA", sha: claimed });
+  const outcome = await factory.claim({ task: "WTA", sha: claimed, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   assert.equal(outcome.verdict, "green", "the gate ran against the worktree tree");
   assert.equal(gitFact(workspace, ["rev-parse", "HEAD"]), base, "the project root never moved");
   assert.equal(gitFact(workspace, ["status", "--porcelain"]), "", "the project root stayed clean");
@@ -1245,7 +1258,7 @@ test("spawn records the driver's worktree; worktreeFor reads it back, claim and 
   assert.equal(legacy.outcome, "dispatched");
   if (legacy.outcome === "dispatched") assert.equal("worktree" in legacy.event, false);
   assert.equal(factory.worktreeFor("WTB"), undefined);
-  const legacyOutcome = await factory.claim({ task: "WTB", sha: base2 });
+  const legacyOutcome = await factory.claim({ task: "WTB", sha: base2, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   assert.equal(legacyOutcome.verdict, "green", "no worktree — the claim runs at the contract workspace, v0.0.5's law");
 });
 
@@ -1268,7 +1281,7 @@ test("re-contract preserves the live worktree and original base so its commits s
   assert.equal(factory.worktreeFor("RECONTRACT"), worktree);
   assert.equal(factory.liveContractFor(worktree)?.seq, contract.seq);
   assert.equal(factory.liveContractFor(join(worktree, "src"))?.seq, contract.seq);
-  assert.equal((await factory.claim({ task: "RECONTRACT", sha: claimed })).verdict, "green");
+  assert.equal((await factory.claim({ task: "RECONTRACT", sha: claimed, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } })).verdict, "green");
   assert.equal((await factory.accept({ task: "RECONTRACT", attempt: 1, accepted_by: "lead" })).landing, "landed");
   assert.equal(spawnSync("git", ["merge-base", "--is-ancestor", claimed, "HEAD"], { cwd: workspace }).status, 0);
   assert.equal(readFileSync(join(workspace, artifact), "utf8"), "export const implemented = true;\n");
@@ -1413,7 +1426,7 @@ async function greenAttempt(dir: string, task: string): Promise<{ factory: Retur
   factory.setContract({ task, workspace, gate: "true", artifact });
   writeFileSync(join(workspace, artifact), "export function pad(input: string, width: number): string {\n  return input.padEnd(width).slice(0, width);\n}\n");
   const sha = gitCommitChanges(workspace, `green ${task}`);
-  const outcome = await factory.claim({ task, sha });
+  const outcome = await factory.claim({ task, sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   assert.equal(outcome.verdict, "green");
   return { factory, workspace, artifact };
 }
@@ -1485,7 +1498,7 @@ test("a task in needs_human refuses the Lead until activity displaces the marker
   f2.requestSpawn({ task: "LA5", provider: "claude", arity: 1 });
   writeFileSync(join(workspace, "src", "format.ts"), "export function pad(input: string, width: number): string {\n  return input.padEnd(width, \"0\").slice(0, width);\n}\n");
   const sha2 = gitCommitChanges(workspace, "corrective work");
-  const second = await f2.claim({ task: "LA5", sha: sha2 });
+  const second = await f2.claim({ task: "LA5", sha: sha2, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   assert.equal(second.verdict, "green");
   assert.equal((await f2.accept({ task: "LA5", attempt: second.attempt, accepted_by: "lead" })).accepted_by, "lead");
 });
@@ -1514,7 +1527,7 @@ test("landing: a green worktree attempt fast-forwards into <project-root>, the w
 
   writeFileSync(join(worktree, artifact), "export function pad(input: string, width: number): string {\n  return input.padEnd(width).slice(0, width);\n}\n");
   const claimed = gitCommitChanges(worktree, "the verified work");
-  const outcome = await factory.claim({ task: "LW1", sha: claimed });
+  const outcome = await factory.claim({ task: "LW1", sha: claimed, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   assert.equal(outcome.verdict, "green");
 
   const accepted = await factory.accept({ task: "LW1", attempt: 1, accepted_by: "lead" });
@@ -1540,7 +1553,7 @@ test("landing on a root that advanced: merge --no-ff brings the attempt's whole 
   // Meanwhile the project root advanced on its own.
   writeFileSync(join(workspace, "other.txt"), "root work\n");
   const rootMoved = gitCommitChanges(workspace, "the root advanced");
-  assert.equal(await factory.claim({ task: "LW2", sha: claimed }).then((o) => o.verdict), "green");
+  assert.equal(await factory.claim({ task: "LW2", sha: claimed, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } }).then((o) => o.verdict), "green");
 
   const accepted = await factory.accept({ task: "LW2", attempt: 1 });
   assert.equal(accepted.landing, "landed");
@@ -1564,7 +1577,7 @@ test("a dirty root lands pending-conflict: the acceptance records, the branch an
 
   writeFileSync(join(worktree, artifact), "export function pad(input: string, width: number): string {\n  return input.padEnd(width).slice(0, width);\n}\n");
   const claimed = gitCommitChanges(worktree, "the verified work");
-  assert.equal((await factory.claim({ task: "LW3", sha: claimed })).verdict, "green");
+  assert.equal((await factory.claim({ task: "LW3", sha: claimed, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } })).verdict, "green");
   // The Owner has uncommitted edits at the root — landing must not touch them.
   writeFileSync(join(workspace, "dirt.txt"), "uncommitted\n");
 
@@ -1593,7 +1606,7 @@ test("a merge conflict lands pending-conflict with the root left clean — the c
   // The root edits the SAME file differently and commits — a true merge conflict.
   writeFileSync(join(workspace, artifact), "export const rootSide = 2;\n");
   const rootMoved = gitCommitChanges(workspace, "the root advanced conflicting");
-  assert.equal((await factory.claim({ task: "LW4", sha: claimed })).verdict, "green");
+  assert.equal((await factory.claim({ task: "LW4", sha: claimed, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } })).verdict, "green");
 
   const accepted = await factory.accept({ task: "LW4", attempt: 1 });
   assert.equal(accepted.landing, "pending-conflict");
@@ -1625,7 +1638,7 @@ test("two same-Project Tasks run their claims concurrently in sibling worktrees 
   writeFileSync(join(wtB, "src", "two", "b.ts"), "export const b = 2;\n");
   const shaA = gitCommitChanges(wtA, "task one");
   const shaB = gitCommitChanges(wtB, "task two");
-  const [first, second] = await Promise.all([factory.claim({ task: "PR1", sha: shaA }), factory.claim({ task: "PR2", sha: shaB })]);
+  const [first, second] = await Promise.all([factory.claim({ task: "PR1", sha: shaA, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } }), factory.claim({ task: "PR2", sha: shaB, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } })]);
   assert.equal(first.verdict, "green");
   assert.equal(second.verdict, "green");
   assert.equal(gitFact(workspace, ["rev-parse", "HEAD"]), base, "the root sat at base through both runs");
@@ -1647,9 +1660,9 @@ test("re-contracting an unaccepted task after MAX_ATTEMPTS and needs_human opens
   const c1 = factory.setContract({ task: "T-01", workspace, gate: "false", artifact });
   const sp1 = factory.requestSpawn({ task: "T-01", provider: "opencode/nemotron", arity: 1 });
   assert.equal(sp1.outcome, "dispatched");
-  const a1 = await factory.claim({ task: "T-01", sha });
-  const a2 = await factory.claim({ task: "T-01", sha });
-  const a3 = await factory.claim({ task: "T-01", sha });
+  const a1 = await factory.claim({ task: "T-01", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
+  const a2 = await factory.claim({ task: "T-01", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
+  const a3 = await factory.claim({ task: "T-01", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   assert.equal(a1.attempt, 1);
   assert.equal(a2.attempt, 2);
   assert.equal(a3.attempt, 3);
@@ -1680,7 +1693,7 @@ test("re-contracting an unaccepted task after MAX_ATTEMPTS and needs_human opens
   assert.equal(factory.activeSpawnOf("T-01")?.seq, sp2.event.seq);
   assert.equal(factory.lastProgressSeq("T-01"), sp2.event.seq);
 
-  const epoch2Attempt1 = await factory.claim({ task: "T-01", sha });
+  const epoch2Attempt1 = await factory.claim({ task: "T-01", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   assert.equal(epoch2Attempt1.attempt, 1);
   assert.equal(epoch2Attempt1.verdict, "green");
   assert.equal(factory.attemptsOf("T-01").length, 1);
@@ -1719,8 +1732,8 @@ test("resetProject purges target project tasks, events, reports, and gate logs w
   factory.setContract({ task: "A-1", workspace: wsA, gate: "echo gateA", artifact });
   factory.setContract({ task: "B-1", workspace: wsB, gate: "echo gateB", artifact });
 
-  const claimA = await factory.claim({ task: "A-1", sha: shaA });
-  const claimB = await factory.claim({ task: "B-1", sha: shaB });
+  const claimA = await factory.claim({ task: "A-1", sha: shaA, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
+  const claimB = await factory.claim({ task: "B-1", sha: shaB, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   assert.equal(claimA.verdict, "green");
   assert.equal(claimB.verdict, "green");
   await factory.accept({ task: "A-1", attempt: 1 });
@@ -1940,13 +1953,13 @@ test("same-SHA GREEN claims reuse completed evidence within their epoch", async 
   const { workspace, artifact, sha } = makeWorkspace(dir);
   const factory = createFactory({ stateDir: join(dir, "factory") });
   factory.setContract({ task: "retry", workspace, gate: "true", artifact });
-  const first = await factory.claim({ task: "retry", sha });
+  const first = await factory.claim({ task: "retry", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   const count = factory.ledger.events.length;
-  assert.deepEqual(await factory.claim({ task: "retry", sha }), first);
+  assert.deepEqual(await factory.claim({ task: "retry", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } }), first);
   assert.equal(factory.ledger.events.length, count);
   factory.setContract({ task: "retry", workspace, gate: "false", artifact });
-  assert.equal((await factory.claim({ task: "retry", sha })).verdict, "red");
-  assert.equal((await factory.claim({ task: "retry", sha })).attempt, 2);
+  assert.equal((await factory.claim({ task: "retry", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } })).verdict, "red");
+  assert.equal((await factory.claim({ task: "retry", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } })).attempt, 2);
 });
 
 test("accept refuses while another attempt is in flight", async (t) => {
@@ -1955,7 +1968,7 @@ test("accept refuses while another attempt is in flight", async (t) => {
   const { workspace, artifact, sha } = makeWorkspace(dir);
   const factory = createFactory({ stateDir: join(dir, "factory") });
   factory.setContract({ task: "busy", workspace, gate: "true", artifact });
-  await factory.claim({ task: "busy", sha });
+  await factory.claim({ task: "busy", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   factory.ledger.append({ event: "claim_reported", task: "busy", attempt: 2, sha });
   factory.ledger.append({ event: "gate_started", task: "busy", attempt: 2, cmd: "true" });
   await assert.rejects(factory.accept({ task: "busy", attempt: 1 }), factoryErrorCode("gate-running"));
@@ -1967,7 +1980,7 @@ test("accepted task projection retains accepted GREEN evidence after a ghost RED
   const { workspace, artifact, sha } = makeWorkspace(dir);
   const factory = createFactory({ stateDir: join(dir, "factory") });
   factory.setContract({ task: "ghost", workspace, gate: "true", artifact });
-  await factory.claim({ task: "ghost", sha });
+  await factory.claim({ task: "ghost", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   await factory.accept({ task: "ghost", attempt: 1 });
   factory.ledger.append({ event: "gate_finished", task: "ghost", attempt: 2, verdict: "red", exit: 1, note: "ghost" });
   const state = projectTask(factory.ledger.events, "ghost");

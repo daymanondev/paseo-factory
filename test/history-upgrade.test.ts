@@ -235,7 +235,7 @@ test("upgrade waits for the full required review and Report before taking its ba
   const reviewing = new Promise<void>((resolve) => { entered = resolve; }); const pause = new Promise<void>((resolve) => { release = resolve; });
   const factory = createFactory({ stateDir, eyeCliProbe: () => true, eyeCliRunner: async () => { entered(); await pause; return { code: 0, stdout: "CLEAR\nNothing to add.", stderr: "", timedOut: false }; } }); t.after(() => factory.history.stop());
   factory.setContract({ task: "T", workspace, artifact: "out", gate: "true", freshEyes: true });
-  const claiming = factory.claim({ task: "T", sha }); await reviewing;
+  const claiming = factory.claim({ task: "T", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } }); await reviewing;
   const upgrading = upgradeFactory(factory, { action: "apply" });
   try { assert.equal(readLocalWriterIdentity(stateDir), undefined); assert.equal(existsSync(join(dir, "state-upgrades")), false); }
   finally { release(); await claiming; }

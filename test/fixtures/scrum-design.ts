@@ -41,7 +41,7 @@ export async function designFixture(t: TestContext, mutate?: (report: import("..
   run = commandRun(state, 'p', run.runId, { type: 'task_reserved', task: 'ux-studio', role: 'ux', required: true, requestId: 'reserve', expectedRevision: run.revision });
   const contract = factory.setContract({ task: 'ux-studio', workspace: root, gate: 'true', execution: { mode: 'scrum', role: 'ux', runId: run.runId, configRevision: run.configRevision, policyRevision: run.policyRevision, artifactRefs: [] } });
   run = commandRun(state, 'p', run.runId, { type: 'task_bound', task: contract.task, epoch: contract.seq, requestId: 'bind', expectedRevision: run.revision });
-  const claim = await factory.claim({ task: contract.task, sha }); await factory.accept({ task: contract.task, attempt: claim.attempt });
+  const claim = await factory.claim({ task: contract.task, sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } }); await factory.accept({ task: contract.task, attempt: claim.attempt });
   const ctx = { factory, root, slug: 'p', authority: 'owner' as const, actor: 'owner', activeAgents: [], pendingDirectives: false };
   const design = { revision: 1, digest: designDigest(refs), refs, browserEvidence };
   const submit = () => scrumOperation({ operation: 'run.command', runId: run.runId, requestId: 'submit', expectedRevision: run.revision, payload: { type: 'design_review_requested', design } }, ctx);

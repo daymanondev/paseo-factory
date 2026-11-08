@@ -4,6 +4,7 @@ import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createFactory } from "../plugin/server/core/factory.ts";
+import type { ClaimReported } from "../src/events.ts";
 import { CorrelationRegistry } from "../plugin/server/core/correlations.ts";
 import { spoolRootFor, spoolRequestSemanticKey, startSpool } from "../plugin/server/spool.ts";
 import { randomId, spoolRequestSemanticKey as binSemanticKey, submit } from "../plugin/bin/spool-client.mjs";
@@ -88,7 +89,7 @@ test("the whole loop over the spool: contract → red claim → green claim → 
   assert.match(contract.stdout, /contract set for LOOP1/);
 
   // Attempt 1: the agent claims unfinished work — the factory says red, with the note.
-  const red = await run(claimCli, ["--task", "LOOP1", "--sha", brokenSha], agentEnv);
+  const red = await run(claimCli, ["--task", "LOOP1", "--outcome", "complete", "--scope", "s", "--verification", "v", "--unknowns", "none", "--sha", brokenSha], agentEnv);
   assert.equal(red.status, 1, `red verdict must exit 1\nstdout: ${red.stdout}\nstderr: ${red.stderr}`);
   assert.match(red.stdout, /LOOP1 attempt 1 — RED/);
   assert.match(red.stdout, /report: .*report-LOOP1-1\.md/);
@@ -106,7 +107,7 @@ test("the whole loop over the spool: contract → red claim → green claim → 
     ].join("\n"),
   );
   const fixedSha = gitCommitChanges(workspace, "fix pad to truncate and pad correctly");
-  const green = await run(claimCli, ["--task", "LOOP1", "--sha", fixedSha], agentEnv);
+  const green = await run(claimCli, ["--task", "LOOP1", "--outcome", "complete", "--scope", "s", "--verification", "v", "--unknowns", "none", "--sha", fixedSha], agentEnv);
   assert.equal(green.status, 0, `green verdict must exit 0\nstdout: ${green.stdout}\nstderr: ${green.stderr}`);
   assert.match(green.stdout, /LOOP1 attempt 2 — GREEN/);
 
@@ -167,7 +168,7 @@ test("the delegated Owner seat's env stamps its id on both acts (v0.0.9)", async
   assert.equal(contract.status, 0, contract.stderr);
   assert.match(contract.stdout, /contract set for SEAT1: .* by agent-supervisor-1/);
 
-  const green = await run(claimCli, ["--task", "SEAT1", "--sha", sha], { FACTORY_STATE_DIR: stateDir, PASEO_AGENT_ID: "agent-worker-1" });
+  const green = await run(claimCli, ["--task", "SEAT1", "--outcome", "complete", "--scope", "s", "--verification", "v", "--unknowns", "none", "--sha", sha], { FACTORY_STATE_DIR: stateDir, PASEO_AGENT_ID: "agent-worker-1" });
   assert.equal(green.status, 0, `expected green\nstdout: ${green.stdout}\nstderr: ${green.stderr}`);
 
   const accept = await run(ownerCli, ["accept", "SEAT1", "--attempt", "1"], seatEnv);
@@ -197,7 +198,7 @@ test("a claim the factory rejects comes back as an error exit with the reason", 
   const spool = startSpool(stateDir, factory);
   t.after(() => spool.stop());
 
-  const rejected = await run(claimCli, ["--task", "NOPE", "--sha", "a1b2c3d"], { FACTORY_STATE_DIR: stateDir });
+  const rejected = await run(claimCli, ["--task", "NOPE", "--outcome", "complete", "--scope", "s", "--verification", "v", "--unknowns", "none", "--sha", "a1b2c3d"], { FACTORY_STATE_DIR: stateDir });
   assert.equal(rejected.status, 2);
   assert.match(rejected.stderr, /no contract set for task NOPE/);
 });
@@ -319,14 +320,69 @@ test("factory lead dispatch: usage refusals, then the spool round trip prints th
   assert.equal(dispatched[1]?.message, "Do the thing");
 });
 
-test("factory-claim usage: --help exits 0, a missing --sha exits 2", async () => {
+test("factory-claim usage: --help exits 0, a missing six-field handoff flag exits 2", async () => {
   const help = await run(claimCli, ["--help"], {});
   assert.equal(help.status, 0);
-  assert.match(help.stdout, /usage: factory-claim --task <id> --sha <commit-sha>/);
+  assert.match(help.stdout, /--outcome <complete\|partial\|blocked\|reopen>/);
+  assert.match(help.stdout, /--ownership/);
 
-  const bad = await run(claimCli, ["--task", "T1"], {});
+  const bad = await run(claimCli, ["--task", "T1", "--sha", "abc"], {});
   assert.equal(bad.status, 2);
-  assert.match(bad.stderr, /--task and --sha are both required/);
+  assert.match(bad.stderr, /--outcome, --scope, --verification, and --unknowns are all required/);
+});
+
+test("factory-claim round-trips the six-field handoff (ADR 0053 §4): the required flags ride the claim, ownership defaults, and --sha omitted is accepted only for read-only dispositions", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const root = join(dir, "repo");
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, "README.md"), "x\n");
+  gitCommitAll(root);
+  const stateDir = join(dir, "state");
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
+  const spool = startSpool(stateDir, factory, { pollMs: 20 });
+  t.after(() => spool.stop());
+  const agentEnv = { FACTORY_STATE_DIR: stateDir, PASEO_AGENT_ID: "agent-scout-1" };
+
+  factory.setContract({ task: "SCOUT-CLI", workspace: root, gate: "true", artifact: "README.md", disposition: "scout" });
+  factory.setContract({ task: "ENG-CLI", workspace: root, gate: "true", artifact: "README.md" });
+
+  // A read-only claim without --sha: the factory resolves the worktree's HEAD
+  // and the 6-field pipeline runs to GREEN (User Story 13).
+  const scout = await run(claimCli, [
+    "--task", "SCOUT-CLI",
+    "--outcome", "complete",
+    "--scope", "read README.md",
+    "--verification", "gate `true` ran green",
+    "--unknowns", "none",
+    "--wait-secs", "10",
+  ], agentEnv);
+  assert.equal(scout.status, 0, scout.stderr);
+  assert.match(scout.stdout, /SCOUT-CLI attempt 1 — GREEN/);
+
+  // An engineer claim without --sha is refused at admission — no Attempt
+  // opens (User Story 14's mandatory-commit law).
+  const engineer = await run(claimCli, [
+    "--task", "ENG-CLI",
+    "--outcome", "complete",
+    "--scope", "src/x.ts",
+    "--verification", "gate `true` ran green",
+    "--unknowns", "none",
+    "--wait-secs", "10",
+  ], agentEnv);
+  assert.equal(engineer.status, 2);
+  assert.match(engineer.stderr, /invalid-claim/);
+  assert.match(engineer.stderr, /commit/);
+
+  const claim = factory.ledger.eventsFor("SCOUT-CLI").find((e): e is ClaimReported => e.event === "claim_reported");
+  assert.ok(claim?.handoff, "the scout claim landed with its handoff");
+  assert.equal(claim.handoff.outcome, "complete");
+  assert.equal(claim.handoff.ownership, "lease returned", "the omitted ownership defaults on the ledger line");
+  assert.deepEqual(
+    factory.ledger.eventsFor("ENG-CLI").map((e) => e.event),
+    ["contract_set"],
+    "the refused engineer claim opened no Attempt",
+  );
 });
 
 test("a claim with no plugin answering times out honestly and exits 2", async (t) => {
@@ -334,7 +390,7 @@ test("a claim with no plugin answering times out honestly and exits 2", async (t
   disposeDir(t, dir);
   const stateDir = join(dir, "state");
 
-  const result = await run(claimCli, ["--task", "T1", "--sha", "abc", "--wait-secs", "1"], { FACTORY_STATE_DIR: stateDir });
+  const result = await run(claimCli, ["--task", "T1", "--outcome", "complete", "--scope", "s", "--verification", "v", "--unknowns", "none", "--sha", "abc", "--wait-secs", "1"], { FACTORY_STATE_DIR: stateDir });
   assert.equal(result.status, 2);
   // v0.0.31 (ADR 0017 §6): the timeout is the explicit stop-and-end-turn
   // instruction — the single deduplicated request stays durably queued.
@@ -385,7 +441,7 @@ test("three identical claims while the watcher is stopped leave ONE request file
   // minting a fresh request id — exactly the spec's Problem 5 stack.
   const awaitedIds: string[] = [];
   for (let i = 0; i < 3; i += 1) {
-    const request = { id: randomId(), kind: "claim" as const, task: "DEDUP1", sha, agent: "agent-dedup-1" };
+    const request = { id: randomId(), kind: "claim" as const, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" }, task: "DEDUP1", sha, agent: "agent-dedup-1" };
     submit(spoolRoot, request);
     awaitedIds.push(request.id);
   }
@@ -440,7 +496,7 @@ test("the loop with --fresh-eyes: the eye's line lands through the real CLIs and
   assert.match(contract.stdout, /fresh eyes ON/);
 
   // The red attempt never asks the eye.
-  const red = await run(claimCli, ["--task", "LOOP2", "--sha", brokenSha], agentEnv);
+  const red = await run(claimCli, ["--task", "LOOP2", "--outcome", "complete", "--scope", "s", "--verification", "v", "--unknowns", "none", "--sha", brokenSha], agentEnv);
   assert.equal(red.status, 1);
   assert.equal(fake.requests.length, 0, "red verdicts never call the eye");
 
@@ -456,7 +512,7 @@ test("the loop with --fresh-eyes: the eye's line lands through the real CLIs and
     ].join("\n"),
   );
   const fixedSha = gitCommitChanges(workspace, "fix pad to truncate and pad correctly");
-  const green = await run(claimCli, ["--task", "LOOP2", "--sha", fixedSha], agentEnv);
+  const green = await run(claimCli, ["--task", "LOOP2", "--outcome", "complete", "--scope", "s", "--verification", "v", "--unknowns", "none", "--sha", fixedSha], agentEnv);
   assert.equal(green.status, 0, `expected green\nstdout: ${green.stdout}\nstderr: ${green.stderr}`);
 
   assert.equal(fake.requests.length, 1, "one green attempt, one eye pass");
@@ -661,7 +717,7 @@ test("factory accept --by <seat>: the flag rides the spool; the Lead's rules ans
     "contract", "--task", "SEAT2", "--workspace", workspace, "--gate", "true", "--artifact", "src/format.ts", "--fresh-eyes",
   ], ownerEnv);
   assert.equal(contract.status, 0, contract.stderr);
-  const green = await run(claimCli, ["--task", "SEAT2", "--sha", sha], agentEnv);
+  const green = await run(claimCli, ["--task", "SEAT2", "--outcome", "complete", "--scope", "s", "--verification", "v", "--unknowns", "none", "--sha", sha], agentEnv);
   assert.equal(green.status, 0, `expected green\nstdout: ${green.stdout}\nstderr: ${green.stderr}`);
   assert.equal(fake.requests.length, 1, "the eye ran on the green attempt");
 
@@ -708,7 +764,7 @@ test("factory accept --by <seat>: the flag rides the spool; the Lead's rules ans
     "contract", "--task", "SEAT3", "--workspace", workspace, "--gate", "true", "--artifact", "src/format.ts",
   ], { PASEO_HOME: home2 });
   assert.equal(contract2.status, 0, contract2.stderr);
-  const green2 = await run(claimCli, ["--task", "SEAT3", "--sha", sha], { FACTORY_STATE_DIR: stateDir2, PASEO_AGENT_ID: "agent-worker-2" });
+  const green2 = await run(claimCli, ["--task", "SEAT3", "--outcome", "complete", "--scope", "s", "--verification", "v", "--unknowns", "none", "--sha", sha], { FACTORY_STATE_DIR: stateDir2, PASEO_AGENT_ID: "agent-worker-2" });
   assert.equal(green2.status, 0, green2.stderr);
   const lead = await run(ownerCli, ["accept", "SEAT3", "--attempt", "1", "--by", "lead"], { PASEO_HOME: home2 });
   assert.equal(lead.status, 0, lead.stderr);
@@ -821,7 +877,7 @@ test("factory CLI stamps PASEO_FACTORY_SEAT onto spool requests and enforces sea
   assert.match(agRotate.stderr, /agent-cannot-orchestrate/);
 
   // Working Agent CAN claim via factory-claim.
-  const claimed = await run(claimCli, ["--task", "T-AUTH", "--sha", sha], {
+  const claimed = await run(claimCli, ["--task", "T-AUTH", "--outcome", "complete", "--scope", "s", "--verification", "v", "--unknowns", "none", "--sha", sha], {
     FACTORY_STATE_DIR: stateDir,
     PASEO_AGENT_ID: "agent-worker-1",
     PASEO_FACTORY_SEAT: "agent",
@@ -1327,9 +1383,9 @@ test("Seam 1: the CLI plumbs --project through the spool router — and factory 
   writeFileSync(join(b.root, "work.txt"), "b\n");
   const shaA = gitCommitAll(a.root, "work-a");
   const shaB = gitCommitAll(b.root, "work-b");
-  const claimA = await run(claimCli, ["--task", "T-09", "--sha", shaA, "--wait-secs", "60"], { FACTORY_STATE_DIR: stateDir, PASEO_AGENT_ID: "peer-a" });
+  const claimA = await run(claimCli, ["--task", "T-09", "--outcome", "complete", "--scope", "s", "--verification", "v", "--unknowns", "none", "--sha", shaA, "--wait-secs", "60"], { FACTORY_STATE_DIR: stateDir, PASEO_AGENT_ID: "peer-a" });
   assert.equal(claimA.status, 0, `project-a's claim ends green\nstdout: ${claimA.stdout}\nstderr: ${claimA.stderr}`);
-  const claimB = await run(claimCli, ["--task", "T-09", "--sha", shaB, "--wait-secs", "60"], { FACTORY_STATE_DIR: stateDir, PASEO_AGENT_ID: "peer-b" });
+  const claimB = await run(claimCli, ["--task", "T-09", "--outcome", "complete", "--scope", "s", "--verification", "v", "--unknowns", "none", "--sha", shaB, "--wait-secs", "60"], { FACTORY_STATE_DIR: stateDir, PASEO_AGENT_ID: "peer-b" });
   assert.equal(claimB.status, 0, `project-b's claim ends green\nstdout: ${claimB.stdout}\nstderr: ${claimB.stderr}`);
 
   // The explicit --project routes the shared Task id's acceptance onto exactly

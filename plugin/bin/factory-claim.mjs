@@ -19,11 +19,17 @@
 import { parseArgs } from "node:util";
 import { awaitReply, randomId, resolveHome, spoolRootFor, stateDirFor, submit } from "./spool-client.mjs";
 
-const usage = `usage: factory-claim --task <id> --sha <commit-sha> [--wait-secs <n>]
+const usage = `usage: factory-claim --task <id> --outcome <complete|partial|blocked|reopen> --scope <text> \\
+              --verification <text> --unknowns <text> [--ownership <text>] \\
+              [--sha <commit-sha>] [--wait-secs <n>]
 
-Claim that the task is finished at a specific commit. The factory does not
-trust the claim: it runs the contract's gate at the claimed commit and
-records the verdict (paseo-factory v0.0.1).`;
+Claim that the task is finished, carrying the mandatory 6-Field Handoff
+(ADR 0053 §4): outcome, scope, verification, unknowns, and optional ownership
+(defaults to "lease returned"; the Snapshot is synthesized from the commit,
+branch, and worktree). --sha is optional only for read-only dispositions
+(scout | architect | reviewer), where it defaults to the worktree's HEAD;
+engineer claims must attest an exact commit. The factory does not trust the
+claim: it runs the contract's gate and records the verdict.`;
 
 const DEFAULT_WAIT_SECS = 600; // gate timeout default is 300s — leave headroom
 
@@ -34,6 +40,11 @@ try {
     options: {
       task: { type: "string" },
       sha: { type: "string" },
+      outcome: { type: "string" },
+      scope: { type: "string" },
+      verification: { type: "string" },
+      unknowns: { type: "string" },
+      ownership: { type: "string" },
       "wait-secs": { type: "string", default: String(DEFAULT_WAIT_SECS) },
       help: { type: "boolean", default: false },
     },
@@ -48,8 +59,24 @@ if (args.values.help) {
   process.exit(0);
 }
 
-if (typeof args.values.task !== "string" || typeof args.values.sha !== "string") {
-  console.error(`factory-claim: --task and --sha are both required\n\n${usage}`);
+const HANDOFF_OUTCOMES = ["complete", "partial", "blocked", "reopen"];
+for (const field of ["outcome", "scope", "verification", "unknowns"]) {
+  const value = args.values[field];
+  if (typeof value !== "string" || value.trim() === "") {
+    console.error(`factory-claim: --outcome, --scope, --verification, and --unknowns are all required (the 6-Field Handoff, ADR 0053) — --${field} is missing or empty\n\n${usage}`);
+    process.exit(2);
+  }
+}
+if (!HANDOFF_OUTCOMES.includes(args.values.outcome)) {
+  console.error(`factory-claim: --outcome must be one of ${HANDOFF_OUTCOMES.join(" | ")} — got ${JSON.stringify(args.values.outcome)}\n\n${usage}`);
+  process.exit(2);
+}
+if (args.values.ownership !== undefined && args.values.ownership.trim() === "") {
+  console.error(`factory-claim: --ownership is optional but must be non-empty when present\n\n${usage}`);
+  process.exit(2);
+}
+if (typeof args.values.task !== "string" || args.values.task.trim() === "") {
+  console.error(`factory-claim: --task is required\n\n${usage}`);
   process.exit(2);
 }
 
@@ -66,7 +93,17 @@ const request = {
   id: randomId(),
   kind: "claim",
   task: args.values.task,
-  sha: args.values.sha,
+  // --sha omitted rides as an omitted field (not an empty string): the
+  // factory judges it against the Contract's disposition — HEAD for the
+  // read-only three, invalid-claim for engineer (ADR 0053 §4).
+  ...(typeof args.values.sha === "string" && args.values.sha.trim() !== "" ? { sha: args.values.sha } : {}),
+  handoff: {
+    outcome: args.values.outcome,
+    scope: args.values.scope,
+    verification: args.values.verification,
+    unknowns: args.values.unknowns,
+    ...(args.values.ownership === undefined ? {} : { ownership: args.values.ownership }),
+  },
   ...(process.env.PASEO_AGENT_ID === undefined ? {} : { agent: process.env.PASEO_AGENT_ID }),
 };
 
@@ -86,7 +123,7 @@ if (reply === null) {
 }
 
 if (!reply.ok) {
-  console.error(`factory-claim: ${reply.message}`);
+  console.error(`factory-claim: ${reply.code ?? "refused"}: ${reply.message}`);
   process.exit(2);
 }
 

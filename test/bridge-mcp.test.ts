@@ -400,7 +400,7 @@ test("bridge.mjs executes Supervisor, Lead, and Agent tools end-to-end over the 
           method: "tools/call",
           params: {
             name: "agent_claim",
-            arguments: {},
+            arguments: { outcome: "complete", scope: "feature.txt written", verification: "gate ran green", unknowns: "none" },
           },
         },
         {
@@ -725,8 +725,8 @@ test("v0.0.31 (ADR 0017 §6): an offline agent_claim deduplicates through the br
       cwd: repoDir,
       env: { PATH: process.env.PATH, PASEO_FACTORY_SPOOL_WAIT_MS: "1000" },
       requests: [
-        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "agent_claim", arguments: {} } },
-        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "agent_claim", arguments: {} } },
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "agent_claim", arguments: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } } },
+        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "agent_claim", arguments: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } } },
       ],
     });
 
@@ -941,6 +941,169 @@ test("lead_set_contract carries disposition and resetPeer end-to-end (ADR 0053):
   );
 });
 
+test("agent_claim carries the mandatory six-field handoff end-to-end (ADR 0053 §4): the schema requires it, a missing field is refused with no Attempt, and a scout claim with no commit walks HEAD to GREEN with the handoff in the report and the Lead's Verdict mail", async (t) => {
+  const homeDir = mkdtempSync(join(tmpdir(), "factory-bridge-handoff-"));
+  const stateDir = join(homeDir, "plugin-state", "paseo-factory");
+  const repoDir = makeGitRepo();
+  t.after(() => {
+    rmSync(homeDir, { recursive: true, force: true });
+    rmSync(repoDir, { recursive: true, force: true });
+  });
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
+  const reg = ensureProjectRegistered(stateDir, repoDir);
+  assert.equal(reg.ok, true);
+  const registry = createFactoryRegistry({ stateDir, root: factory });
+
+  const liveAgents = new Map<string, { id: string; status: string; archivedAt: string | null; cwd: string; labels: Record<string, string> }>();
+  const fakeDaemon = {
+    agents: {
+      list: async (opts?: { filter?: { labels?: Record<string, string> } }) => {
+        const wanted = opts?.filter?.labels ?? {};
+        const entries = [...liveAgents.values()]
+          .filter((a) => Object.entries(wanted).every(([k, v]) => a.labels[k] === v))
+          .map((agent) => ({ agent }));
+        return { entries };
+      },
+      create: async (options: { config: { provider: string }; cwd: string; title: string; labels: Record<string, string>; prompt?: string }) => {
+        const id = `peer-created-${liveAgents.size + 1}`;
+        liveAgents.set(id, { id, status: "idle", archivedAt: null, cwd: options.cwd, labels: options.labels });
+        return { id };
+      },
+      ref: (id: string) => ({
+        send: async () => ({ messageId: `msg-${id}` }),
+        cancel: async () => {},
+        archive: async () => {},
+      }),
+    },
+  };
+
+  const mailRuntime = createLeadMailRuntime({
+    stateDir,
+    factory,
+    registry,
+    daemon: fakeDaemon as never,
+    ensureLead: async () => ({ ok: true, agentId: "lead-1", created: false, projectRoot: repoDir, slug: reg.slug }),
+    ensureSupervisor: async () => ({ ok: true, agentId: "sup-1", created: false, projectRoot: repoDir, slug: reg.slug }),
+    retireLead: async () => ({ ok: true, agentId: "lead-1" }),
+  });
+  const spool = startSpool(stateDir, factory, {
+    registry,
+    pollMs: 25,
+    leadDispatch: mailRuntime.dispatchLead,
+    supervisorDispatch: mailRuntime.dispatchSupervisor,
+    supervisorReport: mailRuntime.reportSupervisor,
+    peerMail: mailRuntime.notifyPeer,
+    daemon: fakeDaemon as never,
+  });
+  t.after(() => spool.stop());
+
+  const correlations = new CorrelationRegistry(stateDir);
+  const leadCorr = correlations.issue({ role: "lead", projectSlug: reg.slug, projectRoot: repoDir });
+  correlations.associate(leadCorr.correlationId, "lead-1");
+
+  // 1. The Lead contracts a read-only scout Task and dispatches its Peer.
+  const leadCall = await runMcpSession({
+    args: ["--correlation", leadCorr.correlationId, "--state-dir", stateDir],
+    cwd: repoDir,
+    requests: [
+      {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {
+          name: "lead_set_contract",
+          arguments: { task: "RECON-6F", gate: "/usr/bin/true", artifact: "README.md", disposition: "scout", description: "Map the workspace layout" },
+        },
+      },
+      { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_dispatch_agent", arguments: { tasks: ["RECON-6F"] } } },
+    ],
+  });
+  for (const res of leadCall) {
+    const result = res.result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.notEqual(result.isError, true, result.content[0].text);
+  }
+  const worktreePath = registry.factoryForProject(reg.slug).worktreeFor("RECON-6F");
+  assert.ok(worktreePath, "the dispatch allocated the Task worktree");
+
+  // 2. The Peer's session: the schema demands the four required handoff fields;
+  //    a claim missing `outcome` is refused without opening an Attempt; the
+  //    complete handoff with `commit` omitted walks HEAD to GREEN.
+  const agentCorr = correlations.issue({ role: "agent", projectSlug: reg.slug, projectRoot: repoDir, task: "RECON-6F" });
+  const handoffArgs = { scope: "read README.md, traced src/entries", verification: "gate ran green; no checks skipped", unknowns: "none — layout confirmed against README" };
+  const agentCall = await runMcpSession({
+    args: ["--correlation", agentCorr.correlationId, "--state-dir", stateDir],
+    cwd: worktreePath,
+    requests: [
+      { jsonrpc: "2.0", id: 1, method: "tools/list" },
+      { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "agent_claim", arguments: handoffArgs } },
+      {
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: { name: "agent_claim", arguments: { ...handoffArgs, outcome: "partial", ownership: "lease returned; findings doc pending" } },
+      },
+    ],
+  });
+  const claimTool = (((agentCall[0].result as { tools: Array<{ name: string; inputSchema: { properties: Record<string, unknown>; required?: string[] } }> }).tools)
+    .find((tool) => tool.name === "agent_claim"))!;
+  assert.deepEqual(
+    (claimTool.inputSchema.properties.outcome as { enum?: string[] })?.enum,
+    ["complete", "partial", "blocked", "reopen"],
+    "the outcome property carries the four-value enum",
+  );
+  assert.equal((claimTool.inputSchema.properties.ownership as { type?: string })?.type, "string", "ownership is the optional fifth property");
+  assert.deepEqual(claimTool.inputSchema.required, ["outcome", "scope", "verification", "unknowns"], "the four Peer-authored fields are required");
+
+  const missing = (agentCall[1].result as { isError?: boolean; content: Array<{ text: string }> });
+  assert.equal(missing.isError, true, "the handoff-less claim is an error result");
+  assert.match(missing.content[0].text, /outcome/, "the refusal names the missing field");
+
+  const claimed = (agentCall[2].result as { isError?: boolean; content: Array<{ text: string }> });
+  assert.notEqual(claimed.isError, true, claimed.content[0].text);
+  assert.match(claimed.content[0].text, /GREEN/i, "the scout claim with no commit ends GREEN");
+
+  // 3. Exactly one Attempt opened — the refused call appended nothing.
+  const ledgerLines = readFileSync(join(stateDir, "projects", reg.slug, "ledger.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  const reconEvents = ledgerLines.filter((e) => e.task === "RECON-6F");
+  assert.equal(reconEvents.filter((e) => e.event === "claim_reported").length, 1, "the refused call opened no Attempt");
+  assert.equal(reconEvents.filter((e) => e.event === "gate_started").length, 1, "the refused call started no Gate");
+  const claimLine = reconEvents.find((e) => e.event === "claim_reported");
+  assert.equal(claimLine.handoff.outcome, "partial");
+  assert.equal(claimLine.handoff.ownership, "lease returned; findings doc pending", "the explicit ownership rides verbatim");
+  assert.equal(claimLine.handoff.unknowns, "none — layout confirmed against README");
+
+  // 4. The report renders the six fields with the Snapshot synthesized from the
+  //    attempt's own facts — the attested commit, branch, and Task worktree.
+  const reportMatch = /Report: (.+)/.exec(claimed.content[0].text);
+  assert.ok(reportMatch, "the reply names the report path");
+  const report = readFileSync(reportMatch[1].trim(), "utf8");
+  const canonical = [
+    "- Outcome: partial",
+    "- Snapshot:",
+    "- Scope: read README.md, traced src/entries",
+    "- Verification: gate ran green; no checks skipped",
+    "- Unknown / risk: none — layout confirmed against README",
+    "- Ownership: lease returned; findings doc pending",
+  ];
+  const positions = canonical.map((needle) => report.indexOf(needle));
+  assert.ok(positions.every((at) => at !== -1), `all six fields render in the report:\n${report}`);
+  assert.ok(positions.every((at, i) => i === 0 || at > positions[i - 1]!), "the six fields render in the canonical order");
+  assert.ok(report.includes(worktreePath), "the Snapshot names the Task worktree");
+
+  // 5. The Verdict mail queued to the Lead mailbox carries the handoff verbatim.
+  const mailboxState = readLeadMailbox(join(stateDir, "projects", reg.slug, "mailbox.jsonl"));
+  const verdict = [...mailboxState.queued, ...(mailboxState.inFlight?.items ?? [])].find((m) => m.kind === "verdict");
+  assert.ok(verdict, "the verdict mail is queued");
+  const mailText = String(verdict.text ?? "");
+  assert.ok(mailText.includes("GREEN"), "the mail names the Gate outcome");
+  for (const field of canonical) {
+    assert.ok(mailText.includes(field), `the verdict mail carries ${field.split(":")[0]} verbatim`);
+  }
+});
+
 test("bridge default Spool wait is 600 seconds, including an invalid override", async (t) => {
   const repoDir = makeGitRepo();
   const stateDir = mkdtempSync(join(tmpdir(), "factory-bridge-wait-"));
@@ -953,7 +1116,7 @@ test("bridge default Spool wait is 600 seconds, including an invalid override", 
     const responses = await runMcpSession({
       args: ["--correlation", agent.correlationId, "--state-dir", stateDir], cwd: repoDir,
       env: { ...process.env, NODE_OPTIONS: `--import=${clock}`, PASEO_FACTORY_SPOOL_WAIT_MS: override },
-      requests: [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "agent_claim", arguments: {} } }],
+      requests: [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "agent_claim", arguments: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } } }],
     });
     const result = responses[0]!.result as { isError?: boolean; content: Array<{ text: string }> };
     assert.equal(result.isError, true);
@@ -1068,7 +1231,7 @@ test("MCP Lead acceptance binds its authenticated role despite forged attributio
   const projectFactory = factoryRegistry.factoryForProject(reg.slug);
   projectFactory.setContract({ task: "mcp-bound", workspace: repoDir, gate: "true", artifact: "README.md" });
   const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoDir, encoding: "utf8" }).trim();
-  await projectFactory.claim({ task: "mcp-bound", sha });
+  await projectFactory.claim({ task: "mcp-bound", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   projectFactory.ledger.append({ event: "fresh_eyes_written", task: "mcp-bound", attempt: 1, model: "eye", outcome: "concern", finding: "Owner decision needed", durationMs: 1 });
   const denial = projectFactory.ledger.append({ event: "permit_denied", task: "mcp-bound", agent: "peer", name: "Bash", kind: "tool", rule: "scope", reason: "denied" });
   const poke = projectFactory.ledger.append({ event: "repoke_dispatched", task: "mcp-bound", agent: "peer" });
@@ -1476,8 +1639,8 @@ test("v0.0.93 quiet-point regression: Lead dispatches a Peer then crosses 128k �
       cwd: worktree,
       requests: [
         { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} },
-        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "agent_claim", arguments: { task: "T-KICK" } } },
-        { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "agent_claim", arguments: { task: "T-KICK" } } },
+        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "agent_claim", arguments: { task: "T-KICK", outcome: "complete", scope: "s", verification: "v", unknowns: "n" } } },
+        { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "agent_claim", arguments: { task: "T-KICK", outcome: "complete", scope: "s", verification: "v", unknowns: "n" } } },
       ],
     });
     const peerTools = (peerMcpCall[0].result as { tools: Array<{ name: string; _meta?: { timeoutMs?: number } }> }).tools;

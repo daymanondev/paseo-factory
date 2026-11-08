@@ -289,7 +289,7 @@ test("Full SLP lifecycle: Owner -> Supervisor -> Lead -> Agent -> Lead -> Superv
   const claimRes = await callMcpTool({
     args: ["--correlation", taskAgent.env.PASEO_FACTORY_CORRELATION!, "--state-dir", stateDir],
     toolName: "agent_claim",
-    toolArgs: { commit: sha },
+    toolArgs: { commit: sha, outcome: "complete", scope: "src/greet.ts", verification: "gate ran green", unknowns: "none" },
   });
   const claimElapsed = Date.now() - claimStart;
   assert.notEqual(claimRes.isError, true, claimRes.text);
@@ -339,7 +339,7 @@ test("Full SLP lifecycle: Owner -> Supervisor -> Lead -> Agent -> Lead -> Superv
   const finalSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: secondAgent.cwd, encoding: "utf8" }).trim();
   const secondClaim = await callMcpTool({
     args: ["--correlation", secondAgent.env.PASEO_FACTORY_CORRELATION!, "--state-dir", stateDir],
-    toolName: "agent_claim", toolArgs: { commit: finalSha },
+    toolName: "agent_claim", toolArgs: { commit: finalSha, outcome: "complete", scope: "src/consumer.ts", verification: "gate ran green", unknowns: "none" },
   });
   assert.notEqual(secondClaim.isError, true, secondClaim.text);
   assert.match(secondClaim.text, /GREEN/);

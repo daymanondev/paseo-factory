@@ -126,7 +126,7 @@ test("a green marked claim runs the watch: ledger order, event fields, CLI argv,
   });
   factory.setContract({ task: "W4", workspace, gate: "echo gate-ran", artifact, watch: true, description: "Implement pad()." });
   const claimed = commitFix(workspace, artifact);
-  const outcome = await factory.claim({ task: "W4", sha: claimed, agent: "agent-w4" });
+  const outcome = await factory.claim({ task: "W4", sha: claimed, agent: "agent-w4", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   assert.equal(outcome.verdict, "green");
 
   // Ticket 03's closing-window order: the watch sits between the verdict and
@@ -209,7 +209,7 @@ test("a red verdict runs the watch too — with honest markers where the station
   const factory = createFactory({ stateDir, fetchTimeline: feed.fetch, watchCopilotProbe: () => true, watchCopilotRunner: fake.runner });
   factory.setContract({ task: "W5", workspace, gate: "exit 1", artifact, watch: true });
   const claimed = commitFix(workspace, artifact);
-  const outcome = await factory.claim({ task: "W5", sha: claimed, agent: "agent-w5" });
+  const outcome = await factory.claim({ task: "W5", sha: claimed, agent: "agent-w5", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   assert.equal(outcome.verdict, "red");
 
   assert.equal(watchEvent(factory, "W5").outcome, "written", "red is watched — the battery's red arms depend on it");
@@ -223,7 +223,7 @@ test("a red verdict runs the watch too — with honest markers where the station
   writeLanes(join(dir, "factory2"), { watch: "copilot/gpt-5.4" });
   const factory2 = createFactory({ stateDir: join(dir, "factory2"), fetchTimeline: feed.fetch, watchCopilotProbe: () => true, watchCopilotRunner: fake.runner });
   factory2.setContract({ task: "W5b", workspace, gate: "true", artifact, watch: true });
-  await factory2.claim({ task: "W5b", sha: "deadbeef", agent: "agent-w5b" });
+  await factory2.claim({ task: "W5b", sha: "deadbeef", agent: "agent-w5b", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   const station1State = stateOfPrompt(fake.calls.at(-1)!.stdin);
   assert.equal(station1State.diff, "[diff unavailable: no resolved sha]");
@@ -249,7 +249,7 @@ test("a scope red carries its violations into the free tier", async (t) => {
   writeFileSync(join(workspace, "src/inside/x.ts"), "export const x = 1;\n");
   writeFileSync(join(workspace, "src/outside.ts"), "export const oops = 1;\n");
   const claimed = gitCommitChanges(workspace, "scope creep");
-  await factory.claim({ task: "W6", sha: claimed, agent: "agent-w6" });
+  await factory.claim({ task: "W6", sha: claimed, agent: "agent-w6", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   const codeAnswers = stateOfPrompt(fake.calls[0]!.stdin).code_answers as Record<string, unknown>;
   assert.equal(codeAnswers.scope_check, "violations: src/outside.ts");
@@ -266,7 +266,7 @@ test("git blocks the ledger holds ride the free tier", async (t) => {
   factory.setContract({ task: "W7", workspace, gate: "true", artifact, watch: true });
   factory.ledger.append({ event: "git_blocked", task: "W7", agent: "agent-w7", command: "git push --force origin main", rule: "git:force-push", reason: "destructive", cwd: workspace, blockId: "b-1" });
   const claimed = commitFix(workspace, artifact);
-  await factory.claim({ task: "W7", sha: claimed, agent: "agent-w7" });
+  await factory.claim({ task: "W7", sha: claimed, agent: "agent-w7", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   const codeAnswers = stateOfPrompt(fake.calls[0]!.stdin).code_answers as Record<string, unknown>;
   assert.deepEqual(codeAnswers.git_blocks, ["git:force-push: git push --force origin main"]);
@@ -281,7 +281,7 @@ test("an unmarked contract behaves exactly like before — no copilot call, no w
 
   factory.setContract({ task: "W8", workspace, gate: "true", artifact });
   const claimed = commitFix(workspace, artifact);
-  const outcome = await factory.claim({ task: "W8", sha: claimed, agent: "agent-w8" });
+  const outcome = await factory.claim({ task: "W8", sha: claimed, agent: "agent-w8", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   assert.equal(outcome.verdict, "green");
   assert.equal(fake.calls.length, 0, "no watch call where none was asked for");
@@ -301,7 +301,7 @@ test("a claim with no agent is an honest failed line — no call, no timeline to
 
   factory.setContract({ task: "W9", workspace, gate: "true", artifact, watch: true });
   const claimed = commitFix(workspace, artifact);
-  const outcome = await factory.claim({ task: "W9", sha: claimed });
+  const outcome = await factory.claim({ task: "W9", sha: claimed, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   assert.equal(outcome.verdict, "green", "a failed watch never touches the verdict");
   assert.equal(fake.calls.length, 0, "no timeline means no ask — the questions are about the run");
@@ -330,7 +330,7 @@ test("a timeline the daemon cannot serve is a failed line naming the reason", as
 
   factory.setContract({ task: "W10", workspace, gate: "true", artifact, watch: true });
   const claimed = commitFix(workspace, artifact);
-  await factory.claim({ task: "W10", sha: claimed, agent: "agent-restarted-away" });
+  await factory.claim({ task: "W10", sha: claimed, agent: "agent-restarted-away", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   const watch = watchEvent(factory, "W10");
   assert.equal(watch.outcome, "failed");
@@ -347,7 +347,7 @@ test("a shell with no captured PaseoApi is a failed line — the plugin was neve
 
   factory.setContract({ task: "W11", workspace, gate: "true", artifact, watch: true });
   const claimed = commitFix(workspace, artifact);
-  await factory.claim({ task: "W11", sha: claimed, agent: "agent-w11" });
+  await factory.claim({ task: "W11", sha: claimed, agent: "agent-w11", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   const watch = watchEvent(factory, "W11");
   assert.equal(watch.outcome, "failed");
@@ -368,7 +368,7 @@ test("malformed answers: missing names and non-numeric values are nulls, outcome
 
   factory.setContract({ task: "W12", workspace, gate: "true", artifact, watch: true });
   const claimed = commitFix(workspace, artifact);
-  const outcome = await factory.claim({ task: "W12", sha: claimed, agent: "agent-w12" });
+  const outcome = await factory.claim({ task: "W12", sha: claimed, agent: "agent-w12", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   const watch = watchEvent(factory, "W12");
   assert.equal(watch.outcome, "failed");
@@ -398,7 +398,7 @@ test("a transient CLI failure retries exactly once and succeeds", async (t) => {
 
   factory.setContract({ task: "W13", workspace, gate: "true", artifact, watch: true });
   const claimed = commitFix(workspace, artifact);
-  await factory.claim({ task: "W13", sha: claimed, agent: "agent-w13" });
+  await factory.claim({ task: "W13", sha: claimed, agent: "agent-w13", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   assert.equal(fake.calls.length, 2, "one transient retry, never more");
   assert.equal(watchEvent(factory, "W13").outcome, "written");
@@ -415,7 +415,7 @@ test("a CLI that keeps failing is a failed line naming the exit and stderr", asy
 
   factory.setContract({ task: "W14", workspace, gate: "true", artifact, watch: true });
   const claimed = commitFix(workspace, artifact);
-  await factory.claim({ task: "W14", sha: claimed, agent: "agent-w14" });
+  await factory.claim({ task: "W14", sha: claimed, agent: "agent-w14", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   assert.equal(fake.calls.length, 2, "the retry happened, then honesty");
   const watch = watchEvent(factory, "W14");
@@ -441,7 +441,7 @@ test("the budget covers every try: a CLI that outlasts the clock is cut off and 
   factory.setContract({ task: "W17", workspace, gate: "true", artifact, watch: true });
   const claimed = commitFix(workspace, artifact);
   const started = Date.now();
-  const outcome = await factory.claim({ task: "W17", sha: claimed, agent: "agent-w17" });
+  const outcome = await factory.claim({ task: "W17", sha: claimed, agent: "agent-w17", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   const wall = Date.now() - started;
 
   assert.ok(wall < 10_000, `the pass stayed near its budget (took ${wall}ms)`);
@@ -497,7 +497,7 @@ test("an oversized timeline is tail-capped with its marker; the newest entries s
   const factory = createFactory({ stateDir, fetchTimeline: timelineFetcher(overCap).fetch, watchCopilotProbe: () => true, watchCopilotRunner: fake.runner });
   factory.setContract({ task: "W19", workspace, gate: "true", artifact, watch: true });
   const claimed = commitFix(workspace, artifact);
-  await factory.claim({ task: "W19", sha: claimed, agent: "agent-w19" });
+  await factory.claim({ task: "W19", sha: claimed, agent: "agent-w19", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   const state = stateOfPrompt(fake.calls[0]!.stdin);
   const timeline = String(state.timeline);
@@ -561,7 +561,7 @@ test("the description-slot rider: the Contract records the assignment, the gate'
   });
   assert.equal(contract.description, "Add the pad() helper with its tests.", "the assignment is Contract data now");
   const claimed = commitFix(workspace, artifact);
-  const outcome = await factory.claim({ task: "W21", sha: claimed, agent: "agent-w21" });
+  const outcome = await factory.claim({ task: "W21", sha: claimed, agent: "agent-w21", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   assert.equal((stateOfPrompt(fake.calls[0]!.stdin).contract as Record<string, unknown>).description, "Add the pad() helper with its tests.", "the watch's state carries the intent");
   assert.ok(existsSync(outcome.reportPath));
@@ -660,7 +660,7 @@ test("v0.0.13: the watch reads its lane from lanes.json — a pi lane dispatches
 
   factory.setContract({ task: "W24", workspace, gate: "true", artifact, watch: true });
   const claimed = commitFix(workspace, artifact);
-  const outcome = await factory.claim({ task: "W24", sha: claimed, agent: "agent-w24" });
+  const outcome = await factory.claim({ task: "W24", sha: claimed, agent: "agent-w24", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   assert.equal(outcome.verdict, "green");
 
   const watch = watchEvent(factory, "W24");

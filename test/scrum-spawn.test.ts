@@ -811,7 +811,7 @@ test("parallel UX and Architect land disjoint artifacts from one accepted PRD in
     };
   }
   async function accept(item: Awaited<ReturnType<typeof prepare>>) {
-    const claim = await factory.claim({ task: item.task, sha: item.sha });
+    const claim = await factory.claim({ task: item.task, sha: item.sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
     assert.equal(claim.verdict, "green", claim.gate.note);
     await factory.accept({
       task: item.task,

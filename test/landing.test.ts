@@ -33,7 +33,7 @@ test("untracked test outputs in root and worktree do not block claim or landing"
       writeFileSync(join(cwd, name, "output.txt"), "test output\n");
     }
   }
-  assert.equal((await factory.claim({ task, sha: claimed })).verdict, "green");
+  assert.equal((await factory.claim({ task, sha: claimed, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } })).verdict, "green");
   assert.equal((await factory.accept({ task, attempt: 1 })).landing, "landed");
   assert.equal(readFileSync(join(workspace, "app.txt"), "utf8"), "after\n");
   assert.equal(existsSync(worktree), false);
@@ -41,7 +41,7 @@ test("untracked test outputs in root and worktree do not block claim or landing"
 
 test("accept retries a pending landing after root cleanup and settles it exactly once", async (t) => {
   const { factory, task, workspace, worktree, claimed } = landingFixture(t);
-  assert.equal((await factory.claim({ task, sha: claimed })).verdict, "green");
+  assert.equal((await factory.claim({ task, sha: claimed, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } })).verdict, "green");
   writeFileSync(join(workspace, "owner.txt"), "owner edit\n");
   assert.equal((await factory.accept({ task, attempt: 1 })).landing, "pending-conflict");
   assert.equal(existsSync(worktree), true);
@@ -55,7 +55,7 @@ test("accept retries a pending landing after root cleanup and settles it exactly
 
 test("pending landing retries preserve newer task commits even when the old claim already landed", async (t) => {
   const { factory, task, workspace, worktree, claimed } = landingFixture(t);
-  assert.equal((await factory.claim({ task, sha: claimed })).verdict, "green");
+  assert.equal((await factory.claim({ task, sha: claimed, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } })).verdict, "green");
   writeFileSync(join(workspace, "owner.txt"), "owner edit\n");
   assert.equal((await factory.accept({ task, attempt: 1 })).landing, "pending-conflict");
   writeFileSync(join(worktree, "followup.txt"), "resolved additional work\n");
@@ -72,7 +72,7 @@ test("pending landing retries preserve newer task commits even when the old clai
 test("pending landing can use the surviving task branch after its worktree was removed", async (t) => {
   const { factory, task, workspace, worktree, claimed } = landingFixture(t);
   factory.setContract({ task, workspace, gate: "true", artifact: "app.txt" });
-  assert.equal((await factory.claim({ task, sha: claimed })).verdict, "green");
+  assert.equal((await factory.claim({ task, sha: claimed, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } })).verdict, "green");
   writeFileSync(join(workspace, "owner.txt"), "owner edit\n");
   assert.equal((await factory.accept({ task, attempt: 1 })).landing, "pending-conflict");
   writeFileSync(join(worktree, "followup.txt"), "branch repair\n");
@@ -85,7 +85,7 @@ test("pending landing can use the surviving task branch after its worktree was r
 
 test("a divergent pending task tip stays pending and preserves the worktree", async (t) => {
   const { factory, task, workspace, worktree, claimed, base } = landingFixture(t);
-  assert.equal((await factory.claim({ task, sha: claimed })).verdict, "green");
+  assert.equal((await factory.claim({ task, sha: claimed, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } })).verdict, "green");
   writeFileSync(join(workspace, "owner.txt"), "owner edit\n");
   assert.equal((await factory.accept({ task, attempt: 1 })).landing, "pending-conflict");
   execFileSync("git", ["reset", "--hard", base], { cwd: worktree, stdio: "pipe" });
@@ -106,7 +106,7 @@ test("artifact exclusions preserve dirty checks for tracked edits and unrelated 
     writeFileSync(join(worktree, "coverage", "tracked.txt"), "tracked fixture\n");
     const claimed = gitCommitChanges(worktree, "track an output fixture");
     writeFileSync(join(worktree, "coverage", "tracked.txt"), "changed tracked fixture\n");
-    assert.equal((await factory.claim({ task, sha: claimed })).verdict, "red");
+    assert.equal((await factory.claim({ task, sha: claimed, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } })).verdict, "red");
   });
   await t.test("tracked dependency remains dirty", async (t) => {
     const { factory, task, worktree } = landingFixture(t);
@@ -114,19 +114,19 @@ test("artifact exclusions preserve dirty checks for tracked edits and unrelated 
     writeFileSync(join(worktree, "node_modules", "fixture", "index.js"), "tracked dependency\n");
     const claimed = gitCommitChanges(worktree, "track a dependency fixture");
     writeFileSync(join(worktree, "node_modules", "fixture", "index.js"), "changed dependency\n");
-    assert.equal((await factory.claim({ task, sha: claimed })).verdict, "red");
+    assert.equal((await factory.claim({ task, sha: claimed, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } })).verdict, "red");
   });
   await t.test("a regular file named coverage remains dirty", async (t) => {
     const { factory, task, worktree, claimed } = landingFixture(t);
     writeFileSync(join(worktree, "coverage"), "a file is not an output directory\n");
-    assert.equal((await factory.claim({ task, sha: claimed })).verdict, "red");
+    assert.equal((await factory.claim({ task, sha: claimed, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } })).verdict, "red");
   });
   await t.test("unrelated untracked file remains dirty", async (t) => {
     const { factory, task, worktree, claimed } = landingFixture(t);
     mkdirSync(join(worktree, "artifacts", "playwright-report"), { recursive: true });
     writeFileSync(join(worktree, "artifacts", "playwright-report", "index.html"), "ignored artifact\n");
     writeFileSync(join(worktree, "artifacts", "owner.txt"), "unrelated untracked file\n");
-    assert.equal((await factory.claim({ task, sha: claimed })).verdict, "red");
+    assert.equal((await factory.claim({ task, sha: claimed, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } })).verdict, "red");
   });
 });
 
@@ -139,7 +139,7 @@ test("claim from a repository subdirectory still rejects untracked sibling dirt"
   const sha = gitCommitChanges(workspace, "add application subdirectory");
   factory.setContract({ task: "SUBDIR", workspace: subdirectory, gate: "true", artifact: "index.txt" });
   writeFileSync(join(workspace, "owner.txt"), "untracked sibling\n");
-  assert.equal((await factory.claim({ task: "SUBDIR", sha })).verdict, "red");
+  assert.equal((await factory.claim({ task: "SUBDIR", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } })).verdict, "red");
 });
 
 test("large untracked dependency trees do not overflow cleanliness inspection", async (t) => {
@@ -154,6 +154,6 @@ test("large untracked dependency trees do not overflow cleanliness inspection", 
       }
     }
   }
-  assert.equal((await factory.claim({ task, sha: claimed })).verdict, "green");
+  assert.equal((await factory.claim({ task, sha: claimed, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } })).verdict, "green");
   assert.equal((await factory.accept({ task, attempt: 1 })).landing, "landed");
 });

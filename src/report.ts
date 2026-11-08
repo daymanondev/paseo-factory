@@ -9,8 +9,31 @@ import type {
   LedgerEvent,
   PermitDenied,
   PermitAllowed,
+  PeerHandoffFields,
+  SpawnDispatched,
   WatchWritten,
 } from "./events.ts";
+
+/**
+ * The six-field handoff block (ADR 0053 §4) in PEER.md's fixed handback
+ * order: Outcome → Snapshot → Scope → Verification → Unknown / risk →
+ * Ownership. `Snapshot` is synthesized from the attempt's own facts — the
+ * resolved commit, the `factory/<task>` branch, and the execution tree —
+ * never a Peer-supplied free-text field. One renderer, two readers: the
+ * attempt report and the Lead's Verdict notification carry the same lines,
+ * so the Peer's words arrive verbatim at both.
+ */
+export function handoffLines(handoff: PeerHandoffFields, snapshot: { sha?: string; branch: string; dir: string }): string[] {
+  const commit = snapshot.sha === undefined || snapshot.sha.trim() === "" ? "" : ` commit \`${snapshot.sha}\` on`;
+  return [
+    `- Outcome: ${handoff.outcome}`,
+    `- Snapshot:${commit} branch \`${snapshot.branch}\` — tree ${snapshot.dir}`,
+    `- Scope: ${handoff.scope}`,
+    `- Verification: ${handoff.verification}`,
+    `- Unknown / risk: ${handoff.unknowns}`,
+    `- Ownership: ${handoff.ownership ?? "lease returned"}`,
+  ];
+}
 
 /**
  * Renders `report-<task>-<n>.md` from ledger events — every content line traces
@@ -63,6 +86,17 @@ export function renderReport(task: string, attempt: number, events: readonly Led
     `- Claimed @ ${formatTimestamp(claim.ts)}: ${claim.sha}`,
     ...(claim.agent === undefined ? [] : [`- Claimed by agent \`${claim.agent}\``]),
     ...(gate.sha === undefined ? [] : [`- Attested commit: \`${gate.sha}\``]),
+    // The six-field handoff (ADR 0053 §4) between the claim line and the
+    // Verdict evidence; pre-0053 claims carry no handoff and render unchanged.
+    ...(claim.handoff === undefined
+      ? []
+      : handoffLines(claim.handoff, {
+          sha: gate.sha ?? claim.sha,
+          branch: `factory/${task}`,
+          dir:
+            epochEvents.findLast((e): e is SpawnDispatched => e.event === "spawn_dispatched" && e.task === task && typeof e.worktree === "string")
+              ?.worktree ?? contract.workspace,
+        })),
     `- Verdict: ${gate.verdict.toUpperCase()} — ${gate.note}`,
     ...(eyeLine(eye)),
     ...(watchLine(watch)),

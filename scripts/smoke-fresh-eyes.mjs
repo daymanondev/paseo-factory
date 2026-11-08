@@ -117,7 +117,7 @@ try {
   step("agent claims the broken commit — RED, and the eye stays asleep");
   run(
     process.execPath,
-    [join(repoRoot, "plugin", "bin", "factory-claim.mjs"), "--task", task, "--sha", brokenSha],
+    [join(repoRoot, "plugin", "bin", "factory-claim.mjs"), "--task", task, "--outcome", "complete", "--scope", "battery arm", "--verification", "battery gate", "--unknowns", "none", "--sha", brokenSha],
     agentEnv,
     1,
     "factory-claim (broken)",
@@ -139,7 +139,7 @@ try {
   const fixedSha = git(["rev-parse", "HEAD"]).stdout.trim();
   run(
     process.execPath,
-    [join(repoRoot, "plugin", "bin", "factory-claim.mjs"), "--task", task, "--sha", fixedSha],
+    [join(repoRoot, "plugin", "bin", "factory-claim.mjs"), "--task", task, "--outcome", "complete", "--scope", "battery arm", "--verification", "battery gate", "--unknowns", "none", "--sha", fixedSha],
     agentEnv,
     0,
     "factory-claim (fixed)",

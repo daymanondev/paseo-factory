@@ -422,7 +422,7 @@ test("controller requires complete design digests and journals a frozen-policy w
     task: contract.task,
     epoch: contract.seq,
   });
-  const claim = await factory.claim({ task: contract.task, sha });
+  const claim = await factory.claim({ task: contract.task, sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   await factory.accept({ task: contract.task, attempt: claim.attempt });
   const refs = paths.slice(0, 4).map((path) => artifactAt(root, sha, path)),
     browserEvidence = [artifactAt(root, sha, paths[4])];

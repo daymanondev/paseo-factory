@@ -144,7 +144,7 @@ test("a Claim through the Spool lands ONE meter_written line and the usage.json 
   writeFileSync(join(root, "r.md"), "y\n");
   const sha = gitCommitChanges(root, "U1 work");
 
-  const reply = await handleSpoolRequest(factory, { id: "c1", kind: "claim", task: "U1", sha, agent: "peer-7" }, {
+  const reply = await handleSpoolRequest(factory, { id: "c1", kind: "claim", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" }, task: "U1", sha, agent: "peer-7" }, {
     daemon: fake.daemon,
     usageMeter: input => usage.meterTaskBoundary(input),
   });
@@ -172,7 +172,7 @@ test("a Claim through the Spool lands ONE meter_written line and the usage.json 
   writeProjectRegistration(stateDir, slug, { root });
   writeFileSync(join(root, "r.md"), "z\n");
   const sha2 = gitCommitChanges(root, "U1 more work");
-  await handleSpoolRequest(factory, { id: "c2", kind: "claim", task: "U1", sha: sha2, agent: "peer-7" }, {
+  await handleSpoolRequest(factory, { id: "c2", kind: "claim", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" }, task: "U1", sha: sha2, agent: "peer-7" }, {
     daemon: fake.daemon,
     usageMeter: input => usage.meterTaskBoundary(input),
   });
@@ -183,7 +183,7 @@ test("a Claim through the Spool lands ONE meter_written line and the usage.json 
   writeProjectRegistration(stateDir, slug, { root });
   writeFileSync(join(root, "r.md"), "w\n");
   const sha3 = gitCommitChanges(root, "U1 grown work");
-  await handleSpoolRequest(factory, { id: "c3", kind: "claim", task: "U1", sha: sha3, agent: "peer-7" }, {
+  await handleSpoolRequest(factory, { id: "c3", kind: "claim", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" }, task: "U1", sha: sha3, agent: "peer-7" }, {
     daemon: fake.daemon,
     usageMeter: input => usage.meterTaskBoundary(input),
   });
