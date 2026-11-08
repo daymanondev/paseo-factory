@@ -167,7 +167,7 @@ describe("the Settings screen", () => {
   it("renders the heading and the honest unconfigured vault — Not configured, Never, no chips lit", () => {
     render(<SettingsScreen view={fixtureView()} />);
     expect(screen.getByRole("heading", { name: "Settings" })).toBeTruthy();
-    expect(screen.getByText("All projects · Private Vault + Project writes")).toBeTruthy();
+    expect(screen.getByText("All projects · Private Vault + Project writes · History imports read")).toBeTruthy();
     const vaultCard = screen.getByLabelText("Private vault");
     expect(screen.getByText("Not configured", { selector: "h2" })).toBeTruthy();
     expect(within(vaultCard).getAllByText("Never")).toHaveLength(2);

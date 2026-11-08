@@ -93,6 +93,13 @@
  *   bootstraps rather than refusing (ADR 0024). The design's later wizard
  *   steps (mode, models, seat start) need writes not in the door and stay
  *   omitted — nothing here can start a seat (ADR 0017).
+ * - The history read (T-14a, ADR 0051): `factory.history.imports` joins the
+ *   door as a PLAIN entry on its existing shared schema (input `{}`) — the
+ *   Settings screen's read-only History imports section, every
+ *   `ImportStatus` row the live writer holds across the root Factory and
+ *   its registered Projects. Its sibling writes stay OUTSIDE the door:
+ *   `factory.history.import` and `factory.history.upgrade` keep refusing
+ *   `unknown_method` as data (a later wave, pending Owner review).
  * - A start failure is logged, never thrown — the sidecar must never break
  *   plugin boot (the shell wraps the call, and `start()` itself resolves to
  *   `{ ok: false, reason }` rather than rejecting while ports fall back).
@@ -101,7 +108,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import type { z, ZodType } from "zod";
-import { accept, agentTranscript, inbox, lanesReset, lanesSet, leadRotate, pluginsCheckUpdates, pluginsInstall, pluginsManage, profilesApply, profilesDelete, profilesSave, projectAdd, projectDelete, projectPickFolder, projectReset, retro, scrumCommand, snapshot, supervisorRevoke, taskDetail, vaultConfigure, vaultHydrate, vaultImport, vaultPull, vaultPush, vaultSync } from "../shared/rpc.ts";
+import { accept, agentTranscript, historyImports, inbox, lanesReset, lanesSet, leadRotate, pluginsCheckUpdates, pluginsInstall, pluginsManage, profilesApply, profilesDelete, profilesSave, projectAdd, projectDelete, projectPickFolder, projectReset, retro, scrumCommand, snapshot, supervisorRevoke, taskDetail, vaultConfigure, vaultHydrate, vaultImport, vaultPull, vaultPush, vaultSync } from "../shared/rpc.ts";
 import type { SurfaceHandlers } from "./surface-rpc.ts";
 import type { SurfaceCallContext } from "./surface-rpc.ts";
 
@@ -430,6 +437,17 @@ export const CONSOLE_RPC_ALLOWLIST: readonly ConsoleRpcEntry[] = [
     refuse: projectAddRefusal,
   }),
   consoleRpcEntry(projectPickFolder.name, projectPickFolder.input, (handlers, input, context) => handlers.projectPickFolder(input ?? {}, context)),
+  // The history read (T-14a) — the Settings screen's read-only History
+  // imports section, a PLAIN entry on its existing shared schema (input
+  // `{}`): the handler answers every `ImportStatus` row the live writer
+  // holds — the root Factory's own imports plus each registered Project's —
+  // state, counts, conflicts, and diagnostics verbatim, read through the
+  // same single-writer door with no write anywhere in the act. The sibling
+  // writes stay OUTSIDE the door: `factory.history.import` and
+  // `factory.history.upgrade` keep refusing `unknown_method` as data (a
+  // later wave, pending Owner review) — nothing here can start or move a
+  // seat (ADR 0017).
+  consoleRpcEntry(historyImports.name, historyImports.input, (handlers) => handlers.historyImports()),
 ];
 
 /** The named allowlist as the refusal sentence spells it. */

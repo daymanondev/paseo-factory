@@ -167,5 +167,5 @@ test("RG-1: the console's real transport writes the vault — configure, pull, a
   const outsidePayload = (await outside.json()) as { ok: boolean; code?: string; error?: string };
   assert.equal(outsidePayload.ok, false);
   assert.equal(outsidePayload.code, "unknown_method");
-  assert.match(outsidePayload.error ?? "", /factory\.vault\.configure, factory\.vault\.pull, factory\.vault\.push, factory\.vault\.sync, factory\.vault\.hydrate, factory\.vault\.import, factory\.project\.reset, factory\.project\.delete, factory\.retro, factory\.project\.add, factory\.project\.pick\.folder/, "the allowlist sentence carries the six vault writes, the two project writes, the retro write, and the Add-Project wizard writes");
+  assert.match(outsidePayload.error ?? "", /factory\.vault\.configure, factory\.vault\.pull, factory\.vault\.push, factory\.vault\.sync, factory\.vault\.hydrate, factory\.vault\.import, factory\.project\.reset, factory\.project\.delete, factory\.retro, factory\.project\.add, factory\.project\.pick\.folder, factory\.history\.imports/, "the allowlist sentence carries the six vault writes, the two project writes, the retro write, the Add-Project wizard writes, and the history imports read");
 });

@@ -47,14 +47,22 @@
  * every other shape). A reset success refreshes the snapshot; a delete
  * success also hands the console back to the unscoped Overview
  * (`onProjectDeleted`). Cancel = no RPC; refusals render inline as data.
- * Still NO seat start (ADR 0017) — and no credential or passphrase text
- * ever reaches the DOM.
+ * T-14a adds the read-only "History imports" section beside the vault card:
+ * every `ImportStatus` row the plain `factory.history.imports` door entry
+ * answers (state, counts, conflicts, diagnostics, the materialization hold
+ * — rendered honestly per Project/node), read once on mount, re-read by the
+ * Refresh button (a read, so no confirm), and re-read after a vault import
+ * succeeds by folding that reply's own `historyImports` copy — loading, a
+ * refusal as data, and the empty "No history imports recorded" all render.
+ * Still NO seat start (ADR 0017) and NO history write — `history.import`
+ * and `history.upgrade` stay outside the door (a later wave, pending Owner
+ * review) — and no credential or passphrase text ever reaches the DOM.
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { FactoryView } from "../../../plugin/shared/view.ts";
 import "../../../design/daemon-settings.css";
 import "../../../design/management.css";
-import { settingsScreenModel, type SettingsProjectPanel, type SettingsSecretChip } from "../settings-view.ts";
+import { historyImportsModel, settingsScreenModel, type SettingsHistoryImportRow, type SettingsProjectPanel, type SettingsSecretChip } from "../settings-view.ts";
 import {
   vaultConfigureViaSidecar,
   vaultHydrateViaSidecar,
@@ -82,6 +90,7 @@ import {
   type ProjectDeleteInput,
   type ProjectResetInput,
 } from "../project.ts";
+import { historyImportsViaSidecar, type HistoryImportStatus, type HistoryImportsReply } from "../history.ts";
 import { navigate } from "../router.ts";
 
 /** Any of the screen's write replies — the banner renders whichever landed, verbatim. */
@@ -1050,6 +1059,121 @@ function ProjectPanel({
   );
 }
 
+// ---- the History imports section (T-14a) ---------------------------------------------------------------
+
+/** The section's read state — the first read loads; a later re-read keeps the current rows until its reply lands. */
+type HistoryImportsState = { phase: "loading" } | { phase: "ready"; rows: readonly SettingsHistoryImportRow[] } | { phase: "failure"; code: string; error: string };
+
+/** The status badge's own two faces — green only when the writer applied the import, red when it refused. */
+function historyStatusBadge(status: SettingsHistoryImportRow["status"]): string {
+  return status === "applied" ? " green" : status === "conflicted" ? " red" : "";
+}
+
+/**
+ * The read-only History imports card (T-14a, ADR 0051) — every
+ * `ImportStatus` row the `factory.history.imports` read answered, next to
+ * the vault card: the import's short id and target ledger, the admission
+ * state as the schema's own word (a green badge only when applied, red when
+ * conflicted), the added/duplicates counts the writer counted, the vault
+ * materialization hold when one rides, and the conflict reasons and
+ * diagnostics verbatim. Every arm renders as data — loading, a refusal's
+ * code and sentence, and the honest empty ("No history imports recorded").
+ * The one control is Refresh — a read, so it needs no confirm. NO
+ * Start/Import control exists (ADR 0017 + the deferred wave): the section
+ * observes; it never writes.
+ */
+function HistoryImportsPanel({
+  state,
+  pending,
+  onRefresh,
+}: {
+  state: HistoryImportsState;
+  /** A read is in flight — the Refresh button holds while it runs. */
+  pending: boolean;
+  onRefresh: () => void;
+}) {
+  return (
+    <div className="panel content-card console-settings-history" aria-label="History imports">
+      <div className="card-top">
+        <div>
+          <span className="eyebrow">HISTORY IMPORTS</span>
+          <h2>{state.phase === "ready" ? `${state.rows.length} import${state.rows.length === 1 ? "" : "s"} recorded` : "History imports"}</h2>
+        </div>
+        {/* The section's one control — a read, never a write, so no confirm gates it. */}
+        <button type="button" className="btn ghost" aria-label="Refresh history imports" disabled={pending} onClick={onRefresh}>
+          Refresh
+        </button>
+      </div>
+      {state.phase === "loading" ? (
+        <div className="notice">Loading history imports…</div>
+      ) : state.phase === "failure" ? (
+        // No role here on purpose: the screen's write banners own the alert
+        // role, and a second live region would collide with their queries.
+        <div className="console-banner console-banner-error">
+          The history imports read refused ({state.code}): {state.error}
+        </div>
+      ) : state.rows.length === 0 ? (
+        <div className="notice">No history imports recorded</div>
+      ) : (
+        state.rows.map((row) => (
+          <div className="console-history-import" key={row.id} aria-label={`History import ${row.shortId}`}>
+            <div className="card-top">
+              <span className="mono">{row.shortId}</span>
+              <span className={`badge${historyStatusBadge(row.status)}`}>
+                <span
+                  className={`dot ${row.status === "applied" ? "green" : row.status === "conflicted" ? "red" : "muted"}`}
+                  aria-hidden="true"
+                />
+                {row.statusLabel}
+              </span>
+            </div>
+            <dl className="project-settings-list">
+              <div className="project-setting-row">
+                <dt>Target</dt>
+                <dd className="setting-path mono">{row.target}</dd>
+              </div>
+              <div className="project-setting-row">
+                <dt>Project / node</dt>
+                <dd>{row.targetLabel}</dd>
+              </div>
+              <div className="project-setting-row">
+                <dt>Events added</dt>
+                <dd>{row.added ?? "—"}</dd>
+              </div>
+              <div className="project-setting-row">
+                <dt>Duplicates</dt>
+                <dd>{row.duplicates ?? "—"}</dd>
+              </div>
+              {row.materialization !== null ? (
+                <div className="project-setting-row">
+                  <dt>Materialization</dt>
+                  <dd>{row.materialization.status}</dd>
+                </div>
+              ) : null}
+            </dl>
+            {row.conflicts.map((conflict, index) => (
+              <p className="small red" key={`${row.id}-conflict-${index}`}>
+                Conflict: {conflict.reason}
+                {conflict.sourceId !== undefined ? ` (source ${conflict.sourceId})` : ""}
+              </p>
+            ))}
+            {row.diagnostics.map((line, index) => (
+              <p className="small muted" key={`${row.id}-diagnostic-${index}`}>
+                {line}
+              </p>
+            ))}
+            {row.materialization !== null && row.materialization.diagnostics.length > 0 ? (
+              <p className="small muted">
+                Materialization: {row.materialization.diagnostics.join("; ")}
+              </p>
+            ) : null}
+          </div>
+        ))
+      )}
+    </div>
+  );
+}
+
 // ---- the screen --------------------------------------------------------------------------------------
 
 export interface SettingsScreenProps {
@@ -1070,6 +1194,13 @@ export interface SettingsScreenProps {
   projectReset?: (input: ProjectResetInput) => Promise<ProjectDangerReply>;
   /** The delete transport (T-10e) — the scoped root alone. */
   projectDelete?: (input: ProjectDeleteInput) => Promise<ProjectDangerReply>;
+  /**
+   * The history imports read (T-14a) — the sidecar's `factory.history.imports`
+   * door by default, a fixture in tests. A read: the section's Refresh needs
+   * no confirm, and a vault import success folds its own reply's
+   * `historyImports` copy instead of re-asking the door.
+   */
+  historyImports?: (input: Record<never, never>) => Promise<HistoryImportsReply>;
   /** Fired after a successful write — the shell refreshes the snapshot (and so the panel's stamps). */
   onChanged?: () => void;
   /**
@@ -1098,6 +1229,16 @@ function dangerOutcomeNote(reply: VaultWriteReply): string {
   return ` (purged ${reply.purgedEvents} event${reply.purgedEvents === 1 ? "" : "s"}, ${reply.tasks.length} task${reply.tasks.length === 1 ? "" : "s"} · removed ${reply.removedFiles} file${reply.removedFiles === 1 ? "" : "s"} · archived ${reply.archivedSeats.length} seat${reply.archivedSeats.length === 1 ? "" : "s"}, ${reply.archivedAgents.length} agent${reply.archivedAgents.length === 1 ? "" : "s"})`;
 }
 
+/**
+ * The write reply's own historyImports copy (T-14a) — the four transport
+ * replies whose schema carries it answer the writer's post-act list, and
+ * the History imports section folds that copy verbatim: the re-read after a
+ * successful vault import IS the reply, so the door is not re-asked.
+ */
+function replyHistoryImports(reply: VaultWriteReply): readonly HistoryImportStatus[] | null {
+  return reply.ok && "historyImports" in reply && reply.historyImports !== undefined ? reply.historyImports : null;
+}
+
 export function SettingsScreen({
   view,
   vaultConfigure = vaultConfigureViaSidecar,
@@ -1108,6 +1249,7 @@ export function SettingsScreen({
   vaultImport = vaultImportViaSidecar,
   projectReset = projectResetViaSidecar,
   projectDelete = projectDeleteViaSidecar,
+  historyImports = historyImportsViaSidecar,
   onChanged = () => {},
   onProjectDeleted = () => navigate("/"),
 }: SettingsScreenProps) {
@@ -1117,13 +1259,39 @@ export function SettingsScreen({
   const [dialog, setDialog] = useState<"setup" | "pull" | "push" | "sync" | "hydrate" | "import" | "reset" | "delete" | null>(null);
   /** The last write's reply — both arms render verbatim; the dialog act closes on success. */
   const [status, setStatus] = useState<{ act: string; reply: VaultWriteReply } | null>(null);
+  /** The History imports section's read state (T-14a) — loads once on mount, re-reads on Refresh, folds a reply's own copy. */
+  const [historyState, setHistoryState] = useState<HistoryImportsState>({ phase: "loading" });
+  /** A history read is in flight — holds the Refresh button (and only the button). */
+  const [historyPending, setHistoryPending] = useState(false);
+
+  /** The section's one read — through the door; every arm lands as data, never a throw. */
+  const readHistoryImports = async () => {
+    setHistoryPending(true);
+    const reply = await historyImports({});
+    setHistoryPending(false);
+    setHistoryState(
+      reply.ok ? { phase: "ready", rows: historyImportsModel(reply.imports).rows } : { phase: "failure", code: reply.code, error: reply.error },
+    );
+  };
+
+  // The open read — one read when the screen mounts (the Refresh button re-runs it; a read needs no confirm).
+  useEffect(() => {
+    void readHistoryImports();
+  }, [historyImports]);
 
   const run = async <R extends VaultWriteReply>(act: string, write: () => Promise<R>): Promise<R> => {
     setPending(true);
     const reply = await write();
     setPending(false);
     setStatus({ act, reply });
-    if (reply.ok) onChanged();
+    if (reply.ok) {
+      onChanged();
+      // T-14a: a transport reply carrying the writer's post-act historyImports
+      // IS the section's re-read — the door is not re-asked for what the reply
+      // already answers (the vault import's success refreshes the rows here).
+      const rows = replyHistoryImports(reply);
+      if (rows !== null) setHistoryState({ phase: "ready", rows: historyImportsModel(rows).rows });
+    }
     return reply;
   };
 
@@ -1132,7 +1300,7 @@ export function SettingsScreen({
       <div className="page-heading">
         <div>
           <h1>Settings</h1>
-          <p className="muted">{model.scope} · Private Vault + Project writes</p>
+          <p className="muted">{model.scope} · Private Vault + Project writes · History imports read</p>
         </div>
       </div>
       {model.daemonError !== null ? (
@@ -1165,6 +1333,8 @@ export function SettingsScreen({
           onHydrate={() => setDialog("hydrate")}
           onImport={() => setDialog("import")}
         />
+        {/* T-14a: the read-only History imports card, beside the vault card it observes. */}
+        <HistoryImportsPanel state={historyState} pending={historyPending} onRefresh={() => void readHistoryImports()} />
         <ProjectPanel model={model} pending={pending} onReset={() => setDialog("reset")} onDelete={() => setDialog("delete")} />
       </div>
       {dialog === "setup" ? (

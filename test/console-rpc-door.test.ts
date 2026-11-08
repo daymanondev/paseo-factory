@@ -22,9 +22,10 @@ import { makeTempDir } from "./helpers.ts";
  * (`factory.vault.import`, a plain entry on its all-optional schema),
  * T-10e's two NARROWED Danger Zone writes (`factory.project.reset`,
  * `factory.project.delete`), T-11b's NARROWED retro write
- * (`factory.retro`), and T-12's Add-Project wizard writes
+ * (`factory.retro`), T-12's Add-Project wizard writes
  * (`factory.project.add`, NARROWED to refuse the empty add, and
- * `factory.project.pick.folder`, a plain entry) —
+ * `factory.project.pick.folder`, a plain entry), and T-14a's plain history
+ * read (`factory.history.imports`) —
  * dispatch in-process through the same `SurfaceHandlers` the RN client's
  * registrations call, every input validated by the shared RPC input schema
  * (`plugin/shared/rpc.ts`); every other method name keeps refusing as data.
@@ -46,6 +47,8 @@ import { makeTempDir } from "./helpers.ts";
  * seat control anywhere): the batch save, `lead.ensure`, `lead.dispatch`,
  * `supervisor.ensure`, and the retro ratification (`retro.ratify` — its
  * handler ensures a Supervisor seat; the Owner's decision is pending).
+ * T-14a's sibling writes (`history.import`, `history.upgrade`) stay outside
+ * the door the same way — a later wave, pending Owner review.
  */
 
 async function post(url: string, body: unknown): Promise<{ status: number; payload: unknown }> {
@@ -112,7 +115,7 @@ test("console RPC door: unlisted methods keep refusing as data, whatever their n
     const payload = refusal.payload as { ok: boolean; code?: string; error?: string };
     assert.equal(payload.ok, false);
     assert.equal(payload.code, "unknown_method");
-    assert.match(payload.error ?? "", /factory\.snapshot, factory\.task\.detail, factory\.agent\.transcript, factory\.accept, factory\.inbox, factory\.scrum\.command, factory\.lanes\.set, factory\.lanes\.reset, factory\.profiles\.apply, factory\.profiles\.save, factory\.profiles\.delete, factory\.lead\.rotate, factory\.supervisor\.revoke, factory\.plugins\.check\.updates, factory\.plugins\.install, factory\.plugins\.manage, factory\.vault\.configure, factory\.vault\.pull, factory\.vault\.push, factory\.vault\.sync, factory\.vault\.hydrate, factory\.vault\.import, factory\.project\.reset, factory\.project\.delete, factory\.retro, factory\.project\.add, factory\.project\.pick\.folder\)/, "the sentence names the allowlist through its last entry");
+    assert.match(payload.error ?? "", /factory\.snapshot, factory\.task\.detail, factory\.agent\.transcript, factory\.accept, factory\.inbox, factory\.scrum\.command, factory\.lanes\.set, factory\.lanes\.reset, factory\.profiles\.apply, factory\.profiles\.save, factory\.profiles\.delete, factory\.lead\.rotate, factory\.supervisor\.revoke, factory\.plugins\.check\.updates, factory\.plugins\.install, factory\.plugins\.manage, factory\.vault\.configure, factory\.vault\.pull, factory\.vault\.push, factory\.vault\.sync, factory\.vault\.hydrate, factory\.vault\.import, factory\.project\.reset, factory\.project\.delete, factory\.retro, factory\.project\.add, factory\.project\.pick\.folder, factory\.history\.imports\)/, "the sentence names the allowlist through its last entry");
   }
 });
 

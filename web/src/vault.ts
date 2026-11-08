@@ -20,10 +20,14 @@
  * verbatim (sync's also folding `createdRepo`/`pushed`, import's
  * `importedFiles`). The passphrase and the keystore password ride the
  * request body once and are never echoed back — the success arm's `vault`
- * carries the passphrase as a boolean only (`hasPassphrase`).
+ * carries the passphrase as a boolean only (`hasPassphrase`). The four
+ * transport replies (pull, sync, hydrate, import) also carry the writer's
+ * post-act `historyImports` list (T-14a) — the Settings screen's History
+ * imports section folds that copy verbatim instead of re-asking the door.
  */
 import { invokeRpc, type FetchLike, type RpcFailure } from "./rpc.ts";
 import type { VaultStatusView } from "../../plugin/shared/view.ts";
+import type { HistoryImportStatus } from "./history.ts";
 
 /** The configure input — the passphrase tri-state: absent preserves, "" clears, text sets. */
 export interface VaultConfigureInput {
@@ -92,12 +96,22 @@ export interface VaultImportInput {
 /** Any vault write's success arm — the refreshed `VaultStatusView` (passphrase a boolean) plus the handler's own sentence. */
 type VaultWriteSuccess = { vault: VaultStatusView; summary: string };
 
+/**
+ * The transport replies' own optional history fold (T-14a) — the four
+ * replies whose shared schema carries it (pull, sync, hydrate, import)
+ * answer the writer's post-act `ImportStatus` list, and the Settings
+ * screen's History imports section folds that copy verbatim instead of
+ * re-asking the door (configure and push never carry it — they move no
+ * history).
+ */
+type VaultHistoryImports = { historyImports?: HistoryImportStatus[] };
+
 export type VaultConfigureReply = ({ ok: true } & VaultWriteSuccess) | RpcFailure;
-export type VaultPullReply = ({ ok: true } & VaultWriteSuccess & { hydratedFiles: string[] }) | RpcFailure;
+export type VaultPullReply = ({ ok: true } & VaultWriteSuccess & { hydratedFiles: string[] } & VaultHistoryImports) | RpcFailure;
 export type VaultPushReply = ({ ok: true } & VaultWriteSuccess & { pushedFiles: string[] }) | RpcFailure;
-export type VaultSyncReply = ({ ok: true } & VaultWriteSuccess & { createdRepo: boolean; hydratedFiles: string[]; pushedFiles: string[]; pushed: boolean }) | RpcFailure;
-export type VaultHydrateReply = ({ ok: true } & VaultWriteSuccess & { hydratedFiles: string[] }) | RpcFailure;
-export type VaultImportReply = ({ ok: true } & VaultWriteSuccess & { importedFiles: string[]; pushed: boolean }) | RpcFailure;
+export type VaultSyncReply = ({ ok: true } & VaultWriteSuccess & { createdRepo: boolean; hydratedFiles: string[]; pushedFiles: string[]; pushed: boolean } & VaultHistoryImports) | RpcFailure;
+export type VaultHydrateReply = ({ ok: true } & VaultWriteSuccess & { hydratedFiles: string[] } & VaultHistoryImports) | RpcFailure;
+export type VaultImportReply = ({ ok: true } & VaultWriteSuccess & { importedFiles: string[]; pushed: boolean } & VaultHistoryImports) | RpcFailure;
 
 export function vaultConfigureViaSidecar(input: VaultConfigureInput, fetchImpl: FetchLike = (request, init) => fetch(request, init)): Promise<VaultConfigureReply> {
   return invokeRpc<VaultWriteSuccess>("factory.vault.configure", input, fetchImpl);

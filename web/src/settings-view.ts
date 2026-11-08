@@ -10,10 +10,13 @@
  * fold's own `utcStamp` string law), and every shared secret renders as a
  * presence chip, never a value. The T-10b/T-10c vault writes and the T-10e
  * danger zone belong to the screen's dialogs, not the fold: nothing here is
- * a transport or a write.
+ * a transport or a write. T-14a adds the History imports fold — the
+ * `ImportStatus` rows the door's `factory.history.imports` read (or a vault
+ * reply's own `historyImports` copy) answers, carried verbatim.
  */
 import type { FactoryView, VaultStatusView } from "../../plugin/shared/view.ts";
 import { utcStamp } from "./integrations-view.ts";
+import type { HistoryImportStatus } from "./history.ts";
 
 /** One shared-secret presence chip — the label the RN Vault bar's own vocabulary spells. */
 export interface SettingsSecretChip {
@@ -77,6 +80,78 @@ export interface SettingsScreenModel {
 /** The hydrate mode's own word — `direct` reads "direct", `sync` reads "sync"; null rides no suffix. */
 function hydrateModeSuffix(mode: VaultStatusView["lastHydrateMode"]): string {
   return mode === null ? "" : ` · ${mode}`;
+}
+
+// ---- the History imports fold (T-14a) -----------------------------------------------------------------
+
+/** One folded history import row — the `ImportStatus` schema's own facts, every optional half honest. */
+export interface SettingsHistoryImportRow {
+  /** The manifest's 64-hex identity — the row's key and the durable trace. */
+  id: string;
+  /** The id's first 12 hex — the row's readable spelling (the full id stays in `id`). */
+  shortId: string;
+  /**
+   * The ledger the import targets — the root Factory's own state dir or
+   * `projects/<slug>`, folded from the target path; the raw path rides too.
+   */
+  targetLabel: string;
+  /** The target ledger's own path, verbatim. */
+  target: string;
+  status: HistoryImportStatus["status"];
+  /** The status's own word — the schema's vocabulary, never invented. */
+  statusLabel: string;
+  /** The admitted event count, or null when the writer has not counted yet. */
+  added: number | null;
+  /** The duplicates the plan folded away, or null when uncounted. */
+  duplicates: number | null;
+  /** The conflict reasons — an honest empty list renders none. */
+  conflicts: readonly { reason: string; sourceId?: string; eventId?: string }[];
+  /** The writer's own diagnostics lines, verbatim. */
+  diagnostics: readonly string[];
+  /** The vault materialization hold when one rides — its status and diagnostics. */
+  materialization: { status: "pending" | "applied" | "refused"; diagnostics: readonly string[] } | null;
+}
+
+/** The History imports section's whole world — the rows, sorted as the handler answered them. */
+export interface SettingsHistoryImportsModel {
+  rows: readonly SettingsHistoryImportRow[];
+}
+
+/** The import's own honest target word — the state dir's ledger reads "root", a Project's reads its slug. */
+function historyTargetLabel(target: string): string {
+  const parts = target.split("/");
+  const slugIndex = parts.lastIndexOf("projects");
+  // `projects/<slug>/ledger.jsonl` — the slug the registry knows; anything else is the root Factory's own ledger.
+  if (slugIndex !== -1 && parts[slugIndex + 1] !== undefined && parts[slugIndex + 1] !== "") return parts[slugIndex + 1]!;
+  return "root Factory";
+}
+
+/**
+ * The History imports fold (T-14a): every `ImportStatus` row the read
+ * answered — the door's `factory.history.imports` list or a vault reply's
+ * own `historyImports` copy — carried verbatim: the state's own word, the
+ * counts the writer counted (never invented), the conflict reasons, the
+ * diagnostics lines, and the materialization hold when one rides. No write,
+ * no fabricated count: an absent optional folds to its honest null and an
+ * empty list stays empty (the section's own "No history imports recorded").
+ */
+export function historyImportsModel(imports: readonly HistoryImportStatus[]): SettingsHistoryImportsModel {
+  return {
+    rows: imports.map((item) => ({
+      id: item.id,
+      shortId: item.id.slice(0, 12),
+      targetLabel: historyTargetLabel(item.target),
+      target: item.target,
+      status: item.status,
+      statusLabel: item.status,
+      added: item.added ?? null,
+      duplicates: item.duplicates ?? null,
+      conflicts: item.conflicts === undefined ? [] : [...item.conflicts],
+      diagnostics: [...item.diagnostics],
+      materialization:
+        item.materialization === undefined ? null : { status: item.materialization.status, diagnostics: [...item.materialization.diagnostics] },
+    })),
+  };
 }
 
 /**
