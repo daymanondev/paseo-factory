@@ -9,7 +9,7 @@
  * `<stateDir>/correlations.json`, and exposes strictly role-scoped tools over
  * the single-writer Spool.
  */
-import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -1411,7 +1411,7 @@ var sharedTools = {
       type: "object",
       properties: {
         task: { type: "string", description: "Optional Task ID (defaults to your bound correlation Task)." },
-        commit: { type: "string", description: "Optional git commit SHA (defaults to `git rev-parse HEAD` in the Task worktree); mandatory for engineer-disposition Tasks." },
+        commit: { type: "string", description: "Git commit SHA the Claim attests \u2014 mandatory for engineer-disposition Tasks; for the read-only dispositions (scout | architect | reviewer) it is optional and defaults to `git rev-parse HEAD` in the Task worktree at admission." },
         outcome: { type: "string", enum: ["complete", "partial", "blocked", "reopen"], description: "6-Field Handoff: where the work stands (ADR 0053)." },
         scope: { type: "string", description: "6-Field Handoff: files changed or read, with paths." },
         verification: { type: "string", description: "6-Field Handoff: commands run, real output summary, and what was deliberately skipped." },
@@ -2116,29 +2116,22 @@ async function handleToolCall(name, rawArgs) {
     if (ownership !== undefined && ownership.trim() === "") {
       return toolResult("agent_claim `ownership` is optional but must be non-empty when present — omit it for the `lease returned` default.", true);
     }
-    const rawCommit = typeof args.commit === "string" && args.commit.trim() !== "" ? args.commit.trim() : typeof args.sha === "string" && args.sha.trim() !== "" ? args.sha.trim() : "";
-    let sha = rawCommit;
-    if (sha === "") {
-      let worktreeCwd = process.cwd();
-      if (ctx.projectSlug) {
-        const candidate = join(ctx.stateDir, "projects", ctx.projectSlug, "worktrees", task);
-        if (existsSync(candidate)) worktreeCwd = candidate;
-      }
-      const headOut = spawnSync(bridgePrimitives.resolveRealGitBinary(ctx.stateDir), ["rev-parse", "HEAD"], {
-        cwd: worktreeCwd,
-        encoding: "utf8",
-        timeout: GIT_TIMEOUT_MS,
-      });
-      if (headOut.status !== 0) {
-        return toolResult(`Could not resolve HEAD in ${worktreeCwd}: ${(headOut.stderr || "").trim()}`, true);
-      }
-      sha = headOut.stdout.trim();
-    }
+    // ADR 0053 §3/§4: an omitted `commit` rides as an omitted field, exactly
+    // like factory-claim — the factory judges it against the Contract's
+    // disposition (HEAD default for the read-only three, invalid-claim for
+    // engineer). Resolving HEAD in the bridge would forge the engineer's
+    // mandatory commit attestation on the MCP path.
+    const sha =
+      typeof args.commit === "string" && args.commit.trim() !== ""
+        ? args.commit.trim()
+        : typeof args.sha === "string" && args.sha.trim() !== ""
+          ? args.sha.trim()
+          : undefined;
     const reply = await roundTripSpool(ctx, {
       id: randomId(),
       kind: "claim",
       task,
-      sha,
+      ...(sha === undefined ? {} : { sha }),
       handoff: {
         outcome,
         scope: stringField(args.scope),

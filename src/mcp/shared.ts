@@ -161,7 +161,7 @@ export const sharedTools: Record<string, ToolDefinition> = {
       type: "object",
       properties: {
         task: { type: "string", description: "Optional Task ID (defaults to your bound correlation Task)." },
-        commit: { type: "string", description: "Optional git commit SHA (defaults to `git rev-parse HEAD` in the Task worktree); mandatory for engineer-disposition Tasks." },
+        commit: { type: "string", description: "Git commit SHA the Claim attests — mandatory for engineer-disposition Tasks; for the read-only dispositions (scout | architect | reviewer) it is optional and defaults to `git rev-parse HEAD` in the Task worktree at admission." },
         outcome: { type: "string", enum: ["complete", "partial", "blocked", "reopen"], description: "6-Field Handoff: where the work stands (ADR 0053)." },
         scope: { type: "string", description: "6-Field Handoff: files changed or read, with paths." },
         verification: { type: "string", description: "6-Field Handoff: commands run, real output summary, and what was deliberately skipped." },

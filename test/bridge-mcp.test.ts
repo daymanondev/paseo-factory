@@ -377,10 +377,13 @@ test("bridge.mjs executes Supervisor, Lead, and Agent tools end-to-end over the 
     assert.ok(worktreePath, "lead_dispatch_agent must allocate and register the Task worktree");
     assert.equal(worktreePath, join(stateDir, "projects", reg.slug, "worktrees", "feat-x"));
 
-    // 3. Working Agent commits in Task worktree and calls agent_claim (defaulting task & commit to HEAD)
+    // 3. Working Agent commits in Task worktree and calls agent_claim, attesting
+    //    the commit explicitly — the engineer disposition's mandatory word
+    //    (ADR 0053 §4); the bridge no longer forges it from HEAD.
     writeFileSync(join(worktreePath, "feature.txt"), "done\n");
     execFileSync("git", ["add", "feature.txt"], { cwd: worktreePath });
     execFileSync("git", ["commit", "-m", "feat: add feature.txt"], { cwd: worktreePath });
+    const featSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: worktreePath, encoding: "utf8" }).trim();
 
     const agentCorr = correlations.issue({
       role: "agent",
@@ -400,7 +403,7 @@ test("bridge.mjs executes Supervisor, Lead, and Agent tools end-to-end over the 
           method: "tools/call",
           params: {
             name: "agent_claim",
-            arguments: { outcome: "complete", scope: "feature.txt written", verification: "gate ran green", unknowns: "none" },
+            arguments: { commit: featSha, outcome: "complete", scope: "feature.txt written", verification: "gate ran green", unknowns: "none" },
           },
         },
         {
@@ -1225,6 +1228,99 @@ test("agent_claim carries the mandatory six-field handoff end-to-end (ADR 0053 �
   }
 });
 
+test("agent_claim on an engineer Task over MCP never forges the mandatory commit (ADR 0053 §4): omitted is refused by the factory's admission with no Attempt, the explicit commit claims GREEN", async (t) => {
+  const homeDir = mkdtempSync(join(tmpdir(), "factory-bridge-engineer-commit-"));
+  const stateDir = join(homeDir, "plugin-state", "paseo-factory");
+  const repoDir = makeGitRepo();
+  t.after(() => {
+    rmSync(homeDir, { recursive: true, force: true });
+    rmSync(repoDir, { recursive: true, force: true });
+  });
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
+  const reg = ensureProjectRegistered(stateDir, repoDir);
+  assert.equal(reg.ok, true);
+  const registry = createFactoryRegistry({ stateDir, root: factory });
+
+  const liveAgents = new Map<string, { id: string; status: string; archivedAt: string | null; cwd: string; labels: Record<string, string> }>();
+  const fakeDaemon = {
+    agents: {
+      list: async (opts?: { filter?: { labels?: Record<string, string>; includeArchived?: boolean; includeBackground?: boolean } }) => {
+        const wanted = opts?.filter?.labels ?? {};
+        const entries = [...liveAgents.values()]
+          .filter((a) => Object.entries(wanted).every(([k, v]) => a.labels[k] === v))
+          .map((agent) => ({ agent }));
+        return { entries };
+      },
+      create: async (options: { config: { provider: string }; cwd: string; title: string; labels: Record<string, string>; prompt?: string }) => {
+        const id = `peer-created-${liveAgents.size + 1}`;
+        liveAgents.set(id, { id, status: "idle", archivedAt: null, cwd: options.cwd, labels: options.labels });
+        return { id };
+      },
+      ref: (id: string) => ({
+        send: async () => ({ messageId: `msg-${id}` }),
+        cancel: async () => {},
+        archive: async () => {},
+      }),
+    },
+  };
+  const spool = startSpool(stateDir, factory, { registry, pollMs: 25, daemon: fakeDaemon as never });
+  t.after(() => spool.stop());
+
+  const correlations = new CorrelationRegistry(stateDir);
+  const leadCorr = correlations.issue({ role: "lead", projectSlug: reg.slug, projectRoot: repoDir });
+  correlations.associate(leadCorr.correlationId, "lead-1");
+  // An engineer Task (the disposition default, stated explicitly here).
+  const leadCall = await runMcpSession({
+    args: ["--correlation", leadCorr.correlationId, "--state-dir", stateDir],
+    cwd: repoDir,
+    requests: [
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "ENG-1", gate: "/usr/bin/true", artifact: "README.md", disposition: "engineer" } } },
+      { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_dispatch_agent", arguments: { tasks: ["ENG-1"] } } },
+    ],
+  });
+  for (const res of leadCall) {
+    const result = res.result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.notEqual(result.isError, true, result.content[0].text);
+  }
+  const worktreePath = registry.factoryForProject(reg.slug).worktreeFor("ENG-1");
+  assert.ok(worktreePath, "the dispatch allocated the Task worktree");
+
+  const agentCorr = correlations.issue({ role: "agent", projectSlug: reg.slug, projectRoot: repoDir, task: "ENG-1" });
+  const handoff = { outcome: "complete", scope: "s", verification: "v", unknowns: "none" };
+  // 1. `commit` omitted: the bridge forwards the omission — the factory's
+  //    admission refuses the engineer claim; no Attempt opens.
+  const refused = await runMcpSession({
+    args: ["--correlation", agentCorr.correlationId, "--state-dir", stateDir],
+    cwd: worktreePath,
+    requests: [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "agent_claim", arguments: handoff } }],
+  });
+  const refusal = refused[0].result as { isError?: boolean; content: Array<{ text: string }> };
+  assert.equal(refusal.isError, true, "the commit-less engineer claim is an error result");
+  assert.match(refusal.content[0].text, /invalid-claim/, "the refusal carries the factory's admission code");
+  assert.match(refusal.content[0].text, /mandatory for the engineer disposition/, "the refusal names the engineer commit law");
+
+  // 2. The explicit commit claims GREEN on the same Task.
+  const engSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: worktreePath, encoding: "utf8" }).trim();
+  const claimed = await runMcpSession({
+    args: ["--correlation", agentCorr.correlationId, "--state-dir", stateDir],
+    cwd: worktreePath,
+    requests: [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "agent_claim", arguments: { ...handoff, commit: engSha } } }],
+  });
+  const claimRes = claimed[0].result as { isError?: boolean; content: Array<{ text: string }> };
+  assert.notEqual(claimRes.isError, true, claimRes.content[0].text);
+  assert.match(claimRes.content[0].text, /Verdict: GREEN/);
+
+  // 3. The refused call opened exactly no Attempt; the attested claim opened one.
+  const ledgerLines = readFileSync(join(stateDir, "projects", reg.slug, "ledger.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  const engEvents = ledgerLines.filter((e) => e.task === "ENG-1");
+  assert.equal(engEvents.filter((e) => e.event === "claim_reported").length, 1, "only the commit-attesting claim opened an Attempt");
+  assert.equal(engEvents.filter((e) => e.event === "gate_started").length, 1, "the refused claim started no Gate");
+  assert.equal(engEvents.find((e) => e.event === "claim_reported").sha, engSha, "the claim attests the explicit commit");
+});
+
 test("lead_accept_task on a GREEN read-only Task closes merge-free (ADR 0053 §3): attempt_accepted with no landing, the Peer archived, the Task worktree removed, and <project-root>'s HEAD untouched", async (t) => {
   const homeDir = mkdtempSync(join(tmpdir(), "factory-bridge-readonly-accept-"));
   const stateDir = join(homeDir, "plugin-state", "paseo-factory");
@@ -1892,13 +1988,16 @@ test("v0.0.93 quiet-point regression: Lead dispatches a Peer then crosses 128k �
     //    (c) an idempotent second `agent_claim` on the same SHA returns GREEN
     //        without queuing a duplicate verdict mail item in `mailbox.jsonl`.
     const peerCorr = correlations.issue({ role: "agent", projectSlug: reg.slug, projectRoot: canonicalRoot, task: "T-KICK", agentId: peer.id });
+    // The engineer disposition's mandatory attestation (ADR 0053 §4): the Peer
+    // names its exact commit; the bridge never defaults it on this path.
+    const kickSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: worktree, encoding: "utf8" }).trim();
     const peerMcpCall = await runMcpSession({
       args: ["--correlation", peerCorr.correlationId, "--state-dir", stateDir, "--home", homeDir],
       cwd: worktree,
       requests: [
         { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} },
-        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "agent_claim", arguments: { task: "T-KICK", outcome: "complete", scope: "s", verification: "v", unknowns: "n" } } },
-        { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "agent_claim", arguments: { task: "T-KICK", outcome: "complete", scope: "s", verification: "v", unknowns: "n" } } },
+        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "agent_claim", arguments: { task: "T-KICK", commit: kickSha, outcome: "complete", scope: "s", verification: "v", unknowns: "n" } } },
+        { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "agent_claim", arguments: { task: "T-KICK", commit: kickSha, outcome: "complete", scope: "s", verification: "v", unknowns: "n" } } },
       ],
     });
     const peerTools = (peerMcpCall[0].result as { tools: Array<{ name: string; _meta?: { timeoutMs?: number } }> }).tools;
