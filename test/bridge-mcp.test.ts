@@ -473,6 +473,235 @@ test("bridge.mjs executes Supervisor, Lead, and Agent tools end-to-end over the 
   }
 });
 
+test("agent_escalate_blocker keeps the Peer alive and routes the challenge Lead-only (peer_challenge, no needs_human, no Supervisor wake); lead_needs_human and lead_report_to_supervisor still work (ADR 0053 Decision 2)", async () => {
+  const homeDir = mkdtempSync(join(tmpdir(), "factory-bridge-challenge-"));
+  const stateDir = join(homeDir, "plugin-state", "paseo-factory");
+  const repoDir = makeGitRepo();
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
+  const reg = ensureProjectRegistered(stateDir, repoDir);
+  assert.equal(reg.ok, true);
+  const registry = createFactoryRegistry({ stateDir, root: factory });
+
+  interface ChallengeAgentShape {
+    id: string;
+    status: string;
+    archivedAt: string | null;
+    cwd: string;
+    labels: Record<string, string>;
+  }
+  const agents = new Map<string, ChallengeAgentShape>();
+  const sent: Array<{ agentId: string; text: string }> = [];
+  const archived: string[] = [];
+  const cancelled: string[] = [];
+  const workspaceDirs = new Map<string, string>();
+  let createdSeq = 0;
+  const registerAgent = (agent: ChallengeAgentShape) => agents.set(agent.id, agent) && agent;
+  const lead: ChallengeAgentShape = { id: "lead-ch-1", status: "idle", archivedAt: null, cwd: repoDir, labels: { seat: "lead", project: reg.slug } };
+  const supervisor: ChallengeAgentShape = { id: "sup-ch-1", status: "idle", archivedAt: null, cwd: repoDir, labels: { seat: "supervisor", project: reg.slug } };
+  registerAgent(lead);
+  registerAgent(supervisor);
+  const createAgentIn = (workspaceId: string | undefined, input: { labels?: Record<string, string>; cwd?: string }): string => {
+    createdSeq += 1;
+    const id = `agent-created-${createdSeq}`;
+    const wsCwd = workspaceId !== undefined ? workspaceDirs.get(workspaceId) : undefined;
+    registerAgent({ id, status: "idle", archivedAt: null, cwd: wsCwd ?? input.cwd ?? repoDir, labels: { ...(input.labels ?? {}) } });
+    return id;
+  };
+  const fakeDaemon = {
+    agents: {
+      list: async (opts?: { filter?: { labels?: Record<string, string> } }) => {
+        const wanted = opts?.filter?.labels ?? {};
+        const entries = [...agents.values()]
+          .filter((a) => Object.entries(wanted).every(([k, v]) => a.labels[k] === v))
+          .map((agent) => ({ agent }));
+        return { entries };
+      },
+      ref: (id: string) => ({
+        send: async (text: string) => {
+          sent.push({ agentId: id, text });
+          return { messageId: `msg-${sent.length}` };
+        },
+        cancel: async () => {
+          cancelled.push(id);
+        },
+        archive: async () => {
+          archived.push(id);
+          const agent = agents.get(id);
+          if (agent !== undefined) agent.archivedAt = new Date().toISOString();
+        },
+      }),
+    },
+    workspaces: {
+      open: async () => ({ id: "project-workspace-main", projectId: "paseo-project-1" }),
+      create: async (input: { source: { path: string } }) => {
+        const id = `task-workspace-${workspaceDirs.size + 1}`;
+        workspaceDirs.set(id, input.source.path);
+        return { id };
+      },
+      ref: (id: string) => ({ agents: { create: async (input: { labels?: Record<string, string>; cwd?: string }) => ({ id: createAgentIn(id, input) }) } }),
+    },
+  };
+
+  const mailRuntime = createLeadMailRuntime({
+    stateDir,
+    factory,
+    registry,
+    daemon: fakeDaemon as never,
+    ensureLead: async () => ({ ok: true, agentId: lead.id, created: false, projectRoot: repoDir, slug: reg.slug }),
+    ensureSupervisor: async () => ({ ok: true, agentId: supervisor.id, created: false, projectRoot: repoDir, slug: reg.slug }),
+    retireLead: async () => ({ ok: true, agentId: lead.id }),
+  });
+  const spool = startSpool(stateDir, factory, {
+    registry,
+    pollMs: 25,
+    leadDispatch: mailRuntime.dispatchLead,
+    supervisorDispatch: mailRuntime.dispatchSupervisor,
+    supervisorReport: mailRuntime.reportSupervisor,
+    peerMail: mailRuntime.notifyPeer,
+    daemon: fakeDaemon as never,
+  });
+
+  try {
+    const canonicalRoot = reg.ok ? reg.root : repoDir;
+    const correlations = new CorrelationRegistry(stateDir);
+    const leadCorr = correlations.issue({ role: "lead", projectSlug: reg.slug, projectRoot: canonicalRoot });
+    correlations.associate(leadCorr.correlationId, lead.id);
+
+    // 1. Lead contracts and dispatches the Peer through the bridge.
+    const leadCall = await runMcpSession({
+      args: ["--correlation", leadCorr.correlationId, "--state-dir", stateDir, "--home", homeDir],
+      cwd: repoDir,
+      requests: [
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "T-CH", gate: "/usr/bin/true", artifact: "README.md", scope: ["README.md"] } } },
+        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_dispatch_agent", arguments: { tasks: ["T-CH"] } } },
+      ],
+    });
+    const contractRes = leadCall[0].result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.notEqual(contractRes.isError, true, contractRes.content[0].text);
+    const spawnRes = leadCall[1].result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.notEqual(spawnRes.isError, true, spawnRes.content[0].text);
+
+    const worktree = join(stateDir, "projects", reg.slug, "worktrees", "T-CH");
+    assert.ok(existsSync(worktree), "the Task worktree exists");
+    const peer = [...agents.values()].find((a) => a.labels.task === "T-CH");
+    assert.ok(peer, "the Peer session exists on the daemon");
+    peer.status = "idle";
+
+    // 2. The Peer challenges a Brief premise mid-flight (Contract Before Test).
+    const peerCorr = correlations.issue({ role: "agent", projectSlug: reg.slug, projectRoot: canonicalRoot, task: "T-CH", agentId: peer.id });
+    const challenge = "REOPEN_REQUEST (foundation): the Brief assumes src/legacy-adapter.ts exports buildFacade(); no such module exists on HEAD. Alternative: scout the adapter boundary first, then re-brief.";
+    const peerCall = await runMcpSession({
+      args: ["--correlation", peerCorr.correlationId, "--state-dir", stateDir, "--home", homeDir],
+      cwd: worktree,
+      requests: [
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "agent_escalate_blocker", arguments: { message: challenge } } },
+      ],
+    });
+    const escalateRes = peerCall[0].result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.notEqual(escalateRes.isError, true, escalateRes.content[0].text);
+    assert.match(escalateRes.content[0].text, /escalated to Lead/i);
+
+    // The Peer session stays alive and paused: still listed, non-archived, never stopped.
+    assert.equal(peer.archivedAt, null, "the challenging Peer was never archived");
+    assert.equal(archived.includes(peer.id), false, "no archive call ever touched the challenging Peer");
+    assert.equal(cancelled.includes(peer.id), false, "no cancel call ever touched the challenging Peer");
+
+    // Exactly one challenge mail item — on the Lead mailbox, kind peer_challenge.
+    const mailboxPath = join(stateDir, "projects", reg.slug, "mailbox.jsonl");
+    const mailboxState = readLeadMailbox(mailboxPath);
+    const leadItems = [...mailboxState.queued, ...(mailboxState.inFlight ? mailboxState.inFlight.items : [])];
+    const challengeMail = leadItems.filter((m) => m.from === "peer");
+    assert.equal(challengeMail.length, 1, "exactly one peer mail item — the challenge");
+    assert.equal(challengeMail[0]?.kind, "peer_challenge");
+    assert.equal(challengeMail[0]?.to, "lead");
+    assert.equal(challengeMail[0]?.task, "T-CH");
+    assert.ok(challengeMail[0]?.text.includes("REOPEN_REQUEST (foundation)"), "the mail carries the challenge text");
+
+    // No Supervisor item and no Supervisor wake.
+    const supervisorItems = [...mailboxState.supervisorQueued, ...(mailboxState.supervisorInFlight ? mailboxState.supervisorInFlight.items : [])];
+    assert.equal(supervisorItems.length, 0, "no to:supervisor item is enqueued by a Peer challenge");
+    assert.equal(sent.filter((p) => p.agentId === supervisor.id).length, 0, "the Supervisor was never pumped or woken by a Peer challenge");
+
+    // No needs_human Ledger event: a challenge is a Lead-reconciliation turn, never a Needs-human fact.
+    const ledgerEvents = readFileSync(join(stateDir, "projects", reg.slug, "ledger.jsonl"), "utf8")
+      .split("\n")
+      .filter((line) => line !== "")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    assert.equal(ledgerEvents.some((e) => e.event === "needs_human"), false, "the epoch's Ledger slice records no needs_human event for the challenge");
+
+    // 3. lead_needs_human still records its needs_human Ledger line — through the
+    //    bridge seam — and records it Lead-quietly (no peer mail, no Supervisor wake).
+    const projectFactory = registry.factoryForProject(reg.slug);
+    projectFactory.ledger.append({
+      event: "permit_denied",
+      task: "T-CH",
+      agent: peer.id,
+      name: "Bash",
+      kind: "tool",
+      command: "git reset --hard",
+      rule: "policy:S1-git-vocabulary",
+      reason: "caught",
+    });
+    const spoolRoot = join(stateDir, "spool");
+    const repokePath = join(spoolRoot, "requests", "rp-ch.json");
+    mkdirSync(join(spoolRoot, "requests"), { recursive: true });
+    writeFileSync(repokePath, `${JSON.stringify({ id: "rp-ch", kind: "repoke", task: "T-CH", agent: peer.id })}\n`);
+    await new Promise<void>((resolveWait, rejectWait) => {
+      const deadline = Date.now() + 5000;
+      const tick = () => {
+        if (existsSync(join(spoolRoot, "replies", "rp-ch.json"))) resolveWait();
+        else if (Date.now() >= deadline) rejectWait(new Error("the repoke evidence request was not answered by the spool"));
+        else setTimeout(tick, 25);
+      };
+      tick();
+    });
+
+    const needsHumanCall = await runMcpSession({
+      args: ["--correlation", leadCorr.correlationId, "--state-dir", stateDir, "--home", homeDir],
+      cwd: repoDir,
+      requests: [
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_needs_human", arguments: { task: "T-CH", reason: "denied-again" } } },
+      ],
+    });
+    const needsHumanRes = needsHumanCall[0].result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.notEqual(needsHumanRes.isError, true, needsHumanRes.content[0].text);
+    assert.match(needsHumanRes.content[0].text, /denied-again/);
+    const ledgerAfter = readFileSync(join(stateDir, "projects", reg.slug, "ledger.jsonl"), "utf8")
+      .split("\n")
+      .filter((line) => line !== "")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    assert.equal(ledgerAfter.some((e) => e.event === "needs_human"), true, "lead_needs_human still records its needs_human Ledger line");
+    const mailboxAfterNeedsHuman = readLeadMailbox(mailboxPath);
+    const supervisorItemsAfterNeedsHuman = [...mailboxAfterNeedsHuman.supervisorQueued, ...(mailboxAfterNeedsHuman.supervisorInFlight ? mailboxAfterNeedsHuman.supervisorInFlight.items : [])];
+    assert.equal(supervisorItemsAfterNeedsHuman.length, 0, "a Lead-originated needs_human recording wakes no Supervisor mail either");
+
+    // 4. lead_report_to_supervisor still wakes the Supervisor with the structured
+    //    question — the one sanctioned writer of to:supervisor mail (User Story 8).
+    const reportCall = await runMcpSession({
+      args: ["--correlation", leadCorr.correlationId, "--state-dir", stateDir, "--home", homeDir],
+      cwd: repoDir,
+      requests: [
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_report_to_supervisor", arguments: { message: "T-CH is blocked on a foundation premise; ruling needed on the adapter boundary." } } },
+      ],
+    });
+    const reportRes = reportCall[0].result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.notEqual(reportRes.isError, true, reportRes.content[0].text);
+    assert.match(reportRes.content[0].text, /end your turn/i);
+    assert.ok(
+      sent.some((p) => p.agentId === supervisor.id && p.text.includes("ruling needed on the adapter boundary")),
+      "lead_report_to_supervisor still wakes the Supervisor",
+    );
+    const mailboxAfterReport = readLeadMailbox(mailboxPath);
+    const reportItems = [...mailboxAfterReport.supervisorQueued, ...(mailboxAfterReport.supervisorInFlight ? mailboxAfterReport.supervisorInFlight.items : [])].filter((m) => m.from === "lead");
+    assert.equal(reportItems.length, 1, "the report lands as the single Lead-written Supervisor item");
+    assert.equal(reportItems[0]?.kind, "report");
+  } finally {
+    spool.stop();
+    rmSync(homeDir, { recursive: true, force: true });
+    rmSync(repoDir, { recursive: true, force: true });
+  }
+});
+
 test("v0.0.31 (ADR 0017 §6): an offline agent_claim deduplicates through the bridge and spool-timeout instructs stop-and-end-turn, leaving the single request queued", async () => {
   const homeDir = mkdtempSync(join(tmpdir(), "factory-bridge-offline-"));
   const stateDir = join(homeDir, "plugin-state", "paseo-factory");

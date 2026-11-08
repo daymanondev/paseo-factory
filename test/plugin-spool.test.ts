@@ -420,6 +420,100 @@ test("peer hooks: a needs_human recording lands its peer mail on the owning Proj
   assert.equal(queued?.kind, "needs_human");
   assert.equal(queued?.task, "T3");
   assert.ok(String(queued?.text).includes("denied-again"));
+
+  // ADR 0053 Decision 2 / spec Decision 6: a peer needs_human recording routes
+  // exclusively to the Lead mailbox — the Supervisor duplicate is never
+  // enqueued (only Owner directives and lead_report_to_supervisor wake Supervisor).
+  const queuedLines = readMailbox(stateDir, slug).filter((evt) => evt.type === "mail_queued");
+  assert.equal(queuedLines.length, 1, "the needs_human recording lands ONE peer mail item");
+  assert.equal(queuedLines.filter((evt) => evt.to === "supervisor").length, 0, "no to:supervisor duplicate is enqueued");
+});
+
+// ---- peer challenge routing (ADR 0053 Decision 2, spec Decision 6) ------------------------
+
+test("a Peer challenge (agent_escalate_blocker) queues kind peer_challenge to the Lead mailbox only — no needs_human Ledger line, no Supervisor item", async (t) => {
+  const { stateDir, slug, projectRoot, factory } = makeSpooledSurface(t);
+  const spoolRoot = spoolRootFor(stateDir);
+
+  factory.setContract({ task: "T9", workspace: projectRoot, gate: "true", artifact: "README.md" });
+  const challenge = "REOPEN_REQUEST (foundation): the Brief assumes src/legacy-adapter.ts exports buildFacade(); no such module exists on HEAD. Alternative: run a scout turn to contract the adapter boundary before re-briefing.";
+  dropRequest(spoolRoot, {
+    id: "ch-1",
+    kind: "lead_dispatch",
+    project: slug,
+    task: "T9",
+    from: "peer",
+    seat: "agent",
+    message: `[Blocker on task T9] ${challenge}`,
+  });
+  await until(() => {
+    assert.equal(readReply(spoolRoot, "ch-1").ok, true, "the challenge dispatch replied ok");
+  });
+
+  const lines = readMailbox(stateDir, slug);
+  const queuedMail = lines.filter((evt) => evt.type === "mail_queued");
+  assert.equal(queuedMail.length, 1, "exactly one mail item — the challenge itself");
+  const challengeMail = queuedMail[0];
+  assert.equal(challengeMail.from, "peer");
+  assert.equal(challengeMail.kind, "peer_challenge");
+  assert.equal(challengeMail.to, "lead");
+  assert.equal(challengeMail.task, "T9", "the mail names the challenged Task");
+  assert.ok(String(challengeMail.text).includes("REOPEN_REQUEST (foundation)"), "the mail carries the challenge text");
+  assert.equal(lines.filter((evt) => evt.to === "supervisor").length, 0, "no Supervisor item is ever enqueued by a Peer challenge");
+
+  // A challenge is a technical reconciliation turn between Peer and Lead, never
+  // a Needs-human fact: the Ledger records no needs_human event.
+  const ledgerLines = readFileSync(join(stateDir, "ledger.jsonl"), "utf8")
+    .split("\n")
+    .filter((line) => line !== "")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.equal(ledgerLines.some((evt) => evt.event === "needs_human"), false, "no needs_human event is appended by a Peer challenge");
+});
+
+test("a queued peer_challenge settles its Task for the rotation quiet-point — the work is back in the Lead's court even while the Peer's escalate turn is still returning", async (t) => {
+  const lead: FakeAgent = { id: "agent-lead-1", title: "Lead (paseo-factory)", status: "idle", labels: {}, lastUsage: { contextWindowUsedTokens: 135_000, contextWindowMaxTokens: 200_000 } };
+  const peer: FakeAgent = { id: "peer-t5", status: "running", labels: {} };
+  const { stateDir, slug, projectRoot, factory, surface, leadMail } = makeSpooledSurface(t, [lead, peer]);
+  lead.labels = { seat: "lead", project: slug };
+  const resolved = resolveProject(projectRoot);
+  assert.ok(resolved.ok, "the test project must resolve");
+  const seated = await surface.leadEnsure({ projectRoot });
+  assert.ok(seated.ok && seated.agentId === "agent-lead-1", "the seeded Lead is the registered one");
+
+  factory.setContract({ task: "T5", workspace: resolved.ok ? resolved.root : projectRoot, gate: "true", artifact: "README.md" });
+  // The Peer is bound to the Task through its seat labels (boundTaskPeers' label arm).
+  peer.labels = { seat: "agent", project: slug, task: "T5" };
+  peer.cwd = taskWorktreePath(stateDir, slug, "T5");
+
+  // The Lead crossed 128k and its turn ended while the Peer is still inside its
+  // active turn: rotation_pending holds (v0.2.2, ADR 0050 §1's durable arm).
+  await leadMail.onLeadTurnEnded({ agentId: "agent-lead-1", outcome: { kind: "completed" }, timeline: [] });
+  assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "rotation_pending", "a running bound Peer holds the rotation");
+
+  // The Peer challenges a Brief premise from inside that still-returning turn
+  // (peer.status === "running"): the challenge queues durably — the mailbox is
+  // held under rotation — and the Task settles into the Lead's court.
+  dropRequest(spoolRootFor(stateDir), {
+    id: "qp-ch",
+    kind: "lead_dispatch",
+    project: slug,
+    task: "T5",
+    from: "peer",
+    seat: "agent",
+    message: "[Blocker on task T5] DEPENDENCY_REQUEST: the upstream contract's artifact path does not exist; alternative: re-contract the dependency wave first.",
+  });
+  await until(() => {
+    assert.equal(readReply(spoolRootFor(stateDir), "qp-ch").ok, true);
+  });
+  const challenge = readMailbox(stateDir, slug).find((evt) => evt.type === "mail_queued" && evt.kind === "peer_challenge");
+  assert.ok(challenge, "the challenge is durably queued in mailbox.jsonl");
+
+  await leadMail.sweepPeers();
+  assert.notEqual(
+    readProjectRegistration(stateDir, slug)?.rotationState,
+    "rotation_pending",
+    "a queued kind:peer_challenge item releases the rotation quiet-point — the ruling is the Lead's now (spec Decision 6)",
+  );
 });
 
 // ---- the offline deduplication drain (v0.0.31, ADR 0017 §6) --------------------------------

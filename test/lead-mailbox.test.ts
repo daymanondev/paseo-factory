@@ -399,7 +399,7 @@ test("supervisor_report queues to=supervisor while Supervisor is busy, delivers 
   assert.equal(state.ackedCount, 1);
 });
 
-test("needs_human automatically notifies both Lead (to=lead) and Supervisor (to=supervisor)", async (t) => {
+test("a peer needs_human recording notifies the Lead mailbox only — never the Supervisor (ADR 0053 Decision 2)", async (t) => {
   const { stateDir, slug, projectRoot, factory, surface, fake } = makeSpooledRuntime(t);
   const spoolRoot = spoolRootFor(stateDir);
 
@@ -437,16 +437,16 @@ test("needs_human automatically notifies both Lead (to=lead) and Supervisor (to=
 
   const events = readMailboxLines(stateDir, slug);
   const queuedEvents = events.filter((e) => e.type === "mail_queued");
-  assert.equal(queuedEvents.length, 2, "needs_human enqueues to both Lead and Supervisor");
+  assert.equal(queuedEvents.length, 1, "the needs_human recording enqueues exactly ONE peer mail item");
   assert.equal(queuedEvents[0]?.to, undefined, "Lead slice omits to (default lead)");
-  assert.equal(queuedEvents[1]?.to, "supervisor", "Supervisor slice sets to=supervisor");
+  assert.equal(queuedEvents.filter((e) => e.to === "supervisor").length, 0, "no to=supervisor duplicate is ever enqueued (spec Decision 6)");
 
-  // Both idle Lead and idle Supervisor received their deliveries.
+  // The idle Lead received its delivery; the Supervisor never heard the stall.
   assert.equal(fake.sent.some((s) => s.agentId === leadEnsured.agentId && s.text.includes("T-NH")), true);
-  assert.equal(fake.sent.some((s) => s.agentId === supEnsured.agentId && s.text.includes("T-NH")), true);
+  assert.equal(fake.sent.some((s) => s.agentId === supEnsured.agentId && s.text.includes("T-NH")), false);
 });
 
-test("needs_human before project.json exists registers project.json via ensureProjectRegistered, ensures Supervisor, and delivers to=supervisor (v0.0.23, T-07)", async (t) => {
+test("needs_human before project.json exists registers project.json via ensureProjectRegistered, ensures the Lead, and delivers to=lead (v0.0.23, T-07; ADR 0053 Decision 2)", async (t) => {
   const { stateDir, slug, projectRoot, factory, fake } = makeSpooledRuntime(t);
   const spoolRoot = spoolRootFor(stateDir);
   rmSync(join(projectStateDir(stateDir, slug), "project.json"), { force: true });
@@ -485,17 +485,22 @@ test("needs_human before project.json exists registers project.json via ensurePr
   assert.ok(resolved.ok);
   const reg = readProjectRegistration(stateDir, slug);
   assert.equal(reg?.root, resolved.root, "project.json was registered with root");
-  assert.ok(reg?.supervisor !== undefined, "Supervisor was ensured on demand");
+  assert.ok(reg?.lead !== undefined, "the Lead was ensured on demand");
   assert.equal(
-    fake.sent.some((s) => s.agentId === reg?.supervisor && s.text.includes("T-NH-FRESH")),
+    fake.sent.some((s) => s.agentId === reg?.lead && s.text.includes("T-NH-FRESH")),
     true,
-    "Supervisor received the needs_human delivery even when project.json was not previously written",
+    "the Lead received the needs_human delivery even when project.json was not previously written",
+  );
+  assert.equal(
+    fake.sent.some((s) => s.text.includes("T-NH-FRESH") && s.agentId !== reg?.lead),
+    false,
+    "the needs_human stall reached exactly one seat — the Lead (ADR 0053 Decision 2)",
   );
 
   // Direct unit check of ensureProjectRegistered idempotence
   const ensuredAgain = ensureProjectRegistered(stateDir, projectRoot);
   assert.equal(ensuredAgain.ok, true);
-  assert.equal(readProjectRegistration(stateDir, slug)?.supervisor, reg?.supervisor, "ensureProjectRegistered preserves existing seat fields");
+  assert.equal(readProjectRegistration(stateDir, slug)?.lead, reg?.lead, "ensureProjectRegistered preserves existing seat fields");
 });
 
 test("isBlockedByAttention and mailbox drains only block on attentionReason='permission', never on attentionReason='error' (v0.0.24, T-02)", async (t) => {

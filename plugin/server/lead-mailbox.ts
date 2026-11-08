@@ -504,9 +504,11 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     daemon: resolveDaemon, timeoutMs: handoffTimeoutMs, readTokens: (agent) => readLeadContextTokens(agent, deps.usagePaths), log,
     ...(deps.usage === undefined ? {} : { recordUsage: async (input: { slug: string; task: string; agent: SurfaceAgentSnapshot }) => { await deps.usage!.meterAgentBoundary({ task: input.task, agent: input.agent, slug: input.slug }); } }),
     queueBlocked: (slug, task, epoch, text) => {
-      for (const to of ["lead", "supervisor"] as const) {
-        appendMailQueued(mailboxPath(slug), { requestId: `peer-context-ceiling:${task}:${epoch}:${to}`, to, from: "peer", kind: "needs_human", task, text });
-      }
+      // ADR 0053 Decision 2 / spec Decision 6: a context-ceiling blocker is a
+      // genuine needs-human-grade Peer stall, but it routes exclusively to the
+      // Lead mailbox — Supervisor mail comes only from Owner directives and
+      // `lead_report_to_supervisor`, never from a Peer stall.
+      appendMailQueued(mailboxPath(slug), { requestId: `peer-context-ceiling:${task}:${epoch}:lead`, to: "lead", from: "peer", kind: "needs_human", task, text });
       peerBlockersQueued.add(slug);
     },
     wake: async slug => {
@@ -917,8 +919,9 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
           return;
         }
         if (peerBlockersQueued.delete(project.slug)) {
+          // A context-ceiling blocker lives on the Lead slice alone (ADR 0053
+          // Decision 2) — there is no Supervisor batch to drain anymore.
           await drainLeadMailbox(project.slug);
-          await drainSupervisorMailbox(project.slug);
         }
       } catch (error) { log(`Peer handoff observation deferred: ${messageOf(error)}`); }
     });
@@ -1418,11 +1421,12 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
    * Ledger-first quiet-point check for `rotation_pending` (v0.0.99, ADR 0031
    * §3): once a Task's folded Ledger status in the current Contract epoch has
    * reached a Peer-terminal state (`ready-to-accept` / GREEN, `needs-human`,
-   * `red` at `MAX_ATTEMPTS`, or a queued `from: "peer", kind: "needs_human"`
-   * blocker in `mailbox.jsonl`), the Task is in Lead's court and no longer
-   * counts as having Peer work in flight — even while the Peer's `agent_claim`
-   * or `agent_escalate_blocker` tool call is still returning inside an active
-   * turn (`peer.status === "running"`).
+   * `red` at `MAX_ATTEMPTS`, or a queued `from: "peer"` blocker in
+   * `mailbox.jsonl` — a `kind: "peer_challenge"` challenge awaiting the Lead's
+   * ruling or a `kind: "needs_human"` ceiling stall), the Task is in Lead's
+   * court and no longer counts as having Peer work in flight — even while the
+   * Peer's `agent_claim` or `agent_escalate_blocker` tool call is still
+   * returning inside an active turn (`peer.status === "running"`).
    */
   const taskHasSettledPeerOutcome = (task: TaskView, queuedPeerBlockerTasks?: ReadonlySet<string>): boolean =>
     task.accepted ||
@@ -1454,7 +1458,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     try {
       const mailbox = readLeadMailbox(mailboxPath(slug));
       const queuedPeerMail = mailbox.queued.filter((item) => item.from === "peer" && typeof item.task === "string");
-      queuedPeerBlockerTasks = new Set(queuedPeerMail.filter((item) => item.kind === "needs_human").map((item) => item.task!));
+      queuedPeerBlockerTasks = new Set(queuedPeerMail.filter((item) => item.kind === "needs_human" || item.kind === "peer_challenge").map((item) => item.task!));
       queuedPeerMailTasks = new Set(queuedPeerMail.map((item) => item.task!));
     } catch {
       queuedPeerBlockerTasks = undefined;
@@ -1567,8 +1571,14 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
         const ensured = await deps.ensureLead({ projectRoot: root });
         if (!ensured.ok) return ensured;
         const from = request.from ?? "owner";
-        const kind = from === "peer" ? "needs_human" : "directive";
-        const queued = appendMailQueued(mailboxPath(slug), { ...(bound.execution === undefined ? {} : { requestId: request.id }), from, kind, ...(from === "peer" && blockerTask !== undefined ? { task: blockerTask } : {}), text: bound.packet ? `${bound.packet}\n${request.message}` : request.message, ...(bound.execution === undefined ? {} : { execution: bound.execution }) });
+        // ADR 0053 Decision 2 / spec Decision 6: a Peer challenge
+        // (`REOPEN_REQUEST` / `DEPENDENCY_REQUEST` / `BLOCKED` via
+        // `agent_escalate_blocker`) is a technical reconciliation turn between
+        // Peer and Lead — queued `to: "lead"` as `peer_challenge`, never
+        // mislabeled `needs_human` (that Ledger fact is the Lead's alone to
+        // record through `lead_needs_human`).
+        const kind = from === "peer" ? "peer_challenge" : "directive";
+        const queued = appendMailQueued(mailboxPath(slug), { ...(bound.execution === undefined ? {} : { requestId: request.id }), ...(from === "peer" ? { to: "lead" as const } : {}), from, kind, ...(from === "peer" && blockerTask !== undefined ? { task: blockerTask } : {}), text: bound.packet ? `${bound.packet}\n${request.message}` : request.message, ...(bound.execution === undefined ? {} : { execution: bound.execution }) });
         return { ok: true, agentId: ensured.agentId, mailId: queued.mailId };
       },
     );
@@ -1717,12 +1727,14 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   /**
    * The spool's peer hook: a Task's terminal outcome lands as `from: "peer"`
    * mail on the owning Project's lane — appended durably BEFORE any delivery
-   * decision, so no regime (driver-held or not) can lose it. When
-   * `input.kind === "needs_human"`, also enqueues to `to: "supervisor"` and
-   * pumps `Supervisor` (ADR 0015 §3). The Lead pump is suppressed while a
-   * synchronous CLI Driver wave is in flight; the wave's last terminal outcome
-   * clears the predicate and its own hook pumps the whole held batch as one
-   * consolidated delivery. Never rejects.
+   * decision, so no regime (driver-held or not) can lose it. ADR 0053
+   * Decision 2 / spec Decision 6: verdicts and `needs_human` stalls route
+   * exclusively to the Lead mailbox — no `to: "supervisor"` duplicate is ever
+   * enqueued and `Supervisor` is never pumped by Peer-originated mail (it
+   * hears through `lead_report_to_supervisor` alone). The Lead pump is
+   * suppressed while a synchronous CLI Driver wave is in flight; the wave's
+   * last terminal outcome clears the predicate and its own hook pumps the
+   * whole held batch as one consolidated delivery. Never rejects.
    */
   const notifyPeer = async (input: { task: string; kind: "verdict" | "needs_human"; text: string }): Promise<void> => {
     try {
@@ -1749,16 +1761,6 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       const resolved = ensureProjectRegistered(deps.stateDir, workspace);
       if (!resolved.ok) return;
       await enqueueLeadMail(resolved.slug, { from: "peer", kind: input.kind, task: input.task, text: input.text });
-      if (input.kind === "needs_human") {
-        await enqueueLeadMail(resolved.slug, {
-          to: "supervisor",
-          from: "peer",
-          kind: "needs_human",
-          task: input.task,
-          text: input.text,
-        });
-        await pumpProjectSupervisor(resolved.slug);
-      }
       let liveAgents: SurfaceAgentSnapshot[] | undefined;
       try {
         const listed = await resolveDaemon().agents.list({ filter: { includeArchived: false, includeBackground: true } });
