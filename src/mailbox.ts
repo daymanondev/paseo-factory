@@ -28,7 +28,7 @@ import { FactoryError } from "./errors.ts";
 export type MailRecipient = "lead" | "supervisor";
 export type LeadMailFrom = "supervisor" | "lead" | "owner" | "peer" | "system";
 export type MailSource = LeadMailFrom;
-export type LeadMailKind = "directive" | "verdict" | "needs_human" | "report";
+export type LeadMailKind = "directive" | "verdict" | "needs_human" | "peer_challenge" | "report";
 export type MailKind = LeadMailKind;
 
 export type LeadMailboxEvent =
@@ -128,7 +128,7 @@ type DistributiveOmit<T, K extends keyof never> = T extends unknown ? Omit<T, K>
 
 const RECIPIENTS: readonly string[] = ["lead", "supervisor"];
 const FROMS: readonly string[] = ["supervisor", "lead", "owner", "peer", "system"];
-const KINDS: readonly string[] = ["directive", "verdict", "needs_human", "report"];
+const KINDS: readonly string[] = ["directive", "verdict", "needs_human", "peer_challenge", "report"];
 const EVENT_TYPES: readonly string[] = ["mail_queued", "mail_delivered", "mail_acked", "mail_requeued"];
 
 /**

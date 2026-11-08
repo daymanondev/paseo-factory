@@ -96,7 +96,7 @@ test("160k Peer turn completion hands existing committed and uncommitted work to
   assert.ok(new CorrelationRegistry(f.stateDir).findByAgentId("successor-1"));
 });
 
-test("the successor's second crossing survives restart and escalates to both seats; a new Contract resets the allowance", async t => {
+test("the successor's second crossing survives restart and escalates to the Lead seat only; a new Contract resets the allowance", async t => {
   const f = fixture(t);
   await f.runtime.onLeadTurnEnded(ended(f.peer.id));
   await f.runtime.onLeadTurnEnded(ended(f.peer.id, "Partial progress, targeted check remains red."));
@@ -111,18 +111,19 @@ test("the successor's second crossing survives restart and escalates to both sea
   assert.equal(f.created.length, 1, "only one automatic successor is allowed");
   assert.deepEqual(f.archived, [f.peer.id, successor.id]);
   assert.equal(f.agents.filter(a => a.archivedAt === null && a.labels.seat === "agent").length, 0);
-  for (const id of ["lead", "supervisor"]) {
-    const mail = f.sent.find(message => message.id === id && message.text.includes("BLOCKED (context-ceiling)"));
-    assert.ok(mail);
-    assert.match(mail.text, /pending.txt/);
-    assert.match(mail.text, /peer-handoff-T-04.md/);
-    assert.match(mail.text, /split/);
-  }
+  // ADR 0053 Decision 2 / spec Decision 6: a context-ceiling blocker routes
+  // exclusively to the Lead mailbox — the Supervisor never hears it directly.
+  const mail = f.sent.find(message => message.id === "lead" && message.text.includes("BLOCKED (context-ceiling)"));
+  assert.ok(mail);
+  assert.match(mail.text, /pending.txt/);
+  assert.match(mail.text, /peer-handoff-T-04.md/);
+  assert.match(mail.text, /split/);
+  assert.equal(f.sent.filter(message => message.id === "supervisor" && message.text.includes("BLOCKED (context-ceiling)")).length, 0, "no ceiling blocker is ever pitched at the Supervisor");
   const mailbox = readLeadMailbox(join(projectStateDir(f.stateDir, f.slug), "mailbox.jsonl"));
-  for (const batch of [mailbox.inFlight, mailbox.supervisorInFlight]) {
-    assert.equal(batch?.items[0]?.from, "peer");
-    assert.equal(batch?.items[0]?.kind, "needs_human");
-  }
+  assert.equal(mailbox.inFlight?.items[0]?.from, "peer");
+  assert.equal(mailbox.inFlight?.items[0]?.kind, "needs_human", "a genuine context-ceiling stays a needs_human-grade Peer-terminal blocker");
+  assert.equal(mailbox.supervisorQueued.length, 0, "no Supervisor mail item is enqueued by a context-ceiling blocker");
+  assert.equal(mailbox.supervisorInFlight, null, "the Supervisor slice stays untouched by a context-ceiling blocker");
   await restarted.pumpAll();
   assert.equal(f.created.length, 1);
   f.factory.setContract({ task: "T-04", workspace: f.root, gate: "true", description: "Narrow remaining slice" });
