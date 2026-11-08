@@ -486,13 +486,17 @@ export interface MeterWritten extends EventIdentityMetadata {
  * itself is the spent marker, and a driver crash re-reads it, never the
  * socket. Delivery truth is the timeline's message-id only; no delivery
  * event exists in v1 — the claim-or-restall outcome is the observable.
+ * Since ADR 0053 Decision 3 a message-bearing repoke (the Lead's ruling
+ * inside a live reconciliation loop) dispatches without that one-per-task
+ * cap; the message body itself is delivery-only and never rides the line —
+ * `agent` remains the act's one target stamp either way.
  */
 export interface RepokeDispatched extends EventIdentityMetadata {
   seq: number;
   ts: Timestamp;
   event: "repoke_dispatched";
   task: string;
-  /** The stalled agent the fixed re-poke text went to — the act names its target. */
+  /** The stalled agent the re-poke text went to — the act names its target. */
   agent: string;
 }
 

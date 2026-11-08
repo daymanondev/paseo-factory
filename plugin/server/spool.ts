@@ -373,14 +373,20 @@ export interface MeterRequest {
  * an ok. The plugin holds the structural laws (task known, not accepted,
  * not already spent); the stall predicate that triggered the ask stays
  * driver-side. Deliberately minimal — the trigger is the driver's fact, the
- * spend is the plugin's authority, and neither interprets the other.
+ * spend is the plugin's authority, and neither interprets the other. Since
+ * ADR 0053 Decision 3 the request may carry the Lead's `message`: a
+ * non-empty string turns the repoke into a live reconciliation turn —
+ * uncapped at the factory, delivered as the ruling itself (the message body
+ * is delivery-only, never persisted on the ledger line).
  */
 export interface RepokeRequest {
   id: string;
   kind: "repoke";
   task: string;
-  /** The stalled agent the fixed re-poke text goes to. */
+  /** The stalled agent the re-poke text goes to. */
   agent: string;
+  /** The Lead's ruling text (ADR 0053 Decision 3) — non-empty when present; delivery-only. */
+  message?: string;
   submitter?: string;
   seat?: SpoolSeat;
   /** Explicit target Project slug (v0.0.89) — the CLI's `--project <slug>` flag. */
@@ -827,7 +833,21 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
   }
   if (req.kind === "repoke") {
     if (typeof req.task !== "string" || typeof req.agent !== "string" || req.agent.trim() === "") return undefined;
-    return { id: req.id, kind: "repoke", task: req.task, agent: req.agent, ...submitterField, ...seatField, ...projectSlugField };
+    // ADR 0053 Decision 3: `message` rides only as a non-empty string — an
+    // empty/whitespace one is the omitted spelling (the Denial-stall
+    // continuation, byte-identical to today); any other type is malformed.
+    if (req.message !== undefined && typeof req.message !== "string") return undefined;
+    const message = typeof req.message === "string" && req.message.trim() !== "" ? req.message : undefined;
+    return {
+      id: req.id,
+      kind: "repoke",
+      task: req.task,
+      agent: req.agent,
+      ...(message === undefined ? {} : { message }),
+      ...submitterField,
+      ...seatField,
+      ...projectSlugField,
+    };
   }
   if (req.kind === "needs_human") {
     if (typeof req.task !== "string") return undefined;
@@ -1912,16 +1932,37 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
     if (request.kind === "repoke") {
       // The Lead's one spend (v0.0.10): one ledger line either way — the
       // dispatch line is the spent marker, and every refusal is a recorded
-      // fact. Only on ok does the driver send its fixed message.
-      const decision = factory.repoke(request.task, request.agent);
+      // fact. Only on ok does the driver send its fixed message. ADR 0053
+      // Decision 3: a message-bearing repoke is a live reconciliation turn —
+      // uncapped at the factory (the message is the judge's own input there)
+      // and delivered as the Lead's ruling, prefixed with the task/disposition
+      // context and the updated Brief after a re-contract.
+      const ruling = request.message !== undefined && request.message.trim() !== "" ? request.message : undefined;
+      const decision = factory.repoke(request.task, request.agent, ruling);
       if (decision.outcome === "refused") {
         return { id: request.id, ok: false, code: decision.code, message: decision.event.reason };
       }
       if (effectiveSeat === "lead" && resolvedDaemon?.agents?.ref !== undefined) {
         try {
           const contract = factory.contractFor(request.task);
-          const nudge = `Re-poke from Lead on task ${request.task}: continue inside your Task worktree on branch factory/${request.task}, run the gate \`${contract?.gate ?? ""}\`, commit your changes, and call \`paseo-factory_agent_claim\` (or \`agent_claim\`).`;
-          await resolvedDaemon.agents.ref(request.agent).send(nudge);
+          if (ruling === undefined) {
+            // The Denial-stall continuation, byte-identical to the pre-0053 law.
+            const nudge = `Re-poke from Lead on task ${request.task}: continue inside your Task worktree on branch factory/${request.task}, run the gate \`${contract?.gate ?? ""}\`, commit your changes, and call \`paseo-factory_agent_claim\` (or \`agent_claim\`).`;
+            await resolvedDaemon.agents.ref(request.agent).send(nudge);
+          } else {
+            const disposition = contract?.disposition ?? "engineer";
+            const briefLines =
+              contract?.description !== undefined && contract.description.trim() !== ""
+                ? [`Updated Brief (contract seq ${contract.seq}): ${contract.description.trim()}`]
+                : [];
+            const nudge = [
+              `Lead ruling on task ${request.task} (disposition: ${disposition}):`,
+              ruling,
+              ...briefLines,
+              `Continue inside your Task worktree on branch factory/${request.task}, run the gate \`${contract?.gate ?? ""}\`, commit your changes, and call \`paseo-factory_agent_claim\` (or \`agent_claim\`).`,
+            ].join("\n\n");
+            await resolvedDaemon.agents.ref(request.agent).send(nudge);
+          }
         } catch {
           // best-effort nudge delivery when invoked directly by Lead MCP tool
         }
@@ -1929,7 +1970,10 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
       return {
         id: request.id,
         ok: true,
-        summary: `re-poke dispatched for ${request.task} → agent ${request.agent.slice(0, 12)} — the task's one spend`,
+        summary:
+          ruling === undefined
+            ? `re-poke dispatched for ${request.task} → agent ${request.agent.slice(0, 12)} — the task's one spend`
+            : `re-poke dispatched for ${request.task} → agent ${request.agent.slice(0, 12)} — Lead ruling delivered into the live Peer session`,
       };
     }
     if (request.kind === "needs_human") {

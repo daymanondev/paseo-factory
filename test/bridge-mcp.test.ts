@@ -941,6 +941,127 @@ test("lead_set_contract carries disposition and resetPeer end-to-end (ADR 0053):
   );
 });
 
+test("lead_repoke_agent with message delivers the Lead's ruling into the live Peer session across reconciliation turns (ticket 02, ADR 0053 Decision 3): the schema advertises message, the delivery carries the task/disposition prefix and the updated Brief, and the message-less cap stays verbatim", async (t) => {
+  const homeDir = mkdtempSync(join(tmpdir(), "factory-bridge-repoke-message-"));
+  const stateDir = join(homeDir, "plugin-state", "paseo-factory");
+  const repoDir = makeGitRepo();
+  t.after(() => {
+    rmSync(homeDir, { recursive: true, force: true });
+    rmSync(repoDir, { recursive: true, force: true });
+  });
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
+  const registration = ensureProjectRegistered(stateDir, repoDir);
+  assert.ok(registration.ok);
+  const slug = registration.ok ? registration.slug : "demo";
+  const registry = createFactoryRegistry({ stateDir, root: factory });
+
+  // The live bound Peer the ruling goes to: the dispatched spawn creates it.
+  const sentPrompts: Array<{ id: string; text: string }> = [];
+  const liveAgents = new Map<string, { id: string; status: string; archivedAt: string | null; cwd: string; labels: Record<string, string> }>();
+  const fakeDaemon = {
+    agents: {
+      list: async (opts?: { filter?: { labels?: Record<string, string>; includeArchived?: boolean; includeBackground?: boolean } }) => {
+        const wanted = opts?.filter?.labels ?? {};
+        const includeArchived = opts?.filter?.includeArchived === true;
+        const entries = [...liveAgents.values()]
+          .filter((a) => (!includeArchived && a.archivedAt !== null ? false : true))
+          .filter((a) => Object.entries(wanted).every(([k, v]) => a.labels[k] === v))
+          .map((agent) => ({ agent }));
+        return { entries };
+      },
+      create: async (options: { config: { provider: string }; cwd: string; title: string; labels: Record<string, string>; prompt?: string }) => {
+        const id = `peer-created-${liveAgents.size + 1}`;
+        liveAgents.set(id, { id, status: "idle", archivedAt: null, cwd: options.cwd, labels: options.labels });
+        return { id };
+      },
+      ref: (id: string) => ({
+        send: async (text: string) => {
+          sentPrompts.push({ id, text });
+          return { messageId: `msg-${sentPrompts.length}` };
+        },
+        cancel: async () => {},
+        archive: async () => ({ archivedAt: new Date().toISOString() }),
+      }),
+    },
+  };
+  const spool = startSpool(stateDir, factory, {
+    registry,
+    pollMs: 10,
+    daemon: fakeDaemon as never,
+    home: homeDir,
+  });
+  t.after(() => spool.stop());
+
+  const lead = new CorrelationRegistry(stateDir).issue({ role: "lead", projectSlug: slug, projectRoot: repoDir, agentId: "lead-1" });
+  const mcpArgs = ["--correlation", lead.correlationId, "--state-dir", stateDir];
+  // Session one: the Brief, the live Peer, the in-place reconciliation, and
+  // the two message-bearing ruling turns into that same Peer.
+  const responses = await runMcpSession({
+    args: mcpArgs,
+    cwd: repoDir,
+    requests: [
+      { jsonrpc: "2.0", id: 1, method: "tools/list" },
+      { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "RULING-1", gate: "true", artifact: "README.md", disposition: "architect", description: "Brief v1: design the adapter boundary." } } },
+      { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "lead_dispatch_agent", arguments: { tasks: ["RULING-1"] } } },
+      { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "RULING-1", gate: "true", artifact: "README.md", description: "Brief v2 (reconciled): the facade owns the retry policy." } } },
+      { jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "lead_repoke_agent", arguments: { task: "RULING-1", agent: "peer-created-1", message: "Ruling (REOPEN_REQUEST foundation): the facade owns the retry policy — drop the caller-side backoff." } } },
+      { jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "lead_repoke_agent", arguments: { task: "RULING-1", agent: "peer-created-1", message: "Second turn: green the gate on the reconciled Brief." } } },
+    ],
+  });
+  const byId = new Map(responses.map((r) => [r.id, r]));
+  const okText = (id: number): string => {
+    const result = byId.get(id)!.result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.notEqual(result.isError, true, result.content[0].text);
+    return result.content[0].text;
+  };
+
+  // 1. The Lead schema advertises the optional message parameter (AC 6).
+  const tools = (byId.get(1)!.result as { tools: Array<{ name: string, inputSchema: { properties: Record<string, unknown> } }> }).tools;
+  const repokeTool = tools.find((tool) => tool.name === "lead_repoke_agent")!;
+  assert.equal((repokeTool.inputSchema.properties.message as { type?: string })?.type, "string", "the message property is a string");
+
+  okText(2); // the Brief
+  okText(3); // the live Peer
+  okText(4); // the in-place reconciliation
+  okText(5); // ruling turn one
+  okText(6); // ruling turn two — no already-spent
+
+  // 2. Both ruling turns were delivered into the live Peer session with the
+  //    task/disposition prefix and the updated Brief (AC 1, 2, 4).
+  const deliveries = sentPrompts.filter((p) => p.id === "peer-created-1");
+  assert.equal(deliveries.length, 2, "both reconciliation turns were daemon-sent to the live Peer");
+  const first = deliveries[0]?.text ?? "";
+  assert.ok(first.includes("Ruling (REOPEN_REQUEST foundation): the facade owns the retry policy — drop the caller-side backoff."), "the delivered text carries the Lead's ruling verbatim");
+  assert.ok(first.includes("RULING-1"), "the task context prefixes the ruling");
+  assert.ok(first.includes("engineer"), "the reconciled epoch's disposition (engineer default) rides the prefix");
+  assert.ok(first.includes("Brief v2 (reconciled): the facade owns the retry policy."), "the updated Brief is named after the lead_set_contract reconciliation");
+  assert.ok((deliveries[1]?.text ?? "").includes("Second turn: green the gate on the reconciled Brief."), "the second turn's ruling rode its own delivery");
+
+  // 3. Each turn landed its own dispatch line; the message body never
+  //    persisted (the agent stamp remains the line's target).
+  const repokeLines = readFileSync(join(stateDir, "projects", slug, "ledger.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line))
+    .filter((e) => e.event === "repoke_dispatched" && e.task === "RULING-1");
+  assert.equal(repokeLines.length, 2, "each reconciliation turn landed a repoke_dispatched line");
+  assert.ok(repokeLines.every((e) => !("message" in e)), "the message body is delivery-only — never persisted on the line");
+
+  // 4. The message-less cap stays verbatim (AC 3): with the spend marker
+  //    present, a bare repoke is refused already-spent.
+  const bareResponses = await runMcpSession({
+    args: mcpArgs,
+    cwd: repoDir,
+    requests: [
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_repoke_agent", arguments: { task: "RULING-1", agent: "peer-created-1" } } },
+    ],
+  });
+  const bare = (bareResponses[0].result as { isError?: boolean; content: Array<{ text: string }> });
+  assert.equal(bare.isError, true);
+  assert.match(bare.content[0].text, /already-spent/);
+  assert.equal(sentPrompts.filter((p) => p.id === "peer-created-1").length, 2, "a refused repoke sends nothing");
+});
+
 test("bridge default Spool wait is 600 seconds, including an invalid override", async (t) => {
   const repoDir = makeGitRepo();
   const stateDir = mkdtempSync(join(tmpdir(), "factory-bridge-wait-"));

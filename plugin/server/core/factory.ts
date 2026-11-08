@@ -315,9 +315,14 @@ export interface Factory {
    * line either way (`repoke_dispatched` or `repoke_refused`, the spawn
    * pair's law); never throws, the refusal rides the return value. The
    * stall predicate itself stays driver-side — this is the authority over
-   * the spend, never the trigger.
+   * the spend, never the trigger. Since ADR 0053 Decision 3 a repoke
+   * carrying a non-empty `message` (the Lead replying inside a live
+   * reconciliation loop) lifts the one-per-task cap — every ruling turn
+   * dispatches — while a message-less repoke keeps the Denial-stall's
+   * one-shot law verbatim. The message body is delivery-only: it is judged
+   * here, never persisted on the line.
    */
-  repoke(task: string, agent: string): RepokeDecision;
+  repoke(task: string, agent: string, message?: string): RepokeDecision;
   /**
    * Judges the driver's automatic Respawn request after `Substrate death`
    * (v0.0.12, ADR 0008 §3): validates `task`, `provider`, and `died_agent`,
@@ -972,7 +977,7 @@ export function createFactory(options: FactoryOptions): Factory {
       });
     },
 
-    repoke(task, agent) {
+    repoke(task, agent, message) {
       // Two spellings of one refusal on purpose (the requestSpawn precedent):
       // `code` dash-style for the spool reply, `rule` colon-style for the line.
       const refuse = (code: string, rule: string, reason: string): RepokeDecision => ({
@@ -1003,11 +1008,17 @@ export function createFactory(options: FactoryOptions): Factory {
           `task ${task} was already accepted at attempt ${priorAccept.attempt} — the task is closed`,
         );
       }
+      // ADR 0053 Decision 3: a repoke bearing the Lead's message is a live
+      // reconciliation turn, never the Denial-stall's one spend — the cap
+      // below lifts for it. The message body is delivery-only (it never
+      // rides the dispatch line), and anything but a non-empty string reads
+      // as message-less, so the factory stays the judge of its own law.
+      const messageBearing = typeof message === "string" && message.trim() !== "";
       const history = epochEventsFor(ledger, task);
       // The structural one-per-task law: the dispatch line IS the spent
       // marker — a second ask names its own refusal, and a driver crash
       // re-reads this slice rather than trusting any socket.
-      if (history.some((e) => e.event === "repoke_dispatched")) {
+      if (!messageBearing && history.some((e) => e.event === "repoke_dispatched")) {
         return refuse(
           "already-spent",
           "repoke:already-spent",
