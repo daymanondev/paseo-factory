@@ -12,9 +12,11 @@ import { makeTempDir } from "./helpers.ts";
  * (`factory.lanes.set`, `factory.lanes.reset`, `factory.profiles.apply`),
  * T-08c's four lifecycle writes (`factory.profiles.save`,
  * `factory.profiles.delete`, `factory.lead.rotate`,
- * `factory.supervisor.revoke`), and T-09b's three plugin writes
+ * `factory.supervisor.revoke`), T-09b's three plugin writes
  * (`factory.plugins.check.updates`, `factory.plugins.install`,
- * `factory.plugins.manage`) — dispatch in-process through the same
+ * `factory.plugins.manage`), and T-10b's three vault writes
+ * (`factory.vault.configure`, `factory.vault.pull`,
+ * `factory.vault.push`) — dispatch in-process through the same
  * `SurfaceHandlers` the RN client's registrations call, every input
  * validated by the shared RPC input schema (`plugin/shared/rpc.ts`); every
  * other method name keeps refusing as data. The Scrum entry allowlists
@@ -25,8 +27,9 @@ import { makeTempDir } from "./helpers.ts";
  * source/ref or ledger/config override) — every narrowing refusal is
  * `forbidden_operation` as data BEFORE any handler runs. The siblings stay
  * OUTSIDE the door (ADR 0017 — no Start/Ensure seat control anywhere): the
- * batch save, `lead.ensure`, `lead.dispatch`, `supervisor.ensure`, and
- * every `project.*`.
+ * batch save, `lead.ensure`, `lead.dispatch`, `supervisor.ensure`, every
+ * `project.*`, and the deferred vault methods (`factory.vault.hydrate`,
+ * `factory.vault.sync`, `factory.vault.import` — T-10c).
  */
 
 async function post(url: string, body: unknown): Promise<{ status: number; payload: unknown }> {
@@ -76,8 +79,9 @@ test("console RPC door: unlisted methods keep refusing as data, whatever their n
   // A write RPC outside the allowlist, a read RPC outside it, an invented
   // name, and every sibling the lifecycle waves left outside the door — the
   // batch save, the ensure/dispatch seat acts (ADR 0017: the console can
-  // retire a LIVE seat but never start one), and every project act — all
-  // refuse identically: the door is a list, not a prefix.
+  // retire a LIVE seat but never start one), every project act, and the
+  // deferred vault methods (T-10c) — all refuse identically: the door is a
+  // list, not a prefix.
   for (const method of [
     "factory.retro",
     "factory.lead.dispatch",
@@ -90,13 +94,16 @@ test("console RPC door: unlisted methods keep refusing as data, whatever their n
     "factory.project.add",
     "factory.project.delete",
     "factory.project.pick.folder",
+    "factory.vault.hydrate",
+    "factory.vault.sync",
+    "factory.vault.import",
   ]) {
     const refusal = await post(started.sidecar.url + "/rpc", { method, params: {} });
     assert.equal(refusal.status, 404, `${method} is not allowlisted`);
     const payload = refusal.payload as { ok: boolean; code?: string; error?: string };
     assert.equal(payload.ok, false);
     assert.equal(payload.code, "unknown_method");
-    assert.match(payload.error ?? "", /factory\.snapshot, factory\.task\.detail, factory\.agent\.transcript, factory\.accept, factory\.inbox, factory\.scrum\.command, factory\.lanes\.set, factory\.lanes\.reset, factory\.profiles\.apply, factory\.profiles\.save, factory\.profiles\.delete, factory\.lead\.rotate, factory\.supervisor\.revoke, factory\.plugins\.check\.updates, factory\.plugins\.install, factory\.plugins\.manage/, "the sentence names the allowlist");
+    assert.match(payload.error ?? "", /factory\.snapshot, factory\.task\.detail, factory\.agent\.transcript, factory\.accept, factory\.inbox, factory\.scrum\.command, factory\.lanes\.set, factory\.lanes\.reset, factory\.profiles\.apply, factory\.profiles\.save, factory\.profiles\.delete, factory\.lead\.rotate, factory\.supervisor\.revoke, factory\.plugins\.check\.updates, factory\.plugins\.install, factory\.plugins\.manage, factory\.vault\.configure, factory\.vault\.pull, factory\.vault\.push/, "the sentence names the allowlist");
   }
 });
 
@@ -268,6 +275,8 @@ test("console RPC door: inputs are validated by the SHARED schema before any han
     { method: "factory.plugins.install", params: { target: "factory-sinister" } }, // target not one of the family
     { method: "factory.plugins.manage", params: {} }, // pluginId missing
     { method: "factory.plugins.manage", params: { pluginId: "factory-burn-lab", action: "sinister" } }, // action not one of the five
+    { method: "factory.vault.configure", params: { branch: "main" } }, // repo missing
+    { method: "factory.vault.configure", params: { repo: "octocat/factory-vault", branch: "" } }, // branch empty
   ];
   for (const call of cases) {
     const refusal = await post(started.sidecar.url + "/rpc", call);
@@ -299,4 +308,13 @@ test("console RPC door: a handler refusal rides as data with HTTP 200 — never 
   const payload = refusal.payload as { ok: boolean; code?: string; error?: string };
   assert.equal(payload.ok, false);
   assert.equal(payload.code, "unknown-task");
+
+  // The vault writes dispatch the same way — pull on an unconfigured home is
+  // the vendored core's own `vault-not-configured` refusal as data, proving
+  // T-10b's entries reach the handler rather than the door refusing.
+  const vaultRefusal = await post(started.sidecar.url + "/rpc", { method: "factory.vault.pull", params: {} });
+  assert.equal(vaultRefusal.status, 200);
+  const vaultPayload = vaultRefusal.payload as { ok: boolean; code?: string; error?: string };
+  assert.equal(vaultPayload.ok, false);
+  assert.equal(vaultPayload.code, "vault-not-configured");
 });

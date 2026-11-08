@@ -1,15 +1,17 @@
 /**
- * The Settings screen's contract (T-10a): the `/settings` route renders the
+ * The Settings screen's contract (T-10a + T-10b): the `/settings` route renders the
  * read-only Private Vault card and the scoped Project card from the snapshot
  * alone — the configured face first, the repo/branch/node facts, the
  * passphrase as a boolean and the clone as a presence, the hydrate/push
  * stamps in deterministic UTC or "Never", the four shared-secret presence
  * chips (never values), the hydrated apps list, and the gh probe's
- * installed/login/user/suggested line inside the diagnostics disclosure —
- * and the boundary stays the wave's own law: NO write control of any kind
- * (no vault configure/hydrate/sync/import, no project reset/delete, no seat
- * start — ADR 0017) and no credential or passphrase text ever reaches the
- * DOM (the fold carries booleans only, so there is nothing to leak).
+ * installed/login/user/suggested line inside the diagnostics disclosure.
+ * T-10b adds exactly the three vault acts (Configure, Pull, Push) behind
+ * their dialogs (the write journeys live in settings-write.test.tsx); the
+ * rest of the wave's boundary law holds: no vault hydrate/sync/import
+ * (T-10c), no project reset/delete (T-10d), no seat start (ADR 0017), and
+ * no credential or passphrase text ever reaches the DOM (the fold carries
+ * booleans only, so there is nothing to leak).
  */
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
@@ -163,7 +165,7 @@ describe("the Settings screen", () => {
   it("renders the heading and the honest unconfigured vault — Not configured, Never, no chips lit", () => {
     render(<SettingsScreen view={fixtureView()} />);
     expect(screen.getByRole("heading", { name: "Settings" })).toBeTruthy();
-    expect(screen.getByText("All projects · Read-only")).toBeTruthy();
+    expect(screen.getByText("All projects · Private Vault writes")).toBeTruthy();
     const vaultCard = screen.getByLabelText("Private vault");
     expect(screen.getByText("Not configured", { selector: "h2" })).toBeTruthy();
     expect(within(vaultCard).getAllByText("Never")).toHaveLength(2);
@@ -227,18 +229,28 @@ describe("the Settings screen", () => {
     expect(screen.getByText(/Live settings are degraded \(paseo daemon unreachable\)/)).toBeTruthy();
   });
 
-  it("carries NO write control of any kind — the disclosure is the only moving part (ADR 0017)", () => {
-    render(<SettingsScreen view={richView()} />);
-    // No button, no textbox, no input anywhere: not the vault's
-    // configure/hydrate/sync/import (T-10b), not the project's reset/delete
-    // danger zone (T-10c), not a seat start — and no passphrase field exists
-    // to leak through.
-    expect(screen.queryAllByRole("button"), "the screen renders zero buttons").toEqual([]);
-    expect(screen.queryAllByRole("textbox")).toEqual([]);
-    expect(document.querySelector("input")).toBeNull();
-    for (const word of ["Configure", "Hydrate", "Sync", "Import", "Reset", "Delete", "Start Supervisor", "Start Lead", "Ensure"]) {
+  it("carries exactly the three vault acts — never the deferred writes or a seat start (T-10b, ADR 0017)", () => {
+    // The configured card offers Configure, Pull, and Push; the deferred
+    // vault writes (hydrate/sync/import — T-10c), the project danger zone
+    // (reset/delete — T-10d), and every seat Start/Ensure control stay
+    // absent; no dialog is open, so no textbox or input exists either.
+    const configured = render(<SettingsScreen view={richView()} />);
+    for (const name of ["Configure vault", "Pull vault", "Push vault"]) {
+      const button = screen.getByRole("button", { name });
+      expect(button.hasAttribute("disabled"), name).toBe(false);
+    }
+    for (const word of ["Hydrate", "Sync", "Import", "Reset", "Delete", "Start Supervisor", "Start Lead", "Ensure"]) {
       expect(screen.queryByRole("button", { name: new RegExp(word, "i") }), word).toBeNull();
     }
+    expect(screen.queryAllByRole("textbox")).toEqual([]);
+    expect(document.querySelector("input")).toBeNull();
+    configured.unmount();
+    // The unconfigured card keeps Configure (the setup path) and disables
+    // Pull and Push — the acts that need a configured vault.
+    render(<SettingsScreen view={fixtureView()} />);
+    expect(screen.getByRole("button", { name: "Configure vault" }).hasAttribute("disabled")).toBe(false);
+    expect(screen.getByRole("button", { name: "Pull vault" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: "Push vault" }).hasAttribute("disabled")).toBe(true);
   });
 
   it("never renders credential or passphrase text — the fold carries booleans only", () => {

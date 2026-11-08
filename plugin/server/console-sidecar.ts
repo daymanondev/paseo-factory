@@ -50,6 +50,11 @@
  *   field (`source`, `ref`, `mergeLedgers`, `overwriteConfigs`) — each
  *   refusal is data (`forbidden_operation`), the daemon's own answers
  *   (`daemon_failed` included) ride as data too.
+ * - The vault writes (T-10b): `factory.vault.configure`, `factory.vault.pull`,
+ *   and `factory.vault.push` join the door as plain entries on their existing
+ *   shared schemas — the Settings screen's three Owner acts. The sibling
+ *   vault methods (`hydrate`, `sync`, `import`) stay outside the door (T-10c),
+ *   and the vendored core's own `vault-*` refusals ride as data.
  * - A start failure is logged, never thrown — the sidecar must never break
  *   plugin boot (the shell wraps the call, and `start()` itself resolves to
  *   `{ ok: false, reason }` rather than rejecting while ports fall back).
@@ -58,7 +63,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import type { z, ZodType } from "zod";
-import { accept, agentTranscript, inbox, lanesReset, lanesSet, leadRotate, pluginsCheckUpdates, pluginsInstall, pluginsManage, profilesApply, profilesDelete, profilesSave, scrumCommand, snapshot, supervisorRevoke, taskDetail } from "../shared/rpc.ts";
+import { accept, agentTranscript, inbox, lanesReset, lanesSet, leadRotate, pluginsCheckUpdates, pluginsInstall, pluginsManage, profilesApply, profilesDelete, profilesSave, scrumCommand, snapshot, supervisorRevoke, taskDetail, vaultConfigure, vaultPull, vaultPush } from "../shared/rpc.ts";
 import type { SurfaceHandlers } from "./surface-rpc.ts";
 import type { SurfaceCallContext } from "./surface-rpc.ts";
 
@@ -232,6 +237,17 @@ export const CONSOLE_RPC_ALLOWLIST: readonly ConsoleRpcEntry[] = [
   consoleRpcEntry(pluginsManage.name, pluginsManage.input, (handlers, input, context) => handlers.pluginsManage(input, context), {
     refuse: pluginManageRefusal,
   }),
+  // The vault writes (T-10b) — the Settings screen's three Owner acts, plain
+  // entries on their existing shared schemas (the passphrase tri-state is the
+  // schema's own law: absent preserves, an empty string clears, text sets —
+  // the console's dialog simply omits the field on "Leave unchanged"). The
+  // siblings stay OUTSIDE the door: `factory.vault.hydrate`,
+  // `factory.vault.sync`, and `factory.vault.import` (key import) are T-10c,
+  // and a handler's own refusal (`vault-not-configured`, `vault-*`) rides as
+  // data with HTTP 200 — never a 5xx.
+  consoleRpcEntry(vaultConfigure.name, vaultConfigure.input, (handlers, input, context) => handlers.vaultConfigure(input, context)),
+  consoleRpcEntry(vaultPull.name, vaultPull.input, (handlers, input, context) => handlers.vaultPull(input, context)),
+  consoleRpcEntry(vaultPush.name, vaultPush.input, (handlers, input, context) => handlers.vaultPush(input, context)),
 ];
 
 /** The named allowlist as the refusal sentence spells it. */

@@ -147,7 +147,7 @@ export function App({
           {view !== null && screen.id === "flow" && <FlowScreen view={view} />}
           {view !== null && screen.id === "models" && <ModelsScreen view={view} onChanged={() => snapshot.refresh()} />}
           {view !== null && screen.id === "integrations" && <IntegrationsScreen view={view} onChanged={() => snapshot.refresh()} />}
-          {view !== null && screen.id === "settings" && <SettingsScreen view={view} />}
+          {view !== null && screen.id === "settings" && <SettingsScreen view={view} onChanged={() => snapshot.refresh()} />}
           {view !== null && screen.id === "tasks" && (
             <TasksScreen view={view} acceptTask={acceptTask} onAccepted={() => snapshot.refresh()} loadTaskDetail={loadTaskDetail} />
           )}
