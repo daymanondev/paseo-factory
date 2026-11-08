@@ -730,7 +730,7 @@ function appendContract(existing: string | undefined, contract: string): string 
   let prefix = existing ?? "";
   const markers = [ROLE_CONTEXT_MARK, SCRUM_PROMPT_MARK];
   // Compatibility with prompts injected before the explicit start marker.
-  if (prefix.includes(FOOTER_MARK)) markers.push("You are the Supervisor seat of the paseo-factory", "You are the Lead seat of the paseo-factory", "You are a working Agent of the paseo-factory");
+  if (prefix.includes(FOOTER_MARK)) markers.push("You are the Supervisor seat of the paseo-factory", "You are the Lead seat of the paseo-factory", "You are a working Agent of the paseo-factory", "You are a Peer of the paseo-factory");
   const starts = markers.map(marker => prefix.indexOf(marker)).filter(index => index >= 0);
   if (starts.length) prefix = prefix.slice(0, Math.min(...starts)).trimEnd();
   return `${prefix ? prefix + "\n\n" : ""}${ROLE_CONTEXT_MARK}\n${contract}`;
