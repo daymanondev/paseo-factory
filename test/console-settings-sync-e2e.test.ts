@@ -31,8 +31,9 @@ import { makeTempDir } from "./helpers.ts";
  * checkboxes, never repo/ref — unpacks the tarball into vault-runtime with
  * no clone left behind and the NEXT snapshot folds `Last hydrated · direct`;
  * and the door's narrowings refuse as data (`forbidden_operation`) — sync's
- * repo/branch/passphrase and hydrate's repo/ref — while the deferred key
- * import (`factory.vault.import`, T-10d) keeps refusing `unknown_method`
+ * repo/branch/passphrase and hydrate's repo/ref — while the landed key
+ * import (`factory.vault.import`, T-10d) has its own RG-1 e2e and the
+ * still-deferred project danger zone keeps refusing `unknown_method`
  * through the same door.
  */
 
@@ -172,7 +173,7 @@ test("RG-1: the console's real transport syncs the vault — the checked include
   }
 });
 
-test("RG-1: the console's real transport hydrates the vault direct — the tarball stream lands; the narrowing and the deferred import refuse as data", async (t) => {
+test("RG-1: the console's real transport hydrates the vault direct — the tarball stream lands; the narrowing and the deferred danger zone refuse as data", async (t) => {
   const homeRoot = makeTempDir();
   // The one gh api call the direct hydrate makes, answered in memory — zero
   // network, zero clone; every other `gh` call answers the deterministic
@@ -225,8 +226,9 @@ test("RG-1: the console's real transport hydrates the vault direct — the tarba
   assert.equal(hydratedModel.vault.cloneLabel, "Absent");
 
   // (d) The door's narrowing through the SAME transport — the repo and ref
-  // overrides refuse as data BEFORE any handler runs, and the deferred key
-  // import keeps refusing `unknown_method` (T-10d).
+  // overrides refuse as data BEFORE any handler runs, and the still-deferred
+  // project danger zone keeps refusing `unknown_method` (T-10e; the T-10d
+  // key import has its own RG-1 e2e).
   for (const params of [{ repo: "octocat/other-vault" }, { ref: "release" }]) {
     const response = await fetchAt("/rpc", {
       method: "POST",
@@ -239,14 +241,14 @@ test("RG-1: the console's real transport hydrates the vault direct — the tarba
     assert.equal(payload.code, "forbidden_operation");
     assert.match(payload.error ?? "", /from the console/, "the sentence names whose door refused");
   }
-  const importResponse = await fetchAt("/rpc", {
+  const dangerResponse = await fetchAt("/rpc", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ method: "factory.vault.import", params: {} }),
+    body: JSON.stringify({ method: "factory.project.delete", params: {} }),
   });
-  assert.equal(importResponse.status, 404, "factory.vault.import stays outside the door");
-  const importPayload = (await importResponse.json()) as { ok: boolean; code?: string; error?: string };
-  assert.equal(importPayload.ok, false);
-  assert.equal(importPayload.code, "unknown_method");
-  assert.match(importPayload.error ?? "", /factory\.vault\.sync, factory\.vault\.hydrate/, "the allowlist sentence carries exactly the two T-10c round-trip writes");
+  assert.equal(dangerResponse.status, 404, "factory.project.delete stays outside the door");
+  const dangerPayload = (await dangerResponse.json()) as { ok: boolean; code?: string; error?: string };
+  assert.equal(dangerPayload.ok, false);
+  assert.equal(dangerPayload.code, "unknown_method");
+  assert.match(dangerPayload.error ?? "", /factory\.vault\.sync, factory\.vault\.hydrate, factory\.vault\.import/, "the allowlist sentence carries the round-trip writes and the landed key import");
 });

@@ -27,9 +27,10 @@ import { makeTempDir } from "./helpers.ts";
  * includeLedgers — the confirm checkbox's checked arm) commits this node's
  * global ledger snapshot into the checkout and MOVES the bare remote's
  * branch, and the NEXT snapshot folds `Last pushed` and the clone presence;
- * and the still-deferred key import (`factory.vault.import` — T-10d) keeps
- * refusing `unknown_method` as data through the same door (the T-10c
- * round-trip writes have their own RG-1 e2e).
+ * and the still-deferred project danger zone (`factory.project.delete` —
+ * T-10e) keeps refusing `unknown_method` as data through the same door, the
+ * allowlist sentence carrying the six landed vault writes (the T-10c
+ * round-trips and the T-10d key import have their own RG-1 e2e).
  */
 
 /** One git invocation against the fixture — output captured, never inherited. */
@@ -138,19 +139,18 @@ test("RG-1: the console's real transport writes the vault — configure, pull, a
   assert.equal(pushedModel.vault.cloneLabel, "Present");
   assert.notEqual(pushedModel.vault.lastHydratedLabel, "Never");
 
-  // (g) The still-deferred vault method through the SAME door — the key
-  // import stays T-10d: it refuses unknown_method as data, and the allowlist
-  // sentence now carries the five landed vault writes (the T-10c round-trips
-  // `factory.vault.sync` and `factory.vault.hydrate` are proven by their own
-  // RG-1 e2e).
+  // (g) The still-deferred write through the SAME door — the project danger
+  // zone stays T-10e: it refuses unknown_method as data, and the allowlist
+  // sentence now carries the six landed vault writes (the T-10c round-trips
+  // and the T-10d key import are proven by their own RG-1 e2e).
   const response = await fetchAt("/rpc", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ method: "factory.vault.import", params: {} }),
+    body: JSON.stringify({ method: "factory.project.delete", params: {} }),
   });
-  assert.equal(response.status, 404, "factory.vault.import stays outside the door");
+  assert.equal(response.status, 404, "factory.project.delete stays outside the door");
   const payload = (await response.json()) as { ok: boolean; code?: string; error?: string };
   assert.equal(payload.ok, false);
-  assert.equal(payload.code, "unknown_method", "factory.vault.import refuses as data");
-  assert.match(payload.error ?? "", /factory\.vault\.configure, factory\.vault\.pull, factory\.vault\.push, factory\.vault\.sync, factory\.vault\.hydrate/, "the allowlist sentence carries the five landed vault writes");
+  assert.equal(payload.code, "unknown_method", "the danger zone refuses as data");
+  assert.match(payload.error ?? "", /factory\.vault\.configure, factory\.vault\.pull, factory\.vault\.push, factory\.vault\.sync, factory\.vault\.hydrate, factory\.vault\.import/, "the allowlist sentence carries the six landed vault writes");
 });

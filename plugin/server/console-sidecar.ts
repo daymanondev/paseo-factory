@@ -50,16 +50,18 @@
  *   field (`source`, `ref`, `mergeLedgers`, `overwriteConfigs`) — each
  *   refusal is data (`forbidden_operation`), the daemon's own answers
  *   (`daemon_failed` included) ride as data too.
- * - The vault writes (T-10b + T-10c): `factory.vault.configure`,
+ * - The vault writes (T-10b + T-10c + T-10d): `factory.vault.configure`,
  *   `factory.vault.pull`, and `factory.vault.push` join the door as plain
  *   entries on their existing shared schemas — the Settings screen's first
- *   three Owner acts — and the two round-trip writes join NARROWED per input
+ *   three Owner acts — the two round-trip writes join NARROWED per input
  *   before any handler runs: `factory.vault.sync` refuses the three fields
  *   configure owns (`repo`, `branch`, `passphrase`), `factory.vault.hydrate`
  *   refuses its repo/ref overrides — each refusal is data
  *   (`forbidden_operation`), and the vendored core's own `vault-*` refusals
- *   ride as data. The key import (`factory.vault.import`) stays outside the
- *   door (T-10d).
+ *   ride as data. The key import (`factory.vault.import`, T-10d) joins as a
+ *   plain entry on its existing all-optional shared schema: every field the
+ *   dialog leaves empty is simply absent from the wire, and the core's own
+ *   `vault-import-*` refusals ride as data.
  * - A start failure is logged, never thrown — the sidecar must never break
  *   plugin boot (the shell wraps the call, and `start()` itself resolves to
  *   `{ ok: false, reason }` rather than rejecting while ports fall back).
@@ -68,7 +70,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import type { z, ZodType } from "zod";
-import { accept, agentTranscript, inbox, lanesReset, lanesSet, leadRotate, pluginsCheckUpdates, pluginsInstall, pluginsManage, profilesApply, profilesDelete, profilesSave, scrumCommand, snapshot, supervisorRevoke, taskDetail, vaultConfigure, vaultHydrate, vaultPull, vaultPush, vaultSync } from "../shared/rpc.ts";
+import { accept, agentTranscript, inbox, lanesReset, lanesSet, leadRotate, pluginsCheckUpdates, pluginsInstall, pluginsManage, profilesApply, profilesDelete, profilesSave, scrumCommand, snapshot, supervisorRevoke, taskDetail, vaultConfigure, vaultHydrate, vaultImport, vaultPull, vaultPush, vaultSync } from "../shared/rpc.ts";
 import type { SurfaceHandlers } from "./surface-rpc.ts";
 import type { SurfaceCallContext } from "./surface-rpc.ts";
 
@@ -297,6 +299,14 @@ export const CONSOLE_RPC_ALLOWLIST: readonly ConsoleRpcEntry[] = [
   consoleRpcEntry(vaultHydrate.name, vaultHydrate.input, (handlers, input, context) => handlers.vaultHydrate(input, context), {
     refuse: vaultHydrateRefusal,
   }),
+  // The key import (T-10d) — the Settings screen's last vault act, a PLAIN
+  // entry on its existing all-optional shared schema: the dialog omits every
+  // empty field (absent from the wire, never an empty string) and the core's
+  // own refusals (`vault-import-file-not-found`, …) ride as data with HTTP
+  // 200. The paths are host file paths the daemon reads itself — the browser
+  // never reads or uploads any file's contents, and the keystore password
+  // rides the request body once, never echoed back.
+  consoleRpcEntry(vaultImport.name, vaultImport.input, (handlers, input, context) => handlers.vaultImport(input, context)),
 ];
 
 /** The named allowlist as the refusal sentence spells it. */

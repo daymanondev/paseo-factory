@@ -1,32 +1,42 @@
 /**
- * The Settings screen (T-10a + T-10b + T-10c, ADR 0051) — the `/settings`
- * route: the read-only fold of T-10a (both panels from the existing snapshot,
- * the design's own settings look — `design/daemon-settings.css`
- * facts/disclosure, `design/management.css` vault summary + presence chips,
- * `design/styles.css` card/badge/dialog vocabulary; the design's JS is
- * mock-only and never ported) plus the Owner's vault writes through the
- * sidecar's allowlisted door: the stepped Vault setup dialog of T-10b
- * (`factory.vault.configure` — repo prefilled from suggestedRepo, branch, and
- * an optional passphrase whose "Leave unchanged" choice OMITS the field so
- * the persisted value survives) and the Pull / Push buttons
- * (`factory.vault.pull` / `factory.vault.push`, enabled only when configured),
- * each behind a confirm naming the act with its mergeLedgers / includeLedgers
- * checkbox, default off; and the two round-trip writes of T-10c — the Sync
- * button (`factory.vault.sync`, confirm with mergeLedgers / includeLedger /
- * overwriteConfigs checkboxes, default off) and the Hydrate button
- * (`factory.vault.hydrate`, confirm with mergeLedgers / overwriteConfigs
- * checkboxes, default off, overwriteConfigs visibly marked destructive). The
- * console's sync sends NO repo/branch/passphrase (configure owns those) and
- * its hydrate sends NO repo/ref (the configured vault is the one that
- * hydrates) — the door refuses both shapes and the dialogs never build them.
- * A sync success also folds the handler's createdRepo/pushed facts. The
- * passphrase is an `<input type="password">` that never echoes back into the
- * DOM after submit, never reaches localStorage/sessionStorage/URL, and
- * clears from component state on every close. Cancel sends nothing; a
- * success refreshes the snapshot so the panel's stamps update; refusals
- * (vault-* codes) render inline as data. Still NO seat start (ADR 0017), NO
- * key import (T-10d), NO project reset/delete danger zone (T-10e) — and no
- * credential or passphrase text ever reaches the DOM.
+ * The Settings screen (T-10a + T-10b + T-10c + T-10d, ADR 0051) — the
+ * `/settings` route: the read-only fold of T-10a (both panels from the
+ * existing snapshot, the design's own settings look —
+ * `design/daemon-settings.css` facts/disclosure, `design/management.css`
+ * vault summary + presence chips, `design/styles.css` card/badge/dialog
+ * vocabulary; the design's JS is mock-only and never ported) plus the
+ * Owner's vault writes through the sidecar's allowlisted door: the stepped
+ * Vault setup dialog of T-10b (`factory.vault.configure` — repo prefilled
+ * from suggestedRepo, branch, and an optional passphrase whose "Leave
+ * unchanged" choice OMITS the field so the persisted value survives), the
+ * Pull / Push buttons (`factory.vault.pull` / `factory.vault.push`, enabled
+ * only when configured), each behind a confirm naming the act with its
+ * mergeLedgers / includeLedgers checkbox, default off, and the two
+ * round-trip writes of T-10c — the Sync button (`factory.vault.sync`,
+ * confirm with mergeLedgers / includeLedger / overwriteConfigs checkboxes,
+ * default off) and the Hydrate button (`factory.vault.hydrate`, confirm with
+ * mergeLedgers / overwriteConfigs checkboxes, default off, overwriteConfigs
+ * visibly marked destructive). The console's sync sends NO
+ * repo/branch/passphrase (configure owns those) and its hydrate sends NO
+ * repo/ref (the configured vault is the one that hydrates) — the door
+ * refuses both shapes and the dialogs never build them. A sync success also
+ * folds the handler's createdRepo/pushed facts. T-10d adds the key-import
+ * write: an "Import keys" button (enabled only when configured) opening a
+ * stepped dialog over `factory.vault.import` — grouped optional fields (App
+ * Store Connect, Google Play, Eye config, Android signing, Firebase) typed
+ * as HOST file paths the daemon reads itself (the browser never reads or
+ * uploads file contents), every empty field OMITTED from the wire, a
+ * "Sync after import" checkbox default off (spelled explicitly — the core's
+ * own omitted default is ON), and a confirm step summarizing which groups
+ * will import by names/paths only. The keystore password is an
+ * `<input type="password">` under the same law as T-10b's passphrase: never
+ * echoed back into the DOM after submit, never in
+ * localStorage/sessionStorage/URL, cleared from component state on every
+ * close. Cancel sends nothing; a success refreshes the snapshot so the
+ * panel's shared-secret chips update and folds the handler's
+ * importedFiles; refusals (vault-* codes) render inline as data. Still NO
+ * seat start (ADR 0017), NO project reset/delete danger zone (T-10e) — and
+ * no credential or passphrase text ever reaches the DOM.
  */
 import { useState } from "react";
 import type { FactoryView } from "../../../plugin/shared/view.ts";
@@ -36,6 +46,7 @@ import { settingsScreenModel, type SettingsSecretChip } from "../settings-view.t
 import {
   vaultConfigureViaSidecar,
   vaultHydrateViaSidecar,
+  vaultImportViaSidecar,
   vaultPullViaSidecar,
   vaultPushViaSidecar,
   vaultSyncViaSidecar,
@@ -43,6 +54,8 @@ import {
   type VaultConfigureReply,
   type VaultHydrateInput,
   type VaultHydrateReply,
+  type VaultImportInput,
+  type VaultImportReply,
   type VaultPullInput,
   type VaultPullReply,
   type VaultPushInput,
@@ -52,7 +65,7 @@ import {
 } from "../vault.ts";
 
 /** Any of the screen's write replies — the banner renders whichever landed, verbatim. */
-type VaultWriteReply = VaultConfigureReply | VaultPullReply | VaultPushReply | VaultSyncReply | VaultHydrateReply;
+type VaultWriteReply = VaultConfigureReply | VaultPullReply | VaultPushReply | VaultSyncReply | VaultHydrateReply | VaultImportReply;
 
 /** One shared-secret presence chip — the design's badge, lit green only when the secret exists. */
 function SecretChip({ chip }: { chip: SettingsSecretChip }) {
@@ -458,9 +471,236 @@ function VaultRoundtripDialog({
   );
 }
 
+// ---- the key-import dialog (T-10d) --------------------------------------------------------------------
+
+/** The import dialog's text fields — every wire field except the checkbox. */
+type ImportTextField = Exclude<keyof VaultImportInput, "syncAfterImport">;
+
+/** One optional import field — the label the Owner reads and the wire key the handler reads. */
+interface ImportFieldSpec {
+  field: ImportTextField;
+  label: string;
+  placeholder: string;
+  hint: string;
+  /** storePass — the one password input, under the T-10b passphrase law. */
+  password?: boolean;
+}
+
+/** One group of optional fields — the design's own grouped import form, rendered under one name. */
+interface ImportGroupSpec {
+  name: string;
+  fields: readonly ImportFieldSpec[];
+}
+
+/** The five groups the shared schema's own fields spell (T-10d) — every field optional, every empty one omitted. */
+const IMPORT_GROUPS: readonly ImportGroupSpec[] = [
+  {
+    name: "App Store Connect",
+    fields: [
+      { field: "ascKeyPath", label: "ASC .p8 key path", placeholder: "/path/to/AuthKey_XYZ.p8", hint: "ascKeyPath — the private key file on this machine; the daemon reads it, the browser never does." },
+      { field: "ascKeyId", label: "ASC key ID", placeholder: "KEY123456", hint: "ascKeyId — the key's ID from App Store Connect." },
+      { field: "ascIssuer", label: "ASC issuer ID", placeholder: "ISSUER-999", hint: "ascIssuer — the issuer ID from App Store Connect." },
+    ],
+  },
+  {
+    name: "Google Play",
+    fields: [{ field: "gplayKeyPath", label: "Google Play service account JSON path", placeholder: "/path/to/gplay-sa.json", hint: "gplayKeyPath — the service account key file on this machine." }],
+  },
+  {
+    name: "Eye config",
+    fields: [{ field: "eyeConfigPath", label: "Eye config path", placeholder: "/path/to/eye.json", hint: "eyeConfigPath — the Eye CLI's config file on this machine." }],
+  },
+  {
+    name: "Android signing",
+    fields: [
+      { field: "appKey", label: "App key", placeholder: "my-app", hint: "appKey — the app namespace the signing files seal under; empty picks the first registered Project." },
+      { field: "keystorePath", label: "Android release keystore path", placeholder: "/path/to/release.keystore", hint: "keystorePath — the release keystore file on this machine." },
+      { field: "storePass", label: "Keystore password", placeholder: "The keystore's store password", hint: "storePass — rides the request body once and is never displayed again; cleared on every close.", password: true },
+      { field: "keyAlias", label: "Key alias", placeholder: "upload", hint: "keyAlias — the key's alias inside the keystore." },
+    ],
+  },
+  {
+    name: "Firebase",
+    fields: [
+      { field: "firebaseProjectId", label: "Firebase project ID", placeholder: "my-firebase-project", hint: "firebaseProjectId — written into the app's google-services.json." },
+      { field: "googleServicesJsonPath", label: "google-services.json path", placeholder: "/path/to/google-services.json", hint: "googleServicesJsonPath — the Android config file on this machine." },
+      { field: "googleServiceInfoPlistPath", label: "GoogleService-Info.plist path", placeholder: "/path/to/GoogleService-Info.plist", hint: "googleServiceInfoPlistPath — the iOS config file on this machine." },
+    ],
+  },
+];
+
+/** Every import field spec flattened — the value state and the input builder share the one list. */
+const IMPORT_FIELDS: readonly ImportFieldSpec[] = IMPORT_GROUPS.flatMap((group) => group.fields);
+
+/**
+ * The Owner's key-import dialog (T-10d) — two steps over the design's own
+ * `.compact-vault` vocabulary: the fields step (the five groups of OPTIONAL
+ * host file paths and ids — the browser never reads or uploads any file's
+ * contents; the daemon reads the paths itself — plus the "Sync after import"
+ * checkbox, default off) and the confirm step, which summarizes exactly
+ * which groups will import by names/paths only. Every empty field is OMITTED
+ * from `factory.vault.import` (absent from the wire, never an empty string);
+ * Review stays disabled until at least one field is filled. The keystore
+ * password is an `<input type="password">` under the T-10b passphrase law:
+ * never echoed back into the DOM after submit (the confirm step shows a
+ * masked marker, never the text), never in localStorage/sessionStorage/URL,
+ * and cleared from component state on every close AND after every submit
+ * (either arm — a refusal keeps the typed paths for another try, never the
+ * password). Cancel, Close, and the overlay send nothing.
+ */
+function VaultImportDialog({
+  submit,
+  close,
+}: {
+  submit: (input: VaultImportInput) => Promise<VaultImportReply>;
+  close: () => void;
+}) {
+  const [step, setStep] = useState<"fields" | "confirm">("fields");
+  const [values, setValues] = useState<Record<ImportTextField, string>>(Object.fromEntries(IMPORT_FIELDS.map((spec) => [spec.field, ""])) as Record<ImportTextField, string>);
+  const [syncAfter, setSyncAfter] = useState(false);
+  const [phase, setPhase] = useState<"editing" | "saving">("editing");
+
+  /** The one field the Owner may not want to retype — gone from state on every path out. */
+  const clearPassword = () => setValues((current) => ({ ...current, storePass: "" }));
+
+  /** Every close path — Cancel, Close, the overlay, a success — lands here: no password survives. */
+  const closeClean = () => {
+    clearPassword();
+    close();
+  };
+
+  const trimmed = (field: ImportTextField): string => values[field].trim();
+  const anyFieldFilled = IMPORT_FIELDS.some((spec) => trimmed(spec.field) !== "");
+  /** The groups the confirm summarizes — only the ones carrying at least one filled field. */
+  const activeGroups = IMPORT_GROUPS.map((group) => ({ group, fields: group.fields.filter((spec) => trimmed(spec.field) !== "") })).filter((entry) => entry.fields.length > 0);
+
+  /** The wire input — every empty field omitted, the checkbox spelled explicitly (the core's omitted default is ON). */
+  const buildInput = (): VaultImportInput => {
+    const input: VaultImportInput = { syncAfterImport: syncAfter };
+    for (const spec of IMPORT_FIELDS) {
+      const value = trimmed(spec.field);
+      if (value !== "") input[spec.field] = value;
+    }
+    return input;
+  };
+
+  const run = async () => {
+    setPhase("saving");
+    const reply = await submit(buildInput());
+    // The typed password never lingers past the submit — either arm clears it.
+    clearPassword();
+    setPhase("editing");
+    if (reply.ok) closeClean();
+    else setStep("fields");
+  };
+
+  /** The confirm's display for one field — the value for names and paths, a masked marker for the password. */
+  const displayValue = (spec: ImportFieldSpec): string => (spec.password === true ? "•••••••• (hidden)" : trimmed(spec.field));
+
+  return (
+    <div className="console-dialog-overlay" role="presentation" onClick={phase === "saving" ? undefined : closeClean}>
+      <div className="dialog console-dialog" role="dialog" aria-modal="true" aria-label="Import vault keys" onClick={(event) => event.stopPropagation()}>
+        <div className="dialog-head">
+          <strong>Import vault keys</strong>
+          <span className="spacer" />
+          <button type="button" className="btn ghost" onClick={closeClean} disabled={phase === "saving"}>
+            Close
+          </button>
+        </div>
+        <div className="dialog-body">
+          <div className="compact-vault">
+            {step === "fields" ? (
+              <>
+                <p className="vault-dialog-intro">
+                  Point the daemon at key files on this machine — the paths are read by the daemon itself; the browser never reads or uploads any file's contents. Every empty field is simply omitted; fill at least one to continue.
+                </p>
+                {IMPORT_GROUPS.map((group) => (
+                  <div className="field" key={group.name}>
+                    <strong>{group.name}</strong>
+                    {group.fields.map((spec) => (
+                      <div className="field" key={spec.field}>
+                        <label htmlFor={`vault-import-${spec.field}`}>{spec.label}</label>
+                        <input
+                          id={`vault-import-${spec.field}`}
+                          type={spec.password === true ? "password" : "text"}
+                          value={values[spec.field]}
+                          placeholder={spec.placeholder}
+                          autoComplete="off"
+                          spellCheck={false}
+                          onChange={(event) => setValues((current) => ({ ...current, [spec.field]: event.target.value }))}
+                        />
+                        <small>{spec.hint}</small>
+                      </div>
+                    ))}
+                  </div>
+                ))}
+                <div className="field">
+                  <label>
+                    <input type="checkbox" checked={syncAfter} onChange={(event) => setSyncAfter(event.target.checked)} /> Sync after import
+                  </label>
+                  <small>syncAfterImport — off by default; on runs the unified sync against the configured vault once the keys land.</small>
+                </div>
+                <div className="dialog-actions">
+                  <button type="button" className="btn ghost" onClick={closeClean}>
+                    Cancel
+                  </button>
+                  <button type="button" className="btn primary" disabled={!anyFieldFilled} onClick={() => setStep("confirm")}>
+                    Review import
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <p className="vault-dialog-intro">
+                  The daemon imports the filled fields below into this home's vault-runtime{syncAfter ? " and then runs the unified sync against the configured vault" : " — no sync runs; the Sync after import checkbox is off"}. Recheck the paths, then confirm.
+                </p>
+                <dl className="data-list">
+                  {activeGroups.map(({ group, fields }) => (
+                    <div key={group.name}>
+                      <dt>{group.name}</dt>
+                      <dd>
+                        {fields.map((spec) => (
+                          <div key={spec.field}>
+                            {spec.label}: <span className="mono">{displayValue(spec)}</span>
+                          </div>
+                        ))}
+                      </dd>
+                    </div>
+                  ))}
+                  <div>
+                    <dt>Sync after import</dt>
+                    <dd>{syncAfter ? "On — the unified sync runs once the keys land" : "Off"}</dd>
+                  </div>
+                </dl>
+                {phase === "editing" ? (
+                  <div className="dialog-actions">
+                    <button type="button" className="btn ghost" onClick={() => setStep("fields")}>
+                      Back
+                    </button>
+                    <button type="button" className="btn ghost" onClick={closeClean}>
+                      Cancel
+                    </button>
+                    <button type="button" className="btn primary" onClick={() => void run()}>
+                      Import keys now
+                    </button>
+                  </div>
+                ) : (
+                  <p className="small muted" role="status">
+                    Importing keys…
+                  </p>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ---- the panels --------------------------------------------------------------------------------------
 
-/** The Private Vault card — the design's own card-top + `.vault-summary` facts + `.vault-items` chips + the T-10b/T-10c Owner acts. */
+/** The Private Vault card — the design's own card-top + `.vault-summary` facts + `.vault-items` chips + the T-10b/T-10c/T-10d Owner acts. */
 function VaultPanel({
   model,
   pending,
@@ -469,6 +709,7 @@ function VaultPanel({
   onPush,
   onSync,
   onHydrate,
+  onImport,
 }: {
   model: ReturnType<typeof settingsScreenModel>;
   pending: boolean;
@@ -477,6 +718,7 @@ function VaultPanel({
   onPush: () => void;
   onSync: () => void;
   onHydrate: () => void;
+  onImport: () => void;
 }) {
   const vault = model.vault;
   return (
@@ -527,7 +769,7 @@ function VaultPanel({
           <SecretChip key={chip.id} chip={chip} />
         ))}
       </div>
-      {/* The Owner's five vault acts (T-10b + T-10c) — Configure always offered; the four transports need a configured vault. */}
+      {/* The Owner's six vault acts (T-10b + T-10c + T-10d) — Configure always offered; the five transports need a configured vault. */}
       <div className="vault-secondary" aria-label="Vault actions">
         <button type="button" className="btn ghost" aria-label="Configure vault" disabled={pending} onClick={onConfigure}>
           Configure
@@ -543,6 +785,9 @@ function VaultPanel({
         </button>
         <button type="button" className="btn ghost" aria-label="Hydrate vault" disabled={pending || !vault.configured} onClick={onHydrate}>
           Hydrate
+        </button>
+        <button type="button" className="btn ghost" aria-label="Import vault keys" disabled={pending || !vault.configured} onClick={onImport}>
+          Import keys
         </button>
       </div>
       <details className="daemon-settings-diagnostics">
@@ -639,6 +884,8 @@ export interface SettingsScreenProps {
   vaultSync?: (input: VaultSyncInput) => Promise<VaultSyncReply>;
   /** The hydrate transport (T-10c) — the zero-clone direct hydrate (checkboxes only, never repo/ref). */
   vaultHydrate?: (input: VaultHydrateInput) => Promise<VaultHydrateReply>;
+  /** The key-import transport (T-10d) — the filled fields only, every empty one omitted from the wire. */
+  vaultImport?: (input: VaultImportInput) => Promise<VaultImportReply>;
   /** Fired after a successful write — the shell refreshes the snapshot (and so the panel's stamps). */
   onChanged?: () => void;
 }
@@ -649,6 +896,12 @@ function syncOutcomeNote(reply: VaultWriteReply): string {
   return ` (${reply.createdRepo ? "repo created; " : ""}${reply.pushed ? "pushed" : "nothing to push"})`;
 }
 
+/** The import reply's own fact the banner appends — the handler's importedFiles list (the shared-secret chips' new truth). */
+function importOutcomeNote(reply: VaultWriteReply): string {
+  if (!reply.ok || !("importedFiles" in reply)) return "";
+  return ` (imported: ${reply.importedFiles.length > 0 ? reply.importedFiles.join(", ") : "nothing new"})`;
+}
+
 export function SettingsScreen({
   view,
   vaultConfigure = vaultConfigureViaSidecar,
@@ -656,12 +909,13 @@ export function SettingsScreen({
   vaultPush = vaultPushViaSidecar,
   vaultSync = vaultSyncViaSidecar,
   vaultHydrate = vaultHydrateViaSidecar,
+  vaultImport = vaultImportViaSidecar,
   onChanged = () => {},
 }: SettingsScreenProps) {
   const model = settingsScreenModel(view);
   const [pending, setPending] = useState(false);
-  /** The open dialog — "setup" (configure), "pull", "push", "sync", "hydrate", or null. */
-  const [dialog, setDialog] = useState<"setup" | "pull" | "push" | "sync" | "hydrate" | null>(null);
+  /** The open dialog — "setup" (configure), "pull", "push", "sync", "hydrate", "import", or null. */
+  const [dialog, setDialog] = useState<"setup" | "pull" | "push" | "sync" | "hydrate" | "import" | null>(null);
   /** The last write's reply — both arms render verbatim; the dialog act closes on success. */
   const [status, setStatus] = useState<{ act: string; reply: VaultWriteReply } | null>(null);
 
@@ -691,7 +945,8 @@ export function SettingsScreen({
         status.reply.ok ? (
           <div className="console-banner console-banner-ok" role="status">
             {status.act} — {status.reply.summary}
-            {syncOutcomeNote(status.reply)}. Refreshing…
+            {syncOutcomeNote(status.reply)}
+            {importOutcomeNote(status.reply)}. Refreshing…
           </div>
         ) : (
           <div className="console-banner console-banner-error" role="alert">
@@ -708,6 +963,7 @@ export function SettingsScreen({
           onPush={() => setDialog("push")}
           onSync={() => setDialog("sync")}
           onHydrate={() => setDialog("hydrate")}
+          onImport={() => setDialog("import")}
         />
         <ProjectPanel model={model} />
       </div>
@@ -758,6 +1014,7 @@ export function SettingsScreen({
           submit={(checks) => run("Hydrating the vault", () => vaultHydrate({ mergeLedgers: checks.mergeLedgers, overwriteConfigs: checks.overwriteConfigs }))}
         />
       ) : null}
+      {dialog === "import" ? <VaultImportDialog close={() => setDialog(null)} submit={(input) => run("Importing keys", () => vaultImport(input))} /> : null}
     </section>
   );
 }
