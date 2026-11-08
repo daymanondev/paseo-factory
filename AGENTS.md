@@ -9,6 +9,8 @@ Research and build repo for `paseo-factory` — a thin verification core deliver
 - **Release before loading — never hot-patch**: Ship every code change through `npm run version:bump -- <x.y.z>`, `npm run check`, commit + tag + push, and `gh release create` before loading into Paseo. Never copy/rsync files into `~/.paseo/plugins/` or reload a live daemon mid-run, which disrupts active sessions.
 - **Shell PATH**: `paseo` sits at `~/.local/bin/paseo`; node comes from nvm (`~/.nvm/versions/node/`, default v24) — non-interactive shells export PATH first.
 - **Client UI (`plugin/client/`)**: Built with React Native primitives (`@getpaseo/plugin`), not HTML/CSS DOM — skip `modern-web-guidance` for `plugin/client/` edits.
+- **Peer verification slice**: Peers never run bare `npm test`, `npm run check`, or `node --test "test/*.test.ts"` inside the Peer shell (inherited `PASEO_FACTORY_*` self-hosting env and live daemon load cause false failures and 600s spool hangs); iterate with targeted fast slice checks (`npm run sync:plugin-core:check && npm run generate:policies:check && npm run typecheck && npm run test:web && npm run build:web:check && node --test "test/console-*.test.ts"`) and let `agent_claim` run the cumulative Gate.
+- **Wave sizing**: Cap UI waves at one screen per wave with read and write split into separate waves and E2E test hooks named up front.
 
 ## Agent skills
 
