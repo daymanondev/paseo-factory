@@ -109,8 +109,9 @@ test("console sidecar: dispatches factory.snapshot in-process through the surfac
   assert.equal(payload.view?.version, 3, "FactoryView v3 rides the sidecar");
   assert.ok(Array.isArray(payload.view?.projects), "the project list rides the snapshot");
 
-  // The door is an allowlist: a method outside it refuses as data.
-  const unknown = await post(`${started.sidecar.url}/rpc`, { method: "factory.retro", params: {} });
+  // The door is an allowlist: a method outside it refuses as data
+  // (`factory.retro.ratify` — T-11b left the ratification outside the door).
+  const unknown = await post(`${started.sidecar.url}/rpc`, { method: "factory.retro.ratify", params: {} });
   assert.equal(unknown.status, 404);
   const refusal = (await unknown.json()) as { ok: boolean; code?: string };
   assert.equal(refusal.ok, false);
@@ -153,8 +154,9 @@ test("console sidecar ↔ console transport: the real loadSnapshotViaSidecar loa
   );
 
   // Transport-level refusals stay data through the same seam: the door's
-  // refusal to an unlisted write RPC arrives as the sidecar's own Failure body.
-  const refusal = await invokeRpc("factory.retro", {}, atSidecar);
+  // refusal to an unlisted write RPC arrives as the sidecar's own Failure body
+  // (`factory.retro.ratify` — the ratification stays outside the door, T-11b).
+  const refusal = await invokeRpc("factory.retro.ratify", {}, atSidecar);
   assert.ok(refusal.ok === false, "an unknown method resolves as Failure-shaped data, never a throw");
   assert.ok(refusal.ok === false && refusal.code === "unknown_method", "the sidecar's refusal code rides verbatim");
 });

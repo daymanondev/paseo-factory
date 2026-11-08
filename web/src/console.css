@@ -297,13 +297,14 @@
   margin-top: 14px;
 }
 
-/* The Activity screen (T-11a): the reused design bundle carries the ledger
-   row and the usage surface (design/styles.css + design/usage.css imported by
-   the screen); the console adds the stream row's four-column grid (time ·
-   kind · task · detail — the prototype's own row widened by two honest
-   cells), the aggregate row's Project slug suffix, the CSS segment bar that
-   stands in for the prototype's SVG chart (never its JS), and the usage
-   panel's spacing between the two halves. */
+/* The Activity screen (T-11a + T-11b): the reused design bundle carries the
+   ledger row and the usage surface (design/styles.css + design/usage.css
+   imported by the screen); the console adds the stream row's four-column
+   grid (time · kind · task · detail — the prototype's own row widened by two
+   honest cells), the aggregate row's Project slug suffix, the CSS segment
+   bar that stands in for the prototype's SVG chart (never its JS), the usage
+   panel's spacing between the two halves, and the Retro half's row/proposal
+   layout (T-11b). */
 .console-activity .toolbar {
   align-items: center;
 }
@@ -353,6 +354,75 @@
 .console-activity-usage-empty {
   padding: 18px 12px;
   font-size: 12px;
+}
+
+/* The Retro half (T-11b): the same usage-surface shell (the panel and its
+   empty state come from design/usage.css); the console adds the retro row's
+   head line (day · outcome · model · count), the proposal rows' chip layout,
+   and the spacing from the usage half above. */
+.console-activity-retro {
+  margin-top: 24px;
+}
+
+.console-activity-retro-run {
+  min-height: 32px;
+  font-size: 11px;
+  padding: 6px 12px;
+}
+
+.console-activity-retro-list {
+  display: grid;
+  gap: 12px;
+}
+
+.console-activity-retro-row {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+}
+
+.console-activity-retro-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.console-activity-retro-head strong {
+  font-size: 13px;
+}
+
+.console-activity-retro-head .mono {
+  font-size: 11px;
+}
+
+.console-activity-retro-proposals {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.console-activity-retro-proposal {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.console-activity-retro-proposal > span:last-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.console-activity-retro-none {
+  margin-top: 8px;
+}
+
+@media(max-width:767px) {
+  .console-activity-retro-head {
+    gap: 6px 8px;
+  }
 }
 
 @media(max-width:767px) {

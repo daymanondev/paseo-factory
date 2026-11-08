@@ -78,6 +78,12 @@ export function makeConsoleFixture(
      * machine would flip the fold's gh facts per machine.
      */
     vaultRunner?: import("../plugin/server/core/vault.ts").VaultRunner;
+    /**
+     * T-11b: the stdout the retro lane fake answers with — every retro pass
+     * (root and per-Project Factories alike) parses this instead of spawning a
+     * real lane CLI, so the Activity retro e2e's proposals are deterministic.
+     */
+    retroCopilotStdout?: string;
   },
 ): ConsoleFixture {
   const home = join(homeRoot, "paseo-home");
@@ -89,14 +95,21 @@ export function makeConsoleFixture(
     "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"><title>Factory Console (fixture)</title></head><body><div id=\"root\"></div></body></html>\n",
   );
   writeFileSync(join(webRoot, "assets", "app.js"), "console.log('fixture bundle');\n");
-  const retroRunner = fakeCopilotRunner(() => ({ code: 0, stdout: '{"proposals":[]}' }));
+  const retroStdout = options?.retroCopilotStdout ?? '{"proposals":[]}';
+  const retroRunner = fakeCopilotRunner(() => ({ code: 0, stdout: retroStdout }));
   // The eye probe admits fresh-eyes Contracts (T-03's detail fixture sets one);
   // no eye CLI ever runs — the pass's ledger line is appended by the test.
   const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner, eyeCliProbe: () => true });
   // T-05: `registry: true` wires the per-Project Factory Registry the live
   // plugin server runs with — the cross-Project inbox e2e registers ≥2
-  // Projects and reads through their OWN Factories, never the root's.
-  const registry = options?.registry === true ? createFactoryRegistry({ stateDir, root: factory }) : undefined;
+  // Projects and reads through their OWN Factories, never the root's. The
+  // retro seams ride along (T-11b): the per-Project Factories answer the
+  // retro lane through the SAME fake, so `factory.retro` never spawns a real
+  // lane CLI however the door dispatches it.
+  const registry =
+    options?.registry === true
+      ? createFactoryRegistry({ stateDir, root: factory, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner })
+      : undefined;
   // T-04: the daemon seam is injectable — the transcript e2e drives handlers
   // against a fake daemon shaped like the SDK's timeline API; an unset
   // `daemon` option can also spell "no PaseoApi captured" via a function

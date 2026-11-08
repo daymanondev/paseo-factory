@@ -1,5 +1,5 @@
 /**
- * The Activity screen (T-11a, ADR 0051) — the `/activity` route, folded
+ * The Activity screen (T-11a + T-11b, ADR 0051) — the `/activity` route, folded
  * entirely from the existing snapshot: the ledger stream (newest first, the
  * deterministic UTC stamp, the kind the event's own word decides, the task
  * id, and the ledger's own detail line verbatim) with client-side kind
@@ -9,20 +9,31 @@
  * surface (`design/usage.css` — the four summary stats, the By model bar
  * rows, the By lane bar rows; plain CSS segment bars, never the prototype's
  * SVG-chart JS) with the honest "No usage recorded" when the snapshot
- * carries no rollup. The screen renders NO write buttons: the retro pass
- * (`factory.retro`) and its ratification land in T-11b, live push streaming
- * in a later wave, and no Start/Ensure seat control exists anywhere
- * (ADR 0017).
+ * carries no rollup. T-11b adds the Retro half — the same design surface
+ * rendering `view.retro` newest first (day, outcome, model, the proposal
+ * count, each proposal R{id} with its class and text) with the honest "No
+ * retros yet" empty — and the screen's ONE write: a "Run retro" button that
+ * only a scoped Project offers (the unscoped view carries the muted hint,
+ * never a button), behind a confirm dialog naming the Project. The confirm
+ * sends exactly `factory.retro {projectRoot}` through the sidecar's NARROWED
+ * door — the reply renders verbatim (a written pass names its outcome and
+ * proposal count, a refusal or a failed pass renders as data), and a
+ * success refreshes the snapshot so the new retro appears. Ratification
+ * stays OFF this screen (`factory.retro.ratify` is outside the door — its
+ * handler ensures a Supervisor seat, ADR 0017; the Owner's decision is
+ * pending), and no Start/Ensure seat control exists anywhere.
  */
 import { useState } from "react";
-import type { FactoryView } from "../../../plugin/shared/view.ts";
+import type { FactoryView, ProjectView } from "../../../plugin/shared/view.ts";
 import "../../../design/usage.css";
+import { retroViaSidecar, type RetroRunInput, type RetroRunReply } from "../retro.ts";
 import {
   activityKindChips,
   activityScreenModel,
   filterLedgerRows,
   type ActivityKindFilter,
   type ActivityLedgerRow,
+  type ActivityRetroRow,
   type ActivityUsagePanel,
   type ActivityUsageRow,
 } from "../activity-view.ts";
@@ -81,6 +92,7 @@ function UsageBarRow({ row }: { row: ActivityUsageRow }) {
   );
 }
 
+/** One usage bar row — the design's `.usage-model-row` with a plain CSS segment bar for the prototype's SVG. */
 /** The usage half — the design's usage surface, or the honest "No usage recorded" empty. */
 function UsagePanel({ usage }: { usage: ActivityUsagePanel | null }) {
   if (usage === null) {
@@ -171,15 +183,141 @@ function UsagePanel({ usage }: { usage: ActivityUsagePanel | null }) {
   );
 }
 
-export interface ActivityScreenProps {
-  view: FactoryView;
+/** One rendered retro — its own day, outcome, model, and count, with the R1..Rn proposals beneath. */
+function RetroRowView({ row }: { row: ActivityRetroRow }) {
+  return (
+    <div className="console-activity-retro-row" aria-label={`${row.day} retro ${row.outcome} ${row.model} ${row.proposalCountLabel}`}>
+      <div className="console-activity-retro-head">
+        <strong>{row.day}</strong>
+        <span className={`badge${row.outcome === "written" ? " green" : row.outcome === "failed" ? " red" : ""}`}>{row.outcome}</span>
+        <span className="muted mono">{row.model}</span>
+        <span className="muted">{row.proposalCountLabel}</span>
+      </div>
+      {row.proposals.length > 0 ? (
+        <div className="console-activity-retro-proposals">
+          {row.proposals.map((proposal) => (
+            <div key={proposal.label} className="console-activity-retro-proposal">
+              <span className="badge cyan">{proposal.label}</span>
+              <span className="badge">{proposal.cls}</span>
+              <span>{proposal.text}</span>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="console-activity-retro-none small muted">{row.outcome === "written" ? "The pass proposed nothing — an honest empty read of the corpus." : "No proposals — the pass wrote no file."}</p>
+      )}
+    </div>
+  );
 }
 
-export function ActivityScreen({ view }: ActivityScreenProps) {
+// ---- the Run retro confirm (T-11b) ------------------------------------------------------------------
+
+/**
+ * The one confirm the Run retro button passes through — it names the scoped
+ * Project, states what the pass honestly does (reads the Project's whole
+ * recorded history, proposes at most 2 improvements, nothing is law until
+ * ratified), and carries the retro lane the pass will run. Cancel, Close,
+ * and the overlay send nothing; the confirm button sends exactly
+ * `{projectRoot}` through the narrowed `factory.retro` door. The reply
+ * renders at the screen's banner — a refusal or a failed pass keeps the
+ * dialog for another try, a written pass closes it (the snapshot refreshes
+ * behind it so the new retro appears).
+ */
+function RetroRunDialog({
+  project,
+  lane,
+  submit,
+  close,
+}: {
+  project: ProjectView;
+  /** The retro lane the pass will run — the snapshot's own resolved lane for this scope. */
+  lane: string;
+  submit: () => Promise<RetroRunReply>;
+  close: () => void;
+}) {
+  const [phase, setPhase] = useState<"confirm" | "saving">("confirm");
+  const run = async () => {
+    setPhase("saving");
+    const reply = await submit();
+    // Only a WRITTEN pass closes the dialog — a failed pass or a refusal
+    // reverts to the confirm step for another try (the reply itself renders
+    // at the screen's banner either way).
+    if (reply.ok && reply.outcome === "written") close();
+    else setPhase("confirm");
+  };
+  const name = project.name ?? project.slug;
+  return (
+    <div className="console-dialog-overlay" role="presentation" onClick={phase === "saving" ? undefined : close}>
+      <div className="dialog console-dialog" role="dialog" aria-modal="true" aria-label={`Run a retro for ${name}?`} onClick={(event) => event.stopPropagation()}>
+        <div className="dialog-head">
+          <strong>Run a retro for {name}?</strong>
+          <span className="spacer" />
+          <button type="button" className="btn ghost" onClick={close} disabled={phase === "saving"}>
+            Close
+          </button>
+        </div>
+        <div className="dialog-body">
+          <p>
+            The retro pass reads {name}&rsquo;s whole recorded history — the ledger, the reports, and the red gate logs — and proposes at most 2 improvements. Nothing here is law until you ratify it; the factory never applies its own proposals.
+          </p>
+          <dl className="data-list">
+            <div>
+              <dt>Project</dt>
+              <dd>{name}</dd>
+            </div>
+            <div>
+              <dt>Root</dt>
+              <dd className="mono">{project.root}</dd>
+            </div>
+            <div>
+              <dt>Retro lane</dt>
+              <dd className="mono">{lane}</dd>
+            </div>
+          </dl>
+          {phase === "confirm" ? (
+            <div className="dialog-actions">
+              <button type="button" className="btn ghost" onClick={close}>
+                Cancel
+              </button>
+              <button type="button" className="btn primary" onClick={() => void run()}>
+                Run retro
+              </button>
+            </div>
+          ) : (
+            <p className="small muted" role="status">
+              Running the retro…
+            </p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export interface ActivityScreenProps {
+  view: FactoryView;
+  /** The retro run transport (T-11b) — the sidecar's narrowed RPC door by default, a fixture in tests. */
+  runRetro?: (input: RetroRunInput) => Promise<RetroRunReply>;
+  /** Fired after a run the handler answered — the shell refreshes the snapshot so the new retro appears. */
+  onChanged?: () => void;
+}
+
+export function ActivityScreen({ view, runRetro = retroViaSidecar, onChanged = () => {} }: ActivityScreenProps) {
   const model = activityScreenModel(view);
   const [filter, setFilter] = useState<ActivityKindFilter>("all");
   const rows = filterLedgerRows(model.ledger, filter);
   const chips = activityKindChips(model);
+  /** The Run retro confirm — open only while the dialog shows; null is closed. */
+  const [confirming, setConfirming] = useState(false);
+  /** The last run's reply — both arms render verbatim at the banner. */
+  const [status, setStatus] = useState<RetroRunReply | null>(null);
+  const run = async (): Promise<RetroRunReply> => {
+    const reply = await runRetro({ projectRoot: view.project!.root });
+    setStatus(reply);
+    if (reply.ok) onChanged();
+    return reply;
+  };
+  const countWord = (count: number | null) => `${count ?? 0} proposal${(count ?? 0) === 1 ? "" : "s"}`;
   return (
     <section className="console-activity" aria-label="Activity">
       <div className="page-heading">
@@ -199,6 +337,22 @@ export function ActivityScreen({ view }: ActivityScreenProps) {
         <div className="notice" role="status">
           The Project ledger could not be opened ({model.ledgerError}) — the stream renders empty until it reads again.
         </div>
+      ) : null}
+      {status !== null ? (
+        status.ok && status.outcome === "written" ? (
+          <div className="console-banner console-banner-ok" role="status">
+            Running retro — retro written · {countWord(status.proposalCount)} → {status.proposalsPath ?? "?"}
+            {status.error === null ? "" : ` · ${status.error}`}. Refreshing…
+          </div>
+        ) : status.ok ? (
+          <div className="console-banner console-banner-error" role="alert">
+            Running retro — retro failed — {status.error ?? "no reason"}
+          </div>
+        ) : (
+          <div className="console-banner console-banner-error" role="alert">
+            Running retro refused ({status.code}): {status.error}
+          </div>
+        )
       ) : null}
       <div className="toolbar">
         <span className="small muted">
@@ -230,6 +384,33 @@ export function ActivityScreen({ view }: ActivityScreenProps) {
         )}
       </div>
       <UsagePanel usage={model.usage} />
+      <div className="usage-surface console-activity-retro" aria-label="Retro timeline">
+        <div className="usage-section-head">
+          <h2>Retro</h2>
+          {view.project !== null ? (
+            <button type="button" className="btn primary console-activity-retro-run" onClick={() => setConfirming(true)}>
+              Run retro
+            </button>
+          ) : (
+            <span className="usage-section-meta">Select a project to run a retro</span>
+          )}
+        </div>
+        {model.retro.rows.length > 0 ? (
+          <div className="console-activity-retro-list">
+            {model.retro.rows.map((row) => (
+              <RetroRowView key={row.seq} row={row} />
+            ))}
+          </div>
+        ) : (
+          <div className="usage-empty">
+            <h2>No retros yet</h2>
+            <p>Each run reads the Project&rsquo;s whole recorded history and proposes at most 2 improvements{view.project !== null ? " — run one with the button above" : ""}.</p>
+          </div>
+        )}
+      </div>
+      {confirming && view.project !== null ? (
+        <RetroRunDialog project={view.project} lane={view.lanes.retro} close={() => setConfirming(false)} submit={run} />
+      ) : null}
     </section>
   );
 }

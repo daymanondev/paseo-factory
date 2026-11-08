@@ -1,19 +1,28 @@
 /**
- * The Activity screen's contract (T-11a): the `/activity` route renders the
- * read-only ledger stream and the usage rollup from the snapshot alone —
- * newest-first rows with the deterministic UTC stamp, the kind the event's
- * own word decides, the task id, and the ledger's own detail line verbatim;
- * the client-side kind chips (contract / spawn / claim / gate / accepted /
- * meter / other) switch the view and never send anything; the scoped
- * Project's `ledgerError` renders as the stream's degraded notice; the
- * usage half renders the design's summary + By model / By lane bars with
- * the honest "No usage recorded" when the snapshot carries no rollup. The
- * boundary law holds: NO write buttons exist on this screen — the retro
- * pass and its ratification are T-11b, and no seat Start/Ensure control
- * exists anywhere (ADR 0017).
+ * The Activity screen's contract (T-11a + T-11b): the `/activity` route
+ * renders the read-only ledger stream and the usage rollup from the snapshot
+ * alone — newest-first rows with the deterministic UTC stamp, the kind the
+ * event's own word decides, the task id, and the ledger's own detail line
+ * verbatim; the client-side kind chips (contract / spawn / claim / gate /
+ * accepted / meter / other) switch the view and never send anything; the
+ * scoped Project's `ledgerError` renders as the stream's degraded notice;
+ * the usage half renders the design's summary + By model / By lane bars with
+ * the honest "No usage recorded" when the snapshot carries no rollup; and
+ * the retro half (T-11b) renders `view.retro` newest first (day, outcome,
+ * model, the proposal count, each proposal R{id} with its class and text)
+ * with the honest "No retros yet" empty. The screen's ONE write is the
+ * scoped "Run retro" act: only a scoped Project offers the button (the
+ * unscoped view carries the muted hint), it opens a confirm naming the
+ * Project, Cancel sends nothing, and the confirm sends exactly
+ * `{projectRoot}` through the narrowed `factory.retro` door — every reply
+ * arm renders verbatim (a written pass names its proposal count and
+ * refreshes via `onChanged`, a failed pass and a refusal render inline with
+ * the dialog kept). Ratification stays OFF this screen
+ * (`factory.retro.ratify` is outside the door), and no seat Start/Ensure
+ * control exists anywhere (ADR 0017).
  */
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { FactoryView, LedgerLineView, ProjectUsageView } from "../../../plugin/shared/view.ts";
 import { fixtureView } from "../test/fixture-view.ts";
 import {
@@ -25,6 +34,7 @@ import {
   formatTokenCount,
   KIND_ORDER,
 } from "../activity-view.ts";
+import type { RetroRunReply } from "../retro.ts";
 import { ActivityScreen } from "./activity.tsx";
 
 afterEach(() => {
@@ -117,6 +127,44 @@ const richView = (): FactoryView => {
     line({ seq: 3, event: "spawn_dispatched", line: "spawn pi", ts: "2026-11-08T09:02:00.000Z" }),
     line({ seq: 2, event: "contract_set", line: 'contract gate="npm test" artifact=src/format.ts', ts: "2026-11-08T09:01:00.000Z" }),
     line({ seq: 1, event: "ledger_schema", task: null, line: "ledger schema v1", ts: "2026-11-08T09:00:00.000Z" }),
+  ];
+  return view;
+};
+
+/** One retro — every field honest, the proposals exactly as the server fold parses them. */
+function retroEntry(over: Partial<FactoryView["retro"][number]> & Pick<FactoryView["retro"][number], "seq" | "day" | "outcome">): FactoryView["retro"][number] {
+  return {
+    model: "glm-5.3",
+    proposalCount: null,
+    proposalsPath: null,
+    proposals: [],
+    ...over,
+  };
+}
+
+/** The scoped view with a two-retro timeline — the server sends oldest first, exactly as the ledger appends. */
+const retroView = (): FactoryView => {
+  const view = richView();
+  view.retro = [
+    retroEntry({
+      seq: 10,
+      day: "2026-11-07",
+      outcome: "written",
+      proposalCount: 2,
+      proposalsPath: "/tmp/paseo-factory-state/projects/research-slp/retro-2026-11-07.md",
+      proposals: [
+        { id: 1, cls: "gate-check", text: "Adopt the gate stub pattern across new attempts." },
+        { id: 2, cls: "observation", text: "Watch passes read the report before the diff." },
+      ],
+    }),
+    retroEntry({
+      seq: 21,
+      day: "2026-11-08",
+      outcome: "failed",
+      proposalCount: null,
+      proposalsPath: null,
+      proposals: [],
+    }),
   ];
   return view;
 };
@@ -240,6 +288,38 @@ describe("the activity fold (pure)", () => {
     expect(activityScreenModel(view).daemonError).toBe("paseo daemon unreachable");
     expect(activityScreenModel(fixtureView()).scope).toBe("All projects");
   });
+
+  it("folds the retro timeline NEWEST FIRST — the server's oldest-first append reversed, fields verbatim", () => {
+    const model = activityScreenModel(retroView());
+    // The server sends oldest first (ledger append order); the panel reverses.
+    expect(model.retro.rows.map((row) => row.seq)).toEqual([21, 10]);
+    const newest = model.retro.rows[0]!;
+    expect(newest.day).toBe("2026-11-08");
+    expect(newest.outcome).toBe("failed");
+    expect(newest.model).toBe("glm-5.3");
+    expect(newest.proposalCountLabel).toBe("proposals unknown");
+    const oldest = model.retro.rows[1]!;
+    expect(oldest.proposalCountLabel).toBe("2 proposals");
+    // The proposals spell R{id} with their class and text verbatim.
+    expect(oldest.proposals).toEqual([
+      { label: "R1", cls: "gate-check", text: "Adopt the gate stub pattern across new attempts." },
+      { label: "R2", cls: "observation", text: "Watch passes read the report before the diff." },
+    ]);
+  });
+
+  it("labels the proposal count honestly — the count's own plural, `proposals unknown` when the pass died before counting", () => {
+    const view = richView();
+    view.retro = [
+      retroEntry({ seq: 1, day: "2026-11-05", outcome: "written", proposalCount: 0, proposals: [] }),
+      retroEntry({ seq: 2, day: "2026-11-06", outcome: "written", proposalCount: 1, proposals: [{ id: 1, cls: "observation", text: "One." }] }),
+      retroEntry({ seq: 3, day: "2026-11-07", outcome: "failed", proposalCount: null, proposals: [] }),
+    ];
+    expect(activityScreenModel(view).retro.rows.map((row) => row.proposalCountLabel)).toEqual(["proposals unknown", "1 proposal", "0 proposals"]);
+  });
+
+  it("folds the honest retro empty — no snapshot retros, no fabricated row", () => {
+    expect(activityScreenModel(fixtureView()).retro.rows).toEqual([]);
+  });
 });
 
 // ---- the screen ------------------------------------------------------------------------------------
@@ -332,17 +412,127 @@ describe("the Activity screen", () => {
     expect(screen.queryByText("By model")).toBeNull();
   });
 
-  it("carries NO write buttons — the chips are the screen's only controls (T-11a, ADR 0017)", () => {
+  it("carries exactly ONE write control on a scoped view — Run retro — and no Ratify or seat control anywhere (T-11b, ADR 0017)", () => {
+    // The scoped view: the eight filter chips plus the ONE write — Run retro.
     render(<ActivityScreen view={richView()} />);
-    // The eight filter chips are the only buttons; no retro/ratify act (T-11b),
-    // no seat Start/Ensure, no textbox or input of any kind.
     const buttons = screen.getAllByRole("button");
-    expect(buttons.every((button) => button.className.includes("filter"))).toBe(true);
-    expect(buttons).toHaveLength(8);
-    for (const word of ["Run Retro", "Ratify", "Start Supervisor", "Start Lead", "Ensure"]) {
+    expect(buttons.filter((button) => !button.className.includes("filter"))).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Run retro" })).toBeTruthy();
+    // No Ratify control (its door entry `factory.retro.ratify` is outside the
+    // allowlist), no seat Start/Ensure, no textbox or input of any kind.
+    for (const word of ["Ratify", "Start Supervisor", "Start Lead", "Ensure"]) {
       expect(screen.queryByRole("button", { name: new RegExp(word, "i") }), word).toBeNull();
     }
     expect(screen.queryAllByRole("textbox")).toEqual([]);
     expect(document.querySelector("input")).toBeNull();
+    cleanup();
+    // The unscoped view: the muted hint replaces the button — the chips are
+    // the only controls, exactly as in T-11a.
+    const unscoped = richView();
+    unscoped.project = null;
+    render(<ActivityScreen view={unscoped} />);
+    expect(screen.getAllByRole("button").every((button) => button.className.includes("filter"))).toBe(true);
+    expect(screen.getByText("Select a project to run a retro")).toBeTruthy();
+    for (const word of ["Run retro", "Ratify", "Start Supervisor", "Start Lead", "Ensure"]) {
+      expect(screen.queryByRole("button", { name: new RegExp(word, "i") }), word).toBeNull();
+    }
+  });
+});
+
+// ---- the retro half (T-11b) --------------------------------------------------------------------------
+
+describe("the Activity screen's retro half", () => {
+  it("renders the timeline newest first — day, outcome badge, model, count, and the R{id} proposals verbatim", () => {
+    render(<ActivityScreen view={retroView()} />);
+    expect(screen.getByText("Retro", { selector: "h2" })).toBeTruthy();
+    const panel = screen.getByLabelText("Retro timeline");
+    // Newest first: the failed 2026-11-08 pass above the written 2026-11-07 one.
+    expect(panel.querySelectorAll(".console-activity-retro-row").length).toBe(2);
+    expect(panel.querySelector(".console-activity-retro-row .console-activity-retro-head strong")!.textContent).toBe("2026-11-08");
+    const rows = panel.querySelectorAll(".console-activity-retro-row");
+    expect(within(rows[0] as HTMLElement).getByText("failed")).toBeTruthy();
+    expect(within(rows[0] as HTMLElement).getByText("proposals unknown")).toBeTruthy();
+    expect(within(rows[0] as HTMLElement).getByText(/No proposals — the pass wrote no file/)).toBeTruthy();
+    expect(within(rows[1] as HTMLElement).getByText("written")).toBeTruthy();
+    expect(within(rows[1] as HTMLElement).getByText("2 proposals")).toBeTruthy();
+    // The proposals: R{id} badge, the class badge, the text verbatim.
+    expect(within(rows[1] as HTMLElement).getByText("R1")).toBeTruthy();
+    expect(within(rows[1] as HTMLElement).getByText("gate-check")).toBeTruthy();
+    expect(within(rows[1] as HTMLElement).getByText("Adopt the gate stub pattern across new attempts.")).toBeTruthy();
+    expect(within(rows[1] as HTMLElement).getByText("R2")).toBeTruthy();
+    expect(within(rows[1] as HTMLElement).getByText("observation")).toBeTruthy();
+    expect(within(rows[1] as HTMLElement).getByText("Watch passes read the report before the diff.")).toBeTruthy();
+  });
+
+  it("renders the honest No retros yet empty", () => {
+    const view = richView();
+    render(<ActivityScreen view={view} />);
+    expect(screen.getByText("No retros yet", { selector: "h2" })).toBeTruthy();
+    expect(screen.getByText(/Each run reads the Project.s whole recorded history/)).toBeTruthy();
+  });
+});
+
+// ---- the Run retro write (T-11b) ----------------------------------------------------------------------
+
+describe("the Run retro write", () => {
+  it("opens the confirm naming the Project — Cancel sends nothing and closes", async () => {
+    const runRetro = vi.fn(async (): Promise<RetroRunReply> => ({ ok: true, outcome: "written", proposalCount: 0, proposalsPath: "/tmp/retro.md", error: null }));
+    render(<ActivityScreen view={richView()} runRetro={runRetro} />);
+    fireEvent.click(screen.getByRole("button", { name: "Run retro" }));
+    const dialog = screen.getByRole("dialog", { name: "Run a retro for research-slp?" });
+    // The dialog names the Project, its root, and the retro lane the pass runs.
+    expect(within(dialog).getByText(/reads research-slp.s whole recorded history/)).toBeTruthy();
+    expect(within(dialog).getByText("research-slp")).toBeTruthy();
+    expect(within(dialog).getByText("/Users/owner/code/research-slp")).toBeTruthy();
+    expect(within(dialog).getByText("pi/zai/glm-5.3")).toBeTruthy();
+    // No Ratify control inside the dialog either.
+    expect(within(dialog).queryByRole("button", { name: /ratify/i })).toBeNull();
+    // Cancel closes — nothing was sent.
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(runRetro).not.toHaveBeenCalled();
+  });
+
+  it("sends exactly {projectRoot} on confirm — the written banner names the count and refreshes the snapshot", async () => {
+    const runRetro = vi.fn(async (): Promise<RetroRunReply> => ({
+      ok: true,
+      outcome: "written",
+      proposalCount: 2,
+      proposalsPath: "/tmp/paseo-factory-state/projects/research-slp/retro-2026-11-08.md",
+      error: null,
+    }));
+    const onChanged = vi.fn();
+    render(<ActivityScreen view={richView()} runRetro={runRetro} onChanged={onChanged} />);
+    fireEvent.click(screen.getByRole("button", { name: "Run retro" }));
+    fireEvent.click(within(screen.getByRole("dialog", { name: "Run a retro for research-slp?" })).getByRole("button", { name: "Run retro" }));
+    await waitFor(() => expect(runRetro).toHaveBeenCalledTimes(1));
+    expect(runRetro).toHaveBeenCalledWith({ projectRoot: "/Users/owner/code/research-slp" });
+    // The written banner names the outcome, the count, and the path — and the snapshot refreshes.
+    await waitFor(() => expect(screen.getByRole("status").textContent).toContain("Running retro — retro written · 2 proposals → /tmp/paseo-factory-state/projects/research-slp/retro-2026-11-08.md"));
+    expect(screen.getByRole("status").textContent).toContain("Refreshing…");
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(onChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders a failed pass verbatim and keeps the dialog for another try", async () => {
+    const runRetro = vi.fn(async (): Promise<RetroRunReply> => ({ ok: true, outcome: "failed", proposalCount: null, proposalsPath: null, error: "the lane died mid-pass" }));
+    render(<ActivityScreen view={richView()} runRetro={runRetro} />);
+    fireEvent.click(screen.getByRole("button", { name: "Run retro" }));
+    fireEvent.click(within(screen.getByRole("dialog", { name: "Run a retro for research-slp?" })).getByRole("button", { name: "Run retro" }));
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("Running retro — retro failed — the lane died mid-pass"));
+    // The dialog reverted to its confirm step — the act can be retried or cancelled.
+    const dialog = screen.getByRole("dialog", { name: "Run a retro for research-slp?" });
+    expect(within(dialog).getByRole("button", { name: "Run retro" })).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("renders a refusal inline as data — the code and sentence verbatim, no throw", async () => {
+    const runRetro = vi.fn(async (): Promise<RetroRunReply> => ({ ok: false, code: "retro-project-required", error: "the retro runs against exactly one Project's ledger" }));
+    render(<ActivityScreen view={richView()} runRetro={runRetro} />);
+    fireEvent.click(screen.getByRole("button", { name: "Run retro" }));
+    fireEvent.click(within(screen.getByRole("dialog", { name: "Run a retro for research-slp?" })).getByRole("button", { name: "Run retro" }));
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("Running retro refused (retro-project-required): the retro runs against exactly one Project's ledger"));
+    expect(screen.getByRole("dialog", { name: "Run a retro for research-slp?" })).toBeTruthy();
   });
 });

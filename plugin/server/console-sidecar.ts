@@ -69,6 +69,16 @@
  *   deletion is Owner-only) — each refusal is data (`forbidden_operation`),
  *   and the handler's own summary and purged/archived counts ride as data
  *   with HTTP 200.
+ * - The retro write (T-11b, ADR 0051): `factory.retro` joins the door on its
+ *   existing shared schema, NARROWED per input before any handler runs — a
+ *   missing/empty `projectRoot` refuses as data (`forbidden_operation`): the
+ *   console's pass runs against exactly the scoped Project's own ledger,
+ *   never the root Factory. The handler's own refusals
+ *   (`retro-same-day`, `retro-copilot-unusable`, `unknown-project`) and its
+ *   `written`/`failed` outcomes ride as data with HTTP 200. Its sibling
+ *   `factory.retro.ratify` stays OUTSIDE the door — the handler ensures a
+ *   Supervisor seat (ADR 0017; the Owner's ratification decision is
+ *   pending), and the console renders no Ratify control.
  * - A start failure is logged, never thrown — the sidecar must never break
  *   plugin boot (the shell wraps the call, and `start()` itself resolves to
  *   `{ ok: false, reason }` rather than rejecting while ports fall back).
@@ -77,7 +87,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import type { z, ZodType } from "zod";
-import { accept, agentTranscript, inbox, lanesReset, lanesSet, leadRotate, pluginsCheckUpdates, pluginsInstall, pluginsManage, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, scrumCommand, snapshot, supervisorRevoke, taskDetail, vaultConfigure, vaultHydrate, vaultImport, vaultPull, vaultPush, vaultSync } from "../shared/rpc.ts";
+import { accept, agentTranscript, inbox, lanesReset, lanesSet, leadRotate, pluginsCheckUpdates, pluginsInstall, pluginsManage, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, retro, scrumCommand, snapshot, supervisorRevoke, taskDetail, vaultConfigure, vaultHydrate, vaultImport, vaultPull, vaultPush, vaultSync } from "../shared/rpc.ts";
 import type { SurfaceHandlers } from "./surface-rpc.ts";
 import type { SurfaceCallContext } from "./surface-rpc.ts";
 
@@ -263,6 +273,14 @@ function projectDeleteRefusal(input: Record<string, unknown>): string | null {
   return null;
 }
 
+/** The retro narrowing (T-11b): the unscoped retro refuses — the pass runs against exactly one Project's own ledger. */
+function retroRefusal(input: Record<string, unknown>): string | null {
+  if (missingProjectRoot(input)) {
+    return "factory.retro refuses the unscoped retro from the console — projectRoot is required (the pass runs against exactly the scoped Project's ledger, never the root Factory)";
+  }
+  return null;
+}
+
 export const CONSOLE_RPC_ALLOWLIST: readonly ConsoleRpcEntry[] = [
   consoleRpcEntry(snapshot.name, snapshot.input, (handlers, input, context) => handlers.snapshot(input, context)),
   consoleRpcEntry(taskDetail.name, taskDetail.input, (handlers, input, context) => handlers.taskDetail(input, context)),
@@ -352,6 +370,19 @@ export const CONSOLE_RPC_ALLOWLIST: readonly ConsoleRpcEntry[] = [
   }),
   consoleRpcEntry(projectDelete.name, projectDelete.input, (handlers, input, context) => handlers.projectDelete(input, context), {
     refuse: projectDeleteRefusal,
+  }),
+  // The retro write (T-11b) — the Activity screen's one Owner act, NARROWED
+  // per input before any handler runs on its existing shared schema: the
+  // console's pass REQUIRES a non-empty projectRoot (an unscoped retro of the
+  // root Factory refuses as data — the screen only ever offers the act on a
+  // scoped Project). The handler's own refusals (`retro-same-day`,
+  // `retro-copilot-unusable`, `unknown-project`) and its `written`/`failed`
+  // outcomes ride as data with HTTP 200. The sibling `factory.retro.ratify`
+  // stays OUTSIDE the door: its handler ensures a Supervisor seat (ADR 0017)
+  // and the Owner's ratification decision is pending — the console renders no
+  // Ratify control.
+  consoleRpcEntry(retro.name, retro.input, (handlers, input, context) => handlers.retro(input, context), {
+    refuse: retroRefusal,
   }),
 ];
 

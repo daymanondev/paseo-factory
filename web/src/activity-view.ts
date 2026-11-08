@@ -1,18 +1,22 @@
 /**
- * The Activity screen's fold (T-11a, ADR 0051) — a PURE fold of the EXISTING
- * snapshot's two activity halves: the ledger stream (`view.ledger`, the
- * newest-first capped stream the server fold already orders) and the scoped
+ * The Activity screen's fold (T-11a + T-11b, ADR 0051) — a PURE fold of the
+ * EXISTING snapshot's three activity halves: the ledger stream (`view.ledger`,
+ * the newest-first capped stream the server fold already orders), the scoped
  * Project's usage rollup (`view.projectUsage`, the same `ProjectUsageView`
- * the RN client's ProjectUsageCard reads). The fold stays pure over the
- * snapshot: the kind taxonomy below is the only invention, every row's
- * detail is the ledger's own rendered `line` verbatim, and the token/cost
- * vocabulary reuses the RN usage surfaces' own words (`formatTokenCount`,
- * the cache-hit percent — `plugin/client/factory/seats.tsx`) so the console
- * and the client can never disagree. The kind filter chips are the screen's
- * own client-side state, never a transport; the retro pass
- * (`factory.retro`) and its ratification stay outside this screen (T-11b).
+ * the RN client's ProjectUsageCard reads), and the retro timeline
+ * (`view.retro`, the same `RetroView[]` fold the RN client's retro note
+ * reads — rendered here newest first, each retro's R1..Rn proposals with
+ * their class and text). The fold stays pure over the snapshot: the kind
+ * taxonomy below is the only invention, every row's detail is the ledger's
+ * own rendered `line` verbatim, and the token/cost vocabulary reuses the RN
+ * usage surfaces' own words (`formatTokenCount`, the cache-hit percent —
+ * `plugin/client/factory/seats.tsx`) so the console and the client can never
+ * disagree. The kind filter chips are the screen's own client-side state,
+ * never a transport; the one write the screen carries is T-11b's scoped
+ * `factory.retro` through the sidecar's narrowed door — its ratification
+ * stays OUTSIDE the screen (the Owner's decision is pending).
  */
-import type { FactoryView, LedgerLineView, ModelUsageRowView, SeatUsageRowView, UsageBucketsView } from "../../plugin/shared/view.ts";
+import type { FactoryView, LedgerLineView, ModelUsageRowView, RetroView, SeatUsageRowView, UsageBucketsView } from "../../plugin/shared/view.ts";
 import { utcStamp } from "./integrations-view.ts";
 
 /**
@@ -159,6 +163,32 @@ export interface ActivityUsagePanel {
   bySeat: readonly ActivityUsageRow[];
 }
 
+/** One rendered proposal — the snapshot's own R{id} with its class and text verbatim. */
+export interface ActivityRetroProposal {
+  /** `R1` — the factory's own id, spelled once for the render. */
+  label: string;
+  cls: string;
+  text: string;
+}
+
+/** One rendered retro — day, outcome, model, the proposal count, and the R1..Rn proposals. */
+export interface ActivityRetroRow {
+  seq: number;
+  /** `2026-11-08` — the retro's own UTC day, the fold's own field verbatim. */
+  day: string;
+  outcome: string;
+  model: string;
+  proposalCount: number | null;
+  /** `2 proposals` / `0 proposals` — or `proposals unknown` when the pass failed before counting. */
+  proposalCountLabel: string;
+  proposals: readonly ActivityRetroProposal[];
+}
+
+/** The Retro panel — the snapshot's own retros, newest first, or the honest empty. */
+export interface ActivityRetroPanel {
+  rows: readonly ActivityRetroRow[];
+}
+
 /** The Activity screen's whole world — folds from any snapshot, scoped or not. */
 export interface ActivityScreenModel {
   /** The selected Project's display name, or "All projects" — the screen renders either way. */
@@ -171,6 +201,8 @@ export interface ActivityScreenModel {
   ledgerError: string | null;
   /** The scoped Project's usage rollup — null on the unscoped view or when no session was recorded. */
   usage: ActivityUsagePanel | null;
+  /** The retro timeline (T-11b) — newest first, from the snapshot's own fold. */
+  retro: ActivityRetroPanel;
   daemonError: string | null;
 }
 
@@ -220,6 +252,19 @@ function seatUsageRow(row: SeatUsageRowView, max: number): ActivityUsageRow {
     turns: row.turns,
     sessionCount: row.sessionCount,
     ...sharesOf(row.totalTokens, row, max),
+  };
+}
+
+/** One rendered retro → one panel row — the snapshot's own fields verbatim, the proposals spelled R1..Rn. */
+function retroRow(entry: RetroView): ActivityRetroRow {
+  return {
+    seq: entry.seq,
+    day: entry.day,
+    outcome: entry.outcome,
+    model: entry.model,
+    proposalCount: entry.proposalCount,
+    proposalCountLabel: entry.proposalCount === null ? "proposals unknown" : `${entry.proposalCount} proposal${entry.proposalCount === 1 ? "" : "s"}`,
+    proposals: entry.proposals.map((proposal) => ({ label: `R${proposal.id}`, cls: proposal.cls, text: proposal.text })),
   };
 }
 
@@ -291,6 +336,10 @@ export function activityScreenModel(view: FactoryView): ActivityScreenModel {
     kindCounts,
     ledgerError: view.project?.ledgerError ?? null,
     usage: usagePanel,
+    // The Retro fold (T-11b): the server's `view.retro` appends in ledger
+    // order (oldest first), so the panel reverses it — the same newest-first
+    // law the ledger stream's own server fold already carries.
+    retro: { rows: [...view.retro].reverse().map(retroRow) },
     daemonError: view.daemonError,
   };
 }

@@ -19,26 +19,31 @@ import { makeTempDir } from "./helpers.ts";
  * (`factory.vault.configure`, `factory.vault.pull`,
  * `factory.vault.push`), T-10c's two NARROWED vault round-trip writes
  * (`factory.vault.sync`, `factory.vault.hydrate`), T-10d's key import
- * (`factory.vault.import`, a plain entry on its all-optional schema), and
+ * (`factory.vault.import`, a plain entry on its all-optional schema),
  * T-10e's two NARROWED Danger Zone writes (`factory.project.reset`,
- * `factory.project.delete`) —
+ * `factory.project.delete`), and T-11b's NARROWED retro write
+ * (`factory.retro`) —
  * dispatch in-process through the same `SurfaceHandlers` the RN client's
  * registrations call, every input validated by the shared RPC input schema
  * (`plugin/shared/rpc.ts`); every other method name keeps refusing as data.
  * The Scrum entry allowlists exactly the five Owner operations the Inbox
- * resolves, and the plugin, round-trip vault, and Danger Zone writes are
- * narrowed per input — manage serves exactly enable/disable/update (never
- * remove/reload, never disabling the console's own host), install carries
- * no developer field (never the core target, never a source/ref or
+ * resolves, and the plugin, round-trip vault, Danger Zone, and retro writes
+ * are narrowed per input — manage serves exactly enable/disable/update
+ * (never remove/reload, never disabling the console's own host), install
+ * carries no developer field (never the core target, never a source/ref or
  * ledger/config override), sync refuses the three fields configure owns
- * (repo, branch, passphrase), hydrate refuses its repo/ref overrides, and
- * BOTH project writes require a non-empty `projectRoot` (an unscoped
+ * (repo, branch, passphrase), hydrate refuses its repo/ref overrides, BOTH
+ * project writes require a non-empty `projectRoot` (an unscoped
  * reset/delete of the root Factory refuses) while delete also refuses the
- * `seat` field — every narrowing refusal is `forbidden_operation` as data
- * BEFORE any handler runs. The siblings stay OUTSIDE the door (ADR 0017 —
- * no Start/Ensure seat control anywhere): the batch save, `lead.ensure`,
- * `lead.dispatch`, `supervisor.ensure`, and the Add-Project wizard doors
- * (`project.add`, `project.pick.folder` — T-12).
+ * `seat` field, and the retro write requires the same non-empty
+ * `projectRoot` (an unscoped pass over the root Factory refuses — the pass
+ * runs against exactly the scoped Project's ledger) — every narrowing
+ * refusal is `forbidden_operation` as data BEFORE any handler runs. The
+ * siblings stay OUTSIDE the door (ADR 0017 — no Start/Ensure seat control
+ * anywhere): the batch save, `lead.ensure`, `lead.dispatch`,
+ * `supervisor.ensure`, the retro ratification (`retro.ratify` — its
+ * handler ensures a Supervisor seat; the Owner's decision is pending), and
+ * the Add-Project wizard doors (`project.add`, `project.pick.folder` — T-12).
  */
 
 async function post(url: string, body: unknown): Promise<{ status: number; payload: unknown }> {
@@ -88,10 +93,11 @@ test("console RPC door: unlisted methods keep refusing as data, whatever their n
   // A write RPC outside the allowlist, a read RPC outside it, an invented
   // name, and every sibling the lifecycle waves left outside the door — the
   // batch save, the ensure/dispatch seat acts (ADR 0017: the console can
-  // retire a LIVE seat but never start one), and the Add-Project wizard
+  // retire a LIVE seat but never start one), the retro ratification
+  // (`retro.ratify` ensures a Supervisor seat), and the Add-Project wizard
   // doors (T-12) — all refuse identically: the door is a list, not a prefix.
   for (const method of [
-    "factory.retro",
+    "factory.retro.ratify",
     "factory.lead.dispatch",
     "factory.sinister",
     "snapshot",
@@ -106,7 +112,7 @@ test("console RPC door: unlisted methods keep refusing as data, whatever their n
     const payload = refusal.payload as { ok: boolean; code?: string; error?: string };
     assert.equal(payload.ok, false);
     assert.equal(payload.code, "unknown_method");
-    assert.match(payload.error ?? "", /factory\.snapshot, factory\.task\.detail, factory\.agent\.transcript, factory\.accept, factory\.inbox, factory\.scrum\.command, factory\.lanes\.set, factory\.lanes\.reset, factory\.profiles\.apply, factory\.profiles\.save, factory\.profiles\.delete, factory\.lead\.rotate, factory\.supervisor\.revoke, factory\.plugins\.check\.updates, factory\.plugins\.install, factory\.plugins\.manage, factory\.vault\.configure, factory\.vault\.pull, factory\.vault\.push, factory\.vault\.sync, factory\.vault\.hydrate, factory\.vault\.import, factory\.project\.reset, factory\.project\.delete/, "the sentence names the allowlist");
+    assert.match(payload.error ?? "", /factory\.snapshot, factory\.task\.detail, factory\.agent\.transcript, factory\.accept, factory\.inbox, factory\.scrum\.command, factory\.lanes\.set, factory\.lanes\.reset, factory\.profiles\.apply, factory\.profiles\.save, factory\.profiles\.delete, factory\.lead\.rotate, factory\.supervisor\.revoke, factory\.plugins\.check\.updates, factory\.plugins\.install, factory\.plugins\.manage, factory\.vault\.configure, factory\.vault\.pull, factory\.vault\.push, factory\.vault\.sync, factory\.vault\.hydrate, factory\.vault\.import, factory\.project\.reset, factory\.project\.delete, factory\.retro\)/, "the sentence names the allowlist through its last entry");
   }
 });
 
@@ -354,6 +360,52 @@ test("console RPC door: the Danger Zone writes are NARROWED — the unscoped res
     assert.equal(payload.code, "unknown-project", `${method}'s handler refusal rides as data — the call dispatched`);
     assert.match(payload.error ?? "", /does not resolve/, "the handler's own sentence names why it refused");
   }
+
+  // The narrowing refuses before dispatch: the root Factory's ledger records no line.
+  assert.equal(fixture.factory.ledger.events.length, 0);
+});
+
+test("console RPC door: the retro write is NARROWED — the unscoped retro refuses before any handler runs", async (t) => {
+  const homeRoot = makeTempDir();
+  const fixture = makeConsoleFixture(homeRoot);
+  const started = await fixture.start();
+  assert.ok(started.ok, started.ok ? "" : started.reason);
+  t.after(async () => {
+    await started.sidecar.close();
+    rmSync(homeRoot, { recursive: true, force: true });
+  });
+
+  const call = (method: string, params: unknown) => post(started.sidecar.url + "/rpc", { method, params });
+
+  // The narrowed refusals — every one a 400 `forbidden_operation` BEFORE any
+  // handler runs: the retro REQUIRES a non-empty projectRoot (the slug doors
+  // the schema allows stay shut too — the console's pass runs against exactly
+  // the scoped Project's own ledger, never the root Factory).
+  const refusals: { params: Record<string, unknown>; sentence: RegExp }[] = [
+    { params: {}, sentence: /refuses the unscoped retro/ },
+    { params: { projectRoot: "" }, sentence: /refuses the unscoped retro/ },
+    { params: { project: "some-slug" }, sentence: /refuses the unscoped retro/ },
+  ];
+  for (const refused of refusals) {
+    const reply = await call("factory.retro", refused.params);
+    assert.equal(reply.status, 400, `factory.retro ${JSON.stringify(refused.params)} is narrowed off the console`);
+    const payload = reply.payload as { ok: boolean; code?: string; error?: string };
+    assert.equal(payload.ok, false);
+    assert.equal(payload.code, "forbidden_operation");
+    assert.match(payload.error ?? "", refused.sentence, "the refusal spells the narrowed act it refused");
+    assert.match(payload.error ?? "", /from the console/, "the sentence names whose door refused");
+  }
+
+  // The allowed shape — a non-empty projectRoot — passes the narrowing and
+  // reaches the handler, which then refuses for its own honest reason on this
+  // unresolvable root (`unknown-project` as data with HTTP 200): the door
+  // could never have written that sentence itself.
+  const scoped = await call("factory.retro", { projectRoot: "/tmp/door-unregistered-project" });
+  assert.equal(scoped.status, 200, "factory.retro with its scoped input dispatches to the handler");
+  const scopedPayload = scoped.payload as { ok: boolean; code?: string; error?: string };
+  assert.equal(scopedPayload.ok, false);
+  assert.equal(scopedPayload.code, "unknown-project", "the handler's own refusal rides as data — the call dispatched");
+  assert.match(scopedPayload.error ?? "", /could not resolve/, "the handler's own sentence names why it refused");
 
   // The narrowing refuses before dispatch: the root Factory's ledger records no line.
   assert.equal(fixture.factory.ledger.events.length, 0);

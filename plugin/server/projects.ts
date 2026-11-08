@@ -80,6 +80,15 @@ export interface FactoryRegistryOptions {
    * same root ledger.
    */
   root?: Factory;
+  /**
+   * The retro lane seams forwarded to every per-Project Factory (T-11b) — the
+   * same `createFactory` test seams the root Factory already carries. The
+   * live server pins neither (the real lane CLI answers the pass); tests fake
+   * the lane so `factory.retro` never spawns a real model.
+   */
+  retroCopilotProbe?: (lane: string) => boolean;
+  /** The retro pass's lane runner seam — forwarded per Project the same way (T-11b). */
+  retroCopilotRunner?: import("./core/watch.ts").CopilotRunner;
 }
 
 /** The lazy per-Project Factory registry — `factoryForProject(slug)` is the one door. */
@@ -136,6 +145,8 @@ export function createFactoryRegistry(options: FactoryRegistryOptions): FactoryR
         stateDir,
         projectSlug: key,
         ...(options.fetchTimeline === undefined ? {} : { fetchTimeline: options.fetchTimeline }),
+        ...(options.retroCopilotProbe === undefined ? {} : { retroCopilotProbe: options.retroCopilotProbe }),
+        ...(options.retroCopilotRunner === undefined ? {} : { retroCopilotRunner: options.retroCopilotRunner }),
       });
       factory.history.start();
       for (const { task, attempt } of factory.recoveredAttempts) {

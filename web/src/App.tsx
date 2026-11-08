@@ -24,11 +24,15 @@
  * scoped Project's identity from the same snapshot, carrying the Owner's
  * vault writes (T-10b..d) and the scoped Project's Danger Zone (T-10e — a
  * successful delete clears the selection and returns the console to the
- * unscoped Overview); the Activity screen (T-11a) renders the read-only
- * ledger stream with its client-side kind filter chips and the usage rollup
- * from the same snapshot — every screen of the eight is real now; the
- * placeholder remains only as a future screen's titled fallback. No Start
- * Supervisor / Start Lead controls anywhere (ADR 0017 preserved).
+ * unscoped Overview); the Activity screen (T-11a + T-11b) renders the
+ * read-only ledger stream with its client-side kind filter chips, the usage
+ * rollup, and the retro timeline (newest first, each retro's R1..Rn
+ * proposals) from the same snapshot — and carries the scoped Run retro write
+ * through the sidecar's narrowed `factory.retro` door (its ratification
+ * stays outside: no Ratify control anywhere) — every screen of the eight is
+ * real now; the placeholder remains only as a future screen's titled
+ * fallback. No Start Supervisor / Start Lead controls anywhere (ADR 0017
+ * preserved).
  */
 import { useEffect, useState } from "react";
 import type { FactoryView } from "../../plugin/shared/view.ts";
@@ -150,7 +154,7 @@ export function App({
         )}
         <main id="main" className="page" tabIndex={-1}>
           {view !== null && screen.id === "overview" && <OverviewScreen view={view} onOpenProject={setProjectRoot} />}
-          {view !== null && screen.id === "activity" && <ActivityScreen view={view} />}
+          {view !== null && screen.id === "activity" && <ActivityScreen view={view} onChanged={() => snapshot.refresh()} />}
           {view !== null && screen.id === "flow" && <FlowScreen view={view} />}
           {view !== null && screen.id === "models" && <ModelsScreen view={view} onChanged={() => snapshot.refresh()} />}
           {view !== null && screen.id === "integrations" && <IntegrationsScreen view={view} onChanged={() => snapshot.refresh()} />}
