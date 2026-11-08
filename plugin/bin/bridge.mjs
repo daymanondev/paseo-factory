@@ -798,6 +798,7 @@ var EVENT_NAMES = [
   "needs_human",
   "retro_written"
 ];
+var PEER_DISPOSITIONS = ["engineer", "architect", "reviewer", "scout"];
 var LEDGER_REFERENCE_KINDS = { denial: "permit_denied", repoke: "repoke_dispatched", gate: "gate_finished", spawn: "spawn_dispatched", respawn: "respawn_dispatched" };
 function eventAllowsUnboundEpoch(kind) {
   return kind === "spawn_refused" || kind === "respawn_refused" || kind === "repoke_refused";
@@ -964,7 +965,7 @@ function v2PayloadIsValid(event) {
     case "ledger_schema":
       return true;
     case "contract_set":
-      return (event.execution === void 0 || scrumBindingIsValid(event.execution)) && string("workspace") && string("gate") && string("artifact") && strings("scope") && strings("skills") && optionalString("base") && optionalString("description") && optionalString("by") && (event.freshEyes === void 0 || event.freshEyes === true) && (event.watch === void 0 || event.watch === true);
+      return (event.execution === void 0 || scrumBindingIsValid(event.execution)) && string("workspace") && string("gate") && string("artifact") && strings("scope") && strings("skills") && optionalString("base") && optionalString("description") && optionalString("by") && (event.freshEyes === void 0 || event.freshEyes === true) && (event.watch === void 0 || event.watch === true) && (event.disposition === void 0 || PEER_DISPOSITIONS.includes(event.disposition));
     case "claim_reported":
       return string("sha") && optionalString("agent");
     case "gate_started":
@@ -1288,7 +1289,7 @@ var sharedTools = {
   },
   lead_set_contract: {
     name: "lead_set_contract",
-    description: "Register a Task's immutable Contract (`gate`, optional `description`, `artifact`, `skills`, `watch`) before spawning its working Agent.",
+    description: "Register a Task's immutable Contract (`gate`, optional `description`, `artifact`, `skills`, `watch`, `disposition`) before spawning its working Agent. Re-contracting an unaccepted Task updates the Brief/Gate in place and preserves the live Peer unless `resetPeer: true`.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1304,6 +1305,8 @@ var sharedTools = {
         },
         watch: { type: "boolean", description: "Enable the post-verdict watch pass." },
         description: { type: "string", description: "Task assignment description stating desired outcome and regression invariants." },
+        disposition: { type: "string", enum: ["engineer", "architect", "reviewer", "scout"], description: "The Peer's SLP disposition (ADR 0053; defaults to engineer when omitted)." },
+        resetPeer: { type: "boolean", description: "Cancel and archive the live bound Peer before the fresh Contract epoch (default false \u2014 the Peer keeps its accumulated context)." },
         workspace: { type: "string", description: "Optional Project root path (defaults to current project root)." }
       },
       required: ["task", "gate"]
@@ -1710,6 +1713,10 @@ async function handleToolCall(name, rawArgs) {
       typeof args.base === "string" && args.base.trim() !== "" ? args.base.trim() : undefined;
     const description =
       typeof args.description === "string" && args.description.trim() !== "" ? args.description.trim() : undefined;
+    const disposition =
+      typeof args.disposition === "string" && ["engineer", "architect", "reviewer", "scout"].includes(args.disposition)
+        ? args.disposition
+        : undefined;
 
     const reply = await roundTripSpool(ctx, {
       id: randomId(),
@@ -1726,6 +1733,8 @@ async function handleToolCall(name, rawArgs) {
       ...(skills && skills.length > 0 ? { skills } : {}),
       ...(args.watch === true ? { watch: true } : {}),
       ...(description ? { description } : {}),
+      ...(disposition ? { disposition } : {}),
+      ...(args.resetPeer === true ? { resetPeer: true } : {}),
       seat: "lead",
     });
     if (!reply.ok) return toolResult(`${reply.code}: ${reply.message}`, true);
@@ -1869,6 +1878,11 @@ async function handleToolCall(name, rawArgs) {
       }
       if (typeof contract?.description === "string" && contract.description.trim() !== "") {
         promptParts.push(`Task (${task}): ${contract.description.trim()}`);
+      }
+      // ADR 0053 §3 — the Peer knows its disposition from turn one; omitted
+      // renders nothing (the engineer default needs no header).
+      if (typeof contract?.disposition === "string" && contract.disposition !== "engineer") {
+        promptParts.push(`Disposition: ${contract.disposition}`);
       }
       if (Array.isArray(contract?.scope) && contract.scope.length > 0) {
         promptParts.push(`Allowed scope: ${contract.scope.join(", ")}`);

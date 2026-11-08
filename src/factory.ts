@@ -9,7 +9,7 @@ import type { AcceptanceRole } from "./task-state.ts";
 import { existsSync, readFileSync, renameSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { Ledger, usageIsValid } from "./ledger.ts";
-import { MAX_ATTEMPTS, NEEDS_HUMAN_REASONS, needsHumanEvidenceIsValid } from "./events.ts";
+import { MAX_ATTEMPTS, NEEDS_HUMAN_REASONS, needsHumanEvidenceIsValid, PEER_DISPOSITIONS } from "./events.ts";
 import { runGate } from "./gate.ts";
 import { artifactPathProblem } from "./artifact.ts";
 import { renderReport } from "./report.ts";
@@ -25,7 +25,7 @@ import { changedFiles, checkCleanAt, headCommitSync, landTaskWorktree, resolveCl
 import { MEMORY_FILES } from "./choke.ts";
 import { projectStateDir, readProjectNotebook, resolveProject } from "./project.ts";
 import { FactoryError } from "./errors.ts";
-import type { AttemptAccepted, ContractSet, GateFinished, GitBlocked, LedgerEvent, MeterWritten, MeterUsage, NeedsHuman, NeedsHumanEvidence, NeedsHumanReason, RepokeDispatched, RepokeRefused, RespawnDispatched, RespawnRefused, SpawnDispatched, SpawnRefused, Verdict } from "./events.ts";
+import type { AttemptAccepted, ContractSet, GateFinished, GitBlocked, LedgerEvent, MeterWritten, MeterUsage, NeedsHuman, NeedsHumanEvidence, NeedsHumanReason, PeerDisposition, RepokeDispatched, RepokeRefused, RespawnDispatched, RespawnRefused, SpawnDispatched, SpawnRefused, Verdict } from "./events.ts";
 import type { GateResult } from "./gate.ts";
 import { LedgerAdmission } from "./history-admission.ts";
 
@@ -133,6 +133,13 @@ export interface ContractInput {
    * on the line — the factory never infers identity.
    */
   by?: string;
+  /**
+   * The Peer's SLP disposition (ADR 0053 §3): exactly one of
+   * `engineer | architect | reviewer | scout`. Omitted = the `engineer`
+   * default; the read-only three are fenced from writing (ticket 02) and
+   * claim/accept without a branch merge (tickets 04/05).
+   */
+  disposition?: PeerDisposition;
   /**
    * Optional caller seat for attribution; never enables Fresh-eyes (ADR 0030).
    */
@@ -432,7 +439,7 @@ export function createFactory(options: FactoryOptions): Factory {
     stateDir,
     recoveredAttempts,
 
-    setContract({ task, workspace, gate, artifact, base: inputBase, scope, freshEyes, watch, description, skills, by, execution }) {
+    setContract({ task, workspace, gate, artifact, base: inputBase, scope, freshEyes, watch, description, skills, by, disposition, execution }) {
       assertTaskId(task);
       if (execution !== undefined && !scrumBindingIsValid(execution)) throw new FactoryError("invalid-contract", "invalid Scrum execution binding");
       if (gate.trim() === "") throw new FactoryError("invalid-contract", "gate command must be a non-empty string");
@@ -446,6 +453,9 @@ export function createFactory(options: FactoryOptions): Factory {
       }
       if (watch !== undefined && watch !== true) {
         throw new FactoryError("invalid-contract", "watch marks the pass ON — omit it, or set it to exactly true");
+      }
+      if (disposition !== undefined && !(PEER_DISPOSITIONS as readonly string[]).includes(disposition)) {
+        throw new FactoryError("invalid-contract", "disposition must be exactly one of engineer|architect|reviewer|scout — omit it for the engineer default");
       }
       if (description !== undefined && (typeof description !== "string" || description.trim() === "")) {
         throw new FactoryError("invalid-contract", "description must be a non-empty string — omit it when the task has no assignment text");
@@ -577,6 +587,7 @@ export function createFactory(options: FactoryOptions): Factory {
         ...(description === undefined ? {} : { description }),
         ...(skills === undefined || skills.length === 0 ? {} : { skills }),
         ...(by === undefined ? {} : { by }),
+        ...(disposition === undefined ? {} : { disposition }),
       });
     },
 

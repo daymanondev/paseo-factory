@@ -565,6 +565,153 @@ test("Lead MCP contracts expose no Fresh-eyes option and never forward legacy op
   assert.equal(existsSync(join(stateDir, "ledger.jsonl")), false, "no root ledger exists");
 });
 
+test("lead_set_contract carries disposition and resetPeer end-to-end (ADR 0053): the Lead schema advertises both, disposition rides the Contract and kickoff prompt, and the default re-contract preserves the live Peer while resetPeer archives it", async (t) => {
+  const homeDir = mkdtempSync(join(tmpdir(), "factory-bridge-disposition-"));
+  const stateDir = join(homeDir, "plugin-state", "paseo-factory");
+  const repoDir = makeGitRepo();
+  t.after(() => {
+    rmSync(homeDir, { recursive: true, force: true });
+    rmSync(repoDir, { recursive: true, force: true });
+  });
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
+  const registration = ensureProjectRegistered(stateDir, repoDir);
+  assert.ok(registration.ok);
+  const slug = registration.ok ? registration.slug : "demo";
+  const registry = createFactoryRegistry({ stateDir, root: factory });
+
+  // A daemon whose Peer roster starts empty: the dispatched spawn (step 3)
+  // creates the live bound Peer the later re-contracts reconcile against —
+  // the mid-flight Peer a Lead updates a Brief on (ADR 0053 §1).
+  const archived: string[] = [];
+  const createdPrompts: string[] = [];
+  const liveAgents = new Map<string, { id: string; status: string; archivedAt: string | null; cwd: string; labels: Record<string, string> }>();
+  const fakeDaemon = {
+    agents: {
+      list: async (opts?: { filter?: { labels?: Record<string, string>; includeArchived?: boolean; includeBackground?: boolean } }) => {
+        const wanted = opts?.filter?.labels ?? {};
+        const includeArchived = opts?.filter?.includeArchived === true;
+        const entries = [...liveAgents.values()]
+          .filter((a) => (!includeArchived && a.archivedAt !== null ? false : true))
+          .filter((a) => Object.entries(wanted).every(([k, v]) => a.labels[k] === v))
+          .map((agent) => ({ agent }));
+        return { entries };
+      },
+      create: async (options: { config: { provider: string }; cwd: string; title: string; labels: Record<string, string>; prompt?: string }) => {
+        createdPrompts.push(options.prompt ?? "");
+        const id = `peer-created-${createdPrompts.length}`;
+        liveAgents.set(id, { id, status: "idle", archivedAt: null, cwd: options.cwd, labels: options.labels });
+        return { id };
+      },
+      ref: (id: string) => ({
+        send: async () => ({ messageId: `msg-${id}` }),
+        cancel: async () => {},
+        archive: async () => {
+          archived.push(id);
+          const agent = liveAgents.get(id);
+          if (agent) liveAgents.set(id, { ...agent, archivedAt: new Date().toISOString() });
+          return { archivedAt: new Date().toISOString() };
+        },
+      }),
+    },
+  };
+
+  const stopped: string[] = [];
+  const spool = startSpool(stateDir, factory, {
+    registry,
+    pollMs: 10,
+    daemon: fakeDaemon as never,
+    home: homeDir,
+    stopAgent: async (agentId: string) => {
+      stopped.push(agentId);
+      return { ok: true };
+    },
+  });
+  t.after(() => spool.stop());
+
+  const lead = new CorrelationRegistry(stateDir).issue({ role: "lead", projectSlug: slug, projectRoot: repoDir, agentId: "lead-1" });
+  const mcpArgs = ["--correlation", lead.correlationId, "--state-dir", stateDir];
+  // Session one: schema, the scout Contract, the spawn, and the default
+  // (resetPeer-omitted) reconciliation.
+  const responses = await runMcpSession({
+    args: mcpArgs,
+    cwd: repoDir,
+    requests: [
+      { jsonrpc: "2.0", id: 1, method: "tools/list" },
+      { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "SCOUT-1", gate: "true", artifact: "README.md", disposition: "scout", description: "Reconnoiter the workspace layout" } } },
+      { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "lead_dispatch_agent", arguments: { tasks: ["SCOUT-1"] } } },
+      { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "SCOUT-1", gate: "true", artifact: "README.md", description: "Reconciled brief after the Scout's challenge" } } },
+    ],
+  });
+
+  // 1. The Lead schema advertises both fields with the exact ADR 0053 vocabulary.
+  const byId = new Map(responses.map((r) => [r.id, r]));
+  const tools = (byId.get(1)!.result as { tools: Array<{ name: string, inputSchema: { properties: Record<string, unknown> } }> }).tools;
+  const contractTool = tools.find((tool) => tool.name === "lead_set_contract")!;
+  assert.deepEqual(
+    (contractTool.inputSchema.properties.disposition as { enum?: string[] })?.enum,
+    ["engineer", "architect", "reviewer", "scout"],
+    "the disposition property carries the four-value enum",
+  );
+  assert.equal((contractTool.inputSchema.properties.resetPeer as { type?: string })?.type, "boolean", "the resetPeer property is a boolean");
+
+  const okText = (id: number): string => {
+    const result = byId.get(id)!.result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.notEqual(result.isError, true, result.content[0].text);
+    return result.content[0].text;
+  };
+
+  // 2. The scout disposition rides the Project's contract_set line (the
+  //    ledger is append-only; epochs are asserted per line).
+  okText(2);
+  const projectFactory = registry.factoryForProject(slug);
+  const contractSets = () =>
+    readFileSync(join(stateDir, "projects", slug, "ledger.jsonl"), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+      .filter((e) => e.event === "contract_set" && e.task === "SCOUT-1");
+
+  // 3. The dispatched Peer's kickoff prompt names the disposition (the direct-Spool spawn path's promptParts).
+  okText(3);
+  assert.ok(
+    createdPrompts.some((prompt) => /Disposition:\s*scout/i.test(prompt)),
+    "the Peer kickoff prompt names the active disposition",
+  );
+
+  // 4. Re-contract with resetPeer omitted: the Brief updates in place and the
+  //    spawned bound Peer survives — no stop, no archive.
+  assert.match(okText(4), /live Peer preserved/i, "the reply names the preserved Peer");
+  const spawnedPeerId = "peer-created-1";
+  assert.ok(liveAgents.has(spawnedPeerId), "the spawned Peer exists");
+  assert.equal(stopped.length, 0, "no Peer was stopped on the default re-contract");
+  assert.equal(archived.length, 0, "no Peer was archived on the default re-contract");
+  assert.equal(liveAgents.get(spawnedPeerId)?.archivedAt, null, "the bound Peer is still live and non-archived");
+  assert.equal(projectFactory.contractFor("SCOUT-1")?.description, "Reconciled brief after the Scout's challenge");
+  assert.equal(projectFactory.contractFor("SCOUT-1")?.disposition, undefined, "the reconciled epoch omits the disposition — it reads as engineer");
+
+  // 5. resetPeer: true (a fresh session) cancels and archives the bound Peer.
+  const resetResponses = await runMcpSession({
+    args: mcpArgs,
+    cwd: repoDir,
+    requests: [
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "SCOUT-1", gate: "true", artifact: "README.md", description: "Fresh eyes required", resetPeer: true } } },
+    ],
+  });
+  const resetRes = (resetResponses[0].result as { isError?: boolean; content: Array<{ text: string }> });
+  assert.notEqual(resetRes.isError, true, resetRes.content[0].text);
+  assert.doesNotMatch(resetRes.content[0].text, /live Peer preserved/i, "the reset reply names no preservation");
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 200));
+  assert.deepEqual(stopped, [spawnedPeerId], "the bound Peer was stopped on resetPeer: true");
+  assert.ok(archived.includes(spawnedPeerId), "the bound Peer was archived on resetPeer: true");
+  assert.equal(projectFactory.contractFor("SCOUT-1")?.description, "Fresh eyes required", "the fresh epoch landed");
+  assert.equal(contractSets().length, 3, "three Contract epochs landed (scout, reconcile, reset)");
+  assert.deepEqual(
+    contractSets().map((e) => e.disposition ?? "(omitted)"),
+    ["scout", "(omitted)", "(omitted)"],
+    "the disposition rides the epochs verbatim",
+  );
+});
+
 test("bridge default Spool wait is 600 seconds, including an invalid override", async (t) => {
   const repoDir = makeGitRepo();
   const stateDir = mkdtempSync(join(tmpdir(), "factory-bridge-wait-"));

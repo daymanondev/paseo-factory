@@ -177,7 +177,7 @@ export type {
   MeterUsage,
   RetroWritten,
 } from "./events.ts";
-export { EVENT_NAMES, MAX_ATTEMPTS } from "./events.ts";
+export { EVENT_NAMES, MAX_ATTEMPTS, PEER_DISPOSITIONS } from "./events.ts";
 
 export { projectTask } from "./task-state.ts";
 export { taskStatusLines } from "./task-status.ts";
@@ -185,7 +185,7 @@ export type { AcceptanceRole, AttemptState, ReviewState } from "./task-state.ts"
 
 export { legacyIdentityMappingIsValid, planLegacyIdentity, resolveLedgerReference, remapLedgerReferences, classifyEventIdentities, semanticEventContent, canonicalHistoryJson, historyHash } from "./history-identity.ts";
 export type { IdentityMappingEntry, LegacyIdentityMapping, IdentityPlan, ReferenceResolution } from "./history-identity.ts";
-export type { EventIdentityMetadata, LedgerSchema, LedgerReferenceField } from "./events.ts";
+export type { EventIdentityMetadata, LedgerSchema, LedgerReferenceField, PeerDisposition } from "./events.ts";
 
 export { planHistoryImport, validateHistoryCausality, reconcileHistory, HistoryImportError } from "./history-import.ts";
 export type { HistoryImportInput, HistoryImportSource, HistoryImportPlan, ImportSourcePlan, ImportConflict, VerifiedImportBinding, VerifiedImportFile, HistoryArtifact } from "./history-import.ts";

@@ -1,5 +1,5 @@
 import { scrumBindingIsValid } from "./scrum/types.ts";
-import { eventAllowsUnboundEpoch, LEDGER_REFERENCE_KINDS, EVENT_NAMES, NEEDS_HUMAN_REASONS, needsHumanEvidenceIsValid } from "./events.ts";
+import { eventAllowsUnboundEpoch, LEDGER_REFERENCE_KINDS, EVENT_NAMES, NEEDS_HUMAN_REASONS, needsHumanEvidenceIsValid, PEER_DISPOSITIONS } from "./events.ts";
 import type { LedgerEvent } from "./events.ts";
 
 /** Legacy records remain readable. V2 requires identities and a file-level writer fence. */
@@ -227,7 +227,8 @@ function v2PayloadIsValid(event: Record<string, unknown>): boolean {
     case "ledger_schema": return true;
     case "contract_set": return (event.execution === undefined || scrumBindingIsValid(event.execution)) && string("workspace") && string("gate") && string("artifact") &&
       strings("scope") && strings("skills") && optionalString("base") && optionalString("description") && optionalString("by") &&
-      (event.freshEyes === undefined || event.freshEyes === true) && (event.watch === undefined || event.watch === true);
+      (event.freshEyes === undefined || event.freshEyes === true) && (event.watch === undefined || event.watch === true) &&
+      (event.disposition === undefined || (PEER_DISPOSITIONS as readonly string[]).includes(event.disposition as string));
     case "claim_reported": return string("sha") && optionalString("agent");
     case "gate_started": return string("cmd");
     case "gate_finished": return (event.exit === null || Number.isSafeInteger(event.exit)) &&

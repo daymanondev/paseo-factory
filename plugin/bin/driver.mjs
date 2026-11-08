@@ -128,14 +128,19 @@ PATH="<path>" first.`;
  * set) rides ahead as the assignment header, and its skills (when set) ride
  * at the very top as the method mandate — since v0.0.16 with the read-first
  * path instruction, so the Agent can open any SKILL.md its filtered
- * <available_skills> no longer preloads.
+ * <available_skills> no longer preloads. The contract's disposition (ADR
+ * 0053 §3), when it names a read-only role, rides beside the description so
+ * the Peer knows its seat from turn one; `engineer` (explicit or the omitted
+ * default) renders nothing — the brief body already is the engineer law.
  */
-export function renderBrief(task, pathValue, description, skills, branch = task) {
+export function renderBrief(task, pathValue, description, skills, branch = task, disposition) {
   const body = BRIEF_TEMPLATE.replaceAll("<branch>", branch)
     .replaceAll("<task-id>", task)
     .replace('PATH="<path>" first.', `PATH="${pathValue}" first.`);
   let brief = body;
   if (description !== undefined && description !== null) brief = `Task: ${description}\n\n${brief}`;
+  if (typeof disposition === "string" && disposition !== "engineer")
+    brief = `Disposition: ${disposition}\n\n${brief}`;
   if (Array.isArray(skills) && skills.length > 0)
     brief = `Required skills to open first: ${skills.join(", ")} (read ~/.agents/skills/<skill>/SKILL.md or .agents/skills/<skill>/SKILL.md before starting)\n\n${brief}`;
   return brief;
@@ -975,7 +980,7 @@ export async function observeTasks(
         const contract = contractFromLedger(events, entry.task);
         const workspace = entry.workspace ?? contract?.workspace;
         cleanWorkspaceForRespawn(workspace); // the TASK WORKTREE on the worktree path — never <project-root>
-        const brief = entry.brief ?? renderBrief(entry.task, process.env.PATH ?? "", contract?.description, contract?.skills, entry.branch);
+        const brief = entry.brief ?? renderBrief(entry.task, process.env.PATH ?? "", contract?.description, contract?.skills, entry.branch, contract?.disposition);
         const { provider: providerId, model, thinking } = splitProvider(contract?.execution ? reply.event?.provider ?? entry.provider ?? provider : provider);
         const respawnSeq = reply.event?.seq;
         const idempotencyKey = respawnSeq !== undefined ? `${entry.task}-respawn-${respawnSeq}` : `${entry.task}-respawn`;
@@ -1423,7 +1428,7 @@ export async function runDriver({ runId, role, providerExplicit, home, stateDir,
       // the branch it is already on — `factory/<task>`, never the bare task
       // id the legacy shared-checkout path used.
       const branch = prep?.branch ?? task;
-      const brief = renderBrief(task, process.env.PATH ?? "", contract.description, contract.skills, branch);
+      const brief = renderBrief(task, process.env.PATH ?? "", contract.description, contract.skills, branch, contract.disposition);
       const spawnSeq = reply.event?.seq;
       const idempotencyKey = spawnSeq !== undefined ? `${task}-spawn-${spawnSeq}` : task;
       const actualLane = contract.execution ? reply.event?.provider ?? provider : provider;

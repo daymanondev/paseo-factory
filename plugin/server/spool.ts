@@ -40,9 +40,9 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameS
 import { dirname, join, resolve } from "node:path";
 import { FactoryError } from "./core/errors.ts";
 import { usageIsValid } from "./core/ledger.ts";
-import { needsHumanEvidenceIsValid, NEEDS_HUMAN_REASONS } from "./core/events.ts";
+import { needsHumanEvidenceIsValid, NEEDS_HUMAN_REASONS, PEER_DISPOSITIONS } from "./core/events.ts";
 import type { Factory } from "./core/factory.ts";
-import type { LedgerEvent, MeterUsage, NeedsHumanEvidence, NeedsHumanReason, Verdict } from "./core/events.ts";
+import type { LedgerEvent, MeterUsage, NeedsHumanEvidence, NeedsHumanReason, PeerDisposition, Verdict } from "./core/events.ts";
 import { CorrelationRegistry, readCorrelations } from "./core/correlations.ts";
 import { loadLanes, parseLane } from "./core/lanes.ts";
 import { listProjectRegistrations, readProjectRegistration, resolveProject, writeProjectRegistration } from "./core/project.ts";
@@ -85,6 +85,19 @@ export interface ContractRequest {
    * 0010 §6) — skill names; the driver's brief renders them at the top.
    */
   skills?: string[];
+  /**
+   * The Peer's SLP disposition (ADR 0053 §3): exactly one of
+   * `engineer | architect | reviewer | scout` when present — omitted reads as
+   * the engineer default everywhere the Contract is consumed.
+   */
+  disposition?: PeerDisposition;
+  /**
+   * Explicit Peer reset (ADR 0053 §1): exactly `true` cancels and archives
+   * the live bound Peer before the fresh Contract epoch. Omitted (default):
+   * a re-contract on an unaccepted Task updates the Brief/Gate in place and
+   * preserves the live Peer's accumulated context.
+   */
+  resetPeer?: true;
   /**
    * Who submitted (v0.0.9, ADR 0006) — required, stamped by the CLI from the
    * submitting shell's env: the delegated Owner agent's `PASEO_AGENT_ID`
@@ -616,6 +629,10 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     if (req.watch !== undefined && req.watch !== true) return undefined;
     if (req.base !== undefined && (typeof req.base !== "string" || req.base.trim() === "")) return undefined;
     if (req.description !== undefined && (typeof req.description !== "string" || req.description.trim() === "")) return undefined;
+    // ADR 0053 §1/§3, the watch law's strictness: the disposition is exactly
+    // one of the four SLP strings when present, and resetPeer is exactly true.
+    if (req.disposition !== undefined && !(PEER_DISPOSITIONS as readonly string[]).includes(req.disposition as string)) return undefined;
+    if (req.resetPeer !== undefined && req.resetPeer !== true) return undefined;
     return {
       id: req.id,
       kind: "contract",
@@ -632,6 +649,8 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       ...(req.freshEyes === undefined ? {} : { freshEyes: req.freshEyes }),
       ...(req.watch === undefined ? {} : { watch: true }),
       ...(req.description === undefined ? {} : { description: req.description }),
+      ...(req.disposition === undefined ? {} : { disposition: req.disposition as PeerDisposition }),
+      ...(req.resetPeer === undefined ? {} : { resetPeer: true }),
       submitter: req.submitter,
       ...seatField,
       ...projectSlugField,
@@ -1505,6 +1524,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         ...(request.freshEyes === undefined ? {} : { freshEyes: request.freshEyes }),
         ...(request.watch === undefined ? {} : { watch: true }),
         ...(request.description === undefined ? {} : { description: request.description }),
+        ...(request.disposition === undefined ? {} : { disposition: request.disposition }),
         ...(scrum.execution === undefined ? {} : { execution: scrum.execution, scope: scrum.scope, artifact: scrum.artifact }),
         by: request.submitter,
         ...(effectiveSeat === undefined ? {} : { seat: effectiveSeat }),
@@ -1514,13 +1534,25 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         throw error;
       }
       if (contractEvt.execution) bindScrumEpoch(factory, request.task, contractEvt.seq, contractEvt.execution, `${scrum.operationId}:bound`, scrum.operationId);
-      await finishRetirement();
+      // ADR 0053 §1 — Provisional Briefs: a re-contract on an unaccepted Task
+      // updates the Brief/Gate in place and PRESERVES the live bound Peer (its
+      // accumulated context window stays in the Task worktree) unless the
+      // Lead explicitly reset it or the Peer is dead (`error` status) — only
+      // then does the pre-0053 retirement (usage flush, stop, archive) run.
+      // The Scrum reconciliation arm above keeps its own always-retire law.
+      const preserveLivePeers =
+        scrum.execution === undefined &&
+        request.resetPeer !== true &&
+        previousPeers.some((peer) => peer.status !== "error");
+      if (!preserveLivePeers) await finishRetirement();
       return {
         id: request.id,
         ok: true,
         summary:
           `contract set for ${request.task}: \`${request.gate}\` in ${request.workspace}` +
-          `${contractEvt.freshEyes === true ? " · fresh eyes ON" : ""}${request.watch === true ? " · watch ON" : ""} · by ${request.submitter}`,
+          `${contractEvt.freshEyes === true ? " · fresh eyes ON" : ""}${request.watch === true ? " · watch ON" : ""}` +
+          `${contractEvt.disposition !== undefined ? ` · ${contractEvt.disposition} disposition` : ""}` +
+          `${preserveLivePeers ? " · live Peer preserved (resetPeer not requested)" : ""} · by ${request.submitter}`,
       };
     }
     if (request.kind === "claim") {
@@ -1719,6 +1751,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
               ...(preSpawnContract.freshEyes !== undefined ? { freshEyes: preSpawnContract.freshEyes } : {}),
               ...(preSpawnContract.watch === true ? { watch: true } : {}),
               ...(preSpawnContract.description !== undefined ? { description: preSpawnContract.description } : {}),
+              ...(preSpawnContract.disposition !== undefined ? { disposition: preSpawnContract.disposition } : {}),
               ...(preSpawnContract.execution === undefined ? {} : { execution: preSpawnContract.execution }),
             });
             if (request.worktree !== undefined && existsSync(request.worktree)) {

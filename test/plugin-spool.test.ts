@@ -226,6 +226,23 @@ test("parseSpoolRequest accepts the lead_dispatch shape and nothing around it", 
   }
 });
 
+test("parseSpoolRequest admits the contract's disposition (exactly one of four) and resetPeer (exactly true) — nothing around them", () => {
+  const base = { id: "r1", kind: "contract", task: "T-01", workspace: "/w/repo", gate: "true", submitter: "owner" };
+  for (const disposition of ["engineer", "architect", "reviewer", "scout"]) {
+    assert.deepEqual(parseSpoolRequest({ ...base, disposition }), { ...base, disposition });
+  }
+  assert.deepEqual(parseSpoolRequest({ ...base, resetPeer: true }), { ...base, resetPeer: true });
+  for (const bad of [
+    { ...base, disposition: "wizard" }, // not one of the four SLP dispositions
+    { ...base, disposition: "" },
+    { ...base, disposition: 7 },
+    { ...base, resetPeer: false }, // the watch law: exactly true or omitted
+    { ...base, resetPeer: "yes" },
+  ]) {
+    assert.equal(parseSpoolRequest(bad), undefined, `${JSON.stringify(bad)} must be rejected`);
+  }
+});
+
 test("lead_dispatch rides the injected handler and is refused loudly without one (the lead_rotate precedent)", async (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);
@@ -645,7 +662,7 @@ test("a turn ending at >= 128k acks its batch, locks handing_over, holds arrivin
   // registration's root binding and the roster's scoping compare against.)
   const resolvedRoot = resolveProject(projectRoot);
   assert.ok(resolvedRoot.ok);
-  factory.setContract({ task: "T1", workspace: resolvedRoot.ok ? resolvedRoot.root : projectRoot, gate: "true", artifact: "README.md" });
+  factory.setContract({ task: "T1", workspace: resolvedRoot.ok ? resolvedRoot.root : projectRoot, gate: "true", artifact: "README.md", disposition: "scout" });
   const sha = execSync("git rev-parse HEAD", { cwd: projectRoot, encoding: "utf8" }).trim();
   dropRequest(spoolRoot, { id: "rot-spawn", kind: "spawn", task: "T1", provider: "pi/zai/glm-5.3", arity: 1, worktree: taskWorktreePath(stateDir, slug, "T1") });
   await until(() => {
@@ -725,6 +742,7 @@ test("a turn ending at >= 128k acks its batch, locks handing_over, holds arrivin
   const kickoff = fake.sent.find((entry) => entry.agentId === successorId && entry.text.includes("Lead handoff"));
   assert.ok(kickoff, "the successor received the kickoff");
   assert.ok(kickoff.text.includes("T1"), "the roster names the task");
+  assert.ok(kickoff.text.includes("disposition scout"), "the roster row carries the active disposition (ADR 0053 §3)");
   assert.ok(kickoff.text.includes("agent-worker-1"), "the roster names the bound agent");
   assert.ok(kickoff.text.includes(taskWorktreePath(stateDir, slug, "T1")), "the roster names the Task worktree");
   assert.ok(kickoff.text.includes("factory/T1"), "the roster names the branch");
@@ -1006,4 +1024,166 @@ test("Seam 1: two Projects contract and claim the same Task id through dropped s
     !existsSync(join(projectStateDir(stateDir, a.slug), "report-T-01-1.md")),
     "project-a's own report is purged",
   );
+});
+
+// ---- Seam 1 (ADR 0053 §1/§3): disposition rides the contract, and a re-contract preserves the live Peer ----
+
+/**
+ * The ADR 0053 In-Place Brief Reconciliation seam: one registered Project,
+ * the Per-Project Factory registry, and the file-based spool watching with a
+ * daemon carrying a live bound Peer — `lead_set_contract` re-contracting an
+ * unaccepted Task must update the Brief/Gate in place and PRESERVE the bound
+ * Peer (no stop, no archive) unless `resetPeer: true` is explicit or the
+ * bound Peer is in `error` state, and the `disposition` field must ride the
+ * `contract_set` ledger lines (omitted = engineer everywhere it is read).
+ */
+test("Seam 1 (ADR 0053): a re-contract preserves the live bound Peer by default, resets it on resetPeer, retires an error-state Peer, and disposition rides the contract_set lines", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const home = join(dir, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const root = join(dir, "repo");
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, "README.md"), "x\n");
+  gitCommitAll(root);
+  const resolved = resolveCoreProject(root);
+  assert.ok(resolved.ok, "the test project must resolve");
+  writeCoreRegistration(stateDir, resolved.slug, { root: resolved.root });
+  const slug = resolved.slug;
+  const registry = createFactoryRegistry({ stateDir });
+  t.after(() => registry.stop());
+
+  // A live Peer bound to T-01 through its Task worktree cwd (the
+  // boundTaskPeers path match) and its task/project labels.
+  const peerCwd = taskWorktreePath(stateDir, slug, "T-01");
+  const agents: FakeAgent[] = [
+    { id: "peer-1", status: "idle", provider: "pi/zai/glm-5.3", cwd: peerCwd, labels: { task: "T-01", project: slug } },
+  ];
+  const fake = fakeDaemon(agents);
+  const stopped: string[] = [];
+  const spool = startSpool(stateDir, registry.root, {
+    pollMs: POLL_MS,
+    registry,
+    home,
+    daemon: fake.daemon,
+    stopAgent: async (agentId) => {
+      stopped.push(agentId);
+      return { ok: true };
+    },
+  });
+  t.after(() => spool.stop());
+
+  const contractLines = () =>
+    readFileSync(join(projectStateDir(stateDir, slug), "ledger.jsonl"), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+      .filter((e) => e.event === "contract_set");
+  const listedPeerIds = async () => {
+    const page = await fake.daemon.agents.list({ filter: { includeArchived: false, includeBackground: true } });
+    return page.entries.map((entry) => entry.agent.id);
+  };
+
+  // 1. The first Contract carries the scout disposition onto its contract_set line.
+  dropRequest(spoolRootFor(stateDir), { id: "c-1", kind: "contract", task: "T-01", workspace: resolved.root, gate: "true", artifact: "README.md", disposition: "scout", submitter: "owner" });
+  await until(() => assert.equal(readReply(spoolRootFor(stateDir), "c-1").ok, true, "the scout contract replies ok"));
+  assert.equal(contractLines().at(-1)?.disposition, "scout", "the contract_set line carries disposition: scout");
+  assert.equal(contractLines().at(-1)?.description, undefined);
+
+  // 2. Re-contract with resetPeer omitted: the Brief/Gate update in place and
+  //    the live bound Peer survives — no stop, no archive.
+  dropRequest(spoolRootFor(stateDir), { id: "c-2", kind: "contract", task: "T-01", workspace: resolved.root, gate: "true", artifact: "README.md", description: "Reconciled brief after the Peer's challenge", submitter: "owner" });
+  await until(() => assert.equal(readReply(spoolRootFor(stateDir), "c-2").ok, true, "the default re-contract replies ok"));
+  const epochTwo = contractLines();
+  assert.equal(epochTwo.length, 2, "a fresh contract_set epoch landed");
+  assert.equal(epochTwo.at(-1)?.description, "Reconciled brief after the Peer's challenge", "the new epoch carries the reconciled Brief");
+  assert.equal(epochTwo.at(-1)?.disposition, undefined, "an omitted disposition is recorded omitted — it reads as engineer");
+  assert.ok((await listedPeerIds()).includes("peer-1"), "the bound Peer is still listed (non-archived) after the in-place re-contract");
+  assert.deepEqual(stopped, [], "no stop was attempted on the preserved Peer");
+
+  // 3. resetPeer: true cancels and archives the prior Peer exactly as the
+  //    pre-0053 law did — observable as the archived agent plus the fresh epoch.
+  dropRequest(spoolRootFor(stateDir), { id: "c-3", kind: "contract", task: "T-01", workspace: resolved.root, gate: "true", artifact: "README.md", disposition: "reviewer", resetPeer: true, submitter: "owner" });
+  await until(() => assert.equal(readReply(spoolRootFor(stateDir), "c-3").ok, true, "the reset re-contract replies ok"));
+  await until(() => assert.deepEqual(stopped, ["peer-1"], "the prior Peer was stopped"));
+  assert.ok(!(await listedPeerIds()).includes("peer-1"), "the prior Peer is archived");
+  assert.equal(contractLines().at(-1)?.disposition, "reviewer", "the fresh epoch carries the reviewer disposition");
+
+  // 4. A bound Peer in error state is retired even without resetPeer — the
+  //    preservation branch never keeps a dead session.
+  agents.push({ id: "peer-2", status: "error", provider: "pi/zai/glm-5.3", cwd: peerCwd, labels: { task: "T-01", project: slug } });
+  dropRequest(spoolRootFor(stateDir), { id: "c-4", kind: "contract", task: "T-01", workspace: resolved.root, gate: "true", artifact: "README.md", submitter: "owner" });
+  await until(() => assert.equal(readReply(spoolRootFor(stateDir), "c-4").ok, true, "the error-peer re-contract replies ok"));
+  await until(() => assert.deepEqual(stopped, ["peer-1", "peer-2"], "the error-state Peer was stopped"));
+  assert.ok(!(await listedPeerIds()).includes("peer-2"), "the error-state Peer is archived");
+  assert.equal(contractLines().length, 4, "the fourth contract_set epoch landed");
+});
+
+test("Seam 1 (ADR 0053): setContract admits exactly the four SLP dispositions — anything else is invalid-contract, and a valid one rides the line", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const root = join(dir, "repo");
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, "README.md"), "x\n");
+  gitCommitAll(root);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  const base = { task: "DISP-1", workspace: root, gate: "true" };
+  for (const invalid of ["wizard", "Scout", "", 7, null]) {
+    assert.throws(
+      () => factory.setContract({ ...base, disposition: invalid as never }),
+      (error: unknown) => error instanceof Error && "code" in error && (error as { code?: string }).code === "invalid-contract",
+      `disposition ${JSON.stringify(invalid)} must be rejected with invalid-contract`,
+    );
+  }
+  const contract = factory.setContract({ ...base, disposition: "architect" });
+  assert.equal(contract.disposition, "architect");
+  assert.equal(factory.contractFor("DISP-1")?.disposition, "architect", "the ledger line carries the disposition");
+  const omitted = factory.setContract({ ...base, task: "DISP-2" });
+  assert.equal("disposition" in omitted, false, "an omitted disposition is recorded omitted — never a defaulted field");
+});
+
+test("Seam 1 (ADR 0053): the spawn-path re-contract onto a moved HEAD preserves the prior epoch's disposition", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const home = join(dir, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const root = join(dir, "repo");
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, "README.md"), "x\n");
+  gitCommitAll(root);
+  const resolved = resolveCoreProject(root);
+  assert.ok(resolved.ok, "the test project must resolve");
+  writeCoreRegistration(stateDir, resolved.slug, { root: resolved.root });
+  const registry = createFactoryRegistry({ stateDir });
+  t.after(() => registry.stop());
+  const spool = startSpool(stateDir, registry.root, { pollMs: POLL_MS, registry });
+  t.after(() => spool.stop());
+
+  // T-01 is contracted read-only (architect) and never claimed.
+  dropRequest(spoolRootFor(stateDir), { id: "c-a", kind: "contract", task: "T-01", workspace: resolved.root, gate: "true", artifact: "README.md", disposition: "architect", submitter: "owner" });
+  await until(() => assert.equal(readReply(spoolRootFor(stateDir), "c-a").ok, true, "the architect contract replies ok"));
+
+  // Upstream lands after T-01's Contract: T-02 is contracted, committed,
+  // claimed green, and accepted — moving the Project's HEAD past T-01's base.
+  dropRequest(spoolRootFor(stateDir), { id: "c-b", kind: "contract", task: "T-02", workspace: resolved.root, gate: "true", artifact: "README.md", submitter: "owner" });
+  await until(() => assert.equal(readReply(spoolRootFor(stateDir), "c-b").ok, true, "the T-02 contract replies ok"));
+  writeFileSync(join(root, "upstream.txt"), "landed upstream\n");
+  const upstreamSha = gitCommitAll(root, "upstream work");
+  dropRequest(spoolRootFor(stateDir), { id: "cl-b", kind: "claim", task: "T-02", sha: upstreamSha });
+  await until(() => assert.equal(readReply(spoolRootFor(stateDir), "cl-b").verdict, "green", "T-02's claim ends green"));
+  dropRequest(spoolRootFor(stateDir), { id: "ac-b", kind: "accept", task: "T-02", attempt: 1, submitter: "owner" });
+  await until(() => assert.equal(readReply(spoolRootFor(stateDir), "ac-b").ok, true, "T-02 is accepted"));
+
+  // The spawn's upstream-landed re-contract re-bases T-01 onto the moved HEAD
+  // — and the fresh epoch stays read-only: the disposition rides forward.
+  dropRequest(spoolRootFor(stateDir), { id: "sp-a", kind: "spawn", task: "T-01", provider: "pi/zai/glm-5.3", arity: 1 });
+  await until(() => assert.equal(readReply(spoolRootFor(stateDir), "sp-a").ok, true, "the T-01 spawn replies ok"));
+  const epochs = readFileSync(join(projectStateDir(stateDir, resolved.slug), "ledger.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line))
+    .filter((e) => e.event === "contract_set" && e.task === "T-01");
+  assert.equal(epochs.length, 2, "the spawn re-contracted T-01 onto the moved HEAD");
+  assert.equal(epochs[1].base, upstreamSha, "the fresh epoch re-based onto the upstream HEAD");
+  assert.equal(epochs[1].disposition, "architect", "the re-spawned read-only task stays read-only");
 });
