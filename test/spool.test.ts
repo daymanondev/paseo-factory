@@ -509,6 +509,56 @@ test("handleSpoolRequest answers a repoke either way — the spend rides ok, alr
   assert.equal(factory.ledger.events.filter((e) => e.event === "needs_human").length, 1, "the refused end wrote no second line");
 });
 
+test("a message-bearing repoke claims delivery only when the daemon send happened (ADR 0053 §1) — an owner-seat repoke or a failed send records the dispatch and says exactly that", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const ws = join(dir, "ws");
+  mkdirSync(join(ws, "src"), { recursive: true });
+  writeFileSync(join(ws, "src", "x.ts"), "x\n");
+  gitCommitAll(ws);
+  const stateDir = join(dir, "state");
+  const factory = createFactory({ stateDir });
+  factory.setContract({ task: "RULE-1", workspace: ws, gate: "true", artifact: "src/x.ts" });
+  const leadCorr = new CorrelationRegistry(stateDir).issue({ role: "lead", projectSlug: "demo", projectRoot: ws });
+
+  // 1. The owner seat (no submitter, no correlation) may repoke, but nothing
+  //    delivers its message — the reply must not claim a delivery.
+  const ownerSeat = await handleSpoolRequest(factory, {
+    id: "r-owner", kind: "repoke", task: "RULE-1", agent: "ag-peer", message: "Owner-authored ruling text",
+  });
+  assert.equal(ownerSeat.ok, true);
+  if (ownerSeat.ok) {
+    assert.doesNotMatch(ownerSeat.summary, /delivered into the live Peer session$/);
+    assert.match(ownerSeat.summary, /re-poke dispatched for RULE-1 → agent ag-peer — Lead ruling recorded on the repoke dispatch, not delivered into the live Peer session \(seat owner is not the live Peer's Lead\)/);
+  }
+
+  // 2. The Lead seat with a daemon whose send fails: same honesty, the named
+  //    failure — the dispatch line still landed (message turns are uncapped).
+  const failingDaemon = {
+    agents: {
+      ref: (id: string) => ({
+        send: async () => { throw new Error(`daemon unavailable for ${id}`); },
+        cancel: async () => {},
+        archive: async () => {},
+      }),
+    },
+  };
+  const leadSeat = await handleSpoolRequest(factory, {
+    id: "r-lead", kind: "repoke", task: "RULE-1", agent: "ag-peer", message: "Lead ruling the daemon cannot deliver",
+    submitter: leadCorr.correlationId,
+  }, { daemon: failingDaemon as never });
+  assert.equal(leadSeat.ok, true);
+  if (leadSeat.ok) {
+    assert.doesNotMatch(leadSeat.summary, /— Lead ruling delivered into the live Peer session/);
+    assert.match(leadSeat.summary, /not delivered into the live Peer session \(the daemon send failed\)/);
+  }
+  assert.equal(
+    factory.ledger.events.filter((e) => e.event === "repoke_dispatched" && e.task === "RULE-1").length,
+    2,
+    "both message-bearing turns landed their dispatch lines — uncapped (ADR 0053 Decision 3)",
+  );
+});
+
 test("handleSpoolRequest answers respawn (with event on both outcomes) and formats needs_human for attempt-ceiling and died-after-respawn (ADR 0008)", async (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);

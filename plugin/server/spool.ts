@@ -1992,7 +1992,16 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
       if (decision.outcome === "refused") {
         return { id: request.id, ok: false, code: decision.code, message: decision.event.reason };
       }
+      // Delivery is best-effort (Lead MCP tool invoked directly, daemon ref
+      // resolvable) — the reply says "delivered" only when the daemon send
+      // actually happened, never as a side effect of the message riding the
+      // request (an owner-seat repoke or a failed send records the dispatch
+      // and reports exactly that).
+      let rulingDelivered = false;
+      let deliveryFailure: string | undefined =
+        effectiveSeat === "lead" ? undefined : `seat ${effectiveSeat ?? "owner"} is not the live Peer's Lead`;
       if (effectiveSeat === "lead" && resolvedDaemon?.agents?.ref !== undefined) {
+        deliveryFailure = "the daemon send failed";
         try {
           const contract = factory.contractFor(request.task);
           if (ruling === undefined) {
@@ -2013,9 +2022,13 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
             ].join("\n\n");
             await resolvedDaemon.agents.ref(request.agent).send(nudge);
           }
+          rulingDelivered = true;
+          deliveryFailure = undefined;
         } catch {
           // best-effort nudge delivery when invoked directly by Lead MCP tool
         }
+      } else if (effectiveSeat === "lead") {
+        deliveryFailure = "no daemon session to deliver through";
       }
       return {
         id: request.id,
@@ -2023,7 +2036,9 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         summary:
           ruling === undefined
             ? `re-poke dispatched for ${request.task} → agent ${request.agent.slice(0, 12)} — the task's one spend`
-            : `re-poke dispatched for ${request.task} → agent ${request.agent.slice(0, 12)} — Lead ruling delivered into the live Peer session`,
+            : rulingDelivered
+              ? `re-poke dispatched for ${request.task} → agent ${request.agent.slice(0, 12)} — Lead ruling delivered into the live Peer session`
+              : `re-poke dispatched for ${request.task} → agent ${request.agent.slice(0, 12)} — Lead ruling recorded on the repoke dispatch, not delivered into the live Peer session (${deliveryFailure ?? "unknown"})`,
       };
     }
     if (request.kind === "needs_human") {

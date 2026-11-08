@@ -1026,8 +1026,8 @@ test("lead_repoke_agent with message delivers the Lead's ruling into the live Pe
   okText(2); // the Brief
   okText(3); // the live Peer
   okText(4); // the in-place reconciliation
-  okText(5); // ruling turn one
-  okText(6); // ruling turn two — no already-spent
+  assert.match(okText(5), /Lead ruling delivered into the live Peer session/, "a daemon-sent ruling claims its delivery");
+  assert.match(okText(6), /Lead ruling delivered into the live Peer session/, "ruling turn two — no already-spent");
 
   // 2. Both ruling turns were delivered into the live Peer session with the
   //    task/disposition prefix and the updated Brief (AC 1, 2, 4).
