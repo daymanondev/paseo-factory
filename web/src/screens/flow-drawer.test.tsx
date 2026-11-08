@@ -117,7 +117,8 @@ describe("the Agent Drawer", () => {
     fireEvent.click(screen.getByRole("button", { name: "Supervisor: Live, pi · glm-5.3" }));
     const dialog = screen.getByRole("dialog");
     expect(dialog.getAttribute("aria-label")).toBe("Agent details for Supervisor");
-    const header = within(dialog);
+    // Scoped to the drawer's own header — the T-13a chat panel on this seat carries its own provider · model badge.
+    const header = within(dialog.querySelector(".agent-drawer-header")!);
     expect(header.getByRole("heading", { level: 2, name: "Supervisor" })).toBeTruthy();
     expect(header.getByText("Live")).toBeTruthy();
     expect(header.getByText("pi · glm-5.3")).toBeTruthy();
@@ -188,7 +189,9 @@ describe("the Agent Drawer", () => {
     render(<FlowScreen view={slpView()} loadTranscript={load} />);
     fireEvent.click(screen.getByRole("button", { name: "Supervisor: Live, pi · glm-5.3" }));
     fireEvent.click(screen.getByRole("tab", { name: "Transcript" }));
-    expect(await screen.findByText(/a restart wiped the in-memory store/)).toBeTruthy();
+    // Scoped to the tabpanel — the seat's T-13a chat panel renders its own unavailable notice above the tabs.
+    const tab = await screen.findByRole("tabpanel");
+    expect(await within(tab).findByText(/a restart wiped the in-memory store/)).toBeTruthy();
   });
 
   it("renders the Transcript tab's refusal arm — the code and sentence as data, never a throw", async () => {
@@ -196,9 +199,12 @@ describe("the Agent Drawer", () => {
     render(<FlowScreen view={slpView()} loadTranscript={load} />);
     fireEvent.click(screen.getByRole("button", { name: "Supervisor: Live, pi · glm-5.3" }));
     fireEvent.click(screen.getByRole("tab", { name: "Transcript" }));
-    expect(await screen.findByRole("alert")).toBeTruthy();
-    expect(screen.getByText(/The transcript refused \(unknown-agent\)/)).toBeTruthy();
-    expect(screen.getByText(/is not attributed to any Task Attempt/)).toBeTruthy();
+    // Scoped to the tabpanel — the seat's T-13a chat panel renders its own refusal banner above the tabs.
+    const tab = await screen.findByRole("tabpanel");
+    const transcript = within(tab);
+    expect(await transcript.findByRole("alert")).toBeTruthy();
+    expect(transcript.getByText(/The transcript refused \(unknown-agent\)/)).toBeTruthy();
+    expect(transcript.getByText(/is not attributed to any Task Attempt/)).toBeTruthy();
   });
 
   it("closes on Escape and returns focus to the node — the selection clears with it", () => {

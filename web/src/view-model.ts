@@ -855,6 +855,50 @@ export function drawerTranscriptModel(reply: AgentTranscriptReply): DrawerTransc
   return { phase: "unavailable", reason: reply.reason };
 }
 
+/**
+ * One conversation turn of the Supervisor Live Chat panel (T-13a, ADR 0051
+ * §3/§5) — a transcript entry folded to the chat's own sender vocabulary.
+ */
+export interface SupervisorChatMessage {
+  /** The entry's timeline seq — the transcript carries no wall clock, so the seq is the honest turn position, never an invented time. */
+  seq: number;
+  /** `owner` for the user's turns, `supervisor` for the agent's. */
+  sender: "owner" | "supervisor";
+  /** The panel's sender label — the prototype's own "You (Owner)" / "Supervisor". */
+  label: string;
+  text: string;
+}
+
+/** The Supervisor Live Chat panel's model (T-13a) — the transcript reply's arms folded to conversation turns. */
+export type SupervisorChatModel =
+  | { phase: "chat"; messages: SupervisorChatMessage[] }
+  | { phase: "unavailable"; reason: string }
+  | { phase: "failure"; code: string; error: string };
+
+/**
+ * The chat fold (T-13a, ADR 0051 §3/§5): the Supervisor's own
+ * `factory.agent.transcript` reply folded to a conversation — user turns read
+ * as the Owner ("You (Owner)"), assistant turns as the "Supervisor", each
+ * keyed on the timeline seq (the transcript carries no wall clock — the seq
+ * is the honest turn position, never an invented time). Tool calls and
+ * system chrome are not conversation turns and fold away — the Transcript
+ * tab keeps the full tail. The other two envelope arms ride verbatim, as
+ * data, never a throw.
+ */
+export function supervisorChatModel(reply: AgentTranscriptReply): SupervisorChatModel {
+  if (!reply.ok) return { phase: "failure", code: reply.code, error: reply.error };
+  if ("unavailable" in reply) return { phase: "unavailable", reason: reply.reason };
+  const messages = reply.entries
+    .filter((entry) => entry.role === "user" || entry.role === "assistant")
+    .map((entry) => ({
+      seq: entry.seq,
+      sender: entry.role === "user" ? ("owner" as const) : ("supervisor" as const),
+      label: entry.role === "user" ? "You (Owner)" : "Supervisor",
+      text: entry.text ?? entry.summary ?? "",
+    }));
+  return { phase: "chat", messages };
+}
+
 /** The specialist role vocabulary — the prototype's own `scrumRoleLabels`. */
 export const SCRUM_ROLE_LABELS: Readonly<Record<string, string>> = { pm: "PM", ux: "UX", architect: "ARCH", dev: "DEV", qa: "QA" };
 

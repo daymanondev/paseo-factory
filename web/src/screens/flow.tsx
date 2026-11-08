@@ -13,6 +13,10 @@
  * (ADR 0017). T-07b: clicking a seat or Peer node with a live agent opens the
  * read-only Agent Drawer (`flow-drawer.tsx`); a vacant "Not started" node
  * still only selects (aria-pressed + `.selected`) — it never opens one.
+ * T-13a: a Supervisor-seat drawer also carries the drawer's LIVE supervisor
+ * node from the current snapshot, so its chat panel tracks the seat — a
+ * rotated or vanished supervisor shows immediately, and every other seat's
+ * drawer stays exactly as it was.
  */
 import { useCallback, useState } from "react";
 import type { FactoryView } from "../../../plugin/shared/view.ts";
@@ -447,7 +451,14 @@ export function FlowScreen({ view, loadTranscript }: FlowScreenProps) {
       ) : (
         <ScrumCanvas model={model} selected={selected} onSelect={onSelect} onOpen={openDrawer} />
       )}
-      {drawer !== null ? <AgentDrawer node={drawer.node} onClose={closeDrawer} load={loadTranscript} /> : null}
+      {drawer !== null ? (
+        <AgentDrawer
+          node={drawer.node}
+          onClose={closeDrawer}
+          load={loadTranscript}
+          liveSupervisor={drawer.node.seat === "supervisor" ? model.supervisor : undefined}
+        />
+      ) : null}
     </section>
   );
 }

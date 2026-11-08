@@ -13,6 +13,8 @@
  * Attempts (each owned Task's ladder — n, verdict, claimed sha, deep-linked),
  * Handoff (the Lead's rotation state, Lead nodes only), and Resources (the
  * usage rows the rollup attributes, or the honest "No usage recorded").
+ * T-13a adds the Supervisor Live Chat panel (`supervisor-chat.tsx`) as the
+ * body's first child on the Supervisor seat — read-only, no composer.
  * Read-only throughout — no Start/Rotate/Revoke/Respawn control anywhere
  * (ADR 0017); the drawer closes on Escape and via its close button and
  * returns focus to the node.
@@ -34,6 +36,7 @@ import {
   type FlowSeatNode,
   type FlowUsageRowModel,
 } from "../view-model.ts";
+import { SupervisorChat } from "./supervisor-chat.tsx";
 import { TranscriptRow, type LoadAgentTranscript } from "./task-detail.tsx";
 
 export interface AgentDrawerProps {
@@ -42,6 +45,13 @@ export interface AgentDrawerProps {
   onClose: () => void;
   /** The transcript transport — the sidecar's door by default, a fixture in tests. */
   load?: LoadAgentTranscript;
+  /**
+   * The LIVE Supervisor node from the CURRENT snapshot while a
+   * Supervisor-seat drawer is open (T-13a) — the chat panel tracks the seat,
+   * not the node the drawer opened on. Omitted for every other seat: their
+   * drawers stay exactly as they were.
+   */
+  liveSupervisor?: FlowSeatNode;
 }
 
 // ---- the Work tab ----------------------------------------------------------------------------------
@@ -339,7 +349,7 @@ function TranscriptTab({ node, load }: { node: FlowSeatNode; load: LoadAgentTran
  * Session everywhere, Attempts where the ledger binds Tasks to the seat,
  * Handoff on the Lead only, and Resources everywhere (`drawerTabsFor`'s own law).
  */
-export function AgentDrawer({ node, onClose, load = agentTranscriptViaSidecar }: AgentDrawerProps) {
+export function AgentDrawer({ node, onClose, load = agentTranscriptViaSidecar, liveSupervisor }: AgentDrawerProps) {
   const titleId = useId();
   const closeRef = useRef<HTMLButtonElement | null>(null);
   const tabs = drawerTabsFor(node);
@@ -385,6 +395,7 @@ export function AgentDrawer({ node, onClose, load = agentTranscriptViaSidecar }:
           </button>
         </header>
         <div className="agent-drawer-body">
+          {liveSupervisor !== undefined ? <SupervisorChat node={liveSupervisor} load={load} /> : null}
           <div className="console-flow-drawer-tabs" role="tablist" aria-label="Agent drawer views">
             {tabs.map((id) => (
               <button
