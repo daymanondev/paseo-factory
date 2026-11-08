@@ -8,6 +8,7 @@ import {
   CONSOLE_SIDECAR_DEFAULT_PORTS,
   CONSOLE_STATE_FILE,
 } from "../plugin/server/console-sidecar.ts";
+import contribute from "../plugin/index.server.ts";
 import { invokeRpc } from "../web/src/rpc.ts";
 import { loadSnapshotViaSidecar } from "../web/src/useSnapshot.ts";
 import { makeConsoleFixture } from "./console-fixture.ts";
@@ -199,4 +200,47 @@ test("console sidecar: a start failure resolves as data — never a thrown boot 
   const bundle = await get(`${degraded.sidecar.url}/`);
   assert.equal(bundle.status, 503);
   assert.match(await bundle.text(), /bundle is not served yet/);
+});
+
+test("plugin server entry (contribute): ordinary boot starts the Console sidecar and writes console.json", async (t) => {
+  const dir = makeTempDir();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const prevHome = process.env.HOME;
+  const prevPaseoHome = process.env.PASEO_HOME;
+  const paseoHome = join(dir, ".paseo");
+  process.env.HOME = dir;
+  process.env.PASEO_HOME = paseoHome;
+  t.after(() => {
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+    if (prevPaseoHome === undefined) delete process.env.PASEO_HOME;
+    else process.env.PASEO_HOME = prevPaseoHome;
+  });
+
+  const fakeServer = {
+    on: () => () => {},
+    before: () => () => {},
+    addHook: () => () => {},
+    handle: () => () => {},
+  };
+  const stop = contribute(fakeServer as unknown as Parameters<typeof contribute>[0]);
+  try {
+    const stateFile = join(paseoHome, "plugin-state", "paseo-factory", CONSOLE_STATE_FILE);
+    const deadline = Date.now() + 3000;
+    while (!existsSync(stateFile)) {
+      assert.ok(Date.now() < deadline, "ordinary plugin boot writes console.json");
+      await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+    }
+    const recorded = JSON.parse(readFileSync(stateFile, "utf8")) as { url?: string; port?: number; host?: string };
+    assert.equal(recorded.host, "127.0.0.1");
+    assert.ok(typeof recorded.url === "string" && recorded.url.startsWith("http://127.0.0.1:"));
+
+    const reply = await post(`${recorded.url}/rpc`, { method: "factory.snapshot", params: {} });
+    assert.equal(reply.status, 200);
+    const payload = (await reply.json()) as { ok: boolean; view?: { version?: number } };
+    assert.equal(payload.ok, true);
+    assert.equal(payload.view?.version, 3);
+  } finally {
+    stop();
+  }
 });

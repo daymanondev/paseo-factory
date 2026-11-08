@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-08
+
+- Console sidecar ordinary-boot activation (`plugin/index.server.ts`, `plugin/server/console-sidecar.ts`, ADR 0051 §1): on a normal plugin boot (`pendingUpgradeFor(stateDir) === undefined`), `initializeOrdinaryRuntime()` ran at line 215 before `surface` and `startConsoleSidecarWhenOrdinary` were assigned at line 577, setting `booted = true` while `startConsoleSidecarWhenOrdinary` was still its initial no-op — so the sidecar only ever started after a recovery boot transitioned `booted` from `false` to `true`, leaving port `4767` unbound and `<stateDir>/console.json` absent on normal boots. `contribute()` now invokes `if (booted) startConsoleSidecarWhenOrdinary()` immediately after assigning the hook (while keeping the incomplete-upgrade fence intact when `booted` is `false`), and `startConsoleSidecar` gains `shouldAbort?: () => boolean` so a synchronous `stop()` during test teardown closes the listener before writing `console.json`. Pinned by `test/console-sidecar.test.ts` (`plugin server entry (contribute): ordinary boot starts the Console sidecar and writes console.json`).
+
 ## [0.3.0] - 2026-11-08
 
 - Standalone Factory Web Console (ADR 0051): a Vite/React/TypeScript app in `web/` (sharing `plugin/shared/` contracts) served by the plugin's own localhost Console sidecar (`plugin/server/console-sidecar.ts`) — bound to `127.0.0.1` only (default port `4767`), Host/Origin-checked, serving the committed bundle from `plugin/web/` as a generated artifact exactly like the policy assets (`build:web:check` fails when stale; plugin installation never runs a build). No daemon credential ever crosses to the browser and the daemon WS protocol is never proxied raw: every write dispatches in-process through the allowlisted, narrowed `factory.*` RPC door against the same handlers the RN client uses, so the single-writer law (ADR 0004) is unchanged.

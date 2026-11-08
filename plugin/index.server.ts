@@ -43,7 +43,7 @@ import { startConsoleSidecar, type ConsoleSidecarHandle } from "./server/console
 // migrateLegacyRootState(stateDir, { projects: Array<{ slug, gitRoot? }> }).
 import { migrateLegacyRootState } from "./server/core/ledger-migration.ts";
 
-const SHELL_VERSION = "0.3.0";
+const SHELL_VERSION = "0.3.1";
 
 const log = (message: string) => console.log(`[${PLUGIN_ID}] ${message}`);
 
@@ -575,12 +575,13 @@ export default function contribute(server: PluginServerContext) {
   // throwing, and the shell still guards the promise). The hook itself fires
   // from `initializeOrdinaryRuntime` — the sidecar is ordinary startup work.
   startConsoleSidecarWhenOrdinary = () => {
-    if (consoleSidecarStarted) return;
+    if (consoleSidecarStarted || consoleSidecarStopped) return;
     consoleSidecarStarted = true;
     void startConsoleSidecar({
       handlers: surface,
       stateDir,
       webRoot: () => (pluginDir === undefined ? undefined : join(pluginDir, "web")),
+      shouldAbort: () => consoleSidecarStopped,
       onLog: log,
     }).then(
       (start) => {
@@ -589,13 +590,14 @@ export default function contribute(server: PluginServerContext) {
           // A stop() that raced the bind still closes the late listener and
           // clears its discovery record.
           if (consoleSidecarStopped) void consoleSidecar.close();
-        } else {
+        } else if (!consoleSidecarStopped) {
           log(`console sidecar: not started — ${start.reason}`);
         }
       },
       (error) => log(`console sidecar: start deferred — ${error instanceof Error ? error.message : String(error)}`),
     );
   };
+  if (booted) startConsoleSidecarWhenOrdinary();
 
 
   const offSessionOpen = registerLifecycleHook<{ request: PluginHookRequests["agent.open.before"] }, PluginHookRequests["agent.open.before"]>(

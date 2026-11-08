@@ -498,6 +498,8 @@ export interface ConsoleSidecarOptions {
   ports?: number[];
   /** The call context handed to every dispatch — the shell's daemon capture. */
   context?: () => SurfaceCallContext;
+  /** Optional lifecycle fence: when true after bind, closes the listener before writing the state file. */
+  shouldAbort?: () => boolean;
   onLog?: (message: string) => void;
 }
 
@@ -621,6 +623,10 @@ export async function startConsoleSidecar(options: ConsoleSidecarOptions): Promi
   if (bound === undefined) {
     await stopServer(server);
     return { ok: false, reason: lastReason || "no port could be bound" };
+  }
+  if (options.shouldAbort?.()) {
+    await stopServer(server);
+    return { ok: false, reason: "stopped before startup completed" };
   }
   const port = bound.port;
   boundary = loopbackBoundary(host, port);
