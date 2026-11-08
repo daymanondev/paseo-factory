@@ -1013,12 +1013,29 @@ test("lead_accept_task on a GREEN read-only Task closes merge-free (ADR 0053 §3
   assert.ok(typeof worktree === "string", "the scout dispatch allocated the Task worktree");
   assert.ok(existsSync(worktree), "the Task worktree exists before acceptance");
 
-  // 2. The read-only Peer claims at the worktree HEAD — no new commit.
+  // 2. The read-only Peer claims at the worktree HEAD — no new commit, but
+  //    with the mandatory 6-Field Handoff (ADR 0053 §4, ticket 04): `commit`
+  //    omitted is the read-only Peer's word, the four handoff fields are not.
   const agentCorr = correlations.issue({ role: "agent", projectSlug: slug, projectRoot: repoDir, task: "RO-ACC", agentId: "peer-ro" });
   const agentCall = await runMcpSession({
     args: ["--correlation", agentCorr.correlationId, "--state-dir", stateDir],
     cwd: worktree!,
-    requests: [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "agent_claim", arguments: {} } }],
+    requests: [
+      {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {
+          name: "agent_claim",
+          arguments: {
+            outcome: "complete",
+            scope: "read README.md and traced the module boundaries from the worktree HEAD",
+            verification: "gate ran green at the worktree HEAD; no new commit — read-only disposition",
+            unknowns: "none",
+          },
+        },
+      },
+    ],
   });
   assert.match(okText(agentCall[0], "the read-only claim"), /GREEN/i, "the read-only claim ends GREEN at the worktree HEAD");
 
