@@ -32,9 +32,9 @@ import { makeTempDir } from "./helpers.ts";
  * no clone left behind and the NEXT snapshot folds `Last hydrated · direct`;
  * and the door's narrowings refuse as data (`forbidden_operation`) — sync's
  * repo/branch/passphrase and hydrate's repo/ref — while the landed key
- * import (`factory.vault.import`, T-10d) has its own RG-1 e2e and the
- * still-deferred project danger zone keeps refusing `unknown_method`
- * through the same door.
+ * import (`factory.vault.import`, T-10d) and the T-10e Danger Zone writes
+ * have their own RG-1 e2es; the danger zone's scoped-only narrowing (no
+ * projectRoot refuses) answers through the same door.
  */
 
 /** One git invocation against the fixture — output captured, never inherited. */
@@ -173,7 +173,7 @@ test("RG-1: the console's real transport syncs the vault — the checked include
   }
 });
 
-test("RG-1: the console's real transport hydrates the vault direct — the tarball stream lands; the narrowing and the deferred danger zone refuse as data", async (t) => {
+test("RG-1: the console's real transport hydrates the vault direct — the tarball stream lands; the narrowing and the danger zone's scoped-only law refuse as data", async (t) => {
   const homeRoot = makeTempDir();
   // The one gh api call the direct hydrate makes, answered in memory — zero
   // network, zero clone; every other `gh` call answers the deterministic
@@ -226,9 +226,11 @@ test("RG-1: the console's real transport hydrates the vault direct — the tarba
   assert.equal(hydratedModel.vault.cloneLabel, "Absent");
 
   // (d) The door's narrowing through the SAME transport — the repo and ref
-  // overrides refuse as data BEFORE any handler runs, and the still-deferred
-  // project danger zone keeps refusing `unknown_method` (T-10e; the T-10d
-  // key import has its own RG-1 e2e).
+  // overrides refuse as data BEFORE any handler runs, and the T-10e Danger
+  // Zone's own narrowing answers too: `factory.project.delete` with no
+  // projectRoot refuses `forbidden_operation` (the scoped-only law; the two
+  // writes' happy paths have their own RG-1 e2e in
+  // console-settings-danger-e2e.test.ts).
   for (const params of [{ repo: "octocat/other-vault" }, { ref: "release" }]) {
     const response = await fetchAt("/rpc", {
       method: "POST",
@@ -246,9 +248,23 @@ test("RG-1: the console's real transport hydrates the vault direct — the tarba
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ method: "factory.project.delete", params: {} }),
   });
-  assert.equal(dangerResponse.status, 404, "factory.project.delete stays outside the door");
+  assert.equal(dangerResponse.status, 400, "factory.project.delete refuses the unscoped delete");
   const dangerPayload = (await dangerResponse.json()) as { ok: boolean; code?: string; error?: string };
   assert.equal(dangerPayload.ok, false);
-  assert.equal(dangerPayload.code, "unknown_method");
-  assert.match(dangerPayload.error ?? "", /factory\.vault\.sync, factory\.vault\.hydrate, factory\.vault\.import/, "the allowlist sentence carries the round-trip writes and the landed key import");
+  assert.equal(dangerPayload.code, "forbidden_operation", "the Danger Zone's scoped-only law refuses as data");
+  assert.match(dangerPayload.error ?? "", /refuses the unscoped delete/, "the refusal names the narrowed act it refused");
+  // The allowlist sentence — which now carries the round-trip writes, the
+  // key import, and the two project writes — answers only on the door's
+  // OUTSIDE, read here off a still-unlisted sibling (the Add-Project wizard
+  // door, T-12).
+  const outsideResponse = await fetchAt("/rpc", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ method: "factory.project.add", params: {} }),
+  });
+  assert.equal(outsideResponse.status, 404, "the Add-Project wizard door stays outside");
+  const outsidePayload = (await outsideResponse.json()) as { ok: boolean; code?: string; error?: string };
+  assert.equal(outsidePayload.ok, false);
+  assert.equal(outsidePayload.code, "unknown_method");
+  assert.match(outsidePayload.error ?? "", /factory\.vault\.sync, factory\.vault\.hydrate, factory\.vault\.import, factory\.project\.reset, factory\.project\.delete/, "the allowlist sentence carries the round-trip writes, the key import, and the two project writes");
 });

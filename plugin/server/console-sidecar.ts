@@ -38,9 +38,8 @@
  *   schema. Rotate and revoke only ever retire a LIVE seat; they are not
  *   Start controls. The sibling writes stay outside the door:
  *   `factory.lanes.set.batch`, `factory.lead.ensure`, `factory.lead.dispatch`,
- *   `factory.supervisor.ensure`, and every `factory.project.*` keep refusing
- *   `unknown_method` as data (ADR 0017 — no Start/Ensure seat controls
- *   anywhere in the console).
+ *   and `factory.supervisor.ensure` keep refusing `unknown_method` as data
+ *   (ADR 0017 — no Start/Ensure seat controls anywhere in the console).
  * - The plugin writes (T-09b, ADR 0051 §7): `factory.plugins.check.updates`,
  *   `factory.plugins.install`, and `factory.plugins.manage` join the door on
  *   their existing shared schemas, `check.updates` as a plain entry and the
@@ -62,6 +61,14 @@
  *   plain entry on its existing all-optional shared schema: every field the
  *   dialog leaves empty is simply absent from the wire, and the core's own
  *   `vault-import-*` refusals ride as data.
+ * - The Danger Zone writes (T-10e, ADR 0051): `factory.project.reset` and
+ *   `factory.project.delete` join the door on their existing shared schemas,
+ *   both NARROWED per input before any handler runs: each REQUIRES a
+ *   non-empty `projectRoot` (an unscoped reset/delete of the root Factory
+ *   refuses as data), and delete also refuses the `seat` field (Project
+ *   deletion is Owner-only) — each refusal is data (`forbidden_operation`),
+ *   and the handler's own summary and purged/archived counts ride as data
+ *   with HTTP 200.
  * - A start failure is logged, never thrown — the sidecar must never break
  *   plugin boot (the shell wraps the call, and `start()` itself resolves to
  *   `{ ok: false, reason }` rather than rejecting while ports fall back).
@@ -70,7 +77,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import type { z, ZodType } from "zod";
-import { accept, agentTranscript, inbox, lanesReset, lanesSet, leadRotate, pluginsCheckUpdates, pluginsInstall, pluginsManage, profilesApply, profilesDelete, profilesSave, scrumCommand, snapshot, supervisorRevoke, taskDetail, vaultConfigure, vaultHydrate, vaultImport, vaultPull, vaultPush, vaultSync } from "../shared/rpc.ts";
+import { accept, agentTranscript, inbox, lanesReset, lanesSet, leadRotate, pluginsCheckUpdates, pluginsInstall, pluginsManage, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, scrumCommand, snapshot, supervisorRevoke, taskDetail, vaultConfigure, vaultHydrate, vaultImport, vaultPull, vaultPush, vaultSync } from "../shared/rpc.ts";
 import type { SurfaceHandlers } from "./surface-rpc.ts";
 import type { SurfaceCallContext } from "./surface-rpc.ts";
 
@@ -232,6 +239,30 @@ function vaultHydrateRefusal(input: Record<string, unknown>): string | null {
   return null;
 }
 
+/** True when the input names no Project — the Danger Zone's scoped-only law (both projectRoot and slug doors empty). */
+function missingProjectRoot(input: Record<string, unknown>): boolean {
+  return typeof input.projectRoot !== "string" || input.projectRoot.trim() === "";
+}
+
+/** The reset narrowing (T-10e): the unscoped reset refuses — the console resets exactly the scoped Project, never the root Factory. */
+function projectResetRefusal(input: Record<string, unknown>): string | null {
+  if (missingProjectRoot(input)) {
+    return "factory.project.reset refuses the unscoped reset from the console — projectRoot is required (the Danger Zone resets exactly the scoped Project, never the root Factory)";
+  }
+  return null;
+}
+
+/** The delete narrowing (T-10e): the unscoped delete and the `seat` field both refuse — Project deletion is the Owner's own scoped act. */
+function projectDeleteRefusal(input: Record<string, unknown>): string | null {
+  if (input.seat !== undefined) {
+    return "factory.project.delete refuses seat from the console — Project deletion is Owner-only; the seat field never rides";
+  }
+  if (missingProjectRoot(input)) {
+    return "factory.project.delete refuses the unscoped delete from the console — projectRoot is required (the Danger Zone deletes exactly the scoped Project, never the root Factory)";
+  }
+  return null;
+}
+
 export const CONSOLE_RPC_ALLOWLIST: readonly ConsoleRpcEntry[] = [
   consoleRpcEntry(snapshot.name, snapshot.input, (handlers, input, context) => handlers.snapshot(input, context)),
   consoleRpcEntry(taskDetail.name, taskDetail.input, (handlers, input, context) => handlers.taskDetail(input, context)),
@@ -307,6 +338,21 @@ export const CONSOLE_RPC_ALLOWLIST: readonly ConsoleRpcEntry[] = [
   // never reads or uploads any file's contents, and the keystore password
   // rides the request body once, never echoed back.
   consoleRpcEntry(vaultImport.name, vaultImport.input, (handlers, input, context) => handlers.vaultImport(input, context)),
+  // The Danger Zone writes (T-10e) — the Settings screen's two scoped Project
+  // acts, NARROWED per input before any handler runs on their existing shared
+  // schemas: both REQUIRE a non-empty projectRoot (an unscoped reset/delete of
+  // the root Factory refuses as data — the slug doors stay shut too, the
+  // dialogs only ever send the switcher's scoped root), and delete also
+  // refuses the `seat` field (Project deletion is Owner-only). The dialogs are
+  // type-to-confirm on the Project slug; the handler's own refusals
+  // (`unknown-project`, `repository-reset-refused`, …) ride as data with HTTP
+  // 200 — the narrowing never polices what the schema already bounds.
+  consoleRpcEntry(projectReset.name, projectReset.input, (handlers, input, context) => handlers.projectReset(input, context), {
+    refuse: projectResetRefusal,
+  }),
+  consoleRpcEntry(projectDelete.name, projectDelete.input, (handlers, input, context) => handlers.projectDelete(input, context), {
+    refuse: projectDeleteRefusal,
+  }),
 ];
 
 /** The named allowlist as the refusal sentence spells it. */

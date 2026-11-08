@@ -18,23 +18,27 @@ import { makeTempDir } from "./helpers.ts";
  * `factory.plugins.manage`), T-10b's three vault writes
  * (`factory.vault.configure`, `factory.vault.pull`,
  * `factory.vault.push`), T-10c's two NARROWED vault round-trip writes
- * (`factory.vault.sync`, `factory.vault.hydrate`), and T-10d's key import
- * (`factory.vault.import`, a plain entry on its all-optional schema) —
+ * (`factory.vault.sync`, `factory.vault.hydrate`), T-10d's key import
+ * (`factory.vault.import`, a plain entry on its all-optional schema), and
+ * T-10e's two NARROWED Danger Zone writes (`factory.project.reset`,
+ * `factory.project.delete`) —
  * dispatch in-process through the same `SurfaceHandlers` the RN client's
  * registrations call, every input validated by the shared RPC input schema
  * (`plugin/shared/rpc.ts`); every other method name keeps refusing as data.
  * The Scrum entry allowlists exactly the five Owner operations the Inbox
- * resolves, and the plugin and round-trip vault writes are narrowed per
- * input — manage serves exactly enable/disable/update (never remove/reload,
- * never disabling the console's own host), install carries no developer
- * field (never the core target, never a source/ref or ledger/config
- * override), sync refuses the three fields configure owns (repo, branch,
- * passphrase), and hydrate refuses its repo/ref overrides — every narrowing
- * refusal is `forbidden_operation` as data BEFORE any handler runs. The
- * siblings stay OUTSIDE the door (ADR 0017 — no Start/Ensure seat control
- * anywhere): the batch save, `lead.ensure`, `lead.dispatch`,
- * `supervisor.ensure`, and every `project.*` (the T-10e danger zone stays
- * deferred).
+ * resolves, and the plugin, round-trip vault, and Danger Zone writes are
+ * narrowed per input — manage serves exactly enable/disable/update (never
+ * remove/reload, never disabling the console's own host), install carries
+ * no developer field (never the core target, never a source/ref or
+ * ledger/config override), sync refuses the three fields configure owns
+ * (repo, branch, passphrase), hydrate refuses its repo/ref overrides, and
+ * BOTH project writes require a non-empty `projectRoot` (an unscoped
+ * reset/delete of the root Factory refuses) while delete also refuses the
+ * `seat` field — every narrowing refusal is `forbidden_operation` as data
+ * BEFORE any handler runs. The siblings stay OUTSIDE the door (ADR 0017 —
+ * no Start/Ensure seat control anywhere): the batch save, `lead.ensure`,
+ * `lead.dispatch`, `supervisor.ensure`, and the Add-Project wizard doors
+ * (`project.add`, `project.pick.folder` — T-12).
  */
 
 async function post(url: string, body: unknown): Promise<{ status: number; payload: unknown }> {
@@ -84,9 +88,8 @@ test("console RPC door: unlisted methods keep refusing as data, whatever their n
   // A write RPC outside the allowlist, a read RPC outside it, an invented
   // name, and every sibling the lifecycle waves left outside the door — the
   // batch save, the ensure/dispatch seat acts (ADR 0017: the console can
-  // retire a LIVE seat but never start one), and every project act (the
-  // T-10e danger zone stays deferred) — all refuse identically: the door is
-  // a list, not a prefix.
+  // retire a LIVE seat but never start one), and the Add-Project wizard
+  // doors (T-12) — all refuse identically: the door is a list, not a prefix.
   for (const method of [
     "factory.retro",
     "factory.lead.dispatch",
@@ -95,9 +98,7 @@ test("console RPC door: unlisted methods keep refusing as data, whatever their n
     "factory.lanes.set.batch",
     "factory.lead.ensure",
     "factory.supervisor.ensure",
-    "factory.project.reset",
     "factory.project.add",
-    "factory.project.delete",
     "factory.project.pick.folder",
   ]) {
     const refusal = await post(started.sidecar.url + "/rpc", { method, params: {} });
@@ -105,7 +106,7 @@ test("console RPC door: unlisted methods keep refusing as data, whatever their n
     const payload = refusal.payload as { ok: boolean; code?: string; error?: string };
     assert.equal(payload.ok, false);
     assert.equal(payload.code, "unknown_method");
-    assert.match(payload.error ?? "", /factory\.snapshot, factory\.task\.detail, factory\.agent\.transcript, factory\.accept, factory\.inbox, factory\.scrum\.command, factory\.lanes\.set, factory\.lanes\.reset, factory\.profiles\.apply, factory\.profiles\.save, factory\.profiles\.delete, factory\.lead\.rotate, factory\.supervisor\.revoke, factory\.plugins\.check\.updates, factory\.plugins\.install, factory\.plugins\.manage, factory\.vault\.configure, factory\.vault\.pull, factory\.vault\.push, factory\.vault\.sync, factory\.vault\.hydrate, factory\.vault\.import/, "the sentence names the allowlist");
+    assert.match(payload.error ?? "", /factory\.snapshot, factory\.task\.detail, factory\.agent\.transcript, factory\.accept, factory\.inbox, factory\.scrum\.command, factory\.lanes\.set, factory\.lanes\.reset, factory\.profiles\.apply, factory\.profiles\.save, factory\.profiles\.delete, factory\.lead\.rotate, factory\.supervisor\.revoke, factory\.plugins\.check\.updates, factory\.plugins\.install, factory\.plugins\.manage, factory\.vault\.configure, factory\.vault\.pull, factory\.vault\.push, factory\.vault\.sync, factory\.vault\.hydrate, factory\.vault\.import, factory\.project\.reset, factory\.project\.delete/, "the sentence names the allowlist");
   }
 });
 
@@ -305,6 +306,59 @@ test("console RPC door: the vault round-trip writes are NARROWED — sync's repo
   }
 });
 
+test("console RPC door: the Danger Zone writes are NARROWED — the unscoped reset/delete and delete's seat field refuse before any handler runs", async (t) => {
+  const homeRoot = makeTempDir();
+  const fixture = makeConsoleFixture(homeRoot);
+  const started = await fixture.start();
+  assert.ok(started.ok, started.ok ? "" : started.reason);
+  t.after(async () => {
+    await started.sidecar.close();
+    rmSync(homeRoot, { recursive: true, force: true });
+  });
+
+  const call = (method: string, params: unknown) => post(started.sidecar.url + "/rpc", { method, params });
+
+  // The narrowed refusals — every one a 400 `forbidden_operation` BEFORE any
+  // handler runs: both writes REQUIRE a non-empty projectRoot (the slug doors
+  // the schema allows stay shut too — an unscoped reset/delete of the root
+  // Factory is never the console's act), and delete also refuses the `seat`
+  // field (Project deletion is Owner-only).
+  const refusals: { method: string; params: Record<string, unknown>; sentence: RegExp }[] = [
+    { method: "factory.project.reset", params: {}, sentence: /refuses the unscoped reset/ },
+    { method: "factory.project.reset", params: { projectRoot: "" }, sentence: /refuses the unscoped reset/ },
+    { method: "factory.project.reset", params: { project: "some-slug" }, sentence: /refuses the unscoped reset/ },
+    { method: "factory.project.delete", params: {}, sentence: /refuses the unscoped delete/ },
+    { method: "factory.project.delete", params: { projectSlug: "some-slug" }, sentence: /refuses the unscoped delete/ },
+    { method: "factory.project.delete", params: { projectRoot: "/tmp/fixture-project", seat: "agent" }, sentence: /refuses seat/ },
+    { method: "factory.project.delete", params: { projectRoot: "/tmp/fixture-project", seat: "lead" }, sentence: /refuses seat/ },
+  ];
+  for (const refused of refusals) {
+    const reply = await call(refused.method, refused.params);
+    assert.equal(reply.status, 400, `${refused.method} ${JSON.stringify(refused.params)} is narrowed off the console`);
+    const payload = reply.payload as { ok: boolean; code?: string; error?: string };
+    assert.equal(payload.ok, false);
+    assert.equal(payload.code, "forbidden_operation");
+    assert.match(payload.error ?? "", refused.sentence, "the refusal spells the narrowed act it refused");
+    assert.match(payload.error ?? "", /from the console/, "the sentence names whose door refused");
+  }
+
+  // The allowed shapes — a non-empty projectRoot — pass the narrowing and
+  // reach the handler, which then refuses for its own honest reason on this
+  // unregistered root (`unknown-project` as data with HTTP 200): the door
+  // could never have written that sentence itself.
+  for (const method of ["factory.project.reset", "factory.project.delete"]) {
+    const reply = await call(method, { projectRoot: "/tmp/door-unregistered-project" });
+    assert.equal(reply.status, 200, `${method} with its scoped input dispatches to the handler`);
+    const payload = reply.payload as { ok: boolean; code?: string; error?: string };
+    assert.equal(payload.ok, false);
+    assert.equal(payload.code, "unknown-project", `${method}'s handler refusal rides as data — the call dispatched`);
+    assert.match(payload.error ?? "", /does not resolve/, "the handler's own sentence names why it refused");
+  }
+
+  // The narrowing refuses before dispatch: the root Factory's ledger records no line.
+  assert.equal(fixture.factory.ledger.events.length, 0);
+});
+
 test("console RPC door: inputs are validated by the SHARED schema before any handler runs", async (t) => {
   const homeRoot = makeTempDir();
   const fixture = makeConsoleFixture(homeRoot);
@@ -340,6 +394,9 @@ test("console RPC door: inputs are validated by the SHARED schema before any han
     { method: "factory.vault.hydrate", params: { overwriteConfigs: 1 } }, // overwriteConfigs not a boolean
     { method: "factory.vault.import", params: { ascKeyPath: 42 } }, // a path field not a string
     { method: "factory.vault.import", params: { syncAfterImport: "yes" } }, // syncAfterImport not a boolean
+    { method: "factory.project.reset", params: { projectRoot: 42 } }, // projectRoot not a string
+    { method: "factory.project.reset", params: { keepSeats: "yes" } }, // keepSeats not a boolean
+    { method: "factory.project.delete", params: { projectRoot: "/tmp/fixture-project", seat: 7 } }, // seat not a string
   ];
   for (const call of cases) {
     const refusal = await post(started.sidecar.url + "/rpc", call);

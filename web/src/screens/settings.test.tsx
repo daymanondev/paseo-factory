@@ -167,7 +167,7 @@ describe("the Settings screen", () => {
   it("renders the heading and the honest unconfigured vault — Not configured, Never, no chips lit", () => {
     render(<SettingsScreen view={fixtureView()} />);
     expect(screen.getByRole("heading", { name: "Settings" })).toBeTruthy();
-    expect(screen.getByText("All projects · Private Vault writes")).toBeTruthy();
+    expect(screen.getByText("All projects · Private Vault + Project writes")).toBeTruthy();
     const vaultCard = screen.getByLabelText("Private vault");
     expect(screen.getByText("Not configured", { selector: "h2" })).toBeTruthy();
     expect(within(vaultCard).getAllByText("Never")).toHaveLength(2);
@@ -231,17 +231,18 @@ describe("the Settings screen", () => {
     expect(screen.getByText(/Live settings are degraded \(paseo daemon unreachable\)/)).toBeTruthy();
   });
 
-  it("carries exactly the six vault acts — never the deferred writes or a seat start (T-10b + T-10c + T-10d, ADR 0017)", () => {
+  it("carries exactly the six vault acts plus the Danger Zone pair — never a seat start (T-10b + T-10c + T-10d + T-10e, ADR 0017)", () => {
     // The configured card offers Configure, Pull, Push, Sync, Hydrate, and
-    // Import keys; the project danger zone (reset/delete — T-10e) and every
-    // seat Start/Ensure control stay absent; no dialog is open, so no textbox
-    // or input exists either.
+    // Import keys; the scoped Project's Danger Zone adds its own Reset
+    // project / Delete project pair (their type-to-confirm journeys live in
+    // settings-danger.test.tsx); every seat Start/Ensure control stays
+    // absent; no dialog is open, so no textbox or input exists either.
     const configured = render(<SettingsScreen view={richView()} />);
     for (const name of ["Configure vault", "Pull vault", "Push vault", "Sync vault", "Hydrate vault", "Import vault keys"]) {
       const button = screen.getByRole("button", { name });
       expect(button.hasAttribute("disabled"), name).toBe(false);
     }
-    for (const word of ["Reset", "Delete", "Start Supervisor", "Start Lead", "Ensure"]) {
+    for (const word of ["Start Supervisor", "Start Lead", "Ensure"]) {
       expect(screen.queryByRole("button", { name: new RegExp(word, "i") }), word).toBeNull();
     }
     expect(screen.queryAllByRole("textbox")).toEqual([]);

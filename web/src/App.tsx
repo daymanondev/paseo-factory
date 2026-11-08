@@ -20,15 +20,18 @@
  * live-seat confirm before a seated lane changes; the Integrations screen
  * (T-09a) renders the read-only plugin/skill/MCP roster, the Open Design
  * link, and the plugins-checked-at stamp from the same snapshot; the
- * Settings screen (T-10a) renders the read-only Private Vault card and the
- * scoped Project's identity from the same snapshot; the other
+ * Settings screen (T-10a + T-10e) renders the Private Vault card and the
+ * scoped Project's identity from the same snapshot, carrying the Owner's
+ * vault writes (T-10b..d) and the scoped Project's Danger Zone (T-10e — a
+ * successful delete clears the selection and returns the console to the
+ * unscoped Overview); the other
  * screens are titled placeholders landing in their own waves. No Start
  * Supervisor / Start Lead controls anywhere (ADR 0017 preserved).
  */
 import { useEffect, useState } from "react";
 import type { FactoryView } from "../../plugin/shared/view.ts";
 import { NAV_ITEMS } from "./chrome/nav.ts";
-import { useRoute } from "./router.ts";
+import { useRoute, navigate } from "./router.ts";
 import { ProjectSwitcher } from "./chrome/project-switcher.tsx";
 import { acceptViaSidecar, type AcceptReply } from "./accept.ts";
 import { taskDetailViaSidecar, type TaskDetailReply } from "./detail.ts";
@@ -147,7 +150,18 @@ export function App({
           {view !== null && screen.id === "flow" && <FlowScreen view={view} />}
           {view !== null && screen.id === "models" && <ModelsScreen view={view} onChanged={() => snapshot.refresh()} />}
           {view !== null && screen.id === "integrations" && <IntegrationsScreen view={view} onChanged={() => snapshot.refresh()} />}
-          {view !== null && screen.id === "settings" && <SettingsScreen view={view} onChanged={() => snapshot.refresh()} />}
+          {view !== null && screen.id === "settings" && (
+            <SettingsScreen
+              view={view}
+              onChanged={() => snapshot.refresh()}
+              // T-10e: a successful delete leaves nothing to scope — clear the
+              // switcher's selection and land the console on the unscoped Overview.
+              onProjectDeleted={() => {
+                setProjectRoot(undefined);
+                navigate("/");
+              }}
+            />
+          )}
           {view !== null && screen.id === "tasks" && (
             <TasksScreen view={view} acceptTask={acceptTask} onAccepted={() => snapshot.refresh()} loadTaskDetail={loadTaskDetail} />
           )}

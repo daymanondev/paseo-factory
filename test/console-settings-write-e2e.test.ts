@@ -27,10 +27,11 @@ import { makeTempDir } from "./helpers.ts";
  * includeLedgers — the confirm checkbox's checked arm) commits this node's
  * global ledger snapshot into the checkout and MOVES the bare remote's
  * branch, and the NEXT snapshot folds `Last pushed` and the clone presence;
- * and the still-deferred project danger zone (`factory.project.delete` —
- * T-10e) keeps refusing `unknown_method` as data through the same door, the
- * allowlist sentence carrying the six landed vault writes (the T-10c
- * round-trips and the T-10d key import have their own RG-1 e2e).
+ * and the T-10e Danger Zone's own narrowing answers through the same door —
+ * `factory.project.delete` with no projectRoot refuses `forbidden_operation`
+ * as data (the door's scoped-only law; the two writes' happy paths have
+ * their own RG-1 e2e in console-settings-danger-e2e.test.ts), the allowlist
+ * sentence carrying the six vault writes and the two project writes.
  */
 
 /** One git invocation against the fixture — output captured, never inherited. */
@@ -46,7 +47,7 @@ function makeBareRemote(homeRoot: string): string {
   return bare;
 }
 
-test("RG-1: the console's real transport writes the vault — configure, pull, and push land; the deferred methods refuse", async (t) => {
+test("RG-1: the console's real transport writes the vault — configure, pull, and push land; the danger zone's scoped-only law refuses", async (t) => {
   const homeRoot = makeTempDir();
   const bare = makeBareRemote(homeRoot);
   // The hybrid runner the write e2e needs: `gh` answers the deterministic
@@ -139,18 +140,32 @@ test("RG-1: the console's real transport writes the vault — configure, pull, a
   assert.equal(pushedModel.vault.cloneLabel, "Present");
   assert.notEqual(pushedModel.vault.lastHydratedLabel, "Never");
 
-  // (g) The still-deferred write through the SAME door — the project danger
-  // zone stays T-10e: it refuses unknown_method as data, and the allowlist
-  // sentence now carries the six landed vault writes (the T-10c round-trips
-  // and the T-10d key import are proven by their own RG-1 e2e).
+  // (g) The T-10e Danger Zone's narrowing through the SAME door — the two
+  // project writes are allowlisted but scoped-only: an input with no
+  // projectRoot refuses `forbidden_operation` as data BEFORE any handler
+  // runs (their happy paths have their own RG-1 e2e). The allowlist
+  // sentence itself — which now carries the six landed vault writes plus
+  // the two project writes — answers only on the door's OUTSIDE, so it is
+  // read here off a still-unlisted sibling (the Add-Project wizard door,
+  // T-12).
   const response = await fetchAt("/rpc", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ method: "factory.project.delete", params: {} }),
   });
-  assert.equal(response.status, 404, "factory.project.delete stays outside the door");
+  assert.equal(response.status, 400, "factory.project.delete refuses the unscoped delete");
   const payload = (await response.json()) as { ok: boolean; code?: string; error?: string };
   assert.equal(payload.ok, false);
-  assert.equal(payload.code, "unknown_method", "the danger zone refuses as data");
-  assert.match(payload.error ?? "", /factory\.vault\.configure, factory\.vault\.pull, factory\.vault\.push, factory\.vault\.sync, factory\.vault\.hydrate, factory\.vault\.import/, "the allowlist sentence carries the six landed vault writes");
+  assert.equal(payload.code, "forbidden_operation", "the Danger Zone's scoped-only law refuses as data");
+  assert.match(payload.error ?? "", /refuses the unscoped delete/, "the refusal names the narrowed act it refused");
+  const outside = await fetchAt("/rpc", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ method: "factory.project.add", params: {} }),
+  });
+  assert.equal(outside.status, 404, "the Add-Project wizard door stays outside");
+  const outsidePayload = (await outside.json()) as { ok: boolean; code?: string; error?: string };
+  assert.equal(outsidePayload.ok, false);
+  assert.equal(outsidePayload.code, "unknown_method");
+  assert.match(outsidePayload.error ?? "", /factory\.vault\.configure, factory\.vault\.pull, factory\.vault\.push, factory\.vault\.sync, factory\.vault\.hydrate, factory\.vault\.import, factory\.project\.reset, factory\.project\.delete/, "the allowlist sentence carries the six vault writes and the two project writes");
 });

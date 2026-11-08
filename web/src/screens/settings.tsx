@@ -1,5 +1,5 @@
 /**
- * The Settings screen (T-10a + T-10b + T-10c + T-10d, ADR 0051) — the
+ * The Settings screen (T-10a + T-10b + T-10c + T-10d + T-10e, ADR 0051) — the
  * `/settings` route: the read-only fold of T-10a (both panels from the
  * existing snapshot, the design's own settings look —
  * `design/daemon-settings.css` facts/disclosure, `design/management.css`
@@ -34,15 +34,27 @@
  * localStorage/sessionStorage/URL, cleared from component state on every
  * close. Cancel sends nothing; a success refreshes the snapshot so the
  * panel's shared-secret chips update and folds the handler's
- * importedFiles; refusals (vault-* codes) render inline as data. Still NO
- * seat start (ADR 0017), NO project reset/delete danger zone (T-10e) — and
- * no credential or passphrase text ever reaches the DOM.
+ * importedFiles; refusals (vault-* codes) render inline as data. T-10e adds
+ * the scoped Project's Danger Zone (`design/management.css`'s own
+ * `.project-danger-*` vocabulary — unscoped renders none): "Reset project"
+ * and "Delete project" behind destructive type-to-confirm dialogs whose
+ * primary (danger) button stays disabled until the Owner types the Project
+ * slug exactly — reset explains what it purges (ledger events, task state
+ * and files; seats archived unless the "Keep live seats" checkbox is
+ * checked, default checked, spelled explicitly on the wire), delete names
+ * the whole-Project removal. Both carry exactly the scoped `projectRoot`
+ * (`factory.project.reset` / `factory.project.delete` — the door refuses
+ * every other shape). A reset success refreshes the snapshot; a delete
+ * success also hands the console back to the unscoped Overview
+ * (`onProjectDeleted`). Cancel = no RPC; refusals render inline as data.
+ * Still NO seat start (ADR 0017) — and no credential or passphrase text
+ * ever reaches the DOM.
  */
 import { useState } from "react";
 import type { FactoryView } from "../../../plugin/shared/view.ts";
 import "../../../design/daemon-settings.css";
 import "../../../design/management.css";
-import { settingsScreenModel, type SettingsSecretChip } from "../settings-view.ts";
+import { settingsScreenModel, type SettingsProjectPanel, type SettingsSecretChip } from "../settings-view.ts";
 import {
   vaultConfigureViaSidecar,
   vaultHydrateViaSidecar,
@@ -63,9 +75,17 @@ import {
   type VaultSyncInput,
   type VaultSyncReply,
 } from "../vault.ts";
+import {
+  projectDeleteViaSidecar,
+  projectResetViaSidecar,
+  type ProjectDangerReply,
+  type ProjectDeleteInput,
+  type ProjectResetInput,
+} from "../project.ts";
+import { navigate } from "../router.ts";
 
 /** Any of the screen's write replies — the banner renders whichever landed, verbatim. */
-type VaultWriteReply = VaultConfigureReply | VaultPullReply | VaultPushReply | VaultSyncReply | VaultHydrateReply | VaultImportReply;
+type VaultWriteReply = VaultConfigureReply | VaultPullReply | VaultPushReply | VaultSyncReply | VaultHydrateReply | VaultImportReply | ProjectDangerReply;
 
 /** One shared-secret presence chip — the design's badge, lit green only when the secret exists. */
 function SecretChip({ chip }: { chip: SettingsSecretChip }) {
@@ -698,6 +718,127 @@ function VaultImportDialog({
   );
 }
 
+// ---- the Danger Zone confirm (T-10e) -------------------------------------------------------------------
+
+/**
+ * The one confirm BOTH Danger Zone acts pass through (the T-10b dialog law,
+ * hardened): it names the destructive act, carries the scoped Project's own
+ * identity facts, states the honest purge, and holds the TYPE-TO-CONFIRM
+ * gate — the primary (danger) button stays disabled until the Owner types
+ * the Project slug exactly. Reset also carries the "Keep live seats"
+ * checkbox, default CHECKED (unchecking archives the Project's seats with
+ * the reset), spelled EXPLICITLY on the wire — the checkbox's promise is
+ * the wire's truth, the vault confirm law. Cancel, Close, and the overlay
+ * send nothing; a refusal keeps the dialog for another try; a success
+ * closes it (the snapshot refreshes behind it — and delete hands the
+ * console to the unscoped Overview through the screen's submit wrapper).
+ */
+function ProjectDangerDialog({
+  act,
+  project,
+  submit,
+  close,
+}: {
+  act: "reset" | "delete";
+  project: SettingsProjectPanel;
+  submit: (input: ProjectResetInput | ProjectDeleteInput) => Promise<ProjectDangerReply>;
+  close: () => void;
+}) {
+  const [typed, setTyped] = useState("");
+  const [keepSeats, setKeepSeats] = useState(true);
+  const [phase, setPhase] = useState<"confirm" | "saving">("confirm");
+  const run = async () => {
+    setPhase("saving");
+    // The wire carries exactly the scoped root — plus reset's checkbox, spelled explicitly.
+    const reply = await submit(act === "reset" ? { projectRoot: project.root, keepSeats } : { projectRoot: project.root });
+    if (reply.ok) close();
+    else setPhase("confirm");
+  };
+  const isReset = act === "reset";
+  // The gate's law — the slug typed EXACTLY (a stray space or prefix keeps the button disabled).
+  const armed = typed === project.slug;
+  return (
+    <div className="console-dialog-overlay" role="presentation" onClick={phase === "saving" ? undefined : close}>
+      <div
+        className="dialog console-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label={isReset ? "Reset project now?" : "Delete project now?"}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="dialog-head">
+          <strong className="red">{isReset ? "Reset project now?" : "Delete project now?"}</strong>
+          <span className="spacer" />
+          <button type="button" className="btn ghost" onClick={close} disabled={phase === "saving"}>
+            Close
+          </button>
+        </div>
+        <div className="dialog-body">
+          <div className="compact-vault">
+            <p className="red">
+              {isReset
+                ? `Resetting ${project.name} purges this Project's Factory state — every Ledger event, task state, report, and gate log, and the tasks' worktree files. The Project, its registration, and its repository survive; the purged history does not.`
+                : `Deleting ${project.name} removes the Project from this Factory home — the registration, every Ledger event, task state, report, and gate log, the tasks' worktree files, and the Project's whole state directory. The repository on disk stays; the Factory forgets the Project.`}
+            </p>
+            <dl className="data-list">
+              <div>
+                <dt>Project</dt>
+                <dd>
+                  <strong>{project.name}</strong>
+                </dd>
+              </div>
+              <div>
+                <dt>Slug</dt>
+                <dd className="mono">{project.slug}</dd>
+              </div>
+              <div>
+                <dt>Root</dt>
+                <dd className="mono">{project.root}</dd>
+              </div>
+            </dl>
+            {isReset ? (
+              <div className="field">
+                <label>
+                  <input type="checkbox" checked={keepSeats} onChange={(event) => setKeepSeats(event.target.checked)} /> Keep live seats
+                </label>
+                <small>keepSeats — on by default; unchecking archives the Project's Supervisor and Lead seats with the reset.</small>
+              </div>
+            ) : null}
+            <div className="field">
+              <label htmlFor="project-danger-confirm">
+                Type <span className="mono">{project.slug}</span> to confirm
+              </label>
+              <input
+                id="project-danger-confirm"
+                value={typed}
+                placeholder={project.slug}
+                autoComplete="off"
+                spellCheck={false}
+                onChange={(event) => setTyped(event.target.value)}
+              />
+              <small className="red">{isReset ? "This cannot be undone — the purged Ledger events and task files are gone for good." : "This cannot be undone — the Project's whole Factory state is gone for good."}</small>
+            </div>
+            {phase === "confirm" ? (
+              <div className="dialog-actions">
+                <button type="button" className="btn ghost" onClick={close}>
+                  Cancel
+                </button>
+                <button type="button" className="btn danger" disabled={!armed} onClick={() => void run()}>
+                  {isReset ? "Reset project now" : "Delete project now"}
+                </button>
+              </div>
+            ) : (
+              <p className="small muted" role="status">
+                {isReset ? "Resetting project…" : "Deleting project…"}
+              </p>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ---- the panels --------------------------------------------------------------------------------------
 
 /** The Private Vault card — the design's own card-top + `.vault-summary` facts + `.vault-items` chips + the T-10b/T-10c/T-10d Owner acts. */
@@ -824,8 +965,25 @@ function VaultPanel({
   );
 }
 
-/** The scoped Project card — the design's project settings rows, read from the snapshot alone. */
-function ProjectPanel({ model }: { model: ReturnType<typeof settingsScreenModel> }) {
+/**
+ * The scoped Project card — the design's project settings rows, read from the
+ * snapshot alone, plus the T-10e Danger Zone (the design's own
+ * `.project-danger-*` vocabulary): the two destructive Owner acts, offered
+ * ONLY on the scoped Project — the unscoped global view renders the honest
+ * "No project selected" card and NO Danger Zone (an unscoped reset/delete
+ * is a shape the door itself refuses).
+ */
+function ProjectPanel({
+  model,
+  pending,
+  onReset,
+  onDelete,
+}: {
+  model: ReturnType<typeof settingsScreenModel>;
+  pending: boolean;
+  onReset: () => void;
+  onDelete: () => void;
+}) {
   const project = model.project;
   if (project === null) {
     return (
@@ -836,7 +994,7 @@ function ProjectPanel({ model }: { model: ReturnType<typeof settingsScreenModel>
             <h2>No project selected</h2>
           </div>
         </div>
-        <p>The console is running on the global view — choose a Project in the switcher to read its settings here. Project writes arrive in a later wave.</p>
+        <p>The console is running on the global view — choose a Project in the switcher to read its settings here. The Danger Zone acts on the scoped Project only.</p>
       </div>
     );
   }
@@ -865,7 +1023,29 @@ function ProjectPanel({ model }: { model: ReturnType<typeof settingsScreenModel>
           <dd className="setting-path mono">{project.root}</dd>
         </div>
       </dl>
-      <p className="small muted">Read-only — project writes arrive in a later wave.</p>
+      <div className="project-danger-actions" aria-label="Danger zone">
+        <div className="project-danger-heading">
+          <span>Danger zone</span>
+        </div>
+        <div className="project-danger-row">
+          <div>
+            <strong>Reset project</strong>
+            <p>Purges this Project's Ledger events, task state, and task files — the Project and its repository stay.</p>
+          </div>
+          <button type="button" className="btn ghost" aria-label="Reset project" disabled={pending} onClick={onReset}>
+            Reset project
+          </button>
+        </div>
+        <div className="project-danger-row">
+          <div>
+            <strong>Delete project</strong>
+            <p>Removes this Project from this Factory home and purges all its state.</p>
+          </div>
+          <button type="button" className="btn danger" aria-label="Delete project" disabled={pending} onClick={onDelete}>
+            Delete project
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -886,8 +1066,18 @@ export interface SettingsScreenProps {
   vaultHydrate?: (input: VaultHydrateInput) => Promise<VaultHydrateReply>;
   /** The key-import transport (T-10d) — the filled fields only, every empty one omitted from the wire. */
   vaultImport?: (input: VaultImportInput) => Promise<VaultImportReply>;
+  /** The reset transport (T-10e) — the scoped root plus the Keep live seats checkbox, spelled explicitly. */
+  projectReset?: (input: ProjectResetInput) => Promise<ProjectDangerReply>;
+  /** The delete transport (T-10e) — the scoped root alone. */
+  projectDelete?: (input: ProjectDeleteInput) => Promise<ProjectDangerReply>;
   /** Fired after a successful write — the shell refreshes the snapshot (and so the panel's stamps). */
   onChanged?: () => void;
+  /**
+   * Fired after a successful delete (T-10e) — the shell clears the scoped
+   * selection and returns the console to the unscoped Overview (the deleted
+   * Project's scope no longer exists to read).
+   */
+  onProjectDeleted?: () => void;
 }
 
 /** The sync reply's own two facts the banner appends — the core's createdRepo and whether a commit moved. */
@@ -902,6 +1092,12 @@ function importOutcomeNote(reply: VaultWriteReply): string {
   return ` (imported: ${reply.importedFiles.length > 0 ? reply.importedFiles.join(", ") : "nothing new"})`;
 }
 
+/** The Danger Zone reply's own counts the banner appends (T-10e) — the handler's purged/removed/archived facts. */
+function dangerOutcomeNote(reply: VaultWriteReply): string {
+  if (!reply.ok || !("purgedEvents" in reply)) return "";
+  return ` (purged ${reply.purgedEvents} event${reply.purgedEvents === 1 ? "" : "s"}, ${reply.tasks.length} task${reply.tasks.length === 1 ? "" : "s"} · removed ${reply.removedFiles} file${reply.removedFiles === 1 ? "" : "s"} · archived ${reply.archivedSeats.length} seat${reply.archivedSeats.length === 1 ? "" : "s"}, ${reply.archivedAgents.length} agent${reply.archivedAgents.length === 1 ? "" : "s"})`;
+}
+
 export function SettingsScreen({
   view,
   vaultConfigure = vaultConfigureViaSidecar,
@@ -910,12 +1106,15 @@ export function SettingsScreen({
   vaultSync = vaultSyncViaSidecar,
   vaultHydrate = vaultHydrateViaSidecar,
   vaultImport = vaultImportViaSidecar,
+  projectReset = projectResetViaSidecar,
+  projectDelete = projectDeleteViaSidecar,
   onChanged = () => {},
+  onProjectDeleted = () => navigate("/"),
 }: SettingsScreenProps) {
   const model = settingsScreenModel(view);
   const [pending, setPending] = useState(false);
-  /** The open dialog — "setup" (configure), "pull", "push", "sync", "hydrate", "import", or null. */
-  const [dialog, setDialog] = useState<"setup" | "pull" | "push" | "sync" | "hydrate" | "import" | null>(null);
+  /** The open dialog — "setup" (configure), "pull", "push", "sync", "hydrate", "import", "reset", "delete", or null. */
+  const [dialog, setDialog] = useState<"setup" | "pull" | "push" | "sync" | "hydrate" | "import" | "reset" | "delete" | null>(null);
   /** The last write's reply — both arms render verbatim; the dialog act closes on success. */
   const [status, setStatus] = useState<{ act: string; reply: VaultWriteReply } | null>(null);
 
@@ -933,7 +1132,7 @@ export function SettingsScreen({
       <div className="page-heading">
         <div>
           <h1>Settings</h1>
-          <p className="muted">{model.scope} · Private Vault writes</p>
+          <p className="muted">{model.scope} · Private Vault + Project writes</p>
         </div>
       </div>
       {model.daemonError !== null ? (
@@ -946,7 +1145,8 @@ export function SettingsScreen({
           <div className="console-banner console-banner-ok" role="status">
             {status.act} — {status.reply.summary}
             {syncOutcomeNote(status.reply)}
-            {importOutcomeNote(status.reply)}. Refreshing…
+            {importOutcomeNote(status.reply)}
+            {dangerOutcomeNote(status.reply)}. Refreshing…
           </div>
         ) : (
           <div className="console-banner console-banner-error" role="alert">
@@ -965,7 +1165,7 @@ export function SettingsScreen({
           onHydrate={() => setDialog("hydrate")}
           onImport={() => setDialog("import")}
         />
-        <ProjectPanel model={model} />
+        <ProjectPanel model={model} pending={pending} onReset={() => setDialog("reset")} onDelete={() => setDialog("delete")} />
       </div>
       {dialog === "setup" ? (
         <VaultSetupDialog
@@ -1015,6 +1215,29 @@ export function SettingsScreen({
         />
       ) : null}
       {dialog === "import" ? <VaultImportDialog close={() => setDialog(null)} submit={(input) => run("Importing keys", () => vaultImport(input))} /> : null}
+      {dialog === "reset" && model.project !== null ? (
+        <ProjectDangerDialog
+          act="reset"
+          project={model.project}
+          close={() => setDialog(null)}
+          submit={(input) => run("Resetting the project", () => projectReset(input as ProjectResetInput))}
+        />
+      ) : null}
+      {dialog === "delete" && model.project !== null ? (
+        <ProjectDangerDialog
+          act="delete"
+          project={model.project}
+          close={() => setDialog(null)}
+          submit={(input) =>
+            // The dialog builds exactly the delete input for act "delete"; the
+            // successful arm hands the console to the unscoped Overview.
+            run("Deleting the project", () => projectDelete(input as ProjectDeleteInput)).then((reply) => {
+              if (reply.ok) onProjectDeleted();
+              return reply;
+            })
+          }
+        />
+      ) : null}
     </section>
   );
 }
