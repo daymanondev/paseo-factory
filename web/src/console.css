@@ -459,3 +459,66 @@
   min-height: 36px;
   white-space: nowrap;
 }
+
+/* T-14c: the ⌘K command palette — the design's own command/search treatment
+   carries the layout (`design/styles.css`'s `.search-trigger` affordance in
+   the topbar and `.command-results`/`.command-result` rows, both imported
+   globally); the console adds the palette's narrower card over the shared
+   dialog overlay, the active row's highlight (the nav's own active law —
+   cyan on cyan-bg), the row's label/kind split, and the empty row's honest
+   padding. The prototype's `showCommands` JS is never ported. */
+.console-palette-trigger {
+  min-height: 36px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.console-palette-trigger kbd {
+  margin-left: 16px;
+}
+
+.console-palette {
+  width: min(520px, calc(100% - 32px));
+}
+
+.console-palette .field {
+  margin-bottom: 14px;
+}
+
+.console-palette-results {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.console-palette-row {
+  min-height: 40px;
+  cursor: pointer;
+}
+
+.console-palette-row[aria-selected="true"] {
+  border-color: #45616c;
+  background: var(--cyan-bg);
+}
+
+.console-palette-row-label {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
+.console-palette-row-kind {
+  flex: none;
+  color: var(--muted);
+}
+
+.console-palette-empty {
+  margin: 0;
+  padding: 22px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  text-align: center;
+  color: var(--muted);
+  font-size: var(--small);
+}

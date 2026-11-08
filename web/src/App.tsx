@@ -36,7 +36,11 @@
  * the door, whose success scopes the console to the new Project and lands
  * on its Overview — every screen of the eight is
  * real now; the placeholder remains only as a future screen's titled
- * fallback. No Start Supervisor / Start Lead controls anywhere (ADR 0017
+ * fallback. The ⌘K command palette (T-14c) rides above every screen —
+ * navigation only: the eight nav screens, the Project scope through the
+ * switcher's own setter, and the wizard, with no RPC of its own — and the
+ * chord stays inert while any dialog (the palette included) holds the
+ * console. No Start Supervisor / Start Lead controls anywhere (ADR 0017
  * preserved).
  */
 import { useEffect, useState } from "react";
@@ -44,6 +48,7 @@ import type { FactoryView } from "../../plugin/shared/view.ts";
 import { NAV_ITEMS } from "./chrome/nav.ts";
 import { useRoute, navigate } from "./router.ts";
 import { AddProjectDialog } from "./chrome/add-project.tsx";
+import { CommandPalette } from "./chrome/command-palette.tsx";
 import { ProjectSwitcher } from "./chrome/project-switcher.tsx";
 import { projectAddViaSidecar, projectPickFolderViaSidecar, type ProjectAddInput, type ProjectAddReply, type ProjectPickReply } from "./project.ts";
 import { acceptViaSidecar, type AcceptReply } from "./accept.ts";
@@ -125,6 +130,24 @@ export function App({
   // The Owner's Add-Project wizard (T-12) — one open flag shared by its two
   // entry points (the topbar beside the switcher, the Overview empty state).
   const [addProjectOpen, setAddProjectOpen] = useState(false);
+  // The ⌘K command palette (T-14c) — one open flag shared by the chord and
+  // the topbar affordance.
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  // The chord opens the palette anywhere in the console (macOS ⌘K, elsewhere
+  // Ctrl+K — the design's own global law), but never barges past a dialog
+  // that already holds the console: while any dialog is open — another
+  // screen's modal, the wizard, the drawer, or the palette itself — the
+  // chord does nothing (no re-open, no reset of a typed filter).
+  useEffect(() => {
+    const onKeydown = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "k") return;
+      event.preventDefault();
+      if (document.querySelector('[role="dialog"]') !== null) return;
+      setPaletteOpen(true);
+    };
+    document.addEventListener("keydown", onKeydown);
+    return () => document.removeEventListener("keydown", onKeydown);
+  }, []);
   return (
     <div className="app" id="app">
       <aside className="sidebar" aria-label="Main navigation">
@@ -161,6 +184,12 @@ export function App({
             <strong id="breadcrumb">{screen.heading}</strong>
           </div>
           <span className="spacer" />
+          {/* T-14c: the palette's visible affordance — the design's own
+              `.search-trigger` vocabulary, chord hint and all. */}
+          <button type="button" className="search-trigger console-palette-trigger" onClick={() => setPaletteOpen(true)}>
+            <span>Search commands…</span>
+            <kbd aria-hidden="true">⌘K</kbd>
+          </button>
           {/* T-12: the wizard's always-offered entry point, beside the switcher. */}
           <button type="button" className="btn ghost console-add-project" onClick={() => setAddProjectOpen(true)}>
             Add project
@@ -232,6 +261,16 @@ export function App({
             setProjectRoot(projectRoot);
             navigate("/");
           }}
+        />
+      ) : null}
+      {/* T-14c: the command palette — navigation only, fed by the nav's own
+          items, the snapshot's own Projects, and the wizard's own flag. */}
+      {paletteOpen ? (
+        <CommandPalette
+          projects={view?.projects ?? []}
+          onScopeProject={setProjectRoot}
+          onAddProject={() => setAddProjectOpen(true)}
+          close={() => setPaletteOpen(false)}
         />
       ) : null}
     </div>
