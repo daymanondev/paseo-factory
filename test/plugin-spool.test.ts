@@ -5,6 +5,8 @@ import { execSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createFactory } from "../plugin/server/core/factory.ts";
+import type { ClaimInput } from "../plugin/server/core/factory.ts";
+import type { ClaimReported } from "../src/events.ts";
 import { resolveProject } from "../plugin/server/core/project.ts";
 import { taskWorktreePath } from "../plugin/server/core/workspace.ts";
 import { projectStateDir } from "../src/index.ts";
@@ -377,7 +379,7 @@ test("peer hooks: verdicts and needs_human land peer mail; a Driver wave holds d
   });
 
   // T1's verdict lands mid-wave: the peer mail queues, but the wave holds delivery.
-  dropRequest(spoolRoot, { id: "cl-1", kind: "claim", task: "T1", sha, agent: "agent-worker-1" });
+  dropRequest(spoolRoot, { id: "cl-1", kind: "claim", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" }, task: "T1", sha, agent: "agent-worker-1" });
   await until(() => {
     assert.equal(readReply(spoolRoot, "cl-1").ok, true);
   });
@@ -394,7 +396,7 @@ test("peer hooks: verdicts and needs_human land peer mail; a Driver wave holds d
 
   // The wave's last outcome: T2's verdict closes every spawned round, and the
   // held mail flushes as ONE consolidated delivery.
-  dropRequest(spoolRoot, { id: "cl-2", kind: "claim", task: "T2", sha, agent: "agent-worker-2" });
+  dropRequest(spoolRoot, { id: "cl-2", kind: "claim", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" }, task: "T2", sha, agent: "agent-worker-2" });
   await until(() => {
     assert.equal(readReply(spoolRoot, "cl-2").ok, true);
   });
@@ -696,7 +698,7 @@ test("startSpool deduplicates pre-seeded duplicate claim files into ONE Gate att
   // each with its own id.
   const ids = ["dup-a", "dup-b", "dup-c"];
   for (const id of ids) {
-    dropRequest(spoolRoot, { id, kind: "claim", task: "DEDUP-B", sha });
+    dropRequest(spoolRoot, { id, kind: "claim", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" }, task: "DEDUP-B", sha });
   }
 
   const spool = startSpool(stateDir, factory, { pollMs: POLL_MS });
@@ -905,7 +907,7 @@ test("a turn ending at >= 128k acks its batch, locks handing_over, holds arrivin
   await until(() => {
     assert.equal(readReply(spoolRoot, "rot-spawn").ok, true);
   });
-  dropRequest(spoolRoot, { id: "rot-claim", kind: "claim", task: "T1", sha, agent: "agent-worker-1" });
+  dropRequest(spoolRoot, { id: "rot-claim", kind: "claim", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" }, task: "T1", sha, agent: "agent-worker-1" });
   await until(() => {
     assert.equal(readReply(spoolRoot, "rot-claim").ok, true);
   });
@@ -1217,8 +1219,8 @@ test("Seam 1: two Projects contract and claim the same Task id through dropped s
   writeFileSync(join(b.root, "work.txt"), "b\n");
   const shaA = gitCommitAll(a.root, "work-a");
   const shaB = gitCommitAll(b.root, "work-b");
-  dropRequest(spoolRootFor(stateDir), { id: "cl-a", kind: "claim", task: "T-01", sha: shaA, agent: "peer-a" });
-  dropRequest(spoolRootFor(stateDir), { id: "cl-b", kind: "claim", task: "T-01", sha: shaB, agent: "peer-b" });
+  dropRequest(spoolRootFor(stateDir), { id: "cl-a", kind: "claim", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" }, task: "T-01", sha: shaA, agent: "peer-a" });
+  dropRequest(spoolRootFor(stateDir), { id: "cl-b", kind: "claim", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" }, task: "T-01", sha: shaB, agent: "peer-b" });
   await until(() => {
     assert.equal(readReply(spoolRootFor(stateDir), "cl-a").verdict, "green", "project-a's claim ends green");
     assert.equal(readReply(spoolRootFor(stateDir), "cl-b").verdict, "green", "project-b's claim ends green");
@@ -1379,6 +1381,156 @@ test("Seam 1 (ADR 0053): setContract admits exactly the four SLP dispositions �
   assert.equal("disposition" in omitted, false, "an omitted disposition is recorded omitted — never a defaulted field");
 });
 
+// ---- the mandatory six-field handoff on agent_claim (ADR 0053 §4) --------------------------
+
+test("Seam 1 (ADR 0053 §4): a scout claim with the six-field handoff and no commit resolves HEAD to GREEN — ownership defaults, and the handoff rides claim_reported, the report, and the Verdict mail", async (t) => {
+  const { stateDir, slug, projectRoot, factory } = makeSpooledSurface(t);
+  const spoolRoot = spoolRootFor(stateDir);
+
+  // A read-only Contract: the Peer owes findings, not a commit (User Story 13).
+  factory.setContract({ task: "SCOUT-6F", workspace: projectRoot, gate: "true", artifact: "README.md", disposition: "scout" });
+  const head = execSync("git rev-parse HEAD", { cwd: projectRoot, encoding: "utf8" }).trim();
+
+  // The Peer's handoff: the four required fields, `ownership` omitted — the
+  // factory defaults it to "lease returned" (spec Implementation Decision 4).
+  dropRequest(spoolRoot, {
+    id: "cl-6f",
+    kind: "claim",
+    task: "SCOUT-6F",
+    handoff: {
+      outcome: "complete",
+      scope: "read README.md and src/layout.ts",
+      verification: "gate `true` ran green; nothing skipped",
+      unknowns: "none",
+    },
+  });
+  await until(() => assert.equal(readReply(spoolRoot, "cl-6f").ok, true, "the scout claim replies ok"));
+  const reply = readReply(spoolRoot, "cl-6f");
+  assert.equal(reply.verdict, "green", "the 6-field pipeline runs to a GREEN Attempt");
+  assert.equal(reply.attempt, 1);
+
+  // claim_reported carries the admitted handoff with the defaulted ownership,
+  // and the omitted commit resolved to the worktree's HEAD.
+  const claim = factory.ledger.eventsFor("SCOUT-6F").find((e): e is ClaimReported => e.event === "claim_reported");
+  assert.ok(claim, "the claim landed");
+  assert.equal(claim.sha, head, "the omitted commit resolved to the worktree's HEAD");
+  assert.deepEqual(claim.handoff, {
+    outcome: "complete",
+    scope: "read README.md and src/layout.ts",
+    verification: "gate `true` ran green; nothing skipped",
+    unknowns: "none",
+    ownership: "lease returned",
+  }, "the four required fields ride verbatim and ownership defaults to 'lease returned'");
+
+  // The report renders all six fields in PEER.md's handback order, with the
+  // Snapshot synthesized from the attempt's own facts — never Peer free text.
+  const report = readFileSync(String(reply.reportPath), "utf8");
+  const canonical = [
+    "- Outcome: complete",
+    "- Snapshot:",
+    "- Scope: read README.md and src/layout.ts",
+    "- Verification: gate `true` ran green; nothing skipped",
+    "- Unknown / risk: none",
+    "- Ownership: lease returned",
+  ];
+  const positions = canonical.map((needle) => report.indexOf(needle));
+  assert.ok(positions.every((at) => at !== -1), `all six fields render in the report:\n${report}`);
+  assert.ok(positions.every((at, i) => i === 0 || at > positions[i - 1]!), "the six fields render in the canonical order");
+  assert.ok(report.includes(head), "the Snapshot names the resolved commit");
+  assert.ok(report.includes("factory/SCOUT-6F"), "the Snapshot names the factory branch");
+
+  // The Verdict mail queued to the Lead mailbox carries the formatted handoff
+  // verbatim next to the Gate outcome (User Story 17).
+  const verdictMail = readMailbox(stateDir, slug).find((evt) => evt.type === "mail_queued" && evt.kind === "verdict");
+  assert.ok(verdictMail, "the verdict mail landed");
+  const mailText = String(verdictMail.text);
+  assert.ok(mailText.includes("GREEN"), "the mail names the Gate outcome");
+  for (const field of canonical) {
+    assert.ok(mailText.includes(field), `the verdict mail carries ${field.split(":")[0]} verbatim`);
+  }
+});
+
+test("Seam 1 (ADR 0053 §4): an incomplete six-field handoff never opens an Attempt — malformed handoffs are refused at the spool, and the factory's own admission rejects bad shapes and the engineer no-commit claim", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const root = join(dir, "repo");
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, "README.md"), "x\n");
+  gitCommitAll(root);
+  const stateDir = join(dir, "state");
+  const factory = createFactory({ stateDir });
+  // Omitted disposition reads as engineer (ADR 0053 §3) — commit stays mandatory.
+  factory.setContract({ task: "ENG-6F", workspace: root, gate: "true", artifact: "README.md" });
+  const head = execSync("git rev-parse HEAD", { cwd: root, encoding: "utf8" }).trim();
+  const spoolRoot = spoolRootFor(stateDir);
+  const spool = startSpool(stateDir, factory, { pollMs: POLL_MS });
+  t.after(() => spool.stop());
+
+  const handoff = { outcome: "complete", scope: "src/a.ts", verification: "gate green", unknowns: "none" };
+
+  // The spool refuses the request SHAPE itself — malformed JSON never reaches
+  // the factory (the ticket's ClaimRequest arm).
+  const malformed: Array<[string, Record<string, unknown>]> = [
+    ["no handoff at all", { task: "ENG-6F", sha: head }],
+    ["outcome outside the four-value enum", { task: "ENG-6F", sha: head, handoff: { ...handoff, outcome: "done" } }],
+    ["whitespace-only scope", { task: "ENG-6F", sha: head, handoff: { ...handoff, scope: "   " } }],
+    ["empty verification", { task: "ENG-6F", sha: head, handoff: { ...handoff, verification: "" } }],
+    ["missing unknowns", { task: "ENG-6F", sha: head, handoff: { outcome: "complete", scope: "s", verification: "v" } }],
+    ["present-but-empty ownership", { task: "ENG-6F", sha: head, handoff: { ...handoff, ownership: "  " } }],
+  ];
+  for (const [id, body] of malformed) {
+    dropRequest(spoolRoot, { id, kind: "claim", ...body });
+    await until(() => assert.ok(existsSync(join(spoolRoot, "replies", `${id}.json`)), `${id} replied`));
+    const reply = readReply(spoolRoot, id);
+    assert.equal(reply.ok, false, `${id} is refused`);
+    assert.equal(reply.code, "bad-request", `${id} never reaches the factory`);
+  }
+
+  // A complete handoff but no commit on an ENGINEER contract: the shape is
+  // admitted, the factory's admission refuses before any append (User Story 14).
+  dropRequest(spoolRoot, { id: "no-commit", kind: "claim", task: "ENG-6F", handoff });
+  await until(() => assert.ok(existsSync(join(spoolRoot, "replies", "no-commit.json")), "the no-commit claim replied"));
+  const refused = readReply(spoolRoot, "no-commit");
+  assert.equal(refused.ok, false);
+  assert.equal(refused.code, "invalid-claim");
+  assert.match(String(refused.message), /commit/, "the refusal names the mandatory commit");
+
+  // Nothing above opened an Attempt: no claim_reported, no gate_started.
+  assert.deepEqual(
+    factory.ledger.eventsFor("ENG-6F").map((e) => e.event),
+    ["contract_set"],
+    "the ledger slice carries the contract alone",
+  );
+
+  // The factory's own admission law for direct callers: bad handoff shapes and
+  // the missing handoff itself are invalid-claim, never a red Attempt. (The
+  // code predicate — not instanceof — matches across the mirrored core copy.)
+  const invalidClaim = (error: unknown): boolean => error instanceof Error && "code" in error && (error as { code?: string }).code === "invalid-claim";
+  for (const bad of [
+    { outcome: "finished", scope: "s", verification: "v", unknowns: "n" },
+    { ...handoff, scope: "  " },
+    { ...handoff, verification: "" },
+    { ...handoff, unknowns: " " },
+    { ...handoff, ownership: "   " },
+  ]) {
+    await assert.rejects(
+      factory.claim({ task: "ENG-6F", sha: head, handoff: bad } as unknown as ClaimInput),
+      invalidClaim,
+      `handoff ${JSON.stringify(bad)} is refused at admission`,
+    );
+  }
+  await assert.rejects(
+    factory.claim({ task: "ENG-6F", sha: head } as ClaimInput),
+    invalidClaim,
+    "a claim with no handoff at all is refused at admission",
+  );
+  assert.deepEqual(
+    factory.ledger.eventsFor("ENG-6F").map((e) => e.event),
+    ["contract_set"],
+    "still no Attempt opened",
+  );
+});
+
 test("Seam 1 (ADR 0053): the spawn-path re-contract onto a moved HEAD preserves the prior epoch's disposition", async (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);
@@ -1406,7 +1558,7 @@ test("Seam 1 (ADR 0053): the spawn-path re-contract onto a moved HEAD preserves 
   await until(() => assert.equal(readReply(spoolRootFor(stateDir), "c-b").ok, true, "the T-02 contract replies ok"));
   writeFileSync(join(root, "upstream.txt"), "landed upstream\n");
   const upstreamSha = gitCommitAll(root, "upstream work");
-  dropRequest(spoolRootFor(stateDir), { id: "cl-b", kind: "claim", task: "T-02", sha: upstreamSha });
+  dropRequest(spoolRootFor(stateDir), { id: "cl-b", kind: "claim", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" }, task: "T-02", sha: upstreamSha });
   await until(() => assert.equal(readReply(spoolRootFor(stateDir), "cl-b").verdict, "green", "T-02's claim ends green"));
   dropRequest(spoolRootFor(stateDir), { id: "ac-b", kind: "accept", task: "T-02", attempt: 1, submitter: "owner" });
   await until(() => assert.equal(readReply(spoolRootFor(stateDir), "ac-b").ok, true, "T-02 is accepted"));

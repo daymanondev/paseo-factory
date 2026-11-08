@@ -57,7 +57,7 @@ test("roadmap §2 scenario: red npm test produces the five-event ledger and a re
 
   const factory = createFactory({ stateDir });
   factory.setContract({ task: "T1", workspace, gate: "npm test", artifact: "src/format.ts" });
-  const outcome = await factory.claim({ task: "T1", sha });
+  const outcome = await factory.claim({ task: "T1", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   assert.equal(outcome.verdict, "red");
   assert.equal(outcome.gate.exit, 1);
@@ -76,7 +76,15 @@ test("roadmap §2 scenario: red npm test produces the five-event ledger and a re
     artifact: "src/format.ts",
     base: sha,
   });
-  assert.deepEqual(lineWithoutTs(lines[1]!), { seq: 2, event: "claim_reported", task: "T1", attempt: 1, sha });
+  assert.deepEqual(lineWithoutTs(lines[1]!), {
+    seq: 2,
+    event: "claim_reported",
+    task: "T1",
+    attempt: 1,
+    sha,
+    // ADR 0053 §4: the admitted six-field handoff rides the line, ownership defaulted.
+    handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n", ownership: "lease returned" },
+  });
   assert.deepEqual(lineWithoutTs(lines[2]!), { seq: 3, event: "gate_started", task: "T1", attempt: 1, cmd: "npm test" });
 
   const gate = JSON.parse(lines[3]!) as { seq: number; event: string; task: string; attempt: number; exit: number; verdict: string; note: string; sha?: string };
@@ -116,7 +124,7 @@ test("the full loop: red attempt → real fix → green attempt 2 → the Owner 
   factory.setContract({ task: "T2", workspace, gate: "npm test", artifact: "src/format.ts" });
 
   // Attempt 1: the agent claims unfinished work; the gate says red.
-  const red = await factory.claim({ task: "T2", sha: brokenSha });
+  const red = await factory.claim({ task: "T2", sha: brokenSha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   assert.equal(red.verdict, "red");
   assert.equal(red.attempt, 1);
 
@@ -133,7 +141,7 @@ test("the full loop: red attempt → real fix → green attempt 2 → the Owner 
   );
   const fixedSha = gitCommitChanges(workspace, "fix pad to truncate and pad correctly");
 
-  const green = await factory.claim({ task: "T2", sha: fixedSha });
+  const green = await factory.claim({ task: "T2", sha: fixedSha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   assert.equal(green.verdict, "green");
   assert.equal(green.attempt, 2, "the fix is a new Attempt, not an overwrite (ADR 0003)");
   const report1 = readFileSync(join(stateDir, "report-T2-1.md"), "utf8");
@@ -194,7 +202,7 @@ test("the Task worktree loop: driver-style allocation, claim inside the worktree
     ].join("\n"),
   );
   const claimed = gitCommitChanges(prepared.path, "fix pad in the worktree");
-  const outcome = await factory.claim({ task: "WTE2E", sha: claimed });
+  const outcome = await factory.claim({ task: "WTE2E", sha: claimed, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   assert.equal(outcome.verdict, "green", "the gate ran against the worktree checkout");
   assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: workspace, encoding: "utf8" }).trim(), base, "the root sat at base the whole run");
   assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: workspace, encoding: "utf8" }).trim(), "", "the root stayed clean");
@@ -279,7 +287,7 @@ test("the core barrel's prepareTaskWorktree: symlinked node_modules and .worktre
     ].join("\n"),
   );
   const claimed = gitCommitChanges(prepared.path, "fix pad inside the core-allocated worktree");
-  const outcome = await factory.claim({ task: "COREWT1", sha: claimed });
+  const outcome = await factory.claim({ task: "COREWT1", sha: claimed, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   assert.equal(outcome.verdict, "green", "the gate ran against the worktree checkout with node_modules linked");
   assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: workspace, encoding: "utf8" }).trim(), base, "the root sat at base the whole run");
 });

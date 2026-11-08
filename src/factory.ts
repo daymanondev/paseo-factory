@@ -9,7 +9,7 @@ import type { AcceptanceRole } from "./task-state.ts";
 import { existsSync, readFileSync, renameSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { Ledger, usageIsValid } from "./ledger.ts";
-import { MAX_ATTEMPTS, NEEDS_HUMAN_REASONS, needsHumanEvidenceIsValid, PEER_DISPOSITIONS } from "./events.ts";
+import { MAX_ATTEMPTS, NEEDS_HUMAN_REASONS, needsHumanEvidenceIsValid, PEER_DISPOSITIONS, PEER_HANDOFF_OUTCOMES } from "./events.ts";
 import { runGate } from "./gate.ts";
 import { artifactPathProblem } from "./artifact.ts";
 import { renderReport } from "./report.ts";
@@ -25,12 +25,48 @@ import { changedFiles, checkCleanAt, headCommitSync, landTaskWorktree, resolveCl
 import { MEMORY_FILES } from "./choke.ts";
 import { projectStateDir, readProjectNotebook, resolveProject } from "./project.ts";
 import { FactoryError } from "./errors.ts";
-import type { AttemptAccepted, ContractSet, GateFinished, GitBlocked, LedgerEvent, MeterWritten, MeterUsage, NeedsHuman, NeedsHumanEvidence, NeedsHumanReason, PeerDisposition, RepokeDispatched, RepokeRefused, RespawnDispatched, RespawnRefused, SpawnDispatched, SpawnRefused, Verdict } from "./events.ts";
+import type { AttemptAccepted, ClaimReported, ContractSet, GateFinished, GitBlocked, LedgerEvent, MeterWritten, MeterUsage, NeedsHuman, NeedsHumanEvidence, NeedsHumanReason, PeerDisposition, PeerHandoffFields, RepokeDispatched, RepokeRefused, RespawnDispatched, RespawnRefused, SpawnDispatched, SpawnRefused, Verdict } from "./events.ts";
 import type { GateResult } from "./gate.ts";
 import { LedgerAdmission } from "./history-admission.ts";
 
 /** Task ids become report filenames, so they stay flat and filename-safe. */
 const TASK_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/**
+ * The six-field handoff's admission law (ADR 0053 §4): the four Peer-authored
+ * fields must be present and non-empty after trimming, `outcome` exactly one
+ * of the four SLP values, `ownership` optional but never present-and-empty.
+ * Returns the admitted handoff with `ownership` defaulted to
+ * `"lease returned"` — the one normalized form stored on `claim_reported`.
+ */
+function admitHandoff(handoff: PeerHandoffFields | undefined): PeerHandoffFields {
+  if (handoff === undefined || handoff === null || typeof handoff !== "object") {
+    throw new FactoryError("invalid-claim", "the six-field handoff is mandatory on every claim (ADR 0053 §4) — pass `outcome`, `scope`, `verification`, and `unknowns`");
+  }
+  if (!(PEER_HANDOFF_OUTCOMES as readonly string[]).includes(handoff.outcome)) {
+    throw new FactoryError(
+      "invalid-claim",
+      `handoff \`outcome\` must be one of ${PEER_HANDOFF_OUTCOMES.join(" | ")} — got ${JSON.stringify(handoff.outcome)}`,
+    );
+  }
+  for (const field of ["scope", "verification", "unknowns"] as const) {
+    const value = handoff[field];
+    if (typeof value !== "string" || value.trim() === "") {
+      throw new FactoryError("invalid-claim", `handoff \`${field}\` is mandatory on every claim — missing or empty (ADR 0053 §4)`);
+    }
+  }
+  const ownership = handoff.ownership;
+  if (ownership !== undefined && (typeof ownership !== "string" || ownership.trim() === "")) {
+    throw new FactoryError("invalid-claim", "handoff `ownership` is optional but must be non-empty when present — omit it for the `lease returned` default (ADR 0053 §4)");
+  }
+  return {
+    outcome: handoff.outcome,
+    scope: handoff.scope,
+    verification: handoff.verification,
+    unknowns: handoff.unknowns,
+    ...(ownership === undefined ? { ownership: "lease returned" } : { ownership }),
+  };
+}
 
 export interface FactoryOptions {
   historyFault?: (boundary: "prepared" | "renamed" | "activated" | "applied") => void;
@@ -148,7 +184,19 @@ export interface ContractInput {
 
 export interface ClaimInput {
   task: string;
+  /**
+   * The claimed commit — the Peer's exact word, resolved later by the gate
+   * station. Empty means "no commit supplied": refused for `engineer`
+   * dispositions (the Claim attests an exact commit, ADR 0053 §4), resolved
+   * to the execution tree's `HEAD` for the read-only three.
+   */
   sha: string;
+  /**
+   * The Peer-authored six-field handoff (ADR 0053 §4): required at admission
+   * — `outcome`, `scope`, `verification`, and `unknowns` non-empty,
+   * `ownership` optional (defaulted to `"lease returned"` on the ledger line).
+   */
+  handoff: PeerHandoffFields;
   /** Who claimed, when the caller knows it — recorded on `claim_reported` (ticket 02b). */
   agent?: string;
 }
@@ -159,6 +207,12 @@ export interface ClaimOutcome {
   verdict: Verdict;
   gate: GateFinished;
   reportPath: string;
+  /**
+   * The handoff exactly as admitted (ownership defaulted) — the notification
+   * pipeline's one source for the six-field block it delivers to the Lead.
+   * Absent on replayed legacy outcomes whose claims predate the field.
+   */
+  handoff?: PeerHandoffFields;
 }
 
 export interface AcceptInput {
@@ -596,12 +650,33 @@ export function createFactory(options: FactoryOptions): Factory {
       });
     },
 
-    async claim({ task, sha, agent }) {
+    async claim({ task, sha, agent, handoff }) {
       assertTaskId(task);
       const contract = this.contractFor(task);
       if (!contract) throw new FactoryError("unknown-task", `no contract set for task ${task} — register one first`);
       const fullHistory = ledger.eventsFor(task);
       const history = epochEventsFor(ledger, task);
+
+      // Admission (ADR 0053 §4) — the six-field handoff law and the
+      // disposition's commit rule, both judged BEFORE any event is appended
+      // and before Station 1 runs: a malformed claim opens no Attempt.
+      const admittedHandoff = admitHandoff(handoff);
+      const disposition = contract.disposition ?? "engineer";
+      const executionDir = this.worktreeFor(task) ?? contract.workspace;
+      let claimedSha = sha.trim();
+      if (claimedSha === "") {
+        if (disposition === "engineer") {
+          throw new FactoryError(
+            "invalid-claim",
+            `the six-field handoff is complete but the claim attests no commit: \`commit\` is mandatory for the ${disposition} disposition — the Claim attests an exact commit (ADR 0053 §4)`,
+          );
+        }
+        const head = headCommitSync(executionDir);
+        if (head === undefined) {
+          throw new FactoryError("invalid-claim", `could not resolve HEAD in ${executionDir} to default the omitted commit for the ${disposition} disposition`);
+        }
+        claimedSha = head;
+      }
 
       // The watch's read of the scope station: undefined until it runs, then
       // the outside-scope files it found (empty = clean). Set where station 4
@@ -636,12 +711,21 @@ export function createFactory(options: FactoryOptions): Factory {
       }
       const completed = projectTask(fullHistory, task).attempts.findLast(
         (entry) => !entry.open && entry.gate?.verdict === "green" &&
-          (entry.gate.sha === sha || entry.events.some(event => event.event === "claim_reported" && event.sha === sha)),
+          (entry.gate.sha === claimedSha || entry.events.some(event => event.event === "claim_reported" && event.sha === claimedSha)),
       );
       if (completed?.gate !== undefined) {
         const report = completed.events.findLast((event) => event.event === "report_written");
         if (report?.event === "report_written") {
-          return { attempt: completed.attempt, verdict: "green", gate: completed.gate, reportPath: report.path };
+          // The replayed outcome is the attempt's own evidence — the admitted
+          // handoff rides it exactly as the first delivery did (ADR 0053 §4).
+          const replayedClaim = completed.events.findLast((event): event is ClaimReported => event.event === "claim_reported");
+          return {
+            attempt: completed.attempt,
+            verdict: "green",
+            gate: completed.gate,
+            reportPath: report.path,
+            ...(replayedClaim?.handoff === undefined ? {} : { handoff: replayedClaim.handoff }),
+          };
         }
       }
       if (lastAttempt >= MAX_ATTEMPTS) {
@@ -663,29 +747,31 @@ export function createFactory(options: FactoryOptions): Factory {
         contract,
         eyeBudgetMs: options.eyeBudgetMs,
         eyeRunner: options.eyeCliRunner,
+        handoff: admittedHandoff,
       };
+
+      ledger.append({
+        event: "claim_reported",
+        task,
+        attempt,
+        sha: claimedSha,
+        handoff: admittedHandoff,
+        ...(agent === undefined || agent.trim() === "" ? {} : { agent }),
+      });
+      ledger.append({ event: "gate_started", task, attempt, cmd: contract.gate });
 
       // The execution tree (v0.0.14, ADR 0010 §4): a task spawned with a
       // managed Task worktree claims, gates, and diffs THERE — the Contract's
       // workspace stays <project-root>, the recorded home of the work and the
       // landing target; the worktree is the driver-level execution detail the
       // spawn line carries. Legacy spawns (no worktree on the line) execute
-      // at the contract workspace, v0.0.5's law.
-      const executionDir = this.worktreeFor(task) ?? contract.workspace;
-
-      ledger.append({
-        event: "claim_reported",
-        task,
-        attempt,
-        sha,
-        ...(agent === undefined || agent.trim() === "" ? {} : { agent }),
-      });
-      ledger.append({ event: "gate_started", task, attempt, cmd: contract.gate });
+      // at the contract workspace, v0.0.5's law. `executionDir` was fixed at
+      // admission — the omitted-commit default needs it before any append.
 
       // Station 1 — the claimed commit must exist as one full object. An empty,
       // unknown or ambiguous sha is a red Verdict (ADR 0002), and the gate
       // command never runs on an unverified tree.
-      const resolved = await resolveClaimedCommit(executionDir, sha);
+      const resolved = await resolveClaimedCommit(executionDir, claimedSha);
       if (!resolved.ok) {
         return finish(finishCtx, attempt, { exit: null, verdict: "red", note: resolved.reason, timedOut: false }, undefined, watchContext());
       }
@@ -1525,9 +1611,11 @@ async function finish(
     stateDir: string;
     /** Where the data files land: the project dir when project-scoped, the root otherwise. */
     dataDir: string;
-    contract: ContractSet;
-    eyeBudgetMs: number | undefined;
-    eyeRunner: LaneCliRunner | undefined;
+  contract: ContractSet;
+  eyeBudgetMs: number | undefined;
+  eyeRunner: LaneCliRunner | undefined;
+  /** The admitted handoff (ADR 0053 §4) — rides the outcome for the notification pipeline. */
+  handoff: PeerHandoffFields;
   },
   attempt: number,
   result: GateResult,
@@ -1607,7 +1695,7 @@ async function finish(
     });
   }
   const reportPath = writeAttemptReport(task, attempt, ledger, dataDir);
-  return { attempt, verdict: result.verdict, gate, reportPath };
+  return { attempt, verdict: result.verdict, gate, reportPath, handoff: ctx.handoff };
 }
 
 /** V2 evidence belongs to a stable Contract epoch; legacy paths remain usable. */

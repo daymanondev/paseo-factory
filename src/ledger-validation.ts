@@ -1,5 +1,5 @@
 import { scrumBindingIsValid } from "./scrum/types.ts";
-import { eventAllowsUnboundEpoch, LEDGER_REFERENCE_KINDS, EVENT_NAMES, NEEDS_HUMAN_REASONS, needsHumanEvidenceIsValid, PEER_DISPOSITIONS } from "./events.ts";
+import { eventAllowsUnboundEpoch, LEDGER_REFERENCE_KINDS, EVENT_NAMES, NEEDS_HUMAN_REASONS, needsHumanEvidenceIsValid, PEER_DISPOSITIONS, PEER_HANDOFF_OUTCOMES } from "./events.ts";
 import type { LedgerEvent } from "./events.ts";
 
 /** Legacy records remain readable. V2 requires identities and a file-level writer fence. */
@@ -209,6 +209,20 @@ export function usageIsValid(usage: unknown): boolean {
   return true;
 }
 
+/**
+ * ADR 0053 §4: the six-field handoff rides `claim_reported` when the claim
+ * carried one — absent on pre-0053 lines, shaped when present (the four
+ * Peer-authored fields strings, `outcome` one of the four SLP values,
+ * `ownership` an optional string; the factory's own admission is stricter).
+ */
+function handoffIsValid(handoff: unknown): boolean {
+  if (handoff === undefined) return true;
+  if (typeof handoff !== "object" || handoff === null || Array.isArray(handoff)) return false;
+  const fields = handoff as Record<string, unknown>;
+  return typeof fields.outcome === "string" && (PEER_HANDOFF_OUTCOMES as readonly string[]).includes(fields.outcome) &&
+    ["scope", "verification", "unknowns", "ownership"].every((key) => fields[key] === undefined || typeof fields[key] === "string");
+}
+
 /** Identified history promises typed evidence; legacy readers retain their historical shape contract. */
 function v2PayloadIsValid(event: Record<string, unknown>): boolean {
   const string = (key: string) => typeof event[key] === "string";
@@ -229,7 +243,7 @@ function v2PayloadIsValid(event: Record<string, unknown>): boolean {
       strings("scope") && strings("skills") && optionalString("base") && optionalString("description") && optionalString("by") &&
       (event.freshEyes === undefined || event.freshEyes === true) && (event.watch === undefined || event.watch === true) &&
       (event.disposition === undefined || (PEER_DISPOSITIONS as readonly string[]).includes(event.disposition as string));
-    case "claim_reported": return string("sha") && optionalString("agent");
+    case "claim_reported": return string("sha") && optionalString("agent") && handoffIsValid(event.handoff);
     case "gate_started": return string("cmd");
     case "gate_finished": return (event.exit === null || Number.isSafeInteger(event.exit)) &&
       (event.verdict === "red" || event.verdict === "green") &&

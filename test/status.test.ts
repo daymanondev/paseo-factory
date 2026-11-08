@@ -90,14 +90,14 @@ test("status tracks a whole loop: contract → red claim → green claim → acc
 
   // Attempt 1: a claim whose sha resolves to nothing is red before the gate
   // even runs — so this attempt has no attested sha to show.
-  const red = await run(claimCli, ["--task", "LOOP9", "--sha", "deadbeef", "--wait-secs", "60"], agentEnv);
+  const red = await run(claimCli, ["--task", "LOOP9", "--sha", "deadbeef", "--outcome", "complete", "--scope", "s", "--verification", "v", "--unknowns", "none", "--wait-secs", "60"], agentEnv);
   assert.equal(red.status, 1, `expected red\nstdout: ${red.stdout}\nstderr: ${red.stderr}`);
   const afterRed = await run(ownerCli, ["status"], ownerEnv);
   assert.equal(afterRed.status, 0, afterRed.stderr);
   assert.equal(establishedFields(afterRed.stdout), "LOOP9 attempts=1 verdict=red sha=- accepted=no eye=- choke=0/0/0\n");
 
   // Attempt 2: the real commit — green, and the verdict attests it (short sha).
-  const green = await run(claimCli, ["--task", "LOOP9", "--sha", baseSha, "--wait-secs", "60"], agentEnv);
+  const green = await run(claimCli, ["--task", "LOOP9", "--sha", baseSha, "--outcome", "complete", "--scope", "s", "--verification", "v", "--unknowns", "none", "--wait-secs", "60"], agentEnv);
   assert.equal(green.status, 0, `expected green\nstdout: ${green.stdout}\nstderr: ${green.stderr}`);
   const afterGreen = await run(ownerCli, ["status"], ownerEnv);
   assert.equal(afterGreen.status, 0, afterGreen.stderr);

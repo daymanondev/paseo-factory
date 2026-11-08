@@ -98,7 +98,7 @@ try {
   step("agent claims the broken commit — expect RED (exit 1)");
   const red = run(
     process.execPath,
-    [join(repoRoot, "plugin", "bin", "factory-claim.mjs"), "--task", task, "--sha", brokenSha],
+    [join(repoRoot, "plugin", "bin", "factory-claim.mjs"), "--task", task, "--outcome", "complete", "--scope", "battery arm", "--verification", "battery gate", "--unknowns", "none", "--sha", brokenSha],
     agentEnv,
     1,
     "factory-claim (broken)",
@@ -123,7 +123,7 @@ try {
   const fixedSha = git(["rev-parse", "HEAD"]).stdout.trim();
   const green = run(
     process.execPath,
-    [join(repoRoot, "plugin", "bin", "factory-claim.mjs"), "--task", task, "--sha", fixedSha],
+    [join(repoRoot, "plugin", "bin", "factory-claim.mjs"), "--task", task, "--outcome", "complete", "--scope", "battery arm", "--verification", "battery gate", "--unknowns", "none", "--sha", fixedSha],
     agentEnv,
     0,
     "factory-claim (fixed)",

@@ -88,7 +88,7 @@ test("specialist Contracts default artifacts and durably own task decisions and 
   writeFileSync(join(repo, "src/farm.ts"), "export const farm = true;\n");
   writeFileSync(join(repo, ".scratch/farm/decisions/dev.jsonl"), '{"id":"D1","rationale":"bounded implementation"}\n');
   const sha = gitCommitChanges(repo, "Dev implementation and decision log");
-  const claim = await handleSpoolRequest(factory, { id: "dev-claim", kind: "claim", task: "dev", sha });
+  const claim = await handleSpoolRequest(factory, { id: "dev-claim", kind: "claim", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" }, task: "dev", sha });
   assert.ok(claim.ok, JSON.stringify(claim));
   assert.equal(claim.verdict, "green", JSON.stringify(claim));
 });
@@ -115,7 +115,7 @@ test("Scrum spool lifecycle records accepted QA evidence, promotion and verified
   const evidenceRun = { command: "node --test", exit: 0, firstAttempt: true, fixtureId: "first", environment: "node", seed: "1", tests: 3, passed: 3, skipped: 0, expectedFailures: 0, evidence: [{ path: logPath, sha256: sha256(log) }] };
   writeFileSync(join(repo, reportPath), JSON.stringify({ schemaVersion: 1, auditId: "audit", productSha, status: "clean", baseline: evidenceRun, runs: [evidenceRun, { ...evidenceRun, fixtureId: "second" }], testIds: ["crop"], requirementRefs: ["R1"], designRefs: [], lenses: ["intent-alignment", "blind-hunter", "edge-case-hunter", "verification-gap"], findings: [], bundles: [], activeSuite: true }));
   const sha = gitCommitChanges(repo, "QA fixture evidence");
-  const claim = await factory.claim({ task: "audit", sha }); assert.equal(claim.verdict, "green", claim.gate.note);
+  const claim = await factory.claim({ task: "audit", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } }); assert.equal(claim.verdict, "green", claim.gate.note);
   await factory.accept({ task: "audit", attempt: claim.attempt, authority: "owner", accepted_by: "owner" });
   run = commandRun(state, project.slug, run.runId, { type: "readiness_recorded", requestId: "ready", expectedRevision: run.revision, readiness: { refs: [], contradictions: [], unsafeAssumptions: [], missingCoverage: [], rationale: "Existing-product audit fixture" } });
   const { CorrelationRegistry } = await import("../plugin/server/core/correlations.ts");
@@ -158,7 +158,7 @@ test("design.submit resolves a named accepted UX artifact and replays frozen def
     writeFileSync(join(repo, prefix, path), bytes);
   }
   const sha = gitCommitChanges(repo, "UX evidence fixture");
-  const claim = await factory.claim({ task: "ux", sha }); assert.equal(claim.verdict, "green", claim.gate.note);
+  const claim = await factory.claim({ task: "ux", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } }); assert.equal(claim.verdict, "green", claim.gate.note);
   await factory.accept({ task: "ux", attempt: claim.attempt, authority: "owner", accepted_by: "owner" });
   const { CorrelationRegistry } = await import("../plugin/server/core/correlations.ts");
   const lead = new CorrelationRegistry(state).issue({ role: "lead", projectSlug: project.slug, projectRoot: repo });

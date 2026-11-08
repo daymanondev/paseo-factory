@@ -55,7 +55,7 @@ test("Claim checks nested Artifacts, missing targets and directory symlinks agai
       const factory = createFactory({ stateDir: join(dir, "state") });
       factory.setContract({ task: "ARTIFACT", workspace, artifact, gate: "true" });
 
-      assert.equal((await factory.claim({ task: "ARTIFACT", sha })).verdict, verdict);
+      assert.equal((await factory.claim({ task: "ARTIFACT", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } })).verdict, verdict);
     });
   }
 });
@@ -75,7 +75,7 @@ test("Claim inspects the Artifact produced by the Gate at completion", async (t)
     gate: `mkdir evidence && ln -s '${outside}' evidence/artifact.txt`,
   });
 
-  assert.equal((await factory.claim({ task: "GENERATED", sha })).verdict, "red");
+  assert.equal((await factory.claim({ task: "GENERATED", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } })).verdict, "red");
   const gate = factory.ledger.eventsFor("GENERATED").find((event) => event.event === "gate_finished");
   assert.ok(gate?.event === "gate_finished");
   assert.match(gate.note, /artifact.*outside.*Workspace/i);
@@ -103,7 +103,7 @@ test("managed Claims contain Artifacts in the Task worktree rather than the Proj
   ] as const) {
     factory.setContract({ task: "ARTIFACT", workspace, artifact, gate: "true" });
     assert.equal(factory.requestSpawn({ task: "ARTIFACT", provider: "claude", arity: 1, worktree }).outcome, "dispatched");
-    assert.equal((await factory.claim({ task: "ARTIFACT", sha })).verdict, verdict, artifact);
+    assert.equal((await factory.claim({ task: "ARTIFACT", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } })).verdict, verdict, artifact);
   }
 });
 
@@ -119,7 +119,7 @@ test("Claim rejects an Artifact whose symlink resolves to an external file", asy
   const factory = createFactory({ stateDir: join(dir, "state") });
   factory.setContract({ task: "SYMLINK", workspace, artifact: "artifact.txt", gate: "true" });
 
-  const result = await factory.claim({ task: "SYMLINK", sha });
+  const result = await factory.claim({ task: "SYMLINK", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   assert.equal(result.verdict, "red");
   const gate = factory.ledger.eventsFor("SYMLINK").find((event) => event.event === "gate_finished");

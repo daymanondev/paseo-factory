@@ -155,7 +155,7 @@ test("the digest: per-task blocks, parade roll-up, denials verbatim, red gate lo
   // Attempt 1: red with real gate output — its log attaches to the red attempt.
   writeFileSync(join(workspace, artifact), "export function pad(input: string): string {\n  return input;\n}\n");
   const red = gitCommitChanges(workspace, "pad without tests");
-  const redOutcome = await factory.claim({ task: "DIG", sha: red, agent: "agent-dig" });
+  const redOutcome = await factory.claim({ task: "DIG", sha: red, agent: "agent-dig", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   assert.equal(redOutcome.verdict, "red");
   // A watch line the marked contract would have produced — answers verbatim, including a failed one elsewhere.
   factory.ledger.append({
@@ -188,7 +188,7 @@ test("the digest: per-task blocks, parade roll-up, denials verbatim, red gate lo
     'import { pad } from "./format.ts";\nimport assert from "node:assert/strict";\nimport test from "node:test";\n\ntest("pad", () => {\n  assert.equal(pad("ab", 4), "ab  ");\n});\n',
   );
   const green = gitCommitChanges(workspace, "pad, implemented and tested");
-  const greenOutcome = await factory.claim({ task: "DIG", sha: green, agent: "agent-dig" });
+  const greenOutcome = await factory.claim({ task: "DIG", sha: green, agent: "agent-dig", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   assert.equal(greenOutcome.verdict, "green");
   const accepted = await factory.accept({ task: "DIG", attempt: 2 });
 
@@ -648,7 +648,7 @@ test("a happy retro: file first, one written line, R-ids assigned in ratificatio
 
   factory.setContract({ task: "R1", workspace, gate: "true", artifact, description: "Do the work." });
   const claimed = commitWork(workspace, artifact);
-  await factory.claim({ task: "R1", sha: claimed, agent: "agent-r1" });
+  await factory.claim({ task: "R1", sha: claimed, agent: "agent-r1", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   const outcome = await factory.retro();
   assert.equal(outcome.outcome, "written");
@@ -712,7 +712,7 @@ test("a parse failure retries once inside the same clock and succeeds (divergenc
   const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: fake.runner });
   factory.setContract({ task: "R2", workspace, gate: "true", artifact });
   const claimed = commitWork(workspace, artifact);
-  await factory.claim({ task: "R2", sha: claimed, agent: "agent-r2" });
+  await factory.claim({ task: "R2", sha: claimed, agent: "agent-r2", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   const outcome = await factory.retro();
   assert.equal(outcome.outcome, "written", "a malformed answer failed the parse, the retry landed clean");
@@ -810,7 +810,7 @@ test("refusals write no line: copilot unusable, and a same-day successful retro"
   const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: fake.runner });
   factory.setContract({ task: "R6", workspace, gate: "true", artifact });
   const claimed = commitWork(workspace, artifact);
-  await factory.claim({ task: "R6", sha: claimed, agent: "agent-r6" });
+  await factory.claim({ task: "R6", sha: claimed, agent: "agent-r6", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   const first = await factory.retro();
   assert.equal(first.outcome, "written");
 
@@ -857,7 +857,7 @@ test("handleSpoolRequest: retro replies with the count and path, or refuses on t
   const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: fake.runner });
   factory.setContract({ task: "S1", workspace, gate: "true", artifact });
   const claimed = commitWork(workspace, artifact);
-  await factory.claim({ task: "S1", sha: claimed, agent: "agent-s1" });
+  await factory.claim({ task: "S1", sha: claimed, agent: "agent-s1", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   const written = await handleSpoolRequest(factory, { id: "q1", kind: "retro" });
   assert.ok(written.ok, "the retro round-trips");
@@ -919,7 +919,7 @@ test("factory retro through the real CLI and spool: exit 0, count + path on stdo
   t.after(() => spool.stop());
   factory.setContract({ task: "CLI1", workspace, gate: "true", artifact });
   const claimed = commitWork(workspace, artifact);
-  await factory.claim({ task: "CLI1", sha: claimed, agent: "agent-cli1" });
+  await factory.claim({ task: "CLI1", sha: claimed, agent: "agent-cli1", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   const ownerEnv = { PASEO_HOME: home };
 
   const first = await run(ownerCli, ["retro"], ownerEnv);
@@ -951,7 +951,7 @@ test("v0.0.13: the retro reads its lane from lanes.json — a claude lane dispat
   const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: happyRunner().runner });
   factory.setContract({ task: "R9", workspace, gate: "true", artifact });
   const claimed = commitWork(workspace, artifact);
-  await factory.claim({ task: "R9", sha: claimed, agent: "agent-r9" });
+  await factory.claim({ task: "R9", sha: claimed, agent: "agent-r9", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   const outcome = await factory.retro();
   assert.equal(outcome.outcome, "written");
@@ -976,7 +976,7 @@ test("v0.0.13: the retro runner seam records the lane's command — claude -p, t
   const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: fake.runner });
   factory.setContract({ task: "R10", workspace, gate: "true", artifact });
   const claimed = commitWork(workspace, artifact);
-  await factory.claim({ task: "R10", sha: claimed, agent: "agent-r10" });
+  await factory.claim({ task: "R10", sha: claimed, agent: "agent-r10", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   await factory.retro();
   assert.equal(fake.calls.length, 1);

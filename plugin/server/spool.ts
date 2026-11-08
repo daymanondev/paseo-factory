@@ -40,9 +40,10 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameS
 import { dirname, join, resolve } from "node:path";
 import { FactoryError } from "./core/errors.ts";
 import { usageIsValid } from "./core/ledger.ts";
-import { needsHumanEvidenceIsValid, NEEDS_HUMAN_REASONS, PEER_DISPOSITIONS } from "./core/events.ts";
+import { needsHumanEvidenceIsValid, NEEDS_HUMAN_REASONS, PEER_DISPOSITIONS, PEER_HANDOFF_OUTCOMES } from "./core/events.ts";
+import { handoffLines } from "./core/report.ts";
 import type { Factory } from "./core/factory.ts";
-import type { LedgerEvent, MeterUsage, NeedsHumanEvidence, NeedsHumanReason, PeerDisposition, Verdict } from "./core/events.ts";
+import type { LedgerEvent, MeterUsage, NeedsHumanEvidence, NeedsHumanReason, PeerDisposition, PeerHandoffFields, Verdict } from "./core/events.ts";
 import { CorrelationRegistry, readCorrelations } from "./core/correlations.ts";
 import { loadLanes, parseLane } from "./core/lanes.ts";
 import { listProjectRegistrations, readProjectRegistration, resolveProject, writeProjectRegistration } from "./core/project.ts";
@@ -120,7 +121,18 @@ export interface ClaimRequest {
   id: string;
   kind: "claim";
   task: string;
-  sha: string;
+  /**
+   * The claimed commit — optional since ADR 0053 §4: omitted is valid only
+   * for the read-only dispositions (the factory resolves the execution
+   * tree's HEAD) and refused for `engineer` at admission.
+   */
+  sha?: string;
+  /**
+   * The mandatory six-field handoff (ADR 0053 §4): the four required
+   * Peer-authored fields, validated at parse so malformed JSON never reaches
+   * the factory; `ownership` optional.
+   */
+  handoff: PeerHandoffFields;
   /** Who submitted, when the daemon stamps it on the agent's env — for the spool log, not the ledger. */
   agent?: string;
   seat?: SpoolSeat;
@@ -663,9 +675,31 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     };
   }
   if (req.kind === "claim") {
-    if (typeof req.task !== "string" || typeof req.sha !== "string") return undefined;
+    if (typeof req.task !== "string") return undefined;
+    // The commit is optional since ADR 0053 §4 (read-only dispositions claim
+    // at the worktree's HEAD), but a present one must be a string.
+    if (req.sha !== undefined && typeof req.sha !== "string") return undefined;
     if (req.agent !== undefined && typeof req.agent !== "string") return undefined;
-    return { id: req.id, kind: "claim", task: req.task, sha: req.sha, ...(req.agent === undefined ? {} : { agent: req.agent }), ...projectSlugField };
+    // The six-field handoff is part of the request's shape (ADR 0053 §4): the
+    // four required fields non-empty strings, `outcome` exactly one of the
+    // four SLP values, `ownership` an optional non-empty string — malformed
+    // JSON never reaches the factory.
+    const handoff = req.handoff as Record<string, unknown> | undefined;
+    if (handoff === undefined || handoff === null || typeof handoff !== "object" || Array.isArray(handoff)) return undefined;
+    if (typeof handoff.outcome !== "string" || !(PEER_HANDOFF_OUTCOMES as readonly string[]).includes(handoff.outcome)) return undefined;
+    for (const field of ["scope", "verification", "unknowns"] as const) {
+      if (typeof handoff[field] !== "string" || (handoff[field] as string).trim() === "") return undefined;
+    }
+    if (handoff.ownership !== undefined && (typeof handoff.ownership !== "string" || (handoff.ownership as string).trim() === "")) return undefined;
+    return {
+      id: req.id,
+      kind: "claim",
+      task: req.task,
+      ...(req.sha === undefined ? {} : { sha: req.sha }),
+      handoff: handoff as unknown as PeerHandoffFields,
+      ...(req.agent === undefined ? {} : { agent: req.agent }),
+      ...projectSlugField,
+    };
   }
   if (req.kind === "accept") {
     if (typeof req.task !== "string" || typeof req.attempt !== "number" || !Number.isInteger(req.attempt)) return undefined;
@@ -1580,7 +1614,8 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         priorSeq: factory.ledger.events.at(-1)?.seq ?? 0,
         completion: factory.claim({
           task: request.task,
-          sha: request.sha,
+          sha: request.sha ?? "",
+          handoff: request.handoff,
           ...(request.agent === undefined ? {} : { agent: request.agent }),
         }),
       });
@@ -1607,12 +1642,23 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         // The peer hook (v0.0.20, ADR 0013 §4): a verdict is a terminal Task
         // outcome the Project's Lead must hear — the hook appends `mail_queued`
         // (`from: "peer"`) on the owning Project's lane, held while a Driver
-        // wave is in flight. It never rejects; a notification failure must not
-        // break the verdict's own reply.
+        // wave is in flight. Since ADR 0053 §4 the notification carries the
+        // Peer's six-field handoff verbatim next to the Gate outcome, so the
+        // Lead judges the engineering assumptions alongside the mechanical
+        // proof (User Story 17). It never rejects; a notification failure must
+        // not break the verdict's own reply.
         await peerMailHook?.({
           task: request.task,
           kind: "verdict",
-          text: `Task ${request.task} attempt ${outcome.attempt} ended ${outcome.verdict.toUpperCase()}${outcome.gate.note === "" ? "" : ` — note: ${outcome.gate.note}`}`,
+          text:
+            `Task ${request.task} attempt ${outcome.attempt} ended ${outcome.verdict.toUpperCase()}${outcome.gate.note === "" ? "" : ` — note: ${outcome.gate.note}`}` +
+            (outcome.handoff === undefined
+              ? ""
+              : `\n6-Field Handoff:\n${handoffLines(outcome.handoff, {
+                  sha: outcome.gate.sha ?? (request.sha ?? ""),
+                  branch: `factory/${request.task}`,
+                  dir: factory.worktreeFor(request.task) ?? contract?.workspace ?? "",
+                }).join("\n")}`),
         });
       }
       return {

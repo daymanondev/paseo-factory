@@ -799,6 +799,7 @@ var EVENT_NAMES = [
   "retro_written"
 ];
 var PEER_DISPOSITIONS = ["engineer", "architect", "reviewer", "scout"];
+var PEER_HANDOFF_OUTCOMES = ["complete", "partial", "blocked", "reopen"];
 var LEDGER_REFERENCE_KINDS = { denial: "permit_denied", repoke: "repoke_dispatched", gate: "gate_finished", spawn: "spawn_dispatched", respawn: "respawn_dispatched" };
 function eventAllowsUnboundEpoch(kind) {
   return kind === "spawn_refused" || kind === "respawn_refused" || kind === "repoke_refused";
@@ -948,6 +949,12 @@ function usageIsValid(usage) {
   }
   return true;
 }
+function handoffIsValid(handoff) {
+  if (handoff === void 0) return true;
+  if (typeof handoff !== "object" || handoff === null || Array.isArray(handoff)) return false;
+  const fields = handoff;
+  return typeof fields.outcome === "string" && PEER_HANDOFF_OUTCOMES.includes(fields.outcome) && ["scope", "verification", "unknowns", "ownership"].every((key) => fields[key] === void 0 || typeof fields[key] === "string");
+}
 function v2PayloadIsValid(event) {
   const string = (key) => typeof event[key] === "string";
   const optionalString = (key) => event[key] === void 0 || string(key);
@@ -967,7 +974,7 @@ function v2PayloadIsValid(event) {
     case "contract_set":
       return (event.execution === void 0 || scrumBindingIsValid(event.execution)) && string("workspace") && string("gate") && string("artifact") && strings("scope") && strings("skills") && optionalString("base") && optionalString("description") && optionalString("by") && (event.freshEyes === void 0 || event.freshEyes === true) && (event.watch === void 0 || event.watch === true) && (event.disposition === void 0 || PEER_DISPOSITIONS.includes(event.disposition));
     case "claim_reported":
-      return string("sha") && optionalString("agent");
+      return string("sha") && optionalString("agent") && handoffIsValid(event.handoff);
     case "gate_started":
       return string("cmd");
     case "gate_finished":
@@ -1399,13 +1406,19 @@ var sharedTools = {
   },
   agent_claim: {
     name: "agent_claim",
-    description: "Submit a Claim for your bound Task in the Task worktree. Runs the Contract's Gate and returns the Verdict (`GREEN` or `RED`) and report.",
+    description: "Submit a Claim for your bound Task in the Task worktree with the mandatory 6-Field Handoff (`outcome`, `scope`, `verification`, `unknowns`, optional `ownership`). Runs the Contract's Gate and returns the Verdict (`GREEN` or `RED`) and report.",
     inputSchema: {
       type: "object",
       properties: {
         task: { type: "string", description: "Optional Task ID (defaults to your bound correlation Task)." },
-        commit: { type: "string", description: "Optional git commit SHA (defaults to `git rev-parse HEAD` in the Task worktree)." }
-      }
+        commit: { type: "string", description: "Optional git commit SHA (defaults to `git rev-parse HEAD` in the Task worktree); mandatory for engineer-disposition Tasks." },
+        outcome: { type: "string", enum: ["complete", "partial", "blocked", "reopen"], description: "6-Field Handoff: where the work stands (ADR 0053)." },
+        scope: { type: "string", description: "6-Field Handoff: files changed or read, with paths." },
+        verification: { type: "string", description: "6-Field Handoff: commands run, real output summary, and what was deliberately skipped." },
+        unknowns: { type: "string", description: '6-Field Handoff: assumptions stood on, open risks, or "none".' },
+        ownership: { type: "string", description: '6-Field Handoff: optional ownership note (defaults to "lease returned").' }
+      },
+      required: ["outcome", "scope", "verification", "unknowns"]
     }
   },
   agent_escalate_blocker: {
@@ -1591,7 +1604,23 @@ async function handleToolCall(name, rawArgs) {
     const git = bridgePrimitives.resolveRealGitBinary(ctx.stateDir);
     if (name === "lead_verify") {
       const commit = args.commit ?? execFileSync(git, ["rev-parse", "HEAD"], { cwd: existsSync(worktree) ? worktree : contract.workspace, encoding: "utf8", timeout: GIT_TIMEOUT_MS }).trim();
-      const reply = await roundTripSpool(ctx, { id: randomId(), kind: "claim", task, sha: commit, agent: ctx.agentId ?? ctx.correlationId ?? "lead" });
+      // ADR 0053 §4: every claim carries the six-field handoff — the Lead's
+      // mechanical re-verification is no Peer handoff, and says so honestly
+      // instead of forging one.
+      const reply = await roundTripSpool(ctx, {
+        id: randomId(),
+        kind: "claim",
+        task,
+        sha: commit,
+        handoff: {
+          outcome: "complete",
+          scope: "lead_verify re-run of the Contract Gate at the requested commit",
+          verification: "mechanical re-verification by the Lead — no Peer handoff on this claim",
+          unknowns: "none",
+          ownership: "lead verification (lead_verify)",
+        },
+        agent: ctx.agentId ?? ctx.correlationId ?? "lead",
+      });
       return toolResult(JSON.stringify(reply), !reply.ok || reply.verdict === "red");
     }
     const result = bridgePrimitives.removeTaskWorktree(ctx.stateDir, contract, task, events);
@@ -2066,6 +2095,27 @@ async function handleToolCall(name, rawArgs) {
     if (task === "") {
       return toolResult("agent_claim requires `task` (or a task-bound correlation token).", true);
     }
+    // The mandatory 6-Field Handoff (ADR 0053 §4): judged here first so the
+    // Peer gets the missing field by name without a spool round trip — the
+    // spool's parse and the factory's admission enforce the same law again.
+    const HANDOFF_OUTCOMES = ["complete", "partial", "blocked", "reopen"];
+    const stringField = (value) => (typeof value === "string" ? value.trim() : "");
+    const outcome = stringField(args.outcome);
+    if (outcome === "") {
+      return toolResult("agent_claim requires the 6-Field Handoff field `outcome` (complete | partial | blocked | reopen) — the handoff is mandatory on every claim (ADR 0053).", true);
+    }
+    if (!HANDOFF_OUTCOMES.includes(outcome)) {
+      return toolResult(`agent_claim \`outcome\` must be one of ${HANDOFF_OUTCOMES.join(" | ")} — got ${JSON.stringify(outcome)}.`, true);
+    }
+    for (const field of ["scope", "verification", "unknowns"]) {
+      if (stringField(args[field]) === "") {
+        return toolResult(`agent_claim requires the 6-Field Handoff field \`${field}\` — the handoff is mandatory on every claim (ADR 0053).`, true);
+      }
+    }
+    const ownership = typeof args.ownership === "string" ? args.ownership : undefined;
+    if (ownership !== undefined && ownership.trim() === "") {
+      return toolResult("agent_claim `ownership` is optional but must be non-empty when present — omit it for the `lease returned` default.", true);
+    }
     const rawCommit = typeof args.commit === "string" && args.commit.trim() !== "" ? args.commit.trim() : typeof args.sha === "string" && args.sha.trim() !== "" ? args.sha.trim() : "";
     let sha = rawCommit;
     if (sha === "") {
@@ -2089,6 +2139,13 @@ async function handleToolCall(name, rawArgs) {
       kind: "claim",
       task,
       sha,
+      handoff: {
+        outcome,
+        scope: stringField(args.scope),
+        verification: stringField(args.verification),
+        unknowns: stringField(args.unknowns),
+        ...(ownership === undefined ? {} : { ownership }),
+      },
       ...(ctx.agentId ? { agent: ctx.agentId } : ctx.correlationId ? { agent: ctx.correlationId } : {}),
     });
     if (!reply.ok) return toolResult(`${reply.code}: ${reply.message}`, true);

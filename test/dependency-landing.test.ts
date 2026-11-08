@@ -34,7 +34,7 @@ function install(cwd: string, value = "verified dependencies") {
 test("accept hydrates missing root dependencies from the verified real installation before cleanup", async (t) => {
   const { factory, task, workspace, worktree, claimed } = landingFixture(t);
   install(worktree);
-  assert.equal((await factory.claim({ task, sha: claimed })).verdict, "green");
+  assert.equal((await factory.claim({ task, sha: claimed, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } })).verdict, "green");
   assert.equal((await factory.accept({ task, attempt: 1 })).landing, "landed");
   assert.equal(readFileSync(join(workspace, "node_modules", "sentinel"), "utf8"), "verified dependencies");
   assert.equal(lstatSync(join(workspace, "node_modules")).isSymbolicLink(), false);
@@ -46,7 +46,7 @@ test("accept replaces a stale root installation with the verified dependencies",
   const destination = install(workspace, "old dependencies");
   install(worktree);
   utimesSync(destination, new Date(0), new Date(0));
-  assert.equal((await factory.claim({ task, sha: claimed })).verdict, "green");
+  assert.equal((await factory.claim({ task, sha: claimed, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } })).verdict, "green");
   assert.equal((await factory.accept({ task, attempt: 1 })).landing, "landed");
   assert.equal(readFileSync(join(destination, "sentinel"), "utf8"), "verified dependencies");
   assert.equal(existsSync(worktree), false);
@@ -56,7 +56,7 @@ test("accept replaces a dangling root dependency symlink", async (t) => {
   const { dir, factory, task, workspace, worktree, claimed } = landingFixture(t);
   symlinkSync(join(dir, "missing-dependencies"), join(workspace, "node_modules"), "dir");
   install(worktree);
-  assert.equal((await factory.claim({ task, sha: claimed })).verdict, "green");
+  assert.equal((await factory.claim({ task, sha: claimed, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } })).verdict, "green");
   assert.equal((await factory.accept({ task, attempt: 1 })).landing, "landed");
   assert.equal(readFileSync(join(workspace, "node_modules", "sentinel"), "utf8"), "verified dependencies");
   assert.equal(lstatSync(join(workspace, "node_modules")).isSymbolicLink(), false);
@@ -67,7 +67,7 @@ test("dependency hydration failure retains the verified worktree and acceptance 
   const destination = join(workspace, "node_modules");
   writeFileSync(destination, "obstructed destination");
   install(worktree);
-  assert.equal((await factory.claim({ task, sha: claimed })).verdict, "green");
+  assert.equal((await factory.claim({ task, sha: claimed, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } })).verdict, "green");
   const pending = await factory.accept({ task, attempt: 1 });
   assert.equal(pending.landing, "pending-conflict");
   assert.match(factory.ledger.eventsFor(task).findLast((event) => event.event === "attempt_accepted")?.landingNote ?? "", /dependency hydration failed.*worktree retained/);
@@ -88,7 +88,7 @@ test("accept replaces only a stale root symlink and preserves its external targe
   utimesSync(oldDeps, new Date(0), new Date(0));
   symlinkSync(oldDeps, join(workspace, "node_modules"), "dir");
   install(worktree);
-  assert.equal((await factory.claim({ task, sha: claimed })).verdict, "green");
+  assert.equal((await factory.claim({ task, sha: claimed, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } })).verdict, "green");
   assert.equal((await factory.accept({ task, attempt: 1 })).landing, "landed");
   assert.equal(lstatSync(join(workspace, "node_modules")).isSymbolicLink(), false);
   assert.equal(readFileSync(join(workspace, "node_modules", "sentinel"), "utf8"), "verified dependencies");
@@ -100,7 +100,7 @@ test("accept preserves a fresh root installation", async (t) => {
   const destination = install(workspace, "fresh root dependencies");
   install(worktree);
   utimesSync(destination, new Date("2100-01-01"), new Date("2100-01-01"));
-  assert.equal((await factory.claim({ task, sha: claimed })).verdict, "green");
+  assert.equal((await factory.claim({ task, sha: claimed, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } })).verdict, "green");
   assert.equal((await factory.accept({ task, attempt: 1 })).landing, "landed");
   assert.equal(readFileSync(join(destination, "sentinel"), "utf8"), "fresh root dependencies");
 });
@@ -110,7 +110,7 @@ test("accept never hydrates an inherited worktree dependency symlink", async (t)
   const destination = install(workspace, "shared root dependencies");
   utimesSync(destination, new Date(0), new Date(0));
   symlinkSync(destination, join(worktree, "node_modules"), "dir");
-  assert.equal((await factory.claim({ task, sha: claimed })).verdict, "green");
+  assert.equal((await factory.claim({ task, sha: claimed, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } })).verdict, "green");
   assert.equal((await factory.accept({ task, attempt: 1 })).landing, "landed");
   assert.equal(readFileSync(join(destination, "sentinel"), "utf8"), "shared root dependencies");
   assert.equal(lstatSync(destination).mtimeMs, 0);

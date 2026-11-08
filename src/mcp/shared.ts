@@ -156,13 +156,19 @@ export const sharedTools: Record<string, ToolDefinition> = {
   agent_claim: {
     name: "agent_claim",
     description:
-      "Submit a Claim for your bound Task in the Task worktree. Runs the Contract's Gate and returns the Verdict (`GREEN` or `RED`) and report.",
+      "Submit a Claim for your bound Task in the Task worktree with the mandatory 6-Field Handoff (`outcome`, `scope`, `verification`, `unknowns`, optional `ownership`). Runs the Contract's Gate and returns the Verdict (`GREEN` or `RED`) and report.",
     inputSchema: {
       type: "object",
       properties: {
         task: { type: "string", description: "Optional Task ID (defaults to your bound correlation Task)." },
-        commit: { type: "string", description: "Optional git commit SHA (defaults to `git rev-parse HEAD` in the Task worktree)." },
+        commit: { type: "string", description: "Optional git commit SHA (defaults to `git rev-parse HEAD` in the Task worktree); mandatory for engineer-disposition Tasks." },
+        outcome: { type: "string", enum: ["complete", "partial", "blocked", "reopen"], description: "6-Field Handoff: where the work stands (ADR 0053)." },
+        scope: { type: "string", description: "6-Field Handoff: files changed or read, with paths." },
+        verification: { type: "string", description: "6-Field Handoff: commands run, real output summary, and what was deliberately skipped." },
+        unknowns: { type: "string", description: "6-Field Handoff: assumptions stood on, open risks, or \"none\"." },
+        ownership: { type: "string", description: "6-Field Handoff: optional ownership note (defaults to \"lease returned\")." },
       },
+      required: ["outcome", "scope", "verification", "unknowns"],
     },
   },
   agent_escalate_blocker: {

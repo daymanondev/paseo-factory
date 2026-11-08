@@ -102,6 +102,29 @@ export type EventName = (typeof EVENT_NAMES)[number];
 export const PEER_DISPOSITIONS = ["engineer", "architect", "reviewer", "scout"] as const;
 export type PeerDisposition = (typeof PEER_DISPOSITIONS)[number];
 
+/**
+ * The four SLP handoff outcomes (ADR 0053 §4) — the Peer's own one-word
+ * summary of where the work stands when the lease goes back.
+ */
+export const PEER_HANDOFF_OUTCOMES = ["complete", "partial", "blocked", "reopen"] as const;
+export type PeerHandoffOutcome = (typeof PEER_HANDOFF_OUTCOMES)[number];
+
+/**
+ * The Peer-authored half of the six-field handoff (ADR 0053 §4, spec lines
+ * 66-77): `outcome`, `scope`, `verification`, and `unknowns` are required and
+ * non-empty at admission; `ownership` is optional and defaults to
+ * `"lease returned"`. The sixth field — `Snapshot` — is never Peer-supplied:
+ * it is synthesized at render time from the attempt's own ledger facts (the
+ * resolved commit, the `factory/<task>` branch, the Task worktree).
+ */
+export interface PeerHandoffFields {
+  outcome: PeerHandoffOutcome;
+  scope: string;
+  verification: string;
+  unknowns: string;
+  ownership?: string;
+}
+
 /** Assigned by the ledger at append time — ISO 8601 UTC (ADR 0003). */
 export type Timestamp = string;
 
@@ -206,6 +229,14 @@ export interface ClaimReported extends EventIdentityMetadata {
    * with the agent id; direct CLI claims carry no spool, so no agent).
    */
   agent?: string;
+  /**
+   * The Peer's six-field handoff (ADR 0053 §4): the four required fields
+   * verbatim plus `ownership` defaulted to `"lease returned"` by admission.
+   * Optional on the line so pre-0053 claims stay valid on read; required at
+   * admission from this change on. `snapshot` is never stored here — it is
+   * synthesized from the attempt's own ledger facts at render time.
+   */
+  handoff?: PeerHandoffFields;
 }
 
 export interface GateStarted extends EventIdentityMetadata {

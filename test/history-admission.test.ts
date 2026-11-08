@@ -61,7 +61,7 @@ for (const station of ["Fresh-eyes", "Watch", "Retro"] as const) {
     writeLanes(stateDir, { freshEyes: "claude/example", watch: "claude/example", retro: "claude/example" });
     factory.setContract({ task: "LOCAL", workspace, gate: "true", artifact: "artifact.txt", scope: ["local"], ...(station === "Fresh-eyes" ? { freshEyes: true } : station === "Watch" ? { watch: true } : {}) });
     const handlers = createSurfaceHandlers({ factory, stateDir, home: dir, daemon: {} as SurfaceDaemonApi });
-    const operation = station === "Retro" ? handlers.retro({}) : handleSpoolRequest(factory, { id: "claim", kind: "claim", task: "LOCAL", sha, agent: "peer" });
+    const operation = station === "Retro" ? handlers.retro({}) : handleSpoolRequest(factory, { id: "claim", kind: "claim", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" }, task: "LOCAL", sha, agent: "peer" });
     try {
       await entered.promise;
       const reply = await handlers.historyImport({ sources });
@@ -194,7 +194,7 @@ test("independent Gates stay concurrent and their real external Spool continuati
   const choke = createChoke({ factory, homeDir: dir });
   const spool = startSpool(stateDir, factory, { pollMs: 10, ask: choke.spoolAskHandler });
   t.after(() => spool.stop());
-  const claims = Promise.all([handleSpoolRequest(factory, { id: "gate-one", kind: "claim", task: "LOCAL", sha }), factory.claim({ task: "OTHER", sha })]);
+  const claims = Promise.all([handleSpoolRequest(factory, { id: "gate-one", kind: "claim", task: "LOCAL", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } }), factory.claim({ task: "OTHER", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } })]);
   await entered.promise;
   const staged = factory.history.stage(sources);
   assert.equal(staged.status, "pending");
@@ -215,7 +215,7 @@ test("acceptance keeps its lease through shared executor workspace cleanup", { t
   const { executeAcceptance } = await import("../plugin/server/commands.ts");
   const project = resolveProject(workspace); assert.ok(project.ok); if (!project.ok) return;
   writeProjectRegistration(stateDir, project.slug, { root: workspace, taskWorkspaces: { LOCAL: "workspace-id" } });
-  const claim = await factory.claim({ task: "LOCAL", sha });
+  const claim = await factory.claim({ task: "LOCAL", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   assert.equal(claim.verdict, "green");
   const entered = deferred(), resume = deferred();
   const operation = executeAcceptance(factory, { task: "LOCAL", attempt: claim.attempt }, { authority: "owner", daemon: { workspaces: { archive: async () => { entered.resolve(); await resume.promise; } } } as never, home: dir, cleanup: async () => ({}) as never });

@@ -127,7 +127,7 @@ test("Lead contracts default to Gate-only claims regardless of eye availability 
   for (const [task, caller] of [["SEAT", { seat: "lead" as const }], ["BY", { by: "lead" }]] as const) {
     const contract = factory.setContract({ task, workspace, gate: "true", artifact, ...caller });
     assert.equal(contract.freshEyes, undefined);
-    assert.equal((await factory.claim({ task, sha: contract.base! })).verdict, "green");
+    assert.equal((await factory.claim({ task, sha: contract.base!, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } })).verdict, "green");
     assert.equal(factory.ledger.eventsFor(task).some((event) => event.event === "fresh_eyes_written"), false);
     assert.equal((await factory.accept({ task, attempt: 1, accepted_by: "lead", authority: "lead" })).accepted_by, "lead");
   }
@@ -145,7 +145,7 @@ test("a green marked claim runs the eye: ledger order, event fields, gate log, r
   const contract = factory.setContract({ task: "FE4", workspace, gate: "echo gate-ran", artifact, freshEyes: true });
   assert.ok(contract.base, "the eye's diff range is recorded at contract time (R2)");
   const claimed = commitFix(workspace, artifact);
-  const outcome = await factory.claim({ task: "FE4", sha: claimed, agent: "agent-fe4" });
+  const outcome = await factory.claim({ task: "FE4", sha: claimed, agent: "agent-fe4", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   assert.equal(outcome.verdict, "green");
 
   // Ticket 03 §2's exact closing-window order.
@@ -212,7 +212,7 @@ test("a CLEAR answer lands as clear — the countable noise flag", async (t) => 
   const factory = createFactory({ stateDir });
   factory.setContract({ task: "FE5", workspace, gate: "true", artifact, freshEyes: true });
   const claimed = commitFix(workspace, artifact);
-  await factory.claim({ task: "FE5", sha: claimed });
+  await factory.claim({ task: "FE5", sha: claimed, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   assert.equal(eyeEvent(factory, "FE5").outcome, "clear");
   assert.equal(eyeEvent(factory, "FE5").finding, "nothing to add.");
@@ -229,7 +229,7 @@ test("a red verdict never calls the eye — green only, by construction", async 
   const factory = createFactory({ stateDir });
   factory.setContract({ task: "FE6", workspace, gate: "exit 1", artifact, freshEyes: true });
   const claimed = commitFix(workspace, artifact);
-  const outcome = await factory.claim({ task: "FE6", sha: claimed });
+  const outcome = await factory.claim({ task: "FE6", sha: claimed, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   assert.equal(outcome.verdict, "red");
   assert.equal(fake.requests.length, 0, "the eye is never asked about a red attempt");
@@ -250,7 +250,7 @@ test("an unmarked contract behaves exactly like 0.0.1 — no eye.json needed, no
 
   factory.setContract({ task: "FE7", workspace, gate: "true", artifact });
   const claimed = commitFix(workspace, artifact);
-  const outcome = await factory.claim({ task: "FE7", sha: claimed });
+  const outcome = await factory.claim({ task: "FE7", sha: claimed, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   assert.equal(outcome.verdict, "green");
   assert.ok(!factory.ledger.eventsFor("FE7").some((e) => e.event === "fresh_eyes_written"));
@@ -270,7 +270,7 @@ test("eye.json is re-read per pass: rotating the model needs no restart", async 
   factory.setContract({ task: "FE8", workspace, gate: "true", artifact, freshEyes: true });
   writeEyeConfig(stateDir, fake.url, "eye-after-rotation"); // rotated between contract and claim
   const claimed = commitFix(workspace, artifact);
-  await factory.claim({ task: "FE8", sha: claimed });
+  await factory.claim({ task: "FE8", sha: claimed, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   assert.equal(eyeEvent(factory, "FE8").model, "eye-after-rotation");
   assert.equal((fake.requests[0]?.body as { model?: string }).model, "eye-after-rotation");
@@ -291,7 +291,7 @@ test("a 429 then a 200: exactly one retry, and it succeeds", async (t) => {
   const factory = createFactory({ stateDir });
   factory.setContract({ task: "FE9", workspace, gate: "true", artifact, freshEyes: true });
   const claimed = commitFix(workspace, artifact);
-  const outcome = await factory.claim({ task: "FE9", sha: claimed });
+  const outcome = await factory.claim({ task: "FE9", sha: claimed, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   assert.equal(fake.requests.length, 2, "one transient retry");
   assert.equal(eyeEvent(factory, "FE9").outcome, "clear");
@@ -309,7 +309,7 @@ test("a 401 is never retried: one call, a visible failed line, verdict and accep
   const factory = createFactory({ stateDir });
   factory.setContract({ task: "FE10", workspace, gate: "true", artifact, freshEyes: true });
   const claimed = commitFix(workspace, artifact);
-  const outcome = await factory.claim({ task: "FE10", sha: claimed });
+  const outcome = await factory.claim({ task: "FE10", sha: claimed, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   assert.equal(outcome.verdict, "green", "a dead eye never touches the verdict");
   assert.equal(fake.requests.length, 1, "auth failures get no retry storm");
@@ -335,7 +335,7 @@ test("a 5xx twice is a failed line, not a hang", async (t) => {
   const factory = createFactory({ stateDir });
   factory.setContract({ task: "FE11", workspace, gate: "true", artifact, freshEyes: true });
   const claimed = commitFix(workspace, artifact);
-  await factory.claim({ task: "FE11", sha: claimed });
+  await factory.claim({ task: "FE11", sha: claimed, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   assert.equal(fake.requests.length, 2, "5xx is transient: one retry, then the record");
   const eye = eyeEvent(factory, "FE11");
@@ -355,7 +355,7 @@ test("an unreachable eye fails visibly after its single retry", async (t) => {
   const factory = createFactory({ stateDir });
   factory.setContract({ task: "FE12", workspace, gate: "true", artifact, freshEyes: true });
   const claimed = commitFix(workspace, artifact);
-  const outcome = await factory.claim({ task: "FE12", sha: claimed });
+  const outcome = await factory.claim({ task: "FE12", sha: claimed, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   assert.equal(outcome.verdict, "green");
   const eye = eyeEvent(factory, "FE12");
@@ -375,7 +375,7 @@ test("the budget covers both tries: a hanging eye is cut off and recorded", asyn
   factory.setContract({ task: "FE13", workspace, gate: "true", artifact, freshEyes: true });
   const claimed = commitFix(workspace, artifact);
   const started = Date.now();
-  const outcome = await factory.claim({ task: "FE13", sha: claimed });
+  const outcome = await factory.claim({ task: "FE13", sha: claimed, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   const wall = Date.now() - started;
 
   assert.ok(wall < 10_000, `the closing window stayed near the budget (took ${wall}ms)`);
@@ -396,7 +396,7 @@ test("an answer that ignores the output contract is a failed pass, never a guess
   const factory = createFactory({ stateDir });
   factory.setContract({ task: "FE14", workspace, gate: "true", artifact, freshEyes: true });
   const claimed = commitFix(workspace, artifact);
-  await factory.claim({ task: "FE14", sha: claimed });
+  await factory.claim({ task: "FE14", sha: claimed, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   const eye = eyeEvent(factory, "FE14");
   assert.equal(eye.outcome, "failed");
@@ -421,7 +421,7 @@ test("oversized diff and gate output are tail-capped with [truncated] markers", 
     `export const first = "DIFF-START";\n${"const filler = 2;\n".repeat(9000)}\nexport const last = "DIFF-END";\n`,
   );
   const claimed = gitCommitChanges(workspace, "big change");
-  await factory.claim({ task: "FE15", sha: claimed });
+  await factory.claim({ task: "FE15", sha: claimed, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   const prompt = promptOf(fake);
   const diffSection = prompt.slice(prompt.indexOf("## The diff"), prompt.indexOf("## The gate"));
@@ -493,7 +493,7 @@ test("v0.0.13: a CLI lane runs the eye headless and tool-less — no eye.json, n
 
   factory.setContract({ task: "FE13", workspace, gate: "true", artifact, freshEyes: true });
   const claimed = commitFix(workspace, artifact);
-  const outcome = await factory.claim({ task: "FE13", sha: claimed, agent: "agent-fe13" });
+  const outcome = await factory.claim({ task: "FE13", sha: claimed, agent: "agent-fe13", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   assert.equal(outcome.verdict, "green");
 
   const eye = eyeEvent(factory, "FE13");
@@ -517,7 +517,7 @@ test("v0.0.13: an existing eye.json keeps answering when lanes.json never named 
 
   factory.setContract({ task: "FE14", workspace, gate: "true", artifact, freshEyes: true });
   const claimed = commitFix(workspace, artifact);
-  await factory.claim({ task: "FE14", sha: claimed, agent: "agent-fe14" });
+  await factory.claim({ task: "FE14", sha: claimed, agent: "agent-fe14", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   assert.equal(fakeEyeServer.requests.length, 1, "the legacy direct-API path ran, untouched");
   assert.equal(eyeEvent(factory, "FE14").model, "legacy-eye-1");
@@ -537,7 +537,7 @@ test("v0.0.13: an explicit lanes.freshEyes overrides an existing eye.json, and '
   const factoryCli = createFactory({ stateDir, eyeCliProbe: () => true, eyeCliRunner: cli.runner });
   factoryCli.setContract({ task: "FE15", workspace, gate: "true", artifact, freshEyes: true });
   const claimed = commitFix(workspace, artifact);
-  await factoryCli.claim({ task: "FE15", sha: claimed, agent: "agent-fe15" });
+  await factoryCli.claim({ task: "FE15", sha: claimed, agent: "agent-fe15", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   assert.equal(fakeEyeServer.requests.length, 0, "the explicit lane bypassed the HTTP eye");
   assert.equal(cli.calls[0]!.command, "pi");
   assert.equal(eyeEvent(factoryCli, "FE15").model, "pi/zai/glm-5.3");
@@ -551,7 +551,7 @@ test("v0.0.13: an explicit lanes.freshEyes overrides an existing eye.json, and '
   factoryEye.setContract({ task: "FE16", workspace, gate: "true", artifact, freshEyes: true });
   writeFileSync(join(workspace, artifact), "export function pad(input: string): string {\n  return input.trim();\n}\n");
   const claimed2 = gitCommitChanges(workspace, "implement pad differently — a second real change");
-  await factoryEye.claim({ task: "FE16", sha: claimed2, agent: "agent-fe16" });
+  await factoryEye.claim({ task: "FE16", sha: claimed2, agent: "agent-fe16", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   assert.equal(fakeEyeServer.requests.length, 1, "the named eye.json lane ran the direct-API path");
   assert.equal(eyeEvent(factoryEye, "FE16").model, "legacy-eye-1");
 });
@@ -567,7 +567,7 @@ test("v0.0.13: a CLI-lane eye that breaks the output contract is an honest faile
 
   factory.setContract({ task: "FE17", workspace, gate: "true", artifact, freshEyes: true });
   const claimed = commitFix(workspace, artifact);
-  const outcome = await factory.claim({ task: "FE17", sha: claimed, agent: "agent-fe17" });
+  const outcome = await factory.claim({ task: "FE17", sha: claimed, agent: "agent-fe17", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
 
   assert.equal(outcome.verdict, "green", "a failed eye never touches the verdict");
   const eye = eyeEvent(factory, "FE17");
@@ -588,7 +588,7 @@ test("Lead eligibility ignores legacy review state, but acceptance waits for the
   const answer = new Promise<{ code: number; stdout: string; stderr: string; timedOut: boolean }>((resolve) => { complete = resolve; });
   const factory = createFactory({ stateDir, eyeCliProbe: () => true, eyeCliRunner: async () => { entered(); return answer; } });
   factory.setContract({ task: "REVIEW", workspace, gate: "true", artifact, freshEyes: true });
-  const claiming = factory.claim({ task: "REVIEW", sha: commitFix(workspace, artifact) });
+  const claiming = factory.claim({ task: "REVIEW", sha: commitFix(workspace, artifact), handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   try {
     await reviewing;
     const view = foldTasks(factory.ledger.events)[0]!;
@@ -615,7 +615,7 @@ test("restart preserves green evidence but represents missing required review as
   const before = createFactory({ stateDir, eyeCliProbe: () => true, eyeCliRunner: async () => ({ code: 0, stdout: "CLEAR\nNothing to add.", stderr: "", timedOut: false }) });
   before.setContract({ task: "RESTART-EYE", workspace, gate: "true", artifact, freshEyes: true });
   const sha = commitFix(workspace, artifact);
-  await before.claim({ task: "RESTART-EYE", sha });
+  await before.claim({ task: "RESTART-EYE", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   assert.equal(foldTasks(before.ledger.events)[0]!.leadEligible, true);
   before.setContract({ task: "RESTART-EYE", workspace, gate: "true", artifact, freshEyes: true });
   // Durable crash fixture: Gate finished, daemon stopped during required review.
@@ -643,7 +643,7 @@ test("Owner acceptance waits for the in-flight report even with GREEN evidence",
   const paused = new Promise<void>((resolve) => { complete = resolve; });
   const factory = createFactory({ stateDir, eyeCliProbe: () => true, eyeCliRunner: async () => { entered(); await paused; return { code: 0, stdout: "CONCERN\nOwner must decide.", stderr: "", timedOut: false }; } });
   factory.setContract({ task: "OVERRIDE-EYE", workspace, gate: "true", artifact, freshEyes: true });
-  const claiming = factory.claim({ task: "OVERRIDE-EYE", sha: commitFix(workspace, artifact) });
+  const claiming = factory.claim({ task: "OVERRIDE-EYE", sha: commitFix(workspace, artifact), handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   try {
     await reviewing;
     await assert.rejects(factory.accept({ task: "OVERRIDE-EYE", attempt: 1, accepted_by: "owner", authority: "owner" }), factoryErrorCode("gate-running"));
@@ -668,7 +668,7 @@ for (const [label, result] of [
     writeLanes(stateDir, { freshEyes: "claude/opus-4-8" });
     const factory = createFactory({ stateDir, eyeCliProbe: () => true, eyeCliRunner: async () => result });
     factory.setContract({ task: "FAILED-EYE", workspace, gate: "true", artifact, freshEyes: true });
-    assert.equal((await factory.claim({ task: "FAILED-EYE", sha: commitFix(workspace, artifact) })).verdict, "green");
+    assert.equal((await factory.claim({ task: "FAILED-EYE", sha: commitFix(workspace, artifact), handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } })).verdict, "green");
     const view = foldTasks(factory.ledger.events)[0]!;
     assert.equal(view.leadEligible, true);
     assert.equal(view.ownerEligible, true);

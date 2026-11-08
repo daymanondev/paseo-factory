@@ -41,12 +41,27 @@ async function until(assertion: () => void, ms = 5000): Promise<void> {
 }
 
 test("parseSpoolRequest accepts exactly the three request shapes and nothing else", () => {
-  assert.deepEqual(parseSpoolRequest({ id: "r1", kind: "claim", task: "T1", sha: "abc" }), {
-    id: "r1",
-    kind: "claim",
-    task: "T1",
-    sha: "abc",
-  });
+  assert.deepEqual(
+    parseSpoolRequest({ id: "r1", kind: "claim", task: "T1", sha: "abc", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } }),
+    {
+      id: "r1",
+      kind: "claim",
+      task: "T1",
+      sha: "abc",
+      handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" },
+    },
+  );
+  // ADR 0053 §4: the commit is optional on the shape — the factory judges its
+  // absence by the Contract's disposition; `ownership` rides when given.
+  assert.deepEqual(
+    parseSpoolRequest({ id: "r1", kind: "claim", task: "T1", handoff: { outcome: "partial", scope: "s", verification: "v", unknowns: "n", ownership: "note" } }),
+    {
+      id: "r1",
+      kind: "claim",
+      task: "T1",
+      handoff: { outcome: "partial", scope: "s", verification: "v", unknowns: "n", ownership: "note" },
+    },
+  );
   assert.deepEqual(parseSpoolRequest({ id: "r1", kind: "accept", task: "T1", attempt: 2, submitter: "owner" }), {
     id: "r1",
     kind: "accept",
@@ -102,7 +117,14 @@ test("parseSpoolRequest accepts exactly the three request shapes and nothing els
     { id: "r1" },
     { id: "r1", kind: "teleport" },
     { id: "r1", kind: "claim" },
-    { id: "r1", kind: "claim", task: "T1", sha: 7 },
+    { id: "r1", kind: "claim", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" }, task: "T1", sha: 7 },
+    // ADR 0053 §4: the six-field handoff is part of the claim's shape — a
+    // claim without one, or with a field outside the law, never reaches the
+    // factory.
+    { id: "r1", kind: "claim", task: "T1", sha: "abc" },
+    { id: "r1", kind: "claim", task: "T1", sha: "abc", handoff: { outcome: "done", scope: "s", verification: "v", unknowns: "n" } },
+    { id: "r1", kind: "claim", task: "T1", sha: "abc", handoff: { outcome: "complete", scope: "  ", verification: "v", unknowns: "n" } },
+    { id: "r1", kind: "claim", task: "T1", sha: "abc", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n", ownership: "  " } },
     { id: "r1", kind: "accept", task: "T1", attempt: "2" },
     // v0.0.9: an Owner act without a submitter is malformed — the spool
     // never defaults an unstamped contract or accept to anyone.
@@ -110,7 +132,7 @@ test("parseSpoolRequest accepts exactly the three request shapes and nothing els
     { id: "r1", kind: "contract", task: "T1", workspace: "/w", gate: "true", artifact: "a" },
     { id: "r1", kind: "contract", task: "T1", workspace: "/w", gate: "true", artifact: "a", submitter: "  " },
     { id: "r1", kind: "accept", task: "T1", attempt: 2, submitter: 7 },
-    { kind: "claim", task: "T1", sha: "abc" },
+    { kind: "claim", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" }, task: "T1", sha: "abc" },
     { id: "r1", kind: "contract", task: "T1", workspace: "/w", gate: "true", artifact: "a", submitter: "owner", freshEyes: "yes" },
     { id: "r1", kind: "contract", task: "T1", workspace: "/w", gate: "true", artifact: "a", submitter: "owner", freshEyes: 1 },
   ]) {
@@ -168,7 +190,7 @@ test("the v0.0.9 stamps ride both Owner acts onto their ledger lines (ADR 0006)"
 
   // One green attempt, then the delegated accept names itself as `accepted_by`
   // — "the Ledger always records who accepted".
-  await factory.claim({ task: "STAMP1", sha: head });
+  await factory.claim({ task: "STAMP1", sha: head, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   const accepted = await handleSpoolRequest(factory, { id: "r2", kind: "accept", task: "STAMP1", attempt: 1, submitter: "agent-supervisor-1" });
   assert.equal(accepted.ok, true);
   if (accepted.ok) assert.match(accepted.summary, /by agent-supervisor-1/);
@@ -195,7 +217,7 @@ test("handleSpoolRequest turns factory errors into rejected replies, never throw
   disposeDir(t, dir);
   const factory = createFactory({ stateDir: join(dir, "state") });
 
-  const rejected = await handleSpoolRequest(factory, { id: "r1", kind: "claim", task: "T404", sha: "abc" });
+  const rejected = await handleSpoolRequest(factory, { id: "r1", kind: "claim", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" }, task: "T404", sha: "abc" });
   assert.equal(rejected.ok, false);
   if (!rejected.ok) assert.equal(rejected.code, "unknown-task");
 });
@@ -546,9 +568,9 @@ test("handleSpoolRequest answers respawn (with event on both outcomes) and forma
   }
 
   // Now run 3 red Attempts and submit attempt-ceiling needs_human.
-  await factory.claim({ task: "RSP-SP", sha: head });
-  await factory.claim({ task: "RSP-SP", sha: head });
-  const a3 = await factory.claim({ task: "RSP-SP", sha: head });
+  await factory.claim({ task: "RSP-SP", sha: head, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
+  await factory.claim({ task: "RSP-SP", sha: head, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
+  const a3 = await factory.claim({ task: "RSP-SP", sha: head, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   const nhCeiling = await handleSpoolRequest(factory, {
     id: "nh2",
     kind: "needs_human",
@@ -730,7 +752,7 @@ test("spool command authority (v0.0.23, ADR 0015 §1): refuses contract/spawn/re
   }
 
   // Working Agent can still claim, and Supervisor can still accept --by supervisor.
-  const claimRes = await handleSpoolRequest(factory, { id: "cl-1", kind: "claim", task: "AUTH-1", sha: head, agent: "ag-worker-1" });
+  const claimRes = await handleSpoolRequest(factory, { id: "cl-1", kind: "claim", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" }, task: "AUTH-1", sha: head, agent: "ag-worker-1" });
   assert.equal(claimRes.ok, true);
   const supAccept = await handleSpoolRequest(factory, {
     id: "sa-1",
@@ -970,7 +992,7 @@ test("correlated Lead cannot turn attribution into Owner acceptance authority", 
   const sha = gitCommitAll(workspace);
   const factory = createFactory({ stateDir: join(dir, "state") });
   factory.setContract({ task: "BOUND", workspace, artifact: "artifact", gate: "true" });
-  await factory.claim({ task: "BOUND", sha });
+  await factory.claim({ task: "BOUND", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   factory.ledger.append({ event: "fresh_eyes_written", task: "BOUND", attempt: 1, model: "eye", outcome: "concern", finding: "needs Owner", durationMs: 1 });
   const denial = factory.ledger.append({ event: "permit_denied", task: "BOUND", agent: "peer", name: "Bash", kind: "tool", rule: "scope", reason: "denied" });
   const poke = factory.ledger.append({ event: "repoke_dispatched", task: "BOUND", agent: "peer" });
@@ -1339,8 +1361,8 @@ test("Seam 1: two concurrent Projects contract, spawn, claim, and accept Task T-
   const shaA = gitCommitAll(worktreeA, "work-in-project-a");
   const shaB = gitCommitAll(worktreeB, "work-in-project-b");
   const claims = await Promise.all([
-    handleSpoolRequest(root, { id: "cl-a", kind: "claim", task: "T-01", sha: shaA, agent: "peer-a" }, {}, registry),
-    handleSpoolRequest(root, { id: "cl-b", kind: "claim", task: "T-01", sha: shaB, agent: "peer-b" }, {}, registry),
+    handleSpoolRequest(root, { id: "cl-a", kind: "claim", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" }, task: "T-01", sha: shaA, agent: "peer-a" }, {}, registry),
+    handleSpoolRequest(root, { id: "cl-b", kind: "claim", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" }, task: "T-01", sha: shaB, agent: "peer-b" }, {}, registry),
   ]);
   assert.deepEqual(claims.map((reply) => reply.ok), [true, true]);
   const greenClaims = claims.filter((reply): reply is Extract<typeof reply, { ok: true }> => reply.ok);
@@ -1408,7 +1430,7 @@ test("Seam 1: context-first routing — explicit projectSlug, Correlation token,
   });
   writeFileSync(join(rootB, "work.txt"), "b\n");
   const shaB = gitCommitAll(rootB, "correlation-routed-work");
-  const correlated = await handleSpoolRequest(root, { id: "cl-b", kind: "claim", task: "T-01", sha: shaB, agent: "peer-b-1" }, {}, registry);
+  const correlated = await handleSpoolRequest(root, { id: "cl-b", kind: "claim", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" }, task: "T-01", sha: shaB, agent: "peer-b-1" }, {}, registry);
   assert.ok(correlated.ok && correlated.verdict === "green");
   assert.ok(
     readProjectLedger(stateDir, slugB).some((event) => event.event === "claim_reported"),

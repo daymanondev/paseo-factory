@@ -47,6 +47,7 @@ var EVENT_NAMES = [
   "retro_written"
 ];
 var PEER_DISPOSITIONS = ["engineer", "architect", "reviewer", "scout"];
+var PEER_HANDOFF_OUTCOMES = ["complete", "partial", "blocked", "reopen"];
 var LEDGER_REFERENCE_KINDS = { denial: "permit_denied", repoke: "repoke_dispatched", gate: "gate_finished", spawn: "spawn_dispatched", respawn: "respawn_dispatched" };
 function eventAllowsUnboundEpoch(kind) {
   return kind === "spawn_refused" || kind === "respawn_refused" || kind === "repoke_refused";
@@ -213,6 +214,12 @@ function usageIsValid(usage) {
   }
   return true;
 }
+function handoffIsValid(handoff) {
+  if (handoff === void 0) return true;
+  if (typeof handoff !== "object" || handoff === null || Array.isArray(handoff)) return false;
+  const fields = handoff;
+  return typeof fields.outcome === "string" && PEER_HANDOFF_OUTCOMES.includes(fields.outcome) && ["scope", "verification", "unknowns", "ownership"].every((key) => fields[key] === void 0 || typeof fields[key] === "string");
+}
 function v2PayloadIsValid(event) {
   const string = (key) => typeof event[key] === "string";
   const optionalString = (key) => event[key] === void 0 || string(key);
@@ -232,7 +239,7 @@ function v2PayloadIsValid(event) {
     case "contract_set":
       return (event.execution === void 0 || scrumBindingIsValid(event.execution)) && string("workspace") && string("gate") && string("artifact") && strings("scope") && strings("skills") && optionalString("base") && optionalString("description") && optionalString("by") && (event.freshEyes === void 0 || event.freshEyes === true) && (event.watch === void 0 || event.watch === true) && (event.disposition === void 0 || PEER_DISPOSITIONS.includes(event.disposition));
     case "claim_reported":
-      return string("sha") && optionalString("agent");
+      return string("sha") && optionalString("agent") && handoffIsValid(event.handoff);
     case "gate_started":
       return string("cmd");
     case "gate_finished":

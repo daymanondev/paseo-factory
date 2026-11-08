@@ -3131,7 +3131,7 @@ test("v0.0.23 (ADR 0015 §6): spool spawn/respawn registers Task worktree worksp
     title: "factory T-WS-1 (live)",
     labels: { seat: "agent", project: project.slug, task: "T-WS-1" },
   });
-  const claim1 = await factory.claim({ task: "T-WS-1", sha: headSha, agent: liveWorker.id });
+  const claim1 = await factory.claim({ task: "T-WS-1", sha: headSha, agent: liveWorker.id, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   assert.equal(claim1.verdict, "green");
 
   const meterReply = await handleSpoolRequest(
@@ -3437,7 +3437,7 @@ test("v0.0.31 (ADR 0017 §4): accepting T-12 while worktrees/T-11 and worktrees/
   writeFileSync(join(wt.path, "t12.txt"), "ok\n");
   const headSha = gitCommitAll(wt.path, "T-12 work");
   factory.requestSpawn({ task: "T-12", provider: "pi/zai/glm-5.3", arity: 1, worktree: wt.path });
-  const claim = await factory.claim({ task: "T-12", sha: headSha, agent: "agent-t12" });
+  const claim = await factory.claim({ task: "T-12", sha: headSha, agent: "agent-t12", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   assert.equal(claim.verdict, "green");
   writeProjectRegistration(stateDir, project.slug, { root: project.root, taskWorkspaces: { "T-12": "wks-t12" } });
 
@@ -3905,7 +3905,7 @@ test("v0.0.24 (ADR 0015 §5): projectReset wipes a project's ledger events, task
   assert.ok(wt.ok, wt.ok ? "" : wt.reason);
   assert.equal(existsSync(wt.path), true);
   factory.requestSpawn({ task: "T-RESET-1", provider: "pi/zai/glm-5.3", arity: 1, worktree: wt.path });
-  const claimOut = await factory.claim({ task: "T-RESET-1", sha: contractA.base!, agent: "agent-worker-reset-1" });
+  const claimOut = await factory.claim({ task: "T-RESET-1", sha: contractA.base!, agent: "agent-worker-reset-1", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   assert.equal(existsSync(claimOut.reportPath), true);
 
   // Seed a live working agent bound to T-RESET-1 in the daemon.
@@ -6241,7 +6241,7 @@ test("Scrum supervisorEnsure preserves a UI-created Supervisor session without s
     title: "PM · pm-prd",
     labels: { seat: "agent", project: project.slug, task: "pm-prd" },
   });
-  const claim = await factory.claim({ task: "pm-prd", sha: headSha, agent: "peer-pm-prd" });
+  const claim = await factory.claim({ task: "pm-prd", sha: headSha, agent: "peer-pm-prd", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   assert.equal(claim.verdict, "green");
 
   const accepted = await handlers.accept({ task: "pm-prd", attempt: 1 });
@@ -6600,7 +6600,7 @@ async function contractGreenT01(setup: ReturnType<typeof makeTwinSurface>, root:
   new CorrelationRegistry(setup.stateDir).issue({ role: "agent", projectSlug: slug, projectRoot: root, task: "T-01", agentId: `peer-${slug}` });
   writeFileSync(join(root, "work.txt"), `${slug}\n`);
   const sha = gitCommitAll(root, `work-${slug}`);
-  const claim = await handleSpoolRequest(setup.registry.root, { id: `cl-${slug}`, kind: "claim", task: "T-01", sha, agent: `peer-${slug}` }, {}, setup.registry);
+  const claim = await handleSpoolRequest(setup.registry.root, { id: `cl-${slug}`, kind: "claim", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" }, task: "T-01", sha, agent: `peer-${slug}` }, {}, setup.registry);
   assert.ok(claim.ok && claim.verdict === "green", `the claim in ${slug} ends green: ${claim.ok ? "" : claim.message}`);
 }
 
