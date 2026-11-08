@@ -122,6 +122,20 @@ commands:
              --project (v0.0.89) pins the target Project when two Projects
              share a Task id
 
+  repoke     Spend the Task's one automatic re-poke on a stalled working
+             Agent — or, with --message, deliver a Lead ruling directly
+             into the live Peer session (ADR 0053 Decision 3). A
+             message-bearing repoke is a live reconciliation turn: never
+             capped by the one-per-task law, delivered prefixed with the
+             task/disposition context and the updated Brief. Without
+             --message the fixed Denial-stall continuation text is sent and
+             the one spend applies verbatim.
+             repoke --task <id> [--agent <id>] [--message "<ruling text>"]
+                                     [--project <slug>]
+             --agent resolves from the task's last agent-bearing ledger
+             line when omitted; --project (v0.0.89) pins the target Project
+             when two Projects share a Task id.
+
   run        Run contracted tasks' agents to verdict (the driver, v0.0.5):
              one agent per task on the daemon, watched to its verdict.
              run <task> [<task>…] [--provider <provider[/model]>]
@@ -673,6 +687,66 @@ if (command === "accept") {
 
   const reply = await roundTrip(
     { id: randomId(), kind: "accept", task, attempt, submitter, ...(by === undefined ? {} : { by }), ...(projectSlug === undefined ? {} : { projectSlug }) },
+    waitSeconds(parsed),
+  );
+  console.log(`factory: ${reply.summary}`);
+  process.exit(0);
+}
+
+if (command === "repoke") {
+  const parsed = parseCommandOptions({
+    task: { type: "string" },
+    agent: { type: "string" },
+    message: { type: "string" },
+    project: { type: "string" },
+    "wait-secs": { type: "string" },
+  });
+  const v = parsed.values;
+  const task = typeof v.task === "string" ? v.task.trim() : "";
+  if (task === "") fail("repoke: --task is required");
+  if (parsed.positionals.length > 0) fail(`repoke: unexpected positional "${parsed.positionals[0]}"`);
+  // ADR 0053 Decision 3: the ruling rides only as a non-empty text — the
+  // contract --description precedent; omit it for the Denial-stall continuation.
+  if (typeof v.message === "string" && v.message.trim() === "") {
+    fail("repoke: --message must be a non-empty ruling text — omit it when spending the Denial-stall continuation");
+  }
+  // The target: explicit --agent, else the task's last agent-bearing ledger
+  // line (the bridge's resolution chain, on the same local read the status
+  // rows use), else the task-named fallback the factory still judges.
+  let agent = typeof v.agent === "string" && v.agent.trim() !== "" ? v.agent.trim() : undefined;
+  const projectSlug = typeof v.project === "string" && v.project.trim() !== "" ? v.project.trim() : undefined;
+  if (agent === undefined) {
+    const readOne = (ledgerPath) => {
+      const read = readLedgerEvents(ledgerPath);
+      if (read.failed !== undefined || read.corrupt !== undefined || read.missing) return [];
+      return read.events;
+    };
+    const streams = projectSlug !== undefined
+      ? [readOne(join(stateDir, "projects", projectSlug, "ledger.jsonl"))]
+      : [
+          readOne(join(stateDir, "ledger.jsonl")),
+          ...registeredProjectSlugs(stateDir).map((slug) => readOne(join(stateDir, "projects", slug, "ledger.jsonl"))),
+        ];
+    outer: for (const events of streams) {
+      for (let i = events.length - 1; i >= 0; i -= 1) {
+        const evt = events[i];
+        if (evt.task === task && typeof evt.agent === "string" && evt.agent.trim() !== "") {
+          agent = evt.agent.trim();
+          break outer;
+        }
+      }
+    }
+  }
+  if (agent === undefined) agent = `agent-${task}`;
+  const reply = await roundTrip(
+    {
+      id: randomId(),
+      kind: "repoke",
+      task,
+      agent,
+      ...(v.message === undefined ? {} : { message: v.message }),
+      ...(projectSlug === undefined ? {} : { projectSlug }),
+    },
     waitSeconds(parsed),
   );
   console.log(`factory: ${reply.summary}`);

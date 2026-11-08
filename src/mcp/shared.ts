@@ -99,12 +99,18 @@ export const sharedTools: Record<string, ToolDefinition> = {
   },
   lead_repoke_agent: {
     name: "lead_repoke_agent",
-    description: "Spend the Task's single automatic re-poke on a stalled working Agent.",
+    description:
+      "Spend the Task's single automatic re-poke on a stalled working Agent — or, with `message`, deliver a Lead ruling directly into the live Peer session (ADR 0053: message-bearing reconciliation turns are never capped by the one-per-task law).",
     inputSchema: {
       type: "object",
       properties: {
         task: { type: "string", description: "Task ID to re-poke." },
         agent: { type: "string", description: "Optional target Agent ID (resolved automatically from task when omitted)." },
+        message: {
+          type: "string",
+          description:
+            "Optional Lead ruling text (answer, reconciled boundary decision) delivered verbatim into the live Peer session, prefixed with the task/disposition context and the updated Brief; omitted sends the fixed Denial-stall continuation.",
+        },
         workspace: { type: "string", description: "Optional Project root path." },
       },
       required: ["task"],

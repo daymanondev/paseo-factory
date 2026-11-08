@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import type { TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { execSync } from "node:child_process";
+import { execSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createFactory } from "../plugin/server/core/factory.ts";
@@ -14,7 +14,7 @@ import type { SurfaceAgentSnapshot, SurfaceDaemonApi } from "../plugin/server/su
 import { handleSpoolRequest, parseSpoolRequest, spoolRootFor, startSpool } from "../plugin/server/spool.ts";
 import { createLeadMailRuntime, LEAD_ROTATE_TOKENS, readLeadContextTokens } from "../plugin/server/lead-mailbox.ts";
 import { deliverLeadMail as coreDeliver, enqueueLeadMail as coreEnqueue } from "../src/index.ts";
-import { disposeDir, gitCommitAll, makeTempDir } from "./helpers.ts";
+import { disposeDir, gitCommitAll, makeTempDir, repoRoot } from "./helpers.ts";
 
 /**
  * The v0.0.20 dispatch pipeline seam (spec §Testing Decisions 2, the
@@ -444,6 +444,149 @@ test("peer hooks: a needs_human recording lands its peer mail on the owning Proj
   const queuedLines = readMailbox(stateDir, slug).filter((evt) => evt.type === "mail_queued");
   assert.equal(queuedLines.length, 1, "the needs_human recording lands ONE peer mail item");
   assert.equal(queuedLines.filter((evt) => evt.to === "supervisor").length, 0, "no to:supervisor duplicate is enqueued");
+});
+
+// ---- direct Lead ruling delivery (ticket 02, ADR 0053 Decision 3) -------------------------
+
+test("parseSpoolRequest admits the repoke's optional message — a non-empty string passes, an empty one drops to the omitted spelling, a wrong type refuses", () => {
+  const base = { id: "r1", kind: "repoke", task: "T-02", agent: "ag-worker" };
+  assert.deepEqual(parseSpoolRequest({ ...base, message: "Ruling: the facade owns the retry policy." }), {
+    ...base,
+    message: "Ruling: the facade owns the retry policy.",
+  });
+  // Empty or whitespace-only is the omitted spelling: the Denial-stall
+  // continuation, byte-identical to today (acceptance criterion 3).
+  assert.deepEqual(parseSpoolRequest({ ...base, message: "" }), { ...base });
+  assert.deepEqual(parseSpoolRequest({ ...base, message: "   " }), { ...base });
+  for (const bad of [
+    { ...base, message: 7 },
+    { ...base, message: { text: "ruling" } },
+    { ...base, message: ["ruling"] },
+  ]) {
+    assert.equal(parseSpoolRequest(bad), undefined, `${JSON.stringify(bad)} must be rejected`);
+  }
+});
+
+test("a message-bearing repoke delivers the Lead's ruling into the live Peer session across reconciliation turns — never repoke:already-spent — and never persists the message body (ticket 02, ADR 0053 Decision 3)", async (t) => {
+  const { projectRoot, factory, fake } = makeSpooledSurface(t, [{ id: "ag-live", status: "idle", labels: { seat: "agent" } }]);
+  const deps = { daemon: fake.daemon };
+  // The reconciliation premise: the Lead re-briefs in place (ticket 01), then
+  // rules into the SAME live Peer session (this ticket).
+  factory.setContract({ task: "T-RP", workspace: projectRoot, gate: "npm run gate", artifact: "README.md", description: "Brief v1: land the adapter boundary.", disposition: "architect" });
+  factory.setContract({ task: "T-RP", workspace: projectRoot, gate: "npm run gate", artifact: "README.md", description: "Brief v2 (reconciled): the facade owns the retry policy.", disposition: "engineer" });
+
+  const ruling = "Ruling (REOPEN_REQUEST foundation): the facade owns the retry policy — drop the caller-side backoff.";
+  const first = await handleSpoolRequest(factory, { id: "mrp-1", kind: "repoke", task: "T-RP", agent: "ag-live", message: ruling, seat: "lead" }, deps);
+  assert.equal(first.ok, true, JSON.stringify(first));
+  assert.equal(fake.sent.length, 1, "the ruling was delivered to the live Peer session");
+  assert.equal(fake.sent[0]?.agentId, "ag-live");
+  const delivered = fake.sent[0]?.text ?? "";
+  assert.ok(delivered.includes(ruling), "the delivered text carries the Lead's message verbatim");
+  assert.ok(delivered.includes("T-RP"), "the task context prefixes the ruling");
+  assert.ok(delivered.includes("engineer"), "the reconciled disposition rides the prefix");
+  assert.ok(delivered.includes("Brief v2 (reconciled): the facade owns the retry policy."), "the updated Brief is named after the lead_set_contract reconciliation");
+
+  // Multiple reconciliation turns: the second and third message-bearing
+  // repokes each dispatch — the already-spent cap never fires (criterion 2).
+  const second = await handleSpoolRequest(factory, { id: "mrp-2", kind: "repoke", task: "T-RP", agent: "ag-live", message: "Second turn: proceed with the in-place retry loop.", seat: "lead" }, deps);
+  assert.equal(second.ok, true, JSON.stringify(second));
+  const third = await handleSpoolRequest(factory, { id: "mrp-3", kind: "repoke", task: "T-RP", agent: "ag-live", message: "Third turn: green the gate now.", seat: "lead" }, deps);
+  assert.equal(third.ok, true, JSON.stringify(third));
+  assert.equal(fake.sent.length, 3, "every reconciliation turn delivered");
+
+  const dispatched = factory.ledger.eventsFor("T-RP").filter((e) => e.event === "repoke_dispatched");
+  assert.equal(dispatched.length, 3, "each turn lands its own repoke_dispatched line");
+  assert.ok(
+    dispatched.every((e) => !("message" in e)),
+    "the message body is delivery-only — never persisted on the ledger line",
+  );
+
+  // The message-less cap stays verbatim: with the spend marker present, a bare
+  // repoke is refused already-spent (criterion 3).
+  const bare = await handleSpoolRequest(factory, { id: "mrp-4", kind: "repoke", task: "T-RP", agent: "ag-live", seat: "lead" }, deps);
+  assert.equal(bare.ok, false);
+  assert.equal(bare.code, "already-spent");
+  assert.equal(fake.sent.length, 3, "a refused repoke sends nothing");
+});
+
+test("a message-less repoke (omitted or empty) sends today's fixed continuation nudge and keeps the one-per-task spend (ticket 02)", async (t) => {
+  const { projectRoot, factory, fake } = makeSpooledSurface(t, [{ id: "ag-stall", status: "idle", labels: { seat: "agent" } }]);
+  const deps = { daemon: fake.daemon };
+  factory.setContract({ task: "T-STALL", workspace: projectRoot, gate: "npm test", artifact: "README.md" });
+
+  const first = await handleSpoolRequest(factory, { id: "srp-1", kind: "repoke", task: "T-STALL", agent: "ag-stall", seat: "lead" }, deps);
+  assert.equal(first.ok, true, JSON.stringify(first));
+  assert.equal(first.summary, "re-poke dispatched for T-STALL → agent ag-stall — the task's one spend");
+  assert.deepEqual(fake.sent, [
+    {
+      agentId: "ag-stall",
+      text: "Re-poke from Lead on task T-STALL: continue inside your Task worktree on branch factory/T-STALL, run the gate `npm test`, commit your changes, and call `paseo-factory_agent_claim` (or `agent_claim`).",
+    },
+  ]);
+
+  // The empty-string message is the omitted spelling — and the one-per-task
+  // cap refuses it exactly like a bare second repoke.
+  const emptyMessage = await handleSpoolRequest(factory, { id: "srp-2", kind: "repoke", task: "T-STALL", agent: "ag-stall", message: "", seat: "lead" }, deps);
+  assert.equal(emptyMessage.ok, false);
+  assert.equal(emptyMessage.code, "already-spent");
+  assert.equal(factory.ledger.eventsFor("T-STALL").filter((e) => e.event === "repoke_dispatched").length, 1, "exactly one dispatch line — the Denial-stall spend");
+});
+
+/** Runs the real factory CLI as a subprocess — async on purpose: the in-process spool poll must keep running while the CLI waits for its reply. */
+function runFactoryCli(args: string[], extraEnv: Record<string, string>): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [join(repoRoot, "plugin", "bin", "factory.mjs"), ...args], {
+      env: { ...process.env, PASEO_AGENT_ID: "", PASEO_FACTORY_CORRELATION: "", PASEO_FACTORY_SEAT: "", ...extraEnv },
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
+    child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
+    const killer = setTimeout(() => child.kill("SIGKILL"), 120_000);
+    child.on("close", (status) => {
+      clearTimeout(killer);
+      resolve({ status, stdout, stderr });
+    });
+  });
+}
+
+test("factory repoke --task <id> --message <ruling> round-trips the CLI → spool → daemon send; without --message it preserves the Denial-stall summary (ticket 02)", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const root = join(dir, "repo");
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, "README.md"), "x\n");
+  gitCommitAll(root);
+  const resolved = resolveProject(root);
+  assert.ok(resolved.ok, "the test project must resolve");
+  const home = join(dir, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const factory = createFactory({ stateDir });
+  factory.setContract({ task: "T-CLI", workspace: resolved.root, gate: "npm test", artifact: "README.md", scope: ["zone-1"], description: "Brief: the CLI ruling round-trip." });
+  factory.setContract({ task: "T-CLI2", workspace: resolved.root, gate: "npm test", artifact: "README.md", scope: ["zone-2"] });
+  const fake = fakeDaemon([{ id: "ag-cli", status: "idle", labels: { seat: "agent" } }]);
+  const spool = startSpool(stateDir, factory, { pollMs: POLL_MS, daemon: fake.daemon });
+  t.after(() => spool.stop());
+
+  // A Lead-shell invocation: the env-stamped seat rides the spool request,
+  // which is what unlocks the daemon send in the handler.
+  const withMessage = await runFactoryCli(
+    ["--home", home, "repoke", "--task", "T-CLI", "--agent", "ag-cli", "--message", "Ruling: the CLI carries the Lead's word into the live session."],
+    { PASEO_FACTORY_SEAT: "lead" },
+  );
+  assert.equal(withMessage.status, 0, withMessage.stderr);
+  assert.match(withMessage.stdout, /re-poke dispatched for T-CLI/);
+  assert.match(withMessage.stdout, /ruling delivered/i);
+  assert.equal(fake.sent.length, 1, "the ruling was daemon-sent to the bound agent");
+  assert.equal(fake.sent[0]?.agentId, "ag-cli");
+  assert.ok(fake.sent[0]?.text.includes("Ruling: the CLI carries the Lead's word into the live session."), "the delivered text carries the ruling verbatim");
+  assert.ok(factory.ledger.eventsFor("T-CLI").some((e) => e.event === "repoke_dispatched"), "the dispatch line landed");
+
+  // Without --message: today's Denial-stall continuation summary, verbatim.
+  const bare = await runFactoryCli(["--home", home, "repoke", "--task", "T-CLI2", "--agent", "ag-cli"], { PASEO_FACTORY_SEAT: "lead" });
+  assert.equal(bare.status, 0, bare.stderr);
+  assert.match(bare.stdout, /re-poke dispatched for T-CLI2 → agent ag-cli — the task's one spend/);
+  assert.equal(factory.ledger.eventsFor("T-CLI2").filter((e) => e.event === "repoke_dispatched").length, 1, "the bare repoke spent the task's one re-poke");
 });
 
 // ---- peer challenge routing (ADR 0053 Decision 2, spec Decision 6) ------------------------
