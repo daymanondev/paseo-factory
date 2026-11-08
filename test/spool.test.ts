@@ -1160,7 +1160,7 @@ test("Seam 2: resolvePeerSpawnProvider returns Project B's worker lane directly 
   assert.equal(createdConfigs.at(-1)?.thinkingOptionId, "high", "the worker lane's :thinking rides the resolved provider");
 });
 
-test("spool enforces one live Peer per Task and retires peers on re-contract", async (t) => {
+test("spool enforces one live Peer per Task and preserves the live Peer on re-contract unless resetPeer (ADR 0053 §1)", async (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);
   const workspace = join(dir, "ws");
@@ -1203,8 +1203,15 @@ test("spool enforces one live Peer per Task and retires peers on re-contract", a
   if (!failed.ok) assert.equal(failed.code, "peer-stop-failed");
   assert.deepEqual(actions, [], "a failed cancellation must not archive or replace the Peer");
   peers[0]!.status = "running";
-  const reply = await handleSpoolRequest(factory, { id: "c", kind: "contract", task: "solo", workspace, gate: "true", submitter: "owner" }, deps);
-  assert.equal(reply.ok, true);
+  // ADR 0053 §1 — a re-contract without resetPeer updates the Brief/Gate in place
+  // and preserves the live bound Peer: no stop, no archive, no replacement.
+  const preserved = await handleSpoolRequest(factory, { id: "c", kind: "contract", task: "solo", workspace, gate: "true", submitter: "owner" }, deps);
+  assert.equal(preserved.ok, true);
+  if (preserved.ok) assert.match(preserved.summary, /live Peer preserved \(resetPeer not requested\)/);
+  assert.deepEqual(actions, [], "the in-place re-contract neither stops nor archives the live Peer");
+  // resetPeer: true restores the pre-0053 retirement law: stop, then archive.
+  const reset = await handleSpoolRequest(factory, { id: "c-2", kind: "contract", task: "solo", workspace, gate: "true", resetPeer: true, submitter: "owner" }, deps);
+  assert.equal(reset.ok, true);
   assert.deepEqual(actions, ["stop:old", "archive:old"]);
 });
 
