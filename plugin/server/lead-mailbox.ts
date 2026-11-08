@@ -649,6 +649,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
         tasks,
         agents: agentOfTask(events, { stateDir: deps.stateDir, slug, tasks, live }),
         live,
+        events,
       });
       const digest = renderLedgerDigest(events);
       const scrumLayer = scrumHandoffLayer(slug);
@@ -1233,6 +1234,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       tasks,
       agents: agentOfTask(events, { stateDir: deps.stateDir, slug, tasks, live }),
       live,
+      events,
     });
     const digest = renderLedgerDigest(events);
     // The outgoing Lead's final cumulative usage is flushed BEFORE the seat
@@ -2006,6 +2008,9 @@ function renderSuccessorKickoff(input: { slug: string; roster: string; digest: s
  * (fold status, bound agent + live daemon status, the Task worktree path and
  * branch, and the latest Attempt / Verdict / Report — the `taskWorktree*` and
  * `agentTaskIndex` precedents) are rendered strictly for unaccepted Tasks.
+ * Since ADR 0053 §3 each active row also carries the epoch's effective Peer
+ * disposition — read from the latest `contract_set`, `engineer` when the
+ * field predates the Contract or was omitted.
  */
 function renderPeerRoster(input: {
   stateDir: string;
@@ -2013,6 +2018,7 @@ function renderPeerRoster(input: {
   tasks: readonly TaskView[];
   agents: ReadonlyMap<string, string>;
   live: ReadonlyMap<string, SurfaceAgentSnapshot>;
+  events?: readonly LedgerEvent[];
 }): string {
   if (input.tasks.length === 0) return "(no tasks in the project's ledger — a clean slate)";
   const acceptedTasks = input.tasks.filter((task) => task.accepted || task.status === "accepted");
@@ -2031,9 +2037,14 @@ function renderPeerRoster(input: {
     const agentId = input.agents.get(task.task);
     const liveStatus = agentId === undefined ? null : (input.live.get(agentId)?.status ?? "(not live on the daemon)");
     const latest = task.attempts.at(-1);
+    const epochContract = input.events?.findLast(
+      (evt): evt is Extract<LedgerEvent, { event: "contract_set" }> => evt.event === "contract_set" && evt.task === task.task,
+    );
+    const disposition = epochContract?.disposition ?? "engineer";
     lines.push(
       [
         `- task ${task.task}: status ${task.status}`,
+        `disposition ${disposition}`,
         agentId === undefined ? "agent (none bound)" : `agent ${agentId} (live: ${liveStatus})`,
         `worktree ${taskWorktreePath(input.stateDir, input.slug, task.task)} (branch ${taskWorktreeBranch(task.task)})`,
         latest === undefined ? "no attempt yet" : `latest attempt #${latest.n} (verdict: ${latest.verdict ?? "none yet"})`,

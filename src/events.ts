@@ -93,6 +93,15 @@ export const EVENT_NAMES = [
 
 export type EventName = (typeof EVENT_NAMES)[number];
 
+/**
+ * The four SLP Peer dispositions (ADR 0053 §3) — the Contract's optional role
+ * stamp. Omitted reads as `"engineer"` everywhere the field is consumed; the
+ * read-only three (`architect`, `reviewer`, `scout`) are fenced from writing
+ * and close without a branch merge (tickets 04/05).
+ */
+export const PEER_DISPOSITIONS = ["engineer", "architect", "reviewer", "scout"] as const;
+export type PeerDisposition = (typeof PEER_DISPOSITIONS)[number];
+
 /** Assigned by the ledger at append time — ISO 8601 UTC (ADR 0003). */
 export type Timestamp = string;
 
@@ -175,6 +184,12 @@ export interface ContractSet extends EventIdentityMetadata {
    * CLI path. Pre-0.0.9 Contracts predate the stamp.
    */
   by?: string;
+  /**
+   * The Peer's SLP disposition (ADR 0053 §3): exactly one of
+   * `engineer | architect | reviewer | scout`. Omitted = the `engineer`
+   * default — pre-0053 Contracts predate the field and are never migrated.
+   */
+  disposition?: PeerDisposition;
 }
 
 export interface ClaimReported extends EventIdentityMetadata {

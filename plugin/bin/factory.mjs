@@ -590,6 +590,8 @@ if (command === "contract") {
     "no-fresh-eyes": { type: "boolean", default: false },
     watch: { type: "boolean", default: false },
     description: { type: "string" },
+    disposition: { type: "string" },
+    "reset-peer": { type: "boolean", default: false },
     project: { type: "string" },
     "wait-secs": { type: "string" },
   });
@@ -600,6 +602,9 @@ if (command === "contract") {
   if (v["fresh-eyes"] && v["no-fresh-eyes"]) fail("contract: pass either --fresh-eyes or --no-fresh-eyes, not both");
   if (typeof v.description === "string" && v.description.trim() === "") {
     fail("contract: --description must be a non-empty text — omit it when the task has no assignment text");
+  }
+  if (v.disposition !== undefined && !["engineer", "architect", "reviewer", "scout"].includes(v.disposition)) {
+    fail("contract: --disposition must be one of engineer|architect|reviewer|scout — omit it for the engineer default");
   }
   if (parsed.positionals.length > 0) fail(`contract: unexpected positional "${parsed.positionals[0]}"`);
 
@@ -622,6 +627,10 @@ if (command === "contract") {
     ...(v["fresh-eyes"] ? { freshEyes: true } : v["no-fresh-eyes"] ? { freshEyes: false } : {}),
     ...(v.watch ? { watch: true } : {}),
     ...(v.description === undefined ? {} : { description: v.description }),
+    // ADR 0053 §1/§3: the Peer's disposition and the explicit reset — a
+    // re-contract preserves the live Peer unless --reset-peer is passed.
+    ...(v.disposition === undefined ? {} : { disposition: v.disposition }),
+    ...(v["reset-peer"] ? { resetPeer: true } : {}),
     // v0.0.89 (ADR 0045 §1): the explicit target Project — the router's
     // top-priority context. Usually redundant (the workspace resolves it);
     // it pins the target when two Projects share a Task id.

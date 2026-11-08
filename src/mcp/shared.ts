@@ -39,7 +39,7 @@ export const sharedTools: Record<string, ToolDefinition> = {
   lead_set_contract: {
     name: "lead_set_contract",
     description:
-      "Register a Task's immutable Contract (`gate`, optional `description`, `artifact`, `skills`, `watch`) before spawning its working Agent.",
+      "Register a Task's immutable Contract (`gate`, optional `description`, `artifact`, `skills`, `watch`, `disposition`) before spawning its working Agent. Re-contracting an unaccepted Task updates the Brief/Gate in place and preserves the live Peer unless `resetPeer: true`.",
     inputSchema: {
       type: "object",
       properties: {
@@ -55,6 +55,8 @@ export const sharedTools: Record<string, ToolDefinition> = {
         },
         watch: { type: "boolean", description: "Enable the post-verdict watch pass." },
         description: { type: "string", description: "Task assignment description stating desired outcome and regression invariants." },
+        disposition: { type: "string", enum: ["engineer", "architect", "reviewer", "scout"], description: "The Peer's SLP disposition (ADR 0053; defaults to engineer when omitted)." },
+        resetPeer: { type: "boolean", description: "Cancel and archive the live bound Peer before the fresh Contract epoch (default false — the Peer keeps its accumulated context)." },
         workspace: { type: "string", description: "Optional Project root path (defaults to current project root)." },
       },
       required: ["task", "gate"],
