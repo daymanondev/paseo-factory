@@ -283,6 +283,11 @@ function scopedContractAt(cwd) {
 
 const MEMORY_FILES = ["AGENTS.md", "CLAUDE.md", "CONTEXT.md"];
 
+// The read-only three (ADR 0053 §3, ticket 05) — the plain-JS mirror of
+// src/events.ts's READ_ONLY_PEER_DISPOSITIONS: this shim cannot import the
+// TS core at exec time, so the three names live here too.
+const READ_ONLY_DISPOSITIONS = new Set(["architect", "reviewer", "scout"]);
+
 function isIsolatedTaskWorktree(cwd) {
   if (/\/projects\/[^/]+\/worktrees\/[^/]+(?:\/|$)/.test(cwd)) return true;
   const contract = scopedContractAt(cwd);
@@ -293,6 +298,18 @@ function checkAgentCommitScope(realGit, argvTokens) {
   const { globalFlags, sub, args } = parseGitSubcommand(argvTokens);
   if (sub !== "commit" || realGit === undefined) return undefined;
   const contract = scopedContractAt(resolveEffectiveCwd(globalFlags));
+  // The read-only disposition fence (ADR 0053 §3, ticket 05): a scout,
+  // architect, or reviewer Peer never commits — findings travel in the
+  // 6-Field Handoff at agent_claim. Checked before the base-bound scope
+  // check so a read-only Contract refuses even without a resolvable base.
+  if (READ_ONLY_DISPOSITIONS.has(contract?.disposition)) {
+    return {
+      rule: "read-only-disposition-fence",
+      reason:
+        `factory git-shim: blocked (read-only-disposition-fence) — the ${contract.disposition} disposition never commits; ` +
+        "deliver findings in the 6-Field Handoff at agent_claim; code changes are an engineer Peer's Contract",
+    };
+  }
   if (!contract?.base) return undefined;
   const query = (args) => {
     const result = spawnSync(realGit, [...globalFlags, ...args], {

@@ -832,10 +832,12 @@ export function createChoke(options: ChokeOptions): Choke {
   // comes from a contracted agent, so the live Contract's workspace and scope
   // ride into the core judges — write/edit asks and shell destinations both —
   // plus the task's worktree root when its spawn recorded one (a worktree
-  // agent's absolute writes name the worktree's copy of the memory file).
+  // agent's absolute writes name the worktree's copy of the memory file), and
+  // the Contract's SLP disposition (ADR 0053 §3): the read-only three fence
+  // every write under the task's root (ticket 05).
   const fenceOf = (contract: ContractSet, judge: Factory = factory): MemoryFence => {
     const worktree = judge.worktreeFor(contract.task);
-    return { ...(contract.execution ? { scrumRole: contract.execution.role } : {}), ...(contract.execution && contract.execution.role !== "dev" ? { artifactOnly: true } : {}), workspace: contract.workspace, scope: contract.scope, ...(worktree === undefined ? {} : { worktree }) };
+    return { ...(contract.execution ? { scrumRole: contract.execution.role } : {}), ...(contract.execution && contract.execution.role !== "dev" ? { artifactOnly: true } : {}), ...(contract.disposition === undefined ? {} : { disposition: contract.disposition }), workspace: contract.workspace, scope: contract.scope, ...(worktree === undefined ? {} : { worktree }) };
   };
   /**
    * The writable root for an ask: the task's worktree when its spawn recorded

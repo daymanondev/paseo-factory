@@ -1573,6 +1573,86 @@ test("Seam 1 (ADR 0053): the spawn-path re-contract onto a moved HEAD preserves 
     .map((line) => JSON.parse(line))
     .filter((e) => e.event === "contract_set" && e.task === "T-01");
   assert.equal(epochs.length, 2, "the spawn re-contracted T-01 onto the moved HEAD");
-  assert.equal(epochs[1].base, upstreamSha, "the fresh epoch re-based onto the upstream HEAD");
+  assert.equal(epochs[1].base, upstreamSha, "the fresh epoch re-based onto the moved HEAD");
   assert.equal(epochs[1].disposition, "architect", "the re-spawned read-only task stays read-only");
+});
+
+// ---- Seam 1 (ADR 0053 §3, ticket 05): read-only acceptance is merge-free -----------------------
+
+/**
+ * The merge-free acceptance seam: a read-only Task (scout/architect/reviewer)
+ * contracted, spawned into its managed Task worktree, and claimed GREEN must
+ * close on `accept` WITHOUT `landTaskWorktree` — `<project-root>`'s HEAD is
+ * unchanged, no `factory/<task>` merge commit exists, the `attempt_accepted`
+ * line carries no `landing`, and the Task worktree is removed — while an
+ * engineer Task on the same machine still lands exactly as before.
+ */
+test("Seam 1 (ADR 0053): lead accept on a GREEN read-only Task records attempt_accepted, removes the Task worktree, and never merges into <project-root> — an engineer Task still lands", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const home = join(dir, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const root = join(dir, "repo");
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, "README.md"), "x\n");
+  gitCommitAll(root);
+  const resolved = resolveProject(root);
+  assert.ok(resolved.ok, "the test project must resolve");
+  writeProjectRegistration(stateDir, resolved.slug, { root: resolved.root });
+  const registry = createFactoryRegistry({ stateDir });
+  t.after(() => registry.stop());
+  const spool = startSpool(stateDir, registry.root, { pollMs: POLL_MS, registry });
+  t.after(() => spool.stop());
+  const projectFactory = () => registry.factoryForProject(resolved.slug);
+  const headAt = () => execSync("git rev-parse HEAD", { cwd: root, encoding: "utf8" }).trim();
+  const acceptedLine = (task: string) =>
+    readFileSync(join(projectStateDir(stateDir, resolved.slug), "ledger.jsonl"), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+      .findLast((e) => e.event === "attempt_accepted" && e.task === task);
+
+  // 1. The scout Task: contract, spawned into its managed worktree, claimed
+  //    GREEN at the worktree HEAD (a read-only Peer makes no new commit).
+  dropRequest(spoolRootFor(stateDir), { id: "c-scout", kind: "contract", task: "RO-1", workspace: resolved.root, gate: "true", artifact: "README.md", disposition: "scout", submitter: "owner" });
+  await until(() => assert.equal(readReply(spoolRootFor(stateDir), "c-scout").ok, true, "the scout contract replies ok"));
+  dropRequest(spoolRootFor(stateDir), { id: "sp-scout", kind: "spawn", task: "RO-1", provider: "pi/zai/glm-5.3", arity: 1, projectSlug: resolved.slug });
+  await until(() => assert.equal(readReply(spoolRootFor(stateDir), "sp-scout").ok, true, "the scout spawn replies ok"));
+  const scoutWorktree = projectFactory().worktreeFor("RO-1");
+  assert.ok(typeof scoutWorktree === "string", "the scout spawn allocated a managed Task worktree");
+  assert.ok(existsSync(scoutWorktree), "the scout Task worktree exists on disk");
+  const headBefore = headAt();
+  const scoutHead = execSync("git rev-parse HEAD", { cwd: scoutWorktree!, encoding: "utf8" }).trim();
+  dropRequest(spoolRootFor(stateDir), { id: "cl-scout", kind: "claim", task: "RO-1", sha: scoutHead, projectSlug: resolved.slug });
+  await until(() => assert.equal(readReply(spoolRootFor(stateDir), "cl-scout").verdict, "green", "the scout claim ends green"));
+
+  // 2. Accept: merge-free. No landing fields, root HEAD unchanged, worktree gone.
+  dropRequest(spoolRootFor(stateDir), { id: "ac-scout", kind: "accept", task: "RO-1", attempt: 1, submitter: "owner", projectSlug: resolved.slug });
+  await until(() => assert.equal(readReply(spoolRootFor(stateDir), "ac-scout").ok, true, "the scout accept replies ok"));
+  const accepted = acceptedLine("RO-1") as Record<string, unknown> | undefined;
+  assert.ok(accepted, "attempt_accepted recorded for the read-only Task");
+  assert.equal("landing" in (accepted ?? {}), false, "no landing field on a read-only acceptance");
+  assert.equal("landingNote" in (accepted ?? {}), false, "no landingNote field on a read-only acceptance");
+  assert.equal(headAt(), headBefore, "<project-root>'s HEAD is unchanged — no merge ran");
+  const mergeCommits = execSync("git log --oneline --merges -3", { cwd: root, encoding: "utf8" });
+  assert.doesNotMatch(mergeCommits, /factory\/RO-1/, "no factory/RO-1 merge commit exists on <project-root>");
+  await until(() => assert.equal(existsSync(scoutWorktree), false, "the read-only Task worktree is removed"));
+
+  // 3. The engineer control on the same machine: the ordinary landing stands.
+  dropRequest(spoolRootFor(stateDir), { id: "c-eng", kind: "contract", task: "ENG-1", workspace: resolved.root, gate: "true", artifact: "feature.txt", submitter: "owner" });
+  await until(() => assert.equal(readReply(spoolRootFor(stateDir), "c-eng").ok, true, "the engineer contract replies ok"));
+  dropRequest(spoolRootFor(stateDir), { id: "sp-eng", kind: "spawn", task: "ENG-1", provider: "pi/zai/glm-5.3", arity: 1, projectSlug: resolved.slug });
+  await until(() => assert.equal(readReply(spoolRootFor(stateDir), "sp-eng").ok, true, "the engineer spawn replies ok"));
+  const engWorktree = projectFactory().worktreeFor("ENG-1");
+  assert.ok(typeof engWorktree === "string", "the engineer spawn allocated a managed Task worktree");
+  writeFileSync(join(engWorktree!, "feature.txt"), "delivered\n");
+  const engSha = gitCommitAll(engWorktree!, "feat: engineer delivery");
+  dropRequest(spoolRootFor(stateDir), { id: "cl-eng", kind: "claim", task: "ENG-1", sha: engSha, projectSlug: resolved.slug });
+  await until(() => assert.equal(readReply(spoolRootFor(stateDir), "cl-eng").verdict, "green", "the engineer claim ends green"));
+  dropRequest(spoolRootFor(stateDir), { id: "ac-eng", kind: "accept", task: "ENG-1", attempt: 1, submitter: "owner", projectSlug: resolved.slug });
+  await until(() => assert.equal(readReply(spoolRootFor(stateDir), "ac-eng").ok, true, "the engineer accept replies ok"));
+  const engineerAccepted = acceptedLine("ENG-1") as Record<string, unknown> | undefined;
+  assert.equal(engineerAccepted?.landing, "landed", "an engineer acceptance still lands into <project-root>");
+  assert.equal(headAt(), engSha, "the root HEAD advanced to the engineer's claimed commit");
+  await until(() => assert.equal(existsSync(engWorktree), false, "the engineer Task worktree is removed after landing"));
 });

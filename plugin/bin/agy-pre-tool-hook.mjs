@@ -78,6 +78,10 @@ const WRITE_TOOL_NAMES = new Set([
   "edit",
 ]);
 
+// The read-only SLP dispositions (ADR 0053 §3, ticket 05) — mirror of
+// src/events.ts's READ_ONLY_PEER_DISPOSITIONS (this hook cannot import the TS core).
+const READ_ONLY_DISPOSITIONS = new Set(["architect", "reviewer", "scout"]);
+
 const SHELL_TOOL_NAMES = new Set([
   "run_command",
   "bash",
@@ -919,6 +923,12 @@ process.stdin.on("end", () => {
     const contract = loadContractForTask(ctx.stateDir, ctx.task, ctx.projectSlug);
     const baseRoot = stripTrailingSlash(resolve(contract?.worktree ?? contract?.workspace ?? ctx.projectRoot ?? process.cwd()));
     const resolvedState = ctx.stateDir ? stripTrailingSlash(resolve(ctx.stateDir)) : "";
+    // The read-only three (ADR 0053 §3, ticket 05) — the plain-JS mirror of
+    // src/events.ts's READ_ONLY_PEER_DISPOSITIONS: this hook cannot import the
+    // TS core, so the three names live here too. A read-only Peer's writes
+    // deny at Layer 1 (here) exactly as they do at Layer 2 (the choke judges)
+    // and Layer 3 (the git shim) — strictly read-only, no scope opt-in.
+    const readOnlyDisposition = READ_ONLY_DISPOSITIONS.has(contract?.disposition) ? contract.disposition : null;
 
     const checkAgentPath = (rawTarget) => {
       const raw = String(rawTarget ?? "").trim();
@@ -929,6 +939,9 @@ process.stdin.on("end", () => {
       }
       if (resolvedCandidate.startsWith(`${baseRoot}/`)) {
         const rel = resolvedCandidate.slice(baseRoot.length + 1);
+        if (readOnlyDisposition) {
+          return `Write to ${rel} is fenced (read-only-disposition-fence) — the ${readOnlyDisposition} disposition is read-only; deliver findings in the 6-Field Handoff at agent_claim.`;
+        }
         if (["AGENTS.md", "CLAUDE.md", "CONTEXT.md"].includes(rel)) {
           if (!Array.isArray(contract?.scope) || !scopePolicy.scopeCoversFile(contract.scope, rel)) {
             return `Write to ${rel} is fenced (policy:memory-write-fenced).`;

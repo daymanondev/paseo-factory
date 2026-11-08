@@ -1225,6 +1225,126 @@ test("agent_claim carries the mandatory six-field handoff end-to-end (ADR 0053 �
   }
 });
 
+test("lead_accept_task on a GREEN read-only Task closes merge-free (ADR 0053 §3): attempt_accepted with no landing, the Peer archived, the Task worktree removed, and <project-root>'s HEAD untouched", async (t) => {
+  const homeDir = mkdtempSync(join(tmpdir(), "factory-bridge-readonly-accept-"));
+  const stateDir = join(homeDir, "plugin-state", "paseo-factory");
+  const repoDir = makeGitRepo();
+  t.after(() => {
+    rmSync(homeDir, { recursive: true, force: true });
+    rmSync(repoDir, { recursive: true, force: true });
+  });
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
+  const registration = ensureProjectRegistered(stateDir, repoDir);
+  assert.ok(registration.ok);
+  const slug = registration.ok ? registration.slug : "demo";
+  const registry = createFactoryRegistry({ stateDir, root: factory });
+
+  const archived: string[] = [];
+  const liveAgents = new Map<string, { id: string; status: string; archivedAt: string | null; cwd: string; labels: Record<string, string> }>();
+  const fakeDaemon = {
+    agents: {
+      list: async (opts?: { filter?: { labels?: Record<string, string>; includeArchived?: boolean; includeBackground?: boolean } }) => {
+        const wanted = opts?.filter?.labels ?? {};
+        const entries = [...liveAgents.values()]
+          .filter((a) => (opts?.filter?.includeArchived === true ? true : a.archivedAt === null))
+          .filter((a) => Object.entries(wanted).every(([k, v]) => a.labels[k] === v))
+          .map((agent) => ({ agent }));
+        return { entries };
+      },
+      create: async (options: { config: { provider: string }; cwd: string; title: string; labels: Record<string, string>; prompt?: string }) => {
+        const id = `peer-created-${liveAgents.size + 1}`;
+        liveAgents.set(id, { id, status: "idle", archivedAt: null, cwd: options.cwd, labels: options.labels });
+        return { id };
+      },
+      ref: (id: string) => ({
+        send: async () => ({ messageId: `msg-${id}` }),
+        cancel: async () => {},
+        archive: async () => {
+          archived.push(id);
+          const agent = liveAgents.get(id);
+          if (agent) liveAgents.set(id, { ...agent, archivedAt: new Date().toISOString() });
+          return { archivedAt: new Date().toISOString() };
+        },
+      }),
+    },
+  };
+  const spool = startSpool(stateDir, factory, { registry, pollMs: 10, daemon: fakeDaemon as never, home: homeDir });
+  t.after(() => spool.stop());
+
+  const correlations = new CorrelationRegistry(stateDir);
+  const lead = correlations.issue({ role: "lead", projectSlug: slug, projectRoot: repoDir, agentId: "lead-ro" });
+  const headAt = () => execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoDir, encoding: "utf8" }).trim();
+
+  // 1. The Lead contracts the Task read-only (scout) and dispatches its Peer.
+  const headBefore = headAt();
+  const leadCall = await runMcpSession({
+    args: ["--correlation", lead.correlationId, "--state-dir", stateDir],
+    cwd: repoDir,
+    requests: [
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "RO-ACC", gate: "/usr/bin/true", artifact: "README.md", disposition: "scout", description: "Reconnoiter the module boundaries" } } },
+      { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_dispatch_agent", arguments: { tasks: ["RO-ACC"] } } },
+    ],
+  });
+  const okText = (response: Record<string, unknown>, context: string): string => {
+    const result = response.result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.notEqual(result.isError, true, `${context}: ${result.content[0].text}`);
+    return result.content[0].text;
+  };
+  okText(leadCall[0], "the scout contract");
+  okText(leadCall[1], "the scout dispatch");
+  const projectFactory = registry.factoryForProject(slug);
+  const worktree = projectFactory.worktreeFor("RO-ACC");
+  assert.ok(typeof worktree === "string", "the scout dispatch allocated the Task worktree");
+  assert.ok(existsSync(worktree), "the Task worktree exists before acceptance");
+
+  // 2. The read-only Peer claims at the worktree HEAD — no new commit.
+  const agentCorr = correlations.issue({ role: "agent", projectSlug: slug, projectRoot: repoDir, task: "RO-ACC", agentId: "peer-ro" });
+  const agentCall = await runMcpSession({
+    args: ["--correlation", agentCorr.correlationId, "--state-dir", stateDir],
+    cwd: worktree!,
+    requests: [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "agent_claim", arguments: {} } }],
+  });
+  assert.match(okText(agentCall[0], "the read-only claim"), /GREEN/i, "the read-only claim ends GREEN at the worktree HEAD");
+
+  // 3. Lead acceptance: merge-free. No landing fields, HEAD untouched, the
+  //    Peer archived, the Task worktree removed.
+  const acceptCall = await runMcpSession({
+    args: ["--correlation", lead.correlationId, "--state-dir", stateDir],
+    cwd: repoDir,
+    requests: [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_merge", arguments: { task: "RO-ACC", attempt: 1 } } }],
+  });
+  const acceptText = okText(acceptCall[0], "the read-only acceptance");
+  assert.match(acceptText, /accepted/i);
+  assert.doesNotMatch(acceptText, /landed into <project-root>/, "the reply names no landing");
+  const accepted = readFileSync(join(stateDir, "projects", slug, "ledger.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line))
+    .findLast((e) => e.event === "attempt_accepted" && e.task === "RO-ACC") as Record<string, unknown> | undefined;
+  assert.ok(accepted, "attempt_accepted recorded");
+  assert.equal("landing" in (accepted ?? {}), false, "the read-only acceptance carries no landing field");
+  assert.equal("landingNote" in (accepted ?? {}), false, "the read-only acceptance carries no landingNote field");
+  assert.equal(headAt(), headBefore, "<project-root>'s HEAD is unchanged — no branch merge ran");
+  const merges = execFileSync("git", ["log", "--oneline", "--merges", "-3"], { cwd: repoDir, encoding: "utf8" });
+  assert.doesNotMatch(merges, /factory\/RO-ACC/, "no factory/RO-ACC merge commit exists");
+  await untilBridge(() => assert.equal(existsSync(worktree), false, "the read-only Task worktree is removed"));
+  await untilBridge(() => assert.ok(archived.length > 0, "the read-only Task's Peer is archived on acceptance"));
+});
+
+/** Bounded retry for the bridge's asynchronous spool effects (file removal, archive). */
+async function untilBridge(assertion: () => void, ms = 5000): Promise<void> {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    try {
+      assertion();
+      return;
+    } catch (err) {
+      if (Date.now() >= deadline) throw err;
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+    }
+  }
+}
+
 test("bridge default Spool wait is 600 seconds, including an invalid override", async (t) => {
   const repoDir = makeGitRepo();
   const stateDir = mkdtempSync(join(tmpdir(), "factory-bridge-wait-"));

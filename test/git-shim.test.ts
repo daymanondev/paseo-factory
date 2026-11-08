@@ -319,3 +319,64 @@ test("installed shim follows live worktree bindings through re-contract, replace
   contract();
   expectStatus(0, "project reset discards historical worktrees");
 });
+
+test("the agent git shim refuses git commit inside a read-only disposition's Task worktree (ADR 0053 §3, ticket 05) — exit 126, one git-blocked.log line, reads and engineer commits pass", (t) => {
+  const dir = makeTempDir("git-shim-readonly-");
+  disposeDir(t, dir);
+  const workspace = join(dir, "repo");
+  mkdirSync(workspace, { recursive: true });
+  writeFileSync(join(workspace, "README.md"), "original\n");
+  const base = gitCommitAll(workspace);
+  const stateDir = join(dir, "state");
+  const factory = createFactory({ stateDir });
+  const worktree = join(stateDir, "projects", "repo-slug", "worktrees", "RO-1");
+  mkdirSync(join(stateDir, "projects", "repo-slug", "worktrees"), { recursive: true });
+  execFileSync("git", ["worktree", "add", "-b", "factory/RO-1", worktree], { cwd: workspace, stdio: "pipe" });
+  ensureGitShim(stateDir, join(repoRoot, "plugin"), process.execPath);
+  const run = (args: string[]) => spawnSync(join(stateDir, "bin", "git"), args, {
+    cwd: worktree, encoding: "utf8", timeout: 10_000,
+    env: { ...process.env, NODE_OPTIONS: "--no-experimental-strip-types", PASEO_FACTORY_SEAT: "agent", PASEO_FACTORY_TASK: "RO-1" },
+  });
+
+  // A scout Contract with a live spawn binding over the worktree.
+  factory.setContract({ task: "RO-1", workspace, gate: "true", artifact: "README.md", disposition: "scout" });
+  factory.requestSpawn({ task: "RO-1", provider: "claude", arity: 1, worktree });
+  writeFileSync(join(worktree, "README.md"), "an uncommitted recon edit\n");
+  execFileSync("git", ["add", "README.md"], { cwd: worktree });
+  const blocked = run(["commit", "-m", "recon should never commit"]);
+  assert.equal(blocked.status, 126, `the read-only commit refuses pre-exec: ${blocked.stderr}`);
+  assert.match(blocked.stderr, /read-only-disposition-fence/);
+  assert.match(blocked.stderr, /scout/);
+  assert.doesNotMatch(blocked.stdout, /STUB-OK/, "nothing was executed");
+  const records = readFileSync(join(stateDir, "git-blocked.log"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.equal(records.length, 1, "exactly one git-blocked.log line");
+  assert.equal(records[0].rule, "read-only-disposition-fence");
+  assert.equal(records[0].command, "git commit -m recon should never commit");
+
+  // Reads never deny — a Scout's recon vocabulary stays fully legal.
+  assert.equal(run(["status", "--short"]).status, 0, "git status passes");
+  assert.equal(run(["diff"]).status, 0, "git diff passes");
+  assert.equal(run(["log", "--oneline", "-1"]).status, 0, "git log passes");
+
+  // The other read-only dispositions refuse identically; engineer (and an
+  // omitted disposition) commits exactly as before — the fence adds no new
+  // denial for writers.
+  for (const disposition of ["architect", "reviewer"] as const) {
+    factory.setContract({ task: "RO-1", workspace, gate: "true", artifact: "README.md", disposition });
+    const refused = run(["commit", "-m", `${disposition} boundary work`]);
+    assert.equal(refused.status, 126, `${disposition} — commit refuses`);
+    assert.match(refused.stderr, /read-only-disposition-fence/);
+  }
+  factory.setContract({ task: "RO-1", workspace, gate: "true", artifact: "README.md", disposition: "engineer" });
+  const engineer = run(["commit", "-m", "engineer delivery"]);
+  assert.equal(engineer.status, 0, `an engineer commit passes untouched: ${engineer.stderr}`);
+  writeFileSync(join(worktree, "README.md"), "a second delivery\n");
+  execFileSync("git", ["add", "README.md"], { cwd: worktree });
+  factory.setContract({ task: "RO-1", workspace, gate: "true", artifact: "README.md" });
+  const omitted = run(["commit", "-m", "default engineer delivery"]);
+  assert.equal(omitted.status, 0, `an omitted disposition (the engineer default) commits untouched: ${omitted.stderr}`);
+
+  // Only the three read-only refusals logged — the two engineer commits added none.
+  const allRecords = readFileSync(join(stateDir, "git-blocked.log"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.equal(allRecords.length, 3, "scout + architect + reviewer refusals, nothing else");
+});
