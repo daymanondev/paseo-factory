@@ -296,3 +296,89 @@
 .console-settings-project .small.muted {
   margin-top: 14px;
 }
+
+/* The Activity screen (T-11a): the reused design bundle carries the ledger
+   row and the usage surface (design/styles.css + design/usage.css imported by
+   the screen); the console adds the stream row's four-column grid (time ·
+   kind · task · detail — the prototype's own row widened by two honest
+   cells), the aggregate row's Project slug suffix, the CSS segment bar that
+   stands in for the prototype's SVG chart (never its JS), and the usage
+   panel's spacing between the two halves. */
+.console-activity .toolbar {
+  align-items: center;
+}
+
+.console-activity .filters .filter span {
+  margin-left: 4px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.console-activity-row {
+  grid-template-columns: 150px 92px 110px minmax(0, 1fr);
+  align-items: baseline;
+}
+
+.console-activity-row .badge {
+  font-size: 10px;
+  padding: 1px 6px;
+}
+
+.console-activity-project {
+  font-size: 10px;
+}
+
+.console-activity-usage {
+  margin-top: 24px;
+}
+
+.console-activity-chart {
+  display: flex;
+  background: #2d2d35;
+}
+
+.console-activity-seg {
+  display: block;
+  height: 100%;
+}
+
+.console-activity-seg-input {
+  background: var(--usage-input);
+}
+
+.console-activity-seg-output {
+  background: var(--usage-output);
+}
+
+.console-activity-usage-empty {
+  padding: 18px 12px;
+  font-size: 12px;
+}
+
+@media(max-width:767px) {
+  .console-activity-row {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 6px 10px;
+  }
+
+  .console-activity-row > span:first-child {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .console-activity-row > span:nth-child(2) {
+    grid-column: 2;
+    grid-row: 1;
+    justify-self: end;
+  }
+
+  .console-activity-row > span:nth-child(3) {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .console-activity-row > span:last-child {
+    grid-column: 1 / -1;
+    grid-row: 3;
+  }
+}

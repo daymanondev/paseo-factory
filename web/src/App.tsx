@@ -24,8 +24,10 @@
  * scoped Project's identity from the same snapshot, carrying the Owner's
  * vault writes (T-10b..d) and the scoped Project's Danger Zone (T-10e — a
  * successful delete clears the selection and returns the console to the
- * unscoped Overview); the other
- * screens are titled placeholders landing in their own waves. No Start
+ * unscoped Overview); the Activity screen (T-11a) renders the read-only
+ * ledger stream with its client-side kind filter chips and the usage rollup
+ * from the same snapshot — every screen of the eight is real now; the
+ * placeholder remains only as a future screen's titled fallback. No Start
  * Supervisor / Start Lead controls anywhere (ADR 0017 preserved).
  */
 import { useEffect, useState } from "react";
@@ -39,6 +41,7 @@ import { inboxViaSidecar, type InboxReply } from "./inbox.ts";
 import { scrumCommandViaSidecar, type ScrumCommandInput, type ScrumCommandReply } from "./scrum.ts";
 import { OverviewScreen } from "./screens/overview.tsx";
 import { PlaceholderScreen } from "./screens/placeholder.tsx";
+import { ActivityScreen } from "./screens/activity.tsx";
 import { FlowScreen } from "./screens/flow.tsx";
 import { ModelsScreen } from "./screens/models.tsx";
 import { IntegrationsScreen } from "./screens/integrations.tsx";
@@ -147,6 +150,7 @@ export function App({
         )}
         <main id="main" className="page" tabIndex={-1}>
           {view !== null && screen.id === "overview" && <OverviewScreen view={view} onOpenProject={setProjectRoot} />}
+          {view !== null && screen.id === "activity" && <ActivityScreen view={view} />}
           {view !== null && screen.id === "flow" && <FlowScreen view={view} />}
           {view !== null && screen.id === "models" && <ModelsScreen view={view} onChanged={() => snapshot.refresh()} />}
           {view !== null && screen.id === "integrations" && <IntegrationsScreen view={view} onChanged={() => snapshot.refresh()} />}
@@ -171,7 +175,7 @@ export function App({
           {/* The route names the screen even while the first snapshot is in
               flight or unreachable — a reload of /tasks lands on Tasks, not a
               blank page (the placeholder screens' own T-01 law, kept). */}
-          {view === null && (screen.id === "tasks" || screen.id === "inbox" || screen.id === "flow" || screen.id === "models" || screen.id === "integrations" || screen.id === "settings") && (
+          {view === null && (screen.id === "tasks" || screen.id === "inbox" || screen.id === "flow" || screen.id === "models" || screen.id === "integrations" || screen.id === "settings" || screen.id === "activity") && (
             <section aria-label={screen.heading}>
               <h1>{screen.heading}</h1>
               {snapshot.error === null ? (
@@ -186,10 +190,10 @@ export function App({
           {view === null && snapshot.error === null && screen.id === "overview" && (
             <div className="notice">Loading the Factory snapshot…</div>
           )}
-          {view === null && snapshot.error !== null && screen.id !== "tasks" && screen.id !== "inbox" && screen.id !== "flow" && screen.id !== "models" && screen.id !== "integrations" && screen.id !== "settings" && (
+          {view === null && snapshot.error !== null && screen.id !== "tasks" && screen.id !== "inbox" && screen.id !== "flow" && screen.id !== "models" && screen.id !== "integrations" && screen.id !== "settings" && screen.id !== "activity" && (
             <div className="notice">The Factory snapshot is unreachable — is the daemon's factory plugin running? ({snapshot.error.message})</div>
           )}
-          {screen.id !== "overview" && screen.id !== "flow" && screen.id !== "models" && screen.id !== "tasks" && screen.id !== "inbox" && screen.id !== "integrations" && screen.id !== "settings" && <PlaceholderScreen screen={screen} view={view} />}
+          {screen.id !== "overview" && screen.id !== "flow" && screen.id !== "models" && screen.id !== "tasks" && screen.id !== "inbox" && screen.id !== "integrations" && screen.id !== "settings" && screen.id !== "activity" && <PlaceholderScreen screen={screen} view={view} />}
         </main>
       </div>
     </div>
