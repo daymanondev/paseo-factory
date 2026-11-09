@@ -122,6 +122,15 @@ commands:
              --project (v0.0.89) pins the target Project when two Projects
              share a Task id
 
+  close      Retire a superseded or split Task cleanly (v0.5.0, ADR 0054 §5):
+             appends task_closed, cancels and archives the bound live Peer,
+             archives the temporary Paseo workspace, and removes the Task
+             worktree and factory/<task> branch. Never for work that should
+             land — accept that instead. Refuses unknown, already-accepted,
+             already-closed, and mid-gate Tasks, and any working-Agent seat.
+             close --task <id> --reason "<text>" [--by owner|supervisor|lead]
+                                   [--project <slug>]
+
   repoke     Spend the Task's one automatic re-poke on a stalled working
              Agent — or, with --message, deliver a Lead ruling directly
              into the live Peer session (ADR 0053 Decision 3). A
@@ -702,6 +711,40 @@ if (command === "accept") {
 
   const reply = await roundTrip(
     { id: randomId(), kind: "accept", task, attempt, submitter, ...(by === undefined ? {} : { by }), ...(projectSlug === undefined ? {} : { projectSlug }) },
+    waitSeconds(parsed),
+  );
+  console.log(`factory: ${reply.summary}`);
+  process.exit(0);
+}
+
+if (command === "close") {
+  const parsed = parseCommandOptions({
+    task: { type: "string" },
+    reason: { type: "string" },
+    by: { type: "string" },
+    project: { type: "string" },
+    "wait-secs": { type: "string" },
+  });
+  const v = parsed.values;
+  if (typeof v.task !== "string" || v.task.trim() === "") fail("close: --task is required (factory close --task <id> --reason \"<text>\")");
+  if (typeof v.reason !== "string" || v.reason.trim() === "") fail("close: --reason is required — the ledger keeps the one sentence that says why the Task retired");
+  if (parsed.positionals.length > 0) fail(`close: unexpected positional "${parsed.positionals[0]}"`);
+  // The accepting seats' law verbatim (v0.0.14): the flag claims a seat
+  // explicitly; without it the shell's own stamp rides the close.
+  let by;
+  if (v.by !== undefined) {
+    if (!ACCEPT_SEATS.includes(v.by)) {
+      fail(`close: --by must be one of owner|supervisor|lead — got "${v.by}"`);
+    }
+    by = v.by;
+  }
+  const projectSlug =
+    typeof v.project === "string" && v.project.trim() !== ""
+      ? v.project.trim()
+      : undefined;
+
+  const reply = await roundTrip(
+    { id: randomId(), kind: "close", task: v.task, reason: v.reason, submitter, ...(by === undefined ? {} : { by }), ...(projectSlug === undefined ? {} : { projectSlug }) },
     waitSeconds(parsed),
   );
   console.log(`factory: ${reply.summary}`);

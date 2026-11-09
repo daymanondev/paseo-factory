@@ -48,7 +48,8 @@ var EVENT_NAMES = [
   "respawn_dispatched",
   "respawn_refused",
   "needs_human",
-  "retro_written"
+  "retro_written",
+  "task_closed"
 ];
 var PEER_DISPOSITIONS = ["engineer", "architect", "reviewer", "scout"];
 var PEER_HANDOFF_OUTCOMES = ["complete", "partial", "blocked", "reopen"];
@@ -193,6 +194,9 @@ function shapeIsValid(evt) {
   if (evt.event === "needs_human") {
     return taskIsString && typeof asRecord.reason === "string" && NEEDS_HUMAN_REASONS.includes(asRecord.reason) && needsHumanEvidenceIsValid(asRecord.evidence, asRecord.reason);
   }
+  if (evt.event === "task_closed") {
+    return taskIsString && typeof asRecord.reason === "string" && (asRecord.closed_by === void 0 || typeof asRecord.closed_by === "string");
+  }
   const attempt = asRecord.attempt;
   return taskIsString && typeof attempt === "number" && Number.isInteger(attempt) && attempt >= 1;
 }
@@ -250,6 +254,8 @@ function v2PayloadIsValid(event) {
       return string("path");
     case "attempt_accepted":
       return optionalString("accepted_by") && optionalString("landingNote") && (event.landing === void 0 || event.landing === "landed" || event.landing === "pending-conflict");
+    case "task_closed":
+      return string("reason") && optionalString("closed_by");
     case "permit_allowed":
     case "permit_denied":
       return string("name") && string("kind") && optionalString("command") && (event.event !== "permit_denied" || string("reason"));

@@ -205,6 +205,7 @@ export function foldTasks(events: readonly AnyEvent[]): TaskView[] {
       pendingLanding: state.pendingLanding,
       accepted: accepted !== undefined,
       acceptedBy: accepted?.accepted_by ?? null,
+      ...(state.closed === undefined ? {} : { closed: state.closed }),
       currentAttempt: state.currentAttempt?.attempt,
       verdict: state.verdict,
       lane,
@@ -356,6 +357,8 @@ export function renderLedgerLine(evt: AnyEvent): string {
       return `report #${evt.attempt} ${basename(evt.path)}`;
     case "attempt_accepted":
       return `ACCEPTED #${evt.attempt}${evt.accepted_by === undefined ? "" : ` by ${evt.accepted_by}`}`;
+    case "task_closed":
+      return `CLOSED${evt.closed_by === undefined ? "" : ` by ${evt.closed_by}`} — ${evt.reason}`;
     case "permit_allowed":
       return `choke allowed ${evt.name}`;
     case "permit_denied":

@@ -52,7 +52,7 @@ import { allocateTaskWorktree } from "./core/mcp/worktrees.ts";
 import { ensureProjectRegistered, resolveTargetProject } from "./projects.ts";
 import type { FactoryRegistry, TargetProjectContext } from "./projects.ts";
 import { FACTORY_SEAT_PROVIDER_IDS, formatPeerAgentTitle, formatPeerWorkspaceTitle } from "./roles.ts";
-import { acceptanceSummary, executeAcceptance } from "./commands.ts";
+import { acceptanceSummary, archiveAcceptedTaskWorkspace, executeAcceptance } from "./commands.ts";
 import { boundTaskPeers, peerIsRunning } from "./task-peers.ts";
 import { stopAgentViaCli } from "./daemon-cli.ts";
 import type { DaemonReply } from "./daemon-cli.ts";
@@ -183,6 +183,31 @@ export interface AcceptRequest {
    */
   submitter: string;
   /** Caller seat stamped from `PASEO_FACTORY_SEAT` when present (v0.0.23, ADR 0015 §1). */
+  seat?: SpoolSeat;
+  /** Explicit target Project slug (v0.0.89) — the CLI's `--project <slug>` flag. */
+  projectSlug?: string;
+}
+
+/**
+ * One clean Task retirement (v0.5.0, ADR 0054 §5, ticket 05) — `factory close`
+ * and `lead_close_task` both land here. The `by`/`seat` law is the accept's:
+ * the explicit seat overrides the submitter stamp, the authority is judged at
+ * the factory. On success the handler cancels and archives any bound live
+ * Peer, archives the temporary Paseo workspace, and the factory's `close`
+ * removes the Task worktree + `factory/<task>` branch and appends
+ * `task_closed`.
+ */
+export interface CloseRequest {
+  id: string;
+  kind: "close";
+  task: string;
+  /** Why the Task retired — non-empty, the ledger's one kept sentence. */
+  reason: string;
+  /** The closing seat, claimed explicitly — the CLI's `--by owner|supervisor|lead` flag. */
+  by?: "owner" | "supervisor" | "lead";
+  /** Who submitted (the accept's law): `PASEO_AGENT_ID` or `owner`. */
+  submitter: string;
+  /** Caller seat stamped from `PASEO_FACTORY_SEAT` when present. */
   seat?: SpoolSeat;
   /** Explicit target Project slug (v0.0.89) — the CLI's `--project <slug>` flag. */
   projectSlug?: string;
@@ -488,6 +513,7 @@ export type SpoolRequest =
   | ContractRequest
   | ClaimRequest
   | AcceptRequest
+  | CloseRequest
   | AskRequest
   | LeadRotateRequest
   | SpoolLeadDispatchRequest
@@ -779,6 +805,25 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       kind: "accept",
       task: req.task,
       attempt: req.attempt,
+      ...(req.by === undefined ? {} : { by: req.by }),
+      submitter: req.submitter,
+      ...seatField,
+      ...projectSlugField,
+    };
+  }
+  if (req.kind === "close") {
+    if (typeof req.task !== "string") return undefined;
+    // The reason is the retirement's own kept sentence — blank is malformed,
+    // never a guessed-at "because".
+    if (typeof req.reason !== "string" || req.reason.trim() === "") return undefined;
+    // The accept's law verbatim: no submitter, no retirement.
+    if (typeof req.submitter !== "string" || req.submitter.trim() === "") return undefined;
+    if (req.by !== undefined && req.by !== "owner" && req.by !== "supervisor" && req.by !== "lead") return undefined;
+    return {
+      id: req.id,
+      kind: "close",
+      task: req.task,
+      reason: req.reason,
       ...(req.by === undefined ? {} : { by: req.by }),
       submitter: req.submitter,
       ...seatField,
@@ -1413,6 +1458,7 @@ const PROJECT_SCOPED_SPOOL_KINDS = new Set([
   "contract",
   "claim",
   "accept",
+  "close",
   "spawn",
   "respawn",
   "meter",
@@ -1431,6 +1477,7 @@ function contextOfSpoolRequest(request: SpoolRequest): TargetProjectContext {
     case "claim":
       return { project: request.projectSlug, task: request.task, agentId: request.agent };
     case "accept":
+    case "close":
     case "respawn":
     case "repoke":
     case "needs_human":
@@ -1608,6 +1655,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         request.kind === "needs_human" ||
         request.kind === "meter" ||
         request.kind === "accept" ||
+        request.kind === "close" ||
         (request.kind === "lead_dispatch" && request.from !== "peer") ||
         request.kind === "supervisor_dispatch" ||
         request.kind === "supervisor_report" ||
@@ -1615,6 +1663,16 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         request.kind === "retro") &&
       effectiveSeat === "agent"
     ) {
+      // v0.5.0 (ADR 0054 §5, ticket 05): the retirement's own named refusal —
+      // the accept's `agent-cannot-orchestrate` law, spelled for this act.
+      if (request.kind === "close") {
+        return {
+          id: request.id,
+          ok: false,
+          code: "agent-cannot-close",
+          message: `Working Agent cannot call factory close; task retirement is the Lead's (or Supervisor's/Owner's) act, not the working Agent's.`,
+        };
+      }
       return {
         id: request.id,
         ok: false,
@@ -2267,6 +2325,31 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         summary: `retro written: ${outcome.proposalCount} proposals → ${outcome.proposalsPath}`,
         proposalsPath: outcome.proposalsPath,
         proposalCount: outcome.proposalCount,
+      };
+    }
+    // The clean retirement (v0.5.0, ADR 0054 §5, ticket 05): the factory's
+    // `close` appends `task_closed` and removes the Task worktree + branch;
+    // this handler owns the Plugin-shell halves the core cannot see — cancel
+    // and archive the bound live Peer (the re-contract retirement's own
+    // law), then archive the temporary Paseo workspace and its registration.
+    // The refusal order is the factory's: nothing below runs on a refused
+    // close, so a refusal touches no Peer and no workspace.
+    if (request.kind === "close") {
+      const closedBy = request.by ?? request.submitter;
+      const peers = await taskPeers(request.task);
+      const closed = await factory.close({
+        task: request.task,
+        reason: request.reason,
+        ...(closedBy === undefined ? {} : { by: closedBy }),
+        authority: effectiveSeat ?? (request.by === "lead" ? "lead" : "owner"),
+      });
+      if (peers.length > 0) await retirePeers(peers);
+      await archiveAcceptedTaskWorkspace(factory, resolvedDaemon, request.task, home);
+      return {
+        id: request.id,
+        ok: true,
+        summary: `task ${request.task} closed by ${closedBy} (reason: ${request.reason}) — bound Peer retired, Task worktree and branch factory/${request.task} removed`,
+        event: closed,
       };
     }
     // The acceptance (v0.0.14): awaited — a worktree task's local landing

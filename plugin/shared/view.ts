@@ -112,6 +112,9 @@ export type AttemptView = z.infer<typeof AttemptViewSchema>;
  * A task's verification-line status — the fold's own state machine over the
  * ledger, so filter chips and KPI tiles agree by construction:
  * - `accepted` — an attempt_accepted exists (the task is closed).
+ * - `closed` — a task_closed exists (v0.5.0, ADR 0054 §5): retired without
+ *   acceptance; terminal beside `accepted` and counted in no open/running/
+ *   attention tile.
  * - `needs-human` — the latest state marker is a needs_human (a later gate
  *   verdict or acceptance displaces it: an Owner answer wakes the task).
  * - `running` — an attempt is open, or a spawn landed with no verdict since.
@@ -119,7 +122,7 @@ export type AttemptView = z.infer<typeof AttemptViewSchema>;
  * - `red` — the latest verdict is red and unaccepted.
  * - `waiting` — contracted, never run (no attempt and no spawn yet).
  */
-export const TaskStatusSchema = z.enum(["accepted", "needs-human", "running", "ready-to-accept", "red", "waiting"]);
+export const TaskStatusSchema = z.enum(["accepted", "closed", "needs-human", "running", "ready-to-accept", "red", "waiting"]);
 export type TaskStatus = z.infer<typeof TaskStatusSchema>;
 
 export const TaskViewSchema = z.object({
@@ -133,6 +136,8 @@ export const TaskViewSchema = z.object({
   pendingLanding: z.boolean().optional(),
   accepted: z.boolean(),
   acceptedBy: z.string().nullable(),
+  /** The clean retirement's own facts (v0.5.0, ADR 0054 §5) — present exactly when `status` is `closed`. */
+  closed: z.object({ seq: z.number().int(), at: z.string(), reason: z.string(), by: z.string() }).optional(),
   /** Accepted evidence wins over any later anomalous Attempt. */
   currentAttempt: z.number().optional(),
   verdict: z.enum(["green", "red"]).optional(),

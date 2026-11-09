@@ -527,6 +527,18 @@ export async function removeTaskWorktree(projectRoot: string, worktree: string):
   await gitExit(projectRoot, ["worktree", "prune"]);
 }
 
+/**
+ * The close path's other half (v0.5.0, ADR 0054 §5, ticket 05): deletes the
+ * `factory/<task>` branch the Task worktree ran on. Deliberately OUTSIDE
+ * `removeTaskWorktree` — the acceptance landing keeps the branch (the landed
+ * range's own history, and a pending-conflict's preserved repair work), while
+ * a clean retirement owes the repo the branch back. Best-effort, never
+ * throws: a Task that never spawned has no branch to delete.
+ */
+export async function deleteTaskWorktreeBranch(projectRoot: string, task: string): Promise<void> {
+  await gitExit(projectRoot, ["branch", "-D", taskWorktreeBranch(task)]);
+}
+
 // ---- the Task worktree allocation (v0.0.14 ADR 0010 §4, promoted from plugin/bin/task-worktree.mjs in v0.0.18) ----
 
 /**

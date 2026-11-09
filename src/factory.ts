@@ -21,11 +21,11 @@ import { runWatchPass, watchLaneAvailable } from "./watch.ts";
 import type { CopilotRunner, TimelineFetcher } from "./watch.ts";
 import { buildRetroDigest, buildSeqToTaskMap, retroDay, retroLaneAvailable, runRetroPass, writtenRetroForDay } from "./retro.ts";
 import type { RetroOutcome } from "./retro.ts";
-import { changedFiles, checkCleanAt, headCommitSync, landTaskWorktree, removeTaskWorktree, resolveClaimedCommit, scopeCoversFile } from "./workspace.ts";
+import { changedFiles, checkCleanAt, deleteTaskWorktreeBranch, headCommitSync, landTaskWorktree, removeTaskWorktree, resolveClaimedCommit, scopeCoversFile } from "./workspace.ts";
 import { MEMORY_FILES } from "./choke.ts";
 import { projectStateDir, readProjectNotebook, resolveProject } from "./project.ts";
 import { FactoryError } from "./errors.ts";
-import type { AttemptAccepted, ClaimReported, ContractSet, GateFinished, GitBlocked, LedgerEvent, MeterWritten, MeterUsage, NeedsHuman, NeedsHumanEvidence, NeedsHumanReason, PeerDisposition, PeerHandoffFields, RepokeDispatched, RepokeRefused, RespawnDispatched, RespawnRefused, SpawnDispatched, SpawnRefused, Verdict } from "./events.ts";
+import type { AttemptAccepted, ClaimReported, ContractSet, GateFinished, GitBlocked, LedgerEvent, MeterWritten, MeterUsage, NeedsHuman, NeedsHumanEvidence, NeedsHumanReason, PeerDisposition, PeerHandoffFields, RepokeDispatched, RepokeRefused, RespawnDispatched, RespawnRefused, SpawnDispatched, SpawnRefused, TaskClosed, Verdict } from "./events.ts";
 import type { GateResult } from "./gate.ts";
 import { LedgerAdmission } from "./history-admission.ts";
 
@@ -315,6 +315,22 @@ export interface AcceptInput {
   authority?: AcceptanceRole;
 }
 
+/**
+ * One clean Task retirement (v0.5.0, ADR 0054 §5, ticket 05): the terminal
+ * act for a superseded or split Task that will never be accepted. The same
+ * attribution law as the acceptance — `by` is the readable seat stamp,
+ * `authority` the transport-resolved role a working Agent cannot forge.
+ */
+export interface CloseInput {
+  task: string;
+  /** Why the Task is retired — the one sentence the ledger keeps. */
+  reason: string;
+  /** The closing seat's stamp (`lead` | `supervisor` | `owner`), the `accepted_by` law. */
+  by?: string;
+  /** Trusted execution authority, separate from readable attribution. */
+  authority?: AcceptanceRole;
+}
+
 export interface SpawnInput {
   task: string;
   /** The `provider[/model]` string the driver runs the agent under — recorded, never interpreted. */
@@ -437,6 +453,20 @@ export interface Factory {
    * before the line records — async git is why the call awaits.
    */
   accept(input: AcceptInput): Promise<AttemptAccepted>;
+  /**
+   * Closes a Task cleanly (v0.5.0, ADR 0054 §5, ticket 05) — the terminal
+   * retirement for work that will never be accepted (superseded, split after
+   * a context-ceiling). Refuses unknown (`unknown-task`), settled
+   * (`already-accepted`), retired (`already-closed`), and mid-gate
+   * (`gate-running`) Tasks, and a working Agent caller
+   * (`agent-cannot-close`). On success — and BEFORE the line records, the
+   * acceptance's own async-git law — the managed Task worktree is removed and
+   * the `factory/<task>` branch deleted, then exactly one `task_closed` line
+   * appends. The Plugin shell's close act (Spool `kind: "close"` /
+   * `lead_close_task`) adds the live Peer cancel/archive and the temporary
+   * Paseo workspace archive around this call.
+   */
+  close(input: CloseInput): Promise<TaskClosed>;
   /**
    * Judges a driver's spawn request (v0.0.5): the task must be known,
    * unaccepted, scoped when the invocation runs parallel (arity ≥ 2), and its
@@ -1153,6 +1183,49 @@ export function createFactory(options: FactoryOptions): Factory {
       });
     },
 
+    async close({ task, reason, by, authority }) {
+      assertTaskId(task);
+      if (reason.trim() === "") {
+        throw new FactoryError("invalid-close", "reason must be a non-empty string — the ledger keeps the one sentence that says why the Task retired");
+      }
+      const fullHistory = ledger.eventsFor(task);
+      const history = epochEventsFor(ledger, task);
+      const contract = this.contractFor(task);
+      if (contract === undefined) {
+        throw new FactoryError("unknown-task", `no contract set for task ${task} — register one first`);
+      }
+      const priorAccept = acceptedAttempt(fullHistory);
+      if (priorAccept !== undefined) {
+        throw new FactoryError(
+          "already-accepted",
+          `task ${task} was already accepted at attempt ${priorAccept.attempt}; the ledger is append-only`,
+        );
+      }
+      if (fullHistory.some((event) => event.event === "task_closed")) {
+        throw new FactoryError("already-closed", `task ${task} was already closed; the ledger is append-only`);
+      }
+      if (inFlightAttempt(history) !== undefined) {
+        throw new FactoryError("gate-running", `task ${task} has an in-flight Attempt — wait for its report before closing`);
+      }
+      // The acceptance's own seat law (v0.0.14, ADR 0010 §3), mirrored: the
+      // transport's resolved authority decides, a bare `by` only claims.
+      const role = authority ?? (by === "lead" ? "lead" : "owner");
+      if (role === "agent") throw new FactoryError("agent-cannot-close", "Working Agents cannot close Tasks");
+      // The cleanup precedes the line (the acceptance's async-git law): when
+      // the line records, the Task's execution tree is already gone — the
+      // managed worktree AND its factory/<task> branch, which a retirement
+      // owes the repo back (the landing path keeps it; this path deletes it).
+      const worktree = this.worktreeFor(task);
+      if (worktree !== undefined) await removeTaskWorktree(contract.workspace, worktree);
+      await deleteTaskWorktreeBranch(contract.workspace, task);
+      return ledger.append({
+        event: "task_closed",
+        task,
+        reason,
+        ...(by === undefined ? {} : { closed_by: by }),
+      });
+    },
+
     requestSpawn({ task, provider, arity, worktree, thinking, thinkingReason }) {
       const base = { task, provider, arity, ...(worktree === undefined || worktree.trim() === "" ? {} : { worktree }) };
       // Two spellings of one refusal on purpose: `code` is dash-style for the
@@ -1488,6 +1561,9 @@ export function createFactory(options: FactoryOptions): Factory {
       const history = ledger.eventsFor(task);
       const acceptance = acceptedAttempt(history);
       if (acceptance !== undefined && acceptance.landing !== "pending-conflict") return undefined;
+      // A clean retirement retires the binding too (v0.5.0, ADR 0054 §5): the
+      // choke and the close's own cleanup never resurrect a closed Task's tree.
+      if (history.some((event) => event.event === "task_closed")) return undefined;
       const epoch = epochEventsFor(ledger, task);
       for (const evt of epoch.toReversed()) {
         if (evt.event === "spawn_dispatched" && typeof evt.worktree === "string" && evt.worktree !== "") return evt.worktree;

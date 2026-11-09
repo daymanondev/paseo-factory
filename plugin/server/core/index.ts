@@ -6,10 +6,10 @@
  * forever (`research/03-hands-on/04-andrew-room.md` §12).
  */
 export { createFactory } from "./factory.ts";
-export type { Factory, FactoryOptions, ContractInput, ClaimInput, ClaimOutcome, AcceptInput, SpawnInput, SpawnDecision, RespawnInput, RespawnDecision, MeterInput } from "./factory.ts";
+export type { Factory, FactoryOptions, ContractInput, ClaimInput, ClaimOutcome, AcceptInput, CloseInput, SpawnInput, SpawnDecision, RespawnInput, RespawnDecision, MeterInput } from "./factory.ts";
 export { resolveProject, resolveOrBootstrapProject, ensureGitRepository, projectStateDir, projectNotebookPath, readProjectNotebook, PROJECT_NOTEBOOK_FILENAME, PROJECT_NOTEBOOK_MAX_LINES, PROJECT_NOTEBOOK_MAX_BYTES, readProjectRegistration, writeProjectRegistration, ensureProjectRegistered, listProjectRegistrations, discoverProjects } from "./project.ts";
 export type { ProjectResolution, BootstrapProjectOptions, BootstrapProjectResolution, DiscoveredProject, ProjectRegistration } from "./project.ts";
-export { resolveClaimedCommit, checkCleanAt, diffBetween, changedFiles, scopeCoversFile, headCommitSync, changesOutsideScope, landTaskWorktree, commitSeatMemoryOnRoot, reapWorktreeProcesses, taskWorktreePath, parseTaskWorktreePath, taskWorktreeBranch, prepareTaskWorktree } from "./workspace.ts";
+export { resolveClaimedCommit, checkCleanAt, diffBetween, changedFiles, scopeCoversFile, headCommitSync, changesOutsideScope, landTaskWorktree, commitSeatMemoryOnRoot, reapWorktreeProcesses, taskWorktreePath, parseTaskWorktreePath, taskWorktreeBranch, prepareTaskWorktree, deleteTaskWorktreeBranch } from "./workspace.ts";
 export type { CommitResolution, TreeCheck, LandingResult, PrepareTaskWorktreeOptions, PrepareTaskWorktreeResult, WorktreeProcessDependencies } from "./workspace.ts";
 export { Ledger, usageIsValid, isValidLedgerEvent, parseLedgerJsonl } from "./ledger.ts";
 export { readLedgerEvents } from "./ledger-read.ts";
@@ -176,12 +176,13 @@ export type {
   MeterWritten,
   MeterUsage,
   RetroWritten,
+  TaskClosed,
 } from "./events.ts";
 export { EVENT_NAMES, MAX_ATTEMPTS, PEER_DISPOSITIONS, PEER_HANDOFF_OUTCOMES } from "./events.ts";
 
 export { projectTask } from "./task-state.ts";
 export { taskStatusLines } from "./task-status.ts";
-export type { AcceptanceRole, AttemptState, ReviewState } from "./task-state.ts";
+export type { AcceptanceRole, AttemptState, ReviewState, TaskClosure } from "./task-state.ts";
 
 export { legacyIdentityMappingIsValid, planLegacyIdentity, resolveLedgerReference, remapLedgerReferences, classifyEventIdentities, semanticEventContent, canonicalHistoryJson, historyHash } from "./history-identity.ts";
 export type { IdentityMappingEntry, LegacyIdentityMapping, IdentityPlan, ReferenceResolution } from "./history-identity.ts";

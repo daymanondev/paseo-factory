@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import type { TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { execSync, spawn } from "node:child_process";
+import { execFileSync, execSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createFactory } from "../plugin/server/core/factory.ts";
@@ -1938,4 +1938,106 @@ test("a promptless (driver-path) thinking spawn replies with the resolved lane f
   assert.equal(reply.ok, true, JSON.stringify(reply));
   assert.equal(reply.resolvedProvider, "zcode/GLM-5.3:high", "medium lands on the configured suffix the catalog carries");
   assert.equal(surface.created.length, 0, "the driver creates this agent itself — the plugin never does");
+});
+
+// ---- clean Task retirement (v0.5.0, ADR 0054 §5, ticket 05) -----------------------------------
+
+test("parseSpoolRequest admits the close shape (task, reason, by seat) and refuses a missing reason or an off-seat by", () => {
+  const base = { id: "cl-1", kind: "close", task: "T-01", reason: "superseded by the split", submitter: "owner" };
+  const parsed = parseSpoolRequest(base);
+  assert.ok(parsed !== undefined && parsed.kind === "close", "the well-formed close request parses");
+  assert.equal(parsed.reason, "superseded by the split");
+  assert.equal(parsed.by, undefined);
+  const byLead = parseSpoolRequest({ ...base, id: "cl-2", by: "lead" });
+  assert.ok(byLead !== undefined && byLead.kind === "close" && byLead.by === "lead", "--by lead parses");
+  assert.equal(parseSpoolRequest({ ...base, id: "cl-3", reason: "   " }), undefined, "an empty reason is malformed");
+  assert.equal(parseSpoolRequest({ ...base, id: "cl-4", by: "agent" }), undefined, "by is exactly owner|supervisor|lead");
+  assert.equal(parseSpoolRequest({ id: "cl-5", kind: "close", task: "T-01", submitter: "owner" }), undefined, "reason is required");
+});
+
+test("Seam 1 (ticket 05, ADR 0054 §5): close cancels and archives the bound live Peer, archives the temporary Paseo workspace, removes the Task worktree and branch, and appends task_closed — and a working-Agent seat cannot close", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const home = join(dir, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const root = join(dir, "repo");
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, "README.md"), "x\n");
+  const base = gitCommitAll(root);
+  const resolved = resolveCoreProject(root);
+  assert.ok(resolved.ok, "the test project must resolve");
+  const slug = resolved.slug;
+  // A real Task worktree on branch factory/T-09 plus the temporary Paseo
+  // workspace registration — the two removal halves' observables.
+  const worktree = taskWorktreePath(stateDir, slug, "T-09");
+  execFileSync("git", ["worktree", "add", "-q", "-b", "factory/T-09", worktree, base], { cwd: root });
+  writeCoreRegistration(stateDir, slug, { root: resolved.root, taskWorkspaces: { "T-09": "ws-close-1" } });
+  const registry = createFactoryRegistry({ stateDir });
+  t.after(() => registry.stop());
+
+  const agents: FakeAgent[] = [
+    { id: "peer-1", status: "idle", provider: "pi/zai/glm-5.3", cwd: worktree, labels: { task: "T-09", project: slug } },
+  ];
+  const fake = fakeDaemon(agents);
+  const archivedWorkspaces: string[] = [];
+  fake.daemon.workspaces = {
+    open: async () => { throw new Error("unused in this test"); },
+    create: async () => { throw new Error("unused in this test"); },
+    archive: async (id: string) => { archivedWorkspaces.push(id); return { archivedAt: new Date().toISOString() }; },
+    ref: () => { throw new Error("unused in this test"); },
+  };
+  const stopped: string[] = [];
+  const spool = startSpool(stateDir, registry.root, {
+    pollMs: POLL_MS,
+    registry,
+    home,
+    daemon: fake.daemon,
+    stopAgent: async (agentId) => {
+      stopped.push(agentId);
+      return { ok: true };
+    },
+  });
+  t.after(() => spool.stop());
+
+  // The contracted, spawned Task the close retires.
+  const factory = registry.factoryForProject(slug);
+  factory.setContract({ task: "T-09", workspace: resolved.root, gate: "true", artifact: "README.md" });
+  factory.requestSpawn({ task: "T-09", provider: "claude", arity: 1, worktree });
+
+  const ledgerLines = () =>
+    readFileSync(join(projectStateDir(stateDir, slug), "ledger.jsonl"), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+  const listedPeerIds = async () => {
+    const page = await fake.daemon.agents.list({ filter: { includeArchived: false, includeBackground: true } });
+    return page.entries.map((entry) => entry.agent.id);
+  };
+
+  // A working-Agent seat is refused by name before anything changes.
+  dropRequest(spoolRootFor(stateDir), { id: "cl-agent", kind: "close", task: "T-09", reason: "agent tries", seat: "agent", submitter: "owner" });
+  await until(() => {
+    const reply = readReply(spoolRootFor(stateDir), "cl-agent");
+    assert.equal(reply.ok, false);
+    assert.equal(reply.code, "agent-cannot-close");
+  });
+  assert.equal(ledgerLines().some((e) => e.event === "task_closed"), false, "the refused close wrote no line");
+  assert.ok((await listedPeerIds()).includes("peer-1"), "the refused close touched no Peer");
+
+  // The Lead's close: one ledger line, the Peer cancelled and archived, the
+  // Paseo workspace archived and unregistered, the worktree and branch gone.
+  dropRequest(spoolRootFor(stateDir), { id: "cl-ok", kind: "close", task: "T-09", reason: "superseded after the context-ceiling split", by: "lead", seat: "lead", submitter: "owner" });
+  await until(() => assert.equal(readReply(spoolRootFor(stateDir), "cl-ok").ok, true, "the close replies ok"));
+  await until(() => assert.deepEqual(stopped, ["peer-1"], "the bound Peer was cancelled"));
+  assert.ok(!(await listedPeerIds()).includes("peer-1"), "the bound Peer is archived");
+  assert.deepEqual(archivedWorkspaces, ["ws-close-1"], "the temporary Paseo workspace was archived");
+  assert.ok(!readProjectRegistration(stateDir, slug)?.taskWorkspaces?.["T-09"], "the workspace registration is cleared");
+  assert.equal(existsSync(worktree), false, "the Task worktree directory is gone");
+  assert.equal(execFileSync("git", ["branch", "--list", "factory/T-09"], { cwd: root, encoding: "utf8" }).trim(), "", "branch factory/<task> is deleted");
+  const closed = ledgerLines().findLast((e) => e.event === "task_closed");
+  assert.ok(closed !== undefined, "task_closed landed on the project ledger");
+  assert.equal(closed.task, "T-09");
+  assert.equal(closed.reason, "superseded after the context-ceiling split");
+  assert.equal(closed.closed_by, "lead");
+  assert.equal(factory.contractFor("T-09") !== undefined, true, "the Contract stays on the append-only ledger — closed, not erased");
 });

@@ -89,7 +89,7 @@ describe("the Meter law at the view-model seam", () => {
 
 describe("the Tasks screen model", () => {
   it("keeps the CONTEXT.md status vocabulary verbatim", () => {
-    expect(TASK_STATUSES).toEqual(["accepted", "needs-human", "running", "ready-to-accept", "red", "waiting"]);
+    expect(TASK_STATUSES).toEqual(["accepted", "closed", "needs-human", "running", "ready-to-accept", "red", "waiting"]);
   });
 
   it("folds rows with statuses, counts, and the project meter", () => {
@@ -156,6 +156,7 @@ describe("the board's five columns (T-03)", () => {
       red: "needs_attention",
       "ready-to-accept": "ready_to_accept",
       accepted: "accepted",
+      closed: "accepted",
     };
     for (const status of TASK_STATUSES) expect(boardColumnForStatus(status)).toBe(expected[status]);
   });

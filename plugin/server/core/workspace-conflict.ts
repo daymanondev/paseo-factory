@@ -66,8 +66,14 @@ export function normalized(path: string): string {
 
 export function acceptedTasks(ledger: { events: readonly LedgerEvent[] }): Set<string> {
   const accepted = new Set<string>();
-  for (const event of ledger.events) if (event.event === "attempt_accepted") {
-    if (event.landing === "pending-conflict") accepted.delete(event.task); else accepted.add(event.task);
+  for (const event of ledger.events) {
+    if (event.event === "attempt_accepted") {
+      if (event.landing === "pending-conflict") accepted.delete(event.task); else accepted.add(event.task);
+    }
+    // v0.5.0 (ADR 0054 §5, ticket 05): a clean retirement is as terminal as a
+    // settled acceptance — a closed Task holds no live Contract, so the same
+    // set that retires the choke's coverage and the workspace conflict reads it.
+    else if (event.event === "task_closed") accepted.add(event.task);
   }
   return accepted;
 }
