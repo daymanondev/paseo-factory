@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-09
+
 ## [0.4.0] - 2026-11-09
 
 - Canonical SLP core (ADR 0053): restores the canonical `Paseo Room` / `Codex Room` Supervisor–Lead–Peer mechanics under `slp` mode across five behavior areas, each landed through the end-to-end bridge/Spool seams.

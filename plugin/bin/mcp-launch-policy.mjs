@@ -11,7 +11,7 @@ function isMcpStdioLaunch(args) {
   if (match === null) return false;
   const [, scope, name] = match;
   const pkg = scope === void 0 ? name : `${scope}/${name}`;
-  const server = ["@z_ai/mcp-server", "@upstash/context7-mcp", "@notionhq/notion-mcp-server"].includes(pkg) || scope === "@modelcontextprotocol" && name.startsWith("server-") || (name.startsWith("mcp-") || /-mcp(?:-|$)/.test(name));
+  const server = ["@z_ai/mcp-server", "@upstash/context7-mcp", "@notionhq/notion-mcp-server", "zcode-acp-server", "glm-acp-agent", "paseo-agy-acp"].includes(pkg) || scope === "@modelcontextprotocol" && name.startsWith("server-") || (name.startsWith("mcp-") || /-mcp(?:-|$)/.test(name) || /-acp(?:-server|-agent)?$/.test(name));
   return server && !args.slice(index + 1).some((arg) => /^(?:--package|--call|--node-options|--script-shell)(?:=|$)|^-[pc]/.test(arg));
 }
 export {

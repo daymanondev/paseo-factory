@@ -1,4 +1,4 @@
-/** Recognize a direct npx MCP stdio launch, without alternate packages or executables. */
+/** Recognize a direct npx MCP or ACP stdio launch, without alternate packages or executables. */
 export function isMcpStdioLaunch(args: readonly string[]): boolean {
   let index = 0;
   while (["-y", "--yes", "--no"].includes(args[index] ?? "")) index++;
@@ -10,9 +10,9 @@ export function isMcpStdioLaunch(args: readonly string[]): boolean {
   if (match === null) return false;
   const [, scope, name] = match;
   const pkg = scope === undefined ? name : `${scope}/${name}`;
-  const server = ["@z_ai/mcp-server", "@upstash/context7-mcp", "@notionhq/notion-mcp-server"].includes(pkg!) ||
+  const server = ["@z_ai/mcp-server", "@upstash/context7-mcp", "@notionhq/notion-mcp-server", "zcode-acp-server", "glm-acp-agent", "paseo-agy-acp"].includes(pkg!) ||
     (scope === "@modelcontextprotocol" && name!.startsWith("server-")) ||
-    (name!.startsWith("mcp-") || /-mcp(?:-|$)/.test(name!));
+    (name!.startsWith("mcp-") || /-mcp(?:-|$)/.test(name!) || /-acp(?:-server|-agent)?$/.test(name!));
   // npx options after the package can still alter execution on older npm versions.
   return server && !args.slice(index + 1).some((arg) => /^(?:--package|--call|--node-options|--script-shell)(?:=|$)|^-[pc]/.test(arg));
 }

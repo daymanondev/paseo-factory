@@ -92,7 +92,7 @@ test("npx shim permits MCP stdio servers for coordination seats and blocks gener
   const { executable, env, wrappedArgs } = stage(t, { name: "exec", tool: "npx", script: "exec-shim.mjs" });
   writeFileSync(executable, `#!${process.execPath}\nconsole.log(process.argv.slice(2).join(' '));\n`, { mode: 0o755 });
   for (const seat of ["supervisor", "lead"]) {
-    for (const pkg of ["chrome-devtools-mcp", "@notionhq/notion-mcp-server", "@z_ai/mcp-server", "@upstash/context7-mcp", "@modelcontextprotocol/server-filesystem@latest", "mcp-demo", "demo-mcp-server"]) {
+    for (const pkg of ["chrome-devtools-mcp", "@notionhq/notion-mcp-server", "@z_ai/mcp-server", "@upstash/context7-mcp", "@modelcontextprotocol/server-filesystem@latest", "mcp-demo", "demo-mcp-server", "zcode-acp-server@0.82.1", "glm-acp-agent@1.3.0", "paseo-agy-acp@2.4.0"]) {
       const result = spawnSync(process.execPath, [...wrappedArgs, "-y", pkg], { env: { ...env, PASEO_FACTORY_SEAT: seat }, encoding: "utf8" });
       assert.equal(result.status, 0, `${seat}: ${pkg}: ${result.stderr}`);
       assert.equal(result.stdout.trim(), `-y ${pkg}`);

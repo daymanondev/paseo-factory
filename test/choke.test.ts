@@ -1757,7 +1757,7 @@ test("coordination seats permit MCP stdio npx launches while refusing general pa
   mkdirSync(workspace);
   const factory = createFactory({ stateDir: join(dir, "state") });
   const choke = createChoke({ factory, homeDir: dir });
-  const commands = ["chrome-devtools-mcp", "@notionhq/notion-mcp-server", "@z_ai/mcp-server", "@upstash/context7-mcp", "@modelcontextprotocol/server-filesystem@latest", "mcp-demo", "demo-mcp-server"];
+  const commands = ["chrome-devtools-mcp", "@notionhq/notion-mcp-server", "@z_ai/mcp-server", "@upstash/context7-mcp", "@modelcontextprotocol/server-filesystem@latest", "mcp-demo", "demo-mcp-server", "zcode-acp-server@0.82.1", "glm-acp-agent@1.3.0", "paseo-agy-acp@2.4.0"];
   for (const seat of ["supervisor", "lead"] as const) {
     for (const pkg of [...commands, "create-vite@latest", "tsx script.ts"]) {
       let behavior: string | undefined;

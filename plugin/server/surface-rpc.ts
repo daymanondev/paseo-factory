@@ -1216,6 +1216,10 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         created = true;
         log(`${seat}: created agent ${handle.id} under ${lane} at ${project.root} (project ${project.slug})`);
       } catch (err) {
+        const priorBound = registration?.[seat];
+        if (readProjectRegistration(deps.stateDir, project.slug)?.[seat] !== priorBound) {
+          writeProjectRegistration(deps.stateDir, project.slug, { root: project.root, [seat]: priorBound ?? null });
+        }
         return failure("create-failed", `creating the ${seat} agent failed: ${messageOf(err)}`);
       }
     }
