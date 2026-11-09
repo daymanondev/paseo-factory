@@ -1159,6 +1159,7 @@ export function createFactory(options: FactoryOptions): Factory {
       if (worktree !== undefined && priorAccept?.landing !== "pending-conflict" && isReadOnlyPeerDisposition(contract.disposition)) {
         await removeTaskWorktree(contract.workspace, worktree);
       } else if (worktree !== undefined && gate.sha !== undefined) {
+        const contractSlug = projectSlugOfWorkspace(contract.workspace);
         const result = await landTaskWorktree({
           projectRoot: contract.workspace,
           worktree,
@@ -1166,6 +1167,11 @@ export function createFactory(options: FactoryOptions): Factory {
           ...(priorAccept?.landing === "pending-conflict" ? { retry: true } : {}),
           ...(contract.base === undefined ? {} : { base: contract.base }),
           branch: `factory/${task}`,
+          // v0.5.0 (ADR 0052 Decision 1): a legacy untracked
+          // `.scratch/notebook.md` promotes into <projectStateDir>/ before
+          // the landing's clean-tree check — never a pending-conflict.
+          stateDir,
+          ...(contractSlug === undefined ? {} : { projectSlug: contractSlug }),
         });
         landing = result.landing;
         landingNote = result.note;

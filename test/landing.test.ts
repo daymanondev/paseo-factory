@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { createFactory } from "../src/index.ts";
+import { createFactory, resolveProject } from "../src/index.ts";
 import { disposeDir, factoryErrorCode, gitCommitAll, gitCommitChanges, makeTempDir } from "./helpers.ts";
 
 function landingFixture(t: TestContext) {
@@ -156,4 +156,24 @@ test("large untracked dependency trees do not overflow cleanliness inspection", 
   }
   assert.equal((await factory.claim({ task, sha: claimed, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } })).verdict, "green");
   assert.equal((await factory.accept({ task, attempt: 1 })).landing, "landed");
+});
+
+test("an untracked .scratch/notebook.md promotes into <projectStateDir> and never blocks the landing (ADR 0052 §1)", async (t) => {
+  const { dir, factory, task, workspace, worktree, claimed } = landingFixture(t);
+  const legacy = "## 1. Verification & Run Recipe\nnpm run check\n\n## 2. Recurrence Guard\n| ID | Cause |\n| --- | --- |\n| V-01 | c → e |\n";
+  mkdirSync(join(workspace, ".scratch"), { recursive: true });
+  writeFileSync(join(workspace, ".scratch", "notebook.md"), legacy);
+  assert.equal((await factory.claim({ task, sha: claimed, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } })).verdict, "green");
+
+  const accepted = await factory.accept({ task, attempt: 1 });
+  assert.equal(accepted.landing, "landed", `the legacy notebook must not produce pending-conflict (note: ${accepted.landingNote ?? "none"})`);
+  assert.equal(existsSync(join(workspace, ".scratch", "notebook.md")), false, "the untracked working-tree copy is unlinked before the clean-tree check");
+  const resolved = resolveProject(workspace);
+  assert.ok(resolved.ok, "the fixture workspace must resolve");
+  assert.equal(
+    readFileSync(join(dir, "state", "projects", resolved.slug, "notebook.md"), "utf8"),
+    legacy,
+    "the promoted canonical notebook lives under <stateDir>/projects/<slug>/notebook.md",
+  );
+  assert.equal(existsSync(worktree), false);
 });

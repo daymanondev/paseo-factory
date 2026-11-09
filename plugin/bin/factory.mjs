@@ -145,6 +145,19 @@ commands:
              line when omitted; --project (v0.0.89) pins the target Project
              when two Projects share a Task id.
 
+  notebook   Update the Project notebook through the plugin single writer
+             (v0.5.0, ADR 0052 §1): the spool validates the content (both
+             required headings — "## 1. Verification & Run Recipe" and
+             "## 2. Recurrence Guard" — plus <= 80 lines, <= 4,096 UTF-8
+             bytes, and <= 12 active Recurrence Guard rows) and persists
+             <projectStateDir>/notebook.md in-process. OS-sandboxed Lead
+             seats (codex Seatbelt) update the notebook without shell-
+             writing <project-root>; over-limit or malformed content is
+             refused with notebook-limit-exceeded / notebook-schema-invalid
+             naming the exact counts — fold/graduate rows, the writer never
+             truncates the bottom of the table.
+             notebook (--content <text> | --file <path>) [--project <dir|slug>]
+
   run        Run contracted tasks' agents to verdict (the driver, v0.0.5):
              one agent per task on the daemon, watched to its verdict.
              run <task> [<task>…] [--provider <provider[/model]>]
@@ -804,6 +817,58 @@ if (command === "repoke") {
       agent,
       ...(v.message === undefined ? {} : { message: v.message }),
       ...(projectSlug === undefined ? {} : { projectSlug }),
+    },
+    waitSeconds(parsed),
+  );
+  console.log(`factory: ${reply.summary}`);
+  process.exit(0);
+}
+
+if (command === "notebook") {
+  const parsed = parseCommandOptions({
+    content: { type: "string" },
+    file: { type: "string" },
+    project: { type: "string" },
+    "wait-secs": { type: "string" },
+  });
+  const v = parsed.values;
+  if (parsed.positionals.length > 0) fail(`notebook: unexpected positional "${parsed.positionals[0]}"`);
+  if ((v.content === undefined) === (v.file === undefined)) {
+    fail("notebook: pass exactly one of --content <text> or --file <path> (the full notebook text)");
+  }
+  let content;
+  if (v.file !== undefined) {
+    try {
+      content = readFileSync(resolvePath(v.file), "utf8");
+    } catch (error) {
+      fail(`notebook: cannot read --file ${v.file}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  } else {
+    content = v.content;
+  }
+  // The Lead's single-writer door (v0.5.0, ADR 0052 §1): the content goes to
+  // the plugin's spool writer, which validates and persists
+  // <projectStateDir>/notebook.md in-process — the CLI (and the OS-sandboxed
+  // Lead seat behind it) never writes the notebook itself.
+  let projectSlug;
+  let projectRoot;
+  if (typeof v.project === "string" && v.project.trim() !== "") {
+    const target = v.project.trim();
+    if (target.includes("/") || existsSync(resolvePath(target))) {
+      const resolved = resolveProjectSlug("notebook", target);
+      projectSlug = resolved.slug;
+      projectRoot = resolved.root;
+    } else {
+      projectSlug = target;
+    }
+  }
+  const reply = await roundTrip(
+    {
+      id: randomId(),
+      kind: "notebook",
+      content,
+      ...(projectSlug === undefined ? {} : { projectSlug }),
+      ...(projectRoot === undefined ? {} : { projectRoot }),
     },
     waitSeconds(parsed),
   );

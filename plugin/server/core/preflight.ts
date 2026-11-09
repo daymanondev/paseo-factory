@@ -19,6 +19,21 @@ import { SCRUM_LEAD_MCP_TOOLS, SCRUM_SUPERVISOR_MCP_TOOLS } from "./scrum/prompt
 import { projectNotebookPath, readProjectNotebook } from "./project.ts";
 import type { LedgerEvent } from "./events.ts";
 
+/**
+ * The plugin-owned Project notebook writer surface (v0.5.0, ADR 0052
+ * Decision 1 — spec Implementation Decision 6 names `src/preflight.ts` as
+ * this surface's home). The law itself lives beside the notebook path
+ * helpers in `src/project.ts` so `readProjectNotebook` can trigger the same
+ * promotion without a module cycle; the Spool `notebook` handler and every
+ * other consumer import the writer from here.
+ */
+export {
+  writeProjectNotebook,
+  syncLegacyScratchNotebook,
+  PROJECT_NOTEBOOK_MAX_GUARD_ROWS,
+  type LegacyNotebookSync,
+} from "./project.ts";
+
 export interface SeatKickoffPacketInput {
   role: "supervisor" | "lead";
   projectSlug: string;
@@ -223,11 +238,13 @@ export function buildSeatKickoffPacket(input: SeatKickoffPacketInput): string {
   // v0.1.0 (ADR 0048 §3): the Project notebook rides the packet as dynamic
   // state — its slug-dependent path plus the bounded content (or the clean
   // empty-state placeholder) — placed with the dynamic preflight lines so
-  // `omitSystemPromptDuplicates` keeps it.
+  // `omitSystemPromptDuplicates` keeps it. Since v0.5.0 (ADR 0052 Decision 1)
+  // the read promotes any legacy untracked `.scratch/notebook.md` first —
+  // the seat's Turn 1 self-heals the working tree before a landing can trip.
   const notebookLines: string[] = [];
   if (input.stateDir !== undefined) {
     const notebookPath = projectNotebookPath(input.stateDir, input.projectSlug);
-    const notebook = readProjectNotebook(input.stateDir, input.projectSlug);
+    const notebook = readProjectNotebook(input.stateDir, input.projectSlug, input.projectRoot);
     notebookLines.push(`- Project notebook path: ${notebookPath}`);
     notebookLines.push(
       notebook !== undefined

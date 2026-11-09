@@ -982,7 +982,7 @@ In Scrum, preserve and refine the Owner's linked Open Design screens seeded in .
 }
 
 // src/project.ts
-import { existsSync as existsSync3, mkdirSync as mkdirSync3, readFileSync as readFileSync4, readdirSync as readdirSync2, realpathSync as realpathSync3, statSync, writeFileSync as writeFileSync3 } from "node:fs";
+import { copyFileSync, existsSync as existsSync3, mkdirSync as mkdirSync3, readFileSync as readFileSync4, readdirSync as readdirSync2, realpathSync as realpathSync3, statSync, unlinkSync, writeFileSync as writeFileSync3 } from "node:fs";
 import { isAbsolute as isAbsolute3, basename as basename2, join as join4, parse, resolve as resolve3 } from "node:path";
 function projectStateDir(stateDir, projectSlug) {
   return join4(stateDir, "projects", projectSlug);

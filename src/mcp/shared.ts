@@ -130,6 +130,22 @@ export const sharedTools: Record<string, ToolDefinition> = {
       required: ["task"],
     },
   },
+  lead_update_notebook: {
+    name: "lead_update_notebook",
+    description:
+      "Replace the Project notebook (`<projectStateDir>/notebook.md`) with `content` through the plugin's single writer — never write `.scratch/notebook.md` inside <project-root> (ADR 0052 §1). Requires both headings (`## 1. Verification & Run Recipe`, `## 2. Recurrence Guard`), `<= 80` lines, `<= 4,096` UTF-8 bytes, and `<= 12` active Recurrence Guard rows; over-limit or malformed content is refused with `notebook-limit-exceeded` / `notebook-schema-invalid` naming the exact counts — fold/graduate rows, the writer never truncates.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        content: {
+          type: "string",
+          description: "The full notebook text — both required headings, within the line/byte/row caps.",
+        },
+        workspace: { type: "string", description: "Optional Project root path (defaults to current project root)." },
+      },
+      required: ["content"],
+    },
+  },
   lead_needs_human: {
     name: "lead_needs_human",
     description:
@@ -238,7 +254,7 @@ export const sharedTools: Record<string, ToolDefinition> = {
 
 export const sharedRoles = {
   supervisor: ["supervisor_accept_task", "supervisor_dispatch_lead", "supervisor_read_ledger", "supervisor_end_cycle", "lead_close_task", "lead_retire_task"],
-  lead: ["lead_repoke_agent", "lead_needs_human", "lead_create_worktree", "lead_set_contract", "lead_dispatch_agent", "lead_verify", "lead_merge", "lead_remove_worktree", "lead_report_to_supervisor", "lead_close_task", "lead_retire_task"],
+  lead: ["lead_repoke_agent", "lead_needs_human", "lead_create_worktree", "lead_set_contract", "lead_dispatch_agent", "lead_verify", "lead_merge", "lead_remove_worktree", "lead_report_to_supervisor", "lead_close_task", "lead_retire_task", "lead_update_notebook"],
   agent: ["agent_claim", "agent_escalate_blocker"],
   unbound: ["factory_dispatch_supervisor", "factory_status"],
 };

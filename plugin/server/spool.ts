@@ -48,6 +48,7 @@ import { CorrelationRegistry, readCorrelations } from "./core/correlations.ts";
 import { loadLanes, parseLane, PEER_THINKING_LEVELS, resolvePeerThinkingLane } from "./core/lanes.ts";
 import type { LaneThinkingCatalogEntry, PeerThinkingLevel } from "./core/lanes.ts";
 import { listProjectRegistrations, readProjectRegistration, resolveProject, writeProjectRegistration } from "./core/project.ts";
+import { writeProjectNotebook } from "./core/preflight.ts";
 import { allocateTaskWorktree } from "./core/mcp/worktrees.ts";
 import { ensureProjectRegistered, resolveTargetProject } from "./projects.ts";
 import type { FactoryRegistry, TargetProjectContext } from "./projects.ts";
@@ -412,6 +413,30 @@ export interface RetroRequest {
 }
 
 /**
+ * The Lead's notebook update (v0.5.0, ADR 0052 Decision 1): the full
+ * replacement content for `<projectStateDir>/notebook.md`, submitted for the
+ * plugin — the one writer — to validate and persist in-process. OS-sandboxed
+ * Lead seats (codex Seatbelt) cannot shell-write outside `<project-root>`,
+ * so the notebook reaches its canonical home through this request (or the
+ * `factory notebook` CLI / `lead_update_notebook` MCP tool above it) and the
+ * working tree never carries a `.scratch/notebook.md` again. Exactly one
+ * target Project: `projectSlug`, or `projectRoot` resolved to its slug.
+ */
+export interface NotebookRequest {
+  id: string;
+  kind: "notebook";
+  /** The full notebook text — the plugin validates and refuses over-limit content, never truncates. */
+  content: string;
+  /** The Project's registered slug — one of projectSlug/projectRoot must name the Project. */
+  projectSlug?: string;
+  /** Any directory inside the Project's repository — resolved to its canonical slug. */
+  projectRoot?: string;
+  submitter?: string;
+  /** Caller seat stamped from `PASEO_FACTORY_SEAT` when present — the notebook is the Lead's act. */
+  seat?: SpoolSeat;
+}
+
+/**
  * The driver's meter request (v0.0.8, ticket 03 item 1 — ADR 0004's third
  * amendment): the usage snapshot the driver captured off its terminal
  * `fetch_agent` poll, submitted for the plugin to validate and ledger as
@@ -526,7 +551,8 @@ export type SpoolRequest =
   | MeterRequest
   | RepokeRequest
   | NeedsHumanRequest
-  | RetroRequest;
+  | RetroRequest
+  | NotebookRequest;
 
 /** Handles a synthetic ask — `createChoke(...).spoolAskHandler` is the implementation. */
 export type AskHandler = (request: AskRequest) => SpoolReply;
@@ -959,6 +985,24 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     return {
       id: req.id,
       kind: "retro",
+      ...(req.projectSlug === undefined ? {} : { projectSlug: req.projectSlug }),
+      ...(req.projectRoot === undefined ? {} : { projectRoot: req.projectRoot }),
+      ...submitterField,
+      ...seatField,
+    };
+  }
+  if (req.kind === "notebook") {
+    // The notebook update (v0.5.0, ADR 0052 Decision 1): the content is any
+    // string — an empty or malformed one is the WRITER's named refusal
+    // (`notebook-schema-invalid`), never a silent parse reject — plus the
+    // optional Project scope and the submitter/seat stamps.
+    if (typeof req.content !== "string") return undefined;
+    if (req.projectSlug !== undefined && (typeof req.projectSlug !== "string" || req.projectSlug.trim() === "")) return undefined;
+    if (req.projectRoot !== undefined && (typeof req.projectRoot !== "string" || req.projectRoot.trim() === "")) return undefined;
+    return {
+      id: req.id,
+      kind: "notebook",
+      content: req.content,
       ...(req.projectSlug === undefined ? {} : { projectSlug: req.projectSlug }),
       ...(req.projectRoot === undefined ? {} : { projectRoot: req.projectRoot }),
       ...submitterField,
@@ -1465,6 +1509,7 @@ const PROJECT_SCOPED_SPOOL_KINDS = new Set([
   "repoke",
   "needs_human",
   "ask",
+  "notebook",
   "reset",
   "delete",
 ]);
@@ -1486,6 +1531,8 @@ function contextOfSpoolRequest(request: SpoolRequest): TargetProjectContext {
       return { project: request.projectSlug, task: request.task, workspace: request.worktree, submitter: request.submitter };
     case "meter":
       return { project: request.projectSlug, task: request.task, agentId: request.agent, submitter: request.submitter };
+    case "notebook":
+      return { project: request.projectSlug, workspace: request.projectRoot, submitter: request.submitter };
     case "ask":
       return { project: request.projectSlug, task: request.task, workspace: request.cwd, agentId: request.agent, submitter: request.submitter };
     case "reset":
@@ -1646,6 +1693,17 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         message: `Supervisor cannot call factory ${request.kind}; dispatch the directive to Lead via 'factory lead dispatch --workspace <dir> --message <directive>' and end your turn.`,
       };
     }
+    // The Project notebook is the Lead's operational memory (v0.5.0, ADR
+    // 0052 §1 — the cognitive firewall keeps it Lead-owned): a Supervisor
+    // reads the Lead's reports, it never rewrites the Lead's notebook.
+    if (request.kind === "notebook" && effectiveSeat === "supervisor") {
+      return {
+        id: request.id,
+        ok: false,
+        code: "supervisor-cannot-notebook",
+        message: `Seat supervisor cannot call factory notebook; the Project notebook is the Lead's operational memory — dispatch the ruling to Lead instead.`,
+      };
+    }
 
     if (
       (request.kind === "contract" ||
@@ -1656,6 +1714,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         request.kind === "meter" ||
         request.kind === "accept" ||
         request.kind === "close" ||
+        request.kind === "notebook" ||
         (request.kind === "lead_dispatch" && request.from !== "peer") ||
         request.kind === "supervisor_dispatch" ||
         request.kind === "supervisor_report" ||
@@ -2350,6 +2409,63 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         ok: true,
         summary: `task ${request.task} closed by ${closedBy} (reason: ${request.reason}) — bound Peer retired, Task worktree and branch factory/${request.task} removed`,
         event: closed,
+      };
+    }
+    if (request.kind === "notebook") {
+      // The plugin's single-writer notebook persist (v0.5.0, ADR 0052
+      // Decision 1): the write happens in-process at
+      // `<projectStateDir>/notebook.md` — never inside `<project-root>` — so
+      // OS-sandboxed Lead seats never shell-write the notebook again. The
+      // target resolves through the same context-first order the retro uses
+      // (explicit slug/root → Correlation token → single-Project fallback);
+      // an unresolvable target is a named refusal, never a guessed Project.
+      let slug: string | undefined;
+      let projectRoot: string | undefined =
+        request.projectRoot !== undefined && request.projectRoot.trim() !== "" ? request.projectRoot.trim() : undefined;
+      if (registry !== undefined) {
+        const target = resolveTargetProject(registry, {
+          project: request.projectSlug,
+          workspace: projectRoot,
+          submitter: request.submitter,
+        });
+        if (!target.ok) {
+          return {
+            id: request.id,
+            ok: false,
+            code: target.code === "unknown-project" ? "unknown-project" : "notebook-project-required",
+            message: `the notebook belongs to exactly one Project — ${target.message}`,
+          };
+        }
+        slug = target.slug;
+      } else if (request.projectSlug !== undefined && request.projectSlug.trim() !== "") {
+        slug = request.projectSlug.trim();
+      } else if (projectRoot !== undefined) {
+        const resolved = resolveProject(projectRoot);
+        if (!resolved.ok) {
+          return { id: request.id, ok: false, code: "unknown-project", message: `could not resolve Project root "${projectRoot}" — ${resolved.reason}` };
+        }
+        slug = resolved.slug;
+        projectRoot = resolved.root;
+      }
+      if (slug === undefined || slug.trim() === "") {
+        return {
+          id: request.id,
+          ok: false,
+          code: "notebook-project-required",
+          message: "the notebook belongs to exactly one Project — pass --project <dir|slug> (or run from the Project's Lead seat)",
+        };
+      }
+      // The legacy-copy unlink wants the real Project root; the registry
+      // knows it, and a request that named only the slug finds it there.
+      if (projectRoot === undefined) projectRoot = readProjectRegistration(factory.stateDir, slug)?.root;
+      // writeProjectNotebook refuses over-limit/malformed content by named
+      // code (notebook-limit-exceeded / notebook-schema-invalid) — the outer
+      // catch maps the FactoryError onto the reply.
+      const path = writeProjectNotebook(factory.stateDir, request.content, slug, projectRoot);
+      return {
+        id: request.id,
+        ok: true,
+        summary: `notebook updated: ${path} (${request.content.split("\n").length} lines, ${Buffer.byteLength(request.content, "utf8")} bytes) by ${request.submitter ?? "owner"}`,
       };
     }
     // The acceptance (v0.0.14): awaited — a worktree task's local landing

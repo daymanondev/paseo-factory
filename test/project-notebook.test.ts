@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   PROJECT_NOTEBOOK_FILENAME,
@@ -9,6 +9,7 @@ import {
   projectNotebookPath,
   readProjectNotebook,
 } from "../src/project.ts";
+import { PROJECT_NOTEBOOK_MAX_GUARD_ROWS } from "../src/preflight.ts";
 import { disposeDir, makeTempDir } from "./helpers.ts";
 
 /**
@@ -106,4 +107,38 @@ test("readProjectNotebook never throws on an unreadable notebook (a directory at
   disposeDir(t, stateDir);
   mkdirSync(projectNotebookPath(stateDir, "demo-abc123"), { recursive: true });
   assert.equal(readProjectNotebook(stateDir, "demo-abc123"), undefined);
+});
+
+// ---- the legacy .scratch promotion (v0.5.0, ADR 0052 §1, ticket 06) ---------------------------
+
+test("readProjectNotebook promotes a legacy <project-root>/.scratch/notebook.md when projectRoot is known (ADR 0052 Decision 1)", (t) => {
+  const stateDir = makeTempDir("notebook-promote-");
+  disposeDir(t, stateDir);
+  const projectRoot = makeTempDir("notebook-promote-root-");
+  disposeDir(t, projectRoot);
+  const legacy = "## 1. Verification & Run Recipe\nnpm run check\n\n## 2. Recurrence Guard\n| ID | Cause |\n| --- | --- |\n| V-01 | c → e |\n";
+  mkdirSync(join(projectRoot, ".scratch"), { recursive: true });
+  writeFileSync(join(projectRoot, ".scratch", "notebook.md"), legacy);
+
+  const read = readProjectNotebook(stateDir, "demo-abc123", projectRoot);
+  assert.equal(read, legacy, "the promoted legacy content reads back");
+  assert.equal(readFileSync(projectNotebookPath(stateDir, "demo-abc123"), "utf8"), legacy, "the canonical <projectStateDir>/notebook.md now exists");
+  assert.equal(existsSync(join(projectRoot, ".scratch", "notebook.md")), false, "the untracked working-tree copy is unlinked");
+});
+
+test("readProjectNotebook without projectRoot never touches a legacy scratch copy (backward-compatible reads)", (t) => {
+  const stateDir = makeTempDir("notebook-nopromote-");
+  disposeDir(t, stateDir);
+  const projectRoot = makeTempDir("notebook-nopromote-root-");
+  disposeDir(t, projectRoot);
+  mkdirSync(join(projectRoot, ".scratch"), { recursive: true });
+  writeFileSync(join(projectRoot, ".scratch", "notebook.md"), "## 1. Verification & Run Recipe\nlegacy\n");
+
+  assert.equal(readProjectNotebook(stateDir, "demo-abc123"), undefined, "the two-argument read stays read-only");
+  assert.equal(existsSync(join(projectRoot, ".scratch", "notebook.md")), true, "no projectRoot means no promotion, no unlink");
+  assert.equal(existsSync(projectNotebookPath(stateDir, "demo-abc123")), false);
+});
+
+test("PROJECT_NOTEBOOK_MAX_GUARD_ROWS pins the Recurrence Guard row cap (spec line 106)", () => {
+  assert.equal(PROJECT_NOTEBOOK_MAX_GUARD_ROWS, 12);
 });
