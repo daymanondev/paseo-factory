@@ -133,6 +133,25 @@ test("the successor's second crossing survives restart and escalates to the Lead
   assert.equal(f.created.length, 2, f.logs.join("\n"));
 });
 
+test("a read-only Contract's 160k successor is fenced: the worktree stays clean at HEAD, no commit, claim without --sha with the disposition's evidence (ticket 03, ADR 0054 §3)", async t => {
+  const f = fixture(t);
+  // The epoch moves onto a read-only disposition before the crossing — the
+  // successor continues the same Task under the reviewer's fence.
+  f.factory.setContract({ task: "T-04", workspace: f.root, gate: "", disposition: "reviewer", description: "Audit the slice" });
+  await f.runtime.onLeadTurnEnded(ended(f.peer.id));
+  writeFileSync(f.handoff, "# Completed & Verified Slice\nPartial findings; the retry policy is unverified.");
+  await f.runtime.onLeadTurnEnded(ended(f.peer.id));
+  const successor = f.created[0]!;
+  assert.match(successor.prompt!, /Disposition: reviewer|disposition reviewer/, "the successor prompt names the disposition");
+  assert.match(successor.prompt!, /Read-Only/, "the successor prompt states the session is Read-Only");
+  assert.match(successor.prompt!, /read-only-disposition-fence/, "the fence is named");
+  assert.match(successor.prompt!, /clean at HEAD/, "the worktree must stay clean at HEAD");
+  assert.ok(!successor.prompt!.includes("--sha"), "no sha flag reaches a read-only successor");
+  assert.ok(!successor.prompt!.includes("for the committed HEAD"), "the engineer's committed-HEAD claim instruction never appears");
+  assert.match(successor.prompt!, /blocking defects/, "the reviewer disposition's evidence expectation rides the prompt");
+  assert.match(successor.prompt!, /agent_claim|factory-claim/, "the claim invocation is still named");
+});
+
 for (const sensor of ["live", "native transcript"] as const) {
   test(`the periodic runtime sweep interrupts a single running turn at 160k using ${sensor}`, async t => {
     const f = fixture(t);

@@ -98,6 +98,39 @@ test("renderBrief names the worktree branch when the driver passes it (the task-
   assert.ok(!brief.includes("`live07-d`."), "the bare task id is not offered as a branch to switch to");
 });
 
+test("renderBrief branches on the read-only dispositions (ticket 03, ADR 0054 §3): the session is fenced Read-Only, the claim invocation is named without commit/--sha, and the handoff carries the disposition's own evidence", () => {
+  const evidence: Record<string, RegExp> = {
+    architect: /alternatives considered/i,
+    reviewer: /blocking defects/i,
+    scout: /confidence/i,
+  };
+  for (const disposition of ["architect", "reviewer", "scout"] as const) {
+    const brief = renderBrief("live03-ro", "/custom/bin", undefined, undefined, "factory/live03-ro", disposition);
+
+    assert.ok(brief.includes(`Disposition: ${disposition}`), `${disposition}: the disposition header rides the brief`);
+    assert.ok(brief.includes("Read-Only"), `${disposition}: the brief states the session is Read-Only`);
+    assert.ok(brief.includes("read-only-disposition-fence"), `${disposition}: the fence is named`);
+    assert.ok(brief.includes("forbids file edits and `git commit`"), `${disposition}: the fence forbids file edits and git commit by name`);
+    assert.ok(
+      brief.includes("`factory-claim --task live03-ro --outcome <complete|partial|blocked|reopen> --scope <text> --verification <text> --unknowns <text>`"),
+      `${disposition}: the exact claim invocation is named with the four handoff fields and no commit/--sha`,
+    );
+    assert.ok(!brief.includes("--sha"), `${disposition}: no --sha anywhere in a read-only brief`);
+    assert.ok(!brief.includes("When done: commit"), `${disposition}: the engineer's commit instruction never appears`);
+    assert.ok(!brief.includes("make a NEW commit"), `${disposition}: the RED-recovery commit instruction never appears`);
+    assert.match(brief, evidence[disposition], `${disposition}: the disposition's Paseo Room evidence expectation is stated`);
+    assert.ok(brief.includes('PATH="/custom/bin" first.'), `${disposition}: the PATH export still bakes the driver's environment`);
+  }
+});
+
+test("renderBrief keeps the engineer law byte-identical on the engineer and omitted dispositions (ticket 03)", () => {
+  const explicit = renderBrief("live03-eng", "/custom/bin", undefined, undefined, "factory/live03-eng", "engineer");
+  const omitted = renderBrief("live03-eng", "/custom/bin", undefined, undefined, "factory/live03-eng");
+  assert.ok(explicit.includes("When done: commit, run\n`git rev-parse HEAD`, then `factory-claim --task live03-eng --sha <sha>`."));
+  assert.equal(explicit, omitted, "an explicit engineer disposition renders byte-identically to the omitted default");
+  assert.ok(!explicit.includes("Read-Only") && !explicit.includes("read-only-disposition-fence"), "no read-only fence leaks into the engineer brief");
+});
+
 test("splitProvider takes provider[/model] on the first slash", () => {
   assert.deepEqual(splitProvider("claude"), { provider: "claude", model: undefined });
   assert.deepEqual(splitProvider("claude/opus-4-8"), { provider: "claude", model: "opus-4-8" });

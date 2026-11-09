@@ -41,6 +41,7 @@ import { dirname, join, resolve } from "node:path";
 import { FactoryError } from "./core/errors.ts";
 import { usageIsValid } from "./core/ledger.ts";
 import { needsHumanEvidenceIsValid, NEEDS_HUMAN_REASONS, PEER_DISPOSITIONS, PEER_HANDOFF_OUTCOMES } from "./core/events.ts";
+import { activeContractSnapshot, repokeCompletionFooter } from "./core/disposition-prompt.ts";
 import { handoffLines } from "./core/report.ts";
 import type { Factory } from "./core/factory.ts";
 import type { LedgerEvent, MeterUsage, NeedsHumanEvidence, NeedsHumanReason, PeerDisposition, PeerHandoffFields, Verdict } from "./core/events.ts";
@@ -2241,22 +2242,28 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
       if (effectiveSeat === "lead" && resolvedDaemon?.agents?.ref !== undefined) {
         deliveryFailure = "the daemon send failed";
         try {
+          // The CURRENT contract re-read at delivery time (ticket 03, ADR
+          // 0054 §3): the snapshot below reaches the live Peer exactly as the
+          // epoch stands now, so an in-place `lead_set_contract` update
+          // (`resetPeer: false`) is always delivered — never the epoch this
+          // handler or the caller last cached.
           const contract = factory.contractFor(request.task);
           if (ruling === undefined) {
-            // The Denial-stall continuation, byte-identical to the pre-0053 law.
-            const nudge = `Re-poke from Lead on task ${request.task}: continue inside your Task worktree on branch factory/${request.task}, run the gate \`${contract?.gate ?? ""}\`, commit your changes, and call \`paseo-factory_agent_claim\` (or \`agent_claim\`).`;
+            // The Denial-stall continuation: the fixed prefix, then the
+            // Active Contract Snapshot, then the disposition-aware footer.
+            const nudge = [
+              `Re-poke from Lead on task ${request.task}:`,
+              activeContractSnapshot(contract),
+              repokeCompletionFooter(request.task, contract),
+            ].join("\n\n");
             await resolvedDaemon.agents.ref(request.agent).send(nudge);
           } else {
             const disposition = contract?.disposition ?? "engineer";
-            const briefLines =
-              contract?.description !== undefined && contract.description.trim() !== ""
-                ? [`Updated Brief (contract seq ${contract.seq}): ${contract.description.trim()}`]
-                : [];
             const nudge = [
               `Lead ruling on task ${request.task} (disposition: ${disposition}):`,
+              activeContractSnapshot(contract),
               ruling,
-              ...briefLines,
-              `Continue inside your Task worktree on branch factory/${request.task}, run the gate \`${contract?.gate ?? ""}\`, commit your changes, and call \`paseo-factory_agent_claim\` (or \`agent_claim\`).`,
+              repokeCompletionFooter(request.task, contract),
             ].join("\n\n");
             await resolvedDaemon.agents.ref(request.agent).send(nudge);
           }

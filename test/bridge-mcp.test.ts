@@ -1136,6 +1136,91 @@ test("lead_repoke_agent with message delivers the Lead's ruling into the live Pe
   assert.equal(sentPrompts.filter((p) => p.id === "peer-created-1").length, 2, "a refused repoke sends nothing");
 });
 
+test("the MCP fallback spawn prompt branches on the disposition (ticket 03, ADR 0054 §3): a read-only Peer is fenced with its own evidence and a no-commit claim; the engineer keeps gate + commit + agent_claim", async (t) => {
+  const homeDir = mkdtempSync(join(tmpdir(), "factory-bridge-fallback-disposition-"));
+  const stateDir = join(homeDir, "plugin-state", "paseo-factory");
+  const repoDir = makeGitRepo();
+  t.after(() => {
+    rmSync(homeDir, { recursive: true, force: true });
+    rmSync(repoDir, { recursive: true, force: true });
+  });
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
+  const registration = ensureProjectRegistered(stateDir, repoDir);
+  assert.ok(registration.ok);
+  const slug = registration.ok ? registration.slug : "demo";
+  const registry = createFactoryRegistry({ stateDir, root: factory });
+
+  const createdPrompts: string[] = [];
+  const liveAgents = new Map<string, { id: string; status: string; archivedAt: string | null; cwd: string; labels: Record<string, string> }>();
+  const fakeDaemon = {
+    agents: {
+      list: async (opts?: { filter?: { labels?: Record<string, string>; includeArchived?: boolean; includeBackground?: boolean } }) => {
+        const wanted = opts?.filter?.labels ?? {};
+        const includeArchived = opts?.filter?.includeArchived === true;
+        const entries = [...liveAgents.values()]
+          .filter((a) => (!includeArchived && a.archivedAt !== null ? false : true))
+          .filter((a) => Object.entries(wanted).every(([k, v]) => a.labels[k] === v))
+          .map((agent) => ({ agent }));
+        return { entries };
+      },
+      create: async (options: { config: { provider: string }; cwd: string; title: string; labels: Record<string, string>; prompt?: string }) => {
+        createdPrompts.push(options.prompt ?? "");
+        const id = `peer-created-${createdPrompts.length}`;
+        liveAgents.set(id, { id, status: "idle", archivedAt: null, cwd: options.cwd, labels: options.labels });
+        return { id };
+      },
+      ref: (id: string) => ({
+        send: async () => ({ messageId: `msg-${id}` }),
+        cancel: async () => {},
+        archive: async () => {
+          const agent = liveAgents.get(id);
+          if (agent) liveAgents.set(id, { ...agent, archivedAt: new Date().toISOString() });
+          return { archivedAt: new Date().toISOString() };
+        },
+      }),
+    },
+  };
+  const spool = startSpool(stateDir, factory, { registry, pollMs: 10, daemon: fakeDaemon as never, home: homeDir });
+  t.after(() => spool.stop());
+
+  const lead = new CorrelationRegistry(stateDir).issue({ role: "lead", projectSlug: slug, projectRoot: repoDir, agentId: "lead-1" });
+  const responses = await runMcpSession({
+    args: ["--correlation", lead.correlationId, "--state-dir", stateDir],
+    cwd: repoDir,
+    requests: [
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "REW-1", disposition: "reviewer", description: brief4("Audit the retry facade", "Read-only disposition (reviewer) — 6-Field Handoff with file:line evidence; worktree must remain clean at HEAD.") } } },
+      { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_dispatch_agent", arguments: { tasks: ["REW-1"] } } },
+      { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "ENGD-1", gate: "npm test", description: brief4("Land the engineer slice") } } },
+      { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "lead_dispatch_agent", arguments: { tasks: ["ENGD-1"] } } },
+    ],
+  });
+  const byId = new Map(responses.map((r) => [r.id, r]));
+  const okText = (id: number): string => {
+    const result = byId.get(id)!.result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.notEqual(result.isError, true, result.content[0].text);
+    return result.content[0].text;
+  };
+  okText(1); okText(2); okText(3); okText(4);
+  assert.equal(createdPrompts.length, 2, "both dispatches spawned their Peer through the fallback path");
+
+  // 1. The read-only fallback prompt: fenced, evidence-carrying, no commit.
+  const readOnlyPrompt = createdPrompts[0]!;
+  assert.ok(readOnlyPrompt.includes("Disposition: reviewer"), "the disposition header rides the prompt");
+  assert.ok(readOnlyPrompt.includes("Read-Only"), "the prompt states the session is Read-Only");
+  assert.ok(readOnlyPrompt.includes("read-only-disposition-fence"), "the fence is named");
+  assert.ok(readOnlyPrompt.includes("forbids file edits and `git commit`"), "the fence forbids file edits and git commit by name");
+  assert.ok(!readOnlyPrompt.includes("commit on branch factory/REW-1"), "the engineer's commit instruction never appears");
+  assert.ok(!readOnlyPrompt.includes("--sha"), "no sha flag reaches a read-only Peer");
+  assert.ok(readOnlyPrompt.includes("agent_claim"), "the claim invocation is still named");
+  assert.ok(readOnlyPrompt.includes("outcome"), "the handoff fields still ride the instruction");
+  assert.match(readOnlyPrompt, /blocking defects/, "the reviewer disposition's evidence expectation rides the prompt");
+
+  // 2. The engineer fallback prompt keeps today's gate + commit + claim clause.
+  const engineerPrompt = createdPrompts[1]!;
+  assert.ok(engineerPrompt.includes("pass gate `npm test`, commit on branch factory/ENGD-1, and call agent_claim."), "the engineer clause stays verbatim");
+  assert.ok(!engineerPrompt.includes("read-only-disposition-fence"), "no read-only fence leaks into the engineer prompt");
+});
+
 test("agent_claim carries the mandatory six-field handoff end-to-end (ADR 0053 §4): the schema requires it, a missing field is refused with no Attempt, and a scout claim with no commit walks HEAD to GREEN with the handoff in the report and the Lead's Verdict mail", async (t) => {
   const homeDir = mkdtempSync(join(tmpdir(), "factory-bridge-handoff-"));
   const stateDir = join(homeDir, "plugin-state", "paseo-factory");
