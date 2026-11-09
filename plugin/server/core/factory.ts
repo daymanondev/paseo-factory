@@ -975,6 +975,76 @@ export function createFactory(options: FactoryOptions): Factory {
         return finish(finishCtx, attempt, { exit: null, verdict: "red", note: resolved.reason, timedOut: false }, undefined, watchContext());
       }
 
+      // The read-only synthetic Gate (ADR 0054 §2): a read-only Contract with
+      // an empty gate owns no shell command — an empty string through runGate
+      // cannot even start, so the Factory verifies the execution tree itself
+      // and records the verdict. The branch sits before Station 2 because its
+      // dirty outcome is this gate's own refusal (dirty-worktree-before-gate),
+      // not the shell path's generic pre-gate note.
+      if (isReadOnlyPeerDisposition(contract.disposition) && contract.gate.trim() === "") {
+        const clean = await checkCleanAt(executionDir, resolved.full);
+        if (!clean.ok) {
+          return finish(
+            finishCtx,
+            attempt,
+            {
+              exit: null,
+              verdict: "red",
+              note: `dirty-worktree-before-gate: ${clean.reason}`,
+              timedOut: false,
+            },
+            resolved.full,
+            watchContext(),
+          );
+        }
+        // The memory write fence's read-only arm (spec Implementation Decision
+        // 2: "no unauthorized root memory edits"): a read-only Contract's scope
+        // is always [], so any fenced root memory file inside the Contract's
+        // diff range reds — project memory is never a read-only Peer's to move.
+        if (contract.base !== undefined) {
+          const diff = await changedFiles(executionDir, contract.base, resolved.full);
+          if (!diff.ok) {
+            return finish(
+              finishCtx,
+              attempt,
+              { exit: null, verdict: "red", note: `memory fence check failed: ${diff.reason}`, timedOut: false },
+              resolved.full,
+              watchContext(),
+            );
+          }
+          const fenced = diff.files.filter((file) => (MEMORY_FILES as readonly string[]).includes(file));
+          if (fenced.length > 0) {
+            return finish(
+              finishCtx,
+              attempt,
+              {
+                exit: null,
+                verdict: "red",
+                note:
+                  `changes to fenced memory files: ${fenced.join(", ")} — project memory (AGENTS.md/CLAUDE.md/CONTEXT.md) ` +
+                  "is the Supervisor's and Lead's act, never a read-only Peer's",
+                timedOut: false,
+              },
+              resolved.full,
+              watchContext(),
+            );
+          }
+        }
+        return finish(
+          finishCtx,
+          attempt,
+          {
+            exit: 0,
+            verdict: "green",
+            note: `read-only disposition (${disposition}) — 6-field handoff recorded, no shell gate required`,
+            timedOut: false,
+            output: `read-only disposition (${disposition}) — 6-field handoff recorded, worktree clean at ${resolved.full}`,
+          },
+          resolved.full,
+          watchContext(),
+        );
+      }
+
       // Station 2 — clean tree, HEAD at the claimed commit, before the gate.
       const before = await checkCleanAt(executionDir, resolved.full);
       if (!before.ok) {

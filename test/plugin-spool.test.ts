@@ -1521,6 +1521,39 @@ test("Seam 1 (ADR 0053 §4): a scout claim with the six-field handoff and no com
   }
 });
 
+// ---- the synthetic green verdict on read-only claims with an empty gate (ADR 0054 §2, ticket 02) --------------------------
+
+test("Seam 1 (ADR 0054 §2): a read-only claim with an empty gate replies synthetic GREEN through the spool — attempt, verdict, reportPath, and the read-only note flow to the Peer (ticket 02)", async (t) => {
+  const { stateDir, projectRoot, factory } = makeSpooledSurface(t);
+  const spoolRoot = spoolRootFor(stateDir);
+
+  // A read-only Contract with no gate: the Peer owes findings, not a shell run.
+  factory.setContract({ task: "SP-SYNGATE", workspace: projectRoot, gate: "", disposition: "reviewer" });
+
+  dropRequest(spoolRoot, {
+    id: "cl-syn",
+    kind: "claim",
+    task: "SP-SYNGATE",
+    handoff: {
+      outcome: "complete",
+      scope: "read README.md",
+      verification: "worktree clean at HEAD",
+      unknowns: "none",
+    },
+  });
+  await until(() => assert.equal(readReply(spoolRoot, "cl-syn").ok, true, "the read-only empty-gate claim replies ok"));
+  const reply = readReply(spoolRoot, "cl-syn");
+  assert.equal(reply.verdict, "green", JSON.stringify(reply));
+  assert.equal(reply.attempt, 1);
+  assert.equal(reply.note, "read-only disposition (reviewer) — 6-field handoff recorded, no shell gate required");
+  assert.ok(existsSync(String(reply.reportPath)), "the reply's reportPath points at the generated report");
+  assert.deepEqual(
+    factory.ledger.eventsFor("SP-SYNGATE").map((e) => e.event),
+    ["contract_set", "claim_reported", "gate_started", "gate_finished", "report_written"],
+    "the synthetic attempt runs the full ledger sequence through the spool claim handler"
+  );
+});
+
 test("Seam 1 (ADR 0053 §4): an incomplete six-field handoff never opens an Attempt — malformed handoffs are refused at the spool, and the factory's own admission rejects bad shapes and the engineer no-commit claim", async (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);
