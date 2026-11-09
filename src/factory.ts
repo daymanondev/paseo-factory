@@ -68,6 +68,66 @@ function admitHandoff(handoff: PeerHandoffFields | undefined): PeerHandoffFields
   };
 }
 
+// ---- the mechanical 4-Part Brief gate (v0.5.0, ADR 0054 §1) --------------------------------
+
+/** The canonical section headings every SLP Lead Brief carries (LEAD_WAVE_LAWS, ADR 0054 §1). */
+export const BRIEF_SECTION_HEADINGS = [
+  "1. Bounded Outcome",
+  "2. Contract Boundary & Regression Invariants",
+  "3. Excluded / Deferred",
+  "4. Verification",
+] as const;
+
+/** The read-only disposition's default Verification section (spec v0.5.0 Implementation Decision 1). */
+export function readOnlyBriefVerification(disposition: PeerDisposition): string {
+  return `Read-only disposition (${disposition}) — 6-Field Handoff with file:line evidence; worktree must remain clean at HEAD.`;
+}
+
+/** The Brief fields a Contract may carry as structured inputs — trimmed, empties dropped. */
+export interface StructuredBriefFields {
+  outcome?: string;
+  invariants?: string;
+  exclusions?: string;
+  verification?: string;
+}
+
+function trimmedBriefField(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed === undefined || trimmed === "" ? undefined : trimmed;
+}
+
+/**
+ * Synthesizes the canonical 4-section Brief from the structured fields. A
+ * read-only disposition with an empty gate and no explicit `verification`
+ * gets the exact read-only Verification default; every other unstated
+ * section keeps its heading with no body — the heading is the contract.
+ */
+export function synthesizeBriefDescription(fields: StructuredBriefFields, disposition: PeerDisposition | undefined, gate: string): string {
+  const verification =
+    trimmedBriefField(fields.verification) ??
+    (isReadOnlyPeerDisposition(disposition) && gate.trim() === "" ? readOnlyBriefVerification(disposition as PeerDisposition) : undefined);
+  const sections: Array<[heading: string, body: string | undefined]> = [
+    [BRIEF_SECTION_HEADINGS[0], trimmedBriefField(fields.outcome)],
+    [BRIEF_SECTION_HEADINGS[1], trimmedBriefField(fields.invariants)],
+    [BRIEF_SECTION_HEADINGS[2], trimmedBriefField(fields.exclusions)],
+    [BRIEF_SECTION_HEADINGS[3], verification],
+  ];
+  return sections.map(([heading, body]) => (body === undefined ? heading : `${heading}\n${body}`)).join("\n\n");
+}
+
+/** The section headings a description is missing — section 2/3 accept either of their marker aliases. */
+export function missingBriefSections(description: string): string[] {
+  const missing: string[] = [];
+  if (!description.includes("Bounded Outcome")) missing.push(BRIEF_SECTION_HEADINGS[0]);
+  if (!description.includes("Contract Boundary") && !description.includes("Regression Invariants")) missing.push(BRIEF_SECTION_HEADINGS[1]);
+  if (!description.includes("Excluded") && !description.includes("Deferred")) missing.push(BRIEF_SECTION_HEADINGS[2]);
+  if (!description.includes("Verification")) missing.push(BRIEF_SECTION_HEADINGS[3]);
+  return missing;
+}
+
+/** The LEAD_WAVE_LAWS Brief cap, mechanical since v0.5.0 (ADR 0054 §1). */
+export const BRIEF_MAX_CHARS = 2500;
+
 export interface FactoryOptions {
   historyFault?: (boundary: "prepared" | "renamed" | "activated" | "applied") => void;
   /** Demonstrable local writer identity, provisioned independently of imported history. */
@@ -125,7 +185,13 @@ export interface ContractInput {
    * the base for the artifact and scope. The Agent never gets to pick a cwd.
    */
   workspace: string;
-  gate: string;
+  /**
+   * The Gate command. Mandatory and non-empty for the `engineer` disposition
+   * (the default); optional (defaulting to `""`) for the read-only three
+   * (`scout | architect | reviewer`, ADR 0054 §2) — a read-only turn with no
+   * gate verifies the worktree sits clean at HEAD instead of spawning a shell.
+   */
+  gate?: string;
   artifact?: string | undefined;
   /**
    * Optional explicit base commit ref/SHA (defaults to the workspace's `HEAD`).
@@ -157,6 +223,18 @@ export interface ContractInput {
    * discover its assignment from the workspace.
    */
   description?: string;
+  /**
+   * The structured 4-Part Brief fields (v0.5.0, ADR 0054 §1): when
+   * `description` is omitted/empty and any of these is supplied,
+   * `setContract` synthesizes the canonical 4-section `Contract.description`
+   * (`1. Bounded Outcome`, `2. Contract Boundary & Regression Invariants`,
+   * `3. Excluded / Deferred`, `4. Verification`). Empty/whitespace values
+   * read as omitted — the synthesis keeps only stated content.
+   */
+  outcome?: string;
+  invariants?: string;
+  exclusions?: string;
+  verification?: string;
   /**
    * The SKILL.md workflows the working Agent must open first (v0.0.14, ADR
    * 0010 §6) — skill names, recorded verbatim on the Contract line; the
@@ -508,14 +586,31 @@ export function createFactory(options: FactoryOptions): Factory {
     stateDir,
     recoveredAttempts,
 
-    setContract({ task, workspace, gate, artifact, base: inputBase, scope, freshEyes, watch, description, skills, by, disposition, execution }) {
+    setContract({ task, workspace, gate, artifact, base: inputBase, scope, freshEyes, watch, description, skills, by, disposition, execution, seat, outcome, invariants, exclusions, verification }) {
       assertTaskId(task);
       if (execution !== undefined && !scrumBindingIsValid(execution)) throw new FactoryError("invalid-contract", "invalid Scrum execution binding");
-      if (gate.trim() === "") throw new FactoryError("invalid-contract", "gate command must be a non-empty string");
+      // ADR 0054 §2: the shell Gate is the engineer disposition's law; the
+      // read-only three (scout|architect|reviewer) may omit it — an empty gate
+      // on a read-only Contract verifies the worktree sits clean at HEAD
+      // instead of spawning a shell (the claim station's law).
+      const resolvedDisposition = disposition ?? "engineer";
+      const readOnly = isReadOnlyPeerDisposition(disposition);
+      const gateCommand = gate ?? "";
+      if (!readOnly && gateCommand.trim() === "") {
+        throw new FactoryError(
+          "invalid-contract",
+          `gate command must be a non-empty string for the ${resolvedDisposition} disposition — the read-only three (scout|architect|reviewer) may omit it (ADR 0054 §2)`,
+        );
+      }
       const resolvedArtifact = artifact === undefined ? "" : artifact;
       if (artifact !== undefined) {
         const artifactProblem = artifactPathProblem(artifact);
         if (artifactProblem !== undefined) throw new FactoryError("invalid-contract", artifactProblem);
+      }
+      // ADR 0054 §1: a read-only disposition never requires an output
+      // artifact — its deliverable is the 6-Field Handoff, not a file.
+      if (readOnly && resolvedArtifact !== "") {
+        throw new FactoryError("invalid-contract", `read-only disposition (${resolvedDisposition}) cannot require an output artifact — the read-only deliverable is the 6-Field Handoff`);
       }
       if (freshEyes !== undefined && typeof freshEyes !== "boolean") {
         throw new FactoryError("invalid-contract", "freshEyes must be a boolean (true or false) — omit it to use the caller default");
@@ -526,8 +621,49 @@ export function createFactory(options: FactoryOptions): Factory {
       if (disposition !== undefined && !(PEER_DISPOSITIONS as readonly string[]).includes(disposition)) {
         throw new FactoryError("invalid-contract", "disposition must be exactly one of engineer|architect|reviewer|scout — omit it for the engineer default");
       }
-      if (description !== undefined && (typeof description !== "string" || description.trim() === "")) {
-        throw new FactoryError("invalid-contract", "description must be a non-empty string — omit it when the task has no assignment text");
+      if (description !== undefined && typeof description !== "string") {
+        throw new FactoryError("invalid-contract", "description must be a string — omit it when the task has no assignment text");
+      }
+      // The structured 4-Part Brief fields (ADR 0054 §1): strings when
+      // present, empties read as omitted; with no `description` they
+      // synthesize the canonical 4-section Brief below.
+      for (const [field, value] of Object.entries({ outcome, invariants, exclusions, verification }) as Array<[string, string | undefined]>) {
+        if (value !== undefined && typeof value !== "string") {
+          throw new FactoryError("invalid-contract", `${field} must be a string — omit it when the Brief section has no content`);
+        }
+      }
+      const briefFields: StructuredBriefFields = { outcome, invariants, exclusions, verification };
+      const hasStructuredBrief = [outcome, invariants, exclusions, verification].some((value) => trimmedBriefField(value) !== undefined);
+      const suppliedDescription = description !== undefined && description.trim() !== "" ? description : undefined;
+      const resolvedDescription =
+        suppliedDescription !== undefined
+          ? suppliedDescription
+          : hasStructuredBrief
+            ? synthesizeBriefDescription(briefFields, disposition, gateCommand)
+            : undefined;
+      // The mechanical 4-Part Brief gate (ADR 0054 §1): scoped to the SLP Lead
+      // seat outside any Scrum execution binding — Owner/Supervisor/Agent
+      // paths and the Agile Scrum specialist workflows keep their own laws.
+      if (seat === "lead" && execution === undefined) {
+        if (resolvedDescription === undefined) {
+          throw new FactoryError(
+            "invalid-contract",
+            `the 4-Part Brief is mandatory on Lead Contracts (slp mode): supply \`description\` or the structured Brief fields (outcome, invariants, exclusions, verification) — the Brief must carry all four sections (${BRIEF_SECTION_HEADINGS.join(", ")})`,
+          );
+        }
+        if (resolvedDescription.length > BRIEF_MAX_CHARS) {
+          throw new FactoryError(
+            "invalid-contract",
+            `the 4-Part Brief exceeds the ${BRIEF_MAX_CHARS.toLocaleString("en-US")}-char cap (LEAD_WAVE_LAWS) — got ${resolvedDescription.length} chars; keep every Contract.description concise`,
+          );
+        }
+        const missing = missingBriefSections(resolvedDescription);
+        if (missing.length > 0) {
+          throw new FactoryError(
+            "invalid-contract",
+            `the 4-Part Brief is missing section(s): ${missing.join("; ")} — a Lead Contract's description must carry all four canonical sections (${BRIEF_SECTION_HEADINGS.join(", ")})`,
+          );
+        }
       }
       if (skills !== undefined && skills.length > 0) {
         const unusable =
@@ -563,6 +699,9 @@ export function createFactory(options: FactoryOptions): Factory {
           throw new FactoryError("invalid-contract", "scope must be an array of workspace-relative path prefixes");
         }
       }
+      // ADR 0054 §1: a read-only Contract declares no writable boundary — any
+      // supplied scope is normalized to [] (recorded omitted) on the line.
+      const effectiveScope = readOnly ? [] : scope;
       // The base commit is recorded on every Contract since v0.0.2 (ticket 03
       // R2): it is the diff range for the scope check and the fresh-eyes pass.
       const priorContract = this.contractFor(task);
@@ -633,7 +772,7 @@ export function createFactory(options: FactoryOptions): Factory {
       // declare disjoint scopes: each Task executes in its own managed worktree,
       // so the single-checkout collision cannot happen — the scope globs are
       // the declared boundary (Implementation Decision 5, bullet 3).
-      const conflict = liveWorkspaceConflict(ledger, workspace, task, scope);
+      const conflict = liveWorkspaceConflict(ledger, workspace, task, effectiveScope);
       if (conflict !== undefined) {
         throw new FactoryError(
           "workspace-conflict",
@@ -647,13 +786,13 @@ export function createFactory(options: FactoryOptions): Factory {
         ...(execution === undefined ? {} : { execution: structuredClone(execution) }),
         task,
         workspace,
-        gate,
+        gate: gateCommand,
         artifact: resolvedArtifact,
-        ...(scope === undefined || scope.length === 0 ? {} : { scope }),
+        ...(effectiveScope === undefined || effectiveScope.length === 0 ? {} : { scope: effectiveScope }),
         base,
         ...(effectiveFreshEyes === true ? { freshEyes: true } : {}),
         ...(watch === undefined ? {} : { watch }),
-        ...(description === undefined ? {} : { description }),
+        ...(resolvedDescription === undefined ? {} : { description: resolvedDescription }),
         ...(skills === undefined || skills.length === 0 ? {} : { skills }),
         ...(by === undefined ? {} : { by }),
         ...(disposition === undefined ? {} : { disposition }),

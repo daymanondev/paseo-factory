@@ -25,6 +25,23 @@ function makeGitRepo(): string {
   return dir;
 }
 
+/** Wraps a one-line summary into the mandatory 4-Part Brief shape (ADR 0054 ยง1). */
+function brief4(summary: string, verification = "the gate command runs green"): string {
+  return [
+    "1. Bounded Outcome",
+    summary,
+    "",
+    "2. Contract Boundary & Regression Invariants",
+    "Existing HEAD interfaces stay untouched.",
+    "",
+    "3. Excluded / Deferred",
+    "None.",
+    "",
+    "4. Verification",
+    verification,
+  ].join("\n");
+}
+
 async function runMcpSession(options: {
   args?: string[];
   env?: NodeJS.ProcessEnv;
@@ -340,6 +357,7 @@ test("bridge.mjs executes Supervisor, Lead, and Agent tools end-to-end over the 
               gate: "/usr/bin/true",
               artifact: "feature.txt",
               scope: "feature.txt",
+              description: brief4("Implement feature-x"),
             },
           },
         },
@@ -575,7 +593,7 @@ test("agent_escalate_blocker keeps the Peer alive and routes the challenge Lead-
       args: ["--correlation", leadCorr.correlationId, "--state-dir", stateDir, "--home", homeDir],
       cwd: repoDir,
       requests: [
-        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "T-CH", gate: "/usr/bin/true", artifact: "README.md", scope: ["README.md"] } } },
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "T-CH", gate: "/usr/bin/true", artifact: "README.md", scope: ["README.md"], description: brief4("Land the challenge slice") } } },
         { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_dispatch_agent", arguments: { tasks: ["T-CH"] } } },
       ],
     });
@@ -778,8 +796,8 @@ test("Lead MCP contracts expose no Fresh-eyes option and never forward legacy op
     args: ["--correlation", lead.correlationId, "--state-dir", stateDir], cwd: repoDir,
     requests: [
       { jsonrpc: "2.0", id: 1, method: "tools/list" },
-      { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "DEFAULT", gate: "true", artifact: "README.md" } } },
-      { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "LEGACY", gate: "true", artifact: "README.md", freshEyes: true, fresh_eyes: true } } },
+      { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "DEFAULT", gate: "true", artifact: "README.md", description: brief4("Default no-fresh-eyes contract") } } },
+      { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "LEGACY", gate: "true", artifact: "README.md", freshEyes: true, fresh_eyes: true, description: brief4("Legacy opt-in contract") } } },
     ],
   });
   const tools = (responses[0]!.result as { tools: Array<{ name: string, inputSchema: { properties: Record<string, unknown> } }> }).tools;
@@ -869,9 +887,9 @@ test("lead_set_contract carries disposition and resetPeer end-to-end (ADR 0053):
     cwd: repoDir,
     requests: [
       { jsonrpc: "2.0", id: 1, method: "tools/list" },
-      { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "SCOUT-1", gate: "true", artifact: "README.md", disposition: "scout", description: "Reconnoiter the workspace layout" } } },
+      { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "SCOUT-1", gate: "true", disposition: "scout", description: brief4("Reconnoiter the workspace layout") } } },
       { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "lead_dispatch_agent", arguments: { tasks: ["SCOUT-1"] } } },
-      { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "SCOUT-1", gate: "true", artifact: "README.md", description: "Reconciled brief after the Scout's challenge" } } },
+      { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "SCOUT-1", gate: "true", artifact: "README.md", description: brief4("Reconciled brief after the Scout's challenge") } } },
     ],
   });
 
@@ -918,7 +936,7 @@ test("lead_set_contract carries disposition and resetPeer end-to-end (ADR 0053):
   assert.equal(stopped.length, 0, "no Peer was stopped on the default re-contract");
   assert.equal(archived.length, 0, "no Peer was archived on the default re-contract");
   assert.equal(liveAgents.get(spawnedPeerId)?.archivedAt, null, "the bound Peer is still live and non-archived");
-  assert.equal(projectFactory.contractFor("SCOUT-1")?.description, "Reconciled brief after the Scout's challenge");
+  assert.equal(projectFactory.contractFor("SCOUT-1")?.description, brief4("Reconciled brief after the Scout's challenge"));
   assert.equal(projectFactory.contractFor("SCOUT-1")?.disposition, undefined, "the reconciled epoch omits the disposition โ€” it reads as engineer");
 
   // 5. resetPeer: true (a fresh session) cancels and archives the bound Peer.
@@ -926,7 +944,7 @@ test("lead_set_contract carries disposition and resetPeer end-to-end (ADR 0053):
     args: mcpArgs,
     cwd: repoDir,
     requests: [
-      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "SCOUT-1", gate: "true", artifact: "README.md", description: "Fresh eyes required", resetPeer: true } } },
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "SCOUT-1", gate: "true", artifact: "README.md", description: brief4("Fresh eyes required"), resetPeer: true } } },
     ],
   });
   const resetRes = (resetResponses[0].result as { isError?: boolean; content: Array<{ text: string }> });
@@ -935,7 +953,7 @@ test("lead_set_contract carries disposition and resetPeer end-to-end (ADR 0053):
   await new Promise((resolvePromise) => setTimeout(resolvePromise, 200));
   assert.deepEqual(stopped, [spawnedPeerId], "the bound Peer was stopped on resetPeer: true");
   assert.ok(archived.includes(spawnedPeerId), "the bound Peer was archived on resetPeer: true");
-  assert.equal(projectFactory.contractFor("SCOUT-1")?.description, "Fresh eyes required", "the fresh epoch landed");
+  assert.equal(projectFactory.contractFor("SCOUT-1")?.description, brief4("Fresh eyes required"), "the fresh epoch landed");
   assert.equal(contractSets().length, 3, "three Contract epochs landed (scout, reconcile, reset)");
   assert.deepEqual(
     contractSets().map((e) => e.disposition ?? "(omitted)"),
@@ -1004,9 +1022,9 @@ test("lead_repoke_agent with message delivers the Lead's ruling into the live Pe
     cwd: repoDir,
     requests: [
       { jsonrpc: "2.0", id: 1, method: "tools/list" },
-      { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "RULING-1", gate: "true", artifact: "README.md", disposition: "architect", description: "Brief v1: design the adapter boundary." } } },
+      { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "RULING-1", gate: "true", disposition: "architect", description: brief4("Brief v1: design the adapter boundary.") } } },
       { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "lead_dispatch_agent", arguments: { tasks: ["RULING-1"] } } },
-      { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "RULING-1", gate: "true", artifact: "README.md", description: "Brief v2 (reconciled): the facade owns the retry policy." } } },
+      { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "RULING-1", gate: "true", artifact: "README.md", description: brief4("Brief v2 (reconciled): the facade owns the retry policy.") } } },
       { jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "lead_repoke_agent", arguments: { task: "RULING-1", agent: "peer-created-1", message: "Ruling (REOPEN_REQUEST foundation): the facade owns the retry policy โ€” drop the caller-side backoff." } } },
       { jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "lead_repoke_agent", arguments: { task: "RULING-1", agent: "peer-created-1", message: "Second turn: green the gate on the reconciled Brief." } } },
     ],
@@ -1136,7 +1154,7 @@ test("agent_claim carries the mandatory six-field handoff end-to-end (ADR 0053 ย
         method: "tools/call",
         params: {
           name: "lead_set_contract",
-          arguments: { task: "RECON-6F", gate: "/usr/bin/true", artifact: "README.md", disposition: "scout", description: "Map the workspace layout" },
+          arguments: { task: "RECON-6F", gate: "/usr/bin/true", disposition: "scout", description: brief4("Map the workspace layout") },
         },
       },
       { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_dispatch_agent", arguments: { tasks: ["RECON-6F"] } } },
@@ -1274,7 +1292,7 @@ test("agent_claim on an engineer Task over MCP never forges the mandatory commit
     args: ["--correlation", leadCorr.correlationId, "--state-dir", stateDir],
     cwd: repoDir,
     requests: [
-      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "ENG-1", gate: "/usr/bin/true", artifact: "README.md", disposition: "engineer" } } },
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "ENG-1", gate: "/usr/bin/true", artifact: "README.md", disposition: "engineer", description: brief4("Land the engineer slice") } } },
       { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_dispatch_agent", arguments: { tasks: ["ENG-1"] } } },
     ],
   });
@@ -1366,7 +1384,7 @@ test("lead_verify claims through the bridge with the mechanical marker and no fo
     args: ["--correlation", leadCorr.correlationId, "--state-dir", stateDir],
     cwd: repoDir,
     requests: [
-      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "ENG-LV", gate: "/usr/bin/true", artifact: "README.md" } } },
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "ENG-LV", gate: "/usr/bin/true", artifact: "README.md", description: brief4("Land the lead_verify slice") } } },
       { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_dispatch_agent", arguments: { tasks: ["ENG-LV"] } } },
     ],
   });
@@ -1461,7 +1479,7 @@ test("lead_accept_task on a GREEN read-only Task closes merge-free (ADR 0053 ยง3
     args: ["--correlation", lead.correlationId, "--state-dir", stateDir],
     cwd: repoDir,
     requests: [
-      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "RO-ACC", gate: "/usr/bin/true", artifact: "README.md", disposition: "scout", description: "Reconnoiter the module boundaries" } } },
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "RO-ACC", gate: "/usr/bin/true", disposition: "scout", description: brief4("Reconnoiter the module boundaries") } } },
       { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_dispatch_agent", arguments: { tasks: ["RO-ACC"] } } },
     ],
   });
@@ -2027,7 +2045,7 @@ test("v0.0.93 quiet-point regression: Lead dispatches a Peer then crosses 128k โ
       args: ["--correlation", leadCorr.correlationId, "--state-dir", stateDir, "--home", homeDir],
       cwd: repoDir,
       requests: [
-        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "T-KICK", gate: "/usr/bin/true", artifact: "README.md", scope: ["README.md"] } } },
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "T-KICK", gate: "/usr/bin/true", artifact: "README.md", scope: ["README.md"], description: brief4("Land the kickoff slice") } } },
         { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_dispatch_agent", arguments: { tasks: ["T-KICK"] } } },
       ],
     });
@@ -2136,7 +2154,7 @@ test("v0.0.93 quiet-point regression: Lead dispatches a Peer then crosses 128k โ
       args: ["--correlation", sucessorCorr.correlationId, "--state-dir", stateDir, "--home", homeDir],
       cwd: repoDir,
       requests: [
-        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "T-IDLE", gate: "/usr/bin/false" } } },
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "T-IDLE", gate: "/usr/bin/false", description: brief4("Probe the idle path") } } },
         { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_dispatch_agent", arguments: { tasks: ["T-IDLE"] } } },
       ],
     });

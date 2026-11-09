@@ -338,8 +338,9 @@ test("the agent git shim refuses git commit inside a read-only disposition's Tas
     env: { ...process.env, NODE_OPTIONS: "--no-experimental-strip-types", PASEO_FACTORY_SEAT: "agent", PASEO_FACTORY_TASK: "RO-1" },
   });
 
-  // A scout Contract with a live spawn binding over the worktree.
-  factory.setContract({ task: "RO-1", workspace, gate: "true", artifact: "README.md", disposition: "scout" });
+  // A scout Contract with a live spawn binding over the worktree — no
+  // artifact since ADR 0054 §1 (a read-only deliverable is the handoff).
+  factory.setContract({ task: "RO-1", workspace, gate: "true", disposition: "scout" });
   factory.requestSpawn({ task: "RO-1", provider: "claude", arity: 1, worktree });
   writeFileSync(join(worktree, "README.md"), "an uncommitted recon edit\n");
   execFileSync("git", ["add", "README.md"], { cwd: worktree });
@@ -362,7 +363,7 @@ test("the agent git shim refuses git commit inside a read-only disposition's Tas
   // omitted disposition) commits exactly as before — the fence adds no new
   // denial for writers.
   for (const disposition of ["architect", "reviewer"] as const) {
-    factory.setContract({ task: "RO-1", workspace, gate: "true", artifact: "README.md", disposition });
+    factory.setContract({ task: "RO-1", workspace, gate: "true", disposition });
     const refused = run(["commit", "-m", `${disposition} boundary work`]);
     assert.equal(refused.status, 126, `${disposition} — commit refuses`);
     assert.match(refused.stderr, /read-only-disposition-fence/);

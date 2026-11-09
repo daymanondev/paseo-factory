@@ -46,6 +46,21 @@ function makeWorkspaceAtBase(dir: string): { workspace: string; artifact: string
   return { workspace, artifact };
 }
 
+/** A minimal complete 4-Part Brief — the slp-mode Lead seat's mandatory description shape (ADR 0054 §1). */
+const FOUR_PART_BRIEF = [
+  "1. Bounded Outcome",
+  "Land the slice.",
+  "",
+  "2. Contract Boundary & Regression Invariants",
+  "Existing HEAD behavior stays green.",
+  "",
+  "3. Excluded / Deferred",
+  "None.",
+  "",
+  "4. Verification",
+  "true",
+].join("\n");
+
 /** The Agent's "work": a real change, committed — returns the claimable sha. */
 function commitFix(workspace: string, artifact: string): string {
   writeFileSync(join(workspace, artifact), "export function pad(input: string): string {\n  return input;\n}\n");
@@ -110,7 +125,7 @@ test("freshEyes: non-boolean is refused with invalid-contract, while freshEyes: 
     factoryErrorCode("invalid-contract"),
   );
 
-  const optedOut = factory.setContract({ task: "FE3", workspace, gate: "true", artifact, freshEyes: false, by: "lead", seat: "lead" });
+  const optedOut = factory.setContract({ task: "FE3", workspace, gate: "true", artifact, freshEyes: false, by: "lead", seat: "lead", description: FOUR_PART_BRIEF });
   assert.equal(optedOut.freshEyes, undefined, "explicit freshEyes: false leaves fresh-eyes off on contract_set");
   assert.equal("freshEyes" in optedOut, false);
 });
@@ -125,7 +140,7 @@ test("Lead contracts default to Gate-only claims regardless of eye availability 
     eyeCliRunner: async () => { throw new Error("default claims must not run Fresh-eyes"); },
   });
   for (const [task, caller] of [["SEAT", { seat: "lead" as const }], ["BY", { by: "lead" }]] as const) {
-    const contract = factory.setContract({ task, workspace, gate: "true", artifact, ...caller });
+    const contract = factory.setContract({ task, workspace, gate: "true", artifact, description: FOUR_PART_BRIEF, ...caller });
     assert.equal(contract.freshEyes, undefined);
     assert.equal((await factory.claim({ task, sha: contract.base!, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } })).verdict, "green");
     assert.equal(factory.ledger.eventsFor(task).some((event) => event.event === "fresh_eyes_written"), false);

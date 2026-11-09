@@ -258,6 +258,19 @@ test("Full SLP lifecycle: Owner -> Supervisor -> Lead -> Agent -> Lead -> Superv
       gate: "sleep 30 & test -f src/greet.ts",
       artifact: "src/greet.ts",
       scope: ["src/greet.ts"],
+      description: [
+        "1. Bounded Outcome",
+        "Create src/greet.ts exporting greet().",
+        "",
+        "2. Contract Boundary & Regression Invariants",
+        "Existing HEAD files stay untouched.",
+        "",
+        "3. Excluded / Deferred",
+        "None.",
+        "",
+        "4. Verification",
+        "test -f src/greet.ts",
+      ].join("\n"),
     },
   });
   assert.notEqual(setContractRes.isError, true, setContractRes.text);
@@ -300,7 +313,25 @@ test("Full SLP lifecycle: Owner -> Supervisor -> Lead -> Agent -> Lead -> Superv
   const waveTwoContract = await callMcpTool({
     args: ["--correlation", leadAgent.env.PASEO_FACTORY_CORRELATION!, "--state-dir", stateDir],
     toolName: "lead_set_contract",
-    toolArgs: { task: "T-02", artifact: "src/consumer.ts", gate: "test -f src/greet.ts && test -f src/consumer.ts", freshEyes: false },
+    toolArgs: {
+      task: "T-02",
+      artifact: "src/consumer.ts",
+      gate: "test -f src/greet.ts && test -f src/consumer.ts",
+      freshEyes: false,
+      description: [
+        "1. Bounded Outcome",
+        "Create src/consumer.ts consuming greet().",
+        "",
+        "2. Contract Boundary & Regression Invariants",
+        "Existing HEAD files stay untouched.",
+        "",
+        "3. Excluded / Deferred",
+        "None.",
+        "",
+        "4. Verification",
+        "test -f src/consumer.ts",
+      ].join("\n"),
+    },
   });
   assert.notEqual(waveTwoContract.isError, true, waveTwoContract.text);
   const staleContract = contractFromLedger(readDriverLedger(stateDir), "T-02");

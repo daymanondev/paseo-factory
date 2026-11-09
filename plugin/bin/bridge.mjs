@@ -1300,14 +1300,14 @@ var sharedTools = {
   },
   lead_set_contract: {
     name: "lead_set_contract",
-    description: "Register a Task's immutable Contract (`gate`, optional `description`, `artifact`, `skills`, `watch`, `disposition`) before spawning its working Agent. Re-contracting an unaccepted Task updates the Brief/Gate in place and preserves the live Peer unless `resetPeer: true`.",
+    description: "Register a Task's immutable Contract (`gate`, optional `description` or structured 4-Part Brief fields, `artifact`, `skills`, `watch`, `disposition`) before spawning its working Agent. Re-contracting an unaccepted Task updates the Brief/Gate in place and preserves the live Peer unless `resetPeer: true`. The Brief must carry all four canonical sections (1. Bounded Outcome, 2. Contract Boundary & Regression Invariants, 3. Excluded / Deferred, 4. Verification) \u2014 via `description` or the structured fields.",
     inputSchema: {
       type: "object",
       properties: {
         task: { type: "string", description: "Unique Task ID (letters, digits, '.', '_', '-')." },
-        gate: { type: "string", description: "Gate command to verify the Task's outcome and regression invariants." },
-        artifact: { type: "string", description: "Optional workspace-relative deliverable file path that must exist and be non-empty when specified." },
-        scope: { type: "array", items: { type: "string" }, description: "Workspace-relative allowed paths." },
+        gate: { type: "string", description: "Gate command to verify the Task's outcome and regression invariants. Mandatory for the engineer disposition; optional (defaults to empty) for scout | architect | reviewer (ADR 0054)." },
+        artifact: { type: "string", description: "Optional workspace-relative deliverable file path that must exist and be non-empty when specified. Refused on read-only dispositions." },
+        scope: { type: "array", items: { type: "string" }, description: "Workspace-relative allowed paths. Normalized to empty on read-only dispositions." },
         base: { type: "string", description: "Optional base commit SHA." },
         skills: {
           type: "array",
@@ -1315,12 +1315,16 @@ var sharedTools = {
           description: "Optional list of SKILL.md names the working Agent must open first."
         },
         watch: { type: "boolean", description: "Enable the post-verdict watch pass." },
-        description: { type: "string", description: "Task assignment description stating desired outcome and regression invariants." },
+        description: { type: "string", description: "Task assignment Brief stating desired outcome and regression invariants \u2014 must carry all four canonical sections (ADR 0054)." },
+        outcome: { type: "string", description: "Structured 4-Part Brief, section 1 (Bounded Outcome) \u2014 synthesized into Contract.description when `description` is omitted (ADR 0054)." },
+        invariants: { type: "string", description: "Structured 4-Part Brief, section 2 (Contract Boundary & Regression Invariants) \u2014 synthesized into Contract.description when `description` is omitted (ADR 0054)." },
+        exclusions: { type: "string", description: "Structured 4-Part Brief, section 3 (Excluded / Deferred) \u2014 synthesized into Contract.description when `description` is omitted (ADR 0054)." },
+        verification: { type: "string", description: "Structured 4-Part Brief, section 4 (Verification) \u2014 synthesized into Contract.description when `description` is omitted; defaults on a gate-less read-only disposition to the clean-worktree handoff law (ADR 0054)." },
         disposition: { type: "string", enum: ["engineer", "architect", "reviewer", "scout"], description: "The Peer's SLP disposition (ADR 0053; defaults to engineer when omitted)." },
         resetPeer: { type: "boolean", description: "Cancel and archive the live bound Peer before the fresh Contract epoch (default false \u2014 the Peer keeps its accumulated context)." },
         workspace: { type: "string", description: "Optional Project root path (defaults to current project root)." }
       },
-      required: ["task", "gate"]
+      required: ["task"]
     }
   },
   lead_spawn_agent: {
@@ -1722,8 +1726,16 @@ async function handleToolCall(name, rawArgs) {
     const gate = typeof args.gate === "string" ? args.gate.trim() : "";
     const artifact =
       typeof args.artifact === "string" && args.artifact.trim() !== "" ? args.artifact.trim() : undefined;
-    if (task === "" || gate === "") {
-      return toolResult("lead_set_contract requires non-empty `task` and `gate`.", true);
+    const disposition =
+      typeof args.disposition === "string" && ["engineer", "architect", "reviewer", "scout"].includes(args.disposition)
+        ? args.disposition
+        : undefined;
+    // ADR 0054 §2: the gate requirement is disposition-aware and judged by the
+    // factory (invalid-contract) — the bridge no longer refuses an empty gate
+    // up front; the read-only three (scout|architect|reviewer) contract
+    // without one.
+    if (task === "") {
+      return toolResult("lead_set_contract requires non-empty `task`.", true);
     }
     const workspace =
       typeof args.workspace === "string" && args.workspace.trim() !== ""
@@ -1745,10 +1757,14 @@ async function handleToolCall(name, rawArgs) {
       typeof args.base === "string" && args.base.trim() !== "" ? args.base.trim() : undefined;
     const description =
       typeof args.description === "string" && args.description.trim() !== "" ? args.description.trim() : undefined;
-    const disposition =
-      typeof args.disposition === "string" && ["engineer", "architect", "reviewer", "scout"].includes(args.disposition)
-        ? args.disposition
-        : undefined;
+    // The structured 4-Part Brief fields (ADR 0054 §1) — empties read as
+    // omitted, exactly like `description`.
+    const structured = (field) =>
+      typeof args[field] === "string" && args[field].trim() !== "" ? args[field] : undefined;
+    const outcome = structured("outcome");
+    const invariants = structured("invariants");
+    const exclusions = structured("exclusions");
+    const verification = structured("verification");
 
     const reply = await roundTripSpool(ctx, {
       id: randomId(),
@@ -1765,6 +1781,10 @@ async function handleToolCall(name, rawArgs) {
       ...(skills && skills.length > 0 ? { skills } : {}),
       ...(args.watch === true ? { watch: true } : {}),
       ...(description ? { description } : {}),
+      ...(outcome === undefined ? {} : { outcome }),
+      ...(invariants === undefined ? {} : { invariants }),
+      ...(exclusions === undefined ? {} : { exclusions }),
+      ...(verification === undefined ? {} : { verification }),
       ...(disposition ? { disposition } : {}),
       ...(args.resetPeer === true ? { resetPeer: true } : {}),
       seat: "lead",
