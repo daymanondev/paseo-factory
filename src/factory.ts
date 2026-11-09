@@ -672,6 +672,15 @@ export function createFactory(options: FactoryOptions): Factory {
       if (description !== undefined && typeof description !== "string") {
         throw new FactoryError("invalid-contract", "description must be a string — omit it when the task has no assignment text");
       }
+      // The pre-v0.5.0 non-empty law stands everywhere EXCEPT the 4-Part
+      // Brief gate's own scope (ADR 0054 §1: `seat === "lead"`, no Scrum
+      // binding), where an empty description must read as omitted so the
+      // structured Brief synthesizes — or the section-naming refusal fires.
+      // Outside that scope a supplied description is a non-empty string;
+      // omission remains the only way to say "no assignment text".
+      if (description !== undefined && description.trim() === "" && !(seat === "lead" && execution === undefined)) {
+        throw new FactoryError("invalid-contract", "description must be a non-empty string — omit it when the task has no assignment text");
+      }
       // The structured 4-Part Brief fields (ADR 0054 §1): strings when
       // present, empties read as omitted; with no `description` they
       // synthesize the canonical 4-section Brief below.

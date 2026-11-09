@@ -238,6 +238,46 @@ test("ticket 01: the 4-Part law scopes to seat lead in slp mode — Supervisor/A
   assert.equal(factory.contractFor("SCOPE-D")?.description, undefined);
 });
 
+test("review: a supplied empty description refuses outside the 4-Part scope — the pre-v0.5.0 non-empty law stands for every other seat (ADR 0054 §1 scope)", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const workspace = makeRepo(dir);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+
+  // Unstamped (Owner) seat: "" and blank-only both refuse — omission is the
+  // only way to say "no assignment text" (the pre-v0.5.0 law).
+  const emptyOwner = invalidContract(() => factory.setContract({ task: "DESC-A", workspace, gate: "true", description: "" }));
+  assert.match(emptyOwner.message, /description must be a non-empty string/);
+  const blankOwner = invalidContract(() => factory.setContract({ task: "DESC-B", workspace, gate: "true", description: "   " }));
+  assert.match(blankOwner.message, /description must be a non-empty string/);
+
+  // A lead seat WITH a Scrum execution binding: outside slp mode, same law.
+  const scrumEmpty = invalidContract(() =>
+    factory.setContract({
+      task: "DESC-C",
+      workspace,
+      gate: "true",
+      seat: "lead",
+      description: "",
+      execution: { mode: "scrum", runId: "run-1", role: "dev", policyRevision: "rev-1", configRevision: 1, artifactRefs: [] },
+    }),
+  );
+  assert.match(scrumEmpty.message, /description must be a non-empty string/);
+
+  // Inside the 4-Part scope (lead, no binding) the empty description still
+  // reads as omitted — the structured Brief synthesizes, and emptiness with
+  // no structured fields names the missing sections (ADR 0054 §1).
+  const synth = factory.setContract({ task: "DESC-D", workspace, gate: "true", seat: "lead", description: "", outcome: "o", invariants: "i", exclusions: "e", verification: "v" });
+  assert.match(synth.description ?? "", /1\. Bounded Outcome/);
+  assert.match(synth.description ?? "", /4\. Verification/);
+  const bare = invalidContract(() => factory.setContract({ task: "DESC-E", workspace, gate: "true", seat: "lead", description: "" }));
+  assert.match(bare.message, /4-Part Brief/);
+
+  // Omission stays valid everywhere — the law binds the supplied empty string, not the absent field.
+  const omitted = factory.setContract({ task: "DESC-F", workspace, gate: "true" });
+  assert.equal(omitted.description, undefined);
+});
+
 test("ticket 01: historical gate-only contract_set events replay and project without retroactive validation (spec User Story 3)", (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);
