@@ -78,6 +78,16 @@ export const sharedTools: Record<string, ToolDefinition> = {
           type: "string",
           description: "Optional `<provider>/<model>[:<thinking>]` override (defaults to `lanes.worker`).",
         },
+        thinking: {
+          type: "string",
+          enum: ["low", "medium", "high", "xhigh", "max"],
+          description:
+            "Optional per-dispatch reasoning effort tier (v0.5.0, ADR 0054 §4) — resolved provider-adaptively against the worker lane's model catalog; fixed-effort models ignore it.",
+        },
+        thinkingReason: {
+          type: "string",
+          description: "One sentence explaining why this Task warrants the requested effort tier — required when `thinking` is supplied.",
+        },
         workspace: { type: "string", description: "Optional Project root path." },
       },
       required: ["tasks"],

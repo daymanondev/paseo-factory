@@ -2165,3 +2165,65 @@ test("v0.0.93 quiet-point regression: Lead dispatches a Peer then crosses 128k �
     rmSync(repoDir, { recursive: true, force: true });
   }
 });
+
+// ---- per-dispatch thinking effort through the bridge (v0.5.0 ticket 04, ADR 0054 §4; spec Seam 2) ----
+
+test("lead_dispatch_agent accepts thinking/thinkingReason end-to-end: a tier without a reason refuses invalid-spawn, a reasoned tier records on spawn_dispatched", async () => {
+  const homeDir = mkdtempSync(join(tmpdir(), "factory-bridge-thinking-home-"));
+  const stateDir = join(homeDir, "plugin-state", "paseo-factory");
+  const repoDir = makeGitRepo();
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
+  const reg = ensureProjectRegistered(stateDir, repoDir);
+  assert.equal(reg.ok, true);
+  const registry = createFactoryRegistry({ stateDir, root: factory });
+  const created: { config: { provider: string; thinkingOptionId?: string } }[] = [];
+  const fakeDaemon = {
+    agents: {
+      list: async () => ({ entries: [] as never[] }),
+      create: async (input: { config: { provider: string; thinkingOptionId?: string } }) => {
+        created.push({ config: input.config });
+        return { id: `agent-created-${created.length}` };
+      },
+      ref: (id: string) => ({ send: async () => {}, cancel: async () => {}, archive: async () => {} }),
+    },
+  };
+  const spool = startSpool(stateDir, factory, { registry, pollMs: 25, daemon: fakeDaemon as never });
+  try {
+    const correlations = new CorrelationRegistry(stateDir);
+    const leadCorr = correlations.issue({ role: "lead", projectSlug: reg.slug, projectRoot: repoDir });
+    correlations.associate(leadCorr.correlationId, "lead-thinking-1");
+
+    const refusal = await runMcpSession({
+      args: ["--correlation", leadCorr.correlationId, "--state-dir", stateDir],
+      cwd: repoDir,
+      requests: [
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "TH-BR", gate: "/usr/bin/true", artifact: "README.md", scope: ["README.md"] } } },
+        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_dispatch_agent", arguments: { tasks: ["TH-BR"], thinking: "high" } } },
+      ],
+    });
+    assert.notEqual((refusal[0].result as { isError?: boolean }).isError, true, "the contract lands");
+    const refused = refusal[1].result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.equal(refused.isError, true, "a tier without its reason never dispatches");
+    assert.match(refused.content[0].text, /invalid-spawn: thinkingReason is required when thinking is specified/);
+
+    const dispatch = await runMcpSession({
+      args: ["--correlation", leadCorr.correlationId, "--state-dir", stateDir],
+      cwd: repoDir,
+      requests: [
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_dispatch_agent", arguments: { tasks: ["TH-BR"], thinking: "high", thinkingReason: "The fix spans the spool router and the ledger fold — high verification burden." } } },
+      ],
+    });
+    const spawned = dispatch[0].result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.notEqual(spawned.isError, true, spawned.content[0].text);
+
+    const ledgerPath = join(stateDir, "projects", reg.slug, "ledger.jsonl");
+    const spawnLine = readFileSync(ledgerPath, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line)).find((e) => e.event === "spawn_dispatched");
+    assert.ok(spawnLine, "the reasoned dispatch is recorded");
+    assert.equal(spawnLine.thinking, "high");
+    assert.equal(spawnLine.thinkingReason, "The fix spans the spool router and the ledger fold — high verification burden.");
+    assert.equal(created.length, 1, "the refusal created no Peer; the reasoned dispatch created exactly one");
+  } finally {
+    spool.stop();
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});

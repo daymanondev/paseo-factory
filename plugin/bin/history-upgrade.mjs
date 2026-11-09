@@ -2,8 +2,8 @@
 
 // src/history-upgrade.ts
 import { createHash as createHash2, randomUUID as randomUUID2 } from "node:crypto";
-import { chmodSync, existsSync as existsSync3, lstatSync, readFileSync as readFileSync4, readdirSync as readdirSync3, readlinkSync, rmSync as rmSync2 } from "node:fs";
-import { basename as basename4, dirname as dirname3, join as join4 } from "node:path";
+import { chmodSync, existsSync as existsSync3, lstatSync, readFileSync as readFileSync5, readdirSync as readdirSync3, readlinkSync, rmSync as rmSync2 } from "node:fs";
+import { basename as basename4, dirname as dirname3, join as join5 } from "node:path";
 
 // src/errors.ts
 var FactoryError = class extends Error {
@@ -83,6 +83,514 @@ function scrumBindingIsValid(value) {
   const v = value;
   return !!v && v.mode === "scrum" && (v.contractRequestId === void 0 || typeof v.contractRequestId === "string" && v.contractRequestId.length > 0) && safeId(v.runId) && SPECIALIST_ROLES.includes(v.role) && typeof v.policyRevision === "string" && v.policyRevision.length > 0 && Number.isSafeInteger(v.configRevision) && v.configRevision >= 0 && Array.isArray(v.artifactRefs) && v.artifactRefs.every(artifactRefIsValid);
 }
+
+// src/scrum/open-design.ts
+var OPEN_DESIGN_DIRECTIONS = [
+  { id: "editorial-monocle", colors: ["#f7f8f4", "#214f3d", "#162019", "#e9f0e5"], typography: "Georgia display; system UI sans", craft: "Generous breathing room, warm paper and sage tonal surfaces" },
+  { id: "modern-minimal", colors: ["#fafafa", "#09090b", "#e4e4e7"], typography: "System sans; tabular numerals", craft: "Crisp monochrome, hairline borders and precision grids" },
+  { id: "human-approachable", colors: ["#fbf9f5", "#a34e35", "#214f3d"], typography: "Georgia display; system UI sans", craft: "Warm cream, soft pills and friendly progressive wizards" },
+  { id: "tech-utility", colors: ["#f8fafc", "#0f172a", "#475569"], typography: "System sans; monospace telemetry", craft: "Dense slate utility, keyboard-first controls" },
+  { id: "brutalist-experimental", colors: ["#ffffff", "#000000", "#dedede"], typography: "Bold editorial display; system sans", craft: "High contrast editorial grids and bold structural rules" }
+];
+var OPEN_DESIGN_CONTRACT = `Open Design UX contract:
+Bind one direction or installed Brand Design System in DESIGN.md, styles.css :root tokens and mockups/design-manifest.json. Embedded directions: ${OPEN_DESIGN_DIRECTIONS.map((d) => `${d.id}: ${d.colors.join(", ")}; ${d.typography}; ${d.craft}`).join("\n")}.
+One primary action per screen in thumb zone. Decompose journeys into focused steps with choice chips, radio cards, bottom sheets and SVG charts. Use drenched hero surfaces, borderless soft tonal surfaces, consistent system/editorial font pairings, 44px touch targets, visible focus and reduced motion. Card paragraphs stay within 280 visible characters.
+For mobile, start from the complete staged .od-frames/iphone.html, android.html or neutral.html shell and place product content in .phone-content. Preserve hardware chrome, safe areas and separate --phone-* tokens. Use .od-frames/layout.css (@layer od-layout). Desktop/responsive web pages are their own product surface. Reserve space for fixed navigation and scroll content internally.
+Deliver mockups/index.html (interactive), screens.html (story-grouped Flow Board with .frame-connection arrows and a System & Edge States group), styles.css, app.js, screens.css, screens-data.js and design-manifest.json {directionId or designSystemId, tokens, journeyGroups, screens, componentPatterns}. Expand journeys into as many focused screens as needed. EXPERIENCE.md declares Core Screens with ## Screen: kebab-case-id, Surface: mobile | desktop | responsive, primary journey and state behaviors.
+Prototype routing reads ?screen=<id>&state=<state>, reflects root dataset.screen/state and handles scrum:set-state messages. Preserve app navigation for contextual empty/loading/error/offline/permission-denied states. Keep screen/state controls in the outer Studio. Use product language and SVG icons; keep internal spec identifiers in documentation.
+Record actual offline Chromium evidence in browser.json: network: disabled, consoleErrors: [], pageErrors: [], viewports with screen, width/height, scrollWidth/clientWidth and SHA-256 PNG screenshot path/hash. Capture screens-board (screens-board.png) and every Core Screen at its declared surface (Mobile 390x844, Desktop 1280x800, responsive both). Record passing keyboard populated checks for each Core Screen and all five system states through edge screens/state handlers, or the legacy six-state matrix. Record detector {tool: open-design, passed: true, nonAdvisoryCount: 0, viewportsChecked, findings}. Derive it from factory open-design lint --dir <mockupsDir> and actual viewport checks; never invent results. Run lint-scrum-doc --kind ux before Claim. Dev consumes the approved manifest, DESIGN.md, styles.css and screens.html; UI Dev and QA supply the same offline evidence before sign-off.`;
+
+// src/scrum/open-design-link-state.ts
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+function readOpenDesignLink(root) {
+  let value;
+  try {
+    value = JSON.parse(readFileSync(join(root, "design/open-design-link.json"), "utf8"));
+  } catch (e) {
+    if (e instanceof SyntaxError || e.code === "ENOENT") return void 0;
+    throw e;
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return void 0;
+  const link = value;
+  if (typeof link.projectId !== "string" || !safeId(link.projectId) || typeof link.projectName !== "string" || !["designSystemId", "directionId"].every((key) => link[key] == null || typeof link[key] === "string") || typeof link.sourceUpdatedAt !== "number" || !Number.isFinite(link.sourceUpdatedAt) || typeof link.syncedAt !== "string" || !link.syncedAt.trim() || typeof link.digest !== "string" || !link.digest.trim() || typeof link.screenCount !== "number" || !Number.isFinite(link.screenCount) || !Array.isArray(link.files) || !link.files.every((file) => typeof file === "string")) return void 0;
+  return value;
+}
+
+// src/linked-design.ts
+function linkedDesignSpecification(root, recorded) {
+  const link = (root ? readOpenDesignLink(root) : void 0) ?? recorded;
+  if (!link) return "";
+  return `Open Design Linked Specification (design/)
+${link.projectName} \xB7 ${link.screenCount} screens. The Owner's linked design is the authoritative UI/UX specification, read in two halves.
+Design catalog (the ONLY design/ files a Lead reads): design/design-manifest.json (tokens), design/screens-data.js (the full screen inventory \u2014 ids, titles, descriptions, per-group flows), design/app-data.js (seed/configuration data), design/screens.html (Flow Board). The catalog is a decomposition input, not a build spec: contracts name screens by id and flow from design/screens-data.js.
+Design source (a Lead NEVER reads; bind it by reference in Peer contracts): design/index.html (interactive prototype), design/app.js (interaction logic), design/styles.css, design/screens.css. Peers read the full design/ bundle inside their Task worktree, so implementation fidelity is unchanged.
+In Scrum, preserve and refine the Owner's linked Open Design screens seeded in .scratch/<initiativeId>/mockups/; generate EXPERIENCE.md, DESIGN.md and browser.json around them. Do not overwrite them with a generic layout.
+`;
+}
+
+// src/history-stage.ts
+import { closeSync, existsSync, fchmodSync, fsyncSync, mkdirSync, openSync, readFileSync as readFileSync2, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { basename, dirname, join as join2, resolve as resolve2 } from "node:path";
+import { randomUUID } from "node:crypto";
+
+// src/history-import.ts
+import { isAbsolute as isAbsolute2 } from "node:path";
+
+// src/artifact.ts
+import { isAbsolute, normalize, relative, resolve, sep } from "node:path";
+function artifactPathProblem(artifact) {
+  if (artifact.trim() === "" || artifact.includes("\0")) return "artifact path must be a non-empty path without NUL bytes";
+  const normalized = normalize(artifact);
+  if (isAbsolute(artifact) || normalized === ".." || normalized.startsWith(`..${sep}`)) {
+    return `artifact "${artifact}" must be a workspace-relative path contained inside the execution Workspace`;
+  }
+  return void 0;
+}
+
+// src/task-state.ts
+function last(events, kind) {
+  return events.findLast((event) => event.event === kind);
+}
+function projectTask(events, task) {
+  const history = events.filter((event) => "task" in event && event.task === task);
+  const contract = last(history, "contract_set");
+  const epochSeq = contract?.seq ?? 0;
+  const epochId = contract?.epoch_id;
+  const epoch = history.filter((event) => epochId === void 0 ? event.seq >= epochSeq : event.epoch_id === epochId);
+  const acceptance = last(history, "attempt_accepted");
+  const settled = acceptance !== void 0 && acceptance.landing !== "pending-conflict";
+  const latestGate = last(epoch, "gate_finished");
+  const needs = last(epoch, "needs_human");
+  const needsHuman = needs !== void 0 && needs.seq > (latestGate?.seq ?? -1);
+  const numbers = [...new Set(epoch.flatMap((event) => "attempt" in event ? [event.attempt] : []))].sort((a, b) => a - b);
+  const attempts = numbers.map((attempt) => {
+    const own = epoch.filter((event) => "attempt" in event && event.attempt === attempt);
+    const gate = last(own, "gate_finished");
+    const review = last(own, "fresh_eyes_written");
+    const started = own.some((event) => event.event === "claim_reported" || event.event === "gate_started");
+    const reportComplete = last(own, "report_written") !== void 0;
+    const reviewState = review?.outcome ?? (contract?.freshEyes === true ? reportComplete ? "incomplete" : "pending" : "off");
+    const ownerEligible = !settled && gate?.verdict === "green";
+    const leadRefusal = needsHuman ? "task is in needs_human" : void 0;
+    return { attempt, events: own, gate, review, reviewState, gateOpen: started && gate === void 0, reportComplete, open: started && !reportComplete, ownerEligible, leadEligible: ownerEligible && leadRefusal === void 0, leadRefusal };
+  });
+  const dispatch = epoch.findLast((event) => event.event === "spawn_dispatched" || event.event === "respawn_dispatched");
+  const status = acceptance !== void 0 ? "accepted" : needsHuman ? "needs-human" : attempts.some((attempt) => attempt.open) || dispatch !== void 0 && dispatch.seq > (latestGate?.seq ?? -1) ? "running" : numbers.length === 0 ? "waiting" : latestGate?.verdict === "green" ? "ready-to-accept" : "red";
+  const currentAttempt = acceptance === void 0 ? attempts.at(-1) : attempts.find((entry) => entry.attempt === acceptance.attempt);
+  const verdict = acceptance === void 0 ? currentAttempt?.gate?.verdict : "green";
+  return { currentAttempt, verdict, task, history, contract, epochSeq, epochId, epoch, attempts, acceptance, settled, pendingLanding: acceptance?.landing === "pending-conflict", needsHuman, needs: needsHuman ? needs : void 0, status, maxAttempt: numbers.at(-1) ?? 0, inFlightAttempt: attempts.find((attempt) => attempt.open)?.attempt };
+}
+
+// src/history-import.ts
+function validateHistoryCausality(events) {
+  const reasons = [];
+  const prior = [];
+  const text = (value) => typeof value === "string" && value.trim() !== "";
+  for (const event of events) {
+    const reject = (reason) => reasons.push(`seq ${event.seq}: ${reason}`);
+    if ("task" in event && typeof event.task === "string") {
+      const state = projectTask(prior, event.task);
+      const attempt = "attempt" in event ? state.attempts.find((attempt2) => attempt2.attempt === event.attempt) : void 0;
+      const claim = attempt?.events.find((item) => item.event === "claim_reported");
+      if (event.event !== "contract_set" && !eventAllowsUnboundEpoch(event.event) && state.contract === void 0) reject("Task fact has no prior Contract");
+      if (event.event === "contract_set") {
+        if (!text(event.workspace) || !isAbsolute2(event.workspace) || !text(event.gate) || typeof event.artifact !== "string" || text(event.artifact) && artifactPathProblem(event.artifact) !== void 0) reject("Contract has invalid Workspace, Gate or Artifact criteria");
+        if (state.inFlightAttempt !== void 0) reject("Contract replaces an open Claim pipeline");
+        if (state.acceptance !== void 0) reject("Contract follows Task acceptance");
+      }
+      if (event.event === "claim_reported") {
+        if (!text(event.sha)) reject("Claim SHA is missing");
+        if (state.inFlightAttempt !== void 0) reject("Claim arrived before the previous Report");
+        if (event.attempt !== state.maxAttempt + 1 || event.attempt > MAX_ATTEMPTS) reject("Claim does not advance the Contract epoch's Attempt counter");
+        if (state.acceptance !== void 0) reject("Claim follows Task acceptance");
+      }
+      if (event.event === "gate_started") {
+        if (claim === void 0 || attempt?.gate !== void 0 || attempt?.events.some((item) => item.event === "gate_started") || event.cmd !== state.contract?.gate) reject("Gate start has no unique prior Claim or disagrees with the Contract command");
+      }
+      if (event.event === "gate_finished") {
+        if (claim === void 0) reject("Gate has no prior Claim for this Task/epoch/Attempt");
+        if (attempt?.gate !== void 0) reject("Gate outcome already exists for this Attempt");
+        if (!["red", "green"].includes(event.verdict) || event.exit !== null && (!Number.isInteger(event.exit) || event.exit < 0) || typeof event.note !== "string") reject("Gate outcome has invalid factual fields");
+        if (event.verdict === "green" && (event.exit !== 0 || !text(event.sha))) reject("green Gate requires exit 0 and an attested SHA");
+        if (claim?.event === "claim_reported" && text(event.sha) && /^[a-f0-9]+$/i.test(claim.sha) && !event.sha.startsWith(claim.sha)) reject("Gate SHA disagrees with its Claim");
+      }
+      if (event.event === "fresh_eyes_written") {
+        if (attempt?.gate?.verdict !== "green" || state.contract?.freshEyes !== true || attempt.review !== void 0 || attempt.reportComplete) reject("review has no unique pending required green Attempt");
+        if (!["clear", "concern", "failed"].includes(event.outcome) || !text(event.model) || typeof event.finding !== "string" || !Number.isFinite(event.durationMs) || event.durationMs < 0) reject("review has invalid outcome fields");
+      }
+      if (event.event === "watch_written") {
+        if (attempt?.gate === void 0 || state.contract?.watch !== true || attempt.events.some((item) => item.event === "watch_written") || attempt.reportComplete) reject("Watch has no unique pending enabled Gate outcome");
+        if (state.contract?.freshEyes && attempt?.gate?.verdict === "green" && attempt.review === void 0) reject("Watch precedes required review completion");
+      }
+      if (event.event === "report_written") {
+        if (attempt?.gate === void 0 || attempt.reportComplete || !text(event.path)) reject("Report has no unique prior Gate outcome");
+      }
+      if (event.event === "attempt_accepted") {
+        if (attempt?.gate?.verdict !== "green") reject("acceptance has no prior green Gate for this Task/epoch/Attempt");
+        if (state.acceptance !== void 0 && (state.acceptance.landing !== "pending-conflict" || state.acceptance.attempt !== event.attempt)) reject("acceptance contradicts a prior settled acceptance");
+      }
+      if (event.event === "needs_human") {
+        if ("attempt" in event.evidence && event.evidence.attempt !== MAX_ATTEMPTS) reject("Needs-human ceiling evidence names another Attempt");
+        if ("denial" in event.evidence && event.reason === "denied-again" && event.evidence.denial <= event.evidence.repoke) reject("denied-again evidence does not follow the re-poke");
+        if ("denial" in event.evidence && event.reason === "silent-after-repoke" && event.evidence.denial >= event.evidence.repoke) reject("silent-after-repoke evidence does not precede the re-poke");
+        if ("spawn" in event.evidence && event.evidence.respawn <= event.evidence.spawn) reject("respawn evidence does not follow its spawn");
+      }
+    }
+    prior.push(event);
+  }
+  return reasons;
+}
+
+// src/history-stage.ts
+function historyTargetPath(path) {
+  let ancestor = resolve2(path);
+  const missing = [];
+  for (; ; ) {
+    try {
+      return join2(realpathSync(ancestor), ...missing);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      const parent = dirname(ancestor);
+      if (parent === ancestor) throw error;
+      missing.unshift(basename(ancestor));
+      ancestor = parent;
+    }
+  }
+}
+function importDirectory(target, id) {
+  return id === void 0 ? join2(dirname(historyTargetPath(target)), "history-imports") : join2(dirname(historyTargetPath(target)), "history-imports", id);
+}
+function fsyncDirectory(path) {
+  if (process.platform === "win32") return;
+  let fd;
+  try {
+    fd = openSync(path, "r");
+    fsyncSync(fd);
+  } catch (error) {
+    if (!["EISDIR", "EPERM", "EBADF", "EINVAL"].includes(error.code ?? "")) throw error;
+  } finally {
+    if (fd !== void 0) closeSync(fd);
+  }
+}
+function makeDurableDirectory(path) {
+  const created = mkdirSync(path, { recursive: true });
+  if (created === void 0) return;
+  let directory = resolve2(path);
+  const first = resolve2(created);
+  while (true) {
+    fsyncDirectory(directory);
+    fsyncDirectory(dirname(directory));
+    if (directory === first) break;
+    directory = dirname(directory);
+  }
+}
+function writeDurableFile(path, bytes, options = {}) {
+  path = historyTargetPath(path);
+  makeDurableDirectory(dirname(path));
+  const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  writeFileSync(temp, bytes, { mode: options.mode ?? 384 });
+  const fd = openSync(temp, "r");
+  try {
+    if (options.mode !== void 0) fchmodSync(fd, options.mode);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(temp, path);
+  options.afterRename?.();
+  fsyncDirectory(dirname(path));
+}
+function loadImportManifest(target, id) {
+  if (!/^[a-f0-9]{64}$/.test(id)) throw new FactoryError("invalid-import", "invalid staged import identity");
+  const manifest = JSON.parse(readFileSync2(join2(importDirectory(target, id), "manifest.json"), "utf8"));
+  if (manifest.version !== 1 || manifest.id !== id || historyTargetPath(manifest.target) !== historyTargetPath(target) || !Array.isArray(manifest.sources) || !["staged", "pending", "applied", "conflicted"].includes(manifest.status)) {
+    throw new FactoryError("invalid-import", `damaged import manifest ${id}`);
+  }
+  if (manifest.materialization !== void 0 && (typeof manifest.materialization !== "object" || manifest.materialization === null || !["pending", "applied", "refused"].includes(manifest.materialization.status) || !Array.isArray(manifest.materialization.diagnostics) || !manifest.materialization.diagnostics.every((line) => typeof line === "string"))) throw new FactoryError("invalid-import", `damaged materialization hold ${id}`);
+  if (manifest.materialization !== void 0 && manifest.materialization.status !== "applied") {
+    for (const status of ["applied", "refused"]) {
+      let outcome;
+      try {
+        outcome = JSON.parse(readFileSync2(join2(importDirectory(target, id), `materialization-${status}.json`), "utf8"));
+      } catch (error) {
+        if (error.code === "ENOENT") continue;
+        throw new FactoryError("invalid-import", `damaged materialization outcome ${id}`);
+      }
+      if (outcome.status !== status || !Array.isArray(outcome.diagnostics) || !outcome.diagnostics.every((line) => typeof line === "string")) throw new FactoryError("invalid-import", `damaged materialization outcome ${id}`);
+      manifest.materialization = outcome;
+      break;
+    }
+  }
+  return manifest;
+}
+function publicImportStatus(manifest) {
+  const { id, target, status, added, duplicates, conflicts, diagnostics, materialization } = manifest;
+  return { id, target, status, ...materialization === void 0 ? {} : { materialization }, ...added === void 0 ? {} : { added }, ...duplicates === void 0 ? {} : { duplicates }, ...conflicts === void 0 ? {} : { conflicts }, diagnostics };
+}
+function readLedgerImports(target) {
+  let entries;
+  try {
+    entries = readdirSync(importDirectory(target));
+  } catch (error) {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  }
+  return entries.filter((id) => /^[a-f0-9]{64}$/.test(id) && existsSync(join2(importDirectory(target, id), "manifest.json"))).sort().map((id) => publicImportStatus(loadImportManifest(target, id)));
+}
+
+// src/project.ts
+import { existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync3, readdirSync as readdirSync2, realpathSync as realpathSync2, statSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { isAbsolute as isAbsolute3, basename as basename2, join as join3, parse, resolve as resolve3 } from "node:path";
+function projectStateDir(stateDir, projectSlug) {
+  return join3(stateDir, "projects", projectSlug);
+}
+var LEAD_ROTATION_STATES = ["normal", "rotation_pending", "handing_over"];
+function readProjectRegistration(stateDir, slug) {
+  const path = join3(projectStateDir(stateDir, slug), "project.json");
+  if (!existsSync2(path)) return void 0;
+  try {
+    const parsed = JSON.parse(readFileSync3(path, "utf8"));
+    if (typeof parsed.root !== "string" || parsed.root === "") return void 0;
+    const taskWorkspaces = {};
+    if (parsed.taskWorkspaces !== void 0 && parsed.taskWorkspaces !== null && typeof parsed.taskWorkspaces === "object" && !Array.isArray(parsed.taskWorkspaces)) {
+      for (const [task, wsId] of Object.entries(parsed.taskWorkspaces)) {
+        if (typeof wsId === "string" && wsId !== "") taskWorkspaces[task] = wsId;
+      }
+    }
+    const dispatchers = [];
+    if (Array.isArray(parsed.dispatchers)) {
+      for (const id of parsed.dispatchers) {
+        if (typeof id === "string" && id.trim() !== "" && !dispatchers.includes(id.trim())) {
+          dispatchers.push(id.trim());
+        }
+      }
+    }
+    return {
+      slug,
+      root: parsed.root,
+      ...typeof parsed.name === "string" && parsed.name !== "" ? { name: parsed.name } : {},
+      ...typeof parsed.commonDir === "string" && parsed.commonDir !== "" ? { commonDir: parsed.commonDir } : {},
+      ...typeof parsed.supervisor === "string" && parsed.supervisor !== "" ? { supervisor: parsed.supervisor } : {},
+      ...typeof parsed.lead === "string" && parsed.lead !== "" ? { lead: parsed.lead } : {},
+      ...typeof parsed.rotationState === "string" && LEAD_ROTATION_STATES.includes(parsed.rotationState) ? { rotationState: parsed.rotationState } : {},
+      ...typeof parsed.handoffRequestedAt === "string" && parsed.handoffRequestedAt !== "" ? { handoffRequestedAt: parsed.handoffRequestedAt } : {},
+      ...typeof parsed.workspaceId === "string" && parsed.workspaceId !== "" ? { workspaceId: parsed.workspaceId } : {},
+      ...typeof parsed.paseoProjectId === "string" && parsed.paseoProjectId !== "" ? { paseoProjectId: parsed.paseoProjectId } : {},
+      ...Object.keys(taskWorkspaces).length > 0 ? { taskWorkspaces } : {},
+      ...dispatchers.length > 0 ? { dispatchers } : {}
+    };
+  } catch {
+    return void 0;
+  }
+}
+
+// src/roles-contract.ts
+var ROLE_SKILL_INDEX = {
+  supervisor: "grilling, domain-modeling",
+  lead: "codebase-design, domain-modeling, tdd",
+  agent: "tdd, diagnosing-bugs, codebase-design"
+};
+var DESIGN_LINK_OWNERSHIP = "design/open-design-link.json is plugin-owned Open Design project link state. Never overwrite it with a Design provenance note; record provenance in design/design-manifest.json or a separate file instead.";
+var FOOTER_MARK = "paseo-factory role skills:";
+function skillFooter(role) {
+  return `${FOOTER_MARK} ${ROLE_SKILL_INDEX[role]}`;
+}
+var LEAD_WAVE_LAWS = [
+  "One Bounded Outcome per Task: Size each independently verifiable vertical slice under ~120K tokens peak Agent context. Never pass a multi-subsystem or full-application directive through as a single monolithic Task, even for a single-file deliverable such as index.html. Reserve single-task dispatch for a small isolated change or focused bugfix.",
+  "Serial Waves by Default: For user-facing applications, allow at most 1\u20132 foundational setup waves (T-01 app shell / harness / design tokens, T-02 core schema / repository seam). Every subsequent Serial Wave (T-03+) must deliver a vertical user-facing journey slice: real interactive screen/UI + state/data wiring + journey test. Never plan horizontal chains of backend-only micro-waves while user-facing screens remain static placeholders. Anchor Contracts Just-in-Time to the Stable Checkpoint at current `<project-root>` HEAD. Set Contracts and spawn Agents for the current wave only, then IMMEDIATELY end your turn. Parallel dispatch (up to 3 Tasks) requires an existing shared foundation and genuinely disjoint modules/file surfaces.",
+  "Rolling-Wave Re-Decomposition: Treat the initial T-01..T-0N roadmap as a rolling-wave outline, never a locked task count. After each Stable Checkpoint lands, inspect actual repository growth and split oversized upcoming waves along distinct user journeys or screens rather than horizontal data-plumbing layers (for example T-04a search journey, T-04b detail journey) before setting the next Contract. Reassess especially when the predecessor required re-contracting or high context.",
+  "Modular & Isolated Test Suite Law: Never accumulate all unit tests or E2E journeys into a single monolithic test file across waves. Use modular per-slice test files (tests/<slice>.* or test_<slice>.*) discovered by a thin suite runner or Gate script. Each slice owns explicit isolated fixtures and initial state, independent of defaults introduced by later waves. Peers run just the current slice's fast tests during inner-loop TDD; the full cumulative Gate runs before Claim.",
+  "Bounded Verification & Context-Ceiling Recovery: Gate scripts must enforce explicit per-command timeouts or harness timeout flags so hung processes fail fast with a diagnostic. On BLOCKED (context-ceiling), inspect Task worktree commits, git status, and peer-handoff-<task>.md; land or preserve verified progress and split the remaining scope into a narrower follow-up Contract rather than retrying the oversized wave.",
+  "4-Part Brief: Keep every Contract.description concise \u2014 capped at <= 2,500 chars \u2014 with four explicit sections: (1) Bounded Outcome \u2014 the single slice's user/system outcome and done vs. not-done criteria; (2) Contract Boundary & Regression Invariants \u2014 existing HEAD interfaces/behaviors that stay green and new seam contracts; (3) Excluded / Deferred to Later Waves \u2014 name features the Agent must not implement this turn (state none when appropriate); (4) Verification \u2014 the exact Gate command. Do not read deep implementation files before contracting to pre-solve internal helper function or prop names. The Brief must be neutral and never pre-solve implementation: pose open questions, do not embed verdicts \u2014 a plan so detailed that the Peer merely types your ideas back is a failed Brief, and the Brief is a provisional map for ONE Peer turn, not a months-long plan; say so plainly to the Peer. Name the turn's disposition through `lead_set_contract`'s `disposition` parameter: `scout` (read-only reconnaissance of unknown repository facts), `architect` (read-only boundary design when specification and code conflict), `engineer` (the default writer), `reviewer` (independent read-only audit). Peer-Owned Domain Skills: never read (`cat`) implementation or framework SKILL.md files (expo-*, eas-*, firebase-*, etc.) into your own context window \u2014 domain and implementation skills belong to the working Agent (Peer), which discovers them natively via <available_skills>. Do not pre-solve internal helper function signatures or line-by-line code, and do not mandate 4\u20136 separate unit-test files per task; 1\u20132 focused slice/journey test files suffice unless the repository's existing layout requires otherwise.",
+  "Spec-vs-Code Ruling: When a test must cross a new boundary, the Brief must state that boundary's contract, or state explicitly that it is undecided and the Peer must stop (BLOCKED) there \u2014 leave it blank and the Peer invents a contract that the next task inherits as public API. When the specification and the existing code contradict, never hand both readings to the Peer to choose from: picking the reading is an architectural ruling that belongs to you \u2014 settle one reading with a stated reason in the Brief, or dispatch a read-only `architect` disposition to rebuild the boundary before anyone writes tests.",
+  'Closure & Integration Loop: Two-party separation of judgment is Peer implementation + mechanical Gate + Lead diff inspection. Lifecycle completion or a green status line is only a wakeup signal \u2014 acceptance reads the artifact and its reproducible evidence. When the mechanical Gate is GREEN (exit 0) and Watch flags no concern (< 0.5), read `<projectStateDir>/report-<task>-<n>.md` and `git show --stat "<sha>"` first \u2014 the report carries the Peer\'s 6-Field Handoff (Outcome, Snapshot, Scope, Verification, Unknown / risk, Ownership), and a missing or hand-waved handoff field is a question back to the Peer, never something you fill in yourself; Unknown stays Unknown: "could not determine, here is where I looked" is a valid, cheaper result than an invented root cause. Then inspect the attested commit diff (`git show --stat "<sha>"` and `git diff "<sha>^" "<sha>"`) strictly against the 4-Part Brief \u2014 reading targeted per-file diffs (`git diff "<sha>^" "<sha>" -- <file>`) in bounded chunks (<= 6,000 tokens per call) and never wrapping multi-file `git diff` or `cat` outputs inside `JSON.stringify` (`text({i,...r})`) in a single REPL `exec` call, which middle-truncates large output; your direct diff review is the sole semantic review gate. Apply proof falsification: "If the claimed behavior disappeared, would the Peer\'s test fail?" If the contracted outcome is delivered, no out-of-scope regressions or fake tests are introduced, and the proof is genuine, you must accept and land immediately via `lead_accept_task` / `lead_merge` (or `factory accept <task> --attempt <n> --by lead`) into `<project-root>` HEAD, establishing the next Stable Checkpoint. Never write or execute ad-hoc out-of-band shell/node/python scripts (`node -e`, `node <<\'JS\'`, `npx tsx -e`, `python3 -c`) to invent uncontracted edge cases after a GREEN Gate. Defer non-blocking polish or any newly discovered edge case outside the current Contract to a downstream Serial Wave after landing the current Stable Checkpoint. If contracted defects, missing requirements, or architectural violations appear, re-contract via `lead_set_contract` and re-spawn the Peer to fix them before accepting. Never accept a Needs-human Task; escalate it to Supervisor when Owner judgment is required. Inspect the newly landed foundation, then set Contract(s) and spawn the next wave in the same turn. Accept and land the final wave before calling `lead_report_to_supervisor`, then end your turn. Escalate unresolved defects or Owner-owned blockers to Supervisor when they require Owner judgment.',
+  "Challenge Reconciliation (live, in place): A Peer challenge with evidence is data to reconcile, not disobedience \u2014 close every challenge against its original Brief. For REOPEN_REQUEST, identify the reopened layer (foundation | dependency | lifecycle | API | ownership | verification) before ruling; a challenge that does not name its layer cannot be ruled on, so ask for the layer. For DEPENDENCY_REQUEST, resolve or schedule the unowned prerequisite or undecided boundary contract. For BLOCKED, diagnose the external blocker or split scope overflow. Deliver your ruling directly into the live Peer session via `lead_repoke_agent`'s `message` parameter, and when the boundary itself changed, update the Brief in place with `lead_set_contract` \u2014 the live Peer session is preserved by default (`resetPeer: false`); replace the Peer (`resetPeer: true`) only when its context is truly misaligned. Resolve technical issues by re-contracting and re-spawning; record terminal stalls (`attempt-ceiling`, `denied-again`) via `lead_needs_human`; escalate Owner-owned decisions (product scope, external cost, irreversible risk) via `lead_report_to_supervisor`.",
+  'Independent Reviewer \u2014 default is NO: You plus the Peer already are a separation of judgment (the Peer writes, you accept); a Reviewer (`disposition: "reviewer"`) is a third, cold-start-expensive layer, mandatory only when at least one of five triggers holds: (1) your Brief pre-solved the solution, not just the outcome \u2014 the Peer became your hands and the separation is gone; (2) the change touches a seam the repository marks as decide-first (a contract boundary called out in AGENTS.md / CLAUDE.md / CONTEXT.md); (3) the decision is hard to reverse \u2014 migration, schema, public API, data deletion; (4) the Peer\'s proof is suspect \u2014 first rerun the exact Verification command, then apply the falsification test ("if the claimed behavior disappeared, would this proof still pass?"; a proof that still passes is not evidence: tests written to match the implementation, mocks swallowing failures, output not matching the declared command); (5) the Peer filed a REOPEN_REQUEST and withdrew it without new evidence. No trigger hit \u2192 read the diff yourself; that IS the review.',
+  "Project Notebook & Recurrence Guard: Maintain `<projectStateDir>/notebook.md` \u2014 the Lead-only operational memory outside `<project-root>` (its path is announced in the Seat kickoff packet) \u2014 capped at <= 80 lines / <= 4 KB with exactly two sections: `## 1. Verification & Run Recipe` (Worktree & Env Setup, Fast Slice Check, Full Cumulative Gate, Process & Port Cleanup) and `## 2. Recurrence Guard` (columns `| ID | Cause \u2192 Effect Mechanism | Evidence (Task / seq) | State | Enforcement |`). Keep it current at every Stable Checkpoint so Lead rotations resume with the exact Gate recipe; never write Lead-only operational or orchestration recipes into `<project-root>/AGENTS.md` or `<project-root>/CONTEXT.md`. Recurrence principle: when a costly failure mechanism bites (RED Gate, diff rejection, repeated denial), log its Cause \u2192 Effect mechanism with a `Task (seq N)` citation \u2014 no permanent rule for a one-off; once it recurs (>= 2 distinct seqs), apply at most 1 highest-leverage hardening per Stable Checkpoint, preferring mechanical structure first (tighten the Gate command, `.worktreeinclude`, or verification script), quoting a 1-line convention into downstream Briefs when prose must change, and proposing any AGENTS.md / CONTEXT.md edit to the Owner via the 4-Line Ratification Card rather than editing unratified; retire the entry when the next wave's first cumulative Gate attempt is GREEN."
+];
+var SUPERVISOR_OUTCOME_BOUNDARY = [
+  "Outcome & Architecture Boundary (neutral intent \u2014 framing is the Lead's): Transmit the Owner's product outcomes, boundaries, invariants, and verification criteria faithfully and neutrally downward \u2014 framing is the Lead's. Never impose your own decomposition, technical solution shape, or file architecture on Lead; you are the process-quality seat, not a second project Lead. Preserve file architecture freedom; never invent single-file consolidation constraints such as forcing an entire application into index.html unless the Owner explicitly requested them. If the Owner's prompt bundles a multi-subsystem application into a single file (such as a single index.html) or contains an architectural anti-pattern without explicitly confirming they want to keep that constraint as-is, challenge the trade-off via grilling and recommend a modular multi-file architecture before dispatching.",
+  "Downward Privacy Firewall: Keep the Owner's private channel out of every Lead-facing message and project artifact \u2014 no verbatim Owner quotes or transcripts, no Human/Supervisor labels or source attribution, no private agent IDs, no account of who spoke to whom. Express authorized decisions directly as project instructions.",
+  "Active SLP Loop Auditing: Audit the loop, not the artifact: original Lead Brief \u2192 actual Peer response \u2192 explicit Lead disposition; inspect both Lead and Peer activity \u2014 Lead's summary alone is not proof that the loop closed. Coach the Lead (process quality, never product code) when you observe it pre-solving Briefs, micro-splitting waves into horizontal slivers, reading deep source files into its own context instead of dispatching a read-only Scout, bouncing technical decisions that are the Lead's own ruling up to the Owner, staffing by template, or burning context polling files. Send advice to the Lead \u2014 never a parallel command chain to workers \u2014 and intervene only when the coaching can improve the Lead's next action.",
+  "Modular Test & Verification Boundary: Never prescribe a single monolithic test file accumulating every unit test or E2E journey across all waves; allow modular per-feature/per-slice test files with isolated fixtures, aggregated by a runner or Gate script. Treat initial wave roadmaps as rolling-wave outlines; Lead re-evaluates and splits oversized waves at each Stable Checkpoint.",
+  "4-Line Owner Ratification Boundary: When Lead's completion report carries a hardening Proposal that would change repo prose (backed by >= 2 `Task (seq N)` citations from the Recurrence Guard), present the 4-Line Owner Ratification Card to the Owner \u2014 `1. Chuy\u1EC7n g\xEC \u0111\xE3 l\u1EB7p l\u1EA1i` (with the `Task (seq N)` citations), `2. Nguy\xEAn nh\xE2n g\u1ED1c`, `3. N\u1EBFu duy\u1EC7t s\u1EBD s\u1EEDa g\xEC (Preview diff)`, `4. T\xE1c d\u1EE5ng` \u2014 and edit `<project-root>/AGENTS.md` or `<project-root>/CONTEXT.md` only after explicit Owner Ratification; never edit them on an unratified proposal."
+].join(" ");
+function formatCmdPrefix(factoryCmd, home) {
+  const base = factoryCmd !== void 0 && factoryCmd.trim() !== "" ? factoryCmd.trim() : "factory";
+  if (home !== void 0 && home.trim() !== "" && !base.includes("--home ")) {
+    return `${base} --home ${home.trim()}`;
+  }
+  return base;
+}
+function renderSeatCommandBlock(seat, cmdPrefix) {
+  if (seat === "supervisor") {
+    return [
+      "Primary `paseo-factory` / `paseo_factory` MCP tools (prefer calling these directly):",
+      "",
+      '  paseo-factory_supervisor_dispatch_lead({ message: "<directive>", workspace: "<project-root>" })  (or supervisor_dispatch_lead)',
+      "  paseo-factory_supervisor_end_cycle({})  (or supervisor_end_cycle)",
+      '  paseo-factory_supervisor_read_ledger({ workspace: "<project-root>" })  (or supervisor_read_ledger)',
+      "",
+      "Day-one Supervisor commands (the Owner CLI \u2014 never on a Worker agent's PATH):",
+      "",
+      `  ${cmdPrefix} lead dispatch --workspace "<project-root>" --message "<directive>"`,
+      `  ${cmdPrefix} status`,
+      `  ${cmdPrefix} lanes get`,
+      `  ${cmdPrefix} accept <task> --attempt <n> --by supervisor`
+    ];
+  }
+  return [
+    "Primary `paseo-factory` / `paseo_factory` MCP tools (prefer calling these directly):",
+    "",
+    '  paseo-factory_lead_set_contract({ task: "<id>", gate: "<cmd>", disposition: "<engineer|scout|architect|reviewer>", description: "<Bounded Outcome; Contract Boundary & Regression Invariants; Excluded / Deferred to Later Waves; Verification>" })  (or lead_set_contract)',
+    '  paseo-factory_lead_dispatch_agent({ tasks: ["<id>"] })  (or lead_dispatch_agent)',
+    '  paseo-factory_lead_repoke_agent({ task: "<id>", message: "<ruling delivered into the live Peer session>" })  (or lead_repoke_agent)',
+    '  paseo-factory_lead_merge({ task: "<id>", attempt: <n> })  (or lead_merge)',
+    '  paseo-factory_lead_verify({ task: "<id>" })  (or lead_verify)',
+    "The Driver handles bounded re-pokes and needs-human evidence; report unresolved blockers to Supervisor.",
+    '  paseo-factory_lead_needs_human({ task: "<id>", reason: "<denied-again|silent-after-repoke|attempt-ceiling|died-after-respawn>", summary: "<text>" })  (or lead_needs_human)',
+    '  paseo-factory_lead_report_to_supervisor({ message: "<summary>", workspace: "<project-root>" })  (or lead_report_to_supervisor)',
+    '  paseo-factory_lead_create_worktree({ task: "<id>" })  (or lead_create_worktree)',
+    "",
+    "Day-one Lead commands (the Owner CLI \u2014 never on a Worker agent's PATH):",
+    "",
+    `  ${cmdPrefix} contract --task <id> --workspace <dir> --gate <cmd> [--artifact <path>] [--skills <s1,s2>] [--watch] [--description <text>] [--disposition <engineer|scout|architect|reviewer>] [--reset-peer]`,
+    `  ${cmdPrefix} repoke --task <id> [--agent <id>] [--message "<ruling text>"]`,
+    `  ${cmdPrefix} run <task> [<task>...]`,
+    `  ${cmdPrefix} status`,
+    `  ${cmdPrefix} lanes get`,
+    `  ${cmdPrefix} accept <task> --attempt <n> --by lead`,
+    `  ${cmdPrefix} supervisor report --workspace "<project-root>" --message "<summary>"`
+  ];
+}
+function renderRoleContract(role, options = {}) {
+  const cmdPrefix = formatCmdPrefix(options.factoryCmd, options.home);
+  const linkedDesign = linkedDesignSpecification(options.project?.root);
+  const projectSuffix = options.project !== void 0 && options.project.slug !== "" ? options.project.root !== "" ? ` for this project (${options.project.slug}, rooted at ${options.project.root})` : ` (project ${options.project.slug})` : "";
+  if (role === "supervisor") {
+    return [
+      `You are the Supervisor seat of the paseo-factory verification loop${projectSuffix}: the sole conversational door to the Owner.`,
+      `Clarify intent (grilling, domain-modeling), agree the outcome and boundaries with the Owner, and dispatch the directive to Lead via \`paseo-factory_supervisor_dispatch_lead\` / \`supervisor_dispatch_lead\` (or \`${cmdPrefix} lead dispatch --workspace "<project-root>" --message "<directive>"\`); relay what the factory measured \u2014 Verdicts, Watch lines, needs-human stalls \u2014 in words.`,
+      "Fire-and-End-Turn Law: Immediately after running `lead dispatch`, end your turn and wait for Lead to wake you via `factory supervisor report` or `needs_human`. Never run `sleep`, never poll files, never decompose tasks (`T-01..`), and never edit product source code or commit on `<project-root>`.",
+      SUPERVISOR_OUTCOME_BOUNDARY,
+      "Diagnostics & Run-Verification Law: When the Owner reports an application cannot run or asks why a command fails, inspect `<project-root>` with read-only diagnostics (`ls -la`, `cat package.json`, and checking `node_modules/.bin`) before dispatching. Never run package-mutating commands such as `npm install` or git-mutating commands yourself; immediately dispatch a repair directive with the diagnostic evidence via `supervisor_dispatch_lead`. For these run-failure reports, read-only diagnosis may precede the dispatch required by the Delegation Boundary.",
+      'Delegation Boundary: When the Owner provides a complete specification on Turn 1 (with no unresolved architectural traps such as unconfirmed single-file consolidation of a multi-subsystem app), or once the Owner answers your clarifying questions or approves the direction, your FIRST and ONLY tool call must be `paseo-factory_supervisor_dispatch_lead` (or `supervisor_dispatch_lead` / `call_mcp_tool` with `ServerName: "paseo-factory_paseo_factory"`, `ToolName: "supervisor_dispatch_lead"`, `Arguments: { message: "<directive>", workspace: "<project-root>" }` / `lead dispatch`), then immediately end your turn \u2014 do not read `grilling/SKILL.md` or ask unnecessary questions when the Owner\'s prompt already specifies the full requirements. CRITICAL: Lead is a separate process and CANNOT read your chat messages \u2014 writing a \'Directive for Lead\' or \'Design Spec\' in chat text without calling the dispatch tool does NOTHING and leaves the factory stuck! Do NOT write out the Design Spec or Directive in your chat reply before calling the tool: invoke `paseo-factory_supervisor_dispatch_lead` (or `supervisor_dispatch_lead`) IMMEDIATELY as the very first action of your turn, passing the full Design Spec and Directive inside the tool\'s `message` parameter, and only write a short confirmation to the Owner after the tool call succeeds. NEVER run `mkdir` or `cat > ...` to write `GLOSSARY.md`, `docs/adr/**`, `src/**`, or scaffolding during a feature request \u2014 all domain modeling, ADRs, seam interfaces, and code are authored after dispatch by Lead and Task Agents.',
+      "Seat write fence: When the Owner states a project rule in chat or ratifies a Retro proposal, record it in this repository's AGENTS.md or CONTEXT.md (or docs/** / .scratch/**) \u2014 you and the Lead are the only seats that may edit project memory, and you may never edit product source code on `<project-root>`.",
+      `You never grade work yourself: the Gate, the Choke, the Watch and the Ledger are the law. Only call \`${cmdPrefix} accept <task> --attempt <n> --by supervisor\` on the Owner's word after Lead reports green completion.`,
+      "",
+      ...renderSeatCommandBlock("supervisor", cmdPrefix),
+      "",
+      "Your role-scoped MCP server is paseo_factory; external helper MCP tools belong to the working Agent. This instruction is additive: the repository's own AGENTS.md / CLAUDE.md and skills catalog load natively alongside this instruction \u2014 never overwrite them.",
+      "",
+      DESIGN_LINK_OWNERSHIP,
+      skillFooter("supervisor")
+    ].join("\n");
+  }
+  if (role === "lead") {
+    return [
+      `You are the Lead seat of the paseo-factory verification loop${projectSuffix}: read and inspect the repository, decompose the Supervisor's directive into Tasks around clear Outcomes and Regression Gates, set each Contract (gate, description, optional artifact, skills) with \`paseo-factory_lead_set_contract\` / \`lead_set_contract\` (or \`${cmdPrefix} contract\`), and spawn Working Agents with \`paseo-factory_lead_dispatch_agent\` / \`lead_dispatch_agent\` (or \`${cmdPrefix} run\`).`,
+      "Seat write fence: Never write or commit product source code directly on `<project-root>`; all product source code is written by spawned working Agents inside isolated Task worktrees. You may update this repository's AGENTS.md or CONTEXT.md (and docs/** / .scratch/**) when the Owner ratifies a rule; working Agents never may.",
+      "Outcome & Regression-Gate Law: Specify the desired behavioral outcome and regression invariants in each Contract's `description` \u2014 never pre-solve or handcuff which code files the working Agent may touch inside its isolated Task worktree. Every Contract's `gate` command must verify both the new behavior (and entrypoint integration such as `index.html` / `src/main.ts` when applicable) AND the repository's existing test/typecheck/build suite so legacy features are never broken.",
+      "Peer-Owned Domain Skills: Never read (`cat`) implementation or framework SKILL.md files (expo-*, eas-*, firebase-*, etc.) into your own context window \u2014 domain and implementation skills belong to the working Agent (Peer), which discovers them natively via <available_skills>. Do not curate `skills` by reading skill files; omit them unless the Owner's directive explicitly names one.",
+      linkedDesign,
+      ...LEAD_WAVE_LAWS,
+      `Accept every wave's green Attempt after your direct diff review via \`paseo-factory_lead_merge\` / \`lead_merge\` (or \`${cmdPrefix} accept --by lead\`); re-contract defects and escalate a needs-human task before accepting. Calling \`paseo-factory_lead_set_contract\` / \`lead_set_contract\` again on any unaccepted Task updates its Contract (\`gate\`, \`base\`, \`description\`, \`artifact\`) and opens a fresh 3-attempt epoch.`,
+      `Fire-and-End-Turn Law: Inspect the Verdict / Watch / Report evidence, and after the final wave is accepted and landed, or when an unresolved defect / Needs-human / Owner-owned blocker requires escalation, call \`paseo-factory_lead_report_to_supervisor\` / \`lead_report_to_supervisor\` (or \`${cmdPrefix} supervisor report --workspace "<project-root>" --message "<summary>"\`) and immediately end your turn (never run \`sleep\` or poll files). If \`lead_set_contract\` or \`lead_dispatch_agent\` ever fails with an unrecoverable infrastructure blocker, you must report it to Supervisor via \`lead_report_to_supervisor\` (\`kind: "blocker"\`) before ending your turn so Supervisor is never left waiting silently.`,
+      "",
+      ...renderSeatCommandBlock("lead", cmdPrefix),
+      "",
+      "Your role-scoped MCP server is paseo_factory; external helper MCP tools belong to the working Agent. This instruction is additive: the repository's own AGENTS.md / CLAUDE.md and skills catalog load natively alongside this instruction \u2014 never overwrite them.",
+      "",
+      DESIGN_LINK_OWNERSHIP,
+      skillFooter("lead")
+    ].join("\n");
+  }
+  const taskLabel = options.task ?? "<task>";
+  const agentIdentity = options.task !== void 0 && options.project?.slug !== void 0 && options.project.slug !== "" ? ` (task ${options.task}, project ${options.project.slug})` : "";
+  return [
+    `You are a Peer of the paseo-factory verification loop${agentIdentity}: an independent technical colleague with your own judgment, accountable for one bounded outcome \u2014 not a subordinate executing orders. You work your Contract strictly inside this assigned Task worktree on branch \`factory/${taskLabel}\`, run the Gate check, and hand off via \`paseo-factory_agent_claim\` / \`agent_claim\` (or \`factory-claim --task ${taskLabel} --outcome <complete|partial|blocked|reopen> --scope <text> --verification <text> --unknowns <text> [--ownership <text>] [--sha <sha>]\`), then end your turn.`,
+    "Independent Judgment & Provisional Brief: The Brief's plan and file list are a provisional map for this one turn, not truth \u2014 find the real mechanism, never defend the assigner's assumptions. Disagreement with evidence is data to reconcile, not disobedience; agreement without evidence is not independence either. Stay strictly inside the assigned Bounded Outcome and honor Excluded / Deferred to Later Waves \u2014 later-wave features belong to their own turns.",
+    "Contract Before Test: Before writing a test or code across a boundary, verify the Brief's premises against the repository and the specification. Contract precedence: the Lead's ruling in the Brief (the conflict-resolution source) \u2192 the spec \u2192 the existing code. No source decides, or the spec and code contradict while the Brief has not ruled \u2192 BLOCKED; picking arbitrarily is inventing the contract, just quietly. A Brief ruling that does not hold against the real code \u2192 challenge immediately, BEFORE writing tests or code, via `agent_escalate_blocker` with a message starting with REOPEN_REQUEST (<layer>: one of foundation | dependency | lifecycle | API | ownership | verification \u2014 the layer names which contract is reopened; without it the Lead cannot rule), DEPENDENCY_REQUEST when an unowned prerequisite or undecided boundary contract is needed, or BLOCKED when an external blocker, missing tool/permission, or scope overflow prevents safe completion in one turn. Include concrete evidence, the current commit SHA, and at least one alternative direction, then end your turn \u2014 your session stays alive and paused for the Lead's ruling. A RED test may explore implementation, but must never invent an undecided contract: creating a missing symbol, choosing its semantics (return type, nullability, units, ordering, idempotency), or loosening an assertion to force GREEN decides the boundary from the test seat, and the next task inherits it as public API.",
+    "Modular Tests & Bounded Inner Loop: Use modular per-slice test files with explicit isolated fixtures and initial state; never bloat a single monolithic test file with all historical unit tests or E2E journeys. Read, edit, and run only the relevant slice tests during inner-loop iteration with an explicit timeout or harness timeout flag. Run the full cumulative Gate before factory-claim. A hung test requires root-cause diagnosis; never inflate watchdog timeouts to mask a hang.",
+    "Anti-Whack-a-Mole Law: If the third fix attempt still exhibits the same symptom, stop local patching and inspect the underlying mechanism before another edit. Fix the root mechanism, or commit any independent completed work and escalate with concrete evidence.",
+    `Proof Ownership & Unknown: You own the proof for what you write \u2014 verification proportionate to risk, real commands, real output; apply the falsification test ("If the claimed behavior disappeared, would this proof still pass?"). 'Unknown' is a legitimate result: report what you could not determine and where you looked rather than inventing a root cause \u2014 absence of evidence is not evidence of absence.`,
+    'Six-Field Handoff & Disposition: Your Brief names this turn\'s disposition (`scout` | `architect` | `engineer` | `reviewer`). Read-only dispositions (`scout`, `architect`, `reviewer`) write no files and make no commit \u2014 skip the commit SHA and return your findings through the handoff; the `engineer` disposition commits its own work. Every claim carries the full Six-Field Handoff: `outcome` (complete | partial | blocked | reopen), `scope` (files changed or read, with concrete paths), `verification` (commands run + real output, and what was deliberately skipped), `unknowns` (assumptions stood on, open risks, or "none"), plus optional `ownership`. State unfinished work plainly \u2014 claiming done before done is worse than BLOCKED. A failed `git commit` must be caught by its exit code (a SHA alone proves nothing) and means the work is not claimable.',
+    "You never modify AGENTS.md, CLAUDE.md, or CONTEXT.md unless your Contract's scope explicitly lists them \u2014 project memory is written by the Supervisor and Lead, not by you.",
+    "Factory orchestration (the `factory` CLI: contract, run, accept) is withheld from you by PATH and by this brief \u2014 the only factory commands on your PATH are factory-claim and the git shim. The daemon exposes plugin tools (paseoTools) to every agent today, so an orchestration surface may still be visible to you: never call it \u2014 setting contracts, running the Driver, and accepting are the Owner's, Supervisor's, and Lead's acts.",
+    `Your \`paseo-factory\` / \`paseo_factory\` MCP tools: \`paseo-factory_agent_claim\` / \`agent_claim\` (submits your Claim with the mandatory 6-Field Handoff \u2014 \`commit\` defaults to HEAD and is required only for the engineer disposition) and \`paseo-factory_agent_escalate_blocker\` / \`agent_escalate_blocker\` (challenges a Brief premise or escalates a blocker to your Lead, keeping your session alive for the ruling). Your factory CLI vocabulary (complete): \`factory-claim --task ${taskLabel} --outcome <complete|partial|blocked|reopen> --scope <text> --verification <text> --unknowns <text> [--ownership <text>] [--sha <sha>]\` \u2014 claim your Task when the Gate's done-criteria hold, then end your turn.`,
+    "This instruction is additive: the repository's own AGENTS.md / CLAUDE.md, MCP servers, and skills catalog load natively alongside it.",
+    "",
+    DESIGN_LINK_OWNERSHIP,
+    skillFooter("agent")
+  ].join("\n");
+}
+function renderRoleAppendSystem(role, options) {
+  const title = role === "supervisor" ? "Supervisor" : role === "lead" ? "Lead" : "Working Agent";
+  const effectiveOptions = role === "agent" ? { factoryCmd: "factory", ...options } : { factoryCmd: "factory", home: "<home>", ...options };
+  return [
+    `# ${title} (paseo-factory) \u2014 immutable SLP role contract`,
+    "",
+    renderRoleContract(role, effectiveOptions),
+    ""
+  ].join("\n");
+}
+
+// src/pi-home.ts
+var ROLE_PROMPTS = {
+  supervisor: renderRoleAppendSystem("supervisor"),
+  lead: renderRoleAppendSystem("lead"),
+  agent: renderRoleAppendSystem("agent")
+};
+
+// src/zcode-home.ts
+var ROLE_PROMPTS2 = {
+  supervisor: renderRoleAppendSystem("supervisor"),
+  lead: renderRoleAppendSystem("lead"),
+  agent: renderRoleAppendSystem("agent")
+};
+
+// src/lanes.ts
+var ZCODE_OFFICIAL_GLM_MODEL_IDS = [
+  "GLM-5.3",
+  "GLM-5.3-Flash",
+  "GLM-5V-Turbo",
+  "GLM-5.2",
+  "GLM-5.1",
+  "GLM-5.1-Highspeed",
+  "GLM-5",
+  "GLM-5-Turbo",
+  "GLM-4.7",
+  "GLM-4.7-FlashX",
+  "GLM-4.7-Flash",
+  "GLM-4.6",
+  "GLM-4.5-Air",
+  "GLM-4.5",
+  "GLM-4.6V",
+  "GLM-4.6V-Flash",
+  "GLM-4.6V-FlashX",
+  "GLM-4.1V-Thinking-FlashX",
+  "GLM-4.1V-Thinking-Flash",
+  "GLM-4-FlashX-250414",
+  "GLM-4-Flash-250414",
+  "GLM-4V-Flash"
+];
+var CANONICAL_ZCODE_MODEL_ID = new Map(
+  ZCODE_OFFICIAL_GLM_MODEL_IDS.map((id) => [id.toLowerCase(), id])
+);
+var PEER_THINKING_LEVELS = ["low", "medium", "high", "xhigh", "max"];
+var TOOLLESS_OPENCODE_CONFIG = JSON.stringify({
+  permission: {
+    "*": "deny",
+    external_directory: "deny",
+    doom_loop: "deny",
+    question: "deny",
+    edit: "deny",
+    write: "deny",
+    bash: "deny",
+    read: { "*": "ask" }
+  }
+});
 
 // src/ledger-validation.ts
 function isValidLedgerEvent(value) {
@@ -263,7 +771,7 @@ function v2PayloadIsValid(event) {
     case "git_blocked":
       return string("reason");
     case "spawn_dispatched":
-      return optionalString("worktree");
+      return optionalString("worktree") && (event.thinking === void 0 || PEER_THINKING_LEVELS.includes(event.thinking)) && optionalString("thinkingReason");
     case "retro_written":
       return string("model") && duration() && optionalString("error") && optionalString("proposalsPath") && (event.proposalCount === void 0 || Number.isSafeInteger(event.proposalCount) && event.proposalCount >= 0) && (event.outcome === "written" ? string("proposalsPath") && event.proposalCount !== void 0 : event.outcome === "failed" && string("error"));
     default:
@@ -449,272 +957,18 @@ function semanticEventContent(event, context) {
   return canonicalHistoryJson({ ...payload, evidence, references: targets });
 }
 
-// src/history-import.ts
-import { isAbsolute as isAbsolute2 } from "node:path";
-
-// src/artifact.ts
-import { isAbsolute, normalize, relative, resolve, sep } from "node:path";
-function artifactPathProblem(artifact) {
-  if (artifact.trim() === "" || artifact.includes("\0")) return "artifact path must be a non-empty path without NUL bytes";
-  const normalized = normalize(artifact);
-  if (isAbsolute(artifact) || normalized === ".." || normalized.startsWith(`..${sep}`)) {
-    return `artifact "${artifact}" must be a workspace-relative path contained inside the execution Workspace`;
-  }
-  return void 0;
-}
-
-// src/task-state.ts
-function last(events, kind) {
-  return events.findLast((event) => event.event === kind);
-}
-function projectTask(events, task) {
-  const history = events.filter((event) => "task" in event && event.task === task);
-  const contract = last(history, "contract_set");
-  const epochSeq = contract?.seq ?? 0;
-  const epochId = contract?.epoch_id;
-  const epoch = history.filter((event) => epochId === void 0 ? event.seq >= epochSeq : event.epoch_id === epochId);
-  const acceptance = last(history, "attempt_accepted");
-  const settled = acceptance !== void 0 && acceptance.landing !== "pending-conflict";
-  const latestGate = last(epoch, "gate_finished");
-  const needs = last(epoch, "needs_human");
-  const needsHuman = needs !== void 0 && needs.seq > (latestGate?.seq ?? -1);
-  const numbers = [...new Set(epoch.flatMap((event) => "attempt" in event ? [event.attempt] : []))].sort((a, b) => a - b);
-  const attempts = numbers.map((attempt) => {
-    const own = epoch.filter((event) => "attempt" in event && event.attempt === attempt);
-    const gate = last(own, "gate_finished");
-    const review = last(own, "fresh_eyes_written");
-    const started = own.some((event) => event.event === "claim_reported" || event.event === "gate_started");
-    const reportComplete = last(own, "report_written") !== void 0;
-    const reviewState = review?.outcome ?? (contract?.freshEyes === true ? reportComplete ? "incomplete" : "pending" : "off");
-    const ownerEligible = !settled && gate?.verdict === "green";
-    const leadRefusal = needsHuman ? "task is in needs_human" : void 0;
-    return { attempt, events: own, gate, review, reviewState, gateOpen: started && gate === void 0, reportComplete, open: started && !reportComplete, ownerEligible, leadEligible: ownerEligible && leadRefusal === void 0, leadRefusal };
-  });
-  const dispatch = epoch.findLast((event) => event.event === "spawn_dispatched" || event.event === "respawn_dispatched");
-  const status = acceptance !== void 0 ? "accepted" : needsHuman ? "needs-human" : attempts.some((attempt) => attempt.open) || dispatch !== void 0 && dispatch.seq > (latestGate?.seq ?? -1) ? "running" : numbers.length === 0 ? "waiting" : latestGate?.verdict === "green" ? "ready-to-accept" : "red";
-  const currentAttempt = acceptance === void 0 ? attempts.at(-1) : attempts.find((entry) => entry.attempt === acceptance.attempt);
-  const verdict = acceptance === void 0 ? currentAttempt?.gate?.verdict : "green";
-  return { currentAttempt, verdict, task, history, contract, epochSeq, epochId, epoch, attempts, acceptance, settled, pendingLanding: acceptance?.landing === "pending-conflict", needsHuman, needs: needsHuman ? needs : void 0, status, maxAttempt: numbers.at(-1) ?? 0, inFlightAttempt: attempts.find((attempt) => attempt.open)?.attempt };
-}
-
-// src/history-import.ts
-function validateHistoryCausality(events) {
-  const reasons = [];
-  const prior = [];
-  const text = (value) => typeof value === "string" && value.trim() !== "";
-  for (const event of events) {
-    const reject = (reason) => reasons.push(`seq ${event.seq}: ${reason}`);
-    if ("task" in event && typeof event.task === "string") {
-      const state = projectTask(prior, event.task);
-      const attempt = "attempt" in event ? state.attempts.find((attempt2) => attempt2.attempt === event.attempt) : void 0;
-      const claim = attempt?.events.find((item) => item.event === "claim_reported");
-      if (event.event !== "contract_set" && !eventAllowsUnboundEpoch(event.event) && state.contract === void 0) reject("Task fact has no prior Contract");
-      if (event.event === "contract_set") {
-        if (!text(event.workspace) || !isAbsolute2(event.workspace) || !text(event.gate) || typeof event.artifact !== "string" || text(event.artifact) && artifactPathProblem(event.artifact) !== void 0) reject("Contract has invalid Workspace, Gate or Artifact criteria");
-        if (state.inFlightAttempt !== void 0) reject("Contract replaces an open Claim pipeline");
-        if (state.acceptance !== void 0) reject("Contract follows Task acceptance");
-      }
-      if (event.event === "claim_reported") {
-        if (!text(event.sha)) reject("Claim SHA is missing");
-        if (state.inFlightAttempt !== void 0) reject("Claim arrived before the previous Report");
-        if (event.attempt !== state.maxAttempt + 1 || event.attempt > MAX_ATTEMPTS) reject("Claim does not advance the Contract epoch's Attempt counter");
-        if (state.acceptance !== void 0) reject("Claim follows Task acceptance");
-      }
-      if (event.event === "gate_started") {
-        if (claim === void 0 || attempt?.gate !== void 0 || attempt?.events.some((item) => item.event === "gate_started") || event.cmd !== state.contract?.gate) reject("Gate start has no unique prior Claim or disagrees with the Contract command");
-      }
-      if (event.event === "gate_finished") {
-        if (claim === void 0) reject("Gate has no prior Claim for this Task/epoch/Attempt");
-        if (attempt?.gate !== void 0) reject("Gate outcome already exists for this Attempt");
-        if (!["red", "green"].includes(event.verdict) || event.exit !== null && (!Number.isInteger(event.exit) || event.exit < 0) || typeof event.note !== "string") reject("Gate outcome has invalid factual fields");
-        if (event.verdict === "green" && (event.exit !== 0 || !text(event.sha))) reject("green Gate requires exit 0 and an attested SHA");
-        if (claim?.event === "claim_reported" && text(event.sha) && /^[a-f0-9]+$/i.test(claim.sha) && !event.sha.startsWith(claim.sha)) reject("Gate SHA disagrees with its Claim");
-      }
-      if (event.event === "fresh_eyes_written") {
-        if (attempt?.gate?.verdict !== "green" || state.contract?.freshEyes !== true || attempt.review !== void 0 || attempt.reportComplete) reject("review has no unique pending required green Attempt");
-        if (!["clear", "concern", "failed"].includes(event.outcome) || !text(event.model) || typeof event.finding !== "string" || !Number.isFinite(event.durationMs) || event.durationMs < 0) reject("review has invalid outcome fields");
-      }
-      if (event.event === "watch_written") {
-        if (attempt?.gate === void 0 || state.contract?.watch !== true || attempt.events.some((item) => item.event === "watch_written") || attempt.reportComplete) reject("Watch has no unique pending enabled Gate outcome");
-        if (state.contract?.freshEyes && attempt?.gate?.verdict === "green" && attempt.review === void 0) reject("Watch precedes required review completion");
-      }
-      if (event.event === "report_written") {
-        if (attempt?.gate === void 0 || attempt.reportComplete || !text(event.path)) reject("Report has no unique prior Gate outcome");
-      }
-      if (event.event === "attempt_accepted") {
-        if (attempt?.gate?.verdict !== "green") reject("acceptance has no prior green Gate for this Task/epoch/Attempt");
-        if (state.acceptance !== void 0 && (state.acceptance.landing !== "pending-conflict" || state.acceptance.attempt !== event.attempt)) reject("acceptance contradicts a prior settled acceptance");
-      }
-      if (event.event === "needs_human") {
-        if ("attempt" in event.evidence && event.evidence.attempt !== MAX_ATTEMPTS) reject("Needs-human ceiling evidence names another Attempt");
-        if ("denial" in event.evidence && event.reason === "denied-again" && event.evidence.denial <= event.evidence.repoke) reject("denied-again evidence does not follow the re-poke");
-        if ("denial" in event.evidence && event.reason === "silent-after-repoke" && event.evidence.denial >= event.evidence.repoke) reject("silent-after-repoke evidence does not precede the re-poke");
-        if ("spawn" in event.evidence && event.evidence.respawn <= event.evidence.spawn) reject("respawn evidence does not follow its spawn");
-      }
-    }
-    prior.push(event);
-  }
-  return reasons;
-}
-
-// src/history-stage.ts
-import { closeSync, existsSync, fchmodSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { basename, dirname, join, resolve as resolve2 } from "node:path";
-import { randomUUID } from "node:crypto";
-function historyTargetPath(path) {
-  let ancestor = resolve2(path);
-  const missing = [];
-  for (; ; ) {
-    try {
-      return join(realpathSync(ancestor), ...missing);
-    } catch (error) {
-      if (error.code !== "ENOENT") throw error;
-      const parent = dirname(ancestor);
-      if (parent === ancestor) throw error;
-      missing.unshift(basename(ancestor));
-      ancestor = parent;
-    }
-  }
-}
-function importDirectory(target, id) {
-  return id === void 0 ? join(dirname(historyTargetPath(target)), "history-imports") : join(dirname(historyTargetPath(target)), "history-imports", id);
-}
-function fsyncDirectory(path) {
-  if (process.platform === "win32") return;
-  let fd;
-  try {
-    fd = openSync(path, "r");
-    fsyncSync(fd);
-  } catch (error) {
-    if (!["EISDIR", "EPERM", "EBADF", "EINVAL"].includes(error.code ?? "")) throw error;
-  } finally {
-    if (fd !== void 0) closeSync(fd);
-  }
-}
-function makeDurableDirectory(path) {
-  const created = mkdirSync(path, { recursive: true });
-  if (created === void 0) return;
-  let directory = resolve2(path);
-  const first = resolve2(created);
-  while (true) {
-    fsyncDirectory(directory);
-    fsyncDirectory(dirname(directory));
-    if (directory === first) break;
-    directory = dirname(directory);
-  }
-}
-function writeDurableFile(path, bytes, options = {}) {
-  path = historyTargetPath(path);
-  makeDurableDirectory(dirname(path));
-  const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
-  writeFileSync(temp, bytes, { mode: options.mode ?? 384 });
-  const fd = openSync(temp, "r");
-  try {
-    if (options.mode !== void 0) fchmodSync(fd, options.mode);
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
-  }
-  renameSync(temp, path);
-  options.afterRename?.();
-  fsyncDirectory(dirname(path));
-}
-function loadImportManifest(target, id) {
-  if (!/^[a-f0-9]{64}$/.test(id)) throw new FactoryError("invalid-import", "invalid staged import identity");
-  const manifest = JSON.parse(readFileSync(join(importDirectory(target, id), "manifest.json"), "utf8"));
-  if (manifest.version !== 1 || manifest.id !== id || historyTargetPath(manifest.target) !== historyTargetPath(target) || !Array.isArray(manifest.sources) || !["staged", "pending", "applied", "conflicted"].includes(manifest.status)) {
-    throw new FactoryError("invalid-import", `damaged import manifest ${id}`);
-  }
-  if (manifest.materialization !== void 0 && (typeof manifest.materialization !== "object" || manifest.materialization === null || !["pending", "applied", "refused"].includes(manifest.materialization.status) || !Array.isArray(manifest.materialization.diagnostics) || !manifest.materialization.diagnostics.every((line) => typeof line === "string"))) throw new FactoryError("invalid-import", `damaged materialization hold ${id}`);
-  if (manifest.materialization !== void 0 && manifest.materialization.status !== "applied") {
-    for (const status of ["applied", "refused"]) {
-      let outcome;
-      try {
-        outcome = JSON.parse(readFileSync(join(importDirectory(target, id), `materialization-${status}.json`), "utf8"));
-      } catch (error) {
-        if (error.code === "ENOENT") continue;
-        throw new FactoryError("invalid-import", `damaged materialization outcome ${id}`);
-      }
-      if (outcome.status !== status || !Array.isArray(outcome.diagnostics) || !outcome.diagnostics.every((line) => typeof line === "string")) throw new FactoryError("invalid-import", `damaged materialization outcome ${id}`);
-      manifest.materialization = outcome;
-      break;
-    }
-  }
-  return manifest;
-}
-function publicImportStatus(manifest) {
-  const { id, target, status, added, duplicates, conflicts, diagnostics, materialization } = manifest;
-  return { id, target, status, ...materialization === void 0 ? {} : { materialization }, ...added === void 0 ? {} : { added }, ...duplicates === void 0 ? {} : { duplicates }, ...conflicts === void 0 ? {} : { conflicts }, diagnostics };
-}
-function readLedgerImports(target) {
-  let entries;
-  try {
-    entries = readdirSync(importDirectory(target));
-  } catch (error) {
-    if (error.code === "ENOENT") return [];
-    throw error;
-  }
-  return entries.filter((id) => /^[a-f0-9]{64}$/.test(id) && existsSync(join(importDirectory(target, id), "manifest.json"))).sort().map((id) => publicImportStatus(loadImportManifest(target, id)));
-}
-
-// src/project.ts
-import { existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync2, readdirSync as readdirSync2, realpathSync as realpathSync2, statSync, writeFileSync as writeFileSync2 } from "node:fs";
-import { isAbsolute as isAbsolute3, basename as basename2, join as join2, parse, resolve as resolve3 } from "node:path";
-function projectStateDir(stateDir, projectSlug) {
-  return join2(stateDir, "projects", projectSlug);
-}
-var LEAD_ROTATION_STATES = ["normal", "rotation_pending", "handing_over"];
-function readProjectRegistration(stateDir, slug) {
-  const path = join2(projectStateDir(stateDir, slug), "project.json");
-  if (!existsSync2(path)) return void 0;
-  try {
-    const parsed = JSON.parse(readFileSync2(path, "utf8"));
-    if (typeof parsed.root !== "string" || parsed.root === "") return void 0;
-    const taskWorkspaces = {};
-    if (parsed.taskWorkspaces !== void 0 && parsed.taskWorkspaces !== null && typeof parsed.taskWorkspaces === "object" && !Array.isArray(parsed.taskWorkspaces)) {
-      for (const [task, wsId] of Object.entries(parsed.taskWorkspaces)) {
-        if (typeof wsId === "string" && wsId !== "") taskWorkspaces[task] = wsId;
-      }
-    }
-    const dispatchers = [];
-    if (Array.isArray(parsed.dispatchers)) {
-      for (const id of parsed.dispatchers) {
-        if (typeof id === "string" && id.trim() !== "" && !dispatchers.includes(id.trim())) {
-          dispatchers.push(id.trim());
-        }
-      }
-    }
-    return {
-      slug,
-      root: parsed.root,
-      ...typeof parsed.name === "string" && parsed.name !== "" ? { name: parsed.name } : {},
-      ...typeof parsed.commonDir === "string" && parsed.commonDir !== "" ? { commonDir: parsed.commonDir } : {},
-      ...typeof parsed.supervisor === "string" && parsed.supervisor !== "" ? { supervisor: parsed.supervisor } : {},
-      ...typeof parsed.lead === "string" && parsed.lead !== "" ? { lead: parsed.lead } : {},
-      ...typeof parsed.rotationState === "string" && LEAD_ROTATION_STATES.includes(parsed.rotationState) ? { rotationState: parsed.rotationState } : {},
-      ...typeof parsed.handoffRequestedAt === "string" && parsed.handoffRequestedAt !== "" ? { handoffRequestedAt: parsed.handoffRequestedAt } : {},
-      ...typeof parsed.workspaceId === "string" && parsed.workspaceId !== "" ? { workspaceId: parsed.workspaceId } : {},
-      ...typeof parsed.paseoProjectId === "string" && parsed.paseoProjectId !== "" ? { paseoProjectId: parsed.paseoProjectId } : {},
-      ...Object.keys(taskWorkspaces).length > 0 ? { taskWorkspaces } : {},
-      ...dispatchers.length > 0 ? { dispatchers } : {}
-    };
-  } catch {
-    return void 0;
-  }
-}
-
 // src/writer-identity.ts
-import { readFileSync as readFileSync3 } from "node:fs";
-import { basename as basename3, dirname as dirname2, join as join3 } from "node:path";
+import { readFileSync as readFileSync4 } from "node:fs";
+import { basename as basename3, dirname as dirname2, join as join4 } from "node:path";
 function localWriterPath(stateDir, projectSlug) {
   const root = historyTargetPath(stateDir);
-  const target = projectSlug === void 0 ? join3(root, "ledger.jsonl") : join3(root, "projects", projectSlug, "ledger.jsonl");
-  return join3(dirname2(root), `${basename3(root)}-local-writers`, `${historyHash(target)}.json`);
+  const target = projectSlug === void 0 ? join4(root, "ledger.jsonl") : join4(root, "projects", projectSlug, "ledger.jsonl");
+  return join4(dirname2(root), `${basename3(root)}-local-writers`, `${historyHash(target)}.json`);
 }
 function readLocalWriterIdentity(stateDir, projectSlug) {
   let raw;
   try {
-    raw = readFileSync3(localWriterPath(stateDir, projectSlug), "utf8");
+    raw = readFileSync4(localWriterPath(stateDir, projectSlug), "utf8");
   } catch (error) {
     if (error.code === "ENOENT") return void 0;
     throw error;
@@ -733,19 +987,19 @@ function readLocalWriterIdentity(stateDir, projectSlug) {
 function upgradeDirectory(stateDir, id) {
   if (!/^[a-f0-9-]{36}$/.test(id)) throw new FactoryError("upgrade-invalid", "Invalid upgrade transaction identity");
   const root = historyTargetPath(stateDir);
-  const directory = join4(dirname3(root), `${basename4(root)}-upgrades`, id);
+  const directory = join5(dirname3(root), `${basename4(root)}-upgrades`, id);
   if (historyTargetPath(directory) !== directory) throw new FactoryError("upgrade-invalid", "Upgrade transaction directory must not traverse a symlink");
   return directory;
 }
 function targetFor(stateDir, projectSlug) {
   if (projectSlug !== void 0 && (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(projectSlug) || readProjectRegistration(stateDir, projectSlug) === void 0)) throw new FactoryError("upgrade-target-invalid", "Upgrade target must be a registered Project slug");
-  const target = historyTargetPath(projectSlug === void 0 ? join4(stateDir, "ledger.jsonl") : join4(stateDir, "projects", projectSlug, "ledger.jsonl"));
+  const target = historyTargetPath(projectSlug === void 0 ? join5(stateDir, "ledger.jsonl") : join5(stateDir, "projects", projectSlug, "ledger.jsonl"));
   if (!target.startsWith(`${historyTargetPath(stateDir)}/`)) throw new FactoryError("upgrade-target-invalid", "Ledger target escapes the managed state directory");
   return target;
 }
 function rawFile(path) {
   try {
-    return readFileSync4(path);
+    return readFileSync5(path);
   } catch (error) {
     if (error.code === "ENOENT") return Buffer.alloc(0);
     throw error;
@@ -763,7 +1017,7 @@ function digest(bytes) {
 }
 function filePath(root, entry, projectSlug) {
   if (entry === "@writer") return localWriterPath(root, projectSlug);
-  if (entry === "." || !entry.startsWith("/") && !entry.split("/").includes("..")) return join4(root, entry);
+  if (entry === "." || !entry.startsWith("/") && !entry.split("/").includes("..")) return join5(root, entry);
   throw new FactoryError("upgrade-invalid", "Unsafe path in upgrade journal");
 }
 function controlAllowed(path, bytes, controls) {
@@ -794,10 +1048,10 @@ function inventory(stateDir, projectSlug, controls = []) {
       if (["worktrees", "node_modules"].includes(basename4(path))) return;
       for (const name of readdirSync3(path).sort()) {
         if (name === "ledger-owner.json" || name === "ledger-owner-acquire") continue;
-        visit(join4(path, name), relative2 === "." ? name : `${relative2}/${name}`);
+        visit(join5(path, name), relative2 === "." ? name : `${relative2}/${name}`);
       }
     } else if (stat.isFile()) {
-      const bytes = readFileSync4(path);
+      const bytes = readFileSync5(path);
       if (!controlAllowed(relative2, bytes, controls)) out.push({ path: relative2, kind: "file", mode, hash: digest(bytes) });
     } else throw new FactoryError("upgrade-file-unsupported", `Unsupported state file type: ${relative2}`);
   }
@@ -806,7 +1060,7 @@ function inventory(stateDir, projectSlug, controls = []) {
   if (existsSync3(writer)) {
     const stat = lstatSync(writer);
     if (!stat.isFile() || stat.isSymbolicLink()) throw new FactoryError("upgrade-file-unsupported", "Local writer identity must be a regular file");
-    out.push({ path: "@writer", kind: "file", mode: stat.mode & 4095, hash: digest(readFileSync4(writer)) });
+    out.push({ path: "@writer", kind: "file", mode: stat.mode & 4095, hash: digest(readFileSync5(writer)) });
   }
   return out.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
 }
@@ -861,7 +1115,7 @@ function preflightUpgrade(stateDir, options = {}) {
     if (!/^spool\/(requests|processed|replies)\/.*\.json$/.test(entry.path)) continue;
     let value;
     try {
-      value = JSON.parse(decode(readFileSync4(filePath(stateDir, entry.path, options.projectSlug))));
+      value = JSON.parse(decode(readFileSync5(filePath(stateDir, entry.path, options.projectSlug))));
     } catch {
       conflicts.push(`Unparseable queued/cached state: ${entry.path}`);
       continue;
@@ -888,8 +1142,8 @@ function preflightUpgrade(stateDir, options = {}) {
   }
   const ledgerVersions = files.filter((entry) => entry.kind === "file" && basename4(entry.path) === "ledger.jsonl").map((entry) => {
     try {
-      const parsed = parseLedgerJsonl(decode(readFileSync4(filePath(stateDir, entry.path, options.projectSlug))));
-      return { path: entry.path, version: schemaVersion(decode(readFileSync4(filePath(stateDir, entry.path, options.projectSlug)))), versions: sourceVersions(decode(readFileSync4(filePath(stateDir, entry.path, options.projectSlug)))), ...parsed.corrupt === void 0 ? {} : { diagnostic: parsed.corrupt } };
+      const parsed = parseLedgerJsonl(decode(readFileSync5(filePath(stateDir, entry.path, options.projectSlug))));
+      return { path: entry.path, version: schemaVersion(decode(readFileSync5(filePath(stateDir, entry.path, options.projectSlug)))), versions: sourceVersions(decode(readFileSync5(filePath(stateDir, entry.path, options.projectSlug)))), ...parsed.corrupt === void 0 ? {} : { diagnostic: parsed.corrupt } };
     } catch (error) {
       return { path: entry.path, version: null, versions: [null], diagnostic: String(error) };
     }
@@ -900,10 +1154,10 @@ function save(journal) {
   const directory = upgradeDirectory(journal.stateDir, journal.id);
   makeDurableDirectory(directory);
   chmodSync(directory, 448);
-  writeDurableFile(join4(upgradeDirectory(journal.stateDir, journal.id), "manifest.json"), JSON.stringify(journal) + "\n");
+  writeDurableFile(join5(upgradeDirectory(journal.stateDir, journal.id), "manifest.json"), JSON.stringify(journal) + "\n");
 }
 function load(stateDir, id) {
-  const journal = JSON.parse(readFileSync4(join4(upgradeDirectory(stateDir, id), "manifest.json"), "utf8"));
+  const journal = JSON.parse(readFileSync5(join5(upgradeDirectory(stateDir, id), "manifest.json"), "utf8"));
   if (journal.version !== 1 || journal.id !== id || journal.stateDir !== historyTargetPath(stateDir) || !Array.isArray(journal.before) || !Array.isArray(journal.after) || !Array.isArray(journal.changes) || !Array.isArray(journal.controls) || targetFor(stateDir, journal.projectSlug) !== journal.target) throw new FactoryError("upgrade-invalid", "Unsupported or damaged upgrade manifest");
   if (!Array.isArray(journal.diagnostics) || journal.beforeWriter !== null && (typeof journal.beforeWriter !== "string" || journal.beforeWriter.trim() === "") || !["backing-up", "backed-up", "prepared", "activating", "applied", "restoring", "restored"].includes(journal.phase) || !legacyIdentityMappingIsValid(journal.mapping) || ![1, 2].includes(journal.sourceVersion) || journal.targetVersion !== 2 || typeof journal.writerId !== "string" || journal.writerId.trim() === "") throw new FactoryError("upgrade-invalid", "Unsupported upgrade version/progress/mapping");
   for (const entry of [...journal.before, ...journal.after, ...journal.changes]) filePath(stateDir, entry.path, journal.projectSlug);
@@ -933,22 +1187,22 @@ function assertInventory(journal, mixed = false) {
 }
 function blobPath(journal, entry) {
   if (entry.blob !== historyHash(entry.path)) throw new FactoryError("upgrade-invalid", `Invalid backup reference for ${entry.path}`);
-  return join4(upgradeDirectory(journal.stateDir, journal.id), "backup", entry.blob);
+  return join5(upgradeDirectory(journal.stateDir, journal.id), "backup", entry.blob);
 }
 function backupBytes(journal, entry) {
   const path = blobPath(journal, entry);
   const stat = lstatSync(path);
   if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 4095) !== entry.mode) throw new FactoryError("upgrade-backup-corrupt", `Backup type/mode mismatch: ${entry.path}`);
-  const bytes = readFileSync4(path);
+  const bytes = readFileSync5(path);
   if (digest(bytes) !== entry.hash) throw new FactoryError("upgrade-backup-corrupt", `Backup hash mismatch: ${entry.path}`);
   return bytes;
 }
 function addControl(journal, id) {
   if (id === void 0) return;
   if (!/^[a-zA-Z0-9._-]+$/.test(id)) throw new FactoryError("upgrade-invalid", "Invalid maintenance request identity");
-  const path = join4(journal.stateDir, "spool", "requests", `${id}.json`);
+  const path = join5(journal.stateDir, "spool", "requests", `${id}.json`);
   if (!existsSync3(path)) return;
-  const raw = readFileSync4(path);
+  const raw = readFileSync5(path);
   const request = JSON.parse(raw.toString("utf8"));
   if (request.kind !== "upgrade" || request.id !== id) throw new FactoryError("upgrade-invalid", "Maintenance control does not match its request");
   const hash = digest(raw);
@@ -977,7 +1231,7 @@ function resultFor(journal, action) {
 async function upgradeFactory(factory, input, options = {}) {
   if (input.action === "preflight") return preflightUpgrade(factory.stateDir, input);
   if (!["apply", "resume", "restore"].includes(input.action)) throw new FactoryError("upgrade-invalid", "Unknown upgrade action");
-  if (input.action === "apply" && (input.transactionId === void 0 || !existsSync3(join4(upgradeDirectory(factory.stateDir, input.transactionId), "manifest.json")))) {
+  if (input.action === "apply" && (input.transactionId === void 0 || !existsSync3(join5(upgradeDirectory(factory.stateDir, input.transactionId), "manifest.json")))) {
     const checked = preflightUpgrade(factory.stateDir, input);
     if (!checked.ok) throw new FactoryError("upgrade-conflicted", checked.conflicts.join("; "));
   }
@@ -987,7 +1241,7 @@ async function upgradeFactory(factory, input, options = {}) {
     const id = input.transactionId ?? randomUUID2();
     const directory = upgradeDirectory(stateDir, id);
     let journal;
-    if (existsSync3(join4(directory, "manifest.json"))) {
+    if (existsSync3(join5(directory, "manifest.json"))) {
       journal = load(stateDir, id);
       if (journal.target !== target || journal.projectSlug !== input.projectSlug) throw new FactoryError("upgrade-target-invalid", "Transaction belongs to another target");
       addControl(journal, input.controlId);
@@ -1048,7 +1302,7 @@ async function upgradeFactory(factory, input, options = {}) {
           const backup = blobPath(journal, entry);
           if (existsSync3(backup)) backupBytes(journal, entry);
           else {
-            const bytes = readFileSync4(filePath(stateDir, entry.path, journal.projectSlug));
+            const bytes = readFileSync5(filePath(stateDir, entry.path, journal.projectSlug));
             if (digest(bytes) !== entry.hash) throw new FactoryError("upgrade-base-changed", entry.path);
             writeDurableFile(backup, bytes, { mode: entry.mode });
           }
@@ -1070,7 +1324,7 @@ async function upgradeFactory(factory, input, options = {}) {
         for (const change of journal.changes) {
           const bytes = prepared.get(change.path);
           if (digest(bytes) !== change.afterHash) throw new FactoryError("upgrade-preparation-changed", change.path);
-          writeDurableFile(join4(directory, "prepared", historyHash(change.path)), bytes, { mode: change.mode });
+          writeDurableFile(join5(directory, "prepared", historyHash(change.path)), bytes, { mode: change.mode });
           options.fault?.(`prepared:${change.path}`);
         }
         journal.phase = "prepared";
@@ -1081,9 +1335,9 @@ async function upgradeFactory(factory, input, options = {}) {
         save(journal);
         for (const change of journal.changes) {
           const path = filePath(stateDir, change.path, journal.projectSlug);
-          const current = existsSync3(path) ? digest(readFileSync4(path)) : void 0;
+          const current = existsSync3(path) ? digest(readFileSync5(path)) : void 0;
           if (current !== change.beforeHash && current !== change.afterHash) throw new FactoryError("upgrade-base-changed", change.path);
-          const bytes = readFileSync4(join4(directory, "prepared", historyHash(change.path)));
+          const bytes = readFileSync5(join5(directory, "prepared", historyHash(change.path)));
           if (digest(bytes) !== change.afterHash) throw new FactoryError("upgrade-prepared-corrupt", change.path);
           if (current !== change.afterHash) {
             if (path === target) ledger.activateHistory(decode(bytes), { expectedHash: historyHash(decode(rawFile(path))), writerId: journal.writerId, mode: change.mode, afterRename: () => options.fault?.(`renamed:${change.path}`) });

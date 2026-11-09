@@ -1204,9 +1204,20 @@ if (command === "run") {
   const parsed = parseCommandOptions({
     run: { type: "string" }, role: { type: "string" },
     provider: { type: "string" },
+    thinking: { type: "string" },
+    "thinking-reason": { type: "string" },
     project: { type: "string" },
     "wait-secs": { type: "string" },
   });
+  // The per-dispatch effort pair (v0.5.0 ticket 04, ADR 0054 §4): a tier is
+  // exactly one of the five levels, and rides the spawn request beside its
+  // one-sentence reason — the spool's own `invalid-spawn` refusal (one ledger
+  // line either way) polices the missing-reason case, never a local guess.
+  const thinkingFlag = typeof parsed.values.thinking === "string" && parsed.values.thinking.trim() !== "" ? parsed.values.thinking.trim() : undefined;
+  const thinkingReasonFlag = typeof parsed.values["thinking-reason"] === "string" && parsed.values["thinking-reason"].trim() !== "" ? parsed.values["thinking-reason"].trim() : undefined;
+  if (thinkingFlag !== undefined && !["low", "medium", "high", "xhigh", "max"].includes(thinkingFlag)) {
+    fail(`run: --thinking must be one of low | medium | high | xhigh | max (got "${thinkingFlag}")`);
+  }
   const tasks = parsed.positionals;
   if (tasks.length === 0) fail("run: at least one task id is required (factory run <task> [<task>…] [--provider <provider[/model]>])");
   // v0.0.92 (ADR 0045 §1): `--project <slug>` names the target Project's
@@ -1273,6 +1284,8 @@ if (command === "run") {
     spoolRoot,
     tasks,
     provider: resolved.provider,
+    ...(thinkingFlag === undefined ? {} : { thinking: thinkingFlag }),
+    ...(thinkingReasonFlag === undefined ? {} : { thinkingReason: thinkingReasonFlag }),
     ...(projectFlag === undefined ? {} : { project: projectFlag }),
     waitSecs: waitSeconds(parsed),
   });

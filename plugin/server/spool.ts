@@ -45,7 +45,8 @@ import { handoffLines } from "./core/report.ts";
 import type { Factory } from "./core/factory.ts";
 import type { LedgerEvent, MeterUsage, NeedsHumanEvidence, NeedsHumanReason, PeerDisposition, PeerHandoffFields, Verdict } from "./core/events.ts";
 import { CorrelationRegistry, readCorrelations } from "./core/correlations.ts";
-import { loadLanes, parseLane } from "./core/lanes.ts";
+import { loadLanes, parseLane, PEER_THINKING_LEVELS, resolvePeerThinkingLane } from "./core/lanes.ts";
+import type { LaneThinkingCatalogEntry, PeerThinkingLevel } from "./core/lanes.ts";
 import { listProjectRegistrations, readProjectRegistration, resolveProject, writeProjectRegistration } from "./core/project.ts";
 import { allocateTaskWorktree } from "./core/mcp/worktrees.ts";
 import { ensureProjectRegistered, resolveTargetProject } from "./projects.ts";
@@ -200,6 +201,16 @@ export interface SpawnRequest {
   worktree?: string;
   /** Optional prompt when `lead_spawn_agent` MCP tool requests the plugin to create the daemon agent directly (v0.0.26). */
   prompt?: string;
+  /**
+   * The per-dispatch reasoning-effort tier (v0.5.0, ADR 0054 §4) — one of
+   * `low | medium | high | xhigh | max`, resolved provider-adaptively against
+   * the daemon catalog at this call site: fixed-effort models ignore it, full
+   * catalogs take it verbatim, partial catalogs map to the nearest supported
+   * option. Requires `thinkingReason`.
+   */
+  thinking?: PeerThinkingLevel;
+  /** One sentence explaining why the Task warrants `thinking` — mandatory when `thinking` is supplied. */
+  thinkingReason?: string;
   submitter?: string;
   /** Caller seat stamped from `PASEO_FACTORY_SEAT` when present (v0.0.23, ADR 0015 §1). */
   seat?: SpoolSeat;
@@ -533,6 +544,14 @@ export type SpoolReply =
       proposalCount?: number;
       /** Spawn / respawn replies: the ledger event appended for the request (carries seq). */
       event?: LedgerEvent;
+      /**
+       * Spawn replies (v0.5.0, ADR 0054 §4): the provider-adaptive lane a
+       * thinking-bearing dispatch resolved to — `<provider>/<model>:<tier>` —
+       * so a promptless (driver-path) spawn creates its own agent under the
+       * resolved effort instead of the locally configured suffix. Absent when
+       * no tier was requested.
+       */
+      resolvedProvider?: string;
       /** Lead-rotate replies: the agent the rotation cancelled + archived. */
       agentId?: string;
       /**
@@ -749,6 +768,11 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     }
     if (req.worktree !== undefined && (typeof req.worktree !== "string" || req.worktree.trim() === "")) return undefined;
     if (req.prompt !== undefined && typeof req.prompt !== "string") return undefined;
+    // The per-dispatch effort law (v0.5.0, ADR 0054 §4): exactly one of the
+    // five tiers when present, and its reason a string — the pair's semantic
+    // coupling (reason required with a tier) is judged at requestSpawn.
+    if (req.thinking !== undefined && (!(PEER_THINKING_LEVELS as readonly string[]).includes(String(req.thinking)) || req.thinking === "")) return undefined;
+    if (req.thinkingReason !== undefined && typeof req.thinkingReason !== "string") return undefined;
     return {
       id: req.id,
       kind: "spawn",
@@ -760,6 +784,8 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       arity: req.arity,
       ...(req.worktree === undefined ? {} : { worktree: req.worktree }),
       ...(req.prompt === undefined ? {} : { prompt: req.prompt }),
+      ...(req.thinking === undefined ? {} : { thinking: req.thinking as PeerThinkingLevel }),
+      ...(req.thinkingReason === undefined ? {} : { thinkingReason: req.thinkingReason }),
       ...submitterField,
       ...seatField,
       ...projectSlugField,
@@ -1159,6 +1185,30 @@ export async function resolvePeerSpawnProvider(
   return thinking !== undefined
     ? `${parsedWorker.provider}/${parsedWorker.model}:${thinking}`
     : `${parsedWorker.provider}/${parsedWorker.model}`;
+}
+
+/**
+ * The provider-catalog slice one spawn's effort resolution reads (v0.5.0,
+ * ADR 0054 §4): the daemon's `providers.listModels` answer for the lane's
+ * own provider, shaped for `resolvePeerThinkingLane`. Best-effort by
+ * construction — an absent daemon, a daemon without `providers`, or a failed
+ * listing yields undefined, and the resolver then preserves the configured
+ * lane verbatim (an unreachable catalog never fails a spawn and never strips
+ * thinking).
+ */
+async function providerCatalogForLane(
+  daemon: SurfaceDaemonApi | undefined,
+  lane: string,
+): Promise<readonly LaneThinkingCatalogEntry[] | undefined> {
+  const parsed = parseLane(lane);
+  if (daemon === undefined || parsed === undefined) return undefined;
+  try {
+    const listed = await daemon.providers.listModels(parsed.provider);
+    if (!Array.isArray(listed?.models)) return undefined;
+    return [{ provider: parsed.provider, models: listed.models }];
+  } catch {
+    return undefined; // best-effort catalog lookup — the configured lane stands
+  }
 }
 
 export function associateTaskPeer(factory: Factory, task: string, agentId: string): void {
@@ -1891,17 +1941,32 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         provider: sanitizedProvider,
         arity: request.arity,
         ...(spawnWorktree.worktree === undefined ? {} : { worktree: spawnWorktree.worktree }),
+        ...(request.thinking === undefined ? {} : { thinking: request.thinking }),
+        ...(request.thinkingReason === undefined || request.thinkingReason === "" ? {} : { thinkingReason: request.thinkingReason }),
       });
       if (decision.outcome === "refused") {
         return { id: request.id, ok: false, code: decision.code, message: decision.event.reason, event: decision.event };
       }
       const spawnMeta = await resolveSpawnWorkspaceAndParent(factory, resolvedDaemon, request.task, spawnWorktree.worktree, home);
+      // The per-dispatch effort resolution (v0.5.0, ADR 0054 §4): a requested
+      // tier resolves onto the Project's worker lane against the daemon's
+      // provider catalog — fixed-effort models keep their exact configured id,
+      // partial catalogs map to the nearest supported option, and the mapping
+      // NEVER strips thinking (the sanitizeLane law does not apply here). The
+      // plugin-side create (below) launches under it; a promptless (driver)
+      // spawn receives it as `resolvedProvider` so its own create does too.
+      let resolvedSpawnProvider: string | undefined;
+      if (request.thinking !== undefined) {
+        const lane = frozenLane === undefined ? await resolvePeerSpawnProvider(factory, sanitizedProvider, spawnMeta.projectSlug) : sanitizedProvider;
+        resolvedSpawnProvider = resolvePeerThinkingLane(lane, request.thinking, await providerCatalogForLane(resolvedDaemon, lane));
+      }
       let spawnedAgentId: string | undefined;
       if (request.prompt !== undefined && request.prompt !== "" && resolvedDaemon !== undefined) {
         // The Peer spawns under the `factory-peer` role provider when it can
         // (v0.0.27, ADR 0017 §2) — `paseoTools` off, seat env on — falling back
         // to the requested lane verbatim.
-        const peerProvider = frozenLane === undefined ? await resolvePeerSpawnProvider(factory, sanitizedProvider, spawnMeta.projectSlug) : sanitizedProvider;
+        const peerProvider = resolvedSpawnProvider ??
+          (frozenLane === undefined ? await resolvePeerSpawnProvider(factory, sanitizedProvider, spawnMeta.projectSlug) : sanitizedProvider);
         const contract = factory.contractFor(request.task);
         let effectivePrompt = request.prompt;
         if (contract !== undefined && effectivePrompt.startsWith(`Execute task ${request.task}:`)) {
@@ -1942,6 +2007,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         event: decision.event,
         ...spawnMeta,
         ...(spawnedAgentId !== undefined ? { agentId: spawnedAgentId } : {}),
+        ...(resolvedSpawnProvider !== undefined ? { resolvedProvider: resolvedSpawnProvider } : {}),
       };
     }
     if (request.kind === "respawn") {

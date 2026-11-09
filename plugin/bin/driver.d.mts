@@ -21,6 +21,37 @@ export declare function renderBrief(task: string, pathValue: string, description
 export declare function splitProvider(value: string): { provider: string; model: string | undefined };
 export declare function renderRunBanner(tasks: readonly string[], provider: string): string;
 
+/**
+ * The spawn request one task's spool round-trip carries (v0.5.0 ticket 04,
+ * ADR 0054 §4): the invocation facts plus the optional per-dispatch
+ * `thinking` tier and its `thinkingReason` — present only when supplied.
+ */
+export declare function driverSpawnRequest(input: {
+  id: string;
+  runId?: string;
+  role?: string;
+  providerExplicit?: boolean;
+  driverProjectSlug?: string;
+  task: string;
+  provider: string;
+  arity: number;
+  worktree?: string;
+  thinking?: string;
+  thinkingReason?: string;
+}): { id: string; kind: "spawn"; [key: string]: unknown };
+
+/**
+ * The lane the driver's own agent create runs under — the spool's
+ * provider-adaptive `resolvedProvider` on the SLP path when a thinking tier
+ * was requested; the recorded lane for execution contracts (ticket 04).
+ */
+export declare function effectiveCreateLane(input: {
+  execution: boolean;
+  eventProvider?: string;
+  resolvedProvider?: string;
+  provider: string;
+}): string;
+
 /** v0.0.92 (ADR 0045 §1): with resolution options the read lands on the target Project's isolated `<stateDir>/projects/<slug>/ledger.jsonl` (explicit `project`, the invocation `workspace`/cwd, or the unique Task lookup across `tasks`); omitted options keep the legacy root ledger. */
 export interface DriverLedgerOptions {
   project?: string;

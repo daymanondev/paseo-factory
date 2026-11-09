@@ -10,6 +10,7 @@ import type { ClaimReported } from "../src/events.ts";
 import { resolveProject } from "../plugin/server/core/project.ts";
 import { taskWorktreePath } from "../plugin/server/core/workspace.ts";
 import { projectStateDir } from "../src/index.ts";
+import { saveLanes } from "../src/lanes.ts";
 import { readProjectRegistration, writeProjectRegistration } from "../plugin/server/projects.ts";
 import { createSurfaceHandlers } from "../plugin/server/surface-rpc.ts";
 import type { SurfaceAgentSnapshot, SurfaceDaemonApi } from "../plugin/server/surface-rpc.ts";
@@ -1712,4 +1713,173 @@ test("Seam 1 (ADR 0053): lead accept on a GREEN read-only Task records attempt_a
   assert.equal(engineerAccepted?.landing, "landed", "an engineer acceptance still lands into <project-root>");
   assert.equal(headAt(), engSha, "the root HEAD advanced to the engineer's claimed commit");
   await until(() => assert.equal(existsSync(engWorktree), false, "the engineer Task worktree is removed after landing"));
+});
+
+// ---- per-dispatch provider-adaptive thinking effort on spawn (v0.5.0 ticket 04, ADR 0054 §4) ----
+
+/**
+ * The spawn-effort harness: a real Factory over a temp git Project, a
+ * configurable `worker` lane, and a fake daemon whose `providers.listModels`
+ * answers one provider's catalog — the structural slice the spawn call site
+ * consults. `created` captures every agent create's config.
+ */
+function makeThinkingSpawnSurface(
+  t: TestContext,
+  options: { workerLane: string; provider: string; thinkingOptions: string[] },
+) {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const projectRoot = join(dir, "repo");
+  mkdirSync(projectRoot, { recursive: true });
+  writeFileSync(join(projectRoot, "README.md"), "x\n");
+  gitCommitAll(projectRoot);
+  const resolved = resolveProject(projectRoot);
+  assert.ok(resolved.ok, "the test project must resolve");
+  const stateDir = join(dir, "factory-state");
+  saveLanes(stateDir, { worker: options.workerLane });
+  const factory = createFactory({ stateDir });
+  const created: { config: { provider: string; thinkingOptionId?: string }; labels: Record<string, string> }[] = [];
+  const daemon = {
+    agents: {
+      list: async () => ({ entries: [] as never[] }),
+      create: async (req: { config: { provider: string; thinkingOptionId?: string }; labels: Record<string, string> }) => {
+        created.push({ config: req.config, labels: req.labels });
+        return { id: `agent-${created.length}` };
+      },
+      ref: (id: string) => ({ send: async () => {}, archive: async () => ({ archivedAt: new Date().toISOString() }), timeline: { refetch: async () => ({ entries: [] }) } }),
+    },
+    providers: {
+      listAvailable: async () => ({ providers: [{ provider: options.provider, available: true }] }),
+      listModels: async (provider: string) =>
+        provider === options.provider
+          ? { models: [{ id: options.provider === "zcode" ? "builtin:zai-coding-plan\\GLM-5.3" : "gemini-4-argon-high", thinkingOptions: options.thinkingOptions.map((id) => ({ id })) }] }
+          : { models: [] },
+    },
+  };
+  return { dir, stateDir, projectRoot, factory, created, daemon: daemon as never };
+}
+
+test("a thinking-bearing spawn resolves provider-adaptively onto the configured worker lane and launches with thinkingOptionId (ticket 04)", async (t) => {
+  const surface = makeThinkingSpawnSurface(t, { workerLane: "zcode/GLM-5.3:high", provider: "zcode", thinkingOptions: ["low", "high", "max"] });
+  surface.factory.setContract({ task: "TH-1", workspace: surface.projectRoot, gate: "true", artifact: "README.md" });
+
+  const reply = await handleSpoolRequest(
+    surface.factory,
+    {
+      id: "th-1",
+      kind: "spawn",
+      task: "TH-1",
+      provider: "zcode/GLM-5.3:high",
+      arity: 1,
+      prompt: "Execute task TH-1: pass gate `true`, and call agent_claim.",
+      seat: "lead",
+      thinking: "xhigh",
+      thinkingReason: "Cross-cutting refactor with a heavy verification burden.",
+    },
+    { daemon: surface.daemon },
+  );
+
+  assert.equal(reply.ok, true, JSON.stringify(reply));
+  assert.equal(surface.created.length, 1, "the plugin created the Peer itself");
+  assert.deepEqual(surface.created[0]!.config, { provider: "zcode/GLM-5.3", thinkingOptionId: "max" }, "xhigh lands on the catalog's max — never the bare model");
+  const dispatched = surface.factory.ledger.events.find((e) => e.event === "spawn_dispatched");
+  assert.ok(dispatched && dispatched.event === "spawn_dispatched");
+  assert.equal(dispatched.thinking, "xhigh");
+  assert.equal(dispatched.thinkingReason, "Cross-cutting refactor with a heavy verification burden.");
+});
+
+test("a spawn without thinking launches under the exact configured worker lane, byte for byte (ticket 04)", async (t) => {
+  const surface = makeThinkingSpawnSurface(t, { workerLane: "zcode/GLM-5.3:high", provider: "zcode", thinkingOptions: ["low", "high", "max"] });
+  surface.factory.setContract({ task: "TH-2", workspace: surface.projectRoot, gate: "true", artifact: "README.md" });
+
+  const reply = await handleSpoolRequest(
+    surface.factory,
+    { id: "th-2", kind: "spawn", task: "TH-2", provider: "zcode/GLM-5.3:high", arity: 1, prompt: "Execute task TH-2: pass gate `true`, and call agent_claim.", seat: "lead" },
+    { daemon: surface.daemon },
+  );
+
+  assert.equal(reply.ok, true, JSON.stringify(reply));
+  assert.deepEqual(surface.created[0]!.config, { provider: "zcode/GLM-5.3", thinkingOptionId: "high" }, "the Owner's configured suffix stands untouched");
+  const dispatched = surface.factory.ledger.events.find((e) => e.event === "spawn_dispatched");
+  assert.ok(dispatched && dispatched.event === "spawn_dispatched");
+  assert.equal("thinking" in dispatched, false, "no override requested — no thinking field recorded");
+});
+
+test("a fixed-effort model silently ignores the thinking override — no error, no suffix mutation (ticket 04)", async (t) => {
+  const surface = makeThinkingSpawnSurface(t, { workerLane: "antigravity/gemini-4-argon-high", provider: "antigravity", thinkingOptions: [] });
+  surface.factory.setContract({ task: "TH-3", workspace: surface.projectRoot, gate: "true", artifact: "README.md" });
+
+  const reply = await handleSpoolRequest(
+    surface.factory,
+    {
+      id: "th-3",
+      kind: "spawn",
+      task: "TH-3",
+      provider: "antigravity/gemini-4-argon-high",
+      arity: 1,
+      prompt: "Execute task TH-3: pass gate `true`, and call agent_claim.",
+      seat: "lead",
+      thinking: "high",
+      thinkingReason: "Auditing a concurrency hot path before the release cut.",
+    },
+    { daemon: surface.daemon },
+  );
+
+  assert.equal(reply.ok, true, JSON.stringify(reply));
+  assert.deepEqual(surface.created[0]!.config, { provider: "antigravity/gemini-4-argon-high" }, "the baked-in effort model keeps its exact configured id");
+  const dispatched = surface.factory.ledger.events.find((e) => e.event === "spawn_dispatched");
+  assert.ok(dispatched && dispatched.event === "spawn_dispatched");
+  assert.equal(dispatched.thinking, "high", "the requested tier is still recorded — ignored is not unrecorded");
+});
+
+test("a thinking spawn without a reason refuses invalid-spawn through the spool — one refusal line, no Peer created (ticket 04)", async (t) => {
+  const surface = makeThinkingSpawnSurface(t, { workerLane: "zcode/GLM-5.3:high", provider: "zcode", thinkingOptions: ["low", "high", "max"] });
+  surface.factory.setContract({ task: "TH-4", workspace: surface.projectRoot, gate: "true", artifact: "README.md" });
+
+  const reply = await handleSpoolRequest(
+    surface.factory,
+    { id: "th-4", kind: "spawn", task: "TH-4", provider: "zcode/GLM-5.3:high", arity: 1, prompt: "Execute task TH-4.", seat: "lead", thinking: "high", thinkingReason: "" },
+    { daemon: surface.daemon },
+  );
+
+  assert.equal(reply.ok, false);
+  if (!reply.ok) {
+    assert.equal(reply.code, "invalid-spawn");
+    assert.equal(reply.message, "thinkingReason is required when thinking is specified");
+  }
+  assert.equal(surface.created.length, 0, "no Peer exists for a refused spawn");
+  const refused = surface.factory.ledger.events.find((e) => e.event === "spawn_refused");
+  assert.ok(refused && refused.event === "spawn_refused");
+});
+
+test("parseSpoolRequest admits the spawn's thinking tier and reason — and refuses wrong shapes", () => {
+  const base = { id: "thp", kind: "spawn", task: "TH-P", provider: "zcode/GLM-5.3:high", arity: 1 };
+  const reason = "The blast radius spans two subsystems.";
+  assert.deepEqual(parseSpoolRequest({ ...base, thinking: "xhigh", thinkingReason: reason }), { ...base, thinking: "xhigh", thinkingReason: reason });
+  assert.deepEqual(parseSpoolRequest(base), base, "absent fields stay absent");
+  assert.equal(parseSpoolRequest({ ...base, thinking: "ultra", thinkingReason: reason }), undefined, "an unknown tier is malformed");
+  assert.equal(parseSpoolRequest({ ...base, thinking: "high", thinkingReason: 7 }), undefined, "a non-string reason is malformed");
+});
+
+test("a promptless (driver-path) thinking spawn replies with the resolved lane for the driver's own agent create (ticket 04)", async (t) => {
+  const surface = makeThinkingSpawnSurface(t, { workerLane: "zcode/GLM-5.3:high", provider: "zcode", thinkingOptions: ["low", "high", "max"] });
+  surface.factory.setContract({ task: "TH-5", workspace: surface.projectRoot, gate: "true", artifact: "README.md" });
+
+  const reply = await handleSpoolRequest(
+    surface.factory,
+    {
+      id: "th-5",
+      kind: "spawn",
+      task: "TH-5",
+      provider: "zcode/GLM-5.3:high",
+      arity: 1,
+      thinking: "medium",
+      thinkingReason: "Routine port with a known template and a narrow diff.",
+    },
+    { daemon: surface.daemon },
+  );
+
+  assert.equal(reply.ok, true, JSON.stringify(reply));
+  assert.equal(reply.resolvedProvider, "zcode/GLM-5.3:high", "medium lands on the configured suffix the catalog carries");
+  assert.equal(surface.created.length, 0, "the driver creates this agent itself — the plugin never does");
 });

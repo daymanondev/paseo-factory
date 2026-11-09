@@ -146,6 +146,40 @@ export function renderBrief(task, pathValue, description, skills, branch = task,
   return brief;
 }
 
+/**
+ * The spawn request one task's spool round-trip carries (v0.5.0 ticket 04,
+ * ADR 0054 §4): the driver's invocation facts plus the optional per-dispatch
+ * `thinking` tier and its `thinkingReason` — present only when the operator
+ * supplied them, so an ordinary run's request stays byte-identical to before.
+ */
+export function driverSpawnRequest({ id, runId, role, providerExplicit, driverProjectSlug, task, provider, arity, worktree, thinking, thinkingReason }) {
+  return {
+    id,
+    kind: "spawn",
+    ...(runId === undefined ? {} : { runId }),
+    ...(role === undefined ? {} : { role }),
+    ...(providerExplicit === undefined ? {} : { providerExplicit }),
+    ...(driverProjectSlug === undefined ? {} : { projectSlug: driverProjectSlug }),
+    task,
+    provider,
+    arity,
+    ...(worktree === undefined ? {} : { worktree }),
+    ...(thinking === undefined || thinking === "" ? {} : { thinking }),
+    ...(thinkingReason === undefined || thinkingReason === "" ? {} : { thinkingReason }),
+  };
+}
+
+/**
+ * The lane the driver's own agent create runs under. An execution (Scrum)
+ * contract keeps today's recorded-lane behavior; an SLP spawn prefers the
+ * spool's provider-adaptive `resolvedProvider` when a thinking tier was
+ * requested — otherwise the locally resolved provider stands (ticket 04).
+ */
+export function effectiveCreateLane({ execution, eventProvider, resolvedProvider, provider }) {
+  if (execution) return eventProvider ?? provider;
+  return typeof resolvedProvider === "string" && resolvedProvider !== "" ? resolvedProvider : provider;
+}
+
 /** `--provider claude/opus-4-8[:high]` → provider `claude`, model `opus-4-8`, optional `thinking`; a bare id carries no model. */
 export function splitProvider(value) {
   const slash = value.indexOf("/");
@@ -1314,7 +1348,7 @@ async function submitMeter(spoolRoot, entry, provider, log) {
  * meter is a recorder and never re-judges a green run. Exit 0 iff every task
  * ended green and nothing was refused or failed along the way; else exit 2.
  */
-export async function runDriver({ runId, role, providerExplicit, home, stateDir, spoolRoot, tasks, provider, project, waitSecs = 60, pollMs = POLL_MS, staggerMs = STAGGER_MS, log = (m) => console.log(m) }) {
+export async function runDriver({ runId, role, providerExplicit, home, stateDir, spoolRoot, tasks, provider, thinking, thinkingReason, project, waitSecs = 60, pollMs = POLL_MS, staggerMs = STAGGER_MS, log = (m) => console.log(m) }) {
   // These change spawn routing when the driver itself runs under an agent —
   // the driver spawns as itself, never as somebody's child (scout §a caveat).
   delete process.env.PASEO_AGENT_ID;
@@ -1339,7 +1373,6 @@ export async function runDriver({ runId, role, providerExplicit, home, stateDir,
     say(`factory: ${task} ${status} — ${reason}`);
     problems.push(task);
   };
-  const { provider: providerId, model, thinking } = splitProvider(provider);
   say(renderRunBanner(tasks, provider));
 
   // The daemon is preflighted before any spawn line lands in the ledger: a
@@ -1394,18 +1427,19 @@ export async function runDriver({ runId, role, providerExplicit, home, stateDir,
     // The spool owns the record: one spawn request per task, one ledger line
     // either way. Unknown tasks ride this path too — the plugin's refusal is
     // the recorded fact, not a local complaint.
-    const request = stampDriverRequest({
+    const request = stampDriverRequest(driverSpawnRequest({
       id: randomId(),
-      kind: "spawn",
-      ...(runId === undefined ? {} : { runId }),
-      ...(role === undefined ? {} : { role }),
-      ...(providerExplicit === undefined ? {} : { providerExplicit }),
-      ...(driverProjectSlug === undefined ? {} : { projectSlug: driverProjectSlug }),
+      runId,
+      role,
+      providerExplicit,
+      driverProjectSlug,
       task,
       provider,
       arity: tasks.length,
       ...(prep?.worktree === undefined ? {} : { worktree: prep.worktree }),
-    });
+      thinking,
+      thinkingReason,
+    }));
     submit(spoolRoot, request);
     const reply = await awaitReply(spoolRoot, request.id, waitSecs * 1000);
     if (reply === null) {
@@ -1431,8 +1465,15 @@ export async function runDriver({ runId, role, providerExplicit, home, stateDir,
       const brief = renderBrief(task, process.env.PATH ?? "", contract.description, contract.skills, branch, contract.disposition);
       const spawnSeq = reply.event?.seq;
       const idempotencyKey = spawnSeq !== undefined ? `${task}-spawn-${spawnSeq}` : task;
-      const actualLane = contract.execution ? reply.event?.provider ?? provider : provider;
-      const effective = contract.execution ? splitProvider(actualLane) : { provider: providerId, model, thinking };
+      // The create's lane: the spool's thinking-resolved provider when a tier
+      // was requested (ticket 04), else today's behavior verbatim.
+      const actualLane = effectiveCreateLane({
+        execution: contract.execution !== undefined,
+        eventProvider: reply.event?.provider,
+        resolvedProvider: reply.resolvedProvider,
+        provider,
+      });
+      const effective = splitProvider(actualLane);
       const agentId = await createTaskAgent(rpc, {
         task,
         idempotencyKey,
