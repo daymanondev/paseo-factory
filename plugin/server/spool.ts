@@ -71,7 +71,12 @@ export interface ContractRequest {
   kind: "contract";
   task: string;
   workspace: string;
-  gate: string;
+  /**
+   * The Gate command — optional since v0.5.0 (ADR 0054 §2): mandatory for
+   * the `engineer` disposition, defaults to `""` for the read-only three
+   * (`scout | architect | reviewer`). The factory judges.
+   */
+  gate?: string;
   artifact?: string;
   base?: string;
   scope?: string[];
@@ -81,6 +86,15 @@ export interface ContractRequest {
   watch?: true;
   /** The task's assignment text (v0.0.6 description-slot rider) — the driver's brief carries it. */
   description?: string;
+  /**
+   * The structured 4-Part Brief fields (v0.5.0, ADR 0054 §1): with
+   * `description` omitted, the factory synthesizes the canonical 4-section
+   * Brief from these. Strings when present; empties read as omitted.
+   */
+  outcome?: string;
+  invariants?: string;
+  exclusions?: string;
+  verification?: string;
   /**
    * The SKILL.md workflows the working Agent must open first (v0.0.14, ADR
    * 0010 §6) — skill names; the driver's brief renders them at the top.
@@ -639,7 +653,7 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     if (
       typeof req.task !== "string" ||
       typeof req.workspace !== "string" ||
-      typeof req.gate !== "string" ||
+      (req.gate !== undefined && typeof req.gate !== "string") ||
       (req.artifact !== undefined && typeof req.artifact !== "string")
     ) {
       return undefined;
@@ -655,6 +669,11 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     if (req.watch !== undefined && req.watch !== true) return undefined;
     if (req.base !== undefined && (typeof req.base !== "string" || req.base.trim() === "")) return undefined;
     if (req.description !== undefined && (typeof req.description !== "string" || req.description.trim() === "")) return undefined;
+    // The structured 4-Part Brief fields (ADR 0054 §1): strings when present —
+    // an empty string reads as omitted, judged by the factory's synthesis.
+    for (const field of ["outcome", "invariants", "exclusions", "verification"] as const) {
+      if (req[field] !== undefined && typeof req[field] !== "string") return undefined;
+    }
     // ADR 0053 §1/§3, the watch law's strictness: the disposition is exactly
     // one of the four SLP strings when present, and resetPeer is exactly true.
     if (req.disposition !== undefined && !(PEER_DISPOSITIONS as readonly string[]).includes(req.disposition as string)) return undefined;
@@ -667,7 +686,7 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       ...(req.artifactRefs === undefined ? {} : { artifactRefs: req.artifactRefs as ArtifactRef[] }),
       task: req.task,
       workspace: req.workspace,
-      gate: req.gate,
+      gate: req.gate ?? "",
       ...(req.artifact === undefined ? {} : { artifact: req.artifact }),
       ...(req.base === undefined ? {} : { base: req.base }),
       ...(scope === undefined ? {} : { scope: scope as string[] }),
@@ -675,6 +694,10 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       ...(req.freshEyes === undefined ? {} : { freshEyes: req.freshEyes }),
       ...(req.watch === undefined ? {} : { watch: true }),
       ...(req.description === undefined ? {} : { description: req.description }),
+      ...(req.outcome === undefined ? {} : { outcome: req.outcome as string }),
+      ...(req.invariants === undefined ? {} : { invariants: req.invariants as string }),
+      ...(req.exclusions === undefined ? {} : { exclusions: req.exclusions as string }),
+      ...(req.verification === undefined ? {} : { verification: req.verification as string }),
       ...(req.disposition === undefined ? {} : { disposition: req.disposition as PeerDisposition }),
       ...(req.resetPeer === undefined ? {} : { resetPeer: true }),
       submitter: req.submitter,
@@ -1595,7 +1618,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
       try { contractEvt = factory.setContract({
         task: request.task,
         workspace: request.workspace,
-        gate: scrum.gate ?? request.gate,
+        gate: scrum.gate ?? request.gate ?? "",
         ...(request.artifact === undefined ? {} : { artifact: request.artifact }),
         ...(request.base === undefined ? {} : { base: request.base }),
         ...(request.scope === undefined ? {} : { scope: request.scope }),
@@ -1603,6 +1626,10 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         ...(request.freshEyes === undefined ? {} : { freshEyes: request.freshEyes }),
         ...(request.watch === undefined ? {} : { watch: true }),
         ...(request.description === undefined ? {} : { description: request.description }),
+        ...(request.outcome === undefined ? {} : { outcome: request.outcome }),
+        ...(request.invariants === undefined ? {} : { invariants: request.invariants }),
+        ...(request.exclusions === undefined ? {} : { exclusions: request.exclusions }),
+        ...(request.verification === undefined ? {} : { verification: request.verification }),
         ...(request.disposition === undefined ? {} : { disposition: request.disposition }),
         ...(scrum.execution === undefined ? {} : { execution: scrum.execution, scope: scrum.scope, artifact: scrum.artifact }),
         by: request.submitter,
@@ -1632,7 +1659,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         id: request.id,
         ok: true,
         summary:
-          `contract set for ${request.task}: \`${request.gate}\` in ${request.workspace}` +
+          `contract set for ${request.task}: ${(scrum.gate ?? request.gate ?? "").trim() === "" ? "no shell gate (read-only disposition)" : `\`${scrum.gate ?? request.gate}\``} in ${request.workspace}` +
           `${contractEvt.freshEyes === true ? " · fresh eyes ON" : ""}${request.watch === true ? " · watch ON" : ""}` +
           `${contractEvt.disposition !== undefined ? ` · ${contractEvt.disposition} disposition` : ""}` +
           `${preserveLivePeers ? " · live Peer preserved (resetPeer not requested)" : ""} · by ${request.submitter}`,
@@ -1839,7 +1866,10 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
               task: preSpawnContract.task,
               workspace: preSpawnContract.workspace,
               gate: preSpawnContract.gate,
-              artifact: preSpawnContract.artifact,
+              // The ledger records "no artifact" as "" — the re-base must not
+              // turn that into an explicit empty path (which the factory
+              // refuses); read-only Contracts carry no artifact since ADR 0054 §1.
+              artifact: preSpawnContract.artifact === "" ? undefined : preSpawnContract.artifact,
               base: currentHead,
               ...(preSpawnContract.scope !== undefined ? { scope: [...preSpawnContract.scope] } : {}),
               ...(preSpawnContract.skills !== undefined ? { skills: [...preSpawnContract.skills] } : {}),

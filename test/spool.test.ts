@@ -12,6 +12,23 @@ import { disposeDir, gitCommitAll, makeTempDir } from "./helpers.ts";
 
 const POLL_MS = 20;
 
+/** Wraps a one-line summary into the mandatory 4-Part Brief shape (ADR 0054 §1). */
+function brief4(summary: string): string {
+  return [
+    "1. Bounded Outcome",
+    summary,
+    "",
+    "2. Contract Boundary & Regression Invariants",
+    "Existing HEAD interfaces stay untouched.",
+    "",
+    "3. Excluded / Deferred",
+    "None.",
+    "",
+    "4. Verification",
+    "the gate command runs green",
+  ].join("\n");
+}
+
 /** The CLI half's write pattern: tmp file + rename, so the plugin never reads a half-written request. */
 function dropRequest(spoolRoot: string, body: Record<string, unknown> & { id: string }): void {
   const requestsDir = join(spoolRoot, "requests");
@@ -686,6 +703,7 @@ test("spool command authority (v0.0.23, ADR 0015 §1): refuses contract/spawn/re
     workspace: ws,
     gate: "true",
     artifact: "src/x.ts",
+    description: brief4("Land the authorized slice"),
     submitter: "agent-lead-1",
     seat: "lead",
   });
@@ -942,6 +960,7 @@ test("handleSpoolRequest keeps Lead contracts Gate-only and records worker corre
     gate: "true",
     artifact: "src/x.ts",
     scope: ["src/one"],
+    description: brief4("First fresh-eyes slice"),
     submitter: "agent-lead-1",
     seat: "lead",
   });
@@ -961,6 +980,7 @@ test("handleSpoolRequest keeps Lead contracts Gate-only and records worker corre
     artifact: "src/x.ts",
     scope: ["src/two"],
     freshEyes: false,
+    description: brief4("Second fresh-eyes slice"),
     submitter: "agent-lead-1",
     seat: "lead",
   });

@@ -22,6 +22,23 @@ import { copyFixture, disposeDir, eyeAnswer, gitCommitAll, gitCommitChanges, mak
 const claimCli = join(repoRoot, "plugin", "bin", "factory-claim.mjs");
 const ownerCli = join(repoRoot, "plugin", "bin", "factory.mjs");
 
+/** Wraps a one-line summary into the mandatory 4-Part Brief shape (ADR 0054 §1). */
+function brief4(summary: string): string {
+  return [
+    "1. Bounded Outcome",
+    summary,
+    "",
+    "2. Contract Boundary & Regression Invariants",
+    "Existing HEAD interfaces stay untouched.",
+    "",
+    "3. Excluded / Deferred",
+    "None.",
+    "",
+    "4. Verification",
+    "the gate command runs green",
+  ].join("\n");
+}
+
 interface CliResult {
   status: number | null;
   stdout: string;
@@ -190,6 +207,46 @@ test("the delegated Owner seat's env stamps its id on both acts (v0.0.9)", async
   assert.equal(set2.event === "contract_set" ? set2.by : undefined, "owner");
 });
 
+test("factory contract gate law (ticket 01, ADR 0054 §1/§2): a read-only disposition contracts without --gate and synthesizes the 4-Part Brief; the engineer default still requires --gate", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const workspace = join(dir, "workspace");
+  copyFixture("sample-workspace", workspace);
+  gitCommitAll(workspace);
+  const home = join(dir, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
+  const spool = startSpool(stateDir, factory);
+  t.after(() => spool.stop());
+
+  // The engineer default (disposition omitted) still requires --gate —
+  // client-side, before any spool round trip.
+  const engineer = await run(
+    ownerCli,
+    ["contract", "--task", "GATE-ENG", "--workspace", workspace, "--outcome", "o", "--invariants", "i", "--exclusions", "e", "--verification", "v"],
+    { PASEO_HOME: home },
+  );
+  assert.equal(engineer.status, 2);
+  assert.match(engineer.stderr, /--gate is required for the engineer disposition/);
+
+  // A read-only disposition contracts without --gate: the structured fields
+  // ride the spool and synthesize the canonical 4-section Brief.
+  const scout = await run(ownerCli, [
+    "contract", "--task", "GATE-SCOUT", "--workspace", workspace, "--disposition", "scout",
+    "--outcome", "Map the seam.", "--invariants", "HEAD untouched.", "--exclusions", "No code changes.",
+  ], { PASEO_HOME: home });
+  assert.equal(scout.status, 0, scout.stderr);
+  assert.match(scout.stdout, /no shell gate \(read-only disposition\)/);
+  const contract = factory.contractFor("GATE-SCOUT");
+  assert.ok(contract, "the scout contract landed");
+  assert.equal(contract.gate, "", "no dummy gate was demanded");
+  assert.match(contract.description ?? "", /1\. Bounded Outcome/);
+  assert.match(contract.description ?? "", /2\. Contract Boundary & Regression Invariants/);
+  assert.match(contract.description ?? "", /3\. Excluded \/ Deferred/);
+  assert.match(contract.description ?? "", /4\. Verification/);
+  assert.match(contract.description ?? "", /Read-only disposition \(scout\) — 6-Field Handoff with file:line evidence; worktree must remain clean at HEAD\./);
+});
+
 test("a claim the factory rejects comes back as an error exit with the reason", async (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);
@@ -344,7 +401,7 @@ test("factory-claim round-trips the six-field handoff (ADR 0053 §4): the requir
   t.after(() => spool.stop());
   const agentEnv = { FACTORY_STATE_DIR: stateDir, PASEO_AGENT_ID: "agent-scout-1" };
 
-  factory.setContract({ task: "SCOUT-CLI", workspace: root, gate: "true", artifact: "README.md", disposition: "scout" });
+  factory.setContract({ task: "SCOUT-CLI", workspace: root, gate: "true", disposition: "scout" });
   factory.setContract({ task: "ENG-CLI", workspace: root, gate: "true", artifact: "README.md" });
 
   // A read-only claim without --sha: the factory resolves the worktree's HEAD
@@ -838,10 +895,11 @@ test("factory CLI stamps PASEO_FACTORY_SEAT onto spool requests and enforces sea
   assert.equal(dispatched.length, 1);
   assert.equal(dispatched[0]?.seat, "supervisor");
 
-  // Lead CAN call `factory contract`.
+  // Lead CAN call `factory contract` — carrying the mandatory 4-Part Brief
+  // (ADR 0054 §1) since the lead seat rides PASEO_FACTORY_SEAT.
   const leadContract = await run(
     ownerCli,
-    ["contract", "--task", "T-AUTH", "--workspace", workspace, "--gate", "true", "--artifact", "src/format.ts", "--scope", "src/format.ts"],
+    ["contract", "--task", "T-AUTH", "--workspace", workspace, "--gate", "true", "--artifact", "src/format.ts", "--scope", "src/format.ts", "--description", brief4("Land the padded slice")],
     leadEnv,
   );
   assert.equal(leadContract.status, 0, leadContract.stderr);
@@ -849,7 +907,7 @@ test("factory CLI stamps PASEO_FACTORY_SEAT onto spool requests and enforces sea
   // Lead CAN pass `--no-fresh-eyes` to explicitly opt out of fresh-eyes.
   const leadNoEye = await run(
     ownerCli,
-    ["contract", "--task", "T-NO-EYE", "--workspace", workspace, "--gate", "true", "--artifact", "src/format.ts", "--scope", "src/other.ts", "--no-fresh-eyes"],
+    ["contract", "--task", "T-NO-EYE", "--workspace", workspace, "--gate", "true", "--artifact", "src/format.ts", "--scope", "src/other.ts", "--no-fresh-eyes", "--description", brief4("Opt out of fresh eyes")],
     leadEnv,
   );
   assert.equal(leadNoEye.status, 0, leadNoEye.stderr);

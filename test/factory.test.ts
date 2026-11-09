@@ -24,6 +24,21 @@ function makeWorkspace(dir: string): { workspace: string; artifact: string; sha:
   return { workspace, artifact, sha };
 }
 
+/** A minimal complete 4-Part Brief — the slp-mode Lead seat's mandatory description shape (ADR 0054 §1). */
+const FOUR_PART_BRIEF = [
+  "1. Bounded Outcome",
+  "Land the slice.",
+  "",
+  "2. Contract Boundary & Regression Invariants",
+  "Existing HEAD behavior stays green.",
+  "",
+  "3. Excluded / Deferred",
+  "None.",
+  "",
+  "4. Verification",
+  "true",
+].join("\n");
+
 // ---- the canonical Project identity (v0.0.14, ADR 0010 §1/§5) --------------------------------
 
 /** The slug the spec's formula demands for a repo whose git dir sits at `<repo>/.git`. */
@@ -252,8 +267,9 @@ test("claim with an empty sha is refused at admission for engineer dispositions,
     "the refused claim opened no Attempt",
   );
 
-  // The read-only disposition claims at the execution tree's HEAD instead.
-  factory.setContract({ task: "U2-RO", workspace, gate: "true", artifact, disposition: "reviewer" });
+  // The read-only disposition claims at the execution tree's HEAD instead —
+  // and since ADR 0054 §1 it contracts without an output artifact.
+  factory.setContract({ task: "U2-RO", workspace, gate: "true", disposition: "reviewer" });
   const outcome = await factory.claim({ task: "U2-RO", sha: "", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   assert.equal(outcome.verdict, "green");
   assert.equal(factory.ledger.eventsFor("U2-RO").find((e) => e.event === "claim_reported")?.sha, sha, "the omitted commit resolved to HEAD");
@@ -1840,6 +1856,7 @@ test("ADR 0030: Lead contracts leave Fresh-eyes off for all identities and retai
     scope: ["src/one"],
     seat: "lead",
     by: "some-agent",
+    description: FOUR_PART_BRIEF,
   });
   assert.equal(cSeat.freshEyes, undefined, "Lead defaults to Gate-only");
 
@@ -1873,6 +1890,7 @@ test("ADR 0030: Lead contracts leave Fresh-eyes off for all identities and retai
     seat: "lead",
     by: "lead",
     freshEyes: false,
+    description: FOUR_PART_BRIEF,
   });
   assert.equal(cOptOut.freshEyes, undefined, "Lead passing freshEyes: false omits freshEyes");
   assert.equal("freshEyes" in cOptOut, false);
@@ -1900,6 +1918,7 @@ test("ADR 0030: Lead contracts leave Fresh-eyes off for all identities and retai
     scope: ["src/six"],
     seat: "lead",
     by: "lead",
+    description: FOUR_PART_BRIEF,
   });
   assert.equal(cDegraded.freshEyes, undefined, "Lead omitting freshEyes on an unusable lane succeeds with freshEyes omitted");
   assert.equal("freshEyes" in cDegraded, false);
@@ -1915,6 +1934,7 @@ test("ADR 0030: Lead contracts leave Fresh-eyes off for all identities and retai
         seat: "lead",
         by: "lead",
         freshEyes: true,
+        description: FOUR_PART_BRIEF,
       }),
     factoryErrorCode("eye-unconfigured"),
     "Lead explicitly passing freshEyes: true on an unusable lane still fails fast with eye-unconfigured",
@@ -1987,7 +2007,7 @@ test("v0.0.38 (ADR 0026 §1): setContract resolves the freshEyes and watch lanes
   // Project lane availability never enables Fresh-eyes implicitly.
   const lead = createFactory({ stateDir: join(dir, "factory-lead"), eyeCliProbe: () => true });
   writeProjectLaneOverrides(join(dir, "factory-lead"), project.slug, { freshEyes: "claude/claude-sonnet-4-6" });
-  const leadContract = lead.setContract({ task: "PSC3", workspace, gate: "true", artifact, seat: "lead" });
+  const leadContract = lead.setContract({ task: "PSC3", workspace, gate: "true", artifact, seat: "lead", description: FOUR_PART_BRIEF });
   assert.equal(leadContract.freshEyes, undefined);
 });
 

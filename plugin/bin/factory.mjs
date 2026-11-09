@@ -604,6 +604,10 @@ if (command === "contract") {
     "no-fresh-eyes": { type: "boolean", default: false },
     watch: { type: "boolean", default: false },
     description: { type: "string" },
+    outcome: { type: "string" },
+    invariants: { type: "string" },
+    exclusions: { type: "string" },
+    verification: { type: "string" },
     disposition: { type: "string" },
     "reset-peer": { type: "boolean", default: false },
     project: { type: "string" },
@@ -612,13 +616,18 @@ if (command === "contract") {
   const v = parsed.values;
   if (typeof v.task !== "string") fail("contract: --task is required");
   if (typeof v.workspace !== "string") fail("contract: --workspace is required");
-  if (typeof v.gate !== "string") fail("contract: --gate is required");
   if (v["fresh-eyes"] && v["no-fresh-eyes"]) fail("contract: pass either --fresh-eyes or --no-fresh-eyes, not both");
   if (typeof v.description === "string" && v.description.trim() === "") {
     fail("contract: --description must be a non-empty text — omit it when the task has no assignment text");
   }
   if (v.disposition !== undefined && !["engineer", "architect", "reviewer", "scout"].includes(v.disposition)) {
     fail("contract: --disposition must be one of engineer|architect|reviewer|scout — omit it for the engineer default");
+  }
+  // ADR 0054 §2: --gate is the engineer disposition's requirement; the
+  // read-only three (scout|architect|reviewer) may omit it (default "").
+  const gateOptional = ["architect", "reviewer", "scout"].includes(v.disposition ?? "");
+  if (typeof v.gate !== "string" && !gateOptional) {
+    fail("contract: --gate is required for the engineer disposition — the read-only dispositions (scout|architect|reviewer) may omit it");
   }
   if (parsed.positionals.length > 0) fail(`contract: unexpected positional "${parsed.positionals[0]}"`);
 
@@ -630,7 +639,7 @@ if (command === "contract") {
     ...(v["artifact-refs"] === undefined ? {} : { artifactRefs: JSON.parse(v["artifact-refs"]) }),
     task: v.task,
     workspace: resolvePath(v.workspace), // fixed, absolute — the agent never picks a cwd
-    gate: v.gate,
+    gate: typeof v.gate === "string" ? v.gate : "",
     ...(typeof v.artifact === "string" ? { artifact: v.artifact } : {}),
     ...(v.scope === undefined
       ? {}
@@ -641,6 +650,12 @@ if (command === "contract") {
     ...(v["fresh-eyes"] ? { freshEyes: true } : v["no-fresh-eyes"] ? { freshEyes: false } : {}),
     ...(v.watch ? { watch: true } : {}),
     ...(v.description === undefined ? {} : { description: v.description }),
+    // The structured 4-Part Brief fields (ADR 0054 §1) — the factory
+    // synthesizes the canonical 4-section Brief when --description is omitted.
+    ...(typeof v.outcome === "string" && v.outcome.trim() !== "" ? { outcome: v.outcome } : {}),
+    ...(typeof v.invariants === "string" && v.invariants.trim() !== "" ? { invariants: v.invariants } : {}),
+    ...(typeof v.exclusions === "string" && v.exclusions.trim() !== "" ? { exclusions: v.exclusions } : {}),
+    ...(typeof v.verification === "string" && v.verification.trim() !== "" ? { verification: v.verification } : {}),
     // ADR 0053 §1/§3: the Peer's disposition and the explicit reset — a
     // re-contract preserves the live Peer unless --reset-peer is passed.
     ...(v.disposition === undefined ? {} : { disposition: v.disposition }),

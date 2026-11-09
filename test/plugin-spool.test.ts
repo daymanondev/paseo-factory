@@ -474,7 +474,7 @@ test("a message-bearing repoke delivers the Lead's ruling into the live Peer ses
   const deps = { daemon: fake.daemon };
   // The reconciliation premise: the Lead re-briefs in place (ticket 01), then
   // rules into the SAME live Peer session (this ticket).
-  factory.setContract({ task: "T-RP", workspace: projectRoot, gate: "npm run gate", artifact: "README.md", description: "Brief v1: land the adapter boundary.", disposition: "architect" });
+  factory.setContract({ task: "T-RP", workspace: projectRoot, gate: "npm run gate", description: "Brief v1: land the adapter boundary.", disposition: "architect" });
   factory.setContract({ task: "T-RP", workspace: projectRoot, gate: "npm run gate", artifact: "README.md", description: "Brief v2 (reconciled): the facade owns the retry policy.", disposition: "engineer" });
 
   const ruling = "Ruling (REOPEN_REQUEST foundation): the facade owns the retry policy — drop the caller-side backoff.";
@@ -901,7 +901,7 @@ test("a turn ending at >= 128k acks its batch, locks handing_over, holds arrivin
   // registration's root binding and the roster's scoping compare against.)
   const resolvedRoot = resolveProject(projectRoot);
   assert.ok(resolvedRoot.ok);
-  factory.setContract({ task: "T1", workspace: resolvedRoot.ok ? resolvedRoot.root : projectRoot, gate: "true", artifact: "README.md", disposition: "scout" });
+  factory.setContract({ task: "T1", workspace: resolvedRoot.ok ? resolvedRoot.root : projectRoot, gate: "true", disposition: "scout" });
   const sha = execSync("git rev-parse HEAD", { cwd: projectRoot, encoding: "utf8" }).trim();
   dropRequest(spoolRoot, { id: "rot-spawn", kind: "spawn", task: "T1", provider: "pi/zai/glm-5.3", arity: 1, worktree: taskWorktreePath(stateDir, slug, "T1") });
   await until(() => {
@@ -1324,7 +1324,7 @@ test("Seam 1 (ADR 0053): a re-contract preserves the live bound Peer by default,
   };
 
   // 1. The first Contract carries the scout disposition onto its contract_set line.
-  dropRequest(spoolRootFor(stateDir), { id: "c-1", kind: "contract", task: "T-01", workspace: resolved.root, gate: "true", artifact: "README.md", disposition: "scout", submitter: "owner" });
+  dropRequest(spoolRootFor(stateDir), { id: "c-1", kind: "contract", task: "T-01", workspace: resolved.root, gate: "true", disposition: "scout", submitter: "owner" });
   await until(() => assert.equal(readReply(spoolRootFor(stateDir), "c-1").ok, true, "the scout contract replies ok"));
   assert.equal(contractLines().at(-1)?.disposition, "scout", "the contract_set line carries disposition: scout");
   assert.equal(contractLines().at(-1)?.description, undefined);
@@ -1342,7 +1342,7 @@ test("Seam 1 (ADR 0053): a re-contract preserves the live bound Peer by default,
 
   // 3. resetPeer: true cancels and archives the prior Peer exactly as the
   //    pre-0053 law did — observable as the archived agent plus the fresh epoch.
-  dropRequest(spoolRootFor(stateDir), { id: "c-3", kind: "contract", task: "T-01", workspace: resolved.root, gate: "true", artifact: "README.md", disposition: "reviewer", resetPeer: true, submitter: "owner" });
+  dropRequest(spoolRootFor(stateDir), { id: "c-3", kind: "contract", task: "T-01", workspace: resolved.root, gate: "true", disposition: "reviewer", resetPeer: true, submitter: "owner" });
   await until(() => assert.equal(readReply(spoolRootFor(stateDir), "c-3").ok, true, "the reset re-contract replies ok"));
   await until(() => assert.deepEqual(stopped, ["peer-1"], "the prior Peer was stopped"));
   assert.ok(!(await listedPeerIds()).includes("peer-1"), "the prior Peer is archived");
@@ -1395,6 +1395,62 @@ test("Seam 1 (ADR 0053): setContract admits exactly the four SLP dispositions �
   assert.equal("disposition" in omitted, false, "an omitted disposition is recorded omitted — never a defaulted field");
 });
 
+test("Seam 1 (ticket 01, ADR 0054 §1/§2): a spool contract may omit gate and description on a read-only disposition — the structured fields synthesize the Brief and gate records empty — while an engineer gate-less contract is refused invalid-contract", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const root = join(dir, "repo");
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, "README.md"), "x\n");
+  gitCommitAll(root);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+
+  // The request shape admits a gate-less contract body (the factory judges).
+  const parsed = parseSpoolRequest({ id: "ro-1", kind: "contract", task: "SP-RO", workspace: root, disposition: "reviewer", outcome: "o", invariants: "i", exclusions: "e", submitter: "owner" });
+  assert.ok(parsed !== undefined, "a gate-less read-only contract body parses");
+
+  // The handler forwards it: gate defaults to "", the structured fields
+  // synthesize the canonical 4-section Brief onto the contract_set line.
+  const reply = await handleSpoolRequest(factory, {
+    id: "ro-1",
+    kind: "contract",
+    task: "SP-RO",
+    workspace: root,
+    disposition: "reviewer",
+    outcome: "Audit the seam against HEAD.",
+    invariants: "No code changes.",
+    exclusions: "Excluded: fixes.",
+    submitter: "owner",
+    seat: "lead",
+  });
+  assert.equal(reply.ok, true, JSON.stringify(reply));
+  const contract = factory.contractFor("SP-RO");
+  assert.ok(contract);
+  assert.equal(contract.gate, "", "the read-only Contract records an empty gate");
+  assert.match(contract.description ?? "", /1\. Bounded Outcome/);
+  assert.match(contract.description ?? "", /2\. Contract Boundary & Regression Invariants/);
+  assert.match(contract.description ?? "", /3\. Excluded \/ Deferred/);
+  assert.match(contract.description ?? "", /4\. Verification/);
+  assert.match(contract.description ?? "", /Read-only disposition \(reviewer\) — 6-Field Handoff with file:line evidence; worktree must remain clean at HEAD\./);
+
+  // The engineer default keeps the mandatory-gate law at the spool surface.
+  const engineer = await handleSpoolRequest(factory, {
+    id: "ro-2",
+    kind: "contract",
+    task: "SP-ENG",
+    workspace: root,
+    gate: "",
+    outcome: "o",
+    invariants: "i",
+    exclusions: "e",
+    verification: "v",
+    submitter: "owner",
+    seat: "lead",
+  });
+  assert.equal(engineer.ok, false);
+  assert.equal((engineer as { code?: string }).code, "invalid-contract");
+  assert.match((engineer as { message?: string }).message ?? "", /gate command must be a non-empty string/);
+});
+
 // ---- the mandatory six-field handoff on agent_claim (ADR 0053 §4) --------------------------
 
 test("Seam 1 (ADR 0053 §4): a scout claim with the six-field handoff and no commit resolves HEAD to GREEN — ownership defaults, and the handoff rides claim_reported, the report, and the Verdict mail", async (t) => {
@@ -1402,7 +1458,7 @@ test("Seam 1 (ADR 0053 §4): a scout claim with the six-field handoff and no com
   const spoolRoot = spoolRootFor(stateDir);
 
   // A read-only Contract: the Peer owes findings, not a commit (User Story 13).
-  factory.setContract({ task: "SCOUT-6F", workspace: projectRoot, gate: "true", artifact: "README.md", disposition: "scout" });
+  factory.setContract({ task: "SCOUT-6F", workspace: projectRoot, gate: "true", disposition: "scout" });
   const head = execSync("git rev-parse HEAD", { cwd: projectRoot, encoding: "utf8" }).trim();
 
   // The Peer's handoff: the four required fields, `ownership` omitted — the
@@ -1580,7 +1636,7 @@ test("Seam 1 (ADR 0053): the spawn-path re-contract onto a moved HEAD preserves 
   t.after(() => spool.stop());
 
   // T-01 is contracted read-only (architect) and never claimed.
-  dropRequest(spoolRootFor(stateDir), { id: "c-a", kind: "contract", task: "T-01", workspace: resolved.root, gate: "true", artifact: "README.md", disposition: "architect", submitter: "owner" });
+  dropRequest(spoolRootFor(stateDir), { id: "c-a", kind: "contract", task: "T-01", workspace: resolved.root, gate: "true", disposition: "architect", submitter: "owner" });
   await until(() => assert.equal(readReply(spoolRootFor(stateDir), "c-a").ok, true, "the architect contract replies ok"));
 
   // Upstream lands after T-01's Contract: T-02 is contracted, committed,
@@ -1645,7 +1701,7 @@ test("Seam 1 (ADR 0053): lead accept on a GREEN read-only Task records attempt_a
 
   // 1. The scout Task: contract, spawned into its managed worktree, claimed
   //    GREEN at the worktree HEAD (a read-only Peer makes no new commit).
-  dropRequest(spoolRootFor(stateDir), { id: "c-scout", kind: "contract", task: "RO-1", workspace: resolved.root, gate: "true", artifact: "README.md", disposition: "scout", submitter: "owner" });
+  dropRequest(spoolRootFor(stateDir), { id: "c-scout", kind: "contract", task: "RO-1", workspace: resolved.root, gate: "true", disposition: "scout", submitter: "owner" });
   await until(() => assert.equal(readReply(spoolRootFor(stateDir), "c-scout").ok, true, "the scout contract replies ok"));
   dropRequest(spoolRootFor(stateDir), { id: "sp-scout", kind: "spawn", task: "RO-1", provider: "pi/zai/glm-5.3", arity: 1, projectSlug: resolved.slug });
   await until(() => assert.equal(readReply(spoolRootFor(stateDir), "sp-scout").ok, true, "the scout spawn replies ok"));
