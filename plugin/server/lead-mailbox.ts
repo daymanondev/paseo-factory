@@ -1433,6 +1433,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   const taskHasSettledPeerOutcome = (task: TaskView, queuedPeerBlockerTasks?: ReadonlySet<string>): boolean =>
     task.accepted ||
     task.status === "accepted" ||
+    task.status === "closed" ||
     task.status === "ready-to-accept" ||
     task.status === "needs-human" ||
     (task.status === "red" && task.attempts.length >= MAX_ATTEMPTS) ||
@@ -2024,11 +2025,19 @@ function renderPeerRoster(input: {
 }): string {
   if (input.tasks.length === 0) return "(no tasks in the project's ledger — a clean slate)";
   const acceptedTasks = input.tasks.filter((task) => task.accepted || task.status === "accepted");
-  const activeTasks = input.tasks.filter((task) => !(task.accepted || task.status === "accepted"));
+  // v0.5.0 (ADR 0054 §5, ticket 05): a clean retirement is closed history too —
+  // one collapsed line, never an active row.
+  const closedTasks = input.tasks.filter((task) => task.status === "closed");
+  const activeTasks = input.tasks.filter((task) => !(task.accepted || task.status === "accepted" || task.status === "closed"));
   const lines: string[] = [];
   if (acceptedTasks.length > 0) {
     lines.push(
       `- accepted tasks (${acceptedTasks.length}): ${acceptedTasks.slice(-5).map((t) => t.task).join(", ")}${acceptedTasks.length > 5 ? ` (latest 5 of ${acceptedTasks.length})` : ""}`,
+    );
+  }
+  if (closedTasks.length > 0) {
+    lines.push(
+      `- closed tasks (${closedTasks.length}): ${closedTasks.slice(-5).map((t) => t.task).join(", ")}${closedTasks.length > 5 ? ` (latest 5 of ${closedTasks.length})` : ""}`,
     );
   }
   if (activeTasks.length === 0) {

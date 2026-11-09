@@ -190,6 +190,16 @@ function shapeIsValid(evt: LedgerEvent): boolean {
       needsHumanEvidenceIsValid(asRecord.evidence, asRecord.reason)
     );
   }
+  if (evt.event === "task_closed") {
+    // v0.5.0 (ADR 0054 §5): attempt-less and refusal-less — the one clean
+    // retirement line needs its task and reason; `closed_by` is the
+    // `accepted_by` seat stamp, optional exactly like it.
+    return (
+      taskIsString &&
+      typeof asRecord.reason === "string" &&
+      (asRecord.closed_by === undefined || typeof asRecord.closed_by === "string")
+    );
+  }
   const attempt = asRecord.attempt;
   return taskIsString && typeof attempt === "number" && Number.isInteger(attempt) && attempt >= 1;
 }
@@ -268,6 +278,7 @@ function v2PayloadIsValid(event: Record<string, unknown>): boolean {
     }
     case "report_written": return string("path");
     case "attempt_accepted": return optionalString("accepted_by") && optionalString("landingNote") && (event.landing === undefined || event.landing === "landed" || event.landing === "pending-conflict");
+    case "task_closed": return string("reason") && optionalString("closed_by");
     case "permit_allowed": case "permit_denied": return string("name") && string("kind") && optionalString("command") && (event.event !== "permit_denied" || string("reason"));
     case "git_blocked": return string("reason");
     case "spawn_dispatched": return optionalString("worktree");

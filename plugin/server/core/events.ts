@@ -89,6 +89,7 @@ export const EVENT_NAMES = [
   "respawn_refused",
   "needs_human",
   "retro_written",
+  "task_closed",
 ] as const;
 
 export type EventName = (typeof EVENT_NAMES)[number];
@@ -690,6 +691,29 @@ export interface RetroWritten extends EventIdentityMetadata {
   proposalCount?: number;
 }
 
+/**
+ * The Lead's clean Task retirement (v0.5.0, ADR 0054 §5, ticket 05): the
+ * terminal answer for a superseded or split Task that will never be accepted.
+ * Attempt-less and task-scoped like the Lead's v0.0.10 lines; one line per
+ * Task per ledger (the second close is `already-closed`, the acceptance's own
+ * `already-accepted` mirror). `closed_by` carries the same seat-stamp law as
+ * `attempt_accepted`'s `accepted_by`: `lead` or `supervisor` through the
+ * spool, `owner` from the CLI — never a working Agent (that refusal is the
+ * factory's `agent-cannot-close`). The Plugin shell's cleanup half (Peer
+ * cancel/archive, the temporary Paseo workspace) rides the same act; this
+ * line is the durable record that the Task left the open set.
+ */
+export interface TaskClosed extends EventIdentityMetadata {
+  seq: number;
+  ts: Timestamp;
+  event: "task_closed";
+  task: string;
+  /** Why the Task was retired — the one free-text sentence the ledger keeps. */
+  reason: string;
+  /** Who closed — the submitting shell's seat stamp, the `accepted_by` law. */
+  closed_by?: string;
+}
+
 export type LedgerEvent =
   | LedgerSchema
   | ContractSet
@@ -711,7 +735,8 @@ export type LedgerEvent =
   | RespawnDispatched
   | RespawnRefused
   | NeedsHuman
-  | RetroWritten;
+  | RetroWritten
+  | TaskClosed;
 
 /** What callers hand to Ledger.append — same shape, `seq` and `ts` not yet assigned. */
 type PendingOf<T> = T extends LedgerSchema ? never : T extends LedgerEvent ? Omit<T, "seq" | "ts" | keyof EventIdentityMetadata> : never;

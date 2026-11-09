@@ -92,6 +92,10 @@ function statusTone(status: TaskStatus): "statusWarning" | "accent" | "statusSuc
       return "statusSuccess";
     case "waiting":
       return "foregroundMuted";
+    // A clean retirement (v0.5.0, ADR 0054 §5) is terminal history — success
+    // green, never the danger red the fallback paints.
+    case "closed":
+      return "statusSuccess";
     default:
       return "statusDanger";
   }

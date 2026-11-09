@@ -4,7 +4,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { foldTasks } from "../plugin/server/view.ts";
+import { foldKpis, foldTasks } from "../plugin/server/view.ts";
 import { taskStatusLines } from "../src/task-status.ts";
 import { projectTask } from "../src/task-state.ts";
 import { createFactory } from "../src/factory.ts";
@@ -2034,4 +2034,93 @@ test("accepted task projection retains accepted GREEN evidence after a ghost RED
   assert.match(taskStatusLines(factory.ledger.events)[0]!, /verdict=green/);
   assert.equal(foldTasks(factory.ledger.events)[0]!.currentAttempt, 1);
   assert.equal(foldTasks(factory.ledger.events)[0]!.verdict, "green");
+});
+
+// ---- clean Task retirement (v0.5.0, ADR 0054 §5, ticket 05) -----------------------------------
+
+test("close: the Lead retires a superseded Task — task_closed appends, the worktree and factory/<task> branch go, and every projection reads closed", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact, sha: base } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  const worktree = makeTaskWorktree(dir, workspace, "CL1", base);
+  factory.setContract({ task: "CL1", workspace, gate: "true", artifact, scope: ["src/**"] });
+  factory.requestSpawn({ task: "CL1", provider: "claude", arity: 1, worktree });
+
+  // The superseded Task's live Contract blocks a scope-overlapping sibling on the same tree — until it closes.
+  assert.throws(
+    () => factory.setContract({ task: "CL2", workspace, gate: "true", scope: ["src/**"] }),
+    factoryErrorCode("workspace-conflict"),
+  );
+
+  const closed = await factory.close({ task: "CL1", reason: "superseded after the context-ceiling split", by: "lead" });
+  assert.equal(closed.event, "task_closed");
+  assert.equal(closed.task, "CL1");
+  assert.equal(closed.reason, "superseded after the context-ceiling split");
+  assert.equal(closed.closed_by, "lead");
+  assert.equal(existsSync(worktree), false, "the Task worktree is removed");
+  assert.equal(gitFact(workspace, ["branch", "--list", "factory/CL1"]), "", "branch factory/<task> is deleted");
+  assert.equal(factory.worktreeFor("CL1"), undefined, "a closed Task retires its worktree binding — the choke does not outlive it");
+
+  const state = projectTask(factory.ledger.events, "CL1");
+  assert.equal(state.status, "closed");
+  assert.deepEqual(state.closed, { seq: closed.seq, at: closed.ts, reason: "superseded after the context-ceiling split", by: "lead" });
+
+  const view = foldTasks(factory.ledger.events).find((entry) => entry.task === "CL1");
+  assert.ok(view !== undefined, "foldTasks still surfaces the closed Task — closed history, not vanished history");
+  assert.equal(view.status, "closed");
+  assert.deepEqual(view.closed, { seq: closed.seq, at: closed.ts, reason: "superseded after the context-ceiling split", by: "lead" });
+  assert.deepEqual(
+    foldKpis(foldTasks(factory.ledger.events)),
+    { needsHuman: 0, running: 0, readyToAccept: 0, accepted: 0, totalCostUsd: 0, totalTokens: 0 },
+    "a closed Task counts in no KPI tile",
+  );
+
+  // The closed Task is no live contract anymore: the scope-overlapping sibling on the same tree contracts cleanly.
+  factory.setContract({ task: "CL2", workspace, gate: "true", scope: ["src/**"] });
+  // The append-only ledger owes the second close its one refusal.
+  await assert.rejects(factory.close({ task: "CL1", reason: "again", by: "lead" }), factoryErrorCode("already-closed"));
+});
+
+test("close refuses unknown, accepted, closed, in-flight, and Agent-seated closers — one code each, no line written", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact, sha } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir: join(dir, "factory") });
+  await assert.rejects(factory.close({ task: "GHOST", reason: "never contracted" }), factoryErrorCode("unknown-task"));
+  await assert.rejects(factory.close({ task: "CL-EMPTY", reason: "  " }), factoryErrorCode("invalid-close"));
+
+  // Settled acceptance is the other terminal — only retirement-by-close may close.
+  const acceptedDir = join(dir, "accepted");
+  const accepted = await greenAttempt(acceptedDir, "ACC-CL");
+  await accepted.factory.accept({ task: "ACC-CL", attempt: 1 });
+  await assert.rejects(accepted.factory.close({ task: "ACC-CL", reason: "too late" }), factoryErrorCode("already-accepted"));
+
+  // An open Attempt holds the close exactly as it holds accept.
+  factory.setContract({ task: "BUSY", workspace, gate: "true", artifact });
+  await factory.claim({ task: "BUSY", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
+  factory.ledger.append({ event: "claim_reported", task: "BUSY", attempt: 2, sha });
+  factory.ledger.append({ event: "gate_started", task: "BUSY", attempt: 2, cmd: "true" });
+  await assert.rejects(factory.close({ task: "BUSY", reason: "mid-gate" }), factoryErrorCode("gate-running"));
+
+  // A working Agent seat never closes — the accept law's mirror.
+  factory.setContract({ task: "IDLE", workspace, gate: "true", artifact });
+  await assert.rejects(
+    factory.close({ task: "IDLE", reason: "agent tries", by: "worker-1", authority: "agent" }),
+    factoryErrorCode("agent-cannot-close"),
+  );
+  assert.equal(factory.ledger.events.filter((evt) => evt.event === "task_closed").length, 0, "no refusal wrote a task_closed line");
+});
+
+test("a pre-0054 ledger without task_closed projects unchanged — accepted stays accepted, no closed field appears", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { factory } = await greenAttempt(dir, "HIST-1");
+  await factory.accept({ task: "HIST-1", attempt: 1 });
+  const state = projectTask(factory.ledger.events, "HIST-1");
+  assert.equal(state.status, "accepted");
+  assert.equal(state.closed, undefined);
+  const view = foldTasks(factory.ledger.events)[0]!;
+  assert.equal(view.status, "accepted");
+  assert.equal(view.closed, undefined);
 });

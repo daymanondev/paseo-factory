@@ -15,7 +15,9 @@ export function taskStatusLines(events: readonly LedgerEvent[], workspaceFilter?
     const review = current?.review;
     const count = (kind: LedgerEvent["event"]) => state.epoch.filter(event => event.event === kind).length;
     const eligible = (role: "ownerEligible" | "leadEligible") => state.attempts.filter(attempt => attempt[role]).map(attempt => attempt.attempt).join(",") || "-";
-    lines.push(`${task} attempts=${state.maxAttempt} verdict=${state.verdict ?? "-"} sha=${gate?.sha?.slice(0, 7) ?? "-"} accepted=${state.acceptance === undefined ? "no" : "yes"} eye=${review?.outcome ?? "-"} choke=${count("permit_allowed")}/${count("permit_denied")}/${count("git_blocked")}` +
+    lines.push(`${task} attempts=${state.maxAttempt} verdict=${state.verdict ?? "-"} sha=${gate?.sha?.slice(0, 7) ?? "-"} accepted=${state.acceptance === undefined ? "no" : "yes"}` +
+      (state.closed === undefined ? "" : ` closed=yes reason="${state.closed.reason}"`) +
+      ` eye=${review?.outcome ?? "-"} choke=${count("permit_allowed")}/${count("permit_denied")}/${count("git_blocked")}` +
       (state.needs === undefined ? "" : ` needs-human=${state.needs.reason}`) +
       ` review=${current?.reviewState ?? (state.contract?.freshEyes === true ? "pending" : "off")} owner-eligible=${eligible("ownerEligible")} lead-eligible=${eligible("leadEligible")}`);
   }

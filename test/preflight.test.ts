@@ -166,7 +166,7 @@ test('kickoff packet injects the Project notebook path and content for Lead and 
 
 test('Ledger tasks line compacts more than three accepted tasks into a count + latest tail (ADR 0047)', t => {
   const root = makeTempDir(); disposeDir(t, root);
-  const ledgerRows = (tasks: Array<{ task: string; stage: 'contracted' | 'green' | 'accepted' }>): LedgerEvent[] => {
+  const ledgerRows = (tasks: Array<{ task: string; stage: 'contracted' | 'green' | 'accepted' | 'closed' }>): LedgerEvent[] => {
     const events: LedgerEvent[] = [];
     let seq = 1;
     for (const { task, stage } of tasks) {
@@ -177,6 +177,9 @@ test('Ledger tasks line compacts more than three accepted tasks into a count + l
       if (stage === 'accepted') {
         events.push({ seq: seq++, ts: '2026-11-05T00:00:00Z', event: 'attempt_accepted', task, attempt: 1 });
       }
+      if (stage === 'closed') {
+        events.push({ seq: seq++, ts: '2026-11-05T00:00:00Z', event: 'task_closed', task, reason: 'superseded by the split', closed_by: 'lead' });
+      }
     }
     return events;
   };
@@ -184,9 +187,11 @@ test('Ledger tasks line compacts more than three accepted tasks into a count + l
     buildSeatKickoffPacket({ role: 'lead', projectSlug: 'repo', projectRoot: root, ledgerEvents: events }).split('\n')
       .find(line => line.startsWith('- Ledger tasks: ')) ?? '(ledger line missing)';
 
-  // > 3 accepted: closed tasks collapse into one count + latest-3 prefix;
-  // unaccepted tasks keep their full [status, attempts, verdict] entry.
+  // > 3 accepted: closed history (accepted or retired, ADR 0054 §5) collapses
+  // into one count + latest-3 prefix; unaccepted tasks keep their full
+  // [status, attempts, verdict] entry.
   const crowded = ledgerRows([
+    { task: 'T-00', stage: 'closed' },
     { task: 'T-01', stage: 'accepted' },
     { task: 'T-02', stage: 'accepted' },
     { task: 'T-03', stage: 'accepted' },
@@ -197,14 +202,20 @@ test('Ledger tasks line compacts more than three accepted tasks into a count + l
   ]);
   assert.equal(
     ledgerLine(crowded),
-    '- Ledger tasks: 5 accepted (latest: T-03, T-04, T-05); T-06 [green, attempts=1, verdict=green]; T-07 [contracted, attempts=0, verdict=none]',
+    '- Ledger tasks: 6 accepted/closed (latest: T-03, T-04, T-05); T-06 [green, attempts=1, verdict=green]; T-07 [contracted, attempts=0, verdict=none]',
   );
 
-  // <= 3 accepted: today's per-task rendering is preserved for every row.
+  // <= 3 accepted: today's per-task rendering is preserved for every row —
+  // a lone retired Task names its own row the same way.
   const small = ledgerRows([{ task: 'T-01', stage: 'accepted' }, { task: 'T-02', stage: 'accepted' }, { task: 'T-03', stage: 'green' }]);
   assert.equal(
     ledgerLine(small),
     '- Ledger tasks: T-01 [accepted (by owner), attempts=1, verdict=green]; T-02 [accepted (by owner), attempts=1, verdict=green]; T-03 [green, attempts=1, verdict=green]',
+  );
+  const retired = ledgerRows([{ task: 'T-09', stage: 'closed' }]);
+  assert.equal(
+    ledgerLine(retired),
+    '- Ledger tasks: T-09 [closed (by lead), attempts=1, verdict=green]',
   );
 });
 

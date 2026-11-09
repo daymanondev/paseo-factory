@@ -48,7 +48,8 @@ var EVENT_NAMES = [
   "respawn_dispatched",
   "respawn_refused",
   "needs_human",
-  "retro_written"
+  "retro_written",
+  "task_closed"
 ];
 var PEER_DISPOSITIONS = ["engineer", "architect", "reviewer", "scout"];
 var PEER_HANDOFF_OUTCOMES = ["complete", "partial", "blocked", "reopen"];
@@ -207,6 +208,9 @@ function shapeIsValid(evt) {
   if (evt.event === "needs_human") {
     return taskIsString && typeof asRecord.reason === "string" && NEEDS_HUMAN_REASONS.includes(asRecord.reason) && needsHumanEvidenceIsValid(asRecord.evidence, asRecord.reason);
   }
+  if (evt.event === "task_closed") {
+    return taskIsString && typeof asRecord.reason === "string" && (asRecord.closed_by === void 0 || typeof asRecord.closed_by === "string");
+  }
   const attempt = asRecord.attempt;
   return taskIsString && typeof attempt === "number" && Number.isInteger(attempt) && attempt >= 1;
 }
@@ -264,6 +268,8 @@ function v2PayloadIsValid(event) {
       return string("path");
     case "attempt_accepted":
       return optionalString("accepted_by") && optionalString("landingNote") && (event.landing === void 0 || event.landing === "landed" || event.landing === "pending-conflict");
+    case "task_closed":
+      return string("reason") && optionalString("closed_by");
     case "permit_allowed":
     case "permit_denied":
       return string("name") && string("kind") && optionalString("command") && (event.event !== "permit_denied" || string("reason"));
@@ -497,6 +503,7 @@ function projectTask(events, task) {
   const epochId = contract?.epoch_id;
   const epoch = history.filter((event) => epochId === void 0 ? event.seq >= epochSeq : event.epoch_id === epochId);
   const acceptance = last(history, "attempt_accepted");
+  const closure = last(history, "task_closed");
   const settled = acceptance !== void 0 && acceptance.landing !== "pending-conflict";
   const latestGate = last(epoch, "gate_finished");
   const needs = last(epoch, "needs_human");
@@ -514,10 +521,10 @@ function projectTask(events, task) {
     return { attempt, events: own, gate, review, reviewState, gateOpen: started && gate === void 0, reportComplete, open: started && !reportComplete, ownerEligible, leadEligible: ownerEligible && leadRefusal === void 0, leadRefusal };
   });
   const dispatch = epoch.findLast((event) => event.event === "spawn_dispatched" || event.event === "respawn_dispatched");
-  const status = acceptance !== void 0 ? "accepted" : needsHuman ? "needs-human" : attempts.some((attempt) => attempt.open) || dispatch !== void 0 && dispatch.seq > (latestGate?.seq ?? -1) ? "running" : numbers.length === 0 ? "waiting" : latestGate?.verdict === "green" ? "ready-to-accept" : "red";
+  const status = closure !== void 0 ? "closed" : acceptance !== void 0 ? "accepted" : needsHuman ? "needs-human" : attempts.some((attempt) => attempt.open) || dispatch !== void 0 && dispatch.seq > (latestGate?.seq ?? -1) ? "running" : numbers.length === 0 ? "waiting" : latestGate?.verdict === "green" ? "ready-to-accept" : "red";
   const currentAttempt = acceptance === void 0 ? attempts.at(-1) : attempts.find((entry) => entry.attempt === acceptance.attempt);
   const verdict = acceptance === void 0 ? currentAttempt?.gate?.verdict : "green";
-  return { currentAttempt, verdict, task, history, contract, epochSeq, epochId, epoch, attempts, acceptance, settled, pendingLanding: acceptance?.landing === "pending-conflict", needsHuman, needs: needsHuman ? needs : void 0, status, maxAttempt: numbers.at(-1) ?? 0, inFlightAttempt: attempts.find((attempt) => attempt.open)?.attempt };
+  return { currentAttempt, verdict, task, history, contract, epochSeq, epochId, epoch, attempts, acceptance, settled, closed: closure === void 0 ? void 0 : { seq: closure.seq, at: closure.ts, reason: closure.reason, by: closure.closed_by ?? "owner" }, pendingLanding: acceptance?.landing === "pending-conflict", needsHuman, needs: needsHuman ? needs : void 0, status, maxAttempt: numbers.at(-1) ?? 0, inFlightAttempt: attempts.find((attempt) => attempt.open)?.attempt };
 }
 
 // src/history-import.ts
@@ -1027,9 +1034,11 @@ function normalized(path) {
 }
 function acceptedTasks(ledger) {
   const accepted = /* @__PURE__ */ new Set();
-  for (const event of ledger.events) if (event.event === "attempt_accepted") {
-    if (event.landing === "pending-conflict") accepted.delete(event.task);
-    else accepted.add(event.task);
+  for (const event of ledger.events) {
+    if (event.event === "attempt_accepted") {
+      if (event.landing === "pending-conflict") accepted.delete(event.task);
+      else accepted.add(event.task);
+    } else if (event.event === "task_closed") accepted.add(event.task);
   }
   return accepted;
 }

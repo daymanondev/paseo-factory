@@ -188,7 +188,7 @@ test("bridge.mjs exposes strictly role-scoped tools in tools/list and enforces r
       ],
     });
     const supTools = ((supResponses[1].result as { tools: Array<{ name: string }> }).tools).map((t) => t.name).sort();
-    assert.deepEqual(supTools, ["supervisor_accept_task", "supervisor_dispatch_lead", "supervisor_end_cycle", "supervisor_read_ledger"]);
+    assert.deepEqual(supTools, ["lead_close_task", "lead_retire_task", "supervisor_accept_task", "supervisor_dispatch_lead", "supervisor_end_cycle", "supervisor_read_ledger"]);
     const supIllegalCall = supResponses[2].result as { isError?: boolean; content: Array<{ text: string }> };
     assert.equal(supIllegalCall.isError, true);
     assert.match(supIllegalCall.content[0].text, /not permitted|unauthorized|role/i);
@@ -204,7 +204,7 @@ test("bridge.mjs exposes strictly role-scoped tools in tools/list and enforces r
       ],
     });
     const leadTools = ((leadResponses[1].result as { tools: Array<{ name: string }> }).tools).map((t) => t.name).sort();
-    assert.deepEqual(leadTools, ["lead_create_worktree", "lead_dispatch_agent", "lead_merge", "lead_needs_human", "lead_remove_worktree", "lead_repoke_agent", "lead_report_to_supervisor", "lead_set_contract", "lead_verify"]);
+    assert.deepEqual(leadTools, ["lead_close_task", "lead_create_worktree", "lead_dispatch_agent", "lead_merge", "lead_needs_human", "lead_remove_worktree", "lead_repoke_agent", "lead_report_to_supervisor", "lead_retire_task", "lead_set_contract", "lead_verify"]);
 
     // 3. Working Agent session
     const agentResponses = await runMcpSession({
@@ -2159,6 +2159,111 @@ test("v0.0.93 quiet-point regression: Lead dispatches a Peer then crosses 128k �
     peer2.archivedAt = new Date().toISOString();
     await mailRuntime.sweepPeers();
     assert.equal(readProjectRegistration(stateDir, reg.slug)?.rotationState, "handing_over", "a dead Peer releases the hold and the sweep begins the handoff");
+  } finally {
+    spool.stop();
+    rmSync(homeDir, { recursive: true, force: true });
+    rmSync(repoDir, { recursive: true, force: true });
+  }
+});
+
+// ---- clean Task retirement over the bridge (v0.5.0, ADR 0054 §5, ticket 05) -------------------
+
+test("bridge.mjs: lead_close_task (and the lead_retire_task alias) closes a Task end-to-end from the lead and supervisor seats — and stays out of the Agent catalog", async () => {
+  const homeDir = mkdtempSync(join(tmpdir(), "factory-bridge-close-home-"));
+  const stateDir = join(homeDir, "plugin-state", "paseo-factory");
+  const repoDir = makeGitRepo();
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
+  const reg = ensureProjectRegistered(stateDir, repoDir);
+  assert.equal(reg.ok, true);
+  const registry = createFactoryRegistry({ stateDir, root: factory });
+  const fakeDaemon = {
+    agents: {
+      list: async () => ({ entries: [] }),
+      ref: (id: string) => ({
+        send: async () => {},
+        cancel: async () => {},
+        archive: async () => {},
+      }),
+    },
+  };
+  const spool = startSpool(stateDir, factory, { registry, pollMs: 25, daemon: fakeDaemon as never });
+  try {
+    const correlations = new CorrelationRegistry(stateDir);
+    const leadCorr = correlations.issue({ role: "lead", projectSlug: reg.slug, projectRoot: repoDir });
+    const supCorr = correlations.issue({ role: "supervisor", projectSlug: reg.slug, projectRoot: repoDir });
+    const agentCorr = correlations.issue({ role: "agent", projectSlug: reg.slug, projectRoot: repoDir, task: "T-CLOSE" });
+
+    const projectLedgerPath = join(stateDir, "projects", reg.slug, "ledger.jsonl");
+    const closedLines = () =>
+      readFileSync(projectLedgerPath, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line)).filter((e) => e.event === "task_closed");
+
+    // The two Tasks the seats retire — contracted through the bridge so they
+    // land on the Project's isolated ledger, exactly as production does.
+    const setup = await runMcpSession({
+      args: ["--correlation", leadCorr.correlationId, "--state-dir", stateDir],
+      cwd: repoDir,
+      requests: [
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "T-CLOSE", gate: "/usr/bin/true", artifact: "README.md" } } },
+        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "T-CLOSE-2", gate: "/usr/bin/true", artifact: "README.md" } } },
+      ],
+    });
+    for (const response of setup) {
+      assert.notEqual((response.result as { isError?: boolean }).isError, true, (response.result as { content: Array<{ text: string }> }).content[0].text);
+    }
+
+    // 1. The Lead closes through lead_close_task — task_closed lands with the Lead's stamp.
+    const leadCall = await runMcpSession({
+      args: ["--correlation", leadCorr.correlationId, "--state-dir", stateDir],
+      cwd: repoDir,
+      requests: [
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_close_task", arguments: { task: "T-CLOSE", reason: "superseded by the split" } } },
+      ],
+    });
+    const leadText = (leadCall[0].result as { isError?: boolean; content: Array<{ text: string }> }).content[0].text;
+    assert.notEqual((leadCall[0].result as { isError?: boolean }).isError, true, leadText);
+    assert.match(leadText, /T-CLOSE closed .*superseded by the split/);
+    assert.equal(closedLines().length, 1);
+    assert.equal(closedLines()[0].closed_by, "lead");
+
+    // 2. The alias resolves the same act — and the append-only ledger owes the repeat its refusal.
+    const again = await runMcpSession({
+      args: ["--correlation", leadCorr.correlationId, "--state-dir", stateDir],
+      cwd: repoDir,
+      requests: [
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_retire_task", arguments: { task: "T-CLOSE", reason: "twice" } } },
+      ],
+    });
+    const againText = (again[0].result as { isError?: boolean; content: Array<{ text: string }> }).content[0].text;
+    assert.equal((again[0].result as { isError?: boolean }).isError, true, "a repeated close is an error at the tool surface");
+    assert.match(againText, /already-closed/);
+
+    // 3. The supervisor seat carries the tool too (spec line 101) and stamps its own act.
+    const supCall = await runMcpSession({
+      args: ["--correlation", supCorr.correlationId, "--state-dir", stateDir],
+      cwd: repoDir,
+      requests: [
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_close_task", arguments: { task: "T-CLOSE-2", reason: "owner retired it" } } },
+      ],
+    });
+    const supText = (supCall[0].result as { isError?: boolean; content: Array<{ text: string }> }).content[0].text;
+    assert.notEqual((supCall[0].result as { isError?: boolean }).isError, true, supText);
+    assert.equal(closedLines().length, 2);
+    assert.equal(closedLines().find((e) => e.task === "T-CLOSE-2").closed_by, "supervisor");
+
+    // 4. The working Agent never sees the tool — and a direct call is refused by role.
+    const agentSession = await runMcpSession({
+      args: ["--correlation", agentCorr.correlationId, "--state-dir", stateDir],
+      cwd: repoDir,
+      requests: [
+        { jsonrpc: "2.0", id: 1, method: "tools/list" },
+        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_close_task", arguments: { task: "T-CLOSE", reason: "agent tries" } } },
+      ],
+    });
+    const agentToolNames = ((agentSession[0].result as { tools: Array<{ name: string }> }).tools).map((tool) => tool.name);
+    assert.ok(!agentToolNames.includes("lead_close_task"), "the Agent catalog carries no close tool");
+    const agentCallText = (agentSession[1].result as { isError?: boolean; content: Array<{ text: string }> }).content[0].text;
+    assert.equal((agentSession[1].result as { isError?: boolean }).isError, true);
+    assert.match(agentCallText, /not permitted/i);
   } finally {
     spool.stop();
     rmSync(homeDir, { recursive: true, force: true });

@@ -140,6 +140,20 @@ export const sharedTools: Record<string, ToolDefinition> = {
       required: ["task", "reason", "summary"],
     },
   },
+  lead_close_task: {
+    name: "lead_close_task",
+    description:
+      "Retire a superseded or split Task cleanly (ADR 0054 §5): appends `task_closed`, cancels and archives the bound live Peer, and removes the Task worktree and `factory/<task>` branch. Refuses unknown, already-accepted, already-closed, or mid-gate Tasks. Never for work that should land — accept that instead.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        task: { type: "string", description: "Task ID to close." },
+        reason: { type: "string", description: "Why the Task is retired — one sentence; the ledger keeps it." },
+        workspace: { type: "string", description: "Optional Project root path." },
+      },
+      required: ["task", "reason"],
+    },
+  },
   lead_report_to_supervisor: {
     name: "lead_report_to_supervisor",
     description:
@@ -209,14 +223,14 @@ export const sharedTools: Record<string, ToolDefinition> = {
 
 
 export const sharedRoles = {
-  supervisor: ["supervisor_accept_task", "supervisor_dispatch_lead", "supervisor_read_ledger", "supervisor_end_cycle"],
-  lead: ["lead_repoke_agent", "lead_needs_human", "lead_create_worktree", "lead_set_contract", "lead_dispatch_agent", "lead_verify", "lead_merge", "lead_remove_worktree", "lead_report_to_supervisor"],
+  supervisor: ["supervisor_accept_task", "supervisor_dispatch_lead", "supervisor_read_ledger", "supervisor_end_cycle", "lead_close_task", "lead_retire_task"],
+  lead: ["lead_repoke_agent", "lead_needs_human", "lead_create_worktree", "lead_set_contract", "lead_dispatch_agent", "lead_verify", "lead_merge", "lead_remove_worktree", "lead_report_to_supervisor", "lead_close_task", "lead_retire_task"],
   agent: ["agent_claim", "agent_escalate_blocker"],
   unbound: ["factory_dispatch_supervisor", "factory_status"],
 };
 sharedTools.supervisor_read_ledger = { ...sharedTools.factory_status, name: "supervisor_read_ledger" };
 sharedTools.supervisor_end_cycle = { name: "supervisor_end_cycle", description: "Finish this Supervisor turn and await the next Owner directive or Lead report.", inputSchema: { type: "object", properties: {} } };
-for (const [name, source] of Object.entries({ lead_dispatch_agent: "lead_spawn_agent", lead_merge: "lead_accept_task" })) {
+for (const [name, source] of Object.entries({ lead_dispatch_agent: "lead_spawn_agent", lead_merge: "lead_accept_task", lead_retire_task: "lead_close_task" })) {
   sharedTools[name] = { ...sharedTools[source], name };
 }
 for (const [name, description] of Object.entries({ lead_create_worktree: "Create an isolated worktree for a contracted Task.", lead_verify: "Verify a committed Task SHA through its Contract Gate.", lead_remove_worktree: "Remove a clean worktree after its Task has been accepted." })) {

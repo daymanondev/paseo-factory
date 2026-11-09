@@ -796,7 +796,8 @@ var EVENT_NAMES = [
   "respawn_dispatched",
   "respawn_refused",
   "needs_human",
-  "retro_written"
+  "retro_written",
+  "task_closed"
 ];
 var PEER_DISPOSITIONS = ["engineer", "architect", "reviewer", "scout"];
 var PEER_HANDOFF_OUTCOMES = ["complete", "partial", "blocked", "reopen"];
@@ -938,6 +939,9 @@ function shapeIsValid(evt) {
   if (evt.event === "needs_human") {
     return taskIsString && typeof asRecord.reason === "string" && NEEDS_HUMAN_REASONS.includes(asRecord.reason) && needsHumanEvidenceIsValid(asRecord.evidence, asRecord.reason);
   }
+  if (evt.event === "task_closed") {
+    return taskIsString && typeof asRecord.reason === "string" && (asRecord.closed_by === void 0 || typeof asRecord.closed_by === "string");
+  }
   const attempt = asRecord.attempt;
   return taskIsString && typeof attempt === "number" && Number.isInteger(attempt) && attempt >= 1;
 }
@@ -995,6 +999,8 @@ function v2PayloadIsValid(event) {
       return string("path");
     case "attempt_accepted":
       return optionalString("accepted_by") && optionalString("landingNote") && (event.landing === void 0 || event.landing === "landed" || event.landing === "pending-conflict");
+    case "task_closed":
+      return string("reason") && optionalString("closed_by");
     case "permit_allowed":
     case "permit_denied":
       return string("name") && string("kind") && optionalString("command") && (event.event !== "permit_denied" || string("reason"));
@@ -1077,6 +1083,7 @@ function projectTask(events, task) {
   const epochId = contract?.epoch_id;
   const epoch = history.filter((event) => epochId === void 0 ? event.seq >= epochSeq : event.epoch_id === epochId);
   const acceptance = last(history, "attempt_accepted");
+  const closure = last(history, "task_closed");
   const settled = acceptance !== void 0 && acceptance.landing !== "pending-conflict";
   const latestGate = last(epoch, "gate_finished");
   const needs = last(epoch, "needs_human");
@@ -1094,10 +1101,10 @@ function projectTask(events, task) {
     return { attempt, events: own, gate, review, reviewState, gateOpen: started && gate === void 0, reportComplete, open: started && !reportComplete, ownerEligible, leadEligible: ownerEligible && leadRefusal === void 0, leadRefusal };
   });
   const dispatch = epoch.findLast((event) => event.event === "spawn_dispatched" || event.event === "respawn_dispatched");
-  const status = acceptance !== void 0 ? "accepted" : needsHuman ? "needs-human" : attempts.some((attempt) => attempt.open) || dispatch !== void 0 && dispatch.seq > (latestGate?.seq ?? -1) ? "running" : numbers.length === 0 ? "waiting" : latestGate?.verdict === "green" ? "ready-to-accept" : "red";
+  const status = closure !== void 0 ? "closed" : acceptance !== void 0 ? "accepted" : needsHuman ? "needs-human" : attempts.some((attempt) => attempt.open) || dispatch !== void 0 && dispatch.seq > (latestGate?.seq ?? -1) ? "running" : numbers.length === 0 ? "waiting" : latestGate?.verdict === "green" ? "ready-to-accept" : "red";
   const currentAttempt = acceptance === void 0 ? attempts.at(-1) : attempts.find((entry) => entry.attempt === acceptance.attempt);
   const verdict = acceptance === void 0 ? currentAttempt?.gate?.verdict : "green";
-  return { currentAttempt, verdict, task, history, contract, epochSeq, epochId, epoch, attempts, acceptance, settled, pendingLanding: acceptance?.landing === "pending-conflict", needsHuman, needs: needsHuman ? needs : void 0, status, maxAttempt: numbers.at(-1) ?? 0, inFlightAttempt: attempts.find((attempt) => attempt.open)?.attempt };
+  return { currentAttempt, verdict, task, history, contract, epochSeq, epochId, epoch, attempts, acceptance, settled, closed: closure === void 0 ? void 0 : { seq: closure.seq, at: closure.ts, reason: closure.reason, by: closure.closed_by ?? "owner" }, pendingLanding: acceptance?.landing === "pending-conflict", needsHuman, needs: needsHuman ? needs : void 0, status, maxAttempt: numbers.at(-1) ?? 0, inFlightAttempt: attempts.find((attempt) => attempt.open)?.attempt };
 }
 
 // src/task-status.ts
@@ -1112,7 +1119,7 @@ function taskStatusLines(events, workspaceFilter) {
     const review = current?.review;
     const count = (kind) => state.epoch.filter((event) => event.event === kind).length;
     const eligible = (role) => state.attempts.filter((attempt) => attempt[role]).map((attempt) => attempt.attempt).join(",") || "-";
-    lines.push(`${task} attempts=${state.maxAttempt} verdict=${state.verdict ?? "-"} sha=${gate?.sha?.slice(0, 7) ?? "-"} accepted=${state.acceptance === void 0 ? "no" : "yes"} eye=${review?.outcome ?? "-"} choke=${count("permit_allowed")}/${count("permit_denied")}/${count("git_blocked")}` + (state.needs === void 0 ? "" : ` needs-human=${state.needs.reason}`) + ` review=${current?.reviewState ?? (state.contract?.freshEyes === true ? "pending" : "off")} owner-eligible=${eligible("ownerEligible")} lead-eligible=${eligible("leadEligible")}`);
+    lines.push(`${task} attempts=${state.maxAttempt} verdict=${state.verdict ?? "-"} sha=${gate?.sha?.slice(0, 7) ?? "-"} accepted=${state.acceptance === void 0 ? "no" : "yes"}` + (state.closed === void 0 ? "" : ` closed=yes reason="${state.closed.reason}"`) + ` eye=${review?.outcome ?? "-"} choke=${count("permit_allowed")}/${count("permit_denied")}/${count("git_blocked")}` + (state.needs === void 0 ? "" : ` needs-human=${state.needs.reason}`) + ` review=${current?.reviewState ?? (state.contract?.freshEyes === true ? "pending" : "off")} owner-eligible=${eligible("ownerEligible")} lead-eligible=${eligible("leadEligible")}`);
   }
   const retro = events.findLast((event) => event.event === "retro_written");
   if (retro !== void 0) {
@@ -1396,6 +1403,19 @@ var sharedTools = {
       required: ["task", "reason", "summary"]
     }
   },
+  lead_close_task: {
+    name: "lead_close_task",
+    description: "Retire a superseded or split Task cleanly (ADR 0054 \xA75): appends `task_closed`, cancels and archives the bound live Peer, and removes the Task worktree and `factory/<task>` branch. Refuses unknown, already-accepted, already-closed, or mid-gate Tasks. Never for work that should land \u2014 accept that instead.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        task: { type: "string", description: "Task ID to close." },
+        reason: { type: "string", description: "Why the Task is retired \u2014 one sentence; the ledger keeps it." },
+        workspace: { type: "string", description: "Optional Project root path." }
+      },
+      required: ["task", "reason"]
+    }
+  },
   lead_report_to_supervisor: {
     name: "lead_report_to_supervisor",
     description: "Send a wave completion or escalation report to the Project's Supervisor mailbox (`to: supervisor`, `from: lead`, `kind: report`). After calling this tool, end your turn immediately.",
@@ -1460,14 +1480,14 @@ var sharedTools = {
   }
 };
 var sharedRoles = {
-  supervisor: ["supervisor_accept_task", "supervisor_dispatch_lead", "supervisor_read_ledger", "supervisor_end_cycle"],
-  lead: ["lead_repoke_agent", "lead_needs_human", "lead_create_worktree", "lead_set_contract", "lead_dispatch_agent", "lead_verify", "lead_merge", "lead_remove_worktree", "lead_report_to_supervisor"],
+  supervisor: ["supervisor_accept_task", "supervisor_dispatch_lead", "supervisor_read_ledger", "supervisor_end_cycle", "lead_close_task", "lead_retire_task"],
+  lead: ["lead_repoke_agent", "lead_needs_human", "lead_create_worktree", "lead_set_contract", "lead_dispatch_agent", "lead_verify", "lead_merge", "lead_remove_worktree", "lead_report_to_supervisor", "lead_close_task", "lead_retire_task"],
   agent: ["agent_claim", "agent_escalate_blocker"],
   unbound: ["factory_dispatch_supervisor", "factory_status"]
 };
 sharedTools.supervisor_read_ledger = { ...sharedTools.factory_status, name: "supervisor_read_ledger" };
 sharedTools.supervisor_end_cycle = { name: "supervisor_end_cycle", description: "Finish this Supervisor turn and await the next Owner directive or Lead report.", inputSchema: { type: "object", properties: {} } };
-for (const [name, source] of Object.entries({ lead_dispatch_agent: "lead_spawn_agent", lead_merge: "lead_accept_task" })) {
+for (const [name, source] of Object.entries({ lead_dispatch_agent: "lead_spawn_agent", lead_merge: "lead_accept_task", lead_retire_task: "lead_close_task" })) {
   sharedTools[name] = { ...sharedTools[source], name };
 }
 for (const [name, description] of Object.entries({ lead_create_worktree: "Create an isolated worktree for a contracted Task.", lead_verify: "Verify a committed Task SHA through its Contract Gate.", lead_remove_worktree: "Remove a clean worktree after its Task has been accepted." })) {
@@ -1592,7 +1612,7 @@ async function handleToolCall(name, rawArgs) {
   for (const field of ["runId", "scrum", "role", "artifactRefs", "mutationMode", "reportType"]) {
     if (field in args && !(field in definition.inputSchema.properties)) return toolResult(`Field "${field}" is not permitted for tool "${name}" in mode "${ctx.mode}".`, true);
   }
-  name = ({ supervisor_read_ledger: "factory_status", lead_dispatch_agent: "lead_spawn_agent", lead_merge: "lead_accept_task" })[name] ?? name;
+  name = ({ supervisor_read_ledger: "factory_status", lead_dispatch_agent: "lead_spawn_agent", lead_merge: "lead_accept_task", lead_retire_task: "lead_close_task" })[name] ?? name;
   if (["lead_create_worktree", "lead_verify", "lead_remove_worktree"].includes(name)) {
     const task = typeof args.task === "string" ? args.task.trim() : "";
     const events = readLedgerEventsList(ctx.stateDir, { projectSlug: ctx.projectSlug, workspace: ctx.workspace, task });
@@ -1712,6 +1732,28 @@ async function handleToolCall(name, rawArgs) {
       attempt,
       by: "supervisor",
       seat: "supervisor",
+    });
+    if (!reply.ok) return toolResult(`${reply.code}: ${reply.message}`, true);
+    return toolResult(reply.summary);
+  }
+
+  if (name === "lead_close_task") {
+    // ADR 0054 §5 (ticket 05): the clean Task retirement. Callable from the
+    // lead and supervisor seats (the catalog carries it on both) — the
+    // closing seat stamps its own act; everyone else defaults to lead.
+    const task = typeof args.task === "string" ? args.task.trim() : "";
+    const reason = typeof args.reason === "string" ? args.reason.trim() : "";
+    if (task === "" || reason === "") {
+      return toolResult("lead_close_task requires non-empty `task` and `reason`.", true);
+    }
+    const seat = ctx.role === "supervisor" ? "supervisor" : "lead";
+    const reply = await roundTripSpool(ctx, {
+      id: randomId(),
+      kind: "close",
+      task,
+      reason,
+      by: seat,
+      seat,
     });
     if (!reply.ok) return toolResult(`${reply.code}: ${reply.message}`, true);
     return toolResult(reply.summary);

@@ -74,6 +74,7 @@ export function meterLabel(meter: MeterViewModel): string {
 /** The CONTEXT.md status vocabulary, verbatim — the fold's own state machine. */
 export const TASK_STATUSES: readonly TaskStatus[] = [
   "accepted",
+  "closed",
   "needs-human",
   "running",
   "ready-to-accept",
@@ -112,6 +113,9 @@ export function boardColumnForStatus(status: TaskStatus): BoardColumnId {
     case "ready-to-accept":
       return "ready_to_accept";
     case "accepted":
+    // A clean retirement (v0.5.0, ADR 0054 §5) is terminal history like an
+    // acceptance — it stands in the accepted column, never the open tiles.
+    case "closed":
       return "accepted";
   }
 }
@@ -157,6 +161,7 @@ export interface TasksScreenViewModel {
 
 const STATUS_TONES: Record<TaskStatus, TaskRowViewModel["tone"]> = {
   accepted: "green",
+  closed: "green",
   "needs-human": "amber",
   running: "cyan",
   "ready-to-accept": "green",
@@ -993,6 +998,10 @@ function scrumTaskLabel(status: TaskStatus): { label: string; tone: ScrumStageTa
   switch (status) {
     case "accepted":
       return { label: "Done", tone: "green" };
+    // A clean retirement (v0.5.0, ADR 0054 §5) is terminal history — the
+    // prototype's Done spelling, never an open-stage card.
+    case "closed":
+      return { label: "Closed", tone: "muted" };
     case "ready-to-accept":
       return { label: "GREEN", tone: "green" };
     case "running":

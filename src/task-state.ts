@@ -1,11 +1,19 @@
 /** Pure interpretation of a Task's current Contract epoch and its Attempts.
  * Numeric Attempt identities are local to this epoch, never the whole Task.
  */
-import type { AttemptAccepted, ContractSet, FreshEyesWritten, GateFinished, LedgerEvent, NeedsHuman } from "./events.ts";
+import type { AttemptAccepted, ContractSet, FreshEyesWritten, GateFinished, LedgerEvent, NeedsHuman, TaskClosed } from "./events.ts";
 
 export type AcceptanceRole = "owner" | "supervisor" | "lead" | "agent";
-export type TaskStateStatus = "accepted" | "needs-human" | "running" | "waiting" | "ready-to-accept" | "red";
+export type TaskStateStatus = "accepted" | "closed" | "needs-human" | "running" | "waiting" | "ready-to-accept" | "red";
 export type ReviewState = "off" | "pending" | "incomplete" | "clear" | "concern" | "failed";
+
+/** The terminal retirement's own four facts (v0.5.0, ADR 0054 §5, ticket 05) — `by` reads the line's `closed_by` (the `accepted_by` seat law, defaulting to the delegated-Owner reading on legacy lines). */
+export interface TaskClosure {
+  seq: number;
+  at: string;
+  reason: string;
+  by: string;
+}
 
 export interface AttemptState {
   attempt: number;
@@ -32,6 +40,7 @@ export function projectTask(events: readonly LedgerEvent[], task: string) {
   const epochId = contract?.epoch_id;
   const epoch = history.filter((event) => epochId === undefined ? event.seq >= epochSeq : event.epoch_id === epochId);
   const acceptance: AttemptAccepted | undefined = last(history, "attempt_accepted");
+  const closure: TaskClosed | undefined = last(history, "task_closed");
   const settled = acceptance !== undefined && acceptance.landing !== "pending-conflict";
   const latestGate = last(epoch, "gate_finished");
   const needs: NeedsHuman | undefined = last(epoch, "needs_human");
@@ -49,8 +58,12 @@ export function projectTask(events: readonly LedgerEvent[], task: string) {
     return { attempt, events: own, gate, review, reviewState, gateOpen: started && gate === undefined, reportComplete, open: started && !reportComplete, ownerEligible, leadEligible: ownerEligible && leadRefusal === undefined, leadRefusal };
   });
   const dispatch = epoch.findLast((event) => event.event === "spawn_dispatched" || event.event === "respawn_dispatched");
-  const status: TaskStateStatus = acceptance !== undefined ? "accepted" : needsHuman ? "needs-human" : attempts.some((attempt) => attempt.open) || (dispatch !== undefined && dispatch.seq > (latestGate?.seq ?? -1)) ? "running" : numbers.length === 0 ? "waiting" : latestGate?.verdict === "green" ? "ready-to-accept" : "red";
+  // v0.5.0 (ADR 0054 §5): the clean retirement is terminal beside acceptance —
+  // it wins the status word wherever the slice carries one (close refuses
+  // already-accepted Tasks, so the pair never legitimately coexists; a closed
+  // read of a re-contracted slice is still the last word on that Task).
+  const status: TaskStateStatus = closure !== undefined ? "closed" : acceptance !== undefined ? "accepted" : needsHuman ? "needs-human" : attempts.some((attempt) => attempt.open) || (dispatch !== undefined && dispatch.seq > (latestGate?.seq ?? -1)) ? "running" : numbers.length === 0 ? "waiting" : latestGate?.verdict === "green" ? "ready-to-accept" : "red";
   const currentAttempt = acceptance === undefined ? attempts.at(-1) : attempts.find((entry) => entry.attempt === acceptance.attempt);
   const verdict = acceptance === undefined ? currentAttempt?.gate?.verdict : "green";
-  return { currentAttempt, verdict, task, history, contract, epochSeq, epochId, epoch, attempts, acceptance, settled, pendingLanding: acceptance?.landing === "pending-conflict", needsHuman, needs: needsHuman ? needs : undefined, status, maxAttempt: numbers.at(-1) ?? 0, inFlightAttempt: attempts.find((attempt) => attempt.open)?.attempt };
+  return { currentAttempt, verdict, task, history, contract, epochSeq, epochId, epoch, attempts, acceptance, settled, closed: closure === undefined ? undefined : { seq: closure.seq, at: closure.ts, reason: closure.reason, by: closure.closed_by ?? "owner" }, pendingLanding: acceptance?.landing === "pending-conflict", needsHuman, needs: needsHuman ? needs : undefined, status, maxAttempt: numbers.at(-1) ?? 0, inFlightAttempt: attempts.find((attempt) => attempt.open)?.attempt };
 }

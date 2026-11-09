@@ -596,3 +596,43 @@ test("Seam 1: status --project reads exactly that Project's ledger; unscoped agg
   assert.match(lines[0]!, new RegExp(`^\\[${slugA}\\] T-01 `));
   assert.match(lines[1]!, new RegExp(`^\\[${slugB}\\] T-01 `));
 });
+
+// ---- clean Task retirement (v0.5.0, ADR 0054 §5, ticket 05) -----------------------------------
+
+test("factory close --task <id> --reason <text> retires a Task through the spool and the status digest carries the closed marker (ticket 05)", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const workspace = join(dir, "workspace");
+  copyFixture("sample-workspace", workspace);
+  gitCommitAll(workspace);
+  const home = join(dir, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+
+  const factory = createFactory({ stateDir });
+  const spool = startSpool(stateDir, factory);
+  t.after(() => spool.stop());
+
+  const ownerEnv = { PASEO_HOME: home };
+  const contract = await run(ownerCli, [
+    "contract", "--task", "CLOSE1", "--workspace", workspace, "--gate", "true", "--artifact", "src/format.ts",
+  ], ownerEnv);
+  assert.equal(contract.status, 0, contract.stderr);
+
+  // The close retires the superseded Task: one ledger line, one reply sentence.
+  const closed = await run(ownerCli, ["close", "--task", "CLOSE1", "--reason", "superseded by the split"], ownerEnv);
+  assert.equal(closed.status, 0, closed.stderr);
+  assert.match(closed.stdout, /CLOSE1 closed .*superseded by the split/);
+
+  // The digest names the retirement where the Owner reads it.
+  const status = await run(ownerCli, ["status"], ownerEnv);
+  assert.equal(status.status, 0, status.stderr);
+  assert.equal(
+    establishedFields(status.stdout),
+    'CLOSE1 attempts=0 verdict=- sha=- accepted=no closed=yes reason="superseded by the split" eye=- choke=0/0/0\n',
+  );
+
+  // A second close is refused by name at the terminal — the ledger is append-only.
+  const again = await run(ownerCli, ["close", "--task", "CLOSE1", "--reason", "twice"], ownerEnv);
+  assert.equal(again.status, 2);
+  assert.match(again.stderr, /already-closed/);
+});

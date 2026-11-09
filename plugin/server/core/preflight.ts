@@ -158,6 +158,8 @@ function summarizeLedgerTasks(projectRoot: string, events: readonly LedgerEvent[
         row.status = evt.verdict === "green" ? "green" : "red";
       } else if (evt.event === "attempt_accepted") {
         row.status = `accepted (by ${evt.accepted_by ?? "owner"})`;
+      } else if (evt.event === "task_closed") {
+        row.status = `closed (by ${evt.closed_by ?? "owner"})`;
       } else if (evt.event === "needs_human") {
         row.status = `needs_human (${evt.reason})`;
       }
@@ -165,8 +167,11 @@ function summarizeLedgerTasks(projectRoot: string, events: readonly LedgerEvent[
   }
   if (tasks.size === 0) return "none (clean slate)";
   const rows = [...tasks.values()];
-  const acceptedRows = rows.filter((row) => row.status.startsWith("accepted"));
-  const activeRows = rows.filter((row) => !row.status.startsWith("accepted"));
+  // v0.5.0 (ADR 0054 §5, ticket 05): a clean retirement is closed history like
+  // an acceptance — it collapses, never occupies an open row.
+  const settledClosed = (row: { status: string }): boolean => row.status.startsWith("accepted") || row.status.startsWith("closed");
+  const acceptedRows = rows.filter(settledClosed);
+  const activeRows = rows.filter((row) => !settledClosed(row));
   const renderRow = (t: { task: string; status: string; attempts: number; latestVerdict: string }): string =>
     `${t.task} [${t.status}, attempts=${t.attempts}, verdict=${t.latestVerdict}]`;
   // ADR 0047 §1.3: once accepted history grows past 3 tasks, closed tasks
@@ -174,7 +179,7 @@ function summarizeLedgerTasks(projectRoot: string, events: readonly LedgerEvent[
   // stays bounded regardless of total Project history length; unaccepted
   // tasks always keep their full [status, attempts, verdict] entry.
   if (acceptedRows.length > 3) {
-    const acceptedSummary = `${acceptedRows.length} accepted (latest: ${acceptedRows.slice(-3).map((r) => r.task).join(", ")})`;
+    const acceptedSummary = `${acceptedRows.length} accepted/closed (latest: ${acceptedRows.slice(-3).map((r) => r.task).join(", ")})`;
     return activeRows.length > 0 ? `${acceptedSummary}; ${activeRows.map(renderRow).join("; ")}` : acceptedSummary;
   }
   return rows.map(renderRow).join("; ");
