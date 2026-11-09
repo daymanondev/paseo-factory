@@ -1713,3 +1713,102 @@ test("Seam 1 (ADR 0053): lead accept on a GREEN read-only Task records attempt_a
   assert.equal(headAt(), engSha, "the root HEAD advanced to the engineer's claimed commit");
   await until(() => assert.equal(existsSync(engWorktree), false, "the engineer Task worktree is removed after landing"));
 });
+
+// ---- the plugin-owned notebook writer surface (v0.5.0, ADR 0052 §1, ticket 06) ---------------
+
+/** A canonical-shape notebook for the spool/CLI/bridge surfaces. */
+function spoolValidNotebook(guardRows = 2): string {
+  const rows = Array.from({ length: guardRows }, (_, i) => `| V-${String(i + 1).padStart(2, "0")} | cause ${i + 1} → effect ${i + 1} | observed (1x) |`);
+  return ["## 1. Verification & Run Recipe", "npm run check", "", "## 2. Recurrence Guard", "| ID | Cause → Effect | State |", "| --- | --- | --- |", ...rows, ""].join("\n");
+}
+
+test("parseSpoolRequest admits the notebook kind (content string + Project scope) and nothing around it", () => {
+  assert.deepEqual(parseSpoolRequest({ id: "nb-1", kind: "notebook", content: "## text" }), {
+    id: "nb-1",
+    kind: "notebook",
+    content: "## text",
+  });
+  assert.deepEqual(
+    parseSpoolRequest({ id: "nb-2", kind: "notebook", content: "## text", projectSlug: "demo-a1b2c3", projectRoot: "/w/repo", submitter: "lead-1", seat: "lead" }),
+    { id: "nb-2", kind: "notebook", content: "## text", projectSlug: "demo-a1b2c3", projectRoot: "/w/repo", submitter: "lead-1", seat: "lead" },
+  );
+  for (const bad of [
+    { id: "nb-1", kind: "notebook" }, // no content
+    { id: "nb-1", kind: "notebook", content: 7 },
+    { id: "nb-1", kind: "notebook", content: "x", projectSlug: " " },
+    { id: "nb-1", kind: "notebook", content: "x", projectRoot: "" },
+  ]) {
+    assert.equal(parseSpoolRequest(bad), undefined, `${JSON.stringify(bad)} must be rejected`);
+  }
+});
+
+test("the Spool notebook kind writes <projectStateDir>/notebook.md from the Lead seat and refuses every other seat (ticket 06)", async (t) => {
+  const { stateDir, slug, projectRoot, factory } = makeSpooledSurface(t);
+  const content = spoolValidNotebook(2);
+
+  const lead = await handleSpoolRequest(factory, { id: "nb-lead", kind: "notebook", content, projectRoot, seat: "lead", submitter: "lead-1" });
+  assert.equal(lead.ok, true, (lead as { message?: string }).message);
+  assert.equal(readFileSync(join(projectStateDir(stateDir, slug), "notebook.md"), "utf8"), content, "the write happens in-process at <projectStateDir>, never inside <project-root>");
+  assert.equal(existsSync(join(projectRoot, ".scratch", "notebook.md")), false, "the working tree stays clean");
+
+  const agent = await handleSpoolRequest(factory, { id: "nb-agent", kind: "notebook", content, projectRoot, seat: "agent", submitter: "peer-1" });
+  assert.equal(agent.ok, false);
+  assert.equal((agent as { code?: string }).code, "agent-cannot-orchestrate");
+
+  const supervisor = await handleSpoolRequest(factory, { id: "nb-sup", kind: "notebook", content, projectRoot, seat: "supervisor", submitter: "sup-1" });
+  assert.equal(supervisor.ok, false);
+  assert.equal((supervisor as { code?: string }).code, "supervisor-cannot-notebook");
+
+  const unscoped = await handleSpoolRequest(factory, { id: "nb-none", kind: "notebook", content, seat: "lead", submitter: "lead-1" });
+  assert.equal(unscoped.ok, false);
+  assert.equal((unscoped as { code?: string }).code, "notebook-project-required");
+});
+
+test("the Spool notebook kind refuses over-limit and malformed content with the named codes (spec Seam 1)", async (t) => {
+  const { projectRoot, factory } = makeSpooledSurface(t);
+  const rows = Array.from({ length: 13 }, (_, i) => `| V-${String(i + 1).padStart(2, "0")} | cause ${i + 1} → effect ${i + 1} | verified |`);
+  const overRows = ["## 1. Verification & Run Recipe", "npm run check", "", "## 2. Recurrence Guard", "| ID | Cause → Effect | State |", "| --- | --- | --- |", ...rows, ""].join("\n");
+  const overLimit = await handleSpoolRequest(factory, { id: "nb-over", kind: "notebook", content: overRows, projectRoot, seat: "lead", submitter: "lead-1" });
+  assert.equal(overLimit.ok, false);
+  assert.equal((overLimit as { code?: string }).code, "notebook-limit-exceeded");
+  assert.match((overLimit as { message?: string }).message ?? "", /13 Recurrence Guard rows \(max 12\)/);
+
+  const malformed = await handleSpoolRequest(factory, { id: "nb-mal", kind: "notebook", content: "just some prose, no headings", projectRoot, seat: "lead", submitter: "lead-1" });
+  assert.equal(malformed.ok, false);
+  assert.equal((malformed as { code?: string }).code, "notebook-schema-invalid");
+});
+
+test("factory notebook round-trips the CLI → Spool single writer from the Lead seat (spec User Story 21)", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const root = join(dir, "repo");
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, "README.md"), "x\n");
+  gitCommitAll(root);
+  const resolved = resolveProject(root);
+  assert.ok(resolved.ok, "the test project must resolve");
+  const home = join(dir, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const factory = createFactory({ stateDir });
+  const spool = startSpool(stateDir, factory, { pollMs: POLL_MS });
+  t.after(() => spool.stop());
+
+  const notebookFile = join(dir, "notebook-input.md");
+  writeFileSync(notebookFile, spoolValidNotebook(3));
+  const viaFile = await runFactoryCli(["--home", home, "notebook", "--file", notebookFile, "--project", root], { PASEO_FACTORY_SEAT: "lead" });
+  assert.equal(viaFile.status, 0, viaFile.stderr);
+  assert.match(viaFile.stdout, /notebook updated/);
+  assert.equal(readFileSync(join(projectStateDir(stateDir, resolved.slug), "notebook.md"), "utf8"), spoolValidNotebook(3));
+
+  const viaContent = await runFactoryCli(["--home", home, "notebook", "--content", spoolValidNotebook(1), "--project", root], { PASEO_FACTORY_SEAT: "lead" });
+  assert.equal(viaContent.status, 0, viaContent.stderr);
+  assert.equal(readFileSync(join(projectStateDir(stateDir, resolved.slug), "notebook.md"), "utf8"), spoolValidNotebook(1));
+
+  // Over-limit content: exit 2 with the named code — the CLI never truncates either.
+  const rows = Array.from({ length: 13 }, (_, i) => `| V-${String(i + 1).padStart(2, "0")} | cause ${i + 1} → effect ${i + 1} | verified |`);
+  const overRows = ["## 1. Verification & Run Recipe", "npm run check", "", "## 2. Recurrence Guard", "| ID | Cause → Effect | State |", "| --- | --- | --- |", ...rows, ""].join("\n");
+  const refused = await runFactoryCli(["--home", home, "notebook", "--content", overRows, "--project", root], { PASEO_FACTORY_SEAT: "lead" });
+  assert.equal(refused.status, 2);
+  assert.match(refused.stderr, /notebook-limit-exceeded/);
+  assert.equal(readFileSync(join(projectStateDir(stateDir, resolved.slug), "notebook.md"), "utf8"), spoolValidNotebook(1), "the refused write changed nothing");
+});

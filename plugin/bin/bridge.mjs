@@ -1373,6 +1373,21 @@ var sharedTools = {
       required: ["task"]
     }
   },
+  lead_update_notebook: {
+    name: "lead_update_notebook",
+    description: "Replace the Project notebook (`<projectStateDir>/notebook.md`) with `content` through the plugin's single writer \u2014 never write `.scratch/notebook.md` inside <project-root> (ADR 0052 \xA71). Requires both headings (`## 1. Verification & Run Recipe`, `## 2. Recurrence Guard`), `<= 80` lines, `<= 4,096` UTF-8 bytes, and `<= 12` active Recurrence Guard rows; over-limit or malformed content is refused with `notebook-limit-exceeded` / `notebook-schema-invalid` naming the exact counts \u2014 fold/graduate rows, the writer never truncates.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        content: {
+          type: "string",
+          description: "The full notebook text \u2014 both required headings, within the line/byte/row caps."
+        },
+        workspace: { type: "string", description: "Optional Project root path (defaults to current project root)." }
+      },
+      required: ["content"]
+    }
+  },
   lead_needs_human: {
     name: "lead_needs_human",
     description: "Record a terminal `needs_human` escalation for a Task with its corroborating ledger sequence pair.",
@@ -1461,7 +1476,7 @@ var sharedTools = {
 };
 var sharedRoles = {
   supervisor: ["supervisor_accept_task", "supervisor_dispatch_lead", "supervisor_read_ledger", "supervisor_end_cycle"],
-  lead: ["lead_repoke_agent", "lead_needs_human", "lead_create_worktree", "lead_set_contract", "lead_dispatch_agent", "lead_verify", "lead_merge", "lead_remove_worktree", "lead_report_to_supervisor"],
+  lead: ["lead_repoke_agent", "lead_needs_human", "lead_create_worktree", "lead_set_contract", "lead_dispatch_agent", "lead_verify", "lead_merge", "lead_remove_worktree", "lead_report_to_supervisor", "lead_update_notebook"],
   agent: ["agent_claim", "agent_escalate_blocker"],
   unbound: ["factory_dispatch_supervisor", "factory_status"]
 };
@@ -1767,6 +1782,30 @@ async function handleToolCall(name, rawArgs) {
       ...(description ? { description } : {}),
       ...(disposition ? { disposition } : {}),
       ...(args.resetPeer === true ? { resetPeer: true } : {}),
+      seat: "lead",
+    });
+    if (!reply.ok) return toolResult(`${reply.code}: ${reply.message}`, true);
+    return toolResult(reply.summary);
+  }
+
+  if (name === "lead_update_notebook") {
+    // The plugin-owned notebook write (v0.5.0, ADR 0052 §1): the Lead never
+    // shell-writes the notebook — the spool's single writer validates the
+    // content and persists <projectStateDir>/notebook.md in-process, so an
+    // OS-sandboxed (codex Seatbelt) Lead seat never dirties <project-root>.
+    if (typeof args.content !== "string") {
+      return toolResult("lead_update_notebook requires a `content` string (the full notebook text).", true);
+    }
+    const workspace =
+      typeof args.workspace === "string" && args.workspace.trim() !== ""
+        ? resolve(args.workspace.trim())
+        : ctx.projectRoot ?? ctx.workspace;
+    const reply = await roundTripSpool(ctx, {
+      id: randomId(),
+      kind: "notebook",
+      content: args.content,
+      ...(ctx.projectSlug !== undefined ? { projectSlug: ctx.projectSlug } : {}),
+      ...(workspace !== undefined && workspace !== null && workspace !== "" ? { projectRoot: workspace } : {}),
       seat: "lead",
     });
     if (!reply.ok) return toolResult(`${reply.code}: ${reply.message}`, true);

@@ -204,7 +204,7 @@ test("bridge.mjs exposes strictly role-scoped tools in tools/list and enforces r
       ],
     });
     const leadTools = ((leadResponses[1].result as { tools: Array<{ name: string }> }).tools).map((t) => t.name).sort();
-    assert.deepEqual(leadTools, ["lead_create_worktree", "lead_dispatch_agent", "lead_merge", "lead_needs_human", "lead_remove_worktree", "lead_repoke_agent", "lead_report_to_supervisor", "lead_set_contract", "lead_verify"]);
+    assert.deepEqual(leadTools, ["lead_create_worktree", "lead_dispatch_agent", "lead_merge", "lead_needs_human", "lead_remove_worktree", "lead_repoke_agent", "lead_report_to_supervisor", "lead_set_contract", "lead_update_notebook", "lead_verify"]);
 
     // 3. Working Agent session
     const agentResponses = await runMcpSession({
@@ -469,6 +469,59 @@ test("bridge.mjs executes Supervisor, Lead, and Agent tools end-to-end over the 
     const statusRes = statusCall[0].result as { isError?: boolean; content: Array<{ text: string }> };
     assert.notEqual(statusRes.isError, true, statusRes.content[0].text);
     assert.match(statusRes.content[0].text, /feat-x.*accepted=yes/);
+  } finally {
+    spool.stop();
+    rmSync(homeDir, { recursive: true, force: true });
+    rmSync(repoDir, { recursive: true, force: true });
+  }
+});
+
+test("lead_update_notebook writes <projectStateDir>/notebook.md through JSON-RPC and refuses over-limit content with the named code (ticket 06, spec Seam 1)", async () => {
+  const homeDir = mkdtempSync(join(tmpdir(), "factory-bridge-notebook-home-"));
+  const stateDir = join(homeDir, "plugin-state", "paseo-factory");
+  const repoDir = makeGitRepo();
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
+  const reg = ensureProjectRegistered(stateDir, repoDir);
+  assert.equal(reg.ok, true);
+  const registry = createFactoryRegistry({ stateDir, root: factory });
+  const spool = startSpool(stateDir, factory, { registry, pollMs: 25 });
+  const validNotebook = (rows: number) =>
+    [
+      "## 1. Verification & Run Recipe",
+      "npm run check",
+      "",
+      "## 2. Recurrence Guard",
+      "| ID | Cause → Effect | State |",
+      "| --- | --- | --- |",
+      ...Array.from({ length: rows }, (_, i) => `| V-${String(i + 1).padStart(2, "0")} | cause ${i + 1} → effect ${i + 1} | observed (1x) |`),
+      "",
+    ].join("\n");
+  try {
+    const correlations = new CorrelationRegistry(stateDir);
+    const leadCorr = correlations.issue({ role: "lead", projectSlug: reg.slug, projectRoot: repoDir });
+    correlations.associate(leadCorr.correlationId, "lead-1");
+
+    const calls = await runMcpSession({
+      args: ["--correlation", leadCorr.correlationId, "--state-dir", stateDir],
+      cwd: repoDir,
+      requests: [
+        { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+        { jsonrpc: "2.0", method: "notifications/initialized" },
+        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_update_notebook", arguments: { content: validNotebook(2) } } },
+        { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "lead_update_notebook", arguments: { content: validNotebook(13) } } },
+      ],
+    });
+    const good = calls[1].result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.notEqual(good.isError, true, good.content[0].text);
+    assert.match(good.content[0].text, /notebook updated/);
+    const notebookPath = join(stateDir, "projects", reg.slug, "notebook.md");
+    assert.equal(readFileSync(notebookPath, "utf8"), validNotebook(2), "the write happened in-process at <projectStateDir>, never inside <project-root>");
+
+    const overLimit = calls[2].result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.equal(overLimit.isError, true);
+    assert.match(overLimit.content[0].text, /notebook-limit-exceeded/);
+    assert.match(overLimit.content[0].text, /13 Recurrence Guard rows \(max 12\)/);
+    assert.equal(readFileSync(notebookPath, "utf8"), validNotebook(2), "the refused write changed nothing");
   } finally {
     spool.stop();
     rmSync(homeDir, { recursive: true, force: true });
