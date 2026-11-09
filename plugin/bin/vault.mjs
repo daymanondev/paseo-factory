@@ -11,19 +11,19 @@ var FactoryError = class extends Error {
 };
 
 // src/upgrade-state.ts
-import { readFileSync as readFileSync6, readdirSync as readdirSync5 } from "node:fs";
-import { basename as basename4, dirname as dirname7, join as join8 } from "node:path";
+import { readFileSync as readFileSync2, readdirSync as readdirSync2 } from "node:fs";
+import { basename as basename2, dirname as dirname2, join as join2 } from "node:path";
 
 // src/history-stage.ts
-import { closeSync, existsSync as existsSync5, fchmodSync, fsyncSync, mkdirSync as mkdirSync6, openSync, readFileSync as readFileSync5, readdirSync as readdirSync4, realpathSync as realpathSync3, renameSync as renameSync2, rmSync as rmSync4, writeFileSync as writeFileSync5 } from "node:fs";
-import { basename as basename3, dirname as dirname6, join as join7, resolve as resolve4 } from "node:path";
-import { randomUUID as randomUUID2 } from "node:crypto";
+import { closeSync, existsSync, fchmodSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync as realpathSync2, renameSync, rmSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, resolve as resolve2 } from "node:path";
+import { randomUUID } from "node:crypto";
 
 // src/history-import.ts
-import { createHash as createHash4 } from "node:crypto";
+import { createHash as createHash2 } from "node:crypto";
 
 // src/history-identity.ts
-import { createHash as createHash3 } from "node:crypto";
+import { createHash } from "node:crypto";
 
 // src/events.ts
 var MAX_ATTEMPTS = 3;
@@ -91,975 +91,8 @@ function scrumBindingIsValid(value) {
   return !!v && v.mode === "scrum" && (v.contractRequestId === void 0 || typeof v.contractRequestId === "string" && v.contractRequestId.length > 0) && safeId(v.runId) && SPECIALIST_ROLES.includes(v.role) && typeof v.policyRevision === "string" && v.policyRevision.length > 0 && Number.isSafeInteger(v.configRevision) && v.configRevision >= 0 && Array.isArray(v.artifactRefs) && v.artifactRefs.every(artifactRefIsValid);
 }
 
-// src/lanes.ts
-import { dirname as dirname5, join as join6 } from "node:path";
-
-// src/scrum/open-design.ts
-import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
-var OPEN_DESIGN_DIRECTIONS = [
-  { id: "editorial-monocle", colors: ["#f7f8f4", "#214f3d", "#162019", "#e9f0e5"], typography: "Georgia display; system UI sans", craft: "Generous breathing room, warm paper and sage tonal surfaces" },
-  { id: "modern-minimal", colors: ["#fafafa", "#09090b", "#e4e4e7"], typography: "System sans; tabular numerals", craft: "Crisp monochrome, hairline borders and precision grids" },
-  { id: "human-approachable", colors: ["#fbf9f5", "#a34e35", "#214f3d"], typography: "Georgia display; system UI sans", craft: "Warm cream, soft pills and friendly progressive wizards" },
-  { id: "tech-utility", colors: ["#f8fafc", "#0f172a", "#475569"], typography: "System sans; monospace telemetry", craft: "Dense slate utility, keyboard-first controls" },
-  { id: "brutalist-experimental", colors: ["#ffffff", "#000000", "#dedede"], typography: "Bold editorial display; system sans", craft: "High contrast editorial grids and bold structural rules" }
-];
-var OPEN_DESIGN_CONTRACT = `Open Design UX contract:
-Bind one direction or installed Brand Design System in DESIGN.md, styles.css :root tokens and mockups/design-manifest.json. Embedded directions: ${OPEN_DESIGN_DIRECTIONS.map((d) => `${d.id}: ${d.colors.join(", ")}; ${d.typography}; ${d.craft}`).join("\n")}.
-One primary action per screen in thumb zone. Decompose journeys into focused steps with choice chips, radio cards, bottom sheets and SVG charts. Use drenched hero surfaces, borderless soft tonal surfaces, consistent system/editorial font pairings, 44px touch targets, visible focus and reduced motion. Card paragraphs stay within 280 visible characters.
-For mobile, start from the complete staged .od-frames/iphone.html, android.html or neutral.html shell and place product content in .phone-content. Preserve hardware chrome, safe areas and separate --phone-* tokens. Use .od-frames/layout.css (@layer od-layout). Desktop/responsive web pages are their own product surface. Reserve space for fixed navigation and scroll content internally.
-Deliver mockups/index.html (interactive), screens.html (story-grouped Flow Board with .frame-connection arrows and a System & Edge States group), styles.css, app.js, screens.css, screens-data.js and design-manifest.json {directionId or designSystemId, tokens, journeyGroups, screens, componentPatterns}. Expand journeys into as many focused screens as needed. EXPERIENCE.md declares Core Screens with ## Screen: kebab-case-id, Surface: mobile | desktop | responsive, primary journey and state behaviors.
-Prototype routing reads ?screen=<id>&state=<state>, reflects root dataset.screen/state and handles scrum:set-state messages. Preserve app navigation for contextual empty/loading/error/offline/permission-denied states. Keep screen/state controls in the outer Studio. Use product language and SVG icons; keep internal spec identifiers in documentation.
-Record actual offline Chromium evidence in browser.json: network: disabled, consoleErrors: [], pageErrors: [], viewports with screen, width/height, scrollWidth/clientWidth and SHA-256 PNG screenshot path/hash. Capture screens-board (screens-board.png) and every Core Screen at its declared surface (Mobile 390x844, Desktop 1280x800, responsive both). Record passing keyboard populated checks for each Core Screen and all five system states through edge screens/state handlers, or the legacy six-state matrix. Record detector {tool: open-design, passed: true, nonAdvisoryCount: 0, viewportsChecked, findings}. Derive it from factory open-design lint --dir <mockupsDir> and actual viewport checks; never invent results. Run lint-scrum-doc --kind ux before Claim. Dev consumes the approved manifest, DESIGN.md, styles.css and screens.html; UI Dev and QA supply the same offline evidence before sign-off.`;
-function inspectOpenDesignHost(environment = process.env) {
-  const resourceRoot = environment.OPEN_DESIGN_RESOURCE_ROOT ?? (process.platform === "win32" ? join(environment.LOCALAPPDATA ?? "", "Programs/Open Design/resources/open-design") : "/Applications/Open Design.app/Contents/Resources/open-design");
-  const available = existsSync(resourceRoot);
-  const cli = join(dirname(resourceRoot), "app/prebundled/daemon/daemon-cli.mjs");
-  const catalog = join(resourceRoot, "design-systems");
-  const designSystems = existsSync(catalog) ? readdirSync(catalog).filter((id) => existsSync(join(catalog, id, "tokens.css")) && existsSync(join(catalog, id, "DESIGN.md"))).sort().map((id) => ({ id, directory: join(catalog, id), tokens: join(catalog, id, "tokens.css"), design: join(catalog, id, "DESIGN.md"), usage: join(catalog, id, "USAGE.md"), components: join(catalog, id, "components.manifest.json") })) : [];
-  const binary = process.platform === "darwin" ? resolve(resourceRoot, "../../MacOS/Open Design") : process.platform === "win32" ? resolve(resourceRoot, "../../Open Design.exe") : process.execPath;
-  return { binary: existsSync(binary) ? binary : process.execPath, available: available || !!environment.OPEN_DESIGN_DAEMON_URL, resourceRoot: available ? resourceRoot : null, daemonUrl: environment.OPEN_DESIGN_DAEMON_URL ?? null, cli: existsSync(cli) ? cli : null, designSystems };
-}
-
-// src/helper-mcp-sync.ts
-import { createHash } from "node:crypto";
-import { existsSync as existsSync2, accessSync, constants, readdirSync as readdirSync2, lstatSync, mkdirSync as mkdirSync3, rmSync as rmSync2, symlinkSync } from "node:fs";
-import { homedir } from "node:os";
-import { basename, delimiter, dirname as dirname3, isAbsolute, join as join2 } from "node:path";
-
-// src/helper-mcp-store.ts
-import { randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync as mkdirSync2, readFileSync, renameSync, rmSync, writeFileSync as writeFileSync2 } from "node:fs";
-import { dirname as dirname2 } from "node:path";
-function readHelperJson(path, strict = false) {
-  try {
-    const value = JSON.parse(readFileSync(path, "utf8"));
-    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Expected a JSON object");
-    return value;
-  } catch (error) {
-    if (strict && error.code !== "ENOENT") throw new Error("Cannot safely read existing Helper MCP state; repair the JSON or its file permissions before syncing");
-    return {};
-  }
-}
-function writeHelperJson(path, value) {
-  mkdirSync2(dirname2(path), { recursive: true, mode: 448 });
-  const temporary = `${path}.${randomUUID()}.tmp`;
-  try {
-    writeFileSync2(temporary, JSON.stringify(value, null, 2) + "\n", { mode: 384 });
-    renameSync(temporary, path);
-    chmodSync(path, 384);
-  } finally {
-    rmSync(temporary, { force: true });
-  }
-}
-
-// src/helper-mcp-sync.ts
-var ALL_HELPER_TARGET_PROVIDERS = ["pi", "claude", "codex", "opencode"];
-function paths(options) {
-  const userHome = options.userHome ?? homedir();
-  return { userHome, peerHome: options.roleHome ?? join2(options.stateDir, "pi-agent/agent"), pi: options.piAgentDir ?? join2(userHome, ".pi/agent"), ag: join2(userHome, ".gemini/antigravity/mcp_oauth_tokens.json") };
-}
-function helperOAuthPath(agentDir, name) {
-  return join2(agentDir, "mcp-oauth", `sha256-${createHash("sha256").update(name).digest("hex")}`, "tokens.json");
-}
-function endpoint(url) {
-  try {
-    const u = new URL(url);
-    return u.origin + u.pathname.replace(/\/$/, "");
-  } catch {
-    return url;
-  }
-}
-function canonical(name, entry) {
-  if (/^expo[-_]mcp$/i.test(name) || typeof entry.url === "string" && endpoint(entry.url) === "https://mcp.expo.dev/mcp") return "expo-mcp";
-  if (/^open[-_]design$/i.test(name)) return "open-design";
-  const invocation = [entry.command, ...Array.isArray(entry.args) ? entry.args : []].join(" ");
-  if (/\bchrome-devtools-mcp(?:@|\b)/.test(invocation)) return "chrome-devtools-mcp";
-  if (invocation.includes("@z_ai/mcp-server")) return "zai-vision";
-  return name;
-}
-function strings(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return void 0;
-  return Object.fromEntries(Object.entries(value).filter((e) => typeof e[1] === "string"));
-}
-function expand(value) {
-  return value.replace(/\$\{(?:env:)?([A-Za-z_][A-Za-z_0-9]*)\}/g, (_, key) => process.env[key] ?? "");
-}
-function credentialScore(entry, options) {
-  return Object.entries(entry.env ?? {}).filter(([k, v]) => /KEY|TOKEN|SECRET|PASSWORD|OPENAPI_MCP_HEADERS/.test(k) && expand(v).trim()).length + Object.values(entry.headers ?? {}).filter((v) => expand(v).trim()).length + (entry.url?.includes("ApiKey=") ? 1 : 0) + (valid(readHelperOAuth(options, [entry])[entry.name]) ? 10 : 0);
-}
-function discoverHelperMcps(options) {
-  const p = paths(options), persisted = readHelperJson(join2(options.stateDir, "helper-mcps.json"));
-  const sources = [];
-  if (!options.piOnly) {
-    const primary = join2(p.userHome, ".gemini/config/mcp_config.json");
-    sources.push(["antigravity", readHelperJson(existsSync2(primary) ? primary : join2(p.userHome, ".gemini/antigravity/mcp_config.json")).mcpServers ?? {}]);
-  }
-  sources.push(["pi", readHelperJson(join2(p.pi, "mcp.json")).mcpServers ?? {}]);
-  if (!options.piOnly) sources.push(["claude", readHelperJson(join2(p.userHome, ".claude.json")).mcpServers ?? {}]);
-  const stored = Array.isArray(persisted.servers) ? Object.fromEntries(persisted.servers.map((s) => [s.name, s])) : persisted.mcpServers ?? {};
-  const host = inspectOpenDesignHost();
-  if (host.cli) sources.push(["factory", { "open-design": { command: host.binary, args: [host.cli, "mcp"], env: { ELECTRON_RUN_AS_NODE: "1" }, enabled: false } }]);
-  if (existsSync2(join2(p.userHome, ".agents/skills/expo-overview/SKILL.md"))) sources.push(["factory", { "expo-mcp": { url: "https://mcp.expo.dev/mcp", oauthRequired: true, enabled: false } }]);
-  sources.push(["factory", stored]);
-  const merged = /* @__PURE__ */ new Map(), disabled = /* @__PURE__ */ new Set(), currentPiNames = /* @__PURE__ */ new Set();
-  for (const [source, servers2] of sources) for (const [alias, raw] of Object.entries(servers2)) {
-    if (!raw || typeof raw !== "object" || Array.isArray(raw) || alias === "paseo_factory" || alias === "paseo-factory") continue;
-    const value = raw;
-    let name = canonical(alias, value);
-    const url = typeof (value.url ?? value.serverUrl) === "string" ? value.url ?? value.serverUrl : void 0;
-    if (!url && typeof value.command !== "string") continue;
-    if (url) name = [...merged.values()].find((s) => s.url && endpoint(s.url) === endpoint(url))?.name ?? name;
-    const entry = {
-      targetProviders: [...ALL_HELPER_TARGET_PROVIDERS],
-      vaultSync: false,
-      name,
-      transport: url ? "http" : "stdio",
-      enabled: value.enabled !== false && value.disabled !== true,
-      sources: source === "factory" && Array.isArray(value.sources) ? value.sources.filter((s) => ["antigravity", "pi", "claude", "vault", "factory"].includes(s)) : [source],
-      status: "unreachable",
-      ...url ? { url } : { command: normalizeCommand(value.command, p.userHome), args: Array.isArray(value.args) ? value.args.filter((s) => typeof s === "string") : [] },
-      ...strings(value.env) ? { env: strings(value.env) } : {},
-      ...strings(value.headers) ? { headers: strings(value.headers) } : {},
-      ...name === "expo-mcp" || value.auth === "oauth" || value.oauthRequired === true ? { oauthRequired: true } : {},
-      ...typeof value.auth === "object" && value.auth !== null ? { auth: value.auth } : {},
-      ...typeof value.timeout === "number" ? { timeout: value.timeout } : {},
-      ...name === "zai-vision" ? { timeout: 300 } : {}
-    };
-    if (source === "pi") currentPiNames.add(name);
-    const previous = merged.get(name);
-    const cachedDiscovery = source === "factory" && Array.isArray(value.sources) && !value.sources.some((s) => s === "factory" || s === "vault");
-    if (previous && cachedDiscovery) continue;
-    if (!entry.enabled && source !== "factory") disabled.add(name);
-    merged.set(name, previous ? { ...credentialScore(entry, options) > credentialScore(previous, options) ? entry : previous, sources: [.../* @__PURE__ */ new Set([...previous.sources, ...entry.sources])] } : entry);
-  }
-  const zaiKey = readHelperJson(join2(p.pi, "auth.json")).zai?.key;
-  if (typeof zaiKey === "string" && zaiKey.trim()) {
-    currentPiNames.add("zai-vision");
-    const prev = merged.get("zai-vision");
-    merged.set("zai-vision", { targetProviders: [...ALL_HELPER_TARGET_PROVIDERS], vaultSync: false, name: "zai-vision", transport: "stdio", command: "npx", args: ["-y", "@z_ai/mcp-server"], enabled: true, status: "unreachable", ...prev, env: { ...prev?.env, Z_AI_API_KEY: zaiKey.trim(), Z_AI_MODE: prev?.env?.Z_AI_MODE ?? "ZAI" }, sources: [.../* @__PURE__ */ new Set([...prev?.sources ?? [], "pi"])], timeout: 300 });
-  }
-  if (!currentPiNames.has("exa")) {
-    const key = readHelperJson(join2(p.pi, "web-search.json")).exaApiKey ?? readHelperJson(join2(dirname3(p.pi), "web-search.json")).exaApiKey;
-    if (typeof key === "string" && key.trim()) {
-      currentPiNames.add("exa");
-      merged.set("exa", {
-        targetProviders: [...ALL_HELPER_TARGET_PROVIDERS],
-        vaultSync: false,
-        name: "exa",
-        transport: "http",
-        url: `https://mcp.exa.ai/mcp?exaApiKey=${encodeURIComponent(key.trim())}`,
-        enabled: true,
-        sources: [.../* @__PURE__ */ new Set([...merged.get("exa")?.sources ?? [], "pi"])],
-        status: "unreachable"
-      });
-    }
-  }
-  const servers = [...merged.values()].sort((a, b) => a.name.localeCompare(b.name));
-  for (const entry of servers) {
-    entry.enabled = typeof persisted.overrides?.[entry.name] === "boolean" ? persisted.overrides[entry.name] : !disabled.has(entry.name) && (currentPiNames.has(entry.name) || entry.sources.includes("vault"));
-    const targets = persisted.targets?.[entry.name];
-    entry.targetProviders = Array.isArray(targets) && targets.every((p2) => ALL_HELPER_TARGET_PROVIDERS.includes(p2)) ? [...new Set(targets)] : [...ALL_HELPER_TARGET_PROVIDERS];
-    entry.vaultSync = typeof persisted.vaultSync?.[entry.name] === "boolean" ? persisted.vaultSync[entry.name] : entry.sources.includes("vault");
-  }
-  const bundles = readHelperOAuth(options, servers);
-  return { servers: servers.map((entry) => {
-    const checked = classify(entry, bundles[entry.name], p.userHome), cached = persisted.health?.[entry.name];
-    return checked.status === "connected" && cached && cached.fingerprint === fingerprint(entry, bundles[entry.name]) && Date.now() - cached.at < 3e5 ? { ...checked, status: cached.status, statusDetail: cached.statusDetail } : checked;
-  }) };
-}
-function readHelperOAuth(options, servers) {
-  const p = paths(options), ag = options.piOnly ? {} : readHelperJson(p.ag), saved = readHelperJson(join2(options.stateDir, "helper-mcp-oauth.json"));
-  const otherPiTokens = [p.pi, p.peerHome].flatMap((agentDir) => {
-    try {
-      return readdirSync2(join2(agentDir, "mcp-oauth")).filter((n) => /^sha256-[a-f0-9]+$/.test(n)).map((n) => readHelperJson(join2(agentDir, "mcp-oauth", n, "tokens.json")));
-    } catch {
-      return [];
-    }
-  });
-  const result = {};
-  for (const server of servers.filter((s) => s.transport === "http")) {
-    const candidates = [];
-    for (const [url, raw] of Object.entries(ag)) if (endpoint(url) === endpoint(server.url)) {
-      if (!raw || typeof raw !== "object") continue;
-      const token = raw.token ?? {};
-      candidates.push({
-        serverUrl: server.url,
-        clientInfo: { ...typeof raw.client_id === "string" ? { clientId: raw.client_id } : {}, ...typeof raw.client_secret === "string" ? { clientSecret: raw.client_secret } : {} },
-        tokenUrl: raw.token_url,
-        tokens: { accessToken: typeof token.access_token === "string" ? token.access_token : "", refreshToken: token.refresh_token, ...token.expiry ? { expiresAt: Date.parse(token.expiry) / 1e3 } : {} }
-      });
-    }
-    for (const raw of [...otherPiTokens, saved[server.name], ...Object.values(saved).filter((v) => v?.serverUrl && endpoint(v.serverUrl) === endpoint(server.url)), readHelperJson(helperOAuthPath(p.pi, server.name)), readHelperJson(helperOAuthPath(p.peerHome, server.name))]) {
-      if (raw?.tokens && raw.serverUrl && endpoint(raw.serverUrl) === endpoint(server.url)) candidates.push({ ...raw, tokens: { ...raw.tokens, accessToken: typeof raw.tokens.accessToken === "string" ? raw.tokens.accessToken : "" } });
-    }
-    candidates.sort((a, b) => {
-      const access = Number(!!b.tokens.accessToken) - Number(!!a.tokens.accessToken);
-      if (access) return access;
-      const expiry = (bundle) => bundle.tokens.expiresAt === void 0 && bundle.tokens.accessToken ? Infinity : Number.isFinite(bundle.tokens.expiresAt) ? bundle.tokens.expiresAt : 0;
-      return expiry(b) - expiry(a);
-    });
-    if (candidates.length) {
-      const winner = candidates[0];
-      const client = candidates.find((c) => c.clientInfo?.clientId && (!winner.clientInfo?.clientId || c.clientInfo.clientId === winner.clientInfo.clientId));
-      const clientInfo = { ...client?.clientInfo, ...winner.clientInfo };
-      const compatible = candidates.filter((c) => !clientInfo.clientId || c.clientInfo?.clientId === clientInfo.clientId);
-      result[server.name] = {
-        ...winner,
-        serverUrl: server.url,
-        tokenUrl: winner.tokenUrl ?? compatible.find((c) => c.tokenUrl)?.tokenUrl,
-        clientInfo,
-        tokens: { ...winner.tokens, refreshToken: winner.tokens.refreshToken ?? compatible.find((c) => c.tokens.refreshToken)?.tokens.refreshToken }
-      };
-    }
-  }
-  return result;
-}
-function valid(bundle) {
-  return !!bundle?.tokens.accessToken && (bundle.tokens.expiresAt === void 0 || Number.isFinite(bundle.tokens.expiresAt) && bundle.tokens.expiresAt > Date.now() / 1e3);
-}
-function candidateBinDirs(userHome = homedir()) {
-  const nvmRoot = join2(userHome, ".nvm/versions/node");
-  let nvmDirs = [];
-  try {
-    nvmDirs = readdirSync2(nvmRoot).sort().reverse().map((v) => join2(nvmRoot, v, "bin"));
-  } catch {
-    nvmDirs = [];
-  }
-  return [.../* @__PURE__ */ new Set([...(process.env.PATH ?? "").split(delimiter).filter(Boolean), dirname3(process.execPath), ...nvmDirs, "/opt/homebrew/bin", "/usr/local/bin", join2(userHome, ".local/bin")])];
-}
-function normalizeCommand(command, userHome = homedir()) {
-  if (!command || !isAbsolute(command) && !command.includes("/")) return command;
-  try {
-    accessSync(command, constants.X_OK);
-    return command;
-  } catch {
-    const base = basename(command);
-    if (["npx", "node", "npm", "uvx", "uv", "bunx", "bun"].includes(base) && commandExists(base, userHome)) return base;
-    return command;
-  }
-}
-function commandExists(command, userHome = homedir()) {
-  if (!command) return false;
-  return (isAbsolute(command) || command.includes("/") ? [command] : candidateBinDirs(userHome).map((p) => join2(p, command))).some((p) => {
-    try {
-      accessSync(p, constants.X_OK);
-      return true;
-    } catch {
-      return false;
-    }
-  });
-}
-function classify(entry, bundle, userHome = homedir()) {
-  let status = "connected", statusDetail;
-  if (!entry.enabled) status = "disabled";
-  else if (entry.transport === "stdio") {
-    const required = new Set(Object.keys(entry.env ?? {}).filter((k) => /KEY|TOKEN|SECRET|PASSWORD|OPENAPI_MCP_HEADERS/.test(k)));
-    if (entry.name === "exa") required.add("EXA_API_KEY");
-    if (entry.name === "zai-vision") required.add("Z_AI_API_KEY");
-    const missing = [...required].filter((k) => !expand(entry.env?.[k] ?? "").trim());
-    const figma = entry.args?.findIndex((a) => a === "--figma-api-key" || a.startsWith("--figma-api-key="));
-    if (figma !== void 0 && figma >= 0) {
-      const key = expand(entry.args?.[figma].split("=").slice(1).join("=") || entry.args?.[figma + 1] || "").trim();
-      if (!key || key.startsWith("--")) missing.push("--figma-api-key");
-    }
-    if (missing.length) {
-      status = "missing_env";
-      statusDetail = `Missing credentials: ${missing.join(", ")}`;
-    } else if (!commandExists(entry.command, userHome)) {
-      status = "unreachable";
-      statusDetail = "Command unavailable on this host";
-    } else statusDetail = "Command and credentials present; server starts on first use";
-  } else if (bundle && !valid(bundle) || (entry.oauthRequired || /mcp\.supabase\.com/.test(entry.url ?? "") || entry.auth) && !valid(bundle) && !Object.entries(entry.headers ?? {}).some(([key, value]) => key.toLowerCase() === "authorization" && expand(value).trim())) status = "auth_expired";
-  else statusDetail = "Credentials checked; use Check Connectivity to verify connectivity";
-  return { ...entry, status, statusDetail, ...bundle?.tokens.expiresAt ? { oauthExpiresAt: bundle.tokens.expiresAt } : {} };
-}
-function isolateHelperOAuthDirectory(options, managedNames = []) {
-  const target = join2(paths(options).peerHome, "mcp-oauth");
-  const unlink = (path) => {
-    try {
-      if (lstatSync(path).isSymbolicLink()) rmSync2(path);
-    } catch (error) {
-      if (error.code !== "ENOENT") throw error;
-    }
-  };
-  unlink(target);
-  mkdirSync3(target, { recursive: true, mode: 448 });
-  const managed = new Set([...Object.keys(readHelperJson(join2(options.stateDir, "helper-mcp-oauth.json"), true)), ...managedNames].map((name) => basename(dirname3(helperOAuthPath("", name)))));
-  for (const name of managed) unlink(join2(target, name));
-  const source = join2(paths(options).pi, "mcp-oauth");
-  let entries = [];
-  try {
-    entries = readdirSync2(source);
-  } catch {
-  }
-  for (const name of entries.filter((name2) => /^sha256-[a-f0-9]+$/.test(name2) && !managed.has(name2))) {
-    const destination = join2(target, name);
-    try {
-      lstatSync(destination);
-    } catch (error) {
-      if (error.code !== "ENOENT") throw error;
-      symlinkSync(join2(source, name), destination);
-    }
-  }
-}
-function materializeHelperOAuth(options, bundles) {
-  const stored = readHelperJson(join2(options.stateDir, "helper-mcp-oauth.json"), true);
-  isolateHelperOAuthDirectory(options, Object.keys(bundles));
-  writeHelperJson(join2(options.stateDir, "helper-mcp-oauth.json"), { ...stored, ...bundles });
-  for (const [name, bundle] of Object.entries(bundles)) {
-    writeHelperJson(helperOAuthPath(paths(options).peerHome, name), bundle);
-  }
-}
-function fingerprint(server, bundle) {
-  return createHash("sha256").update(JSON.stringify([server.command, server.args, server.env, server.url, server.headers, bundle?.tokens])).digest("hex");
-}
-
-// src/scrum/open-design-link-state.ts
-import { readFileSync as readFileSync2 } from "node:fs";
-import { join as join3 } from "node:path";
-function readOpenDesignLink(root) {
-  let value;
-  try {
-    value = JSON.parse(readFileSync2(join3(root, "design/open-design-link.json"), "utf8"));
-  } catch (e) {
-    if (e instanceof SyntaxError || e.code === "ENOENT") return void 0;
-    throw e;
-  }
-  if (!value || typeof value !== "object" || Array.isArray(value)) return void 0;
-  const link = value;
-  if (typeof link.projectId !== "string" || !safeId(link.projectId) || typeof link.projectName !== "string" || !["designSystemId", "directionId"].every((key) => link[key] == null || typeof link[key] === "string") || typeof link.sourceUpdatedAt !== "number" || !Number.isFinite(link.sourceUpdatedAt) || typeof link.syncedAt !== "string" || !link.syncedAt.trim() || typeof link.digest !== "string" || !link.digest.trim() || typeof link.screenCount !== "number" || !Number.isFinite(link.screenCount) || !Array.isArray(link.files) || !link.files.every((file) => typeof file === "string")) return void 0;
-  return value;
-}
-
-// src/linked-design.ts
-function linkedDesignSpecification(root, recorded) {
-  const link = (root ? readOpenDesignLink(root) : void 0) ?? recorded;
-  if (!link) return "";
-  return `Open Design Linked Specification (design/)
-${link.projectName} \xB7 ${link.screenCount} screens. The Owner's linked design is the authoritative UI/UX specification, read in two halves.
-Design catalog (the ONLY design/ files a Lead reads): design/design-manifest.json (tokens), design/screens-data.js (the full screen inventory \u2014 ids, titles, descriptions, per-group flows), design/app-data.js (seed/configuration data), design/screens.html (Flow Board). The catalog is a decomposition input, not a build spec: contracts name screens by id and flow from design/screens-data.js.
-Design source (a Lead NEVER reads; bind it by reference in Peer contracts): design/index.html (interactive prototype), design/app.js (interaction logic), design/styles.css, design/screens.css. Peers read the full design/ bundle inside their Task worktree, so implementation fidelity is unchanged.
-In Scrum, preserve and refine the Owner's linked Open Design screens seeded in .scratch/<initiativeId>/mockups/; generate EXPERIENCE.md, DESIGN.md and browser.json around them. Do not overwrite them with a generic layout.
-`;
-}
-
-// src/scrum/selection.ts
-function executionIsValid(value) {
-  const v = value;
-  return v !== null && typeof v === "object" && v.schemaVersion === 1 && ["slp", "scrum"].includes(v.mode) && Number.isSafeInteger(v.revision) && v.revision >= 0 && (v.skillPacks === void 0 || Array.isArray(v.skillPacks) && v.skillPacks.every((p) => typeof p === "string"));
-}
-
-// src/project.ts
-import { execFileSync } from "node:child_process";
-import { createHash as createHash2 } from "node:crypto";
-import { existsSync as existsSync3, mkdirSync as mkdirSync4, readFileSync as readFileSync3, readdirSync as readdirSync3, realpathSync, statSync, writeFileSync as writeFileSync3 } from "node:fs";
-import { homedir as homedir2 } from "node:os";
-import { isAbsolute as isAbsolute2, basename as basename2, join as join4, parse, resolve as resolve2 } from "node:path";
-var GIT_TIMEOUT_MS = 1e4;
-function realpathSafe(path) {
-  try {
-    return realpathSync(path);
-  } catch {
-    return resolve2(path);
-  }
-}
-function isUnsafeBootstrapDirectory(target, options) {
-  const parsed = parse(target);
-  if (target === parsed.root) {
-    return `refusing to initialize Git at filesystem root (${target})`;
-  }
-  const sysHome = homedir2();
-  if (sysHome !== "" && (target === resolve2(sysHome) || target === realpathSafe(sysHome))) {
-    return `refusing to initialize Git directly in home directory (${target})`;
-  }
-  if (typeof options?.userHome === "string" && options.userHome.trim() !== "") {
-    const uh = options.userHome.trim();
-    if (target === resolve2(uh) || target === realpathSafe(uh)) {
-      return `refusing to initialize Git directly in user home directory (${target})`;
-    }
-  }
-  const paseoHome = options?.paseoHome ?? options?.home;
-  if (typeof paseoHome === "string" && paseoHome.trim() !== "") {
-    const ph = paseoHome.trim();
-    const resPh = resolve2(ph);
-    const normPh = realpathSafe(ph);
-    if (target === resPh || target === normPh || target.startsWith(`${resPh}/`) || target.startsWith(`${normPh}/`)) {
-      return `refusing to initialize Git inside Paseo home directory (${target})`;
-    }
-  }
-  if (typeof options?.stateDir === "string" && options.stateDir.trim() !== "") {
-    const sd = options.stateDir.trim();
-    const resSd = resolve2(sd);
-    const normSd = realpathSafe(sd);
-    if (target === resSd || target === normSd || target.startsWith(`${resSd}/`) || target.startsWith(`${normSd}/`)) {
-      return `refusing to initialize Git inside Factory state directory (${target})`;
-    }
-  }
-  if (target.includes("/plugin-state/paseo-factory")) {
-    return `refusing to initialize Git inside Factory state directory (${target})`;
-  }
-  return null;
-}
-function resolveProject(cwd) {
-  let stdout;
-  try {
-    stdout = execFileSync("git", ["rev-parse", "--show-toplevel", "--git-common-dir"], {
-      cwd,
-      encoding: "utf8",
-      timeout: GIT_TIMEOUT_MS,
-      stdio: ["ignore", "pipe", "pipe"]
-    });
-  } catch (err) {
-    const stderr = err.stderr;
-    const first = typeof stderr === "string" && stderr.trim() !== "" ? stderr.trim().split("\n")[0] : "";
-    return { ok: false, reason: first !== "" ? first : err instanceof Error ? err.message : String(err) };
-  }
-  const lines = stdout.trim().split("\n");
-  const root = lines[0]?.trim() ?? "";
-  const commonDirRaw = lines[1]?.trim() ?? "";
-  if (root === "" || commonDirRaw === "") {
-    return { ok: false, reason: `git did not answer --show-toplevel --git-common-dir for ${cwd}` };
-  }
-  const commonDirAbs = isAbsolute2(commonDirRaw) ? commonDirRaw : resolve2(cwd, commonDirRaw);
-  let gitCommonDir;
-  try {
-    gitCommonDir = realpathSync(commonDirAbs);
-  } catch {
-    return { ok: false, reason: `the git common dir ${commonDirAbs} of ${root} does not exist on disk` };
-  }
-  const hash = createHash2("sha1").update(gitCommonDir).digest("hex").slice(0, 6);
-  return { ok: true, root, gitCommonDir, slug: `${basename2(root)}-${hash}` };
-}
-function projectStateDir(stateDir, projectSlug) {
-  return join4(stateDir, "projects", projectSlug);
-}
-var LEAD_ROTATION_STATES = ["normal", "rotation_pending", "handing_over"];
-function readProjectRegistration(stateDir, slug) {
-  const path = join4(projectStateDir(stateDir, slug), "project.json");
-  if (!existsSync3(path)) return void 0;
-  try {
-    const parsed = JSON.parse(readFileSync3(path, "utf8"));
-    if (typeof parsed.root !== "string" || parsed.root === "") return void 0;
-    const taskWorkspaces = {};
-    if (parsed.taskWorkspaces !== void 0 && parsed.taskWorkspaces !== null && typeof parsed.taskWorkspaces === "object" && !Array.isArray(parsed.taskWorkspaces)) {
-      for (const [task, wsId] of Object.entries(parsed.taskWorkspaces)) {
-        if (typeof wsId === "string" && wsId !== "") taskWorkspaces[task] = wsId;
-      }
-    }
-    const dispatchers = [];
-    if (Array.isArray(parsed.dispatchers)) {
-      for (const id of parsed.dispatchers) {
-        if (typeof id === "string" && id.trim() !== "" && !dispatchers.includes(id.trim())) {
-          dispatchers.push(id.trim());
-        }
-      }
-    }
-    return {
-      slug,
-      root: parsed.root,
-      ...typeof parsed.name === "string" && parsed.name !== "" ? { name: parsed.name } : {},
-      ...typeof parsed.commonDir === "string" && parsed.commonDir !== "" ? { commonDir: parsed.commonDir } : {},
-      ...typeof parsed.supervisor === "string" && parsed.supervisor !== "" ? { supervisor: parsed.supervisor } : {},
-      ...typeof parsed.lead === "string" && parsed.lead !== "" ? { lead: parsed.lead } : {},
-      ...typeof parsed.rotationState === "string" && LEAD_ROTATION_STATES.includes(parsed.rotationState) ? { rotationState: parsed.rotationState } : {},
-      ...typeof parsed.handoffRequestedAt === "string" && parsed.handoffRequestedAt !== "" ? { handoffRequestedAt: parsed.handoffRequestedAt } : {},
-      ...typeof parsed.workspaceId === "string" && parsed.workspaceId !== "" ? { workspaceId: parsed.workspaceId } : {},
-      ...typeof parsed.paseoProjectId === "string" && parsed.paseoProjectId !== "" ? { paseoProjectId: parsed.paseoProjectId } : {},
-      ...Object.keys(taskWorkspaces).length > 0 ? { taskWorkspaces } : {},
-      ...dispatchers.length > 0 ? { dispatchers } : {}
-    };
-  } catch {
-    return void 0;
-  }
-}
-function listProjectRegistrations(stateDir) {
-  const projectsDir = join4(stateDir, "projects");
-  let slugs;
-  try {
-    slugs = readdirSync3(projectsDir);
-  } catch {
-    return [];
-  }
-  const out = [];
-  for (const slug of slugs) {
-    const registration = readProjectRegistration(stateDir, slug);
-    if (registration !== void 0) out.push(registration);
-  }
-  return out.sort((a, b) => a.slug.localeCompare(b.slug));
-}
-function isSeatAgentForDiscovery(agent) {
-  const seat = agent.labels?.seat;
-  if (seat !== void 0 && seat !== "") return true;
-  const project = agent.labels?.project;
-  if (project !== void 0 && project !== "") return true;
-  const provider = agent.provider;
-  if (typeof provider === "string" && provider !== "") {
-    const head = provider.split("/")[0];
-    if (head === "factory-supervisor" || head === "factory-lead" || head === "factory-peer") return true;
-  }
-  return false;
-}
-function inferAgentSeatRole(agent) {
-  if (agent.labels?.seat === "supervisor" || agent.labels?.seat === "lead") {
-    return agent.labels.seat;
-  }
-  if (typeof agent.provider === "string" && agent.provider !== "") {
-    const head = agent.provider.split("/")[0];
-    if (head === "factory-supervisor") return "supervisor";
-    if (head === "factory-lead") return "lead";
-  }
-  return null;
-}
-function discoverProjects(stateDir, liveSeatAgents, home) {
-  const entries = /* @__PURE__ */ new Map();
-  const projectsPrefix = `${resolve2(stateDir, "projects")}/`;
-  for (const registration of listProjectRegistrations(stateDir)) {
-    const missing = !existsSync3(registration.root);
-    entries.set(registration.slug, {
-      slug: registration.slug,
-      name: registration.name ?? (basename2(registration.root) || registration.slug),
-      root: registration.root,
-      commonDir: registration.commonDir ?? join4(registration.root, ".git"),
-      ...missing ? { missingRoot: true } : {},
-      supervisorId: registration.supervisor ?? null,
-      leadId: registration.lead ?? null,
-      activeTaskCount: 0
-    });
-  }
-  for (const agent of liveSeatAgents) {
-    if (!isSeatAgentForDiscovery(agent)) continue;
-    const seatRole = inferAgentSeatRole(agent);
-    const agentId = typeof agent.id === "string" && agent.id !== "" ? agent.id : null;
-    const slug = agent.labels?.project;
-    if (typeof slug === "string" && slug !== "") {
-      const existing = entries.get(slug);
-      if (existing === void 0) {
-        const root = agent.cwd ?? null;
-        entries.set(slug, {
-          slug,
-          name: (root !== null ? basename2(root) : "") || slug,
-          root,
-          commonDir: root !== null ? join4(root, ".git") : ".git",
-          supervisorId: seatRole === "supervisor" ? agentId : null,
-          leadId: seatRole === "lead" ? agentId : null,
-          activeTaskCount: 0
-        });
-      } else if (agentId !== null) {
-        if (seatRole === "supervisor" && existing.supervisorId === null) existing.supervisorId = agentId;
-        if (seatRole === "lead" && existing.leadId === null) existing.leadId = agentId;
-      }
-      continue;
-    }
-    if (typeof agent.cwd === "string" && agent.cwd !== "") {
-      const resolved = resolveProject(agent.cwd);
-      if (resolved.ok && !resolve2(resolved.root).startsWith(projectsPrefix)) {
-        const existing = entries.get(resolved.slug);
-        if (existing === void 0) {
-          entries.set(resolved.slug, {
-            slug: resolved.slug,
-            name: basename2(resolved.root) || resolved.slug,
-            root: resolved.root,
-            commonDir: resolved.gitCommonDir,
-            supervisorId: seatRole === "supervisor" ? agentId : null,
-            leadId: seatRole === "lead" ? agentId : null,
-            activeTaskCount: 0
-          });
-        } else if (agentId !== null) {
-          if (seatRole === "supervisor" && existing.supervisorId === null) existing.supervisorId = agentId;
-          if (seatRole === "lead" && existing.leadId === null) existing.leadId = agentId;
-        }
-      }
-    }
-  }
-  if (home !== void 0) {
-    try {
-      const parsed = JSON.parse(readFileSync3(join4(home, "projects", "projects.json"), "utf8"));
-      const list = Array.isArray(parsed) ? parsed : parsed !== null && typeof parsed === "object" && Array.isArray(parsed.projects) ? parsed.projects : [];
-      for (const entry of list) {
-        if (entry === null || typeof entry !== "object") continue;
-        const record2 = entry;
-        if (record2.archivedAt !== null && record2.archivedAt !== void 0 || typeof record2.rootPath !== "string" || record2.rootPath === "") {
-          continue;
-        }
-        const resolved = resolveProject(record2.rootPath);
-        if (resolved.ok) {
-          if (!resolve2(resolved.root).startsWith(projectsPrefix) && !entries.has(resolved.slug)) {
-            entries.set(resolved.slug, {
-              slug: resolved.slug,
-              name: basename2(resolved.root) || resolved.slug,
-              root: resolved.root,
-              commonDir: resolved.gitCommonDir,
-              supervisorId: null,
-              leadId: null,
-              activeTaskCount: 0
-            });
-          }
-        } else if (existsSync3(record2.rootPath)) {
-          const abs = resolve2(record2.rootPath);
-          const normRoot = realpathSafe(abs);
-          if (!normRoot.startsWith(projectsPrefix) && isUnsafeBootstrapDirectory(normRoot, { stateDir, paseoHome: home }) === null) {
-            const commonDir = join4(normRoot, ".git");
-            const hash = createHash2("sha1").update(commonDir).digest("hex").slice(0, 6);
-            const slug = `${basename2(normRoot)}-${hash}`;
-            if (!entries.has(slug)) {
-              entries.set(slug, {
-                slug,
-                name: basename2(normRoot) || slug,
-                root: normRoot,
-                commonDir,
-                supervisorId: null,
-                leadId: null,
-                activeTaskCount: 0
-              });
-            }
-          }
-        }
-      }
-    } catch {
-    }
-  }
-  return [...entries.values()].sort((a, b) => a.slug.localeCompare(b.slug));
-}
-
-// src/roles-contract.ts
-var ROLE_SKILL_INDEX = {
-  supervisor: "grilling, domain-modeling",
-  lead: "codebase-design, domain-modeling, tdd",
-  agent: "tdd, diagnosing-bugs, codebase-design"
-};
-var DESIGN_LINK_OWNERSHIP = "design/open-design-link.json is plugin-owned Open Design project link state. Never overwrite it with a Design provenance note; record provenance in design/design-manifest.json or a separate file instead.";
-var FOOTER_MARK = "paseo-factory role skills:";
-function skillFooter(role) {
-  return `${FOOTER_MARK} ${ROLE_SKILL_INDEX[role]}`;
-}
-var LEAD_WAVE_LAWS = [
-  "One Bounded Outcome per Task: Size each independently verifiable vertical slice under ~120K tokens peak Agent context. Never pass a multi-subsystem or full-application directive through as a single monolithic Task, even for a single-file deliverable such as index.html. Reserve single-task dispatch for a small isolated change or focused bugfix.",
-  "Serial Waves by Default: For user-facing applications, allow at most 1\u20132 foundational setup waves (T-01 app shell / harness / design tokens, T-02 core schema / repository seam). Every subsequent Serial Wave (T-03+) must deliver a vertical user-facing journey slice: real interactive screen/UI + state/data wiring + journey test. Never plan horizontal chains of backend-only micro-waves while user-facing screens remain static placeholders. Anchor Contracts Just-in-Time to the Stable Checkpoint at current `<project-root>` HEAD. Set Contracts and spawn Agents for the current wave only, then IMMEDIATELY end your turn. Parallel dispatch (up to 3 Tasks) requires an existing shared foundation and genuinely disjoint modules/file surfaces.",
-  "Rolling-Wave Re-Decomposition: Treat the initial T-01..T-0N roadmap as a rolling-wave outline, never a locked task count. After each Stable Checkpoint lands, inspect actual repository growth and split oversized upcoming waves along distinct user journeys or screens rather than horizontal data-plumbing layers (for example T-04a search journey, T-04b detail journey) before setting the next Contract. Reassess especially when the predecessor required re-contracting or high context.",
-  "Modular & Isolated Test Suite Law: Never accumulate all unit tests or E2E journeys into a single monolithic test file across waves. Use modular per-slice test files (tests/<slice>.* or test_<slice>.*) discovered by a thin suite runner or Gate script. Each slice owns explicit isolated fixtures and initial state, independent of defaults introduced by later waves. Peers run just the current slice's fast tests during inner-loop TDD; the full cumulative Gate runs before Claim.",
-  "Bounded Verification & Context-Ceiling Recovery: Gate scripts must enforce explicit per-command timeouts or harness timeout flags so hung processes fail fast with a diagnostic. On BLOCKED (context-ceiling), inspect Task worktree commits, git status, and peer-handoff-<task>.md; land or preserve verified progress and split the remaining scope into a narrower follow-up Contract rather than retrying the oversized wave.",
-  "4-Part Brief: Keep every Contract.description concise \u2014 capped at <= 2,500 chars \u2014 with four explicit sections: (1) Bounded Outcome \u2014 the single slice's user/system outcome and done vs. not-done criteria; (2) Contract Boundary & Regression Invariants \u2014 existing HEAD interfaces/behaviors that stay green and new seam contracts; (3) Excluded / Deferred to Later Waves \u2014 name features the Agent must not implement this turn (state none when appropriate); (4) Verification \u2014 the exact Gate command. Do not read deep implementation files before contracting to pre-solve internal helper function or prop names. The Brief must be neutral and never pre-solve implementation: pose open questions, do not embed verdicts \u2014 a plan so detailed that the Peer merely types your ideas back is a failed Brief, and the Brief is a provisional map for ONE Peer turn, not a months-long plan; say so plainly to the Peer. Name the turn's disposition through `lead_set_contract`'s `disposition` parameter: `scout` (read-only reconnaissance of unknown repository facts), `architect` (read-only boundary design when specification and code conflict), `engineer` (the default writer), `reviewer` (independent read-only audit). Peer-Owned Domain Skills: never read (`cat`) implementation or framework SKILL.md files (expo-*, eas-*, firebase-*, etc.) into your own context window \u2014 domain and implementation skills belong to the working Agent (Peer), which discovers them natively via <available_skills>. Do not pre-solve internal helper function signatures or line-by-line code, and do not mandate 4\u20136 separate unit-test files per task; 1\u20132 focused slice/journey test files suffice unless the repository's existing layout requires otherwise.",
-  "Spec-vs-Code Ruling: When a test must cross a new boundary, the Brief must state that boundary's contract, or state explicitly that it is undecided and the Peer must stop (BLOCKED) there \u2014 leave it blank and the Peer invents a contract that the next task inherits as public API. When the specification and the existing code contradict, never hand both readings to the Peer to choose from: picking the reading is an architectural ruling that belongs to you \u2014 settle one reading with a stated reason in the Brief, or dispatch a read-only `architect` disposition to rebuild the boundary before anyone writes tests.",
-  'Closure & Integration Loop: Two-party separation of judgment is Peer implementation + mechanical Gate + Lead diff inspection. Lifecycle completion or a green status line is only a wakeup signal \u2014 acceptance reads the artifact and its reproducible evidence. When the mechanical Gate is GREEN (exit 0) and Watch flags no concern (< 0.5), read `<projectStateDir>/report-<task>-<n>.md` and `git show --stat "<sha>"` first \u2014 the report carries the Peer\'s 6-Field Handoff (Outcome, Snapshot, Scope, Verification, Unknown / risk, Ownership), and a missing or hand-waved handoff field is a question back to the Peer, never something you fill in yourself; Unknown stays Unknown: "could not determine, here is where I looked" is a valid, cheaper result than an invented root cause. Then inspect the attested commit diff (`git show --stat "<sha>"` and `git diff "<sha>^" "<sha>"`) strictly against the 4-Part Brief \u2014 reading targeted per-file diffs (`git diff "<sha>^" "<sha>" -- <file>`) in bounded chunks (<= 6,000 tokens per call) and never wrapping multi-file `git diff` or `cat` outputs inside `JSON.stringify` (`text({i,...r})`) in a single REPL `exec` call, which middle-truncates large output; your direct diff review is the sole semantic review gate. Apply proof falsification: "If the claimed behavior disappeared, would the Peer\'s test fail?" If the contracted outcome is delivered, no out-of-scope regressions or fake tests are introduced, and the proof is genuine, you must accept and land immediately via `lead_accept_task` / `lead_merge` (or `factory accept <task> --attempt <n> --by lead`) into `<project-root>` HEAD, establishing the next Stable Checkpoint. Never write or execute ad-hoc out-of-band shell/node/python scripts (`node -e`, `node <<\'JS\'`, `npx tsx -e`, `python3 -c`) to invent uncontracted edge cases after a GREEN Gate. Defer non-blocking polish or any newly discovered edge case outside the current Contract to a downstream Serial Wave after landing the current Stable Checkpoint. If contracted defects, missing requirements, or architectural violations appear, re-contract via `lead_set_contract` and re-spawn the Peer to fix them before accepting. Never accept a Needs-human Task; escalate it to Supervisor when Owner judgment is required. Inspect the newly landed foundation, then set Contract(s) and spawn the next wave in the same turn. Accept and land the final wave before calling `lead_report_to_supervisor`, then end your turn. Escalate unresolved defects or Owner-owned blockers to Supervisor when they require Owner judgment.',
-  "Challenge Reconciliation (live, in place): A Peer challenge with evidence is data to reconcile, not disobedience \u2014 close every challenge against its original Brief. For REOPEN_REQUEST, identify the reopened layer (foundation | dependency | lifecycle | API | ownership | verification) before ruling; a challenge that does not name its layer cannot be ruled on, so ask for the layer. For DEPENDENCY_REQUEST, resolve or schedule the unowned prerequisite or undecided boundary contract. For BLOCKED, diagnose the external blocker or split scope overflow. Deliver your ruling directly into the live Peer session via `lead_repoke_agent`'s `message` parameter, and when the boundary itself changed, update the Brief in place with `lead_set_contract` \u2014 the live Peer session is preserved by default (`resetPeer: false`); replace the Peer (`resetPeer: true`) only when its context is truly misaligned. Resolve technical issues by re-contracting and re-spawning; record terminal stalls (`attempt-ceiling`, `denied-again`) via `lead_needs_human`; escalate Owner-owned decisions (product scope, external cost, irreversible risk) via `lead_report_to_supervisor`.",
-  'Independent Reviewer \u2014 default is NO: You plus the Peer already are a separation of judgment (the Peer writes, you accept); a Reviewer (`disposition: "reviewer"`) is a third, cold-start-expensive layer, mandatory only when at least one of five triggers holds: (1) your Brief pre-solved the solution, not just the outcome \u2014 the Peer became your hands and the separation is gone; (2) the change touches a seam the repository marks as decide-first (a contract boundary called out in AGENTS.md / CLAUDE.md / CONTEXT.md); (3) the decision is hard to reverse \u2014 migration, schema, public API, data deletion; (4) the Peer\'s proof is suspect \u2014 first rerun the exact Verification command, then apply the falsification test ("if the claimed behavior disappeared, would this proof still pass?"; a proof that still passes is not evidence: tests written to match the implementation, mocks swallowing failures, output not matching the declared command); (5) the Peer filed a REOPEN_REQUEST and withdrew it without new evidence. No trigger hit \u2192 read the diff yourself; that IS the review.',
-  "Project Notebook & Recurrence Guard: Maintain `<projectStateDir>/notebook.md` \u2014 the Lead-only operational memory outside `<project-root>` (its path is announced in the Seat kickoff packet) \u2014 capped at <= 80 lines / <= 4 KB with exactly two sections: `## 1. Verification & Run Recipe` (Worktree & Env Setup, Fast Slice Check, Full Cumulative Gate, Process & Port Cleanup) and `## 2. Recurrence Guard` (columns `| ID | Cause \u2192 Effect Mechanism | Evidence (Task / seq) | State | Enforcement |`). Keep it current at every Stable Checkpoint so Lead rotations resume with the exact Gate recipe; never write Lead-only operational or orchestration recipes into `<project-root>/AGENTS.md` or `<project-root>/CONTEXT.md`. Recurrence principle: when a costly failure mechanism bites (RED Gate, diff rejection, repeated denial), log its Cause \u2192 Effect mechanism with a `Task (seq N)` citation \u2014 no permanent rule for a one-off; once it recurs (>= 2 distinct seqs), apply at most 1 highest-leverage hardening per Stable Checkpoint, preferring mechanical structure first (tighten the Gate command, `.worktreeinclude`, or verification script), quoting a 1-line convention into downstream Briefs when prose must change, and proposing any AGENTS.md / CONTEXT.md edit to the Owner via the 4-Line Ratification Card rather than editing unratified; retire the entry when the next wave's first cumulative Gate attempt is GREEN."
-];
-var SUPERVISOR_OUTCOME_BOUNDARY = [
-  "Outcome & Architecture Boundary (neutral intent \u2014 framing is the Lead's): Transmit the Owner's product outcomes, boundaries, invariants, and verification criteria faithfully and neutrally downward \u2014 framing is the Lead's. Never impose your own decomposition, technical solution shape, or file architecture on Lead; you are the process-quality seat, not a second project Lead. Preserve file architecture freedom; never invent single-file consolidation constraints such as forcing an entire application into index.html unless the Owner explicitly requested them. If the Owner's prompt bundles a multi-subsystem application into a single file (such as a single index.html) or contains an architectural anti-pattern without explicitly confirming they want to keep that constraint as-is, challenge the trade-off via grilling and recommend a modular multi-file architecture before dispatching.",
-  "Downward Privacy Firewall: Keep the Owner's private channel out of every Lead-facing message and project artifact \u2014 no verbatim Owner quotes or transcripts, no Human/Supervisor labels or source attribution, no private agent IDs, no account of who spoke to whom. Express authorized decisions directly as project instructions.",
-  "Active SLP Loop Auditing: Audit the loop, not the artifact: original Lead Brief \u2192 actual Peer response \u2192 explicit Lead disposition; inspect both Lead and Peer activity \u2014 Lead's summary alone is not proof that the loop closed. Coach the Lead (process quality, never product code) when you observe it pre-solving Briefs, micro-splitting waves into horizontal slivers, reading deep source files into its own context instead of dispatching a read-only Scout, bouncing technical decisions that are the Lead's own ruling up to the Owner, staffing by template, or burning context polling files. Send advice to the Lead \u2014 never a parallel command chain to workers \u2014 and intervene only when the coaching can improve the Lead's next action.",
-  "Modular Test & Verification Boundary: Never prescribe a single monolithic test file accumulating every unit test or E2E journey across all waves; allow modular per-feature/per-slice test files with isolated fixtures, aggregated by a runner or Gate script. Treat initial wave roadmaps as rolling-wave outlines; Lead re-evaluates and splits oversized waves at each Stable Checkpoint.",
-  "4-Line Owner Ratification Boundary: When Lead's completion report carries a hardening Proposal that would change repo prose (backed by >= 2 `Task (seq N)` citations from the Recurrence Guard), present the 4-Line Owner Ratification Card to the Owner \u2014 `1. Chuy\u1EC7n g\xEC \u0111\xE3 l\u1EB7p l\u1EA1i` (with the `Task (seq N)` citations), `2. Nguy\xEAn nh\xE2n g\u1ED1c`, `3. N\u1EBFu duy\u1EC7t s\u1EBD s\u1EEDa g\xEC (Preview diff)`, `4. T\xE1c d\u1EE5ng` \u2014 and edit `<project-root>/AGENTS.md` or `<project-root>/CONTEXT.md` only after explicit Owner Ratification; never edit them on an unratified proposal."
-].join(" ");
-function formatCmdPrefix(factoryCmd, home) {
-  const base = factoryCmd !== void 0 && factoryCmd.trim() !== "" ? factoryCmd.trim() : "factory";
-  if (home !== void 0 && home.trim() !== "" && !base.includes("--home ")) {
-    return `${base} --home ${home.trim()}`;
-  }
-  return base;
-}
-function renderSeatCommandBlock(seat, cmdPrefix) {
-  if (seat === "supervisor") {
-    return [
-      "Primary `paseo-factory` / `paseo_factory` MCP tools (prefer calling these directly):",
-      "",
-      '  paseo-factory_supervisor_dispatch_lead({ message: "<directive>", workspace: "<project-root>" })  (or supervisor_dispatch_lead)',
-      "  paseo-factory_supervisor_end_cycle({})  (or supervisor_end_cycle)",
-      '  paseo-factory_supervisor_read_ledger({ workspace: "<project-root>" })  (or supervisor_read_ledger)',
-      "",
-      "Day-one Supervisor commands (the Owner CLI \u2014 never on a Worker agent's PATH):",
-      "",
-      `  ${cmdPrefix} lead dispatch --workspace "<project-root>" --message "<directive>"`,
-      `  ${cmdPrefix} status`,
-      `  ${cmdPrefix} lanes get`,
-      `  ${cmdPrefix} accept <task> --attempt <n> --by supervisor`
-    ];
-  }
-  return [
-    "Primary `paseo-factory` / `paseo_factory` MCP tools (prefer calling these directly):",
-    "",
-    '  paseo-factory_lead_set_contract({ task: "<id>", gate: "<cmd>", disposition: "<engineer|scout|architect|reviewer>", description: "<Bounded Outcome; Contract Boundary & Regression Invariants; Excluded / Deferred to Later Waves; Verification>" })  (or lead_set_contract)',
-    '  paseo-factory_lead_dispatch_agent({ tasks: ["<id>"] })  (or lead_dispatch_agent)',
-    '  paseo-factory_lead_repoke_agent({ task: "<id>", message: "<ruling delivered into the live Peer session>" })  (or lead_repoke_agent)',
-    '  paseo-factory_lead_merge({ task: "<id>", attempt: <n> })  (or lead_merge)',
-    '  paseo-factory_lead_verify({ task: "<id>" })  (or lead_verify)',
-    "The Driver handles bounded re-pokes and needs-human evidence; report unresolved blockers to Supervisor.",
-    '  paseo-factory_lead_needs_human({ task: "<id>", reason: "<denied-again|silent-after-repoke|attempt-ceiling|died-after-respawn>", summary: "<text>" })  (or lead_needs_human)',
-    '  paseo-factory_lead_report_to_supervisor({ message: "<summary>", workspace: "<project-root>" })  (or lead_report_to_supervisor)',
-    '  paseo-factory_lead_create_worktree({ task: "<id>" })  (or lead_create_worktree)',
-    "",
-    "Day-one Lead commands (the Owner CLI \u2014 never on a Worker agent's PATH):",
-    "",
-    `  ${cmdPrefix} contract --task <id> --workspace <dir> --gate <cmd> [--artifact <path>] [--skills <s1,s2>] [--watch] [--description <text>] [--disposition <engineer|scout|architect|reviewer>] [--reset-peer]`,
-    `  ${cmdPrefix} repoke --task <id> [--agent <id>] [--message "<ruling text>"]`,
-    `  ${cmdPrefix} run <task> [<task>...]`,
-    `  ${cmdPrefix} status`,
-    `  ${cmdPrefix} lanes get`,
-    `  ${cmdPrefix} accept <task> --attempt <n> --by lead`,
-    `  ${cmdPrefix} supervisor report --workspace "<project-root>" --message "<summary>"`
-  ];
-}
-function renderRoleContract(role, options = {}) {
-  const cmdPrefix = formatCmdPrefix(options.factoryCmd, options.home);
-  const linkedDesign = linkedDesignSpecification(options.project?.root);
-  const projectSuffix = options.project !== void 0 && options.project.slug !== "" ? options.project.root !== "" ? ` for this project (${options.project.slug}, rooted at ${options.project.root})` : ` (project ${options.project.slug})` : "";
-  if (role === "supervisor") {
-    return [
-      `You are the Supervisor seat of the paseo-factory verification loop${projectSuffix}: the sole conversational door to the Owner.`,
-      `Clarify intent (grilling, domain-modeling), agree the outcome and boundaries with the Owner, and dispatch the directive to Lead via \`paseo-factory_supervisor_dispatch_lead\` / \`supervisor_dispatch_lead\` (or \`${cmdPrefix} lead dispatch --workspace "<project-root>" --message "<directive>"\`); relay what the factory measured \u2014 Verdicts, Watch lines, needs-human stalls \u2014 in words.`,
-      "Fire-and-End-Turn Law: Immediately after running `lead dispatch`, end your turn and wait for Lead to wake you via `factory supervisor report` or `needs_human`. Never run `sleep`, never poll files, never decompose tasks (`T-01..`), and never edit product source code or commit on `<project-root>`.",
-      SUPERVISOR_OUTCOME_BOUNDARY,
-      "Diagnostics & Run-Verification Law: When the Owner reports an application cannot run or asks why a command fails, inspect `<project-root>` with read-only diagnostics (`ls -la`, `cat package.json`, and checking `node_modules/.bin`) before dispatching. Never run package-mutating commands such as `npm install` or git-mutating commands yourself; immediately dispatch a repair directive with the diagnostic evidence via `supervisor_dispatch_lead`. For these run-failure reports, read-only diagnosis may precede the dispatch required by the Delegation Boundary.",
-      'Delegation Boundary: When the Owner provides a complete specification on Turn 1 (with no unresolved architectural traps such as unconfirmed single-file consolidation of a multi-subsystem app), or once the Owner answers your clarifying questions or approves the direction, your FIRST and ONLY tool call must be `paseo-factory_supervisor_dispatch_lead` (or `supervisor_dispatch_lead` / `call_mcp_tool` with `ServerName: "paseo-factory_paseo_factory"`, `ToolName: "supervisor_dispatch_lead"`, `Arguments: { message: "<directive>", workspace: "<project-root>" }` / `lead dispatch`), then immediately end your turn \u2014 do not read `grilling/SKILL.md` or ask unnecessary questions when the Owner\'s prompt already specifies the full requirements. CRITICAL: Lead is a separate process and CANNOT read your chat messages \u2014 writing a \'Directive for Lead\' or \'Design Spec\' in chat text without calling the dispatch tool does NOTHING and leaves the factory stuck! Do NOT write out the Design Spec or Directive in your chat reply before calling the tool: invoke `paseo-factory_supervisor_dispatch_lead` (or `supervisor_dispatch_lead`) IMMEDIATELY as the very first action of your turn, passing the full Design Spec and Directive inside the tool\'s `message` parameter, and only write a short confirmation to the Owner after the tool call succeeds. NEVER run `mkdir` or `cat > ...` to write `GLOSSARY.md`, `docs/adr/**`, `src/**`, or scaffolding during a feature request \u2014 all domain modeling, ADRs, seam interfaces, and code are authored after dispatch by Lead and Task Agents.',
-      "Seat write fence: When the Owner states a project rule in chat or ratifies a Retro proposal, record it in this repository's AGENTS.md or CONTEXT.md (or docs/** / .scratch/**) \u2014 you and the Lead are the only seats that may edit project memory, and you may never edit product source code on `<project-root>`.",
-      `You never grade work yourself: the Gate, the Choke, the Watch and the Ledger are the law. Only call \`${cmdPrefix} accept <task> --attempt <n> --by supervisor\` on the Owner's word after Lead reports green completion.`,
-      "",
-      ...renderSeatCommandBlock("supervisor", cmdPrefix),
-      "",
-      "Your role-scoped MCP server is paseo_factory; external helper MCP tools belong to the working Agent. This instruction is additive: the repository's own AGENTS.md / CLAUDE.md and skills catalog load natively alongside this instruction \u2014 never overwrite them.",
-      "",
-      DESIGN_LINK_OWNERSHIP,
-      skillFooter("supervisor")
-    ].join("\n");
-  }
-  if (role === "lead") {
-    return [
-      `You are the Lead seat of the paseo-factory verification loop${projectSuffix}: read and inspect the repository, decompose the Supervisor's directive into Tasks around clear Outcomes and Regression Gates, set each Contract (gate, description, optional artifact, skills) with \`paseo-factory_lead_set_contract\` / \`lead_set_contract\` (or \`${cmdPrefix} contract\`), and spawn Working Agents with \`paseo-factory_lead_dispatch_agent\` / \`lead_dispatch_agent\` (or \`${cmdPrefix} run\`).`,
-      "Seat write fence: Never write or commit product source code directly on `<project-root>`; all product source code is written by spawned working Agents inside isolated Task worktrees. You may update this repository's AGENTS.md or CONTEXT.md (and docs/** / .scratch/**) when the Owner ratifies a rule; working Agents never may.",
-      "Outcome & Regression-Gate Law: Specify the desired behavioral outcome and regression invariants in each Contract's `description` \u2014 never pre-solve or handcuff which code files the working Agent may touch inside its isolated Task worktree. Every Contract's `gate` command must verify both the new behavior (and entrypoint integration such as `index.html` / `src/main.ts` when applicable) AND the repository's existing test/typecheck/build suite so legacy features are never broken.",
-      "Peer-Owned Domain Skills: Never read (`cat`) implementation or framework SKILL.md files (expo-*, eas-*, firebase-*, etc.) into your own context window \u2014 domain and implementation skills belong to the working Agent (Peer), which discovers them natively via <available_skills>. Do not curate `skills` by reading skill files; omit them unless the Owner's directive explicitly names one.",
-      linkedDesign,
-      ...LEAD_WAVE_LAWS,
-      `Accept every wave's green Attempt after your direct diff review via \`paseo-factory_lead_merge\` / \`lead_merge\` (or \`${cmdPrefix} accept --by lead\`); re-contract defects and escalate a needs-human task before accepting. Calling \`paseo-factory_lead_set_contract\` / \`lead_set_contract\` again on any unaccepted Task updates its Contract (\`gate\`, \`base\`, \`description\`, \`artifact\`) and opens a fresh 3-attempt epoch.`,
-      `Fire-and-End-Turn Law: Inspect the Verdict / Watch / Report evidence, and after the final wave is accepted and landed, or when an unresolved defect / Needs-human / Owner-owned blocker requires escalation, call \`paseo-factory_lead_report_to_supervisor\` / \`lead_report_to_supervisor\` (or \`${cmdPrefix} supervisor report --workspace "<project-root>" --message "<summary>"\`) and immediately end your turn (never run \`sleep\` or poll files). If \`lead_set_contract\` or \`lead_dispatch_agent\` ever fails with an unrecoverable infrastructure blocker, you must report it to Supervisor via \`lead_report_to_supervisor\` (\`kind: "blocker"\`) before ending your turn so Supervisor is never left waiting silently.`,
-      "",
-      ...renderSeatCommandBlock("lead", cmdPrefix),
-      "",
-      "Your role-scoped MCP server is paseo_factory; external helper MCP tools belong to the working Agent. This instruction is additive: the repository's own AGENTS.md / CLAUDE.md and skills catalog load natively alongside this instruction \u2014 never overwrite them.",
-      "",
-      DESIGN_LINK_OWNERSHIP,
-      skillFooter("lead")
-    ].join("\n");
-  }
-  const taskLabel = options.task ?? "<task>";
-  const agentIdentity = options.task !== void 0 && options.project?.slug !== void 0 && options.project.slug !== "" ? ` (task ${options.task}, project ${options.project.slug})` : "";
-  return [
-    `You are a Peer of the paseo-factory verification loop${agentIdentity}: an independent technical colleague with your own judgment, accountable for one bounded outcome \u2014 not a subordinate executing orders. You work your Contract strictly inside this assigned Task worktree on branch \`factory/${taskLabel}\`, run the Gate check, and hand off via \`paseo-factory_agent_claim\` / \`agent_claim\` (or \`factory-claim --task ${taskLabel} --outcome <complete|partial|blocked|reopen> --scope <text> --verification <text> --unknowns <text> [--ownership <text>] [--sha <sha>]\`), then end your turn.`,
-    "Independent Judgment & Provisional Brief: The Brief's plan and file list are a provisional map for this one turn, not truth \u2014 find the real mechanism, never defend the assigner's assumptions. Disagreement with evidence is data to reconcile, not disobedience; agreement without evidence is not independence either. Stay strictly inside the assigned Bounded Outcome and honor Excluded / Deferred to Later Waves \u2014 later-wave features belong to their own turns.",
-    "Contract Before Test: Before writing a test or code across a boundary, verify the Brief's premises against the repository and the specification. Contract precedence: the Lead's ruling in the Brief (the conflict-resolution source) \u2192 the spec \u2192 the existing code. No source decides, or the spec and code contradict while the Brief has not ruled \u2192 BLOCKED; picking arbitrarily is inventing the contract, just quietly. A Brief ruling that does not hold against the real code \u2192 challenge immediately, BEFORE writing tests or code, via `agent_escalate_blocker` with a message starting with REOPEN_REQUEST (<layer>: one of foundation | dependency | lifecycle | API | ownership | verification \u2014 the layer names which contract is reopened; without it the Lead cannot rule), DEPENDENCY_REQUEST when an unowned prerequisite or undecided boundary contract is needed, or BLOCKED when an external blocker, missing tool/permission, or scope overflow prevents safe completion in one turn. Include concrete evidence, the current commit SHA, and at least one alternative direction, then end your turn \u2014 your session stays alive and paused for the Lead's ruling. A RED test may explore implementation, but must never invent an undecided contract: creating a missing symbol, choosing its semantics (return type, nullability, units, ordering, idempotency), or loosening an assertion to force GREEN decides the boundary from the test seat, and the next task inherits it as public API.",
-    "Modular Tests & Bounded Inner Loop: Use modular per-slice test files with explicit isolated fixtures and initial state; never bloat a single monolithic test file with all historical unit tests or E2E journeys. Read, edit, and run only the relevant slice tests during inner-loop iteration with an explicit timeout or harness timeout flag. Run the full cumulative Gate before factory-claim. A hung test requires root-cause diagnosis; never inflate watchdog timeouts to mask a hang.",
-    "Anti-Whack-a-Mole Law: If the third fix attempt still exhibits the same symptom, stop local patching and inspect the underlying mechanism before another edit. Fix the root mechanism, or commit any independent completed work and escalate with concrete evidence.",
-    `Proof Ownership & Unknown: You own the proof for what you write \u2014 verification proportionate to risk, real commands, real output; apply the falsification test ("If the claimed behavior disappeared, would this proof still pass?"). 'Unknown' is a legitimate result: report what you could not determine and where you looked rather than inventing a root cause \u2014 absence of evidence is not evidence of absence.`,
-    'Six-Field Handoff & Disposition: Your Brief names this turn\'s disposition (`scout` | `architect` | `engineer` | `reviewer`). Read-only dispositions (`scout`, `architect`, `reviewer`) write no files and make no commit \u2014 skip the commit SHA and return your findings through the handoff; the `engineer` disposition commits its own work. Every claim carries the full Six-Field Handoff: `outcome` (complete | partial | blocked | reopen), `scope` (files changed or read, with concrete paths), `verification` (commands run + real output, and what was deliberately skipped), `unknowns` (assumptions stood on, open risks, or "none"), plus optional `ownership`. State unfinished work plainly \u2014 claiming done before done is worse than BLOCKED. A failed `git commit` must be caught by its exit code (a SHA alone proves nothing) and means the work is not claimable.',
-    "You never modify AGENTS.md, CLAUDE.md, or CONTEXT.md unless your Contract's scope explicitly lists them \u2014 project memory is written by the Supervisor and Lead, not by you.",
-    "Factory orchestration (the `factory` CLI: contract, run, accept) is withheld from you by PATH and by this brief \u2014 the only factory commands on your PATH are factory-claim and the git shim. The daemon exposes plugin tools (paseoTools) to every agent today, so an orchestration surface may still be visible to you: never call it \u2014 setting contracts, running the Driver, and accepting are the Owner's, Supervisor's, and Lead's acts.",
-    `Your \`paseo-factory\` / \`paseo_factory\` MCP tools: \`paseo-factory_agent_claim\` / \`agent_claim\` (submits your Claim with the mandatory 6-Field Handoff \u2014 \`commit\` defaults to HEAD and is required only for the engineer disposition) and \`paseo-factory_agent_escalate_blocker\` / \`agent_escalate_blocker\` (challenges a Brief premise or escalates a blocker to your Lead, keeping your session alive for the ruling). Your factory CLI vocabulary (complete): \`factory-claim --task ${taskLabel} --outcome <complete|partial|blocked|reopen> --scope <text> --verification <text> --unknowns <text> [--ownership <text>] [--sha <sha>]\` \u2014 claim your Task when the Gate's done-criteria hold, then end your turn.`,
-    "This instruction is additive: the repository's own AGENTS.md / CLAUDE.md, MCP servers, and skills catalog load natively alongside it.",
-    "",
-    DESIGN_LINK_OWNERSHIP,
-    skillFooter("agent")
-  ].join("\n");
-}
-function renderRoleAppendSystem(role, options) {
-  const title = role === "supervisor" ? "Supervisor" : role === "lead" ? "Lead" : "Working Agent";
-  const effectiveOptions = role === "agent" ? { factoryCmd: "factory", ...options } : { factoryCmd: "factory", home: "<home>", ...options };
-  return [
-    `# ${title} (paseo-factory) \u2014 immutable SLP role contract`,
-    "",
-    renderRoleContract(role, effectiveOptions),
-    ""
-  ].join("\n");
-}
-
-// src/pi-home.ts
-var ROLE_PROMPTS = {
-  supervisor: renderRoleAppendSystem("supervisor"),
-  lead: renderRoleAppendSystem("lead"),
-  agent: renderRoleAppendSystem("agent")
-};
-
-// src/scope-policy.ts
-var PACKAGE_LOCKFILES = /* @__PURE__ */ new Set([
-  "package-lock.json",
-  "npm-shrinkwrap.json",
-  "pnpm-lock.yaml",
-  "yarn.lock",
-  "bun.lock",
-  "bun.lockb"
-]);
-function scopeCoversFile(scope, file) {
-  const directMatch = (target) => scope.some((entry) => {
-    const prefix = normalizeScopePath(entry);
-    const path = normalizeScopePath(target);
-    if (!/[*?]/.test(prefix)) return path === prefix || path.startsWith(`${prefix}/`);
-    return scopeGlob(prefix).test(path);
-  });
-  if (directMatch(file)) return true;
-  const slashIdx = file.lastIndexOf("/");
-  const baseName = slashIdx === -1 ? file : file.slice(slashIdx + 1);
-  if (PACKAGE_LOCKFILES.has(baseName)) {
-    const companionPkgJson = slashIdx === -1 ? "package.json" : `${file.slice(0, slashIdx)}/package.json`;
-    if (directMatch(companionPkgJson)) return true;
-  }
-  return false;
-}
-function normalizeScopePath(path) {
-  return path.replace(/^(?:\.\/)+/, "").replace(/\/+$/, "");
-}
-function scopeGlob(pattern) {
-  let expression = "^";
-  for (let i = 0; i < pattern.length; i++) {
-    const char = pattern[i];
-    if (char === "*" && pattern[i + 1] === "*") {
-      i++;
-      if (pattern[i + 1] === "/") {
-        expression += "(?:[^/]+/)*";
-        i++;
-      } else expression += ".*";
-    } else if (char === "*") expression += "[^/]*";
-    else if (char === "?") expression += "[^/]";
-    else expression += char.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  }
-  return new RegExp(`${expression}$`);
-}
-
-// src/zcode-home.ts
-var ROLE_PROMPTS2 = {
-  supervisor: renderRoleAppendSystem("supervisor"),
-  lead: renderRoleAppendSystem("lead"),
-  agent: renderRoleAppendSystem("agent")
-};
-
-// src/lane-profiles.ts
-import { existsSync as existsSync4, mkdirSync as mkdirSync5, readFileSync as readFileSync4, rmSync as rmSync3, writeFileSync as writeFileSync4 } from "node:fs";
-import { dirname as dirname4, join as join5 } from "node:path";
-function laneProfilesPath(stateDir) {
-  return join5(stateDir, "profiles.json");
-}
-function readLaneProfilesFile(stateDir) {
-  const path = laneProfilesPath(stateDir);
-  if (!existsSync4(path)) return { profiles: {} };
-  let parsed;
-  try {
-    parsed = JSON.parse(readFileSync4(path, "utf8"));
-  } catch {
-    throw new FactoryError("profiles-unreadable", `${path} is not valid JSON`);
-  }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    throw new FactoryError("profiles-unreadable", `${path} must be a JSON object of Lane profiles`);
-  }
-  const record2 = parsed;
-  if (record2.profiles === void 0 || record2.profiles === null || typeof record2.profiles !== "object" || Array.isArray(record2.profiles)) {
-    throw new FactoryError("profiles-unreadable", `${path} must carry a "profiles" object keyed by profile id`);
-  }
-  const file = { profiles: record2.profiles };
-  if (record2.deleted !== void 0 && record2.deleted !== null && typeof record2.deleted === "object" && !Array.isArray(record2.deleted)) {
-    file.deleted = record2.deleted;
-  }
-  if (record2.activeProfileByScope !== void 0 && record2.activeProfileByScope !== null && typeof record2.activeProfileByScope === "object" && !Array.isArray(record2.activeProfileByScope)) {
-    file.activeProfileByScope = record2.activeProfileByScope;
-  }
-  return file;
-}
-function mergeLaneProfilesFiles(local, remote, options) {
-  const preferRemote = options?.preferRemote === true;
-  const stamp = (value) => value ?? "";
-  const merged = { profiles: {} };
-  const deleted = {};
-  for (const id of /* @__PURE__ */ new Set([...Object.keys(local.profiles ?? {}), ...Object.keys(remote.profiles ?? {}), ...Object.keys(local.deleted ?? {}), ...Object.keys(remote.deleted ?? {})])) {
-    const localProfile = local.profiles?.[id];
-    const remoteProfile = remote.profiles?.[id];
-    const localTombstone = local.deleted?.[id];
-    const remoteTombstone = remote.deleted?.[id];
-    const tombstone = stamp(remoteTombstone?.deletedAt) > stamp(localTombstone?.deletedAt) ? remoteTombstone : stamp(localTombstone?.deletedAt) > stamp(remoteTombstone?.deletedAt) ? localTombstone : localTombstone ?? remoteTombstone ?? (preferRemote ? remoteTombstone : localTombstone);
-    const profile = stamp(remoteProfile?.updatedAt) > stamp(localProfile?.updatedAt) ? remoteProfile : stamp(localProfile?.updatedAt) > stamp(remoteProfile?.updatedAt) ? localProfile : preferRemote ? remoteProfile ?? localProfile : localProfile ?? remoteProfile;
-    if (tombstone !== void 0 && profile === void 0) {
-      deleted[id] = tombstone;
-      continue;
-    }
-    if (tombstone !== void 0 && profile !== void 0) {
-      if (stamp(tombstone.deletedAt) >= stamp(profile.updatedAt)) {
-        deleted[id] = tombstone;
-        continue;
-      }
-    }
-    if (profile !== void 0) merged.profiles[id] = profile;
-  }
-  const activeProfileByScope = {};
-  for (const [scope, profileId2] of Object.entries(local.activeProfileByScope ?? {})) activeProfileByScope[scope] = profileId2;
-  for (const [scope, profileId2] of Object.entries(remote.activeProfileByScope ?? {})) {
-    if (preferRemote || activeProfileByScope[scope] === void 0) activeProfileByScope[scope] = profileId2;
-  }
-  for (const scope of Object.keys(activeProfileByScope)) {
-    if (merged.profiles[activeProfileByScope[scope]] === void 0) delete activeProfileByScope[scope];
-  }
-  if (Object.keys(deleted).length > 0) merged.deleted = deleted;
-  if (Object.keys(activeProfileByScope).length > 0) merged.activeProfileByScope = activeProfileByScope;
-  return merged;
-}
-
-// src/lanes.ts
-var EYE_JSON_LANE = "eye.json";
-function projectLanesPath(stateDir, projectSlug) {
-  return join6(projectStateDir(stateDir, projectSlug), "lanes.json");
-}
-function parseLane(value) {
-  if (value === EYE_JSON_LANE || /\s/.test(value)) return void 0;
-  const slash = value.indexOf("/");
-  if (slash === -1) return void 0;
-  const provider = value.slice(0, slash);
-  const rest = value.slice(slash + 1);
-  if (provider.trim() === "" || rest.trim() === "") return void 0;
-  const colon = rest.lastIndexOf(":");
-  const lastSep = Math.max(rest.lastIndexOf("\\"), rest.lastIndexOf("/"));
-  if (colon === -1 || colon < lastSep) return { provider, model: rest };
-  const model = rest.slice(0, colon);
-  const thinking = rest.slice(colon + 1);
-  if (model.trim() === "" || thinking.trim() === "") return void 0;
-  return { provider, model, thinking };
-}
-var ZCODE_OFFICIAL_GLM_MODEL_IDS = [
-  "GLM-5.3",
-  "GLM-5.3-Flash",
-  "GLM-5V-Turbo",
-  "GLM-5.2",
-  "GLM-5.1",
-  "GLM-5.1-Highspeed",
-  "GLM-5",
-  "GLM-5-Turbo",
-  "GLM-4.7",
-  "GLM-4.7-FlashX",
-  "GLM-4.7-Flash",
-  "GLM-4.6",
-  "GLM-4.5-Air",
-  "GLM-4.5",
-  "GLM-4.6V",
-  "GLM-4.6V-Flash",
-  "GLM-4.6V-FlashX",
-  "GLM-4.1V-Thinking-FlashX",
-  "GLM-4.1V-Thinking-Flash",
-  "GLM-4-FlashX-250414",
-  "GLM-4-Flash-250414",
-  "GLM-4V-Flash"
-];
-var CANONICAL_ZCODE_MODEL_ID = new Map(
-  ZCODE_OFFICIAL_GLM_MODEL_IDS.map((id) => [id.toLowerCase(), id])
-);
+// src/peer-thinking.ts
 var PEER_THINKING_LEVELS = ["low", "medium", "high", "xhigh", "max"];
-var TOOLLESS_OPENCODE_CONFIG = JSON.stringify({
-  permission: {
-    "*": "deny",
-    external_directory: "deny",
-    doom_loop: "deny",
-    question: "deny",
-    edit: "deny",
-    write: "deny",
-    bash: "deny",
-    read: { "*": "ask" }
-  }
-});
 
 // src/ledger-validation.ts
 function isValidLedgerEvent(value) {
@@ -1258,7 +291,7 @@ function canonicalHistoryJson(value) {
   return `{${Object.entries(value).filter(([, item]) => item !== void 0).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, item]) => `${JSON.stringify(key)}:${canonicalHistoryJson(item)}`).join(",")}}`;
 }
 function historyHash(value) {
-  return createHash3("sha256").update(value).digest("hex");
+  return createHash("sha256").update(value).digest("hex");
 }
 function legacyIdentityMappingIsValid(value) {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
@@ -1427,15 +460,15 @@ function semanticEventContent(event, context2) {
 }
 
 // src/history-import.ts
-import { isAbsolute as isAbsolute4 } from "node:path";
+import { isAbsolute as isAbsolute2 } from "node:path";
 
 // src/artifact.ts
-import { realpathSync as realpathSync2 } from "node:fs";
-import { isAbsolute as isAbsolute3, normalize, relative, resolve as resolve3, sep } from "node:path";
+import { realpathSync } from "node:fs";
+import { isAbsolute, normalize, relative, resolve, sep } from "node:path";
 function artifactPathProblem(artifact) {
   if (artifact.trim() === "" || artifact.includes("\0")) return "artifact path must be a non-empty path without NUL bytes";
   const normalized2 = normalize(artifact);
-  if (isAbsolute3(artifact) || normalized2 === ".." || normalized2.startsWith(`..${sep}`)) {
+  if (isAbsolute(artifact) || normalized2 === ".." || normalized2.startsWith(`..${sep}`)) {
     return `artifact "${artifact}" must be a workspace-relative path contained inside the execution Workspace`;
   }
   return void 0;
@@ -1444,10 +477,10 @@ function inspectArtifact(workspace, artifact) {
   const pathProblem = artifactPathProblem(artifact);
   if (pathProblem !== void 0) return { present: false, note: pathProblem };
   try {
-    const root = realpathSync2(workspace);
-    const target = realpathSync2(resolve3(workspace, artifact));
+    const root = realpathSync(workspace);
+    const target = realpathSync(resolve(workspace, artifact));
     const fromRoot = relative(root, target);
-    if (isAbsolute3(fromRoot) || fromRoot === ".." || fromRoot.startsWith(`..${sep}`)) {
+    if (isAbsolute(fromRoot) || fromRoot === ".." || fromRoot.startsWith(`..${sep}`)) {
       return { present: false, note: `artifact "${artifact}" resolves outside the execution Workspace` };
     }
     return { present: true };
@@ -1492,8 +525,8 @@ function projectTask(events, task) {
 
 // src/history-import.ts
 function planHistoryImport(input) {
-  const sources = input.sources.map((source) => ({ id: createHash4("sha256").update(source.bytes ?? source.lines).digest("hex"), bytes: new Uint8Array(source.bytes ?? Buffer.from(source.lines)), holderId: source.nodeId, lines: source.lines, artifacts: (source.artifacts ?? []).map((file) => ({ path: file.path, bytes: new Uint8Array(file.bytes) })), ...source.identityMapping === void 0 ? {} : { identityMapping: structuredClone(source.identityMapping) }, sequenceMap: [], diagnostics: [] }));
-  const plan = { version: 1, id: historyHash(canonicalHistoryJson(sources.map((source) => ({ id: source.id, holder: source.holderId, artifacts: source.artifacts.map((file) => ({ path: file.path, hash: createHash4("sha256").update(file.bytes).digest("hex") })).sort((a, b) => a.path.localeCompare(b.path)) })).sort((a, b) => a.id.localeCompare(b.id) || a.holder.localeCompare(b.holder)))), baseHash: historyHash(input.existingLines), status: "duplicate", events: [], additions: [], duplicates: [], lines: input.existingLines, conflicts: [], sources, diagnostics: [] };
+  const sources = input.sources.map((source) => ({ id: createHash2("sha256").update(source.bytes ?? source.lines).digest("hex"), bytes: new Uint8Array(source.bytes ?? Buffer.from(source.lines)), holderId: source.nodeId, lines: source.lines, artifacts: (source.artifacts ?? []).map((file) => ({ path: file.path, bytes: new Uint8Array(file.bytes) })), ...source.identityMapping === void 0 ? {} : { identityMapping: structuredClone(source.identityMapping) }, sequenceMap: [], diagnostics: [] }));
+  const plan = { version: 1, id: historyHash(canonicalHistoryJson(sources.map((source) => ({ id: source.id, holder: source.holderId, artifacts: source.artifacts.map((file) => ({ path: file.path, hash: createHash2("sha256").update(file.bytes).digest("hex") })).sort((a, b) => a.path.localeCompare(b.path)) })).sort((a, b) => a.id.localeCompare(b.id) || a.holder.localeCompare(b.holder)))), baseHash: historyHash(input.existingLines), status: "duplicate", events: [], additions: [], duplicates: [], lines: input.existingLines, conflicts: [], sources, diagnostics: [] };
   const local = parseLedgerJsonl(input.existingLines);
   if (local.corrupt !== void 0) {
     plan.status = "conflicted";
@@ -1611,7 +644,7 @@ function validateHistoryCausality(events) {
       const claim = attempt?.events.find((item) => item.event === "claim_reported");
       if (event.event !== "contract_set" && !eventAllowsUnboundEpoch(event.event) && state.contract === void 0) reject("Task fact has no prior Contract");
       if (event.event === "contract_set") {
-        if (!text(event.workspace) || !isAbsolute4(event.workspace) || !text(event.gate) || typeof event.artifact !== "string" || text(event.artifact) && artifactPathProblem(event.artifact) !== void 0) reject("Contract has invalid Workspace, Gate or Artifact criteria");
+        if (!text(event.workspace) || !isAbsolute2(event.workspace) || !text(event.gate) || typeof event.artifact !== "string" || text(event.artifact) && artifactPathProblem(event.artifact) !== void 0) reject("Contract has invalid Workspace, Gate or Artifact criteria");
         if (state.inFlightAttempt !== void 0) reject("Contract replaces an open Claim pipeline");
         if (state.acceptance !== void 0) reject("Contract follows Task acceptance");
       }
@@ -1661,10 +694,10 @@ function bindingProblems(event, events, binding, files) {
   if (event.event === "retro_written" && event.outcome === "written" && (typeof event.proposalsPath !== "string" || !files.some((file) => file.eventId === event.event_id && file.path === event.proposalsPath))) return ["Retro proposals file has no verified local event binding; citations remain in the source namespace"];
   if (!("task" in event) || typeof event.task !== "string" || event.epoch_id === void 0) return [];
   const contract = events.find((candidate) => candidate.event === "contract_set" && candidate.event_id === event.epoch_id);
-  if (contract?.event !== "contract_set" || binding === void 0 || binding.workspace !== contract.workspace || !isAbsolute4(binding.workspace)) return [`Contract Workspace ${String(contract?.event === "contract_set" ? contract.workspace : event.epoch_id)} has no verified exact-root local binding; relocated roots require explicit materialization before admission`];
+  if (contract?.event !== "contract_set" || binding === void 0 || binding.workspace !== contract.workspace || !isAbsolute2(binding.workspace)) return [`Contract Workspace ${String(contract?.event === "contract_set" ? contract.workspace : event.epoch_id)} has no verified exact-root local binding; relocated roots require explicit materialization before admission`];
   const reasons = [];
   if (contract.base !== void 0 && binding.base !== contract.base) reasons.push("Contract base commit has no verified local binding");
-  if (event.event === "spawn_dispatched" && event.worktree !== void 0 && (binding.worktree !== event.worktree || !isAbsolute4(event.worktree))) reasons.push("spawn has no verified local Task worktree binding");
+  if (event.event === "spawn_dispatched" && event.worktree !== void 0 && (binding.worktree !== event.worktree || !isAbsolute2(event.worktree))) reasons.push("spawn has no verified local Task worktree binding");
   if (event.event === "gate_finished") {
     if (event.verdict === "green") {
       if (!events.some((candidate) => candidate.event === "gate_started" && candidate.epoch_id === event.epoch_id && candidate.attempt === event.attempt && candidate.seq < event.seq)) reasons.push("green Gate has no prior Gate start evidence; retain the original history for resolution");
@@ -1700,22 +733,22 @@ function reconcileHistory(existingLines, sources, options = {}) {
 // src/history-stage.ts
 function projectHistoryTarget(stateDir, slug) {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(slug)) throw new FactoryError("unknown-project", "history target must name a local Project");
-  const path = join7(stateDir, "projects", slug, "ledger.jsonl");
-  const expected = join7(historyTargetPath(stateDir), "projects", slug, "ledger.jsonl");
+  const path = join(stateDir, "projects", slug, "ledger.jsonl");
+  const expected = join(historyTargetPath(stateDir), "projects", slug, "ledger.jsonl");
   if (historyTargetPath(path) !== expected) throw new FactoryError("history-target-alias", "Project history target aliases another state directory; restore an isolated Project state directory before import");
   return path;
 }
 function historyTargetPath(path) {
-  let ancestor = resolve4(path);
+  let ancestor = resolve2(path);
   const missing = [];
   for (; ; ) {
     try {
-      return join7(realpathSync3(ancestor), ...missing);
+      return join(realpathSync2(ancestor), ...missing);
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
-      const parent = dirname6(ancestor);
+      const parent = dirname(ancestor);
       if (parent === ancestor) throw error;
-      missing.unshift(basename3(ancestor));
+      missing.unshift(basename(ancestor));
       ancestor = parent;
     }
   }
@@ -1729,7 +762,7 @@ function observeStagedImports(target, notify) {
   };
 }
 function importDirectory(target, id) {
-  return id === void 0 ? join7(dirname6(historyTargetPath(target)), "history-imports") : join7(dirname6(historyTargetPath(target)), "history-imports", id);
+  return id === void 0 ? join(dirname(historyTargetPath(target)), "history-imports") : join(dirname(historyTargetPath(target)), "history-imports", id);
 }
 function fsyncDirectory(path) {
   if (process.platform === "win32") return;
@@ -1744,22 +777,22 @@ function fsyncDirectory(path) {
   }
 }
 function makeDurableDirectory(path) {
-  const created = mkdirSync6(path, { recursive: true });
+  const created = mkdirSync(path, { recursive: true });
   if (created === void 0) return;
-  let directory = resolve4(path);
-  const first = resolve4(created);
+  let directory = resolve2(path);
+  const first = resolve2(created);
   while (true) {
     fsyncDirectory(directory);
-    fsyncDirectory(dirname6(directory));
+    fsyncDirectory(dirname(directory));
     if (directory === first) break;
-    directory = dirname6(directory);
+    directory = dirname(directory);
   }
 }
 function writeDurableFile(path, bytes, options = {}) {
   path = historyTargetPath(path);
-  makeDurableDirectory(dirname6(path));
-  const temp = `${path}.${process.pid}.${randomUUID2()}.tmp`;
-  writeFileSync5(temp, bytes, { mode: options.mode ?? 384 });
+  makeDurableDirectory(dirname(path));
+  const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  writeFileSync(temp, bytes, { mode: options.mode ?? 384 });
   const fd = openSync(temp, "r");
   try {
     if (options.mode !== void 0) fchmodSync(fd, options.mode);
@@ -1767,17 +800,17 @@ function writeDurableFile(path, bytes, options = {}) {
   } finally {
     closeSync(fd);
   }
-  renameSync2(temp, path);
+  renameSync(temp, path);
   options.afterRename?.();
-  fsyncDirectory(dirname6(path));
+  fsyncDirectory(dirname(path));
 }
 function saveImportManifest(manifest) {
-  writeDurableFile(join7(importDirectory(manifest.target, manifest.id), "manifest.json"), `${JSON.stringify(manifest)}
+  writeDurableFile(join(importDirectory(manifest.target, manifest.id), "manifest.json"), `${JSON.stringify(manifest)}
 `);
 }
 function loadImportManifest(target, id) {
   if (!/^[a-f0-9]{64}$/.test(id)) throw new FactoryError("invalid-import", "invalid staged import identity");
-  const manifest = JSON.parse(readFileSync5(join7(importDirectory(target, id), "manifest.json"), "utf8"));
+  const manifest = JSON.parse(readFileSync(join(importDirectory(target, id), "manifest.json"), "utf8"));
   if (manifest.version !== 1 || manifest.id !== id || historyTargetPath(manifest.target) !== historyTargetPath(target) || !Array.isArray(manifest.sources) || !["staged", "pending", "applied", "conflicted"].includes(manifest.status)) {
     throw new FactoryError("invalid-import", `damaged import manifest ${id}`);
   }
@@ -1786,7 +819,7 @@ function loadImportManifest(target, id) {
     for (const status of ["applied", "refused"]) {
       let outcome;
       try {
-        outcome = JSON.parse(readFileSync5(join7(importDirectory(target, id), `materialization-${status}.json`), "utf8"));
+        outcome = JSON.parse(readFileSync(join(importDirectory(target, id), `materialization-${status}.json`), "utf8"));
       } catch (error) {
         if (error.code === "ENOENT") continue;
         throw new FactoryError("invalid-import", `damaged materialization outcome ${id}`);
@@ -1808,38 +841,38 @@ function publicImportStatus(manifest) {
 function readLedgerImports(target) {
   let entries;
   try {
-    entries = readdirSync4(importDirectory(target));
+    entries = readdirSync(importDirectory(target));
   } catch (error) {
     if (error.code === "ENOENT") return [];
     throw error;
   }
-  return entries.filter((id) => /^[a-f0-9]{64}$/.test(id) && existsSync5(join7(importDirectory(target, id), "manifest.json"))).sort().map((id) => publicImportStatus(loadImportManifest(target, id)));
+  return entries.filter((id) => /^[a-f0-9]{64}$/.test(id) && existsSync(join(importDirectory(target, id), "manifest.json"))).sort().map((id) => publicImportStatus(loadImportManifest(target, id)));
 }
 function stageLedgerImport(targetPath, sources, options = {}) {
   const target = historyTargetPath(targetPath);
   const id = planHistoryImport({ existingLines: "", sources }).id;
   const destination = importDirectory(target, id);
-  if (!existsSync5(join7(destination, "manifest.json"))) {
-    const dir = `${destination}.${process.pid}.${randomUUID2()}.staging`;
+  if (!existsSync(join(destination, "manifest.json"))) {
+    const dir = `${destination}.${process.pid}.${randomUUID()}.staging`;
     makeDurableDirectory(dir);
     const stored = sources.map((source, index) => {
       const bytes = Buffer.from(source.bytes ?? Buffer.from(source.lines));
-      writeDurableFile(join7(dir, `source-${index}.bin`), bytes);
+      writeDurableFile(join(dir, `source-${index}.bin`), bytes);
       const artifacts = (source.artifacts ?? []).map((file, fileIndex) => {
-        writeDurableFile(join7(dir, `artifact-${index}-${fileIndex}.bin`), file.bytes);
+        writeDurableFile(join(dir, `artifact-${index}-${fileIndex}.bin`), file.bytes);
         return { path: file.path, bytes: Buffer.from(file.bytes).toString("base64") };
       });
       return { ...source, bytes: bytes.toString("base64"), artifacts };
     });
     const manifest = { version: 1, id, target, status: "pending", ...options.materialization === void 0 ? {} : { materialization: options.materialization }, sources: stored, createdAt: (/* @__PURE__ */ new Date()).toISOString(), diagnostics: ["snapshot fetched and staged; Ledger owner admission pending"] };
-    writeDurableFile(join7(dir, "manifest.json"), `${JSON.stringify(manifest)}
+    writeDurableFile(join(dir, "manifest.json"), `${JSON.stringify(manifest)}
 `);
     try {
-      renameSync2(dir, destination);
-      fsyncDirectory(dirname6(destination));
+      renameSync(dir, destination);
+      fsyncDirectory(dirname(destination));
     } catch (error) {
-      if (!existsSync5(join7(destination, "manifest.json"))) throw error;
-      rmSync4(dir, { recursive: true, force: true });
+      if (!existsSync(join(destination, "manifest.json"))) throw error;
+      rmSync(dir, { recursive: true, force: true });
     }
   }
   listeners.get(target)?.();
@@ -1849,7 +882,7 @@ function updateImportMaterialization(imports, materialization) {
   for (const item of imports) {
     const manifest = loadImportManifest(item.target, item.id);
     if (manifest.status === "applied" || manifest.materialization === void 0 || manifest.materialization.status === "applied") continue;
-    const path = join7(importDirectory(item.target, item.id), `materialization-${materialization.status}.json`);
+    const path = join(importDirectory(item.target, item.id), `materialization-${materialization.status}.json`);
     writeDurableFile(path, JSON.stringify(materialization) + "\n");
     listeners.get(historyTargetPath(item.target))?.();
   }
@@ -1858,10 +891,10 @@ function updateImportMaterialization(imports, materialization) {
 // src/upgrade-state.ts
 function pendingUpgradeFor(stateDir) {
   const root = historyTargetPath(stateDir);
-  const directory = join8(dirname7(root), `${basename4(root)}-upgrades`);
+  const directory = join2(dirname2(root), `${basename2(root)}-upgrades`);
   let names;
   try {
-    names = readdirSync5(directory).sort();
+    names = readdirSync2(directory).sort();
   } catch (error) {
     if (error.code === "ENOENT") return void 0;
     throw error;
@@ -1869,7 +902,7 @@ function pendingUpgradeFor(stateDir) {
   for (const id of names.filter((name) => /^[a-f0-9-]{36}$/.test(name))) {
     let value;
     try {
-      value = JSON.parse(readFileSync6(join8(directory, id, "manifest.json"), "utf8"));
+      value = JSON.parse(readFileSync2(join2(directory, id, "manifest.json"), "utf8"));
     } catch {
       return id;
     }
@@ -1879,17 +912,17 @@ function pendingUpgradeFor(stateDir) {
 }
 
 // src/writer-identity.ts
-import { readFileSync as readFileSync7 } from "node:fs";
-import { basename as basename5, dirname as dirname8, join as join9 } from "node:path";
+import { readFileSync as readFileSync3 } from "node:fs";
+import { basename as basename3, dirname as dirname3, join as join3 } from "node:path";
 function localWriterPath(stateDir, projectSlug) {
   const root = historyTargetPath(stateDir);
-  const target = projectSlug === void 0 ? join9(root, "ledger.jsonl") : join9(root, "projects", projectSlug, "ledger.jsonl");
-  return join9(dirname8(root), `${basename5(root)}-local-writers`, `${historyHash(target)}.json`);
+  const target = projectSlug === void 0 ? join3(root, "ledger.jsonl") : join3(root, "projects", projectSlug, "ledger.jsonl");
+  return join3(dirname3(root), `${basename3(root)}-local-writers`, `${historyHash(target)}.json`);
 }
 function readLocalWriterIdentity(stateDir, projectSlug) {
   let raw;
   try {
-    raw = readFileSync7(localWriterPath(stateDir, projectSlug), "utf8");
+    raw = readFileSync3(localWriterPath(stateDir, projectSlug), "utf8");
   } catch (error) {
     if (error.code === "ENOENT") return void 0;
     throw error;
@@ -1902,6 +935,51 @@ function readLocalWriterIdentity(stateDir, projectSlug) {
   }
   if (value.version !== 1 || typeof value.writerId !== "string" || value.writerId.trim() === "") throw new FactoryError("writer-identity-invalid", "Unsupported local writer identity");
   return value.writerId;
+}
+
+// src/scope-policy.ts
+var PACKAGE_LOCKFILES = /* @__PURE__ */ new Set([
+  "package-lock.json",
+  "npm-shrinkwrap.json",
+  "pnpm-lock.yaml",
+  "yarn.lock",
+  "bun.lock",
+  "bun.lockb"
+]);
+function scopeCoversFile(scope, file) {
+  const directMatch = (target) => scope.some((entry) => {
+    const prefix = normalizeScopePath(entry);
+    const path = normalizeScopePath(target);
+    if (!/[*?]/.test(prefix)) return path === prefix || path.startsWith(`${prefix}/`);
+    return scopeGlob(prefix).test(path);
+  });
+  if (directMatch(file)) return true;
+  const slashIdx = file.lastIndexOf("/");
+  const baseName = slashIdx === -1 ? file : file.slice(slashIdx + 1);
+  if (PACKAGE_LOCKFILES.has(baseName)) {
+    const companionPkgJson = slashIdx === -1 ? "package.json" : `${file.slice(0, slashIdx)}/package.json`;
+    if (directMatch(companionPkgJson)) return true;
+  }
+  return false;
+}
+function normalizeScopePath(path) {
+  return path.replace(/^(?:\.\/)+/, "").replace(/\/+$/, "");
+}
+function scopeGlob(pattern) {
+  let expression = "^";
+  for (let i = 0; i < pattern.length; i++) {
+    const char = pattern[i];
+    if (char === "*" && pattern[i + 1] === "*") {
+      i++;
+      if (pattern[i + 1] === "/") {
+        expression += "(?:[^/]+/)*";
+        i++;
+      } else expression += ".*";
+    } else if (char === "*") expression += "[^/]*";
+    else if (char === "?") expression += "[^/]";
+    else expression += char.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+  return new RegExp(`${expression}$`);
 }
 
 // src/workspace-conflict.ts
@@ -1962,14 +1040,292 @@ function acceptedTasks(ledger) {
 // src/history-admission.ts
 import { AsyncLocalStorage } from "node:async_hooks";
 import { execFileSync as execFileSync2 } from "node:child_process";
-import { closeSync as closeSync3, existsSync as existsSync6, fsyncSync as fsyncSync3, openSync as openSync3, readFileSync as readFileSync9, readdirSync as readdirSync6, realpathSync as realpathSync4, rmSync as rmSync5, statSync as statSync3 } from "node:fs";
-import { basename as basename6, dirname as dirname10, join as join10, resolve as resolve5 } from "node:path";
-import { randomUUID as randomUUID4 } from "node:crypto";
+import { closeSync as closeSync3, existsSync as existsSync3, fsyncSync as fsyncSync3, openSync as openSync3, readFileSync as readFileSync6, readdirSync as readdirSync4, realpathSync as realpathSync4, rmSync as rmSync2, statSync as statSync3 } from "node:fs";
+import { basename as basename5, dirname as dirname5, join as join5, resolve as resolve4 } from "node:path";
+import { randomUUID as randomUUID3 } from "node:crypto";
+
+// src/scrum/selection.ts
+function executionIsValid(value) {
+  const v = value;
+  return v !== null && typeof v === "object" && v.schemaVersion === 1 && ["slp", "scrum"].includes(v.mode) && Number.isSafeInteger(v.revision) && v.revision >= 0 && (v.skillPacks === void 0 || Array.isArray(v.skillPacks) && v.skillPacks.every((p) => typeof p === "string"));
+}
+
+// src/project.ts
+import { execFileSync } from "node:child_process";
+import { createHash as createHash3 } from "node:crypto";
+import { existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync4, readdirSync as readdirSync3, realpathSync as realpathSync3, statSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { homedir } from "node:os";
+import { isAbsolute as isAbsolute3, basename as basename4, join as join4, parse, resolve as resolve3 } from "node:path";
+var GIT_TIMEOUT_MS = 1e4;
+function realpathSafe(path) {
+  try {
+    return realpathSync3(path);
+  } catch {
+    return resolve3(path);
+  }
+}
+function isUnsafeBootstrapDirectory(target, options) {
+  const parsed = parse(target);
+  if (target === parsed.root) {
+    return `refusing to initialize Git at filesystem root (${target})`;
+  }
+  const sysHome = homedir();
+  if (sysHome !== "" && (target === resolve3(sysHome) || target === realpathSafe(sysHome))) {
+    return `refusing to initialize Git directly in home directory (${target})`;
+  }
+  if (typeof options?.userHome === "string" && options.userHome.trim() !== "") {
+    const uh = options.userHome.trim();
+    if (target === resolve3(uh) || target === realpathSafe(uh)) {
+      return `refusing to initialize Git directly in user home directory (${target})`;
+    }
+  }
+  const paseoHome = options?.paseoHome ?? options?.home;
+  if (typeof paseoHome === "string" && paseoHome.trim() !== "") {
+    const ph = paseoHome.trim();
+    const resPh = resolve3(ph);
+    const normPh = realpathSafe(ph);
+    if (target === resPh || target === normPh || target.startsWith(`${resPh}/`) || target.startsWith(`${normPh}/`)) {
+      return `refusing to initialize Git inside Paseo home directory (${target})`;
+    }
+  }
+  if (typeof options?.stateDir === "string" && options.stateDir.trim() !== "") {
+    const sd = options.stateDir.trim();
+    const resSd = resolve3(sd);
+    const normSd = realpathSafe(sd);
+    if (target === resSd || target === normSd || target.startsWith(`${resSd}/`) || target.startsWith(`${normSd}/`)) {
+      return `refusing to initialize Git inside Factory state directory (${target})`;
+    }
+  }
+  if (target.includes("/plugin-state/paseo-factory")) {
+    return `refusing to initialize Git inside Factory state directory (${target})`;
+  }
+  return null;
+}
+function resolveProject(cwd) {
+  let stdout;
+  try {
+    stdout = execFileSync("git", ["rev-parse", "--show-toplevel", "--git-common-dir"], {
+      cwd,
+      encoding: "utf8",
+      timeout: GIT_TIMEOUT_MS,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+  } catch (err) {
+    const stderr = err.stderr;
+    const first = typeof stderr === "string" && stderr.trim() !== "" ? stderr.trim().split("\n")[0] : "";
+    return { ok: false, reason: first !== "" ? first : err instanceof Error ? err.message : String(err) };
+  }
+  const lines = stdout.trim().split("\n");
+  const root = lines[0]?.trim() ?? "";
+  const commonDirRaw = lines[1]?.trim() ?? "";
+  if (root === "" || commonDirRaw === "") {
+    return { ok: false, reason: `git did not answer --show-toplevel --git-common-dir for ${cwd}` };
+  }
+  const commonDirAbs = isAbsolute3(commonDirRaw) ? commonDirRaw : resolve3(cwd, commonDirRaw);
+  let gitCommonDir;
+  try {
+    gitCommonDir = realpathSync3(commonDirAbs);
+  } catch {
+    return { ok: false, reason: `the git common dir ${commonDirAbs} of ${root} does not exist on disk` };
+  }
+  const hash = createHash3("sha1").update(gitCommonDir).digest("hex").slice(0, 6);
+  return { ok: true, root, gitCommonDir, slug: `${basename4(root)}-${hash}` };
+}
+function projectStateDir(stateDir, projectSlug) {
+  return join4(stateDir, "projects", projectSlug);
+}
+var LEAD_ROTATION_STATES = ["normal", "rotation_pending", "handing_over"];
+function readProjectRegistration(stateDir, slug) {
+  const path = join4(projectStateDir(stateDir, slug), "project.json");
+  if (!existsSync2(path)) return void 0;
+  try {
+    const parsed = JSON.parse(readFileSync4(path, "utf8"));
+    if (typeof parsed.root !== "string" || parsed.root === "") return void 0;
+    const taskWorkspaces = {};
+    if (parsed.taskWorkspaces !== void 0 && parsed.taskWorkspaces !== null && typeof parsed.taskWorkspaces === "object" && !Array.isArray(parsed.taskWorkspaces)) {
+      for (const [task, wsId] of Object.entries(parsed.taskWorkspaces)) {
+        if (typeof wsId === "string" && wsId !== "") taskWorkspaces[task] = wsId;
+      }
+    }
+    const dispatchers = [];
+    if (Array.isArray(parsed.dispatchers)) {
+      for (const id of parsed.dispatchers) {
+        if (typeof id === "string" && id.trim() !== "" && !dispatchers.includes(id.trim())) {
+          dispatchers.push(id.trim());
+        }
+      }
+    }
+    return {
+      slug,
+      root: parsed.root,
+      ...typeof parsed.name === "string" && parsed.name !== "" ? { name: parsed.name } : {},
+      ...typeof parsed.commonDir === "string" && parsed.commonDir !== "" ? { commonDir: parsed.commonDir } : {},
+      ...typeof parsed.supervisor === "string" && parsed.supervisor !== "" ? { supervisor: parsed.supervisor } : {},
+      ...typeof parsed.lead === "string" && parsed.lead !== "" ? { lead: parsed.lead } : {},
+      ...typeof parsed.rotationState === "string" && LEAD_ROTATION_STATES.includes(parsed.rotationState) ? { rotationState: parsed.rotationState } : {},
+      ...typeof parsed.handoffRequestedAt === "string" && parsed.handoffRequestedAt !== "" ? { handoffRequestedAt: parsed.handoffRequestedAt } : {},
+      ...typeof parsed.workspaceId === "string" && parsed.workspaceId !== "" ? { workspaceId: parsed.workspaceId } : {},
+      ...typeof parsed.paseoProjectId === "string" && parsed.paseoProjectId !== "" ? { paseoProjectId: parsed.paseoProjectId } : {},
+      ...Object.keys(taskWorkspaces).length > 0 ? { taskWorkspaces } : {},
+      ...dispatchers.length > 0 ? { dispatchers } : {}
+    };
+  } catch {
+    return void 0;
+  }
+}
+function listProjectRegistrations(stateDir) {
+  const projectsDir = join4(stateDir, "projects");
+  let slugs;
+  try {
+    slugs = readdirSync3(projectsDir);
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const slug of slugs) {
+    const registration = readProjectRegistration(stateDir, slug);
+    if (registration !== void 0) out.push(registration);
+  }
+  return out.sort((a, b) => a.slug.localeCompare(b.slug));
+}
+function isSeatAgentForDiscovery(agent) {
+  const seat = agent.labels?.seat;
+  if (seat !== void 0 && seat !== "") return true;
+  const project = agent.labels?.project;
+  if (project !== void 0 && project !== "") return true;
+  const provider = agent.provider;
+  if (typeof provider === "string" && provider !== "") {
+    const head = provider.split("/")[0];
+    if (head === "factory-supervisor" || head === "factory-lead" || head === "factory-peer") return true;
+  }
+  return false;
+}
+function inferAgentSeatRole(agent) {
+  if (agent.labels?.seat === "supervisor" || agent.labels?.seat === "lead") {
+    return agent.labels.seat;
+  }
+  if (typeof agent.provider === "string" && agent.provider !== "") {
+    const head = agent.provider.split("/")[0];
+    if (head === "factory-supervisor") return "supervisor";
+    if (head === "factory-lead") return "lead";
+  }
+  return null;
+}
+function discoverProjects(stateDir, liveSeatAgents, home) {
+  const entries = /* @__PURE__ */ new Map();
+  const projectsPrefix = `${resolve3(stateDir, "projects")}/`;
+  for (const registration of listProjectRegistrations(stateDir)) {
+    const missing = !existsSync2(registration.root);
+    entries.set(registration.slug, {
+      slug: registration.slug,
+      name: registration.name ?? (basename4(registration.root) || registration.slug),
+      root: registration.root,
+      commonDir: registration.commonDir ?? join4(registration.root, ".git"),
+      ...missing ? { missingRoot: true } : {},
+      supervisorId: registration.supervisor ?? null,
+      leadId: registration.lead ?? null,
+      activeTaskCount: 0
+    });
+  }
+  for (const agent of liveSeatAgents) {
+    if (!isSeatAgentForDiscovery(agent)) continue;
+    const seatRole = inferAgentSeatRole(agent);
+    const agentId = typeof agent.id === "string" && agent.id !== "" ? agent.id : null;
+    const slug = agent.labels?.project;
+    if (typeof slug === "string" && slug !== "") {
+      const existing = entries.get(slug);
+      if (existing === void 0) {
+        const root = agent.cwd ?? null;
+        entries.set(slug, {
+          slug,
+          name: (root !== null ? basename4(root) : "") || slug,
+          root,
+          commonDir: root !== null ? join4(root, ".git") : ".git",
+          supervisorId: seatRole === "supervisor" ? agentId : null,
+          leadId: seatRole === "lead" ? agentId : null,
+          activeTaskCount: 0
+        });
+      } else if (agentId !== null) {
+        if (seatRole === "supervisor" && existing.supervisorId === null) existing.supervisorId = agentId;
+        if (seatRole === "lead" && existing.leadId === null) existing.leadId = agentId;
+      }
+      continue;
+    }
+    if (typeof agent.cwd === "string" && agent.cwd !== "") {
+      const resolved = resolveProject(agent.cwd);
+      if (resolved.ok && !resolve3(resolved.root).startsWith(projectsPrefix)) {
+        const existing = entries.get(resolved.slug);
+        if (existing === void 0) {
+          entries.set(resolved.slug, {
+            slug: resolved.slug,
+            name: basename4(resolved.root) || resolved.slug,
+            root: resolved.root,
+            commonDir: resolved.gitCommonDir,
+            supervisorId: seatRole === "supervisor" ? agentId : null,
+            leadId: seatRole === "lead" ? agentId : null,
+            activeTaskCount: 0
+          });
+        } else if (agentId !== null) {
+          if (seatRole === "supervisor" && existing.supervisorId === null) existing.supervisorId = agentId;
+          if (seatRole === "lead" && existing.leadId === null) existing.leadId = agentId;
+        }
+      }
+    }
+  }
+  if (home !== void 0) {
+    try {
+      const parsed = JSON.parse(readFileSync4(join4(home, "projects", "projects.json"), "utf8"));
+      const list = Array.isArray(parsed) ? parsed : parsed !== null && typeof parsed === "object" && Array.isArray(parsed.projects) ? parsed.projects : [];
+      for (const entry of list) {
+        if (entry === null || typeof entry !== "object") continue;
+        const record2 = entry;
+        if (record2.archivedAt !== null && record2.archivedAt !== void 0 || typeof record2.rootPath !== "string" || record2.rootPath === "") {
+          continue;
+        }
+        const resolved = resolveProject(record2.rootPath);
+        if (resolved.ok) {
+          if (!resolve3(resolved.root).startsWith(projectsPrefix) && !entries.has(resolved.slug)) {
+            entries.set(resolved.slug, {
+              slug: resolved.slug,
+              name: basename4(resolved.root) || resolved.slug,
+              root: resolved.root,
+              commonDir: resolved.gitCommonDir,
+              supervisorId: null,
+              leadId: null,
+              activeTaskCount: 0
+            });
+          }
+        } else if (existsSync2(record2.rootPath)) {
+          const abs = resolve3(record2.rootPath);
+          const normRoot = realpathSafe(abs);
+          if (!normRoot.startsWith(projectsPrefix) && isUnsafeBootstrapDirectory(normRoot, { stateDir, paseoHome: home }) === null) {
+            const commonDir = join4(normRoot, ".git");
+            const hash = createHash3("sha1").update(commonDir).digest("hex").slice(0, 6);
+            const slug = `${basename4(normRoot)}-${hash}`;
+            if (!entries.has(slug)) {
+              entries.set(slug, {
+                slug,
+                name: basename4(normRoot) || slug,
+                root: normRoot,
+                commonDir,
+                supervisorId: null,
+                leadId: null,
+                activeTaskCount: 0
+              });
+            }
+          }
+        }
+      }
+    } catch {
+    }
+  }
+  return [...entries.values()].sort((a, b) => a.slug.localeCompare(b.slug));
+}
 
 // src/ledger.ts
-import { randomUUID as randomUUID3 } from "node:crypto";
-import { appendFileSync, closeSync as closeSync2, fsyncSync as fsyncSync2, ftruncateSync, mkdirSync as mkdirSync7, openSync as openSync2, readFileSync as readFileSync8, statSync as statSync2, writeSync } from "node:fs";
-import { dirname as dirname9 } from "node:path";
+import { randomUUID as randomUUID2 } from "node:crypto";
+import { appendFileSync, closeSync as closeSync2, fsyncSync as fsyncSync2, ftruncateSync, mkdirSync as mkdirSync3, openSync as openSync2, readFileSync as readFileSync5, statSync as statSync2, writeSync } from "node:fs";
+import { dirname as dirname4 } from "node:path";
 var Ledger = class _Ledger {
   #path;
   #events = [];
@@ -1991,10 +1347,10 @@ var Ledger = class _Ledger {
   }
   /** Loads and validates an existing ledger, or starts a fresh one at seq 1. */
   static open(path, options = {}) {
-    mkdirSync7(dirname9(path), { recursive: true });
+    mkdirSync3(dirname4(path), { recursive: true });
     let raw;
     try {
-      raw = readFileSync8(path, "utf8");
+      raw = readFileSync5(path, "utf8");
     } catch (err) {
       if (err.code === "ENOENT") raw = "";
       else throw err;
@@ -2013,7 +1369,7 @@ var Ledger = class _Ledger {
     const identity = {};
     if (this.#schema !== void 0) {
       if (this.#writerId === void 0 || this.#writerId.trim() === "") throw new FactoryError("writer-identity-required", "v2 append requires a demonstrable local writer identity; a copied schema fence is not writer authority");
-      const eventId = `event:${randomUUID3()}`;
+      const eventId = `event:${randomUUID2()}`;
       const task = "task" in evt ? evt.task : void 0;
       const epoch = evt.event === "contract_set" ? eventId : task === void 0 ? void 0 : this.#events.findLast((event) => event.event === "contract_set" && event.task === task)?.epoch_id;
       if (task !== void 0 && epoch === void 0 && !eventAllowsUnboundEpoch(evt.event)) throw new FactoryError("invalid-event-epoch", `Task ${task} has no current Contract epoch`);
@@ -2058,7 +1414,7 @@ var Ledger = class _Ledger {
   }
   #readDisk() {
     try {
-      return readFileSync8(this.#path, "utf8");
+      return readFileSync5(this.#path, "utf8");
     } catch (error) {
       if (error.code === "ENOENT") return "";
       throw error;
@@ -2186,8 +1542,8 @@ var LedgerAdmission = class _LedgerAdmission {
    * deliberately fails closed instead of stealing an unverifiable new owner. */
   static reserve(path) {
     path = historyTargetPath(path);
-    makeDurableDirectory(dirname10(path));
-    const guard = join10(dirname10(path), "ledger-owner-acquire");
+    makeDurableDirectory(dirname5(path));
+    const guard = join5(dirname5(path), "ledger-owner-acquire");
     let fd;
     try {
       fd = openSync3(guard, "wx", 384);
@@ -2200,19 +1556,19 @@ var LedgerAdmission = class _LedgerAdmission {
     } finally {
       closeSync3(fd);
     }
-    fsyncDirectory(dirname10(path));
+    fsyncDirectory(dirname5(path));
     return () => {
-      rmSync5(guard);
-      fsyncDirectory(dirname10(path));
+      rmSync2(guard);
+      fsyncDirectory(dirname5(path));
     };
   }
   static assertAvailable(path) {
     path = historyTargetPath(path);
     const owner = owners.get(historyTargetPath(path));
     if (owner !== void 0 && (owner.#active > 0 || owner.#timer !== void 0 || owner.#maintenance > 0 || owner.#exclusive || owner.#waiters.size > 0)) throw new FactoryError("ledger-writer-active", "another Factory is using this Ledger");
-    const marker = join10(dirname10(path), "ledger-owner.json");
-    if (!existsSync6(marker)) return;
-    const prior = JSON.parse(readFileSync9(marker, "utf8"));
+    const marker = join5(dirname5(path), "ledger-owner.json");
+    if (!existsSync3(marker)) return;
+    const prior = JSON.parse(readFileSync6(marker, "utf8"));
     if (!Number.isSafeInteger(prior.pid) || prior.pid < 1) throw new FactoryError("ledger-owner-unreadable", "Ledger owner registration is invalid");
     if (prior.pid === process.pid) return;
     try {
@@ -2231,7 +1587,7 @@ var LedgerAdmission = class _LedgerAdmission {
       if (id !== void 0) throw new FactoryError("upgrade-recovery-required", `Upgrade ${id} is incomplete; resume or restore before Vault materialization`);
     };
     assertReady();
-    const path = join10(stateDir, "ledger.jsonl");
+    const path = join5(stateDir, "ledger.jsonl");
     const owner = owners.get(historyTargetPath(path));
     if (owner !== void 0) return owner.withExclusiveMaintenance(() => {
       assertReady();
@@ -2259,7 +1615,7 @@ var LedgerAdmission = class _LedgerAdmission {
     if (lease?.live && lease.state === historyTargetPath(stateDir)) return fn();
     const id = pendingUpgradeFor(stateDir);
     if (id !== void 0) throw new FactoryError("upgrade-recovery-required", `Upgrade ${id} is incomplete; resume or restore before changing Vault configuration`);
-    const path = join10(stateDir, "ledger.jsonl");
+    const path = join5(stateDir, "ledger.jsonl");
     const owner = owners.get(historyTargetPath(path));
     if (owner !== void 0) return owner.runSync(fn);
     const release = _LedgerAdmission.reserve(path);
@@ -2280,7 +1636,7 @@ var LedgerAdmission = class _LedgerAdmission {
   #waiters = /* @__PURE__ */ new Set();
   #timer;
   #unobserve;
-  #token = randomUUID4();
+  #token = randomUUID3();
   #error;
   #targets = /* @__PURE__ */ new Map();
   #fault;
@@ -2293,7 +1649,7 @@ var LedgerAdmission = class _LedgerAdmission {
     if (previous !== void 0 && (previous.#active > 0 || previous.#maintenance > 0 || previous.#exclusive || previous.#waiters.size > 0)) throw new FactoryError("ledger-writer-active", "another Factory is using this Ledger");
     previous?.stop();
     owners.set(historyTargetPath(ledger.path), this);
-    writeDurableFile(join10(dirname10(ledger.path), "ledger-owner.json"), JSON.stringify({ version: 1, pid: process.pid, token: this.#token, target: historyTargetPath(ledger.path), startedAt: (/* @__PURE__ */ new Date()).toISOString() }));
+    writeDurableFile(join5(dirname5(ledger.path), "ledger-owner.json"), JSON.stringify({ version: 1, pid: process.pid, token: this.#token, target: historyTargetPath(ledger.path), startedAt: (/* @__PURE__ */ new Date()).toISOString() }));
     ledger.setAdmissionGuards(() => {
       this.#assertOwner();
       this.#assertNormalWork();
@@ -2416,7 +1772,7 @@ var LedgerAdmission = class _LedgerAdmission {
   /** Synchronous activation cannot interleave with an ordinary JS mutation. */
   drain() {
     if (this.#stopped || owners.get(historyTargetPath(this.ledger.path)) !== this) return;
-    const root = owners.get(historyTargetPath(join10(this.stateDir, "ledger.jsonl")));
+    const root = owners.get(historyTargetPath(join5(this.stateDir, "ledger.jsonl")));
     if (root !== void 0 && root !== this && (root.#active > 0 || root.#exclusive || root.#maintenance > 0)) return;
     if (pendingUpgradeFor(this.stateDir) !== void 0) return;
     if (this.#draining || this.#active > 0 || this.#exclusive || this.#maintenance > 0) return;
@@ -2466,7 +1822,7 @@ var LedgerAdmission = class _LedgerAdmission {
         manifest.afterHash = historyHash(plan.lines);
         manifest.added = plan.additions.length;
         manifest.duplicates = plan.duplicates.length;
-        writeDurableFile(join10(importDirectory(this.ledger.path, manifest.id), "prepared.jsonl"), plan.lines);
+        writeDurableFile(join5(importDirectory(this.ledger.path, manifest.id), "prepared.jsonl"), plan.lines);
         saveImportManifest(manifest);
         this.#fault?.("prepared");
         this.ledger.activateHistory(plan.lines, { expectedHash: plan.baseHash, afterRename: () => this.#fault?.("renamed") });
@@ -2479,7 +1835,7 @@ var LedgerAdmission = class _LedgerAdmission {
       this.#error = void 0;
       for (const path of this.#projectTargets()) {
         if (!readLedgerImports(path).some((item) => (item.status === "pending" || item.status === "staged") && (item.materialization === void 0 || item.materialization.status === "applied"))) continue;
-        const owner = this.#projectOwner(basename6(dirname10(path)));
+        const owner = this.#projectOwner(basename5(dirname5(path)));
         owner.drain();
         if (owner.error !== void 0) this.#error = owner.error;
       }
@@ -2492,17 +1848,17 @@ var LedgerAdmission = class _LedgerAdmission {
   }
   #raw() {
     try {
-      return readFileSync9(this.ledger.path, "utf8");
+      return readFileSync6(this.ledger.path, "utf8");
     } catch (error) {
       if (error.code === "ENOENT") return "";
       throw error;
     }
   }
   #projectTargets() {
-    if (resolve5(dirname10(this.ledger.path)) !== resolve5(this.stateDir)) return [];
-    const projects = join10(this.stateDir, "projects");
+    if (resolve4(dirname5(this.ledger.path)) !== resolve4(this.stateDir)) return [];
+    const projects = join5(this.stateDir, "projects");
     try {
-      return readdirSync6(projects, { withFileTypes: true }).filter((entry) => entry.isDirectory() && readProjectRegistration(this.stateDir, entry.name) !== void 0).map((entry) => join10(projects, entry.name, "ledger.jsonl"));
+      return readdirSync4(projects, { withFileTypes: true }).filter((entry) => entry.isDirectory() && readProjectRegistration(this.stateDir, entry.name) !== void 0).map((entry) => join5(projects, entry.name, "ledger.jsonl"));
     } catch (error) {
       if (error.code === "ENOENT") return [];
       throw error;
@@ -2537,8 +1893,8 @@ var LedgerAdmission = class _LedgerAdmission {
   }
   #bindings(sources) {
     const knownRoots = /* @__PURE__ */ new Set();
-    const global = historyTargetPath(this.ledger.path) === historyTargetPath(join10(this.stateDir, "ledger.jsonl"));
-    const registrations = global ? listProjectRegistrations(this.stateDir) : [readProjectRegistration(this.stateDir, basename6(dirname10(this.ledger.path)))].filter((project) => project !== void 0);
+    const global = historyTargetPath(this.ledger.path) === historyTargetPath(join5(this.stateDir, "ledger.jsonl"));
+    const registrations = global ? listProjectRegistrations(this.stateDir) : [readProjectRegistration(this.stateDir, basename5(dirname5(this.ledger.path)))].filter((project) => project !== void 0);
     for (const project of registrations) {
       try {
         knownRoots.add(realpathSync4(project.root));
@@ -2573,14 +1929,14 @@ var LedgerAdmission = class _LedgerAdmission {
         const commits = events.filter((event) => event.event === "gate_finished" || event.event === "claim_reported").map((event) => event.event === "gate_finished" || event.event === "claim_reported" ? event.sha : void 0).filter((sha) => typeof sha === "string" && /^[a-f0-9]{40}$/i.test(sha) && this.#git(root, ["rev-parse", "--verify", `${sha}^{commit}`]) === sha);
         binding.commits = [...new Set(commits)];
         const dispatch = this.ledger.events.findLast((event) => event.event === "spawn_dispatched" && event.epoch_id === contract.epoch_id);
-        if (dispatch?.event === "spawn_dispatched" && dispatch.worktree !== void 0 && existsSync6(dispatch.worktree)) binding.worktree = dispatch.worktree;
+        if (dispatch?.event === "spawn_dispatched" && dispatch.worktree !== void 0 && existsSync3(dispatch.worktree)) binding.worktree = dispatch.worktree;
         const execution = binding.worktree ?? root;
         const gates = events.filter((event) => event.event === "gate_finished");
         binding.artifactPresent = gates.every((event) => event.event !== "gate_finished" || event.verdict !== "green" || event.sha !== void 0 && this.#git(execution, ["rev-parse", "HEAD"]) === event.sha && this.#git(execution, ["status", "--porcelain"]) === "" && (contract.artifact.trim() === "" || inspectArtifact(execution, contract.artifact).present));
         binding.files = events.flatMap((event) => {
           const prior = this.ledger.events.find((local) => local.event_id === event.event_id);
           const path = prior?.event === "gate_finished" ? prior.outputPath : prior?.event === "report_written" ? prior.path : void 0;
-          return path !== void 0 && existsSync6(path) ? [{ eventId: event.event_id, path }] : [];
+          return path !== void 0 && existsSync3(path) ? [{ eventId: event.event_id, path }] : [];
         });
         binding.landedCommits = this.ledger.events.filter((event) => event.event === "attempt_accepted" && event.epoch_id === contract.epoch_id && event.landing === "landed").flatMap((accepted) => this.ledger.events.filter((event) => event.event === "gate_finished" && event.epoch_id === accepted.epoch_id && "attempt" in accepted && event.attempt === accepted.attempt).flatMap((event) => event.event === "gate_finished" && event.sha !== void 0 ? [event.sha] : []));
         bindings.set(binding.epochId, binding);
@@ -2591,9 +1947,9 @@ var LedgerAdmission = class _LedgerAdmission {
   start() {
     this.#assertOwner();
     if (this.#timer !== void 0) return;
-    const marker = join10(dirname10(this.ledger.path), "ledger-owner.json");
-    if (existsSync6(marker)) {
-      const prior = JSON.parse(readFileSync9(marker, "utf8"));
+    const marker = join5(dirname5(this.ledger.path), "ledger-owner.json");
+    if (existsSync3(marker)) {
+      const prior = JSON.parse(readFileSync6(marker, "utf8"));
       if (prior.pid !== process.pid) {
         try {
           process.kill(prior.pid, 0);
@@ -2615,10 +1971,10 @@ var LedgerAdmission = class _LedgerAdmission {
     this.#unobserve();
     if (owners.get(historyTargetPath(this.ledger.path)) === this) owners.delete(historyTargetPath(this.ledger.path));
     for (const owner of this.#targets.values()) owner.stop();
-    const marker = join10(dirname10(this.ledger.path), "ledger-owner.json");
+    const marker = join5(dirname5(this.ledger.path), "ledger-owner.json");
     try {
-      const prior = JSON.parse(readFileSync9(marker, "utf8"));
-      if (prior.token === this.#token) rmSync5(marker);
+      const prior = JSON.parse(readFileSync6(marker, "utf8"));
+      if (prior.token === this.#token) rmSync2(marker);
     } catch {
     }
   }
@@ -2626,8 +1982,8 @@ var LedgerAdmission = class _LedgerAdmission {
 
 // src/vault-envelope.ts
 import { randomBytes, scryptSync, createCipheriv, createDecipheriv } from "node:crypto";
-import { readFileSync as readFileSync10, mkdirSync as mkdirSync8, writeFileSync as writeFileSync6, copyFileSync } from "node:fs";
-import { basename as basename7, dirname as dirname11 } from "node:path";
+import { readFileSync as readFileSync7, mkdirSync as mkdirSync4, writeFileSync as writeFileSync3, copyFileSync } from "node:fs";
+import { basename as basename6, dirname as dirname6 } from "node:path";
 var OBFUSCATION_MASK = Buffer.from("paseo-factory-vault-obfuscation-v1", "utf8");
 function sealVaultBuffer(plain, passphrase) {
   if (passphrase !== void 0 && passphrase !== "") {
@@ -2718,12 +2074,12 @@ function decodeEnvelopeField(envelope, field, length) {
 function stageRuntimeFileIntoCheckout(runtimePath, target, passphrase, relPath) {
   let existing = null;
   try {
-    existing = readFileSync10(target);
+    existing = readFileSync7(target);
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
     existing = null;
   }
-  const runtimeBytes = readFileSync10(runtimePath);
+  const runtimeBytes = readFileSync7(runtimePath);
   const envelope = existing === null ? null : parseEnvelope(existing);
   if (envelope !== null && existing !== null) {
     if (runtimeBytes.equals(existing)) return;
@@ -2736,7 +2092,7 @@ function stageRuntimeFileIntoCheckout(runtimePath, target, passphrase, relPath) 
       } catch {
         throw new FactoryError(
           "vault-push-passphrase-required",
-          `vault push cannot stage ${basename7(target)}: the checkout holds a sealed envelope and no passphrase resolves to verify the runtime copy against it \u2014 restore the passphrase or stage an envelope (vault seal)`
+          `vault push cannot stage ${basename6(target)}: the checkout holds a sealed envelope and no passphrase resolves to verify the runtime copy against it \u2014 restore the passphrase or stage an envelope (vault seal)`
         );
       }
       if (unsealed.equals(runtimeBytes)) return;
@@ -2745,19 +2101,19 @@ function stageRuntimeFileIntoCheckout(runtimePath, target, passphrase, relPath) 
 `,
         "utf8"
       );
-      mkdirSync8(dirname11(target), { recursive: true });
-      writeFileSync6(target, resealed);
+      mkdirSync4(dirname6(target), { recursive: true });
+      writeFileSync3(target, resealed);
       return;
     }
   }
   if ((relPath === "secrets/shared/gplay-service-account.json" || relPath === "secrets/shared/eye.json" || relPath === "secrets/shared/mcp-oauth.json") && parseEnvelope(runtimeBytes) === null) {
     const sealed = Buffer.from(`${JSON.stringify(sealVaultBuffer(runtimeBytes, passphrase))}
 `, "utf8");
-    mkdirSync8(dirname11(target), { recursive: true });
-    writeFileSync6(target, sealed);
+    mkdirSync4(dirname6(target), { recursive: true });
+    writeFileSync3(target, sealed);
     return;
   }
-  mkdirSync8(dirname11(target), { recursive: true });
+  mkdirSync4(dirname6(target), { recursive: true });
   copyFileSync(runtimePath, target);
 }
 function tryUnseal(raw, passphrase, then) {
@@ -2772,11 +2128,332 @@ function tryUnseal(raw, passphrase, then) {
 }
 
 // src/helper-mcp-vault.ts
-import { existsSync as existsSync7 } from "node:fs";
-import { join as join11 } from "node:path";
+import { existsSync as existsSync6 } from "node:fs";
+import { join as join8 } from "node:path";
+
+// src/helper-mcp-store.ts
+import { randomUUID as randomUUID4 } from "node:crypto";
+import { chmodSync, mkdirSync as mkdirSync5, readFileSync as readFileSync8, renameSync as renameSync2, rmSync as rmSync3, writeFileSync as writeFileSync4 } from "node:fs";
+import { dirname as dirname7 } from "node:path";
+function readHelperJson(path, strict = false) {
+  try {
+    const value = JSON.parse(readFileSync8(path, "utf8"));
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Expected a JSON object");
+    return value;
+  } catch (error) {
+    if (strict && error.code !== "ENOENT") throw new Error("Cannot safely read existing Helper MCP state; repair the JSON or its file permissions before syncing");
+    return {};
+  }
+}
+function writeHelperJson(path, value) {
+  mkdirSync5(dirname7(path), { recursive: true, mode: 448 });
+  const temporary = `${path}.${randomUUID4()}.tmp`;
+  try {
+    writeFileSync4(temporary, JSON.stringify(value, null, 2) + "\n", { mode: 384 });
+    renameSync2(temporary, path);
+    chmodSync(path, 384);
+  } finally {
+    rmSync3(temporary, { force: true });
+  }
+}
+
+// src/scrum/open-design.ts
+import { existsSync as existsSync4, mkdirSync as mkdirSync6, readdirSync as readdirSync5, writeFileSync as writeFileSync5 } from "node:fs";
+import { dirname as dirname8, join as join6, resolve as resolve5 } from "node:path";
+var OPEN_DESIGN_DIRECTIONS = [
+  { id: "editorial-monocle", colors: ["#f7f8f4", "#214f3d", "#162019", "#e9f0e5"], typography: "Georgia display; system UI sans", craft: "Generous breathing room, warm paper and sage tonal surfaces" },
+  { id: "modern-minimal", colors: ["#fafafa", "#09090b", "#e4e4e7"], typography: "System sans; tabular numerals", craft: "Crisp monochrome, hairline borders and precision grids" },
+  { id: "human-approachable", colors: ["#fbf9f5", "#a34e35", "#214f3d"], typography: "Georgia display; system UI sans", craft: "Warm cream, soft pills and friendly progressive wizards" },
+  { id: "tech-utility", colors: ["#f8fafc", "#0f172a", "#475569"], typography: "System sans; monospace telemetry", craft: "Dense slate utility, keyboard-first controls" },
+  { id: "brutalist-experimental", colors: ["#ffffff", "#000000", "#dedede"], typography: "Bold editorial display; system sans", craft: "High contrast editorial grids and bold structural rules" }
+];
+var OPEN_DESIGN_CONTRACT = `Open Design UX contract:
+Bind one direction or installed Brand Design System in DESIGN.md, styles.css :root tokens and mockups/design-manifest.json. Embedded directions: ${OPEN_DESIGN_DIRECTIONS.map((d) => `${d.id}: ${d.colors.join(", ")}; ${d.typography}; ${d.craft}`).join("\n")}.
+One primary action per screen in thumb zone. Decompose journeys into focused steps with choice chips, radio cards, bottom sheets and SVG charts. Use drenched hero surfaces, borderless soft tonal surfaces, consistent system/editorial font pairings, 44px touch targets, visible focus and reduced motion. Card paragraphs stay within 280 visible characters.
+For mobile, start from the complete staged .od-frames/iphone.html, android.html or neutral.html shell and place product content in .phone-content. Preserve hardware chrome, safe areas and separate --phone-* tokens. Use .od-frames/layout.css (@layer od-layout). Desktop/responsive web pages are their own product surface. Reserve space for fixed navigation and scroll content internally.
+Deliver mockups/index.html (interactive), screens.html (story-grouped Flow Board with .frame-connection arrows and a System & Edge States group), styles.css, app.js, screens.css, screens-data.js and design-manifest.json {directionId or designSystemId, tokens, journeyGroups, screens, componentPatterns}. Expand journeys into as many focused screens as needed. EXPERIENCE.md declares Core Screens with ## Screen: kebab-case-id, Surface: mobile | desktop | responsive, primary journey and state behaviors.
+Prototype routing reads ?screen=<id>&state=<state>, reflects root dataset.screen/state and handles scrum:set-state messages. Preserve app navigation for contextual empty/loading/error/offline/permission-denied states. Keep screen/state controls in the outer Studio. Use product language and SVG icons; keep internal spec identifiers in documentation.
+Record actual offline Chromium evidence in browser.json: network: disabled, consoleErrors: [], pageErrors: [], viewports with screen, width/height, scrollWidth/clientWidth and SHA-256 PNG screenshot path/hash. Capture screens-board (screens-board.png) and every Core Screen at its declared surface (Mobile 390x844, Desktop 1280x800, responsive both). Record passing keyboard populated checks for each Core Screen and all five system states through edge screens/state handlers, or the legacy six-state matrix. Record detector {tool: open-design, passed: true, nonAdvisoryCount: 0, viewportsChecked, findings}. Derive it from factory open-design lint --dir <mockupsDir> and actual viewport checks; never invent results. Run lint-scrum-doc --kind ux before Claim. Dev consumes the approved manifest, DESIGN.md, styles.css and screens.html; UI Dev and QA supply the same offline evidence before sign-off.`;
+function inspectOpenDesignHost(environment = process.env) {
+  const resourceRoot = environment.OPEN_DESIGN_RESOURCE_ROOT ?? (process.platform === "win32" ? join6(environment.LOCALAPPDATA ?? "", "Programs/Open Design/resources/open-design") : "/Applications/Open Design.app/Contents/Resources/open-design");
+  const available = existsSync4(resourceRoot);
+  const cli = join6(dirname8(resourceRoot), "app/prebundled/daemon/daemon-cli.mjs");
+  const catalog = join6(resourceRoot, "design-systems");
+  const designSystems = existsSync4(catalog) ? readdirSync5(catalog).filter((id) => existsSync4(join6(catalog, id, "tokens.css")) && existsSync4(join6(catalog, id, "DESIGN.md"))).sort().map((id) => ({ id, directory: join6(catalog, id), tokens: join6(catalog, id, "tokens.css"), design: join6(catalog, id, "DESIGN.md"), usage: join6(catalog, id, "USAGE.md"), components: join6(catalog, id, "components.manifest.json") })) : [];
+  const binary = process.platform === "darwin" ? resolve5(resourceRoot, "../../MacOS/Open Design") : process.platform === "win32" ? resolve5(resourceRoot, "../../Open Design.exe") : process.execPath;
+  return { binary: existsSync4(binary) ? binary : process.execPath, available: available || !!environment.OPEN_DESIGN_DAEMON_URL, resourceRoot: available ? resourceRoot : null, daemonUrl: environment.OPEN_DESIGN_DAEMON_URL ?? null, cli: existsSync4(cli) ? cli : null, designSystems };
+}
+
+// src/helper-mcp-sync.ts
+import { createHash as createHash4 } from "node:crypto";
+import { existsSync as existsSync5, accessSync, constants, readdirSync as readdirSync6, lstatSync, mkdirSync as mkdirSync7, rmSync as rmSync4, symlinkSync } from "node:fs";
+import { homedir as homedir2 } from "node:os";
+import { basename as basename7, delimiter, dirname as dirname9, isAbsolute as isAbsolute4, join as join7 } from "node:path";
+var ALL_HELPER_TARGET_PROVIDERS = ["pi", "claude", "codex", "opencode"];
+function paths(options) {
+  const userHome = options.userHome ?? homedir2();
+  return { userHome, peerHome: options.roleHome ?? join7(options.stateDir, "pi-agent/agent"), pi: options.piAgentDir ?? join7(userHome, ".pi/agent"), ag: join7(userHome, ".gemini/antigravity/mcp_oauth_tokens.json") };
+}
+function helperOAuthPath(agentDir, name) {
+  return join7(agentDir, "mcp-oauth", `sha256-${createHash4("sha256").update(name).digest("hex")}`, "tokens.json");
+}
+function endpoint(url) {
+  try {
+    const u = new URL(url);
+    return u.origin + u.pathname.replace(/\/$/, "");
+  } catch {
+    return url;
+  }
+}
+function canonical(name, entry) {
+  if (/^expo[-_]mcp$/i.test(name) || typeof entry.url === "string" && endpoint(entry.url) === "https://mcp.expo.dev/mcp") return "expo-mcp";
+  if (/^open[-_]design$/i.test(name)) return "open-design";
+  const invocation = [entry.command, ...Array.isArray(entry.args) ? entry.args : []].join(" ");
+  if (/\bchrome-devtools-mcp(?:@|\b)/.test(invocation)) return "chrome-devtools-mcp";
+  if (invocation.includes("@z_ai/mcp-server")) return "zai-vision";
+  return name;
+}
+function strings(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return void 0;
+  return Object.fromEntries(Object.entries(value).filter((e) => typeof e[1] === "string"));
+}
+function expand(value) {
+  return value.replace(/\$\{(?:env:)?([A-Za-z_][A-Za-z_0-9]*)\}/g, (_, key) => process.env[key] ?? "");
+}
+function credentialScore(entry, options) {
+  return Object.entries(entry.env ?? {}).filter(([k, v]) => /KEY|TOKEN|SECRET|PASSWORD|OPENAPI_MCP_HEADERS/.test(k) && expand(v).trim()).length + Object.values(entry.headers ?? {}).filter((v) => expand(v).trim()).length + (entry.url?.includes("ApiKey=") ? 1 : 0) + (valid(readHelperOAuth(options, [entry])[entry.name]) ? 10 : 0);
+}
+function discoverHelperMcps(options) {
+  const p = paths(options), persisted = readHelperJson(join7(options.stateDir, "helper-mcps.json"));
+  const sources = [];
+  if (!options.piOnly) {
+    const primary = join7(p.userHome, ".gemini/config/mcp_config.json");
+    sources.push(["antigravity", readHelperJson(existsSync5(primary) ? primary : join7(p.userHome, ".gemini/antigravity/mcp_config.json")).mcpServers ?? {}]);
+  }
+  sources.push(["pi", readHelperJson(join7(p.pi, "mcp.json")).mcpServers ?? {}]);
+  if (!options.piOnly) sources.push(["claude", readHelperJson(join7(p.userHome, ".claude.json")).mcpServers ?? {}]);
+  const stored = Array.isArray(persisted.servers) ? Object.fromEntries(persisted.servers.map((s) => [s.name, s])) : persisted.mcpServers ?? {};
+  const host = inspectOpenDesignHost();
+  if (host.cli) sources.push(["factory", { "open-design": { command: host.binary, args: [host.cli, "mcp"], env: { ELECTRON_RUN_AS_NODE: "1" }, enabled: false } }]);
+  if (existsSync5(join7(p.userHome, ".agents/skills/expo-overview/SKILL.md"))) sources.push(["factory", { "expo-mcp": { url: "https://mcp.expo.dev/mcp", oauthRequired: true, enabled: false } }]);
+  sources.push(["factory", stored]);
+  const merged = /* @__PURE__ */ new Map(), disabled = /* @__PURE__ */ new Set(), currentPiNames = /* @__PURE__ */ new Set();
+  for (const [source, servers2] of sources) for (const [alias, raw] of Object.entries(servers2)) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw) || alias === "paseo_factory" || alias === "paseo-factory") continue;
+    const value = raw;
+    let name = canonical(alias, value);
+    const url = typeof (value.url ?? value.serverUrl) === "string" ? value.url ?? value.serverUrl : void 0;
+    if (!url && typeof value.command !== "string") continue;
+    if (url) name = [...merged.values()].find((s) => s.url && endpoint(s.url) === endpoint(url))?.name ?? name;
+    const entry = {
+      targetProviders: [...ALL_HELPER_TARGET_PROVIDERS],
+      vaultSync: false,
+      name,
+      transport: url ? "http" : "stdio",
+      enabled: value.enabled !== false && value.disabled !== true,
+      sources: source === "factory" && Array.isArray(value.sources) ? value.sources.filter((s) => ["antigravity", "pi", "claude", "vault", "factory"].includes(s)) : [source],
+      status: "unreachable",
+      ...url ? { url } : { command: normalizeCommand(value.command, p.userHome), args: Array.isArray(value.args) ? value.args.filter((s) => typeof s === "string") : [] },
+      ...strings(value.env) ? { env: strings(value.env) } : {},
+      ...strings(value.headers) ? { headers: strings(value.headers) } : {},
+      ...name === "expo-mcp" || value.auth === "oauth" || value.oauthRequired === true ? { oauthRequired: true } : {},
+      ...typeof value.auth === "object" && value.auth !== null ? { auth: value.auth } : {},
+      ...typeof value.timeout === "number" ? { timeout: value.timeout } : {},
+      ...name === "zai-vision" ? { timeout: 300 } : {}
+    };
+    if (source === "pi") currentPiNames.add(name);
+    const previous = merged.get(name);
+    const cachedDiscovery = source === "factory" && Array.isArray(value.sources) && !value.sources.some((s) => s === "factory" || s === "vault");
+    if (previous && cachedDiscovery) continue;
+    if (!entry.enabled && source !== "factory") disabled.add(name);
+    merged.set(name, previous ? { ...credentialScore(entry, options) > credentialScore(previous, options) ? entry : previous, sources: [.../* @__PURE__ */ new Set([...previous.sources, ...entry.sources])] } : entry);
+  }
+  const zaiKey = readHelperJson(join7(p.pi, "auth.json")).zai?.key;
+  if (typeof zaiKey === "string" && zaiKey.trim()) {
+    currentPiNames.add("zai-vision");
+    const prev = merged.get("zai-vision");
+    merged.set("zai-vision", { targetProviders: [...ALL_HELPER_TARGET_PROVIDERS], vaultSync: false, name: "zai-vision", transport: "stdio", command: "npx", args: ["-y", "@z_ai/mcp-server"], enabled: true, status: "unreachable", ...prev, env: { ...prev?.env, Z_AI_API_KEY: zaiKey.trim(), Z_AI_MODE: prev?.env?.Z_AI_MODE ?? "ZAI" }, sources: [.../* @__PURE__ */ new Set([...prev?.sources ?? [], "pi"])], timeout: 300 });
+  }
+  if (!currentPiNames.has("exa")) {
+    const key = readHelperJson(join7(p.pi, "web-search.json")).exaApiKey ?? readHelperJson(join7(dirname9(p.pi), "web-search.json")).exaApiKey;
+    if (typeof key === "string" && key.trim()) {
+      currentPiNames.add("exa");
+      merged.set("exa", {
+        targetProviders: [...ALL_HELPER_TARGET_PROVIDERS],
+        vaultSync: false,
+        name: "exa",
+        transport: "http",
+        url: `https://mcp.exa.ai/mcp?exaApiKey=${encodeURIComponent(key.trim())}`,
+        enabled: true,
+        sources: [.../* @__PURE__ */ new Set([...merged.get("exa")?.sources ?? [], "pi"])],
+        status: "unreachable"
+      });
+    }
+  }
+  const servers = [...merged.values()].sort((a, b) => a.name.localeCompare(b.name));
+  for (const entry of servers) {
+    entry.enabled = typeof persisted.overrides?.[entry.name] === "boolean" ? persisted.overrides[entry.name] : !disabled.has(entry.name) && (currentPiNames.has(entry.name) || entry.sources.includes("vault"));
+    const targets = persisted.targets?.[entry.name];
+    entry.targetProviders = Array.isArray(targets) && targets.every((p2) => ALL_HELPER_TARGET_PROVIDERS.includes(p2)) ? [...new Set(targets)] : [...ALL_HELPER_TARGET_PROVIDERS];
+    entry.vaultSync = typeof persisted.vaultSync?.[entry.name] === "boolean" ? persisted.vaultSync[entry.name] : entry.sources.includes("vault");
+  }
+  const bundles = readHelperOAuth(options, servers);
+  return { servers: servers.map((entry) => {
+    const checked = classify(entry, bundles[entry.name], p.userHome), cached = persisted.health?.[entry.name];
+    return checked.status === "connected" && cached && cached.fingerprint === fingerprint(entry, bundles[entry.name]) && Date.now() - cached.at < 3e5 ? { ...checked, status: cached.status, statusDetail: cached.statusDetail } : checked;
+  }) };
+}
+function readHelperOAuth(options, servers) {
+  const p = paths(options), ag = options.piOnly ? {} : readHelperJson(p.ag), saved = readHelperJson(join7(options.stateDir, "helper-mcp-oauth.json"));
+  const otherPiTokens = [p.pi, p.peerHome].flatMap((agentDir) => {
+    try {
+      return readdirSync6(join7(agentDir, "mcp-oauth")).filter((n) => /^sha256-[a-f0-9]+$/.test(n)).map((n) => readHelperJson(join7(agentDir, "mcp-oauth", n, "tokens.json")));
+    } catch {
+      return [];
+    }
+  });
+  const result = {};
+  for (const server of servers.filter((s) => s.transport === "http")) {
+    const candidates = [];
+    for (const [url, raw] of Object.entries(ag)) if (endpoint(url) === endpoint(server.url)) {
+      if (!raw || typeof raw !== "object") continue;
+      const token = raw.token ?? {};
+      candidates.push({
+        serverUrl: server.url,
+        clientInfo: { ...typeof raw.client_id === "string" ? { clientId: raw.client_id } : {}, ...typeof raw.client_secret === "string" ? { clientSecret: raw.client_secret } : {} },
+        tokenUrl: raw.token_url,
+        tokens: { accessToken: typeof token.access_token === "string" ? token.access_token : "", refreshToken: token.refresh_token, ...token.expiry ? { expiresAt: Date.parse(token.expiry) / 1e3 } : {} }
+      });
+    }
+    for (const raw of [...otherPiTokens, saved[server.name], ...Object.values(saved).filter((v) => v?.serverUrl && endpoint(v.serverUrl) === endpoint(server.url)), readHelperJson(helperOAuthPath(p.pi, server.name)), readHelperJson(helperOAuthPath(p.peerHome, server.name))]) {
+      if (raw?.tokens && raw.serverUrl && endpoint(raw.serverUrl) === endpoint(server.url)) candidates.push({ ...raw, tokens: { ...raw.tokens, accessToken: typeof raw.tokens.accessToken === "string" ? raw.tokens.accessToken : "" } });
+    }
+    candidates.sort((a, b) => {
+      const access = Number(!!b.tokens.accessToken) - Number(!!a.tokens.accessToken);
+      if (access) return access;
+      const expiry = (bundle) => bundle.tokens.expiresAt === void 0 && bundle.tokens.accessToken ? Infinity : Number.isFinite(bundle.tokens.expiresAt) ? bundle.tokens.expiresAt : 0;
+      return expiry(b) - expiry(a);
+    });
+    if (candidates.length) {
+      const winner = candidates[0];
+      const client = candidates.find((c) => c.clientInfo?.clientId && (!winner.clientInfo?.clientId || c.clientInfo.clientId === winner.clientInfo.clientId));
+      const clientInfo = { ...client?.clientInfo, ...winner.clientInfo };
+      const compatible = candidates.filter((c) => !clientInfo.clientId || c.clientInfo?.clientId === clientInfo.clientId);
+      result[server.name] = {
+        ...winner,
+        serverUrl: server.url,
+        tokenUrl: winner.tokenUrl ?? compatible.find((c) => c.tokenUrl)?.tokenUrl,
+        clientInfo,
+        tokens: { ...winner.tokens, refreshToken: winner.tokens.refreshToken ?? compatible.find((c) => c.tokens.refreshToken)?.tokens.refreshToken }
+      };
+    }
+  }
+  return result;
+}
+function valid(bundle) {
+  return !!bundle?.tokens.accessToken && (bundle.tokens.expiresAt === void 0 || Number.isFinite(bundle.tokens.expiresAt) && bundle.tokens.expiresAt > Date.now() / 1e3);
+}
+function candidateBinDirs(userHome = homedir2()) {
+  const nvmRoot = join7(userHome, ".nvm/versions/node");
+  let nvmDirs = [];
+  try {
+    nvmDirs = readdirSync6(nvmRoot).sort().reverse().map((v) => join7(nvmRoot, v, "bin"));
+  } catch {
+    nvmDirs = [];
+  }
+  return [.../* @__PURE__ */ new Set([...(process.env.PATH ?? "").split(delimiter).filter(Boolean), dirname9(process.execPath), ...nvmDirs, "/opt/homebrew/bin", "/usr/local/bin", join7(userHome, ".local/bin")])];
+}
+function normalizeCommand(command, userHome = homedir2()) {
+  if (!command || !isAbsolute4(command) && !command.includes("/")) return command;
+  try {
+    accessSync(command, constants.X_OK);
+    return command;
+  } catch {
+    const base = basename7(command);
+    if (["npx", "node", "npm", "uvx", "uv", "bunx", "bun"].includes(base) && commandExists(base, userHome)) return base;
+    return command;
+  }
+}
+function commandExists(command, userHome = homedir2()) {
+  if (!command) return false;
+  return (isAbsolute4(command) || command.includes("/") ? [command] : candidateBinDirs(userHome).map((p) => join7(p, command))).some((p) => {
+    try {
+      accessSync(p, constants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+}
+function classify(entry, bundle, userHome = homedir2()) {
+  let status = "connected", statusDetail;
+  if (!entry.enabled) status = "disabled";
+  else if (entry.transport === "stdio") {
+    const required = new Set(Object.keys(entry.env ?? {}).filter((k) => /KEY|TOKEN|SECRET|PASSWORD|OPENAPI_MCP_HEADERS/.test(k)));
+    if (entry.name === "exa") required.add("EXA_API_KEY");
+    if (entry.name === "zai-vision") required.add("Z_AI_API_KEY");
+    const missing = [...required].filter((k) => !expand(entry.env?.[k] ?? "").trim());
+    const figma = entry.args?.findIndex((a) => a === "--figma-api-key" || a.startsWith("--figma-api-key="));
+    if (figma !== void 0 && figma >= 0) {
+      const key = expand(entry.args?.[figma].split("=").slice(1).join("=") || entry.args?.[figma + 1] || "").trim();
+      if (!key || key.startsWith("--")) missing.push("--figma-api-key");
+    }
+    if (missing.length) {
+      status = "missing_env";
+      statusDetail = `Missing credentials: ${missing.join(", ")}`;
+    } else if (!commandExists(entry.command, userHome)) {
+      status = "unreachable";
+      statusDetail = "Command unavailable on this host";
+    } else statusDetail = "Command and credentials present; server starts on first use";
+  } else if (bundle && !valid(bundle) || (entry.oauthRequired || /mcp\.supabase\.com/.test(entry.url ?? "") || entry.auth) && !valid(bundle) && !Object.entries(entry.headers ?? {}).some(([key, value]) => key.toLowerCase() === "authorization" && expand(value).trim())) status = "auth_expired";
+  else statusDetail = "Credentials checked; use Check Connectivity to verify connectivity";
+  return { ...entry, status, statusDetail, ...bundle?.tokens.expiresAt ? { oauthExpiresAt: bundle.tokens.expiresAt } : {} };
+}
+function isolateHelperOAuthDirectory(options, managedNames = []) {
+  const target = join7(paths(options).peerHome, "mcp-oauth");
+  const unlink = (path) => {
+    try {
+      if (lstatSync(path).isSymbolicLink()) rmSync4(path);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+  };
+  unlink(target);
+  mkdirSync7(target, { recursive: true, mode: 448 });
+  const managed = new Set([...Object.keys(readHelperJson(join7(options.stateDir, "helper-mcp-oauth.json"), true)), ...managedNames].map((name) => basename7(dirname9(helperOAuthPath("", name)))));
+  for (const name of managed) unlink(join7(target, name));
+  const source = join7(paths(options).pi, "mcp-oauth");
+  let entries = [];
+  try {
+    entries = readdirSync6(source);
+  } catch {
+  }
+  for (const name of entries.filter((name2) => /^sha256-[a-f0-9]+$/.test(name2) && !managed.has(name2))) {
+    const destination = join7(target, name);
+    try {
+      lstatSync(destination);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      symlinkSync(join7(source, name), destination);
+    }
+  }
+}
+function materializeHelperOAuth(options, bundles) {
+  const stored = readHelperJson(join7(options.stateDir, "helper-mcp-oauth.json"), true);
+  isolateHelperOAuthDirectory(options, Object.keys(bundles));
+  writeHelperJson(join7(options.stateDir, "helper-mcp-oauth.json"), { ...stored, ...bundles });
+  for (const [name, bundle] of Object.entries(bundles)) {
+    writeHelperJson(helperOAuthPath(paths(options).peerHome, name), bundle);
+  }
+}
+function fingerprint(server, bundle) {
+  return createHash4("sha256").update(JSON.stringify([server.command, server.args, server.env, server.url, server.headers, bundle?.tokens])).digest("hex");
+}
+
+// src/helper-mcp-vault.ts
 function collectHelperMcpVault(options, runtime) {
   const servers = discoverHelperMcps(options).servers.filter((server) => server.enabled && server.vaultSync);
-  if (servers.length === 0 && !existsSync7(join11(runtime, "config/helper-mcps.json")) && !existsSync7(join11(runtime, "secrets/shared/mcp-oauth.json"))) return;
+  if (servers.length === 0 && !existsSync6(join8(runtime, "config/helper-mcps.json")) && !existsSync6(join8(runtime, "secrets/shared/mcp-oauth.json"))) return;
   const fields = {};
   const sanitized = servers.map((server) => {
     const copy = { ...server }, secret = {};
@@ -2805,14 +2482,14 @@ function collectHelperMcpVault(options, runtime) {
     fields[server.name] = secret;
     return copy;
   });
-  writeHelperJson(join11(runtime, "config/helper-mcps.json"), { servers: sanitized });
-  writeHelperJson(join11(runtime, "secrets/shared/mcp-oauth.json"), { oauth: readHelperOAuth(options, servers), fields });
+  writeHelperJson(join8(runtime, "config/helper-mcps.json"), { servers: sanitized });
+  writeHelperJson(join8(runtime, "secrets/shared/mcp-oauth.json"), { oauth: readHelperOAuth(options, servers), fields });
 }
 function hydrateHelperMcpVault(options, runtime, overwrite) {
-  const configPath = join11(runtime, "config/helper-mcps.json");
-  if (!existsSync7(configPath)) return;
-  const config = readHelperJson(configPath, true), secrets = readHelperJson(join11(runtime, "secrets/shared/mcp-oauth.json"), true);
-  const stored = readHelperJson(join11(options.stateDir, "helper-mcps.json"), true);
+  const configPath = join8(runtime, "config/helper-mcps.json");
+  if (!existsSync6(configPath)) return;
+  const config = readHelperJson(configPath, true), secrets = readHelperJson(join8(runtime, "secrets/shared/mcp-oauth.json"), true);
+  const stored = readHelperJson(join8(options.stateDir, "helper-mcps.json"), true);
   const overrides = { ...stored.overrides }, targets = { ...stored.targets }, vaultSync = { ...stored.vaultSync };
   const local = discoverHelperMcps(options).servers;
   const byName = new Map(local.map((s) => [s.name, s]));
@@ -2832,7 +2509,7 @@ function hydrateHelperMcpVault(options, runtime, overwrite) {
       byName.set(server.name, merged);
     } else byName.set(server.name, remote);
   }
-  writeHelperJson(join11(options.stateDir, "helper-mcps.json"), { ...stored, servers: [...byName.values()], overrides, targets, vaultSync });
+  writeHelperJson(join8(options.stateDir, "helper-mcps.json"), { ...stored, servers: [...byName.values()], overrides, targets, vaultSync });
   const bundles = readHelperOAuth(options, discoverHelperMcps(options).servers.filter((s) => s.enabled));
   for (const [name, remote] of Object.entries(secrets.oauth ?? {})) {
     if (overrides[name] !== true) continue;
@@ -2849,6 +2526,333 @@ import { join as join14 } from "node:path";
 import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
 import { readFileSync as readFileSync11, rmSync as rmSync6 } from "node:fs";
 import { join as join12 } from "node:path";
+
+// src/lanes.ts
+import { dirname as dirname11, join as join11 } from "node:path";
+
+// src/scrum/open-design-link-state.ts
+import { readFileSync as readFileSync9 } from "node:fs";
+import { join as join9 } from "node:path";
+function readOpenDesignLink(root) {
+  let value;
+  try {
+    value = JSON.parse(readFileSync9(join9(root, "design/open-design-link.json"), "utf8"));
+  } catch (e) {
+    if (e instanceof SyntaxError || e.code === "ENOENT") return void 0;
+    throw e;
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return void 0;
+  const link = value;
+  if (typeof link.projectId !== "string" || !safeId(link.projectId) || typeof link.projectName !== "string" || !["designSystemId", "directionId"].every((key) => link[key] == null || typeof link[key] === "string") || typeof link.sourceUpdatedAt !== "number" || !Number.isFinite(link.sourceUpdatedAt) || typeof link.syncedAt !== "string" || !link.syncedAt.trim() || typeof link.digest !== "string" || !link.digest.trim() || typeof link.screenCount !== "number" || !Number.isFinite(link.screenCount) || !Array.isArray(link.files) || !link.files.every((file) => typeof file === "string")) return void 0;
+  return value;
+}
+
+// src/linked-design.ts
+function linkedDesignSpecification(root, recorded) {
+  const link = (root ? readOpenDesignLink(root) : void 0) ?? recorded;
+  if (!link) return "";
+  return `Open Design Linked Specification (design/)
+${link.projectName} \xB7 ${link.screenCount} screens. The Owner's linked design is the authoritative UI/UX specification, read in two halves.
+Design catalog (the ONLY design/ files a Lead reads): design/design-manifest.json (tokens), design/screens-data.js (the full screen inventory \u2014 ids, titles, descriptions, per-group flows), design/app-data.js (seed/configuration data), design/screens.html (Flow Board). The catalog is a decomposition input, not a build spec: contracts name screens by id and flow from design/screens-data.js.
+Design source (a Lead NEVER reads; bind it by reference in Peer contracts): design/index.html (interactive prototype), design/app.js (interaction logic), design/styles.css, design/screens.css. Peers read the full design/ bundle inside their Task worktree, so implementation fidelity is unchanged.
+In Scrum, preserve and refine the Owner's linked Open Design screens seeded in .scratch/<initiativeId>/mockups/; generate EXPERIENCE.md, DESIGN.md and browser.json around them. Do not overwrite them with a generic layout.
+`;
+}
+
+// src/roles-contract.ts
+var ROLE_SKILL_INDEX = {
+  supervisor: "grilling, domain-modeling",
+  lead: "codebase-design, domain-modeling, tdd",
+  agent: "tdd, diagnosing-bugs, codebase-design"
+};
+var DESIGN_LINK_OWNERSHIP = "design/open-design-link.json is plugin-owned Open Design project link state. Never overwrite it with a Design provenance note; record provenance in design/design-manifest.json or a separate file instead.";
+var FOOTER_MARK = "paseo-factory role skills:";
+function skillFooter(role) {
+  return `${FOOTER_MARK} ${ROLE_SKILL_INDEX[role]}`;
+}
+var LEAD_WAVE_LAWS = [
+  "One Bounded Outcome per Task: Size each independently verifiable vertical slice under ~120K tokens peak Agent context. Never pass a multi-subsystem or full-application directive through as a single monolithic Task, even for a single-file deliverable such as index.html. Reserve single-task dispatch for a small isolated change or focused bugfix.",
+  "Serial Waves by Default: For user-facing applications, allow at most 1\u20132 foundational setup waves (T-01 app shell / harness / design tokens, T-02 core schema / repository seam). Every subsequent Serial Wave (T-03+) must deliver a vertical user-facing journey slice: real interactive screen/UI + state/data wiring + journey test. Never plan horizontal chains of backend-only micro-waves while user-facing screens remain static placeholders. Anchor Contracts Just-in-Time to the Stable Checkpoint at current `<project-root>` HEAD. Set Contracts and spawn Agents for the current wave only, then IMMEDIATELY end your turn. Parallel dispatch (up to 3 Tasks) requires an existing shared foundation and genuinely disjoint modules/file surfaces.",
+  "Rolling-Wave Re-Decomposition: Treat the initial T-01..T-0N roadmap as a rolling-wave outline, never a locked task count. After each Stable Checkpoint lands, inspect actual repository growth and split oversized upcoming waves along distinct user journeys or screens rather than horizontal data-plumbing layers (for example T-04a search journey, T-04b detail journey) before setting the next Contract. Reassess especially when the predecessor required re-contracting or high context.",
+  "Modular & Isolated Test Suite Law: Never accumulate all unit tests or E2E journeys into a single monolithic test file across waves. Use modular per-slice test files (tests/<slice>.* or test_<slice>.*) discovered by a thin suite runner or Gate script. Each slice owns explicit isolated fixtures and initial state, independent of defaults introduced by later waves. Peers run just the current slice's fast tests during inner-loop TDD; the full cumulative Gate runs before Claim.",
+  "Bounded Verification & Context-Ceiling Recovery: Gate scripts must enforce explicit per-command timeouts or harness timeout flags so hung processes fail fast with a diagnostic. On BLOCKED (context-ceiling), inspect Task worktree commits, git status, and peer-handoff-<task>.md; land or preserve verified progress and split the remaining scope into a narrower follow-up Contract rather than retrying the oversized wave.",
+  "4-Part Brief: Keep every Contract.description concise \u2014 capped at <= 2,500 chars \u2014 with four explicit sections: (1) Bounded Outcome \u2014 the single slice's user/system outcome and done vs. not-done criteria; (2) Contract Boundary & Regression Invariants \u2014 existing HEAD interfaces/behaviors that stay green and new seam contracts; (3) Excluded / Deferred to Later Waves \u2014 name features the Agent must not implement this turn (state none when appropriate); (4) Verification \u2014 the exact Gate command. Do not read deep implementation files before contracting to pre-solve internal helper function or prop names. The Brief must be neutral and never pre-solve implementation: pose open questions, do not embed verdicts \u2014 a plan so detailed that the Peer merely types your ideas back is a failed Brief, and the Brief is a provisional map for ONE Peer turn, not a months-long plan; say so plainly to the Peer. Name the turn's disposition through `lead_set_contract`'s `disposition` parameter: `scout` (read-only reconnaissance of unknown repository facts), `architect` (read-only boundary design when specification and code conflict), `engineer` (the default writer), `reviewer` (independent read-only audit). Peer-Owned Domain Skills: never read (`cat`) implementation or framework SKILL.md files (expo-*, eas-*, firebase-*, etc.) into your own context window \u2014 domain and implementation skills belong to the working Agent (Peer), which discovers them natively via <available_skills>. Do not pre-solve internal helper function signatures or line-by-line code, and do not mandate 4\u20136 separate unit-test files per task; 1\u20132 focused slice/journey test files suffice unless the repository's existing layout requires otherwise.",
+  "Spec-vs-Code Ruling: When a test must cross a new boundary, the Brief must state that boundary's contract, or state explicitly that it is undecided and the Peer must stop (BLOCKED) there \u2014 leave it blank and the Peer invents a contract that the next task inherits as public API. When the specification and the existing code contradict, never hand both readings to the Peer to choose from: picking the reading is an architectural ruling that belongs to you \u2014 settle one reading with a stated reason in the Brief, or dispatch a read-only `architect` disposition to rebuild the boundary before anyone writes tests.",
+  'Closure & Integration Loop: Two-party separation of judgment is Peer implementation + mechanical Gate + Lead diff inspection. Lifecycle completion or a green status line is only a wakeup signal \u2014 acceptance reads the artifact and its reproducible evidence. When the mechanical Gate is GREEN (exit 0) and Watch flags no concern (< 0.5), read `<projectStateDir>/report-<task>-<n>.md` and `git show --stat "<sha>"` first \u2014 the report carries the Peer\'s 6-Field Handoff (Outcome, Snapshot, Scope, Verification, Unknown / risk, Ownership), and a missing or hand-waved handoff field is a question back to the Peer, never something you fill in yourself; Unknown stays Unknown: "could not determine, here is where I looked" is a valid, cheaper result than an invented root cause. Then inspect the attested commit diff (`git show --stat "<sha>"` and `git diff "<sha>^" "<sha>"`) strictly against the 4-Part Brief \u2014 reading targeted per-file diffs (`git diff "<sha>^" "<sha>" -- <file>`) in bounded chunks (<= 6,000 tokens per call) and never wrapping multi-file `git diff` or `cat` outputs inside `JSON.stringify` (`text({i,...r})`) in a single REPL `exec` call, which middle-truncates large output; your direct diff review is the sole semantic review gate. Apply proof falsification: "If the claimed behavior disappeared, would the Peer\'s test fail?" If the contracted outcome is delivered, no out-of-scope regressions or fake tests are introduced, and the proof is genuine, you must accept and land immediately via `lead_accept_task` / `lead_merge` (or `factory accept <task> --attempt <n> --by lead`) into `<project-root>` HEAD, establishing the next Stable Checkpoint. Never write or execute ad-hoc out-of-band shell/node/python scripts (`node -e`, `node <<\'JS\'`, `npx tsx -e`, `python3 -c`) to invent uncontracted edge cases after a GREEN Gate. Defer non-blocking polish or any newly discovered edge case outside the current Contract to a downstream Serial Wave after landing the current Stable Checkpoint. If contracted defects, missing requirements, or architectural violations appear, re-contract via `lead_set_contract` and re-spawn the Peer to fix them before accepting. Never accept a Needs-human Task; escalate it to Supervisor when Owner judgment is required. Inspect the newly landed foundation, then set Contract(s) and spawn the next wave in the same turn. Accept and land the final wave before calling `lead_report_to_supervisor`, then end your turn. Escalate unresolved defects or Owner-owned blockers to Supervisor when they require Owner judgment.',
+  "Challenge Reconciliation (live, in place): A Peer challenge with evidence is data to reconcile, not disobedience \u2014 close every challenge against its original Brief. For REOPEN_REQUEST, identify the reopened layer (foundation | dependency | lifecycle | API | ownership | verification) before ruling; a challenge that does not name its layer cannot be ruled on, so ask for the layer. For DEPENDENCY_REQUEST, resolve or schedule the unowned prerequisite or undecided boundary contract. For BLOCKED, diagnose the external blocker or split scope overflow. Deliver your ruling directly into the live Peer session via `lead_repoke_agent`'s `message` parameter, and when the boundary itself changed, update the Brief in place with `lead_set_contract` \u2014 the live Peer session is preserved by default (`resetPeer: false`); replace the Peer (`resetPeer: true`) only when its context is truly misaligned. Resolve technical issues by re-contracting and re-spawning; record terminal stalls (`attempt-ceiling`, `denied-again`) via `lead_needs_human`; escalate Owner-owned decisions (product scope, external cost, irreversible risk) via `lead_report_to_supervisor`.",
+  'Independent Reviewer \u2014 default is NO: You plus the Peer already are a separation of judgment (the Peer writes, you accept); a Reviewer (`disposition: "reviewer"`) is a third, cold-start-expensive layer, mandatory only when at least one of five triggers holds: (1) your Brief pre-solved the solution, not just the outcome \u2014 the Peer became your hands and the separation is gone; (2) the change touches a seam the repository marks as decide-first (a contract boundary called out in AGENTS.md / CLAUDE.md / CONTEXT.md); (3) the decision is hard to reverse \u2014 migration, schema, public API, data deletion; (4) the Peer\'s proof is suspect \u2014 first rerun the exact Verification command, then apply the falsification test ("if the claimed behavior disappeared, would this proof still pass?"; a proof that still passes is not evidence: tests written to match the implementation, mocks swallowing failures, output not matching the declared command); (5) the Peer filed a REOPEN_REQUEST and withdrew it without new evidence. No trigger hit \u2192 read the diff yourself; that IS the review.',
+  "Project Notebook & Recurrence Guard: Maintain `<projectStateDir>/notebook.md` \u2014 the Lead-only operational memory outside `<project-root>` (its path is announced in the Seat kickoff packet) \u2014 capped at <= 80 lines / <= 4 KB with exactly two sections: `## 1. Verification & Run Recipe` (Worktree & Env Setup, Fast Slice Check, Full Cumulative Gate, Process & Port Cleanup) and `## 2. Recurrence Guard` (columns `| ID | Cause \u2192 Effect Mechanism | Evidence (Task / seq) | State | Enforcement |`). Keep it current at every Stable Checkpoint so Lead rotations resume with the exact Gate recipe; never write Lead-only operational or orchestration recipes into `<project-root>/AGENTS.md` or `<project-root>/CONTEXT.md`. Recurrence principle: when a costly failure mechanism bites (RED Gate, diff rejection, repeated denial), log its Cause \u2192 Effect mechanism with a `Task (seq N)` citation \u2014 no permanent rule for a one-off; once it recurs (>= 2 distinct seqs), apply at most 1 highest-leverage hardening per Stable Checkpoint, preferring mechanical structure first (tighten the Gate command, `.worktreeinclude`, or verification script), quoting a 1-line convention into downstream Briefs when prose must change, and proposing any AGENTS.md / CONTEXT.md edit to the Owner via the 4-Line Ratification Card rather than editing unratified; retire the entry when the next wave's first cumulative Gate attempt is GREEN."
+];
+var SUPERVISOR_OUTCOME_BOUNDARY = [
+  "Outcome & Architecture Boundary (neutral intent \u2014 framing is the Lead's): Transmit the Owner's product outcomes, boundaries, invariants, and verification criteria faithfully and neutrally downward \u2014 framing is the Lead's. Never impose your own decomposition, technical solution shape, or file architecture on Lead; you are the process-quality seat, not a second project Lead. Preserve file architecture freedom; never invent single-file consolidation constraints such as forcing an entire application into index.html unless the Owner explicitly requested them. If the Owner's prompt bundles a multi-subsystem application into a single file (such as a single index.html) or contains an architectural anti-pattern without explicitly confirming they want to keep that constraint as-is, challenge the trade-off via grilling and recommend a modular multi-file architecture before dispatching.",
+  "Downward Privacy Firewall: Keep the Owner's private channel out of every Lead-facing message and project artifact \u2014 no verbatim Owner quotes or transcripts, no Human/Supervisor labels or source attribution, no private agent IDs, no account of who spoke to whom. Express authorized decisions directly as project instructions.",
+  "Active SLP Loop Auditing: Audit the loop, not the artifact: original Lead Brief \u2192 actual Peer response \u2192 explicit Lead disposition; inspect both Lead and Peer activity \u2014 Lead's summary alone is not proof that the loop closed. Coach the Lead (process quality, never product code) when you observe it pre-solving Briefs, micro-splitting waves into horizontal slivers, reading deep source files into its own context instead of dispatching a read-only Scout, bouncing technical decisions that are the Lead's own ruling up to the Owner, staffing by template, or burning context polling files. Send advice to the Lead \u2014 never a parallel command chain to workers \u2014 and intervene only when the coaching can improve the Lead's next action.",
+  "Modular Test & Verification Boundary: Never prescribe a single monolithic test file accumulating every unit test or E2E journey across all waves; allow modular per-feature/per-slice test files with isolated fixtures, aggregated by a runner or Gate script. Treat initial wave roadmaps as rolling-wave outlines; Lead re-evaluates and splits oversized waves at each Stable Checkpoint.",
+  "4-Line Owner Ratification Boundary: When Lead's completion report carries a hardening Proposal that would change repo prose (backed by >= 2 `Task (seq N)` citations from the Recurrence Guard), present the 4-Line Owner Ratification Card to the Owner \u2014 `1. Chuy\u1EC7n g\xEC \u0111\xE3 l\u1EB7p l\u1EA1i` (with the `Task (seq N)` citations), `2. Nguy\xEAn nh\xE2n g\u1ED1c`, `3. N\u1EBFu duy\u1EC7t s\u1EBD s\u1EEDa g\xEC (Preview diff)`, `4. T\xE1c d\u1EE5ng` \u2014 and edit `<project-root>/AGENTS.md` or `<project-root>/CONTEXT.md` only after explicit Owner Ratification; never edit them on an unratified proposal."
+].join(" ");
+function formatCmdPrefix(factoryCmd, home) {
+  const base = factoryCmd !== void 0 && factoryCmd.trim() !== "" ? factoryCmd.trim() : "factory";
+  if (home !== void 0 && home.trim() !== "" && !base.includes("--home ")) {
+    return `${base} --home ${home.trim()}`;
+  }
+  return base;
+}
+function renderSeatCommandBlock(seat, cmdPrefix) {
+  if (seat === "supervisor") {
+    return [
+      "Primary `paseo-factory` / `paseo_factory` MCP tools (prefer calling these directly):",
+      "",
+      '  paseo-factory_supervisor_dispatch_lead({ message: "<directive>", workspace: "<project-root>" })  (or supervisor_dispatch_lead)',
+      "  paseo-factory_supervisor_end_cycle({})  (or supervisor_end_cycle)",
+      '  paseo-factory_supervisor_read_ledger({ workspace: "<project-root>" })  (or supervisor_read_ledger)',
+      "",
+      "Day-one Supervisor commands (the Owner CLI \u2014 never on a Worker agent's PATH):",
+      "",
+      `  ${cmdPrefix} lead dispatch --workspace "<project-root>" --message "<directive>"`,
+      `  ${cmdPrefix} status`,
+      `  ${cmdPrefix} lanes get`,
+      `  ${cmdPrefix} accept <task> --attempt <n> --by supervisor`
+    ];
+  }
+  return [
+    "Primary `paseo-factory` / `paseo_factory` MCP tools (prefer calling these directly):",
+    "",
+    '  paseo-factory_lead_set_contract({ task: "<id>", gate: "<cmd>", disposition: "<engineer|scout|architect|reviewer>", description: "<Bounded Outcome; Contract Boundary & Regression Invariants; Excluded / Deferred to Later Waves; Verification>" })  (or lead_set_contract)',
+    '  paseo-factory_lead_dispatch_agent({ tasks: ["<id>"] })  (or lead_dispatch_agent)',
+    '  paseo-factory_lead_repoke_agent({ task: "<id>", message: "<ruling delivered into the live Peer session>" })  (or lead_repoke_agent)',
+    '  paseo-factory_lead_merge({ task: "<id>", attempt: <n> })  (or lead_merge)',
+    '  paseo-factory_lead_verify({ task: "<id>" })  (or lead_verify)',
+    "The Driver handles bounded re-pokes and needs-human evidence; report unresolved blockers to Supervisor.",
+    '  paseo-factory_lead_needs_human({ task: "<id>", reason: "<denied-again|silent-after-repoke|attempt-ceiling|died-after-respawn>", summary: "<text>" })  (or lead_needs_human)',
+    '  paseo-factory_lead_report_to_supervisor({ message: "<summary>", workspace: "<project-root>" })  (or lead_report_to_supervisor)',
+    '  paseo-factory_lead_create_worktree({ task: "<id>" })  (or lead_create_worktree)',
+    "",
+    "Day-one Lead commands (the Owner CLI \u2014 never on a Worker agent's PATH):",
+    "",
+    `  ${cmdPrefix} contract --task <id> --workspace <dir> --gate <cmd> [--artifact <path>] [--skills <s1,s2>] [--watch] [--description <text>] [--disposition <engineer|scout|architect|reviewer>] [--reset-peer]`,
+    `  ${cmdPrefix} repoke --task <id> [--agent <id>] [--message "<ruling text>"]`,
+    `  ${cmdPrefix} run <task> [<task>...]`,
+    `  ${cmdPrefix} status`,
+    `  ${cmdPrefix} lanes get`,
+    `  ${cmdPrefix} accept <task> --attempt <n> --by lead`,
+    `  ${cmdPrefix} supervisor report --workspace "<project-root>" --message "<summary>"`
+  ];
+}
+function renderRoleContract(role, options = {}) {
+  const cmdPrefix = formatCmdPrefix(options.factoryCmd, options.home);
+  const linkedDesign = linkedDesignSpecification(options.project?.root);
+  const projectSuffix = options.project !== void 0 && options.project.slug !== "" ? options.project.root !== "" ? ` for this project (${options.project.slug}, rooted at ${options.project.root})` : ` (project ${options.project.slug})` : "";
+  if (role === "supervisor") {
+    return [
+      `You are the Supervisor seat of the paseo-factory verification loop${projectSuffix}: the sole conversational door to the Owner.`,
+      `Clarify intent (grilling, domain-modeling), agree the outcome and boundaries with the Owner, and dispatch the directive to Lead via \`paseo-factory_supervisor_dispatch_lead\` / \`supervisor_dispatch_lead\` (or \`${cmdPrefix} lead dispatch --workspace "<project-root>" --message "<directive>"\`); relay what the factory measured \u2014 Verdicts, Watch lines, needs-human stalls \u2014 in words.`,
+      "Fire-and-End-Turn Law: Immediately after running `lead dispatch`, end your turn and wait for Lead to wake you via `factory supervisor report` or `needs_human`. Never run `sleep`, never poll files, never decompose tasks (`T-01..`), and never edit product source code or commit on `<project-root>`.",
+      SUPERVISOR_OUTCOME_BOUNDARY,
+      "Diagnostics & Run-Verification Law: When the Owner reports an application cannot run or asks why a command fails, inspect `<project-root>` with read-only diagnostics (`ls -la`, `cat package.json`, and checking `node_modules/.bin`) before dispatching. Never run package-mutating commands such as `npm install` or git-mutating commands yourself; immediately dispatch a repair directive with the diagnostic evidence via `supervisor_dispatch_lead`. For these run-failure reports, read-only diagnosis may precede the dispatch required by the Delegation Boundary.",
+      'Delegation Boundary: When the Owner provides a complete specification on Turn 1 (with no unresolved architectural traps such as unconfirmed single-file consolidation of a multi-subsystem app), or once the Owner answers your clarifying questions or approves the direction, your FIRST and ONLY tool call must be `paseo-factory_supervisor_dispatch_lead` (or `supervisor_dispatch_lead` / `call_mcp_tool` with `ServerName: "paseo-factory_paseo_factory"`, `ToolName: "supervisor_dispatch_lead"`, `Arguments: { message: "<directive>", workspace: "<project-root>" }` / `lead dispatch`), then immediately end your turn \u2014 do not read `grilling/SKILL.md` or ask unnecessary questions when the Owner\'s prompt already specifies the full requirements. CRITICAL: Lead is a separate process and CANNOT read your chat messages \u2014 writing a \'Directive for Lead\' or \'Design Spec\' in chat text without calling the dispatch tool does NOTHING and leaves the factory stuck! Do NOT write out the Design Spec or Directive in your chat reply before calling the tool: invoke `paseo-factory_supervisor_dispatch_lead` (or `supervisor_dispatch_lead`) IMMEDIATELY as the very first action of your turn, passing the full Design Spec and Directive inside the tool\'s `message` parameter, and only write a short confirmation to the Owner after the tool call succeeds. NEVER run `mkdir` or `cat > ...` to write `GLOSSARY.md`, `docs/adr/**`, `src/**`, or scaffolding during a feature request \u2014 all domain modeling, ADRs, seam interfaces, and code are authored after dispatch by Lead and Task Agents.',
+      "Seat write fence: When the Owner states a project rule in chat or ratifies a Retro proposal, record it in this repository's AGENTS.md or CONTEXT.md (or docs/** / .scratch/**) \u2014 you and the Lead are the only seats that may edit project memory, and you may never edit product source code on `<project-root>`.",
+      `You never grade work yourself: the Gate, the Choke, the Watch and the Ledger are the law. Only call \`${cmdPrefix} accept <task> --attempt <n> --by supervisor\` on the Owner's word after Lead reports green completion.`,
+      "",
+      ...renderSeatCommandBlock("supervisor", cmdPrefix),
+      "",
+      "Your role-scoped MCP server is paseo_factory; external helper MCP tools belong to the working Agent. This instruction is additive: the repository's own AGENTS.md / CLAUDE.md and skills catalog load natively alongside this instruction \u2014 never overwrite them.",
+      "",
+      DESIGN_LINK_OWNERSHIP,
+      skillFooter("supervisor")
+    ].join("\n");
+  }
+  if (role === "lead") {
+    return [
+      `You are the Lead seat of the paseo-factory verification loop${projectSuffix}: read and inspect the repository, decompose the Supervisor's directive into Tasks around clear Outcomes and Regression Gates, set each Contract (gate, description, optional artifact, skills) with \`paseo-factory_lead_set_contract\` / \`lead_set_contract\` (or \`${cmdPrefix} contract\`), and spawn Working Agents with \`paseo-factory_lead_dispatch_agent\` / \`lead_dispatch_agent\` (or \`${cmdPrefix} run\`).`,
+      "Seat write fence: Never write or commit product source code directly on `<project-root>`; all product source code is written by spawned working Agents inside isolated Task worktrees. You may update this repository's AGENTS.md or CONTEXT.md (and docs/** / .scratch/**) when the Owner ratifies a rule; working Agents never may.",
+      "Outcome & Regression-Gate Law: Specify the desired behavioral outcome and regression invariants in each Contract's `description` \u2014 never pre-solve or handcuff which code files the working Agent may touch inside its isolated Task worktree. Every Contract's `gate` command must verify both the new behavior (and entrypoint integration such as `index.html` / `src/main.ts` when applicable) AND the repository's existing test/typecheck/build suite so legacy features are never broken.",
+      "Peer-Owned Domain Skills: Never read (`cat`) implementation or framework SKILL.md files (expo-*, eas-*, firebase-*, etc.) into your own context window \u2014 domain and implementation skills belong to the working Agent (Peer), which discovers them natively via <available_skills>. Do not curate `skills` by reading skill files; omit them unless the Owner's directive explicitly names one.",
+      linkedDesign,
+      ...LEAD_WAVE_LAWS,
+      `Accept every wave's green Attempt after your direct diff review via \`paseo-factory_lead_merge\` / \`lead_merge\` (or \`${cmdPrefix} accept --by lead\`); re-contract defects and escalate a needs-human task before accepting. Calling \`paseo-factory_lead_set_contract\` / \`lead_set_contract\` again on any unaccepted Task updates its Contract (\`gate\`, \`base\`, \`description\`, \`artifact\`) and opens a fresh 3-attempt epoch.`,
+      `Fire-and-End-Turn Law: Inspect the Verdict / Watch / Report evidence, and after the final wave is accepted and landed, or when an unresolved defect / Needs-human / Owner-owned blocker requires escalation, call \`paseo-factory_lead_report_to_supervisor\` / \`lead_report_to_supervisor\` (or \`${cmdPrefix} supervisor report --workspace "<project-root>" --message "<summary>"\`) and immediately end your turn (never run \`sleep\` or poll files). If \`lead_set_contract\` or \`lead_dispatch_agent\` ever fails with an unrecoverable infrastructure blocker, you must report it to Supervisor via \`lead_report_to_supervisor\` (\`kind: "blocker"\`) before ending your turn so Supervisor is never left waiting silently.`,
+      "",
+      ...renderSeatCommandBlock("lead", cmdPrefix),
+      "",
+      "Your role-scoped MCP server is paseo_factory; external helper MCP tools belong to the working Agent. This instruction is additive: the repository's own AGENTS.md / CLAUDE.md and skills catalog load natively alongside this instruction \u2014 never overwrite them.",
+      "",
+      DESIGN_LINK_OWNERSHIP,
+      skillFooter("lead")
+    ].join("\n");
+  }
+  const taskLabel = options.task ?? "<task>";
+  const agentIdentity = options.task !== void 0 && options.project?.slug !== void 0 && options.project.slug !== "" ? ` (task ${options.task}, project ${options.project.slug})` : "";
+  return [
+    `You are a Peer of the paseo-factory verification loop${agentIdentity}: an independent technical colleague with your own judgment, accountable for one bounded outcome \u2014 not a subordinate executing orders. You work your Contract strictly inside this assigned Task worktree on branch \`factory/${taskLabel}\`, run the Gate check, and hand off via \`paseo-factory_agent_claim\` / \`agent_claim\` (or \`factory-claim --task ${taskLabel} --outcome <complete|partial|blocked|reopen> --scope <text> --verification <text> --unknowns <text> [--ownership <text>] [--sha <sha>]\`), then end your turn.`,
+    "Independent Judgment & Provisional Brief: The Brief's plan and file list are a provisional map for this one turn, not truth \u2014 find the real mechanism, never defend the assigner's assumptions. Disagreement with evidence is data to reconcile, not disobedience; agreement without evidence is not independence either. Stay strictly inside the assigned Bounded Outcome and honor Excluded / Deferred to Later Waves \u2014 later-wave features belong to their own turns.",
+    "Contract Before Test: Before writing a test or code across a boundary, verify the Brief's premises against the repository and the specification. Contract precedence: the Lead's ruling in the Brief (the conflict-resolution source) \u2192 the spec \u2192 the existing code. No source decides, or the spec and code contradict while the Brief has not ruled \u2192 BLOCKED; picking arbitrarily is inventing the contract, just quietly. A Brief ruling that does not hold against the real code \u2192 challenge immediately, BEFORE writing tests or code, via `agent_escalate_blocker` with a message starting with REOPEN_REQUEST (<layer>: one of foundation | dependency | lifecycle | API | ownership | verification \u2014 the layer names which contract is reopened; without it the Lead cannot rule), DEPENDENCY_REQUEST when an unowned prerequisite or undecided boundary contract is needed, or BLOCKED when an external blocker, missing tool/permission, or scope overflow prevents safe completion in one turn. Include concrete evidence, the current commit SHA, and at least one alternative direction, then end your turn \u2014 your session stays alive and paused for the Lead's ruling. A RED test may explore implementation, but must never invent an undecided contract: creating a missing symbol, choosing its semantics (return type, nullability, units, ordering, idempotency), or loosening an assertion to force GREEN decides the boundary from the test seat, and the next task inherits it as public API.",
+    "Modular Tests & Bounded Inner Loop: Use modular per-slice test files with explicit isolated fixtures and initial state; never bloat a single monolithic test file with all historical unit tests or E2E journeys. Read, edit, and run only the relevant slice tests during inner-loop iteration with an explicit timeout or harness timeout flag. Run the full cumulative Gate before factory-claim. A hung test requires root-cause diagnosis; never inflate watchdog timeouts to mask a hang.",
+    "Anti-Whack-a-Mole Law: If the third fix attempt still exhibits the same symptom, stop local patching and inspect the underlying mechanism before another edit. Fix the root mechanism, or commit any independent completed work and escalate with concrete evidence.",
+    `Proof Ownership & Unknown: You own the proof for what you write \u2014 verification proportionate to risk, real commands, real output; apply the falsification test ("If the claimed behavior disappeared, would this proof still pass?"). 'Unknown' is a legitimate result: report what you could not determine and where you looked rather than inventing a root cause \u2014 absence of evidence is not evidence of absence.`,
+    'Six-Field Handoff & Disposition: Your Brief names this turn\'s disposition (`scout` | `architect` | `engineer` | `reviewer`). Read-only dispositions (`scout`, `architect`, `reviewer`) write no files and make no commit \u2014 skip the commit SHA and return your findings through the handoff; the `engineer` disposition commits its own work. Every claim carries the full Six-Field Handoff: `outcome` (complete | partial | blocked | reopen), `scope` (files changed or read, with concrete paths), `verification` (commands run + real output, and what was deliberately skipped), `unknowns` (assumptions stood on, open risks, or "none"), plus optional `ownership`. State unfinished work plainly \u2014 claiming done before done is worse than BLOCKED. A failed `git commit` must be caught by its exit code (a SHA alone proves nothing) and means the work is not claimable.',
+    "You never modify AGENTS.md, CLAUDE.md, or CONTEXT.md unless your Contract's scope explicitly lists them \u2014 project memory is written by the Supervisor and Lead, not by you.",
+    "Factory orchestration (the `factory` CLI: contract, run, accept) is withheld from you by PATH and by this brief \u2014 the only factory commands on your PATH are factory-claim and the git shim. The daemon exposes plugin tools (paseoTools) to every agent today, so an orchestration surface may still be visible to you: never call it \u2014 setting contracts, running the Driver, and accepting are the Owner's, Supervisor's, and Lead's acts.",
+    `Your \`paseo-factory\` / \`paseo_factory\` MCP tools: \`paseo-factory_agent_claim\` / \`agent_claim\` (submits your Claim with the mandatory 6-Field Handoff \u2014 \`commit\` defaults to HEAD and is required only for the engineer disposition) and \`paseo-factory_agent_escalate_blocker\` / \`agent_escalate_blocker\` (challenges a Brief premise or escalates a blocker to your Lead, keeping your session alive for the ruling). Your factory CLI vocabulary (complete): \`factory-claim --task ${taskLabel} --outcome <complete|partial|blocked|reopen> --scope <text> --verification <text> --unknowns <text> [--ownership <text>] [--sha <sha>]\` \u2014 claim your Task when the Gate's done-criteria hold, then end your turn.`,
+    "This instruction is additive: the repository's own AGENTS.md / CLAUDE.md, MCP servers, and skills catalog load natively alongside it.",
+    "",
+    DESIGN_LINK_OWNERSHIP,
+    skillFooter("agent")
+  ].join("\n");
+}
+function renderRoleAppendSystem(role, options) {
+  const title = role === "supervisor" ? "Supervisor" : role === "lead" ? "Lead" : "Working Agent";
+  const effectiveOptions = role === "agent" ? { factoryCmd: "factory", ...options } : { factoryCmd: "factory", home: "<home>", ...options };
+  return [
+    `# ${title} (paseo-factory) \u2014 immutable SLP role contract`,
+    "",
+    renderRoleContract(role, effectiveOptions),
+    ""
+  ].join("\n");
+}
+
+// src/pi-home.ts
+var ROLE_PROMPTS = {
+  supervisor: renderRoleAppendSystem("supervisor"),
+  lead: renderRoleAppendSystem("lead"),
+  agent: renderRoleAppendSystem("agent")
+};
+
+// src/zcode-home.ts
+var ROLE_PROMPTS2 = {
+  supervisor: renderRoleAppendSystem("supervisor"),
+  lead: renderRoleAppendSystem("lead"),
+  agent: renderRoleAppendSystem("agent")
+};
+
+// src/lane-profiles.ts
+import { existsSync as existsSync7, mkdirSync as mkdirSync8, readFileSync as readFileSync10, rmSync as rmSync5, writeFileSync as writeFileSync6 } from "node:fs";
+import { dirname as dirname10, join as join10 } from "node:path";
+function laneProfilesPath(stateDir) {
+  return join10(stateDir, "profiles.json");
+}
+function readLaneProfilesFile(stateDir) {
+  const path = laneProfilesPath(stateDir);
+  if (!existsSync7(path)) return { profiles: {} };
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync10(path, "utf8"));
+  } catch {
+    throw new FactoryError("profiles-unreadable", `${path} is not valid JSON`);
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new FactoryError("profiles-unreadable", `${path} must be a JSON object of Lane profiles`);
+  }
+  const record2 = parsed;
+  if (record2.profiles === void 0 || record2.profiles === null || typeof record2.profiles !== "object" || Array.isArray(record2.profiles)) {
+    throw new FactoryError("profiles-unreadable", `${path} must carry a "profiles" object keyed by profile id`);
+  }
+  const file = { profiles: record2.profiles };
+  if (record2.deleted !== void 0 && record2.deleted !== null && typeof record2.deleted === "object" && !Array.isArray(record2.deleted)) {
+    file.deleted = record2.deleted;
+  }
+  if (record2.activeProfileByScope !== void 0 && record2.activeProfileByScope !== null && typeof record2.activeProfileByScope === "object" && !Array.isArray(record2.activeProfileByScope)) {
+    file.activeProfileByScope = record2.activeProfileByScope;
+  }
+  return file;
+}
+function mergeLaneProfilesFiles(local, remote, options) {
+  const preferRemote = options?.preferRemote === true;
+  const stamp = (value) => value ?? "";
+  const merged = { profiles: {} };
+  const deleted = {};
+  for (const id of /* @__PURE__ */ new Set([...Object.keys(local.profiles ?? {}), ...Object.keys(remote.profiles ?? {}), ...Object.keys(local.deleted ?? {}), ...Object.keys(remote.deleted ?? {})])) {
+    const localProfile = local.profiles?.[id];
+    const remoteProfile = remote.profiles?.[id];
+    const localTombstone = local.deleted?.[id];
+    const remoteTombstone = remote.deleted?.[id];
+    const tombstone = stamp(remoteTombstone?.deletedAt) > stamp(localTombstone?.deletedAt) ? remoteTombstone : stamp(localTombstone?.deletedAt) > stamp(remoteTombstone?.deletedAt) ? localTombstone : localTombstone ?? remoteTombstone ?? (preferRemote ? remoteTombstone : localTombstone);
+    const profile = stamp(remoteProfile?.updatedAt) > stamp(localProfile?.updatedAt) ? remoteProfile : stamp(localProfile?.updatedAt) > stamp(remoteProfile?.updatedAt) ? localProfile : preferRemote ? remoteProfile ?? localProfile : localProfile ?? remoteProfile;
+    if (tombstone !== void 0 && profile === void 0) {
+      deleted[id] = tombstone;
+      continue;
+    }
+    if (tombstone !== void 0 && profile !== void 0) {
+      if (stamp(tombstone.deletedAt) >= stamp(profile.updatedAt)) {
+        deleted[id] = tombstone;
+        continue;
+      }
+    }
+    if (profile !== void 0) merged.profiles[id] = profile;
+  }
+  const activeProfileByScope = {};
+  for (const [scope, profileId2] of Object.entries(local.activeProfileByScope ?? {})) activeProfileByScope[scope] = profileId2;
+  for (const [scope, profileId2] of Object.entries(remote.activeProfileByScope ?? {})) {
+    if (preferRemote || activeProfileByScope[scope] === void 0) activeProfileByScope[scope] = profileId2;
+  }
+  for (const scope of Object.keys(activeProfileByScope)) {
+    if (merged.profiles[activeProfileByScope[scope]] === void 0) delete activeProfileByScope[scope];
+  }
+  if (Object.keys(deleted).length > 0) merged.deleted = deleted;
+  if (Object.keys(activeProfileByScope).length > 0) merged.activeProfileByScope = activeProfileByScope;
+  return merged;
+}
+
+// src/lanes.ts
+var EYE_JSON_LANE = "eye.json";
+function projectLanesPath(stateDir, projectSlug) {
+  return join11(projectStateDir(stateDir, projectSlug), "lanes.json");
+}
+function parseLane(value) {
+  if (value === EYE_JSON_LANE || /\s/.test(value)) return void 0;
+  const slash = value.indexOf("/");
+  if (slash === -1) return void 0;
+  const provider = value.slice(0, slash);
+  const rest = value.slice(slash + 1);
+  if (provider.trim() === "" || rest.trim() === "") return void 0;
+  const colon = rest.lastIndexOf(":");
+  const lastSep = Math.max(rest.lastIndexOf("\\"), rest.lastIndexOf("/"));
+  if (colon === -1 || colon < lastSep) return { provider, model: rest };
+  const model = rest.slice(0, colon);
+  const thinking = rest.slice(colon + 1);
+  if (model.trim() === "" || thinking.trim() === "") return void 0;
+  return { provider, model, thinking };
+}
+var ZCODE_OFFICIAL_GLM_MODEL_IDS = [
+  "GLM-5.3",
+  "GLM-5.3-Flash",
+  "GLM-5V-Turbo",
+  "GLM-5.2",
+  "GLM-5.1",
+  "GLM-5.1-Highspeed",
+  "GLM-5",
+  "GLM-5-Turbo",
+  "GLM-4.7",
+  "GLM-4.7-FlashX",
+  "GLM-4.7-Flash",
+  "GLM-4.6",
+  "GLM-4.5-Air",
+  "GLM-4.5",
+  "GLM-4.6V",
+  "GLM-4.6V-Flash",
+  "GLM-4.6V-FlashX",
+  "GLM-4.1V-Thinking-FlashX",
+  "GLM-4.1V-Thinking-Flash",
+  "GLM-4-FlashX-250414",
+  "GLM-4-Flash-250414",
+  "GLM-4V-Flash"
+];
+var CANONICAL_ZCODE_MODEL_ID = new Map(
+  ZCODE_OFFICIAL_GLM_MODEL_IDS.map((id) => [id.toLowerCase(), id])
+);
+var TOOLLESS_OPENCODE_CONFIG = JSON.stringify({
+  permission: {
+    "*": "deny",
+    external_directory: "deny",
+    doom_loop: "deny",
+    question: "deny",
+    edit: "deny",
+    write: "deny",
+    bash: "deny",
+    read: { "*": "ask" }
+  }
+});
+
+// src/scrum/config.ts
 var mutation = new AsyncLocalStorage2();
 var SCRUM_ROLES = ["pm", "ux", "architect", "dev", "qa"];
 var SCRUM_LANES = [

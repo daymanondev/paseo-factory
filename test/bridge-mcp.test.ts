@@ -2215,7 +2215,7 @@ test("lead_dispatch_agent accepts thinking/thinkingReason end-to-end: a tier wit
       args: ["--correlation", leadCorr.correlationId, "--state-dir", stateDir],
       cwd: repoDir,
       requests: [
-        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "TH-BR", gate: "/usr/bin/true", artifact: "README.md", scope: ["README.md"] } } },
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "TH-BR", gate: "/usr/bin/true", artifact: "README.md", scope: ["README.md"], description: "1. Bounded Outcome\nThe bridge threads lead_dispatch_agent's thinking/thinkingReason end-to-end: an unexplained tier refuses invalid-spawn before any Peer exists, and a reasoned tier records both fields on spawn_dispatched.\n\n2. Contract Boundary & Regression Invariants\nThe pre-existing dispatch surfaces keep their shape; only the two new parameters and the ledger fields change.\n\n3. Excluded / Deferred\nNone.\n\n4. Verification\nThe bridge seam suite asserting the refusal, the ledger line, and the single Peer create." } } },
         { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_dispatch_agent", arguments: { tasks: ["TH-BR"], thinking: "high" } } },
       ],
     });

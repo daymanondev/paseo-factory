@@ -1,6 +1,6 @@
 import { scrumBindingIsValid } from "./scrum/types.ts";
 import { eventAllowsUnboundEpoch, LEDGER_REFERENCE_KINDS, EVENT_NAMES, NEEDS_HUMAN_REASONS, needsHumanEvidenceIsValid, PEER_DISPOSITIONS, PEER_HANDOFF_OUTCOMES } from "./events.ts";
-import { PEER_THINKING_LEVELS } from "./lanes.ts";
+import { PEER_THINKING_LEVELS } from "./peer-thinking.ts";
 import type { LedgerEvent } from "./events.ts";
 
 /** Legacy records remain readable. V2 requires identities and a file-level writer fence. */
