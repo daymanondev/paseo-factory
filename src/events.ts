@@ -53,6 +53,7 @@
 
 import type { ScrumTaskBinding } from "./scrum/types.ts";
 import type { LandingResult } from "./workspace.ts";
+import type { PeerThinkingLevel } from "./lanes.ts";
 
 export type Verdict = "red" | "green";
 
@@ -471,6 +472,19 @@ export interface SpawnDispatched extends EventIdentityMetadata {
    * Absent on the legacy shared-checkout path and pre-0.0.14 lines.
    */
   worktree?: string;
+  /**
+   * The per-dispatch reasoning-effort tier the Lead requested (v0.5.0, ADR
+   * 0054 §4) — one of `low | medium | high | xhigh | max`. Recorded, and
+   * resolved provider-adaptively at the spawn call site against the provider
+   * catalog; absent when the dispatch rode the configured `worker` lane as-is.
+   */
+  thinking?: PeerThinkingLevel;
+  /**
+   * The Lead's one sentence explaining why the Task warrants `thinking` —
+   * required whenever `thinking` is supplied (the refusal names the law).
+   * Absent when no tier was requested.
+   */
+  thinkingReason?: string;
 }
 
 /**

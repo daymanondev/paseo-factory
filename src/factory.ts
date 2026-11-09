@@ -14,8 +14,8 @@ import { runGate } from "./gate.ts";
 import { artifactPathProblem } from "./artifact.ts";
 import { renderReport } from "./report.ts";
 import { laneCliAvailable } from "./lanes.ts";
-import { EYE_JSON_LANE } from "./lanes.ts";
-import type { LaneCliRunner } from "./lanes.ts";
+import { EYE_JSON_LANE, PEER_THINKING_LEVELS } from "./lanes.ts";
+import type { LaneCliRunner, PeerThinkingLevel } from "./lanes.ts";
 import { loadEyeConfig, projectSlugOfWorkspace, resolveEyeLane, runFreshEyesPass } from "./fresh-eyes.ts";
 import { runWatchPass, watchLaneAvailable } from "./watch.ts";
 import type { CopilotRunner, TimelineFetcher } from "./watch.ts";
@@ -253,6 +253,15 @@ export interface SpawnInput {
    * landing read it back. Omitted on the legacy shared-checkout path.
    */
   worktree?: string;
+  /**
+   * The per-dispatch reasoning-effort tier the Lead requested (v0.5.0, ADR
+   * 0054 §4) — one of `low | medium | high | xhigh | max`, resolved
+   * provider-adaptively at the spawn call site. Requires a non-empty
+   * `thinkingReason` (the refusal is `invalid-spawn`).
+   */
+  thinking?: PeerThinkingLevel;
+  /** One sentence explaining why the Task warrants `thinking` — mandatory when `thinking` is supplied. */
+  thinkingReason?: string;
 }
 
 /**
@@ -1005,7 +1014,7 @@ export function createFactory(options: FactoryOptions): Factory {
       });
     },
 
-    requestSpawn({ task, provider, arity, worktree }) {
+    requestSpawn({ task, provider, arity, worktree, thinking, thinkingReason }) {
       const base = { task, provider, arity, ...(worktree === undefined || worktree.trim() === "" ? {} : { worktree }) };
       // Two spellings of one refusal on purpose: `code` is dash-style for the
       // spool reply (the FactoryError convention), `rule` is colon-style for
@@ -1024,6 +1033,27 @@ export function createFactory(options: FactoryOptions): Factory {
           "spawn:invalid-request",
           `spawn request for task ${JSON.stringify(task)} is malformed — arity must be a positive integer and provider a non-empty string`,
         );
+      }
+      // The per-dispatch effort law (v0.5.0, ADR 0054 §4): a supplied tier is
+      // one of the five levels AND carries its one-sentence reason — an
+      // unexplained or mistyped tier is a malformed request, refused like any
+      // other, never silently dropped. (The spool admits only the five tiers
+      // or absence; this guards every other caller, including untyped ones.)
+      if (thinking !== undefined) {
+        if (!(PEER_THINKING_LEVELS as readonly string[]).includes(thinking)) {
+          return refuse(
+            "invalid-spawn",
+            "spawn:invalid-request",
+            `spawn request for task ${JSON.stringify(task)} carries thinking "${thinking}" — use one of low | medium | high | xhigh | max`,
+          );
+        }
+        if ((thinkingReason ?? "").trim() === "") {
+          return refuse(
+            "invalid-spawn",
+            "spawn:invalid-request",
+            "thinkingReason is required when thinking is specified",
+          );
+        }
       }
       if (!TASK_ID_PATTERN.test(task)) {
         return refuse(
@@ -1061,7 +1091,15 @@ export function createFactory(options: FactoryOptions): Factory {
           `workspace "${contract.workspace}" of task ${task} ${relationText(conflict.relation)} the live contract of task ${conflict.task} (${conflict.workspace})`,
         );
       }
-      return { outcome: "dispatched", event: ledger.append({ ...base, event: "spawn_dispatched" }) };
+      return {
+        outcome: "dispatched",
+        event: ledger.append({
+          ...base,
+          event: "spawn_dispatched",
+          ...(thinking === undefined ? {} : { thinking }),
+          ...(thinking !== undefined && (thinkingReason ?? "").trim() !== "" ? { thinkingReason: thinkingReason!.trim() } : {}),
+        }),
+      };
     },
 
     meter({ task, provider, usage, agent }) {

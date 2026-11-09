@@ -934,6 +934,71 @@ test("requestSpawn refuses a workspace overlapping another live contract — the
   }
 });
 
+// ---- per-dispatch thinking effort on spawn (v0.5.0 ticket 04, ADR 0054 §4) --------------
+
+test("requestSpawn records the per-dispatch thinking tier and its reason on spawn_dispatched", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  factory.setContract({ task: "THINK-1", workspace, gate: "true", artifact, scope: ["src"] });
+
+  const decision = factory.requestSpawn({
+    task: "THINK-1",
+    provider: "zcode/GLM-5.3:high",
+    arity: 1,
+    thinking: "max",
+    thinkingReason: "The ledger schema refactor carries high uncertainty and a heavy verification burden.",
+  });
+
+  assert.equal(decision.outcome, "dispatched");
+  const { ts, ...rest } = decision.event;
+  assert.deepEqual(rest, {
+    seq: 2,
+    event: "spawn_dispatched",
+    task: "THINK-1",
+    provider: "zcode/GLM-5.3:high",
+    arity: 1,
+    thinking: "max",
+    thinkingReason: "The ledger schema refactor carries high uncertainty and a heavy verification burden.",
+  });
+  // A spawn without the override records neither field — the line stays exactly as before.
+  const bare = factory.requestSpawn({ task: "THINK-1", provider: "zcode/GLM-5.3:high", arity: 1 });
+  assert.equal(bare.outcome, "dispatched");
+  const { ts: bareTs, ...bareRest } = bare.event;
+  assert.deepEqual(bareRest, { seq: 3, event: "spawn_dispatched", task: "THINK-1", provider: "zcode/GLM-5.3:high", arity: 1 });
+});
+
+test("requestSpawn refuses thinking without a reason or with an unknown tier — invalid-spawn, one line each", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  factory.setContract({ task: "THINK-2", workspace, gate: "true", artifact, scope: ["src"] });
+
+  const noReason = factory.requestSpawn({ task: "THINK-2", provider: "zcode/GLM-5.3:high", arity: 1, thinking: "high", thinkingReason: "" });
+  assert.equal(noReason.outcome, "refused");
+  if (noReason.outcome === "refused") {
+    assert.equal(noReason.code, "invalid-spawn");
+    assert.equal(noReason.event.rule, "spawn:invalid-request");
+    assert.equal(noReason.event.reason, "thinkingReason is required when thinking is specified");
+  }
+
+  // "ultra" is deliberately not a tier — a JS caller (the driver) can send
+  // one; the typed surface takes the cast and the factory refuses at runtime.
+  const unknownTier = factory.requestSpawn({ task: "THINK-2", provider: "zcode/GLM-5.3:high", arity: 1, thinking: "ultra" as never, thinkingReason: "typo tier" });
+  assert.equal(unknownTier.outcome, "refused");
+  if (unknownTier.outcome === "refused") {
+    assert.equal(unknownTier.code, "invalid-spawn");
+    assert.match(unknownTier.event.reason, /low \| medium \| high \| xhigh \| max/);
+  }
+
+  const lines = factory.ledger.eventsFor("THINK-2").filter((e) => e.event === "spawn_refused");
+  assert.equal(lines.length, 2, "every refusal is exactly one line");
+  // The refused tiers never reach a dispatched line.
+  assert.equal(factory.ledger.eventsFor("THINK-2").some((e) => e.event === "spawn_dispatched"), false);
+});
+
 // ---- the Lead's two acts (v0.0.10, ticket 03 items 2–3) ------------------------------
 
 test("repoke dispatches once per task and refuses the second ask with one repoke_refused line (the structural idempotency)", async (t) => {

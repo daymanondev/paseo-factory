@@ -20,13 +20,14 @@ import {
   mergeLaneProfilesFiles,
   parseLane,
   resetProjectLanes,
+  resolvePeerThinkingLane,
   runLaneCli,
   saveLaneProfile,
   saveLanes,
   saveLanesBatch,
   stripZcodeProviderPrefix,
 } from "../src/lanes.ts";
-import type { LaneCliRunner, LaneProfile, LaneProfilesFile } from "../src/lanes.ts";
+import type { LaneCliRunner, LaneProfile, LaneProfilesFile, LaneThinkingCatalogEntry } from "../src/lanes.ts";
 import { resolveEyeLane } from "../src/fresh-eyes.ts";
 import {
   DEFAULT_LANE as DEFAULT_LANE_MJS,
@@ -1122,4 +1123,63 @@ test("parseLane preserves a colon inside a zcode runtime model prefix when no :t
     provider: "zcode",
     model: "custom:cliproxyapi\\claude-sonnet-4-6",
   });
+});
+
+// ---- per-dispatch provider-adaptive thinking effort (v0.5.0 ticket 04, ADR 0054 §4) ----
+
+/** One provider's catalog slice, the shape the daemon's `providers.listModels` returns. */
+function catalogOf(...entries: LaneThinkingCatalogEntry[]): LaneThinkingCatalogEntry[] {
+  return entries;
+}
+
+const FULL_TIERS = ["low", "medium", "high", "xhigh", "max"] as const;
+
+test("resolvePeerThinkingLane keeps the configured worker lane untouched when no override is requested", () => {
+  const catalog = catalogOf({ provider: "zcode", models: [{ id: "builtin:zai-coding-plan\\GLM-5.3", thinkingOptions: FULL_TIERS.map((id) => ({ id })) }] });
+  assert.equal(resolvePeerThinkingLane("zcode/GLM-5.3:high", undefined, catalog), "zcode/GLM-5.3:high");
+  assert.equal(resolvePeerThinkingLane("zcode/GLM-5.3", undefined, catalog), "zcode/GLM-5.3");
+  assert.equal(resolvePeerThinkingLane("antigravity/gemini-4-argon-high", undefined, []), "antigravity/gemini-4-argon-high");
+});
+
+test("a fixed-effort model (thinkingOptions: []) silently ignores the override — no error, no suffix mutation", () => {
+  const catalog = catalogOf({ provider: "antigravity", models: [{ id: "gemini-4-argon-high", thinkingOptions: [] }] });
+  assert.equal(resolvePeerThinkingLane("antigravity/gemini-4-argon-high", "high", catalog), "antigravity/gemini-4-argon-high");
+  assert.equal(resolvePeerThinkingLane("antigravity/gemini-4-argon-high", "max", catalog), "antigravity/gemini-4-argon-high");
+  // An unknown model — no catalog entry at all, or no catalog reachable — preserves the lane the same way.
+  assert.equal(resolvePeerThinkingLane("custom/nothing-known", "high", catalog), "custom/nothing-known");
+  assert.equal(resolvePeerThinkingLane("zcode/GLM-5.3:high", "max", []), "zcode/GLM-5.3:high");
+  assert.equal(resolvePeerThinkingLane("zcode/GLM-5.3:high", "max", undefined), "zcode/GLM-5.3:high");
+});
+
+test("a full-catalog model applies the requested tier as the :thinking suffix", () => {
+  const full = catalogOf(
+    { provider: "claude", models: [{ id: "opus-4-8", thinkingOptions: FULL_TIERS.map((id) => ({ id })) }] },
+    { provider: "zcode", models: [{ id: "builtin:zai-coding-plan\\GLM-5.3", thinkingOptions: FULL_TIERS.map((id) => ({ id })) }] },
+  );
+  assert.equal(resolvePeerThinkingLane("claude/opus-4-8", "xhigh", full), "claude/opus-4-8:xhigh");
+  assert.equal(resolvePeerThinkingLane("zcode/GLM-5.3:high", "max", full), "zcode/GLM-5.3:max");
+  assert.equal(resolvePeerThinkingLane("zcode/builtin:zai-coding-plan\\GLM-5.3", "low", full), "zcode/builtin:zai-coding-plan\\GLM-5.3:low");
+});
+
+test("a partial catalog maps an unsupported medium to the configured suffix, else high, else the last option — never bare", () => {
+  const partial = catalogOf({ provider: "zcode", models: [{ id: "builtin:zai-coding-plan\\GLM-5.3", thinkingOptions: [{ id: "low" }, { id: "high" }, { id: "max" }] }] });
+  // The Owner's configured suffix on the worker lane wins when the catalog carries it.
+  assert.equal(resolvePeerThinkingLane("zcode/GLM-5.3:high", "medium", partial), "zcode/GLM-5.3:high");
+  // A bare configured lane has no suffix to honor — high is medium's default landing tier.
+  assert.equal(resolvePeerThinkingLane("zcode/GLM-5.3", "medium", partial), "zcode/GLM-5.3:high");
+  // The configured suffix is the FIRST fallback — when the catalog carries it,
+  // medium lands there even below the requested rung (the Owner's own word).
+  const lowCatalog = catalogOf({ provider: "zcode", models: [{ id: "builtin:zai-coding-plan\\GLM-5.3", thinkingOptions: [{ id: "low" }, { id: "max" }] }] });
+  assert.equal(resolvePeerThinkingLane("zcode/GLM-5.3:low", "medium", lowCatalog), "zcode/GLM-5.3:low");
+  // No high and no valid configured suffix — the last advertised option stands in, still suffixed.
+  assert.equal(resolvePeerThinkingLane("zcode/GLM-5.3:medium", "medium", lowCatalog), "zcode/GLM-5.3:max");
+});
+
+test("a partial catalog maps xhigh to max, else high, else the last option — never bare", () => {
+  const partial = catalogOf({ provider: "zcode", models: [{ id: "builtin:zai-coding-plan\\GLM-5.3", thinkingOptions: [{ id: "low" }, { id: "high" }, { id: "max" }] }] });
+  assert.equal(resolvePeerThinkingLane("zcode/GLM-5.3", "xhigh", partial), "zcode/GLM-5.3:max");
+  const noMax = catalogOf({ provider: "zcode", models: [{ id: "builtin:zai-coding-plan\\GLM-5.3", thinkingOptions: [{ id: "low" }, { id: "high" }] }] });
+  assert.equal(resolvePeerThinkingLane("zcode/GLM-5.3", "xhigh", noMax), "zcode/GLM-5.3:high");
+  const onlyLowMedium = catalogOf({ provider: "zcode", models: [{ id: "builtin:zai-coding-plan\\GLM-5.3", thinkingOptions: [{ id: "low" }, { id: "medium" }] }] });
+  assert.equal(resolvePeerThinkingLane("zcode/GLM-5.3", "xhigh", onlyLowMedium), "zcode/GLM-5.3:medium");
 });

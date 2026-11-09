@@ -225,6 +225,87 @@ export function stripZcodeProviderPrefix(model: string): string {
   return backslash === -1 ? model : model.slice(backslash + 1);
 }
 
+// ---- per-dispatch provider-adaptive thinking effort (v0.5.0, ADR 0054 §4) ------------------
+
+/** The five reasoning-effort tiers a Lead may request per dispatch (`low` … `max`). */
+export const PEER_THINKING_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
+
+export type PeerThinkingLevel = (typeof PEER_THINKING_LEVELS)[number];
+
+/**
+ * The provider-catalog slice the effort resolution reads: one provider's
+ * models with their advertised `thinkingOptions`. Structural on purpose —
+ * the daemon's `providers.listModels` reply, `ProviderCatalogEntry`, and the
+ * surface's `ProviderEntry` all satisfy it without conversion.
+ */
+export interface LaneThinkingCatalogModel {
+  id: string;
+  thinkingOptions?: readonly { id: string }[] | null;
+}
+
+export interface LaneThinkingCatalogEntry {
+  id?: string;
+  provider?: string;
+  models?: readonly LaneThinkingCatalogModel[] | null;
+}
+
+/**
+ * Resolves one per-dispatch `thinking` override against the configured
+ * `worker` lane and the provider model catalog (ADR 0054 §4; the inverse of
+ * `sanitizeLaneWithProviders` — this mapping never strips thinking):
+ *
+ * 1. No override requested → the configured lane verbatim (the Owner's
+ *    `lanes.json` word is the whole truth).
+ * 2. A model with no `thinkingOptions` (fixed/baked-in effort such as
+ *    `antigravity/gemini-4-argon-high`, an unknown model, or an unreachable
+ *    catalog) → the configured lane verbatim — the override is silently
+ *    ignored, never an error, never a suffix mutation.
+ * 3. The catalog carries the requested tier → `<provider>/<model>:<tier>`.
+ * 4. A non-empty catalog without the requested tier → the nearest supported
+ *    option, never a bare `<provider>/<model>`: `"medium"` lands on the
+ *    Owner's configured suffix when the catalog carries it (else `"high"`,
+ *    else the last option); `"xhigh"` lands on `"max"` (else `"high"`, else
+ *    the last option); any other unsupported tier follows the medium ladder.
+ *
+ * Pure string work — no fs, no env — so the plugin server consults it at the
+ * spawn call sites with the daemon catalog in hand.
+ */
+export function resolvePeerThinkingLane(
+  configuredWorkerLane: string,
+  requestedThinking: PeerThinkingLevel | undefined,
+  providers?: readonly LaneThinkingCatalogEntry[],
+): string {
+  if (requestedThinking === undefined) return configuredWorkerLane;
+  const lane = parseLane(configuredWorkerLane);
+  if (lane === undefined) return configuredWorkerLane;
+  const entry = providers?.find((p) => (p.provider ?? p.id) === lane.provider);
+  const models = entry?.models;
+  if (models === undefined || models === null) return configuredWorkerLane;
+  const strippedModel = lane.model.replace(/^[^/]+\//, "");
+  const strippedZcodeModel = stripZcodeProviderPrefix(strippedModel);
+  const meta = models.find(
+    (m) =>
+      m.id === lane.model ||
+      `${lane.provider}/${m.id}` === lane.model ||
+      m.id === `${lane.provider}/${lane.model}` ||
+      m.id === strippedModel ||
+      m.id.replace(/^[^/]+\//, "") === strippedModel ||
+      (lane.provider === "zcode" && stripZcodeProviderPrefix(m.id.replace(/^[^/]+\//, "")) === strippedZcodeModel),
+  );
+  const options = meta?.thinkingOptions;
+  if (!Array.isArray(options) || options.length === 0) return configuredWorkerLane;
+  const carried = options.some((o) => o.id === requestedThinking);
+  if (carried) return `${lane.provider}/${lane.model}:${requestedThinking}`;
+  // The nearest supported option — the Owner's configured suffix first for the
+  // medium ladder, max first for xhigh; high next; the catalog's last word last.
+  const supports = (tier: string | undefined) => tier !== undefined && options.some((o) => o.id === tier);
+  const resolved =
+    requestedThinking === "xhigh"
+      ? (supports("max") ? "max" : supports("high") ? "high" : options[options.length - 1].id)
+      : (supports(lane.thinking) ? lane.thinking! : supports("high") ? "high" : options[options.length - 1].id);
+  return `${lane.provider}/${lane.model}:${resolved}`;
+}
+
 /**
  * One lanes file's validated entries: absent file → no entries (never an
  * error); unparseable JSON, a non-object, a non-string lane, or an invalid
