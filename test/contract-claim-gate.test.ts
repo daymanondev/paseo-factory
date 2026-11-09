@@ -33,7 +33,7 @@ import { projectTask } from "../src/task-state.ts";
 import { foldTasks } from "../plugin/server/view.ts";
 import { FactoryError } from "../plugin/server/core/errors.ts";
 import type { ContractSet } from "../src/events.ts";
-import { disposeDir, gitCommitAll, makeTempDir } from "./helpers.ts";
+import { disposeDir, gitCommitAll, gitCommitChanges, makeTempDir } from "./helpers.ts";
 
 const BRIDGE_BIN = resolve(import.meta.dirname, "../plugin/bin/bridge.mjs");
 
@@ -404,4 +404,192 @@ test("ticket 01: the 4-Part Brief gate and optional read-only gate hold end-to-e
   assert.equal(engineerResult.isError, true, "an engineer Contract with an empty gate must be refused");
   assert.match(engineerResult.text, /invalid-contract/);
   assert.match(engineerResult.text, /gate command must be a non-empty string/);
+});
+
+// ---- ticket 02: the synthetic green verdict on read-only claims with an empty gate (ADR 0054 §2) ----
+
+const SYNTHETIC_NOTE = "read-only disposition (<disposition>) — 6-field handoff recorded, no shell gate required";
+
+test("ticket 02: a read-only claim with an empty gate records a synthetic green verdict — gate_started then gate_finished green, gate log, and the 6-Field Handoff report, with no shell subprocess (ADR 0054 §2)", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const workspace = makeRepo(dir);
+  const stateDir = join(dir, "state");
+  const factory = createFactory({ stateDir });
+  factory.setContract({
+    task: "SYNGATE-1",
+    workspace,
+    gate: "",
+    seat: "lead",
+    disposition: "architect",
+    outcome: "Map the seam the next wave targets.",
+    invariants: "No code changes.",
+    exclusions: "Excluded: fixes.",
+  });
+  const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: workspace, encoding: "utf8" }).trim();
+
+  // The read-only Peer claims with no commit — the omitted sha defaults to the
+  // execution tree's HEAD, and the empty gate never reaches a shell.
+  const outcome = await factory.claim({
+    task: "SYNGATE-1",
+    sha: "",
+    handoff: { outcome: "complete", scope: "read src/x.ts", verification: "worktree clean at HEAD", unknowns: "none" },
+  });
+
+  assert.equal(outcome.verdict, "green", JSON.stringify(outcome.gate));
+  assert.equal(outcome.attempt, 1);
+  assert.equal(outcome.gate.exit, 0, "the synthetic verdict records exit 0");
+  assert.equal(outcome.gate.verdict, "green");
+  assert.equal(outcome.gate.note, SYNTHETIC_NOTE.replace("<disposition>", "architect"));
+  assert.equal(outcome.gate.sha, head, "the omitted commit resolved to HEAD and the verdict attests it");
+
+  // The full Attempt sequence lands exactly as a shell attempt does — the
+  // synthetic path is a verdict, never a shortcut around the ledger.
+  const events = factory.ledger.eventsFor("SYNGATE-1");
+  assert.deepEqual(
+    events.map((e) => e.event),
+    ["contract_set", "claim_reported", "gate_started", "gate_finished", "report_written"],
+  );
+  assert.equal(events.find((e) => e.event === "gate_started")?.cmd, "", "gate_started carries the contract's empty gate verbatim");
+
+  // The gate log is the one synthetic line — a shell run could never produce
+  // it (an empty command through runGate cannot even start).
+  const finished = events.findLast((e) => e.event === "gate_finished");
+  assert.ok(finished && "outputPath" in finished && finished.outputPath, "gate_finished records the gate log path");
+  assert.equal(
+    readFileSync(String((finished as { outputPath?: string }).outputPath), "utf8"),
+    `read-only disposition (architect) — 6-field handoff recorded, worktree clean at ${head}`,
+  );
+
+  // The report generates as usual and renders the 6-Field Handoff (spec
+  // Implementation Decision 2: "then generate report-<task>-<attempt>.md with
+  // the 6-Field Handoff as usual").
+  const report = readFileSync(outcome.reportPath, "utf8");
+  assert.match(report, /- Outcome: complete/);
+  assert.match(report, /- Snapshot:/);
+  assert.match(report, /- Scope: read src\/x\.ts/);
+  assert.match(report, /- Verification: worktree clean at HEAD/);
+  assert.match(report, /- Unknown \/ risk: none/);
+  assert.ok(report.includes(head), "the Snapshot names the resolved commit");
+});
+
+test("ticket 02: a dirty worktree reds the synthetic path with dirty-worktree-before-gate — the attempt still reaches gate_finished and its report, never an exception (station-2 precedent)", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const workspace = makeRepo(dir);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  factory.setContract({
+    task: "SYNGATE-2",
+    workspace,
+    gate: "",
+    seat: "lead",
+    disposition: "scout",
+    outcome: "Recon the layout.",
+    invariants: "No code changes.",
+    exclusions: "Excluded: fixes.",
+  });
+
+  // The read-only Peer left an untracked file behind — the tree is not clean
+  // at HEAD, so there is nothing clean to attest.
+  writeFileSync(join(workspace, "leftover.txt"), "an untracked read-only leftover\n");
+
+  const outcome = await factory.claim({
+    task: "SYNGATE-2",
+    sha: "",
+    handoff: { outcome: "complete", scope: "read the layout", verification: "worktree clean at HEAD", unknowns: "none" },
+  });
+
+  assert.equal(outcome.verdict, "red");
+  assert.equal(outcome.gate.exit, null, "the pre-gate station red carries no exit code — the station-2 precedent");
+  assert.match(outcome.gate.note, /dirty-worktree-before-gate/);
+  assert.match(outcome.gate.note, /leftover\.txt/, "the note names the dirty tree's own reason");
+  assert.deepEqual(
+    factory.ledger.eventsFor("SYNGATE-2").map((e) => e.event),
+    ["contract_set", "claim_reported", "gate_started", "gate_finished", "report_written"],
+    "the red attempt closes through gate_finished and report_written — no exception escapes the claim"
+  );
+});
+
+test("ticket 02: the synthetic path reds unauthorized root memory edits inside the Contract's diff range (spec Implementation Decision 2)", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const workspace = makeRepo(dir);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  factory.setContract({
+    task: "SYNGATE-3",
+    workspace,
+    gate: "",
+    seat: "lead",
+    disposition: "reviewer",
+    outcome: "Review the fence.",
+    invariants: "No code changes.",
+    exclusions: "Excluded: fixes.",
+  });
+
+  // A committed AGENTS.md edit between the Contract's base and the claimed
+  // HEAD — the tree is clean at HEAD, but project memory is never a read-only
+  // Peer's to move (scope is always [] on a read-only Contract).
+  writeFileSync(join(workspace, "AGENTS.md"), "# memory edit\n");
+  gitCommitChanges(workspace, "memory edit inside the contract range");
+
+  const outcome = await factory.claim({
+    task: "SYNGATE-3",
+    sha: "",
+    handoff: { outcome: "complete", scope: "read AGENTS.md", verification: "worktree clean at HEAD", unknowns: "none" },
+  });
+
+  assert.equal(outcome.verdict, "red");
+  assert.match(outcome.gate.note, /fenced memory files: AGENTS\.md/);
+  assert.deepEqual(
+    factory.ledger.eventsFor("SYNGATE-3").map((e) => e.event),
+    ["contract_set", "claim_reported", "gate_started", "gate_finished", "report_written"],
+  );
+});
+
+test("ticket 02: a read-only Contract with an explicit non-empty gate runs the shell Gate subprocess exactly as today (spec User Story 8)", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const workspace = makeRepo(dir);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+
+  // A failing optional check command: the verdict is red through the ordinary
+  // runGate path, and the note carries the command's own output.
+  factory.setContract({
+    task: "SYNGATE-4",
+    workspace,
+    gate: "echo reviewer-signal >&2; exit 7",
+    seat: "lead",
+    disposition: "reviewer",
+    outcome: "Run the audit script.",
+    invariants: "No code changes.",
+    exclusions: "Excluded: fixes.",
+  });
+  const red = await factory.claim({
+    task: "SYNGATE-4",
+    sha: "",
+    handoff: { outcome: "complete", scope: "read the audit", verification: "the optional gate runs", unknowns: "none" },
+  });
+  assert.equal(red.verdict, "red");
+  assert.equal(red.gate.exit, 7, "the shell's own exit code rides the verdict");
+  assert.match(red.gate.note, /reviewer-signal/, "the note is the shell output tail — the subprocess really ran");
+
+  // A passing optional check command greens through the same ordinary path.
+  factory.setContract({
+    task: "SYNGATE-5",
+    workspace,
+    gate: "echo scout-ok",
+    seat: "lead",
+    disposition: "scout",
+    outcome: "Run the check.",
+    invariants: "No code changes.",
+    exclusions: "Excluded: fixes.",
+  });
+  const green = await factory.claim({
+    task: "SYNGATE-5",
+    sha: "",
+    handoff: { outcome: "complete", scope: "read the check", verification: "the optional gate runs", unknowns: "none" },
+  });
+  assert.equal(green.verdict, "green");
+  assert.equal(green.gate.exit, 0);
+  assert.equal(green.gate.note, "scout-ok", "the note is the shell's output — never the synthetic read-only line");
 });

@@ -275,6 +275,33 @@ test("claim with an empty sha is refused at admission for engineer dispositions,
   assert.equal(factory.ledger.eventsFor("U2-RO").find((e) => e.event === "claim_reported")?.sha, sha, "the omitted commit resolved to HEAD");
 });
 
+test("a read-only claim with an empty gate records the synthetic green verdict and accepts through the merge-free read-only landing (ADR 0054 §2, ticket 02)", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, sha } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir: join(dir, "factory") });
+
+  factory.setContract({ task: "ROSYN-1", workspace, gate: "", disposition: "scout" });
+  const outcome = await factory.claim({ task: "ROSYN-1", sha: "", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
+  assert.equal(outcome.verdict, "green");
+  assert.equal(outcome.attempt, 1);
+  assert.equal(outcome.gate.exit, 0, "the synthetic verdict records exit 0 without spawning a shell");
+  assert.equal(outcome.gate.note, "read-only disposition (scout) — 6-field handoff recorded, no shell gate required");
+  assert.equal(outcome.gate.sha, sha, "the omitted commit defaulted to the execution tree's HEAD");
+  assert.ok(existsSync(outcome.reportPath), "report-<task>-<attempt>.md generates as usual");
+  assert.deepEqual(
+    factory.ledger.eventsFor("ROSYN-1").map((e) => e.event),
+    ["contract_set", "claim_reported", "gate_started", "gate_finished", "report_written"],
+  );
+
+  // A green synthetic attempt is acceptance evidence exactly like a green
+  // shell attempt — and the read-only landing stays merge-free: no landing
+  // fields on attempt_accepted (ticket 05's law, unchanged by ticket 02).
+  const accepted = await factory.accept({ task: "ROSYN-1", attempt: 1, accepted_by: "owner" });
+  assert.equal(accepted.event, "attempt_accepted");
+  assert.equal(accepted.landing, undefined, "the read-only landing records no merge");
+});
+
 test("a lead_verify mechanical re-run claims with no Peer handoff (ADR 0053 §4 scope): the marker rides claim_reported, the report names the re-run, and no Outcome is forged", async (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);

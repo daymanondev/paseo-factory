@@ -105,6 +105,16 @@ test("spawn failure in a bad cwd rejects instead of inventing a verdict", async 
   await assert.rejects(() => runGate({ cmd: "true", cwd: "/nonexistent-cwd-xyz" }));
 });
 
+test("an empty gate command cannot start — runGate rejects, so claim() must route the empty read-only gate around it (ADR 0054 §2, ticket 02 premise)", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  // Routing a read-only Contract's empty gate through the shell could only
+  // ever end red with "gate failed to start" — spawn refuses an empty file
+  // argument outright. This is the mechanical fact the synthetic verdict
+  // replaces: the green outcome proves no shell subprocess ran.
+  await assert.rejects(() => runGate({ cmd: "", cwd: dir }), /cannot be empty/);
+});
+
 test("runGate reaps background subprocesses holding stdout open and finishes in <2s (v0.0.26, ADR 0016)", async (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);
