@@ -1592,24 +1592,25 @@ test("Lead wave laws require a bounded Project notebook at <projectStateDir>/not
   }
 });
 
-test("Lead wave laws condense the Project notebook / Recurrence Guard ceremonies into one compact operational principle — no state-machine prose, no tier hierarchy (ADR 0053 §5, amending ADR 0048)", () => {
+test("Lead wave laws condense the Project notebook / Recurrence Guard ceremonies into one compact operational principle — no state-machine prose, no tier hierarchy (ADR 0053 §5, amended by ADR 0052 Decision 2)", () => {
   const guardLaw = LEAD_WAVE_LAWS.find((law) => law.startsWith("Project Notebook & Recurrence Guard"))!;
   assert.ok(guardLaw !== undefined, "the condensed Project Notebook & Recurrence Guard law exists");
 
   // The compact principle keeps the load-bearing levers: evidence citations, the
-  // recurrence threshold, the one-change cap, mechanical-first preference, the
-  // Owner Ratification path for prose edits, and first-attempt-GREEN retirement.
+  // recurrence threshold, the one-change cap, mechanical-first preference, and
+  // the Owner Ratification path for prose edits.
   assert.match(guardLaw, /Task \(seq N\)/);
   assert.match(guardLaw, /no permanent rule for a one-off/);
   assert.match(guardLaw, />= 2 distinct seqs/);
   assert.match(guardLaw, /at most 1 highest-leverage hardening per Stable Checkpoint/);
   assert.match(guardLaw, /preferring mechanical structure first/);
   assert.match(guardLaw, /4-Line Ratification Card/);
-  assert.match(guardLaw, /next wave's first cumulative Gate attempt is GREEN/);
 
   // The bureaucratic state machine and the 3-Tier hierarchy are gone — from the
   // law itself and from every Lead surface (contract, seat contract, ROLE_PROMPTS,
-  // bootstraps, Turn-1 kickoff packet).
+  // bootstraps, Turn-1 kickoff packet). The graduation state names ADR 0052
+  // Decision 2 reintroduced (`State: verified`, `State: observed (1x)`) are the
+  // exception — the dedicated notebook-graduation test below pins those.
   const project = { root: "/workspace/repo", slug: "repo" };
   const input = { seat: "lead" as const, home: "/trial", stateDir: "/trial/state", nodePath: process.execPath,
     path: "/usr/bin", lane: "codex", project };
@@ -1617,13 +1618,184 @@ test("Lead wave laws condense the Project notebook / Recurrence Guard ceremonies
     renderSeatBootstrapPrompt(input), renderSeatBootstrap(input),
     buildSeatKickoffPacket({ role: "lead", projectSlug: project.slug, projectRoot: project.root, ledgerEvents: [] })]) {
     assert.doesNotMatch(surface, /observed → recurred → hardened → verified/);
-    assert.doesNotMatch(surface, /State: observed \(1x\)/);
     assert.doesNotMatch(surface, /State: hardened/);
     assert.doesNotMatch(surface, /Tier 1 \(Mechanical Structure\)/);
     assert.doesNotMatch(surface, /Tier 2 \(1-Line Repo Convention\)/);
     assert.doesNotMatch(surface, /Tier 3 \(No-Op Rule Deprecation\)/);
     assert.match(surface, /Task \(seq N\)/);
     assert.match(surface, /at most 1 highest-leverage hardening per Stable Checkpoint/);
+  }
+});
+
+test("Lead wave laws rewrite the Project notebook for the plugin single writer — lead_update_notebook / factory notebook, never .scratch/notebook.md — with the seatworks 3-rule graduation and the Tier-2 quote cap (ADR 0052 Decisions 1–2, ticket 06)", () => {
+  const guardLaw = LEAD_WAVE_LAWS.find((law) => law.startsWith("Project Notebook & Recurrence Guard"))!;
+  assert.ok(guardLaw !== undefined, "the Project Notebook & Recurrence Guard law exists");
+
+  // The single-writer law: the notebook is maintained through the plugin's
+  // lead_update_notebook / factory notebook, never by writing a notebook file
+  // inside <project-root> (the OS-sandboxed codex Lead failure mode).
+  assert.match(guardLaw, /lead_update_notebook/);
+  assert.match(guardLaw, /factory notebook/);
+  assert.match(guardLaw, /never write `<project-root>\/\.scratch\/notebook\.md`/);
+
+  // The row cap and the seatworks 3-rule graduation discipline.
+  assert.match(guardLaw, /<= 12 active Recurrence Guard rows/);
+  assert.match(guardLaw, /Fold rows that share one underlying `Cause → Effect` mechanism/);
+  assert.match(guardLaw, /retire `State: verified` rows once their Tier-1 check or helper has held across 3 subsequent waves/);
+  assert.match(guardLaw, /expire `State: observed \(1x\)` rows that have not recurred within 5 waves/);
+
+  // The Tier-2 quote cap: prose conventions are a 2–3 wave bridge, then Tier-1.
+  assert.match(guardLaw, /at most 2–3 waves/);
+  assert.match(guardLaw, /encode it as Tier-1 mechanical structure/);
+
+  // Every Lead surface carries the single writer, the row cap, and the graduation.
+  const project = { root: "/workspace/repo", slug: "repo" };
+  const input = { seat: "lead" as const, home: "/trial", stateDir: "/trial/state", nodePath: process.execPath,
+    path: "/usr/bin", lane: "codex", project };
+  for (const surface of [renderRoleContract("lead"), renderSeatContract("lead", project), ROLE_PROMPTS.lead,
+    renderSeatBootstrapPrompt(input), renderSeatBootstrap(input),
+    buildSeatKickoffPacket({ role: "lead", projectSlug: project.slug, projectRoot: project.root, ledgerEvents: [] })]) {
+    assert.match(surface, /lead_update_notebook/);
+    assert.match(surface, /\.scratch\/notebook\.md/);
+    assert.match(surface, /<= 12 active Recurrence Guard rows/);
+    assert.match(surface, /State: observed \(1x\)/);
+    assert.match(surface, /State: verified/);
+  }
+});
+
+test("Lead wave laws cap post-split verification tails at 1 combined journey wave and forbid standalone test-only negative-matrix sub-wave chains (ADR 0052 Decision 3, User Story 24)", () => {
+  const boundedLaw = LEAD_WAVE_LAWS.find((law) => law.startsWith("Bounded Verification & Context-Ceiling Recovery"))!;
+  assert.ok(boundedLaw !== undefined, "the Bounded Verification & Context-Ceiling Recovery law exists");
+
+  // The verification tail after a context-ceiling split is ONE combined journey
+  // wave — happy path and failure/retry recovery together, not a chain.
+  assert.match(boundedLaw, /at most 1 combined journey wave/);
+  assert.match(boundedLaw, /happy path.*failure\/retry recovery.*one concise suite/);
+  // Standalone test-only negative-matrix sub-wave chains are explicitly forbidden.
+  assert.match(boundedLaw, /standalone test-only negative-matrix sub-wave chains/);
+  assert.match(boundedLaw, /individual error\/refusal branches with `src\/` frozen/);
+  assert.match(boundedLaw, /refusal behavior of temporary stubs slated for replacement/);
+  assert.match(boundedLaw, /are forbidden/);
+
+  const project = { root: "/workspace/repo", slug: "repo" };
+  const input = { seat: "lead" as const, home: "/trial", stateDir: "/trial/state", nodePath: process.execPath,
+    path: "/usr/bin", lane: "codex", project };
+  for (const surface of [renderRoleContract("lead"), renderSeatContract("lead", project), ROLE_PROMPTS.lead,
+    renderSeatBootstrapPrompt(input), renderSeatBootstrap(input),
+    buildSeatKickoffPacket({ role: "lead", projectSlug: project.slug, projectRoot: project.root, ledgerEvents: [] })]) {
+    assert.match(surface, /at most 1 combined journey wave/);
+    assert.match(surface, /test-only negative-matrix sub-wave chains/);
+  }
+});
+
+test("Lead wave laws make recurred context-ceiling on a >1,500-line central file a structural module/fixture extraction wave (ADR 0052 Decision 4)", () => {
+  const boundedLaw = LEAD_WAVE_LAWS.find((law) => law.startsWith("Bounded Verification & Context-Ceiling Recovery"))!;
+  assert.ok(boundedLaw !== undefined, "the Bounded Verification & Context-Ceiling Recovery law exists");
+
+  // Two context-ceiling BLOCKEDs on Tasks touching the same central
+  // orchestration / provider / test-fixture file over 1,500 lines mandate the
+  // structural decomposition, not more micro-splitting around the monolith.
+  assert.match(boundedLaw, /recurs \(>= 2 times\)/);
+  assert.match(boundedLaw, /same central orchestration, provider, or test-fixture file/);
+  assert.match(boundedLaw, /over 1,500 lines/);
+  assert.match(boundedLaw, /mandatory Wave Hardening action is a bounded module\/fixture extraction wave/);
+  assert.match(boundedLaw, /~200–400 line files/);
+  assert.match(boundedLaw, /rather than further micro-splitting/);
+
+  const project = { root: "/workspace/repo", slug: "repo" };
+  const input = { seat: "lead" as const, home: "/trial", stateDir: "/trial/state", nodePath: process.execPath,
+    path: "/usr/bin", lane: "codex", project };
+  for (const surface of [renderRoleContract("lead"), renderSeatContract("lead", project), ROLE_PROMPTS.lead,
+    renderSeatBootstrapPrompt(input), renderSeatBootstrap(input),
+    buildSeatKickoffPacket({ role: "lead", projectSlug: project.slug, projectRoot: project.root, ledgerEvents: [] })]) {
+    assert.match(surface, /over 1,500 lines/);
+    assert.match(surface, /module\/fixture extraction wave/);
+    assert.match(surface, /~200–400 line files/);
+  }
+});
+
+test("Lead closure reuses the shared cumulative Gate runner parameterized by the slice's test file and never re-contracts a GREEN wave for test polish (ADR 0052 Decision 5)", () => {
+  const closureLaw = LEAD_WAVE_LAWS.find((law) => law.startsWith("Closure & Integration Loop"))!;
+  assert.ok(closureLaw !== undefined, "the Closure & Integration Loop law exists");
+
+  // Shared Gate runner parameterized by the current slice's test file — no
+  // per-task scripts/verify-<task>.mjs minting.
+  assert.match(closureLaw, /reuse the repository's shared cumulative Gate runner parameterized by the current slice's test file/);
+  assert.match(closureLaw, /scripts\/verify-<task>\.mjs/);
+  // Once GREEN + outcome + falsification hold, landing is immediate — test
+  // polish alone never re-opens a GREEN wave; structural cleanup defers to
+  // Wave Hardening.
+  assert.match(closureLaw, /re-contracting that GREEN wave solely for test-file DRYness, helper deduplication, or redundant zero-call assertions is forbidden/);
+  assert.match(closureLaw, /defer structural test cleanup to Wave Hardening on the next wave/);
+
+  const project = { root: "/workspace/repo", slug: "repo" };
+  const input = { seat: "lead" as const, home: "/trial", stateDir: "/trial/state", nodePath: process.execPath,
+    path: "/usr/bin", lane: "codex", project };
+  for (const surface of [renderRoleContract("lead"), renderSeatContract("lead", project), ROLE_PROMPTS.lead,
+    renderSeatBootstrapPrompt(input), renderSeatBootstrap(input),
+    buildSeatKickoffPacket({ role: "lead", projectSlug: project.slug, projectRoot: project.root, ledgerEvents: [] })]) {
+    assert.match(surface, /shared cumulative Gate runner parameterized by the current slice's test file/);
+    assert.match(surface, /scripts\/verify-<task>\.mjs/);
+    assert.match(surface, /test-file DRYness, helper deduplication, or redundant zero-call assertions is forbidden/);
+  }
+});
+
+test("Lead wave laws reference the ADR 0054 surfaces — single worker lane with per-dispatch thinking by uncertainty, disposition-specific handoff evidence, and lead_close_task retirement (ADR 0054 Decisions 2/4/5, tickets 03/04/05)", () => {
+  const briefLaw = LEAD_WAVE_LAWS.find((law) => law.startsWith("4-Part Brief"))!;
+  assert.ok(briefLaw !== undefined, "the 4-Part Brief law exists");
+
+  // Per-dispatch effort: the single Owner-configured worker lane carries all
+  // four dispositions; thinking is selected by uncertainty and verification
+  // burden with a mandatory reason — never by disposition label.
+  assert.match(briefLaw, /single `worker` lane/);
+  assert.match(briefLaw, /`thinking`.*`thinkingReason`/);
+  assert.match(briefLaw, /by task uncertainty and verification burden, never by disposition label/);
+
+  // Disposition-specific 6-Field Handoff evidence expectations (ticket 03).
+  assert.match(briefLaw, /alternatives considered.*strongest counterargument.*reversal conditions/);
+  assert.match(briefLaw, /`reviewer`.*concrete `claim` \+ `file:line` evidence per finding/);
+  assert.match(briefLaw, /`scout`.*`file:line` evidence paths, remaining unknowns, and confidence \(`low \| medium \| high`\)/);
+
+  // lead_close_task is the clean retirement for superseded or split unaccepted
+  // Tasks (ticket 05) — it lives where the context-ceiling split is ruled.
+  const boundedLaw = LEAD_WAVE_LAWS.find((law) => law.startsWith("Bounded Verification & Context-Ceiling Recovery"))!;
+  assert.ok(boundedLaw !== undefined, "the Bounded Verification & Context-Ceiling Recovery law exists");
+  assert.match(boundedLaw, /lead_close_task/);
+  assert.match(boundedLaw, /superseded or split/);
+
+  // Every Lead surface carries the per-dispatch effort law and the retirement.
+  const project = { root: "/workspace/repo", slug: "repo" };
+  const input = { seat: "lead" as const, home: "/trial", stateDir: "/trial/state", nodePath: process.execPath,
+    path: "/usr/bin", lane: "codex", project };
+  for (const surface of [renderRoleContract("lead"), renderSeatContract("lead", project), ROLE_PROMPTS.lead,
+    renderSeatBootstrapPrompt(input), renderSeatBootstrap(input),
+    buildSeatKickoffPacket({ role: "lead", projectSlug: project.slug, projectRoot: project.root, ledgerEvents: [] })]) {
+    assert.match(surface, /never by disposition label/);
+    assert.match(surface, /lead_close_task/);
+  }
+});
+
+test("the Lead command block names lead_update_notebook, lead_close_task, and the per-dispatch --thinking effort (v0.5.0, ADR 0052 §1 / ADR 0054 §4–§5)", () => {
+  const project = { root: "/workspace/repo", slug: "repo" };
+  const input = { seat: "lead" as const, home: "/trial", stateDir: "/trial/state", nodePath: process.execPath,
+    path: "/usr/bin", lane: "codex", project };
+  for (const surface of [renderRoleContract("lead"), renderSeatContract("lead", project), ROLE_PROMPTS.lead,
+    renderSeatBootstrapPrompt(input), renderSeatBootstrap(input)]) {
+    // MCP vocabulary: notebook single writer, clean task retirement, and the
+    // thinking/thinkingReason pair on dispatch.
+    assert.match(surface, /paseo-factory_lead_update_notebook\(\{ content:/);
+    assert.match(surface, /paseo-factory_lead_close_task\(\{ task: "<id>", reason:/);
+    assert.match(surface, /paseo-factory_lead_dispatch_agent\(\{ tasks: \["<id>"\], thinking: "/);
+    assert.match(surface, /thinkingReason: "/);
+    // CLI vocabulary: the same three surfaces as factory notebook / close / run --thinking.
+    assert.match(surface, /run <task> \[<task>\.\.\.\] \[--thinking <low\|medium\|high\|xhigh\|max>\]/);
+    assert.match(surface, /close --task <id> --reason "<text>"/);
+    assert.match(surface, /notebook \(--content <text> \| --file <path>\)/);
+  }
+  // The Supervisor block never gains the Lead-only vocabulary.
+  for (const supervisorSurface of [renderRoleContract("supervisor"), renderSeatContract("supervisor", project), ROLE_PROMPTS.supervisor]) {
+    assert.doesNotMatch(supervisorSurface, /lead_update_notebook/);
+    assert.doesNotMatch(supervisorSurface, /notebook --content/);
   }
 });
 
