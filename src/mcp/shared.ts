@@ -263,7 +263,7 @@ sharedTools.supervisor_end_cycle = { name: "supervisor_end_cycle", description: 
 for (const [name, source] of Object.entries({ lead_dispatch_agent: "lead_spawn_agent", lead_merge: "lead_accept_task", lead_retire_task: "lead_close_task" })) {
   sharedTools[name] = { ...sharedTools[source], name };
 }
-for (const [name, description] of Object.entries({ lead_create_worktree: "Create an isolated worktree for a contracted Task.", lead_verify: "Verify a committed Task SHA through its Contract Gate.", lead_remove_worktree: "Remove a clean worktree after its Task has been accepted." })) {
+for (const [name, description] of Object.entries({ lead_create_worktree: "Create an isolated worktree for a contracted Task. Refuses a retired Task (`already-closed`) — the close removed the worktree and its factory/<task> branch, and the retirement is terminal (ADR 0054 §5).", lead_verify: "Verify a committed Task SHA through its Contract Gate.", lead_remove_worktree: "Remove a clean worktree after its Task has been accepted." })) {
   sharedTools[name] = { name, description, inputSchema: { type: "object", properties: { task: { type: "string" }, commit: { type: "string" } }, required: ["task"] } };
 }
 for (const tool of Object.values(sharedTools)) {

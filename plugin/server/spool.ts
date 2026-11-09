@@ -1173,6 +1173,20 @@ function resolveSpawnWorktree(
     isRoot = resolve(contract.workspace) === resolve(project.root);
   }
   if (!isRoot) return {};
+  // A retired Task never re-allocates (v0.5.0, ADR 0054 §5): the close removed
+  // the managed worktree and its factory/<task> branch — a straggler driver's
+  // spawn must not rebuild either. The factory's requestSpawn refuses the same
+  // task one step later (spawn:closed-task); this guard keeps the allocation
+  // invariant from allocating at all for a task that will only be refused.
+  if (factory.ledger.eventsFor(task).some((event) => event.event === "task_closed")) {
+    return {
+      refusal: {
+        code: "already-closed",
+        rule: "spawn:closed-task",
+        reason: `task ${task} was already closed — the retirement is terminal; no Task worktree is allocated on a retired Task`,
+      },
+    };
+  }
   const prepared = allocateTaskWorktree(factory.stateDir, contract, task, factory.ledger.events);
   if (!prepared.ok) {
     return { refusal: { code: "worktree-allocation-failed", rule: "spawn:worktree-allocation-failed", reason: prepared.reason ?? "git worktree allocation failed" } };

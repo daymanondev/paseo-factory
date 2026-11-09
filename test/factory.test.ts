@@ -2224,6 +2224,47 @@ test("close refuses unknown, accepted, closed, in-flight, and Agent-seated close
   assert.equal(factory.ledger.events.filter((evt) => evt.event === "task_closed").length, 0, "no refusal wrote a task_closed line");
 });
 
+test("task_closed is terminal at every write seam — spawn, claim, re-contract, and accept all refuse after the close", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact, sha } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  factory.setContract({ task: "CL-TERM", workspace, gate: "true", artifact });
+  const green = await factory.claim({ task: "CL-TERM", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
+  assert.equal(green.verdict, "green");
+  await factory.close({ task: "CL-TERM", reason: "superseded after the context-ceiling split", by: "lead" });
+
+  // A straggler driver's spawn hears the terminal refusal — one line for the ask, no dispatch.
+  const spawn = factory.requestSpawn({ task: "CL-TERM", provider: "claude", arity: 1 });
+  assert.equal(spawn.outcome, "refused");
+  if (spawn.outcome === "refused") {
+    assert.equal(spawn.code, "already-closed");
+    assert.equal(spawn.event.rule, "spawn:closed-task");
+    assert.match(spawn.event.reason, /already closed/);
+  }
+
+  // A straggler Peer's claim opens no fresh Attempt — and no replay of the closed green evidence either.
+  await assert.rejects(
+    factory.claim({ task: "CL-TERM", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } }),
+    factoryErrorCode("already-closed"),
+  );
+
+  // The retired ID never re-contracts into a new epoch.
+  assert.throws(
+    () => factory.setContract({ task: "CL-TERM", workspace, gate: "true", artifact }),
+    factoryErrorCode("already-closed"),
+  );
+
+  // The just-closed green evidence is no longer accept-worthy.
+  await assert.rejects(factory.accept({ task: "CL-TERM", attempt: 1, accepted_by: "lead" }), factoryErrorCode("already-closed"));
+
+  const tail = factory.ledger.eventsFor("CL-TERM");
+  assert.equal(tail.filter((e) => e.event === "spawn_dispatched").length, 0, "no spawn dispatched after the close");
+  assert.equal(tail.filter((e) => e.event === "claim_reported").length, 1, "no fresh Attempt opened after the close");
+  assert.equal(tail.filter((e) => e.event === "contract_set").length, 1, "no re-contract after the close");
+  assert.equal(tail.filter((e) => e.event === "attempt_accepted").length, 0, "no acceptance after the close");
+});
+
 test("a pre-0054 ledger without task_closed projects unchanged — accepted stays accepted, no closed field appears", async (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);

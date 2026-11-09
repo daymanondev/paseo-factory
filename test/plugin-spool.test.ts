@@ -2131,6 +2131,22 @@ test("Seam 1 (ticket 05, ADR 0054 §5): close cancels and archives the bound liv
   assert.equal(closed.reason, "superseded after the context-ceiling split");
   assert.equal(closed.closed_by, "lead");
   assert.equal(factory.contractFor("T-09") !== undefined, true, "the Contract stays on the append-only ledger — closed, not erased");
+
+  // A straggler driver's late spawn on the retired Task: the allocation
+  // invariant refuses BEFORE any git worktree is rebuilt, and the reply is
+  // the terminal refusal — one spawn_refused line, no dispatch, no branch.
+  dropRequest(spoolRootFor(stateDir), { id: "cl-spawn", kind: "spawn", task: "T-09", provider: "pi/zai/glm-5.3", arity: 1 });
+  await until(() => {
+    const reply = readReply(spoolRootFor(stateDir), "cl-spawn");
+    assert.equal(reply.ok, false);
+    assert.equal(reply.code, "already-closed");
+  });
+  const refusal = ledgerLines().findLast((e) => e.event === "spawn_refused");
+  assert.ok(refusal !== undefined, "the straggler spawn wrote its one refusal line");
+  assert.equal(refusal.rule, "spawn:closed-task");
+  assert.equal(ledgerLines().filter((e) => e.event === "spawn_dispatched").length, 1, "no second dispatch for the retired Task");
+  assert.equal(existsSync(worktree), false, "no Task worktree was re-allocated after the close");
+  assert.equal(execFileSync("git", ["branch", "--list", "factory/T-09"], { cwd: root, encoding: "utf8" }).trim(), "", "branch factory/<task> stays deleted");
 });
 
 // ---- the plugin-owned notebook writer surface (v0.5.0, ADR 0052 §1, ticket 06) ---------------

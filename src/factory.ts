@@ -429,7 +429,11 @@ export interface Factory {
   readonly stateDir: string;
   /** Attempts the factory closed red while opening (ADR 0003 recovery) — for the shell to log loudly. */
   readonly recoveredAttempts: readonly { task: string; attempt: number }[];
-  /** Registers a task's done-criteria. One contract per task — the ledger is append-only. */
+  /**
+   * Registers a task's done-criteria. One contract per task — the ledger is
+   * append-only, and a retired task is terminal: re-contracting a closed ID
+   * refuses `already-closed` (v0.5.0, ADR 0054 §5).
+   */
   setContract(input: ContractInput): ContractSet;
   /**
    * Records the Agent's Claim, verifies it against the Workspace, runs the gate
@@ -437,7 +441,9 @@ export interface Factory {
    * commit: the sha is resolved, and the tree must sit clean with HEAD at that
    * commit both before and after the gate. Anything else is red, never a
    * fallback to whatever is on disk. Each Call opens the task's next Attempt;
-   * a Claim while the previous Attempt is still open is rejected (ADR 0003).
+   * a Claim while the previous Attempt is still open is rejected (ADR 0003),
+   * and a Claim on a retired task refuses `already-closed` — a straggler
+   * Peer opens no Attempt and replays no closed evidence (v0.5.0, ADR 0054 §5).
    */
   claim(input: ClaimInput): Promise<ClaimOutcome>;
   /**
@@ -450,7 +456,9 @@ export interface Factory {
    * (green + not in needs_human,
    * else `lead-accept-refused`), and a task that ran in a managed Task
    * worktree lands its claimedCommit into `<project-root>`'s local branch
-   * before the line records — async git is why the call awaits.
+   * before the line records — async git is why the call awaits. A retired
+   * task refuses `already-closed`: acceptance and retirement are the two
+   * terminals, and neither happens after the other (v0.5.0, ADR 0054 §5).
    */
   accept(input: AcceptInput): Promise<AttemptAccepted>;
   /**
@@ -469,11 +477,12 @@ export interface Factory {
   close(input: CloseInput): Promise<TaskClosed>;
   /**
    * Judges a driver's spawn request (v0.0.5): the task must be known,
-   * unaccepted, scoped when the invocation runs parallel (arity ≥ 2), and its
-   * workspace clear of every other live Contract's tree. One ledger line
-   * either way — `spawn_dispatched` or `spawn_refused` — so the record exists
-   * before any agent does. Never throws; the refusal rides the return value
-   * (and the spool reply), not an exception.
+   * unaccepted, unretired (`spawn:closed-task`, v0.5.0 ADR 0054 §5), scoped
+   * when the invocation runs parallel (arity ≥ 2), and its workspace clear of
+   * every other live Contract's tree. One ledger line either way —
+   * `spawn_dispatched` or `spawn_refused` — so the record exists before any
+   * agent does. Never throws; the refusal rides the return value (and the
+   * spool reply), not an exception.
    */
   requestSpawn(input: SpawnInput): SpawnDecision;
   /**
@@ -794,6 +803,16 @@ export function createFactory(options: FactoryOptions): Factory {
           `task ${task} was already accepted at attempt ${priorAccept.attempt}; the ledger is append-only`,
         );
       }
+      // The retirement's mirror (v0.5.0, ADR 0054 §5): a closed Task is
+      // terminal beside an accepted one — the same ID never re-contracts
+      // into a new epoch, so a straggler cannot resurrect the retired Task.
+      const closure = closureEvent(fullHistory);
+      if (closure !== undefined) {
+        throw new FactoryError(
+          "already-closed",
+          `task ${task} was closed (reason: ${closure.reason}) — the retirement is terminal; the ledger is append-only`,
+        );
+      }
       const epochHistory = epochEventsFor(ledger, task);
       const inFlight = inFlightAttempt(epochHistory);
       if (inFlight !== undefined) {
@@ -894,6 +913,17 @@ export function createFactory(options: FactoryOptions): Factory {
         throw new FactoryError(
           "already-accepted",
           `task ${task} was already accepted at attempt ${priorAccept.attempt}; the ledger is append-only`,
+        );
+      }
+
+      // The H6 rider's close-side mirror (v0.5.0, ADR 0054 §5): a retired Task
+      // is terminal the same way — a straggler Peer's Claim opens no fresh
+      // Attempt and replays no closed green evidence.
+      const closure = closureEvent(fullHistory);
+      if (closure !== undefined) {
+        throw new FactoryError(
+          "already-closed",
+          `task ${task} was closed (reason: ${closure.reason}) — the retirement is terminal; the ledger is append-only`,
         );
       }
 
@@ -1191,6 +1221,16 @@ export function createFactory(options: FactoryOptions): Factory {
           `task ${task} was already accepted at attempt ${priorAccept.attempt}; the ledger is append-only`,
         );
       }
+      // Acceptance's closure gate (v0.5.0, ADR 0054 §5): retirement is the
+      // other terminal — green evidence a close already retired is never
+      // accept-worthy after the fact.
+      const closure = closureEvent(fullHistory);
+      if (closure !== undefined) {
+        throw new FactoryError(
+          "already-closed",
+          `task ${task} was closed (reason: ${closure.reason}) — the retirement is terminal; the ledger is append-only`,
+        );
+      }
       const gate = events.findLast((e): e is GateFinished => e.event === "gate_finished");
       if (!gate || gate.verdict !== "green") {
         throw new FactoryError(
@@ -1361,6 +1401,17 @@ export function createFactory(options: FactoryOptions): Factory {
           "already-accepted",
           "spawn:accepted-task",
           `task ${task} was already accepted at attempt ${priorAccept.attempt} — the task is closed`,
+        );
+      }
+      // The retirement's spawn-side arm (v0.5.0, ADR 0054 §5): a closed Task
+      // is terminal — a straggler driver's spawn allocates no worktree and
+      // rebuilds no factory/<task> branch on the retired ID.
+      const closure = closureEvent(fullHistory);
+      if (closure !== undefined) {
+        return refuse(
+          "already-closed",
+          "spawn:closed-task",
+          `task ${task} was already closed (reason: ${closure.reason}) — the retirement is terminal`,
         );
       }
       const history = epochEventsFor(ledger, task);
@@ -1921,6 +1972,14 @@ function historyState(history: readonly LedgerEvent[]) {
 /** The task's acceptance, when the Owner has accepted — the closed-marker every closer reads. */
 function acceptedAttempt(history: readonly LedgerEvent[]): AttemptAccepted | undefined {
   return historyState(history)?.acceptance;
+}
+
+/**
+ * The task's clean retirement, when the Lead/Owner closed it (v0.5.0, ADR
+ * 0054 §5) — the terminal marker every write seam reads beside acceptance.
+ */
+function closureEvent(history: readonly LedgerEvent[]): TaskClosed | undefined {
+  return history.findLast((event): event is TaskClosed => event.event === "task_closed");
 }
 
 /**

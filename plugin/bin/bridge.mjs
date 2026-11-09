@@ -1521,7 +1521,7 @@ sharedTools.supervisor_end_cycle = { name: "supervisor_end_cycle", description: 
 for (const [name, source] of Object.entries({ lead_dispatch_agent: "lead_spawn_agent", lead_merge: "lead_accept_task", lead_retire_task: "lead_close_task" })) {
   sharedTools[name] = { ...sharedTools[source], name };
 }
-for (const [name, description] of Object.entries({ lead_create_worktree: "Create an isolated worktree for a contracted Task.", lead_verify: "Verify a committed Task SHA through its Contract Gate.", lead_remove_worktree: "Remove a clean worktree after its Task has been accepted." })) {
+for (const [name, description] of Object.entries({ lead_create_worktree: "Create an isolated worktree for a contracted Task. Refuses a retired Task (`already-closed`) \u2014 the close removed the worktree and its factory/<task> branch, and the retirement is terminal (ADR 0054 \xA75).", lead_verify: "Verify a committed Task SHA through its Contract Gate.", lead_remove_worktree: "Remove a clean worktree after its Task has been accepted." })) {
   sharedTools[name] = { name, description, inputSchema: { type: "object", properties: { task: { type: "string" }, commit: { type: "string" } }, required: ["task"] } };
 }
 for (const tool of Object.values(sharedTools)) {
@@ -1665,6 +1665,12 @@ async function handleToolCall(name, rawArgs) {
     const project = resolveProjectFromDir(contract.workspace, ctx.stateDir);
     if (!project || (ctx.projectSlug && ctx.projectSlug !== project.slug)) return toolResult("cross-project-refused: Task belongs to another Project", true);
     if (name === "lead_create_worktree") {
+      // A retired Task never re-allocates (v0.5.0, ADR 0054 §5): the close
+      // removed the managed worktree and its factory/<task> branch — creating
+      // one again would resurrect the retired Task.
+      if (events.some((event) => event.event === "task_closed" && event.task === task)) {
+        return toolResult(`already-closed: task ${task} was retired — the Task worktree and factory/${task} branch were removed at close and stay removed`, true);
+      }
       const result = allocateTaskWorktree(ctx.stateDir, contract, task, events);
       return toolResult(JSON.stringify(result), !result.ok);
     }
@@ -2022,6 +2028,12 @@ async function handleToolCall(name, rawArgs) {
       let worktree;
       if (args.runId !== undefined && contract?.execution?.runId !== args.runId || args.role !== undefined && contract?.execution?.role !== args.role) return toolResult("task-execution-mismatch: spawn assertions disagree with persisted Contract", true);
       if (contract) {
+        // The retirement is terminal (v0.5.0, ADR 0054 §5): never allocate a
+        // Task worktree for a closed Task — the spool's spawn would only be
+        // refused (spawn:closed-task), leaving an orphan behind.
+        if (events.some((event) => event.event === "task_closed" && event.task === task)) {
+          return toolResult(`already-closed: task ${task} was retired — no spawn allocates on a retired Task`, true);
+        }
         const prep = allocateTaskWorktree(ctx.stateDir, contract, task, events);
         if (!prep.ok) {
           return toolResult(`Failed to prepare Task worktree for ${task}: ${prep.reason}`, true);
