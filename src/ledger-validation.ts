@@ -1,5 +1,6 @@
 import { scrumBindingIsValid } from "./scrum/types.ts";
 import { eventAllowsUnboundEpoch, LEDGER_REFERENCE_KINDS, EVENT_NAMES, NEEDS_HUMAN_REASONS, needsHumanEvidenceIsValid, PEER_DISPOSITIONS, PEER_HANDOFF_OUTCOMES } from "./events.ts";
+import { PEER_THINKING_LEVELS } from "./lanes.ts";
 import type { LedgerEvent } from "./events.ts";
 
 /** Legacy records remain readable. V2 requires identities and a file-level writer fence. */
@@ -270,7 +271,9 @@ function v2PayloadIsValid(event: Record<string, unknown>): boolean {
     case "attempt_accepted": return optionalString("accepted_by") && optionalString("landingNote") && (event.landing === undefined || event.landing === "landed" || event.landing === "pending-conflict");
     case "permit_allowed": case "permit_denied": return string("name") && string("kind") && optionalString("command") && (event.event !== "permit_denied" || string("reason"));
     case "git_blocked": return string("reason");
-    case "spawn_dispatched": return optionalString("worktree");
+    case "spawn_dispatched": return optionalString("worktree") &&
+      (event.thinking === undefined || (PEER_THINKING_LEVELS as readonly string[]).includes(event.thinking as string)) &&
+      optionalString("thinkingReason");
     case "retro_written": return string("model") && duration() && optionalString("error") && optionalString("proposalsPath") &&
       (event.proposalCount === undefined || Number.isSafeInteger(event.proposalCount) && (event.proposalCount as number) >= 0) &&
       (event.outcome === "written" ? string("proposalsPath") && event.proposalCount !== undefined : event.outcome === "failed" && string("error"));

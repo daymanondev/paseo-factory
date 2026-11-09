@@ -7,6 +7,8 @@ import {
   agentFate,
   contractFromLedger,
   createTaskAgent,
+  driverSpawnRequest,
+  effectiveCreateLane,
   GRACE_MS,
   leadDecision,
   MAX_ATTEMPTS,
@@ -1547,4 +1549,49 @@ test("pre-contracted wave starts at the landed checkpoint unless its current epo
     assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: prepared.cwd, encoding: "utf8" }).trim(), expected, name);
     assert.equal(existsSync(join(prepared.cwd, "foundation.txt")), expected === checkpoint, name);
   }
+});
+
+// ---- per-dispatch thinking effort riding the driver's spawn submission (v0.5.0 ticket 04, ADR 0054 §4) ----
+
+test("driverSpawnRequest carries the per-dispatch thinking tier and its reason onto the spawn submission — and omits both when absent", () => {
+  const withTier = driverSpawnRequest({
+    id: "sp-th-1",
+    task: "TH-D",
+    provider: "zcode/GLM-5.3:high",
+    arity: 1,
+    worktree: "/tmp/worktrees/TH-D",
+    thinking: "xhigh",
+    thinkingReason: "Two subsystems move together — heavy verification burden.",
+  });
+  assert.deepEqual(withTier, {
+    id: "sp-th-1",
+    kind: "spawn",
+    task: "TH-D",
+    provider: "zcode/GLM-5.3:high",
+    arity: 1,
+    worktree: "/tmp/worktrees/TH-D",
+    thinking: "xhigh",
+    thinkingReason: "Two subsystems move together — heavy verification burden.",
+  });
+  // The ordinary run is byte-identical to today: no tier, no reason, no fields.
+  const bare = driverSpawnRequest({ id: "sp-th-2", task: "TH-D2", provider: "pi/zai/glm-5.3", arity: 2 });
+  assert.deepEqual(bare, { id: "sp-th-2", kind: "spawn", task: "TH-D2", provider: "pi/zai/glm-5.3", arity: 2 });
+});
+
+test("effectiveCreateLane prefers the spool's thinking-resolved lane on the SLP path and stays on the recorded lane for execution contracts", () => {
+  assert.equal(
+    effectiveCreateLane({ execution: false, resolvedProvider: "zcode/GLM-5.3:max", eventProvider: "zcode/GLM-5.3:high", provider: "zcode/GLM-5.3:high" }),
+    "zcode/GLM-5.3:max",
+    "the driver's own agent create honors the plugin's provider-adaptive resolution",
+  );
+  assert.equal(
+    effectiveCreateLane({ execution: false, resolvedProvider: undefined, eventProvider: "pi/zai/glm-5.3", provider: "pi/zai/glm-5.3" }),
+    "pi/zai/glm-5.3",
+    "without a tier the configured lane the driver resolved locally stands",
+  );
+  assert.equal(
+    effectiveCreateLane({ execution: true, resolvedProvider: "zcode/GLM-5.3:max", eventProvider: "pi/scrum/dev", provider: "pi/zai/glm-5.3" }),
+    "pi/scrum/dev",
+    "an execution contract keeps today's recorded-lane behavior",
+  );
 });
