@@ -1618,6 +1618,19 @@ function toolResult(text, isError = false) {
   };
 }
 
+// src/events.ts's READ_ONLY_PEER_DISPOSITIONS and src/disposition-prompt.ts's
+// READ_ONLY_DISPOSITION_EVIDENCE (this CLI cannot import the TS core — ADR
+// 0004): the read-only three's fallback spawn prompts swap the commit clause
+// for the fence, a no-commit claim, and their own Paseo Room evidence
+// expectations (v0.5.0 ticket 03, ADR 0054 §3).
+const READ_ONLY_DISPOSITIONS = new Set(["architect", "reviewer", "scout"]);
+const READ_ONLY_DISPOSITION_EVIDENCE = {
+  architect:
+    "alternatives considered, the strongest counterargument against your recommendation, the conditions that would reverse it, and supporting file:line evidence",
+  reviewer: "a concrete claim plus file:line evidence per finding, separating blocking defects from non-blocking notes",
+  scout: "concrete file:line evidence paths, the remaining unknowns, and your confidence (low | medium | high)",
+};
+
 let selectedBridge;
 function bridgeSession() {
   if (!selectedBridge) {
@@ -2036,8 +2049,18 @@ async function handleToolCall(name, rawArgs) {
         typeof contract?.artifact === "string" && contract.artifact.trim() !== ""
           ? `produce artifact ${contract.artifact} and `
           : "";
+      // The disposition-aware completion clause (v0.5.0 ticket 03, ADR 0054
+      // §3): the engineer keeps gate + commit + agent_claim verbatim; the
+      // read-only three are fenced — no commit instruction, the claim carries
+      // no commit/--sha, and the disposition's own Paseo Room evidence
+      // expectations ride the instruction.
+      const readOnlyEvidence = READ_ONLY_DISPOSITIONS.has(contract?.disposition)
+        ? READ_ONLY_DISPOSITION_EVIDENCE[contract.disposition]
+        : undefined;
       promptParts.push(
-        `Execute task ${task}: ${artifactClause}pass gate \`${contract?.gate ?? ""}\`, commit on branch factory/${task}, and call agent_claim.`,
+        readOnlyEvidence === undefined
+          ? `Execute task ${task}: ${artifactClause}pass gate \`${contract?.gate ?? ""}\`, commit on branch factory/${task}, and call agent_claim.`
+          : `Execute task ${task}: this session is Read-Only (disposition ${contract.disposition}) — the read-only-disposition-fence forbids file edits and \`git commit\`; never commit, never edit files. Call agent_claim with no commit and no sha, supplying \`outcome\`, \`scope\`, \`verification\`, and \`unknowns\` carrying your ${contract.disposition} evidence: ${readOnlyEvidence}.`,
       );
       const taskPrompt =
         typeof args.prompt === "string" && args.prompt.trim() !== ""

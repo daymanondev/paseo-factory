@@ -13,6 +13,7 @@ import type { SurfaceAgentSnapshot, SurfaceDaemonApi } from "./surface-rpc.ts";
 import { stopAgentViaCli, type DaemonReply } from "./daemon-cli.ts";
 import { boundTaskPeers, peerIsRunning } from "./task-peers.ts";
 import { associateTaskPeer, createTaskPeer, resolvePeerSpawnProvider, resolveSpawnWorkspaceAndParent } from "./spool.ts";
+import { READ_ONLY_DISPOSITION_FENCE, readOnlyDispositionEvidence } from "./core/disposition-prompt.ts";
 import { capHandoffText, validHandoffText } from "./handoff-text.ts";
 import { scrumSpawnLane } from "./scrum.ts";
 
@@ -162,13 +163,25 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
       const provider = frozen ?? await resolvePeerSpawnProvider(factoryOf(slug, task), state.provider ?? "", slug);
       const meta = await resolveSpawnWorkspaceAndParent(factoryOf(slug, task), daemon, task, state.worktree, deps.home);
       const labels = { seat: "agent", project: slug, task, epoch: String(contract.seq), peerHandoff: handoffKey, ...(contract.execution ? { execution: "scrum", run: contract.execution.runId, specialization: contract.execution.role } : {}) };
+      // The disposition-aware completion (v0.5.0 ticket 03, ADR 0054 §3): the
+      // engineer successor keeps the cumulative-Gate + committed-HEAD claim
+      // instruction verbatim; a read-only successor is fenced — the worktree
+      // stays clean at HEAD, no commit, and the claim carries its
+      // disposition's own evidence expectations instead of a sha.
+      const disposition = contract.disposition ?? "engineer";
+      const readOnlyEvidence = readOnlyDispositionEvidence(contract.disposition);
       const prompt = [
           `# Peer handoff — Task ${task}`, "You are the fresh successor Peer at 0% context. Continue from the existing Task worktree state; preserve completed work and uncommitted edits.",
-          "## Active Contract Brief", contract.description ?? "(no description)",
-          `Allowed scope: ${contract.scope?.join(", ") ?? "the Task worktree"}`, `Required skills: ${contract.skills?.join(", ") ?? "role defaults"}`, `Gate: ${contract.gate}`,
+          "## Active Contract Brief",
+          ...(readOnlyEvidence === undefined ? [] : [`Disposition: ${disposition} (Read-Only)`]),
+          contract.description ?? "(no description)",
+          `Allowed scope: ${contract.scope?.join(", ") ?? "the Task worktree"}`, `Required skills: ${contract.skills?.join(", ") ?? "role defaults"}`,
+          `Gate: ${readOnlyEvidence !== undefined && contract.gate.trim() === "" ? "(none)" : contract.gate}`,
           "## Machine-Verified Worktree Digest", digest,
           `## Outgoing Peer Handoff (${path})`, readFileSync(path, "utf8"),
-          "Run targeted modular slice tests with isolated fixtures and explicit timeouts while iterating. Run the full cumulative Gate before calling factory-claim for the committed HEAD, then end your turn.",
+          readOnlyEvidence === undefined
+            ? "Run targeted modular slice tests with isolated fixtures and explicit timeouts while iterating. Run the full cumulative Gate before calling factory-claim for the committed HEAD, then end your turn."
+            : `This succession is Read-Only (disposition ${disposition}): ${READ_ONLY_DISPOSITION_FENCE} — the worktree must stay clean at HEAD; never commit, never edit files. Call factory-claim with no commit and no sha, supplying \`--outcome --scope --verification --unknowns\` carrying your ${disposition} evidence: ${readOnlyEvidence}, then end your turn.`,
         ].join("\n\n");
       if (!eligible(slug, contract)) return;
       // Never reallocate/reset the worktree: this is continuation, including dirty files.

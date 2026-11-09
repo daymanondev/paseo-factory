@@ -512,7 +512,7 @@ test("a message-bearing repoke delivers the Lead's ruling into the live Peer ses
   assert.equal(fake.sent.length, 3, "a refused repoke sends nothing");
 });
 
-test("a message-less repoke (omitted or empty) sends today's fixed continuation nudge and keeps the one-per-task spend (ticket 02)", async (t) => {
+test("a message-less repoke (omitted or empty) sends today's fixed continuation footer under the Active Contract Snapshot and keeps the one-per-task spend (ticket 02; ticket 03 adds the snapshot)", async (t) => {
   const { projectRoot, factory, fake } = makeSpooledSurface(t, [{ id: "ag-stall", status: "idle", labels: { seat: "agent" } }]);
   const deps = { daemon: fake.daemon };
   factory.setContract({ task: "T-STALL", workspace: projectRoot, gate: "npm test", artifact: "README.md" });
@@ -520,12 +520,21 @@ test("a message-less repoke (omitted or empty) sends today's fixed continuation 
   const first = await handleSpoolRequest(factory, { id: "srp-1", kind: "repoke", task: "T-STALL", agent: "ag-stall", seat: "lead" }, deps);
   assert.equal(first.ok, true, JSON.stringify(first));
   assert.equal(first.summary, "re-poke dispatched for T-STALL → agent ag-stall — the task's one spend");
-  assert.deepEqual(fake.sent, [
-    {
-      agentId: "ag-stall",
-      text: "Re-poke from Lead on task T-STALL: continue inside your Task worktree on branch factory/T-STALL, run the gate `npm test`, commit your changes, and call `paseo-factory_agent_claim` (or `agent_claim`).",
-    },
-  ]);
+  assert.equal(fake.sent.length, 1);
+  assert.equal(fake.sent[0]?.agentId, "ag-stall");
+  const nudge = fake.sent[0]?.text ?? "";
+  assert.ok(nudge.startsWith("Re-poke from Lead on task T-STALL:"), "the fixed Denial-stall prefix stays");
+  assert.ok(nudge.includes("Active Contract Snapshot"), "the snapshot always embeds, even on the Denial-stall continuation (ticket 03, ADR 0054 §3)");
+  assert.ok(nudge.includes("Disposition: engineer"), "the snapshot names the epoch's disposition (the engineer default)");
+  assert.ok(nudge.includes("Gate: `npm test`"), "the snapshot names the gate");
+  assert.ok(nudge.includes("Scope: (unrestricted)"), "an omitted scope reads as unrestricted");
+  assert.ok(nudge.includes("(no description on this Contract)"), "a Contract without a description says so plainly");
+  assert.ok(
+    nudge.endsWith(
+      "Continue inside your Task worktree on branch factory/T-STALL, run the gate `npm test`, commit your changes, and call `paseo-factory_agent_claim` (or `agent_claim`).",
+    ),
+    "the engineer completion footer stays verbatim below the snapshot",
+  );
 
   // The empty-string message is the omitted spelling — and the one-per-task
   // cap refuses it exactly like a bare second repoke.
@@ -533,6 +542,55 @@ test("a message-less repoke (omitted or empty) sends today's fixed continuation 
   assert.equal(emptyMessage.ok, false);
   assert.equal(emptyMessage.code, "already-spent");
   assert.equal(factory.ledger.eventsFor("T-STALL").filter((e) => e.event === "repoke_dispatched").length, 1, "exactly one dispatch line — the Denial-stall spend");
+});
+
+test("both repoke branches embed the active Contract Snapshot read at delivery time and branch the completion footer on the disposition (ticket 03, ADR 0054 §3): a re-contracted read-only Peer sees the updated contract and never a commit instruction", async (t) => {
+  const { projectRoot, factory, fake } = makeSpooledSurface(t, [
+    { id: "ag-ro", status: "idle", labels: { seat: "agent" } },
+    { id: "ag-stall-ro", status: "idle", labels: { seat: "agent" } },
+  ]);
+  const deps = { daemon: fake.daemon };
+  factory.setContract({ task: "T-SNAP", workspace: projectRoot, gate: "npm run gate", artifact: "README.md", scope: ["zone-1/"], description: "Brief v1: engineer the zone-1 slice." });
+  // The in-place re-contract (the resetPeer: false premise): the epoch moves
+  // onto a read-only disposition with a new, gate-less, scope-less Brief.
+  factory.setContract({ task: "T-SNAP", workspace: projectRoot, gate: "", disposition: "scout", scope: [], description: "Brief v2: scout the zone-1 boundaries." });
+
+  // 1. The message-bearing branch: the snapshot rides above the Lead's message.
+  const ruling = "Ruling: re-scout zone-1 before any further edits.";
+  const first = await handleSpoolRequest(factory, { id: "snap-1", kind: "repoke", task: "T-SNAP", agent: "ag-ro", message: ruling, seat: "lead" }, deps);
+  assert.equal(first.ok, true, JSON.stringify(first));
+  const delivered = fake.sent[0]?.text ?? "";
+  assert.ok(delivered.includes("Active Contract Snapshot"), "the snapshot embeds on the message-bearing branch");
+  assert.ok(delivered.includes("Disposition: scout"), "the re-contracted disposition appears (re-read at delivery time)");
+  assert.ok(delivered.includes("Gate: (none)"), "the read-only epoch's empty gate appears");
+  assert.ok(delivered.includes("Scope: (none — read-only)"), "the normalized read-only scope appears — an omitted scope on a read-only epoch is no writable boundary, never unrestricted");
+  assert.ok(delivered.includes("Brief v2: scout the zone-1 boundaries."), "the full updated description appears");
+  assert.ok(!delivered.includes("Brief v1"), "the stale epoch's description never leaks into the delivery");
+  assert.ok(delivered.includes(ruling), "the Lead's message rides verbatim");
+  assert.ok(
+    delivered.indexOf("Active Contract Snapshot") < delivered.indexOf(ruling) && delivered.indexOf(ruling) < delivered.indexOf("read-only-disposition-fence"),
+    "the snapshot sits above the Lead's message, which sits above the disposition-aware footer",
+  );
+  assert.ok(delivered.includes("read-only-disposition-fence"), "the read-only footer names the fence");
+  assert.ok(delivered.includes("forbids file edits and `git commit`"), "the footer states what the fence forbids");
+  assert.ok(!delivered.includes("commit your changes"), "no commit instruction reaches a read-only Peer");
+  assert.ok(!delivered.includes("--sha"), "no sha flag reaches a read-only Peer");
+  assert.match(delivered, /confidence \(low \| medium \| high\)/, "the scout disposition's evidence expectation rides the footer");
+
+  // 2. The Denial-stall branch (message-less): the same snapshot and the same
+  //    read-only footer — a read-only Peer is never told to commit anywhere.
+  factory.setContract({ task: "T-SNAP2", workspace: projectRoot, gate: "", disposition: "architect", scope: [], description: "Design v1: the adapter boundary." });
+  const stall = await handleSpoolRequest(factory, { id: "snap-2", kind: "repoke", task: "T-SNAP2", agent: "ag-stall-ro", seat: "lead" }, deps);
+  assert.equal(stall.ok, true, JSON.stringify(stall));
+  const stallText = fake.sent[1]?.text ?? "";
+  assert.ok(stallText.startsWith("Re-poke from Lead on task T-SNAP2:"), "the Denial-stall prefix stays");
+  assert.ok(stallText.includes("Active Contract Snapshot"), "the snapshot embeds on the Denial-stall branch too");
+  assert.ok(stallText.includes("Disposition: architect"), "the architect disposition appears");
+  assert.ok(stallText.includes("Design v1: the adapter boundary."), "the description appears");
+  assert.ok(stallText.includes("read-only-disposition-fence"), "the read-only footer fences");
+  assert.ok(!stallText.includes("commit your changes"), "the Denial-stall continuation never orders a commit on a read-only disposition");
+  assert.ok(!stallText.includes("--sha"), "no sha flag on the Denial-stall continuation");
+  assert.match(stallText, /alternatives considered/, "the architect disposition's evidence expectation rides the footer");
 });
 
 /** Runs the real factory CLI as a subprocess — async on purpose: the in-process spool poll must keep running while the CLI waits for its reply. */

@@ -120,6 +120,40 @@ again with the new sha. Never edit tests just to make them green.
 Your shells under the daemon start without git/node/npm on PATH — export
 PATH="<path>" first.`;
 
+// src/events.ts's READ_ONLY_PEER_DISPOSITIONS (this CLI cannot import the TS
+// core — ADR 0004): the read-only three get the fenced brief below instead of
+// the commit law above (v0.5.0 ticket 03, ADR 0054 §3).
+const READ_ONLY_DISPOSITIONS = new Set(["architect", "reviewer", "scout"]);
+
+// The disposition's own Paseo Room evidence expectations (ADR 0054 §2) —
+// what the handoff fields must carry for the Lead to receive actionable
+// findings. A plain-JS mirror of src/disposition-prompt.ts's map.
+const READ_ONLY_DISPOSITION_EVIDENCE = {
+  architect:
+    "alternatives considered, the strongest counterargument against your recommendation, the conditions that would reverse it, and supporting file:line evidence",
+  reviewer: "a concrete claim plus file:line evidence per finding, separating blocking defects from non-blocking notes",
+  scout: "concrete file:line evidence paths, the remaining unknowns, and your confidence (low | medium | high)",
+};
+
+/**
+ * The read-only brief body (v0.5.0 ticket 03, ADR 0054 §3): the session is
+ * fenced (`read-only-disposition-fence` forbids file edits and `git commit`),
+ * the claim invocation is named without commit/`--sha` — the four handoff
+ * fields still ride — and the disposition's evidence expectations are stated
+ * so the handoff carries them. The engineer law above never renders here.
+ */
+function readOnlyBriefBody(task, pathValue, disposition) {
+  return `This session is Read-Only (disposition ${disposition}): the
+read-only-disposition-fence forbids file edits and \`git commit\` — edit no
+files and make no commits. When done, call
+\`factory-claim --task ${task} --outcome <complete|partial|blocked|reopen> --scope <text> --verification <text> --unknowns <text>\`
+— no commit, no sha — putting the evidence your disposition owes into
+\`verification\` and \`unknowns\`: ${READ_ONLY_DISPOSITION_EVIDENCE[disposition]}.
+
+Your shells under the daemon start without git/node/npm on PATH — export
+PATH="${pathValue}" first.`;
+}
+
 /**
  * The brief, rendered per task — `<task-id>` is the task id and `<branch>` the
  * branch argument (the task id on the legacy shared-checkout path, its
@@ -132,11 +166,16 @@ PATH="<path>" first.`;
  * 0053 §3), when it names a read-only role, rides beside the description so
  * the Peer knows its seat from turn one; `engineer` (explicit or the omitted
  * default) renders nothing — the brief body already is the engineer law.
+ * Since v0.5.0 (ticket 03, ADR 0054 §3) a read-only disposition swaps the
+ * fixed body itself for the fenced no-commit brief: the read-only Peer is
+ * never handed the commit + `--sha` instructions.
  */
 export function renderBrief(task, pathValue, description, skills, branch = task, disposition) {
-  const body = BRIEF_TEMPLATE.replaceAll("<branch>", branch)
-    .replaceAll("<task-id>", task)
-    .replace('PATH="<path>" first.', `PATH="${pathValue}" first.`);
+  const body = READ_ONLY_DISPOSITIONS.has(disposition)
+    ? readOnlyBriefBody(task, pathValue, disposition)
+    : BRIEF_TEMPLATE.replaceAll("<branch>", branch)
+      .replaceAll("<task-id>", task)
+      .replace('PATH="<path>" first.', `PATH="${pathValue}" first.`);
   let brief = body;
   if (description !== undefined && description !== null) brief = `Task: ${description}\n\n${brief}`;
   if (typeof disposition === "string" && disposition !== "engineer")
