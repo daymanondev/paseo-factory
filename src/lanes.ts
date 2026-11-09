@@ -42,6 +42,7 @@ import { dirname, join } from "node:path";
 import { provisionPiAgentHome } from "./pi-home.ts";
 import { projectStateDir } from "./project.ts";
 import { provisionZcodeHome } from "./zcode-home.ts";
+import type { PeerThinkingLevel } from "./peer-thinking.ts";
 
 // ---- Owner-authored Lane profiles (v0.0.38, ADR 0026 §2) -----------------------------------
 // The Lane profile store and its pure operations live in ./lane-profiles.ts
@@ -227,10 +228,17 @@ export function stripZcodeProviderPrefix(model: string): string {
 
 // ---- per-dispatch provider-adaptive thinking effort (v0.5.0, ADR 0054 §4) ------------------
 
-/** The five reasoning-effort tiers a Lead may request per dispatch (`low` … `max`). */
-export const PEER_THINKING_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
-
-export type PeerThinkingLevel = (typeof PEER_THINKING_LEVELS)[number];
+/**
+ * The five reasoning-effort tiers a Lead may request per dispatch (`low` …
+ * `max`) — canonical home is the zero-import leaf `./peer-thinking.ts`,
+ * re-exported so this module stays the public seam: importing the tiers from
+ * here would pull `./ledger-validation.ts` (via `./history-import.ts`, inside
+ * this module's own import graph back through `./pi-home.ts`) into a cycle
+ * whose evaluation reaches `roles-contract.ts` before its top-level consts
+ * initialize. See `./peer-thinking.ts` for the full rationale.
+ */
+export { PEER_THINKING_LEVELS } from "./peer-thinking.ts";
+export type { PeerThinkingLevel } from "./peer-thinking.ts";
 
 /**
  * The provider-catalog slice the effort resolution reads: one provider's
