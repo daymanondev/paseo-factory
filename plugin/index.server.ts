@@ -43,7 +43,7 @@ import { startConsoleSidecar, type ConsoleSidecarHandle } from "./server/console
 // migrateLegacyRootState(stateDir, { projects: Array<{ slug, gitRoot? }> }).
 import { migrateLegacyRootState } from "./server/core/ledger-migration.ts";
 
-const SHELL_VERSION = "0.3.1";
+const SHELL_VERSION = "0.4.0";
 
 const log = (message: string) => console.log(`[${PLUGIN_ID}] ${message}`);
 
