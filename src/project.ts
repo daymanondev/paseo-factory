@@ -13,9 +13,10 @@ import { registerExecutionSelection } from "./scrum/selection.ts";
  */
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, basename, join, parse, resolve } from "node:path";
+import { FactoryError } from "./errors.ts";
 
 /** Git plumbing is a fact about the checkout, so it gets the same short leash as the workspace calls. */
 const GIT_TIMEOUT_MS = 10_000;
@@ -308,8 +309,17 @@ export function projectNotebookPath(stateDir: string, projectSlug: string): stri
  * `PROJECT_NOTEBOOK_MAX_BYTES` UTF-8 bytes, with byte truncation backing off
  * to the last complete character boundary so a multi-byte character is never
  * split mid-sequence.
+ *
+ * Since v0.5.0 (ADR 0052 Decision 1) a known `projectRoot` first promotes any
+ * legacy untracked `<project-root>/.scratch/notebook.md` into the canonical
+ * notebook — OS-sandboxed Lead seats (codex Seatbelt) wrote there when the
+ * plugin state dir was unwritable, and the untracked copy otherwise dirties
+ * the working tree before `landTaskWorktree`'s clean-tree check.
  */
-export function readProjectNotebook(stateDir: string, projectSlug: string): string | undefined {
+export function readProjectNotebook(stateDir: string, projectSlug: string, projectRoot?: string): string | undefined {
+  if (projectRoot !== undefined && projectRoot.trim() !== "") {
+    syncLegacyScratchNotebook(stateDir, projectSlug, projectRoot);
+  }
   let raw: string;
   try {
     raw = readFileSync(projectNotebookPath(stateDir, projectSlug), "utf8");
@@ -323,6 +333,125 @@ export function readProjectNotebook(stateDir: string, projectSlug: string): stri
   let cut = PROJECT_NOTEBOOK_MAX_BYTES;
   while (cut > 0 && (bytes[cut]! & 0b1100_0000) === 0b1000_0000) cut -= 1; // back off partial sequences
   return bytes.subarray(0, cut).toString("utf8");
+}
+
+/** What one promotion pass found and did — the file system stays the observable. */
+export interface LegacyNotebookSync {
+  /** True when the legacy copy's bytes replaced (or initialized) the canonical notebook. */
+  promoted: boolean;
+  /** True when an untracked working-tree copy existed and was unlinked. */
+  unlinked: boolean;
+}
+
+/**
+ * Promotes a legacy untracked `<project-root>/.scratch/notebook.md` into the
+ * canonical `<projectStateDir>/notebook.md` (v0.5.0, ADR 0052 Decision 1):
+ * when the canonical notebook is absent or older than the legacy copy, its
+ * bytes are copied verbatim — no schema gate, the legacy file is a Lead's
+ * already-lived notebook, not a fresh write — and the working-tree copy is
+ * ALWAYS unlinked afterwards so a clean-tree check (`landCleanly`) never sees
+ * `?? .scratch/notebook.md` and `lead_accept_task` never fails with
+ * `pending-conflict`. An already-clean project (no legacy file) is a no-op,
+ * and an unexpected filesystem failure reports `{promoted: false, unlinked:
+ * false}` instead of throwing — a failed promotion must never take the
+ * landing down with it; the clean-tree check then reports the file honestly.
+ */
+export function syncLegacyScratchNotebook(
+  stateDir: string,
+  projectSlug: string,
+  projectRoot: string,
+): LegacyNotebookSync {
+  const legacy = join(projectRoot, ".scratch", PROJECT_NOTEBOOK_FILENAME);
+  if (!existsSync(legacy)) return { promoted: false, unlinked: false };
+  try {
+    const canonical = projectNotebookPath(stateDir, projectSlug);
+    const promote = !existsSync(canonical) || statSync(legacy).mtimeMs > statSync(canonical).mtimeMs;
+    if (promote) {
+      mkdirSync(projectStateDir(stateDir, projectSlug), { recursive: true });
+      copyFileSync(legacy, canonical);
+    }
+    unlinkSync(legacy);
+    return { promoted: promote, unlinked: true };
+  } catch {
+    return { promoted: false, unlinked: false };
+  }
+}
+
+// ---- the plugin-owned notebook writer (v0.5.0, ADR 0052 Decision 1) ---------------------------
+
+/** The Recurrence Guard table's active-row cap — the `seatworks` graduation law's ceiling. */
+export const PROJECT_NOTEBOOK_MAX_GUARD_ROWS = 12;
+
+/** The two fixed section headings every persisted notebook must carry. */
+const PROJECT_NOTEBOOK_REQUIRED_HEADINGS = ["## 1. Verification & Run Recipe", "## 2. Recurrence Guard"] as const;
+
+/**
+ * Counts the Recurrence Guard table's ACTIVE rows: `|`-rows after the
+ * `## 2. Recurrence Guard` heading (a following heading ends the section),
+ * minus markdown separator rows and the table's single header row — the
+ * ceiling grades guard ENTRIES, not table scaffolding.
+ */
+function notebookGuardRows(content: string): number {
+  const lines = content.split("\n");
+  const start = lines.findIndex((line) => line.trim().startsWith(PROJECT_NOTEBOOK_REQUIRED_HEADINGS[1]!));
+  if (start === -1) return 0;
+  const rows: string[] = [];
+  for (const line of lines.slice(start + 1)) {
+    const trimmed = line.trim();
+    if (trimmed === "") continue;
+    if (trimmed.startsWith("#")) break;
+    if (trimmed.startsWith("|")) rows.push(trimmed);
+  }
+  const active = rows.filter((row) => !/^\|[\s:|-]+\|?$/.test(row));
+  return Math.max(0, active.length - 1);
+}
+
+/**
+ * The plugin's single-writer notebook persist (v0.5.0, ADR 0052 Decision 1):
+ * validates BEFORE writing — both required headings present, `<= 80` lines,
+ * `<= 4,096` UTF-8 bytes, `<= 12` active Recurrence Guard rows — then writes
+ * the content verbatim to `<projectStateDir>/notebook.md` (never inside
+ * `<project-root>`, never truncated: an over-limit write refuses with
+ * `notebook-limit-exceeded` naming the exact counts and instructing the Lead
+ * to fold/graduate rows; a malformed one refuses with
+ * `notebook-schema-invalid`). A known `projectRoot` also unlinks any legacy
+ * untracked `.scratch/notebook.md` — the fresh canonical write supersedes it.
+ * Returns the canonical path written.
+ */
+export function writeProjectNotebook(
+  stateDir: string,
+  content: string,
+  projectSlug: string,
+  projectRoot?: string,
+): string {
+  const missing = PROJECT_NOTEBOOK_REQUIRED_HEADINGS.filter(
+    (heading) => !content.split("\n").some((line) => line.trim().startsWith(heading)),
+  );
+  if (missing.length > 0) {
+    throw new FactoryError("notebook-schema-invalid", `notebook missing required heading(s): ${missing.join(", ")}`);
+  }
+  const lines = content.split("\n").length;
+  const bytes = Buffer.byteLength(content, "utf8");
+  const guardRows = notebookGuardRows(content);
+  const over: string[] = [];
+  if (lines > PROJECT_NOTEBOOK_MAX_LINES) over.push(`${lines} lines (max ${PROJECT_NOTEBOOK_MAX_LINES})`);
+  if (bytes > PROJECT_NOTEBOOK_MAX_BYTES) over.push(`${bytes} UTF-8 bytes (max ${PROJECT_NOTEBOOK_MAX_BYTES})`);
+  if (guardRows > PROJECT_NOTEBOOK_MAX_GUARD_ROWS) over.push(`${guardRows} Recurrence Guard rows (max ${PROJECT_NOTEBOOK_MAX_GUARD_ROWS})`);
+  if (over.length > 0) {
+    throw new FactoryError(
+      "notebook-limit-exceeded",
+      `notebook over the persisted limits: ${over.join(", ")} — fold rows that share one Cause → Effect mechanism, retire verified rows whose fix held 3 waves, and expire stale observed (1x) rows after 5 waves instead of truncating the bottom of the table`,
+    );
+  }
+  const target = projectNotebookPath(stateDir, projectSlug);
+  mkdirSync(projectStateDir(stateDir, projectSlug), { recursive: true });
+  writeFileSync(target, content);
+  // The fresh canonical write supersedes any legacy working-tree copy: the
+  // sync pass only unlinks here (the canonical bytes are now the newest).
+  if (projectRoot !== undefined && projectRoot.trim() !== "") {
+    syncLegacyScratchNotebook(stateDir, projectSlug, projectRoot);
+  }
+  return target;
 }
 
 /**

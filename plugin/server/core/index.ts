@@ -7,8 +7,8 @@
  */
 export { createFactory } from "./factory.ts";
 export type { Factory, FactoryOptions, ContractInput, ClaimInput, ClaimOutcome, AcceptInput, SpawnInput, SpawnDecision, RespawnInput, RespawnDecision, MeterInput } from "./factory.ts";
-export { resolveProject, resolveOrBootstrapProject, ensureGitRepository, projectStateDir, projectNotebookPath, readProjectNotebook, PROJECT_NOTEBOOK_FILENAME, PROJECT_NOTEBOOK_MAX_LINES, PROJECT_NOTEBOOK_MAX_BYTES, readProjectRegistration, writeProjectRegistration, ensureProjectRegistered, listProjectRegistrations, discoverProjects } from "./project.ts";
-export type { ProjectResolution, BootstrapProjectOptions, BootstrapProjectResolution, DiscoveredProject, ProjectRegistration } from "./project.ts";
+export { resolveProject, resolveOrBootstrapProject, ensureGitRepository, projectStateDir, projectNotebookPath, readProjectNotebook, writeProjectNotebook, syncLegacyScratchNotebook, PROJECT_NOTEBOOK_FILENAME, PROJECT_NOTEBOOK_MAX_LINES, PROJECT_NOTEBOOK_MAX_BYTES, PROJECT_NOTEBOOK_MAX_GUARD_ROWS, readProjectRegistration, writeProjectRegistration, ensureProjectRegistered, listProjectRegistrations, discoverProjects } from "./project.ts";
+export type { ProjectResolution, BootstrapProjectOptions, BootstrapProjectResolution, DiscoveredProject, ProjectRegistration, LegacyNotebookSync } from "./project.ts";
 export { resolveClaimedCommit, checkCleanAt, diffBetween, changedFiles, scopeCoversFile, headCommitSync, changesOutsideScope, landTaskWorktree, commitSeatMemoryOnRoot, reapWorktreeProcesses, taskWorktreePath, parseTaskWorktreePath, taskWorktreeBranch, prepareTaskWorktree } from "./workspace.ts";
 export type { CommitResolution, TreeCheck, LandingResult, PrepareTaskWorktreeOptions, PrepareTaskWorktreeResult, WorktreeProcessDependencies } from "./workspace.ts";
 export { Ledger, usageIsValid, isValidLedgerEvent, parseLedgerJsonl } from "./ledger.ts";

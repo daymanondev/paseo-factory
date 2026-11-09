@@ -10,7 +10,7 @@ import { execFileSync as execFileSync2 } from "node:child_process";
 // src/project.ts
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, basename, join, parse, resolve } from "node:path";
 var GIT_TIMEOUT_MS = 1e4;
 function resolveProject(cwd) {

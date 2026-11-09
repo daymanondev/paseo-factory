@@ -1,10 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { makeTempDir, disposeDir } from "./helpers.ts";
-import { buildSeatKickoffPacket } from "../src/preflight.ts";
+import { makeTempDir, disposeDir, factoryErrorCode } from "./helpers.ts";
+import { buildSeatKickoffPacket, writeProjectNotebook, syncLegacyScratchNotebook, PROJECT_NOTEBOOK_MAX_GUARD_ROWS } from "../src/preflight.ts";
 import { projectNotebookPath } from "../src/project.ts";
+import { FactoryError } from "../src/errors.ts";
 import { formatScrumRunDigest } from "../src/scrum/run-digest.ts";
 import { renderScrumPrompt, SCRUM_LEAD_MCP_TOOLS, SCRUM_SUPERVISOR_MCP_TOOLS } from "../src/scrum/prompts.ts";
 import { OPEN_DESIGN_CONTRACT } from "../src/scrum/open-design.ts";
@@ -415,4 +416,160 @@ test('omitting mode (or passing "slp") keeps the SLP kickoff packet byte-for-byt
     assert.equal(buildSeatKickoffPacket({ ...base, mode: undefined, scrumRunDigest: "must be ignored" }), full);
     assert.ok(!full.includes("Active Scrum run digest"));
   }
+});
+
+// ---- the plugin-owned notebook writer + legacy promotion (v0.5.0, ADR 0052 §1) --------------
+
+/** A canonical-shape notebook: both required headings plus a headered Recurrence Guard table. */
+function validNotebook(guardRows = 3): string {
+  const rows = Array.from({ length: guardRows }, (_, i) => `| V-${String(i + 1).padStart(2, "0")} | cause ${i + 1} → effect ${i + 1} | observed (1x) |`);
+  return [
+    "# Project notebook",
+    "",
+    "## 1. Verification & Run Recipe",
+    "npm run check",
+    "",
+    "## 2. Recurrence Guard",
+    "| ID | Cause → Effect | State |",
+    "| --- | --- | --- |",
+    ...rows,
+    "",
+  ].join("\n");
+}
+
+test("writeProjectNotebook persists a valid notebook at exactly <projectStateDir>/notebook.md (spec User Story 22)", (t) => {
+  const stateDir = makeTempDir("notebook-writer-");
+  disposeDir(t, stateDir);
+  const content = validNotebook(3);
+  const path = writeProjectNotebook(stateDir, content, "demo-abc123");
+  assert.equal(path, projectNotebookPath(stateDir, "demo-abc123"));
+  assert.equal(readFileSync(projectNotebookPath(stateDir, "demo-abc123"), "utf8"), content, "the write is verbatim — never truncated");
+});
+
+test("writeProjectNotebook refuses a notebook missing a required heading with notebook-schema-invalid naming it", (t) => {
+  const stateDir = makeTempDir("notebook-schema-");
+  disposeDir(t, stateDir);
+  const noGuard = validNotebook(2).replace("## 2. Recurrence Guard", "## 2. Notes");
+  assert.throws(() => writeProjectNotebook(stateDir, noGuard, "demo-abc123"), factoryErrorCode("notebook-schema-invalid"));
+  try {
+    writeProjectNotebook(stateDir, noGuard, "demo-abc123");
+    assert.fail("the malformed write must refuse");
+  } catch (err) {
+    assert.match((err as Error).message, /## 2\. Recurrence Guard/, "the refusal names the missing heading");
+  }
+  assert.equal(existsSync(projectNotebookPath(stateDir, "demo-abc123")), false, "a refused write persists nothing");
+});
+
+test("writeProjectNotebook refuses over-limit notebooks with notebook-limit-exceeded naming the exact counts — never truncating", (t) => {
+  const stateDir = makeTempDir("notebook-limits-");
+  disposeDir(t, stateDir);
+  // 81 lines: a valid heading skeleton padded past the 80-line cap.
+  const pad = Array.from({ length: 74 }, (_, i) => `recipe line ${i + 1}`);
+  const overLines = ["## 1. Verification & Run Recipe", ...pad, "", "## 2. Recurrence Guard", "| ID | Cause | State |", "| --- | --- | --- |", "| V-01 | c → e | verified |", ""].join("\n");
+  assert.equal(overLines.split("\n").length, 81);
+  assert.throws(() => writeProjectNotebook(stateDir, overLines, "demo-abc123"), factoryErrorCode("notebook-limit-exceeded"));
+  try {
+    writeProjectNotebook(stateDir, overLines, "demo-abc123");
+    assert.fail("the over-line write must refuse");
+  } catch (err) {
+    assert.match((err as Error).message, /81 lines/, "the refusal names the exact line count");
+    assert.match((err as Error).message, /max 80/);
+  }
+  assert.equal(existsSync(projectNotebookPath(stateDir, "demo-abc123")), false, "an over-limit write persists nothing");
+
+  // > 4,096 UTF-8 bytes while under the line and row caps ("đ" is 2 bytes per char).
+  const longRecipe = Array.from({ length: 60 }, () => `đ`.repeat(90)).join("\n");
+  const overBytes = `## 1. Verification & Run Recipe\n${longRecipe}\n\n## 2. Recurrence Guard\n| ID | Cause | State |\n| --- | --- | --- |\n| V-01 | c → e | verified |\n`;
+  assert.ok(overBytes.split("\n").length <= 80 && Buffer.byteLength(overBytes, "utf8") > 4096, "fixture exceeds only the byte cap");
+  try {
+    writeProjectNotebook(stateDir, overBytes, "demo-abc123");
+    assert.fail("the over-byte write must refuse");
+  } catch (err) {
+    assert.equal((err as FactoryError).code, "notebook-limit-exceeded");
+    assert.match((err as Error).message, /UTF-8 bytes \(max 4096\)/, "the refusal names the byte cap");
+  }
+  assert.equal(existsSync(projectNotebookPath(stateDir, "demo-abc123")), false, "an over-byte write persists nothing");
+
+  // 13 active Recurrence Guard rows.
+  const overRows = validNotebook(13);
+  try {
+    writeProjectNotebook(stateDir, overRows, "demo-abc123");
+    assert.fail("the over-row write must refuse");
+  } catch (err) {
+    assert.equal((err as FactoryError).code, "notebook-limit-exceeded");
+    assert.match((err as Error).message, /13 Recurrence Guard rows/, "the refusal names the exact row count");
+    assert.match((err as Error).message, /max 12/);
+    assert.match((err as Error).message, /fold|graduate|retire/i, "the refusal instructs the Lead to graduate rows");
+  }
+  assert.equal(existsSync(projectNotebookPath(stateDir, "demo-abc123")), false, "an over-row write persists nothing");
+});
+
+test("writeProjectNotebook accepts the caps' exact edge: 80 lines and 12 active Recurrence Guard rows", (t) => {
+  const stateDir = makeTempDir("notebook-edge-");
+  disposeDir(t, stateDir);
+  assert.equal(PROJECT_NOTEBOOK_MAX_GUARD_ROWS, 12);
+  const rows = Array.from({ length: 12 }, (_, i) => `| V-${String(i + 1).padStart(2, "0")} | cause ${i + 1} → effect ${i + 1} | verified |`);
+  const filler = Array.from({ length: 80 - 19 }, (_, i) => `recipe line ${i + 1}`);
+  const edge = ["## 1. Verification & Run Recipe", "npm run check", "", "## 2. Recurrence Guard", "| ID | Cause → Effect | State |", "| --- | --- | --- |", ...rows, ...filler, ""].join("\n");
+  assert.equal(edge.split("\n").length, 80, "fixture sits exactly at the line cap");
+  const path = writeProjectNotebook(stateDir, edge, "demo-abc123");
+  assert.equal(readFileSync(path, "utf8"), edge);
+});
+
+test("writeProjectNotebook unlinks a legacy <project-root>/.scratch/notebook.md after the successful canonical write", (t) => {
+  const stateDir = makeTempDir("notebook-legacy-");
+  disposeDir(t, stateDir);
+  const projectRoot = makeTempDir("notebook-legacy-root-");
+  disposeDir(t, projectRoot);
+  mkdirSync(join(projectRoot, ".scratch"), { recursive: true });
+  writeFileSync(join(projectRoot, ".scratch", "notebook.md"), validNotebook(1));
+  const fresh = validNotebook(2);
+  writeProjectNotebook(stateDir, fresh, "demo-abc123", projectRoot);
+  assert.equal(readFileSync(projectNotebookPath(stateDir, "demo-abc123"), "utf8"), fresh, "the canonical write wins, not the stale legacy copy");
+  assert.equal(existsSync(join(projectRoot, ".scratch", "notebook.md")), false, "the working-tree copy self-cleans");
+});
+
+test("syncLegacyScratchNotebook promotes an untracked legacy scratch notebook when the canonical is absent or older, then unlinks it (ADR 0052 §1)", (t) => {
+  const stateDir = makeTempDir("notebook-sync-");
+  disposeDir(t, stateDir);
+  const projectRoot = makeTempDir("notebook-sync-root-");
+  disposeDir(t, projectRoot);
+  // An already-clean project is a no-op.
+  assert.deepEqual(syncLegacyScratchNotebook(stateDir, "demo-abc123", projectRoot), { promoted: false, unlinked: false });
+  assert.equal(existsSync(projectNotebookPath(stateDir, "demo-abc123")), false);
+
+  // Canonical absent: promote the legacy bytes verbatim, then unlink the working-tree copy.
+  const legacy = validNotebook(4);
+  mkdirSync(join(projectRoot, ".scratch"), { recursive: true });
+  writeFileSync(join(projectRoot, ".scratch", "notebook.md"), legacy);
+  assert.deepEqual(syncLegacyScratchNotebook(stateDir, "demo-abc123", projectRoot), { promoted: true, unlinked: true });
+  assert.equal(readFileSync(projectNotebookPath(stateDir, "demo-abc123"), "utf8"), legacy);
+  assert.equal(existsSync(join(projectRoot, ".scratch", "notebook.md")), false, "the untracked copy never reaches a clean-tree check");
+
+  // Canonical older than the fresh legacy copy: promote again.
+  writeFileSync(join(projectRoot, ".scratch", "notebook.md"), validNotebook(5));
+  const stale = new Date(Date.now() - 120_000);
+  utimesSync(projectNotebookPath(stateDir, "demo-abc123"), stale, stale);
+  assert.deepEqual(syncLegacyScratchNotebook(stateDir, "demo-abc123", projectRoot), { promoted: true, unlinked: true });
+  assert.equal(readFileSync(projectNotebookPath(stateDir, "demo-abc123"), "utf8"), validNotebook(5));
+
+  // Canonical newer (a lead_update_notebook write just landed): no promotion, but the stale legacy copy still unlinks.
+  writeFileSync(join(projectRoot, ".scratch", "notebook.md"), validNotebook(1));
+  utimesSync(join(projectRoot, ".scratch", "notebook.md"), stale, stale);
+  assert.deepEqual(syncLegacyScratchNotebook(stateDir, "demo-abc123", projectRoot), { promoted: false, unlinked: true });
+  assert.equal(readFileSync(projectNotebookPath(stateDir, "demo-abc123"), "utf8"), validNotebook(5), "the newer canonical notebook survives untouched");
+});
+
+test("the seat kickoff packet promotes a legacy scratch notebook when it carries the Project root (ADR 0052 §1)", (t) => {
+  const stateDir = makeTempDir("notebook-kickoff-");
+  disposeDir(t, stateDir);
+  const projectRoot = makeTempDir("notebook-kickoff-root-");
+  disposeDir(t, projectRoot);
+  const legacy = validNotebook(2);
+  mkdirSync(join(projectRoot, ".scratch"), { recursive: true });
+  writeFileSync(join(projectRoot, ".scratch", "notebook.md"), legacy);
+  const packet = buildSeatKickoffPacket({ role: "lead", projectSlug: "demo-abc123", projectRoot, ledgerEvents: [], stateDir });
+  assert.match(packet, /Project notebook/, "the packet carries the notebook block");
+  assert.equal(readFileSync(projectNotebookPath(stateDir, "demo-abc123"), "utf8"), legacy, "the read promoted the legacy copy");
+  assert.equal(existsSync(join(projectRoot, ".scratch", "notebook.md")), false, "the untracked copy is gone before any clean-tree check");
 });

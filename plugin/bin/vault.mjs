@@ -1050,7 +1050,7 @@ function executionIsValid(value) {
 // src/project.ts
 import { execFileSync } from "node:child_process";
 import { createHash as createHash3 } from "node:crypto";
-import { existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync4, readdirSync as readdirSync3, realpathSync as realpathSync3, statSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { copyFileSync, existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync4, readdirSync as readdirSync3, realpathSync as realpathSync3, statSync, unlinkSync, writeFileSync as writeFileSync2 } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute as isAbsolute3, basename as basename4, join as join4, parse, resolve as resolve3 } from "node:path";
 var GIT_TIMEOUT_MS = 1e4;
@@ -1979,7 +1979,7 @@ var LedgerAdmission = class _LedgerAdmission {
 
 // src/vault-envelope.ts
 import { randomBytes, scryptSync, createCipheriv, createDecipheriv } from "node:crypto";
-import { readFileSync as readFileSync7, mkdirSync as mkdirSync4, writeFileSync as writeFileSync3, copyFileSync } from "node:fs";
+import { readFileSync as readFileSync7, mkdirSync as mkdirSync4, writeFileSync as writeFileSync3, copyFileSync as copyFileSync2 } from "node:fs";
 import { basename as basename6, dirname as dirname6 } from "node:path";
 var OBFUSCATION_MASK = Buffer.from("paseo-factory-vault-obfuscation-v1", "utf8");
 function sealVaultBuffer(plain, passphrase) {
@@ -2111,7 +2111,7 @@ function stageRuntimeFileIntoCheckout(runtimePath, target, passphrase, relPath) 
     return;
   }
   mkdirSync4(dirname6(target), { recursive: true });
-  copyFileSync(runtimePath, target);
+  copyFileSync2(runtimePath, target);
 }
 function tryUnseal(raw, passphrase, then) {
   try {
@@ -2990,7 +2990,7 @@ function materializeProjectScrumVault(state, slug, runtimeApp, overwrite) {
 }
 
 // src/scrum/companion-tools.ts
-import { existsSync as existsSync10, mkdirSync as mkdirSync9, mkdtempSync, readdirSync as readdirSync7, symlinkSync as symlinkSync2, rmSync as rmSync7, writeFileSync as writeFileSync7, readFileSync as readFileSync13, copyFileSync as copyFileSync2, realpathSync as realpathSync5 } from "node:fs";
+import { existsSync as existsSync10, mkdirSync as mkdirSync9, mkdtempSync, readdirSync as readdirSync7, symlinkSync as symlinkSync2, rmSync as rmSync7, writeFileSync as writeFileSync7, readFileSync as readFileSync13, copyFileSync as copyFileSync3, realpathSync as realpathSync5 } from "node:fs";
 import { homedir as homedir3, tmpdir } from "node:os";
 import { delimiter as delimiter2, dirname as dirname12, join as join15 } from "node:path";
 function providerSkillDirectories(userHome) {
@@ -3530,7 +3530,7 @@ function sealVaultFile(paseoHome, sourcePath, vaultPath, passphrase) {
 
 // src/vault-materialization.ts
 import { execFileSync as execFileSync3 } from "node:child_process";
-import { readFileSync as readFileSync16, mkdirSync as mkdirSync10, chmodSync as chmodSync2, writeFileSync as writeFileSync9, readdirSync as readdirSync8, existsSync as existsSync13, copyFileSync as copyFileSync3, statSync as statSync5 } from "node:fs";
+import { readFileSync as readFileSync16, mkdirSync as mkdirSync10, chmodSync as chmodSync2, writeFileSync as writeFileSync9, readdirSync as readdirSync8, existsSync as existsSync13, copyFileSync as copyFileSync4, statSync as statSync5 } from "node:fs";
 import { join as join18, basename as basename8, isAbsolute as isAbsolute6, resolve as resolvePath, dirname as dirname13 } from "node:path";
 function writeRuntimeFile(paseoHome, vaultPath, data) {
   assertSafeVaultPath(vaultPath);
@@ -3880,7 +3880,7 @@ function materializeVaultSkillsFromRuntime(paseoHome, overwriteConfigs = false, 
     const destLockPath = join18(userHome, ".agents", ".skill-lock.json");
     if (overwriteConfigs || !existsSync13(destLockPath)) {
       mkdirSync10(dirname13(destLockPath), { recursive: true });
-      copyFileSync3(runtimeLockPath, destLockPath);
+      copyFileSync4(runtimeLockPath, destLockPath);
     }
   }
   if (!existsSync13(runtimeSkillsDir)) return [];
@@ -3905,7 +3905,7 @@ function materializeVaultSkillsFromRuntime(paseoHome, overwriteConfigs = false, 
       const dest = join18(agentsSkillsDir, skillName, rel);
       if (!overwriteConfigs && existsSync13(dest)) continue;
       mkdirSync10(dirname13(dest), { recursive: true });
-      copyFileSync3(src, dest);
+      copyFileSync4(src, dest);
     }
     materializedSkills.push(skillName);
   }
@@ -4031,7 +4031,7 @@ function materializeConfigsFromRuntime(paseoHome, overwriteConfigs = false, opti
     if (!existsSync13(src)) continue;
     if (!overwriteConfigs && existsSync13(dest)) continue;
     mkdirSync10(dirname13(dest), { recursive: true });
-    copyFileSync3(src, dest);
+    copyFileSync4(src, dest);
   }
   const stateDir = vaultStateDir(paseoHome);
   const runtimeProfiles = join18(runtimeConfigDir, "profiles.json");
@@ -4055,7 +4055,7 @@ function materializeConfigsFromRuntime(paseoHome, overwriteConfigs = false, opti
       const dest = projectLanesPath(stateDir, app.projectSlug);
       if (!overwriteConfigs && existsSync13(dest)) continue;
       mkdirSync10(dirname13(dest), { recursive: true });
-      copyFileSync3(src, dest);
+      copyFileSync4(src, dest);
     }
   }
 }

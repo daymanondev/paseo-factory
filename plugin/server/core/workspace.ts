@@ -5,7 +5,7 @@ import { cpSync, existsSync, lstatSync, mkdtempSync, realpathSync, renameSync, r
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { isFactoryInfrastructureProcess } from "./process-policy.ts";
-import { resolveProject } from "./project.ts";
+import { resolveProject, syncLegacyScratchNotebook } from "./project.ts";
 import { hydrateTaskWorktree } from "./worktree-policy.ts";
 import { PACKAGE_LOCKFILES, scopeCoversFile } from "./scope-policy.ts";
 export { scopeCoversFile, scopeRecoveryCommands, normalizeScopePath } from "./scope-policy.ts";
@@ -338,6 +338,16 @@ export async function landTaskWorktree(options: {
   branch: string;
   /** A pending acceptance may have accumulated conflict-resolution commits. */
   retry?: boolean;
+  /**
+   * The factory `stateDir` plus the Project's slug (v0.5.0, ADR 0052
+   * Decision 1): when both are known, a legacy untracked
+   * `<project-root>/.scratch/notebook.md` is promoted into
+   * `<projectStateDir>/notebook.md` and unlinked BEFORE the clean-tree
+   * check — the OS-sandboxed Lead's scratch copy never reads as a
+   * `pending-conflict`. Omitted: the landing behaves exactly as before.
+   */
+  stateDir?: string;
+  projectSlug?: string;
 }): Promise<LandingResult> {
   const { projectRoot, worktree, base, branch } = options;
   let claimedCommit = options.claimedCommit;
@@ -361,7 +371,7 @@ export async function landTaskWorktree(options: {
   // whose own first git call reports the honest reason.
   const already = await gitExit(projectRoot, ["merge-base", "--is-ancestor", claimedCommit, "HEAD"]);
   if (already.status === 0) return finishLanding(projectRoot, worktree);
-  return landCleanly(projectRoot, worktree, claimedCommit, base, branch);
+  return landCleanly(projectRoot, worktree, claimedCommit, base, branch, options.stateDir, options.projectSlug);
 }
 
 /**
@@ -377,8 +387,18 @@ async function landCleanly(
   claimedCommit: string,
   base: string | undefined,
   branch: string,
+  stateDir?: string,
+  projectSlug?: string,
 ): Promise<LandingResult> {
   const conflict = (note: string): LandingResult => ({ landing: "pending-conflict", note: cap(note) });
+  // The legacy notebook promotion (v0.5.0, ADR 0052 Decision 1) runs BEFORE
+  // the clean-tree check: an untracked `.scratch/notebook.md` is the
+  // OS-sandboxed Lead's honest fallback, not an owner edit — promote it into
+  // `<projectStateDir>/notebook.md` and unlink the working-tree copy so the
+  // status read below never sees it.
+  if (stateDir !== undefined && projectSlug !== undefined && projectSlug !== "") {
+    syncLegacyScratchNotebook(stateDir, projectSlug, projectRoot);
+  }
   let status: { stdout: string };
   try {
     status = await workspaceStatus(projectRoot);
