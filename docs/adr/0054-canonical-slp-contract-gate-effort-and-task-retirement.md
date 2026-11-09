@@ -1,0 +1,61 @@
+# 0054 — Canonical SLP Contract Validation, Read-Only Gate Optionality, Provider-Adaptive Effort Selection, and Clean Task Retirement (`v0.5.0`)
+
+- **Date:** 2026-11-09
+- **Status:** Accepted — ratified by the Owner via `/grill-with-docs` for `v0.5.0` after auditing `v0.4.1` live runs against canonical `Paseo Room` and `Codex Room`.
+- **Amends:** `Agent` (`Peer`), `Lead`, `Contract`, `Gate`, `Claim`, `Verdict`, `Accepted`, `Task`, `Spawn`, `Re-poke`, `Peer handoff`, `Role-scoped MCP bridge`, and `Lane config` in `CONTEXT.md` · extends [ADR 0052](0052-anti-fractal-wave-convergence-and-notebook-graduation.md) and [ADR 0053](0053-canonical-slp-core-provisional-briefs-peer-dispositions-live-reconciliation-and-six-field-handoff.md).
+
+## Context
+
+After shipping `v0.4.0` / `v0.4.1` ([ADR 0053](0053-canonical-slp-core-provisional-briefs-peer-dispositions-live-reconciliation-and-six-field-handoff.md)), a side-by-side audit against canonical **Paseo Room** (`/Users/andrewpham/tools/paseo-room`) and **Codex Room** (`zcode-room/research/slp/`) alongside live production telemetry (`goal-partner-f17f4d` at `seq 1927`) exposed five mechanical gaps where `paseo-factory` still drifted from canonical SLP:
+
+1. **Unvalidated `Contract.description` at `lead_set_contract`:** Because `description` was optional (`description?: string`) and unvalidated at `setContract`, a live `Lead` (`seq 1924` on `GP-T27f-account-busy-apply-provider`) set a Contract with `gate` only and omitted `description` entirely, then pasted a multi-paragraph brief manually into `lead_repoke_agent`. That bypassed `Contract.description`, left the `Factory surface` and `Ledger` without a recorded Brief, and caused `160k` `Peer handoff` rotations (which read `Contract.description`) to lose the Task's instructions.
+2. **Mandatory Shell `gate` & Commit-Only Prompt Synthesis on Read-Only Dispositions (`scout | architect | reviewer`):** Although ADR 0053 introduced `disposition?: "engineer" | "architect" | "reviewer" | "scout"`, `lead_set_contract` still required a non-empty shell `gate` string and `factory.claim()` still spawned a shell subprocess for every disposition. Worse, all four Peer prompt builders (`plugin/bin/driver.mjs` `BRIEF_TEMPLATE`, `plugin/bin/bridge.mjs` fallback prompt, `plugin/server/spool.ts` `lead_repoke_agent`, and `plugin/server/peer-handoff.ts` `160k` continuation prompt) still ordered every Peer to run `git commit` on `factory/<task>` and call `agent_claim` with `commit` (`--sha`) — directly contradicting `read-only-disposition-fence` on `scout`, `architect`, and `reviewer`.
+3. **Stale Contract View on In-Place `lead_set_contract` + `lead_repoke_agent`:** When `Lead` updated a `Contract` in place (`resetPeer: false`) and called `lead_repoke_agent`, the repoke prompt appended only a generic footer without delivering the updated `Contract` (`disposition`, `scope`, `gate`, `description`) to the live `Peer`.
+4. **Fixed Worker Thinking Effort & Unsafe Provider Effort Fallbacks:** In canonical `paseo-room` (`lead.md` `Reasoning effort by task`, `controller.ts` `resolveWorkerEffort`), `engineer | architect | reviewer | scout` are task-level dispositions on a single Owner-configured Worker model, and `Lead` selects reasoning effort (`low | medium | high | xhigh | max`) per dispatch based on task uncertainty and verification burden (not disposition label). In `paseo-factory`, `lead_dispatch_agent` had no `thinking` / `thinkingReason` parameters, and `lanes.ts` lacked provider-adaptive effort resolution for models with baked-in effort (`thinkingOptions: []`, e.g. `antigravity/gemini-4-argon-high`) or partial tier sets (e.g. `zcode/GLM-5.3` supporting `["low", "high", "max"]` without `"medium"`).
+5. **No Terminal Task Retirement (`lead_close_task` / `task_closed`):** When a Task was superseded or split after hitting `context-ceiling`, `Lead` had no way to close/retire the superseded Task cleanly without either merging it or leaving it permanently in `unaccepted` / `needs-human` (`openTasks`, `Active Peer Roster`, and `liveWorkspaceConflict`).
+
+## Decision
+
+1. **Mechanical 4-Part Brief Gate on `lead_set_contract` & Read-Only Disposition Contract Normalization:**
+   - `lead_set_contract` (and `factory contract`) accepts either structured 4-Part Brief fields (`outcome`, `invariants`, `exclusions`, `verification` — which synthesize into the canonical 4-section `Contract.description`) or a `description` string containing all four canonical headings (`1. Bounded Outcome`, `2. Contract Boundary & Regression Invariants`, `3. Excluded / Deferred`, `4. Verification`).
+   - In `slp` mode, when `seat === "lead"` sets a Contract without all four sections (or with an empty `description` and missing structured fields), `setContract` refuses with `invalid-contract` naming the missing section(s). Historical `contract_set` events in existing `ledger.jsonl` files remain valid on replay and projection.
+   - When `disposition` is read-only (`"scout" | "architect" | "reviewer"`), setting `artifact` is refused (`invalid-contract: read-only disposition cannot require an output artifact`) and `scope` is normalized to read-only (`[]`).
+
+2. **Optional Shell `gate` for Read-Only Dispositions & Disposition-Specific Handoff Expectations (`paseo-room` Parity):**
+   - On `lead_set_contract`, `gate` is required for `disposition: "engineer"` (default) and **optional** (defaulting to `""`) for `disposition: "scout" | "architect" | "reviewer"`.
+   - In `factory.claim()`, when `isReadOnlyPeerDisposition(disposition)` and `contract.gate.trim() === ""`, the factory verifies the `Task worktree` sits clean at `HEAD` (zero uncommitted or untracked files left by the read-only Peer), skips spawning a shell subprocess, and records `gate_started` + `gate_finished` (`verdict: "green"`, `exit: 0`, `note: "read-only disposition (<disposition>) — 6-field handoff recorded, no shell gate required"`). If a non-empty `gate` was explicitly set on a read-only Contract, it executes as usual.
+   - Role contracts and Peer prompts encode canonical `paseo-room` disposition-specific handoff expectations inside the 6-Field Handoff:
+     - `architect`: alternatives considered, strongest counterargument, reversal conditions, and supporting `file:line` evidence.
+     - `reviewer`: concrete `claim` + `file:line` evidence per finding (distinguishing blocking defects from non-blocking observations).
+     - `scout`: concrete `file:line` evidence paths, remaining unknowns, and confidence (`low | medium | high`).
+
+3. **Disposition-Aware Peer Prompt Synthesis Across All 4 Entrypoints & Updated Contract Delivery on `lead_repoke_agent`:**
+   - Unify all four Peer prompt builders (`plugin/bin/driver.mjs` `BRIEF_TEMPLATE`/`renderBrief`, `plugin/bin/bridge.mjs` fallback prompt, `plugin/server/spool.ts` `lead_repoke_agent`, and `plugin/server/peer-handoff.ts` `160k` continuation prompt):
+     - For `engineer`: run `Gate`, `git commit` on `factory/<task>`, and call `agent_claim` / `factory-claim` with `commit` (`--sha`) + mandatory `--outcome --scope --verification --unknowns`.
+     - For `scout | architect | reviewer`: explicitly state the session is Read-Only (`read-only-disposition-fence` forbids file edits and `git commit`), never run `git commit`, and call `agent_claim` / `factory-claim` **without `commit` / `--sha`** while supplying `--outcome --scope --verification --unknowns` (with disposition-specific evidence in `verification` and `unknowns`).
+   - Whenever `lead_repoke_agent` wakes a live `Peer`, it automatically embeds the Task's current active `Contract` snapshot (`disposition`, `scope`, `gate`, `description`) alongside the `Lead`'s `message` so in-place `lead_set_contract` updates (`resetPeer: false`) are always delivered to the live `Peer`.
+
+4. **Single Owner-Configured Worker Lane + Per-Dispatch Provider-Adaptive Thinking Effort (`thinking` & `thinkingReason` on `lead_dispatch_agent`):**
+   - Retain the single Owner-configured `worker` lane in `lanes.json` (matching `paseo-room`'s single Worker model where `engineer | architect | reviewer | scout` are task-level dispositions on the Peer seat and effort is selected per task by uncertainty and verification burden rather than disposition label).
+   - Add optional `thinking?: "low" | "medium" | "high" | "xhigh" | "max"` and `thinkingReason?: string` to `lead_dispatch_agent` (and `--thinking` / `--thinking-reason` on `factory spawn` / `factory run`). When `thinking` is supplied by `Lead`, `thinkingReason` (one sentence explaining why this task warrants that effort tier) is required.
+   - **Provider/Model-Adaptive Effort Resolution (`resolvePeerSpawnProvider`):**
+     - When `thinking` is omitted, use the exact `worker` model and thinking level configured by the Owner in `lanes.json`.
+     - When `thinking` is provided, inspect the configured `worker` model's `thinkingOptions` in the provider catalog:
+       1. **Fixed/Baked-In Effort Models (`thinkingOptions: []`, e.g. `antigravity/gemini-4-argon-high`):** Silently ignore the `thinking` override and preserve the exact configured model ID (`antigravity/gemini-4-argon-high`) without error or suffix mutation.
+       2. **Partial Effort Catalog Models (e.g. `zcode/GLM-5.3` with `["low", "high", "max"]` and no `"medium"`):** Map an unsupported intermediate tier (`"medium"`) to the model's configured/default option (`"high"` or the Owner's configured suffix in `lanes.json`, falling back to `"high"` for `"medium"` and `"max"` for `"xhigh"`) — never stripping the suffix down to a bare model without thinking.
+       3. **Full Effort Catalog Models (`claude`, `codex`, `copilot`, `pi` supporting the requested tier):** Apply `:<resolvedThinking>` to the base `worker` model and pass `thinkingOptionId: <resolvedThinking>` at session launch.
+
+5. **Clean Task Retirement (`lead_close_task` MCP Tool, `factory close` CLI, and `task_closed` Ledger Event):**
+   - Add `lead_close_task` (`{ task, reason }`, alias `lead_retire_task`) to the `lead` (and `supervisor`) MCP tool catalog and `factory close --task <id> --reason <text>` to the CLI / Spool (`kind: "close"`).
+   - Refused if the Task is unknown (`unknown-task`), already accepted (`already-accepted`), already closed (`already-closed`), or has a Gate currently running (`gate-running`).
+   - Appends `task_closed` (`{ type: "task_closed", task, reason, closed_by: "lead" | "supervisor" | "owner" }`) to `<projectStateDir>/ledger.jsonl`, cancels and archives any bound live `Peer` session and temporary Paseo worktree workspace, removes the managed `Task worktree` (`removeTaskWorktree` + branch `factory/<task>`), and marks the Task terminal (`closed: { seq, at, reason, by }`) across `projectTask`, `foldTasks`, `Active Peer Roster`, `liveWorkspaceConflict`, `projectPeerInFlight`, and `FactoryView` / `Web Console` KPIs (excluded from `openTasks`, `running`, and `needsHuman`).
+
+6. **Unified `v0.5.0` Release Incorporating `ADR 0052`:**
+   - Ship all five pillars of [ADR 0052](0052-anti-fractal-wave-convergence-and-notebook-graduation.md) (`lead_update_notebook` MCP tool + `factory notebook` CLI + `writeProjectNotebook` schema/row/byte validation + `syncLegacyScratchNotebook` auto-promotion and cleanup before `landTaskWorktree` + anti-fractal wave convergence and notebook graduation laws in `src/roles-contract.ts`) together with Decisions 1–5 in `v0.5.0`.
+
+## Consequences
+
+- `Lead` cannot bypass `Contract.description` by setting a bare `gate` and pasting the brief into `lead_repoke_agent`; every SLP Task carries a mechanical 4-Part Brief in the `Ledger`, `Factory surface`, and `160k` `Peer handoff` continuation packet.
+- Read-only `scout`, `architect`, and `reviewer` dispatches work end-to-end without dummy shell gates or conflicting `git commit` instructions, and return canonical disposition-specific 6-Field Handoffs.
+- `Lead` can tune Peer reasoning effort per task (`low | medium | high | xhigh | max` with `thinkingReason`) while `antigravity/*` baked-in effort models and `zcode/GLM-5.3` (`low | high | max`) adapt automatically without ever dropping thinking or failing session launch.
+- Superseded or split Tasks close cleanly via `lead_close_task` (`task_closed`), freeing worktrees and keeping `Active Peer Roster` and `Web Console` KPIs accurate.
