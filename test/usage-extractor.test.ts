@@ -8,7 +8,6 @@ import {
   createUsageExtractor,
   decodeAntigravityUsage,
   readNativeContextWindowTokens,
-  resolveZcodeNativeSessionId,
   type UsageAgentSource,
 } from "../src/usage-extractor.ts";
 import { disposeDir, makeTempDir } from "./helpers.ts";
@@ -381,169 +380,39 @@ test("copilot: per-turn inputTokens already contains the cache sums — the subt
   assert.equal(final!.turns, 2, "usage_record turns stand — only the totals were replaced");
 });
 
-// ---- zcode -------------------------------------------------------------------------------------
+// ---- pi/zcode/* (ADR 0055) -------------------------------------------------------------------
 
-test("zcode: an acpSid resolves through acp-lazy-sessions.json while a bare sess_ id never reads the file", async t => {
-  const { userHome } = tempHomes(t);
-  const lazy = join(userHome, ".zcode", "v2", "acp-lazy-sessions.json");
-  mkdirSync(dirname(lazy), { recursive: true });
-  writeFileSync(lazy, JSON.stringify({
-    "acp-11111111-2222-3333-4444-555555555555": { cwd: "/Users/x/work", zcodeSid: "sess-native-1" },
-    "sess_direct": { cwd: "/Users/x/work", zcodeSid: "sess_other" },
-  }));
-  assert.equal(resolveZcodeNativeSessionId("acp-11111111-2222-3333-4444-555555555555", userHome), "sess-native-1", "the lazy map's zcodeSid answers");
-  assert.equal(resolveZcodeNativeSessionId("sess_direct", userHome), "sess_direct", "a bare sess_ id IS native — the mapping never applies");
-  assert.equal(resolveZcodeNativeSessionId("acp-unmapped", userHome), undefined, "an unmapped acpSid is absent, never a guess");
-  rmSync(lazy, { force: true });
-  assert.equal(resolveZcodeNativeSessionId("acp-gone", userHome), undefined, "a missing file answers undefined, never a throw");
-  writeFileSync(lazy, "{not json");
-  assert.equal(resolveZcodeNativeSessionId("acp-broken", userHome), undefined, "a damaged file answers undefined, never a throw");
-});
-
-test("zcode: assistant message rows fold into the disjoint buckets — inputTokens already contains the cache sums, clamped at zero", async t => {
-  if (!(await nodeSqliteAvailable())) return t.skip("node:sqlite unavailable on this runtime");
-  const { dir, userHome, stateDir } = tempHomes(t);
-  // The per-Task home ticket 01 provisions — the extractor discovers nested db/db.sqlite stores by walking <stateDir>/zcode-home.
-  const taskDb = join(stateDir, "zcode-home", "tasks", "proj-slug", "task-a", "db", "db.sqlite");
-  const db = await openSqlite(t, taskDb);
-  db.exec("CREATE TABLE message (session_id TEXT, sequence INTEGER, role TEXT, metadata TEXT)");
-  const insert = db.prepare("INSERT INTO message VALUES (?, ?, ?, ?)");
-  insert.run("sess-native-2", 1, "user", JSON.stringify({ text: "go" }));
-  insert.run("sess-native-2", 2, "assistant", JSON.stringify({ usage: { inputTokens: 381_131, outputTokens: 6_651, cacheReadInputTokens: 304_564, cacheCreationInputTokens: 76_543, reasoningTokens: 2_987 } }));
-  insert.run("sess-native-2", 3, "assistant", JSON.stringify({ usage: { inputTokens: 10_000, outputTokens: 900, cacheReadInputTokens: 9_000, cacheCreationInputTokens: 2_000, reasoningTokens: 0 } }));
-  insert.run("sess-native-2", 4, "assistant", JSON.stringify({ usage: { inputTokens: 500, outputTokens: 700, cacheReadInputTokens: 4_000, cacheCreationInputTokens: 1_000, reasoningTokens: 50 } }));
-  insert.run("sess-other", 9, "assistant", JSON.stringify({ usage: { inputTokens: 99_999, outputTokens: 1, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 } }));
-  // The lazy-session map carries the acpSid -> zcodeSid resolution (ADR 0046, Gap 1).
-  const lazy = join(userHome, ".zcode", "v2", "acp-lazy-sessions.json");
-  mkdirSync(dirname(lazy), { recursive: true });
-  writeFileSync(lazy, JSON.stringify({ "acp-aaa": { cwd: dir, zcodeSid: "sess-native-2" } }));
-  const usage = await createUsageExtractor({ userHome, stateDir }).extract({ id: "peer-8", provider: "zcode/GLM-5.3", persistence: { sessionId: "acp-aaa" } });
-  assert.ok(usage);
-  assert.equal(usage.harness, "zcode");
-  assert.equal(usage.turns, 3, "one turn per assistant row — the user row and the other session's row never meter");
-  assert.equal(usage.inputUncachedTokens, 24, "max(0, inputTokens - cacheRead - cacheCreation) per turn, clamped at zero");
-  assert.equal(usage.cacheReadTokens, 304_564 + 9_000 + 4_000);
-  assert.equal(usage.cacheWriteTokens, 76_543 + 2_000 + 1_000);
-  assert.equal(usage.outputTokens, 6_651 + 900 + 700);
-  assert.equal(usage.reasoningTokens, 3_037);
-  assert.equal(usage.totalTokens, 24 + 317_564 + 79_543 + 8_251, "the four buckets sum exactly");
-  assert.equal(usage.latestContextWindowTokens, 500 + 700, "the LAST assistant row owns the occupancy — its input already contains the cache sums");
-  assert.equal(usage.nativeSessionRef, taskDb);
-});
-
-test("zcode: the sequence cursor folds only rows past lastStepIdx and an unchanged db answers from the stat gate with zero opens", async t => {
-  if (!(await nodeSqliteAvailable())) return t.skip("node:sqlite unavailable on this runtime");
+test("pi/zcode/*: GLM sessions running through pi and zcode-api extract token usage and context window via the Pi JSONL reader", async t => {
   const { userHome, stateDir } = tempHomes(t);
-  const db = await openSqlite(t, join(stateDir, "zcode-home", "lead", "db", "db.sqlite"));
-  db.exec("CREATE TABLE message (session_id TEXT, sequence INTEGER, role TEXT, metadata TEXT)");
-  const insert = db.prepare("INSERT INTO message VALUES (?, ?, ?, ?)");
-  insert.run("sess_native_3", 1, "assistant", JSON.stringify({ usage: { inputTokens: 2_000, outputTokens: 300, cacheReadInputTokens: 1_000, cacheCreationInputTokens: 500, reasoningTokens: 10 } }));
-  const extractor = createUsageExtractor({ userHome, stateDir });
-  const agent: UsageAgentSource = { id: "lead-9", provider: "zcode/GLM-5.3", persistence: { sessionId: "sess_native_3" } };
-  const first = await extractor.extract(agent);
-  assert.ok(first);
-  assert.equal(first.turns, 1);
-  assert.equal(first.inputUncachedTokens, 500);
-  // The delta sweep: a non-assistant row and one new assistant row land beyond the cursor.
-  insert.run("sess_native_3", 2, "user", JSON.stringify({ text: "more" }));
-  insert.run("sess_native_3", 3, "assistant", JSON.stringify({ usage: { inputTokens: 3_000, outputTokens: 400, cacheReadInputTokens: 2_000, cacheCreationInputTokens: 0, reasoningTokens: 20 } }));
-  const opensAfterFirst = extractor.metrics.sqliteOpens;
-  const grown = await extractor.extract(agent);
-  assert.equal(grown!.turns, 2, "only assistant rows beyond the cursor fold");
-  assert.equal(grown!.inputUncachedTokens, 500 + 1_000);
-  assert.equal(grown!.outputTokens, 700);
-  assert.equal(grown!.latestContextWindowTokens, 3_000 + 400);
-  const opensAfterDelta = extractor.metrics.sqliteOpens;
-  assert.equal(opensAfterDelta, opensAfterFirst + 1, "the delta sweep paid exactly its own single open");
-  const unchanged = await extractor.extract(agent);
-  assert.deepEqual(unchanged, grown);
-  assert.equal(extractor.metrics.sqliteOpens, opensAfterDelta, "an unchanged db answers from the stat gate — zero opens");
-});
-
-test("zcode: the operator's ~/.zcode/cli/db/db.sqlite is the fallback store, and the context sensor answers from it", async t => {
-  if (!(await nodeSqliteAvailable())) return t.skip("node:sqlite unavailable on this runtime");
-  const { userHome, stateDir } = tempHomes(t);
-  const cliDb = join(userHome, ".zcode", "cli", "db", "db.sqlite");
-  const db = await openSqlite(t, cliDb);
-  db.exec("CREATE TABLE message (session_id TEXT, sequence INTEGER, role TEXT, metadata TEXT)");
-  db.prepare("INSERT INTO message VALUES (?, ?, ?, ?)").run("sess_native_4", 1, "assistant", JSON.stringify({ usage: { inputTokens: 140_000, outputTokens: 5_000, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, reasoningTokens: 0 } }));
-  const agent: UsageAgentSource = { id: "sup-3", provider: "zcode/GLM-5.3", persistence: { sessionId: "sess_native_4" } };
+  const sessionsRoot = join(stateDir, "pi-agent", "agent", "sessions", "--encoded-cwd--");
+  const session = join(sessionsRoot, "20261110T100000_ses-zcode-pi.jsonl");
+  writeLines(session, [
+    {
+      type: "message",
+      message: {
+        role: "assistant",
+        provider: "zcode",
+        model: "glm-5.3",
+        usage: { input: 2_000, output: 400, cacheRead: 30_000, cacheWrite: 0, reasoning: 150, cost: { total: 0 } },
+      },
+    },
+  ]);
+  const agent: UsageAgentSource = {
+    id: "peer-zcode",
+    provider: "pi/zcode/glm-5.3:high",
+    persistence: { sessionId: "ses-zcode-pi" },
+  };
   const usage = await createUsageExtractor({ userHome, stateDir }).extract(agent);
   assert.ok(usage);
-  assert.equal(usage.harness, "zcode");
-  assert.equal(usage.nativeSessionRef, cliDb, "no factory zcode home exists — the operator's own store answers");
-  // The 128k/160k handoff sensors read through the exact same shared extractor (ADR 0043 §3).
-  assert.equal(readNativeContextWindowTokens(agent, { userHome, stateDir }), 145_000);
-  assert.equal(readNativeContextWindowTokens({ id: "sup-4", provider: "zcode/GLM-5.3", persistence: { sessionId: "acp-not-mapped" } }, { userHome, stateDir }), null, "an unresolvable session answers null, never a guess");
-});
-
-test("zcode: ZCode 0.17+ real message(id, session_id, time_created, time_updated, data, sequence) schema folds data.tokens and holds the cursor before an in-flight streaming row", async t => {
-  if (!(await nodeSqliteAvailable())) return t.skip("node:sqlite unavailable on this runtime");
-  const { userHome, stateDir } = tempHomes(t);
-  const taskDb = join(stateDir, "zcode-home", "tasks", "proj-slug", "task-live", "db", "db.sqlite");
-  const db = await openSqlite(t, taskDb);
-  db.exec(`CREATE TABLE message (
-    id text primary key,
-    session_id text not null,
-    time_created integer not null,
-    time_updated integer not null,
-    data text not null,
-    sequence integer
-  )`);
-  const insert = db.prepare("INSERT INTO message (id, session_id, time_created, time_updated, data, sequence) VALUES (?, ?, ?, ?, ?, ?)");
-  insert.run("m0", "sess_live_1", 1000, 1000, JSON.stringify({ role: "user", time: { created: 1000 } }), 0);
-  insert.run("m1", "sess_live_1", 1001, 1002, JSON.stringify({
-    role: "assistant",
-    time: { created: 1001, completed: 1002 },
-    modelId: "GLM-5.3",
-    providerId: "account:zai-individual-coding-plan",
-    tokens: { total: 40437, input: 40050, output: 387, reasoning: 0, cache: { read: 8000, write: 0 } },
-  }), 1);
-  // A cancelled zero-token assistant row with `time.completed` set advances the cursor without inflating turns or zeroing latestContext.
-  insert.run("m2", "sess_live_1", 1003, 1004, JSON.stringify({
-    role: "assistant",
-    time: { created: 1003, completed: 1004 },
-    modelId: "GLM-5.3",
-    tokens: { total: 0, input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-  }), 2);
-  // An in-flight streaming assistant row at the tail (`time.completed` absent, tokens still 0) must NOT advance the cursor past seq 3.
-  insert.run("m3", "sess_live_1", 1005, 1005, JSON.stringify({
-    role: "assistant",
-    time: { created: 1005 },
-    modelId: "GLM-5.3",
-    tokens: { total: 0, input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-  }), 3);
-
-  const extractor = createUsageExtractor({ userHome, stateDir });
-  const agent: UsageAgentSource = { id: "peer-live", provider: "zcode/builtin:zai-coding-plan\\GLM-5.3", persistence: { sessionId: "sess_live_1" } };
-  const first = extractor.extract(agent);
-  assert.ok(first);
-  assert.equal(first.turns, 1);
-  assert.equal(first.model, "GLM-5.3");
-  assert.equal(first.inputUncachedTokens, 40050 - 8000);
-  assert.equal(first.cacheReadTokens, 8000);
-  assert.equal(first.outputTokens, 387);
-  assert.equal(first.latestContextWindowTokens, 40050 + 387);
-
-  // Now the streaming row m3 completes with its final token counts.
-  db.prepare("UPDATE message SET time_updated = ?, data = ? WHERE id = ?").run(
-    1006,
-    JSON.stringify({
-      role: "assistant",
-      time: { created: 1005, completed: 1006 },
-      modelId: "GLM-5.3",
-      tokens: { total: 41250, input: 41097, output: 153, reasoning: 12, cache: { read: 40000, write: 0 } },
-    }),
-    "m3",
-  );
-  const second = extractor.extract(agent);
-  assert.ok(second);
-  assert.equal(second.turns, 2, "the settled streaming row folds on the next delta sweep");
-  assert.equal(second.inputUncachedTokens, (40050 - 8000) + (41097 - 40000));
-  assert.equal(second.cacheReadTokens, 8000 + 40000);
-  assert.equal(second.outputTokens, 387 + 153);
-  assert.equal(second.reasoningTokens, 12);
-  assert.equal(second.latestContextWindowTokens, 41097 + 153);
+  assert.equal(usage.harness, "pi");
+  assert.equal(usage.provider, "zcode");
+  assert.equal(usage.model, "glm-5.3");
+  assert.equal(usage.turns, 1);
+  assert.equal(usage.inputUncachedTokens, 2_000);
+  assert.equal(usage.cacheReadTokens, 30_000);
+  assert.equal(usage.outputTokens, 400);
+  assert.equal(usage.reasoningTokens, 150);
+  assert.equal(readNativeContextWindowTokens(agent, { userHome, stateDir }), 2_000 + 30_000 + 400);
 });
 
 // ---- the fallback & honest absence -------------------------------------------------------------

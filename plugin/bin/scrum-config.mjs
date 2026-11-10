@@ -1204,61 +1204,9 @@ var ROLE_PROMPTS = {
   agent: renderRoleAppendSystem("agent")
 };
 
-// src/scope-policy.ts
-var PACKAGE_LOCKFILES = /* @__PURE__ */ new Set([
-  "package-lock.json",
-  "npm-shrinkwrap.json",
-  "pnpm-lock.yaml",
-  "yarn.lock",
-  "bun.lock",
-  "bun.lockb"
-]);
-function scopeCoversFile(scope, file) {
-  const directMatch = (target) => scope.some((entry) => {
-    const prefix = normalizeScopePath(entry);
-    const path = normalizeScopePath(target);
-    if (!/[*?]/.test(prefix)) return path === prefix || path.startsWith(`${prefix}/`);
-    return scopeGlob(prefix).test(path);
-  });
-  if (directMatch(file)) return true;
-  const slashIdx = file.lastIndexOf("/");
-  const baseName = slashIdx === -1 ? file : file.slice(slashIdx + 1);
-  if (PACKAGE_LOCKFILES.has(baseName)) {
-    const companionPkgJson = slashIdx === -1 ? "package.json" : `${file.slice(0, slashIdx)}/package.json`;
-    if (directMatch(companionPkgJson)) return true;
-  }
-  return false;
-}
-function normalizeScopePath(path) {
-  return path.replace(/^(?:\.\/)+/, "").replace(/\/+$/, "");
-}
-function scopeGlob(pattern) {
-  let expression = "^";
-  for (let i = 0; i < pattern.length; i++) {
-    const char = pattern[i];
-    if (char === "*" && pattern[i + 1] === "*") {
-      i++;
-      if (pattern[i + 1] === "/") {
-        expression += "(?:[^/]+/)*";
-        i++;
-      } else expression += ".*";
-    } else if (char === "*") expression += "[^/]*";
-    else if (char === "?") expression += "[^/]";
-    else expression += char.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  }
-  return new RegExp(`${expression}$`);
-}
-
-// src/zcode-home.ts
-var ROLE_PROMPTS2 = {
-  supervisor: renderRoleAppendSystem("supervisor"),
-  lead: renderRoleAppendSystem("lead"),
-  agent: renderRoleAppendSystem("agent")
-};
-
 // src/lanes.ts
 var LANE_NAMES = ["supervisor", "lead", "worker", "watch", "retro", "freshEyes"];
-var DEFAULT_LANE = "pi/zai/glm-5.3";
+var DEFAULT_LANE = "pi/zcode/glm-5.3";
 var EYE_JSON_LANE = "eye.json";
 function lanesPath(stateDir) {
   return join5(stateDir, "lanes.json");
@@ -1295,33 +1243,22 @@ function laneError(name, value) {
   }
   return void 0;
 }
-var ZCODE_OFFICIAL_GLM_MODEL_IDS = [
-  "GLM-5.3",
-  "GLM-5.3-Flash",
-  "GLM-5V-Turbo",
-  "GLM-5.2",
-  "GLM-5.1",
-  "GLM-5.1-Highspeed",
-  "GLM-5",
-  "GLM-5-Turbo",
-  "GLM-4.7",
-  "GLM-4.7-FlashX",
-  "GLM-4.7-Flash",
-  "GLM-4.6",
-  "GLM-4.5-Air",
-  "GLM-4.5",
-  "GLM-4.6V",
-  "GLM-4.6V-Flash",
-  "GLM-4.6V-FlashX",
-  "GLM-4.1V-Thinking-FlashX",
-  "GLM-4.1V-Thinking-Flash",
-  "GLM-4-FlashX-250414",
-  "GLM-4-Flash-250414",
-  "GLM-4V-Flash"
-];
-var CANONICAL_ZCODE_MODEL_ID = new Map(
-  ZCODE_OFFICIAL_GLM_MODEL_IDS.map((id) => [id.toLowerCase(), id])
-);
+function migrateLegacyZcodeLane(value) {
+  const parsed = parseLane(value);
+  if (parsed === void 0) return value;
+  if (parsed.provider === "zcode") {
+    const backslash = parsed.model.indexOf("\\");
+    const rawModel = (backslash === -1 ? parsed.model : parsed.model.slice(backslash + 1)).trim();
+    if (rawModel === "") return value;
+    const lowerModel = rawModel.toLowerCase();
+    return parsed.thinking === void 0 ? `pi/zcode/${lowerModel}` : `pi/zcode/${lowerModel}:${parsed.thinking}`;
+  }
+  if (parsed.provider === "pi" && /^zai\/glm-/i.test(parsed.model)) {
+    const lowerModel = parsed.model.slice("zai/".length).toLowerCase();
+    return parsed.thinking === void 0 ? `pi/zcode/${lowerModel}` : `pi/zcode/${lowerModel}:${parsed.thinking}`;
+  }
+  return value;
+}
 function lanesEntries(path) {
   let raw;
   try {
@@ -1348,7 +1285,7 @@ function lanesEntries(path) {
     }
     const error = laneError(name, value.trim());
     if (error !== void 0) return { ok: false, reason: `${path}: ${error}` };
-    entries[name] = value.trim();
+    entries[name] = migrateLegacyZcodeLane(value.trim());
   }
   return { ok: true, entries };
 }
@@ -1424,6 +1361,51 @@ function readLocalWriterIdentity(stateDir, projectSlug) {
   }
   if (value.version !== 1 || typeof value.writerId !== "string" || value.writerId.trim() === "") throw new FactoryError("writer-identity-invalid", "Unsupported local writer identity");
   return value.writerId;
+}
+
+// src/scope-policy.ts
+var PACKAGE_LOCKFILES = /* @__PURE__ */ new Set([
+  "package-lock.json",
+  "npm-shrinkwrap.json",
+  "pnpm-lock.yaml",
+  "yarn.lock",
+  "bun.lock",
+  "bun.lockb"
+]);
+function scopeCoversFile(scope, file) {
+  const directMatch = (target) => scope.some((entry) => {
+    const prefix = normalizeScopePath(entry);
+    const path = normalizeScopePath(target);
+    if (!/[*?]/.test(prefix)) return path === prefix || path.startsWith(`${prefix}/`);
+    return scopeGlob(prefix).test(path);
+  });
+  if (directMatch(file)) return true;
+  const slashIdx = file.lastIndexOf("/");
+  const baseName = slashIdx === -1 ? file : file.slice(slashIdx + 1);
+  if (PACKAGE_LOCKFILES.has(baseName)) {
+    const companionPkgJson = slashIdx === -1 ? "package.json" : `${file.slice(0, slashIdx)}/package.json`;
+    if (directMatch(companionPkgJson)) return true;
+  }
+  return false;
+}
+function normalizeScopePath(path) {
+  return path.replace(/^(?:\.\/)+/, "").replace(/\/+$/, "");
+}
+function scopeGlob(pattern) {
+  let expression = "^";
+  for (let i = 0; i < pattern.length; i++) {
+    const char = pattern[i];
+    if (char === "*" && pattern[i + 1] === "*") {
+      i++;
+      if (pattern[i + 1] === "/") {
+        expression += "(?:[^/]+/)*";
+        i++;
+      } else expression += ".*";
+    } else if (char === "*") expression += "[^/]*";
+    else if (char === "?") expression += "[^/]";
+    else expression += char.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+  return new RegExp(`${expression}$`);
 }
 
 // src/workspace-conflict.ts
@@ -2208,7 +2190,11 @@ function readScrumConfig(state, slug) {
       "scrum-config-invalid",
       `scrum-config-invalid: ${path}`
     );
-  return value;
+  const migratedLanes = {};
+  for (const name of SCRUM_LANES) {
+    migratedLanes[name] = migrateLegacyZcodeLane(value.lanes[name].trim());
+  }
+  return { ...value, lanes: migratedLanes };
 }
 function saveScrumConfig(state, config, slug) {
   return scrumMutation(state, () => {
@@ -2218,8 +2204,13 @@ function saveScrumConfig(state, config, slug) {
         "complete Scrum roster required"
       );
     const previous = readScrumConfig(state, slug);
+    const migratedLanes = {};
+    for (const name of SCRUM_LANES) {
+      migratedLanes[name] = migrateLegacyZcodeLane(config.lanes[name].trim());
+    }
     const next = {
       ...config,
+      lanes: migratedLanes,
       configRevision: (previous?.configRevision ?? 0) + 1
     };
     atomicJson(join9(scopeDir(state, slug), "scrum-lanes.json"), next);

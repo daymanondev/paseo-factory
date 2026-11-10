@@ -228,7 +228,7 @@ test("mixed Projects preserve SLP homes and freeze Scrum role/model through crea
   assert.equal(existsSync(join(state, "pi-agent/pm")), false);
 });
 
-test("Scrum seats and specialists on zcode/* lanes provision isolated Scrum zcode homes with the Scrum contract and role-scoped skills (v0.2.0, ADR 0049 §1)", async (t) => {
+test("Scrum seats and specialists configured with legacy zcode/* lanes migrate onto pi/zcode/* and provision isolated Scrum Pi homes (ADR 0055)", async (t) => {
   const { createFactory: createPluginFactory } = await import(
     "../plugin/server/core/factory.ts"
   );
@@ -244,25 +244,16 @@ test("Scrum seats and specialists on zcode/* lanes provision isolated Scrum zcod
   const { createScrumRun } = await import(
     "../plugin/server/core/scrum/run-journal.ts"
   );
-  const { SCRUM_ROLE_SKILLS } = await import(
-    "../plugin/server/core/scrum/prompts.ts"
-  );
-  const { ROLE_PROMPTS } = await import("../plugin/server/core/zcode-home.ts");
   const { handleSpoolRequest } = await import("../plugin/server/spool.ts");
   const { injectRoleOnCreate } = await import("../plugin/server/roles.ts");
   const { prepareTaskWorktree } = await import(
     "../plugin/server/core/workspace.ts"
   );
-  const { readFileSync, readdirSync } = await import("node:fs");
+  const { readFileSync } = await import("node:fs");
   const state = makeTempDir();
   disposeDir(t, state);
   const userHome = makeTempDir();
   disposeDir(t, userHome);
-  // The seeded operator zcode skills — `factory` is the Owner-only exclusion.
-  for (const name of ["research", "domain-modeling", "tdd", "factory"]) {
-    mkdirSync(join(userHome, ".zcode", "skills", name), { recursive: true });
-    writeFileSync(join(userHome, ".zcode", "skills", name, "SKILL.md"), `# ${name}\n`);
-  }
   const repo = makeTempDir();
   disposeDir(t, repo);
   writeFileSync(join(repo, "README.md"), "fixture");
@@ -284,10 +275,12 @@ test("Scrum seats and specialists on zcode/* lanes provision isolated Scrum zcod
     state,
     {
       ...config,
-      lanes: { ...config.lanes, pm: "zcode/glm-5.3", supervisor: "zcode/glm-5.3" },
+      lanes: { ...config.lanes, pm: "zcode/GLM-5.3:high", supervisor: "zcode/GLM-5.3:high" },
     },
     project.slug,
   );
+  assert.equal(config.lanes.pm, "pi/zcode/glm-5.3:high", "legacy zcode/GLM-5.3:high lane migrates to pi/zcode/glm-5.3:high on saveScrumConfig");
+  assert.equal(config.lanes.supervisor, "pi/zcode/glm-5.3:high");
   createScrumRun({
     state,
     slug: project.slug,
@@ -321,8 +314,6 @@ test("Scrum seats and specialists on zcode/* lanes provision isolated Scrum zcod
   assert.equal(wt.ok, true);
   if (!wt.ok) return;
 
-  // The specialist: a pm Task contracted on a zcode lane — its clean room is
-  // the Scrum run-epoch home, never the shared SLP zcode-home roots.
   const injected = injectRoleOnCreate(
     {
       config: { cwd: wt.path, provider: "factory-peer" },
@@ -334,25 +325,16 @@ test("Scrum seats and specialists on zcode/* lanes provision isolated Scrum zcod
     state,
     "projects",
     project.slug,
-    "scrum/zcode-home/runs/run-z/plan",
+    "scrum/harness/runs/run-z/plan",
     String(contract.seq),
   );
-  assert.equal(injected.env!.ZCODE_STORAGE_DIR, specialistHome, "the Scrum specialist's ZCODE_STORAGE_DIR sits under the Project state dir");
-  assert.equal(injected.env!.ZCODE_SESSION_DB_PATH, join(specialistHome, "db", "db.sqlite"), "the Scrum specialist owns its own sqlite path");
-  assert.equal(injected.config.provider, "zcode", "the frozen Scrum lane rewrites the provider onto zcode");
-  const specialistContract = readFileSync(join(specialistHome, "ROLE_SYSTEM.md"), "utf8");
-  assert.ok(specialistContract.startsWith("<!-- paseo-factory scrum"), "ROLE_SYSTEM.md carries the Scrum prompt mark");
-  assert.match(specialistContract, /Specialization: pm/, "ROLE_SYSTEM.md carries the Scrum specialization");
-  assert.match(specialistContract, new RegExp(`Project: ${project.slug}; run: run-z; Task: plan; epoch: ${contract.seq}`), "ROLE_SYSTEM.md carries the task identity payload");
-  assert.notEqual(specialistContract, ROLE_PROMPTS.agent, "ROLE_SYSTEM.md is never the SLP agent fallback");
-  assert.deepEqual(
-    readdirSync(join(specialistHome, "skills")).sort(),
-    [...SCRUM_ROLE_SKILLS.pm].sort(),
-    "skills/ symlinks exactly the Scrum pm role-skill list",
-  );
-  assert.ok(!readdirSync(join(specialistHome, "skills")).includes("factory"), "the Owner-only factory skill never reaches the specialist");
+  assert.equal(injected.env!.PI_CODING_AGENT_DIR, specialistHome, "the Scrum specialist's PI_CODING_AGENT_DIR sits under the Project state dir");
+  assert.equal(injected.config.provider, "pi", "the migrated Scrum lane rewrites the provider onto pi");
+  assert.equal((injected.config as Record<string, unknown>).model, "zcode/glm-5.3");
+  const specialistContract = readFileSync(join(specialistHome, "APPEND_SYSTEM.md"), "utf8");
+  assert.ok(specialistContract.startsWith("<!-- paseo-factory scrum"), "APPEND_SYSTEM.md carries the Scrum prompt mark");
+  assert.match(specialistContract, /Specialization: pm/, "APPEND_SYSTEM.md carries the Scrum specialization");
 
-  // The standing seat: the Supervisor on a zcode lane — seats/<selectionRevision>/<generation>/<authority>.
   const seat = injectRoleOnCreate(
     {
       config: { cwd: repo, provider: "factory-supervisor", title: "Ship it" },
@@ -365,23 +347,14 @@ test("Scrum seats and specialists on zcode/* lanes provision isolated Scrum zcod
     state,
     "projects",
     project.slug,
-    "scrum/zcode-home/seats",
+    "scrum/harness/seats",
     String(revision),
     seat.env!.PASEO_FACTORY_CORRELATION!,
     "supervisor",
   );
-  assert.equal(seat.env!.ZCODE_STORAGE_DIR, seatHome, "the Scrum seat's ZCODE_STORAGE_DIR sits under the Project state dir");
-  assert.equal(seat.env!.ZCODE_SESSION_DB_PATH, join(seatHome, "db", "db.sqlite"));
-  assert.equal(seat.env!.ZCODE_DISALLOWED_TOOLS, "Write,Edit,MultiEdit,NotebookEdit,DeleteFile", "the Scrum seat keeps the Layer-1 write-tool lock");
-  const seatContract = readFileSync(join(seatHome, "ROLE_SYSTEM.md"), "utf8");
-  assert.ok(seatContract.startsWith("<!-- paseo-factory scrum"), "the seat's ROLE_SYSTEM.md carries the Scrum prompt mark");
-  assert.match(seatContract, /Authority: supervisor/, "the seat's ROLE_SYSTEM.md carries the Scrum authority");
-  assert.notEqual(seatContract, ROLE_PROMPTS.supervisor, "the seat's ROLE_SYSTEM.md is never the SLP supervisor fallback");
-  assert.deepEqual(
-    readdirSync(join(seatHome, "skills")).sort(),
-    ["domain-modeling", "research", "tdd"],
-    "the Scrum supervisor gets every installed host skill except factory",
-  );
+  assert.equal(seat.env!.PI_CODING_AGENT_DIR, seatHome, "the Scrum seat's PI_CODING_AGENT_DIR sits under the Project state dir");
+  assert.equal(seat.config.provider, "pi");
+  assert.equal((seat.config as Record<string, unknown>).model, "zcode/glm-5.3");
 });
 
 test("Scrum create hooks preserve authority and provider-specific fences across all supported families", async (t) => {
@@ -1208,15 +1181,15 @@ test('UX provisioning emits od.cmd and executable cross-platform Antigravity hoo
   execFileSync(hook, { shell: true, input: '{}', stdio: ['pipe', 'pipe', 'pipe'], timeout: 5000 });
 });
 
-test('skill healer replaces stale copies across five harnesses and removes retired skills', async (t) => {
+test('skill healer replaces stale copies across four harnesses and removes retired skills', async (t) => {
   const { mkdirSync, readFileSync, realpathSync, existsSync } = await import('node:fs');
   const { ensureProviderSkillSymlinks } = await import('../src/scrum/companion-tools.ts');
   const home = makeTempDir(); disposeDir(t, home);
-  for (const path of ['.agents/skills/tdd', '.agents/skills/critique', '.codex', '.zcode/skills/tdd']) mkdirSync(join(home, path), { recursive: true });
+  for (const path of ['.agents/skills/tdd', '.agents/skills/critique', '.codex/skills/tdd']) mkdirSync(join(home, path), { recursive: true });
   writeFileSync(join(home, '.agents/skills/tdd/SKILL.md'), 'canonical');
-  writeFileSync(join(home, '.zcode/skills/tdd/SKILL.md'), 'stale');
+  writeFileSync(join(home, '.codex/skills/tdd/SKILL.md'), 'stale');
   ensureProviderSkillSymlinks(home);
-  for (const path of ['.pi/agent', '.claude', '.gemini/config', '.codex', '.zcode']) {
+  for (const path of ['.pi/agent', '.claude', '.gemini/config', '.codex']) {
     assert.equal(realpathSync(join(home, path, 'skills/tdd')), realpathSync(join(home, '.agents/skills/tdd')));
     assert.equal(readFileSync(join(home, path, 'skills/tdd/SKILL.md'), 'utf8'), 'canonical');
   }
@@ -1321,7 +1294,7 @@ test('Scrum Pi homes sync the Owner Helper catalog and sweep the unified denylis
   }
 });
 
-test('host catalogs expose portable packs read-only and imported skills gain five healthy links', async (t) => {
+test('host catalogs expose portable packs read-only and imported skills gain four healthy links', async (t) => {
   const { mkdirSync, readFileSync } = await import('node:fs');
   const { discoverHostEcosystems, importHostSkillOrPack, inspectSkillHub, detectProjectSkillPacks } = await import('../src/scrum/companion-tools.ts');
   const home = makeTempDir(); disposeDir(t, home);
@@ -1336,7 +1309,7 @@ test('host catalogs expose portable packs read-only and imported skills gain fiv
   assert.equal(readFileSync(join(home, '.zcode/skills/asc-iap/SKILL.md'), 'utf8'), '# Portable');
   const hub = inspectSkillHub({ userHome: home });
   assert.equal(hub.totalInstalled, 1); assert.equal(hub.localCustomCount, 1);
-  assert.equal(hub.installedSkills[0]?.harnesses.filter(h => h.healthy).length, 5);
+  assert.equal(hub.installedSkills[0]?.harnesses.filter(h => h.healthy).length, 4);
   assert.equal(hub.hostCatalog.find(e => e.id === 'zcode:asc-iap')?.status, 'linked');
 });
 

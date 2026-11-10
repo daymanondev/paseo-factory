@@ -13,11 +13,11 @@ import {
   laneCliInvocation,
   laneError,
   laneProfilesPath,
-  normalizeZcodeRuntimeModelId,
   lanesPath,
   listLaneProfiles,
   loadLanes,
   mergeLaneProfilesFiles,
+  migrateLegacyZcodeLane,
   parseLane,
   resetProjectLanes,
   resolvePeerThinkingLane,
@@ -25,7 +25,6 @@ import {
   saveLaneProfile,
   saveLanes,
   saveLanesBatch,
-  stripZcodeProviderPrefix,
 } from "../src/lanes.ts";
 import type { LaneCliRunner, LaneProfile, LaneProfilesFile, LaneThinkingCatalogEntry } from "../src/lanes.ts";
 import { resolveEyeLane } from "../src/fresh-eyes.ts";
@@ -161,15 +160,15 @@ test("a single-lane save never names the other lanes — an existing eye.json ke
 
   // A second single-lane write preserves the first named lane, still without
   // naming the rest; an explicit freshEyes set still wins (the ADR 0009 §3 law).
-  const second = saveLanes(stateDir, { watch: "pi/zai/glm-5.3" });
+  const second = saveLanes(stateDir, { watch: "pi/zcode/glm-5.3" });
   assert.ok(second.ok);
-  assert.deepEqual(JSON.parse(readFileSync(lanesPath(stateDir), "utf8")), { worker: "claude/opus-4-8", watch: "pi/zai/glm-5.3" });
+  assert.deepEqual(JSON.parse(readFileSync(lanesPath(stateDir), "utf8")), { worker: "claude/opus-4-8", watch: "pi/zcode/glm-5.3" });
   const stillEye = resolveEyeLane(stateDir);
   assert.ok(stillEye.ok && stillEye.lane === "eye.json");
-  const explicit = saveLanes(stateDir, { freshEyes: "pi/zai/glm-5.3" });
+  const explicit = saveLanes(stateDir, { freshEyes: "pi/zcode/glm-5.3" });
   assert.ok(explicit.ok);
   const explicitLane = resolveEyeLane(stateDir);
-  assert.ok(explicitLane.ok && explicitLane.lane === "pi/zai/glm-5.3", "an explicit freshEyes always wins — that behavior stays");
+  assert.ok(explicitLane.ok && explicitLane.lane === "pi/zcode/glm-5.3", "an explicit freshEyes always wins — that behavior stays");
 });
 
 test("saveLanes refuses an invalid lane and writes nothing", (t) => {
@@ -251,18 +250,18 @@ test("saveLanes(stateDir, patch, slug) writes only the Project file — machine 
 
   // A second project save keeps the first named project lane; a refused
   // value writes nothing anywhere.
-  const second = saveLanes(stateDir, { supervisor: "pi/zai/glm-5.3" }, "acme-api-abc123");
+  const second = saveLanes(stateDir, { supervisor: "pi/zcode/glm-5.3" }, "acme-api-abc123");
   assert.ok(second.ok);
   assert.deepEqual(
     JSON.parse(readFileSync(join(stateDir, "projects", "acme-api-abc123", "lanes.json"), "utf8")),
-    { lead: "claude/opus-4-8", supervisor: "pi/zai/glm-5.3" },
+    { lead: "claude/opus-4-8", supervisor: "pi/zcode/glm-5.3" },
   );
   const refused = saveLanes(stateDir, { lead: "auto" }, "acme-api-abc123");
   assert.ok(!refused.ok);
   assert.match(refused.reason, /lead/);
   assert.deepEqual(
     JSON.parse(readFileSync(join(stateDir, "projects", "acme-api-abc123", "lanes.json"), "utf8")),
-    { lead: "claude/opus-4-8", supervisor: "pi/zai/glm-5.3" },
+    { lead: "claude/opus-4-8", supervisor: "pi/zcode/glm-5.3" },
     "a refused project save leaves the project file untouched",
   );
 });
@@ -593,130 +592,43 @@ test("an opencode lane completes the Watch, the Retro, and the Fresh-eyes CLI pa
   assert.equal(eyeFake.calls[0]!.env?.CI, "1");
 });
 
-// ---- the zcode family (v0.0.94, ADR 0046 §2) — clean lanes, runtime ids -------------------
+// ---- ADR 0055: retire zcode-acp for pi/zcode/* via zcode-api ------------------------------
 
-test("zcode lanes parse provider/model[:effort] with no parser change — the clean user-facing form", () => {
-  assert.deepEqual(parseLane("zcode/GLM-5.3:high"), { provider: "zcode", model: "GLM-5.3", thinking: "high" });
-  assert.deepEqual(parseLane("zcode/GLM-5.3-Flash:medium"), { provider: "zcode", model: "GLM-5.3-Flash", thinking: "medium" });
-  assert.deepEqual(parseLane("zcode/GLM-5.3"), { provider: "zcode", model: "GLM-5.3" });
-  assert.equal(laneError("worker", "zcode/GLM-5.3:max"), undefined, "the zcode lane validates like every other family");
-});
+test("migrateLegacyZcodeLane rewrites retired zcode/* and legacy pi/zai/glm-* lanes onto pi/zcode/<lowercase-model>[:<thinking>]", (t) => {
+  assert.equal(migrateLegacyZcodeLane("zcode/GLM-5.3:high"), "pi/zcode/glm-5.3:high");
+  assert.equal(migrateLegacyZcodeLane("zcode/GLM-5.3-Flash:medium"), "pi/zcode/glm-5.3-flash:medium");
+  assert.equal(migrateLegacyZcodeLane("zcode/GLM-5.3"), "pi/zcode/glm-5.3");
+  assert.equal(migrateLegacyZcodeLane("zcode/builtin:zai-coding-plan\\GLM-5.3:high"), "pi/zcode/glm-5.3:high");
+  assert.equal(migrateLegacyZcodeLane("pi/zai/glm-5.3"), "pi/zcode/glm-5.3");
+  assert.equal(migrateLegacyZcodeLane("pi/zai/glm-5.3:max"), "pi/zcode/glm-5.3:max");
+  assert.equal(migrateLegacyZcodeLane("pi/zcode/glm-5.3:high"), "pi/zcode/glm-5.3:high");
+  assert.equal(migrateLegacyZcodeLane("claude/opus-4-8:high"), "claude/opus-4-8:high");
 
-test("normalizeZcodeRuntimeModelId prefixes bare GLM names with canonical registry casing and preserves explicit provider\\model verbatim", () => {
-  assert.equal(normalizeZcodeRuntimeModelId("GLM-5.3"), "builtin:zai-coding-plan\\GLM-5.3", "the spec's canonical example (ADR 0046 Gap 2)");
-  assert.equal(normalizeZcodeRuntimeModelId("GLM-5.3-Flash"), "builtin:zai-coding-plan\\GLM-5.3-Flash");
-  assert.equal(normalizeZcodeRuntimeModelId("glm-5.3"), "builtin:zai-coding-plan\\GLM-5.3", "a case-variant bare name canonicalizes — spec §2 maps both GLM-5.3 and glm-5.3 onto builtin:zai-coding-plan\\GLM-5.3, and the runtime's registry lookup (a case-sensitive Map keyed by the canonical spellings) would reject the lowercase id");
-  assert.equal(normalizeZcodeRuntimeModelId("glm-5.3-flash"), "builtin:zai-coding-plan\\GLM-5.3-Flash", "suffix casing canonicalizes too");
-  assert.equal(normalizeZcodeRuntimeModelId("glm-6-pro"), "builtin:zai-coding-plan\\glm-6-pro", "an unrecognized name passes through verbatim — the runtime's own ?? fallback; only the official table's lowercase keys map");
-  assert.equal(normalizeZcodeRuntimeModelId("builtin:zai-coding-plan\\GLM-5.3"), "builtin:zai-coding-plan\\GLM-5.3", "an explicit builtin runtime id passes through verbatim");
-  assert.equal(normalizeZcodeRuntimeModelId("custom:cliproxyapi\\GLM-5.3"), "custom:cliproxyapi\\GLM-5.3", "a custom provider prefix is preserved too — never rewritten");
-});
-
-test("stripZcodeProviderPrefix is the display-direction twin and round-trips with normalize", () => {
-  assert.equal(stripZcodeProviderPrefix("builtin:zai-coding-plan\\GLM-5.3"), "GLM-5.3");
-  assert.equal(stripZcodeProviderPrefix("custom:cliproxyapi\\GLM-5.3"), "GLM-5.3", "any provider prefix strips — the label shows the model alone");
-  assert.equal(stripZcodeProviderPrefix("GLM-5.3"), "GLM-5.3", "a bare name strips to itself");
-  for (const bare of ["GLM-5.3", "GLM-5.3-Flash"]) {
-    assert.equal(stripZcodeProviderPrefix(normalizeZcodeRuntimeModelId(bare)), bare, `normalize → strip round-trips ${bare}`);
-  }
-  assert.equal(stripZcodeProviderPrefix(normalizeZcodeRuntimeModelId("glm-5.3")), "GLM-5.3", "normalize → strip lands on the canonical spelling — the case variant canonicalizes on the way in, deliberately");
-  assert.equal(
-    normalizeZcodeRuntimeModelId(stripZcodeProviderPrefix("builtin:zai-coding-plan\\GLM-5.3")),
-    "builtin:zai-coding-plan\\GLM-5.3",
-    "strip → normalize round-trips a runtime id",
-  );
-});
-
-test("zcode/<model> maps to the installed zcode.cjs headless argv — JSON output, prompt on -p, one argv for every effort", () => {
-  assert.deepEqual(laneCliInvocation("zcode/GLM-5.3"), {
-    command: "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
-    args: ["--json", "-p"],
+  // Retired zcode/<model> has no headless tool-less CLI form anymore — it must migrate to pi/zcode/*.
+  assert.equal(laneCliInvocation("zcode/GLM-5.3"), undefined);
+  assert.deepEqual(laneCliInvocation("pi/zcode/glm-5.3:high"), {
+    command: "pi",
+    args: ["--print", "--no-session", "--no-tools", "--no-extensions", "--no-skills", "--no-context-files", "--model", "zcode/glm-5.3", "--thinking", "high"],
   });
-  // One argv for every effort suffix, deliberately: the installed CLI
-  // (0.17.1, verified against the binary) has no thinking flag — `--thinking`
-  // is an unknown option — so the headless pass runs at the model's default
-  // effort and the lane's effort rides the ACP path (`thinkingOptionId`)
-  // alone (owner decision on the spec §2 errata).
-  assert.deepEqual(laneCliInvocation("zcode/GLM-5.3:high")?.args, ["--json", "-p"]);
-  assert.deepEqual(laneCliInvocation("zcode/GLM-5.3-Flash:medium")?.args, ["--json", "-p"]);
-  // The absolute path is what keeps laneCliAvailable's `<command> --version`
-  // probe honest: a missing install fails to spawn → probe non-zero →
-  // unavailable, the intended fail-fast.
-  assert.equal(laneCliInvocation("zcode/GLM-5.3")?.command.startsWith("/Applications/"), true);
-});
 
-test("runLaneCli on a zcode lane rides -p argv, NODE_OPTIONS IPv4, and the clean-room headless ZCODE_* env", async (t) => {
+  // Legacy lanes in lanes.json and profiles.json automatically migrate on load and save.
   const dir = makeTempDir();
   disposeDir(t, dir);
   const stateDir = join(dir, "factory");
-  const fake = fakeLaneRunner(() => ({ code: 0, stdout: "answer" }));
+  writeRawLanes(stateDir, `${JSON.stringify({ worker: "zcode/GLM-5.3:high", watch: "pi/zai/glm-5.3-flash:medium" }, null, 2)}\n`);
+  const loaded = loadLanes(stateDir);
+  assert.ok(loaded.ok);
+  assert.equal(loaded.lanes.worker, "pi/zcode/glm-5.3:high");
+  assert.equal(loaded.lanes.watch, "pi/zcode/glm-5.3-flash:medium");
 
-  const result = await runLaneCli({
-    lane: "zcode/GLM-5.3:high",
-    stdin: "the prompt",
-    timeoutMs: 5_000,
-    runner: fake.runner,
-    stateDir,
-    userHome: join(dir, "user-home"),
+  const saved = saveLanes(stateDir, { lead: "zcode/GLM-5.3:max" });
+  assert.ok(saved.ok);
+  assert.equal(saved.lanes.lead, "pi/zcode/glm-5.3:max");
+  assert.deepEqual(JSON.parse(readFileSync(lanesPath(stateDir), "utf8")), {
+    worker: "pi/zcode/glm-5.3:high",
+    watch: "pi/zcode/glm-5.3-flash:medium",
+    lead: "pi/zcode/glm-5.3:max",
   });
-  assert.ok(result.ok);
-  assert.equal(result.stdout, "answer");
-  const call = fake.calls[0]!;
-  assert.equal(call.command, "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs");
-  assert.deepEqual(call.args, ["--json", "-p", "the prompt"], "the prompt rides -p argv — the CLI's documented <text> form");
-  assert.equal(call.stdin, "the prompt", "the runner contract still delivers the prompt on stdin");
-  const headless = join(stateDir, "zcode-home", "headless");
-  assert.equal(call.env?.ZCODE_STORAGE_DIR, headless, "the clean-room headless seat (ticket 01's provisioner)");
-  assert.equal(call.env?.ZCODE_SESSION_DB_PATH, join(headless, "db", "db.sqlite"), "per-seat SQLite isolation");
-  assert.equal(call.env?.ZCODE_DYNAMIC_WORKFLOW_MODE, "disabled");
-  assert.equal(call.env?.ZCODE_ACP_QUOTA_AUTO_RESUME, "0");
-  assert.equal(call.env?.ZCODE_ACP_QUOTA_BOOT_NOTICE, "0");
-  assert.equal(call.env?.ZCODE_ACP_MODE, "guarded");
-  assert.equal(call.env?.ZCODE_DISALLOWED_TOOLS, undefined, "the write-tool lock is a supervisor/lead concern — headless carries none");
-  assert.equal(call.env?.HOME, undefined, "the real HOME is never replaced (ADR 0046 Gap 4 — credential decryption)");
-  assert.equal(call.env?.ZCODE_HOME, undefined, "ZCODE_HOME is never replaced either");
-  assert.match(call.env?.NODE_OPTIONS ?? "", /--no-network-family-autoselection/, "IPv4 prioritization rides NODE_OPTIONS");
-  assert.match(call.env?.NODE_OPTIONS ?? "", /--dns-result-order=ipv4first/);
-  assert.equal(fake.calls.length, 1);
-
-  // An inherited NODE_OPTIONS is appended to, never clobbered — and a second
-  // pass finds the same clean room in the same state (idempotent provision).
-  const inherited = process.env.NODE_OPTIONS;
-  process.env.NODE_OPTIONS = "--max-old-space-size=4096";
-  try {
-    const merged = await runLaneCli({
-      lane: "zcode/GLM-5.3",
-      stdin: "p",
-      timeoutMs: 5_000,
-      runner: fake.runner,
-      stateDir,
-      userHome: join(dir, "user-home"),
-    });
-    assert.ok(merged.ok);
-    assert.equal(fake.calls[1]!.env?.NODE_OPTIONS, "--max-old-space-size=4096 --no-network-family-autoselection --dns-result-order=ipv4first");
-    assert.equal(fake.calls[1]!.env?.ZCODE_STORAGE_DIR, headless, "re-provision lands on the same headless home");
-  } finally {
-    if (inherited === undefined) delete process.env.NODE_OPTIONS;
-    else process.env.NODE_OPTIONS = inherited;
-  }
-
-  // A zcode caller without a stateDir inherits the parent env, exactly like pi.
-  const noState = fakeLaneRunner(() => ({ code: 0, stdout: "a" }));
-  const bare = await runLaneCli({ lane: "zcode/GLM-5.3", stdin: "p", timeoutMs: 5_000, runner: noState.runner });
-  assert.ok(bare.ok);
-  assert.equal(noState.calls[0]!.env, undefined, "no stateDir → the parent env stands, exactly like a pi caller without one");
-
-  // Non-zcode lanes never carry the ZCODE_* env or the NODE_OPTIONS override.
-  const other = fakeLaneRunner(() => ({ code: 0, stdout: "a" }));
-  const copilot = await runLaneCli({ lane: "copilot/gpt-5.4", stdin: "p", timeoutMs: 5_000, runner: other.runner, stateDir });
-  assert.ok(copilot.ok);
-  assert.equal(other.calls[0]!.env?.ZCODE_STORAGE_DIR, undefined);
-  assert.equal(other.calls[0]!.env?.NODE_OPTIONS, undefined);
-
-  // The unknown-lane refusal now names zcode among the usable forms.
-  const unknown = await runLaneCli({ lane: "codex/gpt-6", stdin: "p", timeoutMs: 5_000 });
-  assert.ok(!unknown.ok);
-  assert.match(unknown.error, /zcode\/<model>/);
 });
 
 // ---- the CLI-side mirror (ADR 0004: CLIs import no src/ code) ----------------------------
@@ -797,8 +709,8 @@ test("the plugin/bin mirror matches src/lanes.ts: names, default, validation, lo
   const projFromMjs = await loadLanesMjs(projMjs, "acme-api-abc123");
   assert.ok(projFromSrc.ok && projFromMjs.ok);
   assert.deepEqual(projFromMjs.lanes, projFromSrc.lanes, "both loaders merge the project file the same way");
-  const projSavedSrc = saveLanes(projSrc, { supervisor: "pi/zai/glm-5.3" }, "acme-api-abc123");
-  const projSavedMjs = await saveLanesMjs(projMjs, { supervisor: "pi/zai/glm-5.3" }, "acme-api-abc123");
+  const projSavedSrc = saveLanes(projSrc, { supervisor: "pi/zcode/glm-5.3" }, "acme-api-abc123");
+  const projSavedMjs = await saveLanesMjs(projMjs, { supervisor: "pi/zcode/glm-5.3" }, "acme-api-abc123");
   assert.ok(projSavedSrc.ok && projSavedMjs.ok);
   assert.deepEqual(
     JSON.parse(readFileSync(join(projMjs, "projects", "acme-api-abc123", "lanes.json"), "utf8")),
@@ -818,7 +730,7 @@ test("factory lanes: get prints the defaults, set writes one lane, invalid set e
   const getDefaults = await runCli(["lanes", "get"], { PASEO_HOME: home });
   assert.equal(getDefaults.status, 0, getDefaults.stderr);
   for (const name of LANE_NAMES) {
-    assert.match(getDefaults.stdout, new RegExp(`${name}[= ]pi/zai/glm-5.3`), `get shows ${name} at the default`);
+    assert.match(getDefaults.stdout, new RegExp(`${name}[= ]pi/zcode/glm-5.3`), `get shows ${name} at the default`);
   }
 
   const set = await runCli(["lanes", "set", "watch", "copilot/gpt-5.4"], { PASEO_HOME: home });
@@ -859,11 +771,11 @@ test("factory lanes --project: get reads and set writes the Project's override f
   assert.deepEqual(JSON.parse(readFileSync(lanesPath(stateDir), "utf8")), { lead: "claude/opus-4-8" });
 
   // A project-scoped set lands in the project's override file only.
-  const setProject = await runCli(["lanes", "set", "lead", "pi/zai/glm-5.3", "--project", repo], { PASEO_HOME: home });
+  const setProject = await runCli(["lanes", "set", "lead", "pi/zcode/glm-5.3", "--project", repo], { PASEO_HOME: home });
   assert.equal(setProject.status, 0, setProject.stderr);
   assert.deepEqual(
     JSON.parse(readFileSync(projectLanes, "utf8")),
-    { lead: "pi/zai/glm-5.3" },
+    { lead: "pi/zcode/glm-5.3" },
     "the project file persists exactly the lane it names",
   );
   assert.deepEqual(
@@ -875,7 +787,7 @@ test("factory lanes --project: get reads and set writes the Project's override f
   // get --project shows the merged table (project override wins).
   const getProject = await runCli(["lanes", "get", "lead", "--project", repo], { PASEO_HOME: home });
   assert.equal(getProject.status, 0, getProject.stderr);
-  assert.match(getProject.stdout, /lead=pi\/zai\/glm-5\.3/);
+  assert.match(getProject.stdout, /lead=pi\/zcode\/glm-5\.3/);
   const getMachine = await runCli(["lanes", "get", "lead"], { PASEO_HOME: home });
   assert.equal(getMachine.status, 0, getMachine.stderr);
   assert.match(getMachine.stdout, /lead=claude\/opus-4-8/);
@@ -890,7 +802,7 @@ test("factory lanes --project: get reads and set writes the Project's override f
   // An invalid lane value under --project refuses and writes nothing.
   const bad = await runCli(["lanes", "set", "lead", "auto", "--project", repo], { PASEO_HOME: home });
   assert.equal(bad.status, 2);
-  assert.deepEqual(JSON.parse(readFileSync(projectLanes, "utf8")), { lead: "pi/zai/glm-5.3" });
+  assert.deepEqual(JSON.parse(readFileSync(projectLanes, "utf8")), { lead: "pi/zcode/glm-5.3" });
 });
 
 test("run's provider precedence: explicit --provider overrides lanes.worker; omitted falls back to it; a broken lanes.json names itself", async (t) => {
@@ -949,7 +861,7 @@ test("Lane profiles start empty (zero built-ins) and run the save→apply→batc
   assert.deepEqual(listLaneProfiles(stateDir), []);
 
   // Save derives the id slug from the name; the file appears on first save.
-  const cheap = saveLaneProfile(stateDir, { name: "Cheap Nightly", lanes: profileLanes({ worker: "pi/zai/glm-5.3" }) });
+  const cheap = saveLaneProfile(stateDir, { name: "Cheap Nightly", lanes: profileLanes({ worker: "pi/zcode/glm-5.3" }) });
   assert.equal(cheap.id, "cheap-nightly");
   const zed = saveLaneProfile(stateDir, { name: "Zed Setup", lanes: profileLanes(), id: "zed" });
   const alpha = saveLaneProfile(stateDir, { name: "Alpha Setup", lanes: profileLanes(), id: "alpha-2" });
@@ -973,7 +885,7 @@ test("Lane profiles start empty (zero built-ins) and run the save→apply→batc
   assert.equal(appliedProject.path, join(stateDir, "projects", "acme-api-abc123", "lanes.json"));
   assert.deepEqual(
     JSON.parse(readFileSync(appliedProject.path, "utf8")),
-    profileLanes({ worker: "pi/zai/glm-5.3" }),
+    profileLanes({ worker: "pi/zcode/glm-5.3" }),
     "the project file holds exactly the profile's six lanes — no pointer back to profiles.json",
   );
   assert.equal(existsSync(lanesPath(stateDir)), false, "a project apply never touches the machine file");
@@ -983,7 +895,7 @@ test("Lane profiles start empty (zero built-ins) and run the save→apply→batc
   // Copy-on-apply, machine-wide: "All projects" writes the machine file.
   const appliedGlobal = applyLaneProfile(stateDir, "cheap-nightly");
   assert.equal(appliedGlobal.path, lanesPath(stateDir));
-  assert.deepEqual(JSON.parse(readFileSync(lanesPath(stateDir), "utf8")), profileLanes({ worker: "pi/zai/glm-5.3" }));
+  assert.deepEqual(JSON.parse(readFileSync(lanesPath(stateDir), "utf8")), profileLanes({ worker: "pi/zcode/glm-5.3" }));
   profilesFile = JSON.parse(readFileSync(laneProfilesPath(stateDir), "utf8")) as LaneProfilesFile;
   assert.deepEqual(profilesFile.activeProfileByScope, { "acme-api-abc123": "cheap-nightly", global: "cheap-nightly" });
 
@@ -999,7 +911,7 @@ test("Lane profiles start empty (zero built-ins) and run the save→apply→batc
   const batch = saveLanesBatch(stateDir, { watch: "claude/claude-opus-4-6:high", retro: "claude/claude-opus-4-6:high" }, "acme-api-abc123");
   assert.deepEqual(
     JSON.parse(readFileSync(batch.path, "utf8")),
-    profileLanes({ worker: "pi/zai/glm-5.3", watch: "claude/claude-opus-4-6:high", retro: "claude/claude-opus-4-6:high" }),
+    profileLanes({ worker: "pi/zcode/glm-5.3", watch: "claude/claude-opus-4-6:high", retro: "claude/claude-opus-4-6:high" }),
     "the batch lands whole in one write",
   );
   assert.equal(batch.lanes.watch, "claude/claude-opus-4-6:high");
@@ -1009,8 +921,8 @@ test("Lane profiles start empty (zero built-ins) and run the save→apply→batc
   const reset = resetProjectLanes(stateDir, "acme-api-abc123");
   assert.equal(reset.removed, true);
   assert.equal(existsSync(projectLanesPath), false);
-  assert.equal(reset.lanes.watch, "pi/zai/glm-5.3", "the reply is the machine table the Project inherits again");
-  assert.equal(reset.lanes.worker, "pi/zai/glm-5.3");
+  assert.equal(reset.lanes.watch, "pi/zcode/glm-5.3", "the reply is the machine table the Project inherits again");
+  assert.equal(reset.lanes.worker, "pi/zcode/glm-5.3");
   profilesFile = JSON.parse(readFileSync(laneProfilesPath(stateDir), "utf8")) as LaneProfilesFile;
   assert.deepEqual(profilesFile.activeProfileByScope, { global: "cheap-nightly" }, "the project's scope entry is cleared, the machine's stands");
   const resetAgain = resetProjectLanes(stateDir, "acme-api-abc123");
@@ -1135,9 +1047,9 @@ function catalogOf(...entries: LaneThinkingCatalogEntry[]): LaneThinkingCatalogE
 const FULL_TIERS = ["low", "medium", "high", "xhigh", "max"] as const;
 
 test("resolvePeerThinkingLane keeps the configured worker lane untouched when no override is requested", () => {
-  const catalog = catalogOf({ provider: "zcode", models: [{ id: "builtin:zai-coding-plan\\GLM-5.3", thinkingOptions: FULL_TIERS.map((id) => ({ id })) }] });
-  assert.equal(resolvePeerThinkingLane("zcode/GLM-5.3:high", undefined, catalog), "zcode/GLM-5.3:high");
-  assert.equal(resolvePeerThinkingLane("zcode/GLM-5.3", undefined, catalog), "zcode/GLM-5.3");
+  const catalog = catalogOf({ provider: "pi", models: [{ id: "zcode/glm-5.3", thinkingOptions: FULL_TIERS.map((id) => ({ id })) }] });
+  assert.equal(resolvePeerThinkingLane("pi/zcode/glm-5.3:high", undefined, catalog), "pi/zcode/glm-5.3:high");
+  assert.equal(resolvePeerThinkingLane("pi/zcode/glm-5.3", undefined, catalog), "pi/zcode/glm-5.3");
   assert.equal(resolvePeerThinkingLane("antigravity/gemini-4-argon-high", undefined, []), "antigravity/gemini-4-argon-high");
 });
 
@@ -1147,39 +1059,39 @@ test("a fixed-effort model (thinkingOptions: []) silently ignores the override �
   assert.equal(resolvePeerThinkingLane("antigravity/gemini-4-argon-high", "max", catalog), "antigravity/gemini-4-argon-high");
   // An unknown model — no catalog entry at all, or no catalog reachable — preserves the lane the same way.
   assert.equal(resolvePeerThinkingLane("custom/nothing-known", "high", catalog), "custom/nothing-known");
-  assert.equal(resolvePeerThinkingLane("zcode/GLM-5.3:high", "max", []), "zcode/GLM-5.3:high");
-  assert.equal(resolvePeerThinkingLane("zcode/GLM-5.3:high", "max", undefined), "zcode/GLM-5.3:high");
+  assert.equal(resolvePeerThinkingLane("pi/zcode/glm-5.3:high", "max", []), "pi/zcode/glm-5.3:high");
+  assert.equal(resolvePeerThinkingLane("pi/zcode/glm-5.3:high", "max", undefined), "pi/zcode/glm-5.3:high");
 });
 
 test("a full-catalog model applies the requested tier as the :thinking suffix", () => {
   const full = catalogOf(
     { provider: "claude", models: [{ id: "opus-4-8", thinkingOptions: FULL_TIERS.map((id) => ({ id })) }] },
-    { provider: "zcode", models: [{ id: "builtin:zai-coding-plan\\GLM-5.3", thinkingOptions: FULL_TIERS.map((id) => ({ id })) }] },
+    { provider: "pi", models: [{ id: "zcode/glm-5.3", thinkingOptions: FULL_TIERS.map((id) => ({ id })) }] },
   );
   assert.equal(resolvePeerThinkingLane("claude/opus-4-8", "xhigh", full), "claude/opus-4-8:xhigh");
-  assert.equal(resolvePeerThinkingLane("zcode/GLM-5.3:high", "max", full), "zcode/GLM-5.3:max");
-  assert.equal(resolvePeerThinkingLane("zcode/builtin:zai-coding-plan\\GLM-5.3", "low", full), "zcode/builtin:zai-coding-plan\\GLM-5.3:low");
+  assert.equal(resolvePeerThinkingLane("pi/zcode/glm-5.3:high", "max", full), "pi/zcode/glm-5.3:max");
+  assert.equal(resolvePeerThinkingLane("pi/zcode/glm-5.3", "low", full), "pi/zcode/glm-5.3:low");
 });
 
 test("a partial catalog maps an unsupported medium to the configured suffix, else high, else the last option — never bare", () => {
-  const partial = catalogOf({ provider: "zcode", models: [{ id: "builtin:zai-coding-plan\\GLM-5.3", thinkingOptions: [{ id: "low" }, { id: "high" }, { id: "max" }] }] });
+  const partial = catalogOf({ provider: "pi", models: [{ id: "zcode/glm-5.3", thinkingOptions: [{ id: "low" }, { id: "high" }, { id: "max" }] }] });
   // The Owner's configured suffix on the worker lane wins when the catalog carries it.
-  assert.equal(resolvePeerThinkingLane("zcode/GLM-5.3:high", "medium", partial), "zcode/GLM-5.3:high");
+  assert.equal(resolvePeerThinkingLane("pi/zcode/glm-5.3:high", "medium", partial), "pi/zcode/glm-5.3:high");
   // A bare configured lane has no suffix to honor — high is medium's default landing tier.
-  assert.equal(resolvePeerThinkingLane("zcode/GLM-5.3", "medium", partial), "zcode/GLM-5.3:high");
+  assert.equal(resolvePeerThinkingLane("pi/zcode/glm-5.3", "medium", partial), "pi/zcode/glm-5.3:high");
   // The configured suffix is the FIRST fallback — when the catalog carries it,
   // medium lands there even below the requested rung (the Owner's own word).
-  const lowCatalog = catalogOf({ provider: "zcode", models: [{ id: "builtin:zai-coding-plan\\GLM-5.3", thinkingOptions: [{ id: "low" }, { id: "max" }] }] });
-  assert.equal(resolvePeerThinkingLane("zcode/GLM-5.3:low", "medium", lowCatalog), "zcode/GLM-5.3:low");
+  const lowCatalog = catalogOf({ provider: "pi", models: [{ id: "zcode/glm-5.3", thinkingOptions: [{ id: "low" }, { id: "max" }] }] });
+  assert.equal(resolvePeerThinkingLane("pi/zcode/glm-5.3:low", "medium", lowCatalog), "pi/zcode/glm-5.3:low");
   // No high and no valid configured suffix — the last advertised option stands in, still suffixed.
-  assert.equal(resolvePeerThinkingLane("zcode/GLM-5.3:medium", "medium", lowCatalog), "zcode/GLM-5.3:max");
+  assert.equal(resolvePeerThinkingLane("pi/zcode/glm-5.3:medium", "medium", lowCatalog), "pi/zcode/glm-5.3:max");
 });
 
 test("a partial catalog maps xhigh to max, else high, else the last option — never bare", () => {
-  const partial = catalogOf({ provider: "zcode", models: [{ id: "builtin:zai-coding-plan\\GLM-5.3", thinkingOptions: [{ id: "low" }, { id: "high" }, { id: "max" }] }] });
-  assert.equal(resolvePeerThinkingLane("zcode/GLM-5.3", "xhigh", partial), "zcode/GLM-5.3:max");
-  const noMax = catalogOf({ provider: "zcode", models: [{ id: "builtin:zai-coding-plan\\GLM-5.3", thinkingOptions: [{ id: "low" }, { id: "high" }] }] });
-  assert.equal(resolvePeerThinkingLane("zcode/GLM-5.3", "xhigh", noMax), "zcode/GLM-5.3:high");
-  const onlyLowMedium = catalogOf({ provider: "zcode", models: [{ id: "builtin:zai-coding-plan\\GLM-5.3", thinkingOptions: [{ id: "low" }, { id: "medium" }] }] });
-  assert.equal(resolvePeerThinkingLane("zcode/GLM-5.3", "xhigh", onlyLowMedium), "zcode/GLM-5.3:medium");
+  const partial = catalogOf({ provider: "pi", models: [{ id: "zcode/glm-5.3", thinkingOptions: [{ id: "low" }, { id: "high" }, { id: "max" }] }] });
+  assert.equal(resolvePeerThinkingLane("pi/zcode/glm-5.3", "xhigh", partial), "pi/zcode/glm-5.3:max");
+  const noMax = catalogOf({ provider: "pi", models: [{ id: "zcode/glm-5.3", thinkingOptions: [{ id: "low" }, { id: "high" }] }] });
+  assert.equal(resolvePeerThinkingLane("pi/zcode/glm-5.3", "xhigh", noMax), "pi/zcode/glm-5.3:high");
+  const onlyLowMedium = catalogOf({ provider: "pi", models: [{ id: "zcode/glm-5.3", thinkingOptions: [{ id: "low" }, { id: "medium" }] }] });
+  assert.equal(resolvePeerThinkingLane("pi/zcode/glm-5.3", "xhigh", onlyLowMedium), "pi/zcode/glm-5.3:medium");
 });

@@ -257,7 +257,7 @@ test("snapshot: versioned view folding ledger + lanes + daemon agents + provider
   assert.ok(snap.ok, snap.ok ? "" : snap.error);
   const view = snap.view;
   assert.equal(view.version, 3);
-  assert.equal(view.lanes.worker, "pi/zai/glm-5.3", "the lanes table rides the snapshot");
+  assert.equal(view.lanes.worker, "pi/zcode/glm-5.3", "the lanes table rides the snapshot");
   assert.equal(view.kpis.readyToAccept, 1, "one green unaccepted task");
   assert.equal(view.kpis.accepted, 0);
   assert.equal(view.kpis.totalCostUsd, 0.04, "the metered dollars sum");
@@ -595,10 +595,10 @@ test("lanes.set: writes lanes.json, syncs a live supervisor's model and thinking
   assert.deepEqual(modelSyncs, [{ agentId: "agent-sup-1", model: "opus-4-8" }], "the live supervisor's modelId (stripped of provider prefix) was synced");
   assert.deepEqual(thinkingSyncs, [], "no thinking suffix means no thinking sync call");
 
-  const withThinking = await handlers.lanesSet({ lane: "supervisor", value: "pi/zai/glm-5.3:max" });
+  const withThinking = await handlers.lanesSet({ lane: "supervisor", value: "pi/zcode/glm-5.3:max" });
   assert.ok(withThinking.ok, withThinking.ok ? "" : withThinking.error);
-  assert.equal(withThinking.lanes.supervisor, "pi/zai/glm-5.3:max");
-  assert.deepEqual(modelSyncs[1], { agentId: "agent-sup-1", model: "zai/glm-5.3" });
+  assert.equal(withThinking.lanes.supervisor, "pi/zcode/glm-5.3:max");
+  assert.deepEqual(modelSyncs[1], { agentId: "agent-sup-1", model: "zcode/glm-5.3" });
   assert.deepEqual(thinkingSyncs, [{ agentId: "agent-sup-1", thinkingOptionId: "max" }], "a :thinking suffix live-syncs the thinking option too");
 
   // No live supervisor → the sync is skipped, named, never a failure.
@@ -608,7 +608,7 @@ test("lanes.set: writes lanes.json, syncs a live supervisor's model and thinking
   assert.equal(modelSyncs.length, 2);
   assert.deepEqual(
     JSON.parse(readFileSync(lanesPath(stateDir), "utf8")),
-    { supervisor: "pi/zai/glm-5.3:max", worker: "copilot/gpt-5.4" },
+    { supervisor: "pi/zcode/glm-5.3:max", worker: "copilot/gpt-5.4" },
     "the second single-lane save keeps the first named lane and adds nothing else",
   );
 
@@ -616,7 +616,7 @@ test("lanes.set: writes lanes.json, syncs a live supervisor's model and thinking
   assert.ok(!bad.ok);
   assert.equal(bad.code, "invalid-lane");
   const unchanged = loadLanes(stateDir);
-  assert.ok(unchanged.ok && unchanged.lanes.watch === "pi/zai/glm-5.3", "a refused set leaves the file untouched");
+  assert.ok(unchanged.ok && unchanged.lanes.watch === "pi/zcode/glm-5.3", "a refused set leaves the file untouched");
   assert.deepEqual(Object.keys(JSON.parse(readFileSync(lanesPath(stateDir), "utf8"))).sort(), ["supervisor", "worker"]);
 });
 
@@ -818,11 +818,11 @@ test("lanes.set: a project-scoped seat save follows the Live-Seat Transition Law
 
   // Same provider family (pi → pi): the live Lead's model updates in place —
   // no stop, no archive, the session and its conversation survive.
-  const inPlace = await handlers.lanesSet({ lane: "lead", value: "pi/zai/glm-5.3:max", projectRoot: project.root });
+  const inPlace = await handlers.lanesSet({ lane: "lead", value: "pi/zcode/glm-5.3:max", projectRoot: project.root });
   assert.ok(inPlace.ok, inPlace.ok ? "" : inPlace.error);
-  assert.equal(inPlace.lanes.lead, "pi/zai/glm-5.3:max");
+  assert.equal(inPlace.lanes.lead, "pi/zcode/glm-5.3:max");
   assert.match(inPlace.modelSync, /applied — agent agent-le.*in place/);
-  assert.deepEqual(modelSyncs, [{ agentId: "agent-lead-2", model: "zai/glm-5.3" }], "the live Lead's modelId (provider prefix stripped) was synced");
+  assert.deepEqual(modelSyncs, [{ agentId: "agent-lead-2", model: "zcode/glm-5.3" }], "the live Lead's modelId (provider prefix stripped) was synced");
   assert.deepEqual(thinkingSyncs, [{ agentId: "agent-lead-2", thinkingOptionId: "max" }]);
   assert.deepEqual(stopped, [], "a same-family change never cancels the live session");
   assert.deepEqual(fake.archived, [], "a same-family change never archives the live session");
@@ -831,7 +831,7 @@ test("lanes.set: a project-scoped seat save follows the Live-Seat Transition Law
   // was never seeded, so a project-scoped save must not materialize it.
   assert.equal(existsSync(lanesPath(stateDir)), false, "a project-scoped save never materializes machine lanes");
   const override = JSON.parse(readFileSync(join(stateDir, "projects", project.slug, "lanes.json"), "utf8")) as Record<string, unknown>;
-  assert.deepEqual(override, { lead: "pi/zai/glm-5.3:max" });
+  assert.deepEqual(override, { lead: "pi/zcode/glm-5.3:max" });
 
   // Cross provider family (pi → claude): the live Lead retires through the
   // leadRotate door — cancel + archive, the registration binding clears, and
@@ -3957,7 +3957,7 @@ test("v0.0.24 (ADR 0015 §5): projectReset wipes a project's ledger events, task
   assert.equal(existsSync(projectALanesFile), true, "project lanes.json must be preserved across reset");
   const preservedLanes = loadLanes(stateDir, projectA.slug);
   assert.ok(preservedLanes.ok);
-  assert.equal(preservedLanes.lanes.supervisor, "pi/zai/glm-5.3");
+  assert.equal(preservedLanes.lanes.supervisor, "pi/zcode/glm-5.3");
 
   // When keepSeats !== true, project.json is deleted on disk while lanes.json remains intact.
   assert.equal(existsSync(join(projectADir, "project.json")), false, "project.json is deleted when keepSeats !== true");
@@ -5388,8 +5388,8 @@ test("Seam 2: saving lanes, batching, or applying a profile on Project A reconci
   assert.equal(snapA.view.profiles.length, 1);
   assert.equal(snapA.view.profiles[0]?.name, "A Setup");
   assert.equal(snapA.view.hasProjectLaneOverride, true, "A's own lanes.json names lanes");
-  assert.equal(snapA.view.machineLanes.supervisor, "pi/zai/glm-5.3", "the machine-only table rides the scoped view — the reset gate's next table (Implementation Decision 4)");
-  assert.equal(snapA.view.machineLanes.lead, "pi/zai/glm-5.3");
+  assert.equal(snapA.view.machineLanes.supervisor, "pi/zcode/glm-5.3", "the machine-only table rides the scoped view — the reset gate's next table (Implementation Decision 4)");
+  assert.equal(snapA.view.machineLanes.lead, "pi/zcode/glm-5.3");
   assert.equal(snapA.view.lanes.supervisor, "claude/claude-opus-4-6:high", "the scoped effective table still carries A's overrides beside the machine half");
   assert.equal(snapA.view.activeProfileId, "a-setup", "a profile whose 6 lanes match the table is the active one");
   assert.equal(snapA.view.activeProfileModified, false, "the table still matches the saved profile");
@@ -5432,12 +5432,12 @@ test("Seam 2: saving lanes, batching, or applying a profile on Project A reconci
   const reset = await handlers.lanesReset({ projectRoot: projectB.root });
   assert.ok(reset.ok, reset.ok ? "" : reset.error);
   assert.equal(reset.removed, true);
-  assert.equal(reset.lanes.worker, "pi/zai/glm-5.3", "B inherits the machine table again");
+  assert.equal(reset.lanes.worker, "pi/zcode/glm-5.3", "B inherits the machine table again");
   assert.equal(existsSync(join(stateDir, "projects", projectB.slug, "lanes.json")), false);
   const afterResetB = readHomeConfig(home);
   assert.equal(
     afterResetB.providers[FACTORY_ROLE_PROVIDERS.supervisor]?.models?.[0]?.id,
-    "zai/glm-5.3",
+    "zcode/glm-5.3",
     "resetting B reconciles <paseoHome>/config.json to B's inherited machine lanes while A's lanes.json stays intact",
   );
   const snapBReset = await handlers.snapshot({ projectRoot: projectB.root });
@@ -5514,14 +5514,14 @@ test("Seam 2: profilesApply and lanesReset follow the Live-Seat Transition Law �
   // Reset to the machine default: the (still live, claude-family) Supervisor's
   // lane falls back to the machine pi lane — a family change, so the seat
   // rotates for the next turn/dispatch.
-  writeLanes(stateDir, { supervisor: "pi/zai/glm-5.3" });
+  writeLanes(stateDir, { supervisor: "pi/zcode/glm-5.3" });
   const reset = await handlers.lanesReset({ projectRoot: projectA.root });
   assert.ok(reset.ok, reset.ok ? "" : reset.error);
   assert.equal(reset.removed, true);
   assert.deepEqual(stopped, ["a-lead", "a-sup"], "the reset retires the live Supervisor whose family changed");
   assert.deepEqual(fake.archived, ["a-lead", "a-sup"]);
   assert.equal(readProjectRegistration(stateDir, projectA.slug)?.supervisor, undefined, "the Supervisor binding clears so the next turn spawns fresh");
-  assert.match(reset.modelSync, /retired — agent a-sup rotated onto pi\/zai\/glm-5\.3's provider family/);
+  assert.match(reset.modelSync, /retired — agent a-sup rotated onto pi\/zcode\/glm-5\.3's provider family/);
   assert.match(reset.modelSync, /skipped — no live lead agent for project/, "the already-rotated Lead seat has nothing left to transition");
 });
 

@@ -35,13 +35,6 @@
  *                    subtracts `cacheRead + cacheWrite`), with the
  *                    `session.shutdown` `accountingSnapshot` as the
  *                    authoritative final totals when present.
- *   - `zcode`       `<stateDir>/zcode-home/.../db/db.sqlite` (the per-seat and
- *                    per-Task homes the provisioner materializes) with the
- *                    operator's `~/.zcode/cli/db/db.sqlite` as fallback —
- *                    assistant `message` rows' per-turn `metadata.usage`
- *                    (`inputTokens` already contains the cache sums), the
- *                    Paseo-recorded acpSid resolved to the native `sess_...`
- *                    id through `~/.zcode/v2/acp-lazy-sessions.json`.
  *
  * Every reader is stat-gated and O(delta): a `(mtimeMs, size)` cursor short-
  * circuits unchanged files with zero disk reads, and JSONL readers seek to
@@ -62,10 +55,10 @@
  * never crashes the plugin. Every reader is synchronous on purpose: the
  * 128k/160k context sensors are sync contracts.
  */
-import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readdirSync, readSync, statSync } from "node:fs";
 import type { Dirent } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 import { createRequire } from "node:module";
 
 /**
@@ -76,7 +69,7 @@ import { createRequire } from "node:module";
  */
 export interface UsageAgentSource {
   id: string;
-  /** The harness id: `pi`, `codex`, `opencode`, `antigravity`, `claude`, `copilot`, `zcode`. */
+  /** The harness id: `pi`, `codex`, `opencode`, `antigravity`, `claude`, `copilot`. */
   provider: string;
   cwd?: string;
   labels?: Record<string, string>;
@@ -204,7 +197,6 @@ const HARNESS_PROVIDERS: Readonly<Record<string, string>> = {
   antigravity: "antigravity",
   claude: "anthropic",
   copilot: "copilot",
-  zcode: "zcode",
 };
 
 /**
@@ -946,217 +938,6 @@ function extractCopilot(agent: UsageAgentSource, sessionId: string, userHome: st
   return { mtimeMs: gate.stat.mtimeMs, size: gate.stat.size, byteOffset: delta.offset, lastStepIdx: 0, snapshot: usage };
 }
 
-// ---- the zcode reader -----------------------------------------------------------------------
-
-/**
- * Resolves the native zcode session id (`sess_...`) behind a Paseo-recorded
- * id: `zcode-acp-server` mints a synthetic acpSid UUID on `session/new` and
- * persists `acpSid -> { cwd, zcodeSid }` in
- * `<userHome>/.zcode/v2/acp-lazy-sessions.json` (ADR 0046, Gap 1), while
- * ZCode's SQLite keys `message` rows by the native id. A bare `sess_...` id
- * IS native — the file is never read; an absent or damaged file answers
- * `undefined`, never a throw (the lazy JSON-read law).
- */
-export function resolveZcodeNativeSessionId(sessionId: string, userHome: string): string | undefined {
-  if (sessionId.startsWith("sess_")) return sessionId;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(readFileSync(join(userHome, ".zcode", "v2", "acp-lazy-sessions.json"), "utf8"));
-  } catch {
-    return undefined;
-  }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
-  const entry = (parsed as Record<string, unknown>)[sessionId];
-  if (typeof entry !== "object" || entry === null) return undefined;
-  return asString((entry as { zcodeSid?: unknown }).zcodeSid);
-}
-
-/** Every `db/db.sqlite` under the factory's zcode homes — the per-seat and per-Task stores `provisionZcodeHome` materializes. */
-function zcodeHomeDbPaths(stateDir: string): string[] {
-  const found: string[] = [];
-  const walk = (dir: string): void => {
-    let entries: Dirent[];
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      const path = join(dir, entry.name);
-      if (entry.isDirectory()) walk(path);
-      else if (entry.isFile() && entry.name === "db.sqlite" && basename(dir) === "db") found.push(path);
-    }
-  };
-  walk(join(stateDir, "zcode-home"));
-  return found.sort();
-}
-
-/** The candidate zcode stores in precedence order: the factory's isolated homes first, the operator's own db last. */
-function zcodeCandidateDbPaths(stateDir: string, userHome: string): string[] {
-  const candidates = stateDir !== "" ? zcodeHomeDbPaths(stateDir) : [];
-  candidates.push(join(userHome, ".zcode", "cli", "db", "db.sqlite"));
-  return candidates;
-}
-
-interface ZcodeDecodedRow {
-  role: "assistant" | "other";
-  completed: boolean;
-  model?: string;
-  usage?: {
-    inputTokens: number;
-    outputTokens: number;
-    cacheReadInputTokens: number;
-    cacheCreationInputTokens: number;
-    reasoningTokens: number;
-  };
-}
-
-/**
- * Decodes one `message` row from either ZCode 0.17+'s real `data` JSON column
- * (`{ role, time: { created, completed }, modelId, tokens: { input, output, reasoning, cache: { read, write } } }`)
- * or the legacy `metadata` JSON column (`{ usage: { inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens, reasoningTokens } }`).
- */
-function decodeZcodeRow(row: { metadata?: unknown; data?: unknown }): ZcodeDecodedRow {
-  const raw = row.data !== undefined ? row.data : row.metadata;
-  let parsed: unknown = raw;
-  if (typeof parsed === "string" && parsed.trim() !== "") {
-    try {
-      parsed = JSON.parse(parsed);
-    } catch {
-      return { role: "other", completed: true };
-    }
-  }
-  if (typeof parsed !== "object" || parsed === null) return { role: "other", completed: true };
-  const record = parsed as Record<string, unknown>;
-  if (row.data !== undefined && record.role !== "assistant") {
-    return { role: "other", completed: true };
-  }
-  const time = typeof record.time === "object" && record.time !== null ? (record.time as Record<string, unknown>) : undefined;
-  const completed = time === undefined || time.completed !== undefined;
-  const model = asString(record.modelId) ?? asString(record.model);
-  if (typeof record.tokens === "object" && record.tokens !== null) {
-    const t = record.tokens as Record<string, unknown>;
-    const cache = typeof t.cache === "object" && t.cache !== null ? (t.cache as Record<string, unknown>) : undefined;
-    const inputTokens = finiteOr(t.input, 0);
-    const outputTokens = finiteOr(t.output, 0);
-    const cacheReadInputTokens = finiteOr(cache?.read, 0);
-    const cacheCreationInputTokens = finiteOr(cache?.write, 0);
-    const reasoningTokens = finiteOr(t.reasoning, 0);
-    if (
-      inputTokens === 0 &&
-      outputTokens === 0 &&
-      cacheReadInputTokens === 0 &&
-      cacheCreationInputTokens === 0 &&
-      reasoningTokens === 0
-    ) {
-      return { role: "assistant", completed, model };
-    }
-    return {
-      role: "assistant",
-      completed: true,
-      model,
-      usage: { inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens, reasoningTokens },
-    };
-  }
-  const usage = record.usage;
-  if (typeof usage === "object" && usage !== null) {
-    const u = usage as Record<string, unknown>;
-    return {
-      role: "assistant",
-      completed: true,
-      model,
-      usage: {
-        inputTokens: finiteOr(u.inputTokens, 0),
-        outputTokens: finiteOr(u.outputTokens, 0),
-        cacheReadInputTokens: finiteOr(u.cacheReadInputTokens, 0),
-        cacheCreationInputTokens: finiteOr(u.cacheCreationInputTokens, 0),
-        reasoningTokens: finiteOr(u.reasoningTokens, 0),
-      },
-    };
-  }
-  return { role: "assistant", completed, model };
-}
-
-/**
- * The zcode fold: every assistant `message` row carries its own per-turn
- * `data.tokens` (ZCode 0.17+ SQLite schema) or `metadata.usage`, so the
- * session totals are sums over rows beyond `cursor.lastStepIdx` — the
- * row-sequence cursor keeps the sweep O(delta) (the antigravity law). Per-turn
- * `input` already CONTAINS the cache sums, so the reader subtracts
- * `cacheRead + cacheCreation` clamped at zero (the copilot arithmetic), and
- * the context occupancy is the turn's own `input + output`. The store that
- * answered is memoized as the snapshot's `nativeSessionRef`, so every later
- * sweep stat-gates its owner directly.
- */
-function extractZcode(
-  agent: UsageAgentSource,
-  sessionId: string,
-  paths: Required<UsagePaths>,
-  cursor: UsageCursor | undefined,
-  metrics: UsageExtractorMetrics,
-): UsageCursor | undefined {
-  const zcodeSid = resolveZcodeNativeSessionId(sessionId, paths.userHome);
-  if (zcodeSid === undefined) return undefined;
-  const ownerPath = cursor?.snapshot.nativeSessionRef;
-  for (const dbPath of zcodeCandidateDbPaths(paths.stateDir, paths.userHome)) {
-    if (ownerPath !== undefined && dbPath !== ownerPath) continue; // ownership is memoized in the snapshot
-    const gate = statGate(cursor, dbPath);
-    if (gate === undefined) continue; // this candidate holds no store — next
-    if ("hit" in gate) return gate.hit; // the owner's (mtimeMs, size) is unchanged — zero opens
-    const rows = querySqlite<{ sequence?: unknown; metadata?: unknown; data?: unknown }[]>(
-      dbPath,
-      db => {
-        const cols = new Set((db.prepare("PRAGMA table_info(message)").all() as { name?: unknown }[]).map(c => c.name));
-        if (cols.has("data")) {
-          return db
-            .prepare("SELECT sequence, data FROM message WHERE session_id = ? AND sequence > ? ORDER BY sequence ASC")
-            .all(zcodeSid, cursor?.lastStepIdx ?? -1) as never;
-        }
-        return db
-          .prepare("SELECT sequence, metadata FROM message WHERE session_id = ? AND role = 'assistant' AND sequence > ? ORDER BY sequence ASC")
-          .all(zcodeSid, cursor?.lastStepIdx ?? -1) as never;
-      },
-      metrics,
-      { readOnly: true },
-    );
-    if (rows === undefined) continue; // unopenable — the next candidate may hold the session
-    const usage = continued(cursor, agent, "zcode");
-    usage.nativeSessionRef = dbPath;
-    let lastStepIdx = cursor?.lastStepIdx ?? -1;
-    let latestContext = usage.latestContextWindowTokens;
-    for (const row of rows) {
-      const sequence = finite(row.sequence);
-      const decoded = decodeZcodeRow(row);
-      if (decoded.role === "assistant" && decoded.usage === undefined && !decoded.completed) {
-        // An in-flight streaming assistant turn at the tail (`time.completed`
-        // absent and tokens still 0): stop before advancing `lastStepIdx` so
-        // the next sweep re-reads this sequence once its final tokens land.
-        break;
-      }
-      if (sequence !== null) lastStepIdx = Math.max(lastStepIdx, sequence);
-      if (decoded.model !== undefined) usage.model = decoded.model;
-      const u = decoded.usage;
-      if (u === undefined) continue;
-      const input = u.inputTokens;
-      const output = u.outputTokens;
-      const cacheRead = u.cacheReadInputTokens;
-      const cacheWrite = u.cacheCreationInputTokens;
-      usage.turns += 1;
-      usage.inputUncachedTokens += Math.max(0, input - cacheRead - cacheWrite);
-      usage.cacheReadTokens += cacheRead;
-      usage.cacheWriteTokens += cacheWrite;
-      usage.outputTokens += output;
-      usage.reasoningTokens += u.reasoningTokens;
-      latestContext = input + output;
-    }
-    if (latestContext !== undefined) usage.latestContextWindowTokens = latestContext;
-    retotal(usage);
-    if (usage.turns === 0 && cursor === undefined) continue; // this store does not hold the session yet — try the next candidate
-    return { mtimeMs: gate.stat.mtimeMs, size: gate.stat.size, byteOffset: 0, lastStepIdx, snapshot: usage };
-  }
-  return undefined;
-}
-
 // ---- the fallback ---------------------------------------------------------------------------
 
 /** The volatile `lastUsage` fallback — single-turn numbers beat no numbers. */
@@ -1244,12 +1025,6 @@ export function createUsageExtractor(pathsInput?: UsagePaths): UsageExtractor {
       if (sessionId !== undefined) {
         key = `copilot:${sessionId}`;
         advanced = extractCopilot(agent, sessionId, paths.userHome, cursors.get(key), metrics);
-      }
-    } else if (harness === "zcode") {
-      const sessionId = asString(agent.persistence?.sessionId) ?? asString(agent.runtimeInfo?.sessionId);
-      if (sessionId !== undefined) {
-        key = `zcode:${sessionId}`;
-        advanced = extractZcode(agent, sessionId, paths, cursors.get(key), metrics);
       }
     }
     if (key !== undefined && advanced !== undefined) cursors.set(key, advanced);

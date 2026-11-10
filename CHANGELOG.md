@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-11
+
+- Retire the `zcode` ACP harness (`zcode-acp-server`) in favor of `pi` over the local `zcode-api` proxy (ADR 0055, superseding ADR 0046): `DEFAULT_LANE` is now `"pi/zcode/glm-5.3"`, and `migrateLegacyZcodeLane` (`src/lanes.ts`, `src/lane-profiles.ts`, `src/scrum/config.ts`, `plugin/bin/lanes-config.mjs`, `plugin/bin/scrum-config.mjs`) transparently rewrites legacy `zcode/<model>[:<thinking>]` (including `zcode/builtin:zai-coding-plan\GLM-5.3` and `zcode/builtin:zai-start-plan\GLM-5.3-Flash`) and `pi/zai/glm-<model>[:<thinking>]` strings to `"pi/zcode/<lowercase-model>[:<thinking>]"` on load and save across `lanes.json`, `scrum-lanes.json`, and `profiles.json`.
+- Remove the `zcode` execution harness: `src/zcode-home.ts`, `plugin/server/core/zcode-home.ts`, and `test/zcode-home.test.ts` are removed; `ensureRoleProvidersRegistered` (`src/role-providers.ts`) sweeps any lingering `agents.providers.zcode` entry from `<paseoHome>/config.json`; `roles.ts` and `provider-lanes.ts` route all `pi/zcode/*` lanes through the standard isolated `Pi harness home` (`PI_CODING_AGENT_DIR`); `extractZcode` is removed from `src/usage-extractor.ts` (`extractPi` meters `pi/zcode/*` sessions directly); and `ZCode` is removed from `providerSkillDirectories` in `src/scrum/companion-tools.ts` while `src/scrum/skill-hub.ts` retains read-only host discovery of `~/.zcode/skills`.
+- Ratified ADR 0055 (Retire `zcode` ACP Harness in Favor of `pi` over Local `zcode-api` Proxy) and updated `CONTEXT.md` and ADR 0046.
+
 ## [0.5.0] - 2026-11-09
 
 - Canonical SLP contract validation, read-only gate optionality, provider-adaptive effort selection, and clean task retirement (ADR 0054) together with anti-fractal wave convergence and notebook graduation (ADR 0052) — six behavior areas, each landed through the end-to-end bridge/Spool seams and the new `test/contract-claim-gate.test.ts` suite.

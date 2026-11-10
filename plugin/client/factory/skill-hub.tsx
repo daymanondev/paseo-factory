@@ -179,7 +179,7 @@ export function SkillHubCard({
           {hub.symlinkDriftCount > 0 ? (
             <Pill theme={theme} label={`${hub.symlinkDriftCount} with link drift`} tone="statusWarning" lit />
           ) : hub.totalInstalled > 0 ? (
-            <Pill theme={theme} label="5/5 harnesses linked" tone="statusSuccess" />
+            <Pill theme={theme} label="4/4 harnesses linked" tone="statusSuccess" />
           ) : null}
         </View>
 
@@ -576,7 +576,7 @@ export function SkillHubCard({
                   ))}
                 </View>
                 <Text style={text(theme, "meta", "foregroundMuted")}>
-                  Host catalogs are read-only. Import copies portable skills into ~/.agents/skills and links all 5 harnesses.
+                  Host catalogs are read-only. Import copies portable skills into ~/.agents/skills and links all 4 harnesses.
                 </Text>
               </View>
 

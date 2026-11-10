@@ -14,7 +14,7 @@ import { dirname, join } from "node:path";
 import { projectStateDir } from "./project.mjs";
 
 export const LANE_NAMES = ["supervisor", "lead", "worker", "watch", "retro", "freshEyes"];
-export const DEFAULT_LANE = "pi/zai/glm-5.3";
+export const DEFAULT_LANE = "pi/zcode/glm-5.3";
 export const EYE_JSON_LANE = "eye.json";
 
 export function lanesPath(stateDir) {
@@ -59,6 +59,26 @@ export function laneError(name, value) {
   return undefined;
 }
 
+/**
+ * Mirrors migrateLegacyZcodeLane in src/lanes.ts (ADR 0055 §3).
+ */
+export function migrateLegacyZcodeLane(value) {
+  const parsed = parseLane(value);
+  if (parsed === undefined) return value;
+  if (parsed.provider === "zcode") {
+    const backslash = parsed.model.indexOf("\\");
+    const rawModel = (backslash === -1 ? parsed.model : parsed.model.slice(backslash + 1)).trim();
+    if (rawModel === "") return value;
+    const lowerModel = rawModel.toLowerCase();
+    return parsed.thinking === undefined ? `pi/zcode/${lowerModel}` : `pi/zcode/${lowerModel}:${parsed.thinking}`;
+  }
+  if (parsed.provider === "pi" && /^zai\/glm-/i.test(parsed.model)) {
+    const lowerModel = parsed.model.slice("zai/".length).toLowerCase();
+    return parsed.thinking === undefined ? `pi/zcode/${lowerModel}` : `pi/zcode/${lowerModel}:${parsed.thinking}`;
+  }
+  return value;
+}
+
 /** Mirrors lanesEntries in src/lanes.ts: one file's validated entries, absent → none. */
 function lanesEntries(path) {
   let raw;
@@ -83,7 +103,7 @@ function lanesEntries(path) {
     if (typeof value !== "string") return { ok: false, reason: `${path}: lane ${name} must be a string` };
     const error = laneError(name, value.trim());
     if (error !== undefined) return { ok: false, reason: `${path}: ${error}` };
-    entries[name] = value.trim();
+    entries[name] = migrateLegacyZcodeLane(value.trim());
   }
   return { ok: true, entries };
 }
@@ -119,7 +139,7 @@ function explicitLanes(path) {
   const explicit = {};
   for (const name of LANE_NAMES) {
     const value = parsed[name];
-    if (typeof value === "string") explicit[name] = value.trim();
+    if (typeof value === "string") explicit[name] = migrateLegacyZcodeLane(value.trim());
   }
   return explicit;
 }
@@ -141,7 +161,7 @@ export function saveLanes(stateDir, update, projectSlug) {
     if (value === undefined) continue;
     const error = laneError(name, value.trim());
     if (error !== undefined) return { ok: false, reason: error };
-    trimmed[name] = value.trim();
+    trimmed[name] = migrateLegacyZcodeLane(value.trim());
   }
   const target = projectSlug === undefined ? lanesPath(stateDir) : projectLanesPath(stateDir, projectSlug);
   const persisted = explicitLanes(target);
@@ -226,7 +246,21 @@ function readProfilesFile(stateDir) {
   if (typeof parsed.profiles !== "object" || parsed.profiles === null || Array.isArray(parsed.profiles)) {
     return { ok: false, reason: `${path} must carry a "profiles" object keyed by profile id` };
   }
-  return { ok: true, file: parsed };
+  const profiles = {};
+  for (const [id, entry] of Object.entries(parsed.profiles)) {
+    if (entry && typeof entry === "object" && entry.lanes && typeof entry.lanes === "object") {
+      const migratedLanes = { ...entry.lanes };
+      for (const name of LANE_NAMES) {
+        if (typeof migratedLanes[name] === "string") {
+          migratedLanes[name] = migrateLegacyZcodeLane(migratedLanes[name].trim());
+        }
+      }
+      profiles[id] = { ...entry, lanes: migratedLanes };
+    } else {
+      profiles[id] = entry;
+    }
+  }
+  return { ok: true, file: { ...parsed, profiles } };
 }
 
 /**
@@ -303,7 +337,7 @@ function profileLanesError(lanes) {
     if (typeof value !== "string") return { ok: false, reason: `profile lane ${name} is missing — a profile carries all six lanes whole` };
     const error = laneError(name, value.trim());
     if (error !== undefined) return { ok: false, reason: error };
-    validated[name] = value.trim();
+    validated[name] = migrateLegacyZcodeLane(value.trim());
   }
   return { ok: true, lanes: validated };
 }

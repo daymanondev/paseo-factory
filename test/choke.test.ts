@@ -1481,13 +1481,13 @@ test("normalizeAgentCreateRequest rewrites factory seat providers onto the Proje
     stateDir,
   );
   assert.equal(sup.config.provider, "pi", "the seat runs the Project's effective supervisor runtime provider");
-  assert.equal((sup.config as { model?: string }).model, "zai/glm-5.3", "the seat runs the Project's effective supervisor model");
+  assert.equal((sup.config as { model?: string }).model, "zcode/glm-5.3", "the seat runs the Project's effective supervisor model");
   assert.deepEqual(sup.config.labels, { seat: "supervisor", project: "ai-test-043c7e" });
   assert.deepEqual(sup.labels, { seat: "supervisor", project: "ai-test-043c7e" });
 
   const lead = normalizeAgentCreateRequest({ config: { provider: "factory-lead", cwd: workspace, title: "any message" } }, stateDir);
   assert.equal(lead.config.provider, "pi");
-  assert.equal((lead.config as { model?: string }).model, "zai/glm-5.3");
+  assert.equal((lead.config as { model?: string }).model, "zcode/glm-5.3");
   assert.deepEqual(lead.config.labels, { seat: "lead", project: "ai-test-043c7e" });
 
   // factory-peer is a working-agent provider, not a seat-fence seat — no
@@ -1571,39 +1571,34 @@ test("Seam 2: a factory-supervisor create rewrites onto Project A's supervisor p
   assert.equal((agyInA.config as { model?: string }).model, "gemini-3.1-pro-high");
 });
 
-test("a zcode lane's seat rewrite carries the runtime model id — bare GLM-5.3 never reaches the daemon (v0.0.94, ADR 0046 Gap 2)", (t) => {
+test("a legacy zcode lane's seat rewrite migrates onto pi/zcode/<model> and carries the runtime model id (ADR 0055)", (t) => {
   const dir = makeTempDir("choke-zcode-model-");
   disposeDir(t, dir);
   const stateDir = join(dir, "state");
   const project = join(dir, "project-z");
   mkdirSync(project, { recursive: true });
   writeProjectRegistration(stateDir, "project-z-333333", { root: project });
-  // The user-facing lane syntax stays clean (`zcode/GLM-5.3:high`); the daemon
-  // must receive the id zcode-acp-server advertises, because Paseo's
-  // `setModelWithSelection` validates `option.options.some(c => c.value === modelId)`
-  // client-side before the RPC.
+  // Legacy zcode/* lanes migrate transparently to pi/zcode/<lowercase-model>[:<thinking>].
   saveLanes(stateDir, { supervisor: "zcode/GLM-5.3:high", lead: "zcode/GLM-5.3-Flash:medium", worker: "zcode/GLM-5.3:high" }, "project-z-333333");
 
   const sup = normalizeAgentCreateRequest(
     { config: { provider: "factory-supervisor", cwd: project, title: "Ship the game" } },
     stateDir,
   );
-  assert.equal(sup.config.provider, "zcode", "the zcode base provider id rides the rewrite");
-  assert.equal((sup.config as { model?: string }).model, "builtin:zai-coding-plan\\GLM-5.3", "the bare lane model is normalized to the runtime id");
+  assert.equal(sup.config.provider, "pi", "the migrated pi base provider id rides the rewrite");
+  assert.equal((sup.config as { model?: string }).model, "zcode/glm-5.3", "the legacy zcode lane model is migrated to pi/zcode/glm-5.3");
   assert.equal(sup.config.thinkingOptionId, "high", "the lane's effort suffix maps onto thinkingOptionId");
 
   const lead = normalizeAgentCreateRequest({ config: { provider: "factory-lead", cwd: project } }, stateDir);
-  assert.equal(lead.config.provider, "zcode");
-  assert.equal((lead.config as { model?: string }).model, "builtin:zai-coding-plan\\GLM-5.3-Flash");
+  assert.equal(lead.config.provider, "pi");
+  assert.equal((lead.config as { model?: string }).model, "zcode/glm-5.3-flash");
   assert.equal(lead.config.thinkingOptionId, "medium");
 
-  // An explicit "<providerId>\<modelId>" lane passes through verbatim — never
-  // double-prefixed (the `:high` suffix keeps parseLane's last-colon split on
-  // the model side).
+  // Legacy explicit "zcode/builtin:zai-coding-plan\GLM-5.3:high" also migrates cleanly to pi/zcode/glm-5.3:high.
   saveLanes(stateDir, { supervisor: "zcode/builtin:zai-coding-plan\\GLM-5.3:high" }, "project-z-333333");
   const explicit = normalizeAgentCreateRequest({ config: { provider: "factory-supervisor", cwd: project } }, stateDir);
-  assert.equal(explicit.config.provider, "zcode");
-  assert.equal((explicit.config as { model?: string }).model, "builtin:zai-coding-plan\\GLM-5.3", "an explicit runtime id is never rewritten");
+  assert.equal(explicit.config.provider, "pi");
+  assert.equal((explicit.config as { model?: string }).model, "zcode/glm-5.3", "an explicit legacy runtime id migrates to zcode/glm-5.3");
   assert.equal(explicit.config.thinkingOptionId, "high");
 });
 

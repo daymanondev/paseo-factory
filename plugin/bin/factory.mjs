@@ -96,7 +96,7 @@ commands:
              [--scope <p1,p2,...>]   workspace-relative prefixes the task may touch
              [--fresh-eyes]          mark the fresh-eyes pass ON for this task
                                      (dispatches through lanes.freshEyes in
-                                     <stateDir>/lanes.json, default pi/zai/glm-5.3,
+                                     <stateDir>/lanes.json, default pi/zcode/glm-5.3,
                                      or <stateDir>/eye.json when set to "eye.json";
                                      advisory, runs only on green verdicts;
                                      defaults to ON when Lead sets a contract
@@ -105,7 +105,7 @@ commands:
                                      (leaves fresh-eyes OFF even when called by Lead)
              [--watch]               mark the watch pass ON for this task
                                      (dispatches through lanes.watch in
-                                     <stateDir>/lanes.json, default pi/zai/glm-5.3;
+                                     <stateDir>/lanes.json, default pi/zcode/glm-5.3;
                                      record-only, one watch_written line
                                      after EVERY verdict)
              [--description <text>]  the task's assignment in the Owner's words —
@@ -162,7 +162,7 @@ commands:
              one agent per task on the daemon, watched to its verdict.
              run <task> [<task>…] [--provider <provider[/model]>]
              --provider is optional since v0.0.13: omitted reads the worker
-             lane from <stateDir>/lanes.json (default pi/zai/glm-5.3); an
+             lane from <stateDir>/lanes.json (default pi/zcode/glm-5.3); an
              explicit --provider overrides the lane (ADR 0009 §3). Since
              v0.0.38 (ADR 0026 §3) the omitted path is Project-scoped: the
              first task's Contract.workspace (or the current working
@@ -180,7 +180,7 @@ commands:
              lane and --project arrive in v0.0.14, ADR 0010) — the one place
              every model-bearing role's provider/model is named: supervisor,
              lead, worker, watch, retro, freshEyes (all defaulting to
-             pi/zai/glm-5.3). A lane is provider/model with both halves
+             pi/zcode/glm-5.3). A lane is provider/model with both halves
              non-empty, or "eye.json" for freshEyes alone (the legacy direct
              HTTP config in <stateDir>/eye.json). A local read/write of
              <stateDir>/lanes.json — the plugin need not be running.

@@ -29,15 +29,12 @@ import {
   laneError,
   lanesPath,
   loadLanes,
-  normalizeZcodeRuntimeModelId,
+  migrateLegacyZcodeLane,
   parseLane,
   projectLanesPath,
-  stripZcodeProviderPrefix,
-  ZCODE_CJS_PATH,
 } from "./lanes.ts";
 import type { LaneName, Lanes, LanesResult } from "./lanes.ts";
 import { listProjectRegistrations } from "./project.ts";
-import { provisionZcodeHome } from "./zcode-home.ts";
 
 /** The canonical provider ids of the three SLP roles — the keys the reconciler owns in `agents.providers`. */
 export const FACTORY_ROLE_PROVIDERS = {
@@ -136,16 +133,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** `sw2-*` (the removed seatworks-v2 install) and every `factory-*` key the reconciler does not own. */
+/** `sw2-*` (the removed seatworks-v2 install), the retired `zcode` ACP entry (ADR 0055), and every `factory-*` key the reconciler does not own. */
 function isSweptProviderKey(key: string): boolean {
-  if (key.startsWith("sw2-")) return true;
+  if (key === "zcode" || key.startsWith("sw2-")) return true;
   return key.startsWith("factory-") && !ROLE_ORDER.some((role) => FACTORY_ROLE_PROVIDERS[role] === key);
 }
 
 /** A profile row the reconciler owns or orphans — matched by `id` or `provider` prefix. */
 function isSweptProfile(profile: PaseoAgentProfile): boolean {
   for (const field of [profile.id, profile.provider]) {
-    if (typeof field === "string" && (field.startsWith("sw2-") || field.startsWith("factory-"))) return true;
+    if (typeof field === "string" && (field === "zcode" || field.startsWith("sw2-") || field.startsWith("factory-"))) return true;
   }
   return false;
 }
@@ -165,26 +162,6 @@ function isSweptProfile(profile: PaseoAgentProfile): boolean {
  */
 const PASEO_BUILTIN_EXTENDS = new Set(["claude", "codex", "copilot", "opencode", "pi", "omp"]);
 const FALLBACK_BUILTIN_ORDER = ["opencode", "copilot", "claude", "codex", "omp", "pi"] as const;
-
-/**
- * The zcode base provider's ACP runtime (v0.0.94, ADR 0046 Decision 1): the
- * Paseo core team's official ZCode Protocol v1 bridge, pinned to the exact
- * version the ADR validated against ZCode `v0.17.1` / App `v3.17.2`.
- */
-const ZCODE_ACP_COMMAND = ["npx", "-y", "zcode-acp-server@0.82.1"] as const;
-const ZCODE_BASE_LABEL = "ZCode (GLM Coding Plan)";
-
-/**
- * The factory-safe defaults on the base `agents.providers.zcode` env (ADR 0046
- * Decision 1 / Gap 5): workflows stay with the factory's own orchestration,
- * quota parking + auto-resume stay with `QuotaParkRuntime`, and the boot
- * notice never fires on multi-provider `~/.zcode/v2/config.json` setups.
- */
-const ZCODE_BASE_ENV_DEFAULTS: Record<string, string> = {
-  ZCODE_DYNAMIC_WORKFLOW_MODE: "disabled",
-  ZCODE_ACP_QUOTA_AUTO_RESUME: "0",
-  ZCODE_ACP_QUOTA_BOOT_NOTICE: "0",
-};
 
 function fallbackBuiltinExtends(providers: Record<string, PaseoProviderEntry>): string {
   for (const candidate of FALLBACK_BUILTIN_ORDER) {
@@ -238,38 +215,16 @@ function baseProviderFor(
       };
     }
     if (!PASEO_BUILTIN_EXTENDS.has(laneProvider)) {
-      if (laneProvider === "zcode") return zcodeBaseProvider(inheritedEnv);
       return {
         extends: fallbackBuiltinExtends(providers),
         ...(inheritedEnv === undefined ? {} : { inheritedEnv }),
       };
     }
   }
-  if (laneProvider === "zcode") return zcodeBaseProvider(undefined);
   if (PASEO_BUILTIN_EXTENDS.has(laneProvider)) {
     return { extends: laneProvider };
   }
   return { extends: fallbackBuiltinExtends(providers) };
-}
-
-/**
- * The canonical zcode base provider (v0.0.94, ADR 0046 Decision 1): an
- * `acp`-extending entry running `zcode-acp-server@0.82.1` with the
- * factory-safe env defaults under whatever env the user already put on their
- * own `agents.providers.zcode` entry — the same precedence the registered
- * base entry itself carries, so a valid custom entry and the canonical arm
- * resolve identically.
- */
-function zcodeBaseProvider(inheritedEnv: Record<string, string> | undefined): {
-  extends: string;
-  command: string[];
-  inheritedEnv: Record<string, string>;
-} {
-  return {
-    extends: "acp",
-    command: [...ZCODE_ACP_COMMAND],
-    inheritedEnv: { ...ZCODE_BASE_ENV_DEFAULTS, ...(inheritedEnv ?? {}) },
-  };
 }
 
 /** One role provider's English description — the picker's hover text. */
@@ -288,18 +243,6 @@ const ROLE_DESCRIPTIONS: Record<FactoryRole, string> = {
 function opencodeStateDirFor(paseoHome: string | undefined): string | undefined {
   return typeof paseoHome === "string" && paseoHome.trim() !== ""
     ? join(paseoHome, "plugin-state", "paseo-factory", "opencode-state")
-    : undefined;
-}
-
-/**
- * The plugin-owned factory state root (`<paseoHome>/plugin-state/paseo-factory`)
- * under which the per-seat zcode clean rooms are provisioned
- * (`<stateDir>/zcode-home/<role>`, ticket 01's provisioner); undefined when no
- * usable `paseoHome` is given.
- */
-function factoryStateDirFor(paseoHome: string | undefined): string | undefined {
-  return typeof paseoHome === "string" && paseoHome.trim() !== ""
-    ? join(paseoHome, "plugin-state", "paseo-factory")
     : undefined;
 }
 
@@ -330,55 +273,6 @@ function ensureBaseOpencodeStateDir(
 }
 
 /**
- * The base `agents.providers.zcode` arm (v0.0.94, ADR 0046 Decision 1),
- * shared by the reconcile and heal paths so the two can never drift: when
- * `wanted` — any lane names `zcode/...` or ZCode Desktop is installed on the
- * host — the entry exists with `extends: "acp"`, the pinned
- * `zcode-acp-server@0.82.1` command, and the factory-safe env defaults. The
- * user's own keys on the entry are preserved by the spread (the
- * `ensureBaseOpencodeStateDir` law): a valid own `extends`/`command` and every
- * explicit env key stand exactly as the owner wrote them; only absent keys are
- * defaulted. Mutates `providers` in place (both callers build a fresh
- * post-sweep table first).
- */
-function ensureBaseZcodeProvider(providers: Record<string, PaseoProviderEntry>, wanted: boolean): void {
-  if (!wanted) return;
-  const entry = providers.zcode;
-  const userRecord = isRecord(entry) ? (entry as PaseoProviderEntry) : {};
-  const userLabel = typeof userRecord.label === "string" && userRecord.label.trim() !== "" ? userRecord.label : undefined;
-  const userEnv = isRecord(userRecord.env) ? (userRecord.env as Record<string, string>) : undefined;
-  const userExtends = typeof userRecord.extends === "string" && userRecord.extends !== "" ? userRecord.extends : undefined;
-  const userCommand =
-    Array.isArray(userRecord.command) && userRecord.command.length > 0 && userRecord.command.every((part) => typeof part === "string")
-      ? (userRecord.command as string[])
-      : undefined;
-  providers.zcode = {
-    ...userRecord,
-    label: userLabel ?? ZCODE_BASE_LABEL,
-    extends: userExtends ?? "acp",
-    command: userCommand ?? [...ZCODE_ACP_COMMAND],
-    env: {
-      ...ZCODE_BASE_ENV_DEFAULTS,
-      ...(userEnv ?? {}),
-    },
-  };
-}
-
-/** Whether any of the six lanes names the `zcode` family — the lane half of the registration trigger. */
-function lanesWantZcode(lanes: Lanes): boolean {
-  return LANE_NAMES.some((name) => parseLane(lanes[name])?.provider === "zcode");
-}
-
-/**
- * The installed-app half of the registration trigger: ZCode Desktop's
- * `zcode.cjs` exists on disk. Callers may inject their own probe path
- * (`zcodeAppPath`) so tests stay hermetic — never the real `/Applications`.
- */
-function zcodeAppInstalled(zcodeAppPath?: string): boolean {
-  return existsSync(zcodeAppPath ?? ZCODE_CJS_PATH);
-}
-
-/**
  * The pure config transform (spec v0.0.27 §Implementation Decisions 1, ADR
  * 0017 §1, ADR 0026 §1): sweeps `sw2-*` and unknown `factory-*` provider keys,
  * writes `factory-supervisor` / `factory-lead` / `factory-peer` mapped from
@@ -404,7 +298,7 @@ function zcodeAppInstalled(zcodeAppPath?: string): boolean {
 export function reconcilePaseoConfigObject(
   config: PaseoConfigObject,
   lanes: Lanes,
-  options?: { paseoHome?: string; zcodeAppPath?: string; userHome?: string },
+  options?: { paseoHome?: string; userHome?: string },
 ): { changed: boolean; config: PaseoConfigObject } {
   const original = config;
   const agents = isRecord(original.agents) ? original.agents : {};
@@ -412,26 +306,18 @@ export function reconcilePaseoConfigObject(
   const rawProviders = isRecord(agents.providers) ? agents.providers : {};
   const providers: Record<string, PaseoProviderEntry> = {};
   for (const [key, value] of Object.entries(rawProviders)) {
-    if (isSweptProviderKey(key)) continue; // the sw2-* / stale factory-* sweep
+    if (isSweptProviderKey(key)) continue; // the sw2-* / zcode / stale factory-* sweep
     providers[key] = value as PaseoProviderEntry;
   }
-  // The zcode base provider (v0.0.94, ADR 0046 Decision 1): auto-register the
-  // `agents.providers.zcode` entry whenever any lane names the zcode family or
-  // ZCode Desktop is installed on the host — before the role loop, so a zcode
-  // lane's role entries inherit the registered entry exactly as it stands.
-  ensureBaseZcodeProvider(providers, lanesWantZcode(lanes) || zcodeAppInstalled(options?.zcodeAppPath));
   // The plugin-owned OpenCode state home (spec v0.0.91 §3) — the XDG root whose
   // `opencode/service.json` Paseo 0.15.0's V2Runtime probes when acquiring an
   // opencode v2 runtime; undefined when no paseoHome is given.
   const opencodeStateDir = opencodeStateDirFor(options?.paseoHome);
-  // The factory state root under which the per-seat zcode clean rooms live
-  // (v0.0.94, ADR 0046 §3/§4); undefined when no paseoHome is given.
-  const factoryStateDir = factoryStateDirFor(options?.paseoHome);
   // The three managed providers, in canonical order — the mapping is computed
   // against the post-sweep table so an `agy` lane inherits the user's custom
   // entry exactly as it stands after the sweep (agy itself is never swept).
   for (const role of ROLE_ORDER) {
-    const parsed = parseLane(lanes[ROLE_LANE[role]]);
+    const parsed = parseLane(migrateLegacyZcodeLane(lanes[ROLE_LANE[role]]));
     if (parsed === undefined) continue; // an unparseable lane writes nothing, never a guessed provider
     const base = baseProviderFor(parsed.provider, providers);
     const env: Record<string, string> = { ...(base.inheritedEnv ?? {}), PASEO_FACTORY_SEAT: role };
@@ -446,46 +332,16 @@ export function reconcilePaseoConfigObject(
     if (base.extends === "opencode" && opencodeStateDir !== undefined && env.PASEO_OPENCODE_SERVER_URL === undefined) {
       env.XDG_STATE_HOME = base.inheritedEnv?.XDG_STATE_HOME ?? opencodeStateDir;
     }
-    // The per-seat zcode clean room (v0.0.94, ADR 0046 §3/§4): the role entry's
-    // env is what the daemon feeds the spawned `zcode-acp-server` child, so the
-    // provisioner's record (ticket 01) rides the entry — filling only keys the
-    // seat does not already carry, so the user's own inherited values keep
-    // winning (the PI_CODING_AGENT_DIR law). `userHome` is the hermetic seam
-    // (tests pass a temp dir; production leaves it undefined for the operator's
-    // real home — reads only, the provisioner never writes outside the state dir).
-    if (parsed.provider === "zcode" && factoryStateDir !== undefined) {
-      for (const [key, value] of Object.entries(
-        provisionZcodeHome({ stateDir: factoryStateDir, role, userHome: options?.userHome }),
-      )) {
-        if (env[key] === undefined) env[key] = value;
-      }
-    }
-    // The replacement `models` catalog: a zcode lane advertises the runtime id
-    // `zcode-acp-server` exposes (`builtin:zai-coding-plan\GLM-5.3` — Paseo's
-    // `setModelWithSelection` validates the option value verbatim, ADR 0046
-    // Gap 2) under a clean display label; every other family stays verbatim.
-    const modelEntry: PaseoProviderModelEntry =
-      parsed.provider === "zcode"
-        ? {
-            id: normalizeZcodeRuntimeModelId(parsed.model),
-            label: `${stripZcodeProviderPrefix(parsed.model)} (Factory)`,
-            isDefault: true,
-            ...(parsed.thinking === undefined
-              ? {}
-              : {
-                  thinkingOptions: [{ id: parsed.thinking, label: parsed.thinking, isDefault: true }],
-                }),
-          }
+    const modelEntry: PaseoProviderModelEntry = {
+      id: parsed.model,
+      label: parsed.model,
+      isDefault: true,
+      ...(parsed.thinking === undefined
+        ? {}
         : {
-            id: parsed.model,
-            label: parsed.model,
-            isDefault: true,
-            ...(parsed.thinking === undefined
-              ? {}
-              : {
-                  thinkingOptions: [{ id: parsed.thinking, label: parsed.thinking, isDefault: true }],
-                }),
-          };
+            thinkingOptions: [{ id: parsed.thinking, label: parsed.thinking, isDefault: true }],
+          }),
+    };
     const entry: PaseoProviderEntry = {
       extends: base.extends,
       label: FACTORY_ROLE_LABELS[role],
@@ -513,7 +369,7 @@ export function reconcilePaseoConfigObject(
     (profile) => !isRecord(profile) || !isSweptProfile(profile as PaseoAgentProfile),
   );
   const profiles: PaseoAgentProfile[] = [...keptProfiles];
-  const supervisorLane = parseLane(lanes.supervisor);
+  const supervisorLane = parseLane(migrateLegacyZcodeLane(lanes.supervisor));
   if (supervisorLane !== undefined) {
     const normalizedSupervisorFamily =
       supervisorLane.provider === "claude-code"
@@ -526,10 +382,7 @@ export function reconcilePaseoConfigObject(
       id: FACTORY_ROLE_PROVIDERS.supervisor,
       name: FACTORY_ROLE_LABELS.supervisor,
       provider: FACTORY_ROLE_PROVIDERS.supervisor,
-      // A zcode supervisor lane's catalog advertises the normalized runtime id,
-      // so the picker row carries it too — every other family stays verbatim.
-      model:
-        supervisorLane.provider === "zcode" ? normalizeZcodeRuntimeModelId(supervisorLane.model) : supervisorLane.model,
+      model: supervisorLane.model,
       ...(modeId === undefined ? {} : { modeId }),
       ...(supervisorLane.thinking === undefined ? {} : { thinkingOptionId: supervisorLane.thinking }),
     });
@@ -564,7 +417,7 @@ export type ReconcileRoleProvidersResult = { ok: true; changed: boolean } | { ok
 export function reconcilePaseoRoleProviders(
   paseoHome: string,
   lanes: Lanes,
-  deps?: { reloadDaemon?: (paseoHome: string) => void; zcodeAppPath?: string; userHome?: string },
+  deps?: { reloadDaemon?: (paseoHome: string) => void; userHome?: string },
 ): ReconcileRoleProvidersResult {
   const path = join(paseoHome, "config.json");
   let config: PaseoConfigObject = {};
@@ -579,7 +432,6 @@ export function reconcilePaseoRoleProviders(
   }
   const { changed, config: next } = reconcilePaseoConfigObject(config, lanes, {
     paseoHome,
-    ...(deps?.zcodeAppPath === undefined ? {} : { zcodeAppPath: deps.zcodeAppPath }),
     ...(deps?.userHome === undefined ? {} : { userHome: deps.userHome }),
   });
   if (!changed) return { ok: true, changed: false };
@@ -606,7 +458,7 @@ export function reconcilePaseoRoleProviders(
 
 /**
  * Pure sanitizer for an existing `<paseoHome>/config.json` object: sweeps
- * orphaned `sw2-*` / unknown `factory-*` provider entries and heals any
+ * orphaned `sw2-*` / `zcode` / unknown `factory-*` provider entries and heals any
  * `factory-supervisor` / `factory-lead` / `factory-peer` entry whose `extends`
  * would be rejected by Paseo 0.13.0's `ProviderOverridesSchema` (such as
  * `"extends": "antigravity"` left by v0.0.40 or `"extends": "acp"` without a
@@ -620,7 +472,7 @@ export function reconcilePaseoRoleProviders(
  */
 export function healFactoryRoleProvidersObject(
   config: PaseoConfigObject,
-  options?: { paseoHome?: string; zcodeAppPath?: string },
+  options?: { paseoHome?: string },
 ): { changed: boolean; config: PaseoConfigObject } {
   const original = config;
   if (!isRecord(original.agents)) {
@@ -691,12 +543,6 @@ export function healFactoryRoleProvidersObject(
   if (opencodeStateDir !== undefined) {
     ensureBaseOpencodeStateDir(providers, opencodeStateDir);
   }
-  // The base `zcode` entry arm (v0.0.94, ADR 0046 Decision 1) — the heal has
-  // no lanes, so its trigger is the installed app OR the entry itself already
-  // standing (one registered by the reconcile's lane arm never rots): same
-  // merge and same user-key precedence as the reconcile path, so the two can
-  // never drift.
-  ensureBaseZcodeProvider(providers, zcodeAppInstalled(options?.zcodeAppPath) || isRecord(providers.zcode));
   let nextDaemon = original.daemon;
   if (isRecord(original.daemon) && Array.isArray(original.daemon.agentProfiles)) {
     const filteredProfiles = original.daemon.agentProfiles.filter((profile) => {
@@ -730,7 +576,7 @@ export function healFactoryRoleProvidersObject(
  * immediately without a daemon restart. Never creates a missing file and never
  * throws.
  */
-export function healFactoryRoleProvidersInConfig(paseoHome: string, deps?: { zcodeAppPath?: string }): boolean {
+export function healFactoryRoleProvidersInConfig(paseoHome: string): boolean {
   if (typeof paseoHome !== "string" || paseoHome.trim() === "") return false;
   const path = join(paseoHome, "config.json");
   if (!existsSync(path)) return false;
@@ -744,7 +590,6 @@ export function healFactoryRoleProvidersInConfig(paseoHome: string, deps?: { zco
   }
   const { changed, config: next } = healFactoryRoleProvidersObject(config, {
     paseoHome,
-    ...(deps?.zcodeAppPath === undefined ? {} : { zcodeAppPath: deps.zcodeAppPath }),
   });
   if (!changed) return false;
   try {
@@ -857,7 +702,7 @@ function explicitLaneEntries(path: string): Partial<Record<LaneName, string>> {
     if (typeof value !== "string") continue;
     const trimmed = value.trim();
     if (laneError(name as LaneName, trimmed) !== undefined) continue;
-    explicit[name as LaneName] = trimmed;
+    explicit[name as LaneName] = migrateLegacyZcodeLane(trimmed);
   }
   return explicit;
 }

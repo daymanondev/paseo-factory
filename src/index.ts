@@ -61,19 +61,17 @@ export {
   EYE_JSON_LANE,
   LANE_NAMES,
   TOOLLESS_OPENCODE_CONFIG,
-  ZCODE_CJS_PATH,
   defaultLanes,
   laneCliAvailable,
   laneCliInvocation,
   laneError,
   lanesPath,
   loadLanes,
-  normalizeZcodeRuntimeModelId,
+  migrateLegacyZcodeLane,
   parseLane,
   projectLanesPath,
   runLaneCli,
   saveLanes,
-  stripZcodeProviderPrefix,
 } from "./lanes.ts";
 export type { LaneCliInvocation, LaneCliRunner, LaneName, Lanes, LanesResult, ParsedLane } from "./lanes.ts";
 export { provisionPiAgentHome, renderRoleAppendSystem } from "./pi-home.ts";

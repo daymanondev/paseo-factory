@@ -84,13 +84,13 @@ test("fail-fast at contract_set: freshEyes whose lane's CLI is unusable is refus
   const dir = makeTempDir();
   disposeDir(t, dir);
   const { workspace, artifact } = makeWorkspaceAtBase(dir);
-  // No lanes.json, no eye.json: the default CLI lane (pi/zai/glm-5.3) — its
+  // No lanes.json, no eye.json: the default CLI lane (pi/zcode/glm-5.3) — its
   // CLI probe is refused here, the v0.0.2 eye.json law carried to lanes.
   const factory = createFactory({ stateDir: join(dir, "factory"), eyeCliProbe: () => false });
 
   assert.throws(
     () => factory.setContract({ task: "FE1", workspace, gate: "true", artifact, freshEyes: true }),
-    (err: unknown) => err instanceof Error && /pi\/zai\/glm-5\.3 CLI is not usable/.test(err.message) && factoryErrorCode("eye-unconfigured")(err),
+    (err: unknown) => err instanceof Error && /pi\/zcode\/glm-5\.3 CLI is not usable/.test(err.message) && factoryErrorCode("eye-unconfigured")(err),
   );
   assert.deepEqual([...factory.ledger.events], [], "a refused contract writes nothing");
 });
@@ -547,7 +547,7 @@ test("v0.0.13: an explicit lanes.freshEyes overrides an existing eye.json, and '
   writeEyeConfig(stateDir, fakeEyeServer.url, "legacy-eye-1");
 
   // Explicit CLI lane wins over the eye.json that exists.
-  writeLanes(stateDir, { freshEyes: "pi/zai/glm-5.3" });
+  writeLanes(stateDir, { freshEyes: "pi/zcode/glm-5.3" });
   const cli = fakeCopilotRunner(() => ({ code: 0, stdout: "CLEAR" }));
   const factoryCli = createFactory({ stateDir, eyeCliProbe: () => true, eyeCliRunner: cli.runner });
   factoryCli.setContract({ task: "FE15", workspace, gate: "true", artifact, freshEyes: true });
@@ -555,7 +555,7 @@ test("v0.0.13: an explicit lanes.freshEyes overrides an existing eye.json, and '
   await factoryCli.claim({ task: "FE15", sha: claimed, agent: "agent-fe15", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   assert.equal(fakeEyeServer.requests.length, 0, "the explicit lane bypassed the HTTP eye");
   assert.equal(cli.calls[0]!.command, "pi");
-  assert.equal(eyeEvent(factoryCli, "FE15").model, "pi/zai/glm-5.3");
+  assert.equal(eyeEvent(factoryCli, "FE15").model, "pi/zcode/glm-5.3");
 
   // Explicit "eye.json" pins the legacy path — the deliberate opt-in. (A
   // second factory on its own stateDir: FE15's contract still owns the tree.)
@@ -576,7 +576,7 @@ test("v0.0.13: a CLI-lane eye that breaks the output contract is an honest faile
   disposeDir(t, dir);
   const { workspace, artifact } = makeWorkspaceAtBase(dir);
   const stateDir = join(dir, "factory");
-  writeLanes(stateDir, { freshEyes: "pi/zai/glm-5.3" });
+  writeLanes(stateDir, { freshEyes: "pi/zcode/glm-5.3" });
   const fake = fakeCopilotRunner(() => ({ code: 0, stdout: "Seems fine to me." }));
   const factory = createFactory({ stateDir, eyeCliProbe: () => true, eyeCliRunner: fake.runner });
 
@@ -588,7 +588,7 @@ test("v0.0.13: a CLI-lane eye that breaks the output contract is an honest faile
   const eye = eyeEvent(factory, "FE17");
   assert.equal(eye.outcome, "failed");
   assert.match(eye.finding, /output contract/);
-  assert.equal(eye.model, "pi/zai/glm-5.3");
+  assert.equal(eye.model, "pi/zcode/glm-5.3");
 });
 
 test("Lead eligibility ignores legacy review state, but acceptance waits for the in-flight report", async (t) => {

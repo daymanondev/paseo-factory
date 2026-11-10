@@ -473,7 +473,7 @@ export function inspectSkillHub(options: ProjectSkillContext = {}) {
               cache[entry.sourceUrl] !== entry.repoCommitSha)
           ? ("update_available" as const)
           : ("up_to_date" as const);
-    const harnesses = ["Pi", "Claude", "Antigravity", "Codex", "ZCode"].map(
+    const harnesses = ["Pi", "Claude", "Antigravity", "Codex"].map(
       (harness) => {
         const dir = providerSkillDirectories(home)[harness];
         let healthy = false;

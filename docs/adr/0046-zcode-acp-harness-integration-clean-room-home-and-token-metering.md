@@ -1,7 +1,7 @@
 # 0046 — First-Class `zcode` Harness Integration via `zcode-acp-server`, Clean-Room `ZCODE_STORAGE_DIR` Isolation, Compaction-Proof `ROLE_SYSTEM.md`, and SQLite `extractZcode` Token Metering
 
 - **Date:** 2026-11-05
-- **Status:** Accepted — Owner confirmed Q1–Q5 in `/grill-with-docs` ("chưa code luôn ở session này, toàn bộ theo bạn đề xuất").
+- **Status:** Superseded by [ADR 0055](0055-retire-zcode-acp-harness-for-pi-zcode-api-proxy.md) — `zcode-acp-server` and the `zcode` execution harness are retired in favor of running GLM Coding Plan models through Pi (`pi/zcode/glm-5.3`, `pi/zcode/glm-5.3-flash`) backed by the local `TriDefender/zcode-api` proxy (`com.zcode.proxy` LaunchAgent on `127.0.0.1:8318`).
 - **Amends:** [ADR 0013](0013-lead-mailbox-context-rotation-and-role-contracts.md) (extends compaction-proof role contracts to `zcode` via `<roleHome>/ROLE_SYSTEM.md` and `instructions.userFile`) · [ADR 0016](0016-role-scoped-mcp-bridge-kickoff-packet-and-execution-fence.md) (extends the 3-layer `Seat write fence` and `Role-scoped MCP bridge` to `zcode`) · [ADR 0026](0026-per-project-lane-isolation-and-lane-profiles.md) (adds `zcode` as a first-class base harness alongside `pi`, `claude`, `codex`, `opencode`, `copilot`, and `antigravity`) · [ADR 0043](0043-plugin-owned-multi-provider-token-metering-and-project-usage-rollup.md) (adds `extractZcode` incremental SQLite token metering with `~/.zcode/v2/acp-lazy-sessions.json` UUID resolution).
 
 ## Context

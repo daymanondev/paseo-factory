@@ -50,7 +50,7 @@ import { CorrelationRegistry } from "./core/correlations.ts";
 import { FactoryError } from "./core/errors.ts";
 import type { Factory } from "./core/factory.ts";
 import { readLeadMailbox } from "./core/mailbox.ts";
-import { LANE_NAMES, loadLanes, normalizeZcodeRuntimeModelId, parseLane, saveLanes, stripZcodeProviderPrefix, projectLanesPath, listLaneProfiles, getLaneProfile, readLaneProfilesFile, saveLaneProfile, deleteLaneProfile, applyLaneProfile, saveLanesBatch, resetProjectLanes } from "./core/lanes.ts";
+import { LANE_NAMES, loadLanes, parseLane, saveLanes, projectLanesPath, listLaneProfiles, getLaneProfile, readLaneProfilesFile, saveLaneProfile, deleteLaneProfile, applyLaneProfile, saveLanesBatch, resetProjectLanes } from "./core/lanes.ts";
 import type { LaneProfile } from "./core/lanes.ts";
 import { listProjectRegistrations, projectNotebookPath, projectStateDir, readProjectRegistration, resolveOrBootstrapProject, resolveProject } from "./core/project.ts";
 import type { ProjectResolution } from "./core/project.ts";
@@ -212,15 +212,13 @@ export function sanitizeLaneWithProviders(laneValue: string, providers: readonly
   const entry = providers.find((p) => (p.provider ?? p.id) === provider);
   if (entry === undefined || !Array.isArray(entry.models)) return laneValue;
   const strippedModel = model.replace(/^[^/]+\//, "");
-  const strippedZcodeModel = stripZcodeProviderPrefix(strippedModel);
   const meta = entry.models.find(
     (m) =>
       m.id === model ||
       `${provider}/${m.id}` === model ||
       m.id === `${provider}/${model}` ||
       m.id === strippedModel ||
-      m.id.replace(/^[^/]+\//, "") === strippedModel ||
-      (provider === "zcode" && stripZcodeProviderPrefix(m.id.replace(/^[^/]+\//, "")) === strippedZcodeModel),
+      m.id.replace(/^[^/]+\//, "") === strippedModel,
   );
   if (meta !== undefined && Array.isArray(meta.thinkingOptions)) {
     if (
@@ -879,19 +877,11 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           if (!entry.available) return { provider: entry.provider, available: false, models: null };
           try {
             const listed = await daemon.providers.listModels(entry.provider);
-            const rawModels =
-              entry.provider === "zcode"
-                ? [...listed.models].sort((a, b) => {
-                    const aBuiltin = a.id.startsWith("builtin:zai-coding-plan\\") ? 0 : 1;
-                    const bBuiltin = b.id.startsWith("builtin:zai-coding-plan\\") ? 0 : 1;
-                    return aBuiltin - bBuiltin;
-                  })
-                : listed.models;
             return {
               provider: entry.provider,
               available: true,
-              models: rawModels.map((m) => ({
-                id: entry.provider === "zcode" && m.id.startsWith("builtin:zai-coding-plan\\") ? stripZcodeProviderPrefix(m.id) : m.id,
+              models: listed.models.map((m) => ({
+                id: m.id,
                 label: m.label ?? null,
                 ...(m.thinkingOptions !== undefined && m.thinkingOptions !== null
                   ? { thinkingOptions: m.thinkingOptions.map((o) => ({ id: o.id, label: o.label ?? null })) }
@@ -1045,7 +1035,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         const syncThinking = deps.setAgentThinking ?? setAgentThinkingViaCli;
         const currentModel =
           agent.model ?? (agent.provider.startsWith(`${parsed.provider}/`) ? agent.provider.slice(parsed.provider.length + 1) : null);
-        const targetModelId = parsed.provider === "zcode" ? normalizeZcodeRuntimeModelId(parsed.model) : parsed.model;
+        const targetModelId = parsed.model;
         if (
           currentModel !== null &&
           currentModel !== targetModelId &&
@@ -1662,8 +1652,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         const sync = deps.setAgentModel ?? setAgentModelViaCli;
         const syncThinking = deps.setAgentThinking ?? setAgentThinkingViaCli;
         const slash = toLane.indexOf("/");
-        const rawModelId = parsed?.model ?? (slash === -1 ? toLane : toLane.slice(slash + 1));
-        const modelId = parsed?.provider === "zcode" ? normalizeZcodeRuntimeModelId(rawModelId) : rawModelId;
+        const modelId = parsed?.model ?? (slash === -1 ? toLane : toLane.slice(slash + 1));
         try {
           const reply = await sync(agent.id, modelId, deps.home);
           if (!reply.ok) {
@@ -2714,8 +2703,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
                 const laneValue = saved.lanes[seat];
                 const parsed = parseLane(laneValue);
                 const slash = laneValue.indexOf("/");
-                const rawModelId = parsed?.model ?? (slash === -1 ? laneValue : laneValue.slice(slash + 1));
-                const modelId = parsed?.provider === "zcode" ? normalizeZcodeRuntimeModelId(rawModelId) : rawModelId;
+                const modelId = parsed?.model ?? (slash === -1 ? laneValue : laneValue.slice(slash + 1));
                 const reply = await sync(agent.id, modelId, deps.home);
                 const hadThinkingInInput = parseLane(input.value.trim())?.thinking !== undefined;
                 const shouldClearThinking = parsed?.thinking === undefined && ((agent.thinkingOptionId ?? "") !== "" || hadThinkingInInput);

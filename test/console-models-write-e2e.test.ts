@@ -51,7 +51,7 @@ test("RG-1: the console's real transport writes the lanes — set lands on disk 
   assert.equal(machine.ok, true);
   const profile = saveLaneProfile(fixture.stateDir, {
     name: "Night Shift",
-    lanes: { ...machine.lanes, lead: "codex/gpt-5.4:high", watch: "pi/zai/glm-5.3-air" },
+    lanes: { ...machine.lanes, lead: "codex/gpt-5.4:high", watch: "pi/zcode/glm-5.3-air" },
   });
 
   const started = await fixture.start();
@@ -93,9 +93,9 @@ test("RG-1: the console's real transport writes the lanes — set lands on disk 
   // write and records the active profile for this scope.
   const applied = await profilesApplyViaSidecar({ profileId: profile.id, projectRoot: repo }, fetchAt);
   assert.equal(applied.ok, true, applied.ok ? "" : applied.error);
-  assert.equal(applied.lanes.watch, "pi/zai/glm-5.3-air");
+  assert.equal(applied.lanes.watch, "pi/zcode/glm-5.3-air");
   const afterApply = await roster();
-  assert.equal(rowOf(afterApply, "watch").raw, "pi/zai/glm-5.3-air");
+  assert.equal(rowOf(afterApply, "watch").raw, "pi/zcode/glm-5.3-air");
   assert.equal(rowOf(afterApply, "watch").source, "override");
   assert.deepEqual(
     afterApply.profiles.map((entry) => [entry.name, entry.active]),

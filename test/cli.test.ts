@@ -1196,7 +1196,7 @@ test("factory profile + lanes reset: the Owner's whole Lane profile lifecycle ov
   assert.equal(saved.profile.name, "Fast Stack");
   assert.equal(saved.profile.description, "Cheap and quick");
   assert.equal(saved.profile.lanes.worker, "opencode/glm-5.1");
-  assert.equal(saved.profile.lanes.supervisor, "pi/zai/glm-5.3");
+  assert.equal(saved.profile.lanes.supervisor, "pi/zcode/glm-5.3");
   assert.equal(typeof saved.profile.updatedAt, "string");
 
   // list carries it (sorted by name then id); show answers by id AND by exact name.

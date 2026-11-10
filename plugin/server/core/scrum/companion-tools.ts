@@ -246,7 +246,7 @@ export function inspectFactorySkillPack(userHome = homedir()): FactorySkillPackI
 export function providerSkillDirectories(userHome: string): Record<string, string> {
   return Object.fromEntries([
     ['Pi', '.pi/agent/skills'], ['Claude', '.claude/skills'], ['Antigravity', '.gemini/config/skills'],
-    ...['Codex', 'ZCode'].filter(name => existsSync(join(userHome, '.' + name.toLowerCase()))).map(name => [name, '.' + name.toLowerCase() + '/skills']),
+    ...['Codex'].filter(name => existsSync(join(userHome, '.' + name.toLowerCase()))).map(name => [name, '.' + name.toLowerCase() + '/skills']),
   ].map(([name, path]) => [name!, join(userHome, path!)]));
 }
 export function ensureProviderSkillSymlinks(userHome = homedir()): { linked: string[] } {

@@ -99,10 +99,10 @@ function liveLikeConfig(): Record<string, unknown> {
 const LANES: Lanes = {
   supervisor: "opencode/glm-5.1",
   lead: "claude-code/claude-opus-5",
-  worker: "pi/zai/glm-5.3",
-  watch: "pi/zai/glm-5.3",
-  retro: "pi/zai/glm-5.3",
-  freshEyes: "pi/zai/glm-5.3",
+  worker: "pi/zcode/glm-5.3",
+  watch: "pi/zcode/glm-5.3",
+  retro: "pi/zcode/glm-5.3",
+  freshEyes: "pi/zcode/glm-5.3",
 };
 
 function readConfig(home: string): Record<string, unknown> {
@@ -175,7 +175,7 @@ test("v0.0.27 (ADR 0017 §1): reconcilePaseoRoleProviders sweeps the 29 sw2-* or
     PASEO_FACTORY_SEAT: "agent",
     PI_CODING_AGENT_DIR: join(home, "plugin-state", "paseo-factory", "pi-agent", "agent"),
   });
-  assert.deepEqual(peer.models, [{ id: "zai/glm-5.3", label: "zai/glm-5.3", isDefault: true }]);
+  assert.deepEqual(peer.models, [{ id: "zcode/glm-5.3", label: "zcode/glm-5.3", isDefault: true }]);
 
   // The picker: all 29 sw2-* rows swept, exactly one Supervisor (Factory) profile prepended.
   const profiles = (after.daemon as { agentProfiles: Record<string, unknown>[] }).agentProfiles;
@@ -293,7 +293,7 @@ test("v0.0.27 (ADR 0017 §1): effectiveLanesForReconcile reads the machine table
   // Machine file absent, no projects: the safe defaults.
   const none = effectiveLanesForReconcile(stateDir);
   assert.ok(none.ok);
-  assert.equal(none.lanes.supervisor, "pi/zai/glm-5.3");
+  assert.equal(none.lanes.supervisor, "pi/zcode/glm-5.3");
 
   // Two registered projects with overrides: the majority value per lane wins;
   // a lane only one project names takes that value; unmentioned lanes stay default.
@@ -305,19 +305,19 @@ test("v0.0.27 (ADR 0017 §1): effectiveLanesForReconcile reads the machine table
   assert.ok(folded.ok);
   assert.equal(folded.lanes.supervisor, "codex/gpt-5.5", "the majority supervisor lane wins");
   assert.equal(folded.lanes.worker, "claude-code/claude-opus-5", "the only worker vote stands");
-  assert.equal(folded.lanes.lead, "pi/zai/glm-5.3", "an unnamed lane keeps the default");
+  assert.equal(folded.lanes.lead, "pi/zcode/glm-5.3", "an unnamed lane keeps the default");
 
   // A machine lanes.json, once written, is the table of record — projects stop mattering.
   writeLanes(stateDir, { supervisor: "opencode/glm-5.1" });
   const machine = effectiveLanesForReconcile(stateDir);
   assert.ok(machine.ok);
   assert.equal(machine.lanes.supervisor, "opencode/glm-5.1", "the machine file wins when it exists");
-  assert.equal(machine.lanes.worker, "pi/zai/glm-5.3", "project-only lanes do not leak into the machine table");
+  assert.equal(machine.lanes.worker, "pi/zcode/glm-5.3", "project-only lanes do not leak into the machine table");
   // A project override file with an invalid value is skipped, never trusted (the eye.json law).
   writeFileSync(projectLanesPath(stateDir, "proj-a-111111"), JSON.stringify({ supervisor: "auto" }));
   const skipped = effectiveLanesForReconcile(join(dir, "state-2"));
   assert.ok(skipped.ok, "an invalid project entry alone never refuses");
-  assert.equal(skipped.lanes.supervisor, "pi/zai/glm-5.3");
+  assert.equal(skipped.lanes.supervisor, "pi/zcode/glm-5.3");
 });
 
 // ---- the lanesSet seam ---------------------------------------------------------------------
@@ -750,15 +750,15 @@ test("spec v0.0.91 §3: healFactoryRoleProvidersInConfig repairs a 0.15.0-beta.1
   assert.deepEqual(bareHealed.app, { desktop: true }, "unrelated user config survives the heal untouched");
 });
 
-// ---- spec v0.0.94 §3 (ADR 0046 Decision 1): the zcode base provider ------------------------
+// ---- ADR 0055: retire zcode-acp for pi/zcode/* via zcode-api ------------------------------
 
-test("spec v0.0.94 §3 (ADR 0046 Decision 1): a zcode lane auto-registers agents.providers.zcode even with the app absent, the installed app alone registers it with no zcode lane, user keys survive, and heal fills only missing keys", (t) => {
+test("ADR 0055: reconcilePaseoRoleProviders and healFactoryRoleProvidersInConfig sweep retired agents.providers.zcode entries and migrate zcode/* and pi/zai/glm-* lanes onto pi/zcode/*", (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);
-  // The injected app probe keeps both trigger arms machine-independent — the
-  // real /Applications/ZCode.app exists on the Owner's host but never enters a test.
-  const absentApp = join(dir, "missing", "ZCode.app", "Contents", "Resources", "glm", "zcode.cjs");
-  const registeredZcodeEntry = {
+  const home = join(dir, "paseo-home");
+  const legacy = liveLikeConfig();
+  const legacyProviders = (legacy.agents as { providers: Record<string, unknown> }).providers;
+  legacyProviders.zcode = {
     label: "ZCode (GLM Coding Plan)",
     extends: "acp",
     command: ["npx", "-y", "zcode-acp-server@0.82.1"],
@@ -768,263 +768,107 @@ test("spec v0.0.94 §3 (ADR 0046 Decision 1): a zcode lane auto-registers agents
       ZCODE_ACP_QUOTA_BOOT_NOTICE: "0",
     },
   };
-  const providersOf = (home: string): Record<string, Record<string, unknown>> =>
-    (readConfig(home).agents as { providers: Record<string, Record<string, unknown>> }).providers;
+  writeConfig(home, legacy);
 
-  // Arm 1 — the lane trigger: a worker zcode lane registers the base entry even
-  // when ZCode Desktop is absent from the host. The hermetic userHome keeps the
-  // per-seat provisioner (which the lane arm fires) off the operator's real
-  // ~/.zcode/skills.
-  const laneHome = join(dir, "lane-home");
-  writeConfig(laneHome, liveLikeConfig());
-  const zcodeLanes: Lanes = { ...LANES, worker: "zcode/GLM-5.3:high" };
-  const laneRun = reconcilePaseoRoleProviders(laneHome, zcodeLanes, { zcodeAppPath: absentApp, userHome: join(dir, "lane-user") });
-  assert.ok(laneRun.ok && laneRun.changed === true, "the zcode lane reconcile changes the config");
-  assert.deepEqual(providersOf(laneHome).zcode, registeredZcodeEntry, "the base zcode entry carries extends, the npx command, and exactly the factory-safe env defaults");
-  const laneAgain = reconcilePaseoRoleProviders(laneHome, zcodeLanes, { zcodeAppPath: absentApp, userHome: join(dir, "lane-user") });
-  assert.ok(laneAgain.ok && laneAgain.changed === false, "the registration is idempotent");
-
-  // The negative arm — no zcode lane and no app: nothing is registered.
-  const plainHome = join(dir, "plain-home");
-  writeConfig(plainHome, liveLikeConfig());
-  const plainRun = reconcilePaseoRoleProviders(plainHome, LANES, { zcodeAppPath: absentApp });
-  assert.ok(plainRun.ok && plainRun.changed === true);
-  assert.equal("zcode" in providersOf(plainHome), false, "no zcode lane and no app — no zcode entry");
-
-  // Arm 2 — the installed-app trigger: the app alone registers the entry with no zcode lane.
-  const appPath = join(dir, "ZCode.app", "Contents", "Resources", "glm", "zcode.cjs");
-  mkdirSync(dirname(appPath), { recursive: true });
-  writeFileSync(appPath, "#!/usr/bin/env node\n"); // a fixture file — only existsSync is consulted
-  const appHome = join(dir, "app-home");
-  writeConfig(appHome, liveLikeConfig());
-  const appRun = reconcilePaseoRoleProviders(appHome, LANES, { zcodeAppPath: appPath });
-  assert.ok(appRun.ok && appRun.changed === true);
-  assert.deepEqual(providersOf(appHome).zcode, registeredZcodeEntry, "the installed app registers the same base entry");
-
-  // Explicit user keys survive the spread — only missing plugin keys are defaulted.
-  const userHome = join(dir, "user-home");
-  const userConfig = liveLikeConfig();
-  (userConfig.agents as { providers: Record<string, unknown> }).providers.zcode = {
-    label: "My own zcode",
-    command: ["npx", "-y", "zcode-acp-server@0.99.0"],
-    env: { ZCODE_ACP_QUOTA_AUTO_RESUME: "1", ZCODE_MY_KEY: "keep" },
+  const zcodeLanes: Lanes = {
+    ...LANES,
+    supervisor: "zcode/GLM-5.3:high",
+    lead: "pi/zai/glm-5.3:high",
+    worker: "zcode/GLM-5.3-Flash:medium",
   };
-  writeConfig(userHome, userConfig);
-  const userRun = reconcilePaseoRoleProviders(userHome, LANES, { zcodeAppPath: appPath });
-  assert.ok(userRun.ok && userRun.changed === true);
-  assert.deepEqual(providersOf(userHome).zcode, {
-    label: "My own zcode",
-    extends: "acp",
-    command: ["npx", "-y", "zcode-acp-server@0.99.0"],
-    env: {
-      ZCODE_DYNAMIC_WORKFLOW_MODE: "disabled",
-      ZCODE_ACP_QUOTA_AUTO_RESUME: "1",
-      ZCODE_ACP_QUOTA_BOOT_NOTICE: "0",
-      ZCODE_MY_KEY: "keep",
-    },
-  }, "the user's label, command, and env keys survive; only absent factory-safe keys are defaulted");
+  const reconciled = reconcilePaseoRoleProviders(home, zcodeLanes);
+  assert.ok(reconciled.ok && reconciled.changed === true);
 
-  // The heal twin: an existing entry is the heal trigger with the app absent, fills only
-  // missing env keys idempotently; the app alone registers through the heal path; neither
-  // trigger registers nothing.
-  const healHome = join(dir, "heal-home");
-  const healConfig = liveLikeConfig();
-  (healConfig.agents as { providers: Record<string, unknown> }).providers.zcode = {
-    extends: "acp",
-    command: ["npx", "-y", "zcode-acp-server@0.82.1"],
-    env: { ZCODE_ACP_QUOTA_AUTO_RESUME: "1" },
-  };
-  writeConfig(healHome, healConfig);
-  assert.equal(healFactoryRoleProvidersInConfig(healHome, { zcodeAppPath: absentApp }), true, "the heal fills the missing factory-safe env keys and required label");
-  assert.equal(healFactoryRoleProvidersInConfig(healHome, { zcodeAppPath: absentApp }), false, "the second heal is a no-op");
-  assert.equal(providersOf(healHome).zcode?.label, "ZCode (GLM Coding Plan)", "the heal defaults the required Paseo custom-provider label when absent");
-  assert.deepEqual(providersOf(healHome).zcode?.env, {
-    ZCODE_DYNAMIC_WORKFLOW_MODE: "disabled",
-    ZCODE_ACP_QUOTA_AUTO_RESUME: "1",
-    ZCODE_ACP_QUOTA_BOOT_NOTICE: "0",
-  }, "the heal defaults only the missing keys — the user's quota override stands");
-
-  const healAppHome = join(dir, "heal-app-home");
-  writeConfig(healAppHome, liveLikeConfig());
-  assert.equal(healFactoryRoleProvidersInConfig(healAppHome, { zcodeAppPath: appPath }), true, "the app alone registers the entry through the heal path");
-  assert.deepEqual(providersOf(healAppHome).zcode, registeredZcodeEntry, "the heal-registered entry matches the reconcile-registered one — the two paths cannot drift");
-
-  const healNoneHome = join(dir, "heal-none-home");
-  // The opencode entry carries an explicit XDG_STATE_HOME so the v0.0.91 heal arm is a
-  // no-op and the changed flag isolates the zcode arm.
-  writeConfig(healNoneHome, {
-    agents: { providers: { opencode: { enabled: true, env: { XDG_STATE_HOME: "/Users/owner/oc-state" } } } },
-    app: { desktop: true },
-  });
-  assert.equal(healFactoryRoleProvidersInConfig(healNoneHome, { zcodeAppPath: absentApp }), false, "no entry and no app — the heal registers nothing");
-});
-
-test("spec v0.0.94 §3 (ADR 0046 Decision 2): a zcode/GLM-5.3:high lane writes the normalized replacement catalog and the per-seat clean-room env onto the role provider, with no picker modeId", (t) => {
-  const dir = makeTempDir();
-  disposeDir(t, dir);
-  const home = join(dir, "paseo-home");
-  const userHome = join(dir, "user-home"); // the hermetic skills source — the operator's real ~/.zcode is never read
-  const absentApp = join(dir, "missing", "zcode.cjs");
-  writeConfig(home, liveLikeConfig());
-  const lanes: Lanes = { ...LANES, supervisor: "zcode/GLM-5.3:high", worker: "zcode/GLM-5.3:high" };
-  const result = reconcilePaseoRoleProviders(home, lanes, { zcodeAppPath: absentApp, userHome });
-  assert.ok(result.ok && result.changed === true);
   const after = readConfig(home);
   const providers = (after.agents as { providers: Record<string, Record<string, unknown>> }).providers;
-  const factoryState = join(home, "plugin-state", "paseo-factory");
+  assert.equal("zcode" in providers, false, "the retired agents.providers.zcode entry is swept");
 
-  // The per-role record: acp-backed onto the registered base, carrying the per-seat
-  // provisionZcodeHome env (ticket 01) — the daemon-spawned zcode child reads its clean
-  // room straight off the provider entry's env.
   const supervisor = providers[FACTORY_ROLE_PROVIDERS.supervisor]!;
-  assert.equal(supervisor.extends, "acp");
-  assert.deepEqual(supervisor.command, ["npx", "-y", "zcode-acp-server@0.82.1"]);
-  const supervisorEnv = supervisor.env as Record<string, string>;
-  assert.equal(supervisorEnv.PASEO_FACTORY_SEAT, "supervisor");
-  assert.equal(supervisorEnv.ZCODE_STORAGE_DIR, join(factoryState, "zcode-home", "supervisor"));
-  assert.equal(supervisorEnv.ZCODE_SESSION_DB_PATH, join(factoryState, "zcode-home", "supervisor", "db", "db.sqlite"));
-  assert.equal(supervisorEnv.ZCODE_ACP_MODE, "guarded");
-  assert.equal(supervisorEnv.ZCODE_DYNAMIC_WORKFLOW_MODE, "disabled");
-  assert.equal(supervisorEnv.ZCODE_ACP_QUOTA_AUTO_RESUME, "0");
-  assert.equal(supervisorEnv.ZCODE_ACP_QUOTA_BOOT_NOTICE, "0");
-  assert.equal(supervisorEnv.ZCODE_DISALLOWED_TOOLS, "Write,Edit,MultiEdit,NotebookEdit,DeleteFile", "the Layer-1 seat tool lock rides the supervisor entry");
-  assert.equal("HOME" in supervisorEnv, false, "the record never overrides HOME (ADR 0046 Gap 4)");
-  assert.equal("ZCODE_HOME" in supervisorEnv, false, "the record never overrides ZCODE_HOME (ADR 0046 Gap 4)");
-
-  // The normalized replacement catalog (ADR 0046 Gap 2): the runtime id Paseo's
-  // setModelWithSelection validates, a clean display label, and the effort's thinkingOptions.
+  assert.equal(supervisor.extends, "pi", "retired zcode/GLM-5.3:high lane migrates onto pi");
   assert.deepEqual(supervisor.models, [
     {
-      id: "builtin:zai-coding-plan\\GLM-5.3",
-      label: "GLM-5.3 (Factory)",
+      id: "zcode/glm-5.3",
+      label: "zcode/glm-5.3",
+      isDefault: true,
+      thinkingOptions: [{ id: "high", label: "high", isDefault: true }],
+    },
+  ]);
+
+  const lead = providers[FACTORY_ROLE_PROVIDERS.lead]!;
+  assert.equal(lead.extends, "pi", "legacy pi/zai/glm-5.3:high lane migrates onto pi/zcode/glm-5.3:high");
+  assert.deepEqual(lead.models, [
+    {
+      id: "zcode/glm-5.3",
+      label: "zcode/glm-5.3",
       isDefault: true,
       thinkingOptions: [{ id: "high", label: "high", isDefault: true }],
     },
   ]);
 
   const peer = providers[FACTORY_ROLE_PROVIDERS.agent]!;
-  assert.equal(
-    (peer.env as Record<string, string>).ZCODE_STORAGE_DIR,
-    join(factoryState, "zcode-home", "agent"),
-    "the working Agent seat lands on the standing agent home (per-Task homes come at session time)",
-  );
-  assert.equal("ZCODE_DISALLOWED_TOOLS" in (peer.env as Record<string, string>), false, "the Peer seat carries no Layer-1 tool lock — Choke governs it");
+  assert.equal(peer.extends, "pi");
+  assert.deepEqual(peer.models, [
+    {
+      id: "zcode/glm-5.3-flash",
+      label: "zcode/glm-5.3-flash",
+      isDefault: true,
+      thinkingOptions: [{ id: "medium", label: "medium", isDefault: true }],
+    },
+  ]);
 
-  // The picker row: the Supervisor (Factory) profile's model matches its own normalized
-  // catalog, and zcode attaches no modeId.
   const profile = (after.daemon as { agentProfiles: Record<string, unknown>[] }).agentProfiles[0]!;
-  assert.equal(profile.model, "builtin:zai-coding-plan\\GLM-5.3", "the picker row carries the runtime id its catalog advertises");
-  assert.equal("modeId" in profile, false, "zcode attaches no picker modeId");
+  assert.equal(profile.model, "zcode/glm-5.3");
   assert.equal(profile.thinkingOptionId, "high");
 
-  // An explicit "<providerId>\<modelId>" lane passes through verbatim (never rewritten),
-  // with the display label stripped of the prefix.
-  const explicit = reconcilePaseoConfigObject(
-    liveLikeConfig(),
-    { ...lanes, worker: "zcode/custom:mine\\GLM-5.3-Flash:medium" },
-    { paseoHome: home, zcodeAppPath: absentApp, userHome },
-  );
-  const explicitModels = ((explicit.config.agents as { providers: Record<string, { models?: { id: string; label: string }[] }> }).providers[FACTORY_ROLE_PROVIDERS.agent])!.models!;
-  assert.equal(explicitModels[0]!.id, "custom:mine\\GLM-5.3-Flash");
-  assert.equal(explicitModels[0]!.label, "GLM-5.3-Flash (Factory)");
+  // Idempotent on second reconcile.
+  const again = reconcilePaseoRoleProviders(home, zcodeLanes);
+  assert.ok(again.ok && again.changed === false);
 
-  // A case-variant bare lane canonicalizes onto the registry's spelling (the
-  // runtime's model lookup is a case-sensitive map — spec §2 maps both GLM-5.3
-  // and glm-5.3 onto builtin:zai-coding-plan\GLM-5.3), while the label keeps
-  // the lane's own spelling.
-  const lowercased = reconcilePaseoConfigObject(
-    liveLikeConfig(),
-    { ...lanes, worker: "zcode/glm-5.3:high" },
-    { paseoHome: home, zcodeAppPath: absentApp, userHome },
-  );
-  const lowerModels = ((lowercased.config.agents as { providers: Record<string, { models?: { id: string; label: string }[] }> }).providers[FACTORY_ROLE_PROVIDERS.agent])!.models!;
-  assert.equal(lowerModels[0]!.id, "builtin:zai-coding-plan\\GLM-5.3", "a lowercase lane normalizes onto the canonical runtime id");
-  assert.equal(lowerModels[0]!.label, "glm-5.3 (Factory)", "the display label keeps the lane's spelling");
-
-  // Idempotence: the converged config reconciles to changed: false.
-  const again = reconcilePaseoRoleProviders(home, lanes, { zcodeAppPath: absentApp, userHome });
-  assert.ok(again.ok && again.changed === false, "the zcode role record reconciles idempotently");
+  // healFactoryRoleProvidersInConfig also sweeps any remaining agents.providers.zcode entry.
+  const healHome = join(dir, "heal-home");
+  writeConfig(healHome, legacy);
+  assert.equal(healFactoryRoleProvidersInConfig(healHome), true);
+  const healedProviders = (readConfig(healHome).agents as { providers: Record<string, unknown> }).providers;
+  assert.equal("zcode" in healedProviders, false, "heal sweeps agents.providers.zcode");
 });
 
-test("spec v0.0.94 §3/§4: the reconcile path's per-seat zcode provisioning reads skills from the GIVEN userHome — hermetic, never the operator's real ~/.zcode/skills", (t) => {
-  const dir = makeTempDir();
-  disposeDir(t, dir);
-  const home = join(dir, "paseo-home");
-  const userHome = join(dir, "operator");
-  const absentApp = join(dir, "missing", "zcode.cjs");
-  writeConfig(home, liveLikeConfig());
-  // The fake operator skill tree — the exact SEEDED_SKILLS discipline of
-  // test/zcode-home.test.ts: `factory` is the Owner-only exclusion case.
-  const skills = ["codebase-design", "domain-modeling", "factory", "grilling", "tdd"];
-  for (const name of skills) {
-    mkdirSync(join(userHome, ".zcode", "skills", name), { recursive: true });
-    writeFileSync(join(userHome, ".zcode", "skills", name, "SKILL.md"), `# ${name}\n`);
-  }
-  const lanes: Lanes = { ...LANES, supervisor: "zcode/GLM-5.3", lead: "zcode/GLM-5.3", worker: "zcode/GLM-5.3" };
-  const result = reconcilePaseoRoleProviders(home, lanes, { zcodeAppPath: absentApp, userHome });
-  assert.ok(result.ok && result.changed === true);
-  const factoryState = join(home, "plugin-state", "paseo-factory");
-
-  // The whole-dir Owner-parity link: supervisor's skills IS the given userHome's tree.
-  assert.equal(
-    readlinkSync(join(factoryState, "zcode-home", "supervisor", "skills")),
-    join(userHome, ".zcode", "skills"),
-    "supervisor symlinks the given userHome's skills directory — the seam flows through the reconcile path",
-  );
-  // The scoped seats: lead exactly its three core skills, the agent everything
-  // except the Owner-only `factory` — deterministic regardless of the host.
-  assert.deepEqual(
-    readdirSync(join(factoryState, "zcode-home", "lead", "skills")).sort(),
-    ["codebase-design", "domain-modeling", "tdd"],
-    "lead carries exactly the three core skills (ADR 0010 §6)",
-  );
-  assert.deepEqual(
-    readdirSync(join(factoryState, "zcode-home", "agent", "skills")).sort(),
-    ["codebase-design", "domain-modeling", "grilling", "tdd"],
-    "the agent carries every seeded skill except the Owner-only factory",
-  );
-});
-
-test("spec v0.0.94 §3: laneProviderConfig resolves a zcode lane onto the runtime model id with its thinking option intact — the feed for agent.create.before's model rewrite", () => {
-  // The advertised catalog the daemon would build from the registered base zcode entry.
+test("ADR 0055: laneProviderConfig migrates zcode/* and pi/zai/glm-* lanes onto pi with lowercase zcode/<model> and preserved thinkingOptionId", () => {
   const catalog = [
     {
-      id: "zcode",
-      provider: "zcode",
-      models: [{ id: "builtin:zai-coding-plan\\GLM-5.3", thinkingOptions: [{ id: "high" }, { id: "medium" }] }],
+      id: "pi",
+      provider: "pi",
+      models: [{ id: "zcode/glm-5.3", thinkingOptions: [{ id: "high" }, { id: "medium" }] }],
     },
   ];
 
-  // A clean lane resolves onto the runtime id, verbatim provider, and the effort's
-  // thinking option (Paseo's setModelWithSelection validates the id client-side).
   assert.deepEqual(laneProviderConfig("zcode/GLM-5.3:high", catalog), {
-    provider: "zcode",
-    model: "builtin:zai-coding-plan\\GLM-5.3",
+    provider: "pi",
+    model: "zcode/glm-5.3",
     thinkingOptionId: "high",
   });
-  // An explicit "<providerId>\<modelId>" lane passes through unchanged — never rewritten twice.
   assert.deepEqual(laneProviderConfig("zcode/builtin:zai-coding-plan\\GLM-5.3:medium", catalog), {
-    provider: "zcode",
-    model: "builtin:zai-coding-plan\\GLM-5.3",
+    provider: "pi",
+    model: "zcode/glm-5.3",
     thinkingOptionId: "medium",
   });
-  // Without an advertised catalog the thinking level still rides (the options == null law).
-  assert.deepEqual(laneProviderConfig("zcode/GLM-5.3:high", undefined), {
-    provider: "zcode",
-    model: "builtin:zai-coding-plan\\GLM-5.3",
+  assert.deepEqual(laneProviderConfig("pi/zai/glm-5.3:high", catalog), {
+    provider: "pi",
+    model: "zcode/glm-5.3",
     thinkingOptionId: "high",
   });
-  // An effort the catalog does not offer is dropped — the existing supportsThinking law.
+  assert.deepEqual(laneProviderConfig("zcode/GLM-5.3:high", undefined), {
+    provider: "pi",
+    model: "zcode/glm-5.3",
+    thinkingOptionId: "high",
+  });
   assert.deepEqual(laneProviderConfig("zcode/GLM-5.3:max", catalog), {
-    provider: "zcode",
-    model: "builtin:zai-coding-plan\\GLM-5.3",
+    provider: "pi",
+    model: "zcode/glm-5.3",
   });
-  // An effort-less lane carries no thinkingOptionId.
   assert.deepEqual(laneProviderConfig("zcode/GLM-5.3", catalog), {
-    provider: "zcode",
-    model: "builtin:zai-coding-plan\\GLM-5.3",
+    provider: "pi",
+    model: "zcode/glm-5.3",
   });
-  // Non-zcode families resolve exactly as before.
   assert.deepEqual(laneProviderConfig("opencode/glm-5.1", [{ id: "opencode", models: [{ id: "glm-5.1" }] }]), {
     provider: "opencode",
     model: "glm-5.1",

@@ -654,7 +654,7 @@ test("v0.0.13: the watch reads its lane from lanes.json — a pi lane dispatches
   disposeDir(t, dir);
   const { workspace, artifact } = makeWorkspaceAtBase(dir);
   const stateDir = join(dir, "factory");
-  writeLanes(stateDir, { watch: "pi/zai/glm-5.3" });
+  writeLanes(stateDir, { watch: "pi/zcode/glm-5.3" });
   const fake = happyCopilot();
   const factory = createFactory({ stateDir, fetchTimeline: timelineFetcher(TIMELINE).fetch, watchCopilotProbe: () => true, watchCopilotRunner: fake.runner });
 
@@ -665,11 +665,11 @@ test("v0.0.13: the watch reads its lane from lanes.json — a pi lane dispatches
 
   const watch = watchEvent(factory, "W24");
   assert.equal(watch.outcome, "written");
-  assert.equal(watch.model, "pi/zai/glm-5.3", "the lane string is the ledger's model, verbatim");
+  assert.equal(watch.model, "pi/zcode/glm-5.3", "the lane string is the ledger's model, verbatim");
   assert.equal(fake.calls[0]!.command, "pi");
   assert.deepEqual(
     fake.calls[0]!.args,
-    ["--print", "--no-session", "--no-tools", "--no-extensions", "--no-skills", "--no-context-files", "--model", "zai/glm-5.3", "--thinking", "off"],
+    ["--print", "--no-session", "--no-tools", "--no-extensions", "--no-skills", "--no-context-files", "--model", "zcode/glm-5.3", "--thinking", "off"],
     "the tool-less flags are the invariant — the pass cannot act by construction",
   );
 });
@@ -701,7 +701,7 @@ test("v0.0.38: watchLaneAvailable and runWatchPass honor the Contract workspace'
   const projectB = resolveProject(repoB);
   assert.ok(projectA.ok && projectB.ok);
   assert.notEqual(projectA.slug, projectB.slug);
-  writeLanes(stateDir, { watch: "pi/zai/glm-5.3" });
+  writeLanes(stateDir, { watch: "pi/zcode/glm-5.3" });
   writeProjectLanes(stateDir, projectA.slug, { watch: "claude/claude-sonnet-4-6" });
   writeProjectLanes(stateDir, projectB.slug, { watch: "copilot/gpt-5.4" });
 
@@ -710,8 +710,8 @@ test("v0.0.38: watchLaneAvailable and runWatchPass honor the Contract workspace'
   assert.ok(scopedA.ok, scopedA.ok ? "" : scopedA.reason);
   assert.equal(scopedA.lane, "claude/claude-sonnet-4-6", "availability probes the PROJECT's watch lane");
   const unscoped = watchLaneAvailable(stateDir, (lane) => (probed.push(lane), true));
-  assert.ok(unscoped.ok && unscoped.lane === "pi/zai/glm-5.3", "no slug keeps the machine table");
-  assert.deepEqual(probed, ["claude/claude-sonnet-4-6", "pi/zai/glm-5.3"]);
+  assert.ok(unscoped.ok && unscoped.lane === "pi/zcode/glm-5.3", "no slug keeps the machine table");
+  assert.deepEqual(probed, ["claude/claude-sonnet-4-6", "pi/zcode/glm-5.3"]);
 
   const fake = fakeCopilotRunner(() => ({ code: 0, stdout: copilotAnswerLines(ALL_FIVE) }));
   const contractOf = (workspace: string, task: string): ContractSet => ({

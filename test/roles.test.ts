@@ -718,8 +718,8 @@ test("injectRoleOnCreate fences a factory-peer Task-worktree spawn under the wor
   assert.equal(agyRes.config.mcpServers, undefined, "the antigravity branch deletes mcpServers for an agy worker lane");
 });
 
-test("zcode seats fence into guarded mode with auto_accept off and carry the clean-room ZCODE_* env — supervisor/lead get the tool lock, the working Agent does not (v0.0.94, ADR 0046 Decision 5.1)", (t) => {
-  const dir = makeTempDir("roles-zcode-fence-");
+test("legacy zcode/* lanes in lanes.json migrate to pi/zcode/* so seats and Peers fence onto the isolated Pi harness (ADR 0055)", (t) => {
+  const dir = makeTempDir("roles-zcode-migrate-");
   disposeDir(t, dir);
   const stateDir = join(dir, "state");
   const userHome = join(dir, "home");
@@ -734,14 +734,11 @@ test("zcode seats fence into guarded mode with auto_accept off and carry the cle
     `${JSON.stringify({ supervisor: "zcode/GLM-5.3:high", lead: "zcode/GLM-5.3:high", worker: "zcode/GLM-5.3:high" }, null, 2)}\n`,
   );
 
-  // The family resolution: a factory provider under a zcode lane fences as zcode.
-  assert.equal(resolveEffectiveProviderFamily("factory-supervisor", "supervisor", stateDir, slug), "zcode");
-  assert.equal(resolveEffectiveProviderFamily("factory-lead", "lead", stateDir, slug), "zcode");
-  assert.equal(resolveEffectiveProviderFamily("factory-peer", "agent", stateDir, slug), "zcode");
+  // The family resolution: a factory provider under a migrated zcode lane fences as pi.
+  assert.equal(resolveEffectiveProviderFamily("factory-supervisor", "supervisor", stateDir, slug), "pi");
+  assert.equal(resolveEffectiveProviderFamily("factory-lead", "lead", stateDir, slug), "pi");
+  assert.equal(resolveEffectiveProviderFamily("factory-peer", "agent", stateDir, slug), "pi");
 
-  // The standing seats: guarded mode, auto_accept off, and the per-seat
-  // clean-room env riding the hook's env channel (what Paseo forwards to the
-  // zcode-acp-server child process).
   for (const role of ["supervisor", "lead"] as const) {
     const res = injectRoleOnCreate<AgentCreateRequest>(
       { config: { provider: `factory-${role}`, cwd: repoDir, title: "Ship the game" }, env: {} },
@@ -749,21 +746,11 @@ test("zcode seats fence into guarded mode with auto_accept off and carry the cle
       userHome,
     );
     assert.ok(res !== undefined, `the ${role} create injects the role`);
-    assert.equal(res.config.modeId, "guarded", `${role} is pinned into zcode guarded mode`);
-    assert.equal(res.config.featureValues?.auto_accept, false, `${role} auto_accept is off — every ask routes into the choke`);
     assert.ok((res.config.mcpServers as Record<string, unknown>).paseo_factory !== undefined, `${role} keeps the paseo_factory MCP`);
-    assert.equal(res.env?.ZCODE_ACP_MODE, "guarded", `${role} env carries ZCODE_ACP_MODE=guarded`);
-    assert.equal(res.env?.ZCODE_STORAGE_DIR, join(stateDir, "zcode-home", role), `${role} env names its clean-room ZCODE_STORAGE_DIR`);
-    assert.equal(res.env?.ZCODE_SESSION_DB_PATH, join(stateDir, "zcode-home", role, "db", "db.sqlite"), `${role} env names its isolated SQLite path`);
-    assert.equal(res.env?.ZCODE_DISALLOWED_TOOLS, "Write,Edit,MultiEdit,NotebookEdit,DeleteFile", `${role} carries the Layer-1 write-tool lock`);
-    // The clean-room law (ADR 0046 Gap 4): HOME / ZCODE_HOME never ride the env.
-    assert.equal("HOME" in (res.env ?? {}), false, `${role} env never overrides HOME`);
-    assert.equal("ZCODE_HOME" in (res.env ?? {}), false, `${role} env never overrides ZCODE_HOME`);
+    assert.equal(res.env?.PI_CODING_AGENT_DIR, join(stateDir, "pi-agent", role), `${role} env names its isolated Pi harness home`);
+    assert.equal("ZCODE_STORAGE_DIR" in (res.env ?? {}), false, `${role} env no longer carries retired ZCODE_STORAGE_DIR`);
   }
 
-  // The working Agent in a Task worktree: guarded + auto_accept off (its asks
-  // route into the choke) with per-Task SQLite isolation, but NO seat tool
-  // lock — the choke judges each write, the seat keeps its tools.
   const worktreeDir = join(stateDir, "projects", slug, "worktrees", "T-08");
   mkdirSync(worktreeDir, { recursive: true });
   const peer = injectRoleOnCreate<AgentCreateRequest>(
@@ -772,31 +759,8 @@ test("zcode seats fence into guarded mode with auto_accept off and carry the cle
     userHome,
   );
   assert.ok(peer !== undefined, "the managed-worktree branch fires for the peer create");
-  assert.equal(peer.config.featureValues?.auto_accept, false, "the contracted Peer's asks route into the choke");
-  assert.equal("modeId" in peer.config, false, "the Peer carries no seat modeId — the tool lock is supervisor/lead only");
-  assert.equal(peer.env?.ZCODE_ACP_MODE, "guarded");
-  assert.equal(peer.env?.ZCODE_STORAGE_DIR, join(stateDir, "zcode-home", "tasks", slug, "T-08"), "the Peer's clean room is per-Task");
-  assert.equal(peer.env?.ZCODE_SESSION_DB_PATH, join(stateDir, "zcode-home", "tasks", slug, "T-08", "db", "db.sqlite"));
-  assert.equal("ZCODE_DISALLOWED_TOOLS" in (peer.env ?? {}), false, "the working Agent keeps its write tools — the choke judges each ask");
-
-  // The project-scope factory-skill deny (v0.2.3, the ADR 0050 Decision 6
-  // replacement): the Peer's Task worktree gains `<worktree>/.zcode/config.json`
-  // keyed on both real roots' SKILL.md paths — the only config seam a zcode
-  // session reads beside the user config — while the PROJECT ROOT the seats
-  // and the Owner share never gets one (a deny there would disable /factory
-  // for the Owner and the SLP Supervisor too).
-  const worktreeDeny = join(worktreeDir, ".zcode", "config.json");
-  assert.ok(existsSync(worktreeDeny), "the zcode Peer's worktree carries a project-scope .zcode/config.json");
-  const denyConfig = JSON.parse(readFileSync(worktreeDeny, "utf8"));
-  assert.deepEqual(
-    denyConfig.skill,
-    {
-      [join(userHome, ".agents", "skills", "factory", "SKILL.md")]: { enable: false },
-      [join(userHome, ".zcode", "skills", "factory", "SKILL.md")]: { enable: false },
-    },
-    "the worktree deny keys are the SKILL.md file paths of both real roots",
-  );
-  assert.equal(existsSync(join(repoDir, ".zcode", "config.json")), false, "the project root NEVER carries a factory-denying .zcode/config.json");
+  assert.equal(peer.env?.PI_CODING_AGENT_DIR, join(stateDir, "pi-agent", "agent"));
+  assert.equal(existsSync(join(worktreeDir, ".zcode", "config.json")), false, "no .zcode/config.json is written in the Task worktree");
 });
 
 test("injectSessionEnv binds provider-recognized supervisor and lead sessions into project.json without displacing another bound session (v0.0.27, ADR 0017 §2)", (t) => {

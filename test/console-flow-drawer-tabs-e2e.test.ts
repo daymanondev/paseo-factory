@@ -181,7 +181,7 @@ test("RG-1: the console's real snapshot drives the Agent Drawer's Session, Attem
   //    the cwd, and the snapshot's own stamp as the honest last-read time.
   assert.equal(model.supervisor.session!.provider, "pi");
   assert.equal(model.supervisor.session!.model, "z-sup");
-  assert.equal(model.supervisor.session!.lane, "pi/zai/glm-5.3");
+  assert.equal(model.supervisor.session!.lane, "pi/zcode/glm-5.3");
   assert.equal(model.supervisor.session!.status, "running");
   assert.equal(model.supervisor.session!.requiresAttention, false);
   assert.equal(model.supervisor.session!.seqEnd, 41);

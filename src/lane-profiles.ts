@@ -19,7 +19,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { FactoryError } from "./errors.ts";
-import { LANE_NAMES, laneError, lanesPath, loadLanes, projectLanesPath, saveLanes } from "./lanes.ts";
+import { LANE_NAMES, laneError, lanesPath, loadLanes, migrateLegacyZcodeLane, projectLanesPath, saveLanes } from "./lanes.ts";
 import type { LaneName, Lanes } from "./lanes.ts";
 
 /** One saved profile — the six lanes whole, an Owner-given name, and the last edit's ISO timestamp. */
@@ -89,7 +89,21 @@ export function readLaneProfilesFile(stateDir: string): LaneProfilesFile {
   if (record.profiles === undefined || record.profiles === null || typeof record.profiles !== "object" || Array.isArray(record.profiles)) {
     throw new FactoryError("profiles-unreadable", `${path} must carry a "profiles" object keyed by profile id`);
   }
-  const file: LaneProfilesFile = { profiles: record.profiles as Record<string, Omit<LaneProfile, "id">> };
+  const profiles: Record<string, Omit<LaneProfile, "id">> = {};
+  for (const [id, entry] of Object.entries(record.profiles as Record<string, Omit<LaneProfile, "id">>)) {
+    if (entry && typeof entry === "object" && entry.lanes && typeof entry.lanes === "object") {
+      const migratedLanes = { ...entry.lanes };
+      for (const name of LANE_NAMES) {
+        if (typeof migratedLanes[name] === "string") {
+          migratedLanes[name] = migrateLegacyZcodeLane(migratedLanes[name].trim());
+        }
+      }
+      profiles[id] = { ...entry, lanes: migratedLanes };
+    } else {
+      profiles[id] = entry;
+    }
+  }
+  const file: LaneProfilesFile = { profiles };
   if (record.deleted !== undefined && record.deleted !== null && typeof record.deleted === "object" && !Array.isArray(record.deleted)) {
     file.deleted = record.deleted;
   }
@@ -146,7 +160,7 @@ function validatedProfileLanes(lanes: Lanes): Lanes {
     if (error !== undefined) throw new FactoryError("invalid-lane", error);
   }
   const trimmed = {} as Lanes;
-  for (const name of LANE_NAMES) trimmed[name] = lanes[name].trim();
+  for (const name of LANE_NAMES) trimmed[name] = migrateLegacyZcodeLane(lanes[name].trim());
   return trimmed;
 }
 

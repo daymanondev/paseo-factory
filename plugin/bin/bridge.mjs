@@ -1182,7 +1182,7 @@ function resolveDefaultWorkerLane(stateDir, projectSlug, task) {
       return selected ?? frozen;
     }
   }
-  const DEFAULT_LANE = "pi/zai/glm-5.3";
+  const DEFAULT_LANE = "pi/zcode/glm-5.3";
   try {
     if (projectSlug) {
       const projLanesPath = join(stateDir, "projects", projectSlug, "lanes.json");

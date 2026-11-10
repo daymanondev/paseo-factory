@@ -10,7 +10,7 @@ export type { FactoryExecutionMode, ExecutionSelection } from "./selection.ts";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { loadLanes, parseLane } from "../lanes.ts";
+import { loadLanes, migrateLegacyZcodeLane, parseLane } from "../lanes.ts";
 import { FactoryError } from "../errors.ts";
 import { LedgerAdmission } from "../history-admission.ts";
 import { writeDurableFile } from "../history-stage.ts";
@@ -107,7 +107,11 @@ export function readScrumConfig(
       "scrum-config-invalid",
       `scrum-config-invalid: ${path}`,
     );
-  return value;
+  const migratedLanes = {} as Record<ScrumLaneName, string>;
+  for (const name of SCRUM_LANES) {
+    migratedLanes[name] = migrateLegacyZcodeLane(value.lanes[name].trim());
+  }
+  return { ...value, lanes: migratedLanes };
 }
 export function saveScrumConfig(
   state: string,
@@ -121,8 +125,13 @@ export function saveScrumConfig(
         "complete Scrum roster required",
       );
     const previous = readScrumConfig(state, slug);
+    const migratedLanes = {} as Record<ScrumLaneName, string>;
+    for (const name of SCRUM_LANES) {
+      migratedLanes[name] = migrateLegacyZcodeLane(config.lanes[name].trim());
+    }
     const next = {
       ...config,
+      lanes: migratedLanes,
       configRevision: (previous?.configRevision ?? 0) + 1,
     };
     atomicJson(join(scopeDir(state, slug), "scrum-lanes.json"), next);

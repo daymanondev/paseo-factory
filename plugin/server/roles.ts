@@ -14,8 +14,8 @@ import { SCRUM_PROMPT_MARK, SCRUM_ROLE_TITLES, renderScrumPrompt } from "./core/
  * v0.0.27, ADR 0017 §2): additive injection of the `Supervisor`, `Lead`, and
  * working-`Agent` role contracts, `Correlation token` issuance/association,
  * `paseo_factory` MCP bridge wiring, Layer-1 provider execution fences across
- * all 8 providers (`opencode`, `claude`, `codex`, `pi`, `copilot`, `omp`,
- * `antigravity`, `zcode`), and deterministic seat recognition by native role provider
+ * all 7 providers (`opencode`, `claude`, `codex`, `pi`, `copilot`, `omp`,
+ * `antigravity`), and deterministic seat recognition by native role provider
  * id (`factory-supervisor`, `factory-lead`, `factory-peer`).
  */
 import { existsSync, mkdirSync } from "node:fs";
@@ -26,7 +26,6 @@ import { CorrelationRegistry } from "./core/correlations.ts";
 import { parseLane } from "./core/lanes.ts";
 import { resolveOrBootstrapProject, resolveProject } from "./core/project.ts";
 import { provisionPiAgentHome } from "./core/pi-home.ts";
-import { denyFactorySkillInWorktree, provisionZcodeHome } from "./core/zcode-home.ts";
 import {
   FOOTER_MARK,
   ROLE_SKILL_INDEX,
@@ -130,17 +129,6 @@ export function formatPeerWorkspaceTitle(task: string, description?: string): st
  * working agent runs inside the clean room instead of the operator's global
  * `~/.pi/agent`. `userHome` overrides the operator home the shared-state
  * symlinks point back at (default `<homedir()>`; hermetic tests pass a fake).
- *
- * Since v0.0.94 (ADR 0046 Decision 4/5.1) this is also the channel a zcode
- * seat's clean-room env rides: when the seat's effective family resolves to
- * `zcode` (same resolution the Layer-1 fence keys on, `provider` carrying the
- * request's provider id), `provisionZcodeHome`'s `ZCODE_*` record —
- * `ZCODE_STORAGE_DIR`, `ZCODE_SESSION_DB_PATH`, the guarded mode, and the
- * supervisor/lead `ZCODE_DISALLOWED_TOOLS` tool lock — merges here. The env
- * rides this top-level env channel, never `config.providerOptions`, because
- * it is what Paseo forwards to the `zcode-acp-server` child process, and
- * because this seam re-applies on every session open — the clean room
- * survives relaunches, not just the create.
  */
 export function factoryEnvFor(
   role: RoleName,
@@ -170,76 +158,6 @@ export function factoryEnvFor(
   if (input.task !== undefined) env.PASEO_FACTORY_TASK = input.task;
   if (input.correlationId !== undefined && input.correlationId !== "") {
     env.PASEO_FACTORY_CORRELATION = input.correlationId;
-  }
-  // The zcode clean-room twin (v0.0.94, ADR 0046 Decision 4): the same
-  // effective-family resolution the Layer-1 fence keys on decides whether the
-  // seat's `ZCODE_*` storage env rides — a factory provider resolves through
-  // the role's Lane config, a raw provider through its own family — so the
-  // config fence and the child env can never disagree on the harness.
-  // Since v0.2.0 (ADR 0049 §1) a Scrum execution reroutes the clean room under
-  // `<projectStateDir>/scrum/zcode-home/...` (the twin of the Pi
-  // `scrum/harness` hierarchy provisioned above, same `generation`) and pairs
-  // it with the rendered Scrum contract plus the Scrum role-scoped skill
-  // allowlist — the file channel `zcode.cjs` reloads every turn, since
-  // `config.systemPrompt` never rides ACP. SLP calls (no execution) stay
-  // byte-identical to the pre-Scrum shape.
-  if (resolveEffectiveProviderFamily(input.provider, role, input.stateDir, input.project.slug, input.task) === "zcode") {
-    // The project-scope factory-skill deny (v0.2.3, the ADR 0050 Decision 6
-    // replacement): a Task worktree workspace — never the project root, which
-    // the Owner and the SLP Supervisor share — gains `<worktree>/.zcode/config.json`
-    // carrying the `SKILL.md`-path `skill` overrides, the only config seam a
-    // zcode session actually reads beside the user config. Idempotent, so the
-    // session_open re-apply never duplicates anything.
-    if (input.task !== undefined) {
-      denyFactorySkillInWorktree(workspace, input.userHome ?? homedir());
-    }
-    // The Scrum role the clean room renders the contract and scopes skills
-    // for — the same narrowing provisionScrumHarness applies
-    // (src/scrum/harness.ts): a task execution carries its bound specialist
-    // role, while a seat identity only ever attaches to a supervisor/lead
-    // seat — the `agent` role reaches this seam only alongside a task
-    // worktree, which resolves a task-kind execution (or none), so the cast
-    // below is the documented invariant, never a silent trust of `agent`.
-    const scrumRole =
-      execution?.kind === "task"
-        ? execution.binding.role
-        : (role as "supervisor" | "lead");
-    Object.assign(env, provisionZcodeHome({
-      stateDir: input.stateDir,
-      role,
-      projectSlug: input.project.slug,
-      ...(input.task !== undefined ? { task: input.task } : {}),
-      ...(input.userHome !== undefined ? { userHome: input.userHome } : {}),
-      ...(execution === undefined ? {} : {
-        scrum: execution.kind === "seat"
-          ? { kind: "seat", selectionRevision: execution.selectionRevision, generation: input.correlationId ?? "initial", authority: role }
-          : { kind: "task", runId: execution.binding.runId, task: execution.task, epoch: execution.epoch },
-        systemPrompt: renderScrumPrompt(scrumRole, {
-          project: input.project.slug,
-          workspace,
-          ...(execution.kind === "task"
-            ? {
-                run: readScrumRun(input.stateDir, input.project.slug, execution.binding.runId),
-                task: execution.task,
-                runId: execution.binding.runId,
-                epoch: execution.epoch,
-              }
-            : {}),
-        }),
-        // The Scrum supervisor keeps full host skills minus the Owner-only
-        // `factory` skill (the provisioner's Scrum-supervisor policy); the
-        // Scrum lead and every specialist get exactly their role-scoped set.
-        ...(role === "supervisor" ? {} : {
-          allowedSkills: resolveRoleSkillsForProject({
-            role: scrumRole,
-            projectRoot: execution.projectRoot ?? readProjectRegistration(input.stateDir, input.project.slug)?.root,
-            configuredPacks: execution.configuredPacks ?? readExecution(input.stateDir, input.project.slug).skillPacks,
-            contractSkills: execution.contractSkills,
-            userHome: input.userHome,
-          }),
-        }),
-      }),
-    }));
   }
   return env;
 }
@@ -526,22 +444,6 @@ export function applyProviderExecutionFence<T extends AgentCreateRequest["config
         role === "supervisor"
           ? "https://agentclientprotocol.com/protocol/session-modes#plan"
           : "https://agentclientprotocol.com/protocol/session-modes#agent";
-    }
-  } else if (providerFamily === "zcode") {
-    // Layer 1 (v0.0.94, ADR 0046 Decision 5.1): guarded mode + auto_accept
-    // off routes every Write/Edit/MultiEdit/NotebookEdit/DeleteFile and Bash
-    // ask through `interaction/requestPermission` into the choke (Layer 2).
-    // The supervisor/lead write-tool lock itself rides ZCODE_DISALLOWED_TOOLS
-    // in the clean-room env (`factoryEnvFor` → `provisionZcodeHome`) — the
-    // channel zcode-acp-server forwards into `session/create`'s toolDenylist;
-    // the config carries no equivalent field.
-    if (role === "supervisor" || role === "lead") {
-      nextConfig.featureValues = { ...existingFeatures, auto_accept: false };
-      nextConfig.modeId = "guarded";
-    } else if (role === "agent") {
-      // A contracted Peer keeps its write tools — its asks route into the
-      // choke, which auto-allows safe worktree edits and blocks the rest.
-      nextConfig.featureValues = { ...existingFeatures, auto_accept: false };
     }
   } else if (providerFamily === "omp") {
     if (role === "supervisor" || role === "lead") {
