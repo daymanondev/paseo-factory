@@ -590,7 +590,6 @@ export function PluginsPane({
 }) {
   const running = view.companions.filter((c) => c.status === "running").length;
   const companionTools = view.companionTools ?? [];
-  const toolsRunning = companionTools.filter((t) => t.status === "running").length;
   // Public companions & companion tools — a private invite-only companion (factory-release-lab) that stays
   // not_installed must never keep the Install All button lit (v0.0.30, ADR 0012 §2; ADR 0036 §5).
   const anyUninstalled =
@@ -698,6 +697,36 @@ export function PluginsPane({
           onDismissError={dismissCardError ? () => dismissCardError(companion.id) : undefined}
         />
       ))}
+    </View>
+  );
+}
+
+/**
+ * The Skills & Tools section's body (v0.6.0 W8, ADR 0056 §7): Companion tools
+ * (the fallback cards when the Skill Hub did not load), the Skill Hub and the
+ * Helper MCPs — split out of the plugin cards so Plugins stays about updates.
+ */
+export function SkillsToolsPane({
+  theme,
+  view,
+  actions,
+  activeAct = null,
+  elapsedSeconds = 0,
+  cardErrors = {},
+  dismissCardError,
+}: {
+  theme: PluginTheme;
+  view: FactoryView;
+  actions: PluginsActions;
+  activeAct?: ActivePluginAct | null;
+  elapsedSeconds?: number;
+  cardErrors?: Readonly<Record<string, string>>;
+  dismissCardError?: (pluginId: string) => void;
+}) {
+  const companionTools = view.companionTools ?? [];
+  const toolsRunning = companionTools.filter((t) => t.status === "running").length;
+  return (
+    <View style={{ gap: SPACING[2.5] }}>
       {companionTools.length > 0 && !view.skillHub ? (
         <View style={{ gap: SPACING[2], marginTop: SPACING[1] }}>
           <Card theme={theme} gap={SPACING[1]}>

@@ -24,28 +24,19 @@ import type { AgentView, CompanionPluginView, FactoryView } from "../plugin/shar
 
 const read = (rel: string): string => readFileSync(join(repoRoot, rel), "utf8");
 
-test("TabId is the three Settings-type panes (seats, vault, plugins) and the TabBar renders the Vault and Plugins tabs", () => {
+test("v0.6.0 W8 (ADR 0056 §7): the interim tab bar is gone — the Settings screen's sections replace the Seats / Vault / Plugins tabs", () => {
   const pill = read("plugin/client/kit/pill.tsx");
-  assert.match(pill, /export type TabId = "seats" \| "vault" \| "plugins";/);
-  assert.doesNotMatch(pill, /"tasks"|"timeline"|Timeline & Retro/, "the Tasks and Timeline & Retro tabs are gone");
-  assert.match(pill, /\{ id: "vault", label: "Vault", icon: "Shield" \}/);
-  assert.match(pill, /\{ id: "plugins", label: "Plugins", icon: "Blocks" \}/);
+  assert.doesNotMatch(pill, /TabBar|TabId/, "the tab bar and its ids are deleted");
+  const settings = read("plugin/client/factory/settings.tsx");
+  for (const title of ["Default models & Lane profiles", "Skills & Tools", "Plugins", "Vault", "Diagnostics"]) {
+    assert.ok(settings.includes(title), `the Settings screen has a ${title} section`);
+  }
 });
 
-test("the TabBar badge keeps its count > 0 rendering law — zero running companions shows no badge", () => {
-  const pill = read("plugin/client/kit/pill.tsx");
-  assert.match(
-    pill,
-    /typeof count === "number" && count > 0/,
-    "the pre-existing law a count chip renders only when count > 0 stays untouched (the counts formula alone is this ticket's mandate)",
-  );
-});
-
-test("FactoryShell passes plugins: running companions count and renders PluginsPane in the tab === \"plugins\" slot", () => {
+test("FactoryShell renders PluginsPane (Plugins) and SkillsToolsPane (Skills & Tools) as Settings section bodies", () => {
   const shell = read("plugin/client/factory/shell.tsx");
-  assert.match(shell, /plugins: view\.companions\.filter\(\(c\) => c\.status === "running"\)\.length/, "the spec's exact counts formula");
-  assert.match(shell, /tab === "plugins" \?/);
-  assert.match(shell, /<PluginsPane/);
+  assert.match(shell, /plugins: \(\s*<PluginsPane/);
+  assert.match(shell, /<SkillsToolsPane/);
 });
 
 test("FactoryShell owns the plugins RPC pair — one useRpc per contract, dispatched through act()", () => {
@@ -185,7 +176,7 @@ test("v0.0.35 Seam 2.1: VaultPane / VaultSyncBar moves out of Header into the de
   assert.match(vault, /vaultNote/, "VaultSyncBar renders the inline vaultNote banner");
 
   const shell = read("plugin/client/factory/shell.tsx");
-  assert.match(shell, /tab === "vault" \?/, "FactoryShell renders VaultPane in the tab === \"vault\" slot");
+  assert.match(shell, /vault: vaultPane/, "FactoryShell renders VaultPane as the Settings screen's Vault section");
   assert.match(shell, /<VaultPane/, "FactoryShell mounts VaultPane");
   assert.equal((shell.match(/<VaultPane/g) ?? []).length, 1, "FactoryShell defines a single shared <VaultPane element rather than duplicating JSX");
   assert.match(vault, /export function readAgo\(/, "vault.tsx exports shared readAgo helper");
@@ -887,17 +878,19 @@ test("v0.6.0 W4 (ADR 0056): no Kanban, Timeline, Retro or Seat graph source surv
   }
   const seats = read("plugin/client/factory/seats.tsx");
   assert.doesNotMatch(seats, /Seat Graph|All projects|Retro/, "SeatsPane carries no Seat graph, All projects view or Retro wording");
-  assert.match(seats, /No Project · View-only/, "SeatsPane is view-only when the workspace is not a Project");
+  assert.doesNotMatch(seats, /No Project · View-only/, "SeatsPane is the machine-wide pane now — never view-only for want of a Project");
 });
 
 test("ADR 0036: FactoryShell renders the Prerequisite Setup Gate banner when companionTools are missing/incomplete and PluginsPane protects mandatory companionTools against Disable/Remove", () => {
+  const settings = read("plugin/client/factory/settings.tsx");
   const shell = read("plugin/client/factory/shell.tsx");
   const plugins = read("plugin/client/factory/plugins.tsx");
   const companions = read("plugin/shared/companions.ts");
 
-  assert.match(shell, /PREREQUISITE SETUP GATE/, "FactoryShell renders PREREQUISITE SETUP GATE badge when tools are missing/incomplete");
-  assert.match(shell, /Required Factory Skills & Tools Setup/, "FactoryShell renders the Prerequisite Setup Gate title");
-  assert.match(shell, /Install Required Skills & Tools/, "FactoryShell exposes 1-click Install Required Skills & Tools CTA");
+  assert.match(settings, /PREREQUISITE SETUP GATE/, "the Skills & Tools section renders PREREQUISITE SETUP GATE badge when tools are missing/incomplete");
+  assert.match(settings, /Required Factory Skills & Tools Setup/, "the Prerequisite Setup Gate title");
+  assert.match(settings, /Install Required Skills & Tools/, "1-click Install Required Skills & Tools CTA");
+  assert.match(shell, /<PrerequisiteSetupCard/, "FactoryShell mounts the card inside the Skills & Tools section, not on the Project panel");
   assert.match(plugins, /REQUIRED TOOL/, "CompanionCard renders REQUIRED TOOL badge for companion tools");
   assert.match(plugins, /Required by Factory \(Disable\/Remove locked\)/, "CompanionCard locks Disable/Remove on mandatory companion tools");
   assert.match(companions, /git:mattpocock\/skills \+ anthropics\/skills \+ vercel-labs\/agent-skills/, "COMPANION_TOOLS_CATALOG declares canonical GitHub skill sources");
@@ -935,7 +928,7 @@ test("ADR 0039: HelperMcpsCard renders a compact 2-row summary card with a colla
 
 
 
-test('PluginsPane SSR renders Skill Hub inventory and Project pack controls', async () => {
+test('SkillsToolsPane SSR renders Skill Hub inventory and Project pack controls', async () => {
   const { build } = await import('esbuild');
   const { createRequire } = await import('node:module');
   const { createElement } = await import('react');
@@ -953,7 +946,7 @@ test('PluginsPane SSR renders Skill Hub inventory and Project pack controls', as
     new Function('require', 'module', 'exports', bundle.outputFiles[0]!.text)(createRequire(import.meta.url), compiled, compiled.exports);
     const theme = { colors: { surface0: '#ffffff', surface1: '#f5f5f5', surface2: '#eeeeee', foreground: '#111111', foregroundMuted: '#555555', accent: '#3355aa', border: '#cccccc', statusSuccess: '#217342', statusWarning: '#8a6010', statusDanger: '#ae3131' } };
     const view = { ...makeViewWithCore(), corePlugin: makeCorePluginFixture(), companions: [], companionTools: [], pluginsCheckedAt: null, skillHub: inspectSkillHub({ userHome: home }), project: { root: '/project' } };
-    const html = renderToStaticMarkup(createElement(compiled.exports.PluginsPane, { theme, view, actions: { busy: false, install() {}, manage() {}, checkUpdates() {}, togglePack() {}, importSkill() {} } }));
+    const html = renderToStaticMarkup(createElement(compiled.exports.SkillsToolsPane, { theme, view, actions: { busy: false, install() {}, manage() {}, checkUpdates() {}, togglePack() {}, importSkill() {} } }));
     assert.match(html, /Skill Hub — Inventory, Host Ecosystems &amp; Role Matrix/);
     assert.match(html, /Installed in Factory \(0\)/);
     assert.match(html, /Host Ecosystems \(1\)/);

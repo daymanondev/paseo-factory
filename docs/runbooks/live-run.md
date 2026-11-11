@@ -73,8 +73,8 @@ The exporter reads persisted agent records and `~/.gemini/antigravity-cli/conver
   selected provider's CLI binary is on the daemon's PATH.
 - `factory run <task>` may omit `--provider` when `lanes.worker` in
   `lanes.json` is set (default `pi/zai/glm-5.3`); inspect or change lanes via
-  `node plugin/bin/factory.mjs --home ~/.paseo-factory lanes` or the **Seats &
-  Models** tab in the Paseo Factory UI.
+  `node plugin/bin/factory.mjs --home ~/.paseo-factory lanes` or the Settings
+  screen's Default models & Lane profiles section in Paseo.
 
 ## 2. Baseline — mandatory, before the agent exists
 

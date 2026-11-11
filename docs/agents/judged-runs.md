@@ -116,11 +116,11 @@ corrected the operator's own arithmetic error in the record, not quietly in
 place.
 
 Standing law over every pass and CLI in the factory: they never judge and
-never accept. The fresh-eyes review, the Watch, the Meter and the Retro are
+never accept. The fresh-eyes review, the Watch, and the Meter are
 passengers and recorders — advisory ledger lines, evidence for the Owner;
 the battery runners assert mechanical outcomes; the Driver stops at
 verdicts; `factory-claim` answers red/green on a Claim, it never rules a
 check. Acceptance is the Owner's alone — the exemplar's two green Attempts
 were accepted at seq 1427–1428, `accepted_by: owner`. Findings that should
-become law ride the Retro → Proposal → Ratification path: the factory
+become law ride the Wave Hardening → Proposal → Ratification path: the factory
 proposes; only the Owner ratifies.

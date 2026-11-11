@@ -1,7 +1,7 @@
 # 0051 — Standalone Factory Web Console: Plugin Sidecar Transport, In-Console Owner ↔ Supervisor Chat, and Native Read-Only Transcripts
 
 - **Date:** 2026-11-07
-- **Status:** Accepted — the Owner ratified every recommended option in `.scratch/factory-web-app/00-design-outcome-and-gap-analysis.md` (§3.2, §3.3, §3.4, §4, §5, §6), relayed by `Supervisor` directive to `Lead`.
+- **Status:** Superseded by [ADR 0056](0056-slim-factory-panel-slp-only-and-guided-onboarding.md) — the standalone Web Console and its Console sidecar are deleted in v0.6.0; the Paseo plugin client is the sole Factory surface. (Originally: Accepted — the Owner ratified every recommended option in `.scratch/factory-web-app/00-design-outcome-and-gap-analysis.md` (§3.2, §3.3, §3.4, §4, §5, §6), relayed by `Supervisor` directive to `Lead`.)
 - **Amends:** the `Factory surface` glossary entry in `CONTEXT.md` (surface set and the "never replaces the Paseo chat pane" clause) · `AGENTS.md` runtime note · **preserves** [ADR 0017](0017-native-paseo-role-providers-and-slp-seat-recognition.md) unchanged · governed by [ADR 0004](0004-single-writer-plugin-cli-submits.md) (single writer) and [ADR 0044](0044-vertical-wave-slicing-contract-bounded-review-reply-first-handoff-heredoc-choke-and-worktree-process-reaping.md) (vertical serial waves).
 - **Design source:** Open Design project "Redesign Paseo Factory" (`d6bf74c0-1476-4625-8d97-aa361f37a4d4`, linked via `design/open-design-link.json`, which is plugin-owned and never overwritten).
 

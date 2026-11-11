@@ -1,6 +1,6 @@
 /**
  * The surface's small UI kit: the Evidence Pill, the button, the filter
- * chip, the tab bar — function components over raw react-native primitives,
+ * chip — function components over raw react-native primitives,
  * theme colours only. PigMonitor's shapes, factory vocabulary.
  */
 import type { PluginTheme } from "@getpaseo/plugin";
@@ -231,110 +231,6 @@ export function Chip({
         </View>
       ) : null}
     </Pressable>
-  );
-}
-
-export type TabId = "seats" | "vault" | "plugins";
-
-/** The three-tab segmented bar — the Settings-type panes that stay reachable until the Settings screen relocates them (ADR 0056). */
-export function TabBar({
-  theme,
-  active,
-  onPick,
-  counts,
-  compact = false,
-}: {
-  theme: PluginTheme;
-  active: TabId | null;
-  onPick: (tab: TabId) => void;
-  counts?: Partial<Record<TabId, number>>;
-  compact?: boolean;
-}) {
-  const tabs: { id: TabId; label: string; shortLabel?: string; icon: string }[] = [
-    { id: "seats", label: "Seats & Models", shortLabel: "Seats", icon: "Cpu" },
-    { id: "vault", label: "Vault", icon: "Shield" },
-    { id: "plugins", label: "Plugins", icon: "Blocks" },
-  ];
-  return (
-    <View
-      style={{
-        flexDirection: "row",
-        alignItems: "center",
-        alignSelf: compact ? "stretch" : "flex-start",
-        flexWrap: "wrap",
-        gap: 4,
-        padding: 3,
-        borderRadius: RADIUS.lg,
-        borderWidth: 1,
-        borderColor: theme.colors.border,
-        backgroundColor: theme.colors.surface1,
-      }}
-    >
-      {tabs.map((tab) => {
-        const on = tab.id === active;
-        const count = counts?.[tab.id];
-        return (
-          <Pressable
-            key={tab.id}
-            accessibilityRole="tab"
-            onPress={() => onPick(tab.id)}
-            style={(state) => ({
-              minHeight: CONTROL_H - 4,
-              paddingHorizontal: compact ? SPACING[2] : SPACING[3],
-              paddingVertical: 4,
-              borderRadius: RADIUS.md,
-              borderWidth: 1,
-              borderColor: on ? tint(theme.colors.accent, "77") : "transparent",
-              backgroundColor: on
-                ? tint(theme.colors.accent, "1f")
-                : state.pressed || hoveredOf(state)
-                  ? theme.colors.surface2
-                  : "transparent",
-              flexDirection: "row",
-              alignItems: "center",
-              justifyContent: "center",
-              ...(compact ? { flexGrow: 1 } : {}),
-              gap: SPACING[1.5],
-            })}
-          >
-            <Icon name={tab.icon} size={13} color={on ? theme.colors.accent : theme.colors.foregroundMuted} />
-            <Text
-              style={{
-                ...text(theme, "section"),
-                fontSize: compact ? 12 : 13,
-                fontWeight: on ? "600" : "500",
-                color: on ? theme.colors.accent : theme.colors.foreground,
-              }}
-              numberOfLines={1}
-            >
-              {compact && tab.shortLabel !== undefined ? tab.shortLabel : tab.label}
-            </Text>
-            {typeof count === "number" && count > 0 ? (
-              <View
-                style={{
-                  paddingHorizontal: 5,
-                  paddingVertical: 1,
-                  borderRadius: RADIUS.sm,
-                  backgroundColor: on ? tint(theme.colors.accent, "33") : theme.colors.surface2,
-                }}
-              >
-                <Text
-                  style={{
-                    ...text(theme, "badge"),
-                    fontSize: 10,
-                    lineHeight: 13,
-                    fontVariant: ["tabular-nums"],
-                    color: on ? theme.colors.accent : theme.colors.foregroundMuted,
-                  }}
-                >
-                  {count}
-                </Text>
-              </View>
-            ) : null}
-          </Pressable>
-        );
-      })}
-    </View>
   );
 }
 

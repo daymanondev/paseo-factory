@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-11
+
+**Breaking release** (ADR 0056): the Factory becomes a small, SLP-only panel inside the Paseo workspace of the Project it serves. SLP is the only workflow, the Paseo plugin client is the only surface, and everything below ships together as one release.
+
+### Removed
+
+- The Agile Scrum mode, end to end: `src/scrum/`, the Scrum MCP tool catalog and role contracts, the Scrum CLI, Scrum lanes and profiles, Execution mode, Scrum roles, Owner waits, Task allowances, Owner allowance grants and the UI Design Approval Checkpoint. A Project that was in Scrum mode opens as a normal SLP Project.
+- The standalone Web Console and its localhost Console sidecar: `web/`, `plugin/web/`, the generated console bundle, `factory console`, and the console-only RPCs. The server timeline feed stays (the Watch reads it).
+- The on-demand Daily Retro: `factory retro`, the Command Center "Run Daily Retro" action, the proposals file writer and the `retro` lane. Recurrence Guard, Wave Hardening, the Project notebook and notebook graduation are unchanged, and Proposals still reach the Owner through the Lead's report via the Supervisor.
+- The Task Kanban, Timeline swimlane, Ledger stream, Seat graph, Project Switcher, "All projects" view, the global Factory screen with its sidebar row, and the Accept button. Acceptance stays with the Lead (or the Supervisor on the Owner's word).
+- RPCs removed (they now answer with the standard unknown-method failure): every Scrum and execution-mode RPC, `factory.retro`, `factory.retro.ratify`, `factory.inbox`, the agent-transcript RPC, the console door, the client-invoked `accept`, `factory.task.detail`, `factory.project.pick.folder` and `factory.project.add` (the folder-picker and paste-path flow is gone).
+
+### Added
+
+- **Project panel** (workspace panel): one panel is one Project, the one bound to the open Paseo workspace. The server projects the view-model (`FactoryView.panel`, view version 4) and the client renders it: a header with a one-line summary and a `⋯` menu, **Needs you** (only when something does: `needs-human` Tasks, Tasks red at the Attempt ceiling, errored or stuck seats, a stuck Lead handoff, missing prerequisites, a broken Open Design link), **Seats** (Supervisor, Lead with its `Nk / 128k` context bar and Lead handoff state, live Peers), and the **Open Design** card. Colour appears only for errors, waiting states and Needs-you items.
+- **Header `⋯` menu**: per-Project Supervisor, Lead and Worker model overrides, skill packs, Open Design link and unlink, and two-step Reset and Delete Project.
+- **Guided onboarding** for a workspace that is not yet a Project (desktop only): Folder, Prerequisites, Models, Start. New RPCs `factory.onboarding.inspect` (read-only folder inspection) and `factory.onboarding.commit` (registers the Project, optionally runs `git init`, persists model choices and the Open Design link, starts the Supervisor with the first directive).
+- **Start Supervisor** on a vacant Supervisor row (`factory.supervisor.start`, sharing the onboarding seat-start path). The plugin may create a Supervisor seat only from onboarding Start or a vacant Supervisor row, and never a Lead (ADR 0017 amended).
+- **Settings screen**: one scrolling screen of collapsible machine-wide sections (Default models & Lane profiles, Skills & Tools with the Skill Hub, Companion tools and Helper MCPs, Plugins, Vault, Diagnostics); sections with a warning open by default and the rest start collapsed. It carries the prerequisite setup card and keeps Vault sync reachable. Lane and profile edits on this screen write the machine table. Settings are view-only on mobile.
+- **Mobile**: the plugin opens cleanly on Paseo iOS/Android as a monitor with quick actions (Open, Rotate, Revoke). The mobile crash is fixed (no unguarded `window.addEventListener`, Studio through the SDK `DocumentFrame` instead of DOM elements, an iOS-safe monospace font), and the client bundle Gate now refuses unguarded browser event APIs and DOM element creation.
+- Per-Project `project-settings.json` (Open Design link, source, checkpoint paths, skill packs; no execution mode). Open Design linking, staging, preview and catalog moved into their own core module with no dependency on Scrum run state.
+- `Command Center`: exactly one action, "Open Factory Panel".
+
+### Changed
+
+- The Lane config is five lanes (supervisor, lead, worker, watch, freshEyes). A stale `retro` key in an older `lanes.json` is ignored on read and dropped on the next save.
+- Ledger validation and folding accept and ignore the historical `execution` field on `contract_set` events and keep reading historical `retro_written` events; neither shape is written any more.
+- `CONTEXT.md` rewritten to describe only what v0.6.0 does (Factory surface, Lane config, Lane profile, Pi harness home, Role-scoped MCP bridge, Seat kickoff packet, Skill hub, Open Design project link and related terms), with a "Retired in v0.6.0" section; the glossary and role instructions never describe removed features. ADR 0038, 0049 and 0051 are marked Superseded by ADR 0056 and ADR 0017 is marked Amended. README, runbooks and judged-run notes swept of stale Scrum, Retro and console mentions.
+
+### Upgrade
+
+- A one-time, idempotent boot cleanup migrates each Project's legacy `execution.json` into `project-settings.json` (carrying the Open Design link and skill packs) before deleting it, then removes `scrum-lanes.json`, `scrum-profiles.json`, `scrum-active-profile.json`, `execution-switch.json` and every Project's `scrum/` run directory. The settings record is written before the legacy record is removed, so a crash mid-upgrade resumes correctly.
+
 ## [0.5.1] - 2026-11-11
 
 - Retire the `zcode` ACP harness (`zcode-acp-server`) in favor of `pi` over the local `zcode-api` proxy (ADR 0055, superseding ADR 0046): `DEFAULT_LANE` is now `"pi/zcode/glm-5.3"`, and `migrateLegacyZcodeLane` (`src/lanes.ts`, `src/lane-profiles.ts`, `src/scrum/config.ts`, `plugin/bin/lanes-config.mjs`, `plugin/bin/scrum-config.mjs`) transparently rewrites legacy `zcode/<model>[:<thinking>]` (including `zcode/builtin:zai-coding-plan\GLM-5.3` and `zcode/builtin:zai-start-plan\GLM-5.3-Flash`) and `pi/zai/glm-<model>[:<thinking>]` strings to `"pi/zcode/<lowercase-model>[:<thinking>]"` on load and save across `lanes.json`, `scrum-lanes.json`, and `profiles.json`.
