@@ -13,16 +13,12 @@ import {
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { FactoryError } from "../errors.ts";
-import { safeId } from "./types.ts";
+import { safeId } from "../safe-id.ts";
 export type FactoryExecutionMode = "slp" | "scrum";
 export interface ExecutionSelection {
   schemaVersion: 1;
   mode: FactoryExecutionMode;
   revision: number;
-  skillPacks?: string[];
-  openDesignCheckpointPaths?: string[];
-  openDesignSource?: { kind: 'host' | 'client'; requestId?: string; acknowledgedRequestId?: string };
-  openDesignLink?: import("./open-design-link.ts").OpenDesignProjectLink;
 }
 export function selectionPath(state: string, slug?: string): string {
   if (slug !== undefined && !safeId(slug))
@@ -39,8 +35,7 @@ export function executionIsValid(value: unknown): value is ExecutionSelection {
     v.schemaVersion === 1 &&
     ["slp", "scrum"].includes(v.mode) &&
     Number.isSafeInteger(v.revision) &&
-    v.revision >= 0 &&
-    (v.skillPacks === undefined || (Array.isArray(v.skillPacks) && v.skillPacks.every(p => typeof p === "string")))
+    v.revision >= 0
   );
 }
 export function readExecution(

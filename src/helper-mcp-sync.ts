@@ -1,4 +1,4 @@
-import { inspectOpenDesignHost } from "./scrum/open-design.ts";
+import { inspectOpenDesignHost } from "./open-design/open-design.ts";
 /** Peer-only Helper MCP discovery, credential reconciliation and bounded health checks (ADR 0039). */
 import { createHash } from "node:crypto";
 import { existsSync, accessSync, constants, readdirSync, lstatSync, mkdirSync, rmSync, symlinkSync } from "node:fs";

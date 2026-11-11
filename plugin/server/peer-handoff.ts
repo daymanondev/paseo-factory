@@ -6,7 +6,7 @@ import type { Factory } from "./core/factory.ts";
 import type { ContractSet, LedgerEvent } from "./core/events.ts";
 import { projectStateDir } from "./core/project.ts";
 import { projectTask } from "./core/task-state.ts";
-import { atomicJson, readOptionalJson } from "./core/scrum/config.ts";
+import { atomicJson, readOptionalJson } from "./core/json-store.ts";
 import { taskWorktreeBranch } from "./core/workspace.ts";
 import type { LeadTurnEndedInput } from "./lead-mailbox.ts";
 import type { SurfaceAgentSnapshot, SurfaceDaemonApi } from "./surface-rpc.ts";

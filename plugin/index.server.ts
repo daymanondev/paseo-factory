@@ -36,6 +36,7 @@ import { createLeadMailRuntime } from "./server/lead-mailbox.ts";
 import { syncPeerHelpersBeforeCreate, injectRoleOnCreate, injectSessionEnv, sanitizeAgentCreateHookResult } from "./server/roles.ts";
 import { factoryRegistryFor } from "./server/projects.ts";
 import { listProjectRegistrations } from "./server/core/project.ts";
+import { migrateLegacyExecutionState } from "./server/core/project-settings.ts";
 // The one-time root-to-Project split & compact migration (v0.0.89, ADR 0045
 // §2): lands from src/ledger-migration.ts through the vendored core copy —
 // the binding signature is
@@ -136,6 +137,16 @@ export default function contribute(server: PluginServerContext) {
   const initializeOrdinaryRuntime = (): void => {
     if (booted || pendingUpgradeFor(stateDir) !== undefined) return;
     factory.history.runSync(() => {
+      // The one-time v0.6.0 cleanup (ADR 0056): legacy execution records become
+      // project-settings.json and every Scrum artefact is removed. Idempotent
+      // and crash-convergent, so it simply runs at every ordinary boot.
+      try {
+        const cleaned = migrateLegacyExecutionState(stateDir);
+        if (cleaned.migrated.length > 0) log(`migration: ${cleaned.migrated.length} Project execution record(s) moved to project-settings.json`);
+        if (cleaned.unreadable.length > 0) log(`migration: unreadable legacy execution record left in place for ${cleaned.unreadable.join(", ")}`);
+      } catch (error) {
+        log(`migration: legacy execution cleanup deferred — ${error instanceof Error ? error.message : String(error)}`);
+      }
       pluginDir = pluginDirFor(home) ?? pluginDir;
       if (pluginDir === undefined) {
         ensureFactoryBinScripts(stateDir);

@@ -1,8 +1,8 @@
-import { setProjectSkillPacks } from "./core/scrum/config.ts";
-import { linkedPreviewBundle } from "./core/scrum/preview-bundle.ts";
-import { serveLinkedPreview } from "./core/scrum/preview-server.ts";
-import { seedLinkedOpenDesign } from "./core/scrum/open-design-link.ts";
-import { discoverOpenDesignProjects, exportOpenDesignProject, syncOpenDesignLink, readOpenDesignLink, unlinkOpenDesign, prepareOpenDesignDispatch } from "./core/scrum/open-design-link.ts";
+import { readProjectSettings, setProjectSkillPacks } from "./core/project-settings.ts";
+import { linkedPreviewBundle } from "./core/open-design/preview-bundle.ts";
+import { serveLinkedPreview } from "./core/open-design/preview-server.ts";
+import { seedActiveScrumRuns } from "./core/scrum/open-design-seed.ts";
+import { discoverOpenDesignProjects, exportOpenDesignProject, syncOpenDesignLink, readOpenDesignLink, unlinkOpenDesign, prepareOpenDesignDispatch } from "./core/open-design/open-design-link.ts";
 import type { HelperMcpConfigUpdate } from "./core/helper-mcp-sync.ts";
 import { discoverHelperMcps, helperMcpRoster, setHelperMcpEnabled, syncHelperMcps } from "./core/helper-mcp-sync.ts";
 import { provisionPiAgentHome } from "./core/pi-home.ts";
@@ -1747,7 +1747,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       const base = {
         selectedMode: selection.mode,
         revision: selection.revision,
-        openDesignLink: selection.openDesignLink,
+        openDesignLink: slug ? readProjectSettings(deps.stateDir, slug).openDesignLink : undefined,
         pendingSwitch:
           pending?.status === "pending"
             ? { from: pending.previous.mode, to: pending.target.mode }
@@ -1951,18 +1951,17 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     async openDesignStatus(input: { projectRoot: string }) {
       try {
         const project = projectOrRefusal(input.projectRoot); if (!project.ok) return project;
-        const link = readOpenDesignLink(project.root) ?? readExecution(deps.stateDir, project.slug).openDesignLink;
+        const link = readOpenDesignLink(project.root) ?? readProjectSettings(deps.stateDir, project.slug).openDesignLink;
         const source = link && discoverOpenDesignProjects(resolveSurfaceUserHome()).find(p => p.projectId === link.projectId);
-        return { ok: true as const, link: link ?? null, updateAvailable: !!(source && link && (source.digest !== link.digest || source.sourceUpdatedAt > link.sourceUpdatedAt)), sourceAvailable: !!source, syncRequestId: (() => { const source = readExecution(deps.stateDir, project.slug).openDesignSource; return source?.requestId !== source?.acknowledgedRequestId ? source?.requestId : undefined; })() };
+        return { ok: true as const, link: link ?? null, updateAvailable: !!(source && link && (source.digest !== link.digest || source.sourceUpdatedAt > link.sourceUpdatedAt)), sourceAvailable: !!source, syncRequestId: (() => { const source = readProjectSettings(deps.stateDir, project.slug).openDesignSource; return source?.requestId !== source?.acknowledgedRequestId ? source?.requestId : undefined; })() };
       } catch (error) { return failure(codeOf(error), messageOf(error)); }
     },
-    async openDesignSync(input: { projectRoot: string; projectId?: string; bundle?: import('./core/scrum/open-design-link.ts').OpenDesignBundle; syncRequestId?: string; expectedDigest?: string }) {
+    async openDesignSync(input: { projectRoot: string; projectId?: string; bundle?: import('./core/open-design/open-design-link.ts').OpenDesignBundle; syncRequestId?: string; expectedDigest?: string }) {
       try {
         const project = projectOrRefusal(input.projectRoot); if (!project.ok) return project;
         return await withExecutionLane(deps.stateDir, project.slug, async () => {
           ensureProjectRegistered(deps.stateDir, { root: project.root, slug: project.slug });
-          const link = syncOpenDesignLink({ ...input, root: project.root, slug: project.slug, state: deps.stateDir, userHome: resolveSurfaceUserHome() });
-          if (readExecution(deps.stateDir, project.slug).mode === 'scrum') for (const run of listRuns(deps.stateDir, project.slug).filter(r => !terminalRun(r))) seedLinkedOpenDesign(project.root, project.root, run.initiativeId);
+          const link = syncOpenDesignLink({ ...input, root: project.root, slug: project.slug, state: deps.stateDir, userHome: resolveSurfaceUserHome(), seedRuns: () => seedActiveScrumRuns(deps.stateDir, project.slug, project.root) });
           return { ok: true as const, link };
         });
       } catch (error) { return failure(codeOf(error), messageOf(error)); }
@@ -2399,7 +2398,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         .filter(e => e.execution && taskInProject(e.task, enrichedProject.root, enrichedProject.slug) && !projectTask(allEvents, e.task).settled)
         .map(e => ({ task: e.task, role: e.execution!.role, skills: e.skills ?? [] })) : [];
       let configuredPacks: string[] | undefined;
-      try { configuredPacks = enrichedProject ? readExecution(deps.stateDir, enrichedProject.slug).skillPacks : undefined; }
+      try { configuredPacks = enrichedProject ? readProjectSettings(deps.stateDir, enrichedProject.slug).skillPacks : undefined; }
       catch { configuredPacks = []; } // executionView already exposes the damaged selection; do not widen skills.
       return {
         ok: true as const,
@@ -3339,7 +3338,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       };
       try {
         const project = projectOrRefusal(input.projectRoot ?? (input.project ? readProjectRegistration(deps.stateDir, input.project)?.root : undefined) ?? "");
-        if (project.ok) await prepareOpenDesignDispatch({ state: deps.stateDir, slug: project.slug, root: project.root, requestId: request.id, userHome: resolveSurfaceUserHome() });
+        if (project.ok) await prepareOpenDesignDispatch({ state: deps.stateDir, slug: project.slug, root: project.root, requestId: request.id, userHome: resolveSurfaceUserHome(), seedRuns: () => seedActiveScrumRuns(deps.stateDir, project.slug, project.root) });
       } catch (error) { return failure(codeOf(error), messageOf(error)); }
       const reply = await deps.leadDispatch(request);
       if (!reply.ok) return { ok: false as const, code: reply.code ?? "lead-dispatch-failed", error: reply.message ?? "the dispatch failed" };
@@ -3393,7 +3392,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     async skillsTogglePack(input: { projectRoot: string; pack: string; enabled: boolean }) {
       try {
         const project = projectOrRefusal(input.projectRoot); if (!project.ok) return project;
-        const current = readExecution(deps.stateDir, project.slug).skillPacks ?? detectProjectSkillPacks(project.root);
+        const current = readProjectSettings(deps.stateDir, project.slug).skillPacks ?? detectProjectSkillPacks(project.root);
         setProjectSkillPacks(deps.stateDir, project.slug, input.enabled ? [...new Set([...current, input.pack])] : current.filter(p => p !== input.pack));
         return { ok: true as const, summary: `${input.pack} ${input.enabled ? 'enabled' : 'disabled'} for Project; applies to new seats` };
       } catch (error) { return failure(codeOf(error), messageOf(error)); }

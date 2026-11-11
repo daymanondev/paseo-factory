@@ -4,7 +4,7 @@ import { DOC_FILES, lintScrumDoc } from "./linter.ts";
 import type { ScrumDocKind } from "./linter.ts";
 import { verifyBrowserFiles } from "./browser-files.ts";
 import { designScreens } from "./design-contract.ts";
-import { readMockupFiles } from "./open-design-cli.ts";
+import { readMockupFiles } from "../open-design/open-design-cli.ts";
 import { verifyQaFiles } from "./qa-bundle.ts";
 export function lintScrumDirectory(
   kind: string,

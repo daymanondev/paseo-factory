@@ -46,7 +46,7 @@ test('the installed Surface returns usable Design Studio URLs and preview conten
 
 test('Surface Studio serves the committed Open Design flow board, scripts and frames with token protection and offline CSP', async t => {
   const { openDesignFiles } = await import('./fixtures/open-design.ts');
-  const { stageOpenDesignFrames } = await import('../src/scrum/open-design.ts');
+  const { stageOpenDesignFrames } = await import('../src/open-design/open-design.ts');
   const { makeTempDir, disposeDir } = await import('./helpers.ts');
   const { readFileSync } = await import('node:fs');
   const files = openDesignFiles();

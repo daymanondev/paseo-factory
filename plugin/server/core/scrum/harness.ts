@@ -1,6 +1,6 @@
 import { resolveRoleSkillsForProject } from "./skill-hub.ts";
-import { seedLinkedOpenDesign } from "./open-design-link.ts";
-import { stageOpenDesignFrames, inspectOpenDesignHost, openDesignWorkspace } from "./open-design.ts";
+import { seedLinkedOpenDesign } from "./open-design-seed.ts";
+import { stageOpenDesignFrames, inspectOpenDesignHost, openDesignWorkspace } from "../open-design/open-design.ts";
 import { assertOwnerDependencies } from "./owner-work.ts";
 
 import { readProjectRegistration } from "../project.ts";
@@ -11,6 +11,7 @@ import { homedir } from "node:os";
 import { FactoryError } from "../errors.ts";
 import { provisionPiAgentHome } from "../pi-home.ts";
 import { readExecution, readScrumConfig, scopeDir } from "./config.ts";
+import { readProjectSettings } from "../project-settings.ts";
 import { readLedgerEvents } from "../ledger-read.ts";
 import { readRun, listRuns, terminalRun } from "./run-journal.ts";
 import { SCRUM_ROLE_SKILLS, renderScrumPrompt } from "./prompts.ts";
@@ -50,7 +51,7 @@ export function resolveScrumIdentity(
     return {
       kind: "task",
       projectRoot: readProjectRegistration(state, slug)?.root,
-      configuredPacks: readExecution(state, slug).skillPacks,
+      configuredPacks: readProjectSettings(state, slug).skillPacks,
       contractSkills: contract.skills,
       binding: contract.execution,
       task,
@@ -63,7 +64,7 @@ export function resolveScrumIdentity(
     listRuns(state, slug).find((r) => !terminalRun(r))?.config ??
     readScrumConfig(state, slug);
   if (!config) throw new FactoryError("scrum-config-missing", slug);
-  return { kind: "seat", selectionRevision: selected.revision, config, projectRoot: readProjectRegistration(state, slug)?.root, configuredPacks: selected.skillPacks };
+  return { kind: "seat", selectionRevision: selected.revision, config, projectRoot: readProjectRegistration(state, slug)?.root, configuredPacks: readProjectSettings(state, slug).skillPacks };
 }
 export function scrumIdentityLane(
   state: string,
@@ -179,7 +180,7 @@ export function provisionScrumHarness(input: {
   for (const file of ['impeccable-hook.mjs', 'impeccable-opencode.mjs', 'hooks.json', 'hooks', '.claude-plugin', 'agy-settings.json', 'copilot']) rmSync(join(roleHome, file), { recursive: true, force: true });
   const settingsPath = join(roleHome, 'settings.json');
   const settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
-  const skills = resolveRoleSkillsForProject({ role, projectRoot: input.projectRoot ?? identity.projectRoot ?? readProjectRegistration(state, slug)?.root, configuredPacks: input.configuredPacks ?? identity.configuredPacks ?? readExecution(state, slug).skillPacks, contractSkills: input.contractSkills ?? identity.contractSkills, userHome: input.userHome });
+  const skills = resolveRoleSkillsForProject({ role, projectRoot: input.projectRoot ?? identity.projectRoot ?? readProjectRegistration(state, slug)?.root, configuredPacks: input.configuredPacks ?? identity.configuredPacks ?? readProjectSettings(state, slug).skillPacks, contractSkills: input.contractSkills ?? identity.contractSkills, userHome: input.userHome });
   rmSync(join(roleHome, 'skills'), { recursive: true, force: true });
   settings.skills = ['!*', ...skills.map(s => `+${join(input.userHome ?? homedir(), '.agents/skills', s)}`)];
   writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');

@@ -1,17 +1,13 @@
 /** Deterministic structural checks; semantic readiness and browser QA are separate. */
 import { designScreens, screenIdValid, DESIGN_STATES, browserCoverageIssues } from "./design-contract.ts";
-import { OPEN_DESIGN_DIRECTIONS } from "./open-design.ts";
-import { artifactMarkup, runOpenDesignLint } from "./open-design-lint.ts";
+import { OPEN_DESIGN_DIRECTIONS } from "../open-design/open-design.ts";
+import { artifactMarkup, runOpenDesignLint } from "../open-design/open-design-lint.ts";
+import type { Diagnostic } from "../open-design/open-design-lint.ts";
+export type { Diagnostic };
 import { productChromeIssues } from "./product-chrome.ts";
 import { designTokens } from "./design-contract.ts";
 import { validateQaReport } from "./qa-bundle.ts";
 export type ScrumDocKind = "prd" | "ux" | "architecture" | "backlog" | "qa" | "ui";
-export interface Diagnostic {
-  path: string;
-  line: number;
-  category: string;
-  message: string;
-}
 export const DOC_FILES: Record<ScrumDocKind, string[]> = {
   ui: ["browser.json", "EXPERIENCE.md"],
   prd: ["prd.md"],

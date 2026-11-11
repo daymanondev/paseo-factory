@@ -8,7 +8,7 @@ import { projectNotebookPath } from "../src/project.ts";
 import { FactoryError } from "../src/errors.ts";
 import { formatScrumRunDigest } from "../src/scrum/run-digest.ts";
 import { renderScrumPrompt, SCRUM_LEAD_MCP_TOOLS, SCRUM_SUPERVISOR_MCP_TOOLS } from "../src/scrum/prompts.ts";
-import { OPEN_DESIGN_CONTRACT } from "../src/scrum/open-design.ts";
+import { OPEN_DESIGN_CONTRACT } from "../src/open-design/open-design.ts";
 import type { ScrumRun } from "../src/scrum/run-journal.ts";
 import type { ArtifactRef } from "../src/scrum/types.ts";
 import { LEAD_WAVE_LAWS, SUPERVISOR_OUTCOME_BOUNDARY } from "../src/roles-contract.ts";

@@ -1,5 +1,5 @@
 import { linkedDesignSpecification } from "../linked-design.ts";
-import { OPEN_DESIGN_CONTRACT } from "./open-design.ts";
+import { OPEN_DESIGN_CONTRACT } from "../open-design/open-design.ts";
 import { projectMemoryPresence } from "../project-memory.ts";
 import type { ScrumRoleName } from "./types.ts";
 export const SCRUM_PROMPT_MARK = "<!-- paseo-factory scrum 0032-r2 -->";

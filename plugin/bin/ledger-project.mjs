@@ -9,11 +9,13 @@ import { basename, isAbsolute, join as join2, resolve as resolve2 } from "node:p
 // src/ledger-read.ts
 import { readFileSync } from "node:fs";
 
-// src/scrum/types.ts
-var SPECIALIST_ROLES = ["pm", "ux", "architect", "dev", "qa"];
+// src/safe-id.ts
 function safeId(value) {
   return typeof value === "string" && /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(value) && value !== "..";
 }
+
+// src/scrum/types.ts
+var SPECIALIST_ROLES = ["pm", "ux", "architect", "dev", "qa"];
 function safePath(value) {
   return typeof value === "string" && value.length > 0 && !value.includes("\\") && !value.includes("\0") && value.split("/").every((p) => p !== "" && p !== "." && p !== "..");
 }

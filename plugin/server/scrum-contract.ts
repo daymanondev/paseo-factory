@@ -1,4 +1,4 @@
-import { readOpenDesignFiles, readOpenDesignLink } from "./core/scrum/open-design-link.ts";
+import { readOpenDesignFiles, readOpenDesignLink } from "./core/open-design/open-design-link.ts";
 import { assertOwnerDependencies } from "./core/scrum/owner-work.ts";
 import { registerOwnedPaths } from "./core/scrum/ownership.ts";
 /** Scrum specialist contract defaults and dynamic ownership. */

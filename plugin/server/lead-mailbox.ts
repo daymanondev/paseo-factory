@@ -1,11 +1,13 @@
-import { prepareOpenDesignDispatch } from "./core/scrum/open-design-link.ts";
+import { prepareOpenDesignDispatch } from "./core/open-design/open-design-link.ts";
+import { seedActiveScrumRuns } from "./core/scrum/open-design-seed.ts";
 import { discoverHelperMcps } from "./core/helper-mcp-sync.ts";
 import { resolveVaultUserHome } from "./core/vault-materialization.ts";
 import { liveSeatCandidates } from "./seats.ts";
 import { bindProjectDirective } from "./execution-adapters.ts";
 import { bindScrumBlocker } from "./scrum.ts";
 import { withExecutionLane } from "./core/scrum/execution.ts";
-import { atomicJson, readOptionalJson, readExecution } from "./core/scrum/config.ts";
+import { readExecution } from "./core/scrum/config.ts";
+import { atomicJson, readOptionalJson } from "./core/json-store.ts";
 import { readRun, listRuns, commandRun, terminalRun } from "./core/scrum/run-journal.ts";
 import { formatScrumRunDigest } from "./core/scrum/run-digest.ts";
 import { commitSeatMemoryOnRoot } from "./core/workspace.ts";
@@ -1546,7 +1548,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     const target = resolveTargetProject(request, "lead dispatch");
     if (!target.ok) return target;
     const { root, slug } = target;
-    if (request.from !== "peer" && !options?.existingDesignSnapshot) await prepareOpenDesignDispatch({ state: deps.stateDir, slug, root, requestId: request.id, userHome: deps.home ? resolveVaultUserHome(deps.home) : undefined });
+    if (request.from !== "peer" && !options?.existingDesignSnapshot) await prepareOpenDesignDispatch({ state: deps.stateDir, slug, root, requestId: request.id, userHome: deps.home ? resolveVaultUserHome(deps.home) : undefined, seedRuns: () => seedActiveScrumRuns(deps.stateDir, slug, root) });
     // The auto-ensure and the queue land as ONE lane job — the single-writer
     // law this module's header claims: two concurrent dispatches serialize,
     // so the second sees the first's Lead and never double-creates the seat,
@@ -1633,7 +1635,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     const target = resolveTargetProject(request, "supervisor dispatch");
     if (!target.ok) return target;
     const { root, slug } = target;
-    await prepareOpenDesignDispatch({ state: deps.stateDir, slug, root, requestId: request.id, userHome: deps.home ? resolveVaultUserHome(deps.home) : undefined });
+    await prepareOpenDesignDispatch({ state: deps.stateDir, slug, root, requestId: request.id, userHome: deps.home ? resolveVaultUserHome(deps.home) : undefined, seedRuns: () => seedActiveScrumRuns(deps.stateDir, slug, root) });
     const laneOutcome = await projectLane(
       slug,
       async (): Promise<{ ok: true; agentId: string; mailId: string } | { ok: false; code: string; error: string }> => {
