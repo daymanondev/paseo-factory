@@ -1,4 +1,3 @@
-import { resolveScrumIdentity } from "./core/scrum/harness.ts";
 import { resolveRoleLane, laneProviderConfig, findCatalogModelMeta } from "./provider-lanes.ts";
 import type { ProviderCatalogEntry } from "./provider-lanes.ts";
 /**
@@ -406,9 +405,7 @@ export function normalizeAgentCreateRequest(
   let seatRewrite:
     | { provider: string; model?: string; thinkingOptionId?: string; labels: Record<string, string>; slug: string }
     | undefined;
-  const worktree = stateDir && config.cwd ? parseTaskWorktreePath(stateDir, config.cwd) : null;
-  const scrumTask = worktree && stateDir && resolveScrumIdentity(stateDir, worktree.slug, worktree.task) !== undefined ? worktree : null;
-  const rewriteRole = scrumTask ? "agent" : providerInferredSeat;
+  const rewriteRole = providerInferredSeat;
   if (
     rewriteRole !== undefined &&
     typeof config.cwd === "string" &&
@@ -416,11 +413,11 @@ export function normalizeAgentCreateRequest(
     typeof stateDir === "string" &&
     stateDir !== ""
   ) {
-    const project = scrumTask ?? resolveFactorySeatProject(stateDir, config.cwd);
+    const project = resolveFactorySeatProject(stateDir, config.cwd);
     if (project !== undefined) {
-      const lane = resolveRoleLane(stateDir, project.slug, rewriteRole, scrumTask?.task);
+      const lane = resolveRoleLane(stateDir, project.slug, rewriteRole);
       const parsed = lane !== undefined ? parseLane(lane) : undefined;
-      const mergedLabels = { ...(topLabels ?? {}), ...(config.labels ?? {}), seat: rewriteRole, project: project.slug, ...(scrumTask ? { task: scrumTask.task } : {}) };
+      const mergedLabels = { ...(topLabels ?? {}), ...(config.labels ?? {}), seat: rewriteRole, project: project.slug };
       if (parsed !== undefined) {
         seatRewrite = {
           ...laneProviderConfig(lane!, providers),
@@ -837,7 +834,7 @@ export function createChoke(options: ChokeOptions): Choke {
   // every write under the task's root (ticket 05).
   const fenceOf = (contract: ContractSet, judge: Factory = factory): MemoryFence => {
     const worktree = judge.worktreeFor(contract.task);
-    return { ...(contract.execution ? { scrumRole: contract.execution.role } : {}), ...(contract.execution && contract.execution.role !== "dev" ? { artifactOnly: true } : {}), ...(contract.disposition === undefined ? {} : { disposition: contract.disposition }), workspace: contract.workspace, scope: contract.scope, ...(worktree === undefined ? {} : { worktree }) };
+    return { ...(contract.disposition === undefined ? {} : { disposition: contract.disposition }), workspace: contract.workspace, scope: contract.scope, ...(worktree === undefined ? {} : { worktree }) };
   };
   /**
    * The writable root for an ask: the task's worktree when its spawn recorded
@@ -934,7 +931,7 @@ export function createChoke(options: ChokeOptions): Choke {
       ?? readCorrelations(factory.stateDir).find((record) => record.agentId === agent.id)?.projectSlug
       ?? listProjectRegistrations(factory.stateDir).find((registration) => registration.root === agent.cwd)?.slug
       ?? "";
-    const family = resolveEffectiveProviderFamily(agent.provider ?? request.provider, seat, factory.stateDir, projectSlug, agent.labels?.task ?? readCorrelations(factory.stateDir).find(record => record.agentId === agent.id)?.task);
+    const family = resolveEffectiveProviderFamily(agent.provider ?? request.provider, seat, factory.stateDir, projectSlug);
     if (family !== "opencode") return decision;
     if (seat !== "agent" && decision.behavior === "allow" && hasExplicitGitWrite(command)) {
       const guidance = seat === "supervisor"

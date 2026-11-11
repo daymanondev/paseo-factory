@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, symlinkSync, rmSync, writeFileSync, lstatSync, readFileSync, copyFileSync, statSync, realpathSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
-import { ensureFactorySkillSafe } from '../skill.ts';
+import { ensureFactorySkillSafe } from './skill.ts';
 
 
 export const CORE_FACTORY_SKILLS = [

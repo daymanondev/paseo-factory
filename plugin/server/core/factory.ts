@@ -1,5 +1,3 @@
-import { scrumBindingIsValid } from "./scrum/types.ts";
-import type { ScrumTaskBinding } from "./scrum/types.ts";
 import { pendingUpgradeFor } from "./upgrade-state.ts";
 import { readLocalWriterIdentity } from "./writer-identity.ts";
 import { liveWorkspaceConflict, normalized, acceptedTasks } from "./workspace-conflict.ts";
@@ -177,7 +175,6 @@ export interface FactoryOptions {
 }
 
 export interface ContractInput {
-  execution?: ScrumTaskBinding;
   task: string;
   /**
    * The Workspace this Task's work lives in — absolute path, chosen by the
@@ -634,9 +631,8 @@ export function createFactory(options: FactoryOptions): Factory {
     stateDir,
     recoveredAttempts,
 
-    setContract({ task, workspace, gate, artifact, base: inputBase, scope, freshEyes, watch, description, skills, by, disposition, execution, seat, outcome, invariants, exclusions, verification }) {
+    setContract({ task, workspace, gate, artifact, base: inputBase, scope, freshEyes, watch, description, skills, by, disposition, seat, outcome, invariants, exclusions, verification }) {
       assertTaskId(task);
-      if (execution !== undefined && !scrumBindingIsValid(execution)) throw new FactoryError("invalid-contract", "invalid Scrum execution binding");
       // ADR 0054 §2: the shell Gate is the engineer disposition's law; the
       // read-only three (scout|architect|reviewer) may omit it — an empty gate
       // on a read-only Contract verifies the worktree sits clean at HEAD
@@ -673,12 +669,11 @@ export function createFactory(options: FactoryOptions): Factory {
         throw new FactoryError("invalid-contract", "description must be a string — omit it when the task has no assignment text");
       }
       // The pre-v0.5.0 non-empty law stands everywhere EXCEPT the 4-Part
-      // Brief gate's own scope (ADR 0054 §1: `seat === "lead"`, no Scrum
-      // binding), where an empty description must read as omitted so the
+      // Brief gate's own scope (ADR 0054 §1: `seat === "lead"`), where an empty description must read as omitted so the
       // structured Brief synthesizes — or the section-naming refusal fires.
       // Outside that scope a supplied description is a non-empty string;
       // omission remains the only way to say "no assignment text".
-      if (description !== undefined && description.trim() === "" && !(seat === "lead" && execution === undefined)) {
+      if (description !== undefined && description.trim() === "" && seat !== "lead") {
         throw new FactoryError("invalid-contract", "description must be a non-empty string — omit it when the task has no assignment text");
       }
       // The structured 4-Part Brief fields (ADR 0054 §1): strings when
@@ -698,10 +693,9 @@ export function createFactory(options: FactoryOptions): Factory {
           : hasStructuredBrief
             ? synthesizeBriefDescription(briefFields, disposition, gateCommand)
             : undefined;
-      // The mechanical 4-Part Brief gate (ADR 0054 §1): scoped to the SLP Lead
-      // seat outside any Scrum execution binding — Owner/Supervisor/Agent
-      // paths and the Agile Scrum specialist workflows keep their own laws.
-      if (seat === "lead" && execution === undefined) {
+      // The mechanical 4-Part Brief gate (ADR 0054 §1): scoped to the Lead
+      // seat — Owner/Supervisor/Agent paths keep their own laws.
+      if (seat === "lead") {
         if (resolvedDescription === undefined) {
           throw new FactoryError(
             "invalid-contract",
@@ -850,7 +844,6 @@ export function createFactory(options: FactoryOptions): Factory {
       }
       return ledger.append({
         event: "contract_set",
-        ...(execution === undefined ? {} : { execution: structuredClone(execution) }),
         task,
         workspace,
         gate: gateCommand,

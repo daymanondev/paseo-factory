@@ -44,6 +44,8 @@ test("CLI, copied-alone MCP bridge, driver and startup agree on the Ledger integ
   const cases: Array<{ name: string; raw: string; corrupt?: RegExp; tail?: string }> = [
     { name: "valid legacy record", raw: good },
     { name: "explicit supported version", raw: event({ schema_version: 1 }) },
+    { name: "Scrum-era contract_set execution binding is ignored (ADR 0056)", raw: event({ execution: { mode: "scrum", runId: "run-1", role: "dev", policyRevision: "0038-r1", configRevision: 1, artifactRefs: [] } }) },
+    { name: "Scrum-era execution binding of a shape no code validates any more is still ignored", raw: event({ execution: { mode: "scrum", runId: "../escape", role: "wizard", artifactRefs: "x" } }) },
     { name: "sequence gaps remain valid", raw: good + event({ seq: 8, task: "T2" }) },
     { name: "blank complete line", raw: good + "\n", corrupt: /blank line at line 2/ },
     { name: "whitespace complete line", raw: good + "  \n", corrupt: /line 2 is not valid JSON/ },

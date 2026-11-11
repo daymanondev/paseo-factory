@@ -1,4 +1,4 @@
-/** Open Design's design vocabulary: states, screens and token extraction. Scrum design approval builds on it. */
+/** Open Design's design vocabulary: states, screens and token extraction. */
 export const DESIGN_STATES = ['empty', 'loading', 'populated', 'error', 'offline', 'permission-denied'] as const;
 export type DesignState = typeof DESIGN_STATES[number];
 export type ScreenSurface = 'mobile' | 'desktop' | 'responsive';

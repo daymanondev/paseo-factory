@@ -1,5 +1,12 @@
-import { designFiles, states, png } from './scrum-design.ts';
-import { sha256 } from '../../src/scrum/artifacts.ts';
+import { createHash } from 'node:crypto';
+const sha256 = (bytes: string | Uint8Array): string => createHash('sha256').update(bytes).digest('hex');
+export const states = ['empty', 'loading', 'populated', 'error', 'offline', 'permission-denied'] as const;
+export const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII=', 'base64');
+export const designFiles = {
+  'DESIGN.md': '# Tokens\nColor: ink #183153, paper #ffffff\nTypography: Georgia 16px, heading 32px\nSpacing: 8px 16px 24px\nRadius: 4px\nComponent: button uses ink background and paper text\n',
+  'EXPERIENCE.md': ['catalog', 'checkout'].map(id => `## Screen: ${id}\n${states.map(s => `${s}: keyboard accessible ${s} content`).join('\n')}`).join('\n'),
+  'mockups/index.html': `<!doctype html><html><head><title>Shop</title></head><body><main data-screen="catalog"><button id="buy">Buy</button></main><main data-screen="checkout"><button class="pay-cta">Pay</button></main><script>function route(screen,state){document.documentElement.dataset.screen=screen;document.documentElement.dataset.state=state;document.querySelectorAll('main').forEach(e=>e.hidden=e.dataset.screen!==screen)}const q=new URLSearchParams(location.search);route(q.get('screen')||'catalog',q.get('state')||'populated');window.addEventListener('message',e=>{if(e.data.type==='scrum:set-state')route(e.data.screen,e.data.state)});</script></body></html>`,
+};
 export function openDesignFiles(): Record<string, string> {
   const html = designFiles['mockups/index.html'];
   const app = html.match(/<script>([\s\S]*?)<\/script>/)![1];

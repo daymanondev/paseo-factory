@@ -1,5 +1,3 @@
-import { readExecution } from "./server/core/scrum/selection.ts";
-import { listRuns, readRun, terminalRun } from "./server/core/scrum/run-journal.ts";
 /**
  * paseo-factory plugin server entry — the shell around the pure core.
  *
@@ -270,7 +268,7 @@ export default function contribute(server: PluginServerContext) {
       // PASEO_FACTORY_* env — nothing under any project root is written.
       try { await syncPeerHelpersBeforeCreate(next, stateDir); }
       catch { log("helpers: pre-spawn MCP sync failed; cached configuration remains available"); }
-      const injected = injectRoleOnCreate(next, stateDir, undefined, surface.cachedProviders());
+      const injected = injectRoleOnCreate(next, stateDir);
       if (injected !== undefined) {
         log(`roles: injected the ${injected.env?.PASEO_FACTORY_SEAT ?? "agent"} contract into the agent created in ${next.config.cwd}`);
       }
@@ -337,19 +335,6 @@ export default function contribute(server: PluginServerContext) {
     home,
     daemon: () => paseoApi as never,
     usage,
-    reconcileScrum: async project => {
-      if (readExecution(stateDir, project.slug).mode !== "scrum") return;
-      for (let run of listRuns(stateDir, project.slug)) {
-        if (run.wakeups?.some(w => !w.delivered)) run = await surface.scrumRecoverNotifications(project, run.runId);
-        if (run.cancellation && !terminalRun(run)) {
-          await surface.scrumCommand({ operation: "run.cancel", projectRoot: project.root, runId: run.runId, requestId: run.cancellation.requestId, expectedRevision: run.revision, payload: { reason: run.cancellation.reason } }, undefined, { authority: "owner", actor: run.cancellation.actor });
-        } else if (run.completionRequest && !terminalRun(run)) {
-          await surface.scrumCommand({ operation: "run.complete", projectRoot: project.root, runId: run.runId, requestId: run.completionRequest.requestId, expectedRevision: run.revision }, undefined, { authority: "lead", actor: run.completionRequest.actor });
-        }
-        run = readRun(stateDir, project.slug, run.runId);
-        if (run.phase === "completed" && run.completionRequest && !run.completionReported) await leadMail.reportSupervisor({ id: `${run.completionRequest.requestId}:report`, kind: "supervisor_report", workspace: project.root, reportType: "completed", scrum: { runId: run.runId }, message: `Scrum run ${run.runId} completed after verification. ${JSON.stringify(run.telemetry)}`, seat: "lead" });
-      }
-    },
     ensureLead: (input) => surface.leadEnsure(input),
     ensureSupervisor: (input) => surface.supervisorEnsure(input),
     retireLead: (input) => surface.leadRotate(input),
@@ -405,16 +390,6 @@ export default function contribute(server: PluginServerContext) {
     if (!booted || !mailRecovered) resumeOrdinaryRuntime();
   }, 100);
   recoveryTimer.unref?.();
-  // Durable Scrum intents can become actionable after the command or a turn
-  // finishes. Retry them during this lifetime as well as at startup. The
-  // existing SLP mailbox scheduling remains event-driven.
-  let scrumRecoveryInFlight = false;
-  const scrumRecoveryTimer = setInterval(() => {
-    if (!booted || !mailRecovered || !paseoApi || scrumRecoveryInFlight || pendingUpgradeFor(stateDir) !== undefined) return;
-    scrumRecoveryInFlight = true;
-    void leadMail.pumpAll({ reconcileScrumOnly: true }).catch(error => log(`scrum recovery deferred: ${String(error)}`)).finally(() => { scrumRecoveryInFlight = false; });
-  }, 1000);
-  scrumRecoveryTimer.unref?.();
   let peerSweepInFlight = false;
   const peerSweepTimer = setInterval(() => {
     if (!booted || !mailRecovered || !paseoApi || peerSweepInFlight || pendingUpgradeFor(stateDir) !== undefined) return;
@@ -514,14 +489,6 @@ export default function contribute(server: PluginServerContext) {
             code: reply.code,
             message: reply.error,
           };
-    },
-    executionSetMode: async request => {
-      const reply = await surface.executionSetMode(request, { paseo: paseoApi as never });
-      return reply.ok ? { id: request.id, ok: true, summary: "execution selection saved", data: reply.data } : { id: request.id, ok: false, code: reply.code, message: reply.error };
-    },
-    scrumCommand: async (request, caller) => {
-      const reply = await surface.scrumCommand(request, { paseo: paseoApi as never }, caller);
-      return reply.ok ? { id: request.id, ok: true, summary: `Scrum ${request.operation}`, data: reply.data } : { id: request.id, ok: false, code: reply.code, message: reply.error };
     },
     peerMail: leadMail.notifyPeer,
     usageMeter: (input) => usage.meterTaskBoundary(input),
@@ -624,7 +591,6 @@ export default function contribute(server: PluginServerContext) {
     clearTimeout(warmupTimer);
     clearTimeout(postReadySyncTimer);
     clearInterval(recoveryTimer);
-    clearInterval(scrumRecoveryTimer);
     clearInterval(peerSweepTimer);
     offPermissionAsked();
     offAgentCreate();

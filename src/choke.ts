@@ -902,9 +902,6 @@ export function judgeSeatFilePath(
  * `<project-root>` at accept — the fence covers both roots.
  */
 export interface MemoryFence {
-  /** Scrum planning/QA deliver only owned artifacts. SLP callers omit it. */
-  artifactOnly?: boolean;
-  scrumRole?: "pm" | "ux" | "architect" | "dev" | "qa";
   /**
    * The live Contract's SLP disposition (ADR 0053 §3, ticket 05): the
    * read-only three (`scout` | `architect` | `reviewer`) fence EVERY write
@@ -965,14 +962,8 @@ function normalizeMaybeStrippedLeadingSlash(rawPath: string, candidateRoots: rea
 
 function judgeMemoryDestination(rawPath: string, fence: MemoryFence): ChokeDecision | undefined {
   const normalizedPath = normalizeMaybeStrippedLeadingSlash(rawPath, [fence.worktree, fence.workspace]);
-  if (fence.artifactOnly) {
-    const root = fence.worktree ?? fence.workspace;
-    const destination = resolve(root, normalizedPath);
-    const relative = destination.startsWith(root + "/") ? destination.slice(root.length + 1) : undefined;
-    if (relative !== undefined && !scopeCoversFile(fence.scope ?? [], relative)) return { behavior: "deny", rule: "policy:scrum-artifact-only", reason: "planning/QA product source is read-only; write only the owned Contract artifacts" };
-  }
-  // The read-only disposition fence (ADR 0053 §3, ticket 05): unlike the
-  // artifact-only arm there is NO scope opt-in — the read-only three are
+  // The read-only disposition fence (ADR 0053 §3, ticket 05): there is NO
+  // scope opt-in — the read-only three are
   // strictly read-only, and their findings travel in the 6-Field Handoff at
   // `agent_claim`, never as worktree writes. Destinations outside the task's
   // root (e.g. /tmp scratch) stay clear: the fence guards repository trees.

@@ -18,7 +18,6 @@ export interface SessionUsageRecord {
   agentId: string;
   projectSlug: string;
   seat: "supervisor" | "lead" | "agent" | "watch" | "retro";
-  scrumRole?: "pm" | "ux" | "architect" | "dev" | "qa";
   task?: string;
   attempt?: number;
   harness: "pi" | "codex" | "opencode" | "antigravity" | "claude" | "copilot" | (string & {});
@@ -119,10 +118,9 @@ const SEAT_LABELS: Readonly<Record<SessionUsageRecord["seat"], string>> = {
   retro: "Retro",
 };
 
-/** The row label a seat renders — `Peer · dev` for Scrum specializations. */
-export function seatLabelOf(record: Pick<SessionUsageRecord, "seat" | "scrumRole">): string {
-  const base = SEAT_LABELS[record.seat] ?? record.seat;
-  return record.seat === "agent" && record.scrumRole !== undefined ? `${base} · ${record.scrumRole}` : base;
+/** The row label a seat renders. */
+export function seatLabelOf(record: Pick<SessionUsageRecord, "seat">): string {
+  return SEAT_LABELS[record.seat] ?? record.seat;
 }
 
 function emptyBuckets(): UsageBuckets & { costSum: number; costSeen: boolean } {
@@ -183,7 +181,7 @@ export function foldProjectUsageSummary(file: ProjectUsageFile | undefined): Pro
     const modelRow = models.get(modelKey) ?? { provider: record.provider, harness: String(record.harness), model: record.model, ...emptyBuckets() };
     addTo(modelRow, record);
     models.set(modelKey, modelRow);
-    const seatKey = record.seat === "agent" && record.scrumRole !== undefined ? `${record.seat}:${record.scrumRole}` : record.seat;
+    const seatKey = record.seat;
     const seatRow = seats.get(seatKey) ?? { seat: record.seat, label: seatLabelOf(record), ...emptyBuckets() };
     addTo(seatRow, record);
     seats.set(seatKey, seatRow);

@@ -1,9 +1,5 @@
-/** The mode-aware lane and provider configuration shared by create and permission hooks. */
+/** The lane and provider configuration shared by create and permission hooks. */
 import { loadLanes, migrateLegacyZcodeLane, parseLane } from "./core/lanes.ts";
-import {
-  resolveScrumIdentity,
-  scrumIdentityLane,
-} from "./core/scrum/harness.ts";
 import type { RoleName } from "./core/roles-contract.ts";
 export interface ProviderCatalogModel {
   id: string;
@@ -40,14 +36,7 @@ export function resolveRoleLane(
   state: string,
   slug: string,
   role: RoleName,
-  task?: string,
 ): string | undefined {
-  const identity = slug ? resolveScrumIdentity(state, slug, task) : undefined;
-  if (identity) {
-    if (role === "agent" && identity.kind === "seat")
-      return identity.config.lanes.dev;
-    return scrumIdentityLane(state, slug, role, identity);
-  }
   const loaded = loadLanes(state, slug || undefined);
   return loaded.ok
     ? loaded.lanes[role === "agent" ? "worker" : role]

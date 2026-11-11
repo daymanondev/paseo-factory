@@ -539,17 +539,6 @@ export const historyUpgrade = defineRpc({
   output: z.union([z.object({ ok: z.literal(true), result: z.unknown() }), Failure]),
 });
 
-export const executionSetMode = defineRpc({
-  name: "factory.execution.set-mode",
-  input: z.object({ projectRoot: z.string().optional(), mode: z.enum(["slp", "scrum"]) }),
-  output: z.union([z.object({ ok: z.literal(true), data: z.unknown() }), Failure]),
-});
-export const scrumCommand = defineRpc({
-  name: "factory.scrum.command",
-  input: z.object({ projectRoot: z.string().optional(), operation: z.string(), runId: z.string().optional(), requestId: z.string(), expectedRevision: z.number().int().optional(), payload: z.record(z.string(), z.unknown()).optional() }),
-  output: z.union([z.object({ ok: z.literal(true), data: z.unknown() }), Failure]),
-});
-
 export const helperMcpsSyncAndProbe = defineRpc({
   name: "factory.helper_mcps.sync_and_probe",
   input: z.object({}),

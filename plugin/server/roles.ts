@@ -1,15 +1,8 @@
-import { SLP_ROLE_SKILLS, resolveRoleSkillsForProject } from "./core/scrum/skill-hub.ts";
+import { SLP_ROLE_SKILLS } from "./core/skill-hub.ts";
 import { discoverHelperMcps, resolveRoleScopedMcpServers, syncHelperMcps } from "./core/helper-mcp-sync.ts";
 import { buildRoleKickoffPrompt } from "./core/roles-contract.ts";
-import { readRun as readScrumRun } from "./core/scrum/run-journal.ts";
-import { restoreLegacyUiEnvironment } from "./core/scrum/companion-tools.ts";
-import { readExecution } from "./core/scrum/config.ts";
-import { readProjectSettings } from "./core/project-settings.ts";
-import { resolveRoleLane, laneProviderConfig } from "./provider-lanes.ts";
-import type { ProviderCatalogEntry } from "./provider-lanes.ts";
-import { provisionScrumHarness, resolveScrumIdentity, scrumIdentityLane, scopeScrumCapabilities } from "./core/scrum/harness.ts";
-import type { ScrumHarnessIdentity } from "./core/scrum/harness.ts";
-import { SCRUM_PROMPT_MARK, SCRUM_ROLE_TITLES, renderScrumPrompt } from "./core/scrum/prompts.ts";
+import { restoreLegacyUiEnvironment } from "./core/companion-tools.ts";
+import { resolveRoleLane } from "./provider-lanes.ts";
 /**
  * The role-contract layer (v0.0.14, ADR 0010 §1–§2/§6; v0.0.26, ADR 0016 §1/§3;
  * v0.0.27, ADR 0017 §2): additive injection of the `Supervisor`, `Lead`, and
@@ -21,7 +14,7 @@ import { SCRUM_PROMPT_MARK, SCRUM_ROLE_TITLES, renderScrumPrompt } from "./core/
  */
 import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, join } from "node:path";
+import { join } from "node:path";
 import { provisionAgyPlugin, ensureFactoryBinScripts } from "./core/agy-home.ts";
 import { CorrelationRegistry } from "./core/correlations.ts";
 import { parseLane } from "./core/lanes.ts";
@@ -133,15 +126,11 @@ export function formatPeerWorkspaceTitle(task: string, description?: string): st
  */
 export function factoryEnvFor(
   role: RoleName,
-  input: { stateDir: string; project: ProjectIdentity; task?: string; correlationId?: string; userHome?: string; execution?: ScrumHarnessIdentity | null; environment?: Record<string, string>; provider?: string },
+  input: { stateDir: string; project: ProjectIdentity; task?: string; correlationId?: string; userHome?: string; environment?: Record<string, string>; provider?: string },
 ): Record<string, string> {
   ensureFactoryBinScripts(input.stateDir);
   const environment = restoreLegacyUiEnvironment({ ...process.env, ...input.environment });
-  const execution = input.execution === null ? undefined : input.execution ?? resolveScrumIdentity(input.stateDir, input.project.slug, input.task);
-  const workspace = input.task !== undefined
-    ? join(input.stateDir, "projects", input.project.slug, "worktrees", input.task)
-    : input.project.root;
-  const roleHome = execution !== undefined ? provisionScrumHarness({ state: input.stateDir, slug: input.project.slug, authority: role, identity: execution, generation: input.correlationId ?? "initial", userHome: input.userHome, environment, workspace }) : provisionPiAgentHome({
+  const roleHome = provisionPiAgentHome({
     stateDir: input.stateDir,
     role,
     sourceAgentDir: join(input.userHome ?? homedir(), ".pi", "agent"),
@@ -152,8 +141,6 @@ export function factoryEnvFor(
     PASEO_FACTORY_PROJECT: input.project.slug,
     PASEO_FACTORY_STATE_DIR: input.stateDir,
     PI_CODING_AGENT_DIR: roleHome,
-    ...(execution === undefined ? {} : { PATH: [join(roleHome, 'bin'), environment.PATH ?? ''].filter(Boolean).join(delimiter) }),
-    ...(execution === undefined ? {} : { PASEO_FACTORY_EXECUTION: JSON.stringify(execution) }),
   };
   if (input.project.root !== "") env.PASEO_FACTORY_PROJECT_ROOT = input.project.root;
   if (input.task !== undefined) env.PASEO_FACTORY_TASK = input.task;
@@ -276,11 +263,10 @@ export function resolveEffectiveProviderFamily(
   role: RoleName,
   stateDir: string,
   projectSlug: string,
-  taskId?: string,
 ): string {
   const rawProvider = typeof provider === "string" ? provider.trim() : "";
   if (inferRoleFromProviderId(rawProvider) === undefined) return providerFamilyOf(rawProvider);
-  const lane = resolveRoleLane(stateDir, projectSlug, role, taskId);
+  const lane = resolveRoleLane(stateDir, projectSlug, role);
   const parsed = lane !== undefined ? parseLane(lane) : undefined;
   return parsed === undefined ? providerFamilyOf(rawProvider) : providerFamilyOf(parsed.provider);
 }
@@ -331,8 +317,6 @@ export function applyProviderExecutionFence<T extends AgentCreateRequest["config
         correlationId,
         "--role",
         role,
-        "--mode",
-        readExecution(stateDir, projectSlug).mode,
         "--state-dir",
         stateDir,
         "--project",
@@ -490,7 +474,6 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
   request: R,
   stateDir: string,
   userHome?: string,
-  providers?: readonly ProviderCatalogEntry[],
 ): R | undefined {
   const reqLabels =
     (request as { labels?: Record<string, string> }).labels ??
@@ -513,12 +496,11 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
   const envSeat = parseRoleName(request.env?.PASEO_FACTORY_SEAT);
   const titleSeat = inferRoleSeatFromTitleOrLabels(request.config.title, reqLabels);
   const role: RoleName | undefined = providerSeat ?? envSeat ?? titleSeat;
-  const hasPrompt = (request.config.systemPrompt ?? "").includes(FOOTER_MARK) || (request.config.systemPrompt ?? "").includes(SCRUM_PROMPT_MARK);
+  const hasPrompt = (request.config.systemPrompt ?? "").includes(FOOTER_MARK);
   const bound = request.env?.PASEO_FACTORY_CORRELATION ? correlations.resolve(request.env.PASEO_FACTORY_CORRELATION) : undefined;
-  const alreadyProvisioned = (projectSlug: string, execution: ScrumHarnessIdentity | undefined, task?: string) =>
+  const alreadyProvisioned = (projectSlug: string, task?: string) =>
     hasPrompt && bound !== undefined && bound.role === role && bound.projectSlug === projectSlug &&
-    bound.projectSlug === request.env?.PASEO_FACTORY_PROJECT && bound.task === task &&
-    JSON.stringify(bound.execution ?? null) === JSON.stringify(execution ?? null);
+    bound.projectSlug === request.env?.PASEO_FACTORY_PROJECT && bound.task === task;
 
 
   // A managed Task worktree keeps its task-bound path — the correlation and
@@ -528,11 +510,8 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
     if (worktree !== null) {
       const reg = listProjectRegistrations(stateDir).find((r) => r.slug === worktree.slug);
       const projectRoot = reg?.root ?? "";
-      const execution = resolveScrumIdentity(stateDir, worktree.slug, worktree.task);
-      if (alreadyProvisioned(worktree.slug, execution, worktree.task)) return undefined;
-      if (execution) delete request.config.thinkingOptionId;
+      if (alreadyProvisioned(worktree.slug, worktree.task)) return undefined;
       const issued = correlations.issue({
-        ...(execution === undefined ? {} : { execution }),
         role: "agent",
         projectSlug: worktree.slug,
         projectRoot: projectRoot !== "" ? projectRoot : request.config.cwd,
@@ -541,11 +520,10 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
       const fencedConfig = applyProviderExecutionFence(
         {
           ...request.config,
-          ...(execution === undefined ? {} : scrumProviderConfig(stateDir, worktree.slug, "agent", execution, providers)),
           // The Agent tab inside the Task worktree Workspace reads `Peer · <Task>`
           // (ADR 0017 §2) — never the bare task id or the raw spawn prompt.
-          title: execution?.kind === "task" ? `${SCRUM_ROLE_TITLES[execution.binding.role]} · ${worktree.task}` : formatPeerAgentTitle(worktree.task),
-          systemPrompt: appendContract(request.config.systemPrompt, execution?.kind === "task" ? renderScrumPrompt(execution.binding.role, { project: worktree.slug, run: readScrumRun(stateDir, worktree.slug, execution.binding.runId), runId: execution.binding.runId, task: worktree.task, epoch: execution.epoch, workspace: request.config.cwd }) : buildRoleKickoffPrompt("agent", { task: worktree.task, project: { root: request.config.cwd, slug: worktree.slug }, helperMcps: discoverHelperMcps({ stateDir, userHome }).servers })),
+          title: formatPeerAgentTitle(worktree.task),
+          systemPrompt: appendContract(request.config.systemPrompt, buildRoleKickoffPrompt("agent", { task: worktree.task, project: { root: request.config.cwd, slug: worktree.slug }, helperMcps: discoverHelperMcps({ stateDir, userHome }).servers })),
         },
         {
           role: "agent",
@@ -557,12 +535,12 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
           // A `factory-peer` spawn (ADR 0017 §2) fences under the worker
           // lane's harness — without this, `providerFamilyOf("factory-peer")`
           // matches no family and the Layer-1 agent fence silently no-ops.
-          providerFamily: execution === undefined ? resolveEffectiveProviderFamily(request.config.provider, "agent", stateDir, worktree.slug) : providerFamilyOf(scrumIdentityLane(stateDir, worktree.slug, "agent", execution)),
+          providerFamily: resolveEffectiveProviderFamily(request.config.provider, "agent", stateDir, worktree.slug),
         },
       );
       const taskEnv = factoryEnvFor("agent", { stateDir, project: { root: projectRoot, slug: worktree.slug }, task: worktree.task, correlationId: issued.correlationId, userHome, provider: request.config.provider, environment: request.env });
       return sanitizeAgentCreateHookResult({
-        config: execution === undefined ? fencedConfig : scopeScrumCapabilities(fencedConfig, "agent", execution, taskEnv.PI_CODING_AGENT_DIR, { projectRoot, configuredPacks: readProjectSettings(stateDir, worktree.slug).skillPacks, userHome }),
+        config: fencedConfig,
         env: {
           ...(request.env ?? {}),
           ...taskEnv,
@@ -587,11 +565,8 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
   const projectIdentity: ProjectIdentity = registered.ok
     ? { root: registered.root, slug: registered.slug }
     : { root: project.root, slug: project.slug };
-  const execution = resolveScrumIdentity(stateDir, projectIdentity.slug);
-  if (alreadyProvisioned(projectIdentity.slug, execution)) return undefined;
-  if (execution) delete request.config.thinkingOptionId;
+  if (alreadyProvisioned(projectIdentity.slug)) return undefined;
   const issued = correlations.issue({
-    ...(execution === undefined ? {} : { execution }),
     role,
     projectSlug: projectIdentity.slug,
     projectRoot: projectIdentity.root,
@@ -599,13 +574,12 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
   const fencedConfig = applyProviderExecutionFence(
     {
       ...request.config,
-      ...(execution === undefined ? {} : scrumProviderConfig(stateDir, projectIdentity.slug, role, execution, providers)),
       // The Agent tab inside the main Workspace reads the clean seat title
       // (ADR 0017 §2) — `Supervisor` / `Lead`, never the raw first message.
-      title: role === "lead" && execution ? "Scrum Lead" : role === "supervisor" || role === "lead" ? SEAT_TITLES[role] : request.config.title,
+      title: role === "supervisor" || role === "lead" ? SEAT_TITLES[role] : request.config.title,
       systemPrompt: appendContract(
         request.config.systemPrompt,
-        execution !== undefined && role !== "agent" ? renderScrumPrompt(role, { project: projectIdentity.slug, workspace: request.config.cwd }) : role === "agent"
+        role === "agent"
           ? buildRoleKickoffPrompt("agent", { factoryCmd: "factory", project: projectIdentity, helperMcps: discoverHelperMcps({ stateDir, userHome }).servers })
           : buildRoleKickoffPrompt(role, { factoryCmd: "factory", project: projectIdentity, helperMcps: discoverHelperMcps({ stateDir, userHome }).servers }),
       ),
@@ -616,11 +590,11 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
       correlationId: issued.correlationId,
       projectSlug: projectIdentity.slug,
       userHome,
-      providerFamily: execution === undefined ? resolveEffectiveProviderFamily(request.config.provider, role, stateDir, projectIdentity.slug) : providerFamilyOf(scrumIdentityLane(stateDir, projectIdentity.slug, role, execution)),
+      providerFamily: resolveEffectiveProviderFamily(request.config.provider, role, stateDir, projectIdentity.slug),
     },
   );
   return sanitizeAgentCreateHookResult({
-    config: execution === undefined ? fencedConfig : scopeScrumCapabilities(fencedConfig, role, execution, undefined, { projectRoot: projectIdentity.root, configuredPacks: readProjectSettings(stateDir, projectIdentity.slug).skillPacks, userHome }),
+    config: fencedConfig,
     env: {
       ...(request.env ?? {}),
       ...factoryEnvFor(role, { stateDir, project: projectIdentity, correlationId: issued.correlationId, userHome, provider: request.config.provider, environment: request.env }),
@@ -631,7 +605,7 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
 const ROLE_CONTEXT_MARK = "<!-- paseo-factory injected role contract -->";
 function appendContract(existing: string | undefined, contract: string): string {
   let prefix = existing ?? "";
-  const markers = [ROLE_CONTEXT_MARK, SCRUM_PROMPT_MARK];
+  const markers = [ROLE_CONTEXT_MARK];
   // Compatibility with prompts injected before the explicit start marker.
   if (prefix.includes(FOOTER_MARK)) markers.push("You are the Supervisor seat of the paseo-factory", "You are the Lead seat of the paseo-factory", "You are a working Agent of the paseo-factory", "You are a Peer of the paseo-factory");
   const starts = markers.map(marker => prefix.indexOf(marker)).filter(index => index >= 0);
@@ -758,7 +732,6 @@ export function injectSessionEnv<
             stateDir,
             project: { root: associated.projectRoot, slug: associated.projectSlug },
             ...(associated.task !== undefined ? { task: associated.task } : {}),
-            execution: associated.execution ?? null,
             correlationId: associated.correlationId,
             userHome,
             provider: request.provider ?? undefined,
@@ -903,12 +876,6 @@ export function injectSessionEnv<
     }
   }
   return undefined;
-}
-
-function scrumProviderConfig(state: string, slug: string, role: RoleName, identity: ScrumHarnessIdentity, providers?: readonly ProviderCatalogEntry[]) {
-  const lane = resolveRoleLane(state, slug, role, identity.kind === "task" ? identity.task : undefined);
-  if (!lane) throw new Error("invalid frozen Scrum lane");
-  return laneProviderConfig(lane, providers);
 }
 
 /** Async pre-create sync keeps filesystem provisioning synchronous and never starts stdio helpers. */

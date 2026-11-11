@@ -1,7 +1,6 @@
 import { readProjectSettings, setProjectSkillPacks } from "./core/project-settings.ts";
 import { linkedPreviewBundle } from "./core/open-design/preview-bundle.ts";
 import { serveLinkedPreview } from "./core/open-design/preview-server.ts";
-import { seedActiveScrumRuns } from "./core/scrum/open-design-seed.ts";
 import { discoverOpenDesignProjects, exportOpenDesignProject, syncOpenDesignLink, readOpenDesignLink, unlinkOpenDesign, prepareOpenDesignDispatch } from "./core/open-design/open-design-link.ts";
 import type { HelperMcpConfigUpdate } from "./core/helper-mcp-sync.ts";
 import { discoverHelperMcps, helperMcpRoster, setHelperMcpEnabled, syncHelperMcps } from "./core/helper-mcp-sync.ts";
@@ -10,13 +9,7 @@ import { pluginDirFor } from "./paths.ts";
 import { liveSeatCandidates, seatCandidates } from "./seats.ts";
 import { checkProjectResetRepository, removeProjectStateDirectory, resetProjectRepository } from "./project-reset.ts";
 import { boundTaskPeers } from "./task-peers.ts";
-import { scrumTelemetry } from "./core/scrum/telemetry.ts";
-import { scrumOperation } from "./core/scrum/controller.ts";
-import type { ScrumOperation } from "./core/scrum/controller.ts";
-import { readExecution, readScrumConfig, saveExecutionDefault, ensureScrumConfig, scopeDir } from "./core/scrum/config.ts";
-import { listRuns, readRun, terminalRun, commandRun } from "./core/scrum/run-journal.ts";
-import { readScrumProfiles } from "./core/scrum/profiles.ts";
-import { readSwitchIntent, switchExecution, withExecutionLane } from "./core/scrum/execution.ts";
+import { withExecutionLane } from "./core/execution-lane.ts";
 import { projectTask } from "./core/task-state.ts";
 import { upgradeFactory } from "./core/history-upgrade.ts";
 import type { UpgradeInput } from "./core/history-upgrade.ts";
@@ -63,8 +56,8 @@ import {
   inspectFactorySkillPack,
   installOrUpdateFactorySkillPack,
   installOrUpdateExpoSkillPack, inspectSkillHub, importHostSkillOrPack, detectProjectSkillPacks,
-} from "./core/scrum/companion-tools.ts";
-import type { CompanionToolRunner, CompanionToolUpdateStatus } from "./core/scrum/companion-tools.ts";
+} from "./core/companion-tools.ts";
+import type { CompanionToolRunner, CompanionToolUpdateStatus } from "./core/companion-tools.ts";
 import { basename, join, resolve } from "node:path";
 import { FACTORY_VIEW_VERSION } from "../shared/view.ts";
 import { foldRetro, foldTasks, foldView, readTailed } from "./view.ts";
@@ -85,8 +78,6 @@ import type { SpoolLeadDispatchRequest, SpoolSupervisorReportRequest, SpoolReply
 import {
   openDesignCatalog, openDesignExport, openDesignStatus, openDesignSync, openDesignUnlink, openDesignPreview,
   accept,
-  executionSetMode,
-  scrumCommand,
   lanesSet,
   lanesReset,
   lanesSetBatch,
@@ -122,7 +113,7 @@ import {
   vaultPush,
   vaultSync,
 } from "../shared/rpc.ts";
-import type { CompanionPluginView, ExecutionView, AgentView, LaneName, LaneProfileView, Lanes, ProjectView, TaskView, VaultStatusView } from "../shared/view.ts";
+import type { CompanionPluginView, AgentView, LaneName, LaneProfileView, Lanes, ProjectView, TaskView, VaultStatusView } from "../shared/view.ts";
 import type { UsageRuntime } from "./usage-rollup.ts";
 import { enrichTaskUsage } from "./view.ts";
 import { readProjectUsage } from "./core/usage-status.ts";
@@ -990,10 +981,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     } catch {
       // best-effort provider catalog lookup
     }
-    const selected = readExecution(deps.stateDir, project.slug);
-    const scrumRoster = selected.mode === "scrum" ? (listRuns(deps.stateDir, project.slug).find(r => !terminalRun(r))?.config ?? readScrumConfig(deps.stateDir, project.slug)) : undefined;
-    if (selected.mode === "scrum" && !scrumRoster) return failure("scrum-config-missing", project.slug);
-    const lane = sanitizeLaneWithProviders(scrumRoster?.lanes[seat] ?? lanes.lanes[seat], providers);
+    const lane = sanitizeLaneWithProviders(lanes.lanes[seat], providers);
     const parsed = parseLane(lane);
     let agent: SurfaceAgentSnapshot | undefined;
     try {
@@ -1020,7 +1008,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         agent.cwd === "" ||
         agent.cwd === "/tmp" ||
         realpathSafe(agent.cwd) === realpathSafe(project.root);
-      if (agent.status === "error" || !sameProviderFamily || !sameCwd || selected.mode === "scrum" && agent.labels?.scrumConfigRevision !== undefined && agent.labels.scrumConfigRevision !== String(scrumRoster?.configRevision ?? 1)) {
+      if (agent.status === "error" || !sameProviderFamily || !sameCwd) {
         const retired = await retireSeatUnlocked(seat, project.slug, project.root, context);
         if (!retired.ok) {
           return retired;
@@ -1104,7 +1092,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       // seat, the bootstrap prompt carries the orientation, and NOTHING
       // under <project-root> is written (the <home>-supervisor folder and
       // its AGENTS.md overwrite are retired; roles.ts owns the injection).
-      const title = selected.mode === "scrum" && seat === "lead" ? "Scrum Lead" : SEAT_TITLES[seat];
+      const title = SEAT_TITLES[seat];
       const config =
         parsed?.thinking !== undefined
           ? { provider: `${parsed.provider}/${parsed.model}`, thinkingOptionId: parsed.thinking }
@@ -1114,7 +1102,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         daemon.workspaces!.ref(targetWorkspaceId).agents.create({
           config,
           title,
-          labels: { seat, project: project.slug, ...(selected.mode === "scrum" ? { execution: "scrum", scrumConfigRevision: String(scrumRoster?.configRevision ?? 1) } : {}) },
+          labels: { seat, project: project.slug },
           ...(parent !== undefined ? { parent } : {}),
         });
       try {
@@ -1169,7 +1157,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
                 config,
                 cwd: project.root,
                 title,
-                labels: { seat, project: project.slug, ...(selected.mode === "scrum" ? { execution: "scrum", scrumConfigRevision: String(scrumRoster?.configRevision ?? 1) } : {}) },
+                labels: { seat, project: project.slug },
                 ...(parent !== undefined && !parentHasFailedWorkspace ? { parent } : {}),
               });
               workspaceId = undefined;
@@ -1180,7 +1168,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
             config,
             cwd: project.root,
             title,
-            labels: { seat, project: project.slug, ...(selected.mode === "scrum" ? { execution: "scrum", scrumConfigRevision: String(scrumRoster?.configRevision ?? 1) } : {}) },
+            labels: { seat, project: project.slug },
             ...(parent !== undefined ? { parent } : {}),
           });
         }
@@ -1191,7 +1179,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           status: "initializing",
           model: parsed?.model ?? null,
           ...(parsed?.thinking !== undefined ? { thinkingOptionId: parsed.thinking } : {}),
-          labels: { seat, project: project.slug, ...(selected.mode === "scrum" ? { execution: "scrum", scrumConfigRevision: String(scrumRoster?.configRevision ?? 1) } : {}) },
+          labels: { seat, project: project.slug },
           archivedAt: null,
           requiresAttention: false,
           attentionReason: null,
@@ -1595,7 +1583,6 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
    * A live session can never switch its provider adapter in place; the reply
    * names what happened per seat.
    */
-  const projectUsesSlp = (slug: string): boolean => { try { return readExecution(deps.stateDir, slug).mode === "slp"; } catch { return false; } };
   const syncLiveSeatsAfterLaneUpdate = async (input: {
     projectSlug: string;
     projectRoot: string;
@@ -1603,12 +1590,10 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     before: Pick<Lanes, "supervisor" | "lead">;
     /** The Project's effective lanes AFTER the write. */
     after: Pick<Lanes, "supervisor" | "lead">;
-    executionMode?: "slp" | "scrum";
     /** Only these seats are considered (the lanes the act actually touches). */
     seats?: readonly ("supervisor" | "lead")[];
     context?: SurfaceCallContext;
   }): Promise<string> => {
-    if (input.executionMode === "scrum" ? readExecution(deps.stateDir, input.projectSlug).mode !== "scrum" : !projectUsesSlp(input.projectSlug)) return "skipped — config saved for a future execution selection";
     const daemon = resolveDaemon(input.context);
     const parts: string[] = [];
     for (const seat of input.seats ?? (["supervisor", "lead"] as const)) {
@@ -1740,108 +1725,6 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     return summaries.length > 0 ? summaries.join("; ") : undefined;
   };
 
-  const executionView = (slug?: string): ExecutionView => {
-    try {
-      const selection = readExecution(deps.stateDir, slug);
-      const pending = slug ? readSwitchIntent(deps.stateDir, slug) : undefined;
-      const base = {
-        selectedMode: selection.mode,
-        revision: selection.revision,
-        openDesignLink: slug ? readProjectSettings(deps.stateDir, slug).openDesignLink : undefined,
-        pendingSwitch:
-          pending?.status === "pending"
-            ? { from: pending.previous.mode, to: pending.target.mode }
-            : null,
-        ...(pending?.status === "pending"
-          ? { pendingMode: pending.target.mode }
-          : {}),
-      };
-      try {
-        const runs = slug ? listRuns(deps.stateDir, slug) : [];
-        const config = readScrumConfig(deps.stateDir, slug);
-        const profiles = readScrumProfiles(deps.stateDir).profiles;
-        const activePath = join(
-          scopeDir(deps.stateDir, slug),
-          "scrum-active-profile.json",
-        );
-        const recorded = existsSync(activePath)
-          ? (JSON.parse(readFileSync(activePath, "utf8")) as { id: string })
-          : undefined;
-        const activeProfileId =
-          profiles.find((p) => p.id === recorded?.id)?.id ?? null;
-        const run = runs.find((r) => !terminalRun(r)) ?? runs.at(-1);
-        const skippedPhases =
-          run?.track === "small" &&
-          !run.tasks.some((t) => ["ux", "architect"].includes(t.role))
-            ? [{ phase: "design", reason: `Small track: ${run.rationale}` }]
-            : [];
-        return {
-          ...base,
-          scope: slug ? "project" : "global",
-          project: slug ?? null,
-          newProjectDefaultMode: readExecution(deps.stateDir).mode,
-          machineConfig: readScrumConfig(deps.stateDir),
-          config,
-          profiles,
-          activeProfileId,
-          activeProfileModified: !!config && profiles.some(profile => profile.id === activeProfileId && (JSON.stringify(profile.config.lanes) !== JSON.stringify(config.lanes) || profile.config.requireUiApproval !== config.requireUiApproval)),
-          run: run ? { ...run, skippedPhases } : undefined,
-          activeRun: run ? { ...run, skippedPhases } : undefined,
-        };
-      } catch (error) {
-        return { ...base, error: messageOf(error) };
-      }
-    } catch (error) {
-      return {
-        selectedMode: "slp" as const,
-        revision: 0,
-        error: messageOf(error),
-      };
-    }
-  };
-  const isCancelledScrumTask = (task: string, fallbackSlug?: string): boolean => {
-    const taskRouted = resolveTaskFactory(task);
-    const taskFactory = taskRouted.ok ? taskRouted.factory : deps.factory;
-    const contract = taskFactory.contractFor(task);
-    if (contract?.execution?.mode !== "scrum" || !contract.execution.runId) return false;
-    const projected = projectTask(taskFactory.ledger.events, task);
-    if (projected.settled || projected.inFlightAttempt !== undefined) return false;
-    const slug =
-      fallbackSlug ??
-      (() => {
-        const match = contract.workspace.match(/\/projects\/([^/]+)\/worktrees\//);
-        if (match?.[1]) return match[1];
-        const resolved = resolveProject(contract.workspace);
-        return resolved.ok ? resolved.slug : undefined;
-      })();
-    if (!slug) return false;
-    try {
-      return readRun(deps.stateDir, slug, contract.execution.runId).phase === "cancelled";
-    } catch {
-      return false;
-    }
-  };
-  const executionWork = async (project: { slug: string; root: string }, context?: SurfaceCallContext, cachedAgents?: readonly SurfaceAgentSnapshot[]) => {
-    const blockers: string[] = [];
-    // v0.0.89: the busy check reads the Project's OWN Factory ledger.
-    const workEvents = deps.registry === undefined ? deps.factory.ledger.events : deps.registry.factoryForProject(project.slug).ledger.events;
-    for (const event of workEvents) if (event.event === "contract_set" && taskInProject(event.task, project.root, project.slug)) {
-      if (isCancelledScrumTask(event.task, project.slug)) continue;
-      const task = projectTask(workEvents, event.task);
-      if (!task.settled || task.pendingLanding || task.inFlightAttempt !== undefined) blockers.push(`Task ${event.task}: ${task.status}${task.pendingLanding ? " pending-conflict" : ""}`);
-    }
-    const mailbox = readLeadMailbox(join(scopeDir(deps.stateDir, project.slug), "mailbox.jsonl"));
-    const pendingDirectives = mailbox.queued.some(m => m.kind === "directive") || mailbox.supervisorQueued.some(m => m.kind === "directive") || mailbox.inFlight !== null || mailbox.supervisorInFlight !== null;
-    if (mailbox.queued.length || mailbox.supervisorQueued.length || mailbox.inFlight !== null || mailbox.supervisorInFlight !== null) blockers.push("pending/in-flight mailbox delivery");
-    const reg = readProjectRegistration(deps.stateDir, project.slug);
-    if (reg?.rotationState && reg.rotationState !== "normal") blockers.push(`Lead handoff: ${reg.rotationState}`);
-    if (deps.handoffPending?.(project.slug)) blockers.push("unfinished Lead handoff kickoff");
-    const live = cachedAgents ?? (await resolveDaemon(context).agents.list({ filter: { includeArchived: false, includeBackground: true } })).entries.map(e => e.agent);
-    const agents = live.filter(a => a.archivedAt === null && (a.labels.project === project.slug || a.cwd === project.root) && ["running", "initializing"].includes(a.status));
-    blockers.push(...agents.map(a => `Agent ${a.id}: ${a.status}`));
-    if (readExecution(deps.stateDir, project.slug).mode === "scrum") for (const run of listRuns(deps.stateDir, project.slug)) { if (!terminalRun(run)) blockers.push(`Scrum ${run.runId}: ${run.phase}`); else if (run.phase === "completed" && run.completionRequest && !run.completionReported) blockers.push(`Scrum ${run.runId}: completion report pending`); }
-    return { blockers: [...new Set(blockers)], activeAgents: agents.filter(a => a.labels.seat === "agent").map(a => a.id), pendingDirectives };
-  };
   const resolveSurfaceUserHome = (): string => resolveVaultUserHome(deps.home, deps.userHome);
 
   const buildCompanionToolsView = (): CompanionPluginView[] => {
@@ -1912,34 +1795,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     return installOrUpdateExpoSkillPack({ userHome, action: 'update', runner: deps.companionToolRunner });
   };
 
-  // The command journals notification intent before crossing the mailbox boundary.
-  // Mailbox request IDs dedupe the crash window between queueing and this receipt.
-  const deliverScrumNotifications = async (project: { root: string; slug: string }, runId: string) => {
-    let run = readRun(deps.stateDir, project.slug, runId);
-    for (const wakeup of run.wakeups ?? []) {
-      if (wakeup.delivered || terminalRun(run) || run.cancellation) continue;
-      const send = wakeup.target === "supervisor" ? deps.supervisorReport : deps.leadDispatch;
-      if (!send) continue;
-      try {
-        const obsolete = wakeup.pendingId !== undefined && run.ownerRequests?.find(r => r.id === wakeup.pendingId)?.status !== "pending";
-        if (!obsolete) {
-          const reply = wakeup.target === "supervisor"
-            ? await deps.supervisorReport!({ id: `scrum:${runId}:${wakeup.id}`, kind: "supervisor_report", workspace: project.root, seat: "lead", scrum: { runId }, message: wakeup.message })
-            : await deps.leadDispatch!({ id: `scrum:${runId}:${wakeup.id}`, kind: "lead_dispatch", workspace: project.root, runId, from: "owner", message: wakeup.message }, { existingDesignSnapshot: true });
-          if (!reply.ok) throw new Error(reply.message);
-        }
-        run = await withExecutionLane(deps.stateDir, project.slug, async () => {
-          const current = readRun(deps.stateDir, project.slug, runId);
-          return commandRun(deps.stateDir, project.slug, runId, { type: "wakeup_delivered", id: wakeup.id, requestId: `${wakeup.id}:delivered`, expectedRevision: current.revision });
-        });
-      } catch (error) { log(`scrum: durable notification ${wakeup.id} pending — ${messageOf(error)}`); }
-    }
-    return run;
-  };
   const handlers = {
-    // Runtime recovery only delivers already-recorded explicit acts; it never
-    // invents continuation for a blocked run during installation/startup.
-    scrumRecoverNotifications: deliverScrumNotifications,
     async openDesignCatalog(_input: {}) {
       try { return { ok: true as const, projects: discoverOpenDesignProjects(resolveSurfaceUserHome()) }; }
       catch (error) { return failure(codeOf(error), messageOf(error)); }
@@ -1961,7 +1817,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         const project = projectOrRefusal(input.projectRoot); if (!project.ok) return project;
         return await withExecutionLane(deps.stateDir, project.slug, async () => {
           ensureProjectRegistered(deps.stateDir, { root: project.root, slug: project.slug });
-          const link = syncOpenDesignLink({ ...input, root: project.root, slug: project.slug, state: deps.stateDir, userHome: resolveSurfaceUserHome(), seedRuns: () => seedActiveScrumRuns(deps.stateDir, project.slug, project.root) });
+          const link = syncOpenDesignLink({ ...input, root: project.root, slug: project.slug, state: deps.stateDir, userHome: resolveSurfaceUserHome() });
           return { ok: true as const, link };
         });
       } catch (error) { return failure(codeOf(error), messageOf(error)); }
@@ -1978,128 +1834,6 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         const project = projectOrRefusal(input.projectRoot); if (!project.ok) return project;
         await withExecutionLane(deps.stateDir, project.slug, async () => unlinkOpenDesign(deps.stateDir, project.slug, project.root));
         return { ok: true as const };
-      } catch (error) { return failure(codeOf(error), messageOf(error)); }
-    },
-    async executionSetMode(input: { mode: "slp" | "scrum"; projectRoot?: string }, context?: SurfaceCallContext) {
-      try {
-        if (!input.projectRoot || input.projectRoot.trim() === "") {
-          return failure("project-required", "Select a specific project to switch execution mode — All projects is view-only");
-        }
-        const project = projectOrRefusal(input.projectRoot);
-        if (!project.ok) return project;
-        const data = await withExecutionLane(deps.stateDir, project.slug, async () => {
-          const work = await executionWork(project, context);
-          return switchExecution({ state: deps.stateDir, slug: project.slug, mode: input.mode, blockers: work.blockers, rotate: async () => {
-            for (const seat of ["lead", "supervisor"] as const) {
-              const retired = await retireSeat(seat, project.slug, project.root, context);
-              if (!retired.ok && !["no-lead", "no-supervisor"].includes(retired.code)) throw new FactoryError(retired.code, retired.error);
-            }
-          } });
-        });
-        return { ok: true as const, data };
-      } catch (error) { return failure(codeOf(error), messageOf(error)); }
-    },
-    async scrumCommand(input: ScrumOperation & { projectRoot?: string }, context?: SurfaceCallContext, caller?: { authority: "owner" | "supervisor" | "lead" | "agent"; actor: string }) {
-      try {
-        const project = input.projectRoot ? projectOrRefusal(input.projectRoot) : undefined;
-        if (project && !project.ok) return project;
-        const work = project?.ok ? await executionWork(project, context) : { activeAgents: [], pendingDirectives: false };
-        const authority = caller?.authority ?? "owner";
-        if (input.operation === "run.cancel") {
-          if (authority !== "owner" && authority !== "supervisor") throw new FactoryError("scrum-cancel-unauthorized", "Owner/Supervisor required");
-          if (!project?.ok || !input.runId) throw new FactoryError("project-required", "Project and run required");
-          return await withExecutionLane(deps.stateDir, project.slug, async () => {
-            const requested = commandRun(deps.stateDir, project.slug, input.runId!, { type: "cancellation_requested", requestId: input.requestId, expectedRevision: input.expectedRevision!, reason: String(input.payload?.reason ?? "Owner cancellation; unresolved Tasks retained"), actor: caller?.actor ?? "owner" });
-            if (requested.phase === "cancelled") return { ok: true as const, data: requested };
-            const page = await resolveDaemon(context).agents.list({ filter: { includeArchived: false, includeBackground: true } });
-            const cancelEvents = factoryForSlug(project.slug).ledger.events;
-            const peers = new Map(requested.tasks.flatMap(task => boundTaskPeers({ stateDir: deps.stateDir, slug: project.slug, task: task.task, events: cancelEvents, live: page.entries.map(e => e.agent) })).map(agent => [agent.id, agent]));
-            for (const { agent } of page.entries) if (agent.archivedAt === null && agent.labels.project === project.slug && agent.labels.run === input.runId && agent.labels.seat === "agent") peers.set(agent.id, agent);
-            for (const agent of peers.values()) {
-              const stopped = await (deps.stopAgent ?? stopAgentViaCli)(agent.id, deps.home);
-              if (!stopped.ok) throw new FactoryError("agent-stop-failed", stopped.reason);
-              await resolveDaemon(context).agents.ref(agent.id).archive();
-            }
-            const current = readRun(deps.stateDir, project.slug, input.runId!);
-            return { ok: true as const, data: commandRun(deps.stateDir, project.slug, input.runId!, { requestId: `${input.requestId}:cancelled`, expectedRevision: current.revision, type: "phase_changed", phase: "cancelled", reason: requested.cancellation!.reason, telemetry: scrumTelemetry(current, cancelEvents) }) };
-          });
-        }
-        const targetRunBefore =
-          project?.ok && (input.operation === "design.decide" || input.operation === "supervisor.decision")
-            ? (() => {
-                try {
-                  return input.runId
-                    ? readRun(deps.stateDir, project.slug, input.runId)
-                    : listRuns(deps.stateDir, project.slug).find((r) => !terminalRun(r) && !r.cancellation);
-                } catch {
-                  return undefined;
-                }
-              })()
-            : undefined;
-        const previousDecision = targetRunBefore?.design?.decision;
-        const previousDecisionDigest = targetRunBefore?.design?.digest;
-        const execute = async () => {
-          const currentWork = project?.ok ? await executionWork(project, context) : work;
-          const updatesRoster = ["config.set", "config.reset", "profile.apply"].includes(input.operation);
-          const before = project?.ok && updatesRoster ? readScrumConfig(deps.stateDir, project.slug) : undefined;
-          const data = await scrumOperation(input, { factory: project?.ok ? factoryForSlug(project.slug) : deps.factory, ...(project?.ok ? { slug: project.slug, root: project.root } : {}), authority, actor: caller?.actor ?? "owner", activeAgents: currentWork.activeAgents, pendingDirectives: currentWork.pendingDirectives,
-            previewDecision: async (decision, previewRun): Promise<import('./core/scrum/run-journal.ts').ScrumRun> => {
-              const reply = await handlers.scrumCommand({ operation: 'design.decide', projectRoot: project?.ok ? project.root : undefined, runId: previewRun.runId, requestId: `studio:${previewRun.runId}:${previewRun.revision}:${input.requestId}`, expectedRevision: previewRun.revision, payload: { ...decision, explicitOwnerInstruction: true } }, context);
-              if (!reply.ok) throw new FactoryError(reply.code, reply.error);
-              return reply.data as import('./core/scrum/run-journal.ts').ScrumRun;
-            },
-          });
-          if (project?.ok && before && updatesRoster && readExecution(deps.stateDir, project.slug).mode === "scrum" && !listRuns(deps.stateDir, project.slug).some(run => !terminalRun(run))) {
-            const after = readScrumConfig(deps.stateDir, project.slug);
-            if (after) await syncLiveSeatsAfterLaneUpdate({ projectSlug: project.slug, projectRoot: project.root, before: before.lanes, after: after.lanes, executionMode: "scrum", context });
-          }
-          return { ok: true as const, data };
-        };
-        const result = project?.ok ? await withExecutionLane(deps.stateDir, project.slug, execute) : await execute();
-        const decidedRun = result.data as {
-          mode?: string;
-          runId?: string;
-          phase?: string;
-          design?: { revision?: number; digest?: string; decision?: string; rationale?: string; findings?: unknown[]; screenStatuses?: Record<string, string> };
-        } | undefined;
-        if (
-          project?.ok &&
-          (input.operation === "design.decide" || input.operation === "supervisor.decision") &&
-          deps.leadDispatch !== undefined &&
-          decidedRun?.runId &&
-          decidedRun.design?.decision &&
-          (previousDecision !== decidedRun.design.decision || previousDecisionDigest !== decidedRun.design.digest)
-        ) {
-          const decision = decidedRun.design.decision;
-          const findingsLine =
-            Array.isArray(decidedRun.design.findings) && decidedRun.design.findings.length > 0
-              ? `\nFindings: ${JSON.stringify(decidedRun.design.findings)}`
-              : "";
-          const nextStep =
-            decision === "changes_requested"
-              ? "Run phase is now 'design'. Dispatch UX rework to address the requested changes, re-verify readiness, and submit a new design review."
-              : "Run phase is now 'implementation'. Proceed immediately with Stage 4 (Senior Dev): contract and spawn the implementation stories from sprint-backlog.md.";
-          try {
-            await deps.leadDispatch({
-              id: `${input.requestId}:lead-notify`,
-              kind: "lead_dispatch",
-              workspace: project.root,
-              runId: decidedRun.runId,
-              from: authority === "supervisor" ? "supervisor" : "owner",
-              ...(authority === "supervisor" ? { seat: "supervisor" as const } : {}),
-              message: `UI DESIGN DECISION RECORDED — run ${decidedRun.runId}, design revision ${decidedRun.design.revision ?? 1} (digest ${decidedRun.design.digest ?? ""}): ${decision.toUpperCase()}.\nRationale: ${decidedRun.design.rationale ?? ""}${findingsLine}\nScreen statuses: ${JSON.stringify(decidedRun.design.screenStatuses ?? {})}\n${nextStep}`,
-            }, { existingDesignSnapshot: true });
-          } catch (err) {
-            log(`scrum: lead wakeup after ${input.operation} failed — ${messageOf(err)}`);
-          }
-        }
-        // Preview results also carry runId; only full run projections may be
-        // refreshed after notification delivery. Preserve each operation's payload.
-        if (project?.ok && decidedRun?.mode === "scrum" && decidedRun.runId) {
-          const data = await deliverScrumNotifications(project, decidedRun.runId);
-          return { ok: true as const, data };
-        }
-        return result;
       } catch (error) { return failure(codeOf(error), messageOf(error)); }
     },
     async historyUpgrade(input: UpgradeInput) {
@@ -2188,8 +1922,6 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       // Project's slug so the fold can attribute every task row and ledger
       // line. Unwired registry (the legacy single-Factory entrances) keeps
       // the root Factory's ledger as the one event stream.
-      const scrubCancelled = (events: readonly LedgerEvent[]): LedgerEvent[] =>
-        events.filter((evt) => !("task" in evt) || typeof evt.task !== "string" || !isCancelledScrumTask(evt.task));
       // A selected Project that is REGISTERED reads its own Factory's ledger; a
       // repo no Project Factory owns yet (an unregistered directory in the
       // Project Selector's scope) falls back to the root Factory's events — a
@@ -2199,7 +1931,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       const streamErrors = new Map<string, string>();
       const streamForSlug = (slug: string): ProjectEventStream => {
         try {
-          return { slug, events: scrubCancelled(factoryForSlug(slug).ledger.events) };
+          return { slug, events: factoryForSlug(slug).ledger.events };
         } catch (error) {
           const message = messageOf(error);
           streamErrors.set(slug, message);
@@ -2208,7 +1940,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         }
       };
       const scopedStream = (slug: string): ProjectEventStream =>
-        readProjectRegistration(deps.stateDir, slug) !== undefined ? streamForSlug(slug) : { slug, events: scrubCancelled(deps.factory.ledger.events) };
+        readProjectRegistration(deps.stateDir, slug) !== undefined ? streamForSlug(slug) : { slug, events: deps.factory.ledger.events };
       const projectStreams: ProjectEventStream[] | undefined =
         deps.registry === undefined
           ? undefined
@@ -2216,7 +1948,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
             ? [scopedStream(project.slug)]
             : deps.registry.slugs().map((slug) => streamForSlug(slug));
       const allEvents: readonly LedgerEvent[] =
-        projectStreams !== undefined ? projectStreams.flatMap((stream) => stream.events) : scrubCancelled(deps.factory.ledger.events);
+        projectStreams !== undefined ? projectStreams.flatMap((stream) => stream.events) : deps.factory.ledger.events;
       const bound = agentTaskIndex(allEvents);
 
       let rawAgents: SurfaceAgentSnapshot[] = [];
@@ -2319,7 +2051,6 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
                 return r.ok ? r.gitCommonDir : join(entry.root, ".git");
               })()
             : join(entry.root, ".git"));
-        const execution = executionView(entry.slug);
         const ledgerError = streamErrors.get(entry.slug);
         return {
           slug: entry.slug,
@@ -2330,8 +2061,6 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           ...(ledgerError !== undefined ? { ledgerError } : {}),
           supervisorId: liveSup?.id ?? reg?.supervisor ?? entry.supervisorId ?? null,
           leadId: liveLead?.id ?? reg?.lead ?? entry.leadId ?? null,
-          executionMode: execution.selectedMode,
-          activeScrumPhase: (() => { const run = execution.run; return run && !["completed", "cancelled"].includes(run.phase) ? run.phase : null; })(),
           activeTaskCount: allTasks.filter((t) => taskInProject(t.task, entry.root, entry.slug)).length,
         };
       };
@@ -2388,26 +2117,16 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       // filesystem probe layered over the fold (the vault-status precedent),
       // so the view carries the Owner's profile library and the scope's
       // active-profile / override state without the fold learning files.
-      const execution = executionView(enrichedProject?.slug);
-      if (enrichedProject) {
-        try { execution.busyReason = (await executionWork(enrichedProject, context, rawAgents)).blockers.join("; ") || null; }
-        catch (error) { execution.error ??= messageOf(error); execution.busyReason = "Execution state needs recovery: " + messageOf(error); }
-      }
-      const latestContracts = new Map(allEvents.filter(e => e.event === 'contract_set').map(e => [e.task, e]));
-      const contractGrants = enrichedProject ? [...latestContracts.values()]
-        .filter(e => e.execution && taskInProject(e.task, enrichedProject.root, enrichedProject.slug) && !projectTask(allEvents, e.task).settled)
-        .map(e => ({ task: e.task, role: e.execution!.role, skills: e.skills ?? [] })) : [];
       let configuredPacks: string[] | undefined;
       try { configuredPacks = enrichedProject ? readProjectSettings(deps.stateDir, enrichedProject.slug).skillPacks : undefined; }
-      catch { configuredPacks = []; } // executionView already exposes the damaged selection; do not widen skills.
+      catch { configuredPacks = []; } // a damaged settings record does not widen skills.
       return {
         ok: true as const,
         view: {
           ...view,
-          execution,
           tasks: enrichTaskPeerAgents(view.tasks, rawAgents),
           machineLanes: machineLanes.lanes,
-          skillHub: inspectSkillHub({ contractGrants, slpLanes: lanes.lanes, userHome: resolveSurfaceUserHome(), projectRoot: enrichedProject?.root, configuredPacks }),
+          skillHub: inspectSkillHub({ slpLanes: lanes.lanes, userHome: resolveSurfaceUserHome(), projectRoot: enrichedProject?.root, configuredPacks }),
           companionTools: buildCompanionToolsView(),
           helperMcps: helperMcpRoster(discoverHelperMcps({ stateDir: deps.stateDir, userHome: resolveSurfaceUserHome() }).servers),
           ...laneProfilesGather(enrichedProject?.slug, view.lanes),
@@ -2580,7 +2299,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           } else {
             try {
               const agent = await seatOf(daemon, seat, projectSlug);
-              if (agent !== undefined && (agent.labels.project === undefined || projectUsesSlp(agent.labels.project))) {
+              if (agent !== undefined) {
                 const sync = deps.setAgentModel ?? setAgentModelViaCli;
                 const syncThinking = deps.setAgentThinking ?? setAgentThinkingViaCli;
                 const laneValue = saved.lanes[seat];
@@ -3092,7 +2811,6 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           ? deps.registry.factoryForProject(project.slug)
           : deps.factory;
       const { purgedEvents, tasks: purgedTasks, removedFiles } = deleteFactory.resetProject(project.root, project.slug);
-      rmSync(join(projectDir, "scrum"), { recursive: true, force: true });
       const tasks = [...new Set([...purgedTasks, ...projectTaskSet])];
       try {
         new CorrelationRegistry(deps.stateDir).purgeProject(project.slug, project.root, tasks);
@@ -3281,7 +2999,6 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           ? deps.registry.factoryForProject(project.slug)
           : deps.factory;
       const { purgedEvents, tasks: purgedTasks, removedFiles } = resetFactory.resetProject(project.root, project.slug);
-      rmSync(join(projectDir, "scrum"), { recursive: true, force: true });
       const tasks = [...new Set([...purgedTasks, ...projectTaskSet])];
       new CorrelationRegistry(deps.stateDir).purgeProject(project.slug, project.root, tasks, input.keepSeats === true);
       if (input.keepSeats !== true) resetProjectRepository(project.root, protectedPluginDir);
@@ -3338,7 +3055,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       };
       try {
         const project = projectOrRefusal(input.projectRoot ?? (input.project ? readProjectRegistration(deps.stateDir, input.project)?.root : undefined) ?? "");
-        if (project.ok) await prepareOpenDesignDispatch({ state: deps.stateDir, slug: project.slug, root: project.root, requestId: request.id, userHome: resolveSurfaceUserHome(), seedRuns: () => seedActiveScrumRuns(deps.stateDir, project.slug, project.root) });
+        if (project.ok) await prepareOpenDesignDispatch({ state: deps.stateDir, slug: project.slug, root: project.root, requestId: request.id, userHome: resolveSurfaceUserHome() });
       } catch (error) { return failure(codeOf(error), messageOf(error)); }
       const reply = await deps.leadDispatch(request);
       if (!reply.ok) return { ok: false as const, code: reply.code ?? "lead-dispatch-failed", error: reply.message ?? "the dispatch failed" };
@@ -3824,9 +3541,7 @@ export function registerSurfaceRpc(
     return { paseo: context.paseo };
   };
   server.handle(historyUpgrade, (input, context) => { pass(context); return handlers.historyUpgrade(input); });
-  server.handle(executionSetMode, (input, context) => handlers.executionSetMode(input, pass(context)));
-  server.handle(scrumCommand, (input, context) => handlers.scrumCommand(input, pass(context)));
-  server.handle(snapshot, (input, context) => handlers.snapshot(input, pass(context)));
+      server.handle(snapshot, (input, context) => handlers.snapshot(input, pass(context)));
   server.handle(taskDetail, (input, context) => handlers.taskDetail(input, pass(context)));
   server.handle(openDesignCatalog, input => handlers.openDesignCatalog(input));
   server.handle(openDesignExport, input => handlers.openDesignExport(input));

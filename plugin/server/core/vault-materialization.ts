@@ -1,6 +1,5 @@
 import { collectHelperMcpVault, hydrateHelperMcpVault } from "./helper-mcp-vault.ts";
-import { collectScrumVault, collectProjectScrumVault, materializeScrumVault, materializeProjectScrumVault } from "./scrum/vault.ts";
-import { ensureProviderSkillSymlinks } from "./scrum/companion-tools.ts";
+import { ensureProviderSkillSymlinks } from "./companion-tools.ts";
 import { FactoryError } from "./errors.ts";
 import { mergeLaneProfilesFiles, projectLanesPath, readLaneProfilesFile } from "./lanes.ts";
 import type { LaneProfile, LaneProfilesFile } from "./lanes.ts";
@@ -572,7 +571,6 @@ export function materializeVaultSkillsFromRuntime(
 export function collectLocalStateIntoRuntime(paseoHome: string, options?: { userHome?: string }): void {
   const stateDir = vaultStateDir(paseoHome);
   collectHelperMcpVault({ stateDir, userHome: resolveVaultUserHome(paseoHome, options?.userHome) }, join(paseoHome, "vault-runtime"));
-  collectScrumVault(stateDir, join(paseoHome, "vault-runtime/config"));
   collectVaultSkillsIntoRuntime(paseoHome, options?.userHome);
   const configSources: ReadonlyArray<{ src: string; vaultRel: string }> = [
     { src: join(stateDir, "lanes.json"), vaultRel: "config/lanes.json" },
@@ -639,7 +637,7 @@ export function collectLocalStateIntoRuntime(paseoHome: string, options?: { user
     // another machine's DIFFERENT local slug still finds its checkout.
     const projectLanes = projectLanesPath(stateDir, facts.slug);
     const hasProjectLanes = existsSync(projectLanes);
-    if (!hasStoreManifest && !hasProjectLanes && !existsSync(join(stateDir, "projects", facts.slug, "scrum-lanes.json"))) continue;
+    if (!hasStoreManifest && !hasProjectLanes) continue;
 
     let canonicalAppKey = matchManifestAppKey(manifest, facts);
     if (canonicalAppKey === null && hasStoreManifest) {
@@ -654,7 +652,6 @@ export function collectLocalStateIntoRuntime(paseoHome: string, options?: { user
     if (hasProjectLanes) {
       writeRuntimeFile(paseoHome, `config/apps/${canonicalAppKey}/lanes.json`, readFileSync(projectLanes));
     }
-    collectProjectScrumVault(stateDir, facts.slug, join(paseoHome, "vault-runtime/config/apps", canonicalAppKey));
     const priorEntry = manifest[canonicalAppKey] ?? {};
     manifest[canonicalAppKey] = {
       ...priorEntry,
@@ -719,7 +716,6 @@ export function materializeConfigsFromRuntime(
 ): void {
   const runtimeConfigDir = join(paseoHome, "vault-runtime", "config");
   hydrateHelperMcpVault({ stateDir: vaultStateDir(paseoHome), userHome: resolveVaultUserHome(paseoHome, options?.userHome) }, join(paseoHome, "vault-runtime"), overwriteConfigs);
-  materializeScrumVault(vaultStateDir(paseoHome), runtimeConfigDir, overwriteConfigs);
   materializeVaultSkillsFromRuntime(paseoHome, overwriteConfigs, options?.userHome);
   const targets: ReadonlyArray<{ src: string; dest: string }> = [
     { src: join(runtimeConfigDir, "lanes.json"), dest: join(vaultStateDir(paseoHome), "lanes.json") },
@@ -752,7 +748,6 @@ export function materializeConfigsFromRuntime(
     const manifest = readVaultManifestAt(join(paseoHome, "vault-runtime"));
     for (const app of resolveVaultApps(paseoHome, manifest)) {
       if (app.projectSlug === null) continue; // no local checkout behind this key on this machine
-      materializeProjectScrumVault(stateDir, app.projectSlug, join(runtimeConfigDir, "apps", app.canonicalAppKey), overwriteConfigs);
       const src = join(runtimeConfigDir, "apps", app.canonicalAppKey, "lanes.json");
       if (!existsSync(src)) continue;
       const dest = projectLanesPath(stateDir, app.projectSlug);

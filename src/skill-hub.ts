@@ -21,8 +21,6 @@ import {
   installOrUpdateExpoSkillPack,
 } from "./companion-tools.ts";
 import type { CompanionToolRunner } from "./companion-tools.ts";
-import { SCRUM_ROLE_SKILLS } from "./prompts.ts";
-import type { ScrumRoleName } from "./config.ts";
 
 export const PROJECT_SKILL_PACKS = [
   "expo",
@@ -99,14 +97,9 @@ export interface ProjectSkillContext {
   userHome?: string;
   configuredPacks?: string[];
   slpLanes?: { supervisor: string; lead: string; worker: string };
-  contractGrants?: Array<{
-    task: string;
-    role: ScrumRoleName;
-    skills: string[];
-  }>;
 }
 export interface RoleSkillOptions extends ProjectSkillContext {
-  role: ScrumRoleName | "supervisor" | "lead" | "peer";
+  role: "supervisor" | "lead" | "peer";
   contractSkills?: string[];
 }
 export const SLP_ROLE_SKILLS = {
@@ -128,9 +121,7 @@ export function resolveRoleSkillsForProject(
       ? SLP_ROLE_SKILLS.supervisor
       : role === "lead"
         ? SLP_ROLE_SKILLS.lead
-        : role === "peer"
-          ? [...CORE_FACTORY_SKILLS]
-          : SCRUM_ROLE_SKILLS[role];
+        : [...CORE_FACTORY_SKILLS];
   const packs = resolveProjectSkillPacks(options);
   const home = options.userHome ?? homedir();
   const lock = readSkillLockFile(home);
@@ -139,22 +130,9 @@ export function resolveRoleSkillsForProject(
     ...new Set([...installed, ...(packs.includes("expo") ? EXPO_SKILLS : [])]),
   ];
   const domain =
-    role === "pm" || role === "supervisor" || role === "lead"
+    role === "supervisor" || role === "lead"
       ? []
-      : candidates.filter((name) => {
-          const pack = skillPack(name, lock.skills[name]?.source);
-          if (!packs.includes(pack)) return false;
-          if (pack !== "expo" || role === "dev" || role === "peer") return true;
-          if (role === "ux")
-            return /overview|design|native-ui|expo-ui|animation|dom|web-to-native/.test(
-              name,
-            );
-          if (role === "qa")
-            return /overview|debugging|dev-client|^eas-/.test(name);
-          return /overview|structure|router|data-fetching|module|upgrade|brownfield|^eas-/.test(
-            name,
-          );
-        });
+      : candidates.filter((name) => packs.includes(skillPack(name, lock.skills[name]?.source)));
   return [
     ...new Set([...baseline, ...domain, ...(options.contractSkills ?? [])]),
   ].filter((name) => /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name));
@@ -417,18 +395,8 @@ export function importHostSkillOrPack(options: {
 }
 export function buildRoleSkillMatrix(options: ProjectSkillContext = {}) {
   const installed = inspectFactorySkillPack(options.userHome).installedSkills;
-  const roles = [
-    "supervisor",
-    "lead",
-    "peer",
-    "pm",
-    "ux",
-    "architect",
-    "dev",
-    "qa",
-  ] as const;
+  const roles = ["supervisor", "lead", "peer"] as const;
   return roles.map((role) => {
-    const isSlp = ["supervisor", "lead", "peer"].includes(role);
     const lane =
       role === "supervisor"
         ? options.slpLanes?.supervisor
@@ -438,20 +406,13 @@ export function buildRoleSkillMatrix(options: ProjectSkillContext = {}) {
             ? options.slpLanes?.worker
             : undefined;
     const isPi = !lane || /^(pi|omp)\//.test(lane);
-    const taskGrants = isSlp
-      ? []
-      : (options.contractGrants ?? []).filter((g) => g.role === role);
     const skills =
       role === "supervisor" && isPi
         ? [...installed]
         : role === "peer"
           ? installed.filter((s) => s !== "factory")
-          : resolveRoleSkillsForProject({
-              ...options,
-              role,
-              contractSkills: taskGrants.flatMap((g) => g.skills),
-            });
-    return { role, mode: isSlp ? "slp" : "scrum", skills, taskGrants };
+          : resolveRoleSkillsForProject({ ...options, role });
+    return { role, skills };
   });
 }
 export function inspectSkillHub(options: ProjectSkillContext = {}) {

@@ -1,5 +1,4 @@
 import { OpenDesignControl } from "./open-design.tsx";
-import { ExecutionSelector } from "./scrum.tsx";
 /**
  * The persistent Project-centered header (v0.0.35, ADR 0025, amending ADR 0009 §2
  * and ADR 0014 §1): plain-language headline, freshness dot, and the prominent
@@ -28,7 +27,6 @@ export type { VaultActName, VaultImportInput, VaultNote, VaultSyncInput };
 export interface HeaderActions {
   refresh?(): void;
   designSourceKey?: string;
-  setMode?(mode: "slp" | "scrum"): void;
   /** Jump to the live Supervisor's conversation (v0.0.27, ADR 0017 §3) — the seat itself starts from Paseo's native New Chat picker, never here. */
   openSupervisor(): void;
   /** Jump to the live Lead's conversation — the Supervisor spawns the seat via supervisor_dispatch_lead. */
@@ -53,16 +51,6 @@ export function shortenHomePath(path: string): string {
 }
 
 function headlineOf(view: FactoryView): string {
-  const scrumPhase =
-    view.project !== null
-      ? view.execution?.selectedMode === "scrum"
-        ? view.execution.run?.phase ?? null
-        : null
-      : (view.projects.find(
-          (p) => p.executionMode === "scrum" && (p.activeScrumPhase === "awaiting-ui-approval" || p.activeScrumPhase === "blocked"),
-        )?.activeScrumPhase ?? null);
-  if (scrumPhase === "awaiting-ui-approval") return "UI mockup awaiting your approval";
-  if (scrumPhase === "blocked") return "Scrum run blocked — needs attention";
   if (view.kpis.needsHuman > 0) return `${view.kpis.needsHuman} task${view.kpis.needsHuman === 1 ? "" : "s"} need${view.kpis.needsHuman === 1 ? "s" : ""} you`;
   if (view.kpis.running > 0) return `${view.kpis.running} under the gate`;
   if (view.kpis.readyToAccept > 0) return `${view.kpis.readyToAccept} green attempt${view.kpis.readyToAccept === 1 ? "" : "s"} await acceptance`;
@@ -258,7 +246,7 @@ export function Header({
             >
               <Chip
                 theme={theme}
-                label={`${projectLabel(entry.slug, entry.root, entry.name)} · ${entry.executionMode === "scrum" ? `Scrum${entry.activeScrumPhase ? ` · ${entry.activeScrumPhase}` : ""}` : "SLP"}`}
+                label={projectLabel(entry.slug, entry.root, entry.name)}
                 active={project?.slug === entry.slug}
                 count={projectTaskCount(view, entry)}
                 icon={entry.missingRoot ? "AlertTriangle" : "FolderGit2"}
@@ -342,9 +330,7 @@ export function Header({
           </View>
         </View>
 
-        {project ? (
-          <ExecutionSelector theme={theme} view={view} setMode={actions.setMode} busy={actions.busy} />
-        ) : (
+        {project ? null : (
           <View
             style={{
               flexDirection: "row",
@@ -358,7 +344,7 @@ export function Header({
           >
             <Pill theme={theme} label="All projects · View-only" tone="statusWarning" lit />
             <Text style={text(theme, "meta")}>
-              Select a specific project above to switch execution mode or modify settings.
+              Select a specific project above to modify settings.
             </Text>
           </View>
         )}

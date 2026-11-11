@@ -182,8 +182,6 @@ function classSyntaxErrors(code) {
 
 const HOST_OBJECTS = new Set(["window", "document", "globalThis", "self"]);
 const EVENT_APIS = new Set(["addEventListener", "removeEventListener", "dispatchEvent"]);
-/** Modules exempt from the DOM-element rule until they are deleted (the Scrum preview iframes die in W3, ADR 0056). */
-const DOM_ELEMENT_EXEMPT = new Set([path.join("client", "factory", "scrum.tsx")]);
 
 /** `window.addEventListener` / `window?.addEventListener` / `window["addEventListener"]` → "window.addEventListener". */
 function hostApiOf(node) {
@@ -230,9 +228,7 @@ function browserApiErrors(code) {
   const errors = [];
   const fileOf = (node) => modules.findLast((module) => module.at < node.getStart(parsed))?.file ?? "client bundle";
   const report = (node, message) => {
-    const file = fileOf(node);
-    if (DOM_ELEMENT_EXEMPT.has(file) && /DOM element/.test(message)) return;
-    errors.push(`${file}: ${message}`);
+    errors.push(`${fileOf(node)}: ${message}`);
   };
   const calleeName = (callee) => (ts.isIdentifier(callee) ? callee.text : ts.isPropertyAccessExpression(callee) ? callee.name.text : null);
   const visit = (node) => {

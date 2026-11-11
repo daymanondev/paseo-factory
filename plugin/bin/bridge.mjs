@@ -531,7 +531,8 @@ function parseCliArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--correlation" && i + 1 < argv.length) out.correlationId = argv[++i];
-    else if (arg === "--mode" && i + 1 < argv.length) out.mode = argv[++i];
+    // `--mode <slp|scrum>` from seats started before v0.6.0 is read and ignored.
+    else if (arg === "--mode" && i + 1 < argv.length) i++;
     else if (arg === "--role" && i + 1 < argv.length) out.role = argv[++i];
     else if (arg === "--state-dir" && i + 1 < argv.length) out.stateDir = argv[++i];
     else if (arg === "--project" && i + 1 < argv.length) out.projectSlug = argv[++i];
@@ -668,9 +669,7 @@ function resolveBridgeContext() {
   const task = (record?.task ?? cliFlags.task ?? "").trim() || undefined;
   const effectiveAgentId = record?.agentId ?? agentId;
 
-  const mode = mcpCatalog.resolveMode(stateDir, projectSlug, cliFlags.mode);
   return {
-    mode,
     home,
     stateDir,
     spoolRoot: join(stateDir, "spool"),
@@ -757,25 +756,6 @@ __export(ledger_validation_exports, {
 });
 module.exports = __toCommonJS(ledger_validation_exports);
 
-// src/safe-id.ts
-function safeId(value) {
-  return typeof value === "string" && /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(value) && value !== "..";
-}
-
-// src/scrum/types.ts
-var SPECIALIST_ROLES = ["pm", "ux", "architect", "dev", "qa"];
-function safePath(value) {
-  return typeof value === "string" && value.length > 0 && !value.includes("\\") && !value.includes("\0") && value.split("/").every((p) => p !== "" && p !== "." && p !== "..");
-}
-function artifactRefIsValid(value) {
-  const v = value;
-  return !!v && safePath(v.path) && /^[a-f0-9]{40}$/.test(v.commit) && /^[a-f0-9]{64}$/.test(v.sha256);
-}
-function scrumBindingIsValid(value) {
-  const v = value;
-  return !!v && v.mode === "scrum" && (v.contractRequestId === void 0 || typeof v.contractRequestId === "string" && v.contractRequestId.length > 0) && safeId(v.runId) && SPECIALIST_ROLES.includes(v.role) && typeof v.policyRevision === "string" && v.policyRevision.length > 0 && Number.isSafeInteger(v.configRevision) && v.configRevision >= 0 && Array.isArray(v.artifactRefs) && v.artifactRefs.every(artifactRefIsValid);
-}
-
 // src/events.ts
 var EVENT_NAMES = [
   "ledger_schema",
@@ -832,7 +812,7 @@ var PEER_THINKING_LEVELS = ["low", "medium", "high", "xhigh", "max"];
 function isValidLedgerEvent(value) {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const event = value;
-  return (event.schema_version === void 0 || event.schema_version === 1 || event.schema_version === 2) && (event.schema_version !== 2 || identityMetadataIsValid(event)) && Number.isSafeInteger(event.seq) && event.seq > 0 && typeof event.ts === "string" && (event.schema_version !== 2 || utcTimestampIsValid(event.ts)) && typeof event.event === "string" && EVENT_NAMES.includes(event.event) && (event.event !== "contract_set" || event.execution === void 0 || scrumBindingIsValid(event.execution)) && shapeIsValid(value) && (event.schema_version !== 2 || v2PayloadIsValid(event));
+  return (event.schema_version === void 0 || event.schema_version === 1 || event.schema_version === 2) && (event.schema_version !== 2 || identityMetadataIsValid(event)) && Number.isSafeInteger(event.seq) && event.seq > 0 && typeof event.ts === "string" && (event.schema_version !== 2 || utcTimestampIsValid(event.ts)) && typeof event.event === "string" && EVENT_NAMES.includes(event.event) && shapeIsValid(value) && (event.schema_version !== 2 || v2PayloadIsValid(event));
 }
 function utcTimestampIsValid(value) {
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|\+00:?00)$/.test(value)) return false;
@@ -985,7 +965,7 @@ function v2PayloadIsValid(event) {
     case "ledger_schema":
       return true;
     case "contract_set":
-      return (event.execution === void 0 || scrumBindingIsValid(event.execution)) && string("workspace") && string("gate") && string("artifact") && strings("scope") && strings("skills") && optionalString("base") && optionalString("description") && optionalString("by") && (event.freshEyes === void 0 || event.freshEyes === true) && (event.watch === void 0 || event.watch === true) && (event.disposition === void 0 || PEER_DISPOSITIONS.includes(event.disposition));
+      return string("workspace") && string("gate") && string("artifact") && strings("scope") && strings("skills") && optionalString("base") && optionalString("description") && optionalString("by") && (event.freshEyes === void 0 || event.freshEyes === true) && (event.watch === void 0 || event.watch === true) && (event.disposition === void 0 || PEER_DISPOSITIONS.includes(event.disposition));
     case "claim_reported":
       return string("sha") && optionalString("agent") && handoffIsValid(event.handoff) && mechanicalClaimIsValid(event);
     case "gate_started":
@@ -1172,18 +1152,6 @@ function formatFactoryStatus(stateDir, workspaceFilter, options = {}) {
 
 
 function resolveDefaultWorkerLane(stateDir, projectSlug, task) {
-  if (projectSlug && task) {
-    const contract = readLedgerEventsList(stateDir, { projectSlug, task }).findLast(e => e.event === "contract_set" && e.task === task);
-    if (contract?.execution?.mode === "scrum") {
-      const binding = contract.execution;
-      const journal = join(stateDir, "projects", projectSlug, "scrum/runs", binding.runId, "events.jsonl");
-      const events = readFileSync(journal, "utf8").trim().split("\n").map(line => JSON.parse(line));
-      const frozen = events[0]?.payload?.run?.config?.lanes?.[binding.role];
-      const selected = events.findLast(e => e.payload?.type === "provider_selected" && e.payload.task === task && e.payload.epoch === contract.seq)?.payload.provider;
-      if (typeof (selected ?? frozen) !== "string") throw new Error("Missing frozen Scrum role lane");
-      return selected ?? frozen;
-    }
-  }
   const DEFAULT_LANE = "pi/zcode/glm-5.3";
   try {
     if (projectSlug) {
@@ -1232,52 +1200,9 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // src/mcp/catalog.ts
 var catalog_exports = {};
 __export(catalog_exports, {
-  resolveMode: () => resolveMode,
-  selectCatalog: () => selectCatalog
+  catalog: () => catalog
 });
 module.exports = __toCommonJS(catalog_exports);
-
-// src/errors.ts
-var FactoryError = class extends Error {
-  code;
-  constructor(code, message) {
-    super(message);
-    this.name = "FactoryError";
-    this.code = code;
-  }
-};
-
-// src/safe-id.ts
-function safeId(value) {
-  return typeof value === "string" && /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(value) && value !== "..";
-}
-
-// src/scrum/selection.ts
-var import_node_fs = require("node:fs");
-var import_node_path = require("node:path");
-function selectionPath(state, slug) {
-  if (slug !== void 0 && !safeId(slug))
-    throw new FactoryError("invalid-project-slug", slug);
-  return slug === void 0 ? (0, import_node_path.join)(state, "execution.json") : (0, import_node_path.join)(state, "projects", slug, "execution.json");
-}
-function executionIsValid(value) {
-  const v = value;
-  return v !== null && typeof v === "object" && v.schemaVersion === 1 && ["slp", "scrum"].includes(v.mode) && Number.isSafeInteger(v.revision) && v.revision >= 0;
-}
-function readExecution(state, slug) {
-  const path = selectionPath(state, slug);
-  let value;
-  try {
-    value = JSON.parse((0, import_node_fs.readFileSync)(path, "utf8"));
-  } catch (error) {
-    if (error.code === "ENOENT")
-      return { schemaVersion: 1, mode: "slp", revision: 0 };
-    throw new FactoryError("execution-config-invalid", path);
-  }
-  if (!executionIsValid(value))
-    throw new FactoryError("execution-config-invalid", path);
-  return value;
-}
 
 // src/mcp/shared.ts
 var MCP_TOOL_TIMEOUT_MS = 6e5;
@@ -1536,77 +1461,11 @@ var slpCatalog = {
   roles: sharedRoles
 };
 
-// src/mcp/scrum.ts
-var runId = { type: "string", description: "Omit to resolve the active Project run." };
-var specialist = { type: "string", enum: ["pm", "ux", "architect", "dev", "qa"] };
-var string = { type: "string" };
-var decision = {
-  name: "supervisor_scrum_decision",
-  description: "Record an explicit Owner design decision. Omitted run/revision/digest resolve from the active run. Never infer Owner approval.",
-  inputSchema: { type: "object", properties: { runId, decision: { type: "string", enum: ["approved", "changes_requested", "waived"] }, rationale: { type: "string", minLength: 1 }, revision: { type: "integer" }, digest: string, decidedBy: string, actorRole: { type: "string", enum: ["supervisor"] }, designArtifact: string, findings: { type: "array", items: { type: "object", properties: { screen: string, state: { type: "string", enum: ["empty", "loading", "populated", "error", "offline", "permission-denied"] }, viewport: { type: "string", enum: ["desktop", "tablet", "mobile"] }, selector: string, note: string, status: { type: "string", enum: ["approved", "revise"] } }, required: ["screen", "note"] } }, screenStatuses: { type: "object", additionalProperties: { type: "string", enum: ["approved", "revise"] } } }, required: ["decision", "rationale"] },
-  _meta: { timeoutMs: MCP_TOOL_TIMEOUT_MS }
-};
-var operation = {
-  name: "lead_scrum_operation",
-  description: "Orchestrate the Scrum lifecycle. Evidence operations accept exact landed path/commit/sha256 artifactRefs; readiness also accepts contradictions, unsafeAssumptions and missingCoverage. Design submission requires browserEvidence. All evidence is verified by the existing controller.",
-  inputSchema: { type: "object", properties: {
-    action: { type: "string", enum: ["get", "wait.request", "track.select", "readiness", "design.submit", "qa.audit", "fix.reserve", "bundle.promote", "run.complete", "preview"] },
-    runId,
-    pendingId: string,
-    question: string,
-    affected: { type: "array", minItems: 1, items: { type: "object", properties: { kind: { type: "string", enum: ["task", "stage"] }, id: string }, required: ["kind", "id"] } },
-    track: { type: "string", enum: ["quick", "standard", "enterprise"] },
-    rationale: string,
-    designArtifact: string,
-    digest: string,
-    revision: { type: "integer" },
-    waiverReason: string,
-    auditArtifact: string,
-    verdict: string,
-    findings: { type: "array", items: string },
-    parentTaskId: string,
-    task: string,
-    summary: string,
-    ownedPaths: { type: "array", items: string },
-    bundlePath: string,
-    subpath: string,
-    port: { type: "integer" },
-    roleResults: { type: "array", items: { type: "object", properties: { task: string, result: { type: "object", description: "status, artifactRefs, assumptions, openQuestions, conflicts" } }, required: ["task", "result"] }, description: "Landed specialist results to record through the verified controller before this operation." },
-    artifactRefs: { type: "array", items: { type: "object" } },
-    browserEvidence: { type: "array", items: { type: "object" } },
-    contradictions: { type: "array", items: string },
-    unsafeAssumptions: { type: "array", items: string },
-    missingCoverage: { type: "array", items: string }
-  }, required: ["action"] },
-  _meta: { timeoutMs: MCP_TOOL_TIMEOUT_MS }
-};
-var scrumCatalog = {
-  tools: {
-    ...sharedTools,
-    supervisor_dispatch_lead: extendTool(sharedTools.supervisor_dispatch_lead, { runId, scrum: { type: "object", properties: { initiativeId: string, track: { type: "string", enum: ["quick", "standard", "enterprise", "small", "backend", "ui"] }, rationale: string, ownedPaths: { type: "array", items: string }, budgets: { type: "object" } }, description: "Optional admission overrides; omitted values derive from the directive." } }),
-    lead_set_contract: extendTool(sharedTools.lead_set_contract, { runId, role: specialist, artifactRefs: { type: "array", items: { type: "object" } } }),
-    lead_spawn_agent: extendTool(sharedTools.lead_spawn_agent, { runId, role: specialist }),
-    lead_dispatch_agent: extendTool(sharedTools.lead_dispatch_agent, { runId, role: specialist }),
-    lead_report_to_supervisor: extendTool(sharedTools.lead_report_to_supervisor, { runId, reportType: { type: "string", enum: ["ui-review", "completed"] }, scrum: { type: "object" } }),
-    supervisor_scrum_decision: decision,
-    lead_scrum_operation: operation
-  },
-  roles: { ...sharedRoles, supervisor: [...sharedRoles.supervisor, decision.name], lead: [...sharedRoles.lead, operation.name] }
-};
-
 // src/mcp/catalog.ts
-function selectCatalog(mode) {
-  return { slp: slpCatalog, scrum: scrumCatalog }[mode];
-}
-function resolveMode(state, slug, explicit) {
-  const mode = explicit ?? readExecution(state, slug).mode;
-  if (mode !== "slp" && mode !== "scrum") throw new Error(`invalid execution mode: ${mode}`);
-  return mode;
-}
+var catalog = slpCatalog;
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
-  resolveMode,
-  selectCatalog
+  catalog
 });
 
 return module.exports;
@@ -1637,7 +1496,7 @@ let selectedBridge;
 function bridgeSession() {
   if (!selectedBridge) {
     const ctx = resolveBridgeContext();
-    selectedBridge = { ctx, catalog: mcpCatalog.selectCatalog(ctx.mode) };
+    selectedBridge = { ctx, catalog: mcpCatalog.catalog };
   }
   return selectedBridge;
 }
@@ -1649,14 +1508,14 @@ async function handleToolCall(name, rawArgs) {
   const allowed = getAllowedToolNames(ctx.role);
   if (!allowed.includes(name)) {
     return toolResult(
-      `Tool "${name}" is not permitted for role "${ctx.role ?? "unbound"}" in mode "${ctx.mode}". Allowed tools for this seat: ${allowed.join(", ")}.`,
+      `Tool "${name}" is not permitted for role "${ctx.role ?? "unbound"}". Allowed tools for this seat: ${allowed.join(", ")}.`,
       true,
     );
   }
   const args = typeof rawArgs === "object" && rawArgs !== null ? rawArgs : {};
   const definition = bridgeSession().catalog.tools[name];
   for (const field of ["runId", "scrum", "role", "artifactRefs", "mutationMode", "reportType"]) {
-    if (field in args && !(field in definition.inputSchema.properties)) return toolResult(`Field "${field}" is not permitted for tool "${name}" in mode "${ctx.mode}".`, true);
+    if (field in args && !(field in definition.inputSchema.properties)) return toolResult(`Field "${field}" is not permitted for tool "${name}".`, true);
   }
   name = ({ supervisor_read_ledger: "factory_status", lead_dispatch_agent: "lead_spawn_agent", lead_merge: "lead_accept_task", lead_retire_task: "lead_close_task" })[name] ?? name;
   if (["lead_create_worktree", "lead_verify", "lead_remove_worktree"].includes(name)) {
@@ -1698,11 +1557,6 @@ async function handleToolCall(name, rawArgs) {
     return toolResult(JSON.stringify(result), !result.ok);
   }
   if (name === "supervisor_end_cycle") return toolResult("Cycle ended. End your turn and await the next directive or report.");
-  if (name === "supervisor_scrum_decision" || name === "lead_scrum_operation") {
-    const { runId, ...payload } = args;
-    const reply = await roundTripSpool(ctx, { id: randomId(), kind: "scrum_command", operation: name === "supervisor_scrum_decision" ? "supervisor.decision" : "lead.operation", projectRoot: ctx.projectRoot ?? ctx.workspace, ...(runId === undefined ? {} : { runId }), payload });
-    return toolResult(JSON.stringify(reply), !reply.ok);
-  }
   if (name === "factory_status") {
     const ws = typeof args.workspace === "string" && args.workspace.trim() !== "" ? resolve(args.workspace.trim()) : undefined;
     // A correlation-bound seat reads its own Project unprefixed (the `--project`
@@ -1758,8 +1612,6 @@ async function handleToolCall(name, rawArgs) {
     const reply = await roundTripSpool(ctx, {
       id: randomId(),
       kind: "lead_dispatch",
-      ...(args.runId === undefined ? {} : { runId: args.runId }),
-      ...(args.scrum === undefined ? {} : { scrum: args.scrum }),
       ...(workspace ? { workspace } : ctx.projectSlug ? { project: ctx.projectSlug } : {}),
       from: "supervisor",
       message,
@@ -1859,9 +1711,6 @@ async function handleToolCall(name, rawArgs) {
     const reply = await roundTripSpool(ctx, {
       id: randomId(),
       kind: "contract",
-      ...(args.runId === undefined ? {} : { runId: args.runId }),
-      ...(args.role === undefined ? {} : { role: args.role }),
-      ...(args.artifactRefs === undefined ? {} : { artifactRefs: args.artifactRefs }),
       task,
       workspace,
       gate,
@@ -1978,8 +1827,6 @@ async function handleToolCall(name, rawArgs) {
           "run",
           ...tasks,
           ...(rawProvider ? ["--provider", provider] : []),
-          ...(args.runId === undefined ? [] : ["--run", args.runId]),
-          ...(args.role === undefined ? [] : ["--role", args.role]),
         ],
         {
           cwd: ctx.projectRoot ?? ctx.workspace,
@@ -2028,7 +1875,6 @@ async function handleToolCall(name, rawArgs) {
         if (evt.event === "contract_set" && evt.task === task) contract = evt;
       }
       let worktree;
-      if (args.runId !== undefined && contract?.execution?.runId !== args.runId || args.role !== undefined && contract?.execution?.role !== args.role) return toolResult("task-execution-mismatch: spawn assertions disagree with persisted Contract", true);
       if (contract) {
         // The retirement is terminal (v0.5.0, ADR 0054 §5): never allocate a
         // Task worktree for a closed Task — the spool's spawn would only be
@@ -2083,9 +1929,6 @@ async function handleToolCall(name, rawArgs) {
       const reply = await roundTripSpool(ctx, {
         id: randomId(),
         kind: "spawn",
-        ...(args.runId === undefined ? {} : { runId: args.runId }),
-        ...(args.role === undefined ? {} : { role: args.role }),
-        providerExplicit: rawProvider !== "",
         task,
         provider: rawProvider ? provider : resolveDefaultWorkerLane(ctx.stateDir, ctx.projectSlug, task),
         arity: tasks.length,
@@ -2234,8 +2077,6 @@ async function handleToolCall(name, rawArgs) {
     const reply = await roundTripSpool(ctx, {
       id: randomId(),
       kind: "supervisor_report",
-      ...(args.reportType === undefined ? {} : { reportType: args.reportType }),
-      ...(args.scrum === undefined ? {} : { scrum: args.scrum }),
       ...(workspace ? { workspace } : ctx.projectSlug ? { project: ctx.projectSlug } : {}),
       message,
       seat: "lead",

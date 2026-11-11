@@ -91,9 +91,7 @@ export function safeDestination(root: string, path: string, boundary = dirname(r
   }
   return join(base, path);
 }
-/** Scrum-era hook (removed with Scrum): seeds an in-flight run's workspace after the link changes. */
-export type LinkedDesignSeeder = () => void;
-export function syncOpenDesignLink(input: { state: string; slug: string; root: string; projectId?: string; bundle?: OpenDesignBundle; syncRequestId?: string; expectedDigest?: string; userHome?: string; seedRuns?: LinkedDesignSeeder }): OpenDesignProjectLink {
+export function syncOpenDesignLink(input: { state: string; slug: string; root: string; projectId?: string; bundle?: OpenDesignBundle; syncRequestId?: string; expectedDigest?: string; userHome?: string}): OpenDesignProjectLink {
   const previous = readOpenDesignLink(input.root);
   if (input.expectedDigest !== undefined && previous?.digest !== input.expectedDigest) throw new FactoryError('open-design-link-changed', 'The design link changed in another window; refresh before syncing');
   const recorded = readProjectSettings(input.state, input.slug);
@@ -125,13 +123,12 @@ export function syncOpenDesignLink(input: { state: string; slug: string; root: s
   const source = { ...settings.openDesignSource, kind: input.bundle ? 'client' as const : 'host' as const };
   const checkpointPaths = [...new Set([...(settings.openDesignCheckpointPaths ?? []), ...link.files, ...stale, 'open-design-link.json'])];
   writeProjectSettings(input.state, input.slug, { ...settings, openDesignLink: link, openDesignSource: source, openDesignCheckpointPaths: checkpointPaths });
-  input.seedRuns?.();
   checkpointLinkedDesign(input.root, checkpointPaths);
   const { openDesignCheckpointPaths: _pending, ...finished } = readProjectSettings(input.state, input.slug);
   writeProjectSettings(input.state, input.slug, { ...finished, ...(input.syncRequestId && source.requestId === input.syncRequestId ? { openDesignSource: { ...source, acknowledgedRequestId: input.syncRequestId } } : {}) });
   return link;
 }
-export function autoSyncOpenDesignLink(input: { state: string; slug: string; root: string; userHome?: string; seedRuns?: LinkedDesignSeeder }): void {
+export function autoSyncOpenDesignLink(input: { state: string; slug: string; root: string; userHome?: string}): void {
   const link = readOpenDesignLink(input.root) ?? readProjectSettings(input.state, input.slug).openDesignLink; if (!link) return;
   const source = discoverOpenDesignProjects(input.userHome).find(p => p.projectId === link.projectId);
   const hasBundle = existsSync(join(input.root, 'design/index.html')) || existsSync(join(input.root, 'design/screens.html'));
@@ -151,10 +148,10 @@ function checkpointLinkedDesign(root: string, files: string[]): void {
   } catch { throw new FactoryError('open-design-checkpoint-failed', 'Design files were copied but could not be committed. Resolve repository hooks/index conflicts and sync again before dispatch.'); }
 }
 /** A client-pushed source must acknowledge a fresh read before mail is queued. */
-export async function prepareOpenDesignDispatch(input: { state: string; slug: string; root: string; userHome?: string; timeoutMs?: number; requestId?: string; seedRuns?: LinkedDesignSeeder }): Promise<void> {
+export async function prepareOpenDesignDispatch(input: { state: string; slug: string; root: string; userHome?: string; timeoutMs?: number; requestId?: string}): Promise<void> {
   const selection = readProjectSettings(input.state, input.slug);
   if (!selection.openDesignLink) return;
-  if (selection.openDesignSource?.kind !== 'client') { autoSyncOpenDesignLink(input); const link = readOpenDesignLink(input.root); if (link) { input.seedRuns?.(); checkpointLinkedDesign(input.root, [...(selection.openDesignCheckpointPaths ?? []), ...link.files, 'open-design-link.json']); } return; }
+  if (selection.openDesignSource?.kind !== 'client') { autoSyncOpenDesignLink(input); const link = readOpenDesignLink(input.root); if (link) { checkpointLinkedDesign(input.root, [...(selection.openDesignCheckpointPaths ?? []), ...link.files, 'open-design-link.json']); } return; }
   const requestId = input.requestId ?? randomUUID();
   if (selection.openDesignSource.acknowledgedRequestId === requestId) return;
   writeProjectSettings(input.state, input.slug, { ...selection, openDesignSource: { ...selection.openDesignSource, requestId } });

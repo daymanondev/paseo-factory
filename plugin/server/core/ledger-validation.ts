@@ -1,4 +1,3 @@
-import { scrumBindingIsValid } from "./scrum/types.ts";
 import { eventAllowsUnboundEpoch, LEDGER_REFERENCE_KINDS, EVENT_NAMES, NEEDS_HUMAN_REASONS, needsHumanEvidenceIsValid, PEER_DISPOSITIONS, PEER_HANDOFF_OUTCOMES } from "./events.ts";
 import { PEER_THINKING_LEVELS } from "./peer-thinking.ts";
 import type { LedgerEvent } from "./events.ts";
@@ -12,7 +11,6 @@ export function isValidLedgerEvent(value: unknown): value is LedgerEvent {
     Number.isSafeInteger(event.seq) && (event.seq as number) > 0 &&
     typeof event.ts === "string" && (event.schema_version !== 2 || utcTimestampIsValid(event.ts)) &&
     typeof event.event === "string" && (EVENT_NAMES as readonly string[]).includes(event.event) &&
-    (event.event !== "contract_set" || event.execution === undefined || scrumBindingIsValid(event.execution)) &&
     shapeIsValid(value as LedgerEvent) &&
     (event.schema_version !== 2 || v2PayloadIsValid(event));
 }
@@ -260,7 +258,7 @@ function v2PayloadIsValid(event: Record<string, unknown>): boolean {
   }
   switch (event.event) {
     case "ledger_schema": return true;
-    case "contract_set": return (event.execution === undefined || scrumBindingIsValid(event.execution)) && string("workspace") && string("gate") && string("artifact") &&
+    case "contract_set": return string("workspace") && string("gate") && string("artifact") &&
       strings("scope") && strings("skills") && optionalString("base") && optionalString("description") && optionalString("by") &&
       (event.freshEyes === undefined || event.freshEyes === true) && (event.watch === undefined || event.watch === true) &&
       (event.disposition === undefined || (PEER_DISPOSITIONS as readonly string[]).includes(event.disposition as string));

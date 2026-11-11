@@ -1,6 +1,4 @@
 import { SeatNode, Rail, AgentCard } from "./seat-graph.tsx";
-import { ScrumSeatsPane } from "./scrum.tsx";
-import type { ScrumAction } from "./scrum.tsx";
 /**
  * Tab 2 — Seats & Models (ADR 0009 §2; the Lead lane and live Lead seat
  * arrive in v0.0.14, ADR 0010 §2): the Lane Profiles bar (v0.0.38, ADR 0026
@@ -22,7 +20,7 @@ import { Icon, Modal, ScrollView, TextInput } from "@getpaseo/plugin/client/ui";
 import { useEffect, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { AgentView, FactoryView, LaneName, LaneProfileView, Lanes, ProjectUsageView, ProviderModelView } from "../../shared/view.ts";
-import { Btn, Card, Chip, Pill, SegmentedControl } from "../kit/pill.tsx";
+import { Btn, Card, Chip, Pill } from "../kit/pill.tsx";
 import { CONTROL_H, CONTROL_SM, MONO_FONT, RADIUS, SPACING, hoveredOf, text, tint } from "../kit/theme.ts";
 import type { Colour } from "../kit/theme.ts";
 import { planLiveSeatTransitions } from "../kit/live-seats.ts";
@@ -30,8 +28,6 @@ import type { LiveSeatTransition } from "../kit/live-seats.ts";
 
 /** The Seats tab's whole action surface — the Shell owns the RPC calls. */
 export interface SeatsActions {
-  setMode?(mode: "slp" | "scrum"): void;
-  scrum?: ScrumAction;
   setLane(lane: LaneName, value: string): void;
   /**
    * One atomic batch save — every named lane in a single `factory.lanes.setBatch`
@@ -821,7 +817,6 @@ export function SeatsPane({
   modelSyncNote: string | null;
 }) {
   const [editing, setEditing] = useState<LaneCard | null>(null);
-  const [machineRoster, setMachineRoster] = useState<"slp" | "scrum">("slp");
   /** The save-as-profile drawer's two fields (v0.0.38, ADR 0026 §2). */
   const [naming, setNaming] = useState(false);
   const [nameDraft, setNameDraft] = useState("");
@@ -905,20 +900,10 @@ export function SeatsPane({
         <Text style={text(theme, "section")}>Read-only Overview</Text>
       </View>
       <Text style={text(theme, "meta")}>
-        Mode switching and lane/profile edits are disabled in All projects to protect existing projects. Select a specific project in the Project Switcher above to change its mode or lanes.
+        Lane/profile edits are disabled in All projects to protect existing projects. Select a specific project in the Project Switcher above to change its lanes.
       </Text>
-      <SegmentedControl
-        theme={theme}
-        options={[
-          { value: "slp", label: "View SLP Lanes (6)" },
-          { value: "scrum", label: "View Agile Scrum Roster (8)" },
-        ]}
-        value={machineRoster}
-        onChange={setMachineRoster}
-      />
     </Card>
   ) : null;
-  if ((view.project ? view.execution?.selectedMode : machineRoster) === "scrum") return <View style={{ gap: SPACING[4] }}>{machineControls}<ScrumSeatsPane theme={theme} view={view} busy={actions.busy || readOnly} action={readOnly ? undefined : actions.scrum} actions={effectiveActions} renderEditor={(title, current, save, close) => <Modal open onOpenChange={open => { if (!open) close(); }} title={title}><Modal.Content><LaneModalBody theme={theme} view={view} card={{ id: "scrum", title, icon: "Cpu", tier: "Specialist", hint: "Independent Scrum lane", lanes: [], value: () => current }} onSave={save} onClose={close} busy={actions.busy || readOnly} /></Modal.Content></Modal>} /></View>;
 
   return (
     <View style={{ gap: SPACING[4] }}>

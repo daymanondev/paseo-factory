@@ -1611,20 +1611,15 @@ test("driverSpawnRequest carries the per-dispatch thinking tier and its reason o
   assert.deepEqual(bare, { id: "sp-th-2", kind: "spawn", task: "TH-D2", provider: "pi/zai/glm-5.3", arity: 2 });
 });
 
-test("effectiveCreateLane prefers the spool's thinking-resolved lane on the SLP path and stays on the recorded lane for execution contracts", () => {
+test("effectiveCreateLane prefers the spool's thinking-resolved lane when a tier was requested", () => {
   assert.equal(
-    effectiveCreateLane({ execution: false, resolvedProvider: "zcode/GLM-5.3:max", eventProvider: "zcode/GLM-5.3:high", provider: "zcode/GLM-5.3:high" }),
+    effectiveCreateLane({ resolvedProvider: "zcode/GLM-5.3:max", provider: "zcode/GLM-5.3:high" }),
     "zcode/GLM-5.3:max",
     "the driver's own agent create honors the plugin's provider-adaptive resolution",
   );
   assert.equal(
-    effectiveCreateLane({ execution: false, resolvedProvider: undefined, eventProvider: "pi/zai/glm-5.3", provider: "pi/zai/glm-5.3" }),
+    effectiveCreateLane({ resolvedProvider: undefined, provider: "pi/zai/glm-5.3" }),
     "pi/zai/glm-5.3",
     "without a tier the configured lane the driver resolved locally stands",
-  );
-  assert.equal(
-    effectiveCreateLane({ execution: true, resolvedProvider: "zcode/GLM-5.3:max", eventProvider: "pi/scrum/dev", provider: "pi/zai/glm-5.3" }),
-    "pi/scrum/dev",
-    "an execution contract keeps today's recorded-lane behavior",
   );
 });

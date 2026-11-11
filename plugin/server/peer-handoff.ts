@@ -15,7 +15,6 @@ import { boundTaskPeers, peerIsRunning } from "./task-peers.ts";
 import { associateTaskPeer, createTaskPeer, resolvePeerSpawnProvider, resolveSpawnWorkspaceAndParent } from "./spool.ts";
 import { READ_ONLY_DISPOSITION_FENCE, readOnlyDispositionEvidence } from "./core/disposition-prompt.ts";
 import { capHandoffText, validHandoffText } from "./handoff-text.ts";
-import { scrumSpawnLane } from "./scrum.ts";
 
 export const PEER_HANDOFF_TOKENS = 160_000;
 const MAX_PEER_HANDOFFS = 1;
@@ -159,10 +158,9 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
     // Adopt it, and count even an already archived automatic successor.
     successorId ??= boundTaskPeers({ stateDir: deps.stateDir, slug, task, events: eventsOf(slug), live: all }).find(agent => agent.id !== state.outgoingId)?.id;
     if (!successorId) {
-      const frozen = await scrumSpawnLane(factoryOf(slug, task), task, {}, undefined, `peer-handoff:${handoffKey}`);
-      const provider = frozen ?? await resolvePeerSpawnProvider(factoryOf(slug, task), state.provider ?? "", slug);
+      const provider = await resolvePeerSpawnProvider(factoryOf(slug, task), state.provider ?? "", slug);
       const meta = await resolveSpawnWorkspaceAndParent(factoryOf(slug, task), daemon, task, state.worktree, deps.home);
-      const labels = { seat: "agent", project: slug, task, epoch: String(contract.seq), peerHandoff: handoffKey, ...(contract.execution ? { execution: "scrum", run: contract.execution.runId, specialization: contract.execution.role } : {}) };
+      const labels = { seat: "agent", project: slug, task, epoch: String(contract.seq), peerHandoff: handoffKey };
       // The disposition-aware completion (v0.5.0 ticket 03, ADR 0054 §3): the
       // engineer successor keeps the cumulative-Gate + committed-HEAD claim
       // instruction verbatim; a read-only successor is fenced — the worktree
