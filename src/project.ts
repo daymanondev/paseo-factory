@@ -6,7 +6,7 @@
  * The basename distinguishes sibling checkouts; the hash anchors the slug to
  * the repository's common git dir, so a linked worktree resolves the main
  * repo's git dir and every checkout of one repository shares the hash half.
- * All per-Project factory state (ledger, reports, gate logs, retro files,
+ * All per-Project factory state (ledger, reports, gate logs,
  * worktrees, the project's lanes.json override) lives under
  * `<stateDir>/projects/<slug>/` — cross-project pollution is a path bug, then.
  */

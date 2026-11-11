@@ -9,7 +9,7 @@ import { pluginDirFor } from "./paths.ts";
 import { liveSeatCandidates, seatCandidates } from "./seats.ts";
 import { checkProjectResetRepository, removeProjectStateDirectory, resetProjectRepository } from "./project-reset.ts";
 import { boundTaskPeers } from "./task-peers.ts";
-import { withExecutionLane } from "./core/execution-lane.ts";
+import { withProjectIngressLock } from "./core/project-ingress-lock.ts";
 import { projectTask } from "./core/task-state.ts";
 import { upgradeFactory } from "./core/history-upgrade.ts";
 import type { UpgradeInput } from "./core/history-upgrade.ts";
@@ -284,10 +284,10 @@ export interface SurfaceDeps {
   factory: Factory;
   /**
    * The Per-Project Factory registry (v0.0.89, ADR 0045 §1): when wired,
-   * every Project-scoped RPC — snapshot, taskDetail, accept, retro, project
+   * every Project-scoped RPC — snapshot, taskDetail, accept, project
    * reset/delete — resolves its target Project through the context-first
    * order and runs on that Project's own Factory (its isolated ledger,
-   * reports, gate logs, and retro files under `<stateDir>/projects/<slug>/`).
+   * reports and gate logs under `<stateDir>/projects/<slug>/`).
    * The `factory` above remains the root fallback for unbound machine-level
    * acts (upgrade, machine lanes); unwired, it handles everything as before.
    */
@@ -437,7 +437,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   //
   // With a registry wired, Project-scoped acts resolve their target Project
   // through the context-first order and run on that Project's own Factory —
-  // its isolated ledger, reports, gate logs, and retro files under
+  // its isolated ledger, reports and gate logs under
   // `<stateDir>/projects/<slug>/`. Unwired, the single root Factory stands
   // exactly as before.
 
@@ -1803,7 +1803,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     async openDesignSync(input: { projectRoot: string; projectId?: string; bundle?: import('./core/open-design/open-design-link.ts').OpenDesignBundle; syncRequestId?: string; expectedDigest?: string }) {
       try {
         const project = projectOrRefusal(input.projectRoot); if (!project.ok) return project;
-        return await withExecutionLane(deps.stateDir, project.slug, async () => {
+        return await withProjectIngressLock(deps.stateDir, project.slug, async () => {
           ensureProjectRegistered(deps.stateDir, { root: project.root, slug: project.slug });
           const link = syncOpenDesignLink({ ...input, root: project.root, slug: project.slug, state: deps.stateDir, userHome: resolveSurfaceUserHome() });
           return { ok: true as const, link };
@@ -1820,7 +1820,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     async openDesignUnlink(input: { projectRoot: string }) {
       try {
         const project = projectOrRefusal(input.projectRoot); if (!project.ok) return project;
-        await withExecutionLane(deps.stateDir, project.slug, async () => unlinkOpenDesign(deps.stateDir, project.slug, project.root));
+        await withProjectIngressLock(deps.stateDir, project.slug, async () => unlinkOpenDesign(deps.stateDir, project.slug, project.root));
         return { ok: true as const };
       } catch (error) { return failure(codeOf(error), messageOf(error)); }
     },

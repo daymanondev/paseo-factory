@@ -10,7 +10,7 @@ recorded so it can be read back later.
 
 **Agent** (or **Peer**):
 The working agent (`factory-peer` provider in Paseo's `config.json`, tab titled `Peer · <Task>`, ADR 0017, ADR 0053, ADR 0054) doing the work on a Task inside its isolated Task worktree, equipped with the `agent` role slice of the Role-scoped MCP bridge (`agent_claim`, `agent_escalate_blocker`) and the `factory-claim` CLI (ADR 0016, ADR 0053). A `Peer` operates under one of four task-level **Peer dispositions** (`disposition?: "engineer" | "architect" | "reviewer" | "scout"`, defaulting to `"engineer"`, ADR 0053, ADR 0054) on the Project's single Owner-configured `worker` lane: `engineer` owns writable implementation and test changes; `scout`, `architect`, and `reviewer` are fenced read-only (`read-only-disposition-fence`), never run `git commit`, and complete `agent_claim` without `commit` (`--sha`) using disposition-specific evidence in their mandatory **6-Field Handoff** (`Outcome`, `Snapshot`, `Scope`, `Verification`, `Unknown / risk`, `Ownership`). It may make Claims; it never sets or changes a Contract. Under ADR 0029, ADR 0032, and ADR 0053 (`Contract Before Test`), it treats the Brief as a provisional map, verifies premises against the repository before writing tests or code across a boundary, challenges `Lead` immediately via `agent_escalate_blocker` (`REOPEN_REQUEST` on `foundation | dependency | lifecycle | API | ownership | verification`, `DEPENDENCY_REQUEST`, or `BLOCKED`, routed strictly to the `Lead mailbox` while keeping the `Peer` session alive for in-place reconciliation via `lead_set_contract` + `lead_repoke_agent`), implements only its bounded outcome, records decisions and assumptions in its owned `.scratch/<initiativeId>/decisions/<task>.jsonl` rather than stopping for interactive prompts, and respects Excluded / Deferred to Later Waves.
-_Avoid_: worker (except as the legacy `lanes.json` key), bot, separate model lanes per SLP disposition
+_Avoid_: worker as a name for the agent itself (the `worker` lane key in `lanes.json` and the "Worker" model picker label name the Peer's model lane only — the lane keeps its legacy name, ADR 0056), bot, separate model lanes per SLP disposition
 
 **Owner**:
 Whoever sets or ratifies the work's outcome and final acceptance — the human, or a seat the human has delegated authority to (the Supervisor as conversational delegate; the Lead for intermediate Task contracts and clean green-task acceptance under ADR 0010, with Human override always retained). Never the Agent working that Task.
@@ -45,6 +45,10 @@ _Avoid_: repo, project dir, cwd
 **Serial Wave**:
 A bounded stage of a directive, normally one cohesive vertical-slice Task owning a single new interactive workflow or subsystem (real screen/UI + state/data wiring + journey test, after at most 1–2 foundational setup waves for app shell and core schema/repository seam, ADR 0044, ADR 0052). Initial roadmaps are rolling-wave outlines rather than fixed commitments: after each wave lands at a Stable Checkpoint, Lead re-evaluates actual repository complexity and splits any downstream wave that spans multiple user journeys before contracting it, without decomposing work into horizontal chains of backend-only micro-waves (`T-04c1..c6`) or standalone test-only negative-matrix sub-wave chains (`T-04d1..d6` with `src/` frozen, ADR 0044, ADR 0052). When a vertical slice hits `BLOCKED (context-ceiling)` and must split across seams (`Wave A` data/SDK seam → `Wave B` provider/UI wiring), its verification tail (`Wave C`) is capped at **at most 1 combined journey wave** covering both happy path and failure/retry recovery in one concise suite (ADR 0052). Multiple Tasks share a wave only when the existing foundation is stable and their module/file surfaces are genuinely disjoint. Each wave is accepted before the next is contracted (ADR 0029, ADR 0034, ADR 0044, ADR 0052).
 _Avoid_: all-at-once decomposition, locked upfront multi-wave roadmaps, multi-subsystem mega-tasks, horizontal backend-only micro-wave chains, test-only negative-matrix sub-wave spirals
+
+**Project ingress lock**:
+The per-Project serial lock (`withProjectIngressLock`, ADR 0056) under which directive and Contract admission for one Project run strictly one after another, in submission order; a job that re-enters its own Project's lock runs inline. It replaces the retired Execution-mode lane and carries no mode.
+_Avoid_: execution lane, execution mode
 
 **Stable Checkpoint**:
 The landed Project HEAD established by Acceptance of a GREEN wave; the foundation for the next wave's Contracts, Task worktrees, and in-flight `Wave Hardening` (ADR 0029, ADR 0030, ADR 0048).
@@ -358,7 +362,7 @@ The multi-surface review studio where the Owner inspects a linked `Open Design p
 _Avoid_: popup preview, 15-minute ephemeral link expiry, 4-screen static-state dump, opening dead browser tabs when remote ephemeral ports are firewalled
 
 **Screen-state routing**:
-The deterministic addressing contract (`?screen=<id>&state=<state>` and `scrum:set-state` message listener) that maps declared screens in `EXPERIENCE.md` and `screens.html` to addressable views in the UX prototype without in-page debug toolbars (ADR 0034, ADR 0040).
+The deterministic addressing contract (`?screen=<id>&state=<state>` and the `scrum:set-state` message listener — a wire name that predates v0.6.0 and is kept so already-synced designs keep working) that maps declared screens in `EXPERIENCE.md` and `screens.html` to addressable views in the UX prototype without in-page debug toolbars (ADR 0034, ADR 0040).
 _Avoid_: ad-hoc in-page debug bars, forcing every screen to duplicate six hidden static DOM trees
 
 **Screen surface**:
