@@ -5832,8 +5832,11 @@ test('linked design RPC Studio renders repository artifacts', async t => {
   writeFileSync(join(project.root, 'design/open-design-link.json'), JSON.stringify({ projectId: 'owner', projectName: 'Owner flow', sourceUpdatedAt: 1, syncedAt: '2026-11-02', screenCount: 1, digest: 'owner-digest', files: [] }));
   const result = await f.handlers.openDesignPreview({ projectRoot: project.root }); assert.ok(result.ok, JSON.stringify(result));
   assert.ok(result.bundle);
-  assert.equal(result.bundle.model.screens[0].id, 'home'); assert.equal(result.bundle.activeGateId, null);
+  assert.equal(result.bundle.model.screens[0].id, 'home');
   assert.ok(result.bundle.files['mockups/screens.html']); assert.match(result.bundle.studioHtml, /Flow Board/);
+  // ADR 0056: the linked Studio is view-only — the Scrum approval/decision path (gate id, decision relay, controls) is gone.
+  assert.equal('activeGateId' in result.bundle, false);
+  assert.doesNotMatch(result.bundle.studioHtml, /data-decision|api\/decision|factory:studio-decision|factory:studio-result|X-Scrum-Preview-Token|Approve Design|Waive Gate|Review &amp; Decision/);
 });
 
 test('linked designs sync before Lead mail', async t => {
