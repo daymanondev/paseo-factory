@@ -30,8 +30,8 @@ import type { FactoryView } from "../../shared/view.ts";
 import { Btn } from "../kit/pill.tsx";
 import { CONTROL_H, RADIUS, SPACING, text } from "../kit/theme.ts";
 import type { Colour } from "../kit/theme.ts";
-import { LaneModalBody, PROJECT_OVERRIDE_CARDS } from "./seats.tsx";
-import type { LaneCard } from "./seats.tsx";
+import { LaneModalBody, PROJECT_OVERRIDE_CARDS } from "./lane-editor.tsx";
+import type { LaneCard } from "./lane-editor.tsx";
 import { blockerOf, canAdvance, commitInputOf, describeThrown, initialWizard, reduceWizard, stepLabel } from "./onboarding-state.ts";
 import type { CommitInput, DesignChoice, Inspection, OnboardingLaneName, WizardInput } from "./onboarding-state.ts";
 

@@ -2517,6 +2517,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       if (inspected.existingLead) {
         return failure("lead-live", `A Lead is already running in ${inspected.folder} — onboarding never creates a second chain over a live one; ask that Project's Supervisor to retire it, or open a different folder`);
       }
+      // Beyond the spec's Lead-only block (story 49): the seat model is one Supervisor per Project (ADR 0017), the same rule `supervisorStart` enforces — see ADR 0056's review notes.
       if (inspected.existingSupervisor) {
         return failure("supervisor-live", `A Supervisor is already live in ${inspected.folder} — open it from Paseo, or revoke it first, then set the Project up again`);
       }

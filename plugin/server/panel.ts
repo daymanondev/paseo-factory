@@ -19,7 +19,8 @@ import { HANDOFF_EXTRACTION_MAX_SENDS, HANDOFF_EXTRACTION_TIMEOUT_MS, LEAD_ROTAT
 /**
  * How long a `handing_over` handoff may run before the panel calls it stuck:
  * every extraction send's window, times the episode's send cap, plus a minute
- * of slack — past that the runtime's own fuses should have completed it.
+ * of slack — past that the runtime's own fuses should have completed it. New in
+ * v0.6.0 (the spec left the threshold open; recorded in ADR 0056's review notes).
  */
 export const HANDOFF_STUCK_AFTER_MS = HANDOFF_EXTRACTION_TIMEOUT_MS * HANDOFF_EXTRACTION_MAX_SENDS + 60_000;
 

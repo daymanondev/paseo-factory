@@ -51,7 +51,13 @@ export interface ProjectPanelActions {
   busy: boolean;
 }
 
-/** UI-only state a host may seed — what is open and the directive draft. Never data. */
+/**
+ * UI-only state a host may seed — what is open and the directive draft. Never
+ * data. Kept deliberately (review S7): the panel's tests render to static
+ * markup, which cannot click a `⋯` or type a draft, so seeding the initial UI
+ * state is the only door to the open-menu and typed-directive renders. The
+ * live state stays local to the component either way.
+ */
 export interface ProjectPanelInitialUi {
   menuOpen?: boolean;
   supervisorMenuOpen?: boolean;

@@ -1,7 +1,7 @@
 # 0032 — Isolated Scrum execution alongside SLP
 
 - **Date:** 2026-10-27
-- **Status:** Accepted; amended by specification Revision 2
+- **Status:** Accepted; amended by specification Revision 2 — **Superseded in part by [ADR 0056](0056-slim-factory-panel-slp-only-and-guided-onboarding.md)** (its Scrum-mode decisions: Execution mode, Scrum roles, Owner wait, Task allowance, the UI Design Approval Checkpoint and the linked-design approval path; the linked-design preview and Studio view are retained)
 - **Preserves:** ADR 0001–0031
 - **Amended by ADR 0038:** Run age no longer gates Scrum work; cumulative count-based allowances may receive explicit Owner grants, and durable Owner waits hold only dependent work. ADR 0038 records the accepted replacement policy, implemented in v0.0.74.
 

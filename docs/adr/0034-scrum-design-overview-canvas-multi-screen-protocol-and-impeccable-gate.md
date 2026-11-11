@@ -1,7 +1,7 @@
 # 0034 — Scrum Design Overview Canvas, Multi-Screen Routing Protocol, and Full Impeccable Detector Gate
 
 - **Date:** 2026-10-30
-- **Status:** Accepted
+- **Status:** Accepted — **Superseded in part by [ADR 0056](0056-slim-factory-panel-slp-only-and-guided-onboarding.md)** (its Scrum-mode decisions: Execution mode, Scrum roles, Owner wait, Task allowance, the UI Design Approval Checkpoint and the linked-design approval path; the linked-design preview and Studio view are retained)
 - **Amends:** ADR 0032, ADR 0033
 - **Preserves:** ADR 0001–0033
 
