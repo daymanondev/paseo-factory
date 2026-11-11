@@ -6,18 +6,29 @@
  * server-projected `PanelView` (plugin/server/panel.ts): it derives no state,
  * calls no RPC, and draws colour only for exceptions — red for errors and
  * stuck items, amber for waiting states and items that need the Owner.
- * Read-only by construction: no acceptance, no Lead start, and the seat actions
- * (Open / Rotate / Revoke, the header `⋯`, Start Supervisor) arrive in W6.
+ * Actions (W6): every live seat row has Open; the Lead row has Rotate; the
+ * Supervisor row's `⋯` holds Revoke; a vacant Supervisor row offers Start
+ * Supervisor with a directive box (desktop only — it creates the seat through
+ * the ADR 0017 amendment path); the header `⋯` toggles the Project menu the
+ * shell supplies (project-menu.tsx). There is NO Accept and NO Lead start —
+ * a vacant Lead only says to ask the Supervisor. Mobile keeps Open, Rotate and
+ * Revoke; Start Supervisor, Sync/Studio and the menu's writes are desktop only.
  * Test hooks: `factory-panel-needs-you`, `factory-panel-seat-<role>`,
- * `factory-panel-od`. Function components only — no class syntax reaches
- * the Hermes bundle.
+ * `factory-panel-od`, `factory-panel-open-<role|peer-T>`,
+ * `factory-panel-rotate-lead`, `factory-panel-supervisor-menu`,
+ * `factory-panel-revoke-supervisor`, `factory-panel-start-supervisor`,
+ * `factory-panel-directive`, `factory-panel-menu-toggle`, `factory-panel-menu`.
+ * UI-only state (open menus, the directive draft) is local; `initialUi` seeds
+ * it. Function components only — no class syntax reaches the Hermes bundle.
  */
 import type { PluginTheme } from "@getpaseo/plugin";
+import { TextInput } from "@getpaseo/plugin/client/ui";
+import { useState } from "react";
 import type { ReactNode } from "react";
 import { Text, View } from "react-native";
 import type { PanelNeedsYouItem, PanelOpenDesign, PanelPeerRow, PanelSeatRow, PanelTone, PanelView } from "../../shared/view.ts";
 import { Btn } from "../kit/pill.tsx";
-import { RADIUS, SPACING, text, tint } from "../kit/theme.ts";
+import { CONTROL_H, RADIUS, SPACING, text, tint } from "../kit/theme.ts";
 import type { Colour } from "../kit/theme.ts";
 
 /** The panel's action surface — the Shell owns the RPC and navigation calls. */
@@ -26,7 +37,20 @@ export interface ProjectPanelActions {
   openAgent(agentId: string): void;
   /** Install the missing required skills & tools (desktop only — a settings write). */
   installPrerequisites(): void;
+  /** Retire the live Lead so the next dispatch starts a fresh one (also on mobile). */
+  rotateLead(): void;
+  /** Retire the live Supervisor — the seat row's `⋯` act (also on mobile). */
+  revokeSupervisor(): void;
+  /** Start the Supervisor on a vacant seat with the Owner's optional first directive (desktop only). */
+  startSupervisor(directive: string): void;
   busy: boolean;
+}
+
+/** UI-only state a host may seed — what is open and the directive draft. Never data. */
+export interface ProjectPanelInitialUi {
+  menuOpen?: boolean;
+  supervisorMenuOpen?: boolean;
+  directive?: string;
 }
 
 /** Items the Owner must resolve themselves are red; items that wait on the Owner's attention are amber. */
@@ -120,9 +144,28 @@ function ContextBar({ theme, context }: { theme: PluginTheme; context: NonNullab
   );
 }
 
-function SeatRow({ theme, name, row }: { theme: PluginTheme; name: string; row: PanelSeatRow }) {
+function SeatRow({
+  theme,
+  name,
+  row,
+  mobile,
+  actions,
+  initialUi,
+}: {
+  theme: PluginTheme;
+  name: string;
+  row: PanelSeatRow;
+  mobile: boolean;
+  actions: ProjectPanelActions;
+  initialUi?: ProjectPanelInitialUi;
+}) {
   const colour = toneColour(row.tone);
   const handoffWaiting = row.handoff !== null && row.handoff.state !== "normal";
+  const [menuOpen, setMenuOpen] = useState(initialUi?.supervisorMenuOpen === true);
+  const [directive, setDirective] = useState(initialUi?.directive ?? "");
+  const isSupervisor = row.role === "supervisor";
+  const live = !row.vacant && row.agentId !== null;
+  const agentId = row.agentId;
   return (
     <View testID={`factory-panel-seat-${row.role}`} style={{ gap: SPACING[1], paddingVertical: SPACING[1] }}>
       <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[2] }}>
@@ -133,11 +176,70 @@ function SeatRow({ theme, name, row }: { theme: PluginTheme; name: string; row: 
       {row.hint !== null ? <Text style={text(theme, "meta", colour)}>{row.hint}</Text> : null}
       {row.context !== null ? <ContextBar theme={theme} context={row.context} /> : null}
       {row.handoff !== null ? <Text style={text(theme, "meta", handoffWaiting ? "statusWarning" : undefined)}>Handoff: {row.handoff.label}</Text> : null}
+      {live && agentId !== null ? (
+        <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5] }}>
+          <Btn theme={theme} small testID={`factory-panel-open-${row.role}`} label="Open" onPress={() => actions.openAgent(agentId)} />
+          {row.role === "lead" ? (
+            <Btn theme={theme} small testID="factory-panel-rotate-lead" label="Rotate" tone="foregroundMuted" disabled={actions.busy} onPress={actions.rotateLead} />
+          ) : null}
+          {isSupervisor ? (
+            <Btn theme={theme} small testID="factory-panel-supervisor-menu" label="⋯" tone="foregroundMuted" onPress={() => setMenuOpen(!menuOpen)} />
+          ) : null}
+        </View>
+      ) : null}
+      {isSupervisor && live && menuOpen ? (
+        <View testID="factory-panel-supervisor-menu-open" style={{ flexDirection: "row", flexWrap: "wrap", gap: SPACING[1.5] }}>
+          <Btn
+            theme={theme}
+            small
+            testID="factory-panel-revoke-supervisor"
+            label="Revoke Supervisor"
+            tone="statusDanger"
+            disabled={actions.busy}
+            onPress={() => {
+              setMenuOpen(false);
+              actions.revokeSupervisor();
+            }}
+          />
+        </View>
+      ) : null}
+      {isSupervisor && row.vacant && !mobile ? (
+        <View style={{ gap: SPACING[1.5] }}>
+          <TextInput
+            testID="factory-panel-directive"
+            value={directive}
+            onChangeText={setDirective}
+            placeholder="First directive for the Supervisor (optional)"
+            placeholderTextColor={theme.colors.foregroundMuted}
+            multiline
+            style={{
+              minHeight: CONTROL_H * 2,
+              paddingHorizontal: SPACING[2.5],
+              paddingVertical: SPACING[1.5],
+              color: theme.colors.foreground,
+              fontSize: 12,
+              borderWidth: 1,
+              borderColor: theme.colors.border,
+              borderRadius: RADIUS.md,
+              backgroundColor: theme.colors.surface1,
+            }}
+          />
+          <Btn
+            theme={theme}
+            small
+            solid
+            testID="factory-panel-start-supervisor"
+            label="Start Supervisor"
+            disabled={actions.busy}
+            onPress={() => actions.startSupervisor(directive)}
+          />
+        </View>
+      ) : null}
     </View>
   );
 }
 
-function PeerRowView({ theme, row }: { theme: PluginTheme; row: PanelPeerRow }) {
+function PeerRowView({ theme, row, actions }: { theme: PluginTheme; row: PanelPeerRow; actions: ProjectPanelActions }) {
   const colour = toneColour(row.tone);
   return (
     <View testID={`factory-panel-seat-peer-${row.task}`} style={{ gap: SPACING[0.5], paddingVertical: SPACING[1] }}>
@@ -147,21 +249,34 @@ function PeerRowView({ theme, row }: { theme: PluginTheme; row: PanelPeerRow }) 
         <Text style={text(theme, "label", colour)}>{row.statusLabel}</Text>
       </View>
       {row.model !== null ? <Text style={text(theme, "code", "foregroundMuted")} numberOfLines={1}>{row.model}</Text> : null}
+      <Btn theme={theme} small testID={`factory-panel-open-peer-${row.task}`} label="Open" onPress={() => actions.openAgent(row.agentId)} />
     </View>
   );
 }
 
-function Seats({ theme, seats }: { theme: PluginTheme; seats: NonNullable<PanelView["seats"]> }) {
+function Seats({
+  theme,
+  seats,
+  mobile,
+  actions,
+  initialUi,
+}: {
+  theme: PluginTheme;
+  seats: NonNullable<PanelView["seats"]>;
+  mobile: boolean;
+  actions: ProjectPanelActions;
+  initialUi?: ProjectPanelInitialUi;
+}) {
   return (
     <Block theme={theme} testID="factory-panel-seats">
       <SectionTitle theme={theme} label="Seats" />
-      <SeatRow theme={theme} name="Supervisor" row={seats.supervisor} />
-      <SeatRow theme={theme} name="Lead" row={seats.lead} />
+      <SeatRow theme={theme} name="Supervisor" row={seats.supervisor} mobile={mobile} actions={actions} {...(initialUi === undefined ? {} : { initialUi })} />
+      <SeatRow theme={theme} name="Lead" row={seats.lead} mobile={mobile} actions={actions} />
       {seats.peers.length > 0 ? (
         <View testID="factory-panel-peers" style={{ gap: SPACING[1] }}>
           <Text style={text(theme, "label")}>Peers</Text>
           {seats.peers.map((peer) => (
-            <PeerRowView key={peer.agentId} theme={theme} row={peer} />
+            <PeerRowView key={peer.agentId} theme={theme} row={peer} actions={actions} />
           ))}
         </View>
       ) : null}
@@ -224,6 +339,8 @@ export function ProjectPanel({
   daemonError,
   actions,
   openDesignActions = null,
+  menu = null,
+  initialUi,
 }: {
   theme: PluginTheme;
   panel: PanelView;
@@ -234,20 +351,30 @@ export function ProjectPanel({
   actions: ProjectPanelActions;
   /** Desktop's Open Design actions (Sync / Studio), mounted by the Shell; omitted on mobile. */
   openDesignActions?: ReactNode;
+  /** The header `⋯` menu's content (project-menu.tsx), supplied by the Shell for a Project; no menu, no `⋯`. */
+  menu?: ReactNode;
+  /** Seeds UI-only state (open menus, directive draft) — hosts and tests; never data. */
+  initialUi?: ProjectPanelInitialUi;
 }) {
+  const [menuOpen, setMenuOpen] = useState(initialUi?.menuOpen === true);
+  const hasMenu = panel.isProject && menu !== null;
   return (
     <View testID="factory-panel" style={{ gap: SPACING[3] }}>
       <View style={{ gap: SPACING[1] }}>
-        <Text accessibilityRole="header" style={text(theme, "detailTitle")}>
-          {panel.name ?? "Factory"}
-        </Text>
+        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: SPACING[2] }}>
+          <Text accessibilityRole="header" style={{ ...text(theme, "detailTitle"), flexShrink: 1 }}>
+            {panel.name ?? "Factory"}
+          </Text>
+          {hasMenu ? <Btn theme={theme} small testID="factory-panel-menu-toggle" label="⋯" tone="foregroundMuted" onPress={() => setMenuOpen(!menuOpen)} /> : null}
+        </View>
         <Text style={text(theme, "meta")}>{panel.summary}</Text>
         {daemonError !== null ? <Text style={text(theme, "label", "statusWarning")}>{daemonError}</Text> : null}
       </View>
+      {hasMenu && menuOpen ? <Block theme={theme} testID="factory-panel-menu">{menu}</Block> : null}
       {panel.isProject ? (
         <>
           <NeedsYou theme={theme} items={panel.needsYou} mobile={mobile} actions={actions} />
-          {panel.seats !== null ? <Seats theme={theme} seats={panel.seats} /> : null}
+          {panel.seats !== null ? <Seats theme={theme} seats={panel.seats} mobile={mobile} actions={actions} {...(initialUi === undefined ? {} : { initialUi })} /> : null}
           {panel.openDesign !== null ? <OpenDesign theme={theme} openDesign={panel.openDesign} now={now} desktopActions={mobile ? null : openDesignActions} /> : null}
         </>
       ) : (

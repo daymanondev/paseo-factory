@@ -15,8 +15,15 @@ import type { DesignDirectory } from './local-design.ts';
 
 type Catalog = Extract<z.output<typeof openDesignCatalog.output>, { ok: true }>['projects'];
 type Link = Extract<z.output<typeof openDesignStatus.output>, { ok: true }>['link'];
-/** Header controller stays mounted in both modes; remote runs consume the pushed workspace copy. */
-export function OpenDesignControl({ theme, root, sourceKey = root, onChanged }: { theme: PluginTheme; root: string; sourceKey?: string; onChanged: () => void }) {
+/**
+ * The Open Design controller, split in two parts (v0.6.0 W6, ADR 0056): the
+ * `card` part (desktop, on the panel's Open Design card) owns the granted-folder
+ * sync poll, Sync and Open Design Studio; the `menu` part (the header `⋯`) owns
+ * Link / change / Unlink and the project picker. Mobile mounts neither — the
+ * card shows the link status alone. Remote runs consume the pushed workspace copy.
+ */
+export function OpenDesignControl({ theme, root, sourceKey = root, onChanged, part = 'card' }: { theme: PluginTheme; root: string; sourceKey?: string; onChanged: () => void; part?: 'card' | 'menu' }) {
+  const isCard = part === 'card';
   const catalog = useRpc(openDesignCatalog), status = useRpc(openDesignStatus), sync = useRpc(openDesignSync), unlink = useRpc(openDesignUnlink), preview = useRpc(openDesignPreview);
   const [link, setLink] = useState<Link>(null), [update, setUpdate] = useState(false), [projects, setProjects] = useState<Catalog>([]);
   const [localProjects, setLocalProjects] = useState<Awaited<ReturnType<typeof readLocalDesignCatalog>>>([]);
@@ -31,6 +38,8 @@ export function OpenDesignControl({ theme, root, sourceKey = root, onChanged }: 
     return result;
   };
   useEffect(() => {
+    // The menu part only reads the link once — the card part owns the poll.
+    if (!isCard) { void refresh().catch((e) => setError(e instanceof Error ? e.message : String(e))); return; }
     let stopped = false;
     const poll = async () => {
       if (syncing.current) return;
@@ -57,7 +66,7 @@ export function OpenDesignControl({ theme, root, sourceKey = root, onChanged }: 
     };
     void poll(); const timer = setInterval(() => void poll(), 5000);
     return () => { stopped = true; clearInterval(timer); };
-  }, [root, sourceKey, status, sync]);
+  }, [root, sourceKey, status, sync, isCard]);
   const act = async (work: () => Promise<void>) => { if (busy) return; setBusy(true); setError(''); try { await serialized(work); onChanged(); } catch (e) { setError(e instanceof Error ? e.message : String(e)); } finally { setBusy(false); } };
   const linkLocal = async () => {
     const picker = (window as unknown as { showDirectoryPicker?: (options: { mode: string }) => Promise<DesignDirectory> }).showDirectoryPicker;
@@ -70,8 +79,8 @@ export function OpenDesignControl({ theme, root, sourceKey = root, onChanged }: 
   };
   return <View style={{ gap: SPACING[2] }}>
     <View style={{ flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: SPACING[1.5] }}>
-      <Btn theme={theme} small icon="Palette" label={link ? `🎨 ${link.projectName} · ${update ? 'Update available' : 'Synced'}` : '🎨 Link Open Design…'} disabled={busy} onPress={() => void act(async () => { setPicking(true); const response = await catalog({}); if (!response.ok) throw new Error(response.error); setProjects(response.projects); const saved = await designDirectoryStore('catalog'); if (saved && await saved.queryPermission({ mode: 'read' }) === 'granted') setLocalProjects(await readLocalDesignCatalog(saved)); })} />
-      {link ? <>
+      {!isCard ? <Btn theme={theme} small icon="Palette" label={link ? `Linked: ${link.projectName} — change…` : 'Link Open Design…'} disabled={busy} onPress={() => void act(async () => { setPicking(true); const response = await catalog({}); if (!response.ok) throw new Error(response.error); setProjects(response.projects); const saved = await designDirectoryStore('catalog'); if (saved && await saved.queryPermission({ mode: 'read' }) === 'granted') setLocalProjects(await readLocalDesignCatalog(saved)); })} /> : null}
+      {link && isCard ? <>
         <Btn theme={theme} small icon="RefreshCw" label={busy ? 'Syncing…' : update ? 'Update available — Sync' : 'Sync'} disabled={busy} onPress={() => void act(async () => { const bundle = local.current ? await readGrantedDesign(local.current) : undefined; const response = await sync({ projectRoot: root, bundle }); if (!response.ok) throw new Error(response.error); await refresh(); })} />
         <Btn theme={theme} small icon="ExternalLink" label="Open Design Studio" disabled={busy} onPress={() => void act(async () => {
           let url: string | null = null;
@@ -79,11 +88,11 @@ export function OpenDesignControl({ theme, root, sourceKey = root, onChanged }: 
           if (url) await openExternalUrl(url);
           else { const response = await preview({ projectRoot: root, operation: 'preview.bundle' }); if (!response.ok) throw new Error(response.error); setStudio(response.bundle as StudioPayload); }
         })} />
-        <Btn theme={theme} small label="Unlink" disabled={busy} onPress={() => void act(async () => { const response = await unlink({ projectRoot: root }); if (!response.ok) throw new Error(response.error); local.current = undefined; await designDirectoryStore(sourceKey, null); await refresh(); })} />
       </> : null}
+      {link && !isCard ? <Btn theme={theme} small label="Unlink" disabled={busy} onPress={() => void act(async () => { const response = await unlink({ projectRoot: root }); if (!response.ok) throw new Error(response.error); local.current = undefined; await designDirectoryStore(sourceKey, null); await refresh(); })} /> : null}
     </View>
     {error ? <Text accessibilityRole="alert" style={text(theme, 'label', 'statusDanger')}>{error}</Text> : null}
-    <Modal open={picking} title="Link Open Design project" onOpenChange={setPicking}><Modal.Content>
+    {!isCard ? <Modal open={picking} title="Link Open Design project" onOpenChange={setPicking}><Modal.Content>
       <View style={{ gap: SPACING[3] }}>
         <Text style={text(theme, 'meta')}>Choose a project below. To discover designs on this computer, select the Open Design data folder once; an individual project folder also works.</Text>
         <Btn theme={theme} icon="FolderOpen" label="Choose Open Design folder on this computer…" disabled={busy} onPress={() => void act(linkLocal)} />
@@ -102,7 +111,7 @@ export function OpenDesignControl({ theme, root, sourceKey = root, onChanged }: 
           </View>)}
         </View></ScrollView>
       </View>
-    </Modal.Content></Modal>
-    {studio ? <StudioRelay theme={theme} bundle={studio} close={() => setStudio(null)} /> : null}
+    </Modal.Content></Modal> : null}
+    {isCard && studio ? <StudioRelay theme={theme} bundle={studio} close={() => setStudio(null)} /> : null}
   </View>;
 }

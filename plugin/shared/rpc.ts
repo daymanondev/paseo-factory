@@ -167,6 +167,23 @@ export const supervisorEnsure = defineRpc({
   ]),
 });
 
+// The Supervisor seat start (v0.6.0 W6, ADR 0056 amending ADR 0017 §4): the
+// vacant Supervisor row's Start Supervisor (and the onboarding commit) — it
+// creates the seat through the role provider and refuses while one is live.
+// There is no Lead twin: the Lead is dispatched only by the Supervisor.
+export const supervisorStart = defineRpc({
+  name: "factory.supervisor.start",
+  input: z.object({
+    projectRoot: z.string().min(1),
+    /** The Owner's optional first directive — the seat's first user message. */
+    directive: z.string().optional(),
+  }),
+  output: z.union([
+    z.object({ ok: z.literal(true), agentId: z.string(), created: z.boolean(), projectRoot: z.string(), slug: z.string() }),
+    Failure,
+  ]),
+});
+
 export const supervisorRevoke = defineRpc({
   name: "factory.supervisor.revoke",
   input: z.object({
