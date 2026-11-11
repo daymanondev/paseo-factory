@@ -10,10 +10,9 @@
  */
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
 import type { AgentView, PanelNeedsYouItem, PanelOpenDesign, PanelPeerRow, PanelSeatRow, PanelTone, PanelView, ProjectView, TaskView } from "../shared/view.ts";
 import { MAX_ATTEMPTS } from "./core/events.ts";
-import { readOpenDesignLink } from "./core/open-design/open-design-link-state.ts";
+import { openDesignBundleReady, readOpenDesignLink } from "./core/open-design/open-design-link-state.ts";
 import { readProjectSettings } from "./core/project-settings.ts";
 import { HANDOFF_EXTRACTION_MAX_SENDS, HANDOFF_EXTRACTION_TIMEOUT_MS, LEAD_ROTATE_TOKENS } from "./handoff-limits.ts";
 
@@ -24,11 +23,17 @@ import { HANDOFF_EXTRACTION_MAX_SENDS, HANDOFF_EXTRACTION_TIMEOUT_MS, LEAD_ROTAT
  */
 export const HANDOFF_STUCK_AFTER_MS = HANDOFF_EXTRACTION_TIMEOUT_MS * HANDOFF_EXTRACTION_MAX_SENDS + 60_000;
 
+/** The Lead rotation state machine's three durable states (ADR 0013 §5). */
+type RotationState = "normal" | "rotation_pending" | "handing_over";
+/** The two standing seats the panel names. */
+type SeatRole = "supervisor" | "lead";
+type PanelAction = PanelNeedsYouItem["action"];
+
 /** What the Open Design probe found on disk for the Project. */
 export interface PanelOpenDesignProbe {
   /** The recorded link (staged `design/open-design-link.json`, else the settings record), or null. */
   link: { projectName: string; syncedAt: string } | null;
-  /** Whether the staged design bundle (`design/index.html` or `design/screens.html`) exists. */
+  /** Whether the staged design bundle is ready — the sync law's own test (`openDesignBundleReady`). */
   bundlePresent: boolean;
   /** Set when the link record itself could not be read. */
   unreadable: string | null;
@@ -50,7 +55,7 @@ export interface PanelInput {
   missingPrerequisites: readonly string[];
   openDesign: PanelOpenDesignProbe | null;
   /** The Lead rotation state the registration records (durable even when the Lead is gone), or null when unrecorded. */
-  rotationState: "normal" | "rotation_pending" | "handing_over" | null;
+  rotationState: RotationState | null;
   /** When the current Lead handoff began (ISO 8601), from the registration. */
   handoffRequestedAt: string | null;
   now: number;
@@ -90,8 +95,7 @@ export function probeOpenDesign(stateDir: string, slug: string, root: string): P
       // a damaged settings record is not an Open Design verdict
     }
   }
-  const bundlePresent = existsSync(join(root, "design", "index.html")) || existsSync(join(root, "design", "screens.html"));
-  return { link, bundlePresent, unreadable: null };
+  return { link, bundlePresent: openDesignBundleReady(root), unreadable: null };
 }
 
 // ---- the fold -------------------------------------------------------------------------------
@@ -111,14 +115,24 @@ function modelOf(agent: AgentView): string | null {
   return agent.thinking !== undefined && agent.thinking !== null && agent.thinking !== "" ? `${base} · ${agent.thinking}` : base;
 }
 
-function handoffLabel(state: "normal" | "rotation_pending" | "handing_over", queued: number): string {
+function handoffLabel(state: RotationState, queued: number): string {
   const mail = queued > 0 ? ` · ${queued} queued mail` : "";
   if (state === "rotation_pending") return `will hand off at the next quiet point${mail}`;
   if (state === "handing_over") return `handing over to a new Lead${mail}`;
   return "normal";
 }
 
-function seatRow(role: "supervisor" | "lead", agent: AgentView | null): PanelSeatRow {
+const seatName = (role: SeatRole): string => (role === "supervisor" ? "Supervisor" : "Lead");
+
+/** The one "Open <seat>" action every Needs-you item that points at a live seat carries. */
+function openSeatAction(role: SeatRole, agent: AgentView): PanelAction {
+  return { kind: "open-agent", agentId: agent.id, label: `Open ${seatName(role)}` };
+}
+
+/** With neither seat live there is no conversation to open — the only way forward is to start the Supervisor. */
+const START_SUPERVISOR_ACTION: PanelAction = { kind: "start-supervisor", label: "Start Supervisor" };
+
+function seatRow(role: SeatRole, agent: AgentView | null): PanelSeatRow {
   if (agent === null) {
     return {
       role,
@@ -182,9 +196,15 @@ function peerRows(input: PanelInput): PanelPeerRow[] {
   return rows;
 }
 
-function seatStuckItems(role: "supervisor" | "lead", agent: AgentView | null): PanelNeedsYouItem[] {
+/**
+ * A seat is stuck when the daemon reports it errored or parked on a permission
+ * prompt. Known limitation (ADR 0056 consequences): there is no hung-or-idle
+ * detection — the snapshot carries no per-agent last-activity time, and an idle
+ * Lead is legitimately idle between dispatches, so no idle-too-long rule is guessed.
+ */
+function seatStuckItems(role: SeatRole, agent: AgentView | null): PanelNeedsYouItem[] {
   if (agent === null) return [];
-  const name = role === "supervisor" ? "Supervisor" : "Lead";
+  const name = seatName(role);
   const waiting = agent.attentionReason === "permission";
   if (agent.status !== "error" && !waiting) return [];
   return [
@@ -193,12 +213,16 @@ function seatStuckItems(role: "supervisor" | "lead", agent: AgentView | null): P
       kind: "seat-stuck",
       title: agent.status === "error" ? `${name} errored` : `${name} is waiting on a permission prompt`,
       detail: agent.status === "error" ? (agent.lastError ?? null) : null,
-      action: { kind: "open-agent", agentId: agent.id, label: `Open ${name}` },
+      action: openSeatAction(role, agent),
     },
   ];
 }
 
-/** The Owner-readable gloss of each `needs_human` reason code; an unknown code passes through verbatim. */
+/**
+ * The Owner-readable gloss of each `needs_human` reason code; an unknown code
+ * passes through verbatim. The prose is new in v0.6.0 (the spec left the wording
+ * open); keep it one plain sentence per code.
+ */
 const NEEDS_HUMAN_GLOSS: Readonly<Record<string, string>> = {
   "denied-again": "The Peer was denied again after a re-poke.",
   "silent-after-repoke": "The Peer stayed silent after a re-poke.",
@@ -208,8 +232,7 @@ const NEEDS_HUMAN_GLOSS: Readonly<Record<string, string>> = {
 
 function needsYou(input: PanelInput): PanelNeedsYouItem[] {
   // The Owner decides through the Supervisor; the Lead is the fallback while no Supervisor lives.
-  const decider = input.supervisor ?? input.lead;
-  const deciderAction = decider === null ? null : ({ kind: "open-agent", agentId: decider.id, label: `Open ${decider === input.supervisor ? "Supervisor" : "Lead"}` } as const);
+  const deciderAction: PanelAction = input.supervisor !== null ? openSeatAction("supervisor", input.supervisor) : input.lead !== null ? openSeatAction("lead", input.lead) : START_SUPERVISOR_ACTION;
   const items: PanelNeedsYouItem[] = [];
   for (const task of input.tasks) {
     if (task.status !== "needs-human") continue;
@@ -232,13 +255,13 @@ function needsYou(input: PanelInput): PanelNeedsYouItem[] {
     const since = input.handoffRequestedAt === null ? Number.NaN : Date.parse(input.handoffRequestedAt);
     const lost = input.lead === null || input.lead.status === "error";
     if (lost || (Number.isFinite(since) && input.now - since > HANDOFF_STUCK_AFTER_MS)) {
-      const target = input.lead ?? input.supervisor;
       items.push({
         key: "handoff-stuck",
         kind: "handoff-stuck",
         title: "Lead handoff is stuck",
         detail: lost ? "The outgoing Lead is gone before the handoff finished." : "The handoff has run past its extraction window.",
-        action: target === null ? null : { kind: "open-agent", agentId: target.id, label: `Open ${target === input.lead ? "Lead" : "Supervisor"}` },
+        // The Lead while it lives, else the Supervisor that will dispatch the next one, else start a Supervisor.
+        action: input.lead !== null ? openSeatAction("lead", input.lead) : input.supervisor !== null ? openSeatAction("supervisor", input.supervisor) : START_SUPERVISOR_ACTION,
       });
     }
   }
@@ -253,7 +276,7 @@ function needsYou(input: PanelInput): PanelNeedsYouItem[] {
   }
   const design = openDesignOf(input.openDesign);
   if (design?.state === "broken") {
-    items.push({ key: "open-design-broken", kind: "open-design-broken", title: "Open Design link is broken", detail: design.detail, action: { kind: "open-design", label: "Open Design" } });
+    items.push({ key: "open-design-broken", kind: "open-design-broken", title: "Open Design link is broken", detail: design.detail, action: { kind: "sync-open-design", label: "Sync again" } });
   }
   return items;
 }

@@ -417,11 +417,19 @@ export type SkillHubView = z.infer<typeof SkillHubViewSchema>;
 
 // ---- the Project panel view-model (v0.6.0, ADR 0056 §5) ---------------------------------------------
 
-/** The one primary action a Needs-you item carries — a target the client maps to a jump, never an Accept. */
+/**
+ * The one primary action a Needs-you item carries (spec story 23) — a target the
+ * client maps to a jump or a desktop act, never an Accept. The mutating kinds
+ * (`install-prerequisites`, `start-supervisor`, `sync-open-design`) are desktop-only
+ * on the client; mobile renders a hint to use Paseo Desktop in their place.
+ */
 export const PanelNeedsYouActionSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("open-agent"), agentId: z.string(), label: z.string() }),
   z.object({ kind: z.literal("install-prerequisites"), label: z.string() }),
-  z.object({ kind: z.literal("open-design"), label: z.string() }),
+  /** No Supervisor or Lead lives to decide — the way forward is to start the Supervisor. */
+  z.object({ kind: z.literal("start-supervisor"), label: z.string() }),
+  /** A broken Open Design link is healed by syncing the design again. */
+  z.object({ kind: z.literal("sync-open-design"), label: z.string() }),
 ]);
 export type PanelNeedsYouAction = z.infer<typeof PanelNeedsYouActionSchema>;
 
@@ -434,8 +442,8 @@ export const PanelNeedsYouItemSchema = z.object({
   title: z.string(),
   /** A needs-human question, a gate note, a daemon error line — null when the title says it all. */
   detail: z.string().nullable(),
-  /** Null only when the seat that resolves the item is vacant (the vacant row carries the way forward). */
-  action: PanelNeedsYouActionSchema.nullable(),
+  /** Always one action — when no seat lives to resolve the item, it is Start Supervisor. */
+  action: PanelNeedsYouActionSchema,
 });
 export type PanelNeedsYouItem = z.infer<typeof PanelNeedsYouItemSchema>;
 

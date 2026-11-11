@@ -6271,6 +6271,19 @@ test("panel: a handoff whose outgoing Lead vanished is stuck at once, and points
   assert.deepEqual(snap.view.panel.needsYou[0]!.action, { kind: "open-agent", agentId: "agent-sup", label: "Open Supervisor" });
 });
 
+test("panel: with no Supervisor and no Lead live, every Needs-you item still carries one action — Start Supervisor", async (t) => {
+  const { handlers, factory, stateDir, project } = makePanelSurface(t);
+  factory.ledger.append({ event: "contract_set", task: "T-08", workspace: join(project.root, "wt"), gate: "true", artifact: "a" });
+  factory.ledger.append({ event: "repoke_dispatched", task: "T-08", agent: "ag" });
+  factory.ledger.append({ event: "needs_human", task: "T-08", reason: "silent-after-repoke", evidence: { denial: 2, repoke: 1 } });
+  seedRedTask(factory, "T-CEIL", join(project.root, "wt-c"), 3);
+  writeProjectRegistration(stateDir, project.slug, { root: project.root, rotationState: "handing_over", handoffRequestedAt: new Date().toISOString() });
+  const snap = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  assert.deepEqual(snap.view.panel.needsYou.map((item) => item.kind), ["needs-human", "attempt-ceiling", "handoff-stuck"]);
+  for (const item of snap.view.panel.needsYou) assert.deepEqual(item.action, { kind: "start-supervisor", label: "Start Supervisor" }, item.kind);
+});
+
 test("panel: missing prerequisite tools are a Needs-you item whose action installs them", async (t) => {
   const project = makeProject(t, "prereq");
   const { handlers, stateDir } = makeSurface(t); // no skill pack seeded
@@ -6459,13 +6472,25 @@ test("panel: Open Design is unlinked, linked, or broken — a recorded link whos
   assert.equal(broken.openDesign!.state, "broken");
   assert.equal(broken.openDesign!.projectName, "Mobile Redesign");
   assert.deepEqual(broken.needsYou.map((item) => item.kind), ["open-design-broken"]);
-  assert.deepEqual(broken.needsYou[0]!.action, { kind: "open-design", label: "Open Design" });
+  assert.deepEqual(broken.needsYou[0]!.action, { kind: "sync-open-design", label: "Sync again" });
 
   mkdirSync(join(project.root, "design"), { recursive: true });
   writeFileSync(join(project.root, "design", "index.html"), "<html></html>");
   const linked = await read();
   assert.deepEqual(linked.openDesign, { state: "linked", projectName: "Mobile Redesign", syncedAt: "2026-10-01T00:00:00.000Z", detail: null });
   assert.deepEqual(linked.needsYou, [], "a healthy link needs nothing from the Owner");
+});
+
+test("panel: a linked design that stages only screens.html is as usable as one with index.html — readiness is the sync law's, not a second opinion", async (t) => {
+  const { handlers, stateDir, project } = makePanelSurface(t);
+  const link = { projectId: "od-1", projectName: "Flow only", sourceUpdatedAt: 1, syncedAt: "2026-10-01T00:00:00.000Z", digest: "d", screenCount: 1, files: ["screens.html"] };
+  writeProjectSettings(stateDir, project.slug, { schemaVersion: 1, revision: 1, openDesignLink: link });
+  mkdirSync(join(project.root, "design"), { recursive: true });
+  writeFileSync(join(project.root, "design", "screens.html"), "<html></html>");
+  const snap = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  assert.equal(snap.view.panel.openDesign!.state, "linked");
+  assert.deepEqual(snap.view.panel.needsYou, []);
 });
 
 // ---- v0.6.0 W6 (ADR 0056, ADR 0017 amendment): Start Supervisor on a vacant seat ----------------

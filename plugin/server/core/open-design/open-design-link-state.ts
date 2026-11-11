@@ -1,11 +1,21 @@
 /** Dependency-light validation shared by prompts, catalog sync, and RPC readers. */
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { safeId } from '../safe-id.ts';
 
 export interface OpenDesignProjectLink {
   projectId: string; projectName: string; designSystemId?: string | null; directionId?: string | null;
   sourceUpdatedAt: number; syncedAt: string; digest: string; screenCount: number; files: string[];
+}
+/**
+ * Is the staged design bundle usable? The one readiness law: a bundle needs
+ * `design/index.html` or `design/screens.html` — `syncOpenDesignLink` refuses
+ * anything else and catalog discovery hides it, so no valid design has another
+ * layout. The panel's broken-link verdict and the dispatch auto-sync both read
+ * this, so a second opinion can never drift in (ADR 0056 review P6).
+ */
+export function openDesignBundleReady(root: string): boolean {
+  return existsSync(join(root, 'design/index.html')) || existsSync(join(root, 'design/screens.html'));
 }
 export function readOpenDesignLink(root: string): OpenDesignProjectLink | undefined {
   let value: unknown;
