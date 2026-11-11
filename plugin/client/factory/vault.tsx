@@ -14,7 +14,7 @@ import { Text, View } from "react-native";
 
 import type { VaultStatusView } from "../../shared/view.ts";
 import { Btn, Card, Pill } from "../kit/pill.tsx";
-import { CONTROL_SM, RADIUS, SPACING, text, tint } from "../kit/theme.ts";
+import { CONTROL_SM, MONO_FONT, RADIUS, SPACING, text, tint } from "../kit/theme.ts";
 import { historyFeedback } from "./vault-feedback.ts";
 
 export type VaultActName = "Vault Sync" | "Vault Import" | "Vault Configure" | "Vault Hydrate" | "Vault Save";
@@ -95,7 +95,7 @@ function VaultField({
           placeholder={placeholder}
           placeholderTextColor={theme.colors.foregroundMuted}
           secureTextEntry={secure}
-          style={{ paddingHorizontal: SPACING[2], paddingVertical: 4, color: theme.colors.foreground, fontSize: 12, fontFamily: "monospace" }}
+          style={{ paddingHorizontal: SPACING[2], paddingVertical: 4, color: theme.colors.foreground, fontSize: 12, fontFamily: MONO_FONT }}
         />
       </View>
     </View>

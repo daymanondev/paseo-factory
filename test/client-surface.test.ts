@@ -1314,7 +1314,7 @@ test('PluginsPane SSR renders Skill Hub inventory and Project pack controls', as
   try {
     const bundle = await build({ entryPoints: [join(repoRoot, 'plugin/client/factory/plugins.tsx')], bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic', external: ['react', 'react/jsx-runtime'], plugins: [{ name: 'native-ssr-adapter', setup(b) {
       b.onResolve({ filter: /^(react-native|@getpaseo\/plugin\/client\/ui)$/ }, args => ({ path: args.path, namespace: 'native-ssr' }));
-      b.onLoad({ filter: /.*/, namespace: 'native-ssr' }, () => ({ contents: `const React = require('react'); const component = tag => ({children, disabled, onPress}) => React.createElement(tag, {disabled, onClick:onPress}, children); exports.View=component('div'); exports.Text=component('span'); exports.Pressable=component('button'); exports.Icon=()=>null; exports.TextInput=component('input');`, loader: 'js' }));
+      b.onLoad({ filter: /.*/, namespace: 'native-ssr' }, () => ({ contents: `const React = require('react'); const component = tag => ({children, disabled, onPress}) => React.createElement(tag, {disabled, onClick:onPress}, children); exports.View=component('div'); exports.Text=component('span'); exports.Pressable=component('button'); exports.Icon=()=>null; exports.TextInput=component('input'); exports.Platform={OS:'web',select:spec=>spec.default};`, loader: 'js' }));
     } }] });
     const compiled = { exports: {} as Record<string, any> };
     new Function('require', 'module', 'exports', bundle.outputFiles[0]!.text)(createRequire(import.meta.url), compiled, compiled.exports);

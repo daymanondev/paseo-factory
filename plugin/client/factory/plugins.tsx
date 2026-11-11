@@ -26,7 +26,7 @@ import type { CompanionCatalogEntry, ManageablePluginId } from "../../shared/com
 import type { CompanionPluginView, CompanionStatus, FactoryView } from "../../shared/view.ts";
 import { HelperMcpsCard } from "./helper-mcps.tsx";
 import { Btn, Card, Pill } from "../kit/pill.tsx";
-import { CONTROL_H, RADIUS, SPACING, text, tint } from "../kit/theme.ts";
+import { CONTROL_H, MONO_FONT, RADIUS, SPACING, text, tint } from "../kit/theme.ts";
 import type { Colour } from "../kit/theme.ts";
 import {
   DEFAULT_CORE_RESTART_TIMEOUT_MS,
@@ -355,7 +355,7 @@ function CompanionCard({
                     onChangeText={setSource}
                     placeholder={`git:daymanondev/${companion.id}:plugin or /path/to/plugin`}
                     placeholderTextColor={theme.colors.foregroundMuted}
-                    style={{ paddingHorizontal: SPACING[2.5], paddingVertical: 5, color: theme.colors.foreground, fontSize: 12, fontFamily: "monospace" }}
+                    style={{ paddingHorizontal: SPACING[2.5], paddingVertical: 5, color: theme.colors.foreground, fontSize: 12, fontFamily: MONO_FONT }}
                   />
                 </View>
               </View>
@@ -376,7 +376,7 @@ function CompanionCard({
                     onChangeText={setRef}
                     placeholder="e.g. feat/x, v0.2.0, 9f3b2c1"
                     placeholderTextColor={theme.colors.foregroundMuted}
-                    style={{ paddingHorizontal: SPACING[2.5], paddingVertical: 5, color: theme.colors.foreground, fontSize: 12, fontFamily: "monospace" }}
+                    style={{ paddingHorizontal: SPACING[2.5], paddingVertical: 5, color: theme.colors.foreground, fontSize: 12, fontFamily: MONO_FONT }}
                   />
                 </View>
               </View>
@@ -508,7 +508,7 @@ function CompanionCard({
                         onChangeText={setSource}
                         placeholder={`git:daymanondev/${companion.id}:plugin or /path/to/plugin`}
                         placeholderTextColor={theme.colors.foregroundMuted}
-                        style={{ paddingHorizontal: SPACING[2.5], paddingVertical: 5, color: theme.colors.foreground, fontSize: 12, fontFamily: "monospace" }}
+                        style={{ paddingHorizontal: SPACING[2.5], paddingVertical: 5, color: theme.colors.foreground, fontSize: 12, fontFamily: MONO_FONT }}
                       />
                     </View>
                   </View>
@@ -529,7 +529,7 @@ function CompanionCard({
                         onChangeText={setRef}
                         placeholder="e.g. feat/x, v0.2.0, 9f3b2c1"
                         placeholderTextColor={theme.colors.foregroundMuted}
-                        style={{ paddingHorizontal: SPACING[2.5], paddingVertical: 5, color: theme.colors.foreground, fontSize: 12, fontFamily: "monospace" }}
+                        style={{ paddingHorizontal: SPACING[2.5], paddingVertical: 5, color: theme.colors.foreground, fontSize: 12, fontFamily: MONO_FONT }}
                       />
                     </View>
                   </View>
